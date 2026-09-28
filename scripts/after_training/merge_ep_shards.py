@@ -274,8 +274,9 @@ def merge_ep_shards(
             """Rename to hub spelling and stage, at the dtype the shards store.
 
             The sharded writer already applied ``save_dtype_caster`` (the module-tree keep-set of
-            norms, balancing tensors and the family's fp32 pins that the gathered save uses), so the
-            stored dtype is the export dtype. A second, name-only cast here has no model tree to
+            norms, balancing tensors and the family's fp32 pins that the gathered save uses; nothing
+            cast in a training checkpoint, whose fp32 masters the merge keeps so it still resumes), so
+            the stored dtype is the one to write. A second, name-only cast here has no model tree to
             derive the pins from and would fold them to bf16 (GLM-5 Next's linear-attention
             ``A_log``/``dt_bias``, Inkling's short convolutions, DeepSeek-V4's ``attn_hc``), so
             merged-from-sharded would no longer match a gathered save.

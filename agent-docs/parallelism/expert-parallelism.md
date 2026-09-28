@@ -201,6 +201,9 @@ lossy and the error grows with rank count — worth enabling for many-rank / mul
 | `fp32_experts` | Expert weights | FP32 master, BF16 compute. No effect when FSDP2 manages replicated experts (`fsdp_shard_ep1_experts` at `ep_group_size == 1`) — use `fp32_non_ep_params` there |
 | `fp32_non_ep_params` | Attention, embed, norm | FP32 master, BF16 compute |
 
+Training checkpoints keep these masters in fp32 and exports write them bf16
+([What gets saved](../reference/checkpoints.md#what-gets-saved)).
+
 `fp32_non_ep_params: true` unconditionally implies `fp32_router: true` — every family except Gemma 4
 keeps its router inside the EP wrapper, where leaving it BF16 next to FP32 dense params would trip
 FSDP2's uniform-dtype check.

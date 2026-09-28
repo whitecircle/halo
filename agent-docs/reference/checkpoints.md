@@ -139,6 +139,16 @@ the wrapper's own `state_dict()`.
 The buffer leg is collective too, so the FSDP2, TP and CP gathers share one preamble that runs it on
 every rank; a leg entered by the writer alone hangs the save.
 
+A training checkpoint (`checkpoint-N`) writes every tensor at its live dtype
+(`CheckpointContext.training_checkpoint`, set by `_save_checkpoint`); the `save_model` export casts to
+bf16 ([Saving by parallelism mode](#saving-by-parallelism-mode)). fp32 masters (`fp32_router`,
+`fp32_experts`, `fp32_non_ep_params`) and fp32 adapters therefore take 4 bytes per element in a
+checkpoint: `fp32_experts` doubles an MoE checkpoint's expert bytes and `fp32_non_ep_params` its
+non-expert bytes, while the routers alone are negligible. An adapter restore reads them back exactly. A
+full fine-tune built from the checkpoint at construction (Path B, [Resuming training](#resuming-training))
+still loads at the run dtype before the trainer's fp32 upcast, so its fp32 masters resume rounded to
+bf16.
+
 The exported `config.json` is serialized with run-scoped router mutations restored
 (`config_export_ready`): the balancing strategy's zeroed `router_aux_loss_coef`, forced
 `output_router_logits` and toolkit stamp configure the run, not the artifact — exported, they would
@@ -304,8 +314,9 @@ the router under ep1 sharding), resolved via `full_tensor()`; and manually TP-sh
 (GptOss `sinks`, sliced plain because forward needs local shapes), all-gathered from
 `model._tp_sharded_non_dtensor`.
 
-Weights are cast to the save dtype (BF16) except three keep-sets that hold their trained dtype:
-normalization params, the live router-balancing tensors, and the family's fp32 pins. Under EP+CP the
+An export casts weights to the save dtype (BF16) except three keep-sets that hold their trained dtype:
+normalization params, the live router-balancing tensors, and the family's fp32 pins; a training
+checkpoint casts nothing ([What gets saved](#what-gets-saved)). Under EP+CP the
 iteration runs on the unwrapped model with an explicit CP-prefix strip, so attention weights land
 under their hub names; experts are replicated per CP rank (EP ⊥ DP), so any rank holds the complete
 set.
@@ -501,8 +512,8 @@ without it), raises rather than restart the adapters from init on weights that a
 delta; a new run from those weights (`model_name_or_path` pointed at the checkpoint) is the way to
 continue.
 
-The adapter file is written at the save dtype (bf16), as the non-merged save's is, so the restore is
-exact for bf16 adapters; fp32 ones (`fp32_experts`, `fp32_non_ep_params`) resume rounded to bf16.
+The adapter file keeps the adapters' live dtype, as every training checkpoint does, so the restore is
+exact for fp32 adapters (`fp32_experts`, `fp32_non_ep_params`) too.
 
 `copy_checkpoint_aux_files` treats the adapter and its marker as resume sidecars: a tool whose
 output is the same run's weights (`convert_to_bf16`, `merge_ep_shards`, `unfuse_moe_experts`,

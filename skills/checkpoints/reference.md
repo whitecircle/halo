@@ -71,8 +71,8 @@ Merge a `save_sharded_ep` checkpoint (per-rank `.shard_N` expert keys) into HF f
 EP-internal layouts back to each family's HF layout. Flags: `--input_dir`, `--output_dir`, `--quiet`,
 `--max_shard_size` (`5GB`), `--delete_input_shards`. The merge casts nothing: the sharded writer
 already applied `save_dtype_caster` (`src/checkpoint/format.py` — BF16 except the
-module-tree keep-sets: norms, balancing tensors, the family's fp32 pins), so the stored dtype is the
-export dtype. The index metadata is HF's own — there is no `merged_from_*` marker.
+module-tree keep-sets: norms, balancing tensors, the family's fp32 pins; a training checkpoint keeps
+every tensor at its live dtype), so the stored dtype is what the merge writes. The index metadata is HF's own — there is no `merged_from_*` marker.
 - **Family support is class-owned, not a table.** `resolve_ep_merge_layer_class` /
   `supported_ep_merge_model_types` (`expert_weights.py`, which also owns `expert_weight_roots` and
   `to_hub_layer_key`) map a checkpoint's `model_type` to the EP layer class via each class's

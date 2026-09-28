@@ -33,6 +33,10 @@ or 1 (experts FSDP-sharded as DTensors, DP=2), with ``cp_size`` 2 under EP+CP:
 
 Under EP+CP a family Ulysses cannot run (``TinyFamily.ulysses_cp``) must instead be refused at load,
 on every rank.
+
+``--fp32-masters`` trains the adapters as fp32 masters (``fp32_experts`` for the expert adapters,
+``fp32_non_ep_params`` for the attention ones): the resume adapter is part of a training checkpoint,
+so it keeps them in fp32 and phase 3 restores them bit for bit.
 """
 
 import argparse
@@ -103,6 +107,7 @@ def merged_resume_parser(families: Iterable[str]) -> argparse.ArgumentParser:
     parser.add_argument("--adapters", choices=sorted(ADAPTER_MODES), default="mixed")
     parser.add_argument("--ep-size", type=int, choices=sorted({ep for ep, _ in LAYOUTS}), default=2)
     parser.add_argument("--cp-size", type=int, choices=sorted({cp for _, cp in LAYOUTS}), default=1)
+    parser.add_argument("--fp32-masters", action="store_true")
     return parser
 
 
@@ -114,10 +119,16 @@ def _adapter_snapshot(model) -> dict[str, torch.Tensor]:
     return {**snapshot_adapters(unwrapped, expert_lora=True), **peft_adapters}
 
 
-def _parallelism_config(ep_size: int, cp_size: int) -> ParallelismConfig:
+def _parallelism_config(ep_size: int, cp_size: int, fp32_masters: bool) -> ParallelismConfig:
     """A fresh config per phase: ``create_ep_config`` caches the ``EPConfig`` it builds on the config,
     so a phase reusing another's would build its model against that phase's expert groups."""
-    return ParallelismConfig(ep_size=ep_size, cp_size=cp_size, merge_expert_lora_on_save=True)
+    return ParallelismConfig(
+        ep_size=ep_size,
+        cp_size=cp_size,
+        merge_expert_lora_on_save=True,
+        ep_fp32_experts=fp32_masters,
+        fp32_non_ep_params=fp32_masters,
+    )
 
 
 def _pin_deterministic_dispatch() -> None:
@@ -213,7 +224,9 @@ def _attention_lora_b_moved(adapters: dict[str, torch.Tensor], attention_targets
     )
 
 
-def run_merged_resume(ctx, *, family: str, adapters: str, ep_size: int, cp_size: int) -> dict:
+def run_merged_resume(
+    ctx, *, family: str, adapters: str, ep_size: int, cp_size: int, fp32_masters: bool = False
+) -> dict:
     """The four phases above for one family, adapter shape and layout; returns the harness result."""
     tiny = TINY_MOE_FAMILIES[family]
     if ep_size > 1:
@@ -242,7 +255,7 @@ def run_merged_resume(ctx, *, family: str, adapters: str, ep_size: int, cp_size:
         ``setup_peft_model``) and trainer, and the attention modules PEFT adapts. Ulysses CP runs flash
         attention (auto-selected, or through its own probe under the family's
         ``cp_attn_implementation``); the rest stay on eager."""
-        parallelism_config = _parallelism_config(ep_size, cp_size)
+        parallelism_config = _parallelism_config(ep_size, cp_size, fp32_masters)
         model, tokenizer, peft_config = load_peft_model(
             ADAPTER_MODES[adapters],
             parallelism_config,
@@ -282,6 +295,11 @@ def run_merged_resume(ctx, *, family: str, adapters: str, ep_size: int, cp_size:
     final_uninterrupted = _adapter_snapshot(trainer.model)
     saved = at_save.captured or {}
     checks["uninterrupted_ran_all_steps"] = len(uninterrupted) == TOTAL_STEPS
+    if fp32_masters:
+        # The premise: without fp32 adapters a bf16 resume adapter would restore them exactly anyway.
+        checks["adapters_train_as_fp32_masters"] = bool(saved.get("adapters")) and all(
+            tensor.dtype == torch.float32 for tensor in saved["adapters"].values()
+        )
     if attention_targets:
         # A target with a dead gradient never leaves lora_B = 0, so its merge has nothing to carry.
         checks["attention_adapters_trained"] = world_all(
@@ -302,7 +320,9 @@ def run_merged_resume(ctx, *, family: str, adapters: str, ep_size: int, cp_size:
 
     log(f"\n[3/4] Resuming from {checkpoint}...")
     base_source = SimpleNamespace(model_name_or_path=base_dir)
-    source = resolve_resume_weights_source(checkpoint, base_source, _parallelism_config(ep_size, cp_size))
+    source = resolve_resume_weights_source(
+        checkpoint, base_source, _parallelism_config(ep_size, cp_size, fp32_masters)
+    )
     checks["policy_source_is_the_base"] = source == base_dir
     log(f"  policy weights source: {source}")
     trainer, _ = make_trainer(source, train_out, save=False)
@@ -340,7 +360,7 @@ def run_merged_resume(ctx, *, family: str, adapters: str, ep_size: int, cp_size:
             checkpoint, torn, ignore=shutil.ignore_patterns(RESUME_ADAPTER_DIR, RESUME_ADAPTER_MARKER_FILE)
         )
     ctx.barrier()
-    source = resolve_resume_weights_source(torn, base_source, _parallelism_config(ep_size, cp_size))
+    source = resolve_resume_weights_source(torn, base_source, _parallelism_config(ep_size, cp_size, fp32_masters))
     checks["torn_checkpoint_builds_from_its_merged_weights"] = source == torn
     trainer, _ = make_trainer(source, os.path.join(output_dir, "torn_out"), save=False)
     try:

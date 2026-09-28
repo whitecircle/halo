@@ -37,7 +37,8 @@ from src.models.structure import fp32_pinned_param_names, norm_param_keys, strip
 
 logger = logging.getLogger(__name__)
 
-# Distributed checkpoints (EP, TP) are saved bf16 even when training uses fp32 master weights.
+# Exports are saved bf16 even when training uses fp32 master weights; training checkpoints keep the
+# live dtype (:func:`save_dtype_caster`).
 _SAVE_DTYPE = torch.bfloat16
 
 # Per-file cap for gathered safetensors saves, shared by every save path and the arg default.
@@ -169,7 +170,11 @@ def cast_state_dict_to_save_dtype(state: dict[str, torch.Tensor]) -> dict[str, t
     return {k: cast_to_save_dtype(v) for k, v in state.items()}
 
 
-def save_dtype_caster(model: torch.nn.Module):
+def _as_live(_name: str, tensor: torch.Tensor) -> torch.Tensor:
+    return tensor
+
+
+def save_dtype_caster(model: torch.nn.Module, *, keep_live_dtype: bool = False):
     """``cast(name, tensor)`` for checkpoint saves that hold the live model.
 
     Floating tensors go to the save dtype except three tree-derived keep-sets that hold their trained
@@ -177,9 +182,16 @@ def save_dtype_caster(model: torch.nn.Module):
     family's fp32 pins. That way a direct EP/TP save of an fp32-master run matches its merged-shards
     save, and the export quantizes neither the balancing state nor a family's declared fp32 modules.
 
+    ``keep_live_dtype`` (a training checkpoint) casts nothing: every tensor is written at the dtype the
+    gather produced, which is the live one, so a resume reads fp32 masters (``fp32_router``,
+    ``fp32_experts``, ``fp32_non_ep_params``) back unrounded. Decided on the tensor, not its name, since
+    a gathered expert's hub key need not name any live parameter.
+
     Keys also match with their PEFT adapter segment stripped: the EP gather feeds this pre-remap
     keys, where a ``modules_to_save`` router spells its bias ``router.modules_to_save.default.bias``.
     """
+    if keep_live_dtype:
+        return _as_live
     keep = norm_param_keys(model) | balancing_param_keys(model) | fp32_pinned_param_names(model)
 
     def cast(name: str, t: torch.Tensor) -> torch.Tensor:
@@ -259,14 +271,15 @@ def revert_load_conversions(model: torch.nn.Module, state_dict: dict) -> dict:
         model._weight_conversions = load_conversions
 
 
-def normalize_gathered_state_dict(model: torch.nn.Module, state_dict: dict) -> dict:
+def normalize_gathered_state_dict(model: torch.nn.Module, state_dict: dict, *, keep_live_dtype: bool = False) -> dict:
     """Bring a gathered state dict to its on-disk form: save-dtype cast, then hub expert layout.
 
     The order is load-bearing: the caster's keep-set is derived from the module tree, so it uses the
     live key spelling and must run before the revert respells the expert keys. Shared by the FSDP2/CP
     and TP gathered writers, whose artifacts must be byte-identical for the same model.
+    ``keep_live_dtype`` is :func:`save_dtype_caster`'s.
     """
-    cast = save_dtype_caster(model)
+    cast = save_dtype_caster(model, keep_live_dtype=keep_live_dtype)
     return revert_load_conversions(model, {key: cast(key, tensor) for key, tensor in state_dict.items()})
 
 

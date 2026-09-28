@@ -76,6 +76,9 @@ class CheckpointingMixin:
     # :meth:`_save_checkpoint` to decide whether a recorded failure may be deferred to the collective
     # rejection or must raise on this rank now.
     _model_save_collectives_done: bool = False
+    # True while :meth:`_save_checkpoint`'s base save runs ``save_model``, whose context then marks a
+    # training checkpoint (tensors at their live dtype) rather than an export.
+    _writing_training_checkpoint: bool = False
 
     def _checkpoint_load_context(self) -> CheckpointLoadContext:
         """Capture the current model/optimizer/scheduler for a resume path (rebuilt per call so the
@@ -158,6 +161,9 @@ class CheckpointingMixin:
         ``save_total_limit: 1`` a preemption between the base's rotation and the optimizer-shard
         writes would leave one checkpoint with no optimizer state. For the same reason the base's
         rank-0 optimizer.pt stays in place until its replacement shards are written.
+
+        The weights keep their live dtype (``CheckpointContext.training_checkpoint``), so fp32 masters
+        are written unrounded; the final ``save_model`` export casts to the save dtype.
         """
         checkpoint_folder = f"{PREFIX_CHECKPOINT_DIR}-{self.state.global_step}"
         output_dir = os.path.join(self._get_output_dir(trial=trial), checkpoint_folder)
@@ -168,10 +174,12 @@ class CheckpointingMixin:
         save_total_limit = self.args.save_total_limit
         self.args.save_total_limit = None  # rotation is deferred below, not dropped
         self._model_save_collectives_done = False
+        self._writing_training_checkpoint = True
         try:
             guard.run(partial(super()._save_checkpoint, model, trial))
         finally:
             self.args.save_total_limit = save_total_limit
+            self._writing_training_checkpoint = False
         # The fence covers the base's writer-local tail (rank-0 optimizer.pt, RNG,
         # trainer_state.json), so an ENOSPC there reaches every rank as a diagnostic rather than
         # leaving them blocked in the next collective. It cannot cover the region before that: the
@@ -490,4 +498,5 @@ class CheckpointingMixin:
             cp_wrapper=self._find_cp_wrapper(),
             tokenizer=getattr(self, "processing_class", None),
             pp_wrapper_state=self._pp_wrapper_state,
+            training_checkpoint=self._writing_training_checkpoint,
         )

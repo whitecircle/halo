@@ -36,12 +36,14 @@ def save_tp_model(
     output_dir: str,
     tokenizer=None,
     max_shard_size: str = DEFAULT_MAX_SHARD_SIZE,
+    keep_live_dtype: bool = False,
 ) -> None:
     """Save a TP model checkpoint: reconstruct full tensors from the DTensors (the collective
     ``full_tensor()``, which every TP-mesh rank must enter) and stream them to disk through
     :func:`~src.distributed.checkpoint.write.stream_gathered_checkpoint`, the writer the FSDP2
     and CP gathered saves share (config reconciliation, save dtype + hub expert layout, HF-standard
-    multi-file shards + index).
+    multi-file shards + index). ``keep_live_dtype`` (a training checkpoint) is
+    :func:`~src.checkpoint.format.save_dtype_caster`'s.
     """
     fs_aware_makedirs(output_dir)
 
@@ -55,10 +57,11 @@ def save_tp_model(
     with barrier_on_exit():
         stream_gathered_checkpoint(
             model_to_save,
-            _tp_chunks(model, model_to_save, retain=is_save_rank),
+            _tp_chunks(model, model_to_save, retain=is_save_rank, keep_live_dtype=keep_live_dtype),
             output_dir,
             is_save_rank=is_save_rank,
             max_shard_size=max_shard_size,
+            keep_live_dtype=keep_live_dtype,
         )
         if is_save_rank:
             logger.info(f"✓ TP model saved to {output_dir}")
@@ -68,7 +71,7 @@ def save_tp_model(
                 logger.info(f"✓ Tokenizer saved to {output_dir}")
 
 
-def _tp_chunks(model: nn.Module, model_to_save: nn.Module, *, retain: bool):
+def _tp_chunks(model: nn.Module, model_to_save: nn.Module, *, retain: bool, keep_live_dtype: bool):
     """The gathered chunks of a TP save: the DTensor walk, then the hand-sliced params.
 
     The plain TP-sharded params (GptOss sinks) are not DTensors, so ``full_tensor()`` never
@@ -85,5 +88,5 @@ def _tp_chunks(model: nn.Module, model_to_save: nn.Module, *, retain: bool):
     items = ((name, tensor) for name, tensor in saveable_items(model_to_save) if not name.endswith(hand_sliced))
     yield from chunked_saveable_tensors(model_to_save, retain=retain, items=items)
     sharded_plain: dict = {}
-    gather_tp_sharded_non_dtensor_params(model, sharded_plain, retain=retain)
+    gather_tp_sharded_non_dtensor_params(model, sharded_plain, retain=retain, keep_live_dtype=keep_live_dtype)
     yield sharded_plain

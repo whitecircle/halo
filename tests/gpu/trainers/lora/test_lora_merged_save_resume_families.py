@@ -25,7 +25,12 @@ ARGS = merged_resume_parser(TINY_MOE_FAMILIES).parse_args()
 )
 def run(ctx):
     return run_merged_resume(
-        ctx, family=ARGS.family, adapters=ARGS.adapters, ep_size=ARGS.ep_size, cp_size=ARGS.cp_size
+        ctx,
+        family=ARGS.family,
+        adapters=ARGS.adapters,
+        ep_size=ARGS.ep_size,
+        cp_size=ARGS.cp_size,
+        fp32_masters=ARGS.fp32_masters,
     )
 
 

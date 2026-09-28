@@ -100,6 +100,7 @@ def gather_tp_sharded_non_dtensor_params(
     model: nn.Module,
     state_dict: dict[str, torch.Tensor],
     retain: bool = True,
+    keep_live_dtype: bool = False,
 ) -> None:
     """Write ``model``'s manually TP-sharded params into ``state_dict`` as full CPU tensors.
 
@@ -109,8 +110,9 @@ def gather_tp_sharded_non_dtensor_params(
     Cast through the model-derived :func:`save_dtype_caster`, as the callers do for the params they
     resolve themselves: a blanket cast would push a norm / balancing / fp32-pinned tensor that happens
     to be TP-sharded plain down to bf16 while its gathered twin kept the trained dtype.
+    ``keep_live_dtype`` (a training checkpoint) is the caster's.
     """
-    cast = save_dtype_caster(model)
+    cast = save_dtype_caster(model, keep_live_dtype=keep_live_dtype)
     gathered_count = 0
     for name, full_tensor in iter_tp_sharded_non_dtensor_full(model):
         if retain:

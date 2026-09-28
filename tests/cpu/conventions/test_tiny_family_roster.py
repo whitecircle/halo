@@ -64,9 +64,12 @@ def test_every_ep_family_has_one_tiny_model():
 
 def test_the_merged_resume_rows_cover_every_family_adapter_shape_and_layout():
     rows = _rows(MERGED_RESUME_SUITES, merged_resume_parser(TINY_MOE_FAMILIES))
-    covered = [(row.family, row.adapters, row.ep_size, row.cp_size) for row in rows]
+    covered = [(row.family, row.adapters, row.ep_size, row.cp_size, row.fp32_masters) for row in rows]
     expected = {
-        (family, adapters, ep, cp) for family in TINY_MOE_FAMILIES for adapters in ADAPTER_MODES for ep, cp in LAYOUTS
+        (family, adapters, ep, cp, False)
+        for family in TINY_MOE_FAMILIES
+        for adapters in ADAPTER_MODES
+        for ep, cp in LAYOUTS
     }
     assert not sorted(expected - set(covered)), f"merged-resume shapes no row runs: {sorted(expected - set(covered))}"
     assert len(set(covered)) == len(covered), "a merged-resume shape runs in two rows"

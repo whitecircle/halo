@@ -86,6 +86,13 @@ def find_peft_model(model) -> PeftModel | None:
     return None
 
 
+def _adapter_file_state(ctx: CheckpointContext, state: dict) -> dict:
+    """The adapter tensors a hand-written adapter file holds: at the save dtype for an export, so an
+    fp32-master run (``fp32_experts`` / ``fp32_non_ep_params``) does not write a 2x adapter; at the
+    live dtype for a training checkpoint, whose fp32 adapters must resume unrounded."""
+    return state if ctx.training_checkpoint else cast_adapter_state_to_save_dtype(state)
+
+
 def expert_lora_config_fields(spec: ExpertLoraSpec) -> dict:
     """The ``adapter_config.json`` fields describing native EP grouped expert adapters.
 
@@ -184,10 +191,7 @@ class PeftAdapterSaver:
                     getattr(ctx.parallelism_config, "expert_lora", None),
                     output_dir,
                 )
-                # Cast to save dtype so fp32_experts / fp32_non_ep_params don't write a 2x adapter file.
-                self._write_adapter_state_dict(
-                    cast_adapter_state_to_save_dtype({**attn_state, **expert_state}), output_dir
-                )
+                self._write_adapter_state_dict(_adapter_file_state(ctx, {**attn_state, **expert_state}), output_dir)
                 if ctx.tokenizer is not None:
                     ctx.tokenizer.save_pretrained(output_dir)
                 logger.info(
@@ -287,7 +291,7 @@ class PeftAdapterSaver:
                 (self._cp_normalized_config(peft_config) if ctx.is_cp_mode else peft_config).save_pretrained(
                     output_dir
                 )
-                self._write_adapter_state_dict(cast_adapter_state_to_save_dtype(adapter_state_dict), output_dir)
+                self._write_adapter_state_dict(_adapter_file_state(ctx, adapter_state_dict), output_dir)
                 if ctx.tokenizer is not None:
                     ctx.tokenizer.save_pretrained(output_dir)
                 logger.info(f"Saved PEFT adapters ({reconstruction}) to {output_dir}")

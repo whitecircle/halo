@@ -130,6 +130,8 @@ _MERGED_RESUME_CORE_ROWS = (
     "--family qwen3_moe --adapters expert --ep-size 1",
     "--family gpt_oss --adapters mixed --ep-size 1",
     "--family qwen3_moe --adapters mixed --cp-size 2",
+    "--family qwen3_moe --adapters expert --fp32-masters",
+    "--family qwen3_moe --adapters mixed --fp32-masters",
 )
 _MERGED_RESUME_FAMILY_ROWS = tuple(
     row
@@ -886,7 +888,8 @@ MANIFEST: dict[str, TestSpec] = {
         nproc=2, markers=("gpu", "full", "2gpu", "lora", "ep", "moe", "gptoss"), timeout=2400
     ),
     # Tiny random-init MoE, hence `core`: both adapter shapes on the per-expert (Qwen3) and interleaved
-    # (GptOss) layouts at ep2, one row each at ep1's DTensor experts, one EP+CP row.
+    # (GptOss) layouts at ep2, one row each at ep1's DTensor experts, one EP+CP row, and both adapter
+    # shapes trained as fp32 masters.
     "trainers/lora/test_lora_merged_save_resume.py": TestSpec(
         nproc=2,
         markers=("gpu", "core", "2gpu", "lora", "ep", "cp", "moe", "qwen3", "gptoss"),
