@@ -455,6 +455,7 @@ def test_pipeline_parallelism_refuses_a_multimodal_reward_run_fed_images():
         gradient_checkpointing=False,
         gradient_checkpointing_kwargs=None,
         eval_strategy="no",
+        eval_on_start=False,
         activation_offloading=False,
         torch_compile=False,
     )

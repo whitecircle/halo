@@ -42,6 +42,7 @@ def _args():
         gradient_checkpointing=False,
         gradient_checkpointing_kwargs=None,
         eval_strategy="no",
+        eval_on_start=False,
         per_device_eval_batch_size=1,
         per_device_train_batch_size=1,
         torch_compile=False,
