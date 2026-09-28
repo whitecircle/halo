@@ -2,7 +2,7 @@
 
 Picks the ``attn_implementation`` (FA4/FA3, then FA2, SDPA, flex, eager) by GPU capability and model
 support flags, including which implementations may run against GptOss's live sinks, then applies the
-per-backend shims below (Gemma4 SDPA, flex compile, FA4 warm-up, packed position ids). The GptOss
+per-backend shims below (wide-head SDPA, flex compile, FA4 warm-up, packed position ids). The GptOss
 sink policy itself (neutralize / freeze / train, stamps, save-time inverse) lives in
 ``gpt_oss_sinks.py``.
 """

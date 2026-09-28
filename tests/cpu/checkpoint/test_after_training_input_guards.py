@@ -407,7 +407,7 @@ def test_convert_glm5_bf16_refuses_a_per_rank_sharded_checkpoint(tmp_path, monke
 def test_convert_deepseek_v4_bf16_refuses_a_per_rank_sharded_checkpoint(tmp_path, monkeypatch):
     """``--model_id`` also accepts a local directory, and ``from_pretrained`` cannot tell a per-rank
     EP save from a whole one: it reports the real expert keys as MISSING and randomly initializes
-    them, warning only, so the converter would write a 420 GB checkpoint with no experts in it."""
+    them, warning only, so the converter would write a ~580 GB checkpoint with no experts in it."""
     ep = _write_ep_sharded_checkpoint(tmp_path / "ep", model_type="deepseek_v4")
     before = sorted(os.listdir(ep))
     out = tmp_path / "out"
@@ -602,7 +602,7 @@ def test_patch_vocab_refuses_reset_sinks_on_a_family_that_has_none(tmp_path, mon
 def test_convert_deepseek_v4_bf16_loads_through_the_coverage_gate(tmp_path, monkeypatch):
     """The converter must route its load through ``from_pretrained_verified`` — a raw
     ``from_pretrained`` only warns on missing keys, and the tool would re-save random experts as a
-    complete-looking 420 GB BF16 checkpoint. (The gate's raise behavior is pinned in
+    complete-looking ~580 GB BF16 checkpoint. (The gate's raise behavior is pinned in
     test_checkpoint_coverage.py; the real FP8 load path needs the hub checkpoint, so this pins the
     wiring.)"""
     src = _write_gathered_checkpoint(tmp_path / "src", _fused_moe_tensors(), model_type="deepseek_v4")
