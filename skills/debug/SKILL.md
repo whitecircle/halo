@@ -66,8 +66,8 @@ the others never reach.
 ### DeepEP fault (EP crash, combine-barrier deadlock)
 - **Multiple >2-rank dispatch groups in one NVLink domain are rejected at config time**
   (`ep_size > 2` with `nvlink_domain_size > ep_group_size`, e.g. ep4 on an 8-GPU domain): startup
-  raises `ValueError: parallelism config failed on … First (rank 0): expert_parallel_size=N on a single M-GPU
-  NVLink domain forms K concurrent >2-rank DeepEP dispatch groups …` before any model load
+  raises `ValueError: parallelism config failed on … First (rank 0): expert_parallel_size=N on a
+  single M-GPU NVLink domain forms K concurrent >2-rank DeepEP dispatch groups …` before any model load
   (`_validate_single_domain_multigroup_ep`, `parallelism_config.py`);
   `EpIntrospectionMixin._setup_ep_gradient_checkpointing` re-checks a hand-built config. Run anyway,
   their combine barriers race FSDP2's DP-wide NCCL (`elastic` faults, `legacy` deadlocks). **Fix: use
