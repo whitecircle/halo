@@ -166,15 +166,26 @@ def test_numeric_match_rejects_expressions_and_hedges(predicted, expected):
     assert numeric_match(predicted, expected) is False
 
 
-def test_numeric_match_is_linear_in_completion_length():
-    """Degenerate rollouts emit long digit runs, and overlapping quantifiers over one backtrack
-    polynomially and stall the grader. The budget is ~100x the linear cost and a third of one quadratic
-    scan of a 100k-digit run, so it separates the two without turning a loaded CI box into a failure."""
+@pytest.mark.parametrize(
+    ("predicted", "expected", "verdict"),
+    [
+        pytest.param("9" * 100_000, "5", False, id="digit-run"),
+        pytest.param("0." + "3" * 100_000, "0.333", True, id="decimal-run"),
+        pytest.param("1 " * 25_000, "1", True, id="spaced-ones"),
+        pytest.param("1" + ",000" * 16_000 + "0", "5", False, id="group-chain-then-digit"),
+        pytest.param("1" + ",000" * 16_000 + ",00", "5", False, id="group-chain-then-short-group"),
+        pytest.param(",".join(str(100 + i % 900) for i in range(16_000)) + ",1000", "5", False, id="3-digit-list"),
+        pytest.param("5", "9" * 16_000 + "x", False, id="expected-digit-run"),
+    ],
+)
+def test_numeric_match_parses_degenerate_input_within_budget(predicted, expected, verdict):
+    """Degenerate rollouts emit long digit runs and comma chains. Each input here parses in tens of
+    milliseconds. A pattern that restarts a comma chain at every group, or splits a digit run many ways
+    when a full match fails, takes 6-8 s on the chain and expected-side rows, so the 1 s budget fails
+    such a regression in seconds instead of hanging the suite."""
     start = time.monotonic()
-    assert numeric_match("9" * 100000, "5") is False
-    assert numeric_match("0." + "3" * 100000, "0.333") is True
-    assert numeric_match("1 " * 25000, "1") is True
-    assert time.monotonic() - start < 5.0
+    assert numeric_match(predicted, expected) is verdict
+    assert time.monotonic() - start < 1.0
 
 
 # multiple_choice_match — structured extraction, no startswith fallback

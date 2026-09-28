@@ -26,8 +26,10 @@ _BOXED_TOKEN = "\\boxed{"
 _BOLD_RE = re.compile(r"\*\*([^*]+)\*\*")
 
 # ``,`` groups thousands only in the strict ``1,234,567`` form, so ``1,2,3`` and ``3,5`` stay separate numbers.
+# A chain never restarts at one of its own groups and a digit run splits one way, so the scan stays linear.
 _NUMBER_RE = re.compile(
-    r"(?P<sign>[-+]?)(?P<value>(?:\d{1,3}(?:,\d{3})+(?!,?\d)(?:\.\d*)?|\d+\.?\d*|\.\d+)(?:e[-+]?\d+)?)(?P<percent>\s*%)?"
+    r"(?P<sign>[-+]?)(?P<value>(?:(?<!\d,)\d{1,3}(?:,\d{3})+(?!,?\d)(?:\.\d*)?|\d+(?:\.\d*)?|\.\d+)(?:e[-+]?\d+)?)"
+    r"(?P<percent>\s*%)?"
 )
 
 # Formatting-only LaTeX reads as a space, as does ``\approx``, which states the value (``\%``/``\$`` keep
