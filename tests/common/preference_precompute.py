@@ -1,9 +1,11 @@
-"""The real DPO / KTO trainers over a stubbed reference forward, for the precompute CPU tests.
+"""The DPO / KTO precompute tests' shared pieces, and the real trainers over a stubbed reference
+forward for the CPU tests.
 
-``precompute_trainer`` builds ``DistributedDPOTrainer`` / ``DistributedKTOTrainer`` with ``__new__``
-and the attributes TRL's ``__init__`` holds when it runs the sweep, so the tests drive the real MRO,
-column sets and TRL signature columns. ``compute_ref_log_probs`` is replaced by
-:class:`StubReference`, whose values encode which weights "ran" and each row's tokens.
+``TRAINERS`` and :func:`column` serve the GPU precompute suites as well. ``precompute_trainer``
+builds ``DistributedDPOTrainer`` / ``DistributedKTOTrainer`` with ``__new__`` and the attributes
+TRL's ``__init__`` holds when it runs the sweep, so the tests drive the real MRO, column sets and
+TRL signature columns. ``compute_ref_log_probs`` is replaced by :class:`StubReference`, whose values
+encode which weights "ran" and each row's tokens.
 """
 
 from __future__ import annotations
@@ -13,11 +15,13 @@ from types import SimpleNamespace
 
 import torch
 from datasets import Dataset
+from trl import DPOConfig, KTOConfig
 
 from src.trainers.preference.dpo import DistributedDPOTrainer
 from src.trainers.preference.kto import DistributedKTOTrainer
 
-TRAINERS = {"dpo": DistributedDPOTrainer, "kto": DistributedKTOTrainer}
+# Each kind's trainer and the TRL config it takes.
+TRAINERS = {"dpo": (DistributedDPOTrainer, DPOConfig), "kto": (DistributedKTOTrainer, KTOConfig)}
 # The columns each TRL base writes, spelled out rather than read off the trainer under test.
 REFERENCE_COLUMNS = {"dpo": ("ref_chosen_logps", "ref_rejected_logps"), "kto": ("ref_logps", "ref_KL_logps")}
 # The columns the reference forward reads, per TRL's signature columns.
@@ -28,6 +32,8 @@ TOKEN_COLUMNS = {
 BASE = 0.0
 TRAINED = 1000.0
 N_ROWS = 4
+# The batch size the CPU tests hand the reference sweep.
+SWEEP_BATCH_SIZE = 2
 MAX_LENGTH = 64
 
 
@@ -96,7 +102,8 @@ def precompute_trainer(
     ``resume_context`` is what the entry scripts pass (``resume_checkpoint``, ``policy_from_checkpoint``);
     leave it empty for a trainer built without it.
     """
-    trainer = TRAINERS[kind].__new__(TRAINERS[kind])
+    trainer_cls, _ = TRAINERS[kind]
+    trainer = trainer_cls.__new__(trainer_cls)
     trainer._init_reference_resume(dict(resume_context))
     trainer._dataset_presharded = False
     trainer._signature_columns = None

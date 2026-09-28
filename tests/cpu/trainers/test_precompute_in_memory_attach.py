@@ -25,6 +25,7 @@ from tests.common.preference_precompute import (
     BASE,
     N_ROWS,
     REFERENCE_COLUMNS,
+    SWEEP_BATCH_SIZE,
     TRAINERS,
     column,
     precompute_trainer,
@@ -51,20 +52,22 @@ def test_every_rank_attaches_the_swept_columns_without_a_file(kind, tmp_path, ma
     files_before = sorted(os.listdir(dataset_dir))
     trainer = precompute_trainer(kind, main_process=main_process)
 
-    prepared = trainer._precompute_ref_logps(dataset, "train", 2)
+    prepared = trainer._precompute_ref_logps(dataset, "train", SWEEP_BATCH_SIZE)
 
     assert sorted(os.listdir(dataset_dir)) == files_before, "the sweep wrote a file beside the dataset"
     token_sums = trainer.data_collator(list(dataset))
     for index, name in enumerate(REFERENCE_COLUMNS[kind]):
         assert name in prepared.column_names
         assert column(prepared, name).tolist() == (-(BASE + 100 * index + token_sums)).tolist()
-    assert trainer.compute_ref_log_probs.batches == N_ROWS // 2
+    assert trainer.compute_ref_log_probs.batches == N_ROWS // SWEEP_BATCH_SIZE
 
 
 def test_a_kto_loss_without_kl_attaches_only_ref_logps():
     """``compute_ref_log_probs`` returns the KL term as ``None`` there; it must not shift the columns."""
     trainer = precompute_trainer("kto", calculate_kl=False)
-    prepared = trainer._precompute_ref_logps(token_rows("kto").remove_columns(["KL_completion_ids"]), "train", 2)
+    prepared = trainer._precompute_ref_logps(
+        token_rows("kto").remove_columns(["KL_completion_ids"]), "train", SWEEP_BATCH_SIZE
+    )
 
     assert "ref_logps" in prepared.column_names
     assert "ref_KL_logps" not in prepared.column_names
@@ -77,16 +80,16 @@ def test_dataset_supplied_columns_skip_the_sweep(kind):
     supplied = {name: [-1.0] * N_ROWS for name in REFERENCE_COLUMNS[kind]}
     dataset = concatenate_datasets([token_rows(kind), Dataset.from_dict(supplied)], axis=1)
 
-    assert trainer._precompute_ref_logps(dataset, "train", 2) is dataset
+    assert trainer._precompute_ref_logps(dataset, "train", SWEEP_BATCH_SIZE) is dataset
     assert trainer.compute_ref_log_probs.batches == 0
 
-    trainer._precompute_ref_logps(token_rows(kind), "eval", 2)
+    trainer._precompute_ref_logps(token_rows(kind), "eval", SWEEP_BATCH_SIZE)
     assert trainer.compute_ref_log_probs.batches > 0
 
 
 def test_the_trainers_route_the_precompute_through_the_mixin(kind):
     """The mixin's sweep must shadow TRL's, whose cache-file hand-off is what fails across nodes."""
-    trainer_cls = TRAINERS[kind]
+    trainer_cls, _ = TRAINERS[kind]
     assert trainer_cls._precompute_ref_logps is PrecomputeRefLogpsRankConsistentMixin._precompute_ref_logps
     mro = trainer_cls.__mro__
     assert mro.index(PrecomputeRefLogpsRankConsistentMixin) < mro.index(TRL_BASES[kind])

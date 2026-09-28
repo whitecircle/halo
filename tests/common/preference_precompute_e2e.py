@@ -16,11 +16,12 @@ One checkpoint, four phases, the resume taken the production way (the policy sou
 
   1. **Continuous**: ``TOTAL_STEPS`` from the base, checkpointing at ``SAVE_AT_STEP``.
   2. **Resume**: every split's reference columns equal phase 1's bit for bit, and the first resumed
-     step's loss equals the continuous run's at that step to ``LOSS_ATOL``.
+     step's loss equals the continuous run's at that step within ``TOL.replayed_resume_loss_abs``.
   3. **Control**: the same resume with the trainer not told. Where the policy came from the
-     checkpoint its sweep scores the trained weights, and its columns and first-step loss must miss
-     phase 1's by far more than those tolerances, which is what gives phase 2 its teeth. Where it came
-     from the base the sweep must reproduce phase 1's columns instead.
+     checkpoint its sweep scores the trained weights, and its columns must miss phase 1's by more
+     than ``CONTROL_MIN_LOGP_DELTA`` and its first-step loss by more than
+     ``TOL.control_min_loss_shift`` of the resume bound, which is what gives phase 2 its teeth. Where
+     it came from the base the sweep must reproduce phase 1's columns instead.
   4. **Without the sidecar**: the checkpoint copied without ``reference_logps.pt`` refuses on every
      rank where the policy came from it, and sweeps back phase 1's columns where it came from the base.
 """
@@ -35,19 +36,18 @@ from types import SimpleNamespace
 import torch
 from datasets import Dataset, load_from_disk
 from transformers import AutoTokenizer
-from trl import DPOConfig, KTOConfig
 
 from src.checkpoint.format import REFERENCE_LOGPS_FILE
 from src.distributed.loading.model_loading import load_distributed_model
 from src.distributed.parallelism_config import ParallelismConfig
-from src.trainers.preference.dpo import DistributedDPOTrainer
-from src.trainers.preference.kto import DistributedKTOTrainer
 from src.training.environment import resolve_resume_weights_source
 from tests.common.distributed import shared_scratch_dir
 from tests.common.models import QWEN3_0_6B
 from tests.common.peft_helpers import load_peft_model
+from tests.common.preference_precompute import TRAINERS, column
 from tests.common.tiny_models import TINY_DENSE_FAMILY, TINY_MOE_FAMILIES, shared_tiny_family_checkpoint
-from tests.common.utils import cleanup_memory, log
+from tests.common.tolerances import TOL
+from tests.common.utils import cleanup_memory, finish_phase, log
 
 # The two-rank layouts: plain FSDP2 DP (dp2, the dense model's), plain per-rank experts (ep2),
 # FSDP-sharded DTensor experts over DP=2 (ep1), attention and MLP sharded over the TP mesh (tp2), and
@@ -60,7 +60,6 @@ MODES = {
     "etp2": {"ep_size": 1, "expert_tp_size": 2},
 }
 DENSE = "dense"
-TRAINERS = {"dpo": (DistributedDPOTrainer, DPOConfig), "kto": (DistributedKTOTrainer, KTOConfig)}
 # KTO's own loss computes a KL term from mismatched completions; ``apo_zero_unpaired`` has none.
 KTO_LOSSES = ("kto", "apo_zero_unpaired")
 WORLD_SIZE = 2
@@ -75,14 +74,13 @@ MAX_LENGTH = 96
 # Large enough that two steps move the policy's log-probs well off the reference, so a resume that
 # re-derived the reference from the trained weights lands visibly elsewhere.
 LEARNING_RATE = 2e-3
-# Measured on B300 over the 48 checkpoint-built rows (every family and layout, DPO and KTO): the
+# Measured on B300 over the 51 checkpoint-built rows (every family and layout, DPO and KTO): the
 # resume restores the reference columns bit for bit and its first-step loss equals the continuous
-# run's exactly (|delta| 0.0). The control, which sweeps the trained policy instead, misses the
-# first-step loss by 3.1e-3 (KTO on the smallest families) to 0.62 and the reference columns by
-# 1 nat (Cohere2 MoE, Inkling) to 30. The resume bound sits at the floor's kernel headroom, the
-# control bounds between it and the smallest measured control miss.
-LOSS_ATOL = 1e-4
-CONTROL_MIN_LOSS_DELTA = 1e-3
+# run's exactly (|delta| 0.0), held to ``TOL.replayed_resume_loss_abs``. That loss precedes any
+# post-restore optimizer update, so the stochastic-rounding stream needs no rewind. The control,
+# which sweeps the trained policy instead, misses the first-step loss by 3.1e-3 (KTO on the smallest
+# families) to 0.62, held above ``TOL.control_min_loss_shift`` of the resume bound, and the reference
+# columns by 1 nat (Cohere2 MoE, Inkling) to 30, held above this floor.
 CONTROL_MIN_LOGP_DELTA = 0.5
 
 
@@ -140,10 +138,7 @@ def _reference_columns(trainer) -> dict[str, dict[str, torch.Tensor]]:
     """Each split's attached reference columns, by split name then column."""
     splits = {"train": trainer.train_dataset, **trainer.eval_dataset}
     return {
-        name: {
-            column: torch.tensor(list(dataset[column]), dtype=torch.float32)
-            for column in trainer._required_ref_logps_columns()
-        }
+        name: {key: column(dataset, key) for key in trainer._required_ref_logps_columns()}
         for name, dataset in splits.items()
     }
 
@@ -156,7 +151,7 @@ def _split_deltas(actual: dict, reference: dict) -> dict[str, float]:
     """Per split, the largest |difference| over its reference columns; a split missing from
     ``actual`` counts as infinitely far."""
     return {
-        name: max(float((actual[name][column] - values).abs().max()) for column, values in columns.items())
+        name: max(float((actual[name][key] - values).abs().max()) for key, values in columns.items())
         if name in actual
         else math.inf
         for name, columns in reference.items()
@@ -165,16 +160,10 @@ def _split_deltas(actual: dict, reference: dict) -> dict[str, float]:
 
 def _columns_equal(actual: dict, reference: dict) -> bool:
     return sorted(actual) == sorted(reference) and all(
-        torch.equal(actual[name][column], values)
+        torch.equal(actual[name][key], values)
         for name, columns in reference.items()
-        for column, values in columns.items()
+        for key, values in columns.items()
     )
-
-
-def _finish(trainer) -> None:
-    """Release a phase's DeepEP buffers before the next phase builds its own."""
-    trainer.cleanup_ep()
-    cleanup_memory()
 
 
 def run_precompute_resume(ctx, *, trainer: str, family: str, mode: str, peft: bool, kto_loss: str) -> dict:
@@ -251,7 +240,7 @@ def run_precompute_resume(ctx, *, trainer: str, family: str, mode: str, peft: bo
     base_columns = _reference_columns(built)
     built.train()
     continuous = _losses_by_step(built)
-    _finish(built)
+    finish_phase(built)
     ctx.barrier()
     checks["continuous_ran_all_steps"] = sorted(continuous) == list(range(1, TOTAL_STEPS + 1))
     checks["checkpoint_carries_the_sidecar"] = os.path.isfile(os.path.join(ckpt_dir, REFERENCE_LOGPS_FILE))
@@ -268,20 +257,20 @@ def run_precompute_resume(ctx, *, trainer: str, family: str, mode: str, peft: bo
     resumed_columns = _reference_columns(built)
     built.train(resume_from_checkpoint=ckpt_dir)
     resumed = _losses_by_step(built)
-    _finish(built)
+    finish_phase(built)
     ctx.barrier()
     checks["resumed_reference_columns_equal_the_base_run"] = _columns_equal(resumed_columns, base_columns)
     resumed_delta = abs(resumed.get(first_resumed_step, math.inf) - continuous[first_resumed_step])
     metrics["resumed_first_step_loss"] = resumed.get(first_resumed_step, math.nan)
     metrics["resumed_first_step_loss_delta"] = resumed_delta
-    checks["resumed_first_step_loss_matches_continuous"] = resumed_delta < LOSS_ATOL
+    checks["resumed_first_step_loss_matches_continuous"] = resumed_delta < TOL.replayed_resume_loss_abs
 
     log(f"\n--- Phase 3 ({label}): the same resume, trainer NOT told (control) ---")
     built = make_trainer(source, os.path.join(shared, "control_out"))
     control_columns = _reference_columns(built)
     built.train(resume_from_checkpoint=ckpt_dir)
     control = _losses_by_step(built)
-    _finish(built)
+    finish_phase(built)
     ctx.barrier()
     control_deltas = _split_deltas(control_columns, base_columns)
     # The smallest split's miss: every split, eval ones included, is re-swept off the policy.
@@ -293,7 +282,7 @@ def run_precompute_resume(ctx, *, trainer: str, family: str, mode: str, peft: bo
             metrics["control_reference_max_logp_delta"] > CONTROL_MIN_LOGP_DELTA
         )
         checks["control_first_step_loss_misses_continuous"] = math.isfinite(control_delta) and (
-            control_delta > CONTROL_MIN_LOSS_DELTA
+            control_delta > TOL.control_min_loss_shift(TOL.replayed_resume_loss_abs)
         )
     else:
         checks["control_sweep_of_the_base_reproduces_the_base_run"] = _columns_equal(control_columns, base_columns)
@@ -317,7 +306,7 @@ def run_precompute_resume(ctx, *, trainer: str, family: str, mode: str, peft: bo
             _reference_columns(built), base_columns
         )
     if built is not None:
-        _finish(built)
+        finish_phase(built)
     cleanup_memory()
 
     log(

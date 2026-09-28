@@ -19,10 +19,9 @@ PartialState()
 
 from src.distributed.parallelism_config import ParallelismConfig
 from src.trainers.mixins.dataloader import DataParallelDataLoaderMixin
-from src.trainers.preference.dpo import DistributedDPOTrainer
-from src.trainers.preference.kto import DistributedKTOTrainer
 from src.trainers.preference.precompute import PrecomputeRefLogpsRankConsistentMixin
 from tests.common.parallelism import make_parallelism_config
+from tests.common.preference_precompute import TRAINERS
 
 WORLD_SIZE = 8
 TP_SIZE = 2
@@ -177,17 +176,18 @@ def test_presharded_dataset_is_rejected():
         trainer._precompute_ref_logps(_fake_dataset(), "train", BATCH_SIZE)
 
 
-@pytest.mark.parametrize("trainer_cls", [DistributedDPOTrainer, DistributedKTOTrainer])
-def test_preference_trainers_supply_the_sweep_the_mixin_enters(trainer_cls):
+@pytest.mark.parametrize("kind", sorted(TRAINERS))
+def test_preference_trainers_supply_the_sweep_the_mixin_enters(kind):
     """``_Trainer`` above stubs only the TRL base — it composes the REAL two mixins, so everything
     this file proves is proved about that pairing, and the production trainers must be that pairing.
     ``_precompute_ref_logps`` enters ``self.data_parallel_sweep()``, which the precompute mixin does
     not define: a trainer without the dataloader mixin dies with an AttributeError inside TRL's
-    ``__init__``, and one that shadowed the sweep would silently run on the global-rank axis again.
+    ``__init__``, and one that shadowed the sweep would silently run on the global-rank axis.
 
     The other half of the wiring — the mixin's MRO position ahead of the concrete TRL trainer — is
     pinned by ``test_precompute_in_memory_attach.py::test_the_trainers_route_the_precompute_through_the_mixin``.
     """
+    trainer_cls, _ = TRAINERS[kind]
     assert issubclass(trainer_cls, DataParallelDataLoaderMixin)
     assert trainer_cls.data_parallel_sweep is DataParallelDataLoaderMixin.data_parallel_sweep
 

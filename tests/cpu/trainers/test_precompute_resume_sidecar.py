@@ -44,6 +44,7 @@ from tests.common.preference_precompute import (
     MAX_LENGTH,
     N_ROWS,
     REFERENCE_COLUMNS,
+    SWEEP_BATCH_SIZE,
     TOKEN_COLUMNS,
     TRAINED,
     TRAINERS,
@@ -69,7 +70,9 @@ def kind(request):
 def _save_base_run(kind, checkpoint_dir, splits, **trainer_kwargs) -> dict[str, Dataset]:
     """A fresh run's precompute over ``splits`` (name → dataset), persisted into ``checkpoint_dir``."""
     trainer = precompute_trainer(kind, weights=BASE, **trainer_kwargs)
-    prepared = {name: trainer._precompute_ref_logps(dataset, name, 2) for name, dataset in splits.items()}
+    prepared = {
+        name: trainer._precompute_ref_logps(dataset, name, SWEEP_BATCH_SIZE) for name, dataset in splits.items()
+    }
     trainer._persist_trainer_sidecars(str(checkpoint_dir))
     return prepared
 
@@ -99,7 +102,7 @@ def test_a_resume_attaches_the_saved_columns_instead_of_sweeping_the_trained_pol
     base = _save_base_run(kind, tmp_path, {"train": token_rows(kind)})["train"]
     resumed = _resumed(kind, tmp_path)
 
-    prepared = resumed._precompute_ref_logps(token_rows(kind), "train", 2)
+    prepared = resumed._precompute_ref_logps(token_rows(kind), "train", SWEEP_BATCH_SIZE)
 
     assert resumed.compute_ref_log_probs.batches == 0, "the resume swept the policy, which holds the trained weights"
     for name in REFERENCE_COLUMNS[kind]:
@@ -121,7 +124,7 @@ def test_a_resumed_dataset_with_a_new_fingerprint_still_restores(kind, tmp_path)
     dataset._fingerprint = "redrawn-per-process"
     resumed = _resumed(kind, tmp_path)
 
-    resumed._precompute_ref_logps(dataset, "train", 2)
+    resumed._precompute_ref_logps(dataset, "train", SWEEP_BATCH_SIZE)
 
     assert resumed.compute_ref_log_probs.batches == 0
 
@@ -130,7 +133,7 @@ def test_a_policy_built_from_the_checkpoint_without_saved_columns_refuses(kind, 
     trainer = _resumed(kind, tmp_path)
 
     with pytest.raises(RuntimeError, match="TRAINED weights as the reference") as raised:
-        trainer._precompute_ref_logps(token_rows(kind), "train", 2)
+        trainer._precompute_ref_logps(token_rows(kind), "train", SWEEP_BATCH_SIZE)
     assert "--max_steps=1" in str(raised.value), "the refusal must name a way to recover"
     assert trainer.compute_ref_log_probs.batches == 0
 
@@ -146,7 +149,7 @@ def test_the_named_recovery_parses_into_a_fresh_one_step_save(kind, tmp_path):
     (resumed_from / "trainer_state.json").write_text("{}")
     trainer = _resumed(kind, resumed_from)
     with pytest.raises(RuntimeError, match="To recover") as raised:
-        trainer._precompute_ref_logps(token_rows(kind), "train", 2)
+        trainer._precompute_ref_logps(token_rows(kind), "train", SWEEP_BATCH_SIZE)
     assert "on every node" in str(raised.value), "per-node storage needs a copy on each node"
     recovery = re.findall(r"--\w+=[^\s)]+", str(raised.value))
     assert recovery, "the refusal names no flags to recover with"
@@ -181,7 +184,7 @@ def test_a_resume_sweeps_where_the_reference_weights_are_untrained(kind, tmp_pat
         kind, resume_checkpoint=str(tmp_path), policy_from_checkpoint=policy_from_checkpoint, ref_model=ref_model
     )
 
-    trainer._precompute_ref_logps(token_rows(kind), "train", 2)
+    trainer._precompute_ref_logps(token_rows(kind), "train", SWEEP_BATCH_SIZE)
 
     assert trainer.compute_ref_log_probs.batches > 0
 
@@ -189,7 +192,7 @@ def test_a_resume_sweeps_where_the_reference_weights_are_untrained(kind, tmp_pat
 @pytest.mark.parametrize(
     ("resumed_rows", "reason"),
     [
-        (lambda kind: token_rows(kind, N_ROWS - 1), "saved for 4 rows"),
+        (lambda kind: token_rows(kind, N_ROWS - 1), f"saved for {N_ROWS} rows"),
         (lambda kind: token_rows(kind).select(list(reversed(range(N_ROWS)))), "differ from the saved run's"),
     ],
     ids=["fewer_rows", "reordered_rows"],
@@ -199,7 +202,7 @@ def test_saved_columns_for_other_rows_refuse(kind, tmp_path, resumed_rows, reaso
     trainer = _resumed(kind, tmp_path)
 
     with pytest.raises(ValueError, match=reason):
-        trainer._precompute_ref_logps(resumed_rows(kind), "train", 2)
+        trainer._precompute_ref_logps(resumed_rows(kind), "train", SWEEP_BATCH_SIZE)
     assert trainer.compute_ref_log_probs.batches == 0
 
 
@@ -213,7 +216,7 @@ def test_every_column_the_reference_reads_is_in_the_digest(tmp_path, kind, bumpe
     trainer = _resumed(kind, tmp_path)
 
     with pytest.raises(ValueError, match=f"'{bumped}'") as raised:
-        trainer._precompute_ref_logps(token_rows(kind, bump=bumped), "train", 2)
+        trainer._precompute_ref_logps(token_rows(kind, bump=bumped), "train", SWEEP_BATCH_SIZE)
     if bumped == "KL_completion_ids":
         # TRL pairs the KL completions within map batches of the per-device size, across num_proc shards.
         assert "per_device_train_batch_size" in str(raised.value)
@@ -242,7 +245,7 @@ def test_changed_reference_settings_refuse(tmp_path, kind, changed):
             setattr(trainer.args, name, value)
 
     with pytest.raises(ValueError, match="computed under"):
-        trainer._precompute_ref_logps(token_rows(kind), "train", 2)
+        trainer._precompute_ref_logps(token_rows(kind), "train", SWEEP_BATCH_SIZE)
 
 
 @pytest.mark.parametrize(
@@ -255,8 +258,8 @@ def test_a_mismatched_split_is_swept_where_the_reference_weights_are_untrained(
     kind, tmp_path, policy_from_checkpoint, ref_model, changed
 ):
     """Where the sweep scores untrained weights (an adapter or merged-adapter resume builds the
-    policy from the base; a separate reference model), a saved split that no longer matches is
-    simply re-derived, as such a resume always did: only a sweep over trained weights must refuse."""
+    policy from the base; a separate reference model), a saved split that does not match the
+    resumed rows or settings is swept afresh: only a sweep over trained weights must refuse."""
     _save_base_run(kind, tmp_path, {"train": token_rows(kind)})
     trainer = precompute_trainer(
         kind,
@@ -268,7 +271,7 @@ def test_a_mismatched_split_is_swept_where_the_reference_weights_are_untrained(
     )
     rows = token_rows(kind, N_ROWS - 1) if changed == "rows" else token_rows(kind)
 
-    prepared = trainer._precompute_ref_logps(rows, "train", 2)
+    prepared = trainer._precompute_ref_logps(rows, "train", SWEEP_BATCH_SIZE)
 
     assert trainer.compute_ref_log_probs.batches > 0, "the mismatched split was neither refused nor swept"
     assert len(prepared) == len(rows)
@@ -282,7 +285,7 @@ def test_a_mismatched_split_is_swept_where_the_reference_weights_are_untrained(
     "corrupt",
     [
         lambda entry: entry.pop("token_digests"),
-        lambda entry: entry.update(num_rows="4"),
+        lambda entry: entry.update(num_rows=str(N_ROWS)),
         lambda entry: entry["columns"].update({name: values[:-1] for name, values in entry["columns"].items()}),
     ],
     ids=["missing_key", "mistyped_rows", "short_columns"],
@@ -296,9 +299,9 @@ def test_a_malformed_saved_split_is_a_mismatch_not_a_crash(kind, tmp_path, corru
     torch.save(saved, tmp_path / REFERENCE_LOGPS_FILE)
 
     with pytest.raises(ValueError, match="does not belong to this 'train' dataset"):
-        _resumed(kind, tmp_path)._precompute_ref_logps(token_rows(kind), "train", 2)
+        _resumed(kind, tmp_path)._precompute_ref_logps(token_rows(kind), "train", SWEEP_BATCH_SIZE)
     from_base = precompute_trainer(kind, resume_checkpoint=str(tmp_path), policy_from_checkpoint=False)
-    from_base._precompute_ref_logps(token_rows(kind), "train", 2)
+    from_base._precompute_ref_logps(token_rows(kind), "train", SWEEP_BATCH_SIZE)
     assert from_base.compute_ref_log_probs.batches > 0
 
 
@@ -307,11 +310,11 @@ def test_a_split_the_resumed_run_skips_rides_into_its_checkpoints(kind, tmp_path
     checkpoints it makes, so a later resume that turns eval back on restores it rather than refusing."""
     base = _save_base_run(kind, tmp_path / "a", {"train": token_rows(kind), "eval": token_rows(kind, 3)})
     train_only = _resumed(kind, tmp_path / "a")
-    train_only._precompute_ref_logps(token_rows(kind), "train", 2)
+    train_only._precompute_ref_logps(token_rows(kind), "train", SWEEP_BATCH_SIZE)
     train_only._persist_trainer_sidecars(str(tmp_path / "b"))
 
     with_eval = _resumed(kind, tmp_path / "b")
-    prepared = with_eval._precompute_ref_logps(token_rows(kind, 3), "eval", 2)
+    prepared = with_eval._precompute_ref_logps(token_rows(kind, 3), "eval", SWEEP_BATCH_SIZE)
 
     assert with_eval.compute_ref_log_probs.batches == 0
     for name in REFERENCE_COLUMNS[kind]:
@@ -326,7 +329,7 @@ def test_a_kto_resume_that_needs_the_kl_column_the_save_lacks_refuses(tmp_path):
     trainer = _resumed("kto", tmp_path, calculate_kl=True)
 
     with pytest.raises(ValueError, match="ref_KL_logps"):
-        trainer._precompute_ref_logps(token_rows("kto"), "train", 2)
+        trainer._precompute_ref_logps(token_rows("kto"), "train", SWEEP_BATCH_SIZE)
 
 
 def test_a_kto_resume_dropping_the_kl_term_restores_ref_logps(tmp_path):
@@ -335,7 +338,9 @@ def test_a_kto_resume_dropping_the_kl_term_restores_ref_logps(tmp_path):
     base = _save_base_run("kto", tmp_path, {"train": token_rows("kto")}, calculate_kl=True)["train"]
     trainer = _resumed("kto", tmp_path, calculate_kl=False)
 
-    prepared = trainer._precompute_ref_logps(token_rows("kto").remove_columns(["KL_completion_ids"]), "train", 2)
+    prepared = trainer._precompute_ref_logps(
+        token_rows("kto").remove_columns(["KL_completion_ids"]), "train", SWEEP_BATCH_SIZE
+    )
 
     assert trainer.compute_ref_log_probs.batches == 0
     assert torch.equal(column(prepared, "ref_logps"), column(base, "ref_logps"))
@@ -350,12 +355,12 @@ def test_every_split_is_restored_under_its_own_name(kind, tmp_path):
     resumed = _resumed(kind, tmp_path)
 
     for name, dataset in splits.items():
-        prepared = resumed._precompute_ref_logps(dataset, name, 2)
+        prepared = resumed._precompute_ref_logps(dataset, name, SWEEP_BATCH_SIZE)
         for reference in REFERENCE_COLUMNS[kind]:
             assert torch.equal(column(prepared, reference), column(base[name], reference)), name
     assert resumed.compute_ref_log_probs.batches == 0
     with pytest.raises(RuntimeError, match="lacks that split"):
-        resumed._precompute_ref_logps(token_rows(kind, 2), "eval_c", 2)
+        resumed._precompute_ref_logps(token_rows(kind, 2), "eval_c", SWEEP_BATCH_SIZE)
 
 
 def test_a_split_saved_on_some_ranks_only_refuses_without_sweeping(kind, tmp_path, monkeypatch):
@@ -366,13 +371,13 @@ def test_a_split_saved_on_some_ranks_only_refuses_without_sweeping(kind, tmp_pat
     trainer = _resumed(kind, tmp_path)
 
     with pytest.raises(RuntimeError, match="on some ranks only"):
-        trainer._precompute_ref_logps(token_rows(kind), "train", 2)
+        trainer._precompute_ref_logps(token_rows(kind), "train", SWEEP_BATCH_SIZE)
     assert trainer.compute_ref_log_probs.batches == 0
 
 
 def test_the_sidecar_is_written_by_the_save_rank_inside_the_fence(kind, tmp_path, monkeypatch):
     trainer = precompute_trainer(kind)
-    trainer._precompute_ref_logps(token_rows(kind), "train", 2)
+    trainer._precompute_ref_logps(token_rows(kind), "train", SWEEP_BATCH_SIZE)
     path = tmp_path / REFERENCE_LOGPS_FILE
     fence: list[tuple[str, bool]] = []
 
@@ -402,7 +407,7 @@ def test_dataset_supplied_columns_are_not_persisted(kind, tmp_path):
     supplied = {name: [-1.0] * N_ROWS for name in REFERENCE_COLUMNS[kind]}
     dataset = concatenate_datasets([token_rows(kind), Dataset.from_dict(supplied)], axis=1)
 
-    assert trainer._precompute_ref_logps(dataset, "train", 2) is dataset
+    assert trainer._precompute_ref_logps(dataset, "train", SWEEP_BATCH_SIZE) is dataset
     trainer._persist_trainer_sidecars(str(tmp_path))
 
     assert not (tmp_path / REFERENCE_LOGPS_FILE).exists()
@@ -410,10 +415,10 @@ def test_dataset_supplied_columns_are_not_persisted(kind, tmp_path):
 
 def test_two_splits_sharing_a_name_are_refused(kind):
     trainer = precompute_trainer(kind)
-    trainer._precompute_ref_logps(token_rows(kind), "train", 2)
+    trainer._precompute_ref_logps(token_rows(kind), "train", SWEEP_BATCH_SIZE)
 
     with pytest.raises(ValueError, match="share the name 'train'"):
-        trainer._precompute_ref_logps(token_rows(kind, 2), "train", 2)
+        trainer._precompute_ref_logps(token_rows(kind, 2), "train", SWEEP_BATCH_SIZE)
 
 
 def test_a_resume_request_without_the_resume_context_refuses(kind):
@@ -421,11 +426,11 @@ def test_a_resume_request_without_the_resume_context_refuses(kind):
     checkpoint; the scripts always pass the context, ``None`` included."""
     trainer = precompute_trainer(kind, resume_from_checkpoint="out/checkpoint-7")
     with pytest.raises(ValueError, match="built without resume_checkpoint"):
-        trainer._precompute_ref_logps(token_rows(kind), "train", 2)
+        trainer._precompute_ref_logps(token_rows(kind), "train", SWEEP_BATCH_SIZE)
     assert trainer.compute_ref_log_probs.batches == 0
 
     fresh_script_run = precompute_trainer(kind, resume_from_checkpoint=True, resume_checkpoint=None)
-    fresh_script_run._precompute_ref_logps(token_rows(kind), "train", 2)
+    fresh_script_run._precompute_ref_logps(token_rows(kind), "train", SWEEP_BATCH_SIZE)
     assert fresh_script_run.compute_ref_log_probs.batches > 0
 
 
@@ -487,7 +492,7 @@ def test_the_token_digest_hashes_in_bounded_chunks(monkeypatch):
 def test_the_trainers_checkpoint_hook_is_the_precompute_mixins(kind):
     """The mixin must precede ``DistributedTrainerMixin`` in the bases, or ``CheckpointingMixin``'s
     empty default shadows the write and no checkpoint carries the columns."""
-    trainer_cls = TRAINERS[kind]
+    trainer_cls, _ = TRAINERS[kind]
     assert trainer_cls._persist_trainer_sidecars is PrecomputeRefLogpsRankConsistentMixin._persist_trainer_sidecars
     mro = trainer_cls.__mro__
     assert mro.index(PrecomputeRefLogpsRankConsistentMixin) < mro.index(CheckpointingMixin)
