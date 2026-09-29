@@ -3,10 +3,10 @@
 
 Every shaping term is small next to the objective by intent, but "small" is a relation between the
 recipe's own numbers, and a knob edited alone can break it silently. These pin the relations a run
-depends on: the length terms stay under the resubmission price, a fix costs less than a re-roll yet a
-rescue still scores under a first-try solve, an honest failed attempt still beats not attempting, the
-worst solve beats the best zero-objective episode, and — per effort level — the under-use floor
-out-slopes the length price, so below its floor a level is paid to reason more and never less.
+depends on: the length terms stay under the resubmission price, an honest failed attempt still beats
+not attempting, at every effort level a solve paying every per-episode price beats the best
+zero-objective episode, and — per effort level — the under-use floor out-slopes the length price, so
+below its floor a level is paid to reason more and never less.
 
 Run: python tests/cpu/config/test_env_grpo_reward_economy.py  (or pytest)
 """
@@ -22,8 +22,6 @@ from src.environments.episode import effort_length_floor, effort_length_penalty
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
 RECIPES = sorted((REPO_ROOT / "examples" / "grpo" / "environmental").rglob("*code-contests*.yaml"))
-OBJECTIVE_MAX = 1.0  # the environment term: a pass fraction in [0, 1], whatever its exponent
-
 _yaml = YAML(typ="safe")
 _DEFAULTS = AsyncTrainingConfig()
 
@@ -32,15 +30,16 @@ def _economy(path: Path) -> dict:
     cfg = _yaml.load(path)
     env = cfg["environment_kwargs"]
     profiles = env["reasoning_effort_profiles"]
+    terms = cfg.get("rewards", [{"source": "environment"}])
     return {
+        # The environment term on a solve: the grade is 1 or 0, so only the weight prices it.
+        "solve": sum(term.get("weight", 1.0) for term in terms if term["source"] == "environment"),
         "submission": env.get("submission_reward", 0.0),
-        "execution": env.get("execution_progress_reward", 0.0),
         "resubmission": env.get("resubmission_penalty", 0.0),
-        "refund": env.get("improved_resubmission_refund", 0.0),
         "no_tool_use": env.get("no_tool_use_penalty", 0.0),
         "turn_overflow": env.get("turn_overflow_penalty", 0.0),
         "cut": env.get("length_cutoff_penalty", 0.0),
-        "max_submissions": max(profile["max_submissions"] for profile in profiles.values()),
+        "recoveries": env.get("max_length_cutoff_recoveries"),
         "profiles": profiles,
         "k0": cfg.get("effort_length_penalty_k0"),
         "tau": cfg.get("effort_length_penalty_tau", _DEFAULTS.effort_length_penalty_tau),
@@ -94,18 +93,6 @@ def test_length_terms_stay_under_the_resubmission_price(path):
 
 
 @pytest.mark.parametrize("path", RECIPES, ids=_ids(RECIPES))
-def test_a_fix_is_cheaper_than_a_re_roll_and_a_rescue_still_trails_a_first_try_solve(path):
-    """The refund is what separates the two resubmissions a group contains. It stays partial: a free
-    rescue would score level with a first-try solve and take the pressure off the first submission."""
-    e = _economy(path)
-    improved = e["resubmission"] * (1 - e["refund"])
-    assert 0 < improved < e["resubmission"], (
-        f"an improving resubmission costs {improved} against {e['resubmission']} for one that does not: the "
-        "price must separate a fix from a re-roll, and a fix must still cost something"
-    )
-
-
-@pytest.mark.parametrize("path", RECIPES, ids=_ids(RECIPES))
 def test_a_recovered_cut_costs_less_than_the_attempt_bonus_and_no_more_than_an_overflow(path):
     """The cut price makes the per-turn budget bind without outweighing the loop it protects: a cut
     never costs more than the graded attempt earns, and a recovered cut never costs more than the
@@ -129,20 +116,26 @@ def test_an_honest_failed_attempt_beats_not_attempting(path):
 
 
 @pytest.mark.parametrize("path", RECIPES, ids=_ids(RECIPES))
-def test_the_worst_solve_beats_the_best_zero_objective_episode(path):
+def test_at_every_level_the_worst_solve_beats_the_best_zero_objective_episode(path):
+    """A solve costs at most every resubmission its level allows, the overflow, each recovered cut the
+    cap admits and the worst length terms; a zero-objective episode collects at most the submission
+    bonus. The first must stay above the second at every level, or a group ranks a failure over a solve."""
     e = _economy(path)
-    shaping = e["submission"] + e["execution"]
-    worst_solve = (
-        OBJECTIVE_MAX
-        + shaping
-        - e["resubmission"] * (e["max_submissions"] - 1 - e["refund"])  # the solving one is the only fix
-        - e["turn_overflow"]
-        - (e["c_max"] + e["floor"])
-    )
-    assert worst_solve > shaping, (
-        f"a full solve can score as low as {worst_solve}, not above the {shaping} a zero-objective episode can "
-        "collect from shaping alone"
-    )
+    assert e["recoveries"] is not None, "an uncapped recovery count leaves the cut price on a solve unbounded"
+    best_zero_objective = e["submission"]
+    for level in VALID_REASONING_EFFORTS:
+        worst_solve = (
+            e["solve"]
+            + e["submission"]
+            - e["resubmission"] * (e["profiles"][level]["max_submissions"] - 1)
+            - e["turn_overflow"]
+            - e["cut"] * e["recoveries"]
+            - (e["c_max"] + e["floor"])
+        )
+        assert worst_solve > best_zero_objective, (
+            f"{level}: a full solve can score as low as {worst_solve}, not above the {best_zero_objective} a "
+            "zero-objective episode can collect from shaping alone"
+        )
 
 
 @pytest.mark.parametrize("path", RECIPES, ids=_ids(RECIPES))

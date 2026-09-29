@@ -7,8 +7,6 @@
 * Every RLRR invariant (the clip band, positive finite τ/λ, finite band and threshold) fails when
   the args are built — the parse step — gate on or off, instead of inside the trainer after the model
   load.
-* ``AdvantageShaping`` refuses a non-finite scale at parse time: it would make every shaped advantage
-  non-finite, which the normalizer refuses only at the first step.
 * ``rlrr_*`` values without ``use_rlrr`` and ``sdpg_*`` / ``opd_positive_advantage_only`` values
   without ``use_sdpg`` are refused by the script rather than silently ignored.
 
@@ -17,12 +15,11 @@
 
 import ast
 import dataclasses
-import math
 from pathlib import Path
 
 import pytest
 
-from src.args.mixins import AdvantageShaping, RLRRArguments, RLRRConfig, rlrr_arg_name
+from src.args.mixins import RLRRArguments, RLRRConfig, rlrr_arg_name
 from src.args.rlvr_online_grpo_args import RLVROnlineGRPOScriptArguments
 from src.training.parser import H4ArgumentParser
 from src.training.script_runner import reject_non_default_args
@@ -104,18 +101,6 @@ def test_an_inverted_band_fails_on_the_cli_override_path(tmp_path):
     parser = H4ArgumentParser((RLVROnlineGRPOScriptArguments,))
     with pytest.raises(ValueError, match="rlrr_xi_neg <= rlrr_xi_pos"):
         parser.parse_yaml_and_args(str(yaml_path), ["--rlrr_xi_neg=1.0"])
-
-
-@pytest.mark.parametrize("kwargs", [{"neg_scale": float("nan")}, {"pos_scale": float("inf")}, {"neg_scale": -0.1}])
-def test_advantage_shaping_refuses_a_non_finite_or_negative_scale(kwargs):
-    with pytest.raises(ValueError, match="finite value >= 0"):
-        AdvantageShaping(mode="asymmetric", **kwargs)
-
-
-def test_a_nan_scale_is_refused_at_the_script_args_even_at_the_mean_mode():
-    """Built eagerly, so the value fails at parse time whether or not the mode would use it."""
-    with pytest.raises(ValueError, match="neg_scale"):
-        RLVROnlineGRPOScriptArguments(advantage_neg_scale=math.nan)
 
 
 # --- Tunables set beside a closed gate are refused, not ignored ---

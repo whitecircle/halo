@@ -25,8 +25,7 @@ max_turns: 16               # an unproductive turn costs a turn, not the episode
 environment_kwargs:
   language: python
   timeout_per_test: 5
-  stop_on_first_failure: false
-  max_grading_seconds: 150   # wall-clock budget per submission grade, no test-count limit; a budget stop scores the graded prefix
+  max_grading_seconds: 150   # wall-clock budget per submission grade, no test-count limit; a stop before any failure leaves the group baseline, one after is a failure
   reasoning_effort: random
   max_length_cutoff_recoveries: 2  # two recoveries, cut and empty turns together: the third such turn ends the episode truncated
   # One profile per effort level. thinking_tokens is an engine cap on vLLM only; on SGLang it reaches
@@ -36,21 +35,12 @@ environment_kwargs:
     medium: {thinking_tokens: 12288, max_submissions: 2, max_test_calls: 4}
     high: {thinking_tokens: 16384, max_submissions: 3, max_test_calls: 6}
   submission_reward: 0.1     # bonus for reaching the graded channel
-  execution_progress_reward: 0.05
   verdict_detail: outcome    # a failed test's verdict class only; expected/got would make the judge a free test oracle
   resubmission_penalty: 0.2  # magnitude, >= 0 — charged per graded submission after the first
-  improved_resubmission_refund: 0.75  # of that price, earned back by beating every earlier result: a fix is cheap, a re-roll is not
   no_tool_use_penalty: 0.1
-  multi_turn_reward: 0
-  tool_success_reward: 0
   turn_overflow_penalty: 0.1
   length_cutoff_penalty: 0.08  # magnitude, >= 0 — charged per recovered turn that produced nothing: engine-cut, or ended without a call or an answer
   tool_error_penalty: 0.05
-
-# --- Rewards ---
-rewards:
-  - source: environment   # the pass fraction of the submitted solution
-    exponent: 2.0         # convex partial credit: half-right earns a quarter
 
 # --- Ray Workers ---
 num_rollout_workers: 32
@@ -95,13 +85,9 @@ max_prompt_length: null
 num_generations: 8
 use_chunked_grpo_logprobs: true # required for Qwen3.6 (~248k vocab)
 loss_type: dapo
-advantage_mode: asymmetric   # failures run far longer than solves, so under a token-level normalizer
-advantage_neg_scale: 0.7     #   their negatives carry the gradient mass
 beta: 0.0
 num_iterations: 1
 epsilon: 0.2
-epsilon_high: 0.28
-isr_engine_reference: false  # the engine re-score costs server headroom (--mem-fraction-static <= 0.80)
 isr_geo_band_min: 0.95       # +-0.05 nats above the entropy-dependent numerical floor; on sustained masking fix the disagreement, never widen the band
 isr_geo_band_max: 1.05
 isr_veto_min: 1.0e-4

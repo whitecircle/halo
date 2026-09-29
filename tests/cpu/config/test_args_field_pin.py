@@ -312,11 +312,6 @@ _EXPECTED = {
     },
     "RLVROnlineGRPOScriptArguments": {
         "added_special_tokens": "None",
-        "advantage_hard_group_threshold": "0.5",
-        "advantage_mode": "'mean'",
-        "advantage_neg_scale": "0.4",
-        "advantage_pos_scale": "1.0",
-        "advantage_quantile": "0.4",
         "answer_field": "'answer'",
         "bos_token": "None",
         "chat_template": "None",

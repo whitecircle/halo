@@ -94,18 +94,13 @@ beta: 0.01
 num_iterations: 1
 epsilon: 0.2
 scale_rewards: batch     # global batch std; a per-group std divides by ~0 on a uniform group
-# drop_degenerate_groups: true      # mask GRPO groups whose completions all scored the same reward out of the loss
+# drop_degenerate_groups: true      # mask GRPO groups whose completions all scored the same environment reward out of the loss
 # use_chunked_grpo_logprobs: false  # vocab-chunked log-probs instead of full [B, T, vocab] logits (large-vocab models on long completions)
 # routing_replay: none              # MoE routing replay: none, recompute (R2), or rollout (R3; needs a capture-capable server)
 # --- Advantage shaping (AdvantageShapingArguments; agent-docs/training-methods/grpo/async-grpo/objective.md#advantages) ---
-# advantage_mode: mean              # mean, qae (+advantage_quantile), asymmetric (+advantage_pos_scale,
-#                                     advantage_neg_scale; 0 = full negative mask), neg_mask_hard
-#                                     (+advantage_hard_group_threshold)
 # scale_rewards_std_floor: 0.0      # floor on the std divisor in advantage scaling; 0 = off
-# --- IS trust region (engine<->trainer ratio; all eight knobs: agent-docs/training-methods/grpo/async-grpo/objective.md#trust-region-masks) ---
-# isr_band_min: null                # token band on the raw ratio; a band arms only when both bounds are set
-# isr_band_max: null
-# isr_geo_band_min: null            # trajectory band on exp(mean log-ratio)
+# --- IS trust region (engine<->trainer ratio; every knob: agent-docs/training-methods/grpo/async-grpo/objective.md#trust-region-masks) ---
+# isr_geo_band_min: null            # trajectory band on exp(mean log-ratio); arms only when both bounds are set
 # isr_geo_band_max: null
 # isr_veto_min: null                # any corrected token below this raw ratio masks its whole trajectory
 

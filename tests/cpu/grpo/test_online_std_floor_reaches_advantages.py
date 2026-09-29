@@ -7,9 +7,8 @@ and gets full-scale advantages. TRL's own divisor is a fixed ``1e-4``, so the fl
 applied by the trainer's own recompute hook.
 
 Two gates guard that hook: the reward stash in ``_calculate_rewards`` and the early return in
-``_apply_advantage_shaping``. A knob covered by one but not the other is silently inert: keying both
-on ``advantage_shaping`` — ``None`` at the default ``advantage_mode="mean"`` — does exactly that.
-These tests pin that both gates honour the floor on its own.
+``_apply_std_floor_advantages``. A knob covered by one but not the other is silently inert: the stash
+stays ``None`` and the hook returns. These tests pin that both gates honour the floor on its own.
 
     python tests/cpu/grpo/test_online_std_floor_reaches_advantages.py
 """
@@ -19,7 +18,6 @@ from collections import deque
 import pytest
 import torch
 
-from src.args.mixins import AdvantageShaping
 from src.trainers.grpo.objective.advantages import group_relative_advantages
 from src.trainers.grpo.online import DistributedGRPOTrainer
 
@@ -40,9 +38,8 @@ class _Accelerator:
 class _OnlineStub:
     """Borrows the real gate + hook off the trainer without constructing one (needs vLLM)."""
 
-    def __init__(self, *, std_floor=0.0, shaping=None, rlrr=None, drop_degenerate=False):
+    def __init__(self, *, std_floor=0.0, rlrr=None, drop_degenerate=False):
         self._scale_rewards_std_floor = std_floor
-        self._advantage_shaping = shaping
         self._rlrr_config = rlrr
         self._drop_degenerate_groups = drop_degenerate
         self.num_generations = G
@@ -53,7 +50,7 @@ class _OnlineStub:
         self._logs = {"advantages": deque([0.0] * G, maxlen=G)}
 
     _recomputes_from_gathered_rewards = DistributedGRPOTrainer._recomputes_from_gathered_rewards
-    _apply_advantage_shaping = DistributedGRPOTrainer._apply_advantage_shaping
+    _apply_std_floor_advantages = DistributedGRPOTrainer._apply_std_floor_advantages
     _install_advantages = DistributedGRPOTrainer._install_advantages
     _local_slice = DistributedGRPOTrainer._local_slice
 
@@ -75,7 +72,6 @@ def test_std_floor_alone_arms_the_reward_stash():
 @pytest.mark.parametrize(
     "kwargs",
     [
-        {"shaping": AdvantageShaping(mode="qae")},
         {"rlrr": object()},
         {"drop_degenerate": True},
     ],
@@ -92,12 +88,9 @@ def test_std_floor_alone_suppresses_degenerate_group_amplification():
 
     stub = _OnlineStub(std_floor=0.2)
     result = {"advantages": baseline.clone()}
-    stub._apply_advantage_shaping(result)
+    stub._apply_std_floor_advantages(result)
 
-    assert result["advantages"].abs().max() < 0.05, (
-        "scale_rewards_std_floor did not reach the advantages — the shaping hook returned early "
-        "because advantage_shaping is None at the default advantage_mode"
-    )
+    assert result["advantages"].abs().max() < 0.05, "scale_rewards_std_floor did not reach the advantages"
     # The floor replaces the tiny std with 0.2, so the amplification drops by that ratio.
     expected = group_relative_advantages(DEGENERATE_REWARDS.float(), G, "group", std_floor=0.2)
     assert torch.allclose(result["advantages"], expected, atol=1e-6)
@@ -114,15 +107,15 @@ def test_a_short_advantage_log_raises_instead_of_misattributing_rows():
     stub = _OnlineStub(std_floor=0.2)
     stub._logs["advantages"] = deque([0.0] * (G - 1), maxlen=G - 1)
     with pytest.raises(RuntimeError, match="cannot realign the completions record"):
-        stub._apply_advantage_shaping({"advantages": _trl_baseline_advantages()})
+        stub._apply_std_floor_advantages({"advantages": _trl_baseline_advantages()})
 
 
-def test_no_floor_and_no_shaping_leaves_trl_advantages_untouched():
+def test_no_floor_leaves_trl_advantages_untouched():
     """The default path must not be recomputed at all — TRL's values stand."""
     baseline = _trl_baseline_advantages()
     stub = _OnlineStub()
     result = {"advantages": baseline.clone()}
-    stub._apply_advantage_shaping(result)
+    stub._apply_std_floor_advantages(result)
     assert torch.equal(result["advantages"], baseline)
 
 
@@ -137,7 +130,7 @@ def test_floor_preserves_advantages_when_the_group_has_real_spread():
     unfloored = group_relative_advantages(spread, G, "group", std_floor=0.0)
     stub = _SpreadStub(std_floor=0.2)
     result = {"advantages": unfloored.clone()}
-    stub._apply_advantage_shaping(result)
+    stub._apply_std_floor_advantages(result)
     assert torch.allclose(result["advantages"], unfloored, atol=1e-6)
 
 

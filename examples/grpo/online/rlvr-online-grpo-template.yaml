@@ -41,9 +41,6 @@ loss_type: grpo
 # use_chunked_grpo_logprobs: false  # vocab-chunked log-probs instead of full [B, T, vocab] logits (large-vocab models on long completions)
 
 # --- Advantage shaping (AdvantageShapingArguments, exclusive with use_rlrr; agent-docs/training-methods/grpo/online-grpo.md) ---
-# advantage_mode: mean              # mean, qae (+advantage_quantile), asymmetric (+advantage_pos_scale,
-#                                     advantage_neg_scale; 0 = full negative mask), neg_mask_hard
-#                                     (+advantage_hard_group_threshold)
 # scale_rewards_std_floor: 0.0      # floor on the std divisor in advantage scaling; 0 = off
 # drop_degenerate_groups: false     # mask GRPO groups whose completions all scored the same reward out of the loss
 

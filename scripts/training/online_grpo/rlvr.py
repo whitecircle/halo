@@ -245,7 +245,6 @@ def main():
         callbacks=callbacks,
         **distributed_trainer_kwargs(args, dist_args, parallelism_config, dataset_presharded=dataset_presharded),
         rlrr_config=args.build_rlrr_config(),
-        advantage_shaping=args.build_advantage_shaping(),
         drop_degenerate_groups=args.drop_degenerate_groups,
         scale_rewards_std_floor=args.scale_rewards_std_floor,
         # Chunked log-probs (avoids full [B,T,vocab] logits on long completions)

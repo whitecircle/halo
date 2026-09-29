@@ -33,7 +33,7 @@ class RLVROnlineGRPOScriptArguments(
     ``format`` graders, a generative ``judge``, a served ``reward_model`` — each ``weight * score ** exponent``.
 
     RLRR (arXiv:2601.23058, :class:`RLRRArguments`) replaces the group-normalized advantages with
-    relative-ranking ones and is mutually exclusive with the AdvantageShapingArguments surgery.
+    relative-ranking ones, so the trainer refuses it beside either AdvantageShapingArguments guard.
     """
 
     # The tunables ``use_sdpg`` gates: the shared block plus the RLVR-only advantage gate.

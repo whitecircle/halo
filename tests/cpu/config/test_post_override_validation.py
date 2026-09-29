@@ -103,9 +103,8 @@ _RANGE_VIOLATIONS = [
     (OfflineGRPOConfig, "best_completion_emphasis", "atuo"),
     (AsyncTrainingConfig, "sync_weights_every_n_steps", "0"),
     (AsyncTrainingConfig, "max_retries", "-1"),
-    (AsyncTrainingConfig, "advantage_hard_group_threshold", "nan"),
     (AsyncTrainingConfig, "scale_rewards_std_floor", "-0.05"),
-    (RLVROnlineGRPOScriptArguments, "advantage_hard_group_threshold", "nan"),
+    (RLVROnlineGRPOScriptArguments, "scale_rewards_std_floor", "nan"),
 ]
 
 # Presence guards rather than ranges, and the same bypass. Each needs a VALID yaml baseline so the

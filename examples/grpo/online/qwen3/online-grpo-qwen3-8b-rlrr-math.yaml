@@ -31,9 +31,9 @@ temperature: 1.0
 loss_type: grpo
 
 # --- RLRR (arXiv:2601.23058) ---
-# The ranking advantages replace the group-normalized ones outright, so `scale_rewards` and the
-# AdvantageShaping knobs stay unset here — the trainer refuses RLRR together with `advantage_mode`
-# or `scale_rewards_std_floor`.
+# The ranking advantages replace the group-normalized ones outright, so `scale_rewards`,
+# `scale_rewards_std_floor` and `drop_degenerate_groups` stay unset here — the trainer refuses RLRR
+# together with either of the last two.
 use_rlrr: true
 rlrr_mode: hrr            # hybrid: bounded rank correction on top of the binary rule reward
 rlrr_tau: 0.1             # rank-correction magnitude; too high dilutes the accuracy reward

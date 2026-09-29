@@ -43,8 +43,7 @@ max_turns: 16
 environment_kwargs:
   language: python
   timeout_per_test: 5
-  stop_on_first_failure: false
-  max_grading_seconds: 150   # wall-clock budget per submission grade, no test-count limit; a budget stop scores the graded prefix
+  max_grading_seconds: 150   # wall-clock budget per submission grade, no test-count limit; a stop before any failure leaves the group baseline, one after is a failure
   reasoning_effort: random   # drawn once per generation group (shared conditioning), not per episode
   max_length_cutoff_recoveries: 2  # two recoveries, cut and empty turns together: the third such turn ends the episode truncated
   # One profile per effort level: CoT budget + interaction budgets. thinking_tokens is an ENGINE cap
@@ -55,21 +54,12 @@ environment_kwargs:
     high: {thinking_tokens: 16384, max_submissions: 3, max_test_calls: 6}
   # Reward ladder: see code_contests.py _grade_episode.
   submission_reward: 0.1     # bonus for reaching the graded channel
-  execution_progress_reward: 0.05
   verdict_detail: outcome    # a failed test's verdict class only; expected/got would make the judge a free test oracle
   resubmission_penalty: 0.2  # magnitude, >= 0 — charged per graded submission after the first
-  improved_resubmission_refund: 0.75  # of that price, earned back by beating every earlier result: a fix is cheap, a re-roll is not
   no_tool_use_penalty: 0.1   # ending with 0 tool calls
-  multi_turn_reward: 0
-  tool_success_reward: 0
   turn_overflow_penalty: 0.1 # magnitude, >= 0 — charged once when the episode ends truncated (max_turns spent, or a cut/empty turn it could not retry)
   length_cutoff_penalty: 0.08  # magnitude, >= 0 — charged per recovered turn that produced nothing: engine-cut, or ended without a call or an answer
   tool_error_penalty: 0.05   # magnitude, >= 0 — per call that fails to parse/execute
-
-# --- Rewards ---
-rewards:
-  - source: environment   # the pass fraction of the submitted solution
-    exponent: 2.0         # convex partial credit: half-right earns a quarter
 
 # --- Ray Workers ---
 num_rollout_workers: 32
@@ -116,15 +106,11 @@ max_prompt_length: null
 num_generations: 8
 use_chunked_grpo_logprobs: true # required for gpt-oss (~201k vocab)
 loss_type: dapo
-advantage_mode: asymmetric   # failures run far longer than solves, so their negatives dominate the token-level normalizer
-advantage_neg_scale: 0.7
 beta: 0.0                   # KL-free: the IS bands below are the trust region
 num_iterations: 1
 epsilon: 0.2
-epsilon_high: 0.28        # inert at num_iterations=1 (PPO ratio ≡ 1)
 # --- IS trust region (vLLM↔trainer ratio; see agent-docs/reference/configuration-reference.md) ---
 # Requires train_on_sampled_tokens + vllm_importance_sampling_correction (trainer raises otherwise).
-isr_engine_reference: false  # the engine re-score costs server headroom (--gpu-memory-utilization <= 0.80)
 isr_geo_band_min: 0.95       # +-0.05 nats above the entropy-dependent numerical floor; on sustained
 isr_geo_band_max: 1.05       #   masking fix the disagreement, never widen the band
 isr_veto_min: 1.0e-4         # any corrected token below this raw ratio masks its whole trajectory
@@ -135,7 +121,7 @@ scale_rewards_std_floor: 0.2  # floor (reward units) on the batch-std divisor
 #   before enabling.
 num_generations_eval: 1
 scale_rewards: batch        # global batch std — never per-group (degenerate-group noise inflation)
-drop_degenerate_groups: true  # all-alike groups would still inflate the DAPO normalizer
+drop_degenerate_groups: true  # groups alike in reward (the length terms aside) would still inflate the DAPO normalizer
 top_entropy_quantile: 1.0   # train ALL tokens: tool-format tokens need direct reinforcement at beta=0
 mask_truncated_completions: false  # `truncated` = the max_turns overflow, or a cut/empty turn past the recovery
                                    # cap or on the last turn: a real failure worth its negative advantage; a

@@ -12,12 +12,7 @@ from typing import ClassVar, Literal, get_args
 
 from src.args.validation import RangeValidatedConfig
 
-# Advantage-shaping modes: the annotation gates YAML/CLI, and ``get_args`` gives
-# :class:`AdvantageShaping` the same tuple to validate against, so the two stay in step.
-AdvantageMode = Literal["mean", "qae", "asymmetric", "neg_mask_hard"]
-
-# RLRR shaping modes, same arrangement: the annotation gates YAML/CLI and RLRRConfig validates
-# against it.
+# The RLRR shaping modes: the annotation gates YAML/CLI and RLRRConfig validates against it.
 RLRRMode = Literal["hrr", "prr"]
 
 # The script-argument spelling of each RLRRConfig field is ``rlrr_<field>``, except λ: ``lambda`` is a
@@ -113,44 +108,6 @@ class PromptDatasetArguments:
         default="prompt",
         metadata={"help": "Field in the dataset containing the prompt (string or conversation list)"},
     )
-
-
-@dataclass(frozen=True)
-class AdvantageShaping:
-    """Optional advantage-channel surgery, applied by
-    :func:`~src.trainers.grpo.objective.advantages.group_relative_advantages`.
-
-    ``mode``:
-
-    * ``"mean"`` — plain group-mean baseline (default; bit-identical to no shaping).
-    * ``"qae"`` — Quantile Advantage Estimation: baseline is the per-group ``quantile``, not the mean.
-    * ``"asymmetric"`` — mean baseline, then scale positive advantages by ``pos_scale`` and negative
-      by ``neg_scale`` (``neg_scale=0`` is the full negative mask).
-    * ``"neg_mask_hard"`` — mean baseline, then zero negative advantages only in hard groups (no
-      member's ``gate_rewards`` reached ``hard_group_threshold``).
-
-    Built by :class:`AdvantageShapingArguments` and consumed by the GRPO objective.
-    """
-
-    mode: str = "mean"
-    quantile: float = 0.4
-    pos_scale: float = 1.0
-    neg_scale: float = 0.4
-    hard_group_threshold: float = 0.5
-
-    _MODES = get_args(AdvantageMode)
-
-    def __post_init__(self):
-        if self.mode not in self._MODES:
-            raise ValueError(f"advantage mode must be one of {self._MODES}, got {self.mode!r}")
-        if not 0.0 < self.quantile < 1.0:
-            raise ValueError(f"quantile must be in (0, 1), got {self.quantile}")
-        # Finite as well as signed: a NaN/inf scale makes every shaped advantage non-finite, which the
-        # normalizer refuses only at the first step.
-        for name in ("pos_scale", "neg_scale"):
-            value = getattr(self, name)
-            if not math.isfinite(value) or value < 0:
-                raise ValueError(f"{name} must be a finite value >= 0, got {value}")
 
 
 @dataclass
@@ -253,54 +210,14 @@ class RLRRArguments(_RLRRTunables, RangeValidatedConfig):
 
 @dataclass
 class AdvantageShapingArguments(RangeValidatedConfig):
-    """Group-baseline / negative-side advantage surgery + reward-scaling guards.
+    """Reward-scaling and degenerate-group guards on the GRPO group-relative advantages.
 
     Shared by the online (RLVR) and environmental GRPO configs, which feed the same
-    :class:`AdvantageShaping` and the same ``group_relative_advantages`` normalizer.
+    ``group_relative_advantages`` normalizer.
     ``drop_degenerate_groups`` defaults differ per trainer (opt-in online, on by default for
     env-GRPO's sparse verifiable rewards), so that one is re-declared on the env config.
     """
 
-    advantage_mode: AdvantageMode = field(
-        default="mean",
-        metadata={
-            "help": "Group-baseline / negative-side advantage surgery (AdvantageShaping, applied by "
-            "src/trainers/grpo/objective/advantages.py). 'mean' (default) = plain "
-            "GRPO group-mean baseline. 'qae' = per-group quantile baseline (QAE): on "
-            "failure-dominated groups failures get ~0 advantage and only rare successes train — the "
-            "entropy-safest constant baseline per regime. 'asymmetric' = mean baseline, then scale "
-            "positive/negative advantages by advantage_pos_scale/advantage_neg_scale (continuous "
-            "failure-cone attenuation). 'neg_mask_hard' = zero negative advantages only in groups "
-            "where no member's gate reward reached advantage_hard_group_threshold. Targets entropy "
-            "explosion in failure-dominated batches — the substitute that lets a strong KL anchor "
-            "be retired."
-        },
-    )
-    advantage_quantile: float = field(
-        default=0.4,
-        metadata={"help": "QAE baseline quantile K for advantage_mode='qae' (paper default 0.4)."},
-    )
-    advantage_pos_scale: float = field(
-        default=1.0,
-        metadata={"help": "Positive-advantage multiplier for advantage_mode='asymmetric'."},
-    )
-    advantage_neg_scale: float = field(
-        default=0.4,
-        metadata={
-            "help": "Negative-advantage multiplier for advantage_mode='asymmetric' (0 = full negative "
-            "mask; production analogues discard or heavily down-weight negatives)."
-        },
-    )
-    advantage_hard_group_threshold: float = field(
-        default=0.5,
-        metadata={
-            "help": "advantage_mode='neg_mask_hard': a group is HARD (negatives zeroed) when no "
-            "member's gate reward reaches this value. The gate reward is the objective reward "
-            "component on the environmental arm and the TOTAL weighted reward on the online (RLVR) "
-            "arm, which has no objective decomposition (a multi-reward run warns). Set it to the "
-            "value that counts as a solve on that scale."
-        },
-    )
     scale_rewards_std_floor: float = field(
         default=0.0,
         metadata={
@@ -323,36 +240,13 @@ class AdvantageShapingArguments(RangeValidatedConfig):
     )
 
     def _validate_ranges(self) -> None:
-        """Run :class:`AdvantageShaping`'s own guards at parse time, plus the two knobs it does not check.
-
-        A NaN threshold compares False everywhere, so no group member ever reaches it and every
-        group is treated as hard (all negative advantages zeroed); a negative or NaN std floor turns
-        ``max(std, floor)`` into a no-op or a NaN that propagates to every advantage in the batch.
-        """
+        """Refuse a negative or NaN std floor, which fails silently: ``max(std, floor)`` becomes a
+        no-op or a NaN that propagates to every advantage in the batch."""
         super()._validate_ranges()
-        self.build_advantage_shaping()
-        if not math.isfinite(self.advantage_hard_group_threshold):
-            raise ValueError(
-                f"advantage_hard_group_threshold must be finite, got {self.advantage_hard_group_threshold}"
-            )
         if not math.isfinite(self.scale_rewards_std_floor) or self.scale_rewards_std_floor < 0:
             raise ValueError(
                 f"scale_rewards_std_floor must be a finite value >= 0 (0 = off), got {self.scale_rewards_std_floor}"
             )
-
-    def build_advantage_shaping(self) -> AdvantageShaping | None:
-        """Return an :class:`AdvantageShaping` from these fields, or ``None`` at the default 'mean' mode.
-
-        Built eagerly so the numeric knobs are validated even when the mode discards them.
-        """
-        shaping = AdvantageShaping(
-            mode=self.advantage_mode,
-            quantile=self.advantage_quantile,
-            pos_scale=self.advantage_pos_scale,
-            neg_scale=self.advantage_neg_scale,
-            hard_group_threshold=self.advantage_hard_group_threshold,
-        )
-        return shaping if shaping.mode != "mean" else None
 
 
 @dataclass
