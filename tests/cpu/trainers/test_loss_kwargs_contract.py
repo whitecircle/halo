@@ -19,18 +19,10 @@ import pytest
 from transformers.trainer import Trainer
 
 from src.trainers.mixins.base import DistributedTrainerMixin
-from tests.common.rosters import import_all_trainers
-
-import_all_trainers()
+from tests.common.rosters import distributed_trainer_classes
 
 _FLAG = "_loss_is_own_mean"
 _ASSIGNMENT = "model_accepts_loss_kwargs = False"
-
-
-def _subclasses(cls: type):
-    for sub in cls.__subclasses__():
-        yield sub
-        yield from _subclasses(sub)
 
 
 def _computes_its_own_loss(cls: type) -> bool:
@@ -69,14 +61,7 @@ def _assigns_the_flag(cls: type) -> bool:
 
 
 # Derived from the class hierarchy, not listed: a new trainer joins by existing.
-CUSTOM_LOSS_TRAINERS = sorted(
-    (
-        cls
-        for cls in _subclasses(DistributedTrainerMixin)
-        if cls.__module__.startswith("src.trainers") and _computes_its_own_loss(cls)
-    ),
-    key=lambda cls: cls.__name__,
-)
+CUSTOM_LOSS_TRAINERS = [cls for cls in distributed_trainer_classes() if _computes_its_own_loss(cls)]
 
 
 def test_the_derived_roster_covers_the_trainer_families():

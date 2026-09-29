@@ -45,6 +45,8 @@ def test_no_band_means_no_band_check():
         # A NaN is outside every band too.
         ({"training_loss": math.nan}, ["loss_finite", "loss_reasonable"]),
         ({"step_losses": [2.5, math.inf, 1.8]}, ["all_steps_finite"]),
+        # No logged step is no evidence.
+        ({"step_losses": []}, ["all_steps_finite"]),
         ({"global_step": MAX_STEPS - 1}, ["steps_completed"]),
         ({"training_loss": LM_TRAINING_LOSS_BAND[0]}, ["loss_reasonable"]),
         ({"training_loss": LM_TRAINING_LOSS_BAND[1]}, ["loss_reasonable"]),

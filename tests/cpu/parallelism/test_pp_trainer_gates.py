@@ -12,7 +12,6 @@ could not catch a regression in the production guard.
 Run: python tests/cpu/parallelism/test_pp_trainer_gates.py
 """
 
-import importlib
 from types import SimpleNamespace
 
 import pytest
@@ -30,26 +29,14 @@ from src.trainers.mixins.pipeline import PipelineTrainerMixin, wrapper_state_out
 from src.trainers.mixins.validation import ParallelismValidationMixin
 from tests.common.models import TINY_GLM5_CONFIG, TINY_GLM5_VISION_CONFIG, TINY_QWEN3_CONFIG
 from tests.common.parallelism import make_parallelism_config
+from tests.common.rosters import distributed_trainer_classes
 
-# Explicit so a new trainer that never considered PP shows up as a missing entry, not an inherit.
-_TRAINERS = [
-    ("src.trainers.sft", "DistributedSFTTrainer"),
-    ("src.trainers.preference.smpo", "SmoothMarginPOTrainer"),
-    ("src.trainers.preference.dpo", "DistributedDPOTrainer"),
-    ("src.trainers.preference.kto", "DistributedKTOTrainer"),
-    ("src.trainers.reward.bradley_terry", "DistributedRewardTrainer"),
-    ("src.trainers.reward.classification", "ClassificationTrainer"),
-    ("src.trainers.grpo.offline", "OfflineGRPOTrainer"),
-    ("src.trainers.grpo.online", "DistributedGRPOTrainer"),
-    ("src.trainers.grpo.environmental", "DistributedAsyncEnvironmentalGRPOTrainer"),
-    ("src.trainers.distillation.teacher_distillation", "DistributedDistillationTrainer"),
-    ("src.trainers.distillation.self_distillation", "DistributedSelfDistillationTrainer"),
-    ("src.trainers.distillation.sdpg", "DistributedSDPGTrainer"),
-    ("src.trainers.embedding.trainer", "EmbeddingTrainer"),
-]
+# Derived from the class hierarchy: a new trainer joins at the default off and must name its reason.
+_TRAINERS = distributed_trainer_classes()
 
 # PP-enabled: single-forward, per-sequence-or-token losses whose whole-batch denominators can be
-# precomputed into a step normalizer (DPO/KTO precompute-only, offline GRPO only at kl_beta 0).
+# precomputed into a step normalizer (DPO/KTO precompute-only, offline GRPO at any kl_beta through a
+# construction-time reference sweep).
 _PP_ENABLED: set[str] = {
     "DistributedSFTTrainer",
     "SmoothMarginPOTrainer",
@@ -59,10 +46,6 @@ _PP_ENABLED: set[str] = {
     "DistributedDPOTrainer",
     "DistributedKTOTrainer",
 }
-
-
-def _load(module_name, cls_name):
-    return getattr(importlib.import_module(module_name), cls_name)
 
 
 def _pc(**kwargs):
@@ -99,14 +82,15 @@ def test_base_default_is_off():
 
 
 def test_every_trainer_declares_a_pp_stance():
-    """Each trainer's PP support matches the audited verdict, and every rejection names a mechanism."""
-    for module_name, cls_name in _TRAINERS:
-        cls = _load(module_name, cls_name)
-        expected = cls_name in _PP_ENABLED
-        assert cls._supports_pp is expected, f"{cls_name}._supports_pp is {cls._supports_pp}, expected {expected}"
-        if not expected:
+    """The PP-enabled trainers are exactly the audited set, and every rejection names a mechanism."""
+    enabled = {cls.__name__ for cls in _TRAINERS if cls._supports_pp}
+    assert enabled == _PP_ENABLED, f"_supports_pp is set on {sorted(enabled)}, expected {sorted(_PP_ENABLED)}"
+    for cls in _TRAINERS:
+        if not cls._supports_pp:
             reason = cls._pp_unsupported_reason
-            assert reason and len(reason) > 40, f"{cls_name} rejects PP without an actionable reason (got {reason!r})"
+            assert reason and len(reason) > 40, (
+                f"{cls.__name__} rejects PP without an actionable reason (got {reason!r})"
+            )
 
 
 def test_only_sft_rides_the_base_causal_lm_contract():
@@ -118,10 +102,9 @@ def test_only_sft_rides_the_base_causal_lm_contract():
     silently instead of declaring its own.
     """
     on_base_contract = {
-        cls_name
-        for module_name, cls_name in _TRAINERS
-        if cls_name in _PP_ENABLED
-        and _load(module_name, cls_name)._pp_loss_adapter is DistributedTrainerMixin._pp_loss_adapter
+        cls.__name__
+        for cls in _TRAINERS
+        if cls._supports_pp and cls._pp_loss_adapter is DistributedTrainerMixin._pp_loss_adapter
     }
     assert on_base_contract == {"DistributedSFTTrainer"}, on_base_contract
 

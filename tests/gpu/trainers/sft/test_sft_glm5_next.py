@@ -16,7 +16,8 @@ plus the vendor-namespace KDA/hyper-connection keys (``hc_attn_fn``, ``self_attn
      optimizer under FSDP2 + EP, dense+sparse MLP span, KDA/DSA attention interleave).
   3. Save via the gathered EP save and reload the checkpoint as a PLAIN HF model — the reloaded
      loss must match the EP model's post-training loss, and the fp32 ``e_score_correction_bias``
-     buffer must survive the round-trip.
+     buffer, set to a distinctive value after training, must land on disk at fp32 and survive the
+     round-trip.
 
 Run with 2 GPUs:
     torchrun --nproc_per_node=2 \

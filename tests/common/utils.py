@@ -12,7 +12,7 @@ import os
 import pathlib
 import subprocess
 import sys
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable
 from types import ModuleType
 
 import torch
@@ -220,6 +220,13 @@ def relative_l2(actual: dict[str, torch.Tensor], reference: dict[str, torch.Tens
     return math.sqrt(num / den) if den else math.inf
 
 
+def _extreme_or_nan(pick: Callable, values: Iterable[float], default: float | None) -> float:
+    values = list(values)
+    if any(math.isnan(value) for value in values):
+        return math.nan
+    return pick(values) if default is None else pick(values, default=default)
+
+
 def max_or_nan(values: Iterable[float], *, default: float | None = None) -> float:
     """Largest of ``values``, or NaN when any of them is NaN.
 
@@ -228,10 +235,13 @@ def max_or_nan(values: Iterable[float], *, default: float | None = None) -> floa
     instead. ``default`` is returned for an empty ``values``; without one, an empty input raises as
     ``max`` does.
     """
-    values = list(values)
-    if any(math.isnan(value) for value in values):
-        return math.nan
-    return max(values) if default is None else max(values, default=default)
+    return _extreme_or_nan(max, values, default)
+
+
+def min_or_nan(values: Iterable[float], *, default: float | None = None) -> float:
+    """Smallest of ``values``, or NaN when any of them is NaN: :func:`max_or_nan` for the builtin ``min``,
+    which drops a NaN the same way."""
+    return _extreme_or_nan(min, values, default)
 
 
 def log_spectrum_matrix(rows: int, cols: int, generator: torch.Generator, decades: float = 1.0) -> torch.Tensor:
@@ -382,17 +392,18 @@ def training_run_checks(
 ) -> dict[str, bool]:
     """The finished-run checks the SFT and LoRA suites share, each logged with its verdict.
 
-    ``loss_finite`` (the reported training loss), ``all_steps_finite`` (every logged step loss),
-    ``steps_completed`` (``max_steps`` optimizer steps ran), given ``loss_band`` ``loss_reasonable``
-    (the reported training loss strictly inside it), with ``grad_norms`` ``grad_norms_finite`` (at
-    least one gradient norm logged, every one finite), and with ``loss_decreased`` ``loss_decreased`` (the last logged step loss
-    below the first, which fails on fewer than two logged steps).
+    ``loss_finite`` (the reported training loss), ``all_steps_finite`` (at least one step loss logged,
+    every one finite), ``steps_completed`` (``max_steps`` optimizer steps ran), given ``loss_band``
+    ``loss_reasonable`` (the reported training loss strictly inside it), with ``grad_norms``
+    ``grad_norms_finite`` (at least one gradient norm logged, every one finite), and with
+    ``loss_decreased`` ``loss_decreased`` (the last logged step loss below the first, which fails on
+    fewer than two logged steps).
     """
     training_loss = train_result.training_loss
     losses = step_losses(trainer)
     checks = {
         "loss_finite": math.isfinite(training_loss),
-        "all_steps_finite": all(math.isfinite(loss) for loss in losses),
+        "all_steps_finite": bool(losses) and all(math.isfinite(loss) for loss in losses),
         "steps_completed": train_result.global_step == max_steps,
     }
     log(f"  Loss is finite: {'PASS' if checks['loss_finite'] else 'FAIL'} ({training_loss:.6f})")

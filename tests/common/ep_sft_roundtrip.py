@@ -30,11 +30,26 @@ from tests.common.ep_reference import random_token_batch
 from tests.common.models import QWEN3_0_6B
 from tests.common.tiny_models import TINY_MOE_FAMILIES, shared_tiny_family_checkpoint
 from tests.common.tolerances import TOL
-from tests.common.utils import cleanup_memory, log, training_run_checks
+from tests.common.utils import cleanup_memory, log, safetensors_state_dict, training_run_checks
 
 SEED = 42
 NUM_TRAIN_STEPS = 3
 MAX_SEQ_LENGTH = 256
+
+
+def _native_bias_on_disk(ep_layers: list, save_dir: str) -> dict[str, bool]:
+    """Each EP layer's distinctive bias is written exactly once, at fp32. Found by value rather than
+    by key, since a family's hub spelling of the slot differs from its module path."""
+    written = safetensors_state_dict(save_dir)
+    matches = [
+        [t for t in written.values() if t.shape == bias.shape and torch.equal(t.float(), bias)]
+        for bias in (ep.gate.e_score_correction_bias.detach().float().cpu() for ep in ep_layers)
+    ]
+    log(f"native bias on disk: {[[str(t.dtype) for t in found] for found in matches]}")
+    return {
+        "native_bias_written_once_per_layer": all(len(found) == 1 for found in matches),
+        "native_bias_fp32_on_disk": all(len(found) == 1 and found[0].dtype == torch.float32 for found in matches),
+    }
 
 
 class EPSftRoundTrip:
@@ -46,9 +61,11 @@ class EPSftRoundTrip:
     ``composite_token_ids`` pins a composite config's top-level special-token ids to ids of the
     tokenizer, where the family defaults index a release vocab. ``hub_conversion`` checks the lazy
     loader admits the hub-layout checkpoint. ``native_bias_layer``, the first sparse layer, marks a
-    family whose EP layers can adopt the native ``e_score_correction_bias`` slot; the reloaded save must
-    carry that layer's bias. ``balancing_callbacks`` builds the script's own callback wiring at the
-    default ``moe_balancing: auto``. ``reload_in_bf16`` casts the whole reloaded model to bf16.
+    family whose EP layers can adopt the native ``e_score_correction_bias`` slot: after training every
+    EP layer's bias is set to a distinctive bf16-exact value, which the save must write once at fp32
+    and the reloaded model must carry at that layer. ``balancing_callbacks`` builds the script's own
+    callback wiring at the default ``moe_balancing: auto``. ``reload_in_bf16`` casts the whole reloaded
+    model to bf16.
 
     Each hook returns the checks it adds.
     """
@@ -163,6 +180,12 @@ class EPSftRoundTrip:
         metrics["final_train_loss"] = result.training_loss
         checks |= training_run_checks(result, trainer, NUM_TRAIN_STEPS)
         checks |= self.after_train(ep_layers, device)
+        if self.native_bias_layer is not None:
+            # A zero-init bias reloads as zeros whether or not the save wrote it, so the round trip
+            # carries a value no init produces. Replicated state: identical on every rank.
+            with torch.no_grad():
+                for offset, ep in enumerate(ep_layers):
+                    ep.gate.e_score_correction_bias.copy_(torch.arange(ep.num_experts, device=device) * 0.125 + offset)
 
         ids, labels = random_token_batch(vocab_size, batch=2, seq=64, device=device, seed=SEED + 7)
         ep_loss = fixed_batch_loss(model, ids, labels)
@@ -173,6 +196,8 @@ class EPSftRoundTrip:
         trainer.save_model(save_dir)
         ctx.barrier()
         checks |= self.after_save(ep_layers, base_dir, save_dir)
+        if self.native_bias_layer is not None:
+            checks |= _native_bias_on_disk(ep_layers, save_dir)
 
         reloaded = (
             tiny.load_class.from_pretrained(save_dir, dtype=torch.bfloat16, attn_implementation="eager")

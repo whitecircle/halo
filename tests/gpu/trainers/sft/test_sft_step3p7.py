@@ -71,12 +71,6 @@ class Step3p7RoundTrip(EPSftRoundTrip):
             "bias_slot_fp32_live": all(ep.gate.e_score_correction_bias.dtype == torch.float32 for ep in ep_layers),
         }
         log(f"router bias dtypes: {[str(ep.gate.e_score_correction_bias.dtype) for ep in ep_layers]}")
-        # A distinctive, bf16-exact router bias (replicated state — identical on every rank) BEFORE the
-        # fixed-batch loss and the save, so the round-trip proves the values landed and steered
-        # routing, rather than two zero buffers agreeing.
-        with torch.no_grad():
-            for offset, ep in enumerate(ep_layers):
-                ep.gate.e_score_correction_bias.copy_(torch.arange(ep.num_experts, device=device) * 0.125 + offset)
         return checks
 
     def after_save(self, ep_layers, base_dir, save_dir):
@@ -88,7 +82,7 @@ class Step3p7RoundTrip(EPSftRoundTrip):
             "hub_moe_keys_present": set(written) >= _HUB_MOE_KEYS,
             "no_module_tree_spelling": not any(s in key for key in written for s in _MODULE_TREE_SPELLINGS),
         }
-        halves_exact, bias_fp32, bias_values = [], [], []
+        halves_exact, bias_values = [], []
         for i, ep, layer_state in zip(_SPARSE_LAYERS, ep_layers, gathered, strict=True):
             fused = layer_state["experts.gate_up_proj"]  # [E, 2M, H], halves [gate; up]
             half = fused.shape[1] // 2
@@ -98,10 +92,9 @@ class Step3p7RoundTrip(EPSftRoundTrip):
                 and torch.equal(written[f"model.layers.{i}.moe.down_proj.weight"], layer_state["experts.down_proj"])
             )
             bias = written[f"model.layers.{i}.moe.router_bias"]
-            bias_fp32.append(bias.dtype == torch.float32)
             bias_values.append(torch.equal(bias.float(), ep.gate.e_score_correction_bias.float().cpu()))
         checks["expert_halves_bit_exact"] = all(halves_exact)
-        checks["router_bias_fp32_on_disk"] = all(bias_fp32)
+        # The shared round trip checks the bias's fp32 dtype on disk; this pins it to the hub key.
         checks["router_bias_values_on_disk"] = all(bias_values)
         return checks
 

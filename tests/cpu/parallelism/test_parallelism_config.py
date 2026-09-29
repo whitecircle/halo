@@ -16,6 +16,8 @@ from src.distributed.expert_parallel.config import EPConfig, ExpertLoraSpec
 from src.distributed.group_layout import cross_node_rank_and_group, node_local_rank_and_group
 from src.distributed.parallelism_config import ParallelismConfig
 from src.trainers.mixins.base import DistributedTrainerMixin
+from src.trainers.preference.dpo import DistributedDPOTrainer
+from src.trainers.sft import DistributedSFTTrainer
 from src.training.parallelism_args import parallelism_config_from_args
 from tests.common.gloo import run_gloo_ranks
 from tests.common.parallelism import create_config, make_parallelism_config, simulated_world
@@ -755,6 +757,16 @@ def test_parallelism_config_from_args_rejects_pp_when_unsupported():
         raise AssertionError("a _supports_pp=False trainer must reject pipeline_parallel_size=2")
     except ValueError as e:
         assert "DistributedTrainerMixin does not support Pipeline Parallelism" in str(e)
+
+
+def test_parallelism_config_from_args_rejects_cp_when_unsupported():
+    """A trainer class declaring ``_supports_cp = False`` rejects a requested context_parallel_size>1
+    at config time, before any model loads; a trainer declaring it builds the CP config."""
+    args = DistributedArguments(context_parallel_size=2)
+    with simulated_world(world_size=8, gpus_per_node=8):
+        with pytest.raises(ValueError, match="DistributedDPOTrainer does not support Context Parallelism"):
+            parallelism_config_from_args(args, trainer_cls=DistributedDPOTrainer)
+        assert parallelism_config_from_args(args, trainer_cls=DistributedSFTTrainer).cp_size == 2
 
 
 def test_parallelism_config_from_args_rejects_lowp_when_disallowed():

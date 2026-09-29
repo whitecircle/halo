@@ -25,10 +25,7 @@ import pytest
 from src.distributed.expert_parallel.base_layer import EPMoELayerBase
 from src.distributed.expert_parallel.patching import MOE_LAYER_MAP
 from src.distributed.parallelism_config import AXIS_FLAGS, SUPPORTED_AXIS_SETS
-from src.trainers.mixins.base import DistributedTrainerMixin
-from tests.common.rosters import import_all_trainers
-
-import_all_trainers()
+from tests.common.rosters import distributed_trainer_classes
 
 _REPO_ROOT = Path(__file__).resolve().parents[3]
 _PARALLELISM_INDEX = _REPO_ROOT / "agent-docs" / "parallelism" / "README.md"
@@ -142,26 +139,6 @@ def _ep_wrapper_class_name(row: dict[str, str]) -> str:
     return spans[0]
 
 
-def _trainer_classes() -> dict[str, type]:
-    """Every concrete distributed trainer, walked from the mixin's subclass tree (never listed).
-
-    Filtered to classes defined under ``src.trainers``: ``__subclasses__()`` is a process-global
-    registry, and pytest imports every test module before this runs — so a stub trainer any other
-    test file defines at module scope would otherwise be demanded of the docs table.
-    """
-    found: dict[str, type] = {}
-    stack = list(DistributedTrainerMixin.__subclasses__())
-    while stack:
-        cls = stack.pop()
-        if cls.__name__ in found:
-            continue
-        stack.extend(cls.__subclasses__())
-        if not cls.__module__.startswith("src.trainers"):
-            continue
-        found[cls.__name__] = cls
-    return found
-
-
 def test_supported_combinations_table_matches_the_allowlist():
     """``agent-docs/parallelism/README.md`` must publish exactly the sets ``ParallelismConfig`` accepts.
 
@@ -195,7 +172,7 @@ def test_trainer_compatibility_table_matches_the_support_flags():
     refuse (or accept) at construction.
     """
     rows = _table_with_headers(_TRAINER_ARCHITECTURE, "Trainer", "EP", "CP", "TP", "ETP", "PP")
-    classes = _trainer_classes()
+    classes = {cls.__name__: cls for cls in distributed_trainer_classes()}
 
     documented = {_plain(row["Trainer"]) for row in rows}
     assert documented == set(classes), (

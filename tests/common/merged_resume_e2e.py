@@ -13,9 +13,10 @@ or 1 (experts FSDP-sharded as DTensors, DP=2), with ``cp_size`` 2 under EP+CP:
      leaves every parameter bit-identical (it folds each delta into the tensor it writes, out of
      place), and the live adapters are gathered right after it (``on_save``).
   2. The checkpoint serves: stock ``from_pretrained`` loads it with no missing, unexpected or
-     mis-shaped keys and no adapter, its expert (and attention) weights moved off the base (it is the
-     merge, not the base), and it carries the resume adapter and its marker with no root
-     ``adapter_config.json``.
+     mis-shaped keys and no adapter, the expert weights of every layer whose expert adapters trained
+     (and every trained attention projection) moved off the base (it is the merge, not the base), and
+     it carries the resume adapter and its marker with no root ``adapter_config.json``. Moved, not
+     matched: the fold's values are not re-derived here.
   3. Resume from it through the production resolver: the policy source is the BASE; after the
      restore (``on_train_begin``) every adapter is BIT-EQUAL to the one the uninterrupted run held at
      the save; every resumed step's loss matches the uninterrupted run's within
@@ -42,6 +43,7 @@ so it keeps them in fp32 and phase 3 restores them bit for bit.
 import argparse
 import functools
 import os
+import re
 import shutil
 from collections.abc import Iterable
 from types import SimpleNamespace
@@ -58,6 +60,7 @@ from src.checkpoint.format import (
     resume_adapter_dir,
 )
 from src.distributed.context_parallel.validation import UlyssesConfigError
+from src.distributed.expert_parallel.expert_weights import gather_ep_lora_adapters
 from src.distributed.expert_parallel.extension import deep_ep
 from src.distributed.parallelism_config import ParallelismConfig
 from src.trainers.sft import DistributedSFTTrainer
@@ -70,7 +73,6 @@ from tests.common.peft_helpers import (
     attention_target_modules,
     load_peft_model,
     mixed_targets,
-    snapshot_adapters,
     unwrap,
 )
 from tests.common.tiny_models import TINY_MOE_FAMILIES, TinyFamily, shared_tiny_family_checkpoint
@@ -98,11 +100,23 @@ MAX_SEQ_LENGTH = 256
 # High enough that the adapters carry most of the run's movement within a few steps, as a LoRA
 # learning rate does.
 LEARNING_RATE = 2e-3
+_LAYER_INDEX_RE = re.compile(r"(?:^|\.)layers\.(\d+)\.")
+
+
+class _MergedResumeParser(argparse.ArgumentParser):
+    """Refuses an ``--ep-size``/``--cp-size`` pair outside :data:`LAYOUTS`, which each flag's own
+    choices cannot express."""
+
+    def parse_args(self, args=None, namespace=None):
+        parsed = super().parse_args(args, namespace)
+        if (parsed.ep_size, parsed.cp_size) not in LAYOUTS:
+            self.error(f"ep{parsed.ep_size} cp{parsed.cp_size} is not a merged-resume layout; (ep, cp) in {LAYOUTS}")
+        return parsed
 
 
 def merged_resume_parser(families: Iterable[str]) -> argparse.ArgumentParser:
     """The CLI a merged-resume suite takes, over the ``families`` it runs."""
-    parser = argparse.ArgumentParser()
+    parser = _MergedResumeParser()
     parser.add_argument("--family", choices=sorted(families), required=True)
     parser.add_argument("--adapters", choices=sorted(ADAPTER_MODES), default="mixed")
     parser.add_argument("--ep-size", type=int, choices=sorted({ep for ep, _ in LAYOUTS}), default=2)
@@ -112,11 +126,12 @@ def merged_resume_parser(families: Iterable[str]) -> argparse.ArgumentParser:
 
 
 def _adapter_snapshot(model) -> dict[str, torch.Tensor]:
-    """Every adapter tensor, whole and on the host: the grouped expert adapters gathered across the EP
-    group, and the attention PEFT adapters (``.lora_`` params) un-sharded from FSDP2. Collective."""
+    """Every adapter tensor, whole and on the host at its live dtype: the grouped expert adapters
+    gathered across the EP group, and the attention PEFT adapters (``.lora_`` params) un-sharded from
+    FSDP2. Collective."""
     unwrapped = unwrap(model)
     peft_adapters = {name: value for name, value in snapshot_trainable(unwrapped).items() if ".lora_" in name}
-    return {**snapshot_adapters(unwrapped, expert_lora=True), **peft_adapters}
+    return {**gather_ep_lora_adapters(unwrapped), **peft_adapters}
 
 
 def _parallelism_config(ep_size: int, cp_size: int, fp32_masters: bool) -> ParallelismConfig:
@@ -182,9 +197,43 @@ def _sft_config(output_dir: str, *, save: bool) -> SFTConfig:
     )
 
 
-def _serving_checks(family: TinyFamily, checkpoint: str, base_dir: str, attention_targets: set[str]) -> dict:
+def _layer_index(key: str) -> str | None:
+    """The decoder-layer index a key sits under: the one spelling the training tree, the PEFT names and
+    a reloaded checkpoint share, whatever wrapper prefix each carries."""
+    match = _LAYER_INDEX_RE.search(key)
+    return match.group(1) if match else None
+
+
+def _trained_adapter_sites(adapters: dict[str, torch.Tensor], attention_targets: set[str]) -> tuple[set, set]:
+    """Where training moved a ``lora_B`` off its zero init: the layer indices of the expert adapters, and
+    the ``(layer index, projection)`` pairs of the attention ones. Only these must carry a delta: an
+    adapter the batches never reach (a vision tower on text-only rows) folds nothing."""
+    experts, attention = set(), set()
+    for key, value in adapters.items():
+        if not bool(value.any()):
+            continue
+        layer = _layer_index(key)
+        if key.endswith(".lora_B") and ".experts." in key:
+            experts.add(layer)
+        elif ".lora_B." in key and (leaf := key.split(".lora_B.")[0].rsplit(".", 1)[-1]) in attention_targets:
+            attention.add((layer, leaf))
+        else:
+            continue
+        if layer is None:
+            raise AssertionError(f"trained adapter {key} sits under no decoder layer")
+    return experts, attention
+
+
+def _serving_checks(
+    family: TinyFamily,
+    checkpoint: str,
+    base_dir: str,
+    attention_targets: set[str],
+    adapters: dict[str, torch.Tensor],
+) -> dict:
     """The merged checkpoint as a serving engine sees it: stock ``from_pretrained``, full coverage, no
-    adapter, the MERGED weights, and the resume state kept out of the root. Rank-local reads only."""
+    adapter, the MERGED weights (every tensor a trained ``adapters`` entry folds into moved off the
+    base), and the resume state kept out of the root. Rank-local reads only."""
     checks = {}
     load = {"dtype": torch.bfloat16, "trust_remote_code": family.trust_remote_code}
     model, info = family.load_class.from_pretrained(checkpoint, output_loading_info=True, **load)
@@ -199,12 +248,19 @@ def _serving_checks(family: TinyFamily, checkpoint: str, base_dir: str, attentio
     base = family.load_class.from_pretrained(base_dir, **load).state_dict()
     del model
     moved = sorted(key for key in base if key in merged and not torch.equal(merged[key], base[key]))
-    checks["merged_experts_carry_the_delta"] = any("expert" in key for key in moved)
+    trained_expert_layers, trained_attention = _trained_adapter_sites(adapters, attention_targets)
+    checks["merged_trained_experts_moved_off_the_base"] = bool(trained_expert_layers) and all(
+        any(_layer_index(key) == layer and "expert" in key for key in moved) for layer in trained_expert_layers
+    )
     if attention_targets:
-        checks["merged_attention_carries_the_delta"] = any(
-            key.rsplit(".", 2)[-2] in attention_targets for key in moved if key.endswith(".weight")
+        checks["merged_trained_attention_moved_off_the_base"] = bool(trained_attention) and all(
+            any(_layer_index(key) == layer and key.endswith(f".{leaf}.weight") for key in moved)
+            for layer, leaf in trained_attention
         )
-    log(f"  {len(moved)} of {len(base)} base tensors moved by the merge (e.g. {moved[:2]})")
+    log(
+        f"  {len(moved)} of {len(base)} base tensors moved by the merge (e.g. {moved[:2]}); trained expert "
+        f"layers {sorted(trained_expert_layers)}, attention sites {len(trained_attention)}"
+    )
 
     adapter_dir = resume_adapter_dir(checkpoint)
     checks["checkpoint_is_marked_for_adapter_resume"] = adapter_dir is not None
@@ -213,15 +269,6 @@ def _serving_checks(family: TinyFamily, checkpoint: str, base_dir: str, attentio
     )
     checks["no_adapter_config_at_the_root"] = not os.path.exists(os.path.join(checkpoint, ADAPTER_CONFIG_FILE))
     return checks
-
-
-def _attention_lora_b_moved(adapters: dict[str, torch.Tensor], attention_targets: set[str]) -> bool:
-    """Whether any attention ``lora_B`` left its zero init."""
-    return any(
-        bool(value.any())
-        for key, value in adapters.items()
-        if ".lora_B." in key and key.split(".lora_B.")[0].rsplit(".", 1)[-1] in attention_targets
-    )
 
 
 def run_merged_resume(
@@ -302,9 +349,8 @@ def run_merged_resume(
         )
     if attention_targets:
         # A target with a dead gradient never leaves lora_B = 0, so its merge has nothing to carry.
-        checks["attention_adapters_trained"] = world_all(
-            _attention_lora_b_moved(saved.get("adapters", {}), attention_targets), ctx.device
-        )
+        _, trained_attention = _trained_adapter_sites(saved.get("adapters", {}), attention_targets)
+        checks["attention_adapters_trained"] = world_all(bool(trained_attention), ctx.device)
     before = at_save.before_save
     moved = sorted(moved_parameters(before, saved.get("parameters", {})))
     # The run a checkpoint is resumed from must be the run that wrote it: a save that nudges the
@@ -314,7 +360,7 @@ def run_merged_resume(
     finish_phase(trainer)
 
     log("\n[2/4] The merged checkpoint as a server loads it...")
-    serving = _serving_checks(tiny, checkpoint, base_dir, attention_targets)
+    serving = _serving_checks(tiny, checkpoint, base_dir, attention_targets, saved.get("adapters", {}))
     checks.update({name: world_all(ok, ctx.device) for name, ok in serving.items()})
     ctx.barrier()
 
@@ -334,10 +380,13 @@ def run_merged_resume(
     finish_phase(trainer)
 
     saved_adapters, restored_adapters = saved.get("adapters", {}), (restored.captured or {}).get("adapters", {})
+    # ``torch.equal`` compares across dtypes, so a restore that re-cast an adapter must fail on its dtype.
     unequal = sorted(
         key
         for key in saved_adapters
-        if key not in restored_adapters or not torch.equal(saved_adapters[key], restored_adapters[key])
+        if key not in restored_adapters
+        or restored_adapters[key].dtype != saved_adapters[key].dtype
+        or not torch.equal(saved_adapters[key], restored_adapters[key])
     )
     checks["adapters_bit_equal_after_restore"] = bool(saved_adapters) and not unequal
     log(f"  {len(saved_adapters) - len(unequal)}/{len(saved_adapters)} adapters bit-equal after restore {unequal[:2]}")

@@ -12,27 +12,14 @@ import inspect
 
 import pytest
 
-from src.trainers.mixins.base import DistributedTrainerMixin
 from src.trainers.mixins.checkpointing import CheckpointingMixin
-from tests.common.rosters import import_all_trainers
-
-import_all_trainers()
+from tests.common.rosters import distributed_trainer_classes
 
 _WRITER = "create_model_card"
 _KEYWORD_KINDS = (inspect.Parameter.POSITIONAL_OR_KEYWORD, inspect.Parameter.KEYWORD_ONLY)
 
-
-def _subclasses(cls: type):
-    for sub in cls.__subclasses__():
-        yield sub
-        yield from _subclasses(sub)
-
-
 # Derived from the class hierarchy, not listed: a new trainer joins by existing.
-TRAINERS = sorted(
-    {cls for cls in _subclasses(DistributedTrainerMixin) if cls.__module__.startswith("src.trainers")},
-    key=lambda cls: cls.__name__,
-)
+TRAINERS = distributed_trainer_classes()
 
 
 def _writer_owner(classes) -> type:

@@ -74,13 +74,8 @@ MAX_LENGTH = 96
 # Large enough that two steps move the policy's log-probs well off the reference, so a resume that
 # re-derived the reference from the trained weights lands visibly elsewhere.
 LEARNING_RATE = 2e-3
-# Measured on B300 over the 51 checkpoint-built rows (every family and layout, DPO and KTO): the
-# resume restores the reference columns bit for bit and its first-step loss equals the continuous
-# run's exactly (|delta| 0.0), held to ``TOL.replayed_resume_loss_abs``. That loss precedes any
-# post-restore optimizer update. The control, which sweeps the trained policy instead, misses the
-# first-step loss by 3.1e-3 (KTO on the smallest families) to 0.62, held above
-# ``TOL.control_min_loss_shift`` of the resume bound, and the reference columns by 1 nat (Cohere2 MoE,
-# Inkling) to 30, held above this floor.
+# The control's sweep of the trained policy misses the base run's reference columns by at least 1 nat
+# on every family and layout, so half of that separates it from a restore, which is bit for bit.
 CONTROL_MIN_LOGP_DELTA = 0.5
 
 
@@ -141,6 +136,20 @@ def _reference_columns(trainer) -> dict[str, dict[str, torch.Tensor]]:
         name: {key: column(dataset, key) for key in trainer._required_ref_logps_columns()}
         for name, dataset in splits.items()
     }
+
+
+def _precomputed(trainer, columns: dict[str, dict[str, torch.Tensor]]) -> bool:
+    """Whether each split's :func:`_reference_columns` are what a sweep writes: one finite, negative
+    sequence log-prob per row."""
+    splits = {"train": trainer.train_dataset, **trainer.eval_dataset}
+    return all(
+        bool(columns[name])
+        and all(
+            len(values) == len(dataset) and bool(torch.isfinite(values).all() and (values < 0).all())
+            for values in columns[name].values()
+        )
+        for name, dataset in splits.items()
+    )
 
 
 def _losses_by_step(trainer) -> dict[int, float]:
@@ -238,13 +247,13 @@ def run_precompute_resume(ctx, *, trainer: str, family: str, mode: str, peft: bo
     log(f"\n--- Phase 1 ({label}): continuous {TOTAL_STEPS} steps, checkpoint at {SAVE_AT_STEP} ---")
     built = make_trainer(tiny_dir, train_out, save_at=SAVE_AT_STEP)
     base_columns = _reference_columns(built)
+    checks["every_split_was_precomputed"] = _precomputed(built, base_columns)
     built.train()
     continuous = _losses_by_step(built)
     finish_phase(built)
     ctx.barrier()
     checks["continuous_ran_all_steps"] = sorted(continuous) == list(range(1, TOTAL_STEPS + 1))
     checks["checkpoint_carries_the_sidecar"] = os.path.isfile(os.path.join(ckpt_dir, REFERENCE_LOGPS_FILE))
-    checks["every_split_was_precomputed"] = sorted(base_columns) == sorted(("train", *EVAL_SPLITS))
     if not (checks["continuous_ran_all_steps"] and checks["checkpoint_carries_the_sidecar"]):
         return {"checks": checks, "metrics": metrics}
     metrics["continuous_first_resumed_step_loss"] = continuous[first_resumed_step]

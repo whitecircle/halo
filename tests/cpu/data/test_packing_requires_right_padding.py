@@ -21,6 +21,7 @@ import pytest
 
 from src.data.collators.factory import select_data_collator
 from src.data.collators.packing import DataCollatorWithPacking
+from src.distributed.module_registry import iter_subclasses
 
 # Constructor arguments the subclasses add on top of ``tokenizer``. Only values needed to reach the
 # guard; a subclass introducing a new REQUIRED argument fails
@@ -30,10 +31,7 @@ _EXTRA_REQUIRED_ARGS = {"response_prompt_template": "<|assistant|>"}
 
 def _packing_collator_classes() -> list[type]:
     """``DataCollatorWithPacking`` and every subclass, from the class hierarchy — never a hand list."""
-    classes = [DataCollatorWithPacking]
-    for cls in classes:
-        classes.extend(sub for sub in cls.__subclasses__() if sub not in classes)
-    return classes
+    return [DataCollatorWithPacking, *iter_subclasses(DataCollatorWithPacking)]
 
 
 def _required_extra_params(cls: type) -> set[str]:

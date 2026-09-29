@@ -8,7 +8,8 @@
   only prunes when the dataset exposes ``column_names`` silently trains such a dataset on every
   column and fails here.
 - ``_require_vllm_server_mode`` raises instead of no-opping when no training config reaches the
-  ctor, and refuses every non-server shape before TRL's vLLM client is swapped in.
+  ctor, refuses every non-server shape before TRL's vLLM client is swapped in, and accepts the
+  server shape.
 
     python tests/cpu/grpo/test_grpo_dataloader_and_server_gates.py
 """
@@ -128,6 +129,11 @@ def test_non_server_configs_are_refused(use_vllm, vllm_mode, match):
     args = SimpleNamespace(use_vllm=use_vllm, vllm_mode=vllm_mode)
     with pytest.raises(ValueError, match=match):
         DistributedGRPOTrainer._require_vllm_server_mode(args)
+
+
+def test_the_server_config_is_accepted():
+    """Anti-over-rejection: the one shape the gate exists to let through."""
+    DistributedGRPOTrainer._require_vllm_server_mode(SimpleNamespace(use_vllm=True, vllm_mode="server"))
 
 
 if __name__ == "__main__":

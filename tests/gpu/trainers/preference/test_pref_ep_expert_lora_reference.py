@@ -49,7 +49,7 @@ from src.distributed.loading.frozen_models import load_reference_model_for_prefe
 from src.distributed.parallelism_config import ParallelismConfig
 from src.env import env_int, env_str
 from src.trainers.preference.dpo import DistributedDPOTrainer
-from tests.common.distributed import ensure_model_downloaded, world_any, world_min
+from tests.common.distributed import ensure_model_downloaded, world_all, world_min
 from tests.common.harness import gpu_test_main
 from tests.common.models import GPT_OSS_20B
 from tests.common.peft_helpers import load_peft_model_from_config, peft_model_config
@@ -212,7 +212,7 @@ def run(ctx) -> dict:
     # Every rank scores its own rows, so the worst rank decides.
     checks["expert_half_moves_policy"] = world_min(expert_effect) > MIN_HALF_EFFECT
     checks["attention_half_moves_policy"] = world_min(attention_effect) > MIN_HALF_EFFECT
-    checks["reference_is_frozen_base"] = not world_any(reference_error > REFERENCE_VS_BASE_ABS)
+    checks["reference_is_frozen_base"] = world_all(reference_error <= REFERENCE_VS_BASE_ABS)
     return {"checks": checks, "metrics": ctx.metrics(trainer)}
 
 

@@ -15,9 +15,7 @@ import pytest
 
 from src.trainers.mixins.base import DistributedTrainerMixin
 from tests.common.parallelism import make_parallelism_config
-from tests.common.rosters import import_all_trainers
-
-import_all_trainers()
+from tests.common.rosters import distributed_trainer_classes
 
 # The trainers whose objective is verified under CP (CLAUDE.md, "Distributed trainers" CP column).
 CP_TRAINERS = {"DistributedSFTTrainer", "SmoothMarginPOTrainer"}
@@ -25,18 +23,8 @@ CP_TRAINERS = {"DistributedSFTTrainer", "SmoothMarginPOTrainer"}
 # Launcher env that makes the validator refuse every parallel mode for an unrelated reason.
 _ACCELERATE_VARS = ("ACCELERATE_MIXED_PRECISION", "ACCELERATE_USE_FSDP")
 
-
-def _subclasses(cls: type):
-    for sub in cls.__subclasses__():
-        yield sub
-        yield from _subclasses(sub)
-
-
 # Derived from the class hierarchy, not listed: a new trainer joins by existing, at the default off.
-TRAINERS = sorted(
-    {cls for cls in _subclasses(DistributedTrainerMixin) if cls.__module__.startswith("src.trainers")},
-    key=lambda cls: cls.__name__,
-)
+TRAINERS = distributed_trainer_classes()
 
 
 def _with_cp_config(trainer_cls: type):

@@ -30,6 +30,7 @@ from src.configs.embedding_config import EmbeddingConfig
 from src.configs.environment_config import EnvironmentConfig
 from src.configs.offline_grpo_config import OfflineGRPOConfig
 from src.configs.smpo_config import SmoothMarginPOConfig
+from src.distributed.module_registry import iter_subclasses
 from src.distributed.parallelism_config import PP_SCHEDULES
 from src.env import DEFAULT_NCCL_TIMEOUT_MINUTES
 from src.environments.base import VALID_REASONING_EFFORTS
@@ -52,14 +53,6 @@ def _parse(dataclass_type, tmp_path, overrides: list[str], yaml_body: str = ""):
     parser = H4ArgumentParser((dataclass_type,))
     (parsed,) = parser.parse_yaml_and_args(str(path), overrides)
     return parsed
-
-
-def _subclasses(cls) -> set[type]:
-    found = set()
-    for sub in cls.__subclasses__():
-        found.add(sub)
-        found |= _subclasses(sub)
-    return found
 
 
 def _parse_target_dataclasses() -> dict[str, type]:
@@ -171,9 +164,9 @@ def test_every_range_validated_subclass_implements_and_calls_the_hook():
     """Derived from the class hierarchy, not a hand list: inheriting the base without implementing
     ``_validate_ranges`` would make every CLI override raise NotImplementedError, and defining
     ``__post_init__`` without calling it would leave the YAML path unguarded."""
-    subclasses = _subclasses(RangeValidatedConfig)
-    assert subclasses, "no config routes through RangeValidatedConfig — the seam is dead"
-    for cls in subclasses:
+    configs = iter_subclasses(RangeValidatedConfig)
+    assert configs, "no config routes through RangeValidatedConfig — the seam is dead"
+    for cls in configs:
         assert cls._validate_ranges is not RangeValidatedConfig._validate_ranges, (
             f"{cls.__name__} inherits RangeValidatedConfig but never implements _validate_ranges"
         )
@@ -188,7 +181,7 @@ def test_every_validate_ranges_override_opens_the_cooperative_chain():
     override that skips ``super()`` keeps only its own guards, so a class mixing two guarded bases
     silently drops one base's checks. ``OfflineGRPOConfig`` already mixes ``ChunkedLogprobsArguments``
     with ``RangeValidatedConfig``, which puts it one guarded base away from that."""
-    for cls in _subclasses(RangeValidatedConfig):
+    for cls in iter_subclasses(RangeValidatedConfig):
         override = cls.__dict__.get("_validate_ranges")
         if override is None:
             continue

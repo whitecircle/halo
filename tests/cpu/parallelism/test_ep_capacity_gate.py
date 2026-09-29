@@ -41,10 +41,7 @@ from src.training.parallelism_args import (
     parallelism_config_from_args,
 )
 from tests.common.parallelism import make_parallelism_config
-
-# The subclass walk that derives the trainer roster, imported rather than restated so both contracts
-# read the same hierarchy (importing it also populates the roster by importing ``src.trainers``).
-from tests.cpu.trainers.test_loss_kwargs_contract import _subclasses
+from tests.common.rosters import distributed_trainer_classes
 
 # Wide model: hidden 8192 (already wire-aligned) × top-8 puts the 32-bit index ceiling at a capacity
 # of 2**31 / (8 × 8192) = 32768 tokens/rank — a budget a long-context run can genuinely declare.
@@ -352,10 +349,7 @@ _ROWS_PER_EXAMPLE: dict[str, int] = {
 }
 
 # Derived from the class hierarchy, not listed: a new trainer joins the parametrization by existing.
-TRAINER_ROSTER = sorted(
-    (cls for cls in _subclasses(DistributedTrainerMixin) if cls.__module__.startswith("src.trainers")),
-    key=lambda cls: cls.__name__,
-)
+TRAINER_ROSTER = distributed_trainer_classes()
 
 
 def test_the_derived_roster_covers_the_trainer_families():

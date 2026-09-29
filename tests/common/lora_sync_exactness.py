@@ -27,12 +27,14 @@ mixed with native expert LoRA (``--adapters``). Syncs run through the trainers' 
      rank), each after a forward that leaves FSDP2's unsharded params registered, leave the base and
      adapters bit-identical and forward the same bytes every push: each PEFT-LoRA'd weight as
      ``w + delta`` exactly as PEFT's merge adds it, the fold moving the trained ones off ``w``; a mixed
-     row's experts with their delta folded, off the base experts, and a PEFT-only row's as their base.
-     Expected tensors are spelled by the sync's own forwarder, so export renames and hub-namespace
-     reverts name them as a push does.
+     row's experts as the layers' own ``gather_expert_state_dict(merge_lora=True)`` folds them, off the
+     base experts, and a PEFT-only row's as their base. The expert expectation is production's fold, so
+     this pins that the push forwards it, not its values; ``tests/cpu/grpo/test_weight_sync_expert_tp_guard.py``
+     holds those to an independent ``base + scaling·(A@B)``. Expected tensors are spelled by the sync's
+     own forwarder, so export renames and hub-namespace reverts name them as a push does.
   4. Negative control: ``CONTROL_STEPS`` further step syncs inside an in-place PEFT merge/unmerge
-     (``folded_in_place``) move the base (per-sync counts and the largest drift are reported as
-     metrics), so checks 2 and 3 cannot pass vacuously on this row.
+     (``folded_in_place``) move the base (the elements moved since the pushes, counted after each sync,
+     and the largest drift are reported as metrics), so checks 2 and 3 cannot pass vacuously on this row.
   5. Memory: the peak a step sync requests over what was requested before it stays within
      ``FOLD_PEAK_BOUND`` largest-folded-tensor sizes of the in-place syncs' peak, which fold nothing
      themselves (the first step sync is left out: it pays one-time allocations). Per fold, recorded on

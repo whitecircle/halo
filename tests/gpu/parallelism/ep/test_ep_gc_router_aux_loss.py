@@ -17,7 +17,7 @@ Run with 2 GPUs:
     torchrun --nproc_per_node=2 tests/gpu/parallelism/ep/test_ep_gc_router_aux_loss.py --family gpt_oss
 """
 
-import sys
+import argparse
 
 import torch
 from transformers import GptOssConfig, GptOssForCausalLM, Qwen3MoeConfig, Qwen3MoeForCausalLM
@@ -34,7 +34,6 @@ from src.models.moe_balancing import declared_routers
 from tests.common.harness import gpu_test_main, log
 from tests.common.models import TINY_GPTOSS_CONFIG, TINY_QWEN3_MOE_CONFIG
 
-FAMILY = "gpt_oss"
 EP_SIZE = 2
 BATCH, SEQ = 2, 64
 COEF = 0.5
@@ -49,8 +48,8 @@ _FAMILIES = {
 }
 
 
-def build_model(device):
-    model_class, config_class, config = _FAMILIES[FAMILY]
+def build_model(family: str, device):
+    model_class, config_class, config = _FAMILIES[family]
     torch.manual_seed(SEED)
     model = model_class(config_class(**{**config, "router_aux_loss_coef": COEF}))
     for router in declared_routers(model):
@@ -67,8 +66,11 @@ def router_gradient(model, batch, coef: float) -> torch.Tensor:
 
 
 def run(ctx):
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--family", choices=sorted(_FAMILIES), required=True)
+    family = parser.parse_args().family
     checks, metrics = {}, {}
-    model = build_model(ctx.device)
+    model = build_model(family, ctx.device)
     patch_moe_model_for_ep(model, ParallelismConfig(ep_size=EP_SIZE).create_ep_config())
     create_ep_buffers(model)
     apply_balancing_strategy(model, "aux_loss", is_moe=True)
@@ -97,20 +99,13 @@ def run(ctx):
     rel = float((checkpointed_aux - plain_aux).norm() / plain_aux.norm())
     metrics["aux_share_of_router_grad"] = float(plain_aux.norm() / plain.norm())
     metrics["checkpointed_aux_rel_err"] = rel
-    metrics["checkpointed_total_rel_err"] = float((checkpointed - plain).norm() / plain.norm())
     checks["aux_term_moves_the_routers"] = metrics["aux_share_of_router_grad"] > 1e-2
     checks["checkpointed_aux_gradient_matches_unchecked"] = rel < AUX_REL_TOL
-    log(f"[rank {ctx.rank}] {FAMILY}: aux share {metrics['aux_share_of_router_grad']:.3f}, rel err {rel:.2e}")
+    log(f"[rank {ctx.rank}] {family}: aux share {metrics['aux_share_of_router_grad']:.3f}, rel err {rel:.2e}")
     return {"checks": checks, "metrics": metrics}
 
 
 main = gpu_test_main(exact_world_size=2, prefix="ep_gc_router_aux")(run)
 
 if __name__ == "__main__":
-    if "--family" in sys.argv:
-        i = sys.argv.index("--family")
-        FAMILY = sys.argv[i + 1]
-        del sys.argv[i : i + 2]
-    if FAMILY not in _FAMILIES:
-        raise SystemExit(f"--family must be one of {sorted(_FAMILIES)}, got {FAMILY!r}")
     main()

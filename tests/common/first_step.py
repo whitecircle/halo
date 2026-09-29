@@ -25,7 +25,7 @@ from transformers import TrainerCallback
 
 from tests.common.distributed import world_mean
 from tests.common.tolerances import TOL
-from tests.common.utils import log, step_losses
+from tests.common.utils import log, max_or_nan, step_losses
 
 # What PyTorch warns when a backward passes through a collective with no autograd kernel (an in-place
 # ``dist.all_reduce`` on a grad-carrying tensor): the gradient goes through as the identity.
@@ -168,7 +168,9 @@ def first_step_checks(
     miscounted objective carries (the parallel axis size): the bound has to resolve a loss scaled by
     it, or a match says nothing. Also fails a backward that reached the c10d autograd fallback.
     """
-    loss_error = max(_relative_error(got, want) for got, want in zip(record.losses, reference.losses, strict=True))
+    loss_error = max_or_nan(
+        _relative_error(got, want) for got, want in zip(record.losses, reference.losses, strict=True)
+    )
     logged_error = _relative_error(record.logged_loss, reference.logged_loss)
     miscount_error = _relative_error(miscount_factor * reference.logged_loss, reference.logged_loss)
     checks = {

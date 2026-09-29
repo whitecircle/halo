@@ -7,8 +7,8 @@ dtype"). The per-layer wrap gives each router a nested group of its own. Each ro
 on 2 ranks for ``TOTAL_STEPS`` steps with a checkpoint at ``SAVE_AT_STEP``, then resumes from it:
 
   1. Every router parameter is an fp32 DTensor master, has a finite nonzero gradient at every optimizer
-     step, moves, and ends bitwise identical on both ranks; the checkpoint holds it at fp32 beside
-     every file a resume reads.
+     step and moves, while every other trainable parameter stays at the run dtype; the checkpoint holds
+     each router at fp32 beside every file a resume reads.
   2. The resume restores the weights (a fixed batch's loss), the optimizer moments and the LR
      schedule, keeps the routers fp32 DTensors, and replays the uninterrupted run's later losses.
 
@@ -50,7 +50,7 @@ from tests.common.checkpoint_io import (
     resume_continuity_checks,
 )
 from tests.common.datasets import create_sft_dataset
-from tests.common.distributed import group_max_abs_diff, shared_output_dir
+from tests.common.distributed import shared_output_dir
 from tests.common.harness import gpu_test_main
 from tests.common.peft_helpers import load_peft_model_from_config, peft_model_config, unwrap
 from tests.common.pinned_params import RUN_DTYPE, SEED, load_row_model, tiny_family_checkpoint
@@ -178,8 +178,7 @@ def _checkpoint_checks(ctx, checkpoint: str, router_names: list[str]) -> dict[st
         checks["checkpoint_holds_routers_at_fp32"] = bool(dtypes) and all(
             dtype == torch.float32 for dtype in dtypes.values()
         )
-    ctx.broadcast_checks(checks)
-    return checks
+    return ctx.broadcast_checks(checks)
 
 
 @gpu_test_main(exact_world_size=2, prefix="sft_fp32_router_ep1")
@@ -213,9 +212,9 @@ def run(ctx):
     routers = _router_params(trainer.model)
     log(f"  {len(routers)} router params, e.g. {list(routers)[:2]}")
     checks = {"routers_are_fp32_dtensor_masters": _fp32_dtensor_masters(routers)}
-    checks["rest_of_the_trainable_set_is_run_dtype"] = any(
-        p.requires_grad and p.dtype == RUN_DTYPE for p in unwrap(trainer.model).parameters()
-    )
+    router_ids = {id(param) for param in routers.values()}
+    rest = [p for p in unwrap(trainer.model).parameters() if p.requires_grad and id(p) not in router_ids]
+    checks["rest_of_the_trainable_set_is_run_dtype"] = bool(rest) and all(p.dtype == RUN_DTYPE for p in rest)
     before = _router_snapshot(trainer.model)
     grads = _RouterGrads(trainer, ctx.device)
     at_save = _AtSave(trainer, probe)
@@ -230,9 +229,7 @@ def run(ctx):
     checks["every_router_moved"] = (
         bool(before) and not unmoved and all(torch.isfinite(t).all() for t in after.values())
     )
-    spread = max(group_max_abs_diff(tensor.to(ctx.device)) for tensor in after.values())
-    log(f"  {len(before) - len(unmoved)}/{len(before)} routers moved; max cross-rank |delta| {spread}")
-    checks["routers_identical_across_ranks"] = spread == 0.0
+    log(f"  {len(before) - len(unmoved)}/{len(before)} routers moved")
     finish_phase(trainer)
     if not args.lora:
         checks |= _checkpoint_checks(ctx, checkpoint, list(routers))

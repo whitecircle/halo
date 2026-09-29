@@ -94,6 +94,7 @@ from tests.common.tolerances import TOL
 from tests.common.utils import (
     finish_phase,
     log,
+    min_or_nan,
     optimizer_state_matches,
     relative_l2,
     resumed_loss_deltas,
@@ -145,8 +146,7 @@ LEARNING_RATE = 1e-3
 # Every row but EP's replays the uninterrupted run (``TOL.replayed_resume_*``). EP's DeepEP combine
 # sums in no fixed order, so after the first resumed step (which reads only restored state) its losses
 # sit within one bf16 step of an MNRL loss in [2, 4), and its final weights measured 1.1e-4 to 1.2e-3
-# off, against 9.7e-3 to 5.3e-2 of full fine-tune movement over the three resumed steps (fresh adapters
-# sit 1.38-1.44 off).
+# off, against 9.7e-3 to 5.3e-2 of full fine-tune movement over the three resumed steps.
 EP_LOSS_TOL = 2**-6
 EP_FINAL_WEIGHT_RTOL = 5e-3
 # A fold whose delta DTensor contracts the sharded rank dim shard-locally (a ``Partial`` placement)
@@ -431,8 +431,8 @@ def _serving_checks(
     )
     unmoved = sorted(key for key, value in expected.items() if torch.equal(value, base[key]))
     embedding_folds = [key for key in expected if key.endswith(f".{embedding}.weight") or key == f"{embedding}.weight"]
-    checks["lora_targets_serve_the_fold_of_the_resume_adapter"] = bool(expected) and not unfolded
-    checks["every_fold_moves_its_base"] = bool(expected) and not unmoved
+    checks["lora_targets_serve_the_fold_of_the_live_adapters"] = bool(expected) and not unfolded
+    checks["premise_every_fold_moves_its_base"] = bool(expected) and not unmoved
     if embedding is not None:
         checks["the_input_embedding_is_folded"] = len(embedding_folds) == 1
     checks["partial_folds_are_lora_targets"] = partial_folds <= set(expected)
@@ -529,7 +529,7 @@ def _uninterrupted(ctx, family: Family, mode: str, lora: str, base_source: str, 
     final = snapshot_trainable(trainer.model)
     saved = at_save.captured or {}
     checks["uninterrupted_ran_all_steps"] = len(losses) == TOTAL_STEPS
-    checks["losses_are_informative"] = bool(losses) and min(losses) > MIN_INFORMATIVE_LOSS
+    checks["losses_are_informative"] = bool(losses) and min_or_nan(losses) > MIN_INFORMATIVE_LOSS
     log(f"  uninterrupted losses {[f'{x:.6f}' for x in losses]}")
     finish_phase(trainer)
     return SimpleNamespace(
@@ -560,8 +560,10 @@ def _full_finetune_row(ctx, family: Family, mode: str, base_source: str, shared_
             for key, value in run.at_save.items()
             if key[len(run.prefix) :] not in run.expert_weights
         }
-        serving["checkpoint_holds_the_live_weights_at_the_save"] = set(live) <= set(saved) and all(
-            tensors_equal_at_narrower_dtype(saved[key], value) for key, value in live.items()
+        serving["checkpoint_holds_the_live_weights_at_the_save"] = (
+            bool(live)
+            and set(live) <= set(saved)
+            and all(tensors_equal_at_narrower_dtype(saved[key], value) for key, value in live.items())
         )
         log(f"  {len(live)} live weights compared against the checkpoint ({len(run.expert_weights)} expert ones not)")
     checks.update(ctx.broadcast_checks(serving))

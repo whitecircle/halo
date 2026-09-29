@@ -16,7 +16,6 @@ rank's batch and drifts while each loss stays finite.
 from collections.abc import Mapping
 
 import torch
-import torch.distributed as dist
 from transformers import AutoTokenizer
 from trl import SFTConfig
 
@@ -25,13 +24,12 @@ from src.distributed.loading.model_loading import load_distributed_model
 from src.distributed.parallelism_config import ParallelismConfig
 from src.trainers.sft import DistributedSFTTrainer
 from tests.common.datasets import create_sft_dataset
-from tests.common.distributed import world_any
+from tests.common.distributed import group_max_abs_diff
 from tests.common.models import QWEN3_0_6B
 from tests.common.peft_helpers import assert_adapters_moved, load_peft_model, unwrap
 from tests.common.tiny_models import TINY_MOE_FAMILIES, shared_tiny_family_checkpoint
 from tests.common.utils import (
     log,
-    log_all,
     params_off_dtype,
     snapshot_trainable,
     step_losses,
@@ -118,18 +116,6 @@ def _rank_local_param_names(model: torch.nn.Module) -> frozenset[str]:
     return frozenset(name for name, param in model.named_parameters() if id(param) in local)
 
 
-def _differing_from_rank0(tensors: dict[str, torch.Tensor], device: torch.device) -> list[str]:
-    """Names whose value on this rank is not bitwise rank 0's. Collective (one broadcast each)."""
-    differing = []
-    for name in sorted(tensors):
-        local = tensors[name].to(device)
-        reference = local.clone()
-        dist.broadcast(reference, src=0)
-        if not torch.equal(local, reference):
-            differing.append(name)
-    return differing
-
-
 def train_row(ctx, model, tokenizer, pc: ParallelismConfig, peft_config, *, check_sync: bool) -> dict:
     """Train ``NUM_STEPS`` SFT steps and return ``{"checks", "metrics"}``.
 
@@ -186,11 +172,12 @@ def train_row(ctx, model, tokenizer, pc: ParallelismConfig, peft_config, *, chec
     replicated = {name: tensor for name, tensor in after.items() if name not in rank_local}
     log(f"{len(replicated)} trainable params compared across ranks, {len(after) - len(replicated)} rank-local")
     if replicated:
-        differing = _differing_from_rank0(replicated, ctx.device)
+        # A world-wide verdict per tensor, so every rank holds the same list.
+        differing = [name for name in sorted(replicated) if group_max_abs_diff(replicated[name].to(ctx.device)) != 0.0]
         if differing:
-            log_all(f"{len(differing)} trainable params differ from rank 0: {differing[:6]}")
+            log(f"{len(differing)} trainable params differ from rank 0: {differing[:6]}")
         metrics["trainable_params_differing_from_rank0"] = len(differing)
-        checks["trainable_params_identical_across_ranks"] = not world_any(bool(differing))
+        checks["trainable_params_identical_across_ranks"] = not differing
     return {"checks": checks, "metrics": metrics}
 
 

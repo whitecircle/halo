@@ -17,6 +17,10 @@ from tests.common.ports import free_port
 # absorbs an 8-way xdist host starving the rendezvous, so only a rank stuck in a collective or a store
 # wait reaches it.
 GLOO_JOIN_TIMEOUT_S = 420.0
+# The rendezvous store's own timeout, which bounds its connect and any store op not given one. Held to
+# the join bound rather than ``pg_timeout``: a short collective bound would fail the connect on a
+# loaded host before the test reaches what it measures.
+STORE_TIMEOUT = datetime.timedelta(seconds=GLOO_JOIN_TIMEOUT_S)
 
 
 def _gloo_rank(
@@ -38,8 +42,10 @@ def _gloo_rank(
         LOCAL_WORLD_SIZE=str(nprocs),
     )
     os.environ.update(env)
+    # The store ``env://`` rendezvous builds, with STORE_TIMEOUT in place of pg_timeout.
+    store = dist.TCPStore("127.0.0.1", port, nprocs, is_master=rank == 0, timeout=STORE_TIMEOUT, multi_tenant=True)
     timeout_kwargs = {} if pg_timeout is None else {"timeout": pg_timeout}
-    dist.init_process_group("gloo", rank=rank, world_size=nprocs, **timeout_kwargs)
+    dist.init_process_group("gloo", rank=rank, world_size=nprocs, store=store, **timeout_kwargs)
     try:
         worker(rank, *args)
     finally:
@@ -60,7 +66,8 @@ def run_gloo_ranks(
     ``LOCAL_WORLD_SIZE``) with ``env`` applied on top, identically on every rank; a value that has to
     differ per rank is the worker's to set. The group is initialized before ``worker`` and destroyed
     after it on every exit path. ``pg_timeout`` bounds each collective (``None`` keeps torch's
-    default); set it where the test reads what a stuck collective raises.
+    default); set it where the test reads what a stuck collective raises. The rendezvous store keeps
+    :data:`STORE_TIMEOUT` either way.
 
     ``worker`` must be a module-level function, since spawn pickles it by reference. A rank that
     raises or dies fails this call once its peers are stopped (``ProcessRaisedException`` /

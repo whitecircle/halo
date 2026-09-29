@@ -269,9 +269,9 @@ def test_layer_type_gate_and_the_boundary_period_read_one_seam():
 def test_head_cost_survives_per_layer_heterogeneous_attention():
     """step3p7 registers its attention fields per layer (64 full / 96 sliding heads on the hub), so
     the bare ``config.num_attention_heads`` read RAISES transformers'
-    AmbiguousGlobalPerLayerAttributeError — a RuntimeError the getattr default does not swallow.
-    Pre-fix this crashed ``resolve_layer_partition`` before any PP gate could fire; the cost model
-    must resolve through the per-layer-aware seam instead (max: it is a cost ceiling)."""
+    AmbiguousGlobalPerLayerAttributeError — a RuntimeError the getattr default does not swallow,
+    which would stop ``resolve_layer_partition`` before any PP gate could fire. The cost model must
+    resolve through the per-layer-aware seam instead (max: it is a cost ceiling)."""
     config = Step3p7TextConfig(**TINY_STEP3P7_CONFIG)
     with pytest.raises(RuntimeError):
         _ = config.num_attention_heads  # premise: the global read is ambiguous on this family
@@ -282,8 +282,8 @@ def test_ragged_layer_types_snap_to_whole_period_boundaries():
     """step3p7's real 45-layer list is 11 whole ``full,s,s,s`` periods plus one trailing layer, so
     no period tiles it exactly — period detection must use the same shift-invariance criterion the
     rebase gate enforces, and the automatic partition must put every boundary on a whole period
-    with the ragged tail on the last stage. Pre-fix the default pp2 partition was 23/22, whose
-    offset 23 ``reject_layer_type_rebase`` then loudly refused — a dead end with no config knob."""
+    with the ragged tail on the last stage. An even 23/22 pp2 split would start stage 1 at offset 23,
+    which ``reject_layer_type_rebase`` refuses with no config knob to route around it."""
     period = ["full_attention", "sliding_attention", "sliding_attention", "sliding_attention"]
     config = _TextlessConfig((period * 12)[:45])
     assert layer_types_period(config) == 4
