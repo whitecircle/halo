@@ -156,14 +156,9 @@ Three shapes are narrower than they look; all are rejected at config time, not a
 - **EP+CP requires `ep_group_size == nvlink_domain_size`** — on 8-GPU nodes, `ep_size=8` exactly.
   `ep2+cp2` and `ep4+cp2` are rejected, as is cross-domain EP under CP (`ep_scope=global`).
 
-- **EP+ETP across domains** needs a single EP group covering the job *and* exactly one ETP
-  group per domain: `expert_tp_size == nvlink_domain_size` and `ep_size == domain count`, which
-  keeps the ETP all-reduce on NVLink. On 2×8 that leaves `ep2+etp8`.
-
-    Anything narrower (`ep2+etp4`, `ep4+etp2`) has `ep_group_size` below the world and is refused
-    one rule earlier, by the multi-EP-group check (`world_size // ep_group_size > 1`):
-    expert-TP keeps `is_deferred_dp` off, so FSDP2's DP-wide reduce-scatter would race the narrower
-    DeepEP combine across domains. Both raise at either `ep_scope`.
+- **EP+ETP across domains** takes exactly one ETP group per NVLink domain under a single EP group — on
+  2×8, `ep2+etp8` only; narrower splits are refused at either `ep_scope`
+  ([Expert-Tensor Parallelism → Validation rules](expert-tensor-parallelism.md#validation-rules)).
 
 > [!WARNING]
 > **Single-domain pure EP needs a single dispatch group**

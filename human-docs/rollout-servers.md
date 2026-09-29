@@ -73,7 +73,8 @@ the loader reason — the current lists are in [Supported Matrix](supported-matr
 ## Where the server lives
 
 On one machine, give the server the spare GPUs and the trainer the rest; both containers run with
-`network_mode: host`, because the NCCL rendezvous uses an ephemeral port a bridge network would hide.
+`network_mode: host`. The server connects back to the trainer on its group port, then on a random NCCL port, and a
+bridge network publishes neither.
 
 ![Separate inference node: the trainer and its Ray actors on node 1, the rollout server on node 2 joined to the
 trainer's NCCL group on port 51216 while actors post to it over HTTP, with the port, Ray and EFA settings listed
@@ -134,7 +135,7 @@ so leave it alone.
 | 400 on every rollout, zero tokens back | A thinking budget the server cannot take: set `VLLM_REASONING_PARSER` **and** `VLLM_USE_V2_MODEL_RUNNER=0`, or drop `rollout_max_thinking_tokens` |
 | The run finishes with a flat zero reward | Wrong tool-call parser on a tool-using environment: the calls came back as text (a missing one 400s instead) |
 | `Could not bind the weight-transfer group port` | Another process holds it, or two servers share one — give each its own `group_port` and remove stale containers |
-| Group formation stalls with the server never joining | A bridge network hides the rendezvous port: `network_mode: host` on both containers |
+| Group formation stalls with the server never joining | A bridge network hides the ports the server connects back on: `network_mode: host` on both containers |
 | The first collective hangs with both sides idle | The two containers drive different NCCL transports — pin `NCCL_SOCKET_IFNAME` off Docker's `veth` interfaces (the compose default) and use the same images and fabric recipe on both ends |
 | `/health` is 200 but nothing generates | A trainer died mid-sync and left the engine paused. Resume it, or restart the container if the push had already started |
 

@@ -106,7 +106,8 @@ Every MoE family on the roster (`agent-docs/models/README.md`) needs one. New fa
 - [ ] `'gpu'` marker (always).
 - [ ] Exactly one tier: `core` (small/fast, ≤2 GPU, tiny model) **or** `full` (large model /
       many-GPU). Add `vllm_server` when the test needs the live vLLM container — those are
-      always `full`. `benchmark_*` perf scripts run via shell, not the manifest. The `core` tier
+      always `full`. `benchmark_*` perf scripts run via shell, not the launcher, but each must be listed in
+      `_UNMANIFESTED_BENCHMARKS` (`tests/gpu/manifest.py`) or GPU collection fails. The `core` tier
       already sits past its own contract — 4-GPU entries, multi-billion-parameter checkpoints; tier
       composition lives in `agent-docs/contributing/README.md` ("Tests"). Do not add to the drift — when in
       doubt, mark `full`.

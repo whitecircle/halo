@@ -77,16 +77,11 @@ auto-switched to FA4/FA2 by `load_distributed_model` when CP is active. A wrappe
 `REQUIRES_FLASH_ATTN_LABEL = False` waives the check for modeling code that cannot carry a flash
 label at all (Bailing; see [bailing.md](../models/bailing.md#cp-wrapper)).
 
-That check reads the *declared* implementation. The kernel CP calls is resolved separately by
-`get_flash_attn_func` — FA3 on Hopper, FA4 (`flash_attn.cute`) on Blackwell, falling back to FA2 or
-the community kernel when the arch-matched import fails. On Blackwell the wrapper vetoes FA4 for the
-families whose FA4 backward emits NaN — head_dim-256 attention with partial rotary (Qwen3.5/3.6,
-GLM-4 MoE Lite) — and calls FA2 instead (`model_fa4_backward_nan_prone`).
-
-Leave `attn_implementation` at its auto-detected default: CP calls the non-varlen forward, which FA2
-serves poorly on both architectures, and the arch-matched kernel is worth 1.2–3× at ≥32k tokens on
-B300. Bailing is the exception — it needs an explicit `sdpa`, since transformers refuses the
-auto-detected FA4 at model build.
+That check reads the *declared* implementation; the kernel CP actually calls is resolved separately,
+arch-matched with an FA4 veto for the FA4-backward-NaN families
+([Flash Attention → Supported backends](../optimization/flash-attention.md#supported-backends)). Leave
+`attn_implementation` at its auto-detected default. Bailing is the exception — it needs an explicit
+`sdpa`, since transformers refuses the auto-detected FA4 at model build.
 
 **Head divisibility** — `cp_size` must divide both the Q and the KV head count. GPT-OSS (64 Q, 8 KV):
 CP=8 → 8 Q / 1 KV; CP=4 → 16 Q / 2 KV; CP=3 rejected.
@@ -242,6 +237,7 @@ not activations) — that is the case CP exists for.
 | `packing`, `padding_free` | rejected — the Ulysses path runs a dense causal kernel with no per-document boundaries | `src/data/collators/factory.py`; `_reject_cp_incompatible_collator` re-checks a hand-built collator |
 | left-padded batches | rejected on **every** forward (not cached — SMPO left-pads only some batches) | `context_parallel/wrapper.py` |
 | `attn_implementation` | must resolve to FA2/FA3/FA4 or a community flash kernel; `flex_attention` is auto-switched with a warning, `eager`/`sdpa` rejected — except for a wrapper declaring `REQUIRES_FLASH_ATTN_LABEL = False` (Bailing), which runs on the `sdpa` label its model build forces | `SUPPORTED_ATTN_IMPLEMENTATIONS`, `validate_model_for_ulysses` |
+| `init_from_scratch` | rejected — no sharded random init | `model_loading.py` |
 | `reset_sinks: false` on GPT-OSS | rejected at model load — the CP attention kernels drop the sink column, so live sinks would misnormalize the softmax in every layer | `model_loading.py`, re-checked in `GptOssUlyssesAttention` |
 | `label_smoothing_factor > 0`, `loss_type: dft` | rejected — the Trainer pops `labels` and pairs full labels with this rank's chunk logits | `validate_trainer_args_for_cp` |
 | `compute_metrics`, `preprocess_logits_for_metrics` | rejected whatever `eval_strategy` is — eval under CP is loss-only, and `evaluate()`/`predict()` reach the metric path on demand | same |

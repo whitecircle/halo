@@ -14,7 +14,8 @@ weight_decay: 0.01
 
 ```bash
 torchrun --nproc_per_node=8 \
-    scripts/training/sft.py examples/sft/qwen3/qwen3-4b-ultrachat.yaml
+    scripts/training/sft.py examples/sft/qwen3/qwen3-4b-ultrachat.yaml \
+    --optim=flash_adamw --learning_rate=1e-4 --weight_decay=0.01
 ```
 
 Both images install `flashoptim` directly (`Dockerfile`, pinned, `--no-deps` so it cannot re-resolve torch and downgrade NCCL), so `optim: flash_adamw` works out of the box. On a bare host, install the extra (resolves from PyPI):

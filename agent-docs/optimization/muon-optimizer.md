@@ -12,7 +12,8 @@ weight_decay: 0.1
 
 ```bash
 torchrun --nproc_per_node=8 \
-    scripts/training/sft.py examples/sft/qwen3/qwen3-4b-ultrachat.yaml
+    scripts/training/sft.py examples/sft/qwen3/qwen3-4b-ultrachat.yaml \
+    --optim=muon --learning_rate=3e-4 --weight_decay=0.1
 ```
 
 `optim: muon` routes through `build_muon_optimizer` (`src/optimizers/muon.py`), which forwards `learning_rate`, `weight_decay`, `adam_epsilon`, and the decay-parameter set.

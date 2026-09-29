@@ -368,7 +368,8 @@ loads cleanly on either line. Its exports therefore carry the source repo's own 
 those modules ([Checkpoints](../reference/checkpoints.md#what-gets-saved)).
 
 `docker/vllm/parity/check.py` runs at image build: the server's transformers must parse what the
-toolkit exports for every family whose EP layer admits weight sync, since the server loads that
+toolkit exports for every family whose EP layer admits weight sync and the vLLM client does not list
+as unservable, since the server loads that
 checkpoint before a single tensor can be synced into it. One `config.json` fixture per family,
 rendered offline from the tiny roster config in `tests/common/models.py` (only the source-schema
 carry is pinned to a release config at a fixed revision, the one thing a tiny config cannot express),
@@ -379,9 +380,10 @@ A transformers bump on either side then fails the build rather than the first li
 no pinned engine can load (Mistral4) surfaces as a refusal rather than a dead sync.
 `tests/cpu/checkpoint/test_vllm_parity_fixtures.py` fails when the roster or the fixtures drift.
 
-`docker-compose.vllm.yml` runs the server with `network_mode: host` + `ipc: host`: to form the NCCL
-group the two sides first find each other on an ephemeral trainer port (the rendezvous), which a
-bridge network would hide, and group formation then times out at "1/2 clients joined".
+`docker-compose.vllm.yml` runs the server with `network_mode: host` + `ipc: host`: the server's
+workers dial the trainer's rendezvous on its group port and then NCCL's bootstrap on an ephemeral
+trainer port, neither of which a bridge network publishes, so group formation times out at
+"1/2 clients joined".
 
 Prebuilt: `docker pull public.ecr.aws/whitecircle/halo:vllm-0.26.0` (anonymous, no AWS account), then
 `docker tag public.ecr.aws/whitecircle/halo:vllm-0.26.0 vllm-server:0.26.0` — compose names that tag.

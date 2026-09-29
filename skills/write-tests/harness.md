@@ -224,7 +224,7 @@ node, shells out:
 python -m torch.distributed.run --nproc_per_node=<nproc> --master_port=<free> <script> <args>
 ```
 
-with the spec `timeout` (the whole process **group** is killed on expiry — NCCL/FA hangs are
+with the spec `timeout` (on expiry the agent and every worker are killed — NCCL/FA hangs are
 live) and `MASTER_PORT` / `HALO_TEST_LAUNCH_ID` / `TMPDIR` in the env. `TORCHELASTIC_ERROR_FILE` is
 deliberately left unset: one shared path makes the last writer win, and the agent's collateral
 SIGTERMs would overwrite the real cause. It then classifies:
@@ -241,4 +241,4 @@ SIGTERMs would overwrite the real cause. It then classifies:
   `UsageError`, never a skip.
 
 All of this runs inside the Docker image; selection is by marker, e.g. `pytest -m "gpu and
-core"` (PR) or `pytest -m gpu` (heavy, many-GPU; run by hand).
+core"` (`make test-gpu-core`, pre-merge) or `pytest -m gpu` (`make test-gpu-full`).

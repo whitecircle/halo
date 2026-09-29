@@ -222,9 +222,9 @@ long-context ep8 path.
 (`ep_scope=global` / `node_local=False` spanning NVLink domains), for `ep_size` above 8 or above
 `gpus_per_node`, and for an `ep_size` outside DeepEP V1's tuned rank table (`DEEPEP_V1_CONFIG_RANKS`).
 
-The dispatcher re-checks at backend selection and also rejects a node-local group spanning OS nodes: the
-buffer is built with `num_rdma_bytes=0`, and V1's node-major rank layout does not match the column-block
-cross-node layout.
+The dispatcher re-applies the same rules at backend selection for a hand-built `EPConfig`; the
+`gpus_per_node` bound is what refuses a node-local group spanning OS nodes (an NVL72 `ep8` over 4-GPU
+trays), since the V1 buffer is built with `num_rdma_bytes=0`.
 
 ## SM control
 

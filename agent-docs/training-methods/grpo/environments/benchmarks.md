@@ -66,9 +66,10 @@ A row with `choices` switches `exam_qa` to letter grading: the response's choice
 extracted from "A", "(A)", "A.", "The answer is A" and compared to the expected letter, and the
 choices are appended to the prompt.
 
-`answer` may be that letter or a 0-based index into `choices` (MMLU and ARC ship an int). Anything
-else, an out-of-range index included, raises at episode start rather than grading every completion
-0 at zero group variance.
+`answer` may be that letter or a 0-based int index into `choices` (MMLU ships the index). A digit
+string raises: ARC's `answerKey` is sometimes a 1-based label (`"1"`–`"5"`), so convert it to a
+letter when preparing the data. Anything else, an out-of-range index included, raises at episode
+start rather than grading every completion 0 at zero group variance.
 
 ## Dataset
 
