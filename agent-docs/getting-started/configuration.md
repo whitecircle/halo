@@ -106,16 +106,9 @@ EP/CP/TP/ETP/PP under `accelerate launch` **raise** at startup for any `distribu
 
 EP+ETP (`ep_size>1` and `expert_tensor_parallel_size>1`) is supported but experimental: the expert-TP reduction runs in token space so the coupled DeepEP dispatch groups don't deadlock the combine barrier under FSDP2. Its expert-TP groups stay NVLink-local — across domains it runs as one EP group with exactly one ETP group per domain — and it cannot combine with attention TP. See [ETP validation rules](../parallelism/expert-tensor-parallelism.md#validation-rules).
 
-FSDP2 (`fully_shard`) is applied automatically for all `torchrun` modes: gradients and optimizer states stay sharded across DP ranks, so memory scales ~`dp_size` smaller than DDP. EP/CP exclude the EP modules via `ignored_params` — except at `ep_group_size == 1`, where `fsdp_shard_ep1_experts` (default `true`) hands the experts to FSDP2 as well and its reduce-scatter becomes their only gradient sync. TP with DP>1 uses a 2D mesh for DTensor-compatible grad sync.
+FSDP2 (`fully_shard`) is applied automatically for all `torchrun` modes, with gradients and optimizer states sharded across DP ranks; EP/CP exclude the EP modules except at `ep_group_size == 1`, where `fsdp_shard_ep1_experts` (default `true`) hands the experts to FSDP2 as well ([Data Parallelism](../parallelism/data-parallelism.md)).
 
-Two resharding knobs, both `torchrun`-only:
-
-- `fsdp_reshard_after_forward` (default `false` = SHARD_GRAD_OP: parameters stay unsharded between forward and backward). `true` is FULL_SHARD/ZeRO-3 and is rejected wherever an expert-distribution group exists (`ep_group_size > 1`, pure ETP included — the backward all-gather races the DeepEP combine), under TP with `data_parallel_size > 1`, and under PP.
-- `fsdp_reshard_after_backward` (default `true`). `false` keeps parameters unsharded across a gradient-accumulation window's microsteps (its last backward still reshards) at the cost of one unsharded bf16 param copy per GPU for the run (under ZeRO-2 the forward/backward peak already holds it, so the measured peak is unchanged).
-
-    The saving is the per-microstep re-gather: about 4–10% throughput over NVLink, far more when the trainer's NCCL runs over TCP sockets. Rejected with `fsdp_reshard_after_forward: true`, TP, or PP.
-
-`fsdp_defer_grad_sync` (default `false`, `torchrun`-only) is the gradient-side counterpart: `true` reduce-scatters once per optimizer step instead of once per microstep, holding one unsharded gradient copy per GPU across the window. Rejected under TP at `data_parallel_size == 1`, under QLoRA, and with `fsdp_reshard_after_forward: true` (ZeRO-3 exists to shard that gradient). See [Deferred gradient reduce](../parallelism/data-parallelism.md#deferred-gradient-reduce-fsdp_defer_grad_sync) for the measured trade-off.
+Three `torchrun`-only knobs tune it: `fsdp_reshard_after_forward` (ZeRO-3), `fsdp_reshard_after_backward` (keep params unsharded across an accumulation window) and `fsdp_defer_grad_sync` (reduce once per optimizer step). Each row in [ParallelismConfig](../reference/configuration-reference.md#parallelismconfig) states its refusals; the measured trade-offs are in [Data Parallelism](../parallelism/data-parallelism.md#deferred-gradient-reduce-fsdp_defer_grad_sync).
 
 ## Example SFT config
 
@@ -192,12 +185,12 @@ Start with the gradop config; if OOM, try the full one. A hand-written accelerat
 
 | `optim` | Optimizer | Memory/param | Best for |
 |---|---|---|---|
-| `adamw_torch_fused` | PyTorch fused AdamW | 12 B over fp32 params (`bf16: false`) | Default, most stable |
-| (auto with `bf16: true`) | AdamWBF16 (stochastic rounding) | 6 B | Memory-constrained |
+| `adamw_torch_fused` | PyTorch fused AdamW | 12 B over fp32 params (`bf16: false`) | `bf16: false` runs |
+| (auto with `bf16: true`) | AdamWBF16 (stochastic rounding) | 6 B | The default under `bf16: true` |
 | `muon` | Muon (Newton-Schulz) | ~4 B on 2D params | Faster convergence on matrix params |
 | `flash_adamw` | FlashAdamW (quantized states) | ~5 B | Maximum memory savings, drop-in AdamW |
 
-AdamWBF16 replaces `adamw_torch_fused`/`adamw_torch` automatically when `bf16: true`, except under accelerate-managed DDP. `bf16_optimizer` (default `null` = that auto rule) overrides it either way: `true` is the opt-in under DDP, `false` runs the stock AdamW over the params as loaded (bf16 masters with round-to-nearest under `bf16: true`, not fp32 — fp32 masters come from `fp32_non_ep_params` or `bf16: false`). The stock AdamW is refused where plain-tensor experts sit beside FSDP2 DTensors (any `ep_group_size > 1`, or `ep_size: 1` with `fsdp_shard_ep1_experts: false`). `true` alongside `optim: muon` or `flash_adamw` raises — both name an optimizer, and one would silently win. FlashAdamW needs `uv pip install "halo[flash-optimizers]"`. See [BF16 Optimizer](../optimization/bf16-optimizer.md#compatibility), [Muon](../optimization/muon-optimizer.md), [FlashAdamW](../optimization/flash-adamw.md).
+AdamWBF16 replaces `adamw_torch_fused`/`adamw_torch` automatically when `bf16: true`, except under accelerate-managed DDP. `bf16_optimizer` (default `null` = that auto rule) overrides it either way: `true` is the opt-in under DDP, `false` runs the stock AdamW over the params as loaded (bf16 masters with round-to-nearest under `bf16: true`, not fp32 — fp32 masters come from `fp32_non_ep_params` or `bf16: false`). The stock AdamW is refused where plain-tensor experts sit beside FSDP2 DTensors (any `ep_group_size > 1`, or EP-wrapped experts at `ep_size: 1` with `fsdp_shard_ep1_experts: false`), unless `fp32_non_ep_params` is set, which routes to a per-tensor-type grouped AdamW with fp32 masters on the non-expert params only. `true` alongside `optim: muon` or `flash_adamw` raises — both name an optimizer, and one would silently win. FlashAdamW ships in both training images; on a bare host install the `flash-optimizers` extra (`uv pip install -e ".[flash-optimizers]"`). See [BF16 Optimizer](../optimization/bf16-optimizer.md#compatibility), [Muon](../optimization/muon-optimizer.md), [FlashAdamW](../optimization/flash-adamw.md).
 
 ## Low-precision compute
 

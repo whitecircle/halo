@@ -69,7 +69,7 @@ python -c "from flash_attn_interface import flash_attn_func; print('FA3 OK')"
 
 # Pre-download the model on every pod to avoid download races during torchrun init
 export HF_HOME=/workspace/hf_cache
-python -c "from huggingface_hub import snapshot_download; snapshot_download('your-org/model-name')"
+python -c "from huggingface_hub import snapshot_download; snapshot_download('your-org/<model>')"
 ```
 
 ## EP topologies (2 nodes × 8 GPUs)

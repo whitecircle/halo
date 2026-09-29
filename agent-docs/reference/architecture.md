@@ -47,15 +47,16 @@ Leaf modules keep those imports one-way, each holding a contract several layers 
 | `src/data/sources/s3_client.py` | the boto3 `S3Client`, the s3fs control-file reads and the default-bucket helpers | the loader, the preprocessing pipeline, `ShardedDatasetLoader`, the inference scripts and the `scripts/before_training/s3_datasets.py` CLI |
 | `src/distributed/context_parallel/key_mapping.py` | the one CP→HF attention key mapping | the EP gathered save and the PEFT adapter save — without pulling the CP wrapper stack |
 | `src/distributed/checkpoint/write.py` | the collective half of a write: retain-gated DTensor resolve of params AND buffers (with the neutralized GptOss sinks), the streamed part writer, the shard-index exchange | the FSDP2/EP gathered save, the TP state dict and the CP save — the leg every gathered writer must run symmetrically or hang |
-| `src/distributed/checkpoint/coordination.py` | the rank consensus and key-preview cap a resume's two halves share | `checkpoint/loader.py` (weights) and `checkpoint/optimizer.py` (optimizer shards) |
+| `src/distributed/checkpoint/coordination.py` | the rank consensus a resume's two halves share, re-exporting the key-preview cap `src/log.py` owns (`KEY_PREVIEW_COUNT`) | `checkpoint/loader.py` (weights) and `checkpoint/optimizer.py` (optimizer shards) |
 | `src/data/shard_index.py` | the torch-free `shard_index.json` contract and the stamped-sidecar writer both halves of a preprocessed artifact use | written by the preprocessing pipeline, read by `ShardedDatasetLoader` |
 | `src/data/vlm.py` | the VLM chat render, the processor call and the over-length refusal | the runtime collators, the offline bake and the run-intent probe, so a batch and a bake of one row tokenize identically |
 | `src/data/pipeline/preprocessed_metadata.py` | the `metadata.json` contract: the recorded `PreprocessingConfig`, the stamp and the compatibility verdicts | the training entry points and the loader, which read the stamp without importing the bake that wrote the rows |
 | `src/configs/rollout_config.py` | `RolloutConfig` | built by `AsyncTrainingConfig`, received pickled by the Ray rollout actors — keeping the Ray import out of `src.configs` |
 | `src/distributed/nccl/addresses.py` | host-address classification (`is_loopback`) — standard library only | the weight-sync clients and the Ray rollout actors — without pulling the client's torch, DTensor and NCCL transport into the actors |
 
-`src/distributed/runtime.py` therefore holds rank/world state, barriers, the cross-rank
-rejection/consensus seams, the process-group timeouts and DTensor resolution only; anything a
+`src/distributed/runtime.py` therefore holds rank/world state, `init_distributed` and the
+process-group timeouts, barriers, the cross-rank rejection/consensus seams (including the
+shared-filesystem verdict and the FS-aware writer rank), and DTensor resolution only; anything a
 single rank can compute alone lives in the leaves above. It is itself the package leaf:
 `nvlink.py` (fabric probes, read by `ParallelismConfig`) and `filesystem.py` (the c10d-store
 phase, main-first ordering, the output-FS probe, the load throttle) import it, never the reverse.
@@ -64,10 +65,10 @@ phase, main-first ordering, the output-FS probe, the load throttle) import it, n
 
 Every distributed trainer uses multiple inheritance: a base trainer (`trl.SFTTrainer`,
 `transformers.Trainer`, `trl.GRPOTrainer`, …) plus `DistributedTrainerMixin`
-(`src/trainers/mixins/base.py`), which composes its seven sibling sub-mixins — checkpointing,
-dataloaders, EP introspection, gradient sync, parallelism validation, pipeline hooks, and token
-metrics. The mixin overrides the parallelism-sensitive methods (accelerator creation,
-dataloader sharding, gradient clipping, model saving) and delegates the rest.
+(`src/trainers/mixins/base.py`), which composes the sub-mixins listed in
+[Trainer Architecture](trainer-architecture.md). The mixin overrides the parallelism-sensitive
+methods (accelerator creation, dataloader sharding, gradient clipping, model saving) and delegates
+the rest.
 
 Thirteen trainers share this shape: SFT, SMPO, DPO, KTO, offline/online/async environmental GRPO,
 online SDPG, teacher and self distillation, reward, classification, and
@@ -81,20 +82,12 @@ matrix and the reason behind each exclusion are in
 
 `ParallelismConfig` (`src/distributed/parallelism_config.py`) is the single source of truth: it
 validates the requested combination against an allowlist, computes `data_parallel_size`, and
-creates the process groups. The trainer reads mode flags (`is_ep_mode`, `is_cp_mode`, …) off it and
+builds the `EPConfig` / `CPConfig` process groups; the DeviceMeshes come from
+`src/distributed/mesh.py`. The trainer reads mode flags (`is_ep_mode`, `is_cp_mode`, …) off it and
 never re-derives them.
 
-| Mode | What it shards | Data parallel size | Backend |
-|---|---|---|---|
-| FSDP2 (default) | All params, per layer | `world_size` | `fully_shard` |
-| EP | MoE experts across ranks | `world_size` (orthogonal) | DeepEP all-to-all |
-| CP | The sequence axis | `world_size / cp_size` | Ulysses attention |
-| TP | Attention Q/K/V/O + dense MLP; attention only on MoE (embeddings/lm_head replicated) | `world_size / tp_size` | DTensor |
-| ETP (`ep_size=1`) | Expert FFN weights | `world_size / expert_tp_size` | EP wrappers |
-| PP ([not yet available](../parallelism/pipeline-parallelism.md)) | The layer stack, into sequential stages | `world_size / pp_size` | torch pipelining — seams ship, the engine does not |
-
-In full: `data_parallel_size = (world_size / pp_size) / max(tp_size, cp_size, expert_tp_size)`. EP
-is orthogonal — each rank still sees different data.
+What each mode shards, its data-parallel size and its backend: [Parallelism → Supported
+combinations](../parallelism/README.md#supported-combinations).
 
 Four subpackages own the mechanics: `expert_parallel/` (DeepEP dispatch/combine, per-family MoE
 wrappers, grouped-GEMM expert compute, gradient-sync hooks, expert gather/export), `context_parallel/`
@@ -135,7 +128,7 @@ ParallelismConfig  ── validate mode, build process groups
    ▼
 load_distributed_model            src/distributed/loading/model_loading.py
    │  • resolve_attn_implementation → FA4 (SM100+) / FA3 (SM90) / FA2; per-model SDPA/eager overrides
-   │  • patch_moe_model_for_ep → EP wrappers (when ep_size > 1 or grouped-GEMM)
+   │  • patch_moe_model_for_ep → EP wrappers (when ep_group_size > 1 — EP or ETP — or grouped GEMM on an MoE)
    │  • UlyssesCPModelWrapper (when cp_size > 1)
    │  • load_pp_stage_model → this stage's decoder layers only (when pp_size > 1)
    ▼

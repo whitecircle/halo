@@ -97,12 +97,12 @@ For a non-default bucket or an S3-compatible service:
 ```python
 from src.data.sources.s3_client import S3Client
 
-client = S3Client(bucket="my-bucket")
+client = S3Client(bucket="<bucket>")
 client.push_dataset(dataset, "data")
 
 # MinIO / S3-compatible
 client = S3Client(
-    bucket="my-bucket",
+    bucket="<bucket>",
     endpoint_url="http://localhost:9000",
     aws_access_key_id="minioadmin",
     aws_secret_access_key="minioadmin",

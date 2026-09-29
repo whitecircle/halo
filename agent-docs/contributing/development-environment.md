@@ -78,9 +78,10 @@ hard-fails when the cache is missing and the Hub is unreachable; one going throu
 
 Secrets live in the repo-root `.env`. Cache and path redirects are `-e` flags pointed at a **verified**
 large volume: the root filesystem is small, and a path named `/mnt` is not guaranteed to be a separate
-device, so check `findmnt` / `df -h` first. On a host whose docker defaults to a runtime that rejects
-`--gpus` / `--ipc host` (e.g. sysbox-runc), set `DOCKER_RUNTIME=nvidia` — every `make` docker
-invocation then pins `--runtime nvidia` explicitly.
+device, so check `findmnt` / `df -h` first. The toolkit, cache and path variables are catalogued in
+[Environment variables](../reference/configuration-reference.md#environment-variables). On a host
+whose docker defaults to a runtime that rejects `--gpus` / `--ipc host` (e.g. sysbox-runc), set
+`DOCKER_RUNTIME=nvidia` — every `make` docker invocation then pins `--runtime nvidia` explicitly.
 
 | Variable | Purpose | Where set | Owner page |
 |---|---|---|---|
@@ -88,12 +89,6 @@ invocation then pins `--runtime nvidia` explicitly.
 | `HF_TOKEN` | Gated HuggingFace model/dataset access | `.env` | — |
 | `AWS_DEFAULT_REGION` | Region for your S3 bucket / ECR registry | `.env` | [AWS Auth](../infrastructure/aws-auth.md) |
 | `OPENROUTER_API_KEY`, `OPENAI_API_KEY`, `TAVILY_API_KEY`, `SERPER_API_KEY`, `BRAVE_API_KEY` | External LLM + web-search backends | `.env` | [Native Tool-Use](../training-methods/grpo/environments/native-tool-use.md) |
-| `HF_HOME` / `HF_DATASETS_CACHE` | HF cache roots on the scratch volume | `-e` flag | — |
-| `TMPDIR` | Temp dir on the scratch volume | `-e` flag | — |
-| `HALO_DATA_ROOT` | Toolkit scratch root — S3 dataset cache (`<root>/s3_datasets`) + profiler artifacts (`<root>/profiling`) | `-e` flag | [S3 Utilities](../data/s3-utilities.md) |
-| `DIST_SHARED_FILESYSTEM` | `1` shared NFS/Lustre (default), `0` per-node local; `DIST_INPUT_SHARED_FILESYSTEM` / `DIST_OUTPUT_SHARED_FILESYSTEM` override the read and write sides separately | env | [Filesystem Handling](../data/filesystem-handling.md) |
-| `CUDA_DEVICE_MAX_CONNECTIONS` | `1` for EP throughput; baked into the image `ENV` (do not unset) | preset in image | [DeepEP](../infrastructure/deepep.md) |
-| `HALO_SANDBOX_BACKEND`, `HALO_SANDBOX_URL` | Code-execution sandbox backend for coding RL envs | env | [Sandboxes](../training-methods/grpo/environments/sandbox.md) |
 
 ## Paths
 

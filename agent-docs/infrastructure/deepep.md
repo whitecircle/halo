@@ -60,17 +60,15 @@ exports.
 
 ## Environment variables
 
-| Variable | Description | Default |
-|----------|-------------|---------|
-| `EP_DISABLE_GIN` | `1` disables the Gin (RDMA) backend → non-Gin NVLink path. The dispatcher sets it from EP topology (`1` intra-node, `0` inter-node); an explicit value is honored and logged. | dispatcher-set |
-| `EP_SUPPRESS_NCCL_CHECK` | Suppress DeepEP's duplicate-NCCL-runtime guard (the NGC image's HPC-X `libnccl-net` transport *plugin* trips it; complementary, not a conflicting runtime). Must be in the **process** environment — DeepEP reads it inside `check_nccl_so()` at `import deep_ep`, so a Python write is too late; the dispatcher warns whenever the value it sees is not `1`. | `1` (image `ENV`, both images) |
-| `CUDA_DEVICE_MAX_CONNECTIONS` | Hardware work-queue count. `1` serializes device work onto one queue and is free: neutral on dense and `ep_size=2`, **+9.7%** on `ep_size=8` (8×B300, 20B MoE, seq 4096, GC on). Latched at `cuInit` — a launch outside the image exports it before the process starts. The toolkit only warns on another value; it does not make the racy single-domain multi-group shape safe ([below](#ep-grouping-what-is-reliable)). | `1` (image ENV) |
-| `HALO_DEEPEP_GIN_MAX_TOKENS_PER_RANK` | Cross-node (Gin) dispatch ceiling in tokens/rank, checked against the all-reduced capacity at buffer sizing; a larger dispatch wedges instead of erroring ([AWS EFA](#expert-parallelism-over-aws-efa)). `0` disables. | `8192` |
-| `HALO_DEEPEP_NUM_SMS` | Pin the dispatch/combine SM count (else auto from `get_theoretical_num_sms`). Applies to both backends; legacy requires an even count. | auto |
-| `HALO_DEEPEP_NUM_QPS` | Override the RDMA queue-pair count for dispatch **and** combine (also sets the buffer's allocation). **elastic only** — V1 takes no per-call QP count. On non-IBGDA fabrics (EFA proxy Gin) more QPs can raise the latency-bound internode all-to-all parallelism — A/B it. | auto (`0`) |
-| `HALO_DEEPEP_GPU_TIMEOUT_SECONDS` | Device-side spin budget for the dispatch/combine barrier (below). **elastic only** — the V1 buffer's ctor takes no timeout, so a value set under `legacy` is ignored with a warning. | `100` |
-| `HALO_EP_SHARED_OVERLAP` | `1` runs the always-active shared-expert FFN on a side stream concurrent with the routed dispatch all-to-all (every wrapped family with a shared expert; GPT-OSS, Qwen3 MoE, LFM-2, Gemma 4 and Zaya have none). | off |
-| `HALO_EP_CAPACITY_DEDUP` | `0` restores the per-MoE-layer buffer-capacity all-reduce, and with it a private arena per layer. | `1` (on) |
+The DeepEP knobs — `EP_DISABLE_GIN`, `EP_SUPPRESS_NCCL_CHECK`, `CUDA_DEVICE_MAX_CONNECTIONS`,
+`HALO_DEEPEP_GIN_MAX_TOKENS_PER_RANK`, `HALO_DEEPEP_NUM_SMS`, `HALO_DEEPEP_NUM_QPS`,
+`HALO_DEEPEP_GPU_TIMEOUT_SECONDS`, `HALO_EP_SHARED_OVERLAP` and `HALO_EP_CAPACITY_DEDUP` — are catalogued
+with their defaults in [Environment variables](../reference/configuration-reference.md#environment-variables).
+
+`CUDA_DEVICE_MAX_CONNECTIONS=1` (the image `ENV`) serializes device work onto one hardware queue and is
+free: neutral on dense and `ep_size=2`, **+9.7%** on `ep_size=8` (8×B300, gpt-oss-20b, seq 4096, GC on).
+It is latched at `cuInit`, so a launch outside the image exports it before the process starts, and it
+does not make the racy single-domain multi-group shape safe ([below](#ep-grouping-what-is-reliable)).
 
 **These must agree across every rank of the job**: `HALO_EP_CAPACITY_DEDUP`,
 `HALO_DEEPEP_GPU_TIMEOUT_SECONDS`, `HALO_DEEPEP_NUM_SMS`, `HALO_DEEPEP_NUM_QPS`,
@@ -401,8 +399,9 @@ default. Use the full `PATH` export above.
 **`undefined symbol: _ZN5torch9TypeErrorC1EPKcz`.** The `.so` was built against a different PyTorch. Rebuild
 from source.
 
-**`NVSHMEM_DIR is not specified`.** Install `nvidia-nvshmem-cu13` (CUDA 13.x) or `nvidia-nvshmem-cu12`
-(12.x), or set `NVSHMEM_DIR`. With torch 2.11+cu130 the cu13 build is already transitive.
+**`NVSHMEM_DIR is not specified`.** The cu13 NVSHMEM wheel is missing: `pip install nvidia-nvshmem-cu13`
+(torch 2.11+cu130 normally brings it), or set `NVSHMEM_DIR`. Never add `nvidia-nvshmem-cu12` on top
+([Build from source](#build-from-source)).
 
 **`No device id is provided via init_process_group`.** A warning, not an error — the training launcher binds
 the device eagerly via `device_id=`, so it does not appear in normal runs.

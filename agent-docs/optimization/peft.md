@@ -91,8 +91,7 @@ this and keeps its adapters; on text-only data those adapters receive no gradien
 zero initialization, costing optimizer state and nothing else.
 
 One consequence for a mistyped target: a name that matches a container rather than a leaf (`mlp` on
-Qwen3) drops out of the injection with that warning instead of aborting it, so the run trains the
-targets that did match. Read the excluded count — it is the tell.
+Qwen3) drops out of the injection with that warning, so the run trains the targets that did match. Read the excluded count — it is the tell.
 
 ### Hyperparameters
 

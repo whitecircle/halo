@@ -2,8 +2,6 @@
 
 Every "should I use X?" reduces to one question: which bottleneck does X attack, and is that the one you have? The **roofline** ([§2](#2-the-roofline--arithmetic-intensity-and-the-ridge-point)) answers it; [§3](#3-the-four-bottlenecks-a-step-can-hit) names the four bottlenecks a step can hit. The [Optimization](../optimization/README.md) pages each describe one lever — this page describes the machine they pull on.
 
-**How to read it.** §1–§2 build the one tool the rest of the page uses (the roofline); §3–§8 apply it on a single GPU; §9 adds GPUs and the communication wall; §10–§11 cover inference vs training and how to measure your own step. Read in order once; afterwards §3's table and the [rules of thumb](#rules-of-thumb) are the index.
-
 ## Vocabulary
 
 - **FLOP** — one multiply or add. A matmul `(M×K) @ (K×N)` costs `2·M·N·K` FLOPs. A B300 does ~1.8×10¹⁵ bf16 FLOP/s (§1).
@@ -348,9 +346,12 @@ Split a model across GPUs and a third speed enters the picture: inter-GPU bandwi
 | Link | Connects | Bandwidth/GPU | vs HBM |
 |---|---|---|---|
 | **HBM** | a GPU to its own memory | **~6.6 TB/s** (measured) | 1× |
-| **NVLink / NVSwitch** | GPUs within a node / NVL72 rack | **~1.8 TB/s** spec (NVLink 5); NCCL all-reduce bus bw **767 GB/s** measured on 16 GPUs across 2 nodes | ~4× slower (spec) |
+| **NVLink / NVSwitch** | GPUs within a node / NVL72 rack | **~1.8 TB/s** spec (NVLink 5) | ~4× slower (spec) |
 | **PCIe** | CPU ↔ GPU | ~64 GB/s/dir (Gen5 ×16) | ~100× slower |
 | **InfiniBand / Ethernet** | across nodes | ~50 GB/s (400 Gb/s NDR; ~46–48 effective) | ~130× slower |
+
+The one recorded collective, an NCCL all-reduce at **767 GB/s** bus bandwidth, ran on 16 GPUs across two
+nodes, so it measures a job that crosses the node boundary, not NVLink alone.
 
 ![The bandwidth ladder on a log scale: HBM at 6.6 TB/s measured (spec 8 TB/s), NVLink/NVSwitch inside the node at 1.8 TB/s spec (~4× below HBM), with the repo's one recorded all-reduce bus bandwidth, 767 GB/s across 16 GPUs on 2 nodes, drawn as the measured bar, PCIe Gen5 ×16 at 64 GB/s per direction (~100× below HBM), and InfiniBand NDR across nodes at ~48 GB/s (~130× below HBM, the node boundary). Filled bars are measured, dashed outlines are spec; a collective is priced by the slowest tier it touches](../assets/diagrams/interconnect_tiers.png)
 
@@ -407,7 +408,7 @@ Each mode buys memory headroom by spending a specific collective.
 
 FSDP2's `fully_shard` shards all three, and the toolkit's default `reshard_after_forward=False` keeps each unit's gathered parameters resident from its forward to its backward — the ZeRO-2 analog.
 
-`fsdp_reshard_after_forward: true` is the ZeRO-3 analog: it drops the gathered copy after the forward and re-gathers it for the backward, ~1.5× the wire bytes for a lower peak. It is available only where no expert-distribution group exists. No DeepSpeed runs here; ZeRO is the naming only ([Data Parallelism](../parallelism/data-parallelism.md#zero-2-vs-zero-3-reshard_after_forward)).
+`fsdp_reshard_after_forward: true` is the ZeRO-3 analog: it drops the gathered copy after the forward and re-gathers it for the backward, ~1.5× the wire bytes for a lower peak. It is rejected wherever an expert-distribution group exists and under TP with `data_parallel_size > 1`. No DeepSpeed runs here; ZeRO is the naming only ([Data Parallelism](../parallelism/data-parallelism.md#zero-2-vs-zero-3-reshard_after_forward)).
 
 ### Why N× GPUs is not N× throughput
 

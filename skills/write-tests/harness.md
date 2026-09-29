@@ -241,4 +241,4 @@ SIGTERMs would overwrite the real cause. It then classifies:
   `UsageError`, never a skip.
 
 All of this runs inside the Docker image; selection is by marker, e.g. `pytest -m "gpu and
-core"` (PR) or `pytest -m gpu` (nightly).
+core"` (PR) or `pytest -m gpu` (heavy, many-GPU; run by hand).

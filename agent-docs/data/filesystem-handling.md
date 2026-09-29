@@ -171,7 +171,6 @@ export DIST_SHARED_FILESYSTEM=1          # 0 for per-node local storage
 export HF_HOME=/local/hf_cache
 export HF_DATASETS_CACHE=/local/hf_cache/datasets
 export TMPDIR=/local/tmp
-export TORCH_EXTENSIONS_DIR=/local/torch_extensions
 ```
 
 For a 20B MoE budget roughly: weights ~40 GB (shared, read-only), HF cache ~80 GB (local), temp
