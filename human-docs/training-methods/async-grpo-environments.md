@@ -28,7 +28,7 @@ Each step pushes weights, collects a round of episodes, turns the sampled tokens
 | `qa_search` | factual question answering with a web-search tool | yes |
 | `exam_qa` | multiple-choice and open exams, closed-book unless `open_book: true` | yes |
 | `swe` | edit-run-test loop over a workspace that survives across turns | yes (unless judge-only) |
-| `code_contests`, `codeforces` | write a program, try it in a scratchpad, submit it against hidden tests | yes |
+| `code_contests`, `codeforces` | write a program, try it in a scratchpad, submit it; scores 1 only when every hidden test passes | yes |
 | `mcp` | whatever tools an MCP server advertises | no |
 
 Where the answer is required, a dataset without that column is refused at startup. Actor hosts need what their
@@ -54,8 +54,7 @@ The episode reward is the environment's grade priced by a term, plus its own sha
 
 ```yaml
 rewards:
-  - source: environment    # the env's grade in [0, 1]: pass fraction, answer match, adherence
-    exponent: 2.0          # convex partial credit — half-right earns a quarter
+  - source: environment    # the env's grade in [0, 1]: a code solve, answer match, adherence
 ```
 
 The other two sources, `judge` and `reward_model`, are configured exactly as on the
@@ -92,7 +91,9 @@ Three decisions matter more than the rest.
 
 - **Turn budget.** `rollout_max_tokens` caps one turn, `max_turns` the turns. The trajectory accumulates across turns
   and is never truncated — the context window bounds it, and a row past that fails the step. Watch `episode/turns`:
-  pinned at the cap, raise it; far below, lower it, since turns are sequential and set step time.
+  pinned at the cap, raise it; far below, lower it, since turns are sequential and set step time. A turn cut at
+  its cap, an empty turn, or one that calls only tools that do not exist trains only when its episode scored below
+  the group's mean.
 - **Reasoning effort.** `environment_kwargs.reasoning_effort` (`low` / `medium` / `high` / `random`) sets how much the
   model should think, and `reasoning_effort_profiles` gives each level its own caps, as the code-contests recipes do
   (`{high: {thinking_tokens: 16384, max_submissions: 3, max_test_calls: 6}}`). `rollout_max_thinking_tokens`,
@@ -152,7 +153,9 @@ step: it climbs toward 1 on a short single-turn environment (below ~0.8, add ser
 once a multi-turn round outlasts the update.
 
 `reward/within_group_std` near zero is the quiet failure: every episode in a group scored the same, so the advantages
-are zero and that prompt teaches nothing. Rollouts land in `<output_dir>/completions/` as parquet.
+are zero and that prompt teaches nothing. Such groups are dropped from the loss by default (`drop_degenerate_groups`),
+compared on the environment's reward, not the trainer's length terms. Rollouts land in `<output_dir>/completions/`
+as parquet.
 
 ## Sizing a run
 

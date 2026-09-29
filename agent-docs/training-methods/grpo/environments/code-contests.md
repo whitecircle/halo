@@ -3,7 +3,8 @@
 `CodeContestsEnvironment` (`src/environments/envs/tasks/coding/code_contests.py`) trains
 competitive programming: the model writes a solution, tries it in a scratchpad tool, and submits it
 with `submit_solution`, which runs it against the hidden tests through a [sandbox](sandbox.md).
-The grade is the fraction of tests passed, priced by the reward's `environment` term. Two registry names share the class — `code_contests`
+The grade is 1 when the submitted solution passes every hidden test and 0 otherwise, priced by the
+reward's `environment` term. Two registry names share the class — `code_contests`
 (`output_comparison: exact`) and `codeforces` (token comparison).
 
 It speaks native tool calls, so the server needs a tool-call parser for the model family
@@ -17,8 +18,7 @@ It speaks native tool calls, so the server needs a tool-call parser for the mode
 environment_type: codeforces
 max_turns: 16                # 16 in most recipes, 18 in the curriculum's stage-2 and stage-3 recipes; the class default is 15
 rewards:
-  - source: environment      # the pass fraction of the submitted solution
-    exponent: 2.0            # convex partial credit: half-right earns a quarter
+  - source: environment      # 1 when the submitted solution passes every hidden test, else 0
 environment_kwargs:
   language: python           # or cpp / c, or a list ([python, cpp]) the model picks from
   timeout_per_test: 5
@@ -36,19 +36,18 @@ rollout_thinking_budget_scope: episode
 |---|---|---|
 | `language` | `python` | `python`, `cpp`, `c`, or a list the model picks from |
 | `output_comparison` | `exact` (`tokens` under `codeforces`) | `exact` is trimmed equality reading `\r\n` and `\r` as `\n` on both sides, `tokens` whitespace-token equality |
-| `verdict_detail` | `outcome` | `outcome` states a failed test's verdict class alone (the compiler's first error too, on `bubblewrap`); `full` adds its expected and produced output, exit code, output size and stderr |
+| `verdict_detail` | `outcome` | `outcome` states a failed test's verdict class alone (the compiler's first error too, on `bubblewrap`); `full` adds its expected and produced output, exit status or signal, output size and stderr |
 | `timeout_per_test` | 15 s | Per-test cap when the problem declares none; also the interpreted floor. It and `max_time_limit` must be finite and > 0 |
 | `max_time_limit` | 15 s | Clamp on a declared limit; below `timeout_per_test` it is refused |
 | `compiled_time_limit_scale` | `1.0` | Multiplies a compiled language's per-test limit; a non-finite or non-positive value raises at construction |
 | `max_grading_seconds` | `None` | Wall-clock budget for one grade; a non-positive value raises at construction |
-| `repl_timeout` | 15 s | Cap on one scratchpad run |
-| `max_output_size` | 1 MB | Over-cap stdout is OUTPUT LIMIT EXCEEDED, not truncated |
-| `stop_on_first_failure` | `false` | Stop at the first failing test; the pass fraction becomes a lower bound |
+| `max_output_size` | 1 MB | Over-cap stdout is OUTPUT LIMIT EXCEEDED, not truncated; a test's cap rises to 4× its expected output, so a large correct answer passes |
+| `stop_on_first_failure` | `false` | Stop at the first failing test; the grade is unchanged, `outcome/test_pass_frac` becomes a lower bound |
 | `max_submissions` / `max_test_calls` | 2 / 5 | Per-episode tool budgets, overridable per effort level |
 | `max_turns` | 15 | Backstop; the tool budgets are the tuning lever |
 | `eval_protocol` | `harness` | Evaluation contract; `leaderboard` pins both tool budgets ([Evaluation protocols](#evaluation-protocols)) |
 
-The objective's shape is the `environment` term's `exponent` in the top-level `rewards:` — above 1 it is convex, so half-right earns under half a solve ([Reward Terms](../rewards.md)).
+The grade is all-or-nothing, the judge's accept that pass@1 counts: partial credit would pay a brute force that passes the small tests and times out on the large ones. The `environment` term's `weight` prices a solve; its `exponent` has nothing to reshape ([Reward Terms](../rewards.md)).
 
 `sandbox_backend` / `sandbox_url` pick the [sandbox](sandbox.md#choosing-a-backend) both tools and the grader run on; one that does not confine the program, `local` included, [warns](sandbox.md#choosing-a-backend).
 
@@ -61,10 +60,10 @@ The objective's shape is the `environment` term's `exponent` in the top-level `r
 per level over it, so a profile naming only interaction keys keeps the class budget. The level and its budget reach the
 model through the chat template; on Qwen3.6 that is the shipped effort template the recipes pin.
 
-This environment adds three profile keys, bound per episode:
-
-- `max_submissions` (int ≥ 1) and `max_test_calls` (int ≥ 0) — the episode's tool budgets, stamped at reset and stated in the task message. They make effort buy iteration, not just longer reasoning; without them the strategy collapses to submit-and-fix.
-- `tested_submission_reward` (≥ 0) — paid once when a scratchpad run precedes the first submission. Unstated in the prompt: it steers through the gradient.
+This environment adds two profile keys, bound per episode: `max_submissions` (int ≥ 1) and
+`max_test_calls` (int ≥ 0), the episode's tool budgets, stamped at reset and stated in the task
+message. They make effort buy iteration, not just longer reasoning; without them the strategy
+collapses to submit-and-fix.
 
 A value below its minimum raises at construction; where the level is undetermined at reset, the
 constructor's budgets stand.
@@ -83,8 +82,10 @@ message ("1 graded submission, 0 scratchpad runs").
 
 ## Tools
 
-- The scratchpad — `python_repl` when the run fixes `python`, else `run_code`. It runs a program through the grading sandbox, standard library included, on the `stdin` the call supplies (empty by default), so the model can feed it the statement's sample input or its own; it never sees the graded tests. Each call is one-shot — nothing a run writes survives into the next. A run with no `stdin` that ends in an error or in no output says so in its result, since a program starved of input fails without naming the cause. Past `max_test_calls` a call is refused.
+- The scratchpad — `python_repl` when the run fixes `python`, else `run_code`. It runs a program through the grading sandbox, standard library included, on the `stdin` the call supplies (empty by default), so the model can feed it the statement's sample input or its own; it never sees the graded tests. Past `max_test_calls` a call is refused.
 - `submit_solution` — grades a complete stdin/stdout program against the hidden tests. The only graded channel, with no fenced-code-block fallback. Reaching `max_submissions` ends the episode.
+
+A scratchpad run gets the per-test time limit its language is graded at ([Grading rules](#grading-rules)), and a timeout says so. Its reply leads with any error — the compiler's first diagnostics, or a crash's signal and stderr tail — ahead of the program's stdout ([Sandboxes](sandbox.md#using-it-from-python)). A run with no `stdin` that crashes or prints nothing adds a note naming the missing input (not after a compile failure or a timeout), and every reply ends with the runs left while `max_test_calls` binds.
 
 A refused call is a tool error: it pays `tool_error_penalty`, never `tool_success_reward`. A
 scratchpad run that ends on a sandbox fault ends the episode ([Sandbox faults](sandbox.md#sandbox-faults)). With a
@@ -92,6 +93,8 @@ language list both tools take a required `language` argument enumerating the set
 graded in the language its call names, and a foreign value is refused before admission. The episode
 records the last language as its `language` slice, which the trainer slices metrics by
 ([Logged metrics](../async-grpo/monitoring.md#logged-metrics)).
+
+A final text answer ends the episode ungraded, so the recovery nudge after a cut or empty turn asks for a tool call and names `submit_solution`, where the protocol's empty-turn nudge offers a final answer.
 
 ## Reward
 
@@ -109,67 +112,62 @@ remove its working directory, forcing a rebuild that includes the file, and a `r
 each test's request with its stdin.
 
 - **Comparison.** `exact` comparison spuriously fails correct Codeforces solutions, hence the `codeforces` preset. Token comparison accepts real-valued tokens within a 1e-6 relative tolerance, gated on a float-looking *expected* token, so integer answers stay exact.
-- **Verdict detail.** `outcome` shows each failed test's verdict class (`FAIL`, `RUNTIME ERROR`, `TIME LIMIT EXCEEDED`, `OUTPUT LIMIT EXCEEDED`, `COMPILATION ERROR`, and `ERROR` for a test lost to infra, whose text goes to the log) and, save the compiler's first error on `bubblewrap`, nothing beyond it: stderr, an exit code and an output size can each carry the hidden input the program read. Which tests fail, and with which class, still reaches the policy; `stop_on_first_failure` narrows that to the first failing test, the Codeforces contract. `full` adds them (stderr as its tail, where a traceback names the exception), an infra error's text and a wrong answer's expected and produced output; a second submission then turns the judge into a free test oracle, and probing out-earns scratchpad testing within a group. Scratchpad runs on the model's own inputs show their output in both modes.
-- **Time limits.** The payload's `time_limit` is the per-test cap, else `timeout_per_test`. An interpreted language is floored at `timeout_per_test`, so a C++-tuned limit cannot fail a correct CPython solution; a compiled one is scaled by `compiled_time_limit_scale`. Both are clamped to `max_time_limit`, per graded language.
-- **Grading budget.** Tests run sequentially, so a several-hundred-test problem stalls the round. `max_grading_seconds` is checked between tests and keeps the full pool as denominator — an ungraded test counts as failed, so size it for an honest solution (the recipes: 150 s). `episode/tests_graded_frac` shows a partial grade.
+- **Verdict detail.** `outcome` shows each failed test's verdict class (`FAIL`, `RUNTIME ERROR`, `TIME LIMIT EXCEEDED`, `OUTPUT LIMIT EXCEEDED`, `COMPILATION ERROR`, and `ERROR` for a test lost to infra, whose text goes to the log) and, save the compiler's first error on `bubblewrap`, nothing beyond it: stderr, an exit status or signal and an output size can each carry the hidden input the program read, and the output cap, which rises with the expected output, would reveal its size. Which tests fail, and with which class, still reaches the policy; `stop_on_first_failure` narrows that to the first failing test, the Codeforces contract. `full` adds them (a runtime error's signal or exit status, stderr as its tail, where a traceback names the exception, and an output-limit overrun's size against its cap), an infra error's text and a wrong answer's expected and produced output; a second submission then turns the judge into a free test oracle, and probing out-earns scratchpad testing within a group. Scratchpad runs on the model's own inputs show their output in both modes.
+- **Time limits.** The payload's `time_limit` is the per-test cap, else `timeout_per_test`. An interpreted language is floored at `timeout_per_test`, so a C++-tuned limit cannot fail a correct CPython solution; a compiled one is scaled by `compiled_time_limit_scale`. Both are clamped to `max_time_limit`, per graded language (`GradingSpec.time_limit_for`, which the scratchpad shares). A compiled program's stack is the memory limit, as on Codeforces ([Limits](sandbox.md#limits)).
+- **Grading budget.** Tests run sequentially, so a several-hundred-test problem stalls the round. `max_grading_seconds` is checked between tests, and an ungraded test never counts as passed, so size it for an honest solution (the recipes: 150 s). A grade the budget stopped after a failed test is a wrong answer; one it stopped before any test failed says nothing about the code, so it grades 0 and marks the episode invalid, out of the group baseline (`episode/grade_inconclusive`). `episode/tests_graded_frac` shows a partial grade.
 - **Special judges.** A per-problem `checker` (Python) in the payload overrides comparison: `python checker.py input.txt correct_output.txt solution_output.txt`, accepted only when it exits cleanly and its last stdout token is `1`. It runs at the 15 s infra default, never the solution's limit.
-- **Infra errors.** A grade that hit a backend error with no test running cleanly or passing marks the episode invalid, so the trainer drops it from the group baseline rather than teaching a wrong answer (`episode/grading_infra_outage`). A build past the compile limit is a compile error, a program that replaces its working directory a runtime error, one that floods its output an output-limit or runtime error, and one that removes its working directory runs the next test in a fresh one: verdicts, not infra. The routes a program still has into an infra error are listed under [Sandbox faults](sandbox.md#sandbox-faults).
+- **Infra errors.** A grade that lost tests to the backend with none passed and none failed marks the episode invalid, so the trainer drops it from the group baseline rather than teaching a wrong answer (`episode/grading_infra_outage`). Tests lost to the backend beside passes and no failure leave the grade inconclusive, handled like a budget stop. A build past the compile limit is a compile error, a program that replaces its working directory a runtime error, one that floods its output an output-limit or runtime error, and one that removes its working directory runs the next test in a fresh one: verdicts, not infra. The routes a program still has into an infra error are listed under [Sandbox faults](sandbox.md#sandbox-faults).
 
 ### Reward ladder
 
-The grade is the pass fraction `tests_passed / tests_total` of the submitted solution, priced by the
-reward's `environment` term as `weight × fraction ^ exponent` (`rewards:` above). It is credited only
-on `submit_solution`: an unsubmitted solution and an infra outage both grade 0, and the outage also
-marks the episode invalid. No shaping rung pays out on those either; the resubmission penalty and
-the tool shaping still apply.
+The grade is 1 when the submitted solution passes every hidden test and 0 otherwise, priced by the
+reward's `environment` term (`rewards:` above). It is credited only on `submit_solution` and read off
+the last submission: an unsubmitted solution, an infra outage and an inconclusive grade all grade
+0, and the last two also mark the episode invalid. No shaping rung pays out on those
+either; the resubmission penalty and the tool shaping still apply.
 
 | Component | Knob | Default | Pays |
 |---|---|---|---|
-| `reward/objective` | `rewards:` `weight` / `exponent` | `1.0` / `1.0` | the pass fraction, priced by the environment term |
+| `reward/objective` | `rewards:` `weight` | `1.0` | a solve: every hidden test passed |
 | `reward/submission` | `submission_reward` | `0` | once a contentful graded submission lands |
-| `reward/execution` | `execution_progress_reward` | `0` | × the fraction of the whole test pool that ran cleanly |
-| `reward/tested_submission` | `tested_submission_reward` (a profile key) | unset | once, if a scratchpad run preceded the first submission |
 | `reward/resubmission` | `resubmission_penalty` | `0` | −1 × each admitted `submit_solution` call after the first |
-| `reward/resubmission` | `improved_resubmission_refund` | `0` | the share of that price a resubmission earns back by beating every earlier pass fraction |
-| `reward/tool_shaping` | `multi_turn_reward` | `0` | >1 tool call and a real submission |
 | `reward/tool_shaping` | `no_tool_use_penalty` / `turn_overflow_penalty` | `0` | zero tool calls / burning `max_turns` |
 | `reward/tool_shaping` | `length_cutoff_penalty` | `0` | per engine-cut or empty turn the episode recovers from |
 | `reward/turn_shaping` | `tool_success_reward` / `tool_error_penalty` | `0` / `0` | per executed call; this env zeroes the protocol's 0.05 / 0.1 |
 
 The shaping rungs bootstrap a weak base that never submits, and self-neutralize within a group once
-every completion reaches them — keep each small next to the objective's weight. The execution rung
-is the anti-sparsity signal: where every completion fails, it separates runnable-but-wrong from
-crashes. Components log as `reward/*` and sum exactly to the reward. A `judge` or `reward_model`
+every completion reaches them — keep each small next to the objective's weight. Components log as
+`reward/*` and sum exactly to the reward. A `judge` or `reward_model`
 term reads the submitted program as a fenced code block, not the tool-call turn that carried it
 ([Reward Terms](../rewards.md#environment-arm)).
 
-A flat resubmission price lands on a fix and on a re-roll alike, and a policy that always resubmits
-after a failure never samples the alternative. With `improved_resubmission_refund` above zero a
-resubmission that beats every earlier result costs `(1 − refund) ×` the price, one that does not costs
-all of it, and the task message states the rule beside the budgets, so stopping on a good partial is
-an option the policy can weigh. Keep the refund under `1`: a free rescue scores level with a first-try
-solve. `episode/resubmission_improved` is the share of resubmissions that improved.
+Each graded submission after the first is a probe of the judge, priced flat whether it fixes or
+re-rolls; where the effort profiles set the budgets, the task message states the price beside them,
+so not resubmitting is an option the policy can weigh. `episode/resubmission_improved` is the share of
+resubmissions whose pass fraction beat every earlier one.
 
 The trainer's two effort length terms sit outside these components, as `reward/effort_length_penalty`
 and `reward/effort_length_floor` ([Effort length reward](../async-grpo/rollouts.md#effort-length-reward));
 the floor's reference is `0.75 ×` each level's own `thinking_tokens`. The recipes keep their sum
 under the resubmission price, so how long an episode reasons never outweighs whether it resubmits;
 with `submission_reward` and `no_tool_use_penalty` at `0.1` each, a graded submission that passes
-nothing still scores above an episode that never attempts.
+nothing still scores above an episode that never attempts, and at every level a solve that pays
+every per-episode price (the level's resubmissions, the recoveries the cap admits, the overflow and
+the length terms) out-scores any zero-objective episode; each failed tool call adds
+`tool_error_penalty` on top.
 `tests/cpu/config/test_env_grpo_reward_economy.py` holds the shipped recipes to those relations.
 
 Behavior counters ride alongside: `episode/submission_rate`, `episode/test_calls`,
-`episode/tested_before_submission` (over submitting episodes, the rate the tested-submission bonus
-targets), `episode/grading_budget_hit`, and `episode/language_switches` where the model picks the
-language.
+`episode/tested_before_submission` (over submitting episodes), `episode/grading_budget_hit`, and
+`episode/language_switches` where the model picks the language.
 
 ## Dataset
 
 `prompt` is the statement; `answer` the grading payload, a JSON string or dict — required
 (`requires_answer`), since the payload IS the test set a submission is graded against. A bare
 list, `{"test_cases": [...]}` and the full form are accepted. A payload that holds no tests (an empty
-list, no `tests`/`test_cases` key, unparseable JSON, a scalar) fails the episode at reset, so the
-trainer drops it from the group baseline:
+list, no non-empty `tests`/`test_cases`, unparseable JSON, a scalar) fails the episode at reset as a
+rollout error, so the trainer drops it from the group baseline:
 
 ```json
 {"prompt": "<problem statement>",

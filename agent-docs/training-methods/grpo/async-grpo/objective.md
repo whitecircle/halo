@@ -15,16 +15,15 @@ Watch `sampling/logratio_mean` first: the unclamped mean log-ratio in nats, near
 
 ## Trust region masks
 
-The `isr_*` stages mask rather than reweight: a masked token loses its policy-gradient term but keeps its KL anchor. All default off, all raise without the IS correction, and they compose. The three trajectory stages pool a trajectory's turn rows; the token band is per token.
+The `isr_*` stages mask rather than reweight: a masked token loses its policy-gradient term but keeps its KL anchor. All default off, all raise without the IS correction, and they compose. Each stage pools a trajectory's turn rows.
 
 | Knobs | Stage | Metric |
 |---|---|---|
-| `isr_band_min` / `isr_band_max` | Mask a token whose raw ratio leaves the band. Start `[0.5, 2]`. | `sampling/is_token_band_masked_frac` |
 | `isr_geo_band_min` / `isr_geo_band_max` | Mask a trajectory whose `exp(mean log-ratio)` leaves it. | `sampling/is_geo_band_masked_frac` |
 | `isr_veto_min` | Mask a trajectory if any corrected token's raw ratio drops below it. | `sampling/is_veto_masked_frac` |
 | `isr_opsm_delta` | Mask negative-advantage trajectories drifting past N nats. | `sampling/is_opsm_masked_frac` |
 
-Paired bands need both bounds, `0 < min < 1 < max`. The code-contests recipes run the geometric band at `[0.95, 1.05]` with `isr_veto_min: 1.0e-4` and `isr_opsm_delta: 0.05`, and leave the token band off.
+The geometric band needs both bounds, `0 < min < 1 < max`. The code-contests recipes run it at `[0.95, 1.05]` with `isr_veto_min: 1.0e-4` and `isr_opsm_delta: 0.05`.
 
 **Size the geometric band above the numerical floor.** Trainer and engine are different bf16 stacks: their mean log-ratio is negative at identical weights, steeper the flatter the distribution — ~0.002 nats/token at sampling entropy 0.4, ~0.04 at 1.0. A band inside it masks every step; sustained masking at low entropy is a disagreement to fix, not a band to widen.
 
@@ -36,14 +35,7 @@ TRL's `off_policy_mask_threshold` is refused: it reads a batch key this trainer 
 
 ## Advantages
 
-`advantage_mode` sets the baseline and the negative-side treatment:
-
-- `mean` (default) — plain group-mean baseline.
-- `qae` — per-group `advantage_quantile` baseline (default `0.4`), so only rare successes train.
-- `asymmetric` — mean baseline, then `advantage_pos_scale` / `advantage_neg_scale` (`1.0` / `0.4`).
-- `neg_mask_hard` — zero negatives in groups where no member's objective reward reached `advantage_hard_group_threshold` (`0.5`).
-
-The code-contests recipes run `asymmetric` with `advantage_neg_scale: 0.7`. `scale_rewards` picks the divisor:
+A trajectory's advantage is its total reward minus the mean over its group's valid members. `scale_rewards` picks the divisor:
 
 | Value | Effect |
 |---|---|
@@ -55,7 +47,13 @@ The code-contests recipes run `asymmetric` with `advantage_neg_scale: 0.7`. `sca
 
 A non-finite reward or advantage fails the step on every rank: under `batch` scaling a single one makes the shared std, and so every advantage of the step, non-finite.
 
-`drop_degenerate_groups` defaults **on** here (off for online GRPO): all-alike groups carry no gradient but still inflate the DAPO normalizer (`sampling/degenerate_group_frac`). `mask_truncated_completions` is enforced here, not in TRL's generation path; the recipes leave it off.
+A reasoning close the engine forced at the thinking budget (`rollout_reasoning_end_token` at sampling log-prob exactly 0) gets ratio 0 like any masked token, keeping the DAPO normalizer: it was not the policy's choice, and trained with the episode's advantage it moves the model's own probability of ending its reasoning. `sampling/forced_close_frac` counts these tokens; a tokenizer without the marker keeps them in the loss with a warning. The ratio reaches the loss only through the importance-sampling correction, so a run that enforces a vLLM thinking budget (a level's `thinking_tokens` or `rollout_max_thinking_tokens`) refuses to start without it.
+
+## Untrainable turns
+
+A turn the engine cut off, one the model ended on nothing, and one whose every call named a nonexistent tool ([Rollouts](rollouts.md#training-on-sampled-tokens)) train only on a negative advantage (strictly below 0). Rewarded, the runaway reasoning, the empty stop or the invented call would be reinforced whenever the episode recovers; left out entirely, a failing episode's signal lands on its other turns alone and the over-long reasoning behind a cut grows unchecked. The row's `tool_mask` is cleared before the DAPO normalizer is taken, in train and eval alike, so a dropped row counts in neither the loss nor the normalizer; a forced reasoning close inside a kept row still gets ratio 0. `sampling/untrainable_rows_frac` is the share of rows tagged, `sampling/untrainable_rows_trained_frac` the share of those that reached the loss.
+
+`drop_degenerate_groups` defaults **on** here (off for online GRPO) and judges a group on the reward each environment settled: its grade, its shaping and every external score, without the trainer's effort-length terms. Those price every episode differently, so on the trained total no group would ever tie. A group whose members all settled the same reward has no contrast to learn from beyond the length terms, yet its tokens still inflate the DAPO normalizer (`sampling/degenerate_group_frac`). `mask_truncated_completions` is enforced here, not in TRL's generation path; the recipes leave it off.
 
 ## KL and template protection
 

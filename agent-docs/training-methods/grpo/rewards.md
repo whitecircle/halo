@@ -22,7 +22,7 @@ Every term takes `name` (its metric key, `reward/<name>` on the environment arm,
 
 | `source` | Score | Arm |
 |---|---|---|
-| `environment` | the environment's own grade (pass fraction, answer match, adherence) | environments |
+| `environment` | the environment's own grade (a solve on every hidden test, answer match, adherence) | environments |
 | `judge` | a generative judge over the requirements below | both |
 | `reward_model` | a served Bradley-Terry or sequence-classification model | both |
 | `accuracy`, `format` | the RLVR graders | online |
@@ -63,15 +63,15 @@ A `*ForSequenceClassification` or `*ForRewardModel` checkpoint served by the rol
 
 ## Environment arm
 
-An environment grades, the terms price. `_grade_episode(trajectory, context)` returns an `EpisodeGrade`: `objective`, the environment's score in `[0, 1]` (pass fraction, answer match, adherence), and `shaping`, its own episode-level terms by bare name. The episode reward is the sum of its `reward/*` components:
+An environment grades, the terms price. `_grade_episode(trajectory, context)` returns an `EpisodeGrade`: `objective`, the environment's score in `[0, 1]` (a solve on every hidden test, answer match, adherence), and `shaping`, its own episode-level terms by bare name. The episode reward is the sum of its `reward/*` components:
 
 - `reward/turn_shaping` — the per-turn deltas accrued during the episode (tool credit and penalties, ReAct thought credit).
-- `reward/tool_shaping` — native-protocol environments only: their episode-level knobs (`no_tool_use_penalty`, `multi_turn_reward`, `turn_overflow_penalty`, `length_cutoff_penalty`), from `_episode_shaping`.
-- `reward/<name>` — each of the environment's shaping terms (code contests: `submission`, `execution`, `tested_submission`, `resubmission`).
+- `reward/tool_shaping` — native-protocol environments only: their episode-level knobs (`no_tool_use_penalty`, `turn_overflow_penalty`, `length_cutoff_penalty`), from `_episode_shaping`.
+- `reward/<name>` — each of the environment's shaping terms (code contests: `submission`, `resubmission`).
 - `reward/objective` — `weight × grade ^ exponent` from the `environment` term.
 - `reward/<name>` — each `judge` / `reward_model` term.
 
-`rewards` defaults to `[{source: environment}]` and reaches the environment constructor as `reward_terms`. A class declares its shaping names in `SHAPING_COMPONENTS` (the union over the class hierarchy); `turn_shaping` and every declared shaping name are reserved for shaping, and a reward term may not take one. There is no failure offset: a constant cancels in the group baseline. An environment whose grade carries no signal (a null `answer` cell, a grader outage) grades 0 and marks the episode `episode_invalid`, out of the baseline.
+`rewards` defaults to `[{source: environment}]` and reaches the environment constructor as `reward_terms`. A class declares its shaping names in `SHAPING_COMPONENTS` (the union over the class hierarchy); `turn_shaping` and every declared shaping name are reserved for shaping, and a reward term may not take one. There is no failure offset: a constant cancels in the group baseline. An environment whose grade carries no signal (a null `answer` cell, a grader outage, a code grade that stopped before any test failed) grades 0 and marks the episode `episode_invalid`, out of the baseline.
 
 The external terms are scored after the episode ends. At the terminal step the environment prices its own side and marks the reward pending; the episode dispatcher — the Ray actor and the eval runner both drive through it — awaits `settle_async` for every episode it closed, and a sync caller uses `env.settle(ids)`. Reading `rollout_metrics` on an unsettled episode raises. An episode the **eval** driver lost (a generation that failed past its retries) is graded on what it earned and never sent to a scorer; unless its own request caused the failure, the eval then discards that grade and reports the sample as a [generation error](environments/evaluation.md#running-an-evaluation). The training actor instead drops the partial trajectory and returns an error row at reward 0. An episode a [sandbox fault](environments/sandbox.md#sandbox-faults) ended is never sent to a scorer either, and logs no `episode/reward_scored`. A scorer reads the prompt turns before the first assistant turn, the policy's turns after them, and the row's `answer` as the reference; code contests hands it the submitted program as a fenced code block. A failed verdict contributes 0 for that term and marks the episode `episode_invalid`, which the eval runner reports as an error row; `episode/reward_scored` is the per-episode 1/0. The launch probe covers every external term through the environment's `verify_backend`. One scorer per environment instance, so judge concurrency is `max_concurrency` per Ray actor.
 

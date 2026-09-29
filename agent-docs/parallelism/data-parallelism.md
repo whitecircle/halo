@@ -180,9 +180,10 @@ width, slow inter-node fabric, small microbatches) and the memory is there.
 The in-backward EP expert and router hooks gate on the same `sync_gradients`, and the deferred EP
 sweep, the TP replicated-gradient sweep and the gradient clip run after the window's last backward,
 so all of them read the same reduced gradients as before. Rejected under PP (the schedule already
-reduces once per step), TP at `data_parallel_size==1` (no FSDP2 wrap to defer) and QLoRA (no wrap;
-its sweep already runs once per step). Under `accelerate launch` it is warned and ignored:
-accelerate's `no_sync` already skips the reduce on non-final microsteps.
+reduces once per step), TP at `data_parallel_size==1` (no FSDP2 wrap to defer), QLoRA (no wrap;
+its sweep already runs once per step) and `fsdp_reshard_after_forward: true` (the held unsharded
+gradient is the state ZeRO-3 exists to shard; defer under ZeRO-2 instead). Under `accelerate launch`
+it is warned and ignored: accelerate's `no_sync` already skips the reduce on non-final microsteps.
 
 ### EP1 expert sharding
 

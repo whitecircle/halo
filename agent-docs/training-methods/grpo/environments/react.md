@@ -27,7 +27,7 @@ environment_kwargs:
 | `require_thought` | `true` | gate for that penalty; a turn doing neither is free either way |
 | `tool_budgets` | `{}` | per-tool episode caps, `{tool: cap}`; `0` disables a tool, an over-cap call is refused as a tool error |
 
-The knobs every environment shares are in the [overview](README.md#configuration). The native protocol's episode-level knobs (`no_tool_use_penalty`, `multi_turn_reward`, `turn_overflow_penalty`, `require_tool_use`) are not parameters here and raise `TypeError`.
+The knobs every environment shares are in the [overview](README.md#configuration). The native protocol's episode-level knobs (`no_tool_use_penalty`, `turn_overflow_penalty`) are not parameters here and raise `TypeError`.
 
 ## Tools
 
@@ -41,7 +41,7 @@ The grade is 1 when the final answer matches, 0 otherwise, priced by the reward'
 
 Per turn: `+thought_reward` or `-no_thought_penalty` for the Thought, `+tool_success_reward` / `-tool_error_penalty` for the call, paid up to `tool_reward_cap`; these deltas log as `reward/turn_shaping`. Every magnitude must be ≥ 0; the minus is applied at the use site, so a negative value raises instead of paying a penalty as a bonus.
 
-A call that ends on a sandbox fault is booked by its class and ends the episode ([Sandbox faults](sandbox.md#sandbox-faults)). An `Action:` naming an unregistered tool is a tool error whose observation lists the real tools, and that turn is dropped from training. A turn the engine cut short, or one that comes back empty, is neither executed nor graded: the environment appends a nudge asking for the Action or Final Answer and retries within `max_turns` and `max_length_cutoff_recoveries`; both kinds of turn are dropped from training. A turn with text but neither an Action nor a Final Answer gets the format hint instead and stays trainable.
+A call that ends on a sandbox fault is booked by its class and ends the episode ([Sandbox faults](sandbox.md#sandbox-faults)). An `Action:` naming an unregistered tool is a tool error whose observation lists the real tools, and that turn trains only on a negative advantage ([Untrainable turns](../async-grpo/objective.md#untrainable-turns)). A turn the engine cut short, or one that comes back empty, is neither executed nor graded: the environment appends a nudge asking for the Action or Final Answer and retries within `max_turns` and `max_length_cutoff_recoveries`; both kinds of turn train only on a negative advantage. A turn with text but neither an Action nor a Final Answer gets the format hint instead and stays trainable.
 
 ## Dataset
 

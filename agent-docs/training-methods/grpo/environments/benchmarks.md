@@ -7,7 +7,7 @@ multiple-choice or open-ended exams (MMLU-Pro, GPQA, MMLU, ARC). Both live in
 tool-call parser on the server ([Rollout Configuration](../async-grpo/rollouts.md#tool-calls)).
 
 `qa_search` is a factory preset over `NativeToolUseEnvironment` — search tools, a research-assistant
-prompt, `require_tool_use=True` — not its own class. `ExamQAEnvironment` is closed-book by default.
+prompt, a required `answer` column — not its own class. `ExamQAEnvironment` is closed-book by default.
 `examples/grpo/environmental/qwen3_5/vllm/qwen3.6-35b-a3b-exam-qa-full-ep4.yaml` is a shipped recipe.
 
 ## Configuration
@@ -26,7 +26,6 @@ environment_kwargs:
 | `include_python_tools` | `false` | `qa_search` only: adds the sandboxed `python` tool for numeric QA |
 | `open_book` | `false` | `exam_qa` only: registers the search tool. Setting `search_backend` closed-book raises |
 | `system_prompt` | class prompt | Replaces the built-in instructions |
-| `require_tool_use` | `true` on `qa_search` | Flags an episode that called no tool; the charge is `no_tool_use_penalty` |
 
 A fifth backend, `mock`, returns fabricated snippets and is refused unless
 `HALO_ALLOW_MOCK_SEARCH=1`: its results pay `tool_success_reward` like a real search, so a training

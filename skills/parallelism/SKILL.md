@@ -132,7 +132,10 @@ describes a validator or contract, never a launchable topology
 - **`fsdp_shard_ep1_experts=False` with TP or CP**, and **`fsdp_reshard_after_forward=True`
   wherever an expert-distribution group exists** — the gate is `is_ep_mode`
   (`ep_group_size > 1`), so pure ETP (`ep_size=1`, `expert_tp_size>1`) is rejected alongside EP —
-  **or with TP at `dp_size>1`**. `_validate_fsdp_settings` raises.
+  **or with TP at `dp_size>1`**; **`fsdp_defer_grad_sync=True` with TP at `dp_size==1`** (no FSDP2
+  wrap to defer) **or with `fsdp_reshard_after_forward=True`** (the held unsharded gradient is the
+  state ZeRO-3 shards — defer under ZeRO-2). `_validate_fsdp_settings` raises; QLoRA refuses
+  every FSDP shaping knob at trainer construction.
 - **Expert LoRA with ETP** (`expert_tp_size > 1` + `expert_lora`) — `_validate_expert_tp` raises:
   the replicated adapter half would take a partial, never-synced gradient.
 - **LoRA/PEFT with TP** (`tp_size > 1`) — adapters are plain tensors outside the TP graph, so the

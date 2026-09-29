@@ -72,7 +72,7 @@ every score (the telemetry line still counts it), and `generation_errors` counts
 no sample reads `nan`.
 
 `invalid` counts the samples scored 0 with no signal, each carrying `error`: an invalid grade (a
-grading or sandbox outage, a failed scorer, a null `answer`) or an episode whose run raised. Invalid
+grading or sandbox outage, an inconclusive code grade, a failed scorer, a null `answer`) or an episode whose run raised. Invalid
 samples stay in the means, unlike in training, where the baseline drops them.
 
 ## Output files

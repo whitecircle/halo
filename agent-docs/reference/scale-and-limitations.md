@@ -85,7 +85,7 @@ drops the optimizer shards but not the funnel.
 - **Dense model, fits with FSDP2**: plain `torchrun` DP (+ TP node-local for very
   large attention). From-scratch via `init_from_scratch`.
 - **MoE model**: EP (node-local or cross-node / NVL72-wide), optionally + TP for
-  attention, or + ETP to also shard each expert's FFN (EP+ETP, node-local), or
+  attention, or + ETP to also shard each expert's FFN (EP+ETP; each ETP group stays in one NVLink domain), or
   pure ETP (`ep_size=1`) when experts stay replicated. Continued pre-training or
   fine-tuning.
 - **Huge corpus**: pre-tokenize with `scripts/before_training/prepare_dataset.py --num-shards N`

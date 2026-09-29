@@ -270,6 +270,8 @@ single-domain multi-group EP with `ep_size > 2` (`ep4+tp2` on 8) and multi-domai
 | native EP expert LoRA | rejected — the grouped expert adapters ride the EP-distributed expert weights, which both TP gates skip by param identity, so no adapter shape under EP+TP is gradient- or save/merge-covered. Train expert LoRA under EP without TP | same |
 | QLoRA / `load_in_4bit` | rejected — the TP loaders materialize plain de-quantized weights | `model_loading.py` |
 | `fsdp_reshard_after_forward` | rejected at `data_parallel_size > 1` — a plain all-gather on TP-sharded DTensor params has no registered sharding strategy | `_validate_fsdp_settings` |
+| `fsdp_reshard_after_backward: false` | rejected — the TP setup shards through its own `fully_shard` calls | same |
+| `fsdp_defer_grad_sync` | rejected at `data_parallel_size == 1` — no FSDP2 wrap, so no reduce to defer | same |
 | `fsdp_shard_ep1_experts: false` | rejected — the TP path shards `ep1` experts unconditionally | same |
 | `use_hsdp` | rejected — TP builds its own `(dp, tp)` mesh | `_validate_hsdp` |
 | `init_from_scratch` | rejected — no sharded random init | `model_loading.py` |

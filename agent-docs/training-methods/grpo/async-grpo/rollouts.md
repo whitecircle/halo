@@ -63,8 +63,7 @@ which state the level and its budget in the system block from the `reasoning_eff
 `reasoning_effort_profiles` overrides the class's per-level table. Under a set
 `rollout_max_thinking_tokens`, a level's `thinking_tokens` is capped by it per turn, and the turn's
 total drops to that per-turn cap plus the global answer headroom; left `null`, the level caps
-reasoning alone and `rollout_max_tokens` still bounds the turn. A profile may also carry
-`max_length_cutoff_recoveries`.
+reasoning alone and `rollout_max_tokens` still bounds the turn.
 
 `thinking_tokens` is a **vLLM** request field (`thinking_token_budget`). On `rollout_backend:
 sglang` a level's budget reaches no request field (warned once per process): nothing caps CoT
@@ -72,7 +71,7 @@ below `rollout_max_tokens`; the level still steers through the chat template, an
 stays the reference of the [effort length floor](#effort-length-reward).
 
 A turn the engine cuts at its token cap, or one the model ends with neither a tool call nor visible
-content, is nudged and retried within `max_turns` and the episode's `max_length_cutoff_recoveries`
+content, is nudged and retried within `max_turns` and `max_length_cutoff_recoveries`
 (`environment_kwargs`; `null` = every such turn within `max_turns`). A recovered turn lands in
 `episode/length_cutoff_turns` or `episode/empty_turns` and pays the protocol's `length_cutoff_penalty`
 (default `0`); the turn that exhausts the cap, or lands on the last turn, ends the episode truncated,
@@ -86,9 +85,11 @@ that lets an episode's reasoning grow to any per-turn cap. Under `episode` the b
 total: a turn's engine cap is the budget minus the reasoning the earlier turns spent, never below
 `rollout_thinking_turn_reserve` (default `512`, enough to close the reasoning and act) and never above
 `rollout_max_thinking_tokens`, which under this scope is the ceiling one turn may take rather than a
-clamp on the level's budget. The per-turn total (`rollout_max_tokens`, narrowed per level to the first
-turn's cap plus the answer headroom) stays constant across the episode, and a recovery turn gets only
-what is left. `episode/thinking_budget_exhausted` is the fraction of episodes whose budget ran down to
+clamp on the level's budget. A turn's total (`rollout_max_tokens`) narrows with it: the turn's cap plus
+the run's answer headroom (`rollout_max_tokens − rollout_max_thinking_tokens`; all of
+`rollout_max_tokens` when `rollout_max_thinking_tokens` is unset, so the total stays constant), never
+above the first turn's, and a recovery turn gets only what is left. A completion that fills its turn's total
+reads as a cut. `episode/thinking_budget_exhausted` is the fraction of episodes whose budget ran down to
 the reserve. Trainer construction and the eval scripts refuse a scope some episode could not run
 under: with `rollout_max_thinking_tokens` unset, the environment must set `reasoning_effort` and
 every level's `thinking_tokens`, and no level's budget may sit below the reserve.
@@ -149,7 +150,8 @@ turn never lowers the score. An episode with no thinking budget or no assistant 
 turns that carry no reasoning at all pay the whole weight.
 
 Keep `c_max + floor weight` below what the environment charges for the decisions it prices (the
-code-contests recipes: `0.1 + 0.05` under the `0.2` resubmission price). Smaller shaping terms, a
+Qwen3.6 vLLM code-contests recipes: `0.08 + 0.10`, the other code-contests recipes `0.1 + 0.05`, all
+under the `0.2` resubmission price). Smaller shaping terms, a
 `0.05` tool error among them, can still be outweighed by a long trace at the lowest level. Watch
 `reward/effort_length_penalty` and `reward/effort_length_floor`.
 
@@ -192,12 +194,19 @@ vLLM returns the ids under `--return-tokens-as-token-ids`; SGLang requests them 
 flag. The importance-sampling correction additionally needs vLLM's
 `--logprobs-mode processed_logprobs` ([Objective](objective.md#importance-sampling-correction)).
 
-Turns the rollout marked unusable are left out: engine-cut (`truncated`), turns the model ended with
-neither a tool call nor visible content (`empty`), and turns whose every tool call named a nonexistent
-tool (`calls_rejected`). They stay in the next turn's prompt. An episode with every turn excluded
-yields one fully masked row.
+Turns the rollout marked untrainable — engine-cut (`truncated`), ended with neither a tool call nor
+visible content (`empty`), or every tool call naming a nonexistent tool (`calls_rejected`) — become
+rows too, tagged: a tagged row stays in the loss only when its trajectory's advantage is negative
+([Objective](objective.md#untrainable-turns)). Such a turn stays in the next turn's prompt. An episode
+whose turns are all untrainable trains on that condition alone; one that yields no row at all yields
+one fully masked row.
 
-A trajectory where any trainable turn lost its completion ids drops whole to the single re-tokenized
+The negative-only rows need the turn's sampled ids. An untrainable turn without them, and every
+untrainable turn on the single-row path below, trains on nothing: the re-render closes a cut turn with
+template tokens the engine never sampled. `sampling/untrainable_turns_rowless_frac` is the share of
+untrainable turns that became no row (no ids, zero tokens, or over `max_train_row_tokens`).
+
+A trajectory where any other turn lost its completion ids drops whole to the single re-tokenized
 row, warned once with the engine's remedy — all-or-nothing, never a partial capture.
 
 A turn that kept its completion ids but lost its prompt ids re-renders only that prompt through the

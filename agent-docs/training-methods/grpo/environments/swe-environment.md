@@ -37,8 +37,8 @@ Reward knobs are the native protocol's ([Native Tool-Use](native-tool-use.md)).
 - `run_bash_command` — runs one shell command with `bash` in the workspace, under the same
   `code_timeout`. A zero exit returns **stdout only** — stderr is discarded, and empty output
   comes back as `Code executed successfully (no output)`, so diagnostics need an explicit `2>&1`.
-  A non-zero exit returns stdout plus `Error: <last stderr line>`: an observation, not a tool
-  error. A sandbox fault on any tool ends the episode instead
+  A non-zero exit leads with `Error:` and the signal that killed it or the tail of stderr, then
+  the stdout: an observation, not a tool error. A sandbox fault on any tool ends the episode instead
   ([Sandbox faults](sandbox.md#sandbox-faults)). A removed workspace is recreated empty.
 - `write_file` — writes a file later turns and `run_code` see.
 - `read_file` — reads one back; a missing file is a message, not a tool error.

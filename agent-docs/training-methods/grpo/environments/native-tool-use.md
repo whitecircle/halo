@@ -17,9 +17,7 @@ environment_kwargs:
 | Knob | Default | Effect |
 |---|---|---|
 | `max_tool_calls_per_turn` | `5` | calls executed per turn; extras are dropped and trimmed off the stored message, so every advertised call has a result |
-| `require_tool_use` | `false` | flags a zero-tool-call finish in the step info; pays nothing by itself |
 | `no_tool_use_penalty` | `0` | charged once on an episode that made no tool call |
-| `multi_turn_reward` | `0` | paid once on more than one tool call |
 | `turn_overflow_penalty` | `0` | charged once on a truncated episode |
 | `length_cutoff_penalty` | `0` | charged per unproductive turn the episode recovers from — engine-cut, or ended with neither a tool call nor visible content; the turn that exhausts the recovery cap, or lands on the last turn, pays the overflow price instead |
 | `tool_budgets` | `{}` | per-tool episode caps, `{tool: cap}`; `0` disables a tool |
@@ -45,9 +43,9 @@ The grade, in order: an episode that never completed grades 0; a `validator` cal
 
 A row whose `answer` key holds null grades 0 and is marked `episode_invalid`, so the trainer drops it from the group baseline instead of grading every completion 1.
 
-Per episode: `no_tool_use_penalty`, `multi_turn_reward` and `turn_overflow_penalty` are charged once each, by their conditions above, `length_cutoff_penalty` once per recovered cut or empty turn, and they log together as `reward/tool_shaping`; the per-call deltas log as `reward/turn_shaping`. Overflow is charged on any truncated episode, including one killed mid-flight — except one its driver lost, where the fault is not the policy's. Every magnitude must be ≥ 0; the minus is applied at the use site, so a negative value raises instead of paying a penalty as a bonus.
+Per episode: `no_tool_use_penalty` and `turn_overflow_penalty` are charged once each, by their conditions above, `length_cutoff_penalty` once per recovered cut or empty turn, and they log together as `reward/tool_shaping`; the per-call deltas log as `reward/turn_shaping`. Overflow is charged on any truncated episode, including one killed mid-flight — except one its driver lost, where the fault is not the policy's. Every magnitude must be ≥ 0; the minus is applied at the use site, so a negative value raises instead of paying a penalty as a bonus.
 
-Three kinds of turn earn nothing and carry no loss on either tokenization path ([Rollout Configuration](../async-grpo/rollouts.md#training-on-sampled-tokens)): a turn the engine cut off at its token cap or aborted, a turn the model ended with neither a tool call nor visible content (a stop inside its reasoning), and a turn whose every call named a tool that does not exist.
+Three kinds of turn earn nothing and are never rewarded ([Objective](../async-grpo/objective.md#untrainable-turns)): a turn the engine cut off at its token cap or aborted, a turn the model ended with neither a tool call nor visible content (a stop inside its reasoning), and a turn whose every call named a tool that does not exist. Their sampled ids train only on a negative advantage.
 
 A cut or empty turn is nudged and retried within `max_turns` and `max_length_cutoff_recoveries`, one cap for both; a tool call salvaged from a cut turn is never executed. The unknown-tool observation lists the real tools, which stops a drifted policy from burning turns probing for a listing.
 

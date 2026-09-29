@@ -65,8 +65,10 @@ Read the result in this order:
 
 - `error` — a backend or transport fault (missing compiler, HTTP failure, a remote request timeout, a SandboxFusion `SandboxError`). Never a verdict on the code.
 - `agent_fault` — the program replaced its working directory, as above; grading reads it as a runtime error.
-- `compile_failed` — the source never built: the compiler rejected it (`returncode` is the compiler's, `stderr` its diagnostics) or the build ran past the compile limit (an `#include` bomb).
-- `timed_out`, then a non-zero `returncode` — the program's own failure, `error` unset; `remote` reads a SandboxFusion `Failed` response off its run block the same way. `ok` is True only when it built and exited zero.
+- `compile_failed` — the source did not build: the compiler rejected it (`returncode` is the compiler's, `stderr` its diagnostics) or the build ran past the compile limit (an `#include` bomb; `returncode` unset).
+- `timed_out`, then a non-zero `returncode` — the program's own failure, `error` unset; a negative `returncode` is the signal that killed it, and `remote` reads a SandboxFusion `Failed` response off its run block the same way. `ok` is True only when it built and exited zero.
+
+`format_sandbox_repl_output` (`repl.py`) renders a result for a tool reply. A failure leads with its error — a compile failure with the head of the diagnostics, a crash with the signal's name and the tail of stderr (2000 characters each) — and the program's stdout follows under `Output:`, so an observation cut from the end keeps the error.
 
 `environment_kwargs` carries only `sandbox_backend` and `sandbox_url`, so `sandbox=` is the only way to set the executor's constructor arguments (`memory_limit_mb`, `compile_timeout`, `compile_memory_limit_mb`, bubblewrap's `allow_network` / `extra_ro_binds`):
 
@@ -83,7 +85,7 @@ env = SweEnvironment(sandbox=resolve_sandbox("bubblewrap", memory_limit_mb=2048,
 | `SandboxInfraError` | `error` | none: the call is unpriced | out: the episode is marked `episode_invalid`, the fault as its `episode_invalid_reason` |
 | `SandboxAgentFault` | `agent_fault` | a failed call (`tool_error_penalty`) | in: scored against its group like any other episode |
 
-A sandbox-backed tool of your own raises them the same way (a missing session is a `SandboxInfraError`). Either fault ends the episode uncompleted and not truncated (so `mask_truncated_completions` keeps an agent fault in the loss): a completion-graded environment grades it 0, while `code_contests` keeps an earlier graded submission. It skips the external scorers ([Reward Terms](../rewards.md#environment-arm)). `info["sandbox_fault"]` names the class (`infra` or `agent`); `episode/sandbox_infra_fault` and `episode/sandbox_agent_fault` log the per-episode rates, and both count toward `episode/natural_termination_rate`. Any other exception a tool raises is an ordinary tool error, priced `tool_error_penalty`, and that includes a host-side `OSError` out of a `local` / `bubblewrap` run (the `ENOSPC` of a full `TMPDIR`, the `EAGAIN` of a full process table) in the scratchpad tools and the `swe` session. Grading books the same exception the other way: it is an infra error for the test (`_run_in_sandbox`, below), and a grade with one in which no test ran cleanly or passed marks the episode `episode_invalid` (`episode/grading_infra_outage`).
+A sandbox-backed tool of your own raises them the same way (a missing session is a `SandboxInfraError`). Either fault ends the episode uncompleted and not truncated (so `mask_truncated_completions` keeps an agent fault in the loss): a completion-graded environment grades it 0, while `code_contests` keeps an earlier graded submission. It skips the external scorers ([Reward Terms](../rewards.md#environment-arm)). `info["sandbox_fault"]` names the class (`infra` or `agent`); `episode/sandbox_infra_fault` and `episode/sandbox_agent_fault` log the per-episode rates, and both count toward `episode/natural_termination_rate`. Any other exception a tool raises is an ordinary tool error, priced `tool_error_penalty`, and that includes a host-side `OSError` out of a `local` / `bubblewrap` run (the `ENOSPC` of a full `TMPDIR`, the `EAGAIN` of a full process table) in the scratchpad tools and the `swe` session. Grading books the same exception the other way: it is an infra error for the test (`_run_in_sandbox`, below), and a grade in which tests were lost to it and none passed or failed marks the episode `episode_invalid` (`episode/grading_infra_outage`).
 
 Voiding is only as sound as the backend's containment of the program: whatever the program can drive into an `error` can void its own episode. The routes left to it:
 
@@ -117,12 +119,17 @@ Per-run rlimits bound each `local` / `bubblewrap` execution; `remote` enforces i
 | Address space (`RLIMIT_AS`) | 1024 MiB | 2048 MiB | `SANDBOX_DEFAULT_MEMORY_MB` / `SANDBOX_DEFAULT_COMPILE_MEMORY_MB` |
 | File size (`RLIMIT_FSIZE`), captured stdout / stderr included | 64 MiB | 64 MiB | `LOCAL_FSIZE_LIMIT` |
 | Processes (`RLIMIT_NPROC`) | 4096 | not applied | `LOCAL_NPROC_LIMIT` |
+| Stack (`RLIMIT_STACK`) | the address-space limit, compiled languages only | inherited | `memory_limit_mb` |
+
+A compiled program gets a judge-sized stack, so a deep recursive DFS does not overflow the container's 8 MiB default. It is capped at the process's hard stack limit, which an unprivileged container cannot raise (`--ulimit stack=67108864` holds it at 64 MiB). An interpreter keeps the inherited stack: glibc sizes every thread's stack by the limit, so its threads would not fit the address space.
+
+Math libraries run single-threaded (`OPENBLAS_NUM_THREADS`, `OMP_NUM_THREADS`, `MKL_NUM_THREADS` set to `1` in the child env, `SINGLE_THREADED_MATH_ENV`), for scratchpad runs and grading alike: a thread pool sized to the host allocates per-thread buffers past the address-space limit, and OpenBLAS then aborts a correct program at `import numpy`. `remote` runs under the service's own environment.
 
 The `RLIMIT_CPU` backstop kills a busy loop that outruns timeout delivery, reporting `SIGXCPU` as `timed_out=True` — a spin still reads as a time limit. `RLIMIT_NPROC` does not bind a root process (how the containers run), so the process-group kill is `local`'s real fork-bomb defense. The group is killed when the leader exits too, before the leader is reaped, so a run is judged on the leader's exit and output and a child left in its process group does not outlive it; one that `setsid()`s out of the group escapes on `local`, without holding the run open.
 
 ## Concurrency and sizing
 
-Every `local` / `bubblewrap` execution takes a process-global `ExecutionGate` slot before its timeout starts; `HALO_SANDBOX_MAX_CONCURRENCY` (default: host CPU count) sets the slot count and the rest queue. A wall-clock limit measures the program only on an effectively dedicated core — oversubscribe and a correct, fast solution times out from starvation, while `swe` episodes hit `episode_timeout`. Remote needs no gate.
+Every `local` / `bubblewrap` execution takes a process-global `ExecutionGate` slot before its timeout starts; `HALO_SANDBOX_MAX_CONCURRENCY` (default: the CPUs in the process's affinity set, so a container cpuset counts) sets the slot count and the rest queue. A wall-clock limit measures the program only on an effectively dedicated core — oversubscribe and a correct, fast solution times out from starvation, while `swe` episodes hit `episode_timeout`. Remote needs no gate.
 
 The gate is **per process**, its slot count fixed at import: set the variable before the process starts, and when several processes share a host size the slots so they **sum** to the core count.
 

@@ -62,6 +62,7 @@ Setting the servers up in the first place is [Rollout Servers](rollout-servers.m
 | "Excluded N of M `lora_target_modules` matches from PEFT injection" at startup | Working as intended: those matches are modules no stock LoRA adapter fits — a multimodal tower's projection wrapper (Gemma 4), or a projection whose forward is not its layer's plain matmul (DeepSeek-V4's grouped `o_a_proj`). The message names the count and an example path; everything else is adapted. |
 | `GENERATION is wedged` at startup | A previous trainer died attached to the vLLM engine. Restart the vLLM container before relaunching. |
 | Rewards fine, policy silently degrades | Under async GRPO with environments, watch `sampling/logratio_mean` — a steady negative drift means broken weight sync. Also serve MoE models with `--moe-backend triton`; the auto-selected backends silently corrupt synced expert weights. |
+| `a vLLM thinking budget is enforced but the importance-sampling correction is off` at startup | The engine forces a reasoning close at the budget, and only the correction keeps those forced tokens out of the loss. Leave `train_on_sampled_tokens` and `vllm_importance_sampling_correction` on (both default on), or drop the thinking budget. |
 
 ## Getting eyes on a hung run
 

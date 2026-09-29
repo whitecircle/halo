@@ -115,7 +115,7 @@ Two resharding knobs, both `torchrun`-only:
 
     The saving is the per-microstep re-gather: about 4–10% throughput over NVLink, far more when the trainer's NCCL runs over TCP sockets. Rejected with `fsdp_reshard_after_forward: true`, TP, or PP.
 
-`fsdp_defer_grad_sync` (default `false`, `torchrun`-only) is the gradient-side counterpart: `true` reduce-scatters once per optimizer step instead of once per microstep, holding one unsharded gradient copy per GPU across the window. See [Deferred gradient reduce](../parallelism/data-parallelism.md#deferred-gradient-reduce-fsdp_defer_grad_sync) for the measured trade-off.
+`fsdp_defer_grad_sync` (default `false`, `torchrun`-only) is the gradient-side counterpart: `true` reduce-scatters once per optimizer step instead of once per microstep, holding one unsharded gradient copy per GPU across the window. Rejected under TP at `data_parallel_size == 1`, under QLoRA, and with `fsdp_reshard_after_forward: true` (ZeRO-3 exists to shard that gradient). See [Deferred gradient reduce](../parallelism/data-parallelism.md#deferred-gradient-reduce-fsdp_defer_grad_sync) for the measured trade-off.
 
 ## Example SFT config
 
@@ -197,7 +197,7 @@ Start with the gradop config; if OOM, try the full one. A hand-written accelerat
 | `muon` | Muon (Newton-Schulz) | ~4 B on 2D params | Faster convergence on matrix params |
 | `flash_adamw` | FlashAdamW (quantized states) | ~5 B | Maximum memory savings, drop-in AdamW |
 
-AdamWBF16 replaces `adamw_torch_fused`/`adamw_torch` automatically when `bf16: true`, except under accelerate-managed DDP. `bf16_optimizer` (default `null` = that auto rule) overrides it either way: `true` is the opt-in under DDP, `false` runs the stock AdamW over the params as loaded (bf16 masters with round-to-nearest under `bf16: true`, not fp32 — fp32 masters come from `fp32_non_ep_params` or `bf16: false`). `true` alongside `optim: muon` or `flash_adamw` raises — both name an optimizer, and one would silently win. FlashAdamW needs `uv pip install "halo[flash-optimizers]"`. See [BF16 Optimizer](../optimization/bf16-optimizer.md#compatibility), [Muon](../optimization/muon-optimizer.md), [FlashAdamW](../optimization/flash-adamw.md).
+AdamWBF16 replaces `adamw_torch_fused`/`adamw_torch` automatically when `bf16: true`, except under accelerate-managed DDP. `bf16_optimizer` (default `null` = that auto rule) overrides it either way: `true` is the opt-in under DDP, `false` runs the stock AdamW over the params as loaded (bf16 masters with round-to-nearest under `bf16: true`, not fp32 — fp32 masters come from `fp32_non_ep_params` or `bf16: false`). The stock AdamW is refused where plain-tensor experts sit beside FSDP2 DTensors (any `ep_group_size > 1`, or `ep_size: 1` with `fsdp_shard_ep1_experts: false`). `true` alongside `optim: muon` or `flash_adamw` raises — both name an optimizer, and one would silently win. FlashAdamW needs `uv pip install "halo[flash-optimizers]"`. See [BF16 Optimizer](../optimization/bf16-optimizer.md#compatibility), [Muon](../optimization/muon-optimizer.md), [FlashAdamW](../optimization/flash-adamw.md).
 
 ## Low-precision compute
 

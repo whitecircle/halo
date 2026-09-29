@@ -58,9 +58,9 @@ gradient_accumulation_steps: 8
 
 TRL defaults `loss_type` to `dapo` and `scale_rewards` to `group`. The recipes under `examples/grpo/online/` all run `loss_type: grpo`, `beta: 0`, `epsilon` `0.15`–`0.2`, `num_generations` 4 or 8, and `max_completion_length` 128–4096.
 
-Five optional objective changes ride on the script arguments, all off by default: `advantage_mode` (`qae` / `asymmetric` / `neg_mask_hard` — [Advantages](async-grpo/objective.md#advantages)), `scale_rewards_std_floor` (a floor on the std divisor), `drop_degenerate_groups` (mask all-equal-reward groups out of the loss and normalizer), `use_rlrr` (intra-group ranking advantages, [arXiv:2601.23058](https://arxiv.org/abs/2601.23058)) and `use_sdpg` ([Online SDPG](../distillation/online-sdpg.md)).
+Four optional objective changes ride on the script arguments, all off by default: `scale_rewards_std_floor` (a floor on the std divisor), `drop_degenerate_groups` (mask all-equal-reward groups out of the loss and normalizer), `use_rlrr` (intra-group ranking advantages, [arXiv:2601.23058](https://arxiv.org/abs/2601.23058)) and `use_sdpg` ([Online SDPG](../distillation/online-sdpg.md)).
 
-The first four recompute on the gathered reward set, so they raise unless `multi_objective_aggregation` is `sum_then_normalize`, and RLRR excludes the other three. `neg_mask_hard` gates on the **total weighted reward**, not the accuracy reward alone.
+The first three recompute on the gathered reward set, so they raise unless `multi_objective_aggregation` is `sum_then_normalize`, and RLRR excludes the other two.
 
 RLRR's nine tunables (`RLRRConfig`, `src/args/mixins.py`): `rlrr_mode` (`hrr` default, or `prr`), `rlrr_tau` (`0.1`), `rlrr_lambda` (`2048.0` — the config field is `lam`, `lambda` being a keyword), `rlrr_xi_pos` / `rlrr_xi_neg` (the Eq. 5 clip band, `1e-3` / `-1e-3`; `xi_neg > xi_pos` is refused), `rlrr_std_normalize` (`false`), `rlrr_length_rerank` (`true`), `rlrr_correctness_clip` (`true`) and `rlrr_correctness_threshold` (`0.5` — the only correctness signal; no path supplies gold labels). All nine are range-validated whether or not `use_rlrr` is on, and refused at a non-default value with it off. Worked recipe: `examples/grpo/online/qwen3/online-grpo-qwen3-8b-rlrr-math.yaml`.
 

@@ -130,10 +130,10 @@ trainer-side batch knobs live under
 Not Ray; what binds depends on the environment class:
 
 - **Sandbox-backed** (`code_contests`, `codeforces`, `swe`, any env with a `python`/code tool): a
-  process-global gate of `HALO_SANDBOX_MAX_CONCURRENCY` slots (default: host core count), **per
+  gate of `HALO_SANDBOX_MAX_CONCURRENCY` slots (default: the CPUs the process may use), **per
   process** (`local`/`bubblewrap` only; no effect under `remote`).
 
-    Each actor is its own process, so N actors on a node can run `N × cpu_count` concurrent sandbox
+    Each actor is its own process, so N actors on a node can run N × that many concurrent sandbox
     subprocesses unless the var is set so the slots **sum** to the core budget. Per-run rlimits and
     scratch sizing: [Sandboxes](../training-methods/grpo/environments/sandbox.md#concurrency-and-sizing).
 
