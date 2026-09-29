@@ -228,4 +228,4 @@ train: ## run a training config: make train CONFIG=... [METHOD=sft] NPROC=8 EXTR
 # clean does not remove checkpoints/: it is the default output_dir of every shipped example.
 clean: ## prune wandb/, the ruff/pytest caches and $(HALO_SCRATCH) test scratch (leaves checkpoints/)
 	rm -rf wandb/ .ruff_cache .pytest_cache
-	rm -rf $(HALO_SCRATCH)/tmp/*_cache_r* $(HALO_SCRATCH)/tmp/*_out_* 2>/dev/null || true
+	rm -rf $(HALO_SCRATCH)/tmp/halo-test-* 2>/dev/null || true

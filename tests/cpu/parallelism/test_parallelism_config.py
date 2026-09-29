@@ -1000,7 +1000,6 @@ def test_reshard_after_backward_false_is_gated():
         {"ep_size": 2},  # multi-group EP: experts synced by the post-backward sweep, once per step
         {"world_size": 16, "use_hsdp": True},
         {"fsdp_reshard_after_backward": False},
-        {"fsdp_reshard_after_forward": True},
         {"fp32_grad_reduce": True},
     ],
 )
@@ -1022,6 +1021,18 @@ def test_defer_grad_sync_rejected_without_a_per_microstep_reduce(shape, named_kn
     with pytest.raises(ValueError, match="fsdp_defer_grad_sync") as excinfo:
         create_config(fsdp_defer_grad_sync=True, **shape)
     assert named_knob in str(excinfo.value)
+
+
+@pytest.mark.parametrize("fp32_grad_reduce", [False, True])
+def test_defer_grad_sync_rejected_under_full_shard(fp32_grad_reduce):
+    """Deferring holds every module's full unsharded gradient across the window, the state ZeRO-3
+    shards; the refusal names both knobs and the ZeRO-2 remedy."""
+    with pytest.raises(
+        ValueError, match="fsdp_defer_grad_sync=True contradicts fsdp_reshard_after_forward=True"
+    ) as excinfo:
+        create_config(fsdp_defer_grad_sync=True, fsdp_reshard_after_forward=True, fp32_grad_reduce=fp32_grad_reduce)
+    assert "fsdp_reshard_after_forward=False" in str(excinfo.value)
+    create_config(fsdp_defer_grad_sync=False, fsdp_reshard_after_forward=True, fp32_grad_reduce=fp32_grad_reduce)
 
 
 def test_reshard_rejects_ep():

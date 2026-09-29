@@ -218,7 +218,8 @@ class ParallelismConfig:
     # Store non-expert params in FP32 for stable optimizer updates (compute stays BF16 via autocast).
     fp32_non_ep_params: bool = False
 
-    # Reduce grads in fp32 with bf16 params (bf16 sums lose precision); fp32_non_ep_params implies this.
+    # Reduce grads in fp32 with bf16 params (bf16 sums lose precision). fp32_non_ep_params already makes
+    # FSDP2's reduce fp32; the other reduce paths read only this flag.
     fp32_grad_reduce: bool = False
 
     # Tri-state AdamWBF16 switch. None = auto (on under bf16 + a default optim, off under DDP).
@@ -921,6 +922,14 @@ class ParallelismConfig:
                 "FULL_SHARD exists to reshard for memory, keeping params unsharded across the "
                 "grad-accum window defeats it. Use SHARD_GRAD_OP (fsdp_reshard_after_forward=False) "
                 "with the backward reshard off."
+            )
+        if self.fsdp_defer_grad_sync and self.fsdp_reshard_after_forward:
+            raise ValueError(
+                "fsdp_defer_grad_sync=True contradicts fsdp_reshard_after_forward=True: deferring the "
+                "reduce holds every module's full unsharded gradient across the grad-accum window (2 B/param "
+                "at a bf16 reduce dtype, 4 B/param under fp32_grad_reduce), the state FULL_SHARD exists to "
+                "shard. Use SHARD_GRAD_OP (fsdp_reshard_after_forward=False) with the deferred reduce, or "
+                "remove fsdp_defer_grad_sync."
             )
         if not self.fsdp_reshard_after_backward and (self.tp_size > 1 or self.pp_size > 1):
             raise ValueError(

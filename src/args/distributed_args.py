@@ -380,7 +380,8 @@ class DistributedArguments:
             "per GPU across the window at the reduce dtype (2 B/param; 4 B/param when the reduce runs "
             "in fp32: fp32_grad_reduce, fp32_non_ep_params or an fp32 run); peak memory rises by that "
             "copy less the sharded gradient the default holds anyway. Torchrun FSDP2 path only; "
-            "rejected under PP, TP with data_parallel_size=1, and QLoRA."
+            "rejected under PP, TP with data_parallel_size=1, QLoRA, and fsdp_reshard_after_forward=True "
+            "(ZeRO-3 exists to shard that gradient)."
         },
     )
     fsdp_shard_ep1_experts: bool = field(

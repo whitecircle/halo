@@ -206,6 +206,26 @@ def test_an_existing_card_keeps_its_metadata_tags_body_and_mode(tmp_path):
     assert stat.S_IMODE((tmp_path / CARD).stat().st_mode) == 0o640
 
 
+def test_a_read_only_card_is_tagged_and_stays_read_only(tmp_path, monkeypatch):
+    """A card an export copied from a read-only source (``shutil.copy2`` keeps ``0o444``) is tagged.
+
+    The mode is restored only after the write: a non-root user cannot open a ``0o444`` staged file,
+    and root ignores the bits, so the write is checked on the mode bits rather than on the open.
+    """
+    (tmp_path / CARD).write_text(_SOURCE_CARD)
+    (tmp_path / CARD).chmod(0o444)
+    real_save = model_card.metadata_save
+
+    def save_checking_mode(path, data):
+        assert stat.S_IMODE(os.stat(path).st_mode) & stat.S_IWUSR, "the staged card is read-only when written"
+        real_save(path, data)
+
+    monkeypatch.setattr(model_card, "metadata_save", save_checking_mode)
+    tag_model_card(str(tmp_path))
+    assert _card(tmp_path).data.tags == ["text-generation", HALO_TAG]
+    assert stat.S_IMODE((tmp_path / CARD).stat().st_mode) == 0o444
+
+
 def test_a_card_already_carrying_the_tag_is_not_rewritten(tmp_path):
     """Flow style, which a rewrite would re-dump in block style: the bytes show whether it was touched."""
     already = "---\ntags: [a, halo]\n---\nbody\n"

@@ -95,8 +95,10 @@ def tag_model_card(output_dir: str) -> None:
     try:
         if exists:
             shutil.copyfile(path, staged)
-            shutil.copymode(path, staged)
         metadata_save(staged, metadata)
+        if exists:
+            # After the write: a read-only source mode on the staged file would refuse metadata_save.
+            shutil.copymode(path, staged)
         os.replace(staged, path)
     except BaseException:
         staged.unlink(missing_ok=True)
