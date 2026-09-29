@@ -115,8 +115,8 @@ where ZeRO-3's re-gather dominates a short step. Stock TRL gains only +5–9%, s
 | 32k | 7,775 | 22,535 | 21,457 | 18,060 | 9,694 |
 
 It is a 4k–32k lever only: at 32k the GC-off footprints (130–220 GB) already crowd a B300's 288 GB, and
-past ~64k tokens/rank nothing fits GC-off. EP8 32k·b1 GC-off needs the **legacy** transport — see
-[the dispatch ceiling](#the-ep8-dispatch-ceiling-64k-tokensrank).
+past ~64k tokens/rank nothing fits GC-off. EP8 32k·b1 GC-off fits only on the **legacy** transport
+(elastic OOMs).
 
 ## Long context: 64k → 256k
 
@@ -154,24 +154,16 @@ ZeRO-2 (64k: 100 vs 138 GB) — the better dense choice when memory is tight.
 - **Dense CP-only z3 is the leanest point on the board** (32–56 GB across 128k→256k) and the only
   long-context mode with no DeepEP dependency. Splitting 4-way instead of 8 trades memory for throughput
   (256k z3: CP4 2,257·98 vs CP8 1,836·56).
-- `EP1 z2` OOMs (ZeRO-2 keeps ~40 GB of params resident); `EP8`, `EP8+CP2`, `EP8+TP8` hit the ceiling below.
+- `EP1 z2` OOMs (ZeRO-2 keeps ~40 GB of params resident); `EP8`, `EP8+CP2` and `EP8+TP8` put 128k tokens/rank through the dispatch (TP shards attention, not
+  expert tokens) — past the elastic limit [below](#ep8-long-context-training).
 
-### The EP8 dispatch ceiling: ~64k tokens/rank
+### EP8 long-context training
 
-Multi-step EP8 *training* has a practical ceiling around **64k tokens/rank**:
-
-- **≤64k tok/rank trains** — on the **legacy** CUDA-IPC transport (plain EP8 64k = 6,648 tok/s). Elastic
-  forwards any length, but its multi-step training deadlocks at extreme tok/rank (the DeepEP combine
-  barrier races FSDP2's reduce-scatter on the shared NVLink fabric).
-- **128k tok/rank crashes on both transports.** Legacy times out in `combine`, elastic trips the
-  symmetric-window check. The ceiling is architectural, not a timeout you can raise.
-
-    `EP8` no-CP at 128k, `EP8+CP2` at 256k, and `EP8+TP8` (TP shards attention, not expert tokens, so the
-    MoE still sees the full per-rank sequence) all reach 128k tokens/rank in the dispatch.
-
-For ≥128k sequences, keep per-rank tokens ≤64k by **splitting further with CP** (EP8+CP8 = 16k/rank at
-128k), or **go dense** (EP1 / dense CP-only — neither uses DeepEP). Related kernel-side detail:
-[DeepEP → dispatch wire-index limit](../infrastructure/deepep.md#dispatch-wire-index-limit).
+Elastic multi-step EP8 training deadlocks at ≥~64k tokens/rank (its combine barrier races FSDP2's
+reduce-scatter); use `ep_buffer_backend: legacy` there (plain EP8 64k = 6,648 tok/s), or split further
+with CP (EP8+CP8 = 16k/rank at 128k) or go dense (EP1 / dense CP-only — neither uses DeepEP). Transport
+limits: [DeepEP → Transport backend](../infrastructure/deepep.md#transport-backend) and
+[Dispatch wire-index limit](../infrastructure/deepep.md#dispatch-wire-index-limit).
 
 ## Why Halo's EP wins: all-to-all vs masked all-reduce
 

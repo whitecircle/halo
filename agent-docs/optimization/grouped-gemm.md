@@ -8,7 +8,7 @@ The MoE expert step sorts tokens by expert (contiguous per-expert blocks), build
 
 **Isolated kernel** — B300 (SM103, PyTorch 2.11), Qwen3-30B-A3B dims (hidden 2048, moe_intermediate 768), median over 50 iters: **≈11.93×** over the per-expert loop (forward and fwd+bwd alike), e.g. 128 experts / 4K tokens fwd+bwd 17.24 ms → 1.45 ms (11.93×), forward 1.33 ms → 0.11 ms (achieved TFLOPS 9.68 → 115.43). The ratio scales with expert count (more launches saved). These are launch-dominated; end-to-end is far smaller.
 
-**End-to-end** — Qwen3-30B-A3B (128 experts, top_k=8), 2× B300 EP=2, FA4+Liger, seq 8192, GC on, 8 steps: **3.43×** at batch 1 (10,711 vs 3,122 tokens/s/GPU), narrowing to **2.12×** at batch 4 (15,307 vs 7,211). With 64 local experts/rank the launch saving is worth most at small batch; as per-expert GEMMs grow, the win narrows.
+**End-to-end** the launch saving is worth most at small batch and narrows as per-expert GEMMs grow (the Qwen3-30B EP=2 row below).
 
 ### Why grouped GEMM also saves memory
 
@@ -53,7 +53,7 @@ PyTorch's default backward for a duplicate-valued gather is `index_add_`, whose 
 
 The bias gather (`MoEExpertBiasGather`, applied in `EPGptOssMoELayer`'s grouped path) computes `grad_bias` as one GEMM (`onehot(eids)ᵀ @ grad_out`, fp32 tensor-core accumulation): atomic-free and numerically identical (more accurate than the bf16 atomic add).
 
-The atomic-free path runs the EP step at ~6,310 vs ~1,256 tok/s/GPU for the default-backward path (≈5×, board power ~34% → ~56% of limit), and ~6,773 vs ~4,100 tok/s for plain FSDP grouped (~1.65×); the loss curve is identical.
+On that gpt-oss-20b EP step the atomic-free path runs ≈5× faster than the default backward (board power ~34% → ~56% of limit), and plain FSDP grouped ~1.65× faster; the loss curve is identical.
 
 ### The atomic-free gather-reduce permute
 
@@ -64,6 +64,9 @@ The permute expresses both directions with no atomics via a precomputed `inv_map
 It is gated on **`top_k ≥ ep_size`** (`base_layer._sort_tokens_for_grouped_mm` builds `inv_map` via `_build_inv_map`). Below that (gpt-oss top-4 at EP8, the top-8 families at `ep16`, DeepSeek-V4-Flash top-6 at `ep8`) the plain `index_select` + `index_add_` is kept, since the extra `top_k`× read would cost ~4%.
 
 Above the gate the gather is materialized as `[recv_N, top_k, H]` before its sum: `top_k`× the recv buffer per MoE layer as a transient, in the forward unpermute and again in the permute's backward. That is ~5.6 GB per layer at GLM-5.3-Flash / Step-3.7-Flash shapes (16k tokens/rank at ep8, top-8, `H=4096`), most of it sentinel rows since a recv token averages `top_k / ep_size` local experts.
+
+A same-session A/B on Qwen3.6-35B-A3B at EP=8, to compare within the table only; tuned absolute
+figures: [Throughput Benchmarks](throughput-benchmarks.md#ep-scaling-seq-4096).
 
 | Qwen3.6-35b EP=8 | `index_add_` | atomic-free | win |
 |---|---|---|---|
@@ -80,9 +83,9 @@ gpt-oss-120b at EP8, same 64-sequence effective batch: bs2 × GA4 measures ~20% 
 
 The grouped GEMM is one part of an EP step (also: all-to-all dispatch/combine, permute, attention, optimizer). The general sequence/batch playbook is in [Throughput Benchmarks](throughput-benchmarks.md#maximizing-throughput-sequence--batch); the kernel-side levers, measured on 8× B300 (SM 10.3, PyTorch 2.11+cu130, FA4, bf16):
 
-1. **Pick parallelism by fit.** If it fits FSDP2, FSDP has no all-to-all and reaches higher achieved TFLOPS — gpt-oss-20b 1,203 TFLOPS (FSDP, experts replicated) vs 228 (EP=8) at seq 4096, batch 1 — but is memory-heavy (148 GB at b1, near OOM at larger batch). Use EP only when FSDP OOMs.
-2. **Smallest EP degree that fits the experts.** Fewer ranks = smaller all-to-all + larger per-rank GEMMs. gpt-oss EP2 (DP8) 745 TFLOPS vs EP8 228 at seq 4096, batch 1.
-3. **GC off when the batch fits** — recompute is ~+19% overhead on a 288 GB B300 at moderate seq.
+1. **Pick parallelism by fit.** If it fits FSDP2, FSDP has no all-to-all and reaches higher achieved TFLOPS, at a high memory cost; use EP only when FSDP OOMs ([Maximizing achieved TFLOPS](throughput-benchmarks.md#maximizing-achieved-tflops)).
+2. **Smallest EP degree that fits the experts.** Fewer ranks = smaller all-to-all + larger per-rank GEMMs.
+3. **GC off when the batch fits** ([the gpt-oss-20b EP case study](throughput-benchmarks.md#where-the-ep-steps-time-goes-gpt-oss-20b-ep8-b1s4096-8-b300-fa4)).
 4. **Atomic-free expert permute** (above) — automatic for `top_k ≥ ep_size`, +18% (seq 4k) to +65% (seq 16k) on qwen3.6.
 5. **Do not use low precision** (fp8/fp4) — measured net-slower (experts are tiny-M / bandwidth-bound, bf16 at the roofline). See [Low-Precision Kernels](low-precision-moe-kernels.md).
 
@@ -148,7 +151,7 @@ torchrun --nproc_per_node=8 scripts/training/sft.py \
     --expert_parallel_size=1 --use_grouped_gemm=true
 ```
 
-The wrapper keeps the packed-3D layout used at EP>1, so checkpoints stay shape-compatible across `ep_size`. Requires `torchrun`: an MoE with `use_grouped_gemm: true` under any `accelerate launch` is rejected at load (the wrappers need the mixin-managed FSDP2 path) — launch with torchrun or set `use_grouped_gemm: false`. Standalone benchmark: **3.07× over the naive loop** at 128 experts × 4096 tokens on B300 (naive 51.66 → grouped 158.66 TFLOPS).
+The wrapper keeps the packed-3D layout used at EP>1, so checkpoints stay shape-compatible across `ep_size`. Requires `torchrun`: an MoE with `use_grouped_gemm: true` under any `accelerate launch` is rejected at load (the wrappers need the mixin-managed FSDP2 path) — launch with torchrun or set `use_grouped_gemm: false`.
 
 Liger's fused MoE kernel never runs the routed experts: its `LigerExperts` swap is inert under this wrapper (EP=1 included), which replaces the very module the swap targets, and is kept off wherever no wrapper is installed ([Liger Kernels](liger-kernels.md#routed-experts)). Non-expert Liger kernels (RMSNorm, RoPE, CrossEntropy/FusedLinearCE) still apply, and a family whose toolkit spec also names the dense and shared-expert MLPs keeps its fused GLU: [Liger Kernels](liger-kernels.md#ep--cp--tp-behavior).
 

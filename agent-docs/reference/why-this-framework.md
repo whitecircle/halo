@@ -99,21 +99,7 @@ loader streams layers from safetensors, so a family whose EP layer sets
 
 ## Key dependencies
 
-| Package | Version | Purpose |
-|---|---|---|
-| PyTorch | 2.11.x (+cu130) | Training framework |
-| Transformers | 5.16.x | Model loading and tokenization |
-| TRL | 1.6.x | GRPO, DPO, and RL trainers |
-| Accelerate | 1.11.x | FSDP distributed training |
-| PEFT | 0.18.x | LoRA and parameter-efficient fine-tuning |
-| vLLM | 0.26.0 | Online generation for GRPO (separate container) |
-| SGLang | 0.5.17 | Alternative rollout server for Async GRPO with Environments (separate container) |
-| DeepEP | V2 (commit `af9a040`) | MoE expert parallelism |
-| Flash Attention | 2.x / 3.x / 4.x (FA4 on Blackwell) | Attention acceleration |
-| Liger Kernel | 0.8.x | Triton kernel optimizations |
-| FlashAdamW | 0.1.x (extra) | Quantized AdamW states (~5 bytes/param) |
-
-`pyproject.toml` is PEP 621; the core pins are bounded ranges (e.g. `transformers>=5.16.1,<5.17.0`, `torch>=2.11.0,<2.12.0`) resolved by `uv` into `uv.lock`.
+Pinned versions: [Docker](../infrastructure/docker.md) (images) and `pyproject.toml` / `uv.lock` (Python).
 
 > [!WARNING]
 > **Rollout servers run as separate Docker containers**

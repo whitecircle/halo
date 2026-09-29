@@ -320,8 +320,8 @@ roles eager.
 Code loading via `AutoModelForCausalLM.from_pretrained()` instead — the GPU benchmarks — runs
 `apply_liger_kernel` on the config it passes to `from_pretrained`, then `finalize_liger_after_direct_load`.
 
-Under FSDP2, TRL's fused Liger preference/GRPO loss (`liger_loss_fn`, `liger_grpo_loss`, or `liger_loss` in
-later TRL releases) is auto-disabled: it does `input @ weight.t()` against `model.lm_head.weight` outside FSDP2's
+Under FSDP2, TRL's fused Liger preference/GRPO loss (`liger_loss_fn`, `liger_grpo_loss`) is
+auto-disabled: it does `input @ weight.t()` against `model.lm_head.weight` outside FSDP2's
 forward hooks, where the weight is a sharded DTensor. A trainer with TRL's `use_liger_kernel` on and none of
 those attributes set raises at construction rather than leave an unknown loss running. Model-level kernels
 stay active.

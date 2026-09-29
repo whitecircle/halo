@@ -1,6 +1,6 @@
 # Throughput Benchmarks
 
-Throughput (tokens/s/GPU) and achieved-TFLOPS benchmarks on **8× NVIDIA B300** (multi-GPU) or **1× B300** (single-GPU) as labeled. tokens/s/GPU is the headline metric (hardware- and sparsity-independent); achieved TFLOPS is the diagnostic. Hopper numbers are not included here. What MFU measures and why MoE complicates it: [GPU Training Theory §11](../reference/gpu-training-theory.md#mfu-and-why-moe-complicates-it).
+Throughput (tokens/s/GPU) and achieved-TFLOPS benchmarks on **NVIDIA B300** (GPU count per section). tokens/s/GPU is the headline metric (hardware- and sparsity-independent); achieved TFLOPS is the diagnostic. Hopper numbers are not included here. What MFU measures and why MoE complicates it: [GPU Training Theory §11](../reference/gpu-training-theory.md#mfu-and-why-moe-complicates-it).
 
 ## Setup
 
@@ -10,7 +10,7 @@ Throughput (tokens/s/GPU) and achieved-TFLOPS benchmarks on **8× NVIDIA B300** 
 
 - **Framework**: PyTorch 2.11+cu130 + DeepEP + Flash Attention + Liger. The Blackwell image ships FA2 and FA4 co-installed; `--attn_implementation` defaults to `None` in `tests/common/benchmark_args.py`, which auto-selects `flash_attention_4`. **All tables are FA4 unless a row says otherwise.**
 
-    FA4 is ≈ +13% end-to-end for MoE/EP but 1.1–2.3× for dense long-context; see [Flash Attention](flash-attention.md).
+    FA4 is ≈ +13% end-to-end for MoE/EP but 1.13× (4k) to 2.3× (32k) on dense; see [Flash Attention](flash-attention.md).
 
 - **Optimizer**: AdamWBF16 with stochastic rounding (6 bytes/param). **Gradient checkpointing** on unless a row says "GC off".
 - **Config**: 3 warmup + 7 measured steps (defaults `--warmup 3 --steps 10`); throughput is the warm-step average from `EfficiencyCallback`.
@@ -191,8 +191,8 @@ Keep more params local (low EP), then drop GC if activations fit, then add batch
 - **Drop GC where activations fit** — the largest single throughput lever. Past the GC-off memory wall, the
   largest batch that fits under GC-on is the recipe.
 
-Picking a corner: **ep2 b4** for maximum throughput, **ep8 b4** for balanced throughput/memory, **ep8 b1**
-for minimum memory, **ep8+cp8** for 32–64k context.
+Picking a corner: **ep1** (sharded experts) when it fits, else **ep2 b4** for maximum throughput, **ep8 b4**
+for balanced throughput/memory, **ep8 b1** for minimum memory, **ep8+cp8** for 32–64k context.
 
 ## Maximizing throughput: sequence & batch
 
@@ -245,11 +245,6 @@ bandwidth-bound regime where fp8/fp4 quant overhead only loses.
 `CUDA_DEVICE_MAX_CONNECTIONS=1` (baked into the image) is a free default that helps wide EP
 ([DeepEP](../infrastructure/deepep.md#environment-variables)).
 
-> **Profiling EP.** `torch.profiler` (CUPTI) does not complete a step of a multi-GPU EP run with Flash
-> Attention active (the FA4 CuTe-DSL JIT interacts badly with CUPTI). Use `--attn_implementation sdpa`, a
-> single GPU, or a smaller model; for the memory-vs-compute question use
-> `tests/gpu/profiling/benchmark_roofline.py`.
-
 **EP throughput vs sequence length (ep8, b1, liger + FA4):**
 
 | seq | GC-on tok/s/GPU | GC-on mem | GC-off tok/s/GPU | GC-off mem |
@@ -261,7 +256,7 @@ bandwidth-bound regime where fp8/fp4 quant overhead only loses.
 | 49,152 | 8,088 | 108 GB | — (OOM) | — |
 | 65,536 | 6,045 † | 135 GB | — (OOM) | — |
 
-† s65536 GC-on uses `ep_buffer_backend=legacy` (DeepEP CUDA-IPC). The default elastic transport completes the forward but its ep8 backward combine all-gather races the DeepEP NVLink barrier at 65,536 tokens/rank and faults (`symmetric.hpp` Cuda 719); legacy's token-count-independent intranode buffer trains it clean. s49152 trains on either transport.
+† s65536 GC-on uses `ep_buffer_backend=legacy`: elastic ep8 multi-step training at ≥~64k tokens/rank deadlocks ([DeepEP → Transport backend](../infrastructure/deepep.md#transport-backend)); s49152 trains on either transport.
 
 GC-off is +27–28% but ~2× memory; on the default elastic transport it fits to 16k (117 GB) and **does not
 fit 32k**, which `ep_buffer_backend: legacy` trains at 9,694 tok/s/GPU
@@ -290,7 +285,7 @@ ep2 keeps ~17.5B params local and reaches **1,410 TFLOPS at batch 4** — the hi
 
 At ep2 batch 4 the per-MoE-layer step splits ≈ **77% DeepEP dispatch all-to-all / 21% expert GEMM / 2% combine** (`--comm_profile`) — dispatch-bound on the top_k=8 token-count exchange. Raising sequence to 8192 amortizes the all-to-all to **13,484 tok/s/GPU** (b4).
 
-Two kernels are load-bearing here: [grouped GEMM](grouped-gemm.md) is **2.4× over the per-expert loop** (128 local experts/rank) and [Liger](liger-kernels.md) (RMSNorm + CE; SwiGLU/RoPE are off under EP / partial-rotary) adds **+6.6% throughput and −15 GB**. Attention runs SDPA at no throughput cost (it ties FA4 on MoE); FLCE trades −7% throughput for −7 GB at long context.
+Two kernels are load-bearing here: [grouped GEMM](grouped-gemm.md) is **2.4× over the per-expert loop** (128 local experts/rank) and [Liger](liger-kernels.md) (measured with RMSNorm + CE) adds **+6.6% throughput and −15 GB**; current per-family coverage: [Liger Kernels](liger-kernels.md). Attention runs SDPA at no throughput cost (it ties FA4 on MoE).
 
 ### EP throughput vs sequence length (ep8, b1, GC on)
 
@@ -315,7 +310,7 @@ Batch is the dominant lever — raise it with GC off while it fits (Qwen3-4B b1�
 
 ## GPT-OSS-120B notes
 
-**Model**: `unsloth/gpt-oss-120b-BF16` (120B total, 128 experts, top_k=4). On B300 (288 GB) it fits with **EP=8 + GC**: local params = 16.47B → ~99 GB model + AdamWBF16 state, plus ~33 GB bf16 gradients + activations, comfortable at 8K sequence (it does not fit a 141 GB H200). EP+TP further reduces local params (attention sharded across the TP group); multi-node raises aggregate memory.
+**Model**: `unsloth/gpt-oss-120b-BF16` (120B total, 128 experts, top_k=4). On B300 (288 GB) it fits with **EP=8 + GC**: local params = 16.47B → ~99 GB model + AdamWBF16 state, plus ~33 GB bf16 gradients + activations, comfortable at 8K sequence (it does not fit a 141 GB H200 at this config). EP+TP further reduces local params (attention sharded across the TP group); multi-node raises aggregate memory.
 
 ## Using EfficiencyCallback
 
@@ -337,7 +332,7 @@ torchrun --nproc_per_node=8 \
     tests/gpu/profiling/benchmark_sft_ep_cp.py \
     --model gpt-oss-20b --ep 8 --cp 8 --seq 32768 --steps 10 --warmup 3
 
-# EP+TP (ep8 with tp2/tp4/tp8 all valid on 8 GPUs; ep must be a multiple of tp)
+# EP+TP (ep8 with tp2/tp4/tp8 on 8 GPUs; ep must be a multiple of tp, and ep4 on 8 GPUs is rejected)
 torchrun --nproc_per_node=8 \
     tests/gpu/profiling/benchmark_sft_ep_tp.py \
     --model gpt-oss-20b --ep 8 --tp 8 --seq 16384 --steps 10 --warmup 3
