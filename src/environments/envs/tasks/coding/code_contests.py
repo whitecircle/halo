@@ -122,8 +122,8 @@ class CodeContestsEnvironment(NativeToolUseEnvironment):
     DEFAULT_TOOL_ERROR_PENALTY = 0.0
 
     # The protocol's empty-turn nudge offers a final answer, which here ends the episode ungraded: both
-    # nudges name the one graded channel instead. Same rule as the protocol's: the fact and the action, never an
-    # ask for shorter reasoning.
+    # nudges here name the one graded channel instead. Same rule as the protocol's: the fact and the
+    # action, never an ask for shorter reasoning.
     LENGTH_CUTOFF_NUDGE = (
         "Your previous turn was cut off before you made a tool call, so nothing was recorded, and only a "
         "solution sent with submit_solution is graded. Make your tool call now with the best solution you have."

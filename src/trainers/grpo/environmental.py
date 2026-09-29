@@ -338,9 +338,10 @@ class DistributedAsyncEnvironmentalGRPOTrainer(
             logger.warning(
                 "vllm_importance_sampling_correction is ON but train_on_sampled_tokens is off, so the "
                 "correction is DISABLED: the ratio needs the sampling log-probs the server returns "
-                "alongside the sampled tokens. Every batch then trains uncorrected on rollouts that "
-                "are at least one weight-sync stale. Set train_on_sampled_tokens: true (the server "
-                "needs --return-tokens-as-token-ids), or set the correction to false deliberately."
+                "alongside the sampled tokens. Every batch then trains uncorrected for the engine-vs-trainer "
+                "numerics gap, and for a weight-sync lag where one exists (enable_prefetch, "
+                "sync_weights_every_n_steps > 1). Set train_on_sampled_tokens: true (the server needs "
+                "--return-tokens-as-token-ids), or set the correction to false deliberately."
             )
         self._require_forced_close_neutralised()
         if (self._is_mask_config.any_mask_active or self._is_mask_config.opsm_delta is not None) and not (
@@ -581,14 +582,14 @@ class DistributedAsyncEnvironmentalGRPOTrainer(
         model to stop closing its reasoning."""
         if self._forced_close_token_id is not None and not self._is_correction:
             raise ValueError(
-                "a vLLM thinking budget is enforced but the importance-sampling correction is off "
+                "a vLLM thinking budget can be enforced but the importance-sampling correction is off "
                 "(train_on_sampled_tokens + vllm_importance_sampling_correction): the reasoning closes the "
                 "engine forces at the budget would train with the episode's advantage."
             )
 
     def _resolve_forced_close_token_id(self) -> int | None:
         """The reasoning-end token the engine forces when a turn reaches its thinking budget, whose forced
-        occurrences the loss must not train on; ``None`` when no budget is enforced (SGLang enforces none).
+        occurrences the loss must not train on; ``None`` when no budget can be enforced (SGLang enforces none).
 
         The episode scope already requires the marker. Under the per-turn scope a tokenizer without it (a
         family whose reasoning ends in another token) keeps its forced closes in the loss, said loudly."""
@@ -604,8 +605,9 @@ class DistributedAsyncEnvironmentalGRPOTrainer(
             if cfg.rollout_thinking_budget_scope == THINKING_SCOPE_EPISODE:
                 raise
             logger.warning(
-                "rollout_reasoning_end_token %r is not a token of this tokenizer: reasoning closes the engine forces "
-                "at the thinking budget stay in the policy loss. Set rollout_reasoning_end_token to the model's marker.",
+                "rollout_reasoning_end_token %r is not a token of this tokenizer: reasoning closes the engine "
+                "forces at the thinking budget stay in the policy loss. Set rollout_reasoning_end_token to the "
+                "model's marker.",
                 cfg.rollout_reasoning_end_token,
             )
             return None
@@ -908,7 +910,8 @@ class DistributedAsyncEnvironmentalGRPOTrainer(
 
         rows = BatchRows(rollout_results, turns_per_traj, num_dummy_rows, self._train_on_sampled_tokens)
 
-        # A turn missing vLLM logprobs keeps ratio ≡ 1 for that row alone. Zeros are inert: row_has_sampling masks them.
+        # A turn missing vLLM logprobs keeps ratio ≡ 1 for that row alone. Zeros are inert: row_has_sampling
+        # masks them.
         all_sampling_logps = [
             o if o is not None else torch.zeros(len(c), device=device)
             for o, c in zip(all_sampling_logps, all_completion_ids, strict=True)
@@ -1447,8 +1450,8 @@ class DistributedAsyncEnvironmentalGRPOTrainer(
             unknown, missing = levels - set(VALID_REASONING_EFFORTS), set(VALID_REASONING_EFFORTS) - levels
             if unknown or missing:
                 raise ValueError(
-                    f"effort_length_penalty_levels must map exactly the effort levels {sorted(VALID_REASONING_EFFORTS)}; "
-                    f"unknown {sorted(unknown)}, missing {sorted(missing)}"
+                    "effort_length_penalty_levels must map exactly the effort levels "
+                    f"{sorted(VALID_REASONING_EFFORTS)}; unknown {sorted(unknown)}, missing {sorted(missing)}"
                 )
         budgeted = cfg.rollout_max_thinking_tokens is not None or any(
             self._rollout_env.thinking_budget_for_effort(level) for level in VALID_REASONING_EFFORTS

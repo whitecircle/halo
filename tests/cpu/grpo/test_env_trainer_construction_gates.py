@@ -12,20 +12,26 @@
 * The episode thinking scope needs a budget for every episode's turns to share (every level's
   ``thinking_tokens`` under a set ``reasoning_effort``, or the run's ceiling) and a per-turn reserve no
   level's budget falls below; either gap is refused.
+* A vLLM thinking budget forces reasoning closes the loss must not train on: the run needs the IS
+  correction, and a close marker the tokenizer lacks is refused under the episode scope and warned
+  under the per-turn scope.
 
     python tests/cpu/grpo/test_env_trainer_construction_gates.py
 """
 
 import ast
 import inspect
+import logging
 import textwrap
 import types
 
 import pytest
+from accelerate import PartialState
 from datasets import Dataset
 from trl import GRPOConfig
 
 from src.configs.async_training_config import AsyncTrainingConfig
+from src.configs.rollout_config import DEFAULT_REASONING_END_TOKEN
 from src.distributed.nccl.clients.sglang import SGLangWeightSyncClient
 from src.distributed.nccl.clients.vllm import VLLMWeightSyncClient
 from src.environments.engine_wire import SGLANG_BACKEND, VLLM_BACKEND
@@ -34,6 +40,8 @@ from src.trainers.grpo.environmental import (
     DistributedAsyncEnvironmentalGRPOTrainer,
     reject_off_policy_mask_threshold,
 )
+
+PartialState()  # the per-turn close-marker warning logs through accelerate, which refuses to log without it
 
 
 def _grpo_config(tmp_path, **overrides) -> GRPOConfig:
@@ -208,6 +216,62 @@ def test_an_enforced_thinking_budget_needs_the_is_correction():
     host._require_forced_close_neutralised()
     host._forced_close_token_id, host._is_correction = None, False
     host._require_forced_close_neutralised()
+
+
+_CLOSE_ID = 7
+
+
+class _Tokenizer:
+    """Resolves the default reasoning-end marker to ``_CLOSE_ID`` when ``knows_close``; every other token,
+    and the marker otherwise, to ``unk``."""
+
+    unk_token_id = 0
+
+    def __init__(self, knows_close: bool):
+        self._vocab = {DEFAULT_REASONING_END_TOKEN: _CLOSE_ID} if knows_close else {}
+
+    def convert_tokens_to_ids(self, token: str) -> int:
+        return self._vocab.get(token, self.unk_token_id)
+
+
+def _close_host(budgets: dict, knows_close: bool = True, **config):
+    host = object.__new__(DistributedAsyncEnvironmentalGRPOTrainer)
+    host.async_config = AsyncTrainingConfig(**config)
+    host._rollout_env = types.SimpleNamespace(thinking_budget_for_effort=budgets.get)
+    host._tokenizer = _Tokenizer(knows_close)
+    return host
+
+
+def test_a_vllm_thinking_budget_resolves_the_close_the_engine_forces():
+    """A level's ``thinking_tokens`` or the run's ceiling each enforce a budget, and either way the loss
+    needs the marker's id to find the closes the engine forced."""
+    assert _close_host({"high": 16384})._resolve_forced_close_token_id() == _CLOSE_ID
+    assert _close_host({}, rollout_max_thinking_tokens=8192)._resolve_forced_close_token_id() == _CLOSE_ID
+
+
+def test_no_forced_close_where_no_budget_can_be_enforced():
+    """SGLang enforces no thinking budget and an unbudgeted run caps nothing, so neither forces a close: a
+    resolved id would demand the IS correction of a run that needs none, and zero the ratio at a close the
+    model itself emitted with certainty."""
+    assert _close_host({"high": 16384}, rollout_backend=SGLANG_BACKEND)._resolve_forced_close_token_id() is None
+    assert _close_host({})._resolve_forced_close_token_id() is None
+
+
+def test_a_per_turn_scope_marker_the_tokenizer_lacks_warns_and_trains_on_the_forced_closes(caplog):
+    """Under the per-turn scope nothing else reads the marker, so a family whose reasoning ends in another
+    token still runs, told that its forced closes stay in the loss."""
+    host = _close_host({"high": 16384}, knows_close=False)
+    with caplog.at_level(logging.WARNING, logger="src.trainers.grpo.environmental"):
+        assert host._resolve_forced_close_token_id() is None
+    warnings = [r.getMessage() for r in caplog.records if r.levelno == logging.WARNING]
+    assert any("stay in the policy loss" in w and DEFAULT_REASONING_END_TOKEN in w for w in warnings), warnings
+
+
+def test_an_episode_scope_marker_the_tokenizer_lacks_is_refused():
+    """The episode scope counts every turn's reasoning up to the marker, so an unknown one is a broken run."""
+    host = _close_host({"high": 16384}, knows_close=False, rollout_thinking_budget_scope="episode")
+    with pytest.raises(ValueError, match="is not a token of this tokenizer"):
+        host._resolve_forced_close_token_id()
 
 
 if __name__ == "__main__":

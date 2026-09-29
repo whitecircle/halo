@@ -47,9 +47,9 @@ def zero_engine_forced_closes(
     what vLLM's thinking budget emits when a turn reaches its cap. Returns ``(ratio, forced)``.
 
     The close was not the policy's action; trained with the episode's advantage it moves the model's own
-    probability of ending its reasoning, which hundreds of forced closes per step can drive down until the
-    model stops closing at all. Ratio 0 drops the policy-gradient term and keeps the DAPO normalizer, like
-    every mask stage here; a naturally certain token (a collapsed nucleus) is left alone."""
+    probability of ending its reasoning, which repeated forced closes can drive down until the model stops
+    closing at all. Ratio 0 drops the policy-gradient term and keeps the DAPO normalizer, like every mask
+    stage here; a naturally certain token (a collapsed nucleus) is left alone."""
     forced = sampler_certain_mask(sampling_logps, completion_mask, row_has_sampling) & (
         completion_ids == reasoning_end_token_id
     )

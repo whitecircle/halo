@@ -281,7 +281,7 @@ Always think before acting, and provide a Final Answer when you're done."""
 
         # A turn the engine cut short is a fragment whatever the parser would salvage from it — the
         # base flags the message untrainable, so an Action executed or a Final Answer graded here would
-        # earn a reward on a turn the trainer then excludes. Same rule as the native protocol.
+        # earn a reward on a turn the trainer never rewards. Same rule as the native protocol.
         if (context or {}).get("finish_reason") in ENGINE_CUT_FINISH_REASONS:
             return self._handle_length_cutoff(trajectory)
         # Nothing to parse: not a format failure the hint below corrects, but a stop on nothing.
@@ -311,7 +311,8 @@ Always think before acting, and provide a Final Answer when you're done."""
             if not tool:
                 observation = self.registry.unknown_tool_message(step.action)
                 info["tool_error"] = f"Unknown tool: {step.action}"
-                # The turn accomplished nothing: skipped by the trainer, as under the native protocol.
+                # The turn accomplished nothing: trained only on a negative advantage, never rewarded, as
+                # under the native protocol.
                 self._flag_calls_rejected(trajectory)
             else:
                 try:

@@ -533,9 +533,10 @@ def grade_solution(
     """Grade ``code`` against ``tests`` -> :class:`GradeResult`; the single grading entry point.
 
     Selects the verdict via :func:`select_verdict` and runs every test at the limit
-    :meth:`GradingSpec.time_limit_for` derives from the problem's ``time_limit``. ``spec.max_grading_seconds`` bounds the total sequential grading cost per
-    submission (see :func:`run_solution_against_tests`). ``language`` is the submission's own language
-    when the run lets the model choose per submission; unset, the contract's ``spec.language`` applies.
+    :meth:`GradingSpec.time_limit_for` derives from the problem's ``time_limit``. ``spec.max_grading_seconds``
+    bounds the total sequential grading cost per submission (see :func:`run_solution_against_tests`).
+    ``language`` is the submission's own language when the run lets the model choose per submission; unset,
+    the contract's ``spec.language`` applies.
     """
     language = language or spec.language
     return run_solution_against_tests(

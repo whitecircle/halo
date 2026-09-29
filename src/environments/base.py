@@ -54,8 +54,7 @@ SANDBOX_FAULT_KEY = "sandbox_fault"
 SANDBOX_FAULT_INFRA = "infra"
 SANDBOX_FAULT_AGENT = "agent"
 
-# The environment's own grade, priced by the reward's environment term, in ``reward_components``: the
-# term advantage shaping gates on (it falls back to the total reward when absent).
+# The environment's own grade, priced by the reward's environment term, in ``reward_components``.
 OBJECTIVE_REWARD_KEY = component_key(OBJECTIVE_TERM_NAME)
 # Every term of the episode reward, ``reward/<name>`` → contribution; the values sum to the reward.
 REWARD_COMPONENTS_KEY = "reward_components"

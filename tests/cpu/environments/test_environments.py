@@ -16,6 +16,7 @@ import dataclasses
 import logging
 import time
 
+import numpy as np
 import pytest
 
 from src.configs.environment_config import EnvironmentConfig
@@ -1784,7 +1785,7 @@ def test_exam_qa_multiple_choice_wrong():
 
 
 def test_exam_qa_index_answer_is_graded_as_its_choice_letter():
-    """MMLU/ARC ship ``answer`` as a 0-based index into ``choices``.
+    """MMLU ships ``answer`` as a 0-based index into ``choices``.
 
     ``multiple_choice_match`` scores anything that is not a single letter as wrong, so an unconverted
     index grades EVERY completion 0: a GRPO group with zero variance, no gradient, and nothing in the
@@ -1798,13 +1799,24 @@ def test_exam_qa_index_answer_is_graded_as_its_choice_letter():
     env.step(episode_ids, ["The answer is B"])
     assert env.get_trajectories(episode_ids)[0].total_reward == 1.0
 
-    # A digit string is the same shape; and the conversion must still grade a wrong letter as wrong.
-    other_ids, _ = env.reset(["Which is the largest planet?"], [{"answer": "2", "choices": choices}])
+    # A numpy integer is the same index; and the conversion must still grade a wrong letter as wrong.
+    other_ids, _ = env.reset(["Which is the largest planet?"], [{"answer": np.int64(2), "choices": choices}])
     assert env.get_trajectories(other_ids)[0].info["expected_answer"] == "C"
     env.step(other_ids, ["The answer is B"])
     assert env.get_trajectories(other_ids)[0].total_reward == 0.0
 
     env.cleanup(episode_ids + other_ids)
+
+
+@pytest.mark.parametrize("answer", ["1", "2", "4"])
+def test_exam_qa_digit_string_answer_is_refused_not_read_as_an_index(answer):
+    """ARC's ``answerKey`` labels some rows ``"1"``-``"4"``, 1-based: read 0-based, ``"2"`` would grade
+    choice C where the row means B, and ``"4"`` would address no choice at all. Either reading misgrades a
+    convention, so a digit string raises at episode start instead of grading the wrong choice."""
+    env = ExamQAEnvironment(max_turns=3)
+    choices = ["Mars", "Jupiter", "Saturn", "Neptune"]
+    with pytest.raises(ValueError, match="is a digit string"):
+        env.reset(["Which is the largest planet?"], [{"answer": answer, "choices": choices}])
 
 
 def test_exam_qa_letter_answers_pass_through_and_bad_shapes_fail_loud():
@@ -2005,6 +2017,7 @@ def test_native_call_missing_a_required_argument_is_a_refusal_not_a_fault(caplog
     """A model that calls ``submit_solution`` with no ``code`` is charged the tool error and told which
     argument it dropped, without the traceback the log reserves for a tool that actually broke."""
     env = CodeContestsEnvironment(language="python", sandbox_backend="local", tool_error_penalty=0.05)
+    caplog.clear()  # the local sandbox's once-per-process isolation warning fires at construction
     trajectory = Trajectory()
     trajectory.info.update(total_tool_calls=0, successful_tool_calls=0)
     call = NativeToolCall(id="1", name="submit_solution", arguments={})

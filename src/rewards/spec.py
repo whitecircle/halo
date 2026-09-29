@@ -15,7 +15,7 @@ from src.inference.openai_client import DEFAULT_OPENROUTER_BASE_URL
 
 # Metric key of a term's contribution, ``reward/<name>``; the keys of one reward sum to the reward.
 REWARD_COMPONENT_PREFIX = "reward/"
-# The environment's own grade always logs under this name: component advantage shaping reads it.
+# The environment's own grade always logs under this name.
 OBJECTIVE_TERM_NAME = "objective"
 
 DEFAULT_JUDGE_MODEL = "openai/gpt-5.6-luna"
@@ -130,8 +130,8 @@ class EnvironmentTerm(RewardTerm):
         super().__post_init__()
         if self.name != OBJECTIVE_TERM_NAME:
             raise ValueError(
-                f"the environment term is always named {OBJECTIVE_TERM_NAME!r} (its component is what "
-                f"advantage shaping reads), got {self.name!r}"
+                f"the environment term is always named {OBJECTIVE_TERM_NAME!r} (its component is the fixed "
+                f"{component_key(OBJECTIVE_TERM_NAME)!r} key), got {self.name!r}"
             )
 
 

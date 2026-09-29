@@ -1,5 +1,6 @@
 """Question-answering task environments with rule-based rewards (no neural reward model)."""
 
+import numbers
 import re
 from typing import Any
 
@@ -145,24 +146,32 @@ class ExamQAEnvironment(NativeToolUseEnvironment):
     @staticmethod
     def _expected_choice_letter(expected: Any, choices: Any) -> str:
         """Normalize a multiple-choice row's expected answer to a letter :func:`multiple_choice_match`
-        scores: a letter passes through, a 0-based index into ``choices`` becomes its letter.
+        scores: a letter passes through, a 0-based integer index into ``choices`` becomes its letter.
 
-        MMLU/ARC ship ``answer`` as an int (occasionally a digit string), and the matcher rejects
-        anything that is not a single letter, so an unconverted row grades 0 on every completion and
-        leaves its GRPO group with zero variance. Any other shape raises here, at episode start.
+        MMLU ships ``answer`` as an int, and the matcher rejects anything that is not a single letter, so
+        an unconverted row grades 0 on every completion and leaves its GRPO group with zero variance. A
+        digit string is refused, not read as an index: ARC's ``answerKey`` labels some rows ``"1"``-``"5"``,
+        1-based, so no one reading of it is safe. Any other shape raises here, at episode start.
         """
         # bool is an int subclass, so True would otherwise index choice "B".
         if not isinstance(expected, bool):
             text = str(expected).strip()
             if len(text) == 1 and text.upper() in MULTIPLE_CHOICE_LETTERS:
                 return text.upper()
-            if isinstance(expected, int) or text.isdigit():
-                index = int(text)
+            if isinstance(expected, numbers.Integral):
+                index = int(expected)
                 if 0 <= index < min(len(choices), len(MULTIPLE_CHOICE_LETTERS)):
                     return MULTIPLE_CHOICE_LETTERS[index]
                 raise ValueError(
                     f"multiple-choice answer index {index} does not address any of the {len(choices)} "
                     f"choices gradable as {MULTIPLE_CHOICE_LETTERS[0]}-{MULTIPLE_CHOICE_LETTERS[-1]}."
+                )
+            if text.isdigit():
+                raise ValueError(
+                    f"multiple-choice answer {expected!r} is a digit string: as a 0-based index and as a 1-based "
+                    "label (ARC's answerKey) it names different choices, so convert it to a choice letter "
+                    f"({MULTIPLE_CHOICE_LETTERS[0]}-{MULTIPLE_CHOICE_LETTERS[-1]}) or an int index in dataset "
+                    "preparation."
                 )
         raise ValueError(
             f"multiple-choice answer {expected!r} is neither a choice letter "

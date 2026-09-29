@@ -32,8 +32,9 @@ Examples:
         --base_url https://openrouter.ai/api/v1 --api_key "$OPENROUTER_API_KEY" --model qwen/qwen3-235b-a22b
 
 `exam_qa` grades multiple choice by letter: the row needs a `choices` column (the option strings,
-passed through with `--context_fields choices`) and an `answer` that is a letter A-J or a 0-based
-index into `choices` (a raw `cais/mmlu` ships the index); any other answer raises at episode start.
+passed through with `--context_fields choices`) and an `answer` that is a letter A-J or a 0-based int
+index into `choices` (a raw `cais/mmlu` ships the index); any other answer, a digit string included,
+raises at episode start.
 Grading notes: `agent-docs/training-methods/grpo/environments/benchmarks.md`.
 """
 

@@ -568,10 +568,10 @@ class RolloutManager:
             return
         backend = self.rollout_config.backend
         logger.warning(
-            "Multi-node async GRPO but a %s URL is loopback (%s). Ray actors may "
-            "be scheduled on nodes where no %s server listens on localhost, causing "
-            "connection-refused rollouts silently returned as zero-reward. Use "
-            "resolvable host IPs/DNS in rollout_server_url / rollout_server_configs.",
+            "Multi-node async GRPO but a %s URL is loopback (%s). Ray actors may be scheduled on nodes where "
+            "no %s server listens on localhost; their connection-refused rollouts become error rows masked out "
+            "of the loss and the group baseline, shrinking the effective batch. Use resolvable host IPs/DNS in "
+            "rollout_server_url / rollout_server_configs.",
             backend,
             urls,
             backend,

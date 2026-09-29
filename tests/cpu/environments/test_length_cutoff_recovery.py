@@ -7,8 +7,8 @@ it as a plain-text answer ends the episode and books the failure as a NATURAL te
 invisible in every health metric. Instead the episode nudges (in its own protocol's words) and
 retries within ``max_turns``; the trainer never rewards the fragment. A turn the model ends with
 neither a tool call nor visible content recovers the same way, under the same cap, and is never
-rewarded for the same reason. A recovered turn is unpriced by default and pays ``length_cutoff_penalty`` where a protocol
-configures it; the turn that exhausts the recovery cap pays the overflow price instead.
+rewarded for the same reason. A recovered turn is unpriced by default and pays ``length_cutoff_penalty``
+where a protocol configures it; the turn that exhausts the recovery cap pays the overflow price instead.
 
 Run: python tests/cpu/environments/test_length_cutoff_recovery.py  (or pytest)
 """
@@ -168,7 +168,7 @@ def test_react_every_engine_cut_reason_takes_the_recovery_path(finish_reason):
 )
 def test_react_cut_turn_executes_nothing_the_parser_salvaged(text):
     """The base flags every cut turn untrainable, so an Action executed or a Final Answer graded off
-    a cut turn earns a reward on the one turn the trainer then excludes."""
+    a cut turn earns a reward on the one turn the trainer never rewards."""
     env = _make_react_env()
     eid = _reset(env)
     step = env.step([eid], [text], [{"finish_reason": "length"}])[0]
@@ -233,8 +233,8 @@ def test_a_completed_text_turn_still_ends_the_episode():
 @pytest.mark.parametrize("action", ["", "  \n"], ids=["empty", "whitespace"])
 def test_an_empty_turn_is_recovered_like_a_cut_and_flagged_untrainable(action):
     """The model closed its reasoning and stopped with nothing visible and no call. Finalized, that is a
-    natural termination graded on nothing; recovered, the stop is a turn the trainer skips — weighted,
-    a recovering episode would reinforce it."""
+    natural termination graded on nothing; recovered, the stop is a turn the trainer trains only on a
+    negative advantage — rewarded, a recovering episode would reinforce it."""
     env = _make_env()
     eid = _reset(env)
     step = env.step([eid], [action], [{"finish_reason": "stop", "reasoning": "a thought that reached no plan"}])[0]
@@ -304,7 +304,7 @@ def test_cuts_and_empty_turns_share_the_recovery_cap():
     assert traj.info["length_cutoff_turns"] == 1 and traj.info["empty_turns"] == 1
     last = traj.messages[-1]
     assert last.role == "assistant", "no nudge for a turn that ends the episode"
-    assert last.empty is True and last.untrainable, "the exhausting stop is skipped like a recovered one"
+    assert last.empty is True and last.untrainable, "the exhausting stop is never rewarded, like a recovered one"
     shaping, _ = _settled_tool_shaping(env, eid)
     assert shaping == pytest.approx(-0.15), shaping
 
