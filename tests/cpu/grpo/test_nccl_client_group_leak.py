@@ -17,6 +17,7 @@ the local half never starting at all.
     python tests/cpu/grpo/test_nccl_client_group_leak.py
 """
 
+import socket
 import threading
 from unittest.mock import patch
 
@@ -26,6 +27,7 @@ import src.distributed.nccl.clients.sglang as sglang_module
 import src.distributed.nccl.clients.vllm as vllm_module
 from src.distributed.nccl.clients.sglang import SGLangWeightSyncClient
 from src.distributed.nccl.clients.vllm import VLLMWeightSyncClient
+from tests.common.ports import free_port
 
 _SERVER_REFUSED = "server refused the group-init request"
 
@@ -84,9 +86,10 @@ def test_sglang_releases_the_group_when_the_local_half_cannot_even_start(monkeyp
     """``_AsyncCall.__init__`` starts a thread, and a thread-starved process (Ray actors + rollout
     threads) raises there. The handler must still release and report THAT error — reading the
     unbound call handle instead would raise UnboundLocalError, replacing the diagnosis and skipping
-    the release that keeps the group name reusable."""
+    the release that keeps the group name reusable. The listener no store took is closed with it."""
+    port = free_port()
     with patch.object(SGLangWeightSyncClient, "check_server"):
-        client = SGLangWeightSyncClient(base_url="http://localhost:30000")
+        client = SGLangWeightSyncClient(base_url="http://localhost:30000", group_port=port)
 
     destroyed: list[object] = []
     real_async_call = sglang_module._AsyncCall
@@ -107,6 +110,9 @@ def test_sglang_releases_the_group_when_the_local_half_cannot_even_start(monkeyp
 
     assert destroyed == [None], "the failure handler skipped _release_group, so the group name stays claimed"
     assert client._group is None and client._store is None
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as rebind:
+        rebind.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        rebind.bind(("127.0.0.1", port))  # EADDRINUSE while the listener no store took is still open
 
 
 def test_vllm_aborts_a_communicator_it_built_when_the_server_half_fails(monkeypatch):

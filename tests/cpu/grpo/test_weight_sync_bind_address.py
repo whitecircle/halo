@@ -1,4 +1,5 @@
-"""The weight-sync rendezvous store must listen only on the address the engine is told to dial.
+"""The weight-sync rendezvous store must listen only on the address the engine is told to dial, and
+already be listening there when the engine is told.
 
 The store is unauthenticated, and the engine reads the NCCL bootstrap from it while the group forms
 (vLLM unpickles it). Bound on every interface, any host that reaches the group port in that window
@@ -8,27 +9,37 @@ differently; a wide bind is the explicit ``HALO_WEIGHT_SYNC_BIND_ALL`` opt-in, a
 address this host cannot bind alone is refused before the engine is asked to join, never silently
 widened.
 
+The listener is bound before the engine's join request goes out. Told first, the engine dials a port
+nobody holds: another socket can take a probed-and-released port in between, and the engine's own
+retried connect can be handed that port as its source (a TCP self-connect), so the trainer's bind
+fails with the engine already waiting on a group that never forms.
+
 The tests drive the real clients and their real rendezvous stores (a group of one, so no engine
 peer is needed) and read the bound address off the kernel's listener table, as ``ss -ltn`` does.
+The engine's join request runs inline, at the moment the client issues it, so what it records is
+what a real engine would find when it dials in.
 
     python tests/cpu/grpo/test_weight_sync_bind_address.py
 """
 
 import logging
 import socket
+import sys
 from pathlib import Path
+from typing import NamedTuple
 from unittest.mock import patch
 
 import pytest
 from torch.distributed import distributed_c10d as c10d
 
+import src.distributed.nccl.clients.sglang as sglang_module
 import src.distributed.nccl.clients.vllm as vllm_module
-import src.distributed.nccl.transport.stateless_group as stateless_group_module
-import src.distributed.nccl.transport.torch_group as torch_group_module
 from src.distributed.nccl.addresses import is_loopback
 from src.distributed.nccl.clients.base import _get_ip
 from src.distributed.nccl.clients.sglang import SGLangWeightSyncClient
 from src.distributed.nccl.clients.vllm import VLLMWeightSyncClient
+from src.distributed.nccl.transport.stateless_group import RendezvousListener
+from tests.common.ports import free_port
 
 BIND_ALL_ENV = "HALO_WEIGHT_SYNC_BIND_ALL"
 # RFC 5737 documentation range: never an address of the test host.
@@ -50,6 +61,35 @@ def _listening_addresses(port: int) -> list[str]:
             packed = b"".join(raw[i : i + 4][::-1] for i in range(0, len(raw), 4))
             addresses.append(socket.inet_ntop(family, packed))
     return addresses
+
+
+class _JoinRequest(NamedTuple):
+    """A group-join request the engine received, and who listened on its port when it arrived."""
+
+    address: str
+    port: int
+    listening: list[str]
+
+
+class _InlineCall:
+    """``_AsyncCall`` run on the issuing thread, so the call happens at the moment it is issued."""
+
+    def __init__(self, fn, name: str = "server call"):
+        self.name, self.result, self.error = name, None, None
+        try:
+            self.result = fn()
+        except Exception as e:
+            self.error = e
+
+    def is_alive(self) -> bool:
+        return False
+
+    def join(self, grace: float) -> "_InlineCall":
+        return self
+
+    def wait(self, timeout: float = 0.0):
+        if self.error:
+            raise self.error
 
 
 class _Response:
@@ -78,42 +118,49 @@ def _group_without_nccl(*args, **kwargs):
     return object(), None
 
 
-def _recording_join(engine_requests: list[tuple[str, int]]):
+def _recording_join(engine_requests: list[_JoinRequest], server_calls: list[str]):
     def post_once(path, **kwargs):
+        server_calls.append(path)
         body = kwargs["json"]
         group = body.get("init_info", body)  # vLLM nests the group fields, SGLang does not
-        engine_requests.append((group["master_address"], group["master_port"]))
+        port = group["master_port"]
+        engine_requests.append(_JoinRequest(group["master_address"], port, _listening_addresses(port)))
         return _Response({})
 
     return post_once
 
 
 @pytest.fixture
-def engine_requests() -> list[tuple[str, int]]:
-    """``(master address, port)`` of each group-join request the client sent the engine, in order."""
+def engine_requests() -> list[_JoinRequest]:
+    """Each group-join request the client sent the engine, in order."""
     return []
 
 
 @pytest.fixture
-def opened_listeners(monkeypatch) -> list[str]:
-    """Bind address of every rendezvous listener either transport opened, in order."""
-    opened: list[str] = []
-    real = stateless_group_module.rendezvous_listener
+def server_calls() -> list[str]:
+    """Route of every request the client sent the engine while forming the group, in order."""
+    return []
 
-    def recording(bind_address, port):
-        opened.append(bind_address)
-        return real(bind_address, port)
 
-    monkeypatch.setattr(stateless_group_module, "rendezvous_listener", recording)
-    monkeypatch.setattr(torch_group_module, "rendezvous_listener", recording)
+@pytest.fixture
+def opened_listeners(monkeypatch) -> list[RendezvousListener]:
+    """Every rendezvous listener either client opened, in order."""
+    opened: list[RendezvousListener] = []
+    real_init = RendezvousListener.__init__
+
+    def recording(self, bind_address, port):
+        real_init(self, bind_address, port)
+        opened.append(self)
+
+    monkeypatch.setattr(RendezvousListener, "__init__", recording)
     return opened
 
 
 @pytest.fixture(params=["vllm", "sglang"])
-def client(request, monkeypatch, engine_requests, opened_listeners):
+def client(request, monkeypatch, engine_requests, server_calls, opened_listeners):
     """A real client of each engine against a local server address, its HTTP half stubbed.
 
-    The engine reports no ranks, so the group is the trainer alone: the rendezvous store binds its
+    The engine reports no ranks, so the group is the trainer alone: the rendezvous store takes the
     listener and returns without waiting for an engine peer.
     """
     monkeypatch.delenv(BIND_ALL_ENV, raising=False)
@@ -124,14 +171,18 @@ def client(request, monkeypatch, engine_requests, opened_listeners):
         monkeypatch.setattr(client, "probe_generation", lambda: None)
         monkeypatch.setattr(vllm_module.requests, "get", lambda url, timeout=None: _Response({"world_size": 0}))
         monkeypatch.setattr(vllm_module, "PyNcclCommunicator", _GroupHoldingCommunicator)
+        monkeypatch.setattr(vllm_module, "_AsyncCall", _InlineCall)
     else:
         monkeypatch.delenv("SGLANG_GROUP_HOST", raising=False)
         with patch.object(SGLangWeightSyncClient, "check_server"):
             client = SGLangWeightSyncClient(base_url="http://127.0.0.1:30000")
         monkeypatch.setattr(client, "fetch_engine_world_size", lambda: 0)
-        monkeypatch.setattr(client, "_destroy_remote_group", lambda: None)
+        monkeypatch.setattr(
+            client, "_destroy_remote_group", lambda: server_calls.append("/destroy_weights_update_group")
+        )
         monkeypatch.setattr(c10d, "_new_process_group_helper", _group_without_nccl)
-    monkeypatch.setattr(client, "_post_once", _recording_join(engine_requests))
+        monkeypatch.setattr(sglang_module, "_AsyncCall", _InlineCall)
+    monkeypatch.setattr(client, "_post_once", _recording_join(engine_requests, server_calls))
     yield client
     client.close_communicator()
 
@@ -149,7 +200,7 @@ def test_the_listener_binds_the_advertised_address(client, engine_requests, adve
 
     client.init_communicator(device="cpu")
 
-    [(advertised, port)] = engine_requests
+    [(advertised, port, _)] = engine_requests
     assert advertised == expected
     assert _listening_addresses(port) == [expected], (
         f"the rendezvous store listens on {_listening_addresses(port)} while the engine was told to "
@@ -164,7 +215,7 @@ def test_a_name_is_advertised_as_the_address_the_listener_binds(client, engine_r
 
     client.init_communicator(device="cpu")
 
-    [(advertised, port)] = engine_requests
+    [(advertised, port, _)] = engine_requests
     assert advertised == "127.0.0.1", f"the engine was sent {advertised!r}, not the address the listener binds"
     assert _listening_addresses(port) == ["127.0.0.1"]
 
@@ -177,7 +228,7 @@ def test_the_opt_in_binds_every_interface(client, engine_requests, monkeypatch, 
     with caplog.at_level(logging.WARNING):
         client.init_communicator(device="cpu")
 
-    [(_, port)] = engine_requests
+    [(_, port, _)] = engine_requests
     assert _listening_addresses(port) == ["0.0.0.0"]
     warnings = [r.getMessage() for r in caplog.records if r.levelno == logging.WARNING]
     assert any(BIND_ALL_ENV in m and "every interface" in m for m in warnings), (
@@ -235,19 +286,75 @@ def test_an_ipv6_group_address_is_refused_as_unsupported(
     assert not engine_requests, "the engine was asked to dial an IPv6 address no listener takes"
 
 
-def test_an_auto_picked_port_is_probed_on_the_bind_address(client, monkeypatch):
-    """The free-port probe binds where the listener will, so the port it picks is free there."""
-    bound: list[tuple[str, int]] = []
-    real_bind = socket.socket.bind
-    monkeypatch.setattr(socket.socket, "bind", lambda sock, address: bound.append(address) or real_bind(sock, address))
+def test_a_configured_port_is_listening_when_the_engine_is_told_to_dial_it(client, engine_requests):
+    """Told before the listener exists, the engine dials a port nobody holds, where its retried connect
+    can take the port as its own source and fail the trainer's bind with the engine already waiting."""
+    client.group_port = free_port()
 
-    _, port, bind_address = client._resolve_group_address()
+    client.init_communicator(device="cpu")
 
-    assert bound, "no port was probed"
-    assert all(host == bind_address for host, _ in bound), (
-        f"the port was probed on {bound}, not on the bind address {bind_address}"
+    [request] = engine_requests
+    assert request.port == client.group_port
+    assert request.listening == ["127.0.0.1"], (
+        f"the engine was told to dial 127.0.0.1:{request.port} while listeners there were {request.listening}"
     )
-    assert port > 0
+
+
+def test_an_unset_port_is_the_one_the_kernel_gave_the_live_listener(client, engine_requests, opened_listeners):
+    """``group_port`` 0 binds port 0 and advertises what the kernel assigned, the port the listener
+    already holds; a probed-and-released port could be taken before anything binds it again."""
+    client.init_communicator(device="cpu")
+
+    [listener] = opened_listeners
+    [request] = engine_requests
+    assert (request.port, request.listening) == (listener.port, ["127.0.0.1"]), (
+        f"the engine was told port {request.port} (listeners {request.listening}) while the live listener "
+        f"holds {listener.port}"
+    )
+    assert listener.handed_over, "the store did not take over the listener the engine was told about"
+    assert _listening_addresses(listener.port) == ["127.0.0.1"], "the store does not serve the advertised port"
+
+
+def test_a_failure_before_the_store_takes_the_listener_closes_it(
+    client, engine_requests, opened_listeners, monkeypatch
+):
+    """A listener the store never took is closed, not detached: the port is free again, and the engine
+    was never asked to join."""
+    port = client.group_port = free_port()
+    held_at_failure: list[list[str]] = []
+
+    def no_thread(fn, name: str = "server call"):
+        held_at_failure.append(_listening_addresses(port))
+        raise RuntimeError("can't start new thread")
+
+    monkeypatch.setattr(sys.modules[type(client).__module__], "_AsyncCall", no_thread)
+
+    with pytest.raises(RuntimeError, match="can't start new thread"):
+        client.init_communicator(device="cpu")
+
+    assert held_at_failure == [["127.0.0.1"]], f"the port was not held when the join was issued: {held_at_failure}"
+    [listener] = opened_listeners
+    assert not listener.handed_over
+    assert not engine_requests, "the engine was asked to join a group whose listener was closed"
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as rebind:
+        rebind.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        rebind.bind(("127.0.0.1", port))  # EADDRINUSE while a detached listener still holds the port
+
+
+def test_a_configured_port_already_held_raises_before_the_engine_is_asked_anything(client, server_calls):
+    """The bind comes first, so a port another socket holds fails before any request reaches the engine,
+    and the error names the port rather than a topology knob."""
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as holder:
+        holder.bind(("127.0.0.1", 0))
+        holder.listen()
+        port = client.group_port = holder.getsockname()[1]
+
+        with pytest.raises(RuntimeError, match="Could not bind the weight-transfer group port") as refused:
+            client.init_communicator(device="cpu")
+
+    assert f"127.0.0.1:{port}" in str(refused.value)
+    assert "was not asked to join" in str(refused.value)
+    assert not server_calls, f"the engine was sent {server_calls} for a group whose port could not be bound"
 
 
 if __name__ == "__main__":

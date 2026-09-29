@@ -160,12 +160,14 @@ the trainer's `_init_weight_sync_client` → `_sync_weights_to_engine`:
 2. `init_communicator(device=cuda:N)` — GETs `/get_world_size`, computes
    `world_size = inference_ws + 1`, advertises `master_address` (arg →
    `VLLM_GROUP_HOST` env → loopback for a local server → default-route NIC)
-   and binds the TCPStore on that address alone (`HALO_WEIGHT_SYNC_BIND_ALL=1`
-   widens it to `0.0.0.0`,
+   and opens the rendezvous listener on that address alone, on `group_port` or a
+   kernel-assigned port when it is 0 (`HALO_WEIGHT_SYNC_BIND_ALL=1` widens it to
+   `0.0.0.0`,
    [group rendezvous](../../agent-docs/infrastructure/rollout-servers.md#group-rendezvous));
-   POSTs `/init_weight_transfer_engine` (server rank_offset=1) while
-   the trainer (rank 0) builds the `StatelessProcessGroup` + `PyNcclCommunicator`
-   concurrently. Done once, while vLLM is idle.
+   only then POSTs `/init_weight_transfer_engine` (server rank_offset=1) with the
+   listener's port, while the trainer (rank 0) hands the listener to the
+   `StatelessProcessGroup` store and builds the `PyNcclCommunicator` concurrently.
+   Done once, while vLLM is idle.
 3. Each sync: the gather calls `update_named_param()` per param, which stages it on the sync
    GPU and flushes a chunk whenever the next param would overflow `HALO_WEIGHT_SYNC_CHUNK_MB`
    (default 1024). The first flush opens the update (`/pause?mode=keep` → `/start_weight_update`);

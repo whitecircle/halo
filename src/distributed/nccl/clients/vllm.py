@@ -5,7 +5,6 @@ The vllm package is never imported here.
 """
 
 import atexit
-import errno
 import logging
 
 import requests
@@ -192,78 +191,75 @@ class VLLMWeightSyncClient(BaseWeightSyncClient):
         resp.raise_for_status()
         inference_ws = resp.json()["world_size"]
         world_size = inference_ws + 1
-        master_address, master_port, bind_address = self._resolve_group_address()
+        master_address, listener = self._open_group_rendezvous()
+        master_port = listener.port
 
         logger.info(
             f"NCCL init: inference_ws={inference_ws}, master={master_address}:{master_port}, "
-            f"listening on {bind_address}"
+            f"listening on {listener.bind_address}"
         )
 
-        server_call = _AsyncCall(
-            name=_EP_INIT_ENGINE,
-            fn=lambda: self._post_once(
-                _EP_INIT_ENGINE,
-                timeout=_GROUP_FORMATION_TIMEOUT_S,
-                json={
-                    "init_info": {
-                        "master_address": master_address,
-                        "master_port": master_port,
-                        "rank_offset": 1,
-                        "world_size": world_size,
-                    }
-                },
-            ),
-        )
+        # Closed on exit unless the store took the listener over.
+        with listener:
+            # Told before the store is built: the master blocks until every worker joined.
+            server_call = _AsyncCall(
+                name=_EP_INIT_ENGINE,
+                fn=lambda: self._post_once(
+                    _EP_INIT_ENGINE,
+                    timeout=_GROUP_FORMATION_TIMEOUT_S,
+                    json={
+                        "init_info": {
+                            "master_address": master_address,
+                            "master_port": master_port,
+                            "rank_offset": 1,
+                            "world_size": world_size,
+                        }
+                    },
+                ),
+            )
 
-        pg: StatelessProcessGroup | None = None
-        comm_call: _AsyncCall | None = None
-        try:
-            pg = StatelessProcessGroup.create(
-                host=master_address,
-                port=master_port,
-                rank=0,
-                world_size=world_size,
-                bind_address=bind_address,
-            )
-            # ncclCommInitRank is unconditionally blocking (the wrapper binds no non-blocking init and
-            # NCCL has no comm-init deadline), so a server that never joins would park the trainer with
-            # its HTTP error unread. Both sides run concurrently; whichever fails first wins.
-            comm_call = _AsyncCall(
-                name="NCCL group formation",
-                fn=lambda: PyNcclCommunicator(pg, device=device),
-            )
-            _wait_for_calls([server_call, comm_call], timeout=_GROUP_FORMATION_TIMEOUT_S)
-            self.communicator = comm_call.result
-        except Exception as e:
-            # `_wait_for_calls` raises as soon as either half fails, so a communicator this rank has
-            # already built lives only on the call handle; dropping that reference would leak its
-            # ncclComm and the device memory NCCL pinned for it. Abort it before releasing the group.
-            built = comm_call.join(_SERVER_ERROR_GRACE_S).result if comm_call is not None else None
-            if built is not None:
-                built.abort()
-            if pg is not None:
-                # The comm thread stays parked in ncclCommInitRank holding this group, so dropping
-                # references would not free the port; close() releases the listener from the group.
-                pg.close()
-            if e is server_call.error:
-                raise  # the server named its own failure; a network-topology hint would mislead
-            if isinstance(e, OSError) and e.errno == errno.EADDRINUSE:
-                # Not a topology problem: the hint below would point at VLLM_GROUP_HOST rather than
-                # the port another live group already holds.
+            pg: StatelessProcessGroup | None = None
+            comm_call: _AsyncCall | None = None
+            try:
+                pg = StatelessProcessGroup.create(
+                    host=master_address,
+                    port=master_port,
+                    rank=0,
+                    world_size=world_size,
+                    listener=listener,
+                )
+                # ncclCommInitRank is unconditionally blocking (the wrapper binds no non-blocking init
+                # and NCCL has no comm-init deadline), so a server that never joins would park the
+                # trainer with its HTTP error unread. Both sides run concurrently; whichever fails
+                # first wins.
+                comm_call = _AsyncCall(
+                    name="NCCL group formation",
+                    fn=lambda: PyNcclCommunicator(pg, device=device),
+                )
+                _wait_for_calls([server_call, comm_call], timeout=_GROUP_FORMATION_TIMEOUT_S)
+                self.communicator = comm_call.result
+            except Exception as e:
+                # `_wait_for_calls` raises as soon as either half fails, so a communicator this rank
+                # has already built lives only on the call handle; dropping that reference would leak
+                # its ncclComm and the device memory NCCL pinned for it. Abort it before releasing
+                # the group.
+                built = comm_call.join(_SERVER_ERROR_GRACE_S).result if comm_call is not None else None
+                if built is not None:
+                    built.abort()
+                if pg is not None:
+                    # The comm thread stays parked in ncclCommInitRank holding this group, so dropping
+                    # references would not free the port; close() releases the listener from the group.
+                    pg.close()
+                if e is server_call.error:
+                    raise  # the server named its own failure; a network-topology hint would mislead
+                # A wrong-but-routable master surfaces as a bare TCPStore/handshake timeout, so name the knob.
                 raise RuntimeError(
-                    f"Could not bind the weight-transfer group port {bind_address}:{master_port} ({e}). "
-                    f"A connected client holds its group port until close_communicator(), so every vLLM "
-                    f"server — and every trainer process sharing this host — needs its own "
-                    f"vllm_group_port / group_port."
+                    f"Weight-transfer group formation failed (advertised master "
+                    f"{master_address}:{master_port}; vLLM server {self.base_url}). If the vLLM node "
+                    f"cannot reach that address, set VLLM_GROUP_HOST to an interface routable from the "
+                    f"vLLM server (and NCCL_SOCKET_IFNAME for the data plane on multi-homed hosts). "
+                    f"Original error: {type(e).__name__}: {e}"
                 ) from e
-            # A wrong-but-routable master surfaces as a bare TCPStore/handshake timeout, so name the knob.
-            raise RuntimeError(
-                f"Weight-transfer group formation failed (advertised master "
-                f"{master_address}:{master_port}; vLLM server {self.base_url}). If the vLLM node "
-                f"cannot reach that address, set VLLM_GROUP_HOST to an interface routable from the "
-                f"vLLM server (and NCCL_SOCKET_IFNAME for the data plane on multi-homed hosts). "
-                f"Original error: {type(e).__name__}: {e}"
-            ) from e
 
         self._process_group = pg
         atexit.register(self.close_communicator)

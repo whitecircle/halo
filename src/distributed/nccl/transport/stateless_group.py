@@ -3,6 +3,7 @@
 import dataclasses
 import pickle
 import socket
+import threading
 import time
 from collections import deque
 from collections.abc import Iterator
@@ -21,28 +22,68 @@ _DATA_EXPIRATION_SECONDS = 3600
 _STORE_TIMEOUT_SECONDS = 300
 
 
-@contextmanager
-def rendezvous_listener(bind_address: str, port: int) -> Iterator[int]:
-    """Yield the fd of an IPv4 socket listening on ``bind_address:port``, for a ``TCPStore`` master.
+class RendezvousListener:
+    """An IPv4 socket bound and listening on ``bind_address:port`` for a ``TCPStore`` master to take over.
 
-    Handed over as ``master_listen_fd``, the fd is the store's only listener; a master that opens its
-    own listens on every interface whatever host it is given. The store owns the fd from that call
-    on, closing it in its destructor and on a failed start, so the socket is detached on exit rather
-    than closed: closing it under a live store aborts the store's daemon thread, and after a failed
-    start it would close whatever reused the fd number.
+    Opened before the peers are told where to dial, and held from the bind on: a port probed and
+    released first can be taken in between, and a peer retrying against a port nobody holds can be
+    handed that port as its own source (a TCP self-connect), after which the bind fails with the peer
+    already waiting. ``port`` 0 lets the kernel assign one; :attr:`port` is the port actually bound.
+
+    Handed over as ``master_listen_fd`` (:meth:`handover`), the fd is the store's only listener; a
+    master that opens its own listens on every interface whatever host it is given. Until then the
+    socket is this object's, and :meth:`close` (or leaving its ``with`` block) frees the port.
     """
-    listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    try:
-        listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        listener.bind((bind_address, port))
-        listener.listen()
-    except BaseException:
-        listener.close()
-        raise
-    try:
-        yield listener.fileno()
-    finally:
-        listener.detach()
+
+    def __init__(self, bind_address: str, port: int):
+        listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        try:
+            listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            listener.bind((bind_address, port))
+            listener.listen()
+        except BaseException:
+            listener.close()
+            raise
+        self.bind_address = bind_address
+        self.port: int = listener.getsockname()[1]
+        self.handed_over = False
+        self._socket: socket.socket | None = listener
+        # The SGLang client hands the listener over on its group-formation thread while its failure
+        # path may close it from the caller's.
+        self._lock = threading.Lock()
+
+    @contextmanager
+    def handover(self) -> Iterator[int]:
+        """Yield the fd to the one ``TCPStore(master_listen_fd=...)`` call that takes it over.
+
+        The store owns the fd from that call on, closing it in its destructor and on a failed start,
+        so the socket is detached on exit rather than closed: closing it under a live store aborts the
+        store's daemon thread, and after a failed start it would close whatever reused the fd number.
+        The store must be given :attr:`port`, which it checks the fd against.
+        """
+        with self._lock:
+            listener, self._socket = self._socket, None
+            if listener is None:
+                state = "handed to a store" if self.handed_over else "closed"
+                raise RuntimeError(f"The rendezvous listener on {self.bind_address}:{self.port} was already {state}.")
+            self.handed_over = True
+        try:
+            yield listener.fileno()
+        finally:
+            listener.detach()
+
+    def close(self) -> None:
+        """Close the socket and free the port, unless a store took it over; idempotent."""
+        with self._lock:
+            listener, self._socket = self._socket, None
+        if listener is not None:
+            listener.close()
+
+    def __enter__(self) -> "RendezvousListener":
+        return self
+
+    def __exit__(self, *exc_info) -> None:
+        self.close()
 
 
 @dataclasses.dataclass
@@ -87,17 +128,22 @@ class StatelessProcessGroup:
         port: int,
         rank: int,
         world_size: int,
-        bind_address: str | None = None,
+        listener: RendezvousListener | None = None,
     ) -> "StatelessProcessGroup":
         """Create a StatelessProcessGroup without polluting global torch.distributed state.
 
-        ``bind_address`` (default ``host``) is the address rank 0's listener binds: ``host`` resolved,
-        or every interface where the caller opted in for an advertised address that is not local
-        (NAT, a port mapping).
+        Rank 0 hosts the store on ``listener``, already listening on ``port`` (its
+        :attr:`RendezvousListener.port`): the master blocks until every rank has joined, so the other
+        ranks are told where to dial before this call, and the listener is what they reach meanwhile.
         """
         launch_server = rank == 0
-        listener = rendezvous_listener(bind_address or host, port) if launch_server else nullcontext()
-        with listener as listen_fd:
+        if launch_server and listener is None:
+            raise ValueError("Rank 0 hosts the store on a RendezvousListener opened before its peers dial it.")
+        if launch_server and listener.port != port:
+            # The store checks the fd against ``port``, and a mismatch fails its start after taking the fd.
+            raise ValueError(f"Rank 0 was given port {port}, but its rendezvous listener holds {listener.port}.")
+        handover = listener.handover() if launch_server else nullcontext()
+        with handover as listen_fd:
             store = TCPStore(
                 host_name=host,
                 port=port,
@@ -113,7 +159,7 @@ class StatelessProcessGroup:
     def close(self) -> None:
         """Release rank 0's listener so ``port`` can be rebound; idempotent, and a no-op off rank 0.
 
-        The store owns the listening fd (:func:`rendezvous_listener`), so dropping the last store
+        The store owns the listening fd (:meth:`RendezvousListener.handover`), so dropping the last store
         reference runs its destructor, which stops the daemon and closes the fd. Dropping the
         reference here rather than at garbage-collection time makes the release deterministic even
         while another holder of this group (a thread parked in ``ncclCommInitRank``, a traceback) is

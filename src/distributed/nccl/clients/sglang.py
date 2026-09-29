@@ -220,72 +220,74 @@ class SGLangWeightSyncClient(BaseWeightSyncClient):
         """Form the weight-update group: trainer rank 0, engine ranks 1..N."""
         engine_ws = self.fetch_engine_world_size()
         world_size = engine_ws + 1
-        master_address, master_port, bind_address = self._resolve_group_address()
         self._resolve_sync_device(device)
+        master_address, listener = self._open_group_rendezvous()
+        master_port = listener.port
 
         logger.info(
             f"SGLang NCCL init: engine_ws={engine_ws}, master={master_address}:{master_port}, "
-            f"listening on {bind_address}"
+            f"listening on {listener.bind_address}"
         )
 
-        # The engine registers the group by name as soon as it is asked to join and rejects any later
-        # join under that name, so a trainer that died between the request and a working group leaves
-        # the server unable to weight-sync until restarted. Clearing a stale registration first is a
-        # no-op on the first attempt.
-        self._destroy_remote_group()
+        # Closed on exit unless the store took the listener over.
+        with listener:
+            # The engine registers the group by name as soon as it is asked to join and rejects any
+            # later join under that name, so a trainer that died between the request and a working
+            # group leaves the server unable to weight-sync until restarted. Clearing a stale
+            # registration first is a no-op on the first attempt.
+            self._destroy_remote_group()
 
-        server_call = _AsyncCall(
-            name=_EP_INIT_GROUP,
-            fn=lambda: self._post_once(
-                _EP_INIT_GROUP,
-                timeout=_GROUP_FORMATION_TIMEOUT_S,
-                json={
-                    "master_address": master_address,
-                    "master_port": master_port,
-                    "rank_offset": 1,
-                    "world_size": world_size,
-                    "group_name": self.group_name,
-                    "backend": "nccl",
-                },
-            ),
-        )
-        group_call: _AsyncCall | None = None
-        try:
-            # Both halves block until the other arrives (the engine's request returns once the group
-            # formed, group creation returns once the engine joined), so they run concurrently and
-            # whichever fails first wins.
-            group_call = _AsyncCall(
-                name="weight-update group formation",
-                fn=lambda: create_weight_update_group(
-                    master_address=master_address,
-                    master_port=master_port,
-                    world_size=world_size,
-                    device=self.sync_device,
-                    group_name=self.group_name,
-                    bind_address=bind_address,
-                    timeout_s=_GROUP_FORMATION_TIMEOUT_S,
+            server_call = _AsyncCall(
+                name=_EP_INIT_GROUP,
+                fn=lambda: self._post_once(
+                    _EP_INIT_GROUP,
+                    timeout=_GROUP_FORMATION_TIMEOUT_S,
+                    json={
+                        "master_address": master_address,
+                        "master_port": master_port,
+                        "rank_offset": 1,
+                        "world_size": world_size,
+                        "group_name": self.group_name,
+                        "backend": "nccl",
+                    },
                 ),
             )
-            _wait_for_calls([server_call, group_call], timeout=_GROUP_FORMATION_TIMEOUT_S)
-            self._group, self._store = group_call.result
-        except Exception as e:
-            # `_wait_for_calls` raises as soon as either half fails, so a group this rank already
-            # formed lives only on the call handle. Adopt it before releasing, or c10d keeps the
-            # registration under `self.group_name` and the store keeps its listener on `master_port`,
-            # and every later reconnect is rejected with "group name has already been created".
-            formed = group_call.join(_SERVER_ERROR_GRACE_S).result if group_call is not None else None
-            if formed is not None:
-                self._group, self._store = formed
-            self._release_group()
-            if e is server_call.error:
-                raise  # the server named its own failure; a topology hint would mislead
-            raise RuntimeError(
-                f"SGLang weight-update group formation failed (advertised master "
-                f"{master_address}:{master_port}; server {self.base_url}). If the SGLang node cannot "
-                f"reach that address, set {self.GROUP_HOST_ENV} to an interface routable from it. "
-                f"A port already held by another client on this host fails the same way — each server "
-                f"needs its own group_port. Original error: {type(e).__name__}: {e}"
-            ) from e
+            group_call: _AsyncCall | None = None
+            try:
+                # Both halves block until the other arrives (the engine's request returns once the
+                # group formed, group creation returns once the engine joined), so they run
+                # concurrently and whichever fails first wins.
+                group_call = _AsyncCall(
+                    name="weight-update group formation",
+                    fn=lambda: create_weight_update_group(
+                        master_address=master_address,
+                        listener=listener,
+                        world_size=world_size,
+                        device=self.sync_device,
+                        group_name=self.group_name,
+                        timeout_s=_GROUP_FORMATION_TIMEOUT_S,
+                    ),
+                )
+                _wait_for_calls([server_call, group_call], timeout=_GROUP_FORMATION_TIMEOUT_S)
+                self._group, self._store = group_call.result
+            except Exception as e:
+                # `_wait_for_calls` raises as soon as either half fails, so a group this rank already
+                # formed lives only on the call handle. Adopt it before releasing, or c10d keeps the
+                # registration under `self.group_name` and the store keeps its listener on
+                # `master_port`, and every later reconnect is rejected with "group name has already
+                # been created".
+                formed = group_call.join(_SERVER_ERROR_GRACE_S).result if group_call is not None else None
+                if formed is not None:
+                    self._group, self._store = formed
+                self._release_group()
+                if e is server_call.error:
+                    raise  # the server named its own failure; a topology hint would mislead
+                raise RuntimeError(
+                    f"SGLang weight-update group formation failed (advertised master "
+                    f"{master_address}:{master_port}; server {self.base_url}). If the SGLang node cannot "
+                    f"reach that address, set {self.GROUP_HOST_ENV} to an interface routable from it. "
+                    f"Original error: {type(e).__name__}: {e}"
+                ) from e
 
         # The atexit invocation skips the local NCCL destroy: the group's peers are engine
         # processes that never enter destroy, so with an interrupted sync in flight

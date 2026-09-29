@@ -57,6 +57,7 @@ def _build_import_stubs() -> dict:
 
     stateless_pg_mod = types.ModuleType("src.distributed.nccl.transport.stateless_group")
     stateless_pg_mod.StatelessProcessGroup = type("StatelessProcessGroup", (), {})
+    stateless_pg_mod.RendezvousListener = type("RendezvousListener", (), {})
 
     clients_pkg = types.ModuleType("src.distributed.nccl.clients")
     clients_pkg.__path__ = [os.path.join(PROJECT_ROOT, "src", "distributed", "nccl", "clients")]

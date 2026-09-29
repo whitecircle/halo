@@ -81,6 +81,14 @@ whatever address it is given. An address this host cannot bind alone (a NAT or p
 the `0.0.0.0` wildcard, a name resolving to loopback for a remote server) raises before the engine
 is asked to join, and so does one with no IPv4 address: IPv6 is unsupported.
 
+The listener is bound and listening before the engine hears anything: on `group_port`, or on a port
+the kernel assigns when it is 0, and the engine is sent the port the listener holds. The client then
+sends the join request and hands the listener to the store; group formation blocks until every worker
+has joined, so the engine is told before the store exists. A configured port another socket holds (a
+live client, or an outbound connection given it as its source port) fails with
+`Could not bind the weight-transfer group port` before any request reaches the engine, so no server
+is left waiting on a group that cannot form.
+
 `HALO_WEIGHT_SYNC_BIND_ALL=1` puts the store on every interface instead and advertises the
 configured address unresolved, for a trainer the server reaches through NAT or a port mapping. The
 mapping must keep the port, and the trainer must reach its own advertised address: the store's own

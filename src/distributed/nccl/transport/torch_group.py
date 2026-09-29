@@ -19,7 +19,7 @@ import torch
 import torch.distributed as dist
 from torch.distributed import distributed_c10d as c10d
 
-from src.distributed.nccl.transport.stateless_group import rendezvous_listener
+from src.distributed.nccl.transport.stateless_group import RendezvousListener
 
 logger = logging.getLogger(__name__)
 
@@ -52,12 +52,11 @@ def _store_bootstrapped_communicator():
 
 def create_weight_update_group(
     master_address: str,
-    master_port: int,
+    listener: RendezvousListener,
     world_size: int,
     device: torch.device,
     group_name: str = DEFAULT_WEIGHT_UPDATE_GROUP_NAME,
     *,
-    bind_address: str,
     timeout_s: float,
 ) -> tuple[dist.ProcessGroup, dist.TCPStore]:
     """Host the rendezvous store and join the weight-update group as rank 0.
@@ -66,8 +65,9 @@ def create_weight_update_group(
     which the caller must keep alive: dropping the store closes the listener and the engine can no
     longer re-join. Pair with :func:`destroy_weight_update_group`.
 
-    The store listens on ``bind_address`` alone (:func:`rendezvous_listener`): ``master_address``
-    itself, or every interface under the client's explicit opt-in.
+    The store takes over ``listener`` (:class:`RendezvousListener`), which the client opened before
+    it asked the engine to join: bound on ``master_address`` itself, or on every interface under the
+    client's explicit opt-in.
 
     ``timeout_s`` has no default because this half of the handshake blocks against a concurrent HTTP
     request to the engine, and the client sets that deadline (``_GROUP_FORMATION_TIMEOUT_S``); a
@@ -85,10 +85,10 @@ def create_weight_update_group(
     """
     if device.type == "cuda":
         torch.cuda.set_device(device)
-    with rendezvous_listener(bind_address, master_port) as listen_fd:
+    with listener.handover() as listen_fd:
         store = dist.TCPStore(
             host_name=master_address,
-            port=master_port,
+            port=listener.port,
             world_size=world_size,
             is_master=True,
             timeout=timedelta(seconds=timeout_s),
@@ -119,7 +119,7 @@ def create_weight_update_group(
     # declares; without it `broadcast(..., src=0)` cannot translate the root rank.
     c10d._world.pg_group_ranks[group] = {i: i for i in range(world_size)}
     logger.info(
-        f"Weight-update group formed: rank 0 of {world_size} at {master_address}:{master_port} (group {group_name!r})"
+        f"Weight-update group formed: rank 0 of {world_size} at {master_address}:{listener.port} (group {group_name!r})"
     )
     return group, store
 

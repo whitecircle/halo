@@ -13,6 +13,7 @@ through ``update_named_param`` + ``reset_prefix_cache``.
 """
 
 import atexit
+import errno
 import logging
 import socket
 import threading
@@ -30,6 +31,7 @@ from urllib3.util.retry import Retry
 
 from src.distributed.nccl.addresses import is_loopback
 from src.distributed.nccl.transport.packed_tensor import DEFAULT_PACKED_BUFFER_SIZE_BYTES
+from src.distributed.nccl.transport.stateless_group import RendezvousListener
 from src.env import env_flag, env_positive_int, env_str
 
 logger = logging.getLogger(__name__)
@@ -182,13 +184,6 @@ def chunk_by_bytes(
             raise ValueError(f"co-loaded parameters never completed in this payload: {[name for name, _ in held]}")
         chunks.append(sendable)
     return chunks
-
-
-def _get_open_port(host: str) -> int:
-    """A port free on ``host``, the address the rendezvous listener will bind."""
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-        s.bind((host, 0))
-        return s.getsockname()[1]
 
 
 def _get_ip() -> str:
@@ -567,17 +562,40 @@ class BaseWeightSyncClient:
         nucleus_renormalized = None if nucleus is None else nucleus[0] - base[0] > _NUCLEUS_RENORM_MIN_SHIFT_NATS
         return SamplerLogprobSemantics(temperature_applied, nucleus_renormalized)
 
-    def _resolve_group_address(self) -> tuple[str, int, str]:
-        """``(master address, port, bind address)`` of the weight-transfer group's rendezvous.
+    def _open_group_rendezvous(self) -> tuple[str, RendezvousListener]:
+        """``(master address, listener)``: the group's rendezvous, listening before the engine hears of it.
+
+        The listener binds ``group_port``, or a port the kernel assigns when it is 0, and the engine is
+        told the port it holds (:class:`RendezvousListener`). A configured port another socket holds
+        therefore raises here, before the engine is asked anything, rather than leaving it waiting on
+        a group that cannot form. The caller hands the listener to the store, or closes it.
+        """
+        master_address, bind_address = self._resolve_group_address()
+        try:
+            listener = RendezvousListener(bind_address, max(self.group_port, 0))
+        except OSError as e:
+            if self.group_port > 0 and e.errno == errno.EADDRINUSE:
+                raise RuntimeError(
+                    f"Could not bind the weight-transfer group port {bind_address}:{self.group_port} ({e}); the "
+                    f"{self.BACKEND_NAME} server {self.base_url} was not asked to join. A connected client holds "
+                    f"its group port until close_communicator(), so every server — and every trainer process "
+                    f"sharing this host — needs its own group_port / vllm_group_port; a port inside "
+                    f"net.ipv4.ip_local_port_range can also be taken as an outbound connection's source port "
+                    f"unless reserved (net.ipv4.ip_local_reserved_ports)."
+                ) from e
+            raise
+        return master_address, listener
+
+    def _resolve_group_address(self) -> tuple[str, str]:
+        """``(master address, bind address)`` of the weight-transfer group's rendezvous.
 
         The master address is what the engine's workers dial back to. Resolution order: explicit
         ``group_host``, the backend's group-host env var, loopback when the server is on this machine,
         then the default-route NIC. Raises when a remote server would be told to dial a loopback
         address, which forms no group and times out. The bind address is where the listener takes
-        that connection (:meth:`_rendezvous_bind_address`); an auto-picked port is probed there.
-        Outside ``HALO_WEIGHT_SYNC_BIND_ALL`` the engine is sent the bind address rather than the
-        name it was resolved from, since a name the server resolves differently would be dialed where
-        nothing listens.
+        that connection (:meth:`_rendezvous_bind_address`). Outside ``HALO_WEIGHT_SYNC_BIND_ALL`` the
+        engine is sent the bind address rather than the name it was resolved from, since a name the
+        server resolves differently would be dialed where nothing listens.
         """
         master_address = self.group_host or (env_str(self.GROUP_HOST_ENV) if self.GROUP_HOST_ENV else None)
         if not master_address:
@@ -595,16 +613,15 @@ class BaseWeightSyncClient:
         bind_address = self._rendezvous_bind_address(master_address)
         if bind_address != _ALL_INTERFACES:
             master_address = bind_address
-        master_port = self.group_port if self.group_port > 0 else _get_open_port(bind_address)
-        return master_address, master_port, bind_address
+        return master_address, bind_address
 
     def _rendezvous_bind_address(self, master_address: str) -> str:
         """The local address the rendezvous listener binds: the advertised ``master_address``, resolved.
 
         The store is unauthenticated and the engine reads the group's bootstrap from it, so it listens
         only where the engine is told to dial. A name resolves once, here, to the one IPv4 address the
-        port probe, the listener and the engine all use; the listener is IPv4-only, so an address with
-        no IPv4 form (an IPv6 literal, a name without an A record) raises whatever the bind mode.
+        listener and the engine both use; the listener is IPv4-only, so an address with no IPv4 form
+        (an IPv6 literal, a name without an A record) raises whatever the bind mode.
         ``HALO_WEIGHT_SYNC_BIND_ALL`` widens the listener to every interface for a trainer reached
         through NAT or a port mapping, whose advertised address is not its own. Without it, an address
         that is not local, the wildcard, or a name resolving to loopback while the server is remote

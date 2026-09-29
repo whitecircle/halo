@@ -47,7 +47,7 @@ from src.distributed.nccl.clients.sglang import SGLangWeightSyncClient
 from src.distributed.nccl.clients.vllm import VLLMWeightSyncClient
 from src.distributed.nccl.transport.packed_tensor import DEFAULT_PACKED_BUFFER_SIZE_BYTES, DEFAULT_PACKED_NUM_BUFFERS
 from src.distributed.nccl.transport.pynccl import PyNcclCommunicator
-from src.distributed.nccl.transport.stateless_group import StatelessProcessGroup
+from src.distributed.nccl.transport.stateless_group import RendezvousListener, StatelessProcessGroup
 from src.trainers.grpo.rollout.weight_sync_clients import (
     InferenceClientManager,
     verify_context_window,
@@ -722,11 +722,23 @@ def test_group_port_is_released_on_close(server, monkeypatch):
 
 def test_a_closed_group_cannot_broadcast():
     """Closing releases the store, so a later exchange must say so instead of raising AttributeError."""
-    group = StatelessProcessGroup.create(host="127.0.0.1", port=free_port(), rank=0, world_size=1)
+    listener = RendezvousListener("127.0.0.1", 0)
+    group = StatelessProcessGroup.create(host="127.0.0.1", port=listener.port, rank=0, world_size=1, listener=listener)
     group.close()
     group.close()  # idempotent: close runs from cleanup paths that may already have run
     with pytest.raises(RuntimeError, match="closed"):
         group.broadcast_obj("x", src=0)
+
+
+def test_rank_0_refuses_a_port_its_listener_does_not_hold():
+    """The store would take the fd and then fail its start on the port check, leaking the fd; the
+    refusal comes first and leaves the listener the caller's to close."""
+    with RendezvousListener("127.0.0.1", 0) as listener:
+        with pytest.raises(ValueError, match=f"holds {listener.port}"):
+            StatelessProcessGroup.create(
+                host="127.0.0.1", port=listener.port + 1, rank=0, world_size=1, listener=listener
+            )
+        assert not listener.handed_over
 
 
 def test_init_communicator_surfaces_a_server_side_init_failure(server, monkeypatch):
@@ -817,7 +829,8 @@ def test_aborted_communicator_refuses_to_broadcast():
 
 def test_disabled_communicator_still_exposes_its_device():
     """``sync_model_weights`` reads ``.device`` to stage weights, after the server is already paused."""
-    group = StatelessProcessGroup.create(host="127.0.0.1", port=free_port(), rank=0, world_size=1)
+    listener = RendezvousListener("127.0.0.1", 0)
+    group = StatelessProcessGroup.create(host="127.0.0.1", port=listener.port, rank=0, world_size=1, listener=listener)
     try:
         comm = PyNcclCommunicator(group, device="cpu")  # world_size 1 takes the disabled path
     finally:
