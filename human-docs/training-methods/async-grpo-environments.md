@@ -93,7 +93,7 @@ Three decisions matter more than the rest.
   and is never truncated — the context window bounds it, and a row past that fails the step. Watch `episode/turns`:
   pinned at the cap, raise it; far below, lower it, since turns are sequential and set step time. A turn cut at
   its cap, an empty turn, or one that calls only tools that do not exist trains only when its episode scored below
-  the group's mean.
+  the group's mean ([Objective](../../agent-docs/training-methods/grpo/async-grpo/objective.md#untrainable-turns) ↗).
 - **Reasoning effort.** `environment_kwargs.reasoning_effort` (`low` / `medium` / `high` / `random`) sets how much the
   model should think, and `reasoning_effort_profiles` gives each level its own caps, as the code-contests recipes do
   (`{high: {thinking_tokens: 16384, max_submissions: 3, max_test_calls: 6}}`). `rollout_max_thinking_tokens`,

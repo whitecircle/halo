@@ -20,9 +20,9 @@ repos:
     rev: v5.0.0
     hooks:
       - id: end-of-file-fixer
-        exclude: '^(DeepEP/|.*\.ipynb)'
+        exclude: '^(vendors/|.*\.ipynb)'
       - id: trailing-whitespace
-        exclude: '^(DeepEP/|.*\.ipynb)'
+        exclude: '^(vendors/|.*\.ipynb)'
       - id: check-merge-conflict
       - id: check-added-large-files
         args: ["--maxkb=1024"]

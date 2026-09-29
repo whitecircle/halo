@@ -413,6 +413,17 @@ def test_an_outcome_verdict_carries_no_channel_the_program_controls(result, full
     assert "42" not in outcome.details and "5000" not in outcome.details, outcome.details
 
 
+def test_a_backend_outage_logs_one_warning_per_grade(caplog):
+    """A lost test's backend text reaches the log once per grade, tallied by message: an outage of a
+    40-test pool is one line, not forty."""
+    tests = [{"input": str(i), "output": "Y"} for i in range(3)]
+    with caplog.at_level("WARNING"):
+        grade = run_solution_against_tests("code", tests, sandbox=StubSandbox(SandboxResult(error="backend down")))
+    lines = [r.getMessage() for r in caplog.records if "infra errors" in r.getMessage()]
+    assert grade.infra_errors == 3
+    assert lines == ["Grading lost 3 test(s) to infra errors: backend down (x3)"]
+
+
 def test_a_test_lost_to_the_backend_does_not_stop_the_grade_early():
     """``stop_on_first_failure`` stops at the program's first failure; a backend loss is not one."""
     results = iter([SandboxResult(error="backend down"), SandboxResult(stdout="Y\n", returncode=0)])

@@ -82,7 +82,7 @@ message ("1 graded submission, 0 scratchpad runs").
 
 ## Tools
 
-- The scratchpad — `python_repl` when the run fixes `python`, else `run_code`. It runs a program through the grading sandbox, standard library included, on the `stdin` the call supplies (empty by default), so the model can feed it the statement's sample input or its own; it never sees the graded tests. Past `max_test_calls` a call is refused.
+- The scratchpad — `python_repl` when the run fixes `python`, else `run_code`. It runs a program through the grading sandbox, standard library included, on the `stdin` the call supplies (empty by default), so the model can feed it the statement's sample input or its own; it never sees the graded tests. Each call is one-shot — nothing a run writes survives into the next. Past `max_test_calls` a call is refused.
 - `submit_solution` — grades a complete stdin/stdout program against the hidden tests. The only graded channel, with no fenced-code-block fallback. Reaching `max_submissions` ends the episode.
 
 A scratchpad run gets the per-test time limit its language is graded at ([Grading rules](#grading-rules)), and a timeout says so. Its reply leads with any error — the compiler's first diagnostics, or a crash's signal and stderr tail — ahead of the program's stdout ([Sandboxes](sandbox.md#using-it-from-python)). A run with no `stdin` that crashes or prints nothing adds a note naming the missing input (not after a compile failure or a timeout), and every reply ends with the runs left while `max_test_calls` binds.
