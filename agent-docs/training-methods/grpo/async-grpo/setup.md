@@ -76,7 +76,7 @@ Prefetch runs **one round deep**: a round pops what the previous one submitted, 
 
 ## Multi-node
 
-Training, engines and Ray actors can sit on separate nodes. Point `ray_address` at the cluster head ([Ray Cluster](../../../infrastructure/ray.md#multi-node)) and give each inference node its own `rollout_server_configs` entry, `group_port` and, where the trainer's routable address differs per server, `group_host`. Use resolvable host names: a loopback URL reaches actor nodes with no engine, and those episodes come back as silent zero-reward rows.
+Training, engines and Ray actors can sit on separate nodes. Point `ray_address` at the cluster head ([Ray Cluster](../../../infrastructure/ray.md#multi-node)) and give each inference node its own `rollout_server_configs` entry, `group_port` and, where the trainer's routable address differs per server, `group_host`. Use resolvable host names: a loopback URL reaches actor nodes with no engine, and those episodes error into masked rows outside their group's baseline, shrinking the batch; a round where none survives trips the all-invalid halt ([Batch construction](objective.md#batch-construction)).
 
 `num_rollout_workers` actors are created per training rank, soft-pinned to that rank's node; on a shared cluster the budget divides by world size ([pool sizing](../../../infrastructure/ray.md#pool-sizing)).
 
@@ -88,8 +88,8 @@ The trainer's NCCL address must be routable from the serving nodes: set the proc
 
 ## Shipped recipes
 
-`examples/grpo/environmental/<family>/<backend>/` — `gemma4`, `gptoss` and `qwen3_5`, each with `vllm/` and `sglang/`. In a filename, `-lora-` / `-full-` is the adapter and `-ep1` / `-ep4` the expert distribution (undistributed experts, or a 4-rank DeepEP group). Each header carries its own launch line and server flags.
+`examples/grpo/environmental/<family>/<backend>/` — `gemma4`, `gptoss` and `qwen3_5`, each with `vllm/` and `sglang/`. In a filename, `-lora-` / `-full-` is the adapter and `-ep1` / `-ep4` the expert distribution (undistributed experts, or a 4-rank DeepEP group). Each header carries its own launch line and server flags. One template sits at the root: `environmental-grpo-template.yaml` (`react_math`).
 
 Start from `gptoss/vllm/gptoss-20b-code-contests-lora-ep1.yaml` for a tool-heavy graded environment, or `qwen3_5/vllm/qwen3.6-35b-a3b-react-math-full-ep4.yaml` for a light two-tool one. The `sglang/` directories ship ep1 files only.
 
-Every recipe runs `beta: 0`. The code-contests ones drive a two-server pool at `episode_timeout: 2700`, so launch them with `DIST_NCCL_TIMEOUT_MINUTES=60` ([timeout bounds](performance.md#sizing-a-run)). The rest are single-server, prefetch off.
+Every family recipe runs `beta: 0`; the root template runs `0.01`. The code-contests ones drive a two-server pool at `episode_timeout: 2700`, so launch them with `DIST_NCCL_TIMEOUT_MINUTES=60` ([timeout bounds](performance.md#sizing-a-run)). The rest are single-server, prefetch off.

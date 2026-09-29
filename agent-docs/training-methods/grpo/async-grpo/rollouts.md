@@ -217,8 +217,10 @@ boundary it cannot pin **invalidates the episode** — a fully masked row, outsi
 — rather than training a guessed span.
 
 `train_on_sampled_tokens: false` forces that path for every trajectory and disables the
-importance-sampling correction, which needs the sampling log-probs: every batch then trains
-uncorrected on rollouts at least one weight sync stale, with a warning.
+importance-sampling correction, which needs the sampling log-probs: batches then train uncorrected,
+with a warning, and a run that enforces a vLLM thinking budget is refused at construction, since
+its forced reasoning closes are neutralized only through the ratio
+([Objective](objective.md#importance-sampling-correction)).
 
 ## Saving trajectories
 

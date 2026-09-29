@@ -15,7 +15,7 @@ Every method is YAML-driven, runs through the same distributed parallelism syste
 | [Async GRPO with Environments](grpo/async-grpo/README.md) | `DistributedAsyncEnvironmentalGRPOTrainer` | `prompt` (+ `answer` where the environment grades against one) | Multi-turn RL with tools, sandboxes or a judge, on vLLM or SGLang |
 | [Reward modeling](preference/reward-modeling.md) | `DistributedRewardTrainer` | `chosen`, `rejected` | A Bradley-Terry scorer to rank completions |
 | [Classification](classification.md) | `ClassificationTrainer` | `prompt` or `text_field`, `label` | Single- and multi-label sequence classification |
-| [Distillation](distillation/README.md) | `DistributedDistillationTrainer`, `DistributedSelfDistillationTrainer`, `DistributedSDPGTrainer` | `messages` conversations | Compress a teacher, or self-distill from a privileged hint (offline or online SDPG) |
+| [Distillation](distillation/README.md) | `DistributedDistillationTrainer`, `DistributedSelfDistillationTrainer`, `DistributedSDPGTrainer` | SFT conversations (`conversation_field`), or `prompt`, `answer` (online SDPG) | Compress a teacher, or self-distill from a privileged hint (offline or online SDPG) |
 | [Embedding](embedding.md) | `EmbeddingTrainer` | text pairs or triplets, optional `label` / `score` | Retrieval and similarity models, 10 SBERT losses and Matryoshka |
 
 Column types and per-script defaults: [Dataset Formats](../data/dataset-formats.md#required-columns-by-method). Scripts and their flags: [Scripts Reference](../reference/scripts-reference.md). Undecided: [Choosing a Training Method](../getting-started/choosing-a-method.md).

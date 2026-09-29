@@ -10,7 +10,7 @@ Multi-turn RL: the model converses with an environment — tools, code, reposito
 2. Each actor holds its own environment instance: POST `/v1/chat/completions`, parse the reply and its `tool_calls`, run the step, repeat until done or `max_turns`.
 3. The environment grades each trajectory; the trainer builds training rows from the engine's sampled tokens and computes the GRPO loss.
 
-![One async GRPO step: an NCCL weight push to every rollout engine, then a rank's round of 24 rows (3 prompts × 8 generations) handed to RolloutManager and dispatched round-robin over Ray environment actors and the vLLM or SGLang servers by POST /v1/chat/completions; each row runs a multi-turn episode of generate → parse tool_calls → execute → observe until a final answer, max_turns or spent recoveries, after which the environment grades the trajectory, every assistant turn becomes a training row of the engine's sampled ids, the group's 8 rows share one advantage, and the GRPO loss drives the optimizer step](../../../assets/diagrams/batch_rollout_pipeline.png)
+![One async GRPO step: an NCCL weight push to every rollout engine, then a rank's round of 24 rows (3 prompts × 8 generations) handed to RolloutManager and dispatched round-robin over Ray environment actors and the vLLM or SGLang servers by POST /v1/chat/completions; each row runs a multi-turn episode of generate → parse tool_calls → execute → observe until a final answer, max_turns or spent recoveries, after which the environment grades the trajectory, every assistant turn becomes a training row of the engine's sampled ids, each episode's advantage is its reward minus the group's baseline, shared by its turn rows, and the GRPO loss drives the optimizer step](../../../assets/diagrams/batch_rollout_pipeline.png)
 
 ## Configuration surface
 
@@ -35,7 +35,7 @@ The trainer forces `remove_unused_columns: false` at construction (warning when 
 
 A `prompt` given as a message list reduces to its **last `user` turn** — the environment is handed the task as text and builds the conversation itself. A conversation with no `user` turn fails the batch on every rank.
 
-The environment owns the system turn and the tool schema: this surface has no `system_prompt` field, and `tools_field` is rejected. Where an environment accepts an override it is `environment_kwargs.system_prompt` — the ReAct ones hardcode theirs and drop the key.
+The environment owns the system turn and the tool schema: this surface has no `system_prompt` field, and `tools_field` is rejected. Where an environment accepts an override it is `environment_kwargs.system_prompt` — the ReAct presets hardcode theirs and refuse the key.
 
 ## Quickstart
 

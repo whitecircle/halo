@@ -143,6 +143,6 @@ The DeepSeek-V3 **aux-loss-free bias update** is opt-in on the EP path (`moe_bal
 
 vLLM and SGLang load `router.bias` and route with it (top-k on bias-inclusive logits, combine = softmax over the selected values). `_route_with_bias` computes exactly that arithmetic, so trainer and served copy pick the same experts with the same weights.
 
-`router_aux_loss_coef` is forced to 0 for the run to avoid double-balancing (restored in the exported config). The bias lives in logit space, where the default γ is a gentle nudge — the softmax-probability scaling argument other families need does not apply.
+`router_aux_loss_coef` is forced to 0 for the run to avoid double-balancing (restored in the exported config). The bias lives in logit space, so the default γ is small for it; size `router_balancing_rate` per [RouterBiasBalancingCallback](../training-methods/callbacks.md#routerbiasbalancingcallback).
 
 **Not for on-policy RL.** Online and env GRPO must use `moe_balancing: none` — adoption re-registers `router.bias` as a buffer and the weight sync ships parameters only, so a synced engine routes on the pretrained bias (`build_perf_callbacks` downgrades it automatically). Bias-update needs the EP wrappers (`ep_size > 1`, or the default `use_grouped_gemm`); without them it raises at setup.

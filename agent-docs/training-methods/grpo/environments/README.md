@@ -50,7 +50,7 @@ environment_kwargs:
   tool_error_penalty: 0.1
 ```
 
-The factory forwards the merged dict whole, so any constructor parameter of the resolved class is settable from `environment_kwargs`. A key no constructor binds — a typo, or an option of another `environment_type` — raises `TypeError` at construction. Two keys the factories consume themselves: the ReAct presets drop `system_prompt`, and `mcp` reads `mcp_server`. `rewards` reaches the constructor as `reward_terms`.
+The factory forwards the merged dict whole, so any constructor parameter of the resolved class is settable from `environment_kwargs`. A key no constructor binds — a typo, or an option of another `environment_type` — raises `TypeError` at construction. Two keys the factories consume themselves: the ReAct presets refuse a set `system_prompt`, and `mcp` reads `mcp_server`. `rewards` reaches the constructor as `reward_terms`.
 
 [Reward Terms](../rewards.md#environment-arm) defines how the episode reward is composed.
 

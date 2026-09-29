@@ -43,7 +43,7 @@ result = sandbox.run("print(input())", stdin="hi\n", language="python", timeout=
 with sandbox.open_session() as session:
     session.write_file("lib.py", "X = 41\n")
     session.run("import lib; print(lib.X + 1)")   # "42"
-    session.list_files()                          # ['lib.py', 'main.py']
+    session.list_files()                          # ['__pycache__/lib.cpython-312.pyc', 'lib.py', 'main.py'] on local/bubblewrap
     session.read_file("lib.py")                   # None if absent or not a regular file
 ```
 
@@ -78,7 +78,7 @@ env = SweEnvironment(sandbox=resolve_sandbox("bubblewrap", memory_limit_mb=2048,
 
 ## Sandbox faults
 
-`run_code_via_sandbox` raises the two non-verdict results as typed exceptions, and every protocol's tool dispatch (native, async native, ReAct) books them by type:
+`format_sandbox_repl_output` (called by `run_code_via_sandbox` and the code-contests scratchpad) raises the two non-verdict results as typed exceptions, and every protocol's tool dispatch (native, async native, ReAct) books them by type:
 
 | Exception | Raised for | Price | GRPO baseline |
 |---|---|---|---|

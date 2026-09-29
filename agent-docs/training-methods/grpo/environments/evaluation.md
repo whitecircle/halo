@@ -22,7 +22,7 @@ python scripts/environments/inference/run_env.py --env_type qa_search \
 | `--success_threshold` | `1.0` | `run_env.py` only: reward counting a sample as solved, for an environment that reports no solve verdict |
 | `--max_workers` | 32 (16 coding) | Concurrent episodes |
 | `--max_turns` / `--env_kwargs` | the env's own; coding 15 / `{}` | Turn cap override; JSON merged into the env config |
-| `--temperature` / `--top_p` / `--max_tokens` / `--request_timeout` | 0.7 (0.2 coding) / 0.95 / 32768 (coding at a level: its effort budget) / 180 s | Sampling, HTTP timeout |
+| `--temperature` / `--top_p` / `--max_tokens` / `--request_timeout` | 0.7 (0.2 coding) / 0.95 / 32768 (coding at a level: the level's `thinking_tokens` + 4096) / 180 s | Sampling, HTTP timeout |
 
 `run_env.py` reads `--prompt_field` / `--answer_field`, passes extra columns through
 `--context_fields`, buckets by `--group_by` and names each example by `--id_field` (default `id`);

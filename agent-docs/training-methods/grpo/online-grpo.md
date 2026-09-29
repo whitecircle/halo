@@ -4,7 +4,7 @@ RLVR (Reinforcement Learning with Verifiable Rewards) is on-policy GRPO scored b
 
 Parallelism: EP, TP, EP+TP, EP+ETP and pure ETP (`ep_size=1`). CP and PP are rejected at config time.
 
-Use [Offline GRPO](offline-grpo.md) for pre-collected data, [Async GRPO with Environments](async-grpo/README.md) for multi-turn, tool-calling or judge-scored tasks, [SMPO](../preference/smpo.md) or DPO for pairwise data ([overview](README.md)).
+Use [Offline GRPO](offline-grpo.md) for pre-collected data, [Async GRPO with Environments](async-grpo/README.md) for multi-turn or tool-calling tasks, [SMPO](../preference/smpo.md) or DPO for pairwise data ([overview](README.md)).
 
 ![Online GRPO (RLVR) as one step-long cycle: each prompt and answer is repeated num_generations times, the trainer renders and tokenizes the prompt, the vLLM server (separate container, GPU 7 by compose default) returns completions with their sampling log-probs, the reward terms score them into a weighted reward, the group normalizes it into advantages, the GRPO loss steps the model, and the new weights go back over NCCL before the next generation](../../assets/diagrams/online_grpo_pipeline.png)
 

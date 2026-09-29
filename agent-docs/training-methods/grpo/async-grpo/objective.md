@@ -1,6 +1,6 @@
 # Objective and Stability
 
-The loss is TRL's GRPO objective ([Online GRPO](../online-grpo.md#grpo-objective-for-verifiable-rewards)) at TRL's default `loss_type: dapo`, clipped by `epsilon` (`0.2`) and `epsilon_high` (`0.28` in the [shipped recipes](setup.md#shipped-recipes), inert at `num_iterations: 1`). Rollouts are off-policy by at least one weight sync, so an importance ratio corrects them, and the trust region is masks on that ratio, not a KL term.
+The loss is TRL's GRPO objective ([Online GRPO](../online-grpo.md#grpo-objective-for-verifiable-rewards)) at TRL's default `loss_type: dapo`, clipped by `epsilon` (`0.2`; no recipe sets `epsilon_high`, which falls back to `epsilon`), inert at `num_iterations: 1`. Rollouts differ from the trainer's policy by the engine↔trainer numerics gap, and by up to one sync interval under prefetch or `sync_weights_every_n_steps > 1`, so an importance ratio corrects them, and the trust region is masks on that ratio, not a KL term.
 
 ## Importance sampling correction
 
@@ -76,7 +76,7 @@ TRL's `RepeatSampler` delivers each prompt `num_generations` consecutive times, 
 
 ![Batch construction at the stage-1 code-contests shape: the sampler gives each of a rank's 3 prompts 8 consecutive rows, one rank's round is 24 rows (per_device_train_batch_size 1 × steps_per_generation 24), and six data-parallel ranks make one optimizer step of 144 rows = 18 prompts × 8; a row is one episode, a group is one prompt's rows and never straddles ranks](../../../assets/diagrams/batch_prompt_expansion.png)
 
-A rollout with no learning signal — a raised episode, an `episode_timeout` cancellation, an invalid one — enters as a zero-masked row, out of its group's baseline (`sampling/invalid_episode_frac`). A step where no episode survived warns once, then **halts the run on the second**.
+A rollout with no learning signal — a raised episode, an `episode_timeout` cancellation, an invalid one — enters as a zero-masked row, out of its group's baseline (`sampling/invalid_episode_frac`). A step where no episode survived warns once, then **halts the run on the second consecutive one**.
 
 Rows carry two masks. `completion_mask` is attention-valid — every real completion token, tool results and generation-prompt headers included, since they conditioned the sampling — while `tool_mask` is the loss mask, `1` only on assistant spans. The loss and the DAPO normalizer use their intersection. The batch is never packed.
 
@@ -90,4 +90,4 @@ Rows carry two masks. `completion_mask` is attention-valid — every real comple
 
 ## Learning rate
 
-Async GRPO refines an already tuned policy, so the rate sits near the SFT floor: `2e-7` on the code-contests full fine-tunes (`3e-7` on the Qwen3.6 curriculum stages), `3e-6` on their LoRA siblings, `1e-6` on the lighter single-answer tasks, `5e-6` on the template. All use a cosine schedule over the run's useful length, not the dataset's ([SFT](../../sft.md#learning-rate-and-global-batch-size)).
+Async GRPO refines an already tuned policy, so the rate sits near the SFT floor: `2e-7` on the code-contests full fine-tunes (`3e-7` on the Qwen3.6 curriculum stages), `3e-6` on their LoRA siblings, `1e-6` on the lighter single-answer tasks, `5e-6` on the template. All but the curriculum's stage-2 and stage-3 recipes (`constant_with_warmup`) use a cosine schedule over the run's useful length, not the dataset's ([SFT](../../sft.md#learning-rate-and-global-batch-size)).

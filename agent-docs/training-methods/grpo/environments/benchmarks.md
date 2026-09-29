@@ -23,7 +23,7 @@ environment_kwargs:
 | Knob | Default | Effect |
 |---|---|---|
 | `search_backend` | auto | `serper`, `brave`, `tavily`, `duckduckgo`; auto-selects by which API key is set, keyless DuckDuckGo last. Validated at construction |
-| `include_python_tools` | `false` | `qa_search` only: adds the sandboxed `python` tool for numeric QA |
+| `include_python_tools` | `false` | `qa_search` only: adds the in-process restricted `python` REPL for numeric QA |
 | `open_book` | `false` | `exam_qa` only: registers the search tool. Setting `search_backend` closed-book raises |
 | `system_prompt` | class prompt | Replaces the built-in instructions |
 
@@ -34,7 +34,7 @@ run reaching it would teach the policy that invented evidence works.
 ## Tools
 
 - `web_search` — query plus optional `max_results` (5); returns titles, snippets and URLs. On `qa_search` always, on `exam_qa` only under `open_book`.
-- `python` — sandboxed REPL, `qa_search` under `include_python_tools`.
+- `python` — the in-process restricted REPL, `qa_search` under `include_python_tools`.
 
 ## Reward
 
