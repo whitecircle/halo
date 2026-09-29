@@ -245,9 +245,8 @@ What an EP run has to plan around:
   with `num_generations` or `gradient_accumulation_steps`, and the buffer is per-rank, so raising
   `ep_size` does not lower it. Bound the *single-sequence* length: `per_device_train_batch_size = 1`
   for long sequences, and cap SFT `max_length` or the RL rollout budget.
-- **`PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True` composes with the `ElasticBuffer`** on
-  single-node runs — set it when variable-shape packing at `per_device_train_batch_size > 1`
-  fragments the allocator.
+- **`PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True` composes with the `ElasticBuffer`**
+  ([DeepEP → Memory allocation failures](../infrastructure/deepep.md#runtime-errors)).
 - **Dtype contract** (`src/distributed/expert_parallel/autograd.py`): `topk_weights` must be FP32
   contiguous; token tensors keep their dtype across dispatch/combine. The wire zero-pads the feature
   dim to a multiple of 256 and slices it back symmetrically (GPT-OSS hidden 2880 → 3072), so

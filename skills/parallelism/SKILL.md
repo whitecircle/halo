@@ -87,7 +87,11 @@ describes a validator or contract, never a launchable topology
 - `ep_group_size` must divide its scope and not exceed it: `nvlink_domain_size` for
   `node`; for `global`, `stage_world_size` (`world_size // pp_size`), which it must
   also tile as equal contiguous per-domain blocks.
-- EP+TP: `ep_size` must be a multiple of `tp_size`, so each EP group spans whole TP groups.
+- EP+TP: `ep_size` must be a multiple of `tp_size`, so each EP group spans whole TP groups. On one
+  NVLink domain that means `ep_size=2` (`ep2+tp2` on 8 = four 2-rank EP groups) or an EP group that
+  fills the domain (`ep8+tp2` on 8); `ep4+tp2` on 8 is the racy topology and is rejected. Above one
+  domain multi-group EP+TP is rejected — use one global EP group (`ep_size == world_size`,
+  `ep_scope: global`).
 - `world_size % gpus_per_node == 0` and `world_size % nvlink_domain_size == 0`.
 
 ## REJECT THESE (verdict = do not run)

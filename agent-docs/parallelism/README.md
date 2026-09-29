@@ -31,7 +31,7 @@ All modes use FSDP2 (`fully_shard`, per-layer). EP expert modules sit in `ignore
 | TP only | `world_size / tp_size` | DTensor mesh reduces effective DP |
 | CP only | `world_size / cp_size` | Ulysses attention reduces effective DP |
 | EP+CP | `world_size / cp_size` | Only CP reduces DP. Node-local EP requires `ep_group_size == nvlink_domain_size` (= `gpus_per_node` on a standard node; = the rack on NVL72) |
-| EP+TP | `world_size / tp_size` | Attention sharded (node-local TP), experts distributed; TP leaves `ep_group_size` at `ep_size`, so it adds no expert sharding. `ep_size` must be a multiple of `tp_size`. Within one domain the single-domain EP rule still applies (`ep2+tp2` on 8 passes, `ep4+tp2` is rejected); across domains the EP group must be a **single global** one. Rules: [Multi-Node → EP+TP](multi-node.md#eptp-mode) |
+| EP+TP | `world_size / tp_size` | Attention sharded (node-local TP), experts distributed; TP leaves `ep_group_size` at `ep_size`, so it adds no expert sharding. `ep_size` must be a multiple of `tp_size`. Within one domain the single-domain EP rule still applies (`ep2+tp2` and `ep8+tp2` on 8 pass, `ep4+tp2` is rejected); across domains the EP group must be a **single global** one (`ep_size == world_size`, `ep_scope=global`). Rules: [Multi-Node → EP+TP](multi-node.md#eptp-mode) |
 | ETP (pure, `ep_size=1`) | `world_size / expert_tp_size` | Expert FFN sharded `expert_tp_size`-way; experts replicated. MoE only — a dense model raises. See [ETP guide](expert-tensor-parallelism.md) |
 | EP+ETP | `world_size / expert_tp_size` | Experts distributed `ep_size`-way **and** each expert's FFN sharded `expert_tp_size`-way (`ep_group_size = ep_size × expert_tp_size`). Experimental. The expert-TP reduce stays node-local (token space, outside the DeepEP dispatch→combine span) while EP may be node-local **or cross-node** (one ETP group per NVLink domain) |
 | PP | `world_size / pp_size` | In the allowlist, but the schedule engine is not shipped in this release — `pipeline_parallel_size > 1` is rejected at config time; seams only. See [Pipeline Parallelism](pipeline-parallelism.md) |
@@ -86,8 +86,10 @@ What crosses the wire:
 | EP+ETP | expert-TP all-reduce in token space, outside the dispatch→combine span | expert-TP group |
 
 Backward mirrors the table: every activation all-to-all / all-reduce has an autograd transpose. By
-default FSDP2 reduce-scatters after every accumulation micro-step's backward; the EP gradient sync
-(hooks or the deferred sweep) fires once per optimizer step, on the last micro-step.
+default FSDP2 reduce-scatters after every accumulation micro-step's backward
+([`fsdp_defer_grad_sync`](data-parallelism.md#deferred-gradient-reduce-fsdp_defer_grad_sync) holds
+it to the last); the EP gradient sync (hooks or the deferred sweep) fires once per optimizer step, on
+the last micro-step.
 
 EP gradients sync outside FSDP2: the replicated router all-reduces over the world group, and expert
 grads all-reduce over the expert-replica group only when a run holds more than one EP group.

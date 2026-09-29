@@ -8,10 +8,8 @@ and adds `DistributedTrainerMixin`.
 The default save is a standard HuggingFace checkpoint and there is no Megatron conversion step; the
 one opt-in per-rank format (`save_sharded_ep`) needs a merge script before reload.
 
-The runtime is the prebuilt Docker image: PyTorch 2.11+cu130, DeepEP, and Flash Attention live only
-inside `halo:blackwell` (B200/B300, SM100/SM103, FA2+FA4) and `halo:hopper`
-(H100/H200, SM90, FA2+FA3). The host has no usable Python — everything runs inside the image
-(tools on `PATH`, no prefix). See [Docker](../infrastructure/docker.md).
+Everything runs inside the prebuilt image (`halo:blackwell` / `halo:hopper`); the
+host has no usable Python ([Docker](../infrastructure/docker.md)).
 
 ## Component map
 

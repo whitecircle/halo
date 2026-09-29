@@ -32,7 +32,7 @@ system interpreter — no venv, no Poetry), so `python`/`torchrun`/`accelerate`/
 
 The Docker incantation lives **once** in the repo `Makefile` — contributors,
 CI, and this skill all call these targets instead of re-typing `docker run`.
-Read the Makefile (`make help` or open `Makefile`)
+Read the Makefile (`make help` or open the repo-root `Makefile`)
 and use a target if one fits. The relevant targets:
 
 ```bash
@@ -267,7 +267,7 @@ Training configs should set `output_dir` (and checkpoints) under `$D` too.
 - [ ] Concurrent jobs → unique `--master_port`, `--name`, log, disjoint GPUs?
 - [ ] Detached (`-d`) for anything long-running, so it survives the turn?
 
-References: `Makefile` (canonical recipes),
+References: the repo-root `Makefile` (canonical recipes),
 `CLAUDE.md` (work principles), `agent-docs/infrastructure/docker.md` (image registry,
 ECR pull, troubleshooting).
 

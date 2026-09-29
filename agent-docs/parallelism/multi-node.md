@@ -187,7 +187,8 @@ correct mean because `world_size = num_batches × cp_size`.
 
 **HSDP (`--use_hsdp`):** the default 1D full-shard path sends every shard collective over RDMA. `--use_hsdp`
 switches to a 2D `(dp_replicate, dp_shard)` mesh that shards within each NVLink domain and
-replicates across domains, so only one gradient all-reduce crosses RDMA per backward. See
+replicates across domains, so only one gradient all-reduce crosses RDMA per backward (per step with
+[`fsdp_defer_grad_sync`](data-parallelism.md#deferred-gradient-reduce-fsdp_defer_grad_sync)). See
 [Data Parallelism → HSDP](data-parallelism.md#hsdp-hybrid-sharded-data-parallel). Rejected with EP,
 TP, EP+TP, Expert-TP, and PP.
 

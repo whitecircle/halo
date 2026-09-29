@@ -191,7 +191,10 @@ manifest.
 
 - **Scratch goes through the launcher's `TMPDIR`.** `setup_cache_dirs` for per-rank output/cache
   dirs, `shared_scratch_dir` (`tests/common/distributed.py`) for a synthetic checkpoint rank 0
-  writes and the peers read.
+  writes and the peers read. The per-rank dirs carry the `SCRATCH_DIR_TAG` prefix
+  (`tests/common/scratch.py`), and the root `tests/conftest.py` removes tagged dirs older than 6 h at
+  session start, since a crash skips the in-test cleanup; untagged names in a shared `TMPDIR` are never
+  touched.
 
     A literal `/mnt/...` in a test escapes basetemp, is never reclaimed, and assumes a volume layout
     this host may not have; checkpoint locations belong in `tests/common/models.py`.
@@ -204,6 +207,14 @@ manifest.
     It sets `CAUSAL_CONV1D_DETERMINISTIC=1` unless the caller exported a value: causal_conv1d's
     default backward sums the conv weight gradient with atomics, so the gated-DeltaNet families miss
     an exact resume replay now and then.
+- **Build checks from the shared helpers** rather than re-deriving them per file:
+  `training_run_checks` (`tests/common/utils.py`, the finished-run verdicts), `parallel_shape_checks`
+  (`parallel_shape.py`, each enabled axis read off the model, not the config echo), `run_sft_suite`
+  (`sft_modes.py`, the SFT smoke body with one `--mode` per manifest row), `run_gloo_ranks` (`gloo.py`,
+  spawned gloo ranks for a CPU test that needs a real process group) and the synthetic-checkpoint
+  builders in `tiny_models.py`. A worst-difference bound goes through `max_or_nan` (`utils.py`): the
+  builtin `max` drops a NaN anywhere but first, so the bound would pass on it. The full table is in
+  `skills/write-tests/harness.md`.
 - **Emit perf and memory.** Return `ctx.metrics(trainer)` so the result line carries tokens/s/GPU
   and peak memory; a `benchmark_*` script's `emit_benchmark(key, callback)` writes the line the
   committed throughput baselines are compared against.

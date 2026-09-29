@@ -34,8 +34,9 @@ carve-outs: a `Literal` whose choices include the string `"none"` gets the strin
 (`--moe_balancing=none`), and an optional bool refuses the spelling outright (`--bf16=none` raises —
 clearing a precision flag silently is exactly the failure the parser exists to prevent).
 
-Setting a VALUE on a field with no confident string cast — dict-typed fields, lists of containers
-(`rollout_server_configs: list[dict]`) — still requires the YAML.
+Setting a value on a field with no confident string cast — dict-typed fields, lists of containers
+(`rollout_server_configs: list[dict]`), and unions with a container member (`--report_to=wandb`) —
+still requires the YAML.
 
 Overrides are applied with `setattr`, so `__post_init__` does not re-run. Configs carrying numeric or
 cross-field guards inherit `RangeValidatedConfig` (`src/args/validation.py`) and put those guards in

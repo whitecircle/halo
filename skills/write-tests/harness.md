@@ -8,7 +8,7 @@ below matches the real harness — do not invent fields.
 ```python
 def gpu_test_main(
     *,
-    min_world_size: int = 1,         # fewer GPUs than this = BAD LAUNCH → exit 2
+    min_world_size: int = 1,         # fewer GPUs than this = BAD LAUNCH → status="error" result line + exit 2 (the launcher reports it as FAIL)
     exact_world_size: int | None = None,  # if set, world_size must equal it exactly
     prefix: str = "halo_test",       # temp-dir prefix for this test's isolated output/cache dirs
     partial_state: bool = True,      # build accelerate.PartialState() (needed by Trainer tests; off for pure-kernel)
@@ -20,7 +20,7 @@ It wraps a `def run(ctx) -> dict` body and owns the full lifecycle so the body i
 
 1. `init_distributed()` → `(rank, world_size, local_rank)`, optional `PartialState()`.
 2. **Validate the launch before allocating** — wrong world size emits an `error` result and
-   `sys.exit(2)`.
+   `sys.exit(2)` (the launcher reports the `status="error"` line as a FAIL naming the launch).
 3. `setup_cache_dirs(prefix, rank)` → per-rank isolated `output_dir` / `cache_dir`.
 4. Run the body inside `try`; in `finally`, **guaranteed teardown order**:
    `ctx._run_finalizers()` (LIFO) → `cleanup_memory()` → `cleanup_dirs(...)`, then — **only on the
@@ -230,15 +230,15 @@ deliberately left unset: one shared path makes the last writer win, and the agen
 SIGTERMs would overwrite the real cause. It then classifies:
 
 - **PASS** — exit 0 with `status="pass"` in the parsed result line.
-- **FAIL** — a `__HALO_TEST_RESULT__` line with `status="fail"` **or** `status="error"` (a body
-  that raised is a FAIL, not an ERROR), and the case where rank 0 said pass but the exit was
-  non-zero — some other rank failed.
+- **FAIL** — a `__HALO_TEST_RESULT__` line with `status="fail"` or `"error"` (a check False, a body
+  that raised, no checks returned, a bad launch), or a non-zero exit whose line says `pass` (a
+  non-zero rank failed).
 - **ERROR** — non-zero exit with **no** result line → infra / hang / import crash. Plus TIMEOUT.
 - **SKIP** — fewer GPUs than `nproc` available; an OOM on the 8-GPU `full` tier (an OOM on
   a 2-GPU `core` smoke is a real ERROR — that config must fit); an unreachable
   `vllm_server`/`sglang_server` engine, unless `HALO_TEST_REQUIRE_SERVER` names it (then a
-  `UsageError`); or an exit-0 run that printed a `SKIP:` line. **Zero** visible GPUs is a
-  `UsageError`, never a skip.
+  `UsageError`); or an exit-0 run that printed a `SKIP:` line (`skip_unless_local_checkpoint`).
+  **Zero** visible GPUs is a `UsageError`, never a skip.
 
 All of this runs inside the Docker image; selection is by marker, e.g. `pytest -m "gpu and
 core"` (`make test-gpu-core`, pre-merge) or `pytest -m gpu` (`make test-gpu-full`).

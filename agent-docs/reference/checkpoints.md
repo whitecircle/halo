@@ -660,9 +660,9 @@ Because the Path-B base is rebuilt fresh, two classes of trained state are resto
 > Under `bias_update` the balancing state lives in the family's own checkpoint slot (native buffer,
 > adopted `router.bias`/`e_score_correction_bias`/`expert_bias`, or a slot materialized on an LFM-2
 > `use_expert_bias: false` checkpoint). It rides `model.safetensors` at its **trained fp32 dtype**
-> and serves exactly as trained. `balancing_param_keys` exempts it from the bf16 save cast, and the
-> `e_score_correction_bias` families additionally pin the slot fp32 at load through upstream's
-> `_keep_in_fp32_modules_strict`.
+> and serves exactly as trained. `balancing_param_keys` exempts it from the bf16 save cast, and GLM-4
+> MoE Lite, GLM-5 Next and DeepSeek-V4 additionally pin their `e_score_correction_bias` fp32 at load
+> through upstream's `_keep_in_fp32_modules_strict`.
 >
 > Under `bias_update_transient` the bias is a plain per-layer attribute, deliberately off the
 > sharded state, and exports **nowhere**

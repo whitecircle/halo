@@ -414,7 +414,9 @@ contention tripping the 100 s GPU barrier — avoid running EP training alongsid
 **Memory allocation failures.** The `ElasticBuffer` is sized automatically and grow-only. Reduce per-rank
 tokens (lower batch / `max_length`, or raise `ep_size`) or free GPU memory. Fragmentation OOMs on
 variable-shape packed runs respond to `PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True`, which
-composes with the buffer on single-node runs.
+composes with the buffer on single-node runs; no shipped config sets it. On B300 it cuts peak reserved
+memory by 13–14% at unchanged throughput on dense packed SFT (Qwen3-8B, 41.3 → 35.4 GB), DPO
+(61.6 → 52.7 GB) and SMPO (41.1 → 35.8 GB); under EP8 it trims 1–6 GB and costs ~1.5% throughput.
 
 **`CUDA error: an illegal memory access` (Xid 31 MMU fault) at a large `num_max_tokens_per_rank`.** The
 32-bit wire-index limit, normally caught before the kernel faults. Keep `per_device_train_batch_size = 1` for
