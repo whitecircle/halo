@@ -227,6 +227,8 @@ async def test_episode_scope_narrows_each_turns_engine_cap_to_what_the_budget_ha
     config = _episode_config()
     ids = _ids_closing_reasoning_after(1500)
     expected_caps = [4000, 2500, 1000]
+    # Each turn's total is its reasoning cap plus the run's answer headroom (20000 - 4000).
+    expected_totals = [cap + _MAX_TOKENS - 4000 for cap in expected_caps]
     stated = {"reasoning_budget_scope": "episode", "reasoning_budget": 4000}
 
     gens = [_actor_tool_turn(ids), _actor_tool_turn(ids), _actor_text_turn(ids)]
@@ -234,6 +236,7 @@ async def test_episode_scope_narrows_each_turns_engine_cap_to_what_the_budget_ha
     assert result.error is None, result.error
     assert [cfg.max_thinking_tokens for cfg, _, _, _ in seen] == expected_caps
     assert [payload["thinking_token_budget"] for _, _, _, payload in seen] == expected_caps
+    assert [payload["max_tokens"] for _, _, _, payload in seen] == expected_totals
     assert {budget for _, _, budget, _ in seen} == {4000}
     assert [payload["chat_template_kwargs"] for _, _, _, payload in seen] == [stated] * 3
     assert all(payload["return_token_ids"] is True for _, _, _, payload in seen)
@@ -245,6 +248,7 @@ async def test_episode_scope_narrows_each_turns_engine_cap_to_what_the_budget_ha
     responses = [_tool_turn(ids), _tool_turn(ids), _text_turn(token_ids=ids)]
     calls, eval_traj = await _drive_eval(monkeypatch, _BudgetEnv(), context, responses=responses, config=config)
     assert [call["extra_body"]["thinking_token_budget"] for call in calls] == expected_caps
+    assert [call["max_tokens"] for call in calls] == expected_totals
     assert [call["extra_body"]["chat_template_kwargs"] for call in calls] == [stated] * 3
     assert all(call["extra_body"]["return_token_ids"] is True for call in calls)
     assert eval_traj.info["thinking_budget_exhausted"] is True
@@ -257,6 +261,21 @@ async def test_episode_scope_narrows_each_turns_engine_cap_to_what_the_budget_ha
         monkeypatch, _BudgetEnv(), context, responses=[_text_turn(token_ids=ids)], config=config
     )
     assert kept.info["thinking_budget_exhausted"] is False
+
+
+async def test_episode_scope_reads_a_cut_off_the_turns_own_total(monkeypatch):
+    """A turn that consumed its narrowed total is a cut even when the engine labelled it complete: the
+    count is compared with the turn's own cap, not the episode's first-turn one it no longer runs under."""
+    ids = _ids_closing_reasoning_after(1500)
+    second_total = 2500 + _MAX_TOKENS - 4000
+    full = _tool_turn(ids)
+    full.completion_tokens = second_total
+    responses = [_tool_turn(ids), full, _text_turn(token_ids=ids)]
+    _, traj = await _drive_eval(
+        monkeypatch, _BudgetEnv(), {"reasoning_effort": "high"}, responses=responses, config=_episode_config()
+    )
+    assistant = [m for m in traj.messages if m.role == "assistant"]
+    assert [m.truncated for m in assistant[:2]] == [False, True]
 
 
 async def test_episode_scope_refuses_a_turn_without_sampled_ids():

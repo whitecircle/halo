@@ -95,9 +95,7 @@ class NativeToolUseEnvironment(BaseEnvironment):
         tool_registry: NativeToolRegistry,
         system_prompt: str | None = None,
         max_tool_calls_per_turn: int = 5,
-        require_tool_use: bool = False,
         no_tool_use_penalty: float = 0.0,
-        multi_turn_reward: float = 0.0,
         turn_overflow_penalty: float = 0.0,
         length_cutoff_penalty: float = 0.0,
         tool_budgets: dict[str, int] | None = None,
@@ -112,7 +110,6 @@ class NativeToolUseEnvironment(BaseEnvironment):
 
         require_magnitudes(
             no_tool_use_penalty=no_tool_use_penalty,
-            multi_turn_reward=multi_turn_reward,
             turn_overflow_penalty=turn_overflow_penalty,
             length_cutoff_penalty=length_cutoff_penalty,
         )
@@ -121,9 +118,7 @@ class NativeToolUseEnvironment(BaseEnvironment):
         self.tool_budgets = validate_tool_budgets(tool_budgets, tool_registry)
         self.system_prompt = system_prompt
         self.max_tool_calls_per_turn = max_tool_calls_per_turn
-        self.require_tool_use = require_tool_use
         self.no_tool_use_penalty = no_tool_use_penalty
-        self.multi_turn_reward = multi_turn_reward
         self.turn_overflow_penalty = turn_overflow_penalty
         # Per recovered unproductive turn (engine-cut, or ended on nothing). With carried reasoning a cut
         # costs the policy only the turn, and the retry thinks on from where it stopped, so the per-turn
@@ -215,18 +210,13 @@ class NativeToolUseEnvironment(BaseEnvironment):
     ) -> tuple[Trajectory, float, bool, bool, dict[str, Any]]:
         """Terminal step for a plain-text (no tool call) model response, shared sync/async.
 
-        ``require_tool_use`` only FLAGS a zero-tool-call finish here; its price is the episode-level
-        ``no_tool_use_penalty``, charged once by :meth:`_tool_use_shaping` (the single owner). Charging
-        a per-call knob here as well would double-bill the same condition.
+        The step itself pays nothing: a zero-tool-call finish is priced by the episode-level
+        ``no_tool_use_penalty``, charged once by :meth:`_tool_use_shaping` (the single owner), and a
+        per-call charge here as well would double-bill the same condition.
         """
         trajectory.info["completed"] = True
         trajectory.info["final_response"] = action
-
-        info: dict[str, Any] = {}
-        if self.require_tool_use and trajectory.info["total_tool_calls"] == 0:
-            info["no_tool_use"] = True
-
-        return trajectory, 0.0, True, False, info
+        return trajectory, 0.0, True, False, {}
 
     @contextmanager
     def _episode_binding(self, trajectory: Trajectory) -> Iterator[None]:
@@ -293,8 +283,8 @@ class NativeToolUseEnvironment(BaseEnvironment):
         for result in results:
             trajectory.add_message(result.to_message())
 
-        # Nothing this turn could execute: mark the assistant message so the trainer skips it (an
-        # episode that recovers must not reinforce the invented call). Read off ``unknown_tool``,
+        # Nothing this turn could execute: mark the assistant message so the trainer never rewards it
+        # (an episode that recovers must not reinforce the invented call). Read off ``unknown_tool``,
         # never the error text — a tool whose backend answers "Tool not found: x" failed for real, and
         # dropping that turn would hide a broken tool as a model mistake.
         if results and all(r.unknown_tool for r in results):
@@ -328,30 +318,16 @@ class NativeToolUseEnvironment(BaseEnvironment):
             return self._handle_empty_turn(trajectory)
         return self._finalize_text_response(trajectory, action)
 
-    def _tool_use_engaged(self, trajectory: Trajectory) -> bool:
-        """Gate for ``multi_turn_reward``: whether >1 tool call counts as genuine engagement.
-
-        Subclasses tighten it (e.g. CodeContests requires an actual submission, not test-tool spam).
-        """
-        return True
-
     def _tool_use_shaping(self, trajectory: Trajectory) -> float:
-        """Per-episode agentic-loop shaping: penalize 0 tool calls, reward >1 (gated by
-        ``_tool_use_engaged``), and penalize a ``max_turns`` overflow (``trajectory.truncated``, set by
-        ``_finalize_step`` before the reward runs) — an episode that burns the turn budget without
-        terminating pays ``turn_overflow_penalty`` regardless of what it did earn. An episode its
-        driver lost (:data:`EPISODE_ERROR_KEY`) is truncated too but pays no overflow: the fault is
-        not the policy's. Each unproductive turn the episode recovered from — cut by the engine, or
-        ended by the model on nothing — pays ``length_cutoff_penalty``; the one that exhausted the
-        recovery cap pays the overflow price instead, never both. All magnitudes default to 0 (no-op).
-        Distinct from the per-call knobs."""
-        calls = trajectory.info.get("total_tool_calls", 0)
-        if calls == 0:
-            shaping = -self.no_tool_use_penalty
-        elif calls > 1 and self._tool_use_engaged(trajectory):
-            shaping = self.multi_turn_reward
-        else:
-            shaping = 0.0
+        """Per-episode agentic-loop shaping: penalize 0 tool calls and a ``max_turns`` overflow
+        (``trajectory.truncated``, set by ``_finalize_step`` before the reward runs) — an episode that
+        burns the turn budget without terminating pays ``turn_overflow_penalty`` regardless of what it
+        did earn. An episode its driver lost (:data:`EPISODE_ERROR_KEY`) is truncated too but pays no
+        overflow: the fault is not the policy's. Each unproductive turn the episode recovered from —
+        cut by the engine, or ended by the model on nothing — pays ``length_cutoff_penalty``; the one
+        that exhausted the recovery cap pays the overflow price instead, never both. All magnitudes
+        default to 0 (no-op). Distinct from the per-call knobs."""
+        shaping = -self.no_tool_use_penalty if trajectory.info.get("total_tool_calls", 0) == 0 else 0.0
         if trajectory.truncated and EPISODE_ERROR_KEY not in trajectory.info:
             shaping -= self.turn_overflow_penalty
         unproductive = self._unproductive_turns(trajectory)

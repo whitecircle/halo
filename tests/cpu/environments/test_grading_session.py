@@ -103,7 +103,9 @@ def test_a_grade_runs_every_test_through_one_session_and_closes_it():
 def test_a_host_fault_shows_its_class_alone_under_outcome(stage, caplog):
     grade = run_solution_against_tests("code", _TESTS[:1], sandbox=_DeniedSandbox(stage))
     assert grade.infra_errors == 1
-    assert grade.details.splitlines()[1:] == ["Test 1: ERROR -- grading infrastructure failure"], grade.details
+    assert grade.details.splitlines()[1:] == ["Test 1: ERROR -- grading infrastructure failure, not your program"], (
+        grade.details
+    )
     assert "HIDDEN-4217" in caplog.text, "the log keeps what the verdict leaves out"
     full = run_solution_against_tests("code", _TESTS[:1], sandbox=_DeniedSandbox(stage), verdict_detail="full")
     assert "HIDDEN-4217" in full.details

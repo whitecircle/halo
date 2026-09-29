@@ -352,8 +352,9 @@ def create_session_bash_tools(
             name="run_bash_command",
             description=(
                 "Run a shell command with bash in the persistent workspace directory, where the file "
-                "tools write. It is given no stdin. The observation is the command's stdout plus a "
-                "non-zero exit code, so redirect with 2>&1 when you need its error output."
+                "tools write. It is given no stdin. The observation is the command's stdout; a non-zero "
+                "exit leads it with the signal that killed the command or the tail of its stderr, so "
+                "redirect with 2>&1 when you need the error output of a command that succeeds."
             ),
             parameters=[ToolParameter("command", "string", "Shell command to run in the workspace")],
             handler=_run,

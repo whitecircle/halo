@@ -1633,24 +1633,20 @@ def test_qa_search_environment_correct_answer(allow_mock_search):
         [{"answer": "1889"}],
     )
 
-    # Final answer without tools. ``require_tool_use`` only FLAGS the zero-tool-call finish; the price
-    # is the episode-level no_tool_use_penalty (default 0), so a correct answer scores exactly 1.0 —
-    # charging the per-call tool_error_penalty here too would double-bill the same condition.
+    # Final answer without tools: the zero-tool-call price is the episode-level no_tool_use_penalty
+    # (default 0), so a correct answer scores exactly 1.0 — charging the per-call tool_error_penalty
+    # here too would double-bill the same condition.
     env.step(episode_ids, ["1889"])
     traj = env.get_trajectories(episode_ids)[0]
     assert traj.done
-    assert traj.info["no_tool_use"] is True
     assert abs(traj.total_reward - 1.0) < 1e-9, traj.total_reward
 
     env.cleanup(episode_ids)
 
 
 def test_no_tool_use_is_charged_once_by_the_dedicated_knob(allow_mock_search):
-    """The zero-tool-call giveup costs exactly ``no_tool_use_penalty``, once, under ``reward/tool_shaping``.
-
-    ``require_tool_use`` and ``_tool_use_shaping`` both fire on that condition; the terminal step must
-    not add a second (per-call) charge on top of the episode-level one.
-    """
+    """The zero-tool-call giveup costs exactly ``no_tool_use_penalty``, once, under ``reward/tool_shaping``:
+    the terminal step must not add a second (per-call) charge on top of the episode-level one."""
 
     env = create_qa_search_environment(max_turns=5, search_backend="mock", no_tool_use_penalty=0.3)
     episode_ids, _ = env.reset(["Q?"], [{"answer": "A"}])

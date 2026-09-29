@@ -217,44 +217,6 @@ def test_tool_descriptions_defer_when_profiles_bind_interaction():
     assert "You get up to 2 graded submissions" in plain.registry.get("submit_solution").description
 
 
-def test_tested_submission_bonus_pays_only_on_test_then_submit():
-    profiles = {"high": {"max_submissions": 1, "max_test_calls": 6, "tested_submission_reward": 0.1}}
-    env = _make_env(reasoning_effort_profiles=profiles)
-
-    def run_episode(test_first: bool) -> tuple[float, dict]:
-        traj = reset_episode(env, {"reasoning_effort": "high", **SINGLE_TEST_ANSWER})
-        if test_first:
-            call_tool(env, traj, "python_repl")
-        call_tool(env, traj, "submit_solution")
-        if not test_first:
-            call_tool(env, traj, "python_repl")
-        env._settle_grade(traj, None)
-        return traj.total_reward, traj.info[REWARD_COMPONENTS_KEY]
-
-    tested_reward, tested_parts = run_episode(test_first=True)
-    oneshot_reward, oneshot_parts = run_episode(test_first=False)
-    assert tested_parts["reward/tested_submission"] == 0.1
-    assert oneshot_parts["reward/tested_submission"] == 0.0  # a test AFTER the submission pays nothing
-    assert tested_reward - oneshot_reward == pytest.approx(0.1)
-    assert tested_reward == pytest.approx(sum(tested_parts.values()))  # composition residue stays 0
-
-
-def test_bonus_only_profile_still_binds_and_scales_by_effort():
-    profiles = {
-        "medium": {"tested_submission_reward": 0.05},
-        "high": {"tested_submission_reward": 0.1},
-    }
-    env = _make_env(reasoning_effort_profiles=profiles)
-    assert env._profiles_bind_interaction
-    med = reset_episode(env, {"reasoning_effort": "medium", **SINGLE_TEST_ANSWER})
-    low = reset_episode(env, {"reasoning_effort": "low", **SINGLE_TEST_ANSWER})
-    assert med.info["episode_tested_submission_reward"] == 0.05
-    assert (
-        med.info[EPISODE_TOOL_BUDGETS_KEY]["submit_solution"] == 2
-    )  # class caps stated when the profile sets no caps
-    assert "episode_tested_submission_reward" not in low.info  # no bonus at that level
-
-
 def test_effort_binding_caps_both_channels():
     # The budget must bound the WHOLE turn: an unbounded visible channel displaces the tool call.
     # Both budgets are stated here so the arithmetic below does not ride on the class defaults.
@@ -309,6 +271,23 @@ def test_turn_scope_caps_every_turn_alike_and_never_exhausts():
     assert turn.thinking_budget == 18000, "the per-turn scope clamps the level's budget to the ceiling"
     assert {turn.turn_thinking_cap(spent) for spent in (0, 17000, 40000)} == {18000}
     assert turn.budget_exhausted(40000) is False
+
+
+def test_episode_scope_narrows_each_turns_total_with_its_reasoning_cap():
+    """A late turn's reasoning cap shrinks with the spend; its total must shrink with it (cap plus the
+    run's answer headroom, 30000 - 18000 here), or the answer channel inherits the reasoning it lost."""
+    high = _bind_scoped("high", "episode")
+    assert [high.turn_max_tokens(spent) for spent in (0, 17000, 29600)] == [30000, 13000 + 12000, 512 + 12000]
+    low = _bind_scoped("low", "episode")
+    assert low.turn_max_tokens(0) == low.max_tokens == 4096 + 12000
+    assert low.turn_max_tokens(3000) == 1096 + 12000
+    uncapped = _bind_scoped("high", "episode", max_thinking_tokens=None)
+    assert uncapped.turn_max_tokens(29000) == 30000, "no ceiling: the headroom is the whole max_tokens"
+
+
+def test_turn_scope_keeps_every_turns_total_at_the_bound_cap():
+    turn = _bind_scoped("high", "turn")
+    assert {turn.turn_max_tokens(spent) for spent in (0, 17000, 40000)} == {turn.max_tokens}
 
 
 def test_episode_scope_without_a_ceiling_hands_a_turn_the_whole_remainder():
@@ -401,27 +380,6 @@ def test_invalid_profiles_raise():
         _make_env(reasoning_effort_profiles={"low": {"thinking_tokens": 0}})
     with pytest.raises(ValueError, match="must be >= 0"):
         _make_env(reasoning_effort_profiles={"low": {"max_test_calls": -1}})
-    with pytest.raises(ValueError, match="tested_submission_reward.*must be >= 0"):
-        _make_env(reasoning_effort_profiles={"low": {"tested_submission_reward": -0.1}})
-
-
-def test_recovery_cap_tightens_per_level_and_never_exceeds_the_env_cap():
-    env = _make_env(
-        max_length_cutoff_recoveries=3,
-        reasoning_effort_profiles={
-            "low": {"max_submissions": 2, "max_test_calls": 2, "max_length_cutoff_recoveries": 1}
-        },
-    )
-    low = reset_episode(env, {"reasoning_effort": "low", **SINGLE_TEST_ANSWER})
-    assert low.info["episode_max_length_cutoff_recoveries"] == 1
-    high = reset_episode(env, {"reasoning_effort": "high", **SINGLE_TEST_ANSWER})
-    assert "episode_max_length_cutoff_recoveries" not in high.info, "a level without the key runs under the env cap"
-    with pytest.raises(
-        ValueError, match=r"max_length_cutoff_recoveries \(4\) exceeds the env's max_length_cutoff_recoveries \(3\)"
-    ):
-        _make_env(
-            max_length_cutoff_recoveries=3, reasoning_effort_profiles={"low": {"max_length_cutoff_recoveries": 4}}
-        )
 
 
 if __name__ == "__main__":

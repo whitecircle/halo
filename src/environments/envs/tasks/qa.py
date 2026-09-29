@@ -68,18 +68,17 @@ def create_qa_search_environment(
 ) -> NativeToolUseEnvironment:
     """Create a factual-QA-with-search environment (SimpleQA/GAIA/TriviaQA/PopQA).
 
-    Sets ``require_tool_use``; final answer validated against ``context["answer"]`` by the parent reward.
+    The final answer is validated against ``context["answer"]`` by the parent reward.
     """
     registry = create_native_search_tools(backend=search_backend)
     if include_python_tools:
         registry.merge(create_native_python_tools())
 
-    # setdefault, not a keyword argument: the registry forwards the whole env_config, so an explicit
-    # ``require_tool_use`` in environment_kwargs must override this rather than raise a
-    # duplicate-keyword TypeError. The answer is required because the parent grades against it only
-    # when a row carries one, and otherwise grades merely completing 1. ``None`` counts as unset, so
-    # a YAML ``requires_answer: null`` still gets this preset's answer.
-    kwargs.setdefault("require_tool_use", True)
+    # Defaulted into kwargs, not passed as a keyword: the registry forwards the whole env_config, so
+    # a keyword here makes an explicit ``requires_answer`` in environment_kwargs a duplicate-keyword
+    # TypeError instead of an override. The answer is required because the parent grades against it
+    # only when a row carries one, and otherwise grades merely completing 1.
+    # ``None`` counts as unset, so a YAML ``requires_answer: null`` still gets this preset's answer.
     if kwargs.get("requires_answer") is None:
         kwargs["requires_answer"] = True
     return NativeToolUseEnvironment(

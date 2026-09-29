@@ -5,9 +5,9 @@ When the engine cuts a turn short before it produced anything — at its token c
 (``finish_reason == "length"``) or by aborting it (``"abort"``) — the text is a fragment. Finalizing
 it as a plain-text answer ends the episode and books the failure as a NATURAL termination —
 invisible in every health metric. Instead the episode nudges (in its own protocol's words) and
-retries within ``max_turns``; the trainer skips the fragment. A turn the model ends with neither a
-tool call nor visible content recovers the same way, under the same cap, and is skipped for the same
-reason. A recovered turn is unpriced by default and pays ``length_cutoff_penalty`` where a protocol
+retries within ``max_turns``; the trainer never rewards the fragment. A turn the model ends with
+neither a tool call nor visible content recovers the same way, under the same cap, and is never
+rewarded for the same reason. A recovered turn is unpriced by default and pays ``length_cutoff_penalty`` where a protocol
 configures it; the turn that exhausts the recovery cap pays the overflow price instead.
 
 Run: python tests/cpu/environments/test_length_cutoff_recovery.py  (or pytest)
@@ -18,6 +18,7 @@ import pytest
 from src.environments.base import REWARD_COMPONENTS_KEY, Message, Trajectory
 from src.environments.envs.protocols.native import NativeToolUseEnvironment
 from src.environments.envs.protocols.react import ReActEnvironment
+from src.environments.envs.tasks.coding.code_contests import CodeContestsEnvironment
 from src.environments.episode import TurnGeneration, step_context_from_generation
 from src.environments.tools.definitions import NativeTool, NativeToolRegistry, ToolParameter
 from src.inference.response import ENGINE_CUT_FINISH_REASONS
@@ -196,8 +197,10 @@ def test_react_invented_tool_turn_is_flagged_untrainable():
         NativeToolUseEnvironment.EMPTY_TURN_NUDGE,
         ReActEnvironment.LENGTH_CUTOFF_NUDGE,
         ReActEnvironment.EMPTY_TURN_NUDGE,
+        CodeContestsEnvironment.LENGTH_CUTOFF_NUDGE,
+        CodeContestsEnvironment.EMPTY_TURN_NUDGE,
     ],
-    ids=["native-cut", "native-empty", "react-cut", "react-empty"],
+    ids=["native-cut", "native-empty", "react-cut", "react-empty", "code-cut", "code-empty"],
 )
 def test_the_nudge_never_asks_for_shorter_reasoning(nudge):
     # The nudge is trained on wherever recovery succeeds, so a terseness ask becomes a global lesson.
@@ -387,7 +390,7 @@ def test_a_tools_own_not_found_message_is_not_a_model_rejection():
     assert traj.info["successful_tool_calls"] == 0
 
 
-def test_trainer_skips_the_cut_off_turn_row():
+def _turns_trainer():
     trainer = object.__new__(DistributedAsyncEnvironmentalGRPOTrainer)
     trainer._rollout_routing_replay = False
     trainer._batch_build_error = None
@@ -397,7 +400,15 @@ def test_trainer_skips_the_cut_off_turn_row():
     trainer._max_train_row_tokens = None
     trainer._rows_over_cap = 0
     trainer._context_limit = lambda: 100_000
+    trainer.eos_token_id = 2
+    trainer.pad_token_id = 0
+    return trainer
 
+
+def test_trainer_tags_every_unproductive_turn_row_negative_only():
+    """The fragment, the rejected-call turn and the empty turn each become their sampled-id row, tagged
+    so the trainer keeps it only under a negative advantage; the finished turn trains untagged."""
+    trainer = _turns_trainer()
     traj = Trajectory(
         messages=[
             Message.user("task"),
@@ -408,8 +419,9 @@ def test_trainer_skips_the_cut_off_turn_row():
         ]
     )
     rows = trainer._tokenize_trajectory_turns(type("R", (), {"trajectory": traj})())
-    assert len(rows) == 1  # the fragment, the rejected-call turn and the empty turn are all skipped
-    assert rows[0].completion_ids.tolist() == [4, 5]
+    assert [r.completion_ids.tolist() for r in rows] == [[1, 2, 3], [6], [7, 8], [4, 5]]
+    assert [r.negative_only for r in rows] == [True, True, True, False]
+    assert all(r.completion_mask.all() for r in rows)
 
 
 def _flat_render(msgs, add_generation_prompt, _include_thinking):
@@ -463,11 +475,12 @@ def _two_turn_trajectory(first_truncated: bool = False, first_empty: bool = Fals
 
 @pytest.mark.parametrize("first", [{"first_truncated": True}, {"first_empty": True}], ids=["cut", "empty"])
 def test_whole_trajectory_render_does_not_weight_an_unproductive_turn(first):
-    """The re-tokenized path must exclude the same turns the per-turn path does.
+    """The re-tokenized path never weights an untrainable turn, at any advantage.
 
     It is the fallback whenever the engine returned no sampled ids, and it is the only path at
     ``train_on_sampled_tokens: false`` — weighting the fragment there reinforces exactly the runaway
-    the exclusion exists to suppress, at whatever advantage the recovered episode earns.
+    the exclusion exists to suppress, and its re-render is closed by template tokens the engine never
+    sampled, which not even a negative advantage may train.
     """
     trained = _trained_tokens(_render_trainer(), _two_turn_trajectory(**first))
 
@@ -509,26 +522,11 @@ def test_whole_trajectory_render_of_an_all_cut_episode_is_one_masked_row():
     assert completion_ids.numel() == 1
 
 
-def test_all_turns_excluded_trains_a_zero_weight_row():
-    """No surviving turn must not re-tokenize the whole trajectory at FULL weight.
-
-    ``_tokenize_trajectory`` masks IN every assistant span, truncated and rejected ones included, so
-    falling back to it here inverts the exclusion into full-weight training on exactly the runaway or
-    invented call it exists to suppress. The row must survive (rank-uniform row counts) at zero loss
-    weight, and this is not a batch error — the episode was simply unusable.
-    """
-    trainer = object.__new__(DistributedAsyncEnvironmentalGRPOTrainer)
-    trainer._rollout_routing_replay = False
-    trainer._batch_build_error = None
-    trainer._warned_capture_missing = False
-    trainer._rollout_template_kwargs = {}
-    trainer._carry_reasoning = False
-    trainer._max_train_row_tokens = None
-    trainer._rows_over_cap = 0
-    trainer._context_limit = lambda: 100_000
-    trainer.eos_token_id = 2
-    trainer.pad_token_id = 0
-
+def test_an_all_unproductive_episode_trains_only_negative_only_rows():
+    """Every turn untrainable: the rows are all tagged, and the whole-trajectory render — which weights
+    no untrainable span but would re-render the fragment — is never taken. Not a batch error."""
+    trainer = _turns_trainer()
+    trainer._tokenize_trajectory = lambda result: pytest.fail("captured untrainable turns must not re-render")
     traj = Trajectory(
         messages=[
             Message.user("task"),
@@ -538,7 +536,26 @@ def test_all_turns_excluded_trains_a_zero_weight_row():
     )
     rows = trainer._tokenize_trajectory_turns(type("R", (), {"trajectory": traj})())
 
-    assert len(rows) == 1
+    assert [r.completion_ids.tolist() for r in rows] == [[1, 2, 3], [6]]
+    assert all(r.negative_only for r in rows)
+    assert trainer._batch_build_error is None
+
+
+def test_all_unproductive_turns_without_ids_train_a_zero_weight_row():
+    """No row survives: the trajectory is one zero-weight row (rank-uniform row counts), never the
+    whole-trajectory render at full weight."""
+    trainer = _turns_trainer()
+    trainer._tokenize_trajectory = lambda result: pytest.fail("nothing to train: the row is the placeholder")
+    traj = Trajectory(
+        messages=[
+            Message.user("task"),
+            Message.assistant("fragment", token_ids=None, prompt_token_ids=[9], truncated=True),
+            Message.assistant("", token_ids=None, prompt_token_ids=[9], empty=True),
+        ]
+    )
+    rows = trainer._tokenize_trajectory_turns(type("R", (), {"trajectory": traj})())
+
+    assert len(rows) == 1 and not rows[0].negative_only
     assert rows[0].completion_mask.sum().item() == 0
     assert trainer._batch_build_error is None
 

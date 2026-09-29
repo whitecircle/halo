@@ -316,7 +316,9 @@ def test_a_build_past_the_compile_limit_is_a_compile_verdict():
     with _CompileTimesOut(compile_timeout=1.0).open_session() as session:
         result = session.run("#include </dev/zero>", language="cpp")
     assert result.error is None and result.compile_failed and not result.ok
-    assert format_sandbox_repl_output(result, timeout=5).startswith("Error: compilation exceeded")
+    assert (
+        format_sandbox_repl_output(result, timeout=5) == "Error: compilation failed\ncompilation timed out after 1 s"
+    )
 
 
 def test_the_run_step_file_size_limit_is_the_documented_one():

@@ -5,8 +5,8 @@ Every native or ReAct env can cap calls per tool per episode (``tool_budgets``):
 a call — binds its arguments, checks the episode's cap, counts it — before the handler runs, so a call
 the handler could never run or one past the cap is refused as a tool error without spending the
 budget, and a one-call cap cannot be double-spent by two calls in one turn. Every env binds an
-effort profile at reset: thinking budget, recovery cap and token price are base keys; a task adds its
-own through ``EFFORT_PROFILE_KEY_MINIMA`` and ``_apply_effort_profile``.
+effort profile at reset: the thinking budget is the base key; a task adds its own through
+``EFFORT_PROFILE_KEY_MINIMA`` and ``_apply_effort_profile``.
 
 Run: python tests/cpu/environments/test_tool_budgets.py  (or pytest)
 """
@@ -142,23 +142,14 @@ def test_react_budget_refuses_past_the_cap():
 # --- effort profiles on the base ---
 
 
-def test_base_profiles_bind_thinking_budget_and_recovery_cap_at_reset():
-    profiles = {"high": {"thinking_tokens": 2048, "max_length_cutoff_recoveries": 1}}
+def test_base_profiles_bind_the_thinking_budget_per_level():
     env = NativeToolUseEnvironment(
         tool_registry=_registry(),
         reasoning_effort="high",
-        max_length_cutoff_recoveries=3,
-        reasoning_effort_profiles=profiles,
+        reasoning_effort_profiles={"high": {"thinking_tokens": 2048}},
     )
     assert env.thinking_budget_for_effort("high") == 2048
     assert env.thinking_budget_for_effort("low") is None, "the base binds no budget to an unprofiled level"
-    ids, _ = env.reset(["t"])
-    traj = env.get_trajectories(ids)[0]
-    assert traj.info["episode_max_length_cutoff_recoveries"] == 1
-
-    ids, _ = env.reset(["t"], [{"reasoning_effort": "low"}])
-    low = env.get_trajectories(ids)[0]
-    assert "episode_max_length_cutoff_recoveries" not in low.info
 
 
 def test_base_rejects_non_finite_and_non_numeric_profile_values():
@@ -221,11 +212,7 @@ def test_a_subclass_extends_the_admitted_keys_over_the_mro():
         def _apply_effort_profile(self, trajectory, level, profile):
             trajectory.info["seen"] = (level, dict(profile))
 
-    assert _Task.effort_profile_key_minima() == {
-        "thinking_tokens": 1,
-        "max_length_cutoff_recoveries": 0,
-        "max_probes": 0,
-    }
+    assert _Task.effort_profile_key_minima() == {"thinking_tokens": 1, "max_probes": 0}
     env = _Task(
         tool_registry=_registry(), reasoning_effort="medium", reasoning_effort_profiles={"medium": {"max_probes": 2}}
     )

@@ -59,6 +59,8 @@ class EpisodeEffort:
     refuses one above a level's budget."""
     turn_ceiling: int | None = None
     """The run's per-turn reasoning ceiling (``rollout_max_thinking_tokens``), read under the episode scope."""
+    answer_headroom: int | None = None
+    """The tokens a turn may generate past its reasoning cap, read under the episode scope."""
 
     def turn_thinking_cap(self, reasoning_spent: int) -> int | None:
         """The engine's reasoning cap for the turn about to be generated.
@@ -70,6 +72,17 @@ class EpisodeEffort:
             return self.thinking_budget
         remaining = max(self.thinking_budget - reasoning_spent, self.turn_reserve)
         return remaining if self.turn_ceiling is None else min(remaining, self.turn_ceiling)
+
+    def turn_max_tokens(self, reasoning_spent: int) -> int:
+        """The engine's total token cap for the turn about to be generated.
+
+        Per-turn scope: :attr:`max_tokens`, every turn. Episode scope: the turn's reasoning cap
+        (:meth:`turn_thinking_cap`) plus the answer headroom, never above :attr:`max_tokens`, so a late
+        turn's total narrows with its reasoning."""
+        cap = self.turn_thinking_cap(reasoning_spent)
+        if self.scope == THINKING_SCOPE_TURN or cap is None or self.answer_headroom is None:
+            return self.max_tokens
+        return min(self.max_tokens, cap + self.answer_headroom)
 
     def spend_of(self, gen: "TurnGeneration", reasoning_end_token_id: int | None) -> int:
         """The reasoning a generated turn charges against the episode's budget: nothing under the
@@ -140,6 +153,7 @@ def bind_episode_effort(
     """
     level = resolve_episode_effort(context, env)
     budget = env.thinking_budget_for_effort(level) if level is not None else None
+    headroom = max_tokens if max_thinking_tokens is None else max(0, max_tokens - max_thinking_tokens)
     if budget is None:
         if scope == THINKING_SCOPE_EPISODE and max_thinking_tokens is None:
             raise ValueError(
@@ -154,15 +168,11 @@ def bind_episode_effort(
             scope=scope,
             turn_reserve=turn_reserve,
             turn_ceiling=max_thinking_tokens,
+            answer_headroom=headroom,
         )
     if scope == THINKING_SCOPE_TURN and max_thinking_tokens is not None:
         budget = min(budget, max_thinking_tokens)
-    if max_thinking_tokens is not None:
-        first_turn_cap = min(budget, max_thinking_tokens)
-        headroom = max(0, max_tokens - max_thinking_tokens)
-    else:
-        first_turn_cap = budget
-        headroom = max_tokens
+    first_turn_cap = budget if max_thinking_tokens is None else min(budget, max_thinking_tokens)
     return EpisodeEffort(
         level=level,
         thinking_budget=budget,
@@ -170,6 +180,7 @@ def bind_episode_effort(
         scope=scope,
         turn_reserve=turn_reserve,
         turn_ceiling=max_thinking_tokens,
+        answer_headroom=headroom,
     )
 
 

@@ -22,6 +22,9 @@ from src.environments.sandbox.base import (
     SandboxResult,
     SandboxSession,
     resolve_language,
+    signal_description,
+    stderr_head,
+    stderr_tail,
 )
 from src.environments.sandbox.resolve import resolve_sandbox
 
@@ -31,8 +34,10 @@ VerdictFn = Callable[[str, str, str], bool]
 
 _FLOAT_TOL = 1e-6
 
-# Bytes of stdout compared per test; generous, since truncating below real output fails a correct solution.
+# Characters of stdout a test accepts before OUTPUT LIMIT EXCEEDED, raised per test to a multiple of that
+# test's own expected output: a fixed cap fails every correct solution whose answer is larger than it.
 DEFAULT_MAX_OUTPUT_SIZE = 1_000_000
+OUTPUT_CAP_EXPECTED_MULTIPLE = 4
 
 _STDERR_EXCERPT_CHARS = 200
 _OUTPUT_EXCERPT_CHARS = 100
@@ -43,18 +48,18 @@ _MAX_FAILURE_DETAILS = 5
 # Tests named on one folded verdict line before the rest are counted.
 _MAX_FOLDED_TESTS_NAMED = 6
 # What a non-passing test's detail line shows the policy. ``outcome``, the default, states each failed
-# test's verdict class and nothing beyond it: stderr, an exit code or an output size can each carry
-# the hidden input the program read. Which tests fail, and how, still reaches the policy;
-# ``stop_on_first_failure`` narrows that to the first failing test, the Codeforces contract. ``full``
-# adds them, and the expected and produced output of a wrong answer, which turns every resubmission
-# into a probe of the hidden tests.
+# test's verdict class and nothing beyond it: stderr, an exit status, an output size or a backend's
+# error text can each carry the hidden input the program read. Which tests fail, and how, still
+# reaches the policy; ``stop_on_first_failure`` narrows that to the first failing test, the Codeforces
+# contract. ``full`` adds them, and the expected and produced output of a wrong answer, which turns
+# every resubmission into a probe of the hidden tests.
 VERDICT_DETAIL_FULL = "full"
 VERDICT_DETAIL_OUTCOME = "outcome"
 VERDICT_DETAILS = (VERDICT_DETAIL_FULL, VERDICT_DETAIL_OUTCOME)
 # What a test lost to infra shows under ``outcome``: its class alone. The error's text (a service's
 # message, a remote compile step's output, an exception quoting a path) can carry what the program
 # wrote, so it goes to the log.
-_INFRA_ERROR_VERDICT = "ERROR -- grading infrastructure failure"
+_INFRA_VERDICT = "ERROR -- grading infrastructure failure, not your program"
 
 # The checker's argv contract: the test input, the reference output, the candidate output, in this order.
 CHECKER_FILES = ("input.txt", "correct_output.txt", "solution_output.txt")
@@ -64,15 +69,6 @@ _CHECKER_DRIVER = (
     f"sys.argv = {['checker.py', *CHECKER_FILES]!r}\n"
     'runpy.run_path("checker.py", run_name="__main__")\n'
 )
-
-
-def _stderr_line(stderr: str) -> str:
-    """A detail line quoting the end of a program's stderr, empty for none: a traceback names the
-    exception on its last line, so a head excerpt of a long one shows the frames and drops the error."""
-    text = stderr.strip()
-    if len(text) > _STDERR_EXCERPT_CHARS:
-        text = "…" + text[-_STDERR_EXCERPT_CHARS:]
-    return f"\n  Stderr: {text}" if text else ""
 
 
 @dataclass
@@ -251,9 +247,9 @@ class CheckerVerdict:
 class GradeResult(NamedTuple):
     """Outcome of grading one solution against a test list.
 
-    ``ran_ok`` = tests whose code ran to completion AND produced output (powers the "runnable" reward
-    rung, so a no-output stub doesn't tie an honest attempt). ``infra_errors`` = tests lost to a
-    grading-backend failure; ``infra_errors == total`` means the grade carries no signal.
+    ``ran_ok`` = tests whose code ran to completion AND produced output (a no-output stub counts as
+    nothing run), a diagnostic the environment stamps as ``tests_ran_ok``. ``infra_errors`` =
+    tests lost to a grading-backend failure; ``infra_errors == total`` means the grade carries no signal.
     ``graded`` = tests actually judged (``< total`` once a budget stop or ``stop_on_first_failure``
     cuts the run short, while ``total`` stays the scoring denominator), and ``budget_hit`` says which
     of the two it was — partial grading is otherwise indistinguishable from a wrong solution.
@@ -289,8 +285,8 @@ def run_solution_against_tests(
     one entry per distinct verdict (tests failing the same way are folded into it), capped at
     ``_MAX_FAILURE_DETAILS`` distinct entries. ``verdict_detail`` decides what an entry shows: the
     verdict class alone (``outcome``), or also a wrong answer's expected and produced output, a
-    runtime error's exit code, an output-limit overrun's size, the tail of stderr, where a traceback
-    names the exception, and an infra error's text (``full``). A compile error shows the compiler's
+    runtime error's signal or exit status, an output-limit overrun's size and cap, the tail of stderr,
+    where a traceback names the exception, and an infra error's text (``full``). A compile error shows the compiler's
     first error under ``full``, and under ``outcome`` only where the backend builds apart from every
     test's stdin (``compiles_without_test_input``). An infra error's text always reaches the log.
 
@@ -302,6 +298,7 @@ def run_solution_against_tests(
     """
     if verdict_detail not in VERDICT_DETAILS:
         raise ValueError(f"verdict_detail must be one of {VERDICT_DETAILS}, got {verdict_detail!r}")
+    full = verdict_detail == VERDICT_DETAIL_FULL
     if not test_cases:
         return GradeResult(0, 0, "No test cases provided.", 0, graded=0)
 
@@ -317,7 +314,6 @@ def run_solution_against_tests(
     failures: list[_Failure] = []
     notes: list[str] = []
     suppressed = 0
-    full_detail = verdict_detail == VERDICT_DETAIL_FULL
     infra_texts: Counter[str] = Counter()
     deadline = None if max_grading_seconds is None else time.monotonic() + max_grading_seconds
     graded = 0
@@ -341,7 +337,7 @@ def run_solution_against_tests(
         nonlocal infra_errors
         infra_errors += 1
         infra_texts[error] += 1
-        add_detail(i, f"ERROR -- {error}" if full_detail else _INFRA_ERROR_VERDICT)
+        add_detail(i, f"ERROR -- {error}" if full else _INFRA_VERDICT)
 
     with _grading_runner(sandbox, code, language=language, timeout=timeout_per_test) as run_test:
         for i, tc in enumerate(test_cases, 1):
@@ -359,28 +355,35 @@ def run_solution_against_tests(
                 # pool counted, with the compiler's diagnostics as the verdict. The compiler names the
                 # first error first, so the head is the excerpt.
                 line = "COMPILATION ERROR (every test fails)"
-                if result.stderr and (full_detail or sandbox.compiles_without_test_input):
-                    line += f"\n  {result.stderr.strip()[:_STDERR_EXCERPT_CHARS]}"
+                if result.stderr and (full or sandbox.compiles_without_test_input):
+                    line += f"\n  {stderr_head(result.stderr, _STDERR_EXCERPT_CHARS)}"
                 notes.append(line)
                 graded = total
                 break
 
-            test_passed = False
+            test_passed = lost = False
             if result.timed_out:
                 add_detail(i, f"TIME LIMIT EXCEEDED ({timeout_per_test:g}s)")
             elif result.error:
                 # Backend/transport failure (not the program's stderr); bucket as ERROR even with partial stdout.
                 book_infra(i, result.error)
+                lost = True
             elif result.returncode not in (0, None):
                 # Non-zero exit is a Runtime Error on every judge, never a pass even if stdout matches.
                 body = "RUNTIME ERROR"
-                if full_detail:
-                    body += f" (exit {result.returncode}){_stderr_line(result.stderr)}"
+                if full:
+                    body += f" ({signal_description(result.returncode) or f'exit {result.returncode}'})"
+                    if result.stderr:
+                        body += f"\n  Stderr: {stderr_tail(result.stderr, _STDERR_EXCERPT_CHARS)}"
                 add_detail(i, body)
-            elif len(result.stdout) > max_output_size:
+            elif len(result.stdout) > (
+                cap := max(max_output_size, OUTPUT_CAP_EXPECTED_MULTIPLE * len(expected_output))
+            ):
                 # Over-cap output is its own verdict: truncate-and-compare would grade a correct-but-long answer wrong.
-                size = f"{len(result.stdout)} " if full_detail else ""
-                add_detail(i, f"OUTPUT LIMIT EXCEEDED ({size}> {max_output_size} bytes)")
+                add_detail(
+                    i,
+                    f"OUTPUT LIMIT EXCEEDED ({len(result.stdout)} > {cap} bytes)" if full else "OUTPUT LIMIT EXCEEDED",
+                )
             else:
                 actual_output = result.stdout
                 try:
@@ -388,30 +391,32 @@ def run_solution_against_tests(
                 except CheckerInfraError as e:
                     # Verdict lost to infra: no ran_ok/pass credit, keeping an all-infra outage visible.
                     book_infra(i, str(e))
+                    lost = True
                 else:
                     if test_passed or actual_output.strip() or not expected_output.strip():
-                        # Requiring output stops a no-output stub tying an honest attempt on this rung.
                         ran_ok += 1
                     if test_passed:
                         passed += 1
                     else:
                         body = "FAIL"
-                        if full_detail:
+                        if full:
                             body += (
                                 f"\n  Expected: {expected_output.strip()[:_OUTPUT_EXCERPT_CHARS]}"
                                 f"\n  Got:      {actual_output.strip()[:_OUTPUT_EXCERPT_CHARS]}"
-                                f"{_stderr_line(result.stderr)}"
                             )
+                            if result.stderr:
+                                body += f"\n  Stderr: {stderr_tail(result.stderr, _STDERR_EXCERPT_CHARS)}"
                         add_detail(i, body)
 
             graded = i
-            if stop_on_first_failure and not test_passed:
+            # A test lost to the backend is not the program's failure, so it stops nothing.
+            if stop_on_first_failure and not (test_passed or lost):
                 notes.append(f"Stopped after first failing test ({total - i} not run).")
                 break
 
     if infra_texts:
-        lost = "; ".join(f"{text} (x{count})" for text, count in infra_texts.items())
-        logger.warning("Grading lost %d test(s) to infra errors: %s", infra_errors, lost)
+        texts = "; ".join(f"{text} (x{count})" for text, count in infra_texts.items())
+        logger.warning("Grading lost %d test(s) to infra errors: %s", infra_errors, texts)
     details = [failure.render() for failure in failures] + notes
     if suppressed:
         details.append(f"...and {suppressed} more non-passing tests (details omitted).")
@@ -498,6 +503,23 @@ class GradingSpec:
             )
         return replace(self, **{**meta, **overrides})
 
+    def time_limit_for(self, language: str, time_limit: float | None) -> float:
+        """The per-test limit a ``language`` program runs under for a problem stating ``time_limit``.
+
+        Unstated, it is ``default_timeout``; an interpreted language is floored at that default, a
+        compiled one is multiplied by ``compiled_time_limit_scale``, and either is then clamped to
+        ``max_time_limit``.
+        """
+        limit = time_limit or self.default_timeout
+        resolved = resolve_language(language)
+        if resolved is not None and not resolved.is_compiled:
+            # Floor an interpreted language's budget so a C++-tuned limit doesn't TLE a slower CPython solution.
+            limit = max(limit, self.default_timeout)
+        elif resolved is not None:
+            # Statement limits are calibrated for C++ on a dedicated judge; the scale pays for shared grading cores.
+            limit *= self.compiled_time_limit_scale
+        return min(limit, self.max_time_limit)
+
 
 def grade_solution(
     code: str,
@@ -510,26 +532,16 @@ def grade_solution(
 ) -> GradeResult:
     """Grade ``code`` against ``tests`` -> :class:`GradeResult`; the single grading entry point.
 
-    Selects the verdict via :func:`select_verdict` and runs every test at the problem's ``time_limit``,
-    falling back to ``spec.default_timeout``: an interpreted language is floored at that default, a
-    compiled one is multiplied by ``spec.compiled_time_limit_scale``, and either is then clamped to
-    ``spec.max_time_limit``. ``spec.max_grading_seconds`` bounds the total sequential grading cost per
+    Selects the verdict via :func:`select_verdict` and runs every test at the limit
+    :meth:`GradingSpec.time_limit_for` derives from the problem's ``time_limit``. ``spec.max_grading_seconds`` bounds the total sequential grading cost per
     submission (see :func:`run_solution_against_tests`). ``language`` is the submission's own language
     when the run lets the model choose per submission; unset, the contract's ``spec.language`` applies.
     """
     language = language or spec.language
-    limit = time_limit or spec.default_timeout
-    resolved = resolve_language(language)
-    if resolved is not None and not resolved.is_compiled:
-        # Floor an interpreted language's budget so a C++-tuned limit doesn't TLE a slower CPython solution.
-        limit = max(limit, spec.default_timeout)
-    elif resolved is not None:
-        # Statement limits are calibrated for C++ on a dedicated judge; the scale pays for shared grading cores.
-        limit *= spec.compiled_time_limit_scale
     return run_solution_against_tests(
         code,
         tests,
-        timeout_per_test=min(limit, spec.max_time_limit),
+        timeout_per_test=spec.time_limit_for(language, time_limit),
         max_output_size=spec.max_output_size,
         sandbox=spec.sandbox,
         language=language,

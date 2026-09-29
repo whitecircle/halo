@@ -9,6 +9,7 @@ import contextlib
 import errno
 import math
 import os
+import resource
 import select
 import signal
 import stat
@@ -43,6 +44,10 @@ PYTHON_INTERPRETER = sys.executable or "python"
 
 # RLIMIT_CPU headroom over the wall-clock timeout, so SIGXCPU only fires as the backstop.
 RLIMIT_CPU_SLACK_SECONDS = 1.0
+
+# Math libraries size their thread pools to the host and allocate per-thread buffers at load, which
+# the run's address-space limit refuses: numpy's OpenBLAS then aborts a correct program at import.
+SINGLE_THREADED_MATH_ENV = {"OPENBLAS_NUM_THREADS": "1", "OMP_NUM_THREADS": "1", "MKL_NUM_THREADS": "1"}
 
 # The exit code a run is booked with when the program tampered with its working directory (a staged
 # entry or the directory itself replaced): its own runtime error, never an infra fault that would void
@@ -236,6 +241,13 @@ def _restore_owner_access(workdir: str) -> None:
     _walk_tree(workdir, remove=False)
 
 
+def _stack_limit_kib(stack_mb: int) -> int:
+    """``stack_mb`` in KiB, capped at this process's hard stack limit."""
+    hard = resource.getrlimit(resource.RLIMIT_STACK)[1]
+    kib = stack_mb * 1024
+    return kib if hard == resource.RLIM_INFINITY else min(kib, hard // 1024)
+
+
 def _build_key(spec: LanguageSpec, code: str, files: dict[str, str] | None) -> _BuildKey:
     """Identity of a compiled program's inputs; runs with equal keys share one build."""
     return (spec.name, code, tuple(sorted((files or {}).items())))
@@ -285,7 +297,9 @@ class LocalSubprocessSandbox(SandboxExecutor):
         return argv
 
     @staticmethod
-    def _limit_wrap(argv: list[str], cpu_seconds: int, memory_mb: int, nproc: int | None = None) -> list[str]:
+    def _limit_wrap(
+        argv: list[str], cpu_seconds: int, memory_mb: int, nproc: int | None = None, stack_mb: int | None = None
+    ) -> list[str]:
         """Wrap ``argv`` in a shell that applies per-run RLIMITs via ``ulimit`` then ``exec``s it.
 
         Used instead of a ``preexec_fn``, which forces CPython down the ``fork`` path and copies the
@@ -293,14 +307,17 @@ class LocalSubprocessSandbox(SandboxExecutor):
         resident memory grows; the kernel carries the RLIMITs across ``exec`` and into a bwrap jail.
         Bounds are per-call, so concurrent executions do not share them. ``nproc`` (run step only)
         caps process/thread count so a fork bomb cannot outrun the timeout's process-group kill; the
-        compile step omits it, since the compiler's fork tree is trusted.
+        compile step omits it, since the compiler's fork tree is trusted. ``stack_mb`` raises the stack
+        limit, clamped to this process's hard limit (which an unprivileged shell cannot raise).
         """
-        # bash ulimit units (outside POSIX mode): -t seconds (CPU), -f and -v KiB, -u processes.
+        # bash ulimit units (outside POSIX mode): -t seconds (CPU), -f, -v and -s KiB, -u processes.
         limits = [f"ulimit -t {cpu_seconds}", f"ulimit -f {LOCAL_FSIZE_LIMIT // 1024}"]
         if memory_mb:
             limits.append(f"ulimit -v {memory_mb * 1024}")
         if nproc:
             limits.append(f"ulimit -u {nproc}")
+        if stack_mb:
+            limits.append(f"ulimit -s {_stack_limit_kib(stack_mb)}")
         script = "; ".join(limits) + '; exec "$@"'
         return ["/bin/bash", "-c", script, "halo-sandbox", *argv]
 
@@ -335,13 +352,15 @@ class LocalSubprocessSandbox(SandboxExecutor):
 
     @staticmethod
     def _child_env(workdir: str) -> dict[str, str]:
-        """Minimal environment: PATH, a HOME inside the sandbox, no inherited proxy/secrets."""
+        """Minimal environment: PATH, a HOME inside the sandbox, single-threaded math libraries
+        (:data:`SINGLE_THREADED_MATH_ENV`), no inherited proxy/secrets."""
         return {
             "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
             "HOME": workdir,
             "TMPDIR": workdir,
             "LANG": os.environ.get("LANG", "C.UTF-8"),
             "LC_ALL": os.environ.get("LC_ALL", "C.UTF-8"),
+            **SINGLE_THREADED_MATH_ENV,
         }
 
     def _stage_sources(
@@ -382,7 +401,9 @@ class LocalSubprocessSandbox(SandboxExecutor):
                 compile_argv, stdin="", timeout=self.compile_timeout, cwd=workdir, env=self._child_env(workdir)
             )
         if timed_out:
-            return compile_limit_verdict(f"compilation exceeded {self.compile_timeout:g}s")
+            # The compile holds an execution slot, so outrunning the timeout is the source's doing
+            # (a template or constexpr blow-up), not a starved host.
+            return compile_limit_verdict(f"compilation timed out after {self.compile_timeout:g} s")
         # 127 = the wrapper shell could not exec the compiler: a backend failure, not a bad-source verdict.
         if returncode == 127:
             return SandboxResult(error=f"compiler not found: {spec.compile_argv[0]!r}", stderr=stderr.strip())
@@ -398,12 +419,15 @@ class LocalSubprocessSandbox(SandboxExecutor):
         """Run the staged (and built) program in ``workdir`` under the run-step limits."""
         run_argv = [PYTHON_INTERPRETER if tok == INTERPRETER_PLACEHOLDER else tok for tok in spec.run_argv]
         run_argv = self._wrap_command(run_argv, workdir, allow_network=allow_network)
-        # RLIMIT_CPU backstop: SIGXCPU still kills a busy loop if timeout delivery lags.
+        # RLIMIT_CPU backstop: SIGXCPU still kills a busy loop if timeout delivery lags. A compiled
+        # program's stack gets the whole memory limit, as on a contest judge; an interpreter's does not,
+        # since glibc sizes every thread's stack by that limit and its worker threads would each take it.
         run_argv = self._limit_wrap(
             run_argv,
             int(math.ceil(timeout + RLIMIT_CPU_SLACK_SECONDS)),
             self.memory_limit_mb,
             nproc=LOCAL_NPROC_LIMIT,
+            stack_mb=self.memory_limit_mb if spec.is_compiled else None,
         )
         # The slot is held for the whole run, so ``timeout`` measures near-dedicated-core time.
         with SANDBOX_EXECUTION_GATE.slot():

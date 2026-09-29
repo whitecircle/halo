@@ -290,15 +290,19 @@ class EnvironmentActor:
                 scope=config.thinking_budget_scope,
                 turn_reserve=config.thinking_turn_reserve,
             )
-            ep_config = replace(config, max_tokens=effort.max_tokens)
             reasoning_spent = 0
 
             for _ in range(env.max_turns):
                 if step.done:
                     break
 
-                # The engine cap this turn: the level's budget, or under the episode scope what it has left.
-                turn_config = replace(ep_config, max_thinking_tokens=effort.turn_thinking_cap(reasoning_spent))
+                # The engine caps this turn: the level's budget, or under the episode scope what it has
+                # left, with the turn's total bounded alongside it.
+                turn_config = replace(
+                    config,
+                    max_tokens=effort.turn_max_tokens(reasoning_spent),
+                    max_thinking_tokens=effort.turn_thinking_cap(reasoning_spent),
+                )
                 gen = await self._generate_turn(
                     client,
                     server_url,

@@ -6,6 +6,7 @@ its working dir across calls (one per episode isolates concurrent rollouts).
 """
 
 import os
+import signal
 import threading
 from abc import ABC, abstractmethod
 from collections.abc import Iterator
@@ -32,6 +33,15 @@ INTERPRETER_PLACEHOLDER = "$INTERPRETER"
 
 # Shared REPL observation for a run that produced no output, so every backend uses the same wording.
 REPL_NO_OUTPUT_MESSAGE = "Code executed successfully (no output)"
+
+# What the usual fatal signals mean for a contest program, so a crash reads as its cause, not a number.
+SIGNAL_CAUSES: dict[int, str] = {
+    signal.SIGSEGV: "invalid memory access or stack overflow",
+    signal.SIGABRT: "aborted: a failed assert, an uncaught exception, or an allocation past the memory limit",
+    signal.SIGFPE: "arithmetic error, e.g. integer division by zero",
+    signal.SIGBUS: "misaligned or out-of-range memory access",
+    signal.SIGKILL: "killed from outside, e.g. by the out-of-memory killer",
+}
 
 
 def utf8_encodable(text: str) -> str:
@@ -64,13 +74,46 @@ def repl_timeout_message(timeout: float) -> str:
     return f"Error: execution exceeded {timeout:g}s timeout"
 
 
+def signal_description(returncode: int | None) -> str | None:
+    """``killed by SIGSEGV (<cause>)`` for a return code that reports a signal death (negative, as
+    ``subprocess`` reports it); None for a normal exit."""
+    if returncode is None or returncode >= 0:
+        return None
+    try:
+        name = signal.Signals(-returncode).name
+    except ValueError:
+        name = f"signal {-returncode}"
+    cause = SIGNAL_CAUSES.get(-returncode)
+    return f"killed by {name} ({cause})" if cause else f"killed by {name}"
+
+
+def stderr_head(text: str, limit: int) -> str:
+    """The start of a stream, at most ``limit`` characters: a compiler names its first error first."""
+    text = text.strip()
+    return text if len(text) <= limit else text[:limit] + "…"
+
+
+def stderr_tail(text: str, limit: int) -> str:
+    """The end of a stream, at most ``limit`` characters: a traceback names the exception on its last
+    line, so a head excerpt of a long one shows the frames and drops the error."""
+    text = text.strip()
+    return text if len(text) <= limit else "…" + text[-limit:]
+
+
+def _usable_cpus() -> int:
+    """CPUs this process may run on: its affinity set (a container cpuset), else the host count."""
+    if hasattr(os, "sched_getaffinity"):
+        return len(os.sched_getaffinity(0))
+    return os.cpu_count() or 1
+
+
 def _resolve_execution_slots() -> int:
-    """Max concurrent sandboxed executions; host CPU count by default, ``HALO_SANDBOX_MAX_CONCURRENCY``
+    """Max concurrent sandboxed executions; the usable CPU count by default, ``HALO_SANDBOX_MAX_CONCURRENCY``
     overrides (parsed via :func:`env_int` — a malformed value warns and falls back to the default)."""
     override = env_int("HALO_SANDBOX_MAX_CONCURRENCY", None)
     if override is not None:
         return max(1, override)
-    return max(1, os.cpu_count() or 1)
+    return max(1, _usable_cpus())
 
 
 class ExecutionGate:
@@ -91,7 +134,7 @@ class ExecutionGate:
             self._semaphore.release()
 
 
-# Process-global so total concurrency stays at the host core budget across all env instances.
+# One gate per process, shared by every env instance in it; processes sharing a host each hold their own.
 SANDBOX_EXECUTION_GATE = ExecutionGate(_resolve_execution_slots())
 
 

@@ -10,7 +10,8 @@ Covers:
   compile time limit as a backend error), endpoint normalization, timeout/transport errors
   (via an injected fake session — no network).
 - resolve_sandbox: env-var backend selection and the remote-url requirement.
-- format_sandbox_repl_output / run_code_via_sandbox: REPL-style rendering.
+- format_sandbox_repl_output / run_code_via_sandbox: REPL-style rendering — a compile error as the
+  compiler's first diagnostics, a crash as its signal and stderr tail ahead of the program's stdout.
 - run_solution_against_tests: pass/fail/timeout grading on the local backend.
 
 Run: python tests/cpu/environments/test_sandbox.py
@@ -26,8 +27,10 @@ import requests
 from src.environments.envs.tasks.coding.code_contests import CodeContestsEnvironment
 from src.environments.envs.tasks.coding.grading import run_solution_against_tests
 from src.environments.envs.tasks.coding.swe import SweEnvironment
+from src.environments.sandbox import base as sandbox_base
 from src.environments.sandbox.base import (
     LOCAL_NPROC_LIMIT,
+    SANDBOX_DEFAULT_MEMORY_MB,
     ExecutionGate,
     SandboxInfraError,
     SandboxResult,
@@ -38,6 +41,14 @@ from src.environments.sandbox.remote import RemoteSandbox
 from src.environments.sandbox.repl import format_sandbox_repl_output, run_code_via_sandbox
 from src.environments.sandbox.resolve import resolve_sandbox
 from tests.common.code_contests import RecordingSandboxSession
+
+_NUMPY_MATMUL = "import numpy as np\na = np.arange(64.0).reshape(8, 8)\nprint(int((a @ a).trace()))"
+
+# An address space one OpenBLAS thread fits in (~120 MiB in the image) and four do not (~40 MiB of
+# buffers each): a host-sized pool fails here on any host with four cores, the default cap only on a
+# large one.
+_ONE_BLAS_THREAD_MB = 160
+
 
 # LocalSubprocessSandbox
 
@@ -186,8 +197,8 @@ def test_execution_gate_caps_concurrency():
 def test_execution_slots_env_override_via_env_int():
     """HALO_SANDBOX_MAX_CONCURRENCY parses through src.env.env_int (single home for env parsing):
     a valid override wins (clamped to >=1), a malformed value warns inside env_int and falls back
-    to the CPU-count default instead of raising mid-run."""
-    default_slots = max(1, os.cpu_count() or 1)
+    to the usable-CPU default instead of raising mid-run."""
+    default_slots = max(1, len(os.sched_getaffinity(0)))
     saved = os.environ.get("HALO_SANDBOX_MAX_CONCURRENCY")
     try:
         os.environ["HALO_SANDBOX_MAX_CONCURRENCY"] = "3"
@@ -205,6 +216,15 @@ def test_execution_slots_env_override_via_env_int():
             os.environ["HALO_SANDBOX_MAX_CONCURRENCY"] = saved
 
 
+def test_execution_slots_default_to_the_cpus_the_process_may_use(monkeypatch):
+    """A container cpuset leaves the process fewer CPUs than the host reports; sizing the gate off the
+    host count oversubscribes the cores the runs actually get, and a correct solution then times out."""
+    monkeypatch.delenv("HALO_SANDBOX_MAX_CONCURRENCY", raising=False)
+    monkeypatch.setattr(sandbox_base.os, "cpu_count", lambda: 240)
+    monkeypatch.setattr(sandbox_base.os, "sched_getaffinity", lambda pid: set(range(216)))
+    assert _resolve_execution_slots() == 216
+
+
 def test_local_enforces_memory_limit():
     """An allocation past the address-space cap must fail the process, not the host."""
     sb = LocalSubprocessSandbox(memory_limit_mb=256)
@@ -212,6 +232,22 @@ def test_local_enforces_memory_limit():
     res = sb.run("x = bytearray(1500 * 1024 * 1024)\nprint(len(x))")
     assert not res.ok, "allocation beyond the memory cap should not succeed"
     assert not res.timed_out
+
+
+def test_local_child_env_runs_math_libraries_single_threaded(tmp_path):
+    env = LocalSubprocessSandbox._child_env(str(tmp_path))
+    for name in ("OPENBLAS_NUM_THREADS", "OMP_NUM_THREADS", "MKL_NUM_THREADS"):
+        assert env[name] == "1"
+
+
+@pytest.mark.parametrize("memory_limit_mb", [SANDBOX_DEFAULT_MEMORY_MB, _ONE_BLAS_THREAD_MB], ids=["default", "tight"])
+def test_local_numpy_program_runs_under_the_address_space_limit(memory_limit_mb):
+    """A host-sized BLAS thread pool allocates past the address-space cap at import, and OpenBLAS then
+    aborts a correct program; the sandbox runs it single-threaded."""
+    pytest.importorskip("numpy")
+    res = LocalSubprocessSandbox(memory_limit_mb=memory_limit_mb).run(_NUMPY_MATMUL)
+    assert res.ok, res.stderr
+    assert res.stdout.strip() == "68880"
 
 
 def test_local_rejects_unsupported_language():
@@ -547,7 +583,32 @@ def test_format_repl_timeout():
 def test_format_repl_error_tail():
     res = SandboxResult(stdout="", stderr="Traceback...\nValueError: boom", returncode=1)
     out = format_sandbox_repl_output(res, 5)
-    assert out == "Error: ValueError: boom"
+    assert out == "Error: Traceback...\nValueError: boom"
+
+
+def test_format_repl_runtime_error_keeps_the_failing_line_and_leads_the_output():
+    """The frame naming the failing line sits above the exception line, and the error comes before the
+    program's stdout: the protocol cuts a long observation from the end."""
+    stderr = (
+        'Traceback (most recent call last):\n  File "main.py", line 7, in <module>\n    x = a[n]\nIndexError: boom'
+    )
+    out = format_sandbox_repl_output(SandboxResult(stdout="debug 1\ndebug 2\n", stderr=stderr, returncode=1), 5)
+    assert out == f"Error: {stderr}\nOutput:\ndebug 1\ndebug 2"
+
+
+def test_format_repl_names_the_signal_that_killed_the_program():
+    out = format_sandbox_repl_output(SandboxResult(stdout="3\n", returncode=-11), 5)
+    assert out == "Error: killed by SIGSEGV (invalid memory access or stack overflow)\nOutput:\n3"
+    aborted = format_sandbox_repl_output(SandboxResult(stderr="main: main.cpp:4: Assertion failed.", returncode=-6), 5)
+    assert aborted.startswith("Error: killed by SIGABRT (") and aborted.endswith("Assertion failed.")
+
+
+def test_format_repl_renders_a_compile_failure_from_the_head_of_the_diagnostics():
+    """A compiler names its first error first and ends on a caret gutter: the head is the diagnosis."""
+    diagnostics = "main.cpp:3:5: error: 'y' was not declared in this scope\n" + "    |     ^\n" * 400
+    out = format_sandbox_repl_output(SandboxResult(stderr=diagnostics, returncode=1, compile_failed=True), 5)
+    assert out.startswith("Error: compilation failed\nmain.cpp:3:5: error: 'y' was not declared in this scope")
+    assert len(out) < len(diagnostics) and out.endswith("…")
 
 
 def test_format_repl_raises_on_backend_error_with_partial_output():

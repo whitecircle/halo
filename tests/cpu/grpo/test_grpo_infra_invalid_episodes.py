@@ -72,7 +72,7 @@ def test_outage_marks_episode_invalid():
 
 def test_genuine_failure_stays_valid():
     env = CodeContestsEnvironment(language="python")
-    # tests_ran_ok=3 with zero passes is real policy signal, not an outage.
+    # Three judged failures with zero passes is real policy signal, not an outage.
     traj = _graded_traj(
         env,
         submission_result="graded",

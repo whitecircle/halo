@@ -260,9 +260,6 @@ async def run_episode(
     )
     if effort.level is not None:
         context = {**(context or {}), "reasoning_effort": effort.level}
-    # The per-episode contract, narrowed as the training actor narrows it, so the engine enforces the
-    # level's CoT budget here too rather than the trajectory only recording it.
-    episode_rollout = replace(rollout, max_tokens=effort.max_tokens)
     reasoning_spent = 0
 
     episode = EpisodeDispatcher(env)
@@ -281,8 +278,13 @@ async def run_episode(
         for _ in range(env.max_turns):
             if step.done:
                 break
-            # The engine cap this turn: the level's budget, or under the episode scope what it has left.
-            turn_rollout = replace(episode_rollout, max_thinking_tokens=effort.turn_thinking_cap(reasoning_spent))
+            # The per-turn contract, narrowed as the training actor narrows it, so the engine enforces
+            # the level's CoT budget here too rather than the trajectory only recording it.
+            turn_rollout = replace(
+                rollout,
+                max_tokens=effort.turn_max_tokens(reasoning_spent),
+                max_thinking_tokens=effort.turn_thinking_cap(reasoning_spent),
+            )
             try:
                 gen = await generate_turn(
                     partial(_request_turn, client, step.observation, tools, turn_rollout, effort),

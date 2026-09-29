@@ -32,12 +32,12 @@ logger = logging.getLogger(__name__)
 # Reasoning-effort levels for the chat template ("Reasoning: <level>"). "random" resolves per episode.
 VALID_REASONING_EFFORTS = ("low", "medium", "high")
 
-# Set in ``info`` when an episode's reward carries no learning signal — a grading or sandbox backend
-# failed, a scorer returned nothing, a null ``answer`` cell; the trainer excludes it from the GRPO group
-# baseline.
+# Set in ``info`` when an episode's reward carries no learning signal (the grade reached no verdict, a
+# grading or sandbox backend failed, a scorer returned nothing, a null ``answer`` cell); the trainer
+# excludes it from the GRPO group baseline.
 EPISODE_INVALID_KEY = "episode_invalid"
-# Why an episode is invalid (a sandbox or scorer fault, a failed chat-template re-render); read by the
-# trainer's all-invalid step halt so its message names the cause.
+# Why an episode is invalid (a grade with no signal, a sandbox or scorer fault, a trajectory the chat
+# template cannot re-render); read by the all-invalid step halt and the eval runner so each names the cause.
 EPISODE_INVALID_REASON_KEY = "episode_invalid_reason"
 # The cause on an episode its driver lost (a generation that raised), the spelling the Ray actor
 # stamps on the row it hands back for one. A driver stamps it before closing the episode through
@@ -171,13 +171,13 @@ class Message:
     routing_mask: str | None = None
     routing_prompt_tokens: int | None = None
     prompt_token_ids: list[int] | None = None
-    # Engine cut the turn off at its token cap: the text is a fragment, so the trainer skips it.
+    # Engine cut the turn off at its token cap: the text is a fragment, never rewarded (``untrainable``).
     truncated: bool = False
-    # Every tool call named a tool that does not exist, so the turn accomplished nothing; skipped
-    # like a fragment to avoid reinforcing the invented call.
+    # Every tool call named a tool that does not exist, so the turn accomplished nothing — never
+    # rewarded like a fragment, or a recovering episode reinforces the invented call that cost it a turn.
     calls_rejected: bool = False
-    # The model ended the turn with neither visible content nor a tool call — skipped for the same
-    # reason: a recovering episode would reinforce stopping on nothing.
+    # The model ended the turn with neither visible content nor a tool call — never rewarded for the
+    # same reason: a recovering episode would reinforce stopping on nothing.
     empty: bool = False
 
     def to_dict(self, include_thinking: bool = False) -> dict[str, Any]:
@@ -197,10 +197,11 @@ class Message:
 
     @property
     def untrainable(self) -> bool:
-        """An assistant turn no tokenization path may weight: an engine-cut fragment (``truncated``),
+        """An assistant turn no tokenization path may reward: an engine-cut fragment (``truncated``),
         a turn whose every tool call named a nonexistent tool (``calls_rejected``) or one that ended
-        on nothing (``empty``). It stays in the render later turns condition on, but reinforcing it
-        would reward the runaway, the invented call or the empty stop whenever the episode recovers."""
+        on nothing (``empty``). It stays in the render later turns condition on; its sampled ids train
+        only under a negative advantage, so the runaway, the invented call or the empty stop takes the
+        failure signal of an episode that fails and none of the credit of one that recovers."""
         return self.truncated or self.calls_rejected or self.empty
 
     @classmethod
@@ -367,13 +368,9 @@ class BaseEnvironment(ABC):
 
     # Profile keys this class admits and the minimum each takes; a subclass declares only the keys it
     # adds, and the union over the MRO is what a profile may carry. ``thinking_tokens`` is the
-    # level's CoT budget (per turn, or the episode's total under the episode thinking scope),
-    # ``max_length_cutoff_recoveries`` tightens the env's recovery cap for the level. An int minimum
-    # declares a count (only ints admitted); a float minimum admits any finite number.
-    EFFORT_PROFILE_KEY_MINIMA: dict[str, int | float] = {
-        "thinking_tokens": 1,
-        "max_length_cutoff_recoveries": 0,
-    }
+    # level's CoT budget (per turn, or the episode's total under the episode thinking scope). An int
+    # minimum declares a count (only ints admitted); a float minimum admits any finite number.
+    EFFORT_PROFILE_KEY_MINIMA: dict[str, int | float] = {"thinking_tokens": 1}
 
     def __init__(
         self,
@@ -508,10 +505,7 @@ class BaseEnvironment(ABC):
     def _merge_effort_profiles(
         self, overrides: dict[str, dict[str, int | float]] | None
     ) -> dict[str, dict[str, int | float]]:
-        """Validate ``reasoning_effort_profiles`` overrides and merge them per level over the class defaults.
-
-        A level's recovery cap may tighten the env's ``max_length_cutoff_recoveries``, never exceed it.
-        """
+        """Validate ``reasoning_effort_profiles`` overrides and merge them per level over the class defaults."""
         minima = self.effort_profile_key_minima()
         profiles = {level: dict(entry) for level, entry in self.REASONING_EFFORT_PROFILES.items()}
         for level, entry in (overrides or {}).items():
@@ -537,27 +531,16 @@ class BaseEnvironment(ABC):
                 if value < minimum:
                     raise ValueError(f"{key} for effort {level!r} must be >= {minimum}, got {value}")
             profiles.setdefault(level, {}).update(entry)
-        env_cap = self.max_length_cutoff_recoveries
-        for level, profile in profiles.items():
-            if env_cap is not None and profile.get("max_length_cutoff_recoveries", 0) > env_cap:
-                raise ValueError(
-                    f"reasoning_effort_profiles[{level!r}].max_length_cutoff_recoveries "
-                    f"({profile['max_length_cutoff_recoveries']}) exceeds the env's max_length_cutoff_recoveries ({env_cap})"
-                )
         return profiles
 
     def _bind_effort_profile(self, trajectory: Trajectory, context: dict[str, Any] | None) -> None:
-        """Stamp the episode's effort profile once its level is concrete at reset.
-
-        The generic keys land as the ``info`` stamps their consumers read (``_handle_length_cutoff``);
-        task-specific keys go through :meth:`_apply_effort_profile`.
-        An undetermined level (:meth:`reset_effort_level` returns ``None``) binds an empty profile, so
-        the hook still runs and can state the class caps.
+        """Bind the episode's effort profile once its level is concrete at reset, through
+        :meth:`_apply_effort_profile` (the thinking budget is read per request, by
+        :meth:`thinking_budget_for_effort`). An undetermined level (:meth:`reset_effort_level` returns
+        ``None``) binds an empty profile, so the hook still runs and can state the class caps.
         """
         level = self.reset_effort_level(context)
         profile = self.reasoning_effort_profiles.get(level, {}) if level is not None else {}
-        if "max_length_cutoff_recoveries" in profile:
-            trajectory.info["episode_max_length_cutoff_recoveries"] = profile["max_length_cutoff_recoveries"]
         self._apply_effort_profile(trajectory, level, profile)
 
     def _apply_effort_profile(  # noqa: B027  optional hook; task envs override
@@ -651,7 +634,7 @@ class BaseEnvironment(ABC):
 
     def _flag_calls_rejected(self, trajectory: Trajectory) -> None:
         """Mark the turn just taken as one whose every call named a nonexistent tool
-        (:attr:`Message.calls_rejected`), so no tokenization path weights it."""
+        (:attr:`Message.calls_rejected`), so no tokenization path rewards it."""
         self._last_assistant_message(trajectory).calls_rejected = True
 
     def _truncate_observation(self, content: str) -> str:
@@ -800,7 +783,7 @@ class BaseEnvironment(ABC):
         its reasoning, below the cap.
 
         Graded, it would end the episode on an empty final answer; the turn is flagged
-        (:attr:`Message.empty`) so no tokenization path weights it, and the episode recovers like it
+        (:attr:`Message.empty`) so no tokenization path rewards it, and the episode recovers like it
         does from a cut. The wording is each protocol's (:data:`EMPTY_TURN_NUDGE`).
         """
         self._last_assistant_message(trajectory).empty = True
@@ -814,9 +797,8 @@ class BaseEnvironment(ABC):
     def _recover_unproductive_turn(
         self, trajectory: Trajectory, kind: str, nudge_attr: str
     ) -> tuple[Trajectory, float, bool, bool, dict[str, Any]]:
-        """Nudge and retry a turn that produced nothing, within ``max_turns`` and within the episode's
-        recovery cap (``episode_max_length_cutoff_recoveries`` when an env stamped one, else
-        ``max_length_cutoff_recoveries``), which the two kinds of unproductive turn share. The turn is
+        """Nudge and retry a turn that produced nothing, within ``max_turns`` and within
+        ``max_length_cutoff_recoveries``, which the two kinds of unproductive turn share. The turn is
         counted under ``<kind>_turns`` and stamped ``<kind>`` in the step info. A turn past the cap, or
         on the episode's last turn, cannot be retried: it ends the episode truncated, priced like a
         ``max_turns`` overflow and never as a recovered turn (``unrecovered_turn``).
@@ -830,7 +812,7 @@ class BaseEnvironment(ABC):
             )
         counter = f"{kind}_turns"
         trajectory.info[counter] = trajectory.info.get(counter, 0) + 1
-        cap = trajectory.info.get("episode_max_length_cutoff_recoveries", self.max_length_cutoff_recoveries)
+        cap = self.max_length_cutoff_recoveries
         past_cap = cap is not None and self._unproductive_turns(trajectory) > cap
         if past_cap or trajectory.num_turns >= self.max_turns:
             return trajectory, 0.0, True, True, {kind: True, "unrecovered_turn": True}

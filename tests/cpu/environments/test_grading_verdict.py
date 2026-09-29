@@ -19,10 +19,12 @@ from unittest import mock
 import pytest
 
 import src.environments.envs.tasks.coding.grading as grading_module
+from src.environments.base import EPISODE_INVALID_REASON_KEY, OBJECTIVE_REWARD_KEY, REWARD_COMPONENTS_KEY
 from src.environments.envs.tasks.coding.code_contests import CodeContestsEnvironment
 from src.environments.envs.tasks.coding.grading import (
     _MAX_FAILURE_DETAILS,
     _STDERR_EXCERPT_CHARS,
+    OUTPUT_CAP_EXPECTED_MULTIPLE,
     CheckerInfraError,
     CheckerVerdict,
     GradeResult,
@@ -281,6 +283,69 @@ def test_partial_grading_reaches_the_episode_metrics():
     assert full_metrics["episode/grading_budget_hit"] == pytest.approx(0.0)
 
 
+def _budget_stopped_episode(*submissions):
+    """One episode submitting once per entry of ``submissions`` against 50 tests at 10 s/test under a
+    25 s grading budget, so each grade judges three tests (the entry's three sandbox results) and stops."""
+    submit = {
+        "id": "c1",
+        "type": "function",
+        "function": {"name": "submit_solution", "arguments": json.dumps({"code": "print(42)"})},
+    }
+    clock = {"t": 0.0}
+    env = CodeContestsEnvironment(
+        language="python",
+        max_submissions=len(submissions),
+        max_grading_seconds=25.0,
+        submission_reward=0.1,
+        sandbox=_TickingSandbox([result for runs in submissions for result in runs], clock, seconds_per_run=10.0),
+    )
+    eids, _ = env.reset(["Print 42."], [{"answer": {"tests": [{"input": str(i), "output": "42"} for i in range(50)]}}])
+    with mock.patch.object(grading_module.time, "monotonic", lambda: clock["t"]):
+        for _ in submissions:
+            env.step(eids, [""], [{"tool_calls": [submit]}])
+    traj = env.get_trajectories(eids)[0]
+    assert traj.done and traj.info["grading_budget_hit"] and traj.info["tests_graded"] == 3
+    return env, traj
+
+
+_OK = SandboxResult(stdout="42\n", returncode=0)
+_WRONG = SandboxResult(stdout="41\n", returncode=0)
+
+
+def test_a_budget_stop_before_any_failure_leaves_the_group_baseline():
+    """All-or-nothing, the budget's ungraded remainder would score a solution that passed every test it
+    reached 0 — a correct but slow-to-grade program trained as a wrong one. Nothing failed, so the
+    grade says nothing about the code: the episode is invalid and pays no rung, and the halt and the
+    eval runner read why."""
+    env, traj = _budget_stopped_episode([_OK, _OK, _OK])
+    components = traj.info[REWARD_COMPONENTS_KEY]
+    assert traj.episode_invalid
+    assert traj.info[EPISODE_INVALID_REASON_KEY] == (
+        "code grade inconclusive: 3 of 50 tests passed and none failed (47 ungraded, 0 lost to the sandbox backend)"
+    )
+    assert components[OBJECTIVE_REWARD_KEY] == 0.0 and components["reward/submission"] == 0.0
+    assert env.rollout_metrics(traj)["episode/grade_inconclusive"] == 1.0
+
+
+def test_a_budget_stop_after_a_failure_is_a_wrong_answer():
+    env, traj = _budget_stopped_episode([_OK, _WRONG, _OK])
+    components = traj.info[REWARD_COMPONENTS_KEY]
+    assert not traj.episode_invalid and EPISODE_INVALID_REASON_KEY not in traj.info
+    assert components[OBJECTIVE_REWARD_KEY] == 0.0
+    assert components["reward/submission"] == pytest.approx(0.1), "a graded attempt still earns its rung"
+    assert env.rollout_metrics(traj)["episode/grade_inconclusive"] == 0.0
+
+
+@pytest.mark.parametrize(
+    ("first", "last", "invalid"),
+    [([_OK, _WRONG, _OK], [_OK, _OK, _OK], True), ([_OK, _OK, _OK], [_WRONG, _OK, _OK], False)],
+)
+def test_the_last_submissions_grade_decides_whether_the_episode_trains(first, last, invalid):
+    """The last submission is the graded one, so its stop — not an earlier one's — is what is judged."""
+    _, traj = _budget_stopped_episode(first, last)
+    assert traj.episode_invalid is invalid
+
+
 def test_grade_solution_gives_checker_infra_timeout_not_solution_limit():
     """The checker runs at the infra default timeout, never the solution's clamped per-test limit —
     a tight C++-tuned time_limit must TLE the solution, not the trusted judge grading it."""
@@ -320,6 +385,45 @@ def test_outcome_verdict_hides_expected_and_produced_output():
     assert (outcome.passed, outcome.total) == (full.passed, full.total) == (1, 2)
     with pytest.raises(ValueError, match="verdict_detail"):
         run_solution_against_tests("code", tests, sandbox=sandbox, verdict_detail="diff")
+
+
+@pytest.mark.parametrize(
+    ("result", "full_shows", "outcome_verdict"),
+    [
+        (SandboxResult(stdout="", stderr="hidden 42", returncode=3), ["exit 3", "hidden 42"], "RUNTIME ERROR"),
+        (SandboxResult(stdout="", stderr="hidden 42", returncode=-11), ["SIGSEGV", "hidden 42"], "RUNTIME ERROR"),
+        (SandboxResult(stdout="X\n", stderr="hidden 42", returncode=0), ["hidden 42"], "FAIL"),
+        (SandboxResult(stdout="Y" * 5000, returncode=0), ["5000 >"], "OUTPUT LIMIT EXCEEDED"),
+        (SandboxResult(error="backend said hidden 42"), ["backend said hidden 42"], "grading infrastructure failure"),
+    ],
+)
+def test_an_outcome_verdict_carries_no_channel_the_program_controls(result, full_shows, outcome_verdict):
+    """Stderr, the exit status and the output size are all the program's to set, so under ``outcome``
+    each would read the hidden input back through the judge; the verdict class alone stays."""
+    tests = [{"input": "42", "output": "Y"}]
+    full = run_solution_against_tests(
+        "code", tests, sandbox=StubSandbox(result), max_output_size=100, verdict_detail="full"
+    )
+    outcome = run_solution_against_tests(
+        "code", tests, sandbox=StubSandbox(result), max_output_size=100, verdict_detail="outcome"
+    )
+    for shown in full_shows:
+        assert shown in full.details, full.details
+    assert outcome_verdict in outcome.details
+    assert "42" not in outcome.details and "5000" not in outcome.details, outcome.details
+
+
+def test_a_test_lost_to_the_backend_does_not_stop_the_grade_early():
+    """``stop_on_first_failure`` stops at the program's first failure; a backend loss is not one."""
+    results = iter([SandboxResult(error="backend down"), SandboxResult(stdout="Y\n", returncode=0)])
+
+    class _Sequence(StubSandbox):
+        def run(self, code, *, stdin="", timeout=15.0, language="python", files=None):
+            return next(results)
+
+    tests = [{"input": "1", "output": "Y"}, {"input": "2", "output": "Y"}]
+    grade = run_solution_against_tests("code", tests, sandbox=_Sequence(SandboxResult()), stop_on_first_failure=True)
+    assert (grade.graded, grade.passed, grade.infra_errors) == (2, 1, 1)
 
 
 @pytest.mark.parametrize("seconds", [0.0, -1.0, float("nan"), float("inf")])
@@ -397,6 +501,48 @@ def test_tests_failing_identically_fold_into_one_verdict_outside_the_cap():
     assert "ZeroDivisionError: division by zero" in grade.details
     assert f"Test {n + 1}: FAIL" in grade.details
     assert "details omitted" not in grade.details
+
+
+def test_a_correct_answer_larger_than_the_default_cap_passes():
+    """The cap follows the test's own expected output, so a correct answer of any legitimate size is judged
+    on its content: a fixed 1 MB cap would fail every correct solution to a problem whose answer is 2 MB."""
+    answer = "7 " * 1_000_000
+    tests = [{"input": "", "output": answer}]
+    grade = run_solution_against_tests(
+        "print()", tests, max_output_size=1_000, sandbox=StubSandbox(SandboxResult(stdout=answer, returncode=0))
+    )
+    assert (grade.passed, grade.total) == (1, 1), grade.details
+
+
+def test_output_past_its_tests_cap_is_still_refused():
+    """A runaway program still hits the verdict: the cap is the larger of the default and a multiple of the
+    expected output, never unbounded."""
+    expected = "x" * 10_000
+    runaway = "x" * (OUTPUT_CAP_EXPECTED_MULTIPLE * len(expected) + 1)
+    tests = [{"input": "", "output": expected}]
+    grade = run_solution_against_tests(
+        "print()",
+        tests,
+        max_output_size=1_000,
+        sandbox=StubSandbox(SandboxResult(stdout=runaway, returncode=0)),
+        verdict_detail="full",
+    )
+    assert grade.passed == 0
+    assert (
+        f"OUTPUT LIMIT EXCEEDED ({len(runaway)} > {OUTPUT_CAP_EXPECTED_MULTIPLE * len(expected)} bytes)"
+        in grade.details
+    )
+    small = [{"input": "", "output": "1"}]
+    grade = run_solution_against_tests(
+        "print()",
+        small,
+        max_output_size=1_000,
+        sandbox=StubSandbox(SandboxResult(stdout="1" * 1_001, returncode=0)),
+        verdict_detail="full",
+    )
+    assert "OUTPUT LIMIT EXCEEDED (1001 > 1000 bytes)" in grade.details, (
+        "a tiny expected output keeps the default floor"
+    )
 
 
 if __name__ == "__main__":

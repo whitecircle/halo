@@ -103,13 +103,12 @@ def test_grade_infinite_loop_is_tle():
     passed, _total, details, ran_ok, *_ = grade_solution("while True: pass", _ADD_TESTS, _token_spec(), time_limit=1.0)
     assert passed == 0
     assert "TIME LIMIT EXCEEDED" in details
-    assert ran_ok == 0  # never ran to completion → no execution-progress credit
+    assert ran_ok == 0  # never ran to completion
 
 
 def test_ran_ok_separates_runnable_wrong_from_crash():
-    """``ran_ok`` (the dense execution-progress signal) must count a solution that RUNS but is WRONG, and
-    must NOT count one that CRASHES — this is the only within-group signal when every completion fails the
-    hidden tests, so a regression here silently removes the reward variance GRPO relies on."""
+    """``ran_ok`` (the ``tests_ran_ok`` diagnostic) counts a solution that runs but is wrong, and not one
+    that crashes."""
     passed, total, _, ran_ok, *_ = grade_solution(
         "a=int(input()); b=int(input()); print(a*b)", _ADD_TESTS, _token_spec(), time_limit=2.0
     )
@@ -117,16 +116,15 @@ def test_ran_ok_separates_runnable_wrong_from_crash():
         f"runnable-but-wrong should run all {total} tests: passed={passed} ran={ran_ok}"
     )
     _, _, _, ran_crash, *_ = grade_solution("raise SystemExit(1)", _ADD_TESTS, _token_spec(), time_limit=2.0)
-    assert ran_crash == 0, f"a crashing solution must earn 0 execution progress, got {ran_crash}"
+    assert ran_crash == 0, f"a crashing solution must not count as ran_ok, got {ran_crash}"
 
 
-def test_empty_output_stub_earns_no_execution_progress():
-    """A `pass`-style stub (clean exit, no output) must NOT count as ran_ok: on the execution rung it
-    would tie every honest runnable-but-wrong attempt, making the stub a reward-floor attractor in
-    all-fail groups (the observed terminal state of an unanchored run)."""
+def test_empty_output_stub_does_not_count_as_ran_ok():
+    """A `pass`-style stub (clean exit, no output) ran nothing the tests could judge, so it is not
+    ``ran_ok``."""
     result = grade_solution("pass", _ADD_TESTS, _token_spec(), time_limit=2.0)
     assert result.passed == 0
-    assert result.ran_ok == 0, f"an empty-output stub must earn 0 execution progress, got {result.ran_ok}"
+    assert result.ran_ok == 0, f"an empty-output stub must not count as ran_ok, got {result.ran_ok}"
 
 
 def test_backend_outage_counts_infra_errors():
@@ -295,7 +293,9 @@ def test_rating_bounds_drop_unrated_problems():
 # Environment: reset → grade → reward
 
 
-def test_env_reset_parses_payload_and_reward_is_fraction():
+def test_env_reset_parses_payload_and_grades_the_judges_accept():
+    """The objective is the judge's accept: a submission passing half the tests scores like a wrong one,
+    and only one passing every test earns the objective."""
     env = CodeContestsEnvironment(language="python", output_comparison="tokens")
     answer = {"tests": _ADD_TESTS, "checker": None, "time_limit": 2.0}
     traj = env._reset_single("Print a+b.", {"answer": answer})
@@ -304,16 +304,21 @@ def test_env_reset_parses_payload_and_reward_is_fraction():
     assert traj.info["_checker"] is None
 
     half_right = "a=int(input()); b=int(input()); print(a+b if a==2 else a*b)"
-    passed, total, *_ = env._grade_submission(half_right, traj)
-    assert (passed, total) == (1, 2)
-
-    traj.info["tests_passed"] = passed
-    traj.info["tests_total"] = total
-    traj.info["submission_result"] = "Passed 1/2 test cases."
-    traj.info["completed"] = True
-    env._settle_grade(traj, None)
-    assert traj.info[REWARD_COMPONENTS_KEY][OBJECTIVE_REWARD_KEY] == pytest.approx(0.5)
-    assert traj.total_reward == pytest.approx(0.5)
+    for code, (passed, objective) in ((half_right, (1, 0.0)), (_CORRECT_ADD, (2, 1.0))):
+        graded = env._reset_single("Print a+b.", {"answer": answer})
+        grade = env._grade_submission(code, graded)
+        assert (grade.passed, grade.total) == (passed, 2)
+        graded.info.update(
+            tests_passed=grade.passed,
+            tests_total=grade.total,
+            tests_graded=grade.graded,
+            submission_result=grade.details,
+            completed=True,
+        )
+        env._settle_grade(graded, None)
+        assert graded.info[REWARD_COMPONENTS_KEY][OBJECTIVE_REWARD_KEY] == objective
+        assert graded.total_reward == pytest.approx(objective)
+        assert not graded.episode_invalid
 
 
 def test_env_reset_reads_a_bare_list_of_tests_from_json():
@@ -345,27 +350,6 @@ def test_env_reset_refuses_an_answer_that_holds_no_test_set(answer):
     with pytest.raises(ValueError, match="'answer'"):
         env.reset(["Print a+b."], [{"answer": answer}])
     assert env._trajectories == {}
-
-
-def test_environment_term_exponent_makes_partial_credit_convex():
-    """With the environment term's exponent above 1 a half-right submission earns well under half a
-    solve, while a full pass and a zero pass are unchanged — the exponent reshapes partial credit only."""
-
-    def graded(env, passed, total):
-        traj = env._reset_single("Print a+b.", {"answer": {"tests": _ADD_TESTS, "checker": None}})
-        traj.info.update(tests_passed=passed, tests_total=total, submission_result="graded", completed=True)
-        env._settle_grade(traj, None)
-        return traj.info[REWARD_COMPONENTS_KEY][OBJECTIVE_REWARD_KEY]
-
-    convex = CodeContestsEnvironment(language="python", reward_terms=[{"source": "environment", "exponent": 2.0}])
-    linear = CodeContestsEnvironment(language="python")
-    assert graded(convex, 1, 2) == pytest.approx(0.25)
-    assert graded(linear, 1, 2) == pytest.approx(0.5)
-    assert graded(convex, 2, 2) == pytest.approx(graded(linear, 2, 2)) == pytest.approx(1.0)
-    assert graded(convex, 0, 2) == pytest.approx(graded(linear, 0, 2)) == pytest.approx(0.0)
-    for bad in (0.0, -1.0, float("inf")):
-        with pytest.raises(ValueError, match="exponent"):
-            CodeContestsEnvironment(language="python", reward_terms=[{"source": "environment", "exponent": bad}])
 
 
 def test_python_test_tool_runs_complete_program_with_imports():
@@ -447,9 +431,9 @@ def test_passing_submit_truncated_at_max_turns_still_rewarded():
     submit_solution is a tool call, so it does not end the episode; if the model submits on its final
     turn it is truncated at max_turns with ``completed`` unset. Gating the reward on ``completed``
     scores a fully passing submission at the tool bonus alone (0.2). A correct solution must score the
-    full pass fraction regardless — otherwise training punishes models that solve a problem while
-    still using tools. (``max_submissions=2`` so the
-    submit does not end the episode via the submission cap; max_turns truncation is what ends it here.)
+    full objective regardless — otherwise training punishes models that solve a problem while still
+    using tools. (``max_submissions=2`` so the submit does not end the episode via the submission cap;
+    max_turns truncation is what ends it here.)
     """
     env = CodeContestsEnvironment(max_turns=1, language="python", output_comparison="tokens", max_submissions=2)
     ctx = {"answer": {"tests": _ADD_TESTS, "checker": None, "time_limit": 2.0}}
@@ -466,7 +450,7 @@ def test_passing_submit_truncated_at_max_turns_still_rewarded():
     assert traj.done and traj.truncated
     assert not traj.info.get("completed")
     assert traj.info["tests_passed"] == 2 and traj.info["tests_total"] == 2
-    assert traj.total_reward == pytest.approx(1.0)  # pure pass fraction, not a partial/0 score
+    assert traj.total_reward == pytest.approx(1.0)  # the full objective, not a partial/0 score
 
 
 def _submit_call(cid, code):

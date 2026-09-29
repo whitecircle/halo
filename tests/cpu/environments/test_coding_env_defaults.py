@@ -243,13 +243,14 @@ _INPUT_AS_OUTPUT_SIZE = "import sys\nprint('x' * (10 + ord(sys.stdin.read()[0]))
         (_ECHO_TO_STDERR_WRONG, "HIDDEN-4217", "HIDDEN-4217", "Test 1: FAIL"),
         (_ECHO_TO_STDERR_CRASH, "HIDDEN-4217", "HIDDEN-4217", "Test 1: RUNTIME ERROR"),
         (_INPUT_AS_EXIT_CODE, "S", "exit 83", "Test 1: RUNTIME ERROR"),
-        (_INPUT_AS_OUTPUT_SIZE, "S", "94", "Test 1: OUTPUT LIMIT EXCEEDED (> 10 bytes)"),
+        (_INPUT_AS_OUTPUT_SIZE, "S", "94", "Test 1: OUTPUT LIMIT EXCEEDED"),
     ],
     ids=["stderr-on-a-wrong-answer", "stderr-on-a-crash", "exit-code", "output-size"],
 )
 def test_a_graded_program_cannot_read_a_hidden_input_back_by_default(program, hidden_input, leak, verdict):
     """Under ``outcome`` a submission learns its verdict class, never what it wrote itself: stderr,
-    an exit code and an output size each carry the input it read, and ``full`` shows them."""
+    an exit code and an output size each carry the input it read, and ``full`` shows them. The cap an
+    overrun passed stays hidden too, since it follows the expected output's size."""
     tests = [{"input": hidden_input, "output": "right"}]
     sandbox = LocalSubprocessSandbox()
     full = run_solution_against_tests(program, tests, sandbox=sandbox, max_output_size=10, verdict_detail="full")
@@ -272,7 +273,9 @@ def test_a_remote_error_shows_its_class_alone_by_default(body, caplog):
     remote = RemoteSandbox("http://sandbox:8080", session=RecordingSandboxSession(body))
     tests = [{"input": "", "output": "right"}]
     outcome = run_solution_against_tests("code", tests, sandbox=remote, language="cpp")
-    assert outcome.details.splitlines()[1:] == ["Test 1: ERROR -- grading infrastructure failure"], outcome.details
+    assert outcome.details.splitlines()[1:] == ["Test 1: ERROR -- grading infrastructure failure, not your program"], (
+        outcome.details
+    )
     assert "HIDDEN-4217" in caplog.text
     full = run_solution_against_tests("code", tests, sandbox=remote, language="cpp", verdict_detail="full")
     assert "HIDDEN-4217" in full.details
@@ -297,7 +300,9 @@ def test_a_checker_outage_shows_its_class_alone_by_default(caplog):
     spec = GradingSpec(sandbox=_CheckerOutage())
     tests = [{"input": "", "output": "HIDDEN-4217"}]
     outcome = grade_solution("print(7)", tests, spec, checker="# judge")
-    assert outcome.details.splitlines()[1:] == ["Test 1: ERROR -- grading infrastructure failure"], outcome.details
+    assert outcome.details.splitlines()[1:] == ["Test 1: ERROR -- grading infrastructure failure, not your program"], (
+        outcome.details
+    )
     assert outcome.infra_errors == 1 and "HIDDEN-4217" in caplog.text
     full = grade_solution(
         "print(7)", tests, GradingSpec(sandbox=_CheckerOutage(), verdict_detail="full"), checker="# judge"

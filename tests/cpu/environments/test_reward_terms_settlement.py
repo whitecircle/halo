@@ -114,12 +114,24 @@ def test_components_sum_to_the_reward_and_price_the_objective():
     assert env.rollout_metrics(traj)[OBJECTIVE_REWARD_KEY] == 2.0
 
 
-def test_code_contests_exponent_is_the_terms_not_the_environments():
-    env = CodeContestsEnvironment(language="python", reward_terms=[{"source": "environment", "exponent": 2.0}])
+@pytest.mark.parametrize(("passed", "priced"), [(4, 2.0), (2, 0.0)])
+def test_code_contests_grade_is_priced_by_the_term_not_the_environment(passed, priced):
+    """The environment hands the term its all-or-nothing grade; the term's weight prices it, and a convex
+    exponent cannot turn a half pass into credit (a pass fraction priced at exponent 2 would pay 0.5)."""
+    env = CodeContestsEnvironment(
+        language="python", reward_terms=[{"source": "environment", "weight": 2.0, "exponent": 2.0}]
+    )
     traj = env._reset_single("Print a+b.", {"answer": {"tests": [{"input": "1\n2\n", "output": "3"}]}})
-    traj.info.update(submission_result="graded", tests_total=4, tests_passed=2, tests_ran_ok=4, tests_infra_errors=0)
+    traj.info.update(
+        submission_result="graded",
+        tests_total=4,
+        tests_passed=passed,
+        tests_graded=4,
+        tests_ran_ok=4,
+        tests_infra_errors=0,
+    )
     env._settle_grade(traj, None)
-    assert traj.info[REWARD_COMPONENTS_KEY][OBJECTIVE_REWARD_KEY] == pytest.approx(0.25)
+    assert traj.info[REWARD_COMPONENTS_KEY][OBJECTIVE_REWARD_KEY] == pytest.approx(priced)
     with pytest.raises(TypeError, match="pass_fraction_exponent"):
         CodeContestsEnvironment(language="python", pass_fraction_exponent=2.0)
 

@@ -88,10 +88,12 @@ def test_each_program_runs_and_is_graded_in_the_language_its_call_named():
     py, cpp = [ids[0]], [ids[1]]
     env.step(py, [""], [{"tool_calls": [_call("t", "run_code", code=_PY_ADD, language="python")]}])
     env.step(py, [""], [{"tool_calls": [_call("p", "submit_solution", code=_PY_ADD, language="python")]}])
+    env.step(cpp, [""], [{"tool_calls": [_call("u", "run_code", code=_CPP_ADD, language="cpp")]}])
     env.step(cpp, [""], [{"tool_calls": [_call("c", "submit_solution", code=_CPP_ADD, language="cpp")]}])
 
-    # scratchpad (python, repl timeout), python grade (floored at 5 s), cpp grade (the stated 1 s limit)
-    assert sandbox.runs == [("python", 15.0), ("python", 5.0), ("cpp", 1.0)]
+    # Each scratchpad run is held to the limit its language is graded at: python floored at 5 s, cpp
+    # at the stated 1 s.
+    assert sandbox.runs == [("python", 5.0), ("python", 5.0), ("cpp", 1.0), ("cpp", 1.0)]
     tp, tc = env.get_trajectories(py)[0], env.get_trajectories(cpp)[0]
     assert tp.info["submission_language"] == "python" and tc.info["submission_language"] == "cpp"
     assert tp.info[EPISODE_SLICES_KEY] == {"language": "python"}

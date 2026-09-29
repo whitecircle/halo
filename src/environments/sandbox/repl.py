@@ -12,16 +12,26 @@ from src.environments.sandbox.base import (
     SandboxResult,
     SandboxSession,
     repl_timeout_message,
+    signal_description,
+    stderr_head,
+    stderr_tail,
 )
+
+# Characters of compiler diagnostics / runtime stderr a REPL reply carries: enough for the first
+# errors of a compile or the frames of a traceback, bounded so the reply leaves room for stdout.
+REPL_STDERR_EXCERPT_CHARS = 2000
 
 
 def format_sandbox_repl_output(result: SandboxResult, timeout: float) -> str:
-    """Render a :class:`SandboxResult` as a REPL-style string matching the in-process sandbox.
+    """Render a :class:`SandboxResult` as the scratchpad reply the model reads.
 
     Program-level outcomes (timeout, non-zero exit, compile error) are verdicts on the submitted code
-    and render as strings. A backend/transport failure (``result.error``) instead raises
-    :class:`SandboxInfraError`, and a sandbox the program broke (``result.agent_fault``) raises
-    :class:`SandboxAgentFault`: the tool layer tells the two apart by type, never by the text.
+    and render as strings. A failure leads with its error — a compile error with the compiler's first
+    diagnostics, a crash with the signal and the tail of stderr — and the program's stdout follows,
+    so an observation cut from the end keeps the error. A backend/transport failure (``result.error``)
+    is NOT a verdict: it raises :class:`SandboxInfraError`, and a sandbox the program broke
+    (``result.agent_fault``) raises :class:`SandboxAgentFault`; the tool layer tells the two apart by
+    type, never by the text.
     """
     if result.agent_fault:
         raise SandboxAgentFault(result.agent_fault)
@@ -31,14 +41,18 @@ def format_sandbox_repl_output(result: SandboxResult, timeout: float) -> str:
     if result.error:
         raise SandboxInfraError(f"sandbox backend failure: {result.error}")
     if result.compile_failed:
-        detail = result.stderr.strip()
-        return f"Error: {detail.splitlines()[-1]}" if detail else "Error: compilation failed"
+        diagnostics = stderr_head(result.stderr, REPL_STDERR_EXCERPT_CHARS)
+        return "Error: compilation failed" + (f"\n{diagnostics}" if diagnostics else "")
 
     stdout = result.stdout.rstrip("\n")
     if result.returncode not in (0, None):
-        detail = result.stderr.strip()
-        tail = detail.splitlines()[-1] if detail else f"process exited with code {result.returncode}"
-        return f"{stdout}\nError: {tail}" if stdout else f"Error: {tail}"
+        stderr = stderr_tail(result.stderr, REPL_STDERR_EXCERPT_CHARS)
+        killed = signal_description(result.returncode)
+        if killed:
+            error = f"{killed}\n{stderr}" if stderr else killed
+        else:
+            error = stderr or f"process exited with code {result.returncode}"
+        return f"Error: {error}\nOutput:\n{stdout}" if stdout else f"Error: {error}"
     return stdout if stdout else REPL_NO_OUTPUT_MESSAGE
 
 
