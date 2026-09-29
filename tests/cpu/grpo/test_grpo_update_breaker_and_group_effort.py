@@ -81,8 +81,9 @@ def test_breaker_inert_below_threshold():
 
 
 def test_breaker_partial_token_masking_is_not_a_masked_trajectory():
-    # A trajectory with ANY surviving corrected token is not fully masked (token-band masks tokens,
-    # not trajectories) — it must not count toward the breaker fraction.
+    # A trajectory with ANY surviving corrected token is not fully masked (a per-token zero such as
+    # ``zero_engine_forced_closes`` masks tokens, not trajectories) — it must not count toward the
+    # breaker fraction.
     breaker, host = _breaker_host(0.5)
     ratio, corr, ids, _adv = _masked_batch([False, False])
     ratio[0, :3] = 0.0  # 3 of 4 tokens masked, 1 survives

@@ -26,7 +26,6 @@ from src.distributed.nccl.registry import resolve_weight_sync_client
 from src.distributed.runtime import is_multi_rank_run
 from src.environments.base import (
     EPISODE_INVALID_REASON_KEY,
-    OBJECTIVE_REWARD_KEY,
     VALID_REASONING_EFFORTS,
     BaseEnvironment,
     resolve_reasoning_effort,
@@ -65,6 +64,7 @@ from src.trainers.grpo.objective.logratio import (
     clamp_ref_logps,
     compute_is_ratio,
     select_mask_logratio,
+    zero_engine_forced_closes,
 )
 from src.trainers.grpo.rollout.async_rollouts import AsyncRolloutMixin
 from src.trainers.grpo.rollout.completions_logging import log_with_decoupled_completions, unbounded_completion_logs
@@ -295,6 +295,7 @@ class DistributedAsyncEnvironmentalGRPOTrainer(
         self._train_on_sampled_tokens = self.async_config.train_on_sampled_tokens
         self._rollout_backend = self.async_config.rollout_backend
         self._rollout_template_kwargs = self.async_config.rollout_template_variables()
+        self._forced_close_token_id = self._resolve_forced_close_token_id()
         self._max_train_row_tokens = self.async_config.max_train_row_tokens
         self._rows_over_cap = 0
         self._warned_capture_missing = False
@@ -314,13 +315,8 @@ class DistributedAsyncEnvironmentalGRPOTrainer(
         # Keys of the once-per-run warnings already issued (warn_once; the tokenize mixin's reasoning check).
         self._warned_once: set[str] = set()
 
-        # Advantage surgery: built eagerly to validate the knobs, applied only when != "mean".
-        self._advantage_shaping = self.async_config.build_advantage_shaping()
-
         # Mask/veto stages on the vLLM->trainer IS ratio (all default off). Built eagerly to validate bounds.
         self._is_mask_config = ISMaskConfig(
-            band_min=self.async_config.isr_band_min,
-            band_max=self.async_config.isr_band_max,
             geo_band_min=self.async_config.isr_geo_band_min,
             geo_band_max=self.async_config.isr_geo_band_max,
             veto_min=self.async_config.isr_veto_min,
@@ -346,11 +342,12 @@ class DistributedAsyncEnvironmentalGRPOTrainer(
                 "are at least one weight-sync stale. Set train_on_sampled_tokens: true (the server "
                 "needs --return-tokens-as-token-ids), or set the correction to false deliberately."
             )
+        self._require_forced_close_neutralised()
         if (self._is_mask_config.any_mask_active or self._is_mask_config.opsm_delta is not None) and not (
             self._is_correction
         ):
             raise ValueError(
-                "isr_band/isr_geo_band/isr_veto/isr_opsm knobs require the vLLM importance-sampling "
+                "isr_geo_band/isr_veto/isr_opsm knobs require the vLLM importance-sampling "
                 "correction (train_on_sampled_tokens + vllm_importance_sampling_correction) — "
                 "without it they would silently do nothing."
             )
@@ -360,7 +357,7 @@ class DistributedAsyncEnvironmentalGRPOTrainer(
         ):
             raise ValueError(
                 "skip_update_masked_frac requires the vLLM importance-sampling correction AND at "
-                "least one IS mask stage (isr_band/isr_geo_band/isr_veto/isr_opsm) — without them no "
+                "least one IS mask stage (isr_geo_band/isr_veto/isr_opsm) — without them no "
                 "trajectory is ever masked and the circuit breaker would silently never fire."
             )
         self._isr_engine_reference = self.async_config.isr_engine_reference
@@ -577,6 +574,41 @@ class DistributedAsyncEnvironmentalGRPOTrainer(
         if self.async_config.rollout_thinking_budget_scope != THINKING_SCOPE_EPISODE:
             return None
         return resolve_reasoning_end_token_id(self._tokenizer, self.async_config.rollout_reasoning_end_token)
+
+    def _require_forced_close_neutralised(self) -> None:
+        """Forced reasoning closes are neutralised through the IS ratio, which only reaches the loss under the
+        importance-sampling correction; without it they would train with the episode's advantage and teach the
+        model to stop closing its reasoning."""
+        if self._forced_close_token_id is not None and not self._is_correction:
+            raise ValueError(
+                "a vLLM thinking budget is enforced but the importance-sampling correction is off "
+                "(train_on_sampled_tokens + vllm_importance_sampling_correction): the reasoning closes the "
+                "engine forces at the budget would train with the episode's advantage."
+            )
+
+    def _resolve_forced_close_token_id(self) -> int | None:
+        """The reasoning-end token the engine forces when a turn reaches its thinking budget, whose forced
+        occurrences the loss must not train on; ``None`` when no budget is enforced (SGLang enforces none).
+
+        The episode scope already requires the marker. Under the per-turn scope a tokenizer without it (a
+        family whose reasoning ends in another token) keeps its forced closes in the loss, said loudly."""
+        cfg = self.async_config
+        budgeted = cfg.rollout_max_thinking_tokens is not None or any(
+            self._rollout_env.thinking_budget_for_effort(level) for level in VALID_REASONING_EFFORTS
+        )
+        if cfg.rollout_backend == SGLANG_BACKEND or not budgeted:
+            return None
+        try:
+            return resolve_reasoning_end_token_id(self._tokenizer, cfg.rollout_reasoning_end_token)
+        except ValueError:
+            if cfg.rollout_thinking_budget_scope == THINKING_SCOPE_EPISODE:
+                raise
+            logger.warning(
+                "rollout_reasoning_end_token %r is not a token of this tokenizer: reasoning closes the engine forces "
+                "at the thinking budget stay in the policy loss. Set rollout_reasoning_end_token to the model's marker.",
+                cfg.rollout_reasoning_end_token,
+            )
+            return None
 
     def _resolve_rollout_stop_token_ids(self) -> list[int] | None:
         """Resolve rollout_stop_tokens (special-token strings) to ids via the tokenizer.
@@ -811,24 +843,26 @@ class DistributedAsyncEnvironmentalGRPOTrainer(
         all_tool_masks = []
         all_sampling_logps: list[torch.Tensor | None] = []
         all_turn_routing: list[TurnRouting | None] = []
+        all_negative_only: list[bool] = []
 
         # train_on_sampled_tokens splits a trajectory per assistant turn; turns_per_traj expands the advantage.
         turns_per_traj = []
         for turn_rows in self._tokenize_step_rows(rollout_results):
             turns_per_traj.append(len(turn_rows))
-            for prompt_ids, completion_ids, completion_mask, sampling_logps, turn_routing in turn_rows:
+            for row in turn_rows:
                 # ``completion_mask`` is attention-valid (env/tool tokens conditioned sampling), ``tool_mask``
                 # is the loss mask; conflating them hides tool output from attention. Bool: [rows, max_len] sink.
-                loss_mask = completion_mask.to(device=device, dtype=torch.bool)
+                loss_mask = row.completion_mask.to(device=device, dtype=torch.bool)
                 # A fully-masked row (errored/empty rollout) stays invisible to attention too.
                 attention_valid = torch.ones_like(loss_mask) if loss_mask.any() else loss_mask
-                all_prompt_ids.append(prompt_ids.to(device))
-                all_completion_ids.append(completion_ids.to(device))
-                all_prompt_masks.append(torch.ones_like(prompt_ids, dtype=torch.bool, device=device))
+                all_prompt_ids.append(row.prompt_ids.to(device))
+                all_completion_ids.append(row.completion_ids.to(device))
+                all_prompt_masks.append(torch.ones_like(row.prompt_ids, dtype=torch.bool, device=device))
                 all_completion_masks.append(attention_valid)
                 all_tool_masks.append(loss_mask)
-                all_sampling_logps.append(sampling_logps.to(device) if sampling_logps is not None else None)
-                all_turn_routing.append(turn_routing)
+                all_sampling_logps.append(row.sampling_logps.to(device) if row.sampling_logps is not None else None)
+                all_turn_routing.append(row.turn_routing)
+                all_negative_only.append(row.negative_only)
 
         # Config-derived, so every rank agrees on taking the correction branches below.
         use_is_correction = self._is_correction
@@ -855,7 +889,7 @@ class DistributedAsyncEnvironmentalGRPOTrainer(
             chunks = self.args.steps_per_generation
             target_rows = math.ceil(int(global_rows.item()) / chunks) * chunks
             num_dummy_rows = target_rows - len(all_prompt_ids)
-            # The inert row the tokenize path returns for an untrainable trajectory: one attended
+            # The inert row the tokenize path returns for a trajectory with nothing to train: one attended
             # prompt token (no NaN), a fully masked completion (zero loss).
             inert_prompt, inert_completion, inert_mask = (t.to(device) for t in self._masked_trajectory_tensors())
             inert_mask = inert_mask.bool()
@@ -867,6 +901,7 @@ class DistributedAsyncEnvironmentalGRPOTrainer(
                 all_tool_masks.append(inert_mask)
                 all_sampling_logps.append(None)  # zeros below; row_has_sampling masks them
                 all_turn_routing.append(None)  # dummy rows keep natural routing (-1 sentinel)
+                all_negative_only.append(False)
                 row_has_sampling.append(False)
                 if all_engine_logps is not None:
                     all_engine_logps.append(None)
@@ -913,6 +948,16 @@ class DistributedAsyncEnvironmentalGRPOTrainer(
                 device,
                 all_engine_logps,
             )
+            if use_is_correction and self._forced_close_token_id is not None:
+                importance_sampling_ratio, forced = zero_engine_forced_closes(
+                    importance_sampling_ratio,
+                    pad(all_sampling_logps, padding_value=0, padding_side="right"),
+                    completion_mask,
+                    torch.tensor(row_has_sampling, device=device),
+                    completion_ids,
+                    self._forced_close_token_id,
+                )
+                self._world_metrics.fraction("sampling/forced_close_frac", forced.sum(), completion_mask.sum())
 
             ref_per_token_logps = self._compute_ref_logps(prompt_completion_ids, attention_mask, logits_to_keep)
             if ref_per_token_logps is not None and recompute_logps is not None:
@@ -921,19 +966,7 @@ class DistributedAsyncEnvironmentalGRPOTrainer(
 
         num_generations = self.num_generations if mode == "train" else self.num_generations_eval
         valid_mask = rollout_valid_mask(rollout_results, device)
-        gate_rewards = None
-        if self._advantage_shaping is not None:
-            gate_rewards = torch.tensor(
-                [
-                    r.metrics.get(OBJECTIVE_REWARD_KEY, r.total_reward) if r.metrics else r.total_reward
-                    for r in rollout_results
-                ],
-                device=device,
-                dtype=rewards.dtype,
-            )
-        traj_advantages = self._compute_advantages(
-            rewards, num_generations, valid_mask=valid_mask, gate_rewards=gate_rewards
-        )
+        traj_advantages = self._compute_advantages(rewards, num_generations, valid_mask=valid_mask)
         local_advantages = rows.to_rows(traj_advantages)
         # OPSM masks only negative-advantage trajectories, so it must run after the advantages exist.
         if self._is_mask_config.opsm_delta is not None and corrected_mask is not None:
@@ -950,7 +983,15 @@ class DistributedAsyncEnvironmentalGRPOTrainer(
         gathered_valid = gather(valid_mask)
 
         completion_mask, tool_mask, loss_mask, num_items_in_batch = self._narrow_masks_and_normalizer(
-            rows, rewards, valid_mask, num_generations, completion_mask, tool_mask, device, mode
+            rows,
+            valid_mask,
+            num_generations,
+            completion_mask,
+            tool_mask,
+            local_advantages,
+            torch.tensor(all_negative_only, device=device, dtype=torch.bool),
+            device,
+            mode,
         )
 
         self._log_headline_rewards(gathered_rewards, gathered_valid, mode)
@@ -1043,10 +1084,11 @@ class DistributedAsyncEnvironmentalGRPOTrainer(
         The gate is config- and mode-derived, so the uniform raise it wraps is reached by every rank
         or by none; the assembly's own failures are recorded for that raise, never thrown here.
 
-        A batch carrying no engine routing is a capture failure only when ``tool_mask`` (the loss
-        mask) still has a trainable token. All-masked means every assistant turn was excluded as
-        unusable (:meth:`_tokenize_trajectory_turns`), leaving no selection to replay; that step is a
-        no-op, as it is in every other mode.
+        A batch carrying no engine routing is a capture failure only when ``tool_mask`` — the loss
+        mask, read before the advantage-dependent narrowing, so a negative-only row counts — still has
+        a trainable token. All-masked means every assistant turn yielded no row
+        (:meth:`_tokenize_trajectory_turns`: no ids, zero tokens, over the row cap): there is no
+        selection to replay, and every other mode trains that step as a no-op rather than ending the run.
         """
         rollout_routing_masks = None
         if self._rollout_routing_replay and mode == "train":
@@ -1055,7 +1097,7 @@ class DistributedAsyncEnvironmentalGRPOTrainer(
                 if not tool_mask.any():
                     logger.warning(
                         "routing_replay='rollout': nothing to replay this step — every training row is "
-                        "masked (each assistant turn was excluded as unusable), so the step contributes "
+                        "masked (no assistant turn yielded a row), so the step contributes "
                         "no gradient."
                     )
                 elif self._batch_build_error is None:
@@ -1288,30 +1330,37 @@ class DistributedAsyncEnvironmentalGRPOTrainer(
     def _narrow_masks_and_normalizer(
         self,
         rows: BatchRows,
-        rewards: torch.Tensor,
         valid_mask: torch.Tensor,
         num_generations: int,
         completion_mask: torch.Tensor,
         tool_mask: torch.Tensor,
+        advantages: torch.Tensor,
+        negative_only: torch.Tensor,
         device: torch.device,
         mode: str,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         """Mask this step's excluded trajectories out of both loss masks and take the DAPO normalizer.
 
-        Returns ``(completion_mask, tool_mask, loss_mask, num_items_in_batch)``. The drop set is
-        train-mode only; the empty-step check inside it and the normalizer gather below it are
-        world-wide, so mode — never a local row count — decides who reaches them.
+        Returns ``(completion_mask, tool_mask, loss_mask, num_items_in_batch)``. A ``negative_only``
+        row (an untrainable turn, per-row like ``advantages``) leaves ``tool_mask`` unless its
+        advantage is negative, in either mode: the objective penalizes the turn, never rewards it. The
+        drop set is train-mode only; the empty-step check inside it and the normalizer gather below it
+        are world-wide, so mode — never a local row count — decides who reaches them.
         """
+        world = self._world_metrics
+        (tool_mask,) = narrow_loss_masks(negative_only & (advantages >= 0), tool_mask)
         # Masking, not deleting: excluded rows still run the forward so every rank's collective sequence matches.
         if mode == "train":
             # An env-invalid episode's forced failure-reward advantage is noise, so its tokens go too.
             drop_traj = ~valid_mask
-            world = self._world_metrics
             world.fraction("sampling/invalid_episode_frac", drop_traj.sum(), drop_traj.numel())
             self._check_step_has_valid_episodes(rows.rollout_results, valid_mask)
 
             if self.drop_degenerate_groups:
-                degenerate = degenerate_group_mask(rewards, num_generations, valid_mask=valid_mask)
+                # Judged on the environment's reward: the trainer's length terms price every episode
+                # differently, so no group would ever tie on the total it trains on.
+                env_rewards = torch.tensor([r.total_reward for r in rows.rollout_results], device=device)
+                degenerate = degenerate_group_mask(env_rewards, num_generations, valid_mask=valid_mask)
                 drop_traj |= degenerate
                 world.fraction(DEGENERATE_GROUP_FRAC_KEY, degenerate.sum(), degenerate.numel())
 
@@ -1327,6 +1376,10 @@ class DistributedAsyncEnvironmentalGRPOTrainer(
                 # TRL parity: tool_mask narrows with completion_mask, so the normalizer never counts them.
                 completion_mask, tool_mask = narrow_loss_masks(rows.to_rows(drop_traj), completion_mask, tool_mask)
 
+        world.fraction("sampling/untrainable_rows_frac", negative_only.sum(), sum(rows.turns_per_traj))
+        # After every drop: a kept row is one whose tokens reach the normalizer below.
+        kept = negative_only & tool_mask.any(dim=1)
+        world.fraction("sampling/untrainable_rows_trained_frac", kept.sum(), negative_only.sum())
         # DAPO normalizes by the gathered-global loss-token count / num_processes; a local count mis-scales.
         loss_mask = effective_loss_mask({"completion_mask": completion_mask, "tool_mask": tool_mask})
         num_items_in_batch = gathered_num_items(loss_mask, self.accelerator.gather)
@@ -1559,17 +1612,13 @@ class DistributedAsyncEnvironmentalGRPOTrainer(
         rewards: torch.Tensor,
         num_generations: int,
         valid_mask: torch.Tensor | None = None,
-        gate_rewards: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        """GRPO group-relative advantages. ``gate_rewards`` is the env's objective reward component
-        per trajectory (shaping excluded) — the regime gate for the ``neg_mask_hard`` advantage surgery."""
+        """GRPO group-relative advantages of each trajectory's total reward, shaping included."""
         return group_relative_advantages(
             rewards,
             num_generations,
             self.args.scale_rewards,
             valid_mask=valid_mask,
-            shaping=self._advantage_shaping,
-            gate_rewards=gate_rewards,
             std_floor=self._scale_rewards_std_floor,
         )
 

@@ -144,15 +144,16 @@ def test_online_drop_disabled_is_noop():
 # --- Environmental trainer: the REAL _narrow_masks_and_normalizer on a fake self ---
 
 
-def _rollouts(truncated: list[bool], valid: list[bool] | None = None):
+def _rollouts(truncated: list[bool], rewards: list[float], valid: list[bool] | None = None):
     """Rollout stand-ins exposing exactly what the narrow phase reads off them."""
     valid = [True] * len(truncated) if valid is None else valid
     return [
         types.SimpleNamespace(
             trajectory=types.SimpleNamespace(truncated=t, episode_invalid=not v),
             error=None,
+            total_reward=r,
         )
-        for t, v in zip(truncated, valid, strict=True)
+        for t, r, v in zip(truncated, rewards, valid, strict=True)
     ]
 
 
@@ -170,14 +171,16 @@ def _env_application(
     drop_degenerate_groups: bool,
     mask_truncated_completions: bool,
     valid: list[bool] | None = None,
+    negative_only: torch.Tensor | None = None,
+    mode: str = "train",
 ):
     """Drive the REAL ``_narrow_masks_and_normalizer`` (plus the caller's own row expansion) on a
     fake self, so the constants below pin production rather than a transcription of it.
 
-    Returns ``(local_advantages, completion_mask, tool_mask, num_items_in_batch, degenerate_frac)``;
-    ``gather`` is identity (single process).
+    Returns ``(local_advantages, completion_mask, tool_mask, num_items_in_batch, degenerate_frac, metrics)``;
+    ``gather`` is identity (single process). ``negative_only`` tags rows (default: none).
     """
-    rollout_results = _rollouts(truncated.tolist(), valid)
+    rollout_results = _rollouts(truncated.tolist(), rewards.tolist(), valid)
     rows = BatchRows(rollout_results, turns_per_traj, num_dummy_rows, train_on_sampled_tokens)
     me = attach_world_metrics(
         types.SimpleNamespace(
@@ -194,19 +197,23 @@ def _env_application(
     )
 
     local_advantages = rows.to_rows(traj_advantages)
+    if negative_only is None:
+        negative_only = torch.zeros(local_advantages.numel(), dtype=torch.bool)
     comp, tool, _loss_mask, num_items = DistributedAsyncEnvironmentalGRPOTrainer._narrow_masks_and_normalizer(
         me,
         rows,
-        rewards,
         rollout_valid_mask(rollout_results, rewards.device),
         num_generations,
         completion_mask,
         tool_mask,
+        local_advantages,
+        negative_only,
         rewards.device,
-        "train",
+        mode,
     )
-    fracs = flushed_metrics(me)["sampling/degenerate_group_frac"]
-    return local_advantages, comp, tool, num_items, (fracs[0] if fracs else None)
+    metrics = flushed_metrics(me, mode)
+    fracs = metrics["sampling/degenerate_group_frac"]
+    return local_advantages, comp, tool, num_items, (fracs[0] if fracs else None), metrics
 
 
 def _env_scenario():
@@ -228,7 +235,6 @@ def _env_compute_advantages(rewards, num_generations, valid_mask=None):
     """Drive the REAL env ``_compute_advantages`` (group_relative_advantages framing) on a fake self."""
     me = types.SimpleNamespace(
         args=types.SimpleNamespace(scale_rewards="none"),
-        _advantage_shaping=None,
         _scale_rewards_std_floor=0.0,
     )
     return DistributedAsyncEnvironmentalGRPOTrainer._compute_advantages(
@@ -244,7 +250,7 @@ def test_env_application_pins_advantages_masks_and_num_items():
     expected_traj = torch.tensor([1 / 3, -2 / 3, 1 / 3, 0.0, 0.0, 0.0])
     assert torch.allclose(traj_advantages, expected_traj, atol=1e-6)
 
-    adv, comp, tool, num_items, frac = _env_application(
+    adv, comp, tool, num_items, frac, _metrics = _env_application(
         traj_advantages,
         rewards,
         num_generations=3,
@@ -280,7 +286,7 @@ def test_env_application_all_dropped_clamps_num_items():
     traj_advantages = _env_compute_advantages(rewards, num_generations=3)
     assert torch.equal(traj_advantages, torch.zeros(3))
 
-    adv, comp, _tool, num_items, frac = _env_application(
+    adv, comp, _tool, num_items, frac, _metrics = _env_application(
         traj_advantages,
         rewards,
         num_generations=3,
@@ -306,7 +312,7 @@ def test_env_application_no_drops_keeps_masks_and_counts_loss_tokens():
 
     completion_mask = _mask_of_lengths([3, 2], max_len=4).bool()
     tool_mask = torch.ones(2, 4, dtype=torch.bool)
-    adv, comp, tool, num_items, frac = _env_application(
+    adv, comp, tool, num_items, frac, _metrics = _env_application(
         traj_advantages,
         rewards,
         num_generations=2,
@@ -337,7 +343,7 @@ def test_an_invalid_episode_is_dropped_and_excluded_from_degeneracy():
     rewards = torch.tensor([1.0, 1.0, 0.0])
     traj_advantages = _env_compute_advantages(rewards, num_generations=3, valid_mask=torch.tensor([True, True, False]))
 
-    _adv, comp, _tool, num_items, frac = _env_application(
+    _adv, comp, _tool, num_items, frac, _metrics = _env_application(
         traj_advantages,
         rewards,
         num_generations=3,
@@ -354,6 +360,80 @@ def test_an_invalid_episode_is_dropped_and_excluded_from_degeneracy():
     assert comp.sum() == 0, "the two tied valid members are degenerate; the invalid one is dropped outright"
     assert num_items.item() == 1
     assert frac == 1.0
+
+
+# --- negative-only rows (untrainable turns) train only under a negative advantage ---
+
+
+def _negative_only_application(rewards: list[float], mode: str = "train"):
+    """Two trajectories of one group, two rows each (an untagged row, then a tagged one) plus one dummy
+    row; row lengths [2, 3, 4, 5, 1]. Degenerate-group dropping is off so a zero advantage reaches
+    the narrowing itself."""
+    rewards = torch.tensor(rewards)
+    return _env_application(
+        _env_compute_advantages(rewards, num_generations=2),
+        rewards,
+        num_generations=2,
+        truncated=torch.zeros(2, dtype=torch.bool),
+        completion_mask=_mask_of_lengths([2, 3, 4, 5, 1], max_len=5).bool(),
+        tool_mask=_mask_of_lengths([2, 3, 4, 5, 1], max_len=5).bool(),
+        turns_per_traj=[2, 2],
+        num_dummy_rows=1,
+        train_on_sampled_tokens=True,
+        drop_degenerate_groups=False,
+        mask_truncated_completions=False,
+        negative_only=torch.tensor([False, True, False, True, False]),
+        mode=mode,
+    )
+
+
+@pytest.mark.parametrize("mode", ["train", "eval"])
+def test_a_negative_only_row_trains_under_a_negative_advantage_only(mode):
+    """Rewards [1, 0]: trajectory 0's tagged row (advantage +0.5) leaves the loss mask, trajectory 1's
+    (advantage -0.5) stays; untagged rows train either way, in both modes."""
+    adv, comp, tool, num_items, _frac, metrics = _negative_only_application([1.0, 0.0], mode)
+    assert adv.tolist() == [0.5, 0.5, -0.5, -0.5, 0.0]
+    assert tool.sum(dim=1).tolist() == [2, 0, 4, 5, 1]
+    assert torch.equal(comp, _mask_of_lengths([2, 3, 4, 5, 1], max_len=5).bool()), "attention stays valid"
+    assert metrics["sampling/untrainable_rows_frac"] == [0.5]
+    assert metrics["sampling/untrainable_rows_trained_frac"] == [0.5]
+
+
+def test_the_normalizer_counts_only_the_kept_negative_only_rows():
+    """The dropped row's 3 tokens are out of the DAPO normalizer, not only out of the loss: 2 + 4 + 5 + 1."""
+    *_, num_items, _frac, _metrics = _negative_only_application([1.0, 0.0])
+    assert num_items.item() == 12
+
+
+def test_a_zero_advantage_negative_only_row_does_not_train():
+    """Strictly negative: at a zero advantage (a tied group) both tagged rows leave the loss."""
+    _adv, _comp, tool, num_items, _frac, metrics = _negative_only_application([0.5, 0.5])
+    assert tool.sum(dim=1).tolist() == [2, 0, 4, 0, 1]
+    assert num_items.item() == 7
+    assert metrics["sampling/untrainable_rows_trained_frac"] == [0.0]
+
+
+def test_a_negative_only_row_of_a_dropped_episode_is_not_counted_as_trained():
+    """The trained share is read after every drop: an invalid episode's tagged row never reaches the loss
+    however negative its advantage."""
+    rewards = torch.tensor([1.0, 0.0])
+    _adv, _comp, tool, _num_items, _frac, metrics = _env_application(
+        torch.tensor([0.5, -0.5]),
+        rewards,
+        num_generations=2,
+        truncated=torch.zeros(2, dtype=torch.bool),
+        completion_mask=torch.ones(4, 3, dtype=torch.bool),
+        tool_mask=torch.ones(4, 3, dtype=torch.bool),
+        turns_per_traj=[2, 2],
+        num_dummy_rows=0,
+        train_on_sampled_tokens=True,
+        drop_degenerate_groups=False,
+        mask_truncated_completions=False,
+        valid=[True, False],
+        negative_only=torch.tensor([False, True, False, True]),
+    )
+    assert tool.sum(dim=1).tolist() == [3, 0, 0, 0]
+    assert metrics["sampling/untrainable_rows_trained_frac"] == [0.0]
 
 
 def test_shared_seam_traj_row_ids_dummy_fill():

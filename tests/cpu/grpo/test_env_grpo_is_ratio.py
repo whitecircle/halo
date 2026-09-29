@@ -8,7 +8,7 @@ silently removing the correction on any step containing one bad episode.
 import pytest
 import torch
 
-from src.trainers.grpo.objective.logratio import compute_is_ratio
+from src.trainers.grpo.objective.logratio import compute_is_ratio, zero_engine_forced_closes
 
 CLIP_MAX = 3.0
 
@@ -76,6 +76,21 @@ def test_ratio_is_truncated_at_clip_max():
     """A huge positive log-ratio is clamped so a negative-advantage term can't blow up."""
     ratio, _, _ = _run([[0.0]], [[-20.0]], [[1]], [True])
     assert ratio.item() == pytest.approx(CLIP_MAX)
+
+
+_END = 7
+
+
+def test_only_forced_reasoning_closes_lose_their_policy_gradient():
+    """A reasoning close the engine forced at the thinking budget (the end token at probability 1) gets ratio 0:
+    trained with the episode's advantage it moves the model's own close probability. A naturally certain token
+    of any other id, an unforced close, and a row without sampling logprobs all keep their ratio."""
+    sampling = torch.tensor([[-0.3, 0.0, 0.0, -0.4], [0.0, 0.0, 0.0, 0.0]])
+    ids = torch.tensor([[5, _END, 9, _END], [_END, 5, 5, 5]])
+    mask = torch.tensor([[1, 1, 1, 1], [1, 1, 1, 0]])
+    ratio, forced = zero_engine_forced_closes(torch.ones(2, 4), sampling, mask, torch.tensor([True, False]), ids, _END)
+    assert forced.tolist() == [[False, True, False, False], [False, False, False, False]]
+    assert ratio.tolist() == [[1.0, 0.0, 1.0, 1.0], [1.0, 1.0, 1.0, 1.0]]
 
 
 if __name__ == "__main__":

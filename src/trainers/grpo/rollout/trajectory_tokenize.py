@@ -23,19 +23,28 @@ from src.trainers.grpo.rollout.trajectory_spans import TemplateSpanError, locate
 
 logger = logging.getLogger(__name__)
 
+# Untrainable turns (``Message.untrainable``) that became no negative-only row, over all of them.
+UNTRAINABLE_TURNS_ROWLESS_FRAC_KEY = "sampling/untrainable_turns_rowless_frac"
+
 
 # Engine MoE routing for one turn: decoded mask + the prompt-token count it is aligned on.
 TurnRouting = tuple[torch.Tensor, int | None]
 
 
 class TurnRow(NamedTuple):
-    """One per-turn training row (tuple-compatible; the trajectory fallback builds it by splat)."""
+    """One per-turn training row (tuple-compatible; the trajectory fallback builds it by splat).
+
+    ``negative_only`` tags the row of an untrainable turn (:attr:`Message.untrainable`): built like
+    any other, it stays in the loss only when its trajectory's advantage is negative, so the turn
+    takes the failure signal and is never rewarded.
+    """
 
     prompt_ids: torch.Tensor
     completion_ids: torch.Tensor
     completion_mask: torch.Tensor
     sampling_logps: torch.Tensor | None
     turn_routing: TurnRouting | None
+    negative_only: bool = False
 
 
 def single_trajectory_row(tokenized: tuple[torch.Tensor, torch.Tensor, torch.Tensor]) -> list[TurnRow]:
@@ -160,7 +169,7 @@ class TrajectoryTokenizeMixin:
 
         Every trajectory that yields nothing trainable comes through here. A weighted row would
         reinforce, at that trajectory's advantage, either P(EOS | non-completion) or — when every
-        assistant turn was excluded as unusable — the fragment the exclusion suppresses.
+        assistant turn was excluded — a fragment no row may reward.
         """
         completion_token = self.eos_token_id if self.eos_token_id is not None else self.pad_token_id
         return (
@@ -189,7 +198,9 @@ class TrajectoryTokenizeMixin:
 
         Also the one reader of the row-cap tally: ``sampling/rows_over_cap_frac`` is the rows the cap
         left out over those plus the rows that train, each row counted once — an over-cap trajectory
-        comes back as a zero-weight placeholder, which is neither.
+        comes back as a zero-weight placeholder, which is neither. :data:`UNTRAINABLE_TURNS_ROWLESS_FRAC_KEY`
+        is the untrainable turns that became no negative-only row: no sampled ids to train (the
+        re-render path, or a turn the engine returned none for), a zero-token capture, or over the cap.
         """
         self._rows_over_cap = 0
         per_trajectory = [
@@ -198,6 +209,16 @@ class TrajectoryTokenizeMixin:
             else single_trajectory_row(self._tokenize_trajectory(result))
             for result in rollout_results
         ]
+        untrainable_turns = sum(
+            m.role == "assistant" and m.untrainable
+            for r in rollout_results
+            if r.trajectory
+            for m in r.trajectory.messages
+        )
+        tagged_rows = sum(row.negative_only for rows in per_trajectory for row in rows)
+        self._world_metrics.fraction(
+            UNTRAINABLE_TURNS_ROWLESS_FRAC_KEY, untrainable_turns - tagged_rows, untrainable_turns
+        )
         if self._max_train_row_tokens is not None:
             trainable_rows = sum(bool(row.completion_mask.any()) for rows in per_trajectory for row in rows)
             self._world_metrics.fraction(
@@ -212,8 +233,11 @@ class TrajectoryTokenizeMixin:
         the serving template emits; per-turn spans are located inside it
         (:func:`locate_assistant_spans`) rather than accumulated from independently rendered prefixes,
         which no non-monotone template reproduces. The returned mask is the loss mask (1 on the
-        trainable assistant spans, 0 on env-injected tokens and on the turns the per-turn path also
-        excludes), consumed as TRL's ``tool_mask``; ``_build_training_tensors`` derives the
+        trainable assistant spans, 0 on env-injected tokens and on untrainable turns), consumed as
+        TRL's ``tool_mask``. An untrainable turn trains only as a negative-only row of its sampled ids
+        (:meth:`_tokenize_trajectory_turns`): its re-render is not what the engine emitted — a cut
+        turn comes back closed by template tokens it never sampled, and penalizing those would teach
+        the model to stop closing. ``_build_training_tensors`` derives the
         attention-valid ``completion_mask`` (all real tokens) from it, so tool outputs stay visible to
         attention while contributing no loss.
         """
@@ -302,6 +326,10 @@ class TrajectoryTokenizeMixin:
           behavior-policy reference for the IS trust region. ``None`` when the turn has no aligned
           logprobs.
         * ``turn_routing`` — decoded engine routing plus its prompt-token count, else ``None``.
+        * ``negative_only`` — the turn is untrainable (:attr:`Message.untrainable`): the trainer keeps
+          the row in the loss only when the trajectory's advantage is negative. An episode whose every
+          assistant turn is untrainable trains on that condition alone; one that yields no row at all
+          (no ids, zero tokens, all over the cap) is a single masked row.
 
         Per turn, not concatenated: a template may drop prior-turn CoT, so splicing would score a later
         turn under a context it never saw. Rows share the trajectory's advantage; falls back to the single
@@ -314,9 +342,10 @@ class TrajectoryTokenizeMixin:
         messages = traj.messages
         if not any(m.role == "assistant" for m in messages):
             return single_trajectory_row(self._tokenize_trajectory(result))
-        # All-or-nothing over the turns that train: one trainable turn without captured ids falls the
-        # whole trajectory back rather than silently dropping that turn. ``is None`` — an empty
-        # capture is a zero-token turn, not a missing one.
+        # All-or-nothing over the always-trained turns: one without captured ids falls the whole
+        # trajectory back rather than silently dropping that turn. An untrainable turn without ids is
+        # left out instead (the re-render cannot train it either). ``is None`` — an empty capture is a
+        # zero-token turn, not a missing one.
         if any(m.token_ids is None for m in messages if m.role == "assistant" and not m.untrainable):
             if not self._warned_capture_missing:
                 self._warned_capture_missing = True
@@ -345,8 +374,8 @@ class TrajectoryTokenizeMixin:
             if m.role != "assistant":
                 continue
             # A zero-token turn has nothing to train either: rendering it would weight the template
-            # scaffolding the engine never emitted.
-            if m.untrainable or not m.token_ids:
+            # scaffolding the engine never emitted. An untrainable turn is built like any other, tagged.
+            if not m.token_ids:
                 excluded_unusable = True
                 continue
             # Engine prompt ids take priority: a client re-render drifts on effort steering, tool
@@ -363,6 +392,10 @@ class TrajectoryTokenizeMixin:
                         engine_view(messages[:idx], self._carry_reasoning), True, template_kwargs
                     )
                 except Exception as e:  # never a per-rank raise; the episode is dropped, the run goes on
+                    if m.untrainable:
+                        # Its row only ever adds a penalty; losing it costs no other turn its row.
+                        excluded_unusable = True
+                        continue
                     self._invalidate_untrainable_episode(
                         result,
                         f"per-turn re-render of the prompt prefix failed ({type(e).__name__}: {e}); the engine "
@@ -405,6 +438,7 @@ class TrajectoryTokenizeMixin:
                     completion_mask=torch.ones(len(comp), dtype=torch.long),
                     sampling_logps=sampling_logps,
                     turn_routing=turn_routing,
+                    negative_only=m.untrainable,
                 )
             )
 

@@ -5,7 +5,7 @@ Two loss terms are log-prob ratios with an unbounded tail one token can dominate
 :func:`clamp_ref_logps` (k3 KL estimator, capped at :data:`KL_LOGRATIO_CLAMP`).
 
 On top, :func:`apply_is_masks` and :func:`apply_opsm` add masking-over-reweighting stages for MoE-scale
-mismatch (token band, trajectory geometric-mean band, catastrophic-token veto, OPSM), all default off.
+mismatch (trajectory geometric-mean band, catastrophic-token veto, OPSM), all default off.
 A masked token/trajectory gets ratio 0 (policy-gradient term vanishes, DAPO normalizer unchanged); the
 β·k3 KL term is added after the ratio multiply, so masked tokens stay anchored to the reference.
 
@@ -25,6 +25,35 @@ KL_LOGRATIO_CLAMP = 5.0
 SAMPLER_CERTAIN_LOGPROB = 0.0
 """A sampling logprob of exactly 0 is a token the engine emitted with probability 1: a logits processor
 forced it (vLLM's thinking budget closing ``</think>``) or the nucleus collapsed onto it."""
+
+
+def sampler_certain_mask(
+    sampling_logps: torch.Tensor, completion_mask: torch.Tensor, row_has_sampling: torch.Tensor
+) -> torch.Tensor:
+    """Policy tokens the sampler emitted with probability 1 (:data:`SAMPLER_CERTAIN_LOGPROB`), on rows that
+    carry sampling logprobs: no sampling choice was made there, so they carry no importance weight."""
+    return completion_mask.bool() & row_has_sampling.unsqueeze(1) & (sampling_logps >= SAMPLER_CERTAIN_LOGPROB)
+
+
+def zero_engine_forced_closes(
+    ratio: torch.Tensor,
+    sampling_logps: torch.Tensor,
+    completion_mask: torch.Tensor,
+    row_has_sampling: torch.Tensor,
+    completion_ids: torch.Tensor,
+    reasoning_end_token_id: int,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Zero the ratio at reasoning closes the engine forced: the reasoning-end token at probability 1, which is
+    what vLLM's thinking budget emits when a turn reaches its cap. Returns ``(ratio, forced)``.
+
+    The close was not the policy's action; trained with the episode's advantage it moves the model's own
+    probability of ending its reasoning, which hundreds of forced closes per step can drive down until the
+    model stops closing at all. Ratio 0 drops the policy-gradient term and keeps the DAPO normalizer, like
+    every mask stage here; a naturally certain token (a collapsed nucleus) is left alone."""
+    forced = sampler_certain_mask(sampling_logps, completion_mask, row_has_sampling) & (
+        completion_ids == reasoning_end_token_id
+    )
+    return ratio.masked_fill(forced, 0.0), forced
 
 
 def clamp_ref_logps(ref_logps: torch.Tensor, policy_logps: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
@@ -56,7 +85,9 @@ def compute_is_ratio(
     Returns ``(ratio, logps_diff, corrected_mask)``, all shaped like ``completion_mask``.
     """
     corrected_mask = (
-        completion_mask.bool() & row_has_sampling.unsqueeze(1) & (sampling_logps < SAMPLER_CERTAIN_LOGPROB)
+        completion_mask.bool()
+        & row_has_sampling.unsqueeze(1)
+        & ~sampler_certain_mask(sampling_logps, completion_mask, row_has_sampling)
     )
     logps_diff = (recompute_logps - sampling_logps) * corrected_mask
     return torch.clamp(torch.exp(logps_diff), max=clip_max), logps_diff, corrected_mask
@@ -93,29 +124,23 @@ def select_mask_logratio(
 class ISMaskConfig:
     """Mask/veto stages layered on the truncated IS ratio (see module docstring). All default off.
 
-    * ``band_min``/``band_max`` — token band: mask a corrected token whose ratio falls outside it.
     * ``geo_band_min``/``geo_band_max`` — trajectory geometric-mean band: mask the whole trajectory when
       ``exp(mean log-ratio over its corrected tokens)`` leaves the band. Both bounds must be set.
     * ``veto_min`` — catastrophic-token veto: mask the trajectory when any corrected token's ratio is below it.
     * ``opsm_delta`` — see :func:`apply_opsm` (applied separately, once advantages exist).
     """
 
-    band_min: float | None = None
-    band_max: float | None = None
     geo_band_min: float | None = None
     geo_band_max: float | None = None
     veto_min: float | None = None
     opsm_delta: float | None = None
 
     def __post_init__(self):
-        for lo, hi, name in (
-            (self.band_min, self.band_max, "band"),
-            (self.geo_band_min, self.geo_band_max, "geo_band"),
-        ):
-            if (lo is None) != (hi is None):
-                raise ValueError(f"isr_{name}_min and isr_{name}_max must be set together")
-            if lo is not None and not 0 < lo < 1 < hi:
-                raise ValueError(f"isr_{name} bounds must satisfy 0 < min < 1 < max, got [{lo}, {hi}]")
+        lo, hi = self.geo_band_min, self.geo_band_max
+        if (lo is None) != (hi is None):
+            raise ValueError("isr_geo_band_min and isr_geo_band_max must be set together")
+        if lo is not None and not 0 < lo < 1 < hi:
+            raise ValueError(f"isr_geo_band bounds must satisfy 0 < min < 1 < max, got [{lo}, {hi}]")
         if self.veto_min is not None and not 0 < self.veto_min < 1:
             raise ValueError(f"isr_veto_min must be in (0, 1), got {self.veto_min}")
         if self.opsm_delta is not None and self.opsm_delta <= 0:
@@ -123,7 +148,7 @@ class ISMaskConfig:
 
     @property
     def any_mask_active(self) -> bool:
-        return any(v is not None for v in (self.band_min, self.geo_band_min, self.veto_min))
+        return self.geo_band_min is not None or self.veto_min is not None
 
 
 def _traj_scatter(values: torch.Tensor, traj_ids: torch.Tensor, num_trajs: int, reduce: str) -> torch.Tensor:
@@ -151,52 +176,36 @@ def apply_is_masks(
     traj_ids: torch.Tensor,
     config: ISMaskConfig,
 ) -> tuple[torch.Tensor, dict[str, tuple[int, int]]]:
-    """Apply the token-band / geometric-band / veto stages to the truncated ratio.
+    """Apply the geometric-band / veto stages to the truncated ratio.
 
-    ``traj_ids`` maps each row to its trajectory (−1 for dummy rows). The band tests use the raw
-    (pre-truncation) ratio ``exp(logps_diff)`` so the clip cannot hide an out-of-band token.
+    ``traj_ids`` maps each row to its trajectory (−1 for dummy rows). The veto tests the raw
+    (pre-truncation) ratio ``exp(logps_diff)``, so the clip cannot hide a catastrophic token.
     Returns the masked ratio and the diagnostic ``(masked, total)`` counts of each active stage.
     """
     if not config.any_mask_active:
         return ratio, {}
-    raw_ratio = torch.exp(logps_diff)
-    keep = torch.ones_like(ratio, dtype=torch.bool)
-    stats: dict[str, tuple[int, int]] = {}
     num_trajs = int(traj_ids.max().item()) + 1 if traj_ids.numel() else 0
-
-    if config.band_min is not None:
-        in_band = (raw_ratio >= config.band_min) & (raw_ratio <= config.band_max)
-        token_keep = in_band | ~corrected_mask
-        stats["sampling/is_token_band_masked_frac"] = (
-            int(((~token_keep) & corrected_mask).sum()),
-            int(corrected_mask.sum()),
-        )
-        keep &= token_keep
-
-    traj_keep = None
-    if num_trajs and (config.geo_band_min is not None or config.veto_min is not None):
-        traj_keep = torch.ones(num_trajs, device=ratio.device, dtype=torch.bool)
-        if config.geo_band_min is not None:
-            geo = torch.exp(_traj_mean_logratio(logps_diff, corrected_mask, traj_ids, num_trajs))
-            in_geo = (geo >= config.geo_band_min) & (geo <= config.geo_band_max)
-            stats["sampling/is_geo_band_masked_frac"] = (int((~in_geo).sum()), num_trajs)
-            traj_keep &= in_geo
-        if config.veto_min is not None:
-            # uncorrected tokens read as 1.0 so they never trip the veto.
-            row_min = torch.where(corrected_mask, raw_ratio, torch.ones_like(raw_ratio)).min(dim=1).values
-            traj_min = _traj_scatter(row_min, traj_ids, num_trajs, "amin")
-            # An id with no rows keeps the 0 scatter init, which reads as vetoed; restrict to contributing ids.
-            present = _traj_scatter(torch.ones_like(row_min), traj_ids, num_trajs, "sum") > 0
-            vetoed = (traj_min < config.veto_min) & present
-            stats["sampling/is_veto_masked_frac"] = (int(vetoed.sum()), num_trajs)
-            traj_keep &= ~vetoed
-    if traj_keep is not None:
-        row_keep = torch.where(
-            traj_ids >= 0, traj_keep.gather(0, traj_ids.clamp(min=0)), torch.ones_like(traj_ids).bool()
-        )
-        keep &= row_keep.unsqueeze(1)
-
-    return torch.where(keep, ratio, torch.zeros_like(ratio)), stats
+    if not num_trajs:
+        return ratio, {}
+    raw_ratio = torch.exp(logps_diff)
+    stats: dict[str, tuple[int, int]] = {}
+    traj_keep = torch.ones(num_trajs, device=ratio.device, dtype=torch.bool)
+    if config.geo_band_min is not None:
+        geo = torch.exp(_traj_mean_logratio(logps_diff, corrected_mask, traj_ids, num_trajs))
+        in_geo = (geo >= config.geo_band_min) & (geo <= config.geo_band_max)
+        stats["sampling/is_geo_band_masked_frac"] = (int((~in_geo).sum()), num_trajs)
+        traj_keep &= in_geo
+    if config.veto_min is not None:
+        # uncorrected tokens read as 1.0 so they never trip the veto.
+        row_min = torch.where(corrected_mask, raw_ratio, torch.ones_like(raw_ratio)).min(dim=1).values
+        traj_min = _traj_scatter(row_min, traj_ids, num_trajs, "amin")
+        # An id with no rows keeps the 0 scatter init, which reads as vetoed; restrict to contributing ids.
+        present = _traj_scatter(torch.ones_like(row_min), traj_ids, num_trajs, "sum") > 0
+        vetoed = (traj_min < config.veto_min) & present
+        stats["sampling/is_veto_masked_frac"] = (int(vetoed.sum()), num_trajs)
+        traj_keep &= ~vetoed
+    row_keep = torch.where(traj_ids >= 0, traj_keep.gather(0, traj_ids.clamp(min=0)), torch.ones_like(traj_ids).bool())
+    return torch.where(row_keep.unsqueeze(1), ratio, torch.zeros_like(ratio)), stats
 
 
 def apply_opsm(

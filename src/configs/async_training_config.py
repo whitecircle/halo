@@ -237,19 +237,6 @@ class AsyncTrainingConfig(AdvantageShapingArguments, ChunkedLogprobsArguments):
         },
     )
 
-    isr_band_min: float | None = field(
-        default=None,
-        metadata={
-            "help": "Bidirectional TOKEN band on the vLLM->trainer IS ratio: a corrected token whose "
-            "raw ratio leaves [isr_band_min, isr_band_max] is MASKED (ratio 0, gradient removed) instead "
-            "of merely truncated — the production-convergent MoE-mismatch treatment (GLM-5, IcePop). "
-            "Set both bounds to activate; start [0.5, 2]. None (default) = truncation only."
-        },
-    )
-    isr_band_max: float | None = field(
-        default=None,
-        metadata={"help": "Upper bound of the token band (see isr_band_min)."},
-    )
     isr_geo_band_min: float | None = field(
         default=None,
         metadata={
@@ -354,12 +341,12 @@ class AsyncTrainingConfig(AdvantageShapingArguments, ChunkedLogprobsArguments):
     drop_degenerate_groups: bool = field(
         default=True,
         metadata={
-            "help": "Drop GRPO groups whose completions ALL scored the same reward. Their advantage is "
-            "already 0 (no policy gradient), but their tokens would still inflate the loss normalizer and "
-            "dilute the groups that do carry signal — on a sparse verifiable reward these dead groups "
-            "dominate the batch. Masking them restores the effective batch size (the cheap half of DAPO's "
-            "dynamic sampling: drop, without resampling replacements). Logged as "
-            "`sampling/degenerate_group_frac`. Default on."
+            "help": "Drop GRPO groups whose completions ALL settled the same environment reward (grade, "
+            "shaping and external scores; the trainer's effort-length terms excluded, since they make every "
+            "total distinct). Such a group has no contrast to learn from beyond the length terms, and its "
+            "tokens would still inflate the loss normalizer and dilute the groups that do carry signal. "
+            "Masking them restores the effective batch size (the cheap half of DAPO's dynamic sampling: "
+            "drop, without resampling replacements). Logged as `sampling/degenerate_group_frac`. Default on."
         },
     )
 
@@ -723,10 +710,10 @@ class AsyncTrainingConfig(AdvantageShapingArguments, ChunkedLogprobsArguments):
     ):
         """Build RolloutConfig from this config. ``stop_token_ids`` (from ``rollout_stop_tokens``) and
         ``reasoning_end_token_id`` (from ``rollout_reasoning_end_token``) are resolved by the caller that
-        owns the tokenizer; the episode thinking scope refuses to count reasoning without the latter.
-        ``in_process_group`` says the rollout runs inside a training process group, whose NCCL collective
-        watchdog its timeouts must stay under (the trainer, the default); an eval sampling under a
-        training contract joins none and passes False."""
+        owns the tokenizer; the latter only matters under the episode thinking scope, whose reasoning
+        count refuses to run without it. ``in_process_group`` says the rollout runs inside a training
+        process group, whose NCCL collective watchdog its timeouts must stay under (the trainer, the
+        default); an eval sampling under a training contract joins none and passes False."""
         if in_process_group:
             self._validate_timeouts_against_nccl_watchdog()
         mirrored = {target: getattr(self, source) for target, source in rollout_field_sources(type(self)).items()}

@@ -10,6 +10,10 @@
 * A zero-token assistant turn (``token_ids == []``) is a capture that succeeded, distinct from a
   missing one (``None``): it yields no row, the rest of the trajectory trains per turn, and the
   re-render fallback (with its server-flag warning) is reserved for a trainable turn with no ids.
+* An untrainable turn (cut, empty, invented calls) becomes a negative-only row of its sampled ids:
+  through the trainer's own narrowing it trains only under a negative advantage, and the engine-forced
+  reasoning close inside it keeps ratio 0. One without ids yields no row, counted in
+  ``sampling/untrainable_turns_rowless_frac``.
 
     python tests/cpu/grpo/test_env_trainer_row_paths.py
 """
@@ -19,15 +23,19 @@ from collections import defaultdict
 
 import pytest
 import torch
+from trl.trainer.utils import pad
 
 from src.environments.base import Message, Trajectory
 from src.environments.engine_wire import capture_generation_tokens
 from src.environments.episode import RolloutResult, TurnGeneration, step_context_from_generation
-from src.trainers.grpo.environmental import DistributedAsyncEnvironmentalGRPOTrainer
+from src.trainers.grpo.environmental import BatchRows, DistributedAsyncEnvironmentalGRPOTrainer, rollout_valid_mask
+from src.trainers.grpo.objective.logratio import zero_engine_forced_closes
+from src.trainers.grpo.rollout.trajectory_tokenize import UNTRAINABLE_TURNS_ROWLESS_FRAC_KEY
 from tests.common.grpo_metrics import attach_world_metrics, flushed_metrics
 
 _ROLE_TOKENS = {"user": 1001, "assistant": 1002, "tool": 1003, "system": 1004}
 _END_TOKEN = 1000
+_REASONING_CLOSE = 77
 
 
 def _flat_render(msgs, add_generation_prompt, _template_kwargs, include_thinking=True):
@@ -62,6 +70,10 @@ def _trainer(cap: int | None = None, per_turn: bool = True, context_limit: int =
     trainer.eos_token_id = 2
     trainer.pad_token_id = 0
     trainer._render_messages_to_ids = _flat_render
+    trainer.drop_degenerate_groups = False
+    trainer.args = types.SimpleNamespace(mask_truncated_completions=False)
+    trainer.accelerator = types.SimpleNamespace(gather=lambda x: x)
+    trainer._empty_rollout_steps = 0
     return trainer
 
 
@@ -158,6 +170,82 @@ def test_an_untrainable_turn_without_capture_does_not_force_the_fallback():
     rows = trainer._tokenize_trajectory_turns(_result(_turn(None, truncated=True), _turn([7, 8])))
     assert [r.completion_ids.tolist() for r in rows] == [[7, 8]]
     assert trainer._warned_capture_missing is False
+
+
+# --- untrainable turns: negative-only rows ------------------------------------------------------------
+
+
+def test_untrainable_turns_that_became_no_row_are_counted():
+    """Per-turn: of three untrainable turns, the captured cut and empty turns became tagged rows and the
+    uncaptured cut none, so one in three; the whole-trajectory path trains none of them."""
+    results = [
+        _result(_turn([5, 6], truncated=True), _turn([7])),
+        _result(_turn(None, truncated=True), _turn([8], empty=True), _turn([9])),
+    ]
+    trainer = _trainer()
+    per_trajectory = trainer._tokenize_step_rows(results)
+    assert [[r.negative_only for r in rows] for rows in per_trajectory] == [[True, False], [True, False]]
+    assert flushed_metrics(trainer)[UNTRAINABLE_TURNS_ROWLESS_FRAC_KEY] == [pytest.approx(1 / 3)]
+
+    whole = _trainer(per_turn=False)
+    whole._tokenize_step_rows(results)
+    assert flushed_metrics(whole)[UNTRAINABLE_TURNS_ROWLESS_FRAC_KEY] == [1.0]
+
+
+_UNTRAINABLE_FLAGS = [{"truncated": True}, {"empty": True}, {"calls_rejected": True}]
+_FLAG_IDS = ["cut", "empty", "invented_calls"]
+
+
+def _cut_episode_batch(trainer, advantage: float, flag: dict):
+    """One episode — an untrainable turn whose reasoning the engine closed at its budget
+    (``_REASONING_CLOSE`` at sampling log-prob 0), then a finished turn — laid out and narrowed the way
+    ``_build_training_tensors`` does. Returns ``(rows, ratio, tool_mask, num_items)``."""
+    cut = _turn([5, _REASONING_CLOSE, 6], token_logprobs=[-0.5, 0.0, -0.3], **flag)
+    finished = _turn([7, 8], prompt_len=3, token_logprobs=[-0.2, -0.1])
+    result = _result(cut, finished)
+    rows = trainer._tokenize_trajectory_turns(result)
+    sampling = pad([r.sampling_logps for r in rows], padding_value=0, padding_side="right")
+    completion_ids = pad([r.completion_ids for r in rows], padding_value=0, padding_side="right")
+    completion_mask = pad([r.completion_mask.bool() for r in rows], padding_value=0, padding_side="right")
+    ratio, _forced = zero_engine_forced_closes(
+        torch.ones_like(sampling),
+        sampling,
+        completion_mask,
+        torch.ones(len(rows), dtype=torch.bool),
+        completion_ids,
+        _REASONING_CLOSE,
+    )
+    batch = BatchRows([result], [len(rows)], 0, True)
+    _comp, tool_mask, _loss, num_items = trainer._narrow_masks_and_normalizer(
+        batch,
+        rollout_valid_mask([result], torch.device("cpu")),
+        1,
+        completion_mask,
+        completion_mask.clone(),
+        batch.to_rows(torch.tensor([advantage])),
+        torch.tensor([r.negative_only for r in rows]),
+        torch.device("cpu"),
+        "train",
+    )
+    return rows, ratio, tool_mask, num_items
+
+
+@pytest.mark.parametrize("flag", _UNTRAINABLE_FLAGS, ids=_FLAG_IDS)
+def test_an_untrainable_turn_trains_under_a_negative_advantage_with_its_forced_close_at_ratio_zero(flag):
+    rows, ratio, tool_mask, num_items = _cut_episode_batch(_trainer(), -1.0, flag)
+    assert [r.negative_only for r in rows] == [True, False]
+    assert tool_mask[0].tolist() == [True, True, True], "the cut turn's sampled ids are in the loss"
+    assert num_items.item() == 5, "and in the normalizer"
+    assert ratio[0].tolist() == [1.0, 0.0, 1.0], "the engine-forced close inside it carries no gradient"
+
+
+@pytest.mark.parametrize("flag", _UNTRAINABLE_FLAGS, ids=_FLAG_IDS)
+@pytest.mark.parametrize("advantage", [1.0, 0.0])
+def test_an_untrainable_turn_never_trains_at_a_non_negative_advantage(advantage, flag):
+    _rows, _ratio, tool_mask, num_items = _cut_episode_batch(_trainer(), advantage, flag)
+    assert not tool_mask[0].any()
+    assert tool_mask[1].tolist() == [True, True, False]
+    assert num_items.item() == 2
 
 
 def test_the_wire_keeps_an_empty_capture_apart_from_a_missing_one():
