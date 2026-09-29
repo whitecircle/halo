@@ -425,31 +425,47 @@ def norm_param_keys(model: torch.nn.Module) -> frozenset[str]:
     return frozenset(keys)
 
 
-def params_matching_fp32_pins(model: torch.nn.Module, pins: Iterable[str]) -> frozenset[str]:
-    """Names of ``model``'s parameters that ``_keep_in_fp32_modules[_strict]`` entries ``pins`` match.
-
-    transformers' loader rule, reused rather than restated: each entry is a glob searched anywhere in
-    the parameter name (its dtype plan's ``build_glob_alternation``).
-    """
+def _names_matching_fp32_pins(names: Iterable[str], pins: Iterable[str]) -> frozenset[str]:
+    """transformers' loader rule, reused rather than restated: each ``_keep_in_fp32_modules[_strict]``
+    entry is a glob searched anywhere in the name (its dtype plan's ``build_glob_alternation``)."""
     pins = sorted(pins)
     if not pins:
         return frozenset()
     pattern, _, _ = build_glob_alternation(pins)
-    return frozenset(name for name, _ in model.named_parameters() if pattern.search(name))
+    return frozenset(name for name in names if pattern.search(name))
 
 
-def fp32_pinned_param_names(model: torch.nn.Module) -> frozenset[str]:
-    """Parameter names the model's classes pin in fp32 via ``_keep_in_fp32_modules(_strict)``.
+def params_matching_fp32_pins(model: torch.nn.Module, pins: Iterable[str]) -> frozenset[str]:
+    """Names of ``model``'s parameters that the fp32 pin entries ``pins`` match."""
+    return _names_matching_fp32_pins((name for name, _ in model.named_parameters()), pins)
 
-    Both class attributes, read off every class in the tree, so a wrapper (pipeline stage, CP wrapper,
-    PEFT model) derives the same set as the model itself. The training loaders cast these to the run
-    dtype unless the run keeps fp32 masters, and every checkpoint writer leaves them at their trained
-    dtype: a reload re-pinning the slot cannot recover precision an export already discarded.
-    """
-    pins = {
+
+def _fp32_pins(model: torch.nn.Module) -> set[str]:
+    """Both class attributes, read off every class in the tree, so a wrapper (pipeline stage, CP
+    wrapper, PEFT model) derives the same pins as the model itself."""
+    return {
         pin
         for cls in {type(module) for module in model.modules()}
         for attr in ("_keep_in_fp32_modules", "_keep_in_fp32_modules_strict")
         for pin in (getattr(cls, attr, None) or [])
     }
-    return params_matching_fp32_pins(model, pins)
+
+
+def fp32_pinned_param_names(model: torch.nn.Module) -> frozenset[str]:
+    """Parameter names the model's classes pin in fp32 via ``_keep_in_fp32_modules(_strict)``.
+
+    The training loaders cast these to the run dtype unless the run keeps fp32 masters, and every
+    checkpoint writer leaves them at their trained dtype: a reload re-pinning the slot cannot recover
+    precision an export already discarded.
+    """
+    return params_matching_fp32_pins(model, _fp32_pins(model))
+
+
+def fp32_pinned_state_keys(model: torch.nn.Module) -> frozenset[str]:
+    """:func:`fp32_pinned_param_names` plus the buffers the same pins match, the set a writer keeps.
+
+    A pin can name a buffer (GLM-5 Next's ``e_score_correction_bias``): no loader casts it, so it
+    stays fp32 live, and an export must not round it either.
+    """
+    names = [name for name, _ in model.named_parameters()] + [name for name, _ in model.named_buffers()]
+    return _names_matching_fp32_pins(names, _fp32_pins(model))

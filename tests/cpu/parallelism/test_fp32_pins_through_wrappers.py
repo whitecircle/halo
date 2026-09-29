@@ -21,6 +21,7 @@ from src.checkpoint.format import save_dtype_caster
 from src.distributed.pipeline_parallel.stage import build_pipeline_stage
 from src.models.structure import fp32_pinned_param_names
 from tests.common.models import TINY_DSV4_CONFIG
+from tests.common.tiny_models import TINY_MOE_FAMILIES, tiny_family_model
 
 PP_SIZE = 2
 
@@ -61,6 +62,18 @@ def test_pipeline_stages_pin_exactly_the_unsplit_models_tensors():
         unpinned = next(name for name in params if name not in local and "norm" not in name)
         assert cast(unpinned, params[unpinned].float()).dtype != torch.float32
     assert seen == pinned
+
+
+def test_an_export_keeps_a_pinned_buffer_at_fp32():
+    """GLM-5 Next pins its router's ``e_score_correction_bias`` buffer; no loader casts a buffer, so it
+    is fp32 live, and the export must write it so rather than round the checkpoint's own values."""
+    model = tiny_family_model(TINY_MOE_FAMILIES["glm5_next"])
+    buffers = {name: b for name, b in model.named_buffers() if name.endswith("e_score_correction_bias")}
+    assert buffers and all(b.dtype == torch.float32 for b in buffers.values()), buffers
+    cast = save_dtype_caster(model)
+    assert {name: cast(name, b).dtype for name, b in buffers.items()} == dict.fromkeys(buffers, torch.float32)
+    weight = next(name for name, p in model.named_parameters() if name.endswith("gate.weight"))
+    assert cast(weight, model.get_parameter(weight)).dtype == torch.bfloat16, "an unpinned tensor is exported too"
 
 
 if __name__ == "__main__":

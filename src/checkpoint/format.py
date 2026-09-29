@@ -33,7 +33,7 @@ from transformers.trainer_utils import PREFIX_CHECKPOINT_DIR
 from src.checkpoint.config_export import save_model_config
 from src.checkpoint.model_card import is_staged_card, tag_exported_model_card
 from src.models.moe_balancing import balancing_param_keys
-from src.models.structure import fp32_pinned_param_names, norm_param_keys, strip_peft_adapter_segment
+from src.models.structure import fp32_pinned_state_keys, norm_param_keys, strip_peft_adapter_segment
 
 logger = logging.getLogger(__name__)
 
@@ -175,8 +175,9 @@ def save_dtype_caster(model: torch.nn.Module, *, keep_live_dtype: bool = False):
 
     Floating tensors go to the save dtype except three tree-derived keep-sets that hold their trained
     dtype: the normalization params, the live router-balancing tensors (hub-respelled) and the
-    family's fp32 pins. That way a direct EP/TP save of an fp32-master run matches its merged-shards
-    save, and the export quantizes neither the balancing state nor a family's declared fp32 modules.
+    family's fp32 pins, buffers included. That way a direct EP/TP save of an fp32-master run matches
+    its merged-shards save, and the export quantizes neither the balancing state nor a family's
+    declared fp32 modules.
 
     ``keep_live_dtype`` (a training checkpoint) casts nothing: every tensor is written at the dtype the
     gather produced, which is the live one, so fp32 masters (``fp32_router``, ``fp32_experts``,
@@ -191,7 +192,7 @@ def save_dtype_caster(model: torch.nn.Module, *, keep_live_dtype: bool = False):
     """
     if keep_live_dtype:
         return _as_live
-    keep = norm_param_keys(model) | balancing_param_keys(model) | fp32_pinned_param_names(model)
+    keep = norm_param_keys(model) | balancing_param_keys(model) | fp32_pinned_state_keys(model)
 
     def cast(name: str, t: torch.Tensor) -> torch.Tensor:
         return t if name in keep or strip_peft_adapter_segment(name) in keep else cast_to_save_dtype(t)

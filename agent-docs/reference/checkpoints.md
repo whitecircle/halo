@@ -316,8 +316,9 @@ the router under ep1 sharding), resolved via `full_tensor()`; and manually TP-sh
 `model._tp_sharded_non_dtensor`.
 
 An export casts weights to the save dtype (BF16) except three keep-sets that hold their trained dtype:
-normalization params, the live router-balancing tensors, and the family's fp32 pins; a training
-checkpoint casts nothing ([What gets saved](#what-gets-saved)). Under EP+CP the
+normalization params, the live router-balancing tensors, and the family's fp32 pins (a pinned buffer
+such as GLM-5 Next's `e_score_correction_bias` included); a training checkpoint casts nothing
+([What gets saved](#what-gets-saved)). Under EP+CP the
 iteration runs on the unwrapped model with an explicit CP-prefix strip, so attention weights land
 under their hub names; experts are replicated per CP rank (EP ⊥ DP), so any rank holds the complete
 set.
