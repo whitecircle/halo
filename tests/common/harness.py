@@ -28,7 +28,7 @@ The body returns ``{"checks": {name: bool}, "metrics": {...}}``. The decorator
 computes ``all(checks.values())``, emits the machine-readable result line
 (:mod:`tests.common.reporting`), guarantees teardown on every exit path, and
 exits ``0`` (pass) / ``1`` (fail or body raised) / ``2`` (bad launch: wrong world
-size, reported as an infra error rather than a test failure).
+size, emitted as a ``status="error"`` result that the GPU launcher reports as a FAIL).
 
 A decorator rather than a bare context manager because world size is validated
 per test, ``--cp/--ep/--tp`` change the required ``nproc``, and ``cleanup_ep`` is
@@ -176,8 +176,8 @@ def gpu_test_main(
     """Wrap a ``run(ctx) -> dict`` body with the full GPU-test lifecycle.
 
     Args:
-        min_world_size: minimum GPUs the test needs; a smaller launch exits 2,
-            reported as an infra error rather than a test failure.
+        min_world_size: minimum GPUs the test needs; a smaller launch emits a
+            ``status="error"`` result and exits 2, which the GPU launcher reports as a FAIL.
         exact_world_size: if set, the launch must provide exactly this many GPUs.
         prefix: temp-dir prefix for this test's isolated output/cache dirs.
         partial_state: construct ``accelerate.PartialState()`` (needed by the

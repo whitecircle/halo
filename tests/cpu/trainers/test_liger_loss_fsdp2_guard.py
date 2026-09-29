@@ -12,8 +12,11 @@ must raise rather than leave the fused loss running on a shard.
 from types import SimpleNamespace
 
 import pytest
+from accelerate import PartialState
 
 from src.trainers.mixins.base import DistributedTrainerMixin
+
+PartialState()  # the mixin logs through accelerate's rank-aware logger
 
 
 def _host(*, fsdp_wrapped=True, use_liger_kernel=True, **loss_attrs):
@@ -25,9 +28,9 @@ def _host(*, fsdp_wrapped=True, use_liger_kernel=True, **loss_attrs):
     )
 
 
-@pytest.mark.parametrize("attr", ["liger_loss_fn", "liger_grpo_loss", "liger_loss"])
+@pytest.mark.parametrize("attr", ["liger_loss_fn", "liger_grpo_loss"])
 def test_every_known_trl_liger_loss_is_disabled_under_fsdp2(attr):
-    """DPO/KTO, GRPO, and the single name later TRL releases use for all of them."""
+    """DPO/KTO and GRPO."""
     host = _host(**{attr: object()})
     DistributedTrainerMixin._disable_trl_liger_loss_under_fsdp2(host)
     assert host.use_liger_kernel is False and host.args.use_liger_kernel is False

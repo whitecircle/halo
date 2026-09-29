@@ -106,8 +106,8 @@ _FSDP_SHAPING_KNOBS = (
 # ParallelismConfig knobs only the mixin-managed (torchrun) FSDP2 wrap implements.
 _ACCELERATE_UNSUPPORTED_KNOBS = (*_FSDP_SHAPING_KNOBS, "fp32_grad_reduce")
 
-# Where TRL keeps its fused Liger loss: preference trainers (DPO/KTO), GRPO, and the name later TRL uses.
-_TRL_LIGER_LOSS_ATTRS = ("liger_loss_fn", "liger_grpo_loss", "liger_loss")
+# Where TRL keeps its fused Liger loss: the preference trainers (DPO/KTO) and GRPO.
+_TRL_LIGER_LOSS_ATTRS = ("liger_loss_fn", "liger_grpo_loss")
 
 # Peak-allocated fraction of device memory above which the post-first-step margin warning fires.
 # A rank this close to full after the first optimizer step OOMs on a later backward.
@@ -790,12 +790,14 @@ class DistributedTrainerMixin(
     def _reject_unsynced_trainable_params(self, model: nn.Module, candidates: Iterable[nn.Parameter]) -> None:
         """Raise on every rank if a trainable parameter in ``candidates`` has no gradient sync.
 
-        ``candidates`` is what every FSDP2 wrap leaves out (:meth:`_fsdp_exclusions`): frozen dtype
+        ``candidates`` is what the FSDP2 wraps leave out (:meth:`_fsdp_exclusions`): frozen dtype
         exclusions and the parameters of the EP modules that sync their own gradients. Such a parameter
         keeps its local gradient unless its EP layer's hooks (``synced_trainable_param_ids``: experts +
         LoRA, router, replicated submodules) or the deferred post-backward sweep average it; without
         either it trains on this rank's batch only and drifts across DP ranks while every loss stays
-        finite. Collective: every rank must call it.
+        finite. The TP wrap leaves nothing out: its experts are FSDP-managed
+        (``fsdp_shard_ep1_experts=False`` is refused under TP), and the dtype exclusions it shards are
+        frozen, so none is flagged. Collective: every rank must call it.
         """
         candidate_set = IdentityParamSet(candidates)
         # The deferred sweep averages every trainable non-DTensor parameter, and a parameter outside the

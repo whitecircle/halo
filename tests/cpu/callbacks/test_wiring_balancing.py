@@ -64,7 +64,7 @@ class _Cfg:
             setattr(self, name, value)
 
 
-class _Model:
+class _Model(torch.nn.Module):
     """Minimal model stand-in: a config plus configurable ``modules()`` (default: no EP layers).
 
     ``forward`` takes ``output_router_logits`` because that parameter is how the toolkit detects that
@@ -73,6 +73,7 @@ class _Model:
     """
 
     def __init__(self, cfg: _Cfg, submodules=()):
+        super().__init__()
         self.config = cfg
         self._submodules = list(submodules)
 

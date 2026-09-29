@@ -297,14 +297,9 @@ def _convert_checkpoint_to_bf16(
     trust_remote_code,
 ) -> None:
     """A full checkpoint — or an adapter left unmerged — reloaded at bf16 and written back out."""
-    # A per-rank EP/TP save reaches from_pretrained with expert keys under .shard_N: the real ones read
-    # as missing and are randomly initialized (a warning, not a raise), which --verify's dtype count
-    # cannot catch. The guards run ahead of the load and of os.makedirs(output_path), so a refusal
-    # leaves nothing behind. An adapter goes through the merge's gates, since a later merge reads it
-    # and its weights come from the base.
-    #
-    # Full processor for VLMs (keeps processor_config.json), else a plain tokenizer. A PEFT adapter
-    # dir usually carries only a tokenizer, so resolve it against the base model too.
+    # Guards before the load and os.makedirs: a per-rank EP/TP save loads its .shard_N expert keys as
+    # missing and randomly initialized, which --verify's dtype count cannot catch. An adapter takes the
+    # merge's gates, and its processing class (a VLM's full processor) is resolved against the base too.
     if is_peft:
         weights_source = adapter_input_gates(model_path, output_path).base_model_name_or_path
         processing_class = resolve_peft_processing_class(

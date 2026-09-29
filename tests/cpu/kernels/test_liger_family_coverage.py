@@ -412,11 +412,11 @@ def test_the_fused_head_does_not_declare_output_router_logits():
 def test_the_router_logits_probe_really_keys_on_that_parameter_name():
     """Anti-vacuity for the check above: the probe must be sensitive to the declaration."""
 
-    class _Declares:
+    class _Declares(torch.nn.Module):
         def forward(self, output_router_logits=None, **kwargs):
             """A head that consults the flag."""
 
-    class _DoesNot:
+    class _DoesNot(torch.nn.Module):
         def forward(self, **kwargs):
             """A head that does not."""
 

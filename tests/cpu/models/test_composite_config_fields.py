@@ -226,10 +226,10 @@ def test_multimodal_wrapper_does_not_honor_the_router_logits_config_flag():
     never enters the loss. A 512-expert router trains unbalanced, and nothing in the loss curve says so.
     """
 
-    class _Model:
+    class _Model(torch.nn.Module):
         forward = Qwen3_5MoeForConditionalGeneration.forward
 
-    class _TextOnly:
+    class _TextOnly(torch.nn.Module):
         forward = Qwen3_5MoeForCausalLM.forward
 
     assert honors_output_router_logits_config(_TextOnly()) is True
@@ -241,10 +241,11 @@ def test_aux_loss_balancing_refuses_a_model_it_cannot_reach():
     config = _config("qwen3_5_moe")
     set_config_field(config, "router_aux_loss_coef", 0.001, only_declared=True)
 
-    class _Model:
+    class _Model(torch.nn.Module):
         forward = Qwen3_5MoeForConditionalGeneration.forward
 
         def __init__(self, cfg):
+            super().__init__()
             self.config = cfg
 
         def modules(self):

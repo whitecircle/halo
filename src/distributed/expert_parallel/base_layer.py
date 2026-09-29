@@ -1073,7 +1073,7 @@ class EPMoELayerBase(EPExpertGatherMixin, EPRouterBalancingMixin, nn.Module, ABC
     def _grouped_mm_enabled(self) -> bool:
         """Whether the grouped-GEMM path is active — the gate for the grouped-vs-loop branch in
         :meth:`_compute_experts`. Default: the hardware/config flag. GptOss overrides to also require
-        ``expert_tp_size <= 1`` (its interleaved weights can't be de-interleaved once TP-sharded)."""
+        ``expert_tp_size <= 1`` (ETP stores gate/up under the plain loop names, not the ``*_gmm`` pair)."""
         return self._use_grouped_mm
 
     def set_lowp_compute(self, precision: GroupedGemmPrecision, *, weight_cacheable: bool) -> bool:
@@ -1620,7 +1620,7 @@ class EPGroupLimitedMoELayerBase(EPSharedExpertsMoELayerBase):
     # MoE Lite leaves the gate weights un-normalized, the others normalize.
     _NORM_TOPK_PROB_DEFAULT: bool = True
 
-    # Step-3.7 renormalizes with no floor; adding one there would change every routed weight it emits.
+    # The floor the weight renormalization adds to the sum; 0.0 in a family whose router adds none.
     _TOPK_WEIGHT_NORM_EPS: float = TOPK_WEIGHT_NORM_EPS
 
     # Routing knobs (any spelling) this family's block, router and config genuinely do not declare —

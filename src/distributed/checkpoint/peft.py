@@ -57,6 +57,7 @@ from src.distributed.runtime import (
 )
 from src.models.patches.gpt_oss_sinks import stamped_sinks_policy
 from src.models.structure import (
+    PEFT_BASE_MODEL_PREFIX,
     persistent_buffers,
     strip_peft_adapter_segment,
     unwrap_framework_wrappers,
@@ -64,9 +65,6 @@ from src.models.structure import (
 )
 
 logger = logging.getLogger(__name__)
-
-# What PEFT prepends to every adapter key below the model it wraps.
-_PEFT_KEY_PREFIX = "base_model.model."
 
 # Superset of every param name PEFT may serialize into an adapter file: LoRA tensors,
 # modules_to_save clones, and the embed/lm_head pair save_embedding_layers can add.
@@ -351,7 +349,8 @@ class PeftAdapterSaver:
     @staticmethod
     def _normalize_cp_module_path(path: str) -> str:
         """:meth:`_normalize_cp_adapter_key` for a module path — a config entry rather than a tensor key."""
-        return PeftAdapterSaver._normalize_cp_adapter_key(_PEFT_KEY_PREFIX + path).removeprefix(_PEFT_KEY_PREFIX)
+        key = PeftAdapterSaver._normalize_cp_adapter_key(PEFT_BASE_MODEL_PREFIX + path)
+        return key.removeprefix(PEFT_BASE_MODEL_PREFIX)
 
     @staticmethod
     def _cp_normalized_config(peft_config):

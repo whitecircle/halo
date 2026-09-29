@@ -46,8 +46,8 @@ class CheckpointContext:
     # save rank re-emits so the checkpoint keeps the wrapper layout. Empty for a plain causal LM.
     pp_wrapper_state: dict[str, Any] | None = None
 
-    # A training checkpoint rather than an export: every tensor keeps its live dtype, so a resume
-    # reads fp32 masters back unrounded; an export casts to the save dtype (``save_dtype_caster``).
+    # A training checkpoint rather than an export: every tensor keeps its live dtype, so fp32 masters
+    # are written unrounded; an export casts to the save dtype (``save_dtype_caster``).
     training_checkpoint: bool = False
 
 

@@ -24,7 +24,7 @@ from src.models.loading.config_levels import (
     set_config_field,
     set_config_field_run_scoped,
 )
-from src.models.structure import unwrap_framework_wrappers, unwrapped_module_name
+from src.models.structure import base_transformers_model, unwrap_framework_wrappers, unwrapped_module_name
 
 logger = logging.getLogger(__name__)
 
@@ -624,12 +624,13 @@ def honors_output_router_logits_config(model) -> bool:
     ``kwargs`` only, and the flag then pays a ``[tokens, num_experts]`` plane per MoE layer while the
     aux loss never reaches the loss, so the balancing has no effect.
 
-    Probed on the forward the instance runs, not the class's: a Liger fused loss replaces the head
-    with a forward that takes no such parameter, bound on the class at load or on the instance
-    alone when re-applied to a built model, and a verdict read off the class would then enable a
-    flag the running forward refuses.
+    Probed on the head under every wrapper (a PEFT or CP wrapper's own forward passes ``**kwargs``
+    through and describes no head), on the forward the instance runs rather than the class's: a Liger
+    fused loss replaces the head with a forward that takes no such parameter, bound on the class at
+    load or on the instance alone when re-applied to a built model, and a verdict read off the class
+    would then enable a flag the running forward refuses.
     """
-    forward = getattr(_head_model(model), "forward", None)
+    forward = getattr(base_transformers_model(model), "forward", None)
     if forward is None:
         return False
     try:
@@ -638,20 +639,9 @@ def honors_output_router_logits_config(model) -> bool:
         return False
 
 
-def _head_model(model):
-    """The model under a PEFT wrapper and the toolkit's own (the CP wrapper declares
-    ``_toolkit_inner_model_attr``), each of which forwards **kwargs into it and shares its config;
-    probing a wrapper's own forward would describe the wrapper, not the head that runs."""
-    base = getattr(model, "get_base_model", None)
-    if callable(base) and (inner := base()) is not model:
-        return _head_model(inner)
-    inner_attr = getattr(type(model), "_toolkit_inner_model_attr", None)
-    return _head_model(getattr(model, inner_attr)) if inner_attr else model
-
-
 def _liger_fused_head_installed(model) -> bool:
     """Whether a Liger fused-loss forward replaced the family's head, on the class or the instance."""
-    forward = getattr(_head_model(model), "forward", None)
+    forward = getattr(base_transformers_model(model), "forward", None)
     return "liger" in (getattr(forward, "__module__", None) or "")
 
 

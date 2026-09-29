@@ -1,5 +1,6 @@
 """Context Parallelism (CP) configuration, process-group construction, and the shared sequence-axis
-ops (:func:`split_sequence_for_cp`, :func:`cp_boundary_shift`).
+ops (:func:`cp_chunk_bounds`, :func:`split_sequence_for_cp`, :func:`cp_boundary_shift`,
+:func:`cp_shift_against_full_labels`).
 
 :class:`CPConfig` builds CP groups inside a single NVLink domain, the only shape
 ``ParallelismConfig`` accepts: the Ulysses all-to-all is bandwidth-heavy, and DeepEP dispatch under

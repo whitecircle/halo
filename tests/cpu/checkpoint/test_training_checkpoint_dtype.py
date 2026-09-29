@@ -2,10 +2,12 @@
 """A training checkpoint writes every tensor at its live dtype; an export casts to the save dtype.
 
 fp32 master weights (``fp32_router``, ``fp32_experts``, ``fp32_non_ep_params``) rounded to bf16 in a
-training checkpoint resume rounded, so the writers keep the live dtype when the trainer's
+training checkpoint stay rounded through every load that reads them back exactly (Path A, the PP
+stage load, an adapter restore), so the writers keep the live dtype when the trainer's
 ``_save_checkpoint`` is the caller (``CheckpointContext.training_checkpoint``) and cast as before for
-the ``save_model`` export. Pinned here: the gathered writer the FSDP2 / CP / TP saves share, the EP
-gathered writer, the hand-written adapter file, and the trainer seam that marks which save is which.
+the ``save_model`` export. Pinned here: the gathered writer the FSDP2 / CP / TP saves share, the TP
+save's own hand-off to it, the EP gathered writer, the hand-written adapter file, and the trainer seam
+that marks which save is which.
 
     python tests/cpu/checkpoint/test_training_checkpoint_dtype.py
 """
@@ -25,6 +27,7 @@ from src.checkpoint.format import load_full_state_dict
 from src.distributed.checkpoint.peft import _adapter_file_state
 from src.distributed.checkpoint.write import chunked_saveable_tensors, stream_gathered_checkpoint
 from src.distributed.expert_parallel.saving import save_ep_model
+from src.distributed.tensor_parallel.checkpoint import save_tp_model
 from src.trainers.mixins.base import DistributedTrainerMixin
 
 SHARD_SIZE = "64KB"
@@ -75,7 +78,7 @@ def _expert_keys(state: dict) -> list[str]:
     return [key for key in state if key.startswith(prefix) and key.endswith(suffixes)]
 
 
-@pytest.mark.parametrize("writer", ["gathered", "ep_gathered"])
+@pytest.mark.parametrize("writer", ["gathered", "tp", "ep_gathered"])
 def test_a_training_checkpoint_keeps_fp32_masters_and_an_export_casts_them(tmp_path, writer):
     model = _tiny_moe_with_fp32_masters()
     live = {name: param.detach().clone() for name, param in model.named_parameters()}
@@ -84,6 +87,8 @@ def test_a_training_checkpoint_keeps_fp32_masters_and_an_export_casts_them(tmp_p
         os.makedirs(out)
         if writer == "gathered":
             _stream(model, out, keep_live_dtype=keep_live_dtype)
+        elif writer == "tp":
+            save_tp_model(model, out, keep_live_dtype=keep_live_dtype)
         else:
             save_ep_model(model, out, keep_live_dtype=keep_live_dtype)
         state = load_full_state_dict(out)

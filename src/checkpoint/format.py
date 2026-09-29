@@ -90,13 +90,9 @@ ADAPTER_WEIGHT_NAMES = (ADAPTER_SAFETENSORS_FILE, ADAPTER_BIN_FILE)
 # sink policy). A sidecar rather than adapter_config.json, so stock PEFT loads the adapter unchanged.
 TRAINING_PROVENANCE_FILE = "training_provenance.json"
 PROVENANCE_GPT_OSS_SINKS = "gpt_oss_attention_sinks"
-# A merged checkpoint's resume state, beside the merged weights that serve: a
-# ``merge_expert_lora_on_save`` run's unmerged adapter, written as the non-merged save writes it, or
-# an embedding run's unfolded injected-LoRA tensors. A subdirectory, because an
-# ``adapter_config.json`` at the root makes ``from_pretrained`` load that adapter on top of the
-# merged weights, which already hold its delta. The root marker follows once the adapter is complete
-# and classifies the checkpoint as resume-from-base-plus-adapter: its presence is the verdict; the
-# body only names the directory for whoever reads the checkpoint.
+# A merged checkpoint's unmerged adapter, the state it resumes from, in a subdirectory: a root
+# ``adapter_config.json`` makes ``from_pretrained`` load it on top of weights already holding its delta.
+# The root marker follows once the adapter is complete, and its presence alone is the resume verdict.
 RESUME_ADAPTER_DIR = "resume_adapter"
 RESUME_ADAPTER_MARKER_FILE = "resume_adapter.json"
 # Resume state like the sidecars below, but not weight-suffixed: the aux copy carries them by
@@ -183,9 +179,12 @@ def save_dtype_caster(model: torch.nn.Module, *, keep_live_dtype: bool = False):
     save, and the export quantizes neither the balancing state nor a family's declared fp32 modules.
 
     ``keep_live_dtype`` (a training checkpoint) casts nothing: every tensor is written at the dtype the
-    gather produced, which is the live one, so a resume reads fp32 masters (``fp32_router``,
-    ``fp32_experts``, ``fp32_non_ep_params``) back unrounded. Decided on the tensor, not its name, since
-    a gathered expert's hub key need not name any live parameter.
+    gather produced, which is the live one, so fp32 masters (``fp32_router``, ``fp32_experts``,
+    ``fp32_non_ep_params``) reach disk unrounded. The Path-A ``set_model_state_dict`` load, the PP
+    stage load and every adapter restore read them back exactly; a model built from the checkpoint at
+    construction (Path B) loads at the run dtype before the fp32 upcast, so its masters resume rounded.
+    Decided on the tensor, not its name, since a gathered expert's hub key need not name any live
+    parameter.
 
     Keys also match with their PEFT adapter segment stripped: the EP gather feeds this pre-remap
     keys, where a ``modules_to_save`` router spells its bias ``router.modules_to_save.default.bias``.

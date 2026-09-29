@@ -67,9 +67,9 @@ def build_class_claim_map(base_cls: type[_T], attr: str, kind: str) -> dict[str,
 def build_hf_module_name_map(base_cls: type[_T], kind: str) -> dict[str, type[_T]]:
     """HF module class name → claiming class, from each claimant's own ``HF_MODULE_NAMES``.
 
-    Patcher-facing spelling of :func:`build_class_claim_map`: ``kind`` is the wrapped module's noun
-    (e.g. ``"MoE"``, ``"attention"``, ``"backbone"``). The claimant is a wrapper for EP/CP and a
-    split spec for PP.
+    Patcher-facing spelling of :func:`build_class_claim_map`: ``kind`` is the claimed module's noun
+    (e.g. ``"MoE"``, ``"attention"``, ``"backbone"``, ``"causal-LM head"``). The claimant is a wrapper
+    for EP/CP, a split spec for PP and a ``HeadTransformSpec`` for the causal-LM head.
     """
     return build_class_claim_map(base_cls, "HF_MODULE_NAMES", f"HF {kind} class name")
 

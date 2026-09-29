@@ -19,6 +19,7 @@ from types import MethodType
 
 import pytest
 import torch.nn as nn
+from peft import LoraConfig, get_peft_model
 from transformers import PretrainedConfig
 
 from src.distributed.expert_parallel.balancing_strategy import apply_balancing_strategy
@@ -99,19 +100,8 @@ def test_the_fused_loss_remedy_is_named_only_when_a_liger_head_replaced_the_forw
     class _LigerHeaded(_NoRouterLogitFlag):
         forward = build_lce_forward()
 
-    class _PeftLike(nn.Module):
-        def __init__(self, base):
-            super().__init__()
-            self.base = base
-            self.config = base.config
-
-        def get_base_model(self):
-            return self.base
-
-        def forward(self, *args, **kwargs):
-            return self.base(*args, **kwargs)
-
-    for model in (_LigerHeaded(), _PeftLike(_LigerHeaded())):
+    peft_wrapped = get_peft_model(_LigerHeaded(), LoraConfig(r=2, target_modules=["experts"]))
+    for model in (_LigerHeaded(), peft_wrapped):
         caplog.clear()
         with caplog.at_level(logging.WARNING, logger=_RESOLVER_LOGGER):
             assert _resolve(model) == "none"

@@ -29,7 +29,7 @@ logger = logging.getLogger(__name__)
 
 # Key of this optimizer's rounding noise; Muon keys its own, so the two never share a stream.
 _SR_KEY = 0xB165EED
-# Seeds stay inside int32, so a kernel's seed argument keeps one Triton specialization.
+# Seeds stay inside int32, so a kernel's seed argument keeps one Triton type specialization.
 _SR_SEED_MASK = (1 << 30) - 1
 _MASK64 = (1 << 64) - 1
 
@@ -76,8 +76,9 @@ def _adam_bf16_sr_kernel(
     easq_noise = (rnd0.to(tl.uint32, bitcast=True) >> 16).to(tl.int32)
     rand_noise = (rnd1.to(tl.uint32, bitcast=True) >> 16).to(tl.int32)
 
-    # SR the second moment: nearest rounding biases this non-negative accumulator upward, inflating
-    # sqrt(v) and shrinking the effective step below lr.
+    # SR the second moment: near the bf16 underflow floor nearest rounding biases this non-negative
+    # accumulator by tens of percent, with a sign set by the gradient regime, moving sqrt(v) and the
+    # effective step away from lr.
     easq_bits = easq.to(tl.int32, bitcast=True)
     easq_bits = (easq_bits + easq_noise) & (-65536)
     tl.store(easq_ptr + offsets, easq_bits.to(tl.float32, bitcast=True).to(tl.bfloat16), mask=mask)

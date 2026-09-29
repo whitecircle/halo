@@ -57,7 +57,8 @@ __all__ = [
 DEFAULT_BUCKET = env_str("HALO_S3_DEFAULT_BUCKET")
 
 
-# Bounded so concurrency x each file's multipart connections stays within max_pool_connections=50.
+# Each file above the multipart threshold takes up to 5 of the client's 50 pooled connections, so
+# above 10 workers a large-file folder queues on the pool (urllib3 warns "Connection pool is full").
 # Clamped rather than ``or``-defaulted: an explicit 0 would become 16 instead of the no-workers it
 # asks for, and env_int already turns unset/malformed values into the default.
 _S3_FOLDER_CONCURRENCY = max(1, env_int("HALO_S3_MAX_FOLDER_CONCURRENCY", 16))
@@ -220,7 +221,7 @@ class S3Client:
             retries={"max_attempts": 3, "mode": "standard"},
         )
 
-        # 5 threads/transfer, not boto3's 10: parallel workers must stay within max_pool_connections=50.
+        # 5 threads/transfer, not boto3's 10, so up to 10 parallel files fit max_pool_connections=50.
         self._transfer_config = TransferConfig(
             max_concurrency=5,
         )

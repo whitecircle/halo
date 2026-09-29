@@ -30,9 +30,12 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 import pytest
+from accelerate import PartialState
 
 import src.trainers.mixins.base as mixin_module
 from src.trainers.mixins.base import DistributedTrainerMixin
+
+PartialState()  # the mixin logs through accelerate's rank-aware logger
 
 # Any quantile < 1.0 turns entropy masking on; the sentinel is what the stubbed super().evaluate()
 # returns, so an assert matching it proves the call passed THROUGH the escape hatch unchanged.

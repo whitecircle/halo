@@ -44,7 +44,7 @@ class EPStep3p7MoELayer(EPGroupLimitedMoELayerBase):
     # ``moe_router_scaling_factor``), which upstream applies to the routed-expert sum, resolves into
     # the per-token weights instead: equivalent, since the combine is linear in the expert outputs.
     # Required rather than defaulted: at 1.0 every routed weight misses the model's own factor.
-    _TOPK_WEIGHT_NORM_EPS = 0.0
+    _TOPK_WEIGHT_NORM_EPS = 0.0  # a floor here would change every routed weight the router emits
     _OPTIONAL_ROUTING_KNOBS = ("n_group", "topk_group", "norm_topk_prob")
 
     # ``gate.weight`` is ``[num_experts, hidden]``; the block itself carries no config reference,

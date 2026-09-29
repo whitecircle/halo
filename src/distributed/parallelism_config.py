@@ -853,10 +853,9 @@ class ParallelismConfig:
             f"without gradient checkpointing. Use a SINGLE dispatch group per domain: expert_parallel_size=2, "
             f"or raise expert_parallel_size * expert_tensor_parallel_size to the domain "
             f"({self.nvlink_domain_size}), or shrink the job to {self.ep_group_size} GPUs. Sizing "
-            f"expert_parallel_size itself to the domain works "
-            f"only where the model has that many experts per rank to give (rarely on a "
-            f"{self.nvlink_domain_size}-wide rack); attention TP leaves ep_group_size unchanged, so "
-            f"EP+TP lands back on this same rejection."
+            f"expert_parallel_size itself to the domain works only where the model has that many "
+            f"experts per rank to give (rarely on a {self.nvlink_domain_size}-wide rack); attention TP "
+            f"leaves ep_group_size unchanged, so EP+TP lands back on this same rejection."
         )
 
     def _validate_ep_buffer_backend(self):
@@ -934,10 +933,9 @@ class ParallelismConfig:
         if not self.fsdp_reshard_after_backward and (self.tp_size > 1 or self.pp_size > 1):
             raise ValueError(
                 f"fsdp_reshard_after_backward=False is only wired through the plain-DP/CP/EP torchrun "
-                f"path (tensor_parallel_size={self.tp_size}, pipeline_parallel_size={self.pp_size}): the TP "
-                f"setup shards through "
-                f"its own fully_shard calls and PP already pins params unsharded per stage. Remove "
-                f"the flag for those modes."
+                f"path (tensor_parallel_size={self.tp_size}, pipeline_parallel_size={self.pp_size}): "
+                f"the TP setup shards through its own fully_shard calls and PP already pins params "
+                f"unsharded per stage. Remove the flag for those modes."
             )
         if self.fsdp_defer_grad_sync and (self.pp_size > 1 or (self.tp_size > 1 and self.data_parallel_size == 1)):
             raise ValueError(

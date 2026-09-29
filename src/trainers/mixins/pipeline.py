@@ -450,6 +450,7 @@ class PipelineTrainerMixin:
             self._apply_dp_fsdp2(
                 stage,
                 config.stage_world_size,
+                excluded_params=self._fsdp_exclusions().params,
                 dp_group=self._pp_stage_group,
                 topo=topo,
                 detail=f"stage-scoped data parallel ({config.stage_world_size} ranks per stage)",

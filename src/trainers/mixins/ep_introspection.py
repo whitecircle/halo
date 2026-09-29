@@ -47,16 +47,14 @@ def forces_reentrant_checkpointing(parallelism_config, model_config) -> bool:
 def require_ep_config(ep_config):
     """``ep_config`` itself, or a raise where EP state is required but none was captured.
 
-    For paths that only run with EP layers present (expert-TP generation broadcast, the EP grad
-    clip): a missing config there means :meth:`EpIntrospectionMixin._capture_ep_config` never ran,
-    and every process group read off it would come back ``None``, turning each collective into a
-    silent no-op.
+    For paths that only run with EP layers present: a missing config there means
+    :meth:`EpIntrospectionMixin._capture_ep_config` never ran, and every process group read off it
+    would come back ``None``, turning each collective into a silent no-op.
     """
     if ep_config is None:
         raise RuntimeError(
-            "EP state is required here (expert-TP generation broadcast, deferred EP grad sweep or EP "
-            "grad norm) but no EPConfig was captured: _setup_distributed_modes must run "
-            "_capture_ep_config over a model carrying EP layers first."
+            "EP state is required on this path but no EPConfig was captured: _setup_distributed_modes "
+            "must run _capture_ep_config over a model carrying EP layers first."
         )
     return ep_config
 
@@ -185,9 +183,11 @@ class EpIntrospectionMixin:
             raise RuntimeError(config.racy_ep_topology_message)
 
         # Combine and cross-replica grad-sync are different-membership collectives, hence deferred averaging.
-        if config.num_ep_groups > 1 and not config.is_expert_tp_mode and is_global_main_process():
-            scope = "node-local across domains" if config.is_node_local_ep else "cross-node"
-            if require_ep_config(self._ep_config).is_deferred_dp:
+        if config.num_ep_groups > 1 and not config.is_expert_tp_mode:
+            # Outside the logging gate, so a missing EP config raises on every rank rather than rank 0 alone.
+            deferred_dp = require_ep_config(self._ep_config).is_deferred_dp
+            if deferred_dp and is_global_main_process():
+                scope = "node-local across domains" if config.is_node_local_ep else "cross-node"
                 logger.info(
                     f"Multi-group EP ({scope}, {config.num_ep_groups} EP groups, "
                     f"ep_group_size={config.ep_group_size}): cross-replica DP average deferred to a "
