@@ -124,7 +124,7 @@ post-backward sweep ([Multi-Node](multi-node.md#deferred-cross-replica-sync)).
 `8 B/param` = 2 weights + 2 grads + 4 optimizer state; `AdamWBF16` (`src/optimizers/adamw_bf16.py`)
 allocates `exp_avg` and `exp_avg_sq` with `zeros_like(p)`, so both are bf16 and there is no master
 copy and no error-feedback buffer. `fp32_grad_reduce` upcasts only inside the reduce — no storage.
-The stock AdamW is refused under EP ([why](../optimization/bf16-optimizer.md#master-weight-and-grad-reduce-options)),
+The stock AdamW is refused under EP unless `fp32_non_ep_params` is set ([why](../optimization/bf16-optimizer.md#usage)),
 and fp32 expert masters (`fp32_experts`) would take the expert term to 16 B/param, where no cell below
 survives.
 

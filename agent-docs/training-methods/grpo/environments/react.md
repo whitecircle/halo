@@ -27,12 +27,12 @@ environment_kwargs:
 | `require_thought` | `true` | gate for that penalty; a turn doing neither is free either way |
 | `tool_budgets` | `{}` | per-tool episode caps, `{tool: cap}`; `0` disables a tool, an over-cap call is refused as a tool error |
 
-The knobs every environment shares are in the [overview](README.md#configuration). The native protocol's episode-level knobs (`no_tool_use_penalty`, `turn_overflow_penalty`) are not parameters here and raise `TypeError`.
+The knobs every environment shares are in the [overview](README.md#configuration). The native protocol's episode-level knobs (`no_tool_use_penalty`, `turn_overflow_penalty`, `length_cutoff_penalty`) are not parameters here and raise `TypeError`.
 
 ## Tools
 
 - `calculate` — restricted arithmetic and math functions, one `expression`.
-- `python` — in-process sandboxed REPL, imports blocked.
+- `python` — the in-process restricted REPL, imports blocked.
 - `web_search` — `query` and optional `max_results` (default 5).
 
 ## Reward

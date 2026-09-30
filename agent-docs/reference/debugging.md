@@ -38,6 +38,10 @@ profiler_ranks: "0"     # "0" | "all" | "0,8"
 profiler_record_memory_snapshot: false   # also dump a CUDA memory snapshot (§3)
 ```
 
+On a multi-GPU EP run with FA4 active, CUPTI does not complete a step (the CuTe-DSL JIT). Trace with
+`attn_implementation: sdpa`, one GPU or a smaller model, or answer the memory-vs-compute question with
+`tests/gpu/profiling/benchmark_roofline.py`.
+
 Each selected rank writes into `profiler_output_dir`; artifacts carry a `-cycleN` label (one per wait→active cycle):
 
 | Artifact | View with |

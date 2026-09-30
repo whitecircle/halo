@@ -41,7 +41,7 @@ latency-bound and the GPUs are waiting, not computing. Turn on
 | Flash Attention 4 (auto on Blackwell) | 1.1× at 4k rising to 2.3× at 32k on dense; ~+13% on MoE, where all-to-all dominates |
 | `use_liger_kernel: true` (default) | +40% and 19 GB at MoE `ep2`; add `liger_kernel_config: {fused_linear_cross_entropy: true}` past ~16k tokens, which trades 7–20% of speed for 14–30 GB on GPT-OSS `ep1` (the cost shrinks as the sequence grows) |
 | `AdamWBF16` (automatic with `bf16: true`) | weights and optimizer state in 6 bytes/param where fp32-state AdamW needs 12, and a 17% shorter step than `adamw_torch_fused` |
-| `fsdp_defer_grad_sync: true` and `fsdp_reshard_after_backward: false`, with `gradient_accumulation_steps > 1` | one gradient reduce and one parameter re-gather per optimizer step instead of per microstep: +3–7% on one 8-GPU node, +9–13% across two nodes over EFA. Each keeps an unsharded copy per GPU (Qwen3-8B: +13 GB for the gradients). Neither works with `fsdp_reshard_after_forward: true` (ZeRO-3): the config refuses it. [Details](../agent-docs/parallelism/data-parallelism.md) ↗ |
+| `fsdp_defer_grad_sync: true` and `fsdp_reshard_after_backward: false`, with `gradient_accumulation_steps > 1` | one gradient reduce and one parameter re-gather per optimizer step instead of per microstep: +3–7% on one 8-GPU node, +9–13% across two nodes over EFA. Each keeps an unsharded copy per GPU (Qwen3-8B: +13 GB for the gradients). The config refuses both under `fsdp_reshard_after_forward: true` (ZeRO-3). [Details](../agent-docs/parallelism/data-parallelism.md) ↗ |
 
 The defaults already have most of this on. The levers you actually set per run
 are the first three.

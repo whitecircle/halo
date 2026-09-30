@@ -227,7 +227,8 @@ fused SR kernel, fp32 params standard in-place AdamW. See
 [DeepEP](../infrastructure/deepep.md) owns installation, buffer sizing, transport and fabric tuning.
 What an EP run has to plan around:
 
-- **Two dispatch ceilings**, both raised at buffer sizing rather than left to fault mid-kernel:
+- **Two dispatch ceilings**, both refused at config time off the declared budget and re-checked at buffer
+  sizing, rather than left to fault mid-kernel:
 
     - The 32-bit wire index caps every topology at `2³¹ / (num_topk × padded_hidden)` ≈ **175k tokens
       per forward** for GPT-OSS.
@@ -371,7 +372,9 @@ warm-up.
 buffers computed for real** (`accelerate.init_empty_weights(include_buffers=False)`), then streams
 each rank's expert slice straight from safetensors
 (`src/distributed/expert_parallel/lazy_loader.py`). The shell carries the **run's** dtype, not the
-checkpoint config's.
+checkpoint config's. Float parameters stream at that dtype; a float buffer keeps its stored dtype unless the
+family's fp32 pins name it (GLM-5 Next's `e_score_correction_bias`), which then loads fp32, as `from_pretrained`
+loads it.
 
 Buffers must be real: a config-less rotary derives `inv_freq` from ctor args it never stores, which a
 meta build loses irrecoverably. The `from_pretrained(device_map="meta")` route strands the
@@ -502,7 +505,7 @@ topology rejections sit on top: single-domain multi-group EP with `ep_size > 2`
 | `use_grouped_gemm: false` | drops the wrappers at `ep_size == 1`; peeled expert-LoRA targets then raise rather than silently vanish | `_validate_expert_lora_realized` |
 | `fsdp_reshard_after_forward` | rejected — the backward all-gather can race the DeepEP combine | `_validate_fsdp_settings` |
 | `use_hsdp` | rejected — EP already shards over the EP group | `_validate_hsdp` |
-| `bf16_optimizer: false` with a stock AdamW `optim` | rejected at optimizer build ([why](../optimization/bf16-optimizer.md#master-weight-and-grad-reduce-options)); `fp32_non_ep_params: true`, `muon` and `flash_adamw` build | `mixins/base.py` |
+| `bf16_optimizer: false` with a stock AdamW `optim` | rejected at optimizer build ([why](../optimization/bf16-optimizer.md#usage)); `fp32_non_ep_params: true`, `muon` and `flash_adamw` build | `mixins/base.py` |
 | `ref_model` (explicit) | rejected — the reference is never parallelized, so its log-probs would not match the policy | `_validate_reference_model` |
 | `init_from_scratch` | rejected — no sharded random init | `model_loading.py` |
 | `accelerate launch` | rejected — EP requires `torchrun`; the same rejection covers a grouped-GEMM MoE at `ep_size == 1` | `model_loading.py`, `ParallelismValidationMixin` |

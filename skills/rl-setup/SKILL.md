@@ -49,8 +49,9 @@ and full launch examples see [`wiring.md`](wiring.md).
    auto-selected FlashInfer/CUTLASS backends repack expert weights at load and
    corrupt synced updates. vLLM and the trainer must be on **different GPUs** (set
    `VLLM_CUDA_DEVICES` vs `TRAINER_CUDA_DEVICES`); both compose services run
-   `network_mode: host` (the weight-transfer NCCL rendezvous uses an ephemeral
-   trainer-advertised port a bridge network can't reach). Both the server and
+   `network_mode: host` (the server's workers dial the trainer's rendezvous on its
+   `group_port`, then NCCL's bootstrap on an ephemeral trainer port; a bridge network
+   publishes neither). Both the server and
    training images install the one `nvidia-nccl-cu13` version `uv.lock` pins,
    resolved by `docker/nccl_pin.py`, so the weight-transfer NCCL group links the
    same ABI on both ends.
@@ -102,8 +103,9 @@ and full launch examples see [`wiring.md`](wiring.md).
    sizing (`num_rollout_workers`, `max_concurrent_rollouts`), prefetch
    (`enable_prefetch`), and `sync_weights_every_n_steps`.
    `rollout_max_thinking_tokens` caps CoT per turn and is enforced **engine-side**
-   (vLLM `thinking_token_budget`): it needs a server reasoning parser and
-   `VLLM_USE_V2_MODEL_RUNNER=0`, and is refused under `rollout_backend: sglang` — as is
+   (vLLM `thinking_token_budget`): it needs a server reasoning parser,
+   `VLLM_USE_V2_MODEL_RUNNER=0` and, when `rollout_reasoning_end_token` resolves, the IS
+   correction that neutralizes its forced closes; it is refused under `rollout_backend: sglang` — as is
    `carry_reasoning`. The effort length terms (`effort_length_penalty_k0`,
    `effort_length_floor_weight`; both off by default) price an episode's reasoning length by its
    effort level and its shortfall against the per-effort budget.

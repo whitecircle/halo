@@ -155,14 +155,14 @@ ZeRO-2 (64k: 100 vs 138 GB) — the better dense choice when memory is tight.
   long-context mode with no DeepEP dependency. Splitting 4-way instead of 8 trades memory for throughput
   (256k z3: CP4 2,257·98 vs CP8 1,836·56).
 - `EP1 z2` OOMs (ZeRO-2 keeps ~40 GB of params resident); `EP8`, `EP8+CP2` and `EP8+TP8` put 128k tokens/rank through the dispatch (TP shards attention, not
-  expert tokens) — past the elastic limit [below](#ep8-long-context-training).
+  expert tokens), which neither transport trains ([below](#ep8-long-context-training)).
 
 ### EP8 long-context training
 
 Elastic multi-step EP8 training deadlocks at ≥~64k tokens/rank (its combine barrier races FSDP2's
-reduce-scatter); use `ep_buffer_backend: legacy` there (plain EP8 64k = 6,648 tok/s), or split further
-with CP (EP8+CP8 = 16k/rank at 128k) or go dense (EP1 / dense CP-only — neither uses DeepEP). Transport
-limits: [DeepEP → Transport backend](../infrastructure/deepep.md#transport-backend) and
+reduce-scatter); `ep_buffer_backend: legacy` trains 64k (plain EP8 64k = 6,648 tok/s), and 128k tokens/rank
+fails on both transports. Past that, split further with CP (EP8+CP8 = 16k/rank at 128k) or go dense
+(EP1 / dense CP-only — neither uses DeepEP). Transport limits: [DeepEP → Transport backend](../infrastructure/deepep.md#transport-backend) and
 [Dispatch wire-index limit](../infrastructure/deepep.md#dispatch-wire-index-limit).
 
 ## Why Halo's EP wins: all-to-all vs masked all-reduce

@@ -88,9 +88,9 @@ Every released checkpoint ships hybrid `layer_types`, and both of `Qwen3_5MoeGat
 
 ## TP and ETP
 
-Attention-only TP works: `Qwen3_5MoeAttention` and dense `Qwen3_5Attention` are in the TP accept-list, and the MoE block is skipped because EP owns it. The double-width `q_proj` is ColwiseParallel-compatible: the split is per head, so each head keeps its full `head_dim * 2` (query + gate) on one rank.
+Attention-only TP covers the MoE: `Qwen3_5MoeAttention` is in the TP accept-list, and the MoE block is skipped because EP owns it. The double-width `q_proj` is ColwiseParallel-compatible: the split is per head, so each head keeps its full `head_dim * 2` (query + gate) on one rank.
 
-Only the full-attention layers shard: the linear-attention layers stay replicated on every rank, so the per-rank footprint falls by far less than `1/tp_size` (the TP path warns).
+Only the full-attention layers shard there: the linear-attention layers stay replicated on every rank, so the per-rank footprint falls by far less than `1/tp_size` (the TP path warns). A dense checkpoint takes HF-native `tp_plan="auto"`, whose plan also shards the MLP and the linear-attention projections ([Tensor Parallelism](../parallelism/tensor-parallelism.md#supported-models)).
 
 ETP is supported: the routed experts use the fused-GLU contiguous-halves layout, so `_init_fused_glu_params` splits the halves before sharding and stores `gate_proj` / `up_proj` / `down_proj` separately when `expert_tp_size > 1`. The sigmoid-gated shared expert stays replicated. See the [ETP guide](../parallelism/expert-tensor-parallelism.md#limitations).
 

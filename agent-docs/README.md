@@ -4,7 +4,7 @@ Halo is an LLM training toolkit built on HuggingFace TRL, Transformers, and Acce
 
 Trainers subclass TRL/Transformers trainers, so any Hub model trains with the same `TrainingArguments`, Accelerate FSDP configs, and PEFT/LoRA — no checkpoint conversion.
 
-Start with the guides below, or jump to [Training Methods](training-methods/README.md), [Parallelism](parallelism/README.md), [Models](models/README.md), or the [Reference](reference/README.md).
+Start with the guides below, or jump to [Training Methods](training-methods/README.md), [Parallelism](parallelism/README.md), [Models](models/README.md), [Data](data/README.md), [Optimization](optimization/README.md), [Infrastructure](infrastructure/README.md), [Contributing](contributing/README.md), or the [Reference](reference/README.md).
 
 - **[Installation](getting-started/installation.md)** — The prebuilt Blackwell/Hopper image is the supported path — everything, `make install` included, runs inside it.
 - **[Quickstart](getting-started/quickstart.md)** — First SFT run through multi-turn RL, with LoRA, the parallelism flags, and dataset sources.

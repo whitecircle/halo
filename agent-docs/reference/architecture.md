@@ -84,8 +84,8 @@ builds the `EPConfig` / `CPConfig` process groups; the DeviceMeshes come from
 `src/distributed/mesh.py`. The trainer reads mode flags (`is_ep_mode`, `is_cp_mode`, …) off it and
 never re-derives them.
 
-What each mode shards, its data-parallel size and its backend: [Parallelism → Supported
-combinations](../parallelism/README.md#supported-combinations).
+What each mode shards and its backend: [Parallelism → Parallelism modes](../parallelism/README.md#parallelism-modes);
+its data-parallel size: [Supported combinations](../parallelism/README.md#supported-combinations).
 
 Four subpackages own the mechanics: `expert_parallel/` (DeepEP dispatch/combine, per-family MoE
 wrappers, grouped-GEMM expert compute, gradient-sync hooks, expert gather/export), `context_parallel/`

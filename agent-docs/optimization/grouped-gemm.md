@@ -65,8 +65,8 @@ It is gated on **`top_k ≥ ep_size`** (`base_layer._sort_tokens_for_grouped_mm`
 
 Above the gate the gather is materialized as `[recv_N, top_k, H]` before its sum: `top_k`× the recv buffer per MoE layer as a transient, in the forward unpermute and again in the permute's backward. That is ~5.6 GB per layer at GLM-5.3-Flash / Step-3.7-Flash shapes (16k tokens/rank at ep8, top-8, `H=4096`), most of it sentinel rows since a recv token averages `top_k / ep_size` local experts.
 
-A same-session A/B on Qwen3.6-35B-A3B at EP=8, to compare within the table only; tuned absolute
-figures: [Throughput Benchmarks](throughput-benchmarks.md#ep-scaling-seq-4096).
+The table is a same-session A/B on Qwen3.6-35B-A3B at EP=8; compare within it only (tuned absolute
+figures: [Throughput Benchmarks](throughput-benchmarks.md#ep-scaling-seq-4096)).
 
 | Qwen3.6-35b EP=8 | `index_add_` | atomic-free | win |
 |---|---|---|---|

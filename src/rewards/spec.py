@@ -120,7 +120,7 @@ class RewardTerm:
 
 @dataclass(frozen=True, kw_only=True)
 class EnvironmentTerm(RewardTerm):
-    """The environment's own grade — a judge's accept, an answer match, judge adherence — in ``[0, 1]``."""
+    """The environment's own grade — a full solve, an answer match, a passing test function — in ``[0, 1]``."""
 
     source: ClassVar[str] = "environment"
 

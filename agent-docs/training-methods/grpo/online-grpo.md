@@ -74,14 +74,14 @@ A rank-0 startup probe refuses a server whose logprobs are raw pre-temperature v
 
 ## GRPO objective for verifiable rewards
 
-A graded-fraction reward in `[0, 1]` over a small group wants a different objective than the math defaults — this is the reward's *shape*, not the task. The knobs are TRL `GRPOConfig` fields and apply equally to async GRPO.
+A shaped reward in `[0, 1]` (a grade plus small shaping terms) over a small group wants a different objective than the math defaults — this is the reward's *shape*, not the task. The knobs are TRL `GRPOConfig` fields and apply to async GRPO too, except where the row says otherwise.
 
 | Knob | Set it to | Why |
 |---|---|---|
 | `loss_type` | `dapo` (TRL's default) | Normalizes over the global active-token count, so it is length-unbiased; `grpo`'s per-sequence mean is not |
 | `epsilon_high` | `0.28` with `epsilon: 0.2` | DAPO clip-higher: only the upper bound loosens |
 | `scale_rewards` | `batch` for a shaped reward | `group` divides by the group's own spread, turning shaping noise into full-scale advantages |
-| `mask_truncated_completions` | `true` (default `false`) | Drops a completion cut at the budget instead of scoring it a loss |
+| `mask_truncated_completions` | `true` (default `false`) | Drops a completion cut at the budget instead of scoring it a loss. Async GRPO widens `truncated` to a turn overflow, and its recipes leave it off |
 
 A single binary reward is the exception to the `scale_rewards` row: a uniformly-failed group's std is exactly 0, and the `1e-4` added to the divisor leaves its advantages at zero rather than NaN, so the recipes keep `group`.
 

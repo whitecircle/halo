@@ -115,16 +115,16 @@ docker run --gpus all --network=host --ipc=host \
 | `max_concurrent_rollouts` | `None` | pipeline depth; default 4 × this rank's share of `num_rollout_workers` (the whole pool locally, `÷ world_size` on a shared Ray cluster) |
 | `ray_address` | `None` | shared Ray cluster; `None` = per-rank local |
 | `rollout_temperature` / `rollout_top_p` / `rollout_max_tokens` | `0.7` / `0.95` / `32768` | rollout sampling (max tokens per turn) |
-| `rollout_max_thinking_tokens` | `None` | per-turn CoT cap (vLLM `thinking_token_budget`); needs a server reasoning parser + `VLLM_USE_V2_MODEL_RUNNER=0`, refused under `sglang`. Under the episode scope, the most one turn may take of the episode's budget |
+| `rollout_max_thinking_tokens` | `None` | per-turn CoT cap (vLLM `thinking_token_budget`); needs a server reasoning parser + `VLLM_USE_V2_MODEL_RUNNER=0`, and the IS correction when the reasoning marker resolves; refused under `sglang`. Under the episode scope, the most one turn may take of the episode's budget |
 | `rollout_thinking_budget_scope` | `turn` | what a thinking budget covers: `turn` (each turn whole) or `episode` (the turns share it, each turn capped at what is left). `episode` is vLLM-only, needs `train_on_sampled_tokens`, and without `rollout_max_thinking_tokens` needs the env's `reasoning_effort` and every level's `thinking_tokens` |
 | `rollout_thinking_turn_reserve` | `512` | under the episode scope, the reasoning a turn keeps once the budget is spent; at most `rollout_max_thinking_tokens` and every level's `thinking_tokens` |
-| `rollout_reasoning_end_token` | `</think>` | the token that closes reasoning; under the episode scope a turn's spend is its sampled ids up to and including it |
+| `rollout_reasoning_end_token` | `</think>` | the token that closes reasoning; a forced close of it gets ratio 0 wherever a vLLM budget can bind, and under the episode scope a turn's spend is its sampled ids up to and including it |
 | `rollout_chat_template_kwargs` | `{}` | chat-template variables sent on every rollout request **and** applied to the trainer's own renders (Qwen3.x `preserve_thinking`); `reasoning_effort` and `reasoning_budget` are refused here — they travel per episode — and so is `reasoning_budget_scope`, which follows `rollout_thinking_budget_scope` |
 | `max_train_row_tokens` | `None` | longest training row a rank takes; must exceed `rollout_max_tokens`. Over-cap per-turn rows are left out, whole-trajectory rows train at zero weight (`sampling/rows_over_cap_frac`) |
 | `eval_rollout_batch_size` | `None` | rows per rank in one eval rollout round (eval runs without prefetch); `None` = the eval batch |
 | `effort_length_penalty_k0` / `effort_length_floor_weight` | `None` / `0.0` | both off by default; the first prices an episode's reasoning tokens by its effort level (capped at `effort_length_penalty_c_max`), the second its shortfall against `effort_length_floor_budgets` × the thinking budget it ran under |
 | `episode_timeout` | `1200.0` | per-episode deadline in engine-serving time (a weight-sync pause is credited back), checked against the NCCL watchdog — raise `DIST_NCCL_TIMEOUT_MINUTES` with it |
-| `train_on_sampled_tokens` | `True` | train on the server's actual sampled ids (needs `--return-tokens-as-token-ids`) rather than a re-tokenized re-render |
+| `train_on_sampled_tokens` | `True` | train on the server's actual sampled ids (needs `--return-tokens-as-token-ids`) rather than a re-tokenized re-render; off, a run with a bindable vLLM thinking budget is refused |
 | `enable_prefetch` | `True` | overlap rollout with training (auto-disabled in single-server mode) |
 | `num_prefetch_batches` | `1` | prefetch result-queue bound; the pipeline is one round deep, so values above 1 only add headroom |
 | `model_name` / `request_timeout` / `max_retries` / `retry_base_wait` | — | per-request HTTP behavior; `request_timeout` counts engine-serving time like `episode_timeout` |
@@ -146,7 +146,8 @@ merged with `environment_kwargs`, to `resolve_environment(environment_type, conf
 fails before any server is touched. Each term prices one source's score in `[0, 1]` as
 `weight × score ^ exponent` — `environment` (the episode grade), `judge` (a generative judge over
 `requirements`), `reward_model` (a served BT / seq-cls model); the online arm adds `accuracy` and
-`format`. Partial credit is the `exponent` (`> 0`, above 1 convex); there is **no failure offset**,
+`format`. The `exponent` (`> 0`, above 1 convex) reshapes a fractional score (a judge's, a reward
+model's); a binary grade has nothing to reshape. There is **no failure offset**,
 since a constant cancels in the group baseline. Per-term reference:
 `agent-docs/training-methods/grpo/rewards.md`.
 

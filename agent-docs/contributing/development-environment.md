@@ -78,7 +78,8 @@ hard-fails when the cache is missing and the Hub is unreachable; one going throu
 
 Secrets live in the repo-root `.env`. Cache and path redirects are `-e` flags pointed at a **verified**
 large volume: the root filesystem is small, and a path named `/mnt` is not guaranteed to be a separate
-device, so check `findmnt` / `df -h` first. The toolkit, cache and path variables are catalogued in
+device, so check `findmnt` / `df -h` first. `TMPDIR` goes there too, as a short top-level path
+([why](../reference/troubleshooting.md)); the toolkit and cache variables are catalogued in
 [Environment variables](../reference/configuration-reference.md#environment-variables). On a host
 whose docker defaults to a runtime that rejects `--gpus` / `--ipc host` (e.g. sysbox-runc), set
 `DOCKER_RUNTIME=nvidia` — every `make` docker invocation then pins `--runtime nvidia` explicitly.

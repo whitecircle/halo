@@ -50,7 +50,7 @@ Setting the servers up in the first place is [Rollout Servers](rollout-servers.m
 
 | Symptom | Cause → fix |
 | --- | --- |
-| Weight-sync group never forms, the server never joining | Both containers must run `network_mode: host`; a bridge network does not publish the group port the server dials back on. Under SGLang, check the server came from this repo's `Dockerfile.sglang` — the upstream image ships a different NCCL. |
+| Weight-sync group never forms, the server never joining | Both containers must run `network_mode: host`; a bridge network does not publish the ports the server dials back on. Under SGLang, check the server came from this repo's `Dockerfile.sglang` — the upstream image ships a different NCCL. |
 | Trainer exits at start with `Errno 98` on the weight-sync group port | The default port `51216` (plus one per extra server) sits in Linux's ephemeral range, so another connection can take one first. Add them to `net.ipv4.ip_local_reserved_ports` (keep the ports already listed) or set `group_port` outside `32768–60999`. |
 | Rollouts much slower in a run than on the same server benchmarked alone | The vLLM engine core is one CPU thread, and the trainer and sandboxes compete for it. Give each server its own cores (`--cpuset-cpus`) and run one engine per GPU. |
 | Startup rejection under `rollout_backend: sglang` | Weight-sync support is per family and per engine; the trainer names the family and the loader fact behind the refusal at construction ([Supported Matrix](supported-matrix.md#rollout-engines)). `rollout_max_thinking_tokens`, `rollout_thinking_budget_scope: episode` and `carry_reasoning` are vLLM-only and refused here too. Drop the knob it names, or use `rollout_backend: vllm`. |
@@ -62,7 +62,7 @@ Setting the servers up in the first place is [Rollout Servers](rollout-servers.m
 | "Excluded N of M `lora_target_modules` matches from PEFT injection" at startup | Working as intended: those matches are modules no stock LoRA adapter fits — a multimodal tower's projection wrapper (Gemma 4), or a projection whose forward is not its layer's plain matmul (DeepSeek-V4's grouped `o_a_proj`). The message names the count and an example path; everything else is adapted. |
 | `GENERATION is wedged` at startup | A previous trainer died attached to the vLLM engine. Restart the vLLM container before relaunching. |
 | Rewards fine, policy silently degrades | Under async GRPO with environments, watch `sampling/logratio_mean` — a steady negative drift means broken weight sync. Also serve MoE models with `--moe-backend triton`; the auto-selected backends silently corrupt synced expert weights. |
-| `a vLLM thinking budget is enforced but the importance-sampling correction is off` at startup | The engine forces a reasoning close at the budget, and only the correction keeps those forced tokens out of the loss. Leave `train_on_sampled_tokens` and `vllm_importance_sampling_correction` on (both default on), or drop the thinking budget. |
+| `a vLLM thinking budget can be enforced but the importance-sampling correction is off` at startup | The engine closes the reasoning at the budget, and only the correction keeps those forced tokens out of the loss. Turn `train_on_sampled_tokens` and `vllm_importance_sampling_correction` back on (both default on). |
 
 ## Getting eyes on a hung run
 

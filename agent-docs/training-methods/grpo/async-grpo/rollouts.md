@@ -198,19 +198,21 @@ Turns the rollout marked untrainable — engine-cut (`truncated`), ended with ne
 visible content (`empty`), or every tool call naming a nonexistent tool (`calls_rejected`) — become
 rows too, tagged: a tagged row stays in the loss only when its trajectory's advantage is negative
 ([Objective](objective.md#untrainable-turns)). Such a turn stays in the next turn's prompt. An episode
-whose turns are all untrainable trains on that condition alone; one that yields no row at all yields
+whose turns are all untrainable trains only when its advantage is negative; one that yields no row at all yields
 one fully masked row.
 
 The negative-only rows need the turn's sampled ids. An untrainable turn without them, and every
 untrainable turn on the single-row path below, trains on nothing: the re-render closes a cut turn with
 template tokens the engine never sampled. `sampling/untrainable_turns_rowless_frac` is the share of
-untrainable turns that became no row (no ids, zero tokens, or over `max_train_row_tokens`).
+untrainable turns that became no row (no ids, zero tokens, a rejected prompt re-render, or over
+`max_train_row_tokens`).
 
 A trajectory where any other turn lost its completion ids drops whole to the single re-tokenized
 row, warned once with the engine's remedy — all-or-nothing, never a partial capture.
 
 A turn that kept its completion ids but lost its prompt ids re-renders only that prompt through the
-serving template, silently; a prefix the template rejects invalidates the episode, not the batch.
+serving template, silently; a prefix the template rejects invalidates the episode, not the batch, and on an
+untrainable turn drops only that turn's row.
 
 The single-row path renders the trajectory once and locates each assistant span inside that render. A
 boundary it cannot pin **invalidates the episode** — a fully masked row, outside its group's baseline

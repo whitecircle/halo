@@ -1,6 +1,6 @@
 # Objective and Stability
 
-The loss is TRL's GRPO objective ([Online GRPO](../online-grpo.md#grpo-objective-for-verifiable-rewards)) at TRL's default `loss_type: dapo`, clipped by `epsilon` (`0.2`; no recipe sets `epsilon_high`, which falls back to `epsilon`), inert at `num_iterations: 1`. Rollouts differ from the trainer's policy by the engine↔trainer numerics gap, and by up to one sync interval under prefetch or `sync_weights_every_n_steps > 1`, so an importance ratio corrects them, and the trust region is masks on that ratio, not a KL term.
+The loss is TRL's GRPO objective ([Online GRPO](../online-grpo.md#grpo-objective-for-verifiable-rewards)) at TRL's default `loss_type: dapo`, clipped by `epsilon` (`0.2`; no recipe sets `epsilon_high`, which falls back to `epsilon`); the clip is inert at `num_iterations: 1`. Rollouts differ from the trainer's policy by the engine↔trainer numerics gap, and by up to one sync interval under prefetch or `sync_weights_every_n_steps > 1`, so an importance ratio corrects them, and the trust region is masks on that ratio, not a KL term.
 
 ## Importance sampling correction
 
@@ -12,6 +12,8 @@ Consequences:
 - Set `rollout_top_p: 1.0` under the geometric band (default `0.95`): a nucleus cut shifts every uncertain position, which the band reads as drift. A server that renormalizes log-probs over the nucleus raises at startup.
 
 Watch `sampling/logratio_mean` first: the unclamped mean log-ratio in nats, near 0 when healthy. A growing negative drift is the broken-weight-sync signature ([Weight synchronization](setup.md#weight-synchronization)).
+
+A reasoning close the engine forced at the thinking budget (`rollout_reasoning_end_token` at sampling log-prob exactly 0) gets ratio 0 like any masked token, keeping the DAPO normalizer: it was not the policy's choice, and trained with the episode's advantage it moves the model's own probability of ending its reasoning. `sampling/forced_close_frac` counts these tokens. The ratio reaches the loss only through this correction, so a run whose vLLM thinking budget can bind (a level's `thinking_tokens` or `rollout_max_thinking_tokens`) and whose tokenizer resolves the marker refuses to start without it. Under the `turn` scope a tokenizer without the marker keeps the forced closes in the loss, with a warning.
 
 ## Trust region masks
 
@@ -47,13 +49,11 @@ A trajectory's advantage is its total reward minus the mean over its group's val
 
 A non-finite reward or advantage fails the step on every rank: under `batch` scaling a single one makes the shared std, and so every advantage of the step, non-finite.
 
-A reasoning close the engine forced at the thinking budget (`rollout_reasoning_end_token` at sampling log-prob exactly 0) gets ratio 0 like any masked token, keeping the DAPO normalizer: it was not the policy's choice, and trained with the episode's advantage it moves the model's own probability of ending its reasoning. `sampling/forced_close_frac` counts these tokens; a tokenizer without the marker keeps them in the loss with a warning. The ratio reaches the loss only through the importance-sampling correction, so a run that enforces a vLLM thinking budget (a level's `thinking_tokens` or `rollout_max_thinking_tokens`) refuses to start without it.
+`drop_degenerate_groups` defaults **on** here (off for online GRPO) and judges a group on the reward each environment settled: its grade, its shaping and every external score, without the trainer's effort-length terms. Those price every episode differently, so on the trained total no group would ever tie. A group whose members all settled the same reward has no contrast to learn from beyond the length terms, yet its tokens still inflate the DAPO normalizer (`sampling/degenerate_group_frac`). `mask_truncated_completions` is enforced here, not in TRL's generation path; the recipes leave it off.
 
 ## Untrainable turns
 
-A turn the engine cut off, one the model ended on nothing, and one whose every call named a nonexistent tool ([Rollouts](rollouts.md#training-on-sampled-tokens)) train only on a negative advantage (strictly below 0). Rewarded, the runaway reasoning, the empty stop or the invented call would be reinforced whenever the episode recovers; left out entirely, a failing episode's signal lands on its other turns alone and the over-long reasoning behind a cut grows unchecked. The row's `tool_mask` is cleared before the DAPO normalizer is taken, in train and eval alike, so a dropped row counts in neither the loss nor the normalizer; a forced reasoning close inside a kept row still gets ratio 0. `sampling/untrainable_rows_frac` is the share of rows tagged, `sampling/untrainable_rows_trained_frac` the share of those that reached the loss.
-
-`drop_degenerate_groups` defaults **on** here (off for online GRPO) and judges a group on the reward each environment settled: its grade, its shaping and every external score, without the trainer's effort-length terms. Those price every episode differently, so on the trained total no group would ever tie. A group whose members all settled the same reward has no contrast to learn from beyond the length terms, yet its tokens still inflate the DAPO normalizer (`sampling/degenerate_group_frac`). `mask_truncated_completions` is enforced here, not in TRL's generation path; the recipes leave it off.
+A turn the engine cut off, one the model ended on nothing, and one whose every call named a nonexistent tool ([Rollouts](rollouts.md#training-on-sampled-tokens)) train only on a negative advantage (strictly below 0), as per-turn rows of their sampled ids; on the single re-tokenized row they train on nothing. Rewarded, the runaway reasoning, the empty stop or the invented call would be reinforced whenever the episode recovers; left out entirely, a failing episode's signal lands on its other turns alone and the over-long reasoning behind a cut grows unchecked. The row's `tool_mask` is cleared before the DAPO normalizer is taken, in train and eval alike, so a dropped row counts in neither the loss nor the normalizer; a forced reasoning close inside a kept row still gets ratio 0. `sampling/untrainable_rows_frac` is the share of rows tagged, `sampling/untrainable_rows_trained_frac` the share of those that reached the loss.
 
 ## KL and template protection
 

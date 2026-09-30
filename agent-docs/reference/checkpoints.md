@@ -157,8 +157,8 @@ router-logit plane on every forward.
 
 It is also written in the flat form the pinned vLLM server parses. transformers 5.16 serializes a
 family's per-layer attention geometry only as `per_layer_config`, which the vLLM server's transformers
-(the 5.14 line; SGLang pins 5.12.1, [Rollout Servers](../infrastructure/rollout-servers.md#config-schema-parity))
-refuses at parse.
+(the 5.14 line, [Config-schema parity](../infrastructure/rollout-servers.md#config-schema-parity)) refuses at
+parse (SGLang's 5.12.1 reads the flat form too).
 
 A family declaring `_LEGACY_PER_LAYER_CONFIG_KEYS` on its EP layer class (Gemma 4:
 `global_head_dim`, `num_global_key_value_heads` — the full-attention layers' geometry) has every

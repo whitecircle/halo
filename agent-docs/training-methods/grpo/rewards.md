@@ -22,7 +22,7 @@ Every term takes `name` (its metric key, `reward/<name>` on the environment arm,
 
 | `source` | Score | Arm |
 |---|---|---|
-| `environment` | the environment's own grade (a solve on every hidden test, answer match, adherence) | environments |
+| `environment` | the environment's own grade (a solve on every hidden test, an answer match, a passing test function) | environments |
 | `judge` | a generative judge over the requirements below | both |
 | `reward_model` | a served Bradley-Terry or sequence-classification model | both |
 | `accuracy`, `format` | the RLVR graders | online |
@@ -63,7 +63,7 @@ A `*ForSequenceClassification` or `*ForRewardModel` checkpoint served by the rol
 
 ## Environment arm
 
-An environment grades, the terms price. `_grade_episode(trajectory, context)` returns an `EpisodeGrade`: `objective`, the environment's score in `[0, 1]` (a solve on every hidden test, answer match, adherence), and `shaping`, its own episode-level terms by bare name. The episode reward is the sum of its `reward/*` components:
+An environment grades, the terms price. `_grade_episode(trajectory, context)` returns an `EpisodeGrade`: `objective`, the environment's score in `[0, 1]` (a solve on every hidden test, an answer match, a passing test function), and `shaping`, its own episode-level terms by bare name. The episode reward is the sum of its `reward/*` components:
 
 - `reward/turn_shaping` — the per-turn deltas accrued during the episode (tool credit and penalties, ReAct thought credit).
 - `reward/tool_shaping` — native-protocol environments only: their episode-level knobs (`no_tool_use_penalty`, `turn_overflow_penalty`, `length_cutoff_penalty`), from `_episode_shaping`.
