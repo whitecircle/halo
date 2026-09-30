@@ -71,6 +71,12 @@ SUBMIT_TOOL = "submit_solution"
 # Pass fraction of each graded submission, in order: what ``episode/resubmission_improved`` reads.
 SUBMISSION_PASS_FRACS_KEY = "submission_pass_fracs"
 NO_STDIN_NOTE = "(No stdin was passed to this run; give the program its input in the `stdin` argument.)"
+STARVED_RUN_NOTE = (
+    "(No stdin was passed and the program printed nothing, so this run was not counted; give the program its "
+    "input in the `stdin` argument.)"
+)
+# Scratchpad runs returned for getting no input and printing nothing (``episode/starved_test_runs``).
+STARVED_TEST_RUNS_KEY = "starved_test_runs"
 # Follows a scratchpad timeout, whose limit is the one this problem's graded tests run under.
 SCRATCHPAD_TIME_LIMIT_NOTE = "(the per-test time limit this problem is graded at)"
 # Closes every scratchpad reply while the episode caps the scratchpad.
@@ -458,15 +464,18 @@ class CodeContestsEnvironment(NativeToolUseEnvironment):
         stdin = str(stdin or "")
         result = self.sandbox.run(code, stdin=stdin, timeout=timeout, language=language)
         lines = [format_sandbox_repl_output(result, timeout)]
+        clean_exit = result.returncode in (0, None)
         if result.timed_out:
             lines[0] += f" {SCRATCHPAD_TIME_LIMIT_NOTE}"
-        elif (
-            not stdin
-            and not result.compile_failed
-            and (result.returncode not in (0, None) or not result.stdout.strip())
-        ):
-            # A program that reads input it was not given ends in a parse error or in silence, neither
-            # of which names the cause; the run is spent either way. A build failure is not that.
+        elif not stdin and not result.compile_failed and clean_exit and not (result.stdout + result.stderr).strip():
+            # Given no input, the program told the model nothing, so the run is returned to the budget.
+            lines.append(STARVED_RUN_NOTE)
+            if trajectory is not None:
+                self._refund_tool_call(trajectory, self.test_tool_name)
+                trajectory.info[STARVED_TEST_RUNS_KEY] = trajectory.info.get(STARVED_TEST_RUNS_KEY, 0) + 1
+        elif not stdin and not result.compile_failed and (not clean_exit or not result.stdout.strip()):
+            # A program that reads input it was not given ends in a parse error, which does not name the
+            # cause; the traceback it returns still spends the run. A build failure is not that.
             lines.append(NO_STDIN_NOTE)
         cap = trajectory.info[EPISODE_TOOL_BUDGETS_KEY].get(self.test_tool_name) if trajectory is not None else None
         if cap is not None:
@@ -694,6 +703,7 @@ class CodeContestsEnvironment(NativeToolUseEnvironment):
         submissions = self._submissions(trajectory)
         metrics["episode/submission_rate"] = 1.0 if submissions > 0 else 0.0
         metrics["episode/test_calls"] = float(self._test_calls(trajectory))
+        metrics["episode/starved_test_runs"] = float(info.get(STARVED_TEST_RUNS_KEY, 0))
         if submissions > 0:
             # Mean over submitting episodes: the share that ran the scratchpad before submitting.
             metrics["episode/tested_before_submission"] = 1.0 if info.get("tested_before_submission") else 0.0

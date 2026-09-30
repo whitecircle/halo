@@ -569,6 +569,13 @@ class BaseEnvironment(ABC):
         counts[name] = counts.get(name, 0) + 1
         return counts[name]
 
+    @staticmethod
+    def _refund_tool_call(trajectory: Trajectory, name: str) -> None:
+        """Return one admitted call of tool ``name`` to the episode's budget, for a handler that found the
+        call spent nothing (the inverse of :meth:`_count_tool_call`)."""
+        counts = trajectory.info.setdefault(TOOL_CALL_COUNTS_KEY, {})
+        counts[name] = max(0, counts.get(name, 0) - 1)
+
     def _credit_tool_call(self, trajectory: Trajectory, success: bool) -> float:
         """Book one executed tool call on the episode's counters and return its reward delta:
         ``-tool_error_penalty`` for a failed call; for a successful one ``tool_success_reward``, less

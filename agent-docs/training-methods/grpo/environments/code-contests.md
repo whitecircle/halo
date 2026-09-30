@@ -85,7 +85,7 @@ message ("1 graded submission, 0 scratchpad runs").
 - The scratchpad — `python_repl` when the run fixes `python`, else `run_code`. It runs a program through the grading sandbox, standard library included, on the `stdin` the call supplies (empty by default), so the model can feed it the statement's sample input or its own; it never sees the graded tests. Each call is one-shot — nothing a run writes survives into the next. Past `max_test_calls` a call is refused.
 - `submit_solution` — grades a complete stdin/stdout program against the hidden tests. The only graded channel, with no fenced-code-block fallback. Reaching `max_submissions` ends the episode.
 
-A scratchpad run gets the per-test time limit its language is graded at ([Grading rules](#grading-rules)), and a timeout says so. Its reply leads with any error — the compiler's first diagnostics, or a crash's signal and stderr tail — ahead of the program's stdout ([Sandboxes](sandbox.md#using-it-from-python)). A run with no `stdin` that crashes or prints nothing adds a note naming the missing input (not after a compile failure or a timeout), and every reply ends with the runs left while `max_test_calls` binds (`Scratchpad runs left: N of M.`).
+A scratchpad run gets the per-test time limit its language is graded at ([Grading rules](#grading-rules)), and a timeout says so. Its reply leads with any error — the compiler's first diagnostics, or a crash's signal and stderr tail — ahead of the program's stdout ([Sandboxes](sandbox.md#using-it-from-python)). A run with no `stdin` that crashes adds a note naming the missing input, and one that exits cleanly having printed nothing is returned to the budget with a note saying so, since it told the model nothing (neither note follows a compile failure or a timeout); every reply ends with the runs left while `max_test_calls` binds (`Scratchpad runs left: N of M.`).
 
 A refused call is a tool error: it pays `tool_error_penalty`, never `tool_success_reward`. A
 scratchpad run that ends on a sandbox fault ends the episode ([Sandbox faults](sandbox.md#sandbox-faults)). With a
@@ -158,7 +158,8 @@ the length terms) out-scores any zero-objective episode; each failed tool call a
 `tool_error_penalty` on top.
 `tests/cpu/config/test_env_grpo_reward_economy.py` holds the shipped recipes to those relations.
 
-Behavior counters ride alongside: `episode/submission_rate`, `episode/test_calls`,
+Behavior counters ride alongside: `episode/submission_rate`, `episode/test_calls` (runs that counted),
+`episode/starved_test_runs` (runs returned for having no input and no output),
 `episode/tested_before_submission` (over submitting episodes), `episode/grading_budget_hit`, and
 `episode/language_switches` where the model picks the language.
 

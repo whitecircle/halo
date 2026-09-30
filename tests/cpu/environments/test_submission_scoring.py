@@ -16,6 +16,7 @@ import pytest
 from src.environments.base import OBJECTIVE_REWARD_KEY, REWARD_COMPONENTS_KEY
 from src.environments.envs.tasks.coding.code_contests import (
     NO_STDIN_NOTE,
+    STARVED_RUN_NOTE,
     SUBMISSION_PASS_FRACS_KEY,
     CodeContestsEnvironment,
 )
@@ -112,24 +113,25 @@ def test_the_behavior_counter_is_the_share_of_resubmissions_that_improved():
 
 
 @pytest.mark.parametrize(
-    ("result", "stdin", "noted"),
+    ("result", "stdin", "note"),
     [
-        (SandboxResult(stdout="", returncode=0), "", True),
-        (SandboxResult(stdout="", stderr="ValueError: invalid literal for int()", returncode=1), "", True),
-        (SandboxResult(stdout="3\n", stderr="IndexError: list index out of range", returncode=1), "", True),
-        (SandboxResult(stdout="", stderr="ValueError: invalid literal for int()", returncode=1), "5\n", False),
-        (SandboxResult(stdout="", returncode=0), "5\n", False),
-        (SandboxResult(stdout="42\n", returncode=0), "", False),
+        # Silent without input: nothing was learned, so the run is returned and the reply says so.
+        (SandboxResult(stdout="", returncode=0), "", STARVED_RUN_NOTE),
+        (SandboxResult(stdout="", stderr="ValueError: invalid literal for int()", returncode=1), "", NO_STDIN_NOTE),
+        (SandboxResult(stdout="3\n", stderr="IndexError: list index out of range", returncode=1), "", NO_STDIN_NOTE),
+        (SandboxResult(stdout="", stderr="ValueError: invalid literal for int()", returncode=1), "5\n", None),
+        (SandboxResult(stdout="", returncode=0), "5\n", None),
+        (SandboxResult(stdout="42\n", returncode=0), "", None),
         # A build that failed or a run that timed out says nothing about a missing input.
-        (SandboxResult(stderr="main.py: error: bad", returncode=1, compile_failed=True), "", False),
-        (SandboxResult(timed_out=True), "", False),
+        (SandboxResult(stderr="main.py: error: bad", returncode=1, compile_failed=True), "", None),
+        (SandboxResult(timed_out=True), "", None),
     ],
 )
-def test_a_starved_scratchpad_run_names_the_missing_stdin(result, stdin, noted):
+def test_a_starved_scratchpad_run_names_the_missing_stdin(result, stdin, note):
     env = _env(sandbox=StubSandbox(result))
     arguments = {"code": "print(int(input()))", **({"stdin": stdin} if stdin else {})}
     observation = _call(env, _episode(env), "python_repl", **arguments)
-    assert (NO_STDIN_NOTE in observation) is noted, observation
+    assert [n for n in (NO_STDIN_NOTE, STARVED_RUN_NOTE) if n in observation] == ([note] if note else []), observation
     if result.stdout == "" and result.returncode == 0:
         assert observation.startswith(REPL_NO_OUTPUT_MESSAGE)
 

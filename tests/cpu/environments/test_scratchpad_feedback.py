@@ -22,6 +22,7 @@ from src.environments.envs.protocols.native import NativeToolUseEnvironment
 from src.environments.envs.tasks.coding.code_contests import (
     NO_STDIN_NOTE,
     SCRATCHPAD_TIME_LIMIT_NOTE,
+    STARVED_RUN_NOTE,
     SUBMIT_TOOL,
     CodeContestsEnvironment,
 )
@@ -191,6 +192,25 @@ def test_every_scratchpad_reply_states_the_runs_left():
         last = _scratchpad(env, traj, code="print(2)", stdin="1\n")
     assert last.endswith("(Scratchpad runs left: 0 of 6.)")
     assert "runs left" not in env._run_test("print(3)"), "a direct call outside an episode carries no budget"
+
+
+def test_a_run_given_no_input_that_prints_nothing_spends_no_run():
+    """A solution run with no stdin reads nothing and prints nothing: the run is returned to the budget and the
+    reply says so. A starved run that crashes returns a traceback, and a run that prints (or is quiet on real
+    input) told the model something, so each of those spends its run."""
+    env = _env(language="python")
+    traj = _episode(env)
+    reads_input = "import sys\ndata = sys.stdin.read().split()\nif data:\n    print(int(data[0]) + 1)"
+    silent = _scratchpad(env, traj, code=reads_input)
+    assert STARVED_RUN_NOTE in silent and silent.endswith("(Scratchpad runs left: 6 of 6.)"), silent
+    assert env._test_calls(traj) == 0
+    crash = _scratchpad(env, traj, code="print(int(input()) + 1)")
+    assert NO_STDIN_NOTE in crash and crash.endswith("(Scratchpad runs left: 5 of 6.)"), crash
+    printed = _scratchpad(env, traj, code="print(7)")
+    assert STARVED_RUN_NOTE not in printed and printed.endswith("(Scratchpad runs left: 4 of 6.)"), printed
+    quiet_on_input = _scratchpad(env, traj, code=reads_input.replace("print", "len"), stdin="1\n")
+    assert quiet_on_input.endswith("(Scratchpad runs left: 3 of 6.)"), quiet_on_input
+    assert env.rollout_metrics(traj)["episode/starved_test_runs"] == 1.0
 
 
 @pytest.mark.parametrize("name", ["EMPTY_TURN_NUDGE", "LENGTH_CUTOFF_NUDGE"])
