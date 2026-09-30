@@ -16,7 +16,7 @@ It speaks native tool calls, so the server needs a tool-call parser for the mode
 
 ```yaml
 environment_type: codeforces
-max_turns: 16                # 16 in most recipes, 18 in the curriculum's stage-2 and stage-3 recipes; the class default is 15
+max_turns: 16                # 16 in most recipes, 18 in the three curriculum recipes; the class default is 15
 rewards:
   - source: environment      # 1 when the submitted solution passes every hidden test, else 0
 environment_kwargs:
