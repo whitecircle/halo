@@ -27,13 +27,14 @@ import yaml
 
 from src.distributed.expert_parallel.expert_weights import ep_layer_classes_for_config
 from src.distributed.loading.peft_setup import split_expert_lora_targets
+from src.environments.episode import resolve_reasoning_end_ids
 from src.models.loading.config_levels import text_config
 from src.models.loading.tokenizer_setup import is_bounded_length
 from src.models.moe_balancing import BIAS_UPDATE_MODES, config_has_experts, native_balancing_bias_attrs
 from src.models.patches.attention import model_has_sinks, validate_attn_implementation
 from src.training.parallelism_args import parallelism_config_from_args
 from tests.common.parallelism import make_parallelism_config
-from tests.common.tokenizers import load_cached_config, try_cached_config
+from tests.common.tokenizers import load_cached_config, load_cached_tokenizer, try_cached_config
 from tests.cpu.config.test_examples_parse import (
     _EXAMPLES,
     EXAMPLES_ROOT,
@@ -259,6 +260,21 @@ def test_example_thinking_budget_has_a_server_side_parser(config):
         "this config sends a thinking budget but its launch instructions name no --reasoning-parser; "
         "vLLM refuses thinking_token_budget with a 400 on every rollout without one"
     )
+
+
+@pytest.mark.parametrize("config", _ENV_GRPO_EXAMPLES, **_ID)
+def test_vllm_example_names_a_reasoning_close_its_tokenizer_writes(config):
+    """The loss finds the reasoning closes vLLM's thinking budget forces by ``rollout_reasoning_end_token``.
+
+    A marker the model's tokenizer does not write — the ``</think>`` default on Gemma 4 (``<channel|>``) or
+    gpt-oss (its five-token final-channel opener) — only warns at startup, and every forced close then
+    trains with the episode's advantage. SGLang enforces no budget, so forces no close to find.
+    """
+    parsed = parser_for(script_for(config)).parse_yaml_file(str(config))
+    if parsed_field(parsed, "rollout_backend") == "sglang":
+        return
+    tokenizer = load_cached_tokenizer(parsed_field(parsed, "model_name_or_path"), trust_remote_code=True)
+    resolve_reasoning_end_ids(tokenizer, parsed_field(parsed, "rollout_reasoning_end_token"))
 
 
 def test_a_weight_sync_example_exists():

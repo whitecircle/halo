@@ -36,6 +36,7 @@ from src.environments.episode import (
     RolloutResult,
     effort_length_floor,
     effort_length_penalty,
+    resolve_reasoning_end_ids,
     resolve_reasoning_end_token_id,
     validate_thinking_budget_scope,
 )
@@ -295,7 +296,7 @@ class DistributedAsyncEnvironmentalGRPOTrainer(
         self._train_on_sampled_tokens = self.async_config.train_on_sampled_tokens
         self._rollout_backend = self.async_config.rollout_backend
         self._rollout_template_kwargs = self.async_config.rollout_template_variables()
-        self._forced_close_token_id = self._resolve_forced_close_token_id()
+        self._forced_close_ids = self._resolve_forced_close_ids()
         self._max_train_row_tokens = self.async_config.max_train_row_tokens
         self._rows_over_cap = 0
         self._warned_capture_missing = False
@@ -580,35 +581,33 @@ class DistributedAsyncEnvironmentalGRPOTrainer(
         """Forced reasoning closes are neutralised through the IS ratio, which only reaches the loss under the
         importance-sampling correction; without it they would train with the episode's advantage and teach the
         model to stop closing its reasoning."""
-        if self._forced_close_token_id is not None and not self._is_correction:
+        if self._forced_close_ids is not None and not self._is_correction:
             raise ValueError(
                 "a vLLM thinking budget can be enforced but the importance-sampling correction is off "
                 "(train_on_sampled_tokens + vllm_importance_sampling_correction): the reasoning closes the "
                 "engine forces at the budget would train with the episode's advantage."
             )
 
-    def _resolve_forced_close_token_id(self) -> int | None:
-        """The reasoning-end token the engine forces when a turn reaches its thinking budget, whose forced
+    def _resolve_forced_close_ids(self) -> tuple[int, ...] | None:
+        """The reasoning-end ids the engine forces when a turn reaches its thinking budget, whose forced
         occurrences the loss must not train on; ``None`` when no budget can be enforced (SGLang enforces none).
 
-        The episode scope already requires the marker. Under the per-turn scope a tokenizer without it (a
-        family whose reasoning ends in another token) keeps its forced closes in the loss, said loudly."""
+        The episode scope counts reasoning up to the marker, so it requires a single-token one. Under the
+        per-turn scope a marker the tokenizer does not write (the ``</think>`` default on a family whose
+        reasoning ends otherwise) keeps the forced closes in the loss, said loudly."""
         cfg = self.async_config
         budgeted = cfg.rollout_max_thinking_tokens is not None or any(
             self._rollout_env.thinking_budget_for_effort(level) for level in VALID_REASONING_EFFORTS
         )
         if cfg.rollout_backend == SGLANG_BACKEND or not budgeted:
             return None
+        if cfg.rollout_thinking_budget_scope == THINKING_SCOPE_EPISODE:
+            return (self._resolve_reasoning_end_token_id(),)
         try:
-            return resolve_reasoning_end_token_id(self._tokenizer, cfg.rollout_reasoning_end_token)
-        except ValueError:
-            if cfg.rollout_thinking_budget_scope == THINKING_SCOPE_EPISODE:
-                raise
+            return resolve_reasoning_end_ids(self._tokenizer, cfg.rollout_reasoning_end_token)
+        except ValueError as e:
             logger.warning(
-                "rollout_reasoning_end_token %r is not a token of this tokenizer: reasoning closes the engine "
-                "forces at the thinking budget stay in the policy loss. Set rollout_reasoning_end_token to the "
-                "model's marker.",
-                cfg.rollout_reasoning_end_token,
+                "%s The reasoning closes the engine forces at the thinking budget stay in the policy loss.", e
             )
             return None
 
@@ -951,14 +950,14 @@ class DistributedAsyncEnvironmentalGRPOTrainer(
                 device,
                 all_engine_logps,
             )
-            if use_is_correction and self._forced_close_token_id is not None:
+            if use_is_correction and self._forced_close_ids is not None:
                 importance_sampling_ratio, forced = zero_engine_forced_closes(
                     importance_sampling_ratio,
                     pad(all_sampling_logps, padding_value=0, padding_side="right"),
                     completion_mask,
                     torch.tensor(row_has_sampling, device=device),
                     completion_ids,
-                    self._forced_close_token_id,
+                    self._forced_close_ids,
                 )
                 self._world_metrics.fraction("sampling/forced_close_frac", forced.sum(), completion_mask.sum())
 

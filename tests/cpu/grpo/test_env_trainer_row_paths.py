@@ -213,7 +213,7 @@ def _cut_episode_batch(trainer, advantage: float, flag: dict):
         completion_mask,
         torch.ones(len(rows), dtype=torch.bool),
         completion_ids,
-        _REASONING_CLOSE,
+        (_REASONING_CLOSE,),
     )
     batch = BatchRows([result], [len(rows)], 0, True)
     _comp, tool_mask, _loss, num_items = trainer._narrow_masks_and_normalizer(

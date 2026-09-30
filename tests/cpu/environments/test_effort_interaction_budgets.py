@@ -33,6 +33,7 @@ from src.environments.episode import (
     TurnGeneration,
     bind_episode_effort,
     reasoning_tokens_of,
+    resolve_reasoning_end_ids,
     resolve_reasoning_end_token_id,
 )
 from src.environments.tools.definitions import NativeToolCall
@@ -327,24 +328,49 @@ def test_spend_of_counts_only_under_the_episode_scope():
 
 
 class _Tokenizer:
-    """The two attributes the resolver reads, over a fixed vocabulary."""
+    """The two attributes the resolver reads: an encoding per text and the ids of the added tokens."""
 
-    def __init__(self, vocab, unk_token_id=0):
-        self._vocab = vocab
-        self.unk_token_id = unk_token_id
+    def __init__(self, encodings, added):
+        self._encodings = encodings
+        self.added_tokens_decoder = dict.fromkeys(added)
 
-    def convert_tokens_to_ids(self, token):
-        return self._vocab.get(token, self.unk_token_id)
+    def encode(self, text, add_special_tokens=True):
+        assert not add_special_tokens, "the engine encodes its reasoning end string without special tokens"
+        return list(self._encodings[text])
 
 
-def test_resolve_reasoning_end_token_id_requires_a_token_of_the_tokenizer():
-    """A marker the tokenizer does not know would count every turn's whole generation as reasoning and
-    starve the episode after its first turn, whether the tokenizer answers with unk or with None."""
-    assert resolve_reasoning_end_token_id(_Tokenizer({"</think>": _END}), "</think>") == _END
-    with pytest.raises(ValueError, match="not a token of this tokenizer"):
-        resolve_reasoning_end_token_id(_Tokenizer({"</think>": _END}), "<|end_reasoning|>")
-    with pytest.raises(ValueError, match="not a token of this tokenizer"):
-        resolve_reasoning_end_token_id(_Tokenizer({}, unk_token_id=None), "</think>")
+# ``</think>`` as a added token, a string that splits into plain text, and a close of several tokens
+# around added tokens (gpt-oss's final-channel opener).
+_VOCAB = _Tokenizer(
+    {
+        "</think>": [_END],
+        "<|end_reasoning|>": [11, 12, 13],
+        "": [],
+        "<|start|>assistant<|channel|>final<|message|>": [70, 71, 72, 73, 74],
+    },
+    added={_END, 70, 72, 74},
+)
+
+
+def test_resolve_reasoning_end_ids_encodes_the_marker_as_the_engine_forces_it():
+    """The ids vLLM appends at the budget are its parser's end string encoded without special tokens, one
+    id or several; a string of plain text is no close the model writes."""
+    assert resolve_reasoning_end_ids(_VOCAB, "</think>") == (_END,)
+    assert resolve_reasoning_end_ids(_VOCAB, "<|start|>assistant<|channel|>final<|message|>") == (70, 71, 72, 73, 74)
+    with pytest.raises(ValueError, match="not a reasoning marker of this tokenizer"):
+        resolve_reasoning_end_ids(_VOCAB, "<|end_reasoning|>")
+    with pytest.raises(ValueError, match="not a reasoning marker of this tokenizer"):
+        resolve_reasoning_end_ids(_VOCAB, "")
+
+
+def test_resolve_reasoning_end_token_id_requires_one_control_token():
+    """The episode scope counts a turn's reasoning up to one marker token: one the tokenizer does not write
+    would count every turn's whole generation as reasoning and starve the episode after its first turn."""
+    assert resolve_reasoning_end_token_id(_VOCAB, "</think>") == _END
+    with pytest.raises(ValueError, match="not a reasoning marker of this tokenizer"):
+        resolve_reasoning_end_token_id(_VOCAB, "<|end_reasoning|>")
+    with pytest.raises(ValueError, match="encodes to 5 tokens"):
+        resolve_reasoning_end_token_id(_VOCAB, "<|start|>assistant<|channel|>final<|message|>")
 
 
 def test_stamp_records_budget_exhaustion_only_under_the_episode_scope():

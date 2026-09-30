@@ -41,18 +41,27 @@ def zero_engine_forced_closes(
     completion_mask: torch.Tensor,
     row_has_sampling: torch.Tensor,
     completion_ids: torch.Tensor,
-    reasoning_end_token_id: int,
+    reasoning_end_ids: tuple[int, ...],
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    """Zero the ratio at reasoning closes the engine forced: the reasoning-end token at probability 1, which is
-    what vLLM's thinking budget emits when a turn reaches its cap. Returns ``(ratio, forced)``.
+    """Zero the ratio at reasoning closes the engine forced: a run of the reasoning-end ids every token of
+    which the sampler emitted at probability 1, which is what vLLM's thinking budget appends when a turn
+    reaches its cap (one token for ``</think>``, five for gpt-oss's final-channel opener). Returns
+    ``(ratio, forced)``.
 
     The close was not the policy's action; trained with the episode's advantage it moves the model's own
     probability of ending its reasoning, which repeated forced closes can drive down until the model stops
     closing at all. Ratio 0 drops the policy-gradient term and keeps the DAPO normalizer, like every mask
-    stage here; a naturally certain token (a collapsed nucleus) is left alone."""
-    forced = sampler_certain_mask(sampling_logps, completion_mask, row_has_sampling) & (
-        completion_ids == reasoning_end_token_id
-    )
+    stage here. A naturally certain token outside such a run (a collapsed nucleus) is left alone; a natural
+    run emitted wholly at probability 1 is zeroed too, which costs nothing without nucleus truncation (the
+    budgeted recipes sample at top_p 1) and otherwise drops the little gradient its near-certain tokens carry."""
+    certain = sampler_certain_mask(sampling_logps, completion_mask, row_has_sampling)
+    width = len(reasoning_end_ids)
+    forced = torch.zeros_like(certain)
+    if completion_ids.shape[1] >= width:
+        end = completion_ids.new_tensor(reasoning_end_ids)
+        starts = ((completion_ids.unfold(1, width, 1) == end) & certain.unfold(1, width, 1)).all(-1)
+        for offset in range(width):
+            forced[:, offset : offset + starts.shape[1]] |= starts
     return ratio.masked_fill(forced, 0.0), forced
 
 

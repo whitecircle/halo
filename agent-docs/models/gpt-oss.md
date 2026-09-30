@@ -109,7 +109,7 @@ With harmony disabled, five settings are load-bearing.
 
     Only the **first** call is extracted: without `<|call|>` as an eos the model keeps writing `to=functions.*` text and hallucinates its own tool result. A header with no brace-balanced JSON after it is dropped rather than rescued, so the turn scores as a no-tool turn and the policy is pushed toward valid JSON. Non-tool RLVR needs no tool parser.
 
-- **Reasoning budget.** `--reasoning-parser-plugin /opt/gpt_oss_reasoning_parser.py --reasoning-parser openai_gptoss` re-registers the harmony-only stock parser for the harmony-disabled path. It separates the CoT from the answer, and is what lets a request carry `thinking_token_budget` at all (without it every such request 400s).
+- **Reasoning budget.** `--reasoning-parser-plugin /opt/gpt_oss_reasoning_parser.py --reasoning-parser openai_gptoss` re-registers the harmony-only stock parser for the harmony-disabled path. It separates the CoT from the answer, and is what lets a request carry `thinking_token_budget` at all (without it every such request 400s). At the budget it forces the final-channel opener `<|start|>assistant<|channel|>final<|message|>`, which the vLLM recipes name as `rollout_reasoning_end_token` so the loss drops those forced tokens ([Objective](../training-methods/grpo/async-grpo/objective.md#importance-sampling-correction)).
 
     vLLM arms the budget on the `reasoning_start_token_ids` it tokenizes from the parser's `reasoning_start_str`, and ends it by forcing `reasoning_end_str`'s ids. The budget bounds every token generated before the `final` channel, whichever channel opened them (vLLM's counter trails the marker by one, so the cut lands at `budget + 1`).
 

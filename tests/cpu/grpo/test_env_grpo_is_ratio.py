@@ -88,9 +88,39 @@ def test_only_forced_reasoning_closes_lose_their_policy_gradient():
     sampling = torch.tensor([[-0.3, 0.0, 0.0, -0.4], [0.0, 0.0, 0.0, 0.0]])
     ids = torch.tensor([[5, _END, 9, _END], [_END, 5, 5, 5]])
     mask = torch.tensor([[1, 1, 1, 1], [1, 1, 1, 0]])
-    ratio, forced = zero_engine_forced_closes(torch.ones(2, 4), sampling, mask, torch.tensor([True, False]), ids, _END)
+    ratio, forced = zero_engine_forced_closes(
+        torch.ones(2, 4), sampling, mask, torch.tensor([True, False]), ids, (_END,)
+    )
     assert forced.tolist() == [[False, True, False, False], [False, False, False, False]]
     assert ratio.tolist() == [[1.0, 0.0, 1.0, 1.0], [1.0, 1.0, 1.0, 1.0]]
+
+
+_OPENER = (70, 71, 72, 73, 74)
+
+
+def test_a_forced_multi_token_close_loses_its_policy_gradient_as_one_run():
+    """gpt-oss's budget appends a five-token opener, every token at probability 1. The whole run gets ratio 0;
+    the same ids with one token the model chose (a natural close), a run cut short, and a lone certain id of
+    the run keep their ratio."""
+    certain, chosen = 0.0, -0.2
+    sampling = torch.tensor(
+        [
+            [-0.5, certain, certain, certain, certain, certain, -0.4, -0.3],
+            [-0.5, certain, certain, chosen, certain, certain, -0.4, -0.3],
+            [-0.5, -0.1, certain, certain, certain, -0.2, -0.3, -0.1],
+            [-0.5, -0.1, -0.3, -0.2, certain, certain, certain, certain],
+        ]
+    )
+    ids = torch.tensor(
+        [[1, *_OPENER, 2, 3], [1, *_OPENER, 2, 3], [1, 9, 72, 73, 74, 2, 3, 4], [1, 9, 8, 7, *_OPENER[:4]]]
+    )
+    mask = torch.ones_like(ids)
+    ratio, forced = zero_engine_forced_closes(
+        torch.ones(4, 8), sampling, mask, torch.ones(4, dtype=torch.bool), ids, _OPENER
+    )
+    assert forced.int().tolist() == [[0, 1, 1, 1, 1, 1, 0, 0], [0] * 8, [0] * 8, [0] * 8]
+    assert ratio[0].tolist() == [1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 1.0]
+    assert ratio[1:].eq(1.0).all()
 
 
 if __name__ == "__main__":

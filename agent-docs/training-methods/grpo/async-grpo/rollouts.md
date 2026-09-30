@@ -95,7 +95,7 @@ under: with `rollout_max_thinking_tokens` unset, the environment must set `reaso
 every level's `thinking_tokens`, and no level's budget may sit below the reserve.
 
 A turn's spend is read off the engine's sampled ids as the ids up to and including
-`rollout_reasoning_end_token` (default `</think>`, resolved through the tokenizer; the engine's budget
+`rollout_reasoning_end_token` (default `</think>`, resolved through the tokenizer to one token; the engine's budget
 counts the close it forces, and a turn cut before closing its reasoning counts all of its ids), so the
 scope is vLLM-only, requires `train_on_sampled_tokens`, and every request under it — the eval scripts'
 too — asks for `return_token_ids`. The effort templates read the run-wide `reasoning_budget_scope`

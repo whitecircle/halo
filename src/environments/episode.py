@@ -219,18 +219,35 @@ def validate_thinking_budget_scope(
         )
 
 
-def resolve_reasoning_end_token_id(tokenizer, token: str) -> int:
-    """The id of ``token`` under the tokenizer, required to resolve: a marker the tokenizer does not
-    know would count every turn's whole generation as reasoning and starve the episode of its budget
-    after the first turn."""
-    tid = tokenizer.convert_tokens_to_ids(token)
-    if tid is None or tid == getattr(tokenizer, "unk_token_id", None):
+def resolve_reasoning_end_ids(tokenizer, marker: str) -> tuple[int, ...]:
+    """``marker``'s ids as the engine forces them: encoded without special tokens, the way vLLM encodes its
+    reasoning parser's end string (one id for ``</think>`` or Gemma 4's ``<channel|>``, five for gpt-oss's
+    final-channel opener). A reasoning close sits on the tokenizer's added tokens, so an encoding holding none
+    of them is a marker this model does not write (``</think>`` where the vocabulary lacks it splits into
+    plain text) and raises."""
+    ids = tuple(tokenizer.encode(marker, add_special_tokens=False))
+    if not set(ids) & set(tokenizer.added_tokens_decoder):
         raise ValueError(
-            f"rollout_reasoning_end_token {token!r} is not a token of this tokenizer; the episode thinking scope "
-            "counts a turn's reasoning as the sampled ids up to and including that token, so name the model's "
-            "own marker"
+            f"rollout_reasoning_end_token {marker!r} is not a reasoning marker of this tokenizer: it encodes to "
+            f"{list(ids)}, none of them one of its added tokens. Name the end string the server's reasoning "
+            "parser forces (Qwen3.x '</think>', Gemma 4 '<channel|>', gpt-oss "
+            "'<|start|>assistant<|channel|>final<|message|>')."
         )
-    return tid
+    return ids
+
+
+def resolve_reasoning_end_token_id(tokenizer, token: str) -> int:
+    """The one id the episode thinking scope counts a turn's reasoning up to (:func:`reasoning_tokens_of`),
+    required to resolve: a marker the tokenizer does not know would count every turn's whole generation as
+    reasoning and starve the episode of its budget after the first turn."""
+    ids = resolve_reasoning_end_ids(tokenizer, token)
+    if len(ids) != 1:
+        raise ValueError(
+            f"rollout_reasoning_end_token {token!r} encodes to {len(ids)} tokens; the episode thinking scope "
+            "counts a turn's reasoning as the sampled ids up to and including one marker token, so run this "
+            "model under rollout_thinking_budget_scope: turn."
+        )
+    return ids[0]
 
 
 def effort_length_penalty(

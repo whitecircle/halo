@@ -204,11 +204,12 @@ class AsyncTrainingConfig(AdvantageShapingArguments, ChunkedLogprobsArguments):
     rollout_reasoning_end_token: str = field(
         default=DEFAULT_REASONING_END_TOKEN,
         metadata={
-            "help": "The token that closes the model's reasoning (Qwen3.x '</think>'); under "
+            "help": "The string the server's reasoning parser ends reasoning with, encoded as vLLM encodes it "
+            "(Qwen3.x '</think>', Gemma 4 '<channel|>', gpt-oss '<|start|>assistant<|channel|>final<|message|>'). "
+            "Wherever a vLLM thinking budget can bind, a forced run of its ids gets ratio 0 in the loss (under "
+            "the turn scope a marker holding none of the tokenizer's added tokens only warns). Under "
             "rollout_thinking_budget_scope=episode a turn's reasoning is counted as the sampled ids up to and "
-            "including it. Wherever a vLLM thinking budget can bind, its forced occurrences get ratio 0 in the "
-            "loss (under the turn scope a marker the tokenizer lacks only warns). Resolved through the "
-            "tokenizer by the trainer and the eval scripts; the episode scope requires it to be a token of it."
+            "including it, which needs it to be one added token."
         },
     )
 
