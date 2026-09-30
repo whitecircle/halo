@@ -25,6 +25,7 @@ from src.log import KEY_PREVIEW_COUNT
 from src.models.loading.checkpoint_coverage import verify_checkpoint_coverage
 from src.models.loading.dtype import reject_fp8_tensor
 from src.models.loading.lazy_safetensors.conversion import Concat, Convert, Rename, convert_disk_keys
+from src.models.structure import fp32_pinned_state_keys
 
 logger = logging.getLogger(__name__)
 
@@ -215,11 +216,13 @@ class SafetensorsWeightLoader:
         IGNORE: skipped.
 
         Every float parameter takes ``dtype``, except the ``keep_fp32`` model keys, which take fp32:
-        the parameters an eager load keeps fp32 for a run that holds fp32 masters.
+        the parameters an eager load keeps fp32 for a run that holds fp32 masters. A float buffer keeps
+        its stored dtype unless the family pins it, which then loads fp32 as ``from_pretrained`` loads it.
 
         Every materialized tensor is shape-checked against the live target before assignment, since
         this path bypasses ``from_pretrained``'s own size-mismatch check.
         """
+        pinned = fp32_pinned_state_keys(model)
         self._open()
         try:
             loaded = expert_sharded = 0
@@ -239,11 +242,14 @@ class SafetensorsWeightLoader:
                 )
                 # Every float parameter takes the run dtype, as the eager loaders cast (FSDP2 rejects
                 # mixed dtypes in one shard group); keep_fp32 holds the fp32-masters exceptions.
-                # Parameters only: a float buffer may be fp32 by design (Zaya's balancing biases).
+                # A float buffer keeps its stored dtype (Zaya's balancing biases are fp32 by design),
+                # except a pinned one, which loads fp32 as from_pretrained's dtype plan keeps it.
                 if tensor.is_floating_point() and isinstance(_target_tensor(model, plan.model_key), nn.Parameter):
                     reject_fp8_tensor(plan.model_key, tensor, dtype)
                     if dtype is not None:
                         tensor = tensor.to(torch.float32 if plan.model_key in keep_fp32 else dtype)
+                elif tensor.is_floating_point() and plan.model_key in pinned:
+                    tensor = tensor.to(torch.float32)
 
                 assign_tensor_to_model(model, plan.model_key, tensor)
                 loaded += 1

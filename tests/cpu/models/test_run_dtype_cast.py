@@ -392,6 +392,17 @@ def _assert_keeps_exactly(model: nn.Module, pinned: dict[str, str], stored: dict
     assert not off, f"pins off their stored fp32 value: {off}"
 
 
+@pytest.mark.parametrize("loader", FP32_MASTER_LOADERS)
+def test_every_loader_keeps_a_pinned_buffer_fp32(roster_checkpoints, loader, monkeypatch):
+    """GLM-5 Next pins its router's ``e_score_correction_bias`` buffer. The tiny checkpoint stores it
+    bf16 and ``from_pretrained`` loads it fp32, so every training loader must too: the lazy ones read a
+    buffer at its stored dtype unless it is pinned."""
+    model = _load_with(loader, "glm5_next", roster_checkpoints["glm5_next"], False, monkeypatch)
+
+    dtypes = {name: b.dtype for name, b in model.named_buffers() if name.endswith("e_score_correction_bias")}
+    assert dtypes and set(dtypes.values()) == {torch.float32}, dtypes
+
+
 @pytest.mark.parametrize("keep_fp32", [False, True], ids=["bf16", "fp32_masters"])
 @pytest.mark.parametrize("loader", FP32_MASTER_LOADERS)
 @pytest.mark.parametrize("family", PINNED_FP32_FAMILIES)
