@@ -114,6 +114,7 @@ changes.
 | `src/kernels/lowp/` (quantization, linear, deepgemm, mixed_precision) | `agent-docs/optimization/low-precision-moe-kernels.md` |
 | `src/kernels/histogram.py` (the expert-load histogram behind the `moe/*` metrics and the bias update) | `agent-docs/training-methods/callbacks.md` |
 | `src/kernels/grouped_gemm.py` (precision dispatch), `src/kernels/grouped_mm_autograd.py` (bf16 primitive) | `agent-docs/optimization/grouped-gemm.md` |
+| `src/kernels/moe_permute.py` (atomic-free gather-reduce permute + weighted unpermute) | `agent-docs/optimization/grouped-gemm.md` |
 | `src/kernels/fused_glu.py` (fused SwiGLU kernels + `is_silu_activation` gate) | `agent-docs/models/glm4.md` (gate), `agent-docs/models/gpt-oss.md` (clamped variant) |
 | attention selection (`src/models/patches/attention.py`, `_detect_attention_impl`) | `agent-docs/optimization/flash-attention.md` |
 | GptOss sink policy (`src/models/patches/gpt_oss_sinks.py`) | `agent-docs/models/gpt-oss.md` (Attention sinks), the `reset_sinks`/`train_sinks` rows of `agent-docs/reference/configuration-reference.md` |
