@@ -33,7 +33,7 @@ import pytest
 import torch
 from accelerate import PartialState
 
-from src.environments.base import VALID_REASONING_EFFORTS
+from src.environments.base import VALID_REASONING_EFFORTS, stable_reasoning_effort
 from src.environments.episode import resolve_episode_effort
 from src.trainers.grpo.environmental import DistributedAsyncEnvironmentalGRPOTrainer, _BreakerOptimizerSkipCallback
 
@@ -338,10 +338,15 @@ def _effort_host(num_generations: int, training: bool = True, num_generations_ev
     return DistributedAsyncEnvironmentalGRPOTrainer._stamp_group_efforts.__get__(host), host
 
 
+def _group_prompts(rows: int, group: int) -> list[str]:
+    """Group-expanded prompts, as the RepeatSampler hands them: ``group`` consecutive rows per problem."""
+    return [f"problem {i // group}" for i in range(rows)]
+
+
 def test_stamp_group_efforts_uniform_within_group():
     stamp, _ = _effort_host(4)
     contexts = [None] * 12  # 3 groups of 4
-    stamp(contexts)
+    stamp(_group_prompts(12, 4), contexts)
     levels = [ctx["reasoning_effort"] for ctx in contexts]
     assert all(lv in VALID_REASONING_EFFORTS for lv in levels)
     for start in range(0, 12, 4):
@@ -351,7 +356,7 @@ def test_stamp_group_efforts_uniform_within_group():
 def test_stamp_group_efforts_preserves_existing_context_keys():
     stamp, _ = _effort_host(2)
     contexts = [{"answer": "42"}, None]
-    stamp(contexts)
+    stamp(_group_prompts(2, 2), contexts)
     assert contexts[0]["answer"] == "42"
     assert contexts[0]["reasoning_effort"] == contexts[1]["reasoning_effort"]
 
@@ -363,7 +368,7 @@ def test_stamp_group_efforts_records_a_split_group_rather_than_raising():
     ``test_env_ragged_eval_batch_uniform_raise.py``)."""
     stamp, host = _effort_host(4)
     contexts = [None] * 6
-    stamp(contexts)
+    stamp(_group_prompts(6, 4), contexts)
     assert "multiple of the group size" in host._batch_build_error
     assert contexts == [None] * 6, "a refused batch must not be half-stamped"
 
@@ -371,8 +376,31 @@ def test_stamp_group_efforts_records_a_split_group_rather_than_raising():
 def test_stamp_group_efforts_eval_uses_eval_group_size():
     stamp, _ = _effort_host(4, training=False, num_generations_eval=1)
     contexts = [None] * 3  # not a multiple of 4 — fine in eval (group size 1)
-    stamp(contexts)
+    stamp(_group_prompts(3, 1), contexts)
     assert all(ctx["reasoning_effort"] in VALID_REASONING_EFFORTS for ctx in contexts)
+
+
+def test_training_groups_of_one_problem_still_draw_their_levels_at_random():
+    """The stable draw is the eval's alone: a training group's level is the lottery the effort-conditioned
+    policy learns over, so one problem drawn in many rounds must see more than one level."""
+    stamp, _ = _effort_host(2)
+    contexts = [None] * 60
+    stamp(["the same problem"] * 60, contexts)
+    assert len({ctx["reasoning_effort"] for ctx in contexts}) > 1
+
+
+def test_an_eval_scores_each_problem_at_one_level_whatever_the_draw_order():
+    """Every eval round must put a problem at the same level, or the checkpoints' per-level scores (and the
+    level mix behind the headline one) are not comparable."""
+    stamp, _ = _effort_host(4, training=False, num_generations_eval=1)
+    prompts = [f"problem {i}" for i in range(60)]
+    first, second = [None] * 60, [None] * 60
+    stamp(prompts, first)
+    stamp(list(reversed(prompts)), second)
+    by_problem = {p: c["reasoning_effort"] for p, c in zip(prompts, first, strict=False)}
+    assert all(by_problem[p] == c["reasoning_effort"] for p, c in zip(reversed(prompts), second, strict=False))
+    assert set(by_problem.values()) == set(VALID_REASONING_EFFORTS), "the draw still spreads over every level"
+    assert by_problem["problem 0"] == stable_reasoning_effort([{"role": "user", "content": "problem 0"}])
 
 
 def test_resolve_episode_effort_prefers_context():

@@ -3,6 +3,7 @@ base classes an environment subclasses. ``AsyncBaseEnvironment`` runs its turn b
 ``asyncio.gather`` for I/O-bound tool/API calls. The episode driver is :mod:`src.environments.episode`."""
 
 import asyncio
+import hashlib
 import itertools
 import logging
 import math
@@ -46,6 +47,9 @@ EPISODE_ERROR_KEY = "error"
 # Stamped by the rollout driver under the episode thinking scope: whether the episode's reasoning budget
 # ran down to the per-turn reserve (a later turn would have reasoned only its reserve).
 THINKING_BUDGET_EXHAUSTED_KEY = "thinking_budget_exhausted"
+# Set in a turn's step context by the rollout driver when the engine cut the turn while it held an unfinished
+# tool call, so the recovery can say the call ran past the turn's length limit (``LENGTH_CUTOFF_IN_CALL_NUDGE``).
+CUT_IN_TOOL_CALL_KEY = "cut_in_tool_call"
 # Set in ``info`` when a sandbox fault ended the episode, naming its class: ``SANDBOX_FAULT_INFRA`` for
 # a backend/transport failure (the episode is also marked invalid and leaves the GRPO group baseline),
 # ``SANDBOX_FAULT_AGENT`` for a sandbox the program's own action broke (the episode stays in the
@@ -105,6 +109,16 @@ def resolve_reasoning_effort(effort: str | None) -> str | None:
     if effort == "random":
         return random.choice(VALID_REASONING_EFFORTS)
     return effort
+
+
+def stable_reasoning_effort(task: str | list[dict[str, Any]]) -> str:
+    """A level drawn from the task alone, the same in every process and every run: an evaluation's draw for
+    a ``"random"`` setting, so each problem is scored at one level from checkpoint to checkpoint. A
+    conversation is keyed by its last user turn, so it draws what its task text alone would."""
+    if not isinstance(task, str):
+        task = next((str(m.get("content") or "") for m in reversed(task) if m.get("role") == "user"), "")
+    digest = hashlib.blake2b(task.encode("utf-8", "surrogatepass"), digest_size=8).digest()
+    return VALID_REASONING_EFFORTS[int.from_bytes(digest, "big") % len(VALID_REASONING_EFFORTS)]
 
 
 def solve_verdict(metrics: Mapping[str, float]) -> bool | None:
@@ -350,8 +364,10 @@ class BaseEnvironment(ABC):
     # What :meth:`_handle_length_cutoff` feeds back after the engine cuts a turn short, and what
     # :meth:`_handle_empty_turn` feeds back after the model ends one on nothing. Per protocol, since
     # the text must ask for that protocol's next move; ``None`` means the protocol has no recovery
-    # path for that kind of turn and does not route it there.
+    # path for that kind of turn and does not route it there. ``LENGTH_CUTOFF_IN_CALL_NUDGE`` is the cut nudge
+    # for a turn that ran out while writing a tool call, where the protocol can tell (``None`` = the plain one).
     LENGTH_CUTOFF_NUDGE: str | None = None
+    LENGTH_CUTOFF_IN_CALL_NUDGE: str | None = None
     EMPTY_TURN_NUDGE: str | None = None
 
     # Names of the episode-level shaping components this class adds to the reward (``reward/<name>``),
@@ -690,6 +706,7 @@ class BaseEnvironment(ABC):
         # Tracked separately: a termination-rate metric cannot tell a cut-off turn, or one that
         # stopped inside its reasoning, from an answer.
         metrics["episode/length_cutoff_turns"] = float(trajectory.info.get("length_cutoff_turns", 0))
+        metrics["episode/length_cutoff_in_call_turns"] = float(trajectory.info.get("length_cutoff_in_call_turns", 0))
         metrics["episode/empty_turns"] = float(trajectory.info.get("empty_turns", 0))
         if THINKING_BUDGET_EXHAUSTED_KEY in trajectory.info:
             metrics["episode/thinking_budget_exhausted"] = (
@@ -773,16 +790,24 @@ class BaseEnvironment(ABC):
             )
         )
 
-    def _handle_length_cutoff(self, trajectory: Trajectory) -> tuple[Trajectory, float, bool, bool, dict[str, Any]]:
-        """Handle a turn the engine cut short before it produced anything — at its token cap, or by
-        aborting it (:data:`~src.inference.response.ENGINE_CUT_FINISH_REASONS`).
+    def _handle_length_cutoff(
+        self, trajectory: Trajectory, in_tool_call: bool = False
+    ) -> tuple[Trajectory, float, bool, bool, dict[str, Any]]:
+        """Handle a turn the engine cut short — at its token cap, or by aborting it
+        (:data:`~src.inference.response.ENGINE_CUT_FINISH_REASONS`) — before a finished call or answer.
 
         Never graded — the fragment would end the episode on a mid-sentence string that reads as a
         *natural* termination. Owned by the base so ``episode/length_cutoff_turns`` means the same
         thing for every protocol that can recover; the wording is each protocol's
-        (:data:`LENGTH_CUTOFF_NUDGE`).
+        (:data:`LENGTH_CUTOFF_NUDGE`). A turn that ran out ``in_tool_call`` is counted under
+        ``episode/length_cutoff_in_call_turns`` too and told so (:data:`LENGTH_CUTOFF_IN_CALL_NUDGE`).
         """
-        return self._recover_unproductive_turn(trajectory, "length_cutoff", "LENGTH_CUTOFF_NUDGE")
+        nudge = "LENGTH_CUTOFF_NUDGE"
+        if in_tool_call:
+            trajectory.info["length_cutoff_in_call_turns"] = trajectory.info.get("length_cutoff_in_call_turns", 0) + 1
+            if self.LENGTH_CUTOFF_IN_CALL_NUDGE is not None:
+                nudge = "LENGTH_CUTOFF_IN_CALL_NUDGE"
+        return self._recover_unproductive_turn(trajectory, "length_cutoff", nudge)
 
     def _handle_empty_turn(self, trajectory: Trajectory) -> tuple[Trajectory, float, bool, bool, dict[str, Any]]:
         """Handle a turn the model ended with neither visible content nor a tool call: a stop inside

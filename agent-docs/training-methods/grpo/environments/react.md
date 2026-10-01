@@ -1,6 +1,6 @@
 # ReAct Environments
 
-The model writes a `Thought:`, then an `Action:` or a `Final Answer:`, and the environment parses the action out of the plain text ([ReAct](https://arxiv.org/abs/2210.03629), `src/environments/envs/protocols/react.py`). No tool schema reaches the server, so serve the model **without** a tool-call parser: a parser lifts the call out of the text, the environment finds no `Action:` line, and the turn burns on a format hint.
+The model writes a `Thought:`, then an `Action:` or a `Final Answer:`, and the environment parses the action out of the plain text ([ReAct](https://arxiv.org/abs/2210.03629), `src/environments/envs/protocols/react.py`). A `tool(name=value, ...)` action is read as a Python call of literals, so a triple-quoted `code` argument arrives whole; text that is no such call (an unquoted expression, JSON's `true`) falls back to a `name=value` pattern. No tool schema reaches the server, so serve the model **without** a tool-call parser: a parser lifts the call out of the text, the environment finds no `Action:` line, and the turn burns on a format hint.
 
 Two registry names: `react_math` (`calculate`, `python`) and `react_search` (`web_search`); each hardcodes its own system prompt. Shipped config: `examples/grpo/environmental/qwen3_5/vllm/qwen3.6-35b-a3b-react-math-full-ep4.yaml`.
 

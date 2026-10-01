@@ -42,6 +42,7 @@ from src.environments.base import (
     SOLVE_RATE_KEY,
     Message,
     Trajectory,
+    stable_reasoning_effort,
 )
 from src.environments.envs.protocols.native import NativeToolUseEnvironment
 from src.environments.eval_runner import (
@@ -336,6 +337,31 @@ async def test_run_episode_reads_the_tool_schema_after_reset(monkeypatch):
         env, "task", {}, client=object(), rollout=RolloutConfig(model_name="m", temperature=0.0, max_tokens=16)
     )
     assert seen["tools"], "the generation ran without the tools the environment registers on reset"
+
+
+async def test_a_random_level_is_drawn_from_the_problem_so_reruns_agree(monkeypatch):
+    """Under ``reasoning_effort: random`` a rerun, or the next checkpoint's eval, must score each problem at
+    the level it got before; the draw follows the problem text, as the trainer's eval does."""
+    env = _tooled_env()
+    env.reasoning_effort = "random"
+    levels: list[str] = []
+    real_reset = env.reset
+
+    def _reset(prompts, contexts):
+        levels.append(contexts[0]["reasoning_effort"])
+        return real_reset(prompts, contexts)
+
+    async def _generate(**kwargs):
+        return types.SimpleNamespace(
+            answer="done", finish_reason="stop", completion_tokens=1, tool_calls=None, reasoning=None, token_ids=None
+        )
+
+    monkeypatch.setattr(env, "reset", _reset)
+    monkeypatch.setattr(eval_runner, "generate_openai_response", _generate)
+    rollout = RolloutConfig(model_name="m", temperature=0.0, max_tokens=16)
+    for _ in range(3):
+        await run_episode(env, "the same problem", {}, client=object(), rollout=rollout)
+    assert levels == [stable_reasoning_effort("the same problem")] * 3
 
 
 async def test_run_episode_cleans_up_on_mid_episode_exception(monkeypatch):

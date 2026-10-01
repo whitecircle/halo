@@ -13,16 +13,36 @@ where a protocol configures it; the turn that exhausts the recovery cap pays the
 Run: python tests/cpu/environments/test_length_cutoff_recovery.py  (or pytest)
 """
 
+import importlib
+import pkgutil
+
 import pytest
 
-from src.environments.base import REWARD_COMPONENTS_KEY, Message, Trajectory
+import src.environments.envs
+from src.environments.base import REWARD_COMPONENTS_KEY, BaseEnvironment, Message, Trajectory
 from src.environments.envs.protocols.native import NativeToolUseEnvironment
 from src.environments.envs.protocols.react import ReActEnvironment
-from src.environments.envs.tasks.coding.code_contests import CodeContestsEnvironment
 from src.environments.episode import TurnGeneration, step_context_from_generation
 from src.environments.tools.definitions import NativeTool, NativeToolRegistry, ToolParameter
-from src.inference.response import ENGINE_CUT_FINISH_REASONS
+from src.inference.response import ENGINE_CUT_FINISH_REASONS, FINISH_REASON_LENGTH
 from src.trainers.grpo.environmental import DistributedAsyncEnvironmentalGRPOTrainer
+
+
+def _environment_classes(cls: type = BaseEnvironment) -> list[type]:
+    found = []
+    for sub in cls.__subclasses__():
+        found += [sub, *_environment_classes(sub)]
+    return found
+
+
+for _module in pkgutil.walk_packages(src.environments.envs.__path__, f"{src.environments.envs.__name__}."):
+    importlib.import_module(_module.name)
+_NUDGES = {
+    f"{cls.__name__}.{name}": getattr(cls, name)
+    for cls in _environment_classes()
+    for name in dir(cls)
+    if name.endswith("_NUDGE") and isinstance(getattr(cls, name), str)
+}
 
 # Token ids of the synthetic prefix-monotone template the whole-trajectory tests render with.
 _ROLE_TOKENS = {"system": 100, "user": 101, "assistant": 102, "tool": 103}
@@ -62,6 +82,18 @@ def _echo_call_step(env, eid):
     """One completed turn whose echo call executes: the native protocol reads calls off the context."""
     call = {"id": "c0", "function": {"name": "echo", "arguments": '{"text": "x"}'}}
     return env.step([eid], ["calling"], [{"finish_reason": "stop", "tool_calls": [call]}])[0]
+
+
+def test_a_turn_cut_before_any_call_keeps_the_plain_nudge():
+    env = _make_env()
+    eid = _reset(env)
+    ctx = step_context_from_generation(
+        None, TurnGeneration(text="", tool_calls=[], reasoning="x", tokens=9, finish_reason="length")
+    )
+    env.step([eid], [""], [ctx])
+    traj = env.get_trajectories([eid])[0]
+    assert traj.messages[-1].content == NativeToolUseEnvironment.LENGTH_CUTOFF_NUDGE
+    assert env.rollout_metrics(traj)["episode/length_cutoff_in_call_turns"] == 0.0
 
 
 def test_length_cutoff_keeps_the_episode_alive_and_is_unpriced():
@@ -127,7 +159,9 @@ def _generation(finish_reason: str) -> TurnGeneration:
 def test_a_cut_turn_executes_nothing_the_parser_salvaged(finish_reason):
     """A turn cut inside its tool call reaches the driver with the call's name and empty arguments.
     Executed, it books a malformed call the model never finished, and because the label says the
-    turn completed, the fragment trains as a normal row and the model retries into the same cap."""
+    turn completed, the fragment trains as a normal row and the model retries into the same cap. A turn
+    that hit its token cap is told its call ran past the length limit (the plain nudge's "before you made
+    a tool call" is untrue there); an abort names no cause, so it keeps the plain nudge."""
     ctx = step_context_from_generation({}, _generation(finish_reason))
     assert "tool_calls" not in ctx
 
@@ -141,7 +175,10 @@ def test_a_cut_turn_executes_nothing_the_parser_salvaged(finish_reason):
     assert traj.info.get("total_tool_calls", 0) == 0
     fragment, nudge = traj.messages[-2], traj.messages[-1]
     assert fragment.role == "assistant" and fragment.truncated is True and not fragment.tool_calls
-    assert nudge.content == NativeToolUseEnvironment.LENGTH_CUTOFF_NUDGE
+    in_call = finish_reason == FINISH_REASON_LENGTH
+    expected = "LENGTH_CUTOFF_IN_CALL_NUDGE" if in_call else "LENGTH_CUTOFF_NUDGE"
+    assert nudge.content == getattr(NativeToolUseEnvironment, expected)
+    assert env.rollout_metrics(traj)["episode/length_cutoff_in_call_turns"] == float(in_call)
 
 
 def test_a_completed_turn_keeps_its_tool_calls():
@@ -190,25 +227,22 @@ def test_react_invented_tool_turn_is_flagged_untrainable():
     assert [m.untrainable for m in assistant] == [True, False]
 
 
-@pytest.mark.parametrize(
-    "nudge",
-    [
-        NativeToolUseEnvironment.LENGTH_CUTOFF_NUDGE,
-        NativeToolUseEnvironment.EMPTY_TURN_NUDGE,
-        ReActEnvironment.LENGTH_CUTOFF_NUDGE,
-        ReActEnvironment.EMPTY_TURN_NUDGE,
-        CodeContestsEnvironment.LENGTH_CUTOFF_NUDGE,
-        CodeContestsEnvironment.EMPTY_TURN_NUDGE,
-    ],
-    ids=["native-cut", "native-empty", "react-cut", "react-empty", "code-cut", "code-empty"],
-)
-def test_the_nudge_never_asks_for_shorter_reasoning(nudge):
+def test_the_nudge_roster_reaches_every_protocol():
+    assert {"NativeToolUseEnvironment.LENGTH_CUTOFF_IN_CALL_NUDGE", "ReActEnvironment.EMPTY_TURN_NUDGE"} <= set(
+        _NUDGES
+    )
+
+
+@pytest.mark.parametrize("name", sorted(_NUDGES))
+def test_the_nudge_never_asks_for_shorter_reasoning(name):
     # The nudge is trained on wherever recovery succeeds, so a terseness ask becomes a global lesson.
-    lowered = nudge.lower()
+    lowered = _NUDGES[name].lower()
     assert "think brief" not in lowered
     assert "short" not in lowered and "concise" not in lowered and "briefly" not in lowered
-    # It answers an engine abort as well, so it must not name a cause it cannot know.
-    assert "length limit" not in lowered
+    # The plain cut nudge answers an engine abort as well, so it must not name a cause it cannot know; the
+    # in-call one is sent on a token-cap cut alone.
+    if not name.endswith("IN_CALL_NUDGE"):
+        assert "length limit" not in lowered
 
 
 def test_cut_off_turn_is_flagged_for_the_trainer():

@@ -467,6 +467,21 @@ Action: calculate(expression="2 + 2")"""
     assert not step.has_final_answer
 
 
+def test_parse_react_output_reads_a_triple_quoted_code_argument_whole():
+    """Read by pattern alone, the value stopped at its first matching quote and the code's own ``x = 5``
+    line became an argument of its own: an empty program ran, or the call was refused for an argument
+    named ``x``."""
+    text = "Thought: compute\nAction: python(code='''import math\nx = 5\nprint(math.sqrt(x), \"done\")''')"
+    step = parse_react_output(text)
+    assert step.action == "python"
+    assert step.action_args == {"code": 'import math\nx = 5\nprint(math.sqrt(x), "done")'}
+
+
+def test_parse_react_output_keeps_the_pattern_for_text_that_is_no_python_call():
+    step = parse_react_output('Thought: t\nAction: search(query="a b", filters={"exact": true}, limit=3)')
+    assert step.action_args == {"query": "a b", "filters": {"exact": True}, "limit": 3}
+
+
 def test_parse_react_output_final_answer():
     """Test parsing ReAct output with final answer."""
 

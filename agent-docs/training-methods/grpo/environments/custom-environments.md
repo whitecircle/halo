@@ -56,7 +56,7 @@ registry = NativeToolRegistry().register(NativeTool(
 ))
 ```
 
-Arguments are filtered to the declared parameters before the handler runs, so a hallucinated extra never reaches it and a missing required one is refused as a tool error without spending the episode's tool budget. A handler that raises marks the call failed and charges `tool_error_penalty`; return a string for a legitimate negative answer. A sandbox-backed handler instead raises its sandbox fault, booked by class ([Sandbox faults](sandbox.md#sandbox-faults)). Pass the registry as `NativeToolUseEnvironment(tool_registry=registry, ...)`.
+A call naming an argument the tool does not declare is refused before the handler runs, and its error names the declared ones; so is a call missing a required argument. Either is a tool error that spends none of the episode's tool budget. A tool that declares no parameters (an MCP tool without `properties`) takes its arguments as given. A handler that raises marks the call failed and charges `tool_error_penalty`; return a string for a legitimate negative answer. A sandbox-backed handler instead raises its sandbox fault, booked by class ([Sandbox faults](sandbox.md#sandbox-faults)). Pass the registry as `NativeToolUseEnvironment(tool_registry=registry, ...)`.
 
 ## Trainable trajectory shape
 

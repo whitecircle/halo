@@ -213,7 +213,41 @@ def test_a_run_given_no_input_that_prints_nothing_spends_no_run():
     assert env.rollout_metrics(traj)["episode/starved_test_runs"] == 1.0
 
 
-@pytest.mark.parametrize("name", ["EMPTY_TURN_NUDGE", "LENGTH_CUTOFF_NUDGE"])
+def test_only_the_first_silent_input_less_run_of_an_episode_is_returned():
+    """Returning every such run would make one that reads nothing free to repeat: past
+    ``max_starved_run_refunds`` the run spends its turn of the budget and gets the plain no-stdin note."""
+    env = _env(language="python")
+    traj = _episode(env)
+    reads_input = "import sys\ndata = sys.stdin.read().split()\nif data:\n    print(int(data[0]) + 1)"
+    first, second = _scratchpad(env, traj, code=reads_input), _scratchpad(env, traj, code=reads_input)
+    assert STARVED_RUN_NOTE in first and first.endswith("(Scratchpad runs left: 6 of 6.)"), first
+    assert NO_STDIN_NOTE in second and second.endswith("(Scratchpad runs left: 5 of 6.)"), second
+    assert env.rollout_metrics(traj)["episode/starved_test_runs"] == 1.0
+    never = _env(language="python", max_starved_run_refunds=0)
+    reply = _scratchpad(never, _episode(never), code=reads_input)
+    assert NO_STDIN_NOTE in reply and reply.endswith("(Scratchpad runs left: 5 of 6.)"), reply
+
+
+@pytest.mark.parametrize("cap", [-1, 1.5, True])
+def test_a_refund_cap_that_is_not_a_count_is_refused(cap):
+    with pytest.raises(ValueError, match="max_starved_run_refunds"):
+        _env(language="python", max_starved_run_refunds=cap)
+
+
+def test_a_garbled_argument_name_is_refused_unspent_and_named():
+    """A doubled ``parameter=`` prefix arrives as an argument the tool does not declare: the call is refused
+    before it runs or spends a run, and the reply names the bad key and the real ones, where a dropped key
+    would have run the program without its input."""
+    env = _env(language="python")
+    traj = _episode(env)
+    reply = _scratchpad(env, traj, code="print(int(input()) + 1)", **{"parameter=stdin": "1\n"})
+    assert reply.startswith(
+        f"Error: {env.test_tool_name}: unknown argument 'parameter=stdin'; its arguments are code"
+    ), reply
+    assert env._test_calls(traj) == 0
+
+
+@pytest.mark.parametrize("name", ["EMPTY_TURN_NUDGE", "LENGTH_CUTOFF_NUDGE", "LENGTH_CUTOFF_IN_CALL_NUDGE"])
 def test_the_recovery_nudges_name_the_graded_channel_and_offer_no_final_answer(name):
     """A final text answer ends a code-contests episode ungraded, so the nudge the protocol sends after
     an unproductive turn must ask for the tool call, naming submit_solution."""

@@ -52,7 +52,8 @@ server needs a reasoning parser and Model Runner V2 off
 
 Steer depth with the env's `reasoning_effort`: `low`/`medium`/`high`/`random`/`null` (`null` on
 `BaseEnvironment`, `medium` on `code_contests`). A `random` level is drawn **once per generation
-group**, keeping the conditioning of a group identical.
+group**, keeping the conditioning of a group identical. An eval round draws it from the problem's
+text instead, so every checkpoint scores a problem at the same level.
 
 The level reaches the model only through the chat template. gpt-oss's template renders it natively;
 the stock Qwen3.x and Gemma 4 templates have no effort variable, so those recipes pin
@@ -73,7 +74,8 @@ stays the reference of the [effort length floor](#effort-length-reward).
 A turn the engine cuts at its token cap, or one the model ends with neither a tool call nor visible
 content, is nudged and retried within `max_turns` and `max_length_cutoff_recoveries`
 (`environment_kwargs`; `null` = every such turn within `max_turns`). A recovered turn lands in
-`episode/length_cutoff_turns` or `episode/empty_turns` and pays the protocol's `length_cutoff_penalty`
+`episode/length_cutoff_turns` or `episode/empty_turns` (a cut while the turn held an unfinished tool call
+also in `episode/length_cutoff_in_call_turns`) and pays the protocol's `length_cutoff_penalty`
 (default `0`); the turn that exhausts the cap, or lands on the last turn, ends the episode truncated,
 priced like a `max_turns` overflow. Under carried reasoning a cut costs the policy only a turn and
 the retry thinks on from where it stopped, so a per-turn budget binds only once the cut is priced.

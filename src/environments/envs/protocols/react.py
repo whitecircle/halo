@@ -3,6 +3,7 @@
 Paper: https://arxiv.org/abs/2210.03629
 """
 
+import ast
 import contextlib
 import json
 import logging
@@ -135,10 +136,19 @@ def _parse_action(action_text: str) -> tuple[str | None, dict[str, Any] | None]:
 
 
 def _parse_function_args(args_str: str) -> dict[str, Any]:
-    """Parse function-style arguments: arg1="val1", arg2=123"""
+    """Parse function-style arguments: arg1="val1", arg2=123.
+
+    Read as a Python call first, so a triple-quoted or escaped code argument arrives whole: the pattern
+    fallback stops a value at its first matching quote and reads a ``name = value`` line of the code as
+    an argument of its own. Text that is not a call of literals (unquoted expressions, JSON's
+    ``true``/``null``) takes the pattern."""
     args = {}
     if not args_str:
         return args
+    with contextlib.suppress(SyntaxError, ValueError, MemoryError, RecursionError):
+        call = ast.parse(f"_({args_str})", mode="eval").body
+        if isinstance(call, ast.Call) and not call.args and all(kw.arg for kw in call.keywords):
+            return {kw.arg: ast.literal_eval(kw.value) for kw in call.keywords}
 
     for match in _ARGUMENT_RE.finditer(args_str):
         key = match.group(1)

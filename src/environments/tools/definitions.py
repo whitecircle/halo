@@ -22,8 +22,9 @@ class ToolBudgetExhausted(Exception):
 
 
 class ToolArgumentError(TypeError):
-    """A call whose model-authored arguments the handler cannot bind: a required parameter missing
-    (``submit_solution`` with no ``code``) or a name it has no keyword for.
+    """A call whose model-authored arguments the tool refuses: a required parameter missing
+    (``submit_solution`` with no ``code``), a name its schema does not declare, a value outside its enum,
+    or a name its handler has no keyword for.
 
     Raised before the handler runs, so the model reads ``Error: <tool>: missing a required argument:
     'code'`` instead of a Python signature. Expected control flow like :class:`ToolBudgetExhausted`:
@@ -98,54 +99,45 @@ class NativeTool:
             },
         }
 
-    def bind_arguments(self, arguments: dict[str, Any]) -> dict[str, Any]:
-        """Keep only the arguments this tool declares in :attr:`parameters`.
-
-        The argument dict is model-authored, and the handlers are ``functools.partial`` objects
-        carrying pre-bound safety keywords (the sandbox ``timeout``) that a call-time keyword of the
-        same name silently overrides — a model could raise its own execution timeout. Filtering
-        against the declared schema (the same set advertised in :meth:`to_openai_schema`) keeps a
-        hallucinated or adversarial extra out of the handler.
-
-        A tool that declares no parameters has no schema to filter against — an MCP server may
-        advertise a tool without ``properties`` — so its arguments pass through untouched rather than
-        being silently dropped.
-        """
-        if not self.parameters:
-            return arguments
-        declared = {parameter.name for parameter in self.parameters}
-        return {name: value for name, value in arguments.items() if name in declared}
-
     def _bind_for_call(self, handler: Callable[..., Any], arguments: dict[str, Any]) -> dict[str, Any]:
-        """The schema-filtered arguments, checked against ``handler``'s signature before the call.
+        """The call's arguments checked against the declared schema and ``handler``'s signature.
 
-        Binding up front turns the ``TypeError`` the call itself would raise into
-        :class:`ToolArgumentError`; a handler without an introspectable signature is called unchecked.
+        The schema is what :meth:`to_openai_schema` showed the model, so a name outside it is refused,
+        naming the declared ones: dropped unread, a garbled name loses its value, and a keyword shadowing
+        a handler's pre-bound safety one (the sandbox ``timeout``) would lift that cap. A tool declaring no
+        parameters (an MCP tool without ``properties``) takes its arguments as given. Binding up front
+        turns the call's own ``TypeError`` into :class:`ToolArgumentError`; a handler without an
+        introspectable signature is called unchecked.
         """
-        bound = self.bind_arguments(arguments)
+        declared = [parameter.name for parameter in self.parameters]
+        unknown = [name for name in arguments if name not in declared] if declared else []
+        if unknown:
+            raise ToolArgumentError(
+                f"{self.name}: unknown argument {', '.join(map(repr, unknown))}; its arguments are {', '.join(declared)}"
+            )
         for parameter in self.parameters:
             # The schema is the contract the model was shown: a required parameter left out, or an enum
             # value outside it, is a malformed call refused before the handler (and before the episode's
             # budget), even when the handler would supply a default of its own.
-            if parameter.required and parameter.name not in bound:
+            if parameter.required and parameter.name not in arguments:
                 raise ToolArgumentError(f"{self.name}: missing a required argument: {parameter.name!r}")
-            if parameter.enum and parameter.name in bound and bound[parameter.name] not in parameter.enum:
+            if parameter.enum and parameter.name in arguments and arguments[parameter.name] not in parameter.enum:
                 raise ToolArgumentError(
                     f"{self.name}: {parameter.name} must be one of {', '.join(parameter.enum)}, "
-                    f"got {bound[parameter.name]!r}"
+                    f"got {arguments[parameter.name]!r}"
                 )
         try:
             signature = inspect.signature(handler)
         except (TypeError, ValueError):
-            return bound
+            return arguments
         try:
-            signature.bind(**bound)
+            signature.bind(**arguments)
         except TypeError as e:
             raise ToolArgumentError(f"{self.name}: {e}") from None
-        return bound
+        return arguments
 
     def bind(self, arguments: dict[str, Any], *, for_async: bool = False) -> dict[str, Any]:
-        """Admit a call's model-authored arguments: the schema-filtered set the handler can bind, or
+        """Admit a call's model-authored arguments: the schema-checked set the handler can bind, or
         :class:`ToolArgumentError`. The protocols call it before spending the episode's budget on the
         call, so a call the handler could never run is refused without being counted. ``for_async``
         binds against the handler :meth:`execute_async` will run, which may differ from the sync one; a sync

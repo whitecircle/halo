@@ -127,12 +127,17 @@ class CodeContestsEnvironment(NativeToolUseEnvironment):
     DEFAULT_TOOL_SUCCESS_REWARD = 0.0
     DEFAULT_TOOL_ERROR_PENALTY = 0.0
 
-    # The protocol's empty-turn nudge offers a final answer, which here ends the episode ungraded: both
-    # nudges here name the one graded channel instead. Same rule as the protocol's: the fact and the
+    # The protocol's empty-turn nudge offers a final answer, which here ends the episode ungraded: every
+    # nudge here names the one graded channel instead. Same rule as the protocol's: the fact and the
     # action, never an ask for shorter reasoning.
     LENGTH_CUTOFF_NUDGE = (
         "Your previous turn was cut off before you made a tool call, so nothing was recorded, and only a "
         "solution sent with submit_solution is graded. Make your tool call now with the best solution you have."
+    )
+    LENGTH_CUTOFF_IN_CALL_NUDGE = (
+        "Your previous turn reached its length limit while writing a tool call, so the call was not run and "
+        "nothing was recorded, and only a solution sent with submit_solution is graded. Make the call again, "
+        "keeping your reasoning out of the program's comments."
     )
     EMPTY_TURN_NUDGE = (
         "Your previous turn ended without a tool call, so nothing was recorded, and only a solution sent "
@@ -180,6 +185,7 @@ class CodeContestsEnvironment(NativeToolUseEnvironment):
         max_grading_seconds: float | None = None,
         max_submissions: int | None = None,
         max_test_calls: int | None = None,
+        max_starved_run_refunds: int = 1,
         submission_reward: float = 0.0,
         resubmission_penalty: float = 0.0,
         reasoning_effort: str | None = DEFAULT_REASONING_EFFORT,
@@ -201,6 +207,12 @@ class CodeContestsEnvironment(NativeToolUseEnvironment):
             raise ValueError(f"max_submissions must be >= 1, got {max_submissions}")
         if max_test_calls < 0:
             raise ValueError(f"max_test_calls must be >= 0, got {max_test_calls}")
+        if (
+            isinstance(max_starved_run_refunds, bool)
+            or not isinstance(max_starved_run_refunds, int)
+            or max_starved_run_refunds < 0
+        ):
+            raise ValueError(f"max_starved_run_refunds must be an int >= 0, got {max_starved_run_refunds!r}")
         if max_grading_seconds is not None and max_grading_seconds <= 0:
             raise ValueError(f"max_grading_seconds must be > 0 or None, got {max_grading_seconds}")
         if max_time_limit < timeout_per_test:
@@ -225,6 +237,9 @@ class CodeContestsEnvironment(NativeToolUseEnvironment):
         # Reaching the cap ends the episode; further calls are rejected as tool errors.
         self.max_submissions = max_submissions
         self.max_test_calls = max_test_calls
+        # A first input-less silent run is a slip the note corrects; returning every one makes a run that
+        # reads nothing free to repeat, so past this many an episode's silent runs count like any other.
+        self.max_starved_run_refunds = max_starved_run_refunds
         # Without the interaction half, the strategy collapses to submit-and-fix at every effort level.
         # Read off the overrides (the class profiles carry only thinking budgets) because the tool
         # descriptions built below defer to the task message whenever a level binds interaction.
@@ -441,6 +456,11 @@ class CodeContestsEnvironment(NativeToolUseEnvironment):
         """Scratchpad calls admitted so far."""
         return self._tool_calls_made(trajectory, self.test_tool_name)
 
+    def _refunds_left(self, trajectory: Trajectory | None) -> bool:
+        """Whether an input-less silent run is still returned to the budget: up to ``max_starved_run_refunds``
+        per episode, always outside one (a direct call keeps no budget)."""
+        return trajectory is None or trajectory.info.get(STARVED_TEST_RUNS_KEY, 0) < self.max_starved_run_refunds
+
     def _run_test_in(self, code: str, language: str, stdin: str = "") -> str:
         """The scratchpad handler when the run lets the model choose: ``language`` is required, so a
         call without it fails to bind and is refused unspent."""
@@ -467,7 +487,13 @@ class CodeContestsEnvironment(NativeToolUseEnvironment):
         clean_exit = result.returncode in (0, None)
         if result.timed_out:
             lines[0] += f" {SCRATCHPAD_TIME_LIMIT_NOTE}"
-        elif not stdin and not result.compile_failed and clean_exit and not (result.stdout + result.stderr).strip():
+        elif (
+            not stdin
+            and not result.compile_failed
+            and clean_exit
+            and not (result.stdout + result.stderr).strip()
+            and self._refunds_left(trajectory)
+        ):
             # Given no input, the program told the model nothing, so the run is returned to the budget.
             lines.append(STARVED_RUN_NOTE)
             if trajectory is not None:

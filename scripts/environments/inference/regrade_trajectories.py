@@ -147,7 +147,8 @@ def submitted_solutions(episode: dict[str, Any], tool: NativeTool) -> list[tuple
     """The ``submit_solution`` payloads the environment admitted, as ``(code, language)`` in
     submission order; ``language`` is the call's own choice under a multi-language run, ``None`` where
     the run fixed it. A recorded call ``tool`` refuses to bind (no code, a missing or foreign language,
-    unparseable arguments) never ran and spent no budget, so it takes no slot here either."""
+    an argument the tool does not declare, unparseable arguments) never ran and spent no budget, so it
+    takes no slot here either."""
     solutions: list[tuple[str, str | None]] = []
     for message in episode.get("messages", []):
         for call in message.get("tool_calls") or []:

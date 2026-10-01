@@ -30,6 +30,7 @@ from src.environments.base import (
     BaseEnvironment,
     resolve_reasoning_effort,
     solve_verdict,
+    stable_reasoning_effort,
 )
 from src.environments.engine_wire import SGLANG_BACKEND
 from src.environments.episode import (
@@ -788,10 +789,10 @@ class DistributedAsyncEnvironmentalGRPOTrainer(
             contexts.append(ctx if ctx else None)
 
         if self._group_random_effort:
-            self._stamp_group_efforts(contexts)
+            self._stamp_group_efforts(prompts, contexts)
         return prompts, contexts
 
-    def _stamp_group_efforts(self, contexts: list[dict | None]) -> None:
+    def _stamp_group_efforts(self, prompts: list[str], contexts: list[dict | None]) -> None:
         """One reasoning-effort draw per generation group, stamped into every member's rollout context.
 
         GRPO's group baseline compares the ``num_generations`` completions of one prompt against each
@@ -800,6 +801,8 @@ class DistributedAsyncEnvironmentalGRPOTrainer(
         becomes part of the advantage and harder-conditioned members lose to their easier siblings
         regardless of policy quality. Rows arrive group-expanded (RepeatSampler), so consecutive
         blocks of the mode's group size are one group.
+        Evaluation draws a group's level from its problem (:func:`stable_reasoning_effort`), so every eval
+        scores each problem at the same level and checkpoints compare level for level.
         """
         group = (self.num_generations if self.model.training else self.num_generations_eval) or 1
         if len(contexts) % group != 0:
@@ -815,7 +818,9 @@ class DistributedAsyncEnvironmentalGRPOTrainer(
                 )
             return
         for start in range(0, len(contexts), group):
-            level = resolve_reasoning_effort("random")
+            level = (
+                resolve_reasoning_effort("random") if self.model.training else stable_reasoning_effort(prompts[start])
+            )
             for i in range(start, start + group):
                 ctx = contexts[i] or {}
                 ctx["reasoning_effort"] = level

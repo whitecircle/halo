@@ -165,13 +165,9 @@ def test_submitted_solutions_keep_only_the_calls_the_environment_admitted():
         ("w", "python"),
     ]
     fixed = CodeContestsEnvironment(language="python", sandbox_backend="local")
-    # A fixed-language run has no language argument: the schema filter drops it and every coded call binds.
-    assert regrade_trajectories.submitted_solutions(episode, fixed.registry.get("submit_solution")) == [
-        ("x", None),
-        ("y", None),
-        ("z", None),
-        ("w", None),
-    ]
+    # A fixed-language run declares no language argument, so a call naming one is refused like any other
+    # undeclared argument, and only the bare coded call binds.
+    assert regrade_trajectories.submitted_solutions(episode, fixed.registry.get("submit_solution")) == [("y", None)]
 
 
 def test_display_language_joins_a_model_chosen_set():

@@ -140,12 +140,12 @@ def test_execute_async_without_any_handler_raises():
         asyncio.run(NativeTool(name="x", description="d").execute_async())
 
 
-def test_execute_drops_arguments_the_tool_does_not_declare():
+def test_execute_refuses_arguments_the_tool_does_not_declare():
     """A model-supplied extra must not reach the handler.
 
     The handlers are ``functools.partial`` objects carrying pre-bound safety keywords, and a call-time
-    keyword of the same name overrides them — so an undeclared argument was a way for the model to
-    rewrite the tool's own configuration. ``execute`` now binds against the declared schema.
+    keyword of the same name overrides them, so an undeclared argument would let the model rewrite the
+    tool's own configuration. The call is refused instead, naming the extras and the declared names.
     """
     seen: dict = {}
 
@@ -159,8 +159,12 @@ def test_execute_drops_arguments_the_tool_does_not_declare():
         parameters=[ToolParameter("code", "string", "code")],
         handler=functools.partial(handler, timeout=1.0, allow_imports=False),
     )
-    tool.execute(code="print(1)", timeout=3600, allow_imports=True)
-    assert seen == {"code": "print(1)", "timeout": 1.0, "allow_imports": False}
+    with pytest.raises(ToolArgumentError, match="unknown argument 'timeout', 'allow_imports'; its arguments are code"):
+        tool.execute(code="print(1)", timeout=3600, allow_imports=True)
+    assert seen == {}, "a refused call never reaches its handler"
+    # A Python-dict literal the parser repaired can carry a non-string key; it is refused the same way.
+    with pytest.raises(ToolArgumentError, match="unknown argument 1; its arguments are code"):
+        tool.bind({1: "a", "code": "print(1)"})
 
 
 def test_execute_passes_arguments_through_when_the_tool_declares_no_schema():
@@ -232,10 +236,11 @@ def test_an_async_only_tool_is_refused_by_the_sync_path_at_binding():
 def test_python_tool_cannot_have_its_timeout_raised_by_the_model():
     """End-to-end on the shipped in-process Python tool: the configured wall-clock cap must hold."""
     tool = create_native_python_tools(timeout=0.3).get("python")
+    with pytest.raises(ToolArgumentError, match="unknown argument 'timeout'"):
+        tool.execute(code="while True:\n    pass", timeout=30)
     started = time.monotonic()
-    result = tool.execute(code="while True:\n    pass", timeout=30)
-    assert "0.3s timeout" in result
-    assert time.monotonic() - started < 5, "the model-supplied timeout overrode the configured one"
+    assert "0.3s timeout" in tool.execute(code="while True:\n    pass")
+    assert time.monotonic() - started < 5, "the configured cap no longer bounds the run"
 
 
 # NativeToolCall.from_openai_format
@@ -438,8 +443,8 @@ def _bindable(handler, name: str) -> bool:
 def test_every_declared_parameter_binds_to_its_handler(source):
     """A declared name the handler does not accept breaks that tool for the whole run.
 
-    ``bind_arguments`` filters the model's arguments down to the DECLARED schema, so a declared name
-    the handler has no keyword for is passed straight to it: the handler raises, and the protocol
+    Binding admits only the DECLARED schema, so a declared name the handler has no keyword for is
+    passed straight to it: the handler raises, and the protocol
     books a tool error on every call the model makes — while the keyword the handler does own can
     never be reached, silently keeping its default. Neither failure is visible in a config review.
     ``functools.partial`` is unwrapped because that is how the pre-bound safety keywords arrive.
@@ -472,8 +477,9 @@ def test_the_binding_check_would_catch_a_misspelled_parameter():
     assert not _bindable(tool.handler, "max_result")
     with pytest.raises(TypeError, match="max_result"):
         tool.execute(query="q", max_result=99)
-    # The keyword the handler does own is unreachable: undeclared names never survive the filter.
-    assert tool.execute(query="q", max_results=99) == "q:5"
+    # The keyword the handler does own is unreachable: an undeclared name refuses the call.
+    with pytest.raises(ToolArgumentError, match="unknown argument 'max_results'"):
+        tool.execute(query="q", max_results=99)
 
 
 def test_code_tool_advertises_no_input_channel_it_cannot_bind():
@@ -493,14 +499,15 @@ def test_code_tool_advertises_no_input_channel_it_cannot_bind():
 def test_calculator_timeout_is_plumbed_from_the_factory():
     """``create_all_native_tools(timeout=...)`` must reach the calculator, not just the code tool.
 
-    The bound value has to be a pre-bound handler keyword: a call-time one would be filtered out by
-    ``bind_arguments`` (deliberately — a model must not raise its own execution cap).
+    The bound value has to be a pre-bound handler keyword: a call-time one is refused at binding
+    (deliberately — a model must not raise its own execution cap).
     """
     assert create_all_native_tools(timeout=0.25).get("calculate").handler.keywords["timeout"] == 0.25
     assert create_native_math_tools().get("calculate").handler.keywords["timeout"] == SANDBOX_DEFAULT_TIMEOUT
-    # And the model cannot raise it back: an undeclared call-time keyword is filtered out.
+    # And the model cannot raise it back: an undeclared call-time keyword refuses the call.
     tight = create_native_math_tools(timeout=0.25).get("calculate")
-    assert tight.bind_arguments({"expression": "1+1", "timeout": 600}) == {"expression": "1+1"}
+    with pytest.raises(ToolArgumentError, match="unknown argument 'timeout'; its arguments are expression"):
+        tight.bind({"expression": "1+1", "timeout": 600})
 
 
 if __name__ == "__main__":

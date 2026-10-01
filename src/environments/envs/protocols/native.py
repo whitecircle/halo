@@ -8,6 +8,7 @@ from contextvars import ContextVar
 from typing import Any
 
 from src.environments.base import (
+    CUT_IN_TOOL_CALL_KEY,
     EPISODE_ERROR_KEY,
     EPISODE_TOOL_BUDGETS_KEY,
     TOOL_CALL_COUNTS_KEY,
@@ -84,6 +85,12 @@ class NativeToolUseEnvironment(BaseEnvironment):
     LENGTH_CUTOFF_NUDGE = (
         "Your previous turn was cut off before you made a tool call, so nothing was recorded. Make "
         "your tool call now with the best solution you have."
+    )
+    # Sent only on a token-cap cut inside a call, so it may name the length limit; the action it asks for
+    # is where the reasoning goes, not less of it.
+    LENGTH_CUTOFF_IN_CALL_NUDGE = (
+        "Your previous turn reached its length limit while writing a tool call, so the call was not run and "
+        "nothing was recorded. Make the call again, keeping your reasoning out of its arguments."
     )
     EMPTY_TURN_NUDGE = (
         "Your previous turn ended without a tool call or an answer, so nothing was recorded. Make "
@@ -313,7 +320,7 @@ class NativeToolUseEnvironment(BaseEnvironment):
         """Handle a turn that called no tool, shared by the sync and async steps: an engine-cut turn
         and a turn that ended on nothing recover, anything else is the model's final text answer."""
         if ctx.get("finish_reason") in ENGINE_CUT_FINISH_REASONS:
-            return self._handle_length_cutoff(trajectory)
+            return self._handle_length_cutoff(trajectory, in_tool_call=bool(ctx.get(CUT_IN_TOOL_CALL_KEY)))
         if not action.strip():
             return self._handle_empty_turn(trajectory)
         return self._finalize_text_response(trajectory, action)

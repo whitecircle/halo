@@ -39,7 +39,8 @@ flag of its own (`--max_turns`, `--language`, `--eval_protocol`, `--reasoning_ef
 `--training_config <yaml>` parses the YAML with the training script's own config classes: its
 `RolloutConfig` (template variables, stop tokens, thinking budget, sampling) and environment config
 (rewards, `max_turns`, `environment_kwargs`, `environment_type`) become the eval's. An explicit flag
-wins over the YAML, the YAML over the default.
+wins over the YAML, the YAML over the default. An environment at `reasoning_effort: random` draws each problem's level
+from the problem's text, as the trainer's eval does, so a rerun scores every problem at the same level.
 
 The training run's check of `episode_timeout` against the NCCL watchdog stays with training: the
 eval joins no process group, so a recipe whose budget needs a raised `DIST_NCCL_TIMEOUT_MINUTES`

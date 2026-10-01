@@ -22,6 +22,7 @@ from src.configs.rollout_config import (
     RolloutConfig,
 )
 from src.environments.base import (
+    CUT_IN_TOOL_CALL_KEY,
     THINKING_BUDGET_EXHAUSTED_KEY,
     VALID_REASONING_EFFORTS,
     AsyncBaseEnvironment,
@@ -30,7 +31,7 @@ from src.environments.base import (
     Trajectory,
     resolve_reasoning_effort,
 )
-from src.inference.response import ENGINE_CUT_FINISH_REASONS, FINISH_REASON_ABORT
+from src.inference.response import ENGINE_CUT_FINISH_REASONS, FINISH_REASON_ABORT, FINISH_REASON_LENGTH
 
 logger = logging.getLogger(__name__)
 
@@ -450,9 +451,14 @@ def step_context_from_generation(context: dict[str, Any] | None, gen: TurnGenera
     step_ctx = dict(context) if context else {}
     step_ctx["finish_reason"] = gen.finish_reason
     # A cut turn is a fragment whatever the parser salvaged from it: the call it holds was never
-    # finished, and executing it books a malformed call and trains the fragment as a normal row.
-    if gen.tool_calls and gen.finish_reason not in ENGINE_CUT_FINISH_REASONS:
-        step_ctx["tool_calls"] = gen.tool_calls
+    # finished, and executing it books a malformed call and trains the fragment as a normal row. A turn
+    # that hit its token cap inside a call is told so, the one case the generic cut nudge misreads; an
+    # abort names no cause the recovery could pass on.
+    if gen.tool_calls:
+        if gen.finish_reason not in ENGINE_CUT_FINISH_REASONS:
+            step_ctx["tool_calls"] = gen.tool_calls
+        elif gen.finish_reason == FINISH_REASON_LENGTH:
+            step_ctx[CUT_IN_TOOL_CALL_KEY] = True
     if gen.reasoning:
         step_ctx["reasoning"] = gen.reasoning
     # ``is None``, not truthiness: an empty capture is a zero-token turn the engine did return ids
