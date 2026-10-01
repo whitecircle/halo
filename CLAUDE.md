@@ -106,7 +106,7 @@ src/
 │   │                    #   StoredMetrics are mixed in individually) + pp_gates, loss_masks, grad_clip functions)
 │   ├── sft.py preference/ (DPO,SMPO,KTO)  reward/ (bradley_terry, classification)
 │   ├── embedding/       # SBERT trainer + sentence_transformers_compat.py (ST patches, preloaded-model shim)
-│   ├── grpo/            # online, offline, environmental + objective/ mixins/ subpackages and rollout/
+│   ├── grpo/            # online, offline, environmental, early_stop (shared) + objective/ mixins/ subpackages and rollout/
 │   │                    #   (weight_sync, weight_sync_clients, async_rollouts, routing_replay,
 │   │                    #   trajectory_tokenize, trajectory_spans, rollout_metrics, completions_logging)
 │   └── distillation/    # teacher_distillation, self_distillation, sdpg (online); losses.py = the shared

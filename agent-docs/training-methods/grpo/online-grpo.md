@@ -58,9 +58,9 @@ gradient_accumulation_steps: 8
 
 TRL defaults `loss_type` to `dapo` and `scale_rewards` to `group`. The recipes under `examples/grpo/online/` all run `loss_type: grpo`, `beta: 0`, `epsilon` `0.15`–`0.2`, `num_generations` 4 or 8, and `max_completion_length` 128–4096.
 
-Four optional objective changes ride on the script arguments, all off by default: `scale_rewards_std_floor` (a floor on the std divisor), `drop_degenerate_groups` (mask all-equal-reward groups out of the loss and normalizer), `use_rlrr` (intra-group ranking advantages, [arXiv:2601.23058](https://arxiv.org/abs/2601.23058)) and `use_sdpg` ([Online SDPG](../distillation/online-sdpg.md)).
+Five optional objective changes ride on the script arguments, all off by default: `scale_rewards_std_floor` (a floor on the std divisor), `drop_degenerate_groups` (mask all-equal-reward groups out of the loss and normalizer), `balance_token_mass` (cancel each generation round's net token-weighted push; needs `loss_type` `cispo`, `dapo` or `dr_grpo` and no `off_policy_mask_threshold`, [Advantages](async-grpo/objective.md#advantages)), `use_rlrr` (intra-group ranking advantages, [arXiv:2601.23058](https://arxiv.org/abs/2601.23058)) and `use_sdpg` ([Online SDPG](../distillation/online-sdpg.md)).
 
-The first three recompute on the gathered reward set, so they raise unless `multi_objective_aggregation` is `sum_then_normalize`, and RLRR excludes the other two.
+The std floor, the drop and RLRR recompute on the gathered reward set, so they raise unless `multi_objective_aggregation` is `sum_then_normalize`, and RLRR excludes the other two.
 
 RLRR's nine tunables (`RLRRConfig`, `src/args/mixins.py`): `rlrr_mode` (`hrr` default, or `prr`), `rlrr_tau` (`0.1`), `rlrr_lambda` (`2048.0` — the config field is `lam`, `lambda` being a keyword), `rlrr_xi_pos` / `rlrr_xi_neg` (the Eq. 5 clip band, `1e-3` / `-1e-3`; `xi_neg > xi_pos` is refused), `rlrr_std_normalize` (`false`), `rlrr_length_rerank` (`true`), `rlrr_correctness_clip` (`true`) and `rlrr_correctness_threshold` (`0.5` — the only correctness signal; no path supplies gold labels). All nine are range-validated whether or not `use_rlrr` is on, and refused at a non-default value with it off. Worked recipe: `examples/grpo/online/qwen3/online-grpo-qwen3-8b-rlrr-math.yaml`.
 
@@ -185,7 +185,9 @@ CPU: `pytest tests/cpu/grpo -m cpu`. GPU: the `test_online_grpo_vllm_*_e2e.py` s
 
 ## What to watch
 
-Metric names follow TRL's `GRPOTrainer`, plus `kl_clamp_frac` (reference log-ratios hitting the 5-nat clamp, at `beta > 0`) and `sampling/degenerate_group_frac`. Read every run: `rewards/accuracy/mean`, `frac_reward_zero_std`, `sampling/importance_sampling_ratio/mean` (near 1 means trainer and engine agree), `completions/clipped_ratio`, `entropy`, and `<name>/scored_frac` per externally scored term — the share of calls that returned a usable verdict, so a failing judge shows up as a falling fraction rather than a quiet zero ([Reward Terms](rewards.md#generative-judge)).
+Metric names follow TRL's `GRPOTrainer`, plus `kl_clamp_frac` (reference log-ratios hitting the 5-nat clamp, at `beta > 0`), `sampling/degenerate_group_frac` and `advantage/net_token_mass` (with `advantage/token_mass_scale` under `balance_token_mass`; its sign reads as the entropy push only under a token-sum loss, not the default `grpo`). Read every run: `rewards/accuracy/mean`, `frac_reward_zero_std`, `sampling/importance_sampling_ratio/mean` (near 1 means trainer and engine agree), `completions/clipped_ratio`, `entropy`, and `<name>/scored_frac` per externally scored term — the share of calls that returned a usable verdict, so a failing judge shows up as a falling fraction rather than a quiet zero ([Reward Terms](rewards.md#generative-judge)).
+
+`early_stop_entropy_band` and `early_stop_logratio_gap` end a run once their condition breaches on `early_stop_patience` readings in a row; the gap reads TRL's `sampling/sampling_logp_difference/mean`, so it needs `vllm_importance_sampling_correction` ([Early stop](async-grpo/monitoring.md#early-stop)).
 
 `save_completions` (default on) writes `<output_dir>/completions/completions_<step>.parquet` (step zero-padded to five digits); `log_completions` is console-only.
 

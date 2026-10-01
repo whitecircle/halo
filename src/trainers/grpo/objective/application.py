@@ -1,19 +1,125 @@
 """Applying advantages and drops to the GRPO loss inputs (shared by online and environmental GRPO).
 
 Once rewards exist, both trainers run the same steps: mask the rows of degenerate (all-equal-reward)
-groups out of the loss, then recompute the gathered-global DAPO normalizer from the post-drop loss
-mask. They differ only in framing (the online trainer mutates TRL's result dict; the environmental
-trainer builds its tensors directly), so the tensor math lives here.
+groups out of the loss, recompute the gathered-global DAPO normalizer from the post-drop loss mask, and
+balance the step's token-weighted advantage mass. They differ only in framing (the online trainer
+mutates TRL's result dict; the environmental trainer builds its tensors directly), so the tensor math
+lives here.
 """
 
-from collections.abc import Callable
+from collections.abc import Callable, MutableMapping
+from dataclasses import dataclass
 
 import torch
 
 from src.trainers.grpo.objective.advantages import degenerate_group_mask
 
-# Metric key both GRPO trainers log the dropped-group fraction under.
+# Metric keys both GRPO trainers log under.
 DEGENERATE_GROUP_FRAC_KEY = "sampling/degenerate_group_frac"
+NET_TOKEN_MASS_KEY = "advantage/net_token_mass"
+TOKEN_MASS_SCALE_KEY = "advantage/token_mass_scale"
+# TRL loss types whose every loss token of a step shares one normalizer, so a row pulls with its
+# advantage times its trained token weight: the losses the token-mass balance is exact for. ``grpo`` /
+# ``sapo`` average each completion over its own length, ``bnpo`` normalizes per micro-batch, and
+# ``vespo`` weighs each sequence by its advantage's sign.
+TOKEN_SUM_LOSS_TYPES = ("cispo", "dapo", "dr_grpo")
+
+
+@dataclass(frozen=True)
+class TokenMassBalance:
+    """A step's token-weighted advantage mass and the per-sign scales that cancel it.
+
+    ``net`` is ``(P - N) / (P + N)`` before balancing, where ``P`` and ``N`` are the summed positive and
+    negative ``advantage x token weight`` of the whole step: the share of the step's push that raises
+    (``net > 0``) or lowers (``net < 0``) the probability of the tokens the policy sampled.
+    """
+
+    net: float
+    positive_scale: float = 1.0
+    negative_scale: float = 1.0
+
+    @property
+    def scale(self) -> float:
+        """The factor the heavier sign takes (1.0 when nothing is balanced)."""
+        return min(self.positive_scale, self.negative_scale)
+
+    def apply(self, advantages: torch.Tensor) -> torch.Tensor:
+        return torch.where(advantages > 0, advantages * self.positive_scale, advantages * self.negative_scale)
+
+
+def token_mass_balance(
+    advantages: torch.Tensor, token_weights: torch.Tensor, gather_fn: Callable[[torch.Tensor], torch.Tensor]
+) -> TokenMassBalance:
+    """The scales that shrink the heavier sign of a step's advantages until its token mass nets to zero.
+
+    Under a token-sum loss a row pulls with its advantage times its trained token weight. The advantages
+    of a group sum to zero, their token-weighted sum does not: where failures run longer than solves the
+    step pushes down the tokens the policy itself sampled, which flattens it (entropy rises), and where
+    solves run longer it sharpens it. Scaling down the heavier side, never up, removes that net push and
+    keeps every row's sign and its order within its sign. ``advantages`` and ``token_weights`` are
+    per-row and rank-local; the masses are summed over every rank (the gather is collective), so all
+    ranks take the same scales. A step with only one sign has nothing to balance against.
+    """
+    weights = token_weights.to(advantages.dtype)
+    local = torch.stack([(advantages.clamp_min(0) * weights).sum(), (advantages.clamp_max(0).neg() * weights).sum()])
+    positive, negative = gather_fn(local.unsqueeze(0)).sum(dim=0).tolist()
+    total = positive + negative
+    if total <= 0:
+        return TokenMassBalance(net=0.0)
+    net = (positive - negative) / total
+    if positive == 0 or negative == 0:
+        return TokenMassBalance(net=net)
+    if negative > positive:
+        return TokenMassBalance(net=net, negative_scale=positive / negative)
+    return TokenMassBalance(net=net, positive_scale=negative / positive)
+
+
+def record_token_mass(
+    advantages: torch.Tensor,
+    loss_mask: torch.Tensor,
+    is_ratio: torch.Tensor | None,
+    gather_fn: Callable[[torch.Tensor], torch.Tensor],
+    metrics: MutableMapping[str, list[float]],
+    enabled: bool,
+) -> TokenMassBalance | None:
+    """Log a training step's net token mass and return the balance to apply, or ``None`` when off.
+
+    A token weighs what the policy gradient multiplies it by: its place in the loss (``loss_mask``, every
+    drop already in it) times its truncated, masked IS ratio (``None`` when the loss applies none). The
+    net share is logged whether or not the balance is on, as the early sign of an entropy drift.
+    """
+    weights = loss_mask if is_ratio is None else loss_mask * is_ratio
+    result = token_mass_balance(advantages, weights.sum(dim=1), gather_fn)
+    metrics[NET_TOKEN_MASS_KEY].append(result.net)
+    if not enabled:
+        return None
+    metrics[TOKEN_MASS_SCALE_KEY].append(result.scale)
+    return result
+
+
+def validate_token_mass_balance(args) -> None:
+    """Refuse ``balance_token_mass`` under a TRL ``GRPOConfig`` whose loss does not pull with token mass.
+
+    Two masks inside TRL's loss drop tokens after the balance has weighed them: the entropy quantile and
+    the off-policy sequence mask, which drops negative sequences alone and so turns the net push positive.
+    """
+    if args.loss_type not in TOKEN_SUM_LOSS_TYPES:
+        raise ValueError(
+            f"balance_token_mass needs a loss whose loss tokens share one normalizer ({', '.join(TOKEN_SUM_LOSS_TYPES)}), "
+            f"got loss_type={args.loss_type!r}: there a row does not pull with its token count, so the balance "
+            "would add a push instead of cancelling one."
+        )
+    if args.top_entropy_quantile < 1.0:
+        raise ValueError(
+            f"balance_token_mass with top_entropy_quantile={args.top_entropy_quantile}: the entropy mask drops tokens "
+            "inside the loss, after the balance has weighed them. Set top_entropy_quantile: 1.0."
+        )
+    if args.off_policy_mask_threshold is not None:
+        raise ValueError(
+            f"balance_token_mass with off_policy_mask_threshold={args.off_policy_mask_threshold}: the mask drops "
+            "negative-advantage sequences inside the loss, after the balance has weighed them, so the step's net "
+            "push turns positive. Unset one of them."
+        )
 
 
 def degenerate_drop_rows(

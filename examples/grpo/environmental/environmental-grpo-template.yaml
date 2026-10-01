@@ -99,10 +99,16 @@ scale_rewards: batch     # global batch std; a per-group std divides by ~0 on a 
 # routing_replay: none              # MoE routing replay: none, recompute (R2), or rollout (R3; needs a capture-capable server)
 # --- Advantage shaping (AdvantageShapingArguments; agent-docs/training-methods/grpo/async-grpo/objective.md#advantages) ---
 # scale_rewards_std_floor: 0.0      # floor on the std divisor in advantage scaling; 0 = off
+# balance_token_mass: false         # cancel each round's net token-weighted push; needs loss_type: cispo, dapo or dr_grpo
 # --- IS trust region (engine<->trainer ratio; every knob: agent-docs/training-methods/grpo/async-grpo/objective.md#trust-region-masks) ---
 # isr_geo_band_min: null            # trajectory band on exp(mean log-ratio); arms only when both bounds are set
 # isr_geo_band_max: null
 # isr_veto_min: null                # any corrected token below this raw ratio masks its whole trajectory
+# --- Early stop (GRPOEarlyStopArguments; agent-docs/training-methods/grpo/async-grpo/monitoring.md#early-stop) ---
+# early_stop_entropy_band: null     # [low, high]: stop once entropy is outside it on early_stop_patience readings in a row
+# early_stop_logratio_gap: null     # stop once |sampling/logratio_mean| stays above this (needs the IS correction)
+# early_stop_on_skipped_updates: false  # stop once the trust-region breaker skipped every update (needs skip_update_masked_frac)
+# early_stop_patience: 3
 
 # --- Training ---
 per_device_train_batch_size: 2

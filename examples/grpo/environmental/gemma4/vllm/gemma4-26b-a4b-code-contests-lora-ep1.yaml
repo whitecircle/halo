@@ -106,10 +106,12 @@ isr_geo_band_max: 1.05       #   masking fix the disagreement, never widen the b
 isr_veto_min: 1.0e-4         # any corrected token below this raw ratio masks its whole trajectory
 isr_opsm_delta: 0.05         # masks negative-advantage trajectories with |mean log-ratio| > delta (nats)
 skip_update_masked_frac: 0.4  # skip the optimizer step when > this fraction of corrected trajectories or tokens is masked
+early_stop_on_skipped_updates: true  # end the run once the breaker has skipped every update of early_stop_patience (3) rounds in a row
 scale_rewards_std_floor: 0.2  # floor (reward units) on the batch-std divisor
 num_generations_eval: 1
 scale_rewards: batch        # global batch std — never per-group (degenerate-group noise inflation)
 drop_degenerate_groups: true  # groups alike in reward (the length terms aside) would still inflate the DAPO normalizer
+balance_token_mass: true    # failures run longer than solves: cancel each step's net token-weighted push, or entropy climbs
 top_entropy_quantile: 1.0   # train ALL tokens: tool-format tokens need direct reinforcement at beta=0
 mask_truncated_completions: false  # `truncated` = the max_turns overflow, or a cut/empty turn past the recovery
                                    # cap or on the last turn: a real failure worth its negative advantage; a

@@ -210,7 +210,8 @@ class RLRRArguments(_RLRRTunables, RangeValidatedConfig):
 
 @dataclass
 class AdvantageShapingArguments(RangeValidatedConfig):
-    """Reward-scaling and degenerate-group guards on the GRPO group-relative advantages.
+    """Reward scaling, the degenerate-group drop and the token-mass balance of the GRPO group-relative
+    advantages.
 
     Shared by the online (RLVR) and environmental GRPO configs, which feed the same
     ``group_relative_advantages`` normalizer.
@@ -238,6 +239,19 @@ class AdvantageShapingArguments(RangeValidatedConfig):
             "`sampling/degenerate_group_frac`."
         },
     )
+    balance_token_mass: bool = field(
+        default=False,
+        metadata={
+            "help": "Scale down the heavier sign of each generation round's advantages so the round's "
+            "token-weighted advantage mass nets to zero. Under a token-sum loss a completion pulls with its "
+            "advantage times its trained tokens; where failures run longer than solves the round pushes "
+            "down the tokens the policy sampled and entropy climbs, where solves run longer it sharpens "
+            "the policy. Needs `loss_type` `cispo`, `dapo` or `dr_grpo`, `top_entropy_quantile` 1.0 and no "
+            "`off_policy_mask_threshold`, refused otherwise. The pre-balance share is logged as "
+            "`advantage/net_token_mass` either way (its sign reads as the entropy push only under a "
+            "token-sum loss) and the applied factor as `advantage/token_mass_scale`. Default off."
+        },
+    )
 
     def _validate_ranges(self) -> None:
         """Refuse a negative or NaN std floor, which fails silently: ``max(std, floor)`` becomes a
@@ -247,6 +261,99 @@ class AdvantageShapingArguments(RangeValidatedConfig):
             raise ValueError(
                 f"scale_rewards_std_floor must be a finite value >= 0 (0 = off), got {self.scale_rewards_std_floor}"
             )
+
+
+@dataclass(frozen=True)
+class EarlyStopConfig:
+    """What a GRPO early stop checks on the logged training steps; the single home of its validation.
+
+    Built by :class:`GRPOEarlyStopArguments`; ``on_skipped_updates`` comes from the environmental config,
+    the one whose trainer has a trust-region breaker that can skip an update."""
+
+    entropy_band: tuple[float, ...] | None = None
+    logratio_gap: float | None = None
+    on_skipped_updates: bool = False
+    patience: int = 3
+
+    def __post_init__(self) -> None:
+        band = self.entropy_band
+        if band is not None and not (
+            len(band) == 2 and all(math.isfinite(v) for v in band) and 0.0 <= band[0] < band[1]
+        ):
+            raise ValueError(f"early_stop_entropy_band must be [low, high] with 0 <= low < high, got {list(band)}")
+        gap = self.logratio_gap
+        if gap is not None and not (math.isfinite(gap) and gap > 0.0):
+            raise ValueError(f"early_stop_logratio_gap must be a finite positive number or null, got {gap}")
+        patience = self.patience
+        if isinstance(patience, bool) or not isinstance(patience, int) or patience < 1:
+            raise ValueError(f"early_stop_patience must be an int >= 1, got {patience!r}")
+        if not self.active and patience != EarlyStopConfig.patience:
+            raise ValueError(f"early_stop_patience is {patience} but no early-stop condition is set to count it")
+
+    @property
+    def active(self) -> bool:
+        return self.entropy_band is not None or self.logratio_gap is not None or self.on_skipped_updates
+
+
+@dataclass
+class GRPOEarlyStopArguments(RangeValidatedConfig):
+    """Early stop for a KL-free GRPO run, shared by the online and environmental configs.
+
+    A policy without a KL anchor drifts slowly before it fails: entropy leaves its band and the
+    trainer-vs-sampler log-ratio widens with it. A condition ends training once it breaches on
+    ``early_stop_patience`` readings in a row, without saving or evaluating that step; the run keeps the
+    periodic checkpoints it took before.
+    """
+
+    early_stop_entropy_band: list[float] | None = field(
+        default=None,
+        metadata={
+            "help": "Early stop: end training once the policy entropy (`entropy`) stays outside this "
+            "[low, high] band for `early_stop_patience` readings in a row. A KL-free run drifts in "
+            "either direction, toward collapse below the band or explosion above it, and both start "
+            "slowly enough to stop on. The band is model-specific: read it off a healthy run. "
+            "None (default) = off."
+        },
+    )
+    early_stop_logratio_gap: float | None = field(
+        default=None,
+        metadata={
+            "help": "Early stop: end training once the trainer's log-prob gap metric stays above this many "
+            "nats per token for `early_stop_patience` readings in a row (one per generation round: a step "
+            "reusing its round carries none and leaves the count). Env GRPO reads the magnitude "
+            "of its signed mean `sampling/logratio_mean`, online GRPO TRL's mean absolute difference "
+            "`sampling/sampling_logp_difference/mean`; the two read differently, so a threshold does not "
+            "carry from one trainer to the other. The gap grows with entropy, and faster than it once the "
+            "policy flattens, so it is the earlier signal of the two. Needs the vLLM importance-sampling "
+            "correction, which logs it. None (default) = off."
+        },
+    )
+    early_stop_patience: int = field(
+        default=EarlyStopConfig.patience,
+        metadata={
+            "help": "Breaching readings in a row an early-stop condition needs before training ends (>= 1). "
+            "A reading is one training log line, so under `logging_steps` > 1 it is the window's mean. "
+            "Refused at a non-default value when no early-stop condition is set."
+        },
+    )
+
+    def _validate_ranges(self) -> None:
+        super()._validate_ranges()
+        self.build_early_stop()
+
+    def build_early_stop(self) -> EarlyStopConfig:
+        band = self.early_stop_entropy_band
+        return EarlyStopConfig(
+            entropy_band=tuple(band) if band is not None else None,
+            logratio_gap=self.early_stop_logratio_gap,
+            on_skipped_updates=self._stops_on_skipped_updates(),
+            patience=self.early_stop_patience,
+        )
+
+    def _stops_on_skipped_updates(self) -> bool:
+        """Whether a step whose every update was skipped counts toward the stop; only a config whose trainer
+        has a trust-region breaker overrides it."""
+        return False
 
 
 @dataclass

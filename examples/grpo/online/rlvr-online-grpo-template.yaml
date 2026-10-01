@@ -40,9 +40,14 @@ temperature: 1.0
 loss_type: grpo
 # use_chunked_grpo_logprobs: false  # vocab-chunked log-probs instead of full [B, T, vocab] logits (large-vocab models on long completions)
 
-# --- Advantage shaping (AdvantageShapingArguments, exclusive with use_rlrr; agent-docs/training-methods/grpo/online-grpo.md) ---
+# --- Advantage shaping (AdvantageShapingArguments; the std floor and the drop are exclusive with use_rlrr; agent-docs/training-methods/grpo/online-grpo.md) ---
 # scale_rewards_std_floor: 0.0      # floor on the std divisor in advantage scaling; 0 = off
 # drop_degenerate_groups: false     # mask GRPO groups whose completions all scored the same reward out of the loss
+# balance_token_mass: false         # cancel each round's net token-weighted push; needs loss_type: cispo, dapo or dr_grpo
+# --- Early stop (GRPOEarlyStopArguments; agent-docs/training-methods/grpo/online-grpo.md) ---
+# early_stop_entropy_band: null     # [low, high]: stop once entropy is outside it on early_stop_patience readings in a row
+# early_stop_logratio_gap: null     # stop once sampling/sampling_logp_difference/mean stays above this (needs the IS correction)
+# early_stop_patience: 3
 
 # --- RLRR (arXiv:2601.23058; ranking advantages replace the group-normalized ones, so scale_rewards and the shaping knobs stay unset with it) ---
 # use_rlrr: false

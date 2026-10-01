@@ -15,8 +15,9 @@ import trl.generation.vllm_generation as _trl_vllm_generation
 from accelerate.logging import get_logger
 from trl import GRPOTrainer
 
-from src.args.mixins import RLRRConfig
+from src.args.mixins import EarlyStopConfig, RLRRConfig
 from src.distributed.nccl.clients.vllm import VLLMWeightSyncClient
+from src.trainers.grpo.early_stop import SAMPLING_LOGP_GAP_KEY, build_early_stop_callback
 from src.trainers.grpo.mixins.chunked_logprobs import ChunkedGRPOLogprobsMixin, LogitsWidth
 from src.trainers.grpo.mixins.dataloader import GRPOTrainDataLoaderMixin
 from src.trainers.grpo.mixins.entropy_mask import ProtectedTokenEntropyMixin
@@ -28,6 +29,8 @@ from src.trainers.grpo.objective.application import (
     degenerate_drop_rows,
     gathered_num_items,
     narrow_loss_masks,
+    record_token_mass,
+    validate_token_mass_balance,
 )
 from src.trainers.grpo.objective.logratio import clamp_ref_logps
 from src.trainers.grpo.objective.relative_rewards import relative_advantages_grouped
@@ -79,6 +82,12 @@ class DistributedGRPOTrainer(
         training_args, kwargs = self._begin_on_policy_init(args, kwargs)
         self._require_vllm_server_mode(training_args)
         self._resolve_advantage_hooks(kwargs, training_args)
+        # Built before TRL's ctor opens the NCCL group to the rollout server, so a refused condition costs nothing.
+        early_stop = build_early_stop_callback(
+            kwargs.pop("early_stop", EarlyStopConfig()),
+            gap_key=SAMPLING_LOGP_GAP_KEY,
+            gap_logged=training_args.vllm_importance_sampling_correction,
+        )
 
         self._last_rewards_per_func: torch.Tensor | None = None
 
@@ -88,6 +97,8 @@ class DistributedGRPOTrainer(
 
         with self._patch_trl_for_vendored_vllm_client():
             super().__init__(*args, **kwargs)
+        if early_stop is not None:
+            self.add_callback(early_stop)
 
         if self._rlrr_config is not None:
             logger.info("RLRR relative-reward shaping enabled (mode=%s)", self._rlrr_config.mode)
@@ -112,6 +123,9 @@ class DistributedGRPOTrainer(
         self._rlrr_config: RLRRConfig | None = kwargs.pop("rlrr_config", None)
         self._drop_degenerate_groups: bool = kwargs.pop("drop_degenerate_groups", False)
         self._scale_rewards_std_floor: float = kwargs.pop("scale_rewards_std_floor", 0.0)
+        self._balance_token_mass: bool = kwargs.pop("balance_token_mass", False)
+        if self._balance_token_mass:
+            validate_token_mass_balance(grpo_args)
         if self._rlrr_config is not None:
             if self._scale_rewards_std_floor > 0:
                 raise ValueError(
@@ -225,6 +239,7 @@ class DistributedGRPOTrainer(
         self._apply_rlrr_advantages(result)
         self._apply_std_floor_advantages(result)
         self._apply_degenerate_group_drop(result)
+        self._apply_token_mass_balance(result)
         # Consumed: the next generation batch must stash its own rewards, never reuse these.
         self._last_rewards_per_func = None
 
@@ -296,6 +311,30 @@ class DistributedGRPOTrainer(
         start = self.accelerator.process_index * n_local
         return full[start : start + n_local]
 
+    def _apply_token_mass_balance(self, result: dict[str, torch.Tensor | Any]) -> None:
+        """Log the batch's net token mass and, under ``balance_token_mass``, cancel it
+        (:func:`~src.trainers.grpo.objective.application.record_token_mass`), as the environmental
+        trainer does: a token weighs its place in the loss times TRL's vLLM IS ratio. Train mode only."""
+        if not self.model.training:
+            return
+        loss_mask = effective_loss_mask(result)
+        if loss_mask is None:
+            raise RuntimeError(
+                "The net token mass cannot be weighed: TRL's scored batch carries no completion_mask, so no "
+                "row's trained token count is known."
+            )
+        advantages = result["advantages"]
+        balance = record_token_mass(
+            advantages,
+            loss_mask.to(advantages.dtype),
+            result.get("importance_sampling_ratio"),
+            self.accelerator.gather,
+            self._metrics["train"],
+            self._balance_token_mass,
+        )
+        if balance is not None:
+            self._install_advantages(result, balance.apply(self.accelerator.gather(advantages)), "balance_token_mass")
+
     def _apply_std_floor_advantages(self, result: dict[str, torch.Tensor | Any]) -> None:
         """Replace TRL's group-normalized advantages with ones whose std divisor honours
         ``scale_rewards_std_floor``, recomputed on the full gathered reward set and re-sliced to this
@@ -323,9 +362,9 @@ class DistributedGRPOTrainer(
     ) -> None:
         """Slice ``advantages_full`` to this rank, install it, and realign TRL's advantage log.
 
-        Both advantage-replacement hooks recompute on the full gathered set, so both must re-slice
-        and both must re-log; doing one without the other trains on values the logged record does
-        not carry.
+        Every advantage-replacement hook hands over the full gathered set (recomputed from the rewards,
+        or this batch's advantages rescaled), so each must re-slice and re-log; doing one without the
+        other trains on values the logged record does not carry.
 
         TRL fills ``_logs["advantages"]`` with its own group-normalized values inside
         ``_generate_and_score_completions``, before either hook runs. The gathered tensor carries the

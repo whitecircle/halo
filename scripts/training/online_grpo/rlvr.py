@@ -247,6 +247,8 @@ def main():
         rlrr_config=args.build_rlrr_config(),
         drop_degenerate_groups=args.drop_degenerate_groups,
         scale_rewards_std_floor=args.scale_rewards_std_floor,
+        balance_token_mass=args.balance_token_mass,
+        early_stop=args.build_early_stop(),
         # Chunked log-probs (avoids full [B,T,vocab] logits on long completions)
         use_chunked_grpo_logprobs=args.use_chunked_grpo_logprobs,
         # Persist completions parquet decoupled from console log_completions

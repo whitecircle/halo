@@ -6,7 +6,7 @@ from dataclasses import dataclass, field, fields
 from math import isfinite
 from typing import Any, Literal
 
-from src.args.mixins import AdvantageShapingArguments, ChunkedLogprobsArguments
+from src.args.mixins import AdvantageShapingArguments, ChunkedLogprobsArguments, GRPOEarlyStopArguments
 from src.configs.rollout_config import (
     DEFAULT_EPISODE_TIMEOUT_SECONDS,
     DEFAULT_MAX_RETRIES,
@@ -60,7 +60,7 @@ def rollout_field_sources(config_cls) -> dict[str, str]:
 
 
 @dataclass
-class AsyncTrainingConfig(AdvantageShapingArguments, ChunkedLogprobsArguments):
+class AsyncTrainingConfig(AdvantageShapingArguments, GRPOEarlyStopArguments, ChunkedLogprobsArguments):
     """Async training infrastructure: Ray workers, rollout-server connections, weight sync, rollout
     prefetch. Environment selection is in EnvironmentConfig, the trainer in
     src/trainers/grpo/environmental.py."""
@@ -324,6 +324,15 @@ class AsyncTrainingConfig(AdvantageShapingArguments, ChunkedLogprobsArguments):
             "skipping holds the policy still until the next weight-sync re-anchors the rollouts. Logged "
             "as `sampling/update_skipped` with `sampling/is_masked_traj_frac` / "
             "`sampling/is_masked_token_frac`. None (default) = off; 0.3-0.5 is a sane range."
+        },
+    )
+    early_stop_on_skipped_updates: bool = field(
+        default=False,
+        metadata={
+            "help": "Early stop (GRPOEarlyStopArguments): end training once the trust-region breaker "
+            "(`skip_update_masked_frac`) skipped every update of `early_stop_patience` generation rounds in "
+            "a row. Past that the policy is frozen where the rollouts no longer agree with it, and the run "
+            "only spends compute."
         },
     )
 
@@ -614,6 +623,12 @@ class AsyncTrainingConfig(AdvantageShapingArguments, ChunkedLogprobsArguments):
         # A rate is never above 1, so a threshold at 1 would never fire.
         if self.truncation_alarm_rate is not None and not 0.0 <= self.truncation_alarm_rate < 1.0:
             raise ValueError(f"truncation_alarm_rate must be in [0, 1) or null, got {self.truncation_alarm_rate}")
+        # The breaker is the only writer of the skip flag: without it the condition could never fire.
+        if self.early_stop_on_skipped_updates and self.skip_update_masked_frac is None:
+            raise ValueError(
+                "early_stop_on_skipped_updates needs skip_update_masked_frac: the trust-region breaker is "
+                "what skips an update, so without it the condition never holds."
+            )
         if not isinstance(self.rollout_chat_template_kwargs, Mapping):
             raise ValueError(
                 "rollout_chat_template_kwargs must be a mapping of template variables, got "
@@ -632,6 +647,9 @@ class AsyncTrainingConfig(AdvantageShapingArguments, ChunkedLogprobsArguments):
                 "rollout_thinking_budget_scope, which sets it."
             )
         self._validate_backend_capabilities()
+
+    def _stops_on_skipped_updates(self) -> bool:
+        return self.early_stop_on_skipped_updates
 
     def _validate_effort_length_terms(self) -> None:
         """A NaN passes every ordered comparison, a non-positive scale inverts or zeroes the price, and a

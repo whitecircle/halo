@@ -7,6 +7,7 @@ from src.args.common_script_args import CommonScriptArguments
 from src.args.mixins import (
     AdvantageShapingArguments,
     ChunkedLogprobsArguments,
+    GRPOEarlyStopArguments,
     PromptDatasetArguments,
     RLRRArguments,
     SDPGArguments,
@@ -23,6 +24,7 @@ class RLVROnlineGRPOScriptArguments(
     PromptDatasetArguments,
     ChunkedLogprobsArguments,
     AdvantageShapingArguments,
+    GRPOEarlyStopArguments,
     RLRRArguments,
     SDPGArguments,
     CommonScriptArguments,
@@ -33,7 +35,7 @@ class RLVROnlineGRPOScriptArguments(
     ``format`` graders, a generative ``judge``, a served ``reward_model`` — each ``weight * score ** exponent``.
 
     RLRR (arXiv:2601.23058, :class:`RLRRArguments`) replaces the group-normalized advantages with
-    relative-ranking ones, so the trainer refuses it beside either AdvantageShapingArguments guard.
+    relative-ranking ones, so the trainer refuses it beside the std floor or the degenerate-group drop.
     """
 
     # The tunables ``use_sdpg`` gates: the shared block plus the RLVR-only advantage gate.

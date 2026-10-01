@@ -4,6 +4,8 @@
 * ``use_rlrr`` + ``drop_degenerate_groups`` cancels RLRR's point — the drop keys on raw-reward
   equality, so every all-correct group RLRR just gave length-ranked advantages is masked out of the
   loss — and must be refused at construction like the std-floor pairing.
+* ``balance_token_mass`` rescales whatever advantages the earlier hooks left, RLRR's included, and is
+  refused under a loss whose tokens do not share one normalizer (TRL's default ``grpo`` among them).
 * ``multi_objective_aggregation`` other than ``sum_then_normalize`` makes every hook's recompute
   diverge from TRL's; it is refused at construction, not at the first train step.
 * A hook computes on the FULL gathered set and slices this rank's rows the way TRL does, so a group
@@ -49,6 +51,27 @@ def _resolve(kwargs: dict, grpo_args=SUM_THEN_NORMALIZE) -> DistributedGRPOTrain
 def test_rlrr_refuses_every_hook_that_would_cancel_it(extra, match):
     with pytest.raises(ValueError, match=match):
         _resolve({"rlrr_config": RLRRConfig(), **extra})
+
+
+def test_the_balance_is_refused_under_a_per_completion_loss_and_resolves_beside_rlrr():
+    """TRL's default ``grpo`` loss averages each completion over its own length, so token mass is not what
+    it pulls with; under ``dapo`` the balance rescales whatever advantages RLRR set."""
+    per_completion = types.SimpleNamespace(
+        multi_objective_aggregation="sum_then_normalize",
+        loss_type="grpo",
+        top_entropy_quantile=1.0,
+        off_policy_mask_threshold=None,
+    )
+    with pytest.raises(ValueError, match="balance_token_mass needs a loss"):
+        _resolve({"balance_token_mass": True}, per_completion)
+    token_sum = types.SimpleNamespace(
+        multi_objective_aggregation="sum_then_normalize",
+        loss_type="dapo",
+        top_entropy_quantile=1.0,
+        off_policy_mask_threshold=None,
+    )
+    trainer = _resolve({"balance_token_mass": True, "rlrr_config": RLRRConfig()}, token_sum)
+    assert trainer._balance_token_mass and trainer._rlrr_config is not None
 
 
 def test_rlrr_alone_resolves_and_consumes_its_kwargs():
@@ -197,7 +220,8 @@ def test_the_generation_batch_consumes_the_stash(monkeypatch):
     monkeypatch.setattr(GRPOTrainer, "_generate_and_score_completions", lambda self, inputs: {})
     me = object.__new__(DistributedGRPOTrainer)
     me._rlrr_config, me._drop_degenerate_groups = None, False
-    me._scale_rewards_std_floor = 0.0
+    me._scale_rewards_std_floor, me._balance_token_mass = 0.0, False
+    me.model = types.SimpleNamespace(training=False)
     me.parallelism_config = types.SimpleNamespace(is_tp_mode=False, is_expert_tp_mode=False)
     me._last_rewards_per_func = FULL_REWARDS
     DistributedGRPOTrainer._generate_and_score_completions(me, [])

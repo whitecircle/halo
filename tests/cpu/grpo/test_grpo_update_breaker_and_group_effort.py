@@ -280,6 +280,44 @@ def test_the_step_diagnostics_read_the_advantages_after_the_breaker():
     assert min(recorded_at) > breaker_at, "the step diagnostics read the advantages before the breaker"
 
 
+def _calls_function(stmt: ast.stmt, name: str) -> list[ast.Call]:
+    return [
+        node
+        for node in ast.walk(stmt)
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id == name
+    ]
+
+
+def test_the_balance_weighs_what_the_loss_trains_and_reaches_both_advantage_sets():
+    """The token mass must be the loss's: counted on the IS ratio after its correction and on the mask after
+    the drops narrowed it, before the breaker can zero the step, and in train mode only. Its scales must
+    land on the per-row advantages the loss reads and on the per-trajectory ones the record reports."""
+    fn = _build_training_tensors_ast()
+    corrected_at = next(i for i, stmt in enumerate(fn.body) if _calls(stmt, "_apply_is_correction"))
+    narrowed_at = next(i for i, stmt in enumerate(fn.body) if _calls(stmt, "_narrow_masks_and_normalizer"))
+    breaker_at = next(i for i, stmt in enumerate(fn.body) if _breaker_branch(fn) in ast.walk(stmt))
+    balanced_at = [i for i, stmt in enumerate(fn.body) if _calls_function(stmt, "record_token_mass")]
+
+    assert len(balanced_at) == 1, "_build_training_tensors weighs the token mass once"
+    assert corrected_at < narrowed_at < balanced_at[0] < breaker_at
+    block = fn.body[balanced_at[0]]
+    assert isinstance(block, ast.If) and ast.unparse(block.test) == "mode == 'train'"
+    (call,) = _calls_function(block, "record_token_mass")
+    assert [ast.unparse(arg) for arg in call.args[:3]] == [
+        "local_advantages",
+        "loss_mask",
+        "importance_sampling_ratio",
+    ]
+    rebound = {
+        target.id
+        for node in ast.walk(block)
+        if isinstance(node, ast.Assign)
+        for target in ast.walk(node.targets[0])
+        if isinstance(target, ast.Name)
+    }
+    assert {"local_advantages", "traj_advantages"} <= rebound
+
+
 # The phase helpers ``_build_training_tensors`` is partitioned into, in call order.
 _PHASE_HELPERS = (
     "_build_rollout_rewards",

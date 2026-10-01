@@ -598,4 +598,9 @@ def run_trainer(
     trainer.cleanup_ep()
 
     if is_global_main_process():
-        logger.info(f"{method_name} training completed successfully!")
+        state = trainer.state
+        # A callback that ends training (an early stop) leaves the step count short of the plan.
+        if state.global_step < state.max_steps:
+            logger.warning(f"{method_name} training stopped early at step {state.global_step} of {state.max_steps}.")
+        else:
+            logger.info(f"{method_name} training completed successfully!")

@@ -42,6 +42,7 @@ from src.environments.episode import (
     validate_thinking_budget_scope,
 )
 from src.models.structure import resolve_tokenizer
+from src.trainers.grpo.early_stop import LOGRATIO_MEAN_KEY, UPDATE_SKIPPED_KEY, build_early_stop_callback
 from src.trainers.grpo.mixins.chunked_logprobs import (
     ChunkedGRPOLogprobsMixin,
     LogitsWidth,
@@ -58,6 +59,8 @@ from src.trainers.grpo.objective.application import (
     expand_traj_to_rows,
     gathered_num_items,
     narrow_loss_masks,
+    record_token_mass,
+    validate_token_mass_balance,
 )
 from src.trainers.grpo.objective.logratio import (
     ISMaskConfig,
@@ -309,6 +312,9 @@ class DistributedAsyncEnvironmentalGRPOTrainer(
         self.drop_degenerate_groups = self.async_config.drop_degenerate_groups
         # Both range-validated by AsyncTrainingConfig._validate_ranges (finiteness included).
         self._scale_rewards_std_floor = self.async_config.scale_rewards_std_floor
+        self._balance_token_mass = self.async_config.balance_token_mass
+        if self._balance_token_mass:
+            validate_token_mass_balance(self.args)
         self._skip_update_masked_frac = self.async_config.skip_update_masked_frac
         # Set by _update_breaker_tripped once per generation round and held through every optimizer
         # step that round feeds; the next round's verdict overwrites it.
@@ -363,6 +369,11 @@ class DistributedAsyncEnvironmentalGRPOTrainer(
                 "least one IS mask stage (isr_geo_band/isr_veto/isr_opsm) — without them no "
                 "trajectory is ever masked and the circuit breaker would silently never fire."
             )
+        early_stop = build_early_stop_callback(
+            self.async_config.build_early_stop(), gap_key=LOGRATIO_MEAN_KEY, gap_logged=self._is_correction
+        )
+        if early_stop is not None:
+            self.add_callback(early_stop)
         self._isr_engine_reference = self.async_config.isr_engine_reference
         if self._isr_engine_reference:
             self._validate_engine_reference(resolve_weight_sync_client(self._rollout_backend))
@@ -1000,6 +1011,18 @@ class DistributedAsyncEnvironmentalGRPOTrainer(
             device,
             mode,
         )
+        if mode == "train":
+            balance = record_token_mass(
+                local_advantages,
+                loss_mask,
+                importance_sampling_ratio,
+                self.accelerator.gather,
+                self._metrics[mode],
+                self._balance_token_mass,
+            )
+            if balance is not None:
+                # The per-trajectory values follow, so the completions record reports what the gradient carries.
+                local_advantages, traj_advantages = balance.apply(local_advantages), balance.apply(traj_advantages)
 
         self._log_headline_rewards(gathered_rewards, gathered_valid, mode)
         self._metrics[mode]["sampling/is_correction_active"].append(float(use_is_correction))
@@ -1232,7 +1255,7 @@ class DistributedAsyncEnvironmentalGRPOTrainer(
                 self.vllm_importance_sampling_clip_max,
             )
             # Unclamped mean log-ratio (nats): ~0 when conditioning matches vLLM's exact prompt.
-            self._world_metrics.fraction("sampling/logratio_mean", logps_diff.sum(), corrected_mask.sum())
+            self._world_metrics.fraction(LOGRATIO_MEAN_KEY, logps_diff.sum(), corrected_mask.sum())
             clip_max = self.vllm_importance_sampling_clip_max
             # Past the truncation point in either direction, on the raw trainer-vs-sampler ratio; the
             # band [1/clip_max, clip_max] is empty at or below 1.
@@ -1673,7 +1696,7 @@ class DistributedAsyncEnvironmentalGRPOTrainer(
         self._metrics[mode]["sampling/is_masked_traj_frac"].append(traj_frac)
         self._metrics[mode]["sampling/is_masked_token_frac"].append(token_frac)
         skipped = max(traj_frac, token_frac) > self._skip_update_masked_frac
-        self._metrics[mode]["sampling/update_skipped"].append(float(skipped))
+        self._metrics[mode][UPDATE_SKIPPED_KEY].append(float(skipped))
         # This round's verdict replaces the last one's: the flag stays up for every optimizer step
         # the round feeds and comes down only here.
         self._breaker_tripped_this_step = skipped
