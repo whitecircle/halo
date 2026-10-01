@@ -2,26 +2,42 @@
 
 Rollouts are collected by Ray actors against the rollout servers while the trainer steps; a
 background prefetch thread overlaps the next round's collection with this round's update, and the
-trained weights are pushed back to the engines over NCCL between steps.
+trained weights are pushed back to the engines over NCCL between steps. The prefetch trains each
+round's prompts one round late, so a checkpoint carries the rounds submitted but not yet trained and
+a resume submits them again first.
 """
 
 import asyncio
 import contextlib
 import logging
 import math
+import os
 import queue
 import threading
 import time
 import weakref
+from collections import deque
+from functools import partial
 
 import ray
+import torch
 from accelerate.utils import is_peft_model
 from transformers import TrainerCallback
 from trl.extras.profiling import profiling_context
 
+from src.checkpoint.format import prefetch_pending_filename
+from src.distributed.checkpoint.coordination import consensus_read
 from src.distributed.nccl.clients.base import BaseWeightSyncClient, resolve_sync_device
 from src.distributed.nccl.registry import resolve_weight_sync_client
-from src.distributed.runtime import broadcast_from_rank0, get_num_nodes
+from src.distributed.runtime import (
+    DeferredRankFailure,
+    broadcast_from_rank0,
+    get_global_rank,
+    get_global_world_size,
+    get_num_nodes,
+    is_global_main_process,
+    rank_consensus,
+)
 from src.environments.episode import RolloutResult
 from src.environments.ray_actors import RolloutManager, ray_init_kwargs
 from src.trainers.grpo.rollout.weight_sync import (
@@ -43,6 +59,18 @@ _PREFETCH_POLL_TIMEOUT_S = 0.5
 _PREFETCH_DELIVER_TIMEOUT_S = 1.0
 # Grace for the worker to finish its current poll slice and exit at shutdown.
 _PREFETCH_JOIN_TIMEOUT_S = 5.0
+
+
+def _save_pending_rounds(payload: dict, path: str) -> None:
+    """Write a rank's pending rounds whole or not at all, with the pickler Ray ships the same contexts
+    with: a row's context may carry a callable (an answer ``validator``) that the stdlib pickler refuses."""
+    staged = f"{path}.staged"
+    try:
+        torch.save(payload, staged, pickle_module=ray.cloudpickle)
+        os.replace(staged, path)
+    finally:
+        with contextlib.suppress(FileNotFoundError):
+            os.remove(staged)
 
 
 class _RolloutStartCallback(TrainerCallback):
@@ -89,6 +117,11 @@ class AsyncRolloutMixin:
         """
         return resolve_weight_sync_client(self.async_config.rollout_backend).BACKEND_NAME
 
+    @property
+    def _prefetch_inflight(self) -> int:
+        """Submitted prefetch rounds whose output no step has consumed (one output item each)."""
+        return len(self._prefetch_pending)
+
     def _init_async_state(self):
         """Rollout-manager, weight-sync-client and prefetch state, before any of them is built."""
         self._rollout_manager = None
@@ -119,8 +152,11 @@ class AsyncRolloutMixin:
 
         self._prefetch_hits = 0
         self._prefetch_misses = 0
-        # Submitted-but-unconsumed prefetch batches; lock-free — only the trainer thread mutates it.
-        self._prefetch_inflight = 0
+        # The (prompts, contexts) of each submitted round no step has consumed yet, oldest first: the
+        # serial worker answers in submission order. Lock-free — only the trainer thread mutates it.
+        self._prefetch_pending: deque[tuple[list[str], list[dict | None]]] = deque()
+        # The pending rounds a resumed checkpoint carried, submitted once generation starts.
+        self._resumed_prefetch_rounds: list[tuple[list[str], list[dict | None]]] = []
         self._prefetch_input_skips = 0
         # The step at which the sync path was last entered, which keeps it out of every microbatch of
         # one optimizer step. Not the step the engines hold: the cadence gate
@@ -204,6 +240,10 @@ class AsyncRolloutMixin:
         self._sync_weights_to_engine_fenced(force=True)
         if self._prefetch_enabled:
             self._start_prefetch_thread()
+            # After the push, so the resumed rounds are drawn from the restored policy.
+            for prompts, contexts in self._resumed_prefetch_rounds:
+                self._submit_for_prefetch(prompts, contexts)
+        self._resumed_prefetch_rounds = []
 
     def _check_eval_round_fits_cap(self, max_concurrent: int) -> None:
         """An eval round above the in-flight cap runs in serial waves, so a straggler holds its peers at the
@@ -377,8 +417,12 @@ class AsyncRolloutMixin:
             logger.warning("Prefetch thread did not stop cleanly")
 
         self._prefetch_thread = None
-        # Drained submissions can no longer produce output items; reset the in-flight view.
-        self._prefetch_inflight = 0
+        # Drained submissions can no longer produce output items, and delivered ones belong to rounds no
+        # later step consumes (a second train() would pop them against its own pending rounds).
+        self._prefetch_pending.clear()
+        with contextlib.suppress(queue.Empty):
+            while True:
+                self._prefetch_queue.get_nowait()
 
         total = self._prefetch_hits + self._prefetch_misses
         if total > 0:
@@ -446,7 +490,7 @@ class AsyncRolloutMixin:
         except queue.Empty:
             self._prefetch_misses += 1
             return None
-        self._prefetch_inflight -= 1
+        self._prefetch_pending.popleft()
         if results is None:
             self._prefetch_misses += 1
             return None
@@ -479,7 +523,7 @@ class AsyncRolloutMixin:
                         f"({self._rollout_engine_name} unreachable or the worker thread died)."
                     )
                 return None
-            self._prefetch_inflight -= 1
+            self._prefetch_pending.popleft()
             if results is not None:
                 logger.info(f"Prefetch miss: waited for {len(results)} in-flight rollouts")
                 return results
@@ -506,7 +550,75 @@ class AsyncRolloutMixin:
                 f"(total skipped submissions: {self._prefetch_input_skips})"
             )
             return
-        self._prefetch_inflight += 1
+        self._prefetch_pending.append((prompts, contexts))
+
+    def _prefetch_round_layout(self) -> dict[str, int]:
+        """What a round's prompts were drawn and grouped under: the group size, the rows of one round and
+        this rank's DP slice. A resume under any other layout would group or place them differently."""
+        return {
+            "num_generations": self.num_generations,
+            "rows_per_round": self._train_loader_batch_size(),
+            "data_parallel_rank": self.get_data_parallel_rank(),
+            "data_parallel_size": self.get_data_parallel_size(),
+        }
+
+    def _persist_trainer_sidecars(self, checkpoint_dir: str) -> None:
+        """Write this rank's pending prefetch rounds, which a resume submits again first.
+
+        A round's prompts train one round after they were drawn, so at a save on a generation boundary
+        the last submitted round has left the dataloader untrained, and the resumed dataloader starts
+        past it: without the file a resume skips that batch and its cold round trains the next one
+        twice. Per rank, since each rank draws its own prompts; every rank writes its own copy, so a
+        non-shared filesystem holds each one on the node that resumes it.
+        """
+        super()._persist_trainer_sidecars(checkpoint_dir)
+        if not self._prefetch_enabled:
+            return
+        path = os.path.join(checkpoint_dir, prefetch_pending_filename(get_global_rank(), get_global_world_size()))
+        payload = {"layout": self._prefetch_round_layout(), "rounds": list(self._prefetch_pending)}
+        guard = DeferredRankFailure(f"pending prefetch rounds write to {checkpoint_dir}")
+        guard.run(partial(_save_pending_rounds, payload, path))
+        guard.reject()
+
+    def _restore_trainer_sidecars(self, checkpoint: str) -> None:
+        """Load this rank's pending prefetch rounds for :meth:`_start_rollout_generation` to submit.
+
+        Read with ``weights_only=False``: the rounds carry the dataset's own context values, written
+        by this trainer like its optimizer state. Rounds drawn under another layout are dropped on every
+        rank together, leaving the resume a cold round.
+        """
+        super()._restore_trainer_sidecars(checkpoint)
+        payload, path = consensus_read(
+            os.path.join(checkpoint, prefetch_pending_filename(get_global_rank(), get_global_world_size())),
+            partial(torch.load, map_location="cpu", weights_only=False),
+            what="pending prefetch rounds",
+            checkpoint=checkpoint,
+            remedy=" Resume with the rank-to-node placement it was saved with, or delete its prefetch_pending-* "
+            "files to open with a cold round.",
+        )
+        if path is None:
+            if self._prefetch_enabled and is_global_main_process():
+                logger.warning(
+                    f"{checkpoint} holds no pending prefetch rounds for this world size, so the run opens with "
+                    "a cold round: if the saving run prefetched, the batch it had drawn but not trained is "
+                    "skipped and the next one trained twice."
+                )
+            return
+        if not self._prefetch_enabled:
+            if payload["rounds"] and is_global_main_process():
+                logger.warning(
+                    f"{path} holds pending prefetch rounds this run does not prefetch; they are not trained."
+                )
+            return
+        if not rank_consensus(payload["layout"] == self._prefetch_round_layout())[0]:
+            if is_global_main_process():
+                logger.warning(
+                    f"{checkpoint}'s pending prefetch rounds were drawn under {payload['layout']}, this run "
+                    f"draws under {self._prefetch_round_layout()}: they are not resubmitted, and the run opens "
+                    "with a cold round."
+                )
+            return
+        self._resumed_prefetch_rounds = list(payload["rounds"])
 
     def _sync_cadence_declines(self, force: bool) -> bool:
         """Whether ``sync_weights_every_n_steps`` declines this step (``force`` overrides it).

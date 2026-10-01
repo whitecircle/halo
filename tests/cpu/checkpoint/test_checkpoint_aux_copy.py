@@ -3,9 +3,10 @@ directories ride whole.
 
 A merged directory is the mandated resume source for sharded EP/TP checkpoints
 (resolve_resume_weights_source), so the copy must keep ``scheduler.pt``,
-``router_balancing_biases.pt``, ``reference_logps.pt`` and every ``rng_state_<rank>.pth`` —
-dropping them re-warms the LR schedule from step 0, zeroes the router balancing biases, leaves a
-precompute run no untrained reference to restore, and re-draws every shuffle and dropout mask —
+``router_balancing_biases.pt``, ``reference_logps.pt``, every ``rng_state_<rank>.pth`` and every
+``prefetch_pending-<rank>-of-<world>.pt`` — dropping them re-warms the LR schedule from step 0,
+zeroes the router balancing biases, leaves a precompute run no untrained reference to restore,
+re-draws every shuffle and dropout mask, and skips the batch an async GRPO prefetch had not trained —
 while still refusing to carry weight files that would shadow the freshly written safetensors. The
 refusal covers foreign-framework exports (``consolidated.*.pth``, ``.gguf``, ``.h5``,
 ``rust_model.ot``, ``*.tflite``) a hub source ships beside them: those are weights too, and
@@ -38,6 +39,7 @@ from src.checkpoint.format import (
     ROUTER_BALANCING_BIASES_FILE,
     WEIGHT_FILE_IGNORE_PATTERNS,
     copy_checkpoint_aux_files,
+    prefetch_pending_filename,
     write_resume_adapter_marker,
 )
 from src.checkpoint.model_card import CARD_STAGING_PREFIX, CARD_STAGING_SUFFIX
@@ -74,6 +76,7 @@ SIDECARS = (
     SCHEDULER_NAME,
     ROUTER_BALANCING_BIASES_FILE,
     REFERENCE_LOGPS_FILE,
+    prefetch_pending_filename(0, 2),
 )
 # The SentenceTransformer module layout an embedding EP save produces: modules.json names these
 # directories, and 2_Dense carries its OWN weights that no merge rewrites.

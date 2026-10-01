@@ -120,6 +120,7 @@ depends on whether the mode transforms the model at construction — see
 | `router_balancing_biases.pt` | Yes | Yes | DeepSeek-V3 router balancing biases, restored on resume |
 | `reference_logps.pt` | Yes | Yes | DPO/KTO `precompute_ref_log_probs` columns per split, attached on resume in place of the sweep ([DPO — Resuming a precompute run](../training-methods/preference/dpo.md#resuming-a-precompute-run)) |
 | `rng_state_<rank>.pth` | Yes | No | Per-rank RNG state (`rng_state.pth` single-process) |
+| `prefetch_pending-<rank>-of-<world>.pt` | Yes | Yes | Async GRPO with prefetch only: the rounds a rank submitted but had not trained and the layout they were drawn under, submitted again first on a resume under that layout ([Multiple servers and prefetch](../training-methods/grpo/async-grpo/setup.md#multiple-servers-and-prefetch)) |
 | `resume_adapter/`, `resume_adapter.json` | Yes | Yes | `merge_expert_lora_on_save` and embedding LoRA only: the unmerged adapter the merged checkpoint resumes from, and the marker that says so ([Merge-on-save checkpoints](#merge-on-save-checkpoints)) |
 
 `optimizer.pt` is dropped under every
@@ -395,8 +396,8 @@ python scripts/after_training/merge_ep_shards.py \
 ```
 
 The merge copies the resume sidecars (`scheduler.pt`, `router_balancing_biases.pt`,
-`reference_logps.pt`, `rng_state_*`) while excluding stale weight artifacts, so the merged directory
-resumes weights, scheduler, balancing biases and precomputed reference log-probs — but **not** the
+`reference_logps.pt`, `rng_state_*`, `prefetch_pending-*`) while excluding stale weight artifacts, so the merged directory
+resumes weights, scheduler, balancing biases, precomputed reference log-probs and pending prefetch rounds — but **not** the
 optimizer: the per-rank `optimizer_shard_XXXXX.pt` files are weight-suffixed and dropped, so a resume
 from the merged directory warm-restarts. A resume pointed at
 the unmerged directory raises the merge-first error directly.

@@ -15,7 +15,9 @@ queue silently discards completed rollouts. The contract:
   trainer's in-flight accounting never strands a blocking consumer;
 - a WEDGED pipeline is recorded in ``_batch_build_error`` and fenced by
   ``_raise_batch_error_uniformly``, never raised on the one rank that hit it — prefetch state is
-  per-rank, so a lone raise between two collectives parks every peer until the NCCL watchdog.
+  per-rank, so a lone raise between two collectives parks every peer until the NCCL watchdog;
+- a checkpoint carries the rounds submitted but not trained, and a resume submits them first, so a
+  resumed run trains the same batch sequence as an uninterrupted one.
 
     python tests/cpu/grpo/test_grpo_prefetch_exactly_once.py
 """
@@ -23,6 +25,7 @@ queue silently discards completed rollouts. The contract:
 import queue
 import threading
 import types
+from collections import deque
 
 import pytest
 import torch
@@ -30,18 +33,17 @@ import torch
 import src.trainers.grpo.rollout.async_rollouts as async_mod
 from src.configs.async_training_config import AsyncTrainingConfig
 from src.trainers.grpo.environmental import DistributedAsyncEnvironmentalGRPOTrainer as _T
+from src.trainers.grpo.rollout.async_rollouts import AsyncRolloutMixin
+from src.trainers.mixins.checkpointing import CheckpointingMixin
 
 
-class _Host:
-    """Minimal stand-in running the REAL prefetch decision flow with mocked rollout collection."""
+class _Host(AsyncRolloutMixin, CheckpointingMixin):
+    """Minimal stand-in running the REAL prefetch decision flow with mocked rollout collection; the
+    checkpointing base gives the sidecar hooks the mixin's ``super()`` calls end in."""
 
     _generate_and_score_completions_base = _T._generate_and_score_completions_base
-    _try_get_prefetched_results = _T._try_get_prefetched_results
-    _wait_for_inflight_prefetch = _T._wait_for_inflight_prefetch
-    _submit_for_prefetch = _T._submit_for_prefetch
     _extract_prompts_and_contexts = _T._extract_prompts_and_contexts
     _raise_batch_error_uniformly = _T._raise_batch_error_uniformly
-    _rollout_engine_name = _T._rollout_engine_name
 
     def __init__(self, buffer_size: int = 1):
         self.model = types.SimpleNamespace(training=True)
@@ -57,8 +59,12 @@ class _Host:
         self._prefetch_input_queue = queue.Queue(maxsize=buffer_size + 1)
         self._prefetch_hits = 0
         self._prefetch_misses = 0
-        self._prefetch_inflight = 0
+        self._prefetch_pending = deque()
+        self._resumed_prefetch_rounds = []
         self._prefetch_input_skips = 0
+        self._rollout_generation_started = False
+        self._last_sync_attempt_step = -1
+        self.num_generations = 1
         # Every sync collection is recorded here — the duplication fingerprint.
         self.sync_calls: list[list[str]] = []
         self.trained: list[list[str]] = []
@@ -86,6 +92,25 @@ class _Host:
         """One synchronous stand-in for the prefetch worker: input batch → completed rollouts."""
         prompts, _contexts = self._prefetch_input_queue.get_nowait()
         self._prefetch_queue.put((len(prompts), [f"prefetch:{p}" for p in prompts]))
+
+    def _sync_weights_to_engine_fenced(self, force: bool = False) -> bool:
+        return True
+
+    def _start_prefetch_thread(self):
+        pass
+
+    def _train_loader_batch_size(self) -> int:
+        return 1
+
+    def get_data_parallel_rank(self) -> int:
+        return 0
+
+    def get_data_parallel_size(self) -> int:
+        return 1
+
+
+def _pending(*prompts: str) -> deque:
+    return deque(([p], [None]) for p in prompts)
 
 
 def test_miss_with_inflight_waits_instead_of_duplicating():
@@ -123,7 +148,7 @@ def test_miss_with_inflight_waits_instead_of_duplicating():
 
 def test_failure_marker_decrements_inflight_and_falls_back():
     host = _Host(buffer_size=2)
-    host._prefetch_inflight = 2
+    host._prefetch_pending = _pending("pW", "pX")
     host._prefetch_queue.put((1, None))  # worker failure marker
     host._prefetch_queue.put((1, ["prefetch:pX"]))
 
@@ -135,7 +160,7 @@ def test_failure_marker_decrements_inflight_and_falls_back():
 
 def test_all_failed_inflight_returns_none_for_sync_fallback():
     host = _Host()
-    host._prefetch_inflight = 1
+    host._prefetch_pending = _pending("pX")
     host._prefetch_queue.put((1, None))
     assert host._wait_for_inflight_prefetch() is None
     assert host._prefetch_inflight == 0
@@ -150,7 +175,7 @@ def test_wedged_pipeline_is_recorded_for_the_uniform_fence_not_raised():
     """
     host = _Host()
     host.async_config.episode_timeout = 0.01
-    host._prefetch_inflight = 1
+    host._prefetch_pending = _pending("pX")
     with pytest.MonkeyPatch.context() as mp:
         mp.setattr(async_mod, "_PREFETCH_SUBMIT_TIMEOUT_S", 0.01)
         assert host._wait_for_inflight_prefetch() is None, "the caller must fall back to sync collection"
@@ -215,6 +240,7 @@ class _LifecycleHost:
         self._rollout_start_callback = None
         self._rollout_generation_started = False
         self._last_sync_attempt_step = -1
+        self._resumed_prefetch_rounds = []
         self.callbacks: list = []
         # What the engines were handed, in order — the fingerprint of WHICH weights they serve.
         self.pushed: list[float] = []
@@ -278,6 +304,139 @@ def test_generation_starts_only_after_the_resume_restore(monkeypatch):
         assert host.pushed == [2.0]
     finally:
         host._loop.close()
+
+
+def _trained_batches(host: _Host) -> list[str]:
+    """The prompt each trained round's rollouts were drawn for, whichever path collected them."""
+    return [batch[0].split(":", 1)[1] for batch in host.trained]
+
+
+def _run(host: _Host, batches: list[str]) -> None:
+    """One training round per batch, the worker finishing each submission before the next round."""
+    for prompt in batches:
+        if not host._prefetch_input_queue.empty():
+            host.worker_step()
+        host.round([prompt])
+
+
+def test_a_resumed_run_trains_the_batches_an_uninterrupted_one_does(tmp_path):
+    """Each round trains the batch submitted one round earlier, so at a save on a generation boundary the
+    last submitted batch has left the dataloader untrained. A resume that does not carry it skips that batch and trains
+    the next one twice (its cold round collects and submits the same prompts)."""
+    batches = [f"b{i}" for i in range(6)]
+    uninterrupted = _Host()
+    _run(uninterrupted, batches)
+
+    before = _Host()
+    _run(before, batches[:3])
+    before._persist_trainer_sidecars(str(tmp_path))
+    resumed = _Host()
+    resumed._restore_trainer_sidecars(str(tmp_path))
+    resumed._start_rollout_generation()
+    _run(resumed, batches[3:])
+
+    assert _trained_batches(before) + _trained_batches(resumed) == _trained_batches(uninterrupted)
+    assert resumed.sync_calls == [], "the resumed run must not open with a cold round"
+
+
+def test_stopping_the_worker_drops_the_rounds_no_later_step_consumes():
+    """A second ``train()`` restarts the worker over the same queues: an output delivered before the stop
+    would be popped against that run's own pending rounds."""
+    host = _Host()
+    host.round(["b0"])
+    host.worker_step()  # b0's rollouts are delivered, unconsumed
+    host._prefetch_stop_event = threading.Event()
+    host._prefetch_thread = threading.Thread(target=lambda: None)
+    host._prefetch_thread.start()
+    host._stop_prefetch_thread()
+    assert host._prefetch_inflight == 0 and host._prefetch_queue.empty()
+    host.round(["c0"])
+    assert host.trained[-1] == ["sync:c0"], "the next run opens with a cold round of its own batch"
+
+
+def test_rounds_drawn_under_another_layout_are_not_resubmitted(tmp_path):
+    """A stage change from 8 to 12 generations regroups a round's rows across prompts: replayed, its
+    baseline would mix problems for a step. The resume drops them and opens cold instead."""
+    before = _Host()
+    _run(before, ["b0", "b1", "b2"])
+    before._persist_trainer_sidecars(str(tmp_path))
+    resumed = _Host()
+    resumed.num_generations = 2
+    resumed._restore_trainer_sidecars(str(tmp_path))
+    assert resumed._resumed_prefetch_rounds == []
+
+
+def test_a_context_only_ray_can_pickle_survives_the_save(tmp_path):
+    """A row's context may carry a callable (an answer ``validator``), which Ray ships with cloudpickle and
+    the stdlib pickler refuses: a stdlib save would fail every checkpoint of such a run."""
+    host = _Host()
+    host._prefetch_pending = deque([(["b2"], [{"validator": lambda answer: answer == "42"}])])
+    host._persist_trainer_sidecars(str(tmp_path))
+    resumed = _Host()
+    resumed._restore_trainer_sidecars(str(tmp_path))
+    ((prompts, (context,)),) = resumed._resumed_prefetch_rounds
+    assert prompts == ["b2"] and context["validator"]("42")
+
+
+def test_a_failed_save_leaves_no_file_a_resume_would_read(tmp_path):
+    """A torn file in a checkpoint that already holds its trainer state fails every later resume from it."""
+    host = _Host()
+    host._prefetch_pending = deque([(["b2"], [{"lock": threading.Lock()}])])
+    with pytest.raises(RuntimeError, match="cannot pickle"):
+        host._persist_trainer_sidecars(str(tmp_path))
+    assert list(tmp_path.iterdir()) == []
+
+
+class _LoadHost(CheckpointingMixin):
+    """The mixin's resume entry with the weight loader and the bias restore stubbed out."""
+
+    def __init__(self):
+        self.restored: list[str] = []
+
+    def _checkpoint_loader(self):
+        return types.SimpleNamespace(load_model=lambda checkpoint, model, for_best_model: None)
+
+    def _restore_router_balancing_biases(self, checkpoint):
+        pass
+
+    def _restore_trainer_sidecars(self, checkpoint):
+        self.restored.append(checkpoint)
+
+
+def test_a_resume_restores_the_trainer_sidecars_and_a_best_model_load_does_not():
+    host = _LoadHost()
+    host._load_from_checkpoint("checkpoint-50")
+    host._load_from_checkpoint("checkpoint-25", for_best_model=True)
+    assert host.restored == ["checkpoint-50"], "a best-model load continues no training"
+
+
+def test_the_environmental_trainer_takes_the_rollout_mixins_sidecar_hooks():
+    """Listed after ``DistributedTrainerMixin``, the mixin's hooks would be shadowed by the empty defaults
+    and no checkpoint would carry the pending rounds."""
+    for hook in ("_persist_trainer_sidecars", "_restore_trainer_sidecars"):
+        assert getattr(_T, hook) is getattr(AsyncRolloutMixin, hook)
+
+
+def test_a_checkpoint_without_pending_rounds_resumes_cold(tmp_path):
+    host = _Host()
+    host._restore_trainer_sidecars(str(tmp_path))
+    host._start_rollout_generation()
+    _run(host, ["b3", "b4"])
+    assert _trained_batches(host) == ["b3", "b3"], "the cold round primes the lag with its own batch"
+
+
+def test_a_run_without_prefetch_writes_and_takes_no_pending_rounds(tmp_path):
+    host = _Host()
+    host._prefetch_enabled = False
+    host._prefetch_pending = _pending("b2")
+    host._persist_trainer_sidecars(str(tmp_path))
+    assert list(tmp_path.iterdir()) == []
+
+    saved = _Host()
+    saved._prefetch_pending = _pending("b2")
+    saved._persist_trainer_sidecars(str(tmp_path))
+    host._restore_trainer_sidecars(str(tmp_path))
+    assert host._resumed_prefetch_rounds == []
 
 
 def _async_state(server_configs):

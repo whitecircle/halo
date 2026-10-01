@@ -450,9 +450,12 @@ Around it the mixin keeps the non-weight parts of a checkpoint: `_save_checkpoin
 `save_total_limit` rotation until the new checkpoint is complete),
 `_persist_lr_scheduler_for_resume`, and `_persist_router_balancing_biases` /
 `_restore_router_balancing_biases` for the `router_balancing_biases.pt` sidecar.
-`_persist_trainer_sidecars` is a trainer's own hook, called on every rank before rotation. The
-DPO/KTO precompute mixin overrides it to write `reference_logps.pt`; those trainers list the mixin
-ahead of `DistributedTrainerMixin` in their bases, so the empty default does not shadow it.
+`_persist_trainer_sidecars` is a trainer's own hook, called on every rank before rotation, and
+`_restore_trainer_sidecars` its read-back, called on every rank of a resume (never a best-model
+load). The DPO/KTO precompute mixin overrides the write for `reference_logps.pt`, which it reads back
+before TRL's `__init__` instead; the async GRPO rollout mixin overrides both for its pending prefetch
+rounds. Each trainer lists the overriding mixin ahead of `DistributedTrainerMixin` in its bases, so
+the empty defaults do not shadow it.
 
 `load_best_model_at_end` is refused at construction for every shape whose end-of-run reload is
 guaranteed to be refused: `cp_size > 1`, a MoE carrying EP or grouped-GEMM wrappers (`ep_size: 1`

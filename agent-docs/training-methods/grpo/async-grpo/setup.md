@@ -68,6 +68,8 @@ The sync is rolling — N−1 servers stay live — only for a raw model in a si
 
 Prefetch runs **one round deep**: a round pops what the previous one submitted, then submits its own, so `num_prefetch_batches` (default `1`) adds queue headroom only. It, `num_rollout_workers` and an explicit `max_concurrent_rollouts` are all refused below `1`; turn prefetch off with `enable_prefetch: false`.
 
+A checkpoint carries each rank's submitted-but-untrained round (`prefetch_pending-<rank>-of-<world>.pt`, with the group size, round size and DP slice it was drawn under), and a resume submits it again before its first round. A save on a generation boundary, the default where `steps_per_generation` equals the accumulation steps, so resumes onto the batches an uninterrupted run trains. A checkpoint with no file for this world size, or one drawn under another layout, resumes with a cold round, which skips that batch and trains the next one twice.
+
 `async/prefetch_hit_rate` says which phase bounds the step, not whether the servers are healthy. On a short single-turn environment it should climb toward 1; below ~0.8, add servers or raise `max_concurrent_rollouts` / `num_rollout_workers`. A multi-turn round outlasts the update, so it sits near 0 by construction.
 
 ![One rollout server, the compose default: trainer ranks on GPUs 0–6, the engine on GPU 7 joining the NCCL group whose store the trainer binds on :51216, actors generating over POST /v1/chat/completions; the push pauses the engine (POST /pause?mode=keep), prefetch is off, and step time is sync + round + update](../../../assets/diagrams/environmental_grpo_single_server.png)

@@ -34,6 +34,7 @@ _OWNERSHIP = {
         "_persist_router_balancing_biases",
         "_persist_trainer_sidecars",
         "_restore_router_balancing_biases",
+        "_restore_trainer_sidecars",
         "_rotate_checkpoints_after_sidecars",
         "_save_checkpoint",
         "create_model_card",

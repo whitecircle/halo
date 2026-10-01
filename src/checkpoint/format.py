@@ -79,6 +79,8 @@ ROUTER_BALANCING_BIASES_FILE = "router_balancing_biases.pt"
 # The DPO/KTO ``precompute_ref_log_probs`` columns, per dataset split, with the row count and token
 # digest a resume verifies them against.
 REFERENCE_LOGPS_FILE = "reference_logps.pt"
+# The environmental GRPO prefetch's submitted-but-untrained rounds, one file per rank.
+PREFETCH_PENDING_PREFIX = "prefetch_pending"
 
 # PEFT adapter artifact filenames. ADAPTER_WEIGHT_NAMES is in load-preference order; PeftAdapterSaver
 # falls back to .bin, so detection must accept both.
@@ -107,8 +109,9 @@ _FOREIGN_EXPORT_SUFFIXES = (".pth", ".gguf", ".h5", ".msgpack", ".onnx", ".onnx_
 # Exempt from that skip: dropping these restarts the LR schedule, zeroes the router biases, or leaves
 # a precompute resume with no untrained reference to restore.
 _RESUME_SIDECAR_FILES = (SCHEDULER_STATE_FILE, ROUTER_BALANCING_BIASES_FILE, REFERENCE_LOGPS_FILE)
-# Same exemption by prefix: losing ``rng_state_<rank>.pth`` re-draws every shuffle and dropout mask.
-_RESUME_SIDECAR_PREFIXES = ("rng_state",)
+# Same exemption by prefix: losing ``rng_state_<rank>.pth`` re-draws every shuffle and dropout mask,
+# and losing a rank's pending prefetch round skips the batch it holds.
+_RESUME_SIDECAR_PREFIXES = ("rng_state", PREFETCH_PENDING_PREFIX)
 # Vendor dumps of the same weights in a raw format (gpt-oss ships ``original/`` and ``metal/``):
 # hundreds of GB the aux copy must not duplicate. Exact names rather than prefixes, since
 # ``original_adapter_config/`` is aux data the copy must keep.
@@ -129,6 +132,15 @@ def ep_shard_filename(rank: int, world_size: int) -> str:
     ``model.safetensors`` at a single part, which every reader takes for a whole model.
     """
     return SAFETENSORS_SHARD_PATTERN.format(suffix=f"-{rank:05d}-of-{world_size:05d}")
+
+
+def prefetch_pending_filename(rank: int, world_size: int) -> str:
+    """Filename of one rank's pending prefetch rounds.
+
+    The world size is in the name because each rank draws its own prompts: a resume at another width
+    finds no file of its own spelling rather than another layout's prompts.
+    """
+    return f"{PREFETCH_PENDING_PREFIX}-{rank:05d}-of-{world_size:05d}.pt"
 
 
 def is_ep_shard(name: str) -> bool:
@@ -446,7 +458,7 @@ def copy_checkpoint_aux_files(
 
     Skips every top-level weight file and safetensors index, which the caller writes fresh, but
     preserves the resume sidecars (``scheduler.pt``, ``router_balancing_biases.pt``,
-    ``reference_logps.pt``, ``rng_state_*``) a resume-from-merged run restores;
+    ``reference_logps.pt``, ``rng_state_*``, ``prefetch_pending-*``) a resume-from-merged run restores;
     ``include_resume_sidecars=False`` drops them, for an artifact that describes no single run (an
     N-way merge).
 

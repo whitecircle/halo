@@ -36,6 +36,7 @@ from src.checkpoint.format import (
     RESUME_ADAPTER_DIR,
     RESUME_ADAPTER_MARKER_FILE,
     ROUTER_BALANCING_BIASES_FILE,
+    prefetch_pending_filename,
     write_resume_adapter_marker,
 )
 from tests.common.utils import load_script_module
@@ -315,7 +316,13 @@ def test_end_to_end_linear_merge_qwen3_5():
         a, b, out = Path(tmp) / "a", Path(tmp) / "b", Path(tmp) / "merged"
         _build_tiny_qwen35(a, seed=0)
         _build_tiny_qwen35(b, seed=1)
-        sidecars = (SCHEDULER_NAME, "rng_state_0.pth", ROUTER_BALANCING_BIASES_FILE, REFERENCE_LOGPS_FILE)
+        sidecars = (
+            SCHEDULER_NAME,
+            "rng_state_0.pth",
+            ROUTER_BALANCING_BIASES_FILE,
+            REFERENCE_LOGPS_FILE,
+            prefetch_pending_filename(0, 1),
+        )
         for sidecar in sidecars:
             (a / sidecar).write_bytes(b"x")
         (a / RESUME_ADAPTER_DIR).mkdir()
