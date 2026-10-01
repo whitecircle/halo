@@ -11,6 +11,8 @@ into the kernel a layer actually runs.
     python tests/cpu/parallelism/test_fused_glu_activation_gates.py
 """
 
+from functools import partial
+
 import pytest
 import torch
 import torch.nn as nn
@@ -26,11 +28,13 @@ from src.distributed.expert_parallel.config import EPConfig
 from src.distributed.expert_parallel.expert_weights import ep_layer_classes
 from src.distributed.expert_parallel.layers.gemma4 import EPGemma4MoELayer
 from src.distributed.expert_parallel.layers.gpt_oss import EPGptOssMoELayer
+from src.kernels import fused_glu
 from src.kernels.fused_glu import (
     fused_gelu_tanh_mul,
     fused_silu_mul,
     is_gelu_tanh_activation,
     is_silu_activation,
+    packed_glu_mul,
     resolve_fused_glu_mul,
 )
 
@@ -106,6 +110,57 @@ def test_gemma4_fused_combine_matches_the_eager_activation():
     gate, up = torch.randn(7, M), torch.randn(7, M)
     expected = F.gelu(gate, approximate="tanh") * up
     torch.testing.assert_close(layer._glu_combine(gate, up), expected)
+
+
+def test_packed_combine_follows_the_latch(monkeypatch):
+    """The fused ``[gate | up]`` path runs the packed kernel of whatever combine is latched, including a
+    family's clamp-binding partial (with its bound keywords), and a latch with no packed form (a bound
+    method, or eager) keeps the chunked seam rather than silently switching activation."""
+    config = EPConfig(ep_size=1, world_size=1, gpus_per_node=1, use_grouped_gemm=False)
+    config.finalize_expert_assignment(E)
+    layer = EPGemma4MoELayer(_real_gemma4_experts(), config).cpu()
+    gate_up = torch.randn(7, 2 * M)
+    calls = []
+    monkeypatch.setitem(
+        fused_glu.PACKED_GLU_MULS,
+        fused_gelu_tanh_mul,
+        lambda gu: calls.append("packed") or fused_glu.gelu_tanh_mul_eager(*gu.chunk(2, -1)),
+    )
+    expected = F.gelu(gate_up[:, :M], approximate="tanh") * gate_up[:, M:]
+    torch.testing.assert_close(layer._glu_combine_packed(gate_up), expected)
+    assert calls == ["packed"]
+
+    limits = []
+    monkeypatch.setitem(
+        fused_glu.PACKED_GLU_MULS,
+        fused_glu.fused_clamped_silu_mul,
+        lambda gu, limit: limits.append(limit) or fused_glu.clamped_silu_mul_eager(*gu.chunk(2, -1), limit),
+    )
+    layer._fused_glu_mul = partial(fused_glu.fused_clamped_silu_mul, limit=7.0)
+    torch.testing.assert_close(
+        layer._glu_combine_packed(gate_up), fused_glu.clamped_silu_mul_eager(gate_up[:, :M], gate_up[:, M:], 7.0)
+    )
+    assert limits == [7.0]
+
+    layer._fused_glu_mul = lambda gate, up: calls.append("chunked") or F.silu(gate) * up
+    torch.testing.assert_close(layer._glu_combine_packed(gate_up), F.silu(gate_up[:, :M]) * gate_up[:, M:])
+    assert calls == ["packed", "chunked"]
+
+
+def test_an_overridden_combine_wins_over_the_packed_kernel():
+    """A layer that overrides :meth:`_glu_combine` must see the fused ``[gate | up]`` path go through its
+    override: the packed kernel of the latched activation would compute the stock combine instead."""
+
+    class _OverridingLayer(EPGemma4MoELayer):
+        def _glu_combine(self, gate, up):
+            return gate * up
+
+    config = EPConfig(ep_size=1, world_size=1, gpus_per_node=1, use_grouped_gemm=False)
+    config.finalize_expert_assignment(E)
+    layer = _OverridingLayer(_real_gemma4_experts(), config).cpu()
+    assert packed_glu_mul(layer._fused_glu_mul) is not None  # premise: a packed form is latched
+    gate_up = torch.randn(7, 2 * M)
+    torch.testing.assert_close(layer._glu_combine_packed(gate_up), gate_up[:, :M] * gate_up[:, M:])
 
 
 def test_real_mistral4_module_activation_passes_the_gate():

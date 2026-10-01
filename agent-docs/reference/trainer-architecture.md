@@ -38,8 +38,8 @@ on-policy trainers decouple the completions table from the metric drain.
 per-mode setup, and the EP one derives the FSDP ignored-module set in a single module-tree walk it
 hands to `_apply_ep_aware_dp_fsdp2`.
 
-The other three are imported as plain functions — `grad_clip.py::scale_shards_to_max_norm_` (the
-shared clip coefficient, below), `loss_masks.py::effective_loss_mask` (`completion_mask ∧ tool_mask`
+The other three are imported as plain functions — `grad_clip.py` (`clip_coefficient` and
+`scale_shards_to_max_norm_`, the shared clip coefficient, below), `loss_masks.py::effective_loss_mask` (`completion_mask ∧ tool_mask`
 where a `tool_mask` exists, else `completion_mask`), and `pp_gates.py` (the shared PP rejection
 vocabulary, below).
 
@@ -265,10 +265,13 @@ norms:
 - Multiple EP groups: all-reduce over replica groups and divide by `num_ep_groups` to avoid
   double-counting.
 
-Then `global_norm = sqrt(expert_norm_sq + other_norm_sq)` clips every local gradient. Each path
-computes its own global norm — the collective differs per topology — and applies it through
-`scale_shards_to_max_norm_` (`src/trainers/mixins/grad_clip.py`), the one device-resident clip
-coefficient the EP, TP and pipeline clips share.
+Then `global_norm = sqrt(expert_norm_sq + other_norm_sq)` sets the clip. Each path computes its own
+global norm — the collective differs per topology — and derives one device-resident coefficient,
+`clip_coefficient` (`src/trainers/mixins/grad_clip.py`), which the EP, TP and pipeline clips share.
+The TP and pipeline clips, and the EP clip under any other optimizer, scale every local gradient by it
+in place (`scale_shards_to_max_norm_`). Under EP with AdamWBF16 stepping exactly the clipped parameters
+that hold gradients, the EP clip hands the coefficient to the optimizer instead (`defer_grad_scale`),
+which multiplies it into each gradient inside its fused step; the gradients stay unscaled until then.
 
 ## Optimizer construction
 

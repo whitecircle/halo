@@ -513,6 +513,55 @@ def test_every_optimizer_advances_the_version_counter():
     print("  PASSED: no optimizer leaves the low-precision cache stale")
 
 
+def _deferred_vs_prescaled(scale: float, device: str, use_triton: bool):
+    """Step two identical bf16+fp32 parameter sets from the same SR stream: one with its gradients
+    multiplied in place by ``scale`` beforehand (as the in-place clip does, a device fp32 scalar), one
+    handing ``scale`` to ``defer_grad_scale``. The SR seeds depend
+    only on the step and the parameter's position, so two fresh optimizers round alike."""
+    torch.manual_seed(0)
+    shapes = [((4099,), torch.bfloat16), ((33, 65), torch.bfloat16), ((17,), torch.float32)]
+    base = [torch.randn(shape, device=device).to(dtype) for shape, dtype in shapes]
+    grads = [torch.randn_like(t) for t in base]
+    results = []
+    for deferred in (False, True):
+        params = [nn.Parameter(t.clone()) for t in base]
+        optimizer = AdamWBF16(params, lr=1e-2, weight_decay=0.1, use_triton=use_triton)
+        for _ in range(3):
+            for p, g in zip(params, grads, strict=True):
+                p.grad = g.clone() if deferred else g.clone().mul_(torch.tensor(scale, device=device))
+            if deferred:
+                optimizer.defer_grad_scale(torch.tensor(scale, device=device))
+            optimizer.step()
+        results.append([p.detach().clone() for p in params] + [optimizer.state[p]["exp_avg_sq"] for p in params])
+    return results
+
+
+def test_deferred_grad_scale_matches_prescaled_grads():
+    """The clip coefficient applied inside the step must equal scaling the gradients in place first, bit for
+    bit, for any coefficient: the in-place multiply rounds a bf16 gradient's scale and product to bf16, and
+    an fp32 product in the step would differ in the last bits and pass the global norm's run-to-run
+    noise on to the stochastically rounded weights. 0.3 is not exact in bf16; 0.25 is, and passes either
+    way."""
+    for scale in (0.3, 0.25):
+        for device, use_triton in (("cuda", True), ("cpu", False)):
+            prescaled, deferred = _deferred_vs_prescaled(scale, device, use_triton)
+            for a, b in zip(prescaled, deferred, strict=True):
+                assert torch.equal(a, b), (scale, device, use_triton)
+
+
+def test_deferred_grad_scale_is_consumed_once_and_cleared_by_zero_grad():
+    """The scale applies to exactly one step: the next step (and one after ``zero_grad``) is unscaled."""
+    param = nn.Parameter(torch.ones(8, device="cuda", dtype=torch.bfloat16))
+    optimizer = AdamWBF16([param], lr=1e-2, weight_decay=0.0)
+    optimizer.defer_grad_scale(torch.tensor(0.5, device="cuda"))
+    param.grad = torch.ones_like(param)
+    optimizer.step()
+    assert optimizer._grad_scale is None
+    optimizer.defer_grad_scale(torch.tensor(0.5, device="cuda"))
+    optimizer.zero_grad()
+    assert optimizer._grad_scale is None
+
+
 def test_state_dict_roundtrip():
     """Save -> deepcopy -> load into a fresh optimizer: every state tensor and ``step`` bit-exact.
 
@@ -611,6 +660,14 @@ def run(ctx) -> dict:
     record_check(checks, "step_advances_the_version_counter", test_step_advances_the_version_counter)
     record_check(
         checks, "every_optimizer_advances_the_version_counter", test_every_optimizer_advances_the_version_counter
+    )
+    record_check(
+        checks, "deferred_grad_scale_matches_prescaled_grads", test_deferred_grad_scale_matches_prescaled_grads
+    )
+    record_check(
+        checks,
+        "deferred_grad_scale_is_consumed_once_and_cleared_by_zero_grad",
+        test_deferred_grad_scale_is_consumed_once_and_cleared_by_zero_grad,
     )
     record_check(checks, "state_dict_roundtrip", test_state_dict_roundtrip)
     record_check(checks, "restore_replays_the_rounding", test_restore_replays_the_rounding)

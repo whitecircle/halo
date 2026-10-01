@@ -68,6 +68,16 @@ def expert_weight_roots() -> frozenset[str]:
 
 
 @lru_cache(maxsize=1)
+def shared_expert_attrs() -> frozenset[str]:
+    """Every shared-expert attribute the roster declares (:attr:`~EPMoELayerBase._SHARED_EXPERT_ATTRS`).
+
+    A shared expert is replicated, never sharded, and may keep raw parameters named like the routed
+    ones (Inkling's ``shared_experts.gate_proj``), so the expert-weight grouping has to leave it out.
+    """
+    return frozenset(_declared_union("_SHARED_EXPERT_ATTRS"))
+
+
+@lru_cache(maxsize=1)
 def experts_container_attrs() -> tuple[str, ...]:
     """Every expert-container attribute name the roster declares
     (:attr:`~EPMoELayerBase._EXPERTS_CONTAINER_ATTRS`), longest-first.

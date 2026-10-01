@@ -79,9 +79,9 @@ def single_process_ep_config(num_experts: int, **overrides) -> EPConfig:
     The shape every CPU wrapper test needs: ``ep_size=1`` on a world of 1 distributes nothing, so an
     EP layer built on it runs the same routing and expert compute a real rank runs while the
     comparison stays in-process. ``use_grouped_gemm=False`` keeps the eager expert loop (the
-    grouped-GEMM kernel needs SM90+), and the expert assignment is finalized here because the layers
-    read ``expert_start_idx``/``expert_end_idx`` at construction.
+    grouped-GEMM kernel needs SM90+; a GPU caller overrides it), and the expert assignment is finalized
+    here because the layers read ``expert_start_idx``/``expert_end_idx`` at construction.
     """
-    config = EPConfig(ep_size=1, world_size=1, gpus_per_node=1, use_grouped_gemm=False, **overrides)
+    config = EPConfig(**{"ep_size": 1, "world_size": 1, "gpus_per_node": 1, "use_grouped_gemm": False, **overrides})
     config.finalize_expert_assignment(num_experts)
     return config

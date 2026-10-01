@@ -1,16 +1,19 @@
 #!/usr/bin/env python
-"""CPU tests for the expert-activation warmup that precedes the first DeepEP dispatch.
+"""CPU tests for the expert-kernel warmup that precedes the first DeepEP dispatch.
 
-The expert activation is the one lazily-compiled callable inside the dispatch→combine span: every
-expert combine on the roster is a Triton kernel (the fused GLUs, the clamped SwiGLUs, GptOss), and
-Triton compiles one on its first call. Left cold it compiles BETWEEN the two collectives, while every
-peer of the EP group spins in DeepEP's barrier — whose budget bounds rank SKEW, not idle time.
+The expert activation and the fused permute/unpermute are the lazily-compiled callables inside the
+dispatch→combine span: every expert combine on the roster is a Triton kernel (the fused GLUs, the clamped
+SwiGLUs, GptOss), as are the permute kernels, and Triton compiles one on its first call. Left cold it
+compiles BETWEEN the two collectives, while every peer of the EP group spins in DeepEP's barrier — whose
+budget bounds rank SKEW, not idle time.
 
 Asserted here: the warmup runs to completion before the first dispatch on a real dispatch group
 (``ep_size > 1``; at ``ep_size == 1`` the dispatcher is a no-op with no barrier to stall), exactly
 once per layer, in both grad modes AND with a real backward (the backward kernel is a separate
-compilation, built only when a grad is first requested); and each family's own warm hook reaches the
-callable its compute path actually calls, with the operands that path produces.
+compilation, built only when a grad is first requested); it warms the permute kernels wherever the
+compute path runs them; the kernels take their row count unspecialized, so one warm count covers every
+dispatch size; and each family's own warm hook reaches the callable its compute path actually calls,
+with the operands that path produces.
 
 Run: pytest tests/cpu/parallelism/test_ep_activation_warmup.py
 """
@@ -22,9 +25,11 @@ import torch
 import torch.nn as nn
 from torch.utils.checkpoint import checkpoint
 
-from src.distributed.expert_parallel.base_layer import _ACTIVATION_WARMUP_TOKENS
+from src.distributed.expert_parallel import base_layer
+from src.distributed.expert_parallel.base_layer import _WARMUP_TOKENS
 from src.distributed.expert_parallel.gc_scope import active_checkpoint_scope, scoped_checkpoint_func
 from src.distributed.expert_parallel.layers import gpt_oss as gpt_oss_layer
+from src.kernels import fused_glu, moe_permute
 from tests.common.ep_stubs import StubEPLayerBase
 
 HIDDEN, INTER, LOCAL_EXPERTS = 6, 4, 2
@@ -40,6 +45,7 @@ class _RecordingLayer(StubEPLayerBase):
         self.expert_tp_size = 1
         self._capture_routing = False
         self._activation_warmed = False
+        self._use_grouped_mm = True
         self._perf = lambda _label: contextlib.nullcontext()
         self.gate_up_proj = nn.Parameter(torch.randn(LOCAL_EXPERTS, HIDDEN, 2 * INTER))
         self.down_proj = nn.Parameter(torch.randn(LOCAL_EXPERTS, INTER, HIDDEN))
@@ -94,7 +100,7 @@ def test_warmup_covers_both_grad_modes_and_runs_a_real_backward():
     _run_forward(layer)
     warms = [event for event in layer.events if event[0] == "warm"]
     assert {grad for _, _, grad in warms} == {True, False}
-    assert {shape for _, shape, _ in warms} == {(tokens, 2 * INTER) for tokens in _ACTIVATION_WARMUP_TOKENS}
+    assert {shape for _, shape, _ in warms} == {(_WARMUP_TOKENS, 2 * INTER)}
     assert ("warm_backward",) in layer.events, (
         "the grad-enabled warm ran no backward, so the backward kernel still compiles inside the span"
     )
@@ -108,7 +114,7 @@ def test_warmup_runs_once_per_layer():
     warmed = sum(1 for event in layer.events if event[0] == "warm" and event[2])
     layer.events.clear()
     _run_forward(layer)
-    assert warmed == len(_ACTIVATION_WARMUP_TOKENS)
+    assert warmed == 1
     assert [event[0] for event in layer.events] == ["dispatch", "compute", "combine"]
 
 
@@ -136,27 +142,57 @@ def test_the_warmup_draws_no_random_numbers():
     dropout — differentiates activations the loss was never computed from."""
     layer = _RecordingLayer()
     before = torch.random.get_rng_state()
-    layer._warm_activation_graphs(torch.device("cpu"), torch.float32)
+    layer._warm_activation_graphs(torch.device("cpu"), torch.float32, HIDDEN, top_k=2)
 
     assert torch.equal(torch.random.get_rng_state(), before)
-    assert [event[0] for event in layer.events].count("warm") == 2 * len(_ACTIVATION_WARMUP_TOKENS)
+    assert [event[0] for event in layer.events].count("warm") == 2
 
 
-@pytest.mark.parametrize("inter", (INTER, 16), ids=("width_not_multiple_of_16", "width_multiple_of_16"))
-def test_the_warmup_covers_every_element_count_class_a_run_can_present(inter):
-    """These kernels take the element count (tokens x local intermediate) as a RUNTIME argument, and
-    Triton compiles a separate binary per divisibility-by-16 class of it. Warming one class leaves the
-    other to compile between the dispatch and the combine, with every peer already in DeepEP's barrier.
-    """
-    layer = _RecordingLayer()
-    layer.down_proj = nn.Parameter(torch.zeros(LOCAL_EXPERTS, inter, HIDDEN))
-    layer._warm_activation_graphs(torch.device("cpu"), torch.float32)
+@pytest.mark.parametrize(
+    ("kernel", "row_count"),
+    (
+        (fused_glu._glu_fwd_kernel, "n_rows"),
+        (fused_glu._glu_bwd_kernel, "n_rows"),
+        (moe_permute._gather_reduce_kernel, "n_src"),
+    ),
+)
+def test_the_kernels_do_not_specialize_on_the_dispatch_row_count(kernel, row_count):
+    """The row count changes every dispatch. Triton compiles a separate binary per class of a
+    specializable integer (1, a multiple of 16, neither), so a class the warmup did not run would compile
+    between the dispatch and the combine. Unspecialized, the one warm count covers every size."""
+    params = {param.name: param for param in kernel.params}
+    assert params[row_count].do_not_specialize
 
-    warm_shapes = [event[1] for event in layer.events if event[0] == "warm"]
-    warmed = {(tokens * inter) % 16 == 0 for tokens, _width in warm_shapes}
-    # A width that is itself a multiple of 16 makes every token count divisible: the other class is
-    # unreachable at runtime too, so warming it would be warming nothing.
-    assert warmed == ({True} if inter % 16 == 0 else {True, False})
+
+@pytest.mark.parametrize(
+    ("top_k", "ep_size", "grouped_mm", "warmed"),
+    ((2, 2, True, True), (1, 2, True, False), (2, 2, False, False)),
+    ids=("fused_permute", "top_k_below_ep_size", "per_expert_loop"),
+)
+def test_the_permute_kernels_are_warmed_where_the_compute_path_runs_them(
+    monkeypatch, top_k, ep_size, grouped_mm, warmed
+):
+    """The grouped path takes the fused permute when ``top_k >= ep_size``: its gather's backward and the
+    weighted unpermute's forward and backward then run inside the span, so the warmup runs them first,
+    forward and backward. Below that the index_add path runs, and ``use_grouped_gemm: false`` runs the
+    per-expert loop, the documented way around these kernels: in both there is nothing to warm, and a
+    warm-up that ran them anyway would compile the kernels the loop exists to avoid."""
+    calls = []
+    for name in ("MoEGatherPermute", "MoEWeightedUnpermute"):
+        function = getattr(base_layer, name)
+
+        class _Recording(function):
+            @staticmethod
+            def backward(ctx, *grads, _name=name, _function=function):
+                calls.append((_name, "backward"))
+                return _function.backward(ctx, *grads)
+
+        monkeypatch.setattr(base_layer, name, _Recording)
+    layer = _RecordingLayer(ep_size=ep_size)
+    layer._use_grouped_mm = grouped_mm
+    layer._warm_activation_graphs(torch.device("cpu"), torch.float32, HIDDEN, top_k=top_k)
+    expected = {("MoEGatherPermute", "backward"), ("MoEWeightedUnpermute", "backward")} if warmed else set()
+    assert set(calls) == expected
 
 
 class _ScopeCachingLayer(_RecordingLayer):

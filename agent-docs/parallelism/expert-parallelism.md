@@ -353,15 +353,16 @@ on EP MoE — the DeepEP all-to-all breaks the graph at every MoE boundary eithe
 
 Whichever kernel a family resolves, a layer with a real dispatch group (`ep_size > 1`) traces it on
 its **first forward, before that forward's dispatch** (`_warm_activation_graphs`): one grad-enabled
-pass with a backward and one under `no_grad`, at two token counts. These kernels take the element
-count as a runtime argument, and Triton compiles a separate binary per divisibility-by-16 class of
-it.
+pass with a backward and one under `no_grad`. Where the fused permute runs (the grouped-GEMM path with `top_k >= ep_size`), the
+same pass runs the permute's backward and the weighted unpermute's forward and backward. One token count
+covers every dispatch size: the kernels take their row count with `do_not_specialize`, so Triton
+compiles no separate binary per class of it (1, a multiple of 16, neither).
 
 The inputs are zeros rather than a draw, and the backward runs under identity saved-tensor hooks.
 The warm-up sits inside the gradient-checkpointed block, whose recompute restores the RNG to region
 entry and whose non-reentrant form would otherwise recompute the whole block mid-forward.
 
-Without the warm-up, a cold activation compiles between `dispatch` and `combine`, where every peer
+Without the warm-up, a cold kernel compiles between `dispatch` and `combine`, where every peer
 of the group is already inside DeepEP's barrier, and that barrier's budget bounds rank *skew*, not
 idle time. At `ep_size == 1` the dispatcher is a no-op, so there is no barrier to stall and no
 warm-up.

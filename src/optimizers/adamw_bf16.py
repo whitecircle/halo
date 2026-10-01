@@ -52,16 +52,32 @@ def _adam_bf16_sr_kernel(
     wd_factor,
     n_elements,
     seed,  # one Philox call yields both noise streams
+    grad_scale_ptr,
+    HAS_GRAD_SCALE: tl.constexpr,
     BLOCK_SIZE: tl.constexpr,
 ):
-    """Fused Adam update with stochastic rounding for bf16 params (reads bf16, computes fp32, SR-writes bf16)."""
-    pid = tl.program_id(0)
-    block_start = pid * BLOCK_SIZE
-    offsets = block_start + tl.arange(0, BLOCK_SIZE)
+    """Fused Adam update with stochastic rounding for bf16 params (reads bf16, computes fp32, SR-writes bf16).
+
+    ``grad_scale_ptr`` (with ``HAS_GRAD_SCALE``) is a device fp32 scalar multiplied into the gradient as it
+    is read: the deferred gradient-clip coefficient, which then costs no pass of its own over the grads.
+    The product is the one CUDA's in-place ``grad.mul_(scale)`` computes, bit for bit: the scale rounded
+    to the gradient's dtype, the product rounded back to it.
+    """
+    # Each lane owns four consecutive elements and one Philox call: its 4 x 32 random bits give every
+    # element its own two 16-bit noise draws (high half for the second moment, low half for the weight).
+    # A call per element would make the Philox rounds, not memory, the bound.
+    QUARTER: tl.constexpr = BLOCK_SIZE // 4
+    pid = tl.program_id(0).to(tl.int64)
+    lane = tl.arange(0, QUARTER)
+    offsets = pid * BLOCK_SIZE + (lane[:, None] * 4 + tl.arange(0, 4)[None, :])
     mask = offsets < n_elements
 
     p = tl.load(p_ptr + offsets, mask=mask).to(tl.float32)
-    grad = tl.load(grad_ptr + offsets, mask=mask).to(tl.float32)
+    grad_raw = tl.load(grad_ptr + offsets, mask=mask)
+    grad = grad_raw.to(tl.float32)
+    if HAS_GRAD_SCALE:
+        scale = tl.load(grad_scale_ptr).to(grad_raw.dtype).to(tl.float32)
+        grad = (grad * scale).to(grad_raw.dtype).to(tl.float32)
     ea = tl.load(ea_ptr + offsets, mask=mask).to(tl.float32)
     easq = tl.load(easq_ptr + offsets, mask=mask).to(tl.float32)
 
@@ -71,10 +87,10 @@ def _adam_bf16_sr_kernel(
     # exp_avg stored nearest: a signed ~zero-mean EMA, so truncation is already unbiased.
     tl.store(ea_ptr + offsets, ea.to(tl.bfloat16), mask=mask)
 
-    # One Philox call feeds both streams; the high 16 bits of a uniform uint32 are the SR noise.
-    rnd0, rnd1, _, _ = tl.randint4x(seed, offsets)
-    easq_noise = (rnd0.to(tl.uint32, bitcast=True) >> 16).to(tl.int32)
-    rand_noise = (rnd1.to(tl.uint32, bitcast=True) >> 16).to(tl.int32)
+    r0, r1, r2, r3 = tl.randint4x(seed, pid * QUARTER + lane)
+    bits = tl.reshape(tl.join(tl.join(r0, r1), tl.join(r2, r3)), (QUARTER, 4)).to(tl.uint32, bitcast=True)
+    easq_noise = (bits >> 16).to(tl.int32)
+    rand_noise = (bits & 0xFFFF).to(tl.int32)
 
     # SR the second moment: near the bf16 underflow floor nearest rounding biases this non-negative
     # accumulator by tens of percent, with a sign set by the gradient regime, moving sqrt(v) and the
@@ -128,8 +144,9 @@ def _triton_adam_bf16_step(
     beta1: float,
     beta2: float,
     sr_seeds: tuple[int, int],
+    grad_scale: Tensor | None = None,
 ):
-    """Launch the fused Adam+SR Triton kernel for a single parameter."""
+    """Launch the fused Adam+SR Triton kernel for a single parameter (``grad_scale``: see the kernel)."""
     p_data = to_local(p.detach())
     grad_local = to_local(grad)
     ea_local = to_local(exp_avg)
@@ -159,7 +176,10 @@ def _triton_adam_bf16_step(
         wd_factor,
         n,
         seed,
+        grad_scale if grad_scale is not None else grad_flat,
+        HAS_GRAD_SCALE=grad_scale is not None,
         BLOCK_SIZE=BLOCK_SIZE,
+        num_warps=8,
     )
     torch.autograd.graph.increment_version(p)  # the raw-pointer store above is invisible to ATen
 
@@ -179,6 +199,12 @@ def stochastic_round_to_bf16(x_fp32: Tensor, seed: int) -> Tensor:
     return x_fp32.to(torch.bfloat16)
 
 
+def _scaled_grad(grad: Tensor, grad_scale: Tensor | None) -> Tensor:
+    """``grad`` times the deferred clip scale, the same multiply as the clip's ``grad.mul_(grad_scale)``
+    (see :meth:`AdamWBF16.defer_grad_scale`)."""
+    return grad if grad_scale is None else grad * grad_scale
+
+
 def _eager_adam_bf16_step(
     p: Tensor,
     grad: Tensor,
@@ -191,11 +217,12 @@ def _eager_adam_bf16_step(
     beta1: float,
     beta2: float,
     sr_seeds: tuple[int, int],
+    grad_scale: Tensor | None = None,
 ):
     """Eager (non-Triton) Adam+SR step for a single bf16 parameter."""
     easq_seed, weight_seed = sr_seeds
     p_data = to_local(p.detach())
-    grad = to_local(grad)
+    grad = _scaled_grad(to_local(grad), grad_scale)
     exp_avg = to_local(exp_avg)
     exp_avg_sq = to_local(exp_avg_sq)
 
@@ -252,6 +279,27 @@ class AdamWBF16(torch.optim.Optimizer):
         # Resolved per parameter at step time from the tensor's own device: the eager path is
         # equivalent, and gating on `torch.cuda.is_available()` would send a CPU param to Triton.
         self._use_triton = use_triton
+        self._grad_scale: Tensor | None = None
+
+    def defer_grad_scale(self, scale: Tensor) -> None:
+        """Multiply every gradient by ``scale`` (a device fp32 scalar) inside the next :meth:`step`.
+
+        The gradient clip hands its coefficient here instead of rescaling the gradients in place, so the
+        scale rides the optimizer's own read of each gradient rather than costing a separate pass over
+        all of them. The gradients themselves stay unscaled until the step; the scale applies once.
+
+        Each gradient is scaled exactly as ``grad.mul_(scale)`` would scale it, product rounded to the
+        gradient's dtype (and on CUDA the scale too), so the step matches clip-then-step bit for bit. The
+        coefficient carries the global norm's last-bit run-to-run noise (expert gradients are not
+        bit-reproducible under EP); that rounding absorbs it for bf16 gradients as the in-place clip
+        does, where an fp32 product would pass it on to the stochastically rounded weights.
+        """
+        self._grad_scale = scale.detach().to(dtype=torch.float32).reshape(())
+
+    def zero_grad(self, set_to_none: bool = True) -> None:
+        # A scale deferred for gradients that are being discarded must not reach the next step's.
+        self._grad_scale = None
+        super().zero_grad(set_to_none=set_to_none)
 
     def _triton_for(self, param: torch.Tensor) -> bool:
         """Whether ``param`` takes the fused kernel. Its device decides — Triton needs CUDA storage."""
@@ -265,6 +313,7 @@ class AdamWBF16(torch.optim.Optimizer):
             with torch.enable_grad():
                 loss = closure()
 
+        grad_scale, self._grad_scale = self._grad_scale, None
         index = 0  # flat position across the groups, the state dict's index space
         for group in self.param_groups:
             beta1, beta2 = group["betas"]
@@ -313,6 +362,7 @@ class AdamWBF16(torch.optim.Optimizer):
                         beta1,
                         beta2,
                         sr_seed_pair(_SR_KEY, step, param_index),
+                        grad_scale,
                     )
 
             # Per-param updates (no _foreach_* — FSDP2 DTensor params can't mix with plain Tensors).
@@ -326,7 +376,7 @@ class AdamWBF16(torch.optim.Optimizer):
                 p_data = to_local(p.detach())
                 exp_avg = to_local(state["exp_avg"])
                 exp_avg_sq = to_local(state["exp_avg_sq"])
-                grad_fp32 = to_local(grad)
+                grad_fp32 = _scaled_grad(to_local(grad), grad_scale)
                 grad_fp32 = grad_fp32.float() if grad_fp32.dtype != torch.float32 else grad_fp32
 
                 exp_avg.mul_(beta1).add_(grad_fp32, alpha=1.0 - beta1)

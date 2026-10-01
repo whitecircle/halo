@@ -67,6 +67,17 @@ PREFIX_MLP = f"{PREFIX}.mlp"
 PREFIX_FF = f"{PREFIX}.feed_forward"
 
 
+def test_shared_expert_params_are_not_grouped_as_routed_experts():
+    """Inkling keeps its shared experts as raw ``shared_experts.{gate,up,down}_proj`` parameters, the names
+    of a separate-GLU family's routed experts. Grouped as an expert layer they would reach Inkling's fused
+    merge, which refuses the unexpected names, and the whole merge would fail."""
+    routed = {f"{PREFIX_MLP}.gate_up_proj": torch.zeros(1), f"{PREFIX_MLP}.down_proj": torch.zeros(1)}
+    shared = {f"{PREFIX_MLP}.shared_experts.{name}": torch.zeros(1) for name in ("gate_proj", "up_proj", "down_proj")}
+    groups, rest = _group_expert_weights({**routed, **shared})
+    assert set(groups) == {PREFIX_MLP}
+    assert set(rest) == set(shared)
+
+
 def test_transform_gptoss_no_gmm():
     """GptOss without grouped GEMM: rename only, weights pass through verbatim."""
     gate_up = torch.randn(E, H, 2 * M)

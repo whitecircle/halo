@@ -1,10 +1,10 @@
 #!/usr/bin/env python
 """Fused MoE GLU kernels match their eager references, forward and backward.
 
-Exercises the standard SwiGLU and tanh-GeGLU pair used by Mistral 4 and Gemma 4, and the clamped
-family — GptOss, DeepSeek-V4 / GLM-5 Next's clamp-then-SiLU, Step-3.7's SiLU-then-clamp — which shares
-one kernel pair whose bound and ``alpha`` are runtime arguments and whose clamp placement and
-``up + 1`` are ``tl.constexpr``. Token counts vary because grouped expert routing produces dynamic
+Exercises every combine of the one row-strided kernel pair: the standard SwiGLU and tanh-GeGLU used by
+Mistral 4 and Gemma 4, and the clamped family — GptOss, DeepSeek-V4 / GLM-5 Next's clamp-then-SiLU,
+Step-3.7's SiLU-then-clamp — whose bound and ``alpha`` are runtime arguments and whose clamp placement
+and ``up + 1`` are ``tl.constexpr``. Token counts vary because grouped expert routing produces dynamic
 shapes; the variants are run in one process because that is where a constexpr keyed to the wrong
 wrapper, or a compilation reused across two of them, would show.
 
@@ -13,16 +13,22 @@ Run: torchrun --nproc_per_node=1 tests/gpu/kernels/test_fused_glu.py
 
 from collections.abc import Callable
 from typing import NamedTuple
+from unittest.mock import patch
 
 import torch
 
+from src.kernels import fused_glu
 from src.kernels.fused_glu import (
     clamped_silu_mul_eager,
     fused_clamped_silu_mul,
+    fused_clamped_silu_mul_packed,
     fused_gelu_tanh_mul,
+    fused_gelu_tanh_mul_packed,
     fused_gptoss_glu,
     fused_silu_mul,
+    fused_silu_mul_packed,
     fused_silu_then_clamp_mul,
+    fused_silu_then_clamp_mul_packed,
     gelu_tanh_mul_eager,
     gptoss_glu_eager,
     silu_mul_eager,
@@ -63,6 +69,68 @@ def _check_standard(fused_fn, eager_fn, n, dtype, tol):
 def test_standard_glu_matches_eager(fused_fn, eager_fn, dtype, tol):
     for n in (1, 333, 4096):
         _check_standard(fused_fn, eager_fn, n, dtype, tol)
+
+
+# Packed entry, separate-halves entry and eager reference of each standard combine.
+PACKED_STANDARD = (
+    (fused_silu_mul_packed, fused_silu_mul, silu_mul_eager),
+    (fused_gelu_tanh_mul_packed, fused_gelu_tanh_mul, gelu_tanh_mul_eager),
+)
+PACKED_DTYPE_TOLS = ((torch.float32, 1e-5), (torch.bfloat16, 2e-2))
+PACKED_WIDTHS = (704, 2112, 5)
+# Packed and separate-halves forms of the clamped combines.
+PACKED_CLAMPED = (
+    ("clamp_then_silu", fused_clamped_silu_mul_packed, fused_clamped_silu_mul),
+    ("silu_then_clamp", fused_silu_then_clamp_mul_packed, fused_silu_then_clamp_mul),
+)
+PACKED_CLAMPED_WIDTHS = (1536, 5)
+
+
+def test_fused_gate_up_layouts_match_eager(packed_fn, chunked_fn, eager_fn, dtype, tol, width):
+    """The expert path hands the kernel the two halves of one ``[N, 2M]`` projection. The packed entry and
+    the strided halves (no ``.contiguous()`` copy) must both read the right columns and write the right
+    gradient columns: an off-by-``M`` stride swaps gate and up, which only a non-symmetric activation shows."""
+    generator = torch.Generator(device="cuda").manual_seed(width)
+    for n in (1, 333, 4099):
+        base = torch.randn(n, 2 * width, generator=generator, device="cuda", dtype=dtype) * 3
+        grad = torch.randn(n, width, generator=generator, device="cuda", dtype=dtype)
+        reference = base.double().requires_grad_(True)
+        expected = eager_fn(*reference.chunk(2, dim=-1))
+        expected.backward(grad.double())
+        for call in (packed_fn, lambda gu: chunked_fn(*gu.chunk(2, dim=-1))):
+            gate_up = base.clone().requires_grad_(True)
+            out = call(gate_up)
+            out.backward(grad)
+            assert out.shape == (n, width)
+            assert max_abs_rel_err(out, expected) < tol
+            assert max_abs_rel_err(gate_up.grad, reference.grad) < tol
+
+
+def test_packed_clamped_glu_is_bit_identical_to_the_separate_halves(packed_fn, separate_fn, dtype, width):
+    """The packed clamped forms run the same kernel over ``[gate | up]`` read in place, so forward and
+    gradient must equal the separate-halves call bit for bit; a stride off by ``M`` swaps gate and up,
+    which the asymmetric clamps show. Bound 2.0 against inputs of scale 3 fires both clamps on every row."""
+    generator = torch.Generator(device="cuda").manual_seed(width)
+    for n in (1, 333, 4099):
+        base = torch.randn(n, 2 * width, generator=generator, device="cuda", dtype=dtype) * 3
+        grad = torch.randn(n, width, generator=generator, device="cuda", dtype=dtype)
+        packed_in = base.clone().requires_grad_(True)
+        packed_out = packed_fn(packed_in, 2.0)
+        packed_out.backward(grad)
+        gate, up = (half.contiguous().requires_grad_(True) for half in base.chunk(2, dim=-1))
+        separate_out = separate_fn(gate, up, 2.0)
+        separate_out.backward(grad)
+        assert torch.equal(packed_out, separate_out)
+        assert torch.equal(packed_in.grad, torch.cat([gate.grad, up.grad], dim=-1))
+
+
+def test_packed_glu_keeps_leading_dims():
+    """A ``[B, S, 2M]`` input (the dense MLP path) returns ``[B, S, M]`` and a ``[B, S, 2M]`` gradient."""
+    gate_up = torch.randn(2, 5, 2 * 64, device="cuda", requires_grad=True)
+    out = fused_gelu_tanh_mul_packed(gate_up)
+    out.sum().backward()
+    assert out.shape == (2, 5, 64) and gate_up.grad.shape == gate_up.shape
+    torch.testing.assert_close(out, gelu_tanh_mul_eager(*gate_up.detach().chunk(2, dim=-1)))
 
 
 class _Variant(NamedTuple):
@@ -168,6 +236,73 @@ def test_up_plus_one_is_all_that_separates_the_two_pre_activation_variants():
     torch.testing.assert_close(difference, torch.nn.functional.silu(gate.clamp(max=LIMIT)), rtol=0, atol=2e-4)
 
 
+def test_the_switch_runs_every_combine_eagerly_on_cuda():
+    """``HALO_FUSED_GLU=0`` is the documented escape from a GLU kernel that fails on a GPU: with it, none
+    of the nine combine entry points (separate halves and packed, each activation) may reach a Triton
+    kernel, and each must return exactly its eager form."""
+    gate, up = (torch.randn(8, 64, device="cuda", dtype=torch.bfloat16) for _ in range(2))
+    gate_up = torch.cat([gate, up], dim=-1)
+    combines = (
+        (lambda: fused_glu.fused_silu_mul(gate, up), lambda: silu_mul_eager(gate, up)),
+        (lambda: fused_glu.fused_gelu_tanh_mul(gate, up), lambda: gelu_tanh_mul_eager(gate, up)),
+        (lambda: fused_glu.fused_gptoss_glu(gate, up, 1.702, 7.0), lambda: gptoss_glu_eager(gate, up, 1.702, 7.0)),
+        (lambda: fused_glu.fused_clamped_silu_mul(gate, up, 7.0), lambda: clamped_silu_mul_eager(gate, up, 7.0)),
+        (
+            lambda: fused_glu.fused_silu_then_clamp_mul(gate, up, 7.0),
+            lambda: silu_then_clamp_mul_eager(gate, up, 7.0),
+        ),
+        (lambda: fused_glu.fused_silu_mul_packed(gate_up), lambda: silu_mul_eager(gate, up)),
+        (lambda: fused_glu.fused_gelu_tanh_mul_packed(gate_up), lambda: gelu_tanh_mul_eager(gate, up)),
+        (
+            lambda: fused_glu.fused_clamped_silu_mul_packed(gate_up, 7.0),
+            lambda: clamped_silu_mul_eager(gate, up, 7.0),
+        ),
+        (
+            lambda: fused_glu.fused_silu_then_clamp_mul_packed(gate_up, 7.0),
+            lambda: silu_then_clamp_mul_eager(gate, up, 7.0),
+        ),
+    )
+    assert len(combines) == 9  # every entry point that checks the switch
+
+    def no_kernel(*_args):
+        raise AssertionError("a combine reached the fused kernel with HALO_FUSED_GLU=0")
+
+    with (
+        patch.object(fused_glu, "_FUSED_GLU_ENABLED", False),
+        patch.object(fused_glu._FusedGLU, "apply", no_kernel),
+        patch.object(fused_glu._FusedPackedGLU, "apply", no_kernel),
+    ):
+        for fused, eager in combines:
+            assert torch.equal(fused(), eager())
+
+
+def _compiled_binaries(kernel) -> int:
+    return len(kernel.device_caches[torch.cuda.current_device()][0])
+
+
+def test_one_compile_serves_every_row_count():
+    """The EP dispatch's row count changes every step, and its class (1, a multiple of 16, neither) must
+    not select a new binary: one warm call compiles the forward and backward kernels every later row
+    count runs."""
+    width = 704
+    kernels = (fused_glu._glu_fwd_kernel, fused_glu._glu_bwd_kernel)
+
+    def run(rows: int) -> None:
+        gate = torch.randn(rows, width, device="cuda", dtype=torch.bfloat16, requires_grad=True)
+        up = torch.randn(rows, width, device="cuda", dtype=torch.bfloat16, requires_grad=True)
+        fused_silu_mul(gate, up).sum().backward()
+
+    # Earlier checks in this process compiled these kernels at other row counts; start from an empty
+    # cache so a row count that selects its own binary shows up as a new entry.
+    for kernel in kernels:
+        kernel.device_caches.clear()
+    run(16)
+    warm = [_compiled_binaries(kernel) for kernel in kernels]
+    for rows in (1, 17, 33, 48, 1025):
+        run(rows)
+    assert [_compiled_binaries(kernel) for kernel in kernels] == warm, "a row count compiled a new binary"
+
+
 def test_large_numel_int64_offset():
     """gate.numel() past 2**31 must stay correct (int64 program offset).
 
@@ -190,6 +325,25 @@ def run(ctx) -> dict:
                 f"standard_glu_matches_eager[{fused_fn.__name__}-{dtype}]",
                 lambda: test_standard_glu_matches_eager(fused_fn, eager_fn, dtype, tol),
             )
+    for packed_fn, chunked_fn, eager_fn in PACKED_STANDARD:
+        for dtype, tol in PACKED_DTYPE_TOLS:
+            for width in PACKED_WIDTHS:
+                record_check(
+                    checks,
+                    f"fused_gate_up_layouts_match_eager[{packed_fn.__name__}-{dtype}-{width}]",
+                    lambda: test_fused_gate_up_layouts_match_eager(packed_fn, chunked_fn, eager_fn, dtype, tol, width),
+                )
+    for name, packed_fn, separate_fn in PACKED_CLAMPED:
+        for dtype in (torch.float32, torch.bfloat16):
+            for width in PACKED_CLAMPED_WIDTHS:
+                record_check(
+                    checks,
+                    f"packed_clamped_glu_is_bit_identical_to_the_separate_halves[{name}-{dtype}-{width}]",
+                    lambda: test_packed_clamped_glu_is_bit_identical_to_the_separate_halves(
+                        packed_fn, separate_fn, dtype, width
+                    ),
+                )
+    record_check(checks, "packed_glu_keeps_leading_dims", test_packed_glu_keeps_leading_dims)
     record_check(checks, "gptoss_fp32_matches_eager", test_gptoss_fp32_matches_eager)
     record_check(checks, "gptoss_bf16_matches_eager", test_gptoss_bf16_matches_eager)
     for variant in _SILU_VARIANTS:
@@ -215,6 +369,10 @@ def run(ctx) -> dict:
         checks,
         "up_plus_one_is_all_that_separates_the_two_pre_activation_variants",
         test_up_plus_one_is_all_that_separates_the_two_pre_activation_variants,
+    )
+    record_check(checks, "one_compile_serves_every_row_count", test_one_compile_serves_every_row_count)
+    record_check(
+        checks, "the_switch_runs_every_combine_eagerly_on_cuda", test_the_switch_runs_every_combine_eagerly_on_cuda
     )
     total_gib = torch.cuda.mem_get_info()[1] / 2**30
     if total_gib >= LARGE_NUMEL_MIN_GIB:

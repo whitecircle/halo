@@ -53,6 +53,7 @@ from src.checkpoint.tool_io import (
 from src.distributed.expert_parallel.expert_weights import (
     expert_weight_roots,
     resolve_ep_merge_layer_class,
+    shared_expert_attrs,
     supported_ep_merge_model_types,
     to_hub_layer_key,
 )
@@ -76,7 +77,9 @@ def _group_expert_weights(merged_weights: dict) -> tuple[dict, dict]:
     """Separate expert weights from non-expert weights and group by MoE layer.
 
     Values pass through untouched, so this classifies tensors and read plans alike (the streaming
-    merge groups keys before any tensor is materialized).
+    merge groups keys before any tensor is materialized). A declared shared-expert container
+    (:func:`~src.distributed.expert_parallel.expert_weights.shared_expert_attrs`) is not an expert group,
+    whatever its parameters are called.
 
     Returns:
         expert_groups: {layer_prefix: {param_suffix: value}} for expert weights
@@ -85,9 +88,11 @@ def _group_expert_weights(merged_weights: dict) -> tuple[dict, dict]:
     expert_groups = defaultdict(dict)
     non_expert = {}
 
+    shared = shared_expert_attrs()
     for key, value in merged_weights.items():
         match = _EP_EXPERT_PATTERN.match(key)
-        if match:
+        # A shared expert's raw parameters can share a routed suffix; they are never sharded.
+        if match and match.group(1).rsplit(".", 1)[-1] not in shared:
             layer_prefix = match.group(1)
             param_suffix = match.group(2)
             expert_groups[layer_prefix][param_suffix] = value
