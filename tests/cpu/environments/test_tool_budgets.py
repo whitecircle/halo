@@ -96,6 +96,17 @@ def test_the_refusal_wording_is_the_tools_own():
     assert _observations(env.get_trajectories(ids)[0])[1] == "Error: No more echo this task (1)."
 
 
+def test_a_refusal_can_name_another_tools_calls_left():
+    env = NativeToolUseEnvironment(
+        tool_registry=_registry(budget_message="No more {name} ({cap}); {left_ping} ping call(s) left."),
+        tool_budgets={"echo": 1, "ping": 3},
+    )
+    ids, _ = env.reset(["t"])
+    calls = [_call("p", "ping"), _call("a", "echo", code="x"), _call("b", "echo", code="y")]
+    env.step(ids, [""], [{"tool_calls": calls}])
+    assert _observations(env.get_trajectories(ids)[0])[2] == "Error: No more echo (1); 2 ping call(s) left."
+
+
 def test_an_enum_argument_outside_the_schema_is_refused_unspent():
     registry = NativeToolRegistry()
     registry.register(

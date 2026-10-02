@@ -991,6 +991,7 @@ class DistributedAsyncEnvironmentalGRPOTrainer(
         if mode == "train":
             self._check_step_has_valid_episodes(rollout_results, gathered_valid)
 
+        negative_only = torch.tensor(all_negative_only, device=device, dtype=torch.bool)
         completion_mask, tool_mask, loss_mask, num_items_in_batch = self._narrow_masks_and_normalizer(
             rows,
             valid_mask,
@@ -998,7 +999,7 @@ class DistributedAsyncEnvironmentalGRPOTrainer(
             completion_mask,
             tool_mask,
             local_advantages,
-            torch.tensor(all_negative_only, device=device, dtype=torch.bool),
+            negative_only,
             device,
             mode,
         )
@@ -1010,6 +1011,7 @@ class DistributedAsyncEnvironmentalGRPOTrainer(
                 self.accelerator.gather,
                 self._metrics[mode],
                 self._balance_token_mass,
+                negative_only=negative_only,
             )
             if balance is not None:
                 # The per-trajectory values follow, so the completions record reports what the gradient carries.

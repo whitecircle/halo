@@ -95,8 +95,22 @@ def test_scratchpad_cap_reads_episode_budget():
     call_tool(env, traj, "python_repl")
     call_tool(env, traj, "python_repl")
     third = call_tool(env, traj, "python_repl")
-    assert "Test limit reached (2); the scratchpad is exhausted. Submit your solution with submit_solution." in third
+    assert (
+        "Test limit reached (2); the scratchpad is exhausted. Submit your solution with submit_solution "
+        "(2 graded submission(s) left)." in third
+    )
     assert traj.info[TOOL_CALL_COUNTS_KEY]["python_repl"] == 2
+
+
+def test_the_scratchpad_refusal_names_the_submissions_still_left():
+    """A model that keeps calling an exhausted scratchpad is told how many graded submissions remain, so the
+    refusal points at the one action that still counts."""
+    env = _make_env()
+    traj = reset_episode(env, {"reasoning_effort": "low", **SINGLE_TEST_ANSWER})
+    call_tool(env, traj, "submit_solution")
+    call_tool(env, traj, "python_repl")
+    call_tool(env, traj, "python_repl")
+    assert "(1 graded submission(s) left)." in call_tool(env, traj, "python_repl")
 
 
 def test_resubmission_penalty_prices_each_graded_submission_after_the_first():

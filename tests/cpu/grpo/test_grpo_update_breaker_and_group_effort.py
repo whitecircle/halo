@@ -349,6 +349,8 @@ def test_the_balance_weighs_what_the_loss_trains_and_reaches_both_advantage_sets
         "loss_mask",
         "importance_sampling_ratio",
     ]
+    keywords = {kw.arg: ast.unparse(kw.value) for kw in call.keywords}
+    assert keywords.get("negative_only") == "negative_only", "the negative-only rows' share goes unlogged"
     rebound = {
         target.id
         for node in ast.walk(block)
