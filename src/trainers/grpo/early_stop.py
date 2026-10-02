@@ -11,16 +11,15 @@ from transformers import TrainerCallback
 
 from src.args.mixins import EarlyStopConfig
 from src.distributed.runtime import rank_consensus
+from src.trainers.grpo.objective.logratio import UPDATE_SKIPPED_KEY
 
 logger = get_logger(__name__)
 
-# The logged metrics the conditions read. TRL logs the entropy and, under its vLLM IS correction, the
-# online trainer's gap (a mean absolute difference); the environmental trainer logs its own gap (a
-# signed mean, read by magnitude) and the breaker's verdict.
+# TRL's metrics the conditions read: the entropy and, under its vLLM IS correction, the online trainer's
+# gap (a mean absolute difference). The environmental trainer's own gap (a signed mean, read by
+# magnitude) and the breaker's verdict are keyed where it computes them.
 ENTROPY_KEY = "entropy"
-LOGRATIO_MEAN_KEY = "sampling/logratio_mean"
 SAMPLING_LOGP_GAP_KEY = "sampling/sampling_logp_difference/mean"
-UPDATE_SKIPPED_KEY = "sampling/update_skipped"
 
 
 class GRPOEarlyStopCallback(TrainerCallback):

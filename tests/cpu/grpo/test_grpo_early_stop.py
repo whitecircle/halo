@@ -21,13 +21,8 @@ from transformers import TrainerControl, TrainerState
 from src.args.mixins import EarlyStopConfig
 from src.args.rlvr_online_grpo_args import RLVROnlineGRPOScriptArguments
 from src.configs.async_training_config import AsyncTrainingConfig
-from src.trainers.grpo.early_stop import (
-    LOGRATIO_MEAN_KEY,
-    SAMPLING_LOGP_GAP_KEY,
-    UPDATE_SKIPPED_KEY,
-    GRPOEarlyStopCallback,
-    build_early_stop_callback,
-)
+from src.trainers.grpo.early_stop import SAMPLING_LOGP_GAP_KEY, GRPOEarlyStopCallback, build_early_stop_callback
+from src.trainers.grpo.objective.logratio import LOGRATIO_MEAN_KEY, UPDATE_SKIPPED_KEY
 from src.training.script_runner import run_trainer
 from tests.common.utils import REPO_ROOT
 

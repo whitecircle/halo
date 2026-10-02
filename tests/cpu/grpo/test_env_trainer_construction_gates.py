@@ -57,7 +57,7 @@ _INIT_GATES = (
     "_reject_answerless_datasets",
     "_validate_effort_length_terms",
     "_validate_thinking_budget_scope",
-    "_require_forced_close_neutralised",
+    "_require_forced_close_neutralized",
     "reject_off_policy_mask_threshold",
 )
 
@@ -219,16 +219,16 @@ def test_column_pruning_is_forced_off(tmp_path):
 
 
 def test_an_enforced_thinking_budget_needs_the_is_correction():
-    """Forced reasoning closes are neutralised through the IS ratio; with the correction off they would train
+    """Forced reasoning closes are neutralized through the IS ratio; with the correction off they would train
     with the episode's advantage and teach the model to stop closing its reasoning."""
     host = object.__new__(DistributedAsyncEnvironmentalGRPOTrainer)
     host._forced_close_ids, host._is_correction = (7,), False
     with pytest.raises(ValueError, match="importance-sampling correction is off"):
-        host._require_forced_close_neutralised()
+        host._require_forced_close_neutralized()
     host._is_correction = True
-    host._require_forced_close_neutralised()
+    host._require_forced_close_neutralized()
     host._forced_close_ids, host._is_correction = None, False
-    host._require_forced_close_neutralised()
+    host._require_forced_close_neutralized()
 
 
 _CLOSE_ID = 7

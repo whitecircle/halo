@@ -28,6 +28,13 @@ KL_LOGRATIO_CLAMP = 5.0
 KL_CLAMP_FRAC_KEY = "kl_clamp_frac"
 """Metric key of the share of reference log-probs :func:`clamp_ref_logps` capped (online and environmental)."""
 
+LOGRATIO_MEAN_KEY = "sampling/logratio_mean"
+"""Metric key of the environmental trainer's mean :func:`compute_is_ratio` log-ratio over the corrected tokens."""
+
+UPDATE_SKIPPED_KEY = "sampling/update_skipped"
+"""Metric key of the environmental trainer's trust-region breaker verdict over the mask stages: 1 when it skipped
+the round's update."""
+
 SAMPLER_CERTAIN_LOGPROB = 0.0
 """A sampling logprob of exactly 0 is a token the engine emitted with probability 1: a logits processor
 forced it (vLLM's thinking budget closing ``</think>``) or the nucleus collapsed onto it."""

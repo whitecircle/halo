@@ -28,6 +28,7 @@ from src.distributed.runtime import get_global_rank, is_multi_rank_run, reject_a
 from src.environments.base import (
     ANSWER_KEY,
     EPISODE_INVALID_REASON_KEY,
+    RANDOM_REASONING_EFFORT,
     VALID_REASONING_EFFORTS,
     BaseEnvironment,
     resolve_reasoning_effort,
@@ -45,7 +46,7 @@ from src.environments.episode import (
     validate_thinking_budget_scope,
 )
 from src.models.structure import resolve_tokenizer
-from src.trainers.grpo.early_stop import LOGRATIO_MEAN_KEY, UPDATE_SKIPPED_KEY, build_early_stop_callback
+from src.trainers.grpo.early_stop import build_early_stop_callback
 from src.trainers.grpo.mixins.chunked_logprobs import (
     ChunkedGRPOLogprobsMixin,
     LogitsWidth,
@@ -67,11 +68,14 @@ from src.trainers.grpo.objective.application import (
 )
 from src.trainers.grpo.objective.logratio import (
     KL_CLAMP_FRAC_KEY,
+    LOGRATIO_MEAN_KEY,
+    UPDATE_SKIPPED_KEY,
     ISMaskConfig,
     apply_is_masks,
     apply_opsm,
     clamp_ref_logps,
     compute_is_ratio,
+    sampler_certain_mask,
     select_mask_logratio,
     zero_engine_forced_closes,
 )
@@ -361,7 +365,7 @@ class DistributedAsyncEnvironmentalGRPOTrainer(
                 "sync_weights_every_n_steps > 1). Set train_on_sampled_tokens: true (a vLLM server needs "
                 "--return-tokens-as-token-ids), or set the correction to false deliberately."
             )
-        self._require_forced_close_neutralised()
+        self._require_forced_close_neutralized()
         if self._is_mask_config.any_stage_active and not self._is_correction:
             raise ValueError(
                 "isr_geo_band/isr_veto/isr_opsm knobs require the importance-sampling "
@@ -582,8 +586,8 @@ class DistributedAsyncEnvironmentalGRPOTrainer(
             return None
         return resolve_reasoning_end_token_id(self._tokenizer, self.async_config.rollout_reasoning_end_token)
 
-    def _require_forced_close_neutralised(self) -> None:
-        """Forced reasoning closes are neutralised through the IS ratio, which only reaches the loss under the
+    def _require_forced_close_neutralized(self) -> None:
+        """Forced reasoning closes are neutralized through the IS ratio, which only reaches the loss under the
         importance-sampling correction; without it they would train with the episode's advantage and teach the
         model to stop closing its reasoning."""
         if self._forced_close_ids is not None and not self._is_correction:
@@ -774,13 +778,9 @@ class DistributedAsyncEnvironmentalGRPOTrainer(
             prompt = inp["prompt"]
             try:
                 prompt_text = task_prompt(prompt)
-            except ValueError:
+            except ValueError as exc:
                 # The caller raises it uniformly before submitting anything to the environment.
-                self._record_batch_error(
-                    "Environmental GRPO row has no 'user' message in its conversation "
-                    f"(roles: {[m.get('role') for m in prompt]}). The environment is given the "
-                    "last user turn as the task, so there is nothing to send it."
-                )
+                self._record_batch_error(f"Environmental GRPO row: {exc}")
                 prompt_text = ""
 
             prompts.append(prompt_text)
@@ -814,7 +814,9 @@ class DistributedAsyncEnvironmentalGRPOTrainer(
             return
         for start in range(0, len(contexts), group):
             level = (
-                resolve_reasoning_effort("random") if self.model.training else stable_reasoning_effort(prompts[start])
+                resolve_reasoning_effort(RANDOM_REASONING_EFFORT)
+                if self.model.training
+                else stable_reasoning_effort(prompts[start])
             )
             for i in range(start, start + group):
                 ctx = contexts[i] or {}
@@ -1258,10 +1260,9 @@ class DistributedAsyncEnvironmentalGRPOTrainer(
                 extreme = corrected_mask & (logps_diff.abs() > math.log(clip_max))
                 self._world_metrics.fraction("sampling/is_ratio_extreme_frac", extreme.sum(), corrected_mask.sum())
             # Policy tokens the sampler emitted with probability 1 (budget-forced closes): uncorrected.
+            certain = sampler_certain_mask(sampling_logps, completion_mask, row_has_sampling)
             with_sampling = completion_mask.bool() & row_has_sampling.unsqueeze(1)
-            self._world_metrics.fraction(
-                "sampling/sampler_certain_frac", (with_sampling & ~corrected_mask).sum(), with_sampling.sum()
-            )
+            self._world_metrics.fraction("sampling/sampler_certain_frac", certain.sum(), with_sampling.sum())
             traj_row_ids = rows.to_rows(torch.arange(len(rows.rollout_results), device=device), dummy_fill=-1)
             if all_engine_logps is not None:
                 engine_logps = torch.zeros_like(sampling_logps)
