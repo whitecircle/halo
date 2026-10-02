@@ -184,6 +184,25 @@ TINY_GEMMA4_MOE_CONFIG = {
     "moe_intermediate_size": 16,
 }
 
+# Tiny dense Gemma 4 text config with the family's wide global heads (``global_head_dim`` 512, past flash's
+# 256), the shape that resolves ``sdpa`` to the flex-sliding variant; callers add ``layer_types`` (and any
+# geometry they vary).
+TINY_GEMMA4_WIDE_HEAD_CONFIG = {
+    "vocab_size": 256,
+    "hidden_size": 128,
+    "intermediate_size": 128,
+    "num_hidden_layers": 2,
+    "num_attention_heads": 4,
+    "num_key_value_heads": 2,
+    "head_dim": 256,
+    "global_head_dim": 512,
+    "num_global_key_value_heads": 1,
+    "sliding_window": 32,
+    "enable_moe_block": False,
+    "hidden_size_per_layer_input": 0,
+    "num_kv_shared_layers": 0,
+}
+
 # Tiny Qwen3.5-MoE text config (the rollout server registers the composite ``qwen3_5_moe`` wrapper and
 # refuses a ``qwen3_5_moe_text`` config): the family's period-4 L,L,L,F GatedDeltaNet/full-attention
 # interleave, a shared expert, 8 experts top-2.

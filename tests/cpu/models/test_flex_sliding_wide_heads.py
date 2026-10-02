@@ -12,24 +12,18 @@ from transformers.models.gemma4.modeling_gemma4 import Gemma4TextAttention
 
 from src.models.patches.attention import FLASH_MAX_HEAD_DIM, head_dim_exceeds_flash
 from src.models.patches.flex_sliding_attention import sliding_attention_calls
+from tests.common.models import TINY_GEMMA4_WIDE_HEAD_CONFIG
 
 
 def _gemma4(head_dim: int, global_head_dim: int) -> Gemma4TextConfig:
     return Gemma4TextConfig(
-        vocab_size=256,
-        hidden_size=128,
-        intermediate_size=128,
-        num_hidden_layers=4,
-        num_attention_heads=4,
-        num_key_value_heads=2,
-        head_dim=head_dim,
-        global_head_dim=global_head_dim,
-        num_global_key_value_heads=1,
-        sliding_window=32,
-        layer_types=["sliding_attention", "sliding_attention", "full_attention", "full_attention"],
-        enable_moe_block=False,
-        hidden_size_per_layer_input=0,
-        num_kv_shared_layers=0,
+        **{
+            **TINY_GEMMA4_WIDE_HEAD_CONFIG,
+            "num_hidden_layers": 4,
+            "head_dim": head_dim,
+            "global_head_dim": global_head_dim,
+            "layer_types": ["sliding_attention", "sliding_attention", "full_attention", "full_attention"],
+        }
     )
 
 

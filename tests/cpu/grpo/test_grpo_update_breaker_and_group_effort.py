@@ -133,11 +133,12 @@ def _breaker_branch(fn: ast.FunctionDef) -> ast.If:
     raise AssertionError("_build_training_tensors no longer branches on _update_breaker_tripped")
 
 
-def _calls(stmt: ast.stmt, attr: str) -> list[ast.Call]:
+def _calls(stmt: ast.stmt, name: str) -> list[ast.Call]:
+    """The calls of ``name`` in ``stmt``, as a method (``x.name(...)``) or a bare function (``name(...)``)."""
     return [
         node
         for node in ast.walk(stmt)
-        if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute) and node.func.attr == attr
+        if isinstance(node, ast.Call) and (getattr(node.func, "attr", None) or getattr(node.func, "id", None)) == name
     ]
 
 
@@ -311,14 +312,6 @@ def test_the_step_diagnostics_read_the_advantages_after_the_breaker():
     assert min(recorded_at) > breaker_at, "the step diagnostics read the advantages before the breaker"
 
 
-def _calls_function(stmt: ast.stmt, name: str) -> list[ast.Call]:
-    return [
-        node
-        for node in ast.walk(stmt)
-        if isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id == name
-    ]
-
-
 def test_the_empty_step_halt_reads_the_world_gathered_mask_in_train_mode():
     """The halt raises on a world verdict: fed this rank's own mask it would raise on one rank and leave the
     peers in the next collective; dropped, an all-invalid step trains a zero gradient behind a plausible log."""
@@ -344,13 +337,13 @@ def test_the_balance_weighs_what_the_loss_trains_and_reaches_both_advantage_sets
     corrected_at = next(i for i, stmt in enumerate(fn.body) if _calls(stmt, "_apply_is_correction"))
     narrowed_at = next(i for i, stmt in enumerate(fn.body) if _calls(stmt, "_narrow_masks_and_normalizer"))
     breaker_at = next(i for i, stmt in enumerate(fn.body) if _breaker_branch(fn) in ast.walk(stmt))
-    balanced_at = [i for i, stmt in enumerate(fn.body) if _calls_function(stmt, "record_token_mass")]
+    balanced_at = [i for i, stmt in enumerate(fn.body) if _calls(stmt, "record_token_mass")]
 
     assert len(balanced_at) == 1, "_build_training_tensors weighs the token mass once"
     assert corrected_at < narrowed_at < balanced_at[0] < breaker_at
     block = fn.body[balanced_at[0]]
     assert isinstance(block, ast.If) and ast.unparse(block.test) == "mode == 'train'"
-    (call,) = _calls_function(block, "record_token_mass")
+    (call,) = _calls(block, "record_token_mass")
     assert [ast.unparse(arg) for arg in call.args[:3]] == [
         "local_advantages",
         "loss_mask",

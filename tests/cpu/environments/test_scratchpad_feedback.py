@@ -167,11 +167,10 @@ def test_a_scratchpad_run_is_held_to_the_limit_it_is_graded_at():
     assert NO_STDIN_NOTE not in reply
 
 
+@needs_gpp
 def test_a_compile_that_outruns_its_timeout_is_a_compile_error_not_an_infra_fault():
     """A compile timeout is the source's doing: raised as an infra error it would charge the scratchpad
     call as a failed tool call and void the episode's grade."""
-    if shutil.which("g++") is None:
-        pytest.skip("g++ not installed")
     sandbox = LocalSubprocessSandbox(compile_timeout=0.01)
     res = sandbox.run(_UNDECLARED, language="cpp")
     assert res.compile_failed and res.error is None, res

@@ -12,7 +12,6 @@ leaves it, eval logs never count, and nothing is armed unless a condition is set
 
 import ast
 import dataclasses
-from pathlib import Path
 
 import pytest
 from accelerate import PartialState
@@ -28,10 +27,9 @@ from src.trainers.grpo.early_stop import (
     GRPOEarlyStopCallback,
     build_early_stop_callback,
 )
+from tests.common.utils import REPO_ROOT
 
 PartialState()  # the stop logs through accelerate's logger, which refuses to log without it
-
-PROJECT_ROOT = Path(__file__).resolve().parents[3]
 
 
 def _run(config: EarlyStopConfig, steps: list[dict], gap_key: str = LOGRATIO_MEAN_KEY) -> int | None:
@@ -149,7 +147,7 @@ def test_online_args_carry_the_shared_conditions_and_no_breaker_one():
 def test_the_online_script_hands_both_knobs_to_the_trainer():
     """The shared knobs parse on the online args; a script that drops them from the trainer call leaves
     a run that looks configured and trains without them."""
-    tree = ast.parse((PROJECT_ROOT / "scripts/training/online_grpo/rlvr.py").read_text())
+    tree = ast.parse((REPO_ROOT / "scripts/training/online_grpo/rlvr.py").read_text())
     call = next(
         node for node in ast.walk(tree) if isinstance(node, ast.Call) and getattr(node.func, "id", "") == "trainer_cls"
     )

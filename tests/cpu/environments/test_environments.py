@@ -470,9 +470,9 @@ Action: calculate(expression="2 + 2")"""
 
 
 def test_parse_react_output_reads_a_triple_quoted_code_argument_whole():
-    """Read by pattern alone, the value stopped at its first matching quote and the code's own ``x = 5``
-    line became an argument of its own: an empty program ran, or the call was refused for an argument
-    named ``x``."""
+    """Read by pattern alone, the value would stop at its first matching quote and the code's own ``x = 5``
+    line would become an argument of its own: an empty program would run, or the call would be refused for
+    an argument named ``x``."""
     text = "Thought: compute\nAction: python(code='''import math\nx = 5\nprint(math.sqrt(x), \"done\")''')"
     step = parse_react_output(text)
     assert step.action == "python"

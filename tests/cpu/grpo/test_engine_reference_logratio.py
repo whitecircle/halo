@@ -158,7 +158,8 @@ def test_rescore_reports_partial_failures_and_never_raises():
 )
 def test_a_rescore_failure_is_reported_by_the_rank_that_hit_it(monkeypatch, failing, level, silent):
     """Each rank re-scores its own rows, so a failure is rank-local, and accelerate's adapter drops every
-    record off the main process by default: a dead route on rank 3 never printed."""
+    record off the main process by default: unless the report opts out, a dead route on rank 3 would never
+    print."""
     recorder = mock.MagicMock()
     monkeypatch.setattr(environmental, "logger", recorder)
     monkeypatch.setattr(environmental, "get_global_rank", lambda: 3)

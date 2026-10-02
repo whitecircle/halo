@@ -6,7 +6,7 @@ on it, so the sliding-layer graphs ``warmup_flex_sliding_kernels`` compiled at l
 rank at each rank's first long sliding call, mid-forward, with EP peers waiting in DeepEP's dispatch. The
 refusal must come from the shared ``_init_distributed_config``, which runs before ``super().__init__``. A
 process that warmed nothing (a single-rank run, or ``HALO_FLEX_SLIDING=0``), one whose warm-up already ran
-deterministic, and a run without ``full_determinism`` construct as before. The construction is cut short
+deterministic, and a run without ``full_determinism`` construct normally. The construction is cut short
 right after that setup (TRL's own ctor needs a live model and, for GRPO, a server).
 
     python tests/cpu/trainers/test_flex_sliding_determinism_gate.py
@@ -27,6 +27,7 @@ from src.trainers.grpo.online import DistributedGRPOTrainer
 from src.trainers.mixins.base import DistributedTrainerMixin
 from src.trainers.preference.dpo import DistributedDPOTrainer
 from src.trainers.sft import DistributedSFTTrainer
+from tests.common.models import TINY_GEMMA4_WIDE_HEAD_CONFIG
 
 PartialState()  # the trainers' accelerate logger requires an initialized state
 
@@ -87,22 +88,7 @@ def test_a_warmup_that_compiles_nothing_records_no_mode(monkeypatch):
     """A wide-head model with no sliding layer is built with the flex-sliding implementation, but its warm-up
     has no graph to compile, so it must leave nothing for ``full_determinism`` to be refused over."""
     monkeypatch.setattr(flex_sliding_attention, "_WARMED_DETERMINISTIC", None)
-    config = Gemma4TextConfig(
-        vocab_size=256,
-        hidden_size=128,
-        intermediate_size=128,
-        num_hidden_layers=2,
-        num_attention_heads=4,
-        num_key_value_heads=2,
-        head_dim=256,
-        global_head_dim=512,
-        num_global_key_value_heads=1,
-        sliding_window=32,
-        layer_types=["full_attention", "full_attention"],
-        enable_moe_block=False,
-        hidden_size_per_layer_input=0,
-        num_kv_shared_layers=0,
-    )
+    config = Gemma4TextConfig(**TINY_GEMMA4_WIDE_HEAD_CONFIG, layer_types=["full_attention", "full_attention"])
     config._attn_implementation = flex_sliding_attention.register_flex_sliding_attention()
     model = Gemma4ForCausalLM(config)
     assert flex_sliding_attention.sliding_attention_calls(model) == set()  # premise: no sliding layer

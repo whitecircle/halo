@@ -13,7 +13,6 @@ can drift into exactly that.
 
 import ast
 import os
-import pathlib
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
@@ -24,30 +23,16 @@ from transformers import Gemma4TextConfig
 from src.distributed.loading import frozen_models, model_loading
 from src.models.loading import model_preparation
 from src.models.patches.flex_sliding_attention import FLEX_SLIDING
+from tests.common.models import TINY_GEMMA4_WIDE_HEAD_CONFIG
 from tests.common.parallelism import make_parallelism_config
+from tests.common.utils import REPO_ROOT
 
-REPO_ROOT = pathlib.Path(__file__).resolve().parents[3]
 VARIANT_RESOLVER = "resolve_flex_sliding_attn_implementation"
 SEAM_MODULE = "src/models/loading/model_preparation.py"
 
 
 def _wide_gemma4_config() -> Gemma4TextConfig:
-    return Gemma4TextConfig(
-        vocab_size=256,
-        hidden_size=128,
-        intermediate_size=128,
-        num_hidden_layers=2,
-        num_attention_heads=4,
-        num_key_value_heads=2,
-        head_dim=256,
-        global_head_dim=512,
-        num_global_key_value_heads=1,
-        sliding_window=32,
-        layer_types=["sliding_attention", "full_attention"],
-        enable_moe_block=False,
-        hidden_size_per_layer_input=0,
-        num_kv_shared_layers=0,
-    )
+    return Gemma4TextConfig(**TINY_GEMMA4_WIDE_HEAD_CONFIG, layer_types=["sliding_attention", "full_attention"])
 
 
 @pytest.mark.parametrize(("opt_out", "built"), [(False, FLEX_SLIDING), (True, "sdpa")])

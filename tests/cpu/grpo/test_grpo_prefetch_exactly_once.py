@@ -473,8 +473,9 @@ def test_prefetch_is_disabled_whenever_a_single_engine_serves(server_configs):
 
 @pytest.mark.parametrize("server_configs", [*_ONE_ENGINE, _TWO_ENGINES], ids=["url", "one-entry-list", "two-servers"])
 def test_the_start_log_states_the_prefetch_the_trainer_runs(server_configs):
-    """Read off ``enable_prefetch``, the start log said "prefetch: enabled" on every single-server run,
-    whose trainer turns prefetch off."""
+    """The start log reads the prefetch the trainer resolves (``prefetch_active``), not ``enable_prefetch``:
+    read off the knob, it would say "prefetch: enabled" on a single-server run, whose trainer turns prefetch
+    off."""
     host = _async_state(server_configs)
     lines = env_grpo_script.rollout_start_log({}, host.async_config)
     assert f"prefetch: {'enabled' if host._prefetch_enabled else 'disabled'}" in lines

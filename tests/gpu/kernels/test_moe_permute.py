@@ -14,9 +14,12 @@ import torch
 from src.kernels import moe_permute
 from src.kernels.moe_permute import MoEWeightedUnpermute, build_inv_map, gather_reduce_rows
 from tests.common.harness import gpu_test_main, record_check
-from tests.common.utils import max_abs_rel_err
+from tests.common.utils import fro_rel_err, max_abs_rel_err
 
 DTYPE_TOLS = ((torch.float32, 1e-5), (torch.bfloat16, 2e-2))
+# A bf16 result accumulated in fp32 is the exact result rounded once; a partial sum or a weighted row rounded to
+# bf16 on the way lands 1.2x-1.7x that floor at these routings.
+BF16_FLOOR_RATIO_MAX = 1.1
 # (tokens, top_k, hidden, fraction of the top_k slots that hold a row)
 ROUTINGS = ((517, 8, 2816, 0.5), (64, 4, 100, 1.0), (33, 8, 1025, 0.1))
 
@@ -36,9 +39,11 @@ def _check_against_index_add(expert_out, weights, token_idx, inv_map, n_tokens, 
     expected = torch.zeros(n_tokens, expert_out.shape[1], dtype=torch.float64, device="cuda")
     expected = expected.index_add(0, token_idx, ref_out * ref_w.unsqueeze(-1))
     expected.backward(grad.double())
-    assert max_abs_rel_err(out, expected) < tol
-    assert max_abs_rel_err(expert_out.grad, ref_out.grad) < tol
-    assert max_abs_rel_err(weights.grad, ref_w.grad) < tol
+    for got, want in ((out, expected.detach()), (expert_out.grad, ref_out.grad), (weights.grad, ref_w.grad)):
+        assert max_abs_rel_err(got, want) < tol
+        if got.dtype == torch.bfloat16:
+            floor = fro_rel_err(want.to(torch.bfloat16), want)
+            assert fro_rel_err(got, want) <= BF16_FLOOR_RATIO_MAX * floor, (fro_rel_err(got, want), floor)
 
 
 def test_weighted_unpermute_matches_index_add(dtype, tol, n_tokens, top_k, hidden, fill):

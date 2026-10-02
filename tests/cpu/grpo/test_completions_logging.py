@@ -158,8 +158,8 @@ def test_every_node_writes_when_the_output_filesystem_is_not_shared(tmp_path, mo
 
 
 def test_a_per_node_writer_writes_its_record_but_leaves_the_console_table_to_rank_zero(tmp_path, monkeypatch) -> None:
-    """The writer election is per node on a per-node output filesystem; the console is not, and a table
-    printed by every node's writer reached the log once per node."""
+    """The writer election is per node on a per-node output filesystem; the console is not: a table
+    printed by every node's writer would reach the log once per node."""
     printed = []
     monkeypatch.setattr(cl, "print_prompt_completions_sample", lambda *a, **k: printed.append(a))
     monkeypatch.setattr(cl, "is_rich_available", lambda: True)
