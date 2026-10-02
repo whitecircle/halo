@@ -27,8 +27,9 @@ def test_a_failing_probe_raises_naming_what_was_probed():
     def probe():
         raise ConnectionError("connection refused")
 
-    with pytest.raises(RuntimeError, match=r"^reward term 'judge' probe failed: connection refused$"):
+    with pytest.raises(RuntimeError, match=r"^reward term 'judge' probe failed: connection refused$") as raised:
         verify_backend_on_rank0(probe, "reward term 'judge'")
+    assert isinstance(raised.value.__cause__, ConnectionError), "rank 0 must keep the probe's own traceback"
 
 
 def test_a_passing_probe_returns():

@@ -112,7 +112,8 @@ rank predicates, `fs_aware_makedirs` and `reject_across_ranks`).
 
 - `raise_rank0_failure(step, describe, exc_type=RuntimeError)` — the same join for work one rank does
   for the world (an external-backend probe, a weight-sync client build): `step` runs on global rank 0
-  alone and its failure is broadcast, so every rank raises `exc_type(describe(error))` together.
+  alone and its failure is broadcast, so every rank raises `exc_type(describe(error))` together; on rank 0
+  it chains the original exception.
 
 - `store_reject_across_ranks(tag, local_reason, what, exc_type=RuntimeError, timeout=None)` — the
   same contract carried over the c10d store instead of a collective, for joins whose preceding work

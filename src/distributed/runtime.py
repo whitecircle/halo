@@ -270,17 +270,18 @@ def raise_rank0_failure(
 
     For work one rank does for the world (a probe of an external backend, a client build): a raise on rank
     0 alone would leave the peers in the next collective. ``describe`` turns rank 0's exception into the
-    message every rank raises as ``exc_type``.
+    message every rank raises as ``exc_type``; on rank 0 it chains the original exception.
     """
     failure: str | None = None
+    cause: Exception | None = None
     if is_global_main_process():
         try:
             step()
         except Exception as e:  # every failure must reach the peers
-            failure = describe(e)
+            cause, failure = e, describe(e)
     failure = broadcast_from_rank0(failure)
     if failure is not None:
-        raise exc_type(failure)
+        raise exc_type(failure) from cause
 
 
 def raise_gathered_reasons(reasons: list[str | None], what: str, exc_type: type[Exception]) -> None:

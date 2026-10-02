@@ -21,6 +21,7 @@ import pytest
 from src.configs.async_training_config import AsyncTrainingConfig
 from src.distributed.nccl.clients.vllm import VLLMWeightSyncClient
 from src.trainers.grpo.online import DistributedGRPOTrainer
+from src.trainers.grpo.rollout import weight_sync_clients
 from src.trainers.grpo.rollout.weight_sync_clients import (
     verify_sampler_logprob_reference,
     verify_sampler_logprob_reference_synced,
@@ -92,6 +93,30 @@ def test_the_synced_form_takes_the_consumer_flag_under_its_new_name(nucleus_serv
             sequence_ratio_active=True,
             backend=VLLMWeightSyncClient.BACKEND_KEY,
         )
+
+
+@pytest.mark.parametrize(
+    ("error", "message"),
+    [(KeyError("url"), r"^KeyError: 'url'$"), (ValueError("refused"), r"^refused$")],
+    ids=["other-failure", "refusal"],
+)
+def test_a_preflight_failure_reaches_every_rank_with_its_type(monkeypatch, error, message):
+    """Every rank raises ``ValueError``; a failure other than the preflight's own refusal keeps its type in the
+    text (``KeyError('url')`` alone reads ``'url'``), and rank 0 chains the original."""
+
+    def fail(*args):
+        raise error
+
+    monkeypatch.setattr(weight_sync_clients, "verify_sampler_logprob_reference", fail)
+    with pytest.raises(ValueError, match=message) as raised:
+        verify_sampler_logprob_reference_synced(
+            ["http://unused"],
+            temperature=1.0,
+            top_p=1.0,
+            sequence_ratio_active=True,
+            backend=VLLMWeightSyncClient.BACKEND_KEY,
+        )
+    assert raised.value.__cause__ is error
 
 
 def test_the_rlvr_script_feeds_the_gate_from_the_is_mode():

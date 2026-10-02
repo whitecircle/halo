@@ -147,6 +147,11 @@ def verify_sampler_logprob_reference(
                 )
 
 
+def _preflight_failure(error: Exception) -> str:
+    """A preflight's own refusal verbatim; any other failure with its type, which ``str`` alone drops."""
+    return str(error) if isinstance(error, ValueError) else f"{type(error).__name__}: {error}"
+
+
 def verify_context_window_synced(
     urls: list[str], single_turn_tokens: int, full_trajectory_tokens: int | None = None, *, backend: str
 ) -> None:
@@ -157,7 +162,9 @@ def verify_context_window_synced(
     """
     client_cls = resolve_weight_sync_client(backend)
     raise_rank0_failure(
-        partial(verify_context_window, client_cls, urls, single_turn_tokens, full_trajectory_tokens), str, ValueError
+        partial(verify_context_window, client_cls, urls, single_turn_tokens, full_trajectory_tokens),
+        _preflight_failure,
+        ValueError,
     )
 
 
@@ -168,7 +175,7 @@ def verify_sampler_logprob_reference_synced(
     client_cls = resolve_weight_sync_client(backend)
     raise_rank0_failure(
         partial(verify_sampler_logprob_reference, client_cls, urls, temperature, top_p, sequence_ratio_active),
-        str,
+        _preflight_failure,
         ValueError,
     )
 
