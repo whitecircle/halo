@@ -110,6 +110,10 @@ rank predicates, `fs_aware_makedirs` and `reject_across_ranks`).
     Use it in place of a barrier wherever one rank does work the others wait on, so a failure there
     aborts the job instead of parking the peers in the barrier until the watchdog.
 
+- `raise_rank0_failure(step, describe, exc_type=RuntimeError)` — the same join for work one rank does
+  for the world (an external-backend probe, a weight-sync client build): `step` runs on global rank 0
+  alone and its failure is broadcast, so every rank raises `exc_type(describe(error))` together.
+
 - `store_reject_across_ranks(tag, local_reason, what, exc_type=RuntimeError, timeout=None)` — the
   same contract carried over the c10d store instead of a collective, for joins whose preceding work
   is unbounded single-rank time (a fresh-cache dataset map, a first-run shard download).

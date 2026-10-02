@@ -206,8 +206,8 @@ one fully masked row.
 The negative-only rows need the turn's sampled ids. An untrainable turn without them, and every
 untrainable turn on the single-row path below, trains on nothing: the re-render closes a cut turn with
 template tokens the engine never sampled. `sampling/untrainable_turns_rowless_frac` is the share of
-untrainable turns that became no row (no ids, zero tokens, a rejected prompt re-render, or over
-`max_train_row_tokens`).
+untrainable turns that became no row (no ids, zero tokens, a rejected prompt re-render, over
+`max_train_row_tokens`, or a trajectory trained as the single re-tokenized row).
 
 A trajectory where any other turn lost its completion ids drops whole to the single re-tokenized
 row, warned once with the engine's remedy — all-or-nothing, never a partial capture.
@@ -222,8 +222,8 @@ boundary it cannot pin **invalidates the episode** — a fully masked row, outsi
 
 `train_on_sampled_tokens: false` forces that path for every trajectory and disables the
 importance-sampling correction, which needs the sampling log-probs: batches then train uncorrected,
-with a warning, and a run that enforces a vLLM thinking budget is refused at construction, since
-its forced reasoning closes are neutralized only through the ratio
+with a warning, and a run whose vLLM thinking budget can bind and whose `rollout_reasoning_end_token`
+resolves is refused at construction, since its forced reasoning closes are neutralized only through the ratio
 ([Objective](objective.md#importance-sampling-correction)).
 
 ## Saving trajectories

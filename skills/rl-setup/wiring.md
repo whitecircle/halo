@@ -108,7 +108,7 @@ docker run --gpus all --network=host --ipc=host \
 |---|---|---|
 | `rollout_backend` | `vllm` | engine: `vllm` or `sglang` (async GRPO only). SGLang's 0.5.17 loaders refuse a longer family list than vLLM's, quoted at trainer construction; its server needs `NCCL_CUMEM_ENABLE=1` (compose default) and must be the repo's `Dockerfile.sglang` image — `agent-docs/infrastructure/rollout-servers.md#which-families-each-engine-serves` |
 | `rollout_server_url` | `http://localhost:8000` | single-server URL (weight sync + generation) |
-| `rollout_server_configs` | `None` | multi-server: `[{"url": ..., "group_port": ...}]`; overrides `rollout_server_url`, enables prefetch overlap |
+| `rollout_server_configs` | `None` | multi-server: `[{"url": ..., "group_port": ...}]`; overrides `rollout_server_url`; two or more entries enable prefetch overlap |
 | `rollout_connection_timeout` | `120.0` | wait for `/health` |
 | `sync_weights_every_n_steps` | `1` | NCCL weight push cadence |
 | `num_rollout_workers` | `64` | Ray env actors per training rank (`ray_address: null`); with `ray_address` set, one pool of this size split across the ranks |
@@ -124,7 +124,7 @@ docker run --gpus all --network=host --ipc=host \
 | `eval_rollout_batch_size` | `None` | rows per rank in one eval rollout round (eval runs without prefetch); `None` = the eval batch |
 | `effort_length_penalty_k0` / `effort_length_floor_weight` | `None` / `0.0` | both off by default; the first prices an episode's reasoning tokens by its effort level (capped at `effort_length_penalty_c_max`), the second its shortfall against `effort_length_floor_budgets` × the thinking budget it ran under |
 | `episode_timeout` | `1200.0` | per-episode deadline in engine-serving time (a weight-sync pause is credited back), checked against the NCCL watchdog — raise `DIST_NCCL_TIMEOUT_MINUTES` with it |
-| `train_on_sampled_tokens` | `True` | train on the server's actual sampled ids (needs `--return-tokens-as-token-ids`) rather than a re-tokenized re-render; off, a run with a bindable vLLM thinking budget is refused |
+| `train_on_sampled_tokens` | `True` | train on the server's actual sampled ids (needs `--return-tokens-as-token-ids`) rather than a re-tokenized re-render; off, a run with a bindable vLLM thinking budget and a resolvable `rollout_reasoning_end_token` is refused |
 | `enable_prefetch` | `True` | overlap rollout with training (auto-disabled in single-server mode) |
 | `num_prefetch_batches` | `1` | prefetch result-queue bound; the pipeline is one round deep, so values above 1 only add headroom |
 | `model_name` / `request_timeout` / `max_retries` / `retry_base_wait` | — | per-request HTTP behavior; `request_timeout` counts engine-serving time like `episode_timeout` |

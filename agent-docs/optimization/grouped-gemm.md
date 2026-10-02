@@ -65,7 +65,7 @@ It is gated on **`top_k ≥ ep_size`** (`_uses_fused_permute`, read by `base_lay
 
 Above the gate both reductions run as one Triton kernel (`src/kernels/moe_permute.py`) that walks `inv_map` per output row and accumulates in fp32, so no `[recv_N, top_k, H]` transient or padded copy exists. The grouped path folds the routing-weight multiply into the unpermute (`MoEWeightedUnpermute`), and its backward writes the expert-output gradient and the routing-weight gradient in one pass. Routing weights that need no gradient leave the expert outputs unsaved, since only the routing-weight gradient reads them. The fused `[gate | up]` GLU output is read in place by the packed GLU kernels (`PACKED_GLU_MULS` in `src/kernels/fused_glu.py`), whose backward writes one `[..., 2M]` gradient.
 
-The Qwen3.6 table is a same-session A/B of `index_add_` against the atomic-free permute in its padded-gather form, which preceded the fused kernels, on Qwen3.6-35B-A3B at EP=8; compare within it only (tuned absolute figures: [Throughput Benchmarks](throughput-benchmarks.md#ep-scaling-seq-4096)).
+The Qwen3.6 table is a same-session A/B of `index_add_` against the atomic-free permute in its padded-gather form (the `halo_padded_gather` baseline below), on Qwen3.6-35B-A3B at EP=8; compare within it only (tuned absolute figures: [Throughput Benchmarks](throughput-benchmarks.md#ep-scaling-seq-4096)).
 
 | Qwen3.6-35b EP=8 | `index_add_` | atomic-free (padded gather) | win |
 |---|---|---|---|
@@ -74,7 +74,7 @@ The Qwen3.6 table is a same-session A/B of `index_add_` against the atomic-free 
 
 The win grows with sequence length (larger recv buffers → worse contention).
 
-The fused kernels against that padded-gather permute, the one Halo v1.0.0 runs (a separate routing-weight multiply, a padded `[N, top_k, H]` gather-sum each way, the same sort), on the Gemma 4 26B-A4B expert block (hidden 2816, intermediate 704, 128 experts, top-8), fwd+bwd on one B300: 1.78 / 3.25 / 10.63 ms at 2k / 8k / 32k tokens, against 2.21 / 4.73 / 16.24 ms, and 42% less peak transient memory at 32k: 3.7 against 6.5 GiB (`tests/gpu/profiling/benchmark_moe_block.py`, rows `halo` and `halo_padded_gather`).
+The fused kernels against that padded-gather permute (a separate routing-weight multiply, a padded `[N, top_k, H]` gather-sum each way, the same sort), on the Gemma 4 26B-A4B expert block (hidden 2816, intermediate 704, 128 experts, top-8), fwd+bwd on one B300: 1.78 / 3.25 / 10.63 ms at 2k / 8k / 32k tokens, against 2.21 / 4.73 / 16.24 ms, and a peak transient memory at 32k of 3.7 against 6.5 GiB (`tests/gpu/profiling/benchmark_moe_block.py`, rows `halo` and `halo_padded_gather`).
 
 Per-device batch multiplies the per-call recv buffer exactly like sequence length, so on the families the gate leaves on the CAS path (`top_k < ep_size`) batch shape is a real lever. At high router skew scale with GA, not per-device batch.
 

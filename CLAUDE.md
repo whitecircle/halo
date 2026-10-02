@@ -130,7 +130,8 @@ src/
 │                        #     `cu_seq_lens` — for the conv / linear-attention mixers of packed and
 │                        #     padding-free rows),
 │                        #   patches/(attention — backend select off hardware.py's arch predicates —
-│                        #     flex_sliding_attention (FlexAttention for SDPA sliding-window layers),
+│                        #     flex_sliding_attention (`sdpa_flex_sliding`: FlexAttention on SDPA sliding-window
+│                        #     layers, matmul attention on wide-head global layers),
 │                        #     gpt_oss_sinks, zaya, kernel_dispatch, remote_code_compat +
 │                        #     remote_code_hooks = the one wrap of transformers' remote-class funnel, buffer_fixes),
 │                        #   loading/(model_preparation = Auto* class + family patches + the shared post-load

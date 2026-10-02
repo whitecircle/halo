@@ -91,8 +91,12 @@ A scratchpad run gets the per-test time limit its language is graded at ([Gradin
 A refused call is a tool error: it pays `tool_error_penalty`, never `tool_success_reward`. A
 scratchpad run that ends on a sandbox fault ends the episode ([Sandbox faults](sandbox.md#sandbox-faults)). With a
 language list both tools take a required `language` argument enumerating the set, each program is
-graded in the language its call names, and a foreign value is refused before admission. The episode
-records the last language as its `language` slice, which the trainer slices metrics by
+graded in the language its call names, and a foreign value is refused before admission. A run that
+fixes one language declares no `language` argument, so a call naming one is refused like any argument
+a tool does not declare: the model reads `Error: <tool>: unknown argument 'language'; its arguments are …`,
+and the call is a refused call as above, spending its turn but none of `max_test_calls` or
+`max_submissions`; a refused `submit_solution` grades nothing. The episode records the last language
+as its `language` slice, which the trainer slices metrics by
 ([Logged metrics](../async-grpo/monitoring.md#logged-metrics)).
 
 A final text answer ends the episode ungraded, so the recovery nudge after a cut or empty turn asks for a tool call and names `submit_solution`, where the protocol's empty-turn nudge offers a final answer. A turn that reaches its length limit while writing its call is told so and asked to make the call again with its reasoning kept out of the program's comments.
@@ -114,18 +118,17 @@ each test's request with its stdin.
 
 - **Comparison.** `exact` comparison spuriously fails correct Codeforces solutions, hence the `codeforces` preset. Token comparison accepts real-valued tokens within `1e-6 × max(1, |expected|)` (absolute below 1, relative above), gated on a float-looking *expected* token, so integer answers stay exact.
 - **Verdict detail.** `outcome` shows each failed test's verdict class (`FAIL`, `RUNTIME ERROR`, `TIME LIMIT EXCEEDED`, `OUTPUT LIMIT EXCEEDED`, `COMPILATION ERROR`, and `ERROR` for a test lost to infra, whose text goes to the log) and nothing beyond it (compile errors: above): stderr, an exit status or signal and an output size can each carry the hidden input the program read, and the output cap, which rises with the expected output, would reveal its size. Which tests fail, and with which class, still reaches the policy; `stop_on_first_failure` narrows that to the first failing test, the Codeforces contract. `full` adds them (a runtime error's signal or exit status, stderr as its tail, where a traceback names the exception, and an output-limit overrun's size against its cap), an infra error's text and a wrong answer's expected and produced output; a second submission then turns the judge into a free test oracle, and probing out-earns scratchpad testing within a group. Scratchpad runs on the model's own inputs show their output in both modes.
-- **Time limits.** The payload's `time_limit` is the per-test cap, else `timeout_per_test`. An interpreted language is floored at `timeout_per_test`, so a C++-tuned limit cannot fail a correct CPython solution; a compiled one is scaled by `compiled_time_limit_scale`. Both are clamped to `max_time_limit`, per graded language (`GradingSpec.time_limit_for`, which the scratchpad shares). A compiled program's stack is raised to the memory limit, as on Codeforces, up to the process's hard stack limit ([Limits](sandbox.md#limits)).
+- **Time limits.** The payload's `time_limit` is the per-test cap, else `timeout_per_test`. An interpreted language is floored at `timeout_per_test`, so a C++-tuned limit cannot fail a correct CPython solution; a compiled one is scaled by `compiled_time_limit_scale`. Both are clamped to `max_time_limit`, per graded language (`GradingSpec.time_limit_for`, which the scratchpad shares). On `local` / `bubblewrap` a compiled program's stack is raised to the memory limit, as on Codeforces, up to the process's hard stack limit ([Limits](sandbox.md#limits)).
 - **Grading budget.** Tests run sequentially, so a several-hundred-test problem stalls the round. `max_grading_seconds` is checked between tests, and an ungraded test never counts as passed, so size it for an honest solution (the recipes: 150 s). A grade the budget stopped after a failed test is a wrong answer; one it stopped before any test failed says nothing about the code, so it grades 0 and marks the episode invalid, out of the group baseline (`episode/grade_inconclusive`). `episode/tests_graded_frac` shows a partial grade.
 - **Special judges.** A per-problem `checker` (Python) in the payload overrides comparison: `python checker.py input.txt correct_output.txt solution_output.txt`, accepted only when it exits cleanly and its last stdout token is `1`. It runs at the 15 s infra default, never the solution's limit.
 - **Infra errors.** A grade that lost tests to the backend with none passed and none failed marks the episode invalid, so the trainer drops it from the group baseline rather than teaching a wrong answer (`episode/grading_infra_outage`). Tests lost to the backend beside passes and no failure leave the grade inconclusive, handled like a budget stop. A build past the compile limit is a compile error, a program that replaces its working directory a runtime error, one that floods its output an output-limit or runtime error, and one that removes its working directory runs the next test in a fresh one: verdicts, not infra. The routes a program still has into an infra error are listed under [Sandbox faults](sandbox.md#sandbox-faults).
 
 ### Reward ladder
 
-The grade is 1 when the submitted solution passes every hidden test and 0 otherwise, priced by the
-reward's `environment` term (`rewards:` above). It is credited only on `submit_solution` and read off
-the last submission: an unsubmitted solution, an infra outage and an inconclusive grade all grade
-0, and the last two also mark the episode invalid. No shaping rung pays out on those
-either; the resubmission penalty and the tool shaping still apply.
+The grade is credited only on `submit_solution` and read off the last submission: an unsubmitted
+solution, an infra outage and an inconclusive grade all grade 0, and the last two also mark the
+episode invalid. No shaping rung pays out on those either; the resubmission penalty and the tool
+shaping still apply.
 
 | Component | Knob | Default | Pays |
 |---|---|---|---|
