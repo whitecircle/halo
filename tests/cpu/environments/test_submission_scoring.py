@@ -108,6 +108,10 @@ def test_the_behavior_counter_is_the_share_of_resubmissions_that_improved():
     env = _env()
     _, traj = _graded(env, ["0", "012", "01"])
     assert env.rollout_metrics(traj)["episode/resubmission_improved"] == pytest.approx(0.5)
+    _, rebound = _graded(env, ["012", "0", "01"])
+    assert env.rollout_metrics(rebound)["episode/resubmission_improved"] == 0.0, (
+        "beating the last is not beating the best"
+    )
     _, once = _graded(env, ["0123"])
     assert "episode/resubmission_improved" not in env.rollout_metrics(once), "no resubmission, no share"
 

@@ -12,6 +12,8 @@ leaves it, eval logs never count, and nothing is armed unless a condition is set
 
 import ast
 import dataclasses
+import inspect
+import textwrap
 import types
 
 import pytest
@@ -22,7 +24,9 @@ from src.args.mixins import EarlyStopConfig
 from src.args.rlvr_online_grpo_args import RLVROnlineGRPOScriptArguments
 from src.configs.async_training_config import AsyncTrainingConfig
 from src.trainers.grpo.early_stop import SAMPLING_LOGP_GAP_KEY, GRPOEarlyStopCallback, build_early_stop_callback
+from src.trainers.grpo.environmental import DistributedAsyncEnvironmentalGRPOTrainer
 from src.trainers.grpo.objective.logratio import LOGRATIO_MEAN_KEY, UPDATE_SKIPPED_KEY
+from src.trainers.grpo.online import DistributedGRPOTrainer
 from src.training.script_runner import run_trainer
 from tests.common.utils import REPO_ROOT
 
@@ -208,6 +212,34 @@ def test_a_gap_the_run_never_logs_is_refused_and_no_condition_attaches_nothing()
         EarlyStopConfig(logratio_gap=0.01), gap_key=SAMPLING_LOGP_GAP_KEY, gap_logged=True
     )
     assert callback is not None and callback.gap_key == SAMPLING_LOGP_GAP_KEY
+
+
+@pytest.mark.parametrize(
+    ("trainer", "gap_key", "gap_logged"),
+    [
+        (DistributedAsyncEnvironmentalGRPOTrainer, "LOGRATIO_MEAN_KEY", "self._is_correction"),
+        (DistributedGRPOTrainer, "SAMPLING_LOGP_GAP_KEY", "training_args.vllm_importance_sampling_correction"),
+    ],
+    ids=["environmental", "online"],
+)
+def test_each_trainer_attaches_the_stop_on_the_gap_it_logs(trainer, gap_key, gap_logged):
+    """A dropped attach leaves a run that parses its knobs and never stops; a wrong key or gate never feeds it."""
+    init = ast.parse(textwrap.dedent(inspect.getsource(trainer.__init__))).body[0]
+    (build,) = [
+        node
+        for node in ast.walk(init)
+        if isinstance(node, ast.Call) and getattr(node.func, "id", "") == "build_early_stop_callback"
+    ]
+    keywords = {kw.arg: ast.unparse(kw.value) for kw in build.keywords}
+    assert keywords == {"gap_key": gap_key, "gap_logged": gap_logged}
+    attached = [
+        node
+        for node in ast.walk(init)
+        if isinstance(node, ast.Call)
+        and getattr(node.func, "attr", "") == "add_callback"
+        and [ast.unparse(a) for a in node.args] == ["early_stop"]
+    ]
+    assert len(attached) == 1
 
 
 @pytest.mark.parametrize(

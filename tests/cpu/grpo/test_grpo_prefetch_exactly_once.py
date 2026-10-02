@@ -423,6 +423,18 @@ def test_the_environmental_trainer_takes_the_rollout_mixins_sidecar_hooks():
         assert getattr(_T, hook) is getattr(AsyncRolloutMixin, hook)
 
 
+def test_resumed_rounds_are_submitted_after_the_train_begin_push():
+    """Submitted ahead of the push, the worker rolls the resumed round out of the engines' pre-restore
+    weights (on a LoRA resume, the base model)."""
+    host = _Host()
+    events = []
+    host._sync_weights_to_engine_fenced = lambda force=False: events.append("push") or True
+    host._submit_for_prefetch = lambda prompts, contexts: events.append(("submit", tuple(prompts)))
+    host._resumed_prefetch_rounds = [(["b2"], [None])]
+    host._start_rollout_generation()
+    assert events == ["push", ("submit", ("b2",))]
+
+
 def test_a_checkpoint_without_pending_rounds_resumes_cold(tmp_path):
     host = _Host()
     host._restore_trainer_sidecars(str(tmp_path))

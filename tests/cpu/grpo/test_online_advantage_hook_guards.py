@@ -5,7 +5,7 @@
   equality, so every all-correct group RLRR just gave length-ranked advantages is masked out of the
   loss — and must be refused at construction like the std-floor pairing.
 * ``balance_token_mass`` rescales whatever advantages the earlier hooks left, RLRR's included, and is
-  refused under a loss whose tokens do not share one normalizer (TRL's default ``grpo`` among them).
+  refused under a loss whose tokens do not share one normalizer (``grpo`` among them; TRL's default is ``dapo``).
 * ``multi_objective_aggregation`` other than ``sum_then_normalize`` makes every hook's recompute
   diverge from TRL's; it is refused at construction, not at the first train step.
 * A hook computes on the FULL gathered set and slices this rank's rows the way TRL does, so a group
@@ -54,8 +54,8 @@ def test_rlrr_refuses_every_hook_that_would_cancel_it(extra, match):
 
 
 def test_the_balance_is_refused_under_a_per_completion_loss_and_resolves_beside_rlrr():
-    """TRL's default ``grpo`` loss averages each completion over its own length, so token mass is not what
-    it pulls with; under ``dapo`` the balance rescales whatever advantages RLRR set."""
+    """TRL's ``grpo`` loss averages each completion over its own length, so token mass is not what it pulls
+    with; under ``dapo``, TRL's default, the balance rescales whatever advantages RLRR set."""
     per_completion = types.SimpleNamespace(
         multi_objective_aggregation="sum_then_normalize",
         loss_type="grpo",

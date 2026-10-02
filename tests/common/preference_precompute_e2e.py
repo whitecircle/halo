@@ -247,7 +247,9 @@ def run_precompute_resume(ctx, *, trainer: str, family: str, mode: str, peft: bo
     log(f"\n--- Phase 1 ({label}): continuous {TOTAL_STEPS} steps, checkpoint at {SAVE_AT_STEP} ---")
     built = make_trainer(tiny_dir, train_out, save_at=SAVE_AT_STEP)
     base_columns = _reference_columns(built)
-    checks["every_split_was_precomputed"] = _precomputed(built, base_columns)
+    checks["every_split_was_precomputed"] = set(base_columns) == {"train", *EVAL_SPLITS} and _precomputed(
+        built, base_columns
+    )
     built.train()
     continuous = _losses_by_step(built)
     finish_phase(built)

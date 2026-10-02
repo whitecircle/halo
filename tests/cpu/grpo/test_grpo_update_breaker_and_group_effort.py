@@ -344,21 +344,43 @@ def test_the_balance_weighs_what_the_loss_trains_and_reaches_both_advantage_sets
     block = fn.body[balanced_at[0]]
     assert isinstance(block, ast.If) and ast.unparse(block.test) == "mode == 'train'"
     (call,) = _calls(block, "record_token_mass")
-    assert [ast.unparse(arg) for arg in call.args[:3]] == [
+    assert [ast.unparse(arg) for arg in call.args] == [
         "local_advantages",
         "loss_mask",
         "importance_sampling_ratio",
+        "self.accelerator.gather",
+        "self._metrics[mode]",
+        "self._balance_token_mass",
     ]
     keywords = {kw.arg: ast.unparse(kw.value) for kw in call.keywords}
     assert keywords.get("negative_only") == "negative_only", "the negative-only rows' share goes unlogged"
-    rebound = {
-        target.id
-        for node in ast.walk(block)
-        if isinstance(node, ast.Assign)
-        for target in ast.walk(node.targets[0])
-        if isinstance(target, ast.Name)
-    }
-    assert {"local_advantages", "traj_advantages"} <= rebound
+    (rebinding,) = [
+        node for node in ast.walk(block) if isinstance(node, ast.Assign) and isinstance(node.targets[0], ast.Tuple)
+    ]
+    assert ast.unparse(rebinding.targets[0]) == "(local_advantages, traj_advantages)"
+    assert ast.unparse(rebinding.value) == "(balance.apply(local_advantages), balance.apply(traj_advantages))"
+
+
+def test_the_engine_forced_closes_are_zeroed_on_the_corrected_ratio():
+    """Without the call every reasoning close the engine forced trains with its episode's advantage, teaching
+    the model to stop closing its reasoning; ahead of the correction, the correction's ratio would replace
+    the zeros."""
+    fn = _build_training_tensors_ast()
+    (gate,) = [
+        node
+        for node in ast.walk(fn)
+        if isinstance(node, ast.If)
+        and ast.unparse(node.test) == "use_is_correction and self._forced_close_ids is not None"
+    ]
+    (siblings,) = [
+        node.body for node in ast.walk(fn) if isinstance(node, ast.stmt) and gate in getattr(node, "body", [])
+    ]
+    corrected_at = next(i for i, stmt in enumerate(siblings) if _calls(stmt, "_apply_is_correction"))
+    assert corrected_at < siblings.index(gate)
+    assert ast.unparse(gate.body[0]) == (
+        "importance_sampling_ratio, forced = zero_engine_forced_closes(importance_sampling_ratio, sampling_logps, "
+        "completion_mask, has_sampling, completion_ids, self._forced_close_ids)"
+    )
 
 
 # The phase helpers ``_build_training_tensors`` is partitioned into, in call order.
