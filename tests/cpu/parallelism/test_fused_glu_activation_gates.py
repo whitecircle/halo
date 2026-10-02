@@ -23,7 +23,7 @@ from transformers.models.gemma4.modeling_gemma4 import Gemma4TextExperts
 from transformers.models.mistral4.configuration_mistral4 import Mistral4Config
 from transformers.models.mistral4.modeling_mistral4 import Mistral4Experts
 
-from src.distributed.expert_parallel.base_layer import EPMoELayerBase
+from src.distributed.expert_parallel.base_layer import EPMoELayerBase, EPSharedExpertsMoELayerBase
 from src.distributed.expert_parallel.config import EPConfig
 from src.distributed.expert_parallel.expert_weights import ep_layer_classes
 from src.distributed.expert_parallel.layers.gemma4 import EPGemma4MoELayer
@@ -161,6 +161,15 @@ def test_real_mistral4_module_activation_passes_the_gate():
     assert resolve_fused_glu_mul(Mistral4Experts(config).act_fn) is fused_silu_mul
 
 
+def _families_forking_the_combine() -> list[str]:
+    """The families that run a ``_glu_combine`` other than the base's, declared or inherited."""
+    return [
+        cls.__name__
+        for cls in ep_layer_classes()
+        if vars(cls).get("HF_MODULE_NAMES") and cls._glu_combine is not EPMoELayerBase._glu_combine
+    ]
+
+
 def test_a_family_owning_its_combine_latches_it_rather_than_forking_the_seam():
     """``_glu_combine_name()`` must name what the layer ACTUALLY runs.
 
@@ -171,16 +180,27 @@ def test_a_family_owning_its_combine_latches_it_rather_than_forking_the_seam():
     without calling ``_glu_combine``, would skip the override. GptOss is the one family outside the
     seam entirely — its interleaved-bias paths never call ``_glu_combine``.
     """
-    forked = [
-        cls.__name__
-        for cls in ep_layer_classes()
-        if vars(cls).get("HF_MODULE_NAMES") and "_glu_combine" in vars(cls) and cls is not EPGptOssMoELayer
-    ]
+    forked = _families_forking_the_combine()
     assert not forked, (
         f"{forked} override _glu_combine instead of latching the combine into _fused_glu_mul, so the "
         f"construction summary reports a combine the layer does not run."
     )
     assert EPGptOssMoELayer._glu_combine_name is not EPMoELayerBase._glu_combine_name
+
+
+def test_a_combine_inherited_from_an_intermediate_base_is_a_fork_too(monkeypatch):
+    """The families under a shared base inherit its override without declaring it, and run it the same."""
+
+    def clamped(self, gate, up):
+        return gate * up
+
+    monkeypatch.setattr(EPSharedExpertsMoELayerBase, "_glu_combine", clamped, raising=False)
+    below = {
+        cls.__name__
+        for cls in ep_layer_classes()
+        if vars(cls).get("HF_MODULE_NAMES") and issubclass(cls, EPSharedExpertsMoELayerBase)
+    }
+    assert below and set(_families_forking_the_combine()) == below
 
 
 def test_base_glu_combine_name_tracks_the_latch(monkeypatch):
