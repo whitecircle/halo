@@ -2,13 +2,14 @@
 
 Once rewards exist, both trainers mask the rows of degenerate (all-equal-reward) groups out of the
 loss, recompute the gathered-global DAPO normalizer from the post-drop loss mask, and balance the
-step's token-weighted advantage mass: the online trainer on TRL's result dict, the environmental
+round's token-weighted advantage mass: the online trainer on TRL's result dict, the environmental
 trainer on the tensors it builds itself. The mask, normalizer and token-mass helpers serve both, so
 their numerics match; :func:`degenerate_drop_rows` is the online trainer's framing of the drop, and
 :func:`expand_traj_to_rows` the environmental trainer's layout of per-trajectory values over its
 per-turn rows.
 """
 
+import math
 from collections.abc import Callable, MutableMapping
 from dataclasses import dataclass
 
@@ -23,17 +24,18 @@ TOKEN_MASS_SCALE_KEY = "advantage/token_mass_scale"
 NEGATIVE_ONLY_MASS_KEY = "advantage/negative_only_mass"
 # TRL loss types whose every loss token of a step shares one normalizer, so a row pulls with its
 # advantage times its trained token weight: the losses the token-mass balance is exact for. ``grpo`` /
-# ``sapo`` average each completion over its own length, ``bnpo`` normalizes per micro-batch, and
-# ``vespo`` weighs each sequence by its advantage's sign.
+# ``sapo`` average each completion over its own length, ``bnpo`` normalizes per micro-batch, ``luspo``
+# averages each completion's length-scaled term over the micro-batch's rows, and ``vespo`` weighs each
+# sequence by its advantage's sign.
 TOKEN_SUM_LOSS_TYPES = ("cispo", "dapo", "dr_grpo")
 
 
 @dataclass(frozen=True)
 class TokenMassBalance:
-    """A step's token-weighted advantage mass and the per-sign scales that cancel it.
+    """A generation round's token-weighted advantage mass and the per-sign scales that cancel it.
 
     ``net`` is ``(P - N) / (P + N)`` before balancing, where ``P`` and ``N`` are the summed positive and
-    negative ``advantage x token weight`` of the whole step: the share of the step's push that raises
+    negative ``advantage x token weight`` of the whole round: the share of the round's push that raises
     (``net > 0``) or lowers (``net < 0``) the probability of the tokens the policy sampled.
     """
 
@@ -53,18 +55,18 @@ class TokenMassBalance:
 def token_mass_balance(
     advantages: torch.Tensor, token_weights: torch.Tensor, gather_fn: Callable[[torch.Tensor], torch.Tensor]
 ) -> TokenMassBalance:
-    """The scales that shrink the heavier sign of a step's advantages until its token mass nets to zero.
+    """The scales that shrink the heavier sign of a round's advantages until its token mass nets to zero.
 
     Under a token-sum loss a row pulls with its advantage times its trained token weight. The advantages
     of a group sum to zero, their token-weighted sum does not: where failures run longer than solves the
-    step pushes down the tokens the policy itself sampled, which flattens it (entropy rises), and where
+    round pushes down the tokens the policy itself sampled, which flattens it (entropy rises), and where
     solves run longer it sharpens it. Scaling down the heavier side, never up, removes that net push and
     keeps every row's sign and its order within its sign. ``advantages`` and ``token_weights`` are
     per-row and rank-local; the masses are summed over every rank (the gather is collective), so all
-    ranks take the same scales. A step with only one sign has nothing to balance against.
+    ranks take the same scales. The heavier sign's scale falls continuously to 0 as the lighter side's
+    mass does, so a round with mass on one sign only trains nothing on its advantages.
     """
-    positive, negative = gather_fn(_signed_masses(advantages, token_weights).unsqueeze(0)).sum(dim=0).tolist()
-    return _balance(positive, negative)
+    return _balance(*_world_masses(_signed_masses(advantages, token_weights), gather_fn))
 
 
 def _signed_masses(advantages: torch.Tensor, token_weights: torch.Tensor) -> torch.Tensor:
@@ -73,14 +75,24 @@ def _signed_masses(advantages: torch.Tensor, token_weights: torch.Tensor) -> tor
     return torch.stack([(advantages.clamp_min(0) * weights).sum(), (advantages.clamp_max(0).neg() * weights).sum()])
 
 
+def _world_masses(local: torch.Tensor, gather_fn: Callable[[torch.Tensor], torch.Tensor]) -> list[float]:
+    """``local`` summed over every rank (the gather is collective). A sum that is not finite raises on every
+    rank alike: a NaN or infinite advantage or IS ratio reached it, and so the loss."""
+    masses = gather_fn(local.unsqueeze(0)).sum(dim=0).tolist()
+    if not all(math.isfinite(mass) for mass in masses):
+        raise RuntimeError(
+            f"The round's token-weighted advantage masses are not finite ({masses}): a NaN or infinite "
+            "advantage or IS ratio reached the loss."
+        )
+    return masses
+
+
 def _balance(positive: float, negative: float) -> TokenMassBalance:
-    """The balance of a step whose world-summed masses are ``positive`` and ``negative``."""
+    """The balance of a round whose world-summed masses are ``positive`` and ``negative``."""
     total = positive + negative
     if total <= 0:
         return TokenMassBalance(net=0.0)
     net = (positive - negative) / total
-    if positive == 0 or negative == 0:
-        return TokenMassBalance(net=net)
     if negative > positive:
         return TokenMassBalance(net=net, negative_scale=positive / negative)
     return TokenMassBalance(net=net, positive_scale=negative / positive)
@@ -95,22 +107,22 @@ def record_token_mass(
     enabled: bool,
     negative_only: torch.Tensor | None = None,
 ) -> TokenMassBalance | None:
-    """Log a training step's net token mass and return the balance to apply, or ``None`` when off.
+    """Log a generation round's net token mass and return the balance to apply, or ``None`` when off.
 
     A token weighs what the policy gradient multiplies it by: its place in the loss (``loss_mask``, every
     drop already in it) times its truncated, masked IS ratio (``None`` when the loss applies none). The
     net share is logged whether or not the balance is on, as the early sign of an entropy drift.
 
     ``negative_only`` flags the rows that train only on a negative advantage, and their share of the
-    step's trained mass is logged too, after the balance when it is on. The balance zeroes the whole step,
-    so under it that share is the net push left on every other row, raising the tokens it sampled.
+    round's trained mass is logged too, after the balance when it is on. The balance nets the whole round
+    to zero, so under it that share is the net push left on every other row, raising the tokens it sampled.
     """
     weights = (loss_mask if is_ratio is None else loss_mask * is_ratio).sum(dim=1)
     local = _signed_masses(advantages, weights)
     if negative_only is not None:
         flagged = negative_only.to(advantages.device)
         local = torch.cat([local, _signed_masses(advantages[flagged], weights[flagged])[1:]])
-    masses = gather_fn(local.unsqueeze(0)).sum(dim=0).tolist()
+    masses = _world_masses(local, gather_fn)
     result = _balance(masses[0], masses[1])
     metrics[NET_TOKEN_MASS_KEY].append(result.net)
     if negative_only is not None:

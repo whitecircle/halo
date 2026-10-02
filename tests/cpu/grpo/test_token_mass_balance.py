@@ -3,10 +3,11 @@
 
 Under a token-sum loss a row pulls with its advantage times its trained token weight. A group's
 advantages sum to zero, their token-weighted sum does not: when failures run longer than solves the
-step's net push lowers the probability of the tokens the policy sampled (entropy climbs), and when solves
+round's net push lowers the probability of the tokens the policy sampled (entropy climbs), and when solves
 run longer it sharpens the policy. ``balance_token_mass`` scales the heavier sign down until that net
-push is zero; the net share is logged either way. Losses whose tokens do not share one normalizer are
-refused, since there a row does not pull with its token count.
+push is zero, to nothing when the other sign has no mass; the net share is logged either way, and a mass
+that is not finite raises. Losses whose tokens do not share one normalizer are refused, since there a
+row does not pull with its token count.
 
     python tests/cpu/grpo/test_token_mass_balance.py
 """
@@ -67,16 +68,55 @@ def test_balancing_keeps_every_sign_and_the_order_within_a_sign():
 
 @pytest.mark.parametrize(
     ("advantages", "net"),
-    [
-        (torch.tensor([0.5, 0.2]), 1.0),
-        (torch.tensor([-0.5, -0.2]), -1.0),
-        (torch.zeros(3), 0.0),
-    ],
+    [(torch.tensor([0.5, 0.2]), 1.0), (torch.tensor([-0.5, -0.2]), -1.0)],
+    ids=["positive-only", "negative-only"],
 )
-def test_a_step_with_one_sign_or_none_keeps_its_advantages(advantages, net):
+def test_a_round_with_mass_on_one_sign_only_trains_nothing_on_its_advantages(advantages, net):
+    """Nothing on the other side cancels it, so the whole push is net: kept, a round whose positives the IS
+    masks all dropped would push down every sampled token at full strength."""
     balance = token_mass_balance(advantages, torch.full_like(advantages, 10.0), _local)
-    assert balance.net == net and balance.scale == 1.0
+    assert balance.net == net and balance.scale == 0.0
+    assert torch.equal(balance.apply(advantages), torch.zeros_like(advantages))
+
+
+def test_the_heavier_sign_shrinks_continuously_to_nothing_as_the_lighter_side_empties():
+    """A round whose lighter side keeps one token at a tiny ratio trains almost nothing; at zero it must not
+    jump back to full strength."""
+    advantages = torch.tensor([1.0, -1.0, -1.0])
+    scales = [
+        token_mass_balance(advantages, torch.tensor([positive_tokens, 500.0, 500.0]), _local).negative_scale
+        for positive_tokens in (1.0, 1e-3, 1e-6, 0.0)
+    ]
+    assert scales[:3] == [pytest.approx(1 / 1000), pytest.approx(1e-6), pytest.approx(1e-9)]
+    assert scales[3] == 0.0
+
+
+def test_a_round_with_no_mass_keeps_its_advantages():
+    advantages = torch.zeros(3)
+    balance = token_mass_balance(advantages, torch.full_like(advantages, 10.0), _local)
+    assert balance.net == 0.0 and balance.scale == 1.0
     assert torch.equal(balance.apply(advantages), advantages)
+
+
+@pytest.mark.parametrize(
+    ("advantages", "ratio_at"),
+    [
+        (torch.tensor([float("nan"), -0.5]), None),
+        (torch.tensor([0.5, float("inf")]), None),
+        (torch.tensor([0.5, -0.5]), float("nan")),
+    ],
+    ids=["nan-advantage", "inf-advantage", "nan-ratio"],
+)
+@pytest.mark.parametrize("enabled", [True, False], ids=["on", "off"])
+def test_a_mass_that_is_not_finite_raises_on_every_rank(advantages, ratio_at, enabled):
+    """Every rank reads the same world sum, so all raise together; carried on, its scales would turn every row
+    of the heavier sign on every rank to NaN, and with the balance off the loss reads it anyway."""
+    loss_mask = torch.ones(2, 4)
+    ratio = torch.ones(2, 4)
+    if ratio_at is not None:
+        ratio[1, 3] = ratio_at
+    with pytest.raises(RuntimeError, match="not finite"):
+        record_token_mass(advantages, loss_mask, ratio, _local, defaultdict(list), enabled=enabled)
 
 
 def test_every_rank_takes_the_scales_of_the_whole_step():
@@ -161,6 +201,23 @@ def test_the_negative_only_share_is_the_push_the_balance_leaves_on_every_other_r
     metrics = defaultdict(list)
     record_token_mass(advantages, loss_mask, ratio, _local, metrics, enabled=True)
     assert NEGATIVE_ONLY_MASS_KEY not in metrics, "a trainer with no negative-only rows logs no share"
+
+
+def test_a_one_sided_round_leaves_its_negative_only_rows_no_share():
+    """Balanced, a round with no positive mass trains nothing, so nothing is left for its negative-only rows to
+    push; unbalanced they keep their plain share."""
+    _, loss_mask, ratio = _env_step()
+    advantages = torch.tensor([0.0, -0.5, -0.5, -0.5])  # the solve's positive advantage gone
+    negative_only = torch.tensor([False, False, True, False])
+    metrics = defaultdict(list)
+    balance = record_token_mass(
+        advantages, loss_mask, ratio, _local, metrics, enabled=True, negative_only=negative_only
+    )
+    assert metrics[TOKEN_MASS_SCALE_KEY] == [0.0] and metrics[NEGATIVE_ONLY_MASS_KEY] == [0.0]
+    assert torch.equal(balance.apply(advantages), torch.zeros_like(advantages))
+    metrics = defaultdict(list)
+    record_token_mass(advantages, loss_mask, ratio, _local, metrics, enabled=False, negative_only=negative_only)
+    assert metrics[NEGATIVE_ONLY_MASS_KEY] == [pytest.approx(2 / 6)]
 
 
 def _grpo_args(loss_type="dapo", top_entropy_quantile=1.0, off_policy_mask_threshold=None):

@@ -121,7 +121,7 @@ routing_replay: rollout     # replay vLLM's per-token expert selection; server n
 num_generations_eval: 1
 scale_rewards: batch        # global batch std — never per-group (degenerate-group noise inflation)
 drop_degenerate_groups: true  # groups alike in reward (the length terms aside) would still inflate the DAPO normalizer
-balance_token_mass: true    # failures run longer than solves: cancel each step's net token-weighted push, or entropy climbs
+balance_token_mass: true    # failures run longer than solves: cancel each round's net token-weighted push, or entropy climbs
 top_entropy_quantile: 1.0   # train ALL tokens: tool-format tokens need direct reinforcement at beta=0
 mask_truncated_completions: false  # `truncated` = the max_turns overflow, or a cut/empty turn past the recovery
                                    # cap or on the last turn: a real failure worth its negative advantage; a
