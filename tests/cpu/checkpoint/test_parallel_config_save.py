@@ -17,6 +17,7 @@ Run: ``pytest -m cpu tests/cpu/checkpoint/test_parallel_config_save.py``
 
 from __future__ import annotations
 
+import importlib.util
 import json
 import sys
 
@@ -41,20 +42,19 @@ class _VendorModel:
         self.config = config
 
 
-def _dynamic_model(tmp_path, module_name: str = "modeling_vendor_moe"):
-    """A model whose class lives in a ``transformers_modules`` package on disk, as remote code does."""
-    package = tmp_path / "transformers_modules" / "vendor"
-    package.mkdir(parents=True)
-    (package.parent / "__init__.py").write_text("")
-    (package / "__init__.py").write_text("")
-    (package / f"{module_name}.py").write_text(
-        "class VendorForCausalLM:\n    def __init__(self, config):\n        self.config = config\n"
-    )
-    sys.path.insert(0, str(tmp_path))
-    try:
-        module = __import__(f"transformers_modules.vendor.{module_name}", fromlist=["VendorForCausalLM"])
-    finally:
-        sys.path.remove(str(tmp_path))
+def _dynamic_model(tmp_path, monkeypatch, module_name: str = "modeling_vendor_moe"):
+    """A model whose class lives in a ``transformers_modules`` module on disk, as remote code does.
+
+    Only that module is bound in ``sys.modules``, and only for the test: a stand-in ``transformers_modules``
+    package would shadow the real one, and every later remote-code load in the process would fail to import.
+    """
+    tmp_path.mkdir(parents=True)
+    source = tmp_path / f"{module_name}.py"
+    source.write_text("class VendorForCausalLM:\n    def __init__(self, config):\n        self.config = config\n")
+    spec = importlib.util.spec_from_file_location(f"transformers_modules.vendor.{module_name}", source)
+    module = importlib.util.module_from_spec(spec)
+    monkeypatch.setitem(sys.modules, spec.name, module)
+    spec.loader.exec_module(module)
 
     config = _VendorConfig()
     config.model_type = "vendor_moe"
@@ -62,13 +62,13 @@ def _dynamic_model(tmp_path, module_name: str = "modeling_vendor_moe"):
     return module.VendorForCausalLM(config)
 
 
-def test_remote_code_modules_travel_with_the_checkpoint(tmp_path):
+def test_remote_code_modules_travel_with_the_checkpoint(tmp_path, monkeypatch):
     """The module the config's ``auto_map`` names must be written beside it.
 
     Without this the directory is loadable by nothing: ``from_pretrained`` resolves ``auto_map`` and
     raises on the missing file, which lands after a full training run.
     """
-    model = _dynamic_model(tmp_path / "src")
+    model = _dynamic_model(tmp_path / "src", monkeypatch)
     out = tmp_path / "out"
     out.mkdir()
 
@@ -78,14 +78,14 @@ def test_remote_code_modules_travel_with_the_checkpoint(tmp_path):
     assert "modeling_vendor_moe.py" in written, f"auto_map names a module the save did not write: {written}"
 
 
-def test_remote_code_modules_travel_from_an_fsdp2_sharded_model(tmp_path):
+def test_remote_code_modules_travel_from_an_fsdp2_sharded_model(tmp_path, monkeypatch):
     """The same, after FSDP2 has rewritten ``model.__class__`` — the only way these models are saved.
 
     ``fully_shard`` swaps in a dynamic ``FSDP<Name>`` subclass whose ``__module__`` is torch's, so a
     check on the live class sees no remote code and skips the copy on every sharded run — i.e. exactly
     the runs that produce real checkpoints.
     """
-    model = _dynamic_model(tmp_path / "src")
+    model = _dynamic_model(tmp_path / "src", monkeypatch)
     original_cls = type(model)
     # How torch.distributed.fsdp._fully_shard._fsdp_init installs its subclass.
     model.__class__ = type(f"FSDP{original_cls.__name__}", (original_cls,), {})
@@ -101,9 +101,9 @@ def test_remote_code_modules_travel_from_an_fsdp2_sharded_model(tmp_path):
     assert "modeling_vendor_moe.py" in written, f"auto_map names a module the save did not write: {written}"
 
 
-def test_model_type_survives_a_vendor_config_with_no_class_attribute(tmp_path):
+def test_model_type_survives_a_vendor_config_with_no_class_attribute(tmp_path, monkeypatch):
     """``to_dict`` reads ``model_type`` off the class, which these vendor configs leave empty."""
-    model = _dynamic_model(tmp_path / "src")
+    model = _dynamic_model(tmp_path / "src", monkeypatch)
     assert type(model.config).model_type == "", "fixture no longer reproduces the empty class attribute"
     out = tmp_path / "out"
     out.mkdir()

@@ -39,9 +39,8 @@ BANNED_RUNNER = "Test" + "Runner"
 BANNED_SUMMARY = "print_" + "summary("
 # The ``sys.path`` methods that put a directory on the import path.
 SYS_PATH_GROWERS = {"insert", "append", "extend"}
-# The two legitimate inserts: the root conftest owns the pytest-run path, and one test writes a
-# module into `tmp_path` and imports it back.
-BOOTSTRAP_EXEMPT = {"tests/conftest.py", "tests/cpu/checkpoint/test_parallel_config_save.py"}
+# The one legitimate insert: the root conftest owns the pytest-run path.
+BOOTSTRAP_EXEMPT = {"tests/conftest.py"}
 # The profiling benchmarks are not suites: they report a perf table to stdout by design, and nothing
 # selects them by verdict.
 SUMMARY_EXEMPT = {"tests/gpu/profiling/benchmark_collators.py", "tests/gpu/profiling/benchmark_torch_compile.py"}

@@ -16,8 +16,8 @@ Run: python tests/cpu/models/test_run_dtype_cast.py  (or pytest)
 """
 
 import functools
+import os
 import types
-import uuid
 from unittest import mock
 
 import pytest
@@ -238,10 +238,9 @@ def test_a_request_that_is_not_a_dtype_leaves_the_model_as_loaded(dtype):
 def _tiny_checkpoints(tmp_path_factory, name: str, families, *, fp32_pins: bool = False) -> dict[str, str]:
     """``families``' tiny checkpoints under a fresh ``name`` directory, keyed by family."""
     root = tmp_path_factory.mktemp(name)
-    # A directory name unique across processes and containers: transformers copies a checkpoint's remote
-    # code into HF_MODULES_CACHE under its directory name, and every xdist worker and every container
-    # mounting the HF cache shares that cache, where pids repeat.
-    checkpoints = {family: str(root / f"{family}_{uuid.uuid4().hex}") for family in families}
+    # A per-process directory name: transformers copies a checkpoint's remote code into the shared
+    # HF_MODULES_CACHE under its directory name, so two xdist workers loading one family would race.
+    checkpoints = {family: str(root / f"{family}_{os.getpid()}") for family in families}
     for family, path in checkpoints.items():
         build_tiny_family_checkpoint(TINY_MOE_FAMILIES[family], path, fp32_pins=fp32_pins)
     return checkpoints
