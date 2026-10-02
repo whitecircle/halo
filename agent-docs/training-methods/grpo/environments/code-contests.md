@@ -44,7 +44,7 @@ rollout_thinking_budget_scope: episode
 | `max_output_size` | 1 MB | Over-cap stdout is OUTPUT LIMIT EXCEEDED, not truncated; a test's cap rises to 4× its expected output, so a large correct answer passes |
 | `stop_on_first_failure` | `false` | Stop at the first failing test; the grade is unchanged, `outcome/test_pass_frac` becomes a lower bound |
 | `max_submissions` / `max_test_calls` | 2 / 5 | Per-episode tool budgets, overridable per effort level |
-| `max_starved_run_refunds` | 1 | Input-less scratchpad runs per episode that print nothing and are returned to the budget; later ones count. `0` returns none |
+| `max_starved_run_refunds` | 1 | Input-less scratchpad runs per episode that exit cleanly with nothing on stdout and are returned to the budget; later ones count. `0` returns none |
 | `max_turns` | 15 | Backstop; the tool budgets are the tuning lever |
 | `eval_protocol` | `harness` | Evaluation contract; `leaderboard` pins both tool budgets ([Evaluation protocols](#evaluation-protocols)) |
 
@@ -86,7 +86,7 @@ message ("1 graded submission, 0 scratchpad runs").
 - The scratchpad — `python_repl` when the run fixes `python`, else `run_code`. It runs a program through the grading sandbox, standard library included, on the `stdin` the call supplies (empty by default), so the model can feed it the statement's sample input or its own; it never sees the graded tests. Each call is one-shot — nothing a run writes survives into the next. Past `max_test_calls` a call is refused, and the refusal names the graded submissions left.
 - `submit_solution` — grades a complete stdin/stdout program against the hidden tests. The only graded channel, with no fenced-code-block fallback. Reaching `max_submissions` ends the episode.
 
-A scratchpad run gets the per-test time limit its language is graded at ([Grading rules](#grading-rules)), and a timeout says so. Its reply leads with any error — the compiler's first diagnostics, or a crash's signal and stderr tail — ahead of the program's stdout ([Sandboxes](sandbox.md#using-it-from-python)). A run with no `stdin` that crashes adds a note naming the missing input, and one that exits cleanly having printed nothing is returned to the budget with a note saying so, since it told the model nothing, up to `max_starved_run_refunds` per episode; past that cap such a run counts and gets the missing-input note (neither note follows a compile failure or a timeout); every reply ends with the runs left while `max_test_calls` binds (`Scratchpad runs left: N of M.`).
+A scratchpad run gets the per-test time limit its language is graded at ([Grading rules](#grading-rules)), and a timeout says so. Its reply leads with any error — the compiler's first diagnostics, or a crash's signal and stderr tail — ahead of the program's stdout ([Sandboxes](sandbox.md#using-it-from-python)). A run with no `stdin` that crashes adds a note naming the missing input, and one that exits cleanly with nothing on stdout is returned to the budget with a note saying so, since its reply, which leaves a clean exit's stderr out, told the model nothing, up to `max_starved_run_refunds` per episode; past that cap such a run counts and gets the missing-input note (neither note follows a compile failure or a timeout); every reply ends with the runs left while `max_test_calls` binds (`Scratchpad runs left: N of M.`).
 
 A refused call is a tool error: it pays `tool_error_penalty`, never `tool_success_reward`. A
 scratchpad run that ends on a sandbox fault ends the episode ([Sandbox faults](sandbox.md#sandbox-faults)). With a
