@@ -102,10 +102,10 @@ def measure_env_prompt_overhead(environment, tokenizer, template_kwargs: dict) -
         {"role": "user", "content": ""}
     ]
     tools = environment.get_tools_schema()
-    if tools == []:
+    if environment.TOOLS_ARRIVE_ON_RESET and not tools:
         logger.warning(
-            "The environment declares no tools before its first reset (an MCP server's arrive on connect); "
-            "the context-window check omits their schema from the prompt overhead."
+            "An MCP server's tools arrive when its first reset connects, so the context-window check omits "
+            "their schema from the prompt overhead."
         )
     try:
         rendered = tokenizer.apply_chat_template(

@@ -270,7 +270,7 @@ class DistributedAsyncEnvironmentalGRPOTrainer(
 
         # Read off the env instance the tokenize path also renders through, never re-derived from the
         # config dict: the class owns its defaults and its validation.
-        self._group_random_effort = self._rollout_env.reasoning_effort == "random"
+        self._group_random_effort = self._rollout_env.reasoning_effort == RANDOM_REASONING_EFFORT
         self._reject_unverified_carried_reasoning()
 
         # Rewards come from the environment, so the GRPOTrainer reward function is a stub.

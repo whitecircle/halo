@@ -74,6 +74,7 @@ class NativeMCPClientEnvironment(AsyncNativeToolUseEnvironment):
     # Twice the native per-call rate; also stated in
     # agent-docs/training-methods/grpo/environments/mcp.md, which must be updated alongside it.
     DEFAULT_TOOL_SUCCESS_REWARD = 0.1
+    TOOLS_ARRIVE_ON_RESET = True
 
     def __init__(
         self,

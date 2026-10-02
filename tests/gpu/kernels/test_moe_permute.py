@@ -18,7 +18,7 @@ from tests.common.utils import fro_rel_err, max_abs_rel_err
 
 DTYPE_TOLS = ((torch.float32, 1e-5), (torch.bfloat16, 2e-2))
 # A bf16 result accumulated in fp32 is the exact result rounded once; a partial sum or a weighted row rounded to
-# bf16 on the way lands 1.2x-1.7x that floor at these routings.
+# bf16 on the way lands 1.4x-1.7x that floor at the dense routings (less at 10% fill, where most tokens sum one row).
 BF16_FLOOR_RATIO_MAX = 1.1
 # (tokens, top_k, hidden, fraction of the top_k slots that hold a row)
 ROUTINGS = ((517, 8, 2816, 0.5), (64, 4, 100, 1.0), (33, 8, 1025, 0.1))

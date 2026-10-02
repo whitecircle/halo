@@ -376,6 +376,10 @@ class BaseEnvironment(ABC):
     # answer wherever a row carries one, paying for completing the task where no row does.
     requires_answer: bool = False
 
+    # Whether the tools are discovered on the first reset (an MCP server's arrive when it connects), so an
+    # instance never reset reports none of them.
+    TOOLS_ARRIVE_ON_RESET: bool = False
+
     # Declared here because ``_add_action_message`` trims stored ``tool_calls`` to it; ``None`` = no cap.
     max_tool_calls_per_turn: int | None = None
 

@@ -63,6 +63,15 @@ def _listening_addresses(port: int) -> list[str]:
     return addresses
 
 
+def _assert_listens_only_on(port: int, address: str) -> None:
+    """The listener holds ``address`` and no wildcard. One socket binds one address, so a wildcard is the only way
+    it can reach past the one advertised; a parallel test's own socket on another address may share the number."""
+    listening = _listening_addresses(port)
+    assert address in listening and not {"0.0.0.0", "::"} & set(listening), (
+        f"the rendezvous store listens on {listening} while the engine was told to dial {address}:{port}"
+    )
+
+
 class _JoinRequest(NamedTuple):
     """A group-join request the engine received, and who listened on its port when it arrived."""
 
@@ -202,10 +211,7 @@ def test_the_listener_binds_the_advertised_address(client, engine_requests, adve
 
     [(advertised, port, _)] = engine_requests
     assert advertised == expected
-    assert _listening_addresses(port) == [expected], (
-        f"the rendezvous store listens on {_listening_addresses(port)} while the engine was told to "
-        f"dial {advertised}:{port}"
-    )
+    _assert_listens_only_on(port, expected)
 
 
 def test_a_name_is_advertised_as_the_address_the_listener_binds(client, engine_requests):
@@ -217,7 +223,7 @@ def test_a_name_is_advertised_as_the_address_the_listener_binds(client, engine_r
 
     [(advertised, port, _)] = engine_requests
     assert advertised == "127.0.0.1", f"the engine was sent {advertised!r}, not the address the listener binds"
-    assert _listening_addresses(port) == ["127.0.0.1"]
+    _assert_listens_only_on(port, "127.0.0.1")
 
 
 def test_the_opt_in_binds_every_interface(client, engine_requests, monkeypatch, caplog):
