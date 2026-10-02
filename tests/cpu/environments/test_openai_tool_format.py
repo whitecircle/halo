@@ -76,6 +76,13 @@ def test_from_openai_format_repairs_a_python_literal_without_a_syntax_warning():
     assert not [w for w in caught if issubclass(w.category, SyntaxWarning)]
 
 
+def test_from_openai_format_repairs_a_python_literal_after_leading_blanks():
+    """``ast.literal_eval`` strips leading blanks before it parses, and the warning-free parse in its place
+    must too: a model that spaces its arguments string would otherwise bind no arguments."""
+    call = NativeToolCall.from_openai_format({"id": "c", "function": {"name": "f", "arguments": " \t{'a': 1}"}})
+    assert call.arguments == {"a": 1}
+
+
 def test_a_call_no_literal_can_build_is_a_refused_call_not_a_lost_episode():
     registry = NativeToolRegistry().register(
         NativeTool(

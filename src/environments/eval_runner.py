@@ -32,6 +32,7 @@ from src.environments.base import (
     ANSWER_KEY,
     EPISODE_ERROR_KEY,
     EPISODE_INVALID_REASON_KEY,
+    RANDOM_REASONING_EFFORT,
     BaseEnvironment,
     Trajectory,
     solve_verdict,
@@ -252,7 +253,7 @@ async def run_episode(
     """
     # A "random" level is drawn from the problem (as the trainer's eval does), so a rerun or another
     # checkpoint scores each problem at the same level.
-    if env.reasoning_effort == "random" and not (context or {}).get("reasoning_effort"):
+    if env.reasoning_effort == RANDOM_REASONING_EFFORT and not (context or {}).get("reasoning_effort"):
         context = {**(context or {}), "reasoning_effort": stable_reasoning_effort(prompt)}
     # Bound through the same helper as the training rollout, so the level and its implied budget match
     # what the policy was trained under. The resolved draw is stamped back into the reset context so

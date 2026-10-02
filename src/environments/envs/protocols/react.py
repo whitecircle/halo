@@ -115,7 +115,7 @@ def _parse_action(action_text: str) -> tuple[str | None, dict[str, Any] | None]:
             if isinstance(args, str):
                 args = json.loads(args)
             return (name if isinstance(name, str) else None), (args if isinstance(args, dict) else {})
-        except (json.JSONDecodeError, RecursionError):
+        except MALFORMED_LITERAL_ERRORS:
             pass
 
     func_match = _CALL_ACTION_RE.match(action_text)
@@ -160,7 +160,7 @@ def _parse_function_args(args_str: str) -> dict[str, Any]:
         value = next((g for g in match.groups()[1:] if g is not None), None)
 
         if value and (value.startswith("{") or value.startswith("[")):
-            with contextlib.suppress(json.JSONDecodeError, RecursionError):
+            with contextlib.suppress(*MALFORMED_LITERAL_ERRORS):
                 value = json.loads(value)
         elif value:
             with contextlib.suppress(ValueError, TypeError):

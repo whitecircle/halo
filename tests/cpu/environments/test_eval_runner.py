@@ -14,9 +14,11 @@ Run:
     python tests/cpu/environments/test_eval_runner.py
 """
 
+import itertools
 import json
 import logging
 import math
+import random
 import types
 from typing import Any
 
@@ -38,6 +40,7 @@ from src.configs.rollout_config import RolloutConfig
 from src.environments.base import (
     EPISODE_ERROR_KEY,
     OBJECTIVE_REWARD_KEY,
+    RANDOM_REASONING_EFFORT,
     REWARD_COMPONENTS_KEY,
     SOLVE_RATE_KEY,
     Message,
@@ -339,9 +342,13 @@ async def test_run_episode_reads_the_tool_schema_after_reset(monkeypatch):
 
 async def test_a_random_level_is_drawn_from_the_problem_so_reruns_agree(monkeypatch):
     """Under ``reasoning_effort: random`` a rerun, or the next checkpoint's eval, must score each problem at
-    the level it got before; the draw follows the problem text, as the trainer's eval does."""
+    the level it got before; the draw follows the problem text, as the trainer's eval does. ``random.choice``
+    walks the levels in turn here, so a per-episode draw lands on every level across the reruns and cannot
+    match the stable one by chance."""
     env = _tooled_env()
-    env.reasoning_effort = "random"
+    env.reasoning_effort = RANDOM_REASONING_EFFORT
+    turn = itertools.count()
+    monkeypatch.setattr(random, "choice", lambda seq: seq[next(turn) % len(seq)])
     levels: list[str] = []
     real_reset = env.reset
 
@@ -360,6 +367,13 @@ async def test_a_random_level_is_drawn_from_the_problem_so_reruns_agree(monkeypa
     for _ in range(3):
         await run_episode(env, "the same problem", {}, client=object(), rollout=rollout)
     assert levels == [stable_reasoning_effort("the same problem")] * 3
+
+
+def test_a_conversation_with_no_user_turn_has_no_level_to_draw():
+    """The draw is keyed by the task, and a conversation with no user turn has none: drawn as an empty task,
+    every such problem would share one level without a word."""
+    with pytest.raises(ValueError, match="no 'user' message"):
+        stable_reasoning_effort([{"role": "system", "content": "frame"}])
 
 
 async def test_run_episode_cleans_up_on_mid_episode_exception(monkeypatch):

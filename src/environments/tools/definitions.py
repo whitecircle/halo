@@ -15,7 +15,8 @@ from src.environments.sandbox.base import SandboxAgentFault, SandboxInfraError
 
 # What reading model-authored arguments as JSON or a Python literal raises on malformed text, past a
 # syntax error: an unhashable dict key or set member (``{[1]: 2}``) is a TypeError, deep nesting a
-# RecursionError or MemoryError.
+# RecursionError or MemoryError, and an integer past Python's 4300-digit conversion limit a ValueError
+# that ``json.loads`` raises outside ``JSONDecodeError``.
 MALFORMED_LITERAL_ERRORS = (SyntaxError, ValueError, TypeError, MemoryError, RecursionError)
 
 

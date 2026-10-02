@@ -30,8 +30,10 @@ from src.rewards.spec import (
 
 logger = logging.getLogger(__name__)
 
-# Reasoning-effort levels for the chat template ("Reasoning: <level>"). "random" resolves per episode.
+# Reasoning-effort levels for the chat template ("Reasoning: <level>"), and the setting that resolves to one
+# per episode.
 VALID_REASONING_EFFORTS = ("low", "medium", "high")
+RANDOM_REASONING_EFFORT = "random"
 
 # The context key, and so the dataset column, an episode's expected answer travels under (the training
 # script carries the configured ``answer_field`` into it); a ``requires_answer`` env grades against it.
@@ -110,7 +112,7 @@ def resolve_reasoning_effort(effort: str | None) -> str | None:
     ``"random"`` picks uniformly from :data:`VALID_REASONING_EFFORTS`; call once per episode so every
     turn shares the level. Other values pass through.
     """
-    if effort == "random":
+    if effort == RANDOM_REASONING_EFFORT:
         return random.choice(VALID_REASONING_EFFORTS)
     return effort
 
@@ -134,12 +136,8 @@ def task_prompt(prompt: str | list[dict[str, Any]]) -> Any:
 def stable_reasoning_effort(task: str | list[dict[str, Any]]) -> str:
     """A level drawn from the task alone, the same in every process and every run: an evaluation's draw for
     a ``"random"`` setting, so each problem is scored at one level from checkpoint to checkpoint. A
-    conversation is keyed by its :func:`task_prompt`, so it draws what its task text alone would; one with
-    no user turn draws as an empty task."""
-    try:
-        text = str(task_prompt(task) or "")
-    except ValueError:
-        text = ""
+    conversation is keyed by its :func:`task_prompt`, so it draws what its task text alone would."""
+    text = str(task_prompt(task) or "")
     digest = hashlib.blake2b(text.encode("utf-8", "surrogatepass"), digest_size=8).digest()
     return VALID_REASONING_EFFORTS[int.from_bytes(digest, "big") % len(VALID_REASONING_EFFORTS)]
 
@@ -486,11 +484,9 @@ class BaseEnvironment(ABC):
         self.tool_error_penalty = tool_error_penalty
         self.tool_reward_cap = tool_reward_cap
         reasoning_effort = kwargs.pop("reasoning_effort", None)
-        if reasoning_effort is not None and reasoning_effort not in (*VALID_REASONING_EFFORTS, "random"):
-            raise ValueError(
-                f"reasoning_effort must be one of {(*VALID_REASONING_EFFORTS, 'random')} or None, "
-                f"got {reasoning_effort!r}"
-            )
+        settings = (*VALID_REASONING_EFFORTS, RANDOM_REASONING_EFFORT)
+        if reasoning_effort is not None and reasoning_effort not in settings:
+            raise ValueError(f"reasoning_effort must be one of {settings} or None, got {reasoning_effort!r}")
         self.reasoning_effort = reasoning_effort
         self.reasoning_effort_profiles = self._merge_effort_profiles(reasoning_effort_profiles)
         terms = (

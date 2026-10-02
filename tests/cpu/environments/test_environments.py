@@ -538,13 +538,25 @@ def test_parse_react_output_malformed_json_degrades_instead_of_raising():
         "run(code={[1]})",
         "run(code=" + "[" * 100_000 + "1])",
         '{"name": "run", "arguments": ' + "[" * 100_000 + "]" * 100_000 + "}",
+        '{"name": "run", "arguments": {"code": ' + "1" * 5000 + "}}",
+        "run(code=[" + "1" * 5000 + "])",
+        "run: code=[" + "1" * 5000 + "]",
     ],
-    ids=["unhashable-key", "unhashable-set-member", "deep-pattern-value", "deep-json-action"],
+    ids=[
+        "unhashable-key",
+        "unhashable-set-member",
+        "deep-pattern-value",
+        "deep-json-action",
+        "huge-int-json-action",
+        "huge-int-call-value",
+        "huge-int-colon-value",
+    ],
 )
 def test_a_react_action_no_literal_can_build_degrades_instead_of_voiding_the_episode(action):
     """An unhashable dict key or set member raises TypeError out of the literal reader, deep nesting a
-    RecursionError out of the JSON one; uncaught, either escapes ``env.step`` and the policy voids its
-    own episode. Both degrade like any other malformed action, and the episode goes on."""
+    RecursionError out of the JSON one, and an integer past Python's 4300-digit conversion limit a plain
+    ValueError out of ``json.loads``; uncaught, any of them escapes ``env.step`` and the policy voids its
+    own episode. Each degrades like any other malformed action, and the episode goes on."""
     registry = NativeToolRegistry().register(
         NativeTool(name="run", description="run", parameters=[], handler=lambda **kwargs: "ran")
     )
