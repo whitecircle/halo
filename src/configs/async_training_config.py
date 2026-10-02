@@ -19,6 +19,7 @@ from src.configs.rollout_config import (
     DEFAULT_THINKING_BUDGET_SCOPE,
     DEFAULT_THINKING_TURN_RESERVE,
     REASONING_BUDGET_TEMPLATE_VAR,
+    REASONING_END_TOKEN_EXAMPLES,
     REASONING_SCOPE_TEMPLATE_VAR,
     THINKING_BUDGET_SCOPES,
     THINKING_SCOPE_EPISODE,
@@ -206,7 +207,7 @@ class AsyncTrainingConfig(AdvantageShapingArguments, GRPOEarlyStopArguments, Chu
         default=DEFAULT_REASONING_END_TOKEN,
         metadata={
             "help": "The string the server's reasoning parser ends reasoning with, encoded as vLLM encodes it "
-            "(Qwen3.x '</think>', Gemma 4 '<channel|>', gpt-oss '<|start|>assistant<|channel|>final<|message|>'). "
+            f"({REASONING_END_TOKEN_EXAMPLES}). "
             "Wherever a vLLM thinking budget can bind, a forced run of its ids gets ratio 0 in the loss (under "
             "the turn scope a marker holding none of the tokenizer's added tokens only warns). Under "
             "rollout_thinking_budget_scope=episode a turn's reasoning is counted as the sampled ids up to and "
@@ -331,9 +332,9 @@ class AsyncTrainingConfig(AdvantageShapingArguments, GRPOEarlyStopArguments, Chu
         default=False,
         metadata={
             "help": "Early stop (GRPOEarlyStopArguments): end training once the trust-region breaker "
-            "(`skip_update_masked_frac`) skipped every update of `early_stop_patience` generation rounds in "
-            "a row. Past that the policy is frozen where the rollouts no longer agree with it, and the run "
-            "only spends compute."
+            "(`skip_update_masked_frac`) skipped every update on `early_stop_patience` readings in a row (one "
+            "generation round each at `logging_steps: 1`). Past that the policy is frozen where the rollouts no "
+            "longer agree with it, and the run only spends compute. Raises without `skip_update_masked_frac`."
         },
     )
 

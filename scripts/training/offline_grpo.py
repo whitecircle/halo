@@ -1,10 +1,10 @@
 #!/usr/bin/env python
-"""Distributed offline GRPO training with Expert, Tensor, Expert-Tensor and Pipeline Parallelism support.
+"""Distributed offline GRPO training with Expert, Tensor and Expert-Tensor Parallelism support.
 
 Group-relative policy optimization over pre-computed completions and rewards — no live generation.
 
-CP is not supported (the trainer uses the ``logits_to_keep`` optimization); use EP, TP, ETP, PP and
-their supported combinations.
+CP is not supported (the trainer uses the ``logits_to_keep`` optimization); use EP, TP, ETP and their
+supported combinations. PP is declared but not yet available in this release.
 
 Usage:
     torchrun --nproc_per_node=8 scripts/training/offline_grpo.py \\

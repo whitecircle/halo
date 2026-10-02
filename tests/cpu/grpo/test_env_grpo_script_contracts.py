@@ -17,6 +17,7 @@
 """
 
 import dataclasses
+import logging
 import re
 import sys
 import types
@@ -159,6 +160,17 @@ def test_overhead_without_env_system_prompt_still_measures(env_grpo_module):
     overhead = env_grpo_module.measure_env_prompt_overhead(_env(system_prompt=None), _Tokenizer(), {})
     assert overhead >= 0
     assert overhead != env_grpo_module.FALLBACK_ENV_PROMPT_OVERHEAD
+
+
+def test_a_tool_list_empty_before_the_first_reset_is_warned(env_grpo_module, caplog):
+    """An MCP environment learns its tools when its first reset connects, and the probe env is never reset,
+    so the overhead omits their schema and the run must say so. An environment with no tool protocol
+    (``None``) has no schema to omit."""
+    with caplog.at_level(logging.WARNING, logger=env_grpo_module.logger.logger.name):
+        env_grpo_module.measure_env_prompt_overhead(_env(tools=None), _Tokenizer(), {})
+        assert not [r for r in caplog.records if "declares no tools" in r.getMessage()]
+        env_grpo_module.measure_env_prompt_overhead(_env(tools=[]), _Tokenizer(), {})
+    assert [r for r in caplog.records if "declares no tools" in r.getMessage()]
 
 
 def test_overhead_falls_back_conservatively_when_render_fails(env_grpo_module):

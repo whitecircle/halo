@@ -19,7 +19,8 @@ class SelfDistillationArguments(SDPGArguments, SFTScriptArguments):
     # forwarded to the trainer, which takes the complement.
     DATASET_SIDE_SDPG_FIELDS: ClassVar[frozenset[str]] = frozenset({"sdpg_hint_template"})
     # inject_privileged_hint (src/data/collators/self_distill.py) fills the reference solution too.
-    HINT_PLACEHOLDERS: ClassVar[frozenset[str]] = frozenset({"answer", "solution"})
+    SOLUTION_PLACEHOLDER: ClassVar[str] = "solution"
+    HINT_PLACEHOLDERS: ClassVar[frozenset[str]] = SDPGArguments.HINT_PLACEHOLDERS | {SOLUTION_PLACEHOLDER}
 
     sdpg_answer_field: str | None = field(
         default="answer",

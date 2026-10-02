@@ -96,15 +96,21 @@ def measure_env_prompt_overhead(environment, tokenizer, template_kwargs: dict) -
     preamble depends on them. Falls back to a conservative margin when the template cannot render the
     preamble (logged with the assumption). An MCP environment learns its tools only when its first
     reset connects to the server, and ``environment`` here is never reset, so its schema is absent and
-    the overhead under-counts by it.
+    the overhead under-counts by it, which is warned.
     """
     messages = ([{"role": "system", "content": environment.system_prompt}] if environment.system_prompt else []) + [
         {"role": "user", "content": ""}
     ]
+    tools = environment.get_tools_schema()
+    if tools == []:
+        logger.warning(
+            "The environment declares no tools before its first reset (an MCP server's arrive on connect); "
+            "the context-window check omits their schema from the prompt overhead."
+        )
     try:
         rendered = tokenizer.apply_chat_template(
             messages,
-            tools=environment.get_tools_schema(),
+            tools=tools,
             tokenize=False,
             add_generation_prompt=True,
             **template_kwargs,

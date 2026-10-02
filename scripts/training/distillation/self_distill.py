@@ -76,7 +76,8 @@ def _require_privileged_columns(ds, args) -> None:
         return
     if args.sdpg_answer_field:
         require_render_column(ds, str(args.dataset), "sdpg_answer_field", args.sdpg_answer_field)
-    if args.privileged_solution_field and "solution" in format_field_names(args.sdpg_hint_template):
+    placeholder = SelfDistillationArguments.SOLUTION_PLACEHOLDER
+    if args.privileged_solution_field and placeholder in format_field_names(args.sdpg_hint_template):
         require_render_column(ds, str(args.dataset), "privileged_solution_field", args.privileged_solution_field)
 
 

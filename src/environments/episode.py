@@ -17,6 +17,7 @@ import backoff
 
 from src.configs.rollout_config import (
     DEFAULT_THINKING_TURN_RESERVE,
+    REASONING_END_TOKEN_EXAMPLES,
     THINKING_SCOPE_EPISODE,
     THINKING_SCOPE_TURN,
     RolloutConfig,
@@ -231,8 +232,7 @@ def resolve_reasoning_end_ids(tokenizer, marker: str) -> tuple[int, ...]:
         raise ValueError(
             f"rollout_reasoning_end_token {marker!r} is not a reasoning marker of this tokenizer: it encodes to "
             f"{list(ids)}, none of them one of its added tokens. Name the end string the server's reasoning "
-            "parser forces (Qwen3.x '</think>', Gemma 4 '<channel|>', gpt-oss "
-            "'<|start|>assistant<|channel|>final<|message|>')."
+            f"parser forces ({REASONING_END_TOKEN_EXAMPLES})."
         )
     return ids
 

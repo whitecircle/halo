@@ -21,18 +21,18 @@ RLRRMode = Literal["hrr", "prr"]
 RLRR_ARG_PREFIX = "rlrr_"
 _RLRR_ARG_SPELLINGS = {"lam": "rlrr_lambda"}
 
-
-def rlrr_arg_name(config_field: str) -> str:
-    """The YAML/CLI spelling of one :class:`RLRRConfig` field."""
-    return _RLRR_ARG_SPELLINGS.get(config_field, RLRR_ARG_PREFIX + config_field)
-
-
-# The OPD losses ``get_self_distillation_loss_fn`` resolves (src/trainers/distillation/losses.py, which
-# pulls torch): the annotation gates YAML/CLI and SDPGArguments validates against it.
+# The OPD losses ``get_self_distillation_loss_fn`` resolves: a mirror of the trainer-side registry's keys
+# (the args layer imports no trainer), pinned to it by a test. The annotation gates YAML/CLI and
+# SDPGArguments validates against it.
 SelfDistillationLoss = Literal["reverse_kl", "forward_kl", "unnormalized_kl"]
 
 # The teacher hint both OPD flows default to, through SDPGArguments.
 PRIVILEGED_HINT_TEMPLATE = "\n[Hint] The correct answer is: {answer}. Do NOT state that you were given the answer.\n"
+
+
+def rlrr_arg_name(config_field: str) -> str:
+    """The YAML/CLI spelling of one :class:`RLRRConfig` field."""
+    return _RLRR_ARG_SPELLINGS.get(config_field, RLRR_ARG_PREFIX + config_field)
 
 
 def format_field_names(template: str) -> set[str]:

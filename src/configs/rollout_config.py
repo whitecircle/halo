@@ -41,6 +41,10 @@ THINKING_SCOPE_EPISODE = "episode"
 DEFAULT_THINKING_BUDGET_SCOPE = THINKING_SCOPE_TURN
 DEFAULT_THINKING_TURN_RESERVE = 512
 DEFAULT_REASONING_END_TOKEN = "</think>"
+# The end strings the supported families' reasoning parsers force, named wherever the knob is explained.
+REASONING_END_TOKEN_EXAMPLES = (
+    "Qwen3.x '</think>', Gemma 4 '<channel|>', gpt-oss '<|start|>assistant<|channel|>final<|message|>'"
+)
 
 
 @dataclass
