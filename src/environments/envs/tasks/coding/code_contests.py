@@ -416,8 +416,10 @@ class CodeContestsEnvironment(NativeToolUseEnvironment):
                 *self._language_parameters(specs),
             ],
             handler=self._run_test_in if self.chooses_language else self._run_test,
+            # The episode ends at its last graded submission, so a refusal always has one left to name.
             budget_message=(
-                "Test limit reached ({cap}); the scratchpad is exhausted. Submit your solution with submit_solution."
+                "Test limit reached ({cap}); the scratchpad is exhausted. Submit your solution with "
+                f"{SUBMIT_TOOL} ({{left_{SUBMIT_TOOL}}} graded submission(s) left)."
             ),
         )
 

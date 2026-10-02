@@ -6,7 +6,7 @@ import contextlib
 import inspect
 import json
 import warnings
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -161,10 +161,14 @@ class NativeTool:
             raise NotImplementedError(f"Tool '{self.name}' has no handler")
         return self._bind_for_call(handler, arguments)
 
-    def budget_exhausted_message(self, cap: int) -> str:
-        """The observation for a call refused over the episode's cap of ``cap`` calls on this tool."""
+    def budget_exhausted_message(self, cap: int, left: Mapping[str, int]) -> str:
+        """The observation for a call refused over the episode's cap of ``cap`` calls on this tool.
+
+        ``left`` maps each capped tool to the calls it has left, which a ``budget_message`` names as
+        ``{left_<tool>}``, so a refusal can point at the budget that still holds.
+        """
         template = self.budget_message or "{name} limit reached ({cap}); this call was not executed."
-        return template.format(name=self.name, cap=cap)
+        return template.format(name=self.name, cap=cap, **{f"left_{tool}": calls for tool, calls in left.items()})
 
     @staticmethod
     def _as_text(result: Any) -> str:

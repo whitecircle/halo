@@ -602,6 +602,12 @@ class BaseEnvironment(ABC):
             return cap
         return None
 
+    @classmethod
+    def _tool_budgets_left(cls, trajectory: Trajectory) -> dict[str, int]:
+        """The calls each capped tool has left in the episode, by tool name."""
+        budgets = trajectory.info.get(EPISODE_TOOL_BUDGETS_KEY, {})
+        return {name: max(0, cap - cls._tool_calls_made(trajectory, name)) for name, cap in budgets.items()}
+
     @staticmethod
     def _count_tool_call(trajectory: Trajectory, name: str) -> int:
         """Count one admitted call of tool ``name`` for the episode; returns the new count."""

@@ -70,7 +70,7 @@ def admit_tool_call(
     bound = tool.bind(arguments, for_async=for_async)
     cap = env._tool_budget_exhausted(trajectory, tool.name)
     if cap is not None:
-        raise ToolBudgetExhausted(tool.budget_exhausted_message(cap))
+        raise ToolBudgetExhausted(tool.budget_exhausted_message(cap, env._tool_budgets_left(trajectory)))
     env._count_tool_call(trajectory, tool.name)
     return bound
 

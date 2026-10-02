@@ -18,6 +18,7 @@ import pytest
 import torch
 
 from src.trainers.grpo.objective.application import (
+    NEGATIVE_ONLY_MASS_KEY,
     NET_TOKEN_MASS_KEY,
     TOKEN_MASS_SCALE_KEY,
     record_token_mass,
@@ -135,6 +136,31 @@ def test_with_the_balance_off_the_net_mass_is_still_logged():
     assert record_token_mass(advantages, loss_mask, ratio, _local, metrics, enabled=False) is None
     assert metrics[NET_TOKEN_MASS_KEY] == [pytest.approx(-0.5)]
     assert TOKEN_MASS_SCALE_KEY not in metrics
+
+
+def test_the_negative_only_share_is_the_push_the_balance_leaves_on_every_other_row():
+    """The 4-token failing row is a cut turn, trained only on its negative advantage: 2 of the 6 negative
+    mass. Balanced, the negatives shrink by a third, so it carries 2/3 of a total of 4, and the solve's 2
+    against the other failure's 4/3 leaves that same 2/3 pushing up every other row's tokens."""
+    advantages, loss_mask, ratio = _env_step()
+    negative_only = torch.tensor([False, False, True, False])
+    metrics = defaultdict(list)
+    balance = record_token_mass(
+        advantages, loss_mask, ratio, _local, metrics, enabled=True, negative_only=negative_only
+    )
+    assert metrics[NEGATIVE_ONLY_MASS_KEY] == [pytest.approx(1 / 6)]
+    weights = (loss_mask * ratio).sum(dim=1)
+    balanced = balance.apply(advantages)
+    others = ~negative_only
+    assert float((balanced[others] * weights[others]).sum()) == pytest.approx(2 / 3)
+
+    metrics = defaultdict(list)
+    record_token_mass(advantages, loss_mask, ratio, _local, metrics, enabled=False, negative_only=negative_only)
+    assert metrics[NEGATIVE_ONLY_MASS_KEY] == [pytest.approx(2 / 8)], "unbalanced, it is the plain share"
+
+    metrics = defaultdict(list)
+    record_token_mass(advantages, loss_mask, ratio, _local, metrics, enabled=True)
+    assert NEGATIVE_ONLY_MASS_KEY not in metrics, "a trainer with no negative-only rows logs no share"
 
 
 def _grpo_args(loss_type="dapo", top_entropy_quantile=1.0, off_policy_mask_threshold=None):
