@@ -396,6 +396,21 @@ def test_load_best_model_at_end_restores_the_best_checkpoints_adapters(run, tmp_
     _assert_serves_the_fold(final, run.base, saved, backbone_prefix(trainer.model))
 
 
+@pytest.mark.parametrize("for_best_model", [False, True], ids=["resume", "best-model"])
+def test_an_injected_lora_resume_restores_the_state_beside_its_weights(run, monkeypatch, for_best_model):
+    """The router-balancing biases and the trainer sidecars sit beside the adapter this path restores in place
+    of the weights; skipped, a resumed run re-imbalances its router and drops its sidecar state."""
+    restored = []
+    monkeypatch.setattr(
+        EmbeddingTrainer,
+        "_restore_state_beside_weights",
+        lambda self, checkpoint, *, for_best_model: restored.append((checkpoint, for_best_model)),
+    )
+    host = _host(_lora_model(run.base, seed=2))
+    EmbeddingTrainer._load_from_checkpoint(host, run.checkpoint, for_best_model=for_best_model)
+    assert restored == [(run.checkpoint, for_best_model)]
+
+
 # --- refusals -------------------------------------------------------------------------------
 
 

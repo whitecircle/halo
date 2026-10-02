@@ -655,9 +655,7 @@ class EmbeddingTrainer(DistributedTrainerMixin, SentenceTransformerTrainer):
         if not marked:
             raise ValueError(unmarked_merged_checkpoint_reason(resume_from_checkpoint))
         self._restore_injected_lora(resume_from_checkpoint)
-        self._restore_router_balancing_biases(resume_from_checkpoint)
-        if not for_best_model:
-            self._restore_trainer_sidecars(resume_from_checkpoint)
+        self._restore_state_beside_weights(resume_from_checkpoint, for_best_model=for_best_model)
 
     def _restore_injected_lora(self, checkpoint: str) -> None:
         """Copy the resume adapter into the live trainable tensors, bit-exact at an unchanged dtype.
