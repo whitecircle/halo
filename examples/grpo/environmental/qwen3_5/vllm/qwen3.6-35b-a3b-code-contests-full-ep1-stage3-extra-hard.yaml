@@ -108,7 +108,6 @@ isr_veto_min: 1.0e-4         # any corrected token below this raw ratio masks it
 isr_opsm_delta: 0.05         # masks negative-advantage trajectories with |mean log-ratio| > delta (nats)
 skip_update_masked_frac: 0.4  # skip the optimizer step when > this fraction of corrected trajectories or tokens is masked
 early_stop_on_skipped_updates: true  # end the run once the breaker has skipped every update of early_stop_patience (3) rounds in a row
-early_stop_entropy_band: [0.15, 0.35]  # healthy Qwen3.6 runs hold 0.20-0.29: collapse falls below the band, explosion rises above
 early_stop_logratio_gap: 0.005         # the healthy |log-ratio| here is ~0.002, the sampler numerics; it widens as the policy drifts
 scale_rewards_std_floor: 0.2  # floor (reward units) on the batch-std divisor
 num_generations_eval: 1

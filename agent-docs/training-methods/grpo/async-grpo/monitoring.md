@@ -46,11 +46,13 @@ Off unless a condition is set. Each condition counts its breaching readings in a
 
 | Knob | Stops when | Reads |
 |---|---|---|
-| `early_stop_entropy_band` | entropy stays outside `[low, high]` | `entropy` |
+| `early_stop_entropy_band` | `entropy` stays outside `[low, high]` | TRL's `entropy` |
 | `early_stop_logratio_gap` | the trainer-vs-sampler gap stays above it | the magnitude of `sampling/logratio_mean`; needs the IS correction |
 | `early_stop_on_skipped_updates` | the breaker skipped every update | `sampling/update_skipped`; needs `skip_update_masked_frac` |
 
-The band and the gap are model-specific: read them off a healthy run. A drift shows in the gap before it shows in entropy, since the gap grows faster than entropy once the policy flattens. The Qwen3.6 code-contests recipes stop on a band of `[0.15, 0.35]` and, on vLLM, a gap of `0.005`; every code-contests recipe stops on skipped updates. Online GRPO takes the band and the gap ([Online GRPO](../online-grpo.md)).
+TRL's `entropy` is a mean of per-micro-batch means over the loss tokens, and it counts a micro-batch whose loss tokens were all dropped (degenerate groups, invalid episodes, padding rows) as 0. Under drops it therefore reads below the policy's entropy, and it moves with the dropped share as well as with the policy.
+
+The band and the gap are model-specific: read them off a healthy run. A drift shows in the gap before it shows in entropy, since the gap grows faster than entropy once the policy flattens. The Qwen3.6 vLLM code-contests recipes stop on a gap of `0.005`; every code-contests recipe stops on skipped updates. Online GRPO takes the band and the gap ([Online GRPO](../online-grpo.md)).
 
 ## Evaluation
 

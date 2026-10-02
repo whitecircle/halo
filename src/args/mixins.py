@@ -323,11 +323,12 @@ class GRPOEarlyStopArguments(RangeValidatedConfig):
     early_stop_entropy_band: list[float] | None = field(
         default=None,
         metadata={
-            "help": "Early stop: end training once the policy entropy (`entropy`) stays outside this "
-            "[low, high] band for `early_stop_patience` readings in a row. A KL-free run drifts in "
-            "either direction, toward collapse below the band or explosion above it, and both start "
-            "slowly enough to stop on. The band is model-specific: read it off a healthy run. "
-            "None (default) = off."
+            "help": "Early stop: end training once TRL's `entropy` metric stays outside this [low, high] band "
+            "for `early_stop_patience` readings in a row. The metric counts a micro-batch whose loss tokens "
+            "were all dropped (degenerate groups, invalid episodes) as 0, so under drops it reads below the "
+            "policy's entropy. A KL-free run drifts in either direction, toward collapse below the band or "
+            "explosion above it, and both start slowly enough to stop on. The band is model-specific: read "
+            "it off a healthy run. None (default) = off."
         },
     )
     early_stop_logratio_gap: float | None = field(

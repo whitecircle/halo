@@ -94,7 +94,6 @@ isr_veto_min: 1.0e-4
 isr_opsm_delta: 0.05
 skip_update_masked_frac: 0.4
 early_stop_on_skipped_updates: true  # end the run once the breaker has skipped every update of early_stop_patience (3) rounds in a row
-early_stop_entropy_band: [0.15, 0.35]  # healthy Qwen3.6 runs hold 0.20-0.29: collapse falls below the band, explosion rises above
 scale_rewards_std_floor: 0.2
 num_generations_eval: 1
 scale_rewards: batch
