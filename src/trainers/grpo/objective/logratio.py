@@ -91,9 +91,9 @@ def compute_is_ratio(
     row_has_sampling: torch.Tensor,
     clip_max: float,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-    """Truncated per-token vLLM→trainer importance ratio ``clamp(exp(logπ_recompute − logπ_sampling), clip_max)``.
+    """Truncated per-token engine→trainer importance ratio ``clamp(exp(logπ_recompute − logπ_sampling), clip_max)``.
 
-    Rows flagged ``False`` in ``row_has_sampling`` (rollout error dropped their vLLM logprobs) and
+    Rows flagged ``False`` in ``row_has_sampling`` (rollout error dropped their sampling logprobs) and
     non-policy tokens get ratio exactly 1, so one bad row cannot perturb the others. So does a token
     the sampler reports as certain (:data:`SAMPLER_CERTAIN_LOGPROB`): no sampling choice was made
     there, so it carries no importance weight and cannot trip a band or the veto.

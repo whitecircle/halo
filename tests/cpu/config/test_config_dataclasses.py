@@ -7,10 +7,12 @@ Run: python tests/cpu/config/test_config_dataclasses.py
 """
 
 import contextlib
+import logging
 import os
 
 import pytest
 
+import src.configs.async_training_config as async_training_config
 from src.configs.async_training_config import POSITIVE_ROLLOUT_FIELDS, AsyncTrainingConfig
 from src.configs.environment_config import EnvironmentConfig
 from src.configs.smpo_config import SmoothMarginPOConfig
@@ -496,6 +498,16 @@ def test_async_config_episode_timeout_equal_watchdog_does_not_raise():
         cfg = AsyncTrainingConfig(episode_timeout=1800.0)  # == default 1800s watchdog
         rc = cfg.get_rollout_config()  # no raise
         assert rc.episode_timeout == 1800.0
+
+
+@pytest.mark.parametrize("main_process", [True, False])
+def test_async_config_watchdog_warnings_are_said_once_not_once_per_rank(monkeypatch, caplog, main_process):
+    """Every rank builds its rollout config, and both near-watchdog warnings describe the config alone."""
+    monkeypatch.setattr(async_training_config, "is_global_main_process", lambda: main_process)
+    with _nccl_watchdog_minutes(None), caplog.at_level(logging.WARNING, logger=async_training_config.logger.name):
+        AsyncTrainingConfig(episode_timeout=1800.0, request_timeout=1800.0).get_rollout_config()
+    for warning in ("episode_timeout (1800s) is within", "Rollout retry budget"):
+        assert (warning in caplog.text) is main_process, warning
 
 
 def test_positive_rollout_knob_sweep_covers_the_production_tuple():

@@ -91,12 +91,13 @@ def build_early_stop_callback(
     """The callback a trainer attaches for ``config``, or ``None`` when no condition is set.
 
     Refuses a log-prob gap condition the trainer would never feed: ``gap_logged`` is whether its run logs
-    ``gap_key`` at all (both trainers log it only under the vLLM importance-sampling correction)."""
+    ``gap_key`` at all (both trainers log it only under the importance-sampling correction)."""
     if not config.active:
         return None
     if config.logratio_gap is not None and not gap_logged:
         raise ValueError(
-            f"early_stop_logratio_gap reads {gap_key}, which only the vLLM importance-sampling correction "
-            "logs, and the correction is off in this run: the stop would never fire."
+            f"early_stop_logratio_gap reads {gap_key}, which only the importance-sampling correction "
+            "(vllm_importance_sampling_correction) logs, and the correction is off in this run: the stop would "
+            "never fire."
         )
     return GRPOEarlyStopCallback(config, gap_key)

@@ -24,7 +24,7 @@ from trl.trainer.utils import pad
 from src.configs.async_training_config import AsyncTrainingConfig
 from src.configs.rollout_config import THINKING_SCOPE_EPISODE
 from src.distributed.nccl.registry import resolve_weight_sync_client
-from src.distributed.runtime import is_multi_rank_run, reject_across_ranks
+from src.distributed.runtime import get_global_rank, is_multi_rank_run, reject_across_ranks
 from src.environments.base import (
     ANSWER_KEY,
     EPISODE_INVALID_REASON_KEY,
@@ -219,7 +219,7 @@ class DistributedAsyncEnvironmentalGRPOTrainer(
 
     _supports_pp = False
     _pp_unsupported_reason = (
-        "inherits online GRPO's cross-stage vLLM weight-sync and rollout-phase forward blockers, and "
+        "inherits online GRPO's cross-stage engine weight-sync and rollout-phase forward blockers, and "
         "adds Ray-driven multi-turn async rollouts whose generation lengths vary per turn — the "
         "pipeline freezes its boundary activation shape on the first step"
     )
@@ -318,6 +318,8 @@ class DistributedAsyncEnvironmentalGRPOTrainer(
         self._drop_degenerate_groups = self.async_config.drop_degenerate_groups
         # Both range-validated by AsyncTrainingConfig._validate_ranges (finiteness included).
         self._scale_rewards_std_floor = self.async_config.scale_rewards_std_floor
+        # Ahead of the balance gate, which refuses the mask beside it: here the mask is refused on its own.
+        reject_off_policy_mask_threshold(self.args)
         self._balance_token_mass = self.async_config.balance_token_mass
         if self._balance_token_mass:
             validate_token_mass_balance(self.args)
@@ -330,7 +332,7 @@ class DistributedAsyncEnvironmentalGRPOTrainer(
         # Keys of the once-per-run warnings already issued (warn_once), the tokenize mixin's included.
         self._warned_once: set[str] = set()
 
-        # Mask/veto stages on the vLLM->trainer IS ratio (all default off). Built eagerly to validate bounds.
+        # Mask/veto stages on the engine->trainer IS ratio (all default off). Built eagerly to validate bounds.
         self._is_mask_config = ISMaskConfig(
             geo_band_min=self.async_config.isr_geo_band_min,
             geo_band_max=self.async_config.isr_geo_band_max,
@@ -338,7 +340,7 @@ class DistributedAsyncEnvironmentalGRPOTrainer(
             opsm_delta=self.async_config.isr_opsm_delta,
         )
 
-        # Score log-probs at vLLM's sampling temperature, or the IS ratio picks up a systematic bias.
+        # Score log-probs at the engine's sampling temperature, or the IS ratio picks up a systematic bias.
         if self.temperature != self.async_config.rollout_temperature:
             logger.info(
                 f"Scoring log-probs at the sampling temperature: temperature "
@@ -355,13 +357,13 @@ class DistributedAsyncEnvironmentalGRPOTrainer(
                 "correction is DISABLED: the ratio needs the sampling log-probs the server returns "
                 "alongside the sampled tokens. Every batch then trains uncorrected for the engine-vs-trainer "
                 "numerics gap, and for a weight-sync lag where one exists (enable_prefetch, "
-                "sync_weights_every_n_steps > 1). Set train_on_sampled_tokens: true (the server needs "
+                "sync_weights_every_n_steps > 1). Set train_on_sampled_tokens: true (a vLLM server needs "
                 "--return-tokens-as-token-ids), or set the correction to false deliberately."
             )
         self._require_forced_close_neutralised()
         if self._is_mask_config.any_stage_active and not self._is_correction:
             raise ValueError(
-                "isr_geo_band/isr_veto/isr_opsm knobs require the vLLM importance-sampling "
+                "isr_geo_band/isr_veto/isr_opsm knobs require the importance-sampling "
                 "correction (train_on_sampled_tokens + vllm_importance_sampling_correction) — "
                 "without it they would silently do nothing."
             )
@@ -369,7 +371,7 @@ class DistributedAsyncEnvironmentalGRPOTrainer(
             self._is_correction and self._is_mask_config.any_stage_active
         ):
             raise ValueError(
-                "skip_update_masked_frac requires the vLLM importance-sampling correction AND at "
+                "skip_update_masked_frac requires the importance-sampling correction AND at "
                 "least one IS mask stage (isr_geo_band/isr_veto/isr_opsm) — without them no "
                 "trajectory is ever masked and the circuit breaker would silently never fire."
             )
@@ -393,7 +395,6 @@ class DistributedAsyncEnvironmentalGRPOTrainer(
                 "vllm_importance_sampling_clip_min is ignored: environmental GRPO clips the IS ratio "
                 "from above only (vllm_importance_sampling_clip_max)."
             )
-        reject_off_policy_mask_threshold(self.args)
         # Derived from the config class rather than a literal table, so a TRL default change cannot
         # turn this warning into a false positive.
         arg_defaults = {f.name: f.default for f in dataclasses.fields(type(self.args))}
@@ -411,19 +412,6 @@ class DistributedAsyncEnvironmentalGRPOTrainer(
             )
 
         self._init_async_state()
-
-        servers = (
-            f"{len(self.async_config.rollout_server_configs)} servers"
-            if self._multi_server_mode
-            else self.async_config.rollout_server_url
-        )
-        env_display = (
-            self._environment_spec[0].__name__ if isinstance(self._environment_spec, tuple) else self._environment_spec
-        )
-        logger.info(
-            f"DistributedAsyncEnvironmentalGRPOTrainer initialized: "
-            f"{self.async_config.num_rollout_workers} workers, {self._rollout_engine_name}={servers}, env={env_display}"
-        )
 
         self._finish_on_policy_init()
 
@@ -928,7 +916,7 @@ class DistributedAsyncEnvironmentalGRPOTrainer(
 
         rows = BatchRows(rollout_results, turns_per_traj, num_dummy_rows, self._train_on_sampled_tokens)
 
-        # A turn missing vLLM logprobs keeps ratio ≡ 1 for that row alone. Zeros are inert: row_has_sampling
+        # A turn missing sampling logprobs keeps ratio ≡ 1 for that row alone. Zeros are inert: row_has_sampling
         # masks them.
         all_sampling_logps = [
             o if o is not None else torch.zeros(len(c), device=device)
@@ -1265,7 +1253,7 @@ class DistributedAsyncEnvironmentalGRPOTrainer(
                 row_has_sampling,
                 self.vllm_importance_sampling_clip_max,
             )
-            # Unclamped mean log-ratio (nats): ~0 when conditioning matches vLLM's exact prompt.
+            # Unclamped mean log-ratio (nats): ~0 when conditioning matches the engine's exact prompt.
             self._world_metrics.fraction(LOGRATIO_MEAN_KEY, logps_diff.sum(), corrected_mask.sum())
             clip_max = self.vllm_importance_sampling_clip_max
             # Past the truncation point in either direction, on the raw trainer-vs-sampler ratio; the
@@ -1305,7 +1293,7 @@ class DistributedAsyncEnvironmentalGRPOTrainer(
         and top-p of 1) — at any other setting the two references would not be the same function."""
         if not self._is_correction:
             raise ValueError(
-                "isr_engine_reference requires the vLLM importance-sampling correction "
+                "isr_engine_reference requires the importance-sampling correction "
                 "(train_on_sampled_tokens + vllm_importance_sampling_correction): the engine re-score "
                 "is compared against the sampling log-probs that correction captures."
             )
@@ -1362,9 +1350,12 @@ class DistributedAsyncEnvironmentalGRPOTrainer(
         self._world_metrics.fraction("sampling/engine_rescore_miss_frac", len(failures), len(indices))
         if failures:
             report = logger.error if len(failures) == len(indices) else logger.warning
+            # main_process_only=False: the failure is this rank's own requests, invisible to rank 0.
             report(
-                f"isr_engine_reference: {len(failures)}/{len(indices)} re-score requests failed this step "
-                f"(those rows read the trainer's log-ratio instead); last error: {failures[-1]}"
+                f"[rank {get_global_rank()}] isr_engine_reference: {len(failures)}/{len(indices)} re-score "
+                f"requests failed this step (those rows read the trainer's log-ratio instead); last error: "
+                f"{failures[-1]}",
+                main_process_only=False,
             )
         return scored
 

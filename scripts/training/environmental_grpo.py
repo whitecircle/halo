@@ -138,7 +138,8 @@ def probe_template_kwargs(async_config: AsyncTrainingConfig, environment) -> dic
 
 
 def rollout_start_log(env_settings: dict, async_config: AsyncTrainingConfig) -> list[str]:
-    """The run's environment settings and rollout setup, as lines of the start log."""
+    """The run's environment settings and rollout setup, as lines of the start log — the one place they
+    are logged, prefetch as the trainer resolves it against the server count."""
     if async_config.rollout_server_configs:
         servers = [
             f"rollout_server_{i}: {cfg['url']} (port {cfg.get('group_port', 'auto')})"
@@ -148,11 +149,12 @@ def rollout_start_log(env_settings: dict, async_config: AsyncTrainingConfig) -> 
         servers = [f"rollout_server: {async_config.rollout_server_url}"]
     return [
         *(f"{key}: {value}" for key, value in env_settings.items()),
+        f"rollout_backend: {async_config.rollout_backend}",
         f"rollout_workers: {async_config.num_rollout_workers}",
         f"max_concurrent: {async_config.max_concurrent_rollouts or 'auto'}",
         *servers,
         f"weight_sync: every {async_config.sync_weights_every_n_steps} steps",
-        f"prefetch: {'enabled' if async_config.enable_prefetch else 'disabled'}",
+        f"prefetch: {'enabled' if async_config.prefetch_active() else 'disabled'}",
         f"model: {async_config.model_name}",
     ]
 

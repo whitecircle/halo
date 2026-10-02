@@ -201,11 +201,30 @@ def test_a_zero_token_turn_yields_no_row_and_the_other_turns_still_train_per_tur
     assert SAMPLED_IDS_MISSING_WARNING not in trainer._warned_once
 
 
-def test_an_all_empty_trajectory_is_one_masked_row_without_a_re_render():
-    trainer = _trainer()
+def _refused_render(*_args):
+    raise ValueError("the template rejects this prefix")
+
+
+# Every way a turn leaves the per-turn batch without dropping its episode: a zero-token capture, a row
+# over the cap, and an untrainable turn whose prefix the template rejects (its engine prompt ids absent).
+_EXCLUDED_TURNS = {
+    "zero-token": (_turn([]), _turn([], prompt_len=3)),
+    "over-cap": (_turn([5, 6, 7, 8], prompt_len=4),),
+    "untrainable-render-refused": (_turn([5, 6], prompt_len=0, truncated=True),),
+    "mixed": (_turn([]), _turn([5, 6, 7, 8], prompt_len=4), _turn([5, 6], prompt_len=0, truncated=True)),
+}
+
+
+@pytest.mark.parametrize("turns", list(_EXCLUDED_TURNS.values()), ids=list(_EXCLUDED_TURNS))
+def test_an_all_excluded_trajectory_is_one_masked_row_without_a_re_render(turns):
+    trainer = _trainer(cap=6)
+    trainer._render_messages_to_ids = _refused_render
     trainer._tokenize_trajectory = lambda result: pytest.fail("nothing to render: the row is the placeholder")
-    rows = trainer._tokenize_trajectory_turns(_result(_turn([]), _turn([], prompt_len=3)))
+    result = _result(*turns)
+    rows = trainer._tokenize_trajectory_turns(result)
     assert len(rows) == 1 and rows[0].completion_mask.tolist() == [0]
+    assert not result.trajectory.episode_invalid, "an excluded turn leaves its episode in the group baseline"
+    assert trainer._batch_build_error is None
 
 
 def test_a_trainable_turn_with_no_capture_still_falls_the_trajectory_back():

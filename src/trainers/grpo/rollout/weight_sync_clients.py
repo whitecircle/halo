@@ -118,7 +118,7 @@ def verify_sampler_logprob_reference(
             if semantics.temperature_applied is None:
                 logger.warning(
                     f"Rollout server {url}: could not verify that its logprobs carry the sampling temperature "
-                    f"({temperature}); the IS ratio is biased if they are vLLM's default raw values."
+                    f"({temperature}); the IS ratio is biased if they are raw pre-temperature values (vLLM's default)."
                 )
             elif not semantics.temperature_applied:
                 raise ValueError(

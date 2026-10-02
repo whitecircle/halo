@@ -25,6 +25,7 @@ from src.configs.rollout_config import (
     RolloutConfig,
     ThinkingBudgetScope,
 )
+from src.distributed.runtime import is_global_main_process
 from src.env import WATCHDOG_WARN_FRACTION, resolve_nccl_timeout_minutes
 
 logger = logging.getLogger(__name__)
@@ -712,6 +713,11 @@ class AsyncTrainingConfig(AdvantageShapingArguments, GRPOEarlyStopArguments, Chu
             return [c["url"] for c in self.rollout_server_configs]
         return [self.rollout_server_url]
 
+    def prefetch_active(self) -> bool:
+        """Whether the run prefetches: ``enable_prefetch`` with two or more rollout servers. A weight sync
+        pauses a lone engine for its whole push, so with one server there is nothing to overlap against."""
+        return self.enable_prefetch and len(self.get_server_urls()) > 1
+
     def rollout_template_variables(self) -> dict[str, Any]:
         """The run-wide chat-template variables every request and every trainer-side render carries: the
         YAML's ``rollout_chat_template_kwargs`` plus, under the episode thinking scope, the scope variable
@@ -769,7 +775,8 @@ class AsyncTrainingConfig(AdvantageShapingArguments, GRPOEarlyStopArguments, Chu
                 f"episode_timeout (keep ≥15 min margin so the cancelled rank can unwind and rejoin), or "
                 f"lower episode_timeout."
             )
-        if self.episode_timeout >= WATCHDOG_WARN_FRACTION * watchdog:
+        # Every rank builds a rollout config; a warning about the config itself is said once.
+        if self.episode_timeout >= WATCHDOG_WARN_FRACTION * watchdog and is_global_main_process():
             logger.warning(
                 f"episode_timeout ({self.episode_timeout:.0f}s) is within "
                 f"{(1 - WATCHDOG_WARN_FRACTION) * 100:.0f}% of the NCCL watchdog "
@@ -780,7 +787,7 @@ class AsyncTrainingConfig(AdvantageShapingArguments, GRPOEarlyStopArguments, Chu
         attempts = self.max_retries + 1
         backoff = self.retry_base_wait * (2**self.max_retries - 1)
         worst_case = attempts * self.request_timeout + backoff
-        if worst_case >= WATCHDOG_WARN_FRACTION * watchdog:
+        if worst_case >= WATCHDOG_WARN_FRACTION * watchdog and is_global_main_process():
             logger.warning(
                 f"Rollout retry budget (~{worst_case:.0f}s = {attempts}×{self.request_timeout:.0f}s "
                 f"request_timeout + backoff) is close to the {watchdog:.0f}s NCCL collective watchdog. "

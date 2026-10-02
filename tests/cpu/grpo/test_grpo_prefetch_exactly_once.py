@@ -17,11 +17,14 @@ queue silently discards completed rollouts. The contract:
   ``_raise_batch_error_uniformly``, never raised on the one rank that hit it — prefetch state is
   per-rank, so a lone raise between two collectives parks every peer until the NCCL watchdog;
 - a checkpoint carries the rounds submitted but not trained, and a resume submits them first, so a
-  resumed run trains the same batch sequence as an uninterrupted one.
+  resumed run trains the same batch sequence as an uninterrupted one;
+- one engine turns prefetch off, the start log states the prefetch the trainer runs, and the
+  auto-disable warning is said once, not once per rank.
 
     python tests/cpu/grpo/test_grpo_prefetch_exactly_once.py
 """
 
+import logging
 import queue
 import threading
 import types
@@ -35,6 +38,9 @@ from src.configs.async_training_config import AsyncTrainingConfig
 from src.trainers.grpo.environmental import DistributedAsyncEnvironmentalGRPOTrainer as _T
 from src.trainers.grpo.rollout.async_rollouts import AsyncRolloutMixin
 from src.trainers.mixins.checkpointing import CheckpointingMixin
+from tests.common.utils import load_script_module
+
+env_grpo_script = load_script_module("scripts/training/environmental_grpo.py")
 
 
 class _Host(AsyncRolloutMixin, CheckpointingMixin):
@@ -236,7 +242,6 @@ class _LifecycleHost:
         self._rollout_manager = None
         self._weight_sync_client = None
         self._loop = None
-        self._num_rollout_servers = 1
         self._prefetch_enabled = True
         self._rollout_start_callback = None
         self._rollout_generation_started = False
@@ -449,7 +454,11 @@ def _async_state(server_configs):
     return host
 
 
-@pytest.mark.parametrize("server_configs", [None, [{"url": "http://s0:8000"}]])
+_ONE_ENGINE = [None, [{"url": "http://s0:8000"}]]
+_TWO_ENGINES = [{"url": "http://s0:8000"}, {"url": "http://s1:8000"}]
+
+
+@pytest.mark.parametrize("server_configs", _ONE_ENGINE)
 def test_prefetch_is_disabled_whenever_a_single_engine_serves(server_configs):
     """One engine — however it is spelled — must turn prefetch off.
 
@@ -459,8 +468,24 @@ def test_prefetch_is_disabled_whenever_a_single_engine_serves(server_configs):
     rollouts into the paused engine.
     """
     host = _async_state(server_configs)
-    assert host._num_rollout_servers == 1
     assert host._prefetch_enabled is False
+
+
+@pytest.mark.parametrize("server_configs", [*_ONE_ENGINE, _TWO_ENGINES], ids=["url", "one-entry-list", "two-servers"])
+def test_the_start_log_states_the_prefetch_the_trainer_runs(server_configs):
+    """Read off ``enable_prefetch``, the start log said "prefetch: enabled" on every single-server run,
+    whose trainer turns prefetch off."""
+    host = _async_state(server_configs)
+    lines = env_grpo_script.rollout_start_log({}, host.async_config)
+    assert f"prefetch: {'enabled' if host._prefetch_enabled else 'disabled'}" in lines
+
+
+@pytest.mark.parametrize("main_process", [True, False])
+def test_the_auto_disable_warning_is_said_once_not_once_per_rank(monkeypatch, caplog, main_process):
+    monkeypatch.setattr(async_mod, "is_global_main_process", lambda: main_process)
+    with caplog.at_level(logging.WARNING, logger=async_mod.logger.name):
+        _async_state(None)
+    assert ("Prefetch auto-disabled" in caplog.text) is main_process
 
 
 def test_prefetch_stays_on_for_two_engines_and_the_client_shape_follows_the_list():

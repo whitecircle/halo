@@ -4,7 +4,8 @@
 Locks the decoupling contract used by the online + env GRPO trainers: the durable parquet record is
 gated by ``save`` (CommonScriptArguments.save_completions) and the rich console table by ``console``
 (TRL's log_completions) — independently. Recoupling them, e.g. skipping the parquet unless the
-console prints, is the failure this forbids.
+console prints, is the failure this forbids. The record follows the per-node writer election, the
+console table global rank 0 alone.
 
 Also pins how the record REACHES that writer (``rollout_metrics._populate_completion_logs``): the
 full trajectory render is gathered to the writer rank, never all-gathered to all of them, and every
@@ -154,6 +155,23 @@ def test_every_node_writes_when_the_output_filesystem_is_not_shared(tmp_path, mo
     emit_completion_artifacts(trainer, console=False, save=True)
 
     assert os.path.exists(_parquet_path(str(tmp_path))), "a per-node output FS lost this node's completions"
+
+
+def test_a_per_node_writer_writes_its_record_but_leaves_the_console_table_to_rank_zero(tmp_path, monkeypatch) -> None:
+    """The writer election is per node on a per-node output filesystem; the console is not, and a table
+    printed by every node's writer reached the log once per node."""
+    printed = []
+    monkeypatch.setattr(cl, "print_prompt_completions_sample", lambda *a, **k: printed.append(a))
+    monkeypatch.setattr(cl, "is_rich_available", lambda: True)
+    monkeypatch.setattr(runtime, "get_global_rank", lambda: 8)  # the second node's local rank 0
+    monkeypatch.setattr(runtime, "is_local_main_process", lambda: True)
+    monkeypatch.setenv("DIST_OUTPUT_SHARED_FILESYSTEM", "0")
+    monkeypatch.setattr(runtime, "_SHARED_FILESYSTEM_CONSENSUS", None)
+
+    emit_completion_artifacts(_Trainer(str(tmp_path)), console=True, save=True)
+
+    assert os.path.exists(_parquet_path(str(tmp_path))), "the node's writer still owes its parquet"
+    assert printed == [], "the console table printed on a rank other than global rank 0"
 
 
 def test_eval_mode_writes_suffixed_parquet(tmp_path, monkeypatch) -> None:

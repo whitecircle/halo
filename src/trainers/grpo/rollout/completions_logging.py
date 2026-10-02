@@ -18,7 +18,7 @@ import wandb
 from transformers.utils import is_rich_available
 from trl.trainer.utils import print_prompt_completions_sample
 
-from src.distributed.runtime import fs_aware_save_rank
+from src.distributed.runtime import fs_aware_save_rank, is_global_main_process
 
 logger = logging.getLogger(__name__)
 
@@ -70,8 +70,9 @@ def emit_completion_artifacts(trainer, *, console: bool, save: bool, mode: str |
     """Write the completions parquet + wandb table and/or print the console sample table, then
     empty ``trainer._logs`` on every rank.
 
-    Writer rank only; reads ``trainer._logs``. ``console`` prints the per-sample table; ``save`` writes
-    the parquet under ``<output_dir>/completions/`` and logs a ``completions`` table to wandb.
+    Writer rank only; reads ``trainer._logs``. ``console`` prints the per-sample table on the global
+    main process alone, where a per-node writer would print it once per node; ``save`` writes the
+    parquet under ``<output_dir>/completions/`` and logs a ``completions`` table to wandb.
     ``mode`` names the rows' mode when it is not the model's current one (train rows written as an
     eval round begins); by default the model's mode picks the file.
 
@@ -94,7 +95,7 @@ def _emit_completion_artifacts(trainer, *, console: bool, save: bool, mode: str)
     if not prompts:
         return
 
-    if console and is_rich_available():
+    if console and is_rich_available() and is_global_main_process():
         print_prompt_completions_sample(
             prompts,
             list(logs["completion"]),

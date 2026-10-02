@@ -392,14 +392,12 @@ class TrajectoryTokenizeMixin:
 
         context_limit = self._context_limit()
         rows: list[TurnRow] = []
-        excluded_unusable = False
         for idx, m in enumerate(messages):
             if m.role != "assistant":
                 continue
             # A zero-token turn has nothing to train either: rendering it would weight the template
             # scaffolding the engine never emitted. An untrainable turn is built like any other, tagged.
             if not m.token_ids:
-                excluded_unusable = True
                 continue
             # Engine prompt ids take priority: a client re-render drifts on effort steering, tool
             # schemas and channel placement.
@@ -408,8 +406,7 @@ class TrajectoryTokenizeMixin:
             else:
                 # A template that rejects this prefix (a turn ending on a `tool` message) fails on
                 # one rank only, so it must never raise per rank; the episode is dropped instead, as
-                # one masked row — no earlier turn of it trains, and the whole-trajectory fallback
-                # below cannot hand the invalidated episode a weighted row.
+                # one masked row, so no earlier turn of it trains.
                 try:
                     prompt_ids = self._render_messages_to_ids(
                         engine_view(messages[:idx], self._carry_reasoning), True, template_kwargs
@@ -417,7 +414,6 @@ class TrajectoryTokenizeMixin:
                 except Exception as e:  # never a per-rank raise; the episode is dropped, the run goes on
                     if m.untrainable:
                         # Its row only ever adds a penalty; losing it costs no other turn its row.
-                        excluded_unusable = True
                         continue
                     self._invalidate_untrainable_episode(
                         result,
@@ -443,7 +439,6 @@ class TrajectoryTokenizeMixin:
             if self._max_train_row_tokens is not None and row_len > self._max_train_row_tokens:
                 # Over the rank's memory bound: this turn leaves the batch, the episode's other turns stay.
                 self._rows_over_cap += 1
-                excluded_unusable = True
                 continue
             lp = m.token_logprobs
             sampling_logps = torch.tensor(lp, dtype=torch.float32) if lp and len(lp) == len(comp) else None
@@ -466,10 +461,7 @@ class TrajectoryTokenizeMixin:
             )
 
         if not rows:
-            if excluded_unusable:
-                # Every assistant turn was excluded, so the whole-trajectory render below could only
-                # mask out the same turns and return this row anyway — at the cost of re-rendering a
-                # trajectory that carries no trainable token.
-                return single_trajectory_row(self._masked_trajectory_tensors())
-            return single_trajectory_row(self._tokenize_trajectory(result))
+            # Every assistant turn was excluded: a whole-trajectory render could only mask out the same
+            # turns, at the cost of re-rendering a trajectory that carries no trainable token.
+            return single_trajectory_row(self._masked_trajectory_tensors())
         return rows

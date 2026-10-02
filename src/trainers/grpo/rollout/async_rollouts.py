@@ -131,20 +131,18 @@ class AsyncRolloutMixin:
         self._engine_rescore_clients_list: list[BaseWeightSyncClient] | None = None
         self._loop = None
         # Two separate questions: which client shape to build (a configs list of any length carries
-        # its own per-server url/ports) and how many engines serve (a one-entry list is one server).
+        # its own per-server url/ports) and how many engines serve, which prefetch_active counts (a
+        # one-entry list is one server).
         self._multi_server_mode = bool(self.async_config.rollout_server_configs)
-        self._num_rollout_servers = len(self.async_config.get_server_urls())
 
-        self._prefetch_enabled = self.async_config.enable_prefetch
-        if self._prefetch_enabled and self._num_rollout_servers < 2:
+        self._prefetch_enabled = self.async_config.prefetch_active()
+        if self.async_config.enable_prefetch and not self._prefetch_enabled and is_global_main_process():
             logger.warning(
-                "Prefetch auto-disabled: %d rollout server configured. Every weight sync pauses that one "
+                "Prefetch auto-disabled: 1 rollout server configured. Every weight sync pauses that one "
                 "engine for its whole push, so a prefetched round would only sit frozen (vLLM) or be "
                 "aborted (SGLang) across it; prefetch is enabled with two or more servers in "
-                "rollout_server_configs.",
-                self._num_rollout_servers,
+                "rollout_server_configs."
             )
-            self._prefetch_enabled = False
 
         self._prefetch_thread = None
         self._prefetch_queue = queue.Queue(maxsize=self.async_config.num_prefetch_batches)
@@ -209,15 +207,6 @@ class AsyncRolloutMixin:
         if self._rollout_start_callback is None:
             self._rollout_start_callback = _RolloutStartCallback(self)
             self.add_callback(self._rollout_start_callback)
-
-        logger.info(
-            f"Async components initialized: "
-            f"{self._rollout_manager.num_workers} Ray actors (this rank), "
-            f"{self._num_rollout_servers} rollout servers, "
-            f"max_concurrent={self._rollout_manager.max_concurrent}, "
-            f"prefetch={'enabled' if self._prefetch_enabled else 'disabled'}, "
-            f"main_process={self.accelerator.is_main_process}"
-        )
 
     def _start_rollout_generation(self):
         """Push the trainer's weights to the engines and start the prefetch thread. Collective.
@@ -612,16 +601,13 @@ class AsyncRolloutMixin:
         return not force and self.state.global_step % self.async_config.sync_weights_every_n_steps != 0
 
     def _sync_weights_to_engine_single(self, force: bool = False) -> bool:
-        """Sync model weights to the rollout engine via NCCL (main process only); ``force`` ignores the step gate.
+        """Sync weights to the rollout engine via NCCL from a single-process run; ``force`` ignores the step gate.
 
         Only the raw-model path below — a single training process, no adapters, no EP wrappers — syncs
         a multi-server pool one server at a time; every other shape gathers and pauses all servers
         together for the push. Returns whether weights were pushed, so the caller does not record a
         sync the cadence gate declined.
         """
-        if not self.accelerator.is_main_process:
-            return False
-
         if self._sync_cadence_declines(force):
             return False
 
@@ -653,10 +639,10 @@ class AsyncRolloutMixin:
     def _sync_weights_to_engine(self, force: bool = False) -> bool:
         """Sync weights to the rollout engine with EP/TP/FSDP/PEFT awareness; ``force`` ignores the step gate.
 
-        Single-process runs use the main-process-only single path; EP/TP/ETP and any multi-rank run
-        route through the all-ranks collective gather. Returns whether weights were pushed, which is
-        what the caller records: the cadence gate declines most steps, so a stamp taken on the attempt
-        would claim the engines hold weights that were never sent.
+        A single-process run takes :meth:`_sync_weights_to_engine_single`; EP/TP/ETP and any multi-rank
+        run route through the all-ranks collective gather. Returns whether weights were pushed, which
+        is what the caller records: the cadence gate declines most steps, so a stamp taken on the
+        attempt would claim the engines hold weights that were never sent.
         """
         config = self.parallelism_config
 

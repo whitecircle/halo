@@ -240,3 +240,4 @@ The `completion` column renders detokenized message text, unaffected by `train_o
 
 The writer rank comes from `fs_aware_save_rank`: global rank 0 on a shared output filesystem, one
 writer per node on a per-node one, so a non-shared output does not lose every node but the first.
+The console table prints on global rank 0 alone.

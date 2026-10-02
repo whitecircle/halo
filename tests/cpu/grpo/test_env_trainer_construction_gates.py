@@ -3,7 +3,7 @@
 
 * TRL's ``off_policy_mask_threshold`` masks on ``sampling_per_token_logps``, a batch key this trainer
   never emits; TRL then thresholds a KL of exactly 0 and the knob is a silent no-op. Refused, pointing
-  at ``isr_opsm_delta``.
+  at ``isr_opsm_delta``, ahead of the ``balance_token_mass`` gate that would name the pair instead.
 * ``carry_reasoning`` on an SGLang rollout backend is refused until the engine's handling of an
   assistant message carrying ``reasoning_content`` is verified.
 * A dataset with no ``answer`` column under an environment that grades against one scores a single
@@ -74,11 +74,24 @@ def _called_names(fn: ast.FunctionDef) -> set[str]:
     return names
 
 
+def _init_source() -> ast.FunctionDef:
+    return ast.parse(textwrap.dedent(inspect.getsource(DistributedAsyncEnvironmentalGRPOTrainer.__init__))).body[0]
+
+
 def test_every_gate_is_still_called_from_the_trainers_init():
-    source = textwrap.dedent(inspect.getsource(DistributedAsyncEnvironmentalGRPOTrainer.__init__))
-    called = _called_names(ast.parse(source).body[0])
+    called = _called_names(_init_source())
     missing = [gate for gate in _INIT_GATES if gate not in called]
     assert not missing, f"DistributedAsyncEnvironmentalGRPOTrainer.__init__ no longer calls: {missing}"
+
+
+def test_the_off_policy_mask_is_refused_before_the_balance_gate_reads_it():
+    """Run first, the balance gate refuses the pair ("unset one of them") over a knob this trainer refuses
+    on its own: a user who unsets the balance meets the real refusal only on the next launch."""
+    first_call = {}
+    for node in ast.walk(_init_source()):
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Name):
+            first_call[node.func.id] = min(node.lineno, first_call.get(node.func.id, node.lineno))
+    assert first_call["reject_off_policy_mask_threshold"] < first_call["validate_token_mass_balance"]
 
 
 def test_off_policy_mask_threshold_is_refused_with_the_working_knob_named(tmp_path):

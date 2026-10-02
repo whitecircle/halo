@@ -5,6 +5,7 @@ to one server, never raises, and is refused at construction where it could not m
 import inspect
 import types
 from collections import defaultdict
+from unittest import mock
 
 import pytest
 import torch
@@ -13,6 +14,7 @@ from accelerate import PartialState
 from src.configs.async_training_config import AsyncTrainingConfig
 from src.distributed.nccl.clients.sglang import SGLangWeightSyncClient
 from src.distributed.nccl.clients.vllm import VLLMWeightSyncClient as VLLMClient
+from src.trainers.grpo import environmental
 from src.trainers.grpo.environmental import DistributedAsyncEnvironmentalGRPOTrainer
 from src.trainers.grpo.objective.logratio import select_mask_logratio
 from src.trainers.grpo.rollout import async_rollouts
@@ -149,6 +151,24 @@ def test_rescore_reports_partial_failures_and_never_raises():
     scored = rescore(prompts, completions, [True, True, True, True], [2, 1, 1])
     assert scored == [None] * 4
     assert flushed_metrics(host)["sampling/engine_rescore_miss_frac"] == [1.0]
+
+
+@pytest.mark.parametrize(
+    ("failing", "level", "silent"), [((True, False), "warning", "error"), ((True,), "error", "warning")]
+)
+def test_a_rescore_failure_is_reported_by_the_rank_that_hit_it(monkeypatch, failing, level, silent):
+    """Each rank re-scores its own rows, so a failure is rank-local, and accelerate's adapter drops every
+    record off the main process by default: a dead route on rank 3 never printed."""
+    recorder = mock.MagicMock()
+    monkeypatch.setattr(environmental, "logger", recorder)
+    monkeypatch.setattr(environmental, "get_global_rank", lambda: 3)
+    rescore, _host = _rescore_host([_FakeClient(fail=fail) for fail in failing])
+    prompts, completions = _rows()
+    rescore(prompts, completions, [True, True, True, True], [2, 1, 1])
+    getattr(recorder, silent).assert_not_called()
+    (msg,), kwargs = getattr(recorder, level).call_args
+    assert kwargs.get("main_process_only") is False, "the adapter's default drops a non-main rank's report"
+    assert msg.startswith("[rank 3] isr_engine_reference:"), msg
 
 
 def test_rescore_rejects_a_length_mismatch_as_that_rows_miss():
