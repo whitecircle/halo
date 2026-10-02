@@ -25,7 +25,7 @@ from accelerate.utils import is_peft_model
 from transformers import TrainerCallback
 from trl.extras.profiling import profiling_context
 
-from src.checkpoint.format import prefetch_pending_filename
+from src.checkpoint.format import PREFETCH_PENDING_PREFIX, prefetch_pending_filename
 from src.distributed.checkpoint.coordination import consensus_read
 from src.distributed.nccl.clients.base import BaseWeightSyncClient, resolve_sync_device
 from src.distributed.nccl.registry import resolve_weight_sync_client
@@ -60,12 +60,14 @@ _PREFETCH_POLL_TIMEOUT_S = 0.5
 _PREFETCH_DELIVER_TIMEOUT_S = 1.0
 # Grace for the worker to finish its current poll slice and exit at shutdown.
 _PREFETCH_JOIN_TIMEOUT_S = 5.0
+# Suffix of the file a pending-rounds write stages before swapping it in.
+_PENDING_ROUNDS_STAGING_SUFFIX = ".staged"
 
 
 def _save_pending_rounds(payload: dict, path: str) -> None:
     """Write a rank's pending rounds whole or not at all, with the pickler Ray ships the same contexts
     with: a row's context may carry a callable (an answer ``validator``) that the stdlib pickler refuses."""
-    staged = f"{path}.staged"
+    staged = f"{path}{_PENDING_ROUNDS_STAGING_SUFFIX}"
     try:
         torch.save(payload, staged, pickle_module=ray.cloudpickle)
         os.replace(staged, path)
@@ -565,8 +567,8 @@ class AsyncRolloutMixin:
             partial(torch.load, map_location="cpu", weights_only=False),
             what="pending prefetch rounds",
             checkpoint=checkpoint,
-            remedy=" Resume with the rank-to-node placement it was saved with, or delete its prefetch_pending-* "
-            "files to open with a cold round.",
+            remedy=" Resume with the rank-to-node placement it was saved with, or delete its "
+            f"{PREFETCH_PENDING_PREFIX}-* files to open with a cold round.",
         )
         if path is None:
             if self._prefetch_enabled and is_global_main_process():
