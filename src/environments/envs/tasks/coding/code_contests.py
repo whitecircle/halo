@@ -494,10 +494,11 @@ class CodeContestsEnvironment(NativeToolUseEnvironment):
             not stdin
             and not result.compile_failed
             and clean_exit
-            and not (result.stdout + result.stderr).strip()
+            and not result.stdout.strip()
             and self._refunds_left(trajectory)
         ):
-            # Given no input, the program told the model nothing, so the run is returned to the budget.
+            # Given no input, the program told the model nothing (a clean exit's reply leaves stderr out),
+            # so the run is returned to the budget.
             lines.append(STARVED_RUN_NOTE)
             if trajectory is not None:
                 self._refund_tool_call(trajectory, self.test_tool_name)

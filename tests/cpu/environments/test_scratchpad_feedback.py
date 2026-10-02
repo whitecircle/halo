@@ -241,6 +241,17 @@ def test_a_direct_call_outside_an_episode_returns_every_silent_run(refunds):
     assert env._run_test(_READS_INPUT) == f"{REPL_NO_OUTPUT_MESSAGE}\n{STARVED_RUN_NOTE}"
 
 
+def test_a_clean_input_less_run_that_writes_only_to_stderr_spends_no_run():
+    """A clean exit's reply leaves stderr out, so a program that only logged to stderr showed the model no
+    output: the run is returned as a silent one is, not charged under a reply that reads as nothing."""
+    env = _env(language="python")
+    traj = _episode(env)
+    reply = _scratchpad(env, traj, code="import sys\nsys.stderr.write('debug: read nothing\\n')")
+    assert reply == f"{REPL_NO_OUTPUT_MESSAGE}\n{STARVED_RUN_NOTE}\n(Scratchpad runs left: 6 of 6.)", reply
+    assert env._test_calls(traj) == 0
+    assert env.rollout_metrics(traj)["episode/starved_test_runs"] == 1.0
+
+
 @pytest.mark.parametrize("cap", [-1, 1.5, True])
 def test_a_refund_cap_that_is_not_a_count_is_refused(cap):
     with pytest.raises(ValueError, match="max_starved_run_refunds"):
