@@ -33,6 +33,7 @@ import argparse
 import ast
 import functools
 import json
+import logging
 import re
 import sys
 import types
@@ -316,6 +317,42 @@ def test_the_environment_playground_refuses_an_answer_graded_env_without_an_answ
     with pytest.raises(ValueError, match="Expected Answer"):
         mod.run_playground_episode("swe", "fix it", "", "http://localhost:8000/v1", "EMPTY", "m", 0.7, 16, 0.95, 2)
     assert seen == []
+
+
+def test_the_environment_playground_closes_the_environment_of_every_click(monkeypatch):
+    """Each click builds its own environment: one never closed keeps its sandbox sessions, server
+    connections and scorer clients for the life of the app, and a refused click must close it too."""
+    seen, closed = [], []
+    mod = _mock_playground_client(monkeypatch, seen, content="Final Answer: 4")
+    resolve = mod.resolve_environment
+
+    def _resolve(env_type, config):
+        env = resolve(env_type, config)
+        close = env.close
+        env.close = lambda: (closed.append(env_type), close())
+        return env
+
+    monkeypatch.setattr(mod, "resolve_environment", _resolve)
+    mod.run_playground_episode("react_math", "2+2?", "4", "http://localhost:8000/v1", "EMPTY", "m", 0.7, 16, 0.95, 1)
+    with pytest.raises(ValueError, match="Expected Answer"):
+        mod.run_playground_episode("swe", "fix it", "", "http://localhost:8000/v1", "EMPTY", "m", 0.7, 16, 0.95, 2)
+    assert closed == ["react_math", "swe"]
+
+
+def test_the_environment_playground_logs_the_traceback_of_a_failed_click(monkeypatch, caplog):
+    """The UI shows only the message; the traceback is what localizes the fault, so it goes to the log."""
+    mod = _playground()
+
+    def _boom(*args):
+        raise RuntimeError("server exploded")
+
+    monkeypatch.setattr(mod, "run_playground_episode", _boom)
+    (on_run,) = (block.fn for block in mod.create_demo(api_key="EMPTY").fns.values())
+    with caplog.at_level(logging.ERROR, logger=mod.__name__):
+        messages, summary = on_run("react_math", "2+2?", "4", "http://x/v1", "", 0.7, 16, 0.95, 1)
+    assert (messages, summary) == ([], "**Error:** server exploded")
+    (logged,) = (r for r in caplog.records if r.levelno >= logging.ERROR)
+    assert logged.exc_info[1].args == ("server exploded",)
 
 
 def test_the_environment_playground_reports_a_length_cut_turn_as_one(monkeypatch):

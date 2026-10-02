@@ -59,7 +59,7 @@ included, and `swe` [warns](sandbox.md#choosing-a-backend) when built on it. Run
 
 An episode that never completed grades 0. A completed one is graded by:
 
-1. A `test_function` passed to the constructor: its verdict, 1 or 0. A grader that raises grades 0 and marks the episode invalid, keeping it out of the GRPO group baseline.
+1. A `test_function` passed to the constructor: its verdict, 1 or 0. A grader that raises grades 0 and marks the episode invalid (its exception as the `episode_invalid_reason`), keeping it out of the GRPO group baseline.
 2. Else the row's `validator` (a callable) or `answer`: the protocol's answer grading, which matches the final reply against `answer` (`validate_answer`: exact match, then numeric). The workspace is never inspected. A null `answer` cell marks the episode invalid.
 
 There is no completion fallback. Without a `test_function`, `requires_answer` defaults on, so the trainer and `run_env.py` refuse a dataset with no `answer` column and the playground an empty Expected Answer box; `requires_answer: false` without a `test_function` raises at construction, and a driver that hands in a row carrying neither raises at grading. A judge-only reward (no `environment` term) prices no grade of the environment's own, so none is taken: it needs neither, and a null `answer` or a raising `test_function` voids nothing.

@@ -11,7 +11,7 @@ against. A real pass/fail verdict must NOT carry it.
 
 import pytest
 
-from src.environments.base import Trajectory
+from src.environments.base import EPISODE_INVALID_REASON_KEY, Trajectory
 from src.environments.envs.tasks.coding.swe import SweEnvironment
 from src.environments.sandbox.base import SandboxExecutor, SandboxResult
 
@@ -42,6 +42,8 @@ def test_crashing_test_function_marks_the_episode_invalid():
     traj = _finished_episode(boom)
     assert traj.episode_invalid is True, "a crashed grader carries no signal — it must leave the group baseline"
     assert traj.total_reward == pytest.approx(0.0), "and it still grades 0"
+    # Named where the all-invalid step halt and the eval runner read the cause.
+    assert traj.info[EPISODE_INVALID_REASON_KEY] == "test_function raised RuntimeError: grading container died"
 
 
 def test_real_verdicts_stay_in_the_baseline():

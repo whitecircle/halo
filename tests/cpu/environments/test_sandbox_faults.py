@@ -140,7 +140,7 @@ def test_infra_fault_ends_the_episode_unpriced_and_out_of_the_baseline(cls):
     assert traj.episode_invalid
     assert "503" in traj.info[EPISODE_INVALID_REASON_KEY]
     assert traj.total_reward == pytest.approx(0.0), "the backend's outage must not be priced as the policy's"
-    assert traj.info["tool_results"][-1]["success"] is False
+    assert traj.info["successful_tool_calls"] == 0
     metrics = env.rollout_metrics(traj)
     assert (metrics["episode/sandbox_infra_fault"], metrics["episode/sandbox_agent_fault"]) == (1.0, 0.0)
 
@@ -807,7 +807,7 @@ def test_a_swe_command_that_replaces_its_workspace_fails_the_episode(tmp_path):
         env.close()
     traj = step.trajectory
     assert step.done and not traj.info["completed"] and not traj.episode_invalid
-    assert "replaced its working directory" in traj.info["tool_results"][-1]["content"]
+    assert "replaced its working directory" in [m for m in traj.messages if m.role == "tool"][-1].content
     assert traj.total_reward == pytest.approx(-_TOOL_ERROR_PENALTY)
 
 
@@ -823,7 +823,7 @@ def test_a_swe_command_that_removes_its_workspace_just_loses_its_files():
         step = env.step(ids, ["checking"], [{"answer": "done", "tool_calls": [check]}])[0]
     finally:
         env.close()
-    assert not step.done and step.trajectory.info["tool_results"][-1]["content"].strip() == "gone"
+    assert not step.done and step.trajectory.messages[-1].content.strip() == "gone"
 
 
 def test_a_missing_session_is_an_infra_fault():

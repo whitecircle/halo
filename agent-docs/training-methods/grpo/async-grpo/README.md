@@ -33,7 +33,7 @@ Rename columns with `prompt_field` / `answer_field`, forward extras with `contex
 
 The trainer forces `remove_unused_columns: false` at construction (warning when a config sets it true): the rollout context **is** the row minus `prompt`, and column pruning would strip `answer` and every `context_fields` column.
 
-A `prompt` given as a message list reduces to its **last `user` turn** — the environment is handed the task as text and builds the conversation itself. A conversation with no `user` turn fails the batch on every rank.
+A `prompt` given as a message list reduces to its **last `user` turn** — the environment is handed the task as text and builds the conversation itself, and the [eval runner](../environments/evaluation.md) reduces it the same way (`task_prompt` in `src/environments/base.py`). A conversation with no `user` turn fails the batch on every rank.
 
 The environment owns the system turn and the tool schema: this surface has no `system_prompt` field, and `tools_field` is rejected. Where an environment accepts an override it is `environment_kwargs.system_prompt` — the ReAct presets hardcode theirs and refuse the key.
 

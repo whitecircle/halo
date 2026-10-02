@@ -420,8 +420,7 @@ def test_a_tools_own_not_found_message_is_not_a_model_rejection():
     traj = env.get_trajectories([eid])[0]
     asst = [m for m in traj.messages if m.role == "assistant"][-1]
     assert asst.calls_rejected is False  # a registered tool ran and failed: the turn stays trainable
-    assert traj.info["tool_results"][-1]["success"] is False
-    assert traj.info["successful_tool_calls"] == 0
+    assert traj.info["total_tool_calls"] == 1 and traj.info["successful_tool_calls"] == 0
 
 
 def _turns_trainer():

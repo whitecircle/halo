@@ -115,13 +115,32 @@ def resolve_reasoning_effort(effort: str | None) -> str | None:
     return effort
 
 
+def task_prompt(prompt: str | list[dict[str, Any]]) -> Any:
+    """What an environment is handed as the task for a dataset prompt: a string as is, or a conversation's
+    LAST user turn (its earlier turns and system message are the dataset's framing, not the task). The
+    trainer and the eval driver both reduce a prompt through here, so an environment gets the same task
+    from either. A conversation with no user turn raises ``ValueError``: there is nothing to hand it."""
+    if not isinstance(prompt, list):
+        return prompt
+    for message in reversed(prompt):
+        if message.get("role") == "user":
+            return message["content"]
+    raise ValueError(
+        f"the conversation has no 'user' message (roles: {[m.get('role') for m in prompt]}); an environment "
+        "is handed the last user turn as the task, so there is nothing to send it"
+    )
+
+
 def stable_reasoning_effort(task: str | list[dict[str, Any]]) -> str:
     """A level drawn from the task alone, the same in every process and every run: an evaluation's draw for
     a ``"random"`` setting, so each problem is scored at one level from checkpoint to checkpoint. A
-    conversation is keyed by its last user turn, so it draws what its task text alone would."""
-    if not isinstance(task, str):
-        task = next((str(m.get("content") or "") for m in reversed(task) if m.get("role") == "user"), "")
-    digest = hashlib.blake2b(task.encode("utf-8", "surrogatepass"), digest_size=8).digest()
+    conversation is keyed by its :func:`task_prompt`, so it draws what its task text alone would; one with
+    no user turn draws as an empty task."""
+    try:
+        text = str(task_prompt(task) or "")
+    except ValueError:
+        text = ""
+    digest = hashlib.blake2b(text.encode("utf-8", "surrogatepass"), digest_size=8).digest()
     return VALID_REASONING_EFFORTS[int.from_bytes(digest, "big") % len(VALID_REASONING_EFFORTS)]
 
 
@@ -339,8 +358,9 @@ class EnvStep:
 class BaseEnvironment(ABC):
     """Abstract base class for multi-turn GRPO environments.
 
-    Subclasses implement ``_reset_single``, ``_step_single``, ``_grade_episode``. Parallel rollout
-    collection runs one episode per Ray actor instance (see ray_actors.py).
+    Subclasses implement ``_reset_single``, ``_step_single``, ``_grade_episode``. One instance serves
+    several concurrent episodes (a Ray actor multiplexes them on its event loop, see ray_actors.py), so
+    per-episode state lives on the trajectory, never on the instance.
     """
 
     # Turn budget used when the config names none. Per class, since an agentic edit-run-test loop and
@@ -672,8 +692,8 @@ class BaseEnvironment(ABC):
         return content
 
     def get_tools_schema(self) -> list[dict[str, Any]] | None:
-        """OpenAI-format tool schema passed to vLLM as ``tools=``. Default ``None``; overridden by the
-        tool-use envs."""
+        """OpenAI-format tool schema passed to the rollout engine as ``tools=``. Default ``None``;
+        overridden by the tool-use envs."""
         return None
 
     def thinking_budget_for_effort(self, effort: str) -> int | None:
@@ -953,6 +973,7 @@ class BaseEnvironment(ABC):
         """
         logger.warning("Episode context carries a null %r; scoring it invalid, not a success", ANSWER_KEY)
         trajectory.info[EPISODE_INVALID_KEY] = True
+        trajectory.info[EPISODE_INVALID_REASON_KEY] = f"the row's {ANSWER_KEY!r} cell is null: nothing to grade"
         return EpisodeGrade(0.0)
 
     @staticmethod
@@ -1061,14 +1082,23 @@ class BaseEnvironment(ABC):
 
         asyncio.run(settle_and_release())
 
+    def _episode(self, episode_id: int) -> Trajectory:
+        """The open episode ``episode_id`` names; an unknown id raises."""
+        trajectory = self._trajectories.get(episode_id)
+        if trajectory is None:
+            raise ValueError(f"Episode {episode_id} not found")
+        return trajectory
+
     def _episodes(self, episode_ids: list[int]) -> list[Trajectory]:
-        trajectories = []
-        for episode_id in episode_ids:
-            trajectory = self._trajectories.get(episode_id)
-            if trajectory is None:
-                raise ValueError(f"Episode {episode_id} not found")
-            trajectories.append(trajectory)
-        return trajectories
+        return [self._episode(episode_id) for episode_id in episode_ids]
+
+    def _register_episode(self, episode_id: int, trajectory: Trajectory, context: dict[str, Any] | None) -> EnvStep:
+        """Open a freshly reset episode under ``episode_id`` (sync + async reset paths): bind its effort
+        profile, stamp and store it, and return its opening step."""
+        self._bind_effort_profile(trajectory, context)
+        trajectory.info["episode_id"] = episode_id
+        self._trajectories[episode_id] = trajectory
+        return self._first_step(trajectory)
 
     def _run_or_schedule(self, coroutine) -> None:
         """Run a teardown coroutine to completion when no loop runs here, else schedule it on the
@@ -1095,19 +1125,11 @@ class BaseEnvironment(ABC):
         if contexts is None:
             contexts = [None] * len(prompts)
 
-        results = []
+        episode_ids, steps = [], []
         for prompt, context in zip(prompts, contexts, strict=True):
             episode_id = self._get_next_episode_id()
-            trajectory = self._reset_single(prompt, context)
-            self._bind_effort_profile(trajectory, context)
-            trajectory.info["episode_id"] = episode_id
-
-            self._trajectories[episode_id] = trajectory
-
-            results.append((episode_id, self._first_step(trajectory)))
-
-        episode_ids = [r[0] for r in results]
-        steps = [r[1] for r in results]
+            episode_ids.append(episode_id)
+            steps.append(self._register_episode(episode_id, self._reset_single(prompt, context), context))
         return episode_ids, steps
 
     def step(
@@ -1119,10 +1141,7 @@ class BaseEnvironment(ABC):
 
         steps = []
         for episode_id, action, context in zip(episode_ids, actions, contexts, strict=True):
-            trajectory = self._trajectories.get(episode_id)
-            if trajectory is None:
-                raise ValueError(f"Episode {episode_id} not found")
-
+            trajectory = self._episode(episode_id)
             if trajectory.done:
                 steps.append(self._done_step(trajectory))
                 continue
@@ -1146,9 +1165,7 @@ class BaseEnvironment(ABC):
         """
         steps = []
         for episode_id in episode_ids:
-            trajectory = self._trajectories.get(episode_id)
-            if trajectory is None:
-                raise ValueError(f"Episode {episode_id} not found")
+            trajectory = self._episode(episode_id)
             if trajectory.done:
                 steps.append(self._done_step(trajectory))
                 continue
@@ -1210,12 +1227,9 @@ class AsyncBaseEnvironment(BaseEnvironment):
 
         async def reset_one(prompt, context):
             episode_id = self._get_next_episode_id()
-            trajectory = await self._reset_single_async(prompt, context)
-            self._bind_effort_profile(trajectory, context)
-            trajectory.info["episode_id"] = episode_id
-            self._trajectories[episode_id] = trajectory
-
-            return episode_id, self._first_step(trajectory)
+            return episode_id, self._register_episode(
+                episode_id, await self._reset_single_async(prompt, context), context
+            )
 
         results = await asyncio.gather(*[reset_one(p, c) for p, c in zip(prompts, contexts, strict=True)])
 
@@ -1229,10 +1243,7 @@ class AsyncBaseEnvironment(BaseEnvironment):
             contexts = [None] * len(episode_ids)
 
         async def step_one(episode_id, action, context):
-            trajectory = self._trajectories.get(episode_id)
-            if trajectory is None:
-                raise ValueError(f"Episode {episode_id} not found")
-
+            trajectory = self._episode(episode_id)
             if trajectory.done:
                 return self._done_step(trajectory)
 

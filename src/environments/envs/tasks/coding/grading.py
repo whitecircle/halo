@@ -152,7 +152,8 @@ def _run_in_sandbox(sandbox: SandboxExecutor | SandboxSession, code: str, **kwar
     try:
         return sandbox.run(code, **kwargs)
     except Exception as exc:  # anything raised on the grading side is infra, not a verdict
-        logger.warning("Sandbox run failed during grading; scoring the test as an infra error", exc_info=True)
+        # Per test at debug: the grade logs one line counting its infra errors by text.
+        logger.debug("Sandbox run failed during grading; scoring the test as an infra error", exc_info=True)
         return SandboxResult(error=f"sandbox backend failure: {type(exc).__name__}: {exc}")
 
 
@@ -185,7 +186,7 @@ def _grading_runner(
         try:
             session.reset_to_staged()
         except Exception as exc:  # the next test would inherit this one's files: no credit for either
-            logger.warning(
+            logger.debug(
                 "Sandbox session reset failed during grading; scoring the test as an infra error", exc_info=True
             )
             return SandboxResult(error=f"sandbox reset failure: {type(exc).__name__}: {exc}")

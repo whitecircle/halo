@@ -15,6 +15,7 @@ Run: python tests/cpu/environments/test_mcp_lifecycle.py  (or pytest)
 
 import asyncio
 import importlib
+import logging
 import types
 from datetime import timedelta
 
@@ -153,6 +154,56 @@ async def test_disconnect_is_idempotent():
     await env.disconnect()
     await env.disconnect()
     assert not env._connected
+
+
+def test_close_after_asyncio_run_unwound_the_connection_warns_nothing(caplog):
+    """A CLI eval drives its episodes under ``asyncio.run``, which cancels the connection task, and so
+    unwinds the session and the transport, before the script calls ``close()``: a warning that the
+    connection was left open is false on every such run."""
+    env = _StubMCPEnv()
+    asyncio.run(env.connect())
+    assert env.stub_session.exited and env.stub_transport.exited
+    caplog.clear()
+    with caplog.at_level(logging.WARNING, logger=mcp_module.__name__):
+        env.close()
+    assert [r for r in caplog.records if r.levelno >= logging.WARNING] == []
+    assert env._conn_task is None
+
+
+def test_close_still_warns_when_a_stopped_loop_left_the_connection_open(caplog):
+    env = _StubMCPEnv()
+    loop = asyncio.new_event_loop()
+    loop.run_until_complete(env.connect())
+    task = env._conn_task
+    assert not task.done()
+    caplog.clear()
+    with caplog.at_level(logging.WARNING, logger=mcp_module.__name__):
+        env.close()
+    assert [r.getMessage() for r in caplog.records if r.levelno >= logging.WARNING] == [
+        "MCP close(): owning event loop already stopped; connection not unwound"
+    ]
+    env._stop.set()
+    loop.run_until_complete(task)
+    loop.close()
+
+
+async def test_a_failing_mcp_tool_is_logged_once_by_the_protocol(caplog):
+    """The tool's failure reaches the log through the protocol that ran it, traceback included; the MCP
+    client logging it again before re-raising would log every failed call twice."""
+    env = _StubMCPEnv()
+
+    async def _call_tool(name, arguments):
+        raise RuntimeError("server down")
+
+    env.stub_session.call_tool = _call_tool
+    ids, _ = await env.reset_async(["task"])
+    call = {"id": "c1", "function": {"name": "stub_tool", "arguments": "{}"}}
+    with caplog.at_level(logging.DEBUG, logger="src.environments"):
+        await env.step_async(ids, ["calling"], [{"finish_reason": "tool_calls", "tool_calls": [call]}])
+    await env.disconnect()
+    logged = [r for r in caplog.records if r.levelno >= logging.WARNING]
+    assert len(logged) == 1 and logged[0].exc_info is not None
+    assert "server down" in env.get_trajectories(ids)[0].messages[-1].content
 
 
 # Factory credential forwarding: MCP_SERVERS[...]["env"] must reach the server

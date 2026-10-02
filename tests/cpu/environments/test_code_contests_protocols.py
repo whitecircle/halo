@@ -21,6 +21,7 @@ import src.environments.eval_runner as eval_runner
 from scripts.environments._common import rollout_config_from_args
 from scripts.environments.inference.run_code_contests import (
     FLAG_OWNED_ENV_KWARGS,
+    SOLUTION_HEADROOM_TOKENS,
     contest_meta,
     default_max_tokens,
     parse_args,
@@ -240,7 +241,17 @@ def test_the_effort_flag_spells_no_level_as_none(monkeypatch):
 def test_the_default_generation_budget_follows_the_flag_s_level(flag, max_tokens):
     """A level's thinking budget plus the solution headroom; no level has no budget to size it from and
     takes the training rollout's default instead of looking a profile up."""
-    assert default_max_tokens(flag) == max_tokens
+    assert default_max_tokens(CodeContestsEnvironment(sandbox=StubSandbox()), flag) == max_tokens
+
+
+def test_the_default_generation_budget_reads_a_profile_override():
+    """``--env_kwargs reasoning_effort_profiles`` rebinds a level's thinking budget for every episode, so
+    the turn cap sized from it must follow: the class table's budget would leave the override's turns
+    capped for a budget they no longer run under."""
+    env = CodeContestsEnvironment(
+        sandbox=StubSandbox(), reasoning_effort_profiles={"medium": {"thinking_tokens": 2000}}
+    )
+    assert default_max_tokens(env, "medium") == 2000 + SOLUTION_HEADROOM_TOKENS
 
 
 async def test_a_no_level_episode_sends_no_level_and_records_none(monkeypatch):
@@ -251,7 +262,7 @@ async def test_a_no_level_episode_sends_no_level_and_records_none(monkeypatch):
     env_config = resolve_env_config(args, {}, {})
     env = CodeContestsEnvironment(sandbox=StubSandbox(), **env_config)
     rollout = rollout_config_from_args(
-        args, None, default_temperature=0.2, default_max_tokens=default_max_tokens(args.reasoning_effort)
+        args, None, default_temperature=0.2, default_max_tokens=default_max_tokens(env, args.reasoning_effort)
     )
     calls = []
 

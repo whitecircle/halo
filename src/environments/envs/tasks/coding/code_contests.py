@@ -607,9 +607,9 @@ class CodeContestsEnvironment(NativeToolUseEnvironment):
             try:
                 answer = json.loads(answer)
             except ValueError as exc:
-                raise ValueError(f"unparseable 'answer' payload ({len(answer)} chars): {exc}") from exc
+                raise ValueError(f"unparseable {ANSWER_KEY!r} payload ({len(answer)} chars): {exc}") from exc
         if not isinstance(answer, (dict, list)):
-            raise ValueError(f"'answer' must be a dict or list of tests, got {type(answer).__name__}")
+            raise ValueError(f"{ANSWER_KEY!r} must be a dict or list of tests, got {type(answer).__name__}")
         return answer
 
     def _store_problem_data(self, traj: Trajectory, context: dict[str, Any]) -> None:
@@ -628,7 +628,9 @@ class CodeContestsEnvironment(NativeToolUseEnvironment):
         else:
             test_cases, checker, time_limit = answer, None, None
         if not test_cases:
-            raise ValueError("'answer' holds no tests: expected a non-empty list, or a non-empty 'tests'/'test_cases'")
+            raise ValueError(
+                f"{ANSWER_KEY!r} holds no tests: expected a non-empty list, or a non-empty 'tests'/'test_cases'"
+            )
 
         traj.info["_test_cases"] = test_cases
         traj.info["_checker"] = checker

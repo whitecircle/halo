@@ -233,7 +233,8 @@ submission (`s@1`) or any within its budget (`s@2`). The two score the same subm
 `leaderboard` run at `--num_samples 1`, where each row is one episode with one submission.
 
 Without `--training_config` or `--max_tokens`, `--reasoning_effort` sets the generation budget: the
-level's `thinking_tokens` plus 4096 tokens of solution headroom, which the served context window
+level's `thinking_tokens` as the environment binds it (a `reasoning_effort_profiles` override in
+`--env_kwargs` included) plus 4096 tokens of solution headroom, which the served context window
 must exceed. Every episode sends its level's thinking budget, so the vLLM server needs what the
 [reasoning budget](../async-grpo/rollouts.md#reasoning-budget) needs, a reasoning parser among it;
 without one vLLM rejects the request. A non-thinking model served with a think-tag parser gets its

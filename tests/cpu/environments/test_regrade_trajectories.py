@@ -170,6 +170,22 @@ def test_submitted_solutions_keep_only_the_calls_the_environment_admitted():
     assert regrade_trajectories.submitted_solutions(episode, fixed.registry.get("submit_solution")) == [("y", None)]
 
 
+def test_submitted_solutions_read_arguments_the_way_the_environment_admitted_them():
+    """The environment admits a Python-literal ``arguments`` string (single quotes, ``True``/``None``)
+    and runs the submission; a re-grade reading JSON alone would drop that submission and score the
+    episode on a different prefix than the one the run graded."""
+    tool_calls = [
+        {"function": {"name": "submit_solution", "arguments": "{'code': 'print(1)', 'language': 'python'}"}},
+        {"function": {"name": "submit_solution", "arguments": {"code": "print(2)", "language": "python"}}},
+    ]
+    episode = {"messages": [{"role": "assistant", "tool_calls": tool_calls}]}
+    env = CodeContestsEnvironment(language=["python", "cpp"], sandbox_backend="local")
+    assert regrade_trajectories.submitted_solutions(episode, env.registry.get("submit_solution")) == [
+        ("print(1)", "python"),
+        ("print(2)", "python"),
+    ]
+
+
 def test_display_language_joins_a_model_chosen_set():
     assert regrade_trajectories.display_language("python") == "python"
     assert regrade_trajectories.display_language(["python", "cpp"]) == "python,cpp"

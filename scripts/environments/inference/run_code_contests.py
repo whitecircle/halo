@@ -148,15 +148,18 @@ def resolve_effort_setting(flag: str | None, trained_env: dict[str, Any]) -> str
     return trained_env.get("reasoning_effort", DEFAULT_REASONING_EFFORT)
 
 
-def default_max_tokens(flag: str | None) -> int:
-    """``--max_tokens``' default without ``--training_config``: the flag's level's thinking budget plus
-    :data:`SOLUTION_HEADROOM_TOKENS`. Without a level there is no thinking budget to size it from, so it
-    takes the training rollout's own default. Read off the flag alone: under a training config the YAML's
-    ``rollout_max_tokens`` is the default, and its level may be ``random``, which has no budget."""
+def default_max_tokens(env: CodeContestsEnvironment, flag: str | None) -> int:
+    """``--max_tokens``' default without ``--training_config``: the flag's level's thinking budget as the
+    built ``env`` binds it (a ``reasoning_effort_profiles`` override in ``--env_kwargs`` included) plus
+    :data:`SOLUTION_HEADROOM_TOKENS`. Without a level, or a budget for it, there is nothing to size it
+    from, so it takes the training rollout's own default. The level is read off the flag alone: under a
+    training config the YAML's ``rollout_max_tokens`` is the default, and its level may be ``random``,
+    which has no budget."""
     level = resolve_effort_setting(flag, {})
-    if level is None:
+    budget = env.thinking_budget_for_effort(level) if level is not None else None
+    if budget is None:
         return DEFAULT_ROLLOUT_MAX_TOKENS
-    return REASONING_EFFORT_PROFILES[level]["thinking_tokens"] + SOLUTION_HEADROOM_TOKENS
+    return budget + SOLUTION_HEADROOM_TOKENS
 
 
 def resolve_env_config(args: argparse.Namespace, trained_env: dict[str, Any], env_kwargs: dict) -> dict[str, Any]:
@@ -306,8 +309,9 @@ def parse_args() -> argparse.Namespace:
         type=int,
         default=None,
         help="Max tokens per generation. Default: the training config's rollout_max_tokens under "
-        "--training_config, else the effort profile's thinking budget "
+        "--training_config, else the effort profile's thinking budget ("
         + ", ".join(f"{level}={p['thinking_tokens']}" for level, p in REASONING_EFFORT_PROFILES.items())
+        + ", or a reasoning_effort_profiles override in --env_kwargs)"
         + f" plus {SOLUTION_HEADROOM_TOKENS} solution headroom; under --reasoning_effort {NO_REASONING_EFFORT}, "
         f"the training rollout's default {DEFAULT_ROLLOUT_MAX_TOKENS}.",
     )
@@ -396,7 +400,7 @@ def main() -> None:
         args,
         contract,
         default_temperature=DEFAULT_TEMPERATURE,
-        default_max_tokens=default_max_tokens(args.reasoning_effort),
+        default_max_tokens=default_max_tokens(env, args.reasoning_effort),
     )
     logger.info("reasoning_effort=%s, max_tokens=%d", reasoning_effort, rollout.max_tokens)
 

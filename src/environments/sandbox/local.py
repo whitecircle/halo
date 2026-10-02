@@ -565,14 +565,16 @@ class LocalSession(SandboxSession):
 
     def read_file(self, path: str) -> str | None:
         """The file's text, or ``None`` when there is no regular file at ``path`` — a link the program
-        planted included, so a host file never reaches the trajectory through it."""
+        planted included, so a host file never reaches the trajectory through it. Decoded as UTF-8 with
+        replacement, the encoding the write side uses: bytes a program wrote that are not UTF-8 are read
+        as replaced text, never lost to a decode error."""
         require_session_path(path)
         self._require_intact()
         try:
             fd = _open_member(self.workdir, path, os.O_RDONLY)
         except (SessionPathError, FileNotFoundError, NotADirectoryError):
             return None
-        with os.fdopen(fd) as fh:
+        with os.fdopen(fd, encoding="utf-8", errors="replace") as fh:
             return fh.read()
 
     def list_files(self) -> list[str]:

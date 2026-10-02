@@ -12,9 +12,18 @@ Covers: dict-vs-JSON-string arguments, malformed/empty payloads, and the seriali
 Run: ``pytest tests/cpu/environments/test_openai_tool_format.py``.
 """
 
+import warnings
+
 import pytest
 
-from src.environments.tools.definitions import NativeToolCall, NativeToolResult
+from src.environments.envs.protocols.native import NativeToolUseEnvironment
+from src.environments.tools.definitions import (
+    NativeTool,
+    NativeToolCall,
+    NativeToolRegistry,
+    NativeToolResult,
+    ToolParameter,
+)
 
 # NativeToolCall.from_openai_format — single call
 
@@ -36,6 +45,53 @@ def test_from_openai_format_accepts_dict_arguments():
 def test_from_openai_format_malformed_arguments_default_to_empty():
     tc = NativeToolCall.from_openai_format({"id": "c", "function": {"name": "f", "arguments": "{not json"}})
     assert tc.arguments == {}
+
+
+@pytest.mark.parametrize(
+    "raw",
+    [
+        "{[1]: 2}",
+        "{'code': {[1]}}",
+        "[" * 100_000 + "]" * 100_000,
+        '{"a": ' * 100_000 + "1" + "}" * 100_000,
+    ],
+    ids=["unhashable-key", "unhashable-set-member", "deep-list", "deep-object"],
+)
+def test_from_openai_format_degrades_arguments_no_literal_can_build(raw):
+    """An unhashable dict key or set member raises TypeError out of the literal reader, deep nesting a
+    RecursionError out of the JSON one: neither is a syntax error, and uncaught either escapes
+    ``env.step``, so the policy could void its own episode by writing one."""
+    assert NativeToolCall.from_openai_format({"id": "c", "function": {"name": "f", "arguments": raw}}).arguments == {}
+
+
+def test_from_openai_format_repairs_a_python_literal_without_a_syntax_warning():
+    """An invalid escape in a model-written literal (a regex's ``\\d``) is read as Python reads it,
+    silently: a ``SyntaxWarning`` per parse would print once per call of every episode."""
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        call = NativeToolCall.from_openai_format(
+            {"id": "c", "function": {"name": "f", "arguments": "{'pattern': '\\d+'}"}}
+        )
+    assert call.arguments == {"pattern": "\\d+"}
+    assert not [w for w in caught if issubclass(w.category, SyntaxWarning)]
+
+
+def test_a_call_no_literal_can_build_is_a_refused_call_not_a_lost_episode():
+    registry = NativeToolRegistry().register(
+        NativeTool(
+            name="echo",
+            description="echo",
+            parameters=[ToolParameter(name="text", type="string", description="text")],
+            handler=lambda text: text,
+        )
+    )
+    env = NativeToolUseEnvironment(tool_registry=registry, max_turns=3)
+    ids, _ = env.reset(["task"])
+    call = {"id": "c1", "function": {"name": "echo", "arguments": "{[1]: 2}"}}
+    (step,) = env.step(ids, ["calling"], [{"finish_reason": "tool_calls", "tool_calls": [call]}])
+    assert not step.done
+    assert (step.trajectory.info["total_tool_calls"], step.trajectory.info["successful_tool_calls"]) == (1, 0)
+    assert "missing a required argument: 'text'" in step.trajectory.messages[-1].content
 
 
 def test_from_openai_format_missing_fields_default():

@@ -44,7 +44,7 @@ from src.environments.envs.tasks.coding.datasets import CODE_DATASET_ADAPTERS, C
 from src.environments.envs.tasks.coding.grading import grade_solution
 from src.environments.eval_runner import GENERATION_ERROR_KEY, load_hf_split
 from src.environments.registry import resolve_environment
-from src.environments.tools.definitions import NativeTool
+from src.environments.tools.definitions import NativeTool, NativeToolCall, ToolArgumentError
 
 # Meta keys a re-grade needs: env_type/adapter/dataset/split select the environment and rebuild the
 # hidden tests, model/language name the row of the report. Only run_code_contests.py stamps the full
@@ -146,19 +146,19 @@ def episode_submission_budget(episode: dict[str, Any], env: Any) -> int:
 def submitted_solutions(episode: dict[str, Any], tool: NativeTool) -> list[tuple[str, str | None]]:
     """The ``submit_solution`` payloads the environment admitted, as ``(code, language)`` in
     submission order; ``language`` is the call's own choice under a multi-language run, ``None`` where
-    the run fixed it. A recorded call ``tool`` refuses to bind (no code, a missing or foreign language,
-    an argument the tool does not declare, unparseable arguments) never ran and spent no budget, so it
-    takes no slot here either."""
+    the run fixed it. Arguments are read the way the environment read them
+    (:meth:`NativeToolCall.from_openai_format`, Python literals included). A recorded call ``tool``
+    refuses to bind (no code, a missing or foreign language, an argument the tool does not declare,
+    unparseable arguments) never ran and spent no budget, so it takes no slot here either."""
     solutions: list[tuple[str, str | None]] = []
     for message in episode.get("messages", []):
-        for call in message.get("tool_calls") or []:
-            if (call.get("function") or {}).get("name") != SUBMIT_TOOL:
+        for raw in message.get("tool_calls") or []:
+            call = NativeToolCall.from_openai_format(raw)
+            if call.name != SUBMIT_TOOL:
                 continue
             try:
-                arguments = json.loads(call["function"]["arguments"])
-                bound = tool.bind(arguments if isinstance(arguments, dict) else {})
-            except (json.JSONDecodeError, KeyError, TypeError):
-                # ToolArgumentError is a TypeError: the call was refused, not submitted.
+                bound = tool.bind(call.arguments)
+            except ToolArgumentError:
                 continue
             solutions.append((bound["code"], bound.get("language")))
     return solutions

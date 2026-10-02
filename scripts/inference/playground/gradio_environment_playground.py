@@ -17,6 +17,7 @@ Usage:
 import argparse
 import asyncio
 import json
+import logging
 import time
 from typing import Any
 
@@ -29,6 +30,8 @@ from src.environments.base import ANSWER_KEY, Trajectory
 from src.environments.eval_runner import require_answers, run_episode
 from src.environments.registry import get_registered_environments, resolve_environment
 from src.inference.openai_client import DEFAULT_LOCAL_BASE_URL, create_openai_client
+
+logger = logging.getLogger(__name__)
 
 # Per non-assistant message, in the transcript panel: a full tool observation (a failing test log, a
 # search dump) is capped at 16k chars by the env itself and would dominate the turn it belongs to.
@@ -119,32 +122,36 @@ def run_playground_episode(
     binds the episode's reasoning-effort level and token budget, and finalizes a truncated episode.
     """
     env = resolve_environment(env_type, {"max_turns": int(max_turns)})
-    context = build_context(expected_answer)
-    require_answers(env, [{"context": context}], "the Expected Answer box")
-    # A hand-edited "localhost:8000/v1" is not a URL the SDK can route. The field is prefilled with a
-    # full one, so the scheme is restored rather than refused.
-    url = server_url if server_url.startswith("http") else f"http://{server_url}"
-    client = create_openai_client(base_url=url, api_key_override=api_key)
+    try:
+        context = build_context(expected_answer)
+        require_answers(env, [{"context": context}], "the Expected Answer box")
+        # A hand-edited "localhost:8000/v1" is not a URL the SDK can route. The field is prefilled with a
+        # full one, so the scheme is restored rather than refused.
+        url = server_url if server_url.startswith("http") else f"http://{server_url}"
+        client = create_openai_client(base_url=url, api_key_override=api_key)
 
-    start_time = time.time()
-    trajectory = asyncio.run(
-        run_episode(
-            env,
-            prompt,
-            context,
-            client,
-            rollout=RolloutConfig(
-                # None rather than "": an unset model name is dropped from the body and a
-                # single-model server answers with what it serves, while an empty string 404s.
-                model_name=model_name or None,
-                temperature=temperature,
-                max_tokens=int(max_tokens),
-                top_p=top_p,
-            ),
+        start_time = time.time()
+        trajectory = asyncio.run(
+            run_episode(
+                env,
+                prompt,
+                context,
+                client,
+                rollout=RolloutConfig(
+                    # None rather than "": an unset model name is dropped from the body and a
+                    # single-model server answers with what it serves, while an empty string 404s.
+                    model_name=model_name or None,
+                    temperature=temperature,
+                    max_tokens=int(max_tokens),
+                    top_p=top_p,
+                ),
+            )
         )
-    )
-    elapsed = time.time() - start_time
-    return render_transcript(trajectory), render_summary(env_type, trajectory, elapsed, int(max_turns))
+        elapsed = time.time() - start_time
+        return render_transcript(trajectory), render_summary(env_type, trajectory, elapsed, int(max_turns))
+    finally:
+        # One environment per click: its sandbox sessions, server connections and scorer clients go with it.
+        env.close()
 
 
 def create_demo(default_base_url: str = DEFAULT_LOCAL_BASE_URL, api_key: str | None = None):
@@ -178,6 +185,7 @@ def create_demo(default_base_url: str = DEFAULT_LOCAL_BASE_URL, api_key: str | N
                 int(max_turns),
             )
         except Exception as e:
+            logger.exception("Playground episode failed")
             return [], f"**Error:** {e}"
 
     with gr.Blocks(title="Environment Playground") as demo:

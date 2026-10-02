@@ -130,9 +130,8 @@ def test_sandbox_backend_outage_voids_the_episode_unpriced():
         env.step(episode_ids, ["x"], [{"tool_calls": [_tool_call("run_code", code="print(1)")]}])
         traj = env.get_trajectories([eid])[0]
 
-        result = traj.info["tool_results"][-1]
-        assert result["success"] is False, "a backend outage must not score as a successful tool call"
-        assert "503" in result["content"]
+        assert traj.info["successful_tool_calls"] == 0, "a backend outage must not score as a successful tool call"
+        assert "503" in _last_tool_result(traj)
         assert traj.done and not traj.info["completed"]
         assert traj.episode_invalid, "an infra fault must leave the group baseline"
         assert "503" in traj.info[EPISODE_INVALID_REASON_KEY]
@@ -188,9 +187,9 @@ def test_bash_tool_timeout_is_an_observation_not_an_exception():
     try:
         episode_ids, _ = env.reset(["task"])
         env.step(episode_ids, ["b"], [{"tool_calls": [_tool_call("run_bash_command", command="sleep 30")]}])
-        result = env.get_trajectories(episode_ids)[0].info["tool_results"][-1]
-        assert "timeout" in result["content"], result["content"]
-        assert result["success"] is True, "a time limit is a verdict on the command, not a broken tool"
+        traj = env.get_trajectories(episode_ids)[0]
+        assert "timeout" in _last_tool_result(traj), _last_tool_result(traj)
+        assert traj.info["successful_tool_calls"] == 1, "a time limit is a verdict on the command, not a broken tool"
     finally:
         env.close()
 
@@ -202,14 +201,15 @@ def test_bash_tool_nonzero_exit_is_an_observation_and_a_backend_outage_is_not():
     try:
         episode_ids, _ = env.reset(["task"])
         env.step(episode_ids, ["b"], [{"tool_calls": [_tool_call("run_bash_command", command="exit 3")]}])
-        exited = env.get_trajectories(episode_ids)[0].info["tool_results"][-1]
-        assert exited["success"] is True and "3" in exited["content"]
+        traj = env.get_trajectories(episode_ids)[0]
+        assert traj.info["successful_tool_calls"] == 1 and "3" in _last_tool_result(traj)
 
-        session = env._session_for(env.get_trajectories(episode_ids)[0])
+        session = env._session_for(traj)
         session.run = lambda *a, **kw: SandboxResult(error="remote sandbox error: 503")
         env.step(episode_ids, ["b"], [{"tool_calls": [_tool_call("run_bash_command", command="true")]}])
-        outage = env.get_trajectories(episode_ids)[0].info["tool_results"][-1]
-        assert outage["success"] is False, "a backend outage must not score as a successful tool call"
+        traj = env.get_trajectories(episode_ids)[0]
+        assert traj.info["total_tool_calls"] == 2
+        assert traj.info["successful_tool_calls"] == 1, "a backend outage must not score as a successful tool call"
     finally:
         env.close()
 

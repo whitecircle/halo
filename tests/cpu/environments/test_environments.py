@@ -15,6 +15,7 @@ import asyncio
 import dataclasses
 import logging
 import time
+import warnings
 
 import numpy as np
 import pytest
@@ -22,6 +23,7 @@ import pytest
 from src.configs.environment_config import EnvironmentConfig
 from src.environments.base import (
     EPISODE_INVALID_KEY,
+    EPISODE_INVALID_REASON_KEY,
     OBJECTIVE_REWARD_KEY,
     REWARD_COMPONENTS_KEY,
     AsyncBaseEnvironment,
@@ -527,6 +529,39 @@ def test_parse_react_output_malformed_json_degrades_instead_of_raising():
         step = parse_react_output(f"Thought: t\nAction: {action}")
         assert step.action is None or isinstance(step.action, str), action
         assert step.action_args is None or isinstance(step.action_args, dict), action
+
+
+@pytest.mark.parametrize(
+    "action",
+    [
+        "run(code={[1]: 2})",
+        "run(code={[1]})",
+        "run(code=" + "[" * 100_000 + "1])",
+        '{"name": "run", "arguments": ' + "[" * 100_000 + "]" * 100_000 + "}",
+    ],
+    ids=["unhashable-key", "unhashable-set-member", "deep-pattern-value", "deep-json-action"],
+)
+def test_a_react_action_no_literal_can_build_degrades_instead_of_voiding_the_episode(action):
+    """An unhashable dict key or set member raises TypeError out of the literal reader, deep nesting a
+    RecursionError out of the JSON one; uncaught, either escapes ``env.step`` and the policy voids its
+    own episode. Both degrade like any other malformed action, and the episode goes on."""
+    registry = NativeToolRegistry().register(
+        NativeTool(name="run", description="run", parameters=[], handler=lambda **kwargs: "ran")
+    )
+    env = ReActEnvironment(tool_registry=registry, max_turns=3)
+    ids, _ = env.reset(["task"], [{"answer": "4"}])
+    (step,) = env.step(ids, [f"Thought: t\nAction: {action}"], [{}])
+    assert not step.done
+
+
+def test_parse_react_output_reads_an_escape_python_rejects_without_a_syntax_warning():
+    """A regex's ``\\d`` in a code argument is read as Python reads it, silently: a ``SyntaxWarning`` per
+    parse would print once per action of every episode."""
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        step = parse_react_output("Thought: t\nAction: python(code=\"import re; re.findall('\\d', 'a1')\")")
+    assert step.action_args == {"code": "import re; re.findall('\\d', 'a1')"}
+    assert not [w for w in caught if issubclass(w.category, SyntaxWarning)]
 
 
 def test_parse_react_output_numeric_args():
@@ -1040,9 +1075,9 @@ def test_multi_tool_parallel_calls():
     assert traj.info["total_tool_calls"] == 3
     assert traj.info["successful_tool_calls"] == 3
 
-    tool_results = traj.info["tool_results"]
-    assert len(tool_results) == 3
-    assert all(r["success"] for r in tool_results)
+    tool_messages = [m for m in traj.messages if m.role == "tool"]
+    assert [m.tool_call_id for m in tool_messages] == ["call_a", "call_b", "call_c"]
+    assert not any(m.content.startswith("Error") for m in tool_messages)
 
 
 def test_tool_error_handling():
@@ -1077,10 +1112,9 @@ def test_tool_error_handling():
     assert traj.info["total_tool_calls"] == 1
     assert traj.info["successful_tool_calls"] == 0
 
-    tool_results = traj.info["tool_results"]
-    assert len(tool_results) == 1
-    assert tool_results[0]["success"] is False
-    assert "Error" in tool_results[0]["content"]
+    tool_messages = [m for m in traj.messages if m.role == "tool"]
+    assert len(tool_messages) == 1
+    assert "Error" in tool_messages[0].content
 
 
 def test_unknown_tool_handling():
@@ -1100,11 +1134,11 @@ def test_unknown_tool_handling():
     env.step(episode_ids, ["Using unknown tool..."], [{"tool_calls": tool_calls}])
 
     traj = env.get_trajectories(episode_ids)[0]
-    tool_results = traj.info["tool_results"]
+    tool_messages = [m for m in traj.messages if m.role == "tool"]
 
-    assert len(tool_results) == 1
-    assert tool_results[0]["success"] is False
-    assert "Unknown tool" in tool_results[0]["content"] or "not found" in tool_results[0]["content"].lower()
+    assert len(tool_messages) == 1
+    assert traj.info["successful_tool_calls"] == 0
+    assert "Unknown tool" in tool_messages[0].content
 
 
 def test_react_search_environment():
@@ -1368,6 +1402,24 @@ def test_web_search_raises_on_backend_failure_no_mock_fabrication():
         ws._BACKENDS["serper"] = original
 
 
+def test_a_failing_search_backend_is_logged_once_by_the_protocol(monkeypatch, caplog):
+    """The backend fault reaches the log through the protocol that ran the tool, traceback included;
+    a second warning from the search module would log the same failure twice per call."""
+
+    def _boom(**kwargs):
+        raise RuntimeError("network down")
+
+    monkeypatch.setitem(ws._BACKENDS, "serper", dataclasses.replace(ws._BACKENDS["serper"], sync=_boom))
+    env = NativeToolUseEnvironment(tool_registry=create_native_search_tools(backend="serper"), max_turns=3)
+    ids, _ = env.reset(["task"])
+    call = {"id": "c1", "function": {"name": "web_search", "arguments": '{"query": "q"}'}}
+    with caplog.at_level(logging.DEBUG, logger="src.environments"):
+        env.step(ids, ["searching"], [{"finish_reason": "tool_calls", "tool_calls": [call]}])
+    warnings_logged = [r for r in caplog.records if r.levelno >= logging.WARNING]
+    assert len(warnings_logged) == 1 and warnings_logged[0].exc_info is not None
+    assert "network down" in env.get_trajectories(ids)[0].messages[-1].content
+
+
 def test_web_search_format_results():
     """Test result formatting."""
 
@@ -1590,6 +1642,8 @@ def test_native_tool_use_null_answer_is_invalid_not_a_free_success():
     assert traj.info["completed"] is True
     assert traj.total_reward == 0.0  # graded 0, never the completion payout
     assert traj.episode_invalid is True  # and dropped from the group baseline
+    # Named where the all-invalid step halt and the eval runner read the cause.
+    assert "null" in traj.info[EPISODE_INVALID_REASON_KEY]
 
     env.cleanup(episode_ids)
 
@@ -1608,6 +1662,7 @@ def test_react_null_answer_is_invalid_not_a_free_success():
     assert traj.info["completed"] is True
     assert traj.total_reward == 0.0  # graded 0, never the completion payout
     assert traj.info[EPISODE_INVALID_KEY] is True
+    assert "null" in traj.info[EPISODE_INVALID_REASON_KEY]
 
     env.cleanup(episode_ids)
 

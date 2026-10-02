@@ -82,7 +82,6 @@ def _leaky_traj() -> Trajectory:
             "submission_result": "Passed 2/2 test cases.",
             "_test_cases": [{"input": "1", "output": "EXPECTED_OUTPUT_42"}],  # answer key (underscored)
             "context": {"answer": '{"tests": [{"output": "EXPECTED_OUTPUT_42"}]}'},  # answer key (context)
-            "tool_calls": [{"name": "submit_solution"}],  # raw per-turn log
             "_eval_stats": {"generations": 1, "completion_tokens": 50},
         },
     )
@@ -100,7 +99,6 @@ def test_serialize_trajectory_drops_answer_key_and_internals():
     s = serialize_trajectory(_leaky_traj())
     assert "_test_cases" not in s["info"]
     assert "context" not in s["info"]
-    assert "tool_calls" not in s["info"]
     assert "EXPECTED_OUTPUT_42" not in json.dumps(s)
     assert serialize_trajectory(None) is None
 
@@ -458,6 +456,61 @@ async def test_collect_results_forwards_the_whole_rollout_contract(monkeypatch):
     assert seen[0]["model"] == "served-model"
     assert seen[0]["request_timeout"] == pytest.approx(42.0)
     assert results[0]["samples"][0]["success"] is True
+
+
+async def test_a_conversation_prompt_hands_the_environment_its_last_user_turn(monkeypatch):
+    """Training hands an environment a conversation's last user turn as the task; an eval handing it
+    the whole list opens the episode on the dataset's framing turns and grades a different task than
+    the policy trained on."""
+    convo = [
+        {"role": "system", "content": "dataset framing"},
+        {"role": "user", "content": "an earlier turn"},
+        {"role": "assistant", "content": "ack"},
+        {"role": "user", "content": "the task"},
+    ]
+    done = types.SimpleNamespace(
+        answer="done", finish_reason="stop", completion_tokens=1, tool_calls=None, reasoning=None, token_ids=None
+    )
+    monkeypatch.setattr(eval_runner, "generate_openai_response", _scripted_generate([done]))
+    (row,) = await collect_results(
+        _tooled_env(),
+        [{"prompt": convo, "context": {}}],
+        client=object(),
+        rollout=_RETRYING,
+        collect_trajectories=True,
+    )
+    messages = row["samples"][0]["trajectory"]["messages"]
+    assert [(m["role"], m["content"]) for m in messages] == [("user", "the task"), ("assistant", "done")]
+
+
+async def test_a_conversation_without_a_user_turn_is_refused_before_any_episode(monkeypatch):
+    async def _never(**kwargs):
+        raise AssertionError("no episode may run for a prompt with no task in it")
+
+    monkeypatch.setattr(eval_runner, "generate_openai_response", _never)
+    with pytest.raises(ValueError, match="no 'user' message"):
+        await collect_results(
+            _tooled_env(),
+            [{"prompt": [{"role": "system", "content": "s"}], "context": {}}],
+            object(),
+            rollout=_RETRYING,
+        )
+
+
+async def test_a_recorded_native_episode_carries_its_tool_calls_once(monkeypatch):
+    """The messages carry every call and result; a second log of them in ``info`` would be pickled through
+    Ray and the TP broadcast and written to the JSONL for nothing."""
+    done = types.SimpleNamespace(
+        answer="done", finish_reason="stop", completion_tokens=1, tool_calls=None, reasoning=None, token_ids=None
+    )
+    monkeypatch.setattr(eval_runner, "generate_openai_response", _scripted_generate([_tool_call_response(), done]))
+    (row,) = await collect_results(
+        _tooled_env(), [{"prompt": "q", "context": {}}], client=object(), rollout=_RETRYING, collect_trajectories=True
+    )
+    trajectory = row["samples"][0]["trajectory"]
+    assert [m["role"] for m in trajectory["messages"]] == ["user", "assistant", "tool", "assistant"]
+    assert trajectory["messages"][1]["tool_calls"][0]["id"] == "c1" and trajectory["messages"][2]["content"] == "ok"
+    assert not {"tool_calls", "tool_results"} & trajectory["info"].keys()
 
 
 async def test_collect_results_omits_the_model_for_a_single_model_endpoint(monkeypatch):

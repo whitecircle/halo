@@ -24,9 +24,12 @@ from src.environments.base import (
     Trajectory,
     require_magnitudes,
 )
-from src.environments.envs.protocols.native import admit_tool_call, validate_tool_budgets
-from src.environments.sandbox.base import SANDBOX_FAULTS
-from src.environments.tools.definitions import NativeToolRegistry, ToolArgumentError, ToolBudgetExhausted
+from src.environments.envs.protocols.native import admit_tool_call, tool_call_outcome, validate_tool_budgets
+from src.environments.tools.definitions import (
+    MALFORMED_LITERAL_ERRORS,
+    NativeToolRegistry,
+    parse_python_expression,
+)
 from src.environments.tools.factories import (
     create_native_math_tools,
     create_native_python_tools,
@@ -112,7 +115,7 @@ def _parse_action(action_text: str) -> tuple[str | None, dict[str, Any] | None]:
             if isinstance(args, str):
                 args = json.loads(args)
             return (name if isinstance(name, str) else None), (args if isinstance(args, dict) else {})
-        except json.JSONDecodeError:
+        except (json.JSONDecodeError, RecursionError):
             pass
 
     func_match = _CALL_ACTION_RE.match(action_text)
@@ -142,12 +145,12 @@ def _parse_function_args(args_str: str) -> dict[str, Any]:
     Read as a Python call first, so a triple-quoted or escaped code argument arrives whole: the pattern
     fallback stops a value at its first matching quote and reads a ``name = value`` line of the code as
     an argument of its own. Text that is not a call of literals (unquoted expressions, JSON's
-    ``true``/``null``) takes the pattern."""
+    ``true``/``null``, a literal Python cannot build such as an unhashable dict key) takes the pattern."""
     args = {}
     if not args_str:
         return args
-    with contextlib.suppress(SyntaxError, ValueError, MemoryError, RecursionError):
-        call = ast.parse(f"_({args_str})", mode="eval").body
+    with contextlib.suppress(*MALFORMED_LITERAL_ERRORS):
+        call = parse_python_expression(f"_({args_str})")
         if isinstance(call, ast.Call) and not call.args and all(kw.arg for kw in call.keywords):
             return {kw.arg: ast.literal_eval(kw.value) for kw in call.keywords}
 
@@ -157,7 +160,7 @@ def _parse_function_args(args_str: str) -> dict[str, Any]:
         value = next((g for g in match.groups()[1:] if g is not None), None)
 
         if value and (value.startswith("{") or value.startswith("[")):
-            with contextlib.suppress(json.JSONDecodeError):
+            with contextlib.suppress(json.JSONDecodeError, RecursionError):
                 value = json.loads(value)
         elif value:
             with contextlib.suppress(ValueError, TypeError):
@@ -328,26 +331,12 @@ Always think before acting, and provide a Final Answer when you're done."""
             else:
                 try:
                     args = admit_tool_call(self, tool, step.action_args or {}, trajectory)
-                    observation = tool.execute(**args)
-                    success = True
-                except (ToolBudgetExhausted, ToolArgumentError) as e:
-                    # A refusal is expected control flow: charged like any tool error, logged without
-                    # the traceback that a tool which actually broke gets below.
-                    logger.debug("Tool %r refused the call: %s", step.action, e)
-                    observation = f"Error: {e}"
-                    info["tool_error"] = str(e)
-                except SANDBOX_FAULTS as e:
-                    # Booked by type (the native protocol's contract), and it ends the episode.
-                    fault = e
-                    observation = f"Error: {e}"
-                    info["tool_error"] = str(e)
-                except Exception as e:
-                    # Without this line the episode just grades 0 with nothing anywhere
-                    # saying why: the observation carries the message, but the trajectory is not where
-                    # a broken tool gets debugged.
-                    logger.warning("Tool %r raised during execution", step.action, exc_info=True)
-                    observation = f"Error: {str(e)}"
-                    info["tool_error"] = str(e)
+                    outcome = tool.execute(**args)
+                except Exception as e:  # a tool fault is an observation, not an episode kill
+                    outcome = e
+                observation, success, fault = tool_call_outcome(step.action, outcome)
+                if not success:
+                    info["tool_error"] = str(outcome)
 
             reward += self._book_tool_call(trajectory, step.action, success, fault)
             observation = self._truncate_observation(observation)

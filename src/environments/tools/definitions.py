@@ -1,15 +1,22 @@
-"""OpenAI-compatible tool definitions and registry (vLLM tool-calling format)."""
+"""OpenAI-compatible tool definitions and registry (the tool-calling format both rollout engines take)."""
 
 import ast
 import asyncio
+import contextlib
 import inspect
 import json
+import warnings
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any
 
 from src.environments.base import Message
 from src.environments.sandbox.base import SandboxAgentFault, SandboxInfraError
+
+# What reading model-authored arguments as JSON or a Python literal raises on malformed text, past a
+# syntax error: an unhashable dict key or set member (``{[1]: 2}``) is a TypeError, deep nesting a
+# RecursionError or MemoryError.
+MALFORMED_LITERAL_ERRORS = (SyntaxError, ValueError, TypeError, MemoryError, RecursionError)
 
 
 class ToolBudgetExhausted(Exception):
@@ -32,17 +39,24 @@ class ToolArgumentError(TypeError):
     """
 
 
+def parse_python_expression(source: str) -> ast.expr:
+    """``source`` parsed as one Python expression, without the ``SyntaxWarning`` an invalid escape in a
+    model-written string (``"\\d"``) prints on every parse."""
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", SyntaxWarning)
+        return ast.parse(source.lstrip(" \t"), mode="eval").body
+
+
 def _parse_tool_arguments(raw: str) -> dict[str, Any]:
     """Parse a tool-call ``arguments`` string; ``ast.literal_eval`` repairs Python-dict literals (single
     quotes, trailing commas, ``True``/``None``). Unrecoverable / non-dict input falls back to ``{}``."""
-    try:
-        parsed = json.loads(raw)
-    except json.JSONDecodeError:
+    with contextlib.suppress(*MALFORMED_LITERAL_ERRORS):
         try:
-            parsed = ast.literal_eval(raw)
-        except (ValueError, SyntaxError):
-            return {}
-    return parsed if isinstance(parsed, dict) else {}
+            parsed = json.loads(raw)
+        except json.JSONDecodeError:
+            parsed = ast.literal_eval(parse_python_expression(raw))
+        return parsed if isinstance(parsed, dict) else {}
+    return {}
 
 
 @dataclass
@@ -58,7 +72,7 @@ class ToolParameter:
 
 @dataclass
 class NativeTool:
-    """Tool definition in OpenAI function-calling format (understood natively by vLLM)."""
+    """Tool definition in OpenAI function-calling format (understood natively by the rollout engines)."""
 
     name: str
     description: str
@@ -207,7 +221,7 @@ class NativeToolRegistry:
         return f"Error: Unknown tool '{name}'. Available tools: {', '.join(sorted(self.names()))}"
 
     def to_openai_tools(self) -> list[dict[str, Any]]:
-        """OpenAI function-calling schemas, passed to vLLM via the ``tools`` parameter."""
+        """OpenAI function-calling schemas, passed to the rollout engine via the ``tools`` parameter."""
         return [tool.to_openai_schema() for tool in self._tools.values()]
 
     def merge(self, other: "NativeToolRegistry") -> "NativeToolRegistry":

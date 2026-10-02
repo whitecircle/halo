@@ -10,7 +10,8 @@ from pydantic import BaseModel
 
 # The OpenAI-wire finish_reason for a generation cut off at its token cap.
 FINISH_REASON_LENGTH = "length"
-# vLLM's finish reason for a generation the engine aborted (a pause in abort mode, an engine restart).
+# The finish reason an engine reports for a generation it aborted (a weight-sync pause that drops
+# in-flight requests, an engine restart).
 FINISH_REASON_ABORT = "abort"
 # Finish reasons that ended a turn without the model choosing to stop. The fragment is never a
 # natural termination, so it is neither trained as one (the truncated-turn flag) nor graded as the

@@ -208,32 +208,27 @@ class NativeMCPClientEnvironment(AsyncNativeToolUseEnvironment):
     async def _call_mcp_tool(self, name: str, arguments: dict[str, Any]) -> str:
         """Call an MCP tool and return its text content.
 
-        Raises on failure so the wrapper marks ``success=False``; returning an error string would
-        count as a successful call and earn the per-call reward.
+        Raises on failure so the wrapper marks ``success=False`` (the protocol logs it); returning an
+        error string would count as a successful call and earn the per-call reward.
         """
         if not self._session:
             raise RuntimeError("MCP session not connected")
 
-        try:
-            result = await self._session.call_tool(name, arguments=arguments)
+        result = await self._session.call_tool(name, arguments=arguments)
 
-            content_parts = []
-            for c in result.content:
-                if hasattr(c, "text"):
-                    content_parts.append(c.text)
-                elif hasattr(c, "data"):
-                    content_parts.append(f"[Binary data: {len(c.data)} bytes]")
-                else:
-                    content_parts.append(str(c))
+        content_parts = []
+        for c in result.content:
+            if hasattr(c, "text"):
+                content_parts.append(c.text)
+            elif hasattr(c, "data"):
+                content_parts.append(f"[Binary data: {len(c.data)} bytes]")
+            else:
+                content_parts.append(str(c))
 
-            content = "\n".join(content_parts)
-            if result.isError:
-                raise RuntimeError(content or f"MCP tool {name} returned an error")
-            return content
-
-        except Exception:
-            logger.exception(f"MCP tool error: {name}")
-            raise
+        content = "\n".join(content_parts)
+        if result.isError:
+            raise RuntimeError(content or f"MCP tool {name} returned an error")
+        return content
 
     async def disconnect(self) -> None:
         """Signal the connection-owner task to unwind its contexts and wait for it (idempotent)."""
@@ -257,7 +252,10 @@ class NativeMCPClientEnvironment(AsyncNativeToolUseEnvironment):
         the disconnect is scheduled as a task and a reference is kept until it completes.
         """
         task = self._conn_task
-        if task is not None:
+        if task is not None and task.done():
+            # Already unwound: ``asyncio.run`` cancels the tasks its loop leaves behind (a CLI eval).
+            self._conn_task = None
+        elif task is not None:
             loop = task.get_loop()
             try:
                 running = asyncio.get_running_loop()

@@ -778,7 +778,8 @@ async def test_actor_grades_concurrent_codecontests_episodes_in_isolation():
     assert result_b.trajectory.info["tests_passed"] == result_b.trajectory.info["tests_total"] == 1
     # The two episodes really were distinct (each graded its own submission), proving the test is not
     # vacuous; the hidden tests themselves are dropped from a finished trajectory.
-    assert result_a.trajectory.info["tool_calls"] != result_b.trajectory.info["tool_calls"]
+    calls_a, calls_b = ([m.tool_calls for m in r.trajectory.messages if m.tool_calls] for r in (result_a, result_b))
+    assert calls_a and calls_a != calls_b
     assert "_test_cases" not in result_a.trajectory.info
 
 

@@ -5,7 +5,6 @@ Priority: Serper (SERPER_API_KEY) → Brave (BRAVE_API_KEY) → Tavily (TAVILY_A
 """
 
 import asyncio
-import logging
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from functools import partial
@@ -15,8 +14,6 @@ import httpx
 from ddgs import DDGS
 
 from src.env import env_flag, env_str
-
-logger = logging.getLogger(__name__)
 
 # Per-request wall-clock cap (seconds) for every HTTP search backend.
 SEARCH_TIMEOUT = 15.0
@@ -212,11 +209,11 @@ def _resolve_backend(backend: str | None, query: str, max_results: int) -> tuple
 
 
 def _backend_failure(backend: str, exc: Exception) -> RuntimeError:
-    """Log a backend fault and build the error the search entry points raise.
+    """Build the error the search entry points raise for a backend fault; the protocol running the
+    tool logs it.
 
     A fault raises rather than falling back to mock results, which would score as a successful search.
     """
-    logger.warning(f"Search backend '{backend}' failed: {exc}")
     return RuntimeError(f"web_search backend '{backend}' failed: {exc}")
 
 

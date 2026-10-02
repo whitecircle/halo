@@ -275,6 +275,15 @@ def test_session_write_read_list_files():
         assert session.list_files() == ["a.txt", "pkg/b.txt"]
 
 
+def test_session_reads_a_file_the_program_wrote_in_bytes_that_are_not_utf8():
+    """A program's output file is the program's own bytes: read back under the strict locale codec, a
+    stray ``\\xff`` raises out of ``read_file`` and turns the model's file read into a broken tool."""
+    with LocalSubprocessSandbox().open_session() as session:
+        res = session.run("open('out.bin', 'wb').write(b'ok\\xff\\n')")
+        assert res.ok, res
+        assert session.read_file("out.bin") == "ok\ufffd\n"
+
+
 def test_session_cross_language_sharing():
     """A file written via the session is visible to BOTH a python run and a compiled-cpp run."""
     if not _HAS_GPP:

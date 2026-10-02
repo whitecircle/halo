@@ -24,6 +24,10 @@ python scripts/environments/inference/run_env.py --env_type qa_search \
 | `--max_turns` / `--env_kwargs` | the env's own; coding 15 / `{}` | Turn cap override; JSON merged into the env config |
 | `--temperature` / `--top_p` / `--max_tokens` / `--request_timeout` | 0.7 (0.2 coding) / 0.95 / 32768 (coding at a level: the level's `thinking_tokens` + 4096) / 180 s | Sampling, HTTP timeout |
 
+A `prompt` given as a message list reaches the environment as its last `user` turn, the task
+training hands it ([Async GRPO with Environments](../async-grpo/README.md)); a row with no `user` turn
+is refused before any episode runs.
+
 `run_env.py` reads `--prompt_field` / `--answer_field`, passes extra columns through
 `--context_fields`, buckets by `--group_by` and names each example by `--id_field` (default `id`);
 a field that names no column of the split exits before any row is read, except the default answer
@@ -96,8 +100,8 @@ coding, also the adapter, contest `selection`, language, `eval_protocol`, effort
 Each later line is an `episode`, addressed by `index` and `id`: `reward`, `success`,
 `generation_error` (null on a scored sample), `stats`, the messages, `reasoning_effort` /
 `reasoning_budget`, `info`. The answer key (`_`-prefixed `info`
-fields), the `info` tool-call log, `context` and assistant chain-of-thought are stripped; each
-message keeps its own `tool_calls`, which the re-grader replays.
+fields), `context` and assistant chain-of-thought are stripped; each message keeps its own
+`tool_calls`, which the re-grader replays.
 
 ## Re-grading recorded trajectories
 
@@ -111,7 +115,8 @@ python scripts/environments/inference/regrade_trajectories.py \
 ```
 
 It rebuilds each problem's hidden tests by `index` under the meta line's contest `selection`, and
-replays every recorded `submit_solution`, up to that episode's own budget, through `grade_solution`
+replays every recorded `submit_solution`, its arguments read as the environment read them (a
+Python-literal arguments string included), up to that episode's own budget, through `grade_solution`
 under the meta line's `env_grading` contract. The meta's `eval_protocol` only rebuilds the
 environment, whose `max_submissions` is the budget of an episode that stamped none. Grading stops at
 the first failing test and `max_grading_seconds` does not apply. It reports, per file, the protocol

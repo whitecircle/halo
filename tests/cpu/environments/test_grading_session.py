@@ -111,6 +111,18 @@ def test_a_host_fault_shows_its_class_alone_under_outcome(stage, caplog):
     assert "HIDDEN-4217" in full.details
 
 
+@pytest.mark.parametrize("stage", ["run", "reset"])
+def test_a_backend_down_for_every_test_logs_one_line_per_grade(stage, caplog):
+    """A pool of hundreds of tests against a dead backend must not log a traceback per test: the grade
+    logs one line counting its infra errors, the per-test detail stays at debug."""
+    with caplog.at_level(logging.WARNING, logger="src.environments.envs.tasks.coding.grading"):
+        grade = run_solution_against_tests("code", _TESTS, sandbox=_DeniedSandbox(stage))
+    assert grade.infra_errors == len(_TESTS)
+    logged = [r.getMessage() for r in caplog.records if r.levelno >= logging.WARNING]
+    assert len(logged) == 1, logged
+    assert f"(x{len(_TESTS)})" in logged[0]
+
+
 def test_garbage_output_is_a_wrong_answer_not_an_infra_error():
     program = "import sys\nsys.stdout.buffer.write(b'\\x80\\x80\\n')"
     grade = run_solution_against_tests(program, [{"input": "", "output": "ok\n"}], sandbox=LocalSubprocessSandbox())

@@ -189,7 +189,7 @@ def rollout_config_from_args(
     Under ``--training_config`` it is the training run's own :class:`RolloutConfig` — the object the
     training rollout hands its actors, template variables and stop tokens included — with the served
     model name and every sampling flag passed explicitly laid over it. Without the flag it is built
-    from the shared endpoint flags and the script's defaults, as before. ``default_temperature`` and
+    from the shared endpoint flags and the script's defaults. ``default_temperature`` and
     ``default_max_tokens`` are the script's own, for the same reason as in :func:`write_eval_outputs`.
     """
     if contract is not None:

@@ -33,6 +33,7 @@ from src.environments.base import (
     resolve_reasoning_effort,
     solve_verdict,
     stable_reasoning_effort,
+    task_prompt,
 )
 from src.environments.engine_wire import SGLANG_BACKEND
 from src.environments.episode import (
@@ -771,23 +772,16 @@ class DistributedAsyncEnvironmentalGRPOTrainer(
 
         for inp in inputs:
             prompt = inp["prompt"]
-
-            if isinstance(prompt, list):
-                # The env is handed the last user turn as the task; earlier turns and the system
-                # message are the dataset's framing, not the task text.
-                user_msgs = [m for m in prompt if m.get("role") == "user"]
-                if user_msgs:
-                    prompt_text = user_msgs[-1]["content"]
-                else:
-                    # The caller raises it uniformly before submitting anything to the environment.
-                    self._record_batch_error(
-                        "Environmental GRPO row has no 'user' message in its conversation "
-                        f"(roles: {[m.get('role') for m in prompt]}). The environment is given the "
-                        "last user turn as the task, so there is nothing to send it."
-                    )
-                    prompt_text = ""
-            else:
-                prompt_text = prompt
+            try:
+                prompt_text = task_prompt(prompt)
+            except ValueError:
+                # The caller raises it uniformly before submitting anything to the environment.
+                self._record_batch_error(
+                    "Environmental GRPO row has no 'user' message in its conversation "
+                    f"(roles: {[m.get('role') for m in prompt]}). The environment is given the "
+                    "last user turn as the task, so there is nothing to send it."
+                )
+                prompt_text = ""
 
             prompts.append(prompt_text)
             ctx = {k: v for k, v in inp.items() if k != "prompt"}

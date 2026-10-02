@@ -1,4 +1,4 @@
-"""Native tool-use environments using vLLM/OpenAI tool calling (sync + async)."""
+"""Native tool-use environments over OpenAI-format tool calling, which both rollout engines parse (sync + async)."""
 
 import asyncio
 import logging
@@ -19,7 +19,7 @@ from src.environments.base import (
     Trajectory,
     require_magnitudes,
 )
-from src.environments.sandbox.base import SANDBOX_FAULTS
+from src.environments.sandbox.base import SANDBOX_FAULTS, SandboxAgentFault, SandboxInfraError
 from src.environments.tools.definitions import (
     NativeTool,
     NativeToolCall,
@@ -75,8 +75,30 @@ def admit_tool_call(
     return bound
 
 
+def tool_call_outcome(
+    name: str, outcome: str | Exception
+) -> tuple[str, bool, SandboxInfraError | SandboxAgentFault | None]:
+    """A call's observation, whether it succeeded, and the sandbox fault it ended on, from what tool
+    ``name`` returned or raised (admission included), under either protocol.
+
+    A refusal (:class:`ToolBudgetExhausted`, :class:`ToolArgumentError`) is expected control flow,
+    logged without a traceback: an env with a 2-submission cap in a 15-turn episode refuses by design.
+    A sandbox fault is booked and logged by type in the accounting. Any other exception is a broken
+    tool, logged with its traceback: the graded tools run here too, and a submit handler that dies on
+    a malformed payload would otherwise grade 0 with nothing anywhere saying why.
+    """
+    if not isinstance(outcome, Exception):
+        return outcome, True, None
+    fault = outcome if isinstance(outcome, SANDBOX_FAULTS) else None
+    if isinstance(outcome, ToolBudgetExhausted | ToolArgumentError):
+        logger.debug("Tool %r refused the call: %s", name, outcome)
+    elif fault is None:
+        logger.warning("Tool %r raised during execution", name, exc_info=outcome)
+    return f"Error: {outcome}", False, fault
+
+
 class NativeToolUseEnvironment(BaseEnvironment):
-    """Environment using native vLLM/OpenAI tool calling."""
+    """Environment using native OpenAI-format tool calling."""
 
     SHAPING_COMPONENTS = ("tool_shaping",)
 
@@ -134,7 +156,7 @@ class NativeToolUseEnvironment(BaseEnvironment):
         self.length_cutoff_penalty = length_cutoff_penalty
 
     def get_tools_schema(self) -> list[dict[str, Any]]:
-        """Get tools in OpenAI format for vLLM generation."""
+        """Get tools in OpenAI format for the rollout engine's generation request."""
         return self.registry.to_openai_tools()
 
     def _reset_single(self, prompt: str | list[dict[str, str]], context: dict[str, Any] | None = None) -> Trajectory:
@@ -144,8 +166,6 @@ class NativeToolUseEnvironment(BaseEnvironment):
             context,
             system_prompt=self.system_prompt,
             extra_info={
-                "tool_calls": [],
-                "tool_results": [],
                 "total_tool_calls": 0,
                 "successful_tool_calls": 0,
                 TOOL_CALL_COUNTS_KEY: {},
@@ -179,35 +199,16 @@ class NativeToolUseEnvironment(BaseEnvironment):
         )
 
     def _result_from_call(self, tc: NativeToolCall, outcome: str | Exception) -> NativeToolResult:
-        """Build a NativeToolResult from a success payload or caught exception (observation truncated).
-        A sandbox fault rides on the result, so the accounting books it by type."""
-        if isinstance(outcome, Exception):
-            return NativeToolResult(
-                tool_call_id=tc.id,
-                name=tc.name,
-                content=self._truncate_observation(f"Error: {outcome}"),
-                success=False,
-                sandbox_fault=outcome if isinstance(outcome, SANDBOX_FAULTS) else None,
-            )
+        """Build a NativeToolResult from a success payload or caught exception (:func:`tool_call_outcome`,
+        observation truncated). A sandbox fault rides on the result, so the accounting books it by type."""
+        content, success, fault = tool_call_outcome(tc.name, outcome)
         return NativeToolResult(
             tool_call_id=tc.id,
             name=tc.name,
-            content=self._truncate_observation(outcome),
-            success=True,
+            content=self._truncate_observation(content),
+            success=success,
+            sandbox_fault=fault,
         )
-
-    def _refused_call_result(
-        self, tc: NativeToolCall, exc: ToolBudgetExhausted | ToolArgumentError
-    ) -> NativeToolResult:
-        """A call the tool refused — over its per-episode budget, or arguments its handler cannot bind:
-        a tool error like any other, but expected control flow.
-
-        Logged without a traceback — an env with a 2-submission cap in a 15-turn episode refuses by
-        design, a ``submit_solution`` with no ``code`` is a model slip, and a stack trace per refusal
-        buries the faults that ``_execute_tool_calls`` logs.
-        """
-        logger.debug("Tool %r refused the call: %s", tc.name, exc)
-        return self._result_from_call(tc, exc)
 
     def _account_tool_result(self, result: NativeToolResult, trajectory: Trajectory) -> float:
         """Book one result on the episode's counters and return its reward delta (the base's accounting)."""
@@ -255,39 +256,18 @@ class NativeToolUseEnvironment(BaseEnvironment):
                 else:
                     try:
                         bound = admit_tool_call(self, tool, tc.arguments, trajectory)
-                        result = self._result_from_call(tc, tool.execute(**bound))
-                    except (ToolBudgetExhausted, ToolArgumentError) as e:
-                        result = self._refused_call_result(tc, e)
-                    except SANDBOX_FAULTS as e:  # booked (and logged) by type in the accounting, no traceback
-                        result = self._result_from_call(tc, e)
+                        outcome = tool.execute(**bound)
                     except Exception as e:  # a tool fault is an observation, not an episode kill
-                        # Logged because the graded tools run here too: a submit handler that dies on a
-                        # malformed payload becomes an ordinary tool error, and without this line the
-                        # episode just grades 0 with nothing anywhere saying why.
-                        logger.warning("Tool %r raised during execution", tc.name, exc_info=True)
-                        result = self._result_from_call(tc, e)
+                        outcome = e
+                    result = self._result_from_call(tc, outcome)
 
                 reward += self._account_tool_result(result, trajectory)
                 results.append(result)
 
         return results, reward
 
-    def _record_tool_interaction(
-        self,
-        tool_calls: list[NativeToolCall],
-        results: list[NativeToolResult],
-        trajectory: Trajectory,
-    ) -> dict[str, Any]:
-        """Record tool calls and results in trajectory, return step info."""
-        trajectory.info["tool_calls"].extend(
-            [
-                {"id": tc.id, "name": tc.name, "arguments": tc.arguments}
-                for tc in tool_calls[: self.max_tool_calls_per_turn]
-            ]
-        )
-        trajectory.info["tool_results"].extend(
-            [{"id": r.tool_call_id, "name": r.name, "content": r.content, "success": r.success} for r in results]
-        )
+    def _record_tool_interaction(self, results: list[NativeToolResult], trajectory: Trajectory) -> dict[str, Any]:
+        """Record the results as tool messages in the trajectory, return step info."""
         for result in results:
             trajectory.add_message(result.to_message())
 
@@ -312,7 +292,7 @@ class NativeToolUseEnvironment(BaseEnvironment):
 
         tool_calls = self._coerce_tool_calls(tool_calls_data)
         results, reward = self._execute_tool_calls(tool_calls, trajectory)
-        info = self._record_tool_interaction(tool_calls, results, trajectory)
+        info = self._record_tool_interaction(results, trajectory)
         return trajectory, reward, False, False, info
 
     def _step_without_tool_calls(
@@ -389,14 +369,10 @@ class AsyncNativeToolUseEnvironment(AsyncBaseEnvironment, NativeToolUseEnvironme
                 return self._unknown_tool_result(tc)
             try:
                 bound = admit_tool_call(self, tool, tc.arguments, trajectory, for_async=True)
-                return self._result_from_call(tc, await tool.execute_async(**bound))
-            except (ToolBudgetExhausted, ToolArgumentError) as e:
-                return self._refused_call_result(tc, e)
-            except SANDBOX_FAULTS as e:
-                return self._result_from_call(tc, e)
+                outcome = await tool.execute_async(**bound)
             except Exception as e:  # same contract as the sync path above
-                logger.warning("Tool %r raised during async execution", tc.name, exc_info=True)
-                return self._result_from_call(tc, e)
+                outcome = e
+            return self._result_from_call(tc, outcome)
 
         with self._episode_binding(trajectory):
             # gather's child tasks copy the context at creation, so the binding reaches every handler.
@@ -417,5 +393,5 @@ class AsyncNativeToolUseEnvironment(AsyncBaseEnvironment, NativeToolUseEnvironme
 
         tool_calls = self._coerce_tool_calls(tool_calls_data)
         results, reward = await self._execute_tool_calls_async(tool_calls, trajectory)
-        info = self._record_tool_interaction(tool_calls, results, trajectory)
+        info = self._record_tool_interaction(results, trajectory)
         return trajectory, reward, False, False, info
