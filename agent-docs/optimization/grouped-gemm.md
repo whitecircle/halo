@@ -74,7 +74,7 @@ The Qwen3.6 table is a same-session A/B of `index_add_` against the atomic-free 
 
 The win grows with sequence length (larger recv buffers → worse contention).
 
-The fused kernels against that padded-gather permute (a separate routing-weight multiply, a padded `[N, top_k, H]` gather-sum each way, the same sort), on the Gemma 4 26B-A4B expert block (hidden 2816, intermediate 704, 128 experts, top-8), fwd+bwd on one B300: 1.78 / 3.25 / 10.63 ms at 2k / 8k / 32k tokens, against 2.21 / 4.73 / 16.24 ms, and a peak transient memory at 32k of 3.7 against 6.5 GiB (`tests/gpu/profiling/benchmark_moe_block.py`, rows `halo` and `halo_padded_gather`).
+The fused kernels against that padded-gather permute (a separate routing-weight multiply, a padded `[N, top_k, H]` gather-sum each way, the same sort), on the Gemma 4 26B-A4B expert block (hidden 2816, intermediate 704, 128 experts, top-8), fwd+bwd on one B300: 1.78 / 3.25 / 10.63 ms at 2k / 8k / 32k tokens, against 2.21 / 4.73 / 16.24 ms, and peak transient memory of 3.7 against 6.5 GiB at 32k (`tests/gpu/profiling/benchmark_moe_block.py`, rows `halo` and `halo_padded_gather`).
 
 Per-device batch multiplies the per-call recv buffer exactly like sequence length, so on the families the gate leaves on the CAS path (`top_k < ep_size`) batch shape is a real lever. At high router skew scale with GA, not per-device batch.
 

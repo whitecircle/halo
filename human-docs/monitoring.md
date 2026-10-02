@@ -51,9 +51,9 @@ metric groups on top:
 | `log_completions` (GRPO) | off | additionally prints the per-sample table to the console |
 
 For async GRPO with environments, give `sampling/logratio_mean` a standing
-dashboard panel: a steady negative drift with `entropy` flat means the weight
-sync to the rollout server is broken, while a gap that widens as `entropy`
-climbs is a KL-free run drifting, which `balance_token_mass` and the
+dashboard panel: a steady negative drift means the weight sync to the rollout
+server is broken, or, with `advantage/net_token_mass` staying negative and
+`entropy` climbing after it, a KL-free run drifting, which `balance_token_mass` and the
 [early stop](../agent-docs/training-methods/grpo/async-grpo/monitoring.md#early-stop) ↗
 address. Online GRPO does not emit it; there, watch reward and KL
 instead. Details on every callback:

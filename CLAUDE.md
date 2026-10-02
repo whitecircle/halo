@@ -131,7 +131,7 @@ src/
 │                        #     padding-free rows),
 │                        #   patches/(attention — backend select off hardware.py's arch predicates —
 │                        #     flex_sliding_attention (`sdpa_flex_sliding`: FlexAttention on SDPA sliding-window
-│                        #     layers, matmul attention on wide-head global layers),
+│                        #     layers, matmul attention on wide-head global layers within a score budget),
 │                        #     gpt_oss_sinks, zaya, kernel_dispatch, remote_code_compat +
 │                        #     remote_code_hooks = the one wrap of transformers' remote-class funnel, buffer_fixes),
 │                        #   loading/(model_preparation = Auto* class + family patches + the shared post-load

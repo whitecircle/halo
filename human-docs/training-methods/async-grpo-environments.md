@@ -147,9 +147,9 @@ Evaluation runs the same loop: set `eval_strategy`, plus `num_generations_eval: 
 
 `reward/objective` says whether the task is being learned — a rising total reward with a flat objective is shaping,
 not progress (code contests add `outcome/solve_rate` beside it). `episode/turns` and `episode/truncation_rate` say
-whether episodes finish, and `sampling/logratio_mean` drifting steadily negative with `entropy` flat means the weight
-sync is broken and the policy is training on stale rollouts; a gap that widens while `entropy` climbs is a KL-free run
-drifting, which `balance_token_mass` and the early stop address. With several servers, `async/prefetch_hit_rate` says which phase bounds the
+whether episodes finish, and `sampling/logratio_mean` drifting steadily negative means the weight
+sync is broken and the policy is training on stale rollouts, or, with `advantage/net_token_mass` staying negative and
+`entropy` climbing after it, a KL-free run drifting, which `balance_token_mass` and the early stop address. With several servers, `async/prefetch_hit_rate` says which phase bounds the
 step: it climbs toward 1 on a short single-turn environment (below ~0.8, add servers) and sits near 0 by construction
 once a multi-turn round outlasts the update.
 
