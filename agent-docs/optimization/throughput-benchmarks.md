@@ -57,7 +57,7 @@ checkpointing when that runs out of memory:
   weights stochastically; from step 5 on it tracks the fp32-master frameworks.
 
 Per-run tokens/s, memory and step-1 loss: `agent-docs/assets/benchmarks/gemma4-sft-2026-09/summary_2048.tsv`
-and `summary_16384.tsv`. The protocol, the result JSONs and the harness are in the
+and `agent-docs/assets/benchmarks/gemma4-sft-2026-09/summary_16384.tsv`. The protocol, the result JSONs and the harness are in the
 [benchmark gist](https://gist.github.com/advpropsys/0de3c36fd118a5ad18e4883ac15404a2); after `bash unpack.sh`,
 `BENCH_ROOT=<dir> HALO_TREE=<halo checkout> [BENCH_SEQ=16384 BENCH_STEPS=50] bash scripts/benchmarks/gemma4_sft/reproduce.sh`
 runs the data build, every framework and the summary.
