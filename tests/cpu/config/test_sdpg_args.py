@@ -91,7 +91,10 @@ def test_self_distillation_admits_the_solution_placeholder():
 
 def test_the_online_trainer_refuses_it_at_construction_too():
     """The trainer rebuilds the block from its kwargs, so a directly built trainer is held to it."""
-    with pytest.raises(ValueError, match="solution"):
+    refusal = (
+        "sdpg_hint_template names ['{solution}'], which SDPGArguments's hint does not fill; it fills ['{answer}']."
+    )
+    with pytest.raises(ValueError, match=f"^{re.escape(refusal)}$"):
         DistributedSDPGTrainer(sdpg_hint_template="{solution}")
 
 

@@ -3,9 +3,10 @@
 
 The environmental trainer charges a reasoning-length price per episode on top of the reward the
 environment settled, so the totals it trains on almost never tie exactly: judged on them, an
-all-solved group would train on the price alone. Degeneracy is judged on each episode's settled
-environment reward instead, which the drop reads off the rollouts themselves — every other contrast
-the environment prices (a tool error, a cut turn, a resubmission) still keeps a group alive.
+all-solved group would train on the price alone. The narrow phase judges degeneracy on each rollout's
+settled environment reward instead, which it reads off the rollouts. These tests drive it with a group
+tied on that reward, which leaves, and with a group one member of which a priced contrast (a
+resubmission) sets apart, which stays.
 
     python tests/cpu/grpo/test_env_degenerate_groups.py
 """

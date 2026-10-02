@@ -229,6 +229,28 @@ def test_an_instance_patched_module_survives_torch_save_and_load(model_type, fla
         assert torch.equal(loaded(x), module(x))
 
 
+@pytest.mark.parametrize(
+    "spec",
+    [s for s in LIGER_FAMILY_SPECS if s.modeling_module and s.rms_norm and s.rms_norm_kernel == "liger"],
+    ids=lambda s: s.model_types[0],
+)
+def test_an_instance_patched_liger_norm_runs_the_specs_variant_at_its_own_epsilon(spec):
+    """The instance patch must hand LigerRMSNorm's forward what the class swap does: the spec's offset and
+    casting mode, which select the kernel's variant, and the module's own epsilon."""
+    module = importlib.import_module(spec.modeling_module)
+    for name in spec.rms_norm:
+        norm = getattr(module, name)(16, 3e-6)
+        _patch_instance(norm, spec, {"rms_norm": True})
+        assert norm.forward.func is LigerRMSNorm.forward
+        configured = {attr: getattr(norm, attr) for attr in ("variance_epsilon", "offset", "casting_mode", "in_place")}
+        assert configured == {
+            "variance_epsilon": 3e-6,
+            "offset": spec.rms_norm_offset,
+            "casting_mode": spec.rms_norm_casting_mode,
+            "in_place": spec.rms_norm_casting_mode != "gemma",
+        }, f"{name}: {configured}"
+
+
 def test_an_instance_patched_fused_loss_head_refuses_torch_load():
     """The fused-loss head keeps a bound method: its forward is a per-family closure no pickle can
     reference, and the balancing resolver detects the head by that function's module. Loading a model so

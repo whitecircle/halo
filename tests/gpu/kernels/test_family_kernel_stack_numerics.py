@@ -34,8 +34,9 @@ Two comparisons, both against the stock Hugging Face model built from the same w
   DeepSeek-V4 and GLM-5 Next are sums with heavy cancellation, where every bf16 run is noise.
 
 GLM-5 Next's sparse-attention indexer picks KV blocks by a top-k (``index_topk``) that fp32
-reduction-order noise flips on some inputs, which moves a few gradients wholesale in the stock model
-and the stack alike; the fixed seed below has no such near-tie.
+reduction-order noise flips on some inputs, which moves a few gradients wholesale. The fixed seed below
+sits near such a tie: two of the eight one-ulp nudges of the stock model flip it (the median spread
+absorbs them), while the stack's own reduction order does not.
 
     torchrun --nproc_per_node=1 tests/gpu/kernels/test_family_kernel_stack_numerics.py --family qwen3_moe
 """

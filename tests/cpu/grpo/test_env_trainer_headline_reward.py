@@ -76,5 +76,19 @@ def test_within_group_std_with_every_episode_valid_is_the_plain_group_std():
     assert host._metrics["train"]["reward/within_group_std"] == [pytest.approx(expected)]
 
 
+@pytest.mark.parametrize(
+    ("rewards", "num_generations"),
+    [([1.0, 0.0, 0.5], 1), ([1.0, 0.0, 0.5], 2)],
+    ids=["groups-of-one", "ragged-batch"],
+)
+def test_no_within_group_std_without_whole_groups_of_several(rewards, num_generations):
+    """A group of one has no spread to log (it would read as a 0.0 that folds into the window), and a batch
+    that is not whole groups (a ragged eval batch) has no groups to read; the headline still logs."""
+    host = _host()
+    host._log_headline_rewards(torch.tensor(rewards), torch.ones(3, dtype=torch.bool), num_generations, "train")
+    assert "reward/within_group_std" not in host._metrics["train"]
+    assert host._metrics["train"]["reward"] == [pytest.approx(0.5)]
+
+
 if __name__ == "__main__":
     raise SystemExit(pytest.main([__file__, "-v"]))

@@ -123,5 +123,16 @@ def test_a_forced_multi_token_close_loses_its_policy_gradient_as_one_run():
     assert ratio[1:].eq(1.0).all()
 
 
+def test_a_completion_narrower_than_the_close_has_none_to_zero():
+    """A batch whose completions are all shorter than the five-token opener cannot hold a forced close: it
+    keeps every ratio, where sliding the opener's window over it would raise."""
+    ids = torch.tensor([list(_OPENER[:3]), [9, 8, 7]])
+    ratio, forced = zero_engine_forced_closes(
+        torch.full((2, 3), 0.7), torch.zeros(2, 3), torch.ones(2, 3), torch.ones(2, dtype=torch.bool), ids, _OPENER
+    )
+    assert not forced.any() and forced.shape == (2, 3)
+    assert ratio.eq(0.7).all()
+
+
 if __name__ == "__main__":
     raise SystemExit(pytest.main([__file__, "-v"]))

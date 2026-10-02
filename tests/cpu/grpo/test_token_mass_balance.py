@@ -124,12 +124,12 @@ def test_every_rank_takes_the_scales_of_the_whole_round():
     sign; the round balances over both, so both ranks shrink their negatives by the same factor."""
     rank0 = (torch.tensor([0.8, 0.8]), torch.tensor([100.0, 100.0]))
     rank1 = (torch.tensor([-0.8, -0.8]), torch.tensor([300.0, 300.0]))
-    masses = [torch.stack([(a.clamp_min(0) * w).sum(), (a.clamp_max(0).neg() * w).sum()]) for a, w in (rank0, rank1)]
-
-    def all_gather(_local):
-        return torch.stack(masses)
-
-    scales = [token_mass_balance(a, w, all_gather) for a, w in (rank0, rank1)]
+    # What each rank hands the collective, recorded off a first pass; the gather then returns them all.
+    sent = []
+    for a, w in (rank0, rank1):
+        token_mass_balance(a, w, lambda local: sent.append(local) or local)
+    world = torch.cat(sent)
+    scales = [token_mass_balance(a, w, lambda _local: world) for a, w in (rank0, rank1)]
     assert scales[0] == scales[1]
     assert scales[0].negative_scale == pytest.approx(1 / 3)
 

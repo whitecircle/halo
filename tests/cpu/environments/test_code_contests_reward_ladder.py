@@ -29,6 +29,7 @@ from src.environments.base import (
 from src.environments.envs.tasks.coding.code_contests import CodeContestsEnvironment
 from src.environments.envs.tasks.coding.swe import SweEnvironment
 from src.environments.envs.tasks.qa import ExamQAEnvironment
+from src.environments.sandbox.base import SandboxInfraError
 from src.environments.tools.definitions import NativeToolResult
 
 SUB, PEN = 0.1, 0.1
@@ -182,9 +183,34 @@ def test_only_a_grade_that_judged_the_code_pays_and_trains(case):
             f"({10 - graded} ungraded, {infra} lost to the sandbox backend)"
         )
     elif verdict == "outage":
-        assert "lost to the sandbox backend" in traj.info[EPISODE_INVALID_REASON_KEY]
+        assert traj.info[EPISODE_INVALID_REASON_KEY] == (
+            "code grade lost to the sandbox backend: no test passed or failed"
+        )
     else:
         assert EPISODE_INVALID_REASON_KEY not in traj.info
+
+
+def test_an_earlier_fault_keeps_its_own_reason_through_an_outage_grade():
+    """A sandbox fault a tool call booked names what voided the episode; the outage grade that follows must
+    not overwrite it with its own reason."""
+    env = _env()
+    traj = _traj(tool_calls=2, submitted=True, passed=0, tests_graded=10, tests_infra_errors=10, tests_ran_ok=0)
+    env._book_sandbox_fault(traj, env.test_tool_name, SandboxInfraError("backend down"))
+    booked = f"sandbox infrastructure fault in tool {env.test_tool_name!r}: backend down"
+    assert traj.info[EPISODE_INVALID_REASON_KEY] == booked
+    _reward(env, traj)
+    assert traj.episode_invalid and env.rollout_metrics(traj)["episode/grading_infra_outage"] == 1.0
+    assert traj.info[EPISODE_INVALID_REASON_KEY] == booked
+
+
+def test_a_zero_test_grade_pays_nothing():
+    """A grade over no tests passed all of none: read as a solve it would pay the objective and the
+    submission rung for code nothing judged."""
+    env = _env()
+    traj = _traj(tool_calls=2, submitted=True, passed=0, total=0)
+    assert _reward(env, traj) == 0.0
+    components = traj.info[REWARD_COMPONENTS_KEY]
+    assert components[OBJECTIVE_REWARD_KEY] == 0.0 and components["reward/submission"] == 0.0
 
 
 def test_rollout_metrics_decomposition_sums_to_reward():

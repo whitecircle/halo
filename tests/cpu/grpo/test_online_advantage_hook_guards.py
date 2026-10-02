@@ -228,5 +228,26 @@ def test_the_generation_batch_consumes_the_stash(monkeypatch):
     assert me._last_rewards_per_func is None
 
 
+def test_the_balance_weighs_what_the_other_hooks_leave(monkeypatch):
+    """RLRR and the std floor replace the batch's advantages and the drop narrows its loss mask; the balance
+    must weigh the result, or it cancels the net push of advantages the loss never sees."""
+    monkeypatch.setattr(GRPOTrainer, "_generate_and_score_completions", lambda self, inputs: {})
+    me = object.__new__(DistributedGRPOTrainer)
+    me.model = types.SimpleNamespace(training=True)
+    me.parallelism_config = types.SimpleNamespace(is_tp_mode=False, is_expert_tp_mode=False)
+    calls = []
+    hooks = (
+        "_apply_rlrr_advantages",
+        "_apply_std_floor_advantages",
+        "_apply_degenerate_group_drop",
+        "_apply_token_mass_balance",
+    )
+    for hook in hooks:
+        setattr(me, hook, lambda result, hook=hook: calls.append(hook))
+    DistributedGRPOTrainer._generate_and_score_completions(me, [])
+    assert sorted(calls) == sorted(hooks), calls
+    assert calls[-1] == "_apply_token_mass_balance", calls
+
+
 if __name__ == "__main__":
     raise SystemExit(pytest.main([__file__, "-v"]))

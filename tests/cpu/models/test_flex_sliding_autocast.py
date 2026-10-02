@@ -5,7 +5,8 @@ SDPA's inputs.
 Under bf16 autocast a model with fp32 parameters reaches its sliding layers with fp32 queries and keys (the
 fp32 rotary embedding promotes the bf16 projections) beside bf16 values. Run at those dtypes, the kernel is a
 graph the load-time warm-up never compiled, so each rank compiles it mid-run, and it misses the tuned tiles,
-which are keyed on 16-bit inputs. The compiled call is replaced by a spy, so this runs on CPU.
+which are keyed on 16-bit inputs. The compiled call is replaced by a spy, so this runs on CPU. A CPU call
+takes the SDPA fallback, which must receive the call's own ``is_causal``.
 
     python tests/cpu/models/test_flex_sliding_autocast.py
 """
@@ -73,6 +74,26 @@ def test_cast_inputs_take_the_tuned_tiles():
     with patch.object(flex_sliding_attention, "is_blackwell_gpu", lambda: True):
         (call,) = _sliding_call(*_inputs(256, (torch.float32,) * 3), autocast=True)
     assert call["kernel_options"] is flex_sliding_attention._SM100_SLIDING_KERNEL_OPTIONS
+
+
+def test_the_sdpa_fallback_takes_the_calls_is_causal_over_the_modules():
+    """A call's ``is_causal`` overrides the module's, as it does for SDPA: a non-causal call on a causal module
+    attends every key on the fallback too."""
+    torch.manual_seed(0)
+    module = torch.nn.Module()
+    module.is_causal = True
+    module.num_key_value_groups = 1
+    query, key, value = (torch.randn(1, KV_HEADS, 16, 32) for _ in range(3))
+    out, _ = flex_sliding_attention.flex_sliding_attention(
+        module, query, key, value, None, scaling=0.25, is_causal=False
+    )
+
+    def sdpa(is_causal: bool) -> torch.Tensor:
+        attended = torch.nn.functional.scaled_dot_product_attention(query, key, value, scale=0.25, is_causal=is_causal)
+        return attended.transpose(1, 2)
+
+    assert torch.allclose(out, sdpa(is_causal=False), atol=1e-6)
+    assert not torch.allclose(out, sdpa(is_causal=True), atol=1e-3)
 
 
 if __name__ == "__main__":

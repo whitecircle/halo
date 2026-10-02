@@ -242,7 +242,7 @@ def test_the_switch_runs_every_combine_eagerly_on_cuda():
     """``HALO_FUSED_GLU=0`` is the documented escape from a GLU kernel that fails on a GPU: with it, no
     combine entry point (each separate-halves combine in ``PACKED_GLU_MULS`` and its packed form, plus
     ``fused_gptoss_glu``) may reach a Triton kernel, and each must return exactly its eager form. An
-    entry point added there without an eager form here fails the lookup."""
+    entry point added there without an eager form here fails the coverage check."""
     gate, up = (torch.randn(8, 64, device="cuda", dtype=torch.bfloat16) for _ in range(2))
     gate_up = torch.cat([gate, up], dim=-1)
     eager_forms = {
@@ -252,9 +252,9 @@ def test_the_switch_runs_every_combine_eagerly_on_cuda():
         fused_silu_then_clamp_mul: (silu_then_clamp_mul_eager, (LIMIT,)),
         fused_gptoss_glu: (gptoss_glu_eager, (ALPHA, LIMIT)),
     }
+    assert set(PACKED_GLU_MULS) <= set(eager_forms), "a combine in PACKED_GLU_MULS has no eager form here"
     combines = []
-    for separate in (*PACKED_GLU_MULS, fused_gptoss_glu):
-        eager, extra = eager_forms[separate]
+    for separate, (eager, extra) in eager_forms.items():
         combines.append((partial(separate, gate, up, *extra), partial(eager, gate, up, *extra)))
         if separate in PACKED_GLU_MULS:
             combines.append((partial(PACKED_GLU_MULS[separate], gate_up, *extra), partial(eager, gate, up, *extra)))

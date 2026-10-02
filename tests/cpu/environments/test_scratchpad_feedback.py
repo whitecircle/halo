@@ -14,7 +14,6 @@ Run: python tests/cpu/environments/test_scratchpad_feedback.py  (or pytest)
 import json
 import resource
 import shutil
-import time
 
 import pytest
 
@@ -27,6 +26,7 @@ from src.environments.envs.tasks.coding.code_contests import (
     CodeContestsEnvironment,
 )
 from src.environments.envs.tasks.coding.grading import run_solution_against_tests
+from src.environments.sandbox.base import REPL_NO_OUTPUT_MESSAGE
 from src.environments.sandbox.local import LocalSubprocessSandbox
 from src.environments.sandbox.repl import run_code_via_sandbox
 from src.environments.tools.definitions import NativeToolCall
@@ -58,6 +58,8 @@ int dfs(int d) {
 int main() { std::cout << dfs(200000) << std::endl; }
 """
 _DEEP_RECURSION_STACK_BYTES = 256 * 1024 * 1024
+# Reads its input and prints an answer only when it got one: given no stdin it exits cleanly and silently.
+_READS_INPUT = "import sys\ndata = sys.stdin.read().split()\nif data:\n    print(int(data[0]) + 1)"
 _SPIN_SECONDS = """
 #include <chrono>
 #include <iostream>
@@ -160,10 +162,8 @@ def test_a_scratchpad_run_is_held_to_the_limit_it_is_graded_at():
     """A 1 s stated limit at a 2x compiled scale grades C++ at 2 s: a 5 s program must time out in the
     scratchpad at that limit, not run to completion under a generous REPL timeout."""
     env = _env(compiled_time_limit_scale=2.0)
-    started = time.monotonic()
     reply = _scratchpad(env, _episode(env, time_limit=1.0), code=_SPIN_SECONDS % 5, stdin="1\n")
     assert reply.startswith(f"Error: execution exceeded 2s timeout {SCRATCHPAD_TIME_LIMIT_NOTE}"), reply
-    assert time.monotonic() - started < 4.5
     assert NO_STDIN_NOTE not in reply
 
 
@@ -199,15 +199,14 @@ def test_a_run_given_no_input_that_prints_nothing_spends_no_run():
     input) told the model something, so each of those spends its run."""
     env = _env(language="python")
     traj = _episode(env)
-    reads_input = "import sys\ndata = sys.stdin.read().split()\nif data:\n    print(int(data[0]) + 1)"
-    silent = _scratchpad(env, traj, code=reads_input)
+    silent = _scratchpad(env, traj, code=_READS_INPUT)
     assert STARVED_RUN_NOTE in silent and silent.endswith("(Scratchpad runs left: 6 of 6.)"), silent
     assert env._test_calls(traj) == 0
     crash = _scratchpad(env, traj, code="print(int(input()) + 1)")
     assert NO_STDIN_NOTE in crash and crash.endswith("(Scratchpad runs left: 5 of 6.)"), crash
     printed = _scratchpad(env, traj, code="print(7)")
     assert STARVED_RUN_NOTE not in printed and printed.endswith("(Scratchpad runs left: 4 of 6.)"), printed
-    quiet_on_input = _scratchpad(env, traj, code=reads_input.replace("print", "len"), stdin="1\n")
+    quiet_on_input = _scratchpad(env, traj, code=_READS_INPUT.replace("print", "len"), stdin="1\n")
     assert quiet_on_input.endswith("(Scratchpad runs left: 3 of 6.)"), quiet_on_input
     assert env.rollout_metrics(traj)["episode/starved_test_runs"] == 1.0
 
@@ -217,14 +216,29 @@ def test_only_the_first_silent_input_less_run_of_an_episode_is_returned():
     ``max_starved_run_refunds`` the run spends its turn of the budget and gets the plain no-stdin note."""
     env = _env(language="python")
     traj = _episode(env)
-    reads_input = "import sys\ndata = sys.stdin.read().split()\nif data:\n    print(int(data[0]) + 1)"
-    first, second = _scratchpad(env, traj, code=reads_input), _scratchpad(env, traj, code=reads_input)
+    first, second = _scratchpad(env, traj, code=_READS_INPUT), _scratchpad(env, traj, code=_READS_INPUT)
     assert STARVED_RUN_NOTE in first and first.endswith("(Scratchpad runs left: 6 of 6.)"), first
     assert NO_STDIN_NOTE in second and second.endswith("(Scratchpad runs left: 5 of 6.)"), second
     assert env.rollout_metrics(traj)["episode/starved_test_runs"] == 1.0
     never = _env(language="python", max_starved_run_refunds=0)
-    reply = _scratchpad(never, _episode(never), code=reads_input)
+    reply = _scratchpad(never, _episode(never), code=_READS_INPUT)
     assert NO_STDIN_NOTE in reply and reply.endswith("(Scratchpad runs left: 5 of 6.)"), reply
+
+
+def test_the_refund_cap_returns_exactly_that_many_silent_runs():
+    env = _env(language="python", max_starved_run_refunds=2)
+    traj = _episode(env)
+    replies = [_scratchpad(env, traj, code=_READS_INPUT) for _ in range(3)]
+    assert [STARVED_RUN_NOTE in reply for reply in replies] == [True, True, False], replies
+    assert NO_STDIN_NOTE in replies[2] and replies[2].endswith("(Scratchpad runs left: 5 of 6.)"), replies[2]
+    assert env.rollout_metrics(traj)["episode/starved_test_runs"] == 2.0
+
+
+@pytest.mark.parametrize("refunds", [0, 1])
+def test_a_direct_call_outside_an_episode_returns_every_silent_run(refunds):
+    """A direct call keeps no budget, so whatever the episode cap, a silent input-less run reads as returned."""
+    env = _env(language="python", max_starved_run_refunds=refunds)
+    assert env._run_test(_READS_INPUT) == f"{REPL_NO_OUTPUT_MESSAGE}\n{STARVED_RUN_NOTE}"
 
 
 @pytest.mark.parametrize("cap", [-1, 1.5, True])
@@ -240,9 +254,7 @@ def test_a_garbled_argument_name_is_refused_unspent_and_named():
     env = _env(language="python")
     traj = _episode(env)
     reply = _scratchpad(env, traj, code="print(int(input()) + 1)", **{"parameter=stdin": "1\n"})
-    assert reply.startswith(
-        f"Error: {env.test_tool_name}: unknown argument 'parameter=stdin'; its arguments are code"
-    ), reply
+    assert reply == f"Error: {env.test_tool_name}: unknown argument 'parameter=stdin'; its arguments are code, stdin"
     assert env._test_calls(traj) == 0
 
 

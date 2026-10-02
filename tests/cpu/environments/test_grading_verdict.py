@@ -14,6 +14,7 @@ Run: python tests/cpu/environments/test_grading_verdict.py  (or pytest)
 """
 
 import json
+import logging
 from unittest import mock
 
 import pytest
@@ -419,7 +420,7 @@ def test_a_backend_outage_logs_one_warning_per_grade(caplog):
     tests = [{"input": str(i), "output": "Y"} for i in range(3)]
     with caplog.at_level("WARNING"):
         grade = run_solution_against_tests("code", tests, sandbox=StubSandbox(SandboxResult(error="backend down")))
-    lines = [r.getMessage() for r in caplog.records if "infra errors" in r.getMessage()]
+    lines = [r.getMessage() for r in caplog.records if r.levelno >= logging.WARNING]
     assert grade.infra_errors == 3
     assert lines == ["Grading lost 3 test(s) to infra errors: backend down (x3)"]
 
@@ -435,6 +436,26 @@ def test_a_test_lost_to_the_backend_does_not_stop_the_grade_early():
     tests = [{"input": "1", "output": "Y"}, {"input": "2", "output": "Y"}]
     grade = run_solution_against_tests("code", tests, sandbox=_Sequence(SandboxResult()), stop_on_first_failure=True)
     assert (grade.graded, grade.passed, grade.infra_errors) == (2, 1, 1)
+
+
+def test_a_checker_lost_to_the_backend_does_not_stop_the_grade_early():
+    """The special judge's own backend loss is no failure of the program either: the grade runs on to the
+    next test, which the checker accepts."""
+    sandbox = _ScriptedSandbox(
+        [
+            SandboxResult(stdout="Y\n", returncode=0),
+            SandboxResult(error="backend down"),
+            SandboxResult(stdout="Y\n", returncode=0),
+            SandboxResult(stdout="1\n", returncode=0),
+        ]
+    )
+    tests = [{"input": "1", "output": "Y"}, {"input": "2", "output": "Y"}]
+    grade = run_solution_against_tests(
+        "code", tests, sandbox=sandbox, verdict_fn=CheckerVerdict("# checker", sandbox), stop_on_first_failure=True
+    )
+    assert len(sandbox.calls) == 4
+    assert (grade.graded, grade.passed, grade.infra_errors) == (2, 1, 1)
+    assert "Stopped after first failing test" not in grade.details
 
 
 @pytest.mark.parametrize("seconds", [0.0, -1.0, float("nan"), float("inf")])

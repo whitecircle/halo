@@ -364,9 +364,13 @@ async def test_a_random_level_is_drawn_from_the_problem_so_reruns_agree(monkeypa
     monkeypatch.setattr(env, "reset", _reset)
     monkeypatch.setattr(eval_runner, "generate_openai_response", _generate)
     rollout = RolloutConfig(model_name="m", temperature=0.0, max_tokens=16)
-    for _ in range(3):
-        await run_episode(env, "the same problem", {}, client=object(), rollout=rollout)
-    assert levels == [stable_reasoning_effort("the same problem")] * 3
+    problems = [f"problem {i}" for i in range(12)]
+    for _ in range(2):
+        for problem in problems:
+            await run_episode(env, problem, {}, client=object(), rollout=rollout)
+    stable = [stable_reasoning_effort(problem) for problem in problems]
+    assert len(set(stable)) > 1, "every problem draws one level, so matching it proves nothing"
+    assert levels == stable * 2
 
 
 def test_a_conversation_with_no_user_turn_has_no_level_to_draw():

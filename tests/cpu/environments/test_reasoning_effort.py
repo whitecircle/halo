@@ -7,10 +7,28 @@ to a token budget.
     python tests/cpu/environments/test_reasoning_effort.py
 """
 
+import json
+import os
+import subprocess
+import sys
+
 import pytest
 
-from src.environments.base import VALID_REASONING_EFFORTS, BaseEnvironment, EpisodeGrade, resolve_reasoning_effort
+from src.environments.base import (
+    VALID_REASONING_EFFORTS,
+    BaseEnvironment,
+    EpisodeGrade,
+    resolve_reasoning_effort,
+    stable_reasoning_effort,
+)
 from src.environments.envs.tasks.coding.code_contests import CodeContestsEnvironment
+from tests.common.utils import REPO_ROOT
+
+# Prints the stable draw of 24 problems as JSON, for a fresh interpreter under a chosen hash seed.
+_STABLE_DRAW_PROBE = (
+    "import json; from src.environments.base import stable_reasoning_effort; "
+    "print(json.dumps([stable_reasoning_effort(f'problem {i}') for i in range(24)]))"
+)
 
 
 class _MinimalEnv(BaseEnvironment):
@@ -30,6 +48,23 @@ def test_resolve_passthrough_and_none():
     assert resolve_reasoning_effort(None) is None
     for level in VALID_REASONING_EFFORTS:
         assert resolve_reasoning_effort(level) == level
+
+
+def _stable_draw_under_hash_seed(seed: str) -> list[str]:
+    env = {**os.environ, "PYTHONHASHSEED": seed, "PYTHONPATH": str(REPO_ROOT)}
+    result = subprocess.run(
+        [sys.executable, "-c", _STABLE_DRAW_PROBE], capture_output=True, text=True, cwd=REPO_ROOT, env=env, timeout=600
+    )
+    assert result.returncode == 0, result.stderr[-2000:]
+    return json.loads(result.stdout.strip().splitlines()[-1])
+
+
+def test_the_stable_draw_is_the_same_in_every_process():
+    """An eval scores each problem at one level from checkpoint to checkpoint, and each eval is a new
+    process: a draw keyed on Python's per-process salted ``hash`` would move problems between levels."""
+    first, second = _stable_draw_under_hash_seed("1"), _stable_draw_under_hash_seed("2")
+    assert len(set(first)) > 1, "every problem draws one level, so agreeing on it proves nothing"
+    assert first == second == [stable_reasoning_effort(f"problem {i}") for i in range(24)]
 
 
 def test_resolve_random_returns_valid_level_and_covers_all():
