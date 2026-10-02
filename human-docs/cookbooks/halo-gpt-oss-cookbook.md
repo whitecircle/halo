@@ -265,7 +265,9 @@ the shipped ep4 configs target, and the only one for `rollout_max_thinking_token
 ([Supported Matrix](../supported-matrix.md#rollout-engines)). GPT-OSS tool calls arrive
 as plain text that the default `hermes` parser cannot read, so vLLM needs the bundled
 text tool parser, and a thinking budget needs the bundled reasoning parser with Model
-Runner V1 (V2 answers `thinking_token_budget` with a 400):
+Runner V1 (V2 answers `thinking_token_budget` with a 400). Set
+`rollout_reasoning_end_token: "<|start|>assistant<|channel|>final<|message|>"` too, as the shipped
+vLLM configs do: it is the opener the budget forces, and naming it keeps those forced tokens out of the loss:
 
 ```bash
 VLLM_MODEL=/data/checkpoints/gpt-oss-20b-ultrachat-ep8 \

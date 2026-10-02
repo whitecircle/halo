@@ -21,7 +21,7 @@ Its MLA-style attention (256-wide qk/v, 64-dim rope split) triggers the FlashAtt
 
 ## Fused SwiGLU
 
-`EPMoELayerBase._glu_combine` replaces the activation and the multiply with one Triton kernel on every base compute path including the ETP-sharded one. It is a **roster-wide** seam, not a GLM-4 one: `_resolve_activation` latches whatever `resolve_fused_glu_mul` (`src/kernels/fused_glu.py`) returns for the resolved activation — `fused_silu_mul` for a SiLU gate (GLM-4 Lite, Laguna, Qwen3, Qwen3.5/3.6, Bailing, LFM-2, Mistral4, Cohere2 MoE, Inkling, Zaya, and Step-3.7's unclamped layers), `fused_gelu_tanh_mul` for a tanh-GELU one (Gemma 4), `None` otherwise.
+The `_fused_glu_mul` latch replaces the activation and the multiply with one Triton kernel on every base compute path, the ETP-sharded one included: the packed `[gate | up]` path runs it through `packed_glu_mul`, split halves through `_glu_combine`. It is a **roster-wide** seam, not a GLM-4 one: `_resolve_activation` latches whatever `resolve_fused_glu_mul` (`src/kernels/fused_glu.py`) returns for the resolved activation — `fused_silu_mul` for a SiLU gate (GLM-4 Lite, Laguna, Qwen3, Qwen3.5/3.6, Bailing, LFM-2, Mistral4, Cohere2 MoE, Inkling, Zaya, and Step-3.7's unclamped layers), `fused_gelu_tanh_mul` for a tanh-GELU one (Gemma 4), `None` otherwise.
 
 A family opts in by *having* a gate the kernels implement, not by setting a flag. A family whose combine is a variant rebinds the same seam: DeepSeek-V4 (clamp before the activation) and Step-3.7 (its two clamped layers clamp after it) arm their kernels off the same SiLU probe.
 

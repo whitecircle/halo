@@ -105,7 +105,8 @@ hf upload my-org/my-model checkpoints/sft-qwen3-4b-ultrachat/checkpoint-1000
 Upload the checkpoint directory itself, not the whole `output_dir`, and exclude
 its training state, or it goes public with the weights: `scheduler.pt`,
 `trainer_state.json`, (under bias balancing) `router_balancing_biases.pt` and
-(when `precompute_ref_log_probs` swept the reference) `reference_logps.pt` in every
+(when `precompute_ref_log_probs` swept the reference) `reference_logps.pt` and (async GRPO with prefetch)
+`prefetch_pending-*.pt`, the drawn but untrained prompts with their context, answers included, in every
 checkpoint, `resume_adapter/` and `resume_adapter.json` under `merge_expert_lora_on_save` or embedding LoRA,
 plus `optimizer*` and `rng_state*` unless the run set `save_only_model: true`. For a LoRA run, upload the adapter directory, or merge
 it with `merge-peft-adapters` for a standalone model. That tool refuses EP expert-LoRA adapters: train those

@@ -120,6 +120,7 @@ Per-run rlimits bound each `local` / `bubblewrap` execution; `remote` enforces i
 | File size (`RLIMIT_FSIZE`), captured stdout / stderr included | 64 MiB | 64 MiB | `LOCAL_FSIZE_LIMIT` |
 | Processes (`RLIMIT_NPROC`) | 4096 | not applied | `LOCAL_NPROC_LIMIT` |
 | Stack (`RLIMIT_STACK`) | the address-space limit, compiled languages only | inherited | `memory_limit_mb` |
+| Core dumps (`RLIMIT_CORE`) | 0 | 0 | fixed, so a crash leaves no core on the host |
 
 A compiled program gets a judge-sized stack, so a deep recursive DFS does not overflow the container's 8 MiB default. It is capped at the process's hard stack limit, which an unprivileged container cannot raise (`--ulimit stack=67108864` holds it at 64 MiB). An interpreter keeps the inherited stack: glibc sizes every thread's stack by the limit, so its threads would not fit the address space.
 

@@ -401,7 +401,8 @@ def run(ctx) -> dict:
 
     log(f"\n{'=' * 70}\n  Offline GRPO adapter RESUME — mode={mode}, world={ctx.world_size}\n{'=' * 70}")
 
-    if parallelism_config_for(mode, ctx.world_size).ep_size > 1:
+    layout = parallelism_config_for(mode, ctx.world_size)
+    if layout.ep_size > 1:
         pin_deterministic_ep_dispatch()
     # The trainer writes the checkpoint on the save rank and every rank resumes from it, so the
     # output dir must be one shared path rather than a per-rank temp dir.
@@ -411,7 +412,7 @@ def run(ctx) -> dict:
     train_out = os.path.join(workspace, "train_out")
     checkpoint = os.path.join(train_out, f"checkpoint-{SAVE_AT_STEP}")
 
-    model_name = model_name_for(mode, parallelism_config_for(mode, ctx.world_size))
+    model_name = model_name_for(mode, layout)
     ensure_model_downloaded(model_name, ctx.rank)
     tokenizer = AutoTokenizer.from_pretrained(model_name, trust_remote_code=True)
     if tokenizer.pad_token is None:
@@ -520,7 +521,7 @@ def run(ctx) -> dict:
         policy_delta = (policy_logps - base_logps).abs().max().item()
         metrics["reference_vs_base_max_delta"] = ref_delta
         metrics["policy_vs_base_max_delta"] = policy_delta
-        log(f"probe log-probs: |reference - base|={ref_delta:.5f}, |policy - base|={policy_delta:.5f}")
+        log(f"probe log-probs: |reference - base|={ref_delta:.3e}, |policy - base|={policy_delta:.5f}")
         checks["reference_logps_are_the_frozen_base"] = ref_delta < REF_LOGP_TOL
         checks["adapters_move_the_policy"] = policy_delta > ADAPTER_EFFECT_MIN
     _release(live)

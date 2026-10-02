@@ -490,9 +490,9 @@ def _head_row(ctx, family: Family, mode: str, lora: str, source: str, shared_dir
     }
 
 
-def _loss_checks(uninterrupted: list[float], resumed: list[float], tol: float, checks: dict, metrics: dict) -> None:
-    """The first resumed loss reads only restored state, so it replays the uninterrupted run's; the
-    later ones match within ``tol``."""
+def _loss_checks(uninterrupted: list[float], resumed: list[float], checks: dict, metrics: dict) -> None:
+    """Every resumed loss replays the uninterrupted run's; the first reads only restored state, so it is
+    reported on its own."""
     deltas = resumed_loss_deltas(uninterrupted, resumed, save_step=SAVE_AT_STEP, total_steps=TOTAL_STEPS)
     checks["resumed_ran_remaining_steps"] = deltas is not None
     if deltas is None:
@@ -500,7 +500,7 @@ def _loss_checks(uninterrupted: list[float], resumed: list[float], tol: float, c
     metrics["first_resumed_loss_delta"] = deltas[0]
     metrics["resumed_loss_max_delta"] = max(deltas)
     checks["first_resumed_loss_matches"] = deltas[0] <= TOL.replayed_resume_loss_abs
-    checks["resumed_losses_track_uninterrupted"] = max(deltas) <= tol
+    checks["resumed_losses_track_uninterrupted"] = max(deltas) <= TOL.replayed_resume_loss_abs
 
 
 def _uninterrupted(ctx, family: Family, mode: str, lora: str, base_source: str, train_out: str, checks: dict):
@@ -575,7 +575,7 @@ def _full_finetune_row(ctx, family: Family, mode: str, base_source: str, shared_
     checks["weights_bit_equal_after_restore"] = _bit_equal(
         run.at_save, (restored.captured or {}).get("tensors", {}), "restored vs at save"
     )
-    _loss_checks(run.losses, step_losses(trainer), TOL.replayed_resume_loss_abs, checks, metrics)
+    _loss_checks(run.losses, step_losses(trainer), checks, metrics)
     drift = relative_l2(snapshot_trainable(trainer.model), run.final)
     metrics["final_weight_relative_l2"] = drift
     checks["final_weights_match_uninterrupted"] = drift <= TOL.replayed_resume_weight_rtol
@@ -664,8 +664,7 @@ def run_embedding_lora_resume(ctx, family_name: str, mode: str, lora: str, head:
     checks["adapters_bit_equal_after_restore"] = _bit_equal(
         run.at_save, (restored.captured or {}).get("tensors", {}), "restored vs at save"
     )
-    # LoRA is refused under EP, so every LoRA row replays the uninterrupted run.
-    _loss_checks(run.losses, step_losses(trainer), TOL.replayed_resume_loss_abs, checks, metrics)
+    _loss_checks(run.losses, step_losses(trainer), checks, metrics)
     drift = relative_l2(snapshot_trainable(trainer.model), run.final)
     metrics["final_adapter_relative_l2"] = drift
     checks["final_adapters_match_uninterrupted"] = drift <= TOL.replayed_resume_weight_rtol

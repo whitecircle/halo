@@ -241,7 +241,7 @@ CP is declare-to-enable per trainer (`_supports_cp`, default off) — the CP col
 - SFT: `{"prompt": [{"role","content"}, ...]}` (field via `conversation_field`)
 - Preference (DPO/SMPO): `{"prompt", "chosen", "rejected"}` (all `list[dict]`)
 - Offline GRPO: `{"prompt", "completions": [[...]], "rewards": [...]}`
-- Async GRPO with environments: `{"prompt"}` plus `"answer"` where the environment grades against one (`requires_answer`: code contests, `exam_qa`, `qa_search`, `react_*`, `swe` without a `test_function`)
+- Async GRPO with environments: `{"prompt"}` plus `"answer"` where the environment grades against one (`requires_answer`: code contests, `exam_qa`, `qa_search`, `react_*`, `swe` without a `test_function` unless judge-only)
 
 Sources: `s3://`, HF Hub, or local (`src/data/sources/`). Offline tokenize/pack/shard via `scripts/before_training/prepare_dataset.py`; `ShardedDatasetLoader` for per-rank shards; `fs_aware_main_first()` adapts to shared vs local FS (`DIST_SHARED_FILESYSTEM`, default `1` = shared NFS/Lustre; set `0` for per-node local storage). Filesystem coordination: `agent-docs/data/filesystem-handling.md`.
 

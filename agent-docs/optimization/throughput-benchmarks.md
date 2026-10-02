@@ -76,6 +76,12 @@ of all 20 post-warmup steps:
 
 ![Mistral Small 4 SFT throughput comparison](../assets/benchmarks/sft_throughput_comparison_mistral4.png)
 
+![Mistral Small 4 SFT throughput against memory](../assets/benchmarks/sft_memory_throughput_pareto_mistral4.png)
+
+Halo's trace runs synthetic tokens (`dataset_group: halo_synthetic`), so its loss and gradient-norm curves
+are numerical-health evidence, not a convergence comparison. The raw 20-step traces are in
+`agent-docs/assets/benchmarks/runs/`.
+
 ![Mistral Small 4 measured SFT curves](../assets/benchmarks/sft_training_curves_mistral4.png)
 
 ## Metrics

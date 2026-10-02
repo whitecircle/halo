@@ -154,8 +154,8 @@ once a multi-turn round outlasts the update.
 
 `reward/within_group_std` near zero is the quiet failure: every episode in a group scored the same, so that prompt
 teaches nothing. Such groups are dropped from the loss by default (`drop_degenerate_groups`), and
-`sampling/degenerate_group_frac` counts them. The tie is judged on the environment's grade, so a length price on top
-does not hide it. Rollouts land in `<output_dir>/completions/` as parquet.
+`sampling/degenerate_group_frac` counts them. The tie is judged on the reward the environment settled (its grade, shaping and any judge or
+reward-model score), without the trainer's effort-length terms, so a length price on top does not hide it. Rollouts land in `<output_dir>/completions/` as parquet.
 
 ## Sizing a run
 

@@ -9,7 +9,7 @@ The trainer recomputes the sampled tokens' log-probs and multiplies the per-toke
 Consequences:
 
 - `vllm_importance_sampling_mode` and `vllm_importance_sampling_clip_min` are ignored, with a warning when set: truncation is token-level, from above only.
-- Set `rollout_top_p: 1.0` under the geometric band (default `0.95`): a nucleus cut shifts every uncertain position, which the band reads as drift. A server that renormalizes log-probs over the nucleus raises at startup.
+- Set `rollout_top_p: 1.0` under the geometric band or OPSM (`isr_opsm_delta`) (default `0.95`): a nucleus cut shifts every uncertain position, which the band reads as drift. A server that renormalizes log-probs over the nucleus raises at startup.
 
 Watch `sampling/logratio_mean` first: the unclamped mean log-ratio in nats, near 0 when healthy. A growing negative drift is the broken-weight-sync signature ([Weight synchronization](setup.md#weight-synchronization)).
 
