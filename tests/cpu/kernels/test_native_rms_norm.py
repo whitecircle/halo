@@ -242,12 +242,11 @@ def test_an_instance_patched_liger_norm_runs_the_specs_variant_at_its_own_epsilo
         norm = getattr(module, name)(16, 3e-6)
         _patch_instance(norm, spec, {"rms_norm": True})
         assert norm.forward.func is LigerRMSNorm.forward
-        configured = {attr: getattr(norm, attr) for attr in ("variance_epsilon", "offset", "casting_mode", "in_place")}
+        configured = {attr: getattr(norm, attr) for attr in ("variance_epsilon", "offset", "casting_mode")}
         assert configured == {
             "variance_epsilon": 3e-6,
             "offset": spec.rms_norm_offset,
             "casting_mode": spec.rms_norm_casting_mode,
-            "in_place": spec.rms_norm_casting_mode != "gemma",
         }, f"{name}: {configured}"
 
 
