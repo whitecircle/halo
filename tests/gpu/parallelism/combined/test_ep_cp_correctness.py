@@ -30,7 +30,6 @@ from tests.common.distributed import ensure_model_downloaded, world_mean, world_
 from tests.common.ep_reference import fixed_chat_batch
 from tests.common.harness import gpu_test_main
 from tests.common.models import GPT_OSS_20B
-from tests.common.tolerances import TOL
 from tests.common.utils import cleanup_memory, gpu_mem_gb, log, log_all
 
 # Test Configuration
@@ -245,11 +244,12 @@ def run(ctx):
         "ep_cp_finite": math.isfinite(ep_cp_loss),
     }
 
-    # EP-only: every rank ran the identical broadcast batch, so only the combine reduction order
-    # separates their losses (inf when any rank is non-finite).
+    # EP-only: every rank ran the identical broadcast batch, and at top_k >= ep_size each token's expert
+    # rows are computed independently and combined in top-k slot order, so the ranks agree bit for bit
+    # (inf when any rank is non-finite).
     ep_spread = world_spread(ep_only_loss)
-    checks["ep_rank_consistency"] = ep_spread < TOL.ep_identical_batch_rank_spread_abs
-    log(f"  EP-only rank consistency (spread={ep_spread:.8f}): {'PASS' if checks['ep_rank_consistency'] else 'FAIL'}")
+    checks["ep_rank_consistency"] = ep_spread == 0.0
+    log(f"  EP-only rank consistency (spread={ep_spread:.3e}): {'PASS' if checks['ep_rank_consistency'] else 'FAIL'}")
 
     # Under no_grad the CP wrapper all-reduces the chunk sums and returns the group mean, so every
     # rank reports the same full-sequence loss, bit for bit.

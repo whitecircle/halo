@@ -51,9 +51,8 @@ from tests.common.utils import cleanup_memory, log, step_losses, training_run_ch
 
 # Configuration
 
-# HALO_TEST_OFFGRPO_PARALLEL=ep runs the same resume test under Expert Parallelism (EP=2) on an MoE model
-# (warm-restart optimizer by design — EP fuses experts, so the optimizer reinitializes and only the LR
-# scheduler restores); default tp runs Tensor Parallelism (TP=2, exact per-rank optimizer resume).
+# HALO_TEST_OFFGRPO_PARALLEL=ep runs the same resume test under Expert Parallelism (EP=2) on an MoE model;
+# default tp runs Tensor Parallelism (TP=2).
 _MODE = env_str("HALO_TEST_OFFGRPO_PARALLEL", "tp")
 _IS_EP = _MODE == "ep"
 MODEL_NAME = GPT_OSS_20B if _IS_EP else QWEN3_0_6B
@@ -72,8 +71,7 @@ SEED = 42
 
 # By-value weight-restoration probes (catch a silent-base-weights / corrupted-gather resume)
 
-# The TP forward reproduces L_pre to bf16 round-trip noise; DeepEP's combine may reorder the expert sum.
-LOSS_TOL = TOL.resume_loss_abs if _IS_EP else TOL.resume_fixed_batch_loss_abs
+LOSS_TOL = TOL.resume_fixed_batch_loss_abs
 
 
 # Phase 1: Train + Save Checkpoint

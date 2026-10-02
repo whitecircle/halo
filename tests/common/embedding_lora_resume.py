@@ -29,8 +29,9 @@ embedding alone, or DoRA on the attention projections (:data:`LORA_TARGETS`):
   3. Resume through the production resolver. The data-parallel shapes run ``use_grouped_gemm: false``,
      where the resolver keeps the base, so the loader must read the checkpoint into a model that does
      not hold it; TP and EP build from the checkpoint. Every parameter is BIT-EQUAL to the saved one
-     after the restore, and the losses and final weights match as above, within a bound under EP,
-     where each rank's optimizer state is held BIT-EQUAL to the saved one instead.
+     after the restore, and the losses and final weights match as above. Under EP every DeepEP buffer
+     is built in deterministic mode (:func:`~tests.common.distributed.pin_deterministic_ep_dispatch`),
+     without which the atomic receive order alone parts two identical runs.
   4. The best-model load (``_load_best_model`` onto the resumed run, trained past the checkpoint)
      brings the checkpoint's weights back bit for bit. A model wrapped for expert compute (EP, or a
      MoE under TP at the default grouped GEMM) loads its base weights only at construction, and TP
@@ -81,7 +82,7 @@ from src.trainers.embedding.trainer import EmbeddingTrainer
 from src.training.environment import resolve_resume_weights_source
 from src.training.script_runner import ScriptRuntime, apply_distributed_trainer_config
 from tests.common.checkpoint_io import RestorePointSnapshot, loading_problems
-from tests.common.distributed import shared_output_dir, world_all
+from tests.common.distributed import pin_deterministic_ep_dispatch, shared_output_dir
 from tests.common.models import PARAPHRASE_MINILM
 from tests.common.peft_helpers import LORA_ALPHA, LORA_R, injected_lora_fold
 from tests.common.tiny_models import (
@@ -95,7 +96,6 @@ from tests.common.utils import (
     finish_phase,
     log,
     min_or_nan,
-    optimizer_state_matches,
     relative_l2,
     resumed_loss_deltas,
     snapshot_trainable,
@@ -143,12 +143,6 @@ TOTAL_STEPS = 6
 SAVE_AT_STEP = 3
 BATCH_SIZE = 8
 LEARNING_RATE = 1e-3
-# Every row but EP's replays the uninterrupted run (``TOL.replayed_resume_*``). EP's DeepEP combine
-# sums in no fixed order, so after the first resumed step (which reads only restored state) its losses
-# sit within one bf16 step of an MNRL loss in [2, 4), and its final weights measured 1.1e-4 to 1.2e-3
-# off, against 9.7e-3 to 5.3e-2 of full fine-tune movement over the three resumed steps.
-EP_LOSS_TOL = 2**-6
-EP_FINAL_WEIGHT_RTOL = 5e-3
 # A fold whose delta DTensor contracts the sharded rank dim shard-locally (a ``Partial`` placement)
 # measured off PEFT's single-device merge on 9.6-9.9% of the elements the delta moves in BERT's
 # 30522-row embedding, by up to 1.9e-3 of its largest value; every other fold is bit for bit.
@@ -312,11 +306,10 @@ def _partial_fold_targets(model) -> set[str]:
 
 class _RestorePoint(RestorePointSnapshot):
     """The restore-point snapshot with every trainable tensor whole (``tensors``) and, at the save, the
-    LoRA targets whose delta the save contracted shard-locally (``partial_folds``). This rank's
-    optimizer state is captured under EP only, where the restore is held to it bit for bit."""
+    LoRA targets whose delta the save contracted shard-locally (``partial_folds``)."""
 
-    def __init__(self, event: str, trainer: EmbeddingTrainer, mode: str):
-        super().__init__(event, trainer, capture_optimizer=mode == "ep")
+    def __init__(self, event: str, trainer: EmbeddingTrainer):
+        super().__init__(event, trainer, capture_optimizer=False)
 
     def extra(self) -> dict:
         extra = {"tensors": snapshot_trainable(self.trainer.model)}
@@ -522,7 +515,7 @@ def _uninterrupted(ctx, family: Family, mode: str, lora: str, base_source: str, 
         for name, layer in find_ep_layers(trainer.model)
         for param_name, _param in layer.named_parameters()
     }
-    at_save = _RestorePoint("save", trainer, mode)
+    at_save = _RestorePoint("save", trainer)
     trainer.add_callback(at_save)
     trainer.train()
     losses = step_losses(trainer)
@@ -535,7 +528,6 @@ def _uninterrupted(ctx, family: Family, mode: str, lora: str, base_source: str, 
     return SimpleNamespace(
         losses=losses,
         at_save=saved.get("tensors", {}),
-        optimizer=saved.get("optimizer"),
         partial_folds=saved.get("partial_folds", set()),
         final=final,
         prefix=prefix,
@@ -577,28 +569,17 @@ def _full_finetune_row(ctx, family: Family, mode: str, base_source: str, shared_
     rebuilds_from_checkpoint = mode in PARALLEL_MODES
     checks["policy_source_is_the_expected_one"] = source == (checkpoint if rebuilds_from_checkpoint else base_source)
     trainer = _make_trainer(ctx, family, mode, "off", source, os.path.join(shared_dir, "resume_out"), save=False)
-    restored = _RestorePoint("train_begin", trainer, mode)
+    restored = _RestorePoint("train_begin", trainer)
     trainer.add_callback(restored)
     trainer.train(resume_from_checkpoint=checkpoint)
-    at_restore = restored.captured or {}
     checks["weights_bit_equal_after_restore"] = _bit_equal(
-        run.at_save, at_restore.get("tensors", {}), "restored vs at save"
+        run.at_save, (restored.captured or {}).get("tensors", {}), "restored vs at save"
     )
-    ep = mode == "ep"
-    if ep:
-        # The losses and final weights compare within a bound under EP, so the optimizer restore is held
-        # to bit-equality on its own, per rank (expert state is rank-local).
-        matches, why = optimizer_state_matches(run.optimizer, at_restore.get("optimizer"))
-        log(f"  optimizer state restored vs at save: {'bit-equal' if matches else why}")
-        checks["optimizer_state_bit_equal_after_restore"] = world_all(matches, ctx.device)
-    _loss_checks(
-        run.losses, step_losses(trainer), EP_LOSS_TOL if ep else TOL.replayed_resume_loss_abs, checks, metrics
-    )
+    _loss_checks(run.losses, step_losses(trainer), TOL.replayed_resume_loss_abs, checks, metrics)
     drift = relative_l2(snapshot_trainable(trainer.model), run.final)
-    tol = EP_FINAL_WEIGHT_RTOL if ep else TOL.replayed_resume_weight_rtol
     metrics["final_weight_relative_l2"] = drift
-    checks["final_weights_match_uninterrupted"] = drift <= tol
-    log(f"  final weights, resumed vs uninterrupted: relative L2 {drift:.3e} (tol {tol})")
+    checks["final_weights_match_uninterrupted"] = drift <= TOL.replayed_resume_weight_rtol
+    log(f"  final weights, resumed vs uninterrupted: relative L2 {drift:.3e} (tol {TOL.replayed_resume_weight_rtol})")
 
     log(f"\n[4/4] Best-model load of {checkpoint} onto the resumed run...")
     trainer.state.best_model_checkpoint = checkpoint
@@ -637,6 +618,8 @@ def run_embedding_lora_resume(ctx, family_name: str, mode: str, lora: str, head:
     )
     if mode == "ddp":
         os.environ.update(ACCELERATE_LAUNCH_ENV)
+    if mode == "ep":
+        pin_deterministic_ep_dispatch()
     shared_dir = shared_output_dir(ctx)
     base_source = _base_source(ctx, family_name)
     if head:
@@ -675,7 +658,7 @@ def run_embedding_lora_resume(ctx, family_name: str, mode: str, lora: str, head:
     )
     checks["policy_source_is_the_base"] = source == base_source
     trainer = _make_trainer(ctx, family, mode, lora, source, os.path.join(shared_dir, "resume_out"), save=False)
-    restored = _RestorePoint("train_begin", trainer, mode)
+    restored = _RestorePoint("train_begin", trainer)
     trainer.add_callback(restored)
     trainer.train(resume_from_checkpoint=checkpoint)
     checks["adapters_bit_equal_after_restore"] = _bit_equal(

@@ -14,7 +14,10 @@ the whole contract on a tiny random-init model through the real trainer save/res
      trainable weight must equal the save-time snapshot EXACTLY and the LR scheduler must be at
      step 3; the resumed steps 4-6 must then reproduce the continuous run, losses and final weights
      bit for bit. Nothing is reset between the phases: AdamWBF16 keys its stochastic rounding by the
-     parameter's step and position, so a resumed step rounds as the uninterrupted one did.
+     parameter's step and position, so a resumed step rounds as the uninterrupted one did, and every
+     DeepEP buffer is built in deterministic mode
+     (:func:`~tests.common.distributed.pin_deterministic_ep_dispatch`), without which the atomic
+     receive order alone changes how each expert weight gradient is summed.
   4. Mismatch path: resume the ep_size=2 checkpoint at ep_size=1 → the fingerprint warm-restart
      warning fires naming ``ep_size``, the optimizer starts empty, training proceeds.
 
@@ -49,7 +52,7 @@ from src.distributed.loading.model_loading import load_distributed_model
 from src.distributed.parallelism_config import ParallelismConfig
 from src.trainers.sft import DistributedSFTTrainer
 from tests.common.datasets import create_sft_dataset
-from tests.common.distributed import world_all
+from tests.common.distributed import pin_deterministic_ep_dispatch, world_all
 from tests.common.harness import gpu_test_main
 from tests.common.models import QWEN3_0_6B
 from tests.common.tolerances import TOL
@@ -298,6 +301,8 @@ def run(ctx):
     ctx.barrier()
 
     pc = _parallelism_config(mode, ctx.world_size)
+    if pc.ep_size > 1:
+        pin_deterministic_ep_dispatch()
     tokenizer = AutoTokenizer.from_pretrained(tiny_dir, trust_remote_code=True)
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token

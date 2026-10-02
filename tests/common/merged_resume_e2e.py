@@ -41,7 +41,6 @@ so it keeps them in fp32 and phase 3 restores them bit for bit.
 """
 
 import argparse
-import functools
 import os
 import re
 import shutil
@@ -61,13 +60,12 @@ from src.checkpoint.format import (
 )
 from src.distributed.context_parallel.validation import UlyssesConfigError
 from src.distributed.expert_parallel.expert_weights import gather_ep_lora_adapters
-from src.distributed.expert_parallel.extension import deep_ep
 from src.distributed.parallelism_config import ParallelismConfig
 from src.trainers.sft import DistributedSFTTrainer
 from src.training.environment import resolve_resume_weights_source
 from tests.common.checkpoint_io import RestorePointSnapshot, loading_problems
 from tests.common.datasets import create_sft_dataset
-from tests.common.distributed import shared_output_dir, world_all
+from tests.common.distributed import pin_deterministic_ep_dispatch, shared_output_dir, world_all
 from tests.common.models import QWEN3_0_6B
 from tests.common.peft_helpers import (
     attention_target_modules,
@@ -144,13 +142,6 @@ def _parallelism_config(ep_size: int, cp_size: int, fp32_masters: bool) -> Paral
         ep_fp32_experts=fp32_masters,
         fp32_non_ep_params=fp32_masters,
     )
-
-
-def _pin_deterministic_dispatch() -> None:
-    """Build every DeepEP ``ElasticBuffer`` of this process in deterministic mode, which places each
-    received token by source rank and token index rather than by atomic claim order."""
-    buffer_cls = deep_ep().ElasticBuffer
-    buffer_cls.__init__ = functools.partialmethod(buffer_cls.__init__, deterministic=True)
 
 
 class _RestorePoint(RestorePointSnapshot):
@@ -277,7 +268,7 @@ def run_merged_resume(
     """The four phases above for one family, adapter shape and layout; returns the harness result."""
     tiny = TINY_MOE_FAMILIES[family]
     if ep_size > 1:
-        _pin_deterministic_dispatch()
+        pin_deterministic_ep_dispatch()
     log(
         f"\n{'=' * 70}\n  merge_expert_lora_on_save resume: {family}, {adapters} adapters, "
         f"ep{ep_size} cp{cp_size} on {WORLD_SIZE} ranks\n{'=' * 70}"

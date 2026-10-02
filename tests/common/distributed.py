@@ -1,11 +1,12 @@
 """Distributed setup/teardown for torchrun-based tests.
 
-Covers process-group init, scratch/cache dir allocation under the launcher's ``TMPDIR``,
-rank-0-then-barrier model download, world-wide scalar reductions, the cross-rank tensor-identity probe
-and teardown.
+Covers process-group init, the deterministic DeepEP dispatch an exact replay needs, scratch/cache dir
+allocation under the launcher's ``TMPDIR``, rank-0-then-barrier model download, world-wide scalar
+reductions, the cross-rank tensor-identity probe and teardown.
 """
 
 import contextlib
+import functools
 import math
 import os
 import shutil
@@ -20,6 +21,7 @@ from torch.testing._internal.distributed.fake_pg import FakeStore as TorchFakeSt
 from transformers import AutoConfig, AutoTokenizer
 
 from src.distributed.expert_parallel.dispatcher import destroy_all_dispatchers
+from src.distributed.expert_parallel.extension import deep_ep
 from src.distributed.runtime import barrier, broadcast_from_rank0
 from src.models.patches.attention import ensure_fa4_kernel_cache_env
 from tests.common.scratch import SCRATCH_DIR_TAG
@@ -124,6 +126,18 @@ def init_distributed() -> tuple[int, int, int]:
     if torch.cuda.is_available():
         torch.cuda.set_device(local_rank)
     return rank, world_size, local_rank
+
+
+def pin_deterministic_ep_dispatch() -> None:
+    """Build every DeepEP ``ElasticBuffer`` of this process in deterministic mode, which places each
+    received token by source rank and token index rather than by atomic claim order.
+
+    The default dispatch hands out receive slots with atomics, so the order an expert's tokens arrive
+    in changes from run to run, and with it the rounding of every expert weight gradient summed over
+    them. A test that replays a run exactly (a resume against the uninterrupted run) pins this first.
+    """
+    buffer_cls = deep_ep().ElasticBuffer
+    buffer_cls.__init__ = functools.partialmethod(buffer_cls.__init__, deterministic=True)
 
 
 def setup_cache_dirs(prefix: str, rank: int) -> tuple[str, str]:

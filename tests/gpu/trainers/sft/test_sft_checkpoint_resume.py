@@ -77,21 +77,19 @@ RESHARD = env_flag("HALO_TEST_RESUME_FSDP_RESHARD")
 
 @dataclass(frozen=True)
 class ResumeMode:
-    """One mode's ParallelismConfig kwargs, training sequence cap (CP needs one divisible by
-    cp_size), and bound on the fixed-batch loss across the resume, the resume noise of its forward."""
+    """One mode's ParallelismConfig kwargs and training sequence cap (CP needs one divisible by
+    cp_size)."""
 
     parallelism: dict
     max_length: int
-    loss_tol: float
     model: str = DEFAULT_MODEL
 
 
 MODES = {
-    "fsdp": ResumeMode({"fsdp_reshard_after_forward": RESHARD}, 512, TOL.resume_fixed_batch_loss_abs),
-    "cp": ResumeMode({"cp_size": 2, "fsdp_reshard_after_forward": RESHARD}, 4096, TOL.resume_fixed_batch_loss_abs),
-    "tp": ResumeMode({"tp_size": 2}, 512, TOL.resume_fixed_batch_loss_abs),
-    # DeepEP's combine reorders the expert sum, so the EP forward is not bitwise reproducible.
-    "ep": ResumeMode({"ep_size": 2}, 2048, TOL.resume_loss_abs, model=EP_MODEL),
+    "fsdp": ResumeMode({"fsdp_reshard_after_forward": RESHARD}, 512),
+    "cp": ResumeMode({"cp_size": 2, "fsdp_reshard_after_forward": RESHARD}, 4096),
+    "tp": ResumeMode({"tp_size": 2}, 512),
+    "ep": ResumeMode({"ep_size": 2}, 2048, model=EP_MODEL),
 }
 
 
@@ -233,7 +231,7 @@ def phase2_resume_and_train(
     losses = step_losses(trainer)
     checks = {f"resume_{name}": ok for name, ok in training_run_checks(train_result, trainer, TOTAL_STEPS).items()}
     checks |= resume_continuity_checks(
-        resume_capture.capture, l_pre, save_step=SAVE_AT_STEP, loss_tol=MODES[mode].loss_tol
+        resume_capture.capture, l_pre, save_step=SAVE_AT_STEP, loss_tol=TOL.resume_fixed_batch_loss_abs
     )
 
     del trainer, model

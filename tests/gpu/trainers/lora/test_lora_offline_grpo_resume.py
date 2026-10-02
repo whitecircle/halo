@@ -12,10 +12,10 @@ Every check fails when a piece of the resume breaks:
   - the frozen base the adapters ride on is byte-identical to the pre-training one;
   - this rank's optimizer state at ``on_train_begin`` is bit-equal to the phase-1 step-2 snapshot,
     and the LR scheduler is back at step 2;
-  - the resumed run's steps 3-4 track phase 1's, checked at the two precisions they hold: step 3 is a
-    forward on the restored WEIGHTS and reproduces phase 1's loss exactly, while step 4 follows an
-    update driven by the restored MOMENTS, exact too except where DeepEP's dispatch order reorders
-    the expert-adapter gradient sums;
+  - the resumed run's steps 3-4 replay phase 1's: step 3 is a forward on the restored WEIGHTS, step 4
+    follows an update driven by the restored MOMENTS. Under EP every DeepEP buffer is built in
+    deterministic mode (:func:`~tests.common.distributed.pin_deterministic_ep_dispatch`), without
+    which the atomic receive order alone changes how each expert adapter's gradient is summed;
   - the resumed adapters, DISABLED, score a fixed batch as the frozen base scored it before any
     training — the reference log-probs offline GRPO computes at ``kl_beta > 0``. Anti-vacuous by the
     companion check that the same adapters ENABLED move those log-probs by orders more. The base
@@ -58,7 +58,7 @@ from src.distributed.fsdp import reshard_fsdp2_modules
 from src.distributed.parallelism_config import ParallelismConfig
 from src.trainers.grpo.offline import OfflineGRPOTrainer
 from tests.common.datasets import create_offline_grpo_dataset
-from tests.common.distributed import ensure_model_downloaded, shared_scratch_dir
+from tests.common.distributed import ensure_model_downloaded, pin_deterministic_ep_dispatch, shared_scratch_dir
 from tests.common.harness import gpu_test_main
 from tests.common.peft_helpers import (
     is_expert_lora_active,
@@ -68,6 +68,7 @@ from tests.common.peft_helpers import (
     parallelism_config_for,
     snapshot_adapters,
 )
+from tests.common.tolerances import TOL
 from tests.common.utils import (
     cleanup_memory,
     local_optimizer_state,
@@ -111,20 +112,13 @@ PROBE_TEXT = (
 )
 PROBE_MAX_TOKENS = 64
 
-# Measured, all four rows: |reference - base| = 0.0 exactly (disabling the adapters
-# restores the base computation itself, not an approximation of it), and the trained adapters move
-# the same log-probs by 0.94 (dense) to 7.5 (ETP) nats. The tolerance leaves room for the bf16
-# expert combine DeepEP reorders per launch; the separation guard is what keeps the equality from
-# passing on a model whose adapters do nothing.
-REF_LOGP_TOL = 0.05
+# Measured, all four rows: |reference - base| = 0.0 exactly. Disabling the adapters restores
+# the base computation itself, and the EP forward reproduces itself (gpt-oss top-4 on ep2 takes the
+# fused permute, whose output does not depend on DeepEP's receive order), so the bound is kernel
+# headroom. The trained adapters move the same log-probs by 0.94 (dense) to 7.5 (ETP) nats; the
+# separation guard keeps the equality from passing on a model whose adapters do nothing.
+REF_LOGP_TOL = 1e-4
 ADAPTER_EFFECT_MIN = 0.25
-# Step 3 replays phase 1's forward on the restored weights: measured delta 0.0 on all four rows, the
-# band covering only the logged rounding and the bf16 combine reorder. Step 4 follows the first
-# update after the restore: 0.0 on lora, lora_ep and lora_etp, 1.4e-3 on expert_lora, where DeepEP's
-# dispatch order changes how each expert adapter's gradient is summed; the bit-exact optimizer
-# comparison pins the moments.
-RESTORED_STEP_LOSS_TOL = 2e-3
-LOSS_TOL = 0.15
 
 
 def _config(
@@ -407,6 +401,8 @@ def run(ctx) -> dict:
 
     log(f"\n{'=' * 70}\n  Offline GRPO adapter RESUME — mode={mode}, world={ctx.world_size}\n{'=' * 70}")
 
+    if parallelism_config_for(mode, ctx.world_size).ep_size > 1:
+        pin_deterministic_ep_dispatch()
     # The trainer writes the checkpoint on the save rank and every rank resumes from it, so the
     # output dir must be one shared path rather than a per-rank temp dir.
     workspace = shared_scratch_dir(f"lora_offgrpo_resume_{mode}")
@@ -499,10 +495,10 @@ def run(ctx) -> dict:
         metrics["resume_loss_max_delta"] = max_or_nan(deltas)
         log(
             f"steps {SAVE_AT_STEP + 1}-{TOTAL_STEPS}: phase1={[f'{loss:.5f}' for loss in phase1_tail]} "
-            f"resumed={[f'{loss:.5f}' for loss in resumed_tail]} |deltas|={[f'{d:.5f}' for d in deltas]}"
+            f"resumed={[f'{loss:.5f}' for loss in resumed_tail]} |deltas|={[f'{d:.3e}' for d in deltas]}"
         )
-        checks["restored_weights_reproduce_the_loss"] = deltas[0] < RESTORED_STEP_LOSS_TOL
-        checks["resumed_loss_tracks_phase1"] = max_or_nan(deltas) < LOSS_TOL
+        checks["restored_weights_reproduce_the_loss"] = deltas[0] < TOL.replayed_resume_loss_abs
+        checks["resumed_loss_tracks_phase1"] = max_or_nan(deltas) < TOL.replayed_resume_loss_abs
 
     restored = live.get("restored")
     checks["resume_capture_fired"] = restored is not None
