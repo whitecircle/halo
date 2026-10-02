@@ -17,7 +17,8 @@ logger = get_logger(__name__)
 
 # TRL's metrics the conditions read: the entropy and, under its vLLM IS correction, the online trainer's
 # gap (a mean absolute difference). The environmental trainer's own gap (a signed mean, read by
-# magnitude) and the breaker's verdict are keyed where it computes them.
+# magnitude) and the breaker's verdict are keyed in ``objective/logratio.py``, beside the IS ratio and
+# the mask stages they read.
 ENTROPY_KEY = "entropy"
 SAMPLING_LOGP_GAP_KEY = "sampling/sampling_logp_difference/mean"
 

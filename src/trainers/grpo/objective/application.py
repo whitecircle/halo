@@ -25,8 +25,8 @@ NEGATIVE_ONLY_MASS_KEY = "advantage/negative_only_mass"
 # TRL loss types whose every loss token of a step shares one normalizer, so a row pulls with its
 # advantage times its trained token weight: the losses the token-mass balance is exact for. ``grpo`` /
 # ``sapo`` average each completion over its own length, ``bnpo`` normalizes per micro-batch, ``luspo``
-# averages each completion's length-scaled term over the micro-batch's rows, and ``vespo`` weighs each
-# sequence by its advantage's sign.
+# weighs every token of a completion by one clipped sequence-level ratio and, under the vLLM IS correction,
+# averages over every position, padding included, and ``vespo`` weighs each sequence by its advantage's sign.
 TOKEN_SUM_LOSS_TYPES = ("cispo", "dapo", "dr_grpo")
 
 
@@ -155,7 +155,7 @@ def validate_token_mass_balance(args) -> None:
     if args.off_policy_mask_threshold is not None:
         raise ValueError(
             f"balance_token_mass with off_policy_mask_threshold={args.off_policy_mask_threshold}: the mask drops "
-            "negative-advantage sequences inside the loss, after the balance has weighed them, so the step's net "
+            "negative-advantage sequences inside the loss, after the balance has weighed them, so the round's net "
             "push turns positive. Unset one of them."
         )
 

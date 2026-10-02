@@ -34,7 +34,7 @@ def _local(x):
 
 
 def _net(advantages, weights):
-    """The step's net share of token-weighted advantage, in [-1, 1]."""
+    """The round's net share of token-weighted advantage, in [-1, 1]."""
     return float((advantages * weights).sum() / (advantages.abs() * weights).sum())
 
 
@@ -119,9 +119,9 @@ def test_a_mass_that_is_not_finite_raises_on_every_rank(advantages, ratio_at, en
         record_token_mass(advantages, loss_mask, ratio, _local, defaultdict(list), enabled=enabled)
 
 
-def test_every_rank_takes_the_scales_of_the_whole_step():
+def test_every_rank_takes_the_scales_of_the_whole_round():
     """Two ranks: one holds only the short solves, the other only the long failures. Each alone has one
-    sign; the step balances over both, so both ranks shrink their negatives by the same factor."""
+    sign; the round balances over both, so both ranks shrink their negatives by the same factor."""
     rank0 = (torch.tensor([0.8, 0.8]), torch.tensor([100.0, 100.0]))
     rank1 = (torch.tensor([-0.8, -0.8]), torch.tensor([300.0, 300.0]))
     masses = [torch.stack([(a.clamp_min(0) * w).sum(), (a.clamp_max(0).neg() * w).sum()]) for a, w in (rank0, rank1)]
@@ -142,7 +142,7 @@ def test_rows_replicated_across_tensor_parallel_ranks_change_nothing():
     assert once == twice
 
 
-def _env_step():
+def _env_round():
     """The environmental trainer's per-turn rows: a solve (one short row), a long failure (two rows) and
     a failure the trust region masked (IS ratio 0 on its row), with the loss mask the drops left."""
     advantages = torch.tensor([1.0, -0.5, -0.5, -0.5])
@@ -158,8 +158,8 @@ def _env_step():
 
 def test_a_token_weighs_its_place_in_the_loss_times_its_is_ratio():
     """The masked failure's tokens carry no gradient and so no mass: the push is 2 positive against 6
-    negative, the negatives shrink by a third, and the step nets to zero."""
-    advantages, loss_mask, ratio = _env_step()
+    negative, the negatives shrink by a third, and the round nets to zero."""
+    advantages, loss_mask, ratio = _env_round()
     metrics = defaultdict(list)
     balance = record_token_mass(advantages, loss_mask, ratio, _local, metrics, enabled=True)
     assert balance is not None
@@ -171,7 +171,7 @@ def test_a_token_weighs_its_place_in_the_loss_times_its_is_ratio():
 
 
 def test_with_the_balance_off_the_net_mass_is_still_logged():
-    advantages, loss_mask, ratio = _env_step()
+    advantages, loss_mask, ratio = _env_round()
     metrics = defaultdict(list)
     assert record_token_mass(advantages, loss_mask, ratio, _local, metrics, enabled=False) is None
     assert metrics[NET_TOKEN_MASS_KEY] == [pytest.approx(-0.5)]
@@ -182,7 +182,7 @@ def test_the_negative_only_share_is_the_push_the_balance_leaves_on_every_other_r
     """The 4-token failing row is a cut turn, trained only on its negative advantage: 2 of the 6 negative
     mass. Balanced, the negatives shrink by a third, so it carries 2/3 of a total of 4, and the solve's 2
     against the other failure's 4/3 leaves that same 2/3 pushing up every other row's tokens."""
-    advantages, loss_mask, ratio = _env_step()
+    advantages, loss_mask, ratio = _env_round()
     negative_only = torch.tensor([False, False, True, False])
     metrics = defaultdict(list)
     balance = record_token_mass(
@@ -206,7 +206,7 @@ def test_the_negative_only_share_is_the_push_the_balance_leaves_on_every_other_r
 def test_a_one_sided_round_leaves_its_negative_only_rows_no_share():
     """Balanced, a round with no positive mass trains nothing, so nothing is left for its negative-only rows to
     push; unbalanced they keep their plain share."""
-    _, loss_mask, ratio = _env_step()
+    _, loss_mask, ratio = _env_round()
     advantages = torch.tensor([0.0, -0.5, -0.5, -0.5])  # the solve's positive advantage gone
     negative_only = torch.tensor([False, False, True, False])
     metrics = defaultdict(list)
