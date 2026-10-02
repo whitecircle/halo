@@ -27,7 +27,7 @@ from src.data.pipeline.processing import resolve_map_num_proc
 from src.data.spans import LABEL_IGNORE_INDEX
 from src.distributed.checkpoint.peft import find_peft_model
 from src.distributed.context_parallel.validation import validate_trainer_args_for_cp
-from src.distributed.context_parallel.wrapper import UlyssesCPModelWrapper
+from src.distributed.context_parallel.wrapper import UlyssesCPModelWrapper, find_cp_wrapper
 from src.distributed.expert_parallel.base_layer import make_disable_adapter_ep_aware
 from src.distributed.expert_parallel.dispatcher import (
     free_unclaimed_ep_buffers,
@@ -960,17 +960,7 @@ class DistributedTrainerMixin(
 
     def _find_cp_wrapper(self) -> UlyssesCPModelWrapper | None:
         """Find the CP wrapper in the model hierarchy, beneath any ``torch.compile`` wrapper."""
-        model = self._top_level_model()
-        if isinstance(model, UlyssesCPModelWrapper):
-            return model
-
-        inner = getattr(model, "base_model", None)
-        if inner is not None:
-            inner_model = getattr(inner, "model", inner)
-            if isinstance(inner_model, UlyssesCPModelWrapper):
-                return inner_model
-
-        return None
+        return find_cp_wrapper(self._top_level_model())
 
     def _fsdp_exclusions(self) -> FsdpExclusions:
         """The parameters every FSDP2 wrap leaves out (see :class:`FsdpExclusions`).

@@ -26,7 +26,6 @@ from typing import Any, Literal
 
 import torch
 import torch.distributed as dist
-import torch.distributed.nn.functional as dist_nn
 import torch.nn as nn
 import torch.nn.functional as F
 from accelerate.logging import get_logger
@@ -60,6 +59,7 @@ from src.data.pipeline.processing import coordinated_map
 from src.data.pipeline.rendered import lacks_emitted_bos
 from src.data.spans import LABEL_IGNORE_INDEX, lacks_terminator, resolve_eos_token_ids
 from src.data.vlm import render_vlm_text
+from src.distributed.context_parallel.autograd import cp_sum_rows
 from src.distributed.context_parallel.config import cp_shift_against_full_labels
 from src.distributed.loading.model_loading import load_model_from_pretrained
 from src.distributed.loading.peft_setup import peft_bf16_autocast, prepare_peft_model
@@ -675,10 +675,8 @@ class SmoothMarginPOTrainer(StoredMetricsMixin, DistributedTrainerMixin, Trainer
         identity.
         """
         if cp_config is not None and cp_config.cp_size > 1:
-            # fp32 collectives: a bf16 all-reduce(SUM) of partial sums is lossy.
-            sums = dist_nn.all_reduce(sums.float(), group=cp_config.process_group)
-            counts = counts.to(torch.float32, copy=True)
-            dist.all_reduce(counts, op=dist.ReduceOp.SUM, group=cp_config.process_group)
+            sums = cp_sum_rows(sums, cp_config)
+            counts = cp_sum_rows(counts, cp_config)
         return sums / counts.clamp(min=1)
 
     def concatenated_forward(

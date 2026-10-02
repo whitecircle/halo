@@ -89,8 +89,9 @@ from src.trainers.grpo.objective.offline import (
     LOSS_TYPES,
     PG_FORMULATIONS,
     clamp_negative_advantage_logps,
-    loss_normalizer,
-    loss_numerator,
+    offline_loss,
+    offline_loss_normalizer,
+    offline_loss_numerator,
     offline_token_objective,
 )
 from src.trainers.mixins.base import DistributedTrainerMixin
@@ -450,7 +451,7 @@ class OfflineGRPOTrainer(ChunkedLogprobsCore, DistributedTrainerMixin, Trainer):
         self.min_log_prob = args.min_log_prob
         self.loss_type = args.loss_type
         # The objective's loss-type and PG dispatches branch on these strings: validated once here,
-        # not at the first microbatch or under PP alone.
+        # before model and dataset construction, not at the first microbatch or under PP alone.
         if self.loss_type not in LOSS_TYPES:
             raise ValueError(f"Unknown loss type: {self.loss_type!r}. Supported types: {list(LOSS_TYPES)}")
         if args.policy_gradient_formulation not in PG_FORMULATIONS:
@@ -997,9 +998,12 @@ class OfflineGRPOTrainer(ChunkedLogprobsCore, DistributedTrainerMixin, Trainer):
             ref_logps_unclamped=ref_per_token_logps_unclamped,
         )  # [B, T]
 
-        group_sizes = inputs["group_size"]
-        loss = loss_numerator(per_token_loss, completion_mask, group_sizes, self.loss_type) / loss_normalizer(
-            group_sizes, completion_mask.sum(dim=1), self.loss_type, self.max_completion_length
+        loss = offline_loss(
+            per_token_loss,
+            completion_mask,
+            inputs["group_size"],
+            loss_type=self.loss_type,
+            max_completion_length=self.max_completion_length,
         )
 
         self._buffer_sign_metrics(sample_values, advantages, completion_mask)
@@ -1151,16 +1155,16 @@ class OfflineGRPOTrainer(ChunkedLogprobsCore, DistributedTrainerMixin, Trainer):
         return out
 
     def _pp_normalizer(self, inputs: dict[str, torch.Tensor]) -> torch.Tensor:
-        """The loss type's whole-batch denominator (:func:`loss_normalizer`) over the pipeline batch.
+        """The loss type's whole-batch denominator (:func:`offline_loss_normalizer`) over the pipeline batch.
 
         The shifted completion-token counts equal the unshifted ones ``compute_loss`` reads (the
         collator guarantees a non-empty prompt, so position 0 is never a completion token).
         """
-        return loss_normalizer(
+        return offline_loss_normalizer(
+            loss_token_counts_per_row(inputs["labels"]).float(),
             inputs["group_size"],
-            loss_token_counts_per_row(inputs["labels"]),
-            self.loss_type,
-            self.max_completion_length,
+            loss_type=self.loss_type,
+            max_completion_length=self.max_completion_length,
         )
 
     def _pp_token_loss(self, logits: torch.Tensor, target: dict[str, torch.Tensor]) -> torch.Tensor:
@@ -1168,7 +1172,7 @@ class OfflineGRPOTrainer(ChunkedLogprobsCore, DistributedTrainerMixin, Trainer):
 
         Per-token log-probs of the completion labels, the negative-advantage ``min_log_prob`` clamp
         (on the policy and, as off PP, on the reference), then :func:`offline_token_objective` and
-        :func:`loss_numerator`, the objective and numerator ``compute_loss`` runs. The reference
+        :func:`offline_loss_numerator`, the objective and numerator ``compute_loss`` runs. The reference
         arrives precomputed as a target column, and the runtime divides by ``_pp_normalizer``'s
         full-batch denominator.
 
@@ -1199,7 +1203,7 @@ class OfflineGRPOTrainer(ChunkedLogprobsCore, DistributedTrainerMixin, Trainer):
             ref_logps_unclamped=ref_logps_unclamped,
         )
         self._buffer_sign_metrics(sample_values, advantages, mask, rows=rows_with_labels(target["labels"]))
-        return loss_numerator(per_token_loss, mask, target["group_size"], self.loss_type)
+        return offline_loss_numerator(per_token_loss, mask, target["group_size"], loss_type=self.loss_type)
 
     def _pp_precompute_reference_logps(self, dataset: "datasets.Dataset", what: str) -> "datasets.Dataset":
         """Score the KL reference through the pipeline and return ``dataset`` with the values as a column.

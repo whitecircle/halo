@@ -1,12 +1,23 @@
 """Communication primitives for Ulysses sequence parallelism: an autograd-aware all-to-all swapping
 the sequence and head dimensions, a fused Q+KV variant, and a RoPE (cos, sin) all-gather for the
-legacy path.
+legacy path, and a SUM with a collective backward for sequence-global objectives.
 """
 
 from __future__ import annotations
 
 import torch
 import torch.distributed as dist
+import torch.distributed.nn.functional as dist_nn
+
+from src.distributed.context_parallel.config import CPConfig
+
+
+def cp_sum_rows(local_values: torch.Tensor, cp_config: CPConfig | None) -> torch.Tensor:
+    """Sum row values in fp32, with a SUM backward canceled by world-wide mean gradient sync."""
+    values = local_values.float()
+    if cp_config is None or cp_config.cp_size <= 1:
+        return values
+    return dist_nn.all_reduce(values, group=cp_config.process_group)
 
 
 class UlyssesAllToAll(torch.autograd.Function):

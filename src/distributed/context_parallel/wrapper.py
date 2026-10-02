@@ -25,7 +25,9 @@ from src.distributed.context_parallel.config import (
 from src.distributed.context_parallel.key_mapping import strip_cp_attention_prefix
 from src.distributed.context_parallel.patching import patch_attention_for_ulysses
 from src.distributed.expert_parallel.base_layer import EPMoELayerBase
+from src.distributed.expert_parallel.dispatcher import bump_forward_generation
 from src.models.loading.config_levels import get_config_field
+from src.models.structure import base_transformers_model, unwrap_framework_wrappers
 
 logger = logging.getLogger(__name__)
 
@@ -144,42 +146,9 @@ class UlyssesCPModelWrapper(nn.Module):
         of the next chunk's first token; that token is passed through as the boundary label and
         predicted from the current chunk's last logit (the final rank has none).
         """
-        if any(kwargs.get(key) is not None for key in ("pixel_values", "pixel_attention_mask")):
-            # Multimodal CP unsupported: pixel features don't slice by token chunk, mrope is 3D.
-            raise ValueError(
-                "Context Parallelism supports text-only inputs: got multimodal features "
-                "(pixel_values / pixel_attention_mask). Train VLMs without CP."
-            )
-        if input_ids is None:
-            raise ValueError(
-                "Context Parallelism needs input_ids: it splits the batch along the token axis and "
-                "re-pairs each chunk with its labels, which an inputs_embeds-only call cannot "
-                "supply. Pass input_ids, or train without CP."
-            )
-        batch_size, seq_len = input_ids.shape
-
-        if seq_len % self.cp_size != 0:
-            raise ValueError(f"Sequence length {seq_len} must be divisible by context_parallel_size {self.cp_size}")
-
-        _reject_left_padding(attention_mask)
-
-        local_input_ids = split_sequence_for_cp(input_ids, self.cp_config)
-        local_attention_mask = (
-            split_sequence_for_cp(attention_mask, self.cp_config) if attention_mask is not None else None
+        local_input_ids, local_attention_mask, local_position_ids = self._prepare_cp_inputs(
+            input_ids, attention_mask, position_ids, kwargs
         )
-
-        if position_ids is None:
-            position_ids = (
-                torch.arange(seq_len, device=input_ids.device, dtype=torch.long).unsqueeze(0).expand(batch_size, -1)
-            )
-        local_position_ids = split_sequence_for_cp(position_ids, self.cp_config)
-
-        # The legacy attention path RoPEs after the all-to-all, where Q/K span the whole sequence, so
-        # its hooks (Mistral4's llama-4 scale) need the full positions this wrapper holds before the
-        # split. Not cleared afterwards: gradient-checkpoint recompute re-runs attention during the
-        # backward, and the CP trainers run one forward per backward.
-        for layer in self._attention_layers:
-            layer.global_position_ids = position_ids
 
         # labels=None: the boundary-aware loss below replaces the model's.
         outputs = self.model(
@@ -210,6 +179,73 @@ class UlyssesCPModelWrapper(nn.Module):
             outputs["loss"] = loss
 
         return outputs
+
+    def forward_hidden_states(self, input_ids=None, attention_mask=None, position_ids=None, **kwargs) -> torch.Tensor:
+        """Return this rank's final backbone hidden states without materializing vocabulary logits.
+
+        The caller scores the returned local sequence and handles causal boundary labels. This
+        method shares the normal forward's input split and full-position attention hooks, including
+        the hooks needed when gradient checkpointing recomputes attention in backward.
+        """
+        if "labels" in kwargs:
+            raise ValueError("forward_hidden_states does not accept labels; score local hidden states separately.")
+        if kwargs.get("use_cache") not in (None, False):
+            raise ValueError("forward_hidden_states requires use_cache=False under Context Parallelism.")
+        kwargs.pop("use_cache", None)
+        local_input_ids, local_attention_mask, local_position_ids = self._prepare_cp_inputs(
+            input_ids, attention_mask, position_ids, kwargs
+        )
+        base = base_transformers_model(self.model)
+        backbone = base.base_model
+        if backbone is base:
+            raise ValueError("Context Parallelism cannot score hidden states: the model exposes no separate backbone.")
+        bump_forward_generation()
+        return backbone(
+            input_ids=local_input_ids,
+            attention_mask=local_attention_mask,
+            position_ids=local_position_ids,
+            use_cache=False,
+            **kwargs,
+        ).last_hidden_state
+
+    def _prepare_cp_inputs(self, input_ids, attention_mask, position_ids, kwargs):
+        """Validate and split the shared inputs for LM and hidden-only forwards."""
+        if any(kwargs.get(key) is not None for key in ("pixel_values", "pixel_attention_mask")):
+            # Multimodal CP unsupported: pixel features don't slice by token chunk, mrope is 3D.
+            raise ValueError(
+                "Context Parallelism supports text-only inputs: got multimodal features "
+                "(pixel_values / pixel_attention_mask). Train VLMs without CP."
+            )
+        if input_ids is None:
+            raise ValueError(
+                "Context Parallelism needs input_ids: it splits the batch along the token axis and "
+                "re-pairs each chunk with its labels, which an inputs_embeds-only call cannot "
+                "supply. Pass input_ids, or train without CP."
+            )
+        batch_size, seq_len = input_ids.shape
+
+        if seq_len % self.cp_size != 0:
+            raise ValueError(f"Sequence length {seq_len} must be divisible by context_parallel_size {self.cp_size}")
+
+        _reject_left_padding(attention_mask)
+
+        local_input_ids = split_sequence_for_cp(input_ids, self.cp_config)
+        local_attention_mask = (
+            split_sequence_for_cp(attention_mask, self.cp_config) if attention_mask is not None else None
+        )
+        if position_ids is None:
+            position_ids = (
+                torch.arange(seq_len, device=input_ids.device, dtype=torch.long).unsqueeze(0).expand(batch_size, -1)
+            )
+        local_position_ids = split_sequence_for_cp(position_ids, self.cp_config)
+
+        # The legacy attention path RoPEs after the all-to-all, where Q/K span the whole sequence, so
+        # its hooks (Mistral4's llama-4 scale) need the full positions this wrapper holds before the
+        # split. Not cleared afterwards: gradient-checkpoint recompute re-runs attention during the
+        # backward, and the CP trainers run one forward per backward.
+        for layer in self._attention_layers:
+            layer.global_position_ids = position_ids
+        return local_input_ids, local_attention_mask, local_position_ids
 
     def _router_aux_loss_coef(self) -> float:
         """The family's MoE router aux-loss weight. Raises when the config declares none.
@@ -368,6 +404,16 @@ class UlyssesCPModelWrapper(nn.Module):
 
     def load_state_dict(self, *args, **kwargs):
         return self.model.load_state_dict(*args, **kwargs)
+
+
+def find_cp_wrapper(model: nn.Module) -> UlyssesCPModelWrapper | None:
+    """Find the CP wrapper directly or below PEFT and framework wrappers."""
+    model = unwrap_framework_wrappers(model)
+    if isinstance(model, UlyssesCPModelWrapper):
+        return model
+    inner = getattr(model, "base_model", None)
+    inner_model = getattr(inner, "model", inner)
+    return inner_model if isinstance(inner_model, UlyssesCPModelWrapper) else None
 
 
 def patch_model_for_cp(model: nn.Module, cp_config: CPConfig) -> nn.Module:

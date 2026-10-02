@@ -59,6 +59,13 @@ probability of that chunk — and the FSDP average over CP ranks trains the mean
 terms at `router_aux_loss_coef`. That is not the whole-sequence term (a product of means does not
 split across chunks); a `cp_size` factor would only scale it `cp_size`×.
 
+The GRPO scoring seam uses `forward_hidden_states` on the CP wrapper to split a right-padded row
+without constructing vocabulary-wide logits. `cp_shift_against_full_labels` pairs local hidden
+states with the full row's next-token labels; the chunked output head scores those targets.
+`context_parallel/autograd.py` supplies an autograd-aware row SUM shared with SMPO. Its backward
+CP factor is canceled by world-wide mean gradient synchronization; callers must not also apply
+SFT's explicit `cp_size` multiplier. GRPO trainers reject CP at construction.
+
 A model that returns an `aux_loss` while its config declares no `router_aux_loss_coef` **raises** — a
 stand-in weight would train a different objective than the same config without CP. Set the field
 through `model_init_kwargs`, or turn the aux loss off for that family with `moe_balancing`.

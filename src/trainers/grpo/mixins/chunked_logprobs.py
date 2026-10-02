@@ -20,6 +20,8 @@ from trl import GRPOTrainer
 from trl.extras.profiling import profiling_decorator
 from trl.models.utils import _ForwardRedirection
 
+from src.distributed.context_parallel.config import cp_shift_against_full_labels
+from src.distributed.context_parallel.wrapper import find_cp_wrapper
 from src.distributed.expert_parallel.dispatcher import bump_forward_generation
 from src.distributed.runtime import materialize_dtensor, rank_consensus
 from src.distributed.tensor_parallel.state_dict import tp_plan_shards_params
@@ -487,6 +489,47 @@ class ChunkedLogprobsCore:
             batch_size,
             compute_entropy,
         )
+
+    def _cp_chunked_logps(self, model, input_ids, attention_mask, labels):
+        """Score CP-owned next-token targets without constructing vocabulary-wide logits.
+
+        ``labels`` describes the full right-padded row on every CP peer. The returned local labels
+        mark supervised positions; log-probs at ignored positions have no training meaning.
+        """
+        unwrapped = self.accelerator.unwrap_model(model)
+        wrapper = find_cp_wrapper(unwrapped)
+        if wrapper is None:
+            raise TypeError("CP GRPO scoring requires a UlyssesCPModelWrapper")
+        return self._chunked_forward_redirection(
+            model,
+            unwrapped,
+            self._cp_chunked_logps_impl,
+            wrapper,
+            input_ids,
+            attention_mask,
+            labels,
+        )
+
+    def _cp_chunked_logps_impl(self, unwrapped_model, input_ids, attention_mask, labels):
+        if labels.shape != input_ids.shape:
+            raise ValueError("CP GRPO scoring needs labels aligned with the full input row")
+
+        lm_head = unwrapped_model.get_output_embeddings()
+        self._assert_output_embeddings_unadapted(unwrapped_model, lm_head)
+        weight = materialize_dtensor(lm_head.weight)
+        bias = materialize_dtensor(getattr(lm_head, "bias", None))
+        head_transform = self._head_transform(unwrapped_model)
+
+        # One CP-divisible backbone forward per loss graph also keeps the legacy attention's
+        # full-position hooks stable through gradient-checkpoint recomputation.
+        hidden = unwrapped_model.forward_hidden_states(input_ids=input_ids, attention_mask=attention_mask)
+        shifted_hidden, shifted_labels = cp_shift_against_full_labels(
+            hidden, labels, unwrapped_model.cp_rank, unwrapped_model.cp_size
+        )
+        logps = chunked_selective_log_softmax(
+            shifted_hidden, weight, shifted_labels, bias, self.temperature, head_transform
+        )
+        return logps, shifted_labels
 
     def _assert_output_embeddings_unadapted(self, unwrapped_model, lm_head) -> None:
         """Reject a PEFT tuner on the output embedding rather than ignore its delta.

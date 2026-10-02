@@ -228,6 +228,9 @@ MANIFEST: dict[str, TestSpec] = {
     "parallelism/combined/test_ep_cp_train_correctness.py": TestSpec(
         nproc=2, markers=("gpu", "full", "2gpu", "ep", "cp", "moe", "gptoss"), timeout=1000
     ),
+    "parallelism/combined/test_qwen3_moe_cp_grpo_scoring.py": TestSpec(
+        nproc=8, markers=("gpu", "full", "8gpu", "ep", "cp", "moe", "qwen3"), timeout=1200
+    ),
     "parallelism/combined/test_combined_ref_correctness.py": TestSpec(
         nproc=4,
         markers=("gpu", "core", "4gpu", "ep", "tp", "etp", "moe", "mistral4"),
@@ -271,6 +274,9 @@ MANIFEST: dict[str, TestSpec] = {
     ),
     "parallelism/cp/test_cp_correctness.py": TestSpec(
         nproc=2, markers=("gpu", "core", "2gpu", "cp", "qwen3"), timeout=600
+    ),
+    "parallelism/cp/test_cp_grpo_scoring.py": TestSpec(
+        nproc=4, markers=("gpu", "full", "4gpu", "cp", "qwen3"), timeout=900
     ),
     "parallelism/cp/test_cp_smpo_logprobs.py": TestSpec(
         nproc=2, markers=("gpu", "core", "2gpu", "cp", "qwen3"), timeout=600

@@ -1,11 +1,13 @@
-"""The offline-GRPO objective, shared by the non-PP loss and its pipeline counterpart.
+"""The offline-GRPO objective, shared by the non-PP loss, its pipeline counterpart and CP scoring.
 
-Pure tensor math over one batch, or one pipeline microbatch, of completion log-probs: the
-negative-advantage ``min_log_prob`` floor both paths apply to the policy and the reference, the
-policy term, the capped k3 KL against the reference, the per-token quantities both paths buffer as
-diagnostics, and the loss type's reduction. The reduction comes in two halves because the pipeline
-divides once per step: :func:`loss_numerator` is row-local, so microbatch numerators sum to the
-batch's, and :func:`loss_normalizer` reads batch metadata alone. Off PP the loss is their quotient.
+Pure tensor math over the completion log-probs of one batch or pipeline microbatch, as complete rows
+or as one rank's CP token shard of them: the negative-advantage ``min_log_prob`` floor applied to the
+policy and the reference, the policy term, the capped k3 KL against the reference, the per-token
+quantities buffered as diagnostics, and the loss type's reduction. The reduction comes in two halves
+because the pipeline divides once per step: :func:`offline_loss_numerator` is row-local, so
+microbatch numerators sum to the batch's, and :func:`offline_loss_normalizer` reads batch metadata
+alone. Under CP the numerator sums its partials across the shards first. :func:`offline_loss` is
+their quotient.
 """
 
 from __future__ import annotations
@@ -15,6 +17,8 @@ from typing import get_args
 import torch
 
 from src.configs.offline_grpo_config import OfflineGRPOConfig
+from src.distributed.context_parallel.autograd import cp_sum_rows
+from src.distributed.context_parallel.config import CPConfig
 from src.trainers.grpo.objective.logratio import clamp_ref_logps
 
 # Derived from the config's own Literal annotations, so the dispatches here and the parse-time gate
@@ -73,29 +77,66 @@ def offline_token_objective(
     return per_token_loss, sample_values
 
 
-def loss_numerator(
-    per_token_loss: torch.Tensor, mask: torch.Tensor, group_sizes: torch.Tensor, loss_type: str
+def offline_loss_numerator(
+    per_token_loss: torch.Tensor,
+    supervised_mask: torch.Tensor,
+    group_sizes: torch.Tensor,
+    *,
+    loss_type: str,
+    cp_config: CPConfig | None = None,
 ) -> torch.Tensor:
-    """The per-token loss summed over the completion tokens, each row weighted ``1/group_size`` so every
-    source group counts equally; ``grpo`` first averages each row over its own tokens."""
-    weighted = per_token_loss * mask * (1.0 / group_sizes.float()).unsqueeze(1)
+    """The per-token loss summed over the supervised tokens, each row weighted ``1/group_size`` so every
+    source group counts equally; ``grpo`` first averages each row over its own tokens. Row-local, so
+    pipeline microbatch numerators sum to the batch's."""
+    if per_token_loss.shape != supervised_mask.shape or per_token_loss.shape[0] != group_sizes.numel():
+        raise ValueError("Offline loss needs one supervision mask and group size per token row")
+    group_weights = 1.0 / group_sizes.float()
+    weighted = per_token_loss * group_weights.unsqueeze(1) * supervised_mask
     if loss_type == "grpo":
-        return (weighted.sum(dim=1) / mask.sum(dim=1).clamp(min=1)).sum()
-    return weighted.sum()
+        rows = cp_sum_rows(weighted.sum(dim=1, dtype=torch.float32), cp_config)
+        counts = cp_sum_rows(supervised_mask.sum(dim=1, dtype=torch.float32), cp_config)
+        return (rows / counts.clamp(min=1)).sum()
+    return cp_sum_rows(weighted.sum(), cp_config)
 
 
-def loss_normalizer(
-    group_sizes: torch.Tensor, token_counts: torch.Tensor, loss_type: str, max_completion_length: int | None
+def offline_loss_normalizer(
+    token_counts: torch.Tensor | None,
+    group_sizes: torch.Tensor,
+    *,
+    loss_type: str,
+    max_completion_length: int | None,
 ) -> torch.Tensor:
     """The loss type's whole-batch denominator over the ``1/group_size`` row weights: their sum
-    (``grpo``), the weighted completion-token count (``bnpo``; ``token_counts`` per row), or their sum
-    times ``max_completion_length`` (``dr_grpo``)."""
+    (``grpo``), the weighted completion-token count (``bnpo``; ``token_counts`` holds complete per-row
+    counts), or their sum times ``max_completion_length`` (``dr_grpo``). Group metadata is replicated
+    on every CP peer, so no collective runs here."""
     group_weights = 1.0 / group_sizes.float()
     if loss_type == "grpo":
         return group_weights.sum()
     if loss_type == "bnpo":
-        return (group_weights * token_counts).sum().clamp(min=1.0)
+        return (token_counts * group_weights).sum().clamp(min=1)
     if loss_type == "dr_grpo":
+        if max_completion_length is None or max_completion_length <= 0:
+            raise ValueError("dr_grpo needs a positive max_completion_length")
         return group_weights.sum() * max_completion_length
     # A fallthrough would substitute another loss type's denominator instead of failing.
     raise ValueError(f"Unknown loss type: {loss_type!r}. Supported types: {list(LOSS_TYPES)}")
+
+
+def offline_loss(
+    per_token_loss: torch.Tensor,
+    supervised_mask: torch.Tensor,
+    group_sizes: torch.Tensor,
+    *,
+    loss_type: str,
+    max_completion_length: int | None,
+    cp_config: CPConfig | None = None,
+) -> torch.Tensor:
+    """Offline objective on complete rows or CP-owned token shards of the same rows."""
+    numerator = offline_loss_numerator(
+        per_token_loss, supervised_mask, group_sizes, loss_type=loss_type, cp_config=cp_config
+    )
+    counts = cp_sum_rows(supervised_mask.sum(dim=1, dtype=torch.float32), cp_config) if loss_type == "bnpo" else None
+    return numerator / offline_loss_normalizer(
+        counts, group_sizes, loss_type=loss_type, max_completion_length=max_completion_length
+    )
