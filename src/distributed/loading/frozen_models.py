@@ -26,6 +26,7 @@ from src.models.loading.model_preparation import (
 from src.models.loading.tokenizer_setup import setup_model_and_tokenizer
 from src.models.patches.attention import resolve_attn_implementation
 from src.models.patches.buffer_fixes import finalize_loaded_model
+from src.models.patches.flex_sliding_attention import resolve_flex_sliding_attn_implementation
 from src.models.patches.gpt_oss_sinks import SinksPolicy
 from src.models.patches.remote_code_compat import apply_remote_code_compat_shims
 
@@ -51,8 +52,10 @@ def load_frozen_auxiliary_model(
       a teacher and its student are normally different repos.
     * the backend is resolved by the same :func:`resolve_attn_implementation` the policy loader runs,
       against this model's config and the run's dtype, so the per-family limits (DeepSeek-V4
-      eager-only, Gemma4 head_dim-512, fp32 vs FlashAttention) apply. Auto-detection is the widest
-      gap: an unset request pins the reference to SDPA while the policy takes FA4 on Blackwell.
+      eager-only, Gemma4 head_dim-512, fp32 vs FlashAttention) apply, and built with the same variant
+      of it (:func:`resolve_flex_sliding_attn_implementation`: Gemma 4's ``sdpa_flex_sliding``).
+      Auto-detection is the widest gap: an unset request pins the reference to SDPA while the policy
+      takes FA4 on Blackwell.
     * the sinks policy is applied here rather than by the caller, since ``reset_sinks=True`` is what
       permits a sink-dropping backend; skipping the reset leaves GptOss running sdpa over live sinks.
     * every floating parameter takes ``dtype``, as in the policy loaders: a family's fp32-pinned
@@ -71,8 +74,10 @@ def load_frozen_auxiliary_model(
     # repo, so on a cold cache every rank of every node would otherwise hit the hub at once.
     with fs_aware_main_first(download_tag) if download_tag else contextlib.nullcontext():
         config = AutoConfig.from_pretrained(model_name_or_path, trust_remote_code=trust_remote_code, revision=revision)
-        resolved_attn = resolve_attn_implementation(config, attn_implementation, dtype, sinks_reset=reset_sinks)
-        apply_family_attention_patches(config, resolved_attn)
+        family_attn = resolve_attn_implementation(config, attn_implementation, dtype, sinks_reset=reset_sinks)
+        # The family patches key on the resolved backend, the build on its variant, as in the policy loader.
+        apply_family_attention_patches(config, family_attn)
+        resolved_attn = resolve_flex_sliding_attn_implementation(config, family_attn)
         load_kwargs = {
             "revision": revision,
             "dtype": dtype,
@@ -95,7 +100,7 @@ def load_frozen_auxiliary_model(
         sinks_policy=SinksPolicy.from_flags(reset_sinks=reset_sinks),
         attn_implementation=resolved_attn,
     )
-    # Same FA4 warm-up as the policy loader: the first scoring forward would otherwise JIT-compile its
+    # Same attention warm-up as the policy loader: the first scoring forward would otherwise JIT-compile its
     # kernels mid-step on whichever rank reaches it first, while peers run ahead into the next
     # collective. Outside the coordinated block, since the warm-up itself barriers.
     warm_attention_kernels(model, dtype=dtype)
