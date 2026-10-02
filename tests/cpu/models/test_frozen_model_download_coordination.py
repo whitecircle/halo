@@ -35,7 +35,7 @@ def test_config_fetch_happens_inside_the_coordinated_phase(monkeypatch):
     monkeypatch.setattr(frozen_models, "apply_remote_code_compat_shims", lambda: events.append("shims"))
     monkeypatch.setattr(frozen_models, "AutoConfig", fake_auto_config)
     monkeypatch.setattr(frozen_models, "resolve_attn_implementation", lambda *a, **k: "sdpa")
-    monkeypatch.setattr(frozen_models, "apply_family_attention_patches", lambda *a, **k: None)
+    monkeypatch.setattr(frozen_models, "apply_family_attention_patches", lambda config, attn: attn)
     monkeypatch.setattr(frozen_models, "auto_load_model", lambda *a, **k: events.append("weights") or MagicMock())
     with (
         patch.object(frozen_models, "finalize_loaded_model"),

@@ -85,7 +85,7 @@ the towers too.
 
 `load_distributed_model` redirects any FlashAttention impl to SDPA for Gemma 4, then `patch_sdpa_for_wide_heads()` forces the mem-efficient SDPA kernel, the only backend handling this head dim, with manual KV repeat (`use_gqa_in_sdpa → False`). That avoids the math kernel's `[B, heads, S, S]` score matrix, which OOMs at seq 32k. Set `attn_implementation: sdpa` to skip the warning.
 
-The model is then built with the attention implementation `sdpa_flex_sliding`, which the frozen reference and teacher loader picks too; how it works is in [Flash Attention](../optimization/flash-attention.md#sliding-window-and-wide-head-layers-on-sdpa). On Gemma 4 26B-A4B (one B300, `tests/gpu/profiling/benchmark_gemma4_attention.py`, fwd+bwd per layer):
+On CUDA the model is then built with the attention implementation `sdpa_flex_sliding`, which the frozen reference and teacher loader picks too; how it works is in [Flash Attention](../optimization/flash-attention.md#sliding-window-and-wide-head-layers-on-sdpa). On Gemma 4 26B-A4B (one B300, `tests/gpu/profiling/benchmark_gemma4_attention.py`, fwd+bwd per layer):
 
 - **Sliding layers** (head_dim 256, window 1,024) run compiled FlexAttention: 0.64 / 1.91 / 7.86 ms at 2,048 / 8,192 / 32,768 tokens, against 4.68 / 61.8 / 941 ms for mem-efficient SDPA with its dense mask.
 - **Global layers** (head_dim 512) run matmul attention while the layer's saved scores fit the 2 GiB budget (16 heads at 4,096 tokens per row), and mem-efficient SDPA past it: 1.88 / 6.78 ms at 2,048 / 4,096 tokens against 6.52 / 19.7 ms, and the same time as SDPA at 8,192 and beyond, where the layer runs it. FlexAttention only fits shared memory at head_dim 512 with its smallest tiles, and those are slower than SDPA.

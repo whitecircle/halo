@@ -68,6 +68,7 @@ from src.log import KEY_PREVIEW_COUNT
 from src.models.loading.config_levels import config_sources, snapshot_special_token_ids
 from src.models.loading.dtype import resolve_training_dtype
 from src.models.moe_balancing import ep_wraps_experts
+from src.models.patches.flex_sliding_attention import reject_full_determinism_after_warmup
 from src.models.structure import lora_fold_targets, model_has_quantized_params, unwrap_framework_wrappers
 from src.optimizers.adamw_bf16 import build_bf16_optimizer
 from src.optimizers.param_groups import build_tensor_type_grouped_optimizer
@@ -325,6 +326,8 @@ class DistributedTrainerMixin(
         self._accelerate_manages_ddp = self._should_accelerate_manage_ddp()
 
         self._validate_parallelism_modes()
+        # Here, before HF's Trainer.__init__ turns on the deterministic mode the warmed graphs were compiled without.
+        reject_full_determinism_after_warmup(getattr(training_args, "full_determinism", False))
         kwargs = self._maybe_prepare_pipeline_model(kwargs, training_args, ctor_args)
 
         # Force use_reentrant before super().__init__ enables GC. Not under PP, which requires non-reentrant.

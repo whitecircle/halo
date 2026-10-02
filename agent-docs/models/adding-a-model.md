@@ -17,7 +17,7 @@ Multimodal models work too: the loaders resolve the class through `resolve_auto_
 
 Auto-detection covers a family whose attention the installed kernels already run. It falls short on a head dim no flash kernel accepts, a NaN-prone backward, attention sinks, or position IDs the modeling never forwards.
 
-Two seams handle those. `resolve_attn_implementation` (`src/models/patches/attention.py`) narrows the backend from the family's own capabilities; `apply_family_attention_patches` (`src/models/loading/model_preparation.py`) applies the family's patches to trainable and frozen loads alike.
+Two seams handle those. `resolve_attn_implementation` (`src/models/patches/attention.py`) narrows the backend from the family's own capabilities; `apply_family_attention_patches` (`src/models/loading/model_preparation.py`) applies the family's patches, keyed on that backend, to trainable and frozen loads alike, and returns the implementation both loaders build with (the backend, or a variant of it such as Gemma 4's `sdpa_flex_sliding`).
 
 Add the family predicate beside the existing ones and wire it into whichever seam applies. The per-family matrix is in [Flash Attention](../optimization/flash-attention.md#model-specific-handling).
 

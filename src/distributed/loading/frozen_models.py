@@ -26,7 +26,6 @@ from src.models.loading.model_preparation import (
 from src.models.loading.tokenizer_setup import setup_model_and_tokenizer
 from src.models.patches.attention import resolve_attn_implementation
 from src.models.patches.buffer_fixes import finalize_loaded_model
-from src.models.patches.flex_sliding_attention import resolve_flex_sliding_attn_implementation
 from src.models.patches.gpt_oss_sinks import SinksPolicy
 from src.models.patches.remote_code_compat import apply_remote_code_compat_shims
 
@@ -52,8 +51,8 @@ def load_frozen_auxiliary_model(
       a teacher and its student are normally different repos.
     * the backend is resolved by the same :func:`resolve_attn_implementation` the policy loader runs,
       against this model's config and the run's dtype, so the per-family limits (DeepSeek-V4
-      eager-only, Gemma4 head_dim-512, fp32 vs FlashAttention) apply, and built with the same variant
-      of it (:func:`resolve_flex_sliding_attn_implementation`: Gemma 4's ``sdpa_flex_sliding``).
+      eager-only, Gemma4 head_dim-512, fp32 vs FlashAttention) apply, and the model is built with what
+      the shared :func:`apply_family_attention_patches` returns for it (Gemma 4's ``sdpa_flex_sliding``).
       Auto-detection is the widest gap: an unset request pins the reference to SDPA while the policy
       takes FA4 on Blackwell.
     * the sinks policy is applied here rather than by the caller, since ``reset_sinks=True`` is what
@@ -74,10 +73,8 @@ def load_frozen_auxiliary_model(
     # repo, so on a cold cache every rank of every node would otherwise hit the hub at once.
     with fs_aware_main_first(download_tag) if download_tag else contextlib.nullcontext():
         config = AutoConfig.from_pretrained(model_name_or_path, trust_remote_code=trust_remote_code, revision=revision)
-        family_attn = resolve_attn_implementation(config, attn_implementation, dtype, sinks_reset=reset_sinks)
-        # The family patches key on the resolved backend, the build on its variant, as in the policy loader.
-        apply_family_attention_patches(config, family_attn)
-        resolved_attn = resolve_flex_sliding_attn_implementation(config, family_attn)
+        backend = resolve_attn_implementation(config, attn_implementation, dtype, sinks_reset=reset_sinks)
+        resolved_attn = apply_family_attention_patches(config, backend)
         load_kwargs = {
             "revision": revision,
             "dtype": dtype,

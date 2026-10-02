@@ -72,29 +72,20 @@ _SM100_SLIDING_KERNEL_OPTIONS = {
 }
 _TUNED_HEAD_DIM = 256
 
-
-def _sliding_kernel_options(query: torch.Tensor) -> dict | None:
-    """The tuned tiles where they were tuned (16-bit inputs, head_dim 256, SM100+), else the defaults."""
-    if (
-        query.dtype not in (torch.bfloat16, torch.float16)
-        or query.shape[-1] != _TUNED_HEAD_DIM
-        or not is_blackwell_gpu()
-    ):
-        return None
-    return _SM100_SLIDING_KERNEL_OPTIONS
-
-
 # Every compiled call has one shape family, so the kernel compiles at most twice (a training graph and a
 # forward-only one), both at load (:func:`warmup_flex_sliding_kernels`). Dynamo guards on a batch of one,
-# on a length that divides the tile, on grad mode and each input's ``requires_grad``, on the autocast
-# state and on whether a block mask carries a mask tensor; a mid-run compile stalls the other ranks in the
-# next collective, and past Dynamo's recompile limit (8) FlexAttention runs unfused with the full score
-# matrix. So each batch row runs alone, padded to a multiple of the tile, always under a block mask built
-# from a dense mask, outside autocast (its inputs are already in the compute dtype), and a call either
-# records a graph with every input requiring grad or runs under ``no_grad``. Shape-dynamic from the first
-# call, so a new length reuses the graph. Deterministic-algorithms mode is a guard too, which the
-# warm-up does not normalize (see ``warmup_flex_sliding_kernels``).
+# on a length that divides the tile, on grad mode and each input's dtype and ``requires_grad``, on the
+# autocast state and on whether a block mask carries a mask tensor; a mid-run compile stalls the other
+# ranks in the next collective, and past Dynamo's recompile limit (8) FlexAttention runs unfused with the
+# full score matrix. So each batch row runs alone, padded to a multiple of the tile, always under a block
+# mask built from a dense mask, outside autocast (its inputs are cast to the autocast dtype first, as
+# SDPA's are), and a call either records a graph with every input requiring grad or runs under
+# ``no_grad``. Shape-dynamic from the first call, so a new length reuses the graph. Deterministic-algorithms
+# mode is a guard too (:func:`reject_full_determinism_after_warmup`).
 _compiled_flex = torch.compile(flex_attention, dynamic=True)
+
+# The deterministic-algorithms mode the warm-up compiled under, ``None`` in a process that ran none.
+_WARMED_DETERMINISTIC: bool | None = None
 
 # FlexAttention's block-sparsity tile.
 _TILE = 128
@@ -106,6 +97,17 @@ _INTERVAL_ROWS = 256
 # tensor, so they share the block masks, which are freed with the mask. Held on the tensor rather than
 # keyed by its address, which a later step's mask can reuse.
 _BLOCK_MASKS_ATTR = "_flex_sliding_block_masks"
+
+
+def _sliding_kernel_options(query: torch.Tensor) -> dict | None:
+    """The tuned tiles where they were tuned (16-bit inputs, head_dim 256, SM100+), else the defaults."""
+    if (
+        query.dtype not in (torch.bfloat16, torch.float16)
+        or query.shape[-1] != _TUNED_HEAD_DIM
+        or not is_blackwell_gpu()
+    ):
+        return None
+    return _SM100_SLIDING_KERNEL_OPTIONS
 
 
 def _pad_to_tile(length: int) -> int:
@@ -199,6 +201,17 @@ def _padded_rows(tensor: torch.Tensor) -> list[torch.Tensor]:
     ]
 
 
+def _to_autocast_dtype(*tensors: torch.Tensor) -> tuple[torch.Tensor, ...]:
+    """``tensors`` in the autocast dtype where autocast is on for their device, as autocast casts SDPA's
+    inputs, else unchanged. For the kernels here autocast does not cast: the compiled FlexAttention, which
+    runs with autocast off, and the fp32-output score GEMM."""
+    device_type = tensors[0].device.type
+    if not torch.is_autocast_enabled(device_type):
+        return tensors
+    dtype = torch.get_autocast_dtype(device_type)
+    return tuple(t.to(dtype) for t in tensors)
+
+
 def _sliding_flex_attention(
     query: torch.Tensor,
     key: torch.Tensor,
@@ -208,6 +221,9 @@ def _sliding_flex_attention(
 ) -> torch.Tensor:
     """FlexAttention over each batch row under its block mask. Returns ``[B, S, H, D]``."""
     q_len = query.shape[-2]
+    # Under autocast, fp32 parameters hand over fp32 queries and keys (the fp32 rotary embedding promotes
+    # them) beside 16-bit values: a graph the warm-up never compiled, off the tuned tiles.
+    query, key, value = _to_autocast_dtype(query, key, value)
     records_grad = torch.is_grad_enabled() and any(t.requires_grad for t in (query, key, value))
     if records_grad:
         # An input left frozen (a LoRA that adapts q_proj alone) joins the graph as a detached leaf whose
@@ -233,33 +249,74 @@ def _sliding_flex_attention(
     return out[:, :, :q_len].transpose(1, 2).contiguous()
 
 
-def _matmul_global_attention(
-    query: torch.Tensor, key: torch.Tensor, value: torch.Tensor, attention_mask: torch.Tensor | None, scaling: float
-) -> torch.Tensor:
-    """Causal (or ``attention_mask``-masked) attention as two matmuls and an fp32 softmax.
+class _Fp32ScoreMatmul(torch.autograd.Function):
+    """``query @ key_t`` over ``[N, M, D] @ [N, D, K]``, returned in at least fp32.
 
-    GQA without a KV copy: the query heads of each KV group are stacked on the sequence axis, so each KV
-    head is multiplied once. Masked scores take the dtype minimum rather than ``-inf`` (transformers' eager
-    convention), so no row can softmax to NaN. Returns ``[B, S, H, D]``.
+    A 16-bit GEMM already accumulates in fp32, so asking for an fp32 output drops only the rounding of
+    the logits to 16 bits, at 16-bit GEMM speed; upcasting the inputs would run an fp32 GEMM at the run's
+    ``highest`` matmul precision, about 18x slower at Gemma 4's global shapes. ``bmm``'s ``out_dtype`` form
+    has no derivative, so the backward is ``bmm``'s on the gradient in the inputs' dtype.
+    """
+
+    @staticmethod
+    def forward(ctx, query: torch.Tensor, key_t: torch.Tensor) -> torch.Tensor:
+        ctx.save_for_backward(query, key_t)
+        return torch.bmm(query, key_t, out_dtype=torch.promote_types(query.dtype, torch.float32))
+
+    @staticmethod
+    def backward(ctx, grad: torch.Tensor) -> tuple[torch.Tensor | None, torch.Tensor | None]:
+        query, key_t = ctx.saved_tensors
+        grad = grad.to(query.dtype)
+        grad_query = torch.bmm(grad, key_t.transpose(1, 2)) if ctx.needs_input_grad[0] else None
+        grad_key_t = torch.bmm(query.transpose(1, 2), grad) if ctx.needs_input_grad[1] else None
+        return grad_query, grad_key_t
+
+
+def _matmul_global_attention(
+    query: torch.Tensor,
+    key: torch.Tensor,
+    value: torch.Tensor,
+    attention_mask: torch.Tensor | None,
+    scaling: float,
+    is_causal: bool,
+) -> torch.Tensor:
+    """Attention as two matmuls and a softmax over fp32 logits, as mem-efficient SDPA keeps them.
+
+    Masked as SDPA masks the call: by ``attention_mask`` when given; else causally from the first key
+    (SDPA's ``is_causal``, over the first ``q_len`` keys) unless the call is not causal or has one query,
+    which attends every key. GQA without a KV copy: the query heads of each KV group are stacked on the
+    sequence axis, so each KV head is multiplied once. Masked scores take the dtype minimum rather than
+    ``-inf`` (transformers' eager convention), so no row can softmax to NaN. Returns ``[B, S, H, D]``.
     """
     batch, heads, q_len, dim = query.shape
-    kv_heads, kv_len = key.shape[1], key.shape[-2]
+    kv_heads = key.shape[1]
     group = heads // kv_heads
-    q = query.reshape(batch, kv_heads, group * q_len, dim)
-    scores = torch.matmul(q, key.transpose(-1, -2)).view(batch, kv_heads, group, q_len, kv_len)
+    causal = attention_mask is None and is_causal and q_len > 1
+    if causal:
+        key, value = key[:, :, :q_len], value[:, :, :q_len]
+    kv_len = key.shape[-2]
+    q = query.reshape(batch * kv_heads, group * q_len, dim)
+    k = key.reshape(batch * kv_heads, kv_len, dim)
+    q, k = _to_autocast_dtype(q, k)  # bmm's out_dtype form falls through autocast
+    scores = _Fp32ScoreMatmul.apply(q, k.transpose(1, 2))
     if scaling != 1.0:
-        scores = scores * scaling
-    if attention_mask is None:
-        allowed = torch.ones(q_len, kv_len, dtype=torch.bool, device=query.device).tril(kv_len - q_len)
-    else:
+        scores.mul_(scaling)
+    scores = scores.view(batch, kv_heads, group, q_len, kv_len)
+    if causal:
+        allowed = torch.ones(q_len, kv_len, dtype=torch.bool, device=query.device).tril()
+    elif attention_mask is not None:
         allowed = (
             attention_mask[:, :, None]
             if attention_mask.shape[1] == 1
             else attention_mask.view(batch, kv_heads, group, q_len, kv_len)
         )
-    scores = scores.masked_fill(~allowed, torch.finfo(scores.dtype).min)
-    probs = torch.softmax(scores, dim=-1, dtype=torch.float32).to(query.dtype)
-    out = torch.matmul(probs.view(batch, kv_heads, group * q_len, kv_len), value)
+    else:
+        allowed = None
+    if allowed is not None:
+        scores = scores.masked_fill(~allowed, torch.finfo(scores.dtype).min)
+    # Rebound, so the fp32 logits are freed before the 16-bit copy of the weights is made.
+    scores = torch.softmax(scores, dim=-1)
+    out = torch.matmul(scores.to(query.dtype).view(batch, kv_heads, group * q_len, kv_len), value)
     return out.view(batch, heads, q_len, dim).transpose(1, 2).contiguous()
 
 
@@ -295,10 +352,12 @@ def flex_sliding_attention(
     dropout: float = 0.0,
     scaling: float | None = None,
     sliding_window: int | None = None,
+    is_causal: bool | None = None,
     **kwargs,
 ) -> tuple[torch.Tensor, None]:
     """Sliding layers on FlexAttention, SDPA-hostile causal global layers on matmul attention within the
-    budget, every other call on the implementation registered as ``sdpa`` (see the module docstring)."""
+    budget, every other call on the implementation registered as ``sdpa`` (see the module docstring). An
+    explicit ``is_causal`` overrides the module's, as it does for SDPA."""
     boolean_mask = attention_mask is None or attention_mask.dtype == torch.bool
     eligible = (
         query.is_cuda
@@ -316,13 +375,14 @@ def flex_sliding_attention(
         and _fits_eager_budget(query, key.shape[-2])
     ):
         scale = query.shape[-1] ** -0.5 if scaling is None else scaling
-        return _matmul_global_attention(query, key, value, attention_mask, scale), None
+        causal = module.is_causal if is_causal is None else is_causal
+        return _matmul_global_attention(query, key, value, attention_mask, scale, causal), None
     if eligible and sliding_window is not None and _takes_flex(query, attention_mask, sliding_window):
         block_masks = sliding_block_masks(attention_mask)
         if block_masks is not None:
             return _sliding_flex_attention(query, key, value, block_masks, scaling), None
     return ALL_ATTENTION_FUNCTIONS["sdpa"](
-        module, query, key, value, attention_mask, dropout=dropout, scaling=scaling, **kwargs
+        module, query, key, value, attention_mask, dropout=dropout, scaling=scaling, is_causal=is_causal, **kwargs
     )
 
 
@@ -371,15 +431,17 @@ def sliding_attention_calls(model: torch.nn.Module) -> set[tuple[int, int, int, 
 def warmup_flex_sliding_kernels(model: torch.nn.Module, *, dtype: torch.dtype) -> None:
     """Compile the sliding layers' FlexAttention graphs (training and forward-only) for each sliding
     attention call ``model`` makes, so no rank compiles one mid-run. Rank-local; the caller fences it with
-    a barrier.
-
-    Warmed under the default deterministic-algorithms mode: a run that turns it on after the load
-    (``full_determinism``) compiles each graph again at its first sliding call.
+    a barrier. Records the deterministic-algorithms mode it compiled under, which
+    :func:`reject_full_determinism_after_warmup` holds the trainer to.
     """
+    global _WARMED_DETERMINISTIC
     if effective_attn_implementation(model.config) != FLEX_SLIDING:
         return
+    calls = sliding_attention_calls(model)
+    if not calls:  # nothing to compile, so no graph for a later mode to miss
+        return
     device = torch.device(f"cuda:{torch.cuda.current_device()}")
-    for heads, kv_heads, head_dim, window, scaling in sorted(sliding_attention_calls(model), key=str):
+    for heads, kv_heads, head_dim, window, scaling in sorted(calls, key=str):
         seq = 2 * max(window, _TILE) + 3  # past the window and a tile, off the tile edge (the padded path)
         positions = torch.arange(seq, device=device)
         document = positions >= window  # two documents
@@ -398,4 +460,25 @@ def warmup_flex_sliding_kernels(model: torch.nn.Module, *, dtype: torch.dtype) -
             out, _ = flex_sliding_attention(module, q, k, v, mask.clone(), scaling=scaling, sliding_window=window)
             if records_grad:
                 out.sum().backward()
+    _WARMED_DETERMINISTIC = torch.are_deterministic_algorithms_enabled()
     logger.info(f"Compiled the {FLEX_SLIDING} sliding-layer kernels (training and forward-only)")
+
+
+def reject_full_determinism_after_warmup(full_determinism: bool) -> None:
+    """Refuse ``full_determinism`` in a process whose warm-up compiled the sliding-layer graphs without
+    deterministic-algorithms mode. Call before ``Trainer.__init__``, which turns the mode on.
+
+    Dynamo guards on that mode, so each rank would compile every graph again at its own first sliding call
+    longer than the window: a data-dependent point inside a forward, while its peers wait in the next
+    collective (an EP peer in DeepEP's dispatch, which gives up after ``HALO_DEEPEP_GPU_TIMEOUT_SECONDS``).
+    The warm-up runs only at world size > 1, so a single-rank run, which compiles at its first call anyway,
+    is not refused.
+    """
+    if full_determinism and _WARMED_DETERMINISTIC is False:
+        raise ValueError(
+            f"full_determinism: true cannot run with the {FLEX_SLIDING} attention this model was built with: "
+            "its sliding-layer FlexAttention graphs were compiled at load without deterministic mode, which "
+            "full_determinism turns on afterwards, so each rank would recompile them at its own first long "
+            "sliding call while its peers wait in the next collective (a DeepEP dispatch times out). Set "
+            "HALO_FLEX_SLIDING=0 to build the model on plain SDPA, or drop full_determinism."
+        )

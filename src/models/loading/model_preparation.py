@@ -1,6 +1,6 @@
 """Model construction shared by every entry point: the widest Auto* class for a config and the
-verified load through it, the per-family attention patches, and the post-load generation-config /
-Liger fixups.
+verified load through it, the per-family attention patches and the implementation a model is built
+with, and the post-load generation-config / Liger fixups.
 
 The rules it builds on live beside it (config levels, dtype, tokenizer setup); the callers that
 place a model on a parallelism live in :mod:`src.distributed.loading`, above it.
@@ -31,6 +31,7 @@ from src.models.patches.attention import (
     patch_sdpa_for_wide_heads,
     patch_transformers_flash_varlen_int_seqlen,
 )
+from src.models.patches.flex_sliding_attention import resolve_flex_sliding_attn_implementation
 from src.models.patches.gpt_oss_sinks import SinksPolicy, apply_sinks_policy
 from src.models.patches.remote_code_compat import apply_remote_code_compat_shims
 from src.models.patches.zaya import apply_zaya_patches
@@ -134,12 +135,18 @@ def auto_load_model(
     return from_pretrained_verified(model_class, model_name_or_path, trust_remote_code=trust_remote_code, **kwargs)
 
 
-def apply_family_attention_patches(model_config, attn_implementation: str) -> None:
-    """The family/backend-keyed attention patches every loaded model needs, trainable or frozen.
+def apply_family_attention_patches(model_config, attn_implementation: str) -> str:
+    """Apply the family/backend-keyed attention patches every loaded model needs, trainable or frozen,
+    and return the implementation to build it with.
 
     Shared by both loaders: a frozen teacher or reference paired with a different-family policy
     would otherwise miss its family's patch (the policy's load keys on the policy's config) and, for
     example, score packed rows with cross-document flash attention while the student is isolated.
+
+    The patches key on the resolved backend, the build on its variant
+    (:func:`resolve_flex_sliding_attn_implementation`: Gemma 4's ``sdpa_flex_sliding`` for ``sdpa``).
+    The variant still hands SDPA its short sliding calls (within the window or one tile) and its global
+    layers past the matmul budget, so a wide-head model keeps the SDPA pin under it.
     """
     if attn_implementation == "sdpa" and head_dim_exceeds_flash(model_config):
         patch_sdpa_for_wide_heads()
@@ -154,6 +161,7 @@ def apply_family_attention_patches(model_config, attn_implementation: str) -> No
     # Else FA4's varlen backward JIT-recompiles every step on transformers' 0-dim max_seqlen tensor.
     if attn_implementation == "flash_attention_4":
         patch_transformers_flash_varlen_int_seqlen()
+    return resolve_flex_sliding_attn_implementation(model_config, attn_implementation)
 
 
 def sanitize_generation_config(model: PreTrainedModel) -> None:

@@ -17,6 +17,7 @@ import weakref
 from unittest.mock import patch
 
 import torch
+from torch.nn.attention import SDPBackend, sdpa_kernel
 from torch.nn.attention.flex_attention import flex_attention
 from transformers import Gemma4ForCausalLM, Gemma4TextConfig, GptOssConfig, MistralConfig, MistralForCausalLM
 
@@ -25,6 +26,7 @@ from src.models.patches.attention import head_dim_exceeds_flash, patch_sdpa_for_
 from src.models.patches.flex_sliding_attention import (
     FLEX_SLIDING,
     register_flex_sliding_attention,
+    reject_full_determinism_after_warmup,
     resolve_flex_sliding_attn_implementation,
     warmup_flex_sliding_kernels,
 )
@@ -236,6 +238,137 @@ def test_global_layers_fall_back_to_sdpa_past_the_budget():
     assert len(calls) == 2  # the two global layers of the tiny model
 
 
+def test_global_logits_stay_fp32_at_gemma4_scale():
+    """Gemma 4's global layers attend at ``scaling`` 1.0 over 512-wide RMS-normed heads, so their logits
+    reach the tens, where rounding a logit to bf16 moves its attention weight by percents. At that shape
+    (16 query / 2 KV heads, bf16, causal), the matmul path's output and input gradients must be as close
+    to an fp64 reference as mem-efficient SDPA's, the kernel it replaces, which keeps its logits in fp32."""
+    seq, heads, kv_heads, dim = 1024, 16, 2, 512
+    group = heads // kv_heads
+    generator = torch.Generator(device="cuda").manual_seed(0)
+
+    def rms_normed(*shape):
+        x = torch.randn(*shape, device="cuda", generator=generator)
+        return (x * x.pow(2).mean(-1, keepdim=True).rsqrt()).bfloat16().requires_grad_()
+
+    q, k, v = rms_normed(1, heads, seq, dim), rms_normed(1, kv_heads, seq, dim), rms_normed(1, kv_heads, seq, dim)
+    grad = torch.randn(1, seq, heads, dim, device="cuda", generator=generator).bfloat16()
+    q64, k64, v64 = (t.detach().double().requires_grad_() for t in (q, k, v))
+    causal = torch.ones(seq, seq, dtype=torch.bool, device="cuda").tril()
+    scores = q64 @ k64.repeat_interleave(group, 1).transpose(-1, -2)
+    expected = torch.softmax(scores.masked_fill(~causal, float("-inf")), -1) @ v64.repeat_interleave(group, 1)
+    expected.transpose(1, 2).backward(grad.double())
+
+    def errors(out):
+        out.backward(grad)
+        errs = [fro_rel_err(out, expected.transpose(1, 2))]
+        errs += [fro_rel_err(t.grad, t64.grad) for t, t64 in ((q, q64), (k, k64), (v, v64))]
+        for t in (q, k, v):
+            t.grad = None
+        return errs
+
+    calls = []
+    matmul_path = _counting(flex_sliding_attention._matmul_global_attention, calls)
+    with patch.object(flex_sliding_attention, "_matmul_global_attention", matmul_path):
+        matmul = errors(
+            flex_sliding_attention.flex_sliding_attention(_causal_module(group), q, k, v, None, scaling=1.0)[0]
+        )
+    assert calls == [1], "the call must take the matmul path"
+    with sdpa_kernel([SDPBackend.EFFICIENT_ATTENTION]):
+        sdpa = errors(
+            torch.nn.functional.scaled_dot_product_attention(
+                q, k.repeat_interleave(group, 1), v.repeat_interleave(group, 1), is_causal=True, scale=1.0
+            ).transpose(1, 2)
+        )
+    for name, got, floor in zip(("output", "query grad", "key grad", "value grad"), matmul, sdpa, strict=True):
+        assert got <= 1.5 * floor, f"{name}: matmul error {got:.2e} against mem-efficient SDPA's {floor:.2e}"
+
+
+def test_global_matmul_saves_the_budgeted_bytes():
+    """``EAGER_GLOBAL_BUDGET_BYTES`` is spent at ``_SAVED_BYTES_PER_SCORE`` per score (the fp32 softmax output
+    and the 16-bit probabilities): any other score-sized save, such as the fp32 logits, would let a layer the
+    budget admits hold more than it."""
+    seq, heads, kv_heads, dim = 2048, 16, 2, 512
+    q = torch.randn(1, heads, seq, dim, device="cuda", dtype=torch.bfloat16, requires_grad=True)
+    k = torch.randn(1, kv_heads, seq, dim, device="cuda", dtype=torch.bfloat16, requires_grad=True)
+    v = torch.randn(1, kv_heads, seq, dim, device="cuda", dtype=torch.bfloat16, requires_grad=True)
+    saved = {}
+
+    def pack(tensor):
+        saved[tensor.untyped_storage().data_ptr()] = tensor.untyped_storage().nbytes()
+        return tensor
+
+    with torch.autograd.graph.saved_tensors_hooks(pack, lambda tensor: tensor):
+        flex_sliding_attention._matmul_global_attention(q, k, v, None, 1.0, True)
+    scores = heads * seq * seq
+    score_sized = sum(nbytes for nbytes in saved.values() if nbytes >= scores)  # q, k, v save under a byte/score
+    assert score_sized == flex_sliding_attention._SAVED_BYTES_PER_SCORE * scores, score_sized / scores
+
+
+def test_global_layers_without_a_mask_attend_as_sdpa():
+    """With no mask, the implementation registered as ``sdpa`` attends causally from the first key (it keeps
+    the first ``q_len`` keys under PyTorch's top-left ``is_causal``) unless the call has a single query or an
+    explicit ``is_causal=False``, which attend every key. The matmul path must match it, output and input
+    gradients, on each: a decode step (1 query, 40 keys), a StaticCache prefill (8 queries, 40 keys), a
+    square call, fewer keys than queries, and both explicit ``is_causal`` values. In fp64, so any difference
+    is a masking one; the default ``head_dim ** -0.5`` scale runs the scaled branch."""
+    heads, kv_heads, dim = 4, 2, 512
+    module = _causal_module(heads // kv_heads)
+    calls = []
+    cases = [
+        (1, 40, None),
+        (8, 40, None),
+        (8, 40, True),
+        (8, 40, False),
+        (40, 40, None),
+        (40, 40, False),
+        (40, 8, None),
+    ]
+    for q_len, kv_len, is_causal in cases:
+        generator = torch.Generator(device="cuda").manual_seed(q_len * kv_len)
+        shape = {"device": "cuda", "dtype": torch.float64, "generator": generator}
+        q = torch.randn(1, heads, q_len, dim, **shape).requires_grad_()
+        k = torch.randn(1, kv_heads, kv_len, dim, **shape).requires_grad_()
+        v = torch.randn(1, kv_heads, kv_len, dim, **shape).requires_grad_()
+        grad = torch.randn(1, q_len, heads, dim, **shape)
+        q2, k2, v2 = (t.detach().clone().requires_grad_() for t in (q, k, v))
+        matmul_path = _counting(flex_sliding_attention._matmul_global_attention, calls)
+        with patch.object(flex_sliding_attention, "_matmul_global_attention", matmul_path):
+            out, _ = flex_sliding_attention.flex_sliding_attention(module, q, k, v, None, is_causal=is_causal)
+        out.backward(grad)
+        with sdpa_kernel([SDPBackend.MATH]):
+            expected, _ = flex_sliding_attention.ALL_ATTENTION_FUNCTIONS["sdpa"](
+                module, q2, k2, v2, None, is_causal=is_causal
+            )
+        expected.backward(grad)
+        case = f"q_len={q_len} kv_len={kv_len} is_causal={is_causal}"
+        torch.testing.assert_close(out, expected, msg=case)
+        for got, want in ((q.grad, q2.grad), (k.grad, k2.grad), (v.grad, v2.grad)):
+            torch.testing.assert_close(got, want, msg=f"{case}: gradient")
+    assert len(calls) == len(cases), "every call must take the matmul path"
+
+
+def test_global_score_gemm_follows_autocast():
+    """The fp32-output score GEMM is an overload autocast does not cast, so under autocast the path casts its
+    inputs itself, as autocast casts a matmul and SDPA: fp32 queries and keys under bf16 autocast (a PEFT
+    run's ``peft_bf16_autocast``) must reach the GEMM in bf16, not run an fp32 GEMM at ``highest``
+    precision. Outside autocast the inputs keep their dtype."""
+    q = torch.randn(1, 4, 64, 512, device="cuda")
+    k = torch.randn(1, 2, 64, 512, device="cuda")
+    seen = []
+    real = flex_sliding_attention._Fp32ScoreMatmul.apply
+
+    def spy(*inputs):
+        seen.append({t.dtype for t in inputs})
+        return real(*inputs)
+
+    with patch.object(flex_sliding_attention._Fp32ScoreMatmul, "apply", spy):
+        with torch.autocast("cuda", dtype=torch.bfloat16):
+            flex_sliding_attention.flex_sliding_attention(_causal_module(), q, k, k, None, scaling=1.0)
+        flex_sliding_attention.flex_sliding_attention(_causal_module(), q, k, k, None, scaling=1.0)
+    assert seen == [{torch.bfloat16}, {torch.float32}], seen
+
+
 def test_bidirectional_modules_keep_sdpa():
     """The vision/audio towers attend bidirectionally; only causal layers may take the causal matmul path."""
     q = torch.randn(1, 4, 16, 32, device="cuda")
@@ -308,19 +441,25 @@ def test_a_mask_with_a_non_contiguous_row_keeps_sdpa():
 def test_a_non_gemma_sliding_model_matches_sdpa(lengths):
     """Nothing in the path is Gemma's: a Mistral model (one window on every layer, flash SDPA left enabled)
     built with the flex-sliding implementation reproduces the SDPA model's loss and every gradient with
-    uncompiled FlexAttention."""
+    uncompiled FlexAttention. The SDPA backend flags are process-global, so the ones it turns on are
+    restored for the checks after it."""
+    flash, math = torch.backends.cuda.flash_sdp_enabled(), torch.backends.cuda.math_sdp_enabled()
     torch.backends.cuda.enable_flash_sdp(True)
     torch.backends.cuda.enable_math_sdp(True)
-    name = register_flex_sliding_attention()
-    torch.manual_seed(0)
-    reference = MistralForCausalLM(_mistral_config("sdpa")).cuda().float()
-    candidate = MistralForCausalLM(_mistral_config(name)).cuda().float()
-    candidate.load_state_dict(reference.state_dict())
-    calls = []
-    with patch.object(
-        flex_sliding_attention, "_compiled_flex", lambda *a, **k: calls.append(1) or flex_attention(*a, **k)
-    ):
-        _assert_model_matches(reference, candidate, lengths)
+    try:
+        name = register_flex_sliding_attention()
+        torch.manual_seed(0)
+        reference = MistralForCausalLM(_mistral_config("sdpa")).cuda().float()
+        candidate = MistralForCausalLM(_mistral_config(name)).cuda().float()
+        candidate.load_state_dict(reference.state_dict())
+        calls = []
+        with patch.object(
+            flex_sliding_attention, "_compiled_flex", lambda *a, **k: calls.append(1) or flex_attention(*a, **k)
+        ):
+            _assert_model_matches(reference, candidate, lengths)
+    finally:
+        torch.backends.cuda.enable_flash_sdp(flash)
+        torch.backends.cuda.enable_math_sdp(math)
     assert len(calls) == 2  # one call per sliding layer on the one packed row
 
 
@@ -442,6 +581,80 @@ def test_a_warmed_gemma4_model_runs_without_compiling():
     assert len(calls) == 4, f"{len(calls)} compiled flex calls; want 2 sliding layers x 2 forwards"
 
 
+def test_fp32_parameters_under_autocast_run_the_warmed_graphs():
+    """Under bf16 autocast a Gemma 4 with fp32 parameters hands its sliding layers fp32 queries and keys (the
+    fp32 rotary embedding promotes the bf16 projections) beside bf16 values. The sliding path must cast them to
+    bf16, as SDPA's inputs are cast, so a forward and backward and a forward-only pass run the bf16 graphs the
+    warm-up compiled: no compile, and every compiled call in bf16."""
+    patch_sdpa_for_wide_heads()
+    name = register_flex_sliding_attention()
+    torch.manual_seed(0)
+    model = Gemma4ForCausalLM(_config(name)).cuda().float()
+    torch._dynamo.reset()
+    warmup_flex_sliding_kernels(model, dtype=torch.bfloat16)
+    ids, position_ids = _packed_batch([300, 150, 40])
+    arrived, compiled_dtypes = [], []
+    sliding, compiled = flex_sliding_attention._sliding_flex_attention, flex_sliding_attention._compiled_flex
+
+    def sliding_spy(query, key, value, *args):
+        arrived.append({query.dtype, key.dtype, value.dtype})
+        return sliding(query, key, value, *args)
+
+    def compiled_spy(query, key, value, **kwargs):
+        compiled_dtypes.append({query.dtype, key.dtype, value.dtype})
+        return compiled(query, key, value, **kwargs)
+
+    with (
+        patch.object(torch._dynamo.config, "error_on_recompile", True),
+        patch.object(flex_sliding_attention, "_sliding_flex_attention", sliding_spy),
+        patch.object(flex_sliding_attention, "_compiled_flex", compiled_spy),
+        torch.autocast("cuda", dtype=torch.bfloat16),
+    ):
+        _loss_and_grads(model, ids, position_ids)
+        with torch.no_grad():
+            model(input_ids=ids, position_ids=position_ids, use_cache=False)
+    assert arrived and all(dtypes == {torch.float32, torch.bfloat16} for dtypes in arrived), arrived  # premise
+    assert compiled_dtypes == [{torch.bfloat16}] * 4, compiled_dtypes
+
+
+def test_full_determinism_after_the_warmup_is_refused():
+    """Deterministic-algorithms mode is a guard of the warmed graphs: switched on after the warm-up (HF's
+    ``Trainer.__init__`` under ``full_determinism``), the next sliding call compiles again, which on a
+    multi-rank run happens rank by rank mid-forward. The warm-up must record the mode it compiled under, so
+    the trainer gate refuses ``full_determinism`` and keeps a run that does not set it."""
+    name = register_flex_sliding_attention()
+    model = Gemma4ForCausalLM(_config(name))
+    torch._dynamo.reset()
+    warmup_flex_sliding_kernels(model, dtype=torch.bfloat16)
+    reject_full_determinism_after_warmup(False)
+    try:
+        reject_full_determinism_after_warmup(True)
+    except ValueError as error:
+        assert "HALO_FLEX_SLIDING=0" in str(error), error
+    else:
+        raise AssertionError("full_determinism after a non-deterministic warm-up was not refused")
+
+    q = torch.zeros(1, 4, 200, 64, device="cuda", dtype=torch.bfloat16)  # the warmed shape family, forward-only
+    k = torch.zeros(1, 2, 200, 64, device="cuda", dtype=torch.bfloat16)
+
+    def sliding_call():
+        with torch.no_grad(), patch.object(torch._dynamo.config, "error_on_recompile", True):
+            flex_sliding_attention.flex_sliding_attention(
+                _causal_module(), q, k, k, _sliding_mask([200])[None, None], scaling=1.0, sliding_window=WINDOW
+            )
+
+    sliding_call()  # control: in the warmed mode the call compiles nothing
+    torch.use_deterministic_algorithms(True)
+    try:
+        sliding_call()
+    except torch._dynamo.exc.RecompileError:
+        pass
+    else:
+        raise AssertionError("premise: the warmed graph no longer recompiles under deterministic mode")
+    finally:
+        torch.use_deterministic_algorithms(False)
+
+
 def test_rows_past_46k_tokens_match_sdpa():
     """Past about 46k tokens per padded row the flattened mask index ``q * S + kv`` no longer fits int32. A
     single document and a packed row of ~47.5k tokens at Gemma 4's window must still match SDPA on the
@@ -492,6 +705,12 @@ def run(ctx) -> dict:
     record_check(
         checks, "global_layers_fall_back_to_sdpa_past_the_budget", test_global_layers_fall_back_to_sdpa_past_the_budget
     )
+    record_check(checks, "global_logits_stay_fp32_at_gemma4_scale", test_global_logits_stay_fp32_at_gemma4_scale)
+    record_check(checks, "global_matmul_saves_the_budgeted_bytes", test_global_matmul_saves_the_budgeted_bytes)
+    record_check(
+        checks, "global_layers_without_a_mask_attend_as_sdpa", test_global_layers_without_a_mask_attend_as_sdpa
+    )
+    record_check(checks, "global_score_gemm_follows_autocast", test_global_score_gemm_follows_autocast)
     record_check(checks, "bidirectional_modules_keep_sdpa", test_bidirectional_modules_keep_sdpa)
     record_check(checks, "block_masks_live_and_die_with_their_mask", test_block_masks_live_and_die_with_their_mask)
     record_check(
@@ -511,6 +730,14 @@ def run(ctx) -> dict:
     record_check(checks, "one_warmup_serves_every_later_call", test_one_warmup_serves_every_later_call)
     record_check(
         checks, "a_warmed_gemma4_model_runs_without_compiling", test_a_warmed_gemma4_model_runs_without_compiling
+    )
+    record_check(
+        checks,
+        "fp32_parameters_under_autocast_run_the_warmed_graphs",
+        test_fp32_parameters_under_autocast_run_the_warmed_graphs,
+    )
+    record_check(
+        checks, "full_determinism_after_the_warmup_is_refused", test_full_determinism_after_the_warmup_is_refused
     )
     record_check(checks, "rows_past_46k_tokens_match_sdpa", test_rows_past_46k_tokens_match_sdpa)
     return {"checks": checks}
