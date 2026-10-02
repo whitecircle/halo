@@ -45,6 +45,7 @@ from src.models.loading.tokenizer_setup import (
 )
 from src.trainers.grpo.early_stop import GRPOEarlyStopCallback
 from src.training.environment import (
+    TrainingStoppedEarly,
     prepare_distributed_resume,
     setup_training_environment,
 )
@@ -649,7 +650,9 @@ def run_trainer(
         isinstance(callback, GRPOEarlyStopCallback) and callback.stopped
         for callback in trainer.callback_handler.callbacks
     ):
-        raise SystemExit(f"{method_name} training stopped early at step {state.global_step} of {state.max_steps}.")
+        raise TrainingStoppedEarly(
+            f"{method_name} training stopped early at step {state.global_step} of {state.max_steps}."
+        )
     if is_global_main_process():
         # A batch sampler that yields fewer batches than its length also ends a run short of the plan:
         # ``no_duplicates`` under ``dataloader_drop_last`` drops the partial batches its duplicates leave.

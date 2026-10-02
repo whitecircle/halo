@@ -53,6 +53,11 @@ logger = get_logger(__name__)
 _INTERNAL_PREFIXES = (OUTPUT_FS_PROBE_PREFIX,)
 
 
+class TrainingStoppedEarly(SystemExit):
+    """A run an early stop ended: it exits non-zero, after the teardown :func:`run_training` gives a finished
+    run, since the stop's verdict is rank-uniform and every peer leaves training at the same step."""
+
+
 def _is_internal_artifact(name: str) -> bool:
     """Whether an ``output_dir`` entry was created by the toolkit itself, not by a previous run."""
     return name == RUN_LOG_DIR_NAME or name.startswith(_INTERNAL_PREFIXES)
@@ -98,13 +103,14 @@ def _validate_output_dir_across_ranks(output_dir: str) -> None:
 
 
 def run_training(main_fn):
-    """Wrap a training entry point so distributed teardown runs on the success path only.
+    """Wrap a training entry point so distributed teardown runs on the success path and on a
+    :class:`TrainingStoppedEarly` exit only.
 
     Usage: ``run_training(main)()`` under ``if __name__ == "__main__":``. Dispatchers are destroyed
     before the process group — a DeepEP Gin buffer outliving the group communicator faults with a
     sticky ``cudaErrorIllegalAddress`` that hides the original traceback.
 
-    An exception propagates with no teardown at all. Both teardown halves are collectives
+    Any other exception propagates with no teardown at all. Both teardown halves are collectives
     (``destroy_all_dispatchers`` opens with a barrier, ``destroy_process_group`` is one), and a rank
     failing mid-step — an OOM in backward, say — has peers still inside the step's own collective,
     so entering another parks the failed rank in the NCCL watchdog for the full timeout while
@@ -114,13 +120,22 @@ def run_training(main_fn):
 
     @functools.wraps(main_fn)
     def wrapper(*args, **kwargs):
-        result = main_fn(*args, **kwargs)
-        destroy_all_dispatchers()
-        if dist.is_available() and dist.is_initialized():
-            dist.destroy_process_group()
+        try:
+            result = main_fn(*args, **kwargs)
+        except TrainingStoppedEarly:
+            _tear_down_distributed()
+            raise
+        _tear_down_distributed()
         return result
 
     return wrapper
+
+
+def _tear_down_distributed() -> None:
+    """Destroy the EP dispatchers, then the process group. Collective."""
+    destroy_all_dispatchers()
+    if dist.is_available() and dist.is_initialized():
+        dist.destroy_process_group()
 
 
 def setup_training_environment(args, training_config, script_name: str = "train") -> None:

@@ -27,6 +27,7 @@ from src.trainers.grpo.early_stop import SAMPLING_LOGP_GAP_KEY, GRPOEarlyStopCal
 from src.trainers.grpo.environmental import DistributedAsyncEnvironmentalGRPOTrainer
 from src.trainers.grpo.objective.logratio import LOGRATIO_MEAN_KEY, UPDATE_SKIPPED_KEY
 from src.trainers.grpo.online import DistributedGRPOTrainer
+from src.training.environment import TrainingStoppedEarly
 from src.training.script_runner import run_trainer
 from tests.common.utils import REPO_ROOT
 
@@ -125,7 +126,7 @@ def test_a_stopped_run_exits_non_zero_after_its_cleanup_and_any_other_returns():
     from its output; the EP buffers are released first either way. A run that ends short of its plan without
     a stop (a ``no_duplicates`` sampler yields fewer batches than its length) trained all its data."""
     stopped = _StoppableTrainer([_step(0.5)] * 5)
-    with pytest.raises(SystemExit) as exited:
+    with pytest.raises(TrainingStoppedEarly) as exited:
         run_trainer(stopped, _RUNTIME, method_name="GRPO")
     assert exited.value.code == "GRPO training stopped early at step 3 of 5."
     assert stopped.events == ["train", "cleanup"]

@@ -198,5 +198,19 @@ def test_run_training_tears_down_dispatchers_before_the_process_group_on_success
     assert torn_down == ["dispatchers", "process_group"]
 
 
+def test_run_training_tears_down_before_an_early_stop_exits(monkeypatch):
+    """Every rank leaves an early-stopped run at the same step, so the teardown collectives meet their peers;
+    skipped, a DeepEP buffer outside the trained model (a reference model's) outlives the process group."""
+    torn_down = _record_teardown(monkeypatch)
+
+    @environment.run_training
+    def main():
+        raise environment.TrainingStoppedEarly("GRPO training stopped early at step 3 of 5.")
+
+    with pytest.raises(SystemExit, match="stopped early at step 3 of 5"):
+        main()
+    assert torn_down == ["dispatchers", "process_group"]
+
+
 if __name__ == "__main__":
     raise SystemExit(pytest.main([__file__, "-v"]))
