@@ -12,6 +12,7 @@ leaves it, eval logs never count, and nothing is armed unless a condition is set
 
 import ast
 import dataclasses
+import types
 
 import pytest
 from accelerate import PartialState
@@ -27,6 +28,7 @@ from src.trainers.grpo.early_stop import (
     GRPOEarlyStopCallback,
     build_early_stop_callback,
 )
+from src.training.script_runner import run_trainer
 from tests.common.utils import REPO_ROOT
 
 PartialState()  # the stop logs through accelerate's logger, which refuses to log without it
@@ -85,6 +87,53 @@ def test_an_epoch_end_after_the_stop_saves_and_evaluates_nothing():
     control.should_save = True
     healthy.on_epoch_end(None, state, control)
     assert control.should_save, "a run that did not stop keeps its epoch save"
+
+
+class _StoppableTrainer:
+    """Trains one logged step per entry of ``logs`` under the stop, the way the HF loop feeds it, toward a plan
+    of ``max_steps``."""
+
+    def __init__(self, logs: list[dict], max_steps: int | None = None):
+        self.callback_handler = types.SimpleNamespace(callbacks=[GRPOEarlyStopCallback(BAND, LOGRATIO_MEAN_KEY)])
+        self.state = TrainerState(max_steps=len(logs) if max_steps is None else max_steps)
+        self.events: list[str] = []
+        self._logs = logs
+
+    def train(self, resume_from_checkpoint=None):
+        (stop,), control = self.callback_handler.callbacks, TrainerControl()
+        for logs in self._logs:
+            self.state.global_step += 1
+            stop.on_log(None, self.state, control, logs=logs)
+            if control.should_training_stop:
+                break
+        self.events.append("train")
+
+    def cleanup_ep(self):
+        self.events.append("cleanup")
+
+
+_RUNTIME = types.SimpleNamespace(
+    parallelism_config=types.SimpleNamespace(
+        is_ep_mode=False, is_cp_mode=False, is_tp_mode=False, is_expert_tp_mode=False, data_parallel_size=1
+    ),
+    mode_suffix="ddp",
+    resume_checkpoint=None,
+)
+
+
+def test_a_stopped_run_exits_non_zero_after_its_cleanup_and_any_other_returns():
+    """Exiting 0, a stopped run reads as finished to torchrun and a scheduler, and a chained stage would start
+    from its output; the EP buffers are released first either way. A run that ends short of its plan without
+    a stop (a ``no_duplicates`` sampler yields fewer batches than its length) trained all its data."""
+    stopped = _StoppableTrainer([_step(0.5)] * 5)
+    with pytest.raises(SystemExit) as exited:
+        run_trainer(stopped, _RUNTIME, method_name="GRPO")
+    assert exited.value.code == "GRPO training stopped early at step 3 of 5."
+    assert stopped.events == ["train", "cleanup"]
+
+    for healthy in (_StoppableTrainer([_step()] * 5), _StoppableTrainer([_step()] * 4, max_steps=5)):
+        run_trainer(healthy, _RUNTIME, method_name="GRPO")
+        assert healthy.events == ["train", "cleanup"]
 
 
 def test_entropy_below_the_band_stops_too():

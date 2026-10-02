@@ -42,7 +42,7 @@ Four common misreadings:
 
 ## Early stop
 
-Off unless a condition is set. Each condition counts its breaching readings in a row (a reading is one training log line, the window's mean under `logging_steps` > 1; the gap and the breaker's verdict come once per generation round, so a step reusing its round carries neither and leaves their count), and once one reaches `early_stop_patience` (default 3) training ends there, without saving or evaluating that step (an epoch save included): the stop logs its reason, the script reports the step it stopped at, and the run resumes from a checkpoint taken before the drift began. The verdict is taken across ranks.
+Off unless a condition is set. Each condition counts its breaching readings in a row (a reading is one training log line, the window's mean under `logging_steps` > 1; the gap and the breaker's verdict come once per generation round, so a step reusing its round carries neither and leaves their count), and once one reaches `early_stop_patience` (default 3) training ends there, without saving or evaluating that step (an epoch save included): the stop logs its reason, the script exits non-zero on every rank naming the step it stopped at, and the run resumes from a checkpoint taken before the drift began. The verdict is taken across ranks.
 
 | Knob | Stops when | Reads |
 |---|---|---|

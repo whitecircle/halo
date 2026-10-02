@@ -38,7 +38,7 @@ class GRPOEarlyStopCallback(TrainerCallback):
         self.gap_key = gap_key
         self._streaks: dict[str, int] = {}
         self._evidence: dict[str, str] = {}
-        self._stopped = False
+        self.stopped = False
 
     def _readings(self, logs: dict[str, float]) -> dict[str, str | None]:
         """Each armed condition this log reads: the breaching reading's description, or ``None`` when healthy."""
@@ -67,7 +67,7 @@ class GRPOEarlyStopCallback(TrainerCallback):
         _, any_stop = rank_consensus(bool(held))
         if not any_stop:
             return
-        self._stopped = True
+        self.stopped = True
         # Runs before the step's evaluation and save: a checkpoint of this step would be one from inside the drift.
         control.should_training_stop = True
         control.should_save = False
@@ -80,7 +80,7 @@ class GRPOEarlyStopCallback(TrainerCallback):
 
     def on_epoch_end(self, args, state, control, **kwargs):
         # The loop breaks into one more epoch-end save/eval pass, which an epoch save strategy would arm.
-        if self._stopped:
+        if self.stopped:
             control.should_save = False
             control.should_evaluate = False
 

@@ -43,6 +43,7 @@ from src.models.loading.tokenizer_setup import (
     resolve_length_to_context,
     setup_model_and_tokenizer,
 )
+from src.trainers.grpo.early_stop import GRPOEarlyStopCallback
 from src.training.environment import (
     prepare_distributed_resume,
     setup_training_environment,
@@ -615,7 +616,7 @@ def run_trainer(
 ) -> None:
     """Run the common post-construction phase: integration-callback reordering, the canonical
     start log (mode + EP/CP/TP/ETP/DP sizes + ``extra_start_log`` lines), resume log, training,
-    and EP cleanup."""
+    and EP cleanup. A run the GRPO early stop ended exits non-zero on every rank."""
     # Integrations add themselves at the head of the list and would consume `logs` before the
     # toolkit's own callbacks run their on_log.
     reorder_integration_callbacks_last(trainer)
@@ -641,10 +642,18 @@ def run_trainer(
 
     trainer.cleanup_ep()
 
+    state = trainer.state
+    # An early stop fails the run, so a scheduler or a chained stage does not take its output for a finished
+    # one. Its verdict is taken across ranks, so every rank exits.
+    if any(
+        isinstance(callback, GRPOEarlyStopCallback) and callback.stopped
+        for callback in trainer.callback_handler.callbacks
+    ):
+        raise SystemExit(f"{method_name} training stopped early at step {state.global_step} of {state.max_steps}.")
     if is_global_main_process():
-        state = trainer.state
-        # A callback that ends training (an early stop) leaves the step count short of the plan.
+        # A batch sampler that yields fewer batches than its length also ends a run short of the plan:
+        # ``no_duplicates`` under ``dataloader_drop_last`` drops the partial batches its duplicates leave.
         if state.global_step < state.max_steps:
-            logger.warning(f"{method_name} training stopped early at step {state.global_step} of {state.max_steps}.")
+            logger.warning(f"{method_name} training ended at step {state.global_step} of {state.max_steps}.")
         else:
             logger.info(f"{method_name} training completed successfully!")
