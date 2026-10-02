@@ -234,6 +234,6 @@ guides: [Expert](../parallelism/expert-parallelism.md) ·
 The MoE fused kernels have no runtime fallback: one that fails to compile or launch raises at the first forward. They are validated on B300; on other GPUs, turn off the one that fails.
 
 - **Flex-sliding attention** (models with heads wider than 256, i.e. Gemma 4, on a run resolved to `sdpa`): `HALO_FLEX_SLIDING=0` sends every attention layer back to plain SDPA.
-- **Fused GLU** (`src/kernels/fused_glu.py`, every expert and dense-MLP combine, grouped and loop paths alike): `HALO_FUSED_GLU=0` runs each combine through its eager form on CUDA too. On CPU tensors, and for an activation the kernels do not compute exactly, the eager form runs anyway.
+- **Fused GLU** (`src/kernels/fused_glu.py`, every expert and dense-MLP combine, grouped and loop paths alike): `HALO_FUSED_GLU=0` runs each combine through its eager form on CUDA too, and the EP layers' construction lines read `glu_combine=eager`. On CPU tensors, and for an activation the kernels do not compute exactly, the eager form runs anyway.
 - **Native RMSNorm** (a Liger role): `liger_kernel_config: {rms_norm: false}` keeps the family's own norm, and `use_liger_kernel: false` turns off every Liger role.
 - **Fused weighted un-permute**: no switch of its own. `use_grouped_gemm: false` avoids it by running the per-expert loop instead of the grouped path, at a large throughput cost.

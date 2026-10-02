@@ -18,7 +18,16 @@ before it is applied.
 Two comparisons, both against the stock Hugging Face model built from the same weights:
 
 * fp32 against fp32: the stack must match to fp32 round-off (reduction order, fused-kernel accumulation);
-  TF32 is off on both sides.
+  torch's TF32 is off on both sides (``fla``'s Triton dots keep Triton's TF32 default on both). How far
+  round-off moves each gradient is measured, not assumed: the stock model is rerun with every parameter
+  nudged one ulp, and a parameter's bound widens to a multiple of the median move those nudges cause
+  where that is looser than the fixed bound. The median, because a nudge that flips a discrete choice
+  (GLM-5 Next's indexer top-k below) moves many gradients wholesale, which the stack at this seed does
+  not. A gated-delta-rule layer with a steep decay needs the widening (Qwen3.5's first layer at this
+  seed, log-decay down to -25 per token): an fp32 chunked backward gets its decay gradient to ~1e-2
+  only (``fla``'s and transformers' torch path alike), ``fla`` re-draws that error under any round-off
+  change of its inputs, and the parameters reached only through the decay (``A_log``, ``dt_bias``,
+  ``in_proj_a``) move by ~1e-3 in cosine within the stock model itself.
 * bf16 against the fp32 stock model: the stack's bf16 loss error, and its median per-parameter gradient
   error, must stay within a small multiple of the stock model's own bf16 error, since two correct bf16
   implementations already differ. A per-parameter bound would not hold: the hyper-connection scales of
@@ -49,7 +58,7 @@ from src.distributed.expert_parallel.patching import patch_moe_model_for_ep
 from src.kernels.liger.orchestrator import apply_liger_kernel
 from src.models.loading.config_levels import text_config
 from tests.common.ep_merge_oracle import post_process_merged_weights
-from tests.common.harness import gpu_test_main, record_check
+from tests.common.harness import gpu_test_main, log, record_check
 from tests.common.parallelism import single_process_ep_config
 from tests.common.tiny_models import TINY_MOE_FAMILIES, tiny_family_model
 from tests.common.utils import cos_sim, fro_rel_err
@@ -57,15 +66,17 @@ from tests.common.utils import cos_sim, fro_rel_err
 SEED = 0
 BATCH, SEQ = 2, 96
 
-# fp32: fused kernels accumulate in another order than eager, and FLCE/Liger CE chunk the loss. Gradients
-# agree to ~1e-6 in norm except through the linear-attention (fla) kernels of Qwen3.5 and GLM-5 Next. Their
-# per-head scalar parameters (`A_log`, `dt_bias`) sum heavily cancelling terms, and fla picks its Triton tiles
-# by timing, so their error moves with the tiles a run picks; they get a looser bound.
+# fp32: fused kernels accumulate in another order than eager, and FLCE/Liger CE chunk the loss.
 FP32_LOSS_RTOL = 1e-4
 FP32_GRAD_COS_MIN = 0.9999
 FP32_GRAD_NORM_RTOL = 2e-2
-FLA_SCALAR_PARAMS = ("A_log", "dt_bias")
-FP32_FLA_SCALAR_GRAD_NORM_RTOL = 5e-2
+# The stock model's own round-off spread, the median over this many one-ulp nudges; a bound widens to this
+# multiple of it, never past the floor and ceiling below. On the steep-decay GDN layer the stack's deviation
+# measured 0.87x the spread, 1.2e-3 in 1 - cos; on GLM-5 Next two nudges in eight flip the indexer top-k.
+ROUNDOFF_PROBES = 8
+ROUNDOFF_SPREAD_MULTIPLE = 4.0
+ROUNDOFF_GRAD_COS_FLOOR = 0.99
+ROUNDOFF_GRAD_NORM_RTOL_CEILING = 5e-2
 # bf16: the stack's error against the fp32 stock model, relative to the stock model's own bf16 error.
 # Across seeds the stack's median gradient error stays within these ratios: a single seed is noisy, a
 # wrong precision or a dropped fp32 accumulation is not.
@@ -117,8 +128,38 @@ def _stack_model(model_cls: type, config, state: dict, dtype: torch.dtype):
     return model
 
 
+def _round_off_probe(model_cls: type, config, state: dict, probe: int):
+    """The fp32 stock model with every parameter moved to an adjacent fp32 value, up or down per element."""
+    model = _stock_model(model_cls, config, state, torch.float32)
+    generator = torch.Generator().manual_seed(probe)
+    with torch.no_grad():
+        for param in model.parameters():
+            up = torch.rand(param.shape, generator=generator) < 0.5
+            param.copy_(torch.nextafter(param, torch.where(up, torch.inf, -torch.inf).to(param.device)))
+    return model
+
+
+def _round_off_spread(model_cls: type, config, state: dict, input_ids, ref_grads: dict) -> dict:
+    """Per parameter, the median move of the stock gradient under :data:`ROUNDOFF_PROBES` one-ulp nudges:
+    ``1 - cos`` and the relative change of its norm. Same kernels and autotuned tiles as the reference."""
+    moves = {name: [] for name in ref_grads}
+    for probe in range(ROUNDOFF_PROBES):
+        _, grads = _loss_and_grads(_round_off_probe(model_cls, config, state, probe), input_ids)
+        for name, want in ref_grads.items():
+            cos = cos_sim(grads[name], want, label=f"round-off probe {probe} grad {name}")
+            moves[name].append((1 - cos, _norm_rel(grads[name], want)))
+    return {
+        name: {
+            "one_minus_cos": statistics.median(cos_move for cos_move, _ in pairs),
+            "norm_rel": statistics.median(norm_move for _, norm_move in pairs),
+        }
+        for name, pairs in moves.items()
+    }
+
+
 def run_family(model_type: str, seed: int = SEED) -> dict:
-    """Stock fp32 and bf16 references first, then the applier, then the stack in fp32 and bf16."""
+    """The stock fp32 reference and its round-off spread, and the stock bf16 reference, first; then the
+    applier, then the stack in fp32 and bf16."""
     torch.backends.cuda.matmul.allow_tf32 = False
     torch.backends.cudnn.allow_tf32 = False
     family = TINY_MOE_FAMILIES[model_type]
@@ -129,11 +170,12 @@ def run_family(model_type: str, seed: int = SEED) -> dict:
     input_ids = torch.randint(0, vocab, (BATCH, SEQ), generator=torch.Generator().manual_seed(seed)).cuda()
     state = {k: v.clone() for k, v in reference.state_dict().items()}
     ref_loss, ref_grads = _loss_and_grads(reference, input_ids)
+    spread = _round_off_spread(model_cls, config, state, input_ids, ref_grads)
     ref16_loss, ref16_grads = _loss_and_grads(_stock_model(model_cls, config, state, torch.bfloat16), input_ids)
     del reference
 
     applied = apply_liger_kernel(copy.deepcopy(config), None, needs_ep_wrappers=True)
-    result = {"model_type": model_type, "ref_loss": ref_loss}
+    result = {"model_type": model_type, "ref_loss": ref_loss, "round_off_spread": spread}
     for label, dtype in (("fp32", torch.float32), ("bf16", torch.bfloat16)):
         model = _stack_model(model_cls, config, state, dtype)
         layers = find_ep_layers(model)
@@ -169,6 +211,13 @@ def run_family(model_type: str, seed: int = SEED) -> dict:
     return result
 
 
+def _fp32_bounds(spread: dict) -> tuple[float, float]:
+    """A parameter's fp32 ``(cos_min, norm_rtol)``: the fixed bounds, widened to its round-off spread."""
+    widened_cos = max(ROUNDOFF_GRAD_COS_FLOOR, 1 - ROUNDOFF_SPREAD_MULTIPLE * spread["one_minus_cos"])
+    widened_norm = min(ROUNDOFF_GRAD_NORM_RTOL_CEILING, ROUNDOFF_SPREAD_MULTIPLE * spread["norm_rel"])
+    return min(FP32_GRAD_COS_MIN, widened_cos), max(FP32_GRAD_NORM_RTOL, widened_norm)
+
+
 def check_family_stack_matches_the_stock_model(model_type: str, result: dict) -> None:
     fp32, bf16 = result["fp32"], result["bf16"]
     assert fp32["ep_layers"] > 0, f"{model_type}: nothing was EP-wrapped, the check would prove nothing"
@@ -183,9 +232,14 @@ def check_family_stack_matches_the_stock_model(model_type: str, result: dict) ->
     loss_rel = abs(fp32["loss"] - result["ref_loss"]) / abs(result["ref_loss"])
     assert loss_rel < FP32_LOSS_RTOL, f"{model_type}: fp32 loss {fp32['loss']} vs stock {result['ref_loss']}"
     for name, entry in fp32["grads"].items():
-        assert entry["cos"] > FP32_GRAD_COS_MIN, f"{model_type}: fp32 grad {name} cos {entry['cos']:.6f}"
-        norm_rtol = FP32_FLA_SCALAR_GRAD_NORM_RTOL if name.endswith(FLA_SCALAR_PARAMS) else FP32_GRAD_NORM_RTOL
-        assert entry["norm_rel"] < norm_rtol, f"{model_type}: fp32 grad {name} norm off {entry['norm_rel']:.2e}"
+        cos_min, norm_rtol = _fp32_bounds(result["round_off_spread"][name])
+        assert entry["cos"] > cos_min, (
+            f"{model_type}: fp32 grad {name} cos {entry['cos']:.6f}, bound {cos_min:.6f} "
+            f"(stock round-off spread {result['round_off_spread'][name]['one_minus_cos']:.1e})"
+        )
+        assert entry["norm_rel"] < norm_rtol, (
+            f"{model_type}: fp32 grad {name} norm off {entry['norm_rel']:.2e}, bound {norm_rtol:.2e}"
+        )
 
     stack_loss_err = abs(bf16["loss"] - result["ref_loss"])
     stock_loss_err = abs(bf16["stock_bf16_loss"] - result["ref_loss"])
@@ -207,6 +261,14 @@ def run(ctx) -> dict:
     model_type = parser.parse_args().family
     checks: dict[str, bool] = {}
     result = run_family(model_type)
+    fixed = (FP32_GRAD_COS_MIN, FP32_GRAD_NORM_RTOL)
+    widened = {n: _fp32_bounds(s) for n, s in result["round_off_spread"].items() if _fp32_bounds(s) != fixed}
+    if widened:
+        loosest = min(widened, key=lambda name: widened[name][0])
+        log(
+            f"{model_type}: {len(widened)} fp32 bounds widened by the stock round-off spread {sorted(widened)}; "
+            f"loosest (cos_min, norm_rtol) {widened[loosest]} for {loosest}"
+        )
     record_check(
         checks,
         f"stack_matches_the_stock_model[{model_type}]",

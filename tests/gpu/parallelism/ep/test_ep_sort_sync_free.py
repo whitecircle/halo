@@ -35,11 +35,7 @@ HIDDEN = 256
 
 def make_layer(ep_size):
     """Minimal stand-in carrying only what the sort reads off ``self``."""
-    return SimpleNamespace(
-        ep_size=ep_size,
-        experts_per_rank=EXPERTS_PER_RANK,
-        _build_inv_map=EPMoELayerBase._build_inv_map,  # staticmethod — no instance to bind
-    )
+    return SimpleNamespace(ep_size=ep_size, experts_per_rank=EXPERTS_PER_RANK)
 
 
 def make_inputs(ep_size, device):

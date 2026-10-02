@@ -137,11 +137,42 @@ _SILU_VARIANT = _GluVariant(_SILU)
 _GELU_TANH_VARIANT = _GluVariant(_GELU_TANH)
 
 
-def _glu_tile(width: int) -> tuple[int, int]:
-    """``(BLOCK_M, ROWS)`` for a GLU of intermediate ``width``: a column tile and the rows each program
-    walks. Keyed on the width alone, so the EP layer's small-token warmup compiles the exact variant a
-    full dispatch runs. Tuned on the Gemma 4 and Qwen/GLM expert widths."""
-    return (1024, 4) if width <= 1024 else (512, 8)
+def _clamped_variant(limit: float, clamp_activated: bool) -> _GluVariant:
+    """The clamped SwiGLU at ``alpha = 1``: the gate clamped before the SiLU, or (``clamp_activated``) the
+    activated gate after it."""
+    return _GluVariant(_CLAMPED_SILU, 1.0, float(limit), clamp_activated, False)
+
+
+def _glu_launch(n_rows: int, width: int) -> tuple[tuple[int, int], dict]:
+    """The grid and the ``BLOCK_M``/``ROWS`` tile of a GLU kernel launch over ``[n_rows, width]``.
+
+    ``BLOCK_M`` is the column tile, ``ROWS`` the rows each program walks. The tile is keyed on the width
+    alone, so the EP layer's small-token warmup compiles the exact variant a full dispatch runs. Tuned on
+    the Gemma 4 and Qwen/GLM expert widths.
+    """
+    block_m, rows = (1024, 4) if width <= 1024 else (512, 8)
+    return (triton.cdiv(n_rows, rows), triton.cdiv(width, block_m)), {"BLOCK_M": block_m, "ROWS": rows}
+
+
+@triton.jit
+def _gelu_tanh_terms(gate):
+    """tanh-GELU of ``gate``, and the tanh its derivative reuses."""
+    tanh_inner = tanh(_GELU_SQRT_2_OVER_PI * (gate + _GELU_TANH_COEFF * gate * gate * gate))
+    return 0.5 * gate * (1.0 + tanh_inner), tanh_inner
+
+
+@triton.jit
+def _clamped_glu_terms(gate, up, alpha, limit, CLAMP_ACTIVATED: tl.constexpr, UP_PLUS_ONE: tl.constexpr):
+    """The clamped family's activated gate and clamped up half, plus what the backward differentiates
+    through: the gate operand, its scaled sigmoid and the GLU before any post-activation clamp."""
+    up_g = tl.minimum(tl.maximum(up, -limit), limit)
+    if UP_PLUS_ONE:
+        up_g = up_g + 1.0
+    gate_a = gate if CLAMP_ACTIVATED else tl.minimum(gate, limit)
+    s = tl.sigmoid(gate_a * alpha)
+    glu = gate_a * s
+    activated = tl.minimum(glu, limit) if CLAMP_ACTIVATED else glu
+    return activated, up_g, gate_a, s, glu
 
 
 # ``n_rows`` is the dispatch's row count, which changes every step. Left specializable, Triton compiles a
@@ -176,15 +207,10 @@ def _glu_fwd_kernel(
         if ACTIVATION == 0:
             out = gate * tl.sigmoid(gate) * up
         elif ACTIVATION == 1:
-            inner = _GELU_SQRT_2_OVER_PI * (gate + _GELU_TANH_COEFF * gate * gate * gate)
-            out = 0.5 * gate * (1.0 + tanh(inner)) * up
+            activated, _ = _gelu_tanh_terms(gate)
+            out = activated * up
         else:
-            up_g = tl.minimum(tl.maximum(up, -limit), limit)
-            if UP_PLUS_ONE:
-                up_g = up_g + 1.0
-            gate_a = gate if CLAMP_ACTIVATED else tl.minimum(gate, limit)
-            glu = gate_a * tl.sigmoid(gate_a * alpha)
-            activated = tl.minimum(glu, limit) if CLAMP_ACTIVATED else glu
+            activated, up_g, _, _, _ = _clamped_glu_terms(gate, up, alpha, limit, CLAMP_ACTIVATED, UP_PLUS_ONE)
             out = activated * up_g
         tl.store(out_ptr + row * width + cols, out, mask=mask)
 
@@ -225,30 +251,17 @@ def _glu_bwd_kernel(
             dgate = dout * up * (sigmoid * (1.0 + gate * (1.0 - sigmoid)))
             dup = dout * activated
         elif ACTIVATION == 1:
-            gate_sq = gate * gate
-            inner = _GELU_SQRT_2_OVER_PI * (gate + _GELU_TANH_COEFF * gate * gate_sq)
-            tanh_inner = tanh(inner)
-            activated = 0.5 * gate * (1.0 + tanh_inner)
-            inner_grad = _GELU_SQRT_2_OVER_PI * (1.0 + 3.0 * _GELU_TANH_COEFF * gate_sq)
+            activated, tanh_inner = _gelu_tanh_terms(gate)
+            inner_grad = _GELU_SQRT_2_OVER_PI * (1.0 + 3.0 * _GELU_TANH_COEFF * (gate * gate))
             activation_grad = 0.5 * (1.0 + tanh_inner) + 0.5 * gate * (1.0 - tanh_inner * tanh_inner) * inner_grad
             dgate = dout * up * activation_grad
             dup = dout * activated
         else:
-            up_g = tl.minimum(tl.maximum(up, -limit), limit)
-            if UP_PLUS_ONE:
-                up_g = up_g + 1.0
+            activated, up_g, gate_a, s, glu = _clamped_glu_terms(gate, up, alpha, limit, CLAMP_ACTIVATED, UP_PLUS_ONE)
+            dglu = s + gate_a * alpha * s * (1.0 - s)
             # Clamp subgradients follow torch: the bound itself is inside the pass-through interval.
             up_in = tl.where((up >= -limit) & (up <= limit), 1.0, 0.0)
-            gate_a = gate if CLAMP_ACTIVATED else tl.minimum(gate, limit)
-            s = tl.sigmoid(gate_a * alpha)
-            glu = gate_a * s
-            dglu = s + gate_a * alpha * s * (1.0 - s)
-            if CLAMP_ACTIVATED:
-                activated = tl.minimum(glu, limit)
-                gate_in = tl.where(glu <= limit, 1.0, 0.0)
-            else:
-                activated = glu
-                gate_in = tl.where(gate <= limit, 1.0, 0.0)
+            gate_in = tl.where(glu <= limit, 1.0, 0.0) if CLAMP_ACTIVATED else tl.where(gate <= limit, 1.0, 0.0)
             dgate = dout * up_g * dglu * gate_in
             dup = dout * activated * up_in
         tl.store(dgate_ptr + row * stride_dgate + cols, dgate, mask=mask)
@@ -256,13 +269,10 @@ def _glu_bwd_kernel(
 
 
 def _as_rows(t: torch.Tensor) -> torch.Tensor:
-    """``t`` as a 2D ``[rows, width]`` view with a unit column stride, copying only when no such view exists."""
+    """``t`` as a 2D ``[rows, width]`` tensor with a unit column stride, copying only when no such view exists."""
     if t.stride(-1) != 1:
         t = t.contiguous()
-    try:
-        return t.view(-1, t.shape[-1])
-    except RuntimeError:
-        return t.reshape(-1, t.shape[-1])
+    return t.reshape(-1, t.shape[-1])
 
 
 def _variant_args(variant: _GluVariant) -> dict:
@@ -278,8 +288,7 @@ def _variant_args(variant: _GluVariant) -> dict:
 def _glu_forward(gate: torch.Tensor, up: torch.Tensor, variant: _GluVariant) -> torch.Tensor:
     n_rows, width = gate.shape
     out = torch.empty((n_rows, width), device=gate.device, dtype=gate.dtype)
-    block_m, rows = _glu_tile(width)
-    grid = (triton.cdiv(n_rows, rows), triton.cdiv(width, block_m))
+    grid, tile = _glu_launch(n_rows, width)
     _glu_fwd_kernel[grid](
         gate,
         up,
@@ -289,8 +298,7 @@ def _glu_forward(gate: torch.Tensor, up: torch.Tensor, variant: _GluVariant) -> 
         gate.stride(0),
         up.stride(0),
         **_variant_args(variant),
-        BLOCK_M=block_m,
-        ROWS=rows,
+        **tile,
     )
     return out
 
@@ -304,8 +312,7 @@ def _glu_backward(
     variant: _GluVariant,
 ) -> None:
     n_rows, width = gate.shape
-    block_m, rows = _glu_tile(width)
-    grid = (triton.cdiv(n_rows, rows), triton.cdiv(width, block_m))
+    grid, tile = _glu_launch(n_rows, width)
     _glu_bwd_kernel[grid](
         gate,
         up,
@@ -319,8 +326,7 @@ def _glu_backward(
         dgate.stride(0),
         dup.stride(0),
         **_variant_args(variant),
-        BLOCK_M=block_m,
-        ROWS=rows,
+        **tile,
     )
 
 
@@ -376,8 +382,13 @@ def _split_packed(gate_up: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
     return gate_up.chunk(2, dim=-1)
 
 
+def fused_glu_enabled() -> bool:
+    """Whether the fused kernels may run (``HALO_FUSED_GLU``); off, every combine here runs its eager form."""
+    return _FUSED_GLU_ENABLED
+
+
 def _runs_fused(t: torch.Tensor) -> bool:
-    return t.is_cuda and _FUSED_GLU_ENABLED
+    return t.is_cuda and fused_glu_enabled()
 
 
 def fused_silu_mul(gate: torch.Tensor, up: torch.Tensor) -> torch.Tensor:
@@ -406,7 +417,7 @@ def fused_clamped_silu_mul(gate: torch.Tensor, up: torch.Tensor, limit: float) -
     """:func:`clamped_silu_mul_eager` — clamp the gate, then SiLU (``alpha = 1``), times the clamped
     ``up``. Fused on CUDA and eager elsewhere."""
     if _runs_fused(gate):
-        return _FusedGLU.apply(gate, up, _GluVariant(_CLAMPED_SILU, 1.0, float(limit), False, False))
+        return _FusedGLU.apply(gate, up, _clamped_variant(limit, clamp_activated=False))
     return clamped_silu_mul_eager(gate, up, limit)
 
 
@@ -414,7 +425,7 @@ def fused_silu_then_clamp_mul(gate: torch.Tensor, up: torch.Tensor, limit: float
     """:func:`silu_then_clamp_mul_eager` — SiLU (``alpha = 1``) then clamp the activated gate, times
     the clamped ``up``. Fused on CUDA and eager elsewhere."""
     if _runs_fused(gate):
-        return _FusedGLU.apply(gate, up, _GluVariant(_CLAMPED_SILU, 1.0, float(limit), True, False))
+        return _FusedGLU.apply(gate, up, _clamped_variant(limit, clamp_activated=True))
     return silu_then_clamp_mul_eager(gate, up, limit)
 
 
@@ -435,14 +446,14 @@ def fused_gelu_tanh_mul_packed(gate_up: torch.Tensor) -> torch.Tensor:
 def fused_clamped_silu_mul_packed(gate_up: torch.Tensor, limit: float) -> torch.Tensor:
     """:func:`fused_clamped_silu_mul` over a fused ``[gate | up]`` projection output."""
     if _runs_fused(gate_up):
-        return _FusedPackedGLU.apply(gate_up, _GluVariant(_CLAMPED_SILU, 1.0, float(limit), False, False))
+        return _FusedPackedGLU.apply(gate_up, _clamped_variant(limit, clamp_activated=False))
     return clamped_silu_mul_eager(*_split_packed(gate_up), limit)
 
 
 def fused_silu_then_clamp_mul_packed(gate_up: torch.Tensor, limit: float) -> torch.Tensor:
     """:func:`fused_silu_then_clamp_mul` over a fused ``[gate | up]`` projection output."""
     if _runs_fused(gate_up):
-        return _FusedPackedGLU.apply(gate_up, _GluVariant(_CLAMPED_SILU, 1.0, float(limit), True, False))
+        return _FusedPackedGLU.apply(gate_up, _clamped_variant(limit, clamp_activated=True))
     return silu_then_clamp_mul_eager(*_split_packed(gate_up), limit)
 
 

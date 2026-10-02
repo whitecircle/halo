@@ -54,6 +54,18 @@ def test_an_optimizer_without_deferral_keeps_in_place_scaling():
     assert _target(SimpleNamespace(optimizer=None), params) is None
 
 
+def test_a_group_added_after_the_first_clip_is_weighed_too():
+    """A parameter group added mid-training must block deferral when the clip did not select it, or the
+    fused step would scale a gradient the clip never measured."""
+    params = _params(2)
+    optimizer = AdamWBF16(params[:1])
+    trainer = SimpleNamespace(optimizer=optimizer)
+    assert _target(trainer, params[:1]) is optimizer
+    optimizer.add_param_group({"params": params[1:]})
+    assert _target(trainer, params[:1]) is None
+    assert _target(trainer, params) is optimizer
+
+
 def test_params_without_grads_do_not_block_deferral():
     params = _params(3)
     params[2].grad = None

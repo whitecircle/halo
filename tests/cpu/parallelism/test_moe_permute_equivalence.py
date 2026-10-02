@@ -1,8 +1,8 @@
 """Numerical-equivalence test for the atomic-free MoE permute (the production scatter-back).
 
-`MoEGatherPermute` (src/distributed/expert_parallel/autograd.py) and `MoEWeightedUnpermute`
-(src/kernels/moe_permute.py) replace the bf16-atomic `index_add_` expert scatter-back with an
-atomic-free gather+sum via a precomputed `inv_map` (EPMoELayerBase._build_inv_map); the unpermute also
+`MoEGatherPermute` and `MoEWeightedUnpermute` (src/kernels/moe_permute.py) replace the bf16-atomic
+`index_add_` expert scatter-back with an atomic-free gather+sum via a precomputed `inv_map`
+(`build_inv_map`); the unpermute also
 folds in the routing-weight multiply. They are the production permute for every grouped-GEMM MoE family
 when `top_k >= ep_size`, so they must match the index_select / weighted index_add reference they
 replace, in float64, in BOTH forward and backward (the routing-weight gradient included). On CPU both
@@ -15,9 +15,7 @@ This is a CPU test (pure torch); run it inside the container:
 import pytest
 import torch
 
-from src.distributed.expert_parallel.autograd import MoEGatherPermute
-from src.distributed.expert_parallel.base_layer import EPMoELayerBase
-from src.kernels.moe_permute import MoEWeightedUnpermute
+from src.kernels.moe_permute import MoEGatherPermute, MoEWeightedUnpermute, build_inv_map
 
 
 def _make_routing(recv_N: int, width: int, seed: int):
@@ -29,7 +27,7 @@ def _make_routing(recv_N: int, width: int, seed: int):
     idx = torch.repeat_interleave(torch.arange(recv_N), counts)
     perm = torch.randperm(idx.numel(), generator=g)  # simulate expert-sort ordering
     sorted_token_idx = idx[perm].contiguous()
-    inv_map = EPMoELayerBase._build_inv_map(sorted_token_idx, recv_N, width)
+    inv_map = build_inv_map(sorted_token_idx, recv_N, width)
     return sorted_token_idx, inv_map
 
 
@@ -114,7 +112,7 @@ def test_empty_routing_is_all_sentinel():
     and the weighted unpermute yields exactly zeros (the n_sorted==0 fast path)."""
     recv_N, width, H = 8, 4, 5
     sorted_token_idx = torch.empty(0, dtype=torch.long)
-    inv_map = EPMoELayerBase._build_inv_map(sorted_token_idx, recv_N, width)
+    inv_map = build_inv_map(sorted_token_idx, recv_N, width)
     assert inv_map.shape == (recv_N, width)
     assert torch.all(inv_map == 0)  # n_sorted == 0, so the sentinel equals 0
 
@@ -125,13 +123,43 @@ def test_empty_routing_is_all_sentinel():
     print("OK test_empty_routing_is_all_sentinel")
 
 
+def _saved_and_expert_grad(expert_out, weights, sorted_token_idx, inv_map, grad_out, *, weights_need_grad):
+    """What the weighted unpermute keeps for backward, and the ``expert_out`` gradient."""
+    eo = expert_out.clone().requires_grad_(True)
+    w = weights.clone().requires_grad_(weights_need_grad)
+    saved = []
+    with torch.autograd.graph.saved_tensors_hooks(lambda t: saved.append(t) or t, lambda t: t):
+        out = MoEWeightedUnpermute.apply(eo, w, sorted_token_idx, inv_map)
+    out.backward(grad_out)
+    return saved, eo.grad
+
+
+def test_weights_needing_no_grad_keep_no_expert_outputs():
+    """The expert outputs feed only the routing-weight gradient. Weights that need none (a frozen router
+    over activations that need no gradient) must not keep them alive until backward — an ``[n_sorted, H]``
+    tensor per MoE layer — and the expert-output gradient must not change."""
+    sorted_token_idx, inv_map = _make_routing(64, 8, seed=11)
+    n_sorted, hidden = sorted_token_idx.numel(), 16
+    expert_out = torch.randn(n_sorted, hidden, dtype=torch.float64)
+    args = (expert_out, torch.rand(n_sorted, dtype=torch.float64), sorted_token_idx, inv_map)
+    grad_out = torch.randn(64, hidden, dtype=torch.float64)
+
+    saved_full, expert_grad_full = _saved_and_expert_grad(*args, grad_out, weights_need_grad=True)
+    saved, expert_grad = _saved_and_expert_grad(*args, grad_out, weights_need_grad=False)
+
+    assert any(t.shape == expert_out.shape for t in saved_full), "the probe would not see expert_out saved"
+    assert not any(t.shape == expert_out.shape for t in saved), "expert_out kept with no weight gradient"
+    assert sum(t.numel() for t in saved) == sum(t.numel() for t in saved_full) - expert_out.numel()
+    assert torch.equal(expert_grad, expert_grad_full)
+
+
 def test_full_width_token_all_experts():
     """A token routed to all `width` local experts: its inv_map row is fully valid
     (no sentinel) and the gather/scatter still match the index_add reference."""
     width, H = 4, 6
     # token 0 lands on 4 sorted positions, token 1 on none.
     sorted_token_idx = torch.tensor([0, 0, 0, 0], dtype=torch.long)
-    inv_map = EPMoELayerBase._build_inv_map(sorted_token_idx, recv_N=2, width=width)
+    inv_map = build_inv_map(sorted_token_idx, recv_N=2, width=width)
     assert torch.equal(torch.sort(inv_map[0]).values, torch.arange(width))
     assert torch.all(inv_map[1] == 4)  # token 1 absent → all sentinel
 

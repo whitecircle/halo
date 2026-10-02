@@ -12,6 +12,7 @@ Run: torchrun --nproc_per_node=1 tests/gpu/kernels/test_fused_glu.py
 """
 
 from collections.abc import Callable
+from functools import partial
 from typing import NamedTuple
 from unittest.mock import patch
 
@@ -19,6 +20,7 @@ import torch
 
 from src.kernels import fused_glu
 from src.kernels.fused_glu import (
+    PACKED_GLU_MULS,
     clamped_silu_mul_eager,
     fused_clamped_silu_mul,
     fused_clamped_silu_mul_packed,
@@ -237,32 +239,25 @@ def test_up_plus_one_is_all_that_separates_the_two_pre_activation_variants():
 
 
 def test_the_switch_runs_every_combine_eagerly_on_cuda():
-    """``HALO_FUSED_GLU=0`` is the documented escape from a GLU kernel that fails on a GPU: with it, none
-    of the nine combine entry points (separate halves and packed, each activation) may reach a Triton
-    kernel, and each must return exactly its eager form."""
+    """``HALO_FUSED_GLU=0`` is the documented escape from a GLU kernel that fails on a GPU: with it, no
+    combine entry point (each separate-halves combine in ``PACKED_GLU_MULS`` and its packed form, plus
+    ``fused_gptoss_glu``) may reach a Triton kernel, and each must return exactly its eager form. An
+    entry point added there without an eager form here fails the lookup."""
     gate, up = (torch.randn(8, 64, device="cuda", dtype=torch.bfloat16) for _ in range(2))
     gate_up = torch.cat([gate, up], dim=-1)
-    combines = (
-        (lambda: fused_glu.fused_silu_mul(gate, up), lambda: silu_mul_eager(gate, up)),
-        (lambda: fused_glu.fused_gelu_tanh_mul(gate, up), lambda: gelu_tanh_mul_eager(gate, up)),
-        (lambda: fused_glu.fused_gptoss_glu(gate, up, 1.702, 7.0), lambda: gptoss_glu_eager(gate, up, 1.702, 7.0)),
-        (lambda: fused_glu.fused_clamped_silu_mul(gate, up, 7.0), lambda: clamped_silu_mul_eager(gate, up, 7.0)),
-        (
-            lambda: fused_glu.fused_silu_then_clamp_mul(gate, up, 7.0),
-            lambda: silu_then_clamp_mul_eager(gate, up, 7.0),
-        ),
-        (lambda: fused_glu.fused_silu_mul_packed(gate_up), lambda: silu_mul_eager(gate, up)),
-        (lambda: fused_glu.fused_gelu_tanh_mul_packed(gate_up), lambda: gelu_tanh_mul_eager(gate, up)),
-        (
-            lambda: fused_glu.fused_clamped_silu_mul_packed(gate_up, 7.0),
-            lambda: clamped_silu_mul_eager(gate, up, 7.0),
-        ),
-        (
-            lambda: fused_glu.fused_silu_then_clamp_mul_packed(gate_up, 7.0),
-            lambda: silu_then_clamp_mul_eager(gate, up, 7.0),
-        ),
-    )
-    assert len(combines) == 9  # every entry point that checks the switch
+    eager_forms = {
+        fused_silu_mul: (silu_mul_eager, ()),
+        fused_gelu_tanh_mul: (gelu_tanh_mul_eager, ()),
+        fused_clamped_silu_mul: (clamped_silu_mul_eager, (LIMIT,)),
+        fused_silu_then_clamp_mul: (silu_then_clamp_mul_eager, (LIMIT,)),
+        fused_gptoss_glu: (gptoss_glu_eager, (ALPHA, LIMIT)),
+    }
+    combines = []
+    for separate in (*PACKED_GLU_MULS, fused_gptoss_glu):
+        eager, extra = eager_forms[separate]
+        combines.append((partial(separate, gate, up, *extra), partial(eager, gate, up, *extra)))
+        if separate in PACKED_GLU_MULS:
+            combines.append((partial(PACKED_GLU_MULS[separate], gate_up, *extra), partial(eager, gate, up, *extra)))
 
     def no_kernel(*_args):
         raise AssertionError("a combine reached the fused kernel with HALO_FUSED_GLU=0")
@@ -304,12 +299,13 @@ def test_one_compile_serves_every_row_count():
 
 
 def test_large_numel_int64_offset():
-    """gate.numel() past 2**31 must stay correct (int64 program offset).
+    """gate.numel() past 2**31 must stay correct (int64 row offsets).
 
     On the grouped expert path at long context / high ep (e.g. ep8 past the DeepEP token ceiling,
-    where skewed routing piles >745k tokens onto a rank), ``[N, 2880]`` crosses 2**31 elements. An
-    int32 ``pid * BLOCK`` offset wraps negative there and the kernel illegal-accesses. Not run on GPUs
-    too small to hold the >2**31-element tensors (the bug only manifests where the activation fits)."""
+    where skewed routing piles >745k tokens onto a rank), ``[N, 2880]`` crosses 2**31 elements. The
+    kernels address a row as ``row * stride`` in int64; in int32 that product wraps negative there and
+    the kernel illegal-accesses. Not run on GPUs too small to hold the >2**31-element tensors (the bug
+    only manifests where the activation fits)."""
     n = 746_000  # 746000 * 2880 = 2,148,480,000 > 2**31 = 2,147,483,648
     assert n * DIM > 2**31
     _check_clamped(GPTOSS, n, torch.bfloat16, LIMIT, 5e-2)

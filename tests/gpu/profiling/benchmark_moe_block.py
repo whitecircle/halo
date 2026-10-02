@@ -10,17 +10,21 @@ expert intermediate 704, 128 experts, top-8):
   driven through ``EPMoELayerBase``'s own methods.
 - ``halo+<combine>``: the same path with the GeGLU combine swapped for eager PyTorch, ``torch.compile`` or
   Liger, isolating the activation kernel.
-- ``halo_padded_gather``: the same path with the permute Halo v1.0.0 runs: the routing weights multiplied
-  separately, the unpermute a padded ``[N, top_k, H]`` gather-sum, and the permute's backward the same.
+- ``halo_padded_gather``: the same path, its sort included, with the permute Halo v1.0.0 runs: the routing
+  weights multiplied separately, the unpermute a padded ``[N, top_k, H]`` gather-sum, and the permute's
+  backward the same.
 
 Usage (inside the Halo image, one GPU):
     python tests/gpu/profiling/benchmark_moe_block.py --out results.json [--tokens 2048 8192 32768]
 """
 
 import argparse
+import contextlib
 import json
 import statistics
+from functools import partial
 from types import SimpleNamespace
+from unittest.mock import patch
 
 import torch
 import torch.nn.functional as F
@@ -29,12 +33,16 @@ from liger_kernel.ops.geglu import LigerGELUMulFunction
 from transformers.models.gemma4.configuration_gemma4 import Gemma4TextConfig
 from transformers.models.gemma4.modeling_gemma4 import Gemma4TextExperts
 
+from src.distributed.expert_parallel import base_layer
 from src.distributed.expert_parallel.base_layer import EPMoELayerBase
 from src.kernels.fused_glu import PACKED_GLU_MULS, fused_gelu_tanh_mul
 from src.kernels.grouped_gemm import grouped_gemm
 from src.kernels.moe_permute import MoEWeightedUnpermute, padded_gather_reduce
 
 HIDDEN, INTERMEDIATE, EXPERTS, TOP_K = 2816, 704, 128, 8
+
+# What ``_sort_tokens_for_grouped_mm`` reads off the layer: one EP rank holding every expert.
+_LAYER = SimpleNamespace(ep_size=1, experts_per_rank=EXPERTS)
 
 
 def time_ms(fn, warmup: int = 5, iters: int = 25) -> float:
@@ -99,23 +107,22 @@ class _PaddedGatherUnpermute(torch.autograd.Function):
         return grad_out.index_select(0, sorted_token_idx), None, None
 
 
-def _sorted_routing(idx: torch.Tensor, w: torch.Tensor):
-    """The expert-sorted routing ``_sort_tokens_for_grouped_mm`` builds at ``ep_size`` 1, without its gather."""
-    flat = idx.reshape(-1)
-    order = torch.argsort(flat, stable=True)
-    token_idx = torch.arange(idx.shape[0], device=idx.device).repeat_interleave(TOP_K)[order]
-    offs = torch.cumsum(torch.bincount(flat, minlength=EXPERTS), 0).to(torch.int32)
-    inv_map = EPMoELayerBase._build_inv_map(token_idx, idx.shape[0], TOP_K)
-    return offs, token_idx, w.reshape(-1)[order], inv_map
+def _sort(x: torch.Tensor, idx: torch.Tensor, w: torch.Tensor):
+    """``_sort_tokens_for_grouped_mm`` at ``ep_size`` 1: the expert-sorted tokens and routing."""
+    return EPMoELayerBase._sort_tokens_for_grouped_mm(_LAYER, x, idx, w)
+
+
+# The sort's own permute swapped for the padded one, so the baseline differs from ``halo`` in the permute alone.
+padded_permute = partial(patch.object, base_layer, "MoEGatherPermute", _PaddedGatherPermute)
 
 
 def padded_gather_block():
-    """:func:`halo_block` with the padded-gather permute and a separate routing-weight multiply."""
+    """:func:`halo_block` with the padded-gather permute (run under :data:`padded_permute`) and a separate
+    routing-weight multiply."""
     glu = PACKED_GLU_MULS[fused_gelu_tanh_mul]
 
     def run(x, idx, w, gate_up_w, down_w):
-        offs, token_idx, weights, inv_map = _sorted_routing(idx, w)
-        tokens = _PaddedGatherPermute.apply(x, token_idx, inv_map)
+        tokens, offs, token_idx, weights, _, inv_map = _sort(x, idx, w)
         y = grouped_gemm(glu(grouped_gemm(tokens, gate_up_w, offs=offs)), down_w, offs=offs)
         return _PaddedGatherUnpermute.apply(y * weights.unsqueeze(-1).to(y.dtype), token_idx, inv_map)
 
@@ -124,11 +131,10 @@ def padded_gather_block():
 
 def halo_block(combine=None):
     """This tree's grouped expert compute (``_compute_experts_with_grouped_mm`` at ``ep_size`` 1)."""
-    layer = SimpleNamespace(ep_size=1, experts_per_rank=EXPERTS, _build_inv_map=EPMoELayerBase._build_inv_map)
     glu = combine or PACKED_GLU_MULS[fused_gelu_tanh_mul]
 
     def run(x, idx, w, gate_up_w, down_w):
-        tokens, offs, token_idx, weights, _, inv_map = EPMoELayerBase._sort_tokens_for_grouped_mm(layer, x, idx, w)
+        tokens, offs, token_idx, weights, _, inv_map = _sort(x, idx, w)
         y = grouped_gemm(glu(grouped_gemm(tokens, gate_up_w, offs=offs)), down_w, offs=offs)
         return MoEWeightedUnpermute.apply(y.contiguous(), weights.to(y.dtype), token_idx, inv_map)
 
@@ -156,6 +162,11 @@ def bench(tokens: int) -> dict:
     w = (probs / probs.sum(-1, keepdim=True)).requires_grad_()
     grad = torch.randn(tokens, HIDDEN, device="cuda", dtype=torch.bfloat16)
 
+    with padded_permute():
+        swapped = _sort(x, idx, w)[0]
+    assert swapped.grad_fn._forward_cls is _PaddedGatherPermute, "the baseline's sort kept the fused permute"
+
+    halo_params = [x, w, gate_up_w, down_w]
     variants = {}
     for impl in ("eager", "grouped_mm"):
 
@@ -163,18 +174,23 @@ def bench(tokens: int) -> dict:
             config._experts_implementation = impl
             return hf(x, idx, w.to(torch.bfloat16))
 
-        variants[f"hf_{impl}"] = (hf_run, [x, w, hf.gate_up_proj, hf.down_proj])
-    variants["halo"] = (lambda: halo_block()(x, idx, w, gate_up_w, down_w), [x, w, gate_up_w, down_w])
+        variants[f"hf_{impl}"] = (hf_run, [x, w, hf.gate_up_proj, hf.down_proj], contextlib.nullcontext)
+    variants["halo"] = (lambda: halo_block()(x, idx, w, gate_up_w, down_w), halo_params, contextlib.nullcontext)
     variants["halo_padded_gather"] = (
         lambda: padded_gather_block()(x, idx, w, gate_up_w, down_w),
-        [x, w, gate_up_w, down_w],
+        halo_params,
+        padded_permute,
     )
     for name, combine in _combines().items():
         run = halo_block(combine)
-        variants[f"halo+{name}"] = ((lambda run=run: run(x, idx, w, gate_up_w, down_w)), [x, w, gate_up_w, down_w])
+        variants[f"halo+{name}"] = (
+            (lambda run=run: run(x, idx, w, gate_up_w, down_w)),
+            halo_params,
+            contextlib.nullcontext,
+        )
 
     reference, results = None, {}
-    for name, (fwd, params) in variants.items():
+    for name, (fwd, params, context) in variants.items():
 
         def fwd_bwd(fwd=fwd, params=params):
             for p in params:
@@ -182,17 +198,17 @@ def bench(tokens: int) -> dict:
             fwd().backward(grad)
 
         iters = 10 if name == "hf_eager" else 25
-        with torch.no_grad():
-            fwd_ms = time_ms(fwd, iters=iters)
-        with torch.no_grad():
-            out = fwd().float()
-        reference = out if reference is None else reference
-        results[name] = {
-            "fwd_ms": fwd_ms,
-            "fwd_bwd_ms": time_ms(fwd_bwd, iters=iters),
-            "peak_extra_mib": peak_extra_mib(fwd_bwd),
-            "max_rel_err_vs_hf_eager": ((out - reference).abs().max() / reference.abs().max()).item(),
-        }
+        with context():
+            with torch.no_grad():
+                fwd_ms = time_ms(fwd, iters=iters)
+                out = fwd().float()
+            reference = out if reference is None else reference
+            results[name] = {
+                "fwd_ms": fwd_ms,
+                "fwd_bwd_ms": time_ms(fwd_bwd, iters=iters),
+                "peak_extra_mib": peak_extra_mib(fwd_bwd),
+                "max_rel_err_vs_hf_eager": ((out - reference).abs().max() / reference.abs().max()).item(),
+            }
         print(tokens, name, {k: round(v, 4) for k, v in results[name].items()}, flush=True)
     return results
 

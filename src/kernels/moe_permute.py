@@ -1,13 +1,16 @@
-"""Fused token permute/unpermute kernels for grouped-GEMM MoE expert compute.
+"""Atomic-free token permute/unpermute for grouped-GEMM MoE expert compute.
 
-Both directions of the expert permutation reduce over a token's ``top_k`` expert rows through the
-``inv_map`` built by ``EPMoELayerBase._build_inv_map`` (``[recv_N, top_k]`` sorted positions, padded
-with the sentinel ``N_sorted``). The eager form pads the source with a zero row, gathers a
-``[recv_N, top_k, H]`` transient and sums it; these kernels walk ``inv_map`` per output row and
-accumulate in fp32, so neither the pad copy nor the transient exists.
+The permute's gather has ``index_add_`` as its default backward, and the unpermute is one: a bf16 kernel
+that emulates an atomic add with a CAS loop, which serializes under high ``top_k``. Both directions here
+reduce over a token's ``top_k`` expert rows through :func:`build_inv_map`'s ``inv_map`` (``[recv_N,
+top_k]`` sorted positions, padded with the sentinel ``N_sorted``) instead. The eager form pads the source
+with a zero row, gathers a ``[recv_N, top_k, H]`` transient and sums it; the kernels walk ``inv_map`` per
+output row and accumulate in fp32, so neither the pad copy nor the transient exists.
 
 The routing-weight multiply is folded into the unpermute, and its backward emits the expert-output
-gradient and the routing-weight gradient from one read of each operand.
+gradient and the routing-weight gradient from one read of each operand. The expert outputs feed only
+the routing-weight gradient, so they are saved, and that gradient computed, only when the weights
+need one.
 """
 
 from __future__ import annotations
@@ -15,6 +18,8 @@ from __future__ import annotations
 import torch
 import triton
 import triton.language as tl
+
+from src.kernels.histogram import sync_free_bincount
 
 _BLOCK_H = 1024
 
@@ -46,7 +51,9 @@ def _gather_reduce_kernel(
     tl.store(out_ptr + row * hidden + cols, acc, mask=col_mask)
 
 
-@triton.jit
+# ``weight_grad`` is a runtime branch rather than a constexpr, so the one binary the EP warm-up compiles
+# serves both cases.
+@triton.jit(do_not_specialize=["weight_grad"])
 def _weighted_unpermute_bwd_kernel(
     grad_out_ptr,
     expert_out_ptr,
@@ -55,6 +62,7 @@ def _weighted_unpermute_bwd_kernel(
     grad_expert_ptr,
     grad_weight_ptr,
     hidden,
+    weight_grad,
     BLOCK_H: tl.constexpr,
 ):
     # One program per sorted row j: grad_expert[j] = w[j] * grad_out[tok[j]], grad_w[j] = <grad_out[tok[j]], y[j]>.
@@ -66,10 +74,32 @@ def _weighted_unpermute_bwd_kernel(
         cols = start + tl.arange(0, BLOCK_H)
         mask = cols < hidden
         grad = tl.load(grad_out_ptr + token * hidden + cols, mask=mask, other=0.0).to(tl.float32)
-        y = tl.load(expert_out_ptr + row * hidden + cols, mask=mask, other=0.0).to(tl.float32)
         tl.store(grad_expert_ptr + row * hidden + cols, grad * weight, mask=mask)
-        dot += grad * y
-    tl.store(grad_weight_ptr + row, tl.sum(dot, axis=0))
+        if weight_grad:
+            y = tl.load(expert_out_ptr + row * hidden + cols, mask=mask, other=0.0).to(tl.float32)
+            dot += grad * y
+    if weight_grad:
+        tl.store(grad_weight_ptr + row, tl.sum(dot, axis=0))
+
+
+def build_inv_map(sorted_token_idx: torch.Tensor, recv_N: int, width: int) -> torch.Tensor:
+    """The atomic-free permute/unpermute map.
+
+    ``inv_map[r, j]`` = the j-th sorted position whose recv token is ``r``, padded to ``width`` cols
+    with sentinel ``N_sorted``. Sync-free (stable argsort + cumulative counts, no host round-trip).
+    """
+    device = sorted_token_idx.device
+    n_sorted = sorted_token_idx.shape[0]
+    inv_map = torch.full((recv_N, width), n_sorted, dtype=torch.long, device=device)
+    if n_sorted == 0:
+        return inv_map
+    order = torch.argsort(sorted_token_idx, stable=True)
+    rp = sorted_token_idx.index_select(0, order)  # recv positions, grouped & contiguous
+    counts = sync_free_bincount(sorted_token_idx, recv_N, dtype=torch.long)
+    starts = torch.cumsum(counts, 0) - counts
+    slot = torch.arange(n_sorted, device=device) - starts.index_select(0, rp)
+    inv_map[rp, slot] = order
+    return inv_map
 
 
 def _gather_reduce(src: torch.Tensor, inv_map: torch.Tensor, weight: torch.Tensor | None) -> torch.Tensor:
@@ -83,7 +113,7 @@ def _gather_reduce(src: torch.Tensor, inv_map: torch.Tensor, weight: torch.Tenso
     grid = (n_out, triton.cdiv(hidden, _BLOCK_H))
     _gather_reduce_kernel[grid](
         src,
-        weight if weight is not None else src,
+        weight.contiguous() if weight is not None else src,
         inv_map.contiguous(),
         out,
         src.shape[0],
@@ -114,20 +144,36 @@ def gather_reduce_rows(src: torch.Tensor, inv_map: torch.Tensor, weight: torch.T
     return padded_gather_reduce(src, inv_map, weight)
 
 
+class MoEGatherPermute(torch.autograd.Function):
+    """``sorted = tokens[sorted_token_idx]`` (index_select gather) with an atomic-free gather-reduce
+    backward over ``inv_map``."""
+
+    @staticmethod
+    def forward(ctx, tokens: torch.Tensor, sorted_token_idx: torch.Tensor, inv_map: torch.Tensor):
+        ctx.save_for_backward(inv_map)
+        return tokens.index_select(0, sorted_token_idx)
+
+    @staticmethod
+    def backward(ctx, grad_sorted):
+        (inv_map,) = ctx.saved_tensors
+        return gather_reduce_rows(grad_sorted, inv_map), None, None
+
+
 class MoEWeightedUnpermute(torch.autograd.Function):
     """``out[r] = sum_k w[j] * expert_out[j]`` for ``j = inv_map[r, k]``: the routing-weight multiply and
     the atomic-free unpermute in one pass.
 
     Numerically the eager ``expert_out * w`` then padded gather-sum, without the intermediate bf16
-    rounding of each weighted row (the product and the sum accumulate in fp32).
+    rounding of each weighted row (the product and the sum accumulate in fp32). ``expert_out`` is saved
+    only when ``weights`` needs a gradient, the one gradient that reads it.
     """
 
     @staticmethod
     def forward(ctx, expert_out, weights, sorted_token_idx, inv_map):
         # The backward kernel indexes both by row with unit strides.
         expert_out, weights = expert_out.contiguous(), weights.contiguous()
-        ctx.save_for_backward(expert_out, weights, sorted_token_idx.contiguous())
-        ctx.weight_dtype = weights.dtype
+        ctx.weight_grad = ctx.needs_input_grad[1]
+        ctx.save_for_backward(expert_out if ctx.weight_grad else None, weights, sorted_token_idx.contiguous())
         return gather_reduce_rows(expert_out, inv_map, weights)
 
     @staticmethod
@@ -136,21 +182,26 @@ class MoEWeightedUnpermute(torch.autograd.Function):
         if not grad_out.is_cuda:
             gathered = grad_out.index_select(0, sorted_token_idx)
             grad_expert = gathered * weights.unsqueeze(-1).to(gathered.dtype)
+            if not ctx.weight_grad:
+                return grad_expert, None, None, None
             accumulate = torch.promote_types(expert_out.dtype, torch.float32)  # fp32 at least, fp64 kept
             grad_weights = (gathered.to(accumulate) * expert_out.to(accumulate)).sum(-1)
-            return grad_expert, grad_weights.to(ctx.weight_dtype), None, None
-        n_sorted, hidden = expert_out.shape
-        grad_expert = torch.empty_like(expert_out)
-        grad_weights = torch.empty(n_sorted, device=expert_out.device, dtype=torch.float32)
+            return grad_expert, grad_weights.to(weights.dtype), None, None
+        # Autograd casts the incoming gradient to the forward output's dtype, which is expert_out's.
+        n_sorted, hidden = sorted_token_idx.shape[0], grad_out.shape[-1]
+        grad_expert = torch.empty((n_sorted, hidden), device=grad_out.device, dtype=grad_out.dtype)
+        grad_weights = torch.empty(n_sorted if ctx.weight_grad else 0, device=grad_out.device, dtype=torch.float32)
         if n_sorted:
             _weighted_unpermute_bwd_kernel[(n_sorted,)](
                 grad_out.contiguous(),
-                expert_out,
+                # Unread without the weight gradient; grad_expert carries expert_out's dtype, so the binary is the same.
+                expert_out if ctx.weight_grad else grad_expert,
                 weights,
                 sorted_token_idx,
                 grad_expert,
                 grad_weights,
                 hidden,
+                int(ctx.weight_grad),
                 BLOCK_H=_BLOCK_H,
             )
-        return grad_expert, grad_weights.to(ctx.weight_dtype), None, None
+        return grad_expert, grad_weights.to(weights.dtype) if ctx.weight_grad else None, None, None

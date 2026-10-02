@@ -36,6 +36,9 @@ _MASK64 = (1 << 64) - 1
 # Launch tile shared by every SR kernel here and in Muon: all of them make the same elementwise pass
 # over a flattened parameter.
 BLOCK_SIZE = 1024
+# Warps for the Adam kernel only (Muon's kernels draw per element): one thread per Philox lane of four
+# elements, which beats Triton's default 4 warps on a large parameter's memory-bound step.
+_ADAM_NUM_WARPS = BLOCK_SIZE // 4 // 32
 
 
 @triton.jit
@@ -179,7 +182,7 @@ def _triton_adam_bf16_step(
         grad_scale if grad_scale is not None else grad_flat,
         HAS_GRAD_SCALE=grad_scale is not None,
         BLOCK_SIZE=BLOCK_SIZE,
-        num_warps=8,
+        num_warps=_ADAM_NUM_WARPS,
     )
     torch.autograd.graph.increment_version(p)  # the raw-pointer store above is invisible to ATen
 

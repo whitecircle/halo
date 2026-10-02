@@ -34,7 +34,6 @@ from src.kernels.fused_glu import (
     fused_silu_mul,
     is_gelu_tanh_activation,
     is_silu_activation,
-    packed_glu_mul,
     resolve_fused_glu_mul,
 )
 
@@ -147,22 +146,6 @@ def test_packed_combine_follows_the_latch(monkeypatch):
     assert calls == ["packed", "chunked"]
 
 
-def test_an_overridden_combine_wins_over_the_packed_kernel():
-    """A layer that overrides :meth:`_glu_combine` must see the fused ``[gate | up]`` path go through its
-    override: the packed kernel of the latched activation would compute the stock combine instead."""
-
-    class _OverridingLayer(EPGemma4MoELayer):
-        def _glu_combine(self, gate, up):
-            return gate * up
-
-    config = EPConfig(ep_size=1, world_size=1, gpus_per_node=1, use_grouped_gemm=False)
-    config.finalize_expert_assignment(E)
-    layer = _OverridingLayer(_real_gemma4_experts(), config).cpu()
-    assert packed_glu_mul(layer._fused_glu_mul) is not None  # premise: a packed form is latched
-    gate_up = torch.randn(7, 2 * M)
-    torch.testing.assert_close(layer._glu_combine_packed(gate_up), gate_up[:, :M] * gate_up[:, M:])
-
-
 def test_real_mistral4_module_activation_passes_the_gate():
     """The exact production object: ``Mistral4Experts.act_fn`` is a ``SiLUActivation`` instance."""
     config = Mistral4Config(
@@ -184,8 +167,9 @@ def test_a_family_owning_its_combine_latches_it_rather_than_forking_the_seam():
     A family with a clamped SwiGLU (DeepSeek-V4, GLM-5 Next, Step-3.7) binds its own combine INTO the
     latch, so one declaration drives both the compute and the reported name. Overriding
     ``_glu_combine`` alone instead would let the summary report the latch (``eager``) for exactly the
-    families that are not eager; overriding both lets the two disagree. GptOss is the one family
-    outside the seam entirely — its interleaved-bias paths never call ``_glu_combine``.
+    families that are not eager, and the packed ``[gate | up]`` path, which runs a latch's packed form
+    without calling ``_glu_combine``, would skip the override. GptOss is the one family outside the
+    seam entirely — its interleaved-bias paths never call ``_glu_combine``.
     """
     forked = [
         cls.__name__
@@ -199,15 +183,35 @@ def test_a_family_owning_its_combine_latches_it_rather_than_forking_the_seam():
     assert EPGptOssMoELayer._glu_combine_name is not EPMoELayerBase._glu_combine_name
 
 
-def test_base_glu_combine_name_tracks_the_latch():
+def test_base_glu_combine_name_tracks_the_latch(monkeypatch):
     """Keeps the override test above honest: for a family that DOES use the base seam, the reported
-    name must follow the latch — fused when armed, ``eager`` when not."""
+    name must follow the latch — fused when armed, ``eager`` when not, and ``eager`` under
+    ``HALO_FUSED_GLU=0``, where the armed kernel runs its eager form."""
     config = EPConfig(ep_size=1, world_size=1, gpus_per_node=1, use_grouped_gemm=False)
     config.finalize_expert_assignment(E)
     layer = EPGemma4MoELayer(_real_gemma4_experts(), config).cpu()
+    monkeypatch.setattr(fused_glu, "_FUSED_GLU_ENABLED", True)
     assert layer._glu_combine_name() == fused_gelu_tanh_mul.__name__
+    layer._fused_glu_mul = partial(fused_glu.fused_clamped_silu_mul, limit=7.0)
+    assert layer._glu_combine_name() == fused_glu.fused_clamped_silu_mul.__name__
 
+    monkeypatch.setattr(fused_glu, "_FUSED_GLU_ENABLED", False)
+    assert layer._glu_combine_name() == "eager"
+    layer._fused_glu_mul = fused_gelu_tanh_mul
+    assert layer._glu_combine_name() == "eager"
+
+    monkeypatch.setattr(fused_glu, "_FUSED_GLU_ENABLED", True)
     layer._fused_glu_mul = None
+    assert layer._glu_combine_name() == "eager"
+
+
+def test_gptoss_glu_combine_name_follows_the_switch(monkeypatch):
+    """GptOss names its own combine; under ``HALO_FUSED_GLU=0`` its paths run the eager form, and the
+    summary must say so."""
+    layer = object.__new__(EPGptOssMoELayer)
+    monkeypatch.setattr(fused_glu, "_FUSED_GLU_ENABLED", True)
+    assert layer._glu_combine_name() == fused_glu.fused_gptoss_glu.__name__
+    monkeypatch.setattr(fused_glu, "_FUSED_GLU_ENABLED", False)
     assert layer._glu_combine_name() == "eager"
 
 

@@ -550,16 +550,47 @@ def test_deferred_grad_scale_matches_prescaled_grads():
 
 
 def test_deferred_grad_scale_is_consumed_once_and_cleared_by_zero_grad():
-    """The scale applies to exactly one step: the next step (and one after ``zero_grad``) is unscaled."""
-    param = nn.Parameter(torch.ones(8, device="cuda", dtype=torch.bfloat16))
-    optimizer = AdamWBF16([param], lr=1e-2, weight_decay=0.0)
-    optimizer.defer_grad_scale(torch.tensor(0.5, device="cuda"))
-    param.grad = torch.ones_like(param)
-    optimizer.step()
-    assert optimizer._grad_scale is None
-    optimizer.defer_grad_scale(torch.tensor(0.5, device="cuda"))
-    optimizer.zero_grad()
-    assert optimizer._grad_scale is None
+    """The scale applies to exactly one step: the next step (and one after ``zero_grad``) is unscaled.
+
+    Checked against an optimizer that never defers, fed the first step's gradient prescaled and every
+    later one as is: the weights and both moments must agree bit for bit after each step. A scale that
+    reached a later step would move the moments (Adam's first update is nearly scale-free, its state is
+    not)."""
+    torch.manual_seed(0)
+    base = torch.randn(4099, device="cuda").to(torch.bfloat16)
+    grads = [torch.randn_like(base) for _ in range(3)]
+    scale = torch.tensor(0.5, device="cuda")
+    deferring, plain = nn.Parameter(base.clone()), nn.Parameter(base.clone())
+    deferring_opt = AdamWBF16([deferring], lr=1e-2, weight_decay=0.0)
+    plain_opt = AdamWBF16([plain], lr=1e-2, weight_decay=0.0)
+
+    def agree() -> bool:
+        a, b = deferring_opt.state[deferring], plain_opt.state[plain]
+        return all(
+            torch.equal(x, y)
+            for x, y in ((deferring, plain), (a["exp_avg"], b["exp_avg"]), (a["exp_avg_sq"], b["exp_avg_sq"]))
+        )
+
+    deferring_opt.defer_grad_scale(scale)
+    deferring.grad, plain.grad = grads[0].clone(), grads[0].clone().mul_(scale)
+    deferring_opt.step()
+    plain_opt.step()
+    assert deferring_opt._grad_scale is None
+    assert agree(), "the deferred step diverged from the prescaled one"
+
+    deferring.grad, plain.grad = grads[1].clone(), grads[1].clone()
+    deferring_opt.step()
+    plain_opt.step()
+    assert agree(), "the scale reached the step after the one it was deferred to"
+
+    deferring_opt.defer_grad_scale(scale)
+    deferring_opt.zero_grad()
+    plain_opt.zero_grad()
+    assert deferring_opt._grad_scale is None
+    deferring.grad, plain.grad = grads[2].clone(), grads[2].clone()
+    deferring_opt.step()
+    plain_opt.step()
+    assert agree(), "a scale deferred before zero_grad reached the next step"
 
 
 def test_state_dict_roundtrip():

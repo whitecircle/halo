@@ -8,11 +8,13 @@ class swaps and preserves the original class name that downstream lookups key on
 
 from __future__ import annotations
 
+import functools
 import importlib
 import inspect
 from collections.abc import Callable
 from dataclasses import dataclass
 from types import MethodType, ModuleType
+from typing import Literal, get_args
 
 import torch
 import torch.nn as nn
@@ -20,7 +22,6 @@ from accelerate.logging import get_logger
 from fla.modules import FusedRMSNormGated
 from liger_kernel.transformers import LigerRMSNorm
 from liger_kernel.transformers.auto_model import MODEL_TYPE_TO_APPLY_LIGER_FN
-from liger_kernel.transformers.monkey_patch import _patch_rms_norm_module
 from liger_kernel.transformers.rope import liger_rotary_pos_emb
 
 from src.kernels.fused_glu import resolve_fused_glu_mul
@@ -54,6 +55,9 @@ _FLA_GATE_ACTIVATIONS = frozenset({"swish", "silu", "sigmoid"})
 
 _RMS_NORM_CASTING_MODES = ("llama", "gemma")
 
+RmsNormKernel = Literal["liger", "native"]
+_RMS_NORM_KERNELS = get_args(RmsNormKernel)
+
 
 @dataclass(frozen=True)
 class LigerFamilySpec:
@@ -83,7 +87,7 @@ class LigerFamilySpec:
     # "liger" swaps in LigerRMSNorm; "native" swaps in torch's fused `F.rms_norm` under the same casting
     # mode (offset 0 only), which also serves weightless norms and is several times cheaper to launch and
     # to run.
-    rms_norm_kernel: str = "liger"
+    rms_norm_kernel: RmsNormKernel = "liger"
     # Gated norm classes: `norm(x) * weight * act(gate)` over the last dim, as the linear-attention
     # (GDN) blocks apply to their attention output. Served by `fla`'s fused kernel, not Liger's, and
     # patched under the same `rms_norm` flag. A grouped gated norm (Bailing's, which reduces over
@@ -134,10 +138,10 @@ class LigerFamilySpec:
                 f"LigerFamilySpec for {self.model_types} sets rms_norm_casting_mode="
                 f"{self.rms_norm_casting_mode!r}; expected one of {_RMS_NORM_CASTING_MODES}"
             )
-        if self.rms_norm_kernel not in ("liger", "native"):
+        if self.rms_norm_kernel not in _RMS_NORM_KERNELS:
             raise ValueError(
                 f"LigerFamilySpec for {self.model_types} sets rms_norm_kernel={self.rms_norm_kernel!r}; "
-                f"expected 'liger' or 'native'"
+                f"expected one of {_RMS_NORM_KERNELS}"
             )
         if self.rms_norm_kernel == "native" and self.rms_norm_offset:
             raise ValueError(
@@ -263,32 +267,41 @@ def _native_rms_norm_class(original: type, *, casting_mode: str) -> type:
     return _rebrand(_NativeRMSNorm, original, "rms_norm")
 
 
-def _liger_rms_norm_class(original: type, *, offset: float, casting_mode: str) -> type:
-    """``original`` with Liger's fused RMSNorm forward and the parameters that select its variant.
+def _configure_liger_rms_norm(module: nn.Module, *, offset: float, casting_mode: str) -> None:
+    """Set the attributes ``LigerRMSNorm.forward`` reads, which select its variant, on one norm module.
 
-    ``in_place`` follows Liger's own convention: the llama casting mode reuses the incoming gradient
-    buffer, the gemma one (weight multiply in fp32) does not. Reuse is correct only while no family adds
-    a norm output straight into a residual, since ``AddBackward`` hands both inputs the same gradient
-    object. Every family here is pre-norm, which
-    ``tests/cpu/kernels/test_liger_family_coverage.py`` checks.
+    Families spell eps either way; Liger's forward reads ``variance_epsilon``, and :func:`_norm_epsilon`
+    raises on a third spelling rather than hand ``None`` to the Triton kernel. ``in_place`` follows
+    Liger's own convention: the llama casting mode reuses the incoming gradient buffer, the gemma one
+    (weight multiply in fp32) does not. Reuse is correct only while no family adds a norm output straight
+    into a residual, since ``AddBackward`` hands both inputs the same gradient object. Every family here
+    is pre-norm, which ``tests/cpu/kernels/test_liger_family_coverage.py`` checks.
     """
-    in_place = casting_mode != "gemma"
+    module.variance_epsilon = _norm_epsilon(module)
+    module.offset = offset
+    module.casting_mode = casting_mode
+    module.in_place = casting_mode != "gemma"
+    module.row_mode = None
+
+
+def _liger_rms_norm_class(original: type, *, offset: float, casting_mode: str) -> type:
+    """``original`` with Liger's fused RMSNorm forward and the parameters that select its variant."""
 
     class _LigerRMSNorm(original):
         def __init__(self, *args, **kwargs):
             super().__init__(*args, **kwargs)
-            # Families spell eps either way; Liger's forward reads `variance_epsilon`. A third
-            # spelling would hand `None` to the Triton kernel, which fails inside the launcher
-            # without naming the family.
-            self.variance_epsilon = _norm_epsilon(self)
-            self.offset = offset
-            self.casting_mode = casting_mode
-            self.in_place = in_place
-            self.row_mode = None
+            _configure_liger_rms_norm(self, offset=offset, casting_mode=casting_mode)
 
         forward = LigerRMSNorm.forward
 
     return _rebrand(_LigerRMSNorm, original, "rms_norm")
+
+
+def _rms_norm_class(original: type, spec: LigerFamilySpec) -> type:
+    """``original`` with the spec's fused RMSNorm kernel under its casting mode."""
+    if spec.rms_norm_kernel == "native":
+        return _native_rms_norm_class(original, casting_mode=spec.rms_norm_casting_mode)
+    return _liger_rms_norm_class(original, offset=spec.rms_norm_offset, casting_mode=spec.rms_norm_casting_mode)
 
 
 def _bridge_gated_norm(module: nn.Module) -> None:
@@ -318,6 +331,12 @@ def _bridge_gated_norm(module: nn.Module) -> None:
     module.bias = None
 
 
+def fused_gated_rms_norm_forward(self, hidden_states: torch.Tensor, gate: torch.Tensor | None = None) -> torch.Tensor:
+    """``fla``'s fused gated RMSNorm under the family's own parameter names: its blocks call this
+    positionally, but a keyword caller must not have to use fla's ``x``/``g`` spelling."""
+    return FusedRMSNormGated.forward(self, hidden_states, gate)
+
+
 def _fused_gated_rms_norm_class(original: type) -> type:
     """``original`` with ``fla``'s fused gated RMSNorm forward.
 
@@ -331,10 +350,7 @@ def _fused_gated_rms_norm_class(original: type) -> type:
             super().__init__(*args, **kwargs)
             _bridge_gated_norm(self)
 
-        def forward(self, hidden_states: torch.Tensor, gate: torch.Tensor | None = None) -> torch.Tensor:
-            # Keeps the family's own parameter names: its blocks call this positionally, but a
-            # keyword caller must not have to use fla's `x`/`g` spelling.
-            return FusedRMSNormGated.forward(self, hidden_states, gate)
+        forward = fused_gated_rms_norm_forward
 
     return _rebrand(_FusedGatedRMSNorm, original, "gated_rms_norm")
 
@@ -383,14 +399,7 @@ def _patch_module(module: ModuleType, spec: LigerFamilySpec, flags: dict) -> lis
         for name in spec.rms_norm:
             original = _named_class(module, name, spec)
             if getattr(original, _PATCHED_MARKER, None) != "rms_norm":
-                fused = (
-                    _native_rms_norm_class(original, casting_mode=spec.rms_norm_casting_mode)
-                    if spec.rms_norm_kernel == "native"
-                    else _liger_rms_norm_class(
-                        original, offset=spec.rms_norm_offset, casting_mode=spec.rms_norm_casting_mode
-                    )
-                )
-                setattr(module, name, fused)
+                setattr(module, name, _rms_norm_class(original, spec))
         for name in spec.gated_rms_norm:
             original = _named_class(module, name, spec)
             if getattr(original, _PATCHED_MARKER, None) != "gated_rms_norm":
@@ -418,33 +427,38 @@ def _patch_module(module: ModuleType, spec: LigerFamilySpec, flags: dict) -> lis
     return patched
 
 
+def _bind_forward(module: nn.Module, forward: Callable) -> None:
+    """Install the module-level ``forward`` on one instance, picklably.
+
+    A bound method pickles as ``getattr(instance, forward.__name__)``, which ``torch.load`` resolves to the
+    class's own forward (a function named ``forward``) or not at all; a partial pickles the function by
+    reference.
+    """
+    module.forward = functools.partial(forward, module)
+
+
 def _patch_instance(model, spec: LigerFamilySpec, flags: dict) -> None:
     """Apply the same roles to an already-built model, for callers that patch post-construction.
 
     The class swaps above only reach modules constructed afterwards. Matching is by class name, which
-    the swap preserves, so this covers both an unpatched model and one whose classes were swapped.
+    the swap preserves, so this covers both an unpatched model and one whose classes were swapped. Every
+    module binding survives ``torch.save``/``torch.load``; the fused-loss head's does not (see below).
     """
     if flags.get("rms_norm"):
-        gated_forward = None
         for module in model.modules():
-            if type(module).__name__ in spec.rms_norm and spec.rms_norm_kernel == "native":
-                module.native_rms_casting_mode = spec.rms_norm_casting_mode
-                module.forward = MethodType(native_rms_norm_forward, module)
-            elif type(module).__name__ in spec.rms_norm:
-                _patch_rms_norm_module(
-                    module,
-                    offset=spec.rms_norm_offset,
-                    casting_mode=spec.rms_norm_casting_mode,
-                    in_place=spec.rms_norm_casting_mode != "gemma",
-                )
-            elif (
-                type(module).__name__ in spec.gated_rms_norm
-                and getattr(type(module), _PATCHED_MARKER, None) != "gated_rms_norm"
-            ):
+            name = type(module).__name__
+            if name in spec.rms_norm:
+                if spec.rms_norm_kernel == "native":
+                    module.native_rms_casting_mode = spec.rms_norm_casting_mode
+                    _bind_forward(module, native_rms_norm_forward)
+                else:
+                    _configure_liger_rms_norm(
+                        module, offset=spec.rms_norm_offset, casting_mode=spec.rms_norm_casting_mode
+                    )
+                    _bind_forward(module, LigerRMSNorm.forward)
+            elif name in spec.gated_rms_norm and getattr(type(module), _PATCHED_MARKER, None) != "gated_rms_norm":
                 _bridge_gated_norm(module)
-                # Resolved on first need: every instance is already fused when the class swap ran at load.
-                gated_forward = gated_forward or _fused_gated_rms_norm_class(type(module)).forward
-                module.forward = MethodType(gated_forward, module)
+                _bind_forward(module, fused_gated_rms_norm_forward)
     if _glu_flag_on(flags):
         for module in model.modules():
             if type(module).__name__ not in spec.glu_mlp:
@@ -458,8 +472,11 @@ def _patch_instance(model, spec: LigerFamilySpec, flags: dict) -> None:
             fused_mul = getattr(module, _GLU_MUL_ATTR, None) or resolve_fused_glu_mul(getattr(module, "act_fn", None))
             if fused_mul is not None:
                 setattr(module, _GLU_MUL_ATTR, fused_mul)
-                module.forward = MethodType(_fused_glu_forward, module)
+                _bind_forward(module, _fused_glu_forward)
     if flags.get("fused_linear_cross_entropy") and type(model).__name__ in spec.causal_lm:
+        # A bound method, not `_bind_forward`: the forward is a per-family closure no pickle can reference,
+        # and `_liger_fused_head_installed` detects the head by the function's module, which a partial
+        # hides. `torch.load` of a model so patched raises on the closure's name.
         model.forward = MethodType(build_lce_forward(spec.logit_scale_attr, spec.router_aux_loss_in_head), model)
 
 

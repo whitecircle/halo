@@ -33,6 +33,7 @@ from accelerate import PartialState
 from liger_kernel.transformers.auto_model import MODEL_TYPE_TO_APPLY_LIGER_FN
 from transformers.loss import loss_utils
 
+import src.distributed.expert_parallel.layers.roster  # noqa: F401 — the EP predicates read a filled registry
 from src.kernels.liger import orchestrator
 from src.kernels.liger.builder import LigerApplier, LigerFamilySpec
 from src.kernels.liger.cross_entropy import liger_cross_entropy
@@ -352,7 +353,7 @@ shared = model.model.layers[0].mlp.shared_expert
 
 
 def toolkit_owns_forward():
-    return getattr(shared.forward, "__func__", None) is _fused_glu_forward or (
+    return getattr(shared.forward, "func", None) is _fused_glu_forward or (
         "forward" not in shared.__dict__ and type(shared) is once
     )
 

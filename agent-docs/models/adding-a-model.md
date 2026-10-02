@@ -130,7 +130,7 @@ No hook may allocate state sized by `world_size` either — invisible at 8 GPUs,
 
     A family with a non-standard combine (DeepSeek-V4 and GLM-5 Next's clamped SwiGLU, Step-3.7's post-activation clamp) rebinds it in `_init_expert_compute`: a `functools.partial` over the kernel with the family's bound, or a bound method for a gate no kernel implements.
 
-    Latch it rather than overriding `_glu_combine`. The construction summary names the latched callable, so an override makes the reported combine and the running one two declarations that can disagree.
+    Latch it rather than overriding `_glu_combine`. The construction summary names the latched callable, so an override makes the reported combine and the running one two declarations that can disagree, and the fused `[gate | up]` path runs a latch's packed form without calling `_glu_combine` at all.
 
 - `_OPTIONAL_ROUTING_KNOBS` — for a `EPGroupLimitedMoELayerBase` family only: the routing knobs (any spelling) its block, router and config genuinely do not declare, so the shared `_init_routing` may substitute a neutral default.
 

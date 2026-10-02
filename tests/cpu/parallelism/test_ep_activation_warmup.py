@@ -10,10 +10,10 @@ budget bounds rank SKEW, not idle time.
 Asserted here: the warmup runs to completion before the first dispatch on a real dispatch group
 (``ep_size > 1``; at ``ep_size == 1`` the dispatcher is a no-op with no barrier to stall), exactly
 once per layer, in both grad modes AND with a real backward (the backward kernel is a separate
-compilation, built only when a grad is first requested); it warms the permute kernels wherever the
-compute path runs them; the kernels take their row count unspecialized, so one warm count covers every
-dispatch size; and each family's own warm hook reaches the callable its compute path actually calls,
-with the operands that path produces.
+compilation, built only when a grad is first requested), even when that first forward runs under
+inference mode; it warms the permute kernels wherever the compute path runs them; the kernels take
+their row count unspecialized, so one warm count covers every dispatch size; and each family's own
+warm hook reaches the callable its compute path actually calls, with the operands that path produces.
 
 Run: pytest tests/cpu/parallelism/test_ep_activation_warmup.py
 """
@@ -164,6 +164,25 @@ def test_the_kernels_do_not_specialize_on_the_dispatch_row_count(kernel, row_cou
     assert params[row_count].do_not_specialize
 
 
+_PERMUTE_BACKWARDS = {("MoEGatherPermute", "backward"), ("MoEWeightedUnpermute", "backward")}
+
+
+def _record_permute_backwards(monkeypatch) -> list[tuple[str, str]]:
+    """Wrap the layer's two permute Functions so each backward they run appends to the returned list."""
+    calls = []
+    for name in ("MoEGatherPermute", "MoEWeightedUnpermute"):
+        function = getattr(base_layer, name)
+
+        class _Recording(function):
+            @staticmethod
+            def backward(ctx, *grads, _name=name, _function=function):
+                calls.append((_name, "backward"))
+                return _function.backward(ctx, *grads)
+
+        monkeypatch.setattr(base_layer, name, _Recording)
+    return calls
+
+
 @pytest.mark.parametrize(
     ("top_k", "ep_size", "grouped_mm", "warmed"),
     ((2, 2, True, True), (1, 2, True, False), (2, 2, False, False)),
@@ -177,22 +196,32 @@ def test_the_permute_kernels_are_warmed_where_the_compute_path_runs_them(
     forward and backward. Below that the index_add path runs, and ``use_grouped_gemm: false`` runs the
     per-expert loop, the documented way around these kernels: in both there is nothing to warm, and a
     warm-up that ran them anyway would compile the kernels the loop exists to avoid."""
-    calls = []
-    for name in ("MoEGatherPermute", "MoEWeightedUnpermute"):
-        function = getattr(base_layer, name)
-
-        class _Recording(function):
-            @staticmethod
-            def backward(ctx, *grads, _name=name, _function=function):
-                calls.append((_name, "backward"))
-                return _function.backward(ctx, *grads)
-
-        monkeypatch.setattr(base_layer, name, _Recording)
+    calls = _record_permute_backwards(monkeypatch)
     layer = _RecordingLayer(ep_size=ep_size)
     layer._use_grouped_mm = grouped_mm
     layer._warm_activation_graphs(torch.device("cpu"), torch.float32, HIDDEN, top_k=top_k)
-    expected = {("MoEGatherPermute", "backward"), ("MoEWeightedUnpermute", "backward")} if warmed else set()
-    assert set(calls) == expected
+    assert set(calls) == (_PERMUTE_BACKWARDS if warmed else set())
+
+
+def test_a_first_forward_under_inference_mode_warms_every_kernel(monkeypatch):
+    """The warm-up latches on a layer's first forward whatever mode it runs in, so a first forward under
+    ``torch.inference_mode()`` must warm what a later training forward runs: the grad-enabled activation
+    with its backward, and the permute kernels' backward. Latched without them, those compile between that
+    later forward's dispatch and combine."""
+    calls = _record_permute_backwards(monkeypatch)
+    layer = _RecordingLayer()
+    flat = torch.randn(3, HIDDEN)
+    experts = torch.zeros(3, 2, dtype=torch.long)
+    with torch.inference_mode():
+        layer._dispatch_compute_combine(flat, experts, torch.ones(3, 2), torch.float32)
+
+    names = [event[0] for event in layer.events]
+    assert ("warm_backward",) in layer.events, "the inference-mode forward latched with the backward kernel cold"
+    assert names.index("warm_backward") < names.index("dispatch")
+    assert set(calls) == _PERMUTE_BACKWARDS, "the inference-mode forward latched with the permute kernels cold"
+    layer.events.clear()
+    _run_forward(layer)
+    assert [event[0] for event in layer.events] == ["dispatch", "compute", "combine"]
 
 
 class _ScopeCachingLayer(_RecordingLayer):

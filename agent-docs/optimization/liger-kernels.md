@@ -32,7 +32,7 @@ Toolkit-covered families (upstream has none). ✅ = patched, — = left unfused,
 | Mistral 4 | `mistral4` (a `mistral3` wrapper resolves through its text tower: `mistral4` here, `mistral` upstream) | ✅ | ✅ | — interleaved YARN; the llama-4 log scale follows it | ✅ | ✅ text-only checkpoints; [forced off under the wrapper](#fused-loss-under-a-multimodal-wrapper) |
 | Zaya | `zaya` | ✅ | — EP wrapper owns the experts | — partial rotary | ✅ | ✅ **default** |
 | DeepSeek-V4 | `deepseek_v4` | — no parity test covers the swap; the loaders cast the fp32-pinned weights to the run dtype, where the eager norm matches the kernel's output dtype | — clamped SwiGLU | — interleaved partial | ✅ | ✅ **default** |
-| GLM-4.7-Flash | `glm4_moe_lite` | ✅ | ✅ | — dual interleave/plain MLA | ✅ | ✅ **default** |
+| GLM-4.7-Flash | `glm4_moe_lite` | ✅ torch's fused `F.rms_norm` in the llama casting mode (`rms_norm_kernel="native"`) | ✅ | — dual interleave/plain MLA | ✅ | ✅ **default** |
 | Laguna | `laguna` | ✅ | ✅ | — half-width on full-attention layers, full on sliding | ✅ | ✅ |
 | GLM-5.3-Flash | `glm5_next`, `glm5_next_text` | ✅ the two plain norms **+ the GDN gated norm** (fla) | — clamped at `swiglu_limit` | — NoPE text tower | ✅ | — no `*ForCausalLM`; the `*ForConditionalGeneration` head adds the router aux loss after the projection |
 | Inkling | `inkling_text`, `inkling_mm_model` | ✅ | — trained `global_scale` on the MLP output | — no rotary (learned relative bias) | ✅ | — head divides by `logits_mup_width_multiplier` and truncates to `unpadded_vocab_size` |
@@ -124,7 +124,7 @@ over (`upstream_off`) a role upstream gets wrong for the family.
 | Qwen3.5 / 3.6 dense | `qwen3_5`, `qwen3_5_text` | RMSNorm, `Qwen3_5MLP`, FLCE | GDN gated norm → `fla` |
 | Qwen3.5 / 3.6 MoE | `qwen3_5_moe`, `qwen3_5_moe_text` | RMSNorm, FLCE | GDN gated norm → `fla`; **takes over `swiglu`**: shared-expert `Qwen3_5MoeMLP`, withholding upstream's [routed-expert swap](#routed-experts) |
 | Qwen3-Next | `qwen3_next` | RMSNorm, FLCE | GDN gated norm → `fla`; **takes over `swiglu`**: dense + shared-expert `Qwen3NextMLP`, withholding upstream's [routed-expert swap](#routed-experts) |
-| GptOss | `gpt_oss` | RoPE, FLCE | **takes over RMSNorm**: `GptOssRMSNorm` multiplies its weight in fp32 before the cast back (Gemma's casting mode); upstream applies the llama-cast `LigerRMSNorm`, a bf16-ULP deviation on every norm |
+| GptOss | `gpt_oss` | RoPE, FLCE | **takes over RMSNorm** with torch's fused `F.rms_norm` (`rms_norm_kernel="native"`): `GptOssRMSNorm` multiplies its weight in fp32 before the cast back (Gemma's casting mode); upstream applies the llama-cast `LigerRMSNorm`, a bf16-ULP deviation on every norm |
 | Gemma 4 | `gemma4_text` (the `gemma4` wrapper resolves here) | FLCE | **takes over RMSNorm** with torch's fused `F.rms_norm` (`rms_norm_kernel="native"`: fp32 normalize and weight multiply, one cast; covers the weightless `with_scale=False` norms too). At [2048, 2816] bf16 on one B300 it runs fwd+bwd in 51 µs against LigerRMSNorm's gemma mode at 203 µs, and launches in 75 µs against 218 µs, with the same error against fp64. **Takes over GeGLU**: `Gemma4TextMLP` is the dense MLP every decoder layer keeps beside its experts, so the EP wrapper never replaces it; the toolkit's fused GLU probes its activation and survives EP, where upstream's swap is forced off |
 
 `delegates_to_upstream` makes that a build-time contract: the upstream applier is looked up in liger-kernel's
@@ -200,7 +200,8 @@ One row-strided kernel pair (`src/kernels/fused_glu.py`) serves every combine, t
 gradient.
 
 Each wrapped layer logs the executed path at construction (`grouped_mm=True, glu_combine=fused_silu_mul`, or
-`glu_combine=eager`); `tests/gpu/kernels/test_fused_glu.py` checks BF16 and FP32 forward/backward numerics.
+`glu_combine=eager`, as every layer reads under `HALO_FUSED_GLU=0`); `tests/gpu/kernels/test_fused_glu.py`
+checks BF16 and FP32 forward/backward numerics.
 
 ## Configuration
 

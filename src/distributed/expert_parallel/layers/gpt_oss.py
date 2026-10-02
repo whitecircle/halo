@@ -11,7 +11,7 @@ import torch.nn.functional as F
 
 from src.distributed.expert_parallel.autograd import MoEExpertBiasGather
 from src.distributed.expert_parallel.base_layer import EPMoELayerBase
-from src.kernels.fused_glu import fused_gptoss_glu
+from src.kernels.fused_glu import fused_glu_enabled, fused_gptoss_glu
 
 
 def interleave_gate_up(gate: torch.Tensor, up: torch.Tensor) -> torch.Tensor:
@@ -140,8 +140,9 @@ class EPGptOssMoELayer(EPMoELayerBase):
             self.down_proj_bias = nn.Parameter(experts.down_proj_bias.data[start:end].clone())
 
     def _glu_combine_name(self) -> str:
-        """GptOss runs its own interleaved-bias compute paths and never reaches the base GLU seam."""
-        return "fused_gptoss_glu"
+        """GptOss runs its own interleaved-bias compute paths and never reaches the base GLU seam; every
+        path calls :func:`fused_gptoss_glu`, eager under ``HALO_FUSED_GLU=0``."""
+        return fused_gptoss_glu.__name__ if fused_glu_enabled() else "eager"
 
     def _warm_expert_activation(self, gate_up: torch.Tensor) -> torch.Tensor:
         """Warm whichever activation this layer's compute path calls (see the base method).

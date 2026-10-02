@@ -1,5 +1,5 @@
 """Autograd primitives for EP MoE layers: DeepEP dispatch/combine, GC-recompute replay variants,
-and Megatron scatter/reduce around expert-TP compute."""
+Megatron scatter/reduce around expert-TP compute, and the atomic-free expert-bias gather."""
 
 from __future__ import annotations
 
@@ -7,7 +7,6 @@ import torch
 import torch.distributed as dist
 
 from src.distributed.expert_parallel.extension import deep_ep
-from src.kernels.moe_permute import gather_reduce_rows
 
 
 def _to_topk_weights(topk_weights: torch.Tensor) -> torch.Tensor:
@@ -154,26 +153,6 @@ class ReduceFromExpertTP(torch.autograd.Function):
     @staticmethod
     def backward(ctx, grad_output):
         return grad_output, None
-
-
-# Atomic-free MoE token permute / unpermute for the grouped-GEMM expert path: index_add_ lowers to a bf16
-# atomic with no native add, so a CAS loop serialises under high top_k. A precomputed ``inv_map`` (sorted
-# positions per recv token, sentinel-padded) makes scatter-back a gather+sum. See ``_build_inv_map``.
-
-
-class MoEGatherPermute(torch.autograd.Function):
-    """``sorted = tokens[sorted_token_idx]`` (index_select gather) with an atomic-free gather-reduce
-    backward over ``inv_map``."""
-
-    @staticmethod
-    def forward(ctx, tokens: torch.Tensor, sorted_token_idx: torch.Tensor, inv_map: torch.Tensor):
-        ctx.save_for_backward(inv_map)
-        return tokens.index_select(0, sorted_token_idx)
-
-    @staticmethod
-    def backward(ctx, grad_sorted):
-        (inv_map,) = ctx.saved_tensors
-        return gather_reduce_rows(grad_sorted, inv_map), None, None
 
 
 class MoEExpertBiasGather(torch.autograd.Function):

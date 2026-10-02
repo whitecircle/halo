@@ -114,7 +114,8 @@ src/
 ├── optimizers/          # AdamWBF16 (SR), Muon, FlashAdamW (each module owns its build_*; registry.py names the `optim:`-selectable
 │                        #   muon/flash_adamw, AdamWBF16 is a create_optimizer branch)
 ├── kernels/             # grouped_gemm (precision dispatch) over the grouped_mm_autograd primitive,
-│                        #   fused_glu, moe_permute, histogram, liger/, lowp/(quantization, linear, deepgemm,
+│                        #   fused_glu, moe_permute (atomic-free token permute + un-permute), histogram, liger/,
+│                        #   lowp/(quantization, linear, deepgemm,
 │                        #   mixed_precision — the opt-in fp8/fp4 stack)
 ├── models/              # sharding-agnostic model side: structure.py (module-tree introspection),
 │                        #   moe_balancing.py (mode resolve + router/EP-family registries the layer classes

@@ -136,13 +136,10 @@ LIGER_FAMILY_SPECS: tuple[LigerFamilySpec, ...] = (
         delegates_to_upstream=True,
         upstream_off=("rms_norm",),
     ),
-    # Gemma 4: the norms (fp32 normalize and weight multiply, some built without a weight) take torch's
-    # fused kernel, which launches and runs several times cheaper than LigerRMSNorm's gemma mode at these
-    # shapes and also covers the weightless ones. Upstream owns the rotary (off, single-tensor
-    # signature) and the head; `Gemma4TextMLP` is the dense MLP every decoder layer keeps beside its
-    # experts, so the EP wrapper never replaces it. Upstream's `geglu` swaps that class for a
-    # tanh-GeGLU that never checks the activation; the toolkit's probes it and survives the wrap.
-    # `gemma4` wrappers resolve here through their text tower.
+    # Gemma 4: the norms (fp32 normalize and weight multiply, some weightless) take torch's fused kernel.
+    # Upstream owns the rotary (off) and the head. `geglu` is taken over for `Gemma4TextMLP`, the dense
+    # MLP beside every layer's experts: upstream's swap never checks the activation. `gemma4` wrappers
+    # resolve here through their text tower.
     LigerFamilySpec(
         model_types=("gemma4_text",),
         modeling_module="transformers.models.gemma4.modeling_gemma4",
