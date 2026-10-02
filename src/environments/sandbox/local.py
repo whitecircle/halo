@@ -310,8 +310,9 @@ class LocalSubprocessSandbox(SandboxExecutor):
         compile step omits it, since the compiler's fork tree is trusted. ``stack_mb`` raises the stack
         limit, clamped to this process's hard limit (which an unprivileged shell cannot raise).
         """
-        # bash ulimit units (outside POSIX mode): -t seconds (CPU), -f, -v and -s KiB, -u processes.
-        limits = [f"ulimit -t {cpu_seconds}", f"ulimit -f {LOCAL_FSIZE_LIMIT // 1024}"]
+        # bash ulimit units (outside POSIX mode): -t seconds (CPU), -f, -v and -s KiB, -u processes. -c 0: a
+        # crashing program writes no core, which the host's crash handler would otherwise store at its full size.
+        limits = [f"ulimit -t {cpu_seconds}", f"ulimit -f {LOCAL_FSIZE_LIMIT // 1024}", "ulimit -c 0"]
         if memory_mb:
             limits.append(f"ulimit -v {memory_mb * 1024}")
         if nproc:

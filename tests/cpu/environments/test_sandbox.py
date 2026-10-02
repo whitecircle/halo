@@ -162,6 +162,15 @@ def test_limit_wrap_caps_process_count_for_run_step():
     assert "ulimit -u" not in compile_wrapped[2]
 
 
+def test_a_sandboxed_program_cannot_dump_core():
+    """A crash of model-written code must not dump core: the host's crash handler stores each core at the
+    program's full size (about 1 GB under the address-space limit), on the host's disk."""
+    res = LocalSubprocessSandbox().run(
+        "import resource\nprint(resource.getrlimit(resource.RLIMIT_CORE))", timeout=10.0
+    )
+    assert res.stdout.strip() == "(0, 0)", res
+
+
 def test_execution_gate_caps_concurrency():
     """The gate admits at most ``slots`` executions at once (a judge-style queue), so a wall-clock
     time limit is not distorted by oversubscription. One slot strictly serializes; three let runs
