@@ -42,6 +42,7 @@ from src.args.distributed_args import DistributedArguments
 from src.args.environmental_grpo_args import DEFAULT_ANSWER_FIELD, EnvironmentalGRPOScriptArguments
 from src.configs.async_training_config import AsyncTrainingConfig
 from src.configs.environment_config import EnvironmentConfig
+from src.data.pipeline.conversation import as_conversation
 from src.data.pipeline.processing import (
     missing_render_column_splits,
     process_dataset_with_map_and_filter,
@@ -50,12 +51,11 @@ from src.data.pipeline.processing import (
 from src.data.pipeline.rendered import render_generation_prompt
 from src.data.sources.loading import reject_image_columns
 from src.distributed.loading.peft_setup import setup_peft_model
-from src.distributed.runtime import barrier, broadcast_from_rank0, is_global_main_process
-from src.distributed.tensor_parallel.state_dict import input_embeddings_tp_sharded
+from src.distributed.runtime import barrier
+from src.environments.base import ANSWER_KEY
 from src.environments.episode import bind_episode_effort
-from src.environments.registry import create_environment, get_registered_environments
+from src.environments.registry import create_environment
 from src.models.loading.model_preparation import log_model_info
-from src.models.loading.tokenizer_setup import get_model_context_window, setup_model_and_tokenizer
 from src.trainers.grpo.environmental import DistributedAsyncEnvironmentalGRPOTrainer
 from src.trainers.grpo.rollout.trajectory_tokenize import rollout_template_kwargs
 from src.trainers.grpo.rollout.weight_sync_clients import (
@@ -65,6 +65,7 @@ from src.trainers.grpo.rollout.weight_sync_clients import (
 from src.training.environment import run_training
 from src.training.parser import H4ArgumentParser
 from src.training.script_runner import (
+    apply_context_window,
     apply_distributed_trainer_config,
     build_training_callbacks,
     distributed_trainer_kwargs,
@@ -75,6 +76,7 @@ from src.training.script_runner import (
     padded_workload_attn_implementation,
     reject_unsupported_args,
     run_trainer,
+    verify_backend_on_rank0,
 )
 
 logger = get_logger(__name__, log_level="INFO")
@@ -92,7 +94,9 @@ def measure_env_prompt_overhead(environment, tokenizer, template_kwargs: dict) -
     prompt smaller than any the model will see. Rendered under ``template_kwargs`` — the rollout's
     chat-template variables and effort steer (:func:`rollout_template_kwargs`) — since the template's
     preamble depends on them. Falls back to a conservative margin when the template cannot render the
-    preamble (logged with the assumption).
+    preamble (logged with the assumption). An MCP environment learns its tools only when its first
+    reset connects to the server, and ``environment`` here is never reset, so its schema is absent and
+    the overhead under-counts by it.
     """
     messages = ([{"role": "system", "content": environment.system_prompt}] if environment.system_prompt else []) + [
         {"role": "user", "content": ""}
@@ -133,6 +137,26 @@ def probe_template_kwargs(async_config: AsyncTrainingConfig, environment) -> dic
     return rollout_template_kwargs(async_config.rollout_template_variables(), effort.level, effort.thinking_budget)
 
 
+def rollout_start_log(env_settings: dict, async_config: AsyncTrainingConfig) -> list[str]:
+    """The run's environment settings and rollout setup, as lines of the start log."""
+    if async_config.rollout_server_configs:
+        servers = [
+            f"rollout_server_{i}: {cfg['url']} (port {cfg.get('group_port', 'auto')})"
+            for i, cfg in enumerate(async_config.rollout_server_configs)
+        ]
+    else:
+        servers = [f"rollout_server: {async_config.rollout_server_url}"]
+    return [
+        *(f"{key}: {value}" for key, value in env_settings.items()),
+        f"rollout_workers: {async_config.num_rollout_workers}",
+        f"max_concurrent: {async_config.max_concurrent_rollouts or 'auto'}",
+        *servers,
+        f"weight_sync: every {async_config.sync_weights_every_n_steps} steps",
+        f"prefetch: {'enabled' if async_config.enable_prefetch else 'disabled'}",
+        f"model: {async_config.model_name}",
+    ]
+
+
 def process_dataset(args: EnvironmentalGRPOScriptArguments, tokenizer, ds):
     """Process a loaded dataset for Environmental GRPO."""
 
@@ -141,7 +165,7 @@ def process_dataset(args: EnvironmentalGRPOScriptArguments, tokenizer, ds):
         too, keeping every writer batch's Arrow schema identical."""
         result = {}
         if args.answer_field and args.answer_field in row:
-            result["answer"] = row[args.answer_field]
+            result[ANSWER_KEY] = row[args.answer_field]
         for field in args.context_fields or []:
             if field in row:
                 result[field] = row[field]
@@ -155,17 +179,8 @@ def process_dataset(args: EnvironmentalGRPOScriptArguments, tokenizer, ds):
         return {"prompt": blank, **carried_columns(row)}
 
     def process_for_grpo(row):
-        prompt_field = args.prompt_field
-        prompt = row.get(prompt_field)
-
-        if prompt is None:
-            return rejected_row(row)
-
-        if isinstance(prompt, list):
-            messages = prompt
-        elif isinstance(prompt, str):
-            messages = [{"role": "user", "content": prompt}]
-        else:
+        messages = as_conversation(row.get(args.prompt_field))
+        if not isinstance(messages, list):
             return rejected_row(row)
 
         # The rendered text is only the length probe; the environment replays the message list.
@@ -193,7 +208,7 @@ def process_dataset(args: EnvironmentalGRPOScriptArguments, tokenizer, ds):
     for column in args.context_fields or []:
         if column:
             require_render_column(ds, str(args.dataset), "context_fields", column)
-    keep_columns = {"prompt", "answer"} | set(args.context_fields or [])
+    keep_columns = {"prompt", ANSWER_KEY} | set(args.context_fields or [])
     columns_to_remove = [col for col in original_columns if col not in keep_columns]
 
     processed_ds = process_dataset_with_map_and_filter(
@@ -226,19 +241,11 @@ def main():
     )
     args, env_config, async_config, grpo_config, model_config, dist_args = parser.parse()
 
-    available = get_registered_environments()
-    if env_config.environment_type not in available:
-        raise ValueError(
-            f"Unknown environment_type: '{env_config.environment_type}'. Available: {available}. "
-            f"For custom environments, register the class with register_environment() or pass "
-            f"environment_cls to the trainer."
-        )
-
-    # Tools follow the same rule: the environment's tool registry supplies the schema sent to vLLM
-    # (get_tools_schema), so a dataset tool column would never reach the rollout template. The weight
-    # sync forwards trainer parameter names verbatim, and the text-only CausalLM sibling spells its
-    # decoder model.layers.* where the multimodal checkpoint the server loads spells
-    # model.language_model.layers.*, so every dense tensor would miss its slot on the first sync.
+    # The environment's tool registry supplies the schema sent to the rollout server (get_tools_schema),
+    # so a dataset tool column would never reach the rollout template. The weight sync forwards trainer
+    # parameter names verbatim, and the text-only CausalLM sibling spells its decoder model.layers.*
+    # where the multimodal checkpoint the server loads spells model.language_model.layers.*, so every
+    # dense tensor would miss its slot on the first sync.
     reject_unsupported_args(
         "Environmental GRPO", tools_field=args.tools_field, text_only_model=dist_args.text_only_model
     )
@@ -252,8 +259,10 @@ def main():
         )
 
     # A throwaway env for the startup checks below (max_turns=None takes the class default), built
-    # before any load so an environment_kwargs the environment refuses fails here.
-    probe_env = create_environment(env_config.environment_type, env_config.to_env_config())
+    # before any load so an unknown environment_type, or an environment_kwargs the environment
+    # refuses, fails here.
+    env_settings = env_config.to_env_config()
+    probe_env = create_environment(env_config.environment_type, env_settings)
 
     runtime = init_training_script(
         args,
@@ -277,15 +286,8 @@ def main():
     # constant only.
     grpo_config.max_completion_length = async_config.rollout_max_tokens
 
-    # tokenizer.model_max_length is the model's context window, the same limit vLLM enforces during
-    # rollout; the trainer raises on a trajectory that exceeds it rather than truncating.
-    tokenizer = setup_model_and_tokenizer(
-        args,
-        model,
-        tokenizer,
-        get_model_context_window(model, tokenizer),
-        embeddings_sharded=input_embeddings_tp_sharded,
-    )
+    # The trainer raises on a trajectory past the window rather than truncating.
+    tokenizer = apply_context_window(args, model, tokenizer)
 
     peft_config = setup_peft_model(args, model, model_config, "CAUSAL_LM")
     log_model_info(model, tokenizer)
@@ -296,6 +298,7 @@ def main():
         args,
         parallelism_config,
         conversation_field=args.prompt_field,
+        conversation_knob="prompt_field",
     )
     # process_dataset keeps only prompt/answer/context_fields, so an image column would be pruned and
     # the run would train on the rows' text alone.
@@ -332,47 +335,15 @@ def main():
 
     # Environments that score through an external backend (an LLM judge) probe it here: a bad
     # URL/key/model would otherwise mark every episode invalid and the job would train on zero
-    # advantage. Rank 0 probes and broadcasts so all ranks raise together.
-    probe_error: str | None = None
-    if is_global_main_process():
-        try:
-            probe_env.verify_backend()
-        except Exception as e:
-            probe_error = (
-                f"Environment backend probe failed for environment_type={env_config.environment_type!r}: {e}. "
-                f"Fix the environment config before launching."
-            )
-    probe_error = broadcast_from_rank0(probe_error)
-    if probe_error is not None:
-        raise RuntimeError(probe_error)
+    # advantage.
+    verify_backend_on_rank0(
+        probe_env.verify_backend, f"Environment backend of environment_type={env_config.environment_type!r}"
+    )
 
     grpo_config.reward_weights = [1.0]
     apply_distributed_trainer_config(grpo_config, parallelism_config)
 
     barrier()
-
-    # Parallelism sizes are logged by run_trainer's canonical start log.
-    if is_global_main_process():
-        sep = "=" * 60
-        logger.info(sep)
-        logger.info(f"Distributed Environmental GRPO — {env_config.environment_type} (mode: {runtime.mode_suffix})")
-        logger.info(sep)
-
-        env_cfg = env_config.to_env_config()
-        for k, v in env_cfg.items():
-            logger.info(f"  {k}: {v}")
-
-        logger.info(f"  rollout_workers: {async_config.num_rollout_workers}")
-        logger.info(f"  max_concurrent: {async_config.max_concurrent_rollouts or 'auto'}")
-        if async_config.rollout_server_configs:
-            for i, cfg in enumerate(async_config.rollout_server_configs):
-                logger.info(f"  rollout_server_{i}: {cfg['url']} (port {cfg.get('group_port', 'auto')})")
-        else:
-            logger.info(f"  rollout_server: {async_config.rollout_server_url}")
-        logger.info(f"  weight_sync: every {async_config.sync_weights_every_n_steps} steps")
-        logger.info(f"  prefetch: {'enabled' if async_config.enable_prefetch else 'disabled'}")
-        logger.info(f"  model: {async_config.model_name}")
-        logger.info(sep)
 
     callbacks = build_training_callbacks(
         args,
@@ -398,7 +369,12 @@ def main():
         save_completions=args.save_completions,
         **distributed_trainer_kwargs(args, dist_args, parallelism_config, dataset_presharded=dataset_presharded),
     )
-    run_trainer(trainer, runtime, method_name=f"Environmental GRPO ({env_config.environment_type})")
+    run_trainer(
+        trainer,
+        runtime,
+        method_name=f"Environmental GRPO ({env_config.environment_type})",
+        extra_start_log=rollout_start_log(env_settings, async_config),
+    )
 
 
 if __name__ == "__main__":

@@ -22,7 +22,9 @@ from transformers import TrainingArguments
 
 from src.args.distill_args import DistillScriptArguments
 from src.args.distributed_args import DistributedArguments
+from src.args.mixins import SDPGArguments
 from src.args.rlvr_online_grpo_args import RLVROnlineGRPOScriptArguments
+from src.args.self_distill_args import SelfDistillationArguments
 from src.args.validation import RangeValidatedConfig
 from src.configs.async_training_config import AsyncTrainingConfig
 from src.configs.classification_config import ClassificationConfig
@@ -34,6 +36,7 @@ from src.distributed.module_registry import iter_subclasses
 from src.distributed.parallelism_config import PP_SCHEDULES
 from src.env import DEFAULT_NCCL_TIMEOUT_MINUTES
 from src.environments.base import VALID_REASONING_EFFORTS
+from src.trainers.distillation.losses import _SELF_DISTILL_LOSSES
 from src.training.parser import H4ArgumentParser, _literal_choices
 from src.training.script_runner import init_training_script
 
@@ -98,6 +101,10 @@ _RANGE_VIOLATIONS = [
     (AsyncTrainingConfig, "max_retries", "-1"),
     (AsyncTrainingConfig, "scale_rewards_std_floor", "-0.05"),
     (RLVROnlineGRPOScriptArguments, "scale_rewards_std_floor", "nan"),
+    (RLVROnlineGRPOScriptArguments, "sdpg_temperature", "0"),
+    (RLVROnlineGRPOScriptArguments, "sdpg_hint_template", "{solution}"),
+    (SelfDistillationArguments, "sdpg_beta_warmup_steps", "-1"),
+    (SelfDistillationArguments, "sdpg_hint_template", "{answr}"),
 ]
 
 # Presence guards rather than ranges, and the same bypass. Each needs a VALID yaml baseline so the
@@ -256,12 +263,15 @@ def test_async_episode_timeout_default_clears_the_watchdog_warning():
     [
         (DistributedArguments, "pipeline_schedule", PP_SCHEDULES),
         (RLVROnlineGRPOScriptArguments, "reasoning_effort", (*VALID_REASONING_EFFORTS, "random", None)),
+        (SDPGArguments, "sdpg_loss", tuple(_SELF_DISTILL_LOSSES)),
+        (SelfDistillationArguments, "reference_kl_loss", tuple(_SELF_DISTILL_LOSSES)),
     ],
-    ids=["pipeline_schedule", "reasoning_effort"],
+    ids=["pipeline_schedule", "reasoning_effort", "sdpg_loss", "reference_kl_loss"],
 )
 def test_literal_annotation_matches_its_runtime_table(owner, field_name, expected):
-    """These fields restate a tuple that lives elsewhere (PP_SCHEDULES / VALID_REASONING_EFFORTS)
-    because importing it would drag torch or the environments package into the arg dataclasses.
+    """These fields restate a tuple that lives elsewhere (PP_SCHEDULES / VALID_REASONING_EFFORTS /
+    the self-distillation loss table) because importing it would drag torch or the environments
+    package into the arg dataclasses.
     Pin the equality — via the parser's own choice extractor — so the restatement cannot drift."""
     declared = _literal_choices(get_type_hints(owner)[field_name])
     assert declared is not None, (

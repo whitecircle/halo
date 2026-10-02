@@ -13,6 +13,7 @@ from dataclasses import replace
 from typing import Any
 
 from src.environments.base import (
+    ANSWER_KEY,
     EPISODE_INVALID_KEY,
     EPISODE_INVALID_REASON_KEY,
     EPISODE_SLICES_KEY,
@@ -601,7 +602,7 @@ class CodeContestsEnvironment(NativeToolUseEnvironment):
         Any other payload raises, failing the episode at reset: graded against no tests, it would
         score 0 inside its GRPO group, indistinguishable from a wrong solution.
         """
-        answer = context.get("answer", {})
+        answer = context.get(ANSWER_KEY, {})
         if isinstance(answer, str):
             try:
                 answer = json.loads(answer)

@@ -5,7 +5,7 @@ flush folds them into ``self._metrics[mode]``; a stand-in that drives one such m
 accumulator and a single-process flush to read the metric the way TRL's ``log`` would.
 """
 
-from src.trainers.grpo.rollout.rollout_metrics import WorldMetrics
+from src.trainers.grpo.world_metrics import WorldMetrics
 
 
 def attach_world_metrics(host):

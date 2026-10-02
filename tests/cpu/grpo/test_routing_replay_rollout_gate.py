@@ -70,7 +70,7 @@ def _rollout(
 def _host():
     """A trainer stand-in exposing the REAL per-turn tokenizer, gate and uniform raise.
 
-    Single-process, so ``_raise_batch_error_uniformly`` skips its all-reduce and raises the recorded
+    Single-process, so ``_raise_batch_error_uniformly`` skips its gather and raises the recorded
     error directly — the gate's verdict is the assertion, not a mocked one.
     """
     host = types.SimpleNamespace(
@@ -85,7 +85,7 @@ def _host():
         _carry_reasoning=False,
         _max_train_row_tokens=None,
         _rows_over_cap=0,
-        _warned_capture_missing=False,
+        _warned_once=set(),
         _tokenizer=types.SimpleNamespace(model_max_length=4096),
         pad_token_id=0,
         eos_token_id=1,
@@ -95,6 +95,7 @@ def _host():
     for name in ("_tokenize_trajectory_turns", "_masked_trajectory_tensors", "_context_limit"):
         setattr(host, name, types.MethodType(getattr(Trainer, name), host))
     host._assemble_rollout_routing = types.MethodType(Trainer._assemble_rollout_routing, host)
+    host._record_batch_error = types.MethodType(Trainer._record_batch_error, host)
     host._raise_batch_error_uniformly = types.MethodType(Trainer._raise_batch_error_uniformly, host)
     return host
 

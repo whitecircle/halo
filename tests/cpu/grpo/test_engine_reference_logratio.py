@@ -10,6 +10,7 @@ import pytest
 import torch
 from accelerate import PartialState
 
+from src.configs.async_training_config import AsyncTrainingConfig
 from src.distributed.nccl.clients.sglang import SGLangWeightSyncClient
 from src.distributed.nccl.clients.vllm import VLLMWeightSyncClient as VLLMClient
 from src.trainers.grpo.environmental import DistributedAsyncEnvironmentalGRPOTrainer
@@ -18,6 +19,12 @@ from src.trainers.grpo.rollout import async_rollouts
 from tests.common.grpo_metrics import attach_world_metrics, flushed_metrics
 
 PartialState()  # the re-score reports through accelerate's logger, which refuses to log without it
+
+
+def _pair(stats: dict, key: str) -> tuple[float, float]:
+    """A diagnostic's ``(numerator, denominator)`` read off the device, where the stage leaves both."""
+    assert all(isinstance(v, torch.Tensor) for v in stats[key]), "the pair must stay on device for one read"
+    return tuple(float(v) for v in stats[key])
 
 
 def test_mask_logratio_reads_the_engine_diff_only_on_rescored_rows():
@@ -31,10 +38,10 @@ def test_mask_logratio_reads_the_engine_diff_only_on_rescored_rows():
     )
     assert torch.allclose(mask_diff[0], torch.tensor([0.01, -0.01, 0.0]))
     assert torch.allclose(mask_diff[1], trainer_diff[1]), "a row without a re-score keeps the trainer diff"
-    assert stats["sampling/engine_logratio_mean"] == (pytest.approx(0.0), 2)
+    assert _pair(stats, "sampling/engine_logratio_mean") == (pytest.approx(0.0), 2)
     # recompute − engine summed over the two re-scored tokens: −0.06 + −0.04
-    assert stats["sampling/numerics_logratio_mean"] == (pytest.approx(-0.10), 2)
-    assert stats["sampling/engine_rescore_coverage"] == (2, 5)
+    assert _pair(stats, "sampling/numerics_logratio_mean") == (pytest.approx(-0.10), 2)
+    assert _pair(stats, "sampling/engine_rescore_coverage") == (2, 5)
 
 
 def test_numerics_mean_is_recompute_minus_engine_over_rescored_tokens():
@@ -45,8 +52,8 @@ def test_numerics_mean_is_recompute_minus_engine_over_rescored_tokens():
     _, stats = select_mask_logratio(
         recompute - sampling, recompute, sampling, engine_now, corrected, torch.tensor([True])
     )
-    assert stats["sampling/numerics_logratio_mean"] == (pytest.approx(-0.16), 4)
-    assert stats["sampling/engine_logratio_mean"] == (pytest.approx(0.04), 4)
+    assert _pair(stats, "sampling/numerics_logratio_mean") == (pytest.approx(-0.16), 4)
+    assert _pair(stats, "sampling/engine_logratio_mean") == (pytest.approx(0.04), 4)
 
 
 class _FakeClient:
@@ -85,22 +92,21 @@ def test_rescore_clients_are_built_per_rank_from_the_server_urls(monkeypatch):
     host = types.SimpleNamespace(
         _engine_rescore_clients_list=None,
         _weight_sync_client=None,
-        _multi_server_mode=True,
-        async_config=types.SimpleNamespace(
-            rollout_backend="vllm",
+        async_config=AsyncTrainingConfig(
             rollout_connection_timeout=7.0,
+            rollout_server_url="http://single:8000",
             rollout_server_configs=[{"url": "http://a:8000"}, {"url": "http://b:8001"}],
         ),
     )
     clients = DistributedAsyncEnvironmentalGRPOTrainer._engine_rescore_clients.__get__(host)()
-    assert built == [("http://a:8000", 7.0), ("http://b:8001", 7.0)]
+    assert built == [("http://a:8000", 7.0), ("http://b:8001", 7.0)], "the configs list overrides the single URL"
     assert DistributedAsyncEnvironmentalGRPOTrainer._engine_rescore_clients.__get__(host)() is clients, "built once"
-    host.async_config.rollout_server_configs = []
-    host._multi_server_mode = False
-    host.async_config.rollout_server_url = "http://single:8000"
-    host._engine_rescore_clients_list = None
-    DistributedAsyncEnvironmentalGRPOTrainer._engine_rescore_clients.__get__(host)()
-    assert built[-1] == ("http://single:8000", 7.0)
+    for single_server in (None, []):
+        host.async_config.rollout_server_configs = single_server
+        host._engine_rescore_clients_list = None
+        before = len(built)
+        DistributedAsyncEnvironmentalGRPOTrainer._engine_rescore_clients.__get__(host)()
+        assert built[before:] == [("http://single:8000", 7.0)], f"configs={single_server!r} builds the single URL"
 
 
 def test_rescore_path_never_reads_the_main_process_sync_client():

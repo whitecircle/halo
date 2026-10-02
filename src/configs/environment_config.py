@@ -53,7 +53,19 @@ class EnvironmentConfig(RangeValidatedConfig):
     )
 
     def __post_init__(self):
+        self._normalize_environment_type()
         self._validate_ranges()
+
+    def __post_override__(self, overridden_fields: set[str]) -> None:
+        self._normalize_environment_type()
+        super().__post_override__(overridden_fields)
+
+    def _normalize_environment_type(self) -> None:
+        """Spell ``environment_type`` as the registry keys it (lowercased), so every consumer comparing
+        the name — the run name, the coding eval's env check — reads the type the run resolves."""
+        if not isinstance(self.environment_type, str):
+            raise ValueError(f"environment_type must be a registry name, got {self.environment_type!r}")
+        self.environment_type = self.environment_type.lower()
 
     def _validate_ranges(self) -> None:
         super()._validate_ranges()

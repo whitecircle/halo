@@ -431,17 +431,18 @@ def _require_tools_field_somewhere(paths: list, datasets: list, tools_field: str
 
 
 def _apply_conversation_field(
-    dataset: DatasetDict, path: str, conversation_field: str | None, *, required: bool
+    dataset: DatasetDict, path: str, conversation_field: str | None, *, required: bool, knob: str
 ) -> None:
     """Drop rows with an empty conversation from whichever of train/test ``dataset`` carries, in place.
 
     ``required`` (the caller declared its render column, see :data:`_UNDECLARED`) additionally makes
-    the column's absence fatal instead of the no-op filtering below.
+    the column's absence fatal instead of the no-op filtering below, naming ``knob``, the config
+    field the script reads the column name from.
     """
     if conversation_field is None:
         return
     if required:
-        require_render_column(dataset, path, "conversation_field", conversation_field)
+        require_render_column(dataset, path, knob, conversation_field)
     for split in ("train", "test"):
         if split in dataset:
             dataset[split] = _filter_empty_conversations(dataset[split], conversation_field, split_name=split)
@@ -538,7 +539,13 @@ def load_datasets(
     data_parallel_rank: int = 0,
     data_parallel_size: int = 1,
     tools_field: str | None = None,
+    conversation_knob: str = "conversation_field",
 ):
+    """Load one raw dataset or a list of them into a fingerprinted train/test ``DatasetDict``.
+
+    A declared ``conversation_field`` must exist; the refusal names ``conversation_knob``, the config
+    field the caller read the column name from (``prompt_field`` on the GRPO prompt scripts).
+    """
     # No outer barrier: _load_dataset_from_path coordinates the downloads and the rest is
     # rank-deterministic.
     if dataset_ratio is None:
@@ -583,7 +590,9 @@ def load_datasets(
                 # An entry's split set decides how many coordinated operations run over it below, so
                 # a per-rank read that disagrees would desynchronize the store phases.
                 _reject_divergent_split_presence(ds_dict, entry_path)
-            _apply_conversation_field(ds_dict, entry_path, conversation_field, required=declared_conversation_field)
+            _apply_conversation_field(
+                ds_dict, entry_path, conversation_field, required=declared_conversation_field, knob=conversation_knob
+            )
         if tools_field:
             _require_tools_field_somewhere(path, all_datasets, tools_field)
 
@@ -592,7 +601,7 @@ def load_datasets(
         declared_render_columns = {
             knob: column
             for knob, column in (
-                ("conversation_field", conversation_field if declared_conversation_field else None),
+                (conversation_knob, conversation_field if declared_conversation_field else None),
                 ("tools_field", tools_field),
             )
             if column
@@ -648,7 +657,9 @@ def load_datasets(
         # Only a raw sharded load can return a partial DatasetDict (missing splits are skipped).
         _require_train_test_splits(ds, path)
         content_sig = _content_signature(ds)
-        _apply_conversation_field(ds, path, conversation_field, required=declared_conversation_field)
+        _apply_conversation_field(
+            ds, path, conversation_field, required=declared_conversation_field, knob=conversation_knob
+        )
         if tools_field:
             # Optional knob, so a typo does not surface downstream: rows render without tools.
             require_render_column(ds, path, "tools_field", tools_field)

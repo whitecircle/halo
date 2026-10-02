@@ -25,7 +25,7 @@ import gradio as gr
 from scripts._common import add_openai_endpoint_args
 from scripts.inference._common import add_gradio_server_args, launch_gradio
 from src.configs.rollout_config import RolloutConfig
-from src.environments.base import Trajectory
+from src.environments.base import ANSWER_KEY, Trajectory
 from src.environments.eval_runner import require_answers, run_episode
 from src.environments.registry import get_registered_environments, resolve_environment
 from src.inference.openai_client import DEFAULT_LOCAL_BASE_URL, create_openai_client
@@ -40,9 +40,9 @@ def build_context(expected_answer: str) -> dict[str, Any]:
     context: dict[str, Any] = {}
     if expected_answer:
         try:
-            context["answer"] = json.loads(expected_answer)
+            context[ANSWER_KEY] = json.loads(expected_answer)
         except (json.JSONDecodeError, TypeError):
-            context["answer"] = expected_answer
+            context[ANSWER_KEY] = expected_answer
     return context
 
 

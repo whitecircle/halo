@@ -38,12 +38,12 @@ output_dir: checkpoints/self-distill-qwen3.5-9b
 
 | Knob | Default | Effect |
 |---|---|---|
-| `sdpg_hint_template` | `\n[Hint] The correct answer is: {answer}. ...\n` | Appended to the last user turn, teacher forward only |
+| `sdpg_hint_template` | `\n[Hint] The correct answer is: {answer}. ...\n` | Appended to the last user turn, teacher forward only. Fills `{answer}` and `{solution}`; any other placeholder is refused at parse time |
 | `sdpg_answer_field` / `privileged_solution_field` | `answer` / `solution` | Columns filling `{answer}` and `{solution}` |
 | `sdpg_loss` | `reverse_kl` | OPD loss; or `forward_kl`, `unnormalized_kl` |
-| `sdpg_temperature` | `1.0` | OPD softmax temperature; all three losses scale by `T²` |
-| `sdpg_beta_base` | `1.0` | Base OPD coefficient; `0` skips the teacher forward entirely |
-| `sdpg_beta_warmup_steps` / `sdpg_beta_decay_steps` | `0` / `0` | `beta(k) = base · min(1, k/T_warm) · min(1, (T−k)/T_decay)` |
+| `sdpg_temperature` | `1.0` | OPD softmax temperature, finite and `> 0`; all three losses scale by `T²` |
+| `sdpg_beta_base` | `1.0` | Base OPD coefficient, finite and `>= 0`; `0` skips the teacher forward entirely |
+| `sdpg_beta_warmup_steps` / `sdpg_beta_decay_steps` | `0` / `0` | `beta(k) = base · min(1, k/T_warm) · min(1, (T−k)/T_decay)`; each `>= 0` |
 | `opd_exclude_eos` | `True` | Drops EOS/stop tokens from OPD but not from SFT |
 | `reference_kl_coef` | `0.0` | Alpha on a frozen-reference KL anchor; `0` loads no reference. Refused under EP, ETP and TP: the dense reference would run the unpatched path, so its log-probs would not match the policy's |
 | `reference_kl_loss` | `unnormalized_kl` | The anchor's divergence; or `reverse_kl`, `forward_kl` |
@@ -95,5 +95,5 @@ Failure signatures:
 - An over-length raise naming the student or teacher branch — raise `max_length`; the hint needs headroom.
 - A student/teacher response-length mismatch warning — the two branches diverged, usually from truncation upstream.
 - Every row masked, loss flat — `assistant_message_template` does not match the rendered prefix.
-- The gold-answer column missing while `sdpg_beta_base > 0` — the run raises rather than distilling toward a teacher told the answer is nothing.
+- The gold-answer column missing while `sdpg_beta_base > 0`, or the solution column while the template names `{solution}` — the run raises rather than distilling toward a teacher told the answer is nothing.
 - A batch with no `teacher_*` branch while `sdpg_beta_base != 0`, or a trainer built with `reference_kl_coef > 0` and no `reference_model` — both raise rather than dropping the term from the loss.

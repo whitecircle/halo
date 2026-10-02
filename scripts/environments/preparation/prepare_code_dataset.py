@@ -45,6 +45,7 @@ from pathlib import Path
 from datasets import Dataset, DatasetDict, disable_caching, load_dataset
 
 from scripts.environments.preparation._common import parquet_parts
+from src.args.environmental_grpo_args import DEFAULT_ANSWER_FIELD
 from src.data.pipeline.processing import report_rejected_rows, resolve_map_num_proc
 from src.environments.envs.tasks.coding.datasets import CODE_DATASET_ADAPTERS
 from src.environments.envs.tasks.coding.grading import select_verdict
@@ -145,7 +146,7 @@ def checker_is_sound(row: dict) -> bool:
     """Whether a prepared row's special judge accepts the first test's own reference output and rejects
     garbage. A judge failing either grades every answer the same way, so its problem is dropped. A sandbox
     backend failure propagates as :class:`CheckerInfraError` instead of dropping rows."""
-    payload = json.loads(row["answer"])
+    payload = json.loads(row[DEFAULT_ANSWER_FIELD])
     checker, tests = payload.get("checker"), payload.get("tests") or []
     if not checker or not tests:
         return True
@@ -194,7 +195,7 @@ def to_rl_row(row: dict, adapter) -> dict:
         # all-None column that Arrow types as `null`, breaking save_to_disk/push_to_hub.
         "id": str(row.get("id") or row.get("problem_id") or row.get("name") or ""),
         "prompt": adapter.format_prompt(row),
-        "answer": json.dumps(adapter.pack_verification(row)),
+        DEFAULT_ANSWER_FIELD: json.dumps(adapter.pack_verification(row)),
         "rating": row.get("rating") or 0,
         "tags": row.get("tags") or [],
     }

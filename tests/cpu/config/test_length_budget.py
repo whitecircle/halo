@@ -12,9 +12,11 @@ The properties pinned here:
     it (prompt and completion truncate independently, so an over-budget split silently exceeds
     ``max_length``);
   * ``resolve_length_to_context`` treats null AND non-positive alike as "use the model's own limit";
-  * ``apply_max_length`` (one ``max_length``) and ``apply_prompt_completion_window`` (the GRPO
-    family's two budgets) are the only two writers of ``tokenizer.model_max_length``, and the latter
-    refuses to pin a partial sum — which HF would turn into a silent cap on the unbounded half.
+  * ``apply_max_length`` (one ``max_length``), ``apply_prompt_completion_window`` (offline and online
+    GRPO's two budgets) and ``apply_context_window`` (env GRPO's trajectory, bounded by the window
+    alone) are the writers of ``tokenizer.model_max_length``; the second refuses to pin a partial
+    sum — which HF would turn into a silent cap on the unbounded half — and the third pins the model's
+    resolved context window.
 
 Run: pytest tests/cpu/config/test_length_budget.py
 """
@@ -32,7 +34,7 @@ from src.models.loading.tokenizer_setup import get_model_context_window, resolve
 from src.trainers.grpo.environmental import DistributedAsyncEnvironmentalGRPOTrainer
 from src.trainers.grpo.offline import OfflineGRPOTrainer
 from src.training.parser import H4ArgumentParser
-from src.training.script_runner import apply_max_length, apply_prompt_completion_window
+from src.training.script_runner import apply_context_window, apply_max_length, apply_prompt_completion_window
 
 # resolve_length_to_context logs through accelerate's rank-aware logger, which raises until the
 # state exists. Production always has it (init_training_script runs first); mirror that here.
@@ -242,6 +244,18 @@ def test_prompt_completion_window_resolves_the_tokenizer_backend():
             max_prompt_length=512,
             max_completion_length=256,
         )
+
+
+def test_apply_context_window_pins_the_models_resolved_context_window():
+    """The window env GRPO's trainer fails a trajectory against (``_context_limit`` reads it back off
+    the tokenizer), so it must be the model's own, read through the composite-config walk."""
+    model = _model(_CompositeConfig(text_config={"max_position_embeddings": 131072}))
+    tokenizer = _setup_tokenizer()
+
+    returned = apply_context_window(_setup_args(), model, tokenizer)
+
+    assert returned is tokenizer, "apply_context_window must return the backend-resolved tokenizer"
+    assert tokenizer.model_max_length == get_model_context_window(model, tokenizer) == 131072
 
 
 def test_env_grpo_context_limit_uses_the_shared_resolver():

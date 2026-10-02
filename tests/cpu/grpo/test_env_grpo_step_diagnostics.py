@@ -22,7 +22,8 @@ from src.configs.async_training_config import AsyncTrainingConfig
 from src.environments.base import SOLVE_RATE_KEY, Trajectory
 from src.environments.episode import RolloutResult
 from src.trainers.grpo.environmental import BatchRows, DistributedAsyncEnvironmentalGRPOTrainer
-from src.trainers.grpo.rollout.rollout_metrics import WorldMetrics, group_solve_counts
+from src.trainers.grpo.rollout.rollout_metrics import group_solve_counts
+from src.trainers.grpo.world_metrics import WorldMetrics
 from tests.common.grpo_metrics import attach_world_metrics, flushed_metrics
 
 _Trainer = DistributedAsyncEnvironmentalGRPOTrainer
@@ -134,7 +135,7 @@ def _is_host(clip_max: float):
 
 def _two_rows():
     # Sampled at log-prob -1 everywhere; the trainer's ratios are 1, 4, 1/4 and 2, 1, 1.
-    sampling = [torch.full((3,), -1.0), torch.full((3,), -1.0)]
+    sampling = torch.full((2, 3), -1.0)
     recompute = torch.tensor([[0.0, math.log(4), -math.log(4)], [math.log(2), 0.0, 0.0]]) - 1.0
     rows = BatchRows([_episode(None), _episode(None)], [1, 1], 0, True)
     return sampling, recompute, rows
@@ -144,7 +145,14 @@ def test_extreme_ratios_are_those_past_the_truncation_point_either_way():
     host = _is_host(clip_max=3.0)
     sampling, recompute, rows = _two_rows()
     ratio, _, corrected, _ = _Trainer._apply_is_correction(
-        host, True, recompute, sampling, [True, True], torch.ones(2, 3, dtype=torch.bool), rows, torch.device("cpu")
+        host,
+        True,
+        recompute,
+        sampling,
+        torch.ones(2, dtype=torch.bool),
+        torch.ones(2, 3, dtype=torch.bool),
+        rows,
+        torch.device("cpu"),
     )
     _Trainer._score_is_correction(host, ratio, corrected, torch.ones(2, 3, dtype=torch.bool))
     logged = flushed_metrics(host)
@@ -160,7 +168,14 @@ def test_a_truncation_point_at_one_leaves_no_band_and_logs_no_extreme_fraction()
     host = _is_host(clip_max=1.0)
     sampling, recompute, rows = _two_rows()
     _Trainer._apply_is_correction(
-        host, True, recompute, sampling, [True, True], torch.ones(2, 3, dtype=torch.bool), rows, torch.device("cpu")
+        host,
+        True,
+        recompute,
+        sampling,
+        torch.ones(2, dtype=torch.bool),
+        torch.ones(2, 3, dtype=torch.bool),
+        rows,
+        torch.device("cpu"),
     )
     assert "sampling/is_ratio_extreme_frac" not in flushed_metrics(host)
 

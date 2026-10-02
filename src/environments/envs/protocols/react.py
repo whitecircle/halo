@@ -13,6 +13,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from src.environments.base import (
+    ANSWER_KEY,
     EPISODE_INVALID_KEY,
     EPISODE_INVALID_REASON_KEY,
     EPISODE_TOOL_BUDGETS_KEY,
@@ -269,11 +270,11 @@ Always think before acting, and provide a Final Answer when you're done."""
             context,
             system_prompt=self.system_prompt,
             extra_info={
-                "expected_answer": context.get("answer"),
+                "expected_answer": context.get(ANSWER_KEY),
                 # Presence, not value: a row whose ``answer`` cell is null is a data fault, an absent
                 # key an ungraded episode, and the reward pays them differently. Read off the RESET
                 # context, the only one that carries the row (a lost episode is graded with none).
-                "_answer_in_context": "answer" in context,
+                "_answer_in_context": ANSWER_KEY in context,
                 "final_answer": None,
                 "total_tool_calls": 0,
                 "successful_tool_calls": 0,

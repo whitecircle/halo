@@ -355,7 +355,12 @@ def test_no_script_calls_bare_get_peft_config(script: Path):
     )
 
 
-_TOKENIZER_SEAMS = ("apply_max_length", "apply_prompt_completion_window", "setup_model_and_tokenizer")
+_TOKENIZER_SEAMS = (
+    "apply_max_length",
+    "apply_prompt_completion_window",
+    "apply_context_window",
+    "setup_model_and_tokenizer",
+)
 
 # SentenceTransformers owns its own tokenizer pipeline end to end, so embedding.py resolves the
 # length against the ST transformer module instead of a toolkit seam. Listed rather than skipped so
@@ -404,6 +409,22 @@ def test_scripts_bind_the_tokenizer_their_length_seam_returns(script: Path):
         assert not seen, f"{script}: now calls a length seam — drop it from _NO_TOKENIZER_SEAM."
     else:
         assert seen, f"{script}: calls no tokenizer length seam ({', '.join(_TOKENIZER_SEAMS)})."
+
+
+@pytest.mark.parametrize("rel_path", ["online_grpo/rlvr.py", "environmental_grpo.py"])
+def test_prompt_dataset_scripts_declare_the_prompt_column_to_the_loader(rel_path: str):
+    """The GRPO prompt column is the loader's render column: declared, the loader refuses a dataset
+    without it and drops the rows whose prompt is empty, which otherwise render as an empty question
+    the policy is trained to answer. The refusal names ``conversation_knob``, so it must be the field
+    these scripts read the column from — ``conversation_field`` is no knob of theirs."""
+    tree = ast.parse((_TRAINING_DIR / rel_path).read_text(encoding="utf-8"))
+    declared = [
+        {keyword.arg: ast.unparse(keyword.value) for keyword in call.keywords}
+        for call in _named_calls(tree, "load_script_datasets")
+    ]
+    assert [(call.get("conversation_field"), call.get("conversation_knob")) for call in declared] == [
+        ("args.prompt_field", "'prompt_field'")
+    ], f"{rel_path}: load_script_datasets declares {declared}"
 
 
 _INSTALLS_PROCESSING_CLASS = (

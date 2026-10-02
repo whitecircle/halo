@@ -55,6 +55,7 @@ from scripts.environments._common import (
 )
 from src.args.environmental_grpo_args import DEFAULT_ANSWER_FIELD
 from src.configs.rollout_config import DEFAULT_ROLLOUT_MAX_TOKENS, DEFAULT_ROLLOUT_TEMPERATURE
+from src.environments.base import ANSWER_KEY
 from src.environments.eval_runner import (
     collect_results,
     load_hf_split,
@@ -159,7 +160,7 @@ def build_examples(args: argparse.Namespace) -> list[dict[str, Any]]:
             continue
         context = {}
         if args.answer_field in row:
-            context["answer"] = row[args.answer_field]
+            context[ANSWER_KEY] = row[args.answer_field]
         for field in args.context_fields:
             if field in row:
                 context[field] = row[field]

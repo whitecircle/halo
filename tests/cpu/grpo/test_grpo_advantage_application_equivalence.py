@@ -184,16 +184,12 @@ def _env_application(
     rows = BatchRows(rollout_results, turns_per_traj, num_dummy_rows, train_on_sampled_tokens)
     me = attach_world_metrics(
         types.SimpleNamespace(
-            drop_degenerate_groups=drop_degenerate_groups,
+            _drop_degenerate_groups=drop_degenerate_groups,
             args=types.SimpleNamespace(mask_truncated_completions=mask_truncated_completions),
             accelerator=types.SimpleNamespace(gather=lambda x: x),
             model=types.SimpleNamespace(training=True),
-            _empty_rollout_steps=0,
             _metrics={"train": defaultdict(list), "eval": defaultdict(list)},
         )
-    )
-    me._check_step_has_valid_episodes = types.MethodType(
-        DistributedAsyncEnvironmentalGRPOTrainer._check_step_has_valid_episodes, me
     )
 
     local_advantages = rows.to_rows(traj_advantages)

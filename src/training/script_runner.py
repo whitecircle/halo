@@ -3,10 +3,12 @@
 The backbone (``init_training_script`` → ``load_script_datasets`` → ``load_script_model`` →
 ``apply_distributed_trainer_config`` → ``run_trainer``) plus the helpers that must behave identically
 at every call site: window pins, tokenizer/attention resolution, the run's modality verdict, callback
-assembly, and the ``reject_*`` guards. Parsing tuples, collators, and trainer construction stay in the
-scripts.
+assembly, the ``reject_*`` guards and the rank-0 backend probe. Parsing tuples, collators, and trainer
+construction stay in the scripts.
 """
 
+import asyncio
+import inspect
 from collections.abc import Callable, Sequence
 from dataclasses import MISSING, fields
 from typing import Any, NamedTuple
@@ -28,9 +30,15 @@ from src.distributed.filesystem import verify_output_filesystem_sharing
 from src.distributed.loading.peft_setup import split_expert_lora_targets
 from src.distributed.loading.vlm_setup import load_model_consuming_init_kwargs
 from src.distributed.parallelism_config import ParallelismConfig
-from src.distributed.runtime import get_local_rank, init_distributed, is_global_main_process
+from src.distributed.runtime import (
+    get_local_rank,
+    init_distributed,
+    is_global_main_process,
+    raise_rank0_failure,
+)
 from src.distributed.tensor_parallel.state_dict import input_embeddings_tp_sharded
 from src.models.loading.tokenizer_setup import (
+    get_model_context_window,
     is_bounded_length,
     resolve_length_to_context,
     setup_model_and_tokenizer,
@@ -227,7 +235,8 @@ def load_script_datasets(
     Returns ``(loader_result, dataset_presharded)``. ``loader`` is any of the
     ``load_datasets``-shaped loaders (``load_datasets_auto`` returns
     ``(DatasetDict, is_preprocessed)`` — that tuple passes through unchanged); ``loader_kwargs``
-    forward extras such as ``conversation_field`` or ``seed``.
+    forward extras such as ``conversation_field`` (with ``conversation_knob`` when the script reads
+    that column from another config field) or ``seed``.
     """
     data_parallel_rank = parallelism_config.get_data_parallel_rank()
     data_parallel_size = parallelism_config.data_parallel_size
@@ -346,12 +355,29 @@ def apply_max_length(
     ``max_length`` null / non-positive means "use the model's own limit": it resolves to the context
     window and is written back, so collators, length filters and packers all read one resolved number.
     Returns the tokenizer resolved through ``args.tokenizer_backend``, which callers must use in
-    place of the one passed in. The GRPO family pins its two-knob budget through
-    :func:`apply_prompt_completion_window` instead.
+    place of the one passed in. The GRPO family pins its window through
+    :func:`apply_prompt_completion_window` or :func:`apply_context_window` instead.
     """
     training_config.max_length = resolve_length_to_context(training_config.max_length, model, tokenizer)
     return setup_model_and_tokenizer(
         args, model, tokenizer, training_config.max_length, embeddings_sharded=input_embeddings_tp_sharded
+    )
+
+
+def apply_context_window(args, model: PreTrainedModel, tokenizer: PreTrainedTokenizer) -> PreTrainedTokenizer:
+    """Pin the tokenizer to the model's context window, for a run whose sequences no configured length
+    bounds — a multi-turn trajectory grows by a turn's budget per turn, up to the same window the
+    rollout server enforces.
+
+    Returns the tokenizer resolved through ``args.tokenizer_backend`` — callers must use it in place
+    of the one passed in.
+    """
+    return setup_model_and_tokenizer(
+        args,
+        model,
+        tokenizer,
+        get_model_context_window(model, tokenizer),
+        embeddings_sharded=input_embeddings_tp_sharded,
     )
 
 
@@ -491,6 +517,24 @@ def _reject_ignored_fields(context: str, set_fields: list[str]) -> None:
             f"{context} does not support these config fields (they would be silently ignored): "
             f"{set_fields}. Remove them from the YAML."
         )
+
+
+def verify_backend_on_rank0(probe: Callable[[], object], what: str) -> None:
+    """Probe an external backend once on global rank 0 and raise its failure on every rank.
+
+    COLLECTIVE — every rank must call it, behind a rank-uniform gate. A single rank probes, so the
+    backend takes one request rather than one per rank, and its verdict is broadcast, so the ranks
+    raise together instead of the peers waiting in the next collective. A ``probe`` returning a
+    coroutine (an ``async def`` verifier) is run to completion. The ``RuntimeError`` reads
+    ``"<what> probe failed: <error>"``.
+    """
+
+    def run_probe() -> None:
+        outcome = probe()
+        if inspect.iscoroutine(outcome):
+            asyncio.run(outcome)
+
+    raise_rank0_failure(run_probe, lambda e: f"{what} probe failed: {e}")
 
 
 def load_script_model(

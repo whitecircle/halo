@@ -1,6 +1,6 @@
 """CPU tests for offline-GRPO MultiGroupSampler cross-rank determinism.
 
-Under TP/CP the sibling ranks share one DP slice (same dp_rank) and MUST iterate it in the IDENTICAL
+Under TP/ETP the sibling ranks share one DP slice (same dp_rank) and MUST iterate it in the IDENTICAL
 order — else they feed different sequences into the same sharded forward (silent divergence), and the
 global-min truncation in get_train_dataloader would even keep DIFFERENT indices per sibling. Every
 shuffle is seeded from a rank-independent ``random.Random(seed + epoch)`` rather than the process-
@@ -16,7 +16,7 @@ from accelerate import PartialState
 # MultiGroupSampler.__init__ logs via the accelerate logger, which requires an initialized state.
 PartialState()
 
-from src.trainers.grpo.mixins.dataloader import MultiGroupSampler
+from src.trainers.grpo.offline import MultiGroupSampler
 
 
 def _group_ids(num_groups=24, group_size=5):

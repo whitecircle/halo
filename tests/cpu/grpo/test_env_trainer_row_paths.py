@@ -3,7 +3,9 @@
 
 * The context-window check runs BEFORE the row cap on the per-turn path, as it always did on the
   whole-trajectory path: a row the served model could not have produced is a config error, and a cap
-  set below the context must not absorb it as "over cap".
+  set below the context must not absorb it as "over cap". On both paths a row of exactly the window
+  trains and one token more is recorded, the first failure of a step kept; a malformed
+  ``routed_experts`` payload is recorded too, never raised on one rank.
 * ``sampling/rows_over_cap_frac`` counts each row once: rows the cap left out over those plus the rows
   that train. An over-cap trajectory comes back as a zero-weight placeholder, which is neither — a
   count that took the placeholder as a built row read eight all-over-cap trajectories as 0.5.
@@ -21,6 +23,7 @@
 import types
 from collections import defaultdict
 
+import numpy as np
 import pytest
 import torch
 from trl.trainer.utils import pad
@@ -30,8 +33,13 @@ from src.environments.engine_wire import capture_generation_tokens
 from src.environments.episode import RolloutResult, TurnGeneration, step_context_from_generation
 from src.trainers.grpo.environmental import BatchRows, DistributedAsyncEnvironmentalGRPOTrainer, rollout_valid_mask
 from src.trainers.grpo.objective.logratio import zero_engine_forced_closes
-from src.trainers.grpo.rollout.trajectory_tokenize import UNTRAINABLE_TURNS_ROWLESS_FRAC_KEY
+from src.trainers.grpo.rollout.routing_replay import RoutingReplayInjector
+from src.trainers.grpo.rollout.trajectory_tokenize import (
+    SAMPLED_IDS_MISSING_WARNING,
+    UNTRAINABLE_TURNS_ROWLESS_FRAC_KEY,
+)
 from tests.common.grpo_metrics import attach_world_metrics, flushed_metrics
+from tests.common.routing import BareEPLayer, npy_routing_payload
 
 _ROLE_TOKENS = {"user": 1001, "assistant": 1002, "tool": 1003, "system": 1004}
 _END_TOKEN = 1000
@@ -57,7 +65,7 @@ def _trainer(cap: int | None = None, per_turn: bool = True, context_limit: int =
     trainer._rollout_routing_replay = False
     trainer._rollout_backend = "vllm"
     trainer._batch_build_error = None
-    trainer._warned_capture_missing = False
+    trainer._warned_once = set()
     trainer._rollout_template_kwargs = {}
     trainer._carry_reasoning = False
     trainer._max_train_row_tokens = cap
@@ -70,10 +78,9 @@ def _trainer(cap: int | None = None, per_turn: bool = True, context_limit: int =
     trainer.eos_token_id = 2
     trainer.pad_token_id = 0
     trainer._render_messages_to_ids = _flat_render
-    trainer.drop_degenerate_groups = False
+    trainer._drop_degenerate_groups = False
     trainer.args = types.SimpleNamespace(mask_truncated_completions=False)
     trainer.accelerator = types.SimpleNamespace(gather=lambda x: x)
-    trainer._empty_rollout_steps = 0
     return trainer
 
 
@@ -99,6 +106,54 @@ def test_a_per_turn_row_under_the_context_but_over_the_cap_is_only_over_cap():
     trainer = _trainer(cap=3, context_limit=100)
     trainer._tokenize_trajectory_turns(_result(_turn([1, 2, 3, 4, 5], prompt_len=3)))
     assert trainer._batch_build_error is None and trainer._rows_over_cap == 1
+
+
+# --- the context check's recording sites -----------------------------------------------------------------
+
+
+def _trajectory_tokens(result: RolloutResult) -> int:
+    """The whole-trajectory render's length, prompt plus completion."""
+    prompt, completion, _ = _trainer(per_turn=False)._tokenize_trajectory(result)
+    return len(prompt) + len(completion)
+
+
+@pytest.mark.parametrize("per_turn", [False, True], ids=["whole-trajectory", "per-turn"])
+def test_a_row_of_exactly_the_context_trains_and_one_token_more_is_recorded(per_turn):
+    result = _result(_turn([5, 6, 7], prompt_len=3))
+    tokens = 6 if per_turn else _trajectory_tokens(result)
+    tokenize = "_tokenize_trajectory_turns" if per_turn else "_tokenize_trajectory"
+
+    at_window = _trainer(per_turn=per_turn, context_limit=tokens)
+    getattr(at_window, tokenize)(result)
+    assert at_window._batch_build_error is None, at_window._batch_build_error
+
+    one_over = _trainer(per_turn=per_turn, context_limit=tokens - 1)
+    getattr(one_over, tokenize)(result)
+    error = one_over._batch_build_error
+    assert error is not None and f"of {tokens} tokens" in error and f"context window {tokens - 1}" in error, error
+
+
+def test_a_whole_trajectory_overflow_is_recorded_and_the_steps_first_failure_kept():
+    first, second = _result(Message.assistant("aaaa")), _result(Message.assistant("bb"))
+    trainer = _trainer(per_turn=False, context_limit=2)
+    trainer._tokenize_step_rows([first, second])
+    error = trainer._batch_build_error
+    assert error is not None and error.startswith(f"Trajectory of {_trajectory_tokens(first)} tokens"), error
+
+
+def test_a_malformed_routed_experts_payload_is_recorded_and_the_turn_trains_unrouted():
+    """The engine shipped one layer row per token for a model with two decoder layers."""
+    trainer = _trainer()
+    trainer._rollout_routing_replay = True
+    trainer._routing_injector = RoutingReplayInjector(
+        [BareEPLayer(top_k=2, num_experts=8)], engine_layers=2, layer_indices=[1]
+    )
+    payload = npy_routing_payload(np.zeros((5, 1, 2), dtype=np.int32))
+    rows = trainer._tokenize_trajectory_turns(_result(_turn([5, 6, 7], routing_mask=payload, routing_prompt_tokens=2)))
+    error = trainer._batch_build_error
+    assert error is not None and error.startswith("routing_replay='rollout': malformed routed_experts payload:"), error
+    assert "decoder layers" in error, error
+    assert [row.turn_routing for row in rows] == [None]
 
 
 # --- sampling/rows_over_cap_frac counts each row once --------------------------------------------------
@@ -143,7 +198,7 @@ def test_a_zero_token_turn_yields_no_row_and_the_other_turns_still_train_per_tur
     trainer._tokenize_trajectory = lambda result: pytest.fail("a captured trajectory must not re-render")
     rows = trainer._tokenize_trajectory_turns(_result(_turn([5, 6]), _turn([], prompt_len=3), _turn([7])))
     assert [r.completion_ids.tolist() for r in rows] == [[5, 6], [7]]
-    assert trainer._warned_capture_missing is False
+    assert SAMPLED_IDS_MISSING_WARNING not in trainer._warned_once
 
 
 def test_an_all_empty_trajectory_is_one_masked_row_without_a_re_render():
@@ -159,7 +214,7 @@ def test_a_trainable_turn_with_no_capture_still_falls_the_trajectory_back():
     trainer._tokenize_trajectory = lambda result: sentinel
     rows = trainer._tokenize_trajectory_turns(_result(_turn([5, 6]), _turn(None, prompt_len=3)))
     assert len(rows) == 1 and rows[0].completion_ids.tolist() == [99]
-    assert trainer._warned_capture_missing is True
+    assert SAMPLED_IDS_MISSING_WARNING in trainer._warned_once
 
 
 def test_an_untrainable_turn_without_capture_does_not_force_the_fallback():
@@ -169,7 +224,7 @@ def test_an_untrainable_turn_without_capture_does_not_force_the_fallback():
     trainer._tokenize_trajectory = lambda result: pytest.fail("the trainable turn is captured; no re-render")
     rows = trainer._tokenize_trajectory_turns(_result(_turn(None, truncated=True), _turn([7, 8])))
     assert [r.completion_ids.tolist() for r in rows] == [[7, 8]]
-    assert trainer._warned_capture_missing is False
+    assert SAMPLED_IDS_MISSING_WARNING not in trainer._warned_once
 
 
 # --- untrainable turns: negative-only rows ------------------------------------------------------------

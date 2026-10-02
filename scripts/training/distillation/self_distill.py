@@ -5,10 +5,11 @@ Privileged-context self-distillation on top of SFT (:class:`DistributedSelfDisti
 one model is both the student (prompt only) and a privileged teacher (prompt + a hint revealing
 the gold answer), and the teacher's full-vocabulary distribution supervises the student on the
 shared response tokens (``L = L_sft + beta(k)·L_OPD + alpha·L_ref``). One script serves both text
-and vision-language models — ``load_model_for_training`` auto-detects the modality and selects the
-text or VLM self-distillation collator. This is the offline SDPG approximation (scores a fixed
-dataset; the faithful on-policy SDPG runs via ``online_grpo/rlvr.py --use_sdpg``). For
-off-policy teacher→student distillation use ``teacher_distill.py``.
+and vision-language models: the run's modality (``resolve_vlm_run``, read off the data and the
+checkpoint) selects the text or VLM self-distillation collator. This is the offline SDPG
+approximation (scores a fixed dataset; the faithful on-policy SDPG runs via
+``online_grpo/rlvr.py --use_sdpg``). For off-policy teacher→student distillation use
+``teacher_distill.py``.
 
 Dataset: raw SFT conversations (``conversation_field``) plus a privileged answer field (VLM adds an
 ``images`` column). The collator tokenizes the student and teacher (hinted) branches at collation
@@ -21,14 +22,12 @@ Usage:
 That student is dense, so it takes no --expert_parallel_size; the MoE configs pin it themselves.
 """
 
-from dataclasses import fields
-
 from accelerate.logging import get_logger
 from transformers import PreTrainedModel
 from trl import ModelConfig, SFTConfig
 
 from src.args.distributed_args import DistributedArguments
-from src.args.mixins import SDPGArguments
+from src.args.mixins import format_field_names
 from src.args.self_distill_args import SelfDistillationArguments
 from src.data.collators.self_distill import SelfDistillTextCollator, audit_self_distill_row
 from src.data.collators.vlm import SelfDistillVLMDataCollator
@@ -64,16 +63,21 @@ from src.training.script_runner import (
 logger = get_logger(__name__, log_level="INFO")
 
 
-def _require_privileged_answer_column(ds, args) -> None:
-    """Raise when the hint's answer column is absent while the OPD term carries weight.
+def _require_privileged_columns(ds, args) -> None:
+    """Raise when a column the hint fills is absent while the OPD term carries weight.
 
-    The collators read it with ``.get``, so a missing column renders the hint with an EMPTY answer
-    and the OPD term distils toward a teacher told the answer is nothing. The on-policy arm
-    (:class:`DistributedSDPGTrainer`) gates the same way; this is the offline half of it.
+    The collators read both with ``.get``, so a missing column renders its slot EMPTY and the OPD
+    term distils toward a teacher told the answer is nothing, or handed a blank solution. The
+    on-policy arm (:class:`DistributedSDPGTrainer`) gates its answer the same way; this is the
+    offline half of it. The solution column is optional, so it is demanded only where the template
+    names ``{solution}``.
     """
-    if args.sdpg_beta_base == 0.0 or not args.sdpg_answer_field:
+    if args.sdpg_beta_base == 0.0:
         return
-    require_render_column(ds, str(args.dataset), "sdpg_answer_field", args.sdpg_answer_field)
+    if args.sdpg_answer_field:
+        require_render_column(ds, str(args.dataset), "sdpg_answer_field", args.sdpg_answer_field)
+    if args.privileged_solution_field and "solution" in format_field_names(args.sdpg_hint_template):
+        require_render_column(ds, str(args.dataset), "privileged_solution_field", args.privileged_solution_field)
 
 
 def _build_text_dataset_and_collator(ds, args, tokenizer, max_length, model_config, num_proc):
@@ -232,7 +236,7 @@ def main():
     parallelism_config = runtime.parallelism_config
 
     ds, dataset_presharded = load_script_datasets(args, parallelism_config, conversation_field=args.conversation_field)
-    _require_privileged_answer_column(ds, args)
+    _require_privileged_columns(ds, args)
     # The data path follows the run, not the checkpoint class: a natively-multimodal student
     # distilled on text-only rows is a text run (see is_vlm_run). Decided before the model load,
     # which requires the checkpoint's processor for an image run.
@@ -293,11 +297,7 @@ def main():
         **distributed_trainer_kwargs(
             args, distributed_args, parallelism_config, dataset_presharded=dataset_presharded
         ),
-        **{
-            f.name: getattr(args, f.name)
-            for f in fields(SDPGArguments)
-            if f.name not in SelfDistillationArguments.DATASET_SIDE_SDPG_FIELDS
-        },
+        **args.build_sdpg_kwargs(),
         reference_model=reference_model,
         reference_kl_coef=args.reference_kl_coef,
         reference_kl_loss=args.reference_kl_loss,

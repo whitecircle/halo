@@ -12,7 +12,7 @@ from contextlib import contextmanager
 from contextvars import ContextVar
 from typing import Any
 
-from src.environments.base import EPISODE_INVALID_KEY, EpisodeGrade, Trajectory
+from src.environments.base import ANSWER_KEY, EPISODE_INVALID_KEY, EpisodeGrade, Trajectory
 from src.environments.envs.protocols.native import NativeToolUseEnvironment
 from src.environments.sandbox.base import SANDBOX_DEFAULT_TIMEOUT, SandboxExecutor, SandboxSession
 from src.environments.sandbox.resolve import resolve_sandbox, warn_if_unisolated
@@ -155,10 +155,10 @@ Tips:
 
         ctx = context or trajectory.info.get("context") or {}
         # Key presence, not value: the protocol marks a null ``answer`` cell invalid instead of paying it.
-        if callable(ctx.get("validator")) or "answer" in ctx:
+        if callable(ctx.get("validator")) or ANSWER_KEY in ctx:
             return super()._grade_episode(trajectory, context)
         raise ValueError(
             f"{type(self).__name__} has nothing to grade this episode against: no test_function, and the "
-            f"row carries no 'answer' or 'validator' (the trainer refuses such a dataset under "
+            f"row carries no {ANSWER_KEY!r} or 'validator' (the trainer refuses such a dataset under "
             f"requires_answer; this driver passed one)."
         )

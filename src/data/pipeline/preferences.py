@@ -11,7 +11,7 @@ from datasets import Dataset, Features, Sequence, Value
 from datasets import Image as ImageFeature
 from transformers import PreTrainedTokenizer, ProcessorMixin
 
-from src.data.pipeline.conversation import chat_template_kwargs, reject_image_content
+from src.data.pipeline.conversation import as_conversation, chat_template_kwargs, reject_image_content
 from src.data.pipeline.processing import DATASET_NUM_PROC, coordinated_map
 from src.data.pipeline.row_processors import normalize_vlm_conversation, prepare_generative_row
 from src.data.vlm import VLM_RAW_IMAGE_COLUMNS, process_vlm_conversation, render_vlm_text
@@ -73,11 +73,9 @@ def normalize_preference_row(row: dict[str, Any]) -> dict[str, Any]:
     indicates a mis-mapped dataset rather than a shape to infer.
     """
     chosen, rejected = row["chosen"], row["rejected"]
-    prompt = row.get("prompt")
+    prompt = as_conversation(row.get("prompt"))
 
-    if isinstance(prompt, str):
-        prompt = [{"role": "user", "content": prompt}]
-    elif not prompt:
+    if not prompt:
         prompt = list(chosen[: _shared_message_prefix_len(chosen, rejected)])
         if not prompt:
             raise ValueError(

@@ -120,10 +120,7 @@ def _run_environmental_grpo(tmp_path, dataset: DatasetDict) -> None:
     patches = [
         mock.patch.object(module, "init_training_script", return_value=_runtime()),
         mock.patch.object(module, "load_script_model", return_value=(types.SimpleNamespace(config=None), tokenizer)),
-        mock.patch.object(
-            module, "setup_model_and_tokenizer", side_effect=lambda args, model, tok, window, **kwargs: tok
-        ),
-        mock.patch.object(module, "get_model_context_window", return_value=4096),
+        mock.patch.object(module, "apply_context_window", side_effect=lambda args, model, tok: tok),
         mock.patch.object(module, "setup_peft_model", return_value=None),
         mock.patch.object(module, "log_model_info"),
         mock.patch.object(module, "load_script_datasets", return_value=(dataset, False)),

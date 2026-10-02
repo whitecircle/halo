@@ -33,6 +33,10 @@ logger = logging.getLogger(__name__)
 # Reasoning-effort levels for the chat template ("Reasoning: <level>"). "random" resolves per episode.
 VALID_REASONING_EFFORTS = ("low", "medium", "high")
 
+# The context key, and so the dataset column, an episode's expected answer travels under (the training
+# script carries the configured ``answer_field`` into it); a ``requires_answer`` env grades against it.
+ANSWER_KEY = "answer"
+
 # Set in ``info`` when an episode's reward carries no learning signal (the grade reached no verdict, a
 # grading or sandbox backend failed, a scorer returned nothing, a null ``answer`` cell); the trainer
 # excludes it from the GRPO group baseline.
@@ -881,8 +885,8 @@ class BaseEnvironment(ABC):
         for key in [key for key in trajectory.info if key.startswith("_")]:
             del trajectory.info[key]
         context = trajectory.info.get("context")
-        if context and "answer" in context:
-            trajectory.info["context"] = {key: value for key, value in context.items() if key != "answer"}
+        if context and ANSWER_KEY in context:
+            trajectory.info["context"] = {key: value for key, value in context.items() if key != ANSWER_KEY}
 
     def _finalize_step(
         self,
@@ -947,7 +951,7 @@ class BaseEnvironment(ABC):
         that finished, and to its whole GRPO group, since every sibling finishes just as easily. The
         episode leaves the baseline instead, the contract of a grading-infra outage.
         """
-        logger.warning("Episode context carries a null 'answer'; scoring it invalid, not a success")
+        logger.warning("Episode context carries a null %r; scoring it invalid, not a success", ANSWER_KEY)
         trajectory.info[EPISODE_INVALID_KEY] = True
         return EpisodeGrade(0.0)
 
@@ -1002,7 +1006,7 @@ class BaseEnvironment(ABC):
             (i for i, message in enumerate(trajectory.messages) if message.role == "assistant"), len(messages)
         )
         context = trajectory.info.get("context") or {}
-        return ScoringSample(prompt=messages[:first], completion=messages[first:], reference=context.get("answer"))
+        return ScoringSample(prompt=messages[:first], completion=messages[first:], reference=context.get(ANSWER_KEY))
 
     def _apply_external_scores(self, trajectory: Trajectory, verdict: Mapping[str, ScoreResult]) -> None:
         """Price the external terms' verdicts into the components, record their diagnostics, and close

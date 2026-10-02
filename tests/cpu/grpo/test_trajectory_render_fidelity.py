@@ -130,7 +130,7 @@ def _stub(tok):
         _carry_reasoning=False,
         _max_train_row_tokens=None,
         _rows_over_cap=0,
-        _warned_capture_missing=False,
+        _warned_once=set(),
         # Named in the fall-back warning, whose remedy differs per engine.
         _rollout_backend="vllm",
         _rollout_routing_replay=False,
@@ -143,6 +143,7 @@ def _stub(tok):
     stub._invalidate_untrainable_episode = types.MethodType(Trainer._invalidate_untrainable_episode, stub)
     stub._render_messages_to_ids = types.MethodType(Trainer._render_messages_to_ids, stub)
     stub._context_limit = types.MethodType(Trainer._context_limit, stub)
+    stub._record_batch_error = types.MethodType(Trainer._record_batch_error, stub)
     stub._tokenize_trajectory = types.MethodType(Trainer._tokenize_trajectory, stub)
     stub._tokenize_trajectory_turns = types.MethodType(Trainer._tokenize_trajectory_turns, stub)
     return stub

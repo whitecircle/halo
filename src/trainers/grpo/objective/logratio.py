@@ -1,10 +1,13 @@
-"""Truncated log-ratio corrections in the environmental-GRPO objective.
+"""Truncated log-ratio terms of the GRPO objectives.
 
 Two loss terms are log-prob ratios with an unbounded tail one token can dominate, each truncated:
-:func:`compute_is_ratio` (vLLM↔trainer drift, clamped at ``vllm_importance_sampling_clip_max``) and
-:func:`clamp_ref_logps` (k3 KL estimator, capped at :data:`KL_LOGRATIO_CLAMP`).
+:func:`clamp_ref_logps` caps the k3 KL estimator at :data:`KL_LOGRATIO_CLAMP` in all three GRPO
+trainers, and :func:`compute_is_ratio` clamps the environmental trainer's sampling-to-trainer importance
+ratio at ``vllm_importance_sampling_clip_max``. Everything else here serves that ratio: its exemptions
+(sampler-certain tokens, engine-forced reasoning closes), the engine re-score's log-ratio and the mask
+stages.
 
-On top, :func:`apply_is_masks` and :func:`apply_opsm` add masking-over-reweighting stages for MoE-scale
+:func:`apply_is_masks` and :func:`apply_opsm` add masking-over-reweighting stages for MoE-scale
 mismatch (trajectory geometric-mean band, catastrophic-token veto, OPSM), all default off.
 A masked token/trajectory gets ratio 0 (policy-gradient term vanishes, DAPO normalizer unchanged); the
 β·k3 KL term is added after the ratio multiply, so masked tokens stay anchored to the reference.
@@ -21,6 +24,9 @@ import torch
 
 KL_LOGRATIO_CLAMP = 5.0
 """Cap on ``ref − logp`` (nats) in the k3 KL estimator, bounding per-token KL at ``exp(5) ≈ 148``."""
+
+KL_CLAMP_FRAC_KEY = "kl_clamp_frac"
+"""Metric key of the share of reference log-probs :func:`clamp_ref_logps` capped (online and environmental)."""
 
 SAMPLER_CERTAIN_LOGPROB = 0.0
 """A sampling logprob of exactly 0 is a token the engine emitted with probability 1: a logits processor
@@ -66,7 +72,7 @@ def zero_engine_forced_closes(
 
 
 def clamp_ref_logps(ref_logps: torch.Tensor, policy_logps: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
-    """Bound the tail of TRL's k3 KL estimator by capping the log-ratio at :data:`KL_LOGRATIO_CLAMP`
+    """Bound the tail of the k3 KL estimator by capping the log-ratio at :data:`KL_LOGRATIO_CLAMP`
     nats. Unconditional; not configurable.
 
     ``per_token_kl = exp(ref − logp) − (ref − logp) − 1`` is unbounded where the policy suppresses a
@@ -109,22 +115,23 @@ def select_mask_logratio(
     engine_logps: torch.Tensor,
     corrected_mask: torch.Tensor,
     row_has_engine: torch.Tensor,
-) -> tuple[torch.Tensor, dict[str, tuple[float, float]]]:
+) -> tuple[torch.Tensor, dict[str, tuple[torch.Tensor, torch.Tensor]]]:
     """The log-ratio the mask stages read when the engine re-scored the rows under the trainer's
     current weights: ``logπ_engine_now − logπ_sampling`` on rows that carry a re-score — pure policy
     staleness, since the two engine passes share their numerics — and the trainer diff elsewhere.
     Returns it with the step's diagnostics as ``(numerator, denominator)`` pairs over the re-scored
     tokens: the staleness mean, the numerics mean ``logπ_recompute − logπ_engine_now`` (the floor the
-    bands would otherwise read) and the coverage of the re-score over the corrected tokens.
+    bands would otherwise read) and the coverage of the re-score over the corrected tokens. The pairs
+    stay on device, for the caller to read with the step's other counts.
     """
     use_engine = corrected_mask & row_has_engine.unsqueeze(1)
     engine_diff = (engine_logps - sampling_logps) * use_engine
     mask_diff = torch.where(use_engine, engine_diff, logps_diff)
-    n = use_engine.sum().item()
+    n = use_engine.sum()
     stats = {
-        "sampling/engine_logratio_mean": (engine_diff.sum().item(), n),
-        "sampling/numerics_logratio_mean": (((recompute_logps - engine_logps) * use_engine).sum().item(), n),
-        "sampling/engine_rescore_coverage": (n, corrected_mask.sum().item()),
+        "sampling/engine_logratio_mean": (engine_diff.sum(), n),
+        "sampling/numerics_logratio_mean": (((recompute_logps - engine_logps) * use_engine).sum(), n),
+        "sampling/engine_rescore_coverage": (n, corrected_mask.sum()),
     }
     return mask_diff, stats
 
@@ -157,7 +164,19 @@ class ISMaskConfig:
 
     @property
     def any_mask_active(self) -> bool:
+        """Whether a stage :func:`apply_is_masks` applies (the geometric band or the veto) is set."""
         return self.geo_band_min is not None or self.veto_min is not None
+
+    @property
+    def any_stage_active(self) -> bool:
+        """Whether any stage is set, OPSM included."""
+        return self.any_mask_active or self.opsm_delta is not None
+
+
+def _num_trajs(traj_ids: torch.Tensor) -> int:
+    """Trajectories ``traj_ids`` spans (ids ``0..n-1``, −1 for dummy rows). A host read: it sizes the
+    per-trajectory reductions."""
+    return int(traj_ids.max()) + 1 if traj_ids.numel() else 0
 
 
 def _traj_scatter(values: torch.Tensor, traj_ids: torch.Tensor, num_trajs: int, reduce: str) -> torch.Tensor:
@@ -184,16 +203,17 @@ def apply_is_masks(
     corrected_mask: torch.Tensor,
     traj_ids: torch.Tensor,
     config: ISMaskConfig,
-) -> tuple[torch.Tensor, dict[str, tuple[int, int]]]:
+) -> tuple[torch.Tensor, dict[str, tuple[torch.Tensor, int]]]:
     """Apply the geometric-band / veto stages to the truncated ratio.
 
     ``traj_ids`` maps each row to its trajectory (−1 for dummy rows). The veto tests the raw
     (pre-truncation) ratio ``exp(logps_diff)``, so the clip cannot hide a catastrophic token.
-    Returns the masked ratio and the diagnostic ``(masked, total)`` counts of each active stage.
+    Returns the masked ratio and the diagnostic ``(masked, total)`` counts of each active stage, the
+    masked count left on device.
     """
     if not config.any_mask_active:
         return ratio, {}
-    num_trajs = int(traj_ids.max().item()) + 1 if traj_ids.numel() else 0
+    num_trajs = _num_trajs(traj_ids)
     if not num_trajs:
         return ratio, {}
     raw_ratio = torch.exp(logps_diff)
@@ -202,7 +222,7 @@ def apply_is_masks(
     if config.geo_band_min is not None:
         geo = torch.exp(_traj_mean_logratio(logps_diff, corrected_mask, traj_ids, num_trajs))
         in_geo = (geo >= config.geo_band_min) & (geo <= config.geo_band_max)
-        stats["sampling/is_geo_band_masked_frac"] = (int((~in_geo).sum()), num_trajs)
+        stats["sampling/is_geo_band_masked_frac"] = ((~in_geo).sum(), num_trajs)
         traj_keep &= in_geo
     if config.veto_min is not None:
         # uncorrected tokens read as 1.0 so they never trip the veto.
@@ -211,7 +231,7 @@ def apply_is_masks(
         # An id with no rows keeps the 0 scatter init, which reads as vetoed; restrict to contributing ids.
         present = _traj_scatter(torch.ones_like(row_min), traj_ids, num_trajs, "sum") > 0
         vetoed = (traj_min < config.veto_min) & present
-        stats["sampling/is_veto_masked_frac"] = (int(vetoed.sum()), num_trajs)
+        stats["sampling/is_veto_masked_frac"] = (vetoed.sum(), num_trajs)
         traj_keep &= ~vetoed
     row_keep = torch.where(traj_ids >= 0, traj_keep.gather(0, traj_ids.clamp(min=0)), torch.ones_like(traj_ids).bool())
     return torch.where(row_keep.unsqueeze(1), ratio, torch.zeros_like(ratio)), stats
@@ -229,7 +249,7 @@ def apply_opsm(
     whose mean log-ratio magnitude exceeds ``delta`` nats. Positive-advantage trajectories are never
     masked. Returns the masked ratio and the per-trajectory bool mask of what it masked.
     """
-    num_trajs = int(traj_ids.max().item()) + 1 if traj_ids.numel() else 0
+    num_trajs = _num_trajs(traj_ids)
     if num_trajs == 0:
         return ratio, torch.zeros(0, dtype=torch.bool, device=ratio.device)
     traj_mean = _traj_mean_logratio(logps_diff, corrected_mask, traj_ids, num_trajs)

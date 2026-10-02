@@ -428,7 +428,7 @@ def _turns_trainer():
     trainer = object.__new__(DistributedAsyncEnvironmentalGRPOTrainer)
     trainer._rollout_routing_replay = False
     trainer._batch_build_error = None
-    trainer._warned_capture_missing = False
+    trainer._warned_once = set()
     trainer._rollout_template_kwargs = {}
     trainer._carry_reasoning = False
     trainer._max_train_row_tokens = None

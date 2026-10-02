@@ -140,7 +140,7 @@ class CommonScriptArguments(RangeValidatedConfig):
         metadata={
             "help": "GRPO family (online/env): persist per-step rollout completions/trajectories to "
             "<output_dir>/completions/completions_<step>.parquet (prompt, rendered completion, reward, "
-            "advantage) and, when a tracking backend is active, a `completions` table — DECOUPLED from "
+            "advantage) and, under wandb, a `completions` table — DECOUPLED from "
             "console logging. This is the durable generation record; keep it on to inspect what the "
             "policy produced. The rich per-sample CONSOLE table stays gated by TRL's `log_completions` "
             "(set that True only to also spam the console). Text is rendered from detokenized message "

@@ -10,6 +10,13 @@ import torch
 from src.trainers.grpo.objective.logratio import ISMaskConfig, apply_is_masks, apply_opsm, compute_is_ratio
 
 
+def _counts(stats: dict, key: str) -> tuple[float, float]:
+    """A stage's ``(masked, total)`` read off the device, where ``apply_is_masks`` leaves the count."""
+    masked, total = stats[key]
+    assert isinstance(masked, torch.Tensor), "the masked count must stay on device for the caller's one read"
+    return float(masked), float(total)
+
+
 def _ratio_setup(logdiffs: torch.Tensor, clip_max: float = 3.0):
     """Build (ratio, logps_diff, corrected_mask) from a [rows, T] log-diff tensor, all tokens corrected.
 
@@ -34,7 +41,7 @@ def test_forced_token_does_not_trip_the_veto():
         recompute, sampling, torch.ones(1, 3, dtype=torch.long), torch.ones(1, dtype=torch.bool), 3.0
     )
     out, stats = apply_is_masks(ratio, diff, corrected, torch.arange(1), ISMaskConfig(veto_min=1e-4))
-    assert stats["sampling/is_veto_masked_frac"] == (0, 1)
+    assert _counts(stats, "sampling/is_veto_masked_frac") == (0, 1)
     assert torch.equal(out, torch.ones(1, 3))
     # The same disagreement on a token the engine actually sampled is exactly what the veto is for.
     ratio, diff, corrected = compute_is_ratio(
@@ -45,7 +52,7 @@ def test_forced_token_does_not_trip_the_veto():
         3.0,
     )
     out, stats = apply_is_masks(ratio, diff, corrected, torch.arange(1), ISMaskConfig(veto_min=1e-4))
-    assert stats["sampling/is_veto_masked_frac"] == (1, 1)
+    assert _counts(stats, "sampling/is_veto_masked_frac") == (1, 1)
 
 
 def test_ismask_defaults_are_inert():
@@ -54,6 +61,15 @@ def test_ismask_defaults_are_inert():
     ratio, diff, corrected = _ratio_setup(torch.randn(4, 5) * 0.01)
     out, stats = apply_is_masks(ratio, diff, corrected, torch.arange(4), cfg)
     assert out is ratio and stats == {}
+
+
+def test_any_stage_active_counts_opsm_beside_the_mask_stages():
+    """OPSM runs apart from ``apply_is_masks`` (it needs the advantages) but is a stage all the same."""
+    assert not ISMaskConfig().any_stage_active
+    opsm_only = ISMaskConfig(opsm_delta=0.2)
+    assert opsm_only.any_stage_active and not opsm_only.any_mask_active
+    assert ISMaskConfig(veto_min=1e-4).any_stage_active
+    assert ISMaskConfig(geo_band_min=0.99, geo_band_max=1.01).any_stage_active
 
 
 def test_ismask_validation():
@@ -77,7 +93,7 @@ def test_geo_band_masks_whole_trajectory_across_turn_rows():
     out, stats = apply_is_masks(ratio, d, corrected, traj_ids, ISMaskConfig(geo_band_min=0.99, geo_band_max=1.01))
     assert (out[0] == 0).all() and (out[1] == 0).all()
     assert (out[2] == 1).all()
-    assert stats["sampling/is_geo_band_masked_frac"] == (1, 2)
+    assert _counts(stats, "sampling/is_geo_band_masked_frac") == (1, 2)
 
 
 def test_veto_masks_trajectory_with_catastrophic_token():
@@ -87,7 +103,7 @@ def test_veto_masks_trajectory_with_catastrophic_token():
     out, stats = apply_is_masks(ratio, d, corrected, torch.arange(2), ISMaskConfig(veto_min=1e-4))
     assert (out[0] == 0).all()
     assert (out[1] == 1).all()
-    assert stats["sampling/is_veto_masked_frac"] == (1, 2)
+    assert _counts(stats, "sampling/is_veto_masked_frac") == (1, 2)
 
 
 def test_dummy_rows_never_masked_by_trajectory_stages():

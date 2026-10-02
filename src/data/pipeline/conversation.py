@@ -28,6 +28,14 @@ def maybe_parse_json(value):
     return value
 
 
+def as_conversation(prompt: Any) -> Any:
+    """A plain-string prompt as a single user turn; any other value (a message list, or a malformed
+    prompt the caller refuses) passes through unchanged."""
+    if isinstance(prompt, str):
+        return [{"role": "user", "content": prompt}]
+    return prompt
+
+
 def conversation_carries_images(conversation: Any) -> bool:
     """Whether a conversation embeds images in its message content.
 

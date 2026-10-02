@@ -111,7 +111,7 @@ too, because TP siblings inject duplicate blocks into TRL's world-order reward g
 per-rank groups regroup correctly. Pre-sharded datasets consume per DP rank, so the rate is one
 rank's.
 
-**Offline GRPO** uses `MultiGroupSampler` (`src/trainers/grpo/mixins/dataloader.py`). Advantages are
+**Offline GRPO** uses `MultiGroupSampler` (`src/trainers/grpo/offline.py`). Advantages are
 pre-computed per example at tokenization time (`compute_group_advantages` normalizes a group's
 rewards via `advantage_method`, default `quantile_norm`), so the sampler does not pack a group into
 one batch. It emits each group's indices in group-appearance order, shards the sequence across DP

@@ -29,6 +29,7 @@ from openai import NOT_GIVEN, APIStatusError, APITimeoutError, AsyncOpenAI
 from src.configs.rollout_config import RolloutConfig
 from src.data.sources.paths import parse_dataset_source
 from src.environments.base import (
+    ANSWER_KEY,
     EPISODE_ERROR_KEY,
     EPISODE_INVALID_REASON_KEY,
     BaseEnvironment,
@@ -173,7 +174,7 @@ def require_answers(env: BaseEnvironment, examples: list[dict[str, Any]], source
     """Refuse examples an answer-graded environment cannot grade, before any episode runs: the
     trainer's dataset gate (``requires_answer``) for the eval drivers, which would otherwise generate
     every episode in full and then fail to grade it. ``source`` names where the answer was read from."""
-    if env.requires_answer and any("answer" not in example["context"] for example in examples):
+    if env.requires_answer and any(ANSWER_KEY not in example["context"] for example in examples):
         raise ValueError(
             f"{type(env).__name__} grades each episode against an expected answer (requires_answer), but "
             f"{source} carries none."

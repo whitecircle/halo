@@ -5,12 +5,12 @@
 Train mode cannot produce one (the loader gate rejects the shape at construction), but eval can:
 ``dataloader_drop_last`` defaults to ``False``, so the final eval batch is split unevenly and the
 remainder lands on a SUBSET of the DP ranks. A rank-local raise there leaves its peers in the
-``_raise_batch_error_uniformly`` all-reduce until ``DIST_NCCL_TIMEOUT_MINUTES``, with the explaining
+``_raise_batch_error_uniformly`` gather until ``DIST_NCCL_TIMEOUT_MINUTES``, with the explaining
 traceback only on the ranks that died — at 512 GPUs, 500 NCCL timeouts and 12 real tracebacks.
 
 Proven on a real 2-rank gloo group with an asymmetric batch, so the regression manifests as the hang
-it is: rank 1 can only be told the cause if rank 0 reached the all-reduce instead of raising out of
-it. The group timeout and the join are both bounded, so a regression fails this suite rather than
+it is: rank 1 can only be told the cause if rank 0 reached the gather instead of raising out of it.
+The group timeout and the join are both bounded, so a regression fails this suite rather than
 wedging it.
 
     python tests/cpu/grpo/test_env_ragged_eval_batch_uniform_raise.py
@@ -23,7 +23,6 @@ import os
 import types
 
 import pytest
-import torch
 
 from src.trainers.grpo.environmental import DistributedAsyncEnvironmentalGRPOTrainer
 from tests.common.gloo import run_gloo_ranks
@@ -47,6 +46,7 @@ def _eval_trainer():
         model=types.SimpleNamespace(training=False),
     )
     cls = DistributedAsyncEnvironmentalGRPOTrainer
+    host._record_batch_error = cls._record_batch_error.__get__(host)
     host._stamp_group_efforts = cls._stamp_group_efforts.__get__(host)
     host._extract_prompts_and_contexts = cls._extract_prompts_and_contexts.__get__(host)
     host._raise_batch_error_uniformly = cls._raise_batch_error_uniformly.__get__(host)
@@ -61,7 +61,7 @@ def _worker(rank: int, tmp_dir: str, ragged: bool) -> None:
     host = _eval_trainer()
     try:
         host._extract_prompts_and_contexts([{"prompt": "solve it"} for _ in range(rows)])
-        host._raise_batch_error_uniformly(torch.device("cpu"))
+        host._raise_batch_error_uniformly()
         result = "NO RAISE"
     except Exception as e:
         result = f"{type(e).__name__}: {e}"
@@ -82,16 +82,17 @@ def test_a_ragged_eval_tail_raises_on_every_rank(tmp_path):
     """The P1: rank 0's eval batch does not divide by ``num_generations_eval``, rank 1's does.
 
     Rank 1 reaching the error is the whole proof — it can only get there if rank 0 recorded the
-    failure and still entered the all-reduce. Raising rank-locally instead leaves rank 1 blocked in
-    that all-reduce until the watchdog.
+    failure and still entered the gather. Raising rank-locally instead leaves rank 1 blocked in that
+    gather until the watchdog. Every rank names the failing rank and its cause, so the healthy rank's
+    traceback is as useful as the offending one's.
     """
     results = _run_ranks(tmp_path, ragged=True)
 
     for rank, result in results.items():
         assert result != "NO RAISE", f"rank {rank} sailed past a ragged eval batch: {results}"
         assert result.startswith("ValueError"), f"rank {rank} raised the wrong error: {results}"
-    assert "multiple of the group size" in results[0], f"the offending rank did not name the cause: {results}"
-    assert "peer rank" in results[1], f"the healthy rank was not told a peer failed: {results}"
+        assert "multiple of the group size" in result, f"rank {rank} was not told the cause: {results}"
+        assert "rank 0" in result, f"rank {rank} was not told which rank failed: {results}"
 
 
 def test_an_aligned_eval_batch_still_stamps_and_returns(tmp_path):

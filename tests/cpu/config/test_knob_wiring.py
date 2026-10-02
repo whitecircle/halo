@@ -22,7 +22,7 @@ from datasets import Dataset, DatasetDict
 from trl import SFTConfig
 
 from src.args.distributed_args import DistributedArguments
-from src.args.mixins import RLRRConfig, SDPGArguments
+from src.args.mixins import PRIVILEGED_HINT_TEMPLATE, RLRRConfig, SDPGArguments
 from src.args.rlvr_online_grpo_args import RLVROnlineGRPOScriptArguments
 from src.args.self_distill_args import SelfDistillationArguments
 from src.configs.async_training_config import AsyncTrainingConfig
@@ -709,24 +709,15 @@ def test_sdpg_trainer_has_no_spelling_of_the_tunables_of_its_own():
     assert leaked == {"sdpg_temprature": 0.5}
 
 
-def _self_distill_script_splats_the_complement() -> bool:
-    """Whether the script's trainer call splats a dict comprehension filtered on the args class's
-    ``DATASET_SIDE_SDPG_FIELDS`` — the same declaration the trainer pops against."""
+def _self_distill_script_splats_the_builder() -> bool:
+    """Whether the script's trainer call splats ``args.build_sdpg_kwargs()``."""
     tree = ast.parse((PROJECT_ROOT / "scripts/training/distillation/self_distill.py").read_text())
     for node in ast.walk(tree):
         if not (isinstance(node, ast.Call) and getattr(node.func, "id", None) == "DistributedSelfDistillationTrainer"):
             continue
         for keyword in node.keywords:
-            if keyword.arg is None and isinstance(keyword.value, ast.DictComp):
-                for generator in keyword.value.generators:
-                    for test in generator.ifs:
-                        for sub in ast.walk(test):
-                            if (
-                                isinstance(sub, ast.Attribute)
-                                and sub.attr == "DATASET_SIDE_SDPG_FIELDS"
-                                and getattr(sub.value, "id", None) == "SelfDistillationArguments"
-                            ):
-                                return True
+            if keyword.arg is None and ast.unparse(keyword.value) == "args.build_sdpg_kwargs()":
+                return True
     return False
 
 
@@ -754,11 +745,12 @@ def test_self_distill_trainer_adopts_every_forwarded_sdpg_field():
     default, and a dataset-side field handed to the trainer is NOT swallowed — it reaches the parent,
     whose explicit signature rejects it, instead of silently never hinting the teacher."""
     dataset_side = SelfDistillationArguments.DATASET_SIDE_SDPG_FIELDS
-    assert _self_distill_script_splats_the_complement(), (
-        "self_distill.py must splat fields(SDPGArguments) minus SelfDistillationArguments.DATASET_SIDE_SDPG_FIELDS "
-        "into its trainer call — the trainer pops exactly that complement"
+    assert _self_distill_script_splats_the_builder(), (
+        "self_distill.py must splat args.build_sdpg_kwargs() into its trainer call — the trainer pops "
+        "exactly the complement of DATASET_SIDE_SDPG_FIELDS that it builds"
     )
-    forwarded = {name: value for name, value in _SDPG_TUNABLES.items() if name not in dataset_side}
+    forwarded = SelfDistillationArguments(**_SDPG_TUNABLES).build_sdpg_kwargs()
+    assert forwarded == {name: value for name, value in _SDPG_TUNABLES.items() if name not in dataset_side}
     assert forwarded and set(_SDPG_TUNABLES) - set(forwarded) == dataset_side
 
     trainer, leaked = _construct_self_distill_shell(**forwarded)
@@ -774,7 +766,13 @@ def test_self_distill_trainer_adopts_every_forwarded_sdpg_field():
 
 
 def _answer_column_args(**overrides):
-    defaults = {"sdpg_beta_base": 1.0, "sdpg_answer_field": "answer", "dataset": "dummy/dataset"}
+    defaults = {
+        "sdpg_beta_base": 1.0,
+        "sdpg_answer_field": "answer",
+        "privileged_solution_field": "solution",
+        "sdpg_hint_template": PRIVILEGED_HINT_TEMPLATE,
+        "dataset": "dummy/dataset",
+    }
     return SimpleNamespace(**{**defaults, **overrides})
 
 
@@ -788,10 +786,10 @@ def test_self_distill_requires_the_answer_column_while_the_opd_term_carries_weig
     module = load_script_module("scripts/training/distillation/self_distill.py", "halo_test_self_distill_answer")
     without = _dataset_with({"prompt": [[{"role": "user", "content": "q"}]]})
     with pytest.raises(ValueError, match="sdpg_answer_field='answer' names a column"):
-        module._require_privileged_answer_column(without, _answer_column_args())
+        module._require_privileged_columns(without, _answer_column_args())
 
     carried = _dataset_with({"prompt": [[{"role": "user", "content": "q"}]], "answer": ["42"]})
-    module._require_privileged_answer_column(carried, _answer_column_args())
+    module._require_privileged_columns(carried, _answer_column_args())
 
 
 @pytest.mark.parametrize("overrides", [{"sdpg_beta_base": 0.0}, {"sdpg_answer_field": None}])
@@ -800,7 +798,26 @@ def test_self_distill_answer_column_gate_stands_down_where_no_hint_is_asserted(o
     an answer, so neither may demand the column."""
     module = load_script_module("scripts/training/distillation/self_distill.py", "halo_test_self_distill_answer_off")
     without = _dataset_with({"prompt": [[{"role": "user", "content": "q"}]]})
-    module._require_privileged_answer_column(without, _answer_column_args(**overrides))
+    module._require_privileged_columns(without, _answer_column_args(**overrides))
+
+
+def test_self_distill_requires_the_solution_column_only_where_the_template_names_it():
+    """The solution column is optional (the default template never reads it), but a template naming
+    ``{solution}`` over a dataset without that column hands the teacher a blank solution through the
+    collators' ``.get`` — the same silent emptiness the answer gate refuses."""
+    module = load_script_module("scripts/training/distillation/self_distill.py", "halo_test_self_distill_solution")
+    answer_only = _dataset_with({"prompt": [[{"role": "user", "content": "q"}]], "answer": ["42"]})
+    module._require_privileged_columns(answer_only, _answer_column_args())
+
+    names_solution = _answer_column_args(sdpg_hint_template="answer {answer}, worked: {solution}")
+    with pytest.raises(ValueError, match="privileged_solution_field='solution' names a column"):
+        module._require_privileged_columns(answer_only, names_solution)
+
+    carried = _dataset_with({"prompt": [[{"role": "user", "content": "q"}]], "answer": ["42"], "solution": ["6 * 7"]})
+    module._require_privileged_columns(carried, names_solution)
+    # A null field opts out of the slot, as it does for the answer.
+    opted_out = _answer_column_args(sdpg_hint_template="{answer} {solution}", privileged_solution_field=None)
+    module._require_privileged_columns(answer_only, opted_out)
 
 
 def test_self_distill_trainer_has_no_spelling_of_the_tunables_of_its_own():

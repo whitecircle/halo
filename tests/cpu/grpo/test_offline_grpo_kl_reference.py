@@ -9,13 +9,16 @@ GptOss sinks policy (neutralized policy sinks against live reference sinks put a
 family attention patches, and the run's own remote-code flag. A biased reference shifts every step's
 objective with no other symptom, so what is pinned: the script loads the reference exactly as it
 loaded the policy, the trainer refuses a wrapped MoE that arrives without one instead of loading its
-own, and a reference handed to a run that holds none is refused rather than ignored.
+own, and a reference handed to a run that holds none is refused rather than ignored. The reference
+forward itself runs with grad off and, where the run holds no reference model, through the PEFT
+policy with its adapters disabled: either one dropped scores the KL against the live policy.
 
 Run: ``python tests/cpu/grpo/test_offline_grpo_kl_reference.py`` (or ``pytest -m cpu``).
 """
 
 from __future__ import annotations
 
+import contextlib
 import types
 
 import pytest
@@ -173,6 +176,70 @@ def test_the_script_loads_nothing_where_the_trainer_derives_the_reference():
     with stub_frozen_loader() as caps:
         assert _load(_tiny_llama(), model_source=BASE, reset_sinks=True) is None
     caps.auto_load.assert_not_called()
+
+
+class _PeftPolicy:
+    """The policy's ``disable_adapter()`` switch, recording whether a forward ran with the adapters off."""
+
+    def __init__(self):
+        self.adapters_off = False
+
+    @contextlib.contextmanager
+    def disable_adapter(self):
+        self.adapters_off = True
+        try:
+            yield
+        finally:
+            self.adapters_off = False
+
+
+class _ReferenceReached(Exception):
+    """Ends ``_compute_loss_inner`` once the reference forward has been recorded."""
+
+
+def _loss_forwards(ref_model) -> tuple[list[dict], _PeftPolicy]:
+    """Each ``_get_per_token_logps`` call ``_compute_loss_inner`` makes under ``kl_beta > 0``: the model
+    it forwarded, and whether grad and the policy's adapters were on during it."""
+    policy = _PeftPolicy()
+    forwards = []
+
+    def per_token_logps(model, input_ids, *_args, **_kwargs):
+        forwards.append({"model": model, "grad": torch.is_grad_enabled(), "adapters_off": policy.adapters_off})
+        if len(forwards) == 2:
+            raise _ReferenceReached
+        logps = torch.zeros(input_ids.size(0), 2)
+        return logps, logps
+
+    host = types.SimpleNamespace(
+        model=policy,
+        min_log_prob=None,
+        beta=0.1,
+        ref_model=ref_model,
+        accelerator=types.SimpleNamespace(unwrap_model=lambda model: model),
+        _get_per_token_logps=per_token_logps,
+    )
+    inputs = {
+        "prompt_input_ids": torch.zeros(1, 3, dtype=torch.long),
+        "prompt_attention_mask": torch.ones(1, 3, dtype=torch.long),
+        "completion_input_ids": torch.zeros(1, 2, dtype=torch.long),
+        "completion_attention_mask": torch.ones(1, 2, dtype=torch.long),
+        "advantage": torch.ones(1),
+    }
+    with pytest.raises(_ReferenceReached):
+        OfflineGRPOTrainer._compute_loss_inner(host, policy, inputs)
+    return forwards, policy
+
+
+def test_without_a_reference_model_the_reference_is_the_policy_with_adapters_off_and_no_grad():
+    (policy_forward, reference_forward), policy = _loss_forwards(ref_model=None)
+    assert policy_forward == {"model": policy, "grad": True, "adapters_off": False}
+    assert reference_forward == {"model": policy, "grad": False, "adapters_off": True}
+
+
+def test_a_held_reference_model_forwards_with_no_grad_and_the_policy_adapters_untouched():
+    reference = object()
+    (_, reference_forward), _ = _loss_forwards(ref_model=reference)
+    assert reference_forward == {"model": reference, "grad": False, "adapters_off": False}
 
 
 if __name__ == "__main__":

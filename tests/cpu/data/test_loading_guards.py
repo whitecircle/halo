@@ -130,6 +130,19 @@ def test_declared_conversation_field_typo_fails_loud():
         shutil.rmtree(temp_dir)
 
 
+def test_the_refusal_names_the_knob_the_caller_read_the_column_from(tmp_path):
+    """RLVR and env GRPO declare ``prompt_field`` as the render column; an error telling the user to
+    set ``conversation_field`` points at a knob those scripts do not have. Both load paths (one source
+    and a list) name the knob passed."""
+    source = _save_raw_dataset(str(tmp_path / "raw"), _conversation_dataset(4), _conversation_dataset(2))
+    for path in (source, [source]):
+        with pytest.raises(ValueError, match=r"^prompt_field='question' .*Point prompt_field at") as excinfo:
+            load_datasets(
+                path, test_size=None, dataset_ratio=1, conversation_field="question", conversation_knob="prompt_field"
+            )
+        assert "conversation_field" not in str(excinfo.value), excinfo.value
+
+
 def test_declared_tools_field_typo_fails_loud():
     """``tools_field`` is optional at render time, so a typo NEVER surfaces downstream — rows just
     render without tools and the run trains tool-calling data with none. The load must refuse it."""

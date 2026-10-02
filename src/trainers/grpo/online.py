@@ -1,4 +1,4 @@
-"""Online GRPO trainer under EP / TP / EP+TP (no CP — use the SFT trainer for EP+CP).
+"""Online GRPO trainer under EP / TP / ETP and their supported combinations (no CP or PP).
 
 Server-mode vLLM weight sync uses a vendored NCCL client; vLLM is not installed in the
 training environment (ABI-incompatible extensions, older transformers than the image).
@@ -32,11 +32,11 @@ from src.trainers.grpo.objective.application import (
     record_token_mass,
     validate_token_mass_balance,
 )
-from src.trainers.grpo.objective.logratio import clamp_ref_logps
+from src.trainers.grpo.objective.logratio import KL_CLAMP_FRAC_KEY, clamp_ref_logps
 from src.trainers.grpo.objective.relative_rewards import relative_advantages_grouped
 from src.trainers.grpo.rollout.completions_logging import log_with_decoupled_completions
-from src.trainers.grpo.rollout.rollout_metrics import gathered_fractions
 from src.trainers.grpo.rollout.weight_sync import sync_trainer_weights, validate_weight_sync_support
+from src.trainers.grpo.world_metrics import gathered_fractions
 from src.trainers.mixins.base import DistributedTrainerMixin
 from src.trainers.mixins.loss_masks import effective_loss_mask
 
@@ -57,10 +57,7 @@ class DistributedGRPOTrainer(
     DistributedTrainerMixin,
     GRPOTrainer,
 ):
-    """Online GRPO trainer with EP / TP / EP+TP support.
-
-    CP is not supported; use ``DistributedSFTTrainer`` for EP+CP.
-    """
+    """Online GRPO over server-mode vLLM rollouts. No CP (``_supports_cp`` stays off) and no PP (below)."""
 
     _supports_pp = False
     _pp_unsupported_reason = (
@@ -249,7 +246,7 @@ class DistributedGRPOTrainer(
         if old_logps is not None and ref_logps is not None:
             result["ref_per_token_logps"], clamped = clamp_ref_logps(ref_logps, old_logps)
             mode = "train" if self.model.training else "eval"
-            self._metrics[mode]["kl_clamp_frac"].extend(
+            self._metrics[mode][KL_CLAMP_FRAC_KEY].extend(
                 gathered_fractions([(clamped.sum(), clamped.numel())], self.accelerator.gather)
             )
 

@@ -4,7 +4,7 @@ import numbers
 import re
 from typing import Any
 
-from src.environments.base import EpisodeGrade, Trajectory
+from src.environments.base import ANSWER_KEY, EpisodeGrade, Trajectory
 from src.environments.envs.protocols.native import NativeToolUseEnvironment
 from src.environments.tools.definitions import NativeToolRegistry
 from src.environments.tools.factories import create_native_python_tools, create_native_search_tools
@@ -188,7 +188,7 @@ class ExamQAEnvironment(NativeToolUseEnvironment):
         traj = super()._reset_single(prompt, context)
         context = context or {}
 
-        traj.info["expected_answer"] = context.get("answer")
+        traj.info["expected_answer"] = context.get(ANSWER_KEY)
         traj.info["choices"] = context.get("choices")
         traj.info["is_multiple_choice"] = context.get("choices") is not None
 

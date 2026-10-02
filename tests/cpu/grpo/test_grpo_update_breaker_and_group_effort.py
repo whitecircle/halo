@@ -237,6 +237,37 @@ def test_pre_optimizer_step_callback_reaches_the_trainer():
     assert host.calls == 1
 
 
+def test_the_optimizer_skip_callback_is_attached_only_behind_the_breaker_knob():
+    """One attach, inside the ``skip_update_masked_frac`` branch: without the knob no breaker trips,
+    so the hook would only run on every optimizer step for nothing. Constructing the trainer takes a
+    model and a rollout server, so the wiring is read off ``__init__``."""
+    init = _method_ast("__init__")
+    attaches = [
+        call
+        for call in _calls(init, "add_callback")
+        if call.args and ast.unparse(call.args[0]) == "_BreakerOptimizerSkipCallback(self)"
+    ]
+    assert len(attaches) == 1, f"expected one attach of the skip callback, found {len(attaches)}"
+    guards = [
+        node
+        for node in ast.walk(init)
+        if isinstance(node, ast.If) and any(attaches[0] in ast.walk(stmt) for stmt in node.body)
+    ]
+    assert [ast.unparse(guard.test) for guard in guards] == ["self._skip_update_masked_frac is not None"]
+    assert any(
+        ast.unparse(node) == "self._skip_update_masked_frac = self.async_config.skip_update_masked_frac"
+        for node in ast.walk(init)
+        if isinstance(node, ast.Assign)
+    ), "the guard no longer reads the configured knob"
+    module = ast.parse(inspect.getsource(inspect.getmodule(DistributedAsyncEnvironmentalGRPOTrainer)))
+    constructions = [
+        node
+        for node in ast.walk(module)
+        if isinstance(node, ast.Call) and ast.unparse(node.func) == "_BreakerOptimizerSkipCallback"
+    ]
+    assert len(constructions) == 1, "the skip callback is constructed outside the guarded attach"
+
+
 def test_a_tripped_breaker_zeroes_both_advantage_tensors():
     """The verdict alone trains nothing away: a tripped step must zero the per-ROW advantages (the
     policy gradient) AND the per-TRAJECTORY ones (what the durable record reports). Dropping either
@@ -286,6 +317,23 @@ def _calls_function(stmt: ast.stmt, name: str) -> list[ast.Call]:
         for node in ast.walk(stmt)
         if isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id == name
     ]
+
+
+def test_the_empty_step_halt_reads_the_world_gathered_mask_in_train_mode():
+    """The halt raises on a world verdict: fed this rank's own mask it would raise on one rank and leave the
+    peers in the next collective; dropped, an all-invalid step trains a zero gradient behind a plausible log."""
+    fn = _build_training_tensors_ast()
+    gathered_at = next(
+        i
+        for i, stmt in enumerate(fn.body)
+        if isinstance(stmt, ast.Assign) and ast.unparse(stmt) == "gathered_valid = gather(valid_mask)"
+    )
+    halts = [i for i, stmt in enumerate(fn.body) if _calls(stmt, "_check_step_has_valid_episodes")]
+    assert len(halts) == 1 and halts[0] > gathered_at
+    block = fn.body[halts[0]]
+    assert isinstance(block, ast.If) and ast.unparse(block.test) == "mode == 'train'"
+    (call,) = _calls(block, "_check_step_has_valid_episodes")
+    assert [ast.unparse(arg) for arg in call.args] == ["rollout_results", "gathered_valid"]
 
 
 def test_the_balance_weighs_what_the_loss_trains_and_reaches_both_advantage_sets():
@@ -356,8 +404,8 @@ def test_world_metrics_flush_once_after_every_recording_site_with_no_return_betw
 
 def test_phase_helpers_never_early_return():
     """Each phase helper returns exactly once, as its final statement. Three of them issue collectives
-    (the uniform raise, the recompute forward's EP dispatch, the empty-step all_reduce and normalizer
-    gather), so a data-dependent early-out would let one rank skip a collective its peers enter."""
+    (the uniform raise, the recompute forward's EP dispatch, the normalizer gather), so a
+    data-dependent early-out would let one rank skip a collective its peers enter."""
     for name in _PHASE_HELPERS:
         fn = _method_ast(name)
         returns = [node for node in ast.walk(fn) if isinstance(node, ast.Return)]
@@ -373,6 +421,7 @@ def _effort_host(num_generations: int, training: bool = True, num_generations_ev
         model=types.SimpleNamespace(training=training),
         _batch_build_error=None,
     )
+    host._record_batch_error = DistributedAsyncEnvironmentalGRPOTrainer._record_batch_error.__get__(host)
     return DistributedAsyncEnvironmentalGRPOTrainer._stamp_group_efforts.__get__(host), host
 
 

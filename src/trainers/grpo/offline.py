@@ -20,11 +20,13 @@ forward-only sweep through the pipeline and carried into every step as a per-exa
 See ``_pp_loss_adapter``.
 """
 
+import random
 import warnings
 from collections import defaultdict
 from collections.abc import Callable
+from contextlib import nullcontext
 from functools import partial
-from typing import Any, Union, get_args
+from typing import Any, Union
 
 import datasets
 import numpy as np
@@ -40,6 +42,7 @@ from torch.utils.data import (
     DataLoader,
     Dataset,
     IterableDataset,
+    Sampler,
 )
 from transformers import (
     AutoTokenizer,
@@ -81,19 +84,20 @@ from src.models.loading.tokenizer_setup import is_bounded_length
 from src.models.modality import config_declares_multimodality
 from src.models.structure import base_transformers_model, resolve_tokenizer
 from src.trainers.grpo.mixins.chunked_logprobs import ChunkedLogprobsCore, LogitsWidth
-from src.trainers.grpo.mixins.dataloader import MultiGroupSampler
 from src.trainers.grpo.objective.advantages import STD_EPS
-from src.trainers.grpo.objective.offline import clamp_negative_advantage_logps, offline_token_objective
+from src.trainers.grpo.objective.offline import (
+    LOSS_TYPES,
+    PG_FORMULATIONS,
+    clamp_negative_advantage_logps,
+    loss_normalizer,
+    loss_numerator,
+    offline_token_objective,
+)
 from src.trainers.mixins.base import DistributedTrainerMixin
 from src.trainers.mixins.ep_introspection import named_ep_layers
 from src.trainers.mixins.pp_gates import reject_pp_compute_metrics, reject_pp_peft
 
 logger = get_logger(__name__, log_level="INFO")
-
-# Derived from the config's own Literal annotations, so the trainer's dispatch ladders and the
-# parse-time gate can never drift apart.
-LOSS_TYPES: tuple[str, ...] = get_args(OfflineGRPOConfig.__annotations__["loss_type"])
-PG_FORMULATIONS: tuple[str, ...] = get_args(OfflineGRPOConfig.__annotations__["policy_gradient_formulation"])
 
 
 def compute_group_advantages(
@@ -314,6 +318,70 @@ def live_min_log_prob(model: nn.Module, configured: float | None) -> float | Non
     return getattr(model, "min_log_prob", configured)
 
 
+class MultiGroupSampler(Sampler):
+    """Per-completion indices, flattened group-by-group, split across DP ranks (remainder to first ranks).
+
+    The DP slice is cut POSITIONALLY, so a group may straddle ranks: the advantages are precomputed at
+    tokenization and the ``1/group_size`` loss weight rides each row, so group locality is not what
+    makes the objective correct. Per-rank counts can differ; callers must equalize (see
+    ``_build_grouped_dataloader``).
+    """
+
+    def __init__(self, group_ids, rank, world_size, shuffle=True, seed=0):
+        self.group_ids = group_ids
+        self.rank = rank
+        self.world_size = world_size
+        self.shuffle = shuffle
+        # Rank-independent seed: the ranks sharing one DP slice (TP/ETP siblings, a pipeline chain) must
+        # iterate it in identical order.
+        self.seed = seed
+        self._epoch = 0
+
+        self.groups = defaultdict(list)
+        for idx, gid in enumerate(group_ids):
+            self.groups[gid].append(idx)
+
+        self.indices_sequence = []
+        self._create_indices_sequence()
+
+        logger.info(
+            f"MultiGroupSampler (rank {self.rank}): "
+            f"Created sequence of {len(self.indices_sequence)} indices from {len(self.groups)} groups"
+        )
+
+    def _create_indices_sequence(self):
+        """Build the per-rank index sequence: contiguous rank split, then seeded shuffle."""
+        for indices in self.groups.values():
+            self.indices_sequence.extend(indices)
+
+        if self.world_size > 1:
+            total_indices = len(self.indices_sequence)
+            indices_per_rank = total_indices // self.world_size
+            remainder = total_indices % self.world_size
+
+            start_idx = self.rank * indices_per_rank + min(self.rank, remainder)
+            end_idx = start_idx + indices_per_rank + (1 if self.rank < remainder else 0)
+
+            self.indices_sequence = self.indices_sequence[start_idx:end_idx]
+
+        if self.shuffle:
+            random.Random(self.seed).shuffle(self.indices_sequence)
+
+    def set_epoch(self, epoch: int) -> None:
+        """Re-seed the per-iteration shuffle for a new epoch (DistributedSampler convention)."""
+        self._epoch = epoch
+
+    def __iter__(self):
+        indices = self.indices_sequence.copy()
+        if self.shuffle:
+            # +1 offset so epoch 0 differs from the init shuffle.
+            random.Random(self.seed + self._epoch + 1).shuffle(indices)
+        return iter(indices)
+
+    def __len__(self):
+        return len(self.indices_sequence)
+
+
 class OfflineGRPOTrainer(ChunkedLogprobsCore, DistributedTrainerMixin, Trainer):
     """Offline GRPO trainer for pre-computed-reward data (``prompt``/``completions``/``rewards``)
     under EP / TP / PP (see ``_reject_pp_explicit_options`` for the PP-specific rejections).
@@ -381,10 +449,8 @@ class OfflineGRPOTrainer(ChunkedLogprobsCore, DistributedTrainerMixin, Trainer):
         self.best_completion_emphasis = args.best_completion_emphasis
         self.min_log_prob = args.min_log_prob
         self.loss_type = args.loss_type
-        # Every loss/PG dispatch in this file (compute_loss, _pp_normalizer, _pp_token_loss) branches
-        # on these strings; validate once at construction, not per microbatch or PP-only. Each
-        # three-way ``loss_type`` ladder still ends in a raise, since a fallthrough would substitute a
-        # different denominator instead of failing; the two-way PG choice ends in a labelled else.
+        # The objective's loss-type and PG dispatches branch on these strings: validated once here,
+        # not at the first microbatch or under PP alone.
         if self.loss_type not in LOSS_TYPES:
             raise ValueError(f"Unknown loss type: {self.loss_type!r}. Supported types: {list(LOSS_TYPES)}")
         if args.policy_gradient_formulation not in PG_FORMULATIONS:
@@ -907,26 +973,20 @@ class OfflineGRPOTrainer(ChunkedLogprobsCore, DistributedTrainerMixin, Trainer):
 
         ref_per_token_logps = ref_per_token_logps_unclamped = None
         if self.beta != 0.0:
-            with torch.no_grad():
-                if self.ref_model is not None:
-                    ref_per_token_logps, ref_per_token_logps_unclamped = self._get_per_token_logps(
-                        self.ref_model,
-                        input_ids,
-                        attention_mask,
-                        logits_to_keep,
-                        advantages=advantages,
-                        min_log_prob=current_min_log_prob,
-                    )
-                else:
-                    with self.accelerator.unwrap_model(self.model).disable_adapter():
-                        ref_per_token_logps, ref_per_token_logps_unclamped = self._get_per_token_logps(
-                            self.model,
-                            input_ids,
-                            attention_mask,
-                            logits_to_keep,
-                            advantages=advantages,
-                            min_log_prob=current_min_log_prob,
-                        )
+            # A run that holds no reference model scores it as the PEFT policy with its adapters off.
+            if self.ref_model is not None:
+                reference, adapters_off = self.ref_model, nullcontext()
+            else:
+                reference, adapters_off = self.model, self.accelerator.unwrap_model(self.model).disable_adapter()
+            with torch.no_grad(), adapters_off:
+                ref_per_token_logps, ref_per_token_logps_unclamped = self._get_per_token_logps(
+                    reference,
+                    input_ids,
+                    attention_mask,
+                    logits_to_keep,
+                    advantages=advantages,
+                    min_log_prob=current_min_log_prob,
+                )
         per_token_loss, sample_values = offline_token_objective(
             per_token_logps,
             per_token_logps_unclamped,
@@ -937,29 +997,10 @@ class OfflineGRPOTrainer(ChunkedLogprobsCore, DistributedTrainerMixin, Trainer):
             ref_logps_unclamped=ref_per_token_logps_unclamped,
         )  # [B, T]
 
-        # 1/group_size so every original group contributes equally.
-        group_weights = 1.0 / inputs["group_size"].float()  # [B]
-
-        weighted_per_token_loss = per_token_loss * group_weights.unsqueeze(1)  # [B, T]
-        weighted_completion_mask = completion_mask.float() * group_weights.unsqueeze(1)  # [B, T]
-
-        if self.loss_type == "grpo":
-            per_sequence_loss = (weighted_per_token_loss * completion_mask).sum(1) / completion_mask.sum(dim=1).clamp(
-                min=1.0
-            )  # [B]
-            loss = per_sequence_loss.sum() / group_weights.sum()
-
-        elif self.loss_type == "bnpo":
-            loss = (weighted_per_token_loss * completion_mask).sum() / weighted_completion_mask.sum().clamp(min=1.0)
-
-        elif self.loss_type == "dr_grpo":
-            effective_batch_size = group_weights.sum()
-            loss = (weighted_per_token_loss * completion_mask).sum() / (
-                effective_batch_size * self.max_completion_length
-            )
-
-        else:
-            raise ValueError(f"Unknown loss type: {self.loss_type!r}. Supported types: {list(LOSS_TYPES)}")
+        group_sizes = inputs["group_size"]
+        loss = loss_numerator(per_token_loss, completion_mask, group_sizes, self.loss_type) / loss_normalizer(
+            group_sizes, completion_mask.sum(dim=1), self.loss_type, self.max_completion_length
+        )
 
         self._buffer_sign_metrics(sample_values, advantages, completion_mask)
         return loss
@@ -1110,30 +1151,26 @@ class OfflineGRPOTrainer(ChunkedLogprobsCore, DistributedTrainerMixin, Trainer):
         return out
 
     def _pp_normalizer(self, inputs: dict[str, torch.Tensor]) -> torch.Tensor:
-        """This loss type's whole-batch denominator, from batch metadata (see ``compute_loss``).
+        """The loss type's whole-batch denominator (:func:`loss_normalizer`) over the pipeline batch.
 
-        grpo: sum of group weights; bnpo: group-weighted completion-token count; dr_grpo: effective
-        group count × max_completion_length. Shifted and unshifted completion-token counts are equal
-        (the collator guarantees a non-empty prompt, so position 0 is never a completion token).
+        The shifted completion-token counts equal the unshifted ones ``compute_loss`` reads (the
+        collator guarantees a non-empty prompt, so position 0 is never a completion token).
         """
-        group_weights = 1.0 / inputs["group_size"].float()
-        if self.loss_type == "grpo":
-            return group_weights.sum()
-        if self.loss_type == "bnpo":
-            token_counts = loss_token_counts_per_row(inputs["labels"]).float()
-            return (group_weights * token_counts).sum().clamp(min=1.0)
-        if self.loss_type == "dr_grpo":
-            return group_weights.sum() * self.max_completion_length
-        raise ValueError(f"Unknown loss type: {self.loss_type!r}. Supported types: {list(LOSS_TYPES)}")
+        return loss_normalizer(
+            inputs["group_size"],
+            loss_token_counts_per_row(inputs["labels"]),
+            self.loss_type,
+            self.max_completion_length,
+        )
 
     def _pp_token_loss(self, logits: torch.Tensor, target: dict[str, torch.Tensor]) -> torch.Tensor:
         """The offline-GRPO numerator over one microbatch; contributions sum to the full-batch loss.
 
         Per-token log-probs of the completion labels, the negative-advantage ``min_log_prob`` clamp
-        (on the policy and, as off PP, on the reference), then :func:`offline_token_objective` (the
-        objective ``compute_loss`` runs), followed by group weighting and, for loss_type 'grpo', the
-        per-sequence token mean (row-local, so microbatch-safe). The reference arrives precomputed as
-        a target column, and the runtime divides by ``_pp_normalizer``'s full-batch denominator.
+        (on the policy and, as off PP, on the reference), then :func:`offline_token_objective` and
+        :func:`loss_numerator`, the objective and numerator ``compute_loss`` runs. The reference
+        arrives precomputed as a target column, and the runtime divides by ``_pp_normalizer``'s
+        full-batch denominator.
 
         While :meth:`_pp_precompute_reference_logps` drives the schedule, the same call scores the
         reference instead: the raw per-token log-probs are stashed and no objective is formed.
@@ -1144,7 +1181,6 @@ class OfflineGRPOTrainer(ChunkedLogprobsCore, DistributedTrainerMixin, Trainer):
             return token_logps.new_zeros(())
 
         advantages = target["advantage"].float()
-        group_weights = 1.0 / target["group_size"].float()
 
         token_logps_unclamped = token_logps
         token_logps = clamp_negative_advantage_logps(token_logps, advantages, self._pp_min_log_prob)
@@ -1163,10 +1199,7 @@ class OfflineGRPOTrainer(ChunkedLogprobsCore, DistributedTrainerMixin, Trainer):
             ref_logps_unclamped=ref_logps_unclamped,
         )
         self._buffer_sign_metrics(sample_values, advantages, mask, rows=rows_with_labels(target["labels"]))
-        weighted = per_token_loss * mask * group_weights.unsqueeze(1)
-        if self.loss_type == "grpo":
-            return (weighted.sum(dim=1) / mask.sum(dim=1).clamp(min=1)).sum()
-        return weighted.sum()  # bnpo / dr_grpo share the numerator; only the normalizer differs
+        return loss_numerator(per_token_loss, mask, target["group_size"], self.loss_type)
 
     def _pp_precompute_reference_logps(self, dataset: "datasets.Dataset", what: str) -> "datasets.Dataset":
         """Score the KL reference through the pipeline and return ``dataset`` with the values as a column.
@@ -1222,34 +1255,14 @@ class OfflineGRPOTrainer(ChunkedLogprobsCore, DistributedTrainerMixin, Trainer):
                 prompt_width = batch["prompt_input_ids"].size(1)
                 completion_width = batch["completion_input_ids"].size(1)
                 counts = batch["completion_attention_mask"].sum(dim=1).tolist()
-                # Set before the transform: it signals to the transform (no column yet) and to the
-                # last stage's loss (score, do not train) that this pass is the sweep.
+                # Set before the transform too, which reads it as "no reference column yet".
                 self._pp_ref_sweep = []
                 inputs = self._pp_pad_rows_to_frozen(self._pp_batch_transform(batch), frozen_rows, pads)
-                self._pp_runtime.eval_loss(
-                    inputs["input_ids"],
-                    inputs["labels"],
-                    attention_mask=inputs["attention_mask"],
-                    num_items_in_batch=1.0,
-                    extra_targets={key: inputs[key] for key in ("advantage", "group_size")},
-                )
-                stashed = torch.cat(self._pp_ref_sweep) if self.parallelism_config.is_last_pp_stage else None
-                self._pp_ref_sweep = None
-                logps = self._pp_broadcast_output_from_last_stage(stashed)
+                logps = self._pp_reference_sweep_pass(inputs)
                 completion_logps = logps[:real_rows, prompt_width - 1 : prompt_width - 1 + completion_width].cpu()
                 per_row.extend(completion_logps[r, : counts[r]] for r in range(real_rows))
             for _ in range(replays):
-                self._pp_ref_sweep = []
-                self._pp_runtime.eval_loss(
-                    inputs["input_ids"],
-                    inputs["labels"],
-                    attention_mask=inputs["attention_mask"],
-                    num_items_in_batch=1.0,
-                    extra_targets={key: inputs[key] for key in ("advantage", "group_size")},
-                )
-                stashed = torch.cat(self._pp_ref_sweep) if self.parallelism_config.is_last_pp_stage else None
-                self._pp_ref_sweep = None
-                self._pp_broadcast_output_from_last_stage(stashed)
+                self._pp_reference_sweep_pass(inputs)
         finally:
             self._pp_ref_sweep = None
             self.model.train(was_training)
@@ -1268,6 +1281,22 @@ class OfflineGRPOTrainer(ChunkedLogprobsCore, DistributedTrainerMixin, Trainer):
                 f"the data-parallel shards did not reassemble into the dataset."
             )
         return dataset.add_column(REF_PER_TOKEN_LOGPS_COLUMN, column)
+
+    def _pp_reference_sweep_pass(self, inputs: dict[str, torch.Tensor]) -> torch.Tensor:
+        """One forward-only pass of the reference sweep over a frozen-shape batch, collective across the
+        chain and the stage's replicas: the last stage's loss stashes its per-token log-probs instead of
+        training on them (:meth:`_pp_token_loss`), and every rank receives them."""
+        self._pp_ref_sweep = []
+        self._pp_runtime.eval_loss(
+            inputs["input_ids"],
+            inputs["labels"],
+            attention_mask=inputs["attention_mask"],
+            num_items_in_batch=1.0,
+            extra_targets={key: inputs[key] for key in ("advantage", "group_size")},
+        )
+        stashed = torch.cat(self._pp_ref_sweep) if self.parallelism_config.is_last_pp_stage else None
+        self._pp_ref_sweep = None
+        return self._pp_broadcast_output_from_last_stage(stashed)
 
     def prediction_step(
         self,

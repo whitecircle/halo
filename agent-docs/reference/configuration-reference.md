@@ -46,18 +46,20 @@ Two knobs are *not* a plain cap:
 
 ### The tokenizer's window
 
-Every training script routes its `tokenizer.model_max_length` write through one of two seams in `src/training/script_runner.py`:
+Every training script but embedding routes its `tokenizer.model_max_length` write through one of three seams in `src/training/script_runner.py`:
 
 - `apply_max_length` — every single-budget script (SFT, DPO, KTO, SMPO, reward, classification, distillation). It resolves `max_length` against the context window, writes the resolved number back onto the config, and pins the same number, so collators, length filters and packers all read one already-resolved value.
-- `apply_prompt_completion_window` — the GRPO family, which has no single `max_length`. The window is `max_prompt_length + max_completion_length`, pinned **only when both halves are bounded**.
+- `apply_prompt_completion_window` — offline and online GRPO, which have no single `max_length`. The window is `max_prompt_length + max_completion_length`, pinned **only when both halves are bounded**.
 
     HF resolves any `truncation=True, max_length=None` call against `model_max_length`, so pinning a partial sum would turn the *unbounded* half into a silent cap at the other half's budget. An unbounded half therefore leaves the tokenizer at its own value. On the on-policy scripts the completion half is a generation budget with no unbounded setting; an unset one is rejected here.
+
+- `apply_context_window` — Async GRPO, whose multi-turn trajectory no configured length bounds. It pins the raw context window (`get_model_context_window`), the same hard limit the rollout server enforces, which the trainer fails against rather than truncating.
 
 Boundedness is one predicate everywhere (`is_bounded_length`): a positive int bounds, while `null` and any non-positive value mean unset.
 
 The pin is **run-scoped and never exported**. `save_pretrained` writes the live `model_max_length` into `tokenizer_config.json`, so an unrestored pin would ship the training budget as the served context — a run at `max_length: 40000` capping a 262k-context model. `setup_model_and_tokenizer` records the tokenizer's own bound and `DistributedTrainerMixin.save_model` runs every writer under `pristine_model_max_length`, which serves that bound for the duration of the save and puts the pin back afterwards.
 
-Two training paths sit outside the two seams. Async GRPO pins the raw context window (`get_model_context_window`) — the same hard limit vLLM enforces during rollout, which the trainer fails against rather than truncating. Embedding training pins nothing: its length is installed as SentenceTransformers' `max_seq_length`. The inference scripts (`scripts/inference/`) take a raw CLI number and resolve nothing.
+Embedding training pins nothing: its length is installed as SentenceTransformers' `max_seq_length`. The inference scripts (`scripts/inference/`) take a raw CLI number and resolve nothing.
 
 The YAML parser migrates no spelling: `max_seq_length` is a field of no config, so it hits the unknown-key raise (see the [Configuration Guide](../getting-started/configuration.md)).
 
@@ -463,7 +465,7 @@ Environment selection, reward terms and turn budget for Async GRPO with Environm
 
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
-| `environment_type` | `str` | `"react_math"` | Registry name: `react_math`, `react_search`, `native_math`, `native_coding`, `native_combined`, `swe`, `mcp`, `qa_search`, `code_contests`, `codeforces`, `exam_qa`. |
+| `environment_type` | `str` | `"react_math"` | Registry name, case-insensitive (lowercased at parse): `react_math`, `react_search`, `native_math`, `native_coding`, `native_combined`, `swe`, `mcp`, `qa_search`, `code_contests`, `codeforces`, `exam_qa`. |
 | `rewards` | `list[dict]` | `[{source: environment}]` | Reward terms, each `{source, name?, weight?, exponent?, ...}`, summed into the episode reward as `weight × score ^ exponent` over a score in `[0, 1]`: `environment` (the environment's own grade, logged as `reward/objective`), `judge`, `reward_model`. The environment's per-turn and shaping terms add on top. Parsed at config time; forwarded to the environment as `reward_terms`. YAML-only. See [Reward Terms](../training-methods/grpo/rewards.md). |
 | `max_turns` | `int \| null` | `null` | Max environment turns per episode, `>= 1`. `null` keeps the environment class's own default (`code_contests`/`codeforces` 15, `swe` 20, `exam_qa` 8; every other environment 10). |
 | `environment_kwargs` | `dict` | `{}` | Env-specific kwargs passed to the registry factory. Merged with core settings in `to_env_config()`. A key the target environment's constructor chain does not bind raises `TypeError`. |
@@ -574,7 +576,7 @@ Base shared by all training scripts. **Source:** `src/args/common_script_args.py
 | `unfreeze_layers_patterns` / `freeze_layers_patterns` | `list[str] \| None` | `None` | Layer-name patterns to unfreeze / freeze (freeze applied after unfreeze). Under **pipeline parallelism** a pattern that pins a decoder-layer index **raises**: each stage holds only its own layers, re-based to index 0, so a global index selects nothing on most stages and the wrong layer on the rest. Any segment following `layers`/`h` containing a digit counts, including glob character classes (`model.layers.[6-8][0-9].*`); index-free patterns (`*.self_attn.sinks`, `*.mlp.experts.0.*`) pass. A pattern that matches nothing **raises** on either knob — `unfreeze` would leave the model fully frozen, `freeze` would leave what it named training. They match different things: `unfreeze_layers_patterns` is fnmatch against full **module** names, `freeze_layers_patterns` against full **parameter** names. Both are refused on an adapter run (LoRA or native expert LoRA), which trains only the adapters. |
 | `enable_efficiency_metrics` / `enable_moe_metrics` / `moe_balancing` / `router_balancing_rate` / `num_full_model_params` | — | — | See [Performance & balancing flags](#performance--balancing-flags). |
 | `report_mfu_diagnostics` | `bool` | `False` | Add MFU / S-MFU / achieved-TFLOPS to the headline log. Values are computed every step regardless; this only controls headline visibility. tokens/s/GPU is the reported throughput metric. |
-| `save_completions` | `bool` | `True` | GRPO family (online / async): write per-step completions and trajectories to `<output_dir>/completions/completions_<step>.parquet` (+ a backend `completions` table). Text is rendered from detokenized message content. Independent of TRL's console-only `log_completions`; ignored by non-generating trainers (SFT, offline GRPO). |
+| `save_completions` | `bool` | `True` | GRPO family (online / async): write per-step completions and trajectories to `<output_dir>/completions/completions_<step>.parquet` (+ a wandb `completions` table). Text is rendered from detokenized message content. Independent of TRL's console-only `log_completions`; ignored by non-generating trainers (SFT, offline GRPO). |
 | `log_decoded_samples` | `bool` | `False` | Write the first few decoded train/eval samples (`skip_special_tokens=False`) to `<output_dir>/log/{train,eval}_sample.txt`. Written on the FS-aware save rank (same gate as `run.log`: global rank 0 on a shared output FS, each node's local rank 0 when `DIST_OUTPUT_SHARED_FILESYSTEM` — or the umbrella it falls back to — is `0`); datasets without `input_ids` are skipped. |
 
 ### SFTScriptArguments
@@ -611,7 +613,7 @@ RLVR Online GRPO. **Source:** `src/args/rlvr_online_grpo_args.py`
 | `use_sdpg` | `bool` | `False` | Swap in `DistributedSDPGTrainer`: the GRPO loss plus a privileged-teacher reverse-KL OPD term. Text-only. See [SDPG](../training-methods/distillation/online-sdpg.md). |
 | `opd_positive_advantage_only` | `bool` | `True` | Charge the OPD term on positive-advantage tokens only. `false` with `use_sdpg: false` is refused. |
 
-The tuning fields behind the two toggles — `rlrr_*` (`RLRRArguments`, `src/args/mixins.py`) and the SDPG set (`SDPGArguments` plus `opd_positive_advantage_only`) — are **refused** at a non-default value when their toggle is off rather than ignored; `rlrr_*` are additionally range-validated whether or not `use_rlrr` is on, while the SDPG set has no range checks beyond `sdpg_loss`'s allowed values. Per-knob list: [RLVR Online GRPO](../training-methods/grpo/online-grpo.md#configuration).
+The tuning fields behind the two toggles — `rlrr_*` (`RLRRArguments`, `src/args/mixins.py`) and the SDPG set (`SDPGArguments` plus `opd_positive_advantage_only`) — are **refused** at a non-default value when their toggle is off rather than ignored; both sets are additionally range-validated whether or not their toggle is on (the SDPG bounds and hint placeholders: [Online SDPG](../training-methods/distillation/online-sdpg.md#configuration)). Per-knob list: [RLVR Online GRPO](../training-methods/grpo/online-grpo.md#configuration).
 
 It also inherits `AdvantageShapingArguments` (`src/args/mixins.py`): `scale_rewards_std_floor`, `drop_degenerate_groups` and `balance_token_mass`, with the same semantics as the [AsyncTrainingConfig](#asynctrainingconfig) rows, except that `drop_degenerate_groups` defaults **`false`** here (it is `true` in async GRPO, whose sparse verifiable reward makes dead groups dominate the batch) and judges a group on the total weighted reward, since this arm's terms carry no shaping.
 

@@ -18,7 +18,8 @@ logger = get_logger(__name__, log_level="INFO")
 class ProtectedTokenEntropyMixin:
     """Union special-token positions into ``top_entropy_quantile``'s high-entropy mask.
 
-    Place before the trainer's other bases so it wins the MRO. No-op when
+    Mixed in ahead of ``ChunkedGRPOLogprobsMixin``, whose chunked path returns without calling
+    ``super()``: behind it, the completion-id stash below would never run. No-op when
     ``top_entropy_quantile == 1.0`` (TRL never calls ``get_high_entropy_mask``).
     """
 

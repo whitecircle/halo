@@ -20,6 +20,7 @@ from collections.abc import Iterable
 
 import numpy as np
 import torch
+from numpy.lib.format import MAGIC_PREFIX as NPY_MAGIC_PREFIX
 from torch import nn
 
 from src.distributed.expert_parallel.base_layer import EPMoELayerBase
@@ -32,9 +33,6 @@ ROUTING_MASKS_KEY = "routing_masks"
 # The coverage conventions a routed row falls into, exactly one per row (``prompt_len_mismatch`` is
 # counted on top of them, so it stays out of any per-row denominator).
 ROLLOUT_COVERAGE_SHAPES = ("full", "engine_omits_last", "completion_only", "unresolved")
-
-
-_NPY_MAGIC = b"\x93NUMPY"
 
 
 def decoder_layer_indices(names: Iterable[str]) -> list[int]:
@@ -63,7 +61,7 @@ def decode_rollout_routing(payload: str, num_layers: int, top_k: int) -> torch.T
     so a shape disagreement surfaces here rather than as a misaligned mask.
     """
     raw = base64.b64decode(payload)
-    if raw[: len(_NPY_MAGIC)] == _NPY_MAGIC:
+    if raw.startswith(NPY_MAGIC_PREFIX):
         array = np.load(io.BytesIO(raw))
         if array.ndim != 3:
             raise ValueError(f"routed_experts payload has shape {array.shape}, expected [tokens, layers, top_k]")

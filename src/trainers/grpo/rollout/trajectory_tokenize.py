@@ -25,6 +25,9 @@ logger = logging.getLogger(__name__)
 
 # Untrainable turns (``Message.untrainable``) that became no negative-only row, over all of them.
 UNTRAINABLE_TURNS_ROWLESS_FRAC_KEY = "sampling/untrainable_turns_rowless_frac"
+# ``warn_once`` key of the re-render fallback for a rollout that returned no sampled ids: in the trainer's
+# ``_warned_once`` once any trajectory of the run fell back.
+SAMPLED_IDS_MISSING_WARNING = "sampled_ids_missing"
 
 
 # Engine MoE routing for one turn: decoded mask + the prompt-token count it is aligned on.
@@ -70,12 +73,26 @@ def rollout_template_kwargs(
     return kwargs
 
 
+def context_overflow_error(
+    row: str, prompt_len: int, completion_label: str, completion_len: int, limit: int, suspect: str
+) -> str:
+    """The batch error for a training row longer than the model context window. Rows are trained whole,
+    so the overflow can only be a mismatch the rollout engine could not have produced."""
+    return (
+        f"{row} of {prompt_len + completion_len} tokens (prompt {prompt_len} + {completion_label} "
+        f"{completion_len}) exceeds the model context window {limit}. Rollouts are context-bounded by the "
+        f"rollout engine, so this points to a mismatch between the served context length (vLLM "
+        f"max_model_len / SGLang context-length), the trainer context, or {suspect} — trajectories are "
+        f"trained in full, never truncated."
+    )
+
+
 class TrajectoryTokenizeMixin:
     """Chat-template rendering and trajectory tokenization for the environmental GRPO trainer.
 
     Reads the trainer's tokenizer/processor, environment spec, context window and routing-replay
-    state. Fatal per-row failures are recorded in ``self._batch_build_error`` rather than raised, so
-    the trainer's rank-uniform fence raises them together.
+    state. Fatal per-row failures are recorded through the trainer's ``_record_batch_error`` rather than
+    raised, so its rank-uniform fence raises them together.
     """
 
     def _render_messages_to_ids(
@@ -110,8 +127,8 @@ class TrajectoryTokenizeMixin:
 
     @cached_property
     def _tools_schema(self) -> list[dict] | None:
-        """OpenAI tool schema the rollout passes to vLLM (``tools=``), or ``None``, rendered into the
-        trainer's prompt so recompute conditions on vLLM's exact context."""
+        """OpenAI tool schema the rollout passes to the engine (``tools=``), or ``None``, rendered into
+        the trainer's prompt so recompute conditions on the engine's exact context."""
         return self._rollout_env.get_tools_schema()
 
     @cached_property
@@ -153,7 +170,7 @@ class TrajectoryTokenizeMixin:
         """Model context window bounding every training row.
 
         The tokenizer is consulted first: the training script pins the *served* window there, which is
-        the limit vLLM enforces during rollout. An unset value (``None``, non-positive, or at/above
+        the limit the engine enforces during rollout. An unset value (``None``, non-positive, or at/above
         :data:`UNSET_MODEL_MAX_LENGTH`, the threshold HF's oversized "no limit" sentinels sit above)
         falls through to :func:`get_model_context_window`, which reads the model config (composite/VLM
         safe) and raises when no window is derivable; a large fallback would instead disable the
@@ -290,12 +307,16 @@ class TrajectoryTokenizeMixin:
         # No truncation (reward would decouple from trained tokens); recorded rather than raised.
         context_limit = self._context_limit()
         total_len = len(prompt_token_ids) + len(completion_ids)
-        if total_len > context_limit and self._batch_build_error is None:
-            self._batch_build_error = (
-                f"Trajectory of {total_len} tokens (prompt {len(prompt_token_ids)} + completion "
-                f"{len(completion_ids)}) exceeds the model context window {context_limit}. Rollouts are "
-                f"context-bounded by vLLM, so this points to a mismatch between the served max_model_len, "
-                f"the trainer context, or the prompt length — trajectories are trained in full, never truncated."
+        if total_len > context_limit:
+            self._record_batch_error(
+                context_overflow_error(
+                    "Trajectory",
+                    len(prompt_token_ids),
+                    "completion",
+                    len(completion_ids),
+                    context_limit,
+                    "the prompt length",
+                )
             )
 
         if self._max_train_row_tokens is not None and total_len > self._max_train_row_tokens:
@@ -347,20 +368,22 @@ class TrajectoryTokenizeMixin:
         # left out instead (the re-render cannot train it either). ``is None`` — an empty capture is a
         # zero-token turn, not a missing one.
         if any(m.token_ids is None for m in messages if m.role == "assistant" and not m.untrainable):
-            if not self._warned_capture_missing:
-                self._warned_capture_missing = True
-                # The remedy is engine-specific; naming the wrong one points at a flag the configured
-                # server does not accept.
-                remedy = (
-                    "Run the vLLM server with --return-tokens-as-token-ids (docker-compose.vllm.yml passes it)."
-                    if self._rollout_backend == VLLM_BACKEND
-                    else "SGLang needs no server flag for this — the ids are requested per call, so a "
-                    "rollout that returned none usually means the engine errored or was killed mid-turn."
-                )
-                logger.warning(
-                    f"train_on_sampled_tokens is on but a rollout returned no sampled token ids — "
-                    f"falling back to re-tokenization for that trajectory. {remedy}"
-                )
+            # The remedy is engine-specific; naming the wrong one points at a flag the configured
+            # server does not accept.
+            remedy = (
+                "Run the vLLM server with --return-tokens-as-token-ids (docker-compose.vllm.yml passes it)."
+                if self._rollout_backend == VLLM_BACKEND
+                else "SGLang needs no server flag for this — the ids are requested per call, so a "
+                "rollout that returned none usually means the engine errored or was killed mid-turn."
+            )
+            warn_once(
+                logger,
+                self._warned_once,
+                SAMPLED_IDS_MISSING_WARNING,
+                "train_on_sampled_tokens is on but a rollout returned no sampled token ids — falling back to "
+                "re-tokenization for that trajectory. %s",
+                remedy,
+            )
             return single_trajectory_row(self._tokenize_trajectory(result))
 
         template_kwargs = rollout_template_kwargs(
@@ -406,15 +429,16 @@ class TrajectoryTokenizeMixin:
             row_len = len(prompt_ids) + len(comp)
             # The context check comes first, as on the whole-trajectory path: a row the served model
             # could not have produced is a config error, not a row the memory cap below may absorb.
-            if row_len > context_limit and self._batch_build_error is None:
-                # First error wins, like every sibling write: a later overflow would otherwise
-                # replace the root cause.
-                self._batch_build_error = (
-                    f"Per-turn training row of {row_len} tokens (prompt {len(prompt_ids)} + sampled "
-                    f"completion {len(comp)}) exceeds the model context window {context_limit}. Rollouts "
-                    f"are context-bounded by vLLM, so this points to a mismatch between the served "
-                    f"max_model_len, the trainer context, or a template re-render drift — trajectories "
-                    f"are trained in full, never truncated."
+            if row_len > context_limit:
+                self._record_batch_error(
+                    context_overflow_error(
+                        "Per-turn training row",
+                        len(prompt_ids),
+                        "sampled completion",
+                        len(comp),
+                        context_limit,
+                        "a template re-render drift",
+                    )
                 )
             if self._max_train_row_tokens is not None and row_len > self._max_train_row_tokens:
                 # Over the rank's memory bound: this turn leaves the batch, the episode's other turns stay.
@@ -429,8 +453,7 @@ class TrajectoryTokenizeMixin:
                 try:
                     turn_routing = (self._routing_injector.decode_engine_mask(m.routing_mask), m.routing_prompt_tokens)
                 except ValueError as e:
-                    if self._batch_build_error is None:
-                        self._batch_build_error = f"routing_replay='rollout': malformed routed_experts payload: {e}"
+                    self._record_batch_error(f"routing_replay='rollout': malformed routed_experts payload: {e}")
             rows.append(
                 TurnRow(
                     prompt_ids=torch.tensor(prompt_ids, dtype=torch.long),

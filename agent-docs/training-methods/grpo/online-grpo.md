@@ -17,7 +17,7 @@ Two columns: `prompt` (a string or a `{"role", "content"}` message list) and `an
 {"prompt": [{"role": "user", "content": "What is 2 + 3?"}], "answer": "5"}
 ```
 
-`prompt_field` and `answer_field` must name real columns — a typo raises at load instead of yielding all-zero rewards. `system_prompt` is prepended only when the row has no system turn. A rendered prompt over `max_prompt_length` is **dropped**, never truncated. The recipes pull `openai/gsm8k`, `trl-lib/DeepMath-103K` and `open-r1/DAPO-Math-17k-Processed`.
+`prompt_field` and `answer_field` must name real columns — a typo raises at load instead of yielding all-zero rewards — and a row whose prompt is null or empty is dropped at load. `system_prompt` is prepended only when the row has no system turn. A rendered prompt over `max_prompt_length` is **dropped**, never truncated. The recipes pull `openai/gsm8k`, `trl-lib/DeepMath-103K` and `open-r1/DAPO-Math-17k-Processed`.
 
 ## Rewards
 

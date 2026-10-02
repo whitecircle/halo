@@ -26,7 +26,7 @@ from src.distributed.nccl.clients.base import (
     validate_syncable_param,
 )
 from src.distributed.nccl.registry import resolve_weight_sync_client
-from src.distributed.runtime import broadcast_from_rank0, is_global_main_process
+from src.distributed.runtime import raise_rank0_failure
 
 logger = logging.getLogger(__name__)
 
@@ -147,23 +147,6 @@ def verify_sampler_logprob_reference(
                 )
 
 
-def _rank0_preflight(check: Callable[[], None]) -> None:
-    """Run ``check`` on rank 0 and re-raise its ``ValueError`` on every rank.
-
-    One HTTP probe, no log spam; the verdict is broadcast so all ranks raise together instead of
-    hanging on the next barrier.
-    """
-    error: str | None = None
-    if is_global_main_process():
-        try:
-            check()
-        except ValueError as e:
-            error = str(e)
-    error = broadcast_from_rank0(error)
-    if error is not None:
-        raise ValueError(error)
-
-
 def verify_context_window_synced(
     urls: list[str], single_turn_tokens: int, full_trajectory_tokens: int | None = None, *, backend: str
 ) -> None:
@@ -173,7 +156,9 @@ def verify_context_window_synced(
     leave the peers blocked in the verdict broadcast.
     """
     client_cls = resolve_weight_sync_client(backend)
-    _rank0_preflight(partial(verify_context_window, client_cls, urls, single_turn_tokens, full_trajectory_tokens))
+    raise_rank0_failure(
+        partial(verify_context_window, client_cls, urls, single_turn_tokens, full_trajectory_tokens), str, ValueError
+    )
 
 
 def verify_sampler_logprob_reference_synced(
@@ -181,8 +166,10 @@ def verify_sampler_logprob_reference_synced(
 ) -> None:
     """Collective-safe :func:`verify_sampler_logprob_reference`; call on every rank."""
     client_cls = resolve_weight_sync_client(backend)
-    _rank0_preflight(
-        partial(verify_sampler_logprob_reference, client_cls, urls, temperature, top_p, sequence_ratio_active)
+    raise_rank0_failure(
+        partial(verify_sampler_logprob_reference, client_cls, urls, temperature, top_p, sequence_ratio_active),
+        str,
+        ValueError,
     )
 
 
@@ -244,6 +231,22 @@ class InferenceClientManager:
         """The trainer-side NCCL group port for one server: its configured value, else the base + index."""
         return self.server_configs[index].get("group_port", self.base_group_port + index)
 
+    def _connect_client(self, index: int, device: torch.device) -> BaseWeightSyncClient:
+        """Build server ``index``'s client and form its NCCL group on ``device``: the one construction
+        path, shared by the first connect and a reconnect so both bind the same port and NIC."""
+        config = self.server_configs[index]
+        client = self._client_factory(
+            base_url=config["url"],
+            group_port=self._group_port(index),
+            connection_timeout=self.connection_timeout,
+            # Optional per-server routable trainer NIC for the NCCL group (multi-homed nodes).
+            group_host=config.get("group_host"),
+        )
+        client.init_communicator(device=device)
+        if self._co_load_module_names is not None:
+            client.scope_co_load_groups(self._co_load_module_names)
+        return client
+
     def init_communicators(self, device: torch.device | str | int):
         """Create a separate NCCL process group per server (sequentially — groups can't init
         concurrently). ``device`` is the trainer's GPU, which must differ from every server's.
@@ -261,22 +264,12 @@ class InferenceClientManager:
         for i, config in enumerate(self.server_configs):
             url = config["url"]
             port = self._group_port(i)
-            # Optional per-server routable trainer NIC for the NCCL group (multi-homed nodes).
-            group_host = config.get("group_host")
-
             logger.info(
                 f"Initializing {self._client_factory.BACKEND_NAME} weight-sync client "
-                f"{i + 1}/{len(self.server_configs)}: {url} (port {port})"
+                f"{i + 1}/{len(self.server_configs)}: {url} (port {port}, device {device})"
             )
-
             try:
-                client = self._client_factory(
-                    base_url=url,
-                    group_port=port,
-                    connection_timeout=self.connection_timeout,
-                    group_host=group_host,
-                )
-                client.init_communicator(device=device)
+                client = self._connect_client(i, device)
             except Exception as e:
                 # Else the already-initialized clients hold their TCPStore listeners until atexit.
                 self.close_communicators()
@@ -284,8 +277,6 @@ class InferenceClientManager:
                     f"{self._client_factory.BACKEND_NAME} weight-sync client {i + 1}/{len(self.server_configs)} "
                     f"for {url} (group_port {port}) failed to initialize: {type(e).__name__}: {e}"
                 ) from e
-            if self._co_load_module_names is not None:
-                client.scope_co_load_groups(self._co_load_module_names)
             self._clients.append(client)
             logger.info(f"  Connected to {url}")
 
@@ -461,11 +452,10 @@ class InferenceClientManager:
             raise RuntimeError("InferenceClientManager.reconnect_client requires init_communicators() first.")
         if not 0 <= index < len(self._clients):
             raise IndexError(f"Client index {index} out of range (have {len(self._clients)} clients)")
-        config = self.server_configs[index]
+        url = self.server_configs[index]["url"]
         old = self._clients[index]
-        port = self._group_port(index)
         logger.warning(
-            f"Reconnecting weight-sync client for {config['url']} on group_port {port}; "
+            f"Reconnecting weight-sync client for {url} on group_port {self._group_port(index)}; "
             f"full re-sync required before rollouts"
         )
         # Retire the old client first: it holds the /resume for the pause its failed sync left behind.
@@ -473,16 +463,8 @@ class InferenceClientManager:
         try:
             old.close_communicator()
         except Exception as e:  # the old client is already dead; never mask the rebuild
-            logger.warning(f"Error closing stale client for {config['url']}: {e}")
-        client = self._client_factory(
-            base_url=config["url"],
-            group_port=port,
-            connection_timeout=self.connection_timeout,
-            group_host=config.get("group_host"),
-        )
-        client.init_communicator(device=self._device)
-        if self._co_load_module_names is not None:
-            client.scope_co_load_groups(self._co_load_module_names)
+            logger.warning(f"Error closing stale client for {url}: {e}")
+        client = self._connect_client(index, self._device)
         for name, snapshot in buffered:
             client.buffer_param(name, snapshot)
         self._clients[index] = client

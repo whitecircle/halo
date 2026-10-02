@@ -8,6 +8,7 @@ from contextvars import ContextVar
 from typing import Any
 
 from src.environments.base import (
+    ANSWER_KEY,
     CUT_IN_TOOL_CALL_KEY,
     EPISODE_ERROR_KEY,
     EPISODE_TOOL_BUDGETS_KEY,
@@ -362,11 +363,11 @@ class NativeToolUseEnvironment(BaseEnvironment):
         if validator and callable(validator):
             return EpisodeGrade(1.0 if validator(trajectory) else 0.0)
 
-        expected = ctx.get("answer")
+        expected = ctx.get(ANSWER_KEY)
         if expected is not None:
             return EpisodeGrade(1.0 if validate_answer(trajectory.info.get("final_response", ""), expected) else 0.0)
 
-        if "answer" in ctx:
+        if ANSWER_KEY in ctx:
             return self._null_answer_grade(trajectory)
 
         return EpisodeGrade(1.0)

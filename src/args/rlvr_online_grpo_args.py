@@ -112,6 +112,12 @@ class RLVROnlineGRPOScriptArguments(
         """The typed reward terms of ``rewards``, parsed and validated (also at parse time)."""
         return parse_reward_terms(self.rewards, RLVR_REWARD_SOURCES)
 
+    def _validate_hint_template(self) -> None:
+        # With use_sdpg off a null template is a value set beside the closed gate, which the script's
+        # gate refusal names as such; a template that is set is held to its placeholders either way.
+        if self.use_sdpg or self.sdpg_hint_template is not None:
+            super()._validate_hint_template()
+
     def _validate_ranges(self) -> None:
         super()._validate_ranges()
         if not self.rewards:

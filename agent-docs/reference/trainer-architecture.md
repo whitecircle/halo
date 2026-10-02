@@ -386,9 +386,10 @@ but under CP they cover only the local chunk.
   [Async GRPO](../training-methods/grpo/async-grpo/README.md).
 
 The `src/trainers/grpo/` package keeps the three trainers (`environmental.py`, `online.py`,
-`offline.py`) at the top level, with support code in `objective/` (pure loss-side functions),
-`mixins/`, and `rollout/`. `environmental.py` keeps the objective itself: batch assembly,
-advantages, the IS trust region and the rank-uniform fences.
+`offline.py`) and two shared leaves (`early_stop.py`; `world_metrics.py`, the step metrics folded
+from every rank's counts in one collective) at the top level, with support code in `objective/`
+(pure loss-side functions), `mixins/`, and `rollout/`. `environmental.py` keeps the objective
+itself: batch assembly, advantages, the IS trust region and the rank-uniform fences.
 
 `rollout/` holds function modules (`weight_sync.py`, `weight_sync_clients.py`, `trajectory_spans.py`,
 `routing_replay.py`, `completions_logging.py`) plus the three mixins the async GRPO trainer composes:

@@ -1,7 +1,7 @@
 """Decoupled completion/trajectory artifact logging for GRPO trainers.
 
 TRL's ``GRPOTrainer.log`` couples the console table, the parquet record, and the wandb table under
-one ``log_completions`` flag. :func:`emit_completion_artifacts` splits them (parquet and backend table
+one ``log_completions`` flag. :func:`emit_completion_artifacts` splits them (parquet and wandb table
 gated by ``save``, console table by ``console``) so a run can keep the record without console output.
 Built from TRL's ``_logs`` (detokenized text, rewards, advantages, extras, images).
 """
@@ -22,7 +22,7 @@ from src.distributed.runtime import fs_aware_save_rank
 
 logger = logging.getLogger(__name__)
 
-# Cap per-cell text in the backend table (parquet keeps the full text); untruncated cells stall the log call.
+# Cap per-cell text in the wandb table (parquet keeps the full text); untruncated cells stall the log call.
 _TABLE_CELL_CHARS = 8000
 
 
@@ -67,11 +67,11 @@ def _clear_completion_logs(logs: Mapping) -> None:
 
 
 def emit_completion_artifacts(trainer, *, console: bool, save: bool, mode: str | None = None) -> None:
-    """Write the completions parquet + backend table and/or print the console sample table, then
+    """Write the completions parquet + wandb table and/or print the console sample table, then
     empty ``trainer._logs`` on every rank.
 
     Writer rank only; reads ``trainer._logs``. ``console`` prints the per-sample table; ``save`` writes
-    the parquet under ``<output_dir>/completions/`` and logs a ``completions`` table to each backend.
+    the parquet under ``<output_dir>/completions/`` and logs a ``completions`` table to wandb.
     ``mode`` names the rows' mode when it is not the model's current one (train rows written as an
     eval round begins); by default the model's mode picks the file.
 
@@ -127,7 +127,7 @@ def _emit_completion_artifacts(trainer, *, console: bool, save: bool, mode: str)
         df_base.to_parquet(
             os.path.join(completions_dir, f"completions_{trainer.state.global_step:05d}{mode_suffix}.parquet")
         )
-    except Exception as e:  # main-process-only; a raise here desyncs this rank into a hang
+    except Exception as e:  # writer ranks only; a raise here desyncs this rank into a hang
         logger.warning(f"completions parquet write failed (step {trainer.state.global_step}): {e}")
 
     if "wandb" not in (trainer.args.report_to or []) or wandb.run is None:

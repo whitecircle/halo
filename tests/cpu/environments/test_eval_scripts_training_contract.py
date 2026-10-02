@@ -22,7 +22,7 @@ from scripts.environments._common import (
     rollout_config_from_args,
     write_eval_outputs,
 )
-from scripts.environments.inference.run_code_contests import resolve_env_config
+from scripts.environments.inference.run_code_contests import CODING_ENV_TYPES, resolve_env_config
 from src.configs.rollout_config import DEFAULT_ROLLOUT_TOP_P
 from src.env import resolve_nccl_timeout_minutes
 from src.environments.envs.tasks.coding.code_contests import DEFAULT_REASONING_EFFORT
@@ -119,6 +119,16 @@ def test_the_yaml_environment_config_reaches_the_eval(contract):
         "language": "cpp",
         "timeout_per_test": 3,
     }
+
+
+def test_a_mixed_case_environment_type_reaches_the_coding_eval_as_the_registry_name(tmp_path, monkeypatch):
+    """The registry resolves ``environment_type`` case-insensitively, so a ``Code_Contests`` YAML trains;
+    the coding eval compares the name against its coding envs, and must accept the run it trained."""
+    path = tmp_path / "train.yaml"
+    path.write_text(_TRAINING_YAML.replace("environment_type: code_contests", "environment_type: Code_Contests"))
+    monkeypatch.setattr(common.AutoTokenizer, "from_pretrained", lambda *a, **k: _Tokenizer())
+    environment_type = TrainingContract.load(str(path)).env_config.environment_type
+    assert environment_type == "code_contests" and environment_type in CODING_ENV_TYPES
 
 
 @pytest.fixture

@@ -43,6 +43,7 @@ class _Host(AsyncRolloutMixin, CheckpointingMixin):
 
     _generate_and_score_completions_base = _T._generate_and_score_completions_base
     _extract_prompts_and_contexts = _T._extract_prompts_and_contexts
+    _record_batch_error = _T._record_batch_error
     _raise_batch_error_uniformly = _T._raise_batch_error_uniformly
 
     def __init__(self, buffer_size: int = 1):
@@ -183,7 +184,7 @@ def test_wedged_pipeline_is_recorded_for_the_uniform_fence_not_raised():
     assert "wedged" in (host._batch_build_error or ""), "the wedge must be recorded for the fence to raise"
     # The fence is what fails the job — and it fails on every rank, not just this one.
     with pytest.raises(ValueError, match="wedged"):
-        host._raise_batch_error_uniformly(torch.device("cpu"))
+        host._raise_batch_error_uniformly()
 
 
 def test_input_queue_full_skip_is_counted_not_silent():

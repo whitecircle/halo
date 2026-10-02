@@ -46,6 +46,7 @@ def _stub(tokenizer):
     stub._tokenizer = tokenizer  # mirror __init__: processing_class may be a Processor
     stub._render_messages_to_ids = MethodType(DistributedAsyncEnvironmentalGRPOTrainer._render_messages_to_ids, stub)
     stub._context_limit = MethodType(DistributedAsyncEnvironmentalGRPOTrainer._context_limit, stub)
+    stub._record_batch_error = MethodType(DistributedAsyncEnvironmentalGRPOTrainer._record_batch_error, stub)
     stub._masked_trajectory_tensors = MethodType(
         DistributedAsyncEnvironmentalGRPOTrainer._masked_trajectory_tensors, stub
     )
@@ -194,6 +195,7 @@ def _tokenize_with(tok, reasoning_effort):
     stub._tokenizer = tok
     stub._render_messages_to_ids = MethodType(DistributedAsyncEnvironmentalGRPOTrainer._render_messages_to_ids, stub)
     stub._context_limit = MethodType(DistributedAsyncEnvironmentalGRPOTrainer._context_limit, stub)
+    stub._record_batch_error = MethodType(DistributedAsyncEnvironmentalGRPOTrainer._record_batch_error, stub)
     traj = Trajectory(reasoning_effort=reasoning_effort)
     traj.add_message(Message.user("solve it"))
     traj.add_message(Message.assistant("done", thinking="cot"))

@@ -6,17 +6,17 @@ Use it when a verifiable answer exists and the policy solves too few prompts for
 
 ## Configuration
 
-Every knob lives on the RLVR script arguments and is read only with `use_sdpg: true`; setting one away from its default with the gate off is refused before the model loads. No shipped YAML enables it — start from `examples/grpo/online/rlvr-online-grpo-template.yaml`, which carries the block commented out.
+Every knob lives on the RLVR script arguments and is read only with `use_sdpg: true`; setting one away from its default with the gate off is refused before the model loads. An out-of-range value is refused at parse time, gate on or off. No shipped YAML enables it — start from `examples/grpo/online/rlvr-online-grpo-template.yaml`, which carries the block commented out.
 
 | Knob | Default | Effect |
 |---|---|---|
 | `use_sdpg` | `false` | Swap in `DistributedSDPGTrainer` |
-| `sdpg_beta_base` | `1.0` | Base OPD coefficient; `0` drops the term |
-| `sdpg_beta_warmup_steps` | `0` | Steps to ramp beta from 0 to `sdpg_beta_base` |
-| `sdpg_beta_decay_steps` | `0` | Final steps over which beta decays to 0 |
+| `sdpg_beta_base` | `1.0` | Base OPD coefficient, finite and `>= 0`; `0` drops the term |
+| `sdpg_beta_warmup_steps` | `0` | Steps to ramp beta from 0 to `sdpg_beta_base`; `>= 0` |
+| `sdpg_beta_decay_steps` | `0` | Final steps over which beta decays to 0; `>= 0` |
 | `sdpg_loss` | `reverse_kl` | OPD loss: `reverse_kl`, `forward_kl` or `unnormalized_kl` |
-| `sdpg_temperature` | `1.0` | OPD softmax temperature |
-| `sdpg_hint_template` | `\n[Hint] The correct answer is: {answer}. Do NOT state that you were given the answer.\n` | Appended to the prompt for the teacher forward only |
+| `sdpg_temperature` | `1.0` | OPD softmax temperature, finite and `> 0` |
+| `sdpg_hint_template` | `\n[Hint] The correct answer is: {answer}. Do NOT state that you were given the answer.\n` | Appended to the rendered generation prompt for the teacher forward only. `{answer}` is the one placeholder it fills; any other is refused at parse time |
 | `opd_positive_advantage_only` | `true` | Restrict OPD to rows with a positive advantage; `false` distills every completion row |
 
 The hint is tokenized and appended to each rollout's prompt ids, so the term is text-only. It reads the pinned `answer` column that `process_for_rlvr` normalizes `answer_field` into — a train dataset without that column raises at construction whenever `sdpg_beta_base` is non-zero, and a loss batch without the teacher prompts raises rather than training plain GRPO.

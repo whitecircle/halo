@@ -7,6 +7,7 @@ field only to change its default (e.g. ``DistillScriptArguments``' ``conversatio
 """
 
 import math
+import string
 from dataclasses import dataclass, field, fields, make_dataclass
 from typing import ClassVar, Literal, get_args
 
@@ -26,8 +27,22 @@ def rlrr_arg_name(config_field: str) -> str:
     return _RLRR_ARG_SPELLINGS.get(config_field, RLRR_ARG_PREFIX + config_field)
 
 
-# Shared by :class:`SDPGArguments` and the SDPG trainer so both OPD flows steer the teacher alike.
+# The OPD losses ``get_self_distillation_loss_fn`` resolves (src/trainers/distillation/losses.py, which
+# pulls torch): the annotation gates YAML/CLI and SDPGArguments validates against it.
+SelfDistillationLoss = Literal["reverse_kl", "forward_kl", "unnormalized_kl"]
+
+# The teacher hint both OPD flows default to, through SDPGArguments.
 PRIVILEGED_HINT_TEMPLATE = "\n[Hint] The correct answer is: {answer}. Do NOT state that you were given the answer.\n"
+
+
+def format_field_names(template: str) -> set[str]:
+    """The replacement-field names ``str.format`` looks up in ``template``, nested format specs
+    included. A lone brace raises ``ValueError``, as ``str.format`` would."""
+    names: set[str] = set()
+    for _, name, spec, _ in string.Formatter().parse(template):
+        if name is not None:
+            names |= {name, *format_field_names(spec or "")}
+    return names
 
 
 @dataclass
@@ -372,40 +387,88 @@ class ChunkedLogprobsArguments:
 
 
 @dataclass
-class SDPGArguments:
+class SDPGArguments(RangeValidatedConfig):
     """Privileged-teacher OPD term (SDPG, arXiv:2606.04036), shared by the offline self-distillation
     SFT script and the online RLVR GRPO script.
 
     The hint field the teacher fills is not declared here: self-distillation reads it from a
     configurable dataset column, while RLVR's ``process_for_rlvr`` has already normalized it to
-    ``answer``.
+    ``answer``. Validated on construction, so the trainers that build this block from their kwargs
+    hold a direct construction to the bounds a YAML run meets.
     """
+
+    # The placeholders the arm's hint formatter fills: the on-policy trainer has the gold answer alone;
+    # SelfDistillationArguments widens the set with its reference-solution column.
+    HINT_PLACEHOLDERS: ClassVar[frozenset[str]] = frozenset({"answer"})
 
     sdpg_hint_template: str = field(
         default=PRIVILEGED_HINT_TEMPLATE,
         metadata={
-            "help": "Template appended to the last user turn for the TEACHER forward only. Supports "
-            "an {answer} placeholder, and — on the self-distillation arm, which reads a reference "
-            "solution column — a {solution} placeholder."
+            "help": "Hint the TEACHER forward sees after its prompt: appended to the last user turn on "
+            "the self-distillation arm, to the rendered generation prompt on the online arm. A "
+            "str.format template: {answer} on both arms, {solution} on self-distillation only "
+            "(privileged_solution_field). Any other placeholder is refused at parse time."
         },
     )
-    sdpg_loss: Literal["reverse_kl", "forward_kl", "unnormalized_kl"] = field(
+    sdpg_loss: SelfDistillationLoss = field(
         default="reverse_kl",
         metadata={"help": "OPD loss: 'reverse_kl' (SDPG), 'forward_kl', or 'unnormalized_kl' (k3/UKL)."},
     )
     sdpg_temperature: float = field(
         default=1.0,
-        metadata={"help": "Softmax temperature for the OPD loss."},
+        metadata={"help": "Softmax temperature for the OPD loss (finite, > 0)."},
     )
     sdpg_beta_base: float = field(
         default=1.0,
-        metadata={"help": "Base distillation coefficient beta_base."},
+        metadata={"help": "Base distillation coefficient beta_base (finite, >= 0; 0 drops the OPD term)."},
     )
     sdpg_beta_warmup_steps: int = field(
         default=0,
-        metadata={"help": "Steps to ramp beta from 0 to sdpg_beta_base (SDPG warmup)."},
+        metadata={"help": "Steps to ramp beta from 0 to sdpg_beta_base (SDPG warmup; 0 = off)."},
     )
     sdpg_beta_decay_steps: int = field(
         default=0,
-        metadata={"help": "Final steps over which beta decays back to 0 (SDPG decay)."},
+        metadata={"help": "Final steps over which beta decays back to 0 (SDPG decay; 0 = off)."},
     )
+
+    def __post_init__(self) -> None:
+        self._validate_ranges()
+
+    def _validate_ranges(self) -> None:
+        super()._validate_ranges()
+        if self.sdpg_loss not in get_args(SelfDistillationLoss):
+            raise ValueError(f"sdpg_loss must be one of {get_args(SelfDistillationLoss)}, got {self.sdpg_loss!r}")
+        # Divides both distributions' logits: zero turns them infinite and NaNs the OPD loss without a
+        # raise, a negative one inverts them.
+        if not math.isfinite(self.sdpg_temperature) or self.sdpg_temperature <= 0:
+            raise ValueError(f"sdpg_temperature must be a finite value > 0, got {self.sdpg_temperature}")
+        # A NaN coefficient NaNs every loss; a negative one trains the student away from the teacher.
+        if not math.isfinite(self.sdpg_beta_base) or self.sdpg_beta_base < 0:
+            raise ValueError(
+                f"sdpg_beta_base must be a finite value >= 0 (0 drops the OPD term), got {self.sdpg_beta_base}"
+            )
+        # The schedule reads a negative length as off, so one is a typo the run would not report.
+        for name in ("sdpg_beta_warmup_steps", "sdpg_beta_decay_steps"):
+            value = getattr(self, name)
+            if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+                raise ValueError(f"{name} must be an int >= 0 (0 = off), got {value!r}")
+        self._validate_hint_template()
+
+    def _validate_hint_template(self) -> None:
+        """Refuse a placeholder the arm's formatter does not fill: ``str.format`` would raise it at the
+        first teacher prompt, after the model load (and on the online arm, the rollout server)."""
+        if not isinstance(self.sdpg_hint_template, str):
+            raise ValueError(
+                f"sdpg_hint_template must be a str.format template string, got {self.sdpg_hint_template!r}"
+            )
+        try:
+            names = format_field_names(self.sdpg_hint_template)
+        except ValueError as e:
+            raise ValueError(f"sdpg_hint_template is not a valid str.format template: {e}") from e
+        unknown = sorted(names - self.HINT_PLACEHOLDERS)
+        if unknown:
+            raise ValueError(
+                f"sdpg_hint_template names {[f'{{{name}}}' for name in unknown]}, which "
+                f"{type(self).__name__}'s hint does not fill; it fills "
+                f"{[f'{{{name}}}' for name in sorted(self.HINT_PLACEHOLDERS)]}."
+            )

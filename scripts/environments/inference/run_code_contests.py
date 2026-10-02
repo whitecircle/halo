@@ -53,6 +53,7 @@ from scripts.environments._common import (
     write_eval_outputs,
 )
 from src.configs.rollout_config import DEFAULT_ROLLOUT_MAX_TOKENS
+from src.environments.base import ANSWER_KEY
 from src.environments.envs.tasks.coding.code_contests import (
     DEFAULT_EVAL_PROTOCOL,
     DEFAULT_REASONING_EFFORT,
@@ -339,7 +340,7 @@ def build_examples(
         examples.append(
             {
                 "prompt": adapter.format_prompt(row),
-                "context": {"answer": json.dumps(adapter.pack_verification(row))},
+                "context": {ANSWER_KEY: json.dumps(adapter.pack_verification(row))},
                 "group": row.get(adapter.group_field),
                 "id": row.get(adapter.id_field),
             }

@@ -30,6 +30,27 @@ def _grouped(rewards: torch.Tensor, num_generations: int) -> torch.Tensor:
     return rewards.view(-1, num_generations)
 
 
+def valid_group_stats(
+    rewards: torch.Tensor, num_generations: int, valid_mask: torch.Tensor
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Each group's reward mean and unbiased std over its valid members, both ``[groups, 1]``.
+
+    A group with no valid member takes its plain mean; one with fewer than two has std 0, the spread
+    a group-scaled advantage of 0 divides by.
+    """
+    grouped = _grouped(rewards, num_generations)
+    valid = _grouped(valid_mask.to(grouped.dtype), num_generations)
+    valid_count = valid.sum(dim=1, keepdim=True)
+    group_mean = torch.where(
+        valid_count > 0,
+        (grouped * valid).sum(dim=1, keepdim=True) / valid_count.clamp_min(1.0),
+        grouped.mean(dim=1, keepdim=True),
+    )
+    squares = (((grouped - group_mean) ** 2) * valid).sum(dim=1, keepdim=True)
+    var = squares / (valid_count - 1.0).clamp_min(1.0)
+    return group_mean, torch.where(valid_count > 1, var.sqrt(), torch.zeros_like(var))
+
+
 def group_relative_advantages(
     rewards: torch.Tensor,
     num_generations: int,
@@ -56,17 +77,10 @@ def group_relative_advantages(
     """
     grouped = _grouped(rewards, num_generations)
     if valid_mask is not None:
-        valid = _grouped(valid_mask.to(grouped.dtype), num_generations)
-        valid_count = valid.sum(dim=1, keepdim=True)
-        safe_mean = torch.where(
-            valid_count > 0,
-            (grouped * valid).sum(dim=1, keepdim=True) / valid_count.clamp_min(1.0),
-            grouped.mean(dim=1, keepdim=True),
-        )
-        group_baseline = safe_mean.expand_as(grouped).flatten()
+        group_mean, valid_std = valid_group_stats(rewards, num_generations, valid_mask)
     else:
-        group_baseline = grouped.mean(dim=1, keepdim=True).expand_as(grouped).flatten()
-    advantages = rewards - group_baseline
+        group_mean = grouped.mean(dim=1, keepdim=True)
+    advantages = rewards - group_mean.expand_as(grouped).flatten()
 
     if scale_rewards not in (None, False, "none"):
         # The std divisor applies ``valid_mask`` like the baseline: a placeholder would bias every valid row.
@@ -79,16 +93,8 @@ def group_relative_advantages(
             std = batch_rewards.std() if batch_rewards.numel() > 1 else torch.zeros_like(rewards[:1])
             advantages = advantages / (std.clamp_min(std_floor) + STD_EPS)
         elif num_generations > 1:
-            if valid_mask is not None:
-                # Unbiased std over valid members; groups with < 2 of them get std 0 (advantage already 0).
-                valid = _grouped(valid_mask.to(grouped.dtype), num_generations)
-                n = valid.sum(dim=1, keepdim=True)
-                vmean = (grouped * valid).sum(dim=1, keepdim=True) / n.clamp_min(1.0)
-                var = (((grouped - vmean) ** 2) * valid).sum(dim=1, keepdim=True) / (n - 1.0).clamp_min(1.0)
-                std = torch.where(n > 1, var.sqrt(), torch.zeros_like(var)).expand_as(grouped).flatten()
-            else:
-                std = grouped.std(dim=1, keepdim=True).expand_as(grouped).flatten()
-            advantages = advantages / (std.clamp_min(std_floor) + STD_EPS)
+            group_std = valid_std if valid_mask is not None else grouped.std(dim=1, keepdim=True)
+            advantages = advantages / (group_std.expand_as(grouped).flatten().clamp_min(std_floor) + STD_EPS)
         # num_generations == 1: singleton groups have advantage 0; leave unscaled rather than /NaN.
 
     _require_finite(rewards, advantages)

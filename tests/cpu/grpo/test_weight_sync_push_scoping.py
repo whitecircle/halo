@@ -11,8 +11,9 @@ weights with no error.
 
 What is pinned: the environmental trainer's single-process push scopes on both of its branches (one
 SGLang client through the streamed gather; a pool of SGLang clients through the rolling one), a
-manager's clients keep the engine's full groups until a push scopes them, and the collective push
-scopes its forwarding client exactly once.
+manager's clients keep the engine's full groups until a push scopes them, a reconnected client is built
+like the first connect (scope, group port, NIC and device), and the collective push scopes its
+forwarding client exactly once.
 
 Run: ``python tests/cpu/grpo/test_weight_sync_push_scoping.py`` (or ``pytest -m cpu``).
 """
@@ -168,6 +169,31 @@ def test_the_rolling_push_does_not_refuse_a_model_without_q_a_proj():
             _param(leaf) for leaf in ("q_b_proj", "kv_a_proj_with_mqa", "o_proj")
         ]
         assert client._co_load_groups == (("self_attn.kv_a_proj_with_mqa.weight",),)
+
+
+def test_a_reconnected_client_is_built_like_the_first_connect():
+    """A reconnect re-flushes the failed sync's buffer through the replacement, so it must dial back on
+    the server's configured port and NIC and keep the scope the push gave the pool: an unscoped
+    replacement would hold a model without ``q_a_proj`` back for a partner it never declares."""
+    manager = InferenceClientManager(
+        [{"url": "http://localhost:30000", "group_port": 52000, "group_host": "10.0.0.7"}],
+        connection_timeout=0.0,
+        client_cls=_ServerlessSGLangClient,
+        base_group_port=51216,
+    )
+    manager.init_communicators("cpu")
+    model = _MLAModel(("q_b_proj", "kv_a_proj_with_mqa", "o_proj"))
+    manager.scope_co_load_groups(name for name, _ in model.named_modules())
+    first = manager._clients[0]
+    scoped = (("self_attn.kv_a_proj_with_mqa.weight",),)
+    assert first._co_load_groups == scoped
+
+    replacement = manager.reconnect_client(0)
+
+    assert replacement is not first and manager._clients == [replacement]
+    for client in (first, replacement):
+        assert (client.group_port, client.group_host, client.sync_device) == (52000, "10.0.0.7", torch.device("cpu"))
+    assert replacement._co_load_groups == scoped, "the replacement lost the scope the push gave the pool"
 
 
 class _EventClient:

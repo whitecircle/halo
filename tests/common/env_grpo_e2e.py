@@ -42,6 +42,7 @@ from src.configs.environment_config import EnvironmentConfig
 from src.distributed.fsdp import reshard_fsdp2_modules
 from src.env import env_int, env_str
 from src.trainers.grpo.environmental import DistributedAsyncEnvironmentalGRPOTrainer
+from src.trainers.grpo.rollout.trajectory_tokenize import SAMPLED_IDS_MISSING_WARNING
 from src.training.environment import resolve_resume_weights_source
 from tests.common.checkpoint_io import RestorePointSnapshot
 from tests.common.distributed import ensure_model_downloaded, shared_output_dir
@@ -332,7 +333,9 @@ def run_env_grpo_e2e(
     # The trainer falls back to re-tokenization when a rollout returns no ids, and that fallback warns
     # rather than raising, so on a backend whose capture spelling is wrong training succeeds while
     # optimizing tokens the engine never sampled.
-    checks["trained_on_engine_sampled_ids"] = trainer._train_on_sampled_tokens and not trainer._warned_capture_missing
+    checks["trained_on_engine_sampled_ids"] = (
+        trainer._train_on_sampled_tokens and SAMPLED_IDS_MISSING_WARNING not in trainer._warned_once
+    )
 
     if peft is not None:
         record_adapter_training(trainer, checks, before=adapters_before, expert_lora=expert_lora, trained=trained)

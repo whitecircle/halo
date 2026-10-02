@@ -1,2 +1,2 @@
-"""MRO mixins shared by the GRPO trainers: chunked logprob forwards, train-dataloader guards (plus
-offline's group sampler), the TRL generation-buffer seam, and the protected-token entropy filter."""
+"""MRO mixins shared by the GRPO trainers: the on-policy construction spine, chunked logprob forwards,
+train-dataloader geometry, the TRL generation-buffer seam, and the protected-token entropy filter."""

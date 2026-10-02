@@ -36,6 +36,7 @@ from src.distributed.runtime import (
     get_global_world_size,
     get_num_nodes,
     is_global_main_process,
+    raise_rank0_failure,
     rank_consensus,
 )
 from src.environments.episode import RolloutResult
@@ -197,16 +198,10 @@ class AsyncRolloutMixin:
         self._check_eval_round_fits_cap(self._rollout_manager.max_concurrent)
         self._loop.run_until_complete(self._rollout_manager.start())
 
-        # Main-process only; a bare rank-0 raise would leave peers blocked in the first collective gather.
-        error: str | None = None
-        if self.accelerator.is_main_process:
-            try:
-                self._init_weight_sync_client()
-            except Exception as e:  # re-raised on all ranks below
-                error = f"{self._rollout_engine_name} weight-sync client init failed on the main process: {e!r}"
-        error = broadcast_from_rank0(error)
-        if error is not None:
-            raise RuntimeError(error)
+        raise_rank0_failure(
+            self._init_weight_sync_client,
+            lambda e: f"{self._rollout_engine_name} weight-sync client init failed on the main process: {e!r}",
+        )
 
         # The first push and the prefetch thread wait for train-begin (see _RolloutStartCallback):
         # this runs before the resume restore, and both would otherwise generate from pre-restore
@@ -304,19 +299,13 @@ class AsyncRolloutMixin:
         client_cls = resolve_weight_sync_client(self.async_config.rollout_backend)
 
         if self._multi_server_mode:
-            server_configs = self.async_config.rollout_server_configs
-            logger.info(f"Initializing InferenceClientManager for {len(server_configs)} servers on device: {device}")
-
             self._weight_sync_client = InferenceClientManager(
-                server_configs=server_configs,
+                server_configs=self.async_config.rollout_server_configs,
                 connection_timeout=self.async_config.rollout_connection_timeout,
                 client_cls=client_cls,
                 base_group_port=self.args.vllm_group_port,
             )
-
             self._weight_sync_client.init_communicators(device=device)
-
-            logger.info(f"InferenceClientManager initialized: {len(server_configs)} servers, device={device}")
         else:
             logger.info(f"Initializing {client_cls.BACKEND_NAME} weight-sync client on device: {device}")
 
@@ -343,14 +332,9 @@ class AsyncRolloutMixin:
         """
         if self._engine_rescore_clients_list is None:
             client_cls = resolve_weight_sync_client(self.async_config.rollout_backend)
-            urls = (
-                [server["url"] for server in self.async_config.rollout_server_configs]
-                if self._multi_server_mode
-                else [self.async_config.rollout_server_url]
-            )
             self._engine_rescore_clients_list = [
                 client_cls(base_url=url, connection_timeout=self.async_config.rollout_connection_timeout)
-                for url in urls
+                for url in self.async_config.get_server_urls()
             ]
         return self._engine_rescore_clients_list
 
@@ -506,22 +490,21 @@ class AsyncRolloutMixin:
         every in-flight submission failed or the worker produces nothing within the episode deadline;
         either way the caller falls back to synchronous collection.
 
-        A wedged pipeline is recorded in ``_batch_build_error`` rather than raised: the prefetch
+        A wedged pipeline is recorded through ``_record_batch_error`` rather than raised: the prefetch
         counters and worker thread are per-rank, so a rank whose engine route is wedged would raise
         alone while its peers entered the collectives below. ``_raise_batch_error_uniformly`` then
-        fails every rank together and names this one.
+        fails every rank together and names the first failing one.
         """
         timeout = self.async_config.episode_timeout + _PREFETCH_SUBMIT_TIMEOUT_S
         while self._prefetch_inflight > 0:
             try:
                 _count, results = self._prefetch_queue.get(timeout=timeout)
             except queue.Empty:
-                if self._batch_build_error is None:
-                    self._batch_build_error = (
-                        f"Prefetch worker produced no rollouts within {timeout:.0f}s with "
-                        f"{self._prefetch_inflight} batch(es) in flight — the prefetch pipeline is wedged "
-                        f"({self._rollout_engine_name} unreachable or the worker thread died)."
-                    )
+                self._record_batch_error(
+                    f"Prefetch worker produced no rollouts within {timeout:.0f}s with "
+                    f"{self._prefetch_inflight} batch(es) in flight — the prefetch pipeline is wedged "
+                    f"({self._rollout_engine_name} unreachable or the worker thread died)."
+                )
                 return None
             self._prefetch_pending.popleft()
             if results is not None:

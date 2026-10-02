@@ -15,7 +15,7 @@ from collections import defaultdict
 import pytest
 import torch
 
-from src.trainers.grpo.rollout.rollout_metrics import WorldMetrics, gathered_fractions
+from src.trainers.grpo.world_metrics import WorldMetrics, gathered_fractions
 
 
 def _flush(world: WorldMetrics, *peers: WorldMetrics) -> dict[str, list[float]]:

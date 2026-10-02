@@ -620,8 +620,8 @@ class ChunkedGRPOLogprobsMixin(ChunkedLogprobsCore):
     full logits.
 
     Gated by ``self._use_chunked_grpo_logprobs``; falls back to TRL's full-logits path when off or for
-    multimodal inputs (the chunked path is text-only). Place before the trainer's other bases so it
-    wins the MRO.
+    multimodal inputs (the chunked path is text-only). Mixed in ahead of ``GRPOTrainer``, whose method
+    it overrides, and behind ``ProtectedTokenEntropyMixin``, whose override reaches it through ``super()``.
     """
 
     # Derived from TRL's signature rather than hand-listed, so a release adding a modality kwarg does

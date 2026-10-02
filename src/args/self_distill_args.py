@@ -1,9 +1,9 @@
 """Script arguments for offline privileged-context self-distillation."""
 
-from dataclasses import dataclass, field
-from typing import ClassVar, Literal
+from dataclasses import dataclass, field, fields
+from typing import ClassVar
 
-from src.args.mixins import SDPGArguments
+from src.args.mixins import SDPGArguments, SelfDistillationLoss
 from src.args.sft_args import SFTScriptArguments
 
 
@@ -18,6 +18,8 @@ class SelfDistillationArguments(SDPGArguments, SFTScriptArguments):
     # SDPG fields the script applies while building the teacher prompts; every other SDPG field is
     # forwarded to the trainer, which takes the complement.
     DATASET_SIDE_SDPG_FIELDS: ClassVar[frozenset[str]] = frozenset({"sdpg_hint_template"})
+    # inject_privileged_hint (src/data/collators/self_distill.py) fills the reference solution too.
+    HINT_PLACEHOLDERS: ClassVar[frozenset[str]] = frozenset({"answer", "solution"})
 
     sdpg_answer_field: str | None = field(
         default="answer",
@@ -35,7 +37,7 @@ class SelfDistillationArguments(SDPGArguments, SFTScriptArguments):
             "(no reference model is loaded)."
         },
     )
-    reference_kl_loss: Literal["unnormalized_kl", "reverse_kl", "forward_kl"] = field(
+    reference_kl_loss: SelfDistillationLoss = field(
         default="unnormalized_kl",
         metadata={"help": "Reference-policy regularizer: 'unnormalized_kl' (k3/UKL), 'reverse_kl', or 'forward_kl'."},
     )
@@ -74,6 +76,13 @@ class SelfDistillationArguments(SDPGArguments, SFTScriptArguments):
             "not diluted by the softer teacher (prevents the no-stop / repeat failure mode)."
         },
     )
+
+    def build_sdpg_kwargs(self) -> dict:
+        """The SDPG trainer kwargs: every :class:`SDPGArguments` field but the dataset-side ones, the
+        complement the trainer pops."""
+        return {
+            f.name: getattr(self, f.name) for f in fields(SDPGArguments) if f.name not in self.DATASET_SIDE_SDPG_FIELDS
+        }
 
     def __post_init__(self):
         self._apply_default_project_name("self-distillation")

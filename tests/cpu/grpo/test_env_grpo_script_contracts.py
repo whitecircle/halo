@@ -62,6 +62,23 @@ def test_system_prompt_rejected_at_startup(env_grpo_module, tmp_path):
         env_grpo_module.main()
 
 
+def test_unknown_environment_type_fails_before_any_load(env_grpo_module, tmp_path):
+    """The registry refuses an unregistered name, naming the available ones; the probe env that hits
+    it is built ahead of the distributed init and the model load."""
+    config = tmp_path / "config.yaml"
+    config.write_text(
+        f"model_name_or_path: dummy/model\noutput_dir: {tmp_path / 'out'}\n"
+        "bf16: false\nuse_cpu: true\nenvironment_type: no_such_env\n"
+    )
+    with (
+        mock.patch("src.training.parser.install_log_tee"),
+        mock.patch.object(sys, "argv", ["prog", str(config)]),
+        mock.patch.object(env_grpo_module, "init_training_script", side_effect=AssertionError("reached the load")),
+        pytest.raises(ValueError, match=r"Unknown environment type: 'no_such_env'.*code_contests"),
+    ):
+        env_grpo_module.main()
+
+
 def test_retired_parallel_weight_sync_key_rejected_at_startup(env_grpo_module, tmp_path):
     """``use_parallel_weight_sync`` is retired — multi-server weight sync is always rolling. A YAML
     still carrying it must reach the parser's strict unknown-key check, not be absorbed while the

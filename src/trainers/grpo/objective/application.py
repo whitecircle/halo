@@ -1,10 +1,12 @@
-"""Applying advantages and drops to the GRPO loss inputs (shared by online and environmental GRPO).
+"""Applying advantages and drops to the loss inputs of the online and environmental GRPO trainers.
 
-Once rewards exist, both trainers run the same steps: mask the rows of degenerate (all-equal-reward)
-groups out of the loss, recompute the gathered-global DAPO normalizer from the post-drop loss mask, and
-balance the step's token-weighted advantage mass. They differ only in framing (the online trainer
-mutates TRL's result dict; the environmental trainer builds its tensors directly), so the tensor math
-lives here.
+Once rewards exist, both trainers mask the rows of degenerate (all-equal-reward) groups out of the
+loss, recompute the gathered-global DAPO normalizer from the post-drop loss mask, and balance the
+step's token-weighted advantage mass: the online trainer on TRL's result dict, the environmental
+trainer on the tensors it builds itself. The mask, normalizer and token-mass helpers serve both, so
+their numerics match; :func:`degenerate_drop_rows` is the online trainer's framing of the drop, and
+:func:`expand_traj_to_rows` the environmental trainer's layout of per-trajectory values over its
+per-turn rows.
 """
 
 from collections.abc import Callable, MutableMapping

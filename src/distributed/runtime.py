@@ -263,6 +263,26 @@ def broadcast_from_rank0(value):
     return value
 
 
+def raise_rank0_failure(
+    step: Callable[[], Any], describe: Callable[[Exception], str], exc_type: type[Exception] = RuntimeError
+) -> None:
+    """Run ``step`` on global rank 0 and raise its failure on every rank. COLLECTIVE — every rank calls it.
+
+    For work one rank does for the world (a probe of an external backend, a client build): a raise on rank
+    0 alone would leave the peers in the next collective. ``describe`` turns rank 0's exception into the
+    message every rank raises as ``exc_type``.
+    """
+    failure: str | None = None
+    if is_global_main_process():
+        try:
+            step()
+        except Exception as e:  # every failure must reach the peers
+            failure = describe(e)
+    failure = broadcast_from_rank0(failure)
+    if failure is not None:
+        raise exc_type(failure)
+
+
 def raise_gathered_reasons(reasons: list[str | None], what: str, exc_type: type[Exception]) -> None:
     """Raise from a world-gathered reason list, naming the first rank that reported one."""
     failed = [(rank, reason) for rank, reason in enumerate(reasons) if reason]

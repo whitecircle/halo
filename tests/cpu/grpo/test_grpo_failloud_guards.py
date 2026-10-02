@@ -148,7 +148,12 @@ def test_no_stop_tokens_configured_stays_none():
 
 
 def _prompt_host():
-    return types.SimpleNamespace(_batch_build_error=None, _group_random_effort=False)
+    host = types.SimpleNamespace(_batch_build_error=None, _group_random_effort=False)
+    host._record_batch_error = types.MethodType(DistributedAsyncEnvironmentalGRPOTrainer._record_batch_error, host)
+    host._raise_batch_error_uniformly = types.MethodType(
+        DistributedAsyncEnvironmentalGRPOTrainer._raise_batch_error_uniformly, host
+    )
+    return host
 
 
 def test_conversation_without_a_user_turn_records_a_batch_error():
@@ -161,6 +166,17 @@ def test_conversation_without_a_user_turn_records_a_batch_error():
     assert "system" in host._batch_build_error
     # And the environment must never be handed a Python repr of the message list as its task.
     assert "role" not in prompts[0] and "'content'" not in prompts[0]
+
+
+def test_the_fence_raises_the_first_recorded_batch_error_and_clears_it():
+    """A later failure on the same batch would replace the root cause the first one names; once
+    raised, the next batch starts clean."""
+    host = _prompt_host()
+    host._record_batch_error("root cause")
+    host._record_batch_error("a consequence of it")
+    with pytest.raises(ValueError, match="^root cause$"):
+        host._raise_batch_error_uniformly()
+    host._raise_batch_error_uniformly()
 
 
 def test_a_prompt_with_no_user_turn_raises_before_any_rollout_is_submitted():

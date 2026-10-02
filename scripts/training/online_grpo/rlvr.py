@@ -12,20 +12,18 @@ Usage:
         examples/grpo/online/rlvr-online-grpo-template.yaml
 """
 
-import asyncio
-
 from trl import GRPOConfig, ModelConfig
 
 from src.args.distributed_args import DistributedArguments
 from src.args.mixins import RLRRArguments
 from src.args.rlvr_online_grpo_args import RLVROnlineGRPOScriptArguments
-from src.data.pipeline.conversation import chat_template_kwargs, fold_system_into_conversation
+from src.data.pipeline.conversation import as_conversation, chat_template_kwargs, fold_system_into_conversation
 from src.data.pipeline.processing import process_dataset_with_map_and_filter, require_render_column
 from src.data.pipeline.rendered import render_generation_prompt
 from src.data.sources.loading import reject_image_columns
 from src.distributed.loading.peft_setup import setup_peft_model
 from src.distributed.nccl.clients.vllm import VLLMWeightSyncClient
-from src.distributed.runtime import barrier, broadcast_from_rank0, is_global_main_process
+from src.distributed.runtime import barrier
 from src.environments.base import resolve_reasoning_effort
 from src.models.loading.model_preparation import log_model_info
 from src.rewards.functions import ScorerRewardFunction, reward_functions
@@ -51,6 +49,7 @@ from src.training.script_runner import (
     reject_non_default_args,
     reject_unsupported_args,
     run_trainer,
+    verify_backend_on_rank0,
 )
 
 
@@ -109,12 +108,10 @@ def main():
         Extracts the prompt and ground truth answer from the dataset row.
         Supports both conversational (list of messages) and string prompts.
         """
-        prompt_data = row[args.prompt_field]
+        prompt_data = as_conversation(row[args.prompt_field])
         answer_data = row.get(args.answer_field)
 
-        if isinstance(prompt_data, str):
-            prompt_data = [{"role": "user", "content": prompt_data}]
-        elif not isinstance(prompt_data, list):
+        if not isinstance(prompt_data, list):
             raise ValueError(f"Invalid prompt format: {type(prompt_data)}")
         # The system prompt leads only a conversation that does not already open with one; an
         # unconditional insert stacks two.
@@ -143,20 +140,20 @@ def main():
         }
 
     # Pre-sharded datasets are split per DP rank at load; the trainer gets dataset_presharded so it
-    # does not re-shard (no-op for the usual raw prompt/answer dataset).
+    # does not re-shard (no-op for the usual raw prompt/answer dataset). The prompt column is the
+    # loader's render column: it must exist, and rows with an empty prompt are dropped.
     ds, dataset_presharded = load_script_datasets(
         args,
         parallelism_config,
-        conversation_field=None,  # RLVR uses prompt_field/answer_field, not conversation
+        conversation_field=args.prompt_field,
+        conversation_knob="prompt_field",
     )
     reject_image_columns(ds, "RLVR Online GRPO")
 
     original_columns = list(ds["train"].column_names)
-    # A mistyped prompt/answer field yields empty answers and so all-zero verifiable rewards. Both are
-    # checked here because this path declares no conversation_field for the loader to validate.
-    for knob, column in [("prompt_field", args.prompt_field), ("answer_field", args.answer_field)]:
-        if column:
-            require_render_column(ds, str(args.dataset), knob, column)
+    # Read with .get, so a mistyped answer_field would yield empty answers and all-zero verifiable rewards.
+    if args.answer_field:
+        require_render_column(ds, str(args.dataset), "answer_field", args.answer_field)
     columns_to_remove = [col for col in original_columns if col not in ["prompt", "answer"]]
 
     processed_ds = process_dataset_with_map_and_filter(
@@ -185,25 +182,18 @@ def main():
     # One TRL reward function per configured term, weighted by the term; process_for_rlvr renders the
     # ground truth into the "answer" column, which is what a judge term reads as the reference.
     reward_funcs, reward_weights = reward_functions(args.reward_terms, RLVR_GRADERS, reference_column="answer")
-    # A judge or reward-model term is probed once before the trainer exists: a bad URL, key or model
-    # would otherwise score every row None and train on nothing. Rank 0 probes, all ranks raise together.
-    probe_error: str | None = None
-    if is_global_main_process():
-        for function in reward_funcs:
-            if isinstance(function, ScorerRewardFunction):
-                try:
-                    asyncio.run(function.scorer.verify())
-                except Exception as e:
-                    probe_error = f"reward term {function.term.name!r} probe failed: {e}"
-                    break
-    probe_error = broadcast_from_rank0(probe_error)
-    if probe_error is not None:
-        raise RuntimeError(probe_error)
+    # A judge or reward-model term is probed before the trainer exists: a bad URL, key or model would
+    # otherwise score every row None and train on nothing.
+    for function in reward_funcs:
+        if isinstance(function, ScorerRewardFunction):
+            verify_backend_on_rank0(function.scorer.verify, f"reward term {function.term.name!r}")
 
-    # Same base-URL precedence as TRL's generation client: vllm_server_base_url wins over host:port,
+    # TRL's generation client's base-URL precedence (a set vllm_server_base_url wins over host:port),
     # so the probe hits the server the trainer will actually generate against.
     vllm_base_url = (
-        grpo_config.vllm_server_base_url or f"http://{grpo_config.vllm_server_host}:{grpo_config.vllm_server_port}"
+        grpo_config.vllm_server_base_url
+        if grpo_config.vllm_server_base_url is not None
+        else f"http://{grpo_config.vllm_server_host}:{grpo_config.vllm_server_port}"
     )
     verify_context_window_synced(
         [vllm_base_url],
@@ -249,9 +239,7 @@ def main():
         scale_rewards_std_floor=args.scale_rewards_std_floor,
         balance_token_mass=args.balance_token_mass,
         early_stop=args.build_early_stop(),
-        # Chunked log-probs (avoids full [B,T,vocab] logits on long completions)
         use_chunked_grpo_logprobs=args.use_chunked_grpo_logprobs,
-        # Persist completions parquet decoupled from console log_completions
         save_completions=args.save_completions,
         **args.build_sdpg_kwargs(),
     )

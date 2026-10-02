@@ -1,17 +1,26 @@
-"""The offline-GRPO per-token objective, shared by the non-PP loss and its pipeline counterpart.
+"""The offline-GRPO objective, shared by the non-PP loss and its pipeline counterpart.
 
 Pure tensor math over one batch, or one pipeline microbatch, of completion log-probs: the
 negative-advantage ``min_log_prob`` floor both paths apply to the policy and the reference, the
-policy term, the capped k3 KL against the reference, and the per-token quantities both paths buffer
-as diagnostics. The reduction stays with the caller, since it differs per path (a rank-local quotient
-off PP, a microbatch sum under it).
+policy term, the capped k3 KL against the reference, the per-token quantities both paths buffer as
+diagnostics, and the loss type's reduction. The reduction comes in two halves because the pipeline
+divides once per step: :func:`loss_numerator` is row-local, so microbatch numerators sum to the
+batch's, and :func:`loss_normalizer` reads batch metadata alone. Off PP the loss is their quotient.
 """
 
 from __future__ import annotations
 
+from typing import get_args
+
 import torch
 
+from src.configs.offline_grpo_config import OfflineGRPOConfig
 from src.trainers.grpo.objective.logratio import clamp_ref_logps
+
+# Derived from the config's own Literal annotations, so the dispatches here and the parse-time gate
+# can never drift apart.
+LOSS_TYPES: tuple[str, ...] = get_args(OfflineGRPOConfig.__annotations__["loss_type"])
+PG_FORMULATIONS: tuple[str, ...] = get_args(OfflineGRPOConfig.__annotations__["policy_gradient_formulation"])
 
 
 def clamp_negative_advantage_logps(
@@ -62,3 +71,31 @@ def offline_token_objective(
         per_token_loss = per_token_loss + beta * per_token_kl
         sample_values |= {"kl": per_token_kl, "ref_logps": ref_logps, "ref_logps_unclamped": ref_logps_unclamped}
     return per_token_loss, sample_values
+
+
+def loss_numerator(
+    per_token_loss: torch.Tensor, mask: torch.Tensor, group_sizes: torch.Tensor, loss_type: str
+) -> torch.Tensor:
+    """The per-token loss summed over the completion tokens, each row weighted ``1/group_size`` so every
+    source group counts equally; ``grpo`` first averages each row over its own tokens."""
+    weighted = per_token_loss * mask * (1.0 / group_sizes.float()).unsqueeze(1)
+    if loss_type == "grpo":
+        return (weighted.sum(dim=1) / mask.sum(dim=1).clamp(min=1)).sum()
+    return weighted.sum()
+
+
+def loss_normalizer(
+    group_sizes: torch.Tensor, token_counts: torch.Tensor, loss_type: str, max_completion_length: int | None
+) -> torch.Tensor:
+    """The loss type's whole-batch denominator over the ``1/group_size`` row weights: their sum
+    (``grpo``), the weighted completion-token count (``bnpo``; ``token_counts`` per row), or their sum
+    times ``max_completion_length`` (``dr_grpo``)."""
+    group_weights = 1.0 / group_sizes.float()
+    if loss_type == "grpo":
+        return group_weights.sum()
+    if loss_type == "bnpo":
+        return (group_weights * token_counts).sum().clamp(min=1.0)
+    if loss_type == "dr_grpo":
+        return group_weights.sum() * max_completion_length
+    # A fallthrough would substitute another loss type's denominator instead of failing.
+    raise ValueError(f"Unknown loss type: {loss_type!r}. Supported types: {list(LOSS_TYPES)}")

@@ -6,8 +6,9 @@ next-token distribution via reverse KL ``D_KL(p ‖ SG[q])``, gated to positive-
 
     L = L_GRPO  +  beta(k) * L_OPD
 
-The teacher is the same policy under ``torch.no_grad`` (no second model). Dataset is online-GRPO
-format ``{"prompt": [...], "answer": "..."}``. Text-only (the hint is tokenizer-built).
+The teacher is the same policy under ``torch.no_grad`` (no second model). Dataset rows carry the
+``prompt`` (the RLVR script's ``process_for_rlvr`` renders it to text) and the gold ``answer`` the
+hint reveals. Text-only (the hint is tokenizer-built).
 """
 
 import logging
