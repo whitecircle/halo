@@ -163,7 +163,7 @@ the length terms) out-scores any zero-objective episode; each failed tool call a
 `tests/cpu/config/test_env_grpo_reward_economy.py` holds the shipped recipes to those relations.
 
 Behavior counters ride alongside: `episode/submission_rate`, `episode/test_calls` (runs that counted),
-`episode/starved_test_runs` (runs returned for having no input and no output),
+`episode/starved_test_runs` (runs returned for having no input and nothing on stdout),
 `episode/tested_before_submission` (over submitting episodes), `episode/grading_budget_hit`, and
 `episode/language_switches` where the model picks the language.
 
