@@ -37,7 +37,7 @@ import scripts.after_training.reset_sinks as reset_sinks_mod
 from scripts.after_training.reset_sinks import reset_sinks
 from src.checkpoint import tool_io
 from src.checkpoint.format import SAFETENSORS_METADATA
-from src.checkpoint.tool_io import STAGING_SUFFIX, checkpoint_shard_files
+from src.checkpoint.tool_io import PUBLISH_STAGING_SUFFIX, checkpoint_shard_files
 from src.models.patches import gpt_oss_sinks
 from tests.common.checkpoint_io import weight_files
 
@@ -102,7 +102,7 @@ def _plant_previous_sharded_run(out_dir) -> str:
 def _staging_dir(target):
     """Where a staged publish builds its output — the shared suffix, so a rename cannot silently
     leave this test asserting on a path nothing writes."""
-    return target.parent / f"{target.name}{STAGING_SUFFIX}"
+    return target.parent / f"{target.name}{PUBLISH_STAGING_SUFFIX}"
 
 
 def _weight_files(directory) -> set[str]:
@@ -123,7 +123,7 @@ def test_a_publish_that_fails_part_way_leaves_the_staged_checkpoint_whole(tmp_pa
     """Under ``--in_place`` the staged copy is the only complete checkpoint. Publishing by moving the
     staged entries empties it as the swap proceeds, so a failure part-way leaves neither directory
     holding a whole checkpoint; cloning each entry first keeps the staged one intact to recover from."""
-    staging, target = tmp_path / f"out{STAGING_SUFFIX}", tmp_path / "out"
+    staging, target = tmp_path / f"out{PUBLISH_STAGING_SUFFIX}", tmp_path / "out"
     staging.mkdir()
     names = sorted(f"model-{i}.safetensors" for i in range(6))
     for name in names:
