@@ -100,11 +100,10 @@ The honest negatives — cited in full in levers.md. At fine-grained MoE shapes 
   bytes) — not training.
 - **Native DeepGEMM — net-slower than bf16 at every training shape**; opt-in only
   (`HALO_DEEPGEMM_NATIVE=1`), never auto-selected.
-- **torch.compile on EP MoE — composes with Liger, but adds little.** Compile and
-  Liger target the same compilable spans between DeepEP/FA4 graph breaks, so compile alone, Liger
-  alone and the two stacked all land within ~2% — and Liger is already on by default with no warmup
-  cost. Reach for `torch_compile: true` when you can absorb the first-step compile latency, not as a
-  free extra win.
+- **torch.compile on EP MoE — no gain, and `reduce-overhead` is net-slower.** The DeepEP/FA4 graph
+  breaks leave inductor only the spans Liger already fuses: `default` mode ties eager, and
+  `reduce-overhead` (the trainer's fallback when no mode is set) loses throughput alone and on top
+  of Liger. Keep it off; Liger is the lever.
 - **Sub-bf16 master weights — dead.** Params, checkpoint and optimizer state never go below bf16; only
   GEMM operands are cast. bf16 + SR is the floor.
 - **FA2 on Blackwell — the slow outlier** (well under half FA4's throughput at 32k). Use FA4 (auto);

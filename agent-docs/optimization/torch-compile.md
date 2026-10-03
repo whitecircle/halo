@@ -1,8 +1,8 @@
 # torch.compile
 
-On EP MoE, `torch.compile` (inductor) reaches roughly the same speedup as [Liger kernels](liger-kernels.md) (~+30% throughput, −9 GiB) and **composes with them**: compile on top of Liger holds the gain. DeepEP all-to-all and Flash Attention break the compiled graph at every MoE/attention boundary, but inductor compiles the spans between breaks (norms, projections) well enough to pay off.
+On EP MoE, `torch.compile` buys nothing, and in `reduce-overhead` mode — the trainer's fallback when `torch_compile_mode` is unset — it costs throughput: keep it off and keep [Liger kernels](liger-kernels.md) on. On Qwen3-30B-A3B EP=2 at seq 16384, Liger adds **27%**; compile in `default` mode ties eager, and `reduce-overhead` is **7% slower** alone and **10% slower** on top of Liger ([Benchmark results](#benchmark-results)). DeepEP all-to-all and Flash Attention break the graph at every MoE and attention boundary, so inductor compiles only the short spans between breaks, which Liger already fuses.
 
-Liger is the default (no per-shape warmup cost); add `torch_compile` when you can absorb the first-step compile latency. What fusion buys and what it does not: [GPU Training Theory §5](../reference/gpu-training-theory.md#what-fusion-does-not-buy).
+What fusion buys and what it does not: [GPU Training Theory §5](../reference/gpu-training-theory.md#what-fusion-does-not-buy).
 
 ## Expert activations are not compiled
 
@@ -18,11 +18,11 @@ The low-precision weight quantize/dequantize round-trip *is* compiled, for the p
 
 ```yaml
 torch_compile: true
-torch_compile_mode: reduce-overhead
+torch_compile_mode: default
 torch_compile_backend: inductor
 ```
 
-Or via CLI: `torchrun ... scripts/training/sft.py --torch_compile=true --torch_compile_mode=reduce-overhead`.
+Or via CLI: `torchrun ... scripts/training/sft.py --torch_compile=true --torch_compile_mode=default`.
 
 `torch_compile_mode` and `torch_compile_backend` are HF `TrainingArguments` fields, both `None` by default. Left unset, the mixin's own compile call falls back to `reduce-overhead` / `inductor` (`_apply_torch_compile`); the accelerate-managed path (no custom parallelism) leaves the mode at inductor's default instead.
 
@@ -36,26 +36,30 @@ building its plain accelerator and re-applies `torch.compile` itself, assigning 
 a pipeline schedule captures the stage module at setup, so a compiled wrapper installed afterwards would
 never run — `torch_compile: true` with PP raises. No other parallelism mode blocks it.
 
-Two costs come with it: `torch.compile()` returns immediately and the **first forward pass compiles**
-(2–5 min for MoE models), and `reduce-overhead` allocates extra GPU memory for its recorded CUDA-graph
-command streams.
+Compiling costs steps up front: `torch.compile()` returns immediately, the **first step compiles**
+(6–15 s on Qwen3-30B-A3B EP=2, against 4–5 s eager), and each rank recompiles for dynamic shapes when it
+first meets a second sequence length, a 2–7 s step each time. Under `reduce-overhead` slow steps keep coming
+after that (up to 2.4 s against a 1.5 s median), which the `default` mode, without CUDA graphs, does not
+show.
 
 ## Benchmark results
 
-Qwen3-30B-A3B (128 experts, top_k=8), 2× B300 (SM103), EP=2, seq 16384, BF16, FA4, gradient checkpointing, 12 steps / 2 warmup, batch 1:
+Qwen3-30B-A3B-Instruct-2507 (128 experts, top_k=8), 2× B300, EP=2, seq 16384, batch 1, bf16, FA4, gradient checkpointing. 20 steps with the first 5 excluded, so the recompiles fall outside the window; one process per cell, mean of 2–3 runs, spread = (max − min) / mean. Measured 2026-10-03 on the Blackwell image, training code at commit 0bc3a22a5, with the [benchmark below](#running-benchmarks):
 
-| Mode | Liger | Compile | Step (s) | tokens/s/GPU | Peak mem (GiB) |
-|------|:-----:|:-------:|---------:|-------------:|--------------:|
-| `neither` | OFF | OFF | 1.70 | 9,610 | 128.6 |
-| `liger_only` | ON | OFF | 1.31 (−23%) | 12,467 (+30%) | 119.4 |
-| `compile_only` | OFF | ON | 1.29 (−24%) | 12,676 (+32%) | 119.4 |
-| `liger_compile` | ON | ON | **1.30 (−24%)** | **12,608 (+31%)** | 119.5 |
+| Mode | Liger | Compile | Step (s) | tokens/s/GPU | Spread | Peak mem (GiB) |
+|------|:-----:|:-------:|---------:|-------------:|-------:|--------------:|
+| `neither` | OFF | OFF | 1.44 | 11,399 | 0.4% | 128.5 |
+| `liger_only` | ON | OFF | **1.13** | **14,490** (+27%) | 0.0% | 126.6 |
+| `compile_only` | OFF | `default` | 1.42 | 11,536 (+1%) | 0.4% | 126.9 |
+| `liger_compile` | ON | `default` | 1.13 | 14,539 (+0.3% vs `liger_only`) | 0.5% | 149.8 |
+| `compile_only` | OFF | `reduce-overhead` | 1.54 | 10,600 (−7%) | 5.4% | 127.0 |
+| `liger_compile` | ON | `reduce-overhead` | 1.26 | 13,024 (−10% vs `liger_only`) | 7.5% | 135.8 |
 
-Liger, compile, and the two stacked all land within ~2% of each other (+30% to +32%, −9 GiB) — they target the same non-EP spans, so stacking adds little. These are batch-1 (communication-bound) numbers: DeepEP all-to-all dominates and varies run-to-run, so the throughput percentages are directional. Measure at batch ≥ 4 for a stable comparison. The −9 GiB memory saving holds at any batch.
+Liger is the lever: +27% at 2 GiB less memory. Compile adds nothing to it in `default` mode and takes 10% away in `reduce-overhead`, whose slow steps also make the result noisy (5–8% between identical runs, against ≤ 0.5% for every other cell). With Liger on, compile also raises peak memory by 9–23 GiB. Peaks are from warm-cache runs; each compiled cell's first run, on a cold compile cache, peaked 14–37 GiB higher.
 
-## Why the speedup is bounded on EP MoE
+## Why compile does not pay off on EP MoE
 
-Graph breaks cap how much compile can fuse — it speeds up the spans between them (norms, projections), not across them:
+Graph breaks cap what compile can fuse — it compiles the spans between them (norms, projections), not across them:
 
 - **DeepEP dispatch/combine** — splits the graph at every MoE layer.
 - **Flash Attention** — opaque; the compiler cannot fuse across FA boundaries.
@@ -63,18 +67,18 @@ Graph breaks cap how much compile can fuse — it speeds up the spans between th
 - **TP DTensor** — sharded-op dispatch breaks the graph at every sharded operation.
 - **CP (Ulysses)** — all-to-all in every attention layer breaks the graph at every block.
 
-These breaks keep compile's ceiling near Liger's rather than far above it. The expert activation, the one hot op Liger does not cover under an EP wrapper, is already a hand-written Triton kernel — compile has nothing left to win there.
+Those spans are the ones Liger already fuses. The expert activation, the one hot op Liger does not cover under an EP wrapper, is already a hand-written Triton kernel — compile has nothing left to win there.
 
 ## Running benchmarks
 
-`tests/gpu/profiling/benchmark_torch_compile.py` runs the 2×2 Liger × Compile matrix (`--mode neither|liger_only|compile_only|liger_compile`). Run one `--mode` per process: without `--mode` it runs all four in one process, and at seq 16384 on 2× B300 the second mode then runs out of memory.
+`tests/gpu/profiling/benchmark_torch_compile.py` runs one cell of the Liger × compile matrix per process (`--mode neither|liger_only|compile_only|liger_compile`, required). Liger patches the model classes process-wide, so a second cell in the same process would inherit the first one's kernels. `--compile_mode` picks the compile mode (default `reduce-overhead`, the trainer's fallback):
 
 ```bash
 for mode in neither liger_only compile_only liger_compile; do
   torchrun --nproc_per_node=2 \
-      tests/gpu/profiling/benchmark_torch_compile.py --model qwen3-30b-a3b --ep 2 --seq 16384 --steps 12 \
-      --mode "$mode"
+      tests/gpu/profiling/benchmark_torch_compile.py --model qwen3-30b-a3b --ep 2 --seq 16384 \
+      --steps 20 --warmup 5 --mode "$mode"
 done
 
-# 8-GPU: the same loop with --nproc_per_node=8 --ep 8
+# the default-mode rows: add --compile_mode default; 8-GPU: --nproc_per_node=8 --ep 8
 ```

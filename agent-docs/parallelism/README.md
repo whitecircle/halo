@@ -130,7 +130,7 @@ instead of replicating the DP dimension across domains.
 
 ## torch.compile
 
-On EP MoE, `torch_compile` reaches about the same speedup as Liger kernels (the default) and composes with them. DeepEP all-to-all (EP), DTensor dispatch (TP), and Ulysses all-to-all (CP) each break the graph, so compile only fuses the spans between breaks — its ceiling stays near Liger's. Liger has no per-shape warmup cost; add `torch_compile` only when the first-step compile latency is acceptable. See [torch.compile](../optimization/torch-compile.md).
+DeepEP all-to-all (EP), DTensor dispatch (TP), and Ulysses all-to-all (CP) each break the graph, so compile only fuses the spans between breaks, the ones Liger kernels (the default) already fuse. On EP MoE it gains nothing on top of Liger, and its `reduce-overhead` mode is slower; keep `torch_compile` off. See [torch.compile](../optimization/torch-compile.md).
 
 ## Per-axis limitation surface
 

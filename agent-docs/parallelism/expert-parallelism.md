@@ -387,8 +387,8 @@ small with few, and the loop is never faster in the measured grid. Keep the defa
 [Grouped GEMM guide](../optimization/grouped-gemm.md#grouped-vs-the-loop-path).
 
 GptOss's clamped-SwiGLU runs as a single fused Triton kernel on the grouped path
-(`src/kernels/fused_glu.py`). Liger is the default and `torch.compile` reaches about the same gain
-on EP MoE — the DeepEP all-to-all breaks the graph at every MoE boundary either way
+(`src/kernels/fused_glu.py`). Liger is the default; `torch.compile` adds nothing on top of it on
+EP MoE, since the DeepEP all-to-all breaks the graph at every MoE boundary
 ([torch.compile](../optimization/torch-compile.md)).
 
 Whichever kernel a family resolves, a layer with a real dispatch group (`ep_size > 1`) traces it on

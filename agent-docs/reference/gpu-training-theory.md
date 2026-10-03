@@ -229,7 +229,7 @@ The cost is that `outputs.logits` never exists. That makes FLCE SFT-only (prefer
 ### What fusion does not buy
 
 - **Chains, not isolated ops.** `torch.compile(mode="max-autotune")` on a single `silu(a)*b` is slower than eager on a B300, since autotune and guard overhead exceed the one-op saving.
-- **Compile carries guard and recompile cost.** On parallel models the DeepEP all-to-all (EP), DTensor dispatch (TP), and Ulysses all-to-all (CP) each break the graph, so compile fuses only the spans between breaks and its ceiling stays near Liger's ([torch.compile](../optimization/torch-compile.md)).
+- **Compile carries guard and recompile cost.** On parallel models the DeepEP all-to-all (EP), DTensor dispatch (TP), and Ulysses all-to-all (CP) each break the graph, so compile fuses only the spans between breaks — the ones Liger already covers — and gains nothing on top of it ([torch.compile](../optimization/torch-compile.md)).
 - **Nothing for compute-bound matmuls**, which have no HBM pass to remove.
 
 ---

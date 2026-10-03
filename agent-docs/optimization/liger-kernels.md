@@ -375,7 +375,7 @@ At this shape FLCE saves only 1.5 GiB more than CE and costs 5% throughput. FLCE
 plane: on Qwen3-8B activations at 32k it is 24.3 GB forward (32.2 vs 56.5 GB), ~2.5 GB at 8k. Reach for plain CE when a model's FLCE patch is unavailable.
 
 **Measure MoE throughput at batch ≥ 4.** At batch 1 EP MoE is communication-bound and its DeepEP time varies run
-to run, so a batch-1 delta is directional (Liger measures +30% there at seq 16384, [torch.compile](torch-compile.md#benchmark-results)).
+to run, so a batch-1 delta is directional (Liger measures +27% there at seq 16384, [torch.compile](torch-compile.md#benchmark-results)).
 Memory numbers are deterministic at any batch.
 
 ```bash

@@ -189,4 +189,4 @@ torchrun --nproc_per_node=2 \
 
 - [Expert Parallelism](../parallelism/expert-parallelism.md) — EP architecture and configuration
 - [Expert Tensor Parallelism](../parallelism/expert-tensor-parallelism.md) — ETP sharding
-- [torch.compile](torch-compile.md) — where compilation does and does not stack on the fused kernels
+- [torch.compile](torch-compile.md) — why compilation adds nothing on top of the fused kernels on EP MoE
