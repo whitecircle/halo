@@ -34,7 +34,7 @@ The YAML/trainer path (`build_flash_adamw_optimizer` in `src/optimizers/flash_ad
 
 The value is memory, and it scales with model size — tens of GB at 70B+ params, where it is the lever.
 
-Optimizer micro-benchmark on B300 (`tests/gpu/optimizers/bench_muon.py --hidden 4096 --layers 8`, synthetic FFN): FlashAdamW peak memory is **−8.6%** vs `torch.optim.AdamW(fused=True)` over the same bf16 parameters (bf16 states), at a ~5 ms optimizer-step overhead from state quant/dequant. For the AdamW / AdamWBF16 / Muon comparison at the default shape, see [Muon](muon-optimizer.md#benchmark).
+Optimizer micro-benchmark on B300 (`tests/gpu/optimizers/bench_muon.py --hidden 4096 --layers 8`, synthetic FFN): FlashAdamW peak memory is **−8.6%** vs `torch.optim.AdamW(fused=True)` over the same bf16 parameters (bf16 states), at a ~5 ms optimizer-step overhead from state quant/dequant. For the AdamW / AdamWBF16 / Muon comparison at the same shape, see [Muon](muon-optimizer.md#benchmark).
 
 That overhead amortizes against fwd+bwd on most models, but it is not free — on an attention-bound long-context step the per-step cost can outweigh the memory saving (GLM-4.7-Flash EP8 32k: ~50 s/step vs ~34 s/step on the default `optim`, which `bf16: true` resolves to AdamWBF16).
 

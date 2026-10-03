@@ -67,13 +67,14 @@ These breaks keep compile's ceiling near Liger's rather than far above it. The e
 
 ## Running benchmarks
 
-`tests/gpu/profiling/benchmark_torch_compile.py` runs the 2×2 Liger × Compile matrix (`--mode neither|compile_only|liger_only|liger_compile`, default all four):
+`tests/gpu/profiling/benchmark_torch_compile.py` runs the 2×2 Liger × Compile matrix (`--mode neither|liger_only|compile_only|liger_compile`). Run one `--mode` per process: without `--mode` it runs all four in one process, and at seq 16384 on 2× B300 the second mode then runs out of memory.
 
 ```bash
-torchrun --nproc_per_node=2 \
-    tests/gpu/profiling/benchmark_torch_compile.py --model qwen3-30b-a3b --ep 2 --seq 16384 --steps 12
+for mode in neither liger_only compile_only liger_compile; do
+  torchrun --nproc_per_node=2 \
+      tests/gpu/profiling/benchmark_torch_compile.py --model qwen3-30b-a3b --ep 2 --seq 16384 --steps 12 \
+      --mode "$mode"
+done
 
-# 8-GPU
-torchrun --nproc_per_node=8 \
-    tests/gpu/profiling/benchmark_torch_compile.py --model qwen3-30b-a3b --ep 8 --seq 16384 --steps 12
+# 8-GPU: the same loop with --nproc_per_node=8 --ep 8
 ```

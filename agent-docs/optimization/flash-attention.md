@@ -70,7 +70,7 @@ The end-to-end step win is a function of attention's share of the step, which gr
 
 At 4k batch-1 the step is overhead-bound, so FA4 stays close to FA2 (1.13×); the gap opens past 8k and reaches 2.3× at 32k. SDPA tracks-or-slightly-leads FA4 (Blackwell-tuned cuDNN kernel) — it leads at 4k (overhead regime) and ties at 16k+ — so SDPA is a fine fallback for plain dense models; flex trails both.
 
-On sparse MoE the step is dominated by expert GEMM + DeepEP all-to-all, so the kernel speedup is only **+13%** end-to-end. gpt-oss-20b, EP=8, seq 16,384, GC on, 8× B300: FA4 9,749 vs FA2 8,632 tok/s/GPU (1.13×), one same-session A/B (the ep8 sequence sweep in [Throughput Benchmarks](throughput-benchmarks.md) reads 9,894). FA4 is the shipped default for GptOss SFT; SDPA also dispatches once sinks are reset but lacks FA4's native sink/sliding-window/softcap handling.
+On sparse MoE the step is dominated by expert GEMM + DeepEP all-to-all, so the kernel speedup is only **+14%** end-to-end. gpt-oss-20b, EP=8, seq 16,384, batch 1, GC on, 8× B300 (2026-10-03, commit 0bc3a22a5, Blackwell image): FA4 9,981 vs FA2 8,737 tok/s/GPU (1.14×); the FA4 arm is the s16384 row of the ep8 sequence sweep in [Throughput Benchmarks](throughput-benchmarks.md). FA4 is the shipped default for GptOss SFT; SDPA also dispatches once sinks are reset but lacks FA4's native sink/sliding-window/softcap handling.
 
 EP/long-context throughput tables live in [Throughput Benchmarks](throughput-benchmarks.md), which already run the FA4 default.
 
@@ -125,17 +125,17 @@ A Bailing run therefore sets `attn_implementation: sdpa` itself; an unset or fla
 
 Every one of them takes that default only under `reset_sinks: true`. With live gpt-oss sinks (`reset_sinks: false`) the default drops and the model config passes through untouched, since SDPA drops the sink column and would be rejected outright. SFT keeps the auto-selected FA4: a packed batch takes its varlen path, kept fast by the `max_seqlen` int-coercion.
 
-That default costs throughput at the lengths these methods actually run. Measured on 8×B300 with `benchmark_smpo_ep.py`, which does *not* apply it (tokens/s/GPU, auto = FA4):
+That default costs throughput at the lengths these methods actually run. Measured on 8× B300 with `benchmark_smpo_ep.py`, which does *not* apply it (2026-10-03, commit 0bc3a22a5, Blackwell image; auto = FA4). The SMPO collator emits no `input_ids`, so the callback's tokens/s is a padded-length estimate; the table gives the step-time speedup of auto over SDPA:
 
-| model | seq | auto | SDPA |
-|---|---|---|---|
-| gpt-oss-20b ep8 | 4096 | **7,602** | 5,595 |
-| gpt-oss-20b ep8 | 8192 | **14,842** | 11,132 |
-| qwen3-30b-a3b ep8 | 4096 | 3,204 | **3,579** |
-| qwen3-30b-a3b ep8 | 8192 | **8,024** | 7,145 |
-| qwen3-8b ep1 (dense) | 4096 | **7,406** | 5,817 |
+| model | seq | auto vs SDPA |
+|---|---|---|
+| gpt-oss-20b ep8 | 4096 | **1.40×** |
+| gpt-oss-20b ep8 | 8192 | **1.43×** |
+| qwen3-30b-a3b ep8 | 4096 | **1.09×** |
+| qwen3-30b-a3b ep8 | 8192 | **1.15×** |
+| qwen3-8b ep1 (dense) | 4096 | **1.09×** |
 
-FA4 wins everywhere except qwen3-30b at 4096, and the crossover is sequence length, not architecture — the dense no-sinks model prefers FA4 by 27%, and qwen3-30b switches sides between 4k and 8k. Set `attn_implementation: flash_attention_4` explicitly in a preference/reward config running ≥8k.
+FA4 wins every row, on MoE and dense alike. Set `attn_implementation: flash_attention_4` explicitly in a preference/reward config.
 
 **Context Parallelism**: an explicit `flex_attention` label auto-switches to `flash_attention_4` (Blackwell) / `flash_attention_2` (Hopper) since Ulysses can't dispatch flex — the label is cosmetic, though: see [Supported backends](#supported-backends) for what `get_flash_attn_func` actually runs. SDPA/eager unsupported.
 

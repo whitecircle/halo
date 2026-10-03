@@ -108,7 +108,7 @@ A coarse MoE (gpt-oss: 32–128 experts, `2880²`) gives each expert more tokens
 
 The cheapest M is the one you are already paying for. Padding spends it on nothing: a varlen Flash Attention kernel skips pad tokens (SDPA computes and masks them), but every pad row still flows through the projections and the MLP at full GEMM cost.
 
-Packing documents into full rows takes it back — 9.2× the real tokens/s on Qwen3-30B-A3B at `max_length` 4096 with ~1024-token documents (2× B300, EP=2) ([Padding-Free Collator](../optimization/padding-free-collator.md#benchmark-results)).
+Packing documents into full rows takes it back — 14.5× the real tokens/s on Qwen3-30B-A3B at `max_length` 4096 with ~1024-token documents (2× B300, EP=2) ([Padding-Free Collator](../optimization/padding-free-collator.md#benchmark-results)).
 
 First question of any step: are its dominant kernels' M above the ridge? If not, the fix is **a bigger M** — longer packed sequences, a bigger batch, or a smaller parallel degree — not a faster kernel. It buys nothing once the step is compute-bound and saturated, or already at the memory limit.
 
@@ -127,7 +127,7 @@ A step is thousands of kernels, and at any moment one of four resources limits i
 
 The launch floor is a few microseconds of host time per kernel — the sustained issue cost with framework dispatch included, not the bare driver call. [§11](#11-measuring-it-yourself)'s script measures it on your GPU.
 
-Run a MoE layer as a per-expert loop and that cost dominates. Qwen3-30B-A3B's `128 experts × 2 fused projections = 256` tiny matmuls take 1.33 ms in the forward against 0.11 ms for one grouped kernel (B300, 4k tokens) ([Grouped GEMM](../optimization/grouped-gemm.md)). Batching into one kernel matters at high expert count independent of the roofline.
+Run a MoE layer as a per-expert loop and that cost dominates. Qwen3-30B-A3B's `128 experts × 2 fused projections = 256` tiny matmuls take 1.12 ms in the forward against 0.11 ms for one grouped kernel (B300, 4k tokens) ([Grouped GEMM](../optimization/grouped-gemm.md)). Batching into one kernel matters at high expert count independent of the roofline.
 
 ### Anatomy of one step
 
@@ -156,7 +156,7 @@ It ramps first — small M means few tiles and most SMs idle, the §2 penalty �
 
 ![Measured bf16 GEMM efficiency versus M on a B300, gpt-oss expert (K=N=2880), as a percentage of the shape's own peak. Efficiency ramps steeply from a few percent at small M, where few tiles leave most of the 148 SMs idle, to near 90% by M≈1100, then ripples between roughly 70% and 95% as tiles repack across the SMs: a ramp plus a ripple, not the deep sawtooth the tile/wave geometry predicts in the abstract](../assets/diagrams/tile_quantization.png)
 
-This is why `F.grouped_mm` and per-shape cuBLAS trade places. The loop lets cuBLAS pick a per-shape tile and absorb the tail, at one launch per expert; grouped GEMM uses one tile shape for all groups and eats the tail on small ones, but pays a single launch. Which wins is set by `M` and expert count, roofline plus launch floor.
+This is why per-shape cuBLAS narrows `F.grouped_mm`'s lead as `M` grows. The loop lets cuBLAS pick a per-shape tile and absorb the tail, at one launch per expert; grouped GEMM uses one tile shape for all groups and eats the tail on small ones, but pays a single launch. The margin is set by `M` and expert count, roofline plus launch floor; on every measured gpt-oss-20b shape grouped still wins ([Grouped GEMM](../optimization/grouped-gemm.md#grouped-vs-the-loop-path)).
 
 ### Blackwell vs Hopper: same idea, different tensor cores
 
@@ -331,7 +331,7 @@ The two moments cost 4–8 B/param. Each variant trades one axis:
 
 ### Gradient checkpointing
 
-GC keeps only a few activation checkpoints and recomputes the rest in the backward. Memory drops sharply, so longer sequences fit; the cost is one extra forward over the checkpointed regions, `6P → ~8P` — measured +29% wall-clock on gpt-oss-20b ep8 (batch 4, seq 4096, 8× B300), under the `8P/6P ≈ +33%` ceiling because only checkpointed regions recompute and comm is unchanged ([Throughput Benchmarks](../optimization/throughput-benchmarks.md)).
+GC keeps only a few activation checkpoints and recomputes the rest in the backward. Memory drops sharply, so longer sequences fit; the cost is one extra forward over the checkpointed regions, `6P → ~8P` — measured +30% wall-clock on gpt-oss-20b ep8 (batch 4, seq 4096, 8× B300), under the `8P/6P ≈ +33%` ceiling because only checkpointed regions recompute and comm is unchanged ([Throughput Benchmarks](../optimization/throughput-benchmarks.md)).
 
 The corollary: if the batch fits without GC, turning it off is a free speedup, so keep GC on only when you need the memory. **Selective recomputation** (Megatron) checkpoints only the regions with the best memory-saved-per-recompute-FLOP; FlashAttention is already this idea specialized to the attention block.
 

@@ -1,6 +1,6 @@
 # Muon Optimizer (Newton-Schulz Orthogonalization)
 
-Muon projects each gradient matrix onto the nearest orthogonal matrix via Newton-Schulz iteration and uses that as the update direction, reaching a lower loss than Adam in the same step budget on matrix-shaped parameters. Fused Triton kernels do the momentum/nesterov and weight-decay/update math per parameter; the orthogonalization itself runs the Newton-Schulz kernel (quack/cutlass, or a pure-torch fallback). Owning file: `src/optimizers/muon.py`.
+Muon projects each gradient matrix onto the nearest orthogonal matrix via Newton-Schulz iteration and uses that as the update direction on matrix-shaped parameters. Fused Triton kernels do the momentum/nesterov and weight-decay/update math per parameter; the orthogonalization itself runs the Newton-Schulz kernel (quack/cutlass, or a pure-torch fallback). Owning file: `src/optimizers/muon.py`.
 
 ## Usage
 
@@ -66,16 +66,16 @@ The `Dockerfile` force-installs the ABI-compatible pair (`quack-kernels==0.5.0`,
 
 ## Benchmark
 
-Optimizer micro-benchmark on B300 (`tests/gpu/optimizers/bench_muon.py`, synthetic FFN, median of 20 timed steps), isolating the optimizer step:
+Optimizer micro-benchmark on one B300 (`tests/gpu/optimizers/bench_muon.py --hidden 4096 --layers 8`: synthetic FFN, 8 layers × 4096 × 16384, 1.61B params; median of 20 timed steps; 2026-10-03, commit 0bc3a22a5, Blackwell image), isolating the optimizer step:
 
-| Optimizer | Optimizer step | Peak mem vs AdamW | Best loss (40 steps) |
-|---|:---:|:---:|:---:|
-| AdamW (fused) | 7.4 ms | — | 0.13 |
-| AdamWBF16 (SR) | 7.0 ms | −0.0% | 0.13 |
-| Muon (Gram–Newton–Schulz) | 102 ms | +68% | 0.10 |
-| Muon (standard NS) | 144 ms | +68% | 0.098 |
+| Optimizer | Optimizer step | Peak mem vs AdamW |
+|---|:---:|:---:|
+| AdamW (fused) | 7.7 ms | — |
+| AdamWBF16 (SR) | 4.9 ms | −0.0% |
+| Muon (Gram–Newton–Schulz) | 82.4 ms | +68% |
+| Muon (standard NS) | 113.7 ms | — |
 
-Muon reaches the lowest loss in the step budget at the cost of a far more expensive optimizer step. This FFN is worst-case: it is all matrix params, so the Newton-Schulz cost is unamortized. On a real transformer, Newton-Schulz runs on smaller per-layer matrices amortized over a larger fwd+bwd, so the end-to-end slowdown is far smaller; measure on your model.
+Muon's step costs 11–15× fused AdamW's here; the script prints no memory row for standard NS. This FFN is worst-case: it is all matrix params, so the Newton-Schulz cost is unamortized. On a real transformer, Newton-Schulz runs on smaller per-layer matrices amortized over a larger fwd+bwd, so the end-to-end slowdown is far smaller; measure on your model.
 
 The fused Triton kernels replace upstream Muon's per-batch Python loop + `torch.compile`, holding the Muon step at ~200 ms on Qwen3.5-2B (H200) versus ~1000 ms for the upstream path.
 

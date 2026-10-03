@@ -382,10 +382,9 @@ and a layer that entered backward without a scope raises rather than silently co
 
 Expert compute uses [Grouped GEMM](../optimization/grouped-gemm.md)
 (`torch.nn.functional.grouped_mm`) on SM90+ by default; otherwise a per-expert loop accumulates with
-`index_add_`. The win scales with local experts per rank (`num_experts / ep_size`): large with many
-(Qwen3-30B EP=2, 64 experts/rank: +243% at batch 1), while gpt-oss-20b EP=8 (4 experts/rank) is
-faster on the loop from batch 2. Keep the default unless profiling says otherwise; full grid on the
-[Grouped GEMM guide](../optimization/grouped-gemm.md).
+`index_add_`. The win scales with local experts per rank (`num_experts / ep_size`): large with many,
+small with few, and the loop is never faster in the measured grid. Keep the default; the grid is on the
+[Grouped GEMM guide](../optimization/grouped-gemm.md#grouped-vs-the-loop-path).
 
 GptOss's clamped-SwiGLU runs as a single fused Triton kernel on the grouped path
 (`src/kernels/fused_glu.py`). Liger is the default and `torch.compile` reaches about the same gain

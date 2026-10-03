@@ -31,7 +31,7 @@ SR seeds are drawn from no generator: `sr_seed_pair` hashes the parameter's opti
 
 ## Benchmarks
 
-**GPT-OSS-20B MoE (24 layers, 32 experts, 20.7B params, ~14B trainable with first 8 layers frozen), single B300 (SM103):** AdamWBF16 (Triton) steps in 51.6 ms vs 62.1 ms for `adamw_torch_fused` (**−17%**), at identical 134.2 GB peak and identical bf16 (4B) state dtype.
+**GPT-OSS-20B MoE (24 layers, 32 experts, 20.7B params, ~14B trainable with first 8 layers frozen), single B300 (SM103), 2026-10-03, commit 0bc3a22a5, Blackwell image:** AdamWBF16 (Triton) steps in 31.8 ms vs 62.0 ms for `adamw_torch_fused` (**−49%**), at identical 134.2 GB peak and identical bf16 (4B) state dtype.
 
 The kernel is faster because it fuses state EMA + weight update + SR into one memory pass (14 B/element). Each lane owns four consecutive elements and one `tl.randint4x` Philox call, whose 4 × 32 bits give every element its two independent 16-bit SR draws: 6.5 TB/s effective against 3.9 TB/s with one Philox call per element, on a 254M-element expert tensor (one B300). This row compares two bf16-state optimizers; the 6-vs-12 B/param memory win is against fp32-state AdamW and is not visible here.
 
@@ -74,13 +74,13 @@ AdamWBF16 auto-detects dtype per param: bf16 params take the fused Triton SR pat
 
 `fp32_non_ep_params: true` moves non-expert (dense) params to fp32 storage (12 B/param) for exact updates; experts stay bf16 + SR. Use it for headroom on large-vocab `lm_head`/embeddings. On a MoE at `ep_size: 1` it needs `fsdp_shard_ep1_experts: false` — otherwise the FSDP-managed experts would stay bf16 inside an fp32 shard group and `ParallelismConfig` refuses the pair ([Precision control](../parallelism/expert-parallelism.md#precision-control)).
 
-**Measured (gpt-oss-20b EP=2, seq 4096, batch 4, 8× B300, FA4):**
+**Measured (gpt-oss-20b EP=2, seq 4096, batch 4, 8× B300, FA4; 2026-10-03, commit 0bc3a22a5, Blackwell image):**
 
 | master-weight regime | tok/s/GPU | peak mem | notes |
 |----------------------|:---------:|:--------:|-------|
-| **full bf16** (AdamWBF16, default) | 17,875 | 91.4 GB | 6 B/param; production path |
-| `fp32_non_ep_params` | 17,409 | 92.7 GB | non-EP params fp32, experts bf16; +1 GB only (experts dominate, stay bf16) |
-| `+ fp32_grad_reduce` | 16,117 | 92.7 GB | bf16 master, fp32 grad reduction (~−9%: 2× bandwidth on the grad all-reduce) |
+| **full bf16** (AdamWBF16, default) | 20,554 | 85.2 GB | 6 B/param; production path |
+| `fp32_non_ep_params` | 19,993 | 86.6 GB | non-EP params fp32, experts bf16; +1.3 GB only (experts dominate, stay bf16) |
+| `fp32_non_ep_params` + `fp32_grad_reduce` | 18,741 | 86.5 GB | fp32 grad reduction on top of the row above (−6%: 2× bandwidth on the grad all-reduce) |
 | **stock AdamW** (`bf16_optimizer=False`) | — | — | **rejected at `ep_group_size > 1`, and at `ep_group_size == 1` with `fsdp_shard_ep1_experts: false`** — fused AdamW cannot mix the plain-tensor expert FFN (EP rank-local experts, or the grouped-GEMM `gate_proj_gmm`/`up_proj_gmm` split at ep1) with FSDP2 DTensors (`aten._fused_adamw_ got mixed torch.Tensor and DTensor`); raised when the optimizer is built (still before the first step) |
 
 `bf16_optimizer=False` builds on dense models and on `ep_group_size == 1` MoE with the default FSDP-sharded experts. The `fp32_non_ep_params` delta is small for gpt-oss because its non-expert params are a minor fraction; high-vocab or attention-heavy models cost more.

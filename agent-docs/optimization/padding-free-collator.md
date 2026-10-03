@@ -64,15 +64,15 @@ The collator emits `input_ids`, `labels`, and `position_ids` (reset per sequence
 
 Throughput is **real (non-padding) tokens/s/GPU** — `attention_mask.sum()`, not padded element count — set via `include_num_input_tokens_seen="non_padding"` so all three modes share one real-token basis.
 
-**Model:** Qwen3-30B-A3B (128 experts, top_k=8), FA2. **Hardware:** 2× B300 (SM103), EP=2. **Data:** max_length=4096, avg ≈ 1024 tokens (~75% padding waste). **Setup:** batch_size=2/GPU, GC on, 8 steps / 3 warmup.
+**Model:** Qwen3-30B-A3B (128 experts, top_k=8), FA2. **Hardware:** 2× B300 (SM103), EP=2, measured 2026-10-03 at commit 0bc3a22a5 on the Blackwell image. **Data:** max_length=4096, avg ≈ 1024 tokens (~75% padding waste). **Setup:** batch_size=2/GPU, GC on, 8 steps / 3 warmup.
 
 | Mode | tokens/s/GPU (real) | Step time | vs Standard |
 |------|:-------------------:|:---------:|:-----------:|
-| Standard | 1,092 | 1.83s | 1.0× |
-| Packing | 10,072 | 0.78s | **9.2×** |
-| Padding-Free | 2,547 | 0.79s | 2.3× |
+| Standard | 922 | 2.08s | 1.0× |
+| Packing | 13,341 | 0.59s | **14.5×** |
+| Padding-Free | 4,178 | 0.46s | 4.5× |
 
-Peak memory is ~115.8 GiB across all three (weights + optimizer states dominate). At ~75% padding waste, packing wins by filling each max_length block with ~4 real sequences and cutting the step count. Padding-free strips the padding via varlen FA, so it processes only real tokens per step at lower memory than packing, while keeping per-sample boundaries (no cross-sequence attention).
+Peak memory is 117–120 GiB across all three (weights + optimizer states dominate; packing's is ~3 GiB above the other two). At ~75% padding waste, packing wins by filling each max_length block with ~4 real sequences and cutting the step count. Padding-free strips the padding via varlen FA, so it processes only real tokens per step at lower memory than packing, while keeping per-sample boundaries (no cross-sequence attention).
 
 The table uses `--attn_implementation flash_attention_2`. FA4 is also valid: FA4 + packing + EP is safe (`warm_attention_kernels` compiles the FA4 kernels behind a barrier at load — see [Flash Attention](flash-attention.md#known-issues)). With `--attn_implementation` unset (the default), the benchmark auto-detects FA4 on Blackwell (`tests/common/benchmark_args.py`).
 
@@ -91,7 +91,7 @@ Pipeline parallelism ([not yet available in this release](../parallelism/pipelin
 ## When to use each
 
 - **avg > 80% of max_length** — any collator (all within ~1%); use standard.
-- **avg << max_length** — packing (9.2× at ~75% waste; packing's own cross-sequence padding overhead is 1–5%).
+- **avg << max_length** — packing (14.5× at ~75% waste; packing's own cross-sequence padding overhead is 1–5%).
 - **Need CP** — standard padding only; both packing and padding-free are rejected.
 - **Need PP** — packing or standard padding; padding-free is rejected.
 - **Want to skip padding FLOPS without cross-sequence boundaries** — padding-free.
