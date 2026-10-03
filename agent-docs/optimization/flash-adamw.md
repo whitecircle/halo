@@ -44,7 +44,7 @@ A real-model benchmark lives in `tests/gpu/optimizers/bench_muon_qwen3_5.py` (Qw
 
 | Optimizer | Memory | Convergence | Best for |
 |---|---|---|---|
-| `adamw_torch_fused` under `bf16: false` | 12B/param | Baseline | fp32 runs; refused where expert params sit outside FSDP2 (`ep_size > 1`) |
+| `adamw_torch_fused` under `bf16: false` | 12B/param | Baseline | fp32 runs; refused at `ep_group_size > 1` or at ep1 with `fsdp_shard_ep1_experts: false`, unless `fp32_non_ep_params` is set |
 | AdamWBF16 (auto: the default `adamw_torch_fused` under `bf16: true`) | 6B/param | Same as FP32 | Standard bf16 training |
 | `flash_adamw` | ~5B/param | Same as AdamW | Maximum memory savings |
 | `muon` | ~4–6B/param | Faster convergence | When convergence speed matters — see [Muon](muon-optimizer.md#benchmark) |

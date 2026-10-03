@@ -382,8 +382,8 @@ alone predicts). Three consequences:
     an async `unspecified launch failure` in whatever kernel is on-stream).
 
     The dispatcher rejects an oversized cross-node dispatch at buffer sizing
-    (`HALO_DEEPEP_GIN_MAX_TOKENS_PER_RANK`, default 8192, `0` disables). Intra-node NVLink dispatch is
-    unaffected to 65k tokens/rank.
+    (`HALO_DEEPEP_GIN_MAX_TOKENS_PER_RANK`, default 8192, `0` disables). Intra-node NVLink dispatch has
+    no such cap; ep8 at ≥~64k tokens/rank needs `ep_buffer_backend: legacy` ([Transport backend](#transport-backend)).
 
 - **A lower-latency fabric removes the wall.** Mellanox IB with IBGDA, or rack-wide NVLink (GB200/GB300
   NVL72, where cross-node EP rides NVLink), collapse the dispatch latency that dominates here. The limit is

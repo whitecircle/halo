@@ -91,6 +91,8 @@ On CUDA the model is then built with the attention implementation `sdpa_flex_sli
 - **Global layers** (head_dim 512) run matmul attention while the layer's saved scores fit the 2 GiB budget (16 heads at 4,096 tokens per row), and mem-efficient SDPA past it: 1.88 / 6.78 ms at 2,048 / 4,096 tokens against 6.52 / 19.7 ms, and the same time as SDPA at 8,192 and beyond, where the layer runs it. FlexAttention only fits shared memory at head_dim 512 with its smallest tiles, and those are slower than SDPA.
 - The vision and audio towers (bidirectional) keep SDPA. `HALO_FLEX_SLIDING=0` keeps plain SDPA for every layer.
 
+End to end, Gemma 4 26B-A4B full SFT at EP2 on 2× B300 without gradient checkpointing (dd489a700, against plain SDPA): 11,152 → 14,980 cluster tok/s at 2,048 tokens (1.34×), and 4,124 → 16,204 at 16,384 (3.93×) with peak memory 237.6 → 225.0 GiB.
+
 The KV-repeat override is not what makes the global layers legal — transformers 5.16 disables GQA above head_dim 256 itself. It stays because the patch pins mem-efficient as the *only* enabled backend process-wide, where native `enable_gqa` for the 256-dim sliding layers is unverified; the manual repeat is the one measured path. See [Flash Attention](../optimization/flash-attention.md#model-specific-handling).
 
 Gemma 4 never reaches a varlen kernel, so `select_data_collator` rejects **`padding_free`** for it — the gate is the resolved `_attn_implementation`, and only `flash_attention_2/_3/_4` qualify. `packing: true` (what the example config uses) still isolates documents through per-document `position_ids`, at the cost of a dense mask over the flattened batch (side up to `per_device_train_batch_size * max_length`) instead of `cu_seqlens` ([Collators](../data/collators.md)).

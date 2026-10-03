@@ -760,7 +760,7 @@ tok/s per sequence against 63–66 for the same server alone. Pin each server co
 its own cores (`docker run --cpuset-cpus`, compose `cpuset:`) and the trainer to the rest.
 
 Step latency grows with running sequences (about 14 ms + 0.22 ms per sequence here under MTP), so
-per-sequence speed falls as concurrency rises, 101 tok/s at 48 running and 71 at 96 in one sweep, while aggregate
+per-sequence speed falls as concurrency rises, 101 tok/s at 48 running and 71 at 96, while aggregate
 throughput rises sub-linearly (+41% for that doubling).
 
 Kernel-level gains (tuned MoE tiles, another attention backend) do not show at this concurrency;
@@ -772,7 +772,7 @@ fewer steps per token do. Turning these numbers into batch sizes and timeouts:
 `--speculative-config '{"method":"mtp","num_speculative_tokens":2}'` (compose slot
 `VLLM_SPECULATIVE_CONFIG`); the drafter loads from the same checkpoint.
 
-Measured on Qwen3.6-35B-A3B on a B300 at 48 concurrent sequences, temperature 1.0, in a separate session: 59–67 → 108–112
+Measured on Qwen3.6-35B-A3B on a B300 at 48 concurrent sequences, temperature 1.0, measured apart from the sweep above: 59–67 → 108–112
 tok/s per sequence, 2.4 tokens accepted per step, output statistics unchanged.
 
 Sound for RL: rejection sampling applies temperature and top-p to the target logits and keeps the

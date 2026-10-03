@@ -54,9 +54,9 @@ router's weight without calling the router, and FSDP2's root post-backward callb
 gradient. A module that itself owns trainable parameters of two dtypes cannot be split, and the wrap
 raises. A layer whose trainable parameters share one dtype gets no extra group.
 
-On gpt-oss-20b at `ep_size: 1` (B300, measured at merge) the fp32 router runs 10,647 tok/s/GPU against 10,883
-with a bf16 router, at the same 104 GB peak; replicating the experts instead (`fsdp_shard_ep1_experts: false`)
-ran 8,770–9,060 at 153 GB.
+On gpt-oss-20b at `ep_size: 1` (B300, 34c102bba) the fp32 router runs 10,647 tok/s/GPU against 10,883 with a
+bf16 router, at the same 104 GB peak. In that run set, the fp32 router over replicated experts
+(`fsdp_shard_ep1_experts: false`, which keeps the router out of FSDP2) ran 8,770–9,060 at 153 GB.
 
 FSDP2 shards params, gradients, and optimizer states across the DP ranks, so per-rank optimizer-state
 memory is ~`dp_size` smaller than DDP's full per-rank replication. Setup lives in

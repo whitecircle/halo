@@ -50,7 +50,7 @@ Megatron-Core stores `torch_dist` sharded checkpoints split by TP/PP/EP/ETP — 
 ### Published numbers in similar setups
 
 Vendor-reported figures beside Halo's, with the setup stated. The NeMo AutoModel and transformers
-figures ran on H100; the Megatron-LM row and the last bullet ran on the same B300s as Halo. B300 has
+figures ran on H100; the Megatron-LM figures and the last bullet ran on the same B300s as Halo. B300 has
 2.3× the bf16 peak of H100, so read a cross-GPU row as a ceiling on the gap, not the gap.
 
 - **gpt-oss-20b, seq 4096, bf16.** Halo: 24,456 tok/s/GPU at EP1 (8× B300, batch 4, GC off; 20,174

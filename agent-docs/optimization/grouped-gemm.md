@@ -76,6 +76,8 @@ The win grows with sequence length (larger recv buffers → worse contention).
 
 The fused kernels against that padded-gather permute (a separate routing-weight multiply, a padded `[N, top_k, H]` gather-sum each way, the same sort), on the Gemma 4 26B-A4B expert block (hidden 2816, intermediate 704, 128 experts, top-8), fwd+bwd on one B300: 1.78 / 3.25 / 10.63 ms at 2k / 8k / 32k tokens, against 2.21 / 4.73 / 16.24 ms, and peak transient memory of 3.7 against 6.5 GiB at 32k (`tests/gpu/profiling/benchmark_moe_block.py`, rows `halo` and `halo_padded_gather`).
 
+End to end, these kernels together with the fused GLU, torch's fused RMSNorm on four families and AdamWBF16's folded gradient clip (29cf60ded against 425f04103; 2× B300, EP2, peak memory unchanged): Gemma 4 26B-A4B full SFT at 2,048 tokens 8,984 → 11,152 cluster tok/s (1.24×), most of it from the optimizer; at 4,096 tokens gpt-oss-20b 1.25×, Qwen3-30B-A3B 1.12×, GLM-4.7-Flash 1.09×.
+
 Per-device batch multiplies the per-call recv buffer exactly like sequence length, so on the families the gate leaves on the CAS path (`top_k < ep_size`) batch shape is a real lever. At high router skew scale with GA, not per-device batch.
 
 gpt-oss-120b at EP8, same 64-sequence effective batch: bs2 × GA4 measures ~20% slower than bs1 × GA8 at high router skew (`moe/load_max` ~11), and parity at a balanced load (~2).

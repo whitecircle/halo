@@ -18,7 +18,7 @@ the full `S` tokens but `H/cp_size` heads for the attention compute (one for Q, 
 and V), and a third swaps the output back. The backward runs the same three in reverse.
 Multi-head attention is independent across heads, which is what makes this exact.
 
-![Ulysses attention: RoPE runs on the local chunk, an all-to-all scatters heads and gathers the sequence so each rank attends over the full sequence with 16 of 64 heads, and a second all-to-all restores the per-rank chunk layout](../assets/diagrams/ulysses_attention_flow.png)
+![Ulysses attention: RoPE runs on the local chunk, all-to-alls on Q and the fused K|V scatter heads and gather the sequence so each rank attends over the full sequence with 16 of 64 heads, and an all-to-all on the output restores the per-rank chunk layout](../assets/diagrams/ulysses_attention_flow.png)
 
 ![A training step under CP: the wrapper narrows the batch to one contiguous sequence chunk per rank, embeddings and every decoder layer run on that chunk (Ulysses attention, then the MLP or MoE), the logits stay sharded, and the loss is scaled by cp_size over the CP group's all-reduced token count](../assets/diagrams/cp_training_step.png)
 

@@ -46,10 +46,9 @@ These fire automatically; mention them only to confirm, not as new advice. Figur
 - **CDMC=1** — baked into the image env; free win on ep8, neutral dense/ep2.
 - **Atomic-free expert permute** — auto for high-top_k MoE (`top_k ≥ ep_size`); win grows with sequence
   length. gpt-oss (top-4) stays on the cheaper `index_add_` path at EP8.
-- **Fused MoE kernels** — fused GLU (`HALO_FUSED_GLU`) on every expert and dense-MLP combine, and the
-  fused weighted un-permute above the `top_k ≥ ep_size` gate; 1.09–1.25× at EP2 (2× B300, measured at merge).
-- **FlexAttention on Gemma 4's sliding layers** (`sdpa_flex_sliding`, `HALO_FLEX_SLIDING`) — 1.34× at 2k,
-  3.93× at 16k (EP2).
+- **Fused MoE path** — fused GLU (`HALO_FUSED_GLU`) on every expert and dense-MLP combine, and the
+  fused weighted un-permute where `top_k ≥ ep_size` (grouped path).
+- **FlexAttention on Gemma 4's sliding layers** (`sdpa_flex_sliding`, `HALO_FLEX_SLIDING`).
 
 ## Throughput flow (raise tok/s/GPU)
 - **MoE/EP, any shape →** push **seq × batch as high as memory allows** first — EP at low token
