@@ -65,7 +65,7 @@ FP8_HEADER_DTYPE = "F8_E4M3"
 # Sibling suffixes a staged publish writes through: the output is built beside the target and
 # swapped in, so an interrupted write never replaces a good directory with a partial one. A failed
 # swap prints one of these paths.
-STAGING_SUFFIX = ".halo-staging"
+PUBLISH_STAGING_SUFFIX = ".halo-staging"
 DISPLACED_SUFFIX = ".halo-displaced"
 
 # Training-state records an exported artifact carries beside its weights: how the run's routing was
@@ -200,7 +200,7 @@ def resolve_checkpoint_source(model_id: str, revision: str | None = None) -> str
     return snapshot_download(model_id, revision=revision)
 
 
-def clear_staging_path(target: str | os.PathLike, suffix: str = STAGING_SUFFIX) -> str:
+def clear_staging_path(target: str | os.PathLike, suffix: str = PUBLISH_STAGING_SUFFIX) -> str:
     """``target`` + ``suffix``, cleared of whatever an earlier interrupted run left there.
 
     Staged publish for a tool that may be rewriting the only copy of its input: build the new
@@ -208,7 +208,7 @@ def clear_staging_path(target: str | os.PathLike, suffix: str = STAGING_SUFFIX) 
     belongs to a run that failed before its swap and is cleared; anything left after a failed swap is
     the only complete copy, so the caller must name that path in its error and leave it in place.
 
-    ``suffix`` picks the role: :data:`STAGING_SUFFIX` for the new directory,
+    ``suffix`` picks the role: :data:`PUBLISH_STAGING_SUFFIX` for the new directory,
     :data:`DISPLACED_SUFFIX` for a previous target rotated aside until the swap completes.
     """
     path = f"{os.fspath(target)}{suffix}"

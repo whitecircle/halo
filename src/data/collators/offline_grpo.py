@@ -13,9 +13,7 @@ from trl.trainer.utils import pad
 
 logger = get_logger(__name__, log_level="INFO")
 
-# Reference per-token log-probs, one per completion token, written into the tokenized dataset by the
-# trainer's pipeline-parallel reference sweep (``OfflineGRPOTrainer._pp_precompute_reference_logps``)
-# and collated below, aligned position-for-position with ``completion_input_ids``.
+# Raw reference scores align with completion tokens, independent of the scoring parallelism.
 REF_PER_TOKEN_LOGPS_COLUMN = "ref_per_token_logps"
 
 
@@ -49,7 +47,7 @@ class OfflineGRPODataCollatorWithPadding:
                         f"{len(comp_ids)} tokens; the reference log-probs must be one per completion "
                         f"token under the run's own tokenization and length caps."
                     )
-                ref_logps.append(torch.tensor(values, dtype=torch.float32))
+                ref_logps.append(torch.tensor(values or [0.0], dtype=torch.float32))
             if not comp_ids:
                 logger.warning("Empty completion_input_ids found, using pad token")
                 comp_ids = [self.pad_token_id]

@@ -221,6 +221,8 @@ rejected at config time ([Pipeline Parallelism](../parallelism/pipeline-parallel
 | QLoRA + EP / TP / PP / grouped-GEMM MoE | Rejected at load | QLoRA on DDP/FSDP, or CP on a dense model; plain LoRA for EP |
 | CP + a trainer using `logits_to_keep` / global log-prob sums / full-sequence pooling / dual models | Rejected at trainer construction (`<TrainerClass> does not support Context Parallelism (CP)`) | The trainer's `_supports_cp` class attribute is the gate, and it defaults off — nothing inspects the loss for CP-safety. Only SFT and SMPO declare it |
 | PP + a trainer needing a live reference model or a second forward | Rejected at construction | DPO/KTO are precompute-only under PP; a `kl_beta > 0` offline-GRPO reference would be scored once before training by a pipeline sweep |
+| Offline GRPO full-FT KL + pre-sharded inputs, or supplied `ref_per_token_logps` | Rejected before reference preparation | Use a finite, unsharded dataset and the trainer's persisted run-start reference ([reference contract](../training-methods/grpo/offline-grpo.md#reference-model)) |
+| Offline GRPO KL checkpoint lacks `reference_logps.pt` | Trained weights cannot regenerate their original reference | Restore the sidecar from a complete checkpoint, or recover it with the same data/settings and exact original model into a separate scratch run; copy `checkpoint-1/reference_logps.pt` into the resume checkpoint on every node with node-local output ([recovery](../training-methods/grpo/offline-grpo.md#reference-model)) |
 | Any `pipeline_parallel_size > 1` | Rejected at config time | Pipeline parallelism is not yet available in this release |
 
 TP and node-local EP must stay within one NVLink domain. EP can cross domains under

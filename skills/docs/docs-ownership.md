@@ -54,6 +54,7 @@ changes.
 | `src/environments/ray_actors.py` (actor pool, dispatch, Ray init) | `agent-docs/infrastructure/ray.md`, `agent-docs/training-methods/grpo/async-grpo/setup.md` (trainer-side knobs) |
 | `src/distributed/checkpoint/` (save ladder, weight loader, OptimizerShardStore, PeftAdapterSaver) | `agent-docs/reference/checkpoints.md` |
 | `src/checkpoint/format.py` (on-disk spellings, save-dtype casts, the layout cascade, state-dict IO) | `agent-docs/reference/checkpoints.md` |
+| `src/checkpoint/atomic.py` (exclusive staging, atomic Torch-file publication, directory fsync) | `agent-docs/reference/checkpoints.md` |
 | `src/checkpoint/config_export.py` (what an exported `config.json` must contain: model_type restore, flat legacy keys, source schema) | `agent-docs/reference/checkpoints.md`, `agent-docs/models/README.md` |
 | `src/checkpoint/adapters.py` (saved-PEFT file layout, expert-LoRA shape gates, merge-into-base) | `agent-docs/optimization/peft.md`, `agent-docs/reference/checkpoints.md`, `agent-docs/reference/scripts-reference.md` |
 | `src/checkpoint/tool_io.py` (tool-side checkpoint walks, input gates, staged publish, training-state sidecars), `src/checkpoint/fp8_dequant.py` (streaming fp8 → bf16) | `agent-docs/reference/checkpoints.md`, `agent-docs/reference/scripts-reference.md` |

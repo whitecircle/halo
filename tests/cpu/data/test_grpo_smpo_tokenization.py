@@ -16,12 +16,15 @@ Usage:
 
 import pytest
 from accelerate import PartialState
+from datasets import Dataset
 
 PartialState()
 
 from scripts.training.offline_grpo import build_chat_template_row_fn
+from src.data.collators.offline_grpo import REF_PER_TOKEN_LOGPS_COLUMN
 from src.data.pipeline.row_processors import prepare_generative_row
 from src.trainers.grpo.offline import tokenize_prompt_completion
+from src.trainers.grpo.reference_lifecycle import reject_unsupported_reference_input
 from src.trainers.preference.smpo import tokenize_preference_row
 
 BOS_ID = 1
@@ -65,6 +68,15 @@ def test_offline_grpo_render_survives_strict_template():
     out = fn({**ROW, "completions": [list(c) for c in ROW["completions"]]})
     assert out["prompt"] == "<|user|>What is 2+2?<|end|>"
     assert out["completions"] == ["<|assistant|>4<|end|>", "<|assistant|>five<|end|>"]
+
+
+def test_offline_grpo_rendered_supplied_references_are_refused_by_the_trainer():
+    scores = [[-0.5, -0.75], [-1.25]]
+    raw = Dataset.from_list([{**ROW, REF_PER_TOKEN_LOGPS_COLUMN: scores}])
+    rendered = raw.map(build_chat_template_row_fn(StrictTemplateTokenizer(), tools_field=None))
+    assert rendered["completions"][0] == ["<|assistant|>4<|end|>", "<|assistant|>five<|end|>"]
+    with pytest.raises(ValueError, match="Supplied ref_per_token_logps"):
+        reject_unsupported_reference_input(rendered, None)
 
 
 def test_offline_grpo_render_no_mid_sequence_bos():

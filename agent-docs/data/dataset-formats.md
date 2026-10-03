@@ -182,6 +182,10 @@ Reference-model shapes for vision rows: [DPO → Vision-language](../training-me
 
 Config in `OfflineGRPOConfig` (`src/configs/offline_grpo_config.py`); defaults: [Offline GRPO → Configuration](../training-methods/grpo/offline-grpo.md#configuration).
 
+Full-finetuning KL sweeps require a finite, unsharded dataset. Pre-sharded KL inputs and supplied
+`ref_per_token_logps` are refused; the trainer owns its reference scores and their resume identity.
+See [Offline GRPO](../training-methods/grpo/offline-grpo.md#reference-model).
+
 **CP not supported** — uses the `logits_to_keep` optimization, incompatible with sequence splitting.
 
 ## Classification

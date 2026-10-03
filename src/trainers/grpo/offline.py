@@ -11,13 +11,8 @@
 # limitations under the License.
 """Offline GRPO trainer (pre-computed rewards) under EP / TP / PP.
 
-CP unsupported: relies on ``logits_to_keep``, which CP's sequence splitting breaks.
-
-PP runs every loss type (grpo / bnpo / dr_grpo), whose whole-batch denominators are computable from
-batch metadata alone, and the KL term at any ``kl_beta``: no pipeline rank holds a full model to
-forward a reference, so the reference log-probs are scored once before the first optimizer step by a
-forward-only sweep through the pipeline and carried into every step as a per-example side tensor.
-See ``_pp_loss_adapter``.
+Full fine-tuning scores raw run-start reference log-probs once and persists them through
+checkpoint resume. CP is refused at trainer construction.
 """
 
 import random
@@ -56,7 +51,6 @@ from transformers import (
     TrainerCallback,
 )
 from transformers.trainer_utils import seed_worker
-from trl import create_reference_model
 from trl.trainer.utils import (
     disable_dropout_in_model,
     selective_log_softmax,
@@ -68,6 +62,7 @@ from src.data.collators.offline_grpo import REF_PER_TOKEN_LOGPS_COLUMN, OfflineG
 from src.data.pipeline.processing import coordinated_map
 from src.data.pipeline.rendered import lacks_emitted_bos
 from src.data.spans import LABEL_IGNORE_INDEX, lacks_terminator, resolve_eos_token_ids
+from src.distributed.loading.frozen_models import place_and_freeze
 from src.distributed.loading.model_loading import load_model_from_pretrained
 from src.distributed.loading.peft_setup import peft_bf16_autocast, prepare_peft_model
 from src.distributed.parallelism_config import ParallelismConfig
@@ -79,7 +74,17 @@ from src.distributed.pipeline_parallel.losses import (
     rows_with_labels,
     token_logprobs,
 )
-from src.distributed.runtime import current_device, get_global_world_size
+from src.distributed.runtime import (
+    DeferredRankFailure,
+    collective_device,
+    current_device,
+    get_global_rank,
+    get_global_world_size,
+    is_global_main_process,
+    rank_consensus,
+    reject_across_ranks,
+    reject_divergent_settings,
+)
 from src.models.loading.tokenizer_setup import is_bounded_length
 from src.models.modality import config_declares_multimodality
 from src.models.structure import base_transformers_model, resolve_tokenizer
@@ -94,11 +99,21 @@ from src.trainers.grpo.objective.offline import (
     offline_loss_numerator,
     offline_token_objective,
 )
+from src.trainers.grpo.reference_cache import MappedReferenceScores, ReferenceScoreCache
+from src.trainers.grpo.reference_lifecycle import (
+    OfflineGRPOReferenceLifecycleMixin,
+    reject_unsupported_reference_input,
+)
 from src.trainers.mixins.base import DistributedTrainerMixin
-from src.trainers.mixins.ep_introspection import named_ep_layers
 from src.trainers.mixins.pp_gates import reject_pp_compute_metrics, reject_pp_peft
 
 logger = get_logger(__name__, log_level="INFO")
+
+
+def _collate_reference_rows(rows, *, collator, batch_size: int):
+    """Keep FSDP/EP per-row forward counts equal; only the original rows enter the cache."""
+    real_rows = len(rows)
+    return collator(rows + [rows[-1]] * (batch_size - real_rows)), real_rows
 
 
 def compute_group_advantages(
@@ -383,18 +398,18 @@ class MultiGroupSampler(Sampler):
         return len(self.indices_sequence)
 
 
-class OfflineGRPOTrainer(ChunkedLogprobsCore, DistributedTrainerMixin, Trainer):
+class OfflineGRPOTrainer(ChunkedLogprobsCore, OfflineGRPOReferenceLifecycleMixin, DistributedTrainerMixin, Trainer):
     """Offline GRPO trainer for pre-computed-reward data (``prompt``/``completions``/``rewards``)
     under EP / TP / PP (see ``_reject_pp_explicit_options`` for the PP-specific rejections).
 
-    ``ref_model`` is the frozen KL reference for a policy that cannot be deep-copied into one
-    (:meth:`requires_ref_model`); every other run derives its reference, or holds none.
+    Full fine-tuning freezes run-start per-token reference scores in each checkpoint. PEFT scores
+    its base with adapters disabled; native expert LoRA uses an explicit frozen base model.
     """
 
     _tag_names = ["trl", "offline-grpo"]
 
     # Single-forward objective whose denominators come from batch metadata alone; the KL reference
-    # is scored by a pipeline sweep before training (``_pp_precompute_reference_logps``).
+    # is scored by the shared reference sweep before training.
     _supports_pp = True
     # The objective never passes labels into the forward, so Liger CE/FLCE cannot fire.
     _loss_outside_model_forward = True
@@ -438,6 +453,11 @@ class OfflineGRPOTrainer(ChunkedLogprobsCore, DistributedTrainerMixin, Trainer):
         save_sharded_ep: bool = False,
         **kwargs,
     ):
+        resume_context_given = "resume_checkpoint" in kwargs
+        self._init_reference_logps(
+            resume_checkpoint=kwargs.pop("resume_checkpoint", None),
+            resume_context_given=resume_context_given,
+        )
         self._metrics = {"train": defaultdict(list), "eval": defaultdict(list)}
         self._sign_metric_buffer = {"train": defaultdict(list), "eval": defaultdict(list)}
 
@@ -466,8 +486,21 @@ class OfflineGRPOTrainer(ChunkedLogprobsCore, DistributedTrainerMixin, Trainer):
                 f"generation budget. A zero or negative constant divides the loss by zero or flips its sign."
             )
         self.policy_gradient_formulation = args.policy_gradient_formulation
+        self.beta = args.kl_beta
         logger.info(f"Using loss type: {self.loss_type}")
         logger.info(f"Using PG formulation: {self.policy_gradient_formulation}")
+        self._precompute_reference = (
+            self.beta != 0.0
+            and peft_config is None
+            and not (isinstance(model, nn.Module) and is_peft_model(model))
+            and (parallelism_config is None or parallelism_config.expert_lora is None)
+        )
+        reject_unsupported_reference_input(
+            train_dataset,
+            eval_dataset,
+            active=self._precompute_reference,
+            presharded=kwargs.get("dataset_presharded", False),
+        )
 
         # Read by ChunkedLogprobsCore (avoids full [B,T,vocab] logits). Inert under PP: the pipeline
         # drives stages through the PP loss adapter and never calls _get_per_token_logps (the last
@@ -502,7 +535,6 @@ class OfflineGRPOTrainer(ChunkedLogprobsCore, DistributedTrainerMixin, Trainer):
                 stacklevel=2,
             )
 
-        self.beta = args.kl_beta
         if args.disable_dropout:
             disable_dropout_in_model(model)
 
@@ -626,7 +658,9 @@ class OfflineGRPOTrainer(ChunkedLogprobsCore, DistributedTrainerMixin, Trainer):
         self.model.add_model_tags(self._tag_names)
 
         if self.ref_model is not None:
-            self.ref_model = self.accelerator.prepare_model(self.ref_model, evaluation_mode=True)
+            place_and_freeze(self.ref_model, self.model)
+            if not self._precompute_reference:
+                self.ref_model = self.accelerator.prepare_model(self.ref_model, evaluation_mode=True)
 
         if self.accelerator.is_main_process:
             logger.info("Extracting group_ids from training dataset...")
@@ -651,10 +685,13 @@ class OfflineGRPOTrainer(ChunkedLogprobsCore, DistributedTrainerMixin, Trainer):
         self._resolve_chunked_head_transform()
         self._check_full_logits_fit(self._loss_logits_width())
 
-        if self._pp_runtime is not None and self.beta != 0.0:
-            self.train_dataset = self._pp_precompute_reference_logps(self.train_dataset, "training")
+        if self._precompute_reference:
+            self.train_dataset = self._precompute_reference_logps(self.train_dataset, "training")
             if self.eval_dataset is not None:
-                self.eval_dataset = self._pp_precompute_reference_logps(self.eval_dataset, "evaluation")
+                self.eval_dataset = self._precompute_reference_logps(self.eval_dataset, "evaluation")
+            if self.ref_model is not None:
+                self.ref_model.to("cpu")
+                self.ref_model = None
 
     def _loss_logits_width(self) -> LogitsWidth | None:
         """The completion logits row the loss forward carries, one logit past the completion kept for
@@ -756,13 +793,7 @@ class OfflineGRPOTrainer(ChunkedLogprobsCore, DistributedTrainerMixin, Trainer):
 
     @staticmethod
     def _holds_kl_reference(model, kl_beta: float, parallelism_config: "ParallelismConfig", peft_config) -> bool:
-        """Whether the run keeps a KL reference model beside the policy.
-
-        Not at ``kl_beta == 0``; not under PEFT, where ``disable_adapter()`` reverts to the base
-        (EP-aware via ``_setup_distributed_modes``); not under PP, where the reference is scored
-        through the pipeline once the runtime exists (``_pp_precompute_reference_logps``), so no full
-        model sits beside a stage.
-        """
+        """Whether an external frozen reference can be read by this run."""
         return (
             kl_beta != 0.0 and peft_config is None and not is_peft_model(model) and not parallelism_config.is_pp_mode
         )
@@ -771,43 +802,31 @@ class OfflineGRPOTrainer(ChunkedLogprobsCore, DistributedTrainerMixin, Trainer):
     def requires_ref_model(
         cls, model, args: OfflineGRPOConfig, parallelism_config: "ParallelismConfig", peft_config
     ) -> bool:
-        """Whether the caller must load the KL reference and pass it as ``ref_model``.
-
-        A dense policy's reference is a deepcopy of it. An EP / grouped-GEMM wrapped MoE policy, an
-        expert-only LoRA run included (it is not PEFT-wrapped), holds live NCCL process groups
-        ``deepcopy`` cannot pickle, so its reference is a separate frozen load of the policy's weights.
-        """
-        return cls._holds_kl_reference(model, args.kl_beta, parallelism_config, peft_config) and bool(
-            named_ep_layers(model)
+        """Native expert LoRA needs its unadapted base; full fine-tuning sweeps its own policy."""
+        return cls._holds_kl_reference(model, args.kl_beta, parallelism_config, peft_config) and (
+            getattr(parallelism_config, "expert_lora", None) is not None
         )
 
     @classmethod
     def _kl_reference(cls, model, ref_model, kl_beta: float, parallelism_config: "ParallelismConfig", peft_config):
-        """The KL reference model the run holds, or ``None`` where it holds none.
-
-        The caller's ``ref_model`` when given; otherwise a dense policy's deepcopy (TRL's
-        ``create_reference_model``, which on resume anchors the KL to the resumed weights, as the PP
-        sweep does). A wrapped MoE policy cannot be deep-copied (:meth:`requires_ref_model`), so its
-        reference must arrive loaded.
-        """
+        """An explicit reference to sweep, or the native-expert-LoRA base kept live."""
         if not cls._holds_kl_reference(model, kl_beta, parallelism_config, peft_config):
             if ref_model is not None:
                 raise ValueError(
                     "ref_model was passed, but this run holds no KL reference model (kl_beta 0, a PEFT policy "
-                    "scored with its adapters disabled, or pipeline parallelism, which scores the reference "
-                    "through the pipeline), so it would never be read. Drop ref_model."
+                    "scored with its adapters disabled, or PP, which scores the reference through "
+                    "the policy's distributed path), so it would never be read. Drop ref_model."
                 )
             return None
         if ref_model is not None:
             return ref_model
-        if named_ep_layers(model):
+        if getattr(parallelism_config, "expert_lora", None) is not None:
             raise ValueError(
-                "kl_beta > 0 with an EP / grouped-GEMM wrapped MoE policy needs ref_model: deepcopy cannot "
-                "pickle the EP process groups, so the KL reference is a dense replica of the policy's weights "
-                "loaded through load_frozen_reference_model with the policy's revision, attention request and "
-                "sinks flags, as scripts/training/offline_grpo.py loads it. Or use PEFT, or set kl_beta: 0."
+                "kl_beta > 0 with native expert LoRA needs ref_model loaded through "
+                "load_frozen_reference_model from the unadapted base with the policy's revision, "
+                "attention and sinks settings. Or use PEFT, or set kl_beta: 0."
             )
-        return create_reference_model(model)
+        return None
 
     def _build_grouped_dataloader(self, dataset, group_ids, *, batch_size: int, shuffle: bool) -> DataLoader:
         """Build a DataLoader over a ``MultiGroupSampler`` sharded by DP rank/size.
@@ -882,7 +901,7 @@ class OfflineGRPOTrainer(ChunkedLogprobsCore, DistributedTrainerMixin, Trainer):
         """Evaluation DataLoader (see ``_build_grouped_dataloader``; no shuffle, deterministic)."""
 
         def build(dataset):
-            group_ids = self._cached_eval_group_ids
+            group_ids = self._cached_eval_group_ids if dataset is self.eval_dataset else None
             if group_ids is None and dataset is not None and "group_id" in dataset.column_names:
                 group_ids = list(dataset["group_id"])
             eval_dataloader = self._build_grouped_dataloader(
@@ -894,7 +913,23 @@ class OfflineGRPOTrainer(ChunkedLogprobsCore, DistributedTrainerMixin, Trainer):
             # Already sharded by the sampler; num_processes=1 avoids accelerator re-sharding.
             return self._prepare_dataloader(eval_dataloader, num_processes=1, process_index=0)
 
-        return self._cached_eval_dataloader(eval_dataset, build)
+        if eval_dataset is None or isinstance(eval_dataset, str) or eval_dataset is self.eval_dataset:
+            return self._cached_eval_dataloader(eval_dataset, build)
+        # An explicit dynamic dataset is not the constructor's "eval" split. Persistent workers
+        # must retain its prepared loader separately, including its reference-column fingerprint.
+        cache_key = f"eval/{eval_dataset._fingerprint}" if isinstance(eval_dataset, datasets.Dataset) else None
+        if self.args.dataloader_persistent_workers and cache_key is not None:
+            reject_divergent_settings(
+                {"evaluation_cache_key": cache_key},
+                "Offline GRPO evaluation loader",
+                "Every rank must prepare the same dynamic evaluation dataset.",
+            )
+            if rank_consensus(cache_key in self._eval_dataloaders)[0]:
+                return self._eval_dataloaders[cache_key]
+        prepared = build(eval_dataset)
+        if self.args.dataloader_persistent_workers and cache_key is not None:
+            self._eval_dataloaders[cache_key] = prepared
+        return prepared
 
     def _get_last_hidden_state(self, unwrapped_model, input_ids, attention_mask, logits_to_keep):
         """Backbone hidden states for the last ``logits_to_keep`` completion positions (text-only).
@@ -974,20 +1009,29 @@ class OfflineGRPOTrainer(ChunkedLogprobsCore, DistributedTrainerMixin, Trainer):
 
         ref_per_token_logps = ref_per_token_logps_unclamped = None
         if self.beta != 0.0:
-            # A run that holds no reference model scores it as the PEFT policy with its adapters off.
-            if self.ref_model is not None:
-                reference, adapters_off = self.ref_model, nullcontext()
+            if self._precompute_reference:
+                with torch.no_grad():
+                    ref_per_token_logps_unclamped = inputs.get(REF_PER_TOKEN_LOGPS_COLUMN)
+                    if ref_per_token_logps_unclamped is None:
+                        raise RuntimeError("Offline GRPO needs the checkpointed run-start reference on every row")
+                    ref_per_token_logps = clamp_negative_advantage_logps(
+                        ref_per_token_logps_unclamped, advantages, current_min_log_prob
+                    )
             else:
-                reference, adapters_off = self.model, self.accelerator.unwrap_model(self.model).disable_adapter()
-            with torch.no_grad(), adapters_off:
-                ref_per_token_logps, ref_per_token_logps_unclamped = self._get_per_token_logps(
-                    reference,
-                    input_ids,
-                    attention_mask,
-                    logits_to_keep,
-                    advantages=advantages,
-                    min_log_prob=current_min_log_prob,
-                )
+                # A run that holds no reference model scores it as the PEFT policy with its adapters off.
+                if self.ref_model is not None:
+                    reference, adapters_off = self.ref_model, nullcontext()
+                else:
+                    reference, adapters_off = self.model, self.accelerator.unwrap_model(self.model).disable_adapter()
+                with torch.no_grad(), adapters_off:
+                    ref_per_token_logps, ref_per_token_logps_unclamped = self._get_per_token_logps(
+                        reference,
+                        input_ids,
+                        attention_mask,
+                        logits_to_keep,
+                        advantages=advantages,
+                        min_log_prob=current_min_log_prob,
+                    )
         per_token_loss, sample_values = offline_token_objective(
             per_token_logps,
             per_token_logps_unclamped,
@@ -1008,6 +1052,125 @@ class OfflineGRPOTrainer(ChunkedLogprobsCore, DistributedTrainerMixin, Trainer):
 
         self._buffer_sign_metrics(sample_values, advantages, completion_mask)
         return loss
+
+    def _reference_settings(self) -> dict:
+        """Values that affect run-start raw reference scores, excluding the live KL clamp."""
+        return {
+            "model_type": self.model.config.model_type,
+            "temperature": self.temperature,
+        }
+
+    def _precompute_reference_logps(self, dataset, split: str):
+        """Restore original KL scores or sweep the untrained policy once before any update."""
+        settings = self._reference_settings()
+        identity = self._reference_split_identity(dataset, split, settings)
+        restored = self._restore_reference_logps_or_none(dataset, split, identity=identity)
+        if restored is not None:
+            return restored
+        rows = self._sweep_reference_logps(dataset, split)
+        return self._attach_scored_reference_logps(dataset, split, rows, identity=identity)
+
+    def _sweep_reference_logps(self, dataset, split: str) -> MappedReferenceScores:
+        """Sweep contiguous DP shards in every mode and rebuild the original dataset order."""
+        reject_across_ranks(
+            None if isinstance(dataset, datasets.Dataset) else f"Reference sweep needs a finite Dataset for '{split}'",
+            f"Preparing the '{split}' reference sweep",
+            exc_type=ValueError,
+        )
+        dp_size, dp_rank = self.dp_shard_geometry()
+        rows = len(dataset)
+        guard = DeferredRankFailure(f"Preparing the '{split}' reference loader", exc_type=ValueError)
+        loader = guard.run(
+            lambda: DataLoader(
+                dataset.select(range(dp_rank * rows // dp_size, (dp_rank + 1) * rows // dp_size)),
+                batch_size=self.args.per_device_train_batch_size,
+                shuffle=False,
+                collate_fn=partial(
+                    _collate_reference_rows,
+                    collator=self.data_collator,
+                    batch_size=self.args.per_device_train_batch_size,
+                ),
+            )
+        )
+        guard.reject()
+        reject_across_ranks(
+            f"'{split}' has no reference rows on data-parallel rank {dp_rank}" if not len(loader) else None,
+            f"Preparing the '{split}' reference sweep",
+            exc_type=ValueError,
+        )
+        # FSDP and EP peers may span DP shards; every rank must run the same number of forwards.
+        batch_count = torch.tensor([len(loader)], device=collective_device())
+        world_size = get_global_world_size()
+        if world_size > 1:
+            dist.all_reduce(batch_count, op=dist.ReduceOp.MAX)
+        rank_map = self._data_parallel_rank_by_global_rank()
+        representatives = {rank: rank_map.index(rank) for rank in range(dp_size)}
+        cache = ReferenceScoreCache(self._reference_cache_output_dir(), dp_size=dp_size)
+        was_training = self.model.training
+        last_batch = None
+        real_rows = 0
+        total_batches = int(batch_count.item())
+        progress_interval = max(1, total_batches // 10)
+        if is_global_main_process():
+            logger.info(
+                "Preparing run-start KL reference for '%s': %s rows, %s batches before training",
+                split,
+                rows,
+                total_batches,
+            )
+        try:
+            self.model.eval()
+            iterator = iter(loader)
+            with torch.no_grad():
+                for index in range(total_batches):
+                    actual_batch = index < len(loader)
+                    guard = DeferredRankFailure(f"Preparing '{split}' reference batch {index}")
+                    loaded = guard.run(lambda: next(iterator)) if actual_batch else None
+                    guard.reject()
+                    guard = DeferredRankFailure(f"Placing '{split}' reference batch {index}")
+                    if actual_batch:
+                        batch, real_rows = loaded
+                        last_batch = guard.run(lambda batch=batch: self._prepare_inputs(batch))
+                    guard.reject()
+                    # The forward owns collectives: swallowing a rank's exception would strand
+                    # peers inside them while that rank enters a different consensus collective.
+                    scored_rows = self._score_reference_batch(last_batch)
+                    cache.collect_batch(
+                        scored_rows[:real_rows]
+                        if actual_batch and get_global_rank() == representatives[dp_rank]
+                        else None,
+                        representatives,
+                    )
+                    if is_global_main_process() and (
+                        (index + 1) % progress_interval == 0 or index + 1 == total_batches
+                    ):
+                        logger.info("Run-start KL reference '%s': batch %s/%s", split, index + 1, total_batches)
+            return cache.finish(dataset)
+        except BaseException as exc:
+            try:
+                cache.discard()
+            except Exception as cleanup_error:
+                exc.add_note(f"Reference cache cleanup also failed: {cleanup_error}")
+            raise
+        finally:
+            self.model.train(was_training)
+
+    def _score_reference_batch(self, batch) -> list[torch.Tensor]:
+        """Mode-specific scoring inside the shared reference-sweep lifecycle."""
+        if self._pp_runtime is not None:
+            return self._pp_score_reference_batch(batch)
+        ids = torch.cat([batch["prompt_input_ids"], batch["completion_input_ids"]], dim=1)
+        mask = torch.cat([batch["prompt_attention_mask"], batch["completion_attention_mask"]], dim=1)
+        _, logps = self._get_per_token_logps(
+            self.ref_model if self.ref_model is not None else self.model,
+            ids,
+            mask,
+            batch["completion_input_ids"].size(1),
+        )
+        return [
+            values[valid.bool()].float().cpu()
+            for values, valid in zip(logps, batch["completion_attention_mask"], strict=True)
+        ]
 
     def _buffer_sign_metrics(
         self,
@@ -1083,7 +1246,7 @@ class OfflineGRPOTrainer(ChunkedLogprobsCore, DistributedTrainerMixin, Trainer):
         purpose: the non-PP loss is a rank-local quotient whose gradients FSDP averages over the DP
         group, and the PP stage wrap averages over the same group. At ``kl_beta != 0`` the
         reference per-token log-probs ship as a third per-example side tensor, scored before
-        training by :meth:`_pp_precompute_reference_logps`.
+        training by :meth:`_precompute_reference_logps`.
 
         Memory: the non-PP path trims the forward with ``logits_to_keep``; a pipeline's last stage
         has no such lever, so its loss receives full ``[rows, max_length, vocab]`` logits.
@@ -1176,7 +1339,7 @@ class OfflineGRPOTrainer(ChunkedLogprobsCore, DistributedTrainerMixin, Trainer):
         arrives precomputed as a target column, and the runtime divides by ``_pp_normalizer``'s
         full-batch denominator.
 
-        While :meth:`_pp_precompute_reference_logps` drives the schedule, the same call scores the
+        While :meth:`_pp_score_reference_batch` drives the schedule, the same call scores the
         reference instead: the raw per-token log-probs are stashed and no objective is formed.
         """
         token_logps, mask = token_logprobs(logits, target["labels"])
@@ -1205,86 +1368,25 @@ class OfflineGRPOTrainer(ChunkedLogprobsCore, DistributedTrainerMixin, Trainer):
         self._buffer_sign_metrics(sample_values, advantages, mask, rows=rows_with_labels(target["labels"]))
         return offline_loss_numerator(per_token_loss, mask, target["group_size"], loss_type=self.loss_type)
 
-    def _pp_precompute_reference_logps(self, dataset: "datasets.Dataset", what: str) -> "datasets.Dataset":
-        """Score the KL reference through the pipeline and return ``dataset`` with the values as a column.
-
-        At construction the split model is the reference (the checkpoint weights, or on resume the
-        resumed ones, which is what ``create_reference_model`` anchors to off PP), so one
-        forward-only sweep through the schedule before the first optimizer step scores every token,
-        and the values ride into every step as the ``REF_PER_TOKEN_LOGPS_COLUMN`` extra target.
-        Each data-parallel replica sweeps a contiguous shard and the shards are all-gathered over the
-        stage group, so every rank holds the whole column (a pre-sharded dataset is already this
-        rank's own rows and is swept whole). The last stage's loss stashes per-microbatch log-probs
-        rather than the schedule merging the batch's logits, so the sweep's memory is the training
-        path's own per-microbatch footprint; a partial final batch is row-padded to the pipeline's
-        frozen shape with inert rows and trimmed back.
-        """
-        if isinstance(dataset, IterableDataset):
-            raise ValueError(
-                f"kl_beta={self.beta} under pipeline parallelism scores the reference over the whole "
-                f"{what} dataset before training, which needs a sized, indexable dataset; the "
-                f"{what} dataset is an IterableDataset."
-            )
-        dp_size, dp_rank = self.dp_shard_geometry()
-        rows = len(dataset)
-        shard = dataset.select(range(dp_rank * rows // dp_size, (dp_rank + 1) * rows // dp_size))
-        loader = DataLoader(
-            shard, batch_size=self.args.per_device_train_batch_size, shuffle=False, collate_fn=self.data_collator
-        )
+    def _pp_score_reference_batch(self, batch) -> list[torch.Tensor]:
+        """Score one frozen-shape pipeline batch without forming the training objective."""
         frozen_rows = self.args.per_device_train_batch_size
         pads = self._pp_frozen_row_pads()
-        # Every stage forward is a collective across the stage's replicas (FSDP2's all-gathers, a
-        # DeepEP dispatch under PP+EP), so the replicas must run the same number of batches: a shard
-        # one row longer would block its peers on its extra batch. The shorter shards replay their
-        # last (already frozen-shape) batch for the difference and discard the result.
-        if len(loader) == 0:
-            raise ValueError(
-                f"The {what} dataset leaves data-parallel rank {dp_rank} no rows to score the KL reference "
-                f"over ({rows} rows across {dp_size} replicas); the dataset is too small for this world size."
-            )
-        sweep_batches = torch.tensor([len(loader)], device=current_device())
-        if dist.get_world_size(self._pp_stage_group) > 1:
-            dist.all_reduce(sweep_batches, op=dist.ReduceOp.MAX, group=self._pp_stage_group)
-        replays = int(sweep_batches.item()) - len(loader)
-        logger.info(f"Scoring the KL reference over the {what} dataset through the pipeline ({rows} rows)...")
-
-        was_training = self.model.training
-        self.model.eval()
-        per_row: list[torch.Tensor] = []
-        inputs = None
+        real_rows = batch["prompt_input_ids"].size(0)
+        prompt_width = batch["prompt_input_ids"].size(1)
+        completion_width = batch["completion_input_ids"].size(1)
+        valid = batch["completion_attention_mask"].bool().cpu()
+        # Signals both the transform (no reference column yet) and last-stage loss (stash scores).
+        self._pp_ref_sweep = []
         try:
-            for batch in loader:
-                batch = self._prepare_inputs(batch)
-                real_rows = batch["prompt_input_ids"].size(0)
-                prompt_width = batch["prompt_input_ids"].size(1)
-                completion_width = batch["completion_input_ids"].size(1)
-                counts = batch["completion_attention_mask"].sum(dim=1).tolist()
-                # Set before the transform too, which reads it as "no reference column yet".
-                self._pp_ref_sweep = []
-                inputs = self._pp_pad_rows_to_frozen(self._pp_batch_transform(batch), frozen_rows, pads)
-                logps = self._pp_reference_sweep_pass(inputs)
-                completion_logps = logps[:real_rows, prompt_width - 1 : prompt_width - 1 + completion_width].cpu()
-                per_row.extend(completion_logps[r, : counts[r]] for r in range(real_rows))
-            for _ in range(replays):
-                self._pp_reference_sweep_pass(inputs)
+            guard = DeferredRankFailure("Preparing a pipeline KL reference batch")
+            inputs = guard.run(lambda: self._pp_pad_rows_to_frozen(self._pp_batch_transform(batch), frozen_rows, pads))
+            guard.reject()
+            logps = self._pp_reference_sweep_pass(inputs)
+            completion_logps = logps[:real_rows, prompt_width - 1 : prompt_width - 1 + completion_width].float().cpu()
+            return [values[mask] for values, mask in zip(completion_logps, valid, strict=True)]
         finally:
             self._pp_ref_sweep = None
-            self.model.train(was_training)
-
-        shards = [(dp_rank, per_row)]
-        if dp_size > 1:
-            gathered: list = [None] * dist.get_world_size(self._pp_stage_group)
-            dist.all_gather_object(gathered, shards[0], group=self._pp_stage_group)
-            # ETP partners and chain peers land the same dp_rank with identical values; keyed dedup.
-            by_rank = dict(gathered)
-            shards = [(rank, by_rank[rank]) for rank in range(dp_size)]
-        column = [values.tolist() for _, shard_rows in shards for values in shard_rows]
-        if len(column) != rows:
-            raise RuntimeError(
-                f"The KL reference sweep scored {len(column)} rows of the {what} dataset but it has {rows}; "
-                f"the data-parallel shards did not reassemble into the dataset."
-            )
-        return dataset.add_column(REF_PER_TOKEN_LOGPS_COLUMN, column)
 
     def _pp_reference_sweep_pass(self, inputs: dict[str, torch.Tensor]) -> torch.Tensor:
         """One forward-only pass of the reference sweep over a frozen-shape batch, collective across the

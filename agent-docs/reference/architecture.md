@@ -39,6 +39,7 @@ Leaf modules keep those imports one-way, each holding a contract several layers 
 | `src/models/segment_markers.py` | which families' conv / linear-attention mixers read per-document segment markers, the GatedDeltaNet kernel refusal, and the markers built from a row's `position_ids` | the collator factory, the packing and padding-free collators, and SMPO's padding-free forward |
 | `src/models/attention_layout.py` | per-layer attention cost rules off `layer_types` and head geometry — the MFU attention term | the token-metrics mixin and the efficiency callbacks |
 | `src/models/head_transform.py` | the head-path contract: each family's declared transform around `lm_head` (scale, softcap, vocabulary cut), verified against its own forward on a meta-device shell | the chunked GRPO log-prob sweep and the last pipeline stage, which apply the same verdict |
+| `src/checkpoint/atomic.py` | exclusive staging with ordinary umask permissions, atomic Torch-file publication, directory fsync — no rank coordination | model-card writes, reference sidecars, and checkpoint export filtering |
 | `src/checkpoint/format.py` | the on-disk checkpoint spellings, save-dtype casts, config/state-dict read-write — torch, safetensors, transformers and `huggingface_hub`, no `torch.distributed` | the parallel save paths and the standalone `scripts/after_training/` tools |
 | `src/data/sources/paths.py` | S3 / Hub / local classification of a dataset source or destination, pure string rules | the loader, the preprocessing pipeline and the scripts — without a boto3 import |
 | `src/data/sources/dataset_cache.py` | the local cache-publish protocol (lock, completion marker, content fingerprint, atomic publish, stale-temp sweep) — `os`/`shutil`/`filelock`, the fetch injected | the S3 dataset cache and the per-shard cache of a sharded pre-processed dataset, so their crash and staleness semantics cannot drift |
@@ -60,6 +61,18 @@ single rank can compute alone lives in the leaves above. It is itself the packag
 phase, main-first ordering, the output-FS probe, the load throttle) import it, never the reverse.
 
 ## Trainers
+
+Offline GRPO's `src/trainers/grpo/reference_cache.py` owns bounded score transfers, per-DP cache
+assembly and memory-mapped token buffers. `reference_logps.py` owns the ragged payload;
+the shared `mixins/reference_logps.py` owns checkpoint identity and persistence. Cache writers
+are elected from the checkpoint filesystem-owner predicate. Score transfers use one int64 metadata
+gather and one local-I/O failure join per batch, independent of DP size, writer count and chunk count.
+
+Run-local `_reference_cache/<uuid>/` files are merged and checked without durable publication.
+Mapping failures join across ranks; the files are unlinked once every rank has mapped them. Linux
+readers retain the mapped storage through training and checkpoint serialization, without a second
+in-memory token table. NFS may retain `.nfs*` inodes until their final mapped reader closes;
+underscore-prefixed scratch is excluded by Trainer's default Hub upload patterns.
 
 Every distributed trainer uses multiple inheritance: a base trainer (`trl.SFTTrainer`,
 `transformers.Trainer`, `trl.GRPOTrainer`, …) plus `DistributedTrainerMixin`

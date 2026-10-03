@@ -60,7 +60,7 @@ def test_local_publish_replaces_an_existing_dataset_on_success(tmp_path):
 
     assert (dest / "shard_0000" / "data.arrow").read_text() == "new-payload"
     assert not (dest / "stale.arrow").exists(), "the swap must replace the tree, not merge into it"
-    assert not list(tmp_path.glob(f"*{tool_io.STAGING_SUFFIX}")), "staging directory leaked"
+    assert not list(tmp_path.glob(f"*{tool_io.PUBLISH_STAGING_SUFFIX}")), "staging directory leaked"
     assert not list(tmp_path.glob(f"*{tool_io.DISPLACED_SUFFIX}")), "replaced directory leaked"
 
 
@@ -81,7 +81,7 @@ def test_local_publish_keeps_the_old_dataset_when_the_copy_fails(tmp_path, monke
         mod.save_to_local(str(_staged(tmp_path)), str(dest), overwrite=True)
 
     assert (dest / "data.arrow").read_text() == "old-payload", "a failed publish destroyed the previous dataset"
-    assert not list(tmp_path.glob(f"*{tool_io.STAGING_SUFFIX}")), "staging directory leaked after the failure"
+    assert not list(tmp_path.glob(f"*{tool_io.PUBLISH_STAGING_SUFFIX}")), "staging directory leaked after the failure"
 
 
 def test_local_publish_restores_the_old_dataset_if_the_swap_fails(tmp_path, monkeypatch):

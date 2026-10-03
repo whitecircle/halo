@@ -312,8 +312,9 @@ params and reshards nothing.
 DPO and KTO reject an **explicit** `ref_model` under EP and TP (it is never parallelized, so its log-probs
 would not match the policy's), as self-distillation does its KL `reference_model`: use LoRA with
 `ref_model=None`, or `precompute_ref_log_probs=True`. Under TP, LoRA is rejected too, so DPO/KTO there
-must precompute. SMPO is reference-free. Offline GRPO is the exception: a wrapped MoE at `kl_beta > 0`
-requires a dense `ref_model`, which the script loads
+must precompute. SMPO is reference-free. Offline GRPO full fine-tuning sweeps and checkpoints its
+run-start reference without a second resident model; only native expert-only LoRA retains an
+explicit frozen base `ref_model`, which the script loads
 ([Offline GRPO → Reference model](../training-methods/grpo/offline-grpo.md#reference-model)).
 
 On online / async GRPO, where no adapter wraps the model — a full fine-tune, or an expert-only LoRA

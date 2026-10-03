@@ -92,11 +92,9 @@ def _load_kl_reference(
 ):
     """The frozen KL reference the trainer cannot derive from ``policy``, or ``None`` where it can.
 
-    Only a wrapped-MoE full fine-tune at ``kl_beta != 0`` needs one
-    (:meth:`OfflineGRPOTrainer.requires_ref_model`). It is loaded through the preference trainers'
-    frozen-reference path from the policy's own weights source, so on a resume it anchors to the
-    resumed weights as the dense deepcopy and the pipeline sweep do. ``is_vlm`` is off, as the policy's
-    text-path load also resolves its class from the config.
+    Full fine-tuning sweeps raw run-start scores once and restores them from each checkpoint.
+    Only native expert LoRA needs a live, unadapted base; PEFT can disable its adapters in place.
+    Load that base from the configured model, not a trained resume checkpoint.
     """
     if not OfflineGRPOTrainer.requires_ref_model(policy, offline_grpo_config, runtime.parallelism_config, peft_config):
         return None
@@ -105,7 +103,7 @@ def _load_kl_reference(
         model_config,
         offline_grpo_config,
         tokenizer,
-        runtime.model_source,
+        model_config.model_name_or_path,
         is_vlm=False,
         reset_sinks=dist_args.reset_sinks,
         attn_default=attn_default,
@@ -228,6 +226,7 @@ def main():
         peft_config=peft_config,
         ref_model=ref_model,
         callbacks=callbacks,
+        resume_checkpoint=runtime.resume_checkpoint,
         **distributed_trainer_kwargs(args, dist_args, parallelism_config, dataset_presharded=dataset_presharded),
     )
     run_trainer(trainer, runtime, method_name="Offline GRPO")

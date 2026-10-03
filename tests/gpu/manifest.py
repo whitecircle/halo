@@ -638,6 +638,18 @@ MANIFEST: dict[str, TestSpec] = {
         markers=("gpu", "core", "2gpu", "qwen3"),
         timeout=900,
     ),
+    "trainers/grpo/test_offline_grpo_expert_lora_kl.py": TestSpec(
+        nproc=8, markers=("gpu", "full", "8gpu", "ep", "moe", "lora", "qwen3"), timeout=1800
+    ),
+    "trainers/grpo/test_offline_grpo_ep_reference.py": TestSpec(
+        nproc=8, markers=("gpu", "full", "8gpu", "ep", "moe", "qwen3"), timeout=1800
+    ),
+    "trainers/grpo/test_offline_grpo_sibling_reference.py": TestSpec(
+        nproc=4,
+        markers=("gpu", "full", "4gpu", "tp", "etp", "moe", "qwen3"),
+        args_matrix=("--mode tp", "--mode etp"),
+        timeout=1800,
+    ),
     "trainers/grpo/test_offline_grpo_tp_resume.py": TestSpec(
         # FA4 backward JITs per shape on Blackwell and this resume test trains 6 steps across a
         # reload, so 2400s has to cover a compile per step in both phases, not a warm run.
