@@ -118,6 +118,7 @@ def precompute_trainer(
         resume_from_checkpoint=resume_from_checkpoint,
         max_length=max_length,
         truncation_mode="keep_start",
+        gradient_checkpointing_kwargs=None,
     )
     trainer.accelerator = SimpleNamespace(
         prepare=lambda loader: loader,

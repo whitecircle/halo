@@ -112,18 +112,6 @@ def _logprob_chunk(chunk_logits: torch.Tensor, chunk_labels: torch.Tensor) -> to
     return logps.gather(-1, chunk_labels.unsqueeze(-1)).squeeze(-1)
 
 
-def _chunked_token_logprobs(flat_logits: torch.Tensor, flat_labels: torch.Tensor) -> torch.Tensor:
-    """Per-token fp32 log-probs over a flattened ``[tokens, V]`` plane, chunked like the CE path.
-
-    The vector counterpart of :func:`_chunked_token_sum`: each chunk yields a ``[rows]`` slice rather
-    than a scalar, so the results are concatenated instead of summed. Chunking keeps the two full
-    fp32 planes (the ``.float()`` upcast and the ``log_softmax`` output saved for backward) off the
-    stage carrying the head — ~26 GB per microbatch at ``V=201088``, ``S=8192``.
-    """
-    results = _chunked_token_results(_logprob_chunk, flat_logits, flat_labels, _ce_chunk_rows(flat_logits.size(-1)))
-    return torch.cat(list(results))
-
-
 @dataclass(frozen=True)
 class PPLossAdapter:
     """A trainer's pipeline-loss contract, declared per class like ``_supports_pp``.
@@ -316,6 +304,36 @@ def split_pairs(interleaved: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
     return interleaved[0::2], interleaved[1::2]
 
 
+def selective_logprobs(logits: torch.Tensor, index: torch.Tensor) -> torch.Tensor:
+    """fp32 ``[B, T]`` log-probs of ``index`` under already-aligned ``[B, T, V]`` logits.
+
+    The one fp32 log-prob kernel: :func:`token_logprobs` and :func:`sequence_logprobs` build on it,
+    and it is TRL's ``selective_log_softmax`` contract for one index per position, minus that
+    function's bf16 branch, which returns bf16 log-probs. Whole, the ``.float()`` upcast and the
+    ``log_softmax`` output saved for backward are two fp32 planes (~26 GB at ``V=201088``,
+    ``S=8192``); every budget-sized chunk instead runs under a non-reentrant checkpoint, short rows
+    included, so backward holds no fp32 state. Rows are taken one at a time, so a non-contiguous view
+    such as ``logits[..., :-1, :]`` is never copied whole.
+    """
+    if logits.dim() != 3 or index.shape != logits.shape[:-1]:
+        raise ValueError(
+            f"selective_logprobs takes [B, T, V] logits and one index per position ([B, T]), got "
+            f"logits {tuple(logits.shape)} and index {tuple(index.shape)}."
+        )
+    chunk_rows = _ce_chunk_rows(logits.size(-1))
+    rows = []
+    for row_logits, row_index in zip(logits, index, strict=True):
+        # One split per row: per-chunk slices would each zero-fill a whole-row gradient in backward.
+        chunks = [
+            checkpoint(_logprob_chunk, chunk_logits, chunk_index, use_reentrant=False)
+            for chunk_logits, chunk_index in zip(
+                row_logits.split(chunk_rows), row_index.split(chunk_rows), strict=True
+            )
+        ]
+        rows.append(torch.cat(chunks))
+    return torch.stack(rows)
+
+
 def token_logprobs(logits: torch.Tensor, labels: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
     """Shifted per-token log-probs of ``labels`` under ``logits`` plus the non-ignored mask.
 
@@ -323,14 +341,9 @@ def token_logprobs(logits: torch.Tensor, labels: torch.Tensor) -> tuple[torch.Te
     pre-masked: ignored positions carry the (finite) log-prob of label 0, so callers that clamp or
     reweight per token do so before applying the mask, which is the order the trainer losses need.
     """
-    # Shift the labels, not the logits: slicing dim 1 leaves a non-contiguous view whose reshape
-    # would copy the whole bf16 plane, so the flatten below stays a view. The last shifted position
-    # is ignore-only, so dropping it recovers the [B, S-1] contract.
-    shifted = _shift_labels_left(labels)
-    mask = shifted != LABEL_IGNORE_INDEX
-    safe_labels = shifted.masked_fill(~mask, 0)
-    flat = _chunked_token_logprobs(logits.reshape(-1, logits.size(-1)), safe_labels.reshape(-1))
-    return flat.view(shifted.shape)[:, :-1], mask[:, :-1]
+    shift_labels = labels[:, 1:]
+    mask = shift_labels != LABEL_IGNORE_INDEX
+    return selective_logprobs(logits[:, :-1], shift_labels.masked_fill(~mask, 0)), mask
 
 
 def sequence_logprobs(logits: torch.Tensor, labels: torch.Tensor) -> torch.Tensor:

@@ -36,6 +36,7 @@ from tqdm.auto import tqdm
 from src.checkpoint.format import REFERENCE_LOGPS_FILE
 from src.distributed.checkpoint.coordination import consensus_read
 from src.distributed.runtime import barrier_on_exit, fs_aware_save_rank, rank_consensus, reject_across_ranks
+from src.trainers.preference.logprobs import LOGPROB_PRECISION
 
 logger = get_logger(__name__, log_level="info")
 
@@ -45,6 +46,8 @@ _DIGEST_BATCH_ROWS = 256
 _DIGEST_CHUNK_VALUES = 1 << 22
 # What every saved split entry holds, by type; anything else is refused as a mismatch.
 _ENTRY_SCHEMA = {"num_rows": int, "token_digests": Mapping, "settings": Mapping, "columns": Mapping}
+# The settings key recording the precision the sweep summed a split's log-probs in.
+_PRECISION_KEY = "logprob_precision"
 
 
 def _is_token_type(arrow_type: pa.DataType) -> bool:
@@ -103,6 +106,12 @@ def _saved_split_mismatch(
     ]
     if malformed:
         return f"its {malformed} do not hold one value per row"
+    saved_precision = entry["settings"].get(_PRECISION_KEY, "an unrecorded")
+    if saved_precision != settings[_PRECISION_KEY]:
+        return (
+            f"its log-probs were summed at {saved_precision} precision and this run sums them in "
+            f"{settings[_PRECISION_KEY]}, which no setting changes"
+        )
     if entry["settings"] != settings:
         return f"it was computed under {entry['settings']} and this run sets {dict(settings)}"
     changed = sorted(
@@ -114,6 +123,20 @@ def _saved_split_mismatch(
             f"or tokenizer — or, for KTO's KL completions, per_device_train_batch_size or dataset_num_proc)"
         )
     return None
+
+
+def _regeneration_steps(checkpoint: str) -> str:
+    """How to give ``checkpoint`` a reference file computed from the base for this run's data and
+    settings: the recovery a resume that cannot sweep names."""
+    # Outside the run's own output_dir, whose rotation could otherwise delete this checkpoint.
+    scratch = f"{os.path.dirname(os.path.abspath(checkpoint))}-reference-recovery"
+    return (
+        f"run this config for one step from the base model into a scratch directory "
+        f"(--output_dir={scratch} --max_steps=1 --save_strategy=steps --save_steps=1 "
+        f"--save_only_model=true --resume_from_checkpoint=null) and copy its "
+        f"checkpoint-1/{REFERENCE_LOGPS_FILE} into {checkpoint}, on every node when checkpoints are "
+        f"node-local"
+    )
 
 
 class PrecomputeRefLogpsRankConsistentMixin:
@@ -155,6 +178,11 @@ class PrecomputeRefLogpsRankConsistentMixin:
     def _reference_settings(self) -> dict:
         """The run's knobs, besides the tokens, that shape the reference values TRL computes."""
         raise NotImplementedError(f"{type(self).__name__} must name the settings its reference depends on")
+
+    def _reference_identity(self) -> dict:
+        """The settings a saved split records and must match: the run's knobs plus the precision the
+        sweep sums log-probs in, which ``FP32LogprobsMixin`` (listed by every trainer of this mixin) sets."""
+        return {**self._reference_settings(), _PRECISION_KEY: LOGPROB_PRECISION}
 
     def _precompute_ref_logps(self, dataset, name, batch_size):
         """Trust dataset-supplied reference log-probs, restore a resumed run's, and sweep otherwise.
@@ -202,7 +230,7 @@ class PrecomputeRefLogpsRankConsistentMixin:
         self._reference_logps_by_split[name] = {
             "num_rows": len(dataset),
             "token_digests": self._reference_input_digests(dataset, name),
-            "settings": self._reference_settings(),
+            "settings": self._reference_identity(),
             "columns": columns,
         }
         return _attach_reference_columns(dataset, columns)
@@ -276,23 +304,17 @@ class PrecomputeRefLogpsRankConsistentMixin:
             )
         if not present_all:
             if sweep_scores_trained_weights:
-                # Outside the run's own output_dir, whose rotation could otherwise delete this checkpoint.
-                scratch = f"{os.path.dirname(os.path.abspath(checkpoint))}-reference-recovery"
                 raise RuntimeError(
                     f"Cannot resume precompute_ref_log_probs from {checkpoint}: it holds no saved "
                     f"reference log-probs for the '{name}' dataset ({REFERENCE_LOGPS_FILE} is missing "
                     f"or lacks that split), and they cannot be recomputed here. With no separate "
                     f"reference model the sweep scores the policy, and this resume built the policy "
                     f"from the checkpoint, so the sweep would score the TRAINED weights as the "
-                    f"reference and zero every log-ratio. To recover, run this config for one step "
-                    f"from the base model into a scratch directory (--output_dir={scratch} "
-                    f"--max_steps=1 --save_strategy=steps --save_steps=1 --save_only_model=true "
-                    f"--resume_from_checkpoint=null) and copy its checkpoint-1/{REFERENCE_LOGPS_FILE} "
-                    f"into {checkpoint}, on every node when checkpoints are node-local; this resume "
-                    f"then checks it against the dataset. A checkpoint whose save stopped before this "
-                    f"file can take the previous checkpoint's copy instead, which holds the same "
-                    f"values. Or supply the {list(needed)} columns, computed on the base model, in the "
-                    f"dataset."
+                    f"reference and zero every log-ratio. To recover, {_regeneration_steps(checkpoint)}; "
+                    f"this resume then checks it against the dataset. A checkpoint whose save stopped "
+                    f"before this file can take the previous checkpoint's copy instead, which holds the "
+                    f"same values. Or supply the {list(needed)} columns, computed on the base model, in "
+                    f"the dataset."
                 )
             logger.info(
                 f"No saved reference log-probs for '{name}' in {checkpoint}; sweeping, since the "
@@ -301,7 +323,7 @@ class PrecomputeRefLogpsRankConsistentMixin:
             return None
         num_rows = len(dataset)
         token_digests = self._reference_input_digests(dataset, name)
-        settings = self._reference_settings()
+        settings = self._reference_identity()
         mismatch = _saved_split_mismatch(entry, num_rows, token_digests, settings, needed)
         if not sweep_scores_trained_weights:
             matches_all, _ = rank_consensus(mismatch is None)
@@ -316,10 +338,11 @@ class PrecomputeRefLogpsRankConsistentMixin:
             None
             if mismatch is None
             else (
-                f"{path} does not belong to this '{name}' dataset: {mismatch}. Each saved value is its "
-                f"own row's reference, so attaching them would score rows against references they "
-                f"were not computed for. Resume with the data and reference settings the checkpoint "
-                f"was written with."
+                f"{path} does not belong to this '{name}' dataset: {mismatch}. Each saved value is one "
+                f"row's reference under the saving run's data and settings, so attaching them here would "
+                f"score rows against references computed otherwise. Resume with the data and reference "
+                f"settings the checkpoint was written with, or give it a file computed for this run: "
+                f"{_regeneration_steps(checkpoint)}."
             ),
             f"Restoring the '{name}' reference log-probs",
             exc_type=ValueError,

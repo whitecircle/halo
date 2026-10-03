@@ -35,6 +35,7 @@ from src.args.dpo_args import DPOScriptArguments
 from src.args.kto_args import KTOScriptArguments
 from src.checkpoint.format import REFERENCE_LOGPS_FILE
 from src.trainers.mixins.checkpointing import CheckpointingMixin
+from src.trainers.preference.logprobs import LOGPROB_PRECISION
 from src.trainers.preference.precompute import PrecomputeRefLogpsRankConsistentMixin, _token_digest
 from src.training.environment import detect_resume_checkpoint
 from src.training.parser import H4ArgumentParser
@@ -246,6 +247,31 @@ def test_changed_reference_settings_refuse(tmp_path, kind, changed):
 
     with pytest.raises(ValueError, match="computed under"):
         trainer._precompute_ref_logps(token_rows(kind), "train", SWEEP_BATCH_SIZE)
+
+
+@pytest.mark.parametrize("saved_precision", [None, "bfloat16"], ids=["unrecorded", "bfloat16"])
+def test_a_split_summed_at_another_precision_is_not_reused(kind, tmp_path, saved_precision):
+    """A split whose settings record another log-prob precision, or none, carries that precision's
+    rounding: a resume whose sweep would score the trained weights refuses it and names how to
+    regenerate the file, and any other resume re-sweeps."""
+    _save_base_run(kind, tmp_path, {"train": token_rows(kind)})
+    saved = torch.load(tmp_path / REFERENCE_LOGPS_FILE, weights_only=True)
+    settings = saved["train"]["settings"]
+    assert settings["logprob_precision"] == LOGPROB_PRECISION, "premise: a fresh save records its precision"
+    if saved_precision is None:
+        del settings["logprob_precision"]
+    else:
+        settings["logprob_precision"] = saved_precision
+    torch.save(saved, tmp_path / REFERENCE_LOGPS_FILE)
+
+    resumed = _resumed(kind, tmp_path)
+    with pytest.raises(ValueError, match="summed at .* precision and this run sums them in float32") as raised:
+        resumed._precompute_ref_logps(token_rows(kind), "train", SWEEP_BATCH_SIZE)
+    assert "--max_steps=1" in str(raised.value), "the refusal must name how to regenerate the file"
+    assert resumed.compute_ref_log_probs.batches == 0
+    from_base = precompute_trainer(kind, resume_checkpoint=str(tmp_path), policy_from_checkpoint=False)
+    from_base._precompute_ref_logps(token_rows(kind), "train", SWEEP_BATCH_SIZE)
+    assert from_base.compute_ref_log_probs.batches > 0, "the old-precision split was reused, not re-swept"
 
 
 @pytest.mark.parametrize(

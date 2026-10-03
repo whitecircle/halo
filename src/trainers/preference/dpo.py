@@ -48,6 +48,7 @@ from src.trainers.mixins.pp_gates import (
     require_precomputed_reference,
 )
 from src.trainers.mixins.validation import ctor_config, ctor_positions, ctor_value, disable_trl_liger
+from src.trainers.preference.logprobs import FP32LogprobsMixin
 from src.trainers.preference.precompute import PrecomputeRefLogpsRankConsistentMixin
 
 # TRL DPOTrainer positional slots, for ctor params arriving via *args — derived from the installed signature.
@@ -100,8 +101,12 @@ _PP_PAIR_LOSSES: dict[str, Callable[[float, torch.Tensor, torch.Tensor, torch.Te
 }
 
 
-class DistributedDPOTrainer(PrecomputeRefLogpsRankConsistentMixin, DistributedTrainerMixin, DPOTrainer):
+class DistributedDPOTrainer(
+    FP32LogprobsMixin, PrecomputeRefLogpsRankConsistentMixin, DistributedTrainerMixin, DPOTrainer
+):
     """TRL's DPOTrainer plus EP/TP/PP via DistributedTrainerMixin. CP unsupported (see module docstring).
+
+    ``FP32LogprobsMixin`` keeps TRL's non-Liger loss and reference pass on fp32 sequence log-probs.
 
     ``PrecomputeRefLogpsRankConsistentMixin`` runs ``precompute_ref_log_probs`` (the EP/TP
     full-finetune reference path) on the DP axis, attaches its columns in memory on every rank and
