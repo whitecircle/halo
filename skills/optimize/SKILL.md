@@ -43,7 +43,7 @@ These fire automatically; mention them only to confirm, not as new advice. Figur
   where the step is expert-GEMM and all-to-all bound. FA2 is the slow outlier on B300.
 - **AdamWBF16 + stochastic rounding** — auto from `bf16: true`; half the per-param state of fp32 AdamW at
   a loss curve that tracks the fp32 master. Auto-OFF under replicated DDP.
-- **CDMC=1** — baked into the image env; free win on ep8, neutral dense/ep2.
+- **CDMC=1** — baked into the image env for multi-group EP correctness; no measurable throughput effect.
 - **Atomic-free expert permute** — auto for high-top_k MoE (`top_k ≥ ep_size`); win grows with sequence
   length. gpt-oss (top-4) stays on the cheaper `index_add_` path at EP8.
 - **Fused MoE path** — fused GLU (`HALO_FUSED_GLU`) on every expert and dense-MLP combine, and the
@@ -67,25 +67,24 @@ These fire automatically; mention them only to confirm, not as new advice. Figur
 - **Variable-length data (avg << max_len) →** **packing** is the big win; padding-free is the smaller
   one — use it when cross-sequence boundaries are undesirable. Uniform/long-seq data → all collators
   tie (~1%), use standard.
-- **Convergence speed (fewer steps to target loss) →** `optim: muon` reaches a lower loss in the same
-  step budget on matrix params, at a much costlier optimizer step and higher peak memory — far less
-  end-to-end, measure on your model. A convergence lever, not a per-step throughput one.
+- **Convergence speed (fewer steps to target loss) →** `optim: muon` on matrix params, at a much costlier
+  optimizer step and higher peak memory — far less end-to-end, and no measured loss win here, so measure
+  on your model. A convergence lever, not a per-step throughput one.
 
 ## Memory flow (cut peak / fit longer seq / bigger batch)
 - **Long-seq OOM at the loss →** **FusedLinearCrossEntropy**
   (`liger_kernel_config: {cross_entropy: false, fused_linear_cross_entropy: true}` — they are
   sub-keys of that dict, not top-level fields): never materializes the `batch×seq×vocab` logits, for
   tens of GB at 32k at near-CE throughput; SFT-only, disables entropy logging, not CP-compatible.
-- **MoE activation OOM →** keep **GC on** (roughly half the GC-off activation footprint, and what makes
-  32k fit on the default elastic transport — pure ep8 GC-off OOMs there, and fits only on
-  `ep_buffer_backend: legacy`) and/or **raise EP degree** (more ranks = less expert memory/GPU).
+- **MoE activation OOM →** keep **GC on** (half the GC-off peak or less at long sequence) and/or
+  **raise EP degree** (more ranks = less expert memory/GPU).
 - **Optimizer-state OOM →** AdamWBF16 (auto) is already half of fp32 AdamW's state. For more,
   `optim: flash_adamw` (quantized moments, convergence matches AdamW; needs `flashoptim`) — tens of GB
   at 70B+.
 - **Want exact fp32 on dense params with headroom →** `fp32_non_ep_params: true` (dense params fp32,
   experts stay bf16+SR); refused on an `ep_size=1` MoE whose experts FSDP shards (the default).
-- **Fit on a small/consumer GPU →** **QLoRA**: far less memory than full FT and faster than bf16 LoRA
-  (the 4-bit base is bandwidth-bound). With FLCE a Qwen3-8B 32k run fits a 24 GB GPU.
+- **Fit on a small/consumer GPU →** **QLoRA**: far less memory than full FT, at slightly lower throughput
+  than bf16 LoRA. With FLCE a Qwen3-8B 32k run fits a 24 GB GPU.
   Under EP, LoRA targets attention **plus** native grouped expert adapters (ETP is the
   attention-only row); no QLoRA under EP/TP.
 - **Many-rank / multi-node grad precision (not memory) →** `fp32_grad_reduce: true`: a tighter
