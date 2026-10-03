@@ -63,10 +63,8 @@ SAVE_AT_STEP = 2
 BATCH_SIZE = 2
 MAX_LENGTH = 128
 LEARNING_RATE = 2e-3
-# An adapter resume restores the fp32 router copy exactly and replays the run. A full fine-tune resume
-# builds the model from the checkpoint at the run dtype before the fp32 upcast, so its router masters
-# restart rounded to bf16 (agent-docs/reference/checkpoints.md) and the later losses part by that.
-RESUMED_LOSS_TOL = {True: TOL.replayed_resume_loss_abs, False: TOL.resume_loss_abs}
+# Configured router masters and adapter copies retain their stored FP32 values across construction.
+RESUMED_LOSS_TOL = TOL.replayed_resume_loss_abs
 PROBE_TEXT = "User: Which dtype does the router train in?\nAssistant: fp32, as its own shard group."
 
 
@@ -141,7 +139,19 @@ class _AtSave(RestorePointSnapshot):
         self.probe = probe
 
     def extra(self) -> dict:
-        return {"l_pre": fixed_batch_loss(self.trainer.model, *self.probe)}
+        return {
+            "l_pre": fixed_batch_loss(self.trainer.model, *self.probe),
+            "routers": _router_snapshot(self.trainer.model),
+        }
+
+
+class _AtResume(ResumeCapture):
+    """Read router masters after restore and before the first resumed optimizer step."""
+
+    def on_train_begin(self, args, state, control, **kwargs):
+        control = super().on_train_begin(args, state, control, **kwargs)
+        self.capture["routers"] = _router_snapshot(self.trainer.model)
+        return control
 
 
 def _sft_config(output_dir: str, *, save: bool) -> SFTConfig:
@@ -240,21 +250,32 @@ def run(ctx):
         checkpoint, SimpleNamespace(model_name_or_path=base_dir), _parallelism_config()
     )
     trainer, probe = make_trainer(source, save=False)
-    capture = ResumeCapture(trainer, *probe, optimizer_state=False)
+    capture = _AtResume(trainer, *probe, optimizer_state=False)
     trainer.add_callback(capture)
     trainer.train(resume_from_checkpoint=checkpoint)
     resumed = step_losses(trainer)
     checks["resumed_routers_are_fp32_dtensor_masters"] = _fp32_dtensor_masters(_router_params(trainer.model))
     l_pre = (at_save.captured or {}).get("l_pre", float("nan"))
     checks |= resume_continuity_checks(
-        capture.capture, l_pre, save_step=SAVE_AT_STEP, loss_tol=TOL.resume_fixed_batch_loss_abs
+        capture.capture,
+        l_pre,
+        save_step=SAVE_AT_STEP,
+        loss_tol=TOL.resume_fixed_batch_loss_abs if args.lora else TOL.replayed_resume_loss_abs,
     )
+    if not args.lora:
+        saved_routers = (at_save.captured or {}).get("routers", {})
+        restored_routers = (capture.capture or {}).get("routers", {})
+        checks["router_masters_restored_bit_exact"] = (
+            bool(saved_routers)
+            and saved_routers.keys() == restored_routers.keys()
+            and all(torch.equal(value, restored_routers[name]) for name, value in saved_routers.items())
+        )
     deltas = resumed_loss_deltas(uninterrupted, resumed, save_step=SAVE_AT_STEP, total_steps=TOTAL_STEPS)
     checks["resumed_ran_remaining_steps"] = deltas is not None
     metrics = {"final_train_loss": result.training_loss, "router_params": len(routers)}
     if deltas is not None:
         metrics["resumed_loss_max_delta"] = max(deltas)
-        checks["resumed_losses_match_uninterrupted"] = max(deltas) < RESUMED_LOSS_TOL[args.lora]
+        checks["resumed_losses_match_uninterrupted"] = max(deltas) < RESUMED_LOSS_TOL
     finish_phase(trainer)
     return {"checks": checks, "metrics": metrics}
 

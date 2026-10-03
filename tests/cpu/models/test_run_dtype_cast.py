@@ -7,8 +7,8 @@ the run dtype; a loader that does not leaves a mixed-dtype model that FSDP2 refu
 fp32 DeepSeek-V4 norms feed fp32 activations into bf16 projections. These tests pin (1) the helper's
 contract, fp8, quantized storage and fp32-master handling included, (2) that the unsharded loaders a
 CPU run reaches hand back a uniform run-dtype model for every pinned family, (3) that under fp32
-masters every loader, the lazy ones on either meta shell included, keeps exactly the stored pins and
-widens nothing else, while without the flag it loads all bf16, and (4) that every model build in
+    masters the lazy loaders preserve every configured non-EP master (including stored pins), while
+    without the flag they load all bf16, and (4) that every model build in
 ``src/`` and ``scripts/training/`` either casts and finalizes or is pinned as no training load, so a
 new loader that forgets either fails here rather than on its first GPU step.
 
@@ -35,11 +35,12 @@ import src.distributed.expert_parallel.lazy_loader as ep_lazy_loader
 import src.distributed.pipeline_parallel.lazy_loader as pp_lazy_loader
 from src.configs.embedding_config import EmbeddingConfig
 from src.distributed.expert_parallel.config import EPConfig
-from src.distributed.expert_parallel.lazy_loader import fp32_non_ep_param_keys, load_ep_model_lazy
+from src.distributed.expert_parallel.lazy_loader import load_ep_model_lazy
 from src.distributed.expert_parallel.loading import cast_loaded_parameters
 from src.distributed.expert_parallel.patching import ep_claimed_blocks
 from src.distributed.loading.frozen_models import load_frozen_auxiliary_model
 from src.distributed.loading.model_loading import load_model_from_pretrained
+from src.distributed.loading.precision import fp32_master_param_keys
 from src.distributed.pipeline_parallel.lazy_loader import PPWeightPlanner, load_pp_stage_model
 from src.distributed.pipeline_parallel.stage import PP_STAGE_PARTITION_ATTR, resolve_layer_root
 from src.models.loading.dtype import cast_parameters_to_run_dtype
@@ -191,6 +192,7 @@ def test_a_quantized_parameter_keeps_its_float_storage(run_dtype):
 
     assert weight.bnb_quantized and weight.dtype == torch.bfloat16
     assert model.quantized.weight is weight and torch.equal(weight.data.view(torch.uint8), packed)
+    assert "quantized.weight" not in fp32_master_param_keys(model, keep_non_ep=True)
     assert model.pinned.weight.dtype == run_dtype
 
 
@@ -318,10 +320,8 @@ def test_exactly_the_pinned_families_load_fp32_parameters(roster_checkpoints, fa
 
 
 @pytest.mark.parametrize("family", sorted(TINY_MOE_FAMILIES))
-def test_a_config_built_shell_carries_the_pins_from_pretrained_loads(roster_checkpoints, family):
-    """The lazy loaders read what to keep in fp32 off the meta shell, which is config-built when the
-    meta ``from_pretrained`` fails or the checkpoint is a per-node pipeline save. ``from_config`` applies
-    no fp32 pin of its own, so the two shells must agree on every family."""
+def test_a_config_built_shell_selects_the_same_masters_as_pretrained(roster_checkpoints, family):
+    """Master ownership depends on the family tree and configured flags, not the meta shell dtype."""
     tiny = TINY_MOE_FAMILIES[family]
     path = roster_checkpoints[family]
     config = AutoConfig.from_pretrained(path, trust_remote_code=tiny.trust_remote_code)
@@ -337,9 +337,10 @@ def test_a_config_built_shell_carries_the_pins_from_pretrained_loads(roster_chec
         for config_only in (False, True)
     ]
 
-    kept = [fp32_non_ep_param_keys(shell, ep_wrapped=True) for shell in shells]
+    ep_config = EPConfig(ep_size=1, world_size=1, gpus_per_node=1)
+    kept = [fp32_master_param_keys(shell, ep_config, keep_non_ep=True) for shell in shells]
     assert kept[0] == kept[1]
-    assert bool(kept[0]) == (family in PINNED_FP32_FAMILIES)
+    assert kept[0], "every family has non-EP parameters for configured masters"
 
 
 @pytest.fixture(scope="module")
@@ -383,11 +384,14 @@ def _load_with(
     return load_pp_stage_model(path, pp_rank, pp_size, config=config, ep_config=ep_config, **common)
 
 
-def _assert_keeps_exactly(model: nn.Module, pinned: dict[str, str], stored: dict, keep_fp32: bool) -> None:
+def _assert_keeps_exactly(
+    model: nn.Module, pinned: dict[str, str], stored: dict, keep_fp32: bool, *, masters: frozenset[str] | None = None
+) -> None:
     """``pinned`` maps each pin's name in ``model`` to its checkpoint name."""
     fp32 = {name for name, param in model.named_parameters() if param.dtype == torch.float32}
     assert set(params_off_dtype(model, torch.bfloat16)) == fp32
-    assert fp32 == (set(pinned) if keep_fp32 else set())
+    expected_fp32 = set(pinned) if masters is None else set(masters) & set(dict(model.named_parameters()))
+    assert fp32 == (expected_fp32 if keep_fp32 else set())
     off = pins_off_stored(model, stored, pinned) if keep_fp32 else []
     assert not off, f"pins off their stored fp32 value: {off}"
 
@@ -413,15 +417,18 @@ def test_every_loader_keeps_a_pinned_buffer_fp32(roster_checkpoints, loader, mon
 @pytest.mark.parametrize("loader", FP32_MASTER_LOADERS)
 @pytest.mark.parametrize("family", PINNED_FP32_FAMILIES)
 def test_fp32_masters_keep_exactly_the_stored_pins(stored_fp32_checkpoints, family, loader, keep_fp32, monkeypatch):
-    """Without ``fp32_non_ep_params`` every parameter loads bf16. With it exactly the parameters
-    ``from_pretrained`` pins load fp32, bitwise the checkpoint's stored values, which a bf16 round trip
-    would change; nothing else is widened."""
+    """Stored pins remain exact within the configured master set; flags, not shell dtype, select it."""
     path = stored_fp32_checkpoints[family]
     pinned, stored = stored_fp32_pins(family, path)
 
     model = _load_with(loader, family, path, keep_fp32, monkeypatch)
 
-    _assert_keeps_exactly(model, {name: name for name in pinned}, stored, keep_fp32)
+    masters = (
+        fp32_master_param_keys(model, EPConfig(ep_size=1, world_size=1, gpus_per_node=1), keep_non_ep=True)
+        if loader.startswith("ep_lazy")
+        else None
+    )
+    _assert_keeps_exactly(model, {name: name for name in pinned}, stored, keep_fp32, masters=masters)
 
 
 @pytest.mark.parametrize("keep_fp32", [False, True], ids=["bf16", "fp32_masters"])
@@ -462,9 +469,17 @@ def test_the_lazy_keep_set_leaves_out_ep_wrapped_blocks(pinned_checkpoints, ep_w
     )
     shell.get_parameter(in_block).data = shell.get_parameter(in_block).data.float()
 
-    kept = fp32_non_ep_param_keys(shell, ep_wrapped=ep_wrapped)
-
-    assert pins and kept == (pins if ep_wrapped else pins | {in_block})
+    ep_config = EPConfig(ep_size=1, world_size=1, gpus_per_node=1) if ep_wrapped else None
+    kept = fp32_master_param_keys(shell, ep_config, keep_non_ep=True)
+    block_ids = {id(param) for _path, block in ep_claimed_blocks(shell) for param in block.parameters()}
+    expected = {
+        name
+        for name, param in shell.state_dict(keep_vars=True).items()
+        if isinstance(param, nn.Parameter)
+        if not ep_wrapped or id(param) not in block_ids
+    }
+    assert pins and kept == expected
+    assert (in_block in kept) is (not ep_wrapped)
 
 
 @pytest.mark.parametrize("keep_fp32", [frozenset(), frozenset({"weight"})], ids=["cast", "kept"])

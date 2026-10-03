@@ -13,6 +13,7 @@ from __future__ import annotations
 import logging
 import os
 from collections import defaultdict
+from collections.abc import Callable
 from dataclasses import dataclass
 from enum import Enum
 
@@ -187,6 +188,17 @@ class WeightPlan:
         return (self.disk_key, *(sibling for op in self.ops if isinstance(op, Concat) for sibling in op.siblings))
 
 
+def materialize_weight_plan(plan: WeightPlan, read: Callable[[str, WeightPlan], torch.Tensor]) -> torch.Tensor:
+    """Read a plan and replay its conversion ops through the caller's whole/ranged tensor reader."""
+    tensor = read(plan.disk_key, plan)
+    for op in plan.ops:
+        if isinstance(op, Concat):
+            tensor = torch.cat([tensor, *(read(sibling, plan) for sibling in op.siblings)], dim=op.dim)
+        else:
+            tensor = op(tensor)
+    return tensor
+
+
 class SafetensorsWeightLoader:
     """Load weights from safetensors files according to a weight plan.
 
@@ -276,14 +288,8 @@ class SafetensorsWeightLoader:
         return handle
 
     def _materialize(self, plan: WeightPlan) -> torch.Tensor:
-        tensor = self._read(plan.disk_key, plan)
         # Ops act on non-shard dims (asserted at planning), so the ranged reads stay valid.
-        for op in plan.ops:
-            if isinstance(op, Concat):
-                tensor = torch.cat([tensor, *(self._read(sibling, plan) for sibling in op.siblings)], dim=op.dim)
-            else:
-                tensor = op(tensor)
-        return tensor
+        return materialize_weight_plan(plan, self._read)
 
     def _read(self, disk_key: str, plan: WeightPlan) -> torch.Tensor:
         """``disk_key`` read the way ``plan`` reads its own key: whole, or this rank's expert slice."""
@@ -361,8 +367,8 @@ def verify_loaded_shape(
     )
 
 
-def assign_tensor_to_model(model: nn.Module, key: str, tensor: torch.Tensor):
-    """Replace a meta-device parameter or buffer with a real tensor."""
+def assign_tensor_to_model(model: nn.Module, key: str, tensor: torch.Tensor, *, preserve_parameter: bool = False):
+    """Install a real tensor, optionally retaining a pre-wrapper plain parameter's tied aliases."""
     parts = key.split(".")
     parent = model
     for part in parts[:-1]:
@@ -372,7 +378,12 @@ def assign_tensor_to_model(model: nn.Module, key: str, tensor: torch.Tensor):
     old = getattr(parent, attr_name, None)
 
     if isinstance(old, nn.Parameter):
-        setattr(parent, attr_name, nn.Parameter(tensor, requires_grad=old.requires_grad))
+        if preserve_parameter:
+            if type(old) is not nn.Parameter or type(old.data) is not torch.Tensor or old.is_meta:
+                raise TypeError(f"Cannot replace storage of {key!r}: expected a real, plain pre-wrapper parameter.")
+            old.data = tensor
+        else:
+            setattr(parent, attr_name, nn.Parameter(tensor, requires_grad=old.requires_grad))
     elif attr_name in dict(parent.named_buffers(recurse=False)):
         parent.register_buffer(attr_name, tensor)
     else:

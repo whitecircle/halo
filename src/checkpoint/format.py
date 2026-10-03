@@ -194,8 +194,10 @@ def save_dtype_caster(model: torch.nn.Module, *, keep_live_dtype: bool = False):
     ``keep_live_dtype`` (a training checkpoint) casts nothing: every tensor is written at the dtype the
     gather produced, which is the live one, so fp32 masters (``fp32_router``, ``fp32_experts``,
     ``fp32_non_ep_params``) reach disk unrounded. The Path-A ``set_model_state_dict`` load, the PP
-    stage load and every adapter restore read them back exactly; a model built from the checkpoint at
-    construction (Path B) loads at the run dtype before the fp32 upcast, so its masters resume rounded.
+    stage load and every adapter restore read them back exactly. Construction from a checkpoint
+    (Path B) restores the configured parameter masters before parallel wrapping too, or into the
+    existing 1-D TP placement before DP/FSDP2 wrapping. A BF16 export cannot recover discarded FP32
+    precision; promotion from it retains only the values that export stored.
     Decided on the tensor, not its name, since a gathered expert's hub key need not name any live
     parameter.
 

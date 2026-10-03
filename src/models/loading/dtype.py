@@ -85,6 +85,11 @@ def reject_fp8_tensor(name: str, tensor: torch.Tensor, dtype: torch.dtype | None
         )
 
 
+def is_packed_4bit_parameter(param: nn.Parameter) -> bool:
+    """bnb's storage holds packed codes even when its declared storage dtype is floating point."""
+    return hasattr(param, _BNB_4BIT_STATE_ATTR)
+
+
 def cast_parameters_to_run_dtype(
     model: nn.Module, dtype: torch.dtype | str | None, *, keep_fp32: bool = False
 ) -> None:
@@ -97,10 +102,10 @@ def cast_parameters_to_run_dtype(
     before any parallel wrapper, so a family trains in one precision whatever the parallelism (the EP
     lazy loader casts per tensor to the same effect); conversion tools keep the pins.
 
-    ``keep_fp32`` leaves fp32 parameters as stored, for a run that upcasts to fp32 masters anyway
-    (``fp32_non_ep_params``): a round trip through the run dtype would discard the checkpoint's
-    precision before the upcast. The training loaders apply it outside the MoE blocks EP wraps
-    (``cast_loaded_parameters``), and the EP and PP lazy loaders materialize the same keys in fp32.
+    ``keep_fp32`` leaves parameters that *already arrived* in fp32 untouched; it cannot undo
+    ``from_pretrained(dtype=run_dtype)`` rounding them first. Training construction separately
+    streams configured master weights from the checkpoint before wrapping, while lazy loaders
+    materialize the selected keys directly in fp32. The caster itself remains a run-dtype operation.
     Parameters only: a float buffer may be fp32 by design (Zaya's balancing biases). "auto" and None
     leave the model as loaded. bnb's 4-bit storage is left alone: a ``Params4bit`` holds packed codes
     in a tensor that reports ``bnb_4bit_quant_storage``, which may be a float dtype, and a cast would
@@ -109,15 +114,16 @@ def cast_parameters_to_run_dtype(
     Raises on any other ``dtype`` (a name the caller should have resolved), on a 1-byte float (fp8)
     parameter (:func:`reject_fp8_tensor`), and on any other ``Parameter`` subclass or tensor-subclass
     parameter off the run dtype: its storage is not plain values, and rebinding a DTensor's ``.data``
-    leaves its local shard in the old dtype, which is why the dense TP loader, loading straight into
-    DTensors, does not call this (no dense family pins a parameter).
+    leaves its local shard in the old dtype, which is why native dense TP does not call this. Its
+    separate checkpoint replay rebuilds FP32 DTensor parameters from CPU-selected local shards,
+    with the original placements and all tied owners, before the trainer adds DP/FSDP2.
     """
     if dtype in ("auto", None):
         return
     if not isinstance(dtype, torch.dtype):
         raise TypeError(f"cast_parameters_to_run_dtype takes a torch.dtype, 'auto' or None, not {dtype!r}.")
     for name, param in model.named_parameters():
-        if hasattr(param, _BNB_4BIT_STATE_ATTR):
+        if is_packed_4bit_parameter(param):
             continue
         if not param.is_floating_point() or param.dtype == dtype or (keep_fp32 and param.dtype == torch.float32):
             continue

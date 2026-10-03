@@ -319,6 +319,12 @@ checkpoint, so the weights load at construction and `CheckpointLoader._load_tp` 
 Where it does read (a best-model reload, or a model built from elsewhere), each rank streams the
 checkpoint's full tensors and `distribute_tensor`s them into the live DTensor placements.
 
+At construction, configured FP32 masters retain their stored values even for a fresh stage: native
+dense TP splits the reread tensor on CPU and installs only the local FP32 shard, preserving its TP
+placement and tied owners before the trainer adds DP/FSDP2. EP/ETP construction restores the plain
+masters before its wrappers. This makes the constructed-from-checkpoint skip preserve precision
+without attempting a reload into a 2-D packed FSDP2 layout.
+
 TP+DP is the exception: FSDP2 over TP stacks a strided `dp` shard on the `tp` shard, a 2-D placement
 `distribute_tensor` does not invert for packed projections, so it refuses every reload but the
 constructed-from-checkpoint skip. See

@@ -23,6 +23,7 @@ from transformers import (
 
 from src.checkpoint.config_export import LOADED_WEIGHTS_FROM_ATTR
 from src.distributed.context_parallel.loading import load_model_for_cp, load_model_for_ep_cp
+from src.distributed.expert_parallel.config import EPConfig
 from src.distributed.expert_parallel.expert_weights import ep_layer_classes_for_config
 from src.distributed.expert_parallel.lazy_loader import (
     lazy_loader_supports_checkpoint,
@@ -37,11 +38,13 @@ from src.distributed.expert_parallel.loading import (
 )
 from src.distributed.expert_parallel.patching import create_ep_buffers, patch_moe_model_for_ep
 from src.distributed.filesystem import fs_aware_main_first, sequential_load_within_node
+from src.distributed.loading.master_weights import restore_fp32_master_parameters
 from src.distributed.loading.warmup import warm_attention_kernels
 from src.distributed.mesh import create_dp_tp_mesh, get_tp_submesh
 from src.distributed.parallelism_config import ParallelismConfig, accelerate_launch_rejection
 from src.distributed.pipeline_parallel.lazy_loader import load_pp_stage_model
 from src.distributed.runtime import (
+    DeferredRankFailure,
     fs_aware_load_rank,
     get_global_rank,
     get_local_rank,
@@ -235,6 +238,7 @@ def load_distributed_model(
     init_from_scratch: bool = False,
     revision: str | None = None,
     text_only_model: bool = False,
+    preserve_checkpoint_precision: bool = False,
     **model_kwargs,
 ) -> tuple[PreTrainedModel, PreTrainedTokenizer]:
     """Load model with a ``ParallelismConfig`` (EP, CP, TP, or combinations).
@@ -243,6 +247,10 @@ def load_distributed_model(
     resolve to the GptOss :class:`SinksPolicy` (neutralized / live-frozen / trainable).
     ``text_only_model`` steers the auto-resolution to the text-only CausalLM class for a multimodal
     checkpoint (ignored, with a warning, when the caller pins ``model_class``).
+    Configured FP32 masters are restored before wrapping for every checkpoint start, including
+    fresh stages. ``preserve_checkpoint_precision`` marks a resolved full-finetune resume source
+    and additionally requires complete master coverage. Native TP restores its existing 1-D TP
+    placements before DP/FSDP2 wraps; the trainer therefore need not reread already-constructed weights.
     """
     _validate_launch_method_for_parallelism(parallelism_config)
     sinks_policy = SinksPolicy.from_flags(reset_sinks=reset_sinks, train_sinks=train_sinks)
@@ -362,6 +370,8 @@ def load_distributed_model(
         attn_implementation=attn_implementation,
         **model_kwargs,
     )
+    if preserve_checkpoint_precision and not parallelism_config.is_pp_mode:
+        common_kwargs["preserve_checkpoint_precision"] = True
     if revision is not None:
         common_kwargs["revision"] = revision
     if quantization_config is not None:
@@ -500,11 +510,14 @@ def _sequential_load_to_cuda(
     *,
     keep_fp32: bool,
     ep_wrapped: bool,
+    ep_config: EPConfig | None = None,
 ) -> PreTrainedModel:
     """Load to CPU one rank at a time (low CPU peak), move to this rank's GPU, then
     free CPU memory. Shared by the EP+TP sequential fallback and the TP-MoE loader.
 
     ``keep_fp32`` and ``ep_wrapped`` are :func:`cast_loaded_parameters`'."""
+    strict = common_kwargs.pop("preserve_checkpoint_precision", False)
+    precision_guard = DeferredRankFailure(f"FP32-master checkpoint load from {model_name_or_path}")
     with sequential_load_within_node(max_concurrent=max_concurrent):
         model = from_pretrained_verified(
             model_class,
@@ -513,9 +526,21 @@ def _sequential_load_to_cuda(
             **common_kwargs,
         )
         cast_loaded_parameters(model, common_kwargs.get("dtype"), keep_fp32=keep_fp32, ep_wrapped=ep_wrapped)
-        model = model.to(f"cuda:{local_rank}")
+        precision_guard.run(
+            lambda: restore_fp32_master_parameters(
+                model,
+                model_name_or_path,
+                ep_config,
+                keep_non_ep=keep_fp32,
+                strict=strict,
+                revision=common_kwargs.get("revision"),
+            )
+        )
+        if precision_guard.reason is None:
+            model = model.to(f"cuda:{local_rank}")
         gc.collect()
         torch.cuda.empty_cache()
+    precision_guard.reject()
     finalize_loaded_model(model)
     return model
 
@@ -529,12 +554,15 @@ def _from_pretrained_on_local_gpu(
     *,
     keep_fp32: bool,
     ep_wrapped: bool,
+    ep_config: EPConfig | None = None,
 ) -> PreTrainedModel:
     """``from_pretrained`` straight onto this rank's GPU, one rank at a time per node.
 
     With ``_init_from_scratch`` in ``common_kwargs``, builds from config with random weights instead.
     ``keep_fp32`` and ``ep_wrapped`` are :func:`cast_loaded_parameters`'.
     """
+    strict = common_kwargs.pop("preserve_checkpoint_precision", False)
+    precision_guard = DeferredRankFailure(f"FP32-master checkpoint load from {model_name_or_path}")
     if common_kwargs.pop("_init_from_scratch", False):
         config = common_kwargs.get("config")
         # from_config materializes on CPU before .to(cuda), so it needs the same concurrency gate.
@@ -546,12 +574,24 @@ def _from_pretrained_on_local_gpu(
                 trust_remote_code=common_kwargs.get("trust_remote_code", True),
             )
             model = model.to(f"cuda:{local_rank}")
+            # A random-init model has no checkpoint masters to replay.
+            cast_loaded_parameters(model, common_kwargs.get("dtype"), keep_fp32=keep_fp32, ep_wrapped=ep_wrapped)
     else:
         with sequential_load_within_node(max_concurrent=max_concurrent):
             ddp_kwargs = {"device_map": {"": local_rank}, **common_kwargs}
             model = from_pretrained_verified(model_class, model_name_or_path, **ddp_kwargs)
-    # Both branches: a remote-code class can declare parameters fp32 in __init__ (Ling 3.0's KDA state).
-    cast_loaded_parameters(model, common_kwargs.get("dtype"), keep_fp32=keep_fp32, ep_wrapped=ep_wrapped)
+            cast_loaded_parameters(model, common_kwargs.get("dtype"), keep_fp32=keep_fp32, ep_wrapped=ep_wrapped)
+            precision_guard.run(
+                lambda: restore_fp32_master_parameters(
+                    model,
+                    model_name_or_path,
+                    ep_config,
+                    keep_non_ep=keep_fp32,
+                    strict=strict,
+                    revision=common_kwargs.get("revision"),
+                )
+            )
+    precision_guard.reject()
     finalize_loaded_model(model)
     return model
 
@@ -714,6 +754,7 @@ def _load_ep_tp_model(
             common_kwargs,
             keep_fp32=pc.fp32_non_ep_params,
             ep_wrapped=True,
+            ep_config=ep_config,
         )
         _apply_attention_only_tp(model, rank, pc.tp_size, pc.data_parallel_size)
         model = _apply_ep_wrappers(model, ep_config)
@@ -738,6 +779,7 @@ def _load_tp_model(
 ) -> PreTrainedModel:
     """Load model with TP: HF-native ``tp_plan`` weight sharding."""
     tp_size, dp_size = pc.tp_size, pc.data_parallel_size
+    strict = common_kwargs.pop("preserve_checkpoint_precision", False)
 
     device_mesh = create_dp_tp_mesh(tp_size=tp_size, dp_size=dp_size)
     tp_mesh = get_tp_submesh(device_mesh)
@@ -759,6 +801,17 @@ def _load_tp_model(
             device_mesh=tp_mesh,
             **common_kwargs,
         )
+    precision_guard = DeferredRankFailure(f"FP32-master TP checkpoint load from {model_name_or_path}")
+    precision_guard.run(
+        lambda: restore_fp32_master_parameters(
+            model,
+            model_name_or_path,
+            keep_non_ep=pc.fp32_non_ep_params,
+            strict=strict,
+            revision=common_kwargs.get("revision"),
+        )
+    )
+    precision_guard.reject()
     # tp_plan="auto" resolves to an empty plan for architectures shipping no base_model_tp_plan
     # (Qwen3-VL); transformers only warns, and the run becomes tp_size replicas at 1/tp_size
     # throughput. Checked against the applied plan, so a plan covering no parameter (or covering them
@@ -808,6 +861,7 @@ def _load_tp_moe_model(
     logger.info(f"[Rank {rank}] Loading MoE model for TP-only mode (attention-only TP)...")
     logger.info(f"  TP size: {tp_size}, DP size: {dp_size}")
 
+    ep_config = pc.create_ep_config() if pc.needs_ep_wrappers else None
     model = _sequential_load_to_cuda(
         model_name_or_path,
         model_class,
@@ -816,11 +870,12 @@ def _load_tp_moe_model(
         common_kwargs,
         keep_fp32=pc.fp32_non_ep_params,
         ep_wrapped=pc.needs_ep_wrappers,
+        ep_config=ep_config,
     )
     _apply_attention_only_tp(model, rank, tp_size, dp_size)
 
     if pc.needs_ep_wrappers:
-        model = _apply_ep_wrappers(model, pc.create_ep_config())
+        model = _apply_ep_wrappers(model, ep_config)
         logger.info("Applied grouped GEMM wrappers to MoE layers")
 
     logger.info(f"Model loaded with TP on MoE (tp={tp_size}, dp={dp_size})")
@@ -907,6 +962,8 @@ def _load_undistributed_model(
     nothing and exist for the grouped-GEMM expert compute (and, under ``fsdp_shard_ep1_experts``,
     for the FSDP-managed ep1 expert shard).
     """
+    # Creating the groups must precede the node-serialized rank-local checkpoint replay.
+    ep_config = pc.create_ep_config() if ep_wrappers else None
     model = _from_pretrained_on_local_gpu(
         model_name_or_path,
         model_class,
@@ -915,9 +972,10 @@ def _load_undistributed_model(
         common_kwargs,
         keep_fp32=pc.fp32_non_ep_params,
         ep_wrapped=ep_wrappers,
+        ep_config=ep_config,
     )
     if ep_wrappers:
-        model = _apply_ep_wrappers(model, pc.create_ep_config())
+        model = _apply_ep_wrappers(model, ep_config)
     mode = "Grouped GEMM wrappers (no EP distribution)" if ep_wrappers else "standard DDP"
     logger.info(f"Model loaded with {mode}")
     return model

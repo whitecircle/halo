@@ -145,10 +145,19 @@ A training checkpoint (`checkpoint-N`) writes every tensor at its live dtype
 bf16 ([Saving by parallelism mode](#saving-by-parallelism-mode)). fp32 masters (`fp32_router`,
 `fp32_experts`, `fp32_non_ep_params`) and fp32 adapters therefore take 4 bytes per element in a
 checkpoint: `fp32_experts` doubles an MoE checkpoint's expert bytes and `fp32_non_ep_params` its
-non-expert bytes, while the routers alone are negligible. An adapter restore reads them back exactly. A
-full fine-tune built from the checkpoint at construction (Path B, [Resuming training](#resuming-training))
-still loads at the run dtype before the trainer's fp32 upcast, so its fp32 masters resume rounded to
-bf16.
+non-expert bytes, while the routers alone are negligible. An adapter restore reads them back exactly.
+Construction from a checkpoint (Path B) preserves configured FP32 parameter masters in dense
+FSDP2, CP, EP1, EP/EP+CP, TP/EP+TP and ETP/EP+ETP. Plain eager models replay the selected checkpoint
+tensors before parallel wrapping; lazy EP loads retain them on the first read/fusion. Native dense
+TP rebuilds the existing 1-D TP shards and tied aliases before DP/FSDP2 wrapping, splitting on CPU
+so it never uploads a full FP32 matrix per TP rank. Persistent FP32 buffers follow their separate
+family pinning policy and are not parameter masters.
+
+The precision flags apply to **any** checkpoint start, including a fresh training stage.
+`preserve_checkpoint_precision` carries the script's resolved full-finetune resume provenance and
+makes master coverage strict: every configured master's identity must be restored, without
+missing-key exemptions. It does not control the dtype policy. A BF16 export promotes exactly the
+values it stored; it cannot recover precision discarded during export.
 
 The exported `config.json` is serialized with run-scoped router mutations restored
 (`config_export_ready`): the balancing strategy's zeroed `router_aux_loss_coef`, forced

@@ -47,6 +47,7 @@ def load_model_consuming_init_kwargs(
     trust_remote_code: bool,
     revision: str | None,
     model_config_overrides: dict | None = None,
+    preserve_checkpoint_precision: bool = False,
     **loader_kwargs,
 ):
     """``load_distributed_model`` with ``model_init_kwargs`` consumed and Liger re-finalized.
@@ -55,7 +56,8 @@ def load_model_consuming_init_kwargs(
     a script's own overrides such as ``num_labels``, merged over them) and cleared off the config so
     TRL doesn't re-apply them, and the Liger flags are captured before the load so
     ``finalize_liger_after_direct_load`` can replay them on the already-built model. Returns
-    ``(model, tokenizer)``.
+    ``(model, tokenizer)``. ``preserve_checkpoint_precision`` carries the caller's explicit Path-B
+    identity; it is not inferred from the source directory or applied to reference loads.
     """
     # Non-TRL configs (DistillationConfig, the plain HF classification/embedding configs) have no
     # model_init_kwargs — nothing to consume, nothing to clear.
@@ -76,6 +78,7 @@ def load_model_consuming_init_kwargs(
         liger_kernel_config=original_liger_config,
         quantization_config=resolve_quantization_config(model_config, training_config),
         revision=revision,
+        preserve_checkpoint_precision=preserve_checkpoint_precision,
         **loader_kwargs,
     )
     finalize_liger_after_direct_load(training_config, original_use_liger, model)
@@ -190,6 +193,7 @@ def load_vlm_model_and_processor(
     vlm_run: bool,
     reset_sinks: bool = True,
     train_sinks: bool = False,
+    preserve_checkpoint_precision: bool = False,
 ):
     """Load a VLM model + processor + tokenizer for distributed training.
 
@@ -233,6 +237,7 @@ def load_vlm_model_and_processor(
         revision=revision,
         reset_sinks=reset_sinks,
         train_sinks=train_sinks,
+        preserve_checkpoint_precision=preserve_checkpoint_precision,
     )
 
     if is_global_main_process():
@@ -253,6 +258,7 @@ def load_model_for_training(
     init_from_scratch: bool = False,
     weights_source: str | None = None,
     text_only_model: bool = False,
+    preserve_checkpoint_precision: bool = False,
 ):
     """Modality-aware model load; the entry point used by every training script.
 
@@ -281,6 +287,7 @@ def load_model_for_training(
             vlm_run=vlm_run,
             reset_sinks=reset_sinks,
             train_sinks=train_sinks,
+            preserve_checkpoint_precision=preserve_checkpoint_precision,
         )
         return model, processing_class, tokenizer, True
 
@@ -296,5 +303,6 @@ def load_model_for_training(
         train_sinks=train_sinks,
         init_from_scratch=init_from_scratch,
         text_only_model=text_only_model,
+        preserve_checkpoint_precision=preserve_checkpoint_precision,
     )
     return model, tokenizer, tokenizer, False

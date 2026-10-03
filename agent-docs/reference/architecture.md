@@ -97,6 +97,11 @@ A fifth, `loading/`, sits above all four: `load_distributed_model` picks the per
 `ParallelismConfig`, so it is the one place that reaches into every implementation. That is why it
 lives here and not under `src/models/loading/`.
 
+`loading/precision.py` selects configured FP32 parameter masters on the pre-wrapper HF tree;
+`loading/master_weights.py` streams their stored values back for eager construction, including
+native TP's existing 1-D shards before DP wrapping. The EP lazy loader consumes the same selector
+on its first read/fusion. Persistent FP32 buffers are outside this parameter policy.
+
 The lazy-loading machinery both the EP and PP loaders share — safetensors index resolution,
 checkpoint-key alignment, per-key weight plans, hub-conversion op math, meta-shell instantiation —
 lives in `src/models/loading/lazy_safetensors/` (`conversion.py`, `weights.py`, `meta_shell.py`) —
