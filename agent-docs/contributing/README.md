@@ -365,9 +365,10 @@ keep `provenance` accurate.
 
 The committed set is gpt-oss-20b SFT under Expert Parallelism at **ep1 / ep2 / ep8** — 8× B300, seq
 4096, batch 1, gradient checkpointing on, `CUDA_DEVICE_MAX_CONNECTIONS=1`, bf16 + FA4 + grouped GEMM
-on `halo:blackwell`: 9,401 / 10,551 / 8,225 tok/s/GPU. The ep1 file holds the experts replicated per rank
-(148.3 GiB); `benchmark_sft_ep.py` shards them by default (`fsdp_shard_ep1_experts`), so refresh it with
-`--no_fsdp_shard_ep1_experts`, or the same key records the sharded config (8,414 tok/s/GPU at 60.3 GiB).
+on `halo:blackwell`; the b1 rows of [Throughput Benchmarks → EP-only](../optimization/throughput-benchmarks.md#ep-only-batch-scaling)
+are these runs. The ep1 file holds the experts replicated per rank (`fsdp_shard_ep1_experts: false` in its
+provenance); `benchmark_sft_ep.py` shards them by default, so refresh it with `--no_fsdp_shard_ep1_experts`,
+or the same key records the sharded config.
 **ep4 is intentionally excluded** —
 pure `ep_size > 2` with `ep_group_size < nvlink_domain_size` is rejected at config time: its DeepEP
 combine races FSDP2's DP-wide collectives

@@ -9,23 +9,25 @@
     "cuda_device_max_connections": 1,
     "attn": "flash_attention_4",
     "grouped_gemm": true,
-    "measured": "2026-06-25",
+    "measured": "2026-10-03",
     "image": "halo:blackwell",
-    "ep_size": 1
+    "commit": "0bc3a22a56fb5a7a422b1d4f711d92a978a990bd",
+    "ep_size": 1,
+    "fsdp_shard_ep1_experts": false
   },
   "metrics": {
-    "tokens_per_second": 9400.97,
-    "cluster_tokens_per_second": 75207.8,
+    "tokens_per_second": 11040.82,
+    "cluster_tokens_per_second": 88326.59,
     "peak_allocated_gb": 148.32,
     "training_peak_allocated_gb": 148.32,
-    "avg_step_time_seconds": 0.44,
+    "avg_step_time_seconds": 0.37,
     "diagnostics": {
       "gpu_model": "B300",
       "precision": "bf16",
-      "mfu_percent": 36.72,
-      "smfu_percent": 8.13,
-      "achieved_tflops_dense": 1211.65,
-      "achieved_tflops_active": 268.13,
+      "mfu_percent": 62.8,
+      "smfu_percent": 13.55,
+      "achieved_tflops_dense": 1413.0,
+      "achieved_tflops_active": 304.9,
       "local_params_b": 20.915,
       "sparsity_factor": 0.125
     }

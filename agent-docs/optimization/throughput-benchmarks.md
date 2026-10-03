@@ -10,7 +10,7 @@ Throughput (tokens/s/GPU) and achieved-TFLOPS benchmarks on **NVIDIA B300** (GPU
 
 - **Framework**: PyTorch 2.11+cu130 + DeepEP + Flash Attention + Liger. The Blackwell image ships FA2 and FA4 co-installed; `--attn_implementation` defaults to `None` in `tests/common/benchmark_args.py`, which auto-selects `flash_attention_4`. **All tables are FA4 unless a row says otherwise.**
 
-    FA4 is ≈ +13% end-to-end for MoE/EP but 1.13× (4k) to 2.3× (32k) on dense; see [Flash Attention](flash-attention.md).
+    FA4's end-to-end gain is small on MoE/EP and grows with sequence length on dense; see [Flash Attention](flash-attention.md).
 
 - **Optimizer**: AdamWBF16 with stochastic rounding (6 bytes/param). **Gradient checkpointing** on unless a row says "GC off".
 - **Config**: 3 warmup + 7 measured steps (defaults `--warmup 3 --steps 10`); throughput is the warm-step average from `EfficiencyCallback`. Peak memory is its `torch.cuda.max_memory_allocated`, in GiB (2³⁰ bytes).
@@ -147,7 +147,7 @@ excluded (EP ⊥ DP, each EP rank processes a distinct batch); `expert_tp_size` 
 
 ## GPT-OSS-20B (8× B300)
 
-**Model**: `unsloth/gpt-oss-20b-BF16` (20.7B total, 32 experts, top_k=4, 3.5B active). Setup: FA4, liger on, grouped-GEMM on (default), AdamWBF16/bf16, GC on, seq 4096 batch 1 unless noted.
+**Model**: `unsloth/gpt-oss-20b-BF16` (20.7B total, 32 experts, top_k=4, 3.5B active). Setup: FA4, liger on, grouped-GEMM on (default), AdamWBF16/bf16, GC on, seq 4096 batch 1 unless noted. Every table in this section: 8× B300, measured 2026-10-03 at commit 0bc3a22a5 on the Blackwell image.
 
 ### EP-only (batch scaling)
 
@@ -155,17 +155,17 @@ EP distributes experts; DP = world_size = 8. Small-batch pure EP is **communicat
 
 | EP | batch | tok/s/GPU | TFLOPS | peak mem | step |
 |----|-------|:---------:|--------|----------|------|
-| 1 | 1 | 9,401 | 1,203 | 148.3 GiB | 0.44s |
-| 2 | 1 | 10,551 | 745 | 77.3 GiB | 0.39s |
-| 2 | 4 | 17,874 | 1,263 | 91.5 GiB | 0.92s |
-| 8 | 1 | 8,225 | 228 | 25.3 GiB | 0.50s |
-| 8 | 4 | 10,051 | 278 | 57.1 GiB | 1.63s |
+| 1 | 1 | 11,041 | 1,413 | 148.3 GiB | 0.37s |
+| 2 | 1 | 12,432 | 878 | 78.9 GiB | 0.33s |
+| 2 | 4 | 20,554 | 1,452 | 85.2 GiB | 0.80s |
+| 8 | 1 | 8,852 | 244 | 25.4 GiB | 0.46s |
+| 8 | 4 | 10,358 | 286 | 47.2 GiB | 1.58s |
 
-Rows are the grouped-GEMM path (default); the ep1 rows here hold experts replicated per rank (`fsdp_shard_ep1_experts: false`) — the fixed config the b1 golden baselines in `tests/baselines/` measure. Their `achieved_tflops_dense` predates the per-layer attention count above (sliding layers at their window) and reads 1–3% higher than this TFLOPS column. Nothing reads those files automatically: `tokens_per_second` and `peak_allocated_gb` are diffed by hand ([Golden performance baselines](../contributing/README.md#golden-performance-baselines)).
+Rows are the grouped-GEMM path (default); the ep1 row holds experts replicated per rank (`fsdp_shard_ep1_experts: false`). The b1 rows are the runs committed as the golden baselines in `tests/baselines/`. Nothing reads those files automatically: `tokens_per_second` and `peak_allocated_gb` are diffed by hand ([Golden performance baselines](../contributing/README.md#golden-performance-baselines)).
 
-`fsdp_shard_ep1_experts` (the ep1 default) shards the replicated experts across the DP group, cutting ep1 b1 to **8,414 tok/s/GPU · 60.3 GiB** (−59% memory for −10.5% throughput at b1; the all-gather overlaps better at larger batch — −3.5% at b4) — the dense-EP1 config in the [achieved-TFLOPS table](#maximizing-achieved-tflops).
+`fsdp_shard_ep1_experts` (the ep1 default) shards the replicated experts across the DP group. It is faster and leaner than the replicated row at both measured batches: ep1 b1 runs **11,236 tok/s/GPU · 60.3 GiB** (+1.8% throughput, −59% memory), and b4 runs 23,590 · 75.8 GiB against replicated 22,386 · 149.4 GiB (+5.4%, −49%). It is the dense-EP1 config in the [achieved-TFLOPS table](#maximizing-achieved-tflops).
 
-Grouped beats the per-expert loop (`use_grouped_gemm: false`) at low EP and at high EP up to moderate batch; the loop edges ahead only at high EP with large batches. The crossover is set by local experts per rank, modulated by batch — the authoritative A/B is in [grouped-gemm](grouped-gemm.md#when-the-loop-path-wins).
+Grouped beats the per-expert loop (`use_grouped_gemm: false`) in every measured gpt-oss-20b cell, ep8 at batch 4 included; the margin shrinks as local experts per rank fall and batch grows. The A/B is in [grouped-gemm](grouped-gemm.md#grouped-vs-the-loop-path).
 
 > [!CAUTION]
 > **No ep4 row: single-node `ep_size=4` on 8 GPUs is rejected at config time**
@@ -178,11 +178,11 @@ CP splits sequences via Ulysses attention. ep8 + CP=8 (DP=1), GC on:
 
 | SeqLen | tok/s/GPU | TFLOPS | peak mem | step |
 |--------|-----------|--------|----------|------|
-| 16,384 | 5,460 | 190 | 23.6 GiB | 0.38s |
-| 32,768 | 6,042 | 269 | 26.5 GiB | 0.68s |
-| 65,536 | 5,231 | 334 | 33.9 GiB | 1.57s |
+| 16,384 | 6,716 | 234 | 24.4 GiB | 0.30s |
+| 32,768 | 7,642 | 340 | 29.7 GiB | 0.54s |
+| 65,536 | 7,595 | 485 | 42.1 GiB | 1.08s |
 
-Achieved TFLOPS rises with sequence length (longer sequences amortize the Ulysses all-to-all); memory stays near-flat (24–34 GiB) from 16k to 64k. CP trades per-GPU throughput for cheap long context.
+Achieved TFLOPS rises with sequence length (longer sequences amortize the Ulysses all-to-all); memory grows slowly (24–42 GiB) from 16k to 64k. CP trades per-GPU throughput for cheap long context.
 
 ### EP+TP
 
@@ -192,17 +192,17 @@ On one 8-GPU node, full-EP (`ep8`) combines with `tp2`, `tp4`, or `tp8` (all val
 
 | SeqLen | tok/s/GPU | TFLOPS | peak mem | step |
 |--------|-----------|--------|----------|------|
-| 4,096 | 7,641 | 191 | 33.0 GiB | 0.54s |
-| 16,384 | 9,557 | 333 | 70.7 GiB | 1.71s |
-| 32,768 | 10,247 | 492 | 122.3 GiB | 3.20s |
+| 4,096 | 8,475 | 187 | 32.5 GiB | 0.48s |
+| 16,384 | 9,922 | 228 | 67.8 GiB | 1.65s |
+| 32,768 | 9,891 | 239 | 115.7 GiB | 3.31s |
 
-Achieved TFLOPS rises with sequence length (amortizes the TP all-gather/reduce-scatter). TP width is a minor lever: at s4096 the three widths are within ~1% (`ep8tp2` 7,715 ≈ `ep8tp4` 7,714 > `ep8tp8` 7,641 tok/s/GPU); at s16384 `ep8tp4` leads (10,009 vs `ep8tp2` 9,559, `ep8tp8` 9,557).
+Achieved TFLOPS rises with sequence length (amortizes the TP all-gather/reduce-scatter). TP width moves throughput by a few percent: at s4096 the three widths spread 3.9%, `ep8tp8` leading (8,475 vs `ep8tp2` 8,253, `ep8tp4` 8,157 tok/s/GPU); at s16384 `ep8tp4` leads (9,994 vs `ep8tp8` 9,922, `ep8tp2` 9,364).
 
 ### Why MoE utilization reads low
 
 It is not idle hardware. gpt-oss-20b fires top-4 of 32 experts (3.5B active of 20.7B), so a sparse MoE cannot
-approach a dense model's plain MFU. Higher EP also shrinks `N_local` (ep2 = 11.36B → ep8 = 4.19B) at similar
-throughput: ep8 trades per-GPU utilization for memory, not compute waste.
+approach a dense model's plain MFU. Higher EP also shrinks `N_local` far faster than throughput (ep2 = 11.36B
+→ ep8 = 4.19B, −63%, against −29% tok/s/GPU at b1): ep8 trades per-GPU utilization for memory, not compute waste.
 
 Levers to raise it: lower EP (more local params), longer sequence (the EP-independent attention-score
 term), larger batch.
@@ -213,12 +213,12 @@ Keep more params local (low EP), then drop GC if activations fit, then add batch
 
 | model | topology | config | tok/s/GPU | TFLOPS | peak mem |
 |-------|----------|--------|-----------|--------|----------|
-| gpt-oss-20b | ep1 (dense FSDP, sharded experts) | b4, s4096, GC-off | **24,456** | **3,130** | 136.0 GiB |
-| gpt-oss-20b | ep1 (dense FSDP, sharded experts) | b4, s4096, GC-on | 20,174 | 2,582 | 80.6 GiB |
-| gpt-oss-20b | ep2 | b6, s8192 (loop) | 16,624 | 1,215 | 157.6 GiB |
-| gpt-oss-20b | ep8 | b2, s16384 (loop) | 10,041 | 350 | 96.0 GiB |
-| qwen3.5-35b-a3b | ep2 | b4, s4096 | 12,584 | 1,410 | 138.5 GiB |
-| qwen3.5-35b-a3b | ep8 | b8, s4096 | 10,012 | 396 | 132.9 GiB |
+| gpt-oss-20b | ep1 (dense FSDP, sharded experts) | b4, s4096, GC-off | **28,700** | **3,673** | 131.3 GiB |
+| gpt-oss-20b | ep1 (dense FSDP, sharded experts) | b4, s4096, GC-on | 23,590 | 3,019 | 75.8 GiB |
+| gpt-oss-20b | ep2 | b6, s8192 | 21,707 | 1,586 | 138.9 GiB |
+| gpt-oss-20b | ep8 | b2, s16384 | 10,007 | 349 | 81.1 GiB |
+| qwen3.5-35b-a3b | ep2 | b4, s4096 | 16,447 | 1,908 | 137.8 GiB |
+| qwen3.5-35b-a3b | ep8 | b8, s4096 | 15,126 | 659 | 111.0 GiB |
 
 - **Local params decide the ceiling.** ep1 keeps all 20.7B local and tops the table; ep2 ~11.4B; ep8 ~4.2B;
   qwen3.5-35b ep2 ~17.5B. Choose the lowest EP that fits. (The ep1 rows count every local expert as active,
@@ -252,24 +252,24 @@ construction.
 
 ### Where the EP step's time goes (gpt-oss-20b ep8, b1/s4096, 8× B300, FA4)
 
-The per-MoE-layer CUDA self-time at b1/s4096 (serialized attribution via `benchmark_sft_ep.py --comm_profile`) is **dispatch all-to-all 88%, expert GEMM 6.6%, combine all-to-all 5.5%** — communication is ~93% of the layer step.
+The per-MoE-layer CUDA self-time at b1/s4096 (serialized attribution via `benchmark_sft_ep.py --comm_profile`, measured at v1.0.0) is **dispatch all-to-all 88%, expert GEMM 6.6%, combine all-to-all 5.5%** — communication is ~93% of the layer step.
 
 The dispatch all-to-all is a near-fixed per-step latency (~49 ms here), so it dominates at small `M`. The
 expert GEMM is a minority because the model is very sparse (per-expert GEMM stays small-`M` /
 weight-bandwidth-bound), which is also why utilization reads low.
 
 Raising batch or sequence grows the compute term against the fixed comm cost; throughput plateaus around b4
-(b8 only adds memory). At b1 ep8 runs within 3% of the default sharded ep1 (8,225 vs 8,414 tok/s/GPU) at
-~2.4× less memory (25.3 vs 60.3 GiB); replicated ep1 is 14% faster at ~6× the memory (148.3 GiB).
+(b8 only adds memory). At b1 ep8 runs 21% below the default sharded ep1 (8,852 vs 11,236 tok/s/GPU) at
+~2.4× less memory (25.4 vs 60.3 GiB).
 
 **Feature A/B at the optimal point (ep8 b4 s4096):**
 
 | feature | tok/s/GPU | vs bf16 | note |
 |---|---|---|---|
-| bf16 + FA4 + grouped + GC | 10,051 | 1.00× | recommended recipe |
-| **GC off** | **12,971** | **1.29×** | when the batch fits (121 GiB here) |
-| grouped GEMM off (loop) | 10,215 | 1.02× | loop edges grouped at ep8-b4 (fused-SwiGLU grouped path) |
-| flex attention | 1,916 | 0.19× | FA4 ~5.2× faster; flex runs the unfused math path |
+| bf16 + FA4 + grouped + GC | 10,358 | 1.00× | recommended recipe |
+| **GC off** | **13,489** | **1.30×** | when the batch fits (95.5 GiB here) |
+| grouped GEMM off (loop) | 9,529 | 0.92× | grouped wins at ep8-b4 |
+| flex attention | 1,725 | 0.17× | FA4 ~6.0× faster; flex runs the unfused math path |
 | fp8 / fp4 | net-slower | — | bf16 is the throughput path at these shapes ([low-precision](low-precision-moe-kernels.md)) |
 
 SDPA runs GptOss only with the sinks reset (the neutralized column contributes 0) and raises with live
@@ -279,71 +279,70 @@ The roofline crossover (gpt-oss expert K=N=2880: weight-bandwidth-bound below �
 compute-bound above; ridge AI ≈ 275 on B300) is why bf16 stays optimal: the small-`M` experts sit in the
 bandwidth-bound regime where fp8/fp4 quant overhead only loses.
 
-`CUDA_DEVICE_MAX_CONNECTIONS=1` (baked into the image) is a free default that helps wide EP
-([DeepEP](../infrastructure/deepep.md#environment-variables)).
+`CUDA_DEVICE_MAX_CONNECTIONS=1` (baked into the image) is a correctness setting with no measurable
+throughput effect ([DeepEP](../infrastructure/deepep.md#environment-variables)).
 
 **EP throughput vs sequence length (ep8, b1, liger + FA4):**
 
 | seq | GC-on tok/s/GPU | GC-on mem | GC-off tok/s/GPU | GC-off mem |
 |---|---|---|---|---|
-| 4,096 | 8,225 | 25 GiB | 10,505 | 41 GiB |
-| 8,192 | 9,336 | 35 GiB | 11,876 | 67 GiB |
-| 16,384 | 9,894 | 52 GiB | 12,607 | 117 GiB |
-| 32,768 | 8,626 | 83 GiB | — (OOM) | — |
-| 49,152 | 8,088 | 108 GiB | — (OOM) | — |
-| 65,536 | 6,045 † | 135 GiB | — (OOM) | — |
+| 4,096 | 8,852 | 25 GiB | 11,563 | 36 GiB |
+| 8,192 | 9,863 | 33 GiB | 12,511 | 58 GiB |
+| 16,384 | 9,981 | 48 GiB | 12,531 | 104 GiB |
+| 32,768 | 9,096 | 79 GiB | 11,698 | 200 GiB |
+| 49,152 | 8,631 | 109 GiB | — | — |
+| 65,536 | 6,753 † | 140 GiB | — | — |
 
-† s65536 GC-on uses `ep_buffer_backend=legacy`: elastic ep8 multi-step training at ≥~64k tokens/rank deadlocks ([DeepEP → Transport backend](../infrastructure/deepep.md#transport-backend)); s49152 trains on either transport.
+† s65536 GC-on uses `ep_buffer_backend=legacy`: elastic ep8 multi-step training at ≥~64k tokens/rank deadlocks ([DeepEP → Transport backend](../infrastructure/deepep.md#transport-backend)); s49152 trains on either transport. GC-off is not run past 32k.
 
-GC-off is +27–28% but ~2× memory; on the default elastic transport it fits to 16k (117 GiB) and **does not
-fit 32k**, which `ep_buffer_backend: legacy` trains at 9,694 tok/s/GPU
-([Halo vs stock TRL](halo-vs-stock-trl.md#gradient-checkpointing-on-vs-off)). Use GC-off for max
-throughput at ≤16k; GC-on for long context — pure ep8 GC-on streams to 64k (135 GiB) without Context
-Parallelism, tapering past 32k as the per-rank sequence grows.
+GC-off is +26–31% at 1.4–2.5× the memory, and on the default elastic transport it fits to 32k (200 GiB);
+`ep_buffer_backend: legacy` runs 32k GC-off at 9,740 tok/s/GPU. Use GC-off for max throughput up to 32k;
+GC-on for long context — pure ep8 GC-on streams to 64k (140 GiB) without Context Parallelism, tapering past
+16k as the per-rank sequence grows. Against stock TRL: [Halo vs stock TRL](halo-vs-stock-trl.md#gradient-checkpointing-on-vs-off).
 
-Because the dispatch is near-fixed (~47–49 ms across s4096→s16384), its share of the MoE-layer step **falls**
+Because the dispatch is near-fixed (~47–49 ms across s4096→s16384 at v1.0.0), its share of the MoE-layer step **falls**
 as sequence grows while the expert GEMM gets more compute-efficient at larger per-expert `M` (gpt-oss-20b ep8
 GC-off: communication ≈93% @ s4096 → ≈88% @ s16384). Compute–comm overlap would pay off most at long context.
 
 ## Qwen3.5-35B-A3B MoE (8× B300)
 
-**Model**: `Qwen/Qwen3.5-35B-A3B` (35B total, 256 experts, top_k=8, ~3B active). liger on, grouped-GEMM on, AdamWBF16/bf16, GC on. Attention runs **SDPA**: the FA4 backward emits NaN gradients on Qwen3.5's head_dim-256 partial-rotary attention (QK-norm + output gate), so `load_distributed_model` auto-falls back to SDPA — see [Flash Attention](flash-attention.md#model-specific-handling).
+**Model**: `Qwen/Qwen3.5-35B-A3B` (35B total, 256 experts, top_k=8, ~3B active). liger on, grouped-GEMM on, AdamWBF16/bf16, GC on. Attention runs **SDPA**: the FA4 backward emits NaN gradients on Qwen3.5's head_dim-256 partial-rotary attention (QK-norm + output gate), so `load_distributed_model` auto-falls back to SDPA — see [Flash Attention](flash-attention.md#model-specific-handling). Both tables: 8× B300, measured 2026-10-03 at commit 0bc3a22a5 on the Blackwell image.
 
 ### EP scaling (seq 4096)
 
 | EP | batch | tok/s/GPU | TFLOPS | peak mem | step |
 |----|-------|-----------|--------|----------|------|
-| 2 | 1 | 5,964 | 668 | 127.9 GiB | 0.69s |
-| 2 | 4 | **12,584** | 1,410 | 138.5 GiB | 1.30s |
-| 8 | 1 | 6,401 | 253 | 41.1 GiB | 0.64s |
-| 8 | 4 | 9,408 | 372 | 81.0 GiB | 1.74s |
+| 2 | 1 | 6,692 | 776 | 130.0 GiB | 0.61s |
+| 2 | 4 | **16,447** | 1,908 | 137.8 GiB | 1.00s |
+| 8 | 1 | 7,876 | 343 | 41.5 GiB | 0.52s |
+| 8 | 4 | 14,275 | 622 | 72.1 GiB | 1.15s |
 
-ep2 keeps ~17.5B params local and reaches **1,410 TFLOPS at batch 4** — the highest `ep ≥ 2` figure in the table, below only gpt-oss-20b at ep1, consistent with [local params setting the ceiling](#maximizing-achieved-tflops). ep8 trades achieved TFLOPS for memory: 41 GiB at batch 1 vs 128 GiB for ep2. Batch is the dominant lever (ep2 b1→b4 = 2.1×; ep8 b1→b4 = 1.5×), since small-batch pure EP is all-to-all-bound.
+ep2 keeps ~17.5B params local and reaches **1,908 TFLOPS at batch 4** — the highest `ep ≥ 2` figure in the table, below only gpt-oss-20b at ep1, consistent with [local params setting the ceiling](#maximizing-achieved-tflops). ep8 trades achieved TFLOPS for memory: 41.5 GiB at batch 1 vs 130 GiB for ep2. Batch is the dominant lever (ep2 b1→b4 = 2.5×; ep8 b1→b4 = 1.8×), since small-batch pure EP is all-to-all-bound.
 
-At ep2 batch 4 the per-MoE-layer step splits ≈ **77% DeepEP dispatch all-to-all / 21% expert GEMM / 2% combine** (`--comm_profile`) — dispatch-bound on the top_k=8 token-count exchange. Raising sequence to 8192 amortizes the all-to-all to **13,484 tok/s/GPU** (b4).
+At ep2 batch 4 the per-MoE-layer step splits ≈ **77% DeepEP dispatch all-to-all / 21% expert GEMM / 2% combine** (`--comm_profile`, v1.0.0) — dispatch-bound on the top_k=8 token-count exchange. Raising sequence to 8192 amortizes the all-to-all to **17,446 tok/s/GPU** (b4).
 
-Two kernels are load-bearing here: [grouped GEMM](grouped-gemm.md) is **2.4× over the per-expert loop** (128 local experts/rank) and [Liger](liger-kernels.md) (measured with RMSNorm + CE) adds **+6.6% throughput and −15 GiB**; current per-family coverage: [Liger Kernels](liger-kernels.md). Attention runs SDPA at no throughput cost (it ties FA4 on MoE).
+Two kernels are load-bearing here: [grouped GEMM](grouped-gemm.md#grouped-vs-the-loop-path), with 128 local experts/rank, and [Liger](liger-kernels.md), which with RMSNorm + CE added **+6.6% throughput and −15 GiB** at v1.0.0; current per-family coverage: [Liger Kernels](liger-kernels.md).
 
 ### EP throughput vs sequence length (ep8, b1, GC on)
 
 | seq | tok/s/GPU | peak mem |
 |-----|-----------|----------|
-| 4,096 | 6,401 | 41.1 GiB |
-| 8,192 | 8,129 | 52.2 GiB |
-| 16,384 | 8,375 | 74.5 GiB |
+| 4,096 | 7,876 | 41.5 GiB |
+| 8,192 | 11,726 | 51.8 GiB |
+| 16,384 | 11,768 | 72.4 GiB |
 
 Longer sequences amortize the all-to-all at modest memory growth — ep8 is the long-context / memory-efficient topology, ep2 batch 4 the throughput one.
 
 ## Single-GPU dense (1× B300)
 
-`Qwen/Qwen3-4B-Instruct-2507` (4.02B, hidden 2560) and `Qwen/Qwen3-8B` (8.2B, hidden 4096), both 36 layers and dense. liger on, AdamWBF16/bf16, FA4. The FA4/FA2/SDPA/flex comparison lives in [Flash Attention](flash-attention.md#fa4-vs-fa2-vs-sdpa-on-blackwell).
+`Qwen/Qwen3-4B-Instruct-2507` (4.02B, hidden 2560) and `Qwen/Qwen3-8B` (8.2B, hidden 4096), both 36 layers and dense. liger on, AdamWBF16/bf16, FA4. The FA4/FA2/SDPA/flex comparison lives in [Flash Attention](flash-attention.md#fa4-vs-fa2-vs-sdpa-on-blackwell). 1× B300, measured 2026-10-03 at commit 0bc3a22a5 on the Blackwell image, except the s4096 b1 GC column (v1.0.0).
 
-| Model | peak (no GC) | s4096 b1 GC | s32768 b1 GC | b4 no-GC memory |
+| Model | peak (no GC) | s4096 b1 GC (v1.0.0) | s32768 b1 GC | b4 no-GC memory |
 |---|---|---:|---:|---|
-| Qwen3-4B | **39,931** tok/s @ b8×s2048 | 25,459 | 16,835 | 102 GiB @ s4096 · 181 GiB @ s8192 |
-| Qwen3-8B | **24,620** tok/s @ b8×s4096 | 18,533 | 13,118 | 140 GiB @ s4096 · 235 GiB @ s8192 |
+| Qwen3-4B | **39,141** tok/s @ b8×s2048 | 25,459 | 16,927 | 102 GiB @ s4096 · 181 GiB @ s8192 |
+| Qwen3-8B | **24,563** tok/s @ b8×s4096 | 18,533 | 13,279 | 140 GiB @ s4096 · 235 GiB @ s8192 |
 
-Batch is the dominant lever — raise it with GC off while it fits (Qwen3-4B b1→b8 at s4096: 25,459 → 38,307). At batch 1 a short sequence is overhead-bound. b8 no-GC OOMs at s8192 on both models, so 16k and longer are batch-1 GC-on. The 8B runs at roughly ⅔ the 4B's tok/s (more FLOPs/token) while saturating the tensor cores better.
+Batch is the dominant lever — raise it with GC off while it fits. At batch 1 a short sequence is overhead-bound. b8 no-GC OOMs at s8192 on both models, so 16k and longer are batch-1 GC-on. The 8B runs at roughly ⅔ the 4B's tok/s (more FLOPs/token) while saturating the tensor cores better.
 
 ## GPT-OSS-120B notes
 

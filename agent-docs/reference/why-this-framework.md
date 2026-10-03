@@ -53,8 +53,8 @@ Vendor-reported figures beside Halo's, with the setup stated. The NeMo AutoModel
 figures ran on H100; the Megatron-LM figures and the last bullet ran on the same B300s as Halo. B300 has
 2.3× the bf16 peak of H100, so read a cross-GPU row as a ceiling on the gap, not the gap.
 
-- **gpt-oss-20b, seq 4096, bf16.** Halo: 24,456 tok/s/GPU at EP1 (8× B300, batch 4, GC off; 20,174
-  GC on) and 10,051 at EP8 (batch 4, GC on, 57 GiB). NeMo AutoModel reports 13,058 on 8× H100 (FSDP
+- **gpt-oss-20b, seq 4096, bf16.** Halo, measured 2026-10-03 at commit 0bc3a22a5: 28,700 tok/s/GPU at
+  EP1 (8× B300, batch 4, GC off; 23,590 GC on) and 10,358 at EP8 (batch 4, GC on, 47 GiB). NeMo AutoModel reports 13,058 on 8× H100 (FSDP
   without EP, mock data, forced-balanced routing). Megatron-LM on the same 8× B300 in a separate batch-2, GC-off
   sweep: OOM at EP1, where Halo runs 27,707 at 158 GB peak; 13,932 vs Halo 21,642 at EP2 (246 vs
   104 GB); 14,734 vs 11,856 at EP8 (Megatron ahead there; 104 vs 58 GB).
