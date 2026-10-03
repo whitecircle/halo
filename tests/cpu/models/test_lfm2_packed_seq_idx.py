@@ -33,7 +33,7 @@ PartialState()  # the factory logs through accelerate's logger, which needs the 
 SEED = 1234
 
 
-def _tiny_model() -> Lfm2MoeForCausalLM:
+def _tiny_model(*, sparse_ffn: bool = True) -> Lfm2MoeForCausalLM:
     torch.manual_seed(SEED)
     config = Lfm2MoeConfig(
         vocab_size=128,
@@ -50,6 +50,8 @@ def _tiny_model() -> Lfm2MoeForCausalLM:
         layer_types=["conv", "full_attention"],
         conv_L_cache=3,
     )
+    if not sparse_ffn:
+        config.num_dense_layers = config.num_hidden_layers
     model = Lfm2MoeForCausalLM(config).eval()
     model.config._attn_implementation = "sdpa"
     return model
@@ -75,35 +77,64 @@ def _mock_tokenizer() -> MagicMock:
     return tok
 
 
-def _doc_b_drift(model, seq_idx: torch.Tensor | None) -> float:
-    """Doc B's max logit drift when doc A's content changes (doc A precedes doc B, so causality
-    alone never explains a drift — only conv/attention state crossing the boundary does)."""
+def _doc_b_drift(
+    model,
+    seq_idx: torch.Tensor | None,
+    *,
+    conv_only: bool = False,
+    token_shift: int = 17,
+    perturb_doc_b: bool = False,
+) -> float:
+    """Doc B's max activation drift when doc A changes, or doc B with ``perturb_doc_b``.
+
+    Doc-A changes expose state crossing the boundary; doc-B changes are the positive control.
+    """
     lens = (6, 6)
     g = torch.Generator().manual_seed(7)
     input_ids = torch.randint(4, 128, (1, sum(lens)), generator=g)
     position_ids = torch.cat([torch.arange(n) for n in lens]).unsqueeze(0)
     variant = input_ids.clone()
-    variant[0, : lens[0]] = (variant[0, : lens[0]] + 17) % 128
+    changed = slice(lens[0], None) if perturb_doc_b else slice(None, lens[0])
+    variant[0, changed] = (variant[0, changed] + token_shift) % 128
 
     kwargs = {} if seq_idx is None else {"seq_idx": seq_idx}
-    with torch.no_grad():
-        base = model(input_ids=input_ids, position_ids=position_ids, use_cache=False, **kwargs).logits
-        swapped = model(input_ids=variant, position_ids=position_ids, use_cache=False, **kwargs).logits
+    conv_outputs = []
+    handle = None
+    if conv_only:
+        handle = model.model.layers[0].conv.register_forward_hook(
+            lambda _module, _inputs, output: conv_outputs.append(output.detach().clone())
+        )
+    try:
+        with torch.no_grad():
+            base = model(input_ids=input_ids, position_ids=position_ids, use_cache=False, **kwargs).logits
+            swapped = model(input_ids=variant, position_ids=position_ids, use_cache=False, **kwargs).logits
+    finally:
+        if handle is not None:
+            handle.remove()
+    if conv_only:
+        assert len(conv_outputs) == 2
+        base, swapped = conv_outputs
     return (base[0, lens[0] :] - swapped[0, lens[0] :]).abs().max().item()
 
 
-def test_seq_idx_isolates_the_conv():
+@pytest.mark.parametrize("sparse_ffn", [False, True], ids=["dense-logits", "moe-conv"])
+@pytest.mark.parametrize("token_shift", [17, 31])
+def test_seq_idx_isolates_the_conv(sparse_ffn, token_shift):
     """Without seq_idx the conv leaks (the defect pin — if this half fails, transformers made LFM2
     derive segments itself and the collator emission can retire); with it, isolation is exact."""
-    model = _tiny_model()
+    # A's routing changes expert GEMM batch sizes, so MoE logits can differ by rounding alone.
+    # Check its conv exactly; dense feed-forwards also pin the full hybrid stack's logits.
+    model = _tiny_model(sparse_ffn=sparse_ffn)
     position_ids = torch.cat([torch.arange(6), torch.arange(6)]).unsqueeze(0)
     seq_idx = ((position_ids == 0).cumsum(dim=1) - 1).to(torch.int32)
 
-    assert _doc_b_drift(model, None) > 0.0, (
+    check = {"conv_only": sparse_ffn, "token_shift": token_shift}
+    assert _doc_b_drift(model, None, **check) > 0.0, (
         "LFM2 conv isolated packed documents without seq_idx — transformers now derives segments "
         "model-side; retire the collator's seq_idx emission for the family"
     )
-    assert _doc_b_drift(model, seq_idx) == 0.0, "seq_idx did not isolate the conv"
+    assert _doc_b_drift(model, seq_idx, **check) == 0.0, "seq_idx did not isolate the conv"
+    assert _doc_b_drift(model, seq_idx, perturb_doc_b=True, **check) > 0.0
 
 
 def test_factory_emits_seq_idx_for_lfm2_only():
