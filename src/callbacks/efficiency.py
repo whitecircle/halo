@@ -185,6 +185,17 @@ class Memory:
     training_peak_allocated_gb: float = 0.0  # since training started
 
 
+def _step_clock() -> float:
+    """Host time once the device has run everything queued so far.
+
+    Kernel launches return before the kernels run, so an unsynchronized read at a step boundary
+    times the host's enqueue: it books the previous step's tail to this step and drops its own.
+    """
+    if torch.cuda.is_available():
+        torch.cuda.synchronize()
+    return time.perf_counter()
+
+
 def _per_step_metrics(metrics) -> dict[str, float]:
     """The per-step / running-average fields of a metrics dataclass (``step_*`` / ``avg_*``).
 
@@ -383,7 +394,7 @@ class EfficiencyCallback(transformers.TrainerCallback):
             if self.model_ref is not None:
                 self._initialize_metrics(args)
 
-        self.state.step_start_time = time.perf_counter()
+        self.state.step_start_time = _step_clock()
 
         if torch.cuda.is_available():
             torch.cuda.reset_peak_memory_stats()
@@ -421,8 +432,7 @@ class EfficiencyCallback(transformers.TrainerCallback):
 
     def _compute_step_time(self) -> float:
         """Update time tracking and return the step duration."""
-        current_time = time.perf_counter()
-        step_time = current_time - self.state.step_start_time
+        step_time = _step_clock() - self.state.step_start_time
         self.state.elapsed_time += step_time
         self.state.elapsed_step += 1
         avg_step_time = self.state.elapsed_time / self.state.elapsed_step

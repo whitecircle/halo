@@ -88,6 +88,21 @@ class MockTrainerState:
         self.num_input_tokens_seen = num_input_tokens_seen
 
 
+class AsyncDevice:
+    """A host clock and a device queue that drains only on ``synchronize``, as CUDA launches do."""
+
+    def __init__(self):
+        self.now = 0.0
+        self.queued = 0.0
+
+    def perf_counter(self) -> float:
+        return self.now
+
+    def synchronize(self) -> None:
+        self.now += self.queued
+        self.queued = 0.0
+
+
 # Tests
 
 
@@ -339,6 +354,27 @@ def test_warmup_skipping():
     cb.state.step_start_time = 1.0  # fake start time
     cb.on_step_end(args, state, control)
     assert cb.state.elapsed_step == 0, f"Expected elapsed_step=0 during warmup, got {cb.state.elapsed_step}"
+
+
+def test_step_time_covers_the_device_work_of_its_own_step_only(monkeypatch):
+    """No attention source is bound (the SMPO / embedding case), so no other hook syncs the host."""
+    device = AsyncDevice()
+    monkeypatch.setattr(efficiency, "time", device)
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
+    monkeypatch.setattr(torch.cuda, "synchronize", device.synchronize)
+    for name in ("reset_peak_memory_stats", "memory_allocated", "memory_reserved", "max_memory_allocated"):
+        monkeypatch.setattr(torch.cuda, name, lambda *args, **kwargs: 0)
+
+    cb = EfficiencyCallback(_NO_PARALLELISM, n_warmup_steps=0)
+    cb.training_args = MockTrainingArgs()
+    device.queued = 5.0  # the previous step's tail, still running when this step begins
+    cb.on_step_begin(cb.training_args, MockTrainerState(global_step=0), None)
+    device.now += 0.25  # host time to launch the step
+    device.queued += 2.0  # the step's kernels, still running when on_step_end fires
+    cb.on_step_end(cb.training_args, MockTrainerState(global_step=1, num_input_tokens_seen=1000), None)
+
+    assert cb.time.step_time_seconds == pytest.approx(2.25)
+    assert cb.tps.step_tokens_per_second == pytest.approx(1000 / 2.25, abs=0.01)
 
 
 # Core accounting: FLOPS/token, MFU, S-MFU, throughput.
