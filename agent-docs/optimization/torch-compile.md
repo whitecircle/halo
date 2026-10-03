@@ -1,6 +1,6 @@
 # torch.compile
 
-On EP MoE, `torch.compile` (inductor) reaches roughly the same speedup as [Liger kernels](liger-kernels.md) (~+30% throughput, −9 GB) and **composes with them**: compile on top of Liger holds the gain. DeepEP all-to-all and Flash Attention break the compiled graph at every MoE/attention boundary, but inductor compiles the spans between breaks (norms, projections) well enough to pay off.
+On EP MoE, `torch.compile` (inductor) reaches roughly the same speedup as [Liger kernels](liger-kernels.md) (~+30% throughput, −9 GiB) and **composes with them**: compile on top of Liger holds the gain. DeepEP all-to-all and Flash Attention break the compiled graph at every MoE/attention boundary, but inductor compiles the spans between breaks (norms, projections) well enough to pay off.
 
 Liger is the default (no per-shape warmup cost); add `torch_compile` when you can absorb the first-step compile latency. What fusion buys and what it does not: [GPU Training Theory §5](../reference/gpu-training-theory.md#what-fusion-does-not-buy).
 
@@ -44,14 +44,14 @@ command streams.
 
 Qwen3-30B-A3B (128 experts, top_k=8), 2× B300 (SM103), EP=2, seq 16384, BF16, FA4, gradient checkpointing, 12 steps / 2 warmup, batch 1:
 
-| Mode | Liger | Compile | Step (s) | tokens/s/GPU | Peak mem (GB) |
+| Mode | Liger | Compile | Step (s) | tokens/s/GPU | Peak mem (GiB) |
 |------|:-----:|:-------:|---------:|-------------:|--------------:|
 | `neither` | OFF | OFF | 1.70 | 9,610 | 128.6 |
 | `liger_only` | ON | OFF | 1.31 (−23%) | 12,467 (+30%) | 119.4 |
 | `compile_only` | OFF | ON | 1.29 (−24%) | 12,676 (+32%) | 119.4 |
 | `liger_compile` | ON | ON | **1.30 (−24%)** | **12,608 (+31%)** | 119.5 |
 
-Liger, compile, and the two stacked all land within ~2% of each other (+30% to +32%, −9 GB) — they target the same non-EP spans, so stacking adds little. These are batch-1 (communication-bound) numbers: DeepEP all-to-all dominates and varies run-to-run, so the throughput percentages are directional. Measure at batch ≥ 4 for a stable comparison. The −9 GB memory saving holds at any batch.
+Liger, compile, and the two stacked all land within ~2% of each other (+30% to +32%, −9 GiB) — they target the same non-EP spans, so stacking adds little. These are batch-1 (communication-bound) numbers: DeepEP all-to-all dominates and varies run-to-run, so the throughput percentages are directional. Measure at batch ≥ 4 for a stable comparison. The −9 GiB memory saving holds at any batch.
 
 ## Why the speedup is bounded on EP MoE
 

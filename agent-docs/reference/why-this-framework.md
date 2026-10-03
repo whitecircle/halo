@@ -49,21 +49,21 @@ Megatron-Core stores `torch_dist` sharded checkpoints split by TP/PP/EP/ETP — 
 
 ### Published numbers in similar setups
 
-Vendor-reported figures beside Halo's, with the setup stated; only the Megatron-LM and Axolotl rows
-share hardware. B300 has 2.3× the bf16 peak of H100, so read a cross-GPU row as a ceiling on the
-gap, not the gap.
+Vendor-reported figures beside Halo's, with the setup stated. The NeMo AutoModel and transformers
+figures ran on H100; the Megatron-LM row and the last bullet ran on the same B300s as Halo. B300 has
+2.3× the bf16 peak of H100, so read a cross-GPU row as a ceiling on the gap, not the gap.
 
 - **gpt-oss-20b, seq 4096, bf16.** Halo: 24,456 tok/s/GPU at EP1 (8× B300, batch 4, GC off; 20,174
-  GC on) and 10,051 at EP8 (batch 4, GC on, 57 GB). NeMo AutoModel reports 13,058 on 8× H100 (FSDP
-  without EP, mock data, forced-balanced routing). Megatron-LM on the same 8× B300 (batch 2, GC off): OOM at EP1 where
-  Halo runs 27,707; 13,932 vs Halo 21,642 at EP2; 14,734 vs 11,856 at EP8
-  (Megatron ahead there), at 246 vs 158 GB peak at EP1 and 104 vs 58 GB at EP8.
+  GC on) and 10,051 at EP8 (batch 4, GC on, 57 GiB). NeMo AutoModel reports 13,058 on 8× H100 (FSDP
+  without EP, mock data, forced-balanced routing). Megatron-LM on the same 8× B300 in a separate batch-2, GC-off
+  sweep: OOM at EP1, where Halo runs 27,707 at 158 GB peak; 13,932 vs Halo 21,642 at EP2 (246 vs
+  104 GB); 14,734 vs 11,856 at EP8 (Megatron ahead there; 104 vs 58 GB).
 - **Qwen3-30B-A3B, bf16.** transformers' own expert-parallel path: 3,485 tok/s/GPU at 38.6 GB
   (8× H100, seq 2048, `tp_size=8`). Halo EP2 on 8× B300 at seq 4096: 6,898 / 11,343 / 14,536 at
   batch 1 / 2 / 4. NeMo AutoModel reports 12,040 on 8× H100 at EP8, seq 4096 (mock data,
   forced-balanced routing).
-- **Same hardware.** Gemma 4 26B-A4B and Mistral Small 4 119B against NeMo AutoModel, Axolotl,
-  Megatron Bridge, MS-SWIFT and Unsloth: [Throughput Benchmarks](../optimization/throughput-benchmarks.md#full-parameter-sft-framework-comparison).
+- **Same hardware.** Gemma 4 26B-A4B against NeMo AutoModel, Axolotl, Megatron Bridge, MS-SWIFT and
+  Unsloth on 2× B300, and Mistral Small 4 119B against Axolotl on 4× B300: [Throughput Benchmarks](../optimization/throughput-benchmarks.md#full-parameter-sft-framework-comparison).
   Laguna-S 2.1 on 4× B300: Halo 11,298 vs Axolotl 5,617 tok/s/GPU at 15% less memory. LFM2.5-8B-A1B:
   Halo 31,262 vs Axolotl 28,330 at seq 8192, 35,517 vs 29,520 at seq 16384.
 

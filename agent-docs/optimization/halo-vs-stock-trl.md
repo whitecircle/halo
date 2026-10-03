@@ -7,7 +7,7 @@ within ~10% (batch-1 EP steps are communication-bound and vary run to run), so c
 
 Unless a header says otherwise, every number is **gpt-oss-20b** (`unsloth/gpt-oss-20b-BF16`, 20.7B, 32
 experts, top_k=4) on **8× B300**, bf16, FA4 + Liger, `grouped_mm` experts, gradient checkpointing on, DeepEP
-elastic transport, as **tokens/s/GPU · peak GB**. Halo EP1 is dense DP=8 (`fsdp_shard_ep1_experts`); EP2/EP8
+elastic transport, as **tokens/s/GPU · peak GiB**. Halo EP1 is dense DP=8 (`fsdp_shard_ep1_experts`); EP2/EP8
 distribute experts.
 
 ## What differs between the two sides
@@ -26,7 +26,7 @@ The baseline gets the strongest stock options — ZeRO-3 and Liger's FLCE, which
 
 ## Throughput & memory (4k–16k)
 
-*GC-on · grouped GEMM · TRL ZeRO-3 · Halo ZeRO-2 (EP1 also at ZeRO-3) · elastic.* **tok/s/GPU · peak GB:**
+*GC-on · grouped GEMM · TRL ZeRO-3 · Halo ZeRO-2 (EP1 also at ZeRO-3) · elastic.* **tok/s/GPU · peak GiB:**
 
 ![Throughput: Halo vs stock TRL, 4k/16k](../assets/benchmarks/throughput_4k16k.png)
 
@@ -43,13 +43,13 @@ The baseline gets the strongest stock options — ZeRO-3 and Liger's FLCE, which
 - **EP1 and EP2 lead at 2.3–2.8× stock TRL** across every short/mid config, and the gap holds under batch
   scaling. EP8 is the one mode that regresses under batch: its dispatch cost grows with tokens/rank.
 
-    16k b1→b4, tok/s/GPU: EP1 18,304→21,386 z2 / 21,023 z3 at 161 / 122 GB, EP2 16,407→17,449,
-    TRL 6,513→7,796 at 66 GB; EP8 9,747→7,677.
+    16k b1→b4, tok/s/GPU: EP1 18,304→21,386 z2 / 21,023 z3 at 161 / 122 GiB, EP2 16,407→17,449,
+    TRL 6,513→7,796 at 66 GiB; EP8 9,747→7,677.
 
-- **EP8 trades throughput for memory** — 1.3–2.1× TRL at ~½ its memory (26 vs 48 GB at 4k·b1).
+- **EP8 trades throughput for memory** — 1.3–2.1× TRL at ~½ its memory (26 vs 48 GiB at 4k·b1).
 - **EP1 z3 isolates the framework gap** to AdamWBF16 + Halo's FSDP2+EP wrapper: both sides shard every
   param 8-way with the same kernel, and EP1 still leads 1.2× (4k·b2) to 2.7× (16k·b1) on throughput, and
-  on memory everywhere but 16k·b2 (68.4 vs 55.6 GB). **Prefer z2 at short sequence, z3 when memory-tight.**
+  on memory everywhere but 16k·b2 (68.4 vs 55.6 GiB). **Prefer z2 at short sequence, z3 when memory-tight.**
 
     TRL is slower because `full_shard` re-gathers all 20.7B params every microstep, a fixed cost a short
     step cannot hide. That is why EP1 z3 is −38% vs its own z2 at 4k·b1 but only −5% at 16k·b1.
@@ -82,7 +82,7 @@ TRL gets [FLCE](liger-kernels.md) for free from Liger's gpt-oss applier; Halo de
 cross-entropy (logits materialized) and turns FLCE on through `liger_kernel_config:
 {fused_linear_cross_entropy: true}` (`--fused_linear_ce` in the benchmark scripts).
 
-*b1 · GC-on · Halo z2 — tok/s/GPU · peak GB:*
+*b1 · GC-on · Halo z2 — tok/s/GPU · peak GiB:*
 
 | | FLCE off (Liger CE) | FLCE on (`--fused_linear_ce`) |
 |---|---|---|
@@ -93,17 +93,17 @@ cross-entropy (logits materialized) and turns FLCE on through `liger_kernel_conf
 | EP2 · 32k | 15,645 · 112 | 14,353 · 85.4 |
 | EP8 · 32k | 8,851 · 80.3 | 8,625 · 55.7 |
 
-The memory cut grows with sequence while the throughput cost shrinks (EP1: −20% tok/s for −14 GB at 16k,
-−7% for −30 GB at 32k), so **turn FLCE on past ~16k.**
+The memory cut grows with sequence while the throughput cost shrinks (EP1: −20% tok/s for −14 GiB at 16k,
+−7% for −30 GiB at 32k), so **turn FLCE on past ~16k.**
 
-On the dense path it is decisive: EP1 z3 at 128k·b1 is 183 → **67 GB**, and 256k·b1 goes
-**OOM → 5,728 · 112 GB**. FLCE is what enables 256k dense at all. Under EP+CP the per-rank sequence is
+On the dense path it is decisive: EP1 z3 at 128k·b1 is 183 → **67 GiB**, and 256k·b1 goes
+**OOM → 5,728 · 112 GiB**. FLCE is what enables 256k dense at all. Under EP+CP the per-rank sequence is
 already 16–32k, so FLCE is within noise (≤1%): it is a dense-path lever. Per-model applier defaults:
 [Liger Kernels](liger-kernels.md).
 
 ## Gradient checkpointing on vs off
 
-GC-off buys Halo **+9–30%** at ~2× peak memory (EP1 z2 16k·b1: 76 → 131 GB) — and +42% for EP1 z3 at 4k,
+GC-off buys Halo **+9–30%** at ~2× peak memory (EP1 z2 16k·b1: 76 → 131 GiB) — and +42% for EP1 z3 at 4k,
 where ZeRO-3's re-gather dominates a short step. Stock TRL gains only +5–9%, so Halo's lead widens GC-off.
 
 *b1 · GC-off, tok/s/GPU (the GC-on baselines are the tables above and below):*
@@ -114,7 +114,7 @@ where ZeRO-3's re-gather dominates a short step. Stock TRL gains only +5–9%, s
 | 16k | 6,939 | 22,073 | 20,271 | 20,635 | 12,669 |
 | 32k | 7,775 | 22,535 | 21,457 | 18,060 | 9,694 |
 
-It is a 4k–32k lever only: at 32k the GC-off footprints (130–220 GB) already crowd a B300's 288 GB, and
+It is a 4k–32k lever only: at 32k the GC-off footprints (130–220 GiB) already crowd a B300's 288 GB (268 GiB), and
 past ~64k tokens/rank nothing fits GC-off. EP8 32k·b1 GC-off fits only on the **legacy** transport
 (elastic OOMs).
 
@@ -126,7 +126,7 @@ TRL from 128k (the lead narrows as quadratic attention comes to dominate). `EP8+
 
 ![Long context throughput and memory at 64k/128k/256k](../assets/benchmarks/long_context.png)
 
-*32k–64k, every rank holds a full sequence (DP=8) — tok/s/GPU · peak GB:*
+*32k–64k, every rank holds a full sequence (DP=8) — tok/s/GPU · peak GiB:*
 
 | seq·b1 | stock TRL (z3) | **Halo EP1 (z2)** | Halo EP1 (z3) | Halo EP2 (z2) | Halo EP8 (z2) | EP1 vs TRL |
 |---|---|---|---|---|---|---|
@@ -135,7 +135,7 @@ TRL from 128k (the lead narrows as quadratic attention comes to dominate). `EP8+
 | 64k | 6,876 · 66 | **14,775 · 138** | 14,654 · 100 | 12,813 · 166 | 6,648 · 140¹ | **2.1×** |
 
 ¹ EP8 48k/64k via the **legacy** transport. EP1 ZeRO-3 trades ~1% throughput for a large memory cut over
-ZeRO-2 (64k: 100 vs 138 GB) — the better dense choice when memory is tight.
+ZeRO-2 (64k: 100 vs 138 GiB) — the better dense choice when memory is tight.
 
 *128k & 256k — stay dense (EP1 + FLCE) or split the sequence with CP:*
 
@@ -148,10 +148,10 @@ ZeRO-2 (64k: 100 vs 138 GB) — the better dense choice when memory is tight.
 | Halo dense CP-only (z3) | 3,279 · **32** | 1,836 · **56** |
 | Halo EP1 z2, EP8, EP8+CP2, EP8+TP8 | OOM / crash | OOM / crash |
 
-- **Dense EP1 z3 wins throughput at both lengths** and still beats TRL on memory (67 vs 93 GB, 112 vs 148).
+- **Dense EP1 z3 wins throughput at both lengths** and still beats TRL on memory (67 vs 93 GiB, 112 vs 148).
 - **More CP is strictly better past 64k**: `EP8+CP8` beats `EP8+CP4` on both axes at 128k — per-rank
   attention is quadratic, so halving the sequence more than pays for the extra all-gather.
-- **Dense CP-only z3 is the leanest point on the board** (32–56 GB across 128k→256k) and the only
+- **Dense CP-only z3 is the leanest point on the board** (32–56 GiB across 128k→256k) and the only
   long-context mode with no DeepEP dependency. Splitting 4-way instead of 8 trades memory for throughput
   (256k z3: CP4 2,257·98 vs CP8 1,836·56).
 - `EP1 z2` OOMs (ZeRO-2 keeps ~40 GB of params resident); `EP8`, `EP8+CP2` and `EP8+TP8` put 128k tokens/rank through the dispatch (TP shards attention, not
@@ -183,10 +183,10 @@ carries only `top_k/num_experts` of the batch per layer instead of a full-tensor
 
 | Qwen3-30B b1 | Stock TRL (z3) | Halo EP2 (z2) | Halo EP8 (z2) |
 |---|---|---|---|
-| 4k | 3,787 · 63 GB | **6,898** · 112 GB (1.82×) | 6,348 · 33 GB (1.68×, ½ mem) |
-| 16k | 8,837 · 65 GB | **12,127** · 116 GB (1.37×) | 8,089 · 61 GB |
-| 32k | 9,540 · 68 GB | **10,445** · 138 GB (1.09×) | 7,356 · 100 GB |
-| 64k | 7,084 · 73 GB | **7,579** · 190 GB (1.07×) | OOM → EP8+CP4 |
+| 4k | 3,787 · 63 GiB | **6,898** · 112 GiB (1.82×) | 6,348 · 33 GiB (1.68×, ½ mem) |
+| 16k | 8,837 · 65 GiB | **12,127** · 116 GiB (1.37×) | 8,089 · 61 GiB |
+| 32k | 9,540 · 68 GiB | **10,445** · 138 GiB (1.09×) | 7,356 · 100 GiB |
+| 64k | 7,084 · 73 GiB | **7,579** · 190 GiB (1.07×) | OOM → EP8+CP4 |
 
 EP2 is the consistent throughput winner (1.07–1.82×), shrinking as the sequence grows. Unlike gpt-oss,
 TRL's ZeRO-3 stays memory-competitive here, so Qwen is an EP *throughput* win, not a memory one.
@@ -195,7 +195,7 @@ Under batch at 4k (b1→b2→b4) EP2 holds the lead: 6,898 → 11,343 → 14,536
 EP8 (6,348 → 8,382 → 8,904) falls behind TRL by b4.
 
 CP needs `cp_size` to divide Qwen's 4 KV heads, so 64k splits with EP8+CP4. Dense EP1 z3 at 4k·b1 is
-6,395 · 35 GB, 1.69× TRL at half the memory.
+6,395 · 35 GiB, 1.69× TRL at half the memory.
 
 ## Convergence
 

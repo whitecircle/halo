@@ -72,7 +72,7 @@ Throughput is **real (non-padding) tokens/s/GPU** — `attention_mask.sum()`, no
 | Packing | 10,072 | 0.78s | **9.2×** |
 | Padding-Free | 2,547 | 0.79s | 2.3× |
 
-Peak memory is ~115.8 GB across all three (weights + optimizer states dominate). At ~75% padding waste, packing wins by filling each max_length block with ~4 real sequences and cutting the step count. Padding-free strips the padding via varlen FA, so it processes only real tokens per step at lower memory than packing, while keeping per-sample boundaries (no cross-sequence attention).
+Peak memory is ~115.8 GiB across all three (weights + optimizer states dominate). At ~75% padding waste, packing wins by filling each max_length block with ~4 real sequences and cutting the step count. Padding-free strips the padding via varlen FA, so it processes only real tokens per step at lower memory than packing, while keeping per-sample boundaries (no cross-sequence attention).
 
 The table uses `--attn_implementation flash_attention_2`. FA4 is also valid: FA4 + packing + EP is safe (`warm_attention_kernels` compiles the FA4 kernels behind a barrier at load — see [Flash Attention](flash-attention.md#known-issues)). With `--attn_implementation` unset (the default), the benchmark auto-detects FA4 on Blackwell (`tests/common/benchmark_args.py`).
 
