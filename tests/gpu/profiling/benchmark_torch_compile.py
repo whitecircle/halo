@@ -1,45 +1,36 @@
 #!/usr/bin/env python
 """
-Benchmark: Liger kernels x torch.compile 2x2 matrix on GptOss-20B MoE.
-
-Tests four optimization combinations for SFT training with Expert Parallelism
-on a MoE model, measuring MFU, TFLOPS, throughput, and memory for each:
+Benchmark: one cell of the Liger kernels x torch.compile 2x2 matrix for EP MoE SFT.
 
     neither       - No Liger, no compile (true baseline)
     liger_only    - Liger kernels enabled
     compile_only  - torch.compile enabled
     liger_compile - Both Liger + compile
 
-Usage:
-    # Run all 4 modes
-    torchrun --nproc_per_node=2 \
-        tests/gpu/profiling/benchmark_torch_compile.py --ep 2 --seq 4096 --steps 10
+Each process runs exactly one mode: Liger patches the model classes process-wide, so a second
+mode in the same process would inherit the first one's kernels. Loop over the modes in the shell:
 
-    # Run a single mode
-    torchrun --nproc_per_node=2 \
-        tests/gpu/profiling/benchmark_torch_compile.py --ep 2 --seq 4096 --steps 10 \
-        --mode liger_compile
+    for mode in neither liger_only compile_only liger_compile; do
+      torchrun --nproc_per_node=2 tests/gpu/profiling/benchmark_torch_compile.py \
+          --model qwen3-30b-a3b --ep 2 --seq 16384 --steps 20 --warmup 5 --mode "$mode"
+    done
 
-    # Custom warmup steps
-    torchrun --nproc_per_node=2 \
-        tests/gpu/profiling/benchmark_torch_compile.py --ep 2 --seq 4096 --steps 12 \
-        --warmup 3
+A compiled cell recompiles for dynamic shapes when a rank first meets a second sequence length,
+within the first few steps; keep --warmup past it, or the recompile lands in the average. The
+trainer's step logs carry a cumulative train_runtime for every step, warmup included.
 
 Requirements:
-    - 2x GPUs with >=80 GB memory each
-    - DeepEP installed
-    - Model: unsloth/gpt-oss-20b-BF16 (auto-downloaded)
+    - DeepEP; the Qwen3-30B-A3B seq-16384 example above peaks at 127-173 GiB per GPU
+    - The --model checkpoint (auto-downloaded)
 """
 
 import argparse
-import gc
 import random
 import sys
 import time
 import traceback
 
 import torch
-import torch.distributed as dist
 from accelerate import PartialState
 from datasets import Dataset
 from transformers import AutoTokenizer
@@ -59,10 +50,17 @@ from tests.common.distributed import (
 )
 from tests.common.models import DEFAULT_MODEL, MODEL_CONFIGS
 from tests.common.reporting import emit_benchmark, format_benchmark_report
+from tests.common.utils import cleanup_memory, log
 
 # Constants
 
-ALL_MODES = ["neither", "liger_only", "compile_only", "liger_compile"]
+# mode -> (Liger, torch.compile)
+MODES = {
+    "neither": (False, False),
+    "liger_only": (True, False),
+    "compile_only": (False, True),
+    "liger_compile": (True, True),
+}
 
 SEED = 42
 NUM_SAMPLES = 64
@@ -183,46 +181,16 @@ def create_synthetic_sft_dataset(
 # Benchmark Logic
 
 
-def run_benchmark_mode(
-    mode: str,
-    args: argparse.Namespace,
-    tokenizer,
-    dataset: Dataset,
-    rank: int,
-    local_rank: int,
-    output_dir: str,
-) -> dict | None:
-    """Run a single benchmark mode.
-
-    Loads the model fresh, configures Liger/compile per mode, trains for
-    the specified number of steps, and returns metrics from EfficiencyCallback.
-
-    Args:
-        mode: One of "neither", "liger_only", "compile_only", "liger_compile".
-        args: Parsed CLI arguments.
-        tokenizer: HuggingFace tokenizer.
-        dataset: Training dataset.
-        rank: Global rank.
-        local_rank: Local rank.
-        output_dir: The trainer's output directory, allocated and reclaimed by the caller.
-
-    Returns:
-        Dict with benchmark metrics, or None on failure.
-    """
-    use_liger = mode in ("liger_only", "liger_compile")
-    use_compile = mode in ("compile_only", "liger_compile")
-
-    if rank == 0:
-        print(f"\n{'=' * 60}")
-        print(f"  MODE: {mode}")
-        print(f"  Liger: {'ON' if use_liger else 'OFF'}, Compile: {'ON' if use_compile else 'OFF'}")
-        print(f"{'=' * 60}")
-
-    # --- Load model with EP (Liger applied pre-loading via load_distributed_model) ---
-    model_cfg = MODEL_CONFIGS[args.model]
-    model_name = args.model_path or model_cfg["hf_name"]
+def run_benchmark(
+    args: argparse.Namespace, model_name: str, full_params: float, tokenizer, dataset: Dataset, output_dir: str
+) -> None:
+    """Load the model for ``args.mode``, train ``args.steps`` steps and report the EfficiencyCallback metrics."""
+    use_liger, use_compile = MODES[args.mode]
+    cell = f"{args.mode}_{args.compile_mode}" if use_compile else args.mode
+    log(f"  Cell: {cell} (Liger {'ON' if use_liger else 'OFF'})")
     parallelism_config = ParallelismConfig(ep_size=args.ep)
 
+    # Liger is applied pre-loading by load_distributed_model.
     model, _ = load_distributed_model(
         model_name_or_path=model_name,
         parallelism_config=parallelism_config,
@@ -230,13 +198,9 @@ def run_benchmark_mode(
         trust_remote_code=True,
         use_liger_kernel=use_liger,
     )
+    trainable = sum(p.numel() for p in model.parameters() if p.requires_grad)
+    log(f"  Model loaded: {trainable / 1e9:.2f}B params, {torch.cuda.memory_allocated() / 1e9:.1f} GB")
 
-    if rank == 0:
-        trainable = sum(p.numel() for p in model.parameters() if p.requires_grad)
-        mem_gb = torch.cuda.memory_allocated() / 1e9
-        print(f"  Model loaded: {trainable / 1e9:.2f}B params, {mem_gb:.1f} GB")
-
-    # --- SFT Config ---
     sft_config = SFTConfig(
         output_dir=output_dir,
         per_device_train_batch_size=BATCH_SIZE,
@@ -256,22 +220,22 @@ def run_benchmark_mode(
         dataloader_num_workers=0,
         ddp_find_unused_parameters=True,
         fsdp="",
-        # torch.compile settings (applied by DistributedTrainerMixin after FSDP)
-        torch_compile=use_compile,
-        torch_compile_backend="inductor",
-        torch_compile_mode="reduce-overhead",
+        # HF turns torch_compile on whenever a backend or mode is set, so an eager mode passes neither;
+        # DistributedTrainerMixin applies the compile after FSDP wrapping.
+        **(
+            {"torch_compile": True, "torch_compile_backend": "inductor", "torch_compile_mode": args.compile_mode}
+            if use_compile
+            else {}
+        ),
     )
     # Disable TRL's internal Liger re-application
     sft_config.use_liger_kernel = False
 
-    # --- Efficiency Callback ---
     efficiency_callback = EfficiencyCallback(
         parallelism_config,
         n_warmup_steps=args.warmup,
-        num_full_model_params=model_cfg["full_params"],
+        num_full_model_params=full_params,
     )
-
-    # --- Create Trainer ---
     trainer = DistributedSFTTrainer(
         model=model,
         args=sft_config,
@@ -280,136 +244,28 @@ def run_benchmark_mode(
         callbacks=[efficiency_callback],
         parallelism_config=parallelism_config,
     )
+    log(f"  Trainer created: EP={args.ep}, DP={parallelism_config.data_parallel_size}")
+    log(f"  Training for {args.steps} steps (warmup={args.warmup})...")
 
-    if rank == 0:
-        print(f"  Trainer created: EP={args.ep}, DP={parallelism_config.data_parallel_size}")
-        print(f"  Training for {args.steps} steps (warmup={args.warmup})...")
-
-    # --- Train ---
     barrier()
     torch.cuda.reset_peak_memory_stats()
-
     train_start = time.perf_counter()
     trainer.train()
     train_elapsed = time.perf_counter() - train_start
 
-    # --- Collect metrics ---
-    results = None
-    if rank == 0:
-        results = {
-            "mode": mode,
-            "liger": use_liger,
-            "compile": use_compile,
-            "avg_mfu_percent": efficiency_callback.mfu.avg_mfu_percent,
-            "avg_smfu_percent": efficiency_callback.smfu.avg_smfu_percent,
-            "avg_tflops": efficiency_callback.mfu.avg_tflops_per_sec,
-            "avg_active_tflops": efficiency_callback.smfu.avg_smfu_tflops_per_sec,
-            "avg_tps_gpu": efficiency_callback.tps.avg_tokens_per_second,
-            "avg_tps_cluster": efficiency_callback.tps.avg_cluster_tokens_per_second,
-            "avg_step_time_seconds": efficiency_callback.time.avg_step_time_seconds,
-            "peak_memory_gb": efficiency_callback.memory.peak_allocated_gb,
-            "local_params_b": efficiency_callback.mfu.local_params / 1e9,
-            "total_time_sec": train_elapsed,
-            "gpu_model": efficiency_callback.mfu.gpu_model,
-        }
-
-        print(f"\n  --- {mode} Results ---")
-        print("\n" + format_benchmark_report(efficiency_callback))
-        emit_benchmark(f"compile_{mode}_{args.model}_ep{args.ep}_s{args.seq}", efficiency_callback)
-        print(f"  Total Time:     {results['total_time_sec']:.1f}s")
-
-    # --- Cleanup ---
-    if hasattr(trainer, "cleanup_ep"):
-        trainer.cleanup_ep()
-    barrier()
-    del trainer
-    del model
-    gc.collect()
-    torch.cuda.empty_cache()
-    torch.cuda.synchronize()
-
-    # Allow GPU memory to settle between modes
-    barrier()
-
-    return results
-
-
-# Results Summary
-
-
-def print_summary(all_results: list[dict], args: argparse.Namespace):
-    """Print comparison table of all benchmark modes.
-
-    Args:
-        all_results: List of result dicts from each mode.
-        args: Parsed CLI arguments.
-    """
-    model_cfg = MODEL_CONFIGS[args.model]
-    model_name = args.model_path or model_cfg["hf_name"]
-    print(f"\n{'=' * 80}")
-    print("  SUMMARY: Liger x Compile Benchmark")
-    print(f"  Model: {model_name}, EP={args.ep}, SeqLen={args.seq}, Steps={args.steps}")
-    if all_results:
-        print(f"  GPU: {all_results[0].get('gpu_model', 'Unknown')}")
-    print(f"{'=' * 80}")
-
-    # Header
-    print(
-        f"\n  {'Mode':<16} {'Liger':>6} {'Compile':>8} {'MFU%':>6} {'TFLOPS':>7} "
-        f"{'Mem GB':>7} {'Step(s)':>8} {'TPS/GPU':>8}"
-    )
-    print(f"  {'-' * 16} {'-' * 6} {'-' * 8} {'-' * 6} {'-' * 7} {'-' * 7} {'-' * 8} {'-' * 8}")
-
-    baseline_mfu = None
-    baseline_mem = None
-    baseline_step = None
-
-    for r in all_results:
-        liger_str = "ON" if r["liger"] else "OFF"
-        compile_str = "ON" if r["compile"] else "OFF"
-
-        if r["mode"] == "neither":
-            baseline_mfu = r["avg_mfu_percent"]
-            baseline_mem = r["peak_memory_gb"]
-            baseline_step = r["avg_step_time_seconds"]
-
-        print(
-            f"  {r['mode']:<16} {liger_str:>6} {compile_str:>8} "
-            f"{r['avg_mfu_percent']:>5.1f}% {r['avg_tflops']:>7.1f} "
-            f"{r['peak_memory_gb']:>6.1f}  {r['avg_step_time_seconds']:>7.2f}s "
-            f"{r['avg_tps_gpu']:>7.0f}"
-        )
-
-    # Relative improvements vs baseline
-    if baseline_mfu is not None and baseline_mfu > 0 and len(all_results) > 1:
-        print(f"\n  Relative to baseline ({all_results[0]['mode']}):")
-        print(f"  {'Mode':<16} {'MFU delta':>10} {'Mem delta':>10} {'Step delta':>11}")
-        print(f"  {'-' * 16} {'-' * 10} {'-' * 10} {'-' * 11}")
-
-        for r in all_results[1:]:
-            mfu_delta = r["avg_mfu_percent"] - baseline_mfu
-            mfu_pct = (mfu_delta / baseline_mfu) * 100 if baseline_mfu > 0 else 0
-            mem_delta = r["peak_memory_gb"] - baseline_mem if baseline_mem else 0
-            step_delta_pct = (
-                ((r["avg_step_time_seconds"] - baseline_step) / baseline_step) * 100
-                if baseline_step and baseline_step > 0
-                else 0
-            )
-
-            print(
-                f"  {r['mode']:<16} {mfu_delta:>+5.1f}% ({mfu_pct:>+4.0f}%) "
-                f"{mem_delta:>+6.1f} GB  {step_delta_pct:>+6.0f}% step"
-            )
-
-    print(f"\n{'=' * 80}")
+    log(f"\n  --- {cell} Results ---")
+    log("\n" + format_benchmark_report(efficiency_callback))
+    emit_benchmark(f"compile_{cell}_{args.model}_ep{args.ep}_s{args.seq}", efficiency_callback)
+    log(f"  Total Time:     {train_elapsed:.1f}s")
+    trainer.cleanup_ep()
 
 
 # Main
 
 
-def main():
+def main() -> int:
     parser = argparse.ArgumentParser(
-        description="Liger x torch.compile 2x2 benchmark for MoE models.",
+        description="One cell of the Liger x torch.compile 2x2 benchmark for MoE models.",
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     parser.add_argument(
@@ -418,101 +274,63 @@ def main():
     parser.add_argument(
         "--model_path", type=str, default=None, help="Override model path (instead of using MODEL_CONFIGS)"
     )
+    parser.add_argument("--mode", type=str, required=True, choices=list(MODES), help="Liger x compile cell to run")
+    parser.add_argument(
+        "--compile_mode",
+        type=str,
+        default="reduce-overhead",
+        choices=["default", "reduce-overhead", "max-autotune", "max-autotune-no-cudagraphs"],
+        help="torch.compile mode for the compiled cells (default: reduce-overhead, the trainer's own fallback)",
+    )
     parser.add_argument("--ep", type=int, default=2, help="Expert parallel size (default: 2)")
     parser.add_argument("--seq", type=int, default=8192, help="Sequence length (default: 8192)")
-    parser.add_argument("--steps", type=int, default=10, help="Number of training steps per mode (default: 10)")
-    parser.add_argument("--warmup", type=int, default=2, help="Warmup steps excluded from metrics (default: 2)")
-    parser.add_argument(
-        "--mode",
-        type=str,
-        default=None,
-        choices=ALL_MODES,
-        help="Run a single mode instead of all four (default: run all)",
-    )
+    parser.add_argument("--steps", type=int, default=20, help="Number of training steps (default: 20)")
+    parser.add_argument("--warmup", type=int, default=5, help="Warmup steps excluded from metrics (default: 5)")
     args = parser.parse_args()
 
-    # --- Distributed setup ---
     rank, world_size, local_rank = init_distributed()
     PartialState()
 
     model_cfg = MODEL_CONFIGS[args.model]
     model_name = args.model_path or model_cfg["hf_name"]
 
-    if rank == 0:
-        print(f"\n{'#' * 70}")
-        print("  Liger x torch.compile Benchmark")
-        print(f"  Model: {model_name} ({model_cfg['full_params'] / 1e9:.1f}B params)")
-        print(f"  EP={args.ep}, SeqLen={args.seq}, Steps={args.steps}, Warmup={args.warmup}")
-        print(f"  World size: {world_size}")
-        print(f"  GPU: {torch.cuda.get_device_name(local_rank)}")
-        print(f"  GPU memory: {torch.cuda.get_device_properties(local_rank).total_memory / 1e9:.0f} GB")
-        print(f"  PyTorch: {torch.__version__}")
-        print(f"{'#' * 70}")
+    log(f"\n{'#' * 70}")
+    log("  Liger x torch.compile Benchmark")
+    log(f"  Model: {model_name} ({model_cfg['full_params'] / 1e9:.1f}B params)")
+    log(f"  EP={args.ep}, SeqLen={args.seq}, Steps={args.steps}, Warmup={args.warmup}")
+    log(f"  World size: {world_size}")
+    log(f"  GPU: {torch.cuda.get_device_name(local_rank)}")
+    log(f"  PyTorch: {torch.__version__}")
+    log(f"{'#' * 70}")
 
     if world_size < args.ep:
-        if rank == 0:
-            print(f"\nERROR: Need at least {args.ep} GPUs, got {world_size}")
-        dist.destroy_process_group()
+        log(f"\nERROR: Need at least {args.ep} GPUs, got {world_size}")
+        teardown_distributed()
         return 1
 
+    failed = False
     output_dir, cache_dir = setup_cache_dirs("bench_compile", rank)
     try:
-        # --- Ensure model is cached ---
-        if rank == 0:
-            print("\nEnsuring model is downloaded...")
         ensure_model_downloaded(model_name, rank)
-
-        # --- Load tokenizer ---
         tokenizer = AutoTokenizer.from_pretrained(model_name, trust_remote_code=True)
         if tokenizer.pad_token is None:
             tokenizer.pad_token = tokenizer.eos_token
 
-        # --- Create dataset (shared across all modes) ---
         dataset = create_synthetic_sft_dataset(tokenizer, args.seq)
-        if rank == 0:
-            print(f"Dataset created: {len(dataset)} samples, target seq_len={args.seq}")
-            sample_tokens = len(tokenizer.encode(dataset[0]["text"]))
-            print(f"Sample token count: {sample_tokens}")
+        log(f"Dataset created: {len(dataset)} samples, target seq_len={args.seq}")
+        log(f"Sample token count: {len(tokenizer.encode(dataset[0]['text']))}")
 
-        # --- Determine modes to run ---
-        modes = [args.mode] if args.mode else ALL_MODES
-
-        if rank == 0:
-            print(f"\nModes to benchmark: {modes}")
-
-        # --- Run benchmarks ---
-        all_results = []
-        failed = False
-        for mode in modes:
-            try:
-                result = run_benchmark_mode(mode, args, tokenizer, dataset, rank, local_rank, output_dir)
-                if result is not None:
-                    all_results.append(result)
-            except Exception as e:
-                failed = True
-                if rank == 0:
-                    print(f"\n  ERROR in mode '{mode}': {e}")
-                    traceback.print_exc()
-                # Clean up and continue to next mode
-                gc.collect()
-                torch.cuda.empty_cache()
-                barrier()
-                continue
-
-        # --- Print summary ---
-        if rank == 0 and len(all_results) > 0:
-            print_summary(all_results, args)
-    finally:
-        cleanup_dirs(output_dir, cache_dir)
-
-    # On rank 0 a run with no successful modes is a failure; other ranks only
-    # collect results on rank 0, so they gate on whether any mode raised.
-    if rank == 0 and not all_results:
+        run_benchmark(args, model_name, model_cfg["full_params"], tokenizer, dataset, output_dir)
+    except Exception as e:
         failed = True
-
-    # --- Cleanup ---
-    barrier()
-    teardown_distributed()
+        log(f"\nBENCHMARK FAILED: {e}")
+        if rank == 0:
+            traceback.print_exc()
+    finally:
+        cleanup_memory()
+        cleanup_dirs(output_dir, cache_dir)
+        barrier()
+        teardown_distributed()
 
     return 1 if failed else 0
 

@@ -43,7 +43,7 @@ SYS_PATH_GROWERS = {"insert", "append", "extend"}
 BOOTSTRAP_EXEMPT = {"tests/conftest.py"}
 # The profiling benchmarks are not suites: they report a perf table to stdout by design, and nothing
 # selects them by verdict.
-SUMMARY_EXEMPT = {"tests/gpu/profiling/benchmark_collators.py", "tests/gpu/profiling/benchmark_torch_compile.py"}
+SUMMARY_EXEMPT = {"tests/gpu/profiling/benchmark_collators.py"}
 
 
 # Modules a CPU-tier collection may load from tests/gpu/, relative to it: the launcher side, never a
