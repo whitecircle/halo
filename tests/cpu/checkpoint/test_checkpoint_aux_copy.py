@@ -26,11 +26,15 @@ training run (an N-way model merge).
     python tests/cpu/checkpoint/test_checkpoint_aux_copy.py
 """
 
+import os
+from pathlib import Path
+
 import pytest
 import torch
 from safetensors.torch import load_file, save_file
 from transformers.trainer import SCHEDULER_NAME
 
+from src.checkpoint.atomic import atomic_torch_save
 from src.checkpoint.format import (
     ADAPTER_SAFETENSORS_FILE,
     REFERENCE_LOGPS_FILE,
@@ -231,6 +235,41 @@ def test_a_leftover_staged_card_is_not_carried(checkpoint_dir, tmp_path):
     copy_checkpoint_aux_files(str(checkpoint_dir), str(out))
     assert not (out / leftover).exists(), "a staged card from a crashed write was carried into the export"
     assert (out / "config.json").exists(), "the skip took the real aux files with it"
+
+
+@pytest.mark.parametrize("include_resume_sidecars", [True, False], ids=["resume-source", "n-way-merge"])
+@pytest.mark.parametrize("legacy_name", [False, True], ids=["current-staging", "suffixless-staging"])
+def test_an_interrupted_reference_stage_is_not_exported(
+    checkpoint_dir, tmp_path, monkeypatch, include_resume_sidecars, legacy_name
+):
+    staged_paths = []
+    original_replace = os.replace
+
+    def record_stage(source, destination):
+        staged_paths.append(source)
+        original_replace(source, destination)
+
+    sidecar = checkpoint_dir / REFERENCE_LOGPS_FILE
+    with monkeypatch.context() as patch:
+        patch.setattr(os, "replace", record_stage)
+        atomic_torch_save(str(sidecar), lambda: {"values": torch.tensor([-1.0, -2.0])})
+    assert len(staged_paths) == 1
+    stage = Path(staged_paths[0])
+    if legacy_name:
+        stage = checkpoint_dir / f".{REFERENCE_LOGPS_FILE}.interrupted"
+    stage.write_bytes(b"an interrupted sidecar, not a complete reference")
+    complete = sidecar.read_bytes()
+    out = tmp_path / "merged"
+    out.mkdir()
+
+    copy_checkpoint_aux_files(str(checkpoint_dir), str(out), include_resume_sidecars=include_resume_sidecars)
+
+    assert not (out / stage.name).exists(), "a crashed reference write was carried into the export"
+    assert (out / "config.json").exists(), "the skip also removed real aux files"
+    if include_resume_sidecars:
+        assert (out / REFERENCE_LOGPS_FILE).read_bytes() == complete
+    else:
+        assert not (out / REFERENCE_LOGPS_FILE).exists()
 
 
 def test_foreign_framework_exports_are_not_carried(checkpoint_dir, tmp_path):

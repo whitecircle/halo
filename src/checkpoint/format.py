@@ -30,6 +30,7 @@ from transformers.conversion_mapping import get_model_conversion_mapping
 from transformers.core_model_loading import PrefixChange, revert_weight_conversion
 from transformers.trainer_utils import PREFIX_CHECKPOINT_DIR
 
+from src.checkpoint.atomic import is_staged_file
 from src.checkpoint.config_export import save_model_config
 from src.checkpoint.model_card import is_staged_card, tag_exported_model_card
 from src.models.moe_balancing import balancing_param_keys
@@ -466,7 +467,7 @@ def copy_checkpoint_aux_files(
     carries weights no caller rewrites, and filtering them out leaves ``modules.json`` pointing at
     modules that no longer exist. Three kinds of directory stay behind: a nested ``checkpoint-N``
     (resume state rather than the artifact), a vendor weight dump, and a hidden one. So does a card a
-    crashed tagging write left staged.
+    crashed tagging write left staged, or a reference sidecar's interrupted staging file.
 
     ``output_dir`` nested inside ``input_dir`` raises: the walk would copy the destination into
     itself until the disk fills.
@@ -500,7 +501,11 @@ def copy_checkpoint_aux_files(
         keep_as_sidecar = include_resume_sidecars and (
             name in _RESUME_SIDECAR_FILES or name.startswith(_RESUME_SIDECAR_PREFIXES)
         )
-        if (skip_as_weight and not keep_as_sidecar) or is_staged_card(name):
+        if (
+            (skip_as_weight and not keep_as_sidecar)
+            or is_staged_card(name)
+            or is_staged_file(name, REFERENCE_LOGPS_FILE)
+        ):
             continue
         if os.path.isfile(src):
             shutil.copy2(src, os.path.join(output_dir, name))

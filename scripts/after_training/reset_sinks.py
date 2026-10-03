@@ -35,7 +35,7 @@ from src.checkpoint.format import (
 )
 from src.checkpoint.model_card import tag_exported_model_card
 from src.checkpoint.tool_io import (
-    STAGING_SUFFIX,
+    PUBLISH_STAGING_SUFFIX,
     clear_staging_path,
     iter_checkpoint_tensors,
     preflight_model_load_resources,
@@ -209,7 +209,7 @@ def _swap_staged_checkpoint(staging_dir: Path, output_dir: Path) -> None:
     published = False
     for name in os.listdir(staging_dir):
         staged, final = staging_dir / name, output_dir / name
-        clone = staging_dir / f"{name}{STAGING_SUFFIX}"
+        clone = staging_dir / f"{name}{PUBLISH_STAGING_SUFFIX}"
         try:
             if staged.is_dir():
                 shutil.copytree(staged, clone)
