@@ -69,16 +69,16 @@ def _worker(rank: int, tmp_dir: str) -> None:
         window.append(time.monotonic())
         time.sleep(READ_SECONDS)
         window.append(time.monotonic())
-        return {"state": {}, "param_groups": []}, True
+        return {"state": {}, "param_groups": []}, None
 
     store._read_shard = read
-    _osd, ok = store._read_local_state(tmp_dir, os.path.join(tmp_dir, "optimizer_shard_00000.pt"))
+    _osd, failure = store._read_local_state(tmp_dir, os.path.join(tmp_dir, "optimizer_shard_00000.pt"))
     # As ``load`` does: the store server lives in rank 0's process, so no rank may leave while a
     # peer still has store work (the throttle's own bookkeeping) to do.
     dist.barrier()
 
     with open(os.path.join(tmp_dir, f"window_{rank}.txt"), "w") as fh:
-        fh.write(f"{ok}|{window[0]}|{window[1]}")
+        fh.write(f"{failure}|{window[0]}|{window[1]}")
 
 
 def _windows(tmp_path) -> list[tuple[float, float]]:
@@ -87,8 +87,8 @@ def _windows(tmp_path) -> list[tuple[float, float]]:
     windows = []
     for rank in range(WORLD_SIZE):
         with open(os.path.join(str(tmp_path), f"window_{rank}.txt")) as fh:
-            ok, start, end = fh.read().split("|")
-        assert ok == "True", f"rank {rank} did not complete its read"
+            failure, start, end = fh.read().split("|")
+        assert failure == "None", f"rank {rank} did not complete its read: {failure}"
         windows.append((float(start), float(end)))
     return windows
 

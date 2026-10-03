@@ -232,9 +232,9 @@ def test_dead_knobs_are_rejected_not_ignored():
             parser.parse_dict({key: 2})
 
 
-@pytest.mark.parametrize("field_name", ["save_max_shard_size", "overwrite_output_dir"])
+@pytest.mark.parametrize("field_name", ["save_max_shard_size", "overwrite_output_dir", "allow_optimizer_warm_restart"])
 def test_distributed_only_knob_is_forwarded_to_the_training_config(field_name):
-    """Both knobs are declared ONLY on DistributedArguments, but every consumer reads them off the
+    """These knobs are declared ONLY on DistributedArguments, but every consumer reads them off the
     HF/TRL training config (``self.args`` / ``training_config``). The parser routes a YAML key only
     to the dataclass declaring it, so without ``init_training_script``'s forward the reads always
     take their ``getattr(..., default)`` fallback and the knobs are unsettable in practice."""

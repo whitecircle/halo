@@ -37,6 +37,11 @@ warm restart instead: weights and learning-rate schedule restored, optimizer
 moments fresh. MoE router-balancing state round-trips automatically where it
 applies.
 
+If the fingerprint matches but restoring the shards fails on some rank (a
+truncated shard or a CUDA OOM, for example), the resume stops on every rank with
+an error naming those ranks. Fix the cause and resume again, or set `allow_optimizer_warm_restart: true`
+to accept fresh optimizer moments.
+
 Every torchrun resume at the default `use_grouped_gemm: true` (dense included),
 and every EP, TP or CP resume, rebuilds the model *from* the checkpoint rather than
 loading weights back into a running model, which the fused-expert and CP-wrapped

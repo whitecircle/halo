@@ -131,9 +131,9 @@ def init_training_script(
         **parallelism_kwargs,
     )
 
-    # The parser routes a YAML key only to the dataclass declaring it: these two are declared on
+    # The parser routes a YAML key only to the dataclass declaring it: these are declared on
     # DistributedArguments but read off the training config, so without the forward they are unsettable.
-    for field_name in ("save_max_shard_size", "overwrite_output_dir"):
+    for field_name in ("save_max_shard_size", "overwrite_output_dir", "allow_optimizer_warm_restart"):
         setattr(training_config, field_name, getattr(dist_args, field_name))
 
     mode_suffix = parallelism_config.mode_string or "standard"

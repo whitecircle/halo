@@ -99,6 +99,8 @@ class CheckpointingMixin:
             tp_size=config.tp_size,
             super_load_from_checkpoint=_model_arg_tolerant(super()._load_from_checkpoint),
             super_load_optimizer_and_scheduler=super()._load_optimizer_and_scheduler,
+            # Forwarded onto the training config by the entry scripts; a config built elsewhere keeps the raise.
+            allow_optimizer_warm_restart=getattr(self.args, "allow_optimizer_warm_restart", False),
         )
 
     def _checkpoint_loader(self) -> CheckpointLoader:

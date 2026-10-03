@@ -79,3 +79,6 @@ class CheckpointLoadContext:
     # Bound base-Trainer fallbacks, reaching super() without holding the trainer.
     super_load_from_checkpoint: Callable[..., None]
     super_load_optimizer_and_scheduler: Callable[..., None]
+
+    # A shard restore that fails under a matching topology warm-restarts instead of failing the resume.
+    allow_optimizer_warm_restart: bool = False

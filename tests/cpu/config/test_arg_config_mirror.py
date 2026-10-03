@@ -86,6 +86,7 @@ _NOT_FORWARDED = {
     "save_sharded_ep": "trainer save kwargs",
     "save_max_shard_size": "init_training_script -> training_config",
     "overwrite_output_dir": "init_training_script -> training_config",
+    "allow_optimizer_warm_restart": "init_training_script -> training_config",
     "reset_sinks": "model loading / attn selection",
     "train_sinks": "model loading (SinksPolicy.from_flags)",
     "text_only_model": "model loading (load_model_for_training -> resolve_auto_model_class text_only)",

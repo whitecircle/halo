@@ -14,17 +14,22 @@ loss before the save and after the reload (:func:`fixed_batch_loss`). A resume t
 optimizer and scheduler state the checkpoint restored, snapshotted before the first resumed step
 (:class:`ResumeCapture`) and graded by :func:`resume_continuity_checks`. The file probes (:func:`model_save_checks`, :func:`resume_checkpoint_checks`)
 name what a save must have left on disk before any of that is read.
+
+The CPU tests of the per-rank optimizer shard store save and resume a tiny model through
+:func:`shard_store_context`, which routes it to the sharded path without FSDP.
 """
 
 import math
 import os
 
 import torch
+import torch.nn as nn
 from transformers import TrainerCallback
 from transformers.trainer import OPTIMIZER_NAME, SCHEDULER_NAME, TRAINER_STATE_NAME
 from transformers.utils import CONFIG_NAME
 
 from src.checkpoint.format import SAFETENSORS_INDEX_FILE, has_whole_model_weight_file, load_full_state_dict
+from src.distributed.checkpoint.context import CheckpointLoadContext
 from src.distributed.fsdp import reshard_fsdp2_modules
 from tests.common.peft_helpers import snapshot_adapters, unwrap
 from tests.common.utils import local_optimizer_state, log, optimizer_state_matches
@@ -37,6 +42,8 @@ FIXED_TEXT_BATCH_MAX_TOKENS = 64
 # the writer so a rename fails here instead of agreeing with itself.
 OPTIMIZER_SHARD_FILE = "optimizer_shard_{rank:05d}.pt"
 OPTIMIZER_META_FILE = "optimizer_meta.pt"
+# Exported so a resume test can assert the learning rate a restore leaves in place.
+SHARD_ROUND_TRIP_LR = 0.05
 # The fixed-batch probe of the TP resume suites, scored before the save and after the resume.
 TP_RESUME_PROBE_TEXT = (
     "User: What is 17 plus 25?\nAssistant: The answer is 42. "
@@ -168,6 +175,58 @@ def optimizer_moments_stats(optimizer) -> tuple[bool, bool, bool]:
         if not torch.isfinite(local).all().item():
             all_finite = False
     return materialized, any_nonzero, all_finite
+
+
+def shard_round_trip_model(seed: int) -> nn.Module:
+    """Identical on every rank for one seed; only the data, and so the optimizer moments, diverge."""
+    torch.manual_seed(seed)
+    return nn.Sequential(nn.Linear(8, 16), nn.ReLU(), nn.Linear(16, 4))
+
+
+def shard_round_trip_optimizer(model: nn.Module) -> torch.optim.Optimizer:
+    return torch.optim.AdamW(model.parameters(), lr=SHARD_ROUND_TRIP_LR, betas=(0.9, 0.95))
+
+
+def step_on_seeded_data(model: nn.Module, optimizer: torch.optim.Optimizer, seed: int, steps: int) -> None:
+    """Real steps on seeded random data: non-trivial moments that differ between seeds."""
+    generator = torch.Generator().manual_seed(seed)
+    for _ in range(steps):
+        inputs = torch.randn(4, 8, generator=generator)
+        target = torch.randn(4, 4, generator=generator)
+        optimizer.zero_grad()
+        ((model(inputs) - target) ** 2).mean().backward()
+        optimizer.step()
+
+
+def _base_trainer_fallback(*_args, **_kwargs) -> None:
+    raise AssertionError("the base-Trainer optimizer path ran; the sharded per-rank path was expected")
+
+
+def shard_store_context(
+    model: nn.Module, optimizer, parallelism_config, *, lr_scheduler=None, allow_optimizer_warm_restart=False
+) -> CheckpointLoadContext:
+    """A load context that sends a CPU model through the per-rank optimizer shard store.
+
+    No FSDP on CPU, and none is needed: ``get_optimizer_state_dict`` on a plain module returns the
+    full local view, which is what a per-rank shard holds. The base-Trainer fallbacks raise, so a test
+    cannot pass by taking the unsharded route.
+    """
+    return CheckpointLoadContext(
+        model=model,
+        optimizer=optimizer,
+        lr_scheduler=lr_scheduler,
+        parallelism_config=parallelism_config,
+        is_pp_mode=False,
+        is_cp_mode=False,
+        is_tp_mode=False,
+        has_ep_layers=False,
+        fsdp_wrapped=True,
+        tp_rank=0,
+        tp_size=1,
+        super_load_from_checkpoint=_base_trainer_fallback,
+        super_load_optimizer_and_scheduler=_base_trainer_fallback,
+        allow_optimizer_warm_restart=allow_optimizer_warm_restart,
+    )
 
 
 class RestorePointSnapshot(TrainerCallback):

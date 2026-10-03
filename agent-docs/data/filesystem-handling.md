@@ -104,11 +104,16 @@ rank predicates, `fs_aware_makedirs` and `reject_across_ranks`).
 
 - `reject_across_ranks(local_reason, what, exc_type=RuntimeError)` — the collective that joins a
   rank-gated body. Every rank calls it with its own reason or `None`; if **any** is non-`None`, every
-  rank raises the same `exc_type`, naming how many ranks failed and the first one's reason.
+  rank raises the same `exc_type`, naming how many ranks failed, which ones, and the first one's reason.
 
     Pass `exc_type` to keep a caller's own error contract (a config gate documented as `ValueError`).
     Use it in place of a barrier wherever one rank does work the others wait on, so a failure there
     aborts the job instead of parking the peers in the barrier until the watchdog.
+
+- `gather_rank_reasons(local_reason)` — the same gather without the raise, for a caller whose answer
+  to a failure is not always one: every rank gets the world's reasons, indexed by rank, and
+  `gathered_failure_summary(reasons, what)` turns them into the message `reject_across_ranks` raises.
+  The optimizer-shard resume decides raise vs warm restart from it.
 
 - `raise_rank0_failure(step, describe, exc_type=RuntimeError)` — the same join for work one rank does
   for the world (an external-backend probe, a weight-sync client build): `step` runs on global rank 0

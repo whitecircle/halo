@@ -54,7 +54,8 @@ wrapper-level trained params (`_restore_extra_trained_params`) and the router-ba
 (`_restore_router_balancing_biases`, `src/trainers/mixins/checkpointing.py`). Optimizer state resumes from the per-rank shards when
 `OptimizerStateFingerprint` matches; a mismatch warm-restarts (under PP it raises instead), and
 shards whose `optimizer_meta.pt` carries no fingerprint at all raise — delete every
-`optimizer_shard_*.pt` + `optimizer_meta.pt` to accept a warm restart.
+`optimizer_shard_*.pt` + `optimizer_meta.pt` to accept a warm restart. A matched restore that fails
+on any rank (an unreadable shard, a CUDA OOM) raises on every rank unless `allow_optimizer_warm_restart: true`.
 
 Source: `src/distributed/checkpoint/loader.py` (`CheckpointLoader`, `_load_tp`, `_load_fsdp2`,
 `_load_pp_stage`), `src/distributed/checkpoint/optimizer.py` (`OptimizerShardStore.load` / `.save` /

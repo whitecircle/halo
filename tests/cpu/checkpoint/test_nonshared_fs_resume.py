@@ -30,18 +30,22 @@ import datetime
 import hashlib
 import os
 import pathlib
-from types import SimpleNamespace
 
 import pytest
 import torch
-import torch.nn as nn
 
 from src.distributed import runtime
-from src.distributed.checkpoint.context import CheckpointLoadContext
 from src.distributed.checkpoint.fingerprint import OptimizerStateFingerprint
 from src.distributed.checkpoint.optimizer import OptimizerShardStore
 from src.distributed.runtime import fs_aware_makedirs, fs_aware_save_rank
+from tests.common.checkpoint_io import (
+    shard_round_trip_model,
+    shard_round_trip_optimizer,
+    shard_store_context,
+    step_on_seeded_data,
+)
 from tests.common.gloo import run_gloo_ranks
+from tests.common.parallelism import make_parallelism_config
 from tests.common.utils import assert_optimizer_state_bit_exact
 
 WORLD_SIZE = 2  # two 1-rank "nodes"
@@ -67,33 +71,6 @@ def _node_dir(root: str, rank: int) -> str:
     return os.path.join(root, f"node_{rank}", "checkpoint-1")
 
 
-def _tiny_model() -> nn.Module:
-    """Identical on every rank; only the data — and so the optimizer moments — diverge."""
-    torch.manual_seed(SEED)
-    return nn.Sequential(nn.Linear(8, 16), nn.ReLU(), nn.Linear(16, 4))
-
-
-def _fresh_optimizer(model: nn.Module) -> torch.optim.Optimizer:
-    return torch.optim.AdamW(model.parameters(), lr=0.05, betas=(0.9, 0.95))
-
-
-def _stepped_optimizer(model: nn.Module, rank: int) -> torch.optim.Optimizer:
-    """Real steps on rank-specific data: non-trivial moments that differ between the two nodes.
-
-    No gradient sync — what is under test is the per-rank shard write/read, and identical state on
-    both ranks would let a rank→dir mix-up pass every comparison below.
-    """
-    optimizer = _fresh_optimizer(model)
-    generator = torch.Generator().manual_seed(SEED + 1 + rank)
-    for _ in range(TRAIN_STEPS):
-        inputs = torch.randn(4, 8, generator=generator)
-        target = torch.randn(4, 4, generator=generator)
-        optimizer.zero_grad()
-        ((model(inputs) - target) ** 2).mean().backward()
-        optimizer.step()
-    return optimizer
-
-
 def _state_signature(state_dict: dict) -> str:
     """Content digest of an ``optimizer.state_dict()`` payload's per-param state."""
     digest = hashlib.sha256()
@@ -108,41 +85,6 @@ def _state_signature(state_dict: dict) -> str:
     return digest.hexdigest()
 
 
-def _base_trainer_fallback(*_args, **_kwargs) -> None:
-    raise AssertionError("the base-Trainer optimizer path ran; the sharded per-rank path was expected")
-
-
-def _load_ctx(model: nn.Module, optimizer: torch.optim.Optimizer) -> CheckpointLoadContext:
-    return CheckpointLoadContext(
-        model=model,
-        optimizer=optimizer,
-        lr_scheduler=None,
-        parallelism_config=SimpleNamespace(
-            ep_size=1,
-            expert_tp_size=1,
-            cp_size=1,
-            tp_size=1,
-            pp_size=1,
-            fsdp_shard_ep1_experts=True,
-            ep_scope="node",
-            use_grouped_gemm=True,
-            use_hsdp=False,
-            nvlink_domain_size=1,
-        ),
-        is_pp_mode=False,
-        is_cp_mode=False,
-        is_tp_mode=False,
-        has_ep_layers=False,
-        # There is no FSDP on CPU, and none is needed: get_optimizer_state_dict on a plain module
-        # returns the full LOCAL view, which is exactly what a per-rank shard holds.
-        fsdp_wrapped=True,
-        tp_rank=0,
-        tp_size=1,
-        super_load_from_checkpoint=_base_trainer_fallback,
-        super_load_optimizer_and_scheduler=_base_trainer_fallback,
-    )
-
-
 def _worker(rank: int, root: str) -> None:
     problems: list[str] = []
     try:
@@ -154,18 +96,22 @@ def _worker(rank: int, root: str) -> None:
 
         out_dir = _node_dir(root, rank)
         fs_aware_makedirs(out_dir)
+        config = make_parallelism_config(world_size=WORLD_SIZE, gpus_per_node=1, rank=rank)
 
-        model = _tiny_model()
-        optimizer = _stepped_optimizer(model, rank)
+        # Rank-specific data and no gradient sync: identical state on both ranks would let a rank->dir
+        # mix-up pass every comparison below.
+        model = shard_round_trip_model(SEED)
+        optimizer = shard_round_trip_optimizer(model)
+        step_on_seeded_data(model, optimizer, SEED + 1 + rank, TRAIN_STEPS)
         saved = copy.deepcopy(optimizer.state_dict())
         with open(os.path.join(root, f"signature_{rank}.txt"), "w") as fh:
             fh.write(_state_signature(saved))
 
-        OptimizerShardStore(_load_ctx(model, optimizer)).save(out_dir)
+        OptimizerShardStore(shard_store_context(model, optimizer, config)).save(out_dir)
 
-        fresh_model = _tiny_model()
-        fresh_optimizer = _fresh_optimizer(fresh_model)
-        OptimizerShardStore(_load_ctx(fresh_model, fresh_optimizer)).load(out_dir)
+        fresh_model = shard_round_trip_model(SEED)
+        fresh_optimizer = shard_round_trip_optimizer(fresh_model)
+        OptimizerShardStore(shard_store_context(fresh_model, fresh_optimizer, config)).load(out_dir)
 
         assert_optimizer_state_bit_exact(saved, fresh_optimizer.state_dict())
     except Exception as e:  # incl. the AssertionError above — the peer must still get a verdict file

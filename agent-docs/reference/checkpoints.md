@@ -722,6 +722,8 @@ save_only_model: false              # false: per-rank optimizer shards + schedul
                                     #        + precomputed reference log-probs
                                     #        (warm restart, any world size)
 save_on_each_node: false            # multi-node; auto-forced true on a non-shared OUTPUT filesystem
+allow_optimizer_warm_restart: false # true: a failed shard restore (e.g. CUDA OOM) warm-restarts
+                                    #       instead of raising on every rank
 
 save_sharded_ep: false              # EP per-rank sharded save (needs merge_ep_shards.py)
 ```
@@ -760,8 +762,8 @@ The dedup needs a shared output filesystem: a peer must be able to read the writ
 per-node filesystem every rank writes its own copy and the save warns once naming the fix.
 
 A rank whose shard is missing that state and cannot find the writer's fails its read verdict and
-logs the file it looked for. The whole world then warm-restarts (raises under PP) rather than one
-rank restoring a partial optimizer.
+logs the file it looked for. The whole world's resume then fails (see the restore failures below)
+rather than one rank restoring a partial optimizer.
 
 So does a merge that restores **none** of the replicated FQNs the saving optimizer tracked. The
 writer's shard is then keyed differently from this run's expert parameter names, which the
@@ -804,14 +806,15 @@ A fingerprint mismatch falls back to warm restart with a warning naming the diff
 Shards absent on every rank warm-restart only when nothing proves state was written. If the
 directory still holds other ranks' `optimizer_shard_*.pt` or a fingerprint-matched
 `optimizer_meta.pt` (a non-shared filesystem whose restart permuted the rank→node placement), the
-resume raises instead. Restore the original placement, or take the warm-restart opt-in below.
+resume raises instead. Restore the original placement, or delete the shards (below) to accept a warm
+restart.
 
 Shards present on only a subset under a matching fingerprint are a torn checkpoint and raise.
 
 Shards whose `optimizer_meta.pt` carries **no fingerprint at all** are refused outright in every
 mode, with no warm-restart fallback. Nothing records the sharding that produced those raw local
-layouts, and the rank-count gate alone admits a permuted restore at the same world size. The
-warm-restart opt-in below resumes the weights, step and LR schedule with a fresh optimizer.
+layouts, and the rank-count gate alone admits a permuted restore at the same world size. Deleting the
+shards (below) resumes the weights, step and LR schedule with a fresh optimizer.
 
 That verdict is consensused before any rank branches on it. On a non-shared filesystem
 `optimizer_meta.pt` is written once per node, so a heterogeneous meta set (one node holding a
@@ -831,8 +834,17 @@ Deleting every `optimizer_shard_*.pt` plus `optimizer_meta.pt` is the explicit w
 That opt-in is enforced: resuming a sharded-optimizer checkpoint in a **non-sharded** mode (single GPU,
 DDP) raises at load — the base Trainer's loader recognizes only `optimizer.pt`/`.bin`, so it would
 otherwise restore no optimizer state while weights, step and LR schedule resume. Every restore verdict
-is rank-uniform: `set_optimizer_state_dict` issues DTensor collectives, so all ranks warm-restart
-together or none do.
+is rank-uniform, so all ranks restore, raise or warm-restart together: a restore on some ranks only
+would diverge the replicas, and the collectives after it run on every rank.
+
+A restore that passes every gate and still fails on some rank raises on every rank. It fails at
+reading a shard (truncated, an I/O error, a replica writer's shard out of reach or keyed differently)
+or at applying it (a CUDA OOM inside `set_optimizer_state_dict`, a restored moment shaped unlike its
+parameter). The message names the failing ranks and the first one's error; each failing rank's log
+carries its own. Fix the cause and resume again, or set `allow_optimizer_warm_restart: true` to take
+the warm restart: every rank drops its optimizer state, rank 0 warns with the same summary, and
+weights, step and LR schedule resume. Under PP these raise regardless, as every gate does. The flag
+covers these failures only; the gates above keep their own outcomes.
 
 Checkpoint **rotation** (`save_total_limit`) is deferred past the toolkit's sidecars. The base
 Trainer rotates as the last step of its own save, which would delete the oldest checkpoint before

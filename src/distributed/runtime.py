@@ -18,7 +18,7 @@ from torch.distributed import distributed_c10d as c10d
 from torch.distributed.tensor import DTensor, distribute_tensor
 
 from src.env import env_flag, resolve_nccl_timeout_minutes, resolve_store_timeout_hours
-from src.log import warn_once
+from src.log import KEY_PREVIEW_COUNT, warn_once
 
 logger = logging.getLogger(__name__)
 
@@ -284,12 +284,37 @@ def raise_rank0_failure(
         raise exc_type(failure) from cause
 
 
+def gathered_failure_summary(reasons: list[str | None], what: str) -> str | None:
+    """``what`` failed on which ranks, with the first one's reason; None when no rank reported one."""
+    failed = [rank for rank, reason in enumerate(reasons) if reason]
+    if not failed:
+        return None
+    shown = ", ".join(str(rank) for rank in failed[:KEY_PREVIEW_COUNT])
+    more = ", …" if len(failed) > KEY_PREVIEW_COUNT else ""
+    return (
+        f"{what} failed on {len(failed)} of {len(reasons)} rank(s) [{shown}{more}]. "
+        f"First (rank {failed[0]}): {reasons[failed[0]]}"
+    )
+
+
 def raise_gathered_reasons(reasons: list[str | None], what: str, exc_type: type[Exception]) -> None:
-    """Raise from a world-gathered reason list, naming the first rank that reported one."""
-    failed = [(rank, reason) for rank, reason in enumerate(reasons) if reason]
-    if failed:
-        rank, reason = failed[0]
-        raise exc_type(f"{what} failed on {len(failed)} of {len(reasons)} rank(s). First (rank {rank}): {reason}")
+    """Raise from a world-gathered reason list, naming the failing ranks and the first one's reason."""
+    summary = gathered_failure_summary(reasons, what)
+    if summary is not None:
+        raise exc_type(summary)
+
+
+def gather_rank_reasons(local_reason: str | None) -> list[str | None]:
+    """Every rank's ``local_reason``, indexed by global rank. Collective — every rank must call it.
+
+    The non-raising half of :func:`reject_across_ranks`, for a caller whose answer to a failure is
+    not always a raise but must still be the same on every rank.
+    """
+    if not is_multi_rank_run():
+        return [local_reason]
+    reasons: list[str | None] = [None] * dist.get_world_size()
+    dist.all_gather_object(reasons, local_reason)
+    return reasons
 
 
 def reject_across_ranks(local_reason: str | None, what: str, exc_type: type[Exception] = RuntimeError) -> None:
@@ -305,9 +330,7 @@ def reject_across_ranks(local_reason: str | None, what: str, exc_type: type[Exce
         if local_reason:
             raise exc_type(local_reason)
         return
-    reasons: list[str | None] = [None] * dist.get_world_size()
-    dist.all_gather_object(reasons, local_reason)
-    raise_gathered_reasons(reasons, what, exc_type)
+    raise_gathered_reasons(gather_rank_reasons(local_reason), what, exc_type)
 
 
 def divergent_settings(gathered: list[dict[str, object]]) -> dict[str, list[str]]:

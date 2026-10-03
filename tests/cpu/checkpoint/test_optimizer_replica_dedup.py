@@ -175,7 +175,7 @@ def test_every_rank_restores_identical_state(tmp_path, monkeypatch):
     for rank in sorted(REPLICA_SETS):
         store = _store(_ep_model(REPLICA_SETS[rank]), rank, monkeypatch)
         osd = torch.load(os.path.join(tmp_path, f"optimizer_shard_{rank:05d}.pt"), weights_only=False)
-        assert store._merge_replicated_state(str(tmp_path), osd) is True
+        assert store._merge_replicated_state(str(tmp_path), osd) is None
         restored[rank] = osd
 
     expected = _osd(1.0)["state"]
@@ -191,14 +191,14 @@ def test_writer_reads_nothing_extra(tmp_path, monkeypatch):
     os.remove(os.path.join(str(tmp_path), "optimizer_shard_00002.pt"))
     store = _store(_ep_model(REPLICA_SETS[0]), 0, monkeypatch)
     osd = torch.load(os.path.join(str(tmp_path), "optimizer_shard_00000.pt"), weights_only=False)
-    assert store._merge_replicated_state(str(tmp_path), osd) is True
+    assert store._merge_replicated_state(str(tmp_path), osd) is None
 
 
 def test_pre_dedup_checkpoint_needs_no_writer_shard(tmp_path, monkeypatch):
     """A shard set written before the dedup (every rank self-contained) must resume as it always
     did, without reaching for a peer's file."""
     store = _store(_ep_model(REPLICA_SETS[2]), 2, monkeypatch)
-    assert store._merge_replicated_state(str(tmp_path), _osd(1.0)) is True
+    assert store._merge_replicated_state(str(tmp_path), _osd(1.0)) is None
 
 
 def test_a_stateless_replicated_param_is_not_read_as_a_dedup(tmp_path, monkeypatch):
@@ -208,30 +208,28 @@ def test_a_stateless_replicated_param_is_not_read_as_a_dedup(tmp_path, monkeypat
     store = _store(_ep_model(REPLICA_SETS[2]), 2, monkeypatch)
     osd = _osd(1.0)
     del osd["state"]["mlp.router.weight"]
-    assert store._merge_replicated_state(str(tmp_path), osd) is True
+    assert store._merge_replicated_state(str(tmp_path), osd) is None
     assert "mlp.experts" in osd["state"], "the surviving replicated state must not be disturbed"
 
 
 def test_pre_first_step_checkpoint_needs_no_writer_shard(tmp_path, monkeypatch):
     """An empty optimizer state is a checkpoint saved before the first step, not a deduplicated one."""
     store = _store(_ep_model(REPLICA_SETS[1]), 1, monkeypatch)
-    assert store._merge_replicated_state(str(tmp_path), {"state": {}, "param_groups": []}) is True
+    assert store._merge_replicated_state(str(tmp_path), {"state": {}, "param_groups": []}) is None
 
 
-def test_missing_writer_shard_fails_the_read_verdict(tmp_path, monkeypatch, caplog):
+def test_missing_writer_shard_fails_the_read_verdict(tmp_path, monkeypatch):
     """A follower missing its replicated state with no writer shard in reach would otherwise restore
-    a partial optimizer and log success. The verdict rides the shard-readability consensus that
-    follows, so the whole world warm-restarts (raises under PP) instead of this rank alone."""
+    a partial optimizer and log success. The reason rides the shard-read verdict that follows, so the
+    whole world's resume fails instead of this rank alone."""
     _write_deduped_checkpoint(str(tmp_path), monkeypatch)
     os.remove(os.path.join(str(tmp_path), "optimizer_shard_00000.pt"))
     store = _store(_ep_model(REPLICA_SETS[2]), 2, monkeypatch)
     osd = torch.load(os.path.join(str(tmp_path), "optimizer_shard_00002.pt"), weights_only=False)
-    with caplog.at_level("WARNING"):
-        assert store._merge_replicated_state(str(tmp_path), osd) is False
-    assert "optimizer_shard_00000.pt is not in" in caplog.text
+    assert "optimizer_shard_00000.pt is not in" in (store._merge_replicated_state(str(tmp_path), osd) or "")
 
 
-def test_a_writer_shard_spelling_the_experts_differently_fails_the_read(tmp_path, monkeypatch, caplog):
+def test_a_writer_shard_spelling_the_experts_differently_fails_the_read(tmp_path, monkeypatch):
     """The merge's own gate: restoring NONE of the FQNs this shard was deduplicated against means the
     writer's state is keyed differently from this run's expert parameter names.
 
@@ -246,19 +244,17 @@ def test_a_writer_shard_spelling_the_experts_differently_fails_the_read(tmp_path
     follower = _osd(1.0)
     store = _store(_ep_model(REPLICA_SETS[2]), 2, monkeypatch)
     store._drop_replicated_state(follower)
-    with caplog.at_level("WARNING"):
-        assert store._merge_replicated_state(str(tmp_path), follower) is False
-    assert "keyed differently" in caplog.text
+    assert "keyed differently" in (store._merge_replicated_state(str(tmp_path), follower) or "")
 
 
 def test_untracked_replicated_params_merge_nothing_without_failing(tmp_path, monkeypatch):
     """The legitimate empty merge: with the base experts frozen (expert-LoRA), the saving optimizer
     tracked none of the replicated FQNs, so neither shard carries state for them and there is nothing
-    to restore — a False here would warm-restart the whole world over a healthy checkpoint."""
+    to restore — a failure here would fail the whole world's resume over a healthy checkpoint."""
     frozen = {"state": {SHARDED_KEY: {"exp_avg": torch.ones(2)}}, "param_groups": [{"params": [SHARDED_KEY]}]}
     torch.save(frozen, os.path.join(str(tmp_path), "optimizer_shard_00000.pt"))
     store = _store(_ep_model(REPLICA_SETS[2]), 2, monkeypatch)
-    assert store._merge_replicated_state(str(tmp_path), dict(frozen)) is True
+    assert store._merge_replicated_state(str(tmp_path), dict(frozen)) is None
 
 
 def test_the_writer_fqns_match_a_real_optimizer_state_dict(monkeypatch):

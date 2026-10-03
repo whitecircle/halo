@@ -10,8 +10,9 @@ tests exercise the single-process decision logic and, via monkeypatched consensu
 - The constructed-from-checkpoint skip and the TP+DP refusal never consume the checkpoint, so
   they must be decided BEFORE the per-rank read — at 100B+ scale that read is a host OOM, not a
   slowdown. The genuine pure-TP reload distributes each tensor into the live DTensor placements.
-- FSDP2 optimizer restore: the terminal ``set_optimizer_state_dict`` outcome is all-reduced; if ANY
-  rank failed, ALL ranks warm-restart together.
+- FSDP2 optimizer restore: a shard without its topology meta warm-restarts rather than loading
+  ungated. The terminal ``set_optimizer_state_dict`` outcome is pinned on a real two-rank group in
+  ``test_optimizer_restore_failure.py``.
 """
 
 import os
@@ -30,7 +31,6 @@ import src.distributed.checkpoint.loader as loader_mod
 import src.distributed.checkpoint.optimizer as optimizer_mod
 import src.distributed.checkpoint.peft as peft_mod
 from src.distributed.checkpoint.context import CheckpointLoadContext
-from src.distributed.checkpoint.fingerprint import OptimizerStateFingerprint
 from src.distributed.checkpoint.loader import CheckpointLoader
 from src.distributed.checkpoint.optimizer import OptimizerShardStore
 from src.distributed.checkpoint.peft import restore_adapters
@@ -333,19 +333,6 @@ def test_fsdp2_resume_with_matching_keys_reaches_the_load(tmp_path, monkeypatch)
     assert set(applied.calls[0][0][1]) == {"fc.weight"}
 
 
-def _optimizer_checkpoint(tmp_path, model, with_meta: bool = True):
-    """A per-rank optimizer shard, with the topology meta a complete save always writes beside it."""
-    optimizer = torch.optim.SGD(model.parameters(), lr=0.1)
-    torch.save({"state": {}, "param_groups": []}, os.path.join(tmp_path, "optimizer_shard_00000.pt"))
-    if with_meta:
-        fingerprint = OptimizerStateFingerprint.capture(_ctx(model, optimizer).parallelism_config, optimizer, 1)
-        torch.save(
-            {"num_ranks": 1, "fingerprint": fingerprint.to_dict(), "pp_stage_partition": None},
-            os.path.join(tmp_path, "optimizer_meta.pt"),
-        )
-    return optimizer
-
-
 def test_optimizer_shards_without_meta_warm_restart(tmp_path, monkeypatch):
     """A shard with no ``optimizer_meta.pt`` cannot be gated — neither the rank-count nor the
     fingerprint check has anything to compare — so it must warm-restart, not load ungated.
@@ -355,7 +342,8 @@ def test_optimizer_shards_without_meta_warm_restart(tmp_path, monkeypatch):
     halves. Loading ungated silently maps another topology's moments onto this run's params.
     """
     model = _TinyModel()
-    optimizer = _optimizer_checkpoint(tmp_path, model, with_meta=False)
+    optimizer = torch.optim.SGD(model.parameters(), lr=0.1)
+    torch.save({"state": {}, "param_groups": []}, os.path.join(tmp_path, "optimizer_shard_00000.pt"))
 
     restore = _Recorder()
     warm_restarts = _Recorder()
@@ -366,52 +354,6 @@ def test_optimizer_shards_without_meta_warm_restart(tmp_path, monkeypatch):
 
     assert len(restore.calls) == 0, "ungated shards were restored"
     assert len(warm_restarts.calls) == 1
-
-
-def test_optimizer_peer_failure_forces_uniform_warm_restart(tmp_path, monkeypatch):
-    """Local restore succeeds but a peer failed (consensus returns False): this rank must
-    warm-restart too. Warm-restarting only on this rank's OWN exception leaves loaded moments here
-    while the failing rank reinitializes — silent optimizer divergence."""
-    model = _TinyModel()
-    optimizer = _optimizer_checkpoint(tmp_path, model)
-
-    consensus_calls = []
-
-    def fake_all_ranks_ok(local_ok):
-        # Calls 1-4 gate meta/fingerprint/readability/FQN coverage; the 5th is the restore outcome,
-        # which a loader that fails to consensus it never makes.
-        consensus_calls.append(local_ok)
-        return local_ok if len(consensus_calls) < 5 else False
-
-    restore = _Recorder()
-    warm_restarts = _Recorder()
-    monkeypatch.setattr(optimizer_mod, "all_ranks_ok", fake_all_ranks_ok)
-    monkeypatch.setattr(optimizer_mod, "set_optimizer_state_dict", restore)
-    monkeypatch.setattr(OptimizerShardStore, "_warm_restart", lambda self, ckpt, msg: warm_restarts(ckpt, msg))
-
-    OptimizerShardStore(_ctx(model, optimizer, fsdp_wrapped=True)).load(str(tmp_path))
-
-    assert len(restore.calls) == 1
-    assert len(consensus_calls) == 5  # the restore outcome WAS consensus'd
-    assert len(warm_restarts.calls) == 1
-
-
-def test_optimizer_local_failure_warm_restarts_without_raise(tmp_path, monkeypatch):
-    model = _TinyModel()
-    optimizer = _optimizer_checkpoint(tmp_path, model)
-
-    def raising_restore(*args, **kwargs):
-        raise RuntimeError("shard shape mismatch")
-
-    warm_restarts = _Recorder()
-    monkeypatch.setattr(optimizer_mod, "set_optimizer_state_dict", raising_restore)
-    monkeypatch.setattr(OptimizerShardStore, "_warm_restart", lambda self, ckpt, msg: warm_restarts(ckpt, msg))
-
-    # Must not raise: the failure is caught, consensus'd (single-process → False), warm restart.
-    OptimizerShardStore(_ctx(model, optimizer, fsdp_wrapped=True)).load(str(tmp_path))
-
-    assert len(warm_restarts.calls) == 1
-    assert "at least one rank" in warm_restarts.calls[0][0][1]
 
 
 def test_a_non_sharded_resume_refuses_per_rank_optimizer_shards(tmp_path):
