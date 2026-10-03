@@ -37,7 +37,8 @@ These fire automatically; mention them only to confirm, not as new advice. Figur
 - **Grouped GEMM** — auto on SM90+ for MoE experts; the win is largest with many local experts per rank
   and narrows as batch (per-expert M) grows.
 - **Liger CE + RMSNorm/RoPE/SwiGLU** — `use_liger_kernel: true` default; a double-digit-% throughput win
-  and tens of GB, on dense and MoE alike.
+  and tens of GB, on dense and MoE alike. Qwen3 MoE, GLM-4.7-Flash, GPT-OSS and Gemma 4 run torch's fused
+  `F.rms_norm` in the RMSNorm role.
 - **FA4 on Blackwell** — auto-selected; the win over FA2 grows with sequence length and is small on MoE,
   where the step is expert-GEMM and all-to-all bound. FA2 is the slow outlier on B300.
 - **AdamWBF16 + stochastic rounding** — auto from `bf16: true`; half the per-param state of fp32 AdamW at
@@ -45,6 +46,10 @@ These fire automatically; mention them only to confirm, not as new advice. Figur
 - **CDMC=1** — baked into the image env; free win on ep8, neutral dense/ep2.
 - **Atomic-free expert permute** — auto for high-top_k MoE (`top_k ≥ ep_size`); win grows with sequence
   length. gpt-oss (top-4) stays on the cheaper `index_add_` path at EP8.
+- **Fused MoE kernels** — fused GLU (`HALO_FUSED_GLU`) on every expert and dense-MLP combine, and the
+  fused weighted un-permute above the `top_k ≥ ep_size` gate; 1.09–1.25× at EP2 (2× B300, measured at merge).
+- **FlexAttention on Gemma 4's sliding layers** (`sdpa_flex_sliding`, `HALO_FLEX_SLIDING`) — 1.34× at 2k,
+  3.93× at 16k (EP2).
 
 ## Throughput flow (raise tok/s/GPU)
 - **MoE/EP, any shape →** push **seq × batch as high as memory allows** first — EP at low token

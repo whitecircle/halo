@@ -50,7 +50,7 @@ python scripts/training/sft.py examples/sft/qwen3/qwen3-4b-ultrachat.yaml \
 
 ## Liger kernels
 
-`use_liger_kernel: true` (default) enables fused Triton kernels (cross-entropy, RMSNorm, SwiGLU, RoPE). Four safety filters (`liger_parallelism_overrides` and `liger_routed_expert_overrides`, `src/kernels/liger/orchestrator.py`) override the defaults, applied by one sanitizer (`sanitize_liger_config`) at model load and again when the trainer re-sanitizes the config HF Trainer re-applies:
+`use_liger_kernel: true` (default) enables fused Triton kernels (cross-entropy, RMSNorm, SwiGLU, RoPE); Qwen3 MoE, GLM-4.7-Flash, GPT-OSS and Gemma 4 fill the RMSNorm role with torch's fused `F.rms_norm`. Four safety filters (`liger_parallelism_overrides` and `liger_routed_expert_overrides`, `src/kernels/liger/orchestrator.py`) override the defaults, applied by one sanitizer (`sanitize_liger_config`) at model load and again when the trainer re-sanitizes the config HF Trainer re-applies:
 
 - **Wrapped MoE experts** — `swiglu`/`geglu` fusion off, because the EP or grouped-GEMM wrapper replaces the expert FFN Liger would swap.
 

@@ -34,9 +34,9 @@ The YAML/trainer path (`build_flash_adamw_optimizer` in `src/optimizers/flash_ad
 
 The value is memory, and it scales with model size — tens of GB at 70B+ params, where it is the lever.
 
-Optimizer micro-benchmark on B300 (`tests/gpu/optimizers/bench_muon.py --hidden 4096 --layers 8`, synthetic FFN): FlashAdamW peak memory is **−8.6%** vs AdamW (fused), at a ~5 ms optimizer-step overhead from state quant/dequant. For the AdamW / AdamWBF16 / Muon comparison at the default shape, see [Muon](muon-optimizer.md#benchmark).
+Optimizer micro-benchmark on B300 (`tests/gpu/optimizers/bench_muon.py --hidden 4096 --layers 8`, synthetic FFN): FlashAdamW peak memory is **−8.6%** vs `torch.optim.AdamW(fused=True)` over the same bf16 parameters (bf16 states), at a ~5 ms optimizer-step overhead from state quant/dequant. For the AdamW / AdamWBF16 / Muon comparison at the default shape, see [Muon](muon-optimizer.md#benchmark).
 
-That overhead amortizes against fwd+bwd on most models, but it is not free — on an attention-bound long-context step the per-step cost can outweigh the memory saving (GLM-4.7-Flash EP8 32k: ~50 s/step vs ~34 s/step for fused AdamW).
+That overhead amortizes against fwd+bwd on most models, but it is not free — on an attention-bound long-context step the per-step cost can outweigh the memory saving (GLM-4.7-Flash EP8 32k: ~50 s/step vs ~34 s/step on the default `optim`, which `bf16: true` resolves to AdamWBF16).
 
 A real-model benchmark lives in `tests/gpu/optimizers/bench_muon_qwen3_5.py` (Qwen3.5-2B). Correctness is covered by `tests/gpu/optimizers/test_flash_adamw.py` — creation, loss descent, decay filtering, memory savings, and a bit-exact state-dict round-trip.
 
@@ -44,8 +44,8 @@ A real-model benchmark lives in `tests/gpu/optimizers/bench_muon_qwen3_5.py` (Qw
 
 | Optimizer | Memory | Convergence | Best for |
 |---|---|---|---|
-| `adamw_torch_fused` | 12B/param | Baseline | Default, unlimited memory |
-| AdamWBF16 (auto) | 6B/param | Same as FP32 | Standard bf16 training |
+| `adamw_torch_fused` under `bf16: false` | 12B/param | Baseline | fp32 runs; refused where expert params sit outside FSDP2 (`ep_size > 1`) |
+| AdamWBF16 (auto: the default `adamw_torch_fused` under `bf16: true`) | 6B/param | Same as FP32 | Standard bf16 training |
 | `flash_adamw` | ~5B/param | Same as AdamW | Maximum memory savings |
 | `muon` | ~4–6B/param | Faster convergence | When convergence speed matters — see [Muon](muon-optimizer.md#benchmark) |
 

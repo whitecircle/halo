@@ -86,6 +86,8 @@ crashing mid-run. These are the ones that come up:
 | `HALO_DEEPEP_GPU_TIMEOUT_SECONDS` | `100` | device-side spin budget of the dispatch/combine barrier — bounds rank skew |
 | `HALO_DEEPEP_NUM_QPS` | auto | RDMA queue pairs; helps on EFA |
 | `HALO_DEEPGEMM_NATIVE` | `0` | native DeepGEMM low-precision kernels — net-slower at the MoE shapes benchmarked here |
+| `HALO_FUSED_GLU` | `1` | `0` runs every GLU combine (experts and dense MLPs) eager instead of the fused Triton kernels — the switch when a GLU kernel fails to compile or launch on your GPU |
+| `HALO_FLEX_SLIDING` | `1` | `0` builds Gemma 4 on plain SDPA instead of FlexAttention on its sliding layers — the switch when that kernel fails on your GPU, or to run `full_determinism` on more than one GPU |
 | `HALO_SANDBOX_BACKEND` / `HALO_SANDBOX_URL` | `local` / unset | code-execution sandbox for RL environments: `local`, `bubblewrap`, or `remote` |
 | `HALO_ALLOW_MISSING_CHECKPOINT_KEYS` | `0` | demote the missing-checkpoint-key error to a warning; only for deliberately partial checkpoints |
 | `CUDA_DEVICE_MAX_CONNECTIONS` | `1`, baked into both images | driver-owned, latched at `deep_ep`'s `cuInit` — a Python write is too late; `1` is worth +9.7% on ep8 |

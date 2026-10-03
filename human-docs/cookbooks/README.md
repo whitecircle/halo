@@ -20,7 +20,8 @@ matrix disagree, the matrix wins.
 - [GLM-4.7-Flash](halo-glm-4.7-flash-cookbook.md) — EP8 at 30,720 tokens from the
   shipped config, plus CP2/TP2/ETP8 and LoRA on GLM's compressed attention.
 - [Gemma 4 MoE](halo-gemma4-moe-cookbook.md) — 26B-A4B at EP8 and 32,768 tokens,
-  where attention is SDPA-only and no router balancing path exists.
+  where no flash kernel fits (SDPA, with FlexAttention on the sliding layers) and no
+  router balancing path exists.
 - [Mistral 4 MoE](halo-mistral4-moe-cookbook.md) — Mistral Small 4 119B A6B at
   EP8 and 32,000 tokens, with CP, TP, ETP, multimodal inference, and the required
   FP8-to-BF16 checkpoint conversion.

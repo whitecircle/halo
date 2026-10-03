@@ -12,7 +12,7 @@ The unconditional low-precision win is **inference memory**: convert the checkpo
 |------|-----------|-------|-----------|
 | **bf16** | `F.grouped_mm` (MoE) / `F.linear` (dense) | At the roofline | Default; all production training |
 | **Simulated** (fake-quant) | block-scale quantize→dequantize→bf16 matmul, straight-through gradient | Slower than bf16 (mxfp8 ≈8× a bf16 step, fp4 ≈17–19×) | QAT numerics oracle: `lowp_precision: fp8\|fp4\|mxfp4`. Any GPU. |
-| **DeepGEMM native** (fp8/fp4) | DeepSeek's on-device-`m_indices` grouped kernel, real fp8/fp4 tensor cores | Net-slower than bf16 at every training shape (0.05–0.17× at production shapes) | Opt-in (`HALO_DEEPGEMM_NATIVE=1`); never auto-selected |
+| **DeepGEMM native** (fp8/fp4) | DeepSeek's on-device-`m_indices` grouped kernel, real fp8/fp4 tensor cores | Net-slower than bf16 at every training shape (0.05–0.07× at production shapes) | Opt-in (`HALO_DEEPGEMM_NATIVE=1`); never auto-selected |
 
 The apply layer is `src/kernels/lowp/mixed_precision.py`, called pre-FSDP in `load_distributed_model`: it converts the dense MLP `gate_proj`/`up_proj`/`down_proj` (attention, embeddings, `lm_head`, and norms stay bf16) and sets per-EP-layer precision from `lowp_precision` / `lowp_apply_*`. `lowp_keep_first_blocks` / `lowp_keep_last_blocks` exempt whole blocks, counted over the text backbone only so a vision tower's `layers.N` is not miscounted.
 
@@ -46,7 +46,7 @@ Whether low precision can beat bf16 is a question of tokens per expert. Raising 
 
 The ratio rises with tokens/expert but flattens below 1.0 at every realistic width. DeepGEMM pays a per-token activation-quant pass (and, for the contiguous kernel, per-token padding/gather) that scales with the token count and never amortizes, while bf16 is already compute-bound near peak.
 
-Native crosses 1.0 **only** at tok/e ≥ 16384 **and** N ≥ 16384: 131,072 tokens routed across 8 experts in one microbatch, into an expert wider than any model in the roster. No training configuration reaches it. At production shapes (256–512 tok/e, N ≤ 4096) native is 6–20× slower.
+Native crosses 1.0 **only** at tok/e ≥ 16384 **and** N ≥ 16384: 131,072 tokens routed across 8 experts in one microbatch, into an expert wider than any model in the roster. No training configuration reaches it. At production shapes (256–512 tok/e, N ≤ 4096) native is 14–20× slower.
 
 Pushing sequence length is the right throughput lever for bf16 (amortizes the EP all-to-all, fills the expert GEMMs) but never flips the precision decision.
 
@@ -59,7 +59,7 @@ The simulated path realizes fp8/fp4 by block-scale fake-quant: quantize→dequan
 | E8 K2880 N2880, 256 tok/e | 44 µs | 493 µs (≈11× bf16) | 2482 µs |
 | E256 K512 N512, 32 tok/e | 40 µs | 474 µs (≈12× bf16) | — |
 
-Cost is dominated by quantizing the weight (eagerly, 2.5 ms for a 188 MB expert weight — launch-bound, ~15 elementwise kernels per call). Two optimizations cut it:
+Cost is dominated by quantizing the weight (eagerly, 2.5 ms for a 133 MB expert weight — launch-bound, ~15 elementwise kernels per call). Two optimizations cut it:
 
 **Per-step weight cache.** The expert weight is invariant within an optimizer step, so it is quantized once per step (keyed on `weight._version`) and reused across gradient-accumulation microbatches. The fixed-shape weight round-trip is also `torch.compile`d (~6× faster, bit-identical for the power-of-two-scale formats mxfp8/mxfp4).
 

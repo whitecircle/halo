@@ -11,7 +11,7 @@ wrappers, a tuned recipe, and GPU-validated coverage. Fifteen of them are MoE.
 | [Qwen3.5 / Qwen3.6 MoE](cookbooks/halo-qwen3.5-qwen3.6-moe-cookbook.md) | `Qwen/Qwen3.5-35B-A3B` | MoE | hybrid linear attention rules out CP |
 | [GPT-OSS](cookbooks/halo-gpt-oss-cookbook.md) | `unsloth/gpt-oss-20b-BF16` | MoE | attention sinks; FA2 refused on-policy |
 | [GLM-4 MoE Lite](cookbooks/halo-glm-4.7-flash-cookbook.md) | `zai-org/GLM-4.7-Flash` | MoE | compressed attention; every mode works |
-| [Gemma 4 MoE](cookbooks/halo-gemma4-moe-cookbook.md) | `google/gemma-4-26B-A4B-it` | MoE | SDPA only; no router-balancing route |
+| [Gemma 4 MoE](cookbooks/halo-gemma4-moe-cookbook.md) | `google/gemma-4-26B-A4B-it` | MoE | no flash kernel (SDPA, FlexAttention on sliding layers); no router-balancing route |
 | [Mistral 4 MoE](cookbooks/halo-mistral4-moe-cookbook.md) | `mistralai/Mistral-Small-4-119B-2603` | MoE | convert the fp8 release to bf16 |
 | [Laguna 2.1](cookbooks/halo-laguna-2.1-cookbook.md) | `poolside/Laguna-S-2.1` | MoE | remote code at a pinned revision |
 | [LFM-2 MoE](cookbooks/halo-lfm2-moe-cookbook.md) | `LiquidAI/LFM2-24B-A2B` | MoE | short-convolution layers rule out CP |

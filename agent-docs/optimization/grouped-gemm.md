@@ -24,7 +24,7 @@ Some MoE / parallelism / hardware combinations make `use_grouped_gemm: false` co
 
 Per-expert `M = ep_size × tokens_per_rank × top_k / num_experts`: tokens pool across the dispatch group, so per-rank rows `tokens_per_rank × top_k` are EP-invariant and M grows with `ep_size`. M modulates the trend: `grouped_mm` runs one shared ~128-wide M tile for all groups, so its edge is largest at small M and erodes as M grows.
 
-gpt-oss-20b (32 experts, top-4, seq 8192, 8× B300, FA4), grouped vs loop, plus Qwen3-30B (128 experts, ep2 → 64 local/rank) as the high-local-count anchor:
+gpt-oss-20b (32 experts, top-4, seq 8192, 8× B300, FA4), grouped vs loop, plus Qwen3-30B-A3B (128 experts, ep2 → 64 local/rank; 2× B300, seq 8192, GC on: 10,711 vs 3,122 tok/s/GPU at b1, 15,307 vs 7,211 at b4) as the high-local-count anchor:
 
 | Model | EP | local experts/rank | b1 | b2 | b4 | b8 |
 |---|----|:------------------:|:---:|:---:|:---:|:---:|

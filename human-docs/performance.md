@@ -39,9 +39,12 @@ latency-bound and the GPUs are waiting, not computing. Turn on
 | `packing: true` | 9.2× on a corpus averaging a quarter of `max_length` (`padding_free: true`: 2.3×); nothing when rows already fill it |
 | `use_grouped_gemm: true` (default on SM90+) | 2.1–3.4× end-to-end at `ep2` — one batched expert matmul instead of a loop |
 | Flash Attention 4 (auto on Blackwell) | 1.1× at 4k rising to 2.3× at 32k on dense; ~+13% on MoE, where all-to-all dominates |
-| `use_liger_kernel: true` (default) | +40% and 19 GB at MoE `ep2`; add `liger_kernel_config: {fused_linear_cross_entropy: true}` past ~16k tokens, which trades 7–20% of speed for 14–30 GB on GPT-OSS `ep1` (the cost shrinks as the sequence grows) |
+| `use_liger_kernel: true` (default) | +40% and 19 GiB on Qwen3-30B-A3B at `ep2` (measured at v1.0.0), +6.6% on Qwen3.5-35B-A3B; add `liger_kernel_config: {fused_linear_cross_entropy: true}` past ~16k tokens, which trades 7–20% of speed for 14–30 GiB on GPT-OSS `ep1` (the cost shrinks as the sequence grows) |
 | `AdamWBF16` (automatic with `bf16: true`) | weights and optimizer state in 6 bytes/param where fp32-state AdamW needs 12, and a 17% shorter step than `adamw_torch_fused` |
-| `fsdp_defer_grad_sync: true` and `fsdp_reshard_after_backward: false`, with `gradient_accumulation_steps > 1` | one gradient reduce and one parameter re-gather per optimizer step instead of per microstep: +3–7% on one 8-GPU node, +9–13% across two nodes over EFA. Each keeps an unsharded copy per GPU (Qwen3-8B: +13 GB for the gradients). The config refuses both under `fsdp_reshard_after_forward: true` (ZeRO-3). [Details](../agent-docs/parallelism/data-parallelism.md) ↗ |
+| `fsdp_defer_grad_sync: true` and `fsdp_reshard_after_backward: false`, with `gradient_accumulation_steps > 1` | one gradient reduce and one parameter re-gather per optimizer step instead of per microstep. On one 8-GPU node the deferred reduce gives +3% on Qwen3-8B (+5–7% with both knobs) and +11.7% on Qwen3-30B-A3B at `ep_size: 1`; across two nodes over EFA it gives +9–13% on its own. Each keeps an unsharded copy per GPU (Qwen3-8B: +13 GB for the gradients). The config refuses both under `fsdp_reshard_after_forward: true` (ZeRO-3). [Details](../agent-docs/parallelism/data-parallelism.md) ↗ |
+| Fused MoE kernels (on by default) | fused GLU, torch's fused RMSNorm on four families and a fused weighted un-permute: 1.24× on Gemma 4 26B-A4B at `ep2` and 2,048 tokens, 1.09–1.25× on GLM-4.7-Flash, Qwen3-30B-A3B and GPT-OSS 20B at `ep2` and 4,096 tokens (2× B300, same peak memory). `HALO_FUSED_GLU=0` turns the GLU kernels off |
+| FlexAttention on Gemma 4's sliding layers (on by default) | 1.34× at 2,048 tokens and 3.93× at 16,384 on Gemma 4 26B-A4B at `ep2` without checkpointing (2× B300), and 12.6 GiB less peak at 16k. `HALO_FLEX_SLIDING=0` turns it off |
+| `use_chunked_grpo_logprobs: true` (GRPO) | completion log-probs without the full `[tokens, vocab]` logits, in fp32, at about the full-logits speed: offline GRPO on 8 B300s runs 18,367 vs 19,266 tok/s/GPU on Qwen3-8B at 8,192 tokens and 9,042 vs 8,980 on GPT-OSS 20B `ep8` at 4,096. Turn it on when the logits do not fit |
 
 The defaults already have most of this on. The levers you actually set per run
 are the first three.
@@ -52,7 +55,7 @@ are the first three.
 | --- | --- |
 | fp8 / fp4 **compute** (`lowp_precision`) | fine-grained experts are weight-bandwidth-bound, not FLOP-bound, so halving the matmul precision buys nothing — bf16 is already at the roofline |
 | The simulated low-precision backend | it is an exact QAT oracle, not a fast path: roughly 8× a bf16 step at mxfp8, 17–19× at fp4 |
-| Native DeepGEMM (`HALO_DEEPGEMM_NATIVE=1`) | 0.05–0.17× of bf16 at production shapes; the per-token activation quantization never amortizes. Never auto-selected |
+| Native DeepGEMM (`HALO_DEEPGEMM_NATIVE=1`) | 0.05–0.07× of bf16 at production shapes; the per-token activation quantization never amortizes. Never auto-selected |
 | `torch_compile: true` on an EP MoE run | it works, but it targets the same spans Liger already fuses, so stacking adds ~2%, against 2–5 minutes of compile on the first step |
 
 Low precision does earn its keep on the way out: `halo run quantize-to-lowp`

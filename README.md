@@ -223,9 +223,9 @@ precision, FlashAttention 4, Liger kernels, and grouped GEMM.
 | **24,456 tok/s/GPU** | gpt-oss-20b, dense EP1, 4k, batch 4, GC off — ~196k tok/s across 8 GPUs. |
 | **12,584 tok/s/GPU at 1,410 TFLOPS** | Qwen3.5-35B-A3B, 4k, batch 4, EP2 — the highest achieved TFLOPS of any EP>1 run benchmarked. |
 | **Up to 256k context** | gpt-oss-20b; dense EP1 is 2.1× faster than TRL at 64k and 1.28× at 256k. EP8+CP8 and dense CP-only run at about half TRL's per-GPU memory. |
-| **24–76 GB/GPU on the same 16k workload** | EP8+CP8: 23.6 GB at 5,460 tok/s/GPU. Dense EP1: 76 GB at 18,304 tok/s/GPU. |
+| **24–76 GiB/GPU on the same 16k workload** | EP8+CP8: 23.6 GiB at 5,460 tok/s/GPU. Dense EP1: 76 GiB at 18,304 tok/s/GPU. |
 | **2.12× Grouped GEMM** | Qwen3-30B-A3B, 2× B300, EP2, 8k, batch 4; 3.43× at batch 1. |
-| **2.1–3.7× FA4 kernel throughput** | FA4 vs FA2 on the isolated kernel; up to 2.3× end-to-end on dense Qwen3-4B at 32k (1× B300). |
+| **3.6–3.9× FA4 kernel throughput** | FA4 vs FA2 on the isolated kernel (B2×S8192, head_dim 128); up to 2.3× end-to-end on dense Qwen3-4B at 32k (1× B300). |
 
 Full results and methodology: [Performance](human-docs/performance.md)
 
@@ -269,7 +269,8 @@ for the per-model matrix, and [Clusters & Multi-Node](human-docs/clusters.md) fo
 Enabled by default where supported:
 
 - **Attention and kernels** — Flash Attention 4 on Blackwell, FA2/FA3 on Hopper, Liger fused
-  CE/SwiGLU/RMSNorm, and Grouped GEMM for MoE expert compute.
+  CE/SwiGLU/RMSNorm (Qwen3 MoE, GLM-4.7-Flash, GPT-OSS and Gemma 4 take torch's fused RMSNorm instead),
+  fused GLU kernels, and Grouped GEMM for MoE expert compute.
 
 - **Precision and optimizers** — `AdamWBF16` with stochastic rounding keeps weights and optimizer
   state in 6 bytes/parameter instead of 12 with FP32 master weights. Muon and FlashAdamW are also
