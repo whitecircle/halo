@@ -18,7 +18,7 @@ pair layout, the completion-only labels, the fixed-shape padding and the normali
 from __future__ import annotations
 
 import functools
-from collections.abc import Callable, Iterator, Mapping
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 
 import torch
@@ -27,19 +27,8 @@ import torch.nn.functional as F
 from torch.utils.checkpoint import checkpoint
 
 from src.data.spans import LABEL_IGNORE_INDEX
+from src.kernels.logprobs import logit_chunk_rows, selective_logprobs
 from src.models.head_transform import HeadTransform
-
-# fp32 elements per CE chunk. The fp32 upcast of a [tokens, V] plane is the last stage's memory peak;
-# chunking under a non-reentrant checkpoint bounds the held fp32 state to one chunk. Budgeted in
-# elements rather than token rows because the plane is tokens×V, so a fixed row count would scale the
-# held state with the vocabulary. 128M elements = 512 MB fp32, i.e. 4096 rows at V=32k. The fused
-# path (:func:`fused_causal_lm_token_loss`) uses the same budget to bound its head projection.
-_CE_CHUNK_ELEMENTS = 128 * 1024 * 1024
-
-
-def _ce_chunk_rows(vocab_size: int) -> int:
-    """Token rows whose fp32 [rows, V] plane fits the chunk budget; at least one row."""
-    return max(1, _CE_CHUNK_ELEMENTS // max(vocab_size, 1))
 
 
 def _shift_labels_left(labels: torch.Tensor) -> torch.Tensor:
@@ -66,50 +55,32 @@ def _head_ce_sum_chunk(
     return _ce_sum_chunk(head_transform.project(head, chunk_hidden), chunk_labels)
 
 
-def _chunked_token_results(
-    fn: Callable[[torch.Tensor, torch.Tensor], torch.Tensor],
-    rows: torch.Tensor,
-    flat_labels: torch.Tensor,
-    chunk_rows: int,
-) -> Iterator[torch.Tensor]:
-    """``fn(rows[chunk], flat_labels[chunk])`` per token chunk, each under a non-reentrant checkpoint.
-
-    ``rows`` is the flattened logits plane (unfused) or the flattened hidden states (fused), sliced
-    in lockstep with its labels. Checkpointing bounds the held fp32 state to one chunk; a single
-    chunk needs none, so the short-sequence case keeps the plain call. Callers add their own
-    reduction over the results.
-    """
-    n_tokens = flat_labels.numel()
-    if n_tokens <= chunk_rows:
-        yield fn(rows, flat_labels)
-        return
-    for start in range(0, n_tokens, chunk_rows):
-        end = start + chunk_rows
-        yield checkpoint(fn, rows[start:end], flat_labels[start:end], use_reentrant=False)
-
-
 def _chunked_token_sum(
     fn: Callable[[torch.Tensor, torch.Tensor], torch.Tensor],
     rows: torch.Tensor,
     flat_labels: torch.Tensor,
     chunk_rows: int,
 ) -> torch.Tensor:
-    """``sum(fn(rows[chunk], flat_labels[chunk]))`` over token chunks, accumulated in fp32."""
+    """``sum(fn(rows[chunk], flat_labels[chunk]))`` over token chunks, accumulated in fp32.
+
+    ``rows`` is the flattened logits plane (unfused) or the flattened hidden states (fused), sliced
+    in lockstep with its labels. Each chunk runs under a non-reentrant checkpoint, which bounds the
+    held fp32 state to one chunk; a single chunk needs none, so the short-sequence case keeps the
+    plain call.
+    """
     total = rows.new_zeros((), dtype=torch.float32)
-    for value in _chunked_token_results(fn, rows, flat_labels, chunk_rows):
-        total = total + value
+    n_tokens = flat_labels.numel()
+    if n_tokens <= chunk_rows:
+        return total + fn(rows, flat_labels)
+    for start in range(0, n_tokens, chunk_rows):
+        end = start + chunk_rows
+        total = total + checkpoint(fn, rows[start:end], flat_labels[start:end], use_reentrant=False)
     return total
 
 
 def _chunked_ce_sum(flat_logits: torch.Tensor, flat_labels: torch.Tensor) -> torch.Tensor:
     """Summed fp32 cross-entropy over an already-flattened ``[tokens, V]`` plane, chunked."""
-    return _chunked_token_sum(_ce_sum_chunk, flat_logits, flat_labels, _ce_chunk_rows(flat_logits.size(-1)))
-
-
-def _logprob_chunk(chunk_logits: torch.Tensor, chunk_labels: torch.Tensor) -> torch.Tensor:
-    """fp32 log-probs of ``chunk_labels`` under one ``[rows, V]`` chunk — a ``[rows]`` vector."""
-    logps = torch.log_softmax(chunk_logits.float(), dim=-1)
-    return logps.gather(-1, chunk_labels.unsqueeze(-1)).squeeze(-1)
+    return _chunked_token_sum(_ce_sum_chunk, flat_logits, flat_labels, logit_chunk_rows(flat_logits.size(-1)))
 
 
 @dataclass(frozen=True)
@@ -247,7 +218,7 @@ def fused_causal_lm_token_loss(
         functools.partial(_head_ce_sum_chunk, head, head_transform),
         hidden_states.reshape(-1, hidden_states.size(-1)),
         _shift_labels_left(labels).reshape(-1),
-        _ce_chunk_rows(vocab_size),
+        logit_chunk_rows(vocab_size),
     )
 
 
@@ -302,36 +273,6 @@ def split_pairs(interleaved: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
             f"be even, so no pair is split across microbatches."
         )
     return interleaved[0::2], interleaved[1::2]
-
-
-def selective_logprobs(logits: torch.Tensor, index: torch.Tensor) -> torch.Tensor:
-    """fp32 ``[B, T]`` log-probs of ``index`` under already-aligned ``[B, T, V]`` logits.
-
-    The one fp32 log-prob kernel: :func:`token_logprobs` and :func:`sequence_logprobs` build on it,
-    and it is TRL's ``selective_log_softmax`` contract for one index per position, minus that
-    function's bf16 branch, which returns bf16 log-probs. Whole, the ``.float()`` upcast and the
-    ``log_softmax`` output saved for backward are two fp32 planes (~26 GB at ``V=201088``,
-    ``S=8192``); every budget-sized chunk instead runs under a non-reentrant checkpoint, short rows
-    included, so backward holds no fp32 state. Rows are taken one at a time, so a non-contiguous view
-    such as ``logits[..., :-1, :]`` is never copied whole.
-    """
-    if logits.dim() != 3 or index.shape != logits.shape[:-1]:
-        raise ValueError(
-            f"selective_logprobs takes [B, T, V] logits and one index per position ([B, T]), got "
-            f"logits {tuple(logits.shape)} and index {tuple(index.shape)}."
-        )
-    chunk_rows = _ce_chunk_rows(logits.size(-1))
-    rows = []
-    for row_logits, row_index in zip(logits, index, strict=True):
-        # One split per row: per-chunk slices would each zero-fill a whole-row gradient in backward.
-        chunks = [
-            checkpoint(_logprob_chunk, chunk_logits, chunk_index, use_reentrant=False)
-            for chunk_logits, chunk_index in zip(
-                row_logits.split(chunk_rows), row_index.split(chunk_rows), strict=True
-            )
-        ]
-        rows.append(torch.cat(chunks))
-    return torch.stack(rows)
 
 
 def token_logprobs(logits: torch.Tensor, labels: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:

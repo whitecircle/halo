@@ -3,7 +3,7 @@
 
 TRL's ``selective_log_softmax`` returns bf16 per-token log-probs for bf16 logits, and TRL sums them
 into a bf16 sequence log-prob: at ``|logp|`` in [8192, 16384) the bf16 grid is 64 nats. Every KTO
-run and every FSDP2, EP, TP, precompute or PEFT DPO run takes that path rather than TRL's Liger loss.
+run and nearly every DPO run takes that path rather than TRL's Liger loss.
 
 Each test drives the real trainer method — ``_compute_loss`` with a live reference model, or the
 precompute sweep — over :class:`TableLM`, whose bf16 logits are known exactly, on completions long
@@ -78,9 +78,16 @@ def _ld_alpha_weights(completion_mask: torch.Tensor, ld_alpha: float) -> torch.T
     return mask * torch.where(position <= shared, 1.0, ld_alpha)
 
 
+def _trainer(kind: str, **kwargs):
+    """The shared precompute trainer, running its own reference pass instead of the helper's stub."""
+    trainer = precompute_trainer(kind, **kwargs)
+    del trainer.compute_ref_log_probs
+    return trainer
+
+
 def _loss_trainer(kind: str, policy: TableLM, reference: TableLM, **attrs):
-    """The shared precompute trainer plus what TRL's ``_compute_loss`` reads, with a live reference."""
-    trainer = precompute_trainer(kind, ref_model=reference)
+    """:func:`_trainer` plus what TRL's ``_compute_loss`` reads, with a live reference."""
+    trainer = _trainer(kind, ref_model=reference)
     trainer.model = policy
     trainer.accelerator.gather = trainer.accelerator.gather_for_metrics
     trainer.beta = BETA
@@ -227,10 +234,32 @@ def test_trl_log_softmax_is_restored_when_the_loss_raises():
     assert trl_dpo.selective_log_softmax is selective_log_softmax
 
 
+def test_a_reference_pass_nested_in_the_loss_stays_fp32():
+    """A reference pass entered while the loss already routes TRL through fp32 keeps that routing,
+    and leaving both restores TRL's own function."""
+    reference = TableLM(seed=1)
+    ref_batch = DataCollatorForPreference(pad_token_id=0)(_dpo_rows())
+    nested = []
+
+    class Nesting(TableLM):
+        def forward(self, input_ids, attention_mask=None, **kwargs):
+            if not nested:
+                nested.append(trainer.compute_ref_log_probs(ref_batch))
+            return super().forward(input_ids, attention_mask, **kwargs)
+
+    policy = Nesting(seed=0)
+    trainer = _loss_trainer("dpo", policy, reference)
+    trainer._compute_loss(policy, DataCollatorForPreference(pad_token_id=0)(_dpo_rows(completions=(4, 3))), False)
+
+    want = _float64_sequence_logps(reference, ref_batch["input_ids"], ref_batch["completion_mask"]).chunk(2)
+    for got, expected, what in zip(nested[0], want, ("chosen", "rejected"), strict=True):
+        _assert_nats_close(got, expected, f"nested reference {what} log-prob")
+    assert trl_dpo.selective_log_softmax is selective_log_softmax
+
+
 def _swept(kind: str, rows: list[dict], collator) -> tuple[Dataset, TableLM, object]:
     """The precompute sweep over ``rows``, run by the real trainer's reference forward of a TableLM."""
-    trainer = precompute_trainer(kind)
-    del trainer.compute_ref_log_probs  # the shared helper's stub; the trainer's own method runs
+    trainer = _trainer(kind)
     trainer.model = TableLM(seed=0)
     trainer.data_collator = collator
     swept = trainer._precompute_ref_logps(Dataset.from_list(rows), "train", len(rows))

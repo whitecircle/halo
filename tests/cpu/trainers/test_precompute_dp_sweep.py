@@ -19,6 +19,7 @@ PartialState()
 
 from src.distributed.parallelism_config import ParallelismConfig
 from src.trainers.mixins.dataloader import DataParallelDataLoaderMixin
+from src.trainers.preference.logprobs import FP32LogprobsMixin
 from src.trainers.preference.precompute import PrecomputeRefLogpsRankConsistentMixin
 from tests.common.parallelism import make_parallelism_config
 from tests.common.preference_precompute import TRAINERS
@@ -69,6 +70,9 @@ class _ReferenceForward:
 
 class _Trainer(PrecomputeRefLogpsRankConsistentMixin, DataParallelDataLoaderMixin, _ReferenceForward):
     """Real mixin over a stub reference forward, with a world gather simulated from all ranks' shards."""
+
+    # The stub forward stands in for FP32LogprobsMixin's, so it declares that mixin's precision.
+    logprob_precision = FP32LogprobsMixin.logprob_precision
 
     def __init__(self, rank: int, *, presharded: bool = False, world_chunks=None):
         self.parallelism_config = _parallelism_config(rank)

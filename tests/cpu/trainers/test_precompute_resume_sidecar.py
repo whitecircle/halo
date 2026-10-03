@@ -35,7 +35,6 @@ from src.args.dpo_args import DPOScriptArguments
 from src.args.kto_args import KTOScriptArguments
 from src.checkpoint.format import REFERENCE_LOGPS_FILE
 from src.trainers.mixins.checkpointing import CheckpointingMixin
-from src.trainers.preference.logprobs import LOGPROB_PRECISION
 from src.trainers.preference.precompute import PrecomputeRefLogpsRankConsistentMixin, _token_digest
 from src.training.environment import detect_resume_checkpoint
 from src.training.parser import H4ArgumentParser
@@ -257,7 +256,8 @@ def test_a_split_summed_at_another_precision_is_not_reused(kind, tmp_path, saved
     _save_base_run(kind, tmp_path, {"train": token_rows(kind)})
     saved = torch.load(tmp_path / REFERENCE_LOGPS_FILE, weights_only=True)
     settings = saved["train"]["settings"]
-    assert settings["logprob_precision"] == LOGPROB_PRECISION, "premise: a fresh save records its precision"
+    precision = TRAINERS[kind][0].logprob_precision
+    assert settings["logprob_precision"] == precision, "premise: a fresh save records its precision"
     if saved_precision is None:
         del settings["logprob_precision"]
     else:
@@ -265,13 +265,25 @@ def test_a_split_summed_at_another_precision_is_not_reused(kind, tmp_path, saved
     torch.save(saved, tmp_path / REFERENCE_LOGPS_FILE)
 
     resumed = _resumed(kind, tmp_path)
-    with pytest.raises(ValueError, match="summed at .* precision and this run sums them in float32") as raised:
+    with pytest.raises(ValueError, match=f"^Regenerate .* summed at .* this run sums them in {precision}") as raised:
         resumed._precompute_ref_logps(token_rows(kind), "train", SWEEP_BATCH_SIZE)
     assert "--max_steps=1" in str(raised.value), "the refusal must name how to regenerate the file"
+    assert "settings the checkpoint was written with" not in str(raised.value), "no setting selects the precision"
     assert resumed.compute_ref_log_probs.batches == 0
     from_base = precompute_trainer(kind, resume_checkpoint=str(tmp_path), policy_from_checkpoint=False)
     from_base._precompute_ref_logps(token_rows(kind), "train", SWEEP_BATCH_SIZE)
     assert from_base.compute_ref_log_probs.batches > 0, "the old-precision split was reused, not re-swept"
+
+
+def test_a_trainer_without_a_declared_precision_refuses_before_sweeping(kind):
+    """The precision is every saved split's identity; a trainer that does not declare it would save
+    splits a resume could not tell apart from another precision's."""
+    trainer = precompute_trainer(kind)
+    trainer.logprob_precision = None
+
+    with pytest.raises(NotImplementedError, match="logprob_precision"):
+        trainer._precompute_ref_logps(token_rows(kind), "train", SWEEP_BATCH_SIZE)
+    assert trainer.compute_ref_log_probs.batches == 0
 
 
 @pytest.mark.parametrize(

@@ -36,7 +36,6 @@ from tqdm.auto import tqdm
 from src.checkpoint.format import REFERENCE_LOGPS_FILE
 from src.distributed.checkpoint.coordination import consensus_read
 from src.distributed.runtime import barrier_on_exit, fs_aware_save_rank, rank_consensus, reject_across_ranks
-from src.trainers.preference.logprobs import LOGPROB_PRECISION
 
 logger = get_logger(__name__, log_level="info")
 
@@ -83,6 +82,11 @@ def _attach_reference_columns(dataset: Dataset, columns: Mapping[str, torch.Tens
     return concatenate_datasets([dataset, appended], axis=1)
 
 
+def _is_saved_split(entry: object) -> bool:
+    """Whether a saved entry has every :data:`_ENTRY_SCHEMA` field, each of its type."""
+    return isinstance(entry, Mapping) and all(isinstance(entry.get(k), t) for k, t in _ENTRY_SCHEMA.items())
+
+
 def _saved_split_mismatch(
     entry: object, num_rows: int, token_digests: Mapping[str, str], settings: Mapping, needed: Sequence[str]
 ) -> str | None:
@@ -91,7 +95,7 @@ def _saved_split_mismatch(
     Total over whatever the file held: a malformed entry is a mismatch, never a raise, since one
     node's bad copy must reach the verdict every rank joins rather than fail on that rank alone.
     """
-    if not isinstance(entry, Mapping) or not all(isinstance(entry.get(k), t) for k, t in _ENTRY_SCHEMA.items()):
+    if not _is_saved_split(entry):
         return f"its entry is not a saved reference split (expected {sorted(_ENTRY_SCHEMA)})"
     columns = entry["columns"]
     missing = [column for column in needed if column not in columns]
@@ -106,12 +110,6 @@ def _saved_split_mismatch(
     ]
     if malformed:
         return f"its {malformed} do not hold one value per row"
-    saved_precision = entry["settings"].get(_PRECISION_KEY, "an unrecorded")
-    if saved_precision != settings[_PRECISION_KEY]:
-        return (
-            f"its log-probs were summed at {saved_precision} precision and this run sums them in "
-            f"{settings[_PRECISION_KEY]}, which no setting changes"
-        )
     if entry["settings"] != settings:
         return f"it was computed under {entry['settings']} and this run sets {dict(settings)}"
     changed = sorted(
@@ -139,6 +137,27 @@ def _regeneration_steps(checkpoint: str) -> str:
     )
 
 
+def _restore_refusal(path: str, name: str, entry: object, settings: Mapping, mismatch: str, checkpoint: str) -> str:
+    """Why a resume whose sweep would score trained weights refuses the saved split, and the remedy.
+
+    A split summed at another log-prob precision cannot be fixed by resuming with the saving run's
+    settings, since no setting selects the precision, so that refusal names only the regeneration.
+    """
+    if _is_saved_split(entry) and entry["settings"].get(_PRECISION_KEY) != settings[_PRECISION_KEY]:
+        return (
+            f"Regenerate the '{name}' reference log-probs for this run: {_regeneration_steps(checkpoint)}. "
+            f"The saved ones in {path} were summed at {entry['settings'].get(_PRECISION_KEY, 'unrecorded')} "
+            f"precision, and this run sums them in {settings[_PRECISION_KEY]}, which no setting changes."
+        )
+    return (
+        f"{path} does not belong to this '{name}' dataset: {mismatch}. Each saved value is one row's "
+        f"reference under the saving run's data and settings, so attaching them here would score rows "
+        f"against references computed otherwise. Resume with the data and reference settings the "
+        f"checkpoint was written with, or give it a file computed for this run: "
+        f"{_regeneration_steps(checkpoint)}."
+    )
+
+
 class PrecomputeRefLogpsRankConsistentMixin:
     """Run TRL's ``precompute_ref_log_probs`` sweep on the DP axis and attach its columns per rank.
 
@@ -148,6 +167,9 @@ class PrecomputeRefLogpsRankConsistentMixin:
     ``DistributedTrainerMixin`` in its bases, so its :meth:`_persist_trainer_sidecars` overrides the
     checkpointing default.
     """
+
+    # Declared by FP32LogprobsMixin; part of every saved split's identity.
+    logprob_precision: str | None = None
 
     def _init_reference_resume(self, kwargs: dict) -> None:
         """Pop the resume context of the precompute TRL's ``__init__`` runs; call before it.
@@ -181,8 +203,13 @@ class PrecomputeRefLogpsRankConsistentMixin:
 
     def _reference_identity(self) -> dict:
         """The settings a saved split records and must match: the run's knobs plus the precision the
-        sweep sums log-probs in, which ``FP32LogprobsMixin`` (listed by every trainer of this mixin) sets."""
-        return {**self._reference_settings(), _PRECISION_KEY: LOGPROB_PRECISION}
+        sweep sums its log-probs in."""
+        if self.logprob_precision is None:
+            raise NotImplementedError(
+                f"{type(self).__name__} must declare the logprob_precision its reference sweep sums in "
+                f"(list FP32LogprobsMixin in its bases)"
+            )
+        return {**self._reference_settings(), _PRECISION_KEY: self.logprob_precision}
 
     def _precompute_ref_logps(self, dataset, name, batch_size):
         """Trust dataset-supplied reference log-probs, restore a resumed run's, and sweep otherwise.
@@ -222,15 +249,16 @@ class PrecomputeRefLogpsRankConsistentMixin:
                 f"be scored as its own reference. Pass resume_checkpoint (the resolved checkpoint, or "
                 f"None) and policy_from_checkpoint (whether the policy weights came from it)."
             )
+        settings = self._reference_identity()
         if self._reference_resume_checkpoint is not None:
-            restored = self._restore_reference_logps(dataset, name, needed)
+            restored = self._restore_reference_logps(dataset, name, needed, settings)
             if restored is not None:
                 return restored
         columns = self._sweep_reference_logps(dataset, name, batch_size, needed)
         self._reference_logps_by_split[name] = {
             "num_rows": len(dataset),
             "token_digests": self._reference_input_digests(dataset, name),
-            "settings": self._reference_identity(),
+            "settings": settings,
             "columns": columns,
         }
         return _attach_reference_columns(dataset, columns)
@@ -275,7 +303,9 @@ class PrecomputeRefLogpsRankConsistentMixin:
             )
         return {column: _token_digest(dataset, column) for column in columns}
 
-    def _restore_reference_logps(self, dataset, name: str, needed: tuple[str, ...]) -> Dataset | None:
+    def _restore_reference_logps(
+        self, dataset, name: str, needed: tuple[str, ...], settings: Mapping
+    ) -> Dataset | None:
         """Attach the ``name`` split's columns saved in the resume checkpoint, or ``None`` to sweep.
 
         A sweep is correct only when it scores untrained weights. With no separate reference model
@@ -323,7 +353,6 @@ class PrecomputeRefLogpsRankConsistentMixin:
             return None
         num_rows = len(dataset)
         token_digests = self._reference_input_digests(dataset, name)
-        settings = self._reference_identity()
         mismatch = _saved_split_mismatch(entry, num_rows, token_digests, settings, needed)
         if not sweep_scores_trained_weights:
             matches_all, _ = rank_consensus(mismatch is None)
@@ -335,15 +364,7 @@ class PrecomputeRefLogpsRankConsistentMixin:
                 )
                 return None
         reject_across_ranks(
-            None
-            if mismatch is None
-            else (
-                f"{path} does not belong to this '{name}' dataset: {mismatch}. Each saved value is one "
-                f"row's reference under the saving run's data and settings, so attaching them here would "
-                f"score rows against references computed otherwise. Resume with the data and reference "
-                f"settings the checkpoint was written with, or give it a file computed for this run: "
-                f"{_regeneration_steps(checkpoint)}."
-            ),
+            None if mismatch is None else _restore_refusal(path, name, entry, settings, mismatch, checkpoint),
             f"Restoring the '{name}' reference log-probs",
             exc_type=ValueError,
         )

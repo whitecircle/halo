@@ -33,7 +33,17 @@ No training-side prompt cap exists, so an over-long prompt eats its own completi
 
 ## Log-prob precision
 
-Sequence log-probs are summed in fp32. TRL's `selective_log_softmax` keeps bf16 logits' per-token log-probs, and their sum, in bf16 — a 64-nat grid at `|logp|` in [8192, 16384), tens of nats of rounding in a long completion's margin. `FP32LogprobsMixin` (`src/trainers/preference/logprobs.py`) swaps it, for the duration of TRL's loss and reference pass, for a chunked fp32 log-softmax that never builds a full fp32 `[B, T, V]` plane, and TRL sums its output in fp32: every loss term and `ld_alpha` split built on the sequence log-probs, the WPO weights' log-prob term and the `logps/*` and `rewards/*` metrics are fp32. Terms TRL takes from the logits directly (the `sft` loss type's cross-entropy, WPO's normalizer, the `entropy`, `logits/*` and `mean_token_accuracy` metrics) keep TRL's precision. That covers every run outside TRL's fused Liger DPO loss, which runs only on an unsharded policy against a frozen reference copy: FSDP2, EP, TP, precompute and PEFT all take the fp32 path.
+The trainer sums sequence log-probs in fp32. TRL's own `selective_log_softmax` keeps the per-token log-probs of bf16 logits in bf16, and sums them in bf16. At `|logp|` in [8192, 16384) that grid is 64 nats, so a long completion's margin carries tens of nats of rounding.
+
+`FP32LogprobsMixin` (`src/trainers/preference/logprobs.py`) swaps that function out while TRL's loss and reference pass run. The replacement is a chunked fp32 log-softmax (`src/kernels/logprobs.py`) that never builds a full fp32 `[B, T, V]` plane. TRL sums its output in fp32, so these are fp32:
+
+- every loss term built on the sequence log-probs, and the `ld_alpha` split;
+- the log-prob term of the WPO weights;
+- the `logps/*` and `rewards/*` metrics.
+
+Terms TRL takes from the logits directly keep TRL's precision: the `sft` loss type's cross-entropy, WPO's normalizer, and the `entropy`, `logits/*` and `mean_token_accuracy` metrics. Reference columns the dataset supplies keep the precision they were computed in.
+
+Nearly every run takes the fp32 path. TRL's fused Liger DPO loss runs only when Liger's fused linear cross-entropy was applied at load (the [per-model default](../../optimization/liger-kernels.md#configuration) for Zaya, DeepSeek-V4 and GLM-4.7-Flash, or `fused_linear_cross_entropy: true`), on an unsharded policy against a frozen reference copy. FSDP2, EP and TP switch it off, and TRL refuses it alongside precompute or PEFT.
 
 ## Reference model
 
@@ -109,4 +119,5 @@ Failure signatures:
 - A reference-model raise on a live-sinks policy — `use_peft: true`, or precompute under EP/TP/PP. `beta: 0` does not help: it changes the loss, not whether a reference loads.
 - "Cannot hold a separate dense reference" under EP/TP/PP — set `precompute_ref_log_probs: true` or `--use_peft`.
 - "Cannot resume precompute_ref_log_probs" — the checkpoint's `reference_logps.pt` is missing or lacks that split. Recover it with the one-step run [above](#resuming-a-precompute-run), or put the reference columns (computed on the base model) in the dataset.
-- "does not belong to this '<split>' dataset" on resume — the resumed data or reference settings differ from the saving run's (dataset, split, chat template, tokenizer, `max_length`, `truncation_mode`, `ld_alpha`, log-prob precision). Resume with the saving run's data and settings, or regenerate the file with the one-step run [above](#resuming-a-precompute-run).
+- "does not belong to this '<split>' dataset" on resume — the resumed data or reference settings differ from the saving run's (dataset, split, chat template, tokenizer, `max_length`, `truncation_mode`, `ld_alpha`). Resume with the saving run's data and settings, or regenerate the file with the one-step run [above](#resuming-a-precompute-run).
+- "Regenerate the '<split>' reference log-probs for this run" on resume — the saved split was summed at another [log-prob precision](#log-prob-precision), which no setting selects. Run the one-step regeneration the message names.
