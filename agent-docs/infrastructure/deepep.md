@@ -65,10 +65,13 @@ The DeepEP knobs — `EP_DISABLE_GIN`, `EP_SUPPRESS_NCCL_CHECK`, `CUDA_DEVICE_MA
 `HALO_DEEPEP_GPU_TIMEOUT_SECONDS`, `HALO_EP_SHARED_OVERLAP` and `HALO_EP_CAPACITY_DEDUP` — are catalogued
 with their defaults in [Environment variables](../reference/configuration-reference.md#environment-variables).
 
-`CUDA_DEVICE_MAX_CONNECTIONS=1` (the image `ENV`) serializes device work onto one hardware queue and is
-free: neutral on dense and `ep_size=2`, **+9.7%** on `ep_size=8` (8×B300, gpt-oss-20b, seq 4096, GC on).
-It is latched at `cuInit`, so a launch outside the image exports it before the process starts, and it
-does not make the racy single-domain multi-group shape safe ([below](#ep-grouping-what-is-reliable)).
+`CUDA_DEVICE_MAX_CONNECTIONS=1` (the image `ENV`) serializes device work onto one hardware queue. It is a
+correctness setting: without it, EP with more than one dispatch group per NVLink domain can deadlock the
+combine barrier against FSDP2's DP-wide collectives, and the trainer warns at startup when it is not `1`.
+It has no measurable throughput effect: against `8`, `ep_size=8` reads +0.2% / −0.3% and `ep_size=2`
+reads +0.2% (8× B300, gpt-oss-20b, seq 4096, batch 1, GC on; 2026-10-03, commit 0bc3a22a5, Blackwell
+image). It is latched at `cuInit`, so a launch outside the image exports it before the process starts, and
+it does not make the racy single-domain multi-group shape safe ([below](#ep-grouping-what-is-reliable)).
 
 **These must agree across every rank of the job**: `HALO_EP_CAPACITY_DEDUP`,
 `HALO_DEEPEP_GPU_TIMEOUT_SECONDS`, `HALO_DEEPEP_NUM_SMS`, `HALO_DEEPEP_NUM_QPS`,
@@ -210,7 +213,8 @@ interface (`_DeepEPBackend`), so it is transparent to the MoE layer and the auto
 | `legacy` | `deep_ep.Buffer` (V1) | CUDA IPC P2P over NVLink | fixed-size chunked pipeline sized by hidden, streams arbitrary length | **No** (rejected at config time) |
 
 The two are **numerically identical** (bit-identical loss + matching expert/router gradients on
-gpt-oss-20b ep2) and throughput-comparable (legacy ≈ 1.04× elastic step time at ep2/seq4096). `auto`
+gpt-oss-20b ep2); legacy takes ≈1.12× elastic's fwd+bwd time at ep2/seq4096 (2× B300,
+`bench_ep_buffer_backends.py` defaults; 2026-10-03, commit 0bc3a22a5, Blackwell image). `auto`
 resolves to `elastic`, which fits every topology; the backend is fixed for the run.
 
 Pick explicit **`legacy`** (intranode / node-local) for long-context ep8 training: elastic ep8 at extreme
