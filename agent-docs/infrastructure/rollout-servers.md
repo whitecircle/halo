@@ -47,7 +47,7 @@ Use vLLM unless a run needs SGLang specifically.
 ## Weight sync
 
 Both engines receive the **full model** every sync: merged LoRA touches ~95% of bytes, so there is no
-delta path (~42 GB at 20B, ~1–2 s steady over loopback). Re-assembling the sharded weights is a
+delta path (~42 GB at 20B; measured rates under [Servers on other nodes](#servers-on-other-nodes-efa)). Re-assembling the sharded weights is a
 collective; every rank takes part and none may skip.
 
 One rank owns the clients and does the sending: the **forwarding rank** (global main; TP-rank 0 under
@@ -702,7 +702,7 @@ vLLM client 53 GB/s, EFA with the SGLang client 80 GB/s, sockets over the ENA 9.
 rates gpt-oss-120b (234 GB) syncs in 4.4 s, 2.9 s and 24 s.
 
 The vLLM client's rate is set by its one HTTP round trip per chunk and rises with
-`HALO_WEIGHT_SYNC_CHUNK_MB` (1 GiB → 54 GB/s, 8 GiB → 73 GB/s at this payload); the SGLang client's
+`HALO_WEIGHT_SYNC_CHUNK_MB` (1 GiB, the default, → 53 GB/s; 8 GiB → 73 GB/s at this payload); the SGLang client's
 by the fabric.
 
 ## Checking a server
@@ -760,8 +760,8 @@ tok/s per sequence against 63–66 for the same server alone. Pin each server co
 its own cores (`docker run --cpuset-cpus`, compose `cpuset:`) and the trainer to the rest.
 
 Step latency grows with running sequences (about 14 ms + 0.22 ms per sequence here under MTP), so
-per-sequence speed falls as concurrency rises, 101 tok/s at 48 running and 71 at 96, while aggregate
-throughput rises sub-linearly (+44% for that doubling).
+per-sequence speed falls as concurrency rises, 101 tok/s at 48 running and 71 at 96 in one sweep, while aggregate
+throughput rises sub-linearly (+41% for that doubling).
 
 Kernel-level gains (tuned MoE tiles, another attention backend) do not show at this concurrency;
 fewer steps per token do. Turning these numbers into batch sizes and timeouts:
@@ -772,7 +772,7 @@ fewer steps per token do. Turning these numbers into batch sizes and timeouts:
 `--speculative-config '{"method":"mtp","num_speculative_tokens":2}'` (compose slot
 `VLLM_SPECULATIVE_CONFIG`); the drafter loads from the same checkpoint.
 
-Measured on Qwen3.6-35B-A3B on a B300 at 48 concurrent sequences, temperature 1.0: 59–67 → 108–112
+Measured on Qwen3.6-35B-A3B on a B300 at 48 concurrent sequences, temperature 1.0, in a separate session: 59–67 → 108–112
 tok/s per sequence, 2.4 tokens accepted per step, output statistics unchanged.
 
 Sound for RL: rejection sampling applies temperature and top-p to the target logits and keeps the

@@ -160,8 +160,9 @@ reward-model score), without the trainer's effort-length terms, so a length pric
 
 ## Sizing a run
 
-Rollouts in flight per server are at most `data_parallel_size × per_device_train_batch_size × steps_per_generation ÷
-num_servers`, capped per rank by `max_concurrent_rollouts`. Measure the engine's decode speed at about that
+Rollouts in flight per server are at most `world_size × per_device_train_batch_size × steps_per_generation ÷
+num_servers`, capped per rank by `max_concurrent_rollouts`. Under TP or ETP every rank rolls out and only each
+group leader's rollouts are kept. Measure the engine's decode speed at about that
 concurrency with the run's own prompts — nothing in the config predicts it — then set `request_timeout` to at least
 twice one turn's budget at that speed and `episode_timeout` to `max_turns` turns plus tool time. Start from one
 serving GPU per trainer GPU, one engine per serving GPU while the model and its KV cache fit.
