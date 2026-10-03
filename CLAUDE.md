@@ -162,6 +162,7 @@ src/
 │                        #   format.py (on-disk spellings, save-dtype casts, the layout cascade),
 │                        #   config_export.py (what an exported config.json must contain), adapters.py (saved-PEFT
 │                        #   layout, shape gates, merge-into-base), tool_io.py (tool-side directory I/O),
+│                        #   atomic.py (exclusive umask-respecting staging, durable Torch sidecars),
 │                        #   shard_writer.py (StageShardWriter — incremental safetensors parts),
 │                        #   fp8_dequant.py (streaming fp8 → bf16), model_card.py (the `halo` Hub tag on every
 │                        #   model card a save or export writes)
@@ -207,7 +208,8 @@ src/
 |---|---|:--:|
 | `DistributedSFTTrainer` | Supervised fine-tuning | ✅ |
 | `SmoothMarginPOTrainer` | Reference-free preference (SMPO) | ✅ |
-| `OfflineGRPOTrainer` / `DistributedGRPOTrainer` | Offline / online GRPO | ❌ |
+| `OfflineGRPOTrainer` | Offline GRPO | ✅ (full fine-tuning) |
+| `DistributedGRPOTrainer` | Online GRPO | ❌ |
 | `DistributedAsyncEnvironmentalGRPOTrainer` | Async GRPO with environments: multi-turn RL (Ray + vLLM/SGLang) | ❌ |
 | `DistributedDPOTrainer` / `DistributedKTOTrainer` | DPO / KTO | ❌ |
 | `DistributedRewardTrainer` / `ClassificationTrainer` | BT reward / sequence classification | ❌ |

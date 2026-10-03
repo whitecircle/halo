@@ -93,7 +93,7 @@ From `CLAUDE.md` "Distributed Trainers" table. All extend `DistributedTrainerMix
 | `SmoothMarginPOTrainer` (SMPO) | Yes | Yes | Yes | Yes | Yes |
 | `DistributedDPOTrainer` (DPO) | Yes | No | Yes | Yes | Yes (precompute-only; `sigmoid`/`hinge`/`ipo`) |
 | `DistributedKTOTrainer` (KTO) | Yes | No | Yes | Yes | Yes (`apo_zero_unpaired`, precompute-only) |
-| `OfflineGRPOTrainer` | Yes | No | Yes | Yes | Yes (any `kl_beta`; a construction-time sweep scores the KL reference) |
+| `OfflineGRPOTrainer` | Yes | Yes (full fine-tuning) | Yes | Yes | Yes (any `kl_beta`; a construction-time sweep scores the KL reference) |
 | `DistributedGRPOTrainer` (online) | Yes | No | Yes | Yes | No |
 | `DistributedSDPGTrainer` (online SDPG, `DistributedGRPOTrainer` subclass) | Yes | No | Yes | Yes | No |
 | `DistributedAsyncEnvironmentalGRPOTrainer` | Yes | No | Yes | Yes | No |
@@ -104,7 +104,7 @@ From `CLAUDE.md` "Distributed Trainers" table. All extend `DistributedTrainerMix
 | `EmbeddingTrainer` | Yes | No | Yes | Yes | No |
 
 The PP column is each trainer's declared `_supports_pp`, inert while the release gate rejects
-`pp_size > 1` first. Only **SFT and SMPO support CP**. The authoritative gate is the per-class `_supports_cp` /
+`pp_size > 1` first. **SFT, SMPO and offline GRPO full fine-tuning support CP**. The authoritative gate is the per-class `_supports_cp` /
 `_supports_pp` attribute (`src/trainers/mixins/base.py`, checked in
 `src/trainers/mixins/validation.py`), so a hand-built config is rejected too. Each training
 script additionally passes its trainer class to `parallelism_config_from_args(..., trainer_cls=...)`
@@ -119,7 +119,8 @@ CP is incompatible with trainers/paths that use:
 - full-sequence pooling
 - dual models (reference + policy)
 
-That is why DPO/GRPO/reward/classification/distillation/embedding reject CP.
+These paths keep DPO/KTO, online/environment GRPO, reward, classification, distillation and embedding
+outside CP. Offline GRPO has a CP-aware scoring and reduction path; its CP adapter runs are refused.
 
 ## Worked dp_size examples (8 GPUs, 1 node, domain=8)
 

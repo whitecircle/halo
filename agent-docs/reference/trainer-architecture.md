@@ -22,7 +22,7 @@ Each is a class because it reads live trainer state; the methods a test or a cal
 `super()` calls (`_save_checkpoint`, `save_model`, the two loads) must reach the base Trainer —
 `tests/cpu/trainers/test_mixin_composition.py` fails if a sibling base ever intercepts one.
 
-Four modules in the same package sit outside that composition. `StoredMetricsMixin`
+Additional modules in the same package sit outside that composition. `StoredMetricsMixin`
 (`src/trainers/mixins/stored_metrics.py`) is mixed in *directly* by SMPO, teacher and self
 distillation, and SDPG for buffered per-step metric logging. Under PP the store would be fed from
 the last stage ([Pipeline Parallelism](../parallelism/pipeline-parallelism.md), not yet available in
@@ -38,8 +38,16 @@ on-policy trainers decouple the completions table from the metric drain.
 per-mode setup, and the EP one derives the FSDP ignored-module set in a single module-tree walk it
 hands to `_apply_ep_aware_dp_fsdp2`.
 
-The other three are imported as plain functions — `grad_clip.py` (`clip_coefficient` and
-`scale_shards_to_max_norm_`, the shared clip coefficient, below), `loss_masks.py::effective_loss_mask` (`completion_mask ∧ tool_mask`
+`ReferenceLogpsCheckpointMixin` is mixed in by DPO/KTO precompute and offline GRPO. It owns
+reference identity checks, resume attachment and atomic sidecar persistence; each trainer owns its
+score payload and sweep ([Checkpoints](checkpoints.md#what-gets-saved)).
+Offline GRPO's `reference_cache.py` streams current-batch scores to filesystem-aware writers and
+maps the ordered ragged token values; its reference mixin attaches those buffers without repacking
+them ([Reference model](../training-methods/grpo/offline-grpo.md#reference-model)).
+
+Three modules are imported as plain functions — `grad_clip.py` (`clip_coefficient` and
+`scale_shards_to_max_norm_`, the shared clip coefficient, below),
+`loss_masks.py::effective_loss_mask` (`completion_mask ∧ tool_mask`
 where a `tool_mask` exists, else `completion_mask`), and `pp_gates.py` (the shared PP rejection
 vocabulary, below).
 
@@ -49,7 +57,7 @@ vocabulary, below).
 |---------|-----------|:--:|:--:|:--:|:--:|:--:|
 | `DistributedSFTTrainer` | `SFTTrainer` | Yes | Yes | Yes | Yes | Yes |
 | `SmoothMarginPOTrainer` | `Trainer` | Yes | Yes | Yes | Yes | Yes (no VLM / `padding_free` / clip percentile / PEFT; `label_pad_token_id: -100`) |
-| `OfflineGRPOTrainer` | `ChunkedLogprobsCore`, `Trainer` | Yes | No | Yes | Yes | Yes (`kl_beta > 0` via a construction-time reference sweep) |
+| `OfflineGRPOTrainer` | `ChunkedLogprobsCore`, `Trainer` | Yes | Yes (full fine-tuning) | Yes | Yes | Yes (`kl_beta > 0` via a construction-time reference sweep) |
 | `DistributedDPOTrainer` | `DPOTrainer` | Yes | No | Yes | Yes | Yes (precompute-only; `sigmoid`/`hinge`/`ipo`) |
 | `DistributedKTOTrainer` | `KTOTrainer` | Yes | No | Yes | Yes | Yes (`apo_zero_unpaired`, precompute-only) |
 | `DistributedRewardTrainer` | `RewardTrainer` | Yes | No | Yes | Yes | Yes |
@@ -77,10 +85,15 @@ gated by `_supports_ep`.
 **CP** works only where the loss is computable from a sequence chunk. The rest inherit the default
 `_supports_cp = False`.
 
-The reasons: the trainer uses `logits_to_keep` (offline GRPO, Async GRPO with Environments), needs
+The reasons: the trainer uses `logits_to_keep` (Async GRPO with Environments), needs
 global log-probability sums (DPO, KTO), needs full-sequence pooling (classification, reward,
 embedding), wraps two models (distillation), or runs a separate-length privileged-teacher or rollout
 sequence (self distillation, SDPG, online GRPO).
+
+Offline GRPO scores boundary-aligned local hidden states through the chunked head and reduces its
+token objective across CP with the shared autograd SUM. Its CP path rejects adapters; its
+[full-FT reference](../training-methods/grpo/offline-grpo.md#reference-model) is persisted, not
+recomputed from trained weights on resume.
 
 **PP** needs a single-forward objective on one stage's logits, and the conditional rows above are
 constructor-time gates rather than class attributes. Rejections land in three places.
@@ -453,10 +466,11 @@ Around it the mixin keeps the non-weight parts of a checkpoint: `_save_checkpoin
 `_restore_router_balancing_biases` for the `router_balancing_biases.pt` sidecar.
 `_persist_trainer_sidecars` is a trainer's own hook, called on every rank before rotation, and
 `_restore_trainer_sidecars` its read-back, called on every rank of a resume (never a best-model
-load). The DPO/KTO precompute mixin overrides the write for `reference_logps.pt`, which it reads back
-before TRL's `__init__` instead; the async GRPO rollout mixin overrides both for its pending prefetch
-rounds. Each trainer lists the overriding mixin ahead of `DistributedTrainerMixin` in its bases, so
-the empty defaults do not shadow it.
+load). The shared reference mixin overrides the write for DPO/KTO and offline GRPO's `reference_logps.pt`.
+DPO/KTO read it back during TRL's `__init__`, and offline GRPO restores it during construction,
+not through the resume hook. The async GRPO rollout mixin overrides both for its pending prefetch
+rounds. Each trainer lists the overriding mixin ahead of `DistributedTrainerMixin` in its bases,
+so the empty defaults do not shadow it.
 
 `load_best_model_at_end` is refused at construction for every shape whose end-of-run reload is
 guaranteed to be refused: `cp_size > 1`, a MoE carrying EP or grouped-GEMM wrappers (`ep_size: 1`

@@ -18,7 +18,7 @@ Versions compared: TRL 1.6.0 and Accelerate 1.11.0 (the pinned releases), Unslot
 | SMPO (reference-free PO) | **Yes** | No | — | No | No | No | No | No |
 | Offline GRPO (pre-scored) | **Yes** | No | — | No | No | No | No | No |
 | EP for MoE (no conversion) | **DeepEP** | No | No | No | **DeepEP** (v0.17) | Via Megatron | Via Megatron | MCore format |
-| Context Parallelism | **Ulysses (SFT + SMPO)** | SFT-only; needs a newer Accelerate | Yes (FSDP2) | No | Yes (ring/seq) | Via Megatron | Via Megatron | MCore |
+| Context Parallelism | **Ulysses (SFT, SMPO, offline GRPO full-FT)** | SFT-only; needs a newer Accelerate | Yes (FSDP2) | No | Yes (ring/seq) | Via Megatron | Via Megatron | MCore |
 | Tensor Parallelism | Yes (DTensor) | Via Accelerate; needs a newer Accelerate | Yes (ND-parallel) | No | Yes (experimental) | Via Megatron | Via Megatron | MCore |
 | Combined EP+CP / EP+TP / pure ETP | **Yes** | No | No (no EP) | No | Partial (EP×CP and EP×CP×FSDP; EP×TP raises) | Via Megatron | Via Megatron | Yes |
 | Full BF16 (~6 bytes/param) | **AdamWBF16 + SR** | No (FP32 masters) | Plumbing only | No | bf16 MP only | No | No | No |

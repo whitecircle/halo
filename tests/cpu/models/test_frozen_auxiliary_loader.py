@@ -1,7 +1,7 @@
 #!/usr/bin/env python
 """Consolidation contract for the frozen auxiliary models: one loader, one sinks policy.
 
-The DPO/KTO reference, the SDPG KL anchor, the offline-GRPO KL reference of a wrapped-MoE policy and
+The DPO/KTO reference, the SDPG KL anchor, the offline-GRPO native expert-LoRA KL reference and
 the distillation teacher all load an unparallelized frozen model whose logprobs are the other half of
 the objective. A per-site copy of that load buys a silent numerical bug the moment it drifts — a pin read off an object that cannot
 carry it (a "pinned" teacher on hub ``main``), or a backend resolved under ``sinks_reset=True``
@@ -33,6 +33,7 @@ import scripts.training.distillation.self_distill as self_distill_script
 import scripts.training.distillation.teacher_distill as distill_script
 import scripts.training.offline_grpo as offline_grpo_script
 import src.distributed.loading.frozen_models as frozen_models
+from src.distributed.expert_parallel.config import ExpertLoraSpec
 from src.distributed.loading.frozen_models import load_frozen_auxiliary_model, load_reference_model_for_preference
 from src.distributed.parallelism_config import ParallelismConfig
 from tests.common.ep_stubs import StubEPLayerBase
@@ -139,10 +140,12 @@ def _sdpg_reference(*, reset_sinks):
 
 
 def _offline_grpo_reference(*, reset_sinks):
-    """The offline-GRPO KL reference of a wrapped-MoE full fine-tune, whose policy cannot be deep-copied."""
+    """Native expert LoRA uses a live unadapted base rather than full-FT's run-start score cache."""
     return offline_grpo_script._load_kl_reference(
         _token_setup_args(),
-        types.SimpleNamespace(parallelism_config=ParallelismConfig(), model_source=AUX_MODEL),
+        types.SimpleNamespace(
+            parallelism_config=ParallelismConfig(expert_lora=ExpertLoraSpec(r=2, alpha=4)), model_source=AUX_MODEL
+        ),
         types.SimpleNamespace(kl_beta=0.1, bf16=True, fp16=False),
         ModelConfig(model_name_or_path=AUX_MODEL),
         types.SimpleNamespace(reset_sinks=reset_sinks),

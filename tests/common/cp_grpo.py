@@ -3,9 +3,12 @@
 from unittest.mock import patch
 
 import torch
+from torch.distributed.tensor import DTensor, distribute_tensor
 
 from src.data.spans import LABEL_IGNORE_INDEX
 from src.distributed.context_parallel.config import cp_boundary_shift
+from src.distributed.fsdp import reshard_fsdp2_modules
+from src.optimizers.adamw_bf16 import AdamWBF16
 from src.trainers.grpo.objective.offline import offline_loss
 from tests.common.tolerances import TOL
 
@@ -83,6 +86,43 @@ def optimizer_step_agreement(actual, expected, initial, **gradient_bounds):
         {"update": actual_update}, {"update": expected_update}, **gradient_bounds
     )
     return direction_matches and norm_matches
+
+
+def same_layout_optimizer_step(model, optimizer, gradients):
+    """Apply independent full gradients with the tested shard layout and SR parameter order.
+
+    AdamWBF16's noise is keyed by local offset: a CP1 update cannot be compared directly to another
+    CP degree's write. This cold-step oracle preserves the tested optimizer's groups but never reads
+    its gradients or moments.
+    """
+    if not isinstance(optimizer, AdamWBF16) or optimizer.state:
+        raise ValueError("the same-layout oracle requires a fresh AdamWBF16 optimizer")
+    reshard_fsdp2_modules(model)
+    names = {id(parameter): name for name, parameter in model.named_parameters()}
+    clones, groups = {}, []
+    for group in optimizer.param_groups:
+        parameters = []
+        for parameter in group["params"]:
+            name = names[id(parameter)]
+            clone = torch.nn.Parameter(parameter.detach().clone())
+            reference = gradients[name].to(device=parameter.device, dtype=parameter.dtype)
+            if reference.shape != parameter.shape:
+                raise ValueError(f"reference gradient shape differs for {name}")
+            clone.grad = (
+                distribute_tensor(reference, parameter.device_mesh, parameter.placements, src_data_rank=None)
+                if isinstance(parameter, DTensor)
+                else reference
+            )
+            clones[name] = clone
+            parameters.append(clone)
+        groups.append({key: value for key, value in group.items() if key != "params"} | {"params": parameters})
+    reference_optimizer = AdamWBF16(groups, use_triton=optimizer._use_triton)
+    reference_optimizer.step()
+    weights = {
+        name: (parameter.full_tensor() if isinstance(parameter, DTensor) else parameter).detach().float().clone()
+        for name, parameter in clones.items()
+    }
+    return weights, reference_optimizer, clones
 
 
 def boundary_loss_negative_control(scorer, model, ids, mask, advantages, group_sizes, full_logps, cp_config):

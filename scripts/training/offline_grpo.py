@@ -1,11 +1,7 @@
 #!/usr/bin/env python
-"""Distributed offline GRPO training with Expert, Tensor and Expert-Tensor Parallelism support.
+"""Distributed offline GRPO training with Expert, Tensor, Expert-Tensor and Context Parallelism support.
 
 Group-relative policy optimization over pre-computed completions and rewards — no live generation.
-
-CP is not supported (the trainer uses the ``logits_to_keep`` optimization); use EP, TP, ETP and their
-supported combinations. PP is declared but not yet available in this release.
-
 Usage:
     torchrun --nproc_per_node=8 scripts/training/offline_grpo.py \\
         examples/grpo/offline/qwen3_5/offline-grpo-qwen3.6-35b-a3b-gsm8k.yaml
@@ -92,11 +88,9 @@ def _load_kl_reference(
 ):
     """The frozen KL reference the trainer cannot derive from ``policy``, or ``None`` where it can.
 
-    Only a wrapped-MoE full fine-tune at ``kl_beta != 0`` needs one
-    (:meth:`OfflineGRPOTrainer.requires_ref_model`). It is loaded through the preference trainers'
-    frozen-reference path from the policy's own weights source, so on a resume it anchors to the
-    resumed weights as the dense deepcopy and the pipeline sweep do. ``is_vlm`` is off, as the policy's
-    text-path load also resolves its class from the config.
+    Full fine-tuning sweeps raw run-start scores once and restores them from each checkpoint.
+    Only native expert LoRA needs a live, unadapted base; PEFT can disable its adapters in place.
+    Load that base from the configured model, not a trained resume checkpoint.
     """
     if not OfflineGRPOTrainer.requires_ref_model(policy, offline_grpo_config, runtime.parallelism_config, peft_config):
         return None
@@ -105,11 +99,18 @@ def _load_kl_reference(
         model_config,
         offline_grpo_config,
         tokenizer,
-        runtime.model_source,
+        model_config.model_name_or_path,
         is_vlm=False,
         reset_sinks=dist_args.reset_sinks,
         attn_default=attn_default,
     )
+
+
+def _requested_attention(model_config, parallelism_config, *, sinks_reset: bool) -> str | None:
+    """CP leaves the default to the loader's hardware-aware FlashAttention selection."""
+    if parallelism_config.is_cp_mode and not model_config.attn_implementation:
+        return None
+    return padded_workload_attn_implementation(model_config, sinks_reset=sinks_reset)
 
 
 def main():
@@ -126,8 +127,8 @@ def main():
     )
     parallelism_config = runtime.parallelism_config
 
-    # Every batch is padded here: prompts left, completions right.
-    requested_attn = padded_workload_attn_implementation(model_config, sinks_reset=dist_args.reset_sinks)
+    # The CP collator right-pads full rows; the existing non-CP layout left-pads prompts.
+    requested_attn = _requested_attention(model_config, parallelism_config, sinks_reset=dist_args.reset_sinks)
     model, tokenizer = load_script_model(
         runtime, offline_grpo_config, model_config, dist_args, attn_implementation=requested_attn
     )
@@ -228,6 +229,7 @@ def main():
         peft_config=peft_config,
         ref_model=ref_model,
         callbacks=callbacks,
+        resume_checkpoint=runtime.resume_checkpoint,
         **distributed_trainer_kwargs(args, dist_args, parallelism_config, dataset_presharded=dataset_presharded),
     )
     run_trainer(trainer, runtime, method_name="Offline GRPO")

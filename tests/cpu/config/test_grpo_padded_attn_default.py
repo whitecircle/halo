@@ -24,6 +24,7 @@ from unittest import mock
 
 import pytest
 
+from src.distributed.parallelism_config import ParallelismConfig
 from src.training.script_runner import padded_workload_attn_implementation
 from tests.common.utils import load_script_module
 
@@ -63,7 +64,9 @@ def _requested_attn(rel_path: str, yaml_body: str, tmp_path: Path) -> str | None
         captured["requested"] = kwargs.get("attn_implementation") or model_config.attn_implementation
         raise _StopAtModelLoad
 
-    runtime = types.SimpleNamespace(parallelism_config=None, model_source="dummy/model", mode_suffix="", local_rank=0)
+    runtime = types.SimpleNamespace(
+        parallelism_config=ParallelismConfig(), model_source="dummy/model", mode_suffix="", local_rank=0
+    )
     with (
         mock.patch.object(module, "init_training_script", return_value=runtime),
         mock.patch.object(module, "load_script_model", fake_load_script_model),

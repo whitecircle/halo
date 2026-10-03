@@ -7,7 +7,8 @@ It runs under DDP/FSDP, EP, CP and pure ETP; **TP**, **EP+TP** and **PP** reject
 under DDP/FSDP and CP-on-dense (full matrix and reasons: [Parallelism compatibility](#parallelism-compatibility)).
 Under EP, LoRA targets both attention (via PEFT) and the MoE experts (via native grouped adapters).
 
-Most trainers take it. The embedding trainer
+Offline GRPO under CP is full fine-tuning only and rejects every adapter shape; SFT and SMPO keep
+their CP adapter support. Most other configurations take it. The embedding trainer
 accepts LoRA and DoRA, not QLoRA ([Embedding — PEFT / LoRA](../training-methods/embedding.md#peft--lora)).
 
 ## Supported methods
@@ -292,7 +293,7 @@ batch 1 the step is communication-bound, so tok/s/GPU varies ±10% run-to-run.
 
 ## Reference model handling
 
-Offline GRPO and Async GRPO with Environments disable the adapter (`disable_adapter()`) to compute reference log-probs
+Non-CP offline GRPO and Async GRPO with Environments disable the adapter (`disable_adapter()`) to compute reference log-probs
 from the frozen base instead of a second model copy. Under EP the mixin patches that context
 (`make_disable_adapter_ep_aware`) so it reverts the native EP expert adapters too, giving a true frozen-base
 reference for both adapter halves; the patch also covers TRL's `use_adapter(None)` for online GRPO / DPO / KTO.
@@ -312,8 +313,9 @@ params and reshards nothing.
 DPO and KTO reject an **explicit** `ref_model` under EP and TP (it is never parallelized, so its log-probs
 would not match the policy's), as self-distillation does its KL `reference_model`: use LoRA with
 `ref_model=None`, or `precompute_ref_log_probs=True`. Under TP, LoRA is rejected too, so DPO/KTO there
-must precompute. SMPO is reference-free. Offline GRPO is the exception: a wrapped MoE at `kl_beta > 0`
-requires a dense `ref_model`, which the script loads
+must precompute. SMPO is reference-free. Offline GRPO full fine-tuning sweeps and checkpoints its
+run-start reference without a second resident model; only native expert-only LoRA retains an
+explicit frozen base `ref_model`, which the script loads
 ([Offline GRPO → Reference model](../training-methods/grpo/offline-grpo.md#reference-model)).
 
 On online / async GRPO, where no adapter wraps the model — a full fine-tune, or an expert-only LoRA
@@ -371,7 +373,7 @@ The 4-bit **compute** dtype follows the run's own precision (`bf16`/`fp16` on th
 TRL's `ModelConfig.dtype` — whose `"float32"` default nothing else here reads, and which would otherwise
 dequantize and compute every 4-bit matmul in fp32.
 
-QLoRA is SFT/offline territory: the online and async GRPO trainers reject a quantized base at
+QLoRA is SFT/offline territory, but offline GRPO rejects it under CP. The online and async GRPO trainers reject a quantized base at
 construction (`validate_weight_sync_support`). The NCCL weight sync forwards raw parameter storage under
 base-weight names, so a bnb-packed 4-bit base would ship non-floating-point tensors that corrupt the served
 policy. Plain LoRA is the supported

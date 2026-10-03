@@ -19,7 +19,7 @@ back. Multi-head attention is independent across heads, which is what makes this
 
 ![Ulysses attention: RoPE runs on the local chunk, an all-to-all scatters heads and gathers the sequence so each rank attends over the full sequence with 16 of 64 heads, and a second all-to-all restores the per-rank chunk layout](../assets/diagrams/ulysses_attention_flow.png)
 
-![A training step under CP: the wrapper narrows the batch to one contiguous sequence chunk per rank, embeddings and every decoder layer run on that chunk (Ulysses attention, then the MLP or MoE), the logits stay sharded, and the loss is scaled by cp_size over the CP group's all-reduced token count](../assets/diagrams/cp_training_step.png)
+![An SFT training step under CP: the wrapper narrows the batch to one contiguous sequence chunk per rank, embeddings and every decoder layer run on that chunk (Ulysses attention, then the MLP or MoE), the logits stay sharded, and the loss is scaled by cp_size over the CP group's all-reduced token count](../assets/diagrams/cp_training_step.png)
 
 ## Implementation
 
@@ -61,10 +61,13 @@ split across chunks); a `cp_size` factor would only scale it `cp_size`×.
 
 The GRPO scoring seam uses `forward_hidden_states` on the CP wrapper to split a right-padded row
 without constructing vocabulary-wide logits. `cp_shift_against_full_labels` pairs local hidden
-states with the full row's next-token labels; the chunked output head scores those targets.
-`context_parallel/autograd.py` supplies an autograd-aware row SUM shared with SMPO. Its backward
-CP factor is canceled by world-wide mean gradient synchronization; callers must not also apply
-SFT's explicit `cp_size` multiplier. GRPO trainers reject CP at construction.
+states with the full row's next-token labels; the existing chunked output head scores those targets.
+Offline GRPO's per-row token-objective sums use the shared autograd-aware SUM in
+`src/distributed/context_parallel/autograd.py`, whose backward supplies the CP factor canceled by
+world-wide mean gradient synchronization. They must **not** also use the SFT
+loss's explicit `cp_size` multiplier. Offline GRPO uses this path for training, evaluation and
+reference scoring; online and environment GRPO remain unsupported. Its reference and resume
+contract is in [Offline GRPO](../training-methods/grpo/offline-grpo.md#reference-model).
 
 A model that returns an `aux_loss` while its config declares no `router_aux_loss_coef` **raises** — a
 stand-in weight would train a different objective than the same config without CP. Set the field
@@ -106,6 +109,9 @@ and the loss would silently differ from the same batch without CP.
 
 SMPO's collator left-pads prompts, so under CP run SMPO with `per_device_train_batch_size=1`, where
 no padding is emitted.
+
+Offline GRPO uses its own collator: it concatenates each prompt and completion before right-padding
+the full row, so unequal prompt lengths do not introduce left padding.
 
 ### Supported model architectures
 
@@ -219,7 +225,8 @@ Qwen3-8B, CP=2, seq 16384, 2 GPUs (Blackwell)). Use Liger (default on).
 ## Limitations
 
 **Trainers.** CP is declare-to-enable (`_supports_cp`, default `False`): only
-`DistributedSFTTrainer` and `SmoothMarginPOTrainer` declare it. Every other trainer raises at
+`DistributedSFTTrainer`, `SmoothMarginPOTrainer` and `OfflineGRPOTrainer` declare it. Offline GRPO
+requires full fine-tuning and rejects PEFT and native expert adapters. Every other trainer raises at
 construction, and its entry script rejects `--context_parallel_size > 1` earlier through
 `parallelism_config_from_args(..., trainer_cls=...)`, which reads the same flag. Full matrix:
 [Trainer Compatibility](../reference/trainer-architecture.md#trainer-compatibility). Nothing
@@ -254,8 +261,8 @@ not activations) — that is the case CP exists for.
 | `accelerate launch` | rejected — CP requires `torchrun` | `model_loading.py` and `ParallelismValidationMixin` |
 | `gradient_checkpointing` | supported; `use_reentrant` is forced to `True` (warned when the config sets `false`) | `mixins/base.py` |
 | `use_liger_kernel` | supported; `cross_entropy` and `fused_linear_cross_entropy` are forced off (warned when explicitly enabled) | `kernels/liger/orchestrator.py` |
-| `use_peft` / LoRA | supported — CP leaves attention unsharded, so adapters stay replicated | — |
-| QLoRA (`load_in_4bit`) | supported on a **dense** model — CP keeps the standard loader and preserves `Params4bit`. On an MoE the grouped-GEMM loader takes over and rejects a quantized base (`use_grouped_gemm` is on by default) | `model_loading.py` |
+| `use_peft` / LoRA | supported for SFT and SMPO — CP leaves attention unsharded, so adapters stay replicated; offline GRPO rejects adapters | `OfflineGRPOTrainer` |
+| QLoRA (`load_in_4bit`) | supported for SFT and SMPO on a **dense** model — CP keeps the standard loader and preserves `Params4bit`. On an MoE the grouped-GEMM loader takes over and rejects a quantized base (`use_grouped_gemm` is on by default); offline GRPO rejects adapters | `model_loading.py`, `OfflineGRPOTrainer` |
 | `use_hsdp`, `fsdp_reshard_after_forward` | supported — CP is one of HSDP's two accepted paths (pure DP, CP) and one of ZeRO-3's EP-free shapes | `_validate_hsdp`, `_validate_fsdp_settings` |
 | `torch_compile` | not gated, and no measured benefit — the all-to-all breaks the graph at every attention layer | — |
 | `save_sharded_ep` | rejected on a CP run — per-rank shards carry `.original_attention.` keys the merge script cannot remap | `validate_ep_sharded_save` |

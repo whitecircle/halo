@@ -61,8 +61,9 @@ gradient_accumulation_steps: 8
 - `loss_type` — `bnpo` averages over the micro-batch's tokens, `grpo` averages per sequence first (use it when
   completion lengths vary a lot), `dr_grpo` divides by `max_completion_length`, a constant that removes length bias,
   so it needs that cap set.
-- `kl_beta` — above `0` the run holds a reference model and penalizes drift from it: a full extra copy per rank on a
-  full fine-tune, the base with the adapters off under PEFT. Leave it at `0` unless rewards fall through training.
+- `kl_beta` — above `0` full fine-tuning scores its starting policy once and saves the reference scores with each
+  checkpoint; resume keeps that original anchor. It needs a finite, unsharded dataset, not a second model copy.
+  Non-CP PEFT uses the base with adapters off. [Reference rules](../../agent-docs/training-methods/grpo/offline-grpo.md#reference-model) ↗.
 - `initial_min_log_prob` / `min_log_prob` — a floor on low-probability tokens of negative-advantage rows. It is what
   keeps the loss finite when the policy is pushed away from something it already thinks is unlikely.
 - `max_completion_length` is a truncation cap, not a generation budget: a completion cut at the cap is trained
@@ -78,9 +79,9 @@ model with long completions; it computes the same log-probs without materializin
 halo launch offline-grpo examples/grpo/offline/qwen3_5/offline-grpo-qwen3.6-35b-a3b-gsm8k.yaml -n 8
 ```
 
-Nothing else has to be running — no vLLM, no Ray. Expert, tensor and expert-tensor parallelism all work; context
-parallelism is rejected at config time, before the model loads, because the forward is trimmed to the completion
-tokens.
+Nothing else has to be running — no vLLM, no Ray. Expert, tensor and expert-tensor parallelism all work.
+CP and EP+CP support full fine-tuning on [CP-capable models](../../agent-docs/parallelism/context-parallelism.md#supported-model-architectures) ↗;
+they reject adapters and use right-padded whole rows with chunked log-probs.
 
 Test the setup first with `--max_steps=10 --save_strategy=no` on a slice of the data: that exercises tokenization,
 advantage normalization and the loss in minutes, and a bad `loss_type`, `advantage_method` or reward column fails at

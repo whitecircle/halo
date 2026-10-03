@@ -13,7 +13,6 @@ import json
 import logging
 import os
 import shutil
-import uuid
 from pathlib import Path
 
 import yaml
@@ -23,6 +22,7 @@ from huggingface_hub.utils import HFValidationError, validate_repo_id
 from peft import PeftType
 from peft.utils import CONFIG_NAME as ADAPTER_CONFIG_NAME
 
+from src.checkpoint.atomic import FILE_STAGING_SUFFIX, create_staged_file, is_staged_file
 from src.log import warn_once
 
 logger = logging.getLogger(__name__)
@@ -32,7 +32,7 @@ HUB_TAGS = ("halo",)
 # The staged card's name pattern: unique per write, and skipped by the non-weight copy should a
 # crash leave one behind.
 CARD_STAGING_PREFIX = f".{REPOCARD_NAME}."
-CARD_STAGING_SUFFIX = ".tmp"
+CARD_STAGING_SUFFIX = FILE_STAGING_SUFFIX
 # The adapter types stock PEFT loads; the toolkit's native expert-LoRA types are outside it.
 _STOCK_PEFT_TYPES = frozenset(peft_type.value for peft_type in PeftType)
 # Export cards already warned about, so the config finalizer that follows a copy does not repeat it.
@@ -51,7 +51,7 @@ class MalformedModelCardError(ValueError):
 
 def is_staged_card(name: str) -> bool:
     """Whether ``name`` is a card :func:`tag_model_card` staged and never swapped in."""
-    return name.startswith(CARD_STAGING_PREFIX) and name.endswith(CARD_STAGING_SUFFIX)
+    return is_staged_file(name, REPOCARD_NAME) and name.endswith(CARD_STAGING_SUFFIX)
 
 
 def with_halo_tags(tags: str | list[str] | None) -> list[str]:
@@ -91,7 +91,7 @@ def tag_model_card(output_dir: str) -> None:
     if exists and tags == metadata.get("tags"):
         return
     metadata["tags"] = tags
-    staged = _create_staged_card(path.parent)
+    staged = create_staged_file(path.parent, REPOCARD_NAME)
     try:
         if exists:
             shutil.copyfile(path, staged)
@@ -128,17 +128,6 @@ def tag_exported_model_card(output_dir: str, *, source_dir: str | None = None) -
 
 def _malformed_card_message(card: Path, reason: Exception) -> str:
     return f"The model card {card} has malformed metadata ({reason})."
-
-
-def _create_staged_card(directory: Path) -> Path:
-    """An empty file under a fresh staging name in ``directory``.
-
-    Created with the mode ``open(path, "w")`` gives a file (``0o666`` under the umask), so a fresh
-    card is as readable as the rest of the checkpoint and no more.
-    """
-    staged = directory / f"{CARD_STAGING_PREFIX}{uuid.uuid4().hex}{CARD_STAGING_SUFFIX}"
-    os.close(os.open(staged, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o666))
-    return staged
 
 
 def _fresh_card_metadata(directory: Path) -> dict:
