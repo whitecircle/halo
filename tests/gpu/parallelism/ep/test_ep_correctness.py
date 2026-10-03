@@ -152,8 +152,8 @@ def run(ctx):
     metrics["repeat_forward_diff"] = repeat_diff
     log_all(f"  repeated forward: {first_loss:.6f} vs {second_loss:.6f} (diff={repeat_diff:.3e})")
     # Exact, not "small": any difference means state survived between calls (a reused DeepEP arena
-    # buffer, a mutated routing cache). DeepEP's receive order varies from call to call, but at
-    # top_k >= ep_size the forward does not read it: each expert row is computed independently and the
+    # buffer, a mutated routing cache). DeepEP's receive order varies from call to call, but the
+    # grouped path's forward does not read it: each expert row is computed independently and the
     # combine sums a token's partials in top-k slot order. Measured 0.0 on this configuration.
     checks["repeated_forward_is_deterministic"] = repeat_diff == 0.0
 

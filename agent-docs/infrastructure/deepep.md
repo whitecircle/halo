@@ -334,7 +334,11 @@ wire (GPT-OSS 2880 → 3072) and slices it back before results re-enter the auto
 across forward and backward so gradients are exact.
 
 Padding is confined to the elastic backend's own wire buffers; the MoE layer and expert compute see the
-real hidden. It is a no-op for conforming models (Qwen3 MoE, hidden 4096/2048). Cost is
+real hidden. The send side is one strided copy into the padded buffer plus a fill of the pad columns; the
+receive side hands back a row-strided `[tokens, hidden]` view of the padded result, with no copy (every
+consumer reads the row stride directly). On gpt-oss-20b EP2 (GC on, 2× B300, s4096 b4), where the
+permute is unchanged, dropping the receive-side copies and the full-buffer fill took 23,933 → 24,191
+tok/s/GPU (+1.1%). It is a no-op for conforming models (Qwen3 MoE, hidden 4096/2048). Cost is
 ~`padded/hidden − 1` extra transport bandwidth (≈6.7% for GPT-OSS). The legacy backend needs no padding.
 
 ## Expert parallelism over AWS EFA

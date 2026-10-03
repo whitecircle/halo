@@ -191,9 +191,9 @@ def run(ctx) -> dict:
     noise = (out_with_a - out_with_b).abs().max().item()
     delta = (out_with_a - out_without).abs().max().item()
     # The adapter delta must be the SAME ORDER as the forward's run-to-run noise (≈0 ⇒ no-op).
-    # On a deterministic scatter (top_k >= ep_size) noise≈0 and this is effectively bit-equality;
-    # on the atomic-scatter path (top_k < ep_size, e.g. EP=8) toggling adapters changes the compute
-    # graph and thus the atomic accumulation order, so allow a few× the 2-sample noise floor. A real
+    # On the grouped path's deterministic (atomic-free) scatter noise≈0 and this is effectively
+    # bit-equality; on an atomic scatter (the per-expert loop's index_add_) toggling adapters changes the
+    # compute graph and thus the accumulation order, so allow a few× the 2-sample noise floor. A real
     # wiring bug (nonzero/duplicated delta) would make `delta` orders of magnitude larger than noise.
     checks["init_delta_zero"] = delta <= max(4.0 * noise, 1e-3)
     log(f"  adapter delta={delta:.3e} vs forward noise floor={noise:.3e} (same order ⇒ no-op)")

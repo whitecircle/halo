@@ -4,7 +4,7 @@
 `index_add_` expert scatter-back with an atomic-free gather+sum via a precomputed `inv_map`
 (`build_inv_map`); the unpermute also
 folds in the routing-weight multiply. They are the production permute for every grouped-GEMM MoE family
-when `top_k >= ep_size`, so they must match the index_select / weighted index_add reference they
+at every top_k and EP size, so they must match the index_select / weighted index_add reference they
 replace, in float64, in BOTH forward and backward (the routing-weight gradient included). On CPU both
 run their eager forms, which this file pins; the Triton kernels are tests/gpu/kernels/test_moe_permute.py's.
 

@@ -354,7 +354,7 @@ on EP MoE — the DeepEP all-to-all breaks the graph at every MoE boundary eithe
 Whichever kernel a family resolves, a layer with a real dispatch group (`ep_size > 1`) traces it on
 its **first forward, before that forward's dispatch** (`_warm_activation_graphs`): one grad-enabled
 pass with a backward and one under `no_grad`, outside inference mode, so a first forward under
-`torch.inference_mode()` still warms the backward kernels a later training forward runs. Where the fused permute runs (the grouped-GEMM path with `top_k >= ep_size`), the
+`torch.inference_mode()` still warms the backward kernels a later training forward runs. Where the fused permute runs (every grouped-GEMM path), the
 same pass runs the permute's backward and the weighted unpermute's forward and backward. One token count
 covers every dispatch size: the kernels take their row count with `do_not_specialize`, so Triton
 compiles no separate binary per class of it (1, a multiple of 16, neither). The weighted unpermute's

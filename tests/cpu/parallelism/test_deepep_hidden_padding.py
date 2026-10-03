@@ -109,12 +109,24 @@ def test_slicing_a_wire_tensor_drops_only_the_padding():
     assert torch.equal(sliced[0], torch.arange(GPTOSS_HIDDEN, dtype=torch.float32))
 
 
-def test_the_sliced_tensor_is_contiguous():
-    """A narrowing view is non-contiguous; the expert GEMM and the next collective both want a
-    packed buffer, so ``_slice`` materializes one."""
+def test_the_slice_is_a_row_strided_view_not_a_copy():
+    """The receive side hands back a view of the padded wire buffer (no copy per transport call): unit
+    column stride, the padded row stride, and the same storage, which every consumer reads in place."""
     backend = _backend(GPTOSS_HIDDEN)
-    sliced = backend._slice(backend._pad(torch.randn(5, GPTOSS_HIDDEN)))
-    assert sliced.is_contiguous()
+    padded = backend._pad(torch.randn(5, GPTOSS_HIDDEN))
+    sliced = backend._slice(padded)
+    assert sliced.stride() == (padded.shape[-1], 1)
+    assert sliced.data_ptr() == padded.data_ptr()
+
+
+def test_the_pad_columns_are_zero_whatever_the_allocator_returned():
+    """The send side writes the activation and zeroes only the pad columns of an uninitialized buffer, so
+    a recycled block's stale values must not reach the wire."""
+    backend = _backend(GPTOSS_HIDDEN)
+    tokens = torch.randn(7, GPTOSS_HIDDEN)
+    padded = backend._pad(tokens)
+    assert torch.equal(padded[:, :GPTOSS_HIDDEN], tokens)
+    assert torch.count_nonzero(padded[:, GPTOSS_HIDDEN:]) == 0
 
 
 def test_a_conforming_hidden_is_passed_through_untouched():

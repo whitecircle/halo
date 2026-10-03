@@ -43,8 +43,8 @@ These fire automatically; mention them only to confirm, not as new advice. Figur
 - **AdamWBF16 + stochastic rounding** — auto from `bf16: true`; half the per-param state of fp32 AdamW at
   a loss curve that tracks the fp32 master. Auto-OFF under replicated DDP.
 - **CDMC=1** — baked into the image env; free win on ep8, neutral dense/ep2.
-- **Atomic-free expert permute** — auto for high-top_k MoE (`top_k ≥ ep_size`); win grows with sequence
-  length. gpt-oss (top-4) stays on the cheaper `index_add_` path at EP8.
+- **Atomic-free expert permute** — auto on every grouped-GEMM MoE path; win grows with sequence
+  length (+21–24% on gpt-oss-20b EP8).
 
 ## Throughput flow (raise tok/s/GPU)
 - **MoE/EP, any shape →** push **seq × batch as high as memory allows** first — EP at low token

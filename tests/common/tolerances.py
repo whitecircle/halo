@@ -60,7 +60,7 @@ class _Tolerances:
     # Loss across a resume boundary (same data, same step).
     resume_loss_abs: float = 0.05
     # Fixed-batch forward loss before a save and after the resume, on a forward with no
-    # nondeterministic reduction: FSDP, TP, CP, and EP at top_k >= ep_size, whose expert rows are computed
+    # nondeterministic reduction: FSDP, TP, CP, and grouped-GEMM EP, whose expert rows are computed
     # independently and combined in top-k slot order whatever order DeepEP receives them in. bf16
     # round-trip noise; an unrestored or mis-gathered weight set moves it by more than 1.
     resume_fixed_batch_loss_abs: float = 1e-2
