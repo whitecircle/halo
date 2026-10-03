@@ -2,8 +2,9 @@
 
 Halo against upstream `trl.SFTTrainer` on transformers v5 with native FSDP — same model, data, attention, and
 kernels, only the framework changes. Measured with the same `EfficiencyCallback` and synthetic dataset as
-[Throughput Benchmarks](throughput-benchmarks.md), in a run set of its own: a config both pages list agrees
-within ~10% (batch-1 EP steps are communication-bound and vary run to run), so compare within one page.
+[Throughput Benchmarks](throughput-benchmarks.md). Each table names its run set: the 2026-10-03 tables share
+their runs with that page, and the FLCE, long-context and Qwen3-30B tables are from the v1.0.0 run set.
+Compare within one run set.
 
 Unless a header says otherwise, every number is **gpt-oss-20b** (`unsloth/gpt-oss-20b-BF16`, 20.7B, 32
 experts, top_k=4) on **8× B300**, bf16, FA4 + Liger, `grouped_mm` experts, gradient checkpointing on, DeepEP
@@ -26,33 +27,26 @@ The baseline gets the strongest stock options — ZeRO-3 and Liger's FLCE, which
 
 ## Throughput & memory (4k–16k)
 
-*GC-on · grouped GEMM · TRL ZeRO-3 · Halo ZeRO-2 (EP1 also at ZeRO-3) · elastic.* **tok/s/GPU · peak GiB:**
-
-![Throughput: Halo vs stock TRL, 4k/16k](../assets/benchmarks/throughput_4k16k.png)
-
-![Peak memory: Halo vs stock TRL, 4k/16k](../assets/benchmarks/memory_4k16k.png)
+*8× B300 · 2026-10-03 · commit 0bc3a22a5 · Blackwell image. GC-on · grouped GEMM · TRL ZeRO-3 · Halo ZeRO-2 (EP1 also at ZeRO-3) · elastic.* **tok/s/GPU · peak GiB:**
 
 | seq·b | stock TRL (z3) | Halo EP1 (z2) | Halo EP1 (z3) | Halo EP2 (z2) | Halo EP8 (z2) |
 |---|---|---|---|---|---|
-| 4k·b1 | 3,885 · 47.6 | 9,009 · 60 | 5,560 · **28.7** | **10,479 · 77** | 8,320 · 26 |
-| 4k·b2 | 5,519 · 48.2 | 15,429 · 67 | 6,874 · **29.3** | **15,314 · 77** | 9,352 · 37 |
-| 4k·b4 | 6,759 · 50.6 | **18,823 · 81** | 10,082 · 41.6 | 17,949 · 91 | 10,128 · 53 |
-| 16k·b1 | 6,513 · 50.6 | **18,304 · 76** | 17,464 · 37.9 | 16,407 · 85 | 9,747 · 49 |
-| 16k·b2 | 7,466 · 55.6 | **20,730 · 107** | 18,742 · 68.4 | 17,219 · 124 | 9,552 · 92 |
+| 4k·b1 | 3,859 · 47.6 | 11,236 · 60.3 | 9,694 · **28.7** | **12,432 · 78.9** | 8,852 · 25.4 |
+| 4k·b2 | 5,496 · 48.2 | 17,653 · 65.5 | 15,532 · **29.3** | **17,862 · 80.5** | 9,609 · 32.3 |
+| 4k·b4 | 6,719 · 50.6 | **23,590 · 75.8** | 21,678 · 37.9 | 20,554 · 85.2 | 10,358 · 47.2 |
+| 16k·b1 | 6,588 · 50.6 | **20,690 · 75.8** | 19,505 · 37.9 | 18,436 · 85.0 | 9,981 · 48.1 |
+| 16k·b2 | 7,392 · 55.6 | **23,159 · 96.5** | 22,321 · 58.6 | 19,698 · 112.0 | 9,650 · 78.0 |
 
-- **EP1 and EP2 lead at 2.3–2.8× stock TRL** across every short/mid config, and the gap holds under batch
-  scaling. EP8 is the one mode that regresses under batch: its dispatch cost grows with tokens/rank.
-
-    16k b1→b4, tok/s/GPU: EP1 18,304→21,386 z2 / 21,023 z3 at 161 / 122 GiB, EP2 16,407→17,449,
-    TRL 6,513→7,796 at 66 GiB; EP8 9,747→7,677.
-
-- **EP8 trades throughput for memory** — 1.3–2.1× TRL at ~½ its memory (26 vs 48 GiB at 4k·b1).
+- **EP1 and EP2 lead at 2.7–3.5× stock TRL** across every short/mid config, and the gap holds under batch
+  scaling. EP8 is the one mode that regresses under batch: its dispatch cost grows with tokens/rank (16k:
+  9,981 → 9,650 tok/s/GPU from b1 to b2).
+- **EP8 trades throughput for memory** — 1.3–2.3× TRL at ~½ its memory (25.4 vs 47.6 GiB at 4k·b1).
 - **EP1 z3 isolates the framework gap** to AdamWBF16 + Halo's FSDP2+EP wrapper: both sides shard every
-  param 8-way with the same kernel, and EP1 still leads 1.2× (4k·b2) to 2.7× (16k·b1) on throughput, and
-  on memory everywhere but 16k·b2 (68.4 vs 55.6 GiB). **Prefer z2 at short sequence, z3 when memory-tight.**
+  param 8-way with the same kernel, and EP1 still leads 2.5× (4k·b1) to 3.2× (4k·b4) on throughput, and
+  on memory everywhere but 16k·b2 (58.6 vs 55.6 GiB). **Prefer z2 at short sequence, z3 when memory-tight.**
 
     TRL is slower because `full_shard` re-gathers all 20.7B params every microstep, a fixed cost a short
-    step cannot hide. That is why EP1 z3 is −38% vs its own z2 at 4k·b1 but only −5% at 16k·b1.
+    step cannot hide. That is why EP1 z3 is −14% vs its own z2 at 4k·b1 but only −6% at 16k·b1.
 
 ## Grouped GEMM — where the expert kernel matters
 
@@ -61,19 +55,18 @@ experts through `torch.nn.functional.grouped_mm`). The per-expert loop is opt-in
 (`--experts_impl eager`, i.e. transformers' `experts_implementation`, for TRL; `--no_grouped_gemm` for
 Halo).
 
-*4k·b1 · GC-on · TRL z3 · Halo z2* — tok/s/GPU:
+*8× B300 · 2026-10-03 · commit 0bc3a22a5 · Blackwell image. 4k·b1 · GC-on · Halo z2* — tok/s/GPU:
 
 | | per-expert loop | grouped GEMM | uplift |
 |---|---|---|---|
-| stock TRL (z3) | 1,940 | 3,885 | +100% |
-| Halo EP1 (32 experts/rank) | 5,545 | 9,009 | +62% |
-| Halo EP2 (16/rank) | 5,853 | 10,479 | +79% |
-| Halo EP8 (4/rank) | 7,282 | 8,320 | +14% |
+| Halo EP1 (32 experts/rank) | 6,005 | 11,236 | +87% |
+| Halo EP2 (16/rank) | 6,508 | 12,432 | +91% |
+| Halo EP8 (4/rank) | 7,521 | 8,852 | +18% |
 
-The uplift collapses once a rank holds few experts (+14% at EP8, where the loop's per-shape tile fits the
-larger per-expert `M`). **EP token distribution is the bigger lever** — Halo's *loop* at EP1 (5,545)
-already beats TRL's `grouped_mm` (3,885). Kernel-side detail:
-[Grouped GEMM](grouped-gemm.md#when-the-loop-path-wins).
+The uplift shrinks once a rank holds few experts (+18% at EP8, where the loop's per-shape tile fits the
+larger per-expert `M`). **EP token distribution is the bigger lever** — Halo's *loop* at EP1 (6,005)
+already beats TRL's `grouped_mm` (3,859). Kernel-side detail:
+[Grouped GEMM](grouped-gemm.md#grouped-vs-the-loop-path).
 
 ## Fused linear cross-entropy
 
@@ -82,7 +75,7 @@ TRL gets [FLCE](liger-kernels.md) for free from Liger's gpt-oss applier; Halo de
 cross-entropy (logits materialized) and turns FLCE on through `liger_kernel_config:
 {fused_linear_cross_entropy: true}` (`--fused_linear_ce` in the benchmark scripts).
 
-*b1 · GC-on · Halo z2 — tok/s/GPU · peak GiB:*
+*v1.0.0 run set. b1 · GC-on · Halo z2 — tok/s/GPU · peak GiB:*
 
 | | FLCE off (Liger CE) | FLCE on (`--fused_linear_ce`) |
 |---|---|---|
@@ -103,24 +96,25 @@ already 16–32k, so FLCE is within noise (≤1%): it is a dense-path lever. Per
 
 ## Gradient checkpointing on vs off
 
-GC-off buys Halo **+9–30%** at ~2× peak memory (EP1 z2 16k·b1: 76 → 131 GiB) — and +42% for EP1 z3 at 4k,
-where ZeRO-3's re-gather dominates a short step. Stock TRL gains only +5–9%, so Halo's lead widens GC-off.
+GC-off buys Halo **+11–31%** at up to ~2.2× peak memory (EP1 z2 16k·b1: 75.8 → 131.3 GiB). Stock TRL gains
+only +5–6%, so Halo's lead widens GC-off.
 
-*b1 · GC-off, tok/s/GPU (the GC-on baselines are the tables above and below):*
+*8× B300 · 2026-10-03 · commit 0bc3a22a5 · Blackwell image. b1 · GC-off, tok/s/GPU (the GC-on
+baseline is the 4k–16k table above):*
 
-| seq | stock TRL (z3) | Halo EP1 (z2) | Halo EP1 (z3) | Halo EP2 (z2) | Halo EP8 (z2) |
-|---|---|---|---|---|---|
-| 4k | 4,064 | 11,008 | 7,889 | 12,727 | 10,409 |
-| 16k | 6,939 | 22,073 | 20,271 | 20,635 | 12,669 |
-| 32k | 7,775 | 22,535 | 21,457 | 18,060 | 9,694 |
+| seq | stock TRL (z3) | Halo EP1 (z2) | Halo EP2 (z2) | Halo EP8 (z2) |
+|---|---|---|---|---|
+| 4k | 4,048 | 12,484 | 14,988 | 11,563 |
+| 16k | 7,010 | 25,395 | 22,729 | 12,531 |
 
-It is a 4k–32k lever only: at 32k the GC-off footprints (130–220 GiB) already crowd a B300's 288 GB (268 GiB), and
-past ~64k tokens/rank nothing fits GC-off. EP8 32k·b1 GC-off fits only on the **legacy** transport
-(elastic OOMs).
+It is a 4k–32k lever only: EP8 32k·b1 GC-off trains on the default elastic transport, but its 199.7 GiB
+peak already crowds a B300's 288 GB (268 GiB)
+([Throughput Benchmarks](throughput-benchmarks.md#where-the-ep-steps-time-goes-gpt-oss-20b-ep8-b1s4096-8-b300-fa4)),
+and past ~64k tokens/rank nothing fits GC-off.
 
 ## Long context: 64k → 256k
 
-*b1 · GC-on · stock TRL ZeRO-3 with FLCE; Halo on Liger CE through 64k, FLCE at 128k/256k.* Dense Halo
+*v1.0.0 run set. b1 · GC-on · stock TRL ZeRO-3 with FLCE; Halo on Liger CE through 64k, FLCE at 128k/256k.* Dense Halo
 (EP1) is the **throughput** corner — 2.1× TRL at 64k, 1.6× at 128k, 1.28× at 256k, at less memory than
 TRL from 128k (the lead narrows as quadratic attention comes to dominate). `EP8+CP8` and dense `CP-only` are the **memory** corner at ≈½ TRL's memory.
 
@@ -178,7 +172,7 @@ carries only `top_k/num_experts` of the batch per layer instead of a full-tensor
 
 ## Second model: Qwen3-30B-A3B
 
-*b1 · GC-on · TRL ZeRO-3 · Halo ZeRO-2 · elastic.* The win holds but is smaller: the heavier router
+*v1.0.0 run set. b1 · GC-on · TRL ZeRO-3 · Halo ZeRO-2 · elastic.* The win holds but is smaller: the heavier router
 (top_k=8 vs gpt-oss's 4) makes a fatter all-to-all, and ZeRO-3 shards the 30B leanly.
 
 | Qwen3-30B b1 | Stock TRL (z3) | Halo EP2 (z2) | Halo EP8 (z2) |
@@ -199,12 +193,11 @@ CP needs `cp_size` to divide Qwen's 4 KV heads, so 64k splits with EP8+CP4. Dens
 
 ## Convergence
 
-200 steps on the same seeded data, same global batch (16), constant LR. Stock TRL (ZeRO-3), Halo dense
-(EP1), Halo EP2 and Halo EP8 all reach the same loss — **~0.00205 at step 200**, within ~1% of each other
-by step 100. Expert Parallelism, grouped GEMM, and AdamWBF16 stochastic rounding preserve the optimization
-dynamics, so the throughput lead costs nothing.
-
-![Convergence: Halo tracks TRL](../assets/benchmarks/convergence_loss.png)
+200 steps on the same seeded data, same global batch (16), constant LR; 8× B300, 2026-10-03, commit
+0bc3a22a5, Blackwell image. Stock TRL (ZeRO-3), Halo dense (EP1), Halo EP2 and Halo EP8 all reach
+the same loss — **~0.00205 at step 200** (0.002048–0.002051), within 0.6% of each other by step 100. Expert
+Parallelism, grouped GEMM, and AdamWBF16 stochastic rounding preserve the optimization dynamics, so the
+throughput lead costs nothing.
 
 ## Reproduce
 
