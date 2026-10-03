@@ -223,7 +223,7 @@ CP is declare-to-enable per trainer (`_supports_cp`, default off) — the CP col
 | Mode | Notes |
 |---|---|
 | EP | DeepEP expert routing; orthogonal to DP |
-| TP | DTensor mesh; `tp_size` must divide the NVLink domain. Refuses every LoRA shape at trainer construction — native EP expert adapters included, since both TP gates skip them by param identity |
+| TP | DTensor mesh; `tp_size` must divide the NVLink domain. Native dense SFT LoRA requires DP=1 and compatible PEFT; all other TP adapter shapes, including native EP expert adapters, are refused |
 | CP | Ulysses attention; reduces DP |
 | ETP pure (`ep_size=1`) | expert FFN sharded `expert_tp_size`-way, experts replicated (MoE-only, experimental) |
 | EP+CP | node-local EP needs `ep_group_size == nvlink_domain_size` |

@@ -340,6 +340,8 @@ class CheckpointLoader:
         The read is per-rank and streamed one tensor at a time, and ``distribute_tensor`` is
         collective-free (``src_data_rank=None``). Readability, reader construction, the key set and
         the coverage verdict are each joined across ranks before any tensor is written.
+        Adapter-only pure TP checkpoints use ``restore_adapters`` for both resume and best-model
+        loads, preserving the recorded scaling and writing each factor into its live placements.
         """
         ctx = self.ctx
         if model is None:
@@ -353,6 +355,23 @@ class CheckpointLoader:
             except Exception as e:
                 logger.warning(f"Torn/unreadable model checkpoint at {checkpoint}: {e}")
         if not broadcast_from_rank0(bool(checkpoint_keys)):
+            adapter_only = broadcast_from_rank0(
+                is_global_main_process()
+                and not has_whole_model_weight_file(checkpoint)
+                and has_adapter_weight_file(checkpoint)
+            )
+            if adapter_only:
+                if ctx.fsdp_wrapped:
+                    raise RuntimeError(
+                        "TP+DP adapter reload is unsupported: run pure TP (tensor_parallel_size == "
+                        "world size) to restore native TP LoRA adapters."
+                    )
+                # Native TP factors mix plain replicas and DTensor shards; PEFT's plain loader
+                # cannot write the latter. Resume and best-model loads share the same restore.
+                if restore_adapters(checkpoint, model, is_cp_mode=False) is None:
+                    raise RuntimeError(f"TP adapter checkpoint at {checkpoint} no longer holds adapter weights.")
+                barrier()
+                return
             logger.warning(
                 f"No readable model weights (model.safetensors[.index.json] / pytorch_model.bin) "
                 f"found at {checkpoint} on global rank 0, falling back to standard checkpoint "

@@ -1,18 +1,15 @@
 #!/usr/bin/env python
 """
-Test: LoRA adapter save/load across parallelism modes (+ TP rejection).
+Test: LoRA adapter save/load across parallelism modes, including native dense TP.
 
-Validates that PEFT LoRA adapters save/reload correctly on the SUPPORTED modes, and that the
-UNSUPPORTED LoRA+TP combination is rejected at trainer construction. Three sub-tests:
+Validates PEFT LoRA training and portable checkpoint artifacts. Three sub-tests:
 
-  A. Qwen3-0.6B (dense) with TP=2  — LoRA+TP must be REJECTED (adapters are not integrated into
-                                      the TP DTensor graph → rank-inconsistent adapter). Asserts
-                                      DistributedSFTTrainer raises ValueError; no training.
+  A. Qwen3-0.6B (dense) with TP=2  — train, save, replay resume, reload an earlier best adapter,
+                                      stock-load onto a non-TP base and merge with the CLI.
   C. GptOss-20B (MoE) with EP=2    — EP-only (attention LoRA replicated): train, save, reload.
   D. Qwen3-0.6B (dense) with FSDP2 — FSDP2-wrapped LoRA params: train, save, reload.
 
-(Labels skip B: an EP+TP sub-test would hit the identical LoRA+TP guard sub-test A covers, at the
-cost of a 20B model load.)
+(Labels skip B: EP+TP adapters remain unsupported.)
 
 Supported sub-tests (C, D):
   1. Load model, apply LoRA (r=8, alpha=16) to q_proj + v_proj
@@ -49,30 +46,24 @@ from trl import SFTConfig
 
 from src.distributed.loading.model_loading import load_distributed_model
 from src.distributed.parallelism_config import ParallelismConfig
-from src.env import env_str
 from src.trainers.sft import DistributedSFTTrainer
 from tests.common.datasets import create_sft_dataset
 from tests.common.distributed import ensure_model_downloaded
 from tests.common.harness import gpu_test_main
-from tests.common.models import GPT_OSS_20B, QWEN3_0_6B
+from tests.common.models import GPT_OSS_20B
 from tests.common.tolerances import TOL
+from tests.common.tp_lora_lifecycle import (
+    BATCH_SIZE,
+    LEARNING_RATE,
+    MAX_SEQ_LENGTH,
+    MAX_STEPS,
+    NUM_EVAL_SAMPLES,
+    NUM_TRAIN_SAMPLES,
+    QWEN3_MODEL,
+    SEED,
+    run_tp_lora_lifecycle,
+)
 from tests.common.utils import cleanup_memory, gpu_mem_gb, log, training_run_checks
-
-# Configuration
-
-# Dense model for the Qwen3 sub-tests (A: TP=2, D: FSDP2). Defaults to
-# Qwen3-0.6B for fast CI; override to a larger model (e.g. Qwen3-4B) via
-# HALO_TEST_LORA_SAVE_LOAD_MODEL=Qwen/Qwen3-4B-Instruct-2507 for scale checks.
-QWEN3_MODEL = env_str("HALO_TEST_LORA_SAVE_LOAD_MODEL", QWEN3_0_6B)
-
-MAX_STEPS = 5
-BATCH_SIZE = 1
-MAX_SEQ_LENGTH = 2048
-LEARNING_RATE = 2e-4
-NUM_TRAIN_SAMPLES = 32
-NUM_EVAL_SAMPLES = 8
-SEED = 42
-
 
 # Helpers
 
@@ -192,107 +183,13 @@ def verify_saved_adapters(checkpoint_dir: str, live_weights: dict, rank: int) ->
             if missing_count <= 3:
                 details.append(f"  NOT MATCHED: {saved_key}")
 
-    checks["weights_match"] = match_count > 0 and mismatch_count == 0
+    checks["weights_match"] = match_count == len(live_by_normalized) and mismatch_count == 0 and missing_count == 0
     details.append(
         f"  Weight comparison: {match_count} matched, {mismatch_count} mismatched, {missing_count} unmatched"
     )
 
     all_passed = all(checks.values())
     return all_passed, "\n".join(details)
-
-
-# Sub-test A: Qwen3-0.6B with TP=2
-
-
-def run_qwen3_tp_rejected(rank: int, local_rank: int, base_output_dir: str) -> bool:
-    """LoRA + TP=2 must be REJECTED at trainer construction.
-
-    TP shards the attention base layers as DTensors, but PEFT adds lora_A/lora_B as plain tensors
-    outside the TP graph: the replicated matrix diverges across ranks (per-rank init, never
-    broadcast) and the sharded one is corrupted by the TP replicated-grad sync. The adapter would
-    be rank-inconsistent and would not reload onto a non-TP model. The trainer must fail fast with
-    a clear ValueError rather than train a silently-wrong adapter.
-
-    This test FAILS if the guard is removed — the trainer would then construct successfully.
-    """
-    log(f"\n{'=' * 70}")
-    log(f"  SUB-TEST A: {QWEN3_MODEL} — LoRA + TP=2 must be REJECTED")
-    log(f"{'=' * 70}")
-
-    output_dir = os.path.join(base_output_dir, "lora_tp_reject_qwen3")
-    model = None
-
-    try:
-        log("[A.1] Loading tokenizer + datasets...")
-        tokenizer = AutoTokenizer.from_pretrained(QWEN3_MODEL, trust_remote_code=True)
-        if tokenizer.pad_token is None:
-            tokenizer.pad_token = tokenizer.eos_token
-        train_dataset = create_sft_dataset(NUM_TRAIN_SAMPLES, tokenizer, seed=SEED)
-
-        log("[A.2] Loading model with TP=2 + LoRA...")
-        ensure_model_downloaded(QWEN3_MODEL, rank)
-        parallelism_config = ParallelismConfig(tp_size=2)
-        model, _ = load_distributed_model(
-            model_name_or_path=QWEN3_MODEL,
-            parallelism_config=parallelism_config,
-            dtype=torch.bfloat16,
-            trust_remote_code=True,
-            attn_implementation="flash_attention_2",
-            use_liger_kernel=True,
-        )
-        model = get_peft_model(model, create_lora_config())
-
-        config = SFTConfig(
-            output_dir=output_dir,
-            max_steps=MAX_STEPS,
-            per_device_train_batch_size=BATCH_SIZE,
-            bf16=True,
-            use_liger_kernel=False,
-            report_to="none",
-            logging_nan_inf_filter=False,
-            max_length=MAX_SEQ_LENGTH,
-            save_strategy="no",
-            dataloader_num_workers=0,
-            fsdp="",
-        )
-
-        # The guard fires in _setup_distributed_modes (after super().__init__), deterministically
-        # on every rank — so all ranks raise together; no collective desync.
-        log("[A.3] Asserting DistributedSFTTrainer(LoRA, TP=2) raises ValueError...")
-        raised, err = False, ""
-        try:
-            DistributedSFTTrainer(
-                model=model,
-                args=config,
-                train_dataset=train_dataset,
-                processing_class=tokenizer,
-                parallelism_config=parallelism_config,
-            )
-        except ValueError as e:
-            raised, err = True, str(e)
-
-        checks = {
-            "construction_rejected": raised,
-            "error_explains_tp": ("Tensor Parallelism" in err) or ("tp_size" in err),
-        }
-        log(f"  LoRA+TP rejected at construction: {'PASS' if checks['construction_rejected'] else 'FAIL'}")
-        log(f"  Error explains TP incompatibility: {'PASS' if checks['error_explains_tp'] else 'FAIL'}")
-        if raised:
-            log(f"  Rejection message: {err.splitlines()[0]}")
-
-        all_passed = all(checks.values())
-        log(f"\n  Sub-test A (Qwen3 LoRA+TP rejection): {'PASSED' if all_passed else 'FAILED'}")
-        return all_passed
-
-    except Exception as e:
-        log(f"\n  Sub-test A FAILED with exception: {e}")
-        if rank == 0:
-            traceback.print_exc()
-        return False
-
-    finally:
-        del model
-        cleanup_memory()
 
 
 # Sub-test C: GptOss-20B with EP=2 (no TP)
@@ -584,8 +481,7 @@ def run(ctx) -> dict:
 
     for mode in modes:
         if mode == "qwen3_tp":
-            ensure_model_downloaded(QWEN3_MODEL, ctx.rank)
-            checks["qwen3_tp"] = run_qwen3_tp_rejected(ctx.rank, ctx.local_rank, ctx.output_dir)
+            checks["qwen3_tp"] = run_tp_lora_lifecycle(ctx, tp_size=2)
         elif mode == "gptoss_ep":
             ensure_model_downloaded(GPT_OSS_20B, ctx.rank)
             checks["gptoss_ep"] = run_gptoss_ep_save_load(ctx.rank, ctx.local_rank, ctx.output_dir)
@@ -599,7 +495,7 @@ def run(ctx) -> dict:
     return {"checks": checks}
 
 
-main = gpu_test_main(min_world_size=2, prefix="test_lora_tp_save_load")(run)
+main = gpu_test_main(exact_world_size=2, prefix="test_lora_tp_save_load")(run)
 
 if __name__ == "__main__":
     main()

@@ -20,6 +20,7 @@ from src.distributed.checkpoint.peft import find_peft_model
 from src.distributed.expert_parallel.base_layer import find_ep_layers
 from src.distributed.expert_parallel.expert_weights import has_ep_lora
 from src.distributed.parallelism_config import accelerate_launch_rejection
+from src.distributed.tensor_parallel.lora import validate_native_tp_lora_config, validate_native_tp_lora_model
 from src.log import KEY_PREVIEW_COUNT
 from src.models.loading.config_levels import config_sources, set_config_field_run_scoped
 from src.models.moe_balancing import (
@@ -27,7 +28,7 @@ from src.models.moe_balancing import (
     mark_router_logits_forced_off,
 )
 from src.models.patches.gpt_oss_sinks import has_live_attention_sinks
-from src.models.structure import tuner_adapter_param_ids
+from src.models.structure import is_kbit_quantized, model_has_quantized_params, tuner_adapter_param_ids
 
 logger = get_logger(__name__)
 
@@ -434,19 +435,54 @@ class ParallelismValidationMixin:
                 "supported."
             )
 
+    def _validate_tp_lora_scope(self, model):
+        """The native adapter lifecycle is declared only by dense, SFT-only pure TP at DP=1."""
+        if not isinstance(model, nn.Module):
+            raise ValueError(
+                "Tensor Parallelism LoRA needs a preloaded HF-native TP model; load it with "
+                "load_distributed_model before constructing the SFT trainer."
+            )
+        config = self.parallelism_config
+        if (
+            is_kbit_quantized(model)
+            or model_has_quantized_params(model)
+            or getattr(model, "hf_quantizer", None) is not None
+            or any(
+                getattr(source, "quantization_config", None) is not None
+                for source in config_sources(getattr(model, "config", None))
+            )
+        ):
+            raise ValueError("Native TP LoRA does not support a quantized base; use an ordinary floating-point model.")
+        if (
+            not getattr(self, "_supports_tp_lora", False)
+            or config.data_parallel_size != 1
+            or config.is_ep_mode
+            or config.is_expert_tp_mode
+            or config.is_cp_mode
+            or config.is_pp_mode
+            or config_has_experts(getattr(model, "config", None))
+            or find_ep_layers(model)
+        ):
+            raise ValueError(
+                "LoRA/PEFT adapters are not supported with Tensor Parallelism (tp_size > 1) "
+                "for this trainer or layout. Native PEFT TP LoRA requires dense SFT, DP=1, "
+                "and no EP, ETP, CP or PP. Use LoRA without TP, or full fine-tuning under TP."
+            )
+
+    def _validate_tp_lora_request(self, model, peft_config):
+        """Check SFT's config before TRL injects adapters or enables checkpointing."""
+        if not self.parallelism_config.is_tp_mode or peft_config is None:
+            return
+        self._validate_tp_lora_scope(model)
+        if isinstance(model, PeftModel):
+            raise ValueError("Pass either a PEFT-wrapped TP model or peft_config, not both.")
+        validate_native_tp_lora_config(model, peft_config, tp_size=self.parallelism_config.tp_size)
+
     def _validate_lora_tp_compatibility(self):
-        """Reject LoRA/PEFT adapters under Tensor Parallelism (``tp_size > 1``), expert LoRA included.
+        """Validate native dense SFT adapters; retain every other TP adapter refusal.
 
-        PEFT's ``lora_A``/``lora_B`` are plain tensors outside the TP graph: the replicated matrix
-        diverges (per-rank init, never broadcast) and the sharded one is corrupted by the TP grad
-        sync. CP and pure ETP leave attention unsharded, so LoRA there is fine.
-
-        Adapters count whether PEFT wrapped the model or injected them in place (the embedding path
-        does the latter, so an ``isinstance`` check alone would miss it), read off the tuner layers
-        (:func:`~src.models.structure.tuner_adapter_param_ids`) so a backbone's own ``lora_*``
-        parameters stay base weights. EP's native grouped expert adapters are counted separately:
-        they are no tuner layer and the TP replicated-grad sweep excludes them by param identity, so
-        expert-only LoRA under EP+TP would otherwise reach no gate.
+        In-place tuner layers count too, while a backbone's own ``lora_*`` parameters remain base
+        weights. Native EP expert adapters are not PEFT layers and need their own first check.
         """
         model = self._top_level_model()
         if has_ep_lora(model):
@@ -463,16 +499,12 @@ class ParallelismValidationMixin:
             )
         if not isinstance(model, PeftModel) and not tuner_adapter_param_ids(model):
             return
-        raise ValueError(
-            "LoRA/PEFT adapters are not supported with Tensor Parallelism (tensor_parallel_size > 1).\n"
-            "TP shards the attention/MLP base layers as DTensors, but PEFT adapters are added as "
-            "plain tensors outside the TP graph: the replicated adapter matrix diverges across "
-            "ranks (per-rank init, never broadcast) and the sharded one is corrupted by the TP "
-            "replicated-grad sync. The resulting adapter is rank-inconsistent and will not reload "
-            "correctly.\n\n"
-            "Use one of:\n"
-            "  - LoRA with FSDP2 data parallelism (no TP)\n"
-            "  - LoRA with Context Parallelism (CP) and/or pure Expert-TP (ETP) — attention "
-            "weights stay unsharded there, so the adapter is replicated and correct\n"
-            "  - Full fine-tuning under TP (no adapters)"
-        )
+        if not getattr(self, "_supports_tp_lora", False):
+            raise ValueError(
+                "LoRA/PEFT adapters are not supported with Tensor Parallelism (tp_size > 1) "
+                "for this trainer. Native PEFT TP LoRA is enabled only for dense SFT with DP=1. "
+                "Use LoRA without TP, or full fine-tuning under TP."
+            )
+        self._validate_tp_lora_scope(model)
+        validate_native_tp_lora_model(model, tp_size=self.parallelism_config.tp_size)
+        self._native_tp_lora = True

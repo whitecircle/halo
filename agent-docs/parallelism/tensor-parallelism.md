@@ -236,6 +236,39 @@ parallel-vs-baseline bound.
 
 ## Limitations
 
+### Native LoRA for dense SFT
+
+`DistributedSFTTrainer` declares `_supports_tp_lora`; other trainers, including self-distillation,
+reject TP adapters. The supported layout is pure HF-native TP with DP=1 on a dense causal LM.
+EP/ETP, CP, PP, MoE and quantized bases remain unsupported with TP LoRA.
+
+Targets must be ordinary `nn.Linear` layers using the exact `colwise` or `rowwise` plan. This
+covers Llama/Qwen-style attention and MLP projections, including `all-linear`; embeddings,
+`lm_head`, packed projections, gather/split styles and unplanned targets are refused.
+
+Use `lora_dropout: 0.0`, `bias: none`, `init_lora_weights=True` and one `default` adapter. Scalar
+rsLoRA is supported; DoRA, trainable biases/tokens, `modules_to_save`, `target_parameters`, rank/alpha
+patterns, layer replication and other initializer modes are refused.
+
+The runtime needs Transformers >=5.17 and PEFT's native DTensor integration. The validator checks
+global layer/factor dimensions, native forward transforms and the model's named `tp` mesh against
+the trainer's TP size. PEFT 0.21.1 sizes layers locally on this mesh and is refused: its rowwise
+initializer uses the wrong fan-in. Halo does not repair or replace PEFT's implementation.
+
+Colwise B and rowwise A are DTensor shards; the opposite factors stay plain replicas. Native
+transforms supply the colwise backward SUM and rowwise forward SUM. Halo's step-time sync and
+clipping retain their existing accounting. Stock optimizers use tensor-type-separated,
+single-tensor groups; AdamWBF16 keeps its per-parameter path.
+Custom `optimizer_cls_and_kwargs` factories are refused. A supplied optimizer must not enable
+fused/foreach updates on a group mixing plain factors and DTensor shards.
+
+Every rank participates in adapter saving. The standard PEFT artifact reloads onto an unsharded
+base and merges with `merge_peft_adapters.py`. Adapter-only resume and best-model loading restore
+factors into their live TP placements and validate the saved scaling; see
+[PEFT saving](../reference/checkpoints.md#peft-lora-saving).
+
+### Other limits
+
 **Trainers.** `_supports_tp` defaults `True` on the mixin and no trainer overrides it, so no trainer
 rejects TP; the
 only trainer-level TP gate that fires is the LoRA one below. Matrix:
@@ -267,7 +300,7 @@ single-domain multi-group EP with `ep_size > 2` (`ep4+tp2` on 8) and multi-domai
 
 | Knob | Under TP | Gate |
 |---|---|---|
-| `use_peft` / LoRA (incl. EP+TP) | rejected — PEFT adapters are plain tensors outside the TP graph, so the replicated half diverges and the sharded half is corrupted by the replicated-grad sync. Use LoRA with FSDP/DP, CP, or pure ETP | `_validate_lora_tp_compatibility` |
+| `use_peft` / LoRA | dense SFT with pure HF-native TP, DP=1 and compatible native PEFT only; all other trainer/layout combinations rejected ([requirements](#native-lora-for-dense-sft)) | `_validate_lora_tp_compatibility` |
 | native EP expert LoRA | rejected — the grouped expert adapters ride the EP-distributed expert weights, which both TP gates skip by param identity, so no adapter shape under EP+TP is gradient- or save/merge-covered. Train expert LoRA under EP without TP | same |
 | QLoRA / `load_in_4bit` | rejected — the TP loaders materialize plain de-quantized weights | `model_loading.py` |
 | `fsdp_reshard_after_forward` | rejected at `data_parallel_size > 1` — a plain all-gather on TP-sharded DTensor params has no registered sharding strategy | `_validate_fsdp_settings` |
@@ -314,7 +347,7 @@ covers both mechanisms — and `gather_tp_sharded_non_dtensor_params` all-gather
 GptOss `sinks` after it. Both are **collective**: every TP-mesh rank must drive them or the gather
 hangs.
 
-On resume every TP shape is Path B: the training scripts repoint `model_name_or_path` at the
+On full-finetuning resume every TP shape is Path B: the training scripts repoint `model_name_or_path` at the
 checkpoint, so the weights load at construction and `CheckpointLoader._load_tp` skips the re-read.
 Where it does read (a best-model reload, or a model built from elsewhere), each rank streams the
 checkpoint's full tensors and `distribute_tensor`s them into the live DTensor placements.
@@ -323,6 +356,9 @@ TP+DP is the exception: FSDP2 over TP stacks a strided `dp` shard on the `tp` sh
 `distribute_tensor` does not invert for packed projections, so it refuses every reload but the
 constructed-from-checkpoint skip. See
 [Checkpoints](../reference/checkpoints.md#resume-by-parallelism-mode).
+
+Adapter-only pure TP checkpoints keep the original base source and restore the adapter in place,
+including when loading the best model. The saver writes full factors in standard PEFT format.
 
 ## Troubleshooting
 

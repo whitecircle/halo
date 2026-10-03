@@ -26,7 +26,7 @@ from src.trainers.sft import _CTOR_POSITIONS as SFT_CTOR_POSITIONS
 
 def test_sft_slots_match_installed_trl():
     """TRL 1.6.0: ``SFTTrainer.__init__(self, model, args, data_collator, ...)``."""
-    assert SFT_CTOR_POSITIONS == {"model": 0, "args": 1, "data_collator": 2}
+    assert SFT_CTOR_POSITIONS == {"model": 0, "args": 1, "data_collator": 2, "peft_config": 12}
 
 
 def test_dpo_slots_match_installed_trl():
@@ -79,6 +79,13 @@ def test_gate_extracts_the_passed_collator():
     ctor_args[SFT_CTOR_POSITIONS["data_collator"]] = collator
     assert ctor_value(tuple(ctor_args), {}, "data_collator", SFT_CTOR_POSITIONS) is collator
     assert ctor_value((), {"data_collator": collator}, "data_collator", SFT_CTOR_POSITIONS) is collator
+
+
+def test_sft_gate_extracts_the_passed_peft_config():
+    config = object()
+    positional = [None] * 12 + [config]
+    assert ctor_value(tuple(positional), {}, "peft_config", SFT_CTOR_POSITIONS) is config
+    assert ctor_value((), {"peft_config": config}, "peft_config", SFT_CTOR_POSITIONS) is config
 
 
 def test_gate_extracts_the_passed_reference_model():

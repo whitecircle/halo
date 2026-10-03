@@ -3,7 +3,8 @@
 LoRA trains small rank-decomposed adapter matrices while the base model stays frozen, eliminating optimizer
 states for frozen parameters.
 
-It runs under DDP/FSDP, EP, CP and pure ETP; **TP**, **EP+TP** and **PP** reject it, and QLoRA runs only
+It runs under DDP/FSDP, EP, CP and pure ETP, plus [native dense SFT TP](../parallelism/tensor-parallelism.md#native-lora-for-dense-sft)
+with compatible dependencies. **EP+TP** and **PP** reject it, and QLoRA runs only
 under DDP/FSDP and CP-on-dense (full matrix and reasons: [Parallelism compatibility](#parallelism-compatibility)).
 Under EP, LoRA targets both attention (via PEFT) and the MoE experts (via native grouped adapters).
 
@@ -225,9 +226,9 @@ own ([Data Parallelism](../parallelism/data-parallelism.md#fsdp2-strategy-by-mod
 | DDP / FSDP | Yes | Yes | None | Standard path |
 | EP | Yes | No | Attention + experts | Attention via PEFT; expert FFNs via native grouped adapters. QLoRA rejected: EP loaders materialize plain de-quantized weights, losing `Params4bit` |
 | CP | Yes | Yes* | None | CP shards the sequence, not the weights — adapters stay replicated; standard `from_pretrained` preserves `Params4bit`. *QLoRA only on a **dense** model: an MoE takes the grouped-GEMM loader, which rejects a quantized base |
-| TP | **No** | No | — | Rejected — adapters are plain tensors outside the TP DTensor graph |
+| TP | Dense SFT, DP=1 only | No | Native plain colwise/rowwise Linear | [Runtime and configuration requirements](../parallelism/tensor-parallelism.md#native-lora-for-dense-sft) |
 | EP+CP | Yes | No | Attention + experts | Both active |
-| EP+TP | **No** | No | — | Both adapter kinds rejected: attention LoRA as under TP, native expert LoRA by the gate's `has_ep_lora` arm |
+| EP+TP | **No** | No | — | Both adapter kinds rejected: attention LoRA is outside the dense SFT pure-TP path, native expert LoRA is refused by the gate's `has_ep_lora` arm |
 | ETP | Yes | No | Attention only | Expert adapters rejected at config time by `ParallelismConfig` (`expert_tp_size > 1` gives the replicated adapter half a partial, never-synced gradient) |
 | PP | **No** | No | — | Attention PEFT rejected at trainer construction, expert LoRA earlier by `ParallelismConfig`. The adapter save/resume path is not stage-aware: it would write stage-local layer indices |
 
@@ -240,12 +241,11 @@ The default save writes a standalone adapter; `merge_expert_lora_on_save: true` 
 base for a servable HF checkpoint instead, keeping the unmerged adapter beside it for resume
 ([Merging adapters](#merging-adapters)).
 
-**TP / EP+TP.** For a colwise-sharded base, `lora_B` becomes a per-rank output shard while `lora_A` stays
-replicated. Nothing broadcasts the replicated matrix (it diverges from init) and nothing distinguishes the
-sharded one from a replica (the TP replicated-grad sync averages and corrupts it), so the trained adapter is
-rank-inconsistent and will not reload onto a non-TP model. Use FSDP/DP, CP, or pure ETP instead.
+**TP / EP+TP.** Dense SFT accepts validated native PEFT adapters under pure TP, DP=1.
+The [TP page](../parallelism/tensor-parallelism.md#native-lora-for-dense-sft) owns its runtime,
+target and initializer restrictions. EP+TP and other trainers retain the adapter refusal.
 
-The gate is `_validate_lora_tp_compatibility` (`src/trainers/mixins/validation.py`) and it refuses both
+The gate is `_validate_lora_tp_compatibility` (`src/trainers/mixins/validation.py`). Outside dense SFT it refuses both
 adapter kinds: a `PeftModel` or any PEFT tuner layer injected in place (read off the tuner layers, so a
 backbone's own `lora_*` weights stay base weights), and — checked first, via `has_ep_lora` — the native
 grouped expert adapters, which are no tuner layer and which the TP replicated-grad sweep skips by param
@@ -418,6 +418,8 @@ save instead. Per mode:
   the live config keeps the wrapper's spelling; DTensor reconstruction also applied.
 - **FSDP2:** DTensor adapter params reconstructed via `full_tensor()` (a collective) before save; global rank
   0 saves on a shared FS, rank 0 per node otherwise.
+- **Pure TP:** native sharded factors reconstructed through the same DTensor saver; replicated factors
+  stay plain. The artifact uses standard PEFT keys and global shapes.
 - **EP+CP:** combines EP rank selection with CP key normalization.
 
 **Reloading elsewhere.** Attention adapters carry standard PEFT keys and load onto a stock
@@ -437,7 +439,7 @@ The repo's merge and convert scripts check those markers (`assert_no_expert_lora
 to a tensor-key scan when the config is absent or carries a stock `peft_type`, so an unmarked directory
 holding `.experts.<attr>.lora_{A,B}` keys is refused too.
 
-**Resume:** EP/CP rebuild the base with zero-initialized adapters at init, so trained adapters are restored
+**Resume:** EP/CP and native dense SFT TP rebuild the base with zero-initialized adapters at init, so trained adapters are restored
 from the checkpoint's `adapter_model.safetensors` (a merged checkpoint's `resume_adapter/`; not from the base reload) by
 `restore_adapters` (`src/distributed/checkpoint/peft.py`), which `CheckpointLoader` calls. Resuming expert adapters into a run that does not build them (EP off,
 `use_grouped_gemm: false`, or the expert projections dropped from `lora_target_modules`) raises rather than
@@ -501,7 +503,7 @@ and with `save_sharded_ep: true`.
 ## Tests and benchmarks
 
 ```bash
-# LoRA + CP (trains) and LoRA + TP (asserts rejection)
+# LoRA + CP and compatible native dense SFT TP
 torchrun --nproc_per_node=2 tests/gpu/trainers/lora/test_lora_cp_tp.py
 # LoRA + EP with MoE
 torchrun --nproc_per_node=2 tests/gpu/trainers/lora/test_lora_ep.py

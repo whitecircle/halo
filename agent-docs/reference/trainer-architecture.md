@@ -74,6 +74,10 @@ flips. Its PP verdict is written out even when it matches the default, because
 There is no `_supports_etp`: ETP folds into `ep_group_size = ep_size × expert_tp_size`, so it is
 gated by `_supports_ep`.
 
+`_supports_tp_lora` is a separate capability, default off and enabled only on SFT.
+Self-distillation explicitly disables the inherited declaration. Native adapter requirements:
+[Tensor parallelism](../parallelism/tensor-parallelism.md#native-lora-for-dense-sft).
+
 **CP** works only where the loss is computable from a sequence chunk. The rest inherit the default
 `_supports_cp = False`.
 

@@ -65,7 +65,8 @@ explanation before touching the GPUs. The rules people actually hit:
   `true`), which makes the reduce-scatter their only gradient sync and frees
   memory that otherwise grows with the DP size. Turning it off is rejected under TP or CP — those paths shard the
   replicated experts unconditionally.
-- **LoRA doesn't combine with TP**, and **QLoRA only runs on DDP/FSDP/CP.** EP
+- **TP LoRA is dense SFT only**, with DP=1 and [compatible native PEFT](../agent-docs/parallelism/tensor-parallelism.md#native-lora-for-dense-sft).
+  MoE, EP+TP and other trainers reject TP adapters. **QLoRA only runs on DDP/FSDP/CP.** EP
   and TP reject QLoRA outright, and so does the grouped-GEMM MoE path — a MoE
   model rejects it even under plain FSDP unless you set
   `use_grouped_gemm: false`. Both online RL methods reject it in every mode:

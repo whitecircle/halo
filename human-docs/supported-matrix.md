@@ -142,15 +142,16 @@ domain size. ETP has no per-family opt-in (every EP-capable family shards expert
 FFNs through the same helper), with GPT-OSS the one behavioral exception: its
 interleaved expert weights cannot be de-interleaved once TP-sharded, so grouped
 GEMM turns off under ETP. And LoRA
-`Yes` covers FSDP/DP, EP, CP and pure ETP — TP and EP+TP reject adapters
-outright, and any `expert_tp_size > 1` additionally rejects adapters on the
+`Yes` covers FSDP/DP, EP, CP and pure ETP. TP additionally supports
+[native dense SFT, DP=1](../agent-docs/parallelism/tensor-parallelism.md#native-lora-for-dense-sft);
+EP+TP rejects adapters, and any `expert_tp_size > 1` additionally rejects adapters on the
 *expert* projections, so keep `lora_target_modules` on attention there.
 
 ## PEFT, quantization and data
 
 | Feature | Status |
 | --- | --- |
-| LoRA | supported, except under TP / EP+TP; expert-projection adapters are also refused once `expert_tensor_parallel_size > 1` |
+| LoRA | TP requires native dense SFT, DP=1 and compatible dependencies; EP+TP rejected; expert-projection adapters also refused at `expert_tensor_parallel_size > 1` |
 | QLoRA | DDP / FSDP / CP only; a MoE model also needs `use_grouped_gemm: false`. Rejected by both online RL methods in every mode |
 | Adapter merge | `halo run merge-peft-adapters` produces a standalone checkpoint |
 | FP8 / FP4 MoE QAT and export | experimental; simulated backend for QAT, `quantize-to-lowp` for export |

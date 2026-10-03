@@ -157,7 +157,7 @@ Set `expert_parallel_size` to the training-GPU count so the trainer ranks form *
 
 ### LoRA
 
-Add `use_peft: true` and the `lora_*` fields. LoRA runs under FSDP2 DP, EP and pure ETP; any adapter on the TP-sharded backbone is **rejected under TP and EP+TP** (`_validate_lora_tp_compatibility`, `src/trainers/mixins/validation.py`), because PEFT keeps `lora_A`/`lora_B` as plain tensors outside the TP graph. Native expert adapters too.
+Add `use_peft: true` and the `lora_*` fields. LoRA runs under FSDP2 DP, EP and pure ETP; online GRPO **rejects TP and EP+TP adapters**, including native expert adapters (`_validate_lora_tp_compatibility`, `src/trainers/mixins/validation.py`). Halo's native PEFT TP adapter path is [dense SFT only](../../parallelism/tensor-parallelism.md#native-lora-for-dense-sft).
 
 The weight sync folds the adapter into each base weight out of place as it sends it, so vLLM serves the adapted policy with no adapter loaded and the trainer's frozen base is never written; under EP the gather folds native expert-LoRA in too ([PEFT](../../optimization/peft.md#online-rl--rollout-server-weight-sync)).
 
