@@ -57,7 +57,7 @@ Nothing gates `flash_adamw` on a parallelism mode. The only guard is the shared 
 
 The wrapper registers a step post-hook that advances each stepped param's version counter — `flashoptim`'s fused Triton update stores through raw pointers ATen never sees, and the low-precision weight-quant cache keys on that counter (see [Low-Precision MoE](low-precision-moe-kernels.md)).
 
-**Checkpoint limit: unevenly sharded params.** `flashoptim`'s `state_dict` refuses any FSDP2 DTensor param whose sharded dim does not divide the mesh, and the trainer's all-or-nothing shard save then skips optimizer state on every checkpoint — resume warm-restarts the optimizer. Training itself is unaffected. `_warn_if_uneven_shards` (`src/optimizers/flash_adamw.py`) says so at optimizer build; pick dims divisible by the shard world or another `optim` if exact optimizer resume matters.
+**Checkpoint limit: unevenly sharded params.** `flashoptim`'s `state_dict` refuses any FSDP2 DTensor param whose sharded dim does not divide the mesh, and the trainer's all-or-nothing shard save then raises at the first checkpoint. Training itself is unaffected. `_warn_if_uneven_shards` (`src/optimizers/flash_adamw.py`) says so at optimizer build; set `save_only_model: true` for weights-only checkpoints, or pick dims divisible by the shard world or another `optim` to keep optimizer state.
 
 ## References
 

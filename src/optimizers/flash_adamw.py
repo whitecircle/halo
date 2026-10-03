@@ -25,8 +25,8 @@ def _warn_if_uneven_shards(params) -> None:
     """Warn at build time when optimizer-state checkpointing cannot work.
 
     flashoptim's ``state_dict`` raises for any DTensor param whose sharded dim does not divide the
-    mesh, so the trainer's all-or-nothing shard save skips optimizer state on every checkpoint and a
-    resume warm-restarts. Training itself is unaffected: the step unwraps to the local shard.
+    mesh, so the trainer's all-or-nothing shard save raises at the first checkpoint. Training itself is
+    unaffected: the step unwraps to the local shard.
     """
     uneven = [
         (name, tuple(p.shape))
@@ -43,8 +43,8 @@ def _warn_if_uneven_shards(params) -> None:
         logger.warning(
             f"FlashAdamW cannot checkpoint optimizer state for this model: {len(uneven)} parameter(s) "
             f"are unevenly sharded (e.g. '{name}' with shape {shape}) and flashoptim's state_dict "
-            f"refuses them, so every checkpoint will skip optimizer shards and any resume will "
-            f"warm-restart the optimizer. Pick dims divisible by the shard world, or another optim."
+            f"refuses them, so the first checkpoint save will raise. Set save_only_model: true for "
+            f"weights-only checkpoints, pick dims divisible by the shard world, or use another optim."
         )
 
 
