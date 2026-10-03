@@ -161,7 +161,8 @@ _PRECOMPUTE_FAMILY_ROWS = tuple(
     for trainer, mode in (("dpo", ""), ("dpo", " --mode ep1"), ("kto", ""))
 )
 # GPT-OSS on every two-rank layout of the full_determinism backward replay, Qwen3-MoE on ep2; the sweep
-# runs ep2 on every other family.
+# runs ep2 on every other family. tests/cpu/conventions/test_tiny_family_roster.py holds both to the
+# replay's layouts and to the roster.
 _DETERMINISM_CORE_ROWS = (
     *(f"--family gpt_oss --mode {mode}" for mode in ("ep2", "ep2_top1", "ep2_loop", "ep2_legacy", "ep1", "etp2")),
     "--family qwen3_moe --mode ep2",

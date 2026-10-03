@@ -73,7 +73,8 @@ def parallelism_config_from_args(
         training_config: the parsed TRL/HF training config, read for the run's declared per-rank
             token budget (``rows × per_device_train_batch_size × max_length``) — what
             :meth:`ParallelismConfig.validate_against_model_config` judges against DeepEP's dispatch
-            ceilings. ``None``, or a config declaring no ``max_length``, leaves that gate off.
+            ceilings. ``None``, or a config declaring no ``max_length``, leaves that gate off. Its
+            ``full_determinism`` is refused here on an EP group spanning NVLink domains.
         trainer_cls: the trainer class this script builds. Its ``_supports_cp`` / ``_supports_pp``
             gates reject a ``context_parallel_size`` / ``pipeline_parallel_size`` above 1 here, at
             config time: the trainer's own check would reject it too, but only after the model (and
@@ -162,7 +163,9 @@ def parallelism_config_from_args(
     )
     if allow_low_precision:
         kwargs.update({name: getattr(dist_args, name) for name in _LOWP_KNOBS})
-    return ParallelismConfig(**kwargs)
+    config = ParallelismConfig(**kwargs)
+    config.reject_cross_domain_determinism(bool(getattr(training_config, "full_determinism", False)))
+    return config
 
 
 def declared_row_length(training_config) -> int:

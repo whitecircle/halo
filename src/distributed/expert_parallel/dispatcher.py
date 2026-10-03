@@ -224,31 +224,6 @@ def _bump_forward_generation(*_args) -> None:
     bump_forward_generation()
 
 
-def _resolve_deterministic_dispatch() -> bool:
-    """Whether this process runs under torch's deterministic-algorithms mode, which HF's
-    ``full_determinism`` turns on in ``Trainer.__init__``.
-
-    DeepEP asserts at every dispatch and combine that the mode does not run alongside
-    ``torch.utils.deterministic.fill_uninitialized_memory``, which the mode enables by default: the fill
-    launches on the compute stream and races DeepEP's communication-stream allocations. The fill only
-    makes a read of never-written memory reproducible, so it is switched off here rather than refusing
-    the mode.
-    """
-    if not torch.are_deterministic_algorithms_enabled():
-        return False
-    if torch.utils.deterministic.fill_uninitialized_memory:
-        torch.utils.deterministic.fill_uninitialized_memory = False
-        warn_once(
-            logger,
-            _WARNED_ENV,
-            "fill_uninitialized_memory",
-            "Deterministic algorithms are on with an EP model: setting "
-            "torch.utils.deterministic.fill_uninitialized_memory=False, which DeepEP requires under "
-            "deterministic mode (its dispatch and combine assert on the fill).",
-        )
-    return True
-
-
 def register_forward_generation_hook(model: torch.nn.Module) -> None:
     """Let :class:`_ElasticBackend` dedup its capacity all-reduce to once per forward.
 
@@ -457,6 +432,30 @@ class _LegacyArena(_SharedArena):
         return True
 
 
+def _deterministic_dispatch() -> bool:
+    """Whether dispatches must place received tokens in a fixed order: torch's deterministic-algorithms
+    mode is on, which HF's ``Trainer.__init__`` turns on for ``full_determinism``."""
+    return torch.are_deterministic_algorithms_enabled()
+
+
+def _release_uninitialized_memory_fill() -> None:
+    """Switch off ``torch.utils.deterministic.fill_uninitialized_memory`` under deterministic mode.
+
+    DeepEP asserts at every dispatch and combine, on both buffers, that the two are not on together: the
+    fill launches on the compute stream and races DeepEP's communication-stream allocations. The flag
+    defaults to on, so ``full_determinism`` alone trips the assert. Switching it off lasts for the rest
+    of the process and covers every op; it only made reads of never-written memory reproducible.
+    """
+    if torch.are_deterministic_algorithms_enabled() and torch.utils.deterministic.fill_uninitialized_memory:
+        torch.utils.deterministic.fill_uninitialized_memory = False
+        if is_global_main_process():
+            logger.warning(
+                "Deterministic algorithms are on with an EP model: setting "
+                "torch.utils.deterministic.fill_uninitialized_memory=False for the rest of the process, "
+                "which DeepEP's dispatch and combine require under deterministic mode."
+            )
+
+
 class _DeepEPBackend(ABC):
     """A DeepEP transport backend held by a :class:`DeepEPDispatcher`.
 
@@ -489,7 +488,7 @@ class _DeepEPBackend(ABC):
         """Create (or grow) the buffer to serve ``num_tokens`` per rank. Collective over the EP group.
 
         ``deterministic``: the run asked for deterministic algorithms, so received tokens must land in
-        the same order on every dispatch (:func:`_resolve_deterministic_dispatch`).
+        the same order on every dispatch (:func:`_deterministic_dispatch`).
         """
 
     @abstractmethod
@@ -862,7 +861,8 @@ class DeepEPDispatcher:
 
     def _ensure_buffer(self, num_tokens: int, num_topk: int) -> None:
         """Build/grow the transport buffer to hold ``num_tokens`` per rank (collective)."""
-        self.backend.ensure(num_tokens, num_topk, deterministic=_resolve_deterministic_dispatch())
+        _release_uninitialized_memory_fill()
+        self.backend.ensure(num_tokens, num_topk, deterministic=_deterministic_dispatch())
         _LIVE_DISPATCHERS[id(self)] = self
         self._destroyed = False
 

@@ -302,8 +302,10 @@ expert-TP group, then the **dispatch** group, then across replica groups divided
 
 ## Determinism
 
-Under `full_determinism: true` an EP run repeats bit for bit, expert weight gradients included, as
-long as each EP group sits inside one NVLink domain.
+Under `full_determinism: true` the EP path (dispatch, expert compute, combine) repeats bit for bit,
+expert weight gradients included, as long as each EP group sits inside one NVLink domain. The rest of
+the model needs its own deterministic kernels: the gated-DeltaNet families (Qwen3.5/3.6 MoE) need
+`CAUSAL_CONV1D_DETERMINISTIC=1`, which `full_determinism` does not set.
 
 DeepEP's default dispatch claims each receive slot with an atomic, so the order an expert's tokens
 arrive in changes from step to step, and with it the summation order of the expert weight gradient
@@ -317,18 +319,20 @@ nothing. The rest of the EP path is deterministic as is: grouped GEMM, the fused
 permute, the combine, and `ep_size == 1`, which has no dispatch. At `top_k < ep_size` the permute's
 `index_add_` is deterministic only because torch's mode swaps in its deterministic kernel.
 
-DeepEP asserts at every dispatch and combine that deterministic mode does not run beside
-`torch.utils.deterministic.fill_uninitialized_memory`, which that mode turns on by default. The
-dispatcher switches the fill off (one warning per process), so `full_determinism` runs on EP at all.
+DeepEP asserts at every dispatch and combine, on both buffers, that deterministic mode does not run
+beside `torch.utils.deterministic.fill_uninitialized_memory`, which defaults to on whether or not the
+mode is. The dispatcher switches the fill off at the first dispatch under the mode, with one warning;
+that lasts for the rest of the process and covers every op, not only EP.
 
 Cost on gpt-oss-20b ep2 at 4,096 tokens per rank (2×B300, 30 steps): the deterministic dispatch alone
 costs about 2% of throughput (14.9k vs 15.1k tokens/s/GPU), and the whole `full_determinism` mode about
 11% (13.4k), most of it torch's deterministic kernels. Runs without the mode keep the default dispatch.
 
 **Not supported across NVLink domains.** DeepEP's cross-domain (hybrid RDMA) dispatch has no
-deterministic mode. Every trainer refuses `full_determinism` at construction on an EP group spanning
-domains (`ParallelismConfig.validate_determinism`). Keep EP node-local (`ep_scope: node`) with DP across
-domains; on a multi-node NVLink fabric set `NVLINK_DOMAIN_SIZE` to the fabric's size.
+deterministic mode. `full_determinism` on an EP group spanning domains is refused while the entry
+script builds its config, before the load, and again at trainer construction for a hand-built config
+(`ParallelismConfig.reject_cross_domain_determinism`). Keep EP node-local (`ep_scope: node`) with DP
+across domains; on a multi-node NVLink fabric set `NVLINK_DOMAIN_SIZE` to the fabric's size.
 
 `tests/gpu/parallelism/ep/test_ep_deterministic_expert_grads.py` replays a backward under
 `full_determinism` and requires the loss and every gradient bit-identical: GPT-OSS on every two-rank

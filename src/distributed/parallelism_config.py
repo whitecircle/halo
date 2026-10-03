@@ -1119,12 +1119,13 @@ class ParallelismConfig:
                 f"{exc}"
             ) from exc
 
-    def validate_determinism(self, full_determinism: bool) -> None:
+    def reject_cross_domain_determinism(self, full_determinism: bool) -> None:
         """Reject ``full_determinism`` on an EP group spanning NVLink domains.
 
         The dispatcher builds DeepEP's deterministic buffer under the mode ``full_determinism`` turns on,
         but across domains DeepEP runs its hybrid RDMA kernels, which have no deterministic mode (they
-        assert on it at the first dispatch).
+        assert on it at the first dispatch). Applied by the entry scripts before the load, and at trainer
+        construction for a hand-built config.
         """
         if full_determinism and self.requires_rdma:
             raise ValueError(

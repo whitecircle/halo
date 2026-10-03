@@ -26,12 +26,13 @@ import argparse
 from collections.abc import Iterable
 
 import torch
-import torch.distributed as dist
 from accelerate.state import GradientState
 from transformers.trainer_utils import enable_full_determinism
 
+from src.distributed.expert_parallel.dispatcher import _ElasticBackend
 from src.distributed.expert_parallel.patching import create_ep_buffers, patch_moe_model_for_ep
 from src.distributed.parallelism_config import ParallelismConfig
+from tests.common.distributed import world_all
 from tests.common.ep_reference import ep_layers, random_token_batch
 from tests.common.tiny_models import TINY_MOE_FAMILIES, tiny_family_model
 from tests.common.utils import log, log_all
@@ -90,7 +91,8 @@ def run_backward_replay(ctx, *, family: str, mode: str) -> dict:
     model = patch_moe_model_for_ep(model.to(ctx.device), ParallelismConfig(**parallelism).create_ep_config())
     create_ep_buffers(model)
     model.train()
-    expert_params = {id(param) for layer in ep_layers(model) for _, param in layer.expert_named_params()}
+    layers = ep_layers(model)
+    expert_params = {id(param) for layer in layers for _, param in layer.expert_named_params()}
     expert_names = {name for name, param in model.named_parameters() if id(param) in expert_params}
 
     # After the load, as Trainer.__init__ does, so the mode is on before the first dispatch builds a buffer.
@@ -106,6 +108,10 @@ def run_backward_replay(ctx, *, family: str, mode: str) -> dict:
         # router can starve one (Zaya's tiny model sends nothing to rank 1 in its last layers).
         "expert_grads_present": any(name in reference and bool(reference[name].any()) for name in expert_names),
     }
+    # Checked directly as well: at this size the atomic receive order can repeat by chance.
+    elastic = [layer.dispatcher.backend for layer in layers if isinstance(layer.dispatcher.backend, _ElasticBackend)]
+    if elastic:
+        checks["dispatch_buffers_deterministic"] = all(backend._arena.deterministic for backend in elastic)
     expert_diffs, other_diffs, loss_equal = set(), set(), True
     for _ in range(REPEATS - 1):
         loss, grads = _backward_pass(model, ids, labels)
@@ -119,8 +125,5 @@ def run_backward_replay(ctx, *, family: str, mode: str) -> dict:
         log_all(f"  differing expert grads {sorted(expert_diffs)[:6]}, other grads {sorted(other_diffs)[:6]}")
     log(f"  {family} --mode {mode}: {len(expert_names)} expert / {len(other_names)} other grads compared")
 
-    # Every rank's verdict on every rank: a pass on one rank beside a failure on the other is a failure.
-    verdict = torch.tensor([all(checks.values())], device=ctx.device, dtype=torch.int32)
-    dist.all_reduce(verdict, op=dist.ReduceOp.MIN)
-    checks["every_rank_passed"] = bool(verdict.item())
+    checks["every_rank_passed"] = world_all(all(checks.values()), ctx.device)
     return {"checks": checks, "metrics": {"expert_grads": len(expert_names), "differing": len(expert_diffs)}}

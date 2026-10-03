@@ -66,6 +66,9 @@ When `ep_group_size < stage_world_size` the EP groups are data-parallel replicas
 below. The **single global group** (`ep_group_size == stage_world_size`) needs no cross-replica
 deferral: every collective already spans the same ranks.
 
+Cross-node EP runs DeepEP's hybrid RDMA dispatch, which has no deterministic mode, so `full_determinism`
+on such a group is refused before the load ([Determinism](expert-parallelism.md#determinism)).
+
 ### Deferred cross-replica sync
 
 **Every multi-EP-group topology defers**, single-node ones included. `EPConfig.defer_grad_sync` is

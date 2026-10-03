@@ -20,7 +20,6 @@ from torch.testing._internal.distributed.fake_pg import FakeStore as TorchFakeSt
 from transformers import AutoConfig, AutoTokenizer
 
 from src.distributed.expert_parallel import dispatcher as ep_dispatcher
-from src.distributed.expert_parallel.dispatcher import destroy_all_dispatchers
 from src.distributed.runtime import barrier, broadcast_from_rank0
 from src.models.patches.attention import ensure_fa4_kernel_cache_env
 from tests.common.scratch import SCRATCH_DIR_TAG
@@ -137,7 +136,7 @@ def pin_deterministic_ep_dispatch() -> None:
     (``full_determinism``); a test that replays a run exactly (a resume against the uninterrupted run)
     without that mode answers the dispatcher's question for it here.
     """
-    ep_dispatcher._resolve_deterministic_dispatch = lambda: True
+    ep_dispatcher._deterministic_dispatch = lambda: True
 
 
 def setup_cache_dirs(prefix: str, rank: int) -> tuple[str, str]:
@@ -287,5 +286,5 @@ def teardown_distributed():
     """Clean up distributed process group."""
     if dist.is_initialized():
         # Free DeepEP ElasticBuffers before the group (see destroy_all_dispatchers for why order matters).
-        destroy_all_dispatchers()
+        ep_dispatcher.destroy_all_dispatchers()
         dist.destroy_process_group()
