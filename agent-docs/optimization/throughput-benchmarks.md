@@ -336,14 +336,14 @@ Longer sequences amortize the all-to-all at modest memory growth — ep8 is the 
 
 ## Single-GPU dense (1× B300)
 
-`Qwen/Qwen3-4B-Instruct-2507` (4.02B, hidden 2560) and `Qwen/Qwen3-8B` (8.2B, hidden 4096), both 36 layers and dense. liger on, AdamWBF16/bf16, FA4. The FA4/FA2/SDPA/flex comparison lives in [Flash Attention](flash-attention.md#fa4-vs-fa2-vs-sdpa-on-blackwell). 1× B300, measured 2026-10-03 at commit 0bc3a22a5 on the Blackwell image, except the s4096 b1 GC column (v1.0.0).
+`Qwen/Qwen3-4B-Instruct-2507` (4.02B, hidden 2560) and `Qwen/Qwen3-8B` (8.2B, hidden 4096), both 36 layers and dense. Liger on, AdamWBF16/bf16, FA4 (`--attn_implementation flash_attention_4`) on every cell; the FA4/FA2/SDPA/flex comparison lives in [Flash Attention](flash-attention.md#fa4-vs-fa2-vs-sdpa-on-blackwell). tok/s/GPU on one B300 (every cell on the same device), mean of two runs that repeat within 0.9%, measured 2026-10-03 at commit 0bc3a22a5 on the Blackwell image.
 
-| Model | peak (no GC) | s4096 b1 GC (v1.0.0) | s32768 b1 GC | b4 no-GC memory |
-|---|---|---:|---:|---|
-| Qwen3-4B | **39,141** tok/s @ b8×s2048 | 25,459 | 16,927 | 102 GiB @ s4096 · 181 GiB @ s8192 |
-| Qwen3-8B | **24,563** tok/s @ b8×s4096 | 18,533 | 13,279 | 140 GiB @ s4096 · 235 GiB @ s8192 |
+| Model | best no-GC (b16×s2048) | s4096 b1 GC | s32768 b1 GC | b4 no-GC memory |
+|---|---:|---:|---:|---|
+| Qwen3-4B | **41,022** · 181 GiB | 23,614 | 17,504 | 102 GiB @ s4096 · 181 GiB @ s8192 |
+| Qwen3-8B | **25,569** · 235 GiB | 16,637 | 13,399 | 140 GiB @ s4096 · 235 GiB @ s8192 |
 
-Batch is the dominant lever — raise it with GC off while it fits. At batch 1 a short sequence is overhead-bound. b8 no-GC OOMs at s8192 on both models, so 16k and longer are batch-1 GC-on. The 8B runs at roughly ⅔ the 4B's tok/s (more FLOPs/token) while saturating the tensor cores better.
+Batch is the dominant lever — raise it with GC off while it fits. At a fixed 32k tokens per step shorter rows run faster, since attention cost grows with row length: Qwen3-4B runs 41,022 at b16×s2048, 38,936 at b8×s4096 and 34,775 at b4×s8192. At batch 1 a short sequence is overhead-bound. b8 no-GC OOMs at s8192 on both models, so 16k and longer are batch-1 GC-on. The 8B runs at roughly ⅔ the 4B's tok/s (more FLOPs/token) while saturating the tensor cores better on short rows (60% vs 51% MFU at b16×s2048; equal at s32768).
 
 ## GPT-OSS-120B notes
 

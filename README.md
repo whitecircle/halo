@@ -214,7 +214,7 @@ A typical run is: **pick an `examples/` config → `halo launch <method> <config
 ## Benchmarks
 
 Benchmarks below were run on B300, 8 GPUs unless a row says otherwise, on 2026-10-03 at commit 0bc3a22a5 with
-the Blackwell image; the 256k-context and FA4 rows are from v1.0.0. The stock TRL baseline
+the Blackwell image; the 256k-context row and the FA4 kernel figure are from v1.0.0. The stock TRL baseline
 uses `trl.SFTTrainer` with Transformers v5 and FSDP2 ZeRO-3, with the same model, data, bf16
 precision, FlashAttention 4, Liger kernels, and grouped GEMM.
 

@@ -12,7 +12,7 @@ number scales by the GPU count:
 
 | Model | Shape | tok/s/GPU |
 | --- | --- | --- |
-| Qwen3-4B dense | 1 GPU, batch 8 × 2048, no checkpointing | 39,100 |
+| Qwen3-4B dense | 1 GPU, batch 16 × 2048, no checkpointing | 41,000 |
 | GPT-OSS 20B | 8 GPUs, `ep1`, batch 4 × 4096, no checkpointing | 28,700 |
 | Qwen3.5-35B-A3B | 8 GPUs, `ep2`, batch 4 × 4096, checkpointing on | 16,400 |
 | GPT-OSS 20B | 8 GPUs, `ep8`, batch 4 × 4096, checkpointing on | 10,400 |
@@ -39,7 +39,7 @@ latency-bound and the GPUs are waiting, not computing. Turn on
 | `gradient_checkpointing: false` when activations fit | +30% on GPT-OSS `ep8` at 4k, at roughly double the peak memory |
 | `packing: true` | 14.5× on a corpus averaging a quarter of `max_length` (`padding_free: true`: 4.5×); nothing when rows already fill it |
 | `use_grouped_gemm: true` (default on SM90+) | 2.6–4.6× end-to-end on Qwen3-30B-A3B at `ep2` (2× B300, 8k, batch 4 to 1) — one batched expert matmul instead of a loop |
-| Flash Attention 4 (auto on Blackwell) | 1.1× at 4k rising to 2.3× at 32k on dense; ~+14% on MoE, where all-to-all dominates |
+| Flash Attention 4 (auto on Blackwell) | 1.2× FA2 at 4k rising to 2.3× at 32k on dense; ~+14% on MoE, where all-to-all dominates |
 | `use_liger_kernel: true` (default) | +39% and 28 GiB on Qwen3-30B-A3B at `ep2` (2× B300, 8k, batch 4), +6.6% on Qwen3.5-35B-A3B; add `liger_kernel_config: {fused_linear_cross_entropy: true}` past ~16k tokens, which trades 7–20% of speed for 14–30 GiB on GPT-OSS `ep1` (the cost shrinks as the sequence grows) |
 | `AdamWBF16` (automatic with `bf16: true`) | weights and optimizer state in 6 bytes/param where fp32-state AdamW needs 12, and about half the step time of `adamw_torch_fused` |
 | `fsdp_defer_grad_sync: true` and `fsdp_reshard_after_backward: false`, with `gradient_accumulation_steps > 1` | one gradient reduce and one parameter re-gather per optimizer step instead of per microstep. On one 8-GPU node the deferred reduce gives +3% on Qwen3-8B (+5–7% with both knobs) and +11.7% on Qwen3-30B-A3B at `ep_size: 1`; across two nodes over EFA it gives +9–13% on its own. Each keeps an unsharded copy per GPU (Qwen3-8B: +13 GB for the gradients). The config refuses both under `fsdp_reshard_after_forward: true` (ZeRO-3). [Details](../agent-docs/parallelism/data-parallelism.md) ↗ |
