@@ -22,7 +22,8 @@ order with the same optimizer hyperparameters, each at its newest release (2026-
 those tried. Tokens/s are measured over steps 6–25 at 2,048 tokens per row (25 steps) and over steps 6–50 at 16,384
 tokens per row (8 rows packed into one causal sequence, 50 steps); peak memory is `max_memory_allocated`, max over
 ranks. Each rate is the mean of its configuration's valid runs: a run whose token-weighted step-1 loss is more than 2%
-from the common value is left out.
+from the common value is left out. The Halo rows reproduce on main (0bc3a22a5) within 1%: 15,090 cluster tok/s at
+2,048 tokens and 16,219 at 16,384, at the same peak memory.
 
 | framework | version | layout | cluster tok/s | peak GiB/GPU |
 |---|---|---|---:|---:|

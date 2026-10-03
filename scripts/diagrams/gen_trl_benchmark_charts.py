@@ -55,20 +55,19 @@ def throughput_memory_4k16k():
         ("Halo EP8 (ZeRO-2)", C_EP8),
     ]
     tput = {
-        "stock TRL (ZeRO-3)": [3885, 5519, 6759, 6513, 7466],
-        "Halo EP1 (ZeRO-2)": [9009, 15429, 18823, 18304, 20730],
-        "Halo EP1 (ZeRO-3)": [5560, 6874, 10082, 17464, 18742],
-        "Halo EP2 (ZeRO-2)": [10479, 15314, 17949, 16407, 17219],
-        "Halo EP8 (ZeRO-2)": [8320, 9352, 10128, 9747, 9552],
+        "stock TRL (ZeRO-3)": [3859, 5496, 6719, 6588, 7392],
+        "Halo EP1 (ZeRO-2)": [11236, 17653, 23590, 20690, 23159],
+        "Halo EP1 (ZeRO-3)": [9694, 15532, 21678, 19505, 22321],
+        "Halo EP2 (ZeRO-2)": [12432, 17862, 20554, 18436, 19698],
+        "Halo EP8 (ZeRO-2)": [8852, 9609, 10358, 9981, 9650],
     }
     mem = {
         "stock TRL (ZeRO-3)": [47.6, 48.2, 50.6, 50.6, 55.6],
-        "Halo EP1 (ZeRO-2)": [60, 67, 81, 76, 107],
-        "Halo EP1 (ZeRO-3)": [28.7, 29.3, 41.6, 37.9, 68.4],
-        "Halo EP2 (ZeRO-2)": [77, 77, 91, 85, 124],
-        "Halo EP8 (ZeRO-2)": [26, 37, 53, 49, 92],
+        "Halo EP1 (ZeRO-2)": [60.3, 65.5, 75.8, 75.8, 96.5],
+        "Halo EP1 (ZeRO-3)": [28.7, 29.3, 37.9, 37.9, 58.6],
+        "Halo EP2 (ZeRO-2)": [78.9, 80.5, 85.2, 85.0, 112.0],
+        "Halo EP8 (ZeRO-2)": [25.4, 32.3, 47.2, 48.1, 78.0],
     }
-
     for data, ylabel, title, fname, fmt in [
         (
             tput,
@@ -79,7 +78,7 @@ def throughput_memory_4k16k():
         ),
         (
             mem,
-            "peak memory (GB)",
+            "peak memory (GiB)",
             "Peak memory: Halo vs stock TRL (gpt-oss-20b, GC-on)",
             "memory_4k16k.png",
             "{:,.0f}",

@@ -29,6 +29,10 @@ The baseline gets the strongest stock options — ZeRO-3 and Liger's FLCE, which
 
 *8× B300 · 2026-10-03 · commit 0bc3a22a5 · Blackwell image. GC-on · grouped GEMM · TRL ZeRO-3 · Halo ZeRO-2 (EP1 also at ZeRO-3) · elastic.* **tok/s/GPU · peak GiB:**
 
+![Throughput: Halo vs stock TRL, 4k/16k](../assets/benchmarks/throughput_4k16k.png)
+
+![Peak memory: Halo vs stock TRL, 4k/16k](../assets/benchmarks/memory_4k16k.png)
+
 | seq·b | stock TRL (z3) | Halo EP1 (z2) | Halo EP1 (z3) | Halo EP2 (z2) | Halo EP8 (z2) |
 |---|---|---|---|---|---|
 | 4k·b1 | 3,859 · 47.6 | 11,236 · 60.3 | 9,694 · **28.7** | **12,432 · 78.9** | 8,852 · 25.4 |
