@@ -54,6 +54,10 @@ router's weight without calling the router, and FSDP2's root post-backward callb
 gradient. A module that itself owns trainable parameters of two dtypes cannot be split, and the wrap
 raises. A layer whose trainable parameters share one dtype gets no extra group.
 
+On gpt-oss-20b at `ep_size: 1` (B300, measured at merge) the fp32 router runs 10,647 tok/s/GPU against 10,883
+with a bf16 router, at the same 104 GB peak; replicating the experts instead (`fsdp_shard_ep1_experts: false`)
+ran 8,770–9,060 at 153 GB.
+
 FSDP2 shards params, gradients, and optimizer states across the DP ranks, so per-rank optimizer-state
 memory is ~`dp_size` smaller than DDP's full per-rank replication. Setup lives in
 `src/distributed/fsdp.py`; `IdentityParamSet` backs `ignored_params` with `id()`-based
@@ -190,7 +194,7 @@ it is warned and ignored: accelerate's `no_sync` already skips the reduce on non
 At `ep_group_size==1` (`ep_size==1` AND `expert_tp_size==1`) the MoE experts are replicated and the
 DeepEP dispatch is a no-op. By default (`fsdp_shard_ep1_experts: true`) FSDP shards them, with its
 reduce-scatter as their sole gradient sync: grad-equivalent, and freeing memory that scales with DP.
-gpt-oss-20b on 8 GPUs at batch 1 drops from 148.3 to 60.3 GB peak (−59%) for −10.5% throughput, and
+gpt-oss-20b on 8 GPUs at batch 1 drops from 148.3 to 60.3 GiB peak (−59%) for −10.5% throughput, and
 −3.5% at batch 4, where the expert all-gather overlaps better
 ([Throughput Benchmarks](../optimization/throughput-benchmarks.md#ep-only-batch-scaling)).
 

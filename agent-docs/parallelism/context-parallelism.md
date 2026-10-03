@@ -13,9 +13,10 @@ already cut this rank's head count that Ulysses redistributes over.
 ## How Ulysses works
 
 Naive sequence chunking breaks cross-chunk attention. Ulysses instead redistributes tensors around
-the attention kernel: each GPU holds `S/cp_size` tokens but all heads, an all-to-all swaps that to
-the full `S` tokens but `H/cp_size` heads for the attention compute, and a second all-to-all swaps
-back. Multi-head attention is independent across heads, which is what makes this exact.
+the attention kernel: each GPU holds `S/cp_size` tokens but all heads, all-to-alls swap that to
+the full `S` tokens but `H/cp_size` heads for the attention compute (one for Q, one for the fused K
+and V), and a third swaps the output back. The backward runs the same three in reverse.
+Multi-head attention is independent across heads, which is what makes this exact.
 
 ![Ulysses attention: RoPE runs on the local chunk, an all-to-all scatters heads and gathers the sequence so each rank attends over the full sequence with 16 of 64 heads, and a second all-to-all restores the per-rank chunk layout](../assets/diagrams/ulysses_attention_flow.png)
 

@@ -12,9 +12,9 @@ NVLink: [GPU Training Theory §9](../reference/gpu-training-theory.md#collective
 > `embed_tokens`/`lm_head` stay replicated deliberately. On a fine-grained MoE those are nearly all
 > the parameters, so raising `tp_size` costs collectives and saves little — and every TP rank still
 > holds the full expert set, so a full fine-tune of a 35B-A3B under `tp_size=2` needs ≈280 GB per rank
-> (weights + AdamW-bf16 states + grads), over one B300; that shape runs under EP. The useful MoE shapes
-> are **EP**, **EP+ETP** (expert memory), and **EP+TP** (only when attention itself is the
-> bottleneck).
+> (weights + AdamW-bf16 states + grads) before activations, past a B300's ≈260 GB practical ceiling; that
+> shape runs under EP. The useful MoE shapes are **EP**, **EP+ETP** (expert memory), and **EP+TP**
+> (only when attention itself is the bottleneck).
 
 Two sharding mechanisms are in play — HF-native TP (`tp_plan="auto"`, dense models) and the
 toolkit's selective attention TP — and both place their sharded params as **DTensors** on the TP

@@ -166,7 +166,7 @@ base NGC image need updating.
 
 | Variable | Value | Effect |
 |----------|-------|--------|
-| `CUDA_DEVICE_MAX_CONNECTIONS` | `1` | Latched by the driver at `cuInit` (DeepEP import time), so it must be in the environment from PID 1. Free default ([measured effect](deepep.md#environment-variables)); it does **not** make racy single-domain multi-group EP safe — `ParallelismConfig` rejects that shape. Override `-e CUDA_DEVICE_MAX_CONNECTIONS=8` for pure-dense FSDP all-gather/compute overlap. |
+| `CUDA_DEVICE_MAX_CONNECTIONS` | `1` | Latched by the driver at `cuInit` (DeepEP import time), so it must be in the environment from PID 1. Free default ([measured effect](deepep.md#environment-variables)); it does **not** make racy single-domain multi-group EP safe — `ParallelismConfig` rejects that shape. Neutral on dense runs, so keep it there too. |
 | `TORCH_ALLOW_TF32_CUBLAS_OVERRIDE` | `0` | The NGC base defaults fp32 matmuls to TF32, whose 10-bit mantissa collapses adjacent long-context RoPE positions past 2048. Forced off. |
 | `FLASH_ATTENTION_CUTE_DSL_CACHE_ENABLED` | `1` | Persist the FA4 CuTe DSL kernel cache (~10 s JIT per kernel on first use). |
 | `CUTE_DSL_ENABLE_TVM_FFI` | `1` | TVM-FFI direct-invocation ABI for CuTe DSL kernels. |

@@ -234,7 +234,9 @@ What an EP run has to plan around:
       per forward** for GPT-OSS.
     - Cross-node (Gin) dispatch caps at `HALO_DEEPEP_GIN_MAX_TOKENS_PER_RANK` (default **8192**, `0`
       disables), above which an EFA proxy-GIN dispatch **wedges instead of erroring**. Intra-node
-      NVLink dispatch is validated to 65536 tokens per rank.
+      NVLink dispatch has no cap of its own, but the default `elastic` backend deadlocks ep8 at ≥~64k
+      tokens per rank; gpt-oss-20b ep8 trains at 65,536 on `ep_buffer_backend: legacy` and at 49,152 on
+      either ([DeepEP → Transport backend](../infrastructure/deepep.md#transport-backend)).
 
     The Gin cap is the binding limit on `per_device_train_batch_size` × sequence length for any
     `ep_scope=global` run spanning more than one NVLink domain
@@ -571,7 +573,7 @@ topology rejections sit on top: single-domain multi-group EP with `ep_size > 2`
 | `DeepEP NVLink barrier timeout` then `cudaErrorLaunchFailure` abort, under GC | `use_reentrant=False` reached the EP path. The trainer forces `True` — this only appears if `enable_ep_gradient_checkpointing` was called directly. Do not pin `false` |
 | OOM | Enable GC; raise EP size (each doubling roughly halves per-GPU expert memory) |
 
-gpt-oss-20b peak per GPU on 8×B300 at seq 4096, batch 1: `ep8` 25.3 GB, `ep2` 77.3 GB (it grows with
+gpt-oss-20b peak per GPU on 8×B300 at seq 4096, batch 1: `ep8` 25.3 GiB, `ep2` 77.3 GiB (it grows with
 sequence length and batch). `ep4` is not a legal shape on 8 GPUs
 ([above](#single-domain-multi-group-ep-races-and-hangs)).
 

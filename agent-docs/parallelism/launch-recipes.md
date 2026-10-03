@@ -125,7 +125,7 @@ The two modes, save-rank memory, and every `save_sharded_ep` rejection live on [
 
 The toolkit coordinates file operations (model downloads, dataset loading, directory creation, checkpoint saves) based on whether nodes share a filesystem. Set `DIST_SHARED_FILESYSTEM=1` (default) for shared storage (NFS, Lustre, GPFS) or `0` for per-node local storage; the read and write sides can be split with `DIST_INPUT_SHARED_FILESYSTEM` / `DIST_OUTPUT_SHARED_FILESYSTEM` (e.g. per-node input caches with shared-mount checkpoints on a slow NFS export). Full details: [Filesystem Handling](../data/filesystem-handling.md).
 
-Full-checkpoint sizes scale ~2 bytes/param (bf16): 7B MoE ≈ 14 GB, 20B ≈ 40 GB, 70B ≈ 140 GB; per-rank sharded is roughly `full / ep_size`.
+Weights take ~2 bytes/param in bf16 (7B MoE ≈ 14 GB, 20B ≈ 40 GB, 70B ≈ 140 GB), the size of a `save_model` export; per-rank sharded is roughly `full / ep_size`. A training checkpoint keeps fp32 masters (`fp32_router`, `fp32_experts`, `fp32_non_ep_params`) at 4 bytes per element and adds the optimizer state (4 bytes/param for AdamWBF16) unless `save_only_model: true`.
 
 ## Sharded data loading
 

@@ -99,7 +99,7 @@ Parameter counts derived from those fields (fused expert layout
 `shared_expert_gate`; the whole layer lands in FSDP2's ignored set (`_fsdp_exclusions`), TP
 never visits it (`apply_tp_to_attention_only`), and EP does not shard it — `replicated_named_params`
 grad-syncs it by hand. So **0.88 B stays as a full 8 B/param copy on every rank ≈ 7 GB that no axis
-shrinks.**
+shrinks.** Under `fp32_router` its 0.13 B of router weights are fp32 at 16 B/param, +1 GB.
 
 ## Per-rank memory model
 
@@ -116,7 +116,7 @@ post-backward sweep ([Multi-Node](multi-node.md#deferred-cross-replica-sync)).
 | Term | Bytes per rank | 397B value |
 |---|---|---|
 | Routed experts | `8·P_e/X` | 193 / 97 / 48 GB at `X` = 16 / 32 / 64 |
-| Replicated router + shared expert | `8·P_r` | **7 GB, always** |
+| Replicated router + shared expert | `8·P_r`, plus `8·P_router` under `fp32_router` | **7 GB, always** (8 GB with `fp32_router`) |
 | FSDP non-expert, ZeRO-2 (default) | `2·P_f + 8·P_f/F` | 19 GB resident + 5 / 2 / 1 GB at `F` = 16 / 32 / 64 |
 | Activations, GC on | `(2·L·H + 6·k·I_moe)·b·S` | **4.5 GB** at `b1 s8192`, **18.1 GB** at `b1 s32768` |
 | Load-time peak (separate) | `2·(P_ne + P_e/ep_size)` | see the `Load` column |
@@ -190,10 +190,10 @@ NVLink.
 | **2** (16) | **`ep16` global** | 16 | 16 | 193 | 31 | **228** | 242 | 69 | ⚠ fits, zero headroom |
 | 2 | `ep16` global + `tp8` | 16 | 2 | 193 | 55 | **253** | 266 | 69 | ✗ TP collapses `F` to 2 |
 | 2 | `ep2` + `etp8` global | 16 | 2 | 193 | 31 | 228 | 242 | **407** | ✗ load peak |
-| 2 | `ep8` node · `ep4` node · `ep2` node | ≤8 | 16 | 386 | 31 | **>420** | — | 117–407 | ✗ experts alone exceed HBM |
+| 2 | `ep8` node · `ep4` node · `ep2` node | ≤8 | 16 | 386 | 35–63 | **>420** | — | 117–407 | ✗ experts alone exceed HBM |
 | **3** (24) | `ep3/6/12/24` global | 3–24 | 24 | — | — | — | — | — | ✗ `512 % ep_size ≠ 0` at load ([The 3-node case](#the-3-node-case)) |
-| 3 | `ep2/4/8` node | ≤8 | 24 | 386 | 31 | **>420** | — | 117–407 | ✗ experts alone exceed HBM |
-| 3 | `ep3` + `etp8` global | 24 | 3 | 129 | 24 | 158 | 171 | **278** | ✗ `512 % 3 ≠ 0`, and the `ep_size`-governed load peak would not fit either |
+| 3 | `ep2/4/8` node | ≤8 | 24 | 386 | 35–63 | **>420** | — | 117–407 | ✗ experts alone exceed HBM |
+| 3 | `ep3` + `etp8` global | 24 | 3 | 129 | 29 | 162 | 176 | **278** | ✗ `512 % 3 ≠ 0`, and the `ep_size`-governed load peak would not fit either |
 | 3 | `ep2/4/8/16` global | — | — | — | — | — | — | — | ✗ rejected at config (`_validate_ep_group`) |
 | **4** (32) | **`ep32` global** | 32 | 32 | 97 | 28 | **129** | 143 | 45 | ✓ |
 | 4 | `ep4` + `etp8` global | 32 | 4 | 97 | 28 | 129 | 143 | **214** | ⚠ load peak, experimental axis |
@@ -221,7 +221,8 @@ from 8 to 2 bytes/param. That is arithmetic, not a validated cell.
 buffer sizing; above it a proxy-GIN dispatch wedges in transit instead of erroring.
 
 So every `ep_scope=global` row is capped at 8192 tokens/rank whatever its memory column says. The
-`node`-scope rows are unaffected: intra-node dispatch is validated to 65k tokens/rank.
+`node`-scope rows have no such cap, though intra-node ep8 at ≥~64k tokens/rank needs `ep_buffer_backend: legacy`
+([DeepEP → Transport backend](../infrastructure/deepep.md#transport-backend)).
 
 **TP is a net loss on this model.** `apply_tp_to_attention_only` shards only q/k/v/o of the 15
 full-attention layers: 1.57 B of 10.25 B. It leaves the 45 gated-DeltaNet layers untouched, and
@@ -364,7 +365,7 @@ Values that differ from it or are load-bearing at 397B:
 | `text_only_model` | `true` | loads `Qwen3_5MoeForCausalLM`, whose forward declares `output_router_logits` — what `aux_loss` needs. The 122B base keeps the multimodal class, where an explicit `aux_loss` raises; the export drops the vision tower ([Qwen3.5 → EP wrapper](../models/qwen3_5.md#ep-wrapper)) |
 | `moe_balancing` | `aux_loss` | trains and exports by construction under `text_only_model: true`. Strict `bias_update` raises: Qwen3.5 has no checkpoint slot for a routing bias ([Callbacks](../training-methods/callbacks.md#moe-balancing-modes)) |
 | `router_balancing_rate` | well below `1e-3`, only under `bias_update_transient` (the multimodal-class alternative) | inert under `aux_loss`. The sign step lands on softmax probabilities, whose uniform scale is `1/512` here — the default γ is ~50% of it |
-| `fp32_router` | `true` | cheap, and 512 experts at top-10 is where bf16 routing logits start to tie |
+| `fp32_router` | `true` | +1 GB per rank (the 0.13 B router weights at 16 B/param, not in the matrix columns), and 512 experts at top-10 is where bf16 routing logits start to tie |
 | `fp32_grad_reduce` | `true` | bf16 sums lose precision at 16–64 ranks; no storage cost |
 | `use_grouped_gemm` / `use_liger_kernel` / `fp32_output_conversion` | `true` / `true` / `false` (all defaults) | the fused `[512, 2048, 4096]` layout is what `grouped_mm` wants on SM100; the disabled upcast keeps an fp32 copy of the logits off the card |
 | `liger_kernel_config.fused_linear_cross_entropy` | `true` | opt-in: this family defaults to Liger's plain cross-entropy. The fused loss never materializes `[b, S, 248320]` — 4 GB per copy at `S=8192` |
@@ -389,7 +390,7 @@ a measurement.
 |---|---:|---|---:|---:|---|
 | **GLM-5.3-Flash** (321B; 42 MoE layers × 288 × `M=2048, H=4096`) | 304 B | 2 × 8, `ep16 --ep_scope=global` | 19.0 B → 152 GB | ~200 GB (+33 GB gathered non-expert bf16, +13 GB fp32 non-EP masters/state) | the 8192 tokens/rank cross-node dispatch ceiling; `ep8` on one node is 304 GB of experts alone. Needs the bf16 conversion (~650 GB) |
 | GLM-5.3-Flash on EFA | 304 B | 2 × 8, `ep2 --expert_tensor_parallel_size=8 --ep_scope=global` | same `X=16` | same | one cross-node dispatch partner per rank instead of 8 (one ETP group per domain, [EP+ETP](expert-tensor-parallelism.md#process-groups-epetp-combo)); experimental axis |
-| **Step-3.7-Flash** (198B; 42 MoE layers × 288 × `M=1280, H=4096`) | 190 B | 1 × 8, `ep8` | 23.8 B → 190 GB | ~213 GB (+15 GB gathered non-expert, +6 GB shards) | ~60 GB left for activations at `max_length: 8192` with checkpointing — marginal, unmeasured |
+| **Step-3.7-Flash** (198B; 42 MoE layers × 288 × `M=1280, H=4096`) | 190 B | 1 × 8, `ep8` | 23.8 B → 190 GB | ~213 GB (+15 GB gathered non-expert, +6 GB shards) | ~47 GB left for activations under the ≈260 GB ceiling at `max_length: 8192` with checkpointing — marginal, unmeasured |
 | Step-3.7-Flash | 190 B | 2 × 8, `ep16 --ep_scope=global` | 11.9 B → 95 GB | ~115 GB | the 8192 tokens/rank dispatch ceiling |
 | **DeepSeek-V4-Flash** (284B; 43 MoE layers × 256 × `M=2048, H=4096`, 3 of them hash-routed) | 277 B | 2 × 8, `ep16 --ep_scope=global` | 17.3 B → 138 GB | ~155 GB | the 8192 tokens/rank dispatch ceiling. Needs the bf16 conversion (~580 GB output) |
 
