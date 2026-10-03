@@ -6,7 +6,6 @@ reductions, the cross-rank tensor-identity probe and teardown.
 """
 
 import contextlib
-import functools
 import math
 import os
 import shutil
@@ -20,8 +19,8 @@ from torch.distributed.device_mesh import init_device_mesh
 from torch.testing._internal.distributed.fake_pg import FakeStore as TorchFakeStore
 from transformers import AutoConfig, AutoTokenizer
 
+from src.distributed.expert_parallel import dispatcher as ep_dispatcher
 from src.distributed.expert_parallel.dispatcher import destroy_all_dispatchers
-from src.distributed.expert_parallel.extension import deep_ep
 from src.distributed.runtime import barrier, broadcast_from_rank0
 from src.models.patches.attention import ensure_fa4_kernel_cache_env
 from tests.common.scratch import SCRATCH_DIR_TAG
@@ -134,10 +133,11 @@ def pin_deterministic_ep_dispatch() -> None:
 
     The default dispatch hands out receive slots with atomics, so the order an expert's tokens arrive
     in changes from run to run, and with it the rounding of every expert weight gradient summed over
-    them. A test that replays a run exactly (a resume against the uninterrupted run) pins this first.
+    them. The dispatcher builds deterministic buffers under torch's deterministic algorithms
+    (``full_determinism``); a test that replays a run exactly (a resume against the uninterrupted run)
+    without that mode answers the dispatcher's question for it here.
     """
-    buffer_cls = deep_ep().ElasticBuffer
-    buffer_cls.__init__ = functools.partialmethod(buffer_cls.__init__, deterministic=True)
+    ep_dispatcher._resolve_deterministic_dispatch = lambda: True
 
 
 def setup_cache_dirs(prefix: str, rank: int) -> tuple[str, str]:

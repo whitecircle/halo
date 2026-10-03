@@ -118,7 +118,7 @@ def _stub_capacity_all_reduce(module, monkeypatch) -> list:
 
 def _size_capacity(backend, num_tokens: int = 8, num_topk: int = 1) -> None:
     with pytest.raises(ValueError, match="wire-index limit"):
-        backend.ensure(num_tokens, num_topk)
+        backend.ensure(num_tokens, num_topk, deterministic=False)
 
 
 def test_forward_bumps_generation_exactly_once_per_forward():
@@ -245,7 +245,7 @@ def test_a_later_layer_reuses_the_first_layers_capacity(monkeypatch):
     assert len(calls) == 1, "a later layer of the same forward must reuse it, not re-reduce"
 
     with pytest.raises(RuntimeError, match="EP capacity dedup"):
-        backend.ensure(capacity + 1, 1)  # more tokens than the shared arena holds
+        backend.ensure(capacity + 1, 1, deterministic=False)  # more tokens than the shared arena holds
 
 
 def test_disabled_dedup_writes_nothing_to_the_cache(monkeypatch):

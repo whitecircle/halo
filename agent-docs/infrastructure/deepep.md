@@ -226,6 +226,10 @@ The dispatcher re-applies the same rules at backend selection for a hand-built `
 `gpus_per_node` bound is what refuses a node-local group spanning OS nodes (an NVL72 `ep8` over 4-GPU
 trays), since the V1 buffer is built with `num_rdma_bytes=0`.
 
+**Deterministic dispatch.** Under `full_determinism` the `elastic` buffer is built with
+`deterministic=True`; a cross-domain group (hybrid kernels, no deterministic mode) is refused.
+[Expert Parallelism → Determinism](../parallelism/expert-parallelism.md#determinism).
+
 ## SM control
 
 `ElasticBuffer` computes the optimal SM count analytically from the MoE shape via

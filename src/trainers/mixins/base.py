@@ -326,8 +326,10 @@ class DistributedTrainerMixin(
         self._accelerate_manages_ddp = self._should_accelerate_manage_ddp()
 
         self._validate_parallelism_modes()
+        full_determinism = getattr(training_args, "full_determinism", False)
         # Here, before HF's Trainer.__init__ turns on the deterministic mode the warmed graphs were compiled without.
-        reject_full_determinism_after_warmup(getattr(training_args, "full_determinism", False))
+        reject_full_determinism_after_warmup(full_determinism)
+        parallelism_config.validate_determinism(full_determinism)
         kwargs = self._maybe_prepare_pipeline_model(kwargs, training_args, ctor_args)
 
         # Force use_reentrant before super().__init__ enables GC. Not under PP, which requires non-reentrant.

@@ -160,6 +160,13 @@ _PRECOMPUTE_FAMILY_ROWS = tuple(
     for family in _PRECOMPUTE_SWEEP_FAMILIES
     for trainer, mode in (("dpo", ""), ("dpo", " --mode ep1"), ("kto", ""))
 )
+# GPT-OSS on every two-rank layout of the full_determinism backward replay, Qwen3-MoE on ep2; the sweep
+# runs ep2 on every other family.
+_DETERMINISM_CORE_ROWS = (
+    *(f"--family gpt_oss --mode {mode}" for mode in ("ep2", "ep2_top1", "ep2_loop", "ep2_legacy", "ep1", "etp2")),
+    "--family qwen3_moe --mode ep2",
+)
+_DETERMINISM_SWEEP_FAMILIES = tuple(family for family in _TINY_MOE_FAMILIES if family not in ("gpt_oss", "qwen3_moe"))
 # Every syncable MoE family beyond the representative Qwen3-MoE; the roster test holds this to the
 # families some rollout engine takes an online update for.
 _SYNC_EXACTNESS_SWEEP_FAMILIES = (
@@ -382,6 +389,18 @@ MANIFEST: dict[str, TestSpec] = {
     ),
     "parallelism/ep/test_routing_replay.py": TestSpec(
         nproc=2, markers=("gpu", "core", "2gpu", "ep", "moe", "gptoss"), timeout=900
+    ),
+    "parallelism/ep/test_ep_deterministic_expert_grads.py": TestSpec(
+        nproc=2,
+        markers=("gpu", "core", "2gpu", "ep", "etp", "moe", "gptoss", "qwen3"),
+        args_matrix=_DETERMINISM_CORE_ROWS,
+        timeout=600,
+    ),
+    "parallelism/ep/test_ep_deterministic_expert_grads_families.py": TestSpec(
+        nproc=2,
+        markers=("gpu", "full", "2gpu", "ep", "moe", *_family_markers(_DETERMINISM_SWEEP_FAMILIES)),
+        args_matrix=tuple(f"--family {family}" for family in _DETERMINISM_SWEEP_FAMILIES),
+        timeout=600,
     ),
     "parallelism/ep/test_ep_hook_divide_zero_token.py": TestSpec(
         nproc=2, markers=("gpu", "core", "2gpu", "ep", "moe", "qwen3"), timeout=900

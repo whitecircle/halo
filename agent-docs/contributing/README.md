@@ -206,13 +206,15 @@ manifest.
 
     It sets `CAUSAL_CONV1D_DETERMINISTIC=1` unless the caller exported a value: causal_conv1d's
     default backward sums the conv weight gradient with atomics, so the gated-DeltaNet families miss
-    an exact resume replay now and then. An EP body that replays a run exactly calls
-    `pin_deterministic_ep_dispatch` (`tests/common/distributed.py`) itself: DeepEP's default dispatch
-    claims receive slots with atomics, so the order an expert's tokens arrive in, and with it the
-    rounding of every expert weight gradient, changes from run to run. A forward-only comparison needs
-    no pin at `top_k >= ep_size`: each expert row is computed independently of that order and the
-    combine sums a token's partials in top-k slot order, so it holds the bound a non-EP run does.
-    Below that gate the un-permute's bf16 atomic `index_add_` can vary the forward too, pinned or not.
+    an exact resume replay now and then. An EP body that replays a run exactly without
+    `full_determinism` calls `pin_deterministic_ep_dispatch` (`tests/common/distributed.py`) itself:
+    DeepEP's default dispatch claims receive slots with atomics, so the order an expert's tokens arrive
+    in, and with it the rounding of every expert weight gradient, changes from run to run (under
+    `full_determinism` the dispatcher builds the deterministic buffer on its own). A forward-only
+    comparison needs no pin at `top_k >= ep_size`: each expert row is computed independently of that
+    order and the combine sums a token's partials in top-k slot order, so it holds the bound a non-EP
+    run does. Below that gate the un-permute's bf16 atomic `index_add_` can vary the forward too,
+    pinned or not.
 - **Build checks from the shared helpers** rather than re-deriving them per file:
   `training_run_checks` (`tests/common/utils.py`, the finished-run verdicts), `parallel_shape_checks`
   (`parallel_shape.py`, each enabled axis read off the model, not the config echo), `run_sft_suite`

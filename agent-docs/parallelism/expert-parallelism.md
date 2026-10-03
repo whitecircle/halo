@@ -300,6 +300,41 @@ norms batch-`all_reduce(SUM)`ed via `._local_tensor` → expert norms `all_reduc
 expert-TP group, then the **dispatch** group, then across replica groups divided by `num_ep_groups`
 → `sqrt(expert² + non_expert² + tp_shard²)`.
 
+## Determinism
+
+Under `full_determinism: true` an EP run repeats bit for bit, expert weight gradients included, as
+long as each EP group sits inside one NVLink domain.
+
+DeepEP's default dispatch claims each receive slot with an atomic, so the order an expert's tokens
+arrive in changes from step to step, and with it the summation order of the expert weight gradient
+(grouped GEMM and per-expert loop alike). Attention, router, norm and embedding gradients stay
+bit-identical while every expert weight drifts in its last bits, and two runs diverge within a few
+steps. Under torch's deterministic-algorithms mode, which HF's `Trainer` turns on for
+`full_determinism`, the dispatcher builds the `ElasticBuffer` with DeepEP's `deterministic=True`
+(`src/distributed/expert_parallel/dispatcher.py`): a prologue kernel places each received token by
+source rank and token index. The `legacy` V1 buffer places tokens by prefix sums already and needs
+nothing. The rest of the EP path is deterministic as is: grouped GEMM, the fused GLU, the atomic-free
+permute, the combine, and `ep_size == 1`, which has no dispatch. At `top_k < ep_size` the permute's
+`index_add_` is deterministic only because torch's mode swaps in its deterministic kernel.
+
+DeepEP asserts at every dispatch and combine that deterministic mode does not run beside
+`torch.utils.deterministic.fill_uninitialized_memory`, which that mode turns on by default. The
+dispatcher switches the fill off (one warning per process), so `full_determinism` runs on EP at all.
+
+Cost on gpt-oss-20b ep2 at 4,096 tokens per rank (2×B300, 30 steps): the deterministic dispatch alone
+costs about 2% of throughput (14.9k vs 15.1k tokens/s/GPU), and the whole `full_determinism` mode about
+11% (13.4k), most of it torch's deterministic kernels. Runs without the mode keep the default dispatch.
+
+**Not supported across NVLink domains.** DeepEP's cross-domain (hybrid RDMA) dispatch has no
+deterministic mode. Every trainer refuses `full_determinism` at construction on an EP group spanning
+domains (`ParallelismConfig.validate_determinism`). Keep EP node-local (`ep_scope: node`) with DP across
+domains; on a multi-node NVLink fabric set `NVLINK_DOMAIN_SIZE` to the fabric's size.
+
+`tests/gpu/parallelism/ep/test_ep_deterministic_expert_grads.py` replays a backward under
+`full_determinism` and requires the loss and every gradient bit-identical: GPT-OSS on every two-rank
+layout (ep2 with fused and `index_add_` permutes, the loop, the `legacy` buffer, ep1, pure ETP),
+Qwen3-MoE on ep2, and every other family on ep2 in `..._families.py`.
+
 ## Gradient-checkpoint dispatch replay
 
 A checkpointed layer runs its body twice, and the second run must NOT touch DeepEP: a fresh dispatch
@@ -518,6 +553,7 @@ topology rejections sit on top: single-domain multi-group EP with `ep_size > 2`
 | `ep_lazy_loading` | honored on every EP path (EP, EP+CP, EP+TP, pure ETP). Falls back to `from_pretrained` + patch when the checkpoint layout is unreadable; that fallback is the only EP path `max_concurrent_loading` throttles | `model_loading.py`, `expert_parallel/loading.py` |
 | `use_liger_kernel` | supported. `swiglu`/`geglu` default off only for an **upstream** applier, whose expert-FFN swap the EP layers replace (an explicit `liger_kernel_config` request is honored but inert there). A toolkit spec patches the dense and shared-expert MLPs, which the wrappers adopt unchanged, so its fused GLU stays on. RMSNorm, RoPE and CE/FLCE are unaffected by EP | `kernels/liger/orchestrator.py` |
 | `moe_balancing` | `aux_loss` is inert on families whose EP wrapper severs the aux path (warned); `bias_update` raises where nothing carries the bias, and also where the family has no checkpoint slot to export it (Qwen3, Qwen3.5/3.6, Mistral4, Cohere2 MoE — `bias_update_transient` is the trainer-only opt-in there, and its bias reaches no export); both bias modes are downgraded to `none` under on-policy weight-sync RL | `expert_parallel/balancing_strategy.py` |
+| `full_determinism` | supported within one NVLink domain ([Determinism](#determinism)); rejected for an EP group spanning domains | `parallelism_config.py` |
 | `ddp_find_unused_parameters` | must be `True`; the entry scripts set it — do not rely on setting it yourself | — |
 | `packing`, `padding_free`, `torch_compile`, `lowp_precision`, `dataset_num_proc` | not gated under EP | — |
 

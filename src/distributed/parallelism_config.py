@@ -1119,6 +1119,24 @@ class ParallelismConfig:
                 f"{exc}"
             ) from exc
 
+    def validate_determinism(self, full_determinism: bool) -> None:
+        """Reject ``full_determinism`` on an EP group spanning NVLink domains.
+
+        The dispatcher builds DeepEP's deterministic buffer under the mode ``full_determinism`` turns on,
+        but across domains DeepEP runs its hybrid RDMA kernels, which have no deterministic mode (they
+        assert on it at the first dispatch).
+        """
+        if full_determinism and self.requires_rdma:
+            raise ValueError(
+                f"full_determinism cannot run over an EP group spanning NVLink domains (ep_scope=global "
+                f"over {self.num_nvlink_domains} domains of {self.nvlink_domain_size} GPUs): DeepEP's "
+                f"cross-domain (hybrid RDMA) dispatch has no deterministic mode and places received tokens "
+                f"in atomic claim order, so every expert weight gradient is summed in a different order on "
+                f"every step. Keep each EP group inside one NVLink domain (ep_scope=node with data "
+                f"parallelism across domains; on a multi-node NVLink fabric, NVLINK_DOMAIN_SIZE set to the "
+                f"fabric's size), or drop full_determinism."
+            )
+
     @property
     def num_ep_groups(self) -> int:
         """Number of EP groups, computed per scope from the same layout ``EPConfig`` builds its groups
