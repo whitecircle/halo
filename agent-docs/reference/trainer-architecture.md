@@ -22,7 +22,7 @@ Each is a class because it reads live trainer state; the methods a test or a cal
 `super()` calls (`_save_checkpoint`, `save_model`, the two loads) must reach the base Trainer —
 `tests/cpu/trainers/test_mixin_composition.py` fails if a sibling base ever intercepts one.
 
-Four modules in the same package sit outside that composition. `StoredMetricsMixin`
+Additional modules in the same package sit outside that composition. `StoredMetricsMixin`
 (`src/trainers/mixins/stored_metrics.py`) is mixed in *directly* by SMPO, teacher and self
 distillation, and SDPG for buffered per-step metric logging. Under PP the store would be fed from
 the last stage ([Pipeline Parallelism](../parallelism/pipeline-parallelism.md), not yet available in
@@ -38,8 +38,15 @@ on-policy trainers decouple the completions table from the metric drain.
 per-mode setup, and the EP one derives the FSDP ignored-module set in a single module-tree walk it
 hands to `_apply_ep_aware_dp_fsdp2`.
 
-The other three are imported as plain functions — `grad_clip.py` (`clip_coefficient` and
-`scale_shards_to_max_norm_`, the shared clip coefficient, below), `loss_masks.py::effective_loss_mask` (`completion_mask ∧ tool_mask`
+`ReferenceLogpsCheckpointMixin` supplies DPO/KTO precompute with reference identity checks,
+resume attachment and atomic sidecar persistence. The preference mixin owns the score columns,
+the DP sweep and the log-prob precision each split records ([Checkpoints](checkpoints.md#what-gets-saved),
+[DPO](../training-methods/preference/dpo.md#resuming-a-precompute-run)). It precedes `DistributedTrainerMixin`
+in the trainer's bases so the checkpointing default cannot shadow its sidecar hook.
+
+Three modules are imported as plain functions — `grad_clip.py` (`clip_coefficient` and
+`scale_shards_to_max_norm_`, the shared clip coefficient, below),
+`loss_masks.py::effective_loss_mask` (`completion_mask ∧ tool_mask`
 where a `tool_mask` exists, else `completion_mask`), and `pp_gates.py` (the shared PP rejection
 vocabulary, below).
 
@@ -453,10 +460,10 @@ Around it the mixin keeps the non-weight parts of a checkpoint: `_save_checkpoin
 `_restore_router_balancing_biases` for the `router_balancing_biases.pt` sidecar.
 `_persist_trainer_sidecars` is a trainer's own hook, called on every rank before rotation, and
 `_restore_trainer_sidecars` its read-back, called on every rank of a resume (never a best-model
-load). The DPO/KTO precompute mixin overrides the write for `reference_logps.pt`, which it reads back
-before TRL's `__init__` instead; the async GRPO rollout mixin overrides both for its pending prefetch
-rounds. Each trainer lists the overriding mixin ahead of `DistributedTrainerMixin` in its bases, so
-the empty defaults do not shadow it.
+load). The shared reference mixin overrides the write for DPO/KTO precompute's `reference_logps.pt`,
+which it reads back during TRL's `__init__` instead; the async GRPO rollout mixin overrides both for
+its pending prefetch rounds. Each trainer lists the overriding mixin ahead of
+`DistributedTrainerMixin` in its bases, so the empty defaults do not shadow it.
 
 `load_best_model_at_end` is refused at construction for every shape whose end-of-run reload is
 guaranteed to be refused: `cp_size > 1`, a MoE carrying EP or grouped-GEMM wrappers (`ep_size: 1`

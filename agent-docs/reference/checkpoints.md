@@ -147,8 +147,18 @@ bf16 ([Saving by parallelism mode](#saving-by-parallelism-mode)). fp32 masters (
 checkpoint: `fp32_experts` doubles an MoE checkpoint's expert bytes and `fp32_non_ep_params` its
 non-expert bytes, while the routers alone are negligible. An adapter restore reads them back exactly. A
 full fine-tune built from the checkpoint at construction (Path B, [Resuming training](#resuming-training))
-still loads at the run dtype before the trainer's fp32 upcast, so its fp32 masters resume rounded to
-bf16.
+still loads at the resolved run dtype before the trainer's fp32 upcast, so its fp32 masters may
+resume rounded to that dtype (bf16 by default).
+
+`ReferenceLogpsCheckpointMixin` persists DPO/KTO precompute scores on the filesystem-aware
+save rank. The save completes only after its file and parent directory are synced. Unchanged
+checkpoints hardlink the immutable file, falling back to a copy where links are unavailable;
+adding a scored split writes a new payload. Write failures rendezvous across ranks before
+checkpoint rotation can remove the previous complete checkpoint.
+
+Staging and durable publication live in `src/checkpoint/atomic.py`. Fresh files use `0o666` under
+the process umask, matching ordinary checkpoint-file permissions. Export copies omit staging files
+left by interrupted reference or model-card writes.
 
 The exported `config.json` is serialized with run-scoped router mutations restored
 (`config_export_ready`): the balancing strategy's zeroed `router_aux_loss_coef`, forced
