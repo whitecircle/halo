@@ -78,9 +78,9 @@ AdamWBF16 auto-detects dtype per param: bf16 params take the fused Triton SR pat
 
 | master-weight regime | tok/s/GPU | peak mem | notes |
 |----------------------|:---------:|:--------:|-------|
-| **full bf16** (AdamWBF16, default) | 20,554 | 85.2 GB | 6 B/param; production path |
-| `fp32_non_ep_params` | 19,993 | 86.6 GB | non-EP params fp32, experts bf16; +1.3 GB only (experts dominate, stay bf16) |
-| `fp32_non_ep_params` + `fp32_grad_reduce` | 18,741 | 86.5 GB | fp32 grad reduction on top of the row above (−6%: 2× bandwidth on the grad all-reduce) |
+| **full bf16** (AdamWBF16, default) | 20,554 | 85.2 GiB | 6 B/param; production path |
+| `fp32_non_ep_params` | 19,993 | 86.6 GiB | non-EP params fp32, experts bf16; +1.3 GiB only (experts dominate, stay bf16) |
+| `fp32_non_ep_params` + `fp32_grad_reduce` | 18,741 | 86.5 GiB | fp32 grad reduction on top of the row above (−6%: 2× bandwidth on the grad all-reduce) |
 | **stock AdamW** (`bf16_optimizer=False`) | — | — | **rejected at `ep_group_size > 1`, and at `ep_group_size == 1` with `fsdp_shard_ep1_experts: false`** — fused AdamW cannot mix the plain-tensor expert FFN (EP rank-local experts, or the grouped-GEMM `gate_proj_gmm`/`up_proj_gmm` split at ep1) with FSDP2 DTensors (`aten._fused_adamw_ got mixed torch.Tensor and DTensor`); raised when the optimizer is built (still before the first step) |
 
 `bf16_optimizer=False` builds on dense models and on `ep_group_size == 1` MoE with the default FSDP-sharded experts. The `fp32_non_ep_params` delta is small for gpt-oss because its non-expert params are a minor fraction; high-vocab or attention-heavy models cost more.

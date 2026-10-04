@@ -390,7 +390,7 @@ Cost has two regimes. The crossover message size is roughly `link_bandwidth × p
 
 Comm does no FLOPs. The defenses are amortize (bigger M per step), shrink the degree (fewer ranks make a cheaper collective), and overlap (own stream, hidden behind compute).
 
-Gradient accumulation runs several micro-batches per optimizer step, so it buys a larger global batch than fits. By default FSDP2 still reduce-scatters after every micro-batch, so it adds compute and communication in proportion and is not a throughput lever. With `fsdp_defer_grad_sync: true` the gradients are summed locally and reduced once per window, which makes it one: +3% on one 8-GPU node and +9–13% across two nodes over EFA on Qwen3-8B, +11.7% on an `ep_size: 1` MoE ([Data Parallelism](../parallelism/data-parallelism.md#deferred-gradient-reduce-fsdp_defer_grad_sync)).
+Gradient accumulation runs several micro-batches per optimizer step, so it buys a larger global batch than fits. By default FSDP2 still reduce-scatters after every micro-batch, so it adds compute and communication in proportion and is not a throughput lever. With `fsdp_defer_grad_sync: true` the gradients are summed locally and reduced once per window, which makes it one: +5% on one 8-GPU node and +9–13% across two nodes over EFA on Qwen3-8B, +12% on an `ep_size: 1` MoE ([Data Parallelism](../parallelism/data-parallelism.md#deferred-gradient-reduce-fsdp_defer_grad_sync)).
 
 ### Each parallelism mode is a communication pattern
 

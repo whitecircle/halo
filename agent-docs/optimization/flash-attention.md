@@ -60,7 +60,7 @@ FA2 + FA3.
 
 FA2 is an SM80-style kernel, untuned for Blackwell. FA4 is the Blackwell-native CuTe DSL kernel: **3.6–3.9× faster than FA2 on the isolated attention kernel** (microbench B2×S8192×H32×D128: fwd 2.71→0.70 ms, 3.9×; fwd+bwd 10.9→3.0 ms, 3.6×). Both match an fp32 SDPA reference to ~2e-3 (bf16 floor) across MHA/GQA and head_dim 64/128.
 
-The end-to-end step win is a function of attention's share of the step, which grows with sequence length (attention is O(seq²), the rest ~O(seq)). Qwen3-4B-Instruct-2507, batch 1, GC on, Liger on, tok/s/GPU on one B300 (every cell on the same device), mean of two runs, measured 2026-10-03 at commit 0bc3a22a5 on the Blackwell image. Runs repeat within 0.9%, except flex at 4,096 (7.9%):
+The end-to-end step win is a function of attention's share of the step, which grows with sequence length (attention is O(seq²), the rest ~O(seq)). Qwen3-4B-Instruct-2507, batch 1, GC on, Liger on, tok/s/GPU on one B300 (every cell on the same device), mean of two runs, measured 2026-10-03 at commit 0bc3a22a5 on the Blackwell image. Runs repeat within 1.1%, except flex at 4,096 (7.9%):
 
 | SeqLen | FA4 | FA2 | SDPA | flex | FA4/FA2 |
 |--------|-----|-----|------|------|---------|
@@ -68,7 +68,7 @@ The end-to-end step win is a function of attention's share of the step, which gr
 | 16,384 | 23,139 | 12,282 | 23,112 | 16,167 | 1.88× |
 | 32,768 | 17,504 | 7,497 | 17,047 | 10,607 | 2.33× |
 
-At 4k batch-1 the step is overhead-bound, so FA4 stays close to FA2 (1.19×); the gap opens with length and reaches 2.3× at 32k. SDPA (Blackwell-tuned cuDNN kernel) leads FA4 by 9% at 4k and is within 3% of it from 16k, so SDPA is a fine fallback for plain dense models. flex trails both at every length, though it beats FA2 from 16k.
+At 4k batch-1 the step is overhead-bound, so FA4 stays close to FA2 (1.19×); the gap opens with length and reaches 2.3× at 32k. SDPA (Blackwell-tuned cuDNN kernel) leads FA4 by 9% at 4k and is within 3% of it from 16k, so SDPA is a fine fallback for plain dense models. flex trails both at every length; it ties FA2 at 4k (within its own 7.9% run spread) and beats it from 16k.
 
 On sparse MoE the step is dominated by expert GEMM + DeepEP all-to-all, so the kernel speedup is only **+14%** end-to-end. gpt-oss-20b, EP=8, seq 16,384, batch 1, GC on, 8× B300 (2026-10-03, commit 0bc3a22a5, Blackwell image): FA4 9,981 vs FA2 8,737 tok/s/GPU (1.14×); the FA4 arm is the s16384 row of the ep8 sequence sweep in [Throughput Benchmarks](throughput-benchmarks.md). FA4 is the shipped default for GptOss SFT; SDPA also dispatches once sinks are reset but lacks FA4's native sink/sliding-window/softcap handling.
 

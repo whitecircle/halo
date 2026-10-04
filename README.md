@@ -280,7 +280,7 @@ Enabled by default where supported:
 
 - **Memory and PEFT** — padding-free, boundary-aware packing with `cu_seq_lens`, plus LoRA and QLoRA.
   QLoRA fits a 24 GB consumer GPU: the [Qwen3-4B QLoRA example](examples/sft/qwen3/qwen3-4b-ultrachat-qlora.yaml)
-  peaks at 7.9 GB (batch 1, 4k) and Qwen3-8B at 32k fits in 20.9 GB with the fused loss. Ampere and Ada
+  peaks at 7.9 GiB (batch 1, 4k) and Qwen3-8B at 32k fits in 20.9 GiB with the fused loss. Ampere and Ada
   cards run single-GPU LoRA/QLoRA from `halo:blackwell` (FA2/SDPA), but that path is not validated.
 
 - **Checkpoints** — large gathered checkpoints are automatically sharded, with tools for merging

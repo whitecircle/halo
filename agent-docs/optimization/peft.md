@@ -393,8 +393,8 @@ base, set `optim: adamw_8bit`.
 ### FusedLinearCrossEntropy for long sequences
 
 [Liger FLCE](liger-kernels.md) fuses `lm_head` with the loss instead of materializing the
-`batch × seq × vocab` logits. Qwen3-8B QLoRA r=32 all-linear at 32k (BS=1, GC, Liger, FA4) needs **43.5 GB
-with plain CE and 20.9 GB with FLCE**, so it fits a 24 GB consumer GPU only with FLCE. FLCE is SFT-only and
+`batch × seq × vocab` logits. Qwen3-8B QLoRA r=32 all-linear at 32k (BS=1, GC, Liger, FA4) needs **43.5 GiB
+with plain CE and 20.9 GiB with FLCE**, so it fits a 24 GB consumer GPU only with FLCE. FLCE is SFT-only and
 disables entropy logging.
 
 ## Checkpoint saving

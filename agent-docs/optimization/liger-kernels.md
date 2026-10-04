@@ -172,9 +172,9 @@ Two rules keep it off:
   (warned). That covers MoE at `ep_size: 1` with `use_grouped_gemm: false`, and a family with no EP layer
   class (Mixtral) under any configuration.
 
-The force-off costs about 9% end to end on Qwen3-30B-A3B at `ep_size: 1` with `use_grouped_gemm: false` (8× B300,
-tok/s/GPU): those experts run transformers' `grouped_mm`, 18% slower than `LigerExperts` at 8192 tokens and 128
-experts on one B300. The default grouped path is unaffected.
+Under the force-off those experts run transformers' `grouped_mm`: as an op it is 18% slower than `LigerExperts`
+at Qwen3-30B-A3B's expert shape (8192 tokens, 128 experts) on B300, and faster at small shapes. The default
+grouped path is unaffected.
 
 The force-off keys on the config having experts, not on what upstream's flag patches, and drops the flag
 whole: Llama 4's upstream `swiglu`, which fuses only its dense and shared-expert MLP, goes too, and GLM-4V MoE

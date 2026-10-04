@@ -100,7 +100,7 @@ already 16–32k, so FLCE is within noise (≤1%): it is a dense-path lever. Per
 
 ## Gradient checkpointing on vs off
 
-GC-off buys Halo **+11–31%** at up to ~2.2× peak memory (EP1 z2 16k·b1: 75.8 → 131.3 GiB). Stock TRL gains
+GC-off buys Halo **+11–31%** at up to 2.2× peak memory (EP8 z2 16k·b1: 48.1 → 103.7 GiB). Stock TRL gains
 only +5–6%, so Halo's lead widens GC-off.
 
 *8× B300 · 2026-10-03 · commit 0bc3a22a5 · Blackwell image. b1 · GC-off, tok/s/GPU (the GC-on

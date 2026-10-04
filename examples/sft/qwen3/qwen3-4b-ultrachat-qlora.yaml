@@ -1,4 +1,4 @@
-# SFT — Qwen3-4B QLoRA on UltraChat 200K (4-bit NF4 base + bf16 LoRA adapters; 7.9 GB peak at batch 1, fits a 24 GB GPU).
+# SFT — Qwen3-4B QLoRA on UltraChat 200K (4-bit NF4 base + bf16 LoRA adapters; 7.9 GiB peak at batch 1, fits a 24 GB GPU).
 # Launch: python scripts/training/sft.py <this config>
 #   or: accelerate launch --config_file launcher-configs/accelerate/fsdp2_gradop_config.yaml scripts/training/sft.py <this config>
 

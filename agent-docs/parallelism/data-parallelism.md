@@ -54,9 +54,9 @@ router's weight without calling the router, and FSDP2's root post-backward callb
 gradient. A module that itself owns trainable parameters of two dtypes cannot be split, and the wrap
 raises. A layer whose trainable parameters share one dtype gets no extra group.
 
-On gpt-oss-20b at `ep_size: 1` (B300, 34c102bba) the fp32 router runs 10,647 tok/s/GPU against 10,883 with a
-bf16 router, at the same 104 GB peak. In that run set, the fp32 router over replicated experts
-(`fsdp_shard_ep1_experts: false`, which keeps the router out of FSDP2) ran 8,770–9,060 at 153 GB.
+On gpt-oss-20b at `ep_size: 1` (2× B300, seq 4096, batch 1; 34c102bba) the fp32 router runs 10,647 tok/s/GPU
+against 10,883 with a bf16 router, at the same 104 GiB peak. In that run set, the fp32 router over replicated
+experts (`fsdp_shard_ep1_experts: false`, which keeps the router out of FSDP2) ran 8,770–9,060 at 153 GiB.
 
 FSDP2 shards params, gradients, and optimizer states across the DP ranks, so per-rank optimizer-state
 memory is ~`dp_size` smaller than DDP's full per-rank replication. Setup lives in
@@ -153,17 +153,18 @@ multi-group EP) rows of `tests/gpu/trainers/sft/test_sft_fsdp_defer_grad_sync.py
 stays within about 4e-4 of the default and the final weights within about 2% of their movement,
 under the 1.2e-3 loss spread between DP and HSDP (both correct) on the same data.
 
-Measured with packed `sft.py` (4k tokens, batch 2, gradient checkpointing, B300; tok/s/GPU, mean
-of 3 runs unless noted):
+Measured with packed `sft.py` (4k tokens, batch 2, gradient checkpointing, B300; tok/s/GPU, peak allocated
+in GiB). The two GA 4 rows on one 8-GPU node are single runs at commit 0bc3a22a5, whose tok/s the trainer
+logs to four significant figures; the other rows are from 34c102bba, the mean of 3 runs unless noted:
 
 | Run | GA | default | `fsdp_defer_grad_sync` | + `fsdp_reshard_after_backward: false` | peak allocated |
 |---|---|---|---|---|---|
-| Qwen3-8B, 8 GPUs, NVLink | 4 | 16,160 | 16,637 (+3.0%) | 17,015 (+5.3%) | 32.6 → 46.0 GB |
-| Qwen3-8B, 8 GPUs, NVLink | 8 | 16,458 | 16,985 (+3.2%) | 17,673 (+7.4%) | 32.6 → 46.0 GB |
-| Qwen3-8B, 2 nodes × 2 GPUs, EFA | 4 | 14,794 | 16,107 (+8.9%) | — | 40.2 → 51.7 GB |
-| same, `use_hsdp` (1 run) | 4 | 14,945 | 16,910 (+13.1%) | — | 55.5 → 63.1 GB |
-| same, NCCL on TCP sockets (1 run) | 4 | 2,024 | 3,084 (+52%) | — | 40.2 → 51.7 GB |
-| Qwen3-30B-A3B, `ep_size: 1`, 8 GPUs, NVLink | 4 | 11,670 | 13,038 (+11.7%) | — | 95.2 → 145.0 GB |
+| Qwen3-8B, 8 GPUs, NVLink | 4 | 15,670 | 16,460 (+5.0%) | 17,130 (+9.3%) | 32.6 → 45.9 |
+| Qwen3-8B, 8 GPUs, NVLink | 8 | 16,458 | 16,985 (+3.2%) | 17,673 (+7.4%) | 32.6 → 46.0 |
+| Qwen3-8B, 2 nodes × 2 GPUs, EFA | 4 | 14,794 | 16,107 (+8.9%) | — | 40.2 → 51.7 |
+| same, `use_hsdp` (1 run) | 4 | 14,945 | 16,910 (+13.1%) | — | 55.5 → 63.1 |
+| same, NCCL on TCP sockets (1 run) | 4 | 2,024 | 3,084 (+52%) | — | 40.2 → 51.7 |
+| Qwen3-30B-A3B, `ep_size: 1`, 8 GPUs, NVLink | 4 | 12,100 | 13,600 (+12.4%) | — | 95.3 → 145.0 |
 
 Over NVLink the dense reduce-scatters mostly overlap the backward, so the gain is a few percent; it
 grows with the gradient bytes per token (an `ep_size==1` MoE reduces every expert for 3B active
