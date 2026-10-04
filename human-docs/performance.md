@@ -19,8 +19,9 @@ number scales by the GPU count:
 | GPT-OSS 20B, 32k context | 8 GPUs, `ep8 + cp8`, checkpointing on | 7,600 |
 
 Two things to read out of that table. Expert parallelism costs throughput — at
-batch 4, 4k and matched checkpointing `ep1` runs about 2.3× `ep8` on the same
-model — because it trades local parameters for all-to-all traffic, so pick the
+batch 4, 4k and checkpointing on for both, `ep1` runs about 2.3× `ep8` on the same
+model (23,590 vs 10,358 tok/s/GPU; the `ep1` row above has checkpointing off) —
+because it trades local parameters for all-to-all traffic, so pick the
 *lowest* EP that fits rather than the largest your GPUs allow. And context parallelism is a way to afford a
 long sequence, not a way to go faster: it holds memory to 24–42 GiB from 16k to
 64k tokens and buys no speed. Sharding buys capacity — a 119B MoE trains on four

@@ -42,8 +42,8 @@ The baseline gets the strongest stock options — ZeRO-3 and Liger's FLCE, which
 | 16k·b2 | 7,445 · 55.6 | **23,159 · 96.5** | 22,321 · 58.6 | 19,698 · 112.0 | 9,650 · 78.0 |
 
 - **EP1 and EP2 lead at 2.6–3.5× stock TRL** across every short/mid config, and the gap holds under batch
-  scaling. EP8 is the one mode that regresses under batch: its dispatch cost grows with tokens/rank (16k:
-  9,981 → 9,650 tok/s/GPU from b1 to b2).
+  scaling. EP8 gains least from batch (4k: 8,852 → 10,358 tok/s/GPU from b1 to b4) and loses at 16k
+  (9,981 → 9,650 from b1 to b2): its dispatch cost grows with tokens/rank.
 - **EP8 trades throughput for memory** — 1.3–2.3× TRL at ~½ its memory (25.4 vs 47.6 GiB at 4k·b1).
 - **EP1 z3 isolates the framework gap** to AdamWBF16 + Halo's FSDP2+EP wrapper: both sides shard every
   param 8-way with the same kernel, and EP1 still leads 2.5× (4k·b1) to 3.2× (4k·b4) on throughput, and

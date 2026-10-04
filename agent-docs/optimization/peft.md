@@ -263,7 +263,7 @@ Dense — 1× B300 (SM103), `DistributedSFTTrainer`, AdamWBF16, Liger, FA4, Qwen
 |---|---|---|---|
 | LoRA r=64, attn only | 61M (0.7%) | 18,897 | 34.3 GiB |
 | LoRA r=64, all linear | 175M (2.1%) | 16,203 | 35.0 GiB |
-| QLoRA r=64, all linear (NF4 base) | 175M (3.6%) | 15,410 | 25.3 GiB |
+| QLoRA r=64, all linear (NF4 base) | 175M (2.1%) | 15,410 | 25.3 GiB |
 
 Attention-only runs 18% faster than full fine-tuning (15,966) at about half its memory; all-linear is ~14%
 slower than attention-only, since adapter matmuls run on every MLP layer. Throughput is **rank-invariant**
