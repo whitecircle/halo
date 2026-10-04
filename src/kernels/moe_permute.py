@@ -53,7 +53,7 @@ def _gather_reduce_kernel(
 
 # ``weight_grad`` is a runtime branch rather than a constexpr, so the one binary the EP warm-up compiles
 # serves both cases.
-@triton.jit(do_not_specialize=["weight_grad"])
+@triton.jit(do_not_specialize=["grad_out_stride", "weight_grad"])
 def _weighted_unpermute_bwd_kernel(
     grad_out_ptr,
     expert_out_ptr,
@@ -62,6 +62,7 @@ def _weighted_unpermute_bwd_kernel(
     grad_expert_ptr,
     grad_weight_ptr,
     hidden,
+    grad_out_stride,
     weight_grad,
     BLOCK_H: tl.constexpr,
 ):
@@ -73,7 +74,7 @@ def _weighted_unpermute_bwd_kernel(
     for start in range(0, hidden, BLOCK_H):
         cols = start + tl.arange(0, BLOCK_H)
         mask = cols < hidden
-        grad = tl.load(grad_out_ptr + token * hidden + cols, mask=mask, other=0.0).to(tl.float32)
+        grad = tl.load(grad_out_ptr + token * grad_out_stride + cols, mask=mask, other=0.0).to(tl.float32)
         tl.store(grad_expert_ptr + row * hidden + cols, grad * weight, mask=mask)
         if weight_grad:
             y = tl.load(expert_out_ptr + row * hidden + cols, mask=mask, other=0.0).to(tl.float32)
@@ -189,11 +190,15 @@ class MoEWeightedUnpermute(torch.autograd.Function):
             return grad_expert, grad_weights.to(weights.dtype), None, None
         # Autograd casts the incoming gradient to the forward output's dtype, which is expert_out's.
         n_sorted, hidden = sorted_token_idx.shape[0], grad_out.shape[-1]
+        # Read in place at its row stride: under EP the gradient arrives as a row-strided view of the
+        # padded transport buffer.
+        if grad_out.stride(-1) != 1:
+            grad_out = grad_out.contiguous()
         grad_expert = torch.empty((n_sorted, hidden), device=grad_out.device, dtype=grad_out.dtype)
         grad_weights = torch.empty(n_sorted if ctx.weight_grad else 0, device=grad_out.device, dtype=torch.float32)
         if n_sorted:
             _weighted_unpermute_bwd_kernel[(n_sorted,)](
-                grad_out.contiguous(),
+                grad_out,
                 # Unread without the weight gradient; grad_expert carries expert_out's dtype, so the binary is the same.
                 expert_out if ctx.weight_grad else grad_expert,
                 weights,
@@ -201,6 +206,7 @@ class MoEWeightedUnpermute(torch.autograd.Function):
                 grad_expert,
                 grad_weights,
                 hidden,
+                grad_out.stride(0),
                 int(ctx.weight_grad),
                 BLOCK_H=_BLOCK_H,
             )

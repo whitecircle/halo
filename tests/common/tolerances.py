@@ -21,10 +21,11 @@ from dataclasses import dataclass
 @dataclass(frozen=True)
 class _Tolerances:
     # ── Cross-rank agreement ────────────────────────────────────────────────
-    # Identical batch on every rank. An all-reduce hands every rank one sum and DeepEP's combine sums a
-    # token's partials in top-k slot order; what can still vary is EP's un-permute below the fused-permute
-    # gate (top_k < ep_size), a bf16 atomic index_add_ over a token's local expert outputs. 1e-3 is
-    # headroom over that, and a real mis-dispatch or mis-shard moves one rank's loss well past it.
+    # Identical batch on every rank. An all-reduce hands every rank one sum, DeepEP's combine sums a
+    # token's partials in top-k slot order, and the grouped path's un-permute is a fixed-order
+    # gather-reduce; what can still vary is the per-expert loop's (use_grouped_gemm: false) bf16 atomic
+    # index_add_ over a token's local expert outputs. 1e-3 is headroom over that, and a real mis-dispatch
+    # or mis-shard moves one rank's loss well past it.
     ep_identical_batch_rank_spread_abs: float = 1e-3
     # Identical batch through an all-reduce with no EP un-permute in the path (pure TP, pure ETP): the
     # all-reduce hands every rank one sum, and a loss or grad norm read off a shard misses by orders of

@@ -336,10 +336,13 @@ across forward and backward so gradients are exact.
 Padding is confined to the elastic backend's own wire buffers; the MoE layer and expert compute see the
 real hidden. The send side is one strided copy into the padded buffer plus a fill of the pad columns; the
 receive side hands back a row-strided `[tokens, hidden]` view of the padded result, with no copy (every
-consumer reads the row stride directly). On gpt-oss-20b EP2 (GC on, 2× B300, s4096 b4), where the
-permute is unchanged, dropping the receive-side copies and the full-buffer fill took 23,933 → 24,191
-tok/s/GPU (+1.1%). It is a no-op for conforming models (Qwen3 MoE, hidden 4096/2048). Cost is
-~`padded/hidden − 1` extra transport bandwidth (≈6.7% for GPT-OSS). The legacy backend needs no padding.
+consumer reads the row stride directly, the weighted unpermute's backward included). Against a copying
+version (`F.pad` plus a contiguous slice) it runs gpt-oss-20b EP2 at 24,191 tok/s/GPU vs 23,933 (+1.1%;
+GC on, 2× B300, s4096 b4 packed chat data). Under GC the replay cache (`_gc_dispatch` / `_gc_combine`)
+holds the received tensors at the padded width, so it grows by `padded/hidden`: ≈+0.5 GiB peak on
+gpt-oss-20b EP8 (2880 → 3072), proportionally more on Gemma 4 (2816 → 3072). It is a no-op for conforming
+models (Qwen3 MoE, hidden 4096/2048). Cost is ~`padded/hidden − 1` extra transport bandwidth (≈6.7% for
+GPT-OSS). The legacy backend needs no padding.
 
 ## Expert parallelism over AWS EFA
 

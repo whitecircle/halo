@@ -169,10 +169,10 @@ def run(ctx) -> dict:
 
     # --- Check 2: init delta == 0 (adapters present vs disabled produce the same output) ---
     # B is zero-initialized so the LoRA delta is structurally 0; _expert_proj must therefore be a
-    # no-op at init. We can't assert bit-equality directly because the EP scatter-back uses a
-    # non-deterministic atomic index_add_ when top_k < ep_size (e.g. GptOss top-4 at EP=8), so two
-    # forward passes of the SAME model differ by run-to-run noise. Measure that noise floor (two
-    # adapters-on passes) and require the adapters-on-vs-off difference to stay within it.
+    # no-op at init. The grouped path's scatter-back is a fixed-order gather-reduce, so there the noise
+    # floor below is 0 and this is bit-equality; the per-expert loop's scatter-back is an atomic
+    # index_add_, whose run-to-run noise two forward passes of the SAME model show. Measure that noise
+    # floor (two adapters-on passes) and require the adapters-on-vs-off difference to stay within it.
     log("\n[5/8] Checking init delta == 0 (within the EP forward's run-to-run noise floor)...")
     enc = tokenizer(["The quick brown fox jumps over the lazy dog."], return_tensors="pt")
     input_ids = enc["input_ids"].to(ctx.local_rank)

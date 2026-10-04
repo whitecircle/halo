@@ -20,7 +20,7 @@ Grouped collapses those to `P` nodes (Qwen3.6: 256×2=512 → 2), so far fewer s
 
 Some MoE / parallelism / hardware combinations make `use_grouped_gemm: false` competitive or faster.
 
-**1. Few local experts per rank (primary lever).** Grouped's advantage is fusing launches across a rank's `num_experts / ep_size` local experts. Many (low EP) → large saving → grouped wins. Few (high EP) → the loop's per-shape-optimal CUTLASS tile wins, since each expert's GEMM gets a tile fit to its actual per-expert `M`.
+**1. Few local experts per rank (primary lever).** Grouped's advantage is fusing launches across a rank's `num_experts / ep_size` local experts. Many (low EP) → large saving → grouped wins. Few (high EP) → small saving, and the loop's per-shape-optimal CUTLASS tile, fit to each expert's actual per-expert `M`, can close the gap.
 
 Per-expert `M = ep_size × tokens_per_rank × top_k / num_experts`: tokens pool across the dispatch group, so per-rank rows `tokens_per_rank × top_k` are EP-invariant and M grows with `ep_size`. M modulates the trend: `grouped_mm` runs one shared ~128-wide M tile for all groups, so its edge is largest at small M and erodes as M grows.
 
@@ -29,7 +29,6 @@ gpt-oss-20b (32 experts, top-4, seq 8192, 8× B300, FA4), grouped vs loop, plus 
 | Model | EP | local experts/rank | b1 | b2 | b4 | b8 |
 |---|----|:------------------:|:---:|:---:|:---:|:---:|
 | gpt-oss-20b | ep2 | 16 | grouped +60% | +39% | +21% | +8% |
-| gpt-oss-20b | ep8 | 4 | grouped +3.7% | loop +0.9% | loop +4.9% | OOM |
 | Qwen3-30B | ep2 | 64 | grouped +243% | — | +112% | — |
 | Qwen3.5-35B | ep2 | 128 | — | — | grouped +137% | — |
 
@@ -57,11 +56,11 @@ On that gpt-oss-20b EP step the atomic-free path runs ≈5× faster than the def
 
 ### The atomic-free gather-reduce permute
 
-The token permute/unpermute (`MoEGatherPermute`, `MoEWeightedUnpermute`, `src/kernels/moe_permute.py`) is the larger lever for high-top_k MoE. Qwen3.6 (top-8, 256 experts, 32 local/rank at EP8) measures the scatter-back `index_add_` at ~32% of the step: 4.3 ms/call vs gpt-oss (top-4, 4 local/rank) 0.38 ms/call (11× gap, pure collision rate).
+The token permute/unpermute (`MoEGatherPermute`, `MoEWeightedUnpermute`, `src/kernels/moe_permute.py`) is the larger lever for high-top_k MoE. Qwen3.6 (top-8, 256 experts, 32 local/rank at EP8) measures the scatter-back `index_add_` at ~32% of the step, 4.3 ms per call.
 
 The permute expresses both directions with no atomics via a precomputed `inv_map` (`[recv_N, top_k]` of sorted positions feeding each recv token, sentinel-padded, built by `build_inv_map`), turning the scatter into gather + reduction. It matches `index_add_` to rounding, not bit for bit: the kernels accumulate in fp32, and the unpermute skips the bf16 rounding of each weighted row (checked fwd+bwd against a float64 `index_add_`).
 
-It runs on every grouped-GEMM path, whatever `top_k` and `ep_size` (`base_layer._sort_tokens_for_grouped_mm`; the EP warm-up compiles it). Even where a received token lands on few local rows (gpt-oss top-4 at EP8), the bf16 `index_add_` is a CAS-loop atomic: on real packed chat data it took ~1.5 ms per call on gpt-oss-20b EP8 (108 ms of a 1.27 s GC-on step; 161 ms of gpt-oss-120b's 1.66 s), against the gather-reduce's memory-bandwidth pass. Moving gpt-oss EP8 onto it took 13,036 → 16,182 tok/s/GPU at s4096 b4 (+24%) and 13,138 → 15,954 at s16384 b1 (+21%), GC on, 8× B300.
+It runs on every grouped-GEMM path, whatever `top_k` and `ep_size` (`base_layer._sort_tokens_for_grouped_mm`; the EP warm-up compiles it). Even where a received token lands on few local rows (gpt-oss top-4 at EP8), a bf16 `index_add_` is a CAS-loop atomic. On packed chat data (BFD-packed `HuggingFaceH4/ultrachat_200k`, 16k tokens/GPU/step, GC on, 8× B300) it costs ~1.5 ms per call on gpt-oss-20b EP8: 108 ms of a 1.24 s step, and 161 ms of gpt-oss-120b's 1.57 s. The gather-reduce makes one memory-bandwidth pass. On that data gpt-oss-20b EP8 runs 16,574 tok/s/GPU at s4096 b4 and 16,618 at s16384 b1, against 13,050 and 13,138 with `index_add_` (+27%); gpt-oss-120b EP8 runs 12,832 against 10,301 (+25%). Those figures include the copy-free DeepEP padding ([DeepEP](../infrastructure/deepep.md#hidden-padding-hidden--256)), about 2 points at gpt-oss-20b EP8; the permute alone is +24% there.
 
 Both reductions run as one Triton kernel (`src/kernels/moe_permute.py`) that walks `inv_map` per output row and accumulates in fp32, so no `[recv_N, top_k, H]` transient or padded copy exists. The grouped path folds the routing-weight multiply into the unpermute (`MoEWeightedUnpermute`), and its backward writes the expert-output gradient and the routing-weight gradient in one pass. Routing weights that need no gradient leave the expert outputs unsaved, since only the routing-weight gradient reads them. The fused `[gate | up]` GLU output is read in place by the packed GLU kernels (`PACKED_GLU_MULS` in `src/kernels/fused_glu.py`), whose backward writes one `[..., 2M]` gradient.
 
@@ -76,9 +75,7 @@ The win grows with sequence length (larger recv buffers → worse contention).
 
 The fused kernels against that padded-gather permute (a separate routing-weight multiply, a padded `[N, top_k, H]` gather-sum each way, the same sort), on the Gemma 4 26B-A4B expert block (hidden 2816, intermediate 704, 128 experts, top-8), fwd+bwd on one B300: 1.78 / 3.25 / 10.63 ms at 2k / 8k / 32k tokens, against 2.21 / 4.73 / 16.24 ms, and peak transient memory of 3.7 against 6.5 GiB at 32k (`tests/gpu/profiling/benchmark_moe_block.py`, rows `halo` and `halo_padded_gather`).
 
-Per-device batch multiplies the per-call recv buffer exactly like sequence length. At high router skew scale with GA, not per-device batch.
-
-gpt-oss-120b at EP8, same 64-sequence effective batch: bs2 × GA4 measures ~20% slower than bs1 × GA8 at high router skew (`moe/load_max` ~11), and parity at a balanced load (~2).
+Per-device batch multiplies the per-call recv buffer exactly like sequence length.
 
 ## Throughput tuning beyond the kernel
 

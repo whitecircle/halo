@@ -165,7 +165,7 @@ Rows are the grouped-GEMM path (default); the ep1 rows here hold experts replica
 
 `fsdp_shard_ep1_experts` (the ep1 default) shards the replicated experts across the DP group, cutting ep1 b1 to **8,414 tok/s/GPU · 60.3 GB** (−59% memory for −10.5% throughput at b1; the all-gather overlaps better at larger batch — −3.5% at b4) — the dense-EP1 config in the [achieved-TFLOPS table](#maximizing-achieved-tflops).
 
-Grouped beats the per-expert loop (`use_grouped_gemm: false`) at low EP and at high EP up to moderate batch; the loop edges ahead only at high EP with large batches. The crossover is set by local experts per rank, modulated by batch — the authoritative A/B is in [grouped-gemm](grouped-gemm.md#when-the-loop-path-wins).
+Grouped beats the per-expert loop (`use_grouped_gemm: false`) at low EP by a wide margin; the gap shrinks as local experts per rank fall, modulated by batch. The A/B is in [grouped-gemm](grouped-gemm.md#when-the-loop-path-wins).
 
 > [!CAUTION]
 > **No ep4 row: single-node `ep_size=4` on 8 GPUs is rejected at config time**
@@ -268,7 +268,6 @@ Raising batch or sequence grows the compute term against the fixed comm cost; th
 |---|---|---|---|
 | bf16 + FA4 + grouped + GC | 10,051 | 1.00× | recommended recipe |
 | **GC off** | **12,971** | **1.29×** | when the batch fits (121 GB here) |
-| grouped GEMM off (loop) | 10,215 | 1.02× | loop edges grouped at ep8-b4 (fused-SwiGLU grouped path) |
 | flex attention | 1,916 | 0.19× | FA4 ~5.2× faster; flex runs the unfused math path |
 | fp8 / fp4 | net-slower | — | bf16 is the throughput path at these shapes ([low-precision](low-precision-moe-kernels.md)) |
 
