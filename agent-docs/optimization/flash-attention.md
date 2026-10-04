@@ -125,15 +125,15 @@ A Bailing run therefore sets `attn_implementation: sdpa` itself; an unset or fla
 
 Every one of them takes that default only under `reset_sinks: true`. With live gpt-oss sinks (`reset_sinks: false`) the default drops and the model config passes through untouched, since SDPA drops the sink column and would be rejected outright. SFT keeps the auto-selected FA4: a packed batch takes its varlen path, kept fast by the `max_seqlen` int-coercion.
 
-That default costs throughput at the lengths these methods actually run. Measured on 8× B300 with `benchmark_smpo_ep.py`, which does *not* apply it (2026-10-03, commit 0bc3a22a5, Blackwell image; auto = FA4). The SMPO collator emits no `input_ids`, so the callback's tokens/s is a padded-length estimate; the table gives the step-time speedup of auto over SDPA:
+That default costs throughput at the lengths these methods actually run. Measured on 8× B300 with `benchmark_smpo_ep.py`, which does *not* apply it (2026-10-04, training code at commit 0bc3a22a5, Blackwell image; auto = FA4; mean of 2 runs). The SMPO collator emits no `input_ids`, so the callback's tokens/s is a padded-length estimate; the table gives the step-time speedup of auto over SDPA:
 
 | model | seq | auto vs SDPA |
 |---|---|---|
-| gpt-oss-20b ep8 | 4096 | **1.40×** |
-| gpt-oss-20b ep8 | 8192 | **1.43×** |
-| qwen3-30b-a3b ep8 | 4096 | **1.09×** |
-| qwen3-30b-a3b ep8 | 8192 | **1.15×** |
-| qwen3-8b ep1 (dense) | 4096 | **1.09×** |
+| gpt-oss-20b ep8 | 4096 | **1.41×** |
+| gpt-oss-20b ep8 | 8192 | **1.40×** |
+| qwen3-30b-a3b ep8 | 4096 | **1.17×** |
+| qwen3-30b-a3b ep8 | 8192 | **1.14×** |
+| qwen3-8b ep1 (dense) | 4096 | **1.26×** |
 
 FA4 wins every row, on MoE and dense alike. Set `attn_implementation: flash_attention_4` explicitly in a preference/reward config.
 

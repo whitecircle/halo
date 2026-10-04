@@ -71,7 +71,7 @@ so the fix is a bigger `M`, not a faster kernel.
 
 ## Why not stock TRL
 
-Halo trains GPT-OSS 20B at 2.7–3.5× stock TRL across every short and mid-length
+Halo trains GPT-OSS 20B at 2.6–3.5× stock TRL across every short and mid-length
 config on the same 8 B300s, with the same kernels and the strongest stock options
 enabled on both sides. Most of the gap is structural rather than kernel-level:
 the baseline runs no expert parallelism, and its FSDP2 `full_shard` re-gathers

@@ -27,7 +27,7 @@ The baseline gets the strongest stock options — ZeRO-3 and Liger's FLCE, which
 
 ## Throughput & memory (4k–16k)
 
-*8× B300 · 2026-10-03 · commit 0bc3a22a5 · Blackwell image. GC-on · grouped GEMM · TRL ZeRO-3 · Halo ZeRO-2 (EP1 also at ZeRO-3) · elastic.* **tok/s/GPU · peak GiB:**
+*8× B300 · 2026-10-03 (stock TRL 2026-10-04, mean of 2 runs) · commit 0bc3a22a5 · Blackwell image. GC-on · grouped GEMM · TRL ZeRO-3 · Halo ZeRO-2 (EP1 also at ZeRO-3) · elastic.* **tok/s/GPU · peak GiB:**
 
 ![Throughput: Halo vs stock TRL, 4k/16k](../assets/benchmarks/throughput_4k16k.png)
 
@@ -35,13 +35,13 @@ The baseline gets the strongest stock options — ZeRO-3 and Liger's FLCE, which
 
 | seq·b | stock TRL (z3) | Halo EP1 (z2) | Halo EP1 (z3) | Halo EP2 (z2) | Halo EP8 (z2) |
 |---|---|---|---|---|---|
-| 4k·b1 | 3,859 · 47.6 | 11,236 · 60.3 | 9,694 · **28.7** | **12,432 · 78.9** | 8,852 · 25.4 |
-| 4k·b2 | 5,496 · 48.2 | 17,653 · 65.5 | 15,532 · **29.3** | **17,862 · 80.5** | 9,609 · 32.3 |
-| 4k·b4 | 6,719 · 50.6 | **23,590 · 75.8** | 21,678 · 37.9 | 20,554 · 85.2 | 10,358 · 47.2 |
-| 16k·b1 | 6,588 · 50.6 | **20,690 · 75.8** | 19,505 · 37.9 | 18,436 · 85.0 | 9,981 · 48.1 |
-| 16k·b2 | 7,392 · 55.6 | **23,159 · 96.5** | 22,321 · 58.6 | 19,698 · 112.0 | 9,650 · 78.0 |
+| 4k·b1 | 3,836 · 47.6 | 11,236 · 60.3 | 9,694 · **28.7** | **12,432 · 78.9** | 8,852 · 25.4 |
+| 4k·b2 | 5,474 · 48.2 | 17,653 · 65.5 | 15,532 · **29.3** | **17,862 · 80.5** | 9,609 · 32.3 |
+| 4k·b4 | 6,688 · 50.6 | **23,590 · 75.8** | 21,678 · 37.9 | 20,554 · 85.2 | 10,358 · 47.2 |
+| 16k·b1 | 6,461 · 50.6 | **20,690 · 75.8** | 19,505 · 37.9 | 18,436 · 85.0 | 9,981 · 48.1 |
+| 16k·b2 | 7,445 · 55.6 | **23,159 · 96.5** | 22,321 · 58.6 | 19,698 · 112.0 | 9,650 · 78.0 |
 
-- **EP1 and EP2 lead at 2.7–3.5× stock TRL** across every short/mid config, and the gap holds under batch
+- **EP1 and EP2 lead at 2.6–3.5× stock TRL** across every short/mid config, and the gap holds under batch
   scaling. EP8 is the one mode that regresses under batch: its dispatch cost grows with tokens/rank (16k:
   9,981 → 9,650 tok/s/GPU from b1 to b2).
 - **EP8 trades throughput for memory** — 1.3–2.3× TRL at ~½ its memory (25.4 vs 47.6 GiB at 4k·b1).
@@ -69,7 +69,7 @@ Halo).
 
 The uplift shrinks once a rank holds few experts (+18% at EP8, where the loop's per-shape tile fits the
 larger per-expert `M`). **EP token distribution is the bigger lever** — Halo's *loop* at EP1 (6,005)
-already beats TRL's `grouped_mm` (3,859). Kernel-side detail:
+already beats TRL's `grouped_mm` (3,836). Kernel-side detail:
 [Grouped GEMM](grouped-gemm.md#grouped-vs-the-loop-path).
 
 ## Fused linear cross-entropy

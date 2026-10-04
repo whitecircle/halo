@@ -220,7 +220,7 @@ precision, FlashAttention 4, Liger kernels, and grouped GEMM.
 
 | Result | Configuration |
 |---|---|
-| **2.7–3.5× stock TRL throughput** | gpt-oss-20b, 4k–16k; EP2 / dense EP1 (EP8: 1.3–2.3×). Loss matches the baseline to within 0.6% by step 100. |
+| **2.6–3.5× stock TRL throughput** | gpt-oss-20b, 4k–16k; EP2 / dense EP1 (EP8: 1.3–2.3×). Loss matches the baseline to within 0.6% by step 100. |
 | **28,700 tok/s/GPU** | gpt-oss-20b, dense EP1, 4k, batch 4, GC off — ~230k tok/s across 8 GPUs. |
 | **16,447 tok/s/GPU at 1,908 TFLOPS** | Qwen3.5-35B-A3B, 4k, batch 4, EP2 — the highest achieved TFLOPS of any EP>1 run benchmarked. |
 | **Up to 256k context** | gpt-oss-20b; dense EP1 is 2.1× faster than TRL at 64k and 1.28× at 256k. EP8+CP8 and dense CP-only run at about half TRL's per-GPU memory. |
