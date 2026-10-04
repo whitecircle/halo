@@ -57,7 +57,7 @@ are the first three.
 | fp8 / fp4 **compute** (`lowp_precision`) | fine-grained experts are weight-bandwidth-bound, not FLOP-bound, so halving the matmul precision buys nothing — bf16 is already at the roofline |
 | The simulated low-precision backend | it is an exact QAT oracle, not a fast path: roughly 8× a bf16 step at mxfp8, 17–19× at fp4 |
 | Native DeepGEMM (`HALO_DEEPGEMM_NATIVE=1`) | 0.05–0.07× of bf16 at production shapes; the per-token activation quantization never amortizes. Never auto-selected |
-| `torch_compile: true` on an EP MoE run | Liger already fuses the spans compile can reach between the all-to-all and attention graph breaks. `torch_compile_mode: default` ties eager; `reduce-overhead`, used when no mode is set, is 7–10% slower on Qwen3-30B-A3B at `ep2` |
+| `torch_compile: true` on an EP MoE run | on Qwen3-30B-A3B at `ep2` and 16k tokens, `torch_compile_mode: default` gains at most 1% with or without Liger, and `reduce-overhead`, used when no mode is set, is 7–10% slower. [Details](../agent-docs/optimization/torch-compile.md) ↗ |
 
 Low precision does earn its keep on the way out: `halo run quantize-to-lowp`
 halves (fp8) or quarters (fp4) the expert-weight bytes of a checkpoint you are

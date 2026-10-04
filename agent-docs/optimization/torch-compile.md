@@ -1,6 +1,6 @@
 # torch.compile
 
-On EP MoE, `torch.compile` buys nothing, and in `reduce-overhead` mode — the trainer's fallback when `torch_compile_mode` is unset — it costs throughput: keep it off and keep [Liger kernels](liger-kernels.md) on. On Qwen3-30B-A3B EP=2 at seq 16384, Liger adds **27%**; compile in `default` mode ties eager, and `reduce-overhead` is **7% slower** alone and **10% slower** on top of Liger ([Benchmark results](#benchmark-results)). DeepEP all-to-all and Flash Attention break the graph at every MoE and attention boundary, so inductor compiles only the short spans between breaks, which Liger already fuses.
+On EP MoE `torch.compile` gains at most 1%, and in `reduce-overhead` mode — the trainer's fallback when `torch_compile_mode` is unset — it costs throughput. On Qwen3-30B-A3B EP=2 at seq 16384, batch 1, `default` mode gains **1%** without Liger and **0.3%** on top of it, `reduce-overhead` is **7% slower** alone and **10% slower** on top of Liger, and Liger alone adds **27%** ([Benchmark results](#benchmark-results)). At that shape keep `torch_compile` off and [Liger kernels](liger-kernels.md) on.
 
 What fusion buys and what it does not: [GPU Training Theory §5](../reference/gpu-training-theory.md#what-fusion-does-not-buy).
 
@@ -52,22 +52,20 @@ Qwen3-30B-A3B-Instruct-2507 (128 experts, top_k=8), 2× B300, EP=2, seq 16384, b
 | `liger_only` | ON | OFF | **1.13** | **14,490** (+27%) | 0.0% | 126.6 |
 | `compile_only` | OFF | `default` | 1.42 | 11,536 (+1%) | 0.4% | 126.9 |
 | `liger_compile` | ON | `default` | 1.13 | 14,539 (+0.3% vs `liger_only`) | 0.5% | 149.8 |
-| `compile_only` | OFF | `reduce-overhead` | 1.54 | 10,600 (−7%) | 5.4% | 127.0 |
+| `compile_only` | OFF | `reduce-overhead` | 1.54 | 10,600 (−7%) | 5.4% | 126.9 |
 | `liger_compile` | ON | `reduce-overhead` | 1.26 | 13,024 (−10% vs `liger_only`) | 7.5% | 135.8 |
 
-Liger is the lever: +27% at 2 GiB less memory. Compile adds nothing to it in `default` mode and takes 10% away in `reduce-overhead`, whose slow steps also make the result noisy (5–8% between identical runs, against ≤ 0.5% for every other cell). With Liger on, compile also raises peak memory by 9–23 GiB. Peaks are from warm-cache runs; each compiled cell's first run, on a cold compile cache, peaked 14–37 GiB higher.
+Liger is the lever: +27% at 2 GiB less memory. Compile adds 0.3% to it in `default` mode and takes 10% away in `reduce-overhead`, whose slow steps also make the result noisy (5–8% between identical runs, against ≤ 0.5% for every other cell). With Liger on, compile also raises peak memory by 9–23 GiB. Peaks are from warm-cache runs; each compiled cell's first run, on a cold compile cache, peaked 14–37 GiB higher.
 
-## Why compile does not pay off on EP MoE
+## Graph breaks
 
-Graph breaks cap what compile can fuse — it compiles the spans between them (norms, projections), not across them:
+Compile fuses the spans between graph breaks (norms, projections), not across them:
 
 - **DeepEP dispatch/combine** — splits the graph at every MoE layer.
 - **Flash Attention** — opaque; the compiler cannot fuse across FA boundaries.
 - **Gradient checkpointing** — EP, CP and every MoE force `use_reentrant=True`, which adds graph breaks; on a dense model outside EP/CP the config's `use_reentrant` stands.
 - **TP DTensor** — sharded-op dispatch breaks the graph at every sharded operation.
 - **CP (Ulysses)** — all-to-all in every attention layer breaks the graph at every block.
-
-Those spans are the ones Liger already fuses. The expert activation, the one hot op Liger does not cover under an EP wrapper, is already a hand-written Triton kernel — compile has nothing left to win there.
 
 ## Running benchmarks
 

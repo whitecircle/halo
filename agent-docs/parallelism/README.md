@@ -130,7 +130,7 @@ instead of replicating the DP dimension across domains.
 
 ## torch.compile
 
-DeepEP all-to-all (EP), DTensor dispatch (TP), and Ulysses all-to-all (CP) each break the graph, so compile only fuses the spans between breaks, the ones Liger kernels (the default) already fuse. On EP MoE it gains nothing on top of Liger, and its `reduce-overhead` mode is slower; keep `torch_compile` off. See [torch.compile](../optimization/torch-compile.md).
+On EP MoE (Qwen3-30B-A3B, EP=2, seq 16384) `torch.compile` gains at most 1% and its `reduce-overhead` mode, the trainer's fallback, is slower, so leave `torch_compile` off there: [torch.compile](../optimization/torch-compile.md).
 
 ## Per-axis limitation surface
 
