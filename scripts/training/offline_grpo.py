@@ -106,13 +106,6 @@ def _load_kl_reference(
     )
 
 
-def _requested_attention(model_config, parallelism_config, *, sinks_reset: bool) -> str | None:
-    """CP leaves the default to the loader's hardware-aware FlashAttention selection."""
-    if parallelism_config.is_cp_mode and not model_config.attn_implementation:
-        return None
-    return padded_workload_attn_implementation(model_config, sinks_reset=sinks_reset)
-
-
 def main():
     parser = H4ArgumentParser((OfflineGRPOScriptArguments, OfflineGRPOConfig, ModelConfig, DistributedArguments))
     args, offline_grpo_config, model_config, dist_args = parser.parse()
@@ -127,8 +120,10 @@ def main():
     )
     parallelism_config = runtime.parallelism_config
 
-    # The CP collator right-pads full rows; the existing non-CP layout left-pads prompts.
-    requested_attn = _requested_attention(model_config, parallelism_config, sinks_reset=dist_args.reset_sinks)
+    # Padded batches: the CP collator right-pads full rows, the non-CP layout left-pads prompts.
+    requested_attn = padded_workload_attn_implementation(
+        model_config, sinks_reset=dist_args.reset_sinks, context_parallel=parallelism_config.is_cp_mode
+    )
     model, tokenizer = load_script_model(
         runtime, offline_grpo_config, model_config, dist_args, attn_implementation=requested_attn
     )

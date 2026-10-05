@@ -444,7 +444,9 @@ def apply_prompt_completion_window(
     return tokenizer, window
 
 
-def padded_workload_attn_implementation(model_config, *, sinks_reset: bool) -> str | None:
+def padded_workload_attn_implementation(
+    model_config, *, sinks_reset: bool, context_parallel: bool = False
+) -> str | None:
     """Attention implementation for padded (non-varlen) workloads: reward modeling, the GRPO family,
     and every other script that forwards right-padded batches.
 
@@ -452,9 +454,13 @@ def padded_workload_attn_implementation(model_config, *, sinks_reset: bool) -> s
     through its slow varlen path. ``sinks_reset=False`` (on-policy gpt-oss, pretrained sinks live)
     drops the default: only a sink-carrying implementation is accepted there, so requesting SDPA
     would reject the run. Pass the run's own ``reset_sinks`` rather than a hardcoded value.
+    ``context_parallel`` drops it too: Ulysses calls FlashAttention itself, so the loader's
+    hardware-aware selection names the kernel CP runs.
     """
     if model_config.attn_implementation:
         return model_config.attn_implementation
+    if context_parallel:
+        return None
     return "sdpa" if sinks_reset else None
 
 

@@ -7,7 +7,6 @@ import torch
 from datasets import Dataset
 from torch import nn
 
-from scripts.training.offline_grpo import _requested_attention
 from src.data.collators.offline_grpo import REF_PER_TOKEN_LOGPS_COLUMN
 from src.distributed.runtime import DeferredRankFailure
 from src.trainers.grpo.reference_lifecycle import OfflineGRPOReferenceLifecycleMixin
@@ -198,15 +197,6 @@ def test_original_reference_restore_failure_does_not_replace_the_forward_failure
 
 def test_rank_local_object_identity_does_not_skip_collectives(tmp_path):
     run_gloo_ranks(_ranked_object_identity, 2, str(tmp_path))
-
-
-@pytest.mark.parametrize("cp", [False, True])
-@pytest.mark.parametrize("explicit", [None, "eager", "flash_attention_2"])
-def test_script_attention_preserves_explicit_choice_and_lets_cp_select_flash(cp, explicit):
-    result = _requested_attention(
-        SimpleNamespace(attn_implementation=explicit), SimpleNamespace(is_cp_mode=cp), sinks_reset=True
-    )
-    assert result == (explicit if explicit else None if cp else "sdpa")
 
 
 if __name__ == "__main__":
