@@ -175,9 +175,9 @@ load peak.
 
 `X = ep_size × expert_tp_size`. `Steady` = experts + replicated + FSDP non-expert + activations at
 `b1`. `Load` = the separate per-rank peak while weights stream in. All EP cells need
-`512 % ep_size == 0`, rejected in the first second of the job by
-`ParallelismConfig.validate_against_model_config` — it reads `config.json` before the process groups
-and the meta shell exist.
+`512 % ep_size == 0`, rejected by `ParallelismConfig.validate_against_model_config` off `config.json`
+at the top of the model load — after the checkpoint download, before the process groups, the meta
+shell or any weight read.
 
 Read the `Layout` column for the fabric too: on an 8-GPU domain every **`global`** row above one node
 puts its dispatch and combine on RDMA, 240 times per microbatch; every **`node`** row keeps them on
@@ -291,9 +291,9 @@ The working recipe is `NVLINK_DOMAIN_SIZE=64` over 16 of the rack's 18 compute t
 — the domain is the tiling unit, so the legal `ep_group_size` values are its divisors — is on
 [Multi-Node](multi-node.md#gb200gb300-nvl72-multi-node-nvlink).
 
-Scaling out, `world=512` over 8 racks at domain 64 accepts `ep8`, `ep32` and `ep64` node-scope (the
-racy guard is inert across multiple domains); `ep64` gives 8 EP groups, one per rack, averaged by the
-deferred cross-replica sweep. Unvalidated on hardware — treat it as a plan.
+Scaling out, `world=512` over 8 racks at domain 64 accepts every node-scope `ep_size` dividing 64
+(the racy guard is inert across multiple domains); `ep64` gives 8 EP groups, one per rack, averaged by
+the deferred cross-replica sweep. Unvalidated on hardware — treat it as a plan.
 
 **Frozen layers are the lever at 2 nodes.** `unfreeze_layers_patterns` leaves untouched parameters at
 2 B/param — weights only, no gradient and no optimizer state. Unfreezing the top 20 of 60 layers plus
@@ -401,10 +401,10 @@ The `ep16` rows all sit on cross-node EP and inherit its `per_device_train_batch
 
 **Before the launch**
 
-- `512 % ep_size == 0` and `expert_tp_size | moe_intermediate_size` are checked off `config.json` in
-  the first second (`ParallelismConfig.validate_against_model_config`, at the top of
-  `load_distributed_model`). The other model-dependent gates still fire minutes in — TP head
-  divisibility, `validate_model_for_ulysses`.
+- `512 % ep_size == 0`, `expert_tp_size | moe_intermediate_size`, TP head divisibility and the
+  declared tokens/rank budget are checked off `config.json` before any weight is read
+  (`ParallelismConfig.validate_against_model_config`, at the top of `load_distributed_model`, after
+  the checkpoint download). `validate_model_for_ulysses` fires only once the model is built.
 - Scratch: a single checkpoint is ~800 GB with `save_only_model: true` (as shipped), ~2.4 TB with
   optimizer shards (AdamWBF16 adds 4 B/param).
 
@@ -435,7 +435,7 @@ The `ep16` rows all sit on cross-node EP and inherit its `per_device_train_batch
   each rank's optimizer shard to host RAM at every save and resume (`cpu_offload`): ~28 GB/rank at
   `ep64`, ~102 GB/rank at `ep16`, ~820 GB per 8-GPU node.
 
-    Every cell here runs **one** EP group, so each rank's expert state is unique; a job wide enough to
+    Every recommended cell runs **one** EP group, so each rank's expert state is unique; a job wide enough to
     run several EP groups (they are DP replicas) writes that half once per replica group instead
     ([Checkpoints](../reference/checkpoints.md#warm-restart-vs-exact-resume-torchrun)).
 
@@ -447,7 +447,7 @@ The `ep16` rows all sit on cross-node EP and inherit its `per_device_train_batch
 - Dataset shards: `num_shards >= data_parallel_size`, which is `stage_world_size / max(tp, cp, etp)`,
   not the GPU count.
 
-- Dry-run the layout on one node with a tiny Qwen3.5 MoE (`Qwen/Qwen3.5-35B-A3B`) to exercise the
+- Dry-run the layout on one node with the smaller Qwen3.5 MoE sibling (`Qwen/Qwen3.5-35B-A3B`) to exercise the
   validators before the real weights load.
 
 **After step 1**

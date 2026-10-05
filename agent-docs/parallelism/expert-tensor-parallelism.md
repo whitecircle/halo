@@ -14,9 +14,10 @@ Use ETP when expert weights don't fit per rank after EP distribution and attenti
 Per-rank expert memory drops ~`expert_tp_size`×; ranks in the same ETP group share a batch, reducing
 DP.
 
-`expert_tp_size` is mutually exclusive with attention TP (`tp_size`) and with CP (`cp_size`):
-ETP partners hold shards of one expert and must see the **same** tokens, since `ReduceFromExpertTP`
-sums their outputs element-wise in token space, while CP hands each rank a different sequence chunk.
+`expert_tp_size` is mutually exclusive with attention TP (`tp_size`), which would shard the same
+ranks along a second axis, and with CP (`cp_size`): ETP partners hold shards of one expert and must
+see the **same** tokens, since `ReduceFromExpertTP` sums their outputs element-wise in token space,
+while CP hands each rank a different sequence chunk.
 
 | Term | Meaning |
 |------|---------|
@@ -217,7 +218,7 @@ are [not yet available in this release](pipeline-parallelism.md).
 
 | Knob | Under ETP | Gate |
 |---|---|---|
-| expert LoRA | rejected at config time — the replicated adapter half would receive partial gradients and drift across ranks. `EPConfig` repeats the identical raise at group construction, and the vLLM sync's `merge_lora=True` gather guards it once more, unreachably | `ParallelismConfig` |
+| expert LoRA | rejected at config time — the replicated adapter half would receive partial gradients and drift across ranks. `EPConfig` repeats the identical raise at group construction, and every `merge_lora=True` gather (weight sync, merge-on-save) guards it once more, unreachably | `ParallelismConfig` |
 | `save_sharded_ep` | rejected — the merge script cannot reconstruct TP-sharded expert weights | `validate_ep_sharded_save` |
 | `use_hsdp` | rejected — ETP builds its own `(dp, tp)` mesh | `_validate_hsdp` |
 | `use_peft` / attention LoRA | supported — pure ETP leaves attention unsharded, so the adapter is a genuine replica | — |

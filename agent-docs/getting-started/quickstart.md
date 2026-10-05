@@ -78,7 +78,7 @@ Use a 5–10× higher learning rate than full fine-tuning (`5e-5` vs `5e-6`).
 > [!WARNING]
 > **Parallelism limits**
 >
-> - Attention LoRA works under FSDP/DDP, CP, EP and ETP; it **raises** at construction under TP, EP+TP and PP.
+> - Attention LoRA works under FSDP/DDP, CP, EP and ETP; it **raises** at construction under TP, EP+TP and PP, and under offline GRPO with CP (full fine-tuning only).
 > - On any MoE model, expert names (`gate_up_proj`, `gate_proj`, `up_proj`, `down_proj`, the `gate_proj_gmm` / `up_proj_gmm` grouped spellings, and the `experts` / `mlp.experts` containers) are peeled out of `lora_target_modules` into native grouped adapters.
 > - That peel warns: plain `nn.Linear` MLPs sharing those names (dense prefix layers, shared experts) are adapted by neither half. `use_dora` and `lora_target_parameters` are rejected on that path, and `expert_tp_size > 1` rejects expert LoRA.
 > - A `use_peft: true` that would build no adapter raises rather than silently full-finetuning.
@@ -89,7 +89,7 @@ Merge adapters after training:
 
 ```bash
 python scripts/after_training/merge_peft_adapters.py \
-    --adapter_dir checkpoints/my-lora/checkpoint-final \
+    --adapter_dir checkpoints/my-lora/checkpoint-<step> \
     --output_dir checkpoints/my-merged-model
 ```
 
@@ -116,7 +116,7 @@ One flag per axis, combinable where the allowlist allows it — the per-mode com
 
 Before you burn a run:
 
-- **Single-node EP** must form one dispatch group per NVLink domain: `ep_size × expert_tp_size` = GPUs in the domain, or `ep_size` = 2. Anything narrower with `ep_size > 2` (ep4 on 8) is rejected at config time; its DeepEP combine barriers race FSDP2's collectives and hang.
+- **Single-node EP** must form one dispatch group per NVLink domain: `ep_size × expert_tp_size` = GPUs in the domain, or `ep_size` = 2. Anything narrower with `ep_size > 2` (ep4 on 8) is rejected at config time; its DeepEP combine barriers race FSDP2's collectives and fault or hang.
 
     For 4-way expert sharding on 8 GPUs use `ep4 + expert_tp2`; attention TP does not widen the dispatch group.
 
@@ -138,7 +138,7 @@ One `torchrun` per node with its own `--node_rank` (0 and 1 here); `halo launch`
 Run detached and point caches at a **verified** large volume (`df -h` / `findmnt` first — a `/mnt` path is not always a big array):
 
 ```bash
-D=/mnt   # ← your verified large volume
+D=/path/to/large-volume   # verified with df -h / findmnt
 HF_HOME=$D/hf HF_DATASETS_CACHE=$D/hf/datasets TMPDIR=$D/tmp HALO_DATA_ROOT=$D \
   nohup torchrun --nproc_per_node=8 scripts/training/sft.py \
     examples/sft/qwen3_5/qwen3.5-35b-a3b-ultrachat-ep.yaml &
@@ -170,7 +170,6 @@ Sources: HF Hub (`org/name[:config][@split]`), S3 (`s3://bucket/key` — the **f
 ## Verifying the setup
 
 ```bash
-python tests/cpu/environments/test_execution.py                    # CPU, no GPU
-torchrun --nproc_per_node=2 \                                      # 2 GPUs
-    tests/gpu/trainers/preference/test_smpo_fsdp.py
+python tests/cpu/environments/test_execution.py                         # CPU, no GPU
+torchrun --nproc_per_node=2 tests/gpu/trainers/preference/test_smpo_fsdp.py   # 2 GPUs
 ```

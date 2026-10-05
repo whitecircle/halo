@@ -29,6 +29,8 @@ Exactly **one** task per node — `srun` launches one `torchrun` per node, which
 
 A bare `srun --ntasks-per-node=N <script>` — one task per GPU, no `torchrun` — is refused at startup: SLURM declares the world through `SLURM_NTASKS` but supplies no `env://` rendezvous, so `MASTER_ADDR`/`MASTER_PORT` are unset and no process group can be built. Use the recipe below, or export both identically on every task.
 
+Ranks must sit `gpus_per_node` per machine in rank order: every node-local EP/CP/TP/ETP group is a contiguous rank block, so `ParallelismConfig` rejects a round-robin placement (`srun --distribution=cyclic` with an exported rendezvous). One `torchrun` per node, or `--distribution=block`, satisfies it.
+
 ```bash
 #!/bin/bash
 #SBATCH --nodes=2
@@ -70,9 +72,9 @@ export DIST_STORE_TIMEOUT_HOURS=4    # default; bounds c10d-store waits (main-fi
 export NCCL_SOCKET_IFNAME=<your fast NIC>  # multi-homed node: `ib0` on IB, the ENA iface on AWS
 # The image bakes the InfiniBand / RoCE defaults: NCCL_IB_HCA=mlx5, NCCL_IB_DISABLE=0,
 # NCCL_NET_GDR_LEVEL=2 (GPU Direct RDMA for inter-node EP), NCCL_P2P_LEVEL=NVL (NVLink intra-node P2P),
-# NCCL_DEBUG=WARN, and CUDA_DEVICE_MAX_CONNECTIONS=1 (DeepEP's free default —
-# agent-docs/infrastructure/deepep.md#environment-variables; the driver latches it at cuInit, so a
-# launch outside the image must export it before the process starts).
+# NCCL_DEBUG=WARN, and CUDA_DEVICE_MAX_CONNECTIONS=1 (required for multi-group EP, no throughput
+# cost — agent-docs/infrastructure/deepep.md#environment-variables; the driver latches it at cuInit,
+# so a launch outside the image must export it before the process starts).
 # On IB, leave NCCL_NET_PLUGIN unset: the OFI plugin yields to NCCL's built-in IB transport. Set
 # NCCL_IB_HCA only for a non-default HCA.
 # AWS EFA: set the plugin explicitly — the base's shinit_v2 sets it only for a shell that sources
@@ -144,7 +146,7 @@ python scripts/before_training/prepare_dataset.py \
     --assistant-message-template $'<|im_start|>assistant\n'
 ```
 
-The SFT trainer auto-detects the sharded layout and loads each rank's shards via `ShardedDatasetLoader` keyed on the **data-parallel** rank/size, not global world. Set `num_shards >= data_parallel_size`. Layout, the `num_shards >= data_parallel_size` hard requirement, and shard assignment are on [Data Loading → Pre-processed (sharded) datasets](data-loading.md#pre-processed-sharded-datasets).
+The SFT trainer auto-detects the sharded layout and loads each rank's shards via `ShardedDatasetLoader` keyed on the **data-parallel** rank/size, not global world, and refuses `num_shards < data_parallel_size`. Layout and shard assignment: [Data Loading → Pre-processed (sharded) datasets](data-loading.md#pre-processed-sharded-datasets).
 
 ## Troubleshooting
 
@@ -156,10 +158,10 @@ python scripts/profiling/nvlink_health.py --per-link  # every link
 python scripts/profiling/nvlink_health.py --json      # raw report, for a wrapper to parse
 ```
 
-**NVSHMEM not found for inter-node EP** — DeepEP V2 still links against NVSHMEM for device linking (`nvidia-nvshmem-cu13` on CUDA 13.x, a transitive dep of `torch 2.11+cu130`; `nvidia-nvshmem-cu12` on CUDA 12.x — never both). Rebuild DeepEP with the full env the build needs: [DeepEP → Build from source](../infrastructure/deepep.md#build-from-source), which clones upstream at the pinned commit.
+**NVSHMEM not found for inter-node EP** — DeepEP V2 links NVSHMEM for device linking only (`nvidia-nvshmem-cu13` on CUDA 13.x, a transitive dep of `torch 2.11+cu130`; `nvidia-nvshmem-cu12` on CUDA 12.x — never both). Rebuild DeepEP with the full env the build needs: [DeepEP → Build from source](../infrastructure/deepep.md#build-from-source), which clones upstream at the pinned commit.
 
 **RDMA connection timeout** — verify the fabric first (`ibstat` on IB/RoCE, `fi_info -p efa` on EFA — [RDMA fabrics](multi-node.md#rdma-fabrics)), then re-run with `NCCL_DEBUG=INFO` for the transport logs.
 
-**`context_parallel_size (16) cannot exceed the NVLink domain (8)`** — set `cp_size <= nvlink_domain_size` (= `gpus_per_node` on a standard cluster, the rack on NVL72). EP+CP also requires node-local EP (`ep_scope=node` with `ep_group_size == nvlink_domain_size`); `ParallelismConfig._validate_ep_cp` rejects cross-node EP (`ep_scope=global`) combined with CP. Cross-node EP combines with DP and TP (not CP) and requires InfiniBand/RDMA for its all-to-all.
+**`context_parallel_size (16) cannot exceed the NVLink domain (8)`** — set `cp_size <= nvlink_domain_size` (= `gpus_per_node` on a standard cluster, the rack on NVL72). EP+CP also requires node-local EP (`ep_scope=node` with `ep_group_size == nvlink_domain_size`); `ParallelismConfig._validate_ep_cp` rejects cross-node EP (`ep_scope=global`) combined with CP. Cross-node EP combines with DP, TP and ETP (not CP) and needs an RDMA fabric for its all-to-all.
 
 **Rendezvous never completes / one node hangs at startup** — every node must pass the identical `--nnodes`, `--master_addr`, `--master_port` and a distinct `--node_rank`, and every rank must reach `init_distributed` in the same order. Symptom-to-cause table for the rest: [Troubleshooting](../reference/troubleshooting.md).

@@ -73,7 +73,7 @@ per DP rank in DP order. It is an identity when `dp_size == world_size`.
 
 Pre-sharded datasets are rejected under `precompute_ref_log_probs`: the sweep gathers one set of
 log-probs in dataset order, which each rank would attach to its own different shard. Offline GRPO's
-full-finetuning KL sweep has the same restriction, across every non-CP mode; it requires finite,
+full-finetuning KL sweep has the same restriction in every mode, CP included; it requires finite,
 unsharded splits ([reference lifecycle](../training-methods/grpo/offline-grpo.md#reference-model)).
 
 The two paths shard by different indices — the standard path by global rank (one distinct batch per
@@ -126,17 +126,18 @@ minimum, keeping every rank's optimizer-step count equal; a global minimum of 0 
 
 ## Pre-processed (sharded) datasets
 
-SFT can load pre-processed datasets at the **shard level** before the DataLoader is built. SFT
-scripts pass DP rank/size (not global rank/world_size) into `load_datasets_auto()` so CP/TP group
-members load the same shards. Each DP rank takes a **contiguous** range of shards, remainder to the
-first ranks — 10 shards over 3 ranks gives `[4, 3, 3]` (`ShardedDatasetLoader`,
-`src/data/sources/sharded_dataset.py`).
+A sharded dataset (a `train/shard_index.json` layout) loads at the **shard level** before the
+DataLoader is built. Every training script passes DP rank/size (not global rank/world_size) to its
+loader (`load_script_datasets`, `src/training/script_runner.py`), so CP/TP/ETP group members load the
+same shards; SFT additionally detects a pre-processed (tokenized) dataset via `load_datasets_auto()`.
+Each DP rank takes a **contiguous** range of shards, remainder to the first ranks — 10 shards over 3
+ranks gives `[4, 3, 3]` (`ShardedDatasetLoader`, `src/data/sources/sharded_dataset.py`).
 
 **Hard requirement:** `num_shards >= data_parallel_size`. A train split with fewer shards **raises**
 at load time, since ranks with index `>= num_shards` would get zero examples; any other split warns.
-A missing or globally empty `train`/`test` split is rejected at load
-(`load_preprocessed_dataset`) — the sharded loader skips absent splits in silence, so the check is
-what turns that into a failure.
+A missing `train`/`test` split, or one empty on every rank, is rejected at load
+(`src/data/sources/loading.py`) — the sharded loader skips a split with no shard index, so the check
+is what turns that into a failure.
 
 The length-equalizer (`_equalize_presharded_length`, collective — every rank must reach it) runs for
 **both train and eval**: unequal per-rank lengths make ranks run different step counts and hang at
@@ -179,7 +180,7 @@ per-node scope: [Filesystem Handling](../data/filesystem-handling.md).
 - **Double-sharding:** a sampler that already shards DP (e.g. `MultiGroupSampler`) must pass
   `num_processes=1, process_index=0` to `_prepare_dataloader`, not let it resolve DP itself.
 - **Global rank instead of DP rank:** use `get_data_parallel_rank()` / `get_data_parallel_size()` for
-  samplers in TP/CP mode, not `accelerator.process_index` / world_size.
+  samplers under TP/CP/ETP/PP, not `accelerator.process_index` / world_size.
 - **Treating EP like TP:** EP does not reduce DP. `dp_size = world_size` for EP-only.
 - **Expecting a dataset list to shard:** `load_datasets` deliberately does not pass DP rank/size for
   a list path, so every entry loads whole — a sharded entry would otherwise get `1/dp` of its own

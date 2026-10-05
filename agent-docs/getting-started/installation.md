@@ -17,14 +17,14 @@
 
 ## Install with uv
 
-[uv](https://docs.astral.sh/uv/) is the package manager (PEP 621 `pyproject.toml` + `uv.lock`). `make install` shells out via `docker run`, so [build or pull the image](#docker-image) first; it installs an editable `-e .` plus the exported locked requirements (with the `gigatoken` and `flash-optimizers` extras) over the compiled torch/FA/DeepEP the image already ships.
+[uv](https://docs.astral.sh/uv/) is the package manager (PEP 621 `pyproject.toml` + `uv.lock`). The images carry the project as an editable install at `/workspace`, so a checkout mounted there (`-v $(pwd):/workspace`) runs as-is once you [build or pull the image](#docker-image):
 
 ```bash
-pip install uv            # or: curl -LsSf https://astral.sh/uv/install.sh | sh
 git clone https://github.com/whitecircle/halo.git
 cd halo
-make install
 ```
+
+`make install` re-runs the locked sync in a throwaway `--rm` container: an editable `-e .` plus the exported locked requirements (with the `gigatoken` and `flash-optimizers` extras) over the compiled torch/FA/DeepEP the image ships. Nothing it installs outlives the command, so a dependency change takes an image rebuild.
 
 For a host `.venv` that powers IDE go-to-definition (`uv sync`), see [Development Environment](../contributing/development-environment.md). Optional: point `HF_HOME` at a **verified** large volume (`df -h` / `findmnt` — a `/mnt` path is not always a big array), `hf auth login` (gated models), `wandb login` (only for `report_to: wandb`).
 
@@ -32,8 +32,10 @@ For a host `.venv` that powers IDE go-to-definition (`uv sync`), see [Developmen
 
 | Image | ECR Public tag | Attention | GPUs |
 |---|---|---|---|
-| Blackwell | `blackwell` | FA2 + FA4 (CuTe DSL) + DeepEP | B200 (SM100) / B300 (SM103), x86_64 hosts only ([Docker](../infrastructure/docker.md)) |
+| Blackwell | `blackwell` | FA2 + FA4 (CuTe DSL) + DeepEP | B200 (SM100) / B300 (SM103) |
 | Hopper | `hopper` | FA2 + FA3 + DeepEP | H100 / H200 (SM90) |
+
+Both images are x86_64-only; Grace-based GB200/GB300 hosts (aarch64) are not covered ([Docker](../infrastructure/docker.md)).
 
 **Pull from ECR Public** — anonymous, no AWS account or login:
 
@@ -82,6 +84,6 @@ python -c "from flash_attn.cute import flash_attn_func; print('FA4 OK')"  # Blac
 ## Troubleshooting
 
 - **PyTorch does not detect CUDA** — check `nvidia-smi` (driver) and `nvcc --version` (toolkit); the PyTorch build must match the CUDA version.
-- **uv fails to resolve** — `uv lock --upgrade && make install`, or pin the interpreter with `uv python pin 3.12`.
+- **`make install` reports a stale lock** — it exports with `--locked`, so `pyproject.toml` and `uv.lock` must agree; re-lock with `uv lock` (`--upgrade` would drift from the exact versions the Dockerfile compiles).
 - **DeepEP build fails** — never mix `nvidia-nvshmem-cu13` and `nvidia-nvshmem-cu12`. See the [DeepEP guide](../infrastructure/deepep.md).
 - **Missing system libraries** — `apt install build-essential ninja-build zlib1g-dev libffi-dev libssl-dev libbz2-dev libreadline-dev libsqlite3-dev liblzma-dev libncurses-dev tk-dev`.

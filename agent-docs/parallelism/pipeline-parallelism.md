@@ -3,7 +3,7 @@
 **Status: not yet available in this release.** The pipeline-parallel seams ship — the config
 surface, the rank math, the trainer gates, and the stage/split/loss/checkpoint contracts — but the
 schedule engine that would drive microbatches through the stages does not.
-`pipeline_parallel_size > 1` is rejected at config time with a pointer to this page.
+`pipeline_parallel_size > 1` is rejected at config time.
 
 PP would split a model's decoder layers into contiguous **stages**, each owning a rank block, as
 the outermost parallelism dimension and the only one designed to cross NVLink domains — the only
@@ -21,9 +21,10 @@ argument: [GPU Training Theory §9](../reference/gpu-training-theory.md#pipeline
   `stage_base_rank`, `stage_local_rank`) are the base every other axis (EP/CP/TP/ETP) computes its
   groups from; at `pp_size == 1` they equal the world values. Validation pins stage boundaries to
   NVLink-domain boundaries and rejects single-rank stages. The
-  [capability-matrix allowlist](README.md#supported-combinations) admits PP only alone or with the
-  expert axes (PP+EP, PP+ETP); every other combination — PP+TP, PP+CP, PP+HSDP, and the rest — is
-  refused with the breaking mechanism named in the error.
+  [capability-matrix allowlist](README.md#supported-combinations) admits PP alone, PP+EP and PP+ETP;
+  every other axis combination (PP+TP, PP+CP, PP+EP+ETP, …) is refused with the breaking mechanism
+  named in the error. `_validate_pipeline_parallel` separately refuses the PP-incompatible knobs
+  (HSDP, expert LoRA, ZeRO-3, non-`bf16` low precision).
 - **Trainer gates.** `_supports_pp` is declare-to-enable per trainer (like `_supports_cp`), and
   `src/trainers/mixins/pp_gates.py` is the shared rejection vocabulary (PEFT, live reference
   models, `compute_metrics`, activation offloading, precomputed-reference-column requirements);

@@ -69,10 +69,11 @@ Two ways to group ranks, used where each fits:
   swap) rather than a layout-inferred redistribution.
 
     DeepEP also needs contiguous rank blocks for its intra-node kernel, which a mesh's row-major
-    order cannot produce. `src/distributed/expert_parallel/config.py` builds the EP dispatch,
-    expert-replica, sub-EP and expert-TP groups; the CP path takes its group directly. All rank math
-    (node-local vs cross-node, which dim divides `world_size`) lives in
-    `src/distributed/group_layout.py` and `ParallelismConfig`.
+    order cannot produce. `EPConfig` (`src/distributed/expert_parallel/config.py`) builds the EP,
+    expert-replica, dispatch (sub-EP) and expert-TP groups; `CPConfig`
+    (`src/distributed/context_parallel/config.py`) builds the CP groups. All rank math (node-local
+    vs cross-node, which dim divides `world_size`) lives in `src/distributed/group_layout.py` and
+    `ParallelismConfig`.
 
 What crosses the wire:
 
@@ -105,18 +106,17 @@ owning their routed experts, then returned in place after combine. CP splits the
 rank holds `seq_len / cp_size` tokens of its batch, and the Ulysses all-to-all reconstructs full
 sequences inside attention.
 
-Microbatching is TRL/Accelerate gradient accumulation (`gradient_accumulation_steps`); EP grad hooks
-skip cross-rank sync on accumulation steps.
-
 ### Stacking the dimensions
 
-The dimensions nest in a fixed order: EP, CP, TP, and ETP each carve their groups out of `world_size`
-first; whatever remains is the data-parallel dimension, and FSDP2 shards the non-expert params over
-it.
+`data_parallel_size` counts distinct batches: `world_size / max(tp_size, cp_size, expert_tp_size)`;
+EP does not reduce it. FSDP2's shard group is chosen per mode: the whole world for plain DP, CP, EP
+and ETP (CP and ETP ranks shard parameters even though they share a batch); the `dp` dimension of
+the `(dp, tp)` mesh under TP and EP+TP; and the EP group under multi-group EP across NVLink domains,
+where the cross-replica average is deferred to the post-backward sweep.
 
-HSDP is not a separate layer on top of FSDP2; it is how that DP dimension is meshed. The default is
-1D full-shard. Under `--use_hsdp` it is a 2D `(dp_replicate, dp_shard)` mesh that shards within one
-NVLink domain (`dp_shard_size = nvlink_domain_size`) and replicates across domains
+HSDP is not a separate layer on top of FSDP2; it is how the plain-DP or CP shard group is meshed.
+The default is 1D full-shard. Under `--use_hsdp` it is a 2D `(dp_replicate, dp_shard)` mesh that
+shards within one NVLink domain (`dp_shard_size = nvlink_domain_size`) and replicates across domains
 (`dp_replicate_size = num_nvlink_domains`).
 
 HSDP composes only with pure DP and CP; TP, EP, ETP and PP each reject it for their own reason. On a

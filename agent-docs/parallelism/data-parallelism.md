@@ -2,21 +2,24 @@
 
 PyTorch FSDP2 (`fully_shard`) handles gradient synchronization for `torchrun` multi-GPU training,
 applied automatically by `DistributedTrainerMixin` from the active parallelism mode. For training
-without EP/CP/TP, `accelerate launch` with a pre-built config provides FSDP v2 or plain DDP
+without EP/CP/TP/ETP, `accelerate launch` with a pre-built config provides FSDP v2 or plain DDP
 instead.
 
-The wrap decision keys on the **wrap width** each mode passes — the rank block, or the EP group under
-deferred DP — not on `data_parallel_size`. A single GPU and pure TP skip the wrap, QLoRA takes
-post-accumulate all-reduce hooks instead, and a CP run at `data_parallel_size == 1` is still wrapped
-over the whole rank block.
+The wrap decision keys on the **wrap width** each mode passes: the rank block for plain DP, CP and
+EP, the EP group under deferred DP, and the mesh's DP dimension (`data_parallel_size`) only under TP.
+A CP run at `data_parallel_size == 1` is still wrapped over the whole rank block; a single GPU and
+pure TP skip the wrap. QLoRA skips FSDP2 and averages its trainable gradients in one bucketed
+all-reduce sweep per optimizer step (`HALO_GRAD_BUCKET_MB`,
+[Configuration](../reference/configuration-reference.md#environment-variables)).
 
 ## Two launchers
 
-`torchrun` uses FSDP2 exclusively and is required for any EP/CP/TP run — the mixin coordinates FSDP2
-with parallelism-specific gradient hooks ([How the mixin manages FSDP](#how-the-mixin-manages-fsdp)).
+`torchrun` uses FSDP2 exclusively and is required for any EP/CP/TP/ETP run — the mixin coordinates
+FSDP2 with parallelism-specific gradient hooks ([How the mixin manages FSDP](#how-the-mixin-manages-fsdp)).
 
-`accelerate launch` reads an FSDP config YAML and is for standard multi-GPU without EP/CP/TP. Both
-paths produce equivalent results there. Dense models run under `accelerate launch` (FSDP or DDP) even
+`accelerate launch` reads an accelerate config YAML (FSDP or DDP) and is for standard multi-GPU
+without EP/CP/TP/ETP; those modes raise under it (`accelerate_launch_rejection`). Both paths produce
+equivalent results there. Dense models run under `accelerate launch` (FSDP or DDP) even
 at the default `use_grouped_gemm: true`: the grouped-GEMM expert wrappers only activate for MoE
 models.
 
@@ -126,19 +129,18 @@ so the measured peak is unchanged. With the trainer's NCCL on TCP sockets (the n
 step at `gradient_accumulation_steps: 24`.
 
 The window's **last** backward still reshards: the trainer arms the flag per microstep from
-`accelerator.sync_gradients` in `src/trainers/mixins/base.py`. That leaves one re-gather per
-optimizer step instead of one per microstep, so the saving scales with `gradient_accumulation_steps`
-and is nil at 1.
+`accelerator.sync_gradients` (`_set_window_end`, `src/trainers/mixins/grad_sync.py`). That leaves one
+re-gather per optimizer step instead of one per microstep, so the saving scales with
+`gradient_accumulation_steps` and is nil at 1.
 
 The last reshard is also mandatory. FSDP2's `post_backward` clears the unsharded parameters' `.grad`
 before reduce-scattering onto the sharded DTensors, so a module left unsharded
 hands `model.parameters()` grad-less tensors the optimizer never captured (grad norm 0, nothing
 clipped) while `unshard()` no-ops on it, hiding the optimizer's update from the next forward.
 
-The cost is one unsharded bf16 param copy per GPU held for the whole run, the optimizer step
-included; under ZeRO-2 the forward/backward peak already holds it. Plain-DP/CP/EP torchrun
-path only; rejected with `fsdp_reshard_after_forward: true` (contradicts FULL_SHARD's purpose), TP,
-or PP.
+The cost is one unsharded bf16 param copy per GPU held between a window's microsteps; under ZeRO-2
+each forward/backward already holds it. Plain-DP/CP/EP torchrun path only; rejected with
+`fsdp_reshard_after_forward: true` (contradicts FULL_SHARD's purpose), TP, or PP.
 
 ### Deferred gradient reduce (`fsdp_defer_grad_sync`)
 
@@ -184,9 +186,9 @@ width, slow inter-node fabric, small microbatches) and the memory is there.
 
 The in-backward EP expert and router hooks gate on the same `sync_gradients`, and the deferred EP
 sweep, the TP replicated-gradient sweep and the gradient clip run after the window's last backward,
-so all of them read the same reduced gradients as before. Rejected under PP (the schedule already
-reduces once per step), TP at `data_parallel_size==1` (no FSDP2 wrap to defer), QLoRA (no wrap;
-its sweep already runs once per step) and `fsdp_reshard_after_forward: true` (the held unsharded
+so all of them read the same reduced gradients as with the flag off. Rejected under PP (the schedule
+already reduces once per step), TP at `data_parallel_size==1` (no FSDP2 wrap to defer), QLoRA (no
+wrap; its sweep already runs once per step) and `fsdp_reshard_after_forward: true` (the held unsharded
 gradient is the state ZeRO-3 exists to shard; defer under ZeRO-2 instead). Under `accelerate launch`
 it is warned and ignored: accelerate's `no_sync` already skips the reduce on non-final microsteps.
 
@@ -199,11 +201,12 @@ faster than replicated experts on gpt-oss-20b at batch 1 and 4
 ([Throughput Benchmarks](../optimization/throughput-benchmarks.md#ep-only-batch-scaling)).
 
 Set it `false` to keep a full replicated copy on every DP rank (EP modules become FSDP
-`ignored_params`) — what `fp32_non_ep_params` and `ep_fp32_experts` need at ep1. No effect when
-`ep_group_size>1`.
+`ignored_params`) — what `fp32_non_ep_params` and `fp32_experts` need at ep1 (the first raises on a
+MoE at `true`, the second is skipped with a warning). No effect when `ep_group_size>1`.
 
-`false` raises at config time under TP, CP, or PP: those setup paths FSDP-shard ep1 experts
-unconditionally, so the flag is honored only on the pure-DP path.
+`false` raises at config time under TP or CP, whose setup paths FSDP-shard ep1 experts
+unconditionally, and under PP, where a MoE stage and a dense stage would run different clip
+collectives. The flag is honored only on the pure-DP path.
 
 The two flags compose into the EP1 sharding matrix (MoE, `ep_group_size==1`):
 
@@ -215,12 +218,13 @@ The two flags compose into the EP1 sharding matrix (MoE, `ep_group_size==1`):
 | `false` | `true` | replicated | ZeRO-3 |
 
 All four cells work for both SFT and online/async GRPO. At `ep_group_size==1` the MoE is
-still EP-wrapped (grouped-GEMM path) while `is_ep_mode` is `False`, so the GRPO vLLM weight-sync
-gather keys the EP expert reshape on the model carrying EP wrappers, not on `is_ep_mode`.
+still EP-wrapped (grouped-GEMM path) while `is_ep_mode` is `False`, so the GRPO weight-sync gather
+keys the EP expert reshape on the model's live EP layers, not on `is_ep_mode`.
 
-It materializes the FSDP-sharded experts (`materialize_dtensor`) before reshaping to vLLM's
-checkpoint layout. Without that the experts reach vLLM in the EP-internal layout, the server rejects
-them, and the weight-sync NCCL broadcast hangs.
+The family's `gather_expert_state_dict` materializes the FSDP-sharded experts (`materialize_dtensor`)
+before reshaping them to the hub checkpoint layout the rollout engine loads. Without that the experts
+reach the server in the EP-internal layout, the server rejects them, and the weight-sync NCCL
+broadcast hangs.
 
 ## HSDP (Hybrid Sharded Data Parallel)
 
@@ -262,7 +266,7 @@ torchrun --nnodes=2 --nproc_per_node=8 \
 
 ## Accelerate launch configs
 
-For standard multi-GPU without EP/CP/TP. Only the FSDP v2 configs shard; `multigpu_dp_config.yaml` is plain DDP.
+For standard multi-GPU without EP/CP/TP/ETP. Only the FSDP v2 configs shard; `multigpu_dp_config.yaml` is plain DDP.
 
 | Config file | Strategy | Use case |
 |-------------|----------|----------|
@@ -285,8 +289,8 @@ FSDP2 with [`--use_hsdp`](#hsdp-hybrid-sharded-data-parallel).
 > **Avoid accelerate FSDP v1**
 >
 > FSDP v1 SHARD_GRAD_OP and FULL_SHARD have a known PyTorch bug that can corrupt model state after
-> checkpoint saves during training. The mixin warns whenever accelerate is launched with an FSDP v1
-> sharding strategy. Use the FSDP v2 configs or DDP. The `torchrun` path is FSDP2-only and
+> checkpoint saves during training. The mixin warns when accelerate is launched with FSDP v1 at
+> either strategy. Use the FSDP v2 configs or DDP. The `torchrun` path is FSDP2-only and
 > unaffected.
 
 ## Data parallel size
@@ -310,10 +314,10 @@ loading, and an MoE under `accelerate launch` is rejected at load ([Two launcher
 
 Mixed precision is auto-detected from training args by `create_mixed_precision_policy_v2`
 (`src/distributed/fsdp.py`). With `fp32_non_ep_params: true`, non-expert params are
-stored fp32 while compute/comm use bf16 — an alternative to `AdamWBF16` when exact fp32 updates beat
-stochastic rounding (12 vs 6 B/param). The lighter `fp32_grad_reduce` sets `reduce_dtype=fp32`
-**without** moving storage, keeping BF16 masters while summing grads in fp32; this matters as world
-size grows.
+stored fp32 while compute and the param all-gather run in bf16 and gradients reduce in fp32 — an
+alternative to `AdamWBF16` when exact fp32 updates beat stochastic rounding (12 vs 6 B/param). The
+lighter `fp32_grad_reduce` sets `reduce_dtype=fp32` **without** moving storage, keeping BF16 masters
+while summing grads in fp32; this matters as world size grows.
 See [BF16 Optimizer](../optimization/bf16-optimizer.md#master-weight-and-grad-reduce-options).
 
 ## Limitations
@@ -321,8 +325,8 @@ See [BF16 Optimizer](../optimization/bf16-optimizer.md#master-weight-and-grad-re
 **Trainers.** All of them — plain DP is the fallback every trainer runs on, and no trainer declares
 a DP restriction.
 
-**Models.** All of them, dense and MoE. The one model-shaped rejection is a MoE with
-`use_grouped_gemm: true` under `accelerate launch` ([Two launchers](#two-launchers)).
+**Models.** All of them, dense and MoE. The MoE-only rejections are the table rows below that name a
+MoE.
 
 **Axis combinations.** DP is the residual width, not an axis in the
 [allowlist](README.md#supported-combinations) — EP/CP/TP/ETP each carve their groups first and
@@ -335,21 +339,22 @@ FSDP2 shards over what is left. HSDP is the exception with a scope of its own: p
 | `use_grouped_gemm: true` + MoE + `accelerate launch` | rejected — the wrappers need the mixin-managed FSDP2 path. Use `torchrun`, or `use_grouped_gemm: false` | `_validate_gmm_launch_method` |
 | multi-device `device_map` (e.g. `"auto"`) under `torchrun` | rejected — the FSDP2 setup cannot skip a rank-local bail-out before a collective mesh build | `src/distributed/fsdp.py` |
 | `bf16_optimizer: false` with a stock AdamW `optim` on a MoE with `fsdp_shard_ep1_experts: false` | rejected — fused AdamW cannot mix the unsharded plain expert tensors with FSDP2 DTensors. At the default `fsdp_shard_ep1_experts: true` the experts are DTensors too and it is allowed | `mixins/base.py` |
+| `fp32_non_ep_params` on a MoE at the default `fsdp_shard_ep1_experts: true` | rejected — the FSDP-managed experts stay bf16 beside fp32 dense params in one shard group, which FSDP2 refuses. Set `fsdp_shard_ep1_experts: false` | `validate_against_model_config` |
 | `fsdp_defer_grad_sync: true` or `fsdp_reshard_after_backward: false` with `fsdp_reshard_after_forward: true` | rejected — each holds unsharded state across the window ZeRO-3 exists to shard; use them under ZeRO-2 | `_validate_fsdp_settings` |
 | `use_hsdp`, `fsdp_reshard_after_forward`, `fsdp_reshard_after_backward`, `fsdp_defer_grad_sync`, `fp32_grad_reduce` under `accelerate launch` | warned and ignored — accelerate owns the wrap | `_ACCELERATE_UNSUPPORTED_KNOBS` |
 | `bf16_optimizer` auto-enable under accelerate DDP | warned and skipped — replicated DDP is outside the validated stochastic-rounding matrix; set it explicitly to override | `mixins/base.py` |
-| accelerate FSDP v1 sharding strategy | warned — a known PyTorch bug can corrupt model state after a save. Use the FSDP2 configs or DDP | `mixins/base.py` |
+| accelerate FSDP v1 at `SHARD_GRAD_OP` / `FULL_SHARD` | warned — a known PyTorch bug can corrupt model state after a save. Use the FSDP2 configs or DDP | `mixins/base.py` |
 | `use_hsdp` on a single NVLink domain | warned — no-op; the replica axis engages once the job spans domains | `_validate_hsdp` |
-| QLoRA / `load_in_4bit` | supported on a **dense** model. On a MoE the grouped-GEMM loader takes over and rejects a quantized base (`use_grouped_gemm` is on by default) — set `use_grouped_gemm: false`, under either launcher | `model_loading.py` |
-| `use_peft` / LoRA, `packing`, `padding_free`, `torch_compile`, `init_from_scratch`, `gradient_checkpointing` | supported and ungated — plain DP is the mode with the widest knob surface | — |
-| `lowp_precision != "bf16"` | SFT only | `parallelism_config_from_args` |
+| QLoRA / `load_in_4bit` | supported on a **dense** model. On a MoE the grouped-GEMM loader takes over and rejects a quantized base (`use_grouped_gemm` is on by default) — set `use_grouped_gemm: false`, under either launcher. QLoRA skips FSDP2, so `use_hsdp`, `fsdp_reshard_after_forward`, `fsdp_reshard_after_backward` and `fsdp_defer_grad_sync` raise under it | `model_loading.py`, `mixins/base.py` |
+| `use_peft` / LoRA, `packing`, `padding_free`, `torch_compile`, `gradient_checkpointing` | supported and ungated — plain DP is the mode with the widest knob surface | — |
+| `lowp_precision != "bf16"`, `init_from_scratch` | SFT only. `init_from_scratch` also refuses QLoRA and every EP/CP/TP/ETP/PP mode, so plain DP is the one mode it runs in | `parallelism_config_from_args`, `model_loading.py` |
 
 ## Common issues
 
-- **FSDP + Accelerate config conflict** — wrong FSDP strategy or double-wrapping under `torchrun`,
-  caused by HuggingFace FSDP fields (`fsdp`, `fsdp_config`) in the training YAML. Do not set them
-  when using `torchrun` with parallelism.
+- **HuggingFace FSDP fields in the training YAML** (`fsdp`, `fsdp_config`) do nothing for a
+  multi-GPU `torchrun` run: the training scripts blank `fsdp`, and the mixin's own accelerator
+  carries no HF FSDP plugin. Leave them out and use the knobs on this page.
 - **Gradient checkpointing with EP, CP or a MoE** — the mixin forces `use_reentrant=True` before
-  `super().__init__()`, even when the config sets `false` (the GRPO templates commonly do); the MoE
+  `super().__init__()`, even when the config sets `false` (several example configs do); the MoE
   mechanism is in [Flash Attention](../optimization/flash-attention.md#usage). The recompute replays
   the checkpoint frame's DeepEP dispatch instead of issuing a second one.

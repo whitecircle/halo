@@ -12,15 +12,15 @@ multi-turn environments → Async GRPO with Environments.
 | [SMPO](../training-methods/preference/smpo.md) | prompt + chosen + rejected | No | No | `scripts/training/preference/smpo.py` |
 | [DPO](../training-methods/preference/dpo.md) | prompt + chosen + rejected | Yes | No | `scripts/training/preference/dpo.py` |
 | [KTO](../training-methods/preference/kto.md) | prompt + completion + bool label | Yes | No | `scripts/training/preference/kto.py` |
-| [Offline GRPO](../training-methods/grpo/offline-grpo.md) | prompt + completions + rewards | No | No | `scripts/training/offline_grpo.py` |
-| [Online GRPO (RLVR)](../training-methods/grpo/online-grpo.md) | prompt + ground-truth answer | No | vLLM | `scripts/training/online_grpo/rlvr.py` |
-| [Async GRPO with Environments](../training-methods/grpo/async-grpo/README.md) | prompt (+ expected answer per env) | No | vLLM/SGLang + Ray | `scripts/training/environmental_grpo.py` |
+| [Offline GRPO](../training-methods/grpo/offline-grpo.md) | prompt + completions + rewards | Opt-in (`kl_beta > 0`) | No | `scripts/training/offline_grpo.py` |
+| [Online GRPO (RLVR)](../training-methods/grpo/online-grpo.md) | prompt + ground-truth answer | Opt-in (`beta > 0`) | vLLM | `scripts/training/online_grpo/rlvr.py` |
+| [Async GRPO with Environments](../training-methods/grpo/async-grpo/README.md) | prompt (+ expected answer per env) | Opt-in (`beta > 0`) | vLLM/SGLang + Ray | `scripts/training/environmental_grpo.py` |
 | [Distillation](../training-methods/distillation/README.md) | Conversation turns | Teacher | No | `scripts/training/distillation/teacher_distill.py` |
 | [Reward modeling](../training-methods/preference/reward-modeling.md) | chosen + rejected | No | No | `scripts/training/preference/rewards.py` |
 | [Classification](../training-methods/classification.md) | prompt + label | No | No | `scripts/training/classification.py` |
 | [Embedding](../training-methods/embedding.md) | Sentence pairs / triplets | No | No | `scripts/training/embedding.py` |
 
-Every trainer supports EP/TP/ETP. CP supports SFT, SMPO and offline GRPO full fine-tuning. Pipeline parallelism is
+Every trainer supports EP/TP/ETP. CP supports SFT, SMPO and offline GRPO (full fine-tuning only). Pipeline parallelism is
 [not yet available in this release](../parallelism/pipeline-parallelism.md). Full matrix:
 [Trainer Compatibility](../reference/trainer-architecture.md#trainer-compatibility).
 

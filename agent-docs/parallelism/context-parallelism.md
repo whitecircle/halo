@@ -33,9 +33,9 @@ sequence, backward swaps the dims. Per-family attention wrappers in `layers/` su
   all-to-all (no position gather), then Flash Attention with native GQA and zero transposes.
   Requires equal head_dim across Q/K/V.
 - **Legacy** (MLA families GLM4 MoE Lite / Mistral4): all-to-all, gather full-sequence position
-  embeddings, RoPE, then the MLA base's `_flash_attention` right-pads V to `qk_head_dim`, runs flash, and crops
-  back to `v_head_dim`. MLA's `v_head_dim` differs from `qk_head_dim`, so the optimized GQA path
-  cannot apply.
+  embeddings, RoPE, then the MLA base's `_flash_attention` right-pads V to `qk_head_dim` where
+  `v_head_dim` differs, runs flash, and crops back. MLA's compressed projections and rope/nope split
+  do not fit the optimized GQA path.
 
 ### Loss computation
 
@@ -60,15 +60,16 @@ probability of that chunk — and the FSDP average over CP ranks trains the mean
 terms at `router_aux_loss_coef`. That is not the whole-sequence term (a product of means does not
 split across chunks); a `cp_size` factor would only scale it `cp_size`×.
 
-The GRPO scoring seam uses `forward_hidden_states` on the CP wrapper to split a right-padded row
-without constructing vocabulary-wide logits. `cp_shift_against_full_labels` pairs local hidden
-states with the full row's next-token labels; the existing chunked output head scores those targets.
-Offline GRPO's per-row token-objective sums use the shared autograd-aware SUM in
-`src/distributed/context_parallel/autograd.py`, whose backward supplies the CP factor canceled by
-world-wide mean gradient synchronization. They must **not** also use the SFT
-loss's explicit `cp_size` multiplier. Offline GRPO uses this path for training, evaluation and
-reference scoring; online and environment GRPO remain unsupported. Its reference and resume
-contract is in [Offline GRPO](../training-methods/grpo/offline-grpo.md#reference-model).
+The GRPO scoring seam calls `forward_hidden_states` on the CP wrapper, which returns this rank's
+backbone hidden states without constructing vocabulary-wide logits. `cp_shift_against_full_labels`
+pairs them with the full row's next-token labels, and the vocab-chunked output head scores those
+targets. Offline GRPO's per-row token-objective sums (and SMPO's per-sequence sums) reduce through
+`cp_sum_rows` in `src/distributed/context_parallel/autograd.py`, an autograd-aware SUM whose
+backward supplies the CP factor canceled by world-wide mean gradient synchronization. They must
+**not** also use the SFT loss's explicit `cp_size` multiplier. Offline GRPO uses this path for
+training, evaluation and reference scoring; online and environmental GRPO do not declare CP. Its
+reference and resume contract is in
+[Offline GRPO](../training-methods/grpo/offline-grpo.md#reference-model).
 
 A model that returns an `aux_loss` while its config declares no `router_aux_loss_coef` **raises** — a
 stand-in weight would train a different objective than the same config without CP. Set the field
@@ -111,8 +112,9 @@ and the loss would silently differ from the same batch without CP.
 SMPO's collator left-pads prompts, so under CP run SMPO with `per_device_train_batch_size=1`, where
 no padding is emitted.
 
-Offline GRPO uses its own collator: it concatenates each prompt and completion before right-padding
-the full row, so unequal prompt lengths do not introduce left padding.
+Offline GRPO uses its own collator (`OfflineGRPOCPDataCollatorWithPadding`): it concatenates each
+prompt and completion, then right-pads the full row to a multiple of `cp_size`, so unequal prompt
+lengths do not introduce left padding.
 
 ### Supported model architectures
 
@@ -135,7 +137,7 @@ no separate accept list to keep in sync.
 
 **Not supported on production checkpoints:**
 
-- **Qwen3.5 / Qwen3.6** — the full-attention wrapper exists, but every released checkpoint also ships `Qwen3_5MoeGatedDeltaNet` linear-attention layers (sequence-axis Conv1d + recurrent scan) that can't be sharded. Validation rejects any config whose `layer_types` contains `"linear_attention"`. See [qwen3_5.md — Why CP is blocked on real checkpoints](../models/qwen3_5.md#why-cp-is-blocked-on-real-checkpoints).
+- **Qwen3.5 / Qwen3.6** — the full-attention wrapper exists, but every released checkpoint also ships `Qwen3_5MoeGatedDeltaNet` linear-attention layers (sequence-axis Conv1d + recurrent scan) that can't be sharded. Validation rejects the `GatedDeltaNet` classes by name, and any config whose `layer_types` contains `"linear_attention"`. See [qwen3_5.md — Why CP is blocked on real checkpoints](../models/qwen3_5.md#why-cp-is-blocked-on-real-checkpoints).
 - **Ring-mini-linear-2.0** (`bailing_moe_linear`) — Lightning Attention-2 in most layers; validation rejects `BailingMoeV2LinearAttention` by name. Ling 2.0 itself is supported (table above).
 - **Ling 3.0** (`bailing_hybrid`) — 3 of every 4 layers are `BailingMoeV3KimiDeltaAttention`, a KDA linear recurrence, and the MLA layers carry no wrapper; validation rejects the model as having no supported attention module.
 - **LFM-2** — hybrid short-convolution layers mix tokens along the sequence axis, so a Ulysses split severs the conv receptive field.
@@ -144,7 +146,7 @@ no separate accept list to keep in sync.
 - **Inkling** — `InklingShortConvolution` runs a depthwise causal `Conv1d` over the sequence axis, and position enters as an additive relative-logits bias `flash_attn_func` cannot take (the family declares `_supports_flash_attn = False`). Validation rejects the conv class. Use EP (optionally + ETP) instead — see [Inkling](../models/inkling.md).
 - **Zaya** — the CCA front-end runs depthwise + grouped `Conv1d` (kernel size 2) along the sequence axis and concatenates a delayed `v_proj_delayed(h_{t-1})` into V; both cross Ulysses chunk boundaries and would need a per-layer halo exchange the path does not provide.
 - **DeepSeek-V4** — the CSA/HCA compressors (and the Lightning Indexer scoring against them) pool non-overlapping token windows along the sequence axis, so a CP shard would compress incomplete windows at every chunk boundary. Validation rejects the classes. Use EP instead — see [DeepSeek-V4](../models/deepseek-v4.md).
-- **GLM-5 Next** (`glm5_next`) — 34 of 45 layers are `Glm5NextTextLinearAttention`, a KDA linear recurrence (sequence-axis conv1d k=4 + delta-rule scan); validation rejects the `"linear_attention"` entries in `layer_types`. Use EP instead — see [GLM-5 Next](../models/glm5-next.md).
+- **GLM-5 Next** (`glm5_next`) — 34 of 45 layers are `Glm5NextTextLinearAttention`, a KDA linear recurrence (sequence-axis conv1d k=4 + delta-rule scan); validation rejects the class by name (and the `"linear_attention"` entries in `layer_types`). Use EP instead — see [GLM-5 Next](../models/glm5-next.md).
 - **Step-3.7 Flash** — `Step3p7Attention` has no Ulysses wrapper registered, so validation rejects the model as having no supported attention module. Nothing architectural blocks a wrapper (plain full/sliding GQA; 64/96 heads and 8 KV heads divide cp 2/4/8). Use EP instead — see [Step-3.7 Flash](../models/step3p7.md).
 
 ## CP with EP
@@ -167,8 +169,8 @@ ep8/cp2 → DP4, ep8/cp4 → DP2, ep8/cp8 → DP1.
 **Pure CP on a MoE still gets expert wrappers.** `_load_cp_model` hands `load_model_for_cp` an
 `ep_size == 1` EP config whenever `needs_ep_wrappers` holds and the model declares experts, so the
 MoE blocks run the [grouped-GEMM](../optimization/grouped-gemm.md) expert path rather than the stock
-per-expert loop — `needs_ep_wrappers` forces Liger's swiglu/geglu off either way, so without it the
-model would pay that cost for no speedup. Dense models under CP get no EP config.
+per-expert loop — `needs_ep_wrappers` forces Liger's routed-expert swiglu/geglu off either way, so
+without it the model would pay that cost for no speedup. Dense models under CP get no EP config.
 
 ## Usage
 
@@ -194,12 +196,11 @@ Programmatic: `parallelism_config=ParallelismConfig(ep_size=8, cp_size=8)`.
 on by default), and the saver ladder checks for EP layers first, so EP+CP and even `ep_size=1`
 MoE take the EP save — which strips the `.original_attention.` prefix itself.
 
-The CP save runs on the FS-aware main process via `trainer.save_model(output_dir)`, using
-`_find_cp_wrapper()`, which finds the wrapper on the compile-unwrapped model, directly or under
-PEFT. The wrapper's
-`state_dict()` remaps `.original_attention.` keys to standard paths and drops the duplicate dense
-`.mlp.{gate,up,down}_proj` keys only on layers carrying routed experts — genuinely dense layers keep
-their dense MLP weights.
+`trainer.save_model(output_dir)` gathers on every rank and the FS-aware save rank writes.
+`_find_cp_wrapper()` finds the wrapper on the compile-unwrapped model, directly or under PEFT. The
+wrapper's `state_dict()` remaps `.original_attention.` keys to standard paths and drops the
+duplicate dense `.mlp.{gate,up,down}_proj` keys only on layers carrying routed experts — genuinely
+dense layers keep their dense MLP weights.
 
 On resume CP is a **Path B** mode: the trainer skips the checkpoint weight-reload (the CP wrapper
 changes the module tree). The training scripts repoint `model_name_or_path` at the checkpoint so
@@ -231,16 +232,18 @@ Qwen3-8B, CP=2, seq 16384, 2 GPUs (Blackwell)). Use Liger (default on).
 
 **Trainers.** CP is declare-to-enable (`_supports_cp`, default `False`): only
 `DistributedSFTTrainer`, `SmoothMarginPOTrainer` and `OfflineGRPOTrainer` declare it. Offline GRPO
-requires full fine-tuning and rejects PEFT and native expert adapters. Every other trainer raises at
-construction, and its entry script rejects `--context_parallel_size > 1` earlier through
+under CP requires full fine-tuning: it rejects PEFT and native expert LoRA at any `kl_beta`, and an
+explicit `ref_model`, since it scores the run-start reference through the distributed policy
+(`_reject_cp_explicit_options`). Every other trainer raises at construction, and its entry script
+rejects `--context_parallel_size > 1` earlier through
 `parallelism_config_from_args(..., trainer_cls=...)`, which reads the same flag. Full matrix:
 [Trainer Compatibility](../reference/trainer-architecture.md#trainer-compatibility). Nothing
 inspects a trainer's loss for CP-safety, so a new trainer must verify its own objective before
 declaring the flag.
 
 **Models.** Only the wrappers in the [table above](#supported-model-architectures); anything else
-raises `UlyssesConfigError`. Linear-attention and window-pooling blocks are rejected by class name
-even when the surrounding attention is wrapped.
+raises `UlyssesConfigError`. Linear-attention, sequence-axis convolution and window-pooling blocks
+are rejected by class name even when the surrounding attention is wrapped.
 
 **Generation.** `UlyssesCPModelWrapper.generate()` raises: each rank holds one sequence chunk and the
 Ulysses attention has no KV-cache path. Generate from a saved checkpoint without CP.
@@ -266,8 +269,8 @@ not activations) — that is the case CP exists for.
 | `accelerate launch` | rejected — CP requires `torchrun` | `model_loading.py` and `ParallelismValidationMixin` |
 | `gradient_checkpointing` | supported; `use_reentrant` is forced to `True` (warned when the config sets `false`) | `mixins/base.py` |
 | `use_liger_kernel` | supported; `cross_entropy` and `fused_linear_cross_entropy` are forced off (warned when explicitly enabled) | `kernels/liger/orchestrator.py` |
-| `use_peft` / LoRA | supported for SFT and SMPO — CP leaves attention unsharded, so adapters stay replicated; offline GRPO rejects adapters | `OfflineGRPOTrainer` |
-| QLoRA (`load_in_4bit`) | supported for SFT and SMPO on a **dense** model — CP keeps the standard loader and preserves `Params4bit`. On an MoE the grouped-GEMM loader takes over and rejects a quantized base (`use_grouped_gemm` is on by default); offline GRPO rejects adapters | `model_loading.py`, `OfflineGRPOTrainer` |
+| `use_peft` / LoRA | supported for SFT and SMPO — CP leaves attention unsharded, so adapters stay replicated; offline GRPO rejects adapters | `_reject_cp_explicit_options` (offline GRPO) |
+| QLoRA (`load_in_4bit`) | supported for SFT and SMPO on a **dense** model — CP keeps the standard loader and preserves `Params4bit`. On an MoE the grouped-GEMM loader takes over and rejects a quantized base (`use_grouped_gemm` is on by default); offline GRPO rejects adapters | `model_loading.py`, `_reject_cp_explicit_options` |
 | `use_hsdp`, `fsdp_reshard_after_forward` | supported — CP is one of HSDP's two accepted paths (pure DP, CP) and one of ZeRO-3's EP-free shapes | `_validate_hsdp`, `_validate_fsdp_settings` |
 | `torch_compile` | not gated, and no measured benefit — the all-to-all breaks the graph at every attention layer | — |
 | `save_sharded_ep` | rejected on a CP run — per-rank shards carry `.original_attention.` keys the merge script cannot remap | `validate_ep_sharded_save` |

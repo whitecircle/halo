@@ -141,7 +141,9 @@ and `_sync_tp_replicated_grads` sums them once per optimizer step. A name missin
 AVG-reduced as a plain replica, i.e. `1/tp_size` of its true gradient.
 
 MLA families are exempt: their `q_a`/`kv_a` norms sit *before* the colwise expansion, where
-DTensor's `Replicate` backward already all-reduces.
+DTensor's `Replicate` backward already all-reduces. The rope half of their `kv_a_proj_with_mqa`
+output bypasses `kv_b_proj`, so a forward hook (`register_mla_rope_grad_reduction`) sums its
+gradient over the TP group.
 
 Transformers' own `ReplicatedWithGradAllReduce` is deliberately **not** used: its
 `full_backward_hook` re-reduces whatever sits in `.grad` on every backward, so under gradient
@@ -280,7 +282,7 @@ single-domain multi-group EP with `ep_size > 2` (`ep4+tp2` on 8) and multi-domai
 | `ref_model` (explicit) | rejected — the reference is never parallelized, so its log-probs would not match the policy | `_validate_reference_model` |
 | `load_best_model_at_end` | supported under pure TP — the reload distributes each checkpoint tensor into the live placements; rejected as a full fine-tune under TP+DP and under a MoE carrying EP/grouped-GEMM wrappers | `_validate_load_best_model_reloadable` |
 | `use_liger_kernel` | supported; `cross_entropy` and `fused_linear_cross_entropy` are forced off (warned when explicitly enabled) | `kernels/liger/orchestrator.py` |
-| `added_special_tokens` that grow the vocab | unsupported on a dense **tied** model, whose embedding is a vocab-sharded DTensor: `resize_token_embeddings` dies in its mean-resizing Cholesky, which has no DTensor sharding strategy. Patch the vocab offline (`scripts/before_training/patch_vocab.py`) instead | — (raises in transformers) |
+| `added_special_tokens` that grow the vocab | rejected on a dense **tied** model, whose embedding is a vocab-sharded DTensor that `resize_token_embeddings` cannot re-shard. Patch the vocab offline (`scripts/before_training/patch_vocab.py`) instead | `setup_model_and_tokenizer` (`input_embeddings_tp_sharded`) |
 | `gradient_checkpointing`, `packing`, `padding_free`, `lowp_precision`, `moe_balancing` | not gated under TP | — |
 | `torch_compile` | not gated, and no meaningful speedup — DTensor's sharded-op dispatch breaks the graph at every sharded op. Use Liger | — |
 

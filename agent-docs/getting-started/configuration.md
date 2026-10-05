@@ -91,7 +91,7 @@ resolve there, not against the caller's directory.
 a `__main__` guard. A tool keeps the **caller's** working directory: its relative path flags mean what
 they would had the script been run directly.
 
-EP/CP/TP/ETP/PP under `accelerate launch` **raise** at startup for any `distributed_type` (pure ETP folds into the EP check, which keys on `ep_group_size > 1`). The guard (`is_accelerate_launch`, `src/env.py`) keys on `ACCELERATE_MIXED_PRECISION` — set by the launcher for every config — or `ACCELERATE_USE_FSDP`. Use `torchrun`.
+EP/CP/TP/ETP/PP under `accelerate launch` **raise** at startup for any `distributed_type` (pure ETP folds into the EP check, which keys on `ep_group_size > 1`). The guard (`is_accelerate_launch`, `src/env.py`) keys on `ACCELERATE_MIXED_PRECISION` — set by the launcher for every config — or `ACCELERATE_USE_FSDP`. Use `torchrun`. An MoE model raises under `accelerate launch` too unless `use_grouped_gemm: false`: the grouped-GEMM expert wrappers (on by default) need `torchrun`.
 
 | Scenario | Command |
 |---|---|
@@ -107,7 +107,7 @@ EP/CP/TP/ETP/PP under `accelerate launch` **raise** at startup for any `distribu
 
 EP+ETP (`ep_size>1` and `expert_tensor_parallel_size>1`) is supported but experimental: the expert-TP reduction runs in token space so the coupled DeepEP dispatch groups don't deadlock the combine barrier under FSDP2. Its expert-TP groups stay NVLink-local — across domains it runs as one EP group with exactly one ETP group per domain — and it cannot combine with attention TP. See [ETP validation rules](../parallelism/expert-tensor-parallelism.md#validation-rules).
 
-FSDP2 (`fully_shard`) is applied automatically for all `torchrun` modes, with gradients and optimizer states sharded across DP ranks; EP/CP exclude the EP modules except at `ep_group_size == 1`, where `fsdp_shard_ep1_experts` (default `true`) hands the experts to FSDP2 as well ([Data Parallelism](../parallelism/data-parallelism.md)).
+FSDP2 (`fully_shard`) is applied automatically for all `torchrun` modes, with gradients and optimizer states sharded across DP ranks; the EP modules stay outside FSDP2 except at `ep_group_size == 1`, where `fsdp_shard_ep1_experts` (default `true`) hands the experts to FSDP2 as well ([Data Parallelism](../parallelism/data-parallelism.md)).
 
 Three `torchrun`-only knobs tune it: `fsdp_reshard_after_forward` (ZeRO-3), `fsdp_reshard_after_backward` (keep params unsharded across an accumulation window) and `fsdp_defer_grad_sync` (reduce once per optimizer step). Each row in [ParallelismConfig](../reference/configuration-reference.md#parallelismconfig) states its refusals; the measured trade-offs are in [ZeRO-2 vs ZeRO-3](../parallelism/data-parallelism.md#zero-2-vs-zero-3-reshard_after_forward) and [Deferred gradient reduce](../parallelism/data-parallelism.md#deferred-gradient-reduce-fsdp_defer_grad_sync).
 

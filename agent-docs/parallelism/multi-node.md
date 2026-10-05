@@ -90,7 +90,7 @@ The sweep contributes every param structurally instead (a missing grad is zero-f
 that survives on a single-group EP run carries no collective: it only divides by
 `world_size / expert_tp_size`.
 
-`EPConfig.is_deferred_dp` sits on top and is still **multi-node** — `num_ep_groups > 1`,
+`EPConfig.is_deferred_dp` is narrower and **multi-domain only** — `num_ep_groups > 1`,
 `ep_group_size > 1`, more than one NVLink domain, no expert-TP. (Attention TP needs no term of its
 own: `ParallelismConfig` rejects multi-domain multi-group EP+TP at config time.) It does not gate the
 sweep. It decides that FSDP shards the non-expert params over `process_group` (the EP group) instead
@@ -117,8 +117,8 @@ the stage's block under PP:
 enforced once per optimizer step — its expert `SUM / world_size` leg is not idempotent, so a second
 pass raises rather than halving every expert gradient.
 
-Single-domain multi-group EP with dispatch groups wider than 2 ranks stays hard-blocked rather than
-deferred: that rejection is about FSDP2's DP-wide reduce-scatter racing the narrower DeepEP combine,
+Single-domain multi-group EP with dispatch groups wider than 2 ranks is rejected at config time
+rather than deferred: the race is FSDP2's DP-wide reduce-scatter against the narrower DeepEP combine,
 which moving the cross-replica average out of the backward does not address.
 
 ## Configuration matrix
@@ -185,8 +185,8 @@ mix gradient slices from different weight positions. Ranks sharing a TP position
 `[0,8], [1,9], …` for 2 nodes × 8 GPUs at TP=8.
 
 **CP:** syncs across all ranks whenever `cp_size > 1`, even at `data_parallel_size == 1` — each rank
-holds partial gradients from its sequence chunk. FSDP's `all_reduce(SUM) / world_size` yields the
-correct mean because `world_size = num_batches × cp_size`.
+holds partial gradients from its sequence chunk. The CP loss carries a `cp_size` factor that cancels
+FSDP2's `1/world_size` average ([Context Parallelism → Loss computation](context-parallelism.md#loss-computation)).
 
 **HSDP (`--use_hsdp`):** the default 1D full-shard path sends every shard collective over RDMA. `--use_hsdp`
 switches to a 2D `(dp_replicate, dp_shard)` mesh that shards within each NVLink domain and
@@ -238,7 +238,7 @@ config = ParallelismConfig(ep_size=8, tp_size=8, ep_scope="node")
 | `cp_size` | Context parallel size | 1 |
 | `tp_size` | Tensor parallel size (attention) | 1 |
 | `expert_tp_size` | Expert FFN TP size (MoE-only) | 1 |
-| `pp_size` | Pipeline stages — only `1` accepted in this release ([Pipeline Parallelism](pipeline-parallelism.md)) | 1 |
+| `pp_size` | Pipeline stages — the entry scripts reject `> 1` in this release ([Pipeline Parallelism](pipeline-parallelism.md)) | 1 |
 | `ep_scope` | `"node"`, `"global"`, or `"auto"` (node-local when the EP group fits one domain) | `"auto"` |
 | `world_size` / `gpus_per_node` / `nvlink_domain_size` | Override the detected topology | 0 (auto) |
 
@@ -249,8 +249,9 @@ YAML-built one. Derived fields: `data_parallel_size`,
 
 ## DeepEP inter-node communication
 
-`DeepEPDispatcher` (`src/distributed/expert_parallel/dispatcher.py`) owns one lazy
-`deep_ep.ElasticBuffer` per EP layer and selects the transport from the EP topology: intra-node uses
+`DeepEPDispatcher` (`src/distributed/expert_parallel/dispatcher.py`) shares one lazily built
+`deep_ep.ElasticBuffer` across every MoE layer on an EP group (`HALO_EP_CAPACITY_DEDUP=0` gives each
+layer its own) and selects the transport from the EP topology: intra-node uses
 the NVLink (non-Gin) path; inter-node (`requires_rdma=True`) uses the NCCL Gin backend
 (GPU-Initiated Networking / RDMA, e.g. AWS EFA). The dispatcher sets `EP_DISABLE_GIN` (`0`
 inter-node, `1` intra-node) at buffer construction; an explicit env value is honored.
@@ -395,8 +396,8 @@ naming the first failing rank) if any rank has no IMEX channels, reports an NVLi
 registration other than `COMPLETED` (`nvidia-smi` "Fabric State"), or sees no fabric clique at all.
 
 Without them the declaration promises cross-OS-node NVLink P2P that fails deep inside the first
-collective instead. At or below the threshold nothing is checked; outside a live job the same
-verdict only logs.
+collective instead. At or below the threshold only the unset-`NVLINK_DOMAIN_SIZE` warning runs;
+outside a live job the same verdict only logs.
 
 > [!WARNING]
 > **DeepEP on NVL72**
