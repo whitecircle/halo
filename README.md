@@ -214,17 +214,18 @@ A typical run is: **pick an `examples/` config → `halo launch <method> <config
 ## Benchmarks
 
 Benchmarks below were run on B300, 8 GPUs unless a row says otherwise, on 2026-10-03 at commit 0bc3a22a5 with
-the Blackwell image; the 256k-context row and the FA4 kernel figure are from v1.0.0. The stock TRL baseline
-uses `trl.SFTTrainer` with Transformers v5 and FSDP2 ZeRO-3, with the same model, data, bf16
-precision, FlashAttention 4, Liger kernels, and grouped GEMM.
+the Blackwell image (the EP8 and 16k EP8+CP8 figures on 2026-10-05 at commit 0e9a51172); the 256k-context
+row and the FA4 kernel figure are from v1.0.0. The stock TRL baseline uses `trl.SFTTrainer` with Transformers
+v5 and FSDP2 ZeRO-3, with the same model, data, bf16 precision, FlashAttention 4, Liger kernels, and grouped
+GEMM.
 
 | Result | Configuration |
 |---|---|
-| **2.6–3.5× stock TRL throughput** | gpt-oss-20b, 4k–16k; EP2 / dense EP1 (EP8: 1.3–2.3×). Loss matches the baseline to within 0.6% by step 100. |
+| **2.6–3.5× stock TRL throughput** | gpt-oss-20b, 4k–16k; EP2 / dense EP1 (EP8: 1.7–2.8×). Loss matches the baseline to within 0.8% by step 100. |
 | **28,700 tok/s/GPU** | gpt-oss-20b, dense EP1, 4k, batch 4, GC off — ~230k tok/s across 8 GPUs. |
 | **16,447 tok/s/GPU at 1,908 TFLOPS** | Qwen3.5-35B-A3B, 4k, batch 4, EP2 — the highest achieved TFLOPS of any EP>1 run benchmarked. |
 | **Up to 256k context** | gpt-oss-20b; dense EP1 is 2.1× faster than TRL at 64k and 1.28× at 256k. EP8+CP8 and dense CP-only run at about half TRL's per-GPU memory. |
-| **24–76 GiB/GPU on the same 16k workload** | EP8+CP8: 24.4 GiB at 6,716 tok/s/GPU. Dense EP1: 75.8 GiB at 20,690 tok/s/GPU. |
+| **25–76 GiB/GPU on the same 16k workload** | EP8+CP8: 24.6 GiB at 7,149 tok/s/GPU. Dense EP1: 75.8 GiB at 20,690 tok/s/GPU. |
 | **2.56× Grouped GEMM** | Qwen3-30B-A3B, 2× B300, EP2, 8k, batch 4, GC on; 4.58× at batch 1. |
 | **3.6–3.9× FA4 kernel throughput** | FA4 vs FA2 on the isolated kernel (B2×S8192, head_dim 128); up to 2.3× end-to-end on dense Qwen3-4B at 32k (1× B300). |
 

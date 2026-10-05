@@ -5,25 +5,25 @@ do nothing at MoE shapes.
 
 ## Rough numbers
 
-Measured 2026-10-03 on B300 (Blackwell) at commit 0bc3a22a5 with the
-Blackwell image, bf16, Liger and grouped GEMM on, Flash Attention 4 where the
-family takes it (Qwen3.5 falls back to SDPA). Tokens per second per GPU, so a
-number scales by the GPU count:
+Measured 2026-10-03 on B300 (Blackwell) at commit 0bc3a22a5 (the GPT-OSS `ep8`
+rows 2026-10-05 at commit 0e9a51172) with the Blackwell image, bf16, Liger and
+grouped GEMM on, Flash Attention 4 where the family takes it (Qwen3.5 falls back
+to SDPA). Tokens per second per GPU, so a number scales by the GPU count:
 
 | Model | Shape | tok/s/GPU |
 | --- | --- | --- |
 | Qwen3-4B dense | 1 GPU, batch 16 × 2048, no checkpointing | 41,000 |
 | GPT-OSS 20B | 8 GPUs, `ep1`, batch 4 × 4096, no checkpointing | 28,700 |
 | Qwen3.5-35B-A3B | 8 GPUs, `ep2`, batch 4 × 4096, checkpointing on | 16,400 |
-| GPT-OSS 20B | 8 GPUs, `ep8`, batch 4 × 4096, checkpointing on | 10,400 |
-| GPT-OSS 20B, 32k context | 8 GPUs, `ep8 + cp8`, checkpointing on | 7,600 |
+| GPT-OSS 20B | 8 GPUs, `ep8`, batch 4 × 4096, checkpointing on | 13,200 |
+| GPT-OSS 20B, 32k context | 8 GPUs, `ep8 + cp8`, checkpointing on | 9,000 |
 
 Two things to read out of that table. Expert parallelism costs throughput — at
-batch 4, 4k and checkpointing on for both, `ep1` runs about 2.3× `ep8` on the same
-model (23,590 vs 10,358 tok/s/GPU; the `ep1` row above has checkpointing off) —
+batch 4, 4k and checkpointing on for both, `ep1` runs about 1.8× `ep8` on the same
+model (23,590 vs 13,239 tok/s/GPU; the `ep1` row above has checkpointing off) —
 because it trades local parameters for all-to-all traffic, so pick the
 *lowest* EP that fits rather than the largest your GPUs allow. And context parallelism is a way to afford a
-long sequence, not a way to go faster: it holds memory to 24–42 GiB from 16k to
+long sequence, not a way to go faster: it holds memory to 25–42 GiB from 16k to
 64k tokens and buys no speed. Sharding buys capacity — a 119B MoE trains on four
 GPUs at `ep2 + etp2` — and you pay for it in tokens per second.
 
@@ -36,11 +36,11 @@ latency-bound and the GPUs are waiting, not computing. Turn on
 
 | Lever | What it buys |
 | --- | --- |
-| Bigger `M` — raise `per_device_train_batch_size` or `max_length` | the single largest effect; batch 1 → 4 at 4k is 1.2–2.5× on MoE, least at high EP, and at 16k `ep8` loses throughput under batch (its dispatch grows with tokens per rank). Fill the global batch with `gradient_accumulation_steps`, not more parallelism |
-| `gradient_checkpointing: false` when activations fit | +30% on GPT-OSS `ep8` at 4k, at roughly double the peak memory |
+| Bigger `M` — raise `per_device_train_batch_size` or `max_length` | the single largest effect; batch 1 → 4 at 4k is 1.2–2.5× on MoE, least at high EP, and at 16k `ep8` gains only ~5% from batch 2 (its dispatch grows with tokens per rank). Fill the global batch with `gradient_accumulation_steps`, not more parallelism |
+| `gradient_checkpointing: false` when activations fit | +29% on GPT-OSS `ep8` at 4k, at about 1.8× the peak memory |
 | `packing: true` | 14.5× on a corpus averaging a quarter of `max_length` (`padding_free: true`: 4.5×); nothing when rows already fill it |
 | `use_grouped_gemm: true` (default on SM90+) | 2.6–4.6× end-to-end on Qwen3-30B-A3B at `ep2` (2× B300, 8k, batch 4 to 1) — one batched expert matmul instead of a loop |
-| Flash Attention 4 (auto on Blackwell) | 1.2× FA2 at 4k rising to 2.3× at 32k on dense; ~+14% on MoE, where all-to-all dominates |
+| Flash Attention 4 (auto on Blackwell) | 1.2× FA2 at 4k rising to 2.3× at 32k on dense; ~+17% on MoE, where all-to-all dominates |
 | `use_liger_kernel: true` (default) | +39% and 28 GiB on Qwen3-30B-A3B at `ep2` (2× B300, 8k, batch 4), +6.6% on Qwen3.5-35B-A3B; add `liger_kernel_config: {fused_linear_cross_entropy: true}` past ~16k tokens, which trades 7–20% of speed for 14–30 GiB on GPT-OSS `ep1` (the cost shrinks as the sequence grows) |
 | `AdamWBF16` (automatic with `bf16: true`) | weights and optimizer state in 6 bytes/param where fp32-state AdamW needs 12, and about half the step time of `adamw_torch_fused` |
 | `fsdp_defer_grad_sync: true` and `fsdp_reshard_after_backward: false`, with `gradient_accumulation_steps > 1` | one gradient reduce and one parameter re-gather per optimizer step instead of per microstep. On one 8-GPU node the deferred reduce gives +5% on Qwen3-8B (+9% with both knobs) and +12% on Qwen3-30B-A3B at `ep_size: 1`; across two nodes over EFA it gives +9–13% on its own. Each keeps an unsharded copy per GPU (Qwen3-8B: +13 GiB for the gradients). The config refuses both under `fsdp_reshard_after_forward: true` (ZeRO-3). [Details](../agent-docs/parallelism/data-parallelism.md) ↗ |
@@ -80,9 +80,9 @@ all 20.7B parameters every micro-step, a fixed cost a short step cannot hide,
 while its AdamW keeps 12 bytes per parameter of fp32 state where `AdamWBF16`
 keeps 6. At the same ZeRO-3 sharding and expert kernel, dense Halo still leads
 2.5–3.2×. The `ep8` shape trades some of that speed back for memory:
-1.3–2.3× TRL at about half its footprint. None of it costs convergence — TRL,
+1.7–2.8× TRL at about half its footprint. None of it costs convergence — TRL,
 dense Halo, `ep2` and `ep8` reach the same loss over 200 seeded steps, within
-0.6% of each other by step 100.
+0.8% of each other by step 100.
 
 ## Going deeper
 

@@ -20,20 +20,20 @@ Grouped collapses those to `P` nodes (Qwen3.6: 256×2=512 → 2), so far fewer s
 
 `use_grouped_gemm: false` runs the per-expert loop. Grouped wins every measured cell below; what narrows its lead:
 
-**1. Few local experts per rank (primary lever).** Grouped's advantage is fusing launches across a rank's `num_experts / ep_size` local experts. Many (low EP) → large saving. Few (high EP) → a small one, since the loop's per-shape CUTLASS tile fits each expert's actual per-expert `M`.
+**1. Few local experts per rank (primary lever).** Grouped's advantage is fusing launches across a rank's `num_experts / ep_size` local experts. Many (low EP) → large saving. Few (high EP) → a smaller one, since the loop's per-shape CUTLASS tile fits each expert's actual per-expert `M`.
 
 Per-expert `M = ep_size × tokens_per_rank × top_k / num_experts`: tokens pool across the dispatch group, so per-rank rows `tokens_per_rank × top_k` are EP-invariant and M grows with `ep_size`. M modulates the trend: `grouped_mm` runs one shared ~128-wide M tile for all groups, so its edge is largest at small M and erodes as M grows.
 
-gpt-oss-20b (32 experts, top-4, seq 8192, 8× B300, FA4, GC on), grouped vs loop, plus Qwen3-30B-A3B (128 experts, ep2 → 64 local/rank; 2× B300, seq 8192, GC on: 14,536 vs 3,176 tok/s/GPU at b1, 18,956 vs 7,415 at b4) as the high-local-count anchor. Measured 2026-10-03 at commit 0bc3a22a5 on the Blackwell image, except the Qwen3.5 row (v1.0.0):
+gpt-oss-20b (32 experts, top-4, seq 8192, 8× B300, FA4, GC on), grouped vs loop, plus Qwen3-30B-A3B (128 experts, ep2 → 64 local/rank; 2× B300, seq 8192, GC on: 14,536 vs 3,176 tok/s/GPU at b1, 18,956 vs 7,415 at b4) as the high-local-count anchor. Measured 2026-10-03 at commit 0bc3a22a5 on the Blackwell image, except the gpt-oss-20b ep8 row (2026-10-05, commit 0e9a51172, median of 2) and the Qwen3.5 row (v1.0.0):
 
 | Model | EP | local experts/rank | b1 | b2 | b4 |
 |---|----|:------------------:|:---:|:---:|:---:|
 | gpt-oss-20b | ep2 | 16 | grouped +78% | — | +41% |
-| gpt-oss-20b | ep8 | 4 | grouped +10% | +7.1% | +4.4% |
+| gpt-oss-20b | ep8 | 4 | grouped +34% | +34% | +31% |
 | Qwen3-30B | ep2 | 64 | grouped +358% | — | +156% |
 | Qwen3.5-35B | ep2 | 128 | — | — | grouped +137% |
 
-Local-expert *count* is the primary lever; batch (per-expert M) shrinks the margin. **Rule: keep grouped (the default); at these shapes the loop is never faster, and the gap narrows only at high EP with large batches.** The roofline reasoning is in [GPU Training Theory §2](../reference/gpu-training-theory.md#worked-example--why-small-per-expert-m-is-slow).
+Local-expert *count* is the primary lever; batch (per-expert M) shrinks the margin. **Rule: keep grouped (the default); at these shapes the loop is never faster, and the gap is smallest at high EP with large batches (+31% at ep8 b4).** The roofline reasoning is in [GPU Training Theory §2](../reference/gpu-training-theory.md#worked-example--why-small-per-expert-m-is-slow).
 
 The 288-expert rosters (GLM-5.3-Flash, Step-3.7-Flash; top-8) sit inside the grouped-wins regime too, between the measured anchors: `ep8` holds 36 local experts at per-expert M = 1,820 (8192 tokens/rank) to 7,282 (32k), `ep16` 18 at 3,641 (8192 — the cross-node ceiling). Derived from the table, not measured.
 

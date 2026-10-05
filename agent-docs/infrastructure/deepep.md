@@ -68,10 +68,10 @@ with their defaults in [Environment variables](../reference/configuration-refere
 `CUDA_DEVICE_MAX_CONNECTIONS=1` (the image `ENV`) serializes device work onto one hardware queue. It is a
 correctness setting: without it, EP with more than one dispatch group per NVLink domain can deadlock the
 combine barrier against FSDP2's DP-wide collectives, and the trainer warns at startup when it is not `1`.
-It has no measurable throughput effect: against `8`, `ep_size=8` reads +0.2% / −0.3% and `ep_size=2`
-reads +0.2% (8× B300, gpt-oss-20b, seq 4096, batch 1, GC on; 2026-10-03, commit 0bc3a22a5, Blackwell
-image). It is latched at `cuInit`, so a launch outside the image exports it before the process starts, and
-it does not make the racy single-domain multi-group shape safe ([below](#ep-grouping-what-is-reliable)).
+It costs no throughput: against `8`, `ep_size=8` reads +1.5% (2026-10-05, commit 0e9a51172, median of
+2) and `ep_size=2` +0.2% (2026-10-03, commit 0bc3a22a5); 8× B300, gpt-oss-20b, seq 4096, batch 1, GC on,
+Blackwell image. It is latched at `cuInit`, so a launch outside the image exports it before the process
+starts, and it does not make the racy single-domain multi-group shape safe ([below](#ep-grouping-what-is-reliable)).
 
 **These must agree across every rank of the job**: `HALO_EP_CAPACITY_DEDUP`,
 `HALO_DEEPEP_GPU_TIMEOUT_SECONDS`, `HALO_DEEPEP_NUM_SMS`, `HALO_DEEPEP_NUM_QPS`,

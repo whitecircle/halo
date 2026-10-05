@@ -331,7 +331,7 @@ The two moments cost 4–8 B/param. Each variant trades one axis:
 
 ### Gradient checkpointing
 
-GC keeps only a few activation checkpoints and recomputes the rest in the backward. Memory drops sharply, so longer sequences fit; the cost is one extra forward over the checkpointed regions, `6P → ~8P` — measured +30% wall-clock on gpt-oss-20b ep8 (batch 4, seq 4096, 8× B300), under the `8P/6P ≈ +33%` ceiling because only checkpointed regions recompute and comm is unchanged ([Throughput Benchmarks](../optimization/throughput-benchmarks.md)).
+GC keeps only a few activation checkpoints and recomputes the rest in the backward. Memory drops sharply, so longer sequences fit; the cost is one extra forward over the checkpointed regions, `6P → ~8P` — measured +29% wall-clock on gpt-oss-20b ep8 (batch 4, seq 4096, 8× B300), under the `8P/6P ≈ +33%` ceiling because only checkpointed regions recompute and comm is unchanged ([Throughput Benchmarks](../optimization/throughput-benchmarks.md)).
 
 The corollary: if the batch fits without GC, turning it off is a free speedup, so keep GC on only when you need the memory. **Selective recomputation** (Megatron) checkpoints only the regions with the best memory-saved-per-recompute-FLOP; FlashAttention is already this idea specialized to the attention block.
 

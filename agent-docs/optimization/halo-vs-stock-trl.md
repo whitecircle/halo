@@ -27,7 +27,7 @@ The baseline gets the strongest stock options — ZeRO-3 and Liger's FLCE, which
 
 ## Throughput & memory (4k–16k)
 
-*8× B300 · 2026-10-03 (stock TRL 2026-10-04, mean of 2 runs) · commit 0bc3a22a5 · Blackwell image. GC-on · grouped GEMM · TRL ZeRO-3 · Halo ZeRO-2 (EP1 also at ZeRO-3) · elastic.* **tok/s/GPU · peak GiB:**
+*8× B300 · 2026-10-03 at commit 0bc3a22a5 (stock TRL 2026-10-04, mean of 2 runs; Halo EP8 2026-10-05 at commit 0e9a51172, median of 2) · Blackwell image. GC-on · grouped GEMM · TRL ZeRO-3 · Halo ZeRO-2 (EP1 also at ZeRO-3) · elastic.* **tok/s/GPU · peak GiB:**
 
 ![Throughput: Halo vs stock TRL, 4k/16k](../assets/benchmarks/throughput_4k16k.png)
 
@@ -35,16 +35,16 @@ The baseline gets the strongest stock options — ZeRO-3 and Liger's FLCE, which
 
 | seq·b | stock TRL (z3) | Halo EP1 (z2) | Halo EP1 (z3) | Halo EP2 (z2) | Halo EP8 (z2) |
 |---|---|---|---|---|---|
-| 4k·b1 | 3,836 · 47.6 | 11,236 · 60.3 | 9,694 · **28.7** | **12,432 · 78.9** | 8,852 · 25.4 |
-| 4k·b2 | 5,474 · 48.2 | 17,653 · 65.5 | 15,532 · **29.3** | **17,862 · 80.5** | 9,609 · 32.3 |
-| 4k·b4 | 6,688 · 50.6 | **23,590 · 75.8** | 21,678 · 37.9 | 20,554 · 85.2 | 10,358 · 47.2 |
-| 16k·b1 | 6,461 · 50.6 | **20,690 · 75.8** | 19,505 · 37.9 | 18,436 · 85.0 | 9,981 · 48.1 |
-| 16k·b2 | 7,445 · 55.6 | **23,159 · 96.5** | 22,321 · 58.6 | 19,698 · 112.0 | 9,650 · 78.0 |
+| 4k·b1 | 3,836 · 47.6 | 11,236 · 60.3 | 9,694 · **28.7** | **12,432 · 78.9** | 10,905 · 25.5 |
+| 4k·b2 | 5,474 · 48.2 | 17,653 · 65.5 | 15,532 · **29.3** | **17,862 · 80.5** | 12,637 · 33.2 |
+| 4k·b4 | 6,688 · 50.6 | **23,590 · 75.8** | 21,678 · 37.9 | 20,554 · 85.2 | 13,239 · 48.2 |
+| 16k·b1 | 6,461 · 50.6 | **20,690 · 75.8** | 19,505 · 37.9 | 18,436 · 85.0 | 12,382 · 49.0 |
+| 16k·b2 | 7,445 · 55.6 | **23,159 · 96.5** | 22,321 · 58.6 | 19,698 · 112.0 | 12,936 · 80.3 |
 
 - **EP1 and EP2 lead at 2.6–3.5× stock TRL** across every short/mid config, and the gap holds under batch
-  scaling. EP8 gains least from batch (4k: 8,852 → 10,358 tok/s/GPU from b1 to b4) and loses at 16k
-  (9,981 → 9,650 from b1 to b2): its dispatch cost grows with tokens/rank.
-- **EP8 trades throughput for memory** — 1.3–2.3× TRL at ~½ its memory (25.4 vs 47.6 GiB at 4k·b1).
+  scaling. EP8 gains least from batch (4k: 10,905 → 13,239 tok/s/GPU from b1 to b4; 16k: +4.5% from b1
+  to b2): its dispatch cost grows with tokens/rank.
+- **EP8 trades throughput for memory** — 1.7–2.8× TRL at ~½ its memory (25.5 vs 47.6 GiB at 4k·b1).
 - **EP1 z3 isolates the framework gap** to AdamWBF16 + Halo's FSDP2+EP wrapper: both sides shard every
   param 8-way with the same kernel, and EP1 still leads 2.5× (4k·b1) to 3.2× (4k·b4) on throughput, and
   on memory everywhere but 16k·b2 (58.6 vs 55.6 GiB). **Prefer z2 at short sequence, z3 when memory-tight.**
@@ -59,15 +59,15 @@ experts through `torch.nn.functional.grouped_mm`). The per-expert loop is opt-in
 (`--experts_impl eager`, i.e. transformers' `experts_implementation`, for TRL; `--no_grouped_gemm` for
 Halo).
 
-*8× B300 · 2026-10-03 · commit 0bc3a22a5 · Blackwell image. 4k·b1 · GC-on · Halo z2* — tok/s/GPU:
+*8× B300 · 2026-10-03 · commit 0bc3a22a5 (EP8 row 2026-10-05 · commit 0e9a51172) · Blackwell image. 4k·b1 · GC-on · Halo z2* — tok/s/GPU:
 
 | | per-expert loop | grouped GEMM | uplift |
 |---|---|---|---|
 | Halo EP1 (32 experts/rank) | 6,005 | 11,236 | +87% |
 | Halo EP2 (16/rank) | 6,508 | 12,432 | +91% |
-| Halo EP8 (4/rank) | 7,521 | 8,852 | +18% |
+| Halo EP8 (4/rank) | 7,514 | 10,905 | +45% |
 
-The uplift shrinks once a rank holds few experts (+18% at EP8, where the loop's per-shape tile fits the
+The uplift shrinks once a rank holds few experts (+45% at EP8, where the loop's per-shape tile fits the
 larger per-expert `M`). **EP token distribution is the bigger lever** — Halo's *loop* at EP1 (6,005)
 already beats TRL's `grouped_mm` (3,836). Kernel-side detail:
 [Grouped GEMM](grouped-gemm.md#grouped-vs-the-loop-path).
@@ -100,20 +100,19 @@ already 16–32k, so FLCE is within noise (≤1%): it is a dense-path lever. Per
 
 ## Gradient checkpointing on vs off
 
-GC-off buys Halo **+11–31%** at up to 2.2× peak memory (EP8 z2 16k·b1: 48.1 → 103.7 GiB). Stock TRL gains
-only +5–6%, so Halo's lead widens GC-off.
+GC-off buys Halo **+11–32%** at up to 2× peak memory (EP8 z2 16k·b1: 49.0 → 96.4 GiB). Stock TRL gains
+only +5–9%, so Halo's lead widens GC-off.
 
-*8× B300 · 2026-10-03 · commit 0bc3a22a5 · Blackwell image. b1 · GC-off, tok/s/GPU (the GC-on
+*8× B300 · 2026-10-03 · commit 0bc3a22a5 (Halo EP8 2026-10-05 · commit 0e9a51172) · Blackwell image. b1 · GC-off, tok/s/GPU (the GC-on
 baseline is the 4k–16k table above):*
 
 | seq | stock TRL (z3) | Halo EP1 (z2) | Halo EP2 (z2) | Halo EP8 (z2) |
 |---|---|---|---|---|
-| 4k | 4,048 | 12,484 | 14,988 | 11,563 |
-| 16k | 7,010 | 25,395 | 22,729 | 12,531 |
+| 4k | 4,048 | 12,484 | 14,988 | 13,885 |
+| 16k | 7,010 | 25,395 | 22,729 | 16,335 |
 
-It is a 4k–32k lever only: EP8 32k·b1 GC-off trains on the default elastic transport, but its 199.7 GiB
-peak already crowds a B300's 288 GB (268 GiB)
-([Throughput Benchmarks](throughput-benchmarks.md#where-the-ep-steps-time-goes-gpt-oss-20b-ep8-b1s4096-8-b300-fa4)),
+It is measured as a 4k–32k lever: EP8 32k·b1 GC-off trains on the default elastic transport at a 159.4 GiB
+peak ([Throughput Benchmarks](throughput-benchmarks.md#where-the-ep-steps-time-goes-gpt-oss-20b-ep8-b1s4096-8-b300-fa4)),
 and past ~64k tokens/rank nothing fits GC-off.
 
 ## Long context: 64k → 256k
@@ -198,10 +197,12 @@ CP needs `cp_size` to divide Qwen's 4 KV heads, so 64k splits with EP8+CP4. Dens
 ## Convergence
 
 200 steps on the same seeded data, same global batch (16), constant LR; 8× B300, 2026-10-03, commit
-0bc3a22a5, Blackwell image. Stock TRL (ZeRO-3), Halo dense (EP1), Halo EP2 and Halo EP8 all reach
-the same loss — **~0.00205 at step 200** (0.002048–0.002051), within 0.6% of each other by step 100. Expert
-Parallelism, grouped GEMM, and AdamWBF16 stochastic rounding preserve the optimization dynamics, so the
-throughput lead costs nothing.
+0bc3a22a5 (Halo EP8 2026-10-05, commit 0e9a51172, median of four runs), Blackwell image. Stock TRL
+(ZeRO-3), Halo dense (EP1), Halo EP2 and Halo EP8 all reach the same loss — **~0.00205 at step 200**
+(0.002048–0.002051), within 0.8% of each other by step 100. One of the four EP8 runs took a loss spike at
+step 5 and was still 35% higher at step 100, reaching 0.002052 by step 200. Expert Parallelism, grouped
+GEMM, and AdamWBF16 stochastic rounding preserve the optimization dynamics, so the throughput lead costs
+nothing.
 
 ## Reproduce
 

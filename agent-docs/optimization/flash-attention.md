@@ -70,7 +70,7 @@ The end-to-end step win is a function of attention's share of the step, which gr
 
 At 4k batch-1 the step is overhead-bound, so FA4 stays close to FA2 (1.19×); the gap opens with length and reaches 2.3× at 32k. SDPA (Blackwell-tuned cuDNN kernel) leads FA4 by 9% at 4k and is within 3% of it from 16k, so SDPA is a fine fallback for plain dense models. flex trails both at every length; it ties FA2 at 4k (within its own 7.9% run spread) and beats it from 16k.
 
-On sparse MoE the step is dominated by expert GEMM + DeepEP all-to-all, so the kernel speedup is only **+14%** end-to-end. gpt-oss-20b, EP=8, seq 16,384, batch 1, GC on, 8× B300 (2026-10-03, commit 0bc3a22a5, Blackwell image): FA4 9,981 vs FA2 8,737 tok/s/GPU (1.14×); the FA4 arm is the s16384 row of the ep8 sequence sweep in [Throughput Benchmarks](throughput-benchmarks.md). FA4 is the shipped default for GptOss SFT; SDPA also dispatches once sinks are reset but lacks FA4's native sink/sliding-window/softcap handling.
+On sparse MoE the step is dominated by expert GEMM + DeepEP all-to-all, so the kernel speedup is only **+17%** end-to-end. gpt-oss-20b, EP=8, seq 16,384, batch 1, GC on, 8× B300 (2026-10-05, commit 0e9a51172, Blackwell image, median of 2): FA4 12,382 vs FA2 10,627 tok/s/GPU (1.17×); the FA4 arm is the s16384 row of the ep8 sequence sweep in [Throughput Benchmarks](throughput-benchmarks.md). FA4 is the shipped default for GptOss SFT; SDPA also dispatches once sinks are reset but lacks FA4's native sink/sliding-window/softcap handling.
 
 EP/long-context throughput tables live in [Throughput Benchmarks](throughput-benchmarks.md), which already run the FA4 default.
 
@@ -125,12 +125,12 @@ A Bailing run therefore sets `attn_implementation: sdpa` itself; an unset or fla
 
 Every one of them takes that default only under `reset_sinks: true`. With live gpt-oss sinks (`reset_sinks: false`) the default drops and the model config passes through untouched, since SDPA drops the sink column and would be rejected outright. SFT keeps the auto-selected FA4: a packed batch takes its varlen path, kept fast by the `max_seqlen` int-coercion.
 
-That default costs throughput at the lengths these methods actually run. Measured on 8× B300 with `benchmark_smpo_ep.py`, which does *not* apply it (2026-10-04, training code at commit 0bc3a22a5, Blackwell image; auto = FA4; mean of 2 runs). The SMPO collator emits no `input_ids`, so the callback's tokens/s is a padded-length estimate; the table gives the step-time speedup of auto over SDPA:
+That default costs throughput at the lengths these methods actually run. Measured on 8× B300 with `benchmark_smpo_ep.py`, which does *not* apply it (2026-10-04, training code at commit 0bc3a22a5; the gpt-oss-20b rows 2026-10-05 at commit 0e9a51172; Blackwell image; auto = FA4; mean of 2 runs). The SMPO collator emits no `input_ids`, so the callback's tokens/s is a padded-length estimate; the table gives the step-time speedup of auto over SDPA:
 
 | model | seq | auto vs SDPA |
 |---|---|---|
-| gpt-oss-20b ep8 | 4096 | **1.41×** |
-| gpt-oss-20b ep8 | 8192 | **1.40×** |
+| gpt-oss-20b ep8 | 4096 | **1.36×** |
+| gpt-oss-20b ep8 | 8192 | **1.42×** |
 | qwen3-30b-a3b ep8 | 4096 | **1.17×** |
 | qwen3-30b-a3b ep8 | 8192 | **1.14×** |
 | qwen3-8b ep1 (dense) | 4096 | **1.26×** |
