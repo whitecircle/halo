@@ -24,7 +24,7 @@ git clone https://github.com/whitecircle/halo.git
 cd halo
 ```
 
-`make install` re-runs the locked sync in a throwaway `--rm` container: an editable `-e .` plus the exported locked requirements (with the `gigatoken` and `flash-optimizers` extras) over the compiled torch/FA/DeepEP the image ships. Nothing it installs outlives the command, so a dependency change takes an image rebuild.
+`make install` checks the lock in a throwaway `--rm` container: it installs an editable `-e .` plus the exported locked requirements (with the `gigatoken` and `flash-optimizers` extras) over the compiled torch/FA/DeepEP the image ships, and fails when `uv.lock` is stale. Nothing it installs outlives the command, so a dependency change takes an image rebuild.
 
 For a host `.venv` that powers IDE go-to-definition (`uv sync`), see [Development Environment](../contributing/development-environment.md). Optional: point `HF_HOME` at a **verified** large volume (`df -h` / `findmnt` — a `/mnt` path is not always a big array), `hf auth login` (gated models), `wandb login` (only for `report_to: wandb`).
 
@@ -84,6 +84,6 @@ python -c "from flash_attn.cute import flash_attn_func; print('FA4 OK')"  # Blac
 ## Troubleshooting
 
 - **PyTorch does not detect CUDA** — check `nvidia-smi` (driver) and `nvcc --version` (toolkit); the PyTorch build must match the CUDA version.
-- **`make install` reports a stale lock** — it exports with `--locked`, so `pyproject.toml` and `uv.lock` must agree; re-lock with `uv lock` (`--upgrade` would drift from the exact versions the Dockerfile compiles).
+- **`make install` fails on a stale lock** — it exports with `--locked`, so `pyproject.toml` and `uv.lock` must agree; re-lock with `uv lock` (the image ships uv; on the host, [install it](https://docs.astral.sh/uv/getting-started/installation/)). `--upgrade` would drift from the exact versions the Dockerfile compiles.
 - **DeepEP build fails** — never mix `nvidia-nvshmem-cu13` and `nvidia-nvshmem-cu12`. See the [DeepEP guide](../infrastructure/deepep.md).
 - **Missing system libraries** — `apt install build-essential ninja-build zlib1g-dev libffi-dev libssl-dev libbz2-dev libreadline-dev libsqlite3-dev liblzma-dev libncurses-dev tk-dev`.

@@ -60,7 +60,7 @@ Halo — LLM alignment toolkit extending HuggingFace (Transformers, TRL, Acceler
 ## Commands
 
 ```bash
-make install                     # uv pip install from uv.lock (in-image)
+make install                     # check the lock installs into the image (throwaway container)
 
 # Single GPU / LoRA
 python scripts/training/sft.py examples/sft/qwen3/qwen3-4b-ultrachat.yaml

@@ -89,7 +89,7 @@ make precommit
 make docs
 
 # In-image
-make install
+make install                                 # check the lock installs into the image (throwaway container)
 make diagrams                                # regenerate agent-docs/assets from scripts/diagrams (CI byte-compares)
 
 make clean                                   # prune wandb/, the ruff and pytest caches, $(HALO_SCRATCH) test scratch (leaves checkpoints/)

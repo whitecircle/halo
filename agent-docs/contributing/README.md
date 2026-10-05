@@ -44,7 +44,7 @@ cp .env.example .env          # the GPU make targets pass it with --env-file and
 docker pull public.ecr.aws/whitecircle/halo:blackwell && docker tag public.ecr.aws/whitecircle/halo:blackwell halo:blackwell
 # ... or build it: B200 (SM100) / B300 (SM103); build-hopper for H100/H200 (SM90)
 make build-blackwell
-make install                  # uv install inside the image (a pulled image already has it)
+make install                  # check the lock installs into the image (the image already has the install)
 make seed-hf-cache            # configs + tokenizers the CPU tests read into HF_CACHE (no weights)
 make test-cpu                 # sanity check; needs Docker, not a GPU
 ```
