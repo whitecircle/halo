@@ -79,8 +79,7 @@ pytest-driven. CPU tests are pytest-native (`pytest -m cpu`); GPU tests are `tor
 
 ```bash
 python tests/cpu/callbacks/test_variable_scheduler.py                 # CPU (no GPU)
-torchrun --nproc_per_node=2 \                                         # GPU, standalone
-    tests/gpu/trainers/preference/test_smpo_fsdp.py
+torchrun --nproc_per_node=2 tests/gpu/trainers/preference/test_smpo_fsdp.py   # GPU, standalone
 ```
 
 Never hardcode `--master_port` in a test — the launcher allocates a free one per run

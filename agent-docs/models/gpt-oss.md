@@ -57,7 +57,7 @@ GptOss attention adds a per-head learnable scalar to the attention logits before
 
 - **CP** — `GptOssAttention` → `GptOssUlyssesAttention` (`src/distributed/context_parallel/layers/gpt_oss.py`), RoPE before all-to-all and native GQA. Needs `reset_sinks: true`: the CP kernels drop the sink column, so the wrapper raises at the first forward on live sinks rather than normalizing every softmax wrongly.
 - **TP** — a DTensor plan on attention only; `embed_tokens`/`lm_head` stay replicated (sharding them faults with a cuBLAS illegal-memory error under EP+TP), MoE experts belong to EP. See [the selective-TP plan](../parallelism/tensor-parallelism.md#the-selective-tp-plan).
-- **ETP** — the interleaved-GLU layout needs re-interleaving back to `[g0, u0, g1, u1, …]` before the checkpoint write. Expert compute drops to the per-expert loop at `expert_tp_size > 1` (`_grouped_mm_enabled`).
+- **ETP** — the interleaved-GLU layout needs re-interleaving back to `[g0, u0, g1, u1, …]` before the checkpoint write. Expert compute drops to the per-expert loop at `expert_tp_size > 1`: ETP stores the de-interleaved gate/up pair under the plain names the loop reads, not the `*_gmm` pair the grouped path reads (`_grouped_mm_enabled`).
 
     Once the halves are TP-sharded they cannot be de-interleaved into the contiguous `gate_proj_gmm` / `up_proj_gmm` grouped GEMM reads. See [ETP weight sharding](../parallelism/expert-tensor-parallelism.md#weight-sharding).
 

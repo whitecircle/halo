@@ -1,4 +1,4 @@
-// markdownlint config for the agent-docs/ and human-docs/ trees (MkDocs Material). Prose wraps as written, inline HTML
+// markdownlint config for the agent-docs/, human-docs/ and skills/ trees. Prose wraps as written, inline HTML
 // and repeated sibling section names are fine; the rules left on catch real hygiene issues —
 // trailing whitespace, stray blank lines, missing final newline, fence style, broken anchors.
 {
@@ -10,5 +10,5 @@
   "MD036": false,                       // bold lead-ins used as pseudo-headings
   "MD041": false,                       // a page may open with an admonition, not a heading
   "MD046": { "style": "fenced" },       // fenced code blocks
-  "MD007": { "indent": 4 }              // Material renders 4-space nested lists
+  "MD007": { "indent": 4 }              // nested lists indent 4 spaces
 }

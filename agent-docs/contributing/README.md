@@ -213,7 +213,7 @@ manifest.
     `full_determinism` the dispatcher builds the deterministic buffer on its own). A forward-only
     comparison on the grouped-GEMM path needs no pin: each expert row is computed independently of that
     order and the combine sums a token's partials in top-k slot order, so it holds the bound a non-EP
-    run does. The per-expert loop's bf16 atomic `index_add_` can vary the forward too, pinned or not.
+    run does. The per-expert loop's forward is deterministic too: each `index_add_` call writes every row at most once.
 - **Build checks from the shared helpers** rather than re-deriving them per file:
   `training_run_checks` (`tests/common/utils.py`, the finished-run verdicts), `parallel_shape_checks`
   (`parallel_shape.py`, each enabled axis read off the model, not the config echo), `run_sft_suite`
@@ -272,6 +272,7 @@ entry and the script name them, and the non-obvious ones are:
 | `HALO_TEST_EP_RT_ATTN` / `HALO_TEST_EP_RT_SCOPE` / `HALO_TEST_EP_RT_EXPERT_TP` / `HALO_TEST_EP_RT_KEEP` | EP save/reload round-trip (`tests/gpu/parallelism/ep/test_ep_save_reload_roundtrip.py`): attention impl (default `sdpa`), `ep_scope` (default `auto`; `node` / `global` pick the node-local vs cross-node gathered-save path), `expert_tp_size` (default `1`; at `HALO_TEST_EP=1` this is pure ETP), and `_KEEP` to leave the gathered checkpoint on disk instead of deleting it. |
 | `HALO_TEST_EP_CP_RT_ATTN` / `HALO_TEST_EP_CP_RT_KEEP` | The same two knobs for the EP+CP round-trip (`tests/gpu/parallelism/combined/test_ep_cp_save_reload_roundtrip.py`); attention defaults to `flash_attention_2` there. |
 | `HALO_TEST_EP1_KNOB_ATTN` / `HALO_TEST_EP1_KNOB_LAZY` | ep1 `fsdp_shard_ep1_experts` weight-sync suite (`tests/gpu/parallelism/ep/test_ep1_knob_weight_sync.py`): attention impl (default `flash_attention_2`) and `ep_lazy_loading` (default on; `=0` routes the load through `from_pretrained` + EP patching instead). |
+| `HALO_TEST_OFFLINE_GRPO_EP_LAZY` | `ep_lazy_loading` (default on; `=0` loads eagerly) for the offline GRPO EP reference and EP+CP suites (`tests/gpu/trainers/grpo/test_offline_grpo_ep_reference.py`, `test_offline_grpo_ep_cp.py`). |
 | `HALO_TEST_RESUME_FSDP_RESHARD` | `fsdp_reshard_after_forward` (default off = ZeRO-2) for the `fsdp` and `cp` modes of `tests/gpu/trainers/sft/test_sft_checkpoint_resume.py`; the `tp` / `ep` modes ignore it (TP+DP+FULL_SHARD is config-rejected). |
 | `HALO_TEST_VLLM_DENSE_SERVER_URL` | Endpoint of the dense half of the online-GRPO/SDPG e2e pair (`trainers/grpo/test_online_grpo_vllm_dense_e2e.py`) and of the weight-transfer re-init suite, which serves the same checkpoint. The pair's two files train different checkpoints and each asserts on its own server's logprobs, so one `VLLM_SERVER_URL` cannot carry both; unset, both read `VLLM_SERVER_URL`, then `http://localhost:8010`. |
 | `HALO_TEST_ONLINE_GRPO_MOE_MODEL` / `HALO_TEST_ONLINE_GRPO_DENSE_MODEL` | Checkpoints of the online-GRPO/SDPG e2e pair (`trainers/grpo/test_online_grpo_vllm_moe_e2e.py` and its dense sibling): the MoE half's default `Qwen/Qwen3-30B-A3B-Instruct-2507` (EP/ETP rows) and the dense half's `Qwen/Qwen3-0.6B` (TP and FSDP2-DP rows). Every row asserts on the served logprobs, so the running server must serve the same checkpoint. |

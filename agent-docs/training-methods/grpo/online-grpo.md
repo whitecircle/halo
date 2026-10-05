@@ -175,7 +175,7 @@ One optimizer step: each `{prompt, answer}` row is rendered and replicated `num_
 
 Server-side, pin `VLLM_ATTENTION_BACKEND=FLASH_ATTN` only where FlashInfer JIT-fails on SM 10.0; on head-dim-256 families it resolves to FA2 and measures slower ([Rollout Servers](../../infrastructure/rollout-servers.md#throughput)).
 
-Trainer-side, all three GRPO scripts default `attn_implementation` to **SDPA** for their right-padded batches, and drop that default under `reset_sinks: false`, where only a sink-carrying implementation is accepted ([padded workloads](../../optimization/flash-attention.md#model-specific-handling)). A pinned value wins.
+Trainer-side, all three GRPO scripts default `attn_implementation` to **SDPA** for their right-padded batches, and drop that default under `reset_sinks: false`, where only a sink-carrying implementation is accepted, and for offline GRPO under CP ([padded workloads](../../optimization/flash-attention.md#model-specific-handling)). A pinned value wins.
 
 ## Testing a setup
 

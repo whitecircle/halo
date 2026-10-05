@@ -13,7 +13,7 @@ Hosted jobs (ruff, actionlint, the docs link check, the figure regeneration, mar
 
 `.github/workflows/lint.yml`: `ruff format --check` plus the full pyproject rule set (including `PLC0415`, the no-inline-imports house rule) block the PR, and `actionlint` checks the workflow files themselves. Self-hosted runner labels are declared in `.github/actionlint.yaml` so actionlint does not flag them as unknown.
 
-`.github/workflows/docs.yml`: `scripts/docs/check_links.sh` blocks on any broken relative link or heading anchor across `agent-docs/`, `human-docs/`, `skills/` and the root markdown; an anchor must be the slug GitHub generates, so a `{#id}` heading attribute fails too. `markdownlint` covers `agent-docs/`, `human-docs/` and `skills/`.
+`.github/workflows/docs.yml`: `scripts/docs/check_links.sh` blocks on any broken relative link or heading anchor across `agent-docs/`, `human-docs/`, `skills/` and the root markdown; an anchor must be the slug GitHub generates, so a `{#id}` heading attribute fails too. `markdownlint` covers `agent-docs/`, `human-docs/` and `skills/` and is advisory (`continue-on-error`).
 
 A `diagrams` job re-runs `scripts/diagrams/` in a `python:3.12-slim` container at `uv.lock`'s matplotlib pin and byte-compares the result against the committed figures under `agent-docs/assets/`, so a generator edited without re-committing its figure goes red — run `make diagrams` and commit.
 

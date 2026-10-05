@@ -6,7 +6,7 @@ EP, TP, EP+TP, pure ETP and EP+ETP run, as do DDP and FSDP2. CP and PP raise at 
 
 ## Dataset formats
 
-`SentenceTransformerDataCollator` reads the shape **positionally**: the first column named `label`, `labels`, `score` or `scores` is the label, every remaining column in dataset order is one text input. Names carry no meaning.
+`SentenceTransformerDataCollator` reads the shape **positionally**: the label is the first of `label`, `labels`, `score`, `scores` the dataset has, in that priority order; every remaining column in dataset order is one text input. Names carry no meaning.
 
 | Text columns | Label | Use case | Losses |
 |---|---|---|---|
