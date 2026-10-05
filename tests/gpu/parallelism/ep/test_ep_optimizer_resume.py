@@ -1,5 +1,5 @@
 #!/usr/bin/env python
-"""Optimizer-state continuity on resume for EP and CP runs (2 GPUs).
+"""Optimizer-state continuity and checkpoint master precision under EP, CP, TP and FSDP2 (2 GPUs).
 
 The checkpoint loader restores per-rank optimizer shards for EP/CP whenever the topology
 fingerprint in ``optimizer_meta.pt`` matches; a mismatch warm-restarts loudly. This test pins
@@ -27,7 +27,14 @@ their moments are DTensor shards rather than the ``ep`` row's plain FSDP-ignored
 Different shard layout and a different save gather (``full_tensor()``, not an EP all-gather), same
 contract. No mismatch phase: save and resume run the same topology by construction.
 
-``--mode cp`` (tiny dense Qwen3, cp_size=2): phases 1-3 (no mismatch phase).
+``--mode ep_cp`` overlays EP and CP on the same two ranks. ``--mode cp`` uses dense Qwen3 with
+cp_size=2, ``--mode tp`` uses dense Qwen3 with native TP2, and ``--mode fsdp`` uses FSDP2 alone.
+Each runs phases 1-3.
+
+``--fp32-masters`` enables router, expert and non-expert masters together. The ``ep1`` row needs
+``--unsharded-ep1-experts``: managed EP1 experts cannot combine with ``fp32_non_ep_params``.
+``--eager-loading`` selects the non-lazy EP loader. Each master row checks live dtypes and that
+trained values outside BF16's representable set survive resume bit for bit.
 
 Usage:
     torchrun --nproc_per_node=2 \
@@ -40,6 +47,7 @@ import os
 
 import torch
 import torch.distributed as dist
+from torch.distributed.tensor import DTensor
 from transformers import AutoTokenizer, Qwen3Config, Qwen3ForCausalLM, Qwen3MoeConfig, Qwen3MoeForCausalLM
 from transformers.trainer_callback import TrainerCallback
 from trl import SFTConfig
@@ -47,6 +55,7 @@ from trl import SFTConfig
 import src.distributed.checkpoint.optimizer as optimizer_store_mod
 from src.checkpoint.format import load_full_state_dict
 from src.distributed.checkpoint.fingerprint import OptimizerStateFingerprint
+from src.distributed.expert_parallel.base_layer import find_ep_layers
 from src.distributed.fsdp import reshard_fsdp2_modules
 from src.distributed.loading.model_loading import load_distributed_model
 from src.distributed.parallelism_config import ParallelismConfig
@@ -55,6 +64,7 @@ from tests.common.datasets import create_sft_dataset
 from tests.common.distributed import pin_deterministic_ep_dispatch, world_all
 from tests.common.harness import gpu_test_main
 from tests.common.models import QWEN3_0_6B
+from tests.common.tiny_models import VOCAB_PAD_MULTIPLE
 from tests.common.tolerances import TOL
 from tests.common.utils import (
     cleanup_memory,
@@ -67,12 +77,8 @@ from tests.common.utils import (
     step_losses,
 )
 
-parser = argparse.ArgumentParser()
-parser.add_argument("--mode", choices=["ep", "ep1", "cp"], default="ep")
-ARGS, _ = parser.parse_known_args()
-
 # Modes whose tiny model is MoE — the only ones with expert weights to gather on save.
-MOE_MODES = ("ep", "ep1")
+MOE_MODES = ("ep", "ep1", "ep_cp")
 
 SEED = 42
 TOTAL_STEPS = 6
@@ -97,14 +103,26 @@ _TINY_COMMON = {
 }
 
 
+def optimizer_resume_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--mode", choices=["ep", "ep1", "ep_cp", "cp", "tp", "fsdp"], default="ep")
+    parser.add_argument("--fp32-masters", action="store_true", help="enable all three configured master flags")
+    parser.add_argument("--eager-loading", action="store_true", help="load EP weights through from_pretrained")
+    parser.add_argument(
+        "--unsharded-ep1-experts", action="store_true", help="keep EP1 experts outside FSDP2's shard groups"
+    )
+    return parser
+
+
 def _build_tiny_checkpoint(mode: str, target_dir: str) -> None:
     """Rank 0: random-init tiny model + Qwen tokenizer saved as a loadable HF checkpoint."""
     tokenizer = AutoTokenizer.from_pretrained(QWEN3_0_6B, trust_remote_code=True)
+    vocab_size = -(-len(tokenizer) // VOCAB_PAD_MULTIPLE) * VOCAB_PAD_MULTIPLE
     torch.manual_seed(SEED)
     if mode in MOE_MODES:
         config = Qwen3MoeConfig(
             **_TINY_COMMON,
-            vocab_size=len(tokenizer),
+            vocab_size=vocab_size,
             moe_intermediate_size=128,
             num_experts=8,
             num_experts_per_tok=2,
@@ -113,20 +131,32 @@ def _build_tiny_checkpoint(mode: str, target_dir: str) -> None:
         )
         model = Qwen3MoeForCausalLM(config)
     else:
-        config = Qwen3Config(**_TINY_COMMON, vocab_size=len(tokenizer))
+        config = Qwen3Config(**_TINY_COMMON, vocab_size=vocab_size)
         model = Qwen3ForCausalLM(config)
     model.to(torch.bfloat16).save_pretrained(target_dir)
     tokenizer.save_pretrained(target_dir)
 
 
-def _parallelism_config(mode: str, world_size: int) -> ParallelismConfig:
-    if mode == "ep":
-        return ParallelismConfig(ep_size=world_size)
-    if mode == "ep1":
-        # Defaults are the point: use_grouped_gemm applies the EP wrappers with no expert
-        # distribution, and fsdp_shard_ep1_experts then hands the replicated experts to FSDP2.
-        return ParallelismConfig(ep_size=1)
-    return ParallelismConfig(cp_size=world_size)
+def _parallelism_config(
+    mode: str,
+    world_size: int,
+    *,
+    fp32_masters: bool = False,
+    eager_loading: bool = False,
+    unsharded_ep1_experts: bool = False,
+) -> ParallelismConfig:
+    if unsharded_ep1_experts and mode != "ep1":
+        raise ValueError("--unsharded-ep1-experts applies only to --mode ep1")
+    return ParallelismConfig(
+        ep_size=world_size if mode in ("ep", "ep_cp") else 1,
+        cp_size=world_size if mode in ("cp", "ep_cp") else 1,
+        tp_size=world_size if mode == "tp" else 1,
+        ep_fp32_router=fp32_masters,
+        ep_fp32_experts=fp32_masters,
+        fp32_non_ep_params=fp32_masters,
+        ep_lazy_loading=not eager_loading,
+        fsdp_shard_ep1_experts=not unsharded_ep1_experts,
+    )
 
 
 def _sft_config(output_dir: str, max_steps: int, save_at: int | None) -> SFTConfig:
@@ -149,7 +179,7 @@ def _sft_config(output_dir: str, max_steps: int, save_at: int | None) -> SFTConf
     )
 
 
-def _make_trainer(model_path, pc, tokenizer, train_dataset, config):
+def _make_trainer(model_path, pc, tokenizer, train_dataset, config, *, preserve_checkpoint_precision=False):
     # CP rejects sdpa (Ulysses needs a Flash kernel), so let CP auto-detect (FA4 on Blackwell) and
     # keep the cheaper sdpa path for the EP mode, which does not constrain the kernel.
     model, _ = load_distributed_model(
@@ -159,6 +189,7 @@ def _make_trainer(model_path, pc, tokenizer, train_dataset, config):
         trust_remote_code=True,
         attn_implementation=None if pc.is_cp_mode else "sdpa",
         use_liger_kernel=False,
+        preserve_checkpoint_precision=preserve_checkpoint_precision,
     )
     return DistributedSFTTrainer(
         model=model,
@@ -195,6 +226,47 @@ def _trainable_weights(model) -> dict[str, torch.Tensor]:
     """Every trainable parameter, whole and at its live dtype. Collective under FSDP2."""
     reshard_fsdp2_modules(model)
     return snapshot_trainable(model)
+
+
+def _configured_master_checks(model, pc: ParallelismConfig, *, expect_moe: bool) -> dict[str, bool]:
+    """Live parameter identities separate routers, experts and the remaining masters."""
+    reshard_fsdp2_modules(model)
+    layers = list(find_ep_layers(model))
+    experts = {id(parameter) for _, layer in layers for _, parameter in layer.expert_named_params()}
+    routers = {
+        id(parameter)
+        for _, layer in layers
+        if (router := layer._live_router_module()) is not None
+        for parameter in router.parameters()
+    }
+    groups = {"expert": {}, "router": {}, "non_expert": {}}
+    for name, parameter in model.named_parameters():
+        if parameter.requires_grad:
+            group = "expert" if id(parameter) in experts else "router" if id(parameter) in routers else "non_expert"
+            groups[group][name] = parameter
+    checks = {"master_parameter_groups_present": bool(groups["non_expert"])}
+    if expect_moe:
+        checks["master_parameter_groups_present"] &= bool(groups["expert"]) and bool(groups["router"])
+    for group, parameters in groups.items():
+        if not parameters:
+            continue
+        keep_fp32 = (
+            pc.ep_fp32_experts and not pc.experts_fsdp_managed
+            if group == "expert"
+            else pc.fp32_non_ep_params or (group == "router" and pc.ep_fp32_router)
+        )
+        expected_dtype = torch.float32 if keep_fp32 else torch.bfloat16
+        checks[f"{group}_configured_master_dtype"] = all(
+            parameter.dtype == expected_dtype for parameter in parameters.values()
+        )
+        if keep_fp32:
+            # A BF16-exact source would pass a loader that discards its stored FP32 mantissa.
+            checks[f"{group}_masters_exceed_bf16_precision"] = any(
+                not torch.equal(local, local.to(torch.bfloat16).float())
+                for parameter in parameters.values()
+                for local in [parameter.detach().to_local() if isinstance(parameter, DTensor) else parameter.detach()]
+            )
+    return checks
 
 
 def _unequal(expected: dict[str, torch.Tensor], actual: dict[str, torch.Tensor]) -> list[str]:
@@ -281,9 +353,10 @@ def _verify_checkpoint_weights(ckpt_dir: str, source_dir: str, mode: str) -> tup
     return not problems, "; ".join(problems) or detail
 
 
-@gpu_test_main(min_world_size=2, prefix=f"ep_optim_resume_{ARGS.mode}")
+@gpu_test_main(min_world_size=2, prefix="ep_optim_resume")
 def run(ctx):
-    mode = ARGS.mode
+    args = optimizer_resume_parser().parse_args()
+    mode = args.mode
     checks: dict[str, bool] = {}
     metrics: dict[str, float] = {}
     device = ctx.device
@@ -300,7 +373,13 @@ def run(ctx):
         _build_tiny_checkpoint(mode, tiny_dir)
     ctx.barrier()
 
-    pc = _parallelism_config(mode, ctx.world_size)
+    pc = _parallelism_config(
+        mode,
+        ctx.world_size,
+        fp32_masters=args.fp32_masters,
+        eager_loading=args.eager_loading,
+        unsharded_ep1_experts=args.unsharded_ep1_experts,
+    )
     if pc.ep_size > 1:
         pin_deterministic_ep_dispatch()
     tokenizer = AutoTokenizer.from_pretrained(tiny_dir, trust_remote_code=True)
@@ -329,6 +408,11 @@ def run(ctx):
     saved_losses = step_losses(trainer)
     snapshot_ref = local_optimizer_state(trainer.model, trainer.optimizer)
     saved_weights = _trainable_weights(trainer.model)
+    if args.fp32_masters:
+        checks |= {
+            f"saved_{name}": world_all(ok, device)
+            for name, ok in _configured_master_checks(trainer.model, pc, expect_moe=mode in MOE_MODES).items()
+        }
     checks["saved_state_nonempty"] = any(
         torch.is_tensor(v) and v.dtype.is_floating_point and (v != 0).any() for _, v in _snapshot_values(snapshot_ref)
     )
@@ -348,7 +432,14 @@ def run(ctx):
 
     # ── Phase 3: resume → optimizer state restored EXACTLY, losses track the reference ─
     log(f"\n--- Phase 3 ({mode}): resume from checkpoint-{SAVE_AT_STEP} ---")
-    trainer = _make_trainer(ckpt_dir, pc, tokenizer, train_dataset, _sft_config(train_out, TOTAL_STEPS, None))
+    trainer = _make_trainer(
+        ckpt_dir,
+        pc,
+        tokenizer,
+        train_dataset,
+        _sft_config(train_out, TOTAL_STEPS, None),
+        preserve_checkpoint_precision=True,
+    )
     ctx.on_teardown(trainer.cleanup_ep)
     trainer_ref: dict = {"trainer": trainer, "capture": None}
     trainer.add_callback(_ResumeCapture(trainer_ref))
@@ -404,7 +495,12 @@ def run(ctx):
         try:
             pc_ep1 = ParallelismConfig(ep_size=1, use_grouped_gemm=True)
             trainer = _make_trainer(
-                ckpt_dir, pc_ep1, tokenizer, train_dataset, _sft_config(train_out, SAVE_AT_STEP + 1, None)
+                ckpt_dir,
+                pc_ep1,
+                tokenizer,
+                train_dataset,
+                _sft_config(train_out, SAVE_AT_STEP + 1, None),
+                preserve_checkpoint_precision=True,
             )
             ctx.on_teardown(trainer.cleanup_ep)
             trainer_ref = {"trainer": trainer, "capture": None}

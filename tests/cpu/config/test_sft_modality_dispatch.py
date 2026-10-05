@@ -96,6 +96,7 @@ def _run_sft(tmp_path, yaml_body: str, dataset: DatasetDict, *, stub_vlm_prep: b
         mode_suffix="",
         local_rank=0,
         resume_checkpoint=None,
+        policy_from_checkpoint=False,
     )
 
     def fail_text(*_args, **_kwargs):
@@ -105,6 +106,7 @@ def _run_sft(tmp_path, yaml_body: str, dataset: DatasetDict, *, stub_vlm_prep: b
         raise _VLMPathReached
 
     def load_model(*_args, **kwargs):
+        assert kwargs["preserve_checkpoint_precision"] is False
         if loads is not None:
             loads.append(kwargs)
         return model, processing_class, tokenizer, True
@@ -157,6 +159,7 @@ def _run_dpo(tmp_path, dataset: DatasetDict, tokenizer):
         mode_suffix="",
         local_rank=0,
         resume_checkpoint=None,
+        policy_from_checkpoint=False,
     )
 
     def fail_text(*_args, **_kwargs):
@@ -165,9 +168,13 @@ def _run_dpo(tmp_path, dataset: DatasetDict, tokenizer):
     def fail_vlm(*_args, **_kwargs):
         raise _VLMPathReached
 
+    def load_model(*_args, **kwargs):
+        assert kwargs["preserve_checkpoint_precision"] is False
+        return model, processing_class, tokenizer, True
+
     patches = [
         mock.patch.object(module, "init_training_script", return_value=runtime),
-        mock.patch.object(module, "load_model_for_training", return_value=(model, processing_class, tokenizer, True)),
+        mock.patch.object(module, "load_model_for_training", side_effect=load_model),
         mock.patch.object(module, "load_reference_model_for_preference", return_value=None),
         mock.patch.object(module, "apply_max_length", side_effect=lambda cfg, args, model, tok: tok),
         mock.patch.object(module, "install_resolved_tokenizer", side_effect=lambda pc, tok: pc),

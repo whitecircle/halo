@@ -100,6 +100,7 @@ def _run_kto(
         mode_suffix="",
         local_rank=0,
         resume_checkpoint=None,
+        policy_from_checkpoint=False,
     )
 
     def capture_and_stop(datasets, *_args, **_kwargs):
@@ -107,13 +108,13 @@ def _run_kto(
             logged.update(datasets)
         raise _TrainerHandoffReached
 
+    def load_model(*_args, **kwargs):
+        assert kwargs["preserve_checkpoint_precision"] is False
+        return model, types.SimpleNamespace(tokenizer=None), tokenizer, vlm_checkpoint
+
     patches = [
         mock.patch.object(module, "init_training_script", return_value=runtime),
-        mock.patch.object(
-            module,
-            "load_model_for_training",
-            return_value=(model, types.SimpleNamespace(tokenizer=None), tokenizer, vlm_checkpoint),
-        ),
+        mock.patch.object(module, "load_model_for_training", side_effect=load_model),
         mock.patch.object(module, "load_reference_model_for_preference", return_value=None),
         mock.patch.object(module, "apply_max_length", side_effect=lambda cfg, args, model, tok: tok),
         mock.patch.object(module, "install_resolved_tokenizer", side_effect=lambda pc, tok: pc),

@@ -200,6 +200,10 @@ changes the module tree). The training scripts repoint `model_name_or_path` at t
 `load_distributed_model` loads the trained weights at construction; a model not constructed from
 the checkpoint raises rather than silently continuing on its current weights.
 
+Configured FP32 parameter masters are reread before the CP wrapper is installed, for both a resume
+and a fresh stage starting from a checkpoint. Persistent FP32 buffers follow their separate family
+policy. See [Load precision](../models/README.md#load-precision).
+
 Trainer state is restored, and so are LoRA adapters: the saved CP-normalized keys are remapped back
 onto the live wrapped names, and a wholesale key miss raises.
 

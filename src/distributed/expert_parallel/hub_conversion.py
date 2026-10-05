@@ -23,11 +23,13 @@ import torch.nn as nn
 from transformers import PreTrainedModel
 from transformers.conversion_mapping import get_checkpoint_conversion_mapping
 from transformers.core_model_loading import WeightConverter, WeightRenaming
+from transformers.integrations.bitsandbytes import Bnb4bitDeserialize
 
 from src.distributed.expert_parallel.expert_weights import (
     ep_layer_class_by_model_type,
     experts_container_attrs,
 )
+from src.models.loading.dtype import is_packed_4bit_parameter
 from src.models.loading.lazy_safetensors.conversion import Convert, Rename, translate_converter, translate_renaming
 
 # A conversion source addressing one tensor per expert (``…experts.*.w1.weight``): the lazy loaders
@@ -66,23 +68,75 @@ def resolve_conversion_steps(model_type: str, model: nn.Module) -> tuple[Rename 
             )
         scope = scopes.get(key, "")
         for entry in entries:
-            if isinstance(entry, WeightRenaming):
-                steps.append(translate_renaming(entry, scope))
-            elif isinstance(entry, WeightConverter):
-                if all(_PER_EXPERT_SOURCE.search(p) for p in entry.source_patterns):
-                    unknown = {type(op).__name__ for op in entry.operations} - {"MergeModulelist", "Concatenate"}
-                    if unknown:
-                        raise ValueError(
-                            f"per-expert conversion entry for {entry.source_patterns} carries "
-                            f"{sorted(unknown)} — the ExpertFuser only reproduces plain "
-                            "MergeModulelist/Concatenate merges, so skipping it would silently "
-                            "drop a real conversion"
-                        )
-                    continue  # expert merge, handled by the ExpertFuser (see _PER_EXPERT_SOURCE)
-                steps.append(translate_converter(entry, config=model.config, scope=scope))
-            else:
-                raise ValueError(f"Unsupported conversion entry type {type(entry).__name__} for {key!r}.")
+            step = _translate_entry(entry, model, scope, key=key)
+            if step is not None:
+                steps.append(step)
     return tuple(steps) or None
+
+
+def resolve_loaded_conversion_steps(model: nn.Module) -> tuple[Rename | Convert, ...] | None:
+    """Replay the conversions the eager load actually used, including nested-model renames.
+
+    Canonical training checkpoints need no conversion; vendor namespaces use the model's recorded
+    transforms rather than the lazy family's narrower supported subset.
+    """
+    steps = []
+    for entry in getattr(model, "_weight_conversions", None) or ():
+        # HF records the broad original Bnb4bitDeserialize template (target="weight"), not
+        # its concrete packed targets. It also matches ordinary norms/embeddings, where the
+        # exact op returns its single input unchanged. Packed Params4bit are never masters;
+        # replay their *ordinary* neighbours as identity and retain all family transforms.
+        if (
+            isinstance(entry, WeightConverter)
+            and entry.target_patterns == ["weight"]
+            and "weight" in entry.source_patterns
+            and len(entry.operations) == 1
+            and type(entry.operations[0]) is Bnb4bitDeserialize
+            and any(is_packed_4bit_parameter(param) for param in model.parameters())
+        ):
+            continue
+        step = _translate_entry(
+            entry,
+            model,
+            getattr(entry, "scope_prefix", "") or "",
+            key=getattr(getattr(model, "config", None), "model_type", type(model).__name__),
+            strict_renaming=True,
+        )
+        if step is not None:
+            steps.append(step)
+    return tuple(steps) or None
+
+
+def _translate_entry(
+    entry, model: nn.Module, scope: str, *, key: str, strict_renaming: bool = False
+) -> Rename | Convert | None:
+    if isinstance(entry, WeightRenaming):
+        if strict_renaming and (
+            len(entry.source_patterns) != 1
+            or len(entry.target_patterns) != 1
+            or type(entry).rename_source_key is not WeightRenaming.rename_source_key
+        ):
+            raise ValueError(
+                f"Unsupported renaming entry {type(entry).__name__} for {key!r}: checkpoint replay requires "
+                "one unconditional source/target pair."
+            )
+        return translate_renaming(entry, scope)
+    if not isinstance(entry, WeightConverter):
+        raise ValueError(f"Unsupported conversion entry type {type(entry).__name__} for {key!r}.")
+    if all(_PER_EXPERT_SOURCE.search(p) for p in entry.source_patterns):
+        unknown = {type(op).__name__ for op in entry.operations} - {"MergeModulelist", "Concatenate"}
+        if unknown:
+            raise ValueError(
+                f"per-expert conversion entry for {key!r}, {entry.source_patterns} carries "
+                f"{sorted(unknown)} — the ExpertFuser only reproduces plain "
+                "MergeModulelist/Concatenate merges, so skipping it would silently "
+                "drop a real conversion"
+            )
+        return None  # expert merge, handled by the ExpertFuser (see _PER_EXPERT_SOURCE)
+    try:
+        return translate_converter(entry, config=model.config, scope=scope)
+    except ValueError as error:
+        raise ValueError(f"{error} for {key!r}") from error
 
 
 def _conversion_scopes(model: nn.Module) -> dict[str, str]:

@@ -251,6 +251,7 @@ def main():
         reset_sinks=distributed_args.reset_sinks,
         train_sinks=distributed_args.train_sinks,
         weights_source=runtime.model_source,
+        preserve_checkpoint_precision=runtime.policy_from_checkpoint,
         text_only_model=distributed_args.text_only_model,
     )
     tokenizer = apply_max_length(sft_config, args, model, tokenizer)

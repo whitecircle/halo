@@ -85,6 +85,7 @@ def main():
         reset_sinks=dist_args.reset_sinks,
         train_sinks=dist_args.train_sinks,
         weights_source=runtime.model_source,
+        preserve_checkpoint_precision=runtime.policy_from_checkpoint,
         text_only_model=dist_args.text_only_model,
     )
 

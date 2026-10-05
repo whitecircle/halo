@@ -578,6 +578,7 @@ def load_script_model(
         reset_sinks=dist_args.reset_sinks,
         text_only_model=dist_args.text_only_model,
         train_sinks=dist_args.train_sinks,
+        preserve_checkpoint_precision=runtime.policy_from_checkpoint,
     )
 
 

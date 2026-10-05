@@ -204,6 +204,12 @@ lossy and the error grows with rank count — worth enabling for many-rank / mul
 Training checkpoints keep these masters in fp32 and exports write them bf16
 ([What gets saved](../reference/checkpoints.md#what-gets-saved)).
 
+Configured masters keep their checkpoint values before the wrappers adopt them, for a fresh stage
+as well as a resume. One shared selector (`src/distributed/loading/precision.py`) covers routers,
+expert banks and non-EP parameters; FSDP-managed EP1 experts still ignore `fp32_experts`. A resolved
+full-finetune resume additionally requires complete master coverage. The same construction policy
+applies with CP, attention TP and ETP; it does not widen persistent FP32 buffers into the master set.
+
 `fp32_non_ep_params: true` unconditionally implies `fp32_router: true`: every family except Gemma 4
 keeps its router inside the EP wrapper, which that upcast skips, so the implication keeps every
 non-expert weight an FP32 master.
@@ -418,7 +424,16 @@ each rank's expert slice straight from safetensors
 (`src/distributed/expert_parallel/lazy_loader.py`). The shell carries the **run's** dtype, not the
 checkpoint config's. Float parameters stream at that dtype; a float buffer keeps its stored dtype unless the
 family's fp32 pins name it (GLM-5 Next's `e_score_correction_bias`), which then loads fp32, as `from_pretrained`
-loads it.
+loads it. Configured parameter masters instead stream/fuse directly at FP32, independent of the
+shell's dtype or whether this is the first stage or a resume.
+
+The eager fallback replays only selected masters after HF construction, using the same checkpoint
+mapping and expert layout. FP32-stored masters need a **second read**; BF16 safetensors masters
+promote the already-loaded values without rereading their payload. Under `fp32_experts`, FP32 replay
+materializes the **full** expert bank before the EP slice: twice the expert bytes of BF16, plus
+conversion temporaries. Pure EP stages this bank on each admitted CPU rank; eager EP+TP and ETP
+stage it on each GPU before slicing. `max_concurrent_loading` bounds admitted ranks per node;
+the lazy path reads only each rank's expert slice and avoids full-bank staging.
 
 Buffers must be real: a config-less rotary derives `inv_freq` from ctor args it never stores, which a
 meta build loses irrecoverably. The `from_pretrained(device_map="meta")` route strands the

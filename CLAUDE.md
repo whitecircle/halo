@@ -150,7 +150,8 @@ src/
 │   ├── grad_reduce.py    # bucketed gradient all-reduce (EP cross-replica, TP replicated, QLoRA sweeps)
 │   ├── loading/         # parallelism-aware model construction: model_loading (the load_distributed_model
 │   │                    #   dispatcher), vlm_setup (modality-aware entry points), frozen_models (unsharded
-│   │                    #   teacher/reference loads + freeze), peft_setup, warmup (the fenced FA4 warm-up)
+│   │                    #   teacher/reference loads + freeze), precision (configured FP32 parameter masters),
+│   │                    #   master_weights (streamed pre-wrap restore, native TP before DP), peft_setup, warmup (fenced FA4 warm-up)
 │   ├── checkpoint/      # save.py saver ladder (select_checkpoint_saver → FSDP2/CP/TP/EP savers), weight loader, OptimizerShardStore,
 │   │                    #   write.py (the collective half of a write: retain-gated gather, streamed parts, index exchange),
 │   │                    #   coordination.py (rank consensus shared by both halves of a resume), PeftAdapterSaver

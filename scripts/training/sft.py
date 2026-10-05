@@ -285,6 +285,7 @@ def main():
         train_sinks=dist_args.train_sinks,
         init_from_scratch=dist_args.init_from_scratch,
         weights_source=runtime.model_source,
+        preserve_checkpoint_precision=runtime.policy_from_checkpoint,
         text_only_model=dist_args.text_only_model,
     )
 

@@ -372,8 +372,19 @@ MANIFEST: dict[str, TestSpec] = {
     # experts), a different shard layout from the ep row's plain FSDP-ignored expert tensors.
     "parallelism/ep/test_ep_optimizer_resume.py": TestSpec(
         nproc=2,
-        markers=("gpu", "core", "2gpu", "ep", "cp", "moe", "qwen3"),
-        args_matrix=("--mode ep", "--mode ep1", "--mode cp"),
+        markers=("gpu", "core", "2gpu", "ep", "cp", "tp", "moe", "qwen3"),
+        args_matrix=(
+            "--mode ep",
+            "--mode ep1",
+            "--mode cp",
+            "--mode ep --fp32-masters",
+            "--mode ep_cp --fp32-masters",
+            "--mode ep --fp32-masters --eager-loading",
+            "--mode ep1 --fp32-masters --unsharded-ep1-experts",
+            "--mode cp --fp32-masters",
+            "--mode fsdp --fp32-masters",
+            "--mode tp --fp32-masters",
+        ),
         timeout=1200,
     ),
     "parallelism/ep/test_ep_replay_cache.py": TestSpec(

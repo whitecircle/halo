@@ -76,6 +76,7 @@ def _run_dpo(tmp_path, dataset: DatasetDict, yaml_body: str = "") -> dict:
         mode_suffix="",
         local_rank=0,
         resume_checkpoint=None,
+        policy_from_checkpoint=False,
     )
     reached: dict = {}
 
@@ -83,13 +84,13 @@ def _run_dpo(tmp_path, dataset: DatasetDict, yaml_body: str = "") -> dict:
         reached.update(log_examples)
         raise _VisionPathReached
 
+    def load_model(*_args, **kwargs):
+        assert kwargs["preserve_checkpoint_precision"] is False
+        return model, types.SimpleNamespace(tokenizer=None), tokenizer, True
+
     patches = [
         mock.patch.object(module, "init_training_script", return_value=runtime),
-        mock.patch.object(
-            module,
-            "load_model_for_training",
-            return_value=(model, types.SimpleNamespace(tokenizer=None), tokenizer, True),
-        ),
+        mock.patch.object(module, "load_model_for_training", side_effect=load_model),
         mock.patch.object(module, "load_reference_model_for_preference", return_value=None),
         mock.patch.object(module, "apply_max_length", side_effect=lambda cfg, args, model, tok: tok),
         mock.patch.object(module, "install_resolved_tokenizer", side_effect=lambda pc, tok: pc),

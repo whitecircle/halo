@@ -29,10 +29,9 @@ from src.distributed.expert_parallel.config import EPConfig
 from src.distributed.expert_parallel.lazy_loader import (
     CheckpointFormat,
     ExpertFuser,
-    fp32_non_ep_param_keys,
     lazy_load_prologue,
 )
-from src.distributed.expert_parallel.patching import create_ep_buffers, patch_moe_model_for_ep
+from src.distributed.expert_parallel.patching import create_ep_buffers, ep_claimed_blocks, patch_moe_model_for_ep
 from src.distributed.pipeline_parallel.split import (
     TIE_WORD_EMBEDDINGS_FLAG,
     resolve_layer_partition,
@@ -99,6 +98,15 @@ class PPWeightPlanner:
     def filter(self, plans: list[WeightPlan]) -> list[WeightPlan]:
         """This stage's plans, with their model keys re-based."""
         return [replace(plan, model_key=self.stage_key(plan.model_key)) for plan in plans if self.owns(plan.model_key)]
+
+
+def _shell_fp32_non_ep_param_keys(model: nn.Module, *, ep_wrapped: bool) -> frozenset[str]:
+    """The shell's FP32 pins outside the blocks adopted by the stage's EP wrappers."""
+    blocks = ep_claimed_blocks(model) if ep_wrapped else []
+    ep_keys = {f"{path}.{name}" for path, block in blocks for name, _ in block.named_parameters()}
+    return frozenset(
+        name for name, param in model.named_parameters() if param.dtype == torch.float32 and name not in ep_keys
+    )
 
 
 def load_pp_stage_model(
@@ -205,7 +213,9 @@ def load_pp_stage_model(
     slice_backbone_to_stage(model, lo, hi)
     setattr(model, PP_STAGE_PARTITION_ATTR, partition)
     # After the slice: the kept keys must be in the stage's own numbering, the one ``plans`` now uses.
-    keep_fp32 = fp32_non_ep_param_keys(model, ep_wrapped=ep_config is not None) if keep_fp32_params else frozenset()
+    keep_fp32 = (
+        _shell_fp32_non_ep_param_keys(model, ep_wrapped=ep_config is not None) if keep_fp32_params else frozenset()
+    )
     reject_across_ranks(_unresolved_plans_reason(model, plans, pp_rank, lo, hi), _PP_LOAD_LABEL)
 
     # The rank-local materialization steps below raise stage-dependent errors (a shape mismatch or

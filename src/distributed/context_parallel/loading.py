@@ -18,7 +18,8 @@ from src.distributed.context_parallel.wrapper import patch_model_for_cp
 from src.distributed.expert_parallel.loading import cast_loaded_parameters, load_ep_model
 from src.distributed.expert_parallel.patching import create_ep_buffers, patch_moe_model_for_ep
 from src.distributed.filesystem import sequential_load_within_node
-from src.distributed.runtime import get_global_rank, move_model_to_local_device
+from src.distributed.loading.master_weights import restore_fp32_master_parameters
+from src.distributed.runtime import DeferredRankFailure, get_global_rank, move_model_to_local_device
 from src.models.loading.checkpoint_coverage import from_pretrained_verified
 from src.models.patches.attention import revalidate_attn_kwarg
 from src.models.patches.buffer_fixes import finalize_loaded_model
@@ -36,6 +37,7 @@ def load_model_for_cp(
     max_concurrent_loading: int | None = None,
     ep_config=None,
     keep_fp32_params: bool = False,
+    preserve_checkpoint_precision: bool = False,
     **model_kwargs,
 ) -> nn.Module:
     """Load a model with Ulysses CP support only (no expert distribution).
@@ -66,6 +68,7 @@ def load_model_for_cp(
     revalidate_attn_kwarg(model_kwargs, config)
 
     # Sequential loading within each node avoids CPU OOM: each rank loads to CPU, then to GPU.
+    precision_guard = DeferredRankFailure(f"FP32-master checkpoint load from {model_name_or_path}")
     with sequential_load_within_node(max_concurrent=max_concurrent_loading):
         model = from_pretrained_verified(
             model_class,
@@ -77,7 +80,20 @@ def load_model_for_cp(
             **model_kwargs,
         )
         cast_loaded_parameters(model, dtype, keep_fp32=keep_fp32_params, ep_wrapped=ep_config is not None)
-        model = move_model_to_local_device(model)
+        precision_guard.run(
+            lambda: restore_fp32_master_parameters(
+                model,
+                model_name_or_path,
+                ep_config,
+                keep_non_ep=keep_fp32_params,
+                strict=preserve_checkpoint_precision,
+                revision=model_kwargs.get("revision"),
+            )
+        )
+        if precision_guard.reason is None:
+            model = move_model_to_local_device(model)
+
+    precision_guard.reject()
 
     # Before the CP wrap, on the inner HF model: the wrapper carries no tie_weights.
     finalize_loaded_model(model)
@@ -104,6 +120,7 @@ def load_model_for_ep_cp(
     lazy: bool = True,
     revision: str | None = None,
     keep_fp32_params: bool = False,
+    preserve_checkpoint_precision: bool = False,
     **model_kwargs,
 ) -> nn.Module:
     """Load a MoE model with both EP and Ulysses CP support.
@@ -135,6 +152,7 @@ def load_model_for_ep_cp(
         lazy=lazy,
         revision=revision,
         keep_fp32_params=keep_fp32_params,
+        preserve_checkpoint_precision=preserve_checkpoint_precision,
         **model_kwargs,
     )
 

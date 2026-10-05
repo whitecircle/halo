@@ -81,7 +81,28 @@ Families spell the count and the width differently (`num_experts`, `num_local_ex
 
 ## Load precision
 
-The training and scoring loaders cast each floating parameter to the run dtype right after `from_pretrained` and before any EP/TP/CP wrapper (`cast_parameters_to_run_dtype` in `src/models/loading/dtype.py`; the EP lazy loader casts per tensor to the same effect). That overrides transformers' `_keep_in_fp32_modules[_strict]` — DeepSeek-V4's norms and hyper-connections, GLM-5 Next's KDA state, Inkling's short convolutions — so a family trains in one precision under every parallelism mode; FSDP2 refuses mixed dtypes among a shard group's trainable parameters. Buffers keep the dtype the load gives them: fp32 for a pinned one on every loader, the EP lazy one included (a buffer-held `e_score_correction_bias`); Zaya's balancing biases are fp32 by design. Under `fp32_non_ep_params` the fp32 parameters outside the MoE blocks keep their stored values as the fp32 masters start; the experts stay at the run dtype. A quantized base keeps its storage (bnb `Params4bit`, whatever its `bnb_4bit_quant_storage`). An fp8 weight is refused on every training loader, the EP lazy one included: dequantize the checkpoint to bf16 once (`scripts/before_training/convert_*_bf16.py`, for the families that ship a converter). Three loads skip the cast: the checkpoint conversion tools, which keep the pins; the deduplication embeddings tool (`scripts/inference/generation/dataset_deduplication.py`), which loads at the checkpoint's dtype, so a pinned-family model embeds with its pins and a DeepSeek-V4 one fails on the fp32-norm output; and the dense TP loader, which loads straight into DTensors the cast cannot re-dtype (no dense family pins a parameter). The reward-scoring tool casts the whole model, buffers included, to its `--rm_dtype`.
+The training and scoring loaders cast floating parameters to the run dtype after `from_pretrained`
+and before parallel wrappers (`cast_parameters_to_run_dtype` in `src/models/loading/dtype.py`;
+lazy loaders cast per tensor). This overrides transformers' FP32 module pins — DeepSeek-V4's norms
+and hyper-connections, GLM-5 Next's KDA state, Inkling's short convolutions — so FSDP2 sees one dtype
+within each shard group. Persistent buffers have a separate policy: a family-pinned buffer stays
+FP32 on every loader, including the lazy EP loader's `e_score_correction_bias`.
+
+Configured FP32 parameter masters are the exception. The shared selector in
+`src/distributed/loading/precision.py` preserves non-EP weights under `fp32_non_ep_params` and the
+EP wrapper's selected router/expert weights under their flags. Eager construction streams those
+checkpoint values back before wrapping; lazy construction reads/fuses them at FP32 immediately.
+Native dense TP rebuilds its existing TP shards at FP32 before the DP wrap, preserving tied aliases
+and never moving a full FP32 matrix onto each GPU. This applies to fresh stages and resumes alike;
+resolved resume provenance only makes coverage strict. See
+[Checkpoint precision](../reference/checkpoints.md#what-gets-saved) and the
+[eager EP memory/read cost](../parallelism/expert-parallelism.md#model-loading).
+
+A quantized base keeps packed bnb `Params4bit` storage, including floating `bnb_4bit_quant_storage`;
+it is never a parameter master. FP8 weights are refused: dequantize once to BF16 with the family's
+`scripts/before_training/convert_*_bf16.py` converter. Conversion tools keep the original pins,
+while the deduplication embeddings tool loads at the checkpoint's dtype. The reward-scoring tool
+casts the whole model, buffers included, to its `--rm_dtype`.
 
 ## Per-family pages
 
