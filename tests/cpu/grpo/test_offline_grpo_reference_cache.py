@@ -125,7 +125,7 @@ def test_one_reader_mapping_failure_is_joined_before_scratch_is_removed(tmp_path
     outcomes = [(tmp_path / f"mapping-outcome-{rank}.txt").read_text() for rank in range(2)]
     assert outcomes[0] == outcomes[1]
     assert outcomes[0] == (
-        "ValueError: Mapping the offline GRPO reference cache failed on 1 of 2 rank(s). "
+        "ValueError: Mapping the offline GRPO reference cache failed on 1 of 2 rank(s) [1]. "
         "First (rank 1): OSError: rank-1 reference mapping denied"
     )
     assert not list(tmp_path.rglob("*.lengths"))
