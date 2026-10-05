@@ -14,7 +14,7 @@ Memory reduction, throughput, and hardware utilization during training. The [GPU
 
 ## Memory
 
-- **[PEFT (LoRA)](peft.md)** — Train a few percent of parameters at ~50% less memory, across EP and CP (attention-only under ETP; rejected under TP and PP) — with merge-back to a standalone checkpoint.
+- **[PEFT (LoRA)](peft.md)** — Train a few percent of parameters at ~50% less memory, across EP and CP (attention-only under ETP; native dense SFT under pure TP; PP rejected) — with merge-back to a standalone checkpoint.
 - **[BF16 optimizer](bf16-optimizer.md)** — AdamW with bf16 masters and stochastic rounding at 6 bytes/param. Auto-enabled with `bf16: true` on FSDP/EP/TP.
 - **[FlashAdamW](flash-adamw.md)** — Quantized 8-bit states + 24-bit masters (~5 bytes/param) with AdamW-matching convergence. Set `optim: flash_adamw`.
 - **[Low-precision compute (FP8/FP4)](low-precision-moe-kernels.md)** — FP8/FP4 matmul over bf16 masters and checkpoints — a QAT oracle plus inference-memory export (`scripts/after_training/quantize_to_lowp.py`).

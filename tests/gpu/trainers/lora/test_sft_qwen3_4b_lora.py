@@ -1,15 +1,14 @@
 #!/usr/bin/env python
 """
-SFT Trainer test: LoRA and QLoRA on Qwen3-4B with FSDP (+ LoRA/QLoRA TP rejection).
+SFT Trainer test: LoRA and QLoRA on Qwen3-4B with FSDP and native dense LoRA TP.
 
-Tests LoRA/QLoRA under FSDP (data parallel) with checkpoint save + reload, and asserts that the
-unsupported TP combinations are rejected at trainer construction.
+Tests LoRA/QLoRA under FSDP and native LoRA under pure TP with checkpoint save + stock reload.
 
 Tests:
   1. LoRA  + FSDP  -> train -> save -> verify checkpoint -> reload adapter
   2. QLoRA + FSDP  -> train -> save -> verify checkpoint -> reload adapter
-  3. LoRA  + TP=2  -> REJECTED at construction (adapters not in the TP DTensor graph)
-  4. QLoRA + TP=2  -> SKIPPED (4-bit quantization incompatible with DTensor TP)
+  3. LoRA  + TP=2  -> train -> save -> reload adapter onto a non-TP base
+  4. QLoRA + TP=2  -> rejected by the distributed model loader
 
 Checkpoint verification:
   - Adapter files exist (adapter_config.json, adapter_model.safetensors)
@@ -38,7 +37,14 @@ from tests.common.datasets import create_sft_dataset
 from tests.common.distributed import ensure_model_downloaded
 from tests.common.harness import gpu_test_main
 from tests.common.models import QWEN3_4B_INSTRUCT
-from tests.common.peft_helpers import adapter_save_checks, snapshot_adapters, unwrap, verify_adapter_reload
+from tests.common.peft_helpers import (
+    adapter_save_checks,
+    assert_adapters_moved,
+    snapshot_adapters,
+    unwrap,
+    verify_adapter_reload,
+)
+from tests.common.tp_lora_native import assert_native_factors, assert_replicas_equal, require_native_runtime
 from tests.common.utils import LM_TRAINING_LOSS_BAND, cleanup_memory, gpu_mem_gb, log, training_run_checks
 
 # Configuration
@@ -85,14 +91,8 @@ def run_mode(
     rank: int,
     local_rank: int,
     save_dir: str,
-    expect_rejection: bool = False,
 ) -> tuple[bool, str]:
-    """Run one SFT training mode following the sft.py pipeline.
-
-    ``expect_rejection=True`` flips the mode into a guard test: instead of training, it asserts
-    that ``DistributedSFTTrainer`` construction raises ``ValueError`` (used for the unsupported
-    LoRA+TP combination — the adapter would train rank-inconsistent).
-    """
+    """Run one SFT training mode following the sft.py pipeline."""
     model = None
     trainer = None
 
@@ -130,25 +130,7 @@ def run_mode(
                 f"({100 * trainable / total_params:.2f}%)"
             )
 
-        # Step 4: Create trainer (or assert rejection for unsupported LoRA+TP)
-        if expect_rejection:
-            raised, err = False, ""
-            try:
-                DistributedSFTTrainer(
-                    model=model,
-                    args=sft_config,
-                    train_dataset=train_dataset,
-                    eval_dataset=eval_dataset,
-                    processing_class=tokenizer,
-                    peft_config=peft_config,
-                    parallelism_config=parallelism_config,
-                )
-            except ValueError as e:
-                raised, err = True, str(e)
-            ok = raised and (("Tensor Parallelism" in err) or ("tp_size" in err))
-            log(f"  LoRA+TP rejected at construction: {'PASS' if ok else 'FAIL'}")
-            return ok, ("rejected at construction" if ok else "NOT rejected — guard missing?")
-
+        # Step 4: Create trainer
         trainer = DistributedSFTTrainer(
             model=model,
             args=sft_config,
@@ -158,6 +140,11 @@ def run_mode(
             peft_config=peft_config,
             parallelism_config=parallelism_config,
         )
+        before = None
+        if parallelism_config.tp_size > 1:
+            assert_native_factors(trainer.model)
+            assert_replicas_equal(trainer.model, parallelism_config.tp_size)
+            before = snapshot_adapters(unwrap(trainer.model), expert_lora=False)
 
         # Step 5: Train
         log(f"  Training for {MAX_STEPS} steps...")
@@ -172,6 +159,12 @@ def run_mode(
         # Step 7: Validate training
         log(f"\n  --- Training Validation ({mode_name}) ---")
         checks = training_run_checks(train_result, trainer, MAX_STEPS, loss_band=LM_TRAINING_LOSS_BAND)
+        if before is not None:
+            moved, detail = assert_adapters_moved(before, trained_lora)
+            checks["tp_adapters_moved"] = moved
+            checks["tp_active"] = trainer.is_tp_mode
+            assert_replicas_equal(trainer.model, parallelism_config.tp_size)
+            log(f"  Native TP adapters: {detail}")
 
         # Step 8: Verify checkpoint files
         log(f"\n  --- Checkpoint Verification ({mode_name}) ---")
@@ -330,16 +323,14 @@ def run(ctx) -> dict:
     )
     results["qlora_fsdp"] = (success, detail)
 
-    # ── Test 3: LoRA + TP=2 must be REJECTED ─────────────────────────────
-    # TP shards attention as DTensors; PEFT adapters are plain tensors outside the TP graph, so
-    # the adapter would train rank-inconsistent. The trainer must fail fast at construction.
+    # ── Test 3: native LoRA + TP=2 ───────────────────────────────────────
     log(f"\n{'=' * 70}")
-    log("  TEST 3: LoRA + TP=2 must be REJECTED (Qwen3-4B)")
+    log("  TEST 3: native LoRA + TP=2 (Qwen3-4B)")
     log(f"{'=' * 70}")
 
     parallelism_tp2 = ParallelismConfig(tp_size=2)
-
-    lora_tp_model_config = ModelConfig(**lora_model_kwargs)
+    require_native_runtime()
+    lora_tp_model_config = ModelConfig(**{**lora_model_kwargs, "lora_dropout": 0.0})
     lora_tp_sft_config = SFTConfig(
         output_dir=os.path.join(base_output_dir, "lora_tp2_train"),
         learning_rate=LEARNING_RATE,
@@ -349,7 +340,7 @@ def run(ctx) -> dict:
     )
 
     success, detail = run_mode(
-        "lora_tp2_rejected",
+        "lora_tp2",
         lora_tp_model_config,
         lora_tp_sft_config,
         parallelism_tp2,
@@ -359,18 +350,24 @@ def run(ctx) -> dict:
         rank,
         local_rank,
         save_dir=os.path.join(base_output_dir, "lora_tp2_save"),
-        expect_rejection=True,
     )
-    results["lora_tp2_rejected"] = (success, detail)
+    results["lora_tp2"] = (success, detail)
 
     # ── Test 4: QLoRA + TP=2 ─────────────────────────────────────────────
-    # QLoRA (4-bit quantization via BitsAndBytes) is incompatible with TP (DTensor).
-    # DTensor requires sharding tensors across devices, but BnB Linear4bit layers
-    # use custom integer storage that cannot be split by DTensor's ColwiseParallel
-    # and RowwiseParallel. This is a known limitation.
     log(f"\n{'=' * 70}")
-    log("  TEST 4: QLoRA + TP=2 -- SKIPPED (4-bit quantization incompatible with DTensor TP)")
+    log("  TEST 4: QLoRA + TP=2 must be rejected by the loader")
     log(f"{'=' * 70}")
+    rejected, error = False, ""
+    try:
+        load_distributed_model(
+            model_name_or_path=MODEL_NAME,
+            parallelism_config=parallelism_tp2,
+            dtype=torch.bfloat16,
+            quantization_config=get_quantization_config(qlora_fsdp_model_config),
+        )
+    except ValueError as exc:
+        rejected, error = True, str(exc)
+    results["qlora_tp2_rejected"] = (rejected and "quantiz" in error.lower(), error)
 
     for name, (passed, detail) in results.items():
         log(f"  {name:20s} {'PASSED' if passed else 'FAILED'} -- {detail}")
@@ -378,7 +375,7 @@ def run(ctx) -> dict:
     return {"checks": {name: passed for name, (passed, _) in results.items()}}
 
 
-main = gpu_test_main(min_world_size=2, prefix="test_sft_qwen3_4b_lora")(run)
+main = gpu_test_main(exact_world_size=2, prefix="test_sft_qwen3_4b_lora")(run)
 
 if __name__ == "__main__":
     main()

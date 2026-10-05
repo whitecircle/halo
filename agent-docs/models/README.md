@@ -45,7 +45,7 @@ Trainer × parallelism support is tracked in [Trainer Compatibility](../referenc
 
 ⁶ EP+CP is gated the same way for every family: `_validate_ep_cp` requires node-local EP with `ep_group_size == nvlink_domain_size` and rejects both a smaller `ep` within the domain and cross-domain EP (`ep_scope='global'`). On an 8-GPU node that pins `ep_size` to 8; `cp_size` only has to divide the domain, and the fully orthogonal shape is `cp_size == ep_group_size == nvlink_domain_size`.
 
-⁷ LoRA "Yes" means the family trains with adapters under FSDP/DP, EP, CP, and pure ETP. It is rejected at trainer construction under **TP** and **EP+TP** (adapters are plain tensors outside the TP DTensor graph). Under EP the adapters cover attention (PEFT) *and* the experts (native grouped adapters); the expert half is refused at `expert_tp_size > 1`, leaving attention-only LoRA there. See [PEFT](../optimization/peft.md).
+⁷ LoRA "Yes" means the family trains with adapters under its supported FSDP/DP, EP, CP and pure ETP modes. Dense SFT can also use [native TP LoRA](../parallelism/tensor-parallelism.md#native-lora-for-dense-sft) with DP=1 and compatible PEFT; MoE, EP+TP and other trainers still reject TP adapters. Under EP the adapters cover attention (PEFT) *and* the experts (native grouped adapters); the expert half is refused at `expert_tp_size > 1`, leaving attention-only LoRA there. See [PEFT](../optimization/peft.md).
 
 ⁸ DeepSeek-V4 is eager-only (`head_dim=512` exceeds every FA kernel; sinks + compressor KV concat rule out SDPA/flex). Its CSA/HCA compressors pool token windows along the sequence axis (no CP), and shared-KV MQA is not shardable (`apply_tp_to_attention_only` raises). `padding_free` is rejected — no varlen kernel. See [deepseek-v4.md](deepseek-v4.md).
 

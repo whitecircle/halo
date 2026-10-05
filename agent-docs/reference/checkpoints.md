@@ -467,6 +467,7 @@ takes the mode's saver even with adapters present. Only adapter weights are save
 | **EP** | Attention adapters + native grouped expert adapters | Save rank | Yes (expert gather) |
 | **ETP** | Attention adapters only — expert LoRA is rejected at construction under `expert_tp_size > 1` | Save rank | Yes |
 | **FSDP2** | DTensors (sharded across DP mesh) | Global rank 0 (shared FS) / local rank 0 | Yes |
+| **Pure TP, dense SFT** | Native DTensor factor shards + plain replicas | Save rank | Yes |
 | **QLoRA + CP** | Regular tensors (no DTensor adapters) | Save rank | No |
 
 Every save reshards the FSDP2 modules first (`save_model`): mid-training they can still hold the
@@ -475,8 +476,8 @@ writer would read tensors one optimizer step stale. The PEFT path additionally *
 them: its DTensor probe sees plain tensors, takes the rank-0 `save_pretrained` branch, and PEFT's
 shared-tensor scan raises on the first parameter that branch cannot address.
 
-LoRA is rejected at construction under TP / EP+TP (adapters are not integrated into the TP DTensor
-graph) and under PP.
+TP adapters require [native dense SFT, DP=1](../parallelism/tensor-parallelism.md#native-lora-for-dense-sft).
+EP+TP, PP and other trainers reject TP adapters.
 
 The saver checks for DTensor adapters before the CP branch, so non-quantized LoRA+CP (whose adapters
 are FSDP2 DTensors) routes through the FSDP2 path. Only QLoRA+CP, with no DTensor adapters, takes
@@ -630,6 +631,7 @@ WandB does **not** auto-continue the same run — export `WANDB_RUN_ID` (see [Mu
 |------|------|----------------|-----------|-------|
 | **FSDP2** (standard DP) | A at `use_grouped_gemm: false`, else B | Path A: `load_full_state_dict()` → `set_model_state_dict(broadcast_from_rank0)` into DTensor params. Path B: the weights are already in the model from construction and the loader skips the re-read | Per-rank FSDP2 shards | Exact resume, same world size |
 | **TP** | B | Weights load at construction and `_load_tp` skips the re-read. Where it does read (a best-model reload, or a model built from elsewhere), each rank streams the checkpoint's full tensors and `distribute_tensor`s them into its own DTensor placements; TP+DP instead raises for a model not constructed from the checkpoint | Per-rank shards | Exact resume, same world size |
+| **Pure TP, dense SFT LoRA** | A | Base loads at construction; `restore_adapters` restores full saved factors into native TP placements for resume and best-model loading, validating adapter scaling | Per-rank shards | Standard PEFT adapter artifact; same TP topology for exact optimizer resume |
 | **CP** | B | Skipped — weights via `load_distributed_model()` | Per-rank shards (matching fingerprint) | Checkpoint has HF keys, model has CP wrapper keys |
 | **EP / ETP / EP+CP / EP+TP** | B | Skipped in the loader — the trained weights load at construction because the model source points at the checkpoint | Per-rank shards (matching fingerprint) | Checkpoint holds the hub-spelled full expert tensors, not the renamed rank-local slices the EP model registers |
 | **PP / PP+EP** ([not yet available](../parallelism/pipeline-parallelism.md)) | stage-aware | Each rank reads only its stage's global-named tensors from the merged index and remaps them through `global_parameter_name`; a missing stage-retained tensor raises. On per-node output storage the locally-absent cross-stage tensors are skipped — the stage build drops them anyway | Per-rank shards, gated on the fingerprint **and** `pp_stage_partition` | Any topology drift **raises** (no warm-restart fallback). PP+EP expert weights load at construction |

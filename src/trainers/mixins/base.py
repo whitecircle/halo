@@ -19,6 +19,7 @@ import torch.nn as nn
 from accelerate import Accelerator
 from accelerate.logging import get_logger
 from accelerate.utils import DataLoaderConfiguration
+from torch.distributed.tensor import DTensor
 from transformers.utils.output_capturing import _CAN_RECORD_REGISTRY
 from trl.trainer.utils import disable_dropout_in_model
 
@@ -206,6 +207,8 @@ class DistributedTrainerMixin(
     # some layers.
     _supports_cp: bool = False
     _supports_tp: bool = True
+    # Native PEFT TP is a separate capability, not implied by full-finetuning TP support.
+    _supports_tp_lora: bool = False
     # A subclass restates a flag only where it changes the default, except ``_supports_pp = False``,
     # which every PP-refusing trainer keeps beside its paired ``_pp_unsupported_reason`` (the gate
     # quotes that reason, so the two belong together).
@@ -317,6 +320,7 @@ class DistributedTrainerMixin(
         self._ep_config = None
         self._device_mesh = None
         self._fsdp_wrapped = False
+        self._native_tp_lora = False
         self._window_modules = []
         self._window_end_armed = True
         self._warned_empty_labels = False
@@ -478,7 +482,7 @@ class DistributedTrainerMixin(
 
         config = self.parallelism_config
 
-        # Before any wrapping: adapters sit outside the TP DTensor graph and would train rank-inconsistently.
+        # Before wrapping: native adapters must retain the exact TP placements and plain replicas.
         if config.is_tp_mode:
             self._validate_lora_tp_compatibility()
 
@@ -1483,6 +1487,11 @@ class DistributedTrainerMixin(
         """Route to the AdamWBF16 / Muon / FlashAdamW / tensor-type-grouped builders (each in its
         own :mod:`src.optimizers` module) per config, assign ``self.optimizer``, and register the
         TP replicated-grad-sync hook."""
+        if getattr(self, "_native_tp_lora", False) and getattr(self, "optimizer_cls_and_kwargs", None) is not None:
+            raise ValueError(
+                "Native TP LoRA does not support optimizer_cls_and_kwargs. Select an optimizer through "
+                "args.optim so Halo can build tensor-type-safe parameter groups."
+            )
         if self.optimizer is None:
             # A gathered FSDP2 module registers its transient unsharded params, and an evaluate() before
             # train() leaves it gathered (reshard_after_forward=False; the root never reshards post-forward):
@@ -1495,8 +1504,12 @@ class DistributedTrainerMixin(
             elif optim in NAMED_OPTIMIZER_BUILDERS:
                 builder = NAMED_OPTIMIZER_BUILDERS[optim][0]
                 self.optimizer = builder(self.model, self.args, decay_parameters)
-            # Stock SGD's foreach cannot mix FSDP2 DTensors with plain EP tensors; kept narrow to spare other optims.
-            elif self.parallelism_config.fp32_non_ep_params or (optim == "sgd" and self._has_ep_layers):
+            # Native TP adapters mix DTensor shards and plain replicas, just as EP mixes tensor types.
+            elif (
+                self.parallelism_config.fp32_non_ep_params
+                or (optim == "sgd" and self._has_ep_layers)
+                or getattr(self, "_native_tp_lora", False)
+            ):
                 self.optimizer = build_tensor_type_grouped_optimizer(
                     self.model, self.args, decay_parameters, self.get_optimizer_cls_and_kwargs
                 )
@@ -1504,6 +1517,17 @@ class DistributedTrainerMixin(
                 self._refuse_stock_optimizer_on_mixed_params(optim)
                 super().create_optimizer()
 
+        if getattr(self, "_native_tp_lora", False):
+            for group in self.optimizer.param_groups:
+                tensor_types = {isinstance(param, DTensor) for param in group["params"]}
+                if len(tensor_types) > 1 and any(
+                    key in group and group[key] is not False for key in ("foreach", "fused")
+                ):
+                    raise ValueError(
+                        "Native TP LoRA cannot use a supplied optimizer's fused/foreach group mixing "
+                        "DTensor shards and plain factors. Use foreach=False and fused=False, split "
+                        "the tensor types into separate groups, or let Halo create the optimizer."
+                    )
         self._register_tp_replicated_grad_sync_hook()
         self._register_deferred_ep_grad_sync_hook()
         self._register_qlora_grad_sync_hook()

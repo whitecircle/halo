@@ -15,7 +15,7 @@ from src.trainers.mixins.base import DistributedTrainerMixin
 from src.trainers.mixins.validation import ctor_positions, ctor_value
 
 # TRL SFTTrainer positional slots, for ctor params arriving via *args — derived from the installed signature.
-_CTOR_POSITIONS = ctor_positions(SFTTrainer, "model", "args", "data_collator")
+_CTOR_POSITIONS = ctor_positions(SFTTrainer, "model", "args", "data_collator", "peft_config")
 
 # CP metric row deferred to log time: every column is a sum, so one reduce per log gives the same
 # totals as one reduce per micro-batch. Fixed width, so the collective's shape does not depend on
@@ -39,6 +39,7 @@ class DistributedSFTTrainer(DistributedTrainerMixin, SFTTrainer):
     """Distributed SFT trainer supporting EP, CP, and/or TP."""
 
     _supports_cp = True
+    _supports_tp_lora = True
     # Canonical last-stage loss; the PP-incompatible knobs are rejected in _maybe_prepare_pipeline_model.
     _supports_pp = True
     # Forwards with ``labels``, so ``*ForCausalLM.forward`` folds the router aux loss into outputs.loss.
@@ -56,6 +57,10 @@ class DistributedSFTTrainer(DistributedTrainerMixin, SFTTrainer):
 
     def __init__(self, *args, **kwargs):
         kwargs = self._init_distributed_config(kwargs, ctor_args=args, ctor_positions=_CTOR_POSITIONS)
+        self._validate_tp_lora_request(
+            ctor_value(args, kwargs, "model", _CTOR_POSITIONS),
+            ctor_value(args, kwargs, "peft_config", _CTOR_POSITIONS),
+        )
         self._reject_cp_incompatible_collator(ctor_value(args, kwargs, "data_collator", _CTOR_POSITIONS))
         super().__init__(*args, **kwargs)
         self._setup_distributed_modes()

@@ -1,14 +1,13 @@
 #!/usr/bin/env python
 """
-Test: LoRA adapters with Context Parallelism (CP=2), plus LoRA+TP rejection,
+Test: LoRA adapters with Context Parallelism (CP=2) and native dense TP=2,
 on a dense model (Qwen3-0.6B).
 
 Two sub-tests:
 1. Sub-test A: LoRA + CP=2 (Ulysses attention) — supported: train 5 steps, verify adapter
    weights updated. CP shards the sequence, not the weights, so LoRA stays replicated/correct.
-2. Sub-test B: LoRA + TP=2 — must be REJECTED at trainer construction. TP shards the attention
-   weights as DTensors; PEFT adapters are plain tensors outside the TP graph, so the adapter
-   would train rank-inconsistent. Asserts DistributedSFTTrainer raises ValueError.
+2. Sub-test B: native LoRA + TP=2 — train with gradient accumulation and verify both
+   colwise and rowwise adapter factors update without replica drift.
 
 Usage:
     torchrun --nproc_per_node=2 \
@@ -31,6 +30,7 @@ from tests.common.datasets import create_sft_dataset
 from tests.common.distributed import ensure_model_downloaded
 from tests.common.harness import gpu_test_main
 from tests.common.models import QWEN3_0_6B
+from tests.common.tp_lora_native import assert_native_factors, assert_replicas_equal, require_native_runtime
 from tests.common.utils import cleanup_memory, gpu_mem_gb, log
 
 # Configuration
@@ -219,20 +219,15 @@ def run_lora_cp_test(rank: int, base_output_dir: str) -> bool:
 
 
 def run_lora_tp_test(rank: int, base_output_dir: str) -> bool:
-    """LoRA + TP=2 must be REJECTED at trainer construction.
-
-    TP shards the attention base layers as DTensors; PEFT adapters are plain tensors outside the
-    TP graph, so the adapter would train rank-inconsistent (the replicated matrix diverges across
-    ranks and the sharded one is corrupted by the TP replicated-grad sync). The trainer fails fast
-    instead. This test FAILS if the guard is removed (the trainer would construct successfully).
-    """
+    """Train the native colwise/rowwise LoRA path with real SFT gradient accumulation."""
     log("\n" + "=" * 70)
-    log("  SUB-TEST B: LoRA + TP=2 must be REJECTED")
+    log("  SUB-TEST B: native LoRA + TP=2")
     log("=" * 70)
 
     output_dir = os.path.join(base_output_dir, "lora_tp")
 
     try:
+        require_native_runtime()
         # Load tokenizer
         log("[B.1] Loading tokenizer...")
         tokenizer = AutoTokenizer.from_pretrained(MODEL_NAME, trust_remote_code=True)
@@ -268,19 +263,25 @@ def run_lora_tp_test(rank: int, base_output_dir: str) -> bool:
         # Apply LoRA
         log("[B.4] Applying LoRA adapters...")
         lora_config = create_lora_config()
+        lora_config.lora_dropout = 0.0
+        lora_config.target_modules = {"q_proj", "o_proj"}
         model = get_peft_model(model, lora_config)
+        assert_native_factors(model)
+        assert_replicas_equal(model, 2)
+        before = snapshot_lora_weights(model)
         trainable = sum(p.numel() for p in model.parameters() if p.requires_grad)
         total = sum(p.numel() for p in model.parameters())
         log(f"  Trainable: {trainable / 1e6:.2f}M / {total / 1e6:.1f}M ({100 * trainable / total:.2f}%)")
 
-        # Assert the trainer rejects LoRA+TP at construction. The guard fires in
-        # _setup_distributed_modes (after super().__init__) deterministically on every rank, so
-        # all ranks raise together — no collective desync.
-        log("[B.5] Asserting DistributedSFTTrainer(LoRA, TP=2) raises ValueError...")
+        log("[B.5] Training native LoRA with TP=2...")
         config = SFTConfig(
             output_dir=output_dir,
             max_steps=MAX_STEPS,
             per_device_train_batch_size=BATCH_SIZE,
+            gradient_accumulation_steps=2,
+            gradient_checkpointing=True,
+            learning_rate=LEARNING_RATE,
+            logging_steps=1,
             bf16=True,
             use_liger_kernel=False,
             report_to="none",
@@ -290,28 +291,27 @@ def run_lora_tp_test(rank: int, base_output_dir: str) -> bool:
             dataloader_num_workers=0,
             fsdp="",
         )
-        raised, err = False, ""
-        try:
-            DistributedSFTTrainer(
-                model=model,
-                args=config,
-                train_dataset=train_dataset,
-                eval_dataset=eval_dataset,
-                processing_class=tokenizer,
-                parallelism_config=parallelism_config,
-            )
-        except ValueError as e:
-            raised, err = True, str(e)
-
+        trainer = DistributedSFTTrainer(
+            model=model,
+            args=config,
+            train_dataset=train_dataset,
+            eval_dataset=eval_dataset,
+            processing_class=tokenizer,
+            parallelism_config=parallelism_config,
+        )
+        result = trainer.train()
+        after = snapshot_lora_weights(trainer.model)
+        updated, details = verify_lora_updated(before, after)
+        assert_replicas_equal(trainer.model, 2)
         checks = {
-            "construction_rejected": raised,
-            "error_explains_tp": ("Tensor Parallelism" in err) or ("tp_size" in err),
+            "tp_active": trainer.is_tp_mode,
+            "loss_finite": math.isfinite(result.training_loss),
+            "steps_completed": result.global_step == MAX_STEPS,
+            "adapters_updated": updated,
         }
-        log(f"  LoRA+TP rejected at construction: {'PASS' if checks['construction_rejected'] else 'FAIL'}")
-        log(f"  Error explains TP incompatibility: {'PASS' if checks['error_explains_tp'] else 'FAIL'}")
-
+        log(f"  Native TP adapters: {details}")
         all_passed = all(checks.values())
-        log(f"\n  Sub-test B (LoRA+TP rejection): {'PASSED' if all_passed else 'FAILED'}")
+        log(f"\n  Sub-test B (native LoRA+TP): {'PASSED' if all_passed else 'FAILED'}")
         return all_passed
 
     except Exception as e:

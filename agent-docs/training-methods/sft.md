@@ -113,7 +113,7 @@ The VLM collator never truncates: a batch whose vision plus text tokens exceed `
 
 ## Parallelism
 
-Axis sizes are CLI flags: `--expert_parallel_size`, `--context_parallel_size`, `--tensor_parallel_size`, `--expert_tensor_parallel_size`. EP+CP, EP+TP and EP+ETP compose; TP+CP, ETP+CP and EP+TP+ETP are rejected at config time, as is every other unlisted combination, and `--pipeline_parallel_size > 1` is [not yet available in this release](../parallelism/pipeline-parallelism.md). Pure ETP is `--expert_parallel_size=1 --expert_tensor_parallel_size=N` (attention TP and expert TP are mutually exclusive), and LoRA is rejected under TP and EP+TP.
+Axis sizes are CLI flags: `--expert_parallel_size`, `--context_parallel_size`, `--tensor_parallel_size`, `--expert_tensor_parallel_size`. EP+CP, EP+TP and EP+ETP compose; TP+CP, ETP+CP and EP+TP+ETP are rejected at config time, as is every other unlisted combination, and `--pipeline_parallel_size > 1` is [not yet available in this release](../parallelism/pipeline-parallelism.md). Pure ETP is `--expert_parallel_size=1 --expert_tensor_parallel_size=N` (attention TP and expert TP are mutually exclusive). LoRA under pure dense TP requires DP=1 and [compatible native PEFT](../parallelism/tensor-parallelism.md#native-lora-for-dense-sft); EP+TP still rejects adapters.
 
 Under CP a batch whose length is not a multiple of `cp_size` is right-padded in `compute_loss`, and a tokenizer with no `pad_token_id` raises there rather than padding with vocabulary token 0. The loss normalizes over the CP group's tokens; metrics come off the local chunk, reduced once per log ([details](../reference/trainer-architecture.md#cp-loss-and-metrics-in-sft)).
 

@@ -530,6 +530,9 @@ MANIFEST: dict[str, TestSpec] = {
     "parallelism/tp/test_tp_gathered_save_sinks.py": TestSpec(
         nproc=2, markers=("gpu", "core", "2gpu", "tp", "gptoss"), timeout=600
     ),
+    "parallelism/tp/test_tp_lora_native.py": TestSpec(
+        nproc=2, markers=("gpu", "core", "2gpu", "tp", "lora"), timeout=600
+    ),
     "parallelism/tp/test_vlm_parallelism.py": TestSpec(
         nproc=2, markers=("gpu", "full", "2gpu", "vlm", "tp", "cp", "qwen3"), timeout=1000
     ),
@@ -974,6 +977,9 @@ MANIFEST: dict[str, TestSpec] = {
         nproc=2,
         markers=("gpu", "full", "2gpu", "lora", "tp", "ep", "moe", "qwen3", "gptoss"),
         timeout=1000,
+    ),
+    "trainers/lora/test_lora_tp4_save_load.py": TestSpec(
+        nproc=4, markers=("gpu", "full", "4gpu", "lora", "tp", "qwen3"), timeout=1000
     ),
     "trainers/lora/test_sft_oss20b_ep_lora.py": TestSpec(
         nproc=2, markers=("gpu", "full", "2gpu", "lora", "ep", "moe", "gptoss"), timeout=1500

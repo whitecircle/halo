@@ -44,6 +44,7 @@ class DistributedSelfDistillationTrainer(StoredMetricsMixin, DistributedSFTTrain
     """SFT trainer with an SDPG-style privileged-context self-distillation auxiliary loss."""
 
     _supports_cp = False  # privileged teacher uses a separate, longer sequence
+    _supports_tp_lora = False  # the SFT adapter lifecycle does not validate the privileged-teacher objective
     _supports_pp = False
     # Unconditional, unlike the SFT parent's CP-only property: the SDPG objective is its own mean
     # on every axis, so HF must not rescale it by num_items_in_batch.
