@@ -7,7 +7,7 @@ model with expert parallelism. Each sample has multiple completions with pre-com
 rewards. Measures MFU, S-MFU, tokens per second, and peak memory using
 EfficiencyCallback.
 
-Note: CP is NOT supported for Offline GRPO due to the logits_to_keep optimization.
+This benchmark measures EP without context parallelism.
 
 Usage:
     # EP=2 with 4096 sequence length, 10 steps
@@ -233,7 +233,7 @@ def main() -> int:
             print(f"Generations per prompt: {args.num_generations}")
             print(f"Optimizer: {args.optim}, Steps: {args.steps}, Warmup: {args.warmup}")
             print(f"Attention: {args.attn_implementation}")
-            print("Note: CP is NOT supported for Offline GRPO")
+            print("Parallelism: EP only (this benchmark does not enable CP)")
             print(f"GPU: {torch.cuda.get_device_name(local_rank)}")
             if args.model_path:
                 print(f"Model path override: {args.model_path}")

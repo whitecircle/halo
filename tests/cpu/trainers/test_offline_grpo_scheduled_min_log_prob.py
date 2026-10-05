@@ -51,6 +51,7 @@ def _trainer_and_wrapped(*, scheduled_on_module):
         # compute_loss opens the (inert here) QLoRA bf16 autocast region around the forwards.
         _peft_has_been_casted_to_bf16=False,
         accelerator=types.SimpleNamespace(device=torch.device("cpu")),
+        parallelism_config=types.SimpleNamespace(is_cp_mode=False),
     )
 
     if scheduled_on_module:

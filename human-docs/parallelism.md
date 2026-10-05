@@ -71,8 +71,8 @@ explanation before touching the GPUs. The rules people actually hit:
   `use_grouped_gemm: false`. Both online RL methods reject it in every mode:
   rollout weight sync ships raw parameter storage, and packed 4-bit tensors
   corrupt the served policy.
-- **CP only works for SFT and SMPO.** The other trainers need full-sequence
-  quantities that don't survive sequence splitting.
+- **CP works for SFT, SMPO and offline GRPO full fine-tuning.** Offline GRPO
+  rejects adapters under CP; online and environment GRPO do not support CP.
 
 ![Ulysses attention: each rank holds a sequence chunk, all-to-all swaps it for a head slice of the full sequence, then swaps back](../agent-docs/assets/diagrams/ulysses_attention_flow.png)
 

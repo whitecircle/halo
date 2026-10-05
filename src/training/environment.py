@@ -22,6 +22,7 @@ from transformers.trainer import TRAINER_STATE_NAME
 from transformers.trainer_utils import get_last_checkpoint
 
 from src.checkpoint.format import (
+    REFERENCE_CACHE_DIR_NAME,
     has_adapter_weight_file,
     has_whole_model_weight_file,
     is_sharded_checkpoint,
@@ -47,10 +48,8 @@ from src.training.run_logging import setup_logging
 
 logger = get_logger(__name__)
 
-# Prefix match: the name carries a per-run suffix (``.halo_fs_probe_<ns>``). A job killed inside the
-# probe window leaves the file behind, and the next launch would reject an output_dir that holds only
-# toolkit-internal artifacts.
-_INTERNAL_PREFIXES = (OUTPUT_FS_PROBE_PREFIX,)
+# Probe suffixes and reference-cache parents can outlive a failed run; NFS may retain live mmap inodes.
+_INTERNAL_PREFIXES = (OUTPUT_FS_PROBE_PREFIX, REFERENCE_CACHE_DIR_NAME)
 
 
 class TrainingStoppedEarly(SystemExit):
@@ -59,7 +58,7 @@ class TrainingStoppedEarly(SystemExit):
 
 
 def _is_internal_artifact(name: str) -> bool:
-    """Whether an ``output_dir`` entry was created by the toolkit itself, not by a previous run."""
+    """Whether an ``output_dir`` entry is toolkit scratch or logging, not saved training state."""
     return name == RUN_LOG_DIR_NAME or name.startswith(_INTERNAL_PREFIXES)
 
 

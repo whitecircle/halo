@@ -77,9 +77,10 @@ SCHEDULER_STATE_FILE = "scheduler.pt"
 # HF Trainer's replicated optimizer state, which the sharded modes deliberately replace.
 OPTIMIZER_STATE_FILES = ("optimizer.pt", "optimizer.bin")
 ROUTER_BALANCING_BIASES_FILE = "router_balancing_biases.pt"
-# The DPO/KTO ``precompute_ref_log_probs`` columns, per dataset split, with the row count and token
-# digest a resume verifies them against.
+# Checkpointed DPO/KTO and offline GRPO reference scores, with validated split identity.
 REFERENCE_LOGPS_FILE = "reference_logps.pt"
+# Run-local reference scratch, excluded from fresh-output-dir validation and Hub uploads.
+REFERENCE_CACHE_DIR_NAME = "_reference_cache"
 # The environmental GRPO prefetch's submitted-but-untrained rounds, one file per rank.
 PREFETCH_PENDING_PREFIX = "prefetch_pending"
 

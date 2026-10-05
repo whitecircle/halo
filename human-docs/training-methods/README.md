@@ -34,7 +34,7 @@ and mix by list ([Datasets](../data.md)); the columns, and how each method rende
 them, differ per method.
 
 One parallelism stack. Expert, tensor and expert-tensor parallelism work on every trainer; context
-parallelism is enabled on SFT and SMPO only, and pipeline parallelism is not available in this
+parallelism supports SFT, SMPO and offline GRPO full fine-tuning, and pipeline parallelism is not available in this
 release. The axis sizes are config fields or CLI flags, identical across methods
 ([Parallelism](../parallelism.md)).
 

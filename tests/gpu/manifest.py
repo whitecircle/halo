@@ -669,6 +669,35 @@ MANIFEST: dict[str, TestSpec] = {
         markers=("gpu", "core", "2gpu", "qwen3"),
         timeout=900,
     ),
+    "trainers/grpo/test_offline_grpo_cp_resume.py": TestSpec(
+        nproc=2,
+        markers=("gpu", "full", "2gpu", "cp", "ep", "moe", "qwen3", "gptoss", "cohere2_moe"),
+        args_matrix=(
+            "--cp-size 1",
+            "--cp-size 2",
+            "--cp-size 2 --ep-size 2 --family gpt_oss --fp32-masters",
+            "--cp-size 2 --ep-size 2 --family cohere2_moe --fp32-masters",
+        ),
+        timeout=2400,
+    ),
+    "trainers/grpo/test_offline_grpo_ep_cp.py": TestSpec(
+        nproc=8,
+        markers=("gpu", "full", "8gpu", "ep", "cp", "moe", "qwen3"),
+        args_matrix=("--ep-loading lazy", "--ep-loading eager"),
+        timeout=1800,
+    ),
+    "trainers/grpo/test_offline_grpo_expert_lora_kl.py": TestSpec(
+        nproc=8, markers=("gpu", "full", "8gpu", "ep", "moe", "lora", "qwen3"), timeout=1800
+    ),
+    "trainers/grpo/test_offline_grpo_ep_reference.py": TestSpec(
+        nproc=8, markers=("gpu", "full", "8gpu", "ep", "moe", "qwen3"), timeout=1800
+    ),
+    "trainers/grpo/test_offline_grpo_sibling_reference.py": TestSpec(
+        nproc=4,
+        markers=("gpu", "full", "4gpu", "tp", "etp", "moe", "qwen3"),
+        args_matrix=("--mode tp", "--mode etp"),
+        timeout=1800,
+    ),
     "trainers/grpo/test_offline_grpo_tp_resume.py": TestSpec(
         # FA4 backward JITs per shape on Blackwell and this resume test trains 6 steps across a
         # reload, so 2400s has to cover a compile per step in both phases, not a warm run.

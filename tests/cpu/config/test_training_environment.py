@@ -10,9 +10,11 @@ from types import SimpleNamespace
 import pytest
 from accelerate import PartialState
 
+from src.checkpoint.format import REFERENCE_CACHE_DIR_NAME
+
 # The probe's own spelling: the guard's exemption and the sentinel on disk must be the same name.
 from src.distributed.filesystem import OUTPUT_FS_PROBE_PREFIX, RUN_LOG_DIR_NAME
-from src.training.environment import detect_resume_checkpoint
+from src.training.environment import _validate_output_dir, detect_resume_checkpoint
 
 # The module logs through accelerate's logger, which requires an initialized state (CPU here).
 PartialState(cpu=True)
@@ -116,6 +118,33 @@ def test_stale_fs_probe_marker_does_not_exempt_other_leftovers(tmp_path):
     config = _config(out, resume=True)
     with pytest.raises(ValueError, match="already exists and is not empty"):
         detect_resume_checkpoint(config)
+
+
+@pytest.mark.parametrize("nfs_remnant", [False, True])
+def test_reference_scratch_does_not_block_a_fresh_launch(tmp_path, nfs_remnant):
+    out = tmp_path / "out"
+    scratch = out / REFERENCE_CACHE_DIR_NAME
+    scratch.mkdir(parents=True)
+    if nfs_remnant:
+        mapped = scratch / "run-id"
+        mapped.mkdir()
+        (mapped / ".nfs-live-mapping").write_bytes(b"open reference scores")
+    _validate_output_dir(str(out))
+    assert detect_resume_checkpoint(_config(out, resume=True)) is None
+
+
+@pytest.mark.parametrize("leftover", ["checkpoint", "model.safetensors", "unrelated", ".nfs-outside-cache"])
+def test_reference_scratch_does_not_exempt_previous_run_contents(tmp_path, leftover):
+    out = tmp_path / "out"
+    (out / REFERENCE_CACHE_DIR_NAME).mkdir(parents=True)
+    if leftover == "checkpoint":
+        _write_checkpoint(out)
+    elif leftover == "unrelated":
+        (out / leftover).mkdir()
+    else:
+        (out / leftover).write_bytes(b"previous run")
+    with pytest.raises(ValueError, match="already exists and is not empty"):
+        _validate_output_dir(str(out))
 
 
 def test_auto_resume_nothing_found_overwrite_flag_skips_validation(tmp_path):

@@ -142,7 +142,7 @@ traced to the code that raises. This table is the index into them, not a second 
 | [EP](expert-parallelism.md#limitations) | all | the wrapped MoE families; a dense model raises | QLoRA, PEFT inside expert layers, `fsdp_reshard_after_forward`, `use_hsdp`, stock AdamW with `bf16_optimizer: false`, `accelerate launch` |
 | [ETP](expert-tensor-parallelism.md#limitations) | all (gated by `_supports_ep`) | every EP-capable MoE family | expert LoRA, `save_sharded_ep` — plus every EP rule |
 | [TP](tensor-parallelism.md#limitations) | all | the attention classes in `TP_SHARDABLE_ATTENTION_CLASSES`; zero sharded layers raises | LoRA/PEFT, QLoRA, `fsdp_reshard_after_forward` at DP > 1, `use_hsdp` |
-| [CP](context-parallelism.md#limitations) | SFT and SMPO only | the Ulysses attention wrappers | packing, padding-free, left padding, non-Flash attention, `label_smoothing_factor`, `loss_type: dft`, eval metrics, multimodal |
+| [CP](context-parallelism.md#limitations) | SFT, SMPO, offline GRPO (full fine-tuning) | the Ulysses attention wrappers | packing, padding-free, left padding, non-Flash attention, `label_smoothing_factor`, `loss_type: dft`, eval metrics, multimodal; offline GRPO adapters |
 | [PP](pipeline-parallelism.md) | — (not yet available in this release; `pipeline_parallel_size > 1` is rejected at config time) | — | — |
 | [DP](data-parallelism.md#limitations) | all | all | MoE grouped GEMM under `accelerate launch`, multi-device `device_map` |
 

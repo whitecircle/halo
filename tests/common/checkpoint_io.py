@@ -143,15 +143,18 @@ def fixed_text_batch(tokenizer, device, text: str) -> tuple[torch.Tensor, torch.
 def fixed_batch_loss(model, input_ids: torch.Tensor, labels: torch.Tensor) -> float:
     """``model``'s causal-LM loss on a fixed batch: eval mode, no grad, no KV cache, no optimizer step.
 
-    The loss reflects only the current weights. The train/eval mode is restored, so a probe taken
-    between training steps leaves the run as it was.
+    Refresh FSDP2's gathered parameters from the stepped shards before the forward. Restore both
+    the train/eval mode and sharded registration afterward, so the probe does not leave an
+    unstepped gathered copy registered for the next optimizer or checkpoint reader.
     """
+    reshard_fsdp2_modules(model)
     was_training = model.training
     model.eval()
     try:
         with torch.no_grad():
             return model(input_ids=input_ids, labels=labels, use_cache=False).loss.item()
     finally:
+        reshard_fsdp2_modules(model)
         model.train(was_training)
 
 

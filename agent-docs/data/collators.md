@@ -18,7 +18,7 @@ The per-method leaves (`smpo.py`, `vlm.py`, `self_distill.py`, `classification.p
 | `DataCollatorWithFlatteningAndCompletionMask` | No | Yes | Yes | reset per sequence |
 | `DataCollatorForCausalLMWithPadding` | No | No | No | No |
 
-The last one is the CP-mode padded route; it preserves precomputed `labels` (the parent
+The last one is the SFT CP-mode padded route; it preserves precomputed `labels` (the parent
 `DataCollatorForLanguageModeling` rebuilds them from `input_ids` and crashes on ragged ones).
 
 You rarely construct these directly — `select_data_collator()` picks one from your YAML config.
@@ -68,6 +68,16 @@ of every sub-sequence is label-masked (the causal shift cannot predict it from t
 document).
 
 **`DataCollatorWithFlatteningAndCompletionMask`** — padding-free plus completion masking; the lowest-overhead collator for variable-length SFT trained on assistant responses only.
+
+### Offline GRPO
+
+`OfflineGRPOCPDataCollatorWithPadding` joins each tokenized prompt and completion into one row,
+then right-pads to a multiple of `cp_size`. Prompt and pad labels are `-100`; raw reference
+log-probs, when present, occupy the same target-token positions as the completion labels. An empty
+completion stays fully masked. Outside CP, `OfflineGRPODataCollatorWithPadding` pads prompts on the
+left and completions on the right. Both are built by the trainer, not this factory.
+
+Reference preparation and resume: [Offline GRPO](../training-methods/grpo/offline-grpo.md#reference-model).
 
 ## Factory: `select_data_collator()`
 

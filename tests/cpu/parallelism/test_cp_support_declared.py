@@ -18,7 +18,7 @@ from tests.common.parallelism import make_parallelism_config
 from tests.common.rosters import distributed_trainer_classes
 
 # The trainers whose objective is verified under CP (CLAUDE.md, "Distributed trainers" CP column).
-CP_TRAINERS = {"DistributedSFTTrainer", "SmoothMarginPOTrainer"}
+CP_TRAINERS = {"DistributedSFTTrainer", "SmoothMarginPOTrainer", "OfflineGRPOTrainer"}
 
 # Launcher env that makes the validator refuse every parallel mode for an unrelated reason.
 _ACCELERATE_VARS = ("ACCELERATE_MIXED_PRECISION", "ACCELERATE_USE_FSDP")

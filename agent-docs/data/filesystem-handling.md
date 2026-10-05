@@ -174,6 +174,10 @@ joins go permanently off-by-one on the equal-entry invariant.
 
 ## Storage layout
 
+Fresh-run output-dir validation ignores Halo's run logs, filesystem probes and `_reference_cache/`
+scratch, including NFS `.nfs*` remnants inside it. Checkpoints and unrelated contents still require
+resume or a different output directory.
+
 On a shared-storage cluster, put read-only models and datasets there and keep the HF cache and temp files on local NVMe.
 
 ```bash

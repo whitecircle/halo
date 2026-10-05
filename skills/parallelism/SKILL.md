@@ -148,7 +148,9 @@ describes a validator or contract, never a launchable topology
   construction, **native EP expert LoRA included** (its own message: the expert adapters live on
   the EP-distributed weights, which every TP gate skips by param identity). CP and pure ETP leave
   attention unsharded, so LoRA is fine there.
-- **CP with a trainer that doesn't support it** (DPO, KTO, GRPO online/offline/env/SDPG,
+- **Offline GRPO + CP + adapters** — offline CP is full fine-tuning only; PEFT and
+  native expert LoRA are rejected. SFT and SMPO keep their CP adapter support.
+- **CP with a trainer that doesn't support it** (DPO, KTO, GRPO online/env/SDPG,
   reward, classification, distillation, embedding) — see matrix.md trainer table.
 - **PP with a trainer that doesn't support it** (online/env GRPO, SDPG, both distillation
   trainers, embedding) — `_supports_pp`. Moot while the release gate above rejects `pp_size > 1`

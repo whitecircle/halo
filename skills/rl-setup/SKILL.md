@@ -112,11 +112,12 @@ and full launch examples see [`wiring.md`](wiring.md).
 
 ## Parallelism note
 
-GRPO trainers support **EP** (experts distributed) and **TP** (dense weights
+Online and environment GRPO trainers support **EP** (experts distributed) and **TP** (dense weights
 DTensor-sharded); generation is external, so parallelism only affects the
 training forward/backward and the weight-sync gather. **CP is unsupported** for
-GRPO (`logits_to_keep` + global log-prob sums are incompatible with sequence
-splitting) — the GRPO trainers inherit the mixin's `_supports_cp = False` default. Use `torchrun` (not
+these trainers (`logits_to_keep` + global log-prob sums are incompatible with sequence
+splitting); they inherit `_supports_cp = False`. Offline GRPO supports CP for full fine-tuning,
+without a rollout server. Use `torchrun` (not
 `accelerate`) for EP/TP.
 
 ## Single-server vs multi-server

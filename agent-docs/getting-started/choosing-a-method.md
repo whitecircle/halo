@@ -20,7 +20,7 @@ multi-turn environments → Async GRPO with Environments.
 | [Classification](../training-methods/classification.md) | prompt + label | No | No | `scripts/training/classification.py` |
 | [Embedding](../training-methods/embedding.md) | Sentence pairs / triplets | No | No | `scripts/training/embedding.py` |
 
-Every trainer supports EP/TP/ETP. CP is SFT and SMPO only. Pipeline parallelism is
+Every trainer supports EP/TP/ETP. CP supports SFT, SMPO and offline GRPO full fine-tuning. Pipeline parallelism is
 [not yet available in this release](../parallelism/pipeline-parallelism.md). Full matrix:
 [Trainer Compatibility](../reference/trainer-architecture.md#trainer-compatibility).
 
