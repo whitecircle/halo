@@ -89,9 +89,12 @@ help: ## Show this help
 	@grep -hE '^[a-zA-Z0-9_-]+:.*?## ' $(MAKEFILE_LIST) | \
 	  awk 'BEGIN{FS=":.*?## "}{printf "  \033[36m%-18s\033[0m %s\n", $$1, $$2}'
 
-install: ## sync deps inside the image (uv pip install from the lock; preserves compiled torch/FA/DeepEP)
-	$(DOCKER_RUN_CPU) bash -lc "uv pip install --system --break-system-packages -e . \
-	  -r <(uv export --locked --no-emit-project --no-hashes --extra gigatoken --extra flash-optimizers --format requirements-txt)"
+install: ## check the lock installs into the image (throwaway container; fails on a stale uv.lock)
+	$(DOCKER_RUN_CPU) bash -lc "set -euo pipefail; \
+	  uv export --locked --no-emit-project --no-hashes --extra gigatoken --extra flash-optimizers \
+	    --format requirements-txt -o /tmp/requirements.txt; \
+	  uv pip install --system --break-system-packages --no-deps -r /tmp/requirements.txt; \
+	  uv pip install --system --break-system-packages --no-deps -e ."
 
 lint: ## ruff check (pinned binary on host)
 	if command -v uvx >/dev/null 2>&1; then uvx ruff@$(RUFF_VERSION) check .; else ruff check .; fi
