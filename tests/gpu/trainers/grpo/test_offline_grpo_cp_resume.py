@@ -7,7 +7,6 @@ Run with: torchrun --nproc_per_node=2 tests/gpu/trainers/grpo/test_offline_grpo_
 """
 
 import argparse
-import functools
 import math
 import os
 from types import SimpleNamespace
@@ -28,7 +27,6 @@ from src.configs.offline_grpo_config import OfflineGRPOConfig
 from src.data.collators.offline_grpo import REF_PER_TOKEN_LOGPS_COLUMN
 from src.data.spans import LABEL_IGNORE_INDEX
 from src.distributed.expert_parallel.base_layer import EPMoELayerBase
-from src.distributed.expert_parallel.extension import deep_ep
 from src.distributed.fsdp import reshard_fsdp2_modules
 from src.distributed.loading.model_loading import load_distributed_model
 from src.distributed.parallelism_config import ParallelismConfig
@@ -46,6 +44,7 @@ from src.trainers.grpo.offline import OfflineGRPOTrainer
 from src.trainers.grpo.reference_logps import OfflineGRPOReferenceLogpsMixin
 from src.training.environment import resolve_resume_weights_source
 from tests.common.checkpoint_io import loading_problems
+from tests.common.distributed import pin_deterministic_ep_dispatch
 from tests.common.harness import gpu_test_main
 from tests.common.offline_grpo import make_offline_tokenizer, offline_grpo_dataset
 from tests.common.offline_grpo_reference import restore_reference
@@ -442,8 +441,7 @@ def run(ctx) -> dict:
         if args.family not in MOE_FAMILIES:
             parser.error("--ep-size 2 requires a MoE family")
         # Exact resume compares the same routed-token order, not atomic receive-slot races.
-        buffer_cls = deep_ep().ElasticBuffer
-        buffer_cls.__init__ = functools.partialmethod(buffer_cls.__init__, deterministic=True)
+        pin_deterministic_ep_dispatch()
     log(f"offline GRPO {args.family}: EP{ep_size}/CP{cp_size}, fp32 expert masters={fp32_masters}")
     dirs = [ctx.output_dir]
     dist.broadcast_object_list(dirs, src=0)

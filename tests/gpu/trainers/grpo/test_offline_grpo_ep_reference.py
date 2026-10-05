@@ -6,7 +6,6 @@ Run: torchrun --nproc_per_node=8 tests/gpu/trainers/grpo/test_offline_grpo_ep_re
 Set HALO_TEST_OFFLINE_GRPO_EP_LAZY=0 to exercise eager checkpoint loading.
 """
 
-import functools
 import math
 import os
 from unittest.mock import patch
@@ -20,7 +19,6 @@ from transformers import AutoModelForCausalLM
 from src.checkpoint.format import REFERENCE_LOGPS_FILE
 from src.configs.offline_grpo_config import OfflineGRPOConfig
 from src.data.collators.offline_grpo import REF_PER_TOKEN_LOGPS_COLUMN
-from src.distributed.expert_parallel.extension import deep_ep
 from src.distributed.fsdp import reshard_fsdp2_modules
 from src.distributed.loading.model_loading import load_distributed_model
 from src.distributed.parallelism_config import ParallelismConfig
@@ -28,6 +26,7 @@ from src.env import env_flag
 from src.optimizers.adamw_bf16 import AdamWBF16
 from src.trainers.grpo.offline import OfflineGRPOTrainer
 from tests.common.checkpoint_io import RestorePointSnapshot
+from tests.common.distributed import pin_deterministic_ep_dispatch
 from tests.common.harness import gpu_test_main
 from tests.common.offline_grpo import make_offline_tokenizer, offline_grpo_dataset, save_offline_moe_base
 from tests.common.tolerances import TOL
@@ -165,8 +164,7 @@ def _kl_oracle(trainer, checks):
 
 
 def run(ctx):
-    buffer_cls = deep_ep().ElasticBuffer
-    buffer_cls.__init__ = functools.partialmethod(buffer_cls.__init__, deterministic=True)
+    pin_deterministic_ep_dispatch()
     paths = [ctx.output_dir]
     dist.broadcast_object_list(paths, src=0)
     shared = paths[0]

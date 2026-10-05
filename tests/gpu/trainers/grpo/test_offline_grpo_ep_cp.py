@@ -26,7 +26,6 @@ from src.data.collators.offline_grpo import REF_PER_TOKEN_LOGPS_COLUMN, OfflineG
 from src.data.spans import LABEL_IGNORE_INDEX
 from src.distributed.context_parallel.base_layer import get_flash_attn_func
 from src.distributed.expert_parallel.base_layer import EPMoELayerBase
-from src.distributed.expert_parallel.extension import deep_ep
 from src.distributed.fsdp import reshard_fsdp2_modules
 from src.distributed.loading.model_loading import load_distributed_model
 from src.distributed.parallelism_config import ParallelismConfig
@@ -39,6 +38,7 @@ from tests.common.cp_grpo import (
     optimizer_step_agreement,
     same_layout_optimizer_step,
 )
+from tests.common.distributed import pin_deterministic_ep_dispatch
 from tests.common.harness import gpu_test_main
 from tests.common.offline_grpo import (
     OFFLINE_VOCAB,
@@ -307,9 +307,8 @@ def ep_cp_parser():
 def run(ctx):
     args = ep_cp_parser().parse_args()
     build_trainer = functools.partial(_build_trainer, ep_lazy_loading=args.ep_loading == "lazy")
-    buffer_cls = deep_ep().ElasticBuffer
-    buffer_cls.__init__ = functools.partialmethod(buffer_cls.__init__, deterministic=True)
-    log("Exact EP resume premise: DeepEP ElasticBuffer deterministic=True")
+    pin_deterministic_ep_dispatch()
+    log("Exact EP resume premise: deterministic DeepEP dispatch")
     paths = [ctx.output_dir]
     dist.broadcast_object_list(paths, src=0)
     shared = paths[0]

@@ -5,7 +5,6 @@ Uses the training script's reference loader and a local tiny Qwen3-MoE, with no 
 Run: torchrun --nproc_per_node=8 tests/gpu/trainers/grpo/test_offline_grpo_expert_lora_kl.py
 """
 
-import functools
 import math
 import os
 from types import SimpleNamespace
@@ -21,7 +20,6 @@ from src.args.distributed_args import DistributedArguments
 from src.args.offline_grpo_args import OfflineGRPOScriptArguments
 from src.checkpoint.format import RESUME_ADAPTER_DIR, RESUME_ADAPTER_MARKER_FILE
 from src.configs.offline_grpo_config import OfflineGRPOConfig
-from src.distributed.expert_parallel.extension import deep_ep
 from src.distributed.fsdp import reshard_fsdp2_modules
 from src.distributed.parallelism_config import ParallelismConfig
 from src.trainers.grpo.objective.logratio import KL_LOGRATIO_CLAMP
@@ -29,6 +27,7 @@ from src.trainers.grpo.offline import OfflineGRPOTrainer
 from src.training.environment import resolve_resume_weights_source
 from src.training.script_runner import ScriptRuntime
 from tests.common.checkpoint_io import RestorePointSnapshot
+from tests.common.distributed import pin_deterministic_ep_dispatch
 from tests.common.harness import gpu_test_main
 from tests.common.offline_grpo import offline_grpo_dataset, save_offline_moe_base
 from tests.common.peft_helpers import (
@@ -199,8 +198,7 @@ def _kl_oracle(ctx, trainer, export, checks):
 
 
 def run(ctx):
-    buffer_cls = deep_ep().ElasticBuffer
-    buffer_cls.__init__ = functools.partialmethod(buffer_cls.__init__, deterministic=True)
+    pin_deterministic_ep_dispatch()
     paths = [ctx.output_dir]
     dist.broadcast_object_list(paths, src=0)
     shared = paths[0]
