@@ -3,10 +3,12 @@
 import datetime
 from collections import defaultdict
 from types import SimpleNamespace
+from unittest.mock import patch
 
 import pytest
 import torch
 import torch.distributed as dist
+import torch.distributed.nn.functional as dist_nn
 from torch import nn
 
 from src.data.collators.offline_grpo import (
@@ -17,6 +19,57 @@ from src.data.spans import LABEL_IGNORE_INDEX
 from src.trainers.grpo.objective.logratio import KL_LOGRATIO_CLAMP
 from src.trainers.grpo.offline import OfflineGRPOTrainer
 from tests.common.gloo import run_gloo_ranks
+
+_KL_SCORES = [[-2.0, -2.3, -1.8, -2.2, -2.6, -1.7, -3.2], [-1.2, -2.7, -3.1, -1.9, -2.8, -1.5, -2.4]]
+# CP2 loss and full gradient over _KL_SCORES (reinforce, kl_beta 0.2), pinned bit for bit: integer
+# token counts are exact in fp32 wherever they come from.
+_CP2_FROZEN = {
+    "grpo": (
+        1.4572901725769043,
+        [
+            [
+                -0.09460652619600296,
+                -0.17928069829940796,
+                -0.09499384462833405,
+                -0.17928069829940796,
+                -0.10344026982784271,
+                -0.11641031503677368,
+                -0.0957413837313652,
+            ],
+            [0.0, 0.0, 0.0, 0.0, -0.01850668340921402, 0.11364273726940155, -0.04843444377183914],
+        ],
+    ),
+    "bnpo": (
+        2.3402340412139893,
+        [
+            [
+                -0.13244913518428802,
+                -0.25099295377731323,
+                -0.13299137353897095,
+                -0.25099295377731323,
+                -0.14481636881828308,
+                -0.16297443211078644,
+                -0.13403794169425964,
+            ],
+            [0.0, 0.0, 0.0, 0.0, -0.011104006320238113, 0.06818564236164093, -0.029060665518045425],
+        ],
+    ),
+    "dr_grpo": (
+        1.6715956926345825,
+        [
+            [
+                -0.09460652619600296,
+                -0.17928069829940796,
+                -0.09499384462833405,
+                -0.17928069829940796,
+                -0.10344026982784271,
+                -0.11641031503677368,
+                -0.0957413837313652,
+            ],
+            [0.0, 0.0, 0.0, 0.0, -0.007931429892778397, 0.048704031854867935, -0.02075761929154396],
+        ],
+    ),
+}
 
 
 def _inputs(with_reference: bool):
@@ -138,7 +191,7 @@ def _kl_oracle(batch: dict, logps: torch.Tensor, loss_type: str, formulation: st
 
 def _ranked_kl_oracle(rank: int, cp_size: int) -> None:
     batch = _kl_rows(cp_size)
-    scores = torch.tensor([[-2.0, -2.3, -1.8, -2.2, -2.6, -1.7, -3.2], [-1.2, -2.7, -3.1, -1.9, -2.8, -1.5, -2.4]])
+    scores = torch.tensor(_KL_SCORES)
     chunk = batch["labels"].size(1) // cp_size
     start, end = rank * chunk, min((rank + 1) * chunk, scores.size(1))
     trainer = _trainer(scores, beta=0.2, loss_type="grpo")
@@ -175,6 +228,36 @@ def _ranked_kl_oracle(rank: int, cp_size: int) -> None:
 @pytest.mark.parametrize("cp_size", [2, 4])
 def test_cp_kl_reference_rank_slice_matches_full_loss_and_gradient_and_rejects_mutation(cp_size):
     run_gloo_ranks(_ranked_kl_oracle, cp_size, cp_size, pg_timeout=datetime.timedelta(seconds=30))
+
+
+def _cp_sum_count_worker(rank: int) -> None:
+    cp_size = 2
+    batch = _kl_rows(cp_size)
+    scores = torch.tensor(_KL_SCORES)
+    chunk = batch["labels"].size(1) // cp_size
+    start, end = rank * chunk, min((rank + 1) * chunk, scores.size(1))
+    trainer = _trainer(scores, beta=0.2, loss_type="grpo")
+    trainer.cp_config = SimpleNamespace(cp_size=cp_size, cp_rank=rank, process_group=dist.group.WORLD)
+    trainer.max_completion_length = 7
+    for loss_type, (frozen_loss, frozen_grad) in _CP2_FROZEN.items():
+        policy = scores.clone().requires_grad_()
+        trainer.loss_type = loss_type
+        trainer._cp_chunked_logps = lambda model, ids, mask, labels, policy=policy: (
+            policy[:, start:end],
+            labels[:, start + 1 : end + 1],
+        )
+        with patch.object(dist_nn, "all_reduce", wraps=dist_nn.all_reduce) as cp_sums:
+            loss = trainer._compute_loss_inner(trainer.model, batch)
+        # The loss numerator and the sign diagnostics; the row token counts come from the labels.
+        assert cp_sums.call_count == 2, (loss_type, cp_sums.call_count)
+        (loss / cp_size).backward()
+        dist.all_reduce(policy.grad)
+        assert torch.equal(loss.detach(), torch.tensor(frozen_loss)), (loss_type, loss.item())
+        assert torch.equal(policy.grad, torch.tensor(frozen_grad)), (loss_type, policy.grad.tolist())
+
+
+def test_cp2_loss_reduces_twice_per_microbatch_and_keeps_its_exact_values():
+    run_gloo_ranks(_cp_sum_count_worker, 2, pg_timeout=datetime.timedelta(seconds=30))
 
 
 if __name__ == "__main__":

@@ -7,9 +7,11 @@ from unittest.mock import patch
 import pytest
 import torch
 import torch.distributed as dist
+import torch.nn.functional as F
 
 from src.data.collators.offline_grpo import OfflineGRPOCPDataCollatorWithPadding
 from src.data.spans import LABEL_IGNORE_INDEX
+from src.distributed.context_parallel.config import cp_shift_against_full_labels
 from src.trainers.grpo.offline import OfflineGRPOTrainer
 from tests.common.gloo import run_gloo_ranks
 
@@ -77,6 +79,58 @@ def _reassembly_worker(rank, cp_size):
 @pytest.mark.parametrize("cp_size", [2, 4])
 def test_reference_scores_reassemble_in_token_order_and_reject_reversed_shards(cp_size):
     run_gloo_ranks(_reassembly_worker, cp_size, cp_size, pg_timeout=datetime.timedelta(seconds=30))
+
+
+def _ragged_batch(cp_size):
+    generator = torch.Generator().manual_seed(cp_size)
+    rows = []
+    for index in range(6):
+        prompt = torch.randint(1, 50, (int(torch.randint(1, 9, (), generator=generator)),), generator=generator)
+        completion = torch.randint(1, 50, (int(torch.randint(0, 9, (), generator=generator)),), generator=generator)
+        rows.append(
+            {
+                "prompt_input_ids": prompt.tolist(),
+                "completion_input_ids": completion.tolist(),
+                "group_id": index // 2,
+                "group_size": 2,
+                "advantage": 1.0,
+            }
+        )
+    return OfflineGRPOCPDataCollatorWithPadding(pad_token_id=0, cp_size=cp_size)(rows)
+
+
+def _local_mask_worker(rank, cp_size):
+    batch = _ragged_batch(cp_size)
+    labels = batch["labels"]
+    width = labels.size(1)
+    chunk = width // cp_size
+    grid = -0.25 - torch.arange(labels.numel()).reshape(labels.shape).float() * 0.01
+    _, local_labels = cp_shift_against_full_labels(torch.zeros(labels.size(0), chunk, 1), labels, rank, cp_size)
+    # Each shard's shifted targets padded to its chunk and gathered: the grid the sweep's mask must equal.
+    local_valid = F.pad(local_labels != LABEL_IGNORE_INDEX, (0, chunk - local_labels.size(1)))
+    shards = [torch.empty_like(local_valid) for _ in range(cp_size)]
+    dist.all_gather(shards, local_valid)
+    gathered = torch.cat(shards, dim=1)
+    assert gathered.any(dim=1).sum() > 1, "fixture lost supervised rows"
+
+    trainer = OfflineGRPOTrainer.__new__(OfflineGRPOTrainer)
+    trainer.model = object()
+    trainer.cp_config = SimpleNamespace(cp_size=cp_size, cp_rank=rank, process_group=dist.group.WORLD)
+    start = rank * chunk
+    trainer._cp_chunked_logps = lambda model, ids, mask, labels: (
+        grid[:, start : start + local_labels.size(1)],
+        local_labels,
+    )
+    with patch("src.trainers.grpo.offline.dist.all_gather", wraps=dist.all_gather) as gathers:
+        actual = trainer._cp_score_reference_batch(batch)
+    assert gathers.call_count == 1, "only the log-probs need gathering; every rank holds the full labels"
+    for got, scores, valid in zip(actual, grid, gathered, strict=True):
+        assert torch.equal(got, scores[valid])
+
+
+@pytest.mark.parametrize("cp_size", [2, 4])
+def test_reference_sweep_mask_matches_the_gathered_shard_targets(cp_size):
+    run_gloo_ranks(_local_mask_worker, cp_size, cp_size, pg_timeout=datetime.timedelta(seconds=30))
 
 
 if __name__ == "__main__":

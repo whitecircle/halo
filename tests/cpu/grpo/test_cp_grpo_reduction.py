@@ -2,6 +2,7 @@
 """Real Gloo proof for GRPO's autograd-aware per-row CP sum."""
 
 from datetime import timedelta
+from types import SimpleNamespace
 
 import pytest
 import torch
@@ -137,6 +138,7 @@ def _offline_worker(rank: int, cp_size: int) -> None:
             GROUP_SIZES,
             loss_type=loss_type,
             max_completion_length=MAX_COMPLETION_LENGTH,
+            row_token_counts=full_mask.sum(dim=1),
             cp_config=cp_config,
         )
         reference_weight = torch.nn.Parameter(torch.tensor(INITIAL_WEIGHT))
@@ -154,7 +156,7 @@ def _offline_worker(rank: int, cp_size: int) -> None:
             reference_weight.add_(reference_weight.grad, alpha=-LR)
         torch.testing.assert_close(weight, reference_weight, atol=1e-6, rtol=1e-6)
 
-        # Rank 0 has no supervised tokens. Dropping either reduction produces a local zero
+        # Rank 0 has no supervised tokens. Dropping the numerator's reduction produces a local zero
         # instead of the full-row objective, while an SFT-style extra ×CP mis-scales it.
         if rank == 0:
             assert got.detach().abs() > 0.01, "fixture cannot detect a dropped forward collective"
@@ -175,6 +177,25 @@ def test_offline_loss_rejects_invalid_row_shapes_and_dr_grpo_window():
         )
     with pytest.raises(ValueError, match="positive max_completion_length"):
         offline_loss(local, mask, torch.tensor([2, 2]), loss_type="dr_grpo", max_completion_length=0, cp_config=None)
+    with pytest.raises(ValueError, match="one supervised-token count"):
+        offline_loss(
+            local,
+            mask,
+            torch.tensor([2, 2]),
+            loss_type="grpo",
+            max_completion_length=3,
+            row_token_counts=torch.ones(3),
+        )
+    # A shard's own mask undercounts its rows; refused before the numerator's collective.
+    with pytest.raises(ValueError, match="complete row_token_counts"):
+        offline_loss(
+            local,
+            mask,
+            torch.tensor([2, 2]),
+            loss_type="bnpo",
+            max_completion_length=3,
+            cp_config=SimpleNamespace(cp_size=2),
+        )
 
 
 @pytest.mark.parametrize("loss_type", ["grpo", "bnpo", "dr_grpo"])

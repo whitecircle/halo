@@ -1136,6 +1136,7 @@ class OfflineGRPOTrainer(ChunkedLogprobsCore, OfflineGRPOReferenceLifecycleMixin
             inputs["group_size"],
             loss_type=self.loss_type,
             max_completion_length=self.max_completion_length,
+            row_token_counts=loss_token_counts_per_row(labels),
             cp_config=self.cp_config,
         )
         self._buffer_sign_metrics(sample_values, advantages, supervised)
@@ -1263,22 +1264,19 @@ class OfflineGRPOTrainer(ChunkedLogprobsCore, OfflineGRPOReferenceLifecycleMixin
         ]
 
     def _cp_score_reference_batch(self, batch) -> list[torch.Tensor]:
-        local_logps, local_labels = self._cp_chunked_logps(
+        local_logps, _ = self._cp_chunked_logps(
             self.model,
             batch["input_ids"],
             batch["attention_mask"],
             batch["labels"],
         )
         start, end = cp_chunk_bounds(batch["input_ids"].size(1), self.cp_config.cp_rank, self.cp_config.cp_size)
-        chunk = end - start
-        local_logps = F.pad(local_logps.float(), (0, chunk - local_logps.size(1)))
-        local_valid = F.pad(local_labels != LABEL_IGNORE_INDEX, (0, chunk - local_labels.size(1)))
+        local_logps = F.pad(local_logps.float(), (0, end - start - local_logps.size(1)))
         logp_shards = [torch.empty_like(local_logps) for _ in range(self.cp_config.cp_size)]
-        valid_shards = [torch.empty_like(local_valid) for _ in range(self.cp_config.cp_size)]
         dist.all_gather(logp_shards, local_logps, group=self.cp_config.process_group)
-        dist.all_gather(valid_shards, local_valid, group=self.cp_config.process_group)
         full_logps = torch.cat(logp_shards, dim=1)
-        full_valid = torch.cat(valid_shards, dim=1)
+        # Every rank holds the full labels; the shards' shifted targets tile this grid.
+        full_valid = F.pad(batch["labels"][:, 1:] != LABEL_IGNORE_INDEX, (0, 1))
         return [logps[valid].cpu() for logps, valid in zip(full_logps, full_valid, strict=True)]
 
     def _buffer_sign_metrics(

@@ -21,6 +21,7 @@ from src.distributed.context_parallel.wrapper import UlyssesCPModelWrapper
 from src.distributed.expert_parallel.base_layer import EPMoELayerBase
 from src.distributed.expert_parallel.patching import create_ep_buffers, patch_moe_model_for_ep
 from src.distributed.parallelism_config import ParallelismConfig
+from src.distributed.pipeline_parallel.losses import loss_token_counts_per_row
 from src.trainers.grpo.mixins.chunked_logprobs import ChunkedLogprobsCore
 from src.trainers.grpo.objective.offline import offline_loss
 from tests.common.cp_grpo import (
@@ -176,6 +177,7 @@ def run(ctx) -> dict:
             group_sizes,
             loss_type="grpo",
             max_completion_length=SEQ,
+            row_token_counts=loss_token_counts_per_row(labels),
             cp_config=cp_config,
         )
         loss_match = bool((cp_loss.detach() - base_loss_value).abs().item() < TOL.parallel_vs_baseline_loss_abs)
