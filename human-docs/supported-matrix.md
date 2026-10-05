@@ -45,7 +45,7 @@ Context parallelism picks its own kernel and ignores the configured label — FA
 on Hopper, FA4 on Blackwell (FA2 for the families that fall back from FA4), FA2
 otherwise — but rejects an SDPA label except where a family's wrapper
 waives the check (Bailing/Ling), so GLM-4 MoE Lite under CP sets
-`attn_implementation: flash_attention_2`, as its shipped config does. Per-family resolution:
+`attn_implementation: flash_attention_2` (its shipped EP config already pins it). Per-family resolution:
 [Flash Attention](../agent-docs/optimization/flash-attention.md) ↗.
 
 ## Training methods

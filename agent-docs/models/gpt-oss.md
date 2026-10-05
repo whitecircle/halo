@@ -59,7 +59,7 @@ GptOss attention adds a per-head learnable scalar to the attention logits before
 - **TP** — a DTensor plan on attention only; `embed_tokens`/`lm_head` stay replicated (sharding them faults with a cuBLAS illegal-memory error under EP+TP), MoE experts belong to EP. See [the selective-TP plan](../parallelism/tensor-parallelism.md#the-selective-tp-plan).
 - **ETP** — the interleaved-GLU layout needs re-interleaving back to `[g0, u0, g1, u1, …]` before the checkpoint write. Expert compute drops to the per-expert loop at `expert_tp_size > 1`: ETP stores the de-interleaved gate/up pair under the plain names the loop reads, not the `*_gmm` pair the grouped path reads (`_grouped_mm_enabled`).
 
-    Once the halves are TP-sharded they cannot be de-interleaved into the contiguous `gate_proj_gmm` / `up_proj_gmm` grouped GEMM reads. See [ETP weight sharding](../parallelism/expert-tensor-parallelism.md#weight-sharding).
+    See [ETP weight sharding](../parallelism/expert-tensor-parallelism.md#weight-sharding).
 
 ## Precision and kernels
 

@@ -57,7 +57,7 @@ optim: adamw_torch  # adamw_torch / adamw_torch_fused both auto-enable AdamWBF16
 
 `bf16_optimizer` (a `DistributedArguments` field, so every training script parses it) overrides that
 resolution: `true` forces AdamWBF16 on where the auto path would decline (an `optim` other than
-`adamw_torch` / `adamw_torch_fused`, replicated DDP), `false` forces the stock AdamW over the parameters
+`adamw_torch` / `adamw_torch_fused` — except `muon` and `flash_adamw`, which raise, below — and replicated DDP), `false` forces the stock AdamW over the parameters
 as loaded. Under `bf16: true` those are bf16, so `false` keeps bf16 master weights and moments with
 round-to-nearest updates (the stall above), not fp32 ones; fp32 masters come from `fp32_non_ep_params`
 (non-expert params) and `fp32_experts` (EP experts), or `bf16: false`.

@@ -153,7 +153,7 @@ exists, else `from_pretrained` + `save_pretrained` for sharded checkpoints.
 ### `unfuse_moe_experts.py`
 
 Rewrite a gathered checkpoint's fused expert tensors (`experts.gate_up_proj` `[E, 2I, H]` +
-`experts.down_proj`) into the legacy per-expert keys `experts.{i}.{gate,up,down}_proj.weight` for
+`experts.down_proj`) into the per-expert hub keys `experts.{i}.{gate,up,down}_proj.weight` for
 engines that only read those (vLLM's `glm4_moe_lite`). Flags: `--input_dir`, `--output_dir`, plus
 `--max_shard_size`. Weights are unchanged — key layout and the gate/up split only. Projection names
 come from the family's EP layer class (`EPMoELayerBase.hub_per_expert_keys`) —

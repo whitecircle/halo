@@ -78,7 +78,7 @@ The win grows with sequence length (larger recv buffers → worse contention).
 
 The fused kernels against that padded-gather permute (a separate routing-weight multiply, a padded `[N, top_k, H]` gather-sum each way, the same sort), on the Gemma 4 26B-A4B expert block (hidden 2816, intermediate 704, 128 experts, top-8), fwd+bwd on one B300 (2026-10-03, commit 0bc3a22a5, Blackwell image): 2.19 / 3.42 / 10.87 ms at 2k / 8k / 32k tokens, against 2.41 / 4.95 / 16.51 ms, and peak transient memory of 3.7 against 6.5 GiB at 32k (`tests/gpu/profiling/benchmark_moe_block.py`, rows `halo` and `halo_padded_gather`).
 
-End to end, these kernels together with the fused GLU, torch's fused RMSNorm on four families and AdamWBF16's folded gradient clip (2× B300, EP2, A/B at commit 29cf60ded; peak memory unchanged): Gemma 4 26B-A4B full SFT at 2,048 tokens 8,984 → 11,152 cluster tok/s (1.24×), most of it from the optimizer; at 4,096 tokens gpt-oss-20b 1.25×, Qwen3-30B-A3B 1.12×, GLM-4.7-Flash 1.09×.
+End to end, these kernels together with the fused GLU, torch's fused RMSNorm on four families and AdamWBF16's folded gradient clip (2× B300, EP2, A/B of commit 29cf60ded against its parent; peak memory unchanged): Gemma 4 26B-A4B full SFT at 2,048 tokens 8,984 → 11,152 cluster tok/s (1.24×), most of it from the optimizer; at 4,096 tokens gpt-oss-20b 1.25×, Qwen3-30B-A3B 1.12×, GLM-4.7-Flash 1.09×.
 
 Per-device batch multiplies the per-call recv buffer exactly like sequence length.
 

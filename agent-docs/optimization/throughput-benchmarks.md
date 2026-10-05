@@ -117,7 +117,7 @@ not the causal half); bounded layers at the keys their kernel visits. `keys` is 
 `L` is each **document's** length: the trainer costs every batch's documents (`cu_seq_lens_q`, `position_ids`
 resets, or the padded row) and the callback swaps that rank-local measurement in per step, so a packed 64k
 row of 1–40k-token documents is not costed as one 64k sequence. A trainer whose collator emits no `input_ids`
-keeps the config term (every token in a `max_seq_len` document): online and async GRPO, KTO, SMPO and embedding.
+keeps the config term (every token in a `max_seq_len` document): online and async GRPO, offline GRPO outside CP, KTO, SMPO and embedding.
 
 The layer set is this rank's own, so under PP ([not yet available](../parallelism/pipeline-parallelism.md))
 each stage's term would match its real slice rather than an even split of the depth. The measured term
