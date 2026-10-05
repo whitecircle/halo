@@ -138,8 +138,9 @@ before reduce-scattering onto the sharded DTensors, so a module left unsharded
 hands `model.parameters()` grad-less tensors the optimizer never captured (grad norm 0, nothing
 clipped) while `unshard()` no-ops on it, hiding the optimizer's update from the next forward.
 
-The cost is one unsharded bf16 param copy per GPU held between a window's microsteps; under ZeRO-2
-each forward/backward already holds it. Plain-DP/CP/EP torchrun path only; rejected with
+The cost is one unsharded param copy per GPU (at the FSDP param dtype), held between a window's
+microsteps and freed at its last backward; under ZeRO-2 each forward/backward already holds it, so
+peak memory is unchanged. Plain-DP/CP/EP torchrun path only; rejected with
 `fsdp_reshard_after_forward: true` (contradicts FULL_SHARD's purpose), TP, or PP.
 
 ### Deferred gradient reduce (`fsdp_defer_grad_sync`)

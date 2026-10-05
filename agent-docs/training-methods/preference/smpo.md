@@ -55,7 +55,7 @@ output_dir: checkpoints/smpo-gptoss-20b-tulu3-prefmix-ep
 
 `max_length` is the total budget and defaults to `1024`; `null` or a non-positive value resolves it to the context window. An unset `max_prompt_length` takes half of it and `max_completion_length` the remainder. Shares summing past `max_length` are rejected at construction — the two truncate independently. Prompts cut per `truncation_mode` (`keep_end`), completions from the end, keeping the terminal EOS.
 
-`padding_free` needs a varlen Flash Attention kernel and raises on anything else, the `sdpa` the script defaults to under `reset_sinks: true` included. It is also incompatible with CP, VLM runs and PP — the shipped PP gates additionally reject PEFT, a non-null clip percentile and a `label_pad_token_id` other than `-100`.
+`padding_free` needs a varlen Flash Attention kernel and raises on anything else, the `sdpa` the script defaults to under `reset_sinks: true` outside CP included. It is also incompatible with CP, VLM runs and PP — the shipped PP gates additionally reject PEFT, a non-null clip percentile and a `label_pad_token_id` other than `-100`.
 
 Attention isolates each row of the flattened batch through `position_ids`; the LFM-2 and GatedDeltaNet (Qwen3.5/3.6, Qwen3-Next) conv / linear-attention mixers get the segment markers the SFT collators emit, and a GatedDeltaNet model is refused without the `causal_conv1d` / `fla` kernels that read them. Zaya's CCA has no per-document boundary parameter and carries state from each row into the next, across the chosen / rejected split too, so keep `padding_free` off for Zaya. See [Document isolation under packing](../../data/collators.md#document-isolation-under-packing).
 
