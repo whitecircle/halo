@@ -52,7 +52,7 @@ def test_cp_unsupported_options_fail_before_loading_weights(tmp_path, option, kl
     )
     expected = "Drop ref_model" if option == "ref-model" else "requires a full policy fine-tune"
     with patch("src.trainers.grpo.offline.load_model_from_pretrained") as loader:
-        with pytest.raises(ValueError, match=expected):
+        with pytest.raises(ValueError, match=expected) as raised:
             OfflineGRPOTrainer(
                 model=model,
                 ref_model=reference,
@@ -63,6 +63,9 @@ def test_cp_unsupported_options_fail_before_loading_weights(tmp_path, option, kl
                 processing_class=make_offline_tokenizer(),
             )
         loader.assert_not_called()
+    if option != "ref-model":
+        # The adapter refusal holds at every kl_beta, so its reason cannot be the KL anchor.
+        assert "anchor" not in str(raised.value)
 
 
 def test_cp_does_not_hold_an_external_kl_reference():

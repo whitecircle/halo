@@ -299,6 +299,8 @@ def test_every_column_the_reference_reads_is_in_the_digest(tmp_path, kind, bumpe
         # TRL pairs the KL completions within map batches of the per-device size, across num_proc shards.
         assert "per_device_train_batch_size" in str(raised.value)
         assert "dataset_num_proc" in str(raised.value)
+    if kind == "dpo":
+        assert "dataset_num_proc" not in str(raised.value), "DPO's causes must not name KTO's KL pairing"
 
 
 @pytest.mark.parametrize(

@@ -30,6 +30,10 @@ logger = get_logger(__name__, log_level="info")
 _DIGEST_BATCH_ROWS = 256
 _DIGEST_CHUNK_VALUES = 1 << 22
 _IDENTITY_SCHEMA = {"num_rows": int, "token_digests": Mapping, "settings": Mapping}
+# Every complete checkpoint of a run carries the same run-start reference scores.
+PREVIOUS_CHECKPOINT_RECOVERY = (
+    "A checkpoint whose save stopped before this file can take the previous checkpoint's copy instead."
+)
 
 
 def is_token_type(arrow_type: pa.DataType) -> bool:
@@ -70,11 +74,12 @@ def is_reference_entry(entry: object) -> bool:
 
 
 def reference_regeneration_steps(checkpoint: str) -> str:
-    """How to give ``checkpoint`` a reference file computed from the base model for this run."""
+    """How to give ``checkpoint`` a reference file computed from the run's original starting model."""
     # Outside the run's own output_dir, whose rotation could otherwise delete this checkpoint.
     scratch = f"{os.path.dirname(os.path.abspath(checkpoint))}-reference-recovery"
     return (
-        f"run this config for one step from the base model into a scratch directory (--output_dir={scratch} "
+        "run this config for one step from the run's original starting model into a scratch directory "
+        f"(--output_dir={scratch} "
         "--max_steps=1 --save_strategy=steps --save_steps=1 --save_only_model=true "
         f"--resume_from_checkpoint=null) and copy its checkpoint-1/{REFERENCE_LOGPS_FILE} into "
         f"{checkpoint}, on every node when checkpoints are node-local"
@@ -87,6 +92,10 @@ class ReferenceLogpsCheckpointMixin:
     Place this mixin before DistributedTrainerMixin in the trainer's bases so its checkpoint hook
     overrides CheckpointingMixin's empty default and the reference rides every checkpoint.
     """
+
+    # Settings beyond the data, chat template and tokenizer that change this trainer's digested token
+    # columns, named as causes when a saved split's digests do not match.
+    _reference_token_settings: str | None = None
 
     def _init_reference_state(self, *, checkpoint, given: bool, policy_from_checkpoint: bool) -> None:
         self._reference_resume_given = given
@@ -197,10 +206,10 @@ class ReferenceLogpsCheckpointMixin:
             if entry["token_digests"].get(column) != digest
         )
         if changed:
-            return (
-                f"this dataset's {changed} differ from the saved run's (a changed dataset, split, chat template "
-                "or tokenizer — or, for KTO's KL completions, per_device_train_batch_size or dataset_num_proc)"
-            )
+            causes = "a changed dataset, split, chat template or tokenizer"
+            if self._reference_token_settings:
+                causes += f", or a changed {self._reference_token_settings}"
+            return f"this dataset's {changed} differ from the saved run's ({causes})"
         return None
 
     def _validate_restored_reference_payload(self, name: str, entry: Mapping) -> None:
@@ -225,9 +234,8 @@ class ReferenceLogpsCheckpointMixin:
             f"log-probs for the '{name}' dataset ({REFERENCE_LOGPS_FILE} is missing or lacks that split), "
             "and they cannot be recomputed here: this resume built the policy from the checkpoint, "
             "so the sweep would score the TRAINED weights as the reference and zero every log-ratio. "
-            f"To recover, {reference_regeneration_steps(checkpoint)}. A checkpoint whose save "
-            "stopped before this file can take the previous checkpoint's copy instead. Or supply the "
-            f"{list(needed)} columns, computed on the base model, in the dataset."
+            f"To recover, {reference_regeneration_steps(checkpoint)}. {PREVIOUS_CHECKPOINT_RECOVERY} Or "
+            f"supply the {list(needed)} columns, computed on the base model, in the dataset."
         )
 
     def _remember_reference_split(self, name: str, identity: Mapping, payload: Mapping, dataset: Dataset) -> None:

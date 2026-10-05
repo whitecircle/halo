@@ -1,4 +1,4 @@
-"""CP reference scoring reconstructs ordered ragged rows and refuses external anchors."""
+"""CP reference scoring reconstructs ordered ragged rows."""
 
 import datetime
 from types import SimpleNamespace
@@ -50,7 +50,6 @@ def _reassembly_worker(rank, cp_size):
     start, end = rank * chunk, min((rank + 1) * chunk, width - 1)
     trainer = OfflineGRPOTrainer.__new__(OfflineGRPOTrainer)
     trainer.model = object()
-    trainer.ref_model = None
     trainer.cp_config = SimpleNamespace(cp_size=cp_size, cp_rank=rank, process_group=dist.group.WORLD)
     trainer._cp_chunked_logps = lambda model, ids, mask, labels: (full[:, start:end], labels[:, start + 1 : end + 1])
     expected = [
@@ -78,14 +77,6 @@ def _reassembly_worker(rank, cp_size):
 @pytest.mark.parametrize("cp_size", [2, 4])
 def test_reference_scores_reassemble_in_token_order_and_reject_reversed_shards(cp_size):
     run_gloo_ranks(_reassembly_worker, cp_size, cp_size, pg_timeout=datetime.timedelta(seconds=30))
-
-
-def test_cp_scorer_refuses_an_explicit_reference_before_forward():
-    trainer = OfflineGRPOTrainer.__new__(OfflineGRPOTrainer)
-    trainer.ref_model = object()
-    with patch.object(trainer, "_cp_chunked_logps", side_effect=AssertionError("must not score the policy")):
-        with pytest.raises(ValueError, match="drop the explicit ref_model"):
-            trainer._cp_score_reference_batch({})
 
 
 if __name__ == "__main__":

@@ -22,7 +22,12 @@ from src.trainers.grpo.reference_cache import (
     mapped_reference_scores,
     reference_payload_mismatch,
 )
-from src.trainers.mixins.reference_logps import ReferenceLogpsCheckpointMixin, token_digest
+from src.trainers.mixins.reference_logps import (
+    PREVIOUS_CHECKPOINT_RECOVERY,
+    ReferenceLogpsCheckpointMixin,
+    reference_regeneration_steps,
+    token_digest,
+)
 
 _TOKEN_COLUMNS = ("prompt_input_ids", "completion_input_ids")
 
@@ -57,6 +62,8 @@ def attach_reference_column(dataset: Dataset, scores: MappedReferenceScores, dig
 
 class OfflineGRPOReferenceLogpsMixin(ReferenceLogpsCheckpointMixin):
     """Restore frozen token scores using the DPO/KTO checkpoint lifecycle."""
+
+    _reference_token_settings = "max_prompt_length, max_completion_length or drop_degenerate_groups"
 
     def _reference_resume_required(self) -> bool:
         return self._policy_from_checkpoint
@@ -158,12 +165,7 @@ class OfflineGRPOReferenceLogpsMixin(ReferenceLogpsCheckpointMixin):
         return (
             f"Cannot resume offline GRPO from {checkpoint}: its {REFERENCE_LOGPS_FILE} lacks '{name}'. "
             "Recomputing it would score the TRAINED checkpoint policy as its own reference. "
-            "Restore the original sidecar from a complete checkpoint. If none exists, run the same "
-            "config from the exact original model/revision and tokenized train/eval data into a "
-            "separate scratch output (--resume_from_checkpoint=null --max_steps=1 "
-            "--save_strategy=steps --save_steps=1 --save_only_model=true), then copy its "
-            f"checkpoint-1/{REFERENCE_LOGPS_FILE} here on every node with node-local checkpoints. "
-            "Do not use the trained checkpoint as that recovery run's model source."
+            f"To recover, {reference_regeneration_steps(checkpoint)}. {PREVIOUS_CHECKPOINT_RECOVERY}"
         )
 
     def _read_reference_checkpoint(self, path: str):

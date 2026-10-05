@@ -82,8 +82,12 @@ def test_trained_policy_cannot_rescore_when_sidecar_is_missing(tmp_path):
     checkpoint.mkdir()
     resumed = ReferenceStorageTrainer(tmp_path, checkpoint=str(checkpoint))
 
-    with pytest.raises(RuntimeError, match="TRAINED checkpoint policy"):
+    with pytest.raises(RuntimeError, match="TRAINED checkpoint policy") as raised:
         restore_reference(resumed, reference_dataset(), "train")
+    message = str(raised.value)
+    assert f"--output_dir={tmp_path}-reference-recovery" in message, "the refusal must name a runnable recovery"
+    assert "previous checkpoint's copy" in message, "the cheapest recovery must stay on offer"
+    assert "supply" not in message, "offline GRPO refuses dataset-supplied reference columns"
 
     fresh_weights = ReferenceStorageTrainer(tmp_path)
     assert restore_reference(fresh_weights, reference_dataset(), "train") is None
@@ -108,8 +112,12 @@ def test_trained_policy_refuses_a_sidecar_for_other_tokens_or_settings(tmp_path,
         settings["max_completion_length"] += 1
     resumed = ReferenceStorageTrainer(tmp_path, checkpoint=str(checkpoint))
 
-    with pytest.raises(ValueError, match="does not belong"):
+    with pytest.raises(ValueError, match="does not belong") as raised:
         restore_reference(resumed, dataset, "train", settings=settings)
+    if change in ("prompt", "completion"):
+        # Same row lengths, so the token digests are what refuse: the causes must be this trainer's.
+        assert "max_prompt_length, max_completion_length or drop_degenerate_groups" in str(raised.value)
+        assert "dataset_num_proc" not in str(raised.value)
 
 
 @pytest.mark.parametrize("damage", ["missing_split", "bad_lengths", "bad_values"])

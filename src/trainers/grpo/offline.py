@@ -794,9 +794,9 @@ class OfflineGRPOTrainer(ChunkedLogprobsCore, OfflineGRPOReferenceLifecycleMixin
             or (isinstance(model, nn.Module) and is_peft_model(model))
         ):
             raise ValueError(
-                "Offline GRPO with CP requires a full policy fine-tune. PEFT and native expert LoRA "
-                "need a separately validated adapter-disabled reference sweep and adapter checkpoint "
-                "path; refusing to silently anchor KL to adapted weights."
+                "Offline GRPO with CP requires a full policy fine-tune: PEFT and native expert LoRA are "
+                "not validated under offline-GRPO CP (their adapter checkpoint path, and at kl_beta > 0 "
+                "their adapter-disabled reference). Fully fine-tune the policy, or drop context parallelism."
             )
         if ref_model is not None:
             raise ValueError(
@@ -853,8 +853,8 @@ class OfflineGRPOTrainer(ChunkedLogprobsCore, OfflineGRPOReferenceLifecycleMixin
             if ref_model is not None:
                 raise ValueError(
                     "ref_model was passed, but this run holds no KL reference model (kl_beta 0, a PEFT policy "
-                    "scored with its adapters disabled, or CP/PP, which scores the reference through "
-                    "the policy's distributed path), so it would never be read. Drop ref_model."
+                    "scored with its adapters disabled, or PP, which scores the reference through the "
+                    "policy's pipeline), so it would never be read. Drop ref_model."
                 )
             return None
         if ref_model is not None:
@@ -1263,8 +1263,6 @@ class OfflineGRPOTrainer(ChunkedLogprobsCore, OfflineGRPOReferenceLifecycleMixin
         ]
 
     def _cp_score_reference_batch(self, batch) -> list[torch.Tensor]:
-        if self.ref_model is not None:
-            raise ValueError("CP reference scoring uses the distributed policy; drop the explicit ref_model.")
         local_logps, local_labels = self._cp_chunked_logps(
             self.model,
             batch["input_ids"],

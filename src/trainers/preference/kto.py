@@ -75,6 +75,7 @@ class DistributedKTOTrainer(
     """
 
     _tag_names = ["trl", "kto"]
+    _reference_token_settings = "per_device_train_batch_size or dataset_num_proc, which pair the KL completions"
 
     _supports_pp = True
     # TRL's KTO loss adds the aux term itself and this class does not override it, so aux_loss
