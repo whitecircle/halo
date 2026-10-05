@@ -169,10 +169,10 @@ def run(ctx) -> dict:
 
     # --- Check 2: init delta == 0 (adapters present vs disabled produce the same output) ---
     # B is zero-initialized so the LoRA delta is structurally 0; _expert_proj must therefore be a
-    # no-op at init. The grouped path's scatter-back is a fixed-order gather-reduce, so there the noise
-    # floor below is 0 and this is bit-equality; the per-expert loop's scatter-back is an atomic
-    # index_add_, whose run-to-run noise two forward passes of the SAME model show. Measure that noise
-    # floor (two adapters-on passes) and require the adapters-on-vs-off difference to stay within it.
+    # no-op at init. The forward is deterministic on both expert paths: the grouped scatter-back is a
+    # fixed-order gather-reduce, and the per-expert loop's index_add_ adds each row once per local expert
+    # in a fixed expert order. DeepEP's receive order varies between passes, but no row's output reads
+    # it, so the noise floor below (two adapters-on passes) measures 0.
     log("\n[5/8] Checking init delta == 0 (within the EP forward's run-to-run noise floor)...")
     enc = tokenizer(["The quick brown fox jumps over the lazy dog."], return_tensors="pt")
     input_ids = enc["input_ids"].to(ctx.local_rank)
@@ -190,11 +190,9 @@ def run(ctx) -> dict:
     model.train()
     noise = (out_with_a - out_with_b).abs().max().item()
     delta = (out_with_a - out_without).abs().max().item()
-    # The adapter delta must be the SAME ORDER as the forward's run-to-run noise (≈0 ⇒ no-op).
-    # On the grouped path's deterministic (atomic-free) scatter noise≈0 and this is effectively
-    # bit-equality; on an atomic scatter (the per-expert loop's index_add_) toggling adapters changes the
-    # compute graph and thus the accumulation order, so allow a few× the 2-sample noise floor. A real
-    # wiring bug (nonzero/duplicated delta) would make `delta` orders of magnitude larger than noise.
+    # Adding the zero delta leaves the expert outputs unchanged, so delta should measure 0 like the
+    # noise floor; the 1e-3 floor is headroom. A real wiring bug (nonzero/duplicated delta) lands
+    # orders of magnitude above it.
     checks["init_delta_zero"] = delta <= max(4.0 * noise, 1e-3)
     log(f"  adapter delta={delta:.3e} vs forward noise floor={noise:.3e} (same order ⇒ no-op)")
 
