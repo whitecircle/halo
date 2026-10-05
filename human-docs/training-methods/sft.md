@@ -49,8 +49,7 @@ showing up in the loss curve.
 ## Three data decisions
 
 **Completion-only masking** (`train_on_completions_only`, on by default) trains on assistant turns
-only and masks the prompt. It needs `assistant_message_template`; the startup probe raises only when
-*no* message shape renders that marker, so one only a reasoning turn renders masks every row.
+only and masks the prompt. It needs `assistant_message_template` (see [Chat templates](#chat-templates)).
 
 **Packing** (`packing: true`) concatenates short rows into fixed `max_length` blocks so no GPU time
 goes into padding. It requires an explicit `max_length`, which becomes both the pack size and the
@@ -72,8 +71,9 @@ already carries one — without it your template is dropped without a word. Bund
 for GPT-OSS) when the render must match a rollout server byte for byte.
 
 `assistant_message_template` is separate and must byte-match what that template renders for an
-assistant turn: a marker it never renders raises at startup, one it renders only for some message
-shapes masks the rows it misses.
+assistant turn: a marker it never renders raises at startup. One it renders only for some message
+shapes (say, only for a reasoning turn) passes that check and masks every row it misses, with a
+per-row warning.
 
 ## LoRA and QLoRA
 
@@ -143,7 +143,7 @@ result. The config must state `train_on_completions_only: false` and the exact `
 preparation used, or startup raises.
 
 `init_from_scratch: true` builds random weights from the model's config instead of reading a
-checkpoint. It runs on dense FSDP2 data parallelism only — EP, TP, CP and ETP raise, since
+checkpoint. It runs on plain FSDP2 data parallelism only — EP, TP, CP and ETP raise, since
 distributed random-init of sharded parameters is not implemented. For a large or MoE model,
 materialize the random-init checkpoint once outside the job (`from_config` plus `save_pretrained`)
 and point `model_name_or_path` at it.
@@ -151,7 +151,8 @@ and point `model_name_or_path` at it.
 ## What to watch
 
 The loss should fall smoothly in the first hundred steps; a flat loss almost always means the
-assistant marker never matched and every token is masked. Set `log_decoded_samples: true` once to
+assistant marker misses most rows and their tokens are masked (each such row logs a "Could not find
+response key" warning). Set `log_decoded_samples: true` once to
 read exactly what the model is shown, and check the log for how many rows the length filter dropped
 (it warns once that passes half the split) before blaming the model.
 

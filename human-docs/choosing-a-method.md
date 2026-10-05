@@ -7,7 +7,7 @@ switching is a config change, not a rewrite. The last column is the `halo launch
 | Method | Use when | Data | `halo launch` |
 | --- | --- | --- | --- |
 | SFT | Teach format, behavior, or a domain from example conversations | conversations (`prompt`) | `sft` |
-| SFT (VLM) | Same, with images — `sft` auto-detects a multimodal model | image conversations | `sft` |
+| SFT (VLM) | Same, with images — `sft` takes the VLM path when a multimodal checkpoint meets image data | image conversations | `sft` |
 | Classification | Produce a sequence-level label (safety, topic, toxicity) | text + `label` | `classification` |
 | Reward modeling | Train a Bradley-Terry scorer to consume later | `chosen` / `rejected` pairs | `rewards` |
 | DPO | Align on preference pairs with a KL leash to a reference model | `chosen`, `rejected` (+ optional `prompt`) | `dpo` |

@@ -132,7 +132,8 @@ themselves. SMPO is the only one of the three that also takes context parallelis
 
 On DPO and SMPO, `rewards/accuracies` is the share of pairs scored in the right order — 0.5 is
 chance, and it should climb early — and `rewards/margins` is the separation being bought. KTO has no
-pairs, so it logs no accuracy and reports margins only from batches holding both labels. The failure to watch for is
+pairs, so it logs no accuracy, and `rewards/margins` appears only for a logging window that saw both
+labels. The failure to watch for is
 `logps/chosen` and `logps/rejected` falling together: the model is making both answers less likely,
 which degrades generation. Lower the learning rate, or anchor harder: on SMPO raise `chosen_sft_ratio`
 or lower `beta` (it scales the margin term); on DPO add `[sigmoid, sft]` or raise `beta`. On SMPO, a

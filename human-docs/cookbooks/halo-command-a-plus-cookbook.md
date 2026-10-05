@@ -54,7 +54,7 @@ fp32_router: true
 fp32_experts: false
 
 attn_implementation: flash_attention_2
-use_liger_kernel: false
+use_liger_kernel: true
 packing: false
 # 1024 peaks at 255.8 GiB of the B300's ~268 GiB. At 4096 DeepEP's elastic buffer has no
 # room left to grow and hits a CUDA OOM a few steps in.

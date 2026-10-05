@@ -81,9 +81,9 @@ halo launch embedding examples/embedding/gptoss/embedding-gptoss-20b-gooaq-ep.ya
 
 Recipes for Qwen3-Embedding, Qwen3.5, GPT-OSS and Gemma 4 ship under `examples/embedding/`. Expert,
 tensor and expert-tensor parallelism all work; context parallelism does not, because pooling needs
-the whole sequence on one rank. Tensor and expert-tensor parallelism batch through a loader that
-cannot apply `no_duplicates`, so they refuse it: set `batch_sampler: batch_sampler` there (as
-`--batch_sampler=batch_sampler` on the command line). A pipeline with weights after the backbone
+the whole sequence on one rank. Tensor and expert-tensor parallelism, and a pre-sharded dataset,
+batch through a loader that cannot apply `no_duplicates`, so they refuse it: set
+`batch_sampler: batch_sampler` there (as `--batch_sampler=batch_sampler` on the command line). A pipeline with weights after the backbone
 that train or that FSDP2 would shard (a `Dense` head) runs on one GPU or under DDP
 (`accelerate launch`) only: FSDP2, TP and EP refuse it at startup. LoRA (`use_peft: true`) is
 supported on the plain data-parallel path only and rejected under EP, ETP and TP; its targets may
@@ -96,8 +96,8 @@ unfolded adapters, which `resume_from_checkpoint` restores onto the base.
 sentence-transformers owns tokenization here, so `tokenizer_backend` must stay at its default `hf` —
 a `gigatoken` value is refused, not ignored. The same goes for the chat-template and special-token
 knobs (`chat_template`, `force_chat_template`, `pad_token`, `bos_token`, `eos_token`,
-`added_special_tokens`), `freeze_layers_patterns` / `unfreeze_layers_patterns`, `tools_field` and
-`log_decoded_samples`:
+`added_special_tokens`), `freeze_layers_patterns` / `unfreeze_layers_patterns`, `tools_field`,
+`log_decoded_samples` and `text_only_model`:
 this path has no rendering or freeze stage to honor them, so it raises at startup instead of
 accepting a flag that would do nothing. Image columns (`images`, `image`, `pixel_values`) are refused
 too — embedding training is text-only.

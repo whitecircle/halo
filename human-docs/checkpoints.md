@@ -73,6 +73,7 @@ All run as `halo run <tool> <flags>`; each answers `-- --help`.
 | `quantize-to-lowp` | write a block-scaled `compressed-tensors` checkpoint (mxfp8 / mxfp4 / nvfp4) |
 | `unfuse-moe-experts` | rewrite fused MoE expert weights to the per-expert hub layout, for a family whose hub form is per-expert (GLM-4 Lite, Laguna, LFM-2, Qwen3 MoE, Qwen3.5/3.6, DeepSeek-V4, Bailing/Ling, Command A+, GLM-5 Next); refuses the families that store fused |
 | `reset-sinks` | disable the attention-sink mechanism in a GPT-OSS checkpoint |
+| `reattach-vision-tower` | restore the base's vision tower and wrapper layout to a `text_only_model` Qwen3.5/3.6 export, which vLLM loads only in that layout |
 
 Give each tool an output path different from its input: they refuse to run in
 place, because writing over the source deletes the shards they don't overwrite.
@@ -97,7 +98,7 @@ training — the rollout server the RL methods generate against — is
 ## Uploading to the HuggingFace Hub
 
 Halo wires no Hub upload into the save path. The inherited `push_to_hub` /
-`hub_model_id` `TrainingArguments` fields still parse, and the upload they drive
+`hub_model_id` `TrainingArguments` fields parse, but the upload they drive
 is unguarded and untested against Halo's overridden gathered/EP save — including
 for sharded and adapter layouts. Upload explicitly instead: a gathered checkpoint
 is a plain HF model directory, so the standard Hub CLI works:
@@ -110,7 +111,7 @@ hf upload my-org/my-model checkpoints/sft-qwen3-4b-ultrachat/checkpoint-1000
 Upload the checkpoint directory itself, not the whole `output_dir`, and exclude
 its training state, or it goes public with the weights: `scheduler.pt`,
 `trainer_state.json`, (under bias balancing) `router_balancing_biases.pt` and
-(when `precompute_ref_log_probs` swept the reference) `reference_logps.pt` and (async GRPO with prefetch)
+(DPO/KTO `precompute_ref_log_probs`, or offline GRPO full fine-tuning at `kl_beta > 0`) `reference_logps.pt` and (async GRPO with prefetch)
 `prefetch_pending-*.pt`, the drawn but untrained prompts with their context, answers included, in every
 checkpoint, `resume_adapter/` and `resume_adapter.json` under `merge_expert_lora_on_save` or embedding LoRA,
 plus `optimizer*` and `rng_state*` unless the run set `save_only_model: true`. For a LoRA run, upload the adapter directory, or merge

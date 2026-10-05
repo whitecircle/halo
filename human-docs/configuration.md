@@ -40,13 +40,14 @@ A few notes on the ones that bite:
   pick the backend for your GPU and model (FA4 on Blackwell, FA3 on Hopper, per-family
   fallbacks where a kernel is known-broken). The padded-batch methods (preference,
   reward, classification, teacher distillation, every GRPO) default to SDPA
-  instead. Most examples pin one anyway; copy the pin with the config.
+  instead, except offline GRPO under CP, which takes the GPU pick. Most examples
+  pin one anyway; copy the pin with the config.
 - `model_revision` pins a Hub commit, and `max_concurrent_loading` caps how many
   ranks per node load weights at once — unset it resolves to half the node's GPUs
   capped at 4, and `1` rescues a CPU-RAM-tight host.
-- The two RL trainers share TRL's GRPO config, so the `vllm_*` fields parse on
-  both. The async-rollout block is async GRPO's alone: `rollout_server_url` in an
-  online-GRPO YAML fails to parse.
+- The two online RL trainers share TRL's GRPO config, so the `vllm_*` fields
+  parse on both. The async-rollout block is async GRPO's alone:
+  `rollout_server_url` in an online-GRPO YAML fails to parse.
 
 ## Overriding on the command line
 

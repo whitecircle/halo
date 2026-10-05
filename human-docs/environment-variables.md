@@ -19,7 +19,7 @@ and `NCCL_SOCKET_IFNAME` on a multi-homed host — see [Clusters](clusters.md).
 | Variable | Default | What it holds |
 | --- | --- | --- |
 | `HF_HOME` | `~/.cache/huggingface` | model downloads |
-| `HF_DATASETS_CACHE` | `~/.cache/huggingface/datasets` | dataset / Arrow cache |
+| `HF_DATASETS_CACHE` | `$HF_HOME/datasets` | dataset / Arrow cache |
 | `TMPDIR` | `/tmp` | temp files |
 | `HALO_DATA_ROOT` | `~/.cache/halo` | Halo scratch: S3 dataset cache, profiler output |
 
@@ -73,7 +73,7 @@ rank; rank 0's values are broadcast and any disagreeing rank warns.
 
 ## Tuning knobs worth knowing
 
-Halo has some thirty more `HALO_*` knobs, all optional and all defaulted to
+Halo has some thirty-five more `HALO_*` knobs, all optional and all defaulted to
 production-sane values. They're read through `src/env.py`, so booleans accept
 `1/true/yes/on`, and a non-numeric value warns and falls back instead of
 crashing mid-run. These are the ones that come up:
@@ -84,7 +84,7 @@ crashing mid-run. These are the ones that come up:
 | `HALO_DATASET_NUM_PROC` | `max(1, min(cpus/4, 4))` | dataset map/filter workers; pin it fleet-wide on heterogeneous nodes |
 | `HALO_FP32_MATMUL_PRECISION` | `highest` | fp32 matmul mode; `high` opts back into TF32, which corrupts long-context RoPE — leave it alone |
 | `HALO_DEEPEP_GPU_TIMEOUT_SECONDS` | `100` | device-side spin budget of the dispatch/combine barrier — bounds rank skew |
-| `HALO_DEEPEP_NUM_QPS` | auto | RDMA queue pairs; helps on EFA |
+| `HALO_DEEPEP_NUM_QPS` | auto | RDMA queue pairs (elastic backend); more can speed the cross-node all-to-all on EFA — A/B it |
 | `HALO_DEEPGEMM_NATIVE` | `0` | native DeepGEMM low-precision kernels — net-slower at the MoE shapes benchmarked here |
 | `HALO_FUSED_GLU` | `1` | `0` runs every GLU combine (experts and dense MLPs) eager instead of the fused Triton kernels — the switch when a GLU kernel fails to compile or launch on your GPU |
 | `HALO_FLEX_SLIDING` | `1` | `0` builds Gemma 4 on plain SDPA instead of FlexAttention on its sliding layers — the switch when that kernel fails on your GPU, or to run `full_determinism` on more than one GPU |
@@ -92,13 +92,13 @@ crashing mid-run. These are the ones that come up:
 | `HALO_ALLOW_MISSING_CHECKPOINT_KEYS` | `0` | demote the missing-checkpoint-key error to a warning; only for deliberately partial checkpoints |
 | `CUDA_DEVICE_MAX_CONNECTIONS` | `1`, baked into both images | driver-owned, latched at `deep_ep`'s `cuInit` — a Python write is too late; `1` keeps the supported multi-group EP shapes from deadlocking the DeepEP combine against FSDP2's NCCL, at no measurable throughput cost |
 
-The rollout-server switches (`VLLM_*` / `SGLANG_*`: R3 capture, speculative
-decoding, attention backend) are `docker compose` interpolation variables: export
-them or put them in `.env` where you run compose. Neither engine reads them, so a
-hand-run server takes `--enable-return-routed-experts` / `--speculative-config` /
-`--attention-backend` directly. `VLLM_GROUP_HOST` / `SGLANG_GROUP_HOST`, the
-weight-sync dial-back address, are read by the trainer. See
-[Rollout Servers](rollout-servers.md).
+The compose files' rollout-server switches (`VLLM_ENABLE_R3` / `SGLANG_ENABLE_R3`,
+`VLLM_SPECULATIVE_CONFIG`, `VLLM_ATTENTION_BACKEND` / `SGLANG_ATTENTION_BACKEND`, …)
+are `docker compose` interpolation variables: export them or put them in `.env`
+where you run compose. Neither engine reads them, so a hand-run server takes
+`--enable-return-routed-experts` / `--speculative-config` / `--attention-backend`
+directly. `VLLM_GROUP_HOST` / `SGLANG_GROUP_HOST`, the weight-sync dial-back
+address, are read by the trainer. See [Rollout Servers](rollout-servers.md).
 
 The rest — DeepEP buffer sizing, gradient-bucket geometry, low-precision cache
 switches, weight-sync timeouts, the EP profiling switches — are cataloged with

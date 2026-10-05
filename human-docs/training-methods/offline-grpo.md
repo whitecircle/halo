@@ -41,7 +41,7 @@ those families.
 ```yaml
 model_name_or_path: Qwen/Qwen3.6-35B-A3B
 dataset:
-- path/to/gsm8k-qwen3.6-35b-a3b-offline-grpo
+- path/to/gsm8k_<model>_offline_grpo.jsonl
 expert_parallel_size: 8
 
 advantage_method: quantile_norm    # rewards -> advantages inside each group
@@ -63,7 +63,8 @@ gradient_accumulation_steps: 8
   so it needs that cap set.
 - `kl_beta` — above `0` full fine-tuning scores its starting policy once and saves the reference scores with each
   checkpoint; resume keeps that original anchor. It needs a finite, unsharded dataset, not a second model copy.
-  Non-CP PEFT uses the base with adapters off. [Reference rules](../../agent-docs/training-methods/grpo/offline-grpo.md#reference-model) ↗.
+  Non-CP PEFT uses the base with adapters off; native expert LoRA loads a frozen copy of the base.
+  [Reference rules](../../agent-docs/training-methods/grpo/offline-grpo.md#reference-model) ↗.
 - `initial_min_log_prob` / `min_log_prob` — a floor on low-probability tokens of negative-advantage rows. It is what
   keeps the loss finite when the policy is pushed away from something it already thinks is unlikely.
 - `max_completion_length` is a truncation cap, not a generation budget: a completion cut at the cap is trained
@@ -90,7 +91,8 @@ construction rather than an hour in.
 ## What to watch
 
 The trainer logs per-sample diagnostics split by advantage sign. Three of them tell you whether it is working:
-`positive/logps_mean` (stable or rising), `negative/logps_mean` (falling) and `positive/pg_objective_mean`.
+`positive/logps_mean` (stable or rising), `negative/logps_mean` (falling) and `positive/pg_objective_mean` — the
+advantage-weighted policy term (π·A under the default `prob_weighted`), not the dataset reward.
 
 | Symptom | Cause | Fix |
 | --- | --- | --- |

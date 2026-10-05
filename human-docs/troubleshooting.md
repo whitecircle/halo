@@ -27,7 +27,7 @@ reference.
 | Loss degrades only past ~2048 tokens | TF32 rounding corrupting long-context RoPE. The image pins fp32 matmuls to full precision, so you only see this after setting `HALO_FP32_MATMUL_PRECISION=high` — unset it. |
 | Garbage output / index crash right after dataset mapping | A map whose output depends on a closure value the fingerprint can't hash. Grep the log for `Dataset-map cache fingerprint`; clearing `HF_DATASETS_CACHE` is the fix from outside the code. |
 | Zaya raises as soon as gradient checkpointing is enabled | The family cannot train with it — the recompute faults in cuDNN — so Halo refuses it at load. Set `gradient_checkpointing: false`. |
-| `fp32 training is not supported under Expert Parallelism` at model load | `bf16: false` with no `fp16` either resolves the run to fp32, and DeepEP's dispatch buffer is sized for 2-byte tokens. Train in bf16, or keep fp32 masters via `fp32_non_ep_params` / `fp32_experts`. Dense fp32 and pure ETP are unaffected. |
+| `fp32 training is not supported under Expert Parallelism` at model load | `bf16: false` with no `fp16` either resolves the run to fp32, and DeepEP's dispatch buffer is sized for 2-byte tokens. Train in bf16, or keep fp32 masters via `fp32_non_ep_params` / `fp32_experts` (Gemma 4 refuses `fp32_non_ep_params` under EP). Dense fp32 and pure ETP are unaffected. |
 | Run dies mid-run with a write error | A cache or output landed on the small root filesystem after all. Recheck the four cache variables. |
 
 ## Multi-node and clusters

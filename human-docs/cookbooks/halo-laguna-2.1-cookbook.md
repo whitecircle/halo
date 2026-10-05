@@ -131,8 +131,7 @@ expert_tensor_parallel_size: 2
 ```
 
 Leave `use_grouped_gemm: true`. Laguna stores its GLU halves contiguously, which the ETP
-split handles; only GPT-OSS, whose halves are interleaved, has to fall back to the
-per-expert loop under ETP.
+split handles; only GPT-OSS falls back to the per-expert loop under ETP.
 
 Use EP4 as the default full-model recipe. Use ETP when expert tensor size is the main memory limit. Do not enable TP or CP.
 

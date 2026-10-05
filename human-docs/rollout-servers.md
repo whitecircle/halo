@@ -66,7 +66,8 @@ The variables mirror vLLM's — `SGLANG_MODEL` (required), `SGLANG_PORT` (`30000
 the same repack gate) — plus `NCCL_CUMEM_ENABLE=1`, which the compose file sets and a hand-run container must too.
 
 Weight sync needs **this repo's** SGLang image, not the upstream one: it aligns NCCL with the training image and
-patches two loaders an online update has to reach. Use vLLM unless you need SGLang specifically. Which families each
+patches the GLM-4 and Gemma 4 routers, which upstream derives once on first use, so a synced router weight would
+never take effect. Use vLLM unless you need SGLang specifically. Which families each
 engine can take an online update for differs, and the trainer refuses the pair at construction, naming the family and
 the loader reason — the current lists are in [Supported Matrix](supported-matrix.md#rollout-engines).
 

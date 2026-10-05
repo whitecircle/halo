@@ -38,7 +38,7 @@ otherwise the resume starts a fresh run.
 ## What gets logged
 
 Loss, learning rate, and grad-norm come from the base trainer at every
-`logging_steps` (the examples use `logging_steps: 1`). Halo adds opt-in
+`logging_steps` (most examples use `logging_steps: 1`). Halo adds opt-in
 metric groups on top:
 
 | Config field | Default | Adds |
@@ -47,16 +47,17 @@ metric groups on top:
 | `report_mfu_diagnostics` | off | logs MFU and achieved TFLOPS; needs `enable_efficiency_metrics` on. The S-MFU variants appear only for MoE, where plain MFU misreads sparse models |
 | `enable_moe_metrics` | on | per-layer expert load balance: `moe/load_max`, `moe/load_cv`, `moe/dead_frac`, … (no-op on dense models) |
 | `generate_eval_examples` | on (off for SFT) | a table of sample generations at each evaluation (skipped under TP/CP) |
-| `save_completions` (GRPO) | on | writes each step's rollouts to `<output_dir>/completions/completions_<step>.parquet` (prompt, completion, reward, advantage), plus a `completions` table in W&B when `report_to` includes `wandb` |
-| `log_completions` (GRPO) | off | additionally prints the per-sample table to the console |
+| `save_completions` (online / async GRPO) | on | writes each step's rollouts to `<output_dir>/completions/completions_<step>.parquet` (prompt, completion, reward, advantage), plus a `completions` table in W&B when `report_to` includes `wandb` |
+| `log_completions` (online / async GRPO) | off | additionally prints the per-sample table to the console |
 
 For async GRPO with environments, give `sampling/logratio_mean` a standing
 dashboard panel: a steady negative drift means the weight sync to the rollout
 server is broken, or, with `advantage/net_token_mass` staying negative and
 `entropy` climbing after it, a KL-free run drifting, which `balance_token_mass` and the
 [early stop](../agent-docs/training-methods/grpo/async-grpo/monitoring.md#early-stop) ↗
-address. Online GRPO does not emit it; there, watch reward and KL
-instead. Details on every callback:
+address. Online GRPO logs TRL's unsigned gap
+`sampling/sampling_logp_difference/mean` instead, with the importance-sampling
+correction on. Details on every callback:
 [Callbacks](../agent-docs/training-methods/callbacks.md) ↗.
 
 ## Profiling

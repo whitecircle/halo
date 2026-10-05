@@ -53,8 +53,8 @@ trainable. Leave it out and Halo only warns, while the head never trains and acc
 halo launch rewards examples/reward/qwen3_5/rm-qwen3.5-9b-skywork-pref80k.yaml -n 8
 ```
 
-`examples/reward/gptoss/rm-gptoss-20b-skywork-pref80k-ep.yaml` is the MoE version, with expert
-parallelism pinned in the config. Once trained, `halo run rm-scoring` and
+The MoE versions under `examples/reward/gptoss/` and `examples/reward/gemma4/` pin expert
+parallelism in the config. Once trained, `halo run rm-scoring` and
 `halo run rm-rejection-sampling` generate against a served endpoint and score the results.
 
 ### What to watch

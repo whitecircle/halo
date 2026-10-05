@@ -31,9 +31,10 @@ Pull the prebuilt images or build them from source: [Installation](installation.
 Halo picks the backend: FA4 on Blackwell, FA3 on Hopper, FA2 as the fallback,
 SDPA or eager where no Flash kernel serves the family; the padded-batch scripts
 (preference, reward, classification, teacher distillation, GRPO) default to SDPA
-when the YAML sets none. Gemma 4 gets no flash path at all (FA2 caps head_dim at
+when the YAML sets none, except offline GRPO under CP, which keeps the hardware
+pick. Gemma 4 gets no flash path at all (FA2 caps head_dim at
 256 and FA4 overflows tensor memory at its 512-wide global layers); Qwen3.5/3.6
-and GLM-4 MoE Lite are demoted off FA4 alone (its backward NaNs at their shapes)
+and GLM-4 MoE Lite fall back from FA4 to SDPA (its backward NaNs at their shapes)
 and keep FA3 on Hopper; GLM-5 Next, Step-3.7 Flash and Inkling fall back to
 SDPA on their own; DeepSeek-V4 needs eager. Bailing/Ling and Laguna get no
 automatic fallback: set `attn_implementation: sdpa` yourself, as their shipped
@@ -41,15 +42,19 @@ configs do — on Bailing/Ling a flash label, the auto-selected one included,
 fails the model build.
 
 Context parallelism picks its own kernel and ignores the configured label — FA3
-on Hopper, FA4 on Blackwell, FA2 otherwise — and rejects SDPA except where a
-family's wrapper waives the check (Bailing/Ling). Per-family resolution:
+on Hopper, FA4 on Blackwell (FA2 for the families that fall back from FA4), FA2
+otherwise — but rejects an SDPA label except where a family's wrapper
+waives the check (Bailing/Ling), so GLM-4 MoE Lite under CP sets
+`attn_implementation: flash_attention_2`, as its shipped config does. Per-family resolution:
 [Flash Attention](../agent-docs/optimization/flash-attention.md) ↗.
 
 ## Training methods
 
-Every trainer supports EP, TP, ETP and EP+TP. CP is declare-to-enable and only
-SFT and SMPO set it: nothing inspects a trainer's loss, so CP would silently
-mis-pool across sequence shards.
+Every trainer supports EP, TP, ETP and EP+TP. CP is declare-to-enable, set only
+by SFT, SMPO and offline GRPO: nothing inspects a trainer's loss, so on any other
+trainer CP would silently mis-pool across sequence shards. Offline GRPO under CP
+is full fine-tuning only — PEFT, native expert LoRA and an explicit `ref_model`
+are rejected; the run-start reference is scored through the CP policy.
 
 | Method | Script | CP | Notes |
 | --- | --- | :---: | --- |
@@ -58,7 +63,7 @@ mis-pool across sequence shards.
 | DPO / KTO | `scripts/training/preference/{dpo,kto}.py` | No | reference log-prob sums block CP |
 | Reward modeling | `scripts/training/preference/rewards.py` | No | full-sequence pooling blocks CP |
 | Classification | `scripts/training/classification.py` | No | full-sequence pooling blocks CP |
-| Offline GRPO | `scripts/training/offline_grpo.py` | No | trains from scored completions |
+| Offline GRPO | `scripts/training/offline_grpo.py` | Yes | trains from scored completions; CP is full fine-tuning only |
 | Online GRPO (RLVR) | `scripts/training/online_grpo/rlvr.py` | No | needs vLLM; `--use_sdpg=true` runs online SDPG |
 | Async GRPO with environments | `scripts/training/environmental_grpo.py` | No | needs Ray plus a vLLM or SGLang server |
 | Distillation | `scripts/training/distillation/` | No | teacher and self distillation |
@@ -93,7 +98,7 @@ from this repo's image, not upstream. Engine setup, ports, weight sync and
 | FSDP2 / DP | supported | default dense and small MoE runs |
 | HSDP (`use_hsdp: true`) | supported | multi-node DP; pure DP or CP only, no-op on one domain |
 | EP | supported | MoE expert sharding |
-| CP | supported | long-context SFT / SMPO |
+| CP | supported | long-context SFT / SMPO / offline GRPO |
 | TP | supported | attention and weight sharding; family support varies |
 | ETP | experimental | expert FFN memory, experts replicated |
 | EP+CP · EP+TP | supported for selected families | MoE plus long context / attention sharding |
@@ -120,7 +125,7 @@ CP wrapper drop CP. What each family is for: [Supported Models](models.md).
 | GPT-OSS | Yes | Yes | Yes | Yes | Yes | Yes | Yes | Yes | interleaved fused experts; trainable attention sinks |
 | GLM-4 MoE Lite | Yes | Yes | Yes | Yes | Yes | Yes | Yes | Yes | LoRA-style attention compression |
 | Command A+ (Cohere2 MoE) | Yes | Yes | Yes | Yes | Yes | Yes | Yes | Yes | only EP is validated on the 200B+ checkpoint; the other modes and LoRA pass tiny-model GPU tests. No online RL, on either engine |
-| Laguna S / XS 2.1 | Yes | Yes | No | No | partial | No | No | Yes | native in transformers, released checkpoints still load through remote code at a pinned revision; `sdpa`, so `padding_free` is rejected and they pack instead; weight sync on vLLM only |
+| Laguna S / XS 2.1 | Yes | Yes | No | No | partial | No | No | Yes | native in transformers, but the released checkpoints load through remote code at a pinned revision; `sdpa`, so `padding_free` is rejected and they pack instead; weight sync on vLLM only |
 | Gemma 4 MoE | Yes | Yes | No | No | Yes | No | No | Yes | KV-shared layers block CP/TP; no router-balancing path at all; attention LoRA adapts the language model only — the vision/audio towers' same-named projections are wrappers PEFT cannot adapt and are excluded |
 | Bailing/Ling | Yes | Yes | Yes | No | Yes | partial | No | Yes | EP covers Ling 2.0, Ling 3.0 and the Ring siblings; CP on Ling 2.0 only; no DTensor attention plan. Ling 3.0 and Ring's linear spellings take no online weight update |
 | LFM-2 MoE | Yes | Yes | No | Yes | Yes | No | Yes | Yes | short-conv layers block CP |
@@ -139,9 +144,9 @@ either.
 Three rules cut across the table. Every EP+CP shape carries the same topology
 rule — EP stays node-local and `ep_size × expert_tp_size` equals the NVLink
 domain size. ETP has no per-family opt-in (every EP-capable family shards expert
-FFNs through the same helper), with GPT-OSS the one behavioral exception: its
-interleaved expert weights cannot be de-interleaved once TP-sharded, so grouped
-GEMM turns off under ETP. And LoRA
+FFNs through the same helper), with GPT-OSS the one behavioral exception: under
+ETP it stores its de-interleaved gate/up halves where the per-expert loop reads
+them, so grouped GEMM turns off. And LoRA
 `Yes` covers FSDP/DP, EP, CP and pure ETP — TP and EP+TP reject adapters
 outright, and any `expert_tp_size > 1` additionally rejects adapters on the
 *expert* projections, so keep `lora_target_modules` on attention there.

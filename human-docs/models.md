@@ -55,5 +55,5 @@ packed, so the VLM path uses standard padding.
 
 A family that trains under plain FSDP2 needs no code. Giving it expert or context
 parallelism means one wrapper file that registers itself.
-[Model Integration Cost](model-integration-cost.md) is the honest accounting;
+[Model Integration Cost](model-integration-cost.md) counts what each wrapper costs;
 [Adding a Model](../agent-docs/models/adding-a-model.md) ↗ is the procedure.

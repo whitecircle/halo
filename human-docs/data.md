@@ -28,7 +28,7 @@ has the turns the two sides share extracted as one. One SFT record:
 ## Where data can come from
 
 `dataset` accepts a HuggingFace Hub ID (`repo@split`, `repo:config`), a local
-path (JSON/JSONL, Parquet, Arrow, or a `save_to_disk` directory), or an S3 path
+path (JSON/JSONL, Parquet, Arrow, CSV, or a `save_to_disk` directory), or an S3 path
 (`s3://my-bucket/key`, with your own AWS credentials). Pass a list to mix sources; `dataset_ratio` is the fraction of
 each source kept, not a mixing weight:
 

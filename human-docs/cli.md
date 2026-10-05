@@ -3,8 +3,8 @@
 The image ships a `halo` command with two verbs: `halo launch` starts a training
 method, `halo run` starts every other tool (checkpoint surgery, data prep,
 inference, diagnostics). Both are thin wrappers that resolve a name to a script
-under `scripts/` and exec the right launcher. The scripts still run directly
-with `python`/`torchrun`; the CLI just saves the typing.
+under `scripts/` and exec the right launcher. The scripts also run directly
+with `python`/`torchrun`; the CLI saves the typing.
 
 ## `halo launch`
 

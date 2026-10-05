@@ -16,8 +16,8 @@ Halo preserves the sigmoid router, the group-limited top-k rule, and the shared 
 
 The EP path uses DeepEP and grouped GEMM. The CP and TP paths support GLM's compressed MLA attention.
 
-This recipe uses eight NVIDIA B300 GPUs for EP8, with BF16 inputs and FP32 router and
-expert compute.
+This recipe uses eight NVIDIA B300 GPUs for EP8. It keeps FP32 master weights for the
+router, experts and dense layers; the router matmul runs in FP32, the rest in BF16.
 
 ## Start the training container
 
@@ -33,7 +33,7 @@ cp examples/sft/glm4/glm-4.7-flash-ultrachat-ep.yaml glm47-sft.yaml
 ```
 
 In the copy, set `output_dir: /data/checkpoints/glm-4.7-flash-ultrachat-ep8` so the
-checkpoint lands on the scratch volume; the copy then reads as below. It trains on the
+checkpoint lands on the scratch volume. Its settings are below, defaults spelled out. It trains on the
 supervised split of [UltraChat 200K](https://huggingface.co/datasets/HuggingFaceH4/ultrachat_200k) and renders
 multi-turn data with Halo's `glm-chat.jinja` template, which preserves GLM's native role
 markers.

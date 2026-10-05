@@ -17,7 +17,7 @@ Halo supports the GPT-OSS expert layout and attention sinks. It gathers EP, TP, 
 | Model | Training checkpoint | Suggested start |
 |---|---|---|
 | GPT-OSS 20B | `unsloth/gpt-oss-20b-BF16` | Eight GPUs with EP8 |
-| GPT-OSS 120B | `unsloth/gpt-oss-120b-BF16` | Multi-node EP |
+| GPT-OSS 120B | `unsloth/gpt-oss-120b-BF16` | Eight B300 GPUs with EP8; multi-node EP on H200 |
 
 The native OpenAI checkpoints store the experts in MXFP4. Halo EP requires dequantized floating-point expert weights. Use the BF16 checkpoint for training.
 
@@ -50,7 +50,7 @@ train_on_completions_only: true
 
 expert_parallel_size: 8
 save_sharded_ep: false
-use_grouped_gemm: false
+use_grouped_gemm: true
 max_concurrent_loading: 2
 fp32_output_conversion: false
 
@@ -135,8 +135,8 @@ expert_tensor_parallel_size: 8
 ```
 
 Expert compute drops to the per-expert loop at `expert_tensor_parallel_size > 1`:
-GPT-OSS stores its GLU halves interleaved, and once they are TP-sharded they can no
-longer be read as contiguous grouped-GEMM operands.
+ETP de-interleaves GPT-OSS's GLU halves and stores the shards where the loop reads
+them, not in the grouped-GEMM layout.
 
 Do not combine attention TP with ETP.
 
@@ -205,7 +205,8 @@ Halo sends the expert targets to its grouped LoRA path. Keep TP disabled for LoR
 
 Copy `examples/grpo/environmental/environmental-grpo-template.yaml` to `gpt-oss-grpo.yaml`,
 point `model_name_or_path` at the SFT checkpoint's `/data` path, set the environment and
-reward fields for your task, and set the keys below. The shipped GPT-OSS configs under
+reward fields for your task, and set the keys below, editing the template's own line where
+it already has the key (a repeated key fails to parse). The shipped GPT-OSS configs under
 `examples/grpo/environmental/gptoss/sglang/` (full and LoRA, ep1) and `.../vllm/` (full and
 LoRA, ep1 and ep4) are already wired for their engine but list two servers; start the
 ones their header names instead of the single server below.

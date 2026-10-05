@@ -143,7 +143,7 @@ print(tokenizer.decode(output[0][inputs["input_ids"].shape[-1]:], skip_special_t
 
 Neither pinned engine serves a ZAYA1 export: vLLM 0.26.0 has no native Zaya class
 (its generic transformers backend is unverified), and SGLang 0.5.17's loader reads the
-legacy per-expert layout. Run inference from transformers.
+pre-transformers-5.14 per-expert layout. Run inference from transformers.
 
 ## Train a LoRA adapter
 

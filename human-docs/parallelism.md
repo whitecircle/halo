@@ -83,9 +83,7 @@ sequence length to divide by `cp_size`; the collator pads to make the last one
 true.
 
 Pipeline parallelism is not yet available: the `pipeline_parallel_size` knob
-parses, but any value above 1 is rejected at config time in this release. The
-implementation is nearly complete — after extensive testing it will be enabled
-for selected models and trainers in an upcoming version.
+parses, but any value above 1 is rejected at config time in this release.
 
 Sharding costs throughput, so take the least of it that fits — see
 [Performance](performance.md). Per-model coverage (which family supports which
