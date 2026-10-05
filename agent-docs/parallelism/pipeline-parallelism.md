@@ -3,7 +3,7 @@
 **Status: not yet available in this release.** The pipeline-parallel seams ship — the config
 surface, the rank math, the trainer gates, and the stage/split/loss/checkpoint contracts — but the
 schedule engine that would drive microbatches through the stages does not.
-`pipeline_parallel_size > 1` is rejected at config time.
+`pipeline_parallel_size > 1` is rejected at config time, with a pointer to this page.
 
 PP would split a model's decoder layers into contiguous **stages**, each owning a rank block, as
 the outermost parallelism dimension and the only one designed to cross NVLink domains — the only

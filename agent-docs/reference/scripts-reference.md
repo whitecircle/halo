@@ -323,7 +323,7 @@ Throughput benchmarks live under `tests/gpu/profiling/`, grouped by what they me
 | Group | Scripts |
 |---|---|
 | Trainer × parallelism throughput | `benchmark_sft_dense`, `benchmark_sft_ep`, `benchmark_sft_ep_cp`, `benchmark_sft_ep_tp`, `benchmark_smpo_ep`, `benchmark_smpo_ep_cp`, `benchmark_offline_grpo_ep` — each takes `--model` from the shared roster (`tests/common/models.py`), so a per-model number is a flag, not a script |
-| Kernel / mechanism A/B | `benchmark_attention_implementations` (FA4/FA2 vs flex/sdpa/eager, fwd + bwd), `benchmark_gemma4_attention` (Gemma 4 attention backends per layer type), `benchmark_grouped_mm` (loop vs `grouped_mm`), `benchmark_moe_block` (one routed-expert block: transformers eager / `grouped_mm` vs Halo's grouped path), `benchmark_torch_compile` (Liger × compile 2×2 on EP), `benchmark_collators` (packing vs padding-free), `benchmark_roofline`, `bench_ep_buffer_backends` (DeepEP V1 Buffer vs V2 ElasticBuffer) |
+| Kernel / mechanism A/B | `benchmark_attention_implementations` (FA4/FA2 vs flex/sdpa/eager, fwd + bwd), `benchmark_gemma4_attention` (Gemma 4 attention backends per layer type), `benchmark_grouped_mm` (loop vs `grouped_mm`), `benchmark_moe_block` (the Gemma 4 26B-A4B routed-expert block: transformers eager / `grouped_mm` vs Halo's grouped path), `benchmark_torch_compile` (Liger × compile 2×2 on EP), `benchmark_collators` (packing vs padding-free), `benchmark_roofline`, `bench_ep_buffer_backends` (DeepEP V1 Buffer vs V2 ElasticBuffer) |
 | Stock-TRL reference | `benchmark_trl_baseline` (same `EfficiencyCallback` metrics), `benchmark_convergence` (loss curves, same seed + data order) |
 
 Shell runners in the same directory: `run_all_benchmarks.sh`, `run_mfu_benchmarks.sh`,

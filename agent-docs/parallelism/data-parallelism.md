@@ -328,9 +328,9 @@ a DP restriction.
 **Models.** All of them, dense and MoE. The MoE-only rejections are the table rows below that name a
 MoE.
 
-**Axis combinations.** DP is the residual width, not an axis in the
-[allowlist](README.md#supported-combinations) — EP/CP/TP/ETP each carve their groups first and
-FSDP2 shards over what is left. HSDP is the exception with a scope of its own: pure DP and CP only.
+**Axis combinations.** DP is the batch count, not an axis in the
+[allowlist](README.md#supported-combinations); FSDP2's shard group per mode is in
+[Stacking the dimensions](README.md#stacking-the-dimensions). HSDP is the exception with a scope of its own: pure DP and CP only.
 
 **Knobs.** Everything below raises unless the verdict says otherwise.
 
