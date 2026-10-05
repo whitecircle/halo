@@ -243,22 +243,6 @@ infrastructure sets:
 | `VLLM_SERVER_URL` / `SGLANG_SERVER_URL` | `http://localhost:8000` / `:30000` | Live rollout server the `vllm_server` / `sglang_server` tiers probe and drive. Both are set by the shipped infrastructure itself (`Makefile`, `docker-compose.vllm.yml`), which is why they carry no `HALO_TEST_` prefix — every other test knob does. |
 | `HALO_TEST_LAUNCH_ID` | per launch | Set BY the launcher, not for it: a unique id stamped into every torchrun launch's environment so the orphan sweep can identify surviving workers from `/proc` without matching on a script name a co-tenant might also be running. Do not export it. |
 | `HALO_TEST_REQUIRE_SERVER` | unset | The **engine name** (`vllm` / `sglang`, set by the `make` server tiers) whose tests must not be skipped: a node carrying the `<value>_server` marker raises a `UsageError` instead of skipping when the endpoint is unreachable, so a dead container cannot pass as a skip. Any other engine's tests still skip. |
-| `HALO_TEST_MODEL` and the per-suite `HALO_TEST_<SUITE>_MODEL` overrides | per suite | Swap the checkpoint a suite loads without editing it. One spelling for every per-suite checkpoint override: `HALO_TEST_<SUITE>_MODEL`, so a global override cannot point a family test at a checkpoint of another family. Per family (`HALO_TEST_ZAYA_MODEL`, `HALO_TEST_GLM4_MODEL`, `HALO_TEST_GEMMA4_MODEL`, `HALO_TEST_QWEN3_5_MODEL`, …) and per phase: `HALO_TEST_EP_RT_MODEL` (EP round-trip, default a local Gemma4-26B-A4B checkpoint, built as shown below the table), `HALO_TEST_EP_CP_RT_MODEL` (EP+CP round-trip, the same for gpt-oss-20b), `HALO_TEST_EP1_KNOB_MODEL` (ep1 weight-sync, default gpt-oss), `HALO_TEST_RESUME_MODEL` / `HALO_TEST_RESUME_EP_MODEL` (SFT resume: dense default Qwen3-0.6B, and the MoE the `ep` mode needs), `HALO_TEST_LORA_CP_MODEL` / `HALO_TEST_LORA_SAVE_LOAD_MODEL` (both default Qwen3-0.6B; point them at a 4B for a scale check), `HALO_TEST_STEP3P7_MODEL` (**required** — the Step-3.7 vLLM sync suite serves its own `--write-checkpoint` tree and has no default). A suite whose local default checkpoint is absent skips rather than failing. |
-
-The two local checkpoints those suites default to, Gemma4-26B-A4B (`HALO_TEST_GEMMA4_MODEL`,
-`HALO_TEST_EP_RT_MODEL`) and gpt-oss-20b (`HALO_TEST_EP_CP_RT_MODEL`), are
-`scripts/before_training/patch_vocab.py` outputs at `$HALO_DATA_ROOT/models/<repo name>-patched`
-(`patched_checkpoint_dir` in `tests/common/models.py`), which resolves under
-`$(HALO_SCRATCH)/models/` in the `make` tiers (they set `HALO_DATA_ROOT=$(HALO_SCRATCH)`). The
-suites need a local checkpoint directory, not added tokens, so the tool runs without `--patterns`
-and re-saves the source vocabulary unchanged:
-
-```bash
-python scripts/before_training/patch_vocab.py --model_id google/gemma-4-26B-A4B-it \
-    --output_dir "${HALO_DATA_ROOT:?}/models/gemma-4-26B-A4B-it-patched"
-python scripts/before_training/patch_vocab.py --model_id unsloth/gpt-oss-20b-BF16 \
-    --output_dir "${HALO_DATA_ROOT:?}/models/gpt-oss-20b-BF16-patched"
-```
 
 Test scripts read their own knobs through `src/env.py`, `HALO_TEST_`-prefixed so a stray `export` or
 a co-tenant compose file cannot collide with them — the one exception is the server-side `VLLM_MODEL`
@@ -266,6 +250,7 @@ below. The cross-suite ones:
 
 | Var | Meaning |
 |---|---|
+| `HALO_TEST_MODEL` | Checkpoint of the suites that sweep architectures: the expert-LoRA, router `modules_to_save`, mixed merged-save and expert-LoRA reference suites (default gpt-oss-20b; swept with `HALO_TEST_ATTN` / `HALO_TEST_EP`) and the dense self-distillation text suite (default Qwen3-0.6B). |
 | `HALO_TEST_EP` / `HALO_TEST_CP` / `HALO_TEST_TP` / `HALO_TEST_ETP` | Parallel size a sweep-capable suite builds its `ParallelismConfig` with; unset = the suite's own default (often `world_size` for EP). The suffix is the parallelism axis as the rest of the toolkit spells it (`ep_size` / `cp_size` / `tp_size` / `expert_tp_size`), so the knob and the config field it feeds read the same. |
 | `HALO_TEST_REQUIRE_HUB_CACHE` | For an offline run over the seed `tests/common/hub_seed.py` derives ([Hub seed](../infrastructure/ci.md#hub-seed)): a CPU test whose Hub repo is not in the local HF cache fails instead of skipping. Gated repos (`GATED_REPOS`) and local checkpoint paths still skip. Load a tokenizer, processor, config or template through the `tests/common/tokenizers.py` helpers, and name its repo in `tests/common/models.py` so the seed carries it. |
 | `HALO_TEST_ATTN` / `HALO_TEST_GC` / `HALO_TEST_REVISION` | Attention implementation, gradient checkpointing (default **on**), hub revision for the suites that sweep them. The per-family `HALO_TEST_ZAYA_GC` defaults the other way — see the per-suite table. |
@@ -280,6 +265,7 @@ entry and the script name them, and the non-obvious ones are:
 
 | Var | Meaning |
 |---|---|
+| `HALO_TEST_<SUITE>_MODEL` | Swap the checkpoint a family or phase suite loads without editing it; the per-suite spelling keeps a global export from pointing a family test at a checkpoint of another family. Per family (`HALO_TEST_ZAYA_MODEL`, `HALO_TEST_GLM4_MODEL`, `HALO_TEST_GEMMA4_MODEL`, `HALO_TEST_QWEN3_5_MODEL`, …) and per phase: `HALO_TEST_EP_RT_MODEL` (EP round-trip, default a local Gemma4-26B-A4B checkpoint, built as shown below the table), `HALO_TEST_EP_CP_RT_MODEL` (EP+CP round-trip, the same for gpt-oss-20b), `HALO_TEST_EP1_KNOB_MODEL` (ep1 weight-sync, default gpt-oss), `HALO_TEST_RESUME_MODEL` / `HALO_TEST_RESUME_EP_MODEL` (SFT resume: dense default Qwen3-0.6B, and the MoE the `ep` mode needs), `HALO_TEST_LORA_CP_MODEL` / `HALO_TEST_LORA_SAVE_LOAD_MODEL` (both default Qwen3-0.6B; point them at a 4B for a scale check), `HALO_TEST_STEP3P7_MODEL` (**required** — the Step-3.7 vLLM sync suite serves its own `--write-checkpoint` tree and has no default). A suite whose local default checkpoint is absent skips rather than failing. |
 | `HALO_TEST_ZAYA_EP_STEPS` / `HALO_TEST_ZAYA_EP_SEQ` | Training steps (default `4`) and `max_length` (default `512`) of the ZAYA1-8B EP smoke suite (`tests/gpu/parallelism/ep/test_zaya_ep.py`); the step count is asserted, so a longer sweep stays self-checking. |
 | `HALO_TEST_ZAYA_FSDP_STEPS` | Training steps (default `4`) of the ZAYA1-8B FSDP2 suite (`tests/gpu/trainers/sft/test_zaya_fsdp.py`); its sequence length is fixed. |
 | `HALO_TEST_ZAYA_GC` / `HALO_TEST_ZAYA_GC_REENTRANT` | Gradient checkpointing (default **off**) and its `use_reentrant` kwarg (default on) for both Zaya suites. Zaya's load patch refuses GC, so `=1` asserts that refusal rather than training with it. |
@@ -287,7 +273,7 @@ entry and the script name them, and the non-obvious ones are:
 | `HALO_TEST_EP_CP_RT_ATTN` / `HALO_TEST_EP_CP_RT_KEEP` | The same two knobs for the EP+CP round-trip (`tests/gpu/parallelism/combined/test_ep_cp_save_reload_roundtrip.py`); attention defaults to `flash_attention_2` there. |
 | `HALO_TEST_EP1_KNOB_ATTN` / `HALO_TEST_EP1_KNOB_LAZY` | ep1 `fsdp_shard_ep1_experts` weight-sync suite (`tests/gpu/parallelism/ep/test_ep1_knob_weight_sync.py`): attention impl (default `flash_attention_2`) and `ep_lazy_loading` (default on; `=0` routes the load through `from_pretrained` + EP patching instead). |
 | `HALO_TEST_RESUME_FSDP_RESHARD` | `fsdp_reshard_after_forward` (default off = ZeRO-2) for the `fsdp` and `cp` modes of `tests/gpu/trainers/sft/test_sft_checkpoint_resume.py`; the `tp` / `ep` modes ignore it (TP+DP+FULL_SHARD is config-rejected). |
-| `HALO_TEST_VLLM_DENSE_SERVER_URL` | Endpoint of the dense half of the online-GRPO/SDPG e2e pair (`trainers/grpo/test_online_grpo_vllm_dense_e2e.py`, default `http://localhost:8010`) and of the weight-transfer re-init suite, which serves the same checkpoint. The pair's two files train different checkpoints and each asserts on its own server's logprobs, so one `VLLM_SERVER_URL` cannot carry both; unset, both fall back to `VLLM_SERVER_URL`. |
+| `HALO_TEST_VLLM_DENSE_SERVER_URL` | Endpoint of the dense half of the online-GRPO/SDPG e2e pair (`trainers/grpo/test_online_grpo_vllm_dense_e2e.py`) and of the weight-transfer re-init suite, which serves the same checkpoint. The pair's two files train different checkpoints and each asserts on its own server's logprobs, so one `VLLM_SERVER_URL` cannot carry both; unset, both read `VLLM_SERVER_URL`, then `http://localhost:8010`. |
 | `HALO_TEST_ONLINE_GRPO_MOE_MODEL` / `HALO_TEST_ONLINE_GRPO_DENSE_MODEL` | Checkpoints of the online-GRPO/SDPG e2e pair (`trainers/grpo/test_online_grpo_vllm_moe_e2e.py` and its dense sibling): the MoE half's default `Qwen/Qwen3-30B-A3B-Instruct-2507` (EP/ETP rows) and the dense half's `Qwen/Qwen3-0.6B` (TP and FSDP2-DP rows). Every row asserts on the served logprobs, so the running server must serve the same checkpoint. |
 | `HALO_TEST_ENV_GRPO_MODEL` / `HALO_TEST_ENV_GRPO_MAX_STEPS` | Checkpoint (default `Qwen/Qwen3-30B-A3B-Instruct-2507`) and step count (default `2`) of the Environmental-GRPO e2e body (`tests/common/env_grpo_e2e.py`), the vLLM 2-GPU leg's; the SGLang and 4-GPU wrappers own their own checkpoint knobs. |
 | `HALO_TEST_ENV_GRPO_SGLANG_MODEL` | Checkpoint of the SGLang Environmental-GRPO e2e wrappers (`trainers/grpo/test_env_grpo_sglang_e2e.py` and its four-rank sibling `test_env_grpo_sglang_4gpu_e2e.py`, default `unsloth/gpt-oss-20b-BF16`); a per-family pass points it at the family and serves the same checkpoint. Its own knob because its server and default family differ from the vLLM leg's. |
@@ -295,6 +281,21 @@ entry and the script name them, and the non-obvious ones are:
 | `HALO_TEST_ENV_GRPO_4GPU_MODEL` | Checkpoint of the 4-rank Environmental-GRPO e2e (`trainers/grpo/test_env_grpo_vllm_4gpu_e2e.py`, default `unsloth/gpt-oss-20b-BF16`), whose rows hold two parallelism axes at once (EP+ETP, EP+TP, ep4). Its own knob because it shares the 2-GPU file's server but not its default family. |
 | `HALO_TEST_VLLM_REINIT_MODEL` / `HALO_TEST_VLLM_REINIT_CYCLES` | Checkpoint (default `Qwen/Qwen3-0.6B`, the dense endpoint's) and connect/sync/disconnect cycle count (default `12`) of `trainers/grpo/test_vllm_weight_transfer_reinit.py`. An unreleased communicator costs ~633 MiB per cycle on each end, so twelve cycles of a leak overshoot the suite's 1 GiB growth budget several times over. |
 | `HALO_TEST_VLLM_SERVER_GPU` | The vLLM server's GPU as `nvidia-smi` indexes it, for the same suite's device-memory read. Unset means "every GPU the trainer does not own", which is exactly the server's on the tier's own topology (`TRAINER_CUDA_DEVICES` covers the rest); set it when another job holds a third GPU. |
+
+The two local checkpoints the per-suite overrides default to, Gemma4-26B-A4B (`HALO_TEST_GEMMA4_MODEL`,
+`HALO_TEST_EP_RT_MODEL`) and gpt-oss-20b (`HALO_TEST_EP_CP_RT_MODEL`), are
+`scripts/before_training/patch_vocab.py` outputs at `$HALO_DATA_ROOT/models/<repo name>-patched`
+(`patched_checkpoint_dir` in `tests/common/models.py`), which resolves under
+`$(HALO_SCRATCH)/models/` in the `make` tiers (they set `HALO_DATA_ROOT=$(HALO_SCRATCH)`). The
+suites need a local checkpoint directory, not added tokens, so the tool runs without `--patterns`
+and re-saves the source vocabulary unchanged:
+
+```bash
+python scripts/before_training/patch_vocab.py --model_id google/gemma-4-26B-A4B-it \
+    --output_dir "${HALO_DATA_ROOT:?}/models/gemma-4-26B-A4B-it-patched"
+python scripts/before_training/patch_vocab.py --model_id unsloth/gpt-oss-20b-BF16 \
+    --output_dir "${HALO_DATA_ROOT:?}/models/gpt-oss-20b-BF16-patched"
+```
 
 **Env knob or `args_matrix` row?** `nproc`, `markers`, `timeout` and the tier are per-`TestSpec`, not
 per-row, so every row of a matrix runs at the same size, under the same marker set, in the same tier.
@@ -313,8 +314,8 @@ neighbor's timeout.
 from the manifest, not from that intent. Over half of `tests/gpu/manifest.py` carries `core`.
 
 Within that tier several entries need 4 GPUs, many declare timeouts of 1500–2400 s, and a large
-minority load a real multi-billion-parameter checkpoint (gpt-oss-20b, GLM-4.7-Flash, ZAYA1-8B,
-Qwen3-30B-A3B, Qwen3.5-2B, Qwen3-VL-2B and three Ling/Ring checkpoints), so summed worst-case timeouts
+minority load a real multi-billion-parameter checkpoint (gpt-oss-20b, ZAYA1-8B, Qwen3-30B-A3B,
+Qwen3.5-2B, Qwen3-VL-2B and three Ling/Ring checkpoints), so summed worst-case timeouts
 run to tens of hours. This page owns tier composition; the manifest is the only place exact counts live.
 
 Where a big-checkpoint entry stays `core`, it is because it is a *correctness gate* — a comparison

@@ -109,7 +109,7 @@ The `reset_sinks` decision is recorded on the config instance, so the nested EP/
 
 **Gemma4** (5 full-attention layers at `global_head_dim=512`): FA2/FA3/FA4/cuDNN-SDPA all reject head_dim>256 (FA2 cap 256, cuDNN cap 128 on cu13, FA4's SM100 kernel overflows tensor memory and asserts in `flash_fwd_sm100`); math SDPA materializes `[B, heads, S, S]` (64 GB/layer at 32k → OOM).
 
-The loader therefore redirects any FlashAttention impl — auto-detected or caller-supplied — to SDPA for any model whose widest head exceeds 256 (`head_dim_exceeds_flash`, off the per-layer `head_dim`), and on SDPA `patch_sdpa_for_wide_heads` forces mem-efficient SDPA (the only backend supporting head_dim=512) and sets `transformers.integrations.sdpa_attention.use_gqa_in_sdpa → False` for manual KV repeat. On that path alone (v1.0.0), Gemma4 32k EP=8 peaked at ~155 GB/rank. On CUDA the model itself is built with `sdpa_flex_sliding`, which moves the sliding and short-context global layers off that kernel ([Gemma 4](../models/gemma4.md)).
+The loader therefore redirects any FlashAttention impl — auto-detected or caller-supplied — to SDPA for any model whose widest head exceeds 256 (`head_dim_exceeds_flash`, off the per-layer `head_dim`), and on SDPA `patch_sdpa_for_wide_heads` forces mem-efficient SDPA (the only backend supporting head_dim=512) and sets `transformers.integrations.sdpa_attention.use_gqa_in_sdpa → False` for manual KV repeat. On that path alone (`HALO_FLEX_SLIDING=0`), Gemma4 32k EP=8 peaks at ~155 GB/rank (measured at v1.0.0). On CUDA the model itself is built with `sdpa_flex_sliding`, which moves the sliding and short-context global layers off that kernel ([Gemma 4](../models/gemma4.md)).
 
 **Qwen3.5 / Qwen3.6 / Qwen3-Next and GLM-4 MoE Lite (GLM-4.7-Flash)**: auto-fall back from FA4 to **SDPA** (`model_fa4_backward_nan_prone`). The FA4 beta backward emits **NaN gradients** on these models — forward is finite, the first backward goes non-finite and collapses loss to 0 (NaN `grad_norm`).
 
@@ -123,7 +123,7 @@ A Bailing run therefore sets `attn_implementation: sdpa` itself; an unset or fla
 
 **Padded workloads**: the scripts that forward right-padded batches — DPO / SMPO / KTO, teacher distillation, reward modeling, classification, and all three GRPO scripts (offline, online, environmental) — default `attn_implementation` to **SDPA** when the YAML sets none (`padded_workload_attn_implementation` / `attn_default="sdpa"`, both overridable).
 
-Every one of them takes that default only under `reset_sinks: true`. With live gpt-oss sinks (`reset_sinks: false`) the default drops and the model config passes through untouched, since SDPA drops the sink column and would be rejected outright. SFT keeps the auto-selected FA4: a packed batch takes its varlen path, kept fast by the `max_seqlen` int-coercion.
+Every one of them takes that default only under `reset_sinks: true`, and offline GRPO also skips it under CP, leaving an unset label to the loader's FlashAttention selection, which Ulysses requires. With live gpt-oss sinks (`reset_sinks: false`) the default drops and the model config passes through untouched, since SDPA drops the sink column and would be rejected outright. SFT keeps the auto-selected FA4: a packed batch takes its varlen path, kept fast by the `max_seqlen` int-coercion.
 
 That default costs throughput at the lengths these methods actually run. Measured on 8× B300 with `benchmark_smpo_ep.py`, which does *not* apply it (2026-10-04, training code at commit 0bc3a22a5; the gpt-oss-20b rows 2026-10-05 at commit 0e9a51172; Blackwell image; auto = FA4; mean of 2 runs). The SMPO collator emits no `input_ids`, so the callback's tokens/s is a padded-length estimate; the table gives the step-time speedup of auto over SDPA:
 
@@ -208,7 +208,7 @@ Every row is what the loader picks on its own; the reason for each redirect is i
 | Hopper training | `flash_attention_3` (else FA2 when not installed) |
 | No flash-attn | FA2 is still requested and the model build raises — set `attn_implementation: sdpa` yourself (CP then unavailable) |
 | GptOss | FA4 on Blackwell, FA3 on Hopper |
-| Qwen3.5 / Qwen3.6 / GLM-4.7-Flash | → SDPA (FA4 backward NaN) |
+| Qwen3.5 / Qwen3.6 / Qwen3-Next / GLM-4.7-Flash | → SDPA on Blackwell (FA4 backward NaN) |
 | Gemma4 | → `sdpa_flex_sliding` on CUDA: FlexAttention on the sliding layers, matmul attention (mem-efficient SDPA past a score-memory budget) on the head_dim-512 global layers ([Gemma 4](../models/gemma4.md)) |
 | Bailing / Ling | no fallback: the flash label fails the model build — set `attn_implementation: sdpa` |
 | DeepSeek-V4 | → eager |

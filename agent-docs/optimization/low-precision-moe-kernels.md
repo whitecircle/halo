@@ -182,7 +182,7 @@ lowp_keep_first_blocks: 0      # keep the first/last N blocks bf16 (NVFP4 recipe
 lowp_keep_last_blocks: 0
 ```
 
-Low precision is the fake-quant oracle by default; there is no backend knob. The native DeepGEMM kernel is opt-in via `HALO_DEEPGEMM_NATIVE=1` (never a throughput win). Two env knobs tune the simulated path: `HALO_LOWP_COMPILE=0` disables the fused quantizer, `HALO_LOWP_WEIGHT_CACHE=0` disables the per-step expert-weight cache. The master weight stays bf16/fp32 and the checkpoint is unchanged.
+Low precision is the fake-quant oracle by default; there is no backend knob. The native DeepGEMM kernel is opt-in via `HALO_DEEPGEMM_NATIVE=1` (never a throughput win). Two env knobs tune the simulated path: `HALO_LOWP_COMPILE=0` runs the weight round-trip eager instead of compiled, `HALO_LOWP_WEIGHT_CACHE=0` disables the per-step expert-weight cache. The master weight stays bf16/fp32 and the checkpoint is unchanged.
 
 Rejected at config/load time, loudly: any trainer but SFT; **pipeline parallelism** (each stage re-bases its layer indices to 0, so `lowp_keep_*_blocks` would protect every stage's own ends instead of the network's); a `quantization_config` (QLoRA/bitsandbytes — the weights are not plain `nn.Linear`); `fp16: true` masters; and both `lowp_apply_dense_mlp` and `lowp_apply_moe_experts` false, which would apply low precision to nothing.
 

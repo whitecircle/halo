@@ -52,15 +52,15 @@ torchrun --nproc_per_node=8 \
 bf16: true
 learning_rate: 1e-4
 adam_beta2: 0.999
-optim: adamw_torch  # adamw_torch / adamw_torch_fused both auto-enable AdamWBF16 under bf16: true; a non-adamw optim (e.g. adamw_bnb_8bit) suppresses it
+optim: adamw_torch  # adamw_torch / adamw_torch_fused both auto-enable AdamWBF16 under bf16: true; any other optim (e.g. adamw_bnb_8bit) suppresses it
 ```
 
 `bf16_optimizer` (a `DistributedArguments` field, so every training script parses it) overrides that
-resolution: `true` forces AdamWBF16 on where the auto path would decline (a non-AdamW `optim`, replicated
-DDP), `false` forces the stock AdamW over the parameters as loaded. Under `bf16: true` those are bf16, so
-`false` keeps bf16 master weights and moments with round-to-nearest updates (the stall above), not fp32
-ones; fp32 masters come from `fp32_non_ep_params` (non-expert params) and `fp32_experts` (EP experts), or
-`bf16: false`.
+resolution: `true` forces AdamWBF16 on where the auto path would decline (an `optim` other than
+`adamw_torch` / `adamw_torch_fused`, replicated DDP), `false` forces the stock AdamW over the parameters
+as loaded. Under `bf16: true` those are bf16, so `false` keeps bf16 master weights and moments with
+round-to-nearest updates (the stall above), not fp32 ones; fp32 masters come from `fp32_non_ep_params`
+(non-expert params) and `fp32_experts` (EP experts), or `bf16: false`.
 
 `false` is rejected where the run mixes plain-tensor experts with FSDP2 DTensors: `ep_group_size` (`ep_size × expert_tp_size`) above 1, or `ep_group_size == 1` with `fsdp_shard_ep1_experts: false`, unless `fp32_non_ep_params` is set, which routes to a per-tensor-type grouped AdamW with fp32 masters on the non-expert params. The raise lands when the optimizer is built, not at config time. Dense runs and MoE at `ep_size == expert_tp_size == 1` with the default `fsdp_shard_ep1_experts: true` are allowed.
 

@@ -22,8 +22,8 @@ order with the same optimizer hyperparameters, each at its newest release (2026-
 those tried. Tokens/s are measured over steps 6–25 at 2,048 tokens per row (25 steps) and over steps 6–50 at 16,384
 tokens per row (8 rows packed into one causal sequence, 50 steps); peak memory is `max_memory_allocated`, max over
 ranks. Each rate is the mean of its configuration's valid runs: a run whose token-weighted step-1 loss is more than 2%
-from the common value is left out. The Halo rows reproduce on main (0bc3a22a5) within 1%: 15,090 cluster tok/s at
-2,048 tokens and 16,219 at 16,384, at the same peak memory.
+from the common value is left out. At commit 0bc3a22a5 Halo measures 15,090 cluster tok/s at 2,048 tokens and
+16,219 at 16,384, within 1% of its rows below at the same peak memory.
 
 | framework | version | layout | cluster tok/s | peak GiB/GPU |
 |---|---|---|---:|---:|
@@ -117,7 +117,7 @@ not the causal half); bounded layers at the keys their kernel visits. `keys` is 
 `L` is each **document's** length: the trainer costs every batch's documents (`cu_seq_lens_q`, `position_ids`
 resets, or the padded row) and the callback swaps that rank-local measurement in per step, so a packed 64k
 row of 1–40k-token documents is not costed as one 64k sequence. A trainer whose collator emits no `input_ids`
-keeps the config term (every token in a `max_seq_len` document): every GRPO trainer, KTO, SMPO and embedding.
+keeps the config term (every token in a `max_seq_len` document): online and async GRPO, KTO, SMPO and embedding.
 
 The layer set is this rank's own, so under PP ([not yet available](../parallelism/pipeline-parallelism.md))
 each stage's term would match its real slice rather than an even split of the depth. The measured term
@@ -322,7 +322,7 @@ ep2 keeps ~17.5B params local and reaches **1,908 TFLOPS at batch 4** — the hi
 
 At ep2 batch 4 the per-MoE-layer step splits ≈ **77% DeepEP dispatch all-to-all / 21% expert GEMM / 2% combine** (`--comm_profile`, v1.0.0) — dispatch-bound on the top_k=8 token-count exchange. Raising sequence to 8192 amortizes the all-to-all to **17,446 tok/s/GPU** (b4).
 
-Two kernels are load-bearing here: [grouped GEMM](grouped-gemm.md#grouped-vs-the-loop-path), with 128 local experts/rank, and [Liger](liger-kernels.md), which with RMSNorm + CE added **+6.6% throughput and −15 GiB** at v1.0.0; current per-family coverage: [Liger Kernels](liger-kernels.md).
+Two kernels are load-bearing here: [grouped GEMM](grouped-gemm.md#grouped-vs-the-loop-path), with 128 local experts/rank, and [Liger](liger-kernels.md), whose RMSNorm + CE add **+6.6% throughput and −15 GiB** (measured at v1.0.0).
 
 ### EP throughput vs sequence length (ep8, b1, GC on)
 

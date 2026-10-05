@@ -96,7 +96,7 @@ whose docker defaults to a runtime that rejects `--gpus` / `--ipc host` (e.g. sy
 | Path | Role |
 |---|---|
 | `/workspace` | Repo bind-mount and working dir in the image (`-v $(pwd):/workspace -w /workspace`); also `PYTHONPATH` |
-| scratch volume (the `make` targets use `/mnt`) | Checkpoints, logs, HF cache, temp — verify its capacity before a large write |
+| scratch volume (`HALO_SCRATCH`, default `/mnt`) | Checkpoints, logs, HF cache, temp — verify its capacity before a large write |
 | `.env` (repo root) | Secrets, passed via `--env-file .env` |
 | `/root/.aws` | AWS credentials, bind-mounted for S3 / ECR |
 | `.venv/` (repo root) | Host-side uv environment for the IDE (git-ignored) |

@@ -94,4 +94,4 @@ Two further consequences: NS normalizes its input, so `max_grad_norm` clipping c
 ## References
 
 - [Muon is Scalable for LLM Training](https://arxiv.org/abs/2502.16982) — weight decay + per-parameter update-scale adjustment for Muon at scale
-- [gram-newton-schulz](https://github.com/Dao-AILab/gram-newton-schulz) — upstream implementation (git pin in `pyproject.toml`)
+- [gram-newton-schulz](https://github.com/Dao-AILab/gram-newton-schulz) — upstream implementation (a git dependency; `uv.lock` pins the commit)
