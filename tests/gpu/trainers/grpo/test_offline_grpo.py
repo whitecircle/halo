@@ -12,9 +12,9 @@ Runs OfflineGRPOTrainer in standard FSDP mode on Qwen3-0.6B with:
 Test Phases:
 1. Synthetic dataset creation (prompt/completions/rewards)
 2. Offline GRPO training for 10 steps
-3. Validation: every configured step ran, and the final and every per-step loss is finite
-
-It does not compare the GRPO objective against a reference, so a wrong-but-finite loss passes.
+3. Validation: every configured step ran, the final and every per-step loss is finite, and
+   ``compute_loss`` on one group's batch matches the objective recomputed independently from
+   full-vocabulary logits, so a wrong-but-finite loss fails
 
 Run with 2 GPUs:
     torchrun --nproc_per_node=2 \
@@ -25,11 +25,13 @@ import torch
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
 from src.configs.offline_grpo_config import OfflineGRPOConfig
+from src.distributed.fsdp import reshard_fsdp2_modules
 from src.distributed.parallelism_config import ParallelismConfig
 from src.trainers.grpo.offline import OfflineGRPOTrainer
 from tests.common.datasets import create_offline_grpo_dataset
 from tests.common.harness import gpu_test_main
 from tests.common.models import QWEN3_0_6B
+from tests.common.tolerances import TOL
 from tests.common.utils import log, training_run_checks
 
 # Configuration
@@ -45,6 +47,50 @@ NUM_TRAIN_SAMPLES = 64
 NUM_EVAL_SAMPLES = 16
 SEED = 42
 MULTI_TURN_RATIO = 0.3
+# The objective the oracle below recomputes, set explicitly so the two cannot drift apart.
+LOSS_TYPE = "bnpo"
+PG_FORMULATION = "prob_weighted"
+MIN_LOG_PROB = -3.0
+# A group's own rank-normalized advantages nearly cancel, leaving an objective close to the bf16
+# log-softmax residual. These keep it well above that and still send one row through the floor.
+ORACLE_ADVANTAGES = (1.5, 1.0, 0.5, -0.5)
+
+
+def objective_oracle_checks(trainer) -> dict[str, bool]:
+    """``compute_loss`` on the first group's rows against the bnpo / prob_weighted objective with the
+    negative-advantage floor, recomputed from full-vocabulary logits. Collective (FSDP2 forward)."""
+    rows = [trainer.train_dataset[index] for index in range(len(ORACLE_ADVANTAGES))]
+    batch = trainer._prepare_inputs(trainer.data_collator(rows))
+    batch["advantage"] = torch.tensor(
+        ORACLE_ADVANTAGES, dtype=batch["advantage"].dtype, device=batch["advantage"].device
+    )
+    model = trainer.model
+    model.eval()
+    try:
+        with torch.no_grad():
+            ids = torch.cat([batch["prompt_input_ids"], batch["completion_input_ids"]], dim=1)
+            attention = torch.cat([batch["prompt_attention_mask"], batch["completion_attention_mask"]], dim=1)
+            logits = model(input_ids=ids, attention_mask=attention, use_cache=False).logits[:, :-1].float()
+            width = batch["completion_input_ids"].size(1)
+            logps = logits.log_softmax(-1).gather(-1, ids[:, 1:].unsqueeze(-1)).squeeze(-1)[:, -width:]
+            advantages = batch["advantage"].float()
+            floored = torch.where((advantages < 0).unsqueeze(1), logps.clamp(min=MIN_LOG_PROB), logps)
+            mask = batch["completion_attention_mask"].float()
+            weights = batch["group_size"].float().reciprocal()
+            numerator = -(floored.exp() * advantages.unsqueeze(1) * mask * weights.unsqueeze(1)).sum()
+            expected = (numerator / (mask.sum(1) * weights).sum()).item()
+            actual = trainer.compute_loss(model, batch).item()
+    finally:
+        reshard_fsdp2_modules(model)
+        model.train()
+    bound = TOL.exact_objective_rel * abs(expected)
+    error = abs(actual - expected)
+    log(f"  Objective oracle: compute_loss={actual:.6f}, independent={expected:.6f}, error={error:.3e}")
+    return {
+        # A tolerance relative to a vanishing objective would accept any loss near zero.
+        "oracle_objective_nonzero": abs(expected) > 1e-3,
+        "loss_matches_independent_objective": error < bound,
+    }
 
 
 # Main Test
@@ -127,6 +173,9 @@ def run(ctx) -> dict:
         logging_nan_inf_filter=False,
         max_prompt_length=MAX_PROMPT_LENGTH,
         max_completion_length=MAX_COMPLETION_LENGTH,
+        loss_type=LOSS_TYPE,
+        policy_gradient_formulation=PG_FORMULATION,
+        min_log_prob=MIN_LOG_PROB,
         dataloader_drop_last=True,
         fsdp="",  # Mixin handles FSDP wrapping
     )
@@ -164,7 +213,9 @@ def run(ctx) -> dict:
 
     # ── Assertions ──────────────────────────────────────────────────
     log("\n  --- Assertions ---")
-    return {"checks": training_run_checks(train_result, trainer, MAX_STEPS)}
+    checks = training_run_checks(train_result, trainer, MAX_STEPS)
+    checks.update(objective_oracle_checks(trainer))
+    return {"checks": checks}
 
 
 main = gpu_test_main(min_world_size=2, prefix="offline_grpo")(run)
