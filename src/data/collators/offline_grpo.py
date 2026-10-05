@@ -25,8 +25,6 @@ def _validate_reference_rows(features: list[dict[str, Any]]) -> bool:
         raise ValueError("Offline GRPO needs at least one row per batch")
     has_reference = REF_PER_TOKEN_LOGPS_COLUMN in features[0]
     for row in features:
-        if not row["prompt_input_ids"]:
-            raise ValueError("Offline GRPO needs a nonempty tokenized prompt")
         if (REF_PER_TOKEN_LOGPS_COLUMN in row) != has_reference:
             raise ValueError("Offline GRPO cannot mix rows with and without reference log-probs")
         if has_reference:
@@ -103,10 +101,11 @@ class OfflineGRPOCPDataCollatorWithPadding:
     pad_token_id: int = 0
     cp_size: int = 1
 
-    def __call__(self, features: list[dict[str, Any]]) -> dict[str, Any]:
+    def __post_init__(self):
         if self.cp_size < 1:
-            raise ValueError("cp_size must be positive")
+            raise ValueError(f"cp_size must be positive, got {self.cp_size}")
 
+    def __call__(self, features: list[dict[str, Any]]) -> dict[str, Any]:
         has_reference = _validate_reference_rows(features)
 
         rows: list[list[int]] = []

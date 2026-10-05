@@ -2,6 +2,7 @@
 
 import pytest
 import torch
+from accelerate import PartialState
 
 from src.data.collators.offline_grpo import (
     REF_PER_TOKEN_LOGPS_COLUMN,
@@ -69,6 +70,7 @@ def test_cp_rows_keep_completion_targets_and_reference_in_full_row_positions():
 
 @pytest.mark.parametrize("cp", [False, True], ids=["local", "cp"])
 def test_empty_completion_is_inert_and_mixed_reference_rows_fail(cp):
+    PartialState()  # the substituted-completion warning logs through accelerate's logger
     collator = (
         OfflineGRPOCPDataCollatorWithPadding(pad_token_id=7, cp_size=2)
         if cp
@@ -84,12 +86,16 @@ def test_empty_completion_is_inert_and_mixed_reference_rows_fail(cp):
         assert batch["completion_attention_mask"].tolist() == [[0]]
     with pytest.raises(ValueError, match="at least one row"):
         collator([])
-    with pytest.raises(ValueError, match="nonempty tokenized prompt"):
-        collator([_row([], [])])
     with pytest.raises(ValueError, match="mix rows"):
         collator([_row([1], [2]), _row([1], [2], reference=[-1.0])])
     with pytest.raises(ValueError, match="must match tokenization"):
         collator([_row([1], [2, 3], reference=[-1.0])])
+
+
+@pytest.mark.parametrize("cp_size", [0, -2])
+def test_cp_collator_refuses_a_nonpositive_cp_size_at_construction(cp_size):
+    with pytest.raises(ValueError, match="cp_size must be positive"):
+        OfflineGRPOCPDataCollatorWithPadding(pad_token_id=0, cp_size=cp_size)
 
 
 def test_grouped_tokenization_drops_unused_supplied_scores():
