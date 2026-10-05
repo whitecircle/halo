@@ -263,7 +263,8 @@ class ParallelismConfig:
     # toggled back on for its last backward so the optimizer still reads sharded params carrying grads).
     # FSDP2 otherwise reshards after each microstep's backward and re-all-gathers the full model on the
     # next — once per gradient_accumulation_step, and the dominant step cost whenever those collectives
-    # run over sockets. Costs one unsharded param copy per GPU; plain-DP torchrun path only.
+    # run over sockets. Holds only the unsharded params ZeRO-2 keeps from forward to backward anyway, so
+    # peak memory is unchanged. Torchrun DP/CP/EP only; TP and PP are rejected.
     fsdp_reshard_after_backward: bool = True
 
     # True skips FSDP2's gradient reduce on a grad-accum window's microsteps 1..n-1
@@ -271,8 +272,9 @@ class ParallelismConfig:
     # Costs one unsharded gradient copy per GPU (at the reduce dtype) held across the window.
     fsdp_defer_grad_sync: bool = False
 
-    # ep_size==1 only: True shards the replicated experts via FSDP reduce-scatter (grad-equivalent,
-    # frees DP-scaling memory); RL-safe — the vLLM weight-sync gather materializes shards first.
+    # ep_group_size==1 only: True shards the replicated experts via FSDP reduce-scatter (grad-equivalent,
+    # frees DP-scaling memory); RL-safe — the engine weight-sync gather (vLLM or SGLang) materializes
+    # shards first.
     fsdp_shard_ep1_experts: bool = True
 
     # Shard non-expert params within each NVLink domain, replicate across domains. Pure DP or CP only
