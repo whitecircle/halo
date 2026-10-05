@@ -62,18 +62,6 @@ phase, main-first ordering, the output-FS probe, the load throttle) import it, n
 
 ## Trainers
 
-Offline GRPO's `src/trainers/grpo/reference_cache.py` owns bounded score transfers, per-DP cache
-assembly and memory-mapped token buffers. `reference_logps.py` owns the ragged payload;
-the shared `mixins/reference_logps.py` owns checkpoint identity and persistence. Cache writers
-are elected from the checkpoint filesystem-owner predicate. Score transfers use one int64 metadata
-gather and one local-I/O failure join per batch, independent of DP size, writer count and chunk count.
-
-Run-local `_reference_cache/<uuid>/` files are merged and checked without durable publication.
-Mapping failures join across ranks; the files are unlinked once every rank has mapped them. Linux
-readers retain the mapped storage through training and checkpoint serialization, without a second
-in-memory token table. NFS may retain `.nfs*` inodes until their final mapped reader closes;
-underscore-prefixed scratch is excluded by Trainer's default Hub upload patterns.
-
 Every distributed trainer uses multiple inheritance: a base trainer (`trl.SFTTrainer`,
 `transformers.Trainer`, `trl.GRPOTrainer`, …) plus `DistributedTrainerMixin`
 (`src/trainers/mixins/base.py`), which composes the sub-mixins listed in
@@ -83,12 +71,18 @@ the rest.
 
 Thirteen trainers share this shape: SFT, SMPO, DPO, KTO, offline/online/async environmental GRPO,
 online SDPG, teacher and self distillation, reward, classification, and
-embedding. All support EP, TP, and ETP. CP supports SFT, SMPO, and offline GRPO full
-fine-tuning. PP is
-[not yet available in this release](../parallelism/pipeline-parallelism.md); `_supports_pp` marks
+embedding. All support EP, TP, and ETP. CP supports SFT, SMPO, and offline GRPO full fine-tuning.
+PP is [not yet available in this release](../parallelism/pipeline-parallelism.md); `_supports_pp` marks
 SFT, SMPO, DPO, KTO, reward, classification, and offline GRPO. The per-trainer
 matrix and the reason behind each exclusion are in
 [Trainer Architecture](trainer-architecture.md#trainer-compatibility).
+
+Offline GRPO's frozen-reference scores span four modules: `src/trainers/grpo/reference_cache.py`
+(bounded, filesystem-aware score storage and the memory-mapped token buffers), `reference_logps.py`
+(the ragged payload), `reference_lifecycle.py` (run-start scoring for training and evaluation), and
+the shared `src/trainers/mixins/reference_logps.py` (checkpoint identity and persistence, which
+DPO/KTO precompute also use). Storage, resume and recovery:
+[Offline GRPO → Reference model](../training-methods/grpo/offline-grpo.md#reference-model).
 
 ## Distributed layer
 

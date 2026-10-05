@@ -58,9 +58,9 @@ figures ran on H100; the Megatron-LM figures and the last bullet ran on the same
   without EP, mock data, forced-balanced routing). Megatron-LM on the same 8× B300 in a separate batch-2, GC-off
   sweep: OOM at EP1, where Halo runs 27,707 at 158 GiB peak; 13,932 vs Halo 21,642 at EP2 (246 GB vs
   104 GiB); 14,734 vs 11,856 at EP8 (Megatron ahead there; 104 GB vs 58 GiB). Halo's peaks are
-  `max_memory_allocated` in GiB; Megatron's are the research page's GB. That sweep predates the
-  atomic-free permute at EP8: Halo now runs that EP8 shape at 15,945 tok/s/GPU and 52 GiB (2026-10-05,
-  commit 0e9a51172); Megatron was not re-run.
+  `max_memory_allocated` in GiB; Megatron's are the research page's GB. Halo's side of that sweep ran
+  without the atomic-free permute at EP8; with it, Halo runs that EP8 shape at 15,945 tok/s/GPU and
+  52 GiB (2026-10-05, commit 0e9a51172), a figure Megatron was not re-run against.
 - **Qwen3-30B-A3B, bf16.** transformers' own expert-parallel path: 3,485 tok/s/GPU at 38.6 GB
   (8× H100, seq 2048, `tp_size=8`). Halo EP2 on 8× B300 at seq 4096: 6,898 / 11,343 / 14,536 at
   batch 1 / 2 / 4. NeMo AutoModel reports 12,040 on 8× H100 at EP8, seq 4096 (mock data,
