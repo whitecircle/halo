@@ -18,7 +18,7 @@ Point the default S3 bucket at your own with `HALO_S3_DEFAULT_BUCKET=<your-bucke
 Mount `~/.aws` and pass the repo-root `.env` (it supplies `AWS_DEFAULT_REGION` alongside `WANDB_API_KEY` / `HF_TOKEN` and **must** be passed via `--env-file` — the code does not auto-load it):
 
 ```bash
-SCRATCH=/mnt                     # your large volume — confirm with findmnt / df -h
+SCRATCH=/path/to/large/volume    # confirm its capacity with findmnt / df -h
 docker run --rm --gpus all --env-file .env \
   -v $(pwd):/workspace -v "$SCRATCH:$SCRATCH" -v ~/.aws:/root/.aws -w /workspace \
   halo:blackwell bash -lc "..."

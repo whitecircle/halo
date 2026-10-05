@@ -227,8 +227,8 @@ processes through dill, which pickles a bound method's whole `self`: the model, 
 DeepEP/NCCL process groups (unpicklable, so the map dies mid-pass).
 
 `reject_self_capturing_fn` enforces this at `coordinated_map` / `coordinated_filter`. Passing
-tunables through `fn_kwargs` also puts them in the cache key, which values read off `self` were
-invisible to.
+tunables through `fn_kwargs` also puts them in the cache key, which values read off `self` never
+reach.
 
 Those two helpers carry their own rank ordering and must never be nested in a main-first block — see
 [Filesystem Handling](filesystem-handling.md#coordination-primitives).

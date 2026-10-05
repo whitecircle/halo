@@ -346,9 +346,9 @@ The pinned NCCL wheel installs over newer vLLM bases as well; the engine pin is 
 weight-sync contract and what the image patches and asserts at build, and no newer release is
 validated end to end. Two breaks are known. From 0.28 the engine reads the packed-transfer fields
 (`packed`, `packed_buffer_size_bytes`, `packed_num_buffers`) off the init request, while this client
-sends them with each update, so its first sync fails. From 0.29 the module the gpt-oss plugins
-import their protocol types from (`vllm.entrypoints.openai.engine.protocol`) is gone, so the image
-build fails.
+sends them with each update, so its first sync fails. 0.29 has no
+`vllm.entrypoints.openai.engine.protocol`, the module the gpt-oss plugins import their protocol
+types from, so the image build fails.
 
 ### Config-schema parity
 

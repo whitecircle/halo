@@ -29,8 +29,8 @@ the completion-mask boundaries, and a template override re-renders every turn. `
 recorded as resolved template *text*, so a path and the text it names compare equal.
 
 The checked set is derived from `PreprocessingConfig`: each field declares its own exemption
-(`render_check: False` in the field metadata), so a knob is compared unless it opts out, and
-metadata that predates a knob warns instead. `--mode text`
+(`render_check: False` in the field metadata), so a knob is compared unless it opts out, and a
+knob the metadata does not record warns instead. `--mode text`
 artifacts render no template and skip the render check entirely. A training config setting
 `packing: true` against an unpacked artifact warns — preprocessed rows are never packed at runtime.
 

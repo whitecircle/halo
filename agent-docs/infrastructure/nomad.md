@@ -6,7 +6,7 @@ Unlike [SkyPilot](skypilot.md), Nomad provisions nothing: it places containers o
 
 ## Prerequisites
 
-- **Nomad 1.4+** for the specs' core (the `device` block landed in 0.9, native service discovery in 1.3, Nomad Variables in 1.4). The two-node spec additionally uses group `max_run_duration`, **which needs Nomad 2.0.3+** — delete that line to run it on older clusters.
+- **Nomad 1.4+** for the specs' core (the `device` block needs 0.9+, native service discovery 1.3+, Nomad Variables 1.4+). The two-node spec additionally uses group `max_run_duration`, **which needs Nomad 2.0.3+** — delete that line to run it on older clusters.
 - **The `nomad-device-nvidia` device plugin on every GPU client.** It is not bundled with Nomad; download it from [releases.hashicorp.com/nomad-device-nvidia](https://releases.hashicorp.com/nomad-device-nvidia/), drop the binary in the client's `plugin_dir` (default `<data_dir>/plugins`), and enable it:
 
     ```hcl

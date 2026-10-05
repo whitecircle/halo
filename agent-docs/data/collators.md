@@ -97,10 +97,11 @@ collator = select_data_collator(
 Flags: `padding_free=False`, `packing=False`, `train_on_completions_only=False`,
 `assistant_message_template=None`, `pad_to_multiple_of=None`, `use_context_parallel=False`,
 `train_on_last_assistant_only=False`, `model_config=None`, `per_device_train_batch_size=1`,
-`keeps_packed_rows=False`. The last two exist for pipeline parallelism (a seam — PP
-itself is [not yet available](../parallelism/pipeline-parallelism.md)): a batch above 1 warns that
-packed/flattened rows merge documents, and `keeps_packed_rows` (set when `pp_size > 1`) suppresses
-that warning because a pipeline splits the packed rows back into microbatches.
+`keeps_packed_rows=False`. With `packing` above batch 1 the collator merges the mini-batch's packed
+rows into one row (document isolation and throughput unchanged), and the factory warns: raise
+`max_length` instead when a longer pack is the intent. `keeps_packed_rows` (set when `pp_size > 1`,
+a seam — PP itself is [not yet available](../parallelism/pipeline-parallelism.md)) suppresses that
+warning, because a pipeline keeps the packed rows and splits them into microbatches.
 
 **Pass `model_config`.** It is what feeds `resolve_eos_token_ids(tokenizer, model_config)`; without
 it the collator falls back to the tokenizer's EOS alone and mis-masks any family whose turn
