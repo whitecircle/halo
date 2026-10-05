@@ -1,4 +1,5 @@
-"""CP sign diagnostics use full logical rows, including zero-target shards."""
+"""Offline GRPO's sign diagnostics: the logged keys, and under CP full logical rows, zero-target shards
+included."""
 
 import datetime
 from collections import defaultdict
@@ -10,6 +11,7 @@ import torch
 import torch.distributed as dist
 from torch import nn
 
+from src.trainers.grpo.objective.offline import offline_token_objective
 from src.trainers.grpo.offline import OfflineGRPOTrainer
 from tests.common.gloo import run_gloo_ranks
 
@@ -70,6 +72,28 @@ def _diagnostics_worker(rank, cp_size, training):
 @pytest.mark.parametrize("training", [True, False], ids=["train", "eval"])
 def test_cp_sign_metrics_match_cp1_and_detect_dropped_reduction(cp_size, training):
     run_gloo_ranks(_diagnostics_worker, cp_size, cp_size, training, pg_timeout=datetime.timedelta(seconds=30))
+
+
+def test_drained_metrics_name_the_policy_gradient_term_not_a_reward():
+    trainer = _trainer()
+    logps = torch.tensor([[-0.5, -1.0], [-2.0, -0.25]])
+    advantages = torch.tensor([1.0, -1.0])
+    _, sample_values = offline_token_objective(
+        logps,
+        logps,
+        advantages,
+        policy_gradient_formulation="reinforce",
+        beta=0.1,
+        ref_logps=logps - 0.1,
+        ref_logps_unclamped=logps - 0.1,
+    )
+    trainer._buffer_sign_metrics(sample_values, advantages, torch.ones_like(logps))
+    trainer._drain_sign_metrics("train")
+    metrics = trainer._metrics["train"]
+    assert not any("rewards" in key for key in metrics), sorted(metrics)
+    # The pre-KL advantage-weighted log-prob, log π · A, averaged over each row's tokens.
+    assert metrics["positive/pg_objective_mean"] == [pytest.approx(-0.75)]
+    assert metrics["negative/pg_objective_mean"] == [pytest.approx(1.125)]
 
 
 if __name__ == "__main__":

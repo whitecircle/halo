@@ -443,7 +443,7 @@ class OfflineGRPOTrainer(ChunkedLogprobsCore, OfflineGRPOReferenceLifecycleMixin
     # Buffered per-sample key → logged sign prefixes (unclamped: negative side only, where it binds).
     _SIGN_METRIC_KEYS = {
         "logps": ("positive", "negative"),
-        "rewards": ("positive", "negative"),
+        "pg_objective": ("positive", "negative"),
         "logps_unclamped": ("negative",),
         "kl": ("positive", "negative"),
         "ref_logps": ("positive", "negative"),

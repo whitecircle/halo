@@ -55,8 +55,8 @@ def offline_token_objective(
     """The per-token loss (unmasked and unweighted) plus the per-token diagnostics to buffer.
 
     ``prob_weighted`` L = -(π·A) weights high-prob tokens more; ``reinforce`` L = -(log π·A) is
-    uniform. At ``beta != 0`` the capped k3 KL ``exp(Δ) - Δ - 1`` is added on top of the reward term,
-    so the diagnostics capture the reward term before the KL lands.
+    uniform. At ``beta != 0`` the capped k3 KL ``exp(Δ) - Δ - 1`` is added on top of the policy-gradient
+    term, so the ``pg_objective`` diagnostic (π·A or log π·A) captures that term before the KL lands.
 
     ``clamp_ref_logps`` is fed the detached policy log-probs: the ceiling is ``policy + the clamp``,
     so a grad-carrying policy tensor would make ``ref_clamped - logp`` constant on every clamped
@@ -68,7 +68,7 @@ def offline_token_objective(
     sample_values = {
         "logps": token_logps,
         "logps_unclamped": token_logps_unclamped,
-        "rewards": -per_token_loss,
+        "pg_objective": -per_token_loss,
     }
     if beta != 0.0:
         ref_logps, _ = clamp_ref_logps(ref_logps, token_logps.detach())

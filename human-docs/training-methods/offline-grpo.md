@@ -90,7 +90,7 @@ construction rather than an hour in.
 ## What to watch
 
 The trainer logs per-sample diagnostics split by advantage sign. Three of them tell you whether it is working:
-`positive/logps_mean` (stable or rising), `negative/logps_mean` (falling) and `positive/rewards_mean`.
+`positive/logps_mean` (stable or rising), `negative/logps_mean` (falling) and `positive/pg_objective_mean`.
 
 | Symptom | Cause | Fix |
 | --- | --- | --- |

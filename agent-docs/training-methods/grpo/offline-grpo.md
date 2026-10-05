@@ -166,9 +166,9 @@ CPU: `pytest tests/cpu/grpo -m cpu`, including CP1/CP2/CP4 equivalence of logged
 
 ## What to watch
 
-Per-sample diagnostics split by advantage sign, once per log step: `{positive,negative}/{logps,rewards,kl,ref_logps}_{mean,std,min,max,range}`, plus the pre-clamp `negative/*_unclamped_*`. The `kl` and `ref_logps` families exist only at `kl_beta > 0`, `min_log_prob_restriction` is the live clamp floor, and evaluation prefixes every key with `eval_`.
+Per-sample diagnostics split by advantage sign, once per log step: `{positive,negative}/{logps,pg_objective,kl,ref_logps}_{mean,std,min,max,range}`, plus the pre-clamp `negative/*_unclamped_*`. The `kl` and `ref_logps` families exist only at `kl_beta > 0`, `min_log_prob_restriction` is the live clamp floor, and evaluation prefixes every key with `eval_`.
 
-Read `positive/logps_mean` (stable or rising), `negative/logps_mean` (falling) and `positive/rewards_mean`.
+Read `positive/logps_mean` (stable or rising), `negative/logps_mean` (falling) and `positive/pg_objective_mean`.
 
 | Symptom | Cause | Fix |
 |---|---|---|
