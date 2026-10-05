@@ -75,13 +75,15 @@ def main():
         reject_unsupported_args("SMPO VLM mode", tools_field=args.tools_field)
 
     # --- Model (class follows the checkpoint); padded preference takes the shared padded-workload
-    # backend (SDPA, dropped under live sinks) ---
+    # backend (SDPA, dropped under live sinks and under CP) ---
     model, processing_class, tokenizer, _ = load_model_for_training(
         model_config,
         smpo_config,
         parallelism_config,
         vlm_run=is_vlm,
-        attn_default=padded_workload_attn_implementation(model_config, sinks_reset=dist_args.reset_sinks),
+        attn_default=padded_workload_attn_implementation(
+            model_config, sinks_reset=dist_args.reset_sinks, context_parallel=parallelism_config.is_cp_mode
+        ),
         reset_sinks=dist_args.reset_sinks,
         train_sinks=dist_args.train_sinks,
         weights_source=runtime.model_source,
