@@ -583,7 +583,7 @@ class RolloutManager:
             return
         if not ray.is_initialized():
             # Local-mode fallback for direct library use: on every entry-script path the trainer's
-            # _init_async_state has already initialized Ray with the configured ray_address.
+            # _init_async_components has already initialized Ray with the configured ray_address.
             ray.init(**ray_init_kwargs())
         # Prefer this node; without it a shared cluster scatters this rank's actors cluster-wide.
         # `soft` alone spills only when the node is dead or infeasible: a live but saturated node pins
