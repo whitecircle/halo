@@ -58,7 +58,7 @@ if __name__ == "__main__":
 Rules:
 - End the file with that `__main__` guard, declare no `pytestmark` (the `cpu` marker is applied
   by path) and no `sys.path` bootstrap — `tests/cpu/conventions/test_test_conventions.py` fails the
-  suite over a hand-rolled runner or a printed pass/fail summary.
+  suite over any of those, and over a hand-rolled runner or a printed pass/fail summary.
 - Assert the **behavior/invariant**, not the internal call sequence. A test that mirrors the
   implementation breaks on every refactor and catches nothing.
 - **It must fail when the behavior breaks.** Mentally mutate the function (flip a sign, drop a
@@ -124,7 +124,7 @@ Open `matrix.md` and tick off the trainer × parallelism cells the change touche
 `ep_vs_fsdp` baseline for any new MoE family, and **every required rejection test**. The allowlist
 is `SUPPORTED_AXIS_SETS` — plain DP, each axis alone (EP/ETP/TP/CP/PP), EP+TP, EP+CP, EP+ETP, PP+EP,
 PP+ETP; everything else must raise, including TP+CP, TP+ETP, EP+TP+ETP, ETP+CP, and every PP pairing
-outside the expert axes (PP+TP, PP+CP, PP+EP+TP, PP+EP+ETP). Also: QLoRA+EP/TP, LoRA+TP, and `_supports_cp=False` / `_supports_pp=False` trainers
+outside the expert axes (PP+TP, PP+CP, PP+EP+TP, PP+EP+CP, PP+EP+ETP). Also: QLoRA+EP/TP, LoRA+TP, and `_supports_cp=False` / `_supports_pp=False` trainers
 rejecting `cp_size>1` / `pp_size>1` at init. A support-matrix change isn't done until its rejection
 counterpart exists. **PP is not available in this release** — `pipeline_parallel_size > 1` is
 rejected at config time and `PipelineRuntime` raises, so every PP cell takes a rejection test and

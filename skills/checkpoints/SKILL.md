@@ -42,7 +42,8 @@ before acting. Authoritative doc: `agent-docs/reference/checkpoints.md`.
   moves the reference onto trained weights. The model loads the
   trained weights at construction and the loader skips the re-read; it restores `trainer_state.json`,
   the LR scheduler from `scheduler.pt`, LoRA adapters, wrapper-level trained params, the
-  router-balancing biases, and the **optimizer state from the per-rank shards when the topology
+  router-balancing biases, the frozen reference scores (`reference_logps.pt`: DPO/KTO precompute,
+  offline GRPO KL), and the **optimizer state from the per-rank shards when the topology
   fingerprint matches** (`OptimizerStateFingerprint`); a mismatch warm-restarts instead. Only a
   `use_grouped_gemm: false` run with no EP/ETP/CP/TP reloads weights, via `load_full_state_dict`;
   PP takes its own `_load_pp_stage` path. A model built from anything but the checkpoint (a custom

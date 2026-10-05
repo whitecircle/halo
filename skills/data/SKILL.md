@@ -59,8 +59,8 @@ re-shard. Key flags (read the argparse for the rest): `--mode {chat,text}`, `--p
   `"1"`) coordinate shared-NFS vs per-node-local downloads.
 - Collator routing (`src/data/collators/factory.py`, `select_data_collator`): picks
   completions-only / packing / padding-free (`cu_seq_lens`) from your YAML flags. Mutually-exclusive
-  guards raise: packing+padding_free, CP+padding_free; `train_on_completions_only` needs
-  `assistant_message_template`. Selection matrix in `reference.md`.
+  guards raise: packing+padding_free, CP+padding_free, CP+packing, padding_free off a varlen
+  attention kernel; `train_on_completions_only` needs `assistant_message_template`. Selection matrix in `reference.md`.
 
 ## Sources of truth
 

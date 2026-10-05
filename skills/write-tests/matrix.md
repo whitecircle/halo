@@ -19,7 +19,7 @@ correctness test (loss finite + decreasing over ≥2 steps + cross-rank invarian
 |---|:--:|:--:|:--:|:--:|:--:|
 | `DistributedSFTTrainer` | Yes | Yes | Yes | Yes | Yes |
 | `SmoothMarginPOTrainer` (SMPO) | Yes | Yes | Yes | Yes | Yes |
-| `OfflineGRPOTrainer` | Yes | **No** | Yes | Yes | Yes (any `kl_beta`) |
+| `OfflineGRPOTrainer` | Yes | Yes (full fine-tuning; adapters rejected) | Yes | Yes | Yes (any `kl_beta`) |
 | `DistributedGRPOTrainer` (online) | Yes | **No** | Yes | Yes | **No** |
 | `DistributedDPOTrainer` | Yes | **No** | Yes | Yes | Yes (precompute-only) |
 | `DistributedKTOTrainer` | Yes | **No** | Yes | Yes | Yes (`apo_zero_unpaired`, precompute-only) |
@@ -33,7 +33,8 @@ correctness test (loss finite + decreasing over ≥2 steps + cross-rank invarian
 
 `_supports_cp` / `_supports_pp` (`src/trainers/mixins/base.py`, both default `False`) are the class
 attributes that drive the rejections. CP is incompatible with any trainer using `logits_to_keep`,
-global log-prob sums, full-sequence pooling, or dual models; PP additionally rejects PEFT/LoRA, a
+global log-prob sums, full-sequence pooling, dual models, or a separate-length teacher or rollout
+sequence; PP additionally rejects PEFT/LoRA, a
 live `ref_model`, `activation_offloading` and reentrant GC at trainer construction. The PP column
 records each class's declared `_supports_pp`; while PP is unavailable it drives no runnable cell,
 so its **Yes** entries carry no correctness-test obligation.
@@ -67,8 +68,8 @@ enough), not a correctness test.
 | TP + CP (`tp_size>1` AND `cp_size>1`) | raises — DTensor mesh conflicts with CP groups |
 | ETP + CP (`expert_tp_size>1` AND `cp_size>1`) | raises — ETP sub-EP groups break CP seq reconstruction |
 | Any `pipeline_parallel_size > 1` | raises at config time — the schedule engine is not shipped in this release (`parallelism_config_from_args`); constructing `PipelineRuntime` raises `NotImplementedError` |
-| PP + TP, PP + CP (`pp_size>1` with either) | raises — never exercised multi-node (TP); CP-scaled gradients with no error (CP) |
-| PP + EP + TP, PP + EP + ETP (all three `>1`) | raises — outside the allowlist; the expert-TP reduce cannot be deferred past the combine |
+| PP + TP, PP + CP (`pp_size>1` with either) | raises — untested on real multi-node hardware (TP); CP-scaled gradients with no error (CP) |
+| PP + EP + TP, PP + EP + CP, PP + EP + ETP (all three `>1`) | raises — outside the allowlist; FSDP mesh conflict (TP), CP-scaled expert gradients (CP), the expert-TP reduce cannot be deferred past the combine (ETP) |
 | QLoRA + EP | raises |
 | LoRA/PEFT + TP (`tp_size>1`), native EP expert LoRA included | raises at trainer construction — `_validate_lora_tp_compatibility` |
 | Multi-group >2-rank EP on one NVLink domain (`ep_size>2` with `nvlink_domain_size > ep_group_size`) | fails fast (DeepEP combine race) |

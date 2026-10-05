@@ -50,8 +50,10 @@ additionally needs `ep_size` in the index metadata, not just the marker.
 
 All three restore `trainer_state.json`, the LR scheduler from `scheduler.pt` (written even under
 `save_only_model`), LoRA adapters (`restore_adapters`, `src/distributed/checkpoint/peft.py`),
-wrapper-level trained params (`_restore_extra_trained_params`) and the router-balancing biases
-(`_restore_router_balancing_biases`, `src/trainers/mixins/checkpointing.py`). Optimizer state resumes from the per-rank shards when
+wrapper-level trained params (`_restore_extra_trained_params`), the router-balancing biases
+(`_restore_router_balancing_biases`, `src/trainers/mixins/checkpointing.py`) and the frozen reference
+scores in `reference_logps.pt` (DPO/KTO precompute, offline GRPO KL; `src/trainers/mixins/reference_logps.py`,
+which validates token digests and settings before attaching them). Optimizer state resumes from the per-rank shards when
 `OptimizerStateFingerprint` matches; a mismatch warm-restarts (under PP it raises instead), and
 shards whose `optimizer_meta.pt` carries no fingerprint at all raise — delete every
 `optimizer_shard_*.pt` + `optimizer_meta.pt` to accept a warm restart. A matched restore that fails
@@ -206,7 +208,8 @@ and `convert_to_bf16.py` call it and print the returned actions; `copy_training_
   keys per layer, gated on layers that actually carry routed experts. A model-global filter would drop
   the genuinely-dense early layers (GLM-4 MoE Lite, Mistral4 `first_k_dense_replace`) → a corrupt CP-only
   checkpoint.
-- **TP attention head divisibility** — `parallelize_attention.py` raises before sharding when
+- **TP attention head divisibility** — `validate_tp_head_divisibility` (`parallelize_attention.py`)
+  raises from `config.json` before any weight loads, and again before sharding, when
   `num_attention_heads` (or non-MLA GQA `num_key_value_heads`) is not divisible by `tp_size`;
   `ColwiseParallel` would otherwise split Q/K/V inside a head and silently corrupt attention. MLA
   (GLM4 latent attn) shards by query head, so the KV-head check is skipped there.

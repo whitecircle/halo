@@ -15,7 +15,9 @@ Authoritative: `agent-docs/data/dataset-formats.md`. Messages are OpenAI ChatML
   (`agent-docs/training-methods/sft.md#vision-language-models`).
 - **DPO / SMPO** — `prompt`, `chosen`, `rejected`, all `List[Dict]`.
 - **Offline GRPO** — `prompt: List[Dict]`, `completions: List[List[Dict]]`, `rewards: List[float]`;
-  `len(rewards) == len(completions)`, variable group size.
+  `len(rewards) == len(completions)`, variable group size. A full-fine-tuning KL run scores its own
+  reference and needs a finite, unsharded dataset: pre-sharded KL inputs and a supplied grouped
+  `ref_per_token_logps` column are refused (`agent-docs/training-methods/grpo/offline-grpo.md#reference-model`).
 - **Async GRPO with environments** — `prompt`: the task as `str` **or** a ChatML list, which is
   reduced to its last `user` turn (a conversation with no user turn fails the batch on every rank);
   the environment builds the conversation itself. `answer: Any` (expected) is required only where

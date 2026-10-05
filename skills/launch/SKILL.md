@@ -51,7 +51,7 @@ make train CONFIG=examples/sft/qwen3/qwen3-4b-ultrachat.yaml \
 # Tests
 make seed-hf-cache                           # Hub configs + tokenizers the CPU tier reads (no weights)
 make test-cpu                                # pytest CPU tier (no GPU, runs in image)
-make test-gpu-core                           # core GPU tier (PR gate)
+make test-gpu-core                           # core GPU tier (pre-merge, GPU changes; CI runs it on dispatch)
 make test-gpu-full                           # full GPU tier (heavy, many-GPU; run by hand)
 
 # Benchmarks
@@ -188,8 +188,8 @@ docker run -d --rm --name <job> \
 ```
 
 Both mounts are load-bearing: without `-v "$D:$D"` the log is written into the
-container's ephemeral filesystem and destroyed by `--rm`, and without the HF cache
-~60 CPU tests **hard-fail** (not skip) the moment the Hub is unreachable.
+container's ephemeral filesystem and destroyed by `--rm`, and without the HF cache the CPU
+tests that call `from_pretrained` directly **hard-fail** (not skip) the moment the Hub is unreachable.
 
 ## 3. Image selection — by GPU architecture
 

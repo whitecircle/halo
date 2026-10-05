@@ -21,6 +21,7 @@ changes.
 | `src/trainers/sft.py` | `agent-docs/training-methods/sft.md`, `agent-docs/training-methods/pretraining.md` |
 | `src/trainers/preference/` (DPO, SMPO, KTO) | `agent-docs/training-methods/preference/dpo.md`, `agent-docs/training-methods/preference/smpo.md`, `agent-docs/training-methods/preference/kto.md` |
 | `src/trainers/grpo/` (online, offline, environmental) | `agent-docs/training-methods/grpo/{README,online-grpo,offline-grpo}.md`, `agent-docs/training-methods/grpo/async-grpo/*.md` |
+| `src/trainers/grpo/reference_lifecycle.py`, `reference_cache.py`, `reference_logps.py` (offline GRPO's run-start reference scores, their bounded cache and the `reference_logps.pt` sidecar) | `agent-docs/training-methods/grpo/offline-grpo.md` (Reference model), `agent-docs/reference/checkpoints.md` |
 | `src/rewards/` (reward terms, judge, served reward model, composer, TRL adapters, RLVR graders, answer matching) | `agent-docs/training-methods/grpo/rewards.md`, `agent-docs/training-methods/grpo/online-grpo.md`, `agent-docs/training-methods/grpo/environments/README.md`, `agent-docs/reference/configuration-reference.md` |
 | `src/trainers/reward/` | `agent-docs/training-methods/preference/reward-modeling.md`, `agent-docs/training-methods/classification.md` |
 | `src/trainers/distillation/` | `agent-docs/training-methods/distillation/{README,teacher-distillation,self-distillation,online-sdpg}.md` |

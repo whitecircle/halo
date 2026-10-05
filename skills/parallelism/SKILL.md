@@ -56,8 +56,8 @@ describes a validator or contract, never a launchable topology
   `data_parallel_size = stage_world_size // max(tp_size, cp_size, expert_tp_size)`;
   if that max is 1, `dp_size = stage_world_size`. **EP alone never reduces DP** (EP is
   orthogonal to DP). Only TP, CP, ETP, and PP reduce distinct-batch count.
-- Locality unit is `nvlink_domain_size` (auto = `gpus_per_node`; set it only on
-  NVL72/MNNVL). "Node-local" below means "within one NVLink domain".
+- Locality unit is `nvlink_domain_size` (auto = `NVLINK_DOMAIN_SIZE`, else `gpus_per_node`; set
+  it only on NVL72/MNNVL). "Node-local" below means "within one NVLink domain".
 - `ep_scope` defaults to `"auto"` in both the dataclass and on the CLI/YAML
   (`src/args/distributed_args.py`). `"auto"` resolves to `node` if
   `ep_group_size <= nvlink_domain_size`, else `global`.
@@ -117,7 +117,9 @@ describes a validator or contract, never a launchable topology
   or `ep_group_size`) — "must divide" / "cannot exceed domain" raises.
 - **TP with indivisible attention heads** (`num_attention_heads % tp_size != 0`, or
   non-MLA GQA `num_key_value_heads % tp_size != 0`) — a split inside a head corrupts
-  attention; `parallelize_attention.py` raises.
+  attention; `validate_against_model_config` raises from `config.json` before any weight is read.
+  The same gate rejects `num_experts % ep_size != 0`, an `expert_tp_size` not dividing the expert
+  FFN width, and a declared per-rank token budget past DeepEP's dispatch ceiling (matrix.md).
 - **HSDP with TP / ETP / EP** — `_validate_hsdp` rejects all three; **PP+HSDP** is
   refused by `_validate_pipeline_parallel`. HSDP wraps the standard DP path only:
   **pure DP or CP**. (EP already shards over the EP group; PP cannot restrict a 2-D mesh
