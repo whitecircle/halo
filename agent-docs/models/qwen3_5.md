@@ -108,7 +108,7 @@ Examples under `examples/sft/qwen3_5/`:
 - `qwen3.5-122b-a10b-ep.yaml` scales the same shape to 122B-A10B at EP=8 single-node, or EP=16 with `ep_scope: global` across two Hopper nodes; it keeps the experts bf16 (`fp32_experts` off), since fp32 expert masters fit the 35B shape but OOM at 122B.
 - VLM SFT on Qwen3.5-9B: `qwen3.5-9b-vl-ocr-olmocr.yaml`, `qwen3.5-9b-vl-docvqa.yaml`.
 
-Online GRPO smoke: `examples/grpo/online/qwen3_5/online-grpo-qwen3.6-35b-a3b-smoke.yaml`. Async GRPO with Environments: `examples/grpo/environmental/qwen3_5/vllm/` plus the `sglang/` ep1 siblings; both pinned engines read the fused hub expert pair the gather emits, so either `rollout_backend` takes the weight sync ([Rollout Servers](../infrastructure/rollout-servers.md#which-families-each-engine-serves)).
+Online GRPO smoke: `examples/grpo/online/qwen3_5/online-grpo-qwen3.6-35b-a3b-smoke.yaml`. Async GRPO with Environments: `examples/grpo/environmental/qwen3_5/vllm/` plus the `sglang/` ep1 siblings; both pinned engines read the fused expert pair the gather emits, so either `rollout_backend` takes the weight sync ([Rollout Servers](../infrastructure/rollout-servers.md#which-families-each-engine-serves)).
 
 Chat templates: the shipped SFT configs pin `jinja-templates/qwen3/qwen3-multiturn.jinja` (ultrachat is multi-turn). `jinja-templates/qwen3/qwen3.5-native.jinja` is the verbatim upstream `Qwen/Qwen3.5-35B-A3B` template — system messages, XML-form tools, thinking, and the VLM vision placeholders — for runs that must match the served render exactly (tool-call `arguments` must be a parsed mapping). Qwen3's own upstream template ships as `qwen3/qwen3-native.jinja`.
 

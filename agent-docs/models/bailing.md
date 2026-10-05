@@ -15,7 +15,7 @@ The shipped config trains `inclusionAI/Ling-mini-2.0` (`model_type: bailing_moe`
 
 `BailingMoeV3ForCausalLM` (`model_type: bailing_hybrid`) — `inclusionAI/Ling-3.0-tiny` (7.9B, 128 experts) and `inclusionAI/Ling-3.0-flash` (~122B, 512 experts).
 
-The MoE block is unchanged from V2 (same per-expert `gate_proj`/`up_proj`/`down_proj` modules, same gate arithmetic: sigmoid, `expert_bias` on selection only, group-limited top-k, renormalization, `routed_scaling_factor`), so `EPBailingMoELayer` claims `BailingMoeV3SparseMoeBlock` too and everything above applies. The V3 block returns `(hidden, router_logits)` where V2 returns a tensor; its decoder layer tests the return for a tuple, so the wrapper's bare tensor is accepted.
+The MoE block matches V2's (same per-expert `gate_proj`/`up_proj`/`down_proj` modules, same gate arithmetic: sigmoid, `expert_bias` on selection only, group-limited top-k, renormalization, `routed_scaling_factor`), so `EPBailingMoELayer` claims `BailingMoeV3SparseMoeBlock` too and everything above applies. The V3 block returns `(hidden, router_logits)` where V2 returns a tensor; its decoder layer tests the return for a tuple, so the wrapper's bare tensor is accepted.
 
 Attention is what differs: layers alternate in groups of `layer_group_size`, with most layers `BailingMoeV3KimiDeltaAttention` (KDA linear attention through `fla`) and the rest `BailingMoeV3MultiLatentAttention` (MLA).
 

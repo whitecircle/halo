@@ -84,7 +84,7 @@ torchrun --nproc_per_node=2 \                                         # GPU, sta
 ```
 
 Never hardcode `--master_port` in a test — the launcher allocates a free one per run
-(`tests/common/ports.py::free_port`); fixed ports raced between back-to-back tests and CI shards.
+(`tests/common/ports.py::free_port`); a fixed port races back-to-back tests and CI shards.
 A CPU test ends in `raise SystemExit(pytest.main([__file__, "-v"]))`, a GPU test in the `gpu_test_main`
 entry (`tests/common/harness.py`) that owns its lifecycle; neither declares `pytestmark` (the `cpu`
 marker is applied by path) nor bootstraps `sys.path` (the root `tests/conftest.py` owns the import
@@ -103,19 +103,22 @@ src/
 ├── trainers/            # all extend DistributedTrainerMixin (mixins/base.py — lifecycle/accelerator/optimizer
 │   │                    #   spine; mixins/ also holds checkpointing, dataloader, ep_introspection, grad_sync,
 │   │                    #   token_metrics, validation, pipeline (composed by the base; per-trainer mixins like
-│   │                    #   StoredMetrics are mixed in individually) + pp_gates, loss_masks, grad_clip functions)
+│   │                    #   StoredMetrics are mixed in individually; reference_logps holds the frozen-reference
+│   │                    #   score lifecycle DPO/KTO and offline GRPO share) + pp_gates, loss_masks, grad_clip functions)
 │   ├── sft.py preference/ (DPO,SMPO,KTO)  reward/ (bradley_terry, classification)
 │   ├── embedding/       # SBERT trainer + sentence_transformers_compat.py (ST patches, preloaded-model shim)
-│   ├── grpo/            # online, offline, environmental, early_stop + world_metrics (shared) + objective/ mixins/
-│   │                    #   subpackages and rollout/ (weight_sync, weight_sync_clients, async_rollouts,
-│   │                    #   routing_replay, trajectory_tokenize, trajectory_spans, rollout_metrics, completions_logging)
+│   ├── grpo/            # online, offline, environmental, early_stop + world_metrics (shared),
+│   │                    #   reference_cache/reference_lifecycle/reference_logps (offline GRPO's frozen-reference
+│   │                    #   scores) + objective/ mixins/ subpackages and rollout/ (weight_sync, weight_sync_clients,
+│   │                    #   async_rollouts, routing_replay, trajectory_tokenize, trajectory_spans, rollout_metrics,
+│   │                    #   completions_logging)
 │   └── distillation/    # teacher_distillation, self_distillation, sdpg (online); losses.py = the shared
 │                        #   objectives + SDPG schedule, teacher_losses.py = the eight off-policy losses
 ├── optimizers/          # AdamWBF16 (SR), Muon, FlashAdamW (each module owns its build_*; registry.py names the `optim:`-selectable
 │                        #   muon/flash_adamw, AdamWBF16 is a create_optimizer branch)
 ├── kernels/             # grouped_gemm (precision dispatch) over the grouped_mm_autograd primitive,
-│                        #   fused_glu, moe_permute (atomic-free token permute + un-permute), histogram, liger/,
-│                        #   lowp/(quantization, linear, deepgemm,
+│                        #   fused_glu, moe_permute (atomic-free token permute + un-permute), histogram,
+│                        #   logprobs (chunked fp32 log-probs), liger/, lowp/(quantization, linear, deepgemm,
 │                        #   mixed_precision — the opt-in fp8/fp4 stack)
 ├── models/              # sharding-agnostic model side: structure.py (module-tree introspection),
 │                        #   moe_balancing.py (mode resolve + router/EP-family registries the layer classes
@@ -258,10 +261,10 @@ Sources: `s3://`, HF Hub, or local (`src/data/sources/`). Offline tokenize/pack/
 Terse rules; depth lives in the linked docs.
 
 - **FSDP2** (`fully_shard`, `reshard_after_forward=False`) for all torchrun DP. EP modules are FSDP-ignored **except** when experts are truly replicated (`ep_group_size==1`): `fsdp_shard_ep1_experts` (default `True`) shards them so their reduce-scatter is the sole grad sync (frees DP-growing memory, grad-equivalent, RL-safe). Anything that reads parameters outside a forward — the optimizer build, every checkpoint writer, `save_model`, RL weight sync — calls `reshard_fsdp2_modules` first: a forward leaves transient **unsharded** params registered while the optimizer steps the shards, so reading them ships state one optimizer step stale (and mis-routes the PEFT save, whose DTensor probe then sees plain tensors). Accelerate FSDP v1 has a known corruption bug with SHARD_GRAD_OP/FULL_SHARD — prefer FSDP v2 or DDP.
-- **EP expert export** goes through each family's `gather_expert_state_dict` (gathered saves, engine weight sync, `--merge_expert_lora_on_save` all route here). Per-expert un-fused hub layouts come from `_PER_EXPERT_UNFUSED_KEYS` auto-split (declared by GLM4/LFM2; Laguna inherits GLM4's) or the shared `_gather_individual_glu_state_dict` helper (Bailing/Qwen3); only genuinely distinct layouts override the gather with their own logic (GptOss re-interleave, Gemma4 prefix-strip; Zaya, Cohere2, glm5_next and step3p7 use the base fused gather — Zaya's hub layout is fused-native, while Cohere2's/glm5_next's per-expert and step3p7's per-layer-stacked hub spellings are restored by transformers' save-side converter). `agent-docs/reference/checkpoints.md`.
+- **EP expert export** goes through each family's `gather_expert_state_dict` (gathered saves, engine weight sync, `--merge_expert_lora_on_save` all route here). Per-expert un-fused hub layouts come from `_PER_EXPERT_UNFUSED_KEYS` auto-split (declared by GLM4/LFM2; Laguna inherits GLM4's) or the shared `_gather_individual_glu_state_dict` helper (Bailing/Qwen3); only genuinely distinct layouts override the gather with their own logic (GptOss re-interleave, Gemma4 prefix-strip). Every other family gathers the base fused pair: Zaya's hub layout is fused-native; Qwen3.5/3.6's, DeepSeek-V4's, Cohere2's and glm5_next's gathered saves keep it (`from_pretrained` reads it back), and their per-expert hub spellings return only through `unfuse_moe_experts.py`, since transformers' save-side revert runs on a wrapper-less `save_pretrained`, not on the gathered save; step3p7's gathered save runs that revert itself into its per-layer-stacked hub namespace (`_EXPORTS_HUB_NAMESPACE`). `agent-docs/reference/checkpoints.md`.
 - **Attention:** production auto-selects **FA4** on Blackwell (`flash_attn.cute`; 3.6–3.9× the FA2 attention kernel, smaller end-to-end), FA2+FA3 on Hopper (both source-built; the FA2 build swaps its split-K kernels for the throw-stubs in `docker/training/flash_attn_split_stubs_hopper.cpp`). **GptOss sinks** (`src/models/patches/gpt_oss_sinks.py`, one `SinksPolicy` per run): SFT neutralizes them (frozen `dtype.min`) so FA2/SDPA match eager; on-policy RL (`reset_sinks: false`) keeps them live and frozen, so `validate_attn_implementation` rejects FA2/SDPA and only sink-carrying impls run; `train_sinks: true` (SFT, full fine-tuning, FA4 or eager) trains them — FA4's fused backward emits no sink gradient, so the loader routes grad-requiring sinks through an exact sink-less + `sigmoid(lse - sink)` rescale. `agent-docs/optimization/flash-attention.md`.
 - **EP requires DeepEP V2** (`deep_ep.ElasticBuffer` over NCCL Gin; no NCCL fallback; hidden padded to ×256). Do not install `nvidia-nvshmem-cu12`. One arena per forward: the first MoE layer's all-reduced MAX capacity (aligned to 256) is cached and reused by every later layer (`HALO_EP_CAPACITY_DEDUP`, default on), and a layer that dispatches past it raises instead of under-sizing the wire buffer. A pre-hook on the outermost module the loop calls opens each scope — re-register it whenever a wrapper lands above that module (a `PeftModel` reaches the model it wraps through `.forward()`, running no pre-hook), and call `bump_forward_generation()` from any path that enters the backbone directly (TRL's chunked log-probs). `agent-docs/infrastructure/deepep.md`.
-- **Grouped GEMM** (`torch.nn.functional.grouped_mm`) auto-enabled for MoE expert compute on SM90+ (`use_grouped_gemm: false` to disable). `agent-docs/optimization/grouped-gemm.md`.
+- **Grouped GEMM** (`torch.nn.functional.grouped_mm`) auto-enabled for MoE expert compute on SM90+ (`use_grouped_gemm: false` to disable). Its token permute is atomic-free at every `top_k`/`ep_size` (`src/kernels/moe_permute.py`); only the per-expert loop scatters with a bf16 atomic `index_add_`. `agent-docs/optimization/grouped-gemm.md`.
 - **AdamWBF16** auto-enabled when `bf16: true` on FSDP/EP/TP (6 B/param): stochastic rounding on the weight write **and** `exp_avg_sq` (nearest rounding biases the 2nd moment by tens of percent). Not auto-enabled under DDP (outside the validated SR matrix; `bf16_optimizer=True` opts in). `fp32_grad_reduce: true` reduces grads in fp32 at bf16 storage (~2.2× tighter at world=8). `agent-docs/optimization/bf16-optimizer.md`.
 - **fp32 matmul precision** pinned to `highest` at model load (`configure_float32_matmul_precision`, knob `HALO_FP32_MATMUL_PRECISION`; Dockerfile also sets `TORCH_ALLOW_TF32_CUBLAS_OVERRIDE=0`). The NGC image defaults fp32 matmuls to TF32, whose 10-bit mantissa collapses adjacent long-context RoPE token positions past 2048 (the large `inv_freq @ position_ids`) — corrupting every RoPE model beyond 2048 tokens. bf16 matmuls (the bulk of a bf16 run) are unaffected. `agent-docs/reference/configuration-reference.md`.
 - **Mixed precision** (`lowp_precision: bf16|fp8|fp4|mxfp4`): bf16/fp32 masters + low-precision matmul; **bf16 is the production default** (no fp4 MMA win at these MoE shapes). Simulated backend = correct numerics + QAT oracle, not faster; native DeepGEMM is opt-in (`HALO_DEEPGEMM_NATIVE=1`) and net-slower here. `quantize_to_lowp.py` exports mxfp8/mxfp4/nvfp4. `agent-docs/optimization/low-precision-moe-kernels.md`.

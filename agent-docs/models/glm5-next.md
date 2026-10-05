@@ -33,7 +33,7 @@ HF_HOME=$D/hf python scripts/before_training/convert_glm5_bf16.py \
 
 Budget ~330 GB download cache + ~650 GB output; the conversion streams shard-by-shard, so host RAM stays bounded by `--max_shard_size`. Unquantized tensors keep their stored dtype, and the emitted `config.json` drops its `quantization_config`.
 
-The family's fp32 pins are transformers' `_keep_in_fp32_modules_strict` (`e_score_correction_bias`, `conv1d`, `dt_bias`, `A_log`); the `hc_*` tensors are not among them. Every training loader casts the pinned parameters to the run dtype ([Load precision](README.md#load-precision)) while the `e_score_correction_bias` buffer stays fp32, and every toolkit save keeps each at its trained dtype (`save_dtype_caster`).
+The family's fp32 pins are transformers' `_keep_in_fp32_modules_strict` (`e_score_correction_bias`, `conv1d`, `dt_bias`, `A_log`); the `hc_*` tensors are not among them. Every training loader casts the pinned parameters to the run dtype unless `fp32_non_ep_params` keeps them as fp32 masters ([Load precision](README.md#load-precision)), while the `e_score_correction_bias` buffer stays fp32, and every toolkit save keeps each at its trained dtype (`save_dtype_caster`).
 
 ## Model loading
 

@@ -60,7 +60,7 @@ Both are registry-gated, and Laguna is in neither registry:
 - **CP** needs a Ulysses attention wrapper. `LagunaAttention` is absent from `CP_SUPPORTED_ATTENTION_CLASSES` — the registered wrappers in `src/distributed/context_parallel/layers/` — so CP, and therefore EP+CP, is rejected.
 - **TP** on a MoE model takes the selective attention-only path (HF's `tp_plan="auto"` mis-shards expert weights), gated on `TP_SHARDABLE_ATTENTION_CLASSES` (`src/distributed/tensor_parallel/module_types.py`). `LagunaAttention` is not listed, so there is nothing for the DTensor path to shard.
 
-ETP is mechanically reachable (the experts use the shared fused-GLU storage, so `_init_fused_glu_params` handles `expert_tp_size > 1`) but has not been validated on Laguna.
+ETP is mechanically reachable (the experts use the shared fused-GLU storage, so `_init_fused_glu_params` handles `expert_tp_size > 1`); its only GPU coverage is the tiny-model LoRA row in footnote ².
 
 ## Configs
 

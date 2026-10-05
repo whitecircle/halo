@@ -9,6 +9,6 @@ Start with the guides below, or jump to [Training Methods](training-methods/READ
 - **[Installation](getting-started/installation.md)** — The prebuilt Blackwell/Hopper image is the supported path — everything, `make install` included, runs inside it.
 - **[Quickstart](getting-started/quickstart.md)** — First SFT run through multi-turn RL, with LoRA, the parallelism flags, and dataset sources.
 - **[Configuration Guide](getting-started/configuration.md)** — The YAML system, toolkit defaults (BF16, Liger), CLI overrides, and accelerate vs torchrun launchers.
-- **[Choosing a Training Method](getting-started/choosing-a-method.md)** — A decision flowchart and comparison table — match your data to a method, and see which trainers take CP.
+- **[Choosing a Training Method](getting-started/choosing-a-method.md)** — A comparison table that matches your data to a method, and which trainers take CP.
 
 [GPU Training Theory](reference/gpu-training-theory.md) covers the roofline and training-step bottlenecks behind every optimization lever — read it before tuning. For the design rationale and how the toolkit relates to TRL, Accelerate, Unsloth, Axolotl, MS-SWIFT, veRL, and Megatron-LM, see [Why this framework](reference/why-this-framework.md).

@@ -6,7 +6,7 @@
 |---|:--:|:--:|:--:|:--:|:--:|:--:|:--:|
 | Zaya (Zyphra/ZAYA1) | Yes | **No** | Yes | **No** | **No** | **No** | Yes |
 
-40 `ZayaDecoderLayer`, each one CCA attention plus a `ZayaSparseMoeBlock` — every layer is MoE. `layer_types` picks `hybrid` or `hybrid_sliding` per layer, which selects the mask, the per-layer `sliding_window` kernel argument, and the RoPE parameters. `rope_parameters` is a per-layer-type dict; a flat legacy spelling is stored as-is and dies at model build with a bare `KeyError`.
+40 `ZayaDecoderLayer`, each one CCA attention plus a `ZayaSparseMoeBlock` — every layer is MoE. `layer_types` picks `hybrid` or `hybrid_sliding` per layer, which selects the mask, the per-layer `sliding_window` kernel argument, and the RoPE parameters. `rope_parameters` is a per-layer-type dict; a flat spelling is stored as-is and dies at model build with a bare `KeyError`.
 
 `num_experts_per_tok` must be `1` — the config raises otherwise, as it does for a `hybrid_sliding` entry with no `sliding_window`. Config defaults: hidden 2048, `moe_intermediate_size` 2048, `router_hidden_size` 256, vocab 262272, 8 attention heads / 2 KV heads, head_dim 128, `cca_time0` = `cca_time1` = 2, `tie_word_embeddings: true`.
 
@@ -29,7 +29,7 @@ Hub `Zyphra/ZAYA1-8B` `main` is the native format: 40 layers, fused `model.layer
 - **Discard slot**: the router emits `num_experts + 1` logits, the extra one a learned "send to nowhere" bucket. `ZayaRouter.forward` masks tokens routed to it (weight → 0, index → 0) before returning. Under EP (`ep_size > 1`) the wrapper dispatches those zero-weight picks as `-1`, DeepEP's "no expert", so they never ride the all-to-all to expert 0's rank; at ep1 nothing is dispatched and the upstream masking stands.
 - Topology: top-1 only, enforced by the config.
 - Storage: fused `gate_up_proj [E, H, 2M]` and `down_proj [E, M, H]` in matmul convention (the checkpoint is `[E, 2M, H]` / `[E, H, M]`, transposed on load). SwiGLU, Grouped GEMM compute.
-- Loading and saving both use the base fused path: lazy safetensors loading is supported (each rank reads only its expert slice), and the gathered save emits the two native fused tensors per layer, which `from_pretrained` reads back. A legacy per-expert checkpoint is still declined by the loader's structural probe.
+- Loading and saving both use the base fused path: lazy safetensors loading is supported (each rank reads only its expert slice), and the gathered save emits the two native fused tensors per layer, which `from_pretrained` reads back. The loader's structural probe declines a per-expert checkpoint in the `-legacy` layout.
 - Routing replay is unsupported (`_supports_routing_replay = False`) — the EDA state makes a replayed forward non-reproducible.
 
 vLLM 0.26.0 ships no **native** Zaya implementation. An exported checkpoint still resolves through vLLM's transformers backend, whose generation quality for this family the toolkit does not validate.

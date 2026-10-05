@@ -29,6 +29,7 @@ Standard transformer with GQA, RoPE, SwiGLU MLP. Stock `Qwen3ForCausalLM`, no pa
 | `examples/sft/qwen3/qwen3-4b-ultrachat-qlora.yaml` | SFT (QLoRA) | `Qwen/Qwen3-4B-Instruct-2507` |
 | `examples/embedding/qwen3/embedding-qwen3-4b-nq.yaml` | Embedding | `Qwen/Qwen3-Embedding-4B` |
 | `examples/grpo/online/qwen3/online-grpo-qwen3-{4b,8b}-smoke.yaml` | Online GRPO smoke | `Qwen/Qwen3-4B-Instruct-2507`, `Qwen/Qwen3-8B` |
+| `examples/grpo/online/qwen3/online-grpo-qwen3-8b-rlrr-math.yaml` | Online GRPO (RLVR + RLRR) | `Qwen/Qwen3-8B` |
 | `examples/grpo/{online/rlvr-online-grpo,environmental/environmental-grpo}-template.yaml` | RLVR / env GRPO templates | `Qwen/Qwen3-4B-Instruct-2507` |
 
 The per-method canonical examples (DPO, SMPO, KTO, reward, classification, distillation, GRPO task configs) are built on Qwen3.5/3.6 — see [Qwen3.5 / Qwen3.6](qwen3_5.md).
