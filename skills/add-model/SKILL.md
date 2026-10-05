@@ -66,6 +66,7 @@ All execution (tests, loading) runs **inside the Docker image** — tools are on
 prefix); see `CLAUDE.md`.
 
 ## Sources of truth
+
 `agent-docs/models/adding-a-model.md` + `checklist.md` are the guide. The code is the **ultimate** authority:
 `src/distributed/expert_parallel/` (`base_layer.py`, `patching.py`, the existing `layers/*.py`),
 `src/kernels/liger/families.py`, and the HF `modeling_*.py` you are wrapping are what actually

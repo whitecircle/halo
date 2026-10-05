@@ -26,6 +26,7 @@ full reference matrix with per-row source citations is in **[matrix.md](matrix.m
 Read it before giving a verdict on any non-trivial combo.
 
 ## PP is not available in this release
+
 The verdict on any `pipeline_parallel_size > 1` request is **not runnable — shard with EP/TP/CP**.
 The schedule engine is not shipped: `parallelism_config_from_args` (`src/training/parallelism_args.py`)
 rejects `pipeline_parallel_size > 1` at config time, before any rank math, and `PipelineRuntime`
@@ -35,6 +36,7 @@ describes a validator or contract, never a launchable topology
 (`agent-docs/parallelism/pipeline-parallelism.md`).
 
 ## Source of truth
+
 - `src/distributed/parallelism_config.py` — the dataclass + `__post_init__` →
   `_validate()` sub-validators. Every config-time `raise` lives here.
 - `src/trainers/mixins/ep_introspection.py` `_setup_ep_gradient_checkpointing` —
@@ -45,6 +47,7 @@ describes a validator or contract, never a launchable topology
   `agent-docs/parallelism/{data-parallelism,multi-node,data-loading}.md`.
 
 ## Key facts (from the code)
+
 - **The allowlist decides.** `SUPPORTED_AXIS_SETS` is checked first, before any rank
   math: plain DP, each axis alone (**EP, ETP, TP, CP, PP**), and **EP+TP, EP+CP,
   EP+ETP, PP+EP, PP+ETP**. Anything else is rejected with the mechanism from
@@ -65,6 +68,7 @@ describes a validator or contract, never a launchable topology
   `--pipeline_schedule` (`1f1b` | `gpipe`), `--pipeline_split`.
 
 ## How to pick a mode
+
 1. **Dense (non-MoE) model?** EP/ETP do nothing — use **TP** (memory/large hidden)
    or **CP** (long seq), else plain FSDP2 DDP (`dp_size = world_size`).
 2. **MoE model?** Start with **EP** (orthogonal to DP, keeps full DP). For finer
@@ -82,6 +86,7 @@ describes a validator or contract, never a launchable topology
    global batch is what you intend.
 
 ## Hard node-local / divisibility constraints
+
 - TP, CP, ETP must be **NVLink-local**: each must divide `nvlink_domain_size` and
   be `<= nvlink_domain_size`.
 - `ep_group_size` must divide its scope and not exceed it: `nvlink_domain_size` for
@@ -95,6 +100,7 @@ describes a validator or contract, never a launchable topology
 - `world_size % gpus_per_node == 0` and `world_size % nvlink_domain_size == 0`.
 
 ## REJECT THESE (verdict = do not run)
+
 - **TP + CP** (`tp_size>1 and cp_size>1`) — DTensor mesh conflicts with CP groups.
 - **TP + ETP**, with or without EP (`tp_size>1 and expert_tp_size>1`) — attention-TP and
   expert-TP are mutually exclusive; use EP+TP **or** pure/EP+ETP.
@@ -163,6 +169,7 @@ When rejecting, cite the exact reason and offer the nearest valid alternative
 ep4+etp2; EP+TP does not help — attention TP leaves `ep_group_size` at 4").
 
 ## Sources of truth
+
 `matrix.md` + `agent-docs/parallelism/` document the supported/rejected combos. The code is the **ultimate**
 authority: `src/distributed/parallelism_config.py` (the validators) and
 `src/trainers/mixins/ep_introspection.py` (the runtime EP-GC setup guard) decide what actually raises or

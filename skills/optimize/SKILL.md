@@ -21,6 +21,7 @@ row citing the `agent-docs/optimization/` page it comes from. This page carries 
 only: read levers.md and quote the number from there, never from here.
 
 ## How to use this skill
+
 1. Pin the **bottleneck**: throughput-bound (want more tok/s/GPU) or memory-bound (OOM /
    want longer seq / bigger batch)? For MoE/EP also ask: comm-bound (low top-k, e.g.
    gpt-oss) or permute/elementwise-bound (high top-k, e.g. qwen3.6)? When unsure, measure:
@@ -33,7 +34,9 @@ only: read levers.md and quote the number from there, never from here.
 4. Steer away from the **negatives** below — they are the common dead-ends.
 
 ## Already on by default (don't "enable" — they're free)
+
 These fire automatically; mention them only to confirm, not as new advice. Figures in levers.md.
+
 - **Grouped GEMM** — auto on SM90+ for MoE experts; the win is largest with many local experts per rank
   and narrows as batch (per-expert M) grows.
 - **Liger CE + RMSNorm/RoPE/SwiGLU** — `use_liger_kernel: true` default; a double-digit-% throughput win
@@ -51,6 +54,7 @@ These fire automatically; mention them only to confirm, not as new advice. Figur
 - **FlexAttention on Gemma 4's sliding layers** (`sdpa_flex_sliding`, `HALO_FLEX_SLIDING`).
 
 ## Throughput flow (raise tok/s/GPU)
+
 - **MoE/EP, any shape →** push **seq × batch as high as memory allows** first — EP at low token
   counts is comm-bound (fixed all-to-all), so **batch is the dominant EP lever**. Read achieved
   TFLOPS / tok-s, not plain MFU% (sparse MoE can't approach a dense MFU; longer seq + lower EP raise
@@ -72,6 +76,7 @@ These fire automatically; mention them only to confirm, not as new advice. Figur
   on your model. A convergence lever, not a per-step throughput one.
 
 ## Memory flow (cut peak / fit longer seq / bigger batch)
+
 - **Long-seq OOM at the loss →** **FusedLinearCrossEntropy**
   (`liger_kernel_config: {cross_entropy: false, fused_linear_cross_entropy: true}` — they are
   sub-keys of that dict, not top-level fields): never materializes the `batch×seq×vocab` logits, for
@@ -91,8 +96,10 @@ These fire automatically; mention them only to confirm, not as new advice. Figur
   grad-reduce at bf16 storage cost, ~2× cost on the reduce collective only.
 
 ## What does NOT help here (do not chase these)
+
 The honest negatives — cited in full in levers.md. At fine-grained MoE shapes (EP8,
 256–512 tokens/expert, N ≤ 4096) these are dead-ends:
+
 - **Low-precision fp8/fp4 *compute* — no throughput win. Train bf16.** Per-expert GEMM is
   weight-bandwidth-bound at the bf16 roofline (proven roofline + Blackwell HW + measured DeepGEMM).
   Simulated fake-quant runs many times a bf16 step — a *convergence-validation* oracle, not a speed
@@ -111,6 +118,7 @@ The honest negatives — cited in full in levers.md. At fine-grained MoE shapes 
 - **MoE throughput levers measured at batch 1** — comm-bound, run-to-run noisy. Always **batch ≥ 4**.
 
 ## Sources of truth
+
 Figures live in [levers.md](levers.md), each cited to its page in `agent-docs/optimization/`:
 grouped-gemm.md, liger-kernels.md, flash-attention.md, bf16-optimizer.md, padding-free-collator.md,
 throughput-benchmarks.md, low-precision-moe-kernels.md, muon-optimizer.md, flash-adamw.md,

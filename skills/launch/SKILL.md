@@ -272,6 +272,7 @@ References: the repo-root `Makefile` (canonical recipes),
 ECR pull, troubleshooting).
 
 ## Sources of truth
+
 The `Makefile` + `agent-docs/infrastructure/docker.md` document the run recipes. The code is the **ultimate**
 authority: when the `Makefile` recipe, this skill, or memory disagrees with what a script actually
 expects (its argparse) or the `Dockerfile`, read the real file before launching. (`CLAUDE.md`:

@@ -29,8 +29,10 @@ non-trivial. User-facing guide: `agent-docs/reference/debugging.md`.
 ## Triage decision tree
 
 ### Hang / deadlock (job stuck, no progress, GPUs idle or one busy)
+
 A hang is almost always a **collective mismatch**: one rank issues a collective
 the others never reach.
+
 1. Dump every rank's stack — the rank *not* in a collective is the culprit:
    `python scripts/profiling/py_spy_diag.py dump` from a shell in the training container attaches
    py-spy to every torchrun rank. No launch-time setup, so it works on a job already hung; one file
@@ -43,6 +45,7 @@ the others never reach.
    rejected topology, not a hang — see the **DeepEP fault** branch.
 
 ### OOM (CUDA out of memory)
+
 1. Find *what* holds memory: `profiler_record_memory_snapshot: true` (or `cuda_memory_history(...)`)
    → `.pickle` onto <https://pytorch.org/memory_viz> for the per-allocation flame graph.
 2. Reduce levers, cheapest first: **gradient checkpointing** on; lower
@@ -52,6 +55,7 @@ the others never reach.
 3. Quick textual check: `log_cuda_memory("after forward")` / `EfficiencyCallback` peak mem.
 
 ### NaN / Inf loss
+
 1. **Which model + attention impl?** qwen3.5/3.6/Qwen3-Next and GLM-4 MoE Lite under FA4 NaN the
    first backward (head_dim-256 + partial rotary) — the fix is the auto FA4→SDPA fallback
    (`model_fa4_backward_nan_prone`, applied in `resolve_attn_implementation` in
@@ -64,6 +68,7 @@ the others never reach.
    activations) diverge — add the call there, then `HALO_TP_CONSISTENCY_CHECK=1`.
 
 ### DeepEP fault (EP crash, combine-barrier deadlock)
+
 - **Multiple >2-rank dispatch groups in one NVLink domain are rejected at config time**
   (`ep_size > 2` with `nvlink_domain_size > ep_group_size`, e.g. ep4 on an 8-GPU domain): startup
   raises `ValueError: parallelism config failed on … First (rank 0): expert_parallel_size=N on a
@@ -77,6 +82,7 @@ the others never reach.
   in the `parallelism` skill (`matrix.md`, row *Multi-group >2-rank EP on one NVLink domain*).
 
 ### NCCL timeout (watchdog fires after a stall)
+
 1. Raise the window for legit-slow collectives (big all-to-all / gathered save):
    `DIST_NCCL_TIMEOUT_MINUTES` (default 30; PyTorch's own is 10).
 2. Capture *which* collective each rank missed: `TORCH_NCCL_TRACE_BUFFER_SIZE=20000`,
@@ -90,6 +96,7 @@ the others never reach.
    live job.
 
 ### Slow but not stuck (throughput / straggler)
+
 - Per-rank skew: capture `profiler_ranks: "all"` traces and run the TraceLens collective report
   (per-collective latency/bandwidth/skew): `python scripts/profiling/trace_report.py`.
 - CPU stalls (dataloader/tokenize): `python scripts/profiling/py_spy_diag.py record --duration 30`
@@ -106,6 +113,7 @@ embedding-OOB, fused EP export an engine rejects), the exact env-var enable reci
 `debugging.py` helper, and how to read `TorchProfilerCallback` artifacts.
 
 ## Sources of truth
+
 `agent-docs/reference/debugging.md` + `playbook.md` capture the known failure modes. The code is the
 **ultimate** authority: `src/diagnostics/debugging.py` (the opt-in helpers) and the failing
 `src/` path itself are what actually behave — when a doc, this skill, or memory disagrees, or you are

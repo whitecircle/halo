@@ -16,12 +16,13 @@ Read every PP row as the shape a validator enforces, never as a launchable topol
 
 ## data_parallel_size formula
 
-```
+```text
 stage_world_size = world_size // pp_size        # PP is the outermost split
 dp_divisor       = max(tp_size, cp_size, expert_tp_size)
 data_parallel_size = stage_world_size // dp_divisor   if dp_divisor > 1
                    = stage_world_size                 otherwise   # EP-only / DDP
 ```
+
 EP is **always orthogonal to DP** — `ep_size` is not in the divisor. PP is, via
 `stage_world_size`: a whole pipeline chain consumes one batch.
 Source: `parallelism_config.py` `__post_init__`.
@@ -43,6 +44,7 @@ Source: `parallelism_config.py` `__post_init__`.
 | **PP**, **PP + EP**, **PP + ETP** — *in the allowlist, not runnable* | `pp_size>1` | `stage_world_size / max(1, expert_tp_size)` | **Rejected by the release gate before any of this is reached.** PP is outermost: the world splits into `pp_size` contiguous blocks of whole NVLink domains and every inner axis runs unchanged inside one block. Composes with the expert axes only — EP, **or** pure ETP (`ep_size==1`), never both, and never TP/CP. All EP/ETP gradient sync runs in one deferred post-backward sweep; the ETP divisor drops the `expert_tp_size` factor (partners share a batch) | `_validate_pipeline_parallel`; `grad_sync.py` `_sync_deferred_expert_grads` |
 
 Notes:
+
 - For pure EP, prefer `ep_scope="auto"` so the scope resolves correctly; `"auto"` is
   the default in both the dataclass and `DistributedArguments`. Cross-node (`global`)
   EP needs `ep_group_size` to tile `stage_world_size` (`world_size // pp_size`) as
@@ -116,8 +118,10 @@ error — passing CP there is a config error, not a silent no-op. There is no `_
 folds into `ep_group_size` and is gated by `_supports_ep`.
 
 ### CP incompatibility list
+
 The reasons behind each `_supports_cp = False` (`agent-docs/reference/trainer-architecture.md`,
 *Trainer compatibility*):
+
 - `logits_to_keep` (environment GRPO)
 - global log-probability sums (DPO, KTO)
 - full-sequence pooling (reward, classification, embedding)

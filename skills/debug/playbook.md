@@ -32,26 +32,33 @@ helpers (§2.2, §2.4) run when you invoke `py_spy_diag.py` or call them in-scri
 `src/env.py`); a set-but-empty value counts as unset and yields the default.
 
 ### 2.1 Cross-rank consistency — `assert_consistent` / `assert_tensor_shape_consistent`
+
 Catches a shape/value divergence as a clear error instead of a downstream NCCL hang. The toolkit
 ships **no call sites**, so setting the env var alone does nothing — add the call at the suspect
 seam first.
+
 ```bash
 export HALO_TP_CONSISTENCY_CHECK=1   # makes assert_consistent RAISE on mismatch (else just warns)
 ```
+
 ```python
 from src.diagnostics.debugging import assert_tensor_shape_consistent, assert_consistent
 assert_tensor_shape_consistent(hidden_states, group=tp_group, label="attn_in")
 assert_consistent(some_scalar, group=ep_group, label="n_tokens")
 ```
+
 `group=None` or world≤1 is a no-op. Pass `strict=True`/`False` to override the env var per call.
 
 ### 2.2 Stack dump on hang — `py_spy_diag.py dump`
+
 Attaches py-spy out of process, so it works on a job that is already hung — nothing to enable at
 launch. Attach from the job's pid namespace (`docker exec` into the training container first).
+
 ```bash
 python scripts/profiling/py_spy_diag.py dump              # every torchrun rank on this node
 python scripts/profiling/py_spy_diag.py dump --pid 1234   # explicit pid, repeatable
 ```
+
 Output: a timestamped `$TMPDIR/halo_diag_stacks/<ts>-rank00/pid<pid>.txt` per pid (`STACK_DUMP_DIR`;
 `--output-dir` to change; `torchrun_python_pids()` walks torchrun's python children, so one
 invocation dumps the whole job). The rank NOT
@@ -60,6 +67,7 @@ group) and `--cap-add=SYS_PTRACE` on the container (in the standard launch comma
 fails with `Permission denied`. In-script equivalent: `dump_distributed_stacks`.
 
 ### 2.3 NCCL watchdog + flight recorder
+
 ```bash
 export DIST_NCCL_TIMEOUT_MINUTES=60          # watchdog window (default 30; applied by init_distributed; PyTorch's own default is 10)
 export TORCH_NCCL_TRACE_BUFFER_SIZE=20000    # ring buffer of recent collectives
@@ -71,25 +79,33 @@ export NCCL_DEBUG_SUBSYS=INIT,NET
 ```
 
 ### 2.4 CPU flame graph — `py_spy_diag.py record` / `record_distributed_flamegraph`
+
 For CPU-side stalls (dataloader/tokenize/collation), NOT for hangs (use §2.2 for those).
+
 ```bash
 python scripts/profiling/py_spy_diag.py record --duration 30   # every torchrun rank → $TMPDIR/halo_diag_flamegraphs/<ts>-rank00/pid<pid>.svg
 ```
+
 In-script equivalent:
+
 ```python
 from src.diagnostics.debugging import record_distributed_flamegraph
 record_distributed_flamegraph(duration=30)                  # this rank only
 record_distributed_flamegraph(duration=30, this_rank_only=False)  # every rank on node (spot a straggler)
 ```
+
 py-spy ships in the image (`profiling` dependency group); attach needs `--cap-add=SYS_PTRACE`.
 
 ## 3. GPU memory profiling (OOM)
+
 Wrap the OOMing region or enable alongside the profiler, then drop the `.pickle`
 on <https://pytorch.org/memory_viz> for a per-allocation flame graph:
+
 ```yaml
 enable_torch_profiler: true
 profiler_record_memory_snapshot: true  # mem-<label>-rankNN.pickle: end of the first active step → one step past the window
 ```
+
 ```python
 from src.diagnostics.profiling import cuda_memory_history, log_cuda_memory, reset_peak_memory_stats
 with cuda_memory_history(ranks="all"):
@@ -98,8 +114,10 @@ reset_peak_memory_stats(); log_cuda_memory("after forward")   # quick textual al
 ```
 
 ## 4. Reading `TorchProfilerCallback` traces
+
 Enable from any training YAML (wired in `wiring.build_perf_callbacks` when
 `enable_torch_profiler: true`):
+
 ```yaml
 enable_torch_profiler: true
 profiler_wait: 5        # skip first 5 steps (warm caches)
@@ -108,6 +126,7 @@ profiler_active: 3      # record 3 steps
 profiler_ranks: "0"     # "0" | "all" | "0,8" — which global ranks profile
 profiler_record_memory_snapshot: false
 ```
+
 Artifacts per selected rank, with a `-cycleN` suffix per wait→active cycle:
 
 | Artifact | What it is | How to read |
@@ -126,6 +145,7 @@ compute/comm/idle, op tables, roofline) + a multi-rank collective latency/bandwi
 report for `ranks: "all"` captures.
 
 Notes from the callback source:
+
 - Default profiles **only rank 0**; set `ranks: "all"` to catch rank skew/stragglers.
 - On a large multi-GPU MoE, `ProfilerActivity.CPU` per-op tracing starves the GPUs
   (first step crawls). Construct `TorchProfilerCallback(cpu_activity=False)` for a
@@ -138,6 +158,7 @@ For TPS / peak-memory per step (not a trace), use `EfficiencyCallback`
 and the EP degree, never the dense ceiling.
 
 ## References
+
 - `agent-docs/reference/debugging.md` — full user-facing guide (this playbook mirrors it)
 - `src/diagnostics/debugging.py` — consistency-check + py-spy capture helpers (authoritative for env vars/signatures)
 - `src/diagnostics/profiling.py` — CUDA-memory helpers (`log_cuda_memory`, `cuda_memory_history`, `reset_peak_memory_stats`)

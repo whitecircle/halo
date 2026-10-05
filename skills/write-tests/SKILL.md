@@ -56,6 +56,7 @@ if __name__ == "__main__":
 ```
 
 Rules:
+
 - End the file with that `__main__` guard, declare no `pytestmark` (the `cpu` marker is applied
   by path) and no `sys.path` bootstrap — `tests/cpu/conventions/test_test_conventions.py` fails the
   suite over any of those, and over a hand-rolled runner or a printed pass/fail summary.
@@ -144,6 +145,7 @@ python tests/cpu/parallelism/test_matrix_correctness_coverage.py # renaming a pa
 ```
 
 ## Sources of truth
+
 `harness.md` / `matrix.md` + `agent-docs/contributing/README.md` document the conventions. The code is the
 **ultimate** authority: `tests/common/harness.py`, `tests/gpu/manifest.py`, and the `src/` behavior you
 are testing are what actually hold — when a doc, this skill, or memory disagrees, or you are unsure,

@@ -87,6 +87,7 @@ also set `VLLM_USE_V2_MODEL_RUNNER=0` — Model Runner V2 answers `thinking_toke
 at config time.
 
 Standalone (no compose):
+
 ```bash
 docker run --gpus all --network=host --ipc=host \
   vllm-server:0.26.0 Qwen/Qwen3-4B-Instruct-2507 --port 8000 \

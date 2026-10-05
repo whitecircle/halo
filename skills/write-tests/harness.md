@@ -207,11 +207,11 @@ those, kept separate only so the manifest can attach its family markers, timeout
   `tests.common.ep_reference.score_ep_grad_pairs(pairs, checks, metrics, cos_min=TOL.ep_grad_cosine_min)`;
   its norm-ratio band defaults to `TOL.ep_grad_norm_ratio_band`.
 - **Reporting** (`tests/common/reporting.py`):
-  - Correctness: `ctx.metrics(trainer)` → `snapshot_efficiency(cb)` flat dict. Headline at
+    - Correctness: `ctx.metrics(trainer)` → `snapshot_efficiency(cb)` flat dict. Headline at
     top level: `tokens_per_second` (per-GPU), `cluster_tokens_per_second`, `peak_allocated_gb`,
     `training_peak_allocated_gb`, `avg_step_time_seconds`. MFU/S-MFU/TFLOPS live under `"diagnostics"` and
     are never gated.
-  - Benchmarks: `emit_benchmark("<key>", efficiency_cb)` prints a `__HALO_BENCH__` line a
+    - Benchmarks: `emit_benchmark("<key>", efficiency_cb)` prints a `__HALO_BENCH__` line a
     refresh run uses to seed `tests/baselines/<key>.json`; `format_benchmark_report(cb)` for
     the human log. The result/bench lines (`RESULT_SENTINEL` = `__HALO_TEST_RESULT__`,
     `BENCH_SENTINEL` = `__HALO_BENCH__`) survive interleaved torchrun stdout.
@@ -221,7 +221,7 @@ those, kept separate only so the manifest can attach its family markers, timeout
 The pytest launcher (`tests/gpu/conftest.py`) reads the manifest and, per `(script, args)`
 node, shells out:
 
-```
+```bash
 python -m torch.distributed.run --nproc_per_node=<nproc> --master_port=<free> <script> <args>
 ```
 

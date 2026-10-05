@@ -51,6 +51,7 @@ lower-precision matmul to take. **bf16 is the production default.**
 | **FA2 on Blackwell** | The **slow outlier** — 7,497 vs FA4's 17,504 tok/s/GPU at s32768 (Qwen3-4B b1), and SDPA and flex beat it too. Use FA4 (auto); SDPA is the dense fallback when FA4 is unavailable (rejected for GptOss live sinks). | flash-attention.md |
 
 ### Notes on the "untapped" precision frontier
+
 The genuinely open low-precision lever is **memory, not matmul math**: quantized optimizer states (shipped
 as FlashAdamW above) and FP4 **activation-storage + EP-comm compression** (not shipped, no measurement in
 `agent-docs/optimization/`). Freed HBM converts to throughput indirectly — longer seq / less GC. Do not present

@@ -70,12 +70,14 @@ Source: `src/distributed/checkpoint/loader.py` (`CheckpointLoader`, `_load_tp`, 
 Read the script's argparse to confirm flags before running — these are the load-bearing ones.
 
 ### `merge_ep_shards.py`
+
 Merge a `save_sharded_ep` checkpoint (per-rank `.shard_N` expert keys) into HF format; converts
 EP-internal layouts back to each family's HF layout. Flags: `--input_dir`, `--output_dir`, `--quiet`,
 `--max_shard_size` (`5GB`), `--delete_input_shards`. The merge casts nothing: the sharded writer
 already applied `save_dtype_caster` (`src/checkpoint/format.py` — BF16 except the
 module-tree keep-sets: norms, balancing tensors, the family's fp32 pins; a training checkpoint keeps
 every tensor at its live dtype), so the stored dtype is what the merge writes. The index metadata is HF's own — there is no `merged_from_*` marker.
+
 - **Family support is class-owned, not a table.** `resolve_ep_merge_layer_class` /
   `supported_ep_merge_model_types` (`expert_weights.py`, which also owns `expert_weight_roots` and
   `to_hub_layer_key`) map a checkpoint's `model_type` to the EP layer class via each class's
@@ -91,6 +93,7 @@ every tensor at its live dtype), so the stored dtype is what the merge writes. T
   in `src/distributed/expert_parallel/expert_weights.py`, not hand-listed.
 
 ### `merge_peft_adapters.py`
+
 Load base + adapter, `merge_and_unload()`, save standalone HF checkpoint (base path read from
 `adapter_config.json`). Flags: `--adapter_dir`, `--output_dir`,
 `--task {causal_lm,classification}`, `--dtype` (`bfloat16`), `--device_map` (`auto`/`cpu` for big
@@ -107,6 +110,7 @@ merged model (see below) — the merge rebuilds the base from the hub, so withou
 run's routing and a `reset_sinks` run's sinks are lost.
 
 ### `convert_to_bf16.py`
+
 Re-save a model in BF16, optionally merging a PEFT adapter in the same pass. Flags: `--input_dir`,
 `--output_dir`, `--model_type {causal_lm,classifier,base}`, `--peft`, `--merge_adapter`,
 `--device_map`, `--verify`, `--check_inference`, `--max_shard_size`, `--trust_remote_code` /
@@ -122,6 +126,7 @@ transformers keeps fp32 only under `--dtype float16`. `merge_ep_shards.py` keeps
 trained dtype. Applies `apply_training_sidecars` to the loaded model (see below).
 
 ### `quantize_to_lowp.py`
+
 Post-training quantize bf16/fp32 → block-scaled **mxfp8 / mxfp4 / nvfp4** (compressed-tensors triples +
 a manifest). Pairs with the QAT training path (`lowp_precision: …`). Flags: `--input_dir`, `--output_dir`,
 `--format {mxfp8,mxfp4,nvfp4}`, `--contraction_axis` (default -1; **2-D `*.weight` matrices only** —
@@ -137,6 +142,7 @@ non-weight file (config, tokenizer, `chat_template.jinja`, remote-code `.py`). A
 speedup** — bf16 stays optimal at these shapes.
 
 ### `reset_sinks.py`
+
 Set every `*.sinks` param to dtype-min (neutralize the attention sink), matching the GptOss FA2-finetune
 behavior. Flags: `--model_id` (required; local dir or HF repo id, no `--revision`), `--output_dir`
 (required unless `--in_place` or `--dry_run`), `--in_place` (rewrites the `--model_id` directory, no undo — never
@@ -145,6 +151,7 @@ valid for a repo id), `--dry_run`, plus the shared `--max_shard_size` / `--trust
 exists, else `from_pretrained` + `save_pretrained` for sharded checkpoints.
 
 ### `unfuse_moe_experts.py`
+
 Rewrite a gathered checkpoint's fused expert tensors (`experts.gate_up_proj` `[E, 2I, H]` +
 `experts.down_proj`) into the legacy per-expert keys `experts.{i}.{gate,up,down}_proj.weight` for
 engines that only read those (vLLM's `glm4_moe_lite`). Flags: `--input_dir`, `--output_dir`, plus
@@ -156,6 +163,7 @@ tensor per expert (fused-native, or already interleaved as engines expect), so e
 would be one nothing reads. A checkpoint with no fused expert keys is copied through.
 
 ### `merge_models.py`
+
 Merge several fine-tuned checkpoints **of the same architecture** into one — no mergekit dependency.
 Methods (`--method`): `linear` (weighted average, normalized by the weight sum), `slerp` (exactly two
 models, `--t`), `task_arithmetic` (`--base_model` + Σ wᵢ·task vector), `ties` (`--density`,
@@ -168,6 +176,7 @@ Deliberately copies **no** resume sidecars (`rng_state*`, `scheduler.pt`,
 `router_balancing_biases.pt`, `reference_logps.pt`) — they describe one run, not the merge.
 
 ### `reattach_vision_tower.py`
+
 Rebuild the multimodal wrapper layout around a `text_only_model` export: text weights re-prefixed to
 `model.language_model.*`, `model.visual.*` / `mtp.*` streamed back from the base, the composite
 config regrafted with the trained text config. Flags: `--input_dir` (the text-only export),

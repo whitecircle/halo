@@ -67,6 +67,7 @@ overrides recorded in `metadata.json` and re-checked at training time — `--bos
 `--tools-field` and `--interleaved-thinking` are both rejected with `--vlm`.
 
 **Two distinct mechanisms** (don't conflate):
+
 - **preprocessed** — output `metadata.json` has `preprocessed: true`; `load_datasets_auto()`
   (`src/data/sources/loading.py`) auto-detects via `is_preprocessed_dataset()`
   (`src/data/pipeline/preprocessed_metadata.py`) and **skips tokenization**. No config flag needed — point `dataset:` at the output.

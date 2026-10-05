@@ -84,9 +84,12 @@ redundancy, over-citation). Cut both.
 path on every clause:
 
 > ## Overview
+>
 > The S3 utilities provide functions for DataFrame operations, dataset operations,
 > folder operations, file management, nested paths, local caching, and a CLI.
+>
 > ## Path formats
+>
 > The toolkit supports three source types… (then a second "Path format rules"
 > section restating the same three formats).
 
