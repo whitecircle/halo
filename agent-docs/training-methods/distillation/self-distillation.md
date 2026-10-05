@@ -51,7 +51,7 @@ output_dir: checkpoints/self-distill-qwen3.5-9b
 | `confidence_field` / `confidence_power` | `None` / `4.0` | Per-sample weight `conf**p`, mean-normalized across the batch |
 | `confidence_weight_opd` | `True` | Applies that weight to OPD as well as SFT |
 
-With `reference_kl_coef <= 0`, a non-default `reference_model_name_or_path` or `reference_kl_loss` raises rather than being ignored. `assistant_message_template` has no default and is required whenever `train_on_completions_only` is on — the collator refuses that pair at construction. It is never checked against the template, and a marker that does not byte-match the rendered assistant prefix masks every row.
+With `reference_kl_coef <= 0`, a non-default `reference_model_name_or_path` or `reference_kl_loss` raises rather than being ignored. `assistant_message_template` has no default and is required whenever `train_on_completions_only` is on — the collator refuses that pair at construction, and a marker the chat template never renders with it, through the probe `select_data_collator` runs.
 
 Neither branch is ever truncated — the teacher is systematically longer, so right-truncation would cut response tokens the student keeps. On the text path a row over `max_length` raises, naming the branch, and a prep-time audit makes that raise world-uniform instead of hanging the peers of one rank. Size `max_length` with headroom for the hint.
 

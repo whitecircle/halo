@@ -214,10 +214,10 @@ they score packed rows under the same masks the student does.
 - **Completion masking requires `assistant_message_template`** matching the tokenizer's exact
   assistant-header encoding; unmatched sequences are dropped from the loss.
 
-    A marker the chat template never renders is refused by `select_data_collator`: it would mask
-    every label and the run would train zero tokens at loss ≈ 0. The probe renders both a plain and a
-    `thinking` assistant turn, so a marker gpt-oss harmony emits only under thinking passes it and is
-    caught per batch instead.
+    A marker the chat template never renders is refused by `select_data_collator` and the
+    self-distillation collator: it would mask every label and the run would train zero tokens at
+    loss ≈ 0. The probe renders both a plain and a `thinking` assistant turn, so a marker gpt-oss
+    harmony emits only under thinking passes it and is caught per batch instead.
 
 ## EOS, pad, and the response template
 

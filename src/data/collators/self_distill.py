@@ -9,7 +9,7 @@ from typing import Any
 import torch
 
 from src.data.pipeline.rendered import render_conversation, tokenize_rendered
-from src.data.spans import build_completion_only_labels, require_response_marker, resolve_eos_token_ids
+from src.data.spans import build_completion_only_labels, require_rendered_response_marker, resolve_eos_token_ids
 
 
 def inject_privileged_hint(
@@ -81,7 +81,9 @@ class SelfDistillTextCollator:
         interleaved_thinking: bool = False,
         model_config=None,
     ):
-        require_response_marker(response_prompt_template, train_on_completions_only, "Self-distillation")
+        require_rendered_response_marker(
+            tokenizer, response_prompt_template, train_on_completions_only, "Self-distillation"
+        )
         self.tokenizer = tokenizer
         self.max_length = max_length
         self.conversation_field = conversation_field

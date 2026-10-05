@@ -11,7 +11,7 @@ from src.data.collators.packing import (
     DataCollatorWithFlatteningAndCompletionMask,
     DataCollatorWithPacking,
 )
-from src.data.spans import require_response_marker, resolve_eos_token_ids, verify_marker_renders_in_chat_template
+from src.data.spans import require_rendered_response_marker, resolve_eos_token_ids
 from src.models.patches.attention import (
     VARLEN_ATTN_IMPLEMENTATIONS,
     effective_attn_implementation,
@@ -112,10 +112,9 @@ def _validate_collator_options(
             "Please disable padding_free when using CP."
         )
 
-    require_response_marker(assistant_message_template, train_on_completions_only, "select_data_collator")
-
-    if train_on_completions_only and getattr(tokenizer, "chat_template", None):
-        verify_marker_renders_in_chat_template(tokenizer, assistant_message_template)
+    require_rendered_response_marker(
+        tokenizer, assistant_message_template, train_on_completions_only, "select_data_collator"
+    )
 
     if train_on_last_assistant_only and not train_on_completions_only:
         raise ValueError("train_on_last_assistant_only=True requires train_on_completions_only=True")

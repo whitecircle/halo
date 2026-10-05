@@ -134,6 +134,20 @@ def verify_marker_renders_in_chat_template(
         )
 
 
+def require_rendered_response_marker(
+    tokenizer: PreTrainedTokenizerBase,
+    response_prompt_template: str | None,
+    train_on_completions_only: bool,
+    subject: str,
+) -> None:
+    """A text completion-only collator's construction-time marker refusals: no marker at all
+    (:func:`require_response_marker`), then, where the tokenizer carries a chat template, a marker the
+    template never renders (:func:`verify_marker_renders_in_chat_template`)."""
+    require_response_marker(response_prompt_template, train_on_completions_only, subject)
+    if train_on_completions_only and getattr(tokenizer, "chat_template", None):
+        verify_marker_renders_in_chat_template(tokenizer, response_prompt_template)
+
+
 def ends_with_terminator(input_ids, tokenizer, eos_token_ids) -> bool:
     """Whether ``input_ids`` already ends a turn, ignoring the template's trailing whitespace.
 

@@ -211,6 +211,18 @@ def test_completion_only_masks_prompt():
     assert 0 < n_sup < labels.numel()
 
 
+def test_a_marker_the_chat_template_never_renders_is_refused_at_construction():
+    """It would match no row, so completion-only masking would train zero tokens at loss ~0."""
+    tok = _tokenizer()
+    with pytest.raises(ValueError, match="does not occur in this tokenizer's rendered chat template"):
+        SelfDistillTextCollator(
+            tok,
+            hint_template=" answer={answer}",
+            response_prompt_template="<|start|>assistant<|channel|>final<|message|>",
+            train_on_completions_only=True,
+        )
+
+
 def _render(tok, **collator_kwargs) -> str:
     """Decode the student branch of a one-row batch — what the model actually sees."""
     col = SelfDistillTextCollator(
