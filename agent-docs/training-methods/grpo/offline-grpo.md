@@ -59,7 +59,7 @@ learning_rate: 5.0e-06
 | `max_completion_length` | `null` | Completion budget, cut from the end; `null` = no cap |
 | `max_length` | `null` | Pipeline-parallel only; rejected at construction off PP — on every run, since [PP is not yet available](../../parallelism/pipeline-parallelism.md) |
 
-The shipped recipes run `learning_rate: 5.0e-06`: GRPO refines a tuned policy, so the rate sits below the SFT band. Advantages are group-relative, so a wider batch helps ([sizing](../sft.md#learning-rate-and-global-batch-size)).
+The shipped recipes run `learning_rate: 5.0e-06`, the top of the SFT full-FT band. Advantages are group-relative, so a wider batch helps ([sizing](../sft.md#learning-rate-and-global-batch-size)).
 
 Both length knobs are truncation caps, and the tokenizer's window is pinned only when both are bounded. At a cut the sequence gets no terminator — EOS is appended only when the completion ends inside its budget — so a completion cut at the cap is trained without a stop token rather than taught to stop there.
 
@@ -93,59 +93,21 @@ The default path materializes `[B, T_completion, vocab]` logits — on wide voca
 
 ### Reference model
 
-At `kl_beta > 0`, full fine-tuning scores the run-start policy once before its first update, over the
-configured train and evaluation splits. This uses the same reference lifecycle under CP, non-CP
-and the PP loss seam; PP itself remains unavailable. Inputs must be finite, unsharded
-`datasets.Dataset` splits. Pre-sharded KL datasets and supplied grouped `ref_per_token_logps` are
-refused. No dense policy deepcopy or second resident reference model is needed. An explicit frozen
-`ref_model` is accepted outside CP and PP, swept once and released.
+At `kl_beta > 0`, full fine-tuning scores the run-start policy once, before the first update, over the configured train and evaluation splits, through the same reference lifecycle off CP, under CP and at the PP loss seam. No second resident reference model is held. The sweep needs finite, unsharded `datasets.Dataset` splits: a pre-sharded dataset or a supplied `ref_per_token_logps` column is refused. An explicit frozen `ref_model` is accepted outside CP and PP, swept once and released.
 
-This preparation finishes before step 1 and logs batch progress for each split. The trainer
-does not resweep on resume. With KL disabled, PEFT, or expert LoRA, unused dataset reference
-columns are dropped during tokenization; the finite-split and pre-sharded restrictions above
-apply only to the full-finetuning sweep.
+The sweep finishes before step 1, logging batch progress per split, and does not rerun on resume. With KL off, PEFT or expert LoRA, unused dataset reference columns are dropped at tokenization, and the finite-split and pre-sharded restrictions do not apply.
 
-Raw completion-token scores travel with every training checkpoint in `reference_logps.pt`.
-The live `min_log_prob` clamp is applied at each loss step, not stored in the reference. On resume,
-the sidecar preserves the original anchor instead of scoring the trained policy. Ordered prompt
-and completion token digests, row counts and reference settings must match; non-finite scores or
-rank-divergent reference values raise. Pass the resolved `resume_checkpoint` at trainer
-construction, before reference preparation, then pass the same path to `train()`.
+Raw completion-token scores travel with every training checkpoint in `reference_logps.pt`; the live `min_log_prob` clamp applies at each loss step and is not stored. On resume the sidecar restores the original anchor rather than scoring the trained policy. Ordered prompt and completion token digests, row counts and reference settings must match; non-finite scores or rank-divergent reference values raise. Pass the resolved `resume_checkpoint` at trainer construction, before reference preparation, and the same path to `train()`.
 
-The sweep streams bounded batches from one representative per DP shard to the output-filesystem
-writers: global rank 0 on shared storage, each node's local rank 0 on node-local storage.
-Writers merge contiguous DP shards in dataset order; all ranks attach a memory-mapped Arrow
-reference column. Checkpoint serialization uses the same mapped values, and resume maps the
-sidecar instead of loading a full float32 token table into each rank's heap. Unchanged
-later checkpoints hardlink the immutable sidecar, or copy it when links are unavailable. DPO, KTO
-and offline GRPO share that persistence and resume lifecycle
-([Checkpoints](../../reference/checkpoints.md#what-gets-saved)).
+The sweep streams bounded batches from one representative per DP shard to the output-filesystem writers: global rank 0 on shared storage, each node's local rank 0 on node-local storage. Writers merge contiguous DP shards in dataset order, and every rank attaches a memory-mapped Arrow reference column. Checkpoint serialization reuses the mapped values, and resume maps the sidecar rather than loading a full float32 token table into each rank's heap. A later checkpoint with unchanged scores hardlinks the immutable sidecar, or copies it where links are unavailable. DPO, KTO and offline GRPO share this persistence and resume lifecycle ([Checkpoints](../../reference/checkpoints.md#what-gets-saved)).
 
-The temporary `_reference_cache/<uuid>/` filenames are unlinked after every rank maps the
-completed scores; those mappings stay valid through training and checkpointing. NFS may keep
-hidden files until their last mapped reader closes. The scratch cache is excluded from Hub uploads.
+The scratch files under `_reference_cache/<uuid>/` are unlinked once every rank has mapped the completed scores; the mappings stay valid through training and checkpointing. NFS may keep hidden files until the last mapped reader closes. The scratch cache is excluded from Hub uploads.
 
-`evaluate(new_tokenized_dataset)` reuses the original scores for token-identical rows, including
-subsets, reordered rows and duplicates. Unseen rows require the exact original frozen policy:
-outside CP/PP, pass `original_reference_model=original_frozen_policy`. The model must have all
-parameters frozen and be in eval mode; the trainer places it temporarily for the sweep and restores
-its original device. The caller owns the run-start weight identity. CP/PP evaluation splits must
-be declared before training so their scores come from the original distributed policy.
+`evaluate(new_tokenized_dataset)` reuses the original scores for token-identical rows, including subsets, reordered rows and duplicates. Unseen rows need the exact original frozen policy: outside CP/PP, pass `original_reference_model=original_frozen_policy`, with every parameter frozen and the model in eval mode; the trainer moves it to the policy's device for the sweep and then restores its original device. The caller owns the run-start weight identity. Under CP/PP, declare evaluation splits before training so their scores come from the original distributed policy.
 
-An old KL checkpoint without its sidecar cannot rescore trained weights. Recover the file from a
-complete checkpoint, or run the same tokenized splits and configuration for one step from the
-exact original model/revision into a separate scratch output. Copy that run's
-`checkpoint-1/reference_logps.pt` into the resume checkpoint on each node with node-local storage.
-The refusal message gives the recovery flags. Supplied scores and pre-sharded KL datasets remain
-unsupported, including during recovery.
+A KL checkpoint without its sidecar cannot resume: rescoring would anchor the KL to the trained weights. Recover the file from a complete checkpoint, or run the same tokenized splits and configuration for one step from the exact original model/revision into a separate scratch output and copy that run's `checkpoint-1/reference_logps.pt` into the resume checkpoint, on each node with node-local storage. The refusal message gives the recovery flags. Supplied scores and pre-sharded KL datasets are refused during recovery too.
 
-The trainer places supplied references on the policy's device, switches them to eval mode and
-freezes their parameters. Outside CP, PEFT policies retain the adapter-disabled frozen-base reference. Native expert-only
-LoRA builds no `PeftModel` and requires an explicit frozen base `ref_model`, loaded by the script
-through `load_frozen_reference_model` from `model_name_or_path`, never the trained resume checkpoint,
-with the policy's revision, attention and sinks settings.
-Those adapter paths keep their live reference behavior. A run without KL rejects an unused
-`ref_model`. The reference log-ratio is capped at 5 nats to bound the k3 estimator's tail.
+The trainer places a supplied reference on the policy's device, switches it to eval mode and freezes its parameters. The adapter paths score the reference live at every step, with no sweep and no sidecar: a PEFT policy (outside CP) disables its adapters, and native expert-only LoRA, which builds no `PeftModel`, requires an explicit frozen base `ref_model` — the script loads it through `load_frozen_reference_model` from `model_name_or_path`, never the trained resume checkpoint, with the policy's revision, attention and sinks settings. A run without KL rejects an unused `ref_model`. The reference log-ratio is capped at 5 nats to bound the k3 estimator's tail.
 
 ## Launch
 
@@ -162,7 +124,7 @@ torchrun --nproc_per_node=8 scripts/training/offline_grpo.py \
 
 Run a short config on a slice of the data first: `max_steps: 10` with `save_strategy: "no"` exercises tokenization, advantage normalization and the loss in minutes. A bad `loss_type`, `advantage_method` or `policy_gradient_formulation` is caught at construction.
 
-CPU: `pytest tests/cpu/grpo -m cpu`, including CP1/CP2/CP4 equivalence of logged KL/reference metrics. GPU: `tests/gpu/trainers/grpo/test_offline_grpo.py` and its `_bnpo` / `_bs4` / `_chunked` / `_tp_resume` siblings, plus the LoRA suites. The CP suites compare CP1 with CP2/CP4 on dense Qwen3 and Qwen3-MoE with EP+CP: token log-probs, loss, per-parameter gradient direction and global norm, and an AdamWBF16 step. Boundary-only supervision makes the missing-boundary negative control fail numerically. The GPU trainer suite covers train → resume → export.
+CPU: `pytest tests/cpu/grpo -m cpu`, including CP1/CP2/CP4 equivalence of logged KL/reference metrics. GPU: `tests/gpu/trainers/grpo/test_offline_grpo.py` and its `_bnpo` / `_bs4` / `_chunked` / `_tp_resume` siblings, plus the LoRA suites. The CP scoring suites (`tests/gpu/parallelism/cp/test_cp_grpo_scoring.py` on dense Qwen3, `tests/gpu/parallelism/combined/test_qwen3_moe_cp_grpo_scoring.py` on Qwen3-MoE at EP8) compare CP1 with CP2/CP4: token log-probs, loss, per-parameter gradient direction and global norm, and an AdamWBF16 step. Boundary-only supervision makes the missing-boundary negative control fail numerically. The CP trainer suites cover train → resume → export: `test_offline_grpo_ep_cp.py` at EP8 with CP2/CP4, and `test_offline_grpo_cp_resume.py` on Qwen3 plus GPT-OSS and Cohere2 MoE at EP2+CP2 with fp32 expert masters.
 
 ## What to watch
 

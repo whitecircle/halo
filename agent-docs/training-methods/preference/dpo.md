@@ -117,7 +117,7 @@ Covering tests:
 Failure signatures:
 
 - A reference-model raise on a live-sinks policy — `use_peft: true`, or precompute under EP/TP/PP. `beta: 0` does not help: it changes the loss, not whether a reference loads.
-- "Cannot hold a separate dense reference" under EP/TP/PP — set `precompute_ref_log_probs: true` or `--use_peft`.
+- "cannot hold a separate dense reference model" under EP/TP/PP — set `precompute_ref_log_probs: true` or `--use_peft`.
 - "Cannot resume precompute_ref_log_probs" — the checkpoint's `reference_logps.pt` is missing or lacks that split. Recover it with the one-step run [above](#resuming-a-precompute-run), or put the reference columns (computed on the base model) in the dataset.
 - "does not belong to this '<split>' dataset" on resume — the resumed data or reference settings differ from the saving run's (dataset, split, chat template, tokenizer, `max_length`, `truncation_mode`, `ld_alpha`). Resume with the saving run's data and settings, or regenerate the file with the one-step run [above](#resuming-a-precompute-run).
 - "Regenerate the '<split>' reference log-probs for this run" on resume — the saved split was summed at another [log-prob precision](#log-prob-precision), which no setting selects. Run the one-step regeneration the message names.

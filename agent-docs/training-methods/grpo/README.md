@@ -13,7 +13,7 @@ Group Relative Policy Optimization scores a prompt's completions against each ot
 | Infrastructure | Training only | Training + one vLLM server | Training + rollout servers + Ray |
 | Best for | Large pre-scored datasets, no generation cost | Single-turn verifiable answers: math, structured output | Tool use, code generation, environment feedback, policy compliance |
 
-All three extend `DistributedTrainerMixin` and run under EP, TP, pure ETP, EP+TP and EP+ETP. Offline GRPO additionally supports CP and EP+CP for full fine-tuning: it scores shard-local tokens and reduces whole-row sums across CP ranks. Online and environmental GRPO still do not support CP. Offline GRPO alone declares `_supports_pp` — [pipeline parallelism](../../parallelism/pipeline-parallelism.md) is not yet available in this release.
+All three extend `DistributedTrainerMixin` and run under EP, TP, pure ETP, EP+TP and EP+ETP. Offline GRPO additionally supports CP and EP+CP for full fine-tuning: it scores shard-local tokens and reduces whole-row sums across CP ranks. Online and environmental GRPO do not support CP. Offline GRPO alone declares `_supports_pp` — [pipeline parallelism](../../parallelism/pipeline-parallelism.md) is not yet available in this release.
 
 Async GRPO is the only variant with an engine choice, `rollout_backend: vllm | sglang`. Online GRPO is vLLM-only by construction: it drives TRL's vLLM server path through the vendored NCCL client and rejects in-process and colocate generation.
 

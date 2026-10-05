@@ -83,7 +83,7 @@ Too high a learning rate erases pretrained capability without showing up in the 
 | Band | Learning rate | Anchor |
 |---|---|---|
 | Conservative floor | `0.5e-6` – `1.5e-6` | 100B+ MoE; also stage 2 of a two-stage run |
-| Default (full FT) | `2.5e-6` – `5e-6` | stage-1 recipes use `3.5e-6` or `5e-6` |
+| Default (full FT) | `2.5e-6` – `5e-6` | most shipped full-FT recipes use `5e-6` |
 | Aggressive | `8e-6` – `2e-5` | short runs or small dense models |
 
 Pair with `lr_scheduler_type: cosine` and a warmup of ~3–5% of the run. There is no `warmup_ratio`: `warmup_steps` ≥ 1 is an exact step count, below 1 a fraction of the total (`warmup_steps: 0.03`).
