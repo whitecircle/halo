@@ -169,10 +169,10 @@ def run(ctx) -> dict:
 
     # --- Check 2: init delta == 0 (adapters present vs disabled produce the same output) ---
     # B is zero-initialized so the LoRA delta is structurally 0; _expert_proj must therefore be a
-    # no-op at init. We can't assert bit-equality directly because the EP scatter-back uses a
-    # non-deterministic atomic index_add_ when top_k < ep_size (e.g. GptOss top-4 at EP=8), so two
-    # forward passes of the SAME model differ by run-to-run noise. Measure that noise floor (two
-    # adapters-on passes) and require the adapters-on-vs-off difference to stay within it.
+    # no-op at init. The grouped path's scatter-back is a fixed-order gather-reduce, so there the noise
+    # floor below is 0 and this is bit-equality; the per-expert loop's scatter-back is an atomic
+    # index_add_, whose run-to-run noise two forward passes of the SAME model show. Measure that noise
+    # floor (two adapters-on passes) and require the adapters-on-vs-off difference to stay within it.
     log("\n[5/8] Checking init delta == 0 (within the EP forward's run-to-run noise floor)...")
     enc = tokenizer(["The quick brown fox jumps over the lazy dog."], return_tensors="pt")
     input_ids = enc["input_ids"].to(ctx.local_rank)
@@ -191,9 +191,9 @@ def run(ctx) -> dict:
     noise = (out_with_a - out_with_b).abs().max().item()
     delta = (out_with_a - out_without).abs().max().item()
     # The adapter delta must be the SAME ORDER as the forward's run-to-run noise (≈0 ⇒ no-op).
-    # On a deterministic scatter (top_k >= ep_size) noise≈0 and this is effectively bit-equality;
-    # on the atomic-scatter path (top_k < ep_size, e.g. EP=8) toggling adapters changes the compute
-    # graph and thus the atomic accumulation order, so allow a few× the 2-sample noise floor. A real
+    # On the grouped path's deterministic (atomic-free) scatter noise≈0 and this is effectively
+    # bit-equality; on an atomic scatter (the per-expert loop's index_add_) toggling adapters changes the
+    # compute graph and thus the accumulation order, so allow a few× the 2-sample noise floor. A real
     # wiring bug (nonzero/duplicated delta) would make `delta` orders of magnitude larger than noise.
     checks["init_delta_zero"] = delta <= max(4.0 * noise, 1e-3)
     log(f"  adapter delta={delta:.3e} vs forward noise floor={noise:.3e} (same order ⇒ no-op)")

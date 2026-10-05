@@ -132,16 +132,6 @@ def has_grouped_mm() -> bool:
     return (major * 10 + minor) >= 90
 
 
-def _uses_fused_permute(top_k: int, ep_size: int) -> bool:
-    """Whether the grouped path permutes through ``inv_map`` and the fused kernels rather than
-    ``index_select`` + the bf16 atomic ``index_add_``.
-
-    The atomic-free permute pays for building ``inv_map`` and beats the atomics only under real
-    duplicate-row contention, where a received token adds into many local rows.
-    """
-    return top_k >= ep_size
-
-
 class EPMoELayerBase(EPExpertGatherMixin, EPRouterBalancingMixin, nn.Module, ABC):
     """Base class for EP MoE layers using DeepEP.
 
@@ -813,8 +803,7 @@ class EPMoELayerBase(EPExpertGatherMixin, EPRouterBalancingMixin, nn.Module, ABC
             sorted_token_idx: [N_valid] original token positions for scatter-back
             sorted_weights: [N_valid] routing weights in sorted order
             sorted_expert_ids: [N_valid] expert ids in sorted order (for bias lookup)
-            inv_map: [N, width] atomic-free permute/unpermute map (see build_inv_map), or None below the
-                fused-permute gate (:func:`_uses_fused_permute`)
+            inv_map: [N, width] atomic-free permute/unpermute map (see build_inv_map)
         """
         N = tokens.shape[0]
         device = tokens.device
@@ -842,12 +831,11 @@ class EPMoELayerBase(EPExpertGatherMixin, EPRouterBalancingMixin, nn.Module, ABC
         expert_counts = sync_free_bincount(sorted_expert_ids, self.experts_per_rank, dtype=torch.long)
         offs = torch.cumsum(expert_counts, dim=0).to(torch.int32)
 
-        if _uses_fused_permute(width, self.ep_size):
-            inv_map = build_inv_map(sorted_token_idx, N, width)
-            sorted_tokens = MoEGatherPermute.apply(tokens, sorted_token_idx, inv_map)
-        else:
-            inv_map = None
-            sorted_tokens = tokens.index_select(0, sorted_token_idx)
+        # Atomic-free in both directions at every top_k / ep_size: the bf16 ``index_add_`` the gather's
+        # default backward and the scatter-back would run is a CAS-loop atomic, ~1.5 ms per call on the
+        # gpt-oss-20b ep8 shape where the fused gather-reduce streams at memory bandwidth.
+        inv_map = build_inv_map(sorted_token_idx, N, width)
+        sorted_tokens = MoEGatherPermute.apply(tokens, sorted_token_idx, inv_map)
         return sorted_tokens, offs, sorted_token_idx, sorted_weights, sorted_expert_ids, inv_map
 
     def _glu_combine(self, gate: torch.Tensor, up: torch.Tensor) -> torch.Tensor:
@@ -929,9 +917,8 @@ class EPMoELayerBase(EPExpertGatherMixin, EPRouterBalancingMixin, nn.Module, ABC
             with torch.enable_grad(), torch.autograd.graph.saved_tensors_hooks(lambda t: t, lambda t: t):
                 gate_up = self._warmup_input((_WARMUP_TOKENS, width), device, dtype, requires_grad=True)
                 torch.autograd.grad(self._warm_expert_activation(gate_up).sum(), gate_up)
-                # The fused permute runs only on the grouped path, and there only above its gate
-                # (_compute_experts, _sort_tokens_for_grouped_mm).
-                if self._grouped_mm_enabled() and _uses_fused_permute(top_k, self.ep_size):
+                # The fused permute runs only on the grouped path (_compute_experts, _sort_tokens_for_grouped_mm).
+                if self._grouped_mm_enabled():
                     self._warm_permute_kernels(hidden, top_k, device, dtype)
             with torch.no_grad():
                 self._warm_expert_activation(self._warmup_input((_WARMUP_TOKENS, width), device, dtype))
@@ -1126,14 +1113,9 @@ class EPMoELayerBase(EPExpertGatherMixin, EPRouterBalancingMixin, nn.Module, ABC
         with torch.amp.autocast("cuda", dtype=output_dtype):
             expert_out = compute_fn(sorted_tokens, offs, sorted_expert_ids)
 
-        if inv_map is not None:
-            return MoEWeightedUnpermute.apply(
-                expert_out.to(output_dtype).contiguous(), sorted_weights.to(output_dtype), sorted_token_idx, inv_map
-            )
-        expert_out = expert_out.to(output_dtype) * sorted_weights.unsqueeze(-1).to(output_dtype)
-        output = torch.zeros((tokens.shape[0], tokens.shape[-1]), device=tokens.device, dtype=output_dtype)
-        output.index_add_(0, sorted_token_idx, expert_out)
-        return output
+        return MoEWeightedUnpermute.apply(
+            expert_out.to(output_dtype).contiguous(), sorted_weights.to(output_dtype), sorted_token_idx, inv_map
+        )
 
     def _separate_glu_experts_gmm(
         self, tokens: torch.Tensor, experts: torch.Tensor, weights: torch.Tensor, output_dtype: torch.dtype

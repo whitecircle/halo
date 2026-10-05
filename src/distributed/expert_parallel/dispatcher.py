@@ -32,7 +32,6 @@ from typing import Self
 
 import torch
 import torch.distributed as dist
-import torch.nn.functional as F
 
 from src.distributed.expert_parallel.autograd import (
     DeepEPCombineFunction,
@@ -677,16 +676,26 @@ class _ElasticBackend(_DeepEPBackend):
         return self._slice(grad_x)
 
     def _pad(self, t: torch.Tensor) -> torch.Tensor:
-        """Zero-pad the feature dim up to ``_padded_hidden`` for the all-to-all transport."""
+        """Zero-pad the feature dim up to ``_padded_hidden`` for the all-to-all transport.
+
+        One strided copy into the padded buffer plus a fill of the pad columns only: ``F.pad`` fills the
+        whole buffer first and then copies, two full passes over a ``[tokens, hidden]`` activation."""
         if not self._needs_pad:
             return t
-        return F.pad(t, (0, self._padded_hidden - self._d.hidden_dim))
+        hidden = self._d.hidden_dim
+        out = t.new_empty((*t.shape[:-1], self._padded_hidden))
+        out[..., :hidden].copy_(t)
+        out[..., hidden:].zero_()
+        return out
 
     def _slice(self, t: torch.Tensor) -> torch.Tensor:
-        """Drop the transport padding, returning the real ``hidden_dim`` width."""
+        """Drop the transport padding, returning the real ``hidden_dim`` width as a row-strided view.
+
+        No copy: every consumer (the expert permute's gather, the residual add, the next transport's
+        ``_pad``) reads a row stride of ``_padded_hidden`` as cheaply as a contiguous row."""
         if not self._needs_pad:
             return t
-        return t[..., : self._d.hidden_dim].contiguous()
+        return t[..., : self._d.hidden_dim]
 
 
 class _LegacyBackend(_DeepEPBackend):

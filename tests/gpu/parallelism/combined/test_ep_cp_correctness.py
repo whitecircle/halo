@@ -244,7 +244,7 @@ def run(ctx):
         "ep_cp_finite": math.isfinite(ep_cp_loss),
     }
 
-    # EP-only: every rank ran the identical broadcast batch, and at top_k >= ep_size each token's expert
+    # EP-only: every rank ran the identical broadcast batch, and on the grouped path each token's expert
     # rows are computed independently and combined in top-k slot order, so the ranks agree bit for bit
     # (inf when any rank is non-finite).
     ep_spread = world_spread(ep_only_loss)

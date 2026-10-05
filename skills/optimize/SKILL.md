@@ -44,10 +44,10 @@ These fire automatically; mention them only to confirm, not as new advice. Figur
 - **AdamWBF16 + stochastic rounding** — auto from `bf16: true`; half the per-param state of fp32 AdamW at
   a loss curve that tracks the fp32 master. Auto-OFF under replicated DDP.
 - **CDMC=1** — baked into the image env for multi-group EP correctness; no measurable throughput effect.
-- **Atomic-free expert permute** — auto for high-top_k MoE (`top_k ≥ ep_size`); win grows with sequence
-  length. gpt-oss (top-4) stays on the cheaper `index_add_` path at EP8.
+- **Atomic-free expert permute** — auto on every grouped-GEMM MoE path; win grows with sequence
+  length (+24% on gpt-oss-20b EP8).
 - **Fused MoE path** — fused GLU (`HALO_FUSED_GLU`) on every expert and dense-MLP combine, and the
-  fused weighted un-permute where `top_k ≥ ep_size` (grouped path).
+  fused weighted un-permute on the grouped path.
 - **FlexAttention on Gemma 4's sliding layers** (`sdpa_flex_sliding`, `HALO_FLEX_SLIDING`).
 
 ## Throughput flow (raise tok/s/GPU)

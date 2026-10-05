@@ -185,17 +185,17 @@ def _record_permute_backwards(monkeypatch) -> list[tuple[str, str]]:
 
 @pytest.mark.parametrize(
     ("top_k", "ep_size", "grouped_mm", "warmed"),
-    ((2, 2, True, True), (1, 2, True, False), (2, 2, False, False)),
-    ids=("fused_permute", "top_k_below_ep_size", "per_expert_loop"),
+    ((2, 2, True, True), (1, 2, True, True), (2, 2, False, False)),
+    ids=("fused_permute", "fused_permute_top_k_below_ep_size", "per_expert_loop"),
 )
 def test_the_permute_kernels_are_warmed_where_the_compute_path_runs_them(
     monkeypatch, top_k, ep_size, grouped_mm, warmed
 ):
-    """The grouped path takes the fused permute when ``top_k >= ep_size``: its gather's backward and the
-    weighted unpermute's forward and backward then run inside the span, so the warmup runs them first,
-    forward and backward. Below that the index_add path runs, and ``use_grouped_gemm: false`` runs the
-    per-expert loop, the documented way around these kernels: in both there is nothing to warm, and a
-    warm-up that ran them anyway would compile the kernels the loop exists to avoid."""
+    """The grouped path always takes the fused permute, whatever ``top_k`` and ``ep_size``: its gather's
+    backward and the weighted unpermute's forward and backward run inside the span, so the warmup runs
+    them first, forward and backward. ``use_grouped_gemm: false`` runs the per-expert loop, the documented
+    way around these kernels: there is nothing to warm, and a warm-up that ran them anyway would compile
+    the kernels the loop exists to avoid."""
     calls = _record_permute_backwards(monkeypatch)
     layer = _RecordingLayer(ep_size=ep_size)
     layer._use_grouped_mm = grouped_mm

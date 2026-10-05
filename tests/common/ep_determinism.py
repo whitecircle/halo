@@ -10,12 +10,12 @@ uninitialized-memory fill that DeepEP refuses to run beside (left on, the first 
 The body turns determinism on exactly as HF's ``Trainer`` does for ``full_determinism``
 (``enable_full_determinism``, after the load), then runs the same forward and backward on the same
 per-rank batch ``REPEATS`` times on a family's tiny model and requires the loss and every gradient to
-match the first pass bit for bit. ``MODES`` are the two-rank layouts, each a distinct dispatch or
-expert-compute path:
+match the first pass bit for bit. ``MODES`` are the two-rank layouts, each a distinct dispatch, routing
+or expert-compute shape:
 
-  ep2          — DeepEP V2 dispatch, grouped GEMM, atomic-free fused permute (``top_k >= ep_size``).
-  ep2_top1     — top-1 routing, so the grouped path permutes through ``index_select`` / ``index_add_``
-                 (families whose config spells the top-k ``num_experts_per_tok``).
+  ep2          — DeepEP V2 dispatch, grouped GEMM, atomic-free fused permute.
+  ep2_top1     — the same path at top-1 routing, below ``top_k == ep_size`` (families whose config
+                 spells the top-k ``num_experts_per_tok``).
   ep2_loop     — the per-expert loop (``use_grouped_gemm: false``).
   ep2_legacy   — the DeepEP V1 buffer (``ep_buffer_backend: legacy``).
   ep1          — experts replicated on every rank, no dispatch.

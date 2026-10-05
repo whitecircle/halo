@@ -318,8 +318,9 @@ steps. Under torch's deterministic-algorithms mode, which HF's `Trainer` turns o
 (`src/distributed/expert_parallel/dispatcher.py`): a prologue kernel places each received token by
 source rank and token index. The `legacy` V1 buffer places tokens by prefix sums already and needs
 nothing. The rest of the EP path is deterministic as is: grouped GEMM, the fused GLU, the atomic-free
-permute, the combine, and `ep_size == 1`, which has no dispatch. At `top_k < ep_size` the permute's
-`index_add_` is deterministic only because torch's mode swaps in its deterministic kernel.
+permute, the combine, and `ep_size == 1`, which has no dispatch. The per-expert loop's
+(`use_grouped_gemm: false`) `index_add_` is deterministic only because torch's mode swaps in its
+deterministic kernel.
 
 DeepEP asserts at every dispatch and combine, on both buffers, that deterministic mode does not run
 beside `torch.utils.deterministic.fill_uninitialized_memory`, which defaults to on whether or not the
@@ -393,7 +394,7 @@ it on EP MoE ([torch.compile](../optimization/torch-compile.md)).
 Whichever kernel a family resolves, a layer with a real dispatch group (`ep_size > 1`) traces it on
 its **first forward, before that forward's dispatch** (`_warm_activation_graphs`): one grad-enabled
 pass with a backward and one under `no_grad`, outside inference mode, so a first forward under
-`torch.inference_mode()` still warms the backward kernels a later training forward runs. Where the fused permute runs (the grouped-GEMM path with `top_k >= ep_size`), the
+`torch.inference_mode()` still warms the backward kernels a later training forward runs. Where the fused permute runs (every grouped-GEMM path), the
 same pass runs the permute's backward and the weighted unpermute's forward and backward. One token count
 covers every dispatch size: the kernels take their row count with `do_not_specialize`, so Triton
 compiles no separate binary per class of it (1, a multiple of 16, neither). The weighted unpermute's

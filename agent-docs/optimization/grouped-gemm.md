@@ -57,13 +57,13 @@ On that gpt-oss-20b EP step the atomic-free path runs ≈5× faster than the def
 
 ### The atomic-free gather-reduce permute
 
-The token permute/unpermute (`MoEGatherPermute`, `MoEWeightedUnpermute`, `src/kernels/moe_permute.py`) is the larger lever for high-top_k MoE. Qwen3.6 (top-8, 256 experts, 32 local/rank at EP8) measures the scatter-back `index_add_` at ~32% of the step: 4.3 ms/call vs gpt-oss (top-4, 4 local/rank) 0.38 ms/call (11× gap, pure collision rate).
+The token permute/unpermute (`MoEGatherPermute`, `MoEWeightedUnpermute`, `src/kernels/moe_permute.py`) is the larger lever for high-top_k MoE. Qwen3.6 (top-8, 256 experts, 32 local/rank at EP8) measures the scatter-back `index_add_` at ~32% of the step, 4.3 ms per call.
 
 The permute expresses both directions with no atomics via a precomputed `inv_map` (`[recv_N, top_k]` of sorted positions feeding each recv token, sentinel-padded, built by `build_inv_map`), turning the scatter into gather + reduction. It matches `index_add_` to rounding, not bit for bit: the kernels accumulate in fp32, and the unpermute skips the bf16 rounding of each weighted row (checked fwd+bwd against a float64 `index_add_`).
 
-It is gated on **`top_k ≥ ep_size`** (`_uses_fused_permute`, read by `base_layer._sort_tokens_for_grouped_mm` and the EP warm-up). The atomic-free path pays for building `inv_map` and wins only where many rows add into the same token, which is what `top_k ≥ ep_size` means. Below that (gpt-oss top-4 at EP8, the top-8 families at `ep16`, DeepSeek-V4-Flash top-6 at `ep8`) a received token lands on few local rows, the atomics rarely collide, and the plain `index_select` + `index_add_` is kept.
+It runs on every grouped-GEMM path, whatever `top_k` and `ep_size` (`base_layer._sort_tokens_for_grouped_mm`; the EP warm-up compiles it). Even where a received token lands on few local rows (gpt-oss top-4 at EP8), a bf16 `index_add_` is a CAS-loop atomic. On packed chat data (BFD-packed `HuggingFaceH4/ultrachat_200k`, 16k tokens/GPU/step, GC on, 8× B300) it costs ~1.5 ms per call on gpt-oss-20b EP8: 108 ms of a 1.24 s step, and 161 ms of gpt-oss-120b's 1.57 s. The gather-reduce makes one memory-bandwidth pass. On that data gpt-oss-20b EP8 runs 16,574 tok/s/GPU at s4096 b4 and 16,618 at s16384 b1, against 13,050 and 13,138 with `index_add_` (+27%); gpt-oss-120b EP8 runs 12,832 against 10,301 (+25%). Those figures include the copy-free DeepEP padding ([DeepEP](../infrastructure/deepep.md#hidden-padding-hidden--256)), about 2 points at gpt-oss-20b EP8; the permute alone is +24% there.
 
-Above the gate both reductions run as one Triton kernel (`src/kernels/moe_permute.py`) that walks `inv_map` per output row and accumulates in fp32, so no `[recv_N, top_k, H]` transient or padded copy exists. The grouped path folds the routing-weight multiply into the unpermute (`MoEWeightedUnpermute`), and its backward writes the expert-output gradient and the routing-weight gradient in one pass. Routing weights that need no gradient leave the expert outputs unsaved, since only the routing-weight gradient reads them. The fused `[gate | up]` GLU output is read in place by the packed GLU kernels (`PACKED_GLU_MULS` in `src/kernels/fused_glu.py`), whose backward writes one `[..., 2M]` gradient.
+Both reductions run as one Triton kernel (`src/kernels/moe_permute.py`) that walks `inv_map` per output row and accumulates in fp32, so no `[recv_N, top_k, H]` transient or padded copy exists. The grouped path folds the routing-weight multiply into the unpermute (`MoEWeightedUnpermute`), and its backward writes the expert-output gradient and the routing-weight gradient in one pass. Routing weights that need no gradient leave the expert outputs unsaved, since only the routing-weight gradient reads them. The fused `[gate | up]` GLU output is read in place by the packed GLU kernels (`PACKED_GLU_MULS` in `src/kernels/fused_glu.py`), whose backward writes one `[..., 2M]` gradient.
 
 The Qwen3.6 table is a same-session A/B of `index_add_` against the atomic-free permute in its padded-gather form (the `halo_padded_gather` baseline below), on Qwen3.6-35B-A3B at EP=8; compare within it only (tuned absolute figures: [Throughput Benchmarks](throughput-benchmarks.md#ep-scaling-seq-4096)).
 
@@ -78,9 +78,7 @@ The fused kernels against that padded-gather permute (a separate routing-weight 
 
 End to end, these kernels together with the fused GLU, torch's fused RMSNorm on four families and AdamWBF16's folded gradient clip (measured on the change merged as 29cf60ded; 2× B300, EP2, peak memory unchanged): Gemma 4 26B-A4B full SFT at 2,048 tokens 8,984 → 11,152 cluster tok/s (1.24×), most of it from the optimizer; at 4,096 tokens gpt-oss-20b 1.25×, Qwen3-30B-A3B 1.12×, GLM-4.7-Flash 1.09×.
 
-Per-device batch multiplies the per-call recv buffer exactly like sequence length, so on the families the gate leaves on the CAS path (`top_k < ep_size`) batch shape is a real lever. At high router skew scale with GA, not per-device batch.
-
-gpt-oss-120b at EP8, same 64-sequence effective batch: bs2 × GA4 measures ~20% slower than bs1 × GA8 at high router skew (`moe/load_max` ~11), and parity at a balanced load (~2).
+Per-device batch multiplies the per-call recv buffer exactly like sequence length.
 
 ## Throughput tuning beyond the kernel
 
@@ -89,7 +87,7 @@ The grouped GEMM is one part of an EP step (also: all-to-all dispatch/combine, p
 1. **Pick parallelism by fit.** If it fits FSDP2, FSDP has no all-to-all and reaches higher achieved TFLOPS, at a high memory cost; use EP only when FSDP OOMs ([Maximizing achieved TFLOPS](throughput-benchmarks.md#maximizing-achieved-tflops)).
 2. **Smallest EP degree that fits the experts.** Fewer ranks = smaller all-to-all + larger per-rank GEMMs.
 3. **GC off when the batch fits** ([the gpt-oss-20b EP case study](throughput-benchmarks.md#where-the-ep-steps-time-goes-gpt-oss-20b-ep8-b1s4096-8-b300-fa4)).
-4. **Atomic-free expert permute** (above) — automatic for `top_k ≥ ep_size`, +18% (seq 4k) to +65% (seq 16k) on qwen3.6.
+4. **Atomic-free expert permute** (above) — always on the grouped path; +18% (seq 4k) to +65% (seq 16k) on qwen3.6 EP8, +21–24% on gpt-oss-20b EP8.
 5. **Do not use low precision** (fp8/fp4) — measured net-slower (experts are tiny-M / bandwidth-bound, bf16 at the roofline). See [Low-Precision Kernels](low-precision-moe-kernels.md).
 
 Compute–comm overlap is the remaining structural lever. One narrow form ships opt-in: `HALO_EP_SHARED_OVERLAP=1` runs the shared-expert FFN on a side stream concurrent with the dispatch all-to-all, on the families that have one (see [DeepEP](../infrastructure/deepep.md)). The broader async dispatch/combine restructure (hiding the all-to-all behind the routed compute) is not implemented — it needs a larger forward restructure, and gpt-oss is already compute-bound at production seq lengths.

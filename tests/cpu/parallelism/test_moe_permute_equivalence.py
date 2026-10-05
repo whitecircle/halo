@@ -4,7 +4,7 @@
 `index_add_` expert scatter-back with an atomic-free gather+sum via a precomputed `inv_map`
 (`build_inv_map`); the unpermute also
 folds in the routing-weight multiply. They are the production permute for every grouped-GEMM MoE family
-when `top_k >= ep_size`, so they must match the index_select / weighted index_add reference they
+at every top_k and EP size, so they must match the index_select / weighted index_add reference they
 replace, in float64, in BOTH forward and backward (the routing-weight gradient included). On CPU both
 run their eager forms, which this file pins; the Triton kernels are tests/gpu/kernels/test_moe_permute.py's.
 
@@ -16,6 +16,7 @@ import pytest
 import torch
 
 from src.kernels.moe_permute import MoEGatherPermute, MoEWeightedUnpermute, build_inv_map
+from tests.common.ep_stubs import StubEPLayerBase
 
 
 def _make_routing(recv_N: int, width: int, seed: int):
@@ -171,6 +172,50 @@ def test_full_width_token_all_experts():
     for name, g, r in zip(("fwd", "expert grad", "weight grad"), got, want, strict=True):
         _eq(g, r, f"full-width weighted unpermute {name}")
     print("OK test_full_width_token_all_experts")
+
+
+class _GroupedPathLayer(StubEPLayerBase):
+    """The grouped expert path of an EP layer with ``ep_size`` ranks, without process groups."""
+
+    def __init__(self, ep_size: int, experts_per_rank: int):
+        super().__init__()
+        self.ep_size = ep_size
+        self.experts_per_rank = experts_per_rank
+        self._use_grouped_mm = True
+
+
+@pytest.mark.parametrize(("top_k", "ep_size"), ((4, 8), (2, 2), (1, 2)), ids=("below_top_k", "at_top_k", "top_1"))
+def test_the_grouped_path_permutes_atomic_free_at_every_top_k_and_ep_size(monkeypatch, top_k, ep_size):
+    """gpt-oss's top-4 at EP8 sits below ``top_k >= ep_size``, where the grouped path used to fall back to
+    ``index_select`` and a bf16 ``index_add_``. Every shape must build ``inv_map`` and go through both fused
+    Functions, and the scatter-back must equal the weighted ``index_add_`` reference, with dispatch padding
+    (``-1``) and other ranks' expert ids dropped."""
+    calls = []
+    for cls in (MoEGatherPermute, MoEWeightedUnpermute):
+        apply = cls.apply
+        monkeypatch.setattr(
+            cls, "apply", lambda *args, _apply=apply, _name=cls.__name__: calls.append(_name) or _apply(*args)
+        )
+    layer = _GroupedPathLayer(ep_size, experts_per_rank=3)
+    g = torch.Generator().manual_seed(top_k * 10 + ep_size)
+    recv_n, hidden = 11, 5
+    tokens = torch.randn(recv_n, hidden, dtype=torch.float64, generator=g)
+    experts = torch.randint(-1, 5, (recv_n, top_k), generator=g)  # -1 padding, 3..4 are not this rank's
+    weights = torch.rand(recv_n, top_k, dtype=torch.float64, generator=g)
+    scale = torch.tensor([1.0, 2.0, 3.0], dtype=torch.float64)
+
+    out = layer._compute_experts_with_grouped_mm(
+        tokens, experts, weights, torch.float64, lambda rows, _offs, eids: rows * scale[eids, None]
+    )
+
+    assert calls == ["MoEGatherPermute", "MoEWeightedUnpermute"]
+    local = (experts >= 0) & (experts < 3)
+    rows, slots = local.nonzero(as_tuple=True)
+    eids = experts[rows, slots]
+    expected = torch.zeros(recv_n, hidden, dtype=torch.float64).index_add(
+        0, rows, tokens[rows] * scale[eids, None] * weights[rows, slots, None]
+    )
+    _eq(out, expected, f"top_k={top_k} ep_size={ep_size} scatter-back")
 
 
 if __name__ == "__main__":

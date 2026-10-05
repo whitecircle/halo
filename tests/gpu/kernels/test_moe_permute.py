@@ -58,7 +58,8 @@ def test_weighted_unpermute_matches_index_add(dtype, tol, n_tokens, top_k, hidde
 
 def test_weighted_unpermute_takes_strided_inputs():
     """Column slices of wider buffers (a row stride larger than the width): the backward kernel indexes
-    the saved tensors with unit strides, so it must receive contiguous copies."""
+    the saved tensors with unit strides, so it must receive contiguous copies, and reads the incoming
+    gradient at its own row stride (under EP, a view of the padded transport buffer)."""
     generator = torch.Generator(device="cuda").manual_seed(0)
     n_tokens, top_k, hidden = 257, 8, 704
     n_sorted = n_tokens * top_k // 2
@@ -69,8 +70,31 @@ def test_weighted_unpermute_takes_strided_inputs():
     expert_out.retain_grad()
     weights.retain_grad()
     assert not expert_out.is_contiguous() and not weights.is_contiguous()
-    grad = torch.randn(n_tokens, hidden, generator=generator, device="cuda")
+    grad = torch.randn(n_tokens, hidden + 64, generator=generator, device="cuda")[:, :hidden]
+    assert grad.stride() == (hidden + 64, 1)
     _check_against_index_add(expert_out, weights, token_idx, inv_map, n_tokens, grad, 1e-5)
+
+
+def test_one_backward_compile_serves_every_gradient_row_stride():
+    """The warm-up runs the unpermute's backward on a contiguous gradient; training hands it a row-strided
+    view of the padded transport buffer. The stride must not select a new binary, or the first training
+    backward compiles inside the dispatch-combine span the warm-up exists to keep compile-free."""
+    kernel = moe_permute._weighted_unpermute_bwd_kernel
+    generator = torch.Generator(device="cuda").manual_seed(0)
+    token_idx, inv_map = _routing(64, 2, 128, generator)
+
+    def run(row_stride: int) -> None:
+        expert_out = torch.randn(128, 360, device="cuda", dtype=torch.bfloat16, requires_grad=True)
+        weights = torch.rand(128, device="cuda", dtype=torch.bfloat16, requires_grad=True)
+        grad = torch.randn(64, row_stride, device="cuda", dtype=torch.bfloat16)[:, :360]
+        MoEWeightedUnpermute.apply(expert_out, weights, token_idx, inv_map).backward(grad)
+
+    kernel.device_caches.clear()
+    run(360)
+    warm = len(kernel.device_caches[torch.cuda.current_device()][0])
+    for row_stride in (384, 361, 3072):
+        run(row_stride)
+    assert len(kernel.device_caches[torch.cuda.current_device()][0]) == warm, "a row stride compiled a new binary"
 
 
 def test_gather_reduce_sums_only_real_rows():
@@ -178,6 +202,11 @@ def run(ctx) -> dict:
     record_check(checks, "gather_reduce_takes_a_strided_weight", test_gather_reduce_takes_a_strided_weight)
     record_check(checks, "empty_dispatch", test_empty_dispatch)
     record_check(checks, "one_compile_serves_every_row_count", test_one_compile_serves_every_row_count)
+    record_check(
+        checks,
+        "one_backward_compile_serves_every_gradient_row_stride",
+        test_one_backward_compile_serves_every_gradient_row_stride,
+    )
     return {"checks": checks}
 
 
