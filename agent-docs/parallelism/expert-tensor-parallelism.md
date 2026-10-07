@@ -191,8 +191,7 @@ patching when `expert_tp_size > 1`. Per-rank sharded EP save is rejected — see
 
 ## Limitations
 
-**Trainers.** There is no `_supports_etp`: ETP folds into `ep_group_size = ep_size ×
-expert_tp_size`, so it is gated by `_supports_ep`, which every trainer declares `True`. Matrix:
+**Trainers.** Every trainer runs ETP, as it runs EP. Matrix:
 [Trainer Compatibility](../reference/trainer-architecture.md#trainer-compatibility).
 
 **Models.** Every EP-capable MoE family

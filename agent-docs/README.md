@@ -6,7 +6,7 @@ Trainers subclass TRL/Transformers trainers, so any Hub model trains with the sa
 
 Start with the guides below, or jump to [Training Methods](training-methods/README.md), [Parallelism](parallelism/README.md), [Models](models/README.md), [Data](data/README.md), [Optimization](optimization/README.md), [Infrastructure](infrastructure/README.md), [Contributing](contributing/README.md), or the [Reference](reference/README.md).
 
-- **[Installation](getting-started/installation.md)** — The prebuilt Blackwell/Hopper image is the supported path — everything, `make install` included, runs inside it.
+- **[Installation](getting-started/installation.md)** — The prebuilt Blackwell/Hopper image (the supported path, everything compiled in), the `make install` lock check, and the DeepEP / Flash Attention pins.
 - **[Quickstart](getting-started/quickstart.md)** — First SFT run through multi-turn RL, with LoRA, the parallelism flags, and dataset sources.
 - **[Configuration Guide](getting-started/configuration.md)** — The YAML system, toolkit defaults (BF16, Liger), CLI overrides, and accelerate vs torchrun launchers.
 - **[Choosing a Training Method](getting-started/choosing-a-method.md)** — A comparison table that matches your data to a method, and which trainers take CP.

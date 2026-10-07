@@ -22,7 +22,7 @@ Wrapped MoE families: [Qwen3 MoE](../models/qwen3.md#qwen3-moe), [Qwen3.5/3.6 Mo
 
 ## Supported combinations
 
-All modes use FSDP2 (`fully_shard`, per-layer). EP expert modules sit in `ignored_params` and sync via EP backward hooks, except at `ep_group_size == 1`, where `fsdp_shard_ep1_experts` (default on) has FSDP2 shard them; CP wraps the attention path for sequence splitting and lets FSDP2 sync the rest.
+All modes use FSDP2 (`fully_shard`, per-layer). EP expert modules sit in `ignored_params` and sync via EP backward hooks or the deferred post-backward sweep, except at `ep_group_size == 1`, where `fsdp_shard_ep1_experts` (default on) has FSDP2 shard them; CP wraps the attention path for sequence splitting and lets FSDP2 sync the rest.
 
 | Mode | Data Parallel Size | Notes |
 |------|-------------------|-------|
@@ -140,15 +140,14 @@ traced to the code that raises. This table is the index into them, not a second 
 | Axis | Trainers | Models | Signature knob rejections |
 |---|---|---|---|
 | [EP](expert-parallelism.md#limitations) | all | the wrapped MoE families; a dense model raises | QLoRA, PEFT inside expert layers, `fsdp_reshard_after_forward`, `use_hsdp`, stock AdamW with `bf16_optimizer: false`, `accelerate launch` |
-| [ETP](expert-tensor-parallelism.md#limitations) | all (gated by `_supports_ep`) | every EP-capable MoE family | expert LoRA, `save_sharded_ep` — plus every EP rule |
+| [ETP](expert-tensor-parallelism.md#limitations) | all | every EP-capable MoE family | expert LoRA, `save_sharded_ep` — plus every EP rule |
 | [TP](tensor-parallelism.md#limitations) | all | the attention classes in `TP_SHARDABLE_ATTENTION_CLASSES`; zero sharded layers raises | LoRA/PEFT, QLoRA, `fsdp_reshard_after_forward` at DP > 1, `use_hsdp` |
 | [CP](context-parallelism.md#limitations) | SFT, SMPO, offline GRPO (full fine-tuning) | the Ulysses attention wrappers | packing, padding-free, left padding, non-Flash attention, `label_smoothing_factor`, `loss_type: dft`, eval metrics, multimodal; offline GRPO adapters |
 | [PP](pipeline-parallelism.md) | — (not yet available in this release; `pipeline_parallel_size > 1` is rejected at config time) | — | — |
 | [DP](data-parallelism.md#limitations) | all | all | MoE grouped GEMM under `accelerate launch`, multi-device `device_map` |
 
-Trainer support is declared per class (`_supports_ep` / `_supports_tp` / `_supports_cp` /
-`_supports_pp`) and enforced in `ParallelismValidationMixin`; there is no `_supports_etp`, since ETP
-folds into `ep_group_size`. Full matrix:
+EP, ETP and TP run under every trainer. CP and PP support is declared per class (`_supports_cp` /
+`_supports_pp`) and enforced in `ParallelismValidationMixin`. Full matrix:
 [Trainer Compatibility](../reference/trainer-architecture.md#trainer-compatibility). CP's `False`
 rows are per-trainer declarations — `logits_to_keep`, global log-probability sums, full-sequence
 pooling and dual models are the reasons behind them, not properties CP itself detects.

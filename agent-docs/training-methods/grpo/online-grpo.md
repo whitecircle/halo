@@ -28,9 +28,9 @@ The reward is the `rewards:` list of [terms](rewards.md): each becomes one TRL r
 | `accuracy` | the last `\boxed{...}` equals `answer` | none |
 | `format` | the completion matches `pattern` | `pattern`, default `<think>.*?</think>\s*<answer>.*?</answer>` under `re.DOTALL` |
 
-Accuracy normalizes both sides: the answer keeps only the text after a GSM8K `####` marker, both drop `,` and `$`, and `extract_last_boxed` (`src/rewards/matching.py`) matches braces by depth. An empty extraction never scores; the match is strict, while the environments' chain also lowercases and accepts `rtol=0.01` numeric matches. The graders live in `src/rewards/verifiable.py`.
+Accuracy normalizes both sides: the answer keeps only the text after a GSM8K `####` marker, both drop `,` and `$`, and `extract_last_boxed` (`src/rewards/graders/matching.py`) matches braces by depth. An empty extraction never scores; the match is strict, while the environments' chain also lowercases and accepts `rtol=0.01` numeric matches. The graders live in `src/rewards/graders/verifiable.py`.
 
-A `judge` or `reward_model` term is an async reward function TRL gathers on its own loop; a judge reads the rendered `answer` column as the reference. The list is YAML-only: a container field cannot be set from the CLI.
+A `judge` or `reward_model` term is an async reward function TRL gathers on its own loop; a judge reads the rendered `answer` column as the reference, and each term logs `<source>/<name>/scored` (`judge/…`, `reward_model/…`), the share of completions it reached a verdict on. A judge listing `checks` (a veto judge) is refused at config time: it gates an environment objective this arm has none of, so list `requirements` instead. The list is YAML-only: a container field cannot be set from the CLI.
 
 ## Configuration
 
@@ -58,7 +58,7 @@ gradient_accumulation_steps: 8
 
 TRL defaults `loss_type` to `dapo` and `scale_rewards` to `group`. The recipes under `examples/grpo/online/` all run `loss_type: grpo`, `beta: 0`, `epsilon` `0.15`–`0.2`, `num_generations` 4 or 8, and `max_completion_length` 128–4096.
 
-Five optional objective changes ride on the script arguments, all off by default: `scale_rewards_std_floor` (a floor on the std divisor), `drop_degenerate_groups` (mask all-equal-reward groups out of the loss and normalizer), `balance_token_mass` (cancel each generation round's net token-weighted push; needs `loss_type` `cispo`, `dapo` or `dr_grpo`, `top_entropy_quantile: 1.0` and no `off_policy_mask_threshold`, [Advantages](async-grpo/objective.md#advantages)), `use_rlrr` (intra-group ranking advantages, [arXiv:2601.23058](https://arxiv.org/abs/2601.23058)) and `use_sdpg` ([Online SDPG](../distillation/online-sdpg.md)).
+Five optional objective changes ride on the script arguments, all off by default: `scale_rewards_std_floor` (a floor on the std divisor, refused under `scale_rewards: none`), `drop_degenerate_groups` (mask all-equal-reward groups out of the loss and normalizer), `balance_token_mass` (cancel each generation round's net token-weighted push; needs `loss_type` `cispo`, `dapo` or `dr_grpo`, `top_entropy_quantile: 1.0` and no `off_policy_mask_threshold`, [Advantages](async-grpo/objective.md#advantages)), `use_rlrr` (intra-group ranking advantages, [arXiv:2601.23058](https://arxiv.org/abs/2601.23058)) and `use_sdpg` ([Online SDPG](../distillation/online-sdpg.md)).
 
 The std floor, the drop and RLRR recompute on the gathered reward set, so they raise unless `multi_objective_aggregation` is `sum_then_normalize`, and RLRR excludes the other two.
 
@@ -66,7 +66,7 @@ RLRR's nine tunables (`RLRRConfig`, `src/args/mixins.py`): `rlrr_mode` (`hrr` de
 
 **Importance-sampling correction** (`vllm_importance_sampling_correction`, TRL default on) weights the loss by `exp(logπ_recompute − logπ_sampling)`; under the default `vllm_importance_sampling_mode: sequence_mask` a sequence whose ratio exceeds `vllm_importance_sampling_clip_max` (`3.0`) — or falls below `vllm_importance_sampling_clip_min`, unset by default — is masked out of the loss, and the `*_truncate` modes clamp it instead. It gates the KL tail clamp, so `beta > 0` with it off warns.
 
-A rank-0 startup probe refuses a server whose logprobs are raw pre-temperature values at `temperature != 1.0` — serve vLLM with `--logprobs-mode processed_logprobs`. It also refuses nucleus-renormalized logprobs under `top_p < 1` while the correction runs a `sequence_*` mode, which stalls the run silently; keep `top_p: 1.0`.
+A rank-0 startup probe refuses a server whose logprobs are raw pre-temperature values at `temperature != 1.0` — serve vLLM with `--logprobs-mode processed_logprobs`. It also refuses logprobs renormalized over a sampling cut — `top_p < 1`, a `top_k` or a `min_p` — while the correction runs a `sequence_*` mode, which stalls the run silently; keep all three off. TRL's `top_k`, `min_p` and `repetition_penalty` go out on every request, off values included, so the server never substitutes the model's `generation_config.json` defaults ([Rollout Servers](../../infrastructure/rollout-servers.md)).
 
 **Dropout is forced off** after the parallel modes are realized, so it reaches EP grouped expert-LoRA dropout and overrides `disable_dropout: false`: active dropout biases every recomputed log-prob against vLLM's dropout-free sampling. A config-level float only warns.
 
@@ -106,6 +106,8 @@ Text-only: a multimodal batch routes every rank back to the full path, and a PEF
 ## Server mode only
 
 A colocated in-process `vllm.LLM()` builds its own NCCL communicators on the training GPUs, and two NCCL worlds sharing devices and streams under `CUDA_DEVICE_MAX_CONNECTIONS=1` deadlock, so `DistributedGRPOTrainer` rejects `use_vllm: false` and `vllm_mode: colocate` at init ([Rollout Servers](../../infrastructure/rollout-servers.md#vllm)).
+
+It also rejects TRL's tool-calling loop (`tools`, `environment_factory`): the loop regenerates as long as a completion on the rank calls a tool, each round a collective generate, so ranks fall out of step. Tool use trains on [Async GRPO with Environments](async-grpo/README.md).
 
 A rank-0 preflight reads the served `max_model_len` from `/v1/models` and raises on every rank when `max_prompt_length + max_completion_length` exceeds it, before the trainer is built.
 
@@ -153,7 +155,7 @@ CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6 torchrun --nproc_per_node=7 \
 
 `halo launch rlvr <config> --nproc 7` builds the same `torchrun` line — the device split stays yours — landing on FSDP2 data parallelism. Add `--tensor_parallel_size` for dense TP or `--expert_parallel_size` for MoE.
 
-Set `expert_parallel_size` to the training-GPU count so the trainer ranks form **one** DeepEP group. Above `expert_parallel_size: 2` a group narrower than the NVLink domain is rejected ([DeepEP](../../infrastructure/deepep.md#ep-grouping-what-is-reliable)), and `num_experts` must divide by `ep_size` — so most rosters want a power-of-two split: trainer on `CUDA_VISIBLE_DEVICES=0,1,2,3` with `--expert_parallel_size=4`, server on `VLLM_CUDA_DEVICES=4,5,6,7`. Under EP+TP, `tp_size` must divide the NVLink domain and `ep_size` must be a multiple of it.
+Set `expert_parallel_size` to the training-GPU count so the trainer ranks form **one** DeepEP group. Above `expert_parallel_size: 2` a group narrower than the NVLink domain is rejected ([DeepEP](../../infrastructure/deepep.md#ep-grouping-what-is-reliable)), and `num_experts` must divide by `ep_size` — so most rosters want a power-of-two split: trainer on `CUDA_VISIBLE_DEVICES=0,1,2,3` with `--expert_parallel_size=4`, server on `VLLM_CUDA_DEVICES=4,5,6,7`. Under EP+TP, `tp_size` must divide the NVLink domain and `ep_size` must be a multiple of `tp_size`.
 
 ### LoRA
 
@@ -163,7 +165,7 @@ The weight sync folds the adapter into each base weight out of place as it sends
 
 ## Data flow and batch construction
 
-One optimizer step: each `{prompt, answer}` row is rendered and replicated `num_generations`× into a group, `_generate_single_turn` sends the token ids to vLLM, completions come back right-**padded** with a `completion_mask` that is `1` only on generated tokens, the rewards score them, and `scale_rewards` normalizes each group into advantages. Under TP the group leader generates and broadcasts, so every rank forwards identical tokens.
+One optimizer step: each `{prompt, answer}` row is rendered and replicated `num_generations`× into a group, `_generate_single_turn` sends the token ids to vLLM, completions come back right-**padded** with a `completion_mask` that is `1` only on generated tokens, the rewards score them, and `scale_rewards` normalizes each group into advantages. Under TP the group leader generates and broadcasts, so every rank forwards identical tokens; TRL's `rollout_func`, which generates in its place, is refused under TP and ETP.
 
 **Collator.** GRPO uses TRL's dataset-**row** collator, not the SFT [collators](../../data/collators.md): left-padded prompts, right-padded completions, never packed — hence no CP.
 
@@ -185,11 +187,13 @@ CPU: `pytest tests/cpu/grpo -m cpu`. GPU: the `test_online_grpo_vllm_*_e2e.py` s
 
 ## What to watch
 
-Metric names follow TRL's `GRPOTrainer`, plus `kl_clamp_frac` (reference log-ratios hitting the 5-nat clamp, at `beta > 0`), `sampling/degenerate_group_frac` and `advantage/net_token_mass` (with `advantage/token_mass_scale` under `balance_token_mass`; its sign reads as the entropy push only under a token-sum loss such as the default `dapo`, not the recipes' `grpo`). Read every run: `rewards/accuracy/mean`, `frac_reward_zero_std`, `sampling/importance_sampling_ratio/mean` (near 1 means trainer and engine agree), `completions/clipped_ratio`, `entropy`, and `<name>/scored_frac` per externally scored term — the share of calls that returned a usable verdict, so a failing judge shows up as a falling fraction rather than a quiet zero ([Reward Terms](rewards.md#generative-judge)).
+Metric names follow TRL's `GRPOTrainer`, plus `kl_clamp_frac` (the share of loss tokens whose reference log-ratio hits the 5-nat clamp, at `beta > 0`), `sampling/degenerate_group_frac` and `advantage/net_token_mass` (with `advantage/token_mass_scale` under `balance_token_mass`; its sign reads as the entropy push only under a token-sum loss such as the default `dapo`, not the recipes' `grpo`). Read every run: `rewards/accuracy/mean`, `frac_reward_zero_std`, `sampling/importance_sampling_ratio/mean` (near 1 means trainer and engine agree), `completions/clipped_ratio` and `entropy`; with a `judge` or `reward_model` term, its `<source>/<name>/scored`.
 
 `early_stop_entropy_band` and `early_stop_logratio_gap` end a run once their condition breaches on `early_stop_patience` readings in a row; the gap reads TRL's `sampling/sampling_logp_difference/mean`, so it needs `vllm_importance_sampling_correction` ([Early stop](async-grpo/monitoring.md#early-stop)).
 
-`save_completions` (default on) writes `<output_dir>/completions/completions_<step>.parquet` (step zero-padded to five digits); `log_completions` is console-only.
+`save_completions` (default on) writes `<output_dir>/completions/completions_<step>.parquet` (step zero-padded to five digits; evaluation adds an `_eval` suffix); `log_completions` is console-only.
+
+**Eval padding.** An eval split's final round is filled with repeats of its first prompts so every rank runs the same rounds. TRL's side of the online eval — generating those repeats, the GRPO loss term, and the reward, length, KL and clamp metrics — counts them like real prompts, so a split that does not fill whole rounds over-weights its first prompts. [Async GRPO with Environments](async-grpo/README.md) never rolls the padding out: its rollout metrics and completions count the split's own episodes alone ([Evaluation](async-grpo/monitoring.md#evaluation)).
 
 | Symptom | Cause | Fix |
 |---|---|---|

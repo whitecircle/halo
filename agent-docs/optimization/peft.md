@@ -255,7 +255,7 @@ before the checkpoint downloads.
 
 ## Measured cost
 
-Both tables measured 2026-10-03 at commit 0bc3a22a5 on the Blackwell image.
+Both tables measured on the Blackwell image.
 
 Dense — 1× B300 (SM103), `DistributedSFTTrainer`, AdamWBF16, Liger, FA4, Qwen3-8B, seq 16384, BS=1, GC,
 10 steps / 3 warmup (full fine-tuning at this shape: [Liger → Benchmarks](liger-kernels.md#benchmarks)):
@@ -310,12 +310,13 @@ before peft's exit, so the restore lands on the sharded params, and the next for
 them once. A pass behind the policy forward (DPO, KTO, offline GRPO) enters and exits on the same unsharded
 params and reshards nothing.
 
-DPO and KTO reject an **explicit** `ref_model` under EP and TP (it is never parallelized, so its log-probs
-would not match the policy's), as self-distillation does its KL `reference_model`: use LoRA with
-`ref_model=None`, or `precompute_ref_log_probs=True`. Under TP, LoRA is rejected too, so DPO/KTO there
-must precompute. SMPO is reference-free. Offline GRPO full fine-tuning sweeps and checkpoints its
-run-start reference without a second resident model; only native expert-only LoRA retains an
-explicit frozen base `ref_model`, which the script loads
+An explicit `ref_model` (DPO, KTO) or self-distillation's KL `reference_model` is never parallelized, so
+under EP or TP it is a whole dense replica on every rank. Its log-probs match the policy's up to kernel
+numerics, so it is warned about, not refused: LoRA with `ref_model=None`, or `precompute_ref_log_probs=True`,
+avoids the replica. Under TP, LoRA is rejected, so DPO/KTO there precompute or hold the replica. SMPO is
+reference-free. Offline GRPO full fine-tuning sweeps and checkpoints its run-start reference without a
+second resident model; only native expert-only LoRA retains an explicit frozen base `ref_model`, which
+the script loads
 ([Offline GRPO → Reference model](../training-methods/grpo/offline-grpo.md#reference-model)).
 
 On online / async GRPO, where no adapter wraps the model — a full fine-tune, or an expert-only LoRA
@@ -325,9 +326,9 @@ and **raises** whenever the policy carries live attention sinks (`reset_sinks: f
 models would compute different log-probs for identical tokens. Add an attention LoRA target (it wraps the
 model, and the disabled adapter is the reference) or set `beta: 0`.
 
-The DPO/KTO scripts never leave the reference to TRL: a full fine-tune gets a frozen copy on plain data
-parallelism and needs `precompute_ref_log_probs: true` under EP, TP or PP; an expert-only LoRA run needs it
-in every mode ([DPO → Reference model](../training-methods/preference/dpo.md#reference-model)).
+The DPO/KTO scripts never leave the reference to TRL: a full fine-tune gets a frozen copy, or no reference
+under `precompute_ref_log_probs: true` with EP or TP (plain data parallelism still loads the copy); an
+expert-only LoRA run needs precompute in every mode ([DPO → Reference model](../training-methods/preference/dpo.md#reference-model)).
 
 ## Online RL — rollout-server weight sync
 

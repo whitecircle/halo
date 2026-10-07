@@ -33,6 +33,8 @@ The checked set is derived from `PreprocessingConfig`: each field declares its o
 knob the metadata does not record warns instead. `--mode text`
 artifacts render no template and skip the render check entirely. A training config setting
 `packing: true` against an unpacked artifact warns — preprocessed rows are never packed at runtime.
+A `model_name_or_path` other than the prep `--model-name` only warns, so train with the tokenizer
+the rows were baked with.
 
 `--mode` is validated on the config, not only by the CLI's choices: an unvalidated typo like `txt`
 falls through every `mode == "text"` branch and chat-templates a raw pretraining corpus. A knob belonging
@@ -139,7 +141,7 @@ artifact would carry `is_vlm: true` over rows holding no pixels, which training 
 | `--no-system-role` | `False` | Merge system prompt into first user message (models without system role) |
 | `--train-on-completions-only` / `--no-train-on-completions-only` | `True` in `--mode chat`, `False` in `--mode text` | Mask user turns; train only on assistant responses. The chat default matches the training side and requires `--assistant-message-template`; asking for masking under `--mode text` is rejected (raw documents have no assistant turns) |
 | `--assistant-message-template` | `None` | Template marking start of assistant response |
-| `--pack-sequences` | `False` | Pack multiple sequences (text SFT only) |
+| `--pack-sequences` | `False` | Pack multiple sequences (text SFT only; refused for a model with compressed-KV layers, such as DeepSeek-V4) |
 | `--packing-strategy` | `bfd` | TRL strategy: `bfd` (best-fit-decreasing, drops overflow), `bfd_split` (carries overflow into later examples) or `wrapped` (concatenate-and-chunk — emits no document boundaries, so a packed row attends across itself) |
 | `--vlm` | `False` | VLM mode (stores `pixel_values`, `image_grid_thw`) |
 | `--images-field` | `None` | (`--vlm`) column holding the row's image(s) for datasets that keep them outside the conversation; merged into the messages like the runtime path. An image column named by nothing is refused |

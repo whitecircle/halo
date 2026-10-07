@@ -44,7 +44,7 @@ It drops the dense `attention_mask` so Flash Attention builds a per-document blo
 
 Inter-row padding is dropped in the flatten. A pad carries position 0, so every kept pad would be its own varlen segment, and the FA4 backward pays a fixed per-segment cost.
 
-Where pads must survive (pipeline parallelism's fixed shapes, `pad_to_multiple_of`), the tail's position IDs are a ramp restarting every `PAD_TAIL_SEGMENT_CHUNK` (256) tokens, keeping it a handful of no-op segments.
+Where pads must survive (`pad_to_multiple_of`, the shipped PP seam's fixed shapes), the tail's position IDs are a ramp restarting every `PAD_TAIL_SEGMENT_CHUNK` (256) tokens, keeping it a handful of no-op segments.
 
 Whether the packed documents actually stay isolated is **per family**, not universal; see [Document isolation under packing](#document-isolation-under-packing).
 
@@ -71,13 +71,8 @@ document).
 
 ### Offline GRPO
 
-`OfflineGRPOCPDataCollatorWithPadding` joins each tokenized prompt and completion into one row,
-then right-pads to a multiple of `cp_size`. Prompt and pad labels are `-100`; raw reference
-log-probs, when present, occupy the same target-token positions as the completion labels. An empty
-completion stays fully masked. Outside CP, `OfflineGRPODataCollatorWithPadding` pads prompts on the
-left and completions on the right. Both are built by the trainer, not this factory.
-
-Reference preparation and resume: [Offline GRPO](../training-methods/grpo/offline-grpo.md#reference-model).
+`OfflineGRPODataCollatorWithPadding` and, under CP, `OfflineGRPOCPDataCollatorWithPadding` are built
+by the trainer, not this factory: [Offline GRPO](../training-methods/grpo/offline-grpo.md).
 
 ## Factory: `select_data_collator()`
 
@@ -147,7 +142,7 @@ non-attention mixer carries state along the sequence regardless of any mask.
 | Inkling | isolated | four depthwise causal convs per layer **cross by construction** — the modeling reads `seq_idx` but its call sites never forward kwargs, so no emission can reach them |
 | Mistral4 | isolated — flash needs `patch_mistral4_flash_packed_position_ids` (upstream drops `position_ids` before the attention interface); dense clean to grouped-GEMM reduction noise | — |
 | GPT-OSS | isolated on flash only; eager/SDPA/flex **leak** — the model's mask kwargs omit `position_ids`, so the packed row runs as one dense causal sequence | — |
-| DeepSeek-V4 (eager-only) | isolated on the training path (`use_cache=False`; a live cache suppresses the packed mask) | the CSA/HCA compressors pool KV across the whole row — **cross by construction** |
+| DeepSeek-V4 (eager-only) | isolated on the training path (`use_cache=False`; a live cache suppresses the packed mask) | the CSA/HCA compressors cut KV windows at row indices and judge their causality by position, so every document after the first attends the row's first windows — `packing` and `padding_free` are **refused** |
 | Qwen3.5 / 3.6, Qwen3-Next | isolated | GatedDeltaNet reads `seq_idx` (conv) + `cu_seq_lens_q` (delta rule): the collators and SMPO's padding-free forward emit both for the family, so its boundaries reach the kernels — but only the `fla` / `causal-conv1d` fast paths consume them (both installed in the images). The torch fallbacks take neither, so a multi-document row would cross in the conv *and* the scan — the factory refuses `packing` / `padding_free`, and SMPO its `padding_free`, unless transformers' own fast-path predicates hold |
 | Bailing / Ling | remote code; see [Bailing/Ling](../models/bailing.md) | KDA linear attention — **crosses**. The KDA op accepts a `cu_seqlens` kwarg, but the model forward never threads kwargs down to it, so there is no reachable boundary parameter — the same class of crossing as Inkling's convs |
 | GLM-5 Next | both layer types receive the 2D padding mask `create_recurrent_attention_mask` builds, so no packed-boundary parameter reaches the DSA attention either | KDA linear attention — **crosses**, the same unreachable-boundary class as Bailing/Ling |
@@ -156,10 +151,20 @@ non-attention mixer carries state along the sequence regardless of any mask.
 | Cohere2 MoE | isolated on every backend, no patch needed — the forward feeds `position_ids` into mask construction and through layer kwargs to the attention interface | — |
 | Step-3.7 Flash | isolated on SDPA and eager, no patch needed — the forward feeds `position_ids` into both mask constructions (full and sliding); bit-exact through dense layers, MoE layers add expert-summation reduction noise (~1e-7 fp32). Training path only: a live cache suppresses the packed mask (`use_cache=False`, as DeepSeek-V4) | — |
 
-The GPT-OSS leak is the one case the toolkit refuses outright: `select_data_collator` raises for
-`DENSE_PACKING_LEAK_MODEL_TYPES` (`src/models/segment_markers.py`) when packing is asked for on a
-non-varlen backend. Pin `flash_attention_2` or turn packing off. The refusal reads the text
-sub-config too, so a composite (VLM) wrapper around a leaking family is covered.
+Two families are refused outright in `select_data_collator`. Both checks read the text sub-config
+too, so a composite (VLM) wrapper is covered:
+
+- **GPT-OSS** (`DENSE_PACKING_LEAK_MODEL_TYPES` in `src/models/segment_markers.py`): packing on a
+  non-varlen backend raises. Pin `flash_attention_2` or turn packing off.
+- **DeepSeek-V4**, or any model whose `layer_types` declare a compressed-KV layer (the
+  `"compressed"` kind in `src/models/attention_layout.py`: `compressed_sparse_attention`,
+  `heavily_compressed_attention`): `packing` and `padding_free` raise on every backend
+  (`reject_compressed_kv_rows`). Positions restart per document but the compressor windows are cut
+  at row indices, so a later document reads another document's compressed KV as its own context.
+  Train with padded batches. The SFT script runs the same check before the model load,
+  `prepare_dataset.py` before an offline `--pack-sequences` pass, and the SFT trainer for a
+  packing / padding-free collator handed to it directly (`_reject_compressed_kv_collator`, keyed on
+  the same two collator roots as the CP gate), as does SMPO for its `padding_free` forward.
 
 Which families get which segment markers, and the kernel refusal below, live in
 `src/models/segment_markers.py`, shared by the collators and SMPO's padding-free forward.
@@ -182,7 +187,7 @@ that would be emitted but not read:
   documents.
 
 "Crosses by construction" applies where the mixer has no per-document boundary parameter at
-all (Zaya's CCA, DeepSeek-V4's compressors, Inkling's convs). Pack such a family only where a
+all (Zaya's CCA, Inkling's convs). Pack such a family only where a
 small amount of cross-document mixing is acceptable, and prefer padded batches when it is not.
 
 Under distillation the teacher and the frozen reference forward with `use_cache=False` explicitly, so
@@ -200,9 +205,9 @@ they score packed rows under the same masks the student does.
 
     Off it, `padding_free` **raises** (its `cu_seq_lens` kwargs have no consumer) and `packing`
     **warns** (it pays a dense `[L, L]` mask per layer). A family whose dense path leaks documents
-    makes packing raise too ([Document isolation](#document-isolation-under-packing)). DeepSeek-V4
-    (eager-only: head_dim 512 exceeds FA's 256 cap) and Gemma 4 land on the warning; use padded
-    batches. See [Padding-Free Collator](../optimization/padding-free-collator.md).
+    makes packing raise too ([Document isolation](#document-isolation-under-packing)), and
+    DeepSeek-V4 (eager-only: head_dim 512 exceeds FA's 256 cap) refuses both. Gemma 4 lands on the
+    warning; use padded batches. See [Padding-Free Collator](../optimization/padding-free-collator.md).
 
 - **Padding-free is incompatible with Context Parallelism**, and **packing is rejected under CP**.
   Under CP use the padded collator, which sets `pad_to_multiple_of=cp_size`.

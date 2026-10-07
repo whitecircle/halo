@@ -44,15 +44,18 @@ before acting. Authoritative doc: `agent-docs/reference/checkpoints.md`.
   the LR scheduler from `scheduler.pt`, LoRA adapters, wrapper-level trained params, the
   router-balancing biases, the frozen reference scores (`reference_logps.pt`: DPO/KTO precompute,
   offline GRPO KL), and the **optimizer state from the per-rank shards when the topology
-  fingerprint matches** (`OptimizerStateFingerprint`); a mismatch warm-restarts instead. Only a
+  fingerprint matches** (`OptimizerStateFingerprint`); a mismatch warm-restarts instead, and a
+  matched restore that fails on any rank raises on every rank unless
+  `allow_optimizer_warm_restart: true`. Only a
   `use_grouped_gemm: false` run with no EP/ETP/CP/TP reloads weights, via `load_full_state_dict`;
   PP takes its own `_load_pp_stage` path. A model built from anything but the checkpoint (a custom
   script) makes the loader **refuse the resume** under EP/CP and TP+DP rather than continue on the base
   weights (`loader.py`); only an adapter-only checkpoint, which ships no base weights to check
   against, still resumes quietly. A merge-on-save checkpoint inverts the check: it refuses a model
   built from its own merged weights (the delta would apply twice), and an unmarked merged checkpoint
-  under an adapter run raises. `load_best_model_at_end` is refused under EP/CP full fine-tuning
-  and TP+DP — export the best checkpoint directly. Owner:
+  under an adapter run raises. `load_best_model_at_end` is refused for a full fine-tune under CP, on
+  a MoE carrying EP or grouped-GEMM wrappers (`ep_size: 1` included), and under TP+DP — export the
+  best checkpoint directly. Owner:
   `agent-docs/reference/checkpoints.md#resuming-training`.
 - **A per-rank sharded checkpoint is NOT directly loadable.** `load_full_state_dict` refuses
   `metadata.format` `ep_sharded` and raises pointing at the merge tool. Run the merge first.
@@ -119,10 +122,11 @@ incl. PP), `write.py` (the shared streaming writer every gathered save funnels t
 `context.py` (the trainer-state snapshot, mode flags included, the savers and loader read),
 `coordination.py` (the rank consensus shared by the resume paths).
 Per-mode mechanics:
-`src/distributed/expert_parallel/saving.py`, `expert_parallel/expert_weights.py`,
-`tensor_parallel/checkpoint.py`, `src/checkpoint/` (`format.py` layout + dtype, `config_export.py` the
+`src/distributed/checkpoint/ep_save.py`, `src/distributed/expert_parallel/expert_weights.py`,
+`src/distributed/checkpoint/tp_save.py`, `src/checkpoint/` (`format.py` layout + dtype, `config_export.py` the
 config contract, `adapters.py` the saved-PEFT shape and the shared `merge_adapter_into_base`,
-`tool_io.py` the tool-side directory I/O, `shard_writer.py` the incremental parts writer,
+`tool_io.py` the tool-side directory I/O, `atomic.py` the staged, fsynced checkpoint-file publication,
+`shard_writer.py` the incremental parts writer,
 `fp8_dequant.py` the streaming fp8 → bf16, `model_card.py` the `halo` Hub tag on the model card of
 every checkpoint Halo writes, tool conversions included), and the
 `scripts/after_training/` script you are about to run.

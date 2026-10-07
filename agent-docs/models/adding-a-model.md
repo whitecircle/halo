@@ -196,6 +196,8 @@ If a model isn't in transformers yet, or its `trust_remote_code` conflicts with 
 
 HF models that only need `trust_remote_code=True` (Bailing/Ling, Laguna) take the shims path with no vendoring.
 
+A node's ranks share the module cache transformers copies remote code into (`HF_MODULES_CACHE`), and transformers rewrites a module there in place. `src/models/patches/remote_code_hooks.py`, which every loader and training entry point imports, makes each copy land whole (the remote code a save writes beside a checkpoint too), so a rank never imports a module a peer is still writing.
+
 ## Declare Liger coverage
 
 Upstream Liger's `MODEL_TYPE_TO_APPLY_LIGER_FN` doesn't cover every supported model, and covers some only in part. A family that neither registry covers warns at model load that the run trains unfused, and refuses an explicit `liger_kernel_config` key. Add one `LigerFamilySpec` to `src/kernels/liger/families.py` — there is no per-family applier module:

@@ -73,25 +73,25 @@ Gemma-4 26B-A4B (30 EP layers, `Gemma4ForConditionalGeneration`) trains text-onl
 
 Async GRPO with Environments: `examples/grpo/environmental/gemma4/vllm/` plus the `sglang/` ep1 siblings; both need `use_chunked_grpo_logprobs` for the 262k vocabulary, and the chunked sweep applies the head's `final_logit_softcapping` ([Memory and Throughput](../training-methods/grpo/async-grpo/performance.md#chunked-log-probs)). Both pinned engines read the fused expert pair the gather emits, so either `rollout_backend` takes the weight sync ([Rollout Servers](../infrastructure/rollout-servers.md#which-families-each-engine-serves)).
 
-**Attention LoRA** (the `-lora-` recipes) adapts the language model alone. The vision and audio towers'
+**Attention LoRA** (the `-lora-` recipes) adapts the language model alone. The vision tower's
 projections carry the same `q_proj`…`o_proj` names but are `Gemma4ClippableLinear`, a wrapper holding
 its weight in a child `nn.Linear` that PEFT cannot decompose, so they are excluded from injection with
 a warning naming the count ([PEFT](../optimization/peft.md#targets-peft-cannot-adapt)); the vision
 MLP spells `gate_proj`/`up_proj`/`down_proj` the same way, so those names collect exclusions there too
 (under EP the expert peel takes them first). `all-linear` resolves to the inner `nn.Linear` and adapts
-the towers too.
+the tower too.
 
 **Long-context attention**: Gemma 4's full-attention layers run at `global_head_dim=512`, which every FlashAttention kernel and cuDNN SDPA reject (FA2 caps at 256; FA4's SM100 kernel overflows tensor memory).
 
 `load_distributed_model` redirects any FlashAttention impl to SDPA for Gemma 4, then `patch_sdpa_for_wide_heads()` forces the mem-efficient SDPA kernel, the only backend handling this head dim, with manual KV repeat (`use_gqa_in_sdpa → False`). That avoids the math kernel's `[B, heads, S, S]` score matrix, which OOMs at seq 32k. Set `attn_implementation: sdpa` to skip the warning.
 
-On CUDA the model is then built with the attention implementation `sdpa_flex_sliding`, which the frozen reference and teacher loader picks too; how it works is in [Flash Attention](../optimization/flash-attention.md#sliding-window-and-wide-head-layers-on-sdpa). On Gemma 4 26B-A4B (one B300, `tests/gpu/profiling/benchmark_gemma4_attention.py`, fwd+bwd per layer; 2026-10-03, commit 0bc3a22a5, Blackwell image):
+On CUDA the model is then built with the attention implementation `sdpa_flex_sliding`, which the frozen reference and teacher loader picks too; how it works is in [Flash Attention](../optimization/flash-attention.md#sliding-window-and-wide-head-layers-on-sdpa). On Gemma 4 26B-A4B (one B300, `tests/gpu/profiling/benchmark_gemma4_attention.py`, fwd+bwd per layer, Blackwell image):
 
 - **Sliding layers** (head_dim 256, window 1,024) run compiled FlexAttention: 0.55 / 1.91 / 7.86 ms at 2,048 / 8,192 / 32,768 tokens, against 4.65 / 61.8 / 941 ms for mem-efficient SDPA with its dense mask.
 - **Global layers** (head_dim 512) run matmul attention while the layer's saved scores fit the 2 GiB budget (16 heads at 4,096 tokens per row), and mem-efficient SDPA past it: 1.86 / 6.73 ms at 2,048 / 4,096 tokens against 6.53 / 19.7 ms, and the same time as SDPA at 8,192 and beyond, where the layer runs it. FlexAttention only fits shared memory at head_dim 512 with its smallest tiles, and those are slower than SDPA.
-- The vision and audio towers (bidirectional) keep SDPA. `HALO_FLEX_SLIDING=0` keeps plain SDPA for every layer.
+- The vision tower (bidirectional) keeps SDPA. `HALO_FLEX_SLIDING=0` keeps plain SDPA for every layer.
 
-End to end, Gemma 4 26B-A4B full SFT at EP2 on 2× B300 without gradient checkpointing (dd489a700, against plain SDPA): 11,152 → 14,980 cluster tok/s at 2,048 tokens (1.34×), and 4,124 → 16,204 at 16,384 (3.93×) with peak memory 237.6 → 225.0 GiB.
+End to end, Gemma 4 26B-A4B full SFT at EP2 on 2× B300 without gradient checkpointing runs 14,980 cluster tok/s at 2,048 tokens and 16,204 at 16,384 in the [framework comparison](../optimization/throughput-benchmarks.md#full-parameter-sft-framework-comparison). Plain SDPA, measured in a separate run set, runs 11,152 and 4,124 (1.34× and 3.93× across the two sets), at 237.6 against 225.0 GiB peak at 16,384.
 
 The KV-repeat override is not what makes the global layers legal — transformers 5.16 disables GQA above head_dim 256 itself. It stays because the patch pins mem-efficient as the *only* enabled backend process-wide, where native `enable_gqa` for the 256-dim sliding layers is unverified; the manual repeat is the one measured path. See [Flash Attention](../optimization/flash-attention.md#model-specific-handling).
 

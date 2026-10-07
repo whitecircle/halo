@@ -44,7 +44,7 @@ output_dir: checkpoints/clf-qwen3.5-9b-mage
 
 Full field list: [ClassificationConfig](../reference/configuration-reference.md#classificationconfig).
 
-The two weighting knobs are mutually exclusive — setting both raises, on the CLI as well as in YAML. Either switches the trainer off the model's built-in head loss onto its own weighted objective, evaluated in fp32. HF's own `label_smoothing_factor` is rejected at construction: the trainer builds its own loss and never reaches HF's `label_smoother`.
+The two weighting knobs are mutually exclusive — setting both raises, on the CLI as well as in YAML. Every objective, the default cross-entropy included, is the trainer's own and evaluated in fp32; the head's built-in loss would run in the logits' bf16. A single-label head needs `num_labels >= 2` — one logit is transformers' regression convention — and is refused at construction otherwise. HF's own `label_smoothing_factor` is rejected at construction: the trainer builds its own loss and never reaches HF's `label_smoother`.
 
 The script defaults `attn_implementation` to `sdpa` when the YAML pins none, because batches are right-padded and the auto-selected FA4 would take its slow varlen path. Under `reset_sinks: false` it requests nothing and lets the resolver auto-select, which there accepts only a sink-carrying backend.
 
@@ -63,7 +63,7 @@ LoRA takes `lora_task_type: SEQ_CLS` and is rejected under TP, EP+TP and PP ([PE
 
 ### Pipeline parallelism
 
-Pipeline parallelism is [not yet available in this release](../parallelism/pipeline-parallelism.md); the shipped seams here would serve `compute_metrics`, since the trainer declares `PPLossAdapter.predictions_fn` and the pooled `[B, num_labels]` would cross the chain rather than the full plane. Two construction gates ship with them and raise — a `config.pad_token_id` unset or disagreeing with the tokenizer's (pooling takes the rightmost non-pad position), and a single-label head with `num_labels < 2`, which transformers treats as regression.
+Pipeline parallelism is [not yet available in this release](../parallelism/pipeline-parallelism.md); the shipped seams here would serve `compute_metrics`, since the trainer declares `PPLossAdapter.predictions_fn` and the pooled `[B, num_labels]` would cross the chain rather than the full plane. A construction gate ships with them and raises on a `config.pad_token_id` unset or disagreeing with the tokenizer's (pooling takes the rightmost non-pad position).
 
 ## Vision-language
 

@@ -54,13 +54,13 @@ nomad job plan <spec>                             # scheduler dry-run, no alloca
 |---|---|---|---|
 | `qwen3-4b-1gpu-lora.nomad.hcl` | single process, `python` | 1 | `examples/sft/qwen3/qwen3-4b-ultrachat-lora.yaml` |
 | `qwen3.5-35b-a3b-8gpu-ep.nomad.hcl` | 1 node, EP=8 node-local | 8 | `examples/sft/qwen3_5/qwen3.5-35b-a3b-ultrachat-ep.yaml` |
-| `qwen3.5-122b-a10b-2node-ep.nomad.hcl` | 2 nodes, EP=8 node-local + cross-node DP | 2 × 8 | `examples/sft/qwen3_5/qwen3.5-122b-a10b-ep.yaml` |
+| `qwen3.5-122b-a10b-2node-ep.nomad.hcl` | 2 Blackwell nodes, EP=8 node-local + cross-node DP | 2 × 8 | `examples/sft/qwen3_5/qwen3.5-122b-a10b-ep.yaml` |
 
 The LoRA job is the entry point: one GPU, one process, driven by a config whose own header calls for `python` rather than `torchrun`.
 
 Shared variables: `image`, `scratch_host_path`, `config_path`, `model`, `memory_mb`. The 8-GPU job adds `gpus`; the two-node job adds `gpus_per_node`, `shared_filesystem`, `max_run_duration` and `rendezvous_timeout_s`.
 
-**All three take EP size and scope from the training config**, and none pass `--expert_parallel_size` or `--ep_scope`. The 122B YAML pins `expert_parallel_size: 8`, and `ep_scope` resolves node-local on its own because the 8-rank EP group fits one NVLink domain. Forcing either on the command line would silently override a retargeted `config_path`.
+**Both EP specs take EP size and scope from the training config**, and none of the three passes `--expert_parallel_size` or `--ep_scope`. The 122B YAML pins `expert_parallel_size: 8`, and `ep_scope` resolves node-local on its own because the 8-rank EP group fits one NVLink domain. Forcing either on the command line would silently override a retargeted `config_path`.
 
 ## Multi-node rendezvous
 
@@ -91,6 +91,10 @@ Shell variables in that entrypoint are written brace-less (`$MASTER_ADDR`, not `
 
 Both ranks run one shared script, branching on `NODE_RANK`. Beyond that variable and the rendezvous template, only rank 0 carries the port reservation, the service registration and a `shutdown_delay`.
 
+### RDMA fabric
+
+The two-node spec passes no RDMA device and sets no fabric env, so cross-node NCCL falls back to TCP sockets until you add both. In both tasks' `config`, pass the verbs devices — `devices = [{ host_path = "/dev/infiniband", container_path = "/dev/infiniband" }]`, the counterpart of `docker run --device /dev/infiniband`. InfiniBand/RoCE then runs on the image's NCCL defaults. On AWS EFA also add `NCCL_NET_PLUGIN = "ofi"` and `NCCL_NET = "Libfabric"` to `common_env`, so a missing plugin fails the launch instead of falling back to sockets. Node-local EP needs neither proxy GIN nor `/dev/gdrdrv` ([Multi-Node → RDMA fabrics](../parallelism/multi-node.md#rdma-fabrics)).
+
 ### Gang scheduling
 
 **Nomad has no gang / all-or-nothing scheduling — not in OSS, not in Enterprise, not in 2.0** ([hashicorp/nomad#18773](https://github.com/hashicorp/nomad/issues/18773)).
@@ -99,7 +103,7 @@ Placement is per-allocation and best-effort: whichever group fits starts immedia
 
 - `max_run_duration` on both groups caps the wall-clock a half-placed job can burn (Nomad 2.0.3+).
 - `rendezvous_timeout_s` makes rank 1 exit loudly instead of waiting forever.
-- `restart { attempts = 0 }` and `reschedule { attempts = 0 }` keep a failed run dead — a training job that silently restarts from step 0 wastes the node.
+- `restart { attempts = 0 }` and `reschedule { attempts = 0 }` keep a failed run dead — a restart re-runs the same command without `resume_from_checkpoint`, so it starts over from step 0, or stops at the non-empty `output_dir` check once a checkpoint exists.
 
 Run `nomad job plan` first on a busy cluster: it reports up front whether both groups can place.
 
@@ -138,7 +142,7 @@ volume_mount {
 }
 ```
 
-On a cluster without a shared filesystem the scratch path is per-client local disk, so the two-node spec sets `DIST_SHARED_FILESYSTEM=0` — each node saves and resumes its own checkpoint copy. Set `shared_filesystem=1` only when that path is one NFS/Lustre mount on both clients ([Filesystem handling](../data/filesystem-handling.md)).
+On a cluster without a shared filesystem the scratch path is per-client local disk, so the two-node spec sets `DIST_SHARED_FILESYSTEM=0`: each node's local rank 0 fetches the model into its own HF cache and writes its own checkpoint copy, and a resume reads each node's copy. A local `model` path must exist on both clients — the ranks agree on the source before loading and fail together when one node lacks it. Set `shared_filesystem=1` only when that path is one NFS/Lustre mount on both clients; a declaration that contradicts the `output_dir` mount fails at startup ([Filesystem handling](../data/filesystem-handling.md)). Per-node save and resume is covered by CPU simulations, not yet by a multi-node run ([Multi-Node → Verified topologies](../parallelism/multi-node.md#verified-topologies)).
 
 ## Credentials
 
@@ -173,6 +177,7 @@ The specs carry the same container flags every other Halo surface passes (`CLAUD
 |---|---|
 | `--gpus all` | `resources { device "nvidia/gpu" { count = N } }` |
 | `--ipc=host` | `ipc_mode = "host"` |
+| `--device /dev/infiniband` | `devices = [{ host_path = "/dev/infiniband", container_path = "/dev/infiniband" }]` (not in the shipped specs — [RDMA fabric](#rdma-fabric)) |
 | `--shm-size=128g` | `shm_size = 137438953472` (**bytes**) |
 | `--ulimit memlock=-1 --ulimit stack=67108864` | `ulimit { memlock = "-1" stack = "67108864" }` (values are **strings**) |
 | `--network host` | `network_mode = "host"` + group `network { mode = "host" }` |
@@ -198,7 +203,7 @@ nomad alloc exec -task sft <alloc-id> bash
 nomad job stop -purge halo-qwen35-35b-ep
 ```
 
-Training output goes to Nomad's alloc logs; checkpoints go to `output_dir` on the scratch volume.
+Training output goes to Nomad's alloc logs, and the save rank also writes its console output to `<output_dir>/log/run.log`; checkpoints go to `output_dir` on the scratch volume.
 
 ## Troubleshooting
 

@@ -109,12 +109,11 @@ with `causal=` and has no varlen path, so it tolerates only padding a causal mas
 A left-padded batch is rejected on every forward. Every real token would attend the leading pads
 and the loss would silently differ from the same batch without CP.
 
-SMPO's collator left-pads prompts, so under CP run SMPO with `per_device_train_batch_size=1`, where
-no padding is emitted.
+SMPO's collator left-pads prompts; its chosen|rejected concat flushes every row left, so every pad
+trails the completion and any batch size runs.
 
-Offline GRPO uses its own collator (`OfflineGRPOCPDataCollatorWithPadding`): it concatenates each
-prompt and completion, then right-pads the full row to a multiple of `cp_size`, so unequal prompt
-lengths do not introduce left padding.
+Offline GRPO's CP collator right-pads each joined prompt+completion row
+([Offline GRPO](../training-methods/grpo/offline-grpo.md)).
 
 ### Supported model architectures
 
@@ -207,9 +206,8 @@ changes the module tree). The training scripts repoint `model_name_or_path` at t
 `load_distributed_model` loads the trained weights at construction; a model not constructed from
 the checkpoint raises rather than silently continuing on its current weights.
 
-Configured FP32 parameter masters are reread before the CP wrapper is installed, for both a resume
-and a fresh stage starting from a checkpoint. Persistent FP32 buffers follow their separate family
-policy. See [Load precision](../models/README.md#load-precision).
+Configured FP32 masters are restored before the CP wrapper is installed
+([Load precision](../models/README.md#load-precision)).
 
 Trainer state is restored, and so are LoRA adapters: the saved CP-normalized keys are remapped back
 onto the live wrapped names, and a wholesale key miss raises.
@@ -257,12 +255,12 @@ not activations) — that is the case CP exists for.
 | Knob | Under CP | Gate |
 |---|---|---|
 | `packing`, `padding_free` | rejected — the Ulysses path runs a dense causal kernel with no per-document boundaries | `src/data/collators/factory.py`; `_reject_cp_incompatible_collator` re-checks a hand-built collator |
-| left-padded batches | rejected on **every** forward (not cached — SMPO left-pads only some batches) | `context_parallel/wrapper.py` |
+| left-padded batches | rejected on **every** forward (not cached — a prompt-left-padding collator pads only its ragged batches) | `context_parallel/wrapper.py` |
 | `attn_implementation` | must resolve to FA2/FA3/FA4 or a community flash kernel; `flex_attention` is auto-switched with a warning, `eager`/`sdpa` rejected — except for a wrapper declaring `REQUIRES_FLASH_ATTN_LABEL = False` (Bailing), which runs on the `sdpa` label its model build forces | `SUPPORTED_ATTN_IMPLEMENTATIONS`, `validate_model_for_ulysses` |
 | `init_from_scratch` | rejected — no sharded random init | `model_loading.py` |
 | `reset_sinks: false` on GPT-OSS | rejected at model load — the CP attention kernels drop the sink column, so live sinks would misnormalize the softmax in every layer | `model_loading.py`, re-checked in `GptOssUlyssesAttention` |
 | `label_smoothing_factor > 0`, `loss_type: dft` | rejected — the Trainer pops `labels` and pairs full labels with this rank's chunk logits | `validate_trainer_args_for_cp` |
-| `compute_metrics`, `preprocess_logits_for_metrics` | rejected whatever `eval_strategy` is — eval under CP is loss-only, and `evaluate()`/`predict()` reach the metric path on demand | same |
+| `compute_metrics`, `preprocess_logits_for_metrics` | rejected whenever set, not gated on `eval_strategy` (a direct `evaluate()`/`predict()` reaches the same misaligned chunk-logits path) — eval under CP is loss-only | same |
 | CP's own metrics (`mean_token_accuracy`, `entropy`, `aux_loss`, `num_attended_tokens_seen`) | accumulated locally per micro-batch and reduced once per log, so the metric path adds one collective per log instead of five to six per micro-batch | `src/trainers/sft.py` (`_drain_cp_metrics`) |
 | multimodal inputs (`pixel_values`) | rejected — text-only | `context_parallel/wrapper.py` |
 | `fsdp_shard_ep1_experts: false` | rejected — the CP path shards `ep1` experts unconditionally, so the flag would be a silent no-op | `_validate_fsdp_settings` |

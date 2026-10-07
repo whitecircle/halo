@@ -3,18 +3,38 @@
 Rollout knobs sit at the YAML top level on `AsyncTrainingConfig`
 ([fields](../../../reference/configuration-reference.md#asynctrainingconfig)); `reasoning_effort` and
 `carry_reasoning` are `environment_kwargs`, and `max_turns` is a top-level `EnvironmentConfig` field.
-Sampling is `rollout_temperature` (default `0.7`) and `rollout_top_p` (`0.95`); TRL's own sampling
-fields reach no sampler ([Rollout backend](setup.md#rollout-backend)).
+Sampling is `rollout_temperature` (default `0.7`) and `rollout_top_p` (`0.95`), with
+`rollout_top_k`, `rollout_min_p` and `rollout_repetition_penalty` off by default. Rollout and eval
+requests send all five, so the model's `generation_config.json` defaults never apply
+([Rollout Servers](../../../infrastructure/rollout-servers.md)). TRL's own sampling fields reach no
+sampler ([Rollout backend](setup.md#rollout-backend)).
 
 ## Trajectory length
 
-`rollout_max_tokens` (default `32768`) caps **one turn** — it is the only generation budget.
-`max_turns` caps the turns; an episode that burns them ends truncated. Its `null` default keeps the
-environment class's own — 15 on `code_contests` / `codeforces`, 20 on `swe`, 8 on `exam_qa`, 10
-everywhere else.
+Three knobs bound what an episode generates. `rollout_max_tokens` (default `32768`) caps **one
+turn**, reasoning and answer together. `max_turns` caps the turns; an episode that burns them ends
+truncated. Its `null` default keeps the environment class's own — 15 on `code_contests` /
+`codeforces`, 20 on `swe`, 8 on `exam_qa`, 10 everywhere else.
+`rollout_max_episode_tokens` (default `null`) caps the **episode**: the most tokens its assistant
+turns may sample together, reasoning and visible output alike, recovery turns included. Unset, an
+episode may generate `max_turns × rollout_max_tokens`.
 
-The trajectory accumulates across turns, bounded only by the model context window, and is **never
-truncated**: a row over that window is recorded per rank, then raised on every rank together.
+The episode budget is enforced by the engine per turn and never stated to the model. A turn's
+`max_tokens` is the smaller of its own cap and what the episode has left, and its reasoning cap
+([Reasoning budget](#reasoning-budget)) shrinks by the same amount, so the turn keeps its answer
+room: `rollout_max_tokens` less the turn's reasoning cap, the whole turn without one. An episode
+left with less than that room starts no further turn and ends truncated, priced like a `max_turns`
+overflow; a cut or empty turn on the last turn the budget affords is closed the same way, never nudged into a
+retry that could not run. `episode/output_budget_exhausted` is the fraction of episodes whose budget ran below it.
+The budget must be at least `rollout_max_tokens`, so one whole turn fits; it is `max_tokens` on the
+wire, so it holds on both engines. Every shipped code-contests recipe sets `131072`.
+
+The trajectory accumulates across turns within the model context window and is **never
+truncated**: a row over that window is recorded per rank, then raised on every rank together. The
+startup check warns when `max_prompt_length` + the environment's preamble + what an episode may
+generate (the smaller of `max_turns × rollout_max_tokens` and `rollout_max_episode_tokens`) exceeds the
+served window ([Servers and Launch](setup.md#rollout-backend)); set the episode budget so that worst
+case fits.
 
 `max_prompt_length` (default `null`) is a dataset filter — rows whose rendered prompt exceeds it are
 dropped. `max_completion_length` is no knob here: the script pins it to `rollout_max_tokens` and
@@ -24,6 +44,9 @@ raises on any other explicit value, and TRL reads it only as the `dr_grpo` norma
 a training row, and must exceed `rollout_max_tokens` (a row is prompt plus completion). A per-turn
 row over it leaves the batch while the episode's other turns train; a whole-trajectory row trains at
 zero weight. Setting it also turns on `sampling/rows_over_cap_frac`, the share of rows left out.
+`rollout_max_episode_tokens` bounds a row's generated share (a per-turn row's prompt carries the
+earlier turns' output) but not the tool output between turns, so it lowers how many rows reach this
+cap without replacing it.
 
 ## Tool calls
 
@@ -39,15 +62,15 @@ sends as `stop_token_ids`. Set it to a tool-call terminator the model's `eos_tok
 with harmony disabled ends a call with `<|call|>` and otherwise hallucinates the result, playing the
 episode out in one turn (the recipes set `["<|call|>"]`).
 
-An unknown name is warned and skipped; a list where **none** resolves raises rather than running
-unstopped.
+Every name must resolve: an unknown one raises at trainer construction, and the eval scripts resolve
+`--training_config`'s list through the same function, so a recipe that trains also evaluates.
 
 ## Reasoning budget
 
-`rollout_max_thinking_tokens` (default `null` = unbounded) caps a turn's chain-of-thought (vLLM's
-`thinking_token_budget`), leaving the rest of `rollout_max_tokens` for the answer. A value at or
-above `rollout_max_tokens` is refused, as is any value under `rollout_backend: sglang`. The vLLM
-server needs a reasoning parser and Model Runner V2 off
+A thinking budget is per turn. `rollout_max_thinking_tokens` (default `null`) caps a turn's
+chain-of-thought (vLLM's `thinking_token_budget`), leaving the rest of `rollout_max_tokens` for the
+answer. A value at or above `rollout_max_tokens` is refused, as is any value under
+`rollout_backend: sglang`. The vLLM server needs a reasoning parser and Model Runner V2 off
 ([Rollout Servers](../../../infrastructure/rollout-servers.md#vllm)).
 
 Steer depth with the env's `reasoning_effort`: `low`/`medium`/`high`/`random`/`null` (`null` on
@@ -58,18 +81,22 @@ text instead, so every checkpoint scores a problem at the same level.
 The level reaches the model only through the chat template. gpt-oss's template renders it natively;
 the stock Qwen3.x and Gemma 4 templates have no effort variable, so those recipes pin
 `jinja-templates/qwen3/qwen3.6-reasoning-effort.jinja` and `jinja-templates/gemma4/gemma4-reasoning-effort.jinja`,
-which state the level and its budget in the system block from the `reasoning_effort` and
-`reasoning_budget` variables below. A level the model cannot see is not a policy it can learn.
+which state the level and its per-turn budget in the system block ("Think for at most N tokens per
+turn") from the `reasoning_effort` and `reasoning_budget` variables below. A level the model cannot
+see is not a policy it can learn.
 
-`reasoning_effort_profiles` overrides the class's per-level table. Under a set
-`rollout_max_thinking_tokens`, a level's `thinking_tokens` is capped by it per turn, and the turn's
-total drops to that per-turn cap plus the global answer headroom; left `null`, the level caps
-reasoning alone and `rollout_max_tokens` still bounds the turn.
+`reasoning_effort_profiles` overrides the class's per-level table. A level's `thinking_tokens` caps
+every turn's reasoning, clamped by `rollout_max_thinking_tokens` where that is set; an episode whose
+level sets none runs under `rollout_max_thinking_tokens` alone, or uncapped. `rollout_max_tokens`
+bounds the whole turn either way, so a level's budget must sit below it (refused at trainer
+construction and at the start of an eval) and the difference is the turn's answer room. An episode output budget narrows both
+caps together ([Trajectory length](#trajectory-length)); `reasoning_budget` stays the level's budget.
 
 `thinking_tokens` is a **vLLM** request field (`thinking_token_budget`). On `rollout_backend:
 sglang` a level's budget reaches no request field (warned once per process): nothing caps CoT
-below `rollout_max_tokens`; the level still steers through the chat template, and the budget
-stays the reference of the [effort length floor](#effort-length-reward).
+below `rollout_max_tokens`; the level still steers through the chat template (which states the
+budget as a cut it cannot be on this engine), and the budget stays the reference of the
+[reasoning floor](#reasoning-length-reward).
 
 A turn the engine cuts at its token cap, or one the model ends with neither a tool call nor visible
 content, is nudged and retried within `max_turns` and `max_length_cutoff_recoveries`
@@ -79,31 +106,9 @@ also in `episode/length_cutoff_in_call_turns`) and pays the protocol's `length_c
 (default `0`); the turn that exhausts the cap, or lands on the last turn, ends the episode truncated,
 priced like a `max_turns` overflow. Under carried reasoning a cut costs the policy only a turn and
 the retry thinks on from where it stopped, so a per-turn budget binds only once the cut is priced.
-
-**Budget scope.** `rollout_thinking_budget_scope` (default `turn`) says what a budget — a level's
-`thinking_tokens`, else `rollout_max_thinking_tokens` — covers. Under `turn` every turn gets it whole,
-so a cut or empty turn plus its recovery nudge buys another full budget: a cheap "continue thinking"
-that lets an episode's reasoning grow to any per-turn cap. Under `episode` the budget is the episode's
-total: a turn's engine cap is the budget minus the reasoning the earlier turns spent, never below
-`rollout_thinking_turn_reserve` (default `512`, enough to close the reasoning and act) and never above
-`rollout_max_thinking_tokens`, which under this scope is the ceiling one turn may take rather than a
-clamp on the level's budget. A turn's total (`rollout_max_tokens`) narrows with it: the turn's cap plus
-the run's answer headroom (`rollout_max_tokens − rollout_max_thinking_tokens`; all of
-`rollout_max_tokens` when `rollout_max_thinking_tokens` is unset, so the total stays constant), never
-above the first turn's, and a recovery turn gets only what is left. A completion that fills its turn's total
-reads as a cut. `episode/thinking_budget_exhausted` is the fraction of episodes whose budget ran down to
-the reserve. Trainer construction and the eval scripts refuse a scope some episode could not run
-under: with `rollout_max_thinking_tokens` unset, the environment must set `reasoning_effort` and
-every level's `thinking_tokens`, and no level's budget may sit below the reserve.
-
-A turn's spend is read off the engine's sampled ids as the ids up to and including
-`rollout_reasoning_end_token` (default `</think>`, resolved through the tokenizer to one token; the engine's budget
-counts the close it forces, and a turn cut before closing its reasoning counts all of its ids), so the
-scope is vLLM-only, requires `train_on_sampled_tokens`, and every request under it — the eval scripts'
-too — asks for `return_token_ids`. The effort templates read the run-wide `reasoning_budget_scope`
-variable and state the budget as a total across the task's turns; `reasoning_budget` stays the level's
-budget, not the turn's narrowed cap. The floor term's reference scales with it
-([Effort length reward](#effort-length-reward)).
+A recovery gets the whole per-turn budget again; the episode budget bounds what the recoveries may
+add in total, and every reasoning token they add is priced
+([Reasoning length reward](#reasoning-length-reward)).
 
 An engine abort never reaches the environment: the actor re-issues the turn up to `max_retries` times
 (default `3`) rather than charging a length cut; past that the episode errors into a masked row.
@@ -121,41 +126,73 @@ warned once — the server most likely runs without a reasoning parser.
 Where a carried thought renders is the template's decision. `rollout_chat_template_kwargs`
 (`{preserve_thinking: true}` on the stock Qwen3.x template; the shipped Qwen3.6 effort template always
 renders carried reasoning) sends template variables with every request **and** applies
-them to the trainer's own renders, so both sides see one template state. `reasoning_effort` is
-refused there.
+them to the trainer's own renders, so both sides see one template state. `reasoning_effort` and
+`reasoning_budget` are refused there, being per episode.
 
-## Effort length reward
+## Reasoning length reward
 
-Two trainer-side terms price an episode's reasoning tokens, summed over its assistant turns, by its
-effort level. Both enter the task reward before advantages.
+Four trainer-side knobs price an episode's reasoning: two terms on its reasoning tokens summed over
+its assistant turns, by its effort level, and one on a turn running into its thinking cap. All enter
+the task reward before advantages.
 
-**The price** (`effort_length_penalty_k0`, default `None` = off) is
-`-min(c_max, k(effort) × tokens / l_norm)` with `k(effort) = k0 × exp(-(effort - effort_min) / tau)`.
-`effort_length_penalty_levels` gives each level its scalar (`low` 25, `medium` 50, `high` 100), so at
-the default `tau` of 25 the same trace costs `low` about 20× what it costs `high`. It prices reasoning
-tokens only — code and tool calls are free — and `c_max` caps it, so a long trace cannot outweigh the
-task reward.
+**The price** (`reasoning_price`, default `null` = off) maps each effort level to reward units per
+1,000 reasoning tokens: an episode pays `-min(reasoning_price_cap, price[level] × tokens / 1000)`.
+The map must name exactly the three levels, `low`, `medium` and `high`, whatever the environment draws (refused at trainer construction); price the lowest
+level highest, so the same trace costs most where little reasoning was asked. It prices
+reasoning tokens only — code and tool calls are free — and `reasoning_price_cap` (default `0.1`;
+refused at another value while the price is off) caps it per episode, so a long trace cannot
+outweigh the task reward. An episode with no level pays nothing.
 
 A price is paid within the group, so the sibling that reasons less wins it whatever the outcome. That
 is why it is capped and near zero at the highest level, and why the recipes never run it alone:
 
-**The floor** (`effort_length_floor_weight`, default `0` = off) is the one term that pays for more
-reasoning. Its reference is `effort_length_floor_budgets` (default `0.75`) times the thinking budget
-the episode ran under — a level's per-turn budget, or the episode's total under
-`rollout_thinking_budget_scope: episode`. The floor moves with that budget, so the fraction is set
-against the budgets a recipe runs: the episode-scope Qwen3.6 code-contests recipes pair `0.375` with
-24,576–36,000-token budgets, a floor of 9,216–13,500 reasoning tokens. The default sits below 1 so
-that an episode of a single assistant turn can clear its floor without running into the cap the engine
-enforces per turn. An episode short of the floor pays `-weight × shortfall / floor`. It reads the episode's
-total, not a per-turn mean, so a terse repair turn after a verdict is not under-use and an extra tool
-turn never lowers the score. An episode with no thinking budget or no assistant turn pays nothing;
-turns that carry no reasoning at all pay the whole weight.
+**The floor** (`reasoning_floor`, default `0` = off) is the one term that pays for more reasoning.
+Its reference is three quarters of the per-turn thinking budget the episode ran under (its level's
+`thinking_tokens`, clamped by `rollout_max_thinking_tokens`); an episode whose reasoning tokens,
+summed over its turns, fall short of it pays `-floor × shortfall / reference`, the whole weight for
+an episode that reasoned nothing. The reference sits under one budget so that an episode of a single
+assistant turn can clear it without running into the cap the engine enforces per turn, and it reads
+the episode's total, not a per-turn mean, so a terse repair turn after a verdict is not under-use and
+an extra tool turn never lowers the score. An episode with no thinking budget or no assistant turn
+pays nothing. A run where no drawable level sets a budget and `rollout_max_thinking_tokens` is unset
+is refused at trainer construction.
 
-Keep `c_max + floor weight` below what the environment charges for the decisions it prices (the
-Qwen3.6 vLLM code-contests recipes: `0.08 + 0.10`, the other code-contests recipes `0.1 + 0.05`, all
-under the `0.2` resubmission price). Smaller shaping terms, a
-`0.05` tool error among them, can still be outweighed by a long trace at the lowest level. Watch
-`reward/effort_length_penalty` and `reward/effort_length_floor`.
+**The overlong charge** (`turn_overlong_penalty`, default `0` = off) prices a turn that reasons up
+to its cap, where the engine forces the close and the turn otherwise pays nothing for running into
+it. A turn pays `-penalty × clamp((reasoning − 0.75 × cap) / (0.25 × cap), 0, 1)`: nothing until its
+reasoning enters the last quarter under its cap, the whole penalty at it. The cap is the turn's recorded
+`thinking_cap` (the level's, clamped by `rollout_max_thinking_tokens`), never the narrower request cap an episode output budget leaves a
+late turn, so a turn is never charged for the episode's budget running out. The reasoning is the
+turn's sampled ids up to and including `rollout_reasoning_end_token` (default `</think>`), all of
+them for a turn cut before its close. On a turn vLLM force-closes that count is exactly the budget:
+vLLM's counter starts after the last `<think>` the request holds, so it counts the generation
+prompt's tokens after it (the `\n` the Qwen3.6 template ends on) but not the close it forces, and the
+two cancel; a prompt ending on a bare `<think>` reads one past the budget, a `<think>` the model
+emits itself two past, and either lands at the clamp, so a forced turn pays the whole penalty. A turn
+whose ids were not captured, or that ran uncapped, is not charged. The episode pays its most-charged
+turn once, so the term stays in `[-penalty, 0]` however many turns a run allows.
+
+Like the price, the charge reaches the gradient only through groups the environment's reward separates:
+`drop_degenerate_groups` judges a group without the length terms, so a group whose members all settled
+the same reward is dropped whatever its members' charges ([Advantages](objective.md#advantages)).
+
+The charge is vLLM-only and needs `train_on_sampled_tokens` and a `rollout_reasoning_end_token` that
+encodes to one token, the one the count reads up to (gpt-oss's five-token final-channel opener cannot
+run it; trainer construction refuses it). A run where no turn can carry a cap is refused at trainer
+construction: a budget only on a level the environment's `reasoning_effort` never draws counts as
+none.
+
+Keep `reasoning_price_cap + reasoning_floor` below what the environment charges for the decisions it
+prices (the Qwen3.6 vLLM code-contests recipes: `0.09 + 0.10`, the other code-contests recipes
+`0.1 + 0.05`, all under the `0.2` resubmission price). The overlong charge starts where the floor
+stops charging — both at three quarters of the turn's cap — so no episode pays both (to within the
+few tokens by which the floor's re-tokenized count and the charge's sampled count differ), and with the
+charge the bound is the larger of that sum and `reasoning_price_cap + turn_overlong_penalty`
+(`0.09 + 0.05` on the Qwen3.6 vLLM recipes, which charge `0.05`). Smaller shaping terms, a `0.05`
+tool error among them, can still be outweighed by a long trace at the lowest level. Watch
+`reward/reasoning_price`, `reward/reasoning_floor` and `reward/turn_overlong`, with
+`reward/turn_overlong_turn_frac`, the share of assistant turns charged; both overlong metrics are also
+logged per effort level (`effort/<level>/turn_overlong`).
 
 ## Chat template
 
@@ -173,9 +210,8 @@ policy never generated under. Per-turn rows take the engine's ids and cannot dri
 their thinking toggle from and hand the template. SGLang lets a nested copy override that field (it
 pops it into the top-level one before rendering), so on SGLang the same value is added nested too —
 an exact copy, so the render reads one value whichever spelling the engine consults. The level's
-thinking budget rides in the nested form as `reasoning_budget`, added per request, and under the
-episode scope the run-wide `reasoning_budget_scope: episode` rides beside it; the trainer's own renders
-carry the same variables, and `rollout_chat_template_kwargs` refuses all three keys.
+per-turn thinking budget rides in the nested form as `reasoning_budget`, added per request; the
+trainer's own renders carry the same variables, and `rollout_chat_template_kwargs` refuses both keys.
 
 `jinja-templates/qwen3/qwen3.6-reasoning-effort.jinja` is the hub Qwen3.6 template cut to what the rollouts
 use — text only, thinking always on, an assistant turn rendering whatever reasoning it carries, the
@@ -240,4 +276,5 @@ The `completion` column renders detokenized message text, unaffected by `train_o
 
 The writer rank comes from `fs_aware_save_rank`: global rank 0 on a shared output filesystem, one
 writer per node on a per-node one, so a non-shared output does not lose every node but the first.
-The console table prints on global rank 0 alone.
+The console table prints on global rank 0 alone. A writer that fails (a full disk, a wandb outage)
+fails the step on every rank.

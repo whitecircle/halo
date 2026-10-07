@@ -87,7 +87,7 @@ MXFP4 still serves on vLLM, but not under weight sync: its expert loader has no 
 
 Async GRPO with Environments: `examples/grpo/environmental/gptoss/vllm/` plus the `sglang/` ep1 siblings — both pinned engines read the interleaved expert pair the gather emits, so either `rollout_backend` takes the weight sync ([Rollout Servers](../infrastructure/rollout-servers.md#which-families-each-engine-serves)).
 
-The example sets `use_grouped_gemm: false`: at its EP=16 the 20B keeps 2 experts per rank, few enough that the loop is competitive, and gpt-oss's square expert FFN (`intermediate == hidden == 2880`, not a multiple of the kernel's 128-tile K) pays a CUTLASS tail epilogue the loop avoids. Grouped GEMM is the default and wins every measured cell through ep8 at batch 4. See [Grouped GEMM](../optimization/grouped-gemm.md#grouped-vs-the-loop-path).
+`gptoss-20b-multinode-ep.yaml` sets `use_grouped_gemm: false`: at its EP=16 the 20B keeps 2 experts per rank, few enough that the loop is competitive, and gpt-oss's square expert FFN (`intermediate == hidden == 2880`, not a multiple of the kernel's 128-tile K) pays a CUTLASS tail epilogue the loop avoids. Grouped GEMM is the default and wins every measured cell through ep8 at batch 4. See [Grouped GEMM](../optimization/grouped-gemm.md#grouped-vs-the-loop-path).
 
 ## Chat template
 

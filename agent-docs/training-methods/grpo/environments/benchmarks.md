@@ -38,7 +38,7 @@ run reaching it would teach the policy that invented evidence works.
 
 ## Reward
 
-Grading is all-or-nothing, through `src/rewards/matching.py`: `exact_match` (case-insensitive
+Grading is all-or-nothing, through `src/rewards/graders/matching.py`: `exact_match` (case-insensitive
 after normalization), then `numeric_match` — every number in the response against the one value the
 expected answer states (read the same way, so `$18` and `18 dollars` expect 18), at `rtol=0.01` /
 `atol=1e-6`, percentages divided by 100 and `3,500` or `10\,000` read as one number. The response must

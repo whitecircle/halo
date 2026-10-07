@@ -67,7 +67,7 @@ Each rank's shard loads join across the world on the c10d store (`DIST_STORE_TIM
 
 Force a re-download with `load_dataset_from_s3_uri(..., use_cache=False)`. Clear it by removing the resolved cache directory (`$HALO_DATA_ROOT/s3_datasets` unless overridden above).
 
-On multi-node with a shared filesystem (NFS/Lustre) the cache is shared — only one node downloads. With per-node local storage each node caches independently; set `DIST_SHARED_FILESYSTEM=0` (see [Filesystem Handling](filesystem-handling.md)).
+On multi-node with a shared filesystem (NFS/Lustre) the cache is shared — only one node downloads. With per-node local storage each node caches independently; set `DIST_SHARED_FILESYSTEM=0` (see [Filesystem Handling](filesystem-handling.md)). Since a node can serve its own stale cache while S3 is unreachable from it, the load agrees the rows across ranks and fails the launch on a disagreement ([Distributed Data Loading](../parallelism/data-loading.md)).
 
 ## Authentication
 

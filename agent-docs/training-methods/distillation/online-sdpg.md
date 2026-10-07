@@ -19,7 +19,7 @@ Every knob lives on the RLVR script arguments and is read only with `use_sdpg: t
 | `sdpg_hint_template` | `\n[Hint] The correct answer is: {answer}. Do NOT state that you were given the answer.\n` | Appended to the rendered generation prompt for the teacher forward only. `{answer}` is the one placeholder it fills; any other is refused at parse time |
 | `opd_positive_advantage_only` | `true` | Restrict OPD to rows with a positive advantage; `false` distills every completion row |
 
-The hint is tokenized and appended to each rollout's prompt ids, so the term is text-only. It reads the pinned `answer` column that `process_for_rlvr` normalizes `answer_field` into — a train dataset without that column raises at construction whenever `sdpg_beta_base` is non-zero, and a loss batch without the teacher prompts raises rather than training plain GRPO.
+OPD runs on the tokens the GRPO loss trains, so tool-output tokens are excluded. The hint is tokenized and appended to each rollout's prompt ids, so the term is text-only. It reads the pinned `answer` column that `process_for_rlvr` normalizes `answer_field` into — a train dataset without that column raises at construction whenever `sdpg_beta_base` is non-zero and the template names `{answer}`, and a loss batch without the teacher prompts raises rather than training plain GRPO.
 
 ## Launch
 
@@ -36,7 +36,7 @@ From Python, construct the trainer exactly as the online one plus the SDPG kwarg
 ```python
 trainer = DistributedSDPGTrainer(
     model=model,
-    reward_funcs=[accuracy_reward],      # src/rewards/verifiable.py
+    reward_funcs=[accuracy_reward],
     args=grpo_config,                      # use_vllm=True, vllm_mode="server"
     train_dataset=train_dataset,           # needs an "answer" column
     processing_class=tokenizer,
@@ -48,14 +48,16 @@ trainer = DistributedSDPGTrainer(
 
 ## Testing a setup
 
-Run a three-step smoke against a live server before the real run: take one of the smoke configs under `examples/grpo/online/` and add `--use_sdpg=true`. The term is covered by `pytest tests/cpu/trainers/test_sdpg_trainer.py tests/cpu/trainers/test_distillation_shared_losses.py -m cpu` and, end to end, by `tests/gpu/trainers/grpo/test_online_grpo_vllm_e2e.py --mode sdpg` plus the `--trainer sdpg` rows of the MoE and dense suites.
+Run a three-step smoke against a live server before the real run: take one of the smoke configs under `examples/grpo/online/` and add `--use_sdpg=true`. The term is covered by `pytest tests/cpu/trainers/test_sdpg_trainer.py tests/cpu/trainers/test_distillation_losses.py -m cpu` and, end to end, by `tests/gpu/trainers/grpo/test_online_grpo_vllm_e2e.py --mode sdpg` plus the `--trainer sdpg` rows of the MoE and dense suites.
 
 ## What to watch
 
 Two keys on top of the online-GRPO metrics: `opd_beta` (the live coefficient, prefixed `eval_` under evaluation) and `opd_loss`. Treat a finite `opd_loss` with a non-zero `opd_beta` as healthy.
 
+Under evaluation `opd_loss` reads the split's own rows alone, but the rest is TRL's online eval: generating the final round's padding prompts, the GRPO term and its reward, length, KL and clamp metrics count them like real prompts ([Eval padding](../grpo/online-grpo.md#what-to-watch)). Async GRPO with Environments never rolls the padding out: its rollout metrics count the split's own episodes alone ([Evaluation](../grpo/async-grpo/monitoring.md#evaluation)).
+
 - **`opd_loss` is exactly 0** — under `opd_positive_advantage_only: true`, no rollout in the batch earned a positive advantage, so the gate masked every token. Expected on easy or fully-failed batches; persistent zeros mean the verifier never separates a group.
-- **OOM the online trainer did not hit** — OPD adds two full-vocabulary forwards per micro-batch, neither trimmed with `logits_to_keep`, both logit planes upcast to fp32, and the teacher pass runs the longer prompt+hint+completion sequence. `use_chunked_grpo_logprobs` bounds the GRPO half only; size the batch against the OPD peak.
+- **OOM the online trainer did not hit** — OPD adds two forwards per micro-batch whose `[B, C, V]` completion logit planes are upcast to fp32 (where the forward takes `logits_to_keep`, the prompt rows stay out of both), and the teacher pass runs the longer prompt+hint+completion sequence. `use_chunked_grpo_logprobs` bounds the GRPO half only; size the batch against the OPD peak.
 - **Missing-answer warning** — a row whose answer is blank gets no hint, so it distills toward an unprivileged teacher. Fix the `answer_field` mapping.
 
 `use_liger_kernel` is cleared with a warning (`disable_trl_liger`): TRL's fused GRPO-Liger loss replaces the trainer's own and would silently drop the OPD term. Model-level Liger kernels still apply at load.
@@ -63,3 +65,4 @@ Two keys on top of the online-GRPO metrics: `opd_beta` (the live coefficient, pr
 ## Related pages
 
 - [Online GRPO (RLVR)](../grpo/online-grpo.md) · [Self-Distillation](self-distillation.md) · [Distillation Overview](README.md)
+- [Configuration Reference](../../reference/configuration-reference.md#rlvronlinegrposcriptarguments) — the RLVR script arguments the `sdpg_*` fields extend

@@ -6,11 +6,11 @@ Trainer GPUs must not overlap the server's: one process cannot NCCL-broadcast to
 
 ## Rollout backend
 
-`rollout_backend: vllm` (default) or `sglang`. Both serve rollouts over `/v1/chat/completions` and take weights over NCCL. A pair the engine cannot update online is refused at construction with its loader reason ([which families each serves](../../../infrastructure/rollout-servers.md#which-families-each-engine-serves)). SGLang also refuses `rollout_max_thinking_tokens`, `rollout_thinking_budget_scope: episode` and [`carry_reasoning`](rollouts.md#carried-reasoning).
+`rollout_backend: vllm` (default) or `sglang`. Both serve rollouts over `/v1/chat/completions` and take weights over NCCL. A pair the engine cannot update online is refused at construction with its loader reason ([which families each serves](../../../infrastructure/rollout-servers.md#which-families-each-engine-serves)). SGLang also refuses `rollout_max_thinking_tokens`, `turn_overlong_penalty` and [`carry_reasoning`](rollouts.md#carried-reasoning).
 
-TRL's `top_p`, `top_k`, `min_p`, `repetition_penalty` and `generation_kwargs` reach no sampler here, and only `top_p` has a `rollout_top_p` equivalent; `temperature` is force-set to `rollout_temperature`, so log-probs are scored at the sampling temperature.
+TRL's `top_p`, `top_k`, `min_p`, `repetition_penalty` and `generation_kwargs` reach no sampler here; the first four have `rollout_*` equivalents (`rollout_top_p`, `rollout_top_k`, `rollout_min_p`, `rollout_repetition_penalty`). `temperature` is force-set to `rollout_temperature`, so log-probs are scored at the sampling temperature.
 
-Rank 0 probes each server at startup and broadcasts its verdict. The context check **raises** when a turn cannot fit (`max_prompt_length` + the environment's measured prompt overhead + `rollout_max_tokens`), and warns on the multi-turn worst case. `verify_backend()` fails the launch on an unreachable external judge.
+Rank 0 probes each server at startup and broadcasts its verdict. The context check **raises** when a turn cannot fit (`max_prompt_length` + the environment's measured prompt overhead + `rollout_max_tokens`), and warns on the multi-turn worst case (that prompt budget plus the smaller of `max_turns × rollout_max_tokens` and `rollout_max_episode_tokens`). `verify_backend()` fails the launch on an unreachable external judge.
 
 ## Starting a server
 
@@ -51,7 +51,7 @@ A forced sync runs at train-begin, after the resume restore and before the first
 
 `vllm_group_port` (TRL `GRPOConfig`, default `51216`) is bound on the **trainer** host, one listener per server, so two servers sharing a port collide even on distinct hosts. In multi-server mode it is the base: an entry with no `group_port` binds `vllm_group_port + index`.
 
-Client init and every push are fail-fast: a main-process error is broadcast so all ranks raise together. Each EP layer's expert gather transiently materializes the **full expert set** on every rank, so its cost scales with total expert count, not `ep_size`.
+Component start and every push are fail-fast: an error any rank raises at start (its rollout manager or re-score clients, the main process's sync client) or out of a push (the forwarding rank's sends defer theirs to a reject every rank joins) raises on all ranks together. Each EP layer's expert gather transiently materializes the **full expert set** on every rank, so its cost scales with total expert count, not `ep_size`.
 
 ## Multiple servers and prefetch
 
@@ -64,9 +64,9 @@ rollout_server_configs:
 enable_prefetch: true
 ```
 
-The sync is rolling — N−1 servers stay live — only for a raw model in a single training process, adapter-free and without EP wrappers. Every other shape, shipped recipes included, pauses all servers together for the push. Dispatch is server-state-blind either way: `RolloutManager` is plain round-robin, so a paused server still takes its turn.
+Every push pauses all servers together: the gather streams each chunk to every server, whatever the model's shape or the training world.
 
-Prefetch runs **one round deep**: a round pops what the previous one submitted, then submits its own, so `num_prefetch_batches` (default `1`) adds queue headroom only. It, `num_rollout_workers` and an explicit `max_concurrent_rollouts` are all refused below `1`; turn prefetch off with `enable_prefetch: false`.
+Prefetch runs **one round deep**: a round pops what the previous one submitted, then submits its own. `num_rollout_workers` and an explicit `max_concurrent_rollouts` are refused below `1`; turn prefetch off with `enable_prefetch: false`.
 
 A checkpoint carries each rank's submitted-but-untrained round (`prefetch_pending-<rank>-of-<world>.pt`, with the group size, round size and DP slice it was drawn under), and a resume submits it again before its first round. A save on a generation boundary therefore resumes onto the batches an uninterrupted run trains, and by default every save is on one, since `steps_per_generation` equals the accumulation steps. A save between generation boundaries (a round that feeds several optimizer steps, with `save_steps` landing inside it) resumes into the middle of that round and trains the round twice. A checkpoint with no file for this world size, or one drawn under another layout, resumes with a cold round, which skips that batch and trains the next one twice. A file present on some ranks and missing on others (a non-shared filesystem resumed under another rank-to-node placement, or a torn copy) raises: resume with the saving placement, or delete the `prefetch_pending-*` files to open with a cold round.
 

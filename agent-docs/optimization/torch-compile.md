@@ -44,7 +44,7 @@ show.
 
 ## Benchmark results
 
-Qwen3-30B-A3B-Instruct-2507 (128 experts, top_k=8), 2× B300, EP=2, seq 16384, batch 1, bf16, FA4, gradient checkpointing. 20 steps with the first 5 excluded, so the recompiles fall outside the window; one process per cell, mean of 2–3 runs, spread = (max − min) / mean. Measured 2026-10-03 on the Blackwell image, training code at commit 0bc3a22a5, with the [benchmark below](#running-benchmarks):
+Qwen3-30B-A3B-Instruct-2507 (128 experts, top_k=8), 2× B300, EP=2, seq 16384, batch 1, bf16, FA4, gradient checkpointing. 20 steps with the first 5 excluded, so the recompiles fall outside the window; one process per cell, mean of 2–3 runs, spread = (max − min) / mean. Measured on the Blackwell image with the [benchmark below](#running-benchmarks):
 
 | Mode | Liger | Compile | Step (s) | tokens/s/GPU | Spread | Peak mem (GiB) |
 |------|:-----:|:-------:|---------:|-------------:|-------:|--------------:|

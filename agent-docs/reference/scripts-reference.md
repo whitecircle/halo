@@ -58,7 +58,7 @@ torchrun --nproc_per_node=8 scripts/training/sft.py \
 
 | Script | Description |
 |--------|-------------|
-| `scripts/training/online_grpo/rlvr.py` | RLVR: online GRPO scored by the config's `rewards` terms — `accuracy`, `format`, `judge`, `reward_model`; EP/TP/ETP, no CP or PP |
+| `scripts/training/online_grpo/rlvr.py` | RLVR: online GRPO scored by the config's reward terms (the `\boxed{}` accuracy and format graders, a judge, a served reward model); EP/TP/ETP, no CP or PP |
 
 Run a vLLM server on a dedicated GPU, then launch training on the rest:
 
@@ -128,12 +128,13 @@ CUDA_VISIBLE_DEVICES=1,2,3,4,5,6,7 torchrun --nproc_per_node=7 \
 Both `run_*.py` runners in `scripts/environments/inference/` share one dataset/endpoint/trajectory flag block
 (`scripts/environments/_common.py`). `--training_config <yaml>` points them at an async-GRPO training
 YAML and evaluates under that run's contract: its `EnvironmentConfig`, and its rollout settings
-(backend, chat-template variables, stop tokens, thinking budget, temperature, top-p, max tokens,
-request timeout).
+(backend, chat-template variables, stop tokens, thinking budget, temperature, top-p, top-k, min-p,
+repetition penalty, max tokens per turn and per episode, request timeout).
 
 Precedence is explicit flag → `--training_config` → the script's own default, so an eval matches the
 run it is judging unless a flag says otherwise. A `rollout_stop_tokens` entry that the config's
-tokenizer does not know raises here, where the trainer warns and skips a partially unresolved set.
+tokenizer does not know raises here, as it does at trainer construction: both resolve the list through
+`resolve_rollout_stop_token_ids`.
 
 In `openai_batched_generation.py`, `--input_path` / `--output_path` are S3 **keys**, not URIs:
 `build_s3_uri` joins them under `HALO_S3_DEFAULT_BUCKET` (required; unset raises) and `--subfolder`
@@ -143,7 +144,7 @@ local file or a Hub dataset id and `--output_path` a local path.
 The three async CLIs — `openai_batched_generation.py`, `rm_rejection_sampling.py`, `rm_scoring.py`
 — run under a shared SIGINT/SIGTERM handler
 (`run_async_cli`) that exits `128 + signo`, the shell's own convention for a signalled process.
-Progress is checkpointed, so re-running resumes; the non-zero exit is what stops a wrapper script or
+Progress is checkpointed (generation through `parallel_openai_requests` in `src/inference/batch_requests.py`, over the JSONL store in `resume_store.py`; the two `rm_*` CLIs in their own JSONL output), so re-running resumes; the non-zero exit is what stops a wrapper script or
 `&&` chain from consuming a partial output dataset as a finished one.
 
 A run that produced no usable row raises rather than writing an empty result (`reject_empty_results`), so a dead endpoint or a
@@ -151,7 +152,9 @@ wrong `--model` cannot republish the resumed rows as a finished job. Each CLI's 
 names its per-reason drop counts (first-response failures, degenerate skips).
 
 Every endpoint these CLIs talk to is OpenAI-compatible (`--base_url` / `--api_key`),
-reached through the one shared client (`create_openai_client`) with the toolkit's retry policy. There
+reached through the one shared client (`create_openai_client`, `src/inference/openai_client.py`) with the toolkit's retry policy;
+`--base_url` defaults to `http://localhost:8000/v1` and `--api_key` to `VLLM_API_KEY`, then `OPENAI_API_KEY`, then the
+`EMPTY` placeholder (`src/inference/endpoints.py`). There
 is no separate Azure mode — point `--base_url` at the deployment's OpenAI-compatible route like
 any other endpoint.
 

@@ -11,7 +11,9 @@ L_total = loss_fn(beta · logits) + chosen_sft_ratio · CE(chosen) + (1 − chos
 
 ![SMPO on one preference pair: one forward over the 2N concatenated rows gives per-token log-probs; the percentile clip (rejected tail at the 2% token quantile, optional chosen-side cap, min_log_prob floor) trims the margin path only, whose per-sequence mean feeds the smooth_lower_bound term relu(−β·z)² against the scheduled margin, while the SFT anchors take the pre-clip NLL of both sides; the total is the mean margin loss plus chosen_sft_ratio-weighted cross-entropy, with no reference model](../../assets/diagrams/smpo_pipeline.png)
 
-Under CP the per-sequence sums and counts all-reduce across the group before the mean. The sum reduce is autograd-aware: its backward sums the gradient over the group, which cancels FSDP2's `1/cp_size` average, so the loss takes no `cp_size` factor and logs the unsplit-sequence value.
+Every path — padded and `padding_free` — takes its per-token log-probs from one chunked fp32 log-softmax (`next_token_logprobs`, `src/distributed/pipeline_parallel/losses.py`), so a bf16 model's tokens are scored at fp32 precision.
+
+The concat rolls every row left by its leading-pad count (`flush_rows_left` in `src/models/segment_markers.py`, no host sync), on every path: the collator's leading prompt pads trail the completion, so each row's real tokens hold the positions and indices they hold unpadded. A padded row then scores as it does alone even where attention reads absolute positions (Mistral4's llama-4 query scale) or pools KV over windows cut at fixed indices (DeepSeek-V4's compressors), and the CP attention, which ignores the mask, never reaches a pad from a real token, so a batch of any size trains the same objective as without CP. Under CP the per-sequence sums and counts all-reduce across the group before the mean. The sum reduce is autograd-aware: its backward sums the gradient over the group, which cancels FSDP2's `1/cp_size` average, so the loss takes no `cp_size` factor and logs the unsplit-sequence value.
 
 ## Configuration
 
@@ -55,7 +57,7 @@ output_dir: checkpoints/smpo-gptoss-20b-tulu3-prefmix-ep
 
 `max_length` is the total budget and defaults to `1024`; `null` or a non-positive value resolves it to the context window. An unset `max_prompt_length` takes half of it and `max_completion_length` the remainder. Shares summing past `max_length` are rejected at construction — the two truncate independently. Prompts cut per `truncation_mode` (`keep_end`), completions from the end, keeping the terminal EOS.
 
-`padding_free` needs a varlen Flash Attention kernel and raises on anything else, the `sdpa` the script defaults to under `reset_sinks: true` outside CP included. It is also incompatible with CP, VLM runs and PP — the shipped PP gates additionally reject PEFT, a non-null clip percentile and a `label_pad_token_id` other than `-100`.
+`padding_free` needs a varlen Flash Attention kernel and raises on anything else, the `sdpa` the script defaults to under `reset_sinks: true` outside CP included. It is also incompatible with CP and VLM runs; the shipped PP gates ([not yet available](../../parallelism/pipeline-parallelism.md)) refuse it too, and additionally PEFT and a non-null clip percentile.
 
 Attention isolates each row of the flattened batch through `position_ids`; the LFM-2 and GatedDeltaNet (Qwen3.5/3.6, Qwen3-Next) conv / linear-attention mixers get the segment markers the SFT collators emit, and a GatedDeltaNet model is refused without the `causal_conv1d` / `fla` kernels that read them. Zaya's CCA has no per-document boundary parameter and carries state from each row into the next, across the chosen / rejected split too, so keep `padding_free` off for Zaya. See [Document isolation under packing](../../data/collators.md#document-isolation-under-packing).
 

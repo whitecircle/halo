@@ -4,7 +4,7 @@ Fit a student to a separate, frozen teacher's token-level distribution over a fi
 
 Trainer `DistributedDistillationTrainer`, script `scripts/training/distillation/teacher_distill.py` (text or VLM). EP, TP and ETP apply to the **student**; CP and PP are rejected, since every loss reads the teacher's whole `[tokens, vocab]` plane and no stage or sequence shard holds it ([matrix](../../reference/trainer-architecture.md#trainer-compatibility)).
 
-Both models sit on every rank — the student with its optimizer states, the teacher weights-only under `torch.no_grad()` in `eval()` mode. Their `vocab_size` must match, or construction raises. That is the only check: a teacher from another tokenizer family with the same `vocab_size` passes and distills over misaligned token ids, so pick the teacher by tokenizer, not by `vocab_size`.
+Both models sit on every rank — the student with its optimizer states, the teacher weights-only under `torch.no_grad()` in `eval()` mode. Before any teacher weight loads, the script reads the teacher repo's tokenizer and config (at `teacher_model_revision`) and raises unless the two tokenizers map every token to the same id — tokens added to the student only (`added_special_tokens`) count as a mismatch. The two `vocab_size`s may differ only in embedding padding past the tokenizer; both logit rows are then compared over the tokenizer's ids. The trainer repeats the check at construction.
 
 ## Configuration
 
@@ -36,13 +36,14 @@ output_dir: checkpoints/distill-qwen3.5-9b-from-qwen3.6-35b-a3b
 |---|---|---|
 | `distill_loss` | `kl_divergence` | The divergence against the teacher; see below |
 | `distill_temperature` | `1.0` | Softmax temperature; reaches only the four losses that declare it |
-| `distill_alpha` | `1.0` | Weight on the distillation term; `1.0` drops CLM from the loss |
-| `use_clm_loss` | `True` | `False` needs `distill_alpha: 1.0`, or alpha would rescale the sole term |
-| `apply_hard_labels` | `False` | Scales the loss by `(1 − student_prob[label]) · teacher_prob[label]` |
+| `distill_alpha` | `1.0` | Weight on the distillation term, `1 − distill_alpha` on CLM; `1.0` drops CLM from the loss |
+| `apply_hard_labels` | `False` | Scales the distillation term per token by `(1 − student_prob[label]) · teacher_prob[label]`, a detached weight that carries no gradient of its own; ignored under `slim`, which weights by its own gold-token rule |
 | `max_length` | `2048` | Over-length conversations are **dropped**, not truncated; `null` → context window |
 | `teacher_model_revision` | `None` | Pins the teacher repo; the student's `model_revision` names a commit elsewhere |
 
 The teacher loads in the run's own dtype (an fp32 run scored against a bf16 teacher fits rounded targets) and under the run's `trust_remote_code`. Student and teacher make the same padded-workload attention request, so the two compared forwards cannot split across kernels — but it resolves against the **teacher's** config, so the teacher's per-family kernel limits apply (DeepSeek-V4 eager-only, Gemma 4 head_dim 512).
+
+Each term is one mean over the micro-batch's supervised tokens, so a short row's tokens weigh what a long row's do.
 
 ### Loss types
 
@@ -53,13 +54,11 @@ The teacher loads in the run's own dtype (an fp32 run scored against a bf16 teac
 | `soft_cross_entropy` | `-sum(teacher_probs · log student_probs)` at `distill_temperature` |
 | `cosine_similarity` | `1 - cos(teacher_logits, student_logits)`; tolerant of logit-scale differences |
 | `jensen_shannon` | `0.5·KL(P‖M) + 0.5·KL(Q‖M)` with `M` the midpoint — symmetric |
-| `earth_mover_distance` | Per-token 1-Wasserstein `sum_v \|CDF_s(v) − CDF_t(v)\|` over the vocab axis |
-| `alpha_beta_divergence` | Alpha-beta divergence at its fixed `α=1.0`, `β=2.0`; unrelated to `distill_alpha`, and not settable |
-| `slim` | Soft cross-entropy kept at the gold token, scaled by `1 - exp(-teacher_prob/student_prob)` |
+| `slim` | `KL(teacher ‖ student)` weighted per token by `1 - exp(-teacher_prob[label] / student_prob[label])`, a detached weight |
 
-`distill_temperature` reaches `kl_divergence`, `soft_cross_entropy`, `jensen_shannon` and `slim`; the other four take no temperature, so setting it there changes nothing. Every softened divergence is scaled by `distill_temperature²` (Hinton's convention), which holds the distillation term's pull — and its weight against CLM — fixed as the temperature moves.
+`slim` takes the weighting [SLIM](https://openreview.net/forum?id=2fc5GOPYip)'s text describes — larger where the teacher is more confident in the gold token than the student — not the paper's loss: its Eq. 4 prints the inverse ratio, `1 − exp(−s/t)`, and adds the weighted soft cross-entropy over a top-5% teacher to a unit-weight CE term, while here the full teacher distribution is used and CLM keeps its `1 − distill_alpha` weight.
 
-`slim` is the exception: its student-dependent coefficient multiplies an offset that does not shrink with `T`, so it is left unscaled and its gradient drifts with temperature. Retune the learning rate when raising `distill_temperature` there.
+`distill_temperature` reaches `kl_divergence`, `soft_cross_entropy`, `jensen_shannon` and `slim`; `mse` and `cosine_similarity` take no temperature, so setting it there changes nothing. Every softened divergence is scaled by `distill_temperature²` (Hinton's convention), which holds the distillation term's pull — and its weight against CLM — fixed as the temperature moves.
 
 ## Launch
 
@@ -76,7 +75,7 @@ One script serves both modalities. The student class follows its checkpoint; the
 
 An image run maps through the shared `prepare_vlm_dataset` and forces `remove_unused_columns=False` so the `history`/`images` columns reach `VLMDataCollator`. `pixel_values` thread to both forwards, and the two models must share processor geometry as well as vocabulary.
 
-`train_on_completions_only` is honored on both paths via `assistant_message_template`: both loss terms mask on `labels`.
+`train_on_completions_only` is honored on both paths via `assistant_message_template`: both loss terms mask on `labels`. Without it, the text path's padded collator keeps the turn-ending EOS label where pad and EOS share an id.
 
 ## Testing a setup
 
@@ -97,7 +96,6 @@ Covering tests: `pytest tests/cpu/trainers -m cpu`, `tests/gpu/trainers/other/te
 
 Failure signatures:
 
-- `vocab_size` mismatch raise at construction — the teacher has another vocabulary size (another tokenizer family, or the same tokenizer with padded embeddings).
+- A tokenizer-mismatch raise before the teacher loads (repeated at construction) — the teacher is from another tokenizer family, or `added_special_tokens` grew the student's tokenizer; a raise naming fewer logit rows than the tokenizer — one model's embedding is smaller than the tokenizer.
 - OOM on the first step — both models are resident. Use PEFT on the student, gradient checkpointing, or a smaller `max_length`.
 - Most rows dropped at prep — `max_length` drops over-length conversations rather than truncating them.
-- `use_clm_loss=False needs distill_alpha=1.0` — set alpha to 1.0, or keep CLM on to weight the two terms.

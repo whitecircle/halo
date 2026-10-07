@@ -12,6 +12,16 @@ the *same* batch.
 | Expert TP | Ranks in an expert-TP group get the **same** data | Expert FFN is sharded across the group |
 | PP | Ranks of one pipeline chain get the **same** batch | Stage 0 reads `input_ids`, the last stage reads `labels`. PP itself is [not yet available](pipeline-parallelism.md); its stage-scoped sharding ships as a seam |
 
+Every rank reads its own copy of the source — a per-node S3 cache, a pre-staged directory, a cached
+hub revision — so the load agrees the rows before any rank trains on them (`src/data/sources/loading.py`).
+A replicated load compares each split's row count, schema and a digest of 16 evenly spaced rows across
+the world (media columns excluded: their stored paths can name a node's own cache). A sharded load
+compares every split's `shard_index.json` across the world, and the same row identity among the ranks
+sharing a DP rank — TP/CP/ETP siblings, and pipeline peers once PP is available. A disagreement
+raises `ValueError` on every rank: the row-identity check names the ranks and nodes holding each
+version, the shard-index check lists each split's distinct digests and rank 0's mapping. Unchecked, a stale
+node trains other rows.
+
 ## Data parallel size
 
 `data_parallel_size` is the number of distinct batches (= unique shards needed):
@@ -38,29 +48,40 @@ EP, contiguous under cross-node EP), so partners sharing a dispatch rank process
 ## How the DataLoader is built
 
 `DataParallelDataLoaderMixin` (`src/trainers/mixins/dataloader.py`, composed into
-`DistributedTrainerMixin`) takes the custom path when `_needs_custom_dataloader()` sees `is_tp_mode`,
-`is_cp_mode`, `is_expert_tp_mode`, `is_pp_mode`, or `_dataset_presharded`; otherwise (DDP / EP-only,
-not presharded) it uses the base Trainer flow.
+`DistributedTrainerMixin`) takes the custom path when `needs_dp_sharded_loader` sees
+`non_dp_replication_factor > 1` (more than one rank sees each batch: TP, CP, ETP or PP) or a
+pre-sharded dataset; otherwise (DDP / EP-only / HSDP, not presharded) it uses the base Trainer flow.
 
-PP must take the custom path: accelerate's default shards by **global** rank, which would hand every
-rank of a pipeline chain a different batch. Stage 0 would forward one row set while the last stage
-scores another's labels, with nothing raised.
+The shipped PP seam takes the custom path too (PP itself is not yet available): accelerate's default
+shards by **global** rank, which would hand every rank of a pipeline chain a different batch.
 
 On the custom path `_prepare_dataloader()` wraps the loader through Accelerate's
 `prepare_data_loader` passing `num_processes=data_parallel_size` and
 `process_index=data_parallel_rank` — **DP size/rank, not global world_size/rank**. For pre-sharded
 datasets it passes `num_processes=1` (device placement only) so Accelerate does not re-shard the
 already-disjoint slice. Prepared loaders are marked `_is_accelerate_prepared` to avoid double
-preparation.
+preparation. The custom path never dispatches: accelerate's dispatching loader (its default for an
+iterable dataset) slices rank 0's batches by global rank whatever size/rank it is handed, so
+siblings would draw different rows. An iterable dataset is sharded by DP rank instead, and an
+explicit `accelerator_config.dispatch_batches: true` raises.
 
 The samplers are not `DistributedSampler` — distribution happens in `prepare_data_loader` via
 Accelerate's `BatchSamplerShard`, which yields batch `idx` to a process when
 `idx % num_processes == process_index`. `data_seed` is passed through, so it owns the shuffle order
 exactly as on the standard path; unset, the seedable sampler falls back to the ambient torch seed.
-Dataloader workers are seeded by **DP rank**, not global rank, so TP/CP/ETP/PP siblings draw
-identical worker randomness.
+The custom-path train loader seeds its workers by **DP rank**, not global rank, so TP/CP/ETP
+siblings draw identical worker randomness; the eval loader sets no `worker_init_fn`.
 
-Under PP the train loader is forced to `drop_last=True`: a pipeline would freeze its P2P shapes on
+Every rank of one split must draw the same permutation, but a sampler without a generator shuffles
+off the rank's own torch RNG, which EP ranks and pipeline stages consume differently.
+So on every path a train sampler left without a generator gets one seeded with `data_seed`, else
+`seed` (`_get_train_sampler`). That covers the two shuffles accelerate's seedable sampler does not
+reach: `train_sampling_strategy: group_by_length`, and a `RandomSampler` on a one-process loader
+(`data_parallel_size == 1`, or a pre-sharded dataset) under
+`accelerator_config.use_seedable_sampler: false`. The on-policy GRPO trainers' `RepeatSampler`
+carries its own generator, seeded with `seed`.
+
+The PP seam forces the train loader to `drop_last=True`: a pipeline would freeze its P2P shapes on
 the first step, so a short final batch would raise mid-epoch.
 
 **Sweeps over the dataset.** The `precompute_ref_log_probs` sweep builds its own loader and
@@ -165,15 +186,9 @@ without the DP identity equal-length shards would
 stamp identical keys and non-writer ranks would load rank 0's mapped shard. Replicated (non-sharded)
 loads keep a shared key so single-writer caching works.
 
-The map/filter itself runs under `coordinated_dataset_operation`
-(`src/data/pipeline/processing.py`): one writer rank per filesystem scope, the rest reading its
-cache. That call **is** the rank ordering — never nest it in a main-first block
-(`fs_aware_main_first`, `local_main_process_first()`).
-
-The phases join on the c10d store (`store_reject_across_ranks`, bounded by
-`DIST_STORE_TIMEOUT_HOURS`), so an hours-long fresh-cache map neither trips the NCCL watchdog on the
-waiting ranks nor hides a per-rank failure: the real cause is re-raised on every rank. Shared vs
-per-node scope: [Filesystem Handling](../data/filesystem-handling.md).
+The map/filter runs on one rank per filesystem scope and the rest read its cache; the rank ordering,
+the store joins and the never-nest rule are on
+[Filesystem Handling](../data/filesystem-handling.md#coordination-primitives).
 
 ## Common pitfalls
 

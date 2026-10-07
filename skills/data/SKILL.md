@@ -51,9 +51,9 @@ re-shard. Key flags (read the argparse for the rest): `--mode {chat,text}`, `--p
 
 ## Loading & collators (selected for you)
 
-- Sources (`src/data/sources/loading.py`): `s3://bucket/key`, `org/name[:config][@split]` (HF Hub),
-  a local `load_from_disk` path, or a local `.jsonl/.json/.parquet/.arrow/.csv` file. Bare strings
-  are local/HF — **not** auto-prefixed to any bucket.
+- Sources (`src/data/sources/loading.py`): `s3://bucket/key`, `org/name` (HF Hub, `:config` and
+  `@split` suffixes), or a local `save_to_disk` directory or single data file. Bare strings are
+  local/HF — **not** auto-prefixed to any bucket.
 - Multi-node: `ShardedDatasetLoader` gives each DP rank its shards; `fs_aware_main_first(tag)` /
   `DIST_INPUT_SHARED_FILESYSTEM` (falling back to the `DIST_SHARED_FILESYSTEM` umbrella, default
   `"1"`) coordinate shared-NFS vs per-node-local downloads.

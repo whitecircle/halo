@@ -44,7 +44,7 @@ cp .env.example .env          # the GPU make targets pass it with --env-file and
 docker pull public.ecr.aws/whitecircle/halo:blackwell && docker tag public.ecr.aws/whitecircle/halo:blackwell halo:blackwell
 # ... or build it: B200 (SM100) / B300 (SM103); build-hopper for H100/H200 (SM90)
 make build-blackwell
-make install                  # check the lock installs into the image (the image already has the install)
+make install                  # check the lock installs into the image (throwaway container)
 make seed-hf-cache            # configs + tokenizers the CPU tests read into HF_CACHE (no weights)
 make test-cpu                 # sanity check; needs Docker, not a GPU
 ```
@@ -158,6 +158,16 @@ manifest.
     A per-file `sys.path.insert` is dead weight that only masks running outside the image. A `scripts/`
     entry point (not an importable package) is loaded with `tests.common.utils.load_script_module`.
 
+- **Remote code loads into the test process's own module cache.** `tests/cpu/conftest.py` points
+  `HF_MODULES_CACHE` at a scratch dir per process before transformers is imported, so remote-code
+  loads need no writable HF home and no worker shares the copies another writes. A standalone
+  `python tests/cpu/<file>.py` that imports transformers keeps `$HF_HOME/modules`.
+
+    Do not redirect the cache inside a test around a `trust_remote_code` load. transformers puts
+    each cache it copies into on `sys.path` and never takes it off, so the `transformers_modules`
+    package can stay bound to the test's temp dir for the rest of the worker, and every later local
+    remote-code checkpoint there fails to import.
+
 - **Deterministic, seeded data.** GPU tests generate synthetic problems from a fixed seed; only
   rank 0 prints.
 
@@ -184,6 +194,10 @@ manifest.
   `tests/gpu/`: `tests/gpu/conftest.py` ignores every manifest script, so no collection (a
   `pytest -m cpu` from the repo root included) imports a torchrun program.
 
+    A CPU test or a `tests/common` helper never reaches a GPU script either — not by import, not by
+    `load_script_module`, not inside a probe script's source. A fixture both tiers need lives in
+    `tests/common/`; `tests/cpu/conventions/test_test_conventions.py` fails the suite on a reach.
+
     The launcher allocates a free `--master_port` per node from `tests/common/ports.py` — a pool from
     20000 up to the kernel's ephemeral range, one slice per pytest-xdist worker — and points `TMPDIR`
     at a per-run dir under pytest's basetemp; never hardcode either. A script run standalone under
@@ -204,7 +218,11 @@ manifest.
   and returns `{"checks": {name: bool}, "metrics": {...}}`, exiting `0` pass / `1` fail / `2` bad
   launch.
 
-    It sets `CAUSAL_CONV1D_DETERMINISTIC=1` unless the caller exported a value: causal_conv1d's
+    Every manifest script runs under it, except a script whose lifecycle the harness cannot express,
+    listed in `_OWN_LIFECYCLE` (`tests/cpu/conventions/test_gpu_harness_conventions.py`) with the
+    reason, and an entry whose script moves onto the harness fails the suite until it is dropped.
+
+    The harness sets `CAUSAL_CONV1D_DETERMINISTIC=1` unless the caller exported a value: causal_conv1d's
     default backward sums the conv weight gradient with atomics, so the gated-DeltaNet families miss
     an exact resume replay now and then. An EP body that replays a run exactly without
     `full_determinism` calls `pin_deterministic_ep_dispatch` (`tests/common/distributed.py`) itself:
@@ -213,7 +231,7 @@ manifest.
     `full_determinism` the dispatcher builds the deterministic buffer on its own). A forward-only
     comparison on the grouped-GEMM path needs no pin: each expert row is computed independently of that
     order and the combine sums a token's partials in top-k slot order, so it holds the bound a non-EP
-    run does. The per-expert loop's forward is deterministic too: each `index_add_` call writes every row at most once.
+    run does, as the per-expert loop does ([EP → Determinism](../parallelism/expert-parallelism.md#determinism)).
 - **Build checks from the shared helpers** rather than re-deriving them per file:
   `training_run_checks` (`tests/common/utils.py`, the finished-run verdicts), `parallel_shape_checks`
   (`parallel_shape.py`, each enabled axis read off the model, not the config echo), `run_sft_suite`
@@ -256,8 +274,8 @@ below. The cross-suite ones:
 | `HALO_TEST_ATTN` / `HALO_TEST_GC` / `HALO_TEST_REVISION` | Attention implementation, gradient checkpointing (default **on**), hub revision for the suites that sweep them. The per-family `HALO_TEST_ZAYA_GC` defaults the other way — see the per-suite table. |
 | `HALO_TEST_OFFGRPO_PARALLEL` | `tp` (default, dense Qwen3) or `ep` (gpt-oss MoE) leg of `trainers/grpo/test_offline_grpo_tp_resume.py`. |
 | `HALO_TEST_MAX_STEPS`, `HALO_TEST_BATCH_SIZE`, `HALO_TEST_GRAD_ACCUM`, `HALO_TEST_NUM_GENERATIONS`, `HALO_TEST_NUM_WORKERS`, `HALO_TEST_MAX_CONCURRENT`, `HALO_TEST_ROLLOUT_MAX_TOKENS`, `HALO_TEST_MAX_COMPLETION` | Step count and rollout sizing for `trainers/grpo/test_environmental_grpo_benchmarks.py`, whose defaults are sized for one vLLM server. |
-| `HALO_TEST_VLLM_GROUP_PORT` / `HALO_TEST_SGLANG_GROUP_PORT` | Weight-transfer NCCL group port the e2e rollout suites open (default `51216`; `51220` for the Step-3.7 sync suite, `51340` / `51380` for the online-GRPO MoE / dense e2e pair — each row owns `base + 2×row-index`, its resume phase 2 the next port up, so back-to-back rows never contend through TIME_WAIT; `51240` for both 4-GPU env files (the vLLM and SGLang wrappers, each on its own engine's knob); `51228` for the weight-transfer re-init suite, which rebinds it once per cycle); the server must be started on the same one. |
-| `HALO_TEST_VLLM_SERVER_URLS` | Comma-separated rollout endpoints the environmental legs of `trainers/grpo/test_online_grpo_vllm_e2e.py` drive (default: the single `VLLM_SERVER_URL`). Two or more put the weight sync on the rolling multi-server path — one server updated at a time while the rest keep serving — and the leg then asserts the served policy moved on **every** one of them. Each server serves the same model on its own GPU; the leg binds one trainer-side group port per server, each allocated by `free_port()` (`tests/common/ports.py`) rather than pinned, so back-to-back rows cannot contend. |
+| `HALO_TEST_VLLM_GROUP_PORT` / `HALO_TEST_SGLANG_GROUP_PORT` | Pins the trainer-side weight-transfer group port the rollout e2e suites bind. Unset, each run draws one with `free_port()` (`tests/common/ports.py`), below the kernel's ephemeral range, so no outbound connection on the host can hold it; the engine learns the port from the trainer's init request, so the server needs no matching setting. The online-GRPO MoE / dense pair offsets a pinned port by the row's index, so back-to-back rows bind different ones. A resume row rebinds its port for phase 2, and the weight-transfer re-init suite rebinds it every cycle. |
+| `HALO_TEST_VLLM_SERVER_URLS` | Comma-separated rollout endpoints the environmental legs of `trainers/grpo/test_online_grpo_vllm_e2e.py` drive (default: the single `VLLM_SERVER_URL`). Two or more make the single training process's `InferenceClientManager` push pause every server together and stream each chunk to all of them, and the leg then asserts the served policy moved on **every** one of them. Each server serves the same model on its own GPU; the leg binds one trainer-side group port per server, each allocated by `free_port()` (`tests/common/ports.py`) rather than pinned, so back-to-back rows cannot contend. |
 | `VLLM_MODEL` | Checkpoint the running vLLM server serves, read by the rollout benchmark itself — not by the launcher, and **not** forwarded by the `make` tiers, so put it in `.env` or export it. It must be the model the test trains: unset, the benchmark falls back to Qwen3-0.6B and a MoE-serving tier silently tests the wrong pairing. (`SGLANG_MODEL` is the compose file's server-side spelling; no test reads it.) |
 
 Suites that pin one family or one phase add their own `HALO_TEST_<SUITE>_*` knobs on top; the manifest
@@ -272,7 +290,6 @@ entry and the script name them, and the non-obvious ones are:
 | `HALO_TEST_EP_RT_ATTN` / `HALO_TEST_EP_RT_SCOPE` / `HALO_TEST_EP_RT_EXPERT_TP` / `HALO_TEST_EP_RT_KEEP` | EP save/reload round-trip (`tests/gpu/parallelism/ep/test_ep_save_reload_roundtrip.py`): attention impl (default `sdpa`), `ep_scope` (default `auto`; `node` / `global` pick the node-local vs cross-node gathered-save path), `expert_tp_size` (default `1`; at `HALO_TEST_EP=1` this is pure ETP), and `_KEEP` to leave the gathered checkpoint on disk instead of deleting it. |
 | `HALO_TEST_EP_CP_RT_ATTN` / `HALO_TEST_EP_CP_RT_KEEP` | The same two knobs for the EP+CP round-trip (`tests/gpu/parallelism/combined/test_ep_cp_save_reload_roundtrip.py`); attention defaults to `flash_attention_2` there. |
 | `HALO_TEST_EP1_KNOB_ATTN` / `HALO_TEST_EP1_KNOB_LAZY` | ep1 `fsdp_shard_ep1_experts` weight-sync suite (`tests/gpu/parallelism/ep/test_ep1_knob_weight_sync.py`): attention impl (default `flash_attention_2`) and `ep_lazy_loading` (default on; `=0` routes the load through `from_pretrained` + EP patching instead). |
-| `HALO_TEST_OFFLINE_GRPO_EP_LAZY` | `ep_lazy_loading` (default on; `=0` loads eagerly) for the offline GRPO EP reference and EP+CP suites (`tests/gpu/trainers/grpo/test_offline_grpo_ep_reference.py`, `test_offline_grpo_ep_cp.py`). |
 | `HALO_TEST_RESUME_FSDP_RESHARD` | `fsdp_reshard_after_forward` (default off = ZeRO-2) for the `fsdp` and `cp` modes of `tests/gpu/trainers/sft/test_sft_checkpoint_resume.py`; the `tp` / `ep` modes ignore it (TP+DP+FULL_SHARD is config-rejected). |
 | `HALO_TEST_VLLM_DENSE_SERVER_URL` | Endpoint of the dense half of the online-GRPO/SDPG e2e pair (`trainers/grpo/test_online_grpo_vllm_dense_e2e.py`) and of the weight-transfer re-init suite, which serves the same checkpoint. The pair's two files train different checkpoints and each asserts on its own server's logprobs, so one `VLLM_SERVER_URL` cannot carry both; unset, both read `VLLM_SERVER_URL`, then `http://localhost:8010`. |
 | `HALO_TEST_ONLINE_GRPO_MOE_MODEL` / `HALO_TEST_ONLINE_GRPO_DENSE_MODEL` | Checkpoints of the online-GRPO/SDPG e2e pair (`trainers/grpo/test_online_grpo_vllm_moe_e2e.py` and its dense sibling): the MoE half's default `Qwen/Qwen3-30B-A3B-Instruct-2507` (EP/ETP rows) and the dense half's `Qwen/Qwen3-0.6B` (TP and FSDP2-DP rows). Every row asserts on the served logprobs, so the running server must serve the same checkpoint. |
@@ -304,8 +321,11 @@ per-row, so every row of a matrix runs at the same size, under the same marker s
 A leg that keeps the model, the GPU count and the cost becomes a CLI flag with one row per leg, so
 each gets its own pytest node and verdict (`--mode` on `trainers/grpo/test_online_grpo_vllm_e2e.py`;
 one `--mode` per parallel shape on `trainers/sft/test_sft_qwen3_dense.py` and
-`trainers/sft/test_sft_gptoss_modes.py`). Such an entry's markers are the union over its rows, so
-`-m "gpu and cp"` also selects its non-CP rows.
+`trainers/sft/test_sft_gptoss_modes.py`; `--ep-loading lazy` / `eager` on
+`trainers/grpo/test_offline_grpo_ep_reference.py` and `test_offline_grpo_ep_cp.py`, one row per
+`ep_lazy_loading` value, pinned by `tests/cpu/conventions/test_offline_grpo_ep_loading_rows.py`).
+Such an entry's markers are the union over its rows, so `-m "gpu and cp"` also selects its non-CP
+rows.
 
 A leg that changes the model family, the GPU count or the runtime stays an env override:
 registering it as a row would file an EP-on-20B run under a dense entry's markers and its

@@ -42,6 +42,13 @@ its one-step staleness, sync cadence, trajectory-length knobs) stay on the
 | Expert layout on sync | the layout the family's own `gather_expert_state_dict` emits, per-expert or fused; 0.26.0's expert loader reads both. A family whose hub namespace differs from its module tree (Step-3.7's per-layer `moe.gate_proj`/`up_proj` stacks) is re-spelled through transformers' save-side revert, so the engine receives its hub keys | the same layouts, read by 0.5.17's per-family loaders; the families they cannot update are listed under [Which families each engine serves](#which-families-each-engine-serves) |
 | Trainer expert distribution ([EP/ETP](../reference/glossary.md#parallelism)) | supported | supported |
 
+Both engines fill a sampling field a request omits from the model's `generation_config.json` (vLLM
+`--generation-config auto`; SGLang `--sampling-defaults model`, chat route), so every request states
+`top_k`, `min_p` and `repetition_penalty`. Async GRPO and its evals send `rollout_top_k`,
+`rollout_min_p` and `rollout_repetition_penalty`, off by default (`-1`, `0.0`, `1.0`; SGLang refuses a
+`top_k` of `0`); online GRPO sends TRL's `top_k`, `min_p` and `repetition_penalty`. A model default
+such as Qwen3.6's `top_k: 20` then never filters the distribution the trainer scores.
+
 Use vLLM unless a run needs SGLang specifically.
 
 ## Weight sync
@@ -127,9 +134,7 @@ client owns its own NCCL connection to its server on a `group_port` bound on the
 
 **The quiesce spans the streaming, not just the final broadcast.** The update opens with the first
 full chunk (~1 GB into the gather) and closes when the last one lands, so a server stops serving for
-as long as the gather runs: minutes at 397B. Only the raw-model path is rolling, one server at a time
-— a single training process, no adapters, no EP wrappers, in multi-server mode; every other shape
-pauses all servers together
+as long as the gather runs: minutes at 397B. Every push pauses all servers together
 ([single vs multi-server](../training-methods/grpo/async-grpo/setup.md#multiple-servers-and-prefetch)).
 
 The client pauses vLLM with `/pause?mode=keep`: in-flight generations (the prefetched rollout round)
@@ -217,6 +222,16 @@ engine-core worker) until `ncclCommInitRank` fails while `/health` still answers
 half is symmetric: `close_communicator()` aborts its own communicator instead of dropping it. Both
 halves are asserted by `tests/gpu/trainers/grpo/test_vllm_weight_transfer_reinit.py`.
 
+**The spec-decode prompt-log-prob patch** (`docker/vllm/patches/vllm_spec_decode_prompt_logprobs_patch.py`,
+same hook) keeps `prompt_logprobs` correct under speculative decoding. Stock vLLM 0.26.0 runs the
+drafter before it reads the target's hidden states for prompt log-probs. When the prefill ran as a
+CUDA graph (up to 512 tokens by default), the drafter's graph overwrites those hidden states first:
+every prompt position comes back garbage (NLL 12–22) while sampling stays correct
+([vllm#53488](https://github.com/vllm-project/vllm/issues/53488)). On a step that schedules a
+prompt-log-prob request, the patch clones the hidden states before the drafter runs. The V2 model
+runner takes prompt log-probs before drafting and needs no patch. The `isr_engine_reference` startup
+probe refuses an unpatched server that speculates ([Objective](../training-methods/grpo/async-grpo/objective.md#trust-region-masks)).
+
 Checkpoint layout and expert un-fuse rules live in
 [Checkpoints](../reference/checkpoints.md#serving-on-vllm--sglang).
 
@@ -296,7 +311,7 @@ the first forward and never re-reads the parameter, and the Gemma 4 router folds
 norm once, behind a latch. A synced router weight lands in the parameter while routing keeps the
 launch values, with no error.
 
-`Dockerfile.sglang` applies `docker/sglang/patches/patch_sglang_weight_updates.py`: the gate reads
+`Dockerfile.sglang` applies `docker/sglang/patches/patch_sglang.py`: the gate reads
 its fp32 weight live, and a load of `scale` releases the latch. The script asserts its pre-images
 before rewriting and its post-images after, at build, and stays in the image (`/opt/halo/`) so
 `--verify` re-checks a running container.
@@ -305,7 +320,7 @@ before rewriting and its post-images after, at build, and stays in the image (`/
 `kv_a_proj_with_mqa` from a cache local to one `load_weights` call, one chunk, and drop a half that
 arrives alone. The client declares the pair (`CO_LOADED_PARAM_GROUPS`) and the chunker keeps it in
 one chunk, deferring the first half when the byte budget would cut between them; a pair still
-incomplete when the sync closes refuses the close. Every push, streamed or rolling, first scopes the
+incomplete when the sync closes refuses the close. Every push, to one server or a pool, first scopes the
 pair to the pushed model's modules: a block without `q_lora_rank` has no `q_a_proj`, so its
 `kv_a_proj_with_mqa` travels alone.
 
@@ -436,12 +451,10 @@ Flags the compose file already sets that are load-bearing for RL:
     collapses). The trainer probes each server at startup (temperature 2 must halve the top-1/top-2
     gap) and refuses a raw server whenever that temperature ≠ 1.
 
-    Under this mode a top-p < 1 also renormalizes every uncertain position over its nucleus, lifting
-    it by the nucleus mass. Whenever the per-token log-ratios are summed per sequence — the env arm's
-    trajectory geometric band (`isr_geo_band_min/max`), or an online `sequence_*`
-    `vllm_importance_sampling_mode` — that pairing is probed and refused: the band reads the sum as
-    drift and a sequence-level IS weight collapses toward 0, stalling the run silently. Fix it with
-    `rollout_top_p: 1.0` / `top_p: 1.0`, a `token_*` IS mode, or by dropping the band.
+    Under this mode a top-p < 1, a top-k or a min-p also renormalizes every uncertain position over
+    the tokens the cut keeps, which a log-ratio summed per sequence reads as drift: leave all three
+    off under the geometric band (`isr_geo_band_min/max`), OPSM (`isr_opsm_delta`) or an online
+    `sequence_*` `vllm_importance_sampling_mode` (also probed and refused).
 
 `--max-model-len` is left unset: the server serves the model's native context window. The trainer's
 startup probe reads it off `/v1/models` and **raises** when `max_prompt_length` plus one turn's
@@ -513,6 +526,11 @@ The build bumps the NCCL wheel, installs the EFA userspace the training image ru
 It asserts that the weight-sync routes, request schemas and rendezvous convention still exist, so an
 upstream refactor fails the build instead of a training run.
 
+The patches also make the prefill result loop step its log-prob offset over a request retracted
+while its prefill ran. Upstream leaves the offset behind, so each later request in that batch reads
+a slice shifted back by the skipped block under its own ids, and the `isr_engine_reference` re-score
+reads another request's values without an error. A build check runs the patched loop on a retracted request.
+
 The server's transformers stays at SGLang's own exact pin (5.12.1 for 0.5.17); only NCCL and the EFA
 userspace are rebuilt. Serving-only use can run upstream directly
 (`SGLANG_IMAGE=lmsysorg/sglang:v0.5.17`); weight sync needs this image. The pinned NCCL wheel
@@ -558,11 +576,11 @@ Engine behavior under RL:
   `choice.meta_info.output_token_logprobs[i][1]`. No server flag.
 
 - **Logprobs are post-temperature, pre-nucleus** by default: `sampler.py` divides the logits by the
-  temperature before the log-softmax the reported values come from, and top-p renormalizes only the
-  sampling probabilities.
+  temperature before the log-softmax the reported values come from, and top-p, top-k and min-p
+  renormalize only the sampling probabilities.
 
-    They are therefore the IS reference the trainer expects at any `rollout_temperature`, and a
-    top-p < 1 leaves the geometric band untouched. Do not set `SGLANG_RETURN_ORIGINAL_LOGPROB`: it
+    They are therefore the IS reference the trainer expects at any `rollout_temperature`, and none of
+    those cuts moves the geometric band. Do not set `SGLANG_RETURN_ORIGINAL_LOGPROB`: it
     switches to raw values, and the startup probe refuses them.
 
 - **A length cut-off is a `stop_reason`**, not a `finish_reason`. `get_finish_reason`
@@ -779,9 +797,10 @@ Sound for RL: rejection sampling applies temperature and top-p to the target log
 target distribution, `processed_logprobs` come from those same logits, and the thinking budget is
 enforced on the target under speculation. The drafter's embeddings and `lm_head` are the target's
 modules, so weight sync updates them; its MTP layer keeps launch weights, which only moves
-acceptance.
+acceptance. Prompt log-probs (the `isr_engine_reference` re-score) stay correct under MTP through the
+image's [spec-decode prompt-log-prob patch](#vllm-server-patches).
 
-Not applied under speculation: `min_p`, `logit_bias`. Never `ngram` or `suffix` on linear-attention
+Refused under speculation: a request with `min_p > 0` or a `logit_bias` raises. Never `ngram` or `suffix` on linear-attention
 families (open output-corruption bug; they also turn async scheduling off).
 `scripts/profiling/weight_sync_transport.py` passes against an MTP server.
 

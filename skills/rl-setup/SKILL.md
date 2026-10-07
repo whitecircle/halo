@@ -29,11 +29,12 @@ cannot import vLLM (the server image ships its own torch and
 2.11+cu130 + `transformers 5.16`). `Dockerfile.vllm` pins that 5.14 line and
 asserts it at build: vLLM's Gemma 4 code reads the 5.14 config schema that 5.16
 folds into `per_layer_config`, so a 5.16 server makes Gemma 4 unservable
-(`agent-docs/infrastructure/rollout-servers.md`, config-schema parity). Four further
+(`agent-docs/infrastructure/rollout-servers.md`, config-schema parity). Further
 build gates keep the sync honest — layerwise-reload skip-list coverage, the
 weight-transfer re-init patch, the `/pause mode=keep` signature the client pauses with,
-and the gpt-oss parser-plugin verifier — so a green
-build is what proves the server can be synced (`wiring.md` §1).
+and the gpt-oss parser-plugin verifier — and assert the spec-decode prompt-logprob patch the
+engine re-score relies on, so a green build is what proves the server can be synced
+(`wiring.md` §1).
 Trainer and vLLM communicate over **HTTP** (generation) and **NCCL** (weight
 sync via the vendored client). For concrete commands, field-by-field references,
 and full launch examples see [`wiring.md`](wiring.md).
@@ -105,28 +106,30 @@ and full launch examples see [`wiring.md`](wiring.md).
    `rollout_max_thinking_tokens` caps CoT per turn and is enforced **engine-side**
    (vLLM `thinking_token_budget`): it needs a server reasoning parser,
    `VLLM_USE_V2_MODEL_RUNNER=0` and, when `rollout_reasoning_end_token` resolves, the IS
-   correction that neutralizes its forced closes; it is refused under `rollout_backend: sglang` — as is
-   `carry_reasoning`. The effort length terms (`effort_length_penalty_k0`,
-   `effort_length_floor_weight`; both off by default) price an episode's reasoning length by its
-   effort level and its shortfall against the per-effort budget.
+   correction that neutralizes its forced closes; it is refused under `rollout_backend: sglang` — as are
+   `turn_overlong_penalty` and `carry_reasoning`. On vLLM a level's `thinking_tokens` caps every turn's reasoning
+   below it (SGLang warns once and leaves it uncapped); `rollout_max_episode_tokens` bounds what an episode samples in total. The reasoning terms
+   (`reasoning_price` per level per 1k tokens with `reasoning_price_cap`, `reasoning_floor`; the price and
+   the floor off by default) price an episode's reasoning length and its shortfall against three quarters of its per-turn
+   cap; `turn_overlong_penalty` (off by default) charges the turn that reasoned furthest into its cap.
 
 ## Parallelism note
 
-Online and environment GRPO trainers support **EP** (experts distributed) and **TP** (dense weights
-DTensor-sharded); generation is external, so parallelism only affects the
+Online and environment GRPO trainers support **EP** (experts distributed), **TP** (dense weights
+DTensor-sharded) and **ETP**; generation is external, so parallelism only affects the
 training forward/backward and the weight-sync gather. **CP is unsupported** for
-these trainers (`logits_to_keep` + global log-prob sums are incompatible with sequence
-splitting); they inherit `_supports_cp = False`. Offline GRPO supports CP for full fine-tuning,
-without a rollout server. Use `torchrun` (not
+these trainers: environment GRPO uses `logits_to_keep`, and online GRPO runs a separate-length
+rollout sequence. Both inherit `_supports_cp = False` and declare `_supports_pp = False`. Offline GRPO
+supports CP for full fine-tuning, without a rollout server. Use `torchrun` (not
 `accelerate`) for EP/TP.
 
 ## Single-server vs multi-server
 
 Single server blocks during weight sync, so prefetch is auto-disabled with a
-warning (no overlap possible). For rollout/sync overlap, run multiple servers
-via `rollout_server_configs`. Multi-rank runs flush all servers concurrently
-during the sync; the rolling sync that keeps (N-1) servers generating exists
-only on the single-process path (no EP wrappers, no PEFT).
+warning (no overlap possible). For rollout/training overlap, run multiple servers
+via `rollout_server_configs`. Every push pauses all servers together, a single
+training process's included: prefetch overlaps rollouts with training, not with
+the sync.
 
 ## Sources of truth
 

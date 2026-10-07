@@ -39,9 +39,6 @@ describes a validator or contract, never a launchable topology
 
 - `src/distributed/parallelism_config.py` — the dataclass + `__post_init__` →
   `_validate()` sub-validators. Every config-time `raise` lives here.
-- `src/trainers/mixins/ep_introspection.py` `_setup_ep_gradient_checkpointing` —
-  a **runtime** re-check of the multi-group >2-rank EP guard for hand-built configs
-  that skipped validation (config-time raise is `_validate_single_domain_multigroup_ep`).
 - `CLAUDE.md` "## Parallelism" table + DeepEP / trainer-support notes.
 - User docs to cross-link: `agent-docs/parallelism/{expert,context,tensor,expert-tensor}-parallelism.md`,
   `agent-docs/parallelism/{data-parallelism,multi-node,data-loading}.md`.
@@ -101,16 +98,17 @@ describes a validator or contract, never a launchable topology
 
 ## REJECT THESE (verdict = do not run)
 
-- **TP + CP** (`tp_size>1 and cp_size>1`) — DTensor mesh conflicts with CP groups.
+- **TP + CP** (`tp_size>1 and cp_size>1`) — both partition the same contiguous rank blocks, and
+  Ulysses redistributes heads TP has already split.
 - **TP + ETP**, with or without EP (`tp_size>1 and expert_tp_size>1`) — attention-TP and
   expert-TP are mutually exclusive; use EP+TP **or** pure/EP+ETP.
-- **ETP + CP** (`expert_tp_size>1 and cp_size>1`) — ETP sub-EP dispatch groups break
-  CP sequence reconstruction.
+- **ETP + CP** (`expert_tp_size>1 and cp_size>1`) — expert-TP partners sum their outputs
+  element-wise in token space, while CP hands each rank a different sequence chunk.
 - **Multi-group >2-rank EP on one NVLink domain** — the predicate is
   `num_nvlink_domains == 1 and ep_size > 2 and nvlink_domain_size > ep_group_size`
   (`is_racy_single_domain_multigroup_ep`): DeepEP combine barriers race FSDP2's DP-wide NCCL.
-  **Rejected at config time** (`_validate_single_domain_multigroup_ep`); the trainer re-checks
-  hand-built configs. Use `ep_size=2`, `ep_size = nvlink_domain_size` (the **domain**, not the
+  **Rejected at config time** (`_validate_single_domain_multigroup_ep`), hand-built configs
+  included. Use `ep_size=2`, `ep_size = nvlink_domain_size` (the **domain**, not the
   node — they differ on NVL72), or `ep4 + etp2` — the supported 4-way expert split across 8 GPUs,
   since `ep_group_size = ep_size * expert_tp_size` fills the domain. `ep4 + tp2` lands on the same
   rejection: attention TP leaves `ep_group_size` untouched. The measured evidence and the two

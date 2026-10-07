@@ -46,6 +46,7 @@ matryoshka_dimensions: [256, 128, 64, 32]
 | `max_length` | `512` | Truncation length; `null` or non-positive → the backbone's context window |
 | `disable_dropout` | `false` | Disable dropout while training |
 | `batch_sampler` | `batch_sampler` | `no_duplicates` / `no_duplicates_hashed` (MNRL — avoids in-batch false negatives), `group_by_label` (batch-triplet losses). Refused under TP, ETP or a pre-sharded dataset: those runs batch through the toolkit's DP-sharded loader, which builds plain batches |
+| `dataloader_drop_last` | `false` (`true` on any multi-process launch) | sentence-transformers sets it to `true`, with a warning, on any multi-process launch, a YAML `false` included. A CLI `--dataloader_drop_last=false` survives that and is refused on a multi-process plain DP or pure EP run over a map-style dataset that is not pre-sharded, right after the datasets load: the sentence-transformers loader shards its batch sampler with `even_batches` off, so a kept remainder gives some ranks one step more and the run hangs in it. The eval loader then drops its last incomplete round too. On a multi-process plain DP or pure EP run, an iterable dataset that is not pre-sharded runs only with `accelerator_config.dispatch_batches: false` and either `split_batches: true` or at most one file shard per process, else it is refused: accelerate's default dispatches an iterable by concatenating collated batches, which the collator's string modality fields cannot take, and more shards than processes are split by shard, unevenly whatever `drop_last` says |
 
 `pooling_mode`, `normalize_embeddings` and `max_length` describe the pipeline both loading paths train: the EP/TP path builds the `SentenceTransformer` modules from them, the standard path aligns the checkpoint's `modules.json` to them.
 
@@ -95,6 +96,8 @@ Under FSDP2 (torchrun), TP or EP the trainer refuses at construction a parameter
 ## What to watch
 
 Metrics come from a separate `torch.no_grad()` encoding pass on logging steps, capped at 256 samples per padded text group; evaluation runs it every batch under an `eval_` prefix (`eval_embed/norm`, …).
+
+The eval values are this rank's per-batch means averaged over its batches, logged from rank 0, and not reduced over ranks. Where the eval loader pads its final round with repeats of the split's first rows (TP or ETP over more than one data-parallel replica with a CLI `--dataloader_drop_last=false`; a pre-sharded split is cut to the shortest rank's length and padded by nothing), those rows enter that round's means and its in-batch ranking candidates; plain DP and pure EP, which require `dataloader_drop_last: true`, drop the incomplete round instead.
 
 | Metric | When | Reading |
 |---|---|---|

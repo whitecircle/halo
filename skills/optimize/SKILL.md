@@ -97,7 +97,7 @@ These fire automatically; mention them only to confirm, not as new advice. Figur
 
 ## What does NOT help here (do not chase these)
 
-The honest negatives — cited in full in levers.md. At fine-grained MoE shapes (EP8,
+The honest negatives — cited in full in levers.md. At this repo's fine-grained MoE shapes (EP8,
 256–512 tokens/expert, N ≤ 4096) these are dead-ends:
 
 - **Low-precision fp8/fp4 *compute* — no throughput win. Train bf16.** Per-expert GEMM is

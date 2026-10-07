@@ -4,7 +4,7 @@ Concrete commands, config fields, and launch examples for online / async-environ
 GRPO. Source of truth: `Dockerfile.vllm`, `docker-compose.vllm.yml`,
 `src/distributed/nccl/clients/vllm.py`, `src/trainers/grpo/environmental.py`,
 `src/configs/async_training_config.py`, `src/configs/environment_config.py`,
-`src/rewards/spec.py` (the reward terms), `src/environments/registry.py`. Cross-link the docs:
+`src/rewards/terms.py` (the reward terms), `src/environments/registry.py`. Cross-link the docs:
 `agent-docs/infrastructure/rollout-servers.md` (server setup, weight sync, SGLang),
 `agent-docs/training-methods/grpo/rewards.md` (the `rewards:` term list),
 `agent-docs/training-methods/grpo/online-grpo.md`,
@@ -43,10 +43,11 @@ both `NCCLWeightTransferEngine.init_transfer_engine` and `.shutdown` (unpatched,
 that connects strands a live communicator on each engine-core worker until
 `ncclCommInitRank` fails outright); `/pause` must still accept `mode=keep`, the form the client pauses with so in-flight
 requests survive a sync; and `verify_gptoss_plugins.py` must exercise the gpt-oss
-tool + reasoning parser plugins, which no test suite can reach (they import vLLM). Two more
-assert the transformers 5.14 line with a per-family config-schema parity fixture, and that
-`EngineArgs` still carries `weight_transfer_config` / `enable_return_routed_experts` and
-`KernelConfig.moe_backend`.
+tool + reasoning parser plugins, which no test suite can reach (they import vLLM). Three more
+assert the transformers 5.14 line with a per-family config-schema parity fixture, the spec-decode
+prompt-logprob patch (unpatched, a speculative drafter overwrites the hidden states the engine re-score
+reads prompt log-probs from), and that `EngineArgs` still carries `weight_transfer_config` /
+`enable_return_routed_experts` and `KernelConfig.moe_backend`.
 
 Compose env knobs (`docker-compose.vllm.yml`): `VLLM_MODEL`, `VLLM_PORT` (8000), `VLLM_TP`
 (tensor-parallel size), `VLLM_GPU_MEM` (`--gpu-memory-utilization`, default 0.85),
@@ -116,18 +117,17 @@ docker run --gpus all --network=host --ipc=host \
 | `max_concurrent_rollouts` | `None` | pipeline depth; default 4 × this rank's share of `num_rollout_workers` (the whole pool locally, `÷ world_size` on a shared Ray cluster) |
 | `ray_address` | `None` | shared Ray cluster; `None` = per-rank local |
 | `rollout_temperature` / `rollout_top_p` / `rollout_max_tokens` | `0.7` / `0.95` / `32768` | rollout sampling (max tokens per turn) |
-| `rollout_max_thinking_tokens` | `None` | per-turn CoT cap (vLLM `thinking_token_budget`); needs a server reasoning parser + `VLLM_USE_V2_MODEL_RUNNER=0`, and the IS correction when the reasoning marker resolves; refused under `sglang`. Under the episode scope, the most one turn may take of the episode's budget |
-| `rollout_thinking_budget_scope` | `turn` | what a thinking budget covers: `turn` (each turn whole) or `episode` (the turns share it, each turn capped at what is left). `episode` is vLLM-only, needs `train_on_sampled_tokens`, and without `rollout_max_thinking_tokens` needs the env's `reasoning_effort` and every level's `thinking_tokens` |
-| `rollout_thinking_turn_reserve` | `512` | under the episode scope, the reasoning a turn keeps once the budget is spent; at most `rollout_max_thinking_tokens` and every level's `thinking_tokens` |
-| `rollout_reasoning_end_token` | `</think>` | the server parser's reasoning end string, encoded as vLLM encodes it and holding at least one added token (Gemma 4 `<channel\|>`, gpt-oss `<\|start\|>assistant<\|channel\|>final<\|message\|>`); a forced run of its ids gets ratio 0 wherever a vLLM budget can bind, and under the episode scope (one token only) a turn's spend is its sampled ids up to and including it |
-| `rollout_chat_template_kwargs` | `{}` | chat-template variables sent on every rollout request **and** applied to the trainer's own renders (Qwen3.x `preserve_thinking`); `reasoning_effort` and `reasoning_budget` are refused here — they travel per episode — and so is `reasoning_budget_scope`, which follows `rollout_thinking_budget_scope` |
+| `rollout_max_episode_tokens` | `None` | the most an episode may sample over all its turns, reasoning and visible output together; a turn's caps narrow to what is left, keeping the turn's answer room, and an episode with less than that room left ends truncated; never stated to the model; `>= rollout_max_tokens` |
+| `rollout_max_thinking_tokens` | `None` | per-turn CoT cap (vLLM `thinking_token_budget`); a level's smaller `thinking_tokens` caps the turn instead; needs a server reasoning parser + `VLLM_USE_V2_MODEL_RUNNER=0`, and the IS correction when the reasoning marker resolves; refused under `sglang` and at or above `rollout_max_tokens` |
+| `rollout_reasoning_end_token` | `</think>` | the server parser's reasoning end string, encoded as vLLM encodes it and holding at least one added token (Gemma 4 `<channel\|>`, gpt-oss `<\|start\|>assistant<\|channel\|>final<\|message\|>`); a forced run of its ids gets ratio 0 wherever a vLLM budget can bind, and the overlong charge counts a turn's reasoning as its sampled ids up to and including it (one token only) |
+| `rollout_chat_template_kwargs` | `{}` | chat-template variables sent on every rollout request **and** applied to the trainer's own renders (Qwen3.x `preserve_thinking`); `reasoning_effort` and `reasoning_budget` are refused here — they travel per episode |
 | `max_train_row_tokens` | `None` | longest training row a rank takes; must exceed `rollout_max_tokens`. Over-cap per-turn rows are left out, whole-trajectory rows train at zero weight (`sampling/rows_over_cap_frac`) |
 | `eval_rollout_batch_size` | `None` | rows per rank in one eval rollout round (eval runs without prefetch); `None` = the eval batch |
-| `effort_length_penalty_k0` / `effort_length_floor_weight` | `None` / `0.0` | both off by default; the first prices an episode's reasoning tokens by its effort level (capped at `effort_length_penalty_c_max`), the second its shortfall against `effort_length_floor_budgets` × the thinking budget it ran under |
+| `reasoning_price` / `reasoning_price_cap` / `reasoning_floor` | `None` / `0.1` / `0.0` | the price is off by default: per level, reward units per 1k reasoning tokens summed over the episode's turns, capped per episode by the cap (refused at a non-default value while the price is off); the floor (off at `0`) prices an episode's shortfall against 0.75 × the per-turn thinking budget it ran under |
+| `turn_overlong_penalty` | `0.0` | off by default; charges an episode, once, for its turn that reasoned furthest into the last quarter under its recorded cap. vLLM-only; needs `train_on_sampled_tokens` and a single-token `rollout_reasoning_end_token` |
 | `episode_timeout` | `1200.0` | per-episode deadline in engine-serving time (a weight-sync pause is credited back), checked against the NCCL watchdog — raise `DIST_NCCL_TIMEOUT_MINUTES` with it |
 | `train_on_sampled_tokens` | `True` | train on the server's actual sampled ids (needs `--return-tokens-as-token-ids`) rather than a re-tokenized re-render; off, a run with a bindable vLLM thinking budget and a resolvable `rollout_reasoning_end_token` is refused |
 | `enable_prefetch` | `True` | overlap rollout with training (auto-disabled in single-server mode) |
-| `num_prefetch_batches` | `1` | prefetch result-queue bound; the pipeline is one round deep, so values above 1 only add headroom |
 | `model_name` / `request_timeout` / `max_retries` / `retry_base_wait` | — | per-request HTTP behavior; `request_timeout` counts engine-serving time like `episode_timeout` |
 
 `vllm_group_port` is **not** in `AsyncTrainingConfig` — it's a TRL `GRPOConfig`
@@ -143,11 +143,13 @@ environment 10), `environment_kwargs` (per-env dict).
 `to_env_config()` forwards the terms as `reward_terms` plus an explicitly-set `max_turns`,
 merged with `environment_kwargs`, to `resolve_environment(environment_type, config)`.
 
-`rewards` is parsed into typed dataclasses at config time (`src/rewards/spec.py`), so a bad term
+`rewards` is parsed into typed dataclasses at config time (`src/rewards/terms.py`), so a bad term
 fails before any server is touched. Each term prices one source's score in `[0, 1]` as
 `weight × score ^ exponent` — `environment` (the episode grade), `judge` (a generative judge over
-`requirements`), `reward_model` (a served BT / seq-cls model); the online arm adds `accuracy` and
-`format`. The `exponent` (`> 0`, above 1 convex) reshapes a fractional score (a judge's, a reward
+`requirements`, or a veto judge over `checks` whose fired veto check zeroes `reward/objective` and
+every other positive component — environments only), `reward_model` (a served BT / seq-cls model); the external terms take `view`
+(`final` / `full` / judge-only `digest`) and `on_error` (`invalid` / `neutral`); the online arm adds
+`accuracy` and `format`. The `exponent` (`> 0`, above 1 convex) reshapes a fractional score (a judge's, a reward
 model's); a binary grade has nothing to reshape. There is **no failure offset**,
 since a constant cancels in the group baseline. Per-term reference:
 `agent-docs/training-methods/grpo/rewards.md`.
@@ -176,7 +178,8 @@ the trainer's `_init_weight_sync_client` → `_sync_weights_to_engine`:
    each chunk is a `/update_weights` declaration alongside `packed_broadcast_producer`.
    `reset_prefix_cache()` sends the tail chunk, then `/finish_weight_update` → `/resume`. PEFT
    adapters are folded into each base weight as it is sent, names stripped of `base_model.model.`. `sync_model_weights()` is the
-   single-call form of the same phases (`update_model_params`, the reconnect replay).
+   single-call form of the same phases, for a caller holding the whole payload (the transport
+   preflight, `scripts/profiling/weight_sync_transport.py`).
 
 The parallelism-aware gather is the shared `gather_and_send_weights`
 (`src/trainers/grpo/rollout/weight_sync.py`) that both the online trainer and env
@@ -203,11 +206,11 @@ server, `make ... EFA=1` on the trainer, `scripts/profiling/weight_sync_transpor
 | `native_math` | `NativeToolUseEnvironment` | Calculator + Python | OpenAI function calling |
 | `native_coding` | `NativeToolUseEnvironment` | Python REPL | OpenAI function calling |
 | `native_combined` | `NativeToolUseEnvironment` | All native tools | OpenAI function calling |
-| `swe` | `SweEnvironment` | File ops + Python REPL | OpenAI function calling |
+| `swe` | `SweEnvironment` | Workspace file ops + `run_code` + `run_bash_command` | OpenAI function calling |
 | `mcp` | `NativeMCPClientEnvironment` | MCP server tools (`mcp_server`) | MCP protocol |
 | `qa_search` | `NativeToolUseEnvironment` (via `create_qa_search_environment`) | Web search (+ optional Python) | OpenAI function calling |
-| `code_contests` | `CodeContestsEnvironment` | Python REPL + test runner (`timeout_per_test`, `output_comparison`) | OpenAI function calling |
-| `codeforces` | `CodeContestsEnvironment` (tokens preset) | Python REPL + test runner (token compare + special-judge checkers) | OpenAI function calling |
+| `code_contests` | `CodeContestsEnvironment` | Scratchpad (`python_repl`, or `run_code` off Python-only) + `submit_solution` hidden-test grader (`timeout_per_test`, `output_comparison`) | OpenAI function calling |
+| `codeforces` | `CodeContestsEnvironment` (tokens preset) | Same, token compare + special-judge checkers | OpenAI function calling |
 | `exam_qa` | `ExamQAEnvironment` | Optional search (`open_book`) | OpenAI function calling |
 
 Per-env `environment_kwargs`: `search_backend` (qa_search/exam_qa only — `react_search` builds its
@@ -254,7 +257,8 @@ CUDA_VISIBLE_DEVICES=0,1,2,3 torchrun --nproc_per_node=4 \
   --expert_parallel_size=4
 ```
 
-(`scripts/training/online_grpo/rlvr.py` — verifiable rewards.)
+(`scripts/training/online_grpo/rlvr.py` — verifiable rewards, with the same scoring-judge and reward-model
+terms as the environment arm.)
 
 ### Async GRPO with Environments — multi-turn tool-use
 
@@ -309,7 +313,7 @@ num_rollout_workers: 4
 rollout_temperature: 0.7
 rollout_top_p: 0.95
 rollout_max_tokens: 512         # per-turn generation cap; the script pins max_completion_length to it
-enable_prefetch: true
+enable_prefetch: false          # needs 2+ rollout_server_configs; one server auto-disables it
 
 # GRPO hyperparameters (GRPOConfig)
 num_generations: 4

@@ -43,8 +43,9 @@ additionally needs `ep_size` in the index metadata, not just the marker.
   merge-on-save checkpoint inverts this: it refuses a model built from itself), and under TP+DP,
   whose strided dp-over-tp placement `distribute_tensor` does not invert; pure TP instead streams the
   checkpoint one tensor at a time per rank and `distribute_tensor`s each into the live placements
-  (GptOss sinks sliced by `tp_rank`). `load_best_model_at_end` raises under EP/CP full fine-tuning
-  and TP+DP; FSDP2 and pure TP re-read for it.
+  (GptOss sinks sliced by `tp_rank`). `load_best_model_at_end` raises for a full fine-tune under CP,
+  on a MoE carrying EP or grouped-GEMM wrappers (`ep_size: 1` included), and under TP+DP; dense
+  FSDP2 and pure TP re-read for it.
 - **Path C — PP** (`_load_pp_stage`, dispatched first): stage-local restore. Unreachable while PP is
   unavailable in this release.
 
@@ -83,7 +84,7 @@ every tensor at its live dtype), so the stored dtype is what the merge writes. T
   `to_hub_layer_key`) map a checkpoint's `model_type` to the EP layer class via each class's
   `HF_MODEL_TYPES`; the transform itself is that class's `merge_shards_to_hf` (`expert_gather.py`,
   overridden where the layout differs). Save time gates on `_check_ep_merge_family_supported`
-  (`saving.py`), which refuses two cases: a `model_type` no EP layer class claims, and a family
+  (`ep_save.py`), which refuses two cases: a `model_type` no EP layer class claims, and a family
   declaring `_EXPORTS_HUB_NAMESPACE` — Step-3.7 Flash, **both spellings** (`step3p7`, `step3p5`) —
   whose hub layout comes from transformers'
   save-side conversion revert that a key-by-key merge stream cannot apply. Every other shipped
@@ -173,7 +174,8 @@ default base or first model, a Hub id is downloaded weights-excluded), `--max_sh
 `--quiet`, `--allow_missing_tokenizer`, `--trust_remote_code`. Streams one tensor at a time across the inputs, so peak host memory scales with the largest
 tensor, not N models (knob ranges and per-method working set: `agent-docs/reference/model-merging.md`).
 Deliberately copies **no** resume sidecars (`rng_state*`, `scheduler.pt`,
-`router_balancing_biases.pt`, `reference_logps.pt`) — they describe one run, not the merge.
+`router_balancing_biases.pt`, `reference_logps.pt`, `prefetch_pending-*`, `resume_adapter/` and its
+marker) — they describe one run, not the merge.
 
 ### `reattach_vision_tower.py`
 
@@ -240,7 +242,7 @@ and `convert_to_bf16.py` call it and print the returned actions; `copy_training_
   `auto_load_model` (`src/models/loading/model_preparation.py`) load a multimodal config as the
   full `*ForImageTextToText` wrapper.
 - **Save retains state on the save-rank only** — `save_ep_model`
-  (`src/distributed/expert_parallel/saving.py`) has all ranks run each gather collective but only the
+  (`src/distributed/checkpoint/ep_save.py`) has all ranks run each gather collective but only the
   save rank keeps the tensor (per-node CPU RAM peaks well under 1× model, not gpus_per_node×). TP
   mirrors this, and on the same `fs_aware_save_rank()` — never `tp_rank == 0`, which the several TP
   groups a node holds would race on identical files. Don't "optimize" by skipping ranks in the

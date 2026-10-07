@@ -104,7 +104,7 @@ On NVL72 the NVLink domain spans the rack (72 GPUs across ~18 OS nodes), so node
 
 ### NCCL collective timeout
 
-Slow loads or large checkpoints can exceed the default. Every shipped `crossnode-ep` task already pins `DIST_NCCL_TIMEOUT_MINUTES: "60"` in `envs`; raise it further there if a load is slower still.
+Model loading rarely holds a collective for long: the source agreement and the eager loads join over the c10d store (`DIST_STORE_TIMEOUT_HOURS`), and the default lazy EP load reads on every rank at once ([Multi-Node → Model loading](../parallelism/multi-node.md#model-loading)). A gathered save does: the non-writing ranks wait in its per-layer expert gathers while the save rank streams each flush to disk ([Checkpoints → Multi-node](../reference/checkpoints.md#multi-node)). Every shipped `crossnode-ep` task pins `DIST_NCCL_TIMEOUT_MINUTES: "60"` in `envs`; raise it there if a save is slower still.
 
 ## Storage
 

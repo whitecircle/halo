@@ -182,10 +182,7 @@ Reference-model shapes for vision rows: [DPO → Vision-language](../training-me
 
 Config in `OfflineGRPOConfig` (`src/configs/offline_grpo_config.py`); defaults: [Offline GRPO → Configuration](../training-methods/grpo/offline-grpo.md#configuration).
 
-Offline GRPO supports CP and EP+CP for full fine-tuning. Full-FT KL reference sweeps require a finite,
-unsharded dataset; pre-sharded KL inputs and supplied grouped `ref_per_token_logps` are refused.
-The trainer owns reference scores and their checkpoint/resume identity. See
-[Offline GRPO](../training-methods/grpo/offline-grpo.md#reference-model).
+Full-fine-tune KL runs need a finite, unsharded dataset ([Offline GRPO → Reference model](../training-methods/grpo/offline-grpo.md#reference-model)).
 
 ## Classification
 

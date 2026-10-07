@@ -57,8 +57,8 @@ router's weight without calling the router, and FSDP2's root post-backward callb
 gradient. A module that itself owns trainable parameters of two dtypes cannot be split, and the wrap
 raises. A layer whose trainable parameters share one dtype gets no extra group.
 
-On gpt-oss-20b at `ep_size: 1` (2× B300, seq 4096, batch 1; 34c102bba) the fp32 router runs 10,647 tok/s/GPU
-against 10,883 with a bf16 router, at the same 104 GiB peak. In that run set, the fp32 router over replicated
+On gpt-oss-20b at `ep_size: 1` (2× B300, seq 4096, batch 1) the fp32 router runs 10,647 tok/s/GPU against
+10,883 with a bf16 router, at the same 104 GiB peak. In that run set, the fp32 router over replicated
 experts (`fsdp_shard_ep1_experts: false`, which keeps the router out of FSDP2) ran 8,770–9,060 at 153 GiB.
 
 FSDP2 shards params, gradients, and optimizer states across the DP ranks, so per-rank optimizer-state
@@ -157,8 +157,8 @@ stays within about 4e-4 of the default and the final weights within about 2% of 
 under the 1.2e-3 loss spread between DP and HSDP (both correct) on the same data.
 
 Measured with packed `sft.py` (4k tokens, batch 2, gradient checkpointing, B300; tok/s/GPU, peak allocated
-in GiB). The two GA 4 rows on one 8-GPU node are single runs at commit 0bc3a22a5, whose tok/s the trainer
-logs to four significant figures; the other rows are from 34c102bba, the mean of 3 runs unless noted:
+in GiB). The two GA 4 rows on one 8-GPU node are single runs from a separate run set, whose tok/s the trainer logs to
+four significant figures; the other rows are the mean of 3 runs unless noted:
 
 | Run | GA | default | `fsdp_defer_grad_sync` | + `fsdp_reshard_after_backward: false` | peak allocated |
 |---|---|---|---|---|---|
@@ -348,7 +348,8 @@ MoE.
 | `use_hsdp` on a single NVLink domain | warned — no-op; the replica axis engages once the job spans domains | `_validate_hsdp` |
 | QLoRA / `load_in_4bit` | supported on a **dense** model. On a MoE the grouped-GEMM loader takes over and rejects a quantized base (`use_grouped_gemm` is on by default) — set `use_grouped_gemm: false`, under either launcher. QLoRA skips FSDP2, so `use_hsdp`, `fsdp_reshard_after_forward`, `fsdp_reshard_after_backward` and `fsdp_defer_grad_sync` raise under it | `model_loading.py`, `mixins/base.py` |
 | `use_peft` / LoRA, `packing`, `padding_free`, `torch_compile`, `gradient_checkpointing` | supported and ungated — plain DP is the mode with the widest knob surface | — |
-| `lowp_precision != "bf16"`, `init_from_scratch` | SFT only. `init_from_scratch` also refuses QLoRA and every EP/CP/TP/ETP/PP mode, so plain DP is the one mode it runs in | `parallelism_config_from_args`, `model_loading.py` |
+| `lowp_precision != "bf16"` | SFT only | `parallelism_config_from_args` |
+| `init_from_scratch` | SFT only; refuses QLoRA and every EP/CP/TP/ETP/PP mode, so plain DP is the one mode it runs in | `parallelism_config_from_args`, `model_loading.py` |
 
 ## Common issues
 

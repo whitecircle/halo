@@ -68,10 +68,10 @@ with their defaults in [Environment variables](../reference/configuration-refere
 `CUDA_DEVICE_MAX_CONNECTIONS=1` (the image `ENV`) serializes device work onto one hardware queue. It is a
 correctness setting: without it, EP with more than one dispatch group per NVLink domain can deadlock the
 combine barrier against FSDP2's DP-wide collectives, and the trainer warns at startup when it is not `1`.
-It costs no throughput: against `8`, `ep_size=8` reads +1.5% (2026-10-05, commit 0e9a51172, median of
-2) and `ep_size=2` +0.2% (2026-10-03, commit 0bc3a22a5); 8× B300, gpt-oss-20b, seq 4096, batch 1, GC on,
-Blackwell image. It is latched at `cuInit`, so a launch outside the image exports it before the process
-starts, and it does not make the racy single-domain multi-group shape safe ([below](#ep-grouping-what-is-reliable)).
+It costs no throughput: against `8`, `ep_size=8` reads +1.5% (median of 2) and `ep_size=2` +0.2% (a
+separate run set); 8× B300, gpt-oss-20b, seq 4096, batch 1, GC on, Blackwell image. It is latched at
+`cuInit`, so a launch outside the image exports it before the process starts, and it does not make the
+racy single-domain multi-group shape safe ([below](#ep-grouping-what-is-reliable)).
 
 **These must agree across every rank of the job**: `HALO_EP_CAPACITY_DEDUP`,
 `HALO_DEEPEP_GPU_TIMEOUT_SECONDS`, `HALO_DEEPEP_NUM_SMS`, `HALO_DEEPEP_NUM_QPS`,
@@ -214,7 +214,7 @@ interface (`_DeepEPBackend`), so it is transparent to the MoE layer and the auto
 
 The two are **numerically identical** (bit-identical loss + matching expert/router gradients on
 gpt-oss-20b ep2); legacy takes ≈1.12× elastic's fwd+bwd time at ep2/seq4096 (2× B300,
-`bench_ep_buffer_backends.py` defaults; 2026-10-03, commit 0bc3a22a5, Blackwell image). `auto`
+`bench_ep_buffer_backends.py` defaults, Blackwell image). `auto`
 resolves to `elastic`, which fits every topology; the backend is fixed for the run.
 
 Pick explicit **`legacy`** (intranode / node-local) for long-context ep8 training: elastic ep8 at extreme
@@ -344,13 +344,12 @@ across forward and backward so gradients are exact.
 Padding is confined to the elastic backend's own wire buffers; the MoE layer and expert compute see the
 real hidden. The send side is one strided copy into the padded buffer plus a fill of the pad columns; the
 receive side hands back a row-strided `[tokens, hidden]` view of the padded result, with no copy (every
-consumer reads the row stride directly, the weighted unpermute's backward included). Against a copying
-version (`F.pad` plus a contiguous slice) it runs gpt-oss-20b EP2 at 24,191 tok/s/GPU vs 23,933 (+1.1%;
-GC on, 2× B300, s4096 b4 packed chat data). Under GC the replay cache (`_gc_dispatch` / `_gc_combine`)
-holds the received tensors at the padded width, so it grows by `padded/hidden`: ≈+0.5 GiB peak on
-gpt-oss-20b EP8 (2880 → 3072), proportionally more on Gemma 4 (2816 → 3072). It is a no-op for conforming
-models (Qwen3 MoE, hidden 4096/2048). Cost is ~`padded/hidden − 1` extra transport bandwidth (≈6.7% for
-GPT-OSS). The legacy backend needs no padding.
+consumer reads the row stride directly, the weighted unpermute's backward included). That view keeps its
+padded buffer alive, so the GC replay cache (`_gc_dispatch` / `_gc_combine`) pins the received tensors at
+the padded width, `padded/hidden − 1` more (≈6.7% on GPT-OSS): ≈+0.5 GiB peak on gpt-oss-20b EP8
+(2880 → 3072), proportionally more on Gemma 4 (2816 → 3072). It is a no-op for conforming models (Qwen3
+MoE, hidden 4096/2048). Cost is ~`padded/hidden − 1` extra transport bandwidth. The legacy backend needs
+no padding.
 
 ## Expert parallelism over AWS EFA
 

@@ -42,7 +42,9 @@ is in [Flash Attention](flash-attention.md#choosing-a-backend).
 Use packing or padded batches there: packing raises tokens per row on any kernel, so off a varlen backend it
 only **warns**. gpt-oss is the exception. Its forward never passes the packed `position_ids` into mask
 construction, so the row would run as one dense causal sequence with documents attending across each other,
-and packing off a varlen backend is **rejected** there.
+and packing off a varlen backend is **rejected** there. DeepSeek-V4 rejects packing too, on every backend: its
+compressors cut KV windows at row indices, so a later packed document reads the row's first windows
+([Document isolation](../data/collators.md#document-isolation-under-packing)).
 
 Both collators emit `position_ids` that reset per document; whether a family's forward turns those into an
 isolating mask is per-family, and the exceptions are tabulated in
@@ -64,7 +66,7 @@ The collator emits `input_ids`, `labels`, and `position_ids` (reset per sequence
 
 Throughput is **real (non-padding) tokens/s/GPU** — `attention_mask.sum()`, not padded element count — set via `include_num_input_tokens_seen="non_padding"` so all three modes share one real-token basis.
 
-**Model:** Qwen3-30B-A3B (128 experts, top_k=8), FA2. **Hardware:** 2× B300 (SM103), EP=2, measured 2026-10-03 at commit 0bc3a22a5 on the Blackwell image. **Data:** max_length=4096, avg ≈ 1024 tokens (~75% padding waste). **Setup:** batch_size=2/GPU, GC on, 8 steps / 3 warmup.
+**Model:** Qwen3-30B-A3B (128 experts, top_k=8), FA2. **Hardware:** 2× B300 (SM103), EP=2, Blackwell image. **Data:** max_length=4096, avg ≈ 1024 tokens (~75% padding waste). **Setup:** batch_size=2/GPU, GC on, 8 steps / 3 warmup.
 
 | Mode | tokens/s/GPU (real) | Step time | vs Standard |
 |------|:-------------------:|:---------:|:-----------:|

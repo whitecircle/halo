@@ -104,12 +104,14 @@ For a checkpoint carrying **both** tied keys on disk (the Qwen3-0.6B/1.7B export
 compares them before tying, which on two DTensors is an **all-reduce on the default process group**:
 every rank must reach it.
 
-`_load_tp_model` therefore does not throttle its ranks with `max_concurrent_loading`. A
+`_load_tp_model` therefore does not throttle the load with `max_concurrent_loading`. A
 rank-serialized load blocks the loading rank inside that collective while its peers wait their turn,
-and the job hangs until the store timeout.
+and the job hangs until the NCCL watchdog fires.
 
 Nothing is lost: transformers streams the checkpoint key by key and places each rank's shard
-straight on its GPU, so host RAM never holds the model.
+straight on its GPU, so host RAM never holds the model. The FP32-master restore that follows
+(`fp32_non_ep_params`) stages each full FP32 tensor in host memory, so it does take the throttle
+([Multi-Node → Model loading](multi-node.md#model-loading)).
 
 ## The selective-TP plan
 
@@ -187,7 +189,8 @@ torchrun --nproc_per_node=4 scripts/training/sft.py \
 2D `(dp, tp)` mesh: TP within a node, FSDP2 across replicas. DTensor gradients cannot be reduced
 with plain `dist.all_reduce` or DDP — FSDP2's `fully_shard` understands DTensor semantics. The
 loader builds the mesh and attaches it to the model; the trainer wraps over the DP dimension via
-`setup_fsdp2_for_tp` (`src/distributed/fsdp.py`), reusing that mesh. Pure TP (DP=1)
+`setup_fsdp2_for_tp` (`src/distributed/fsdp.py`), reusing that mesh. EP+TP takes the same entry
+point with its EP modules as `ignored_params`. Pure TP (DP=1)
 skips FSDP. Prefer `tp_size = world_size` when the model fits the TP group's memory.
 
 ## Gradient sync and the grad norm
@@ -238,9 +241,8 @@ parallel-vs-baseline bound.
 
 ## Limitations
 
-**Trainers.** `_supports_tp` defaults `True` on the mixin and no trainer overrides it, so no trainer
-rejects TP; the
-only trainer-level TP gate that fires is the LoRA one below. Matrix:
+**Trainers.** No trainer rejects TP; its trainer-level gates reject knobs (LoRA and
+`load_best_model_at_end` below, online GRPO's `rollout_func`). Matrix:
 [Trainer Compatibility](../reference/trainer-architecture.md#trainer-compatibility).
 
 **Models.** There is no per-family "supports TP" flag. Selective TP shards exactly the attention
@@ -279,7 +281,7 @@ single-domain multi-group EP with `ep_size > 2` (`ep4+tp2` on 8) and multi-domai
 | `use_hsdp` | rejected — TP builds its own `(dp, tp)` mesh | `_validate_hsdp` |
 | `init_from_scratch` | rejected — no sharded random init | `model_loading.py` |
 | `accelerate launch` | rejected — TP requires `torchrun` | `model_loading.py`, `ParallelismValidationMixin` |
-| `ref_model` (explicit) | rejected — the reference is never parallelized, so its log-probs would not match the policy | `_validate_reference_model` |
+| `ref_model` (explicit) | warned — the reference is never parallelized, so every rank holds a whole dense replica; its log-probs match the policy's up to kernel numerics | `warn_unparallelized_reference` |
 | `load_best_model_at_end` | supported under pure TP — the reload distributes each checkpoint tensor into the live placements; rejected as a full fine-tune under TP+DP and under a MoE carrying EP/grouped-GEMM wrappers | `_validate_load_best_model_reloadable` |
 | `use_liger_kernel` | supported; `cross_entropy` and `fused_linear_cross_entropy` are forced off (warned when explicitly enabled) | `kernels/liger/orchestrator.py` |
 | `added_special_tokens` that grow the vocab | rejected on a dense **tied** model, whose embedding is a vocab-sharded DTensor that `resize_token_embeddings` cannot re-shard. Patch the vocab offline (`scripts/before_training/patch_vocab.py`) instead | `setup_model_and_tokenizer` (`input_embeddings_tp_sharded`) |
@@ -305,7 +307,7 @@ GPU-side barrier, not the PyTorch watchdog, so this does **not** bound it.
 
 ## Checkpoint saving
 
-`save_tp_model` (`src/distributed/tensor_parallel/checkpoint.py`) drives TP saving, and it always
+`save_tp_model` (`src/distributed/checkpoint/tp_save.py`) drives TP saving, and it always
 gathers: all TP ranks reconstruct full tensors and one save rank writes a standard HF checkpoint, put
 through `normalize_gathered_state_dict` (hub expert layout, save dtype) like the FSDP2 and CP
 writers. There is no per-rank TP save. The write streams through `stream_gathered_checkpoint`, so
@@ -321,11 +323,9 @@ checkpoint, so the weights load at construction and `CheckpointLoader._load_tp` 
 Where it does read (a best-model reload, or a model built from elsewhere), each rank streams the
 checkpoint's full tensors and `distribute_tensor`s them into the live DTensor placements.
 
-At construction, configured FP32 masters retain their stored values even for a fresh stage: native
-dense TP splits the reread tensor on CPU and installs only the local FP32 shard, preserving its TP
-placement and tied owners before the trainer adds DP/FSDP2. EP/ETP construction restores the plain
-masters before its wrappers. This makes the constructed-from-checkpoint skip preserve precision
-without attempting a reload into a 2-D packed FSDP2 layout.
+Configured FP32 masters are restored at construction, before the DP wrap
+([Load precision](../models/README.md#load-precision)), so the constructed-from-checkpoint skip keeps
+their precision without a reload into a 2-D packed FSDP2 layout.
 
 TP+DP is the exception: FSDP2 over TP stacks a strided `dp` shard on the `tp` shard, a 2-D placement
 `distribute_tensor` does not invert for packed projections, so it refuses every reload but the

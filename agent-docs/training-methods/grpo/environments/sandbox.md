@@ -9,7 +9,7 @@ The in-process restricted REPL (`inprocess.py`) — restricted builtins, no impo
 | Backend | Isolation | Languages | Needs |
 |---|---|---|---|
 | `local` (default) | rlimits, throwaway working dir, stripped child env, own process group; no namespaces | python, bash, cpp, c | `pidfd_open` (Linux 5.3+, allowed by the seccomp profile; checked at construction); `gcc` / `g++` for C/C++ |
-| `bubblewrap` | that core in a `bwrap` jail (`--unshare-all`): read-only system, only the working dir writable | python, bash, cpp, c | what `local` needs, plus `bwrap` and user-namespace rights |
+| `bubblewrap` | that core in a `bwrap` jail: own user, mount, PID, IPC, UTS and cgroup namespaces and, without `allow_network`, network, read-only system, only the working dir writable, no capabilities, the jail's root a subordinate uid | python, bash, cpp, c | what `local` needs, plus root, `bwrap`, util-linux `unshare`, `uidmap` with a subordinate range for root, and namespace rights |
 | `remote` | in the service, behind a SandboxFusion-compatible `/run_code` endpoint | whatever it exposes | network to it |
 
 Coding environments select it in `environment_kwargs`:
@@ -22,7 +22,21 @@ environment_kwargs:
 
 `resolve_sandbox()` (`src/environments/sandbox/resolve.py`) takes **explicit argument > env var > default** for `HALO_SANDBOX_BACKEND` (`local`) and `HALO_SANDBOX_URL` (unset). `remote` with no URL raises; so does a URL against `local` or `bubblewrap`, which would be ignored while untrusted code ran here.
 
-`bubblewrap` needs the `bwrap` binary (the `bubblewrap` apt package, in the training image) **and** the right to create user and mount namespaces, which Docker's default seccomp denies — run the container `--privileged` on a host allowing them (`kernel.unprivileged_userns_clone=1`). Its constructor probes once, so a blocked jail fails at construction, not per run.
+`bubblewrap` needs the `bwrap` binary, util-linux `unshare` and the `uidmap` package's `newuidmap`/`newgidmap` with a subordinate id range for root in `/etc/subuid` and `/etc/subgid` (all in the training image), **and** the right to create namespaces, which Docker's default seccomp denies — run the container `--privileged`, or with the narrower set `--cap-add SYS_ADMIN --security-opt seccomp=unconfined --security-opt apparmor=unconfined`, and mount a clean proc beside the container's own before the trainer starts. The kernel grants the jail a fresh `/proc` only while a proc mount in the container is fully visible, and the container's is not: Docker masks parts of it under the narrower set, and in a GPU container the NVIDIA runtime mounts over parts of `/proc/driver/nvidia` under either option, `--privileged` included. A second mount leaves both masks in place, and the jail binds neither:
+
+```bash
+docker run --gpus all --init --cap-add SYS_ADMIN --security-opt seccomp=unconfined \
+    --security-opt apparmor=unconfined ... halo:blackwell \
+    bash -lc "mkdir -p /run/fullproc && mount -t proc proc /run/fullproc && exec torchrun ..."
+```
+
+Under that set the jail sees only its own PID namespace (`/proc/1/environ` is its own stripped environment, not the trainer's) and, without `allow_network`, no network. Without the clean mount the jail's `/proc` mount fails (`Can't mount proc on /newroot/proc`), without `SYS_ADMIN` its loopback setup (`loopback: Failed RTM_NEWADDR`). Its constructor probes once, so a blocked jail fails at construction, not per run. On several nodes, every container that hosts environment actors needs the same.
+
+The jail's root is root's first subordinate uid and gid, not uid 0, so the trainer must run as root. The program owns its working directory, mounted at `/sandbox` (so a traceback names `/sandbox`, not the host path), and every file the host writes there, but no other host file; and `RLIMIT_NPROC` binds it, counted per run in the run's own user namespace (Linux 5.14+; an older kernel counts every jail against one uid). The jail drops every capability, so its root cannot remount a read-only bind writable. Every directory above a bound path must be searchable by other users, as `/tmp` is: the working directories live under `TMPDIR`.
+
+`bwrap` exits without reaping the jail's init, so a process is a child subreaper while one of its jailed runs is in flight, and each run reaps its init. An orphan of anything else the process started meanwhile is reparented to it too and stays unreaped. Keep `--init`: an environment actor that dies with runs in flight leaves their processes to the container's PID 1, which reaps them only if it is an init.
+
+`bwrap` exits `128 + n` for a program killed by signal `n`, which the backend reads back as that signal, as `local` reports it; a program that exits with such a code itself reads as the signal too.
 
 An executor declares whether it confines the program (`SandboxExecutor.isolated`, `False` unless declared): kept from writing the host's filesystem and from its network, though it may still read what the backend exposes (`bubblewrap`'s read-only system paths and `extra_ro_binds`). `remote` does, `bubblewrap` does unless `allow_network`, `local` does not. On `local` the program has this process's filesystem and network, where a policy can read or rewrite what grades it and fetch a solution, and it reads the grader's launch environment (`/proc/<pid>/environ`): the secrets the trainer was started with (`--env-file`) reach it. `swe` and `code_contests` log one warning per process per backend class when built on an executor that does not confine it. Use `bubblewrap` without network, or `remote`, for RL on untrusted code, and whenever the trainer's environment carries secrets.
 
@@ -106,6 +120,8 @@ On `local` / `bubblewrap` an output flood is not one: output is captured in file
 | `cpp` | `c++`, `cxx`, `cc` | `g++ -O2 -pipe -std=c++17` | `./main` |
 | `c` | — | `gcc -O2 -pipe -std=c11` | `./main` |
 
+`SandboxExecutor.toolchain(language)` states how a backend builds or runs a language, for a tool description to name: `local` and `bubblewrap` give the registry's compile flags (`is compiled with g++ -O2 -pipe -std=c++17`) and the interpreter a Python program runs on, this process's own (`runs on CPython 3.12`); `remote` gives nothing, since the service answers for its own toolchain.
+
 `SANDBOX_DEFAULT_TIMEOUT` is the single default wall-clock limit: the REPL and test tools, the `swe` session and hidden-test grading all start from it.
 
 ## Limits
@@ -118,7 +134,7 @@ Per-run rlimits bound each `local` / `bubblewrap` execution; `remote` enforces i
 | CPU (`RLIMIT_CPU`) | wall-clock + 1 s | compile timeout + 1 s | `RLIMIT_CPU_SLACK_SECONDS` |
 | Address space (`RLIMIT_AS`) | 1024 MiB | 2048 MiB | `SANDBOX_DEFAULT_MEMORY_MB` / `SANDBOX_DEFAULT_COMPILE_MEMORY_MB` |
 | File size (`RLIMIT_FSIZE`), captured stdout / stderr included | 64 MiB | 64 MiB | `LOCAL_FSIZE_LIMIT` |
-| Processes (`RLIMIT_NPROC`) | 4096 | not applied | `LOCAL_NPROC_LIMIT` |
+| Processes (`RLIMIT_NPROC`) | 4096 per run on `bubblewrap`; on `local`, none for uid 0 | not applied | `LOCAL_NPROC_LIMIT` |
 | Stack (`RLIMIT_STACK`) | the address-space limit, compiled languages only | inherited | `memory_limit_mb` |
 | Core dumps (`RLIMIT_CORE`) | 0 | 0 | fixed, so a crash leaves no core on the host |
 
@@ -126,7 +142,7 @@ A compiled program gets a judge-sized stack, so a deep recursive DFS does not ov
 
 Math libraries run single-threaded (`OPENBLAS_NUM_THREADS`, `OMP_NUM_THREADS`, `MKL_NUM_THREADS` set to `1` in the child env, `SINGLE_THREADED_MATH_ENV`), for scratchpad runs and grading alike: a thread pool sized to the host allocates per-thread buffers past the address-space limit, and OpenBLAS then aborts a correct program at `import numpy`. `remote` runs under the service's own environment.
 
-The `RLIMIT_CPU` backstop kills a busy loop that outruns timeout delivery, reporting `SIGXCPU` as `timed_out=True` — a spin still reads as a time limit. `RLIMIT_NPROC` does not bind a root process (how the containers run), so the process-group kill is `local`'s real fork-bomb defense. The group is killed when the leader exits too, before the leader is reaped, so a run is judged on the leader's exit and output and a child left in its process group does not outlive it; one that `setsid()`s out of the group escapes on `local`, without holding the run open.
+The `RLIMIT_CPU` backstop kills a busy loop that outruns timeout delivery, reporting `SIGXCPU` as `timed_out=True` — a spin still reads as a time limit. `RLIMIT_NPROC` does not bind uid 0, so on `local` in a root container (how the containers run) no rlimit bounds how many processes a fork bomb makes before its run ends; the process-group kill bounds only how long they live. `bubblewrap`'s jail root is a subordinate uid, which the limit binds per run. The group is killed when the leader exits too, before the leader is reaped, so a run is judged on the leader's exit and output and a child left in its process group does not outlive it; one that `setsid()`s out of the group escapes on `local`, without holding the run open.
 
 ## Concurrency and sizing
 

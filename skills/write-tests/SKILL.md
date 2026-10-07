@@ -76,8 +76,9 @@ Rules:
 
 1. **Write the body** as `@gpu_test_main(...)` over `def run(ctx) -> dict` returning
    `{"checks": {name: bool}, "metrics": ...}`. The decorator owns init → validate world size
-   → cache dirs → teardown (`cleanup_ep → cleanup_memory → cleanup_dirs → barrier →
-   teardown`) → the `__HALO_TEST_RESULT__` line → `sys.exit`. See `harness.md` for the full
+   → cache dirs → teardown (the `ctx.on_teardown` finalizers, `cleanup_ep` among them →
+   `cleanup_memory` → `cleanup_dirs`, then `barrier` → `teardown_distributed` on the clean path
+   only) → the `__HALO_TEST_RESULT__` line → `sys.exit`. See `harness.md` for the full
    skeleton; do not hand-roll init/finally.
 2. **Register in `tests/gpu/manifest.py`** — add one `TestSpec(nproc=..., markers=(...),
    timeout=..., ...)`. A script on disk but absent from the manifest fails collection

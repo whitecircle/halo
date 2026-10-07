@@ -58,8 +58,8 @@ The decorator computes `all(checks.values())`. **Returning no checks is an error
 return at least one. `metrics` is optional but should be present on any test that trains.
 
 Every check must be able to fail. A cross-rank spread of a logged loss cannot (HF logs the world
-mean), and neither can `trainer.is_ep_mode` / `is_tp_mode` / `is_cp_mode`, which return the
-`ParallelismConfig` the trainer was handed; read the axis off the model instead.
+mean), and neither can `trainer.parallelism_config.is_ep_mode` / `is_tp_mode` / `is_cp_mode`, which
+read back the config the trainer was handed; read the axis off the model instead.
 
 ### Shared checks and probes
 
@@ -78,7 +78,7 @@ Build checks from these rather than re-deriving them per file:
 | `train_recording_first_step` / `score_first_step` / `first_step_checks` / `first_step_gradient_checks` | `tests/common/first_step.py` | a parallel run's first optimizer step (microbatch losses, logged loss, sharded gradients, c10d autograd fallbacks) scored against a reference trainer on the same microbatches, for an objective a parallel axis could miscount |
 | `skip_unless_local_checkpoint(path, env_var)` | `tests/common/harness.py` | the `SKIP:` exit for a suite whose local checkpoint is absent, called under `__main__` before `run()` |
 | `max_or_nan(values, *, default=)` | `tests/common/utils.py` | the largest value, NaN when any is NaN; the builtin `max` drops a NaN anywhere but first, so a bound on it would pass |
-| `run_gloo_ranks(worker, nprocs, *args, pg_timeout=, env=)` | `tests/common/gloo.py` | `nprocs` spawned ranks sharing one gloo group, for a CPU test that needs a real process group; a rank that raises, dies or hangs fails the call |
+| `run_gloo_ranks(worker, nprocs, *args, pg_timeout=, env=)` | `tests/common/gloo.py` | `nprocs` spawned ranks sharing one gloo group, for a CPU test that needs a real process group; a rank that raises, dies or hangs fails the call. The rendezvous store is served from the calling process, and no worker starts before every rank has initialized the group: a rank that finishes first tears down neither the store nor a pair a peer is still connecting |
 | `tiny_family_model` / `build_tiny_family_checkpoint` / `shared_tiny_family_checkpoint` | `tests/common/tiny_models.py` | one seeded random-init tiny model per EP MoE family, and a synthetic checkpoint of it the production loaders read (`shared_…` builds it once on rank 0 into a rank-shared scratch dir) |
 
 ## Minimal copy-pasteable skeleton

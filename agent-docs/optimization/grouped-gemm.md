@@ -6,7 +6,7 @@ The MoE expert step sorts tokens by expert (contiguous per-expert blocks), build
 
 ## Performance
 
-**Isolated kernel** — 1× B300 (SM103, PyTorch 2.11), measured 2026-10-03 at commit 0bc3a22a5 on the Blackwell image, Qwen3-30B-A3B dims (hidden 2048, moe_intermediate 768), 128 experts / 4K tokens, median over 50 iters: the forward runs **≈10.2×** the per-expert loop, 1.12 ms → 0.11 ms (achieved TFLOPS 11.51 → 117.42). `benchmark_grouped_mm.py` reports the raw `grouped_mm` backward as unavailable and estimates its fwd+bwd row from the forward ratio, so there is no measured fwd+bwd figure. The ratio scales with expert count (more launches saved). These are launch-dominated; end-to-end is far smaller.
+**Isolated kernel** — 1× B300 (SM103, PyTorch 2.11), Blackwell image, Qwen3-30B-A3B dims (hidden 2048, moe_intermediate 768), 128 experts / 4K tokens, median over 50 iters: the forward runs **≈10.2×** the per-expert loop, 1.12 ms → 0.11 ms (achieved TFLOPS 11.51 → 117.42). `benchmark_grouped_mm.py` reports the raw `grouped_mm` backward as unavailable and estimates its fwd+bwd row from the forward ratio, so there is no measured fwd+bwd figure. The ratio scales with expert count (more launches saved). These are launch-dominated; end-to-end is far smaller.
 
 **End-to-end** the launch saving is worth most at small batch and narrows as per-expert GEMMs grow (the Qwen3-30B EP=2 row below).
 
@@ -24,13 +24,13 @@ Grouped collapses those to `P` nodes (Qwen3.6: 256×2=512 → 2), so far fewer s
 
 Per-expert `M = ep_size × tokens_per_rank × top_k / num_experts`: tokens pool across the dispatch group, so per-rank rows `tokens_per_rank × top_k` are EP-invariant and M grows with `ep_size`. M modulates the trend: `grouped_mm` runs one shared ~128-wide M tile for all groups, so its edge is largest at small M and erodes as M grows.
 
-gpt-oss-20b (32 experts, top-4, seq 8192, 8× B300, FA4, GC on), grouped vs loop, plus Qwen3-30B-A3B (128 experts, ep2 → 64 local/rank; 2× B300, seq 8192, GC on: 14,536 vs 3,176 tok/s/GPU at b1, 18,956 vs 7,415 at b4) as the high-local-count anchor. Measured 2026-10-03 at commit 0bc3a22a5 on the Blackwell image, except the gpt-oss-20b ep8 row (2026-10-05, commit 0e9a51172, median of 2) and the Qwen3.5 row (v1.0.0):
+gpt-oss-20b (32 experts, top-4, seq 8192, 8× B300, FA4, GC on), grouped vs loop, plus Qwen3-30B-A3B (128 experts, ep2 → 64 local/rank; 2× B300, seq 8192, GC on: 15,587 vs 3,798 tok/s/GPU at b1, 18,710 vs 7,646 at b4) as the high-local-count anchor. Measured on the Blackwell image; the gpt-oss-20b ep8 row (median of 2) and the Qwen3.5 row each come from a separate run set:
 
 | Model | EP | local experts/rank | b1 | b2 | b4 |
 |---|----|:------------------:|:---:|:---:|:---:|
 | gpt-oss-20b | ep2 | 16 | grouped +78% | — | +41% |
 | gpt-oss-20b | ep8 | 4 | grouped +34% | +34% | +31% |
-| Qwen3-30B | ep2 | 64 | grouped +358% | — | +156% |
+| Qwen3-30B | ep2 | 64 | grouped +310% | — | +145% |
 | Qwen3.5-35B | ep2 | 128 | — | — | grouped +137% |
 
 Local-expert *count* is the primary lever; batch (per-expert M) shrinks the margin. **Rule: keep grouped (the default); at these shapes the loop is never faster, and the gap is smallest at high EP with large batches (+31% at ep8 b4).** The roofline reasoning is in [GPU Training Theory §2](../reference/gpu-training-theory.md#worked-example--why-small-per-expert-m-is-slow).
@@ -76,11 +76,9 @@ The Qwen3.6 table is a same-session A/B of `index_add_` against the atomic-free 
 
 The win grows with sequence length (larger recv buffers → worse contention).
 
-The fused kernels against that padded-gather permute (a separate routing-weight multiply, a padded `[N, top_k, H]` gather-sum each way, the same sort), on the Gemma 4 26B-A4B expert block (hidden 2816, intermediate 704, 128 experts, top-8), fwd+bwd on one B300 (2026-10-03, commit 0bc3a22a5, Blackwell image): 2.19 / 3.42 / 10.87 ms at 2k / 8k / 32k tokens, against 2.41 / 4.95 / 16.51 ms, and peak transient memory of 3.7 against 6.5 GiB at 32k (`tests/gpu/profiling/benchmark_moe_block.py`, rows `halo` and `halo_padded_gather`).
+The fused kernels against that padded-gather permute (a separate routing-weight multiply, a padded `[N, top_k, H]` gather-sum each way, the same sort), on the Gemma 4 26B-A4B expert block (hidden 2816, intermediate 704, 128 experts, top-8), fwd+bwd on one B300 (Blackwell image): 2.19 / 3.42 / 10.87 ms at 2k / 8k / 32k tokens, against 2.41 / 4.95 / 16.51 ms, and peak transient memory of 3.7 against 6.5 GiB at 32k (`tests/gpu/profiling/benchmark_moe_block.py`, rows `halo` and `halo_padded_gather`).
 
-End to end, these kernels together with the fused GLU, torch's fused RMSNorm on four families and AdamWBF16's folded gradient clip (2× B300, EP2, A/B of commit 29cf60ded against its parent; peak memory unchanged): Gemma 4 26B-A4B full SFT at 2,048 tokens 8,984 → 11,152 cluster tok/s (1.24×), most of it from the optimizer; at 4,096 tokens gpt-oss-20b 1.25×, Qwen3-30B-A3B 1.12×, GLM-4.7-Flash 1.09×.
-
-Per-device batch multiplies the per-call recv buffer exactly like sequence length.
+End to end, these kernels together with the fused GLU, torch's fused RMSNorm on four families and AdamWBF16's folded gradient clip run Gemma 4 26B-A4B full SFT at 2,048 tokens at 11,152 cluster tok/s against 8,984 without them (1.24×, most of it from the optimizer; 2× B300, EP2, peak memory unchanged); at 4,096 tokens gpt-oss-20b gains 1.25×, Qwen3-30B-A3B 1.12×, GLM-4.7-Flash 1.09×.
 
 ## Throughput tuning beyond the kernel
 
@@ -88,7 +86,7 @@ The grouped GEMM is one part of an EP step (also: all-to-all dispatch/combine, p
 
 1. **Pick parallelism by fit.** If it fits FSDP2, FSDP has no all-to-all and reaches higher achieved TFLOPS, at a high memory cost; use EP only when FSDP OOMs ([Maximizing achieved TFLOPS](throughput-benchmarks.md#maximizing-achieved-tflops)).
 2. **Smallest EP degree that fits the experts.** Fewer ranks = smaller all-to-all + larger per-rank GEMMs.
-3. **GC off when the batch fits** ([the gpt-oss-20b EP case study](throughput-benchmarks.md#where-the-ep-steps-time-goes-gpt-oss-20b-ep8-b1s4096-8-b300-fa4)).
+3. **GC off when the batch fits** ([the gpt-oss-20b EP step breakdown](throughput-benchmarks.md#where-the-ep-steps-time-goes-gpt-oss-20b-ep8-b1s4096-8-b300-fa4)).
 4. **Atomic-free expert permute** (above) — always on the grouped path; +18% (seq 4k) to +65% (seq 16k) on qwen3.6 EP8, +24% on gpt-oss-20b EP8.
 5. **Do not use low precision** (fp8/fp4) — measured net-slower (experts are tiny-M / bandwidth-bound, bf16 at the roofline). See [Low-Precision Kernels](low-precision-moe-kernels.md).
 

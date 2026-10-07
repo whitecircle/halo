@@ -51,8 +51,8 @@ from src.environments.envs.protocols.mcp import NativeMCPClientEnvironment
 
 env = NativeMCPClientEnvironment(
     server_command="npx",
-    server_args=["-y", "@your-org/mcp-server-custom"],
-    server_env={"CUSTOM_API_KEY": "..."},
+    server_args=["-y", "<npm-package>"],
+    server_env={"API_KEY": "..."},
 )
 ```
 

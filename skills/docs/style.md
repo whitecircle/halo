@@ -98,7 +98,7 @@ caveat that protects the reader:
 
 > Grouped GEMM (`torch.nn.functional.grouped_mm`) batches the per-expert matmuls
 > into one kernel launch (SM90+, PyTorch 2.11+). On Qwen3-30B-A3B EP=2 (2× B300,
-> seq 8192, batch 4): **2.56×** over the loop. The win shrinks as batch grows —
+> seq 8192, batch 4): **2.45×** over the loop. The win shrinks as batch grows —
 > measure at batch ≥ 4.
 
 That is the bar: one anchor, one number with its shape, one caveat, nothing else.

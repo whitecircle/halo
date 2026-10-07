@@ -60,8 +60,8 @@ advertise is inert here. The spec's `gated_rms_norm` role therefore binds `flash
 `FusedRMSNormGated`, already a hard dependency for this roster's delta-rule and short-convolution kernels.
 It rides the same `rms_norm` flag, so one knob turns both norm kernels off.
 
-Measured on a B300 over `[1, 8192, 32, 128]` (262144 rows × 128) forward and backward (2026-10-03, commit
-0bc3a22a5, Blackwell image): **2.7–6.3×** (1.79–1.98 ms eager → 0.32–0.66 ms fused).
+Measured on a B300 over `[1, 8192, 32, 128]` (262144 rows × 128) forward and backward (Blackwell
+image): **2.7–6.3×** (1.79–1.98 ms eager → 0.32–0.66 ms fused).
 
 The kernel keeps the reduction, the weight multiply and the gate in fp32, as GLM-5's module does. The Qwen
 modules round the normalized activation to storage dtype *before* the weight multiply, so the fused path is
@@ -357,7 +357,7 @@ The EP MoE layer's own clamped-SwiGLU is independent of Liger: every path — pe
 
 ## Benchmarks
 
-Both measured 2026-10-03 at commit 0bc3a22a5 on the Blackwell image.
+Both measured on the Blackwell image.
 
 **Dense — 1× B300 (SM103), Qwen3-8B, GC on, seq 16384, batch 1:** Liger+CE gives 15,966 vs 11,746
 tokens/s/GPU (**+36%**) at 64.6 vs 78.6 GiB peak (**−14 GiB**).

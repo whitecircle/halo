@@ -24,6 +24,10 @@ python scripts/environments/inference/run_env.py --env_type qa_search \
 | `--max_turns` / `--env_kwargs` | the env's own; coding 15 / `{}` | Turn cap override; JSON merged into the env config |
 | `--temperature` / `--top_p` / `--max_tokens` / `--request_timeout` | 0.7 (0.2 coding) / 0.95 / 32768 (coding at a level: the level's `thinking_tokens` + 4096) / 180 s | Sampling, HTTP timeout |
 
+Every request also carries `top_k`, `min_p` and `repetition_penalty`: the run's `rollout_*` values
+under `--training_config`, else their off values (`-1`, `0.0`, `1.0`), so a served model's
+`generation_config.json` defaults never filter the eval.
+
 A `prompt` given as a message list reaches the environment as its last `user` turn, the task
 training hands it ([Async GRPO with Environments](../async-grpo/README.md)); a row with no `user` turn
 is refused before any episode runs.
@@ -41,7 +45,7 @@ flag of its own (`--max_turns`, `--language`, `--eval_protocol`, `--reasoning_ef
 `--env_kwargs`, which would otherwise override the flag.
 
 `--training_config <yaml>` parses the YAML with the training script's own config classes: its
-`RolloutConfig` (template variables, stop tokens, thinking budget, sampling) and environment config
+`RolloutConfig` (template variables, stop tokens, thinking and episode output budgets, sampling) and environment config
 (rewards, `max_turns`, `environment_kwargs`, `environment_type`) become the eval's. An explicit flag
 wins over the YAML, the YAML over the default. An environment at `reasoning_effort: random` draws each problem's level
 from the problem's text, as the trainer's eval does, so a rerun scores every problem at the same level.
@@ -77,7 +81,7 @@ every score (the telemetry line still counts it), and `generation_errors` counts
 no sample reads `nan`.
 
 `invalid` counts the samples scored 0 with no signal, each carrying `error`: an invalid grade (a
-grading or sandbox outage, an inconclusive code grade, a failed scorer, a null `answer`) or an episode whose run raised. Invalid
+grading or sandbox outage, an inconclusive code grade, a failed scorer whose term is `invalid` on error, a null `answer`) or an episode whose run raised. Invalid
 samples stay in the means, unlike in training, where the baseline drops them.
 
 ## Output files
@@ -101,7 +105,9 @@ Each later line is an `episode`, addressed by `index` and `id`: `reward`, `succe
 `generation_error` (null on a scored sample), `stats`, the messages, `reasoning_effort` /
 `reasoning_budget`, `info`. The answer key (`_`-prefixed `info`
 fields), `context` and assistant chain-of-thought are stripped; each message keeps its own
-`tool_calls`, which the re-grader replays.
+`tool_calls`, which the re-grader replays, and each assistant turn its `thinking_cap` (its level's
+per-turn cap) where it ran under one; no turn records `reasoning_tokens`, since the eval transport
+captures no sampled ids.
 
 ## Re-grading recorded trajectories
 

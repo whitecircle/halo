@@ -369,7 +369,7 @@ Values that differ from it or are load-bearing at 397B:
 | `fp32_grad_reduce` | `true` | bf16 sums lose precision at 16–64 ranks; no storage cost |
 | `use_grouped_gemm` / `use_liger_kernel` / `fp32_output_conversion` | `true` / `true` / `false` (all defaults) | the fused `[512, 2048, 4096]` layout is what `grouped_mm` wants on SM100; the disabled upcast keeps an fp32 copy of the logits off the card |
 | `liger_kernel_config.fused_linear_cross_entropy` | `true` | opt-in: this family defaults to Liger's plain cross-entropy. The fused loss never materializes `[b, S, 248320]` — 4 GB per copy at `S=8192` |
-| `max_concurrent_loading` | leave unset | node-local wave gate; unset adapts to the node (`min(4, max(1, local_world_size // 2))` — 4 on an 8-GPU node, 2 on a 4-GPU tray), and any explicit value is used verbatim. The lazy EP path bypasses it, so this only bounds the fallback |
+| `max_concurrent_loading` | leave unset | node-local wave gate; unset adapts to the node (`min(4, max(1, local_world_size // 2))` — 4 on an 8-GPU node, 2 on a 4-GPU tray), and any explicit value is used verbatim. The lazy EP path bypasses it, so at load it bounds only the EP fallback; a resume's optimizer-shard reads take it too |
 | `save_sharded_ep` | `true` on the pure-EP cells (`ep16`/`ep32`/`ep64`) | every rank writes its own shard instead of funneling 794 GB through one. Requires a single EP group spanning all ranks (`ep_group_size == world_size` — exactly these cells) and a shared output filesystem; **rejected under ETP**, so the `ep8+etp8` cell takes the layer-streaming gathered save instead. Merge before serving ([Checkpoints](../reference/checkpoints.md#expert-parallelism-ep-eptp-epcp)) |
 | `per_device_train_batch_size` | `1` | the activation column is `b=1`; raise only at 8 nodes and only after step 1's peak is known |
 | `max_length` | `8192` on every `ep_scope=global` cell | doubling it doubles the activation column — but on cross-node EP the hard limit is the 8192 tokens/rank dispatch ceiling above, not memory. Raise the ceiling only after validating a larger dispatch end-to-end on your fabric ([DeepEP → AWS EFA](../infrastructure/deepep.md#expert-parallelism-over-aws-efa)) |
@@ -418,8 +418,8 @@ The `ep16` rows all sit on cross-node EP and inherit its `per_device_train_batch
     per-rank shards only once the merged checkpoint is complete, so the volume briefly holds both.
 
 - Host RAM at load: the EP lazy path reads safetensors straight to GPU and needs almost none. Every
-  slice is a view over the mmapped shard, so anonymous RSS stays at the process baseline and
-  `max_concurrent_loading` never applies.
+  slice is a view over the mmapped shard, so anonymous RSS stays near the process baseline (about
+  one tensor at a time) and `max_concurrent_loading` never applies.
 
     What `free` shows is page cache the size of the checkpoint (~800 GB here; 398 / 628 / 582 GB for
     the Step-3.7 / GLM-5.3 / DeepSeek-V4 Flash artifacts of
@@ -429,7 +429,8 @@ The `ep16` rows all sit on cross-node EP and inherit its `per_device_train_batch
 
     The gate+up fan-in's 2× transient lives on the GPU (~1 GB per layer). If `ep_lazy_loading` is off
     or the checkpoint layout is lazy-incompatible, the fallback stages the full model in CPU RAM per
-    concurrent loader; set `max_concurrent_loading: 1` when `free -g` is tight.
+    concurrent loader; set `max_concurrent_loading: 1` when `free -g` is tight. `fp32_experts` doubles
+    the expert bank it stages ([EP → Model loading](expert-parallelism.md#model-loading)).
 
 - Host RAM at save and resume: a run that keeps optimizer state (`save_only_model: false`) copies
   each rank's optimizer shard to host RAM at every save and resume (`cpu_offload`): ~28 GB/rank at

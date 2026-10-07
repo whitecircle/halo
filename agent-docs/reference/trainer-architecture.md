@@ -24,25 +24,40 @@ Each is a class because it reads live trainer state; the methods a test or a cal
 
 Additional modules in the same package sit outside that composition. `StoredMetricsMixin`
 (`src/trainers/mixins/stored_metrics.py`) is mixed in *directly* by SMPO, teacher and self
-distillation, and SDPG for buffered per-step metric logging. Under PP the store would be fed from
-the last stage ([Pipeline Parallelism](../parallelism/pipeline-parallelism.md), not yet available in
-this release).
+distillation, and SDPG for buffered per-step metric logging. `log` reports
+each metric's row-weighted world mean: one all-reduce of `(Σ value·rows, Σ rows)` per log call, after
+the ranks agree on the key set (a mismatch raises on every rank). `store_metrics(..., rows=n)` weights
+a value by the real rows it averages. Every eval store passes `rows=eval_split_rows(n)` (pairs for
+SMPO) and computes its values over those rows — the distillation and SDPG trainers through
+`store_batch_metrics`, which weighs a train micro-batch 1; the eval losses read
+the same rows, bar SDPG's GRPO term, which TRL computes over the whole batch. Under PP the store would
+be fed from the last stage ([Pipeline Parallelism](../parallelism/pipeline-parallelism.md), not yet
+available in this release).
+TRL's DPO, KTO and reward trainers log through their own `_metrics` and accelerate's gather instead,
+so their eval metrics keep the final round's padding.
 
 Offline GRPO, the embedding trainer, and online and async GRPO keep their own `log` instead:
 offline reads the train/eval bucket off `model.training` rather than the mixin's `"loss" in logs`,
 the embedding trainer's eval metrics go into `output.metrics` for best-model tracking, and the two
-on-policy trainers decouple the completions table from the metric drain.
+on-policy trainers decouple the completions table from the metric drain. The embedding trainer's
+`eval_embed/*` values are rank 0's per-batch means and count a padded final round's repeated rows
+([Embedding](../training-methods/embedding.md#what-to-watch)).
 
 `GradientSyncMixin` dispatches by method, not by mode string: `_setup_ep_gradient_sync`,
 `_setup_cp_gradient_sync` and `_setup_ep_tp_gradient_sync` are called directly from `mixins/base.py`'s
 per-mode setup, and the EP one derives the FSDP ignored-module set in a single module-tree walk it
 hands to `_apply_ep_aware_dp_fsdp2`.
 
+`CoordinatedTRLDatasetPrepMixin` (`trl_dataset_prep.py`) is mixed in directly by DPO, KTO and the
+reward trainer, ahead of TRL: it runs TRL's dataset preparation once per filesystem scope
+([Filesystem handling](../data/filesystem-handling.md)).
+
 `ReferenceLogpsCheckpointMixin` is mixed in by DPO/KTO precompute and offline GRPO. It owns
 reference identity checks, resume attachment and atomic sidecar persistence; each trainer owns its
-score payload and sweep ([Checkpoints](checkpoints.md#what-gets-saved)). The preference mixin also
-records the log-prob precision each split was summed in
-([DPO](../training-methods/preference/dpo.md#resuming-a-precompute-run)), and precedes
+score payload and sweep ([Checkpoints](checkpoints.md#what-gets-saved)). Both record the log-prob
+precision each split was scored in (`LOGPROB_PRECISION_KEY`;
+[DPO](../training-methods/preference/dpo.md#resuming-a-precompute-run),
+[offline GRPO](../training-methods/grpo/offline-grpo.md#reference-model)). The preference mixin precedes
 `DistributedTrainerMixin` in the trainer's bases so the checkpointing default cannot shadow its
 sidecar hook.
 Offline GRPO's `reference_cache.py` streams current-batch scores to filesystem-aware writers and
@@ -57,42 +72,40 @@ vocabulary, below).
 
 ## Trainer compatibility
 
-| Trainer | Base Class | EP | CP | TP | ETP | PP |
-|---------|-----------|:--:|:--:|:--:|:--:|:--:|
-| `DistributedSFTTrainer` | `SFTTrainer` | Yes | Yes | Yes | Yes | Yes |
-| `SmoothMarginPOTrainer` | `Trainer` | Yes | Yes | Yes | Yes | Yes (no VLM / `padding_free` / clip percentile / PEFT; `label_pad_token_id: -100`) |
-| `OfflineGRPOTrainer` | `ChunkedLogprobsCore`, `Trainer` | Yes | Yes (full fine-tuning) | Yes | Yes | Yes (`kl_beta > 0` via a construction-time reference sweep) |
-| `DistributedDPOTrainer` | `DPOTrainer` | Yes | No | Yes | Yes | Yes (precompute-only; `sigmoid`/`hinge`/`ipo`) |
-| `DistributedKTOTrainer` | `KTOTrainer` | Yes | No | Yes | Yes | Yes (`apo_zero_unpaired`, precompute-only) |
-| `DistributedRewardTrainer` | `RewardTrainer` | Yes | No | Yes | Yes | Yes |
-| `ClassificationTrainer` | `Trainer` | Yes | No | Yes | Yes | Yes |
-| `DistributedGRPOTrainer` | `GRPOTrainer` | Yes | No | Yes | Yes | No |
-| `DistributedSDPGTrainer` | `DistributedGRPOTrainer` | Yes | No | Yes | Yes | No |
-| `DistributedAsyncEnvironmentalGRPOTrainer` | `GRPOTrainer` | Yes | No | Yes | Yes | No |
-| `DistributedDistillationTrainer` | `Trainer` | Yes | No | Yes | Yes | No |
-| `DistributedSelfDistillationTrainer` | `DistributedSFTTrainer` | Yes | No | Yes | Yes | No |
-| `EmbeddingTrainer` | `SentenceTransformerTrainer` | Yes | No | Yes | Yes | No |
+| Trainer | Base Class | CP | PP |
+|---------|-----------|:--:|:--:|
+| `DistributedSFTTrainer` | `SFTTrainer` | Yes | Yes |
+| `SmoothMarginPOTrainer` | `Trainer` | Yes | Yes (no VLM / `padding_free` / clip percentile / PEFT) |
+| `OfflineGRPOTrainer` | `ChunkedLogprobsCore`, `Trainer` | Yes (full fine-tuning) | Yes (`kl_beta > 0` via a construction-time reference sweep) |
+| `DistributedDPOTrainer` | `DPOTrainer` | No | Yes (precompute-only; `sigmoid`/`hinge`/`ipo`) |
+| `DistributedKTOTrainer` | `KTOTrainer` | No | Yes (`apo_zero_unpaired`, precompute-only) |
+| `DistributedRewardTrainer` | `RewardTrainer` | No | Yes |
+| `ClassificationTrainer` | `Trainer` | No | Yes |
+| `DistributedGRPOTrainer` | `GRPOTrainer` | No | No |
+| `DistributedSDPGTrainer` | `DistributedGRPOTrainer` | No | No |
+| `DistributedAsyncEnvironmentalGRPOTrainer` | `GRPOTrainer` | No | No |
+| `DistributedDistillationTrainer` | `Trainer` | No | No |
+| `DistributedSelfDistillationTrainer` | `DistributedSFTTrainer` | No | No |
+| `EmbeddingTrainer` | `SentenceTransformerTrainer` | No | No |
 
-The PP axis itself is **not yet available in this release** — `pipeline_parallel_size > 1` is
-rejected at config time, and the PP column records each trainer's `_supports_pp` declaration: which
-trainers take the axis when the engine lands ([Pipeline Parallelism](../parallelism/pipeline-parallelism.md)).
+EP, ETP and TP run under every trainer. The PP axis itself is **not yet available in this release**
+— `pipeline_parallel_size > 1` is rejected at config time, and the PP column records each trainer's
+`_supports_pp` declaration: which trainers take the axis when the engine lands
+([Pipeline Parallelism](../parallelism/pipeline-parallelism.md)).
 
-Support is declared per class as `_supports_ep` / `_supports_cp` / `_supports_tp` / `_supports_pp`
-and enforced in `ParallelismValidationMixin`; `_pp_unsupported_reason` carries the rejection text.
-`DistributedTrainerMixin` defaults them to EP/TP on and CP/PP off, so a trainer states only what it
-flips. Its PP verdict is written out even when it matches the default, because
-`_pp_unsupported_reason` is meaningless without it.
-
-There is no `_supports_etp`: ETP folds into `ep_group_size = ep_size × expert_tp_size`, so it is
-gated by `_supports_ep`.
+CP and PP support is declared per class as `_supports_cp` /
+`_supports_pp` and enforced in `ParallelismValidationMixin`; `_pp_unsupported_reason` carries the
+rejection text. `DistributedTrainerMixin` defaults both off, so a trainer states only what it flips.
+Its PP verdict is written out even when it matches the default, because `_pp_unsupported_reason` is
+meaningless without it.
 
 **CP** works only where the loss is computable from a sequence chunk. The rest inherit the default
 `_supports_cp = False`.
 
-The reasons: the trainer uses `logits_to_keep` (Async GRPO with Environments), needs
-global log-probability sums (DPO, KTO), needs full-sequence pooling (classification, reward,
-embedding), wraps two models (distillation), or runs a separate-length privileged-teacher or rollout
-sequence (self distillation, SDPG, online GRPO).
+The reasons: the trainer uses `logits_to_keep` (Async GRPO with Environments), needs global
+log-probability sums (DPO, KTO), needs full-sequence pooling (classification, reward, embedding),
+wraps two models (distillation), or runs a separate-length privileged-teacher or rollout sequence
+(self distillation, SDPG, online GRPO).
 
 Offline GRPO scores boundary-aligned local hidden states through the chunked head and reduces its
 token objective across CP with the shared autograd SUM. Its CP path rejects adapters; its
@@ -106,7 +119,7 @@ constructor-time gates rather than class attributes. Rejections land in three pl
 an unset `max_length`, `save_sharded_ep`, reentrant gradient checkpointing, `peft_config`, TRL's
 `activation_offloading`, `torch_compile`, image-bearing data, and an eval batch size differing
 from train. Padding-free collation is rejected at the collator wrap (its flattened width varies
-every step); **packing is supported**, at one packed row per microbatch.
+every step); packing passes the gates, at one packed row per microbatch.
 
 `src/trainers/mixins/pp_gates.py` holds the shared vocabulary the preference and offline-GRPO
 wrappers add on top — a live `ref_model`, missing precomputed reference columns, and
@@ -131,7 +144,7 @@ for an image run only.
 | Method | Vision | Notes |
 |---|---|---|
 | SFT | Yes | Conversation-embedded images or an `images_field` column; packing/padding-free rejected on the VLM path; CP is text-only (the CP wrapper raises on a batch carrying `pixel_values`). See [SFT — VLMs](../training-methods/sft.md#vision-language-models) |
-| DPO / KTO | Yes | `images`/`image` column routes to TRL's vision collators. Vision excludes `precompute_ref_log_probs`, so EP DPO needs standard-PEFT adapters |
+| DPO / KTO | Yes | `images`/`image` column routes to TRL's vision collators. Vision excludes `precompute_ref_log_probs`, so EP vision DPO takes standard-PEFT adapters or a frozen copy |
 | SMPO | Yes | `DataCollatorForVLMSMPO` processes images at collation; CP, padding-free and PP are text-only. See [SMPO — VLMs](../training-methods/preference/smpo.md) |
 | Teacher distillation | Yes | Student and teacher share the processor's vision geometry; over-length rows pre-filtered |
 | Self-distillation (SDPG offline) | Yes | Privileged hint appended to the last user turn; teacher branch fails loud on overflow |
@@ -159,7 +172,7 @@ _CTOR_POSITIONS = ctor_positions(SomeBaseTrainer, "model", "args")
 
 
 class MyDistributedTrainer(DistributedTrainerMixin, SomeBaseTrainer):
-    _supports_cp = True   # only the flips; EP/TP default on, CP/PP default off
+    _supports_cp = True   # only the flips; CP/PP default off
     _supports_pp = False
 
     def __init__(self, *args, **kwargs):
@@ -181,7 +194,8 @@ passes them through `**explicit` instead (SMPO, Classification, offline GRPO, te
 kwargs-style values win over explicit ones. The model and `training_args` default to the ctor's
 `model` / `args`, read from `kwargs` or, for positionals, from their slots in `ctor_positions`
 (positionals without the table raise). Online and async GRPO pass `training_args=` as well, having
-resolved it first, and `EmbeddingTrainer` passes a synthetic `{"args": args}`.
+resolved it first, and `EmbeddingTrainer` passes a synthetic `{"model": model, "args": args}` (a
+`SentenceTransformer`'s `config` is its backbone's).
 
 `ParallelismConfig` validates the combination and exposes mode-flag properties (`is_ep_mode`,
 `is_cp_mode`, `is_tp_mode`, `is_expert_tp_mode`, `is_ep_tp_mode`, `is_ep_cp_mode`, `is_pp_mode`);
@@ -228,7 +242,7 @@ frozen parameters of a dtype no trainable parameter shares, and raises if it wou
 trainable one nothing else syncs ([Data Parallelism](../parallelism/data-parallelism.md#fsdp2-strategy-by-mode)).
 
 QLoRA skips FSDP2 on both the plain-DP and the CP path (`fully_shard` cannot wrap bnb's non-float
-`Params4bit`). `_setup_qlora_gradient_sync` sets a flag rather than per-parameter hooks, whose
+`Params4bit`). `_setup_qlora_sync` sets a flag rather than per-parameter hooks, whose
 rank-local firing would hang a job whose microbatch touches different adapters per rank.
 
 The sync is one bucketed all-reduce over every trainable grad per optimizer step, with membership
@@ -273,18 +287,19 @@ Clipping and sync read the mesh groups (TP, DP) through the `ParallelDims` view
 
 A local norm is wrong when expert params are sharded, so the mixin patches
 `accelerator.clip_grad_norm_` to reconstruct the global norm from separate expert and non-expert
-norms:
+norms. The EP and TP clips share one norm, `_compute_global_grad_norm`:
 
-- DTensor params (EP+TP): take the local shard via `._local_tensor` and all-reduce shard norms
-  across the TP group into the non-expert norm.
+- DTensor params (TP, EP+TP): take the local shard via `._local_tensor` and all-reduce shard norms
+  over the group that tiles them into the non-expert norm.
 - ETP: all-reduce expert shard norms within `expert_tp_group` first.
-- All topologies: all-reduce expert norms within the dispatch (sub-EP) group.
-- Multiple EP groups: all-reduce over replica groups and divide by `num_ep_groups` to avoid
-  double-counting.
+- All EP topologies: all-reduce expert norms within the dispatch (sub-EP) group.
+- Multiple EP groups: no replica reduce. Every multi-group topology defers, and the clip runs the
+  deferred sweep before the norm, so the replicas already hold identical expert grads.
 
-Then `global_norm = sqrt(expert_norm_sq + other_norm_sq)` sets the clip. Each path computes its own
-global norm — the collective differs per topology — and derives one device-resident coefficient,
-`clip_coefficient` (`src/trainers/mixins/grad_clip.py`), which the EP, TP and pipeline clips share.
+Then `global_norm = sqrt(expert_norm_sq + other_norm_sq)` sets the clip. The pipeline clip reduces its
+own norm (one all-reduce over disjoint stages), and every clip derives one device-resident coefficient,
+`clip_coefficient` (`src/trainers/mixins/grad_clip.py`), and refuses any `norm_type` but 2 (`require_l2`).
+The EP clip refuses to install on a model with no EP layers.
 The TP and pipeline clips, and the EP clip under any other optimizer, scale every local gradient by it
 in place (`scale_shards_to_max_norm_`). Under EP with AdamWBF16 stepping exactly the clipped parameters
 that hold gradients, the EP clip hands the coefficient to the optimizer instead (`defer_grad_scale`),
@@ -328,7 +343,8 @@ The three hooks above are what keeps the grad sweeps running on those steps. See
 
 ## DataLoader and data parallelism
 
-`DataParallelDataLoaderMixin` overrides `get_train_dataloader()` / `get_eval_dataloader()` to build
+`DataParallelDataLoaderMixin` overrides `get_train_dataloader()` / `get_eval_dataloader()` /
+`get_test_dataloader()` (the eval body, for `predict()`) to build
 dataloaders with a custom DP size/rank so ranks in the same TP/CP/ETP group — and every rank of one
 pipeline chain — receive identical data. The custom path fires when `_needs_custom_dataloader()` is
 True: TP, CP, ETP, or PP active, or the dataset is pre-sharded per DP rank. EP alone does not trigger
@@ -350,7 +366,40 @@ consume the same batch.
 `accelerate.prepare_data_loader()` as `num_processes` / `process_index`. A dataset already sharded
 per DP rank passes `1` / `0` instead, so accelerate places batches on the device without re-sharding
 away `(N-1)/N` of each slice; offline GRPO passes the same pair, its `MultiGroupSampler` having
-already sharded.
+already sharded. accelerate's dispatching loader (its default for an iterable dataset) ignores both
+and slices rank 0's batches by global rank, so a loader sharded fewer ways than the world never
+dispatches: an iterable dataset is sharded by DP rank instead, and an explicit
+`accelerator_config.dispatch_batches: true` raises. Sharded that way, an iterable eval split's final
+round repeats its first rows with no length to count them by, so its metrics count them (the eval
+loader warns).
+
+accelerate's even-batches shard fills every rank's last eval batch with the split's first rows, so
+all ranks run the same rounds; with `even_batches` off the last batch is short instead, while HF
+still repeats each rank's scalar loss `eval_batch_size` times. The split's own rows fill that final
+round in rank order, and the loader's `BatchSamplerShard` says how many: the rows its sampler draws
+(`num_generations` per prompt under TRL's `RepeatSampler`) modulo one round
+(`final_round_split_rows`). That count is trusted only
+for torch's `BatchSampler` iteration over a sampler whose length is its rows (sequential, random,
+subset, group-by-length, `RepeatSampler`), which sentence-transformers' default batch sampler is.
+A batch sampler with its own iteration counts off its dataset only where its trainer declares it
+draws every row once (`_dataset_drawing_batch_samplers`: the embedding trainer's no-duplicates
+sampler, exact while only its last batch is short). Any other is not counted, so nothing is cut:
+group-by-label draws fewer rows than its dataset holds.
+
+`eval_split_rows(n)` gives a rank its share of a batch of `n`, identical across TP/CP/ETP siblings.
+The evaluation gather installed on every trainer cuts the gathered final round by the same
+geometry, per rank: each rank's chunk keeps the head standing for its own real rows, rounded up, so
+a rank with any real row keeps its loss even where HF's loss repeat is narrower than the loader
+batch. It runs after keeping one chunk per DP rank wherever the loader is DP-sharded; a loader
+sharded any other number of ways (one built around `get_eval_dataloader` / `get_test_dataloader`)
+raises on its first batch. The object gather (`eval_use_gather_object`, or a non-tensor input) keeps
+the same ranks and cuts each one's entries the same way. accelerate's own `remainder` counts the
+dataset instead, which miscounts a `RepeatSampler` and trims real rows from a one-process loader
+(pre-sharded data, offline GRPO). A half-padded rank's scalar loss still averages over its padding,
+except where the eval loss reads `eval_split_rows` (SMPO, classification, teacher and self
+distillation). SFT's eval loss is TRL's
+model-forward mean over rows that packing and padding-free collation flatten across examples, so no
+row cut reaches it.
 
 When the eval dataloader yields a different number of batches per rank (or has no length),
 `evaluate()` replaces the per-step metric gather with the identity to avoid a deadlock, and warns:
@@ -390,36 +439,44 @@ but under CP they cover only the local chunk.
   all-reduce of log-prob sums and token counts. See [SMPO](../training-methods/preference/smpo.md).
 - **OfflineGRPOTrainer** — advantage methods `z_norm`, `minmax`, `quantile_norm`,
   `quantile_uniform`, `robust`; PG formulations `prob_weighted` or `reinforce`. `ChunkedLogprobsCore`
-  owns its log-prob path; `use_chunked_grpo_logprobs` has no effect under PP (the schedule never calls
-  `_get_per_token_logps`) and warns at construction.
-- **DistributedDPOTrainer** — the reference model is not parallelized under EP/TP: use
-  `precompute_ref_log_probs=True`, or PEFT/LoRA with `ref_model=None` (LoRA works under EP, not TP).
+  owns its log-prob path; `use_chunked_grpo_logprobs` is refused under PP, where the schedule never
+  calls `_get_per_token_logps`.
+- **DistributedDPOTrainer** — the reference model is never parallelized: under EP/TP a frozen copy is a
+  whole dense replica per rank (warned); `precompute_ref_log_probs=True`, or PEFT/LoRA with
+  `ref_model=None` (LoRA works under EP, not TP), avoids it.
 - **DistributedDistillationTrainer** — losses `kl_divergence`, `mse`, `soft_cross_entropy`,
-  `cosine_similarity`, `jensen_shannon`, `earth_mover_distance`, `alpha_beta_divergence`, `slim`;
-  the teacher forward runs under `torch.no_grad()` in `eval()` mode.
+  `cosine_similarity`, `jensen_shannon`, `slim`; the teacher forward runs under `torch.no_grad()` in
+  `eval()` mode.
 - **DistributedAsyncEnvironmentalGRPOTrainer** — async multi-turn RL with Ray actors against vLLM or
   SGLang servers (`rollout_backend`); rollout generation overlaps training; environments resolved by
   `environment_type` through `src/environments/registry.py`. See
   [Async GRPO](../training-methods/grpo/async-grpo/README.md).
 
 The `src/trainers/grpo/` package keeps the three trainers (`environmental.py`, `online.py`,
-`offline.py`), two shared leaves (`early_stop.py`; `world_metrics.py`, the step metrics folded
-from every rank's counts in one collective) and offline GRPO's reference modules
-(`reference_cache.py`, `reference_logps.py`, `reference_lifecycle.py`) at the top level, with support code in `objective/`
-(pure loss-side functions), `mixins/`, and `rollout/`. `environmental.py` keeps the objective
-itself: batch assembly, advantages, the IS trust region and the rank-uniform fences.
+`offline.py`) and these shared leaves at the top level: `early_stop.py`; `world_metrics.py`, the step
+metrics folded from every rank's counts in one collective; `reference_policy.py`, the model the KL
+reference forward runs (a held `ref_model`, else the PEFT policy with its adapters disabled); and
+`reference_cache.py`, the storage of offline GRPO's frozen-reference scores. Support code lives in
+`objective/` (pure loss-side functions), `mixins/` (offline GRPO's reference lifecycle among them,
+`mixins/offline_reference.py`), and `rollout/`. `environmental.py` keeps the objective itself: batch assembly, advantages, the IS
+trust region and the rank-uniform fences.
 
-`rollout/` holds function modules (`weight_sync.py`, `weight_sync_clients.py`, `trajectory_spans.py`,
-`routing_replay.py`, `completions_logging.py`) plus the three mixins the async GRPO trainer composes:
+`rollout/` holds `weight_sync.py`, `weight_sync_clients.py`, `trajectory_spans.py` and
+`routing_replay.py`, plus four mixins. The async GRPO trainer composes three of them:
 `AsyncRolloutMixin` (`async_rollouts.py` — Ray actors, the prefetch thread, engine weight sync),
 `TrajectoryTokenizeMixin` (`trajectory_tokenize.py` — trajectory → training rows) and
-`RolloutMetricsMixin` (`rollout_metrics.py` — completion logs and per-episode diagnostics).
+`RolloutMetricsMixin` (`rollout_metrics.py` — completion logs and per-episode diagnostics). Both
+on-policy trainers compose the fourth, `DecoupledCompletionsLogMixin` (`completions_logging.py`, beside
+the artifact writers it routes `log` through): it writes the completions record under
+`save_completions` and the console table under TRL's `log_completions`.
 
 ### Online GRPO vLLM weight sync
 
 `DistributedGRPOTrainer._setup_weight_sync` replaces TRL's
 `VLLMGeneration.sync_weights` with `_distributed_sync_weights` at construction, and raises when TRL
-built no `vllm_generation` (server-mode vLLM is required).
+built no `vllm_generation` (server-mode vLLM is required). Before it, the init spine both on-policy
+trainers close through (`OnPolicyGRPOInitMixin._finish_on_policy_init`) runs
+`validate_weight_sync_support` against the trainer's engine.
 It uses the vendored `VLLMWeightSyncClient` (`src/distributed/nccl/`) instead of TRL's
 `VLLMClient`, which would import the vLLM package.
 
