@@ -22,9 +22,9 @@ process-group error.
 
 `MASTER_ADDR` has to be an IP the compute fabric can route (the InfiniBand or
 private address, not the public SSH one), and port 29500 has to be reachable
-node-to-node. The image must already be present on every node: Flash Attention
-and DeepEP are compiled into it, and building from source on a bare node is not
-supported.
+node-to-node. The image must already be present on every node, pulled or built with
+`make build-*`: Flash Attention and DeepEP are compiled into it, and installing the
+stack directly on a host is not supported.
 
 On SLURM, launch with `--ntasks-per-node=1` and pass `$SLURM_NODEID` as the node
 rank — one torchrun per node, not one per GPU.
