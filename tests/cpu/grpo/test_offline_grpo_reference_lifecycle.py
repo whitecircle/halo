@@ -9,7 +9,7 @@ import pytest
 from datasets import Dataset, Features, Sequence, Value
 
 from src.data.collators.offline_grpo import REF_PER_TOKEN_LOGPS_COLUMN
-from src.trainers.grpo.reference_lifecycle import OfflineGRPOReferenceLifecycleMixin, _token_row_keys
+from src.trainers.grpo.mixins.offline_reference import _token_row_keys
 from tests.common.gloo import run_gloo_ranks
 from tests.common.offline_grpo_reference import (
     ReferenceStorageTrainer,
@@ -25,7 +25,7 @@ class _TrainingBase:
         return resume_from_checkpoint
 
 
-class _Trainer(OfflineGRPOReferenceLifecycleMixin, ReferenceStorageTrainer, _TrainingBase):
+class _Trainer(ReferenceStorageTrainer, _TrainingBase):
     def __init__(self, output_dir, *, checkpoint=None):
         super().__init__(output_dir, checkpoint=checkpoint)
         self.beta = 0.2

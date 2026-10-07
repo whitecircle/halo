@@ -14,7 +14,7 @@ from dataclasses import replace
 import pytest
 
 from src.configs.async_training_config import AsyncTrainingConfig
-from src.configs.rollout_config import REASONING_BUDGET_TEMPLATE_VAR, REASONING_SCOPE_TEMPLATE_VAR, RolloutConfig
+from src.configs.rollout_config import REASONING_BUDGET_TEMPLATE_VAR, RolloutConfig
 from src.environments.engine_wire import generation_control_fields
 from src.trainers.grpo.rollout.trajectory_tokenize import rollout_template_kwargs
 
@@ -22,7 +22,7 @@ from src.trainers.grpo.rollout.trajectory_tokenize import rollout_template_kwarg
 def test_request_and_render_agree_on_the_episode_variables():
     run_kwargs = {"preserve_thinking": True}
     config = RolloutConfig(max_tokens=20000, max_thinking_tokens=12288, chat_template_kwargs=run_kwargs)
-    fields = generation_control_fields(config, "medium")
+    fields = generation_control_fields(config, "medium", 12288)
     assert fields["reasoning_effort"] == "medium"
     assert fields["chat_template_kwargs"] == {"preserve_thinking": True, REASONING_BUDGET_TEMPLATE_VAR: 12288}
     render_kwargs = rollout_template_kwargs(run_kwargs, "medium", 12288)
@@ -30,41 +30,35 @@ def test_request_and_render_agree_on_the_episode_variables():
     assert run_kwargs == {"preserve_thinking": True}, "the run's kwargs are never mutated"
 
 
-def test_the_template_states_the_levels_budget_while_the_engine_enforces_the_turns_cap():
-    """Under the episode scope the two diverge: the engine enforces what the budget has left this turn,
-    the template states the episode's whole budget — the one value the trajectory carries and every
-    trainer-side render reproduces. Omitted, the engine cap stands in, the per-turn scope's one number."""
+def test_the_template_states_the_levels_cap_while_the_engine_enforces_the_turns():
+    """Under an output budget the two diverge: the engine enforces the narrowed cap of this turn, the
+    template states the level's whole per-turn cap — the one value the trajectory carries and every
+    trainer-side render reproduces. Omitted, the template is told no budget: the drivers always pass the level's."""
     run = AsyncTrainingConfig(
-        rollout_thinking_budget_scope="episode",
-        rollout_max_thinking_tokens=4000,
-        rollout_chat_template_kwargs={"preserve_thinking": True},
+        rollout_max_thinking_tokens=4000, rollout_chat_template_kwargs={"preserve_thinking": True}
     )
-    # What the drivers send on a turn with 2500 of the budget left.
-    turn = replace(run.get_rollout_config(reasoning_end_token_id=5), max_thinking_tokens=2500)
-    fields = generation_control_fields(turn, "high", 9000)
+    # What the drivers send on a turn the output budget narrowed to 2500 of the level's 4000.
+    turn = replace(run.get_rollout_config(), max_thinking_tokens=2500)
+    fields = generation_control_fields(turn, "high", 4000)
     assert fields["thinking_token_budget"] == 2500
-    assert fields["chat_template_kwargs"] == {
-        "preserve_thinking": True,
-        REASONING_SCOPE_TEMPLATE_VAR: "episode",
-        REASONING_BUDGET_TEMPLATE_VAR: 9000,
-    }
-    render_kwargs = rollout_template_kwargs(run.rollout_template_variables(), "high", 9000)
+    assert fields["chat_template_kwargs"] == {"preserve_thinking": True, REASONING_BUDGET_TEMPLATE_VAR: 4000}
+    render_kwargs = rollout_template_kwargs(run.rollout_chat_template_kwargs, "high", 4000)
     assert render_kwargs == {**fields["chat_template_kwargs"], "reasoning_effort": "high"}
     omitted = generation_control_fields(RolloutConfig(max_tokens=20000, max_thinking_tokens=12288), "high")
     assert omitted["thinking_token_budget"] == 12288
-    assert omitted["chat_template_kwargs"] == {REASONING_BUDGET_TEMPLATE_VAR: 12288}
+    assert REASONING_BUDGET_TEMPLATE_VAR not in omitted.get("chat_template_kwargs", {}), (
+        "nothing stands in for the level's budget"
+    )
 
 
-def test_the_episode_scope_asks_vllm_for_the_sampled_ids():
-    """The spend is read off the ids, so the request asks for them even where no other capture does.
-    SGLang drops the vLLM spelling silently (and the config gate refuses the scope there), so the wire
-    never sends it; the per-turn scope reads no ids and asks for none."""
-    episode = RolloutConfig(max_tokens=20000, max_thinking_tokens=4000, thinking_budget_scope="episode")
-    assert generation_control_fields(episode, "high", 4000)["return_token_ids"] is True
-    turn = RolloutConfig(max_tokens=20000, max_thinking_tokens=4000)
-    assert "return_token_ids" not in generation_control_fields(turn, "high", 4000)
-    sglang = RolloutConfig(backend="sglang", max_tokens=20000, thinking_budget_scope="episode")
-    assert "return_token_ids" not in generation_control_fields(sglang, "high", 4000)
+def test_the_control_fields_never_ask_for_the_sampled_ids():
+    """The id capture is the payload builder's, from ``capture_token_ids``; the control fields the eval
+    sends as its extra body carry no capture flag on either engine, so an eval samples without one."""
+    for config in (
+        RolloutConfig(max_tokens=20000, max_thinking_tokens=4000, reasoning_end_token_id=5),
+        RolloutConfig(backend="sglang", max_tokens=20000),
+    ):
+        assert "return_token_ids" not in generation_control_fields(config, "high", 4000)
 
 
 def test_sglang_also_nests_the_level_for_its_template():

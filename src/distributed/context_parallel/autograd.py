@@ -1,6 +1,7 @@
-"""Communication primitives for Ulysses sequence parallelism: an autograd-aware all-to-all swapping
-the sequence and head dimensions, a fused Q+KV variant, and a RoPE (cos, sin) all-gather for the
-legacy path, and a SUM with a collective backward for sequence-global objectives.
+"""Communication primitives used by Ulysses sequence parallelism: an autograd-aware
+all-to-all that swaps the sequence and head dimensions, plus a fused Q+KV variant, a RoPE
+(cos, sin) all-gather for the legacy path, and a SUM with a collective backward for
+sequence-global objectives.
 """
 
 from __future__ import annotations
@@ -71,18 +72,13 @@ class UlyssesAllToAll(torch.autograd.Function):
         return grad_input, None, None, None
 
 
-def ulysses_all_to_all(
-    tensor: torch.Tensor,
-    process_group: dist.ProcessGroup,
-    scatter_dim: int = 2,
-    gather_dim: int = 1,
-) -> torch.Tensor:
-    """Swap sequence and head parallelism via Ulysses all-to-all.
+def ulysses_all_to_all(tensor: torch.Tensor, process_group: dist.ProcessGroup) -> torch.Tensor:
+    """Return an attention output to sequence parallelism via Ulysses all-to-all.
 
-    ``tensor`` is ``[batch, seq, heads, dim]``; scatter the head dim and gather the
-    sequence dim (defaults).
+    ``[batch, seq, heads/CP, dim]`` → ``[batch, seq/CP, heads, dim]``: scatter the sequence dim and
+    gather the head dim, the inverse of :func:`ulysses_all_to_all_fused_kv`.
     """
-    return UlyssesAllToAll.apply(tensor, process_group, scatter_dim, gather_dim)
+    return UlyssesAllToAll.apply(tensor, process_group, 1, 2)
 
 
 def ulysses_all_to_all_fused_kv(
@@ -90,12 +86,11 @@ def ulysses_all_to_all_fused_kv(
     key: torch.Tensor,
     value: torch.Tensor,
     process_group: dist.ProcessGroup,
-    scatter_dim: int = 2,
-    gather_dim: int = 1,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-    """All-to-all for Q, K, V with K/V fusion (3 calls → 2).
+    """All-to-all Q, K, V into head parallelism with K/V fusion (3 calls → 2).
 
-    GQA K/V share a head count, so they fuse on the last dim.
+    ``[batch, seq/CP, heads, dim]`` → ``[batch, seq, heads/CP, dim]``. GQA K/V share head count, so
+    they fuse on the last dim, halving one all-to-all.
     """
     world_size = dist.get_world_size(process_group)
     if world_size == 1:
@@ -103,8 +98,8 @@ def ulysses_all_to_all_fused_kv(
 
     kv_fused = torch.cat([key, value], dim=-1)
 
-    query_out = UlyssesAllToAll.apply(query, process_group, scatter_dim, gather_dim)
-    kv_out = UlyssesAllToAll.apply(kv_fused, process_group, scatter_dim, gather_dim)
+    query_out = UlyssesAllToAll.apply(query, process_group, 2, 1)
+    kv_out = UlyssesAllToAll.apply(kv_fused, process_group, 2, 1)
 
     # The all-to-all scatters/gathers dims 2 and 1, never the fused last dim, so the split is exact.
     head_dim = key.shape[-1]
@@ -119,8 +114,8 @@ def gather_pos_embeddings(
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """All-gather position embeddings across a CP group.
 
-    Used by the legacy path, which applies RoPE after the all-to-all and so needs cos/sin for the
-    full sequence on every rank. Cos and sin are fused on the last dim into one all-gather.
+    Used by the legacy path (RoPE after the all-to-all, so each rank needs cos/sin
+    for the *full* sequence). Cos/sin fused on the last dim into one all-gather.
 
     Args:
         cos, sin: Per-rank slices ``[batch, chunk_size, dim]``.

@@ -30,10 +30,10 @@ from pathlib import Path
 import pytest
 import torch
 from accelerate import PartialState
+from huggingface_hub.constants import HF_HUB_CACHE
 from liger_kernel.transformers.auto_model import MODEL_TYPE_TO_APPLY_LIGER_FN
 from liger_kernel.transformers.rope import liger_rotary_pos_emb
 from transformers.models.auto.configuration_auto import CONFIG_MAPPING
-from transformers.utils import HF_MODULES_CACHE
 
 from src.distributed.expert_parallel.expert_weights import ep_layer_classes
 from src.kernels.liger.builder import _bridge_gated_norm
@@ -49,9 +49,10 @@ PartialState()  # the orchestrator logs through accelerate's rank-aware logger
 NATIVE_SPECS = [spec for spec in LIGER_FAMILY_SPECS if spec.modeling_module]
 REMOTE_SPECS = [spec for spec in LIGER_FAMILY_SPECS if spec.remote_classes]
 
-# Where transformers copies a `trust_remote_code` repo's modeling files — read from transformers so
-# an HF_HOME redirect (every run in this repo sets one) is followed rather than guessed.
-_HF_MODULES_ROOT = Path(HF_MODULES_CACHE)
+# Every snapshot's modeling files in the hub cache, read from huggingface_hub so an HF_HOME redirect
+# (every run in this repo sets one) is followed rather than guessed. Not the dynamic-module cache: the
+# CPU tier gives each test process an empty one (tests/cpu/conftest.py).
+_HUB_MODELING_FILES = "models--*/snapshots/*/modeling_*.py"
 
 # The llama-style RMSNorm body `casting_mode="llama", offset=0.0` reproduces exactly.
 _LLAMA_RMS_NORM_BODY = (
@@ -217,7 +218,7 @@ def test_declared_norms_are_what_the_chosen_liger_variant_computes(spec, dtype):
 
 @pytest.mark.parametrize("spec", REMOTE_SPECS, ids=lambda s: s.model_types[0])
 def test_declared_remote_norms_are_llama_style(spec):
-    """Same assertion for the ``trust_remote_code`` families, read off the cached modeling file.
+    """Same assertion for the ``trust_remote_code`` families, read off the modeling files the hub cache holds.
 
     Their modules cannot be imported standalone (they relative-import their sibling configuration),
     and a revision bump is the one thing that can move them under a pinned toolkit, so the check is
@@ -226,7 +227,7 @@ def test_declared_remote_norms_are_llama_style(spec):
     """
     sources = [
         path.read_text(encoding="utf-8")
-        for path in _HF_MODULES_ROOT.rglob("modeling_*.py")
+        for path in Path(HF_HUB_CACHE).glob(_HUB_MODELING_FILES)
         if all(f"class {name}(" in path.read_text(encoding="utf-8") for name in spec.remote_classes)
     ]
     if not sources:

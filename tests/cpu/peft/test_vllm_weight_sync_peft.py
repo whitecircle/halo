@@ -91,11 +91,10 @@ def test_peft_sync_broadcasts_merged_not_base():
     assert "proj.weight" in merged
 
     client = _RecordingClient()
-    peft = gather_and_send_weights(model, client)
+    gather_and_send_weights(model, client)
     # The caller flushes after the gather returns, as the real sync does.
     client.reset_prefix_cache()
 
-    assert peft is True
     assert "proj.weight" in client.flushed, "base weight was never forwarded"
     # No adapter-only params should leak to vLLM.
     assert not any("lora_" in k for k in client.flushed)

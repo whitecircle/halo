@@ -1,8 +1,8 @@
 #!/usr/bin/env python
 """ClassificationTrainer end-to-end, with the logged loss pinned to its exact objective.
 
-The trainer has two loss paths and both fail silently. The default routes to the model's built-in
-head loss (cross-entropy over logits pooled at each row's last non-pad token), where a wrong pooling
+The trainer has two loss paths and both fail silently. The default is the trainer's own fp32
+cross-entropy over the head's logits pooled at each row's last non-pad token, where a wrong pooling
 position scores padding and a label misalignment trains on the wrong class — both finite, both
 step-count-clean. The ``focal`` path is halo's own code (``ClassificationTrainer._focal_loss``) and
 carries a detail that is easy to get wrong and impossible to see from finiteness: the ``(1-pt)^gamma``
@@ -46,7 +46,6 @@ from tests.common.utils import log, step_losses
 
 MODEL_NAME = QWEN3_0_6B
 NUM_TRAIN_SAMPLES = 64
-NUM_EVAL_SAMPLES = 16
 MAX_LENGTH = 128
 NUM_TRAIN_STEPS = 10
 FOCAL_STEPS = 3
@@ -62,17 +61,18 @@ LEARNING_RATE = 2e-5
 SEED = 42
 PINNED_STEP = NUM_TRAIN_STEPS
 
-# The pin compares the bf16-logged loss with a rescoring of the same weights; they differ by about two
-# bf16 ULPs here (at most 2.2e-3 measured, losses 0.11-0.27). A bound near that, not the shared relative
-# one floored at 1.0, is what lets the pooling-at-pad control, which can move this loss by 1e-2, fail it.
+# The pin compares the logged loss, the trainer's fp32 cross-entropy over the step's bf16 logits, with the
+# same fp32 cross-entropy over a rescoring of the same weights: what separates them is the two bf16
+# forwards' logits. A bound near that, not the shared relative one floored at 1.0, is what lets the
+# pooling-at-pad control, which can move this loss by 1e-2, fail it.
 LOSS_ABS_TOL = 5e-3
 # A control's job is to show the pin would FAIL, so its threshold IS the pin's tolerance.
 CONTROL_MIN_GAP = LOSS_ABS_TOL
 # The focal pin is RELATIVE: the shared absolute bound is ~1% of the focal value here but would be a
 # far weaker statement at a smaller one, and the modulator errors this leg exists to catch are
-# multiplicative. The floor is the bf16 quantization of the logged scalar (half a ULP, ~0.3% at this
-# magnitude, and the measured residual of 1.8e-3 on a value of 0.58 is exactly that). The
-# modulator-source control misses by 0.31 — 27x this bound — so the leg still discriminates hard.
+# multiplicative. What separates the logged value from the reference is the two bf16 forwards' logits,
+# as for the pin above. The modulator-source control misses by 0.31 — 27x this bound — so the leg still
+# discriminates hard.
 FOCAL_REL_TOL = 2e-2
 
 
@@ -240,11 +240,13 @@ def run(ctx):
         tokenizer.pad_token_id = tokenizer.eos_token_id
     dataset = create_classification_dataset(NUM_TRAIN_SAMPLES, tokenizer)
 
-    # ── Cross-entropy leg (the default path: the model's built-in head loss) ─────────────────
+    # ── Cross-entropy leg (the default path: the trainer's own unweighted fp32 CE) ──────────────
     trainer, captured, weights, losses = train_and_capture(
         ctx, tokenizer, dataset, make_config(ctx.output_dir), PINNED_STEP
     )
-    checks["cross_entropy_selects_builtin_head_loss"] = trainer._loss_fn is None
+    checks["cross_entropy_builds_unweighted_ce"] = (
+        isinstance(trainer._loss_fn, torch.nn.CrossEntropyLoss) and trainer._loss_fn.weight is None
+    )
     # Constructing with cp_size=1 and then asserting is_cp_mode is False only restates the test's own
     # input. What matters is that the trainer REJECTS CP (_supports_cp is False), so ask it to.
     try:
@@ -330,7 +332,9 @@ def run(ctx):
         ),
         FOCAL_STEPS,
     )
-    checks["focal_selects_custom_loss_fn"] = focal_trainer._loss_fn is not None
+    checks["focal_selects_focal_loss_fn"] = (
+        getattr(focal_trainer._loss_fn, "func", None) is ClassificationTrainer._focal_loss
+    )
 
     focal_scorer = build_model(tokenizer)
     focal_scorer.load_state_dict(focal_weights)
@@ -354,8 +358,7 @@ def run(ctx):
     metrics["focal_modulated_by_weighted_ce"] = modulated_by_weighted
     # The configured weights must actually be inside the partial the trainer built, or the
     # weighted-vs-unweighted distinction this leg exists to pin is not being exercised at all.
-    # Compared at the dtype the trainer stores them in: the weights follow the logits to bf16, so an
-    # fp32 expectation would differ by bf16 rounding alone (0.4 -> 0.400390625) and fail spuriously.
+    # Compared at the dtype the trainer stores them in: fp32, built once and only moved to the device.
     configured = focal_trainer._loss_fn.keywords.get("weight")
     checks["focal_class_weights_reached_the_loss"] = configured is not None and torch.equal(
         configured.float().cpu(),

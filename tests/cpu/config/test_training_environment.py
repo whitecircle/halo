@@ -10,7 +10,7 @@ from types import SimpleNamespace
 import pytest
 from accelerate import PartialState
 
-from src.checkpoint.format import REFERENCE_CACHE_DIR_NAME
+from src.checkpoint.format import INCOMPLETE_CHECKPOINTS_DIR_NAME, REFERENCE_CACHE_DIR_NAME
 
 # The probe's own spelling: the guard's exemption and the sentinel on disk must be the same name.
 from src.distributed.filesystem import OUTPUT_FS_PROBE_PREFIX, RUN_LOG_DIR_NAME
@@ -61,6 +61,61 @@ def test_auto_resume_finds_last_checkpoint(tmp_path):
     last = _write_checkpoint(out, step=10)
     config = _config(out, resume=True)
     assert detect_resume_checkpoint(config) == str(last)
+
+
+def test_auto_resume_passes_over_a_newer_checkpoint_whose_save_never_completed(tmp_path):
+    """The mixin publishes trainer_state.json last, so a step directory without it is a save that
+    stopped partway; resuming it would load a mix of the new and the absent files. It leaves the
+    step-directory namespace with its data intact, so rotation cannot take it for the newest."""
+    out = tmp_path / "out"
+    complete = _write_checkpoint(out, step=5)
+    stopped = out / "checkpoint-10"
+    stopped.mkdir()
+    (stopped / "model.safetensors").write_text("weights of a save that never finished")
+    (stopped / ".trainer_state.json.uncommitted").write_text(json.dumps({"global_step": 10}))
+    config = _config(out, resume=True)
+    assert detect_resume_checkpoint(config) == str(complete)
+    assert not stopped.exists(), "the incomplete step directory stayed where rotation counts it"
+    kept = out / INCOMPLETE_CHECKPOINTS_DIR_NAME / "checkpoint-10" / "model.safetensors"
+    assert kept.read_text() == "weights of a save that never finished"
+
+
+def test_an_explicit_resume_also_sets_aside_an_incomplete_newer_checkpoint(tmp_path):
+    out = tmp_path / "out"
+    complete = _write_checkpoint(out, step=5)
+    (out / "checkpoint-10").mkdir()
+    assert detect_resume_checkpoint(_config(out, resume=str(complete))) == str(complete)
+    assert {path.name for path in out.iterdir()} == {"checkpoint-5", INCOMPLETE_CHECKPOINTS_DIR_NAME}
+
+
+def test_a_second_set_aside_of_the_same_step_keeps_both(tmp_path):
+    """A step torn twice (two resumes, each stopped mid-save of the same step) keeps both copies."""
+    out = tmp_path / "out"
+    _write_checkpoint(out, step=5)
+    for attempt in ("first", "second"):
+        (out / "checkpoint-10").mkdir()
+        (out / "checkpoint-10" / "attempt").write_text(attempt)
+        detect_resume_checkpoint(_config(out, resume=True))
+    holding = out / INCOMPLETE_CHECKPOINTS_DIR_NAME
+    assert sorted((path / "attempt").read_text() for path in holding.iterdir()) == ["first", "second"]
+
+
+def test_auto_resume_with_no_complete_checkpoint_raises(tmp_path):
+    """Starting fresh over an output_dir whose only checkpoint is incomplete would discard it."""
+    out = tmp_path / "out"
+    (out / "checkpoint-10").mkdir(parents=True)
+    config = _config(out, resume=True)
+    with pytest.raises(RuntimeError, match="incomplete"):
+        detect_resume_checkpoint(config)
+    assert (out / "checkpoint-10").is_dir(), "a refused resume moved the checkpoint it refused"
+
+
+def test_auto_resume_orders_steps_numerically(tmp_path):
+    out = tmp_path / "out"
+    _write_checkpoint(out, step=9)
+    last = _write_checkpoint(out, step=10)
+    (out / "checkpoint-11-copy").mkdir()
+    assert detect_resume_checkpoint(_config(out, resume=True)) == str(last)
 
 
 def test_auto_resume_missing_output_dir_starts_fresh(tmp_path):

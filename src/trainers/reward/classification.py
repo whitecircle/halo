@@ -59,6 +59,7 @@ from src.data.pipeline.processing import (
     coordinated_filter,
     coordinated_map,
     report_rejected_rows,
+    resolve_map_num_proc,
 )
 from src.distributed.loading.peft_setup import peft_bf16_autocast, prepare_peft_model
 from src.distributed.parallelism_config import ParallelismConfig
@@ -115,6 +116,17 @@ def _loss_inputs_fp32(logits: torch.Tensor, targets: torch.Tensor) -> tuple[torc
     Integer class ids pass through — ``F.cross_entropy`` requires them as ``long``.
     """
     return logits.float(), targets.float() if targets.is_floating_point() else targets
+
+
+def _require_class_ids(labels: torch.Tensor) -> torch.Tensor:
+    """A single-label batch's ``[B]`` class ids, or a raise: a ``[B, C]`` float target would train
+    soft-label cross-entropy, silently. Shape metadata only, so no host sync."""
+    if labels.dim() != 1:
+        raise ValueError(
+            f"Single-label classification expects [B] integer class ids, got labels of shape "
+            f"{tuple(labels.shape)}. For multi-hot targets pass is_multi_label=True."
+        )
+    return labels
 
 
 def _is_within_length(example: dict[str, Any], max_length: int) -> bool:
@@ -253,7 +265,7 @@ class ClassificationTrainer(DistributedTrainerMixin, Trainer):
 
         if "input_ids" not in train_dataset.column_names:
             # Coordinated map: one rank tokenizes to a deterministic cache file, the rest load it.
-            num_proc = self._dataset_map_num_proc(args.dataset_num_proc)
+            num_proc = resolve_map_num_proc(args.dataset_num_proc)
             fn_kwargs = {"tokenizer": processing_class}
             train_dataset = coordinated_map(
                 train_dataset,
@@ -459,18 +471,22 @@ class ClassificationTrainer(DistributedTrainerMixin, Trainer):
         full[present] = (counts.sum() / (present.sum() * counts[counts > 0])).to(torch.float32)
         return full
 
-    def _build_loss_fn(self, args, train_dataset, model=None):
-        """Build the loss function based on config. Returns None to use model's default."""
-        # Multi-label builds its own loss: the head's dtype sniffing crashes on int multi-hot labels
-        # and latches problem_type into config.json, while the PP path is dtype-blind BCE.
-        has_custom_loss = (
-            args.loss_type != "cross_entropy"
-            or args.class_weights is not None
-            or args.derive_class_weights
-            or self.is_multi_label
-        )
-        if not has_custom_loss:
-            return None
+    def _build_loss_fn(self, args, train_dataset, model):
+        """The configured objective — always the trainer's own, evaluated in fp32 on every path.
+
+        Never the head's built-in loss: transformers' sequence-classification loss runs its
+        cross-entropy in the logits' bf16 storage dtype (:func:`_loss_inputs_fp32` says why that is
+        too coarse), picks single- vs multi-label by sniffing the label dtype, and scores a
+        single-logit head as regression.
+        """
+        num_labels = model.config.num_labels
+        if not self.is_multi_label and num_labels < 2:
+            raise ValueError(
+                f"Single-label classification needs num_labels >= 2 (got {num_labels}): its objective "
+                f"is a softmax cross-entropy over the head's logits. A single-logit head is "
+                f"transformers' regression convention (MSE), and regression is not supported; use "
+                f"is_multi_label=True for independent sigmoid outputs."
+            )
 
         if self.is_multi_label:
             if args.loss_type == "label_smoothing_ce":
@@ -535,9 +551,9 @@ class ClassificationTrainer(DistributedTrainerMixin, Trainer):
 
         The pipeline seam needs the sum form: per-microbatch sums are additive, and the runtime
         divides by :meth:`_pooled_loss_normalizer` to recover exactly the non-PP per-batch mean.
-        Covers every ``_build_loss_fn`` outcome: model-default CE/BCE (``_loss_fn is None``),
-        weighted / label-smoothed ``nn.CrossEntropyLoss``, weighted ``nn.BCEWithLogitsLoss``, and
-        the focal partial (which accepts ``reduction`` itself).
+        Covers every ``_build_loss_fn`` outcome: (weighted / label-smoothed) ``nn.CrossEntropyLoss``,
+        (weighted) ``nn.BCEWithLogitsLoss``, and the focal partial (which accepts ``reduction``
+        itself).
 
         The inert rows are zeroed in value space rather than indexed out: a boolean index would
         force a device→host sync on every micro-batch. Their logits are neutralized before the
@@ -548,27 +564,21 @@ class ClassificationTrainer(DistributedTrainerMixin, Trainer):
         logits, targets = _loss_inputs_fp32(pooled_logits, targets)
         row_mask = valid_rows.reshape(-1, *(1,) * (logits.dim() - 1))
         logits = torch.where(row_mask, logits, logits.new_zeros(()))
-        if self._loss_fn is None:
-            if self.is_multi_label:
-                per_element = F.binary_cross_entropy_with_logits(logits, targets, reduction="none")
-            else:
-                per_element = F.cross_entropy(logits, targets, reduction="none")
+        self._move_loss_weights_to(logits.device)
+        if isinstance(self._loss_fn, nn.CrossEntropyLoss):
+            per_element = F.cross_entropy(
+                logits,
+                targets,
+                weight=self._loss_fn.weight,
+                label_smoothing=self._loss_fn.label_smoothing,
+                reduction="none",
+            )
+        elif isinstance(self._loss_fn, nn.BCEWithLogitsLoss):
+            per_element = F.binary_cross_entropy_with_logits(
+                logits, targets, pos_weight=self._loss_fn.pos_weight, reduction="none"
+            )
         else:
-            self._move_loss_weights_to(logits.device)
-            if isinstance(self._loss_fn, nn.CrossEntropyLoss):
-                per_element = F.cross_entropy(
-                    logits,
-                    targets,
-                    weight=self._loss_fn.weight,
-                    label_smoothing=self._loss_fn.label_smoothing,
-                    reduction="none",
-                )
-            elif isinstance(self._loss_fn, nn.BCEWithLogitsLoss):
-                per_element = F.binary_cross_entropy_with_logits(
-                    logits, targets, pos_weight=self._loss_fn.pos_weight, reduction="none"
-                )
-            else:
-                per_element = self._loss_fn(logits, targets, reduction="none")
+            per_element = self._loss_fn(logits, targets, reduction="none")
         mask = valid_rows.reshape(-1, *(1,) * (per_element.dim() - 1))
         return torch.where(mask, per_element, per_element.new_zeros(())).sum()
 
@@ -599,18 +609,11 @@ class ClassificationTrainer(DistributedTrainerMixin, Trainer):
         return rows.float().clamp(min=1.0)
 
     def _setup_pipeline_parallel(self):
-        """Seed the PP-only pooling pad id and refuse a head this adapter cannot score, then run the
-        mixin's setup.
+        """Seed the PP-only pooling pad id, then run the mixin's setup.
 
         Kept out of ``_pp_loss_adapter``, which the mixin may call as a declarative accessor.
         """
         self._pp_pool_pad_id = pooling_pad_id_for(self)
-        if not self.is_multi_label and self.model.config.num_labels < 2:
-            raise ValueError(
-                f"Sequence classification under pipeline parallelism needs num_labels >= 2 (got "
-                f"{self.model.config.num_labels}): transformers treats a single-logit head as "
-                f"regression (MSE), which the PP loss adapter does not implement."
-            )
         super()._setup_pipeline_parallel()
 
     def _pp_loss_adapter(self) -> PPLossAdapter:
@@ -618,12 +621,11 @@ class ClassificationTrainer(DistributedTrainerMixin, Trainer):
 
         The batch transform rewrites the collated ``labels`` into the runtime's ``[B, S]`` plane:
         ``-100`` everywhere except the pooled position (transformers' rightmost-non-pad rule), which
-        carries the class id, so single-label needs no side tensors. Multi-hot targets are float
-        ``[B, num_labels]`` and cannot ride a long plane; they ship as the ``class_targets`` extra
-        with an inert ``0`` marker in the plane. Every loss variant is microbatch-invariant in its
-        sum form with a batch-level denominator (see ``_pooled_loss`` / ``_pooled_loss_normalizer``);
-        ``num_labels == 1`` is rejected in ``_setup_pipeline_parallel``, where transformers' default
-        head loss degenerates to regression MSE.
+        carries the class id — so single-label needs no side tensors at all. Multi-hot targets are
+        float ``[B, num_labels]`` and cannot ride a long plane; they ship as the ``class_targets``
+        extra with an inert ``0`` marker in the plane. Every loss variant is microbatch-invariant in
+        its sum form with a batch-level denominator (see ``_pooled_loss`` / ``_pooled_loss_normalizer``),
+        so none is rejected.
         """
         return PPLossAdapter(
             token_loss_fn=self._pp_classification_token_loss,
@@ -662,13 +664,7 @@ class ClassificationTrainer(DistributedTrainerMixin, Trainer):
             out["class_targets"] = class_labels[:, : self.model.config.num_labels].float()
             markers = 0
         else:
-            if class_labels.dim() != 1:
-                raise ValueError(
-                    f"Single-label classification under pipeline parallelism expects [B] integer "
-                    f"labels, got shape {tuple(class_labels.shape)}. For multi-hot targets pass "
-                    f"is_multi_label=True."
-                )
-            markers = class_labels.to(input_ids.dtype)
+            markers = _require_class_ids(class_labels).to(input_ids.dtype)
         out["labels"] = encode_pooling_plane(input_ids, self._pp_pool_pad_id, markers)
         return out
 
@@ -702,9 +698,11 @@ class ClassificationTrainer(DistributedTrainerMixin, Trainer):
         return_outputs=False,
         num_items_in_batch=None,
     ) -> torch.Tensor | tuple[torch.Tensor, dict[str, torch.Tensor]]:
-        """Compute classification loss via the custom loss fn if configured, else the model's built-in head."""
-        self._validate_inputs(inputs)
+        """The configured objective (``_build_loss_fn``) on the head's pooled logits, in fp32.
 
+        No ``_validate_inputs``: that check reads ``labels`` as token ids, and class ids collide with
+        the tokenizer's pad/eos ids (Gemma's pad=0 / eos=1 is every binary label).
+        """
         with peft_bf16_autocast(self._peft_has_been_casted_to_bf16, self.accelerator.device):
             return self._compute_loss_inner(model, inputs, return_outputs)
 
@@ -714,25 +712,23 @@ class ClassificationTrainer(DistributedTrainerMixin, Trainer):
         inputs: dict[str, torch.Tensor | Any],
         return_outputs: bool,
     ) -> torch.Tensor | tuple[torch.Tensor, dict[str, torch.Tensor]]:
-        if self._loss_fn is None:
-            outputs = model(
-                input_ids=inputs["input_ids"],
-                attention_mask=inputs["attention_mask"],
-                labels=inputs["labels"],
-                return_dict=True,
-            )
-            loss = outputs.loss
-            logits = outputs.logits
-        else:
-            outputs = model(
-                input_ids=inputs["input_ids"],
-                attention_mask=inputs["attention_mask"],
-                return_dict=True,
-            )
-            logits = outputs.logits
+        outputs = model(
+            input_ids=inputs["input_ids"],
+            attention_mask=inputs["attention_mask"],
+            return_dict=True,
+        )
+        logits = outputs.logits
 
-            self._move_loss_weights_to(logits.device)
-            loss = self._loss_fn(*_loss_inputs_fp32(logits, inputs["labels"]))
+        labels = inputs["labels"] if self.is_multi_label else _require_class_ids(inputs["labels"])
+        self._move_loss_weights_to(logits.device)
+        real_rows = self.eval_split_rows(logits.size(0))
+        if real_rows < logits.size(0):
+            # Rows padding an eval split's final round repeat its first rows: they leave the mean as
+            # the pipeline's inert rows do, and a rank of padding alone scores 0.
+            real = torch.arange(logits.size(0), device=logits.device) < real_rows
+            loss = self._pooled_loss(logits, labels, real) / self._pooled_loss_normalizer(labels, real)
+        else:
+            loss = self._loss_fn(*_loss_inputs_fp32(logits, labels))
 
         if return_outputs:
             return loss, {"logits": logits}

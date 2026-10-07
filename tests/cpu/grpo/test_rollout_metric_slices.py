@@ -26,7 +26,6 @@ def _host():
     host._total_rollouts = 0
     host._total_rollout_latency = 0.0
     host._total_generation_tokens = 0
-    host._assistant_turn_reasoning_tokens = lambda traj: [10]
     return host
 
 
@@ -74,7 +73,7 @@ def test_metrics_are_sliced_per_value_of_every_slice(monkeypatch):
         _result("low", {"language": "python"}, solve=1.0, test_calls=1.0, reward=1.0),
         _result("low", None, solve=0.0, test_calls=3.0, reward=0.0),
     ]
-    host._log_rollout_metrics(results, "train")
+    host._log_rollout_metrics(results, "train", [[10]] * len(results))
     m = host._metrics["train"]
     assert m["language/cpp/count"] == [2.0] and m["language/python/count"] == [1.0]
     assert m["language/cpp/solve_rate"] == [pytest.approx(0.5)]

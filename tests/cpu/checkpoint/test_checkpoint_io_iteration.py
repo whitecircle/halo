@@ -1,8 +1,8 @@
 #!/usr/bin/env python
-"""The shared checkpoint walk five conversion tools read through.
+"""The shared checkpoint walk the standalone checkpoint tools read through.
 
 ``iter_checkpoint_shard_entries`` / ``iter_checkpoint_tensors`` are the single open-every-shard loop
-for reset_sinks, unfuse_moe_experts (twice), merge_models and convert_to_bf16. Two properties are
+every standalone checkpoint tool reads through. Two properties are
 load-bearing and easy to lose in a per-tool re-derivation:
 
 * the shard a key came from — ``merge_models`` builds its whole read plan out of that mapping, and a

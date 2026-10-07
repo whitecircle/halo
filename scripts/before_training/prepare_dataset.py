@@ -27,7 +27,7 @@ from accelerate.logging import get_logger
 from datasets import Dataset, DatasetDict
 from huggingface_hub import HfApi, upload_folder
 from huggingface_hub.errors import EntryNotFoundError, RepositoryNotFoundError
-from transformers import AutoProcessor, AutoTokenizer, PreTrainedTokenizer
+from transformers import AutoConfig, AutoProcessor, AutoTokenizer, PreTrainedTokenizer
 
 from scripts._common import add_trust_remote_code_arg
 from src.checkpoint.tool_io import DISPLACED_SUFFIX, clear_staging_path
@@ -40,6 +40,7 @@ from src.data.sources.paths import EVAL_SPLIT_NAMES, METADATA_FILE, parse_datase
 from src.data.sources.s3_client import S3Client
 from src.log import configure_cli_logging
 from src.models.loading.tokenizer_setup import load_chat_template
+from src.models.segment_markers import reject_compressed_kv_rows
 from src.models.structure import resolve_tokenizer
 
 # The rank-aware accelerate logger, at INFO: the shared data helpers this tool drives log through it,
@@ -546,6 +547,9 @@ def main():
 
     # Before the input dataset is fetched: the config that owns this pair is only built afterwards.
     reject_unbuildable_masking(args)
+    if args.pack_sequences:
+        hf_config = AutoConfig.from_pretrained(args.model_name, trust_remote_code=args.trust_remote_code)
+        reject_compressed_kv_rows(hf_config, "--pack-sequences")
 
     mode_str = "VLM" if args.vlm else "Text SFT"
     logger.info("=" * 60)

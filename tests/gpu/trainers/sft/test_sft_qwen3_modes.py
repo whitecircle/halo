@@ -93,12 +93,12 @@ def run_mode(
     trainer = None
 
     try:
-        # --- Step 1: Quantization config (mirrors sft.py line 148) ---
+        # --- Step 1: Quantization config ---
         quantization_config = get_quantization_config(model_config)
         if quantization_config is not None:
             log(f"  Quantization: {quantization_config.quant_method}")
 
-        # --- Step 2: Load model (mirrors sft.py line 151) ---
+        # --- Step 2: Load model ---
         log("  Loading model via load_distributed_model...")
         model, _ = load_distributed_model(
             model_name_or_path=model_config.model_name_or_path,
@@ -113,18 +113,18 @@ def run_mode(
         log(f"  Model loaded: {total_params / 1e6:.1f}M params, GPU: {gpu_mem_gb():.2f} GB")
 
         # Disable Liger in SFTConfig — already applied during model loading.
-        # Prevents TRL from re-applying with different defaults (sft.py line 179).
+        # Prevents TRL from re-applying with different defaults.
         if sft_config.use_liger_kernel:
             sft_config.use_liger_kernel = False
 
-        # --- Step 3: Setup PEFT (mirrors sft.py line 186) ---
+        # --- Step 3: Setup PEFT ---
         peft_config = setup_peft_model(PEFT_ARGS, model, model_config, "CAUSAL_LM")
         if peft_config is not None:
             log(f"  PEFT config: r={peft_config.r}, alpha={peft_config.lora_alpha}")
         else:
             log("  PEFT: disabled (full fine-tune)")
 
-        # --- Step 4: Create trainer (mirrors sft.py line 365) ---
+        # --- Step 4: Create trainer ---
         trainer_kwargs = {}
         if data_collator is not None:
             trainer_kwargs["data_collator"] = data_collator
@@ -139,11 +139,11 @@ def run_mode(
             **trainer_kwargs,
         )
 
-        # --- Step 5: Train (mirrors sft.py line 394) ---
+        # --- Step 5: Train ---
         log(f"  Training for {MAX_STEPS} steps...")
         train_result = trainer.train()
 
-        # --- Step 6: Save model (mirrors sft.py line 399) ---
+        # --- Step 6: Save model ---
         log(f"  Saving model to {save_dir}...")
         trainer.save_model(save_dir)
         barrier()
@@ -211,7 +211,7 @@ def run(ctx) -> dict:
         "max_length": MAX_SEQ_LENGTH,
         "packing": True,
         "dataloader_drop_last": True,
-        "fsdp": "",  # Mixin handles FSDP wrapping (sft.py line 353)
+        "fsdp": "",  # Mixin handles FSDP wrapping
     }
 
     # ── Test 1: Full Fine-Tune ──────────────────────────────────────────

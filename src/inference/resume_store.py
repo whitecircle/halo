@@ -39,7 +39,7 @@ def load_openai_checkpoint(
         for line in file:
             try:
                 index, response = _checkpoint_line_to_response(line, response_format)
-            except (TypeError, ValueError, json.JSONDecodeError):
+            except (TypeError, ValueError):
                 skipped_records += 1
                 continue
 

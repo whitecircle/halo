@@ -1,5 +1,5 @@
 #!/usr/bin/env python
-"""Two seams that keep packed-batch inputs intact on their way into a trainer.
+"""Three seams that keep packed-batch inputs intact on their way into a trainer.
 
 1. Column pruning: ``seq_lengths`` is a collator input, not a model-forward parameter, so HF's
    signature-based pruning drops it unless the trainer's signature set names it. TRL's SFT trainer
@@ -8,20 +8,26 @@
 2. The CP × packing rejection must see a collator passed POSITIONALLY (at TRL's own data_collator
    slot), not only via keyword — a packed collator slipping past the gate under CP attends across
    documents silently.
+3. The compressed-KV rejection must see a packing / padding-free collator handed straight to the
+   trainer, which skips the factory: a multi-document row on DeepSeek-V4's compressors reads another
+   document's compressed KV.
 
 Run: python tests/cpu/trainers/test_packing_column_and_cp_seams.py
 """
 
+import contextlib
 import types
 from unittest import mock
 
 import pytest
 from accelerate import PartialState
+from transformers.models.deepseek_v4 import DeepseekV4Config
 from trl import SFTTrainer
 
-from src.data.collators.packing import DataCollatorWithPacking
+from src.data.collators.packing import DataCollatorWithFlattening, DataCollatorWithPacking
 from src.trainers.mixins.dataloader import DataParallelDataLoaderMixin
 from src.trainers.sft import _CTOR_POSITIONS, DistributedSFTTrainer
+from tests.common.models import TINY_DSV4_CONFIG
 
 PartialState()  # the trainer's accelerate logger requires an initialized state
 
@@ -72,23 +78,42 @@ def test_union_override_wins_over_trl_base():
     )
 
 
-def test_positional_collator_reaches_cp_gate():
+def _construct_sft(*, cp: bool, model=None, collator=None) -> None:
+    """``DistributedSFTTrainer`` up to its gates, ``model`` and ``collator`` at TRL's own positional
+    slots, as a signature-following caller would pass them."""
+
     def _init_cfg(self, kwargs, **_):
-        self.parallelism_config = types.SimpleNamespace(is_cp_mode=True)
+        self.parallelism_config = types.SimpleNamespace(is_cp_mode=cp)
         return kwargs
 
-    # ``object.__new__``: isinstance is all the gate reads, and the real ctor wants a tokenizer.
-    collator = object.__new__(DataCollatorWithPacking)
-    # Placed at TRL's own data_collator slot, as a signature-following caller would pass it.
-    ctor_args: list = [None] * (_CTOR_POSITIONS["data_collator"] + 1)
+    ctor_args: list = [None] * (max(_CTOR_POSITIONS["data_collator"], _CTOR_POSITIONS["model"]) + 1)
     ctor_args[_CTOR_POSITIONS["data_collator"]] = collator
+    ctor_args[_CTOR_POSITIONS["model"]] = model
     with (
         mock.patch.object(DistributedSFTTrainer, "_init_distributed_config", _init_cfg),
         mock.patch.object(SFTTrainer, "__init__", return_value=None),
         mock.patch.object(DistributedSFTTrainer, "_setup_distributed_modes", return_value=None),
     ):
-        with pytest.raises(ValueError, match="context parallelism"):
-            DistributedSFTTrainer(*ctor_args)
+        DistributedSFTTrainer(*ctor_args)
+
+
+def test_positional_collator_reaches_cp_gate():
+    # ``object.__new__``: isinstance is all the gate reads, and the real ctor wants a tokenizer.
+    with pytest.raises(ValueError, match="context parallelism"):
+        _construct_sft(cp=True, collator=object.__new__(DataCollatorWithPacking))
+
+
+@pytest.mark.parametrize(
+    ("root", "mode"), [(DataCollatorWithPacking, "packing"), (DataCollatorWithFlattening, "padding_free")]
+)
+@pytest.mark.parametrize("compressed", [True, False], ids=["compressed-kv", "masked-attention-only"])
+def test_a_hand_built_multi_document_collator_reaches_the_compressed_kv_gate(root, mode, compressed):
+    """Refused for a model with compressed-KV layers; a model without them constructs."""
+    layer_types = TINY_DSV4_CONFIG["layer_types"] if compressed else ["sliding_attention"] * 3
+    model = types.SimpleNamespace(config=DeepseekV4Config(**{**TINY_DSV4_CONFIG, "layer_types": layer_types}))
+    refusal = f"{mode} is refused .* layers pool KV over windows"
+    with pytest.raises(ValueError, match=refusal) if compressed else contextlib.nullcontext():
+        _construct_sft(cp=False, model=model, collator=object.__new__(root))
 
 
 if __name__ == "__main__":

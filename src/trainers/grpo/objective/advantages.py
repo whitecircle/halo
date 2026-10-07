@@ -3,11 +3,16 @@
 Pure functions over a rank-local reward tensor: ``RepeatSampler`` keeps each prompt's completions
 together on one rank, so the baseline needs no cross-rank gather (except ``scale_rewards="batch"``,
 whose divisor must be identical on every rank, and the non-finite check, which every rank must agree
-on before any of them raises).
+on before any of them raises). Offline GRPO's stored groups take their advantages at tokenization
+instead, one group at a time (:func:`compute_group_advantages`).
 """
 
+from collections.abc import Callable
+
+import numpy as np
 import torch
 from accelerate.utils import gather
+from scipy import stats
 
 from src.distributed.runtime import rank_consensus
 
@@ -19,6 +24,89 @@ STD_EPS = 1e-4
 _DEGENERATE_SPREAD = 1e-6
 
 
+def _z_norm(rewards: np.ndarray) -> np.ndarray:
+    # ddof=1 explicitly: numpy defaults to 0 while torch's .std() is correction=1, and the online and
+    # environmental z-norms take the torch path; an implicit default would split the two by sqrt((n-1)/n).
+    reward_std = np.std(rewards, ddof=1) if len(rewards) > 1 else 1.0
+    return (rewards - np.mean(rewards)) / (reward_std + STD_EPS)
+
+
+def _minmax(rewards: np.ndarray) -> np.ndarray:
+    reward_min, reward_max = np.min(rewards), np.max(rewards)
+    if reward_max == reward_min:
+        return np.zeros_like(rewards)
+    return 2 * (rewards - reward_min) / (reward_max - reward_min) - 1
+
+
+def _quantile_norm(rewards: np.ndarray) -> np.ndarray:
+    # (ranks - 0.5)/n: uniform on [0, 1] without its boundaries, then to the normal.
+    uniform_scores = (stats.rankdata(rewards) - 0.5) / len(rewards)
+    return stats.norm.ppf(uniform_scores)
+
+
+def _quantile_uniform(rewards: np.ndarray) -> np.ndarray:
+    # A single or all-equal group has no spread to rank, and n-1 == 0 would divide by zero.
+    if len(rewards) == 1 or np.all(rewards == rewards[0]):
+        return np.zeros(len(rewards))
+    uniform_scores = (stats.rankdata(rewards) - 1) / (len(rewards) - 1)
+    return 2 * uniform_scores - 1
+
+
+def _robust(rewards: np.ndarray) -> np.ndarray:
+    q75, q25 = np.percentile(rewards, [75, 25])
+    iqr = q75 - q25
+    return np.zeros_like(rewards) if iqr == 0 else (rewards - np.median(rewards)) / iqr
+
+
+# Each OfflineGRPOConfig.advantage_method spelling to the map it names.
+GROUP_ADVANTAGE_METHODS: dict[str, Callable[[np.ndarray], np.ndarray]] = {
+    "z_norm": _z_norm,
+    "minmax": _minmax,
+    "quantile_norm": _quantile_norm,
+    "quantile_uniform": _quantile_uniform,
+    "robust": _robust,
+}
+
+
+def compute_group_advantages(
+    rewards_list: list[float],
+    method: str,
+    best_completion_emphasis: float | str,
+) -> list[float]:
+    """Advantages from one stored group's rewards via ``method`` (a :data:`GROUP_ADVANTAGE_METHODS` key,
+    refused otherwise by the offline trainer's constructor), with optional best-completion emphasis,
+    clipped to [-10, 10]."""
+    # float64 explicitly: integral rewards (0/1 verifiable) would keep an int64 dtype through the
+    # `np.zeros_like` degenerate-group branches, and the in-place emphasis multiply below then raises
+    # UFuncTypeError inside datasets.map.
+    rewards_array = np.asarray(rewards_list, dtype=np.float64)
+    if not np.all(np.isfinite(rewards_array)):
+        # Every method divides by a spread derived from these rewards, so one NaN/Inf reaches the
+        # whole group's advantages and from there the micro-batch gradient.
+        raise ValueError(
+            f"Non-finite reward in a completion group: {rewards_list}. Fix the reward column — "
+            f"training through it silently either zeroes the row's advantage or NaNs the batch, "
+            f"depending only on the group size."
+        )
+    advantages = GROUP_ADVANTAGE_METHODS[method](rewards_array)
+
+    if len(rewards_array) > 1:
+        if best_completion_emphasis == "auto":
+            # Scale emphasis with std: 3.0 at std=0 → 5.0 at std→∞. Population std (numpy's default),
+            # unlike the z_norm divisor: this heuristic has no torch counterpart to match, and it
+            # multiplies the best row under every method, so aligning it would also move the advantages
+            # of the rank/minmax methods.
+            reward_std = np.std(rewards_array)
+            emphasis_factor = 3.0 + 2.0 * reward_std / (1.0 + reward_std)
+        else:
+            emphasis_factor = float(best_completion_emphasis)
+
+        if emphasis_factor > 1.0:
+            advantages[rewards_array == np.max(rewards_array)] *= emphasis_factor
+
+    return np.clip(advantages, -10.0, 10.0).tolist()
+
+
 def _grouped(rewards: torch.Tensor, num_generations: int) -> torch.Tensor:
     """``rewards`` as ``(num_groups, num_generations)``; raises if generations were split across ranks."""
     if rewards.numel() % num_generations != 0:
@@ -28,6 +116,22 @@ def _grouped(rewards: torch.Tensor, num_generations: int) -> torch.Tensor:
             f"generations to stay together on one rank."
         )
     return rewards.view(-1, num_generations)
+
+
+def scales_rewards(scale_rewards: str | bool | None) -> bool:
+    """Whether ``scale_rewards`` (``"group"`` / ``"batch"`` / ``"none"``, or a bool) divides the advantages
+    by a std. ``"none"`` is TRUTHY, so the off values are matched explicitly."""
+    return scale_rewards not in (None, False, "none")
+
+
+def reject_inert_std_floor(scale_rewards: str | bool | None, std_floor: float) -> None:
+    """Refuse ``scale_rewards_std_floor`` on a run whose advantages divide by no std: it floors nothing."""
+    if std_floor > 0 and not scales_rewards(scale_rewards):
+        raise ValueError(
+            f"scale_rewards_std_floor={std_floor} with scale_rewards={scale_rewards!r}: the floor bounds the std "
+            "the advantages divide by, and this run divides by none. Set scale_rewards to 'group' or 'batch', "
+            "or drop the floor."
+        )
 
 
 def valid_group_stats(
@@ -65,10 +169,9 @@ def group_relative_advantages(
     baseline so they cannot poison the advantages of their valid siblings; a group with no valid member
     falls back to the plain mean.
 
-    ``scale_rewards`` is ``"group"`` / ``"batch"`` / ``"none"`` (or a bool). The string ``"none"`` is
-    truthy, so the disabled values are matched explicitly rather than via ``if scale_rewards``.
-    ``"group"`` divides by the per-group std (risky on sparse reward, where degenerate groups have
-    std → 0); ``"batch"`` divides by the global-batch std, holding the gradient scale steady.
+    ``scale_rewards`` is read by :func:`scales_rewards`. ``"group"`` divides by the per-group std
+    (dangerous on sparse reward — degenerate groups have std → 0); ``"batch"`` divides by the
+    global-batch std, keeping degenerate groups near 0 while holding the gradient scale steady.
 
     ``std_floor`` bounds the scaling amplification: the divisor is ``max(std, std_floor)``. A
     behaviorally-degenerate batch/group (every reward within a few hundredths) otherwise divides its own
@@ -82,8 +185,8 @@ def group_relative_advantages(
         group_mean = grouped.mean(dim=1, keepdim=True)
     advantages = rewards - group_mean.expand_as(grouped).flatten()
 
-    if scale_rewards not in (None, False, "none"):
-        # The std divisor applies ``valid_mask`` like the baseline: a placeholder would bias every valid row.
+    if scales_rewards(scale_rewards):
+        # The std divisor honors ``valid_mask`` like the baseline: a placeholder would bias every valid row.
         if scale_rewards == "batch":
             # Global std: a rank-local one would scale each DP rank's advantages differently.
             batch_rewards = rewards if already_gathered else gather(rewards)

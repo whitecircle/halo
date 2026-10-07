@@ -25,10 +25,9 @@ from src.args.distributed_args import DistributedArguments
 from src.args.mixins import PRIVILEGED_HINT_TEMPLATE, RLRRConfig, SDPGArguments
 from src.args.rlvr_online_grpo_args import RLVROnlineGRPOScriptArguments
 from src.args.self_distill_args import SelfDistillationArguments
-from src.configs.async_training_config import AsyncTrainingConfig
+from src.configs.async_training_config import AsyncTrainingConfig, ISMaskConfig
 from src.trainers.distillation.sdpg import DistributedSDPGTrainer
 from src.trainers.distillation.self_distillation import DistributedSelfDistillationTrainer
-from src.trainers.grpo.objective.logratio import ISMaskConfig
 from src.trainers.grpo.online import DistributedGRPOTrainer
 from src.trainers.mixins.base import DistributedTrainerMixin
 from src.trainers.preference.precompute import PrecomputeRefLogpsRankConsistentMixin
@@ -181,8 +180,8 @@ def test_named_optimizers_are_not_refused_by_the_stock_adamw_guard():
 
 def test_fp32_on_a_moe_builds_the_trainer_and_only_refuses_at_the_optimizer():
     """Constructing a trainer with ``bf16: false`` on a MoE must NOT raise: forward, backward and the
-    EP-aware clip are correct over the mixed parameter set (the fp32 PP+ETP equivalence gate runs
-    exactly that, with no optimizer in play). Only building the stock optimizer is the defect."""
+    EP-aware clip are correct over the mixed parameter set. Only building the stock optimizer is the
+    defect."""
     stub = _mixed_precision_stub(ep_group_size=8, bf16_optimizer=None)
     DistributedTrainerMixin._configure_mixed_precision(
         stub, _moe_model_kwargs(), SimpleNamespace(bf16=False, optim="adamw_torch_fused", fp32_grad_reduce=None)
@@ -429,6 +428,9 @@ def _run_script_main(script: str, config_body: str, tmp_path: Path) -> None:
             "reference_kl_coef: 0.0\nreference_kl_loss: reverse_kl\n",
             "reference_kl_loss",
         ),
+        # Both only shape the confidence weights, which no row carries without the column.
+        ("distillation/self_distill.py", "confidence_power: 2.0\n", "confidence_power"),
+        ("distillation/self_distill.py", "confidence_weight_opd: false\n", "confidence_weight_opd"),
     ],
 )
 def test_script_main_refuses_the_knob_before_any_load(script, config_body, knob, tmp_path):
@@ -721,6 +723,15 @@ def _self_distill_script_splats_the_builder() -> bool:
     return False
 
 
+# The trainer's own knobs, which the script passes explicitly (required, so none restates a default).
+_SELF_DISTILL_TRAINER_KNOBS = {
+    "reference_kl_coef": 0.0,
+    "reference_kl_loss": "unnormalized_kl",
+    "confidence_weight_opd": True,
+    "opd_exclude_eos": True,
+}
+
+
 def _construct_self_distill_shell(**kwargs) -> tuple[DistributedSelfDistillationTrainer, dict]:
     """Run ``DistributedSelfDistillationTrainer.__init__`` for real with the SFT parent stubbed out
     (and the tokenizer-reading stop-id resolver, which needs a processing class). Returns the trainer
@@ -730,12 +741,13 @@ def _construct_self_distill_shell(**kwargs) -> tuple[DistributedSelfDistillation
 
     def parent_init(self, *args, **kw):
         leaked.update(kw)
+        self.data_collator = SimpleNamespace(builds_teacher_branch=True)
 
     with (
         mock.patch.object(DistributedSFTTrainer, "__init__", parent_init),
         mock.patch.object(DistributedSelfDistillationTrainer, "_resolve_stop_token_ids", lambda self: None),
     ):
-        return DistributedSelfDistillationTrainer(**kwargs), leaked
+        return DistributedSelfDistillationTrainer(**_SELF_DISTILL_TRAINER_KNOBS, **kwargs), leaked
 
 
 def test_self_distill_trainer_adopts_every_forwarded_sdpg_field():
@@ -771,6 +783,7 @@ def _answer_column_args(**overrides):
         "sdpg_answer_field": "answer",
         "privileged_solution_field": "solution",
         "sdpg_hint_template": PRIVILEGED_HINT_TEMPLATE,
+        "confidence_field": None,
         "dataset": "dummy/dataset",
     }
     return SimpleNamespace(**{**defaults, **overrides})
@@ -792,13 +805,19 @@ def test_self_distill_requires_the_answer_column_while_the_opd_term_carries_weig
     module._require_privileged_columns(carried, _answer_column_args())
 
 
-@pytest.mark.parametrize("overrides", [{"sdpg_beta_base": 0.0}, {"sdpg_answer_field": None}])
-def test_self_distill_answer_column_gate_stands_down_where_no_hint_is_asserted(overrides):
-    """beta 0 drops the OPD term and a null field opts out of the hint's answer slot; neither renders
-    an answer, so neither may demand the column."""
+def test_self_distill_answer_column_gate_stands_down_with_the_opd_term_off():
+    """beta 0 drops the OPD term and with it the teacher branch, so no hint may demand the column."""
     module = load_script_module("scripts/training/distillation/self_distill.py", "halo_test_self_distill_answer_off")
     without = _dataset_with({"prompt": [[{"role": "user", "content": "q"}]]})
-    module._require_privileged_columns(without, _answer_column_args(**overrides))
+    module._require_privileged_columns(without, _answer_column_args(sdpg_beta_base=0.0))
+
+
+def test_self_distill_requires_the_confidence_column_it_weights_by():
+    """The weights read the column per row; a typo'd one would fail inside the first batch."""
+    module = load_script_module("scripts/training/distillation/self_distill.py", "halo_test_self_distill_conf")
+    without = _dataset_with({"prompt": [[{"role": "user", "content": "q"}]], "answer": ["42"]})
+    with pytest.raises(ValueError, match="confidence_field='conf' names a column"):
+        module._require_privileged_columns(without, _answer_column_args(sdpg_beta_base=0.0, confidence_field="conf"))
 
 
 def test_self_distill_requires_the_solution_column_only_where_the_template_names_it():
@@ -815,9 +834,9 @@ def test_self_distill_requires_the_solution_column_only_where_the_template_names
 
     carried = _dataset_with({"prompt": [[{"role": "user", "content": "q"}]], "answer": ["42"], "solution": ["6 * 7"]})
     module._require_privileged_columns(carried, names_solution)
-    # A null field opts out of the slot, as it does for the answer.
-    opted_out = _answer_column_args(sdpg_hint_template="{answer} {solution}", privileged_solution_field=None)
-    module._require_privileged_columns(answer_only, opted_out)
+    # A slot the template does not name demands no column: a solution-only hint takes no answer column.
+    solution_only = _dataset_with({"prompt": [[{"role": "user", "content": "q"}]], "solution": ["6 * 7"]})
+    module._require_privileged_columns(solution_only, _answer_column_args(sdpg_hint_template="worked: {solution}"))
 
 
 def test_self_distill_trainer_has_no_spelling_of_the_tunables_of_its_own():
@@ -850,29 +869,31 @@ def _grpo_trainer_trees() -> list[ast.Module]:
     return [ast.parse(path.read_text()) for path in sorted((PROJECT_ROOT / _IS_MASK_CONSUMER_ROOT).rglob("*.py"))]
 
 
-def _is_mask_construction() -> dict[str, str | None]:
-    """The ``ISMaskConfig(...)`` keywords, each mapped to the attribute name its value reads.
+def test_every_is_mask_knob_reaches_the_mask_config():
+    """The shipped env-GRPO configs set these, and the mask config the config builds is the only
+    thing that reads them. A dropped keyword leaves the stage off while the YAML says it is on, and the
+    run keeps training on exactly the drifted tokens the band exists to mask — with nothing in the logs."""
+    stages = {"geo_band_min": 0.98, "geo_band_max": 1.02, "veto_min": 1e-4, "opsm_delta": 0.3}
+    assert set(stages) == set(_IS_MASK_SOURCES), "a mask stage this test does not set"
+    config = AsyncTrainingConfig(**{_IS_MASK_SOURCES[name]: value for name, value in stages.items()})
+    assert dataclasses.asdict(config.build_is_mask_config()) == stages
 
-    ``None`` for a value that is not a plain attribute read: a literal there is a stage pinned off
-    whatever the config says, which is the same silent no-op as a missing keyword.
-    """
-    calls = [
+
+def test_the_trainer_reads_the_configs_mask_config():
+    """The trainer's stages are the config's, not a second construction that could drop a keyword."""
+    builds = [
+        node
+        for tree in _grpo_trainer_trees()
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call) and getattr(node.func, "attr", None) == "build_is_mask_config"
+    ]
+    constructions = [
         node
         for tree in _grpo_trainer_trees()
         for node in ast.walk(tree)
         if isinstance(node, ast.Call) and getattr(node.func, "id", None) == "ISMaskConfig"
     ]
-    assert len(calls) == 1, (
-        f"expected exactly one ISMaskConfig construction under {_IS_MASK_CONSUMER_ROOT}, found {len(calls)}"
-    )
-    return {kw.arg: getattr(kw.value, "attr", None) for kw in calls[0].keywords if kw.arg}
-
-
-def test_every_is_mask_knob_reaches_the_mask_config():
-    """Fourteen shipped env-GRPO configs set these, and this construction is the only thing that
-    reads them. A dropped keyword leaves the stage off while the YAML says it is on, and the run
-    keeps training on exactly the drifted tokens the band exists to mask — with nothing in the logs."""
-    assert _is_mask_construction() == _IS_MASK_SOURCES
+    assert len(builds) == 1 and not constructions, (len(builds), len(constructions))
 
 
 def test_every_is_mask_stage_has_a_config_knob():

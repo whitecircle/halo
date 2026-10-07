@@ -4,7 +4,7 @@
 A round spans ``steps_per_generation * num_iterations`` micro-batches — ``num_iterations`` optimizer
 steps at the default ``steps_per_generation`` — and ``_build_training_tensors`` zeroes the advantages
 of every one of them. The optimizer skip must therefore fire on every one of those steps too: a skip
-that consumed the flag on first use left the later steps running Adam on momentum alone, exactly the
+that consumed the flag on first use would leave the later steps running Adam on momentum alone, exactly the
 weight movement the skip exists to prevent. ``_update_breaker_tripped`` owns the flag: it sets this
 round's verdict and, on the next round, replaces it.
 
@@ -49,8 +49,9 @@ def test_the_skip_fires_on_every_optimizer_step_while_the_round_is_tripped():
         optimizer=types.SimpleNamespace(zero_grad=lambda set_to_none: calls.append(set_to_none)),
     )
     skip = DistributedAsyncEnvironmentalGRPOTrainer._skip_optimizer_step_if_breaker_tripped.__get__(host)
-    assert [skip(), skip(), skip()] == [True, True, True], "a round of three optimizer steps must skip all three"
-    assert calls == [True, True, True]
+    for _ in range(3):
+        skip()
+    assert calls == [True, True, True], "a round of three optimizer steps must skip all three"
     assert host._breaker_tripped_this_step is True, "the skip must not consume the round's verdict"
 
 

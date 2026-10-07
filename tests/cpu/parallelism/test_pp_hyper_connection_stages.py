@@ -11,8 +11,7 @@ the unsplit model exactly — any lossy boundary (a mean-collapse re-widened by 
 
 GLM-5's chained checks run an all-DSA ``layer_types`` stack: the KDA linear-attention path dispatches
 to the CUDA-only ``causal_conv1d`` package even on CPU (transformers' with-fallback kernel wrapper
-prefers the installed package unconditionally), so the KDA interleave is covered by the GPU test
-(tests/gpu/parallelism/pp/test_pp_glm5_vs_single_gpu.py) instead.
+prefers the installed package unconditionally), so the KDA interleave stays out of these CPU checks.
 
 Run: python tests/cpu/parallelism/test_pp_hyper_connection_stages.py
 """

@@ -48,6 +48,7 @@ from src.trainers.mixins.pp_gates import (
     require_model_and_args_kwargs,
     require_precomputed_reference,
 )
+from src.trainers.mixins.trl_dataset_prep import CoordinatedTRLDatasetPrepMixin
 from src.trainers.mixins.validation import ctor_config, ctor_positions, ctor_value, disable_trl_liger
 from src.trainers.preference.logprobs import FP32LogprobsMixin
 from src.trainers.preference.precompute import PrecomputeRefLogpsRankConsistentMixin
@@ -60,7 +61,11 @@ _REF_LOGPS_COLUMN = "ref_logps"
 
 
 class DistributedKTOTrainer(
-    FP32LogprobsMixin, PrecomputeRefLogpsRankConsistentMixin, DistributedTrainerMixin, KTOTrainer
+    FP32LogprobsMixin,
+    PrecomputeRefLogpsRankConsistentMixin,
+    DistributedTrainerMixin,
+    CoordinatedTRLDatasetPrepMixin,
+    KTOTrainer,
 ):
     """TRL's KTOTrainer plus EP/TP/PP via DistributedTrainerMixin. CP unsupported (see module docstring).
 

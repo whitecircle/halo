@@ -9,7 +9,6 @@ same config only after the datasets are loaded. A genuinely unreadable config st
 import json
 
 import pytest
-import transformers.dynamic_module_utils
 
 from src.models.modality import is_vlm_model
 
@@ -41,9 +40,7 @@ def test_an_untrusted_remote_code_config_is_refused_naming_the_knob(remote_code_
         is_vlm_model(remote_code_checkpoint, trust_remote_code=False)
 
 
-def test_a_trusted_remote_code_config_is_read(remote_code_checkpoint, tmp_path_factory, monkeypatch):
-    modules_cache = str(tmp_path_factory.mktemp("hf_modules"))
-    monkeypatch.setattr(transformers.dynamic_module_utils, "HF_MODULES_CACHE", modules_cache)
+def test_a_trusted_remote_code_config_is_read(remote_code_checkpoint):
     assert is_vlm_model(remote_code_checkpoint, trust_remote_code=True) is False
 
 

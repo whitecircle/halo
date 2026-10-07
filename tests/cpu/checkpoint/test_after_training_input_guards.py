@@ -5,18 +5,15 @@ These tools (``scripts/after_training`` plus the ``scripts/before_training`` con
 stop before a checkpoint is served, and each failure mode here is silent — the tool prints success and
 exits 0 while the experts are gone:
 
-* **Per-rank EP/TP sharded input.** The index filename is the ordinary one but every expert tensor is
+* **Per-rank EP sharded input.** The index filename is the ordinary one but every expert tensor is
   one rank's partial slice under a ``.shard_N`` key. A ``from_pretrained``-based tool therefore sees
   the real expert keys as MISSING, and transformers RANDOMLY INITIALIZES them with a warning rather
-  than an exception (``test_missing_keys_only_warn`` pins that premise). ``reset_sinks`` then
-  overwrites the source in place by default, so the shards are unrecoverable.
+  than an exception (``test_missing_keys_only_warn`` pins that premise). ``reset_sinks --in_place``
+  then overwrites the source, so the shards are unrecoverable.
 * **Wrong model family.** ``experts.gate_up_proj`` / ``experts.down_proj`` are spelled identically at
   identical shapes across most of the roster, so ``unfuse_moe_experts`` must emit the projection
   names the checkpoint's OWN family declares — LFM-2 reads ``w1``/``w3``/``w2``, not GLM-4's
   ``gate_proj``/``up_proj``/``down_proj`` — and refuse a family that declares none.
-* **The wrong merge tool.** An EP-sharded and a TP-sharded save are told apart only by their index's
-  ``format`` marker, so a merge that infers its shard count from a defaulted ``tp_size`` diagnoses
-  the wrong input as an incomplete shard set instead of naming the tool that owns it.
 * **In-place output.** ``save_pretrained`` deletes the weight files it does not overwrite.
 * **Asymmetric key sets in a merge.** A tensor present in a later model but not the reference is
   never visited and is dropped from the merged checkpoint.
@@ -72,18 +69,13 @@ def _write_ep_sharded_checkpoint(path, *, model_type="gpt_oss"):
     return path
 
 
-def _write_gathered_checkpoint(path, tensors, *, model_type="qwen3_moe", with_index=False, config_extra=None):
+def _write_gathered_checkpoint(path, tensors, *, model_type="qwen3_moe", config_extra=None):
     """An ordinary gathered single-file checkpoint.
 
-    ``with_index`` adds the HF index a multi-shard gathered save also writes — standard metadata, no
-    per-rank format marker — which is what a merge tool must tell apart from its own input.
     ``config_extra`` adds config fields a specific tool reads (e.g. ``moe_intermediate_size``).
     """
     os.makedirs(path, exist_ok=True)
     save_file(tensors, os.path.join(path, "model.safetensors"), metadata={"format": "pt"})
-    if with_index:
-        with open(os.path.join(path, "model.safetensors.index.json"), "w") as f:
-            json.dump({"metadata": {"total_size": 1}, "weight_map": dict.fromkeys(tensors, "model.safetensors")}, f)
     with open(os.path.join(path, "config.json"), "w") as f:
         json.dump({"model_type": model_type, "hidden_size": 8, "intermediate_size": 4, **(config_extra or {})}, f)
     return path
@@ -178,8 +170,9 @@ def test_tools_refuse_a_per_node_pp_directory_before_writing(tmp_path, tool):
 
 
 def test_reset_sinks_refuses_a_per_rank_sharded_checkpoint(tmp_path):
-    """Without the guard this loads the dir via from_pretrained (no ``model.safetensors`` to shortcut
-    on), re-initializes the experts, and writes the result back over the source shards."""
+    """Without the guard an ``--in_place`` run loads the dir via from_pretrained (no
+    ``model.safetensors`` to shortcut on), re-initializes the experts, and writes the result back
+    over the source shards."""
     ep = _write_ep_sharded_checkpoint(tmp_path / "ep")
     before = sorted(os.listdir(ep))
     with pytest.raises(ValueError, match="per-rank sharded checkpoint"):
@@ -334,7 +327,7 @@ def test_unfuse_moe_experts_names_the_missing_config(tmp_path):
 
 def test_unfuse_moe_experts_diagnoses_a_per_rank_sharded_input_as_one(tmp_path):
     """Ordering: the sharded-input check owns this diagnosis and names the merge scripts. Resolving the
-    family first answered "no per-expert hub layout" for a checkpoint whose real problem is that every
+    family first would answer "no per-expert hub layout" for a checkpoint whose real problem is that every
     expert tensor is one rank's slice."""
     ep = _write_ep_sharded_checkpoint(tmp_path / "ep", model_type="qwen3_5_moe")
     with pytest.raises(ValueError, match="per-rank sharded checkpoint"):
@@ -379,8 +372,9 @@ def test_unfuse_moe_experts_convertible_set_is_the_declared_per_expert_families(
 
 
 def test_convert_mistral4_bf16_refuses_a_per_rank_sharded_checkpoint(tmp_path, monkeypatch):
-    """The one converter that read ``model.safetensors.index.json`` itself: an EP-sharded save was
-    streamed through and re-indexed as if each partial expert slice were the whole tensor."""
+    """A converter that reads ``model.safetensors.index.json`` itself: without the refusal an
+    EP-sharded save is streamed through and re-indexed as if each partial expert slice were the whole
+    tensor."""
     ep = _write_ep_sharded_checkpoint(tmp_path / "ep", model_type="mistral4")
     before = sorted(os.listdir(ep))
     out = tmp_path / "out"
@@ -431,7 +425,7 @@ def test_convert_deepseek_v4_bf16_refuses_an_in_place_conversion(tmp_path, monke
 
 
 def test_convert_to_bf16_refuses_an_in_place_conversion(tmp_path, monkeypatch):
-    """The one converter whose guard is newest. ``save_pretrained``
+    """``save_pretrained``
     clears the ``model*.safetensors`` it does not overwrite, so an in-place run destroys the source
     checkpoint it is still reading — the same reason every sibling converter refuses it."""
     src = _write_gathered_checkpoint(tmp_path / "src", _fused_moe_tensors(), model_type="qwen3_moe")
@@ -574,8 +568,8 @@ def test_patch_vocab_refuses_a_truncated_checkpoint(tmp_path, monkeypatch):
 
 
 def test_patch_vocab_refuses_reset_sinks_on_a_family_that_has_none(tmp_path, monkeypatch):
-    """``--reset_sinks`` on a sink-less family printed its banner and exited 0 over an unchanged
-    checkpoint: the flag's entire effect dropped silently, and the artifact then reads to every
+    """Unrefused, ``--reset_sinks`` on a sink-less family would print its banner and exit 0 over an
+    unchanged checkpoint: the flag's entire effect drops silently, and the artifact then reads to every
     downstream tool (provenance, the merge tools, the RL sink gate) as deliberately sink-free."""
     src, out = tmp_path / "src", tmp_path / "out"
     Qwen3ForCausalLM(

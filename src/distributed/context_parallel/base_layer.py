@@ -31,8 +31,8 @@ from src.models.patches.attention import (
     model_fa4_backward_nan_prone,
 )
 
-# Hub kernel id of the flash-attn2 build the CP fallback loads; ``validation.py`` accepts the same
-# spelling as an attn_implementation, so the two must stay in sync.
+# Hub kernel id of the flash-attn2 build the CP fallback loads; ``validation.py`` also accepts it as an
+# attn_implementation.
 HUB_FLASH_ATTN2_KERNEL = "kernels-community/flash-attn2"
 
 
@@ -394,12 +394,7 @@ class UlyssesAttentionBase(nn.Module, ABC):
         query_states, key_states = self._post_rope(query_states, key_states, position_ids)
 
         query_states, key_states, value_states = ulysses_all_to_all_fused_kv(
-            query_states,
-            key_states,
-            value_states,
-            self.cp_group,
-            scatter_dim=2,
-            gather_dim=1,
+            query_states, key_states, value_states, self.cp_group
         )
 
         flash_attn_func = get_flash_attn_func(self._allow_fa4)
@@ -411,12 +406,7 @@ class UlyssesAttentionBase(nn.Module, ABC):
             **self._flash_call_kwargs(key_states.shape[1]),
         )
 
-        attn_output = ulysses_all_to_all(
-            attn_output,
-            self.cp_group,
-            scatter_dim=1,
-            gather_dim=2,
-        )
+        attn_output = ulysses_all_to_all(attn_output, self.cp_group)
 
         return attn_output.reshape(batch_size, local_seq_len, -1)
 
@@ -437,12 +427,7 @@ class UlyssesAttentionBase(nn.Module, ABC):
         all-to-all on, so :meth:`_post_rope` gets the global positions, not this rank's chunk.
         """
         query_states, key_states, value_states = ulysses_all_to_all_fused_kv(
-            query_states,
-            key_states,
-            value_states,
-            self.cp_group,
-            scatter_dim=2,
-            gather_dim=1,
+            query_states, key_states, value_states, self.cp_group
         )
 
         query_states = query_states.transpose(1, 2)
@@ -458,12 +443,7 @@ class UlyssesAttentionBase(nn.Module, ABC):
 
         attn_output = attn_output.transpose(1, 2)
 
-        attn_output = ulysses_all_to_all(
-            attn_output,
-            self.cp_group,
-            scatter_dim=1,
-            gather_dim=2,
-        )
+        attn_output = ulysses_all_to_all(attn_output, self.cp_group)
 
         return attn_output.reshape(batch_size, local_seq_len, -1)
 

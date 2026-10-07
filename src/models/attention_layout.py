@@ -7,7 +7,7 @@ sliding, chunked, sparse-indexed, compressed, linear/conv — never on a model n
 off the rank's OWN decoder layers, so a pipeline stage describes its slice and a wrapped tree (FSDP2,
 EP, TP, CP, PEFT) describes the same layers as the bare one. Costs are the algorithmic key counts: a
 family whose kernels run the dense mask (eager / SDPA sparse attention) does more hardware work than
-this counts.
+this counts. The same vocabulary names the compressed-KV layers the multi-document-row gates refuse.
 """
 
 from __future__ import annotations
@@ -193,6 +193,15 @@ def attention_layout_from_config(config) -> AttentionLayout:
     return AttentionLayout(
         tuple(_layer_attention(decoder, kind, index) for index, kind in enumerate(declared)), source="config"
     )
+
+
+def compressed_layer_types(config) -> list[str]:
+    """The declared ``layer_types`` entries of kind ``"compressed"`` (DeepSeek-V4's CSA/HCA): layers
+    that pool KV over windows cut at fixed row indices. Read off the text sub-config too, so a
+    wrapper resolves like its decoder. A config that declares no ``layer_types`` has none:
+    :func:`_declared_layer_types` derives only full or sliding attention for it."""
+    declared = get_config_field(config, "layer_types") or ()
+    return sorted({layer_type for layer_type in declared if LAYER_TYPE_KINDS.get(layer_type) == "compressed"})
 
 
 def _declared_layer_types(decoder) -> list[str]:

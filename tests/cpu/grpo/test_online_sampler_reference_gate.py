@@ -33,14 +33,14 @@ RLVR_SCRIPT = REPO_ROOT / "scripts/training/online_grpo/rlvr.py"
 ENV_SCRIPT = REPO_ROOT / "scripts/training/environmental_grpo.py"
 
 
-def _gate_expression(script) -> str:
-    """The ``sequence_ratio_active=`` source the script feeds the preflight, from its own AST."""
+def _preflight_argument(script, name: str = "sequence_ratio_active") -> str:
+    """The source of the ``name=`` argument the script feeds the preflight, from its own AST."""
     for node in ast.walk(ast.parse(script.read_text())):
         if isinstance(node, ast.Call) and ast.unparse(node.func) == "verify_sampler_logprob_reference_synced":
             for keyword in node.keywords:
-                if keyword.arg == "sequence_ratio_active":
+                if keyword.arg == name:
                     return ast.unparse(keyword.value)
-    raise AssertionError(f"{script.name} no longer runs the sampler-logprob preflight")
+    raise AssertionError(f"{script.name} no longer runs the sampler-logprob preflight with {name}=")
 
 
 @pytest.fixture
@@ -67,29 +67,32 @@ def test_sequence_level_is_follows_the_mode_and_the_correction_switch(correction
     grpo_args = types.SimpleNamespace(
         vllm_importance_sampling_correction=correction, vllm_importance_sampling_mode=mode
     )
-    assert DistributedGRPOTrainer.sequence_level_importance_sampling(grpo_args) is expected
+    assert DistributedGRPOTrainer.sums_sequence_logratio(grpo_args) is expected
 
 
 def test_a_nucleus_reference_is_refused_for_any_sequence_summing_consumer(nucleus_server):
     """The refusal names both remedies, since either consumer may be the one summing."""
     with pytest.raises(ValueError, match="top_p: 1.0") as excinfo:
         verify_sampler_logprob_reference(
-            VLLMWeightSyncClient, [nucleus_server.url], 1.0, 0.95, sequence_ratio_active=True
+            VLLMWeightSyncClient, [nucleus_server.url], 1.0, 0.95, 0, 0.0, 1.0, sequence_ratio_active=True
         )
     message = str(excinfo.value)
     assert "vllm_importance_sampling_mode" in message and "isr_geo_band" in message, message
     # A token-level consumer takes the ratio per token: the lift cancels nothing, so it passes.
     verify_sampler_logprob_reference(
-        VLLMWeightSyncClient, [nucleus_server.url], 1.0, 0.95, sequence_ratio_active=False
+        VLLMWeightSyncClient, [nucleus_server.url], 1.0, 0.95, 0, 0.0, 1.0, sequence_ratio_active=False
     )
 
 
-def test_the_synced_form_takes_the_consumer_flag_under_its_new_name(nucleus_server):
+def test_the_synced_form_takes_the_consumer_flag(nucleus_server):
     with pytest.raises(ValueError, match="summed over each sequence"):
         verify_sampler_logprob_reference_synced(
             [nucleus_server.url],
             temperature=1.0,
             top_p=0.95,
+            top_k=0,
+            min_p=0.0,
+            repetition_penalty=1.0,
             sequence_ratio_active=True,
             backend=VLLMWeightSyncClient.BACKEND_KEY,
         )
@@ -113,6 +116,9 @@ def test_a_preflight_failure_reaches_every_rank_with_its_type(monkeypatch, error
             ["http://unused"],
             temperature=1.0,
             top_p=1.0,
+            top_k=-1,
+            min_p=0.0,
+            repetition_penalty=1.0,
             sequence_ratio_active=True,
             backend=VLLMWeightSyncClient.BACKEND_KEY,
         )
@@ -120,9 +126,9 @@ def test_a_preflight_failure_reaches_every_rank_with_its_type(monkeypatch, error
 
 
 def test_the_rlvr_script_feeds_the_gate_from_the_is_mode():
-    """The script must derive the flag from the config, not pin it — a pinned False is the bug this
-    fixes: TRL's default ``sequence_mask`` ran against a renormalized reference unchecked."""
-    assert _gate_expression(RLVR_SCRIPT) == "DistributedGRPOTrainer.sequence_level_importance_sampling(grpo_config)"
+    """The script must derive the flag from the config, not pin it: a pinned False leaves TRL's
+    default ``sequence_mask`` running against a renormalized reference unchecked."""
+    assert _preflight_argument(RLVR_SCRIPT) == "DistributedGRPOTrainer.sums_sequence_logratio(grpo_config)"
 
 
 @pytest.mark.parametrize(
@@ -131,8 +137,9 @@ def test_the_rlvr_script_feeds_the_gate_from_the_is_mode():
         ({}, False),
         ({"isr_geo_band_min": 0.99, "isr_geo_band_max": 1.01}, True),
         ({"isr_opsm_delta": 0.1}, True),
+        ({"isr_veto_min": 1e-4}, False),
     ],
-    ids=["neither", "geo_band_only", "opsm_only"],
+    ids=["neither", "geo_band_only", "opsm_only", "veto_only"],
 )
 def test_the_env_script_arms_the_gate_for_every_sequence_summing_consumer(knobs, expected):
     """OPSM sums the per-token log-ratios over a trajectory exactly as the geometric band does
@@ -140,7 +147,52 @@ def test_the_env_script_arms_the_gate_for_every_sequence_summing_consumer(knobs,
     same way. The env script's flag is evaluated from its own source: an expression naming only the
     geometric band leaves an OPSM-only run's reference unchecked."""
     async_config = AsyncTrainingConfig(**knobs)
-    assert eval(_gate_expression(ENV_SCRIPT), {"async_config": async_config}) is expected  # noqa: S307
+    assert eval(_preflight_argument(ENV_SCRIPT), {"async_config": async_config}) is expected  # noqa: S307
+
+
+@pytest.mark.parametrize(
+    ("script", "expected"),
+    [
+        (
+            ENV_SCRIPT,
+            {
+                "top_k": "async_config.rollout_top_k",
+                "min_p": "async_config.rollout_min_p",
+                "repetition_penalty": "async_config.rollout_repetition_penalty",
+            },
+        ),
+        (
+            RLVR_SCRIPT,
+            {
+                "top_k": "grpo_config.top_k",
+                "min_p": "0.0 if grpo_config.min_p is None else grpo_config.min_p",
+                "repetition_penalty": "grpo_config.repetition_penalty",
+            },
+        ),
+    ],
+    ids=["env", "rlvr"],
+)
+def test_each_script_feeds_the_preflight_its_own_sampler_filters(script, expected):
+    """A pinned off value here would pass every preflight test while a run's own cut went unchecked."""
+    assert {name: _preflight_argument(script, name) for name in expected} == expected
+
+
+@pytest.mark.parametrize(
+    ("knobs", "match"),
+    [
+        ({"isr_geo_band_max": 1.01}, "set together"),
+        ({"isr_geo_band_min": 0.99}, "set together"),
+        ({"isr_geo_band_min": 1.01, "isr_geo_band_max": 1.02}, "0 < min < 1 < max"),
+        ({"isr_veto_min": 1.5}, "isr_veto_min"),
+        ({"isr_opsm_delta": 0.0}, "isr_opsm_delta"),
+        ({"isr_opsm_delta": float("nan")}, "isr_opsm_delta"),
+    ],
+)
+def test_the_isr_bounds_are_refused_at_parse(knobs, match):
+    """A bad bound fails before the model loads, and a lone upper band bound never reaches the sampler
+    preflight reading as no sequence consumer."""
+    with pytest.raises(ValueError, match=match):
+        AsyncTrainingConfig(**knobs)
 
 
 if __name__ == "__main__":

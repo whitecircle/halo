@@ -7,7 +7,7 @@ Pins:
 - the VLM policy (demote_existing_system=False): only the config system_prompt is folded
   (prefixed onto a leading system/user turn), dataset-borne system turns stay untouched;
 - apply_chat_template_to_conversations render equality for both add_generation_prompt values,
-  including the generation-eval slice (drop_last_turn_on_generation);
+  including the generation-eval slice;
 - process_vlm_conversation's fold behavior through the shared helper.
 
 Usage:
@@ -125,25 +125,13 @@ def test_render_full_conversation_without_generation_prompt():
 
 
 def test_render_generation_drops_last_turn_and_adds_generation_prompt():
-    """The former _prepare_conversation semantics: on the generation branch the trailing
-    assistant turn (the reference answer) is dropped and the generation prompt appended."""
-    row = {"messages": _msgs(("user", "q"), ("assistant", "a"))}
-    out = apply_chat_template_to_conversations(
-        row,
-        RenderTokenizer(),
-        conversation_field="messages",
-        add_generation_prompt=True,
-        drop_last_turn_on_generation=True,
-    )
-    assert out == "<user>q</user><assistant>"
-
-
-def test_render_generation_without_drop_keeps_last_turn():
+    """On the generation branch the trailing assistant turn (the reference answer) is dropped and
+    the generation prompt appended."""
     row = {"messages": _msgs(("user", "q"), ("assistant", "a"))}
     out = apply_chat_template_to_conversations(
         row, RenderTokenizer(), conversation_field="messages", add_generation_prompt=True
     )
-    assert out == "<user>q</user><assistant>a</assistant><assistant>"
+    assert out == "<user>q</user><assistant>"
 
 
 def test_render_system_prompt_folded_when_unsupported():

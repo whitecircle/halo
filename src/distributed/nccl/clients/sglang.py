@@ -113,7 +113,9 @@ class SGLangWeightSyncClient(BaseWeightSyncClient):
     # An empty body is rejected: the endpoint takes a request dataclass, so it needs JSON.
     RESUME_PAYLOAD: dict | None = {}
 
-    def score_completion_logprobs(self, prompt_ids: list[int], completion_ids: list[int]) -> list[float]:
+    def score_completion_logprobs(
+        self, prompt_ids: list[int], completion_ids: list[int], timeout: float = _RESCORE_TIMEOUT_S
+    ) -> list[float]:
         """SGLang's prefill log-probs come from its native ``/generate`` route: ``return_logprob`` with
         ``logprob_start_len`` returns one ``[logprob, token_id, text]`` entry per input token from
         that position on, and the first entry of the window is its anchor with no log-prob. The
@@ -129,7 +131,7 @@ class SGLangWeightSyncClient(BaseWeightSyncClient):
             "return_logprob": True,
             "logprob_start_len": len(prompt_ids) - 1,
         }
-        resp = self.session.post(f"{self.base_url}/generate", json=body, timeout=_RESCORE_TIMEOUT_S)
+        resp = self.session.post(f"{self.base_url}/generate", json=body, timeout=timeout)
         resp.raise_for_status()
         entries = resp.json()["meta_info"]["input_token_logprobs"]
         if len(entries) != len(completion_ids) + 1:
@@ -193,7 +195,7 @@ class SGLangWeightSyncClient(BaseWeightSyncClient):
         ``tp_rank`` already enumerates every GPU (one TP group spans the server), so the group is sized
         by ``tp_size`` alone; multiplying by ``dp_size`` oversizes the c10d group and hangs formation.
         Plain ``--dp-size`` replicas each restart ``tp_rank`` at 0, so their ranks collide in the
-        update group and no sizing can address them, which is rejected above. The layout is read from
+        update group and no sizing can address them, which is rejected below. The layout is read from
         the server rather than from config so the two cannot disagree after a serve-flag change.
         """
         resp = self.session.get(f"{self.base_url}/server_info", timeout=_HTTP_PROBE_TIMEOUT_S)

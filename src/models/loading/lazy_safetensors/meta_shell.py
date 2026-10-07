@@ -32,7 +32,9 @@ def _resolve_remote_code_class(model_class, config, trust_remote_code: bool):
 
     Auto dispatch against the local snapshot dir hits a transformers HF-cache-symlink bug
     (``FileNotFoundError`` on relative imports); resolving from the hub id avoids it, and a concrete
-    class skips Auto resolution entirely.
+    class skips Auto resolution entirely. The modeling file is fetched at the commit the config was
+    read from (``_commit_hash``): unpinned, it would come from the repo's ``main`` while the config
+    and weights come from the run's revision.
     """
     auto_map = getattr(config, "auto_map", None)
     class_name = getattr(model_class, "__name__", "")
@@ -42,7 +44,7 @@ def _resolve_remote_code_class(model_class, config, trust_remote_code: bool):
     if not ref or os.path.isdir(ref):
         return model_class
     try:
-        return get_class_from_dynamic_module(auto_map[class_name], ref)
+        return get_class_from_dynamic_module(auto_map[class_name], ref, revision=getattr(config, "_commit_hash", None))
     except Exception as exc:  # best-effort; fall back to the Auto class on any failure
         logger.warning(f"Could not pre-resolve remote-code class {auto_map[class_name]!r} from {ref!r}: {exc}")
         return model_class

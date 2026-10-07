@@ -1,7 +1,8 @@
 #!/usr/bin/env python
-"""Distributed offline GRPO training with Expert, Tensor, Expert-Tensor and Context Parallelism support.
+"""Distributed offline GRPO training.
 
 Group-relative policy optimization over pre-computed completions and rewards — no live generation.
+
 Usage:
     torchrun --nproc_per_node=8 scripts/training/offline_grpo.py \\
         examples/grpo/offline/qwen3_5/offline-grpo-qwen3.6-35b-a3b-gsm8k.yaml
@@ -21,9 +22,10 @@ from src.data.pipeline.processing import coordinated_map, resolve_map_num_proc
 from src.data.pipeline.row_processors import prepare_generative_row
 from src.data.sources.loading import reject_image_columns
 from src.distributed.loading.frozen_models import load_frozen_reference_model
-from src.distributed.loading.peft_setup import setup_peft_model
+from src.distributed.loading.peft_setup import has_attention_lora_targets, setup_peft_model
 from src.distributed.runtime import barrier
 from src.models.loading.model_preparation import log_model_info
+from src.trainers.grpo.mixins.offline_reference import reject_unsupported_reference_input
 from src.trainers.grpo.offline import OfflineGRPOTrainer
 from src.training.environment import run_training
 from src.training.parser import H4ArgumentParser
@@ -120,6 +122,25 @@ def main():
     )
     parallelism_config = runtime.parallelism_config
 
+    ds, dataset_presharded = load_script_datasets(
+        args,
+        parallelism_config,
+        conversation_field="prompt",
+    )
+    reject_image_columns(ds, "Offline GRPO")
+    # The trainer refuses the same splits at construction; checked here, before the model load.
+    reject_unsupported_reference_input(
+        ds["train"],
+        ds["test"],
+        active=OfflineGRPOTrainer.sweeps_run_start_reference(
+            model_config.model_name_or_path,
+            offline_grpo_config.kl_beta,
+            parallelism_config,
+            peft=has_attention_lora_targets(model_config),
+        ),
+        presharded=dataset_presharded,
+    )
+
     # Padded batches: the CP collator right-pads full rows, the non-CP layout left-pads prompts.
     requested_attn = padded_workload_attn_implementation(
         model_config, sinks_reset=dist_args.reset_sinks, context_parallel=parallelism_config.is_cp_mode
@@ -153,13 +174,6 @@ def main():
     )
 
     log_model_info(model, tokenizer)
-
-    ds, dataset_presharded = load_script_datasets(
-        args,
-        parallelism_config,
-        conversation_field="prompt",
-    )
-    reject_image_columns(ds, "Offline GRPO")
 
     apply_chat_templates = build_chat_template_row_fn(tokenizer, args.tools_field)
 

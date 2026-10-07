@@ -1,8 +1,8 @@
 """The two silent-corruption guards on the native DeepGEMM grouped path.
 
-``deep_gemm`` ships in neither image, so the kernel itself is GPU-and-opt-in only
-(``tests/gpu/kernels/test_deepgemm.py``). Both behaviors checked here sit *around* the kernel and
-are reachable with the resolver stubbed:
+``deep_gemm`` is Blackwell-only and opt-in (``HALO_DEEPGEMM_NATIVE=1``), so the kernel itself is
+GPU-tested (``tests/gpu/kernels/test_deepgemm.py``). Both behaviors checked here sit *around* the
+kernel and are reachable with the resolver stubbed:
 
 - ``offs`` validation: the output buffer is uninitialized and only the covered span is written, so an
   ``offs`` that does not end at ``T`` returns garbage memory as activations,

@@ -21,6 +21,7 @@ from src.distributed.loading import vlm_setup
 
 def _args(**overrides) -> types.SimpleNamespace:
     defaults = {
+        "dataset": "the loaded dataset",
         "conversation_field": "conversation",
         "images_field": None,
         "system_prompt": None,
@@ -105,7 +106,7 @@ def test_the_vlm_loader_takes_the_modality_verdict_instead_of_re_probing(monkeyp
         raise _Sentinel
 
     monkeypatch.setattr(vlm_setup, "is_vlm_model", _must_not_probe)
-    # The processor load is the first thing after the (removed) verdict; reaching it proves no probe ran.
+    # The processor load is the loader's first step; reaching it proves no probe ran.
     monkeypatch.setattr(vlm_setup, "load_vlm_processor", _processor_reached)
     model_config = types.SimpleNamespace(model_name_or_path="Qwen/Qwen3-4B", model_revision=None)
     with pytest.raises(_Sentinel):

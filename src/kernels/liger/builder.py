@@ -225,14 +225,14 @@ def _rebrand(patched: type, original: type, role: str) -> type:
 
 
 def _norm_epsilon(module: nn.Module) -> float:
-    """The epsilon of an RMSNorm module, whichever spelling its family uses."""
+    """The epsilon of an RMSNorm or gated-norm module, whichever spelling its family uses."""
     eps = getattr(module, "variance_epsilon", None)
     if eps is None:
         eps = getattr(module, "eps", None)
     if eps is None:
         raise AttributeError(
-            f"{type(module).__name__} exposes neither `variance_epsilon` nor `eps`; a fused RMSNorm "
-            f"cannot be given an epsilon. Drop it from the family's rms_norm spec."
+            f"{type(module).__name__} exposes neither `variance_epsilon` nor `eps`; a fused norm "
+            f"cannot be given an epsilon. Drop it from the family's LigerFamilySpec."
         )
     return eps
 
@@ -312,11 +312,7 @@ def _bridge_gated_norm(module: nn.Module) -> None:
     gate is the one the eager module declared.
     """
     name = type(module).__name__
-    eps = getattr(module, "variance_epsilon", None)
-    if eps is None:
-        eps = getattr(module, "eps", None)
-    if eps is None:
-        raise AttributeError(f"{name} exposes neither `variance_epsilon` nor `eps` for fla's gated norm")
+    eps = _norm_epsilon(module)
     activation = getattr(module, "activation", None)
     if activation not in _FLA_GATE_ACTIVATIONS:
         raise ValueError(

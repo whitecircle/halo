@@ -3,14 +3,16 @@
 A PP checkpoint stores complete tensors under the UNSPLIT model's global names; resume maps them
 back through each stage's ``global_parameter_name``. The gates under test:
 
-- weight coverage: a stage tensor absent from the checkpoint raises (a silent miss = base weights);
+- a stage constructed from the checkpoint on every rank skips the reload (a best-model load never does);
+- weight coverage: a stage tensor absent from the checkpoint raises (a silent miss = base weights), and
+  one whose shard file this node's copy lacks names the per-node placement;
 - optimizer fingerprint mismatch under PP raises (never a quiet warm restart);
 - ``pp_stage_partition`` absent or different from the live stage's layer range raises;
-- per-shard FQN coverage: a trainable param with no saved moments raises, except the documented
-  no-grad ``sinks`` allowlist;
+- per-shard FQN coverage: a trainable param with no saved moments raises;
 - deleting every shard + meta remains the explicit warm-restart escape hatch.
 """
 
+import json
 import os
 from types import SimpleNamespace
 
@@ -187,14 +189,15 @@ def test_pp_ep_guard_reads_where_weights_were_read_not_name_or_path(tmp_path):
 
 def test_pp_ep_guard_accepts_a_model_whose_weights_were_read_from_the_checkpoint(tmp_path):
     """Anti-vacuity, and the inverse discrimination: weights genuinely read from the checkpoint pass
-    even when ``_name_or_path`` points at the hub id the run was configured with."""
+    even when ``_name_or_path`` points at the hub id the run was configured with. The best-model
+    load reads past the constructed-from-checkpoint skip, so the copy proves the guard let it through."""
     stage = _fake_stage(2, 4)
     saved = _write_pp_checkpoint(tmp_path, stage)
     stage.ep_moe_layers = lambda: [("model.nonexistent_moe_block", object())]
     stage.config = SimpleNamespace(_name_or_path="org/base-model")
     setattr(stage, LOADED_WEIGHTS_FROM_ATTR, str(tmp_path))
 
-    CheckpointLoader(_ctx(stage)).load_model(str(tmp_path))
+    CheckpointLoader(_ctx(stage)).load_model(str(tmp_path), for_best_model=True)
 
     for local, value in stage.state_dict().items():
         assert torch.equal(value, saved[stage.global_parameter_name(local)]), local
@@ -222,26 +225,130 @@ def test_pp_ep_guard_joins_the_world_even_on_a_moe_free_stage(tmp_path, monkeypa
     stage = _fake_stage(0, 2)  # no EP layers on this stage
     _write_pp_checkpoint(tmp_path, stage)
     real_reject = loader_mod.reject_across_ranks
-    joined: list[str | None] = []
+    joined: list[tuple[str, str | None]] = []
     monkeypatch.setattr(
         loader_mod,
         "reject_across_ranks",
-        lambda reason, what, **kwargs: joined.append(reason) or real_reject(reason, what, **kwargs),
+        lambda reason, what, **kwargs: joined.append((what, reason)) or real_reject(reason, what, **kwargs),
     )
 
     CheckpointLoader(_ctx(stage)).load_model(str(tmp_path))
 
-    assert joined == [None], "a MoE-free stage must still enter the identity join, reporting no reason"
+    identity = [reason for what, reason in joined if what == "PP+EP resume construction identity"]
+    assert identity == [None], "a MoE-free stage must still enter the identity join, reporting no reason"
 
 
 def test_load_pp_stage_unreadable_checkpoint_raises_uniformly(tmp_path, monkeypatch):
     """A peer failing its shard read must raise here too (consensus), not proceed to copies."""
     stage = _fake_stage(0, 2)
     _write_pp_checkpoint(tmp_path, stage)
-    # The shard read is the first of this path's two ``all_ranks_ok`` joins (the other is key
-    # coverage), so failing every join still lands the raise on the read.
+    # Failing every ``all_ranks_ok`` join: the construction verdict then reloads, and the shard read
+    # is the next join, ahead of key coverage, so the raise lands on the read.
     monkeypatch.setattr(loader_mod, "all_ranks_ok", lambda local: False)
     with pytest.raises(RuntimeError, match="unreadable"):
+        CheckpointLoader(_ctx(stage)).load_model(str(tmp_path))
+
+
+def _refuse_read(*_args, **_kwargs):
+    raise AssertionError("a stage constructed from the checkpoint must not re-read it")
+
+
+def test_a_stage_built_from_the_checkpoint_skips_the_reload(tmp_path, monkeypatch):
+    """The stage-aware loader already read these tensors at construction, so the resume reads nothing:
+    a second full read of the stage, with its mesh collectives, would only rewrite the same values."""
+    stage = _fake_stage(2, 4)
+    _write_pp_checkpoint(tmp_path, stage)
+    setattr(stage, LOADED_WEIGHTS_FROM_ATTR, str(tmp_path))
+    constructed = {name: tensor.clone() for name, tensor in stage.state_dict().items()}
+    monkeypatch.setattr(loader_mod, "joined_streaming_reader", _refuse_read)
+    CheckpointLoader(_ctx(stage)).load_model(str(tmp_path))
+
+    for name, tensor in stage.state_dict().items():
+        assert torch.equal(tensor, constructed[name]), name
+
+
+def test_the_stage_carries_its_models_construction_stamp(tmp_path, monkeypatch):
+    """``build_pipeline_stage`` carries load_distributed_model's stamp from the model to the stage,
+    which is what lets the resume recognize a stage the stage-aware loader built."""
+    cfg = Qwen3Config(**TINY_QWEN3_CONFIG, pad_token_id=0, eos_token_id=1)
+    model = Qwen3ForCausalLM(cfg)
+    setattr(model, LOADED_WEIGHTS_FROM_ATTR, str(tmp_path))
+    stage = build_pipeline_stage(model, 1, PP_SIZE)
+    _write_pp_checkpoint(tmp_path, stage)
+    monkeypatch.setattr(loader_mod, "joined_streaming_reader", _refuse_read)
+
+    CheckpointLoader(_ctx(stage, parallelism_config=_StubParallelismConfig(pp_rank=1))).load_model(str(tmp_path))
+
+
+def test_a_stage_only_named_after_the_checkpoint_reloads(tmp_path):
+    """``config._name_or_path`` names the checkpoint for any ``from_pretrained`` of it, including one
+    that rounded the FP32 masters to the run dtype. Without the stage loader's stamp the reload runs."""
+    stage = _fake_stage(2, 4)
+    saved = _write_pp_checkpoint(tmp_path, stage)
+    stage.config = SimpleNamespace(_name_or_path=str(tmp_path))
+
+    CheckpointLoader(_ctx(stage)).load_model(str(tmp_path))
+
+    for local, value in stage.state_dict().items():
+        assert torch.equal(value, saved[stage.global_parameter_name(local)]), local
+
+
+def test_the_skip_needs_every_rank_constructed_from_the_checkpoint(tmp_path, monkeypatch):
+    """``realpath`` resolves per node, so one rank's verdict cannot skip alone: the peers that disagree
+    would be left in the reload's mesh collectives. A world that is not unanimous reloads everywhere."""
+    stage = _fake_stage(2, 4)
+    saved = _write_pp_checkpoint(tmp_path, stage)
+    setattr(stage, LOADED_WEIGHTS_FROM_ATTR, str(tmp_path))
+    peer_disagrees = iter([False])  # the construction verdict's join; every later join is this rank's own
+    monkeypatch.setattr(loader_mod, "all_ranks_ok", lambda local: next(peer_disagrees, local))
+
+    CheckpointLoader(_ctx(stage)).load_model(str(tmp_path))
+
+    for local, value in stage.state_dict().items():
+        assert torch.equal(value, saved[stage.global_parameter_name(local)]), local
+
+
+def test_a_best_model_load_reads_even_a_stage_built_from_the_checkpoint(tmp_path):
+    """The live weights trained past the best checkpoint, so the skip never applies to a best-model load."""
+    stage = _fake_stage(2, 4)
+    saved = _write_pp_checkpoint(tmp_path, stage)
+    setattr(stage, LOADED_WEIGHTS_FROM_ATTR, str(tmp_path))
+
+    CheckpointLoader(_ctx(stage)).load_model(str(tmp_path), for_best_model=True)
+
+    for local, value in stage.state_dict().items():
+        assert torch.equal(value, saved[stage.global_parameter_name(local)]), local
+
+
+def test_the_reload_reshards_the_stage_before_writing(tmp_path, monkeypatch):
+    """A best-model load follows an evaluation whose forward-only drives can leave the stage's FSDP2
+    modules unsharded; writing then would land in transient buffers the next unshard discards."""
+    stage = _fake_stage(2, 4)
+    _write_pp_checkpoint(tmp_path, stage)
+    events: list[str] = []
+    monkeypatch.setattr(loader_mod, "reshard_fsdp2_modules", lambda module: events.append("reshard"))
+    real_copy = loader_mod.copy_full_tensor
+    monkeypatch.setattr(
+        loader_mod, "copy_full_tensor", lambda target, value: events.append("copy") or real_copy(target, value)
+    )
+
+    CheckpointLoader(_ctx(stage)).load_model(str(tmp_path))
+
+    assert events[0] == "reshard" and "copy" in events, events
+
+
+def test_a_stage_shard_absent_from_this_node_names_the_placement(tmp_path):
+    """A per-node pipeline checkpoint holds only the shards of the stages each node ran, under the
+    global index. A stage placed on another node finds its shard missing, which is a placement
+    mismatch, not a torn save, and the refusal says so."""
+    stage = _fake_stage(2, 4)
+    tensors = _write_pp_checkpoint(tmp_path, stage)
+    os.remove(os.path.join(tmp_path, "model.safetensors"))
+    index = {"metadata": {}, "weight_map": dict.fromkeys(tensors, "model-pp00001-of-00002.safetensors")}
+    with open(os.path.join(tmp_path, "model.safetensors.index.json"), "w") as handle:
+        json.dump(index, handle)
+
+    with pytest.raises(RuntimeError, match="same topology and rank placement"):
         CheckpointLoader(_ctx(stage)).load_model(str(tmp_path))
 
 
@@ -331,21 +438,6 @@ def test_pp_missing_fqn_in_shard_raises(tmp_path, monkeypatch):
     with pytest.raises(RuntimeError, match=r"model\.layers\.1\.weight"):
         OptimizerShardStore(_ctx(stage, optimizer, parallelism_config=pc)).load(str(tmp_path))
     assert restore.calls == []
-
-
-def test_pp_sinks_allowlist_passes_fqn_gate(tmp_path, monkeypatch):
-    """GptOss FA4 sinks accrue no grad, so Adam never materializes their state and the save omits
-    it — the coverage gate must not mistake that for a torn shard."""
-    stage, optimizer = _stage_with_optimizer()
-    stage.model.sinks = nn.Parameter(torch.zeros(4))
-    pc = _StubParallelismConfig(pp_rank=0)
-    _write_optimizer_checkpoint(tmp_path, stage, optimizer, pc)  # state written for pre-sinks params only
-    restore = _Recorder()
-    monkeypatch.setattr(optimizer_mod, "set_optimizer_state_dict", restore)
-
-    OptimizerShardStore(_ctx(stage, optimizer, parallelism_config=pc)).load(str(tmp_path))
-
-    assert len(restore.calls) == 1
 
 
 def test_pp_no_shards_anywhere_is_the_explicit_warm_restart_escape_hatch(tmp_path, monkeypatch):

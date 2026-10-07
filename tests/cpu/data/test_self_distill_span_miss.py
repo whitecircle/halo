@@ -59,7 +59,7 @@ def _labels(row: list[int], span_policy) -> torch.Tensor:
 
 def test_terminatorless_row_under_collator_policy_warns_instead_of_crashing():
     """Marker present, terminator absent, collator policy → masked row + a warning, not a raise."""
-    # The precondition the crash came from, pinned so this test cannot stop covering it: under this
+    # The precondition a strict zip crashes on, pinned so this test cannot stop covering it: under this
     # policy the row resolves to a start with NO paired end.
     starts, ends = resolve_completion_spans([5, 7, 7, 9], MARKER_IDS, frozenset({EOS_ID}), **COLLATOR_POLICY)
     assert starts and not ends

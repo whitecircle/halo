@@ -80,7 +80,7 @@ def test_context_window_from_plain_config():
 def test_context_window_from_composite_vlm_config():
     """The regression this guards: reading ``max_position_embeddings`` off the TOP level of a
     composite config finds nothing, falls through to the tokenizer's unset sentinel, and raises —
-    so ``max_length: null`` was unusable on every VLM."""
+    leaving ``max_length: null`` unusable on every VLM."""
     config = _CompositeConfig(text_config={"max_position_embeddings": 131072})
     assert not hasattr(config, "max_position_embeddings"), "fixture must not carry a top-level window"
     assert get_model_context_window(_model(config), _tokenizer()) == 131072
@@ -277,13 +277,13 @@ def test_env_grpo_context_limit_uses_the_shared_resolver():
 
 
 def test_smpo_budget_defaults_split_max_length_in_half():
-    """Shipped defaults are unchanged by the null-share derivation (1024 → 512 / 512)."""
+    """The null-share derivation splits the shipped default in half (1024 → 512 / 512)."""
     assert SmoothMarginPOConfig(**_CPU_OK).resolve_length_budget() == (1024, 512, 512)
 
 
 def test_smpo_budget_prompt_share_scales_with_max_length():
-    """The footgun this closes: a fixed 512 prompt default silently truncated prompts to 512 on a
-    run whose max_length was resolved to a long context window."""
+    """A fixed 512 prompt default would silently truncate prompts to 512 on a run whose max_length
+    resolves to a long context window."""
     cfg = SmoothMarginPOConfig(max_length=131072, **_CPU_OK)
     assert cfg.resolve_length_budget() == (131072, 65536, 65536)
 
@@ -328,7 +328,7 @@ def _offline_config(**kwargs) -> OfflineGRPOConfig:
 @pytest.mark.parametrize("parallelism_config", [None, SimpleNamespace(is_pp_mode=False)])
 def test_offline_grpo_max_length_is_refused_off_pipeline_parallelism(parallelism_config):
     """Only the PP path reads ``max_length`` (the fixed shape P2P buffers freeze on). Off PP the
-    budget is the two caps, so a set ``max_length`` reached nothing and the run trained uncapped."""
+    budget is the two caps, so a set ``max_length`` would reach nothing, leaving the run uncapped."""
     with pytest.raises(ValueError, match="pipeline-parallel-only"):
         OfflineGRPOTrainer._reject_inert_max_length(_offline_config(max_length=4096), parallelism_config)
 

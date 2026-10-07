@@ -39,7 +39,7 @@ from transformers import GptOssConfig, GptOssForCausalLM
 # a hand-built model reaches save_tp_model without the load path that pulls this in.
 import src.distributed.expert_parallel.layers.roster  # noqa: F401
 from src.checkpoint.format import SAFETENSORS_INDEX_FILE
-from src.distributed.tensor_parallel.checkpoint import save_tp_model
+from src.distributed.checkpoint.tp_save import save_tp_model
 from src.distributed.tensor_parallel.parallelize_attention import apply_tp_to_attention_only
 from src.distributed.tensor_parallel.state_dict import tp_sharded_non_dtensor_suffixes
 from tests.common.checkpoint_io import weight_files

@@ -1,4 +1,4 @@
-"""CPU tests for the chunked GRPO log-prob / entropy helpers (src/trainers/grpo/chunked_logprobs.py).
+"""CPU tests for the chunked GRPO log-prob / entropy helpers (src/trainers/grpo/mixins/chunked_logprobs.py).
 
 The chunked path must compute the SAME per-token log-probs and entropy as the full-logits path TRL
 uses (``selective_log_softmax`` / ``entropy_from_logits`` over ``hidden @ lm_head.weight.T / temp``),

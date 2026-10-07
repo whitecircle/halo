@@ -219,8 +219,8 @@ def test_slerp_colinear_falls_back_to_lerp():
 
 def test_slerp_of_neutralized_sinks_stays_finite():
     """Two gpt-oss checkpoints trained under ``reset_sinks`` (the SFT default) carry every sink at
-    ``bfloat16.min``, whose square overflows fp32: a raw norm read ``inf``, the cosine of two
-    identical vectors read 0, and the "orthogonal" arc summed to ``-inf`` — a non-finite sink in a
+    ``bfloat16.min``, whose square overflows fp32: a raw norm reads ``inf``, the cosine of two
+    identical vectors reads 0, and the "orthogonal" arc sums to ``-inf`` — a non-finite sink in a
     checkpoint whose inputs were finite. Identical inputs must slerp to themselves, at any scale."""
     sinks = torch.full((64,), torch.finfo(torch.bfloat16).min, dtype=torch.bfloat16)
     out = mm._merge_slerp(sinks, sinks.clone(), 0.5)
@@ -262,7 +262,7 @@ def test_ties_density_trims_small_deltas():
 def test_reference_keys_uses_base_for_task_methods():
     """task_arithmetic/ties merge over the BASE key set (vectors are base-relative), so a key in base
     but absent from model[0] is included — iterating model[0] instead would silently drop it.
-    linear/slerp have no base and use model[0]."""
+    linear/slerp have no base (the knob gate refuses one) and use model[0]."""
 
     class _StubReader:
         def __init__(self, ks):
@@ -275,10 +275,8 @@ def test_reference_keys_uses_base_for_task_methods():
     m1 = _StubReader({"x", "y"})
     base = _StubReader({"x", "y"})  # 'y' is absent from model[0]
     # base-relative methods cover 'y' (would be dropped if iterating m0)
-    assert mm._reference_keys("task_arithmetic", [m0, m1], base) == ["x", "y"]
-    assert mm._reference_keys("ties", [m0, m1], base) == ["x", "y"]
-    assert mm._reference_keys("linear", [m0, m1], None) == ["x"]
-    assert mm._reference_keys("slerp", [m0, m1], None) == ["x"]
+    assert mm._reference_keys([m0, m1], base) == ["x", "y"]
+    assert mm._reference_keys([m0, m1], None) == ["x"]
 
 
 _TINY_QWEN35 = {
@@ -410,9 +408,8 @@ def test_balancing_biases_keep_their_trained_dtype():
 def test_a_base_only_key_names_the_model_that_lacks_it():
     """``task_arithmetic``/``ties`` merge over the BASE key set, and the RAM preflight sizes those
     keys against ``model[0]`` — ahead of the merge loop's own coverage check. A base key no
-    fine-tune carries (the realistic case: a base saved untied, the runs saved tied) therefore
-    surfaced as a bare ``KeyError: 'lm_head.weight'`` naming neither the model that lacks it nor
-    why it was wanted."""
+    fine-tune carries (the realistic case: a base saved untied, the runs saved tied) must raise
+    naming the model that lacks it, not as a bare ``KeyError: 'lm_head.weight'``."""
     with tempfile.TemporaryDirectory(dir="/tmp") as tmp:
         base, a, b, out = Path(tmp) / "base", Path(tmp) / "a", Path(tmp) / "b", Path(tmp) / "merged"
         shared = {"model.layers.0.mlp.down.weight": torch.zeros(4, 4)}

@@ -30,7 +30,11 @@ import torch
 import src.trainers.grpo.rollout.completions_logging as cl
 import src.trainers.grpo.rollout.rollout_metrics as rm
 from src.distributed import runtime
+from src.trainers.grpo.environmental import DistributedAsyncEnvironmentalGRPOTrainer
+from src.trainers.grpo.mixins.on_policy_init import OnPolicyGRPOInitMixin
+from src.trainers.grpo.online import DistributedGRPOTrainer
 from src.trainers.grpo.rollout.completions_logging import emit_completion_artifacts
+from src.trainers.mixins.base import DistributedTrainerMixin
 
 
 class _Accel:
@@ -142,7 +146,7 @@ def test_non_writer_rank_writes_nothing(tmp_path, monkeypatch) -> None:
 
 
 def test_every_node_writes_when_the_output_filesystem_is_not_shared(tmp_path, monkeypatch) -> None:
-    """Anti-vacuity for the test above, and the reason the predicate changed: with a per-node output
+    """Anti-vacuity for the test above, and the reason the election is per node: with a per-node output
     filesystem this same non-global-main rank IS its node's writer — gating on global rank 0 would
     silently drop that node's completions."""
     monkeypatch.setattr(cl, "print_prompt_completions_sample", lambda *a, **k: None)
@@ -372,6 +376,49 @@ def test_completion_logs_skipped_entirely_when_no_artifact_is_wanted(monkeypatch
     host._populate_completion_logs(_rollouts("p0"), torch.tensor([1.0]), torch.tensor([0.25]), "train")
 
     assert calls == {"all_gather": 0, "gather_dst": 0}
+
+
+class _BaseLog:
+    """Stands for the rest of the MRO the mixin delegates to: records TRL's flag as ``log`` saw it."""
+
+    def log(self, logs, start_time=None):
+        self.seen_by_base = (dict(logs), self.log_completions)
+
+
+class _LogHost(cl.DecoupledCompletionsLogMixin, _BaseLog):
+    def __init__(self, tmp_path, *, console: bool, save: bool):
+        self.log_completions, self._save_completions = console, save
+        self.args, self.state, self.model = _Args(str(tmp_path)), _State(step=7), _Model()
+        self.num_completions_to_print, self.log_unique_prompts = 2, False
+        self._logs = _fresh_logs()
+
+
+@pytest.mark.parametrize(("console", "save"), [(True, False), (False, True)])
+def test_the_log_mixin_keeps_trls_block_off_and_emits_the_decoupled_artifacts(tmp_path, monkeypatch, console, save):
+    printed = []
+    monkeypatch.setattr(cl, "print_prompt_completions_sample", lambda *a, **k: printed.append(a))
+    monkeypatch.setattr(cl, "is_rich_available", lambda: True)
+    host = _LogHost(tmp_path, console=console, save=save)
+
+    host.log({"loss": 1.0})
+
+    assert host.seen_by_base == ({"loss": 1.0}, False), "TRL's coupled completions block ran"
+    assert host.log_completions is console, "TRL's flag was not restored after the delegated log"
+    assert os.path.exists(_parquet_path(str(tmp_path))) is save
+    assert len(printed) == int(console)
+
+
+def test_both_on_policy_trainers_log_through_the_mixin_ahead_of_the_parallelism_logs():
+    for cls in (DistributedGRPOTrainer, DistributedAsyncEnvironmentalGRPOTrainer):
+        mro = cls.__mro__
+        assert mro.index(cl.DecoupledCompletionsLogMixin) < mro.index(DistributedTrainerMixin), cls.__name__
+
+
+def test_the_init_spine_takes_save_completions_before_trls_ctor_sees_it():
+    host = types.SimpleNamespace(_init_distributed_config=lambda kwargs, **_: kwargs)
+    kwargs = {"save_completions": False, "args": None}
+    _, remaining = OnPolicyGRPOInitMixin._begin_on_policy_init(host, (), kwargs)
+    assert host._save_completions is False and "save_completions" not in remaining
 
 
 if __name__ == "__main__":

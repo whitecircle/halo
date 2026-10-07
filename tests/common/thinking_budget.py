@@ -1,10 +1,10 @@
 """The live half of ``rollout_max_thinking_tokens``: is the budget enforced, and did a turn respect it.
 
-The budget is a vLLM-only request field: ``generation_control_fields``
+The budget is a vLLM-only request field — ``generation_control_fields``
 (:mod:`src.environments.engine_wire`) puts ``thinking_token_budget`` at the top level of the chat
-request, and the engine enforces it. Nothing in the toolkit truncates or masks a turn's CoT, and
-reasoning ids are not captured separately from the turn's sampled ids, so both halves need a live
-server: whether it honours the field at all, and what the rollouts then reasoned.
+request — and the ENGINE enforces it: nothing in the toolkit truncates or masks a turn's CoT, and
+reasoning ids are not captured separately from the turn's sampled ids. So both halves need a live
+server: whether this one honours the field at all, and what the rollouts then reasoned.
 
 The server needs a reasoning parser (gpt-oss: ``--reasoning-parser-plugin
 /opt/gpt_oss_reasoning_parser.py --reasoning-parser openai_gptoss``) and ``VLLM_USE_V2_MODEL_RUNNER=0``;
@@ -18,13 +18,13 @@ from src.trainers.grpo.environmental import DistributedAsyncEnvironmentalGRPOTra
 from tests.common.on_policy_e2e import PROBE_TIMEOUT_S
 from tests.common.utils import log
 
-# Long enough that an unbudgeted answer reasons past the budget under test; the A/B only measures
-# enforcement while the model would otherwise have overrun it.
+# Long enough that an unbudgeted answer reasons past the budget under test — the A/B is only a
+# measurement of enforcement while the model would otherwise have overrun it.
 _PROBE_PROMPT = "Multiply 3847 by 2913 by hand, showing every intermediate product before the final answer."
 _PROBE_MAX_TOKENS = 768
-# Sampled, seeded attempts: greedy decoding on an easy prompt answers with no reasoning channel,
-# which measures nothing. Each attempt pairs a free and a budgeted request on one seed; the probe
-# needs one attempt whose free run overruns the budget, and reports it when none does.
+# Sampled, seeded attempts: greedy decoding on an easy prompt answers with no reasoning channel at
+# all, which measures nothing. Each attempt pairs a free and a budgeted request on one seed; the
+# probe needs one attempt whose FREE run overruns the budget, and says so loudly when none does.
 _PROBE_ATTEMPTS = 4
 _PROBE_TEMPERATURE = 1.0
 # Enough of a refused server's body to carry its reason into the log; the rest is a JSON envelope.
@@ -46,9 +46,9 @@ def _chat(server_url: str, model_name: str, budget: int | None, seed: int) -> re
         "max_tokens": _PROBE_MAX_TOKENS,
         "temperature": _PROBE_TEMPERATURE,
         "seed": seed,
-        # Top-level, as generation_control_fields sends it: the engines derive their thinking toggles
-        # from this spelling, and a request without it renders with thinking off, so no reasoning
-        # channel opens whatever the sampling.
+        # Top-level, exactly as generation_control_fields sends it: this spelling is what the engines
+        # derive their thinking toggles from — a request without it renders with thinking off and no
+        # reasoning channel ever opens, whatever the sampling.
         "reasoning_effort": "high",
     }
     if budget is not None:
@@ -66,11 +66,11 @@ def _cot(server_url: str, model_name: str, budget: int | None, seed: int) -> str
 
 
 def record_budget_enforcement(server_url: str, model_name: str, budget: int, tokenizer, checks: dict) -> None:
-    """Rank 0: the server takes the field, and the same prompt reasons less with it than without.
+    """RANK 0: the server takes the field, and the SAME prompt reasons less with it than without.
 
     An acceptance check alone would pass on an engine that parses the field and ignores it, since the
-    arithmetic prompts a rollout runs answer well under any reasonable budget. The A/B measures
-    enforcement directly and needs no rollout; its unbudgeted arm also shows this checkpoint opens a
+    arithmetic prompts a rollout runs answer well under any sane budget. The A/B measures enforcement
+    directly and needs no rollout; its unbudgeted arm is also what proves this checkpoint opens a
     reasoning channel at all.
     """
     probe = _chat(server_url, model_name, budget, seed=0)
@@ -80,7 +80,7 @@ def record_budget_enforcement(server_url: str, model_name: str, budget: int, tok
         checks["server_enforced_the_thinking_budget"] = False
         return
     # Elicitation and enforcement are separate verdicts: an attempt set whose free arm never overran
-    # measured nothing, and folding that into "not enforced" would misattribute a probe failure.
+    # measured nothing, and folding that into "not enforced" would blame the engine for the probe.
     for attempt in range(_PROBE_ATTEMPTS):
         free = _reasoning_tokens(tokenizer, _cot(server_url, model_name, None, attempt))
         if free > budget + RETOKENIZE_SLACK:
@@ -97,20 +97,19 @@ def record_budget_enforcement(server_url: str, model_name: str, budget: int, tok
 class ReasoningTurnRecorder(DistributedAsyncEnvironmentalGRPOTrainer):
     """The environmental trainer, keeping each sampled assistant turn's CoT length.
 
-    ``_log_rollout_metrics`` is where the trainer sees a step's episodes on every rank before they are
-    reduced to means, and it already holds the per-turn count. A mean is not enough: the budget bounds
-    each turn, and a mean of per-episode sums can sit under it while a turn ran over.
+    ``_log_rollout_metrics`` is the one place the trainer sees a step's episodes on every rank before
+    they are reduced to means, and it is handed the step's per-turn counts. A mean would not do: the budget
+    bounds each TURN, and a mean of per-episode sums can sit under it while a turn ran over.
     """
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         self.sampled_reasoning_tokens: list[int] = []
 
-    def _log_rollout_metrics(self, results, mode: str):
-        for result in results:
-            if result.trajectory is not None:
-                self.sampled_reasoning_tokens.extend(self._assistant_turn_reasoning_tokens(result.trajectory))
-        return super()._log_rollout_metrics(results, mode)
+    def _log_rollout_metrics(self, results, mode: str, reasoning_tokens):
+        for tokens in reasoning_tokens:
+            self.sampled_reasoning_tokens.extend(tokens)
+        return super()._log_rollout_metrics(results, mode, reasoning_tokens)
 
 
 def record_thinking_budget_checks(trainer: ReasoningTurnRecorder, checks: dict[str, bool], budget: int) -> None:
@@ -121,7 +120,7 @@ def record_thinking_budget_checks(trainer: ReasoningTurnRecorder, checks: dict[s
     """
     counts = trainer.sampled_reasoning_tokens
     checks["thinking_budget_sampled_a_turn"] = bool(counts)
-    # Guard: a run whose turns emitted no CoT satisfies "nothing exceeded the budget" trivially.
+    # ANTI-VACUITY: a run whose turns emitted no CoT satisfies "nothing exceeded the budget" trivially.
     checks["thinking_budget_some_turn_reasoned"] = any(count > 0 for count in counts)
     checks["thinking_budget_capped_every_turn"] = all(count <= budget + RETOKENIZE_SLACK for count in counts)
     log(f"  reasoning tokens over {len(counts)} sampled turn(s), budget {budget}: {counts}")

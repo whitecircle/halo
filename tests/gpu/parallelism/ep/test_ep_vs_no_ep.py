@@ -18,9 +18,9 @@ for one of them (see LOSS_ABS_TOL).
 Both sides are loaded over the checkpoint's PRETRAINED attention sinks, on the one backend that
 carries them — see ATTN_IMPLEMENTATION. Under the loader's fine-tuning sink reset the model runs
 off-distribution, both sides reroute against each other, and the file reports that as an EP defect.
-This is the nightly counterpart of the core-tier
-tests/gpu/parallelism/ep/test_ep_correctness.py: it holds both models at once and adds the
-per-token logit and top-1 comparisons that one leaves out.
+This is the full-tier counterpart of the core-tier
+tests/gpu/parallelism/ep/test_ep_correctness.py: it adds the per-token logit and top-1 comparisons
+that one leaves out.
 
 Test Matrix:
   1. Forward pass: both the non-EP baseline and the EP loss match the undistributed reference
@@ -91,7 +91,7 @@ def extract_router_grads(model):
 def run_baseline_forward(batch):
     """Load model WITHOUT EP and run forward pass.
 
-    Returns loss, logits (last token), and router gradients on rank 0.
+    Returns the loss, the full-sequence logits and the router gradients.
     """
     input_ids, attention_mask, labels = batch
 
@@ -149,7 +149,7 @@ def run_baseline_forward(batch):
 def run_ep_forward(batch):
     """Load model WITH EP=2 and run forward pass.
 
-    Returns loss, logits (last token), and router gradients on rank 0.
+    Returns the loss, the full-sequence logits and the router gradients.
     """
     rank = dist.get_rank()
     input_ids, attention_mask, labels = batch
@@ -404,14 +404,14 @@ def compare_results(
         # hence the tight identical-batch bound rather than the DP one.
         baseline_spread = max(baseline_losses) - min(baseline_losses)
         results["baseline_spread"] = baseline_spread
-        results["baseline_ranks_consistent"] = baseline_spread < TOL.ep_identical_batch_rank_spread_abs
+        results["baseline_ranks_consistent"] = TOL.identical_batch_ranks_agree(baseline_spread)
         if not results["baseline_ranks_consistent"]:
             passed = False
         log(f"  Baseline cross-rank spread: {baseline_spread:.8f} (tol={TOL.ep_identical_batch_rank_spread_abs})")
 
         ep_spread = max(ep_losses) - min(ep_losses)
         results["ep_spread"] = ep_spread
-        results["ep_ranks_consistent"] = ep_spread < TOL.ep_identical_batch_rank_spread_abs
+        results["ep_ranks_consistent"] = TOL.identical_batch_ranks_agree(ep_spread)
         if not results["ep_ranks_consistent"]:
             passed = False
         log(f"  EP cross-rank spread: {ep_spread:.8f} (tol={TOL.ep_identical_batch_rank_spread_abs})")

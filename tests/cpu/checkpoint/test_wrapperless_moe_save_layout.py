@@ -30,7 +30,7 @@ from transformers import CONFIG_MAPPING, AutoModelForCausalLM
 PartialState()  # save_model_config logs through accelerate's logger
 
 from src.checkpoint.format import load_full_state_dict, write_gathered_checkpoint
-from src.distributed.tensor_parallel.checkpoint import save_tp_model
+from src.distributed.checkpoint.tp_save import save_tp_model
 from tests.common.checkpoint_io import written_keys
 
 
@@ -84,7 +84,7 @@ def test_wrapperless_save_writes_hub_expert_layout(tmp_path):
     # pins the LAYOUT — rounding noise from an fp32 fixture would mask a layout bug).
     model = _tiny_qwen3_moe().to(torch.bfloat16)
     state_dict = {k: v.clone() for k, v in model.state_dict().items()}
-    # Premise: 5.14 really stores this family module-fused — if this moves, the writer's revert
+    # Premise: the pinned transformers stores this family module-fused — if this moves, the writer's revert
     # (and this test) must be re-decided, not silently skipped.
     assert any(k.endswith("mlp.experts.gate_up_proj") for k in state_dict), "premise: live module is fused"
 

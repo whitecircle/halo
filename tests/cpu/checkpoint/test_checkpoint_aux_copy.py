@@ -1,7 +1,7 @@
 """copy_checkpoint_aux_files: weight artifacts are skipped, resume sidecars survive, module
 directories ride whole.
 
-A merged directory is the mandated resume source for sharded EP/TP checkpoints
+A merged directory is the mandated resume source for sharded EP checkpoints
 (resolve_resume_weights_source), so the copy must keep ``scheduler.pt``,
 ``router_balancing_biases.pt``, ``reference_logps.pt``, every ``rng_state_<rank>.pth`` and every
 ``prefetch_pending-<rank>-of-<world>.pt`` — dropping them re-warms the LR schedule from step 0,
@@ -17,26 +17,26 @@ Subdirectories are part of the artifact and copy whole, their own weights includ
 SentenceTransformer module directory (``1_Pooling/``, ``2_Dense/``) or
 ``original_adapter_config/`` carries weights no merge rewrites, so skipping the directory (or
 filtering weights inside it) leaves ``modules.json`` naming modules that no longer exist — exactly
-what an embedding EP merge produces. Two kinds of directory stay behind: a nested
-``checkpoint-N`` (a run's resume state, not the artifact's) and a vendor weight dump
-(``original/`` — the same weights again, which the hub-download ignore list drops off the same
-tuple). ``include_resume_sidecars=False`` is the seam for artifacts that describe no single
-training run (an N-way model merge).
+what an embedding EP merge produces. Four kinds of directory stay behind: a nested
+``checkpoint-N`` (a run's resume state, not the artifact's), a run's own ``_``-prefixed state
+(``_reference_cache/``, ``_incomplete_checkpoints/``), a vendor weight dump (``original/``,
+``metal/`` — the same weights again, which the hub-download ignore list drops off the same tuple)
+and a hidden directory (``.git``, ``.cache``). ``include_resume_sidecars=False`` is the seam for
+artifacts that describe no single training run (an N-way model merge).
 
     python tests/cpu/checkpoint/test_checkpoint_aux_copy.py
 """
 
-import os
-from pathlib import Path
-
 import pytest
 import torch
+from huggingface_hub.constants import REPOCARD_NAME
 from safetensors.torch import load_file, save_file
 from transformers.trainer import SCHEDULER_NAME
 
-from src.checkpoint.atomic import atomic_torch_save
+from src.checkpoint.atomic import atomic_torch_save, create_staged_file
 from src.checkpoint.format import (
     ADAPTER_SAFETENSORS_FILE,
+    OPTIMIZER_META_FILE,
     REFERENCE_LOGPS_FILE,
     RESUME_ADAPTER_DIR,
     RESUME_ADAPTER_MARKER_FILE,
@@ -46,7 +46,6 @@ from src.checkpoint.format import (
     prefetch_pending_filename,
     write_resume_adapter_marker,
 )
-from src.checkpoint.model_card import CARD_STAGING_PREFIX, CARD_STAGING_SUFFIX
 
 SKIPPED = (
     "model.safetensors",
@@ -89,6 +88,14 @@ MODULE_DIRS = ("1_Pooling", "2_Dense", "original_adapter_config")
 # inside the nested checkpoint — so a copy that flattened the nested directory in is visible.
 ARTIFACT_AUX_BYTES = b"x"
 NESTED_RUN_STATE = b"the nested run's state, not the artifact's"
+# Spelled literally: each is a name a crash left on disk, which outlives a later rename of its writer.
+_STAGE_TOKEN = "0123456789abcdef0123456789abcdef"
+LEFTOVER_STAGES = (
+    ".trainer_state.json.uncommitted",
+    f".reference_logps.pt.{_STAGE_TOKEN}.tmp",
+    f".reference_logps.pt.{_STAGE_TOKEN}",
+    "prefetch_pending-0-of-2.pt.staged",
+)
 
 
 @pytest.fixture()
@@ -228,7 +235,7 @@ def test_a_vendor_weight_dump_directory_stays_behind(checkpoint_dir, tmp_path):
 def test_a_leftover_staged_card_is_not_carried(checkpoint_dir, tmp_path):
     """A crash between staging a tagged card and swapping it in leaves the staged copy behind; carried
     over, it would ship in every export built from that directory."""
-    leftover = f"{CARD_STAGING_PREFIX}k3j9x{CARD_STAGING_SUFFIX}"
+    leftover = create_staged_file(checkpoint_dir, REPOCARD_NAME).name
     (checkpoint_dir / leftover).write_text("---\ntags:\n- halo\n---\n")
     out = tmp_path / "merged"
     out.mkdir()
@@ -238,38 +245,42 @@ def test_a_leftover_staged_card_is_not_carried(checkpoint_dir, tmp_path):
 
 
 @pytest.mark.parametrize("include_resume_sidecars", [True, False], ids=["resume-source", "n-way-merge"])
-@pytest.mark.parametrize("legacy_name", [False, True], ids=["current-staging", "suffixless-staging"])
-def test_an_interrupted_reference_stage_is_not_exported(
-    checkpoint_dir, tmp_path, monkeypatch, include_resume_sidecars, legacy_name
-):
-    staged_paths = []
-    original_replace = os.replace
-
-    def record_stage(source, destination):
-        staged_paths.append(source)
-        original_replace(source, destination)
-
-    sidecar = checkpoint_dir / REFERENCE_LOGPS_FILE
-    with monkeypatch.context() as patch:
-        patch.setattr(os, "replace", record_stage)
-        atomic_torch_save(str(sidecar), lambda: {"values": torch.tensor([-1.0, -2.0])})
-    assert len(staged_paths) == 1
-    stage = Path(staged_paths[0])
-    if legacy_name:
-        stage = checkpoint_dir / f".{REFERENCE_LOGPS_FILE}.interrupted"
-    stage.write_bytes(b"an interrupted sidecar, not a complete reference")
-    complete = sidecar.read_bytes()
+@pytest.mark.parametrize(
+    "sidecar", [REFERENCE_LOGPS_FILE, prefetch_pending_filename(0, 2), OPTIMIZER_META_FILE], ids=lambda name: name
+)
+def test_an_interrupted_staged_write_is_not_exported(checkpoint_dir, tmp_path, include_resume_sidecars, sidecar):
+    """Every atomic writer stages beside its target; a crash before the swap leaves the stage, which an
+    export must not ship whichever writer left it."""
+    target = checkpoint_dir / sidecar
+    atomic_torch_save(str(target), lambda: {"values": torch.tensor([-1.0, -2.0])})
+    stage = create_staged_file(checkpoint_dir, sidecar)
+    stage.write_bytes(b"an interrupted sidecar, not a complete one")
+    (checkpoint_dir / ".gitattributes").write_text("*.safetensors filter=lfs\n")
     out = tmp_path / "merged"
     out.mkdir()
 
     copy_checkpoint_aux_files(str(checkpoint_dir), str(out), include_resume_sidecars=include_resume_sidecars)
 
-    assert not (out / stage.name).exists(), "a crashed reference write was carried into the export"
+    assert not (out / stage.name).exists(), "a crashed staged write was carried into the export"
+    assert (out / ".gitattributes").exists(), "the staging skip took an ordinary hidden file with it"
     assert (out / "config.json").exists(), "the skip also removed real aux files"
-    if include_resume_sidecars:
-        assert (out / REFERENCE_LOGPS_FILE).read_bytes() == complete
-    else:
-        assert not (out / REFERENCE_LOGPS_FILE).exists()
+
+
+@pytest.mark.parametrize("leftover", LEFTOVER_STAGES)
+def test_every_staging_spelling_a_crash_leaves_stays_out_of_an_export(checkpoint_dir, tmp_path, leftover):
+    """The withheld trainer state of a save that never committed, a current stage, and the two spellings
+    earlier releases staged under: none is a published file, and an export from an interrupted
+    directory must not ship one beside the files it does publish."""
+    (checkpoint_dir / leftover).write_bytes(b"an unpublished stage")
+    (checkpoint_dir / f".{REFERENCE_LOGPS_FILE}.notes").write_text("a hidden file no writer stages")
+    out = tmp_path / "merged"
+    out.mkdir()
+
+    copy_checkpoint_aux_files(str(checkpoint_dir), str(out))
+
+    assert not (out / leftover).exists(), f"{leftover} was carried into the export"
+    assert (out / f".{REFERENCE_LOGPS_FILE}.notes").exists(), "the staging skip took an unstaged hidden file"
+    assert (out / REFERENCE_LOGPS_FILE).exists(), "the skip took the published sidecar with it"
 
 
 def test_foreign_framework_exports_are_not_carried(checkpoint_dir, tmp_path):
@@ -301,6 +312,23 @@ def test_hidden_directories_stay_behind(checkpoint_dir, tmp_path):
     assert not (out / ".git").exists(), "the workspace's git history is not artifact aux data"
     assert not (out / ".cache").exists()
     assert (out / "2_Dense" / "model.safetensors").exists(), "the exclusion blanketed every directory"
+
+
+def test_a_runs_own_directories_stay_behind(checkpoint_dir, tmp_path):
+    """A run's ``output_dir`` is also an export source (its final save lands there). Its reference scratch
+    and the torn checkpoints a resume set aside are run state, gigabytes of it, not the artifact's."""
+    (checkpoint_dir / "_reference_cache" / "launch").mkdir(parents=True)
+    (checkpoint_dir / "_reference_cache" / "launch" / "merged.values").write_bytes(b"scores")
+    (checkpoint_dir / "_incomplete_checkpoints" / "checkpoint-200").mkdir(parents=True)
+    (checkpoint_dir / "_incomplete_checkpoints" / "checkpoint-200" / "config.json").write_text("{}")
+    out = tmp_path / "merged"
+    out.mkdir()
+
+    copy_checkpoint_aux_files(str(checkpoint_dir), str(out))
+
+    assert not (out / "_reference_cache").exists()
+    assert not (out / "_incomplete_checkpoints").exists()
+    assert (out / "1_Pooling" / "config.json").exists(), "the skip took a module directory with it"
 
 
 def test_an_output_directory_inside_the_input_is_refused(checkpoint_dir):

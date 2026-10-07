@@ -1,7 +1,7 @@
 # DeepSeek-V4 tiny random-init smoke — pipeline check (EP=2, eager, hash + top-k layers) without the
 # ~580 GB BF16 checkpoint. Materialize the tiny checkpoint once with the recipe the GPU suite uses
-# (`_materialize_checkpoint` in tests/gpu/trainers/sft/test_sft_deepseek_v4_moe.py): build from
-# TINY_DSV4_CONFIG and fill each hash layer with DISTINCT experts per token id, which DeepEP requires.
+# (`build_tiny_family_checkpoint` on `TINY_MOE_FAMILIES["deepseek_v4"]` in tests/common/tiny_models.py): it
+# builds from TINY_DSV4_CONFIG and fills each hash layer with DISTINCT experts per token id, which DeepEP requires.
 # Launch: torchrun --nproc_per_node=2 scripts/training/sft.py <this config>
 
 # --- Model ---
@@ -21,8 +21,7 @@ assistant_message_template: "<|im_start|>assistant\n"
 expert_parallel_size: 2
 
 # --- Training (few steps, padded batches) ---
-# padding_free is rejected for V4. packing is legal but left off: the CSA/HCA compressors pool KV
-# across packed documents.
+# packing and padding_free are refused for V4 (the CSA/HCA compressor windows are cut at row indices).
 max_steps: 10
 per_device_train_batch_size: 1
 gradient_accumulation_steps: 2

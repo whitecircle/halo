@@ -1,5 +1,5 @@
 #!/usr/bin/env python
-"""Distributed sequence-classification training with Expert, Tensor and Pipeline Parallelism support.
+"""Distributed sequence-classification training.
 
 Modality: text-only. VLM sequence classification needs a multimodal classification head, which
 transformers ships for only a few families (Gemma3, dense Qwen3.5, T5Gemma2, ModernVBert); the
@@ -298,7 +298,7 @@ def main():
             "tools_field": args.tools_field,
         },
         # The baked label_to_id keys the map cache: with presharded data the ids change with world size,
-        # and a stale cache would keep the old ones (fn_kwargs dict values are cache-irrelevant).
+        # and a stale cache would keep the old ones.
         cache_key_extras={"label_list": label_list},
     )
 

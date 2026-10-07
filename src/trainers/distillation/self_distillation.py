@@ -11,25 +11,24 @@ Teacher forward reuses the same model under ``torch.no_grad()`` (no second model
 (the privileged teacher uses a second, differently-lengthed sequence).
 """
 
-from dataclasses import fields
-
 import torch
 from accelerate.logging import get_logger
 
-from src.args.mixins import SDPGArguments
 from src.args.self_distill_args import SelfDistillationArguments
 from src.data.spans import LABEL_IGNORE_INDEX, resolve_eos_token_ids
-from src.distributed.loading.frozen_models import place_and_freeze
-from src.distributed.runtime import rank_consensus
+from src.data.vlm import SEQUENCE_ALIGNED_VISION_KEYS
+from src.distributed.loading.frozen_models import place_and_freeze, warn_unparallelized_reference
 from src.models.structure import resolve_tokenizer
 from src.trainers.distillation.losses import (
-    beta_warmup_decay,
-    get_self_distillation_loss_fn,
+    get_divergence,
     logits_forward_inputs,
     masked_token_mean,
     privileged_teacher_pass,
+    shared_vocab_width,
     shifted_token_cross_entropy,
 )
+from src.trainers.distillation.opd_term import OPDTermMixin
+from src.trainers.mixins.dataloader import split_rows_head
 from src.trainers.mixins.stored_metrics import StoredMetricsMixin
 from src.trainers.sft import DistributedSFTTrainer
 
@@ -40,7 +39,7 @@ logger = get_logger(__name__, log_level="info")
 _VISION_REUSE_MODEL_TYPES = {"lfm2_vl"}
 
 
-class DistributedSelfDistillationTrainer(StoredMetricsMixin, DistributedSFTTrainer):
+class DistributedSelfDistillationTrainer(OPDTermMixin, StoredMetricsMixin, DistributedSFTTrainer):
     """SFT trainer with an SDPG-style privileged-context self-distillation auxiliary loss."""
 
     _supports_cp = False  # privileged teacher uses a separate, longer sequence
@@ -65,11 +64,11 @@ class DistributedSelfDistillationTrainer(StoredMetricsMixin, DistributedSFTTrain
     def __init__(
         self,
         *args,
+        reference_kl_coef: float,
+        reference_kl_loss: str,
+        confidence_weight_opd: bool,
+        opd_exclude_eos: bool,
         reference_model: torch.nn.Module | None = None,
-        reference_kl_coef: float = 0.0,
-        reference_kl_loss: str = "unnormalized_kl",
-        confidence_weight_opd: bool = True,
-        opd_exclude_eos: bool = True,
         **kwargs,
     ):
         if reference_kl_coef > 0 and reference_model is None:
@@ -79,24 +78,13 @@ class DistributedSelfDistillationTrainer(StoredMetricsMixin, DistributedSFTTrain
                 f"(the self_distill script loads it from reference_model_name_or_path), or set "
                 f"reference_kl_coef: 0."
             )
-        # Tunables arrive under the names and defaults SDPGArguments declares. The dataset-side
-        # fields stay with the script, which bakes the hint into the teacher prompts.
-        dataset_side = SelfDistillationArguments.DATASET_SIDE_SDPG_FIELDS
-        sdpg = SDPGArguments(
-            **{
-                f.name: kwargs.pop(f.name)
-                for f in fields(SDPGArguments)
-                if f.name in kwargs and f.name not in dataset_side
-            }
-        )
-        vars(self).update({name: value for name, value in vars(sdpg).items() if name not in dataset_side})
-        self.sdpg_loss_fn = get_self_distillation_loss_fn(self.sdpg_loss)
+        # The dataset-side fields stay with the script, which bakes the hint into the teacher prompts.
+        self._adopt_sdpg_arguments(kwargs, exclude=SelfDistillationArguments.DATASET_SIDE_SDPG_FIELDS)
         self.reference_kl_coef = reference_kl_coef
-        self.reference_kl_loss_fn = get_self_distillation_loss_fn(reference_kl_loss) if reference_kl_coef > 0 else None
+        self.reference_kl_loss_fn = get_divergence(reference_kl_loss) if reference_kl_coef > 0 else None
         self.confidence_weight_opd = confidence_weight_opd
         self.opd_exclude_eos = opd_exclude_eos
         self._reference_model = reference_model
-        self._warned_response_mismatch = False
         self._vision_reuse_setup = False
         self._vision_reuse_active = False
         self._vision_cache = None
@@ -105,10 +93,17 @@ class DistributedSelfDistillationTrainer(StoredMetricsMixin, DistributedSFTTrain
 
         super().__init__(*args, **kwargs)
 
+        # Every rank builds the same collator, so this refusal is world-uniform and needs no collective.
+        if self.sdpg_beta_base != 0.0 and not getattr(self.data_collator, "builds_teacher_branch", False):
+            raise ValueError(
+                f"sdpg_beta_base={self.sdpg_beta_base} needs the privileged teacher branch (teacher_* keys) in "
+                f"every batch, and {type(self.data_collator).__name__} builds none. Use a SelfDistill collator "
+                f"built with a hint_template, or set sdpg_beta_base: 0 to drop the term."
+            )
         self._resolve_stop_token_ids()
 
         if self.reference_kl_coef > 0:
-            self._validate_reference_model(self._reference_model)
+            warn_unparallelized_reference(self.parallelism_config, "reference_kl_coef: 0 loads no reference.")
             self._setup_reference_model()
 
     def _resolve_stop_token_ids(self):
@@ -152,7 +147,16 @@ class DistributedSelfDistillationTrainer(StoredMetricsMixin, DistributedSFTTrain
         return True
 
     def _setup_reference_model(self):
-        """Move the frozen reference model to the student device and disable gradients."""
+        """Size the logit rows compared with the reference, then move it to the student device frozen.
+
+        The reference is keyed to the policy's own tokenizer, so only the row counts are checked here:
+        equal rows compare whole, padding past the tokenizer is sliced away, too few rows raise. The
+        token ids of a reference from another repo are the script's check, made before any load.
+        """
+        tokenizer = resolve_tokenizer(self.processing_class)
+        self._reference_vocab_width = shared_vocab_width(
+            self.model.config, self._reference_model.config, tokenizer, tokenizer
+        )
         device = place_and_freeze(self._reference_model, self.model)
         logger.info(f"Reference model moved to {device} and frozen (alpha={self.reference_kl_coef})")
 
@@ -171,27 +175,21 @@ class DistributedSelfDistillationTrainer(StoredMetricsMixin, DistributedSFTTrain
         self._vision_record, self._vision_replay = reuse, False
 
         student_outputs = model(**model_inputs)
-        student_logits = student_outputs.logits
         self._vision_record = False
+        # Rows padding an eval split's final round repeat its first rows: every term reads the
+        # split's own (in train, the whole batch, unsliced).
+        real = self.eval_split_rows(labels.size(0))
+        student_logits, labels = split_rows_head(student_outputs.logits, real), split_rows_head(labels, real)
+        if confidence_weights is not None:
+            confidence_weights = split_rows_head(confidence_weights, real)
 
         sft_loss = self._weighted_cross_entropy(student_logits, labels, confidence_weights)
         loss = sft_loss
 
-        mode = "train" if self.model.training else "eval"
         metrics = {"sft_loss": sft_loss.detach()}
 
-        # The teacher forward is a collective, so the branch must be present on every rank or the
-        # step fails on all of them: some ranks entering it alone would hang, and none entering it
-        # would train SFT alone under a self-distillation config.
-        run_teacher = self.sdpg_beta_base != 0.0
-        if run_teacher and not rank_consensus(teacher.get("input_ids") is not None)[0]:
-            raise RuntimeError(
-                f"sdpg_beta_base={self.sdpg_beta_base} needs the privileged teacher branch (teacher_* "
-                f"keys) in every rank's batch, and at least one rank's batch carries none. The "
-                f"SelfDistill collators build it; check the data_collator, or set sdpg_beta_base: 0 "
-                f"to drop the term."
-            )
-        if run_teacher:
+        # The teacher forward is a collective: config-gated, never batch-gated, so every rank enters it.
+        if self.sdpg_beta_base != 0.0:
             # Every per-token tensor must come from the teacher branch: its sequence is longer (the hint).
             per_token = (
                 "input_ids",
@@ -204,12 +202,12 @@ class DistributedSelfDistillationTrainer(StoredMetricsMixin, DistributedSFTTrain
             teacher_inputs = {k: v for k, v in model_inputs.items() if k not in per_token}
             teacher_inputs["input_ids"] = teacher["input_ids"]
             teacher_inputs["attention_mask"] = teacher["attention_mask"]
-            for extra in ("mm_token_type_ids", "token_type_ids"):
+            for extra in SEQUENCE_ALIGNED_VISION_KEYS:
                 if extra in teacher:
                     teacher_inputs[extra] = teacher[extra]
             self._vision_replay = reuse
             with privileged_teacher_pass(model):
-                teacher_logits = model(**teacher_inputs).logits
+                teacher_logits = split_rows_head(model(**teacher_inputs).logits, real)
             self._vision_replay = False
             self._vision_cache = None
 
@@ -217,28 +215,21 @@ class DistributedSelfDistillationTrainer(StoredMetricsMixin, DistributedSFTTrain
                 student_logits,
                 labels,
                 teacher_logits,
-                teacher["labels"],
+                split_rows_head(teacher["labels"], real),
                 confidence_weights if self.confidence_weight_opd else None,
             )
-            beta = beta_warmup_decay(
-                int(self.state.global_step),
-                int(self.state.max_steps),
-                self.sdpg_beta_base,
-                self.sdpg_beta_warmup_steps,
-                self.sdpg_beta_decay_steps,
-            )
+            beta = self._opd_beta()
             loss = loss + beta * opd_loss
-            metrics["opd_loss"] = opd_loss.detach()
-            metrics["beta"] = beta
+            metrics.update(self._opd_metrics(opd_loss, beta))
 
         if self.reference_kl_coef > 0:
             with torch.no_grad():
-                ref_logits = self._reference_model(**model_inputs).logits
+                ref_logits = split_rows_head(self._reference_model(**model_inputs).logits, real)
             ref_loss = self._reference_loss(student_logits, ref_logits, labels)
             loss = loss + self.reference_kl_coef * ref_loss
             metrics["reference_kl"] = ref_loss.detach()
 
-        self._record_metrics(metrics, mode)
+        self.store_batch_metrics(metrics, "train" if self.model.training else "eval", real)
 
         if return_outputs:
             return loss, student_outputs
@@ -251,70 +242,58 @@ class DistributedSelfDistillationTrainer(StoredMetricsMixin, DistributedSFTTrain
         return masked_token_mean(token_ce, shift_labels != LABEL_IGNORE_INDEX, sample_weights)
 
     def _opd_loss(self, student_logits, student_labels, teacher_logits, teacher_labels, sample_weights):
-        """Full-vocab OPD loss on the shared response tokens.
+        """Full-vocab OPD divergence on the response tokens both branches supervise.
 
-        Student and teacher sequences differ in length (the teacher carries the hint), so response
-        rows are gathered per sample by their label masks and aligned positionally. ``opd_exclude_eos``
-        drops the EOS/stop token from OPD, but not from SFT.
+        The teacher's sequence is longer by the hint, so each branch's rows are gathered by its own
+        mask; the collators guarantee both masks select the same tokens in the same order
+        (``require_aligned_responses``). ``opd_exclude_eos`` drops EOS/stop tokens from OPD, not SFT.
         """
-        student_shift = student_logits[:, :-1, :]
-        student_ids = student_labels[:, 1:]
-        student_mask = student_ids != LABEL_IGNORE_INDEX
-        teacher_shift = teacher_logits[:, :-1, :]
-        teacher_mask = teacher_labels[:, 1:] != LABEL_IGNORE_INDEX
+        return self._response_divergence(
+            self.sdpg_loss_fn,
+            student_logits,
+            self._opd_mask(student_labels),
+            teacher_logits,
+            self._opd_mask(teacher_labels),
+            sample_weights,
+        )
 
-        per_sample = []
-        for b in range(student_shift.size(0)):
-            student_rows = student_shift[b][student_mask[b]]
-            teacher_rows = teacher_shift[b][teacher_mask[b]]
-            n = min(student_rows.size(0), teacher_rows.size(0))
-            if n == 0:
-                per_sample.append(student_logits.new_zeros(()))
-                continue
-            if student_rows.size(0) != teacher_rows.size(0) and not self._warned_response_mismatch:
-                logger.warning(
-                    "Self-distillation: student/teacher response length mismatch "
-                    f"({student_rows.size(0)} vs {teacher_rows.size(0)}); aligning on the first "
-                    f"{n} tokens. Usually caused by max_length truncation — raise max_length."
-                )
-                self._warned_response_mismatch = True
-
-            resp_ids = student_ids[b][student_mask[b]][:n]
-            keep = self._opd_keep_mask(resp_ids)
-            sr, tr = student_rows[:n][keep], teacher_rows[:n][keep]
-            if sr.size(0) == 0:
-                per_sample.append(student_logits.new_zeros(()))
-                continue
-            token_loss = self.sdpg_loss_fn(sr, tr, self.sdpg_temperature)
-            per_sample.append(token_loss.sum(-1).mean())
-
-        loss = torch.stack(per_sample)
-        if sample_weights is not None:
-            loss = loss * sample_weights.to(loss.dtype)
-        return loss.mean()
-
-    def _opd_keep_mask(self, resp_ids):
-        """Per-response-token boolean keep-mask: drops EOS/stop tokens when opd_exclude_eos."""
-        keep = torch.ones(resp_ids.size(0), dtype=torch.bool, device=resp_ids.device)
+    def _opd_mask(self, labels):
+        """The positions OPD distils: supervised next tokens, less EOS/stop under ``opd_exclude_eos``."""
+        targets = labels[:, 1:]
+        mask = targets != LABEL_IGNORE_INDEX
         if self.opd_exclude_eos and self._stop_token_ids:
             if self._stop_ids_tensor is None:
-                # Memoized: runs per sample per microbatch.
-                self._stop_ids_tensor = torch.tensor(sorted(self._stop_token_ids), device=resp_ids.device)
-            keep &= ~torch.isin(resp_ids, self._stop_ids_tensor)
-        return keep
+                self._stop_ids_tensor = torch.tensor(sorted(self._stop_token_ids), device=targets.device)
+            mask &= ~torch.isin(targets, self._stop_ids_tensor)
+        return mask
 
     def _reference_loss(self, student_logits, reference_logits, labels):
-        """Unnormalized-KL (or KL) regularization to the frozen reference on response tokens."""
-        student_shift = student_logits[:, :-1, :]
-        reference_shift = reference_logits[:, :-1, :]
-        response_mask = labels[:, 1:] != LABEL_IGNORE_INDEX
-        token_loss = self.reference_kl_loss_fn(student_shift, reference_shift, self.sdpg_temperature)
-        return masked_token_mean(token_loss, response_mask)
-
-    def _record_metrics(self, metrics, mode):
-        """Store auxiliary-loss metrics as detached on-device values. ``StoredMetricsMixin`` drains
-        them once per log window, so recording adds no per-microbatch host sync."""
-        self.store_metrics(
-            {key: value.detach() if torch.is_tensor(value) else float(value) for key, value in metrics.items()},
-            train_eval=mode,
+        """Divergence to the frozen reference on the supervised tokens; the two share the sequence."""
+        mask = labels[:, 1:] != LABEL_IGNORE_INDEX
+        width = self._reference_vocab_width
+        return self._response_divergence(
+            self.reference_kl_loss_fn, student_logits[..., :width], mask, reference_logits[..., :width], mask
         )
+
+    def _response_divergence(
+        self, loss_fn, student_logits, student_mask, target_logits, target_mask, sample_weights=None
+    ):
+        """``loss_fn`` between the student's and the target's next-token rows at the masked positions,
+        the k-th masked row of one paired with the k-th of the other, as a per-sample token mean.
+
+        One gather per side, so the fp32 divergence planes cover the response rows only.
+        """
+        student_counts, target_counts = student_mask.sum(-1), target_mask.sum(-1)
+        # One mask on both sides (the reference term) pairs trivially. A host check, not a device assert:
+        # the boolean gathers below sync the host anyway, and a device assert would lose the counts.
+        if student_mask is not target_mask and not torch.equal(student_counts, target_counts):
+            raise RuntimeError(
+                f"Self-distillation pairs per-row response counts {student_counts.tolist()} (student) with "
+                f"{target_counts.tolist()} (target): the batch breaks the SelfDistill collators' response "
+                f"alignment contract (require_aligned_responses), so rows would pair across samples."
+            )
+        student_rows = student_logits[:, :-1][student_mask]
+        target_rows = target_logits[:, :-1][target_mask]
+        per_row = loss_fn(student_rows, target_rows, self.sdpg_temperature).sum(-1)
+        per_token = per_row.new_zeros(student_mask.shape).masked_scatter(student_mask, per_row)
+        return masked_token_mean(per_token, student_mask, sample_weights)

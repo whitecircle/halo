@@ -2,7 +2,7 @@
 """``fs_aware_main_first`` — main-first coordination over the c10d store, not a NCCL barrier.
 
 The main rank's body is unbounded single-rank work: a 100B+ ``snapshot_download``
-(``_ensure_model_downloaded``), whole-corpus packing (``pack_dataset_coordinated``), an S3 dataset
+(``resolve_model_source``), whole-corpus packing (``pack_dataset_coordinated``), an S3 dataset
 fetch. Parking the waiters inside a collective for that duration kills the job at the NCCL watchdog
 (``DIST_NCCL_TIMEOUT_MINUTES``) on EVERY peer, so the waiters must block on a store key with an
 hours-scale wall-clock timeout instead.

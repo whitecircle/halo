@@ -7,8 +7,8 @@ output. :mod:`src.models.loading.checkpoint_coverage` turns that into a raise.
 
 Both directions are pinned here, because a gate that over-rejects is as bad as one that never fires:
 
-- a checkpoint missing backbone tensors must RAISE (``test_dropped_backbone_tensors_raise`` and the
-  loader-level ``test_from_pretrained_verified_*``);
+- a checkpoint missing backbone tensors must RAISE (``test_dropped_backbone_tensors_raise``,
+  ``test_dropped_embedding_raises``);
 - a sequence-classification head absent from a base checkpoint, a tied ``lm_head``, and a class's own
   ``_keys_to_ignore_on_load_missing`` must still LOAD.
 

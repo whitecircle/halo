@@ -21,7 +21,7 @@ What the gate must get right at scale:
 * it stays silent on what it cannot judge (no declared budget, a config stating no context window,
   pure ETP, a dense config), because a false raise here blocks a legal run.
 
-The runtime backstop is unchanged and still owns the batch actually in hand
+The runtime backstop owns the batch actually in hand
 (``test_ep_capacity_dedup_generation.py``).
 
 Run: ``python tests/cpu/parallelism/test_ep_capacity_gate.py`` (or ``pytest -m cpu``).
@@ -48,7 +48,7 @@ from tests.common.rosters import distributed_trainer_classes
 _WIDE_HIDDEN = 8192
 _WIDE_TOPK = 8
 _WIDE_INDEX_CEILING = 2**31 // (_WIDE_TOPK * _WIDE_HIDDEN)
-# gpt-oss shaped: hidden 2880 pads to 2944 on the wire, top-4.
+# gpt-oss shaped: hidden 2880 pads to 3072 on the wire, top-4.
 _GPTOSS = {"hidden_size": 2880, "num_experts_per_tok": 4}
 
 
@@ -213,8 +213,8 @@ def test_a_null_max_length_is_judged_against_the_models_own_context_window():
     """``max_length: null`` means "use the model's own limit", so the gate resolves the window rather
     than reading the run as having declared nothing.
 
-    Left unresolved, the product ``rows × per_device_train_batch_size × 0`` switched the gate OFF for
-    the one spelling that reaches the ceilings first — the refusal then landed at the first MoE
+    Left unresolved, the product ``rows × per_device_train_batch_size × 0`` would switch the gate OFF
+    for the one spelling that reaches the ceilings first, leaving the refusal to the first MoE
     dispatch, after the whole load.
     """
     config = _config(world_size=8, gpus_per_node=8, ep_size=8, ep_rows_per_device=1, ep_declared_max_length=0)
@@ -315,8 +315,8 @@ def test_a_concatenated_preference_forward_declares_twice_the_rows():
 
 
 def test_the_prologue_separates_a_null_max_length_from_an_absent_one():
-    """Both spelled 0 in the old single-product field, and they mean opposite things: ``null`` is the
-    model's whole context window, while a trainer with no such knob has declared no budget at all."""
+    """A single product would spell both 0, yet they mean opposite things: ``null`` is the model's
+    whole context window, while a trainer with no such knob has declared no budget at all."""
     null_length = _built(_PairedTrainer, _TrainingConfig(2, None))
     assert (null_length.ep_rows_per_device, null_length.ep_declared_max_length) == (4, 0)
 

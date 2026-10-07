@@ -1,5 +1,5 @@
 #!/usr/bin/env python
-"""Distributed SMPO training (text or VLM) with Expert, Context, and Tensor Parallelism support.
+"""Distributed SMPO training (text or VLM).
 
 Smooth Margin Preference Optimization — reference-model-free preference training. One script serves
 both text and vision-language models. The model class follows the checkpoint

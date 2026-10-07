@@ -3,8 +3,8 @@
 
 MoE experts are two keys per layer but most of the bytes: a checkpoint written under a different
 expert namespace matches almost every key while losing the majority of the model. A key-count gate
-reads that as a healthy resume and strict=False then silently keeps base values for the experts
-(measured 62% of parameters lost). The numel-weighted gate refuses it.
+reads that as a healthy resume and strict=False then silently keeps base values for the experts.
+The numel-weighted gate refuses it.
 
     python tests/cpu/checkpoint/test_resume_numel_coverage.py
 """

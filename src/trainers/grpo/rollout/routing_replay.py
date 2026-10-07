@@ -26,6 +26,7 @@ from torch import nn
 from src.distributed.expert_parallel.base_layer import EPMoELayerBase
 from src.models.loading.config_levels import text_config
 from src.models.structure import decoder_layer_index, unwrap_framework_wrappers
+from src.trainers.grpo.world_metrics import world_sums
 from src.trainers.mixins.ep_introspection import named_ep_layers
 
 ROUTING_MASKS_KEY = "routing_masks"
@@ -310,14 +311,15 @@ class RoutingReplayInjector:
             )
 
     def flip_rate(self) -> float | None:
-        """Mean fraction of forced (token, layer) selections whose live top-k differed from the replayed
-        mask since the last call. One host sync per call — call once per logging step."""
+        """Fraction of the world's forced (token, layer) selections whose live top-k differed from the
+        replayed mask since the last call; ``None`` when none was forced anywhere. COLLECTIVE — every rank
+        calls it, one with no forced selection contributing zeros. One host sync per call — call once per
+        logging step."""
         totals = [layer._replay_flip_counts for layer in self._layers if layer._replay_flip_counts is not None]
         for layer in self._layers:
             layer._replay_flip_counts = None
-        if not totals:
-            return None
-        flipped, forced = torch.stack(totals).sum(dim=0).tolist()
+        local = torch.stack(totals).sum(dim=0) if totals else torch.zeros(2)
+        flipped, forced = world_sums(local.unbind())
         return flipped / forced if forced > 0 else None
 
 

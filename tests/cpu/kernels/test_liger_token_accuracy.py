@@ -37,8 +37,8 @@ def test_the_output_class_actually_carries_the_field():
 def test_no_family_ships_a_second_fused_forward():
     """The contract below is enforced on ONE file, so a per-family forward would escape it.
 
-    Reintroducing a bespoke ``lce_forward`` beside the generic one is exactly how the token-accuracy
-    regression happened the first time: two forwards, one of them holding the contract.
+    A bespoke ``lce_forward`` beside the generic one would split the contract across two forwards, with
+    only one of them holding it.
     """
     builders = {
         path.name
@@ -66,8 +66,8 @@ def test_the_forward_returns_ligers_output_class():
 
 
 def test_the_forward_forwards_the_accuracy_it_computed():
-    """Computing it and dropping it on the floor is the failure this pins — deepseek_v4 unpacked the
-    result into ``loss, _, _, _`` while the accuracy sat in slot 2."""
+    """Computing it and dropping it on the floor is the failure this pins — unpacking the result into
+    ``loss, _, _, _`` discards the accuracy in slot 2."""
     source = TOOLKIT_LCE_FORWARD.read_text(encoding="utf-8")
     tree = ast.parse(source)
 

@@ -20,7 +20,7 @@ RANKS, CELL_GAP = 16, 0.1
 # The strip is its own page: the cells span STRIP_W with no margin, offset by STRIP_X.
 CELL_XS, CELL_W = columns(STRIP_W, RANKS, 0.0, CELL_GAP)
 
-GATE_FLAGS = "is_tp_mode · is_cp_mode · is_expert_tp_mode · is_pp_mode · _dataset_presharded"
+GATE_FLAGS = "non_dp_replication_factor > 1 · _dataset_presharded"
 SAMPLER = ("Sampler (not distributed)", ["_get_train_sampler()", "→ RandomSampler"], TEAL)
 
 
@@ -88,7 +88,7 @@ panel(
     "Standard dataloader path",
     "world 16 · DDP / FSDP / EP-only · dp = world = 16",
     "_needs_custom_dataloader() → False",
-    "— none set",
+    "— neither holds",
     [
         ("Trainer (HF / TRL)", ["get_train_dataloader()", "accelerator.prepare(dl)"], SLATE),
         SAMPLER,
@@ -105,7 +105,7 @@ panel(
     "Custom dataloader path",
     "tp 2 · dp = (world / pp) / max(cp, tp, etp) = 16 / 2 = 8",
     "_needs_custom_dataloader() → True",
-    "— any one set",
+    "— either holds",
     [
         ("Trainer (toolkit)", ["get_train_dataloader()", "_prepare_dataloader(dl)"], SLATE),
         SAMPLER,

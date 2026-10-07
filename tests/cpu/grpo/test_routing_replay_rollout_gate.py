@@ -25,6 +25,7 @@ from trl.trainer.utils import pad
 
 from src.environments.base import Message, Trajectory
 from src.environments.episode import RolloutResult
+from src.trainers.grpo.environmental import BatchBuildFence
 from src.trainers.grpo.environmental import DistributedAsyncEnvironmentalGRPOTrainer as Trainer
 from src.trainers.grpo.rollout.routing_replay import RoutingReplayInjector
 from tests.common.grpo_metrics import attach_world_metrics, flushed_metrics
@@ -70,7 +71,7 @@ def _rollout(
 def _host():
     """A trainer stand-in exposing the REAL per-turn tokenizer, gate and uniform raise.
 
-    Single-process, so ``_raise_batch_error_uniformly`` skips its gather and raises the recorded
+    Single-process, so the batch fence's ``reject`` skips its gather and raises the recorded
     error directly — the gate's verdict is the assertion, not a mocked one.
     """
     host = types.SimpleNamespace(
@@ -80,7 +81,7 @@ def _host():
             engine_layers=ENGINE_LAYERS,
             layer_indices=EP_LAYER_INDICES,
         ),
-        _batch_build_error=None,
+        _batch_errors=BatchBuildFence(),
         _rollout_template_kwargs={},
         _carry_reasoning=False,
         _max_train_row_tokens=None,
@@ -95,8 +96,6 @@ def _host():
     for name in ("_tokenize_trajectory_turns", "_masked_trajectory_tensors", "_context_limit"):
         setattr(host, name, types.MethodType(getattr(Trainer, name), host))
     host._assemble_rollout_routing = types.MethodType(Trainer._assemble_rollout_routing, host)
-    host._record_batch_error = types.MethodType(Trainer._record_batch_error, host)
-    host._raise_batch_error_uniformly = types.MethodType(Trainer._raise_batch_error_uniformly, host)
     return host
 
 
@@ -122,7 +121,7 @@ def test_an_engine_cut_turn_keeps_its_routing_on_a_negative_only_row():
     assert len(rows) == 1 and rows[0].negative_only
     assert rows[0].completion_mask.tolist() == [1] * len(SAMPLED)
     assert rows[0].turn_routing is not None
-    assert host._batch_build_error is None
+    assert host._batch_errors.reason is None
 
 
 def test_gate_assembles_the_engine_mask_for_a_negative_only_row():

@@ -909,7 +909,7 @@ class DeepEPDispatcher:
         if self._noop:
             return x, topk_idx, topk_weights, None
         self._ensure_buffer(x.shape[0], topk_idx.shape[1])
-        return DeepEPDispatchFunction.apply(x, topk_idx, topk_weights, self, self.num_experts)
+        return DeepEPDispatchFunction.apply(x, topk_idx, topk_weights, self)
 
     def combine(self, x: torch.Tensor, topk_weights: torch.Tensor, handle: object) -> torch.Tensor:
         """Combine expert outputs back to original positions.

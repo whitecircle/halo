@@ -1,10 +1,10 @@
 """Filesystem-aware coordination: the c10d-store phase primitive, the store-carried rejection joins
 built on it, main-rank-first ordering for read-side work, the shared-output-filesystem probe, and
-the per-node load throttle.
+the per-node load throttle with its world join.
 
 Every wait here is bounded by wall clock (``DIST_STORE_TIMEOUT_HOURS``) rather than the NCCL
-watchdog, because the work it covers is unbounded single-rank filesystem time (a snapshot download,
-a whole-corpus pack) that a collective would turn into a watchdog abort on every peer.
+watchdog, because the work it covers is unbounded single-rank filesystem time — a snapshot download,
+a whole-corpus pack — that a collective would turn into a watchdog abort on every peer.
 """
 
 import datetime
@@ -51,30 +51,35 @@ _HUB_METADATA_TIMEOUT = datetime.timedelta(minutes=30)
 OUTPUT_FS_PROBE_PREFIX = ".halo_fs_probe_"
 # The run's own directory under ``output_dir``: run.log plus the decoded dataset samples.
 RUN_LOG_DIR_NAME = "log"
-# Poll budget for a rank waiting to see the sentinel: NFS's cached negative lookup can hide it for
-# up to the directory attribute-cache ceiling (``acdirmax``, 60 s), and judging on the first stat
-# would fail a healthy shared mount. Only a wrongly declared run pays the whole budget.
+# Poll budget for a rank waiting to SEE the sentinel: NFS's cached negative lookup can hide it for up
+# to the directory attribute-cache ceiling (``acdirmax``, 60 s), and judging on the first stat would
+# fail a healthy shared mount. Only a wrongly declared run ever pays the whole budget.
 _OUTPUT_FS_PROBE_TIMEOUT_S = 60.0
 _OUTPUT_FS_PROBE_INTERVAL_S = 0.25
+# Output directories this process has already probed: an entry script probes before resume detection
+# and every trainer again at construction, which must not write a second sentinel or pay the poll twice.
+_PROBED_OUTPUT_DIRS: set[str] = set()
 
 
 class _StorePhase:
-    """One collectively-ordered use ("phase") of a c10d-store coordination tag, self-cleaning.
+    """One collectively-ordered use ("phase") of a c10d-store coordination tag — self-cleaning.
 
     Each participant's own store-held entry counter supplies the phase number and namespaces the
     phase's keys, so repeated uses of one tag never see a previous use's keys even while its cleanup
-    lags, with no module-level state. The last participant to leave (:meth:`finish`) deletes the
+    lags, with no module-level state. The LAST participant to leave (:meth:`finish`) deletes the
     transient keys, bounding a tag's store footprint at the per-participant counters.
 
-    Invariant: every participant of a scope must enter a given tag the same number of times, in the
-    same order — the phase number is each participant's private count, so one extra entry stays
-    off-by-one thereafter. Use one tag per call site, never entered from a rank-dependent branch.
+    **Invariant: every participant of a scope must enter a given tag the same number of times, in
+    the same order** — the phase number is each participant's private count, so one extra entry is
+    permanently off-by-one thereafter, and only half of that reports itself (an off-by-one READER
+    waits on a key nobody writes; a WRITER leaves a stale key that releases a later peer). Guarantee
+    it at the call site: one tag per call site, never entered from a rank-dependent branch.
     """
 
     def __init__(self, tag: str, scope: str, participant: int, num_participants: int, timeout: datetime.timedelta):
         if not 0 <= participant < num_participants:
-            # An under-counted num_participants collects the phase's keys once that many ranks
-            # leave, holding the rest for the whole store timeout; this rank's index disproves it.
+            # An UNDER-counted num_participants collects the phase's keys once that many ranks leave,
+            # stranding the rest for the whole store timeout; this rank's index disproves it.
             raise RuntimeError(
                 f"Store coordination '{tag}/{scope}' got participant index {participant} of only "
                 f"{num_participants} participants, which cannot both be true. The participant count "
@@ -95,10 +100,10 @@ class _StorePhase:
 
     def get_all(self, names) -> list[str]:
         """Values of phase keys this participant has already waited on, in ``names`` order (bytes
-        decoded to str), in one store round-trip.
+        decoded to str) — ONE store round-trip.
 
-        A key-per-participant loop would be O(world²) sequential requests through the single store
-        server, and a pipeline runs several joins.
+        The only reader: a key-per-participant loop is O(world²) sequential requests through the
+        single store server (~262k for one join at world=512), and a pipeline runs several joins.
         """
         values = self._store.multi_get([f"{self._prefix}/{name}" for name in names])
         return [value.decode() if isinstance(value, bytes) else str(value) for value in values]
@@ -135,10 +140,12 @@ def store_reject_across_ranks(
     """:func:`~src.distributed.runtime.reject_across_ranks` over the c10d store instead of a
     collective, for joins whose preceding work is unbounded single-rank wall-clock time.
 
-    Work only some ranks pay (a fresh-cache dataset map, a first-run shard download) would hold the
-    peers inside NCCL/gloo and abort at ``DIST_NCCL_TIMEOUT_MINUTES``; here they wait on store keys
-    bounded by ``DIST_STORE_TIMEOUT_HOURS``. World-scoped and collective-equivalent: every rank must
-    call it with the same ``tag``\\ s in the same order (the :class:`_StorePhase` invariant).
+    A fresh-cache dataset map or a first-run shard download that only some ranks pay would hold the
+    peers inside NCCL/gloo for its whole duration and die at ``DIST_NCCL_TIMEOUT_MINUTES`` blaming
+    the collective; here they wait on store keys bounded by ``DIST_STORE_TIMEOUT_HOURS``.
+
+    World-scoped and collective-EQUIVALENT: every rank must call it with the same ``tag``\\ s in the
+    same order (the :class:`_StorePhase` invariant). Same verdict and message contract.
     """
     if not is_multi_rank_run():
         if local_reason:
@@ -153,19 +160,19 @@ def store_reject_across_ranks(
         phase.wait(reason_keys)
         reasons: list[str | None] = [reason or None for reason in phase.get_all(reason_keys)]
     finally:
-        # Keys survive until the last rank leaves (finish deletes only then), so every rank reads
+        # Keys survive until the LAST rank leaves (finish deletes only then), so every rank reads
         # them before any deletion; a raise below still releases this rank's exit slot.
         phase.finish(reason_keys)
     raise_gathered_reasons(reasons, what, exc_type)
 
 
 def store_join_recorded_failure(tag: str, failure: BaseException | None, what: str) -> None:
-    """Join a recorded rank-local failure across the world over the store.
+    """Join a RECORDED rank-local failure across the world over the store.
 
-    For "one rank ran work the others depend on": the failing rank re-raises its own exception,
-    keeping the type and traceback callers rely on, while every other rank raises the uniform
-    ``RuntimeError`` naming it. The uniform rejection is chained under the original so a transport
-    failure of the join itself is not swallowed. Same tag rules as the join above.
+    The seam for "one rank ran work the others depend on": the failing rank re-raises its OWN
+    exception, keeping the type and traceback callers rely on, while every other rank takes the
+    uniform ``RuntimeError`` naming it. The uniform rejection is chained under the original so a
+    transport failure of the join itself is not swallowed. Same tag rules as the join above.
     """
     if failure is None:
         store_reject_across_ranks(tag, None, what)
@@ -181,13 +188,13 @@ def store_join_recorded_failure(tag: str, failure: BaseException | None, what: s
 def fs_aware_main_first(tag: str, timeout: datetime.timedelta | None = None):
     """Order the body main-rank-first: the main rank runs it alone, then everyone else runs it.
 
-    Every rank runs the body: the main rank goes first and populates a cache (a hub snapshot, a
+    **Every rank runs the body** — the main rank goes first and populates a cache (a hub snapshot, a
     packed arrow file), the peers then run the same code and hit what it left behind. Scope follows
-    the input filesystem — shared: global rank 0 leads the world; per-node: each node's local rank 0
+    the INPUT filesystem: shared → global rank 0 leads the world, per-node → each node's local rank 0
     leads its own node and the nodes proceed independently.
 
     Waiters block on a store key rather than in a collective, because the body is unbounded
-    single-rank work. The body must therefore issue no collective itself, directly or through a
+    single-rank work. The body must therefore issue NO collective itself, directly or through a
     helper (``fs_aware_makedirs`` barriers), or the main rank blocks alone until the NCCL watchdog
     fires. ``tag`` namespaces the call site, under the :class:`_StorePhase` equal-entry invariant.
     """
@@ -220,19 +227,18 @@ def fs_aware_main_first(tag: str, timeout: datetime.timedelta | None = None):
 def hub_metadata_main_first(tag: str, fetch: Callable[[], Any]) -> Any:
     """Run a checkpoint-metadata read main-rank-first and return its result.
 
-    Covers the small hub reads preceding the weight download (``AutoConfig``, ``AutoProcessor``,
-    ``AutoTokenizer``): uncoordinated they are one hub request per rank, which at scale means HTTP
-    429 and a fallback path disagreeing with the config result, and under ``trust_remote_code`` the
-    ranks race to populate transformers' unlocked dynamic-module cache, where a peer can import a
-    truncated module.
+    The one seam for the small hub reads preceding the weight download — ``AutoConfig``,
+    ``AutoProcessor``, ``AutoTokenizer`` — each cheap per rank and ruinous world-wide: at 512 ranks
+    an uncoordinated fetch is 512 simultaneous hub requests (HTTP 429, then a fallback path that
+    disagrees with the config answer).
 
     Same call-site rules as :func:`fs_aware_main_first`. The wait is bounded to
-    :data:`_HUB_METADATA_TIMEOUT`, so a tag entered from a branch that is not rank-uniform fails by
-    name instead of stalling for the hours-scale store default.
+    :data:`_HUB_METADATA_TIMEOUT`, so a tag entered from a branch that is not in fact rank-uniform
+    fails by name instead of stalling for the hours-scale store default.
     """
-    # These reads can precede ``init_distributed`` (the entry scripts probe the checkpoint's
-    # modality to name the run), so this may be the run's first coordinated phase, and its scope
-    # comes from the shared-filesystem flags a per-node override would otherwise split in two.
+    # These reads can precede ``init_distributed`` (the entry scripts probe the checkpoint's modality
+    # to name the run), so this may be the run's FIRST coordinated phase — and its scope comes from
+    # the shared-filesystem flags, which a per-node override would otherwise split in two.
     ensure_shared_filesystem_consensus()
     with fs_aware_main_first(f"hub_meta/{tag}", timeout=_HUB_METADATA_TIMEOUT):
         return fetch()
@@ -242,13 +248,12 @@ def output_filesystem_contradiction(declared_shared: bool, seen: list[bool]) -> 
     """Why the declared output-FS sharing contradicts what the ranks observed, or None if it holds.
 
     ``seen[rank]`` is whether that rank could see the sentinel global rank 0 wrote under
-    ``output_dir``. Pure, so it is testable without a job, and identical on every rank because the
-    gathered list is.
+    ``output_dir``. The whole decision of :func:`verify_output_filesystem_sharing`, pure so it is
+    testable without a job, and identical on every rank because the gathered list is.
 
-    Neither contradiction raises an error of its own in a multi-node run: declared shared on
-    per-node storage leaves nodes 1..N without ``trainer_state.json`` / ``scheduler.pt`` /
-    ``rng_state`` (they resume at step 0); declared per-node on shared storage has every node's
-    rank 0 write the same paths at once.
+    Both contradictions break a multi-node run: declared shared on per-node storage leaves nodes 1..N
+    without ``trainer_state.json`` / ``scheduler.pt`` / ``rng_state``, so no checkpoint resumes there;
+    declared per-node on shared storage has every node's rank 0 write the SAME paths at once.
     """
     if not seen:
         return None
@@ -266,8 +271,8 @@ def output_filesystem_contradiction(declared_shared: bool, seen: list[bool]) -> 
         return (
             f"Output filesystem is declared SHARED but {len(blind)} of {len(seen)} ranks (first: "
             f"rank {blind[0]}) cannot see a file global rank 0 wrote under output_dir. Only rank 0 "
-            f"would write trainer_state.json / scheduler.pt / rng_state, so every other node "
-            f"resumes at global_step=0 and the run desyncs. Set "
+            f"would write trainer_state.json / scheduler.pt / rng_state, so no checkpoint would resume "
+            f"on the other nodes. Set "
             f"DIST_OUTPUT_SHARED_FILESYSTEM=0 (or DIST_SHARED_FILESYSTEM=0 for both sides) so each "
             f"node writes its own copy, or point output_dir at the shared mount."
         )
@@ -280,8 +285,8 @@ def output_filesystem_contradiction(declared_shared: bool, seen: list[bool]) -> 
 
 
 def _visible_within(path: str, seconds: float) -> bool:
-    """Whether ``path`` shows up within ``seconds``. Polls, because NFS/Lustre attribute caching can
-    hide a just-created file and judging on the first ``stat`` would fail a healthy shared mount."""
+    """Whether ``path`` shows up within ``seconds``. Polls: NFS/Lustre attribute caching can hide a
+    just-created file for a beat, and judging on the first ``stat`` would fail a healthy shared mount."""
     deadline = time.monotonic() + seconds
     while True:
         if os.path.exists(path):
@@ -294,16 +299,19 @@ def _visible_within(path: str, seconds: float) -> bool:
 def verify_output_filesystem_sharing(output_dir: str) -> None:
     """Probe whether ``output_dir`` really is shared and reject a declaration that contradicts it.
 
-    Collective — every rank must call it, unconditionally. ``DIST_SHARED_FILESYSTEM`` and its
-    output-side override are declarations that nothing else checks against the filesystem, and
-    neither way of getting them wrong raises on its own
-    (:func:`output_filesystem_contradiction`). Only meaningful across nodes: one node's ranks share
-    their mounts by construction.
+    COLLECTIVE — every rank must call it, unconditionally. ``DIST_SHARED_FILESYSTEM`` and its
+    output-side override are pure declarations that nothing else checks against the filesystem, and
+    both ways of getting them wrong are silent (:func:`output_filesystem_contradiction`). Only
+    meaningful across nodes: one node's ranks share their mounts by construction. Once per directory
+    per process; a repeat returns at once on every rank alike.
     """
     if not (dist.is_available() and dist.is_initialized()):
         return
     world = dist.get_world_size()
     if world <= 1 or get_local_world_size() >= world or not output_dir:
+        return
+    probed = os.path.abspath(output_dir)
+    if probed in _PROBED_OUTPUT_DIRS:
         return
     declared_shared = is_output_shared_filesystem()
 
@@ -317,11 +325,11 @@ def verify_output_filesystem_sharing(output_dir: str) -> None:
                 handle.write("halo")
         except OSError as exc:
             write_failure = f"could not write {sentinel}: {exc}"
-    # Joins rank 0's write failure and orders every peer's poll after the write.
+    # Joins rank 0's write failure AND orders every peer's poll after the write.
     reject_across_ranks(write_failure, "output-filesystem probe", exc_type=OSError)
 
-    # Only a rank that expects to see the sentinel polls for it, ruling out a cached negative
-    # lookup; under a per-node declaration one sighting already contradicts the declaration.
+    # Only a rank that EXPECTS to see the sentinel polls for it, ruling out a cached negative lookup;
+    # under a per-node declaration seeing the file at all is already proof, and not seeing it agrees.
     seen: list[bool] = [False] * world
     dist.all_gather_object(seen, _visible_within(sentinel, _OUTPUT_FS_PROBE_TIMEOUT_S if declared_shared else 0.0))
     if is_global_main_process():
@@ -333,6 +341,7 @@ def verify_output_filesystem_sharing(output_dir: str) -> None:
     reason = output_filesystem_contradiction(declared_shared, seen)
     if reason:
         raise RuntimeError(reason)
+    _PROBED_OUTPUT_DIRS.add(probed)
     if is_global_main_process():
         logger.info(
             "Output filesystem probed across %d nodes: %s, matching the declared flags.",
@@ -344,9 +353,9 @@ def verify_output_filesystem_sharing(output_dir: str) -> None:
 def resolve_load_concurrency(max_concurrent: int | None, local_world_size: int) -> int:
     """Ranks per node admitted to weight materialization at once, resolved against the node's width.
 
-    ``None`` derives from the node: half its width, capped at :data:`MAX_CONCURRENT_LOADING_CAP` —
-    4 on an 8-GPU node, 2 on a 4-GPU tray, where a flat 4 would equal the node width and admit every
-    rank at once (the CPU-RAM OOM this prevents).
+    ``None`` derives from the node: half its width, capped at
+    :data:`MAX_CONCURRENT_LOADING_CAP` — 4 on an 8-GPU node, 2 on a 4-GPU tray, where a flat
+    4 would equal the node width and admit every rank at once (the CPU-RAM OOM this prevents).
 
     Every explicit value passes through untouched, ``0`` ("no throttle") and ``4`` included, which is
     why the unset default is ``None``: an in-band sentinel would make ``max_concurrent_loading: 4``
@@ -362,9 +371,9 @@ def sequential_load_within_node(tag: str = "model", max_concurrent: int | None =
     """Throttle a node's local ranks in batches of ``max_concurrent`` (0=all, 1=sequential).
 
     For loading large models, where simultaneous CPU allocation by every rank would OOM. Coordinates
-    over the store rather than NCCL barriers, which a long load would time out; a repeated ``tag``
-    stays throttled because :class:`_StorePhase` isolates it from the previous done-keys. ``None``
-    resolves node-width-aware through :func:`resolve_load_concurrency`.
+    over the store rather than NCCL barriers, which a long load would time out, and a repeated
+    ``tag`` stays throttled because :class:`_StorePhase` isolates it from the previous done-keys.
+    ``None`` resolves node-width-aware through :func:`resolve_load_concurrency`.
     """
     if not (dist.is_available() and dist.is_initialized()):
         yield
@@ -389,3 +398,25 @@ def sequential_load_within_node(tag: str = "model", max_concurrent: int | None =
     finally:
         phase.set(f"rank{local_rank}_done")
         phase.finish([f"rank{r}_done" for r in range(local_world_size)])
+
+
+@contextmanager
+def joined_node_load(what: str, max_concurrent: int | None):
+    """A weight load throttled per node (:func:`sequential_load_within_node`) whose exit joins the
+    whole world over the store. Collective-EQUIVALENT — every rank enters it once per load.
+
+    The batches finish at different times, so without the join they meet in the first collective
+    after the load, which serves both of its jobs badly. A rank-local failure (a torn shard in one
+    node's copy, the coverage gate, a host OOM) leaves the peers in it with no diagnostic; here the
+    failing rank re-raises its own exception and every other rank a uniform ``RuntimeError`` naming
+    it. And the first batch's wait for the last runs under the NCCL watchdog, which eight serialized
+    loads of a large checkpoint at ``max_concurrent_loading: 1`` outlast; this join is bounded by
+    ``DIST_STORE_TIMEOUT_HOURS`` instead.
+    """
+    failure: BaseException | None = None
+    try:
+        with sequential_load_within_node(max_concurrent=max_concurrent):
+            yield
+    except BaseException as exc:  # a KeyboardInterrupt must reach the join too, or the peers wait it out
+        failure = exc
+    store_join_recorded_failure("node_load", failure, what)

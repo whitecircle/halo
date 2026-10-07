@@ -16,7 +16,7 @@ gradients match this rank's slice of the reference gradients in direction and sc
 gradients are live and finite.
 
 Run with 2 or 4 GPUs:
-    torchrun --nproc_per_node=2 \
+    torchrun --nproc_per_node=4 \
         tests/gpu/parallelism/combined/test_ep_etp_inkling.py
 """
 
@@ -104,7 +104,7 @@ def run(ctx):
     # Every rank sees the full batch, so per-rank losses must agree.
     spread = world_spread(etp_loss)
     metrics["rank_loss_spread"] = spread
-    checks["losses_match_across_ranks"] = spread < TOL.ep_identical_batch_rank_spread_abs
+    checks["losses_match_across_ranks"] = TOL.identical_batch_ranks_agree(spread)
 
     # ── Gradient equivalence vs this rank's slice of the reference ─────────────────────
     for i, (ep, refs) in enumerate(zip(ep_layers, ref_grads, strict=True)):

@@ -1,5 +1,6 @@
 """Dynamic KL evaluation never turns a trained policy into its own reference."""
 
+import datetime
 from types import SimpleNamespace
 
 import pytest
@@ -9,7 +10,7 @@ from torch import nn
 
 from src.data.collators.offline_grpo import REF_PER_TOKEN_LOGPS_COLUMN
 from src.distributed.runtime import DeferredRankFailure
-from src.trainers.grpo.reference_lifecycle import OfflineGRPOReferenceLifecycleMixin
+from src.trainers.grpo.mixins.offline_reference import OfflineGRPOReferenceMixin
 from tests.common.gloo import run_gloo_ranks
 from tests.common.offline_grpo_reference import mapped_scores
 
@@ -20,6 +21,10 @@ def _dataset():
     return Dataset.from_dict(
         {"prompt_input_ids": [[1], [2], [3]], "completion_input_ids": [[4, 5], [6], []], "group_id": [0, 1, 2]}
     )
+
+
+def _cache_directories(root) -> list[str]:
+    return sorted(str(path.relative_to(root)) for path in root.glob("_reference_cache/*/*"))
 
 
 class _Base:
@@ -34,9 +39,9 @@ class _Base:
         return {f"{metric_key_prefix}_loss": 42.0}
 
 
-class _Trainer(OfflineGRPOReferenceLifecycleMixin, _Base):
+class _Trainer(OfflineGRPOReferenceMixin, _Base):
     def __init__(self, output_dir):
-        self.args = SimpleNamespace(output_dir=output_dir)
+        self.args = SimpleNamespace(output_dir=output_dir, resume_from_checkpoint=None)
         self._init_reference_logps(resume_checkpoint=None)
         self._precompute_reference = True
         self.model = nn.Linear(1, 1)
@@ -61,7 +66,18 @@ def test_reordered_subset_and_duplicate_rows_reuse_exact_original_scores(tmp_pat
     assert result == {"heldout_loss": 42.0}
     assert trainer.eval_options == (["hidden_states"], "heldout")
     assert trainer.evaluated[REF_PER_TOKEN_LOGPS_COLUMN] == [[-0.75], [-0.25, -1.5], [-0.75], []]
-    assert not trainer._reference_evaluation_datasets
+
+
+def test_reevaluating_the_same_rows_reuses_their_scores_without_storing_them_again(tmp_path):
+    """Evaluation scores stay on disk for the launch, so the same rows evaluated again (a fresh object,
+    as a periodic callback builds) must reuse them rather than add another copy per call."""
+    trainer = _Trainer(tmp_path)
+    trainer.evaluate(_dataset().select([2, 0]))
+    caches = _cache_directories(tmp_path)
+    trainer._sweep_reference_logps = lambda *args: pytest.fail("reuse must not sweep the trained model")
+    trainer.evaluate(_dataset().select([2, 0]))
+    assert _cache_directories(tmp_path) == caches, "re-evaluating the same rows stored their scores again"
+    assert trainer.evaluated[REF_PER_TOKEN_LOGPS_COLUMN] == [[], [-0.25, -1.5]]
 
 
 def test_named_eval_splits_preserve_standard_recursive_evaluation(tmp_path):
@@ -70,14 +86,16 @@ def test_named_eval_splits_preserve_standard_recursive_evaluation(tmp_path):
     assert result == {"eval_first": {"eval_first_loss": 42.0}, "eval_second": {"eval_second_loss": 42.0}}
 
 
-def test_later_named_split_failure_releases_earlier_temporary_reference_cache(tmp_path):
+def test_a_later_split_failure_stores_nothing_for_it_and_keeps_the_earlier_split_reusable(tmp_path):
     trainer = _Trainer(tmp_path)
     unseen = _dataset().select([0]).remove_columns("prompt_input_ids").add_column("prompt_input_ids", [[99]])
     with pytest.raises(ValueError, match="unseen token rows"):
         trainer.evaluate({"known": _dataset().select([0]), "unseen": unseen})
-    assert not trainer._reference_evaluation_datasets
-    assert trainer._reference_evaluation_depth == 0
-    assert not list((tmp_path / "_reference_cache").iterdir()), "failed evaluation left a temporary cache"
+    caches = _cache_directories(tmp_path)
+    assert len(caches) == 2, f"expected the training split's cache and the known split's, got {caches}"
+    trainer.evaluate(_dataset().select([0]))
+    assert _cache_directories(tmp_path) == caches
+    assert trainer.evaluated[REF_PER_TOKEN_LOGPS_COLUMN] == [[-0.25, -1.5]]
 
 
 def test_unseen_rows_fail_before_any_live_policy_forward_with_a_recovery_path(tmp_path):
@@ -197,6 +215,33 @@ def test_original_reference_restore_failure_does_not_replace_the_forward_failure
 
 def test_rank_local_object_identity_does_not_skip_collectives(tmp_path):
     run_gloo_ranks(_ranked_object_identity, 2, str(tmp_path))
+
+
+def _ranked_original_reference_branch(rank, root):
+    trainer = _Trainer(root)
+    if rank == 1:
+        for stored in (
+            trainer._reference_logps_by_split,
+            trainer._reference_dataset_by_split,
+            trainer._reference_storage_by_split,
+        ):
+            stored.clear()
+    sweeps = []
+
+    def sweep(dataset, split):
+        sweeps.append(split)
+        return mapped_scores(root, dataset, [[-0.25, -1.5], [-0.75], []])
+
+    trainer._sweep_reference_logps = sweep
+    trainer.evaluate(_dataset(), original_reference_model=nn.Linear(1, 1).requires_grad_(False).eval())
+    assert sweeps == ["evaluation"], f"rank {rank} reused stored scores while a peer swept the original reference"
+    assert trainer.evaluated[REF_PER_TOKEN_LOGPS_COLUMN] == [[-0.25, -1.5], [-0.75], []]
+
+
+def test_rows_missing_on_one_rank_send_every_rank_through_the_original_reference(tmp_path):
+    """Only rank 1 lacks stored scores for these rows. The sweep and the stored-score reuse enter
+    different collectives, so a rank-local choice strands the ranks in mismatched ones."""
+    run_gloo_ranks(_ranked_original_reference_branch, 2, str(tmp_path), pg_timeout=datetime.timedelta(seconds=30))
 
 
 if __name__ == "__main__":

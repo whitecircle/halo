@@ -121,7 +121,7 @@ def run(ctx):
     # Losses must agree across ranks (identical input; EP orthogonal to DP).
     spread = world_spread(ep_loss)
     metrics["rank_loss_spread"] = spread
-    checks["losses_match_across_ranks"] = spread < TOL.ep_identical_batch_rank_spread_abs
+    checks["losses_match_across_ranks"] = TOL.identical_batch_ranks_agree(spread)
 
     # ── 3. Gradient equivalence vs reference ──────────────────────────────────
     for i, (ep, refs) in enumerate(zip(ep_layers, ref_grads, strict=True)):

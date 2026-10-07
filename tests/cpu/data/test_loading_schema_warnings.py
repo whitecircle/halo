@@ -12,7 +12,12 @@ Two properties pinned here:
 Run: pytest tests/cpu/data/test_loading_schema_warnings.py
 """
 
+import json
 import logging
+import os
+import subprocess
+import sys
+from pathlib import Path
 
 import pytest
 from accelerate import PartialState
@@ -27,7 +32,7 @@ _LOADING_LOGGER = "src.data.sources.loading"
 
 
 def test_loading_logger_is_pinned_at_info():
-    """The WARNING pin silenced the column-drop notice and the post-normalization dataset columns —
+    """A WARNING pin would silence the column-drop notice and the post-normalization dataset columns —
     the run's only record of what data actually trained.
 
     The logger's OWN level, not the effective one: accelerate's ``get_logger(..., log_level="INFO")``
@@ -58,8 +63,8 @@ def test_schema_warning_names_the_runs_own_declared_column(caplog):
     """The warned-about set follows the run's configuration, not a fixed literal.
 
     A custom ``conversation_field`` is pinned through the concatenation, so the only way to lose it
-    is a type mismatch across the entries — and that must be named. The hardcoded tuple knew only
-    the default spellings, so a column named by the YAML vanished without a word.
+    is a type mismatch across the entries — and that must be named. A hardcoded tuple would know only
+    the default spellings, so a column named by the YAML would vanish without a word.
     """
     ds_a = Dataset.from_dict({"dialogue": [[{"role": "user", "content": "hi"}]], "row_id": [0]})
     ds_b = Dataset.from_dict({"dialogue": ["hi"], "row_id": [1]})
@@ -97,6 +102,38 @@ def test_no_schema_warning_when_nothing_is_lost(caplog):
         _normalize_dataset_schema([ds_a, ds_b])
 
     assert not [r for r in caplog.records if r.levelno >= logging.WARNING], [r.getMessage() for r in caplog.records]
+
+
+_COLUMN_ORDER_PROBE = """
+import json
+from accelerate import PartialState
+PartialState()
+from datasets import Dataset
+from src.data.sources.loading import _normalize_dataset_schema
+columns = ["prompt", "messages", "source", "id", "tools", "label", "score"]
+first = Dataset.from_dict({c: ["x"] for c in columns})
+second = Dataset.from_dict({c: ["y"] for c in reversed(columns)} | {"extra": ["z"]})
+print(json.dumps(_normalize_dataset_schema([first, second])[0].column_names))
+"""
+
+
+def test_normalized_column_order_is_the_same_in_every_process():
+    """Every rank normalizes on its own, and the column order it lands on reaches each map that keys
+    or removes by ``column_names``: ranks ordering the columns differently key different caches for
+    one map, so each re-runs it instead of reading the load rank's. String-set order changes with the
+    per-process hash seed, so two seeds must agree — on the first dataset's order."""
+    orders = []
+    for seed in ("1", "2"):
+        result = subprocess.run(
+            [sys.executable, "-c", _COLUMN_ORDER_PROBE],
+            capture_output=True,
+            text=True,
+            check=True,
+            cwd=Path(__file__).resolve().parents[3],
+            env={**os.environ, "PYTHONHASHSEED": seed},
+        )
+        orders.append(json.loads(result.stdout.strip().splitlines()[-1]))
+    assert orders[0] == orders[1] == ["prompt", "messages", "source", "id", "tools", "label", "score"], orders
 
 
 if __name__ == "__main__":

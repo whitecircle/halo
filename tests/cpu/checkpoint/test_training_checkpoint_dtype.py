@@ -4,37 +4,47 @@
 fp32 master weights (``fp32_router``, ``fp32_experts``, ``fp32_non_ep_params``) rounded to bf16 in a
 training checkpoint stay rounded through every load that reads them back exactly (Path A, the PP
 stage load, an adapter restore), so the writers keep the live dtype when the trainer's
-``_save_checkpoint`` is the caller (``CheckpointContext.training_checkpoint``) and cast as before for
-the ``save_model`` export. Pinned here: the gathered writer the FSDP2 / CP / TP saves share, the TP
-save's own hand-off to it, the EP gathered writer, the hand-written adapter file, and the trainer seam
-that marks which save is which.
+``_save_checkpoint`` is the caller (``CheckpointContext.training_checkpoint``) and cast to the save
+dtype for the ``save_model`` export. Pinned here: the gathered writer the FSDP2 / CP / TP saves
+share, the TP save's own hand-off to it, the EP gathered writer, the PP stage writer (on a real
+gloo group), the hand-written adapter file, and the trainer seam that marks which save is which.
 
     python tests/cpu/checkpoint/test_training_checkpoint_dtype.py
 """
 
+import dataclasses
 import os
 from types import SimpleNamespace
 
 import pytest
 import torch
+import torch.distributed as dist
 import torch.nn as nn
 from accelerate import PartialState
-from transformers import CONFIG_MAPPING, AutoModelForCausalLM
+from transformers import CONFIG_MAPPING, AutoModelForCausalLM, Qwen3Config, Qwen3ForCausalLM, TrainerState
 
 PartialState()  # save_model_config logs through accelerate's logger
 
 from src.checkpoint.format import load_full_state_dict
+from src.distributed.checkpoint.ep_save import save_ep_model
 from src.distributed.checkpoint.peft import _adapter_file_state
+from src.distributed.checkpoint.save import save_pp_checkpoint
+from src.distributed.checkpoint.tp_save import save_tp_model
 from src.distributed.checkpoint.write import chunked_saveable_tensors, stream_gathered_checkpoint
-from src.distributed.expert_parallel.saving import save_ep_model
-from src.distributed.tensor_parallel.checkpoint import save_tp_model
+from src.distributed.pipeline_parallel.stage import build_pipeline_stage
 from src.trainers.mixins.base import DistributedTrainerMixin
+from tests.common.base_save import BaseTrainerSave
+from tests.common.gloo import run_gloo_ranks
+from tests.common.models import TINY_QWEN3_CONFIG
+from tests.cpu.checkpoint.test_pp_sharded_save_roundtrip import PP_SIZE, WORLD_SIZE, _context, _parallelism_config
 
 SHARD_SIZE = "64KB"
 # The live parameters the tiny MoE trains as fp32 masters: a router, an attention projection and a
 # fused expert bank, whose hub keys are the per-expert split the save reverts it to.
 FP32_MASTERS = ("model.layers.0.mlp.gate.weight", "model.layers.0.self_attn.q_proj.weight")
 FP32_EXPERTS = "model.layers.1.mlp.experts.gate_up_proj"
+# One fp32 master in each of the two pipeline stages of the 8-layer tiny Qwen3.
+PP_FP32_MASTERS = ("model.layers.0.self_attn.q_proj.weight", "model.layers.7.mlp.down_proj.weight")
 
 
 def _tiny_moe_with_fp32_masters():
@@ -55,6 +65,16 @@ def _tiny_moe_with_fp32_masters():
     named = dict(model.named_parameters())
     for name in (*FP32_MASTERS, FP32_EXPERTS):
         # Off the bf16 grid, as a trained fp32 master is: a round trip through bf16 would move it.
+        named[name].data = named[name].data.float() + 1e-5
+    return model
+
+
+def _tiny_dense_with_fp32_masters():
+    """Identically initialized on every rank, as the PP replicas of one stage must be."""
+    torch.manual_seed(0)
+    model = Qwen3ForCausalLM(Qwen3Config(**TINY_QWEN3_CONFIG, pad_token_id=0, eos_token_id=1)).to(torch.bfloat16)
+    named = dict(model.named_parameters())
+    for name in PP_FP32_MASTERS:
         named[name].data = named[name].data.float() + 1e-5
     return model
 
@@ -106,6 +126,29 @@ def test_a_training_checkpoint_keeps_fp32_masters_and_an_export_casts_them(tmp_p
         assert state["model.embed_tokens.weight"].dtype == torch.bfloat16
 
 
+def _pp_save_worker(rank: int, out_dir: str, training_checkpoint: bool) -> None:
+    config = _parallelism_config()
+    stage = build_pipeline_stage(_tiny_dense_with_fp32_masters(), config.pp_rank, PP_SIZE)
+    if rank == 0:
+        os.makedirs(out_dir)
+    dist.barrier()
+    save_pp_checkpoint(dataclasses.replace(_context(stage, config), training_checkpoint=training_checkpoint), out_dir)
+
+
+def test_the_pp_stage_writer_keeps_fp32_masters_only_in_a_training_checkpoint(tmp_path):
+    live = {name: param.detach().clone() for name, param in _tiny_dense_with_fp32_masters().named_parameters()}
+    for training_checkpoint in (True, False):
+        out = str(tmp_path / f"pp-{training_checkpoint}")
+        run_gloo_ranks(_pp_save_worker, WORLD_SIZE, out, training_checkpoint)
+        state = load_full_state_dict(out)
+        for name in PP_FP32_MASTERS:
+            if training_checkpoint:
+                assert state[name].dtype == torch.float32 and torch.equal(state[name], live[name]), name
+            else:
+                assert state[name].dtype == torch.bfloat16, name
+        assert state["model.embed_tokens.weight"].dtype == torch.bfloat16
+
+
 def test_the_adapter_file_keeps_fp32_adapters_only_in_a_training_checkpoint():
     state = {
         "base_model.model.q_proj.lora_A.weight": torch.randn(2, 4),
@@ -118,20 +161,10 @@ def test_the_adapter_file_keeps_fp32_adapters_only_in_a_training_checkpoint():
     assert exported["base_model.model.gate.modules_to_save.default.e_score_correction_bias"].dtype == torch.float32
 
 
-class _BaseTrainer:
-    """Stands in for HF's ``Trainer._save_checkpoint``: it saves the model through ``save_model``."""
-
-    def _save_checkpoint(self, model, trial):
-        output_dir = os.path.join(self.run_dir, f"checkpoint-{self.state.global_step}")
-        os.makedirs(output_dir, exist_ok=True)
-        self.save_model(output_dir, _internal_call=True)
-        if self.base_save_fails:
-            raise OSError(28, "No space left on device")
-
-
-class _Trainer(DistributedTrainerMixin, _BaseTrainer):
-    """The mixin's ``_save_checkpoint`` and ``_checkpoint_context``; ``save_model`` records the context
-    each save is handed."""
+class _Trainer(DistributedTrainerMixin, BaseTrainerSave):
+    """The mixin's ``_save_checkpoint`` and ``_checkpoint_context`` over HF's save, which saves the model
+    through ``save_model``; ``save_model`` records the context each save is handed. The base's
+    optimizer write after it fails on ``base_save_fails``."""
 
     _has_ep_layers = False
 
@@ -139,8 +172,8 @@ class _Trainer(DistributedTrainerMixin, _BaseTrainer):
         self.run_dir = run_dir
         self.base_save_fails = base_save_fails
         self.model = nn.Linear(2, 2)
-        self.args = SimpleNamespace(save_total_limit=None, save_only_model=False, should_save=True)
-        self.state = SimpleNamespace(global_step=2, best_model_checkpoint=None)
+        self.args = SimpleNamespace(save_total_limit=None, save_only_model=False, should_save=True, push_to_hub=False)
+        self.state = TrainerState(global_step=2)
         self.parallelism_config = SimpleNamespace(
             is_pp_mode=False, is_cp_mode=False, is_tp_mode=False, is_ep_tp_mode=False, merge_expert_lora_on_save=False
         )
@@ -149,9 +182,6 @@ class _Trainer(DistributedTrainerMixin, _BaseTrainer):
         self.save_sharded_ep = False
         self.lr_scheduler = None
         self.saves: list[bool] = []
-
-    def _get_output_dir(self, trial=None):
-        return self.run_dir
 
     def _top_level_model(self):
         return self.model
@@ -162,6 +192,10 @@ class _Trainer(DistributedTrainerMixin, _BaseTrainer):
     def save_model(self, output_dir=None, _internal_call=False):
         self.saves.append(self._checkpoint_context().training_checkpoint)
         self._model_save_collectives_done = True
+
+    def _save_optimizer_and_scheduler(self, output_dir):
+        if self.base_save_fails:
+            raise OSError(28, "No space left on device")
 
 
 def test_the_checkpoint_save_is_a_training_checkpoint_and_the_export_is_not(tmp_path):

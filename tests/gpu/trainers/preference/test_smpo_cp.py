@@ -54,7 +54,9 @@ from tests.common.utils import cleanup_memory, gpu_mem_gb, log, training_run_che
 MODEL_NAME = QWEN3_0_6B
 CP_SIZE = 2
 NUM_TRAIN_STEPS = 10
-BATCH_SIZE = 1
+# Two pairs per microbatch: the collator left-pads a ragged pair of prompts, which the concat must
+# flush behind the completions.
+BATCH_SIZE = 2
 GRADIENT_ACCUMULATION_STEPS = 2
 LEARNING_RATE = 5e-6
 MAX_LENGTH = 4096

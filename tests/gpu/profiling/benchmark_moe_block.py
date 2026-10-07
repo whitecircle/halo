@@ -10,7 +10,7 @@ expert intermediate 704, 128 experts, top-8):
   driven through ``EPMoELayerBase``'s own methods.
 - ``halo+<combine>``: the same path with the GeGLU combine swapped for eager PyTorch, ``torch.compile`` or
   Liger, isolating the activation kernel.
-- ``halo_padded_gather``: the same path, its sort included, with the permute Halo v1.0.0 runs: the routing
+- ``halo_padded_gather``: the same path, its sort included, with a padded-gather permute: the routing
   weights multiplied separately, the unpermute a padded ``[N, top_k, H]`` gather-sum, and the permute's
   backward the same.
 

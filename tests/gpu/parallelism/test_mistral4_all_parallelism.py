@@ -1,11 +1,11 @@
 #!/usr/bin/env python
-"""End-to-end EP / CP / TP / EP+CP / EP+TP test for Mistral4.
+"""End-to-end EP / CP / TP / EP+CP / EP+TP / EP+ETP test for Mistral4.
 
 Validates EP (Mistral4MoE → DeepEP), CP (Mistral4Attention → Ulysses), and TP
 (selective DTensor attention) integrations for the text backbone of mistral3
 VLMs (``mistralai/Mistral-Small-4-119B-2603`` and similar). Each invocation of
 this script runs **one** parallelism mode determined by ``--mode``; the
-manifest's args entries chain them on 8 GPUs.
+manifest's args_matrix chains them on 8 GPUs.
 
 Build path: instead of downloading the 119 B fp8 checkpoint, the test
 materializes ``tests.common.models.TINY_MISTRAL4_CONFIG``, which exercises the
@@ -34,7 +34,7 @@ from liger_kernel.transformers import LigerRMSNorm
 from torch.distributed.tensor import DTensor
 from transformers.models.mistral4 import modeling_mistral4
 
-from src.distributed.expert_parallel.saving import save_ep_model
+from src.distributed.checkpoint.ep_save import save_ep_model
 from src.distributed.loading.model_loading import load_distributed_model
 from src.distributed.parallelism_config import ParallelismConfig
 from tests.common.distributed import cleanup_dirs, shared_scratch_dir, world_spread
@@ -128,7 +128,7 @@ def run_mode(
         checks["cp_attention_patched"] = "Mistral4UlyssesAttention" in attn_classes
         log(f"  Attention classes after CP: {attn_classes}")
     if pc.is_tp_mode:
-        # Selective TP keeps the outer attention class (Mistral4FlashAttention2) and turns
+        # Selective TP keeps the outer attention class (Mistral4Attention) and turns
         # q_b_proj / kv_b_proj into DTensors — so the DTensors, not the class name, are the proof
         # the mode engaged. Without this the --mode tp and --mode ep_tp nodes assert no TP at all.
         checks["tp_engaged"] = any(isinstance(p.data, DTensor) for p in model.parameters())
@@ -163,15 +163,15 @@ def run_mode(
     log(f"  Forward loss: {loss.item():.6f}")
     checks["loss_finite"] = torch.isfinite(loss).item()
 
-    # All ranks should observe the same loss within a tight tolerance
-    # (modulo CP sharding, which divides the per-token loss across ranks).
+    # All ranks should observe the same loss (modulo CP sharding, which divides the per-token loss
+    # across ranks).
     spread = world_spread(loss.item())
     if pc.is_cp_mode:
         # Each CP rank computes loss on its sequence chunk → values differ;
         # only require finiteness (the spread is inf when any rank is non-finite).
         checks["losses_finite_across_ranks"] = math.isfinite(spread)
     else:
-        checks["losses_consistent_across_ranks"] = spread < TOL.ep_identical_batch_rank_spread_abs
+        checks["losses_consistent_across_ranks"] = TOL.identical_batch_ranks_agree(spread)
         log(f"  Cross-rank max loss diff: {spread:.6e}")
 
     # Backward (a raising backward fails the run through the harness, so no check entry here).

@@ -2,8 +2,8 @@
 """Pin the script-arg dataclass field surfaces.
 
 The expectation below is a per-class map of ``dataclasses.fields()`` name → default repr
-(``factory:<value>`` for default_factory fields). Rebasing a class onto the shared mixins
-(ConversationRenderArguments / GenerationEvalArguments / PromptDatasetArguments /
+(``factory:<value>`` for default_factory fields). Moving fields between a class and the shared
+mixins (ConversationRenderArguments / GenerationEvalArguments / PromptDatasetArguments /
 ChunkedLogprobsArguments) must not add, drop, or re-default a single field on any class —
 any drift fails here. Field ORDER and metadata/type spellings are deliberately not pinned.
 
@@ -36,8 +36,8 @@ def _script_argument_classes() -> dict[str, type]:
 
 _CLASSES = _script_argument_classes()
 
-# Generated from pre-refactor main (see module docstring). Do NOT regenerate casually: an
-# intentional field change must be edited here explicitly, with the diff called out in review.
+# Do NOT regenerate casually: an intentional field change must be edited here explicitly, with the
+# diff called out in review.
 _EXPECTED = {
     "CLFScriptArguments": {
         "added_special_tokens": "None",

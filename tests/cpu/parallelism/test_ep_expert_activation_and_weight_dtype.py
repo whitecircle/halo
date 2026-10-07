@@ -8,8 +8,8 @@
   is one chain in ``_resolve_activation`` (block ``hidden_act`` → block ``config`` → the family
   default), not a per-wrapper spelling: a wrapper that stops handing its block over lands on the SiLU
   default with no error, which is the same silent wrong non-linearity one rung down.
-* **The fused SwiGLU kernel is armed exactly when the block gates with SiLU.** GLM-4 Lite / Laguna swap
-  one Triton kernel in for the activation and the multiply; disarming it costs only throughput, so
+* **The fused SwiGLU kernel is armed exactly when the block gates with SiLU.** Every SiLU-gated family
+  swaps one Triton kernel in for the activation and the multiply; disarming it costs only throughput, so
   nothing but a real block at ``hidden_act: silu`` catches a gate that stopped recognizing SiLU.
 * **Routing weights reach the dispatch boundary in fp32.** ``_to_topk_weights`` upcasts inside
   ``DeepEPDispatchFunction.forward``, so a bf16 weight tensor still produces the right FORWARD; but
@@ -208,7 +208,7 @@ FAMILIES = [
 _FAMILY_FIELDS = ("name", "wrapper", "factory", "act_owner", "tracks_hidden_act")
 _FAMILY_IDS = [family[0] for family in FAMILIES]
 
-# The both-ways matrix needs a factory buildable at a NON-silu hidden_act; only these two take it.
+# The both-ways matrix needs a factory buildable at a NON-silu hidden_act.
 FUSED_SWIGLU_FAMILIES = [
     (name, wrapper, factory)
     for name, wrapper, factory, _owner, _tracks in FAMILIES
@@ -314,7 +314,7 @@ def test_gemma4_activation_name_fallback_reads_the_wrapped_experts_module():
 def test_every_silu_family_arms_the_fused_kernel(name, wrapper, factory, act_owner, tracks_hidden_act):
     """A SiLU-gated family must get the fused kernel — ALL of them, not the one that wired it.
 
-    A fused branch living on a single family's ``_glu_combine`` override leaves the other six SiLU
+    A fused branch living on a single family's ``_glu_combine`` override leaves the other SiLU
     families silently running the eager activation plus a separate multiply (and the separate
     autograd chain) on every base compute path, per MoE layer, per step. It is numerically invisible
     — pure lost throughput — which is exactly why it survives unnoticed.

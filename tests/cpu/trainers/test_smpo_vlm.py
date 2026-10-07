@@ -34,7 +34,8 @@ from datasets import Dataset
 from PIL import Image
 
 from src.data.collators.smpo import DataCollatorForSMPO, DataCollatorForVLMSMPO
-from src.trainers.preference.smpo import SmoothMarginPOTrainer, tokenize_vlm_preference_row
+from src.data.pipeline.preferences import tokenize_vlm_preference_row
+from src.trainers.preference.smpo import SmoothMarginPOTrainer
 from tests.common.models import QWEN3_5_9B
 from tests.common.tokenizers import load_cached_processor
 
@@ -140,7 +141,6 @@ def make_trainer(**attrs):
         "dataset_num_proc": None,
         # The real trainer resolves this once from tokenizer + model config.
         "_eos_token_ids": frozenset({EOS_ID}),
-        "label_pad_token_id": -100,
         "pad_token_id": 0,
         # cp_size is a read-only mixin property; is_ep_mode gates dataset-map workers (EP pins 1).
         "parallelism_config": SimpleNamespace(cp_size=1, is_ep_mode=False),
@@ -457,6 +457,9 @@ def test_concatenated_forward_passes_vision_inputs():
     assert out["chosen_logps"].shape == (batch_size,)
     assert out["rejected_logps"].shape == (batch_size,)
     assert torch.isfinite(out["chosen_sft_loss"])
+    # Rows arrive flushed left, so the model's own positions (an mrope family's from its image grid)
+    # are the real-token ones; none are passed in.
+    assert "position_ids" not in model.received
 
     # A text batch must reach the model with NO extra kwargs.
     model_text = RecordingModel()

@@ -99,7 +99,7 @@ def test_sandbox_print_capture():
 def test_sandbox_no_output():
     """No print, two locals bound -> the LAST bound local (y = sum(x) = 6) is reported.
 
-    The previous `"6" in result or "success" in result.lower()` passed regardless of which
+    A check like `"6" in result or "success" in result.lower()` passes regardless of which
     branch held, so a regression that returned the success line (or the wrong variable)
     would not be caught. Pin the exact last-variable value.
     """
@@ -352,9 +352,8 @@ def test_mul_bomb_rejected_not_hung():
 
 def test_range_c_iterator_bomb_rejected_not_hung():
     """``sum(range(10**18))`` (also min/max/sorted/list/any/all over a range) drains the range inside
-    ONE GIL-holding C loop, never returning to bytecode — pre-guard, a 1s-timeout ``sum(range(8*10**7))``
-    was empirically observed to run to completion (1.2s) instead of timing out, so a 10**18 range wedged
-    the worker forever. The guarded ``range`` must reject construction immediately."""
+    ONE GIL-holding C loop, never returning to bytecode — unguarded, a 1s-timeout ``sum(range(8*10**7))``
+    runs to completion (1.2s) instead of timing out, so a 10**18 range would wedge the worker forever. The guarded ``range`` must reject construction immediately."""
     start = time.monotonic()
     assert "range too large" in run_python_sandboxed("sum(range(10**18))", timeout=1.0)
     assert time.monotonic() - start < 1.0, "must be rejected by the guard, not saved by the bypassable timeout"
@@ -364,9 +363,8 @@ def test_range_c_iterator_bomb_rejected_not_hung():
 
 
 def test_sequence_repetition_bomb_rejected_not_hung():
-    """``[0] * 10**9`` / ``'a' * 10**9`` allocate the whole multi-GB result in one C call — the old
-    int×int-only mul guard passed them through untouched (empirically confirmed). The extended guard
-    bounds len × count for any sized operand, both operand orders and the augmented form."""
+    """``[0] * 10**9`` / ``'a' * 10**9`` allocate the whole multi-GB result in one C call — an
+    int×int-only mul guard passes them through untouched. The guard bounds len × count for any sized operand, both operand orders and the augmented form."""
     assert "sequence repetition" in run_python_sandboxed("[0] * 10**9", timeout=5.0)
     assert "sequence repetition" in run_python_sandboxed("10**9 * [0]", timeout=5.0)
     assert "sequence repetition" in run_python_sandboxed("'a' * 10**9", timeout=5.0)

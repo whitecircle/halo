@@ -8,7 +8,7 @@ return those facts in different places. Transport and the episode loop belong to
 import logging
 from typing import Any, get_args, get_type_hints
 
-from src.configs.rollout_config import REASONING_BUDGET_TEMPLATE_VAR, THINKING_SCOPE_EPISODE, RolloutConfig
+from src.configs.rollout_config import REASONING_BUDGET_TEMPLATE_VAR, RolloutConfig
 from src.log import warn_once
 
 logger = logging.getLogger(__name__)
@@ -142,11 +142,12 @@ def capture_routing_mask(choice: dict[str, Any], data: dict[str, Any]) -> str | 
 def generation_control_fields(
     config: RolloutConfig, reasoning_effort: str | None = None, reasoning_budget: int | None = None
 ) -> dict[str, Any]:
-    """The request fields carrying a turn's generation contract: the reasoning level, the CoT cap the
-    engine enforces this turn (``config.max_thinking_tokens``), the budget the template states
-    (``reasoning_budget``; the engine cap stands in when omitted, the same number under the per-turn
-    scope), and the turn terminator. One owner for both drivers — the training payload below and the
-    eval runner's SDK call — so a knob cannot reach one and quietly miss the other.
+    """The request fields carrying a turn's generation contract: the sampler filters (``config.top_k``,
+    ``min_p``, ``repetition_penalty``), the reasoning level, the CoT cap the engine enforces this turn
+    (``config.max_thinking_tokens``), the budget the template states (``reasoning_budget``, the level's
+    per-turn budget both drivers pass), and the turn terminator.
+    One owner for both drivers — the training payload below and the eval runner's SDK call — so a knob
+    cannot reach one and quietly miss the other.
 
     ``reasoning_effort`` goes out TOP-LEVEL: that spelling is the one both engines derive their
     thinking toggles from (vLLM ``enable_thinking``, SGLang ``thinking`` + ``enable_thinking``) and
@@ -156,9 +157,15 @@ def generation_control_fields(
     value whichever spelling the engine reads.
     The run's other template variables (``config.chat_template_kwargs``) ride in the nested form,
     joined by the level's thinking budget under :data:`REASONING_BUDGET_TEMPLATE_VAR`; the config
-    refuses the per-episode keys there, and the scope variable it sets itself.
+    refuses the per-episode keys there.
     """
-    fields: dict[str, Any] = {}
+    # Sent at every value, off included: both engines fill an omitted filter from the model's
+    # generation_config.json, and the eval's OpenAI SDK call has no keyword for any of them.
+    fields: dict[str, Any] = {
+        "top_k": config.top_k,
+        "min_p": config.min_p,
+        "repetition_penalty": config.repetition_penalty,
+    }
     if config.stop_token_ids:
         # Stop at the tool-call terminator, else the model hallucinates the tool result itself.
         fields["stop_token_ids"] = config.stop_token_ids
@@ -175,24 +182,20 @@ def generation_control_fields(
                 config.backend,
                 "Per-effort thinking budget of %d tokens is NOT enforced on rollout_backend=%r "
                 "(thinking_token_budget is a vLLM-only request field): nothing caps reasoning "
-                "below max_tokens=%d. The level still reaches the chat template and the effort "
-                "length terms (effort_length_penalty_k0, effort_length_floor_weight), which price "
-                "reasoning per level without the engine's help.",
+                "below max_tokens=%d. The level still reaches the chat template and the reasoning "
+                "terms (reasoning_price, reasoning_floor), which price reasoning per level "
+                "without the engine's help.",
                 config.max_thinking_tokens,
                 config.backend,
                 config.max_tokens,
             )
-    if config.thinking_budget_scope == THINKING_SCOPE_EPISODE and config.backend == VLLM_BACKEND:
-        # The episode scope counts a turn's reasoning off the sampled ids, so every driver's request
-        # asks for them — the eval transport requests no other capture.
-        fields["return_token_ids"] = True
     template_kwargs = dict(config.chat_template_kwargs or {})
-    stated_budget = reasoning_budget if reasoning_budget is not None else config.max_thinking_tokens
-    if stated_budget is not None:
+    if reasoning_budget is not None:
         # The level's budget as a template variable, so a template can state the budget the engine
         # enforces; a template that does not read it ignores it. Episode-constant: the trainer renders
-        # every turn of a trajectory with the one value the trajectory carries.
-        template_kwargs[REASONING_BUDGET_TEMPLATE_VAR] = stated_budget
+        # every turn of a trajectory with the one value the trajectory carries, never the narrower cap
+        # an output budget leaves a late turn.
+        template_kwargs[REASONING_BUDGET_TEMPLATE_VAR] = reasoning_budget
     if reasoning_effort is not None:
         fields["reasoning_effort"] = reasoning_effort
         if config.backend != VLLM_BACKEND:

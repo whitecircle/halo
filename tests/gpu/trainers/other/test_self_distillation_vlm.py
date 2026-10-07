@@ -1,12 +1,12 @@
 #!/usr/bin/env python
 """
-Test: DistributedSelfDistillationTrainer (SDPG) with Qwen3-VL-2B (single-GPU smoke).
+Test: DistributedSelfDistillationTrainer (offline SDPG approximation) with Qwen3-VL-2B (single-GPU smoke).
 
-Validates the full SDPG self-distillation path end-to-end under TRL 1.6.0:
+Validates the full self-distillation path end-to-end under TRL 1.6.0:
 1. SelfDistillVLMDataCollator emits the student batch + teacher_* branch (privileged hint).
 2. The trainer runs the student forward + privileged-teacher forward and computes
    L = L_sft + beta(k) * L_OPD on the shared response tokens.
-3. ParallelismConfig() (standard mode).
+3. ParallelismConfig() by default; HALO_TEST_EP / HALO_TEST_TP select EP / TP.
 
 Assertions: training completes, all logged losses finite, and the OPD term is actually
 exercised (an opd_loss metric is recorded), so the privileged-teacher forward + full-vocab
@@ -35,7 +35,6 @@ from tests.common.utils import log, step_losses, training_run_checks
 MODEL_NAME = QWEN3_VL_2B
 NUM_TRAIN_SAMPLES = 16
 NUM_TRAIN_STEPS = 4
-SEED = 42
 
 
 def _parallelism_from_env() -> ParallelismConfig:
@@ -92,6 +91,8 @@ def run(ctx) -> dict:
         processor,
         tokenizer,
         max_length=1024,
+        response_prompt_template="<|im_start|>assistant\n",
+        train_on_completions_only=True,
         hint_template="\n[Hint] The correct answer is: {answer}.\n",
         answer_field="answer",
         solution_field=None,
@@ -128,6 +129,9 @@ def run(ctx) -> dict:
         parallelism_config=_parallelism_from_env(),
         sdpg_loss="reverse_kl",
         sdpg_beta_base=1.0,
+        reference_kl_coef=0.0,
+        reference_kl_loss="unnormalized_kl",
+        confidence_weight_opd=True,
         opd_exclude_eos=True,
     )
     ctx.on_teardown(lambda: trainer.cleanup_ep() if hasattr(trainer, "cleanup_ep") else None)
@@ -140,9 +144,7 @@ def run(ctx) -> dict:
     checks["enough_steps_logged"] = len(losses) >= 2
 
     # The OPD term must have actually run (teacher forward + reverse-KL), not just SFT.
-    checks["opd_loss_recorded"] = any("opd_loss" in e for e in trainer.state.log_history) or (
-        hasattr(trainer, "_metrics") and any("opd_loss" in v for v in trainer._metrics.values())
-    )
+    checks["opd_loss_recorded"] = any("opd_loss" in e for e in trainer.state.log_history)
 
     log(f"  {len(losses)} steps logged, checks: {checks}")
     return {"checks": checks}

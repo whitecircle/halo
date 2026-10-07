@@ -63,9 +63,9 @@ from src.environments.sandbox.remote import RemoteSandbox
 from src.environments.sandbox.repl import format_sandbox_repl_output
 from src.environments.tools.definitions import NativeTool, NativeToolRegistry, ToolParameter
 from src.environments.tools.factories import create_session_code_tools
-from src.rewards import composer as composer_module
-from src.rewards.scoring import Scorer, ScoreResult
-from src.rewards.spec import JudgeTerm
+from src.rewards.scorers import catalog as scorers_module
+from src.rewards.scorers.base import Scorer, ScoreResult
+from src.rewards.terms import JudgeTerm
 from src.trainers.grpo.environmental import rollout_valid_mask
 from src.trainers.grpo.objective.advantages import group_relative_advantages
 from tests.common.code_contests import RecordingSandboxSession, StubSandbox
@@ -230,7 +230,7 @@ def test_a_fault_ended_episode_is_never_sent_to_a_scorer(mode, monkeypatch):
         async def verify(self):
             pass
 
-    monkeypatch.setitem(composer_module.SCORERS, JudgeTerm, _Judge)
+    monkeypatch.setitem(scorers_module.SCORERS, JudgeTerm, _Judge)
     judge = {"source": "judge", "name": "quality", "requirements": [{"name": "done", "description": "Done."}]}
     env = NativeToolUseEnvironment(
         tool_registry=_registry(), reward_terms=[{"source": "environment"}, judge], **_knobs()
@@ -533,15 +533,21 @@ _NEST_PAST_THE_RECURSION_LIMIT = (
 
 
 @pytest.mark.parametrize("backend", ["local", "bubblewrap"])
-def test_a_tree_nested_past_the_recursion_limit_is_graded_and_removed(backend, tmp_path, monkeypatch):
+def test_a_tree_nested_past_the_recursion_limit_is_graded_and_removed(backend, monkeypatch):
     """The reset between tests and the removal after the grade walk the program's tree without
     recursion, so nesting it deep is judged like any program, never a host error that voids the grade."""
-    monkeypatch.setattr(tempfile, "tempdir", str(tmp_path))
-    tests = [{"input": "", "output": "right"}, {"input": "", "output": "wrong"}]
-    grade = run_solution_against_tests(_NEST_PAST_THE_RECURSION_LIMIT, tests, sandbox=_executor(backend))
-    assert (grade.graded, grade.infra_errors, grade.passed) == (2, 0, 1), grade.details
-    assert "Test 2: FAIL" in grade.details, grade.details
-    assert os.listdir(tmp_path) == [], "the nested working directory is removed"
+    # Under the system temp dir, searchable by the jail's root as pytest's private tmp_path is not.
+    base = tempfile.mkdtemp()
+    os.chmod(base, 0o711)
+    monkeypatch.setattr(tempfile, "tempdir", base)
+    try:
+        tests = [{"input": "", "output": "right"}, {"input": "", "output": "wrong"}]
+        grade = run_solution_against_tests(_NEST_PAST_THE_RECURSION_LIMIT, tests, sandbox=_executor(backend))
+        assert (grade.graded, grade.infra_errors, grade.passed) == (2, 0, 1), grade.details
+        assert "Test 2: FAIL" in grade.details, grade.details
+        assert os.listdir(base) == [], "the nested working directory is removed"
+    finally:
+        shutil.rmtree(base, ignore_errors=True)
 
 
 def test_closing_a_session_never_raises(tmp_path, monkeypatch):
@@ -596,10 +602,10 @@ def test_a_staging_write_refused_after_the_restore_is_the_programs_runtime_error
     """A child that escaped the process group can lock a staged file again between the host's restore
     and its write: the refusal is the program's runtime error, never an infra error."""
 
-    def locked(workdir, name, content):
+    def locked(self, workdir, name, content):
         raise PermissionError(errno.EACCES, os.strerror(errno.EACCES), os.path.join(workdir, name))
 
-    monkeypatch.setattr(LocalSubprocessSandbox, "_write_member", staticmethod(locked))
+    monkeypatch.setattr(LocalSubprocessSandbox, "_write_member", locked)
     tests = [{"input": "", "output": "1"}] * 2
     grade = run_solution_against_tests("print(1)", tests, sandbox=LocalSubprocessSandbox())
     assert (grade.graded, grade.infra_errors, grade.passed) == (2, 0, 0), grade.details
@@ -634,7 +640,7 @@ def test_a_host_that_refuses_pidfd_open_refuses_the_sandbox(denial, monkeypatch)
 @pytest.mark.parametrize("timeout", [0.0, -1.0, float("nan"), float("inf")])
 def test_a_run_refuses_a_timeout_poll_cannot_bound(timeout):
     with pytest.raises(ValueError, match="timeout"):
-        LocalSubprocessSandbox._run_in_new_session(["true"], stdin="", timeout=timeout, cwd="/", env={})
+        LocalSubprocessSandbox()._run_in_new_session(["true"], stdin="", timeout=timeout, cwd="/", env={})
 
 
 def test_the_group_is_killed_before_its_leader_is_reaped(monkeypatch):

@@ -2,18 +2,22 @@
 """CPU tests: what a code-contests submission scores, and what the scratchpad says about a missing stdin.
 
 The grade is the judge's accept: 1 when the submitted program passes every hidden test, 0 otherwise, so a
-near miss scores like a wrong answer. Every graded submission after the first pays a flat price, and the
-task message states it so that not resubmitting is an option the policy can weigh.
+near miss scores like a wrong answer. Every graded submission after the first pays a flat price; neither
+the price nor the submission budget is stated to the model — a verdict is the grade alone, and the cap
+ends the episode at its last graded submission.
 
-The scratchpad half: a program that reads input it was not given ends in a parse error or in
-silence, and the result names the cause so the next run is not spent the same way.
+The scratchpad half: a program run on no input says so, since one that reads input it was not given
+ends in a parse error or in silence, and the result names the cause so the next run is not spent the
+same way.
 
 Run: python tests/cpu/environments/test_submission_scoring.py  (or pytest)
 """
 
+import json
+
 import pytest
 
-from src.environments.base import OBJECTIVE_REWARD_KEY, REWARD_COMPONENTS_KEY
+from src.environments.base import EPISODE_TOOL_BUDGETS_KEY, REWARD_COMPONENTS_KEY
 from src.environments.envs.tasks.coding.code_contests import (
     NO_STDIN_NOTE,
     STARVED_RUN_NOTE,
@@ -22,13 +26,16 @@ from src.environments.envs.tasks.coding.code_contests import (
 )
 from src.environments.sandbox.base import REPL_NO_OUTPUT_MESSAGE, SandboxExecutor, SandboxResult
 from src.environments.tools.definitions import NativeToolCall
-from tests.common.code_contests import StubSandbox
+from src.rewards.terms import OBJECTIVE_REWARD_KEY
+from tests.common.code_contests import StubSandbox, retired_budget_phrases
 
 PENALTY = 0.2
 PROFILES = {"high": {"max_submissions": 3, "max_test_calls": 8}}
 # Four hidden tests whose input is its own index; ``_PassesSandbox`` passes test ``i`` when the
-# submitted "program" contains the digit ``i``, so a program's text is its pass set.
+# submitted "program" contains the digit ``i``, so a program's text is its pass set (submitted as a
+# comment, which compiles as Python).
 TESTS = {"answer": {"tests": [{"input": str(i), "output": "ok"} for i in range(4)]}}
+# The resubmission-price rule no task message states.
 PRICE_RULE = "every resubmission costs part of the score"
 
 
@@ -60,7 +67,7 @@ def _call(env, traj, name, **arguments):
 def _graded(env, programs):
     traj = _episode(env)
     for program in programs:
-        _call(env, traj, "submit_solution", code=program)
+        _call(env, traj, "submit_solution", code=f"# {program}")
     env._settle_grade(traj, None)
     components = traj.info[REWARD_COMPONENTS_KEY]
     assert traj.total_reward == pytest.approx(sum(components.values())), "the decomposition no longer sums"
@@ -74,12 +81,85 @@ def _graded(env, programs):
         (["012"], 0.0),  # 3 of 4: a near miss scores like a wrong answer
         (["0"], 0.0),
         (["0", "0123"], 1.0),  # the last submission is the graded one
-        (["0123", "012"], 0.0),
+        (["0123", "012"], 1.0),  # an accept stands: a later submission is not graded
     ],
 )
 def test_the_objective_is_the_judges_accept_of_the_last_submission(programs, objective):
     components, _ = _graded(_env(), programs)
     assert components[OBJECTIVE_REWARD_KEY] == objective
+
+
+def _step_submit(env, ids, program):
+    """One turn submitting ``program`` (as a comment, like :func:`_graded`) through the protocol's step."""
+    arguments = json.dumps({"code": f"# {program}"})
+    call = {"id": "s", "type": "function", "function": {"name": "submit_solution", "arguments": arguments}}
+    return env.step(ids, [""], [{"tool_calls": [call]}])[0]
+
+
+def test_a_submission_passing_every_test_ends_the_episode():
+    """Past an accept a resubmission can only lose the solve, so the accept ends the episode the way
+    the submission cap does, completed, with graded submissions still unspent."""
+    env = _env()
+    ids, _ = env.reset(["solve it"], [{"reasoning_effort": "high", **TESTS}])
+    first = _step_submit(env, ids, "01")
+    assert not first.done
+    accepted = _step_submit(env, ids, "0123")
+    traj = accepted.trajectory
+    assert accepted.done and not accepted.truncated and traj.info["completed"]
+    assert env._submissions(traj) == 2, "one of the three graded submissions is left unspent"
+    assert traj.info[REWARD_COMPONENTS_KEY][OBJECTIVE_REWARD_KEY] == 1.0
+
+
+def test_an_accept_stands_against_a_later_submission_in_the_same_turn():
+    """The episode ends after the turn that submitted the accept, so a submission later in that turn is
+    refused unspent and unpaid, and grades nothing that could replace the solve."""
+    env = _env(tool_success_reward=0.05)
+    ids, _ = env.reset(["solve it"], [{"reasoning_effort": "high", **TESTS}])
+    calls = [
+        {
+            "id": cid,
+            "type": "function",
+            "function": {"name": "submit_solution", "arguments": json.dumps({"code": code})},
+        }
+        for cid, code in (("a", "# 0123"), ("b", "# 0"))
+    ]
+    (step,) = env.step(ids, [""], [{"tool_calls": calls}])
+    traj = step.trajectory
+    assert traj.messages[-1].content == (
+        "Not graded: an earlier submission already passed every test, so it stands and the task ends."
+    )
+    assert step.done and env._submissions(traj) == 1
+    assert traj.info["submission_result"] == "Passed 4/4 test cases."
+    components = traj.info[REWARD_COMPONENTS_KEY]
+    assert components[OBJECTIVE_REWARD_KEY] == 1.0
+    assert components["reward/resubmission"] == 0.0
+    assert components["reward/turn_shaping"] == pytest.approx(0.05), "the refused call is not paid"
+
+
+def test_a_graded_verdict_is_the_grade_alone_and_the_cap_still_ends_the_episode():
+    """Every verdict the model reads is the grade and nothing about what is left: the submissions left are
+    never stated, while the third graded submission of the ``high`` budget still ends the episode."""
+    env = _env()
+    ids, _ = env.reset(["solve it"], [{"reasoning_effort": "high", **TESTS}])
+    steps, replies = [], []
+    for program in ("0", "01", "012"):
+        steps.append(_step_submit(env, ids, program))
+        replies.append(steps[-1].trajectory.messages[-1].content)
+    assert replies == [
+        "Passed 1/4 test cases.\nTests 2, 3, 4: FAIL",
+        "Passed 2/4 test cases.\nTests 3, 4: FAIL",
+        "Passed 3/4 test cases.\nTest 4: FAIL",
+    ]
+    assert [step.done for step in steps] == [False, False, True]
+    traj = steps[-1].trajectory
+    assert traj.info["completed"] and not traj.truncated
+    assert traj.info[EPISODE_TOOL_BUDGETS_KEY]["submit_solution"] == 3 == env._submissions(traj)
+    assert traj.info["submission_result"] == replies[-1], "the record keeps the verdict alone"
+
+    ids, _ = env.reset(["solve it"], [{"reasoning_effort": "high", **TESTS}])
+    accepted = _step_submit(env, ids, "0123").trajectory
+    assert accepted.messages[-1].content == "Passed 4/4 test cases."
+    assert not any(retired_budget_phrases(m.content) for m in accepted.messages if m.content)
 
 
 def test_a_never_submitted_episode_grades_zero():
@@ -95,13 +175,17 @@ def test_every_graded_submission_after_the_first_pays_the_flat_price(programs):
     assert len(traj.info[SUBMISSION_PASS_FRACS_KEY]) == len(programs)
 
 
-def test_the_task_message_states_the_price_only_when_a_resubmission_can_be_charged():
-    stated = _episode(_env()).messages[-1].content
-    assert PRICE_RULE in stated and "3 graded submissions" in stated
-
-    assert PRICE_RULE not in _episode(_env(resubmission_penalty=0.0)).messages[-1].content, "nothing is charged"
-    single = _env(reasoning_effort_profiles={"high": {"max_submissions": 1}})
-    assert PRICE_RULE not in _episode(single).messages[-1].content, "one submission has no resubmission to price"
+def test_the_task_message_states_neither_the_price_nor_the_budget():
+    """Whatever the ladder binds, the task message carries no price rule and no submission count; the
+    price is still charged (``test_every_graded_submission_after_the_first_pays_the_flat_price``)."""
+    for env in (
+        _env(),
+        _env(resubmission_penalty=0.0),
+        _env(reasoning_effort_profiles={"high": {"max_submissions": 1}}),
+    ):
+        stated = _episode(env).messages[-1].content
+        assert PRICE_RULE not in stated and "graded submission" not in stated, stated
+        assert not retired_budget_phrases(stated), stated
 
 
 def test_the_behavior_counter_is_the_share_of_resubmissions_that_improved():
@@ -125,10 +209,11 @@ def test_the_behavior_counter_is_the_share_of_resubmissions_that_improved():
         (SandboxResult(stdout="3\n", stderr="IndexError: list index out of range", returncode=1), "", NO_STDIN_NOTE),
         (SandboxResult(stdout="", stderr="ValueError: invalid literal for int()", returncode=1), "5\n", None),
         (SandboxResult(stdout="", returncode=0), "5\n", None),
-        (SandboxResult(stdout="42\n", returncode=0), "", None),
-        # A build that failed or a run that timed out says nothing about a missing input.
+        # Output computed from no input, and a loop on end-of-file, ran on nothing too.
+        (SandboxResult(stdout="42\n", returncode=0), "", NO_STDIN_NOTE),
+        (SandboxResult(timed_out=True), "", NO_STDIN_NOTE),
+        # A build that failed ran nothing.
         (SandboxResult(stderr="main.py: error: bad", returncode=1, compile_failed=True), "", None),
-        (SandboxResult(timed_out=True), "", None),
     ],
 )
 def test_a_starved_scratchpad_run_names_the_missing_stdin(result, stdin, note):

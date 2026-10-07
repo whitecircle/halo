@@ -43,7 +43,7 @@ from src.models.loading.tokenizer_setup import (
     resolve_length_to_context,
     setup_model_and_tokenizer,
 )
-from src.trainers.grpo.early_stop import GRPOEarlyStopCallback
+from src.training.early_stopping import StopsTrainingEarly
 from src.training.environment import (
     TrainingStoppedEarly,
     prepare_distributed_resume,
@@ -450,10 +450,10 @@ def padded_workload_attn_implementation(
     """Attention implementation for padded (non-varlen) workloads: reward modeling, the GRPO family,
     and every other script that forwards right-padded batches.
 
-    Defaults to SDPA when the YAML pins none, because the auto-detected FA4 runs padded shapes
-    through its slow varlen path. ``sinks_reset=False`` (on-policy gpt-oss, pretrained sinks live)
-    drops the default: only a sink-carrying implementation is accepted there, so requesting SDPA
-    would reject the run. Pass the run's own ``reset_sinks`` rather than a hardcoded value.
+    Defaults to SDPA when the YAML pins none — the auto-detected FA4 runs padded shapes through its
+    slow varlen path. ``sinks_reset=False`` (on-policy gpt-oss, pretrained sinks live) drops the
+    default: only a sink-carrying impl is accepted there, so requesting SDPA would reject the run.
+    Pass the run's own ``reset_sinks`` — hardcoding it makes the exemption a claim about the model.
     ``context_parallel`` drops it too: Ulysses calls FlashAttention itself, so the loader's
     hardware-aware selection names the kernel CP runs.
     """
@@ -625,8 +625,7 @@ def run_trainer(
     """Run the common post-construction phase: integration-callback reordering, the canonical
     start log (mode + EP/CP/TP/ETP/DP sizes + ``extra_start_log`` lines), resume log, training,
     and EP cleanup. A run the GRPO early stop ended exits non-zero on every rank."""
-    # Integrations add themselves at the head of the list and would consume `logs` before the
-    # toolkit's own callbacks run their on_log.
+    # Integrations add themselves at the HEAD and would consume `logs` before our callbacks' on_log.
     reorder_integration_callbacks_last(trainer)
 
     parallelism_config = runtime.parallelism_config
@@ -654,7 +653,7 @@ def run_trainer(
     # An early stop fails the run, so a scheduler or a chained stage does not take its output for a finished
     # one. Its verdict is taken across ranks, so every rank exits.
     if any(
-        isinstance(callback, GRPOEarlyStopCallback) and callback.stopped
+        isinstance(callback, StopsTrainingEarly) and callback.stopped
         for callback in trainer.callback_handler.callbacks
     ):
         raise TrainingStoppedEarly(

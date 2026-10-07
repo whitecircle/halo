@@ -60,7 +60,7 @@ def test_flattening_mask_finds_spans_in_input_ids_when_labels_masked():
 
 
 def test_flattening_mask_unchanged_when_labels_are_input_copy():
-    """Sanity: labels==input_ids (the non-baked path) behaves exactly as before."""
+    """Sanity: labels==input_ids (the non-baked path) trains marker..EOS and masks the rest."""
     collator = DataCollatorWithFlatteningAndCompletionMask(
         tokenizer=make_tokenizer(),
         response_prompt_template=TEMPLATE_IDS,

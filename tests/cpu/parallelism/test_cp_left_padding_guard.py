@@ -6,9 +6,11 @@ mask ignores and whose labels are ``-100``, and silently wrong for LEADING paddi
 attends the pads, and the identical batch computes a different loss without CP, where HF's FA2 unpads
 via the mask.
 
-This is reachable from a shipped trainer: ``DataCollatorForSMPO`` left-pads prompts unconditionally
-and SMPO is one of only two CP-enabled trainers. The repo already rejects ``padding_free`` and
-``packing`` under CP for the very same mechanism, so this closes the remaining case.
+``DataCollatorForSMPO`` left-pads prompts unconditionally, and SMPO is CP-enabled: its concat
+flushes those pads behind each completion
+(``tests/cpu/parallelism/test_cp_training_path_boundary.py``), and this guard refuses any batch that
+reaches the wrapper otherwise. The repo already rejects ``padding_free`` and ``packing`` under CP for
+the very same mechanism, so this closes the remaining case.
 
     python tests/cpu/parallelism/test_cp_left_padding_guard.py
 """

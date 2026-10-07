@@ -12,8 +12,15 @@ from src.args.mixins import (
     RLRRArguments,
     SDPGArguments,
 )
-from src.rewards.spec import JudgeTerm, RewardModelTerm, RewardTerm, parse_reward_terms, sources_of
-from src.rewards.verifiable import AccuracyTerm, FormatTerm
+from src.rewards.graders.verifiable import AccuracyTerm, FormatTerm
+from src.rewards.terms import (
+    JudgeTerm,
+    RewardModelTerm,
+    RewardTerm,
+    parse_reward_terms,
+    refuse_veto_judges,
+    sources_of,
+)
 
 # The reward sources the RLVR arm admits: its two graders plus the externally scored terms.
 RLVR_REWARD_SOURCES = sources_of(AccuracyTerm, FormatTerm, JudgeTerm, RewardModelTerm)
@@ -31,7 +38,7 @@ class RLVROnlineGRPOScriptArguments(
 ):
     """Arguments for RLVR (Reinforcement Learning with Verifiable Rewards) Online GRPO.
 
-    The reward is the ``rewards`` list of terms (:mod:`src.rewards.spec`): the ``accuracy`` and
+    The reward is the ``rewards`` list of terms (:mod:`src.rewards.terms`): the ``accuracy`` and
     ``format`` graders, a generative ``judge``, a served ``reward_model`` — each ``weight * score ** exponent``.
 
     RLRR (arXiv:2601.23058, :class:`RLRRArguments`) replaces the group-normalized advantages with
@@ -69,10 +76,12 @@ class RLVROnlineGRPOScriptArguments(
     rewards: list[dict[str, Any]] = field(
         default_factory=lambda: [{"source": "accuracy"}],
         metadata={
-            "help": "Reward terms, each {source, name?, weight?, exponent?, ...}: sources 'accuracy' "
-            "(last \\boxed{} equals the answer), 'format' (pattern), 'judge' (model, requirements, "
-            "reasoning_effort, ...) and 'reward_model' (url, model, backend, ...). Each term is one "
-            "TRL reward function named after it, weighted by its weight; see agent-docs/training-methods/grpo/rewards.md."
+            "help": "Reward terms, each {source, name (required for judge/reward_model), weight?, exponent?, ...}: "
+            "sources 'accuracy' (last \\boxed{} equals the answer), 'format' (pattern), 'judge' (model, "
+            "requirements, view, on_error, reasoning_effort, ...; a veto judge listing checks is refused here, "
+            "having no objective to gate) and 'reward_model' (url, model, backend, view, on_error, ...). Each "
+            "term is one TRL reward function named after it, weighted by its weight; see "
+            "agent-docs/training-methods/grpo/rewards.md."
         },
     )
 
@@ -109,8 +118,12 @@ class RLVROnlineGRPOScriptArguments(
 
     @property
     def reward_terms(self) -> tuple[RewardTerm, ...]:
-        """The typed reward terms of ``rewards``, parsed and validated (also at parse time)."""
-        return parse_reward_terms(self.rewards, RLVR_REWARD_SOURCES)
+        """The typed reward terms of ``rewards``, parsed and validated (also at parse time). A veto
+        judge (one listing ``checks``) gates an environment objective, which this arm's independent
+        TRL reward functions have none of, so it is refused."""
+        terms = parse_reward_terms(self.rewards, RLVR_REWARD_SOURCES)
+        refuse_veto_judges(terms, where="the online arm")
+        return terms
 
     def _validate_hint_template(self) -> None:
         # With use_sdpg off a null template is a value set beside the closed gate, which the script's

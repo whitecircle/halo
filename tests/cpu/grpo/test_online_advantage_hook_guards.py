@@ -30,8 +30,8 @@ from src.trainers.grpo.objective.advantages import degenerate_group_mask
 from src.trainers.grpo.objective.relative_rewards import relative_advantages_grouped
 from src.trainers.grpo.online import DistributedGRPOTrainer
 
-SUM_THEN_NORMALIZE = types.SimpleNamespace(multi_objective_aggregation="sum_then_normalize")
-NORMALIZE_THEN_SUM = types.SimpleNamespace(multi_objective_aggregation="normalize_then_sum")
+SUM_THEN_NORMALIZE = types.SimpleNamespace(multi_objective_aggregation="sum_then_normalize", scale_rewards="group")
+NORMALIZE_THEN_SUM = types.SimpleNamespace(multi_objective_aggregation="normalize_then_sum", scale_rewards="group")
 
 
 def _resolve(kwargs: dict, grpo_args=SUM_THEN_NORMALIZE) -> DistributedGRPOTrainer:
@@ -58,6 +58,7 @@ def test_the_balance_is_refused_under_a_per_completion_loss_and_resolves_beside_
     with; under ``dapo``, TRL's default, the balance rescales whatever advantages RLRR set."""
     per_completion = types.SimpleNamespace(
         multi_objective_aggregation="sum_then_normalize",
+        scale_rewards="group",
         loss_type="grpo",
         top_entropy_quantile=1.0,
         off_policy_mask_threshold=None,
@@ -66,6 +67,7 @@ def test_the_balance_is_refused_under_a_per_completion_loss_and_resolves_beside_
         _resolve({"balance_token_mass": True}, per_completion)
     token_sum = types.SimpleNamespace(
         multi_objective_aggregation="sum_then_normalize",
+        scale_rewards="group",
         loss_type="dapo",
         top_entropy_quantile=1.0,
         off_policy_mask_threshold=None,
@@ -100,6 +102,15 @@ def test_drop_without_rlrr_still_masks_degenerate_groups():
 def test_foreign_aggregation_is_refused_at_construction_once_any_hook_is_armed(hook):
     with pytest.raises(ValueError, match="multi_objective_aggregation='normalize_then_sum'"):
         _resolve(hook, NORMALIZE_THEN_SUM)
+
+
+@pytest.mark.parametrize("scale_rewards", ["none", False])
+def test_a_std_floor_is_refused_where_no_std_divides(scale_rewards):
+    """``scale_rewards: none`` leaves the advantages unscaled, so a floor on their divisor floors nothing."""
+    args = types.SimpleNamespace(multi_objective_aggregation="sum_then_normalize", scale_rewards=scale_rewards)
+    with pytest.raises(ValueError, match="divides by none"):
+        _resolve({"scale_rewards_std_floor": 0.05}, args)
+    assert _resolve({}, args)._scale_rewards_std_floor == 0.0, "no floor, nothing to refuse"
 
 
 def test_foreign_aggregation_is_fine_with_no_hook_armed():

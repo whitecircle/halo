@@ -12,30 +12,48 @@ hint reveals. Text-only (the hint is tokenizer-built).
 """
 
 import logging
-from dataclasses import fields
 
 import torch
 
-from src.args.mixins import SDPGArguments
+from src.args.mixins import format_field_names
+from src.data.collators.self_distill import privileged_hint
 from src.log import warn_once
 from src.models.structure import resolve_tokenizer
-from src.trainers.distillation.losses import (
-    beta_warmup_decay,
-    get_self_distillation_loss_fn,
-    positive_advantage_gate,
-    privileged_teacher_pass,
-)
-from src.trainers.grpo.mixins.on_policy_init import GRPO_CTOR_POSITIONS
+from src.trainers.distillation.losses import global_token_mean, privileged_teacher_pass
+from src.trainers.distillation.opd_term import OPDTermMixin
 from src.trainers.grpo.online import DistributedGRPOTrainer
+from src.trainers.mixins.dataloader import split_rows_head
+from src.trainers.mixins.loss_masks import effective_loss_mask
 from src.trainers.mixins.stored_metrics import StoredMetricsMixin
-from src.trainers.mixins.validation import ctor_config, disable_trl_liger
 
 # Stdlib, not accelerate's adapter: the warning below fires per rollout row on whichever rank drew
 # it, and the adapter drops everything off rank 0 (warn_once cannot pass main_process_only).
 logger = logging.getLogger(__name__)
 
 
-class DistributedSDPGTrainer(StoredMetricsMixin, DistributedGRPOTrainer):
+def positive_advantage_gate(
+    loss_mask: torch.Tensor,
+    advantages: torch.Tensor,
+    enabled: bool,
+) -> torch.Tensor:
+    """The OPD token gate: the tokens the GRPO loss trains, optionally restricted to
+    strictly-positive-advantage rows.
+
+    Strict ``> 0``: a zero advantage means a tied or unscorable group, where the verifier expressed
+    no preference, so those rows must not pull the student toward the teacher.
+
+    Args:
+        loss_mask: ``[B, C]`` mask, 1 on the trained completion tokens (``effective_loss_mask``).
+        advantages: ``[B]`` or ``[B, 1]`` per-sample advantages.
+        enabled: when False the gate is the loss mask alone.
+    """
+    if not enabled:
+        return loss_mask
+    adv = advantages.unsqueeze(1) if advantages.dim() == 1 else advantages
+    return loss_mask * (adv > 0).to(loss_mask.dtype)
+
+
+class DistributedSDPGTrainer(OPDTermMixin, StoredMetricsMixin, DistributedGRPOTrainer):
     """On-policy SDPG: online GRPO + privileged-teacher reverse-KL OPD on positive-advantage rollouts."""
 
     _tag_names = ["trl", "grpo", "sdpg"]
@@ -57,27 +75,24 @@ class DistributedSDPGTrainer(StoredMetricsMixin, DistributedGRPOTrainer):
         opd_positive_advantage_only: bool = True,
         **kwargs,
     ):
-        # Tunables arrive under the names and defaults SDPGArguments declares: popped by its fields
-        # and adopted as attributes.
-        sdpg = SDPGArguments(**{f.name: kwargs.pop(f.name) for f in fields(SDPGArguments) if f.name in kwargs})
-        vars(self).update(vars(sdpg))
-        self.sdpg_loss_fn = get_self_distillation_loss_fn(self.sdpg_loss)
+        self._adopt_sdpg_arguments(kwargs)
         self.sdpg_answer_field = sdpg_answer_field
         self.opd_positive_advantage_only = opd_positive_advantage_only
         # Warned once for the whole run: a single answer-less row means the column is unusable.
         self._warned_missing_answer: set = set()
-
-        disable_trl_liger(
-            ctor_config(args, kwargs, GRPO_CTOR_POSITIONS),
-            "Disabling use_liger_kernel for SDPG: the fused GRPO-Liger loss bypasses the OPD term.",
-        )
 
         super().__init__(*args, **kwargs)
 
         # Every rank constructs the trainer, so this raise is world-uniform; a per-rollout raise would
         # leave the peers of the rank that drew the bad row waiting in the next collective.
         columns = getattr(self.train_dataset, "column_names", None)
-        if self.sdpg_beta_base != 0.0 and columns is not None and self.sdpg_answer_field not in columns:
+        hints_the_answer = "answer" in format_field_names(self.sdpg_hint_template)
+        if (
+            self.sdpg_beta_base != 0.0
+            and hints_the_answer
+            and columns is not None
+            and self.sdpg_answer_field not in columns
+        ):
             raise ValueError(
                 f"SDPG's privileged teacher needs the gold answer in column "
                 f"{self.sdpg_answer_field!r}, which the train dataset does not carry (has: "
@@ -99,14 +114,12 @@ class DistributedSDPGTrainer(StoredMetricsMixin, DistributedGRPOTrainer):
     def _build_teacher_prompts(self, prompt_ids, prompt_mask, answers):
         """Left-padded ``[prompt + hint]`` token ids per rollout row (hint reveals the gold answer)."""
         tok = resolve_tokenizer(self.processing_class)
-        pad_id = tok.pad_token_id if tok.pad_token_id is not None else tok.eos_token_id
         rows = []
         for i in range(prompt_ids.size(0)):
             real = prompt_ids[i][prompt_mask[i].bool()].tolist()
-            answer = answers[i]
-            if answer is None or not str(answer).strip():
-                # No hint rather than one stating an empty answer, which would mislead the teacher
-                # instead of privileging it. Warned, not raised: this runs per rollout row on one rank.
+            hint = privileged_hint(self.sdpg_hint_template, answer=answers[i])
+            if hint is None:
+                # Warned, not raised: this runs per rollout row on one rank.
                 warn_once(
                     logger,
                     self._warned_missing_answer,
@@ -116,12 +129,9 @@ class DistributedSDPGTrainer(StoredMetricsMixin, DistributedGRPOTrainer):
                     "rows — check the dataset's answer column.",
                     self.sdpg_answer_field,
                 )
-                hint_ids = []
-            else:
-                hint_ids = tok.encode(self.sdpg_hint_template.format(answer=answer), add_special_tokens=False)
-            rows.append(real + hint_ids)
+            rows.append(real + ([] if hint is None else tok.encode(hint, add_special_tokens=False)))
         max_len = max(len(r) for r in rows)
-        ids = torch.full((len(rows), max_len), pad_id, dtype=prompt_ids.dtype, device=prompt_ids.device)
+        ids = torch.full((len(rows), max_len), tok.pad_token_id, dtype=prompt_ids.dtype, device=prompt_ids.device)
         mask = torch.zeros((len(rows), max_len), dtype=prompt_mask.dtype, device=prompt_mask.device)
         for i, r in enumerate(rows):  # left-pad (matches GRPO prompt padding side)
             ids[i, max_len - len(r) :] = torch.tensor(r, dtype=prompt_ids.dtype, device=prompt_ids.device)
@@ -141,47 +151,43 @@ class DistributedSDPGTrainer(StoredMetricsMixin, DistributedGRPOTrainer):
             )
 
         completion_ids, completion_mask = inputs["completion_ids"], inputs["completion_mask"]
-        comp_len = completion_ids.size(1)
-
-        # The last comp_len positions of each forward, so the two align despite different prefixes.
         student_logits = self._completion_logits(
-            model, inputs["prompt_ids"], inputs["prompt_mask"], completion_ids, completion_mask, comp_len
+            model, inputs["prompt_ids"], inputs["prompt_mask"], completion_ids, completion_mask
         )
         with privileged_teacher_pass(model):
             teacher_logits = self._completion_logits(
-                model,
-                inputs["teacher_prompt_ids"],
-                inputs["teacher_prompt_mask"],
-                completion_ids,
-                completion_mask,
-                comp_len,
+                model, inputs["teacher_prompt_ids"], inputs["teacher_prompt_mask"], completion_ids, completion_mask
             )
 
         opd_per_token = self.sdpg_loss_fn(student_logits, teacher_logits, self.sdpg_temperature).sum(-1)
 
+        # The tokens the GRPO loss trains: a tool-output token is attention-valid but never trained.
         gate = positive_advantage_gate(
-            completion_mask.to(opd_per_token.dtype), inputs["advantages"], self.opd_positive_advantage_only
+            effective_loss_mask(inputs).to(opd_per_token.dtype), inputs["advantages"], self.opd_positive_advantage_only
         )
-        opd = (opd_per_token * gate).sum() / gate.sum().clamp(min=1.0)
+        # Rows padding an eval split's final round repeat its first rows: the OPD mean reads the
+        # split's own (in train, the whole batch, unsliced).
+        real_rows = self.eval_split_rows(gate.size(0))
+        opd = global_token_mean(split_rows_head(opd_per_token, real_rows), split_rows_head(gate, real_rows))
 
-        beta = beta_warmup_decay(
-            int(self.state.global_step),
-            int(self.state.max_steps),
-            self.sdpg_beta_base,
-            self.sdpg_beta_warmup_steps,
-            self.sdpg_beta_decay_steps,
-        )
-        mode = "train" if model.training else "eval"
-        self.store_metrics({"opd_loss": opd.detach(), "opd_beta": beta}, train_eval=mode)
+        beta = self._opd_beta()
+        self.store_batch_metrics(self._opd_metrics(opd, beta), "train" if model.training else "eval", real_rows)
         # TRL normalizes inside _compute_loss, so an undivided per-microbatch OPD mean inflates beta
         # by grad_accum.
         if model.training:
             opd = opd / self.current_gradient_accumulation_steps
         return loss + beta * opd
 
-    def _completion_logits(self, model, prefix_ids, prefix_mask, completion_ids, completion_mask, comp_len):
-        """Full-vocab logits at the completion positions of ``[prefix + completion]`` → ``[B, comp_len, V]``."""
+    def _completion_logits(self, model, prefix_ids, prefix_mask, completion_ids, completion_mask):
+        """Full-vocab logits predicting each completion token of ``[prefix + completion]`` → ``[B, C, V]``.
+
+        Where the forward takes ``logits_to_keep`` (TRL's ``model_kwarg_keys``, as its own GRPO forward
+        reads them) the head stops at the last ``C + 1`` positions, so the prompt's ``[B, P, V]`` rows are
+        never built. The prefixes differ in length; aligning on the sequence end pairs the two forwards' rows.
+        """
+        keep = completion_ids.size(1) + 1
         input_ids = torch.cat([prefix_ids, completion_ids], dim=1)
         attention_mask = torch.cat([prefix_mask, completion_mask], dim=1)
-        logits = model(input_ids=input_ids, attention_mask=attention_mask, use_cache=False).logits
-        return logits[:, -(comp_len + 1) : -1, :]
+        trim = {"logits_to_keep": keep} if "logits_to_keep" in self.model_kwarg_keys else {}
+        logits = model(input_ids=input_ids, attention_mask=attention_mask, use_cache=False, **trim).logits
+        return logits[:, -keep:-1, :]

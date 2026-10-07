@@ -126,7 +126,7 @@ def test_forced_off_stamp_is_visible_from_either_config_object():
 
 
 def test_plain_config_is_untouched_by_the_resolver():
-    """A non-composite config must behave exactly as before — one source, no aliasing."""
+    """A non-composite config reads and writes its own fields — one source, no aliasing."""
     model = _Model(_TextConfig(router_aux_loss_coef=0.001, output_router_logits=False))
 
     apply_balancing_strategy(model, "aux_loss", is_moe=True)

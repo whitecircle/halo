@@ -29,17 +29,17 @@ import torch
 from transformers import AutoModelForCausalLM
 
 from src.distributed.nccl.clients.sglang import SGLangWeightSyncClient
-from src.env import env_int, env_str
+from src.env import env_str
 from src.environments.engine_wire import capture_generation_tokens
 from src.environments.ray_actors import EnvironmentActor, RolloutConfig
 from tests.common.harness import gpu_test_main, record_check
 from tests.common.models import QWEN3_0_6B
 from tests.common.utils import log
+from tests.common.weight_sync import weight_transfer_port
 
 # ``or`` (not an env_str default): an exported-but-empty SGLANG_SERVER_URL passes the conftest gate,
 # which reads it the same way, so the client must fall back to the same URL rather than to "".
 SGLANG_SERVER_URL = env_str("SGLANG_SERVER_URL") or "http://localhost:30000"
-GROUP_PORT = env_int("HALO_TEST_SGLANG_GROUP_PORT", 51216)
 PROBE_PROMPT = "Count: 1 2 3"
 
 
@@ -105,7 +105,8 @@ def test_weight_sync_changes_the_served_policy():
     targets = [n for n in params if "layers.0.self_attn" in n and n.endswith(".weight")]
     assert targets, "no layer-0 attention weights found — the perturbation below would be a no-op"
 
-    client = SGLangWeightSyncClient(base_url=SGLANG_SERVER_URL, group_port=GROUP_PORT, connection_timeout=120)
+    group_port = weight_transfer_port("HALO_TEST_SGLANG_GROUP_PORT")
+    client = SGLangWeightSyncClient(base_url=SGLANG_SERVER_URL, group_port=group_port, connection_timeout=120)
     client.init_communicator(device=torch.device("cuda", 0))
     try:
         with torch.no_grad():

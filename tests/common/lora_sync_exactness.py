@@ -11,8 +11,9 @@ A row is one tiny random-init family of :mod:`tests.common.tiny_models` (``--fam
 or a MoE one under its ``model_type``) under one sharding (``--mode``: ``fsdp`` for a dense model;
 ``ep1`` with FSDP-sharded DTensor experts, ``ep2`` with plain experts, or pure ETP ``etp2`` for a
 MoE) with stock PEFT on the token mixers' projections (every linear layer on a dense model), alone or
-mixed with native expert LoRA (``--adapters``). Syncs run through the trainers' own entry
-(``sync_trainer_weights``, no server), and the row must:
+mixed with native expert LoRA (``--adapters``). No server: the pushes run through the trainers' own
+entry (``sync_trainer_weights``) into a recording sender, the step syncs through its gather
+(``gather_and_send_weights``) with no rank forwarding, and the row must:
 
   1. Cover the roster and the layout it names: the tiny MoE roster has a model for every EP family
      some engine takes an online update for (the syncable roster, derived from the layer registry and
@@ -67,7 +68,11 @@ from src.distributed.nccl.registry import resolve_weight_sync_client, rollout_ba
 from src.distributed.parallelism_config import ParallelismConfig
 from src.distributed.runtime import broadcast_from_rank0
 from src.models.structure import lora_fold_targets, unwrap_framework_wrappers
-from src.trainers.grpo.rollout.weight_sync import sync_trainer_weights, validate_weight_sync_support
+from src.trainers.grpo.rollout.weight_sync import (
+    gather_and_send_weights,
+    sync_trainer_weights,
+    validate_weight_sync_support,
+)
 from src.trainers.mixins.ep_introspection import named_ep_layers
 from src.trainers.sft import DistributedSFTTrainer
 from tests.common.checkpoint_io import fixed_text_batch
@@ -181,6 +186,12 @@ def _requested_bytes(stat: str) -> int:
     return torch.cuda.memory_stats()[f"requested_bytes.all.{stat}"]
 
 
+def _gather_without_forwarding(trainer) -> None:
+    """The step sync's gathers and adapter folds with no rank forwarding: what the peak and fold rows
+    measure, with nothing staged for an engine. A sync proper refuses a forwarding rank with no client."""
+    gather_and_send_weights(unwrap_framework_wrappers(trainer.model), None)
+
+
 def _sync_peak(model, sync: Callable[[], None]) -> int:
     """Bytes ``sync`` requests at its peak over what was requested before it, on this rank.
 
@@ -240,11 +251,11 @@ class _SyncEachStep(TrainerCallback):
         trainer = self.state["trainer"]
         if state.global_step < STEP_SYNCS:
             self.state["peaks"]["out_of_place"].append(
-                _sync_peak(self.state["unwrapped"], lambda: sync_trainer_weights(trainer, None))
+                _sync_peak(self.state["unwrapped"], lambda: _gather_without_forwarding(trainer))
             )
         elif state.global_step == STEP_SYNCS:
             with _recording_folds(self.state["folds"]):
-                sync_trainer_weights(trainer, None)
+                _gather_without_forwarding(trainer)
         elif state.global_step == STEP_SYNCS + 1:
             self._fixed_adapter_pushes(trainer)
         else:
@@ -256,7 +267,7 @@ class _SyncEachStep(TrainerCallback):
 
     def _in_place_sync(self, trainer) -> None:
         with folded_in_place(self.state["peft_model"]):
-            sync_trainer_weights(trainer, None)
+            _gather_without_forwarding(trainer)
 
     def _fixed_adapter_pushes(self, trainer) -> None:
         """``PUSHES`` syncs, each after a no-grad forward; what the forwarding rank handed its client,

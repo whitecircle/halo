@@ -47,7 +47,8 @@ class _MoEModel(nn.Module):
 
 
 def _fake_self(model):
-    # is_pp_mode=False keeps the non-PP write path; the PP branch is collective (GPU-tested).
+    # is_pp_mode=False keeps the non-PP write path; the PP branch is collective
+    # (test_pp_biases_are_gathered_to_one_rank_not_to_every_rank).
     me = types.SimpleNamespace(model=model, parallelism_config=types.SimpleNamespace(is_pp_mode=False))
     # Borrowed, not reimplemented: a stub unwrap could pass while the real one is broken.
     me._top_level_model = types.MethodType(DistributedTrainerMixin._top_level_model, me)
@@ -229,8 +230,8 @@ def test_sidecar_applies_under_peft_plus_context_parallelism():
     """PEFT+CP names every module one level deeper again: the CP wrapper's inner-model attribute is
     kept by ``unwrap_framework_wrappers``, so the sidecar records
     ``base_model.model.model.model.layers.N``. Stripping only the PEFT prefix leaves
-    ``model.model.layers.N``, which resolves against no hub tree — every PEFT+CP run trained a bias
-    whose merge then died on a KeyError."""
+    ``model.model.layers.N``, which resolves against no hub tree — the merge of every PEFT+CP run's
+    bias would die on a KeyError."""
     model = _HubGptOssCausalLM()
     sidecar = {
         "base_model.model.model.model.layers.0": torch.full((4,), 0.25),

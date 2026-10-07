@@ -107,7 +107,7 @@ def run(ctx):
 
     spread = world_spread(ep_loss)
     metrics["rank_loss_spread"] = spread
-    checks["losses_match_across_ranks"] = spread < TOL.ep_identical_batch_rank_spread_abs
+    checks["losses_match_across_ranks"] = TOL.identical_batch_ranks_agree(spread)
 
     vision_grad = sum(p.grad.abs().sum().item() for p in model.model.vision_tower.parameters() if p.grad is not None)
     metrics["vision_grad_mass"] = vision_grad

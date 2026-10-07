@@ -15,10 +15,9 @@ from liger_kernel.transformers import _apply_liger_kernel_to_instance
 from transformers import Qwen3Config, Qwen3ForCausalLM
 
 from tests.common.models import TINY_QWEN3_CONFIG
-from tests.common.utils import load_script_module
+from tests.common.offline_grpo import load_liger_class_patched_model
 
 PartialState()
-suite = load_script_module("tests/gpu/trainers/grpo/test_offline_grpo_chunked.py")
 
 def qk_forwards(model):
     targets = {
@@ -31,9 +30,9 @@ def qk_forwards(model):
 
 with tempfile.TemporaryDirectory() as checkpoint:
     Qwen3ForCausalLM(Qwen3Config(**TINY_QWEN3_CONFIG)).save_pretrained(checkpoint)
-    original = suite._load_model(checkpoint, attn_implementation="eager")
+    original = load_liger_class_patched_model(checkpoint, attn_implementation="eager")
     _apply_liger_kernel_to_instance(original, cross_entropy=False, fused_linear_cross_entropy=False)
-    restored = suite._load_model(checkpoint, attn_implementation="eager")
+    restored = load_liger_class_patched_model(checkpoint, attn_implementation="eager")
     before, after = qk_forwards(original), qk_forwards(restored)
     findings = ["target sets differ"] if before.keys() != after.keys() else []
     findings.extend(name for name in before.keys() & after.keys() if before[name] is not after[name])

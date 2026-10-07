@@ -38,14 +38,14 @@ def test_supported_classes_match_wrapper_registry_exactly():
 
 def test_validator_reads_the_derived_registry():
     """The validator must not carry its own copy of the list — importing it from anywhere else
-    is what let the two drift."""
+    lets the two drift."""
     assert validation.CP_SUPPORTED_ATTENTION_CLASSES is CP_SUPPORTED_ATTENTION_CLASSES
 
 
 def test_every_wrapper_takes_the_one_constructor_signature_the_patcher_calls():
-    """``patching.py:67`` builds every wrapper as ``wrapper_cls(module, cp_group, cp_size)``, so a
-    family declaring a fourth parameter (or renaming one) is a TypeError at patch time for that
-    family only — invisible until someone runs its GPU suite."""
+    """``patch_attention_for_ulysses`` builds every wrapper as ``wrapper_cls(module, cp_group,
+    cp_size)``, so a family declaring a fourth parameter (or renaming one) is a TypeError at patch
+    time for that family only — invisible until someone runs its GPU suite."""
     expected = ("original_attention", "cp_group", "cp_size")
     for name, wrapper_cls in sorted(WRAPPER_CLASS_MAP.items()):
         params = tuple(inspect.signature(wrapper_cls.__init__).parameters)[1:]

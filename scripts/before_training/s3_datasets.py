@@ -41,7 +41,7 @@ def _cli_download(args, client: S3Client):
 
 def _cli_list(args, client: S3Client):
     objects = client.list_objects(
-        prefix=args.prefix or "",
+        prefix=args.prefix,
         subfolder=args.subfolder,
         recursive=args.recursive,
         max_keys=args.max_keys,

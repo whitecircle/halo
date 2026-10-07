@@ -7,8 +7,8 @@ the run dtype; a loader that does not leaves a mixed-dtype model that FSDP2 refu
 fp32 DeepSeek-V4 norms feed fp32 activations into bf16 projections. These tests pin (1) the helper's
 contract, fp8, quantized storage and fp32-master handling included, (2) that the unsharded loaders a
 CPU run reaches hand back a uniform run-dtype model for every pinned family, (3) that under fp32
-    masters the lazy loaders preserve every configured non-EP master (including stored pins), while
-    without the flag they load all bf16, and (4) that every model build in
+masters the lazy loaders preserve every configured non-EP master (including stored pins), while
+without the flag they load all bf16, and (4) that every model build in
 ``src/`` and ``scripts/training/`` either casts and finalizes or is pinned as no training load, so a
 new loader that forgets either fails here rather than on its first GPU step.
 
@@ -16,7 +16,6 @@ Run: python tests/cpu/models/test_run_dtype_cast.py  (or pytest)
 """
 
 import functools
-import os
 import types
 from unittest import mock
 
@@ -35,12 +34,12 @@ import src.distributed.expert_parallel.lazy_loader as ep_lazy_loader
 import src.distributed.pipeline_parallel.lazy_loader as pp_lazy_loader
 from src.configs.embedding_config import EmbeddingConfig
 from src.distributed.expert_parallel.config import EPConfig
+from src.distributed.expert_parallel.fp32_masters import fp32_master_param_keys
 from src.distributed.expert_parallel.lazy_loader import load_ep_model_lazy
 from src.distributed.expert_parallel.loading import cast_loaded_parameters
 from src.distributed.expert_parallel.patching import ep_claimed_blocks
 from src.distributed.loading.frozen_models import load_frozen_auxiliary_model
 from src.distributed.loading.model_loading import load_model_from_pretrained
-from src.distributed.loading.precision import fp32_master_param_keys
 from src.distributed.pipeline_parallel.lazy_loader import PPWeightPlanner, load_pp_stage_model
 from src.distributed.pipeline_parallel.stage import PP_STAGE_PARTITION_ATTR, resolve_layer_root
 from src.models.loading.dtype import cast_parameters_to_run_dtype
@@ -104,8 +103,8 @@ NON_MODEL_BUILDERS = frozenset(
     {
         ("scripts/training/offline_grpo.py", "main"),
         ("scripts/training/sft.py", "main"),
-        ("src/rewards/spec.py", "from_config"),
-        ("src/rewards/spec.py", "parse_reward_terms"),
+        ("src/rewards/terms.py", "from_config"),
+        ("src/rewards/terms.py", "parse_reward_terms"),
         ("src/training/script_runner.py", "prepare_script_preference_data"),
     }
 )
@@ -240,9 +239,7 @@ def test_a_request_that_is_not_a_dtype_leaves_the_model_as_loaded(dtype):
 def _tiny_checkpoints(tmp_path_factory, name: str, families, *, fp32_pins: bool = False) -> dict[str, str]:
     """``families``' tiny checkpoints under a fresh ``name`` directory, keyed by family."""
     root = tmp_path_factory.mktemp(name)
-    # A per-process directory name: transformers copies a checkpoint's remote code into the shared
-    # HF_MODULES_CACHE under its directory name, so two xdist workers loading one family would race.
-    checkpoints = {family: str(root / f"{family}_{os.getpid()}") for family in families}
+    checkpoints = {family: str(root / family) for family in families}
     for family, path in checkpoints.items():
         build_tiny_family_checkpoint(TINY_MOE_FAMILIES[family], path, fp32_pins=fp32_pins)
     return checkpoints
@@ -384,6 +381,17 @@ def _load_with(
     return load_pp_stage_model(path, pp_rank, pp_size, config=config, ep_config=ep_config, **common)
 
 
+def _outside_moe_blocks(model: nn.Module, *, aliases: bool = False) -> frozenset[str]:
+    """Every parameter name outside the family's MoE blocks, read off the blocks' module paths: the
+    masters ``fp32_non_ep_params`` configures when no router or expert master is (:func:`_load_with`'s
+    ep1 config). ``aliases`` lists a tied parameter under each of its names."""
+    blocks = tuple(f"{path}." for path, _block in ep_claimed_blocks(model))
+    assert blocks, "the premise is a MoE family whose blocks EP claims"
+    return frozenset(
+        name for name, _param in model.named_parameters(remove_duplicate=not aliases) if not name.startswith(blocks)
+    )
+
+
 def _assert_keeps_exactly(
     model: nn.Module, pinned: dict[str, str], stored: dict, keep_fp32: bool, *, masters: frozenset[str] | None = None
 ) -> None:
@@ -423,17 +431,13 @@ def test_fp32_masters_keep_exactly_the_stored_pins(stored_fp32_checkpoints, fami
 
     model = _load_with(loader, family, path, keep_fp32, monkeypatch)
 
-    masters = (
-        fp32_master_param_keys(model, EPConfig(ep_size=1, world_size=1, gpus_per_node=1), keep_non_ep=True)
-        if loader.startswith("ep_lazy")
-        else None
-    )
+    masters = None if loader == "path_string" else _outside_moe_blocks(model)
     _assert_keeps_exactly(model, {name: name for name in pinned}, stored, keep_fp32, masters=masters)
 
 
 @pytest.mark.parametrize("keep_fp32", [False, True], ids=["bf16", "fp32_masters"])
 def test_a_later_pp_stage_keeps_the_pins_of_its_own_layers(stored_fp32_checkpoints, keep_fp32, monkeypatch):
-    """The second of two stages re-bases its layers to 0, so its kept keys must be taken in the stage's
+    """The second of two stages re-bases its layers to 0, so its masters must be taken in the stage's
     numbering, after the slice. DeepSeek-V4's layer types pin different parameters (only a compressed
     layer pins its compressor's norm), so a keep set in the checkpoint's numbering names other layers'
     parameters (the premise, checked below)."""
@@ -447,7 +451,7 @@ def test_a_later_pp_stage_keeps_the_pins_of_its_own_layers(stored_fp32_checkpoin
     stage_pins = {planner.stage_key(name): name for name in pinned if planner.owns(name)}
     stage_names = {name for name, _ in model.named_parameters()}
     assert lo > 0 and set(stage_pins) != pinned & stage_names
-    _assert_keeps_exactly(model, stage_pins, stored, keep_fp32)
+    _assert_keeps_exactly(model, stage_pins, stored, keep_fp32, masters=_outside_moe_blocks(model))
 
 
 @pytest.mark.parametrize("ep_wrapped", [True, False])
@@ -471,13 +475,8 @@ def test_the_lazy_keep_set_leaves_out_ep_wrapped_blocks(pinned_checkpoints, ep_w
 
     ep_config = EPConfig(ep_size=1, world_size=1, gpus_per_node=1) if ep_wrapped else None
     kept = fp32_master_param_keys(shell, ep_config, keep_non_ep=True)
-    block_ids = {id(param) for _path, block in ep_claimed_blocks(shell) for param in block.parameters()}
-    expected = {
-        name
-        for name, param in shell.state_dict(keep_vars=True).items()
-        if isinstance(param, nn.Parameter)
-        if not ep_wrapped or id(param) not in block_ids
-    }
+    every_name = frozenset(name for name, _param in shell.named_parameters(remove_duplicate=False))
+    expected = _outside_moe_blocks(shell, aliases=True) if ep_wrapped else every_name
     assert pins and kept == expected
     assert (in_block in kept) is (not ep_wrapped)
 
@@ -504,7 +503,9 @@ def test_the_sentence_transformer_backbone_is_cast_and_finalized(tmp_path):
     base = tmp_path / "base"
     build_tiny_family_checkpoint(TINY_MOE_FAMILIES["deepseek_v4"], str(base), load_cached_tokenizer(QWEN3_0_6B))
     runtime = types.SimpleNamespace(
-        parallelism_config=types.SimpleNamespace(is_ep_mode=False, is_tp_mode=False, fp32_non_ep_params=False),
+        parallelism_config=types.SimpleNamespace(
+            is_ep_mode=False, is_tp_mode=False, fp32_non_ep_params=False, max_concurrent_loading=None
+        ),
         model_source=str(base),
     )
     embedding_config = EmbeddingConfig(

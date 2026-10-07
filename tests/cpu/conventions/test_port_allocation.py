@@ -3,7 +3,7 @@
 
 A port is released between the probe and its consumer's bind. Under pytest-xdist that window loses
 two races: a concurrent worker is handed the same port, or an outbound connection's kernel-picked
-local port lands on it, and the rank-0 TCPStore dies with ``EADDRINUSE``. These pins hold the two
+local port lands on it, and the TCPStore binding it dies with ``EADDRINUSE``. These pins hold the two
 properties that close the window, the probe that skips a port something already holds, and the
 random start that keeps two sessions on one network apart.
 

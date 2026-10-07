@@ -286,7 +286,7 @@ def apply_balancing_strategy(
             # acceptor it raises in turn, so name the knobs that create one instead.
             if accepts_bias_balancing(model) or has_balancing_routers(model):
                 remedy = (
-                    "Use moe_balancing=bias_update (aux-loss-free, works under EP and PP), or "
+                    "Use moe_balancing=bias_update (aux-loss-free, works under EP), or "
                     "moe_balancing=none to train unbalanced deliberately."
                 )
             else:

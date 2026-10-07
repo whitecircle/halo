@@ -22,10 +22,10 @@ PartialState()
 
 from scripts.training.offline_grpo import build_chat_template_row_fn
 from src.data.collators.offline_grpo import REF_PER_TOKEN_LOGPS_COLUMN
+from src.data.pipeline.preferences import tokenize_preference_row
 from src.data.pipeline.row_processors import prepare_generative_row
+from src.trainers.grpo.mixins.offline_reference import reject_unsupported_reference_input
 from src.trainers.grpo.offline import tokenize_prompt_completion
-from src.trainers.grpo.reference_lifecycle import reject_unsupported_reference_input
-from src.trainers.preference.smpo import tokenize_preference_row
 
 BOS_ID = 1
 NOMINAL_BOS_ID = 999
@@ -128,7 +128,6 @@ def _offline_tokenize(tokenizer, *, max_prompt_length=None, max_completion_lengt
         tokenizer,
         max_prompt_length=max_prompt_length,
         max_completion_length=max_completion_length,
-        is_encoder_decoder=False,
     )
 
 
@@ -149,8 +148,7 @@ def test_offline_tokenize_bos_kept_for_postprocessing_tokenizer():
 def test_offline_tokenize_caps_are_true_bounds():
     """The caps are token BUDGETS: a completion truncated AT the cap must not overflow to cap+1
     via the EOS append (the stored rollout did not end there — EOS at the cut would teach premature
-    stopping), and BOS must not push a cap-full prompt to cap+1. The pipeline's fixed P2P shape is
-    derived as max_prompt_length + max_completion_length, so an overflow crashes PP mid-epoch."""
+    stopping), and BOS must not push a cap-full prompt to cap+1."""
     batch = _offline_tokenize(
         PostProcBosTokenizer(),
         max_prompt_length=3,
@@ -179,12 +177,11 @@ class HFTruncationTokenizer(NominalBosTokenizer):
 
 
 def test_offline_tokenize_null_completion_cap_is_no_cap():
-    """``max_completion_length: null`` is documented as NO cap, but it reached the tokenizer as
-    ``truncation=True, max_length=None`` — which HF resolves against ``model_max_length``, i.e. the
-    window the launch script pinned from the *prompt* budget. Every stored completion was therefore
-    cut at a number nobody chose, and because the EOS-at-the-cut guard keys off the cap being set,
-    an EOS was still appended at the cut — teaching premature stopping exactly where the data was
-    truncated."""
+    """``max_completion_length: null`` is documented as NO cap. Reaching the tokenizer as
+    ``truncation=True, max_length=None`` it would resolve against ``model_max_length``, i.e. the
+    window the launch script pinned from the *prompt* budget: every stored completion cut at a number
+    nobody chose, and, because the EOS-at-the-cut guard keys off the cap being set, an EOS appended
+    at the cut — teaching premature stopping exactly where the data was truncated."""
     batch = _offline_tokenize(
         HFTruncationTokenizer(), max_completion_length=None, completion="one two three four five six"
     )
@@ -204,9 +201,8 @@ def test_offline_tokenize_explicit_completion_cap_still_truncates():
 
 def test_generative_row_null_prompt_cap_is_no_cap():
     """``prepare_generative_row`` builds the eval-time generation prompts for offline GRPO / DPO /
-    SMPO and carried the same defect: ``truncation=True`` with a nullable cap, so an uncapped prompt
-    was cut at ``model_max_length`` — silently shortening the very prompts the eval generations are
-    judged on."""
+    SMPO, where ``truncation=True`` with a nullable cap would cut an uncapped prompt at
+    ``model_max_length`` — silently shortening the very prompts the eval generations are judged on."""
 
     class _Tok(HFTruncationTokenizer):
         pad_token_id = 0
@@ -224,7 +220,7 @@ def test_generative_row_null_prompt_cap_is_no_cap():
 
 
 def test_offline_tokenize_eos_and_bos_within_budget():
-    """Under the caps, the terminal EOS and the post-processor BOS are kept as before."""
+    """Under the caps, the terminal EOS and the post-processor BOS are kept."""
     batch = _offline_tokenize(
         PostProcBosTokenizer(), max_prompt_length=3, max_completion_length=8, prompt="one two", completion="short one"
     )

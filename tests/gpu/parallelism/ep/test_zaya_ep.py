@@ -12,14 +12,7 @@ Verifies the EP path on ZAYA1-8B with DeepEP all-to-all expert routing:
      loss trend is not asserted.
 
 Run (2 GPUs, EP=2):
-    docker run --rm --gpus '"device=0,1"' --ipc=host --ulimit memlock=-1 \\
-        --ulimit stack=67108864 \\
-        -v $(pwd):/workspace \\
-        -v /root/.cache/huggingface:/root/.cache/huggingface \\
-        -w /workspace -e HF_HOME=/root/.cache/huggingface \\
-        halo:blackwell \\
-        torchrun --nproc_per_node=2 \\
-            tests/gpu/parallelism/ep/test_zaya_ep.py
+    torchrun --nproc_per_node=2 tests/gpu/parallelism/ep/test_zaya_ep.py
 """
 
 import torch

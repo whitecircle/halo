@@ -218,6 +218,58 @@ def test_a_required_schema_parameter_is_enforced_even_when_the_handler_has_a_def
         tool.execute()
 
 
+def _string_tool(seen: list):
+    """A tool with a required and an optional ``string`` parameter and an ``integer`` one; its handler
+    records what it receives."""
+    return NativeTool(
+        name="run_code",
+        description="d",
+        parameters=[
+            ToolParameter("code", "string", "code"),
+            ToolParameter("stdin", "string", "input", required=False),
+            ToolParameter("max_results", "integer", "n", required=False),
+        ],
+        handler=lambda code, stdin="", max_results=5: seen.append((code, stdin, max_results)) or "ran",
+    )
+
+
+@pytest.mark.parametrize("value", [["print(1)"], {"src": "print(1)"}, ("print(1)",)])
+def test_a_list_or_object_for_a_string_parameter_is_refused_before_the_handler_runs(value):
+    """A list ``code`` passed on fails inside the sandbox, read as the backend's fault; no string reading
+    of a list or an object exists, so the call is refused, naming the type, on both execute paths."""
+    seen = []
+    tool = _string_tool(seen)
+    refusal = rf"^run_code: code must be a string, got {type(value).__name__}$"
+    with pytest.raises(ToolArgumentError, match=refusal):
+        tool.execute(code=value)
+    with pytest.raises(ToolArgumentError, match=refusal):
+        asyncio.run(tool.execute_async(code=value))
+    assert seen == [], "a refused call must never reach the handler"
+
+
+@pytest.mark.parametrize(("value", "received"), [(5, "5"), (3.5, "3.5"), (True, "True")])
+def test_a_json_scalar_for_a_string_parameter_reaches_the_handler_as_its_string(value, received):
+    """An engine's tool parser may emit an unquoted scalar (SGLang's Gemma 4 detector sends ``"stdin": 5``),
+    which reads as the string it spells, at binding and so at the handler."""
+    seen = []
+    tool = _string_tool(seen)
+    assert tool.bind({"code": "c", "stdin": value}) == {"code": "c", "stdin": received}
+    assert tool.execute(code="c", stdin=value) == "ran"
+    assert asyncio.run(tool.execute_async(code="c", stdin=value)) == "ran"
+    assert seen == [("c", received, 5)] * 2
+
+
+def test_a_null_string_argument_is_an_omission():
+    """Null on an optional ``string`` parameter leaves the handler its default; on a required one the
+    call is missing it. A parameter declared with another type gets its value as sent."""
+    seen = []
+    tool = _string_tool(seen)
+    assert tool.execute(code="c", stdin=None, max_results=None) == "ran"
+    assert seen == [("c", "", None)]
+    with pytest.raises(ToolArgumentError, match=r"^run_code: missing a required argument: 'code'$"):
+        tool.execute(code=None)
+
+
 def test_an_async_only_tool_is_refused_by_the_sync_path_at_binding():
     """Admission binds against the handler that will run; a sync call has none, so it is refused before
     the protocol counts it rather than after ``execute`` fails."""
@@ -483,9 +535,9 @@ def test_the_binding_check_would_catch_a_misspelled_parameter():
 
 
 def test_code_tool_advertises_no_input_channel_it_cannot_bind():
-    """The description is the model's only account of the tool. It once promised stdin while no
-    ``stdin`` parameter was declared and none was bound, so the sandbox always ran with empty input
-    and the model was told to write programs that read it."""
+    """The description is the model's only account of the tool. One promising stdin with no ``stdin``
+    parameter declared and bound would run every program on empty input while telling the model to
+    write programs that read it."""
     for source in ("code", "python", "session_code", "session_bash"):
         for tool in _registries_under_test()[source].list_tools():
             declared = {parameter.name for parameter in tool.parameters}

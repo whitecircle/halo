@@ -47,6 +47,7 @@ from src.trainers.mixins.pp_gates import (
     require_model_and_args_kwargs,
     require_precomputed_reference,
 )
+from src.trainers.mixins.trl_dataset_prep import CoordinatedTRLDatasetPrepMixin
 from src.trainers.mixins.validation import ctor_config, ctor_positions, ctor_value, disable_trl_liger
 from src.trainers.preference.logprobs import FP32LogprobsMixin
 from src.trainers.preference.precompute import PrecomputeRefLogpsRankConsistentMixin
@@ -102,7 +103,11 @@ _PP_PAIR_LOSSES: dict[str, Callable[[float, torch.Tensor, torch.Tensor, torch.Te
 
 
 class DistributedDPOTrainer(
-    FP32LogprobsMixin, PrecomputeRefLogpsRankConsistentMixin, DistributedTrainerMixin, DPOTrainer
+    FP32LogprobsMixin,
+    PrecomputeRefLogpsRankConsistentMixin,
+    DistributedTrainerMixin,
+    CoordinatedTRLDatasetPrepMixin,
+    DPOTrainer,
 ):
     """TRL's DPOTrainer plus EP/TP/PP via DistributedTrainerMixin. CP unsupported (see module docstring).
 

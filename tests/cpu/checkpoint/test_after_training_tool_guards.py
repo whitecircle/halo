@@ -130,8 +130,8 @@ def test_one_spelling_decides_what_a_sink_key_is():
 
 
 def test_a_merged_peft_conversion_copies_the_base_directory_not_the_adapter(tmp_path, monkeypatch):
-    """THE regression: with the adapter directory as ``source_dir`` the save copied
-    ``adapter_config.json`` next to full merged weights, and downstream tools re-exported the base.
+    """With the adapter directory as ``source_dir`` the save would copy ``adapter_config.json`` next
+    to full merged weights, and downstream tools would re-export the base.
 
     Driven through the tool's own entry point, so it also pins that ``--peft --merge_adapter`` still
     reaches the shared merge rather than growing a second copy of the sequence.

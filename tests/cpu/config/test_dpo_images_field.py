@@ -97,7 +97,7 @@ def _run_dpo(tmp_path, dataset: DatasetDict, yaml_body: str = "") -> dict:
         mock.patch.object(module, "setup_peft_model", return_value=None),
         mock.patch.object(module, "log_model_info"),
         mock.patch.object(module, "load_script_datasets", return_value=(dataset, False)),
-        # Both moved into the shared script_runner helper the script now calls — patch its globals.
+        # Both live in the shared script_runner helper the script calls — patch its globals.
         mock.patch("src.training.script_runner.prepare_preference_datasets", side_effect=_TextPathReached),
         mock.patch("src.training.script_runner.log_dataset_examples", side_effect=capture),
         mock.patch("src.training.parser.install_log_tee"),

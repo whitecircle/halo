@@ -5,7 +5,7 @@
 top-k, unbiased gate weights — for every family that routes this way, plus the single writer of the
 six attributes it reads (``n_routed_experts``, ``n_group``, ``topk_group``, ``norm_topk_prob``,
 ``routed_scaling_factor``, ``top_k``). Writer and reader in one class is what stops a family from
-half-populating the contract; the shared body is what stops four near-identical copies from
+half-populating the contract; the shared body is what stops near-identical copies from
 drifting, which is a SILENT routing change (a bias added in the wrong order, a knob defaulted)
 rather than a crash.
 
@@ -139,7 +139,7 @@ def test_the_roster_routing_this_way_is_exactly_the_five_families_that_do():
 @pytest.mark.parametrize("cls", _group_limited_families(), ids=lambda c: c.__name__)
 def test_no_family_forks_the_shared_routing_body(cls):
     """A family may declare how it SCORES its logits and where its knobs live; re-implementing the
-    selection itself is how four copies drifted apart before, and every way they can disagree —
+    selection itself lets the copies drift apart, and every way they can disagree —
     the order the two biases are added in, which scores the weights come from, whether replay runs
     — is silent."""
     forked = [name for name in ("route_tokens_to_experts", "_group_limited_topk") if name in vars(cls)]
@@ -234,8 +234,8 @@ def _real_glm4_block():
 )
 def test_real_upstream_blocks_deliver_non_neutral_knobs(cls, build):
     """Against the INSTALLED transformers modules, with knobs at non-neutral values — the synthetic
-    block above carries a pre-5.14 layout and passed while Mistral4 silently resolved every knob to
-    its default (the 5.14 *TopkRouter refactor moved them onto the gate, spelled ``num_group``)."""
+    block above carries the knobs on the block, while the installed ``*TopkRouter`` modules carry them
+    on the gate (spelled ``num_group``), which only a real block exercises."""
     torch.manual_seed(0)
     layer = _build(cls, build())
     assert layer.n_routed_experts == E

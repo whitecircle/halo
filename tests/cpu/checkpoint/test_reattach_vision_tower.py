@@ -107,8 +107,8 @@ def test_wrapper_layout_input_is_refused(artifacts, tmp_path):
 def test_a_base_storing_its_text_tower_under_another_prefix_is_refused(artifacts, tmp_path):
     """The export supersedes the base's text tower by key prefix. A base keeping a vendor namespace
     (renamed only inside ``from_pretrained``) has nothing under ``model.language_model.``, so every
-    one of its text tensors was carried over beside the trained ones — two text towers colliding on
-    load — and the run reported success. Refused before the output directory exists."""
+    one of its text tensors would be carried over beside the trained ones — two text towers colliding
+    on load — under a reported success. Refused before the output directory exists."""
     base_dir, export_dir = artifacts
     vendor_base = tmp_path / "vendor_base"
     vendor_base.mkdir()
@@ -127,8 +127,8 @@ def test_a_base_storing_its_text_tower_under_another_prefix_is_refused(artifacts
 
 def test_an_output_aimed_at_the_base_is_refused(artifacts):
     """The base is streamed from while the writer's close sweeps every ``model*.safetensors`` it did
-    not write, so ``--output_dir`` equal to a local ``--model_id`` replaced the base checkpoint with
-    the wrapper artifact and reported success."""
+    not write, so ``--output_dir`` equal to a local ``--model_id`` would replace the base checkpoint
+    with the wrapper artifact under a reported success."""
     base_dir, export_dir = artifacts
     before = sorted(os.listdir(base_dir))
     with pytest.raises(ValueError, match="same path"):

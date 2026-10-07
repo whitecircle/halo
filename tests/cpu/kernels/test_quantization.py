@@ -3,8 +3,8 @@
 ``src/kernels/lowp/quantization.py``.
 
 Validates storage shapes/dtypes, quantize->dequantize round-trip error within each
-format's tolerance, axis handling, divisibility guards, the NVFP4 saturating-scale
-outlier guard, the straight-through ``fake_quant`` estimator, the per-step
+format's tolerance, axis handling, divisibility guards, NVFP4's outlier handling, the
+straight-through ``fake_quant`` estimator, the per-step
 ``cached_fake_quant`` weight cache, and which failures switch the compiled round trip to eager.
 
 Run: ``pytest tests/cpu/kernels/test_quantization.py``.
@@ -135,9 +135,9 @@ def test_e2m1_midpoints_round_to_even_not_down():
 
 
 def test_nvfp4_saturating_scale_guards_against_outlier_nan():
-    # A block amax above E2M1_MAX*E4M3_MAX (=2688) would overflow the e4m3 scale to NaN
-    # and poison the tensor; the source clamps the scale instead. Reconstruction must
-    # stay finite (the outlier is under-scaled, not NaN).
+    # A block amax above E2M1_MAX*E4M3_MAX (=2688) would overflow a lone e4m3 scale to NaN
+    # and poison the tensor; the per-tensor global scale lifts it into e4m3 range instead.
+    # Reconstruction must stay finite.
     x = torch.randn(16, 64) * 0.1
     x[0, 0] = 5000.0  # well past the saturation threshold
     q = quantize_nvfp4(x, block_size=16)

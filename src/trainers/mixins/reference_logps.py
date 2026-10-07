@@ -27,9 +27,13 @@ from src.distributed.runtime import (
 
 logger = get_logger(__name__, log_level="info")
 
-_DIGEST_BATCH_ROWS = 256
+# Rows per Arrow batch wherever a token or score table is scanned, so no scan materializes a split.
+REFERENCE_SCAN_ROWS = 256
 _DIGEST_CHUNK_VALUES = 1 << 22
 _IDENTITY_SCHEMA = {"num_rows": int, "token_digests": Mapping, "settings": Mapping}
+# The settings key recording the dtype a split's reference log-probs were computed in: a split scored
+# at another precision carries that precision's rounding and is never reused.
+LOGPROB_PRECISION_KEY = "logprob_precision"
 # Every complete checkpoint of a run carries the same run-start reference scores.
 PREVIOUS_CHECKPOINT_RECOVERY = (
     "A checkpoint whose save stopped before this file can take the previous checkpoint's copy instead."
@@ -51,7 +55,7 @@ def token_digest(dataset: Dataset, column: str) -> str:
     Separate length and value hashes keep batching and chunk boundaries out of the digest.
     """
     lengths, values = hashlib.sha256(), hashlib.sha256()
-    for batch in dataset.select_columns([column]).with_format("arrow").iter(batch_size=_DIGEST_BATCH_ROWS):
+    for batch in dataset.select_columns([column]).with_format("arrow").iter(batch_size=REFERENCE_SCAN_ROWS):
         array = batch.column(column).combine_chunks()
         if array.null_count:
             raise ValueError(f"'{column}' contains null token IDs")
@@ -96,6 +100,9 @@ class ReferenceLogpsCheckpointMixin:
     # Settings beyond the data, chat template and tokenizer that change this trainer's digested token
     # columns, named as causes when a saved split's digests do not match.
     _reference_token_settings: str | None = None
+    # Whether a resume memory-maps the saved payload instead of loading it into each rank's heap. The
+    # mapping holds its file for the run, so such a trainer also overrides _saved_reference_file.
+    _maps_saved_reference = False
 
     def _init_reference_state(self, *, checkpoint, given: bool, policy_from_checkpoint: bool) -> None:
         self._reference_resume_given = given
@@ -109,7 +116,7 @@ class ReferenceLogpsCheckpointMixin:
         self._reference_immutable_path: str | None = None
 
     def _reference_resume_required(self) -> bool:
-        return self._policy_from_checkpoint and getattr(self, "ref_model", None) is None
+        return self._policy_from_checkpoint and self.ref_model is None
 
     def _reference_split_identity(self, dataset: Dataset, name: str, settings: Mapping | None = None) -> dict:
         guard = DeferredRankFailure(f"Identifying the '{name}' reference dataset", exc_type=ValueError)
@@ -124,11 +131,7 @@ class ReferenceLogpsCheckpointMixin:
         return identity
 
     def _check_reference_resume_context(self) -> None:
-        missing = (
-            not self._reference_resume_given
-            and getattr(self, "ref_model", None) is None
-            and getattr(getattr(self, "args", None), "resume_from_checkpoint", None)
-        )
+        missing = not self._reference_resume_given and self.ref_model is None and self.args.resume_from_checkpoint
         reject_across_ranks(
             f"resume_from_checkpoint={self.args.resume_from_checkpoint!r} is set, but the trainer was built "
             "without resume_checkpoint/"
@@ -145,8 +148,8 @@ class ReferenceLogpsCheckpointMixin:
         if checkpoint is None:
             return None
         if not self._reference_saved_loaded:
-            saved, path = consensus_read(
-                os.path.join(checkpoint, REFERENCE_LOGPS_FILE),
+            saved, _ = consensus_read(
+                self._saved_reference_file(checkpoint),
                 self._read_reference_checkpoint,
                 what=REFERENCE_LOGPS_FILE,
                 checkpoint=checkpoint,
@@ -154,7 +157,7 @@ class ReferenceLogpsCheckpointMixin:
             guard = DeferredRankFailure(f"Reading {REFERENCE_LOGPS_FILE}", exc_type=ValueError)
             self._resumed_reference_logps = guard.run(lambda: dict(saved) if isinstance(saved, Mapping) else {})
             guard.reject()
-            self._reference_saved_path = path
+            self._reference_saved_path = os.path.join(checkpoint, REFERENCE_LOGPS_FILE)
             self._reference_saved_loaded = True
         entry = self._resumed_reference_logps.get(name)
         present_all, present_any = rank_consensus(entry is not None)
@@ -188,8 +191,12 @@ class ReferenceLogpsCheckpointMixin:
         logger.info(f"Restored the '{name}' reference log-probs from {self._reference_saved_path}; skipping sweep.")
         return attached
 
+    def _saved_reference_file(self, checkpoint: str) -> str:
+        """The file a resume reads ``checkpoint``'s saved references from. Collective where overridden."""
+        return os.path.join(checkpoint, REFERENCE_LOGPS_FILE)
+
     def _read_reference_checkpoint(self, path: str):
-        return torch.load(path, map_location="cpu", weights_only=True)
+        return torch.load(path, map_location="cpu", weights_only=True, mmap=self._maps_saved_reference)
 
     def _reference_entry_mismatch(self, entry, dataset, needed, identity) -> str | None:
         if not is_reference_entry(entry):

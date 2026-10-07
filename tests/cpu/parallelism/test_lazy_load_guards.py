@@ -335,7 +335,7 @@ def test_two_checkpoint_keys_claiming_one_model_tensor_are_refused():
 
 
 # --------------------------------------------------------------------------------------------
-# Finding 4: the per-rank load is fenced by the consensus seam, not by a bare barrier
+# The per-rank load is fenced by the consensus seam, not by a bare barrier
 # --------------------------------------------------------------------------------------------
 
 

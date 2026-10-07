@@ -1,8 +1,7 @@
 """CPU tests for the torch-free env-var helpers in :mod:`src.env`.
 
 Covers the truthiness/parse-and-fallback contract every HALO_/DIST_ knob relies on, and pins the
-:func:`env_str` fallback-chain semantics that ``src/data/sources/dataset_cache.py`` depends on
-(``HALO_S3_DATASET_CACHE_DIR`` → ``S3_DATASET_CACHE_DIR`` → home default).
+:func:`env_str` fallback-chain semantics.
 """
 
 import importlib

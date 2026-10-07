@@ -8,8 +8,8 @@ Tests 4 environment types against actual evaluation datasets:
 3. ExamQA            → MMLU-Pro (hard multiple choice)
 4. CodeContests      → Codeforces (competitive programming)
 
-Each test runs a short training loop (3-5 steps) with a live vLLM server, sequentially in one
-process: every benchmark forms its own weight-transfer group on the same ``HALO_TEST_VLLM_GROUP_PORT``, so it
+Each test runs a short training loop (``MAX_STEPS``, default 3) with a live vLLM server, sequentially
+in one process: every benchmark forms its own weight-transfer group on the same group port, so it
 also covers the client releasing that listener on close.
 
 Prerequisites:
@@ -63,6 +63,7 @@ from tests.common.harness import gpu_test_main, record_check
 from tests.common.models import QWEN3_0_6B
 from tests.common.utils import cleanup_memory, step_losses
 from tests.common.utils import log as rank0_log
+from tests.common.weight_sync import weight_transfer_port
 
 # Same knob as docker-compose.vllm.yml: the trainer broadcasts its own weights into the served
 # model, so the two must be the same checkpoint.
@@ -70,14 +71,14 @@ MODEL_NAME = env_str("VLLM_MODEL", QWEN3_0_6B)
 # ``or`` (not an env_str default): an exported-but-empty VLLM_SERVER_URL passes the conftest gate,
 # which reads it the same way, so the client must fall back to the same URL rather than to "".
 VLLM_SERVER_URL = env_str("VLLM_SERVER_URL") or "http://localhost:8000"
-HALO_TEST_VLLM_GROUP_PORT = env_int("HALO_TEST_VLLM_GROUP_PORT", 51216)
+# Drawn once for the process (one rank): every benchmark rebinds it.
+GROUP_PORT = weight_transfer_port("HALO_TEST_VLLM_GROUP_PORT")
 # The search benchmark keeps the offline fabricated-results backend instead of rate-limited live
 # search; naming it is refused at env construction without this opt-in. Module scope, because Ray
 # actors snapshot the driver environment at the FIRST ray.init — an earlier benchmark in the same
 # process starts Ray before test_search_qa runs.
 os.environ["HALO_ALLOW_MOCK_SEARCH"] = "1"
 MAX_STEPS = env_int("HALO_TEST_MAX_STEPS", 3)
-SEED = 42
 
 # Sized for ONE vLLM server: batch × grad_accum × num_generations = 16 multi-turn rollouts per step,
 # which is about what a single engine serves concurrently. Scale the workers with the engine count.
@@ -273,7 +274,7 @@ def run_env_grpo_training(
             "gradient_checkpointing": True,
             "gradient_checkpointing_kwargs": {"use_reentrant": False},
             "optim": "adamw_torch_fused",
-            "vllm_group_port": HALO_TEST_VLLM_GROUP_PORT,
+            "vllm_group_port": GROUP_PORT,
             "remove_unused_columns": False,
         }
         if extra_grpo_kwargs:
@@ -305,12 +306,16 @@ def run_env_grpo_training(
         )
 
         # environment_cls takes real BaseEnvironment subclasses only; factory-built envs (qa_search)
-        # arrive as registry names and must go through EnvironmentConfig instead.
+        # arrive as registry names and must go through EnvironmentConfig instead, whose turn cap is its
+        # own field.
         log("  Creating DistributedAsyncEnvironmentalGRPOTrainer...")
         if isinstance(environment_cls, str):
+            env_kwargs = dict(environment_kwargs)
             env_selector = {
                 "environment_config": EnvironmentConfig(
-                    environment_type=environment_cls, environment_kwargs=environment_kwargs
+                    environment_type=environment_cls,
+                    max_turns=env_kwargs.pop("max_turns", None),
+                    environment_kwargs=env_kwargs,
                 )
             }
         else:
@@ -460,7 +465,12 @@ def test_code_contests():
         env_name="code_contests",
         dataset=dataset,
         environment_cls=CodeContestsEnvironment,
-        environment_kwargs={"max_turns": 4, "timeout_per_test": 5},
+        # The class default level's cap (medium, 8192) would fill the 2048-token turn, which the run refuses.
+        environment_kwargs={
+            "max_turns": 4,
+            "timeout_per_test": 5,
+            "reasoning_effort_profiles": {"medium": {"thinking_tokens": 1024}},
+        },
         num_generations=4,
         batch_size=4,  # must be divisible by num_generations
         grad_accum=1,

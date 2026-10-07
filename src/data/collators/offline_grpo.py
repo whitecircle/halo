@@ -18,6 +18,14 @@ logger = get_logger(__name__, log_level="INFO")
 # Raw reference scores align with completion tokens, independent of the scoring parallelism.
 REF_PER_TOKEN_LOGPS_COLUMN = "ref_per_token_logps"
 
+# Per-row group metadata the GRPO loss reads, carried into the batch unchanged by both layouts.
+_GROUP_COLUMNS = ("group_id", "group_size", "advantage")
+
+
+def _group_tensors(features: list[dict[str, Any]]) -> dict[str, torch.Tensor]:
+    """The batch's :data:`_GROUP_COLUMNS`, one tensor entry per row."""
+    return {column: torch.tensor([row[column] for row in features]) for column in _GROUP_COLUMNS}
+
 
 def _validate_reference_rows(features: list[dict[str, Any]]) -> bool:
     """Both layouts require references to match the same raw completion tokens."""
@@ -80,9 +88,7 @@ class OfflineGRPODataCollatorWithPadding:
             "prompt_attention_mask": pad(prompt_attention_mask, padding_value=0, padding_side="left"),
             "completion_input_ids": pad(completion_input_ids, padding_value=pad_value),
             "completion_attention_mask": pad(completion_attention_mask, padding_value=0),
-            "group_id": torch.tensor([ex["group_id"] for ex in features]),
-            "group_size": torch.tensor([ex["group_size"] for ex in features]),
-            "advantage": torch.tensor([ex["advantage"] for ex in features]),
+            **_group_tensors(features),
         }
         if has_ref_logps:
             output[REF_PER_TOKEN_LOGPS_COLUMN] = pad(ref_logps, padding_value=0)
@@ -141,9 +147,7 @@ class OfflineGRPOCPDataCollatorWithPadding:
             "input_ids": token_rows,
             "attention_mask": attention,
             "labels": target_rows,
-            "group_id": torch.tensor([row["group_id"] for row in features]),
-            "group_size": torch.tensor([row["group_size"] for row in features]),
-            "advantage": torch.tensor([row["advantage"] for row in features]),
+            **_group_tensors(features),
         }
         if reference_rows is not None:
             output[REF_PER_TOKEN_LOGPS_COLUMN] = reference_rows

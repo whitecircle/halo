@@ -8,7 +8,6 @@ from typing import Any, Literal
 from transformers import TrainingArguments
 
 from src.args.validation import RangeValidatedConfig
-from src.data.spans import LABEL_IGNORE_INDEX
 
 
 @dataclass
@@ -109,10 +108,6 @@ class SmoothMarginPOConfig(RangeValidatedConfig, TrainingArguments):
             "help": "Which end of an over-long PROMPT to keep: 'keep_end' (default, the tokens "
             "nearest the completion) or 'keep_start'. Completions always truncate from the end."
         },
-    )
-    label_pad_token_id: int = field(
-        default=LABEL_IGNORE_INDEX,
-        metadata={"help": "Token ID for masking prompt in labels."},
     )
     disable_dropout: bool = field(
         default=True,

@@ -23,8 +23,8 @@ Two settings make the comparison an equivalence statement about *parallelism* ra
 preprocessing, and both are load-bearing: ``eager`` attention on both sides (gpt-oss carries live
 attention sinks, and a sink-dropping backend moves the loss by nats), and ``reset_sinks=False`` on
 the parallel load (the loader's default resets the sinks to dtype-min for fine-tuning, which on
-its own shifts this batch's loss by 2.65 — measured — and would swamp everything below). FA2/FA4
-under EP+TP is covered by ``test_ep_tp_replicated_grad_sync.py``.
+its own shifts this batch's loss by 2.65 — measured — and would swamp everything below).
+flex_attention under EP+TP is covered by ``test_ep_tp_replicated_grad_sync.py``.
 
 Run with 2 GPUs:
     torchrun --nproc_per_node=2 \
@@ -149,7 +149,7 @@ def run(ctx):
     # Every rank saw the same batch, so a spread means the gather/reduce desynced them.
     spread = world_spread(loss.item())
     metrics["rank_loss_spread"] = spread
-    checks["losses_agree_across_ranks"] = spread < TOL.ep_identical_batch_rank_spread_abs
+    checks["losses_agree_across_ranks"] = TOL.identical_batch_ranks_agree(spread)
 
     # ── Router gradient vs the reference ─────────────────────────────────────────────────────
     loss.backward()

@@ -37,9 +37,9 @@ from src.checkpoint.config_export import (
     save_model_config,
 )
 from src.checkpoint.tool_io import save_full_checkpoint
+from src.distributed.checkpoint.ep_save import save_ep_model
 from src.distributed.expert_parallel.config import EPConfig
 from src.distributed.expert_parallel.patching import patch_moe_model_for_ep
-from src.distributed.expert_parallel.saving import save_ep_model
 from tests.common.models import TINY_GEMMA4_MOE_CONFIG, TINY_QWEN3_MOE_CONFIG
 
 GLOBAL_HEAD_DIM = TINY_GEMMA4_MOE_CONFIG["global_head_dim"]

@@ -140,7 +140,7 @@ def test_scan_flags_a_first_party_skip_but_spares_a_third_party_submodule(tmp_pa
     probe = tmp_path / "test_probe.py"
     probe.write_text(
         "import pytest\n\n\ndef test_x():\n"
-        '    pytest.importorskip("scripts.inference.policies.gradio_policies_demo")\n'
+        '    pytest.importorskip("scripts.inference.playground.gradio_openai_chatbot")\n'
         '    pytest.importorskip("transformers.models.qwen3.modeling_qwen3")\n'
     )
 

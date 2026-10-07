@@ -293,7 +293,7 @@ class EPConfig:
         self.fp32_grad_reduce = fp32_grad_reduce
         self.use_grouped_gemm = use_grouped_gemm
         # The LoRA gather/load paths assume this: adapters are never ETP-sharded, so lifting the
-        # restriction means re-adding the per-projection A/B shard split those paths dropped.
+        # restriction needs a per-projection A/B shard split in those paths.
         if expert_lora is not None and expert_tp_size > 1:
             reject_expert_lora_with_expert_tp()
         self.expert_lora = expert_lora

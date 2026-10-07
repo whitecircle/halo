@@ -1,16 +1,21 @@
 """torch.distributed core: rank/world-size getters, launcher-derived node math, barriers and sync
-context managers, cross-rank rejection/consensus helpers, the shared-filesystem flags, the
+context managers, the cross-rank rejection/consensus seams, the shared-filesystem flags, the
 process-group timeouts and DTensor resolution.
+
+Leaf of the package — :mod:`~src.distributed.nvlink` and :mod:`~src.distributed.filesystem` import
+it, never the reverse — which is why the shared-filesystem flags live here rather than beside the
+coordination that reads them: :func:`init_distributed` agrees them as the group comes up.
 """
 
 import datetime
 import gc
+import hashlib
 import logging
 import os
 import re
 from collections.abc import Callable
 from contextlib import contextmanager
-from typing import Any
+from typing import Any, NamedTuple
 
 import torch
 import torch.distributed as dist
@@ -22,10 +27,10 @@ from src.log import KEY_PREVIEW_COUNT, warn_once
 
 logger = logging.getLogger(__name__)
 
-# Process-wide: the fallback resolves the same way on every call, so warn once.
+# Process-wide: the fallback resolves the same way on every call, so one line says it.
 _LWS_FALLBACK_ANNOUNCED: set[str] = set()
 
-# Each side falls back to the umbrella while unset; an explicitly set side var overrides it.
+# Each side falls back to the umbrella while UNSET; a side var that IS set wins over it.
 _SHARED_FILESYSTEM_VAR = "DIST_SHARED_FILESYSTEM"
 _INPUT_SHARED_FILESYSTEM_VAR = "DIST_INPUT_SHARED_FILESYSTEM"
 _OUTPUT_SHARED_FILESYSTEM_VAR = "DIST_OUTPUT_SHARED_FILESYSTEM"
@@ -33,7 +38,15 @@ _OUTPUT_SHARED_FILESYSTEM_VAR = "DIST_OUTPUT_SHARED_FILESYSTEM"
 # Rank-agreed values for the three vars above, set once by resolve_shared_filesystem_consensus().
 _SHARED_FILESYSTEM_CONSENSUS: dict[str, bool] | None = None
 
-# NCCL has no 16-bit integer type; such tensors are sent as a lossless uint8 bit view.
+# A digest below 2**62 negates without overflowing int64, so [d, -d] rides one MAX all-reduce.
+_AGREEMENT_DIGEST_BITS = 62
+# MAX's neutral element: an abstaining rank's slot never wins.
+_INT64_MIN = -(2**63)
+# The [d, -d] pair of a rank whose object cannot be digested: 2**62 is above every real digest while
+# 0 is at or above every real -d, so max(d) != -max(-d) whoever else takes part.
+_UNDIGESTIBLE = (2**_AGREEMENT_DIGEST_BITS, 0)
+
+# NCCL has no 16-bit-integer type; such tensors ride the wire as a lossless uint8 bit view.
 _NCCL_UNSUPPORTED_DTYPES = (torch.int16, torch.uint16)
 
 
@@ -43,10 +56,11 @@ def current_device() -> torch.device:
 
 
 def collective_device() -> torch.device:
-    """Device a hand-built collective tensor must live on for the default group's backend.
+    """Where a hand-built collective tensor must live for the default group's BACKEND — not this
+    rank's compute device.
 
-    Differs from :func:`current_device` for a gloo group on a GPU host: gloo transfers host memory,
-    so the tensor belongs on CPU.
+    The two differ on every gloo group running on a GPU box: gloo moves host memory, so a CUDA
+    tensor is at best a staging copy, while :func:`current_device` still answers ``cuda:N``.
     """
     backend = dist.get_backend() if dist.is_available() and dist.is_initialized() else None
     if backend is not None and backend.lower() == dist.Backend.NCCL and torch.cuda.is_available():
@@ -71,9 +85,10 @@ def get_global_world_size() -> int:
 def launcher_global_rank() -> int:
     """Global rank from the live process group, else the launcher's ``RANK`` / ``SLURM_PROCID``.
 
-    Valid before ``init_process_group``, which the node-local rank math needs: reporting 0 pre-init
-    would bind every rank of the node to ``cuda:0``. ``RANK`` takes precedence over
-    ``SLURM_PROCID``, which under ``srun torchrun`` counts srun tasks (one per node), not ranks.
+    Valid BEFORE ``init_process_group``, unlike :func:`get_global_rank`, which the node-local rank
+    math needs: reporting 0 pre-init would bind every rank of the node to ``cuda:0``. ``RANK`` wins
+    over ``SLURM_PROCID`` because ``srun torchrun`` sets both and the SLURM value counts srun tasks
+    (one per node) there, not ranks.
     """
     if dist.is_available() and dist.is_initialized():
         return dist.get_rank()
@@ -84,9 +99,10 @@ def launcher_global_world_size() -> int:
     """World size from the live process group, else ``WORLD_SIZE`` / ``SLURM_NTASKS`` (1 when none).
 
     Pre-init counterpart of :func:`get_global_world_size`, same precedence. Under a bare
-    ``srun --ntasks-per-node=8`` neither ``RANK`` nor ``WORLD_SIZE`` is set, so without the SLURM
-    fallback every rank would read world 1 and build no group. ``SLURM_NTASKS`` counts only
-    alongside ``SLURM_PROCID``, which ``sbatch``/``salloc`` do not export.
+    ``srun --ntasks-per-node=8`` neither ``RANK`` nor ``WORLD_SIZE`` exists, and without the SLURM
+    fallback every rank would read world 1, build no group, believe itself main and write one
+    ``output_dir``. ``SLURM_NTASKS`` counts only alongside ``SLURM_PROCID``: ``sbatch``/``salloc``
+    export the former without the latter, where a plain ``python`` launch really is world 1.
     """
     if dist.is_available() and dist.is_initialized():
         return dist.get_world_size()
@@ -95,7 +111,10 @@ def launcher_global_world_size() -> int:
 
 
 def _warn_bad_local_world_size(local_world_size: int) -> None:
-    """Warn that the node's process count is not positive, so node-local rank math degrades."""
+    """Warn that the node's process count is not a positive number, so node-local rank math degrades.
+
+    A nonsensical value must not silently collapse every rank onto node 0 / ``cuda:0``.
+    """
     logger.warning(
         "Local world size resolved to %d, which is not a positive process count — node-local rank "
         "math degrades to a single node with this rank at index 0. Set LOCAL_WORLD_SIZE explicitly "
@@ -126,8 +145,8 @@ def get_local_world_size() -> int:
     """Processes on this node, from LOCAL_WORLD_SIZE / SLURM_NTASKS_PER_NODE.
 
     Falls back to the visible CUDA device count (one process per GPU), then to the global world
-    size, which collapses num_nodes to 1 and builds wrong node-local EP/CP groups on a real
-    multi-node job; that path warns once.
+    size — a last resort that collapses num_nodes to 1 and builds wrong node-local EP/CP groups on a
+    real multi-node job, so it warns once.
     """
     if "LOCAL_WORLD_SIZE" in os.environ:
         return int(os.environ["LOCAL_WORLD_SIZE"])
@@ -163,8 +182,8 @@ def get_local_world_size() -> int:
 def get_num_nodes() -> int:
     """Number of nodes in the distributed setup, or 1 if not distributed.
 
-    Launcher-derived like :func:`get_local_rank`; a post-init-only world size would report 0 nodes
-    before ``init_process_group``.
+    Launcher-derived like :func:`get_local_rank`: mixing a launcher-derived node size with a
+    post-init-only world size would report 0 nodes before ``init_process_group``.
     """
     local_world_size = get_local_world_size()
     if local_world_size <= 0:
@@ -183,10 +202,10 @@ def get_node_rank() -> int:
 
 
 def is_multi_rank_run() -> bool:
-    """Whether an initialized process group holds more than one rank.
+    """Whether a collective would actually reach a peer: an initialized group of more than one rank.
 
-    Guards code that computes a value locally and then gathers it: a single-rank run has nothing to
-    gather, and an uninitialized one raises inside the collective.
+    Guards code that computes something locally and then gathers it: a single-rank run has nothing
+    to gather, and an uninitialized one would raise inside the collective.
     """
     return dist.is_available() and dist.is_initialized() and dist.get_world_size() > 1
 
@@ -227,11 +246,11 @@ def barrier(group: dist.ProcessGroup | None = None):
 
 @contextmanager
 def barrier_on_exit(group: dist.ProcessGroup | None = None):
-    """Run a save-rank-only write, then barrier, including when the write raised.
+    """Run a save-rank-only write, then barrier — **even if the write raised**.
 
     One rank writes while every rank must reach the barrier, so an unfenced writer turns a local I/O
-    failure (ENOSPC, EIO, a stale NFS handle) into a job-wide hang. The writer's exception still
-    propagates; this only releases the peers first.
+    failure (ENOSPC, EIO, a stale NFS handle) into a job-wide hang whose traceback names the barrier
+    rather than the disk. The writer's exception still propagates; this only releases the peers first.
     """
     try:
         yield
@@ -242,9 +261,9 @@ def barrier_on_exit(group: dist.ProcessGroup | None = None):
 def nccl_safe_broadcast(tensor: torch.Tensor, src: int, group: dist.ProcessGroup | None = None) -> None:
     """In-place ``dist.broadcast`` that routes NCCL-unsupported dtypes through a uint8 bit view.
 
-    The view shares storage, so the receiver's tensor is written through it, and the reinterpret
-    round-trips exactly (``-1`` sentinels survive). A non-contiguous tensor of an unsupported dtype
-    raises in ``Tensor.view`` rather than broadcasting a copy.
+    The view shares storage, so the receiver's tensor is written through it, and the bit
+    reinterpret round-trips exactly (``-1`` sentinels survive). A non-contiguous tensor of an
+    unsupported dtype fails loud in ``Tensor.view`` rather than silently broadcasting a copy.
     """
     wire = tensor.view(torch.uint8) if tensor.dtype in _NCCL_UNSUPPORTED_DTYPES else tensor
     dist.broadcast(wire, src=src, group=group)
@@ -253,8 +272,8 @@ def nccl_safe_broadcast(tensor: torch.Tensor, src: int, group: dist.ProcessGroup
 def broadcast_from_rank0(value):
     """Return rank 0's ``value`` on every rank; unchanged when not distributed / world size 1.
 
-    Use where a per-rank-derived value (strftime output_dir, run id, a checkpoint decision) must
-    agree across ranks.
+    Use where a per-rank-derived value (strftime output_dir, run id, a checkpoint decision)
+    must agree across ranks to avoid split-brain checkpoints/logs/collective hangs.
     """
     if is_multi_rank_run():
         box = [value]
@@ -268,9 +287,10 @@ def raise_rank0_failure(
 ) -> None:
     """Run ``step`` on global rank 0 and raise its failure on every rank. COLLECTIVE — every rank calls it.
 
-    For work one rank does for the world (a probe of an external backend, a client build): a raise on rank
-    0 alone would leave the peers in the next collective. ``describe`` turns rank 0's exception into the
-    message every rank raises as ``exc_type``; on rank 0 it chains the original exception.
+    For work one rank does for the world (a preflight probe of a rollout server or an external
+    backend): a raise on rank 0 alone would leave the peers in the next collective. ``describe`` turns
+    rank 0's exception into the message every rank raises as ``exc_type``; on rank 0 it chains the
+    original exception.
     """
     failure: str | None = None
     cause: Exception | None = None
@@ -317,18 +337,36 @@ def gather_rank_reasons(local_reason: str | None) -> list[str | None]:
     return reasons
 
 
-def reject_across_ranks(local_reason: str | None, what: str, exc_type: type[Exception] = RuntimeError) -> None:
-    """Raise on every rank when any rank reports a reason. Collective — every rank must call it.
+def _rank_max(slots: list[int]) -> list[int]:
+    """Each int64 slot's MAX across the world, in ONE fixed-size all-reduce. COLLECTIVE.
 
-    For a rank-local verdict taken between collectives: a rank raising alone leaves its peers in the
-    next collective until the watchdog fires. The reason is gathered so every rank reports the real
-    cause, and ``exc_type`` preserves the caller's error type. The gather is bounded by the
-    process-group timeout; where the preceding work is unbounded single-rank time, use
-    :func:`~src.distributed.filesystem.store_reject_across_ranks`.
+    The cheap half of every agreement seam here: a flag or digest reduced in O(1) on the common path,
+    so the object gather that names a failure runs only when there is one to name.
+    """
+    reduced = torch.tensor(slots, dtype=torch.int64, device=collective_device())
+    dist.all_reduce(reduced, op=dist.ReduceOp.MAX)
+    return reduced.tolist()
+
+
+def reject_across_ranks(local_reason: str | None, what: str, exc_type: type[Exception] = RuntimeError) -> None:
+    """Raise on EVERY rank when any rank reports a reason. COLLECTIVE — every rank must call it.
+
+    The seam for a rank-local verdict (one rank's filesystem, one rank's dataset map, one stage's key
+    set) sitting between collectives: a rank raising alone leaves its peers in the next collective
+    with no diagnostic, and its own traceback never prints because teardown blocks there too. The
+    reason travels, so every rank reports the real cause rather than a timeout, and ``exc_type``
+    keeps the caller's error contract (a gate documenting ``ValueError`` still raises ``ValueError``).
+
+    One :func:`_rank_max` of a has-reason flag on the common path, where no rank failed; the reasons
+    are gathered only when some rank holds one. The join is a collective, bounded by the
+    process-group timeout: where the work preceding it is unbounded single-rank time, use
+    :func:`~src.distributed.filesystem.store_reject_across_ranks` instead.
     """
     if not is_multi_rank_run():
         if local_reason:
             raise exc_type(local_reason)
+        return
+    if not _rank_max([int(bool(local_reason))])[0]:
         return
     raise_gathered_reasons(gather_rank_reasons(local_reason), what, exc_type)
 
@@ -336,8 +374,8 @@ def reject_across_ranks(local_reason: str | None, what: str, exc_type: type[Exce
 def divergent_settings(gathered: list[dict[str, object]]) -> dict[str, list[str]]:
     """Setting names whose value is not identical across the per-rank mappings, as sorted spellings.
 
-    Pure, so it is testable without a process group. A name absent from one rank's mapping counts
-    as a divergence.
+    The whole verdict of :func:`reject_divergent_settings`, pure so it is testable without a process
+    group. A name absent from one rank's mapping is a divergence like any other.
     """
     if not gathered:
         return {}
@@ -345,21 +383,74 @@ def divergent_settings(gathered: list[dict[str, object]]) -> dict[str, list[str]
     names = {name for rank_values in gathered for name in rank_values}
     return {
         name: sorted({str(rank_values.get(name)) for rank_values in gathered})
-        for name in sorted(names)
+        for name in sorted(names, key=str)
         if any(rank_values.get(name) != reference.get(name) for rank_values in gathered)
     }
 
 
-def reject_divergent_settings(values: dict[str, object], what: str, guidance: str) -> None:
-    """Raise on every rank when the ranks disagree on a resolved setting. Collective.
+class RankAgreement(NamedTuple):
+    """What :func:`agree_across_ranks` learns in its one all-reduce."""
 
-    For env-derived knobs that decide how many collectives a rank runs, or the wire parameters both
-    ends of an all-to-all share; a per-node divergence there surfaces only as a hang.
+    agreed: bool
+    # Lowest rank that did not abstain; None when every rank did.
+    first_present: int | None
+    any_abstained: bool
 
-    ``values`` must be resolved rather than raw strings, so an absent variable and one set to its
-    own default compare equal. ``guidance`` is appended verbatim to the message.
+
+def _agreement_digest(obj: object) -> int:
+    """62-bit blake2b digest of ``obj``'s canonical repr (a mapping's items sorted). Never Python's
+    ``hash``, which is salted per process."""
+    canonical = sorted(obj.items()) if isinstance(obj, dict) else obj
+    digest = hashlib.blake2b(repr(canonical).encode(), digest_size=8).digest()
+    return int.from_bytes(digest, "big") >> (64 - _AGREEMENT_DIGEST_BITS)
+
+
+def agree_across_ranks(obj: object, *, abstain: bool = False) -> RankAgreement:
+    """Whether every rank that holds ``obj`` holds an equal one. COLLECTIVE — every rank must call it.
+
+    One :func:`_rank_max` of ``[d, -d, -rank, abstained]`` over the canonical digest ``d``: the ranks
+    agree iff ``max(d) == -max(-d)``, so the common case costs no object collective and nothing
+    proportional to the world. An object the digest cannot canonicalize (uncomparable mapping keys, a
+    raising ``repr``) contributes a pair that forces a mismatch, sending every rank down the caller's
+    gather path rather than raising on one rank inside a collective its peers have entered. A caller that must name a disagreement gathers only
+    after ``agreed`` comes back False. ``abstain`` takes a rank out of the comparison (it holds
+    nothing to compare) by contributing MAX's neutral element; ``first_present`` names a rank the
+    abstainers can learn the object from.
     """
     if not is_multi_rank_run():
+        return RankAgreement(True, None if abstain else 0, abstain)
+    if abstain:
+        local = [_INT64_MIN] * 3 + [1]
+    else:
+        try:
+            digest = _agreement_digest(obj)
+            pair = [digest, -digest]
+        except Exception:  # a rank-local raise here would strand the peers in the reduce
+            pair = list(_UNDIGESTIBLE)
+        local = [*pair, -dist.get_rank(), 0]
+    max_digest, max_negated, max_negated_rank, any_abstained = _rank_max(local)
+    if max_negated_rank == _INT64_MIN:
+        return RankAgreement(True, None, True)
+    return RankAgreement(max_digest == -max_negated, -max_negated_rank, bool(any_abstained))
+
+
+def reject_divergent_settings(values: dict[str, object], what: str, guidance: str) -> None:
+    """Raise on EVERY rank when the ranks disagree on a RESOLVED setting. COLLECTIVE.
+
+    The seam for env-derived knobs that decide how many collectives a rank runs, or the wire
+    parameters both ends of an all-to-all share: a partial per-node rollout is a realistic mistake at
+    512 GPUs whose symptom is a hang naming nothing. Agreement is one :func:`agree_across_ranks`
+    all-reduce; only a disagreement gathers the per-rank values to name it.
+
+    ``values`` are RESOLVED, never raw strings: an absent variable and one set to its own default
+    mean the same thing, so comparing strings would reject a launcher exporting a default on the
+    head node only. ``guidance`` is appended verbatim so the caller says what to align.
+
+    The digest is a fast path, not the verdict: values equal under ``==`` can still spell differently
+    (a set's order follows the hash salt, ``30`` and ``30.0``), so a digest mismatch gathers and
+    :func:`divergent_settings` decides. ``gathered`` is the same on every rank, so is the decision.
+    """
+    if not is_multi_rank_run() or agree_across_ranks(values).agreed:
         return
     gathered: list[dict[str, object]] = [{} for _ in range(dist.get_world_size())]
     dist.all_gather_object(gathered, values)
@@ -372,11 +463,12 @@ def reject_divergent_settings(values: dict[str, object], what: str, guidance: st
 
 
 def rank_consensus(local_ok: bool) -> tuple[bool, bool]:
-    """``(all_ok, any_ok)`` across ranks in one SUM all-reduce. Collective — every rank must call it.
+    """``(all_ok, any_ok)`` across ranks in one SUM all-reduce. COLLECTIVE — every rank must call it.
 
-    For an all-or-nothing decision taken from a per-rank observation (a checkpoint file present on
-    some nodes only) that then gates collectives. Does not raise; the caller decides what a partial
-    result means.
+    The seam for an all-or-nothing decision taken from a per-rank observation (a checkpoint file
+    present on some nodes only): such a decision gates collectives, so a split verdict leaves half
+    the world in a DTensor gather the other half never enters. Unlike :func:`reject_across_ranks`
+    it does not raise — the caller chooses what a partial result means.
     """
     if is_multi_rank_run():
         count = torch.tensor([1 if local_ok else 0], device=collective_device())
@@ -387,13 +479,15 @@ def rank_consensus(local_ok: bool) -> tuple[bool, bool]:
 
 
 class DeferredRankFailure:
-    """Defer a rank-local failure to the next collective, so the peers are not left waiting.
+    """Defer a rank-local failure to the next collective, so the ranks after it are not left hanging.
 
-    For a write interleaved with collectives (a checkpoint streaming to disk between per-layer
-    gathers): raising at layer *k* would leave the peers in layer *k+1*'s all-gather until the
-    watchdog fires. Wrap each local step in :meth:`run` and close the region with :meth:`reject`, so
-    the collectives still run on every rank. Once a step fails the rest are skipped, and the first
-    reason is the one reported.
+    For a write INTERLEAVED with collectives (a checkpoint streaming to disk between per-layer
+    gathers), where :func:`barrier_on_exit` fences one that precedes a barrier: raising at layer *k*
+    would leave the peers in layer *k+1*'s all-gather until the watchdog fires. Wrap each local step
+    in :meth:`run` and close the region with :meth:`reject` — the collectives still run everywhere.
+
+    Once a step has failed the rest are skipped: they would write to the filesystem that just failed,
+    and the first reason is the diagnostic one.
     """
 
     def __init__(self, what: str, exc_type: type[Exception] = RuntimeError) -> None:
@@ -408,13 +502,13 @@ class DeferredRankFailure:
         try:
             return step()
         except Exception as exc:  # any local failure must reach the peers as a reason
-            # Only the message reaches :meth:`reject`, so the traceback is logged here.
+            # Only the message survives to :meth:`reject`; a genuine bug needs its traceback here.
             logger.exception("%s failed on this rank; deferring to the next collective", self.what)
             self.reason = f"{type(exc).__name__}: {exc}"
             return None
 
     def reject(self) -> None:
-        """Collective — every rank must call it. Raises on all ranks if any recorded a failure."""
+        """COLLECTIVE — every rank must call it. Raise on all ranks if any recorded a failure."""
         reject_across_ranks(self.reason, self.what, exc_type=self.exc_type)
 
 
@@ -428,9 +522,10 @@ def _shared_filesystem_flag(var: str, default: bool) -> bool:
 def is_shared_filesystem() -> bool:
     """Umbrella shared-filesystem flag, from DIST_SHARED_FILESYSTEM (default "1"=shared).
 
-    Both sides fall back to it; the coordination helpers read :func:`is_input_shared_filesystem` /
-    :func:`is_output_shared_filesystem`. Returns the rank-agreed value once
-    :func:`resolve_shared_filesystem_consensus` has run, else this rank's raw env. Not a collective.
+    The default both sides fall back to; the coordination helpers read
+    :func:`is_input_shared_filesystem` / :func:`is_output_shared_filesystem`. Answers the rank-agreed
+    value once :func:`resolve_shared_filesystem_consensus` has run, else this rank's raw env. Never
+    a collective itself — callers like :func:`fs_aware_save_rank` run inside rank-gated branches.
     """
     return _shared_filesystem_flag(_SHARED_FILESYSTEM_VAR, True)
 
@@ -438,7 +533,7 @@ def is_shared_filesystem() -> bool:
 def is_input_shared_filesystem() -> bool:
     """Whether the read side (model/dataset downloads, dataset map/pack, HF caches) is shared.
 
-    ``DIST_INPUT_SHARED_FILESYSTEM``, falling back to the ``DIST_SHARED_FILESYSTEM`` umbrella. Sets
+    ``DIST_INPUT_SHARED_FILESYSTEM``, falling back to the ``DIST_SHARED_FILESYSTEM`` umbrella. Picks
     the coordination scope of :func:`fs_aware_main_first` and the rank of :func:`fs_aware_load_rank`.
     """
     return _shared_filesystem_flag(_INPUT_SHARED_FILESYSTEM_VAR, is_shared_filesystem())
@@ -447,7 +542,7 @@ def is_input_shared_filesystem() -> bool:
 def is_output_shared_filesystem() -> bool:
     """Whether the write side (checkpoints, run.log, dumped artifacts) is on a shared filesystem.
 
-    ``DIST_OUTPUT_SHARED_FILESYSTEM``, falling back to the ``DIST_SHARED_FILESYSTEM`` umbrella. Sets
+    ``DIST_OUTPUT_SHARED_FILESYSTEM``, falling back to the ``DIST_SHARED_FILESYSTEM`` umbrella. Picks
     the rank of :func:`fs_aware_save_rank`.
     """
     return _shared_filesystem_flag(_OUTPUT_SHARED_FILESYSTEM_VAR, is_shared_filesystem())
@@ -456,8 +551,8 @@ def is_output_shared_filesystem() -> bool:
 def _env_shared_filesystem_flags() -> dict[str, bool]:
     """This rank's own three shared-filesystem flags, read straight from the environment.
 
-    Bypasses the memo: this is the input to the consensus, and the getters would return whatever
-    was agreed last time.
+    Bypasses the memo deliberately: it is the INPUT to the consensus, and reading it through the
+    getters would return whatever was agreed last time.
     """
     umbrella = env_flag(_SHARED_FILESYSTEM_VAR, default=True)
     return {
@@ -467,14 +562,16 @@ def _env_shared_filesystem_flags() -> dict[str, bool]:
     }
 
 
-def resolve_shared_filesystem_consensus() -> dict[str, bool]:
-    """Agree the shared-filesystem flags across ranks once and memoize them. Collective.
+def resolve_shared_filesystem_consensus() -> None:
+    """Agree the shared-filesystem flags across ranks once and memoize them. COLLECTIVE.
 
-    The flags set the coordination scope (world-wide vs per-node), so a per-rank divergence splits
-    one tag's participants across two scopes and each waits out the full store timeout. All three
-    are agreed, since an explicitly set side var overrides the umbrella; rank 0's values win and a
-    mismatch is logged. The memo is written once, at the end, so a concurrent reader never observes
-    a half-resolved state.
+    The flags pick the coordination SCOPE — world-wide vs per-node — so a per-rank divergence (a
+    heterogeneous ``--env-file``, per-node env injection) would split one tag's participants across
+    two scopes where each waits out the full store timeout. All three are agreed, not just the
+    umbrella: a side var that IS set wins over it. Rank 0's values win, loudly.
+
+    The memo is written ONCE, at the end: a concurrent reader (a dataloader worker, the profiler
+    thread) must never observe a half-resolved state.
     """
     global _SHARED_FILESYSTEM_CONSENSUS
     local = _env_shared_filesystem_flags()
@@ -490,32 +587,31 @@ def resolve_shared_filesystem_consensus() -> dict[str, bool]:
             {var: agreed[var] for var in disagreed},
         )
     _SHARED_FILESYSTEM_CONSENSUS = agreed
-    # An umbrella left shared over per-node local disks makes every node recompute the dataset with
-    # correct output and no error, so log the resolved scope.
+    # Getting it wrong is silent: an umbrella left shared on per-node local disks makes every node
+    # recompute the dataset — correct output, N× the CPU and disk, no error.
     if is_global_main_process():
         logger.info(
             "Shared-filesystem scope: %s (set DIST_SHARED_FILESYSTEM=0 for per-node local storage).",
             {var: ("shared" if value else "per-node") for var, value in agreed.items()},
         )
-    return agreed
 
 
 def ensure_shared_filesystem_consensus() -> None:
-    """Agree the flags if no consensus has been taken yet. Collective on that first call only.
+    """Agree the flags if no consensus has been taken yet. COLLECTIVE on that first call only.
 
-    For a coordinated phase that can precede ``init_distributed`` (a hub-metadata read naming the
-    run); it must not re-broadcast once the scope is settled.
+    The seam for a coordinated phase that can precede ``init_distributed`` (a hub-metadata read
+    naming the run); it must not re-broadcast once the scope is settled.
     """
     if _SHARED_FILESYSTEM_CONSENSUS is None:
         resolve_shared_filesystem_consensus()
 
 
 def reset_shared_filesystem_consensus() -> None:
-    """Test-only: drop the memoized consensus so the flags re-read this rank's environment.
+    """Test-only seam: drop the memoized consensus so the flags re-read this rank's environment.
 
-    The flags are agreed once per process, so a test suite that varies ``DIST_*_SHARED_FILESYSTEM``
-    would otherwise keep asserting against the scope an earlier case agreed. Not for training code:
-    a job's coordination scope is fixed for the run.
+    The flags are agreed ONCE per process, so a test suite that varies ``DIST_*_SHARED_FILESYSTEM``
+    would otherwise keep asserting against the scope an earlier case agreed — silently, since every
+    getter still answers. Never for training code: a job's coordination scope is fixed for the run.
     """
     global _SHARED_FILESYSTEM_CONSENSUS
     _SHARED_FILESYSTEM_CONSENSUS = None
@@ -579,15 +675,16 @@ def get_nccl_timeout() -> datetime.timedelta:
 def get_store_timeout() -> datetime.timedelta:
     """Wall-clock bound for c10d-store coordination waits, as a ``timedelta``.
 
-    ``DIST_STORE_TIMEOUT_HOURS`` env → ``DEFAULT_STORE_TIMEOUT_HOURS`` (4). Hours-scale and
-    independent of ``DIST_NCCL_TIMEOUT_MINUTES``: these waits bound one rank's download/packing
-    work rather than a collective.
+    ``DIST_STORE_TIMEOUT_HOURS`` env → ``DEFAULT_STORE_TIMEOUT_HOURS`` (4). Deliberately hours-scale
+    and independent of ``DIST_NCCL_TIMEOUT_MINUTES``: these waits bound one rank's download/packing
+    work, not a collective, so the NCCL watchdog scale does not apply.
     """
     return datetime.timedelta(hours=resolve_store_timeout_hours())
 
 
 def _world_group_timeout() -> datetime.timedelta | None:
-    """Current NCCL watchdog timeout of the initialized world group, or None if unreadable."""
+    """Current NCCL watchdog timeout of the (already-initialized) world group, or None if
+    unreadable (private torch internals — same access tier as ``c10d._set_pg_timeout``)."""
     try:
         backend = dist.group.WORLD._get_backend(torch.device("cuda"))
         return backend.options._timeout
@@ -600,10 +697,11 @@ def apply_default_pg_timeout(timeout: datetime.timedelta) -> None:
 
     ``init_process_group(timeout=...)`` sets the world group's timeout only; ``new_group`` falls
     back to PyTorch's 10 min, too short for EP/CP/TP subgroups at 100B+/cross-node scale. Reassigning
-    ``distributed_c10d.default_pg_nccl_timeout`` before any subgroup is built makes them inherit it,
-    including ``init_device_mesh`` (DP/HSDP/TP axes), which takes no timeout kwarg. Its absence
-    raises: assigning an attribute torch no longer defines would leave every mesh subgroup on the
-    10-minute default.
+    ``distributed_c10d.default_pg_nccl_timeout`` before any subgroup is built makes them inherit it —
+    chiefly ``init_device_mesh`` (DP/HSDP/TP axes), which takes no timeout kwarg.
+
+    The name is READ before it is written, and its absence RAISES: assigning an attribute torch no
+    longer defines would leave every mesh subgroup on the 10-minute default with nothing to show.
     """
     if not hasattr(c10d, "default_pg_nccl_timeout"):
         raise RuntimeError(
@@ -621,7 +719,7 @@ def apply_default_pg_timeout(timeout: datetime.timedelta) -> None:
         return
     current = _world_group_timeout()
     if current is None:
-        # Setting blindly could shorten an external watchdog (accelerate ddp_timeout).
+        # Setting blindly could SHORTEN an external watchdog (accelerate ddp_timeout).
         if is_global_main_process():
             logger.warning(
                 "Could not read the world group's current NCCL timeout; skipping the retroactive "
@@ -631,8 +729,8 @@ def apply_default_pg_timeout(timeout: datetime.timedelta) -> None:
         if is_global_main_process():
             logger.info(f"World process group already has a >= timeout ({current}); not shortening to {timeout}.")
     else:
-        # Private API: the world group already carries init_process_group's timeout, so a rename
-        # here costs the extension, not the pin above.
+        # Best-effort and private: the world group already carries init_process_group's timeout, so
+        # a rename here costs the extension, not the pin above.
         try:
             c10d._set_pg_timeout(timeout)
         except Exception:
@@ -640,10 +738,10 @@ def apply_default_pg_timeout(timeout: datetime.timedelta) -> None:
 
 
 def require_rendezvous_env() -> None:
-    """Raise when the launcher declares a multi-rank world but no ``env://`` rendezvous.
+    """Fail loud when the launcher declares a multi-rank world but no ``env://`` rendezvous.
 
-    A bare ``srun --ntasks-per-node=8`` sets ``SLURM_PROCID``/``SLURM_NTASKS`` and nothing else;
-    c10d's own "environment variable MASTER_ADDR expected" names neither the launcher nor the fix.
+    A bare ``srun --ntasks-per-node=8`` sets ``SLURM_PROCID``/``SLURM_NTASKS`` and nothing else,
+    where c10d's own "environment variable MASTER_ADDR expected" names neither launcher nor fix.
     """
     missing = [var for var in ("MASTER_ADDR", "MASTER_PORT") if not os.environ.get(var)]
     if not missing:
@@ -661,18 +759,20 @@ def require_rendezvous_env() -> None:
 def init_distributed(backend: str = "nccl") -> bool:
     """Initialize the default process group for a torchrun/SLURM launch.
 
-    Entry point for every training script: passes ``timeout=get_nccl_timeout()``, the only mechanism
-    extending PyTorch's 10-min watchdog, pins the same timeout for later ``new_group`` so EP/CP/TP
-    subgroups inherit it, and eagerly binds this rank's CUDA device via ``device_id=``. Runs
-    whenever the launcher declares a rank or a multi-rank world, ``accelerate launch`` included; a
-    single process with no launcher vars is a no-op.
+    Single entry point for every training script: it passes ``timeout=get_nccl_timeout()`` (the only
+    mechanism extending PyTorch's 10-min watchdog), pins the same timeout for later ``new_group``
+    so EP/CP/TP subgroups inherit it, and eagerly binds this rank's CUDA device via ``device_id=``.
+
+    Runs whenever the launcher declares a rank or a multi-rank world, which includes an
+    ``accelerate launch``: building the group here rather than in ``PartialState`` is what applies
+    those two. A single process with no launcher vars is the only no-op.
 
     Returns whether it initialized; an already-initialized group still gets the subgroup timeout
     pin and the shared-filesystem consensus.
     """
     timeout = get_nccl_timeout()
-    # A multi-rank world counts even without RANK (the bare-srun shape): skipping init would leave
-    # every rank at world 1, main, and writing the same output_dir.
+    # A multi-rank world counts even without RANK: that is exactly the bare-srun shape, where
+    # skipping init leaves every rank at world 1, "main", and writing the same output_dir.
     world = launcher_global_world_size()
     if ("RANK" not in os.environ and world <= 1) or dist.is_initialized():
         if dist.is_initialized():
@@ -704,7 +804,7 @@ def init_distributed(backend: str = "nccl") -> bool:
 
     dist.init_process_group(**kwargs)
     apply_default_pg_timeout(timeout)
-    # The flag sets the coordination scope, so it must be one value for the whole job.
+    # The flag picks the coordination scope, so it must be one value for the whole job.
     resolve_shared_filesystem_consensus()
     if is_global_main_process():
         logger.info("Initialized distributed: backend=%s timeout=%s world_size=%d", backend, kwargs["timeout"], world)
@@ -714,8 +814,8 @@ def init_distributed(backend: str = "nccl") -> bool:
 def materialize_dtensor(data: torch.Tensor | None) -> torch.Tensor | None:
     """Materialize a DTensor shard as its full tensor; pass ``None``/plain tensors through.
 
-    ``full_tensor()`` is a collective across the device mesh (every rank holding a shard must call
-    it) and autograd-aware, so unlike :func:`resolve_param_tensor` it preserves gradient.
+    ``full_tensor()`` is a COLLECTIVE across the device mesh — every rank holding a shard must call
+    it — and autograd-aware, so unlike :func:`resolve_param_tensor` it preserves gradient.
     """
     if isinstance(data, DTensor):
         return data.full_tensor()
@@ -741,8 +841,8 @@ def copy_full_tensor(target: torch.Tensor, value: torch.Tensor) -> None:
 def to_local(tensor: torch.Tensor) -> torch.Tensor:
     """This rank's shard of a DTensor; plain tensors pass through.
 
-    Local, no collective. The custom optimizers step through it because ``view(-1)`` and their
-    Triton kernels reject a DTensor.
+    Purely local, unlike its neighbours here — no collective. The custom optimizers step through it
+    because ``view(-1)`` and their Triton kernels reject a DTensor.
     """
     if isinstance(tensor, DTensor):
         return tensor._local_tensor
@@ -750,7 +850,7 @@ def to_local(tensor: torch.Tensor) -> torch.Tensor:
 
 
 def local_numel(param: torch.Tensor) -> int:
-    """Element count held by this rank (``DTensor.numel()`` reports the global size).
+    """Element count held BY THIS RANK (``DTensor.numel()`` reports the global size).
 
     Mixing this with a plain ``numel()`` across a model sums two scopes: FSDP2/TP params are
     DTensors (global), EP expert params are FSDP-ignored plain tensors (already per-rank).
@@ -761,8 +861,8 @@ def local_numel(param: torch.Tensor) -> int:
 def resolve_param_tensor(param_data: torch.Tensor) -> torch.Tensor:
     """Resolve a parameter tensor to a plain CPU tensor.
 
-    DTensor params reconstruct via ``full_tensor()``, a collective: every rank of the mesh must call
-    it for the same param. Plain tensors detach to CPU.
+    DTensor params reconstruct via ``full_tensor()`` — a COLLECTIVE, so every rank of the mesh must
+    call it for the same param; plain tensors just detach to CPU.
     """
     if isinstance(param_data, DTensor):
         return param_data.full_tensor().cpu()
@@ -770,13 +870,13 @@ def resolve_param_tensor(param_data: torch.Tensor) -> torch.Tensor:
 
 
 def fs_aware_makedirs(path: str, writer_rank: Callable[[], bool] = fs_aware_save_rank) -> None:
-    """Create a directory on the writer rank, then barrier (shared FS: global rank 0; per-node: each
-    node's local rank 0).
+    """Create a directory on the writer rank, then barrier — shared FS: global rank 0; per-node:
+    each node's local rank 0.
 
-    ``writer_rank`` selects the side: :func:`fs_aware_save_rank` (the default, for checkpoints,
-    adapters, dumps) or :func:`fs_aware_load_rank` for a read-side cache dir, which follows
-    ``DIST_INPUT_SHARED_FILESYSTEM`` instead. The barrier is in a ``finally`` so a writer failing in
-    ``makedirs`` does not hang its peers.
+    ``writer_rank`` picks the side: :func:`fs_aware_save_rank` (the default — checkpoints, adapters,
+    dumps) or :func:`fs_aware_load_rank` for a read-side cache dir, which follows
+    ``DIST_INPUT_SHARED_FILESYSTEM`` instead. The barrier is in a ``finally`` for
+    :func:`barrier_on_exit`'s reason: a writer dying in ``makedirs`` must not hang its peers.
     """
     try:
         if writer_rank():

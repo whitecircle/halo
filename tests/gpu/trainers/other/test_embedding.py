@@ -56,8 +56,7 @@ def create_pairs_dataset(num_samples: int = 64) -> Dataset:
 
     Each sample contains an ``anchor`` question and a ``positive`` answer. Rows differ ONLY by the
     country index and share every other token, so the in-batch negatives are genuinely confusable and
-    the MNRL loss stays O(1) instead of collapsing to ~0 — which is the regime where the objective pin
-    and its scale control can be told apart at all.
+    the MNRL loss stays O(1) instead of collapsing to ~0, leaving it room to drop.
     """
     anchors = [f"What is the capital of country {i}?" for i in range(num_samples)]
     positives = [f"It is a large city located in country {i}." for i in range(num_samples)]
@@ -69,8 +68,7 @@ def create_scored_pairs_dataset(num_samples: int = 64) -> Dataset:
 
     Even-indexed samples are the same fact restated (score=1.0); odd-indexed samples are the same
     sentence about a DIFFERENT index (score=0.0). Both levels share their wording, so the cosine
-    similarities are not saturated and the CoSENT ranking hinge stays O(1) — the regime where the
-    objective pin can be separated from its controls.
+    similarities are not saturated and the CoSENT ranking hinge stays O(1), leaving it room to drop.
     """
     sentence1 = [f"Country {i} has a large capital city." for i in range(num_samples)]
     sentence2 = [f"The capital city of country {i if i % 2 == 0 else i + 1} is large." for i in range(num_samples)]
@@ -103,10 +101,9 @@ def make_config(output_dir: str, **overrides) -> EmbeddingConfig:
 
 
 def lora_model() -> SentenceTransformer:
-    """A SentenceTransformer with LoRA injected exactly the way the embedding script does it.
-
-    ``inject_adapter_in_model`` (not ``ST.add_adapter``, whose transformers adapter API needs
-    peft>=0.19.1) adds the adapters in place; the freeze-by-name below is part of the wiring under test.
+    """A SentenceTransformer with LoRA added in place through ``inject_adapter_in_model``, the call the
+    embedding script makes (not ``ST.add_adapter``, whose transformers adapter API needs peft>=0.19.1);
+    only the adapters stay trainable.
     """
     model = SentenceTransformer(MODEL_NAME)
     inject_adapter_in_model(
@@ -120,12 +117,10 @@ def lora_model() -> SentenceTransformer:
 
 def check_capability_flags() -> bool:
     """Verify parallelism capability flags on EmbeddingTrainer."""
-    log("Check: capability flags (CP unsupported, EP/TP supported)")
+    log("Check: capability flags (CP unsupported)")
 
     assert hasattr(EmbeddingTrainer, "_supports_cp"), "Missing _supports_cp"
     assert EmbeddingTrainer._supports_cp is False, "_supports_cp should be False"
-    assert EmbeddingTrainer._supports_ep is True, "_supports_ep should be True"
-    assert EmbeddingTrainer._supports_tp is True, "_supports_tp should be True"
     return True
 
 
@@ -154,8 +149,7 @@ def check_loss_leg(ctx, loss_type: str, train_dataset: Dataset, eval_dataset: Da
         parallelism_config=ParallelismConfig(),
     )
 
-    for attr in ("is_ep_mode", "is_cp_mode", "is_tp_mode"):
-        assert hasattr(trainer, attr), f"Missing {attr}"
+    assert not trainer.parallelism_config.has_custom_parallelism, "this leg runs plain data parallelism"
 
     # halo's create_loss is what forwards config.loss_scale; an unwired scale silently uses 20.0.
     assert trainer.loss.scale == LOSS_SCALE, (
@@ -178,9 +172,9 @@ def check_loss_leg(ctx, loss_type: str, train_dataset: Dataset, eval_dataset: Da
 
 
 def check_training_lora(ctx) -> bool:
-    """Train a SentenceTransformer with LoRA adapters (mirrors the embedding script's inject path).
+    """Train a SentenceTransformer with LoRA adapters injected in place.
 
-    Validates the embedding PEFT wiring: inject + freeze-by-name leaves only adapters trainable, and
+    Validates the embedding PEFT wiring: inject + freeze leaves only adapters trainable, and
     they move under MNRL training. (Embedding LoRA is plain LoRA — no 4-bit QLoRA on the ST loader.)
     """
     log("Check: training with LoRA adapters")

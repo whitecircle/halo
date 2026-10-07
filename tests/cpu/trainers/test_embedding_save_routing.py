@@ -1,11 +1,13 @@
 #!/usr/bin/env python
-"""The embedding save path is the shared checkpoint ladder, not a fourth hand-rolled copy.
+"""The embedding save path is the shared checkpoint ladder.
 
 ``EmbeddingTrainer`` owns one genuine difference from every other trainer: its top-level model is a
 ``SentenceTransformer`` ``nn.Sequential``, so the checkpoint context has to be re-pointed at the
 ``auto_model`` backbone. Everything downstream of that — save dtype, hub expert layout, shard size,
 the ``.bin`` fallback, and the single retaining rank on a gathered save — must come from
-``save_checkpoint`` and the shared gather/write leaves rather than a local re-implementation.
+``save_checkpoint`` and the shared gather/write leaves rather than a local re-implementation. A run
+with nothing to gather is the mixin's save alone, so every save step (reshard, router-balancing
+sidecar, writer) runs once on either branch.
 
 Run: pytest tests/cpu/trainers/test_embedding_save_routing.py
 """
@@ -16,7 +18,9 @@ import pytest
 import torch
 import torch.nn as nn
 from peft import LoraConfig, inject_adapter_in_model
+from sentence_transformers import SentenceTransformerTrainer
 
+import src.trainers.mixins.checkpointing as checkpointing_mod
 from src.distributed.expert_parallel.base_layer import find_ep_layers
 from src.trainers.embedding import trainer as embedding_module
 from src.trainers.embedding.trainer import EmbeddingTrainer
@@ -121,7 +125,7 @@ def test_non_lora_save_delegates_to_the_registry_with_the_configured_shard_size(
 
     assert seen["ctx"] is ctx
     assert seen["out"] == str(tmp_path)
-    # The hand-rolled EP/TP branches dropped max_shard_size on the floor; the ladder carries it.
+    # The ladder carries max_shard_size through to the EP/TP savers.
     assert seen["ctx"].max_shard_size == "1GB"
     assert seen["ctx"].model is backbone
 
@@ -202,7 +206,7 @@ def test_save_model_runs_every_writer_under_pristine_model_max_length(monkeypatc
         yield
         order.append("exit")
 
-    monkeypatch.setattr(embedding_module, "pristine_model_max_length", _pristine)
+    monkeypatch.setattr(checkpointing_mod, "pristine_model_max_length", _pristine)
     monkeypatch.setattr(embedding_module, "fs_aware_save_rank", lambda: True)
     monkeypatch.setattr("src.trainers.mixins.checkpointing.fs_aware_save_rank", lambda: True)
     monkeypatch.setattr(
@@ -214,6 +218,52 @@ def test_save_model_runs_every_writer_under_pristine_model_max_length(monkeypatc
     EmbeddingTrainer.save_model(host, str(tmp_path))
 
     assert order == ["enter", "write", "exit"]
+
+
+def _record_save_steps(host, monkeypatch) -> list[str]:
+    """Record the save steps that must run once per save: the reshard, the balancing sidecar, each writer."""
+    calls = []
+    host._pristine_special_token_ids = []
+    host._persist_router_balancing_biases = lambda _dir: calls.append("sidecar")
+    for module in (embedding_module, checkpointing_mod):
+        monkeypatch.setattr(module, "reshard_fsdp2_modules", lambda _model: calls.append("reshard"))
+        monkeypatch.setattr(module, "fs_aware_save_rank", lambda: True)
+    monkeypatch.setattr(
+        EmbeddingTrainer,
+        "_save_distributed_embedding_model",
+        lambda self, ctx, output_dir, _internal_call=False: calls.append("distributed"),
+    )
+    monkeypatch.setattr(
+        SentenceTransformerTrainer, "save_model", lambda self, output_dir, _internal_call=False: calls.append("st")
+    )
+    return calls
+
+
+def test_a_plain_save_is_the_mixins_save_alone(monkeypatch, tmp_path):
+    """Single GPU, DDP and accelerate FSDP: the mixin's save owns the reshard, the sidecar and the fence
+    mark, with ST's writer as its base fallback. Wrapping it in a second copy of those steps runs each
+    twice — a second sidecar write, a second reshard."""
+    host, _, _ = _host()
+    host._fsdp_wrapped = False
+    host.args.should_save = False
+    calls = _record_save_steps(host, monkeypatch)
+
+    EmbeddingTrainer.save_model(host, str(tmp_path))
+
+    assert calls == ["reshard", "sidecar", "st"]
+    assert host._model_save_collectives_done
+
+
+def test_a_distributed_save_writes_through_the_mixins_payload_hook(monkeypatch, tmp_path):
+    """EP/TP/FSDP2 and injected LoRA replace only the payload: the mixin's save keeps the reshard, the
+    sidecar and the fence mark, each once, and ST's writer never runs."""
+    host, _, _ = _host()
+    calls = _record_save_steps(host, monkeypatch)
+
+    EmbeddingTrainer.save_model(host, str(tmp_path))
+
+    assert calls == ["reshard", "sidecar", "distributed"]
+    assert host._model_save_collectives_done
 
 
 if __name__ == "__main__":

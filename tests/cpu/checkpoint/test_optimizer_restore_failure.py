@@ -14,6 +14,9 @@ group, with only rank 1 failing, pin:
    resumes, and rank 0 warns with the failing rank and error.
 3. **No optimizer state saved** (``save_only_model``) is not a failure: the resume proceeds with a
    fresh optimizer and a warning, without the opt-in.
+4. **An interrupted save is.** Shards whose meta never landed, and the base save's rank-0
+   ``optimizer.pt`` with no shards beside it, are the two halves a kill mid-save leaves: every rank
+   refuses them, naming the opt-in, rather than warm-restarting over them as if they were complete.
 
 A single process takes both outcomes too, and the trainer hands the opt-in to the store it builds.
 
@@ -24,6 +27,7 @@ import datetime
 import json
 import logging
 import os
+import re
 from types import SimpleNamespace
 
 import pytest
@@ -48,6 +52,9 @@ from tests.common.parallelism import make_parallelism_config
 
 WORLD_SIZE = 2
 FAILING_RANK = 1
+# Spelled literally: importing the writer's constants would make a rename invisible here.
+META_FILE = "optimizer_meta.pt"
+BASE_OPTIMIZER_FILE = "optimizer.pt"
 SEED = 20261003
 TRAIN_STEPS = 3
 OOM_MESSAGE = "CUDA out of memory. Tried to allocate 20.00 MiB"
@@ -113,12 +120,19 @@ def _worker(rank: int, root: str, scenario: str) -> None:
     try:
         checkpoint = os.path.join(root, f"checkpoint-{TRAIN_STEPS}")
         fs_aware_makedirs(checkpoint)
-        if scenario != "no_optimizer_state":
+        if scenario not in ("no_optimizer_state", "base_optimizer_only"):
             scheduler = _save(checkpoint, rank, WORLD_SIZE)
             if rank == 0:
                 torch.save(scheduler.state_dict(), os.path.join(checkpoint, "scheduler.pt"))
             if scenario == "unreadable_shard" and rank == FAILING_RANK:
                 _truncate_shard(checkpoint, rank)
+        dist.barrier()
+        if rank == 0 and scenario.startswith("torn_meta"):
+            os.remove(os.path.join(checkpoint, META_FILE))
+        if rank == 0 and scenario == "base_optimizer_only":
+            model, optimizer, _ = _fresh()
+            step_on_seeded_data(model, optimizer, SEED, TRAIN_STEPS)
+            torch.save(optimizer.state_dict(), os.path.join(checkpoint, BASE_OPTIMIZER_FILE))
         dist.barrier()
 
         real_apply = optimizer_mod.set_optimizer_state_dict
@@ -132,7 +146,7 @@ def _worker(rank: int, root: str, scenario: str) -> None:
         optimizer_mod.set_optimizer_state_dict = apply
 
         model, optimizer, scheduler = _fresh()
-        store = _store(model, optimizer, scheduler, rank, WORLD_SIZE, allow=scenario == "apply_failure_opt_in")
+        store = _store(model, optimizer, scheduler, rank, WORLD_SIZE, allow=scenario.endswith("_opt_in"))
         try:
             store.load(checkpoint)
         except Exception as e:
@@ -213,6 +227,37 @@ def test_a_checkpoint_without_optimizer_state_resumes_without_the_opt_in(tmp_pat
     assert "No optimizer shards" in "\n".join(results[0]["warnings"]), results[0]["warnings"]
 
 
+def _assert_every_rank_refused_the_torn_save(results: list[dict], names: str) -> None:
+    for rank, result in enumerate(results):
+        raised = result["raised"]
+        assert raised is not None, f"rank {rank} resumed over an interrupted save"
+        assert raised.startswith("RuntimeError"), f"rank {rank}: {raised}"
+        assert names in raised, f"rank {rank} did not name the torn half: {raised}"
+        assert "allow_optimizer_warm_restart" in raised, f"rank {rank} did not name the opt-in: {raised}"
+        assert not result["applied_locally"], f"rank {rank} applied a shard of a torn set"
+        assert result["state_entries"] == 0, f"rank {rank}"
+
+
+def test_shards_whose_meta_never_landed_are_refused_on_every_rank(tmp_path):
+    _assert_every_rank_refused_the_torn_save(_run(tmp_path, "torn_meta"), f"{META_FILE} is missing")
+
+
+def test_the_base_optimizer_without_its_shards_is_refused_on_every_rank(tmp_path):
+    """Killed after the base save's ``trainer_state.json`` but before the per-rank shards: what is
+    left is rank 0's replicated view, which the mixin deletes only once its shards are on disk."""
+    _assert_every_rank_refused_the_torn_save(_run(tmp_path, "base_optimizer_only"), BASE_OPTIMIZER_FILE)
+
+
+def test_the_opt_in_warm_restarts_over_a_torn_shard_set(tmp_path):
+    results = _run(tmp_path, "torn_meta_opt_in")
+
+    for rank, result in enumerate(results):
+        assert result["raised"] is None, f"rank {rank} raised under the opt-in: {result['raised']}"
+        assert not result["applied_locally"], f"rank {rank} applied a shard of a torn set"
+        assert result["scheduler_epoch"] == TRAIN_STEPS, f"rank {rank} did not resume the LR schedule"
+    assert "Warm restart (allow_optimizer_warm_restart)" in "\n".join(results[0]["warnings"])
+
+
 @pytest.mark.parametrize("failure", ["unreadable_shard", "apply_failure"])
 @pytest.mark.parametrize("allow", [False, True], ids=["default", "opted-in"])
 def test_a_single_process_restore_failure(tmp_path, monkeypatch, failure, allow):
@@ -241,6 +286,47 @@ def test_a_single_process_restore_failure(tmp_path, monkeypatch, failure, allow)
     assert not optimizer.state, "the warm restart kept optimizer state"
     assert all(param.grad is None for param in model.parameters()), "the warm restart kept the init step's gradients"
     assert optimizer.param_groups[0]["lr"] == SHARD_ROUND_TRIP_LR, "the warm restart left the init step's lr=0"
+
+
+def _rebuild_one_group_too_many(optimizer: torch.optim.Optimizer) -> None:
+    """What a shard saved under another param-group layout leaves after ``set_optimizer_state_dict``."""
+    optimizer.param_groups.append({**optimizer.param_groups[0], "params": []})
+
+
+def test_a_drifted_group_count_never_masks_the_restore_error(tmp_path, monkeypatch):
+    """The group-settings cleanup runs while the apply's own error unwinds: a group count it cannot
+    pair up must not replace that error, which is the only diagnosis every rank receives."""
+    _save(str(tmp_path), rank=0, world_size=1)
+
+    def drift_then_fail(model, optimizer, **kwargs):
+        _rebuild_one_group_too_many(optimizer)
+        _fail_like_the_init_step(model, optimizer)
+
+    monkeypatch.setattr(optimizer_mod, "set_optimizer_state_dict", drift_then_fail)
+    model, optimizer, scheduler = _fresh()
+    store = _store(model, optimizer, scheduler, rank=0, world_size=1)
+
+    with pytest.raises(RuntimeError, match=f"OutOfMemoryError: {re.escape(OOM_MESSAGE)}"):
+        store.load(str(tmp_path))
+    assert optimizer.param_groups[0]["lr"] == SHARD_ROUND_TRIP_LR, "the run's group settings were not restored"
+
+
+def test_a_restore_that_rebuilt_another_group_count_fails_loud(tmp_path, monkeypatch):
+    """An unmatched group would step on the checkpoint's hyperparameters, so a clean apply that
+    drifted the group count still fails the resume."""
+    _save(str(tmp_path), rank=0, world_size=1)
+    real_apply = optimizer_mod.set_optimizer_state_dict
+
+    def apply_then_drift(model, optimizer, **kwargs):
+        real_apply(model, optimizer, **kwargs)
+        _rebuild_one_group_too_many(optimizer)
+
+    monkeypatch.setattr(optimizer_mod, "set_optimizer_state_dict", apply_then_drift)
+    model, optimizer, scheduler = _fresh()
+    store = _store(model, optimizer, scheduler, rank=0, world_size=1)
+
+    with pytest.raises(RuntimeError, match=r"holds 2 param group\(s\) but this run built 1"):
+        store.load(str(tmp_path))
 
 
 class _TrainerBase:

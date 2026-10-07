@@ -145,13 +145,13 @@ class _TensorReader:
         return handle
 
 
-def _reference_keys(method: str, readers: list[_TensorReader], base_reader: _TensorReader | None) -> list[str]:
+def _reference_keys(readers: list[_TensorReader], base_reader: _TensorReader | None) -> list[str]:
     """The key set to merge over. ``task_arithmetic``/``ties`` task vectors are relative to the base,
-    so iterate the base key set: iterating model[0] would drop any parameter present in the base (and
-    other models) but absent from model[0] (an untied ``lm_head.weight``, say), yielding an
-    incomplete, unloadable merged checkpoint. ``linear``/``slerp`` have no base, so use model[0]."""
-    source = base_reader if (method in ("task_arithmetic", "ties") and base_reader is not None) else readers[0]
-    return sorted(source.keys())
+    so iterate the BASE key set — iterating model[0] would silently drop any parameter present in the
+    base (and other models) but absent from model[0] (e.g. an untied ``lm_head.weight``), yielding an
+    incomplete, unloadable merged checkpoint. ``linear``/``slerp`` take no base (the knob gate
+    refuses one) → use model[0]."""
+    return sorted((base_reader if base_reader is not None else readers[0]).keys())
 
 
 # --- per-tensor merge ops (all compute in float32, caller casts the result) ---
@@ -345,15 +345,16 @@ def merge_models(
             reject_in_place_conversion(source, output_dir)
     readers = [_TensorReader(p) for p in paths]
     base_reader = _TensorReader(base_model) if base_model else None
+    contributors = [*readers, *([base_reader] if base_reader is not None else [])]
 
     # Reference key set to merge over; every contributing model must then provide each key/shape.
-    ref_keys = _reference_keys(method, readers, base_reader)
+    ref_keys = _reference_keys(readers, base_reader)
 
     # Symmetric coverage: the per-key loop raises on a reference key a model lacks, but an extra key
     # is never visited. The realistic case is an untied head, since reconcile_tie_word_embeddings flips
     # tie_word_embeddings only for the model whose lm_head diverged, so the merge would drop it.
     reference = set(ref_keys)
-    for reader in [*readers, *([base_reader] if base_reader is not None else [])]:
+    for reader in contributors:
         extra = sorted(reader.keys() - reference)
         if extra:
             raise ValueError(
@@ -379,7 +380,6 @@ def merge_models(
     # Peak RAM is the costliest key, every contributor's copy as stored plus the method's fp32 working
     # set over it (an integer pass-through key counted as if merged), and the writer's pending output
     # shard. On disk the artifact is one input's size.
-    contributors = [*readers, *([base_reader] if base_reader is not None else [])]
     working_bytes_per_element = spec.fp32_copies(len(readers)) * torch.float32.itemsize
     costliest_key_bytes = max(
         (
@@ -518,7 +518,7 @@ def main() -> int:
     parser.add_argument("--base_model", default=None, help="Base for task_arithmetic / ties.")
     add_dtype_arg(parser)
     # Knob defaults stay None here and resolve in merge_models(), so a knob a method ignores raises;
-    # the help text renders each op signature's own default rather than a copy of it.
+    # the help text renders the method table's default rather than a copy of it.
     parser.add_argument(
         "--density",
         type=float,

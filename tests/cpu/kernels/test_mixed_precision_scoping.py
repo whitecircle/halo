@@ -88,5 +88,12 @@ def test_plain_text_model_unchanged():
     assert isinstance(model.layers[1].gate_proj, LowPrecisionLinear)
 
 
+def test_unknown_precision_raises_before_converting_anything():
+    model = _Stack(2)
+    with pytest.raises(ValueError, match="fp16"):
+        apply_mixed_precision_compute(model, precision="fp16")
+    assert not any(isinstance(m, LowPrecisionLinear) for m in model.modules())
+
+
 if __name__ == "__main__":
     raise SystemExit(pytest.main([__file__, "-v"]))

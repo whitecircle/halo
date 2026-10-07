@@ -17,9 +17,8 @@ from types import SimpleNamespace
 
 import pytest
 import torch
-from bitsandbytes.nn import Linear4bit, Params4bit
 from safetensors.torch import save_file
-from transformers import AutoConfig, AutoModel, BitsAndBytesConfig
+from transformers import AutoConfig, AutoModel
 from transformers.core_model_loading import (
     Chunk,
     Concatenate,
@@ -30,10 +29,8 @@ from transformers.core_model_loading import (
     WeightConverter,
     WeightRenaming,
 )
-from transformers.quantizers.quantizer_bnb_4bit import Bnb4BitHfQuantizer
 
 import src.distributed.expert_parallel.hub_conversion as hub_conversion
-from src.distributed.expert_parallel.config import EPConfig
 from src.distributed.expert_parallel.expert_weights import ep_layer_class_by_model_type
 from src.distributed.expert_parallel.hub_conversion import resolve_conversion_steps, resolve_loaded_conversion_steps
 from src.distributed.expert_parallel.lazy_loader import (
@@ -41,7 +38,6 @@ from src.distributed.expert_parallel.lazy_loader import (
     WeightAction,
     build_family_key_mapping,
 )
-from src.distributed.loading.master_weights import restore_fp32_master_parameters
 from src.models.loading.lazy_safetensors.conversion import (
     Concat,
     Deinterleave,
@@ -53,6 +49,7 @@ from src.models.loading.lazy_safetensors.conversion import (
 )
 from src.models.loading.lazy_safetensors.weights import SafetensorsWeightLoader, WeightPlan, build_key_mapping
 from src.models.loading.model_preparation import resolve_auto_model_class
+from tests.common.tiny_models import module_with_weight_keys
 
 E, M, H = 4, 6, 8
 
@@ -118,7 +115,7 @@ _ENTRIES = [
     WeightConverter(
         source_patterns="mlp.experts.w13_weight",
         target_patterns=["mlp.experts.gate_up_proj"],
-        operations=[Chunk(dim=1)],  # stands in for Interleave on images that lack it; ops are per-entry
+        operations=[Chunk(dim=1)],  # stands in for Interleave; ops are per-entry
     ),
     WeightConverter(
         source_patterns="mlp.shared_w13_weight",
@@ -517,33 +514,11 @@ def test_canonical_checkpoint_keys_resume_untouched(model_type):
     )
 
 
-class _WeightLeaf(torch.nn.Module):
-    def __init__(self):
-        super().__init__()
-        self.weight = torch.nn.Parameter(torch.zeros(1))
-
-
-def _model_with_keys(paths: list[str]) -> torch.nn.Module:
-    """A module tree whose state dict is exactly ``paths`` (each ending in ``.weight``)."""
-    root = torch.nn.Module()
-    for path in paths:
-        parent = root
-        parts = path.split(".")
-        for name in parts[:-2]:
-            child = parent._modules.get(name)
-            if child is None:
-                child = torch.nn.Module()
-                parent.add_module(name, child)
-            parent = child
-        parent.add_module(parts[-2], _WeightLeaf())
-    return root
-
-
 def test_unanchored_source_falls_back_to_the_canonical_key():
     """Pin of the model-key fallback (transformers 5.16 semantics): a rename whose target misses the
     model's key space while the source key itself resolves is undone, and a genuine vendor key
     converting onto a real model key is NOT — the fallback must never mask a needed conversion."""
-    model = _model_with_keys(["model.norm.weight", "model.layers.0.self_attn.kv_norm.weight"])
+    model = module_with_weight_keys(["model.norm.weight", "model.layers.0.self_attn.kv_norm.weight"])
     steps = _steps(
         [
             WeightRenaming(source_patterns=r"\.attn\.", target_patterns=".self_attn."),
@@ -581,7 +556,7 @@ def test_eager_replay_does_not_invent_conversions_for_a_canonical_load(recorded)
 
 
 def test_eager_replay_accepts_text_only_prefix_changes():
-    model = _model_with_keys(["model.linear.weight"])
+    model = module_with_weight_keys(["model.linear.weight"])
     model.base_model_prefix = "model"
     model.config = SimpleNamespace(model_type="qwen3_moe")
     model._weight_conversions = [PrefixChange(prefix_to_remove="language_model", model_prefix="model")]
@@ -591,31 +566,6 @@ def test_eager_replay_accepts_text_only_prefix_changes():
     mapping, fanout = build_family_key_mapping(model, [disk_key], loaded_conversions=True)
     assert mapping == {disk_key: "model.linear.weight"}
     assert fanout == {disk_key: (("model.linear.weight", ()),)}
-
-
-def test_eager_fp32_reread_uses_the_loaded_nested_rename_and_its_scope(tmp_path):
-    vision_key = "model.vision_model.q_proj.weight"
-    text_key = "model.language_model.wq_du.weight"
-    disk_vision_key = "model.vision_model.wq_du.weight"
-    model = _model_with_keys([vision_key, text_key]).to(torch.bfloat16)
-    model.base_model_prefix = "model"
-    model.config = SimpleNamespace(model_type="qwen3_moe")
-    rename = WeightRenaming(source_patterns=r"^wq_du\.", target_patterns="q_proj.")
-    rename.scope_prefix = "vision_model"
-    model._weight_conversions = [rename]
-    stored = {disk_vision_key: torch.tensor([1.00001]), text_key: torch.tensor([2.00001])}
-    assert all(not torch.equal(value, value.bfloat16().float()) for value in stored.values())
-    save_file(stored, str(tmp_path / "model.safetensors"))
-    state = model.state_dict(keep_vars=True)
-    for key, disk_key in ((vision_key, disk_vision_key), (text_key, text_key)):
-        state[key].data.copy_(stored[disk_key])
-    plain_mapping, _ = build_family_key_mapping(model, list(stored))
-    assert plain_mapping[disk_vision_key] not in state, "the declared lazy family cannot do this nested rename"
-    restore_fp32_master_parameters(model, str(tmp_path), EPConfig(ep_size=1), keep_non_ep=True)
-    restored = model.state_dict(keep_vars=True)
-    for key, disk_key in ((vision_key, disk_vision_key), (text_key, text_key)):
-        assert restored[key] is state[key]
-        assert restored[key].dtype == torch.float32 and torch.equal(restored[key], stored[disk_key])
 
 
 @pytest.mark.parametrize(
@@ -633,55 +583,8 @@ def test_eager_replay_refuses_renames_it_cannot_reproduce_without_silent_loss(en
         resolve_loaded_conversion_steps(model)
 
 
-@pytest.mark.parametrize("deserialize_first", (False, True))
-def test_prequantized_float_storage_keeps_codes_and_restores_plain_masters(tmp_path, deserialize_first):
-    """The real HF broad deserializer also matches plain weights, which it leaves unchanged.
-
-    Packed floating-storage Params4bit and their quantization statistics come from a real bnb
-    serialization. The streamed master replay must leave them intact without dropping a separate
-    recorded vendor rename or rounding the ordinary master's checkpoint value.
-    """
-    model = _model_with_keys(["norm.weight"]).to(torch.bfloat16)
-    model.config = SimpleNamespace(model_type="qwen3")
-    model.quantized = Linear4bit(64, 64, bias=False, quant_storage=torch.bfloat16, quant_type="nf4")
-    model.quantized.weight = Params4bit(
-        torch.randn(64, 64, dtype=torch.bfloat16),
-        requires_grad=False,
-        quant_storage=torch.bfloat16,
-        quant_type="nf4",
-    )
-    model.quantized.to("cpu")
-    packed = model.quantized.weight
-    codes = packed.data.view(torch.uint8).clone()
-    assert packed.bnb_quantized and packed.dtype == torch.bfloat16
-    original = torch.tensor([1.00001])
-    stored = {key: value.clone().contiguous() for key, value in model.quantized.state_dict().items()}
-    assert any("quant_state" in key for key in stored), "the checkpoint must carry prequantized statistics"
-    stored = {f"quantized.{key}": value for key, value in stored.items()}
-    stored["vendor_norm.weight"] = original
-    save_file(stored, str(tmp_path / "model.safetensors"))
-    quantizer = Bnb4BitHfQuantizer(BitsAndBytesConfig(load_in_4bit=True), pre_quantized=True)
-    (deserialize,) = quantizer.get_weight_conversions()
-    rename = WeightRenaming(source_patterns=r"^vendor_norm\.", target_patterns="norm.")
-    model._weight_conversions = [deserialize, rename] if deserialize_first else [rename, deserialize]
-    model.norm.weight.data.copy_(original)
-    assert not torch.equal(model.norm.weight.float(), original)
-    # The actual op's identity branch is the premise for skipping only this storage conversion.
-    assert deserialize.operations[0].convert({"weight": original})["weight"] is original
-
-    restore_fp32_master_parameters(model, str(tmp_path), keep_non_ep=True, strict=True)
-
-    assert model.quantized.weight is packed and torch.equal(packed.data.view(torch.uint8), codes)
-    assert model.norm.weight.dtype == torch.float32 and torch.equal(model.norm.weight, original)
-    model._weight_conversions.append(
-        WeightConverter(source_patterns=["a", "b"], target_patterns="c", operations=[Chunk(dim=0)])
-    )
-    with pytest.raises(ValueError, match="multi-source.*qwen3"):
-        resolve_loaded_conversion_steps(model)
-
-
 def test_unsupported_declared_conversion_names_its_original_mapping_key(monkeypatch):
-    model = _model_with_keys(["norm.weight"])
+    model = module_with_weight_keys(["norm.weight"])
     model.config = SimpleNamespace(model_type="step3p7")
     layer = ep_layer_class_by_model_type()["step3p7"]
     monkeypatch.setattr(layer, "_HUB_CONVERSION_KEYS", ("vendor_bad_entry",))

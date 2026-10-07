@@ -50,7 +50,6 @@ class DeepEPDispatchFunction(torch.autograd.Function):
         topk_idx: torch.Tensor,
         topk_weights: torch.Tensor,
         dispatcher,
-        num_experts: int,
     ):
         x = x.contiguous()
         topk_idx = topk_idx.contiguous().to(deep_ep().topk_idx_t)
@@ -66,7 +65,7 @@ class DeepEPDispatchFunction(torch.autograd.Function):
     @staticmethod
     def backward(ctx, grad_recv_x, grad_recv_topk_idx, grad_recv_topk_weights, grad_handle):
         grad_x, grad_topk_weights = _dispatch_backward(ctx, grad_recv_x, grad_recv_topk_weights)
-        return grad_x, None, grad_topk_weights, None, None
+        return grad_x, None, grad_topk_weights, None
 
 
 class DeepEPCombineFunction(torch.autograd.Function):

@@ -2,7 +2,8 @@
 """CPU tests: the data-loading probes each rank answers off its OWN slice are agreed on the world.
 
 Under a pre-sharded corpus every data-parallel rank holds a disjoint slice, so a probe of "does this
-dataset declare images", "is this split empty", or "which splits did I get" is a per-rank fact. The
+dataset declare images" or "is this split empty" is a per-rank fact (which splits a rank got is
+agreed by the load itself, ``tests/cpu/data/test_multinode_dataset_loading.py``). The
 branch each one decides runs coordinated work — one ``ensure_cache_dir()`` barrier plus two
 ``dataset_op`` store phases per operation — and the two arms of the modality dispatch do not even run
 the same NUMBER of them, so a split verdict pairs a barrier against a store wait and the phase
@@ -26,7 +27,6 @@ from datasets import Dataset, DatasetDict
 from transformers.models.auto.configuration_auto import CONFIG_MAPPING
 
 import src.data.probe_consensus as probe_consensus_mod
-import src.data.sources.loading as loading_mod
 from src.data.pipeline.preprocessing import shard_dataset
 from src.data.shard_index import SHARD_INDEX_FILE
 from src.data.sources.sharded_dataset import ShardedDatasetLoader
@@ -124,22 +124,6 @@ def test_an_empty_split_on_one_rank_raises_on_all_of_them(monkeypatch):
 
     with pytest.raises(ValueError, match="at least one data-parallel rank"):
         sft._reject_empty_split(Dataset.from_dict({"input_ids": [[1, 2]]}), "training", 8)
-
-
-def test_a_split_only_some_ranks_loaded_is_rejected(monkeypatch):
-    """A transient shard-index read failure drops a split on one rank alone. Every consumer of
-    ``ds.get("test")`` then runs a different number of coordinated operations, so the divergence
-    must raise — and raise on every rank, off the agreed verdict rather than the local shape."""
-
-    def fake_rank_consensus(local_ok: bool) -> tuple[bool, bool]:
-        return local_ok, True  # the peer loaded both splits
-
-    monkeypatch.setattr(loading_mod, "get_global_world_size", lambda: 2)
-    monkeypatch.setattr(loading_mod, "rank_consensus", fake_rank_consensus)
-
-    only_train = DatasetDict({"train": Dataset.from_dict({"input_ids": [[1]]})})
-    with pytest.raises(ValueError, match=r"loaded split\(s\) \['test'\]"):
-        loading_mod._reject_divergent_split_presence(only_train, "s3://bucket/ds")
 
 
 def test_a_starved_rank_gets_the_splits_schema_not_a_column_less_dataset():

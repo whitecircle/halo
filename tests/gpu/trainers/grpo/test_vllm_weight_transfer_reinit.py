@@ -31,13 +31,11 @@ from tests.common.harness import gpu_test_main
 from tests.common.models import QWEN3_0_6B
 from tests.common.on_policy_e2e import probe_top_logprobs
 from tests.common.utils import log
+from tests.common.weight_sync import weight_transfer_port
 
 MODEL_NAME = env_str("HALO_TEST_VLLM_REINIT_MODEL", QWEN3_0_6B)
 # The dense endpoint of the vLLM tier: this file asserts on logprobs only a 0.6B server can produce.
 SERVER_URL = env_str("HALO_TEST_VLLM_DENSE_SERVER_URL") or env_str("VLLM_SERVER_URL") or "http://localhost:8010"
-# Trainer-side weight-transfer port, rebound by every cycle — itself part of the invariant, since
-# close_communicator must release it on both ends or the next cycle cannot form its group.
-GROUP_PORT = env_int("HALO_TEST_VLLM_GROUP_PORT", 51228)
 # The server's GPU as `nvidia-smi` indexes it. Unset (the tier's shape: the trainer owns every GPU
 # but the server's) means "every GPU this process does not own", which is that one GPU.
 SERVER_GPU = env_str("HALO_TEST_VLLM_SERVER_GPU")
@@ -84,9 +82,9 @@ def _trainer_gpu_used_mib(device: torch.device) -> int:
     return (total - free) // 2**20
 
 
-def _sync_one_param(name: str, weight: torch.Tensor, device: torch.device) -> None:
+def _sync_one_param(name: str, weight: torch.Tensor, device: torch.device, group_port: int) -> None:
     """One whole trainer lifetime against the server: connect, one quiesced update, disconnect."""
-    client = VLLMWeightSyncClient(base_url=SERVER_URL, group_port=GROUP_PORT, connection_timeout=CONNECTION_TIMEOUT_S)
+    client = VLLMWeightSyncClient(base_url=SERVER_URL, group_port=group_port, connection_timeout=CONNECTION_TIMEOUT_S)
     client.init_communicator(device=device)
     try:
         client.update_named_param(name, weight)
@@ -117,6 +115,9 @@ def run(ctx) -> dict:
     param = dict(model.named_parameters())[PERTURBED_PARAM]
     original = param.detach().clone()
 
+    # Drawn once and rebound by every cycle: itself part of the invariant, since close_communicator must
+    # release it on both ends or the next cycle cannot form its group.
+    group_port = weight_transfer_port("HALO_TEST_VLLM_GROUP_PORT")
     probes = [baseline]
     errors: list[str] = []
     # Both baselines are taken after the first cycle: the first sync loads the NCCL library, sizes
@@ -127,7 +128,7 @@ def run(ctx) -> dict:
         with torch.no_grad():
             param.mul_(PERTURBATION)
         try:
-            _sync_one_param(PERTURBED_PARAM, param.detach(), ctx.device)
+            _sync_one_param(PERTURBED_PARAM, param.detach(), ctx.device, group_port)
         except Exception as e:  # noqa: BLE001 — a refused re-init is the defect under test, not an error
             errors.append(f"cycle {cycle}: {type(e).__name__}: {e}")
             log(errors[-1])
@@ -144,7 +145,7 @@ def run(ctx) -> dict:
     restored: dict[str, float] | None = None
     if not errors:
         try:
-            _sync_one_param(PERTURBED_PARAM, original, ctx.device)
+            _sync_one_param(PERTURBED_PARAM, original, ctx.device, group_port)
         except Exception as e:  # noqa: BLE001 — same verdict as a failed cycle
             errors.append(f"restore cycle: {type(e).__name__}: {e}")
             log(errors[-1])

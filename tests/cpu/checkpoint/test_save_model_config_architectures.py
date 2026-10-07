@@ -12,7 +12,7 @@ off a reward checkpoint. Nothing raises; the artifact simply is not the model.
 A real ``PreTrainedModel`` gets its stale value REPLACED here (through the FSDP2 in-place
 ``__class__`` swap, whose dynamic ``FSDP<Name>`` subclass must not be mistaken for the architecture).
 A carrier with no ``PreTrainedModel`` in its MRO cannot be read that way, so its config's value is
-written verbatim — which is why the PIPELINE STAGE, the carrier the toolkit actually ships, stamps
+written verbatim — which is why the PIPELINE STAGE, the PP seam's carrier, stamps
 the live class at build time instead: it wraps the model away behind a plain ``nn.Module``, so by the
 time the writer sees it there is nothing left to derive from.
 

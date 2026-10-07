@@ -42,7 +42,6 @@ class PerformanceMonitor:
     def time_operation(self, operation_name: str):
         """Time a span on CUDA events where available; a wall clock would miss async kernels."""
         cuda = torch.cuda.is_available()
-        start_event = end_event = None
         if cuda:
             torch.cuda.synchronize()
             start_event = torch.cuda.Event(enable_timing=True)
@@ -54,7 +53,7 @@ class PerformanceMonitor:
             with torch.profiler.record_function(operation_name):
                 yield
         finally:
-            if start_event is not None and end_event is not None:
+            if cuda:
                 end_event.record()
                 torch.cuda.synchronize()
                 elapsed = start_event.elapsed_time(end_event) / 1000.0  # ms -> s

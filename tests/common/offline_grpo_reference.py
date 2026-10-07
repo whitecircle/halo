@@ -8,8 +8,8 @@ from accelerate import PartialState
 from datasets import Dataset
 
 from src.distributed.runtime import DeferredRankFailure, fs_aware_save_rank
+from src.trainers.grpo.mixins.offline_reference import OfflineGRPOReferenceMixin
 from src.trainers.grpo.reference_cache import ReferenceScoreCache
-from src.trainers.grpo.reference_logps import OfflineGRPOReferenceLogpsMixin
 
 SETTINGS = {"max_prompt_length": 8, "max_completion_length": 6, "pad_token_id": 0}
 
@@ -60,10 +60,12 @@ class _CheckpointBase:
         self.rotated = True
 
 
-class ReferenceStorageTrainer(OfflineGRPOReferenceLogpsMixin, _CheckpointBase):
+class ReferenceStorageTrainer(OfflineGRPOReferenceMixin, _CheckpointBase):
     def __init__(self, output_dir, *, checkpoint=None, step=1):
         PartialState()
         self.output_dir = output_dir
+        self.args = SimpleNamespace(output_dir=output_dir, resume_from_checkpoint=None)
+        self.ref_model = None
         self.state = SimpleNamespace(global_step=step)
         self.rotated = False
         self._init_reference_logps(resume_checkpoint=checkpoint)

@@ -51,7 +51,7 @@ ep_scope: global
 # nvlink_domain_size: 72         # or `export NVLINK_DOMAIN_SIZE=72`
 
 save_sharded_ep: false
-use_grouped_gemm: false               # gpt-oss: per-expert loop beats grouped GEMM at high EP
+use_grouped_gemm: false               # 2 experts/rank at ep16, square non-128-aligned FFN: see agent-docs/models/gpt-oss.md
 max_concurrent_loading: 2             # ranks loading at once per node
 
 # --- Attention & kernels ---

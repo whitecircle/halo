@@ -47,16 +47,6 @@ class _RecordingApplier:
         )
 
 
-class _FlceOnlyRecordingApplier:
-    """Stands in for an FLCE-only applier (deepseek_v4 / glm4_moe_lite signature shape)."""
-
-    def __init__(self):
-        self.calls = []
-
-    def __call__(self, fused_linear_cross_entropy=True, model=None):
-        self.calls.append({"fused_linear_cross_entropy": fused_linear_cross_entropy})
-
-
 class _SwigluOffApplier(_RecordingApplier):
     """An applier whose own ``swiglu`` default is False — GptOss's and Qwen3-VL's shape upstream."""
 
@@ -182,8 +172,8 @@ def test_cp_force_off_recorded_as_effective(monkeypatch):
     ``outputs.logits`` itself. Every Liger ``lce_forward`` gates on
     ``skip_logits = self.training and labels is not None``, so FLCE never engages — leaving the flag
     on reports a memory saving that does not exist and makes the trainer pin ``use_liger_kernel``
-    on that false basis. ``cross_entropy`` goes too: its patch rebinds
-    ``torch.nn.functional.cross_entropy`` process-wide, under CP's own fp32 loss included.
+    on that false basis. ``cross_entropy`` goes too: with ``labels=None`` the model's ``loss_utils``
+    path never runs, so the scoped CE patch is inert.
     """
     applier = _RecordingApplier()
     monkeypatch.setitem(orchestrator._TOOLKIT_LIGER_APPLIERS, "zaya", applier)
@@ -199,9 +189,8 @@ def test_pp_force_off_recorded_as_effective(monkeypatch):
 
     The pipeline drives the stage with ``input_ids``/``attention_mask`` only — labels ride to the
     schedule's ``loss_fn`` as the target — so ``skip_logits = self.training and labels is not None``
-    never fires and FLCE reports a memory saving that does not exist. ``cross_entropy`` matters more
-    here than being merely inert: its patch rebinds ``F.cross_entropy`` process-wide, and the PP
-    last-stage loss (``losses._chunked_ce_sum``) calls exactly that function.
+    never fires and FLCE reports a memory saving that does not exist. ``cross_entropy`` is inert for
+    the same reason: the stage computes its loss outside the model's ``loss_utils`` path.
     """
     applier = _RecordingApplier()
     monkeypatch.setitem(orchestrator._TOOLKIT_LIGER_APPLIERS, "zaya", applier)
@@ -399,32 +388,6 @@ def test_cp_off_leaves_the_family_default_alone(monkeypatch):
     )
 
 
-@pytest.mark.parametrize("model_type", ["deepseek_v4", "glm4_moe_lite"])
-def test_flce_only_applier_defaults_flce_on(monkeypatch, model_type):
-    """FLCE-only appliers must resolve fused_linear_cross_entropy=True with NO user dict — the generic
-    flce=False default would make `use_liger_kernel: true` a total no-op for these families."""
-    applier = _FlceOnlyRecordingApplier()
-    monkeypatch.setitem(orchestrator._TOOLKIT_LIGER_APPLIERS, model_type, applier)
-    config = types.SimpleNamespace(model_type=model_type, text_config=None)
-    applied = orchestrator.apply_liger_kernel(config, liger_kernel_config=None)
-    assert applied == {"fused_linear_cross_entropy": True}
-    assert config._halo_liger_applied_config == applied
-    assert applier.calls == [applied]
-
-
-def test_flce_only_applier_user_override_and_tp_force_off_win(monkeypatch):
-    """User flce=False and the TP force-off must still beat the FLCE-only default."""
-    applier = _FlceOnlyRecordingApplier()
-    monkeypatch.setitem(orchestrator._TOOLKIT_LIGER_APPLIERS, "deepseek_v4", applier)
-    config = types.SimpleNamespace(model_type="deepseek_v4", text_config=None)
-    applied = orchestrator.apply_liger_kernel(config, {"fused_linear_cross_entropy": False})
-    assert applied == {"fused_linear_cross_entropy": False}
-
-    config = types.SimpleNamespace(model_type="deepseek_v4", text_config=None)
-    applied = orchestrator.apply_liger_kernel(config, liger_kernel_config=None, tp_size=2)
-    assert applied == {"fused_linear_cross_entropy": False}
-
-
 @pytest.mark.parametrize("model_type", ["deepseek_v4", "glm4_moe_lite", "zaya"])
 def test_the_large_vocab_families_still_default_to_flce(model_type):
     """The families whose logits plane is the binding memory limit must keep FLCE as their default.
@@ -440,7 +403,7 @@ def test_the_large_vocab_families_still_default_to_flce(model_type):
 
 def test_every_toolkit_applier_is_registered_in_the_toolkit_registry():
     """One registry, not two: a family self-registering into liger_kernel's own dict would resolve on
-    the upstream branch, where ``_PER_MODEL_DEFAULTS`` and the FLCE-only rule never look.
+    the upstream branch, where ``_PER_MODEL_DEFAULTS`` never looks.
 
     A DELEGATING spec is the one shape that must appear in both — it exists to run upstream's applier
     — and it must resolve on the toolkit branch, which is what puts the added role on top.

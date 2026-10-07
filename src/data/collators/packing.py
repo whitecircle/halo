@@ -383,16 +383,15 @@ class DataCollatorForCompletionOnlyLMWithPacking(DataCollatorWithPacking):
 
         return batch
 
-    def _mask_sequence(self, labels: torch.Tensor, input_ids: torch.Tensor | None = None) -> torch.Tensor:
-        """Completion-only mask a single sequence. When input_ids is given, detect template/EOS in
-        it (unaffected by the position_ids==0 boundary masking on labels); the mask applies to labels.
+    def _mask_sequence(self, labels: torch.Tensor, input_ids: torch.Tensor) -> torch.Tensor:
+        """Completion-only mask a single sequence: template/EOS are detected in ``input_ids``
+        (unaffected by the position_ids==0 boundary masking on labels); the mask applies to labels.
 
         Uses :data:`~src.data.spans.PACKED_SPAN_POLICY`, the same policy the offline bake takes for
         a packed artifact, so a terminator-less final turn trains the same tokens either way.
         """
-        detect = input_ids if input_ids is not None else labels
         spans = resolve_spans_or_warn(
-            detect.tolist(),
+            input_ids.tolist(),
             self.response_token_ids,
             self.eos_token_ids,
             train_on_last_assistant_only=self.train_on_last_assistant_only,
@@ -410,7 +409,7 @@ class DataCollatorForCompletionOnlyLMWithPacking(DataCollatorWithPacking):
             # Copy from `labels`, not input_ids: a template starting at a doc boundary must keep its mask.
             new_labels[start : end + 1] = labels[start : end + 1]
             # Rescue the turn-ending EOS dropped by the copy when pad_token_id == eos_token_id.
-            if input_ids is not None and start <= end < len(input_ids):
+            if start <= end < len(input_ids):
                 new_labels[end] = input_ids[end]
 
         return new_labels
@@ -419,8 +418,8 @@ class DataCollatorForCompletionOnlyLMWithPacking(DataCollatorWithPacking):
 @dataclass
 class DataCollatorWithFlattening(DefaultDataCollator):
     """Padding-free Flash Attention collator (no completion masking): flattens the
-    mini-batch into a single [1, total_tokens] sequence. Requires the model to use
-    `attn_implementation="flash_attention_2"`.
+    mini-batch into a single [1, total_tokens] sequence. Requires a varlen flash implementation
+    (:data:`~src.models.patches.attention.VARLEN_ATTN_IMPLEMENTATIONS`).
     """
 
     tokenizer: PreTrainedTokenizerBase = None
@@ -506,7 +505,7 @@ class DataCollatorWithFlatteningAndCompletionMask(DataCollatorWithFlattening):
         spans = resolve_spans_or_warn(
             input_ids,
             self.response_token_ids,
-            self.eos_token_ids or frozenset(),
+            self.eos_token_ids,
             train_on_last_assistant_only=self.train_on_last_assistant_only,
             span_policy=PACKED_SPAN_POLICY,
             response_prompt_template=self.response_prompt_template,

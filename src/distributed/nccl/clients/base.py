@@ -25,7 +25,6 @@ from urllib.parse import urlparse
 import requests
 import torch
 from requests.adapters import HTTPAdapter
-from torch import nn
 from torch.distributed.tensor import DTensor
 from urllib3.util.retry import Retry
 
@@ -476,7 +475,9 @@ class BaseWeightSyncClient:
             self._served_model_id = str(self.served_model_cards()[0]["id"])
         return self._served_model_id
 
-    def score_completion_logprobs(self, prompt_ids: list[int], completion_ids: list[int]) -> list[float]:
+    def score_completion_logprobs(
+        self, prompt_ids: list[int], completion_ids: list[int], timeout: float = _RESCORE_TIMEOUT_S
+    ) -> list[float]:
         """Per-token log-probs of ``completion_ids`` after ``prompt_ids`` under the engine's CURRENT
         weights: one prefill through the completions ``prompt_logprobs`` echo, the raw (pre-sampler)
         distribution. Raises on a transport, shape or key error — the caller decides what a failed
@@ -489,7 +490,7 @@ class BaseWeightSyncClient:
             "prompt_logprobs": 0,
             "temperature": 0.0,
         }
-        resp = self.session.post(f"{self.base_url}/v1/completions", json=body, timeout=_RESCORE_TIMEOUT_S)
+        resp = self.session.post(f"{self.base_url}/v1/completions", json=body, timeout=timeout)
         resp.raise_for_status()
         entries = resp.json()["choices"][0]["prompt_logprobs"]
         expected = len(prompt_ids) + len(completion_ids)
@@ -511,7 +512,9 @@ class BaseWeightSyncClient:
                 return int(card["max_model_len"])
         return None
 
-    def _probe_top_logprobs(self, model_id: str, temperature: float, top_p: float) -> list[float] | None:
+    def _probe_top_logprobs(
+        self, model_id: str, temperature: float, top_p: float, filters: Mapping[str, int | float]
+    ) -> list[float] | None:
         """The top logprob values (descending) of one 1-token completion, or ``None`` when unreadable."""
         body = {
             "model": model_id,
@@ -519,6 +522,7 @@ class BaseWeightSyncClient:
             "max_tokens": 1,
             "temperature": temperature,
             "top_p": top_p,
+            **filters,
             "logprobs": 2,
             "seed": 0,
         }
@@ -534,7 +538,9 @@ class BaseWeightSyncClient:
             return None
         return values
 
-    def probe_sampler_logprob_semantics(self) -> SamplerLogprobSemantics:
+    def probe_sampler_logprob_semantics(
+        self, top_k: int, min_p: float, repetition_penalty: float
+    ) -> SamplerLogprobSemantics:
         """Whether the engine's per-token logprobs are the SAMPLING distribution's — after temperature,
         and after a top-p renormalization — or the raw pre-processor values.
 
@@ -544,15 +550,21 @@ class BaseWeightSyncClient:
         renormalized into them. vLLM reports raw values unless served with ``--logprobs-mode
         processed_logprobs`` (temperature and nucleus both applied); SGLang reports post-temperature,
         pre-nucleus values unless ``SGLANG_RETURN_ORIGINAL_LOGPROB`` is set.
+
+        ``top_k``, ``min_p`` and ``repetition_penalty`` ride on all three requests, and the caller passes
+        their off values: each request moves one knob from the identity sampler, a filter set to a run's
+        value could cut the second token the gap is read from, and one left out takes the model's
+        generation_config default on vLLM's completions route.
         """
         try:
             model_id = self.served_model_cards()[0]["id"]
         except Exception as e:
             logger.warning(f"Sampler-logprob probe: could not resolve the model served at {self.base_url}: {e}")
             return SamplerLogprobSemantics(None, None)
-        base = self._probe_top_logprobs(model_id, 1.0, 1.0)
-        hot = self._probe_top_logprobs(model_id, _LOGPROB_PROBE_TEMPERATURE, 1.0)
-        nucleus = self._probe_top_logprobs(model_id, 1.0, _LOGPROB_PROBE_TOP_P)
+        filters = {"top_k": top_k, "min_p": min_p, "repetition_penalty": repetition_penalty}
+        base = self._probe_top_logprobs(model_id, 1.0, 1.0, filters)
+        hot = self._probe_top_logprobs(model_id, _LOGPROB_PROBE_TEMPERATURE, 1.0, filters)
+        nucleus = self._probe_top_logprobs(model_id, 1.0, _LOGPROB_PROBE_TOP_P, filters)
         if base is None or len(base) < 2:
             return SamplerLogprobSemantics(None, None)
         temperature_applied = None
@@ -788,7 +800,7 @@ class BaseWeightSyncClient:
         """Push a whole payload inside one quiesce: open the phase, stream it in chunks, close.
 
         The single-call form of the streamed path below, for callers holding the entire payload
-        (``update_model_params``, the reconnect replay). Same phases and byte budget: declaring a whole
+        (the transport preflight). Same phases and byte budget: declaring a whole
         model in one request would have the engine allocate receive buffers for all of it up front.
         """
         named_params = list(named_params)
@@ -808,10 +820,6 @@ class BaseWeightSyncClient:
             self.abort_weight_update()
             raise
         self._close_update(chunks[-1])
-
-    def update_model_params(self, model: nn.Module):
-        """Sync every model param in one quiesced update."""
-        self.sync_model_weights([(n, p.data) for n, p in model.named_parameters()])
 
     @classmethod
     def scoped_co_load_groups(cls, module_names: Iterable[str]) -> tuple[tuple[str, ...], ...]:

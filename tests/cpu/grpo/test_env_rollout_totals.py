@@ -48,12 +48,17 @@ def _fake_dp_world(monkeypatch, world: int):
     monkeypatch.setattr(rm, "is_multi_rank_run", lambda: world > 1)
 
 
+def _log_round(host, results: list, mode: str = "train") -> None:
+    """``_log_rollout_metrics`` over episodes that carry no reasoning."""
+    host._log_rollout_metrics(results, mode, [[] for _ in results])
+
+
 def test_cumulative_totals_count_the_whole_world_not_this_rank(monkeypatch) -> None:
     """A rank-local count would report 2 rollouts for a 4-rank step that ran 8."""
     _fake_dp_world(monkeypatch, world=4)
     host = _MetricsHost()
 
-    host._log_rollout_metrics([_episode(1.0, 100), _episode(3.0, 300)], "train")
+    _log_round(host, [_episode(1.0, 100), _episode(3.0, 300)])
 
     metrics = host.cumulative_rollout_metrics()
     assert metrics["async/total_rollouts"] == 8.0
@@ -67,8 +72,8 @@ def test_totals_accumulate_across_steps_and_modes(monkeypatch) -> None:
     _fake_dp_world(monkeypatch, world=2)
     host = _MetricsHost()
 
-    host._log_rollout_metrics([_episode(1.0, 10)], "train")
-    host._log_rollout_metrics([_episode(5.0, 30)], "eval")
+    _log_round(host, [_episode(1.0, 10)])
+    _log_round(host, [_episode(5.0, 30)], "eval")
 
     metrics = host.cumulative_rollout_metrics()
     assert metrics["async/total_rollouts"] == 4.0
@@ -82,7 +87,7 @@ def test_totals_are_per_trainer_not_shared_by_the_class(monkeypatch) -> None:
     _fake_dp_world(monkeypatch, world=1)
     first, second = _MetricsHost(), _MetricsHost()
 
-    first._log_rollout_metrics([_episode(1.0, 10)], "train")
+    _log_round(first, [_episode(1.0, 10)])
 
     assert first.cumulative_rollout_metrics()["async/total_rollouts"] == 1.0
     assert second.cumulative_rollout_metrics()["async/total_rollouts"] == 0.0
@@ -103,7 +108,7 @@ def test_requests_expired_in_sync_is_the_worlds_count_not_a_mean(monkeypatch) ->
     _fake_dp_world(monkeypatch, world=2)
     host = _MetricsHost()
 
-    host._log_rollout_metrics([_episode(1.0, 10, 1), _episode(1.0, 10, 0), _episode(1.0, 10, 2)], "train")
+    _log_round(host, [_episode(1.0, 10, 1), _episode(1.0, 10, 0), _episode(1.0, 10, 2)])
 
     assert host._metrics["train"]["async/requests_expired_in_sync"] == [6.0]
 

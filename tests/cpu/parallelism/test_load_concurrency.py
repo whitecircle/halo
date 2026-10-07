@@ -23,7 +23,7 @@ from tests.common.distributed import FakeStore
 
 
 def test_four_gpu_node_still_throttles_when_unset():
-    """The finding: LOCAL_WORLD_SIZE=4 with a flat default of 4 admitted the whole node at once."""
+    """LOCAL_WORLD_SIZE=4 with a flat default of 4 would admit the whole node at once."""
     resolved = resolve_load_concurrency(None, local_world_size=4)
     assert resolved == 2, f"a 4-GPU tray must keep a throttle, got {resolved}"
     assert resolved < 4, "a value at or above the node width disarms sequential_load_within_node"

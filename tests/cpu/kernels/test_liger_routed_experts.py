@@ -321,7 +321,7 @@ class _InitHost:
 
 def _trainer_liger_config(model_config, liger_kernel_config, **parallelism) -> dict:
     """The ``liger_kernel_config`` the trainer mixin leaves for HF Trainer to re-apply at ``train()``."""
-    args = types.SimpleNamespace(use_liger_kernel=True, liger_kernel_config=liger_kernel_config)
+    args = types.SimpleNamespace(use_liger_kernel=True, liger_kernel_config=liger_kernel_config, output_dir="unused")
     kwargs = {
         "parallelism_config": ParallelismConfig(**parallelism),
         "model": types.SimpleNamespace(config=model_config),
@@ -461,7 +461,7 @@ def test_under_an_ep_wrapper_the_soft_gate_still_decides(monkeypatch):
     explicit = orchestrator.apply_liger_kernel(_moe_config("qwen3_moe"), {"swiglu": True}, needs_ep_wrappers=True)
     assert explicit["swiglu"] is True
 
-    # A delegating spec keeps its shared-expert GLU under the wrapper, as before.
+    # A delegating spec keeps its shared-expert GLU under the wrapper.
     assert orchestrator.liger_ep_disables_fused_glu(True, _moe_config("qwen3_5_moe")) is False
 
 

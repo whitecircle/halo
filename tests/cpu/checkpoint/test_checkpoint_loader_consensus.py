@@ -10,9 +10,9 @@ tests exercise the single-process decision logic and, via monkeypatched consensu
 - The constructed-from-checkpoint skip and the TP+DP refusal never consume the checkpoint, so
   they must be decided BEFORE the per-rank read — at 100B+ scale that read is a host OOM, not a
   slowdown. The genuine pure-TP reload distributes each tensor into the live DTensor placements.
-- FSDP2 optimizer restore: a shard without its topology meta warm-restarts rather than loading
-  ungated. The terminal ``set_optimizer_state_dict`` outcome is pinned on a real two-rank group in
-  ``test_optimizer_restore_failure.py``.
+- FSDP2 optimizer restore: a shard without its topology meta is refused as torn rather than loaded
+  ungated or warm-restarted. The terminal ``set_optimizer_state_dict`` outcome is pinned on a real
+  two-rank group in ``test_optimizer_restore_failure.py``.
 """
 
 import os
@@ -333,13 +333,14 @@ def test_fsdp2_resume_with_matching_keys_reaches_the_load(tmp_path, monkeypatch)
     assert set(applied.calls[0][0][1]) == {"fc.weight"}
 
 
-def test_optimizer_shards_without_meta_warm_restart(tmp_path, monkeypatch):
+def test_optimizer_shards_without_meta_are_refused_as_torn(tmp_path, monkeypatch):
     """A shard with no ``optimizer_meta.pt`` cannot be gated — neither the rank-count nor the
-    fingerprint check has anything to compare — so it must warm-restart, not load ungated.
+    fingerprint check has anything to compare — and it is not a weights-only checkpoint either.
 
-    Reachable two ways: a kill in the window between the shard save's write and its
-    meta write, and a user who follows "delete every optimizer_shard_*.pt AND optimizer_meta.pt" by
-    halves. Loading ungated silently maps another topology's moments onto this run's params.
+    Reachable two ways: a kill in the window between the shard save's write and its meta write, and
+    a user who follows "delete every optimizer_shard_*.pt AND optimizer_meta.pt" by halves. Loading
+    ungated silently maps another topology's moments onto this run's params; warm-restarting resumes
+    an interrupted save as if it were complete. Both are refused unless the run opted in.
     """
     model = _TinyModel()
     optimizer = torch.optim.SGD(model.parameters(), lr=0.1)
@@ -350,10 +351,16 @@ def test_optimizer_shards_without_meta_warm_restart(tmp_path, monkeypatch):
     monkeypatch.setattr(optimizer_mod, "set_optimizer_state_dict", restore)
     monkeypatch.setattr(OptimizerShardStore, "_warm_restart", lambda self, ckpt, msg: warm_restarts(ckpt, msg))
 
-    OptimizerShardStore(_ctx(model, optimizer, fsdp_wrapped=True)).load(str(tmp_path))
+    with pytest.raises(RuntimeError, match="optimizer_meta.pt is missing beside the per-rank optimizer shards"):
+        OptimizerShardStore(_ctx(model, optimizer, fsdp_wrapped=True)).load(str(tmp_path))
+    assert restore.calls == [], "ungated shards were restored"
+    assert warm_restarts.calls == [], "an interrupted save was warm-restarted as if complete"
 
-    assert len(restore.calls) == 0, "ungated shards were restored"
-    assert len(warm_restarts.calls) == 1
+    opted_in = _ctx(model, optimizer, fsdp_wrapped=True)
+    opted_in.allow_optimizer_warm_restart = True
+    OptimizerShardStore(opted_in).load(str(tmp_path))
+    assert restore.calls == [], "ungated shards were restored under the opt-in"
+    assert len(warm_restarts.calls) == 1, "the opt-in must take the warm restart"
 
 
 def test_a_non_sharded_resume_refuses_per_rank_optimizer_shards(tmp_path):
@@ -403,7 +410,8 @@ def test_a_meta_write_failure_defers_to_the_collective(tmp_path, monkeypatch):
     real_save = torch.save
 
     def failing_meta_save(obj, f, *args, **kwargs):
-        if str(f).endswith("optimizer_meta.pt"):
+        # The meta is staged beside its final name, so match the name wherever it sits.
+        if "optimizer_meta.pt" in os.path.basename(str(f)):
             raise OSError("No space left on device")
         return real_save(obj, f, *args, **kwargs)
 
@@ -416,6 +424,9 @@ def test_a_meta_write_failure_defers_to_the_collective(tmp_path, monkeypatch):
         loader.save(str(tmp_path))
 
     assert os.path.exists(os.path.join(tmp_path, "optimizer_shard_00000.pt")), "the shard write itself succeeded"
+    assert not [name for name in os.listdir(tmp_path) if "optimizer_meta" in name], (
+        "a failed meta write left a file that could vouch for the shards"
+    )
 
 
 def _scheduler(model):

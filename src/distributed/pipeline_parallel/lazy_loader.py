@@ -1,17 +1,17 @@
 """Stage-aware model loading for pipeline parallelism.
 
-Every rank instantiates the full model on the meta device (zero bytes), plans the checkpoint against
-that whole-model key space, then keeps only the plans for the decoder layers its stage holds —
-re-based onto the stage's own layer numbering — and streams exactly those tensors from safetensors,
-so the load-time ceiling falls with ``pp_size`` instead of pinning the whole model to one GPU.
+Every rank instantiates the FULL model on the meta device (zero bytes), plans the checkpoint against
+that whole-model key space, then keeps only the plans for the decoder layers its stage owns —
+re-based onto the stage's own layer numbering — and streams exactly those tensors from safetensors.
+The load-time ceiling therefore falls with ``pp_size`` instead of pinning the whole model to one GPU.
 
-Composition with EP is a filter rather than a second loader: :class:`PPWeightPlanner` narrows
-whatever :class:`~src.distributed.expert_parallel.lazy_loader.EPWeightPlanner` produced (an
-``EPConfig`` of ``None`` means no expert sharding), so dense and EP stages take one code path.
+Composition with EP is a filter, not a second loader: :class:`PPWeightPlanner` narrows whatever
+:class:`~src.distributed.expert_parallel.lazy_loader.EPWeightPlanner` produced (an ``EPConfig`` of
+``None`` means no expert sharding at all), so a dense stage and an EP stage take one code path.
 
-Embeddings, the final norm and the task head are materialized on every stage and dropped afterwards
-by :func:`~src.distributed.pipeline_parallel.stage.build_pipeline_stage`: they are O(vocab x hidden)
-once, while the decoder layers scale with depth.
+Embeddings, the final norm and the task head are deliberately materialized on EVERY stage and
+dropped afterwards by :func:`~src.distributed.pipeline_parallel.stage.build_pipeline_stage`: they are
+O(vocab x hidden) once, while the decoder layers are the term that scales with depth.
 """
 
 from __future__ import annotations
@@ -26,12 +26,13 @@ import torch.nn as nn
 from transformers import AutoModelForCausalLM
 
 from src.distributed.expert_parallel.config import EPConfig
+from src.distributed.expert_parallel.fp32_masters import fp32_master_param_keys, verify_fp32_master_coverage
 from src.distributed.expert_parallel.lazy_loader import (
     CheckpointFormat,
     ExpertFuser,
     lazy_load_prologue,
 )
-from src.distributed.expert_parallel.patching import create_ep_buffers, ep_claimed_blocks, patch_moe_model_for_ep
+from src.distributed.expert_parallel.patching import create_ep_buffers, patch_moe_model_for_ep
 from src.distributed.pipeline_parallel.split import (
     TIE_WORD_EMBEDDINGS_FLAG,
     resolve_layer_partition,
@@ -65,14 +66,21 @@ from src.models.structure import backbone_with_layers
 
 logger = logging.getLogger(__name__)
 
-# Label attached to this loader's cross-rank rejections.
+# Names this loader in every uniform cross-rank rejection it raises.
 _PP_LOAD_LABEL = "Stage-aware pipeline load"
+
+# Why a stage finds its own tensors absent from a per-node pipeline checkpoint: each node's directory
+# holds only the shards of the stages that node ran (src/distributed/checkpoint/save.py).
+PER_NODE_PLACEMENT_REMEDY = (
+    "A per-node pipeline checkpoint resumes only onto the same topology and rank placement; for "
+    "anything else gather every node's directory onto one filesystem first."
+)
 
 
 class PPWeightPlanner:
     """Narrow a whole-model weight plan to one pipeline stage, re-basing its layer indices.
 
-    ``layer_root`` is the dotted prefix of the decoder-layer paths in the unsplit model's naming
+    ``layer_root`` is the dotted prefix of the decoder-layer paths in the UNSPLIT model's naming
     (``model.layers.``, ``model.language_model.layers.``, …) — the space the checkpoint and the meta
     shell share. Keys outside it (embeddings, final norm, task head) are claimed by every stage.
     """
@@ -90,23 +98,14 @@ class PPWeightPlanner:
     def stage_key(self, model_key: str) -> str:
         """``model_key`` re-based onto this stage's layer numbering (identity outside the layers).
 
-        Inverse of :meth:`~src.distributed.pipeline_parallel.stage.PipelineStageModule.global_parameter_name`'s
-        index shift; both go through :func:`~src.distributed.pipeline_parallel.stage.rebase_layer_index`.
+        The exact inverse of :meth:`~src.distributed.pipeline_parallel.stage.PipelineStageModule.global_parameter_name`'s
+        index shift — both go through :func:`~src.distributed.pipeline_parallel.stage.rebase_layer_index`.
         """
         return rebase_layer_index(model_key, self.layer_root, self.layer_root, -self.lo) or model_key
 
     def filter(self, plans: list[WeightPlan]) -> list[WeightPlan]:
         """This stage's plans, with their model keys re-based."""
         return [replace(plan, model_key=self.stage_key(plan.model_key)) for plan in plans if self.owns(plan.model_key)]
-
-
-def _shell_fp32_non_ep_param_keys(model: nn.Module, *, ep_wrapped: bool) -> frozenset[str]:
-    """The shell's FP32 pins outside the blocks adopted by the stage's EP wrappers."""
-    blocks = ep_claimed_blocks(model) if ep_wrapped else []
-    ep_keys = {f"{path}.{name}" for path, block in blocks for name, _ in block.named_parameters()}
-    return frozenset(
-        name for name, param in model.named_parameters() if param.dtype == torch.float32 and name not in ep_keys
-    )
 
 
 def load_pp_stage_model(
@@ -121,6 +120,7 @@ def load_pp_stage_model(
     trust_remote_code: bool = True,
     model_class=None,
     keep_fp32_params: bool = False,
+    preserve_checkpoint_precision: bool = False,
     **model_kwargs,
 ) -> nn.Module:
     """Load only this pipeline stage's decoder layers, streamed from safetensors.
@@ -130,15 +130,18 @@ def load_pp_stage_model(
     and ``resize_token_embeddings()`` keep working for every PP-enabled script.
     ``build_pipeline_stage`` finishes the split — it reads the partition back off
     :data:`~src.distributed.pipeline_parallel.stage.PP_STAGE_PARTITION_ATTR`.
-    ``keep_fp32_params`` (the run keeps fp32 masters) materializes in fp32 what an eager load leaves
-    fp32 outside the EP-wrapped MoE blocks, as the EP lazy loader does.
+    Configured FP32 masters (``keep_fp32_params``, plus ``ep_config``'s ``fp32_router`` /
+    ``fp32_experts``) are read or fused at fp32, chosen by the selector the EP lazy loader uses; the
+    PP resume reload skips EP layers, so this is the only read their routers and experts get.
+    ``preserve_checkpoint_precision`` marks a resume and requires every master of this stage restored.
 
     Raises:
         ValueError: the model's structure cannot be split (see
             :func:`~src.distributed.pipeline_parallel.split.validate_model_structure_supports_pp`).
         RuntimeError: a planned key does not exist on the sliced stage, a live tensor was never
-            assigned, or this stage carries no EP MoE layer. Each condition is stage-local, so it is
-            routed through :func:`~src.distributed.runtime.reject_across_ranks` and every rank raises.
+            assigned, a resume would leave a configured master unrestored, or this stage carries no
+            EP MoE layer. Each is a STAGE-local verdict routed through
+            :func:`~src.distributed.runtime.reject_across_ranks`, so the whole world raises together.
     """
     rank = get_global_rank()
     device = f"cuda:{get_local_rank()}" if torch.cuda.is_available() else "cpu"
@@ -150,10 +153,10 @@ def load_pp_stage_model(
         rank=rank,
         dtype=dtype,
         meta_init_phase="pp_stage_meta_init",
-        # A per-node PP save leaves each node only its own stage's shard files plus the full index
-        # (agent-docs/parallelism/pipeline-parallelism.md, Checkpoints). from_pretrained opens every
-        # indexed file, so the meta shell is then built config-only and the plan gate below decides
-        # whether the absent tensors are the droppable cross-stage ones.
+        # A per-node PP save (``save_pp_checkpoint``) leaves each node only its own stage's shard files
+        # plus the full index. from_pretrained opens every indexed file, so the meta shell must then be
+        # built config-only, and the plan gate below decides whether the absent tensors are the
+        # legitimately-droppable cross-stage ones.
         build_meta_shell=lambda incomplete: _instantiate_untied_on_meta(
             model_path,
             model_class or AutoModelForCausalLM,
@@ -172,13 +175,15 @@ def load_pp_stage_model(
             f"{model_path} (per-node pipeline checkpoint); loaded only locally-present shards."
         )
 
-    # Runs on the meta shell, before any weight is read.
+    # On the meta shell, before a single weight is read: a model that cannot be split must fail here
+    # rather than after every rank has paid the load.
     validate_model_structure_supports_pp(model)
 
     partition = resolve_layer_partition(model, pp_size, pp_split)
     lo, hi = partition[pp_rank]
-    # Every rank validates every stage's offset and the family's boundary constraints, on the meta
-    # shell: a rank-local raise would leave its peers waiting at the first collective below.
+    # Validate EVERY stage's offset on EVERY rank: a rank-local raise strands its peers at the
+    # first collective below. The family's own boundary constraints get the same treatment, and
+    # both run on the meta shell — before any rank pays for a weight.
     for stage_rank, (stage_lo, _) in enumerate(partition):
         reject_layer_type_rebase(model, stage_lo, stage_rank)
     resolve_pp_spec(backbone_with_layers(model)).validate_partition(model, partition)
@@ -201,39 +206,49 @@ def load_pp_stage_model(
             )
             if planner.owns(model_key)
         ]
-    # Per-expert keys map to no fused model key, so they never appear in ``plans`` and the
-    # missing-shard gate above cannot see them; without this gate the fuser's ``safe_open`` raises
-    # rank-local on an absent file, between two collectives.
+    # Per-expert keys never ride through ``plans`` (they map to no fused model key), so the
+    # missing-shard gate above cannot see them; without this gate the fuser's ``safe_open`` would
+    # die rank-local on an absent file between two collectives, stranding the other stages.
     reject_across_ranks(
         _missing_fusion_shards_reason(fusion_tasks, missing_files, model_path, pp_rank), _PP_LOAD_LABEL
     )
 
-    # Sliced only now: the plan above is built in the unsplit model's key space, the one the
-    # checkpoint index and disk_to_model use.
+    # Sliced only now: the plan above is built in the UNSPLIT model's key space, the one the
+    # checkpoint index and disk_to_model live in.
     slice_backbone_to_stage(model, lo, hi)
     setattr(model, PP_STAGE_PARTITION_ATTR, partition)
-    # After the slice: the kept keys must be in the stage's own numbering, the one ``plans`` now uses.
-    keep_fp32 = (
-        _shell_fp32_non_ep_param_keys(model, ep_wrapped=ep_config is not None) if keep_fp32_params else frozenset()
-    )
     reject_across_ranks(_unresolved_plans_reason(model, plans, pp_rank, lo, hi), _PP_LOAD_LABEL)
 
-    # The rank-local materialization steps below raise stage-dependent errors (a shape mismatch or
-    # missing expert confined to one stage's layers); the guard turns those into the collective
-    # rejection, so the other stages do not wait at the barrier.
+    # Rank-local materialization steps carry STAGE-dependent raises (a shape mismatch or missing
+    # expert confined to one stage's layers) — the guard converts them into the uniform collective
+    # rejection this loader promises, instead of stranding the other stages at the barrier.
     guard = DeferredRankFailure(f"PP stage weight load from {model_path}")
+    # After the slice: the masters must be in the stage's own numbering, the one ``plans`` now uses.
+    keep_fp32 = (
+        guard.run(lambda: fp32_master_param_keys(model, ep_config, keep_non_ep=keep_fp32_params)) or frozenset()
+    )
+    # Before the fusion replaces parameters: the coverage check groups tied aliases by identity.
+    master_state = guard.run(lambda: model.state_dict(keep_vars=True)) if preserve_checkpoint_precision else None
     fused_keys: set[str] = set()
     if fusion_tasks:
         fused_keys = (
-            guard.run(partial(fuser.execute, fusion_tasks, model, model_path, dtype=dtype, device=device)) or set()
+            guard.run(
+                partial(
+                    fuser.execute, fusion_tasks, model, model_path, dtype=dtype, device=device, keep_fp32=keep_fp32
+                )
+            )
+            or set()
         )
         plans = [plan for plan in plans if plan.model_key not in fused_keys]
 
     if dropped_keys:
         guard.run(partial(_materialize_droppable_keys, model, dropped_keys, device, dtype))
     # dropped_keys count as planned: they are materialized (empty) above, not checkpoint-absent, and
-    # the absent-module pass would otherwise re-init their modules and fail its coverage gate.
+    # the absent-module pass would otherwise re-init their backbone modules and fail its coverage gate.
+    # The stage build drops them, so they need no master either.
     planned = {plan.model_key for plan in plans} | fused_keys | set(dropped_keys)
+    if preserve_checkpoint_precision:
+        guard.run(partial(verify_fp32_master_coverage, master_state, keep_fp32, planned, source=model_path))
     guard.run(partial(init_checkpoint_absent_modules, model, planned, device, f"PP stage {pp_rank}", dtype=dtype))
 
     live = [plan for plan in plans if plan.action is not WeightAction.IGNORE]
@@ -251,21 +266,22 @@ def load_pp_stage_model(
     if torch.cuda.is_available():
         torch.cuda.empty_cache()
 
-    # Collective (all_gather_object): acts as the barrier and raises on any rank's deferred failure.
+    # Collective: every rank leaves the load together, and any rank's deferred failure raises on all.
     guard.reject()
     if ep_config is not None:
         reason = None
         try:
-            # Derived, not asserted (see load_ep_model_lazy): claiming "already sharded" for a
-            # checkpoint whose expert keys matched no pattern would give every rank experts
+            # Derived, never asserted — see load_ep_model_lazy: claiming "already sharded" for a
+            # checkpoint whose expert keys matched no pattern would give EVERY rank experts
             # 0..E_local-1.
             model = patch_moe_model_for_ep(model, ep_config, weights_already_sharded=bool(fused_keys) or n_shard > 0)
-        except Exception as e:  # stage-local failure, reported collectively below
-            # The common case is a hybrid MoE with a dense prefix (first_k_dense_replace,
-            # mlp_only_layers) leaving a leading stage with no MoE block. Every exception is caught,
-            # not just that ValueError: patching runs each family's wrapper constructor and
-            # detect_num_experts over this stage's layers, so a shape or key error is stage-local
-            # too, and one escaping here would leave the peers waiting in the gather below.
+        except Exception as e:  # the verdict is stage-local; see below
+            # The expected case is a hybrid MoE with a dense prefix (first_k_dense_replace,
+            # mlp_only_layers) leaving a leading stage with no MoE block at all. ANY exception is
+            # caught, not just that ValueError: patching runs each family's wrapper constructor and
+            # detect_num_experts over THIS stage's layers, so a shape or key error is stage-local
+            # too, and one escaping here would strand the peers in the gather immediately below —
+            # which is the whole reason this raise is fenced rather than propagated.
             reason = f"EP patching failed on pipeline stage {pp_rank}: {type(e).__name__}: {e}"
         reject_across_ranks(reason, _PP_LOAD_LABEL)
         # Only this stage's layers exist, so the buffers are stage-scoped by construction; EP groups
@@ -281,15 +297,16 @@ def load_pp_stage_model(
 
 
 def _instantiate_untied_on_meta(model_path: str, model_class, config, **model_kwargs) -> nn.Module:
-    """Build the meta shell with weight tying suppressed, then restore the declared flag on it.
+    """Build the meta shell with weight tying suppressed, then write the declared flag back onto it.
 
-    When the checkpoint carries both tied keys, ``from_pretrained`` decides whether to honour the tie
-    by comparing their values with ``torch.equal``, which has no meta kernel: a tied checkpoint would
-    fail with ``NotImplementedError: aten::equal`` before
-    :func:`~src.distributed.pipeline_parallel.split.validate_model_structure_supports_pp` runs.
-    Building untied does not change that gate's verdict — it reads the declared flag and the presence
-    of an output embedding, which is what permits a tie-declaring reward/classification head — so the
-    flag is restored for the gate and for the stage config it is saved into.
+    ``from_pretrained`` resolves the tie during the load and, when the checkpoint carries BOTH tied
+    keys, decides whether to honour it by comparing their VALUES with ``torch.equal`` — an op with no
+    meta kernel, so a tied checkpoint dies with ``NotImplementedError: aten::equal`` one line before
+    :func:`~src.distributed.pipeline_parallel.split.validate_model_structure_supports_pp` would have
+    explained the real problem. Whether the shell's two weights share storage is irrelevant to PP:
+    the gate rules on the declared flag and on the presence of an output embedding (which is what
+    permits a tie-declaring reward/classification head), and that verdict is unchanged by building
+    untied — so the flag is restored for the gate, and for the stage config it is saved into.
     """
     holders = tie_flag_configs(config)
     declared = {path: bool(getattr(holder, TIE_WORD_EMBEDDINGS_FLAG)) for path, holder in holders.items()}
@@ -317,13 +334,13 @@ def _instantiate_untied_on_meta(model_path: str, model_class, config, **model_kw
 
 
 def _cross_stage_droppable_prefixes(model: nn.Module, pp_rank: int, pp_size: int) -> tuple[str, ...]:
-    """Module paths this stage materializes only to drop at the stage build.
+    """Module paths this stage materializes only to DROP at the stage build.
 
     Mirrors :func:`~src.distributed.pipeline_parallel.stage.build_pipeline_stage`: a non-first stage
     drops the input embedding, a non-last stage replaces the final norm with ``Identity`` and sheds
-    the task head. Their checkpoint values are never read on this stage, so a per-node pipeline
-    checkpoint that lacks them locally is still complete here. Resolved by the same identity/spec
-    probes the stage build uses, not by hardcoded attribute names.
+    the task head. Their checkpoint values are never consumed on this stage, so a per-node pipeline
+    checkpoint that does not carry them locally is still complete for this stage. Resolved by the
+    same identity/spec probes the stage build uses — never by hardcoded attribute names.
     """
     prefixes: list[str] = []
     backbone = backbone_with_layers(model)
@@ -352,10 +369,11 @@ def _split_missing_shard_plans(
     """Drop the plans whose shard files are absent on this filesystem, if that is legitimate.
 
     Returns ``(loadable_plans, dropped_keys, reason)``. A per-node pipeline save leaves only this
-    node's stage shard, so the only keys a stage may plan out of an absent file are the cross-stage
+    node's stage shard, so the sole keys a stage may plan out of an absent file are the cross-stage
     modules it drops at the stage build (:func:`_cross_stage_droppable_prefixes`). Anything else
-    means the checkpoint lacks state this stage trains; ``reason`` carries the stage-local rejection
-    for ``reject_across_ranks``, returned rather than raised so the peers are not left in that gather.
+    means the checkpoint genuinely lacks state this stage trains — ``reason`` carries the stage-local
+    rejection for ``reject_across_ranks`` (returned, not raised: a lone raise would strand the peers
+    in that gather).
     """
     if not missing_files:
         return plans, [], None
@@ -376,10 +394,8 @@ def _split_missing_shard_plans(
             (
                 f"PP stage {pp_rank}: {len(undroppable)} planned tensor(s) live in shard file(s) absent from "
                 f"{model_path} and are NOT the cross-stage modules this stage drops — the checkpoint on this "
-                f"node's filesystem does not carry state the stage trains. A per-node pipeline checkpoint "
-                f"resumes only onto the same topology and rank placement; for anything else gather every "
-                f"node's directory onto one filesystem first. First few: {undroppable[:KEY_PREVIEW_COUNT]} "
-                f"(missing: {missing_files[:3]})."
+                f"node's filesystem does not carry state the stage trains. {PER_NODE_PLACEMENT_REMEDY} "
+                f"First few: {undroppable[:KEY_PREVIEW_COUNT]} (missing: {missing_files[:3]})."
             ),
         )
     dropped_keys = sorted(plan.model_key for plan in from_missing)
@@ -393,8 +409,8 @@ def _split_missing_shard_plans(
 def _missing_fusion_shards_reason(fusion_tasks, missing_files: list[str], model_path: str, pp_rank: int) -> str | None:
     """Why this stage's per-expert fusion tasks reference shard files absent on this filesystem.
 
-    Expert weights are never droppable cross-stage state, so any hit is the wrong-topology rejection
-    :func:`_split_missing_shard_plans` issues for planned keys.
+    Expert weights are never droppable cross-stage state, so any hit is the same wrong-topology
+    rejection :func:`_split_missing_shard_plans` issues for planned keys.
     """
     if not fusion_tasks or not missing_files:
         return None
@@ -413,18 +429,17 @@ def _missing_fusion_shards_reason(fusion_tasks, missing_files: list[str], model_
     return (
         f"PP stage {pp_rank}: the per-expert fusion needs shard file(s) absent from {model_path} "
         f"({hit[:3]}) — the checkpoint on this node's filesystem does not carry experts the stage "
-        f"trains. A per-node pipeline checkpoint resumes only onto the same topology and rank "
-        f"placement; for anything else gather every node's directory onto one filesystem first."
+        f"trains. {PER_NODE_PLACEMENT_REMEDY}"
     )
 
 
 def _materialize_droppable_keys(model: nn.Module, keys: list[str], device: str, dtype: torch.dtype | None) -> None:
     """Give the to-be-dropped cross-stage tensors real (uninitialized) storage off the meta device.
 
-    Their values are never read — ``build_pipeline_stage`` drops or replaces these modules — but the
-    coverage gate refuses any tensor left on meta, and FSDP cannot wrap one. ``torch.empty`` rather
-    than an init pass: an RNG draw here would desynchronize the seed stream against ranks whose
-    checkpoint carries the tensors.
+    Their values are never consumed — ``build_pipeline_stage`` drops or replaces these modules right
+    after — but the coverage gate rightly refuses ANY tensor left on meta, and FSDP wrapping would
+    also choke on one. ``torch.empty``, deliberately not an init pass: an RNG draw here would
+    desynchronize the seed stream against ranks whose checkpoint carries the tensors.
     """
     for key in keys:
         materialize_empty_like(model, key, device, dtype)
@@ -434,9 +449,10 @@ def _unresolved_plans_reason(model: nn.Module, plans: list[WeightPlan], pp_rank:
     """Why a re-based plan names a tensor the sliced stage does not have, or ``None``.
 
     Bypassing ``from_pretrained`` means nothing else reports a bad key: the assignment would raise a
-    bare ``AttributeError`` deep in an attribute walk, or for a stale name never run at all. Stage 0
-    cannot fail this gate (its re-base is the identity), so the verdict is returned for
-    :func:`~src.distributed.runtime.reject_across_ranks` rather than raised here.
+    bare ``AttributeError`` deep in an attribute walk, or (for a stale name) never run at all. Note
+    that stage 0 cannot fail this gate — its re-base is the identity — which is why the verdict is
+    routed through :func:`~src.distributed.runtime.reject_across_ranks` rather than raised
+    here.
     """
     stage_keys = set(model.state_dict().keys())
     unresolved = sorted({plan.model_key for plan in plans if plan.action is not WeightAction.IGNORE} - stage_keys)
@@ -454,9 +470,10 @@ def _unmaterialized_reason(model: nn.Module, model_path: str, pp_rank: int, lo: 
 
     The stage-aware load bypasses ``from_pretrained``, so nothing else reports a missing checkpoint
     key. A tensor left on meta means either the checkpoint does not carry it or the re-base dropped
-    its plan, and since every decoder layer shares its shapes an omission is otherwise invisible
-    until the first forward. Scope is ``state_dict`` (parameters + persistent buffers), the state a
-    checkpoint carries; non-persistent buffers are recomputed by the ``buffer_fixes`` pass.
+    its plan — and every decoder layer shares its shapes, so an omission is otherwise invisible until
+    the first forward. Scope is ``state_dict`` (parameters + persistent buffers), i.e. exactly the
+    state a checkpoint carries; non-persistent buffers are recomputed by the ``buffer_fixes`` pass
+    and a family that leaves one on meta is that pass's problem, not the loader's.
     """
     stranded = sorted(name for name, tensor in model.state_dict().items() if tensor is not None and tensor.is_meta)
     if not stranded:

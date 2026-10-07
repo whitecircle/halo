@@ -1,19 +1,49 @@
 #!/usr/bin/env python
-"""Offline-GRPO group advantages must survive integral reward columns.
+"""Offline-GRPO group advantages: each method's map, the clip, and integral reward columns.
 
-Verifiable rewards are commonly 0/1 integers. ``np.array`` on such a list keeps an int64 dtype, the
-degenerate-group branches return ``np.zeros_like`` (still int64), and the in-place best-completion
-emphasis multiply then raises ``UFuncTypeError`` inside ``datasets.map`` — where the traceback
-points at the map worker, not the reward column.
+Each ``advantage_method`` is pinned to its own values on an asymmetric group, where no two methods
+agree, and the result to the [-10, 10] clip. Verifiable rewards are commonly 0/1 integers.
+``np.array`` on such a list keeps an int64 dtype, the degenerate-group branches return
+``np.zeros_like`` (still int64), and the in-place best-completion emphasis multiply then raises
+``UFuncTypeError`` inside ``datasets.map`` — where the traceback points at the map worker, not the
+reward column.
 """
+
+import statistics
 
 import pytest
 import torch
 
-from src.trainers.grpo.objective.advantages import STD_EPS, group_relative_advantages
-from src.trainers.grpo.offline import compute_group_advantages
+from src.trainers.grpo.objective.advantages import STD_EPS, compute_group_advantages, group_relative_advantages
 
 METHODS = ["z_norm", "minmax", "quantile_norm", "quantile_uniform", "robust"]
+
+# Distinct rewards in ascending order, so their ranks are 1..4; spread unevenly, so the methods disagree.
+_ASYMMETRIC = [0.0, 0.2, 0.3, 1.0]
+_RANKS = [1, 2, 3, 4]
+_EXPECTED = {
+    "z_norm": [(r - 0.375) / (statistics.stdev(_ASYMMETRIC) + STD_EPS) for r in _ASYMMETRIC],
+    "minmax": [-1.0, -0.6, -0.4, 1.0],
+    "quantile_norm": [statistics.NormalDist().inv_cdf((k - 0.5) / 4) for k in _RANKS],
+    "quantile_uniform": [-1.0, -1 / 3, 1 / 3, 1.0],
+    # Median 0.25, interquartile range 0.475 - 0.15 by linear interpolation.
+    "robust": [(r - 0.25) / 0.325 for r in _ASYMMETRIC],
+}
+
+
+@pytest.mark.parametrize("method", METHODS)
+def test_each_method_maps_an_asymmetric_group_to_its_own_advantages(method):
+    assert compute_group_advantages(_ASYMMETRIC, method, best_completion_emphasis=0.0) == pytest.approx(
+        _EXPECTED[method]
+    )
+
+
+def test_advantages_are_clipped_to_ten_either_way():
+    """An outlier on each side of a tight interquartile range: 400 interquartile ranges out, clipped."""
+    rewards = [-100.0, 0.0, 0.1, 0.2, 0.3, 100.0]
+    assert compute_group_advantages(rewards, "robust", best_completion_emphasis=0.0) == pytest.approx(
+        [-10.0, -0.6, -0.2, 0.2, 0.6, 10.0]
+    )
 
 
 @pytest.mark.parametrize("method", METHODS)
@@ -42,7 +72,7 @@ def test_degenerate_integer_group_emphasis_is_inert():
 
 
 def test_emphasis_still_scales_the_best_completion():
-    """The fix must not disable the emphasis on a group that does have spread."""
+    """Handling integer rewards must not disable the emphasis on a group that does have spread."""
     plain = compute_group_advantages([0, 0, 1], "minmax", best_completion_emphasis=0.0)
     emphasized = compute_group_advantages([0, 0, 1], "minmax", best_completion_emphasis=2.0)
     best = plain.index(max(plain))
@@ -92,7 +122,7 @@ def test_auto_emphasis_scales_by_the_population_std_under_every_method():
 def test_single_completion_group_has_zero_advantage(method):
     """A one-completion group has no spread, so every method must return exactly ``[0.0]``.
 
-    No method carries a hand-written ``n == 1`` case any more — the general rank/IQR branches produce
+    No method carries a hand-written ``n == 1`` case — the general rank/IQR branches produce
     this. A regression that divides by ``n - 1`` or by a zero IQR would surface here as NaN.
     """
     assert compute_group_advantages([0.5], method, best_completion_emphasis=3.0) == [0.0]

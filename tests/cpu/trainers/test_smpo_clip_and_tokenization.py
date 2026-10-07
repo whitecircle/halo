@@ -19,7 +19,8 @@ import pytest
 import torch
 import torch.distributed as dist
 
-from src.trainers.preference.smpo import SmoothMarginPOTrainer, tokenize_preference_row
+from src.data.pipeline.preferences import tokenize_preference_row
+from src.trainers.preference.smpo import SmoothMarginPOTrainer
 from tests.common.gloo import run_gloo_ranks
 
 CP_WORLD_SIZE = 2
@@ -71,7 +72,7 @@ def test_percentile_clip_bound_carries_no_gradient():
 
 
 def test_padding_free_percentile_clip_bound_carries_no_gradient():
-    """The padding-free row shares the contract, and now the same method — only the selector differs."""
+    """The padding-free row shares the contract and the same method — only the selector differs."""
     flat = _rejected_logps(rows=1, seq=800).reshape(-1).requires_grad_(True)
     loss_mask = torch.ones_like(flat, dtype=torch.bool)
     is_chosen = torch.zeros_like(flat, dtype=torch.bool)
@@ -96,8 +97,8 @@ def test_clip_still_clamps_the_low_tail():
     assert clipped.min().item() == pytest.approx(bound.item(), abs=1e-5)
 
 
-def _legacy_padded_clip(clipper, per_token_logps, loss_mask, num_chosen, cp_config=None):
-    """The pre-merge padded spelling: row-slice selectors, ``torch.where`` writes."""
+def _row_split_clip(clipper, per_token_logps, loss_mask, num_chosen, cp_config=None):
+    """Padded spelling: row-slice selectors, ``torch.where`` writes."""
     per_token_logps = per_token_logps.clone()
     if clipper.lower_clip_percentile is not None:
         rejected_logps = per_token_logps[num_chosen:][loss_mask[num_chosen:]]
@@ -126,8 +127,8 @@ def _legacy_padded_clip(clipper, per_token_logps, loss_mask, num_chosen, cp_conf
     return per_token_logps
 
 
-def _legacy_flat_clip(clipper, per_token_logps, loss_mask, is_chosen):
-    """The pre-merge padding-free spelling: boolean-mask selectors, ``clamp`` writes."""
+def _boolean_mask_clip(clipper, per_token_logps, loss_mask, is_chosen):
+    """Padding-free spelling: boolean-mask selectors, ``clamp`` writes."""
     per_token_logps = per_token_logps.clone()
     rejected_valid = loss_mask & ~is_chosen
     chosen_valid = loss_mask & is_chosen
@@ -149,12 +150,12 @@ def _legacy_flat_clip(clipper, per_token_logps, loss_mask, is_chosen):
 
 
 @pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16])
-def test_merged_clip_reproduces_both_pre_merge_spellings(dtype):
-    """The one clip must equal BOTH spellings it replaced, on the same data, in the same dtype.
+def test_the_clip_reproduces_both_selector_spellings(dtype):
+    """The one clip must equal BOTH independent spellings, on the same data, in the same dtype.
 
-    The two differed only in selector (row split vs boolean mask) and write (``where`` vs ``clamp``);
-    if the merge changed the rule — an order swap, a masked position touched, a dtype cast moved —
-    one of these two comparisons breaks.
+    The two differ only in selector (row split vs boolean mask) and write (``where`` vs ``clamp``);
+    a change to the rule — an order swap, a masked position touched, a dtype cast moved — breaks
+    one of these two comparisons.
     """
     num_chosen, seq = 3, 400
     logps = _rejected_logps(rows=2 * num_chosen, seq=seq, seed=7).to(dtype)
@@ -163,23 +164,23 @@ def test_merged_clip_reproduces_both_pre_merge_spellings(dtype):
     clipper = _Clipper(lower=0.05, upper=0.9, min_log_prob=-2.0)
 
     row_is_chosen = (torch.arange(2 * num_chosen) < num_chosen).unsqueeze(1)
-    merged = clipper._clip_log_probs(logps, loss_mask, row_is_chosen, cp_config=None)
+    clipped = clipper._clip_log_probs(logps, loss_mask, row_is_chosen, cp_config=None)
 
-    legacy = _legacy_padded_clip(clipper, logps, loss_mask, num_chosen)
-    assert torch.equal(merged, legacy), "the merged clip disagrees with the padded spelling it replaced"
+    reference = _row_split_clip(clipper, logps, loss_mask, num_chosen)
+    assert torch.equal(clipped, reference), "the clip disagrees with the padded spelling"
 
     flat_logps = logps.reshape(-1)
     flat_mask = loss_mask.reshape(-1)
     flat_is_chosen = row_is_chosen.expand_as(logps).reshape(-1)
-    merged_flat = clipper._clip_log_probs(flat_logps, flat_mask, flat_is_chosen)
-    assert torch.equal(merged_flat, _legacy_flat_clip(clipper, flat_logps, flat_mask, flat_is_chosen)), (
-        "the merged clip disagrees with the padding-free spelling it replaced"
+    clipped_flat = clipper._clip_log_probs(flat_logps, flat_mask, flat_is_chosen)
+    assert torch.equal(clipped_flat, _boolean_mask_clip(clipper, flat_logps, flat_mask, flat_is_chosen)), (
+        "the clip disagrees with the padding-free spelling"
     )
-    assert torch.equal(merged_flat.view_as(logps), merged), (
+    assert torch.equal(clipped_flat.view_as(logps), clipped), (
         "padded and padding-free batches of the same data clip differently — the selector, not the "
         "rule, is supposed to be the only difference"
     )
-    assert torch.equal(merged[~loss_mask], logps[~loss_mask]), "a masked (padding) position was clipped"
+    assert torch.equal(clipped[~loss_mask], logps[~loss_mask]), "a masked (padding) position was clipped"
 
 
 def _cp_clip_worker(rank: int, out_path: str) -> None:

@@ -99,7 +99,7 @@ def test_active_flops_matches_hand_derivation():
 def test_expert_tp_divides_active_flops(expert_tp_size):
     """ETP shards each expert's rows, so a rank really does 1/etp of the expert work.
 
-    Guards the other direction of the same fix: ``expert_tp_size`` must NOT be multiplied in, because
+    Guards the other direction: ``expert_tp_size`` must NOT be multiplied in, because
     it already divides the local expert params.
     """
     baseline_expert_term = 6.0 * TOP_K * HIDDEN * HIDDEN
@@ -122,7 +122,7 @@ class _State:
 def test_warmup_excludes_exactly_n_steps():
     """HF increments global_step before on_step_end, so the bound must be inclusive.
 
-    With an exclusive bound ``n_warmup_steps=2`` skipped only one step, leaving first-step JIT and
+    An exclusive bound would skip only one step at ``n_warmup_steps=2``, leaving first-step JIT and
     allocator skew inside the reported averages.
     """
     cb = EfficiencyCallback(_NO_PARALLELISM, n_warmup_steps=2)

@@ -134,7 +134,7 @@ def run(ctx):
     # Every rank saw the same broadcast batch and ends each layer on the same all-reduced partial sums.
     spread = world_spread(loss.item())
     metrics["rank_loss_spread"] = spread
-    checks["losses_agree_across_ranks"] = spread < TOL.ep_identical_batch_rank_spread_abs
+    checks["losses_agree_across_ranks"] = TOL.identical_batch_ranks_agree(spread)
 
     # ── Router gradient vs the reference ─────────────────────────────────────────────────────
     loss.backward()

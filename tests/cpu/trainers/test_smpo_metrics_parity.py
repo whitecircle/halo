@@ -82,7 +82,7 @@ def _trainer(margin_schedule: bool = False) -> SmoothMarginPOTrainer:
         rejected_token_count=torch.tensor(REJECTED_TOKEN_COUNT),
         target_margin=TARGET_MARGIN,
     )
-    trainer.concatenated_forward = lambda model, batch: {
+    trainer.concatenated_forward = lambda model, batch, real_pairs=None: {
         "chosen_logps": torch.tensor(CHOSEN_LOGPS),
         "rejected_logps": torch.tensor(REJECTED_LOGPS),
         "chosen_sft_loss": torch.tensor(EXPECTED["sft_loss/chosen"]),
@@ -207,7 +207,7 @@ def test_the_real_callers_stay_pinned_to_the_shared_helpers(margin_schedule):
     values for the same batch, or a metric added to one path alone would desync the PP chain
     broadcast (whose key set is pinned) and split the logged series in two."""
     trainer = _trainer(margin_schedule)
-    _, non_pp = trainer.get_batch_loss_metrics(model=None, batch={}, train_eval="train")
+    _, non_pp, _ = trainer.get_batch_loss_metrics(model=None, batch={}, train_eval="train")
 
     pipelined_trainer = _trainer(margin_schedule)
     pipelined_trainer._pp_accumulate_metrics(_microbatch_sums(pipelined_trainer))
@@ -253,7 +253,9 @@ def test_a_stage_that_accumulated_nothing_reports_the_same_names():
 def test_eval_prefixes_only_the_caller_side():
     """The helpers return unprefixed names; ``get_batch_loss_metrics`` owns the ``eval_`` prefix."""
     trainer = _trainer()
-    _, evaluated = trainer.get_batch_loss_metrics(model=None, batch={}, train_eval="eval")
+    trainer.eval_split_rows = lambda num_rows: num_rows
+    batch = {"prompt_input_ids": torch.zeros(len(CHOSEN_LOGPS), 1)}
+    _, evaluated, _ = trainer.get_batch_loss_metrics(model=None, batch=batch, train_eval="eval")
 
     assert {name.removeprefix("eval_") for name in evaluated} == set(EXPECTED)
     assert all(name.startswith("eval_") for name in evaluated)

@@ -33,7 +33,7 @@ def test_a_matching_pattern_unfreezes_only_that_module():
 
 
 def test_a_pattern_matching_nothing_raises():
-    """Pre-gate this returned normally with every parameter frozen."""
+    """Without the gate this would return normally with every parameter frozen."""
     with pytest.raises(ValueError, match="matched no parameter-bearing module"):
         unfreeze_modules_by_patterns(_model(), ["model.layer.0.*"])
 
@@ -54,8 +54,8 @@ def test_a_matching_freeze_pattern_freezes_only_those_parameters():
 
 
 def test_a_freeze_pattern_matching_nothing_raises():
-    """Pre-gate this returned normally, having frozen nothing: the module the user meant to hold
-    still trained for the whole run with no other symptom."""
+    """Without the gate this would return normally, having frozen nothing: the module the user meant
+    to hold would train for the whole run with no other symptom."""
     with pytest.raises(ValueError, match="matched no parameter"):
         freeze_modules_by_patterns(_model(), ["nothing.matches.this"])
 

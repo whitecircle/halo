@@ -56,7 +56,7 @@ def test_gemma4_template_bos_survives():
         text = _render(tok, messages, add_gen)
         assert text.startswith(tok.bos_token), "precondition: the gemma-4 template emits BOS"
         ids = tokenize_rendered(tok, text, for_generation=add_gen)["input_ids"]
-        assert ids[0] == tok.bos_token_id, "the template-emitted BOS must survive (regression: it was stripped)"
+        assert ids[0] == tok.bos_token_id, "the template-emitted BOS must survive"
         assert ids.count(tok.bos_token_id) == 1
 
 
@@ -94,8 +94,8 @@ def test_zaya_training_keeps_terminator_generation_drops_it():
 
     # Training rows: single BOS, and the terminator appears exactly as the TEMPLATE emits it —
     # Zaya's template already closes the final assistant turn with <|im_end|>\n, so the
-    # post-processor's appended copy is a duplicate and must be stripped (regression: training rows
-    # ended [..., <|im_end|>, \n, <|im_end|>] — a doubled terminator).
+    # post-processor's appended copy is a duplicate and must be stripped (a kept copy ends the row
+    # [..., <|im_end|>, \n, <|im_end|>] — a doubled terminator).
     train_text = _render(tok, MESSAGES, add_generation_prompt=False)
     train_ids = tokenize_rendered(tok, train_text)["input_ids"]
     assert train_ids[0] == tok.bos_token_id and train_ids.count(tok.bos_token_id) == 1
@@ -118,8 +118,8 @@ def test_zaya_max_length_boundary_never_doubles_the_terminator():
     """Boundary regression on the real Zaya tokenizer, through the production SFT map fn.
 
     ``create_llm_processor`` drops rows longer than ``max_length``, so a surviving row is never cut
-    by more than the render's trailing whitespace — yet a length-vs-budget dedup guard read those
-    rows as "truncated" and let the appended ``<|im_end|>`` double the template's own.
+    by more than the render's trailing whitespace — so a dedup guard keyed on length-vs-budget would
+    read those rows as "truncated" and let the appended ``<|im_end|>`` double the template's own.
     """
     tok = load_cached_tokenizer(ZAYA_8B, trust_remote_code=True)
     eos_id = tok.eos_token_id

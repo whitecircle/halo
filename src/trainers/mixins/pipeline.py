@@ -39,7 +39,9 @@ from src.distributed.pipeline_parallel.stage import PipelineStageModule, build_p
 from src.distributed.runtime import (
     current_device,
     fs_aware_save_rank,
+    get_num_nodes,
     is_global_main_process,
+    is_output_shared_filesystem,
     reject_across_ranks,
 )
 from src.env import env_flag
@@ -49,6 +51,7 @@ from src.trainers.mixins.grad_clip import (
     clip_parameters,
     clipping_enabled,
     local_grad_norm_sq,
+    require_l2,
     scale_shards_to_max_norm_,
 )
 from src.trainers.mixins.pp_gates import (
@@ -250,6 +253,15 @@ class PipelineTrainerMixin:
                 "unsplit-model names with no pipeline-stage layer offset, so shards from different "
                 "stages would collide or merge under wrong names. The PP save already writes one "
                 "complete-tensor shard per stage under global names."
+            )
+        if getattr(training_args, "push_to_hub", False) and not is_output_shared_filesystem() and get_num_nodes() > 1:
+            raise ValueError(
+                "push_to_hub is not supported under pipeline parallelism with a per-node output "
+                "filesystem (DIST_OUTPUT_SHARED_FILESYSTEM=0) across nodes: each node writes only the "
+                "shards of the stages it runs beside the full index, and the Trainer uploads from global "
+                "rank 0, whose node lacks the other nodes' stages, so the Hub repo would get an index "
+                "naming files it never receives. Write checkpoints to a shared output filesystem, or "
+                "gather every node's checkpoint directory into one and upload that."
             )
         gc_kwargs = training_args.gradient_checkpointing_kwargs or {}
         if training_args.gradient_checkpointing and gc_kwargs.get("use_reentrant", False):
@@ -518,8 +530,7 @@ class PipelineTrainerMixin:
         separate expert leg; stages holding plain-tensor EP expert shards use
         ``ep_clip_grad_norm_`` instead.
         """
-        if norm_type != 2:
-            raise ValueError(f"Pipeline-parallel clipping supports norm_type=2 only, got {norm_type}")
+        require_l2(norm_type, "Pipeline-parallel")
         grads = [p.grad for p in clip_parameters(parameters) if p.grad is not None]
         shards = [g.to_local() if isinstance(g, DTensor) else g for g in grads]
         local = local_grad_norm_sq(shards, device=current_device())
@@ -550,8 +561,7 @@ class PipelineTrainerMixin:
         intra-stage composition. Trainers normalizing differently declare it on their adapter.
         """
         count = loss_token_count(inputs["labels"]).to(dtype=torch.float32)
-        if self._pp_stage_group is not None:
-            dist.all_reduce(count, group=self._pp_stage_group)
+        dist.all_reduce(count, group=self._pp_stage_group)
         return (count / self.parallelism_config.stage_world_size).clamp(min=1.0)
 
     def _pp_training_step(self, inputs) -> torch.Tensor:
@@ -568,6 +578,8 @@ class PipelineTrainerMixin:
         adapter = self._pp_adapter
         if adapter.batch_transform is not None:
             inputs = adapter.batch_transform(inputs)
+        if adapter.step_state_fn is not None:
+            adapter.step_state_fn(inputs)
         normalizer = self._pp_default_normalizer(inputs) if adapter.normalizer is None else adapter.normalizer(inputs)
         extras = {key: inputs[key] for key in adapter.extra_target_keys} or None
 
@@ -664,12 +676,14 @@ class PipelineTrainerMixin:
         # rather than at it.
         self.store_metrics({}, train_eval="train")
 
-    def _pp_share_step_metrics(self, train_eval: str) -> None:
+    def _pp_share_step_metrics(self, train_eval: str, rows: int = 1) -> None:
         """Broadcast the last stage's per-step metrics down the chain and record them everywhere.
 
         Only the last stage runs the loss closure, so only it has values; every other rank enters
         with its own (zero) reading and leaves with the last stage's. One fp32 vector per step over
         the chain group — not per microbatch, and not an object hop, because the names are pinned.
+        ``rows`` weighs them: an eval step's real examples, uniform across the chain since every
+        stage reads the same DP shard.
         """
         if not self._pp_metric_keys:
             return
@@ -687,7 +701,9 @@ class PipelineTrainerMixin:
             [torch.as_tensor(local[key], dtype=torch.float32).to(device) for key in self._pp_metric_keys]
         )
         dist.broadcast(values, src=self._pp_last_stage_rank, group=self._pp_chain_group)
-        self.store_metrics(dict(zip(self._pp_metric_keys, values.unbind(), strict=True)), train_eval=train_eval)
+        self.store_metrics(
+            dict(zip(self._pp_metric_keys, values.unbind(), strict=True)), train_eval=train_eval, rows=rows
+        )
 
     def _pp_stage_gather(self, tensor: torch.Tensor) -> torch.Tensor:
         """All-gather ``tensor`` over this stage's ranks — the DP scope under PP.
@@ -695,7 +711,7 @@ class PipelineTrainerMixin:
         A world gather would mix stages: only the last stage's ranks hold sample-level values at
         all, and the other stages would enter with nothing (a hang) or with duplicates.
         """
-        stage_size = dist.get_world_size(self._pp_stage_group) if self._pp_stage_group is not None else 1
+        stage_size = dist.get_world_size(self._pp_stage_group)
         if stage_size == 1:
             return tensor
         buffers = [torch.empty_like(tensor) for _ in range(stage_size)]
@@ -769,24 +785,36 @@ class PipelineTrainerMixin:
         (:meth:`_pp_hoist_metrics_reduction`) and must not be re-applied here.
 
         A partial final eval batch is row-padded to the frozen batch size with the inert rows of
-        :meth:`_pp_frozen_row_pads`, which contribute nothing to the loss.
+        :meth:`_pp_frozen_row_pads`, which contribute nothing to the loss. The examples padding an
+        eval split's final round (past :meth:`eval_split_rows`, repeats of its first examples) leave
+        first and come back as those inert rows, so the loss, its normalizer and the per-step
+        metrics read the real examples alone; the predictions keep the batch's rows, the shape every
+        rank's evaluation gather expects, for it to cut.
         """
         del ignore_keys
         adapter = self._pp_adapter
         inputs = self._prepare_inputs(inputs)
         if adapter.batch_transform is not None:
             inputs = adapter.batch_transform(inputs)
-        # Per-batch mean, matching non-PP eval. Computed before the row padding so pair/row-count
-        # normalizers see the true batch (the causal-LM token count is pad-invariant either way).
-        count = (
-            adapter.eval_normalizer(inputs)
-            if adapter.eval_normalizer is not None
-            else self._pp_eval_token_normalizer(inputs["labels"])
-        )
 
         rows = inputs["input_ids"].size(0)
         frozen_rows = self.args.per_device_train_batch_size * adapter.rows_per_example
-        inputs = self._pp_pad_rows_to_frozen(inputs, frozen_rows, self._pp_frozen_row_pads())
+        pad_values = self._pp_frozen_row_pads()
+        real_examples = self.eval_split_rows(rows // adapter.rows_per_example)
+        real_rows = real_examples * adapter.rows_per_example
+        inputs = {key: value[:real_rows] if key in pad_values else value for key, value in inputs.items()}
+        if adapter.step_state_fn is not None:
+            adapter.step_state_fn(inputs)
+        # The per-batch mean over the real examples. Computed before the row padding so pair/row-count
+        # normalizers see them alone (the causal-LM token count is pad-invariant either way); a step
+        # of padding alone sums to 0 over its filler rows and divides by 1, as no row is real.
+        if not real_examples:
+            count = 1.0
+        elif adapter.eval_normalizer is not None:
+            count = adapter.eval_normalizer(inputs)
+        else:
+            count = self._pp_eval_token_normalizer(inputs["labels"])
+        inputs = self._pp_pad_rows_to_frozen(inputs, frozen_rows, pad_values)
         extras = {key: inputs[key] for key in adapter.extra_target_keys} or None
 
         if prediction_loss_only or self.compute_metrics is None:
@@ -798,7 +826,7 @@ class PipelineTrainerMixin:
                 num_items_in_batch=count,
                 extra_targets=extras,
             )
-            self._pp_share_step_metrics("eval")
+            self._pp_share_step_metrics("eval", rows=real_examples)
             return self._pp_broadcast_loss_from_last_stage(loss), None, None
 
         outputs = self._pp_runtime.forward_only(
@@ -812,17 +840,15 @@ class PipelineTrainerMixin:
             loss = (adapter.token_loss_fn(outputs, target) / count).detach()
             predictions = outputs if adapter.predictions_fn is None else adapter.predictions_fn(outputs, inputs)
             predictions = predictions.detach()
-        self._pp_share_step_metrics("eval")
+        self._pp_share_step_metrics("eval", rows=real_examples)
         loss = self._pp_broadcast_loss_from_last_stage(loss)
         predictions = self._pp_broadcast_output_from_last_stage(predictions)
         labels = inputs["labels"] if adapter.eval_labels_fn is None else adapter.eval_labels_fn(inputs)
         # Trim filler rows in the eval output's own row unit, which a predictions_fn may change: a
         # preference adapter emits one row per pair, so slicing by the batch's row count would keep
         # inert pad pairs, which score as ties and inflate every partial final batch's metric.
-        # Predictions and labels trim together or not at all: an adapter reducing to a fixed-size
-        # batch summary emits the same shape on both legs, and trimming one alone hands
-        # compute_metrics mismatched lengths and desyncs gather_for_metrics across replicas.
-        if adapter.row_aligned_eval_outputs:
-            labels = labels[: labels.size(0) * rows // frozen_rows]
-            predictions = predictions[: predictions.size(0) * rows // frozen_rows]
+        # Predictions and labels trim together: trimming one alone hands compute_metrics mismatched
+        # lengths and desyncs gather_for_metrics across replicas.
+        labels = labels[: labels.size(0) * rows // frozen_rows]
+        predictions = predictions[: predictions.size(0) * rows // frozen_rows]
         return loss, predictions, labels

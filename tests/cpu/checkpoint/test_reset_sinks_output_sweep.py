@@ -9,9 +9,9 @@ its own ``-00001-of-00002`` numbering regex matches, so a stale index survives i
 ``from_pretrained`` and the toolkit's index-first readers can resolve the OLD weights — or shards
 that no longer exist — from a directory the tool reported as successfully reset.
 
-The sweep therefore sits at the dispatcher, after whichever branch ran, and only when the output
-directory is not the input: rewriting a checkpoint where it stands is this tool's documented default,
-and there the directory's other weight files are not the tool's to delete.
+The single-file branch sweeps at the dispatcher, and only when the output directory is not the
+input: under ``--in_place`` the directory's other weight files are not the tool's to delete. The
+``from_pretrained`` branch sweeps its own output after its staged swap.
 
 The other way this tool hands back a directory it should not: the ``from_pretrained`` branch applies
 the trainers' own sink policy, so a layout that walk does not recognize must RAISE there instead of
@@ -188,7 +188,7 @@ def test_the_sharded_branch_sweeps_the_previous_runs_index(tmp_path):
 
 
 def test_an_in_place_run_sweeps_nothing(tmp_path):
-    """In place is this tool's default, and there the directory is not its to prune: the other weight
+    """An ``--in_place`` reset does not prune the directory: the other weight
     files belong to whoever put them there, and the reset still has to happen."""
     source = tmp_path / "src"
     sinks = _build_source(source, sharded=False)
@@ -215,7 +215,7 @@ def _sinks_across_shards(directory) -> dict[str, torch.Tensor]:
 
 
 def test_an_in_place_sharded_reset_is_staged_verified_and_swapped(tmp_path, monkeypatch):
-    """The sharded (from_pretrained) branch's default is in place over the only copy, so WHERE the
+    """Under ``--in_place`` the sharded (from_pretrained) branch writes over the only copy, so WHERE the
     reset is written before it lands is the contract, not just the end state: a save straight into
     the target reaches the same final bytes and loses the checkpoint on any failure along the way.
     Recorded at the swap seam — the staged copy must already be reset while the target still holds

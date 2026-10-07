@@ -6,10 +6,8 @@ applies Hinton's ``T**2``. Pinned against independent spellings of each loss:
 
 - the OPD losses (reverse, forward, unnormalized KL) equal the upcast-then-divide formulas bit for
   bit, values and student gradients, at every temperature, for bf16 and fp32 logits;
-- the teacher arm's ``kl_divergence`` is the OPD forward KL, and it, ``soft_cross_entropy`` and
-  ``jensen_shannon`` agree with the ``kl_div`` / ``softmax`` spellings to fp32 rounding;
-- at a temperature bf16 cannot divide exactly, a bf16 input scores exactly like its fp32 copy: the
-  divide runs once, after the upcast, never on the bf16 logits;
+- the teacher arm's ``kl_divergence``, ``soft_cross_entropy`` and ``jensen_shannon`` agree with the
+  ``kl_div`` / ``softmax`` spellings to fp32 rounding;
 - a ``-inf`` logit (padded vocabulary, a top-k-truncated teacher) is a zero-probability entry that adds
   exactly 0, not NaN, to the value and the gradient;
 - the student's backward keeps one fp32 ``[..., V]`` plane (``log_softmax``'s output): flooring the
@@ -23,12 +21,13 @@ import torch
 from torch.nn.functional import kl_div, log_softmax, softmax
 
 from src.trainers.distillation.losses import (
-    forward_kl_opd_loss,
-    reverse_kl_opd_loss,
+    call_divergence,
+    forward_kl_loss,
+    get_divergence,
+    reverse_kl_loss,
     softened_log_probs,
     unnormalized_kl_loss,
 )
-from src.trainers.distillation.teacher_losses import call_distillation_loss, get_distillation_loss_fn
 
 BATCH, SEQ, VOCAB = 2, 5, 257
 TEMPERATURES = (1.0, 2.0, 0.7, 1.3)
@@ -103,11 +102,9 @@ def _logits(dtype, seed=0):
 
 
 def _teacher_loss(name):
-    loss_fn = get_distillation_loss_fn(name)
+    loss_fn = get_divergence(name)
     hard_labels = torch.zeros(BATCH, SEQ, dtype=torch.long)
-    return lambda student, teacher, temperature: call_distillation_loss(
-        loss_fn, student, teacher, temperature, hard_labels
-    )
+    return lambda student, teacher, temperature: call_divergence(loss_fn, student, teacher, temperature, hard_labels)
 
 
 def _value_and_grad(loss_fn, student, teacher, temperature):
@@ -122,8 +119,8 @@ def _value_and_grad(loss_fn, student, teacher, temperature):
 @pytest.mark.parametrize(
     ("loss_fn", "reference_fn"),
     [
-        (reverse_kl_opd_loss, _reverse_kl),
-        (forward_kl_opd_loss, _forward_kl),
+        (reverse_kl_loss, _reverse_kl),
+        (forward_kl_loss, _forward_kl),
         (unnormalized_kl_loss, _unnormalized_kl),
     ],
 )
@@ -136,10 +133,6 @@ def test_opd_losses_are_bit_identical_to_upcast_then_divide(loss_fn, reference_f
     assert torch.equal(grad, reference_grad), f"{loss_fn.__name__} student gradient at T={temperature}, {dtype}"
 
 
-def test_teacher_kl_is_the_opd_forward_kl():
-    assert get_distillation_loss_fn("kl_divergence") is forward_kl_opd_loss
-
-
 @pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16])
 @pytest.mark.parametrize("temperature", TEMPERATURES)
 @pytest.mark.parametrize("name", TEACHER_SOFTENED_LOSSES)
@@ -149,19 +142,6 @@ def test_teacher_softened_losses_match_their_reference_spelling(name, temperatur
     reference, reference_grad = _value_and_grad(SPELLINGS[name], student, teacher, temperature)
     torch.testing.assert_close(value.sum(-1), reference.sum(-1), rtol=FP32_RTOL, atol=FP32_ATOL)
     torch.testing.assert_close(grad.float(), reference_grad.float(), rtol=FP32_RTOL, atol=FP32_ATOL)
-
-
-@pytest.mark.parametrize("name", TEACHER_SOFTENED_LOSSES)
-def test_teacher_softened_losses_divide_after_the_upcast(name):
-    student, teacher = _logits(torch.bfloat16, seed=2)
-    loss = _teacher_loss(name)
-    assert torch.equal(
-        loss(student, teacher, INEXACT_TEMPERATURE), loss(student.float(), teacher.float(), INEXACT_TEMPERATURE)
-    )
-    bf16_divide = log_softmax(student / INEXACT_TEMPERATURE, dim=-1, dtype=torch.float32)
-    assert not torch.equal(bf16_divide, _log_probs(student, INEXACT_TEMPERATURE)), (
-        "fixture does not separate a bf16 divide from an fp32 one"
-    )
 
 
 def _padded(logits):
@@ -181,7 +161,7 @@ def _finite_value_and_grad(loss_fn, student, teacher, temperature):
 
 
 @pytest.mark.parametrize("temperature", (1.0, INEXACT_TEMPERATURE))
-@pytest.mark.parametrize("loss_fn", [reverse_kl_opd_loss, forward_kl_opd_loss, unnormalized_kl_loss])
+@pytest.mark.parametrize("loss_fn", [reverse_kl_loss, forward_kl_loss, unnormalized_kl_loss])
 def test_opd_losses_ignore_a_vocabulary_padded_on_both_sides(loss_fn, temperature):
     """Self-distillation scores student and teacher with one model, so both pad the same columns."""
     student, teacher = _logits(torch.float32, seed=3)

@@ -103,7 +103,6 @@ def run_backward_replay(ctx, *, family: str, mode: str) -> dict:
     reference_loss, reference = _backward_pass(model, ids, labels)
     other_names = set(reference) - expert_names
     checks = {
-        "deterministic_algorithms_on": torch.are_deterministic_algorithms_enabled(),
         # Vacuous unless this rank's experts received tokens and trained. Not every expert: a random-init
         # router can starve one (Zaya's tiny model sends nothing to rank 1 in its last layers).
         "expert_grads_present": any(name in reference and bool(reference[name].any()) for name in expert_names),

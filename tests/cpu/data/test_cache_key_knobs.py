@@ -102,7 +102,7 @@ def test_irrelevant_captured_object_does_not_change_cache_name():
     tokenized output of valid rows, and keying on it would needlessly re-tokenize the corpus.
 
     The negative control for the tests above — pinned on _get_closure_fingerprint directly, since
-    the sentinel is derived from the tokenizer and no longer settable from outside."""
+    the sentinel is derived from the tokenizer and not settable from outside."""
 
     def make(max_length, sentinel):
         def process_row(row):

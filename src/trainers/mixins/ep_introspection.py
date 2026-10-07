@@ -80,7 +80,7 @@ class EpIntrospectionMixin:
         """Whether the model actually has EP-patched layers.
 
         Asked of the model directly, so it also answers before :meth:`_capture_ep_config` has run.
-        This property selects the checkpoint saver, the resume path and the EP grad-clip branch.
+        This property selects the checkpoint saver and the resume path, and gates the EP clip's install.
         """
         return bool(find_ep_layers(self.model))
 
@@ -97,7 +97,7 @@ class EpIntrospectionMixin:
         if cached is not None:
             return cached
         ep_param_ids = set()
-        for module in named_ep_layers(self.model).values():
+        for module in self._find_ep_modules():
             for param in module.parameters():
                 ep_param_ids.add(id(param))
         self._ep_param_ids_cache = ep_param_ids
@@ -128,8 +128,9 @@ class EpIntrospectionMixin:
         if cached is not None:
             return cached
         ids = set()
-        for module in named_ep_layers(self.model).values():
-            # ep1 FSDP DTensors belong in the standard bucket; the replica division would shrink their norm².
+        for module in self._find_ep_modules():
+            # ep1 FSDP-managed experts are DTensors normed over their FSDP shard group; the expert
+            # bucket's legs reduce nothing at ep1, so there only the local shard would count.
             if module.ep_config.experts_fsdp_managed:
                 continue
             for _name, param in module.expert_named_params():
@@ -142,7 +143,11 @@ class EpIntrospectionMixin:
         """Upcast non-EP (dense) params to FP32 master weights (BF16 compute via autocast).
 
         Iterates the full top-level model so ``lm_head`` (non-EP on untied-embedding models) is
-        upcast too; EP params keep their own precision control.
+        upcast too; EP params keep their own precision control. The toolkit loaders already hold the
+        checkpoint-backed masters at FP32 (:func:`~src.distributed.expert_parallel.fp32_masters.fp32_master_param_keys`),
+        so this pass changes only what no loader read from a checkpoint: PEFT and wrapper-added
+        parameters, and every parameter of a model handed in by a caller that bypassed those loaders,
+        which keeps its run-dtype rounding.
         """
         model = self._top_level_model()
         ep_param_ids = self._get_ep_param_ids()
@@ -178,10 +183,6 @@ class EpIntrospectionMixin:
         config = self.parallelism_config
         gc_enabled = self.args.gradient_checkpointing
 
-        # Rejected at config time too (shared predicate); re-checked for hand-built configs.
-        if config.is_racy_single_domain_multigroup_ep:
-            raise RuntimeError(config.racy_ep_topology_message)
-
         # Combine and cross-replica grad-sync are different-membership collectives, hence deferred averaging.
         if config.num_ep_groups > 1 and not config.is_expert_tp_mode:
             # Outside the logging gate, so a missing EP config raises on every rank rather than rank 0 alone.
@@ -201,7 +202,7 @@ class EpIntrospectionMixin:
         unsupported = sorted(
             {
                 type(module).__name__
-                for module in named_ep_layers(self.model).values()
+                for module in self._find_ep_modules()
                 if not module._supports_gradient_checkpointing
             }
         )
@@ -215,13 +216,12 @@ class EpIntrospectionMixin:
             )
 
         gc_kwargs = getattr(self.args, "gradient_checkpointing_kwargs", None) or {}
-        # The backbone's config: the embedding trainer's top-level SentenceTransformer carries none.
-        use_reentrant = forces_reentrant_checkpointing(config, getattr(self._get_unwrapped_model(), "config", None))
+        # The config the constructor forced use_reentrant from, read off the same top-level model.
+        use_reentrant = forces_reentrant_checkpointing(config, getattr(self._top_level_model(), "config", None))
         if gc_kwargs.get("use_reentrant") not in (None, use_reentrant) and is_global_main_process():
             logger.warning(
-                "Expert Parallelism %s use_reentrant=%s for gradient checkpointing; overriding the "
+                "Expert Parallelism requires use_reentrant=%s for gradient checkpointing; overriding the "
                 "configured use_reentrant=%s.",
-                "under pipeline parallelism requires" if config.is_pp_mode else "requires",
                 use_reentrant,
                 gc_kwargs["use_reentrant"],
             )

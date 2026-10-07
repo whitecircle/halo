@@ -59,6 +59,7 @@ class _ReachedPreprocess(Exception):
 
 
 mod.setup_tokenizer = lambda args: object()  # never used (preprocess is stubbed) — avoids any download
+mod.AutoConfig = types.SimpleNamespace(from_pretrained=lambda *args, **kwargs: types.SimpleNamespace(model_type="qwen3"))
 
 real_load = mod.load_input_dataset
 
@@ -187,6 +188,20 @@ def test_a_multi_process_launch_is_refused_before_the_input_is_fetched():
 
     assert "EXIT:1" in output, output
     assert "single-process tool" in output, output
+    assert "REACHED_LOAD" not in output, f"the refusal came after the input dataset was fetched:\n{output}"
+
+
+def test_packing_a_compressed_kv_model_is_refused_before_the_input_is_fetched():
+    """An offline-packed artifact for a model whose compressor windows cut by row index trains
+    nothing the collator would accept, so ``--pack-sequences`` is refused off the model config."""
+    prelude = (
+        "from transformers.models.deepseek_v4 import DeepseekV4Config\n"
+        "from tests.common.models import TINY_DSV4_CONFIG\n"
+        "mod.AutoConfig = types.SimpleNamespace(from_pretrained=lambda *a, **k: DeepseekV4Config(**TINY_DSV4_CONFIG))"
+    )
+    output = _run(_DOC_TEXT_ARGV, prelude=prelude)
+
+    assert "--pack-sequences is refused" in output, output
     assert "REACHED_LOAD" not in output, f"the refusal came after the input dataset was fetched:\n{output}"
 
 

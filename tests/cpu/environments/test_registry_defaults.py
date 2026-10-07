@@ -1,7 +1,7 @@
 #!/usr/bin/env python
 """CPU tests: the environment registry must not override per-class defaults it didn't configure.
 
-``_common_kwargs`` must not inject ``max_turns=10`` into every factory call: that silently clobbers
+The registry must not inject ``max_turns=10`` into every factory call: that silently clobbers
 the per-class defaults. Class defaults win unless the user set ``max_turns`` in the env config —
 and because ``max_turns: null`` is what the shipped templates rely on, the ``EnvironmentConfig``
 help that tells users which default they are getting is held to the classes themselves here.
@@ -15,7 +15,7 @@ from src.configs.environment_config import EnvironmentConfig
 from src.environments.base import EPISODE_INVALID_KEY, EPISODE_INVALID_REASON_KEY, BaseEnvironment
 from src.environments.envs.protocols.react import create_react_math_environment
 from src.environments.registry import get_registered_environments, resolve_environment
-from src.rewards.spec import EnvironmentTerm
+from src.rewards.terms import EnvironmentTerm
 
 # Minimal valid construction kwargs per registered env. ``sandbox_backend`` is declared only by the
 # sandboxed coding envs; passing it to the others raises instead of being absorbed and ignored,
@@ -76,15 +76,15 @@ def test_class_default_table_names_every_environment_that_declares_one():
 
 
 def test_every_registered_environment_is_covered():
-    """A new env_type must arrive with its own turn-budget assertion, else the table below (and the
-    user-facing help it holds to account) silently stops covering the registry."""
+    """A new env_type must arrive with its own turn-budget assertion, else the tables above (and the
+    user-facing help they hold to account) silently stop covering the registry."""
     assert sorted(_ENV_KWARGS) == get_registered_environments()
 
 
 def test_max_turns_help_names_every_environment_that_overrides_the_base_default():
     """An env that declares its own budget while the help enumerates only the others leaves the
-    shipped template's ``max_turns: null`` documenting no budget at all. Derived from the
-    classes, not restated — a new env with its own budget fails here until the help says so."""
+    shipped template's ``max_turns: null`` documenting no budget at all. The table read here is
+    tied to the classes above, so a new env with its own budget fails until the help says so."""
     help_text = EnvironmentConfig.__dataclass_fields__["max_turns"].metadata["help"]
     for env_type, default in _CLASS_DEFAULT_MAX_TURNS.items():
         assert f"{env_type} {default}" in help_text, (

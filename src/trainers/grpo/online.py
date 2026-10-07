@@ -23,24 +23,33 @@ from src.trainers.grpo.mixins.dataloader import GRPOTrainDataLoaderMixin
 from src.trainers.grpo.mixins.entropy_mask import ProtectedTokenEntropyMixin
 from src.trainers.grpo.mixins.generation_buffer import GRPOGenerationBufferMixin
 from src.trainers.grpo.mixins.on_policy_init import OnPolicyGRPOInitMixin
-from src.trainers.grpo.objective.advantages import group_relative_advantages
+from src.trainers.grpo.objective.advantages import (
+    degenerate_group_mask,
+    group_relative_advantages,
+    reject_inert_std_floor,
+)
 from src.trainers.grpo.objective.application import (
     DEGENERATE_GROUP_FRAC_KEY,
-    degenerate_drop_rows,
     gathered_num_items,
     narrow_loss_masks,
     record_token_mass,
     validate_token_mass_balance,
 )
-from src.trainers.grpo.objective.logratio import KL_CLAMP_FRAC_KEY, clamp_ref_logps
+from src.trainers.grpo.objective.logratio import KL_CLAMP_FRAC_KEY, clamp_ref_logps, kl_clamp_counts
 from src.trainers.grpo.objective.relative_rewards import relative_advantages_grouped
-from src.trainers.grpo.rollout.completions_logging import log_with_decoupled_completions
-from src.trainers.grpo.rollout.weight_sync import sync_trainer_weights, validate_weight_sync_support
+from src.trainers.grpo.rollout.completions_logging import DecoupledCompletionsLogMixin
+from src.trainers.grpo.rollout.weight_sync import sync_trainer_weights
 from src.trainers.grpo.world_metrics import gathered_fractions
 from src.trainers.mixins.base import DistributedTrainerMixin
 from src.trainers.mixins.loss_masks import effective_loss_mask
+from src.trainers.mixins.validation import ctor_positions, ctor_value
 
 logger = get_logger(__name__, log_level="info")
+
+# TRL ctor parameters that run its tool-calling loop, whose round count is each rank's own.
+_TOOL_LOOP_CTOR_POSITIONS = ctor_positions(GRPOTrainer, "tools", "environment_factory")
+# TRL's custom rollout, which generates in place of _generate_single_turn.
+_ROLLOUT_FUNC_CTOR_POSITIONS = ctor_positions(GRPOTrainer, "rollout_func")
 
 
 def _vllm_available_stub() -> bool:
@@ -54,6 +63,7 @@ class DistributedGRPOTrainer(
     GRPOGenerationBufferMixin,
     ProtectedTokenEntropyMixin,
     ChunkedGRPOLogprobsMixin,
+    DecoupledCompletionsLogMixin,
     DistributedTrainerMixin,
     GRPOTrainer,
 ):
@@ -78,6 +88,8 @@ class DistributedGRPOTrainer(
     def __init__(self, *args, **kwargs):
         training_args, kwargs = self._begin_on_policy_init(args, kwargs)
         self._require_vllm_server_mode(training_args)
+        self._reject_tool_calling_loop(args, kwargs)
+        self._reject_unshared_rollout_func(args, kwargs)
         self._resolve_advantage_hooks(kwargs, training_args)
         # Built before TRL's ctor opens the NCCL group to the rollout server, so a refused condition costs nothing.
         early_stop = build_early_stop_callback(
@@ -89,8 +101,6 @@ class DistributedGRPOTrainer(
         self._last_rewards_per_func: torch.Tensor | None = None
 
         self._use_chunked_grpo_logprobs = kwargs.pop("use_chunked_grpo_logprobs", False)
-
-        self._save_completions = kwargs.pop("save_completions", True)
 
         with self._patch_trl_for_vendored_vllm_client():
             super().__init__(*args, **kwargs)
@@ -121,6 +131,7 @@ class DistributedGRPOTrainer(
         self._drop_degenerate_groups: bool = kwargs.pop("drop_degenerate_groups", False)
         self._scale_rewards_std_floor: float = kwargs.pop("scale_rewards_std_floor", 0.0)
         self._balance_token_mass: bool = kwargs.pop("balance_token_mass", False)
+        reject_inert_std_floor(grpo_args.scale_rewards, self._scale_rewards_std_floor)
         if self._balance_token_mass:
             validate_token_mass_balance(grpo_args)
         if self._rlrr_config is not None:
@@ -146,17 +157,14 @@ class DistributedGRPOTrainer(
             )
 
     @staticmethod
-    def sequence_level_importance_sampling(grpo_args) -> bool:
+    def sums_sequence_logratio(grpo_args) -> bool:
         """Whether TRL's vLLM IS correction takes ONE ratio per sequence (``sequence_*`` modes), i.e. sums
-        the per-token log-ratios — the consumer the sampler-logprob preflight gates a nucleus-renormalized
-        reference against. Off with the correction off, whatever the mode says."""
+        the per-token log-ratios — the online arm's counterpart of ``ISMaskConfig.sums_sequence_logratio``,
+        the consumer the sampler-logprob preflight gates a nucleus-renormalized reference against. Off with
+        the correction off, whatever the mode says."""
         if not grpo_args.vllm_importance_sampling_correction:
             return False
         return grpo_args.vllm_importance_sampling_mode.startswith("sequence")
-
-    def log(self, logs: dict[str, float], start_time: float | None = None) -> None:
-        """Emit the completions parquet (``save_completions``) decoupled from the console table."""
-        log_with_decoupled_completions(self, logs, start_time, super().log, save_completions=self._save_completions)
 
     @staticmethod
     def _require_vllm_server_mode(grpo_args) -> None:
@@ -185,6 +193,40 @@ class DistributedGRPOTrainer(
                 f"with the training PyTorch/Transformers). Run a separate vLLM "
                 f"container (docker-compose.vllm.yml) and set vllm_mode='server' "
                 f"with vllm_server_host/vllm_server_port (weights sync over NCCL)."
+            )
+
+    @staticmethod
+    def _reject_tool_calling_loop(ctor_args: tuple, kwargs: dict) -> None:
+        """Refuse TRL's tool-calling loop (``tools``, ``environment_factory``): it regenerates while any
+        rank-local completion still calls a tool, and each round is a collective generate, so ranks whose
+        completions stop calling tools at different rounds desync."""
+        given = [
+            name
+            for name in _TOOL_LOOP_CTOR_POSITIONS
+            if ctor_value(ctor_args, kwargs, name, _TOOL_LOOP_CTOR_POSITIONS)
+        ]
+        if given:
+            raise ValueError(
+                f"DistributedGRPOTrainer does not run TRL's tool-calling loop ({', '.join(given)}): it loops as "
+                "long as some completion on this rank calls a tool, each round a collective vLLM generate, so ranks "
+                "fall out of step. Train tool use with Async GRPO with Environments "
+                "(scripts/training/environmental_grpo.py), whose episodes run in the rollout actors."
+            )
+
+    def _reject_unshared_rollout_func(self, ctor_args: tuple, kwargs: dict) -> None:
+        """Refuse TRL's ``rollout_func`` where a TP/ETP group shares one model replica: it generates in
+        place of :meth:`_generate_single_turn`, the override that hands every sibling its leader's
+        completions, so each sibling would forward its own rollouts into the group's in-forward
+        collectives. Elsewhere TRL syncs the weights before each call and the rollouts are the rank's own."""
+        config = self.parallelism_config
+        if not (config.is_tp_mode or config.is_expert_tp_mode):
+            return
+        if ctor_value(ctor_args, kwargs, "rollout_func", _ROLLOUT_FUNC_CTOR_POSITIONS) is not None:
+            raise ValueError(
+                "rollout_func is not supported under tensor or expert-tensor parallelism: it replaces the "
+                "generation that broadcasts the group leader's completions, so siblings sharing one sharded "
+                "replica would forward different tokens and deadlock in the model's collectives. Drop "
+                "rollout_func, or run without tensor_parallel_size / expert_tensor_parallel_size."
             )
 
     @staticmethod
@@ -239,18 +281,24 @@ class DistributedGRPOTrainer(
         self._apply_token_mass_balance(result)
         # Consumed: the next generation batch must stash its own rewards, never reuse these.
         self._last_rewards_per_func = None
-
-        # k3 tail clamp; both tensors exist only when beta != 0 AND TRL's recompute gate fired.
-        old_logps = result.get("old_per_token_logps")
-        ref_logps = result.get("ref_per_token_logps")
-        if old_logps is not None and ref_logps is not None:
-            result["ref_per_token_logps"], clamped = clamp_ref_logps(ref_logps, old_logps)
-            mode = "train" if self.model.training else "eval"
-            self._metrics[mode][KL_CLAMP_FRAC_KEY].extend(
-                gathered_fractions([(clamped.sum(), clamped.numel())], self.accelerator.gather)
-            )
+        # After the drop, so the clamp share reads the loss mask the KL term is averaged on.
+        self._clamp_kl_reference(result)
 
         return self._broadcast_tensors_from_tp_leader(result)
+
+    def _clamp_kl_reference(self, result: dict[str, torch.Tensor | Any]) -> None:
+        """The k3 tail clamp on the reference log-probs, and ``kl_clamp_frac`` over the batch's loss
+        tokens (:func:`kl_clamp_counts`). Both tensors exist only when ``beta != 0`` and TRL's
+        recompute gate fired, config verdicts every rank shares, so the gather is reached by all or none."""
+        old_logps = result.get("old_per_token_logps")
+        ref_logps = result.get("ref_per_token_logps")
+        if old_logps is None or ref_logps is None:
+            return
+        result["ref_per_token_logps"], clamped = clamp_ref_logps(ref_logps, old_logps)
+        mode = "train" if self.model.training else "eval"
+        self._metrics[mode][KL_CLAMP_FRAC_KEY].extend(
+            gathered_fractions([kl_clamp_counts(clamped, effective_loss_mask(result))], self.accelerator.gather)
+        )
 
     def _calculate_rewards(self, *args, **kwargs):
         """Capture the (gathered) per-function rewards so the advantage hooks see the full group set.
@@ -364,7 +412,7 @@ class DistributedGRPOTrainer(
         other trains on values the logged record does not carry.
 
         TRL fills ``_logs["advantages"]`` with its own group-normalized values inside
-        ``_generate_and_score_completions``, before either hook runs. The gathered tensor carries the
+        ``_generate_and_score_completions``, before any hook runs. The gathered tensor carries the
         same world order and length TRL appended, so overwriting that tail realigns the record row
         for row.
         """
@@ -392,10 +440,10 @@ class DistributedGRPOTrainer(
             return
         rewards, unscorable = gathered
         # Scorable members only: an unscorable placeholder's reward must not hide an all-alike group.
-        drop_full, degenerate_frac = degenerate_drop_rows(rewards, self.num_generations, valid_mask=~unscorable)
+        drop_full = degenerate_group_mask(rewards, self.num_generations, valid_mask=~unscorable)
         drop = self._local_slice(drop_full, result["completion_mask"].shape[0])
-        self._metrics["train"][DEGENERATE_GROUP_FRAC_KEY].append(degenerate_frac)
-        # Narrow every mask TRL composes into its loss mask, else untrained tokens inflate the normalizer.
+        self._metrics["train"][DEGENERATE_GROUP_FRAC_KEY].append(drop_full.float().mean().item())
+        # Narrow EVERY mask TRL composes into its loss mask, else untrained tokens inflate the normalizer.
         present = [name for name in ("completion_mask", "tool_mask") if result.get(name) is not None]
         narrowed = narrow_loss_masks(drop, *(result[name] for name in present))
         result.update(zip(present, narrowed, strict=True))
@@ -453,11 +501,7 @@ class DistributedGRPOTrainer(
         TRL only unfolds DTensors when ``is_fsdp_enabled`` is set, but the toolkit applies FSDP2 via
         ``fully_shard`` under accelerate MULTI_GPU, so it forwards DTensors verbatim and deadlocks
         against the trainer↔vLLM NCCL group. The replacement gathers EP then TP shards, then broadcasts.
-
-        Also the construction gate for syncable weights: a quantized (QLoRA) base must fail here, not
-        as an opaque server-side error at the first sync.
         """
-        validate_weight_sync_support(self.model, self._rollout_backend)
         if getattr(self, "vllm_generation", None) is None:
             raise RuntimeError(
                 "TRL built no vllm_generation for this trainer, so the distributed-aware weight sync "

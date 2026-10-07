@@ -112,8 +112,8 @@ def test_the_allowlist_is_not_vacuous():
         frozenset(combo) for size in range(len(AXIS_FLAGS) + 1) for combo in itertools.combinations(AXIS_FLAGS, size)
     }
     assert frozenset() in SUPPORTED_AXIS_SETS, "plain data parallelism must be supported"
-    assert frozenset({"pp", "ep"}) in SUPPORTED_AXIS_SETS, "PP+EP is a supported combination"
-    assert frozenset({"pp", "tp"}) not in SUPPORTED_AXIS_SETS, "PP+TP was deliberately dropped"
+    assert frozenset({"pp", "ep"}) in SUPPORTED_AXIS_SETS, "PP+EP is an allowlisted combination"
+    assert frozenset({"pp", "tp"}) not in SUPPORTED_AXIS_SETS, "PP+TP is deliberately not allowlisted"
     assert 0 < len(SUPPORTED_AXIS_SETS) < len(all_sets), (len(SUPPORTED_AXIS_SETS), len(all_sets))
 
 

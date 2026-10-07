@@ -384,7 +384,7 @@ def test_run_keeps_the_caller_cwd_so_relative_path_flags_mean_what_they_say(tmp_
 
 
 def test_launch_still_runs_the_training_script_from_the_repo_root(tmp_path, monkeypatch):
-    """The launch side is unchanged: relative paths in a training config resolve at the root."""
+    """The launch side runs from the repo root: relative paths in a training config resolve there."""
     write_script(tmp_path / "scripts/training/sft.py")
     write_config(tmp_path / "config.yaml")
     monkeypatch.chdir(tmp_path)

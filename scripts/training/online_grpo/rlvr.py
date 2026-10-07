@@ -27,7 +27,7 @@ from src.distributed.runtime import barrier
 from src.environments.base import resolve_reasoning_effort
 from src.models.loading.model_preparation import log_model_info
 from src.rewards.functions import ScorerRewardFunction, reward_functions
-from src.rewards.verifiable import RLVR_GRADERS
+from src.rewards.graders.verifiable import RLVR_GRADERS
 from src.trainers.distillation.sdpg import DistributedSDPGTrainer
 from src.trainers.grpo.online import DistributedGRPOTrainer
 from src.trainers.grpo.rollout.weight_sync_clients import (
@@ -132,10 +132,12 @@ def main():
         # Over-budget prompts are dropped with a blank-string sentinel, not None: an all-rejected first writer
         # batch makes Arrow infer a null column and crash casting later real string batches.
         if formatted_prompt is None:
-            return {"prompt": "", "answer": ""}
+            return {"prompt": "", "conversation": [], "answer": ""}
 
+        # The scored terms read the conversation itself, not the rendered template the engine takes.
         return {
             "prompt": formatted_prompt,
+            "conversation": messages,
             "answer": str(answer_data) if answer_data is not None else "",
         }
 
@@ -154,7 +156,7 @@ def main():
     # Read with .get, so a mistyped answer_field would yield empty answers and all-zero verifiable rewards.
     if args.answer_field:
         require_render_column(ds, str(args.dataset), "answer_field", args.answer_field)
-    columns_to_remove = [col for col in original_columns if col not in ["prompt", "answer"]]
+    columns_to_remove = [col for col in original_columns if col not in ["prompt", "conversation", "answer"]]
 
     processed_ds = process_dataset_with_map_and_filter(
         ds,
@@ -179,9 +181,11 @@ def main():
 
     log_script_dataset_examples({"train": train_dataset, "test": eval_dataset}, tokenizer, args, grpo_config)
 
-    # One TRL reward function per configured term, weighted by the term; process_for_rlvr renders the
-    # ground truth into the "answer" column, which is what a judge term reads as the reference.
-    reward_funcs, reward_weights = reward_functions(args.reward_terms, RLVR_GRADERS, reference_column="answer")
+    # One TRL reward function per configured term, weighted by the term; process_for_rlvr keeps the
+    # conversation a scorer reads and renders the ground truth into "answer", a judge's reference.
+    reward_funcs, reward_weights = reward_functions(
+        args.reward_terms, RLVR_GRADERS, prompt_column="conversation", reference_column="answer"
+    )
     # A judge or reward-model term is probed before the trainer exists: a bad URL, key or model would
     # otherwise score every row None and train on nothing.
     for function in reward_funcs:
@@ -201,13 +205,16 @@ def main():
         backend=VLLMWeightSyncClient.BACKEND_KEY,
     )
     # TRL's IS correction divides by the engine's logprobs too: they must carry the sampling temperature,
-    # and a sequence-level IS mode sums the per-token log-ratios, which a nucleus-renormalized reference
-    # drives toward a zero sequence weight.
+    # and a sequence-level IS mode sums the per-token log-ratios, which a reference renormalized over the
+    # sampler's cut drives toward a zero sequence weight. TRL's unset min_p (None) samples with no cut.
     verify_sampler_logprob_reference_synced(
         [vllm_base_url],
         temperature=grpo_config.temperature,
         top_p=grpo_config.top_p,
-        sequence_ratio_active=DistributedGRPOTrainer.sequence_level_importance_sampling(grpo_config),
+        top_k=grpo_config.top_k,
+        min_p=0.0 if grpo_config.min_p is None else grpo_config.min_p,
+        repetition_penalty=grpo_config.repetition_penalty,
+        sequence_ratio_active=DistributedGRPOTrainer.sums_sequence_logratio(grpo_config),
         backend=VLLMWeightSyncClient.BACKEND_KEY,
     )
 

@@ -1,8 +1,8 @@
 """The default ``--num-shards 1`` artifact trains at any data-parallel size.
 
 A single-shard dataset written in the sharded layout loads through ``ShardedDatasetLoader``, which
-refuses fewer shards than the DP size, so the default output of ``prepare_dataset`` trained only on
-one GPU. At ``num_shards <= 1`` the splits are saved unsharded instead and every rank loads them whole.
+refuses fewer shards than the DP size, so the default output of ``prepare_dataset`` would train only
+on one GPU. At ``num_shards <= 1`` the splits are saved unsharded and every rank loads them whole.
 """
 
 import os

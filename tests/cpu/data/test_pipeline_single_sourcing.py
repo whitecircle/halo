@@ -25,7 +25,11 @@ from PIL import Image
 from src.data.collators.self_distill import SelfDistillTextCollator
 from src.data.collators.vlm import VLMDataCollator
 from src.data.pipeline import preferences, preprocessing, rendered, row_processors
-from src.data.pipeline.preferences import render_vlm_preference_row, split_vlm_preference_row
+from src.data.pipeline.preferences import (
+    render_vlm_preference_row,
+    split_vlm_preference_row,
+    tokenize_vlm_preference_row,
+)
 from src.data.pipeline.preprocessed_metadata import PreprocessingConfig
 from src.data.pipeline.preprocessing import tokenize_vlm_dataset
 from src.data.pipeline.processing import filter_by_length
@@ -38,7 +42,6 @@ from src.data.pipeline.row_processors import (
 )
 from src.data.pipeline.vlm_dataset import _VLM_SIGNATURE_COLUMNS, vlm_map_features
 from src.data.vlm import VLM_OUTPUT_COLUMNS
-from src.trainers.preference.smpo import tokenize_vlm_preference_row
 from tests.common.vlm_fakes import FakeVLMProcessorBase, FakeVLMTokenizer
 
 
@@ -95,7 +98,7 @@ def test_both_vlm_preference_routes_go_through_the_shared_prologue(monkeypatch):
     """Break the ONE image-extraction call the shared splitter makes; both routes must fail on it.
 
     A route that kept its own prologue would import ``process_vlm_conversation`` from the VLM leaf
-    itself and sail past this patch — which is precisely how the two copies drifted apart before.
+    itself and sail past this patch.
     """
 
     class _SharedPrologueReached(Exception):
@@ -164,7 +167,13 @@ def test_both_text_renderers_go_through_the_shared_render(monkeypatch):
 
     with pytest.raises(_SharedRenderReached):
         apply_chat_template_to_conversations(row, tokenizer, conversation_field="messages")
-    collator = SelfDistillTextCollator(tokenizer=tokenizer, hint_template="hint {answer}")
+    collator = SelfDistillTextCollator(
+        tokenizer=tokenizer,
+        max_length=256,
+        conversation_field="messages",
+        hint_template="hint {answer}",
+        train_on_completions_only=False,
+    )
     with pytest.raises(_SharedRenderReached):
         collator._render(_PROMPT, row)
 
@@ -175,7 +184,10 @@ def test_the_shared_render_applies_the_system_fold_to_both_renderers():
     row = {"messages": _PROMPT}
     collator = SelfDistillTextCollator(
         tokenizer=tokenizer,
+        max_length=256,
+        conversation_field="messages",
         hint_template="hint {answer}",
+        train_on_completions_only=False,
         system_prompt="be terse",
         model_supports_system_role=False,
     )
@@ -201,8 +213,8 @@ def test_the_shared_render_keeps_a_template_emitted_bos():
 def test_the_vlm_map_output_is_one_declaration():
     """Row processor, pinned Arrow schema and collator signature list must name the SAME columns.
 
-    They were three hand-kept lists: a column added to the row processor had to be edited into two
-    more or the map stripped it before collation.
+    As three hand-kept lists, a column added to the row processor would have to be edited into two
+    more or the map would strip it before collation.
     """
     row = {"messages": [{"role": "user", "content": "hi"}]}
     emitted = set(create_vlm_processor()(row))
@@ -258,8 +270,8 @@ def test_the_preprocessed_vision_key_refusal_reads_the_declared_schema():
 
 
 def test_the_non_completions_vlm_bake_routes_through_the_shared_label_builder(monkeypatch):
-    """The bake's no-completion-masking arm re-implemented "mask these token ids out of labels"
-    inline. Replacing the shared builder must change what it bakes; an inline copy would not see it."""
+    """The bake's no-completion-masking arm masks token ids out of labels through the shared builder:
+    replacing the builder must change what it bakes; an inline copy would not see it."""
 
     def _sentinel_labels(input_ids, *_args, **_kwargs):
         return torch.full_like(input_ids, -7)
@@ -313,7 +325,7 @@ def test_the_vlm_bake_masks_image_tokens_without_erasing_a_real_eos():
     assert labels[-1] == input_ids[-1] == 1, "the real EOS was erased by a pad-value mask"
 
 
-# --- the layering the moved sentinels bought -----------------------------------------------------
+# --- the row-shape leaf ---------------------------------------------------------------------------
 
 
 def test_row_processors_imports_nothing_from_the_coordinated_map_module():
@@ -326,9 +338,9 @@ def test_row_processors_imports_nothing_from_the_coordinated_map_module():
 
 
 def test_the_row_map_factories_expose_no_dead_injection_knobs():
-    """``none_example`` and ``process_vlm_conversation_fn`` were caller-supplied overrides no
-    production caller ever set — one handed back the factory's own default, the other a stub only
-    tests passed. A knob nothing sets cannot be verified by a run, so it must not exist."""
+    """``none_example`` and ``process_vlm_conversation_fn`` would be caller-supplied overrides no
+    production caller sets — one handing back the factory's own default, the other a stub only tests
+    pass. A knob nothing sets cannot be verified by a run, so it must not exist."""
     assert "none_example" not in inspect.signature(create_llm_processor).parameters
     for fn in (create_vlm_processor, build_vlm_history):
         assert "process_vlm_conversation_fn" not in inspect.signature(fn).parameters
@@ -339,8 +351,8 @@ def test_the_row_map_factories_expose_no_dead_injection_knobs():
 
 def test_filter_by_length_reports_through_the_shared_rejection_reporter(caplog):
     """It is a drop-and-continue filter like every other, so it owes the high-rejection WARNING:
-    a max_length that removes most of the corpus is usually a config bug, and its own private INFO
-    line let that scroll by. It also returns the dataset alone — both callers dropped the stats."""
+    a max_length that removes most of the corpus is usually a config bug, and a private INFO line
+    would let that scroll by. It returns the dataset alone; no caller reads drop stats."""
 
     class _CharTokenizer:
         def __call__(self, text, **kwargs):
@@ -367,7 +379,11 @@ def test_filter_by_length_reports_through_the_shared_rejection_reporter(caplog):
         ),
         pytest.param(
             lambda: SelfDistillTextCollator(
-                tokenizer=_RenderTokenizer(), hint_template="h {answer}", train_on_completions_only=True
+                tokenizer=_RenderTokenizer(),
+                max_length=256,
+                conversation_field="messages",
+                hint_template="h {answer}",
+                train_on_completions_only=True,
             ),
             id="self-distill-collator",
         ),

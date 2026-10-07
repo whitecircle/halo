@@ -194,8 +194,8 @@ def run_test_inference(model_path, model_type, is_peft=False, trust_remote_code=
     """Run a simple inference test on the converted model and print what it produced.
 
     Diagnostic only: a broken conversion shows up in the printed text/logits, not as a return value,
-    so the caller has nothing to branch on. ``--verify`` is the gate that raises. ``is_peft`` picks
-    the adapter auto-class, the same split the ``--verify`` gate makes.
+    so the caller has nothing to branch on. ``--verify`` is the gate that raises. ``is_peft`` takes
+    :func:`load_model`'s adapter path, the same split the ``--verify`` gate makes.
     """
     logger.info(f"Running test inference on model at {model_path}...")
 

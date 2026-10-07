@@ -56,7 +56,6 @@ def _map_kwargs() -> dict:
         "max_completion_length": None,
         "advantage_method": "z_norm",
         "best_completion_emphasis": 1.0,
-        "is_encoder_decoder": False,
     }
 
 

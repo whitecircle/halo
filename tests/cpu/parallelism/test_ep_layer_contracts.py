@@ -91,7 +91,7 @@ class _Trainer(EpIntrospectionMixin):
             gradient_checkpointing=gradient_checkpointing, gradient_checkpointing_kwargs=gradient_checkpointing_kwargs
         )
 
-    def _get_unwrapped_model(self) -> nn.Module:
+    def _top_level_model(self) -> nn.Module:
         return self.model
 
 

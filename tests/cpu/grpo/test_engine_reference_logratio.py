@@ -1,8 +1,12 @@
 """``isr_engine_reference``: the mask stages read the engine's current-vs-sampling log-ratio on
 re-scored rows (pure staleness), the trainer diff elsewhere; the re-score fans a trajectory's rows out
-to one server, never raises, and is refused at construction where it could not mean what it says."""
+to one server, never raises, and is refused at construction where it could not mean what it says, and
+at startup against an engine whose prompt log-probs depend on how the prefill was batched."""
 
+import ast
 import inspect
+import math
+import re
 import types
 from collections import defaultdict
 from unittest import mock
@@ -17,10 +21,18 @@ from src.distributed.nccl.clients.vllm import VLLMWeightSyncClient as VLLMClient
 from src.trainers.grpo import environmental
 from src.trainers.grpo.environmental import DistributedAsyncEnvironmentalGRPOTrainer
 from src.trainers.grpo.objective.logratio import select_mask_logratio
-from src.trainers.grpo.rollout import async_rollouts
+from src.trainers.grpo.rollout import async_rollouts, weight_sync_clients
+from src.trainers.grpo.rollout.weight_sync_clients import (
+    _probe_prompt_logprobs,
+    verify_engine_prompt_logprobs_synced,
+)
 from tests.common.grpo_metrics import attach_world_metrics, flushed_metrics
+from tests.common.utils import REPO_ROOT
+from tests.cpu.grpo.test_weight_sync_protocol import GRAPH_CAPTURE_TOKENS, FakeVLLMServer
 
 PartialState()  # the re-score reports through accelerate's logger, which refuses to log without it
+
+ENV_SCRIPT = REPO_ROOT / "scripts/training/environmental_grpo.py"
 
 
 def _pair(stats: dict, key: str) -> tuple[float, float]:
@@ -72,12 +84,11 @@ class _FakeClient:
 
 def _rescore_host(clients):
     host = types.SimpleNamespace(
-        _engine_rescore_clients_list=clients,
+        _engine_rescore_clients=clients,
         _weight_sync_client=None,  # every rank but the main one holds no sync client
         _metrics={"train": defaultdict(list)},
     )
     attach_world_metrics(host)
-    host._engine_rescore_clients = DistributedAsyncEnvironmentalGRPOTrainer._engine_rescore_clients.__get__(host)
     return DistributedAsyncEnvironmentalGRPOTrainer._rescore_rows_on_engine.__get__(host), host
 
 
@@ -92,28 +103,32 @@ def test_rescore_clients_are_built_per_rank_from_the_server_urls(monkeypatch):
 
     monkeypatch.setattr(async_rollouts, "resolve_weight_sync_client", lambda backend: _Scorer)
     host = types.SimpleNamespace(
-        _engine_rescore_clients_list=None,
         _weight_sync_client=None,
+        _train_loader_batch_size=lambda: 8,
         async_config=AsyncTrainingConfig(
             rollout_connection_timeout=7.0,
             rollout_server_url="http://single:8000",
             rollout_server_configs=[{"url": "http://a:8000"}, {"url": "http://b:8001"}],
         ),
     )
-    clients = DistributedAsyncEnvironmentalGRPOTrainer._engine_rescore_clients.__get__(host)()
+    build = DistributedAsyncEnvironmentalGRPOTrainer._build_engine_rescore_clients.__get__(host)
+    assert len(build()) == 2
     assert built == [("http://a:8000", 7.0), ("http://b:8001", 7.0)], "the configs list overrides the single URL"
-    assert DistributedAsyncEnvironmentalGRPOTrainer._engine_rescore_clients.__get__(host)() is clients, "built once"
+    # Trajectory t re-scores on server t mod N: a one-trajectory round reaches server 0 alone.
+    host._train_loader_batch_size = lambda: 1
+    before = len(built)
+    assert len(build()) == 1 and built[before:] == [("http://a:8000", 7.0)]
+    host._train_loader_batch_size = lambda: 8
     for single_server in (None, []):
         host.async_config.rollout_server_configs = single_server
-        host._engine_rescore_clients_list = None
         before = len(built)
-        DistributedAsyncEnvironmentalGRPOTrainer._engine_rescore_clients.__get__(host)()
+        build()
         assert built[before:] == [("http://single:8000", 7.0)], f"configs={single_server!r} builds the single URL"
 
 
 def test_rescore_path_never_reads_the_main_process_sync_client():
     for method in (
-        DistributedAsyncEnvironmentalGRPOTrainer._engine_rescore_clients,
+        DistributedAsyncEnvironmentalGRPOTrainer._build_engine_rescore_clients,
         DistributedAsyncEnvironmentalGRPOTrainer._rescore_rows_on_engine,
     ):
         assert "self._weight_sync_client" not in inspect.getsource(method), method.__name__
@@ -172,6 +187,14 @@ def test_a_rescore_failure_is_reported_by_the_rank_that_hit_it(monkeypatch, fail
     assert msg.startswith("[rank 3] isr_engine_reference:"), msg
 
 
+def test_a_rescore_before_the_components_started_raises():
+    """Every request would otherwise fail as a miss and the step train on the trainer's reference, quietly."""
+    rescore, _host = _rescore_host(None)
+    prompts, completions = _rows()
+    with pytest.raises(RuntimeError, match="before the rollout components started"):
+        rescore(prompts, completions, [True, True, True, True], [2, 1, 1])
+
+
 def test_rescore_rejects_a_length_mismatch_as_that_rows_miss():
     class _Short(_FakeClient):
         def score_completion_logprobs(self, prompt_ids, completion_ids):
@@ -183,10 +206,11 @@ def test_rescore_rejects_a_length_mismatch_as_that_rows_miss():
     assert scored[1] is not None and scored[2] is None, "one log-prob for a three-token completion is a miss"
 
 
-def _gate_probe(*, is_correction=True, temperature=1.0, top_p=1.0):
+def _gate_probe(*, is_correction=True, **sampler):
+    """A trainer whose rollout config is the identity sampler, with ``sampler`` overriding its knobs."""
     trainer = DistributedAsyncEnvironmentalGRPOTrainer.__new__(DistributedAsyncEnvironmentalGRPOTrainer)
     trainer._is_correction = is_correction
-    trainer.async_config = types.SimpleNamespace(rollout_temperature=temperature, rollout_top_p=top_p)
+    trainer.async_config = AsyncTrainingConfig(**{"rollout_temperature": 1.0, "rollout_top_p": 1.0, **sampler})
     return trainer
 
 
@@ -203,8 +227,12 @@ def test_engine_reference_gate_accepts_the_identity_sampler_on_vllm():
             type("NoRescore", (VLLMClient,), {"SUPPORTS_ENGINE_RESCORE": False, "BACKEND_NAME": "Other"}),
             "not available on Other",
         ),
-        ({"temperature": 1.1}, VLLMClient, "rollout_temperature 1.0"),
-        ({"top_p": 0.95}, VLLMClient, "rollout_top_p 1.0"),
+        ({"rollout_temperature": 1.1}, VLLMClient, re.escape("got {'rollout_temperature': 1.1}")),
+        ({"rollout_top_p": 0.95}, VLLMClient, re.escape("got {'rollout_top_p': 0.95}")),
+        # Each filter cuts or reshapes the sampling distribution the prefill echo never sees.
+        ({"rollout_top_k": 20}, VLLMClient, re.escape("got {'rollout_top_k': 20}")),
+        ({"rollout_min_p": 0.05}, VLLMClient, re.escape("got {'rollout_min_p': 0.05}")),
+        ({"rollout_repetition_penalty": 1.1}, VLLMClient, re.escape("got {'rollout_repetition_penalty': 1.1}")),
     ],
 )
 def test_engine_reference_gate_refuses(kwargs, client_cls, match):
@@ -216,6 +244,109 @@ def test_both_engines_declare_the_rescore():
     assert VLLMClient.SUPPORTS_ENGINE_RESCORE is True
     assert SGLangWeightSyncClient.SUPPORTS_ENGINE_RESCORE is True
     _gate_probe()._validate_engine_reference(SGLangWeightSyncClient)
+
+
+def _word_tokenizer(text):
+    """One id per whitespace-separated word, clear of the low special-token range."""
+    return {"input_ids": [100 + int(word) for word in text.split()]}
+
+
+@pytest.fixture
+def prefill_server():
+    server = FakeVLLMServer()
+    try:
+        yield server
+    finally:
+        server.close()
+
+
+def _scored_lengths(server: FakeVLLMServer) -> list[int]:
+    """Token count of every prefill-log-prob request the server answered, in order, on either engine's route."""
+    return [
+        len(body["prompt"] if path == "/v1/completions" else body["input_ids"])
+        for path, body in server.posted
+        if path in ("/v1/completions", "/generate")
+    ]
+
+
+_ENGINES = pytest.mark.parametrize("client_cls", [VLLMClient, SGLangWeightSyncClient], ids=["vllm", "sglang"])
+
+
+@_ENGINES
+@pytest.mark.parametrize(
+    ("shift", "capture_tokens"),
+    [(-15.0, GRAPH_CAPTURE_TOKENS), (float("nan"), GRAPH_CAPTURE_TOKENS), (-15.0, 4096)],
+    ids=["garbage-prefixes", "non-finite-prefixes", "garbage-whole"],
+)
+def test_prompt_logprob_probe_refuses_an_engine_whose_graph_prefills_are_garbage(
+    prefill_server, client_cls, shift, capture_tokens
+):
+    """vLLM 0.26.0 under MTP returns garbage prompt log-probs whenever the prefill replays a captured graph.
+    The probe's prefixes do while its whole sequence does not, so their shared positions disagree; a capture
+    range raised past the whole sequence corrupts it too, and its mean NLL gives it away. Either way the run
+    is refused with the cause and the remedies."""
+    prefill_server.graph_prefill_shift = shift
+    prefill_server.graph_capture_tokens = capture_tokens
+    with pytest.raises(ValueError, match="speculative decoding") as raised:
+        verify_engine_prompt_logprobs_synced([prefill_server.url], _word_tokenizer, backend=client_cls.BACKEND_KEY)
+    assert "Dockerfile.vllm" in str(raised.value) and "isr_engine_reference: false" in str(raised.value)
+
+
+@_ENGINES
+def test_prompt_logprob_probe_accepts_batch_shape_noise(prefill_server, client_cls):
+    """A shift within bf16 batch-shape noise passes, once the probe has scored a whole sequence that prefills
+    eagerly and prefixes of it that each replay a graph; the gap it measures is that shift alone, so each
+    prefix position is compared with the same position of the whole."""
+    prefill_server.graph_prefill_shift = -0.5
+    verify_engine_prompt_logprobs_synced([prefill_server.url], _word_tokenizer, backend=client_cls.BACKEND_KEY)
+    whole, *prefixes = _scored_lengths(prefill_server)
+    assert whole > GRAPH_CAPTURE_TOKENS, "the reference must prefill outside the graph capture range"
+    assert prefixes and all(length <= GRAPH_CAPTURE_TOKENS for length in prefixes), prefixes
+
+    _, gap, _ = _probe_prompt_logprobs(client_cls(base_url=prefill_server.url), list(range(100, 100 + whole)))
+    assert gap == pytest.approx(0.5)
+
+
+class _OneNaNPrefixPosition:
+    """Every prefix scores one NaN log-prob behind finite ones; the whole sequence scores clean."""
+
+    def score_completion_logprobs(self, prompt_ids, completion_ids, timeout):
+        values = [-0.1] * len(completion_ids)
+        if len(completion_ids) <= GRAPH_CAPTURE_TOKENS:
+            values[3] = float("nan")
+        return values
+
+
+def test_prompt_logprob_probe_reads_a_non_finite_position_as_an_infinite_gap():
+    """``max`` keeps whichever operand it met first when the other is NaN, so a NaN behind a finite gap
+    would otherwise vanish from the verdict."""
+    _, gap, _ = _probe_prompt_logprobs(_OneNaNPrefixPosition(), list(range(1100)))
+    assert gap == math.inf
+
+
+@_ENGINES
+def test_a_preflight_request_never_retries_a_read_past_its_timeout(prefill_server, client_cls):
+    """Every rank waits on rank 0's probes: a stalled server must cost one timeout per request, where the
+    client's own session would retry the read five times."""
+    url = prefill_server.url
+    retry = weight_sync_clients._probe_server(
+        client_cls, url, lambda client: client.session.get_adapter(url).max_retries, None, "probe"
+    )
+    assert retry.read == 0 and retry.connect > 0
+
+
+def test_the_env_script_runs_the_prompt_logprob_probe_under_isr_engine_reference():
+    """The probe guards the re-score only, so the script gates it on the knob that turns the re-score on."""
+    guards = [
+        ast.unparse(node.test)
+        for node in ast.walk(ast.parse(ENV_SCRIPT.read_text()))
+        if isinstance(node, ast.If)
+        and any(
+            isinstance(call, ast.Call) and ast.unparse(call.func) == "verify_engine_prompt_logprobs_synced"
+            for call in ast.walk(node)
+        )
+    ]
+    assert guards == ["async_config.isr_engine_reference"], guards
 
 
 if __name__ == "__main__":

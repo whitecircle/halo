@@ -88,7 +88,7 @@ def parallelism_config_from_args(
         expert_lora: peeled native EP expert-LoRA spec. Must be passed here, not assigned onto the
             returned config: only construction runs ``__post_init__``, where the PP rejection lives,
             and :meth:`ParallelismConfig.create_ep_config` caches the ``EPConfig`` it builds, so a
-            later assignment would not reach the layers.
+            later assignment never reaches the layers.
     """
     if not allow_low_precision:
         if dist_args.lowp_precision != "bf16":

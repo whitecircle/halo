@@ -168,7 +168,7 @@ def run(ctx) -> dict:
     # sequence splitting in forward(). For logit comparison, we need
     # to get the raw logits from the CP forward pass.
     #
-    # Strategy: Use the model WITHOUT the full CPModelWrapper, but WITH
+    # Strategy: Use the model WITHOUT the full UlyssesCPModelWrapper, but WITH
     # Ulysses attention patching. Manually split input and gather output.
     cp_group = cp_config.process_group
 

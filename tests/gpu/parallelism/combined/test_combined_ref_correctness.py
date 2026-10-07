@@ -1,7 +1,7 @@
 #!/usr/bin/env python
 """Numerical correctness of combined/complex parallelism shapes vs a single-GPU reference.
 
-The sibling ``test_mistral4_all_parallelism.py`` proves each shape *runs* (finite loss,
+``tests/gpu/parallelism/test_mistral4_all_parallelism.py`` proves each shape *runs* (finite loss,
 rank-consistent reduced loss, EP wrappers land, checkpoint roundtrips). It does **not**
 prove the shape computes the *same math* as the undistributed model. This test closes
 that gap for the non-CP shapes on Mistral4 — EP, TP, pure ETP, **EP+TP** and **EP+ETP** —
@@ -156,7 +156,7 @@ def run(ctx):
     # Every rank must agree on the reduced loss (a broken gather desyncs ranks).
     spread = world_spread(loss.item())
     metrics["rank_loss_spread"] = spread
-    checks["losses_agree_across_ranks"] = spread < TOL.ep_identical_batch_rank_spread_abs
+    checks["losses_agree_across_ranks"] = TOL.identical_batch_ranks_agree(spread)
 
     loss.backward()
     router_name, router_weight = find_router_weight(model)

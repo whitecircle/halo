@@ -221,14 +221,12 @@ def test_save_sharded_state_dict_still_sweeps_stale_files_after_success(tmp_path
 
 
 def _hf_like_model():
-    """The gathered writer branches on ``hasattr(model, "save_pretrained")`` and never calls it.
+    """The gathered writer's config/tie steps branch on ``hasattr(model, "config")``.
 
     A bare ``nn.Module`` (the writer's save-dtype keep-set walks the module tree) with no config —
     the config/tie steps skip, no norms/balancing keep anything — so the write ordering is what
     remains under test."""
-    model = nn.Module()
-    model.save_pretrained = None
-    return model
+    return nn.Module()
 
 
 def test_the_bin_fallback_writes_before_it_sweeps(tmp_path, monkeypatch):

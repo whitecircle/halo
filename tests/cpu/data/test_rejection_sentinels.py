@@ -142,8 +142,8 @@ def test_is_valid_example_blank_string_and_conversation_sentinels():
 
 def test_map_and_filter_survives_all_rejected_writer_batch():
     """num_proc=2 over a dataset whose first worker's FIRST writer batch is entirely over-length:
-    the all-None sentinel raised ``TypeError: Couldn't cast array of type list<item: int64> to
-    null`` when the same worker later wrote real rows. The typed sentinel keeps every batch's
+    an all-None sentinel raises ``TypeError: Couldn't cast array of type list<item: int64> to
+    null`` when the same worker later writes real rows. The typed sentinel keeps every batch's
     schema identical; only the valid rows survive."""
     tokenizer = _WordTokenizer()
     processor = create_llm_processor(tokenizer, max_length=8, conversation_field="messages")
@@ -179,7 +179,7 @@ def test_tokenize_dataset_text_mode_survives_all_rejected_writer_batch():
 
 
 def test_tokenize_dataset_all_rejected_still_fails_loud():
-    """The zero-surviving-rows guard must still fire on the new sentinel: a split whose every row is
+    """The zero-surviving-rows guard must still fire on the typed sentinel: a split whose every row is
     rejected raises instead of silently training on nothing."""
     dataset = Dataset.from_dict({"text": ["", "", ""]})
     config = PreprocessingConfig(model_name_or_path="fake/model", mode="text", max_length=16, num_proc=1)
@@ -190,7 +190,7 @@ def test_tokenize_dataset_all_rejected_still_fails_loud():
 def test_map_and_filter_survives_all_rejected_string_writer_batch():
     """GRPO-script shape (rlvr): a STRING prompt column whose first worker's first writer
     batch is entirely rejected. The blank-string sentinel keeps the Arrow schema string-typed (None
-    rows inferred a null column and crashed the cast against later real batches), and the filter
+    rows infer a null column and crash the cast against later real batches), and the filter
     must actually drop the blank rows."""
 
     def process_prompt_row(row):
@@ -258,7 +258,7 @@ def test_map_and_filter_survives_all_rejected_conversation_writer_batch():
 def test_tokenize_vlm_dataset_survives_all_rejected_writer_batch():
     """VLM regression: the first worker's first writer batch is entirely rejected (empty
     conversations → all-None rows), so without the explicitly pinned output features the writer
-    inferred null columns and crashed casting the later real batch, exactly like the text path."""
+    infers null columns and crashes casting the later real batch, exactly like the text path."""
     empty_row = {"conversation": []}
     good_row = {
         "conversation": [

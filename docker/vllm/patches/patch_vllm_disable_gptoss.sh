@@ -159,7 +159,7 @@ fi
 MOE_ORACLE="$VLLM_PATH/model_executor/layers/fused_moe/oracle/unquantized.py"
 if require_file "unquantized MoE oracle" "$MOE_ORACLE"; then
     echo "Patching $MOE_ORACLE..."
-    if grep -q 'universal-benchmarks' "$MOE_ORACLE"; then
+    if grep -q 'WORKAROUND (halo)' "$MOE_ORACLE"; then
         echo "  - Already patched, skipping..."
     else
         $PY - "$MOE_ORACLE" <<'PY' || ERRORS=$((ERRORS + 1))
@@ -177,7 +177,7 @@ marker = (
 )
 patch = marker + """
 
-        # WORKAROUND (universal-benchmarks): FlashInfer CUTLASS BF16 has
+        # WORKAROUND (halo): FlashInfer CUTLASS BF16 has
         # correctness issues for unquantized MoE (vLLM authors already
         # demote it for Qwen3.5 + DP>1 below — same kernel produces pure
         # garbage for gpt-oss-20b bf16 unquantized MoE at any DP/TP).
@@ -257,7 +257,7 @@ fi
 validate "openai_gptoss commented out" "$REASONING_INIT" '# "openai_gptoss"'
 validate "envs.py logging stream = stderr" "$ENVS_PY" 'ext://sys.stderr'
 validate "config.py reasoning_parser disabled" "$CONFIG_PY" '# Disabled: do not force openai_gptoss'
-validate "unquantized MoE oracle: CUTLASS demoted" "$MOE_ORACLE" 'universal-benchmarks'
+validate "unquantized MoE oracle: CUTLASS demoted" "$MOE_ORACLE" 'WORKAROUND (halo)'
 
 # Smoke-test the patched tree, unconditionally: the seds rewrite Python source in place, so a
 # malformed edit surfaces here rather than at server start.

@@ -4,11 +4,11 @@ zero-arg ``super()`` calls land.
 
 Two invariants the split into ``src/trainers/mixins/`` depends on, both silent when broken:
 
-* every method the trainers and tests reach as ``DistributedTrainerMixin.<name>`` still resolves
-  through the MRO after moving to a sub-mixin (a typo in the bases tuple drops it);
-* the checkpoint methods' ``super()`` calls reach the **base Trainer**, not a sibling mixin. They
-  are spelled ``super(CheckpointingMixin, self)``, so a base declaring ``save_model`` or
-  ``_save_checkpoint`` between the two would silently intercept the save.
+* every method the trainers and tests reach as ``DistributedTrainerMixin.<name>`` resolves through
+  the MRO to the sub-mixin that owns it (a typo in the bases tuple drops it);
+* the checkpoint methods' zero-arg ``super()`` calls reach the **base Trainer**, not a sibling
+  mixin: a base declaring ``save_model`` or ``_save_checkpoint`` between the two would silently
+  intercept the save.
 
 Run: python tests/cpu/trainers/test_mixin_composition.py
 """
@@ -33,17 +33,19 @@ _OWNERSHIP = {
         "_persist_lr_scheduler_for_resume",
         "_persist_router_balancing_biases",
         "_persist_trainer_sidecars",
+        "_publish_checkpoint",
         "_restore_router_balancing_biases",
         "_restore_state_beside_weights",
         "_restore_trainer_sidecars",
         "_rotate_checkpoints_after_sidecars",
         "_save_checkpoint",
+        "_write_model_payload",
         "create_model_card",
         "save_model",
+        "train",
     ),
     GradientSyncMixin: (
         "_compute_global_grad_norm",
-        "_compute_tp_grad_norm",
         "_patch_gradient_clipping_for_ep",
         "_patch_gradient_clipping_for_qlora",
         "_patch_gradient_clipping_for_tp",
@@ -53,7 +55,7 @@ _OWNERSHIP = {
         "_setup_cp_gradient_sync",
         "_setup_ep_gradient_sync",
         "_setup_ep_tp_gradient_sync",
-        "_setup_qlora_gradient_sync",
+        "_setup_qlora_sync",
         "_sync_deferred_expert_grads",
         "_sync_qlora_grads",
         "_sync_tp_replicated_grads",
@@ -69,6 +71,7 @@ _SUPER_DELEGATED = (
     "_save_checkpoint",
     "create_model_card",
     "save_model",
+    "train",
 )
 
 
@@ -90,6 +93,9 @@ class _BaseTrainer:
     def create_model_card(self, tags=None, **kwargs):
         return "base"
 
+    def train(self, resume_from_checkpoint=None, trial=None, ignore_keys_for_eval=None):
+        return "base"
+
 
 class _ComposedTrainer(DistributedTrainerMixin, _BaseTrainer):
     """The shape every concrete trainer has: the mixin first, a Trainer base behind it."""
@@ -99,7 +105,7 @@ def _owner(cls: type, name: str) -> type:
     return next(base for base in cls.__mro__ if name in base.__dict__)
 
 
-def test_every_moved_method_is_owned_by_its_sub_mixin_and_reachable_from_the_composed_class():
+def test_every_method_is_owned_by_its_sub_mixin_and_reachable_from_the_composed_class():
     for mixin, names in _OWNERSHIP.items():
         assert mixin in DistributedTrainerMixin.__mro__, f"{mixin.__name__} is not a base of the trainer mixin"
         for name in names:

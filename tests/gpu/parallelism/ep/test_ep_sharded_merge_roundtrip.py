@@ -26,9 +26,9 @@ import torch
 import torch.distributed as dist
 
 from scripts.after_training.merge_ep_shards import merge_ep_shards
+from src.distributed.checkpoint.ep_save import save_ep_model
 from src.distributed.expert_parallel.config import EPConfig
 from src.distributed.expert_parallel.patching import patch_moe_model_for_ep
-from src.distributed.expert_parallel.saving import save_ep_model
 from src.models.loading.model_preparation import auto_load_model
 from tests.common.distributed import shared_scratch_dir
 from tests.common.harness import gpu_test_main

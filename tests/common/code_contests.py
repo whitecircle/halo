@@ -2,6 +2,7 @@
 SandboxFusion service, and the reset / tool-call steps, so a test runs episodes through the native
 protocol's own dispatch without a subprocess or a network."""
 
+import re
 from typing import Any, NamedTuple
 
 from src.environments.base import Trajectory
@@ -12,6 +13,20 @@ from src.environments.tools.definitions import NativeToolCall
 SINGLE_TEST_ANSWER = {"answer": {"tests": [{"input": "", "output": "X"}]}}
 # The body SandboxFusion answers for a program that ran to a clean exit.
 FINISHED_RUN = {"status": "Success", "run_result": {"status": "Finished", "stdout": "", "return_code": 0}}
+# Wording no task message, tool description or tool reply may carry: an episode's budgets are
+# enforced by the engine and the protocol, never stated to the model.
+RETIRED_BUDGET_PHRASES = (
+    "Budgets for this task",
+    "runs left",
+    "submissions left",
+    "limit reached",
+    "stated in the task message",
+    "You get up to",
+    "only graded submission",
+    "disabled for this task",
+)
+# The sentence window around each "submission"/"run" word, where a stated budget would put its count.
+_BUDGET_WORD_WINDOW = re.compile(r"[^.\n]{0,24}\b(?:graded\s+)?(?:submissions?|runs?)\b[^.\n]{0,24}", re.IGNORECASE)
 
 
 class StubSandbox(SandboxExecutor):
@@ -59,6 +74,17 @@ class RecordingSandboxSession:
 
     def json(self) -> dict[str, Any]:
         return self.body
+
+
+def retired_budget_phrases(text: str) -> list[str]:
+    """The retired budget statements ``text`` still carries."""
+    return [phrase for phrase in RETIRED_BUDGET_PHRASES if phrase in text]
+
+
+def counts_beside_budget_words(text: str) -> list[str]:
+    """The windows of ``text`` where a count sits beside "submission" or "run" — where a tool description
+    stating a budget puts it. Not for a task message, whose time-limit note ("runs under 5 s") is one."""
+    return [window.group(0) for window in _BUDGET_WORD_WINDOW.finditer(text) if re.search(r"\d", window.group(0))]
 
 
 def reset_episode(env: Any, context: dict[str, Any]) -> Trajectory:

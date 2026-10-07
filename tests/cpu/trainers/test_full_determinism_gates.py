@@ -70,6 +70,7 @@ def _construct(trainer_cls, full_determinism: bool, parallelism_config: Parallel
         bf16=False,
         optim="adamw_torch",
         save_on_each_node=False,
+        output_dir="unused",
     )
     trainer_cls(
         model=nn.Linear(2, 2), args=training_args, parallelism_config=parallelism_config or ParallelismConfig()

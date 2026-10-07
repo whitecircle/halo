@@ -4,7 +4,7 @@
 # --- Model ---
 # VLM checkpoint (Cohere2Vision wrapper around the Cohere2MoeForCausalLM backbone), loaded through its
 # multimodal class; text-only SFT takes the text pipeline, and EP wraps the text backbone's MoE blocks.
-# The revision pin fixes the checkpoint layout this config was validated against.
+# The revision pin is the layout the memory numbers below assume.
 model_name_or_path: CohereLabs/command-a-plus-05-2026-bf16
 model_revision: 5fb6fde5fd12ff89356aae552e11883bc49f069b
 # The family has no aux-loss wiring and no exportable bias slot (auto resolves to none). The

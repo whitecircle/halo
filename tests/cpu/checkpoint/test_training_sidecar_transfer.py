@@ -127,7 +127,7 @@ def test_an_adapter_directory_gives_the_slot_fp32_storage_for_its_sidecar(tmp_pa
     assert torch.equal(seen["sidecar"]["model.layers.0.mlp.gate"], TRAINED_BIAS)
     assert any("1 native slots" in action for action in actions)
     # The transient-bias warning is what tells the operator their export routes differently from
-    # training; the two copies of this sequence had already lost half of it.
+    # training, so it must survive the shared sequence.
     assert any(action.startswith("WARNING:") and "TRANSIENT" in action for action in actions)
 
 

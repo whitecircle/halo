@@ -5,7 +5,7 @@
 Train mode cannot produce one (the loader gate rejects the shape at construction), but eval can:
 ``dataloader_drop_last`` defaults to ``False``, so the final eval batch is split unevenly and the
 remainder lands on a SUBSET of the DP ranks. A rank-local raise there leaves its peers in the
-``_raise_batch_error_uniformly`` gather until ``DIST_NCCL_TIMEOUT_MINUTES``, with the explaining
+batch fence's gather (``BatchBuildFence.reject``) until ``DIST_NCCL_TIMEOUT_MINUTES``, with the explaining
 traceback only on the ranks that died — at 512 GPUs, 500 NCCL timeouts and 12 real tracebacks.
 
 Proven on a real 2-rank gloo group with an asymmetric batch, so the regression manifests as the hang
@@ -24,7 +24,7 @@ import types
 
 import pytest
 
-from src.trainers.grpo.environmental import DistributedAsyncEnvironmentalGRPOTrainer
+from src.trainers.grpo.environmental import BatchBuildFence, DistributedAsyncEnvironmentalGRPOTrainer
 from tests.common.gloo import run_gloo_ranks
 
 WORLD_SIZE = 2
@@ -40,16 +40,14 @@ def _eval_trainer():
     """Minimal stand-in exposing exactly what the batch-build path reads, in EVAL mode."""
     host = types.SimpleNamespace(
         _group_random_effort=True,
-        _batch_build_error=None,
+        _batch_errors=BatchBuildFence(),
         num_generations=4,
         num_generations_eval=NUM_GENERATIONS_EVAL,
         model=types.SimpleNamespace(training=False),
     )
     cls = DistributedAsyncEnvironmentalGRPOTrainer
-    host._record_batch_error = cls._record_batch_error.__get__(host)
     host._stamp_group_efforts = cls._stamp_group_efforts.__get__(host)
     host._extract_prompts_and_contexts = cls._extract_prompts_and_contexts.__get__(host)
-    host._raise_batch_error_uniformly = cls._raise_batch_error_uniformly.__get__(host)
     return host
 
 
@@ -61,7 +59,7 @@ def _worker(rank: int, tmp_dir: str, ragged: bool) -> None:
     host = _eval_trainer()
     try:
         host._extract_prompts_and_contexts([{"prompt": "solve it"} for _ in range(rows)])
-        host._raise_batch_error_uniformly()
+        host._batch_errors.reject()
         result = "NO RAISE"
     except Exception as e:
         result = f"{type(e).__name__}: {e}"
@@ -79,7 +77,7 @@ def _run_ranks(tmp_path, ragged: bool) -> dict[int, str]:
 
 
 def test_a_ragged_eval_tail_raises_on_every_rank(tmp_path):
-    """The P1: rank 0's eval batch does not divide by ``num_generations_eval``, rank 1's does.
+    """Rank 0's eval batch does not divide by ``num_generations_eval``, rank 1's does.
 
     Rank 1 reaching the error is the whole proof — it can only get there if rank 0 recorded the
     failure and still entered the gather. Raising rank-locally instead leaves rank 1 blocked in that

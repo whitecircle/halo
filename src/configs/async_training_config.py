@@ -14,22 +14,22 @@ from src.configs.rollout_config import (
     DEFAULT_REQUEST_TIMEOUT_SECONDS,
     DEFAULT_RETRY_BASE_WAIT_SECONDS,
     DEFAULT_ROLLOUT_MAX_TOKENS,
+    DEFAULT_ROLLOUT_MIN_P,
+    DEFAULT_ROLLOUT_REPETITION_PENALTY,
     DEFAULT_ROLLOUT_TEMPERATURE,
+    DEFAULT_ROLLOUT_TOP_K,
     DEFAULT_ROLLOUT_TOP_P,
-    DEFAULT_THINKING_BUDGET_SCOPE,
-    DEFAULT_THINKING_TURN_RESERVE,
     REASONING_BUDGET_TEMPLATE_VAR,
     REASONING_END_TOKEN_EXAMPLES,
-    REASONING_SCOPE_TEMPLATE_VAR,
-    THINKING_BUDGET_SCOPES,
-    THINKING_SCOPE_EPISODE,
     RolloutConfig,
-    ThinkingBudgetScope,
 )
 from src.distributed.runtime import is_global_main_process
 from src.env import WATCHDOG_WARN_FRACTION, resolve_nccl_timeout_minutes
 
 logger = logging.getLogger(__name__)
+
+# The reasoning price's per-episode cap, read only while the price is on.
+DEFAULT_REASONING_PRICE_CAP = 0.1
 
 # Rollout knobs whose consumer has no meaning for a non-positive value (see _validate_ranges).
 POSITIVE_ROLLOUT_FIELDS = (
@@ -59,6 +59,51 @@ def rollout_field_sources(config_cls) -> dict[str, str]:
         for source in (target.name, f"rollout_{target.name}")
         if source in declared
     }
+
+
+@dataclass(frozen=True)
+class ISMaskConfig:
+    """Mask/veto stages layered on the truncated IS ratio, applied by ``src/trainers/grpo/objective/logratio.py``.
+    All default off.
+
+    * ``geo_band_min``/``geo_band_max`` — trajectory geometric-mean band: mask the whole trajectory when
+      ``exp(mean log-ratio over its corrected tokens)`` leaves the band. Both bounds must be set.
+    * ``veto_min`` — catastrophic-token veto: mask the trajectory when any corrected token's ratio is below it.
+    * ``opsm_delta`` — off-policy sequence masking (``apply_opsm``, applied separately once advantages exist).
+    """
+
+    geo_band_min: float | None = None
+    geo_band_max: float | None = None
+    veto_min: float | None = None
+    opsm_delta: float | None = None
+
+    def __post_init__(self):
+        lo, hi = self.geo_band_min, self.geo_band_max
+        if (lo is None) != (hi is None):
+            raise ValueError("isr_geo_band_min and isr_geo_band_max must be set together")
+        if lo is not None and not 0 < lo < 1 < hi:
+            raise ValueError(f"isr_geo_band bounds must satisfy 0 < min < 1 < max, got [{lo}, {hi}]")
+        if self.veto_min is not None and not 0 < self.veto_min < 1:
+            raise ValueError(f"isr_veto_min must be in (0, 1), got {self.veto_min}")
+        if self.opsm_delta is not None and not (isfinite(self.opsm_delta) and self.opsm_delta > 0):
+            raise ValueError(f"isr_opsm_delta must be a finite number > 0 (nats), got {self.opsm_delta}")
+
+    @property
+    def any_mask_active(self) -> bool:
+        """Whether a stage :func:`apply_is_masks` applies (the geometric band or the veto) is set."""
+        return self.geo_band_min is not None or self.veto_min is not None
+
+    @property
+    def any_stage_active(self) -> bool:
+        """Whether any stage is set, OPSM included."""
+        return self.any_mask_active or self.opsm_delta is not None
+
+    @property
+    def sums_sequence_logratio(self) -> bool:
+        """Whether a stage reads the per-token log-ratio summed over a trajectory (the geometric band's
+        and OPSM's per-trajectory mean); the veto reads single tokens. The consumer the sampler-logprob preflight holds to a reference not
+        renormalized over the sampler's cut."""
+        return self.geo_band_min is not None or self.opsm_delta is not None
 
 
 @dataclass
@@ -98,8 +143,8 @@ class AsyncTrainingConfig(AdvantageShapingArguments, GRPOEarlyStopArguments, Chu
             "time is its slowest episode and per_device_eval_batch_size-sized rounds idle the servers between them; "
             "size it to what the servers sustain: rows × data_parallel_size requests are in flight at once, and a turn "
             "that decodes slower than request_timeout allows fails the episode; a multiple of num_generations_eval, at "
-            "most max_concurrent_rollouts (a wider round runs in serial waves), and a divisor of the per-rank share "
-            "(eval rows ÷ data_parallel_size) to avoid padded duplicate rows. It bounds the loader's batch, "
+            "most max_concurrent_rollouts (a wider round runs in serial waves). The final round's padding is never "
+            "rolled out or scored. It bounds the loader's batch, "
             "not eval peak memory: the loss forward still chunks per_device_eval_batch_size rows, but the round's "
             "widest completion sets the padded width. None leaves the round at the eval batch."
         },
@@ -112,8 +157,8 @@ class AsyncTrainingConfig(AdvantageShapingArguments, GRPOEarlyStopArguments, Chu
         metadata={
             "help": "Inference engine serving rollouts and receiving weight updates. Both support "
             "generation, NCCL weight sync, `train_on_sampled_tokens` and `routing_replay: rollout`. "
-            "'sglang' does not support `rollout_max_thinking_tokens` (the trainer wires neither of "
-            "SGLang's budget mechanisms; harmony models have none server-side), needs cuMem parity on "
+            "'sglang' does not support `rollout_max_thinking_tokens` or `turn_overlong_penalty` (the trainer "
+            "wires neither of SGLang's budget mechanisms; harmony models have none server-side), needs cuMem parity on "
             "the server (NCCL_CUMEM_ENABLE=1, which docker-compose.sglang.yml sets), and must be served "
             "from the NCCL-aligned Dockerfile.sglang image — the stock upstream image ships a "
             "different NCCL than the trainer and cannot form the weight-sync group."
@@ -156,50 +201,64 @@ class AsyncTrainingConfig(AdvantageShapingArguments, GRPOEarlyStopArguments, Chu
         default=DEFAULT_ROLLOUT_TOP_P, metadata={"help": "Top-p (nucleus) sampling for rollout generation."}
     )
 
+    rollout_top_k: int = field(
+        default=DEFAULT_ROLLOUT_TOP_K,
+        metadata={
+            "help": "Top-k sampling for rollout generation: -1 (off) or >= 1; 0 is refused, since SGLang "
+            "rejects it. Sent on every request, as are rollout_min_p and rollout_repetition_penalty: both "
+            "engines fill an omitted one from the model's generation_config.json."
+        },
+    )
+
+    rollout_min_p: float = field(
+        default=DEFAULT_ROLLOUT_MIN_P,
+        metadata={
+            "help": "Min-p sampling for rollout generation, in [0, 1]; 0 = off. vLLM rejects every request "
+            "with min_p > 0 on a server running speculative decoding (MTP)."
+        },
+    )
+
+    rollout_repetition_penalty: float = field(
+        default=DEFAULT_ROLLOUT_REPETITION_PENALTY,
+        metadata={
+            "help": "Repetition penalty for rollout generation, in (0, 2]; 1 = off. The sampling log-probs "
+            "carry it and the trainer's recomputed ones do not, so a value other than 1 is refused at "
+            "startup under a sequence-level ratio (isr_geo_band_*, isr_opsm_delta)."
+        },
+    )
+
     rollout_max_tokens: int = field(
         default=DEFAULT_ROLLOUT_MAX_TOKENS,
         metadata={
             "help": "Max tokens per single-turn generation (one /chat/completions call). The whole "
-            "multi-turn trajectory accumulates across turns and is bounded only by the model's context "
-            "window (shared with vLLM); env-GRPO does not truncate it — a trajectory exceeding the context "
-            "fails. This per-turn budget is the active generation knob; it is verified against the server "
-            "at startup."
+            "multi-turn trajectory accumulates across turns, bounded by rollout_max_episode_tokens where set and "
+            "by the model's context window (shared with vLLM); a trajectory exceeding the context fails. This "
+            "per-turn bound is verified against the server at startup."
+        },
+    )
+
+    rollout_max_episode_tokens: int | None = field(
+        default=None,
+        metadata={
+            "help": "The most tokens one episode may sample over all its assistant turns, reasoning and visible "
+            "output together, recoveries included (null = unbounded: max_turns x rollout_max_tokens). Enforced "
+            "by the engine per turn, never stated to the model: a turn's max_tokens is the smaller of its own "
+            "cap and what the episode has left, its reasoning cap shrinks with it so the turn keeps its answer "
+            "room (rollout_max_tokens less its reasoning cap), and an episode left with less than that room "
+            "starts no further turn and ends truncated, priced like a max_turns overflow. Must be >= "
+            "rollout_max_tokens, so one whole turn fits. Logged as episode/output_budget_exhausted: the share of "
+            "episodes whose budget held no further turn when they ended, by the budget or done."
         },
     )
 
     rollout_max_thinking_tokens: int | None = field(
         default=None,
         metadata={
-            "help": "Per-turn reasoning-token budget for reasoning models (vLLM thinking_token_budget): "
-            "caps the chain-of-thought, then forces the model to answer with the rest of max_tokens. "
-            "Requires a reasoning parser on the vLLM server (--reasoning-parser qwen3 for Qwen3.x; the "
-            "openai_gptoss plugin for gpt-oss). None = unbounded reasoning. Under "
-            "rollout_thinking_budget_scope=episode it is the ceiling one turn may take of the episode's budget."
-        },
-    )
-
-    rollout_thinking_budget_scope: ThinkingBudgetScope = field(
-        default=DEFAULT_THINKING_BUDGET_SCOPE,
-        metadata={
-            "help": "What a thinking budget (a level's thinking_tokens, else rollout_max_thinking_tokens) covers: "
-            "'turn' gives every turn the whole budget; 'episode' makes it the episode's total, so each turn's "
-            "engine cap is the budget minus the reasoning the earlier turns spent (never below "
-            "rollout_thinking_turn_reserve, never above rollout_max_thinking_tokens). Closes the loophole "
-            "where a cut or empty turn plus its recovery nudge buys another full budget of reasoning. vLLM "
-            "only; needs train_on_sampled_tokens (the spend is read off the sampled ids) and "
-            "rollout_reasoning_end_token. Without rollout_max_thinking_tokens the environment must set "
-            "reasoning_effort and every level's thinking_tokens, or trainer construction and the eval scripts "
-            "refuse the run. The effort templates state the scope to the model."
-        },
-    )
-
-    rollout_thinking_turn_reserve: int = field(
-        default=DEFAULT_THINKING_TURN_RESERVE,
-        metadata={
-            "help": "Under rollout_thinking_budget_scope=episode: the reasoning a turn always gets once the "
-            "episode's budget is spent, so the model can still close its reasoning and act. Must be >= 1, "
-            "at most rollout_max_thinking_tokens when that is set, and at most every level's thinking_tokens "
-            "(refused at trainer construction and by the eval scripts)."
+            "help": "Per-turn reasoning-token cap for reasoning models (vLLM thinking_token_budget): caps the "
+            "chain-of-thought, then forces the model to answer with the rest of max_tokens. A level whose profile "
+            "sets a smaller thinking_tokens runs under that instead. Requires a reasoning parser on the vLLM "
+            "server (--reasoning-parser qwen3 for Qwen3.x; the openai_gptoss plugin for gpt-oss). None = only a "
+            "level's thinking_tokens caps reasoning, or nothing does."
         },
     )
 
@@ -208,10 +267,9 @@ class AsyncTrainingConfig(AdvantageShapingArguments, GRPOEarlyStopArguments, Chu
         metadata={
             "help": "The string the server's reasoning parser ends reasoning with, encoded as vLLM encodes it "
             f"({REASONING_END_TOKEN_EXAMPLES}). "
-            "Wherever a vLLM thinking budget can bind, a forced run of its ids gets ratio 0 in the loss (under "
-            "the turn scope a marker holding none of the tokenizer's added tokens only warns). Under "
-            "rollout_thinking_budget_scope=episode a turn's reasoning is counted as the sampled ids up to and "
-            "including it, which needs it to be one added token."
+            "Wherever a vLLM thinking budget can bind, a forced run of its ids gets ratio 0 in the loss (a marker "
+            "holding none of the tokenizer's added tokens only warns). The overlong charge counts a turn's "
+            "reasoning as the sampled ids up to and including it, which needs it to be one added token."
         },
     )
 
@@ -284,7 +342,8 @@ class AsyncTrainingConfig(AdvantageShapingArguments, GRPOEarlyStopArguments, Chu
             "trainer-vs-sampling. Logged as sampling/engine_logratio_mean (staleness plus the "
             "decode-vs-prefill floor), sampling/numerics_logratio_mean (trainer minus engine-prefill) "
             "and sampling/engine_rescore_coverage. Requires the IS correction, rollout_temperature "
-            "and rollout_top_p of 1.0 (prefill log-probs are the raw distribution); vLLM re-scores through "
+            "and rollout_top_p of 1.0 and rollout_top_k / rollout_min_p / rollout_repetition_penalty off "
+            "(prefill log-probs are the raw distribution); vLLM re-scores through "
             "the completions prompt_logprobs echo, SGLang through /generate with logprob_start_len. The "
             "server must hold headroom for that pass: vLLM materializes an fp32 log-softmax over the "
             "vocabulary for every prefill chunk of a prompt_logprobs request (max_num_batched_tokens x "
@@ -342,7 +401,8 @@ class AsyncTrainingConfig(AdvantageShapingArguments, GRPOEarlyStopArguments, Chu
         default=0.25,
         metadata={
             "help": "Warn when the share of a rollout round's episodes that ended truncated "
-            "(`episode/truncation_rate`: the max_turns cap, or a cut turn past its recoveries) rises over "
+            "(`episode/truncation_rate`: the max_turns cap, the episode output budget, or a cut turn past its "
+            "recoveries) rises over "
             "this, and log `episode/truncation_alarm` (1 over, 0 under) every round. Past it the turn or "
             "token budget, not the task, ends a large share of episodes. The warning repeats only after the rate "
             "has dropped back under. In [0, 1); None = off."
@@ -355,9 +415,10 @@ class AsyncTrainingConfig(AdvantageShapingArguments, GRPOEarlyStopArguments, Chu
         default=True,
         metadata={
             "help": "Drop GRPO groups whose completions ALL settled the same environment reward (grade, "
-            "shaping and external scores; the trainer's effort-length terms excluded, since they make every "
-            "total distinct). Such a group has no contrast to learn from beyond the length terms, and its "
-            "tokens would still inflate the loss normalizer and dilute the groups that do carry signal. "
+            "shaping and external scores; the trainer's own reasoning terms and turn overlong charge "
+            "excluded, since they make every total distinct). Such a group has no contrast to learn from beyond "
+            "those trainer terms, and its tokens would still inflate the loss normalizer and dilute the groups "
+            "that do carry signal. "
             "Masking them restores the effective batch size (the cheap half of DAPO's dynamic sampling: "
             "drop, without resampling replacements). Logged as `sampling/degenerate_group_frac`. Default on."
         },
@@ -387,56 +448,44 @@ class AsyncTrainingConfig(AdvantageShapingArguments, GRPOEarlyStopArguments, Chu
         },
     )
 
-    effort_length_penalty_k0: float | None = field(
+    reasoning_price: dict[str, float] | None = field(
         default=None,
         metadata={
-            "help": "Coefficient of the capped, effort-conditioned reasoning-length price at the lowest effort level "
-            "(None = off). Per episode: -min(c_max, k(effort) * reasoning_tokens / l_norm) with "
-            "k(effort) = k0 * exp(-(effort - effort_min) / tau), reasoning tokens summed over the assistant turns. "
-            "Priced per level, so a low level pays most for the same trace, and capped, so a long trace cannot "
-            "outweigh the task reward. Logged as reward/effort_length_penalty."
+            "help": "Per effort level, the reward units an episode pays per 1,000 reasoning tokens, summed over its "
+            "assistant turns (null = off). Must map exactly the three effort levels, low, medium and high (refused at "
+            "trainer construction otherwise, as is an environment whose reasoning_effort is unset); price the lowest "
+            "level highest, so the same trace costs most where little reasoning was asked. Capped by "
+            "reasoning_price_cap. Logged as reward/reasoning_price."
         },
     )
-    effort_length_penalty_tau: float = field(
-        default=25.0,
-        metadata={"help": "Effort units over which the price coefficient falls by e (see effort_length_penalty_k0)."},
-    )
-    effort_length_penalty_c_max: float = field(
-        default=0.1,
+    reasoning_price_cap: float = field(
+        default=DEFAULT_REASONING_PRICE_CAP,
         metadata={
-            "help": "Cap of the reasoning-length price, in reward units. Keep it, plus effort_length_floor_weight, "
-            "below what the environment charges for the decisions it prices (a resubmission, in code contests)."
+            "help": "Cap of reasoning_price per episode, in reward units: a long trace cannot outweigh the task "
+            "reward. Keep it, plus reasoning_floor, below what the environment charges for the decisions it "
+            "prices (a resubmission, in code contests)."
         },
     )
-    effort_length_penalty_l_norm: float = field(
-        default=8192.0,
-        metadata={"help": "Reasoning tokens per unit of the price (the trace length k(effort) is charged per)."},
-    )
-    effort_length_penalty_levels: dict[str, float] = field(
-        default_factory=lambda: {"low": 25.0, "medium": 50.0, "high": 100.0},
-        metadata={
-            "help": "Scalar effort per categorical level for the price's k(effort); the lowest value is effort_min. "
-            "Must map exactly the environment's effort levels (refused at trainer construction otherwise)."
-        },
-    )
-    effort_length_floor_weight: float = field(
+    reasoning_floor: float = field(
         default=0.0,
         metadata={
-            "help": "Weight of the reasoning under-use floor (0 = off). An episode whose reasoning tokens, summed "
-            "over its turns, fall short of effort_length_floor_budgets x the thinking budget it ran under (a "
-            "level's per-turn budget, or the episode's total under rollout_thinking_budget_scope=episode) pays "
-            "-weight * shortfall / that floor. The price only ever pays for less reasoning; this is the term that "
-            "resists reasoning shrinking toward nothing. An episode with no thinking budget is free of it, and a "
-            "run where none can have one is refused at trainer construction. Logged as reward/effort_length_floor."
+            "help": "Weight of the reasoning under-use floor (0 = off): an episode whose reasoning tokens, summed "
+            "over its turns, fall short of three quarters of its per-turn thinking cap (its level's thinking_tokens, "
+            "clamped by rollout_max_thinking_tokens) pays -weight x shortfall / that reference. The one term that pays "
+            "for more reasoning; it resists reasoning "
+            "shrinking toward nothing. An episode with no thinking budget is free of it, and a run where no "
+            "drawable level sets one and rollout_max_thinking_tokens is unset is refused at trainer construction. "
+            "Logged as reward/reasoning_floor."
         },
     )
-    effort_length_floor_budgets: float = field(
-        default=0.75,
+    turn_overlong_penalty: float = field(
+        default=0.0,
         metadata={
-            "help": "The floor's reference, in thinking budgets: an episode is asked to reason at least this many "
-            "times its level's thinking_tokens, summed over its turns. Below 1 by default, so an episode of a single "
-            "assistant turn can clear its floor without running into the cap the engine enforces per turn. Under "
-            "rollout_thinking_budget_scope=episode the budget is the episode's total, so scale this down with it."
+            "help": "Most a turn that runs into its thinking cap costs its episode, in reward units (0 = off). A "
+            "turn pays -penalty x clamp((reasoning - 0.75 x cap) / (0.25 x cap), 0, 1) on the reasoning it "
+            "sampled, counted off its ids up to and including the close: nothing until its reasoning enters the "
+            "last quarter under its cap, the whole penalty at the cap. The episode pays its most-charged turn "
+            "once. vLLM only; needs train_on_sampled_tokens. Logged as reward/turn_overlong."
         },
     )
 
@@ -446,15 +495,6 @@ class AsyncTrainingConfig(AdvantageShapingArguments, GRPOEarlyStopArguments, Chu
             "help": "Enable prefetching to overlap rollout collection with training. Multi-server "
             "only: with one rollout server it auto-disables, since that engine stops serving during "
             "weight sync and there is nothing to overlap against."
-        },
-    )
-
-    num_prefetch_batches: int = field(
-        default=1,
-        metadata={
-            "help": "Bound on the prefetch result queue. The pipeline is one round deep by construction "
-            "(each round submits one batch and pops one), so values above 1 only add headroom — they do "
-            "not prefetch further ahead. Inert while prefetch is auto-disabled (single rollout server)."
         },
     )
 
@@ -513,18 +553,12 @@ class AsyncTrainingConfig(AdvantageShapingArguments, GRPOEarlyStopArguments, Chu
             raise ValueError(
                 f"sync_weights_every_n_steps must be >= 1 (1 = every step), got {self.sync_weights_every_n_steps}"
             )
-        self._validate_effort_length_terms()
+        self._validate_reasoning_terms()
         # A negative budget reaches backoff as max_tries <= 0, which it treats as "no limit": a wedged
         # server is then retried until the NCCL watchdog kills the job.
         if self.max_retries < 0:
             raise ValueError(f"max_retries must be >= 0 (0 = one attempt, no retry), got {self.max_retries}")
-        # queue.Queue treats maxsize <= 0 as unbounded, so `num_prefetch_batches: 0` would buffer
-        # rollouts without a limit.
-        if self.num_prefetch_batches < 1:
-            raise ValueError(
-                f"num_prefetch_batches must be >= 1, got {self.num_prefetch_batches}; set "
-                f"enable_prefetch: false to turn prefetching off."
-            )
+        self.build_is_mask_config()
         # 0 workers builds an empty actor list and then divides by it.
         if self.num_rollout_workers < 1:
             raise ValueError(f"num_rollout_workers must be >= 1, got {self.num_rollout_workers}")
@@ -550,62 +584,43 @@ class AsyncTrainingConfig(AdvantageShapingArguments, GRPOEarlyStopArguments, Chu
             value = getattr(self, name)
             if not isfinite(value) or value <= 0:
                 raise ValueError(f"{name} must be a finite number > 0, got {value}")
-        # Sent verbatim on the wire; outside (0, 1] the server rejects every rollout request.
+        # Sent verbatim on the wire; outside these ranges the server rejects every rollout request
+        # (SGLang's, the narrower of the two engines': it refuses top_k 0 and a penalty above 2).
         if not 0 < self.rollout_top_p <= 1:
             raise ValueError(f"rollout_top_p must be in (0, 1], got {self.rollout_top_p}")
+        if self.rollout_top_k != -1 and self.rollout_top_k < 1:
+            raise ValueError(f"rollout_top_k must be -1 (off) or >= 1, got {self.rollout_top_k}")
+        if not 0 <= self.rollout_min_p <= 1:
+            raise ValueError(f"rollout_min_p must be in [0, 1], got {self.rollout_min_p}")
+        if not 0 < self.rollout_repetition_penalty <= 2:
+            raise ValueError(f"rollout_repetition_penalty must be in (0, 2], got {self.rollout_repetition_penalty}")
         # A negative base shrinks the retry backoff instead of growing it.
         if not isfinite(self.retry_base_wait) or self.retry_base_wait < 0:
             raise ValueError(
                 f"retry_base_wait must be a finite number >= 0 (0 = retry immediately), got {self.retry_base_wait}"
             )
-        # The per-turn answer headroom is `rollout_max_tokens - rollout_max_thinking_tokens`, floored
-        # at 0 where the budgets meet: the turn would then spend its whole cap on reasoning and stop
-        # before the answer or tool call it exists to produce.
-        if self.rollout_max_thinking_tokens is not None and (
-            not isfinite(self.rollout_max_thinking_tokens) or self.rollout_max_thinking_tokens < 0
+        # A turn's answer room is `rollout_max_tokens - rollout_max_thinking_tokens`, none where the caps
+        # meet: the turn would then spend its whole cap on reasoning and stop before the answer or tool
+        # call it exists to produce. A cap of 0 would still be sent (as 1) while counting as no cap.
+        cap = self.rollout_max_thinking_tokens
+        if cap is not None and (
+            isinstance(cap, bool) or not isinstance(cap, int) or not 1 <= cap < self.rollout_max_tokens
         ):
             raise ValueError(
-                f"rollout_max_thinking_tokens must be a finite number >= 0 when set (null = unbounded "
-                f"reasoning), got {self.rollout_max_thinking_tokens}"
+                f"rollout_max_thinking_tokens must be an int in [1, rollout_max_tokens={self.rollout_max_tokens}) when "
+                f"set (null = no run-wide cap): rollout_max_tokens bounds the whole turn, and at or above it the turn "
+                f"has no answer room and is cut mid-reasoning, got {cap!r}"
             )
-        if (
-            self.rollout_max_thinking_tokens is not None
-            and self.rollout_max_thinking_tokens >= self.rollout_max_tokens
+        # Below one turn's cap the first turn could never use the per-turn budget the run states.
+        if self.rollout_max_episode_tokens is not None and (
+            isinstance(self.rollout_max_episode_tokens, bool)
+            or not isinstance(self.rollout_max_episode_tokens, int)
+            or self.rollout_max_episode_tokens < self.rollout_max_tokens
         ):
             raise ValueError(
-                f"rollout_max_thinking_tokens ({self.rollout_max_thinking_tokens}) must be below "
-                f"rollout_max_tokens ({self.rollout_max_tokens}), which bounds the WHOLE turn: at or "
-                f"above it the turn has no answer headroom left and is cut mid-reasoning every time."
+                f"rollout_max_episode_tokens must be an int >= rollout_max_tokens ({self.rollout_max_tokens}), so "
+                f"one whole turn fits the episode, or null, got {self.rollout_max_episode_tokens!r}"
             )
-        if self.rollout_thinking_budget_scope not in THINKING_BUDGET_SCOPES:
-            raise ValueError(
-                f"rollout_thinking_budget_scope must be one of {THINKING_BUDGET_SCOPES}, "
-                f"got {self.rollout_thinking_budget_scope!r}"
-            )
-        if isinstance(self.rollout_thinking_turn_reserve, bool) or self.rollout_thinking_turn_reserve < 1:
-            raise ValueError(
-                f"rollout_thinking_turn_reserve must be an int >= 1 (a turn's engine cap of 0 would close its "
-                f"reasoning before it opened), got {self.rollout_thinking_turn_reserve!r}"
-            )
-        if self.rollout_thinking_budget_scope == THINKING_SCOPE_EPISODE:
-            if (
-                self.rollout_max_thinking_tokens is not None
-                and self.rollout_thinking_turn_reserve > self.rollout_max_thinking_tokens
-            ):
-                raise ValueError(
-                    f"rollout_thinking_turn_reserve ({self.rollout_thinking_turn_reserve}) must not exceed "
-                    f"rollout_max_thinking_tokens ({self.rollout_max_thinking_tokens}), the ceiling one turn may take."
-                )
-            if not self.train_on_sampled_tokens:
-                raise ValueError(
-                    "rollout_thinking_budget_scope='episode' requires train_on_sampled_tokens: the reasoning a turn "
-                    "spent is counted off the sampled ids the capture returns."
-                )
-            if not self.rollout_reasoning_end_token:
-                raise ValueError(
-                    "rollout_thinking_budget_scope='episode' requires rollout_reasoning_end_token, the marker the "
-                    "reasoning count reads up to."
-                )
         if self.max_train_row_tokens is not None and (
             isinstance(self.max_train_row_tokens, bool) or self.max_train_row_tokens < 1
         ):
@@ -643,40 +658,56 @@ class AsyncTrainingConfig(AdvantageShapingArguments, GRPOEarlyStopArguments, Chu
                 "budget are per episode; the level travels as the request's top-level field and the budget is "
                 "added to the nested form per request."
             )
-        if REASONING_SCOPE_TEMPLATE_VAR in self.rollout_chat_template_kwargs:
-            raise ValueError(
-                f"rollout_chat_template_kwargs must not carry {REASONING_SCOPE_TEMPLATE_VAR!r}: it follows "
-                "rollout_thinking_budget_scope, which sets it."
-            )
         self._validate_backend_capabilities()
 
     def _stops_on_skipped_updates(self) -> bool:
         return self.early_stop_on_skipped_updates
 
-    def _validate_effort_length_terms(self) -> None:
-        """A NaN passes every ordered comparison, a non-positive scale inverts or zeroes the price, and a
-        negative floor weight would pay for skipping the reasoning."""
-        if self.effort_length_penalty_k0 is not None:
-            for name in (
-                "effort_length_penalty_k0",
-                "effort_length_penalty_tau",
-                "effort_length_penalty_c_max",
-                "effort_length_penalty_l_norm",
-            ):
-                value = getattr(self, name)
-                if not (isfinite(value) and value > 0):
-                    raise ValueError(f"{name} must be a finite positive number when the price is on, got {value}")
-            levels = self.effort_length_penalty_levels
-            if not levels or not all(isfinite(v) for v in levels.values()):
+    def build_is_mask_config(self) -> ISMaskConfig:
+        """The IS mask stages the ``isr_*`` knobs set, validated by :class:`ISMaskConfig` itself."""
+        return ISMaskConfig(
+            geo_band_min=self.isr_geo_band_min,
+            geo_band_max=self.isr_geo_band_max,
+            veto_min=self.isr_veto_min,
+            opsm_delta=self.isr_opsm_delta,
+        )
+
+    def _validate_reasoning_terms(self) -> None:
+        """A NaN passes every ordered comparison, a negative price, floor weight or overlong penalty would pay
+        for the length it prices, a cap set while the price is off parses and changes nothing, and an overlong
+        charge with no count to read would never charge a turn."""
+        if self.reasoning_price is None and self.reasoning_price_cap != DEFAULT_REASONING_PRICE_CAP:
+            raise ValueError(
+                "reasoning_price_cap set with reasoning_price unset: nothing reads it until the price is on. Remove "
+                "it, or set reasoning_price."
+            )
+        if self.reasoning_price is not None:
+            if not isinstance(self.reasoning_price, Mapping) or not self.reasoning_price:
                 raise ValueError(
-                    f"effort_length_penalty_levels must map every effort level to a finite scalar, got {levels}"
+                    f"reasoning_price must map each effort level to a price, got {self.reasoning_price!r}"
                 )
-        floor = self.effort_length_floor_weight
-        if not isfinite(floor) or floor < 0:
-            raise ValueError(f"effort_length_floor_weight must be a finite number >= 0 (0 = off), got {floor}")
-        budgets = self.effort_length_floor_budgets
-        if floor > 0 and not (isfinite(budgets) and budgets > 0):
-            raise ValueError(f"effort_length_floor_budgets must be a finite positive number, got {budgets}")
+            for level, price in self.reasoning_price.items():
+                if isinstance(price, bool) or not isinstance(price, int | float) or not isfinite(price) or price < 0:
+                    raise ValueError(f"reasoning_price[{level!r}] must be a finite number >= 0, got {price!r}")
+        if not (isfinite(self.reasoning_price_cap) and self.reasoning_price_cap > 0):
+            raise ValueError(f"reasoning_price_cap must be a finite positive number, got {self.reasoning_price_cap}")
+        if not isfinite(self.reasoning_floor) or self.reasoning_floor < 0:
+            raise ValueError(f"reasoning_floor must be a finite number >= 0 (0 = off), got {self.reasoning_floor}")
+        penalty = self.turn_overlong_penalty
+        if not isfinite(penalty) or penalty < 0:
+            raise ValueError(f"turn_overlong_penalty must be a finite number >= 0 (0 = off), got {penalty}")
+        if penalty == 0:
+            return
+        if not self.train_on_sampled_tokens:
+            raise ValueError(
+                "turn_overlong_penalty requires train_on_sampled_tokens: a turn's reasoning is counted off the "
+                "sampled ids the capture returns."
+            )
+        if not self.rollout_reasoning_end_token:
+            raise ValueError(
+                "turn_overlong_penalty requires rollout_reasoning_end_token, the marker a turn's reasoning count "
+                "reads up to."
+            )
 
     def _validate_backend_capabilities(self) -> None:
         """Reject request knobs the selected engine does not implement.
@@ -689,10 +720,11 @@ class AsyncTrainingConfig(AdvantageShapingArguments, GRPOEarlyStopArguments, Chu
         (raw-int32 wire format, handled by ``decode_rollout_routing``).
 
         Neither is the environment's per-effort ``thinking_tokens`` profile, whose budget reaches the
-        same request field: the level it belongs to still reaches the chat template and the effort
-        length terms, so on an engine without the field the level keeps steering and only the hard
-        cap is lost. The rollout actor warns once per process that it is unenforced. This knob has
-        no such second consumer, so rejecting it is the only honest answer here.
+        same request field: the level it belongs to still reaches the chat template and the reasoning
+        terms, so on an engine without the field the level keeps steering and only the hard
+        cap is lost. The rollout actor warns once per process that it is unenforced. The two knobs
+        refused here are the ones whose point is the enforced cap: ``rollout_max_thinking_tokens`` is a
+        cap and nothing else, and the overlong charge prices a turn against the cap the engine forced.
         """
         if self.rollout_backend != "sglang":
             return
@@ -702,10 +734,10 @@ class AsyncTrainingConfig(AdvantageShapingArguments, GRPOEarlyStopArguments, Chu
                 "thinking_token_budget request field is vLLM-only and SGLang would silently ignore it, "
                 "leaving reasoning uncapped. Steer with the environment's reasoning_effort instead."
             )
-        if self.rollout_thinking_budget_scope == THINKING_SCOPE_EPISODE:
+        if self.turn_overlong_penalty > 0:
             raise ValueError(
-                "rollout_thinking_budget_scope='episode' is not supported with rollout_backend='sglang': the "
-                "per-turn engine cap it narrows is the vLLM-only thinking_token_budget field."
+                "turn_overlong_penalty is not supported with rollout_backend='sglang': it charges a turn against the "
+                "cap the engine enforces, the vLLM-only thinking_token_budget field SGLang ignores."
             )
 
     def get_server_urls(self) -> list[str]:
@@ -719,15 +751,6 @@ class AsyncTrainingConfig(AdvantageShapingArguments, GRPOEarlyStopArguments, Chu
         pauses a lone engine for its whole push, so with one server there is nothing to overlap against."""
         return self.enable_prefetch and len(self.get_server_urls()) > 1
 
-    def rollout_template_variables(self) -> dict[str, Any]:
-        """The run-wide chat-template variables every request and every trainer-side render carries: the
-        YAML's ``rollout_chat_template_kwargs`` plus, under the episode thinking scope, the scope variable
-        the effort templates read to state what the budget covers."""
-        variables = dict(self.rollout_chat_template_kwargs)
-        if self.rollout_thinking_budget_scope == THINKING_SCOPE_EPISODE:
-            variables[REASONING_SCOPE_TEMPLATE_VAR] = THINKING_SCOPE_EPISODE
-        return variables
-
     def get_rollout_config(
         self,
         stop_token_ids: list[int] | None = None,
@@ -737,14 +760,14 @@ class AsyncTrainingConfig(AdvantageShapingArguments, GRPOEarlyStopArguments, Chu
     ):
         """Build RolloutConfig from this config. ``stop_token_ids`` (from ``rollout_stop_tokens``) and
         ``reasoning_end_token_id`` (from ``rollout_reasoning_end_token``) are resolved by the caller that
-        owns the tokenizer; the latter only matters under the episode thinking scope, whose reasoning
-        count refuses to run without it. ``in_process_group`` says the rollout runs inside a training
+        owns the tokenizer; the latter only matters to the overlong charge, whose reasoning count reads up
+        to it. ``in_process_group`` says the rollout runs inside a training
         process group, whose NCCL collective watchdog its timeouts must stay under (the trainer, the
         default); an eval sampling under a training contract joins none and passes False."""
         if in_process_group:
             self._validate_timeouts_against_nccl_watchdog()
         mirrored = {target: getattr(self, source) for target, source in rollout_field_sources(type(self)).items()}
-        mirrored["chat_template_kwargs"] = self.rollout_template_variables()
+        mirrored["chat_template_kwargs"] = dict(self.rollout_chat_template_kwargs)
         return RolloutConfig(
             **mirrored,
             # Derived from other state rather than mirrored from a same-named knob.

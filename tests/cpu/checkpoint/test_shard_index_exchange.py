@@ -1,8 +1,8 @@
 #!/usr/bin/env python
 """The checkpoint index is merged on rank 0 alone, and its verdict reaches every rank.
 
-``exchange_shard_index`` replaces an ``all_gather_object`` of the whole weight map. That all-gather
-left EVERY rank holding one fragment per rank of a map only the index writer ever reads — at 512
+``exchange_shard_index`` gathers the weight map to rank 0 rather than ``all_gather_object``-ing it,
+which would leave EVERY rank holding one fragment per rank of a map only the index writer ever reads — at 512
 ranks, 512 copies of the entire key space on each of 512 ranks, for a file one of them writes.
 
 Gathering to rank 0 moves the merge off the peers, which puts the collision check somewhere only one
@@ -51,7 +51,7 @@ class _FakeWorld:
         monkeypatch.setattr(dist, "get_rank", lambda group=None: self.rank)
         monkeypatch.setattr(dist, "gather_object", self._gather_object)
         monkeypatch.setattr(dist, "broadcast_object_list", self._broadcast_object_list)
-        # The regression this whole module exists for: a revert to the all-gather form must fail
+        # Regression guard: an all-gather form must fail
         # here rather than quietly pass because the merged map still comes out right.
         monkeypatch.setattr(dist, "all_gather_object", self._banned_all_gather)
 
@@ -129,7 +129,7 @@ def test_every_rank_returns_the_same_merged_index(monkeypatch):
 
 
 def test_only_rank_zero_allocates_the_gather_list(monkeypatch):
-    """The memory the switch exists to save: a peer must hold no per-rank copy of the map.
+    """The memory the rank-0 gather exists to save: a peer must hold no per-rank copy of the map.
 
     ``object_gather_list`` is the allocation — one slot per rank, each filled with a whole fragment.
     Rank 0 needs it to merge; anywhere else it is N copies of a map that rank never reads.
@@ -165,8 +165,8 @@ def test_a_non_writer_still_joins_both_collectives(monkeypatch):
 def test_any_merge_failure_reaches_every_rank_not_just_rank_zero(monkeypatch):
     """The verdict must carry EVERY failure of the merge, not only the collision it is written to
     raise. A malformed fragment (a ``TypeError``) escaping on rank 0 leaves the peers in the
-    broadcast and then the barrier until the watchdog fires, which is the exact failure the move to
-    a single merging rank introduced and this exchange exists to keep impossible."""
+    broadcast and then the barrier until the watchdog fires, which is the failure a single merging
+    rank invites and this exchange exists to keep impossible."""
     world = _FakeWorld(_stage_payloads())
     world.install(monkeypatch)
 
@@ -185,7 +185,7 @@ def test_any_merge_failure_reaches_every_rank_not_just_rank_zero(monkeypatch):
 def test_a_planted_collision_raises_on_every_rank_with_the_key_named(monkeypatch):
     """Two writers claiming one key must stop the whole world, naming the key.
 
-    Only rank 0 can see the collision once the merge moves there. If its raise did not ride the
+    Only rank 0 can see the collision since the merge runs there. If its raise did not ride the
     broadcast, the peers would walk into the post-exchange barrier and hang until the watchdog fired
     — and the checkpoint would carry one writer's tensor under the other's name.
     """

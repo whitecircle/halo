@@ -21,7 +21,6 @@ from src.distributed.expert_parallel.config import reject_expert_lora_with_exper
 from src.distributed.parallelism_config import accelerate_launch_rejection
 from src.distributed.tensor_parallel.parallelize_attention import validate_tp_head_divisibility
 from src.trainers.mixins.base import DistributedTrainerMixin
-from src.trainers.mixins.validation import ParallelismValidationMixin
 from tests.common.parallelism import make_parallelism_config
 from tests.common.utils import REPO_ROOT, load_script_module
 
@@ -186,16 +185,6 @@ def test_model_shape_refusal_names_the_yaml_knobs(shape, model_config, knob):
             reject_expert_lora_with_expert_tp,
             "Expert LoRA is not supported with expert_tensor_parallel_size > 1",
             id="expert_lora_under_etp",
-        ),
-        pytest.param(
-            lambda: ParallelismValidationMixin._validate_reference_model(
-                SimpleNamespace(
-                    parallelism_config=SimpleNamespace(is_ep_mode=True, is_tp_mode=False, ep_size=2, tp_size=1)
-                ),
-                object(),
-            ),
-            "expert_parallel_size=2, tensor_parallel_size=1",
-            id="explicit_ref_model",
         ),
     ],
 )

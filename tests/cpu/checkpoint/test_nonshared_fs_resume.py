@@ -14,13 +14,16 @@ Driven on the real writer and the real reader, this pins:
 1. **One meta per node.** Each node's dir must hold its own ``optimizer_meta.pt`` beside its own
    globally-named ``optimizer_shard_XXXXX.pt``. A rank-0-only meta write — the natural spelling —
    leaves every other node's shards ungated:
-   ``_read_saved_meta`` is rank-local, so a missing meta is a FAILED topology gate there, and the
-   gate is all-or-nothing across ranks. The whole world then warm-restarts and every node resumes
-   with reset Adam moments — node 0's own intact shard included — at exit code 0.
+   ``_read_saved_meta`` is rank-local, so a missing meta marks that node's shards torn, and the
+   verdict is all-or-nothing across ranks: the whole world refuses the resume, node 0's own intact
+   shard included.
 2. **Round trip.** Resuming from the node's own dir restores the pre-save optimizer state
    bit-exactly — moments and step counter included.
 3. **Rank distinctness.** The two nodes hold DIFFERENT optimizer state, so a rank→dir mix-up cannot
    pass the round trip by comparing two identical states.
+4. **One node's torn save refuses everywhere.** Node 1 stopped between its shard and its meta, while
+   node 0's copy is complete: every rank raises, rather than node 0 restoring and node 1 resetting, or
+   the world warm-restarting over a save that never finished.
 
     python tests/cpu/checkpoint/test_nonshared_fs_resume.py
 """
@@ -28,6 +31,7 @@ Driven on the real writer and the real reader, this pins:
 import copy
 import datetime
 import hashlib
+import json
 import os
 import pathlib
 
@@ -49,6 +53,7 @@ from tests.common.parallelism import make_parallelism_config
 from tests.common.utils import assert_optimizer_state_bit_exact
 
 WORLD_SIZE = 2  # two 1-rank "nodes"
+TORN_NODE = 1
 SEED = 20260817
 TRAIN_STEPS = 3
 
@@ -122,6 +127,35 @@ def _worker(rank: int, root: str) -> None:
     runtime.reset_shared_filesystem_consensus()
 
 
+def _torn_node_worker(rank: int, root: str) -> None:
+    """Both nodes save; node 1 then loses its meta, as a save killed between its shard and its meta."""
+    outcome = {"raised": None, "restored_entries": None}
+    try:
+        runtime.resolve_shared_filesystem_consensus()
+        out_dir = _node_dir(root, rank)
+        fs_aware_makedirs(out_dir)
+        config = make_parallelism_config(world_size=WORLD_SIZE, gpus_per_node=1, rank=rank)
+        model = shard_round_trip_model(SEED)
+        optimizer = shard_round_trip_optimizer(model)
+        step_on_seeded_data(model, optimizer, SEED + 1 + rank, TRAIN_STEPS)
+        OptimizerShardStore(shard_store_context(model, optimizer, config)).save(out_dir)
+        if rank == TORN_NODE:
+            os.remove(os.path.join(out_dir, META_FILE))
+
+        fresh_model = shard_round_trip_model(SEED)
+        fresh_optimizer = shard_round_trip_optimizer(fresh_model)
+        try:
+            OptimizerShardStore(shard_store_context(fresh_model, fresh_optimizer, config)).load(out_dir)
+        except RuntimeError as e:
+            outcome["raised"] = str(e)
+        outcome["restored_entries"] = len(fresh_optimizer.state)
+    except Exception as e:  # the setup failing must still leave a verdict file for the assertions
+        outcome["raised"] = f"setup {type(e).__name__}: {e}"
+    with open(os.path.join(root, f"torn_{rank}.json"), "w") as fh:
+        json.dump(outcome, fh)
+    runtime.reset_shared_filesystem_consensus()
+
+
 @pytest.fixture(scope="module")
 def two_node_run(tmp_path_factory):
     """One 2-process gloo save→resume run; the tests below read the artifacts it left behind."""
@@ -152,8 +186,8 @@ def test_every_node_writes_its_own_shard_and_meta(two_node_run):
     """Each node's dir holds its own globally-named shard AND its own ``optimizer_meta.pt``.
 
     One writer per NODE, not one per world: a rank-0-only meta write leaves node 1's shards ungated,
-    which ``_read_saved_meta`` reads as a failed topology gate — and since that gate is
-    all-or-nothing, EVERY node then warm-restarts with reset moments. The shard name stays keyed by
+    which ``_read_saved_meta`` reads as a torn set — and since that verdict is all-or-nothing, EVERY
+    node then refuses the resume. The shard name stays keyed by
     GLOBAL rank (a per-node numbering still round-trips, so only this assertion catches it), so node 1
     writes ``optimizer_shard_00001.pt``; renumbering per node would make every node's dir look like
     rank 0's to the resume.
@@ -168,9 +202,23 @@ def test_every_node_writes_its_own_shard_and_meta(two_node_run):
         meta = torch.load(meta_path, map_location="cpu", weights_only=False)
         assert meta["num_ranks"] == WORLD_SIZE, f"node {rank} recorded num_ranks={meta['num_ranks']}"
         assert OptimizerStateFingerprint.from_dict(meta.get("fingerprint")) is not None, (
-            f"node {rank}'s {META_FILE} carries no complete fingerprint, so its resume falls back to "
-            f"the num_ranks-only gate"
+            f"node {rank}'s {META_FILE} carries no complete fingerprint, so its resume is refused as a "
+            f"pre-fingerprint checkpoint"
         )
+
+
+def test_one_nodes_torn_save_refuses_the_resume_on_every_node(tmp_path):
+    run_gloo_ranks(_torn_node_worker, WORLD_SIZE, str(tmp_path), pg_timeout=PG_TIMEOUT, env=TWO_NODE_ENV)
+    for rank in range(WORLD_SIZE):
+        outcome = json.loads((tmp_path / f"torn_{rank}.json").read_text())
+        raised = outcome["raised"]
+        assert raised is not None, f"rank {rank} resumed over node {TORN_NODE}'s torn shard set"
+        assert not raised.startswith("setup"), raised
+        assert "torn set of an interrupted save" in raised, f"rank {rank}: {raised}"
+        assert "allow_optimizer_warm_restart" in raised, f"rank {rank} did not name the opt-in: {raised}"
+        assert outcome["restored_entries"] == 0, f"rank {rank} restored moments its peer could not"
+    own = json.loads((tmp_path / f"torn_{TORN_NODE}.json").read_text())["raised"]
+    assert f"{META_FILE} is missing" in own, own
 
 
 if __name__ == "__main__":

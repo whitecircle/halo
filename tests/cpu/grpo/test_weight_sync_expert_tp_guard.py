@@ -126,7 +126,7 @@ def _sync(layer: nn.Module) -> _RecordingSender:
 
 
 def test_full_finetune_syncs_under_expert_tp():
-    """The P0: no PEFT anywhere + expert_tp_size > 1 must reach vLLM, not raise at the first sync."""
+    """No PEFT anywhere + expert_tp_size > 1 must reach vLLM, not raise at the first sync."""
     layer = _EPLayerStub(expert_tp_size=2, expert_lora=False)
     assert not layer.has_expert_lora
 

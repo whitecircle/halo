@@ -23,7 +23,6 @@ def _write(output: str, results: list[dict]) -> None:
         traj_path=None,
         env_type="qa_search",
         split="test",
-        max_turns=None,
         rollout=RolloutConfig(model_name="m", temperature=0.0, max_tokens=16),
         num_samples=1,
     )

@@ -9,7 +9,7 @@ field only to change its default (e.g. ``DistillScriptArguments``' ``conversatio
 import math
 import string
 from dataclasses import dataclass, field, fields, make_dataclass
-from typing import ClassVar, Literal, get_args
+from typing import Any, ClassVar, Literal, get_args
 
 from src.args.validation import RangeValidatedConfig
 
@@ -21,9 +21,9 @@ RLRRMode = Literal["hrr", "prr"]
 RLRR_ARG_PREFIX = "rlrr_"
 _RLRR_ARG_SPELLINGS = {"lam": "rlrr_lambda"}
 
-# The OPD losses ``get_self_distillation_loss_fn`` resolves: a mirror of the trainer-side registry's keys
-# (the args layer imports no trainer), pinned to it by a test. The annotation gates YAML/CLI and
-# SDPGArguments validates against it.
+# The OPD arms' names in the trainer-side divergence registry (``losses.DIVERGENCES``), pinned to it by a
+# test: the args layer imports no trainer. The annotation gates YAML/CLI and SDPGArguments validates
+# against it.
 SelfDistillationLoss = Literal["reverse_kl", "forward_kl", "unnormalized_kl"]
 
 # The teacher hint both OPD flows default to, through SDPGArguments.
@@ -434,6 +434,18 @@ class SDPGArguments(RangeValidatedConfig):
 
     def __post_init__(self) -> None:
         self._validate_ranges()
+
+    @classmethod
+    def pop_from(cls, kwargs: dict, *, exclude: frozenset[str] = frozenset()) -> dict[str, Any]:
+        """Pop this block's fields but ``exclude`` from trainer ``kwargs``: validated, defaults filled.
+
+        A trainer adopts the result as attributes, so a directly built one runs the OPD schedule the
+        identical YAML run would. A misspelt field stays in ``kwargs``, where the parent's explicit
+        signature rejects it.
+        """
+        names = [f.name for f in fields(cls) if f.name not in exclude]
+        block = cls(**{name: kwargs.pop(name) for name in names if name in kwargs})
+        return {name: getattr(block, name) for name in names}
 
     def _validate_ranges(self) -> None:
         super()._validate_ranges()

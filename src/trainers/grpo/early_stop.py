@@ -7,11 +7,11 @@ evaluating that step, so the run keeps only the periodic checkpoints taken befor
 """
 
 from accelerate.logging import get_logger
-from transformers import TrainerCallback
 
 from src.args.mixins import EarlyStopConfig
 from src.distributed.runtime import rank_consensus
 from src.trainers.grpo.objective.logratio import UPDATE_SKIPPED_KEY
+from src.training.early_stopping import StopsTrainingEarly
 
 logger = get_logger(__name__)
 
@@ -23,7 +23,7 @@ ENTROPY_KEY = "entropy"
 SAMPLING_LOGP_GAP_KEY = "sampling/sampling_logp_difference/mean"
 
 
-class GRPOEarlyStopCallback(TrainerCallback):
+class GRPOEarlyStopCallback(StopsTrainingEarly):
     """Ends training once an :class:`EarlyStopConfig` condition breaches on ``patience`` readings in a row.
 
     Reads training logs only (an eval log carries ``eval_``-prefixed keys). The gap and the breaker's
@@ -38,7 +38,6 @@ class GRPOEarlyStopCallback(TrainerCallback):
         self.gap_key = gap_key
         self._streaks: dict[str, int] = {}
         self._evidence: dict[str, str] = {}
-        self.stopped = False
 
     def _readings(self, logs: dict[str, float]) -> dict[str, str | None]:
         """Each armed condition this log reads: the breaching reading's description, or ``None`` when healthy."""

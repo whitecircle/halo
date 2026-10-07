@@ -130,11 +130,11 @@ def test_fa4_dispatch_reaches_every_sm100_plus_capability(capability):
 def test_context_parallelism_resolves_fa4_over_the_same_capability_range(capability):
     """CP resolves its own ``flash_attn_func`` and must not carry a second SM-major test.
 
-    ``get_flash_attn_func`` probes FA3 (Hopper) → FA2 → FA4 (Blackwell); an equality test stopping at
-    major 10 makes CP silently take a different kernel for the same run on a device the config-level
-    detector calls Blackwell. Probed by making ``flash_attn`` unimportable
-    (so the FA2 probe cannot short-circuit the walk) and raising from the FA4-only cache setup —
-    only ``ImportError`` is caught there, so the RuntimeError escaping proves the branch was taken.
+    ``get_flash_attn_func`` probes FA3 (Hopper) → FA4 (Blackwell) → FA2 → the hub kernel; an equality
+    test stopping at major 10 makes CP silently take a different kernel for the same run on a device
+    the config-level detector calls Blackwell. Probed by making ``flash_attn`` unimportable and raising
+    from the FA4-only cache setup — only ``ImportError`` is caught there, so the RuntimeError escaping
+    proves the branch was taken.
     """
     cp_base_layer.get_flash_attn_func.cache_clear()
     try:

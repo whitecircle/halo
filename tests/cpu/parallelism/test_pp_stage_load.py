@@ -15,17 +15,21 @@ checkpoint written to disk, which is the only way to catch what the key map cann
     python tests/cpu/parallelism/test_pp_stage_load.py
 """
 
+import datetime
 import json
 import os
 import shutil
+from types import SimpleNamespace
 
 import pytest
 import torch
 from safetensors.torch import save_file
 from transformers import AutoConfig, AutoModelForSequenceClassification, Qwen3Config, Qwen3ForCausalLM
 
+import src.distributed.loading.model_loading as model_loading
 from src.distributed.pipeline_parallel.lazy_loader import load_pp_stage_model
 from src.distributed.pipeline_parallel.stage import PP_STAGE_PARTITION_ATTR
+from tests.common.gloo import run_gloo_ranks
 from tests.common.models import TINY_QWEN3_CONFIG
 
 PP_SIZE = 2
@@ -199,6 +203,35 @@ def test_per_node_dir_rejects_a_stage_it_does_not_hold(per_node_dirs):
     node0, _ = per_node_dirs
     with pytest.raises(RuntimeError, match="NOT the cross-stage modules"):
         _load(node0, 1, dtype=torch.bfloat16)
+
+
+def _unresolved_checkpoint_worker(rank: int, checkpoint_dir: str, outcome_path: str) -> None:
+    """Rank 0 resolves the checkpoint, rank 1 cannot: the stage load must stop on both."""
+    model_loading.resolve_hub_or_local_dir = lambda *_args, **_kwargs: checkpoint_dir if rank == 0 else None
+    # Past the verdict the stage load's own collectives would start; the stub marks reaching them.
+    model_loading.load_pp_stage_model = lambda *_args, **_kwargs: "loaded"
+    model_loading.log_global_load_duration_seconds = lambda **_kwargs: None
+    pc = SimpleNamespace(pp_rank=0, pp_size=PP_SIZE, pp_split=None, fp32_non_ep_params=False, ep_size=1)
+    pc.data_parallel_size = 2
+    try:
+        outcome = model_loading._load_pp_stage_model("org/tiny", pc, None, {"config": None}, False)
+    except RuntimeError as exc:
+        outcome = f"raised: {exc}"
+    with open(f"{outcome_path}.{rank}", "w") as fh:
+        fh.write(outcome)
+
+
+def test_a_rank_without_the_checkpoint_stops_every_rank_before_the_stage_load(checkpoint, tmp_path):
+    """A partially populated per-node cache leaves one rank without the directory rank 0 resolved.
+    Raised there alone, the healthy ranks would walk into the stage load's collectives and wait out
+    the watchdog for a peer that is gone."""
+    path, _ = checkpoint
+    outcome = str(tmp_path / "outcome")
+    run_gloo_ranks(_unresolved_checkpoint_worker, 2, path, outcome, pg_timeout=datetime.timedelta(seconds=60))
+    for rank in range(2):
+        with open(f"{outcome}.{rank}") as fh:
+            result = fh.read()
+        assert result.startswith("raised:") and "rank 1 could not resolve it" in result, f"rank {rank}: {result}"
 
 
 if __name__ == "__main__":

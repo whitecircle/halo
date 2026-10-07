@@ -15,20 +15,11 @@ This test loads ZAYA1-8B under EP (no training), saves via
   2. Those tensors are bit-identical to the original base checkpoint's — i.e. EP load (slice) → save
      (gather) is a loss-less round-trip. A router (non-expert) tensor is checked too.
 
-The reload is verified against the on-disk base rather than by re-loading under
-EP in-process: DeepEP does not support recreating its buffers within a single
-process (see ``merge_ep_shards.py`` / ``load_ep_model``), so a second EP load
-would deadlock in ``create_ep_buffers``.
+The saved tensors are compared against the on-disk base checkpoint, which pins the fused layout and
+the bit-exact gather without a second load.
 
 Run (2 GPUs, EP=2):
-    docker run --rm --gpus '"device=4,5"' --ipc=host --ulimit memlock=-1 \\
-        --ulimit stack=67108864 \\
-        -v $(pwd):/workspace \\
-        -v /root/.cache/huggingface:/root/.cache/huggingface \\
-        -w /workspace -e HF_HOME=/root/.cache/huggingface \\
-        halo:blackwell \\
-        torchrun --nproc_per_node=2 \\
-            tests/gpu/parallelism/ep/test_zaya_ep_save_roundtrip.py
+    torchrun --nproc_per_node=2 tests/gpu/parallelism/ep/test_zaya_ep_save_roundtrip.py
 """
 
 import json
@@ -39,8 +30,8 @@ import torch
 from huggingface_hub import snapshot_download
 from safetensors import safe_open
 
+from src.distributed.checkpoint.ep_save import save_ep_model
 from src.distributed.expert_parallel.layers.zaya import EPZayaMoELayer
-from src.distributed.expert_parallel.saving import save_ep_model
 from src.distributed.loading.model_loading import load_distributed_model
 from src.distributed.parallelism_config import ParallelismConfig
 from src.env import env_str

@@ -300,7 +300,7 @@ def test_tp_patching(inputs: dict[str, torch.Tensor], local_rank: int, baseline_
 
     # TP is a sharded rearrangement of one computation, so every rank must agree.
     spread = world_spread(loss_value)
-    checks["tp_losses_consistent"] = spread < TOL.ep_identical_batch_rank_spread_abs
+    checks["tp_losses_consistent"] = TOL.identical_batch_ranks_agree(spread)
     log(f"  TP loss consistency (spread={spread:.2e}): {'PASS' if checks['tp_losses_consistent'] else 'FAIL'}")
 
     tp_diff = abs(loss_value - baseline_loss)

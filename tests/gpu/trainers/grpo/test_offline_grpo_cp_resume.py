@@ -14,21 +14,12 @@ from unittest.mock import patch
 
 import torch
 import torch.distributed as dist
-from transformers import (
-    AutoModelForCausalLM,
-    AutoTokenizer,
-    Qwen3Config,
-    Qwen3ForCausalLM,
-    TrainerCallback,
-)
+from transformers import AutoModelForCausalLM, AutoTokenizer, Qwen3Config, Qwen3ForCausalLM
 
 from src.checkpoint.format import REFERENCE_LOGPS_FILE, load_full_state_dict
-from src.configs.offline_grpo_config import OfflineGRPOConfig
 from src.data.collators.offline_grpo import REF_PER_TOKEN_LOGPS_COLUMN
 from src.data.spans import LABEL_IGNORE_INDEX
 from src.distributed.expert_parallel.base_layer import EPMoELayerBase
-from src.distributed.fsdp import reshard_fsdp2_modules
-from src.distributed.loading.model_loading import load_distributed_model
 from src.distributed.parallelism_config import ParallelismConfig
 from src.models.patches.attention import model_has_sinks
 from src.models.patches.gpt_oss_sinks import (
@@ -39,88 +30,58 @@ from src.models.patches.gpt_oss_sinks import (
     stamped_sinks_policy,
 )
 from src.optimizers.adamw_bf16 import AdamWBF16
-from src.trainers.grpo.objective.logratio import KL_LOGRATIO_CLAMP
+from src.trainers.grpo.mixins.offline_reference import OfflineGRPOReferenceMixin
 from src.trainers.grpo.offline import OfflineGRPOTrainer
-from src.trainers.grpo.reference_logps import OfflineGRPOReferenceLogpsMixin
 from src.training.environment import resolve_resume_weights_source
-from tests.common.checkpoint_io import loading_problems
-from tests.common.distributed import pin_deterministic_ep_dispatch
+from tests.common.checkpoint_io import RestorePointSnapshot, loading_problems
+from tests.common.distributed import pin_deterministic_ep_dispatch, shared_output_dir
 from tests.common.harness import gpu_test_main
-from tests.common.offline_grpo import make_offline_tokenizer, offline_grpo_dataset
+from tests.common.offline_grpo import (
+    build_offline_grpo_trainer,
+    completion_logps,
+    doubled_head_kl_verdict,
+    doubled_output_head,
+    make_offline_tokenizer,
+    offline_grpo_config,
+    offline_grpo_dataset,
+    pure_kl_batch,
+    pure_kl_objective,
+    token_logps,
+)
 from tests.common.offline_grpo_reference import restore_reference
 from tests.common.tiny_models import TINY_MOE_FAMILIES, tiny_family_model
 from tests.common.tolerances import TOL
-from tests.common.utils import cleanup_memory, log
+from tests.common.utils import cleanup_memory, finish_phase, log, optimizer_state_matches
 
 SEED = 721
 STEPS = 3
 CHECKPOINT_STEP = 2
-LEARNING_RATE = 1e-3
+KL_BETA = 0.05
 MOE_FAMILIES = ("gpt_oss", "cohere2_moe")
 
 
-class _ReferenceProbe(OfflineGRPOReferenceLogpsMixin):
+class _ReferenceProbe(OfflineGRPOReferenceMixin):
     """Exercise the production sidecar restore without constructing another Trainer."""
 
 
-class _ResumeState(TrainerCallback):
-    def __init__(self):
-        self.optimizer_has_moments = False
-        self.optimizer_moment_sums = None
-        self.optimizer_steps = None
-        self.optimizer_lrs = None
-        self.scheduler_epoch = None
-        self.is_bf16_optimizer = False
+class _OptimizerSnapshot(RestorePointSnapshot):
+    """The restore-point snapshot plus the learning rates, the optimizer class and the expert masters."""
 
-    def on_train_begin(self, args, state, control, **kwargs):
-        optimizer = kwargs["optimizer"]
-        self.is_bf16_optimizer = isinstance(getattr(optimizer, "optimizer", optimizer), AdamWBF16)
-        self.optimizer_has_moments = any(
-            bool(torch.any(moment.to_local() if hasattr(moment, "to_local") else moment).item())
-            for item in optimizer.state.values()
-            if (moment := item.get("exp_avg_sq")) is not None
-        )
-        self.optimizer_moment_sums = _optimizer_moment_sums(optimizer)
-        self.optimizer_steps = _optimizer_steps(optimizer)
-        self.optimizer_lrs = [group["lr"] for group in optimizer.param_groups]
-        self.scheduler_epoch = kwargs["lr_scheduler"].last_epoch
-        return control
+    def extra(self):
+        optimizer = self.trainer.optimizer
+        return {
+            "learning_rates": [group["lr"] for group in optimizer.param_groups],
+            "bf16_optimizer": isinstance(getattr(optimizer, "optimizer", optimizer), AdamWBF16),
+            "expert_masters": _expert_masters(self.trainer.model),
+        }
 
 
-class _StepTwoState(TrainerCallback):
-    def __init__(self):
-        self.optimizer_moment_sums = None
-        self.optimizer_steps = None
-        self.optimizer_lrs = None
-        self.expert_masters = {}
-
-    def on_step_end(self, args, state, control, model=None, **kwargs):
-        if state.global_step == CHECKPOINT_STEP:
-            self.optimizer_moment_sums = _optimizer_moment_sums(kwargs["optimizer"])
-            self.optimizer_steps = _optimizer_steps(kwargs["optimizer"])
-            self.optimizer_lrs = [group["lr"] for group in kwargs["optimizer"].param_groups]
-            self.expert_masters = _expert_masters(model)
-        return control
-
-
-def _optimizer_moment_sums(optimizer):
-    totals = {}
-    for key in ("exp_avg", "exp_avg_sq"):
-        tensors = [
-            value.to_local() if hasattr(value, "to_local") else value
-            for item in optimizer.state.values()
-            if (value := item.get(key)) is not None
-        ]
-        totals[key] = sum(float(tensor.float().square().sum().item()) for tensor in tensors)
-    return totals
-
-
-def _optimizer_steps(optimizer):
-    def step_number(value):
-        local = value.to_local() if hasattr(value, "to_local") else value
-        return float(local.item() if hasattr(local, "item") else local)
-
-    return sorted({step_number(step) for item in optimizer.state.values() if (step := item.get("step")) is not None})
+def _has_second_moments(optimizer_state):
+    return any(
+        bool(torch.count_nonzero(entry["exp_avg_sq"]))
+        for entry in optimizer_state["state"].values()
+        if "exp_avg_sq" in entry
+    )
 
 
 def _expert_masters(model):
@@ -164,44 +125,12 @@ def _save_tiny_model(path, family="qwen3"):
     fast.save_pretrained(path)
 
 
-def _config(output_dir, save):
-    return OfflineGRPOConfig(
-        output_dir=output_dir,
-        max_steps=STEPS,
-        per_device_train_batch_size=2,
-        per_device_eval_batch_size=2,
-        gradient_accumulation_steps=1,
-        learning_rate=LEARNING_RATE,
-        bf16=True,
-        gradient_checkpointing=True,
-        use_liger_kernel=False,
-        kl_beta=0.05,
-        use_chunked_grpo_logprobs=True,
-        loss_type="grpo",
-        policy_gradient_formulation="reinforce",
-        min_log_prob=None,
-        logging_steps=1,
-        eval_strategy="steps",
-        eval_steps=1,
-        save_strategy="steps" if save else "no",
-        save_steps=CHECKPOINT_STEP,
-        save_total_limit=2,
-        report_to="none",
-        max_prompt_length=16,
-        max_completion_length=16,
-        dataloader_drop_last=True,
-        dataloader_num_workers=0,
-        seed=SEED,
-        data_seed=SEED,
-        fsdp="",
-    )
-
-
 def _parallelism_config(cp_size, ep_size, fp32_masters):
     return ParallelismConfig(cp_size=cp_size, ep_size=ep_size, ep_fp32_experts=fp32_masters)
 
 
 def _build_trainer(
+    ctx,
     source,
     output_dir,
     tokenizer,
@@ -215,25 +144,18 @@ def _build_trainer(
     save=False,
 ):
     parallelism = _parallelism_config(cp_size, ep_size, fp32_masters)
-    model, _ = load_distributed_model(
-        model_name_or_path=source,
-        parallelism_config=parallelism,
-        dtype=torch.bfloat16,
-        trust_remote_code=False,
-        attn_implementation="flash_attention_2",
-        use_liger_kernel=False,
-        reset_sinks=True,
-        preserve_checkpoint_precision=checkpoint is not None,
+    args = offline_grpo_config(
+        output_dir,
+        steps=STEPS,
+        save_steps=CHECKPOINT_STEP,
+        seed=SEED,
+        kl_beta=KL_BETA,
+        sequence_length=16,
+        save=save,
+        max_grad_norm=1.0,
     )
-    trainer = OfflineGRPOTrainer(
-        model=model,
-        args=_config(output_dir, save),
-        train_dataset=train,
-        eval_dataset=evaluation,
-        processing_class=tokenizer,
-        parallelism_config=parallelism,
-        resume_checkpoint=checkpoint,
-        moe_balancing="none",
+    trainer = build_offline_grpo_trainer(
+        ctx, source, parallelism, args, train, evaluation, checkpoint=checkpoint, tokenizer=tokenizer
     )
     assert trainer.parallelism_config.is_cp_mode == (cp_size > 1)
     if cp_size > 1:
@@ -305,58 +227,34 @@ def _record_training_rows(trainer):
 
 
 def _kl_oracle(ctx, trainer, export):
-    batch = trainer._prepare_inputs(trainer.data_collator([trainer.train_dataset[index] for index in range(2)]))
-    batch["advantage"] = torch.zeros_like(batch["advantage"])
-    if trainer.parallelism_config.is_cp_mode:
-        ids, attention = batch["input_ids"], batch["attention_mask"]
-        reference = batch[REF_PER_TOKEN_LOGPS_COLUMN][:, 1:]
-        valid = batch["labels"][:, 1:] != LABEL_IGNORE_INDEX
-    else:
-        ids = torch.cat([batch["prompt_input_ids"], batch["completion_input_ids"]], dim=1)
-        attention = torch.cat([batch["prompt_attention_mask"], batch["completion_attention_mask"]], dim=1)
-        reference = batch[REF_PER_TOKEN_LOGPS_COLUMN]
-        valid = batch["completion_attention_mask"].bool()
+    batch = pure_kl_batch(trainer)
+    cp = trainer.parallelism_config.is_cp_mode
     expected = torch.zeros((), device=ctx.device)
     if ctx.rank == 0:
         oracle = _eager_oracle(export, ctx.device)
-        with torch.no_grad():
-            oracle.get_output_embeddings().weight.mul_(2)
-            logits = oracle(input_ids=ids, attention_mask=attention).logits[:, :-1]
-            logps = logits.float().log_softmax(-1).gather(-1, ids[:, 1:].unsqueeze(-1)).squeeze(-1)
-            if not trainer.parallelism_config.is_cp_mode:
-                logps = logps[:, -reference.size(1) :]
-            delta = torch.minimum(reference, logps + KL_LOGRATIO_CLAMP) - logps
-            weights = batch["group_size"].float().reciprocal()
-            expected = (
-                trainer.beta
-                * (((delta.exp() - delta - 1) * valid).sum(1) / valid.sum(1).clamp(min=1) * weights).sum()
-                / weights.sum()
-            )
+        with doubled_output_head(oracle), torch.no_grad():
+            if cp:
+                policy = token_logps(oracle, batch["input_ids"], batch["attention_mask"])
+                reference = batch[REF_PER_TOKEN_LOGPS_COLUMN][:, 1:]
+                valid = batch["labels"][:, 1:] != LABEL_IGNORE_INDEX
+            else:
+                policy = completion_logps(oracle, batch)
+                reference = batch[REF_PER_TOKEN_LOGPS_COLUMN]
+                valid = batch["completion_attention_mask"].bool()
+            expected = pure_kl_objective(policy, reference, valid, batch["group_size"], KL_BETA)
         del oracle
         cleanup_memory()
     dist.broadcast(expected, src=0)
-    reshard_fsdp2_modules(trainer.model)
-    head = trainer.model.get_output_embeddings().weight
-    original = head.detach().clone()
-    was_training = trainer.model.training
-    trainer.model.eval()
-    try:
-        with torch.no_grad():
-            head.mul_(2)
-            actual = trainer.compute_loss(trainer.model, batch)
-    finally:
-        reshard_fsdp2_modules(trainer.model)
-        with torch.no_grad():
-            trainer.model.get_output_embeddings().weight.copy_(original)
-        trainer.model.train(was_training)
-    error = abs((actual - expected).item())
-    log(f"CP{trainer.parallelism_config.cp_size} nonzero KL oracle: expected={expected.item():.5g}, error={error:.5g}")
-    return bool(expected > 0), error < TOL.exact_objective_rel * expected.item()
+    return doubled_head_kl_verdict(
+        trainer, batch, lambda _model: expected, f"CP{trainer.parallelism_config.cp_size} nonzero KL oracle"
+    )
 
 
 def _probe(checkpoint, dataset, settings):
     probe = _ReferenceProbe()
-    probe.beta = 0.05
+    probe.beta = KL_BETA
+    probe.args = SimpleNamespace(output_dir=os.path.dirname(checkpoint), resume_from_checkpoint=None)
+    probe.ref_model = None
     probe._init_reference_logps(resume_checkpoint=checkpoint)
     return restore_reference(probe, dataset, "training", settings=settings)
 
@@ -443,9 +341,7 @@ def run(ctx) -> dict:
         # Exact resume compares the same routed-token order, not atomic receive-slot races.
         pin_deterministic_ep_dispatch()
     log(f"offline GRPO {args.family}: EP{ep_size}/CP{cp_size}, fp32 expert masters={fp32_masters}")
-    dirs = [ctx.output_dir]
-    dist.broadcast_object_list(dirs, src=0)
-    shared = dirs[0]
+    shared = shared_output_dir(ctx)
     base = os.path.join(shared, f"tiny_{args.family}")
     output = os.path.join(shared, "train")
     continuous_export = os.path.join(shared, "continuous_export")
@@ -457,9 +353,9 @@ def run(ctx) -> dict:
     train, evaluation = offline_grpo_dataset(8), offline_grpo_dataset(4, 6)
 
     layout = {"cp_size": cp_size, "ep_size": ep_size, "fp32_masters": fp32_masters}
-    trainer = _build_trainer(base, output, tokenizer, train, evaluation, **layout, save=True)
-    step_two = _StepTwoState()
-    trainer.add_callback(step_two)
+    trainer = _build_trainer(ctx, base, output, tokenizer, train, evaluation, **layout, save=True)
+    saved_state = _OptimizerSnapshot("save", trainer, capture_optimizer=True)
+    trainer.add_callback(saved_state)
     checks = {"run_start_reference_swept": REF_PER_TOKEN_LOGPS_COLUMN in trainer.train_dataset.column_names}
     checks.update({f"fresh_{name}": value for name, value in _sink_checks(trainer.model).items()})
     initial_train_rows = _reference_rows(trainer.train_dataset)
@@ -509,9 +405,9 @@ def run(ctx) -> dict:
     checks["row_reorder_rejected"], checks["missing_reference_rejected"] = _negative_sidecar_checks(
         ctx, checkpoint, tokenized, settings
     )
-    trainer.cleanup_ep()
+    finish_phase(trainer)
+    saved_state.trainer = None
     del trainer
-    cleanup_memory()
     dist.barrier()
 
     source = resolve_resume_weights_source(
@@ -521,9 +417,10 @@ def run(ctx) -> dict:
     with patch.object(
         OfflineGRPOTrainer, "_sweep_reference_logps", side_effect=AssertionError("reswept KL reference")
     ):
-        resumed = _build_trainer(source, output, tokenizer, train, evaluation, **layout, checkpoint=checkpoint)
+        resumed = _build_trainer(ctx, source, output, tokenizer, train, evaluation, **layout, checkpoint=checkpoint)
+    at_save = saved_state.captured or {}
     if fp32_masters:
-        expected_masters = step_two.expert_masters
+        expected_masters = at_save.get("expert_masters", {})
         restored_masters = _expert_masters(resumed.model)
         checks["fp32_expert_masters_off_bf16_grid"] = (
             bool(expected_masters)
@@ -556,27 +453,23 @@ def run(ctx) -> dict:
         torch.equal(before, after)
         for before, after in zip(initial_eval_rows, _reference_rows(resumed.eval_dataset), strict=True)
     )
-    capture = _ResumeState()
-    resumed.add_callback(capture)
+    restored_state = _OptimizerSnapshot("train_begin", resumed, capture_optimizer=True)
+    resumed.add_callback(restored_state)
     resumed_rows = _record_training_rows(resumed)
     resumed_result = resumed.train(resume_from_checkpoint=checkpoint)
-    checks["optimizer_moments_restored_exactly"] = (
-        step_two.optimizer_moment_sums is not None
-        and capture.optimizer_moment_sums is not None
-        and all(
-            math.isclose(step_two.optimizer_moment_sums[key], capture.optimizer_moment_sums[key], rel_tol=1e-6)
-            for key in ("exp_avg", "exp_avg_sq")
-        )
+    at_resume = restored_state.captured or {}
+    optimizer_exact, reason = optimizer_state_matches(
+        at_save.get("optimizer") or {"state": {}}, at_resume.get("optimizer") or {"state": {}}
     )
-    checks["optimizer_step_counters_restored"] = step_two.optimizer_steps == capture.optimizer_steps
-    checks["production_adamw_bf16_resumed"] = capture.is_bf16_optimizer
-    checks["optimizer_learning_rates_restored"] = step_two.optimizer_lrs == capture.optimizer_lrs
+    checks["optimizer_state_restored_exactly"] = optimizer_exact
+    if not optimizer_exact:
+        log(f"optimizer restore: {reason}")
+    checks["production_adamw_bf16_resumed"] = at_resume.get("bf16_optimizer", False)
+    checks["optimizer_learning_rates_restored"] = at_save.get("learning_rates") == at_resume.get("learning_rates")
     if ctx.rank == 0:
         log(
-            f"optimizer moments at checkpoint/resume: {step_two.optimizer_moment_sums} / {capture.optimizer_moment_sums}"
+            f"optimizer learning rates at checkpoint/resume: {at_save.get('learning_rates')} / {at_resume.get('learning_rates')}"
         )
-        log(f"optimizer step counters at checkpoint/resume: {step_two.optimizer_steps} / {capture.optimizer_steps}")
-        log(f"optimizer learning rates at checkpoint/resume: {step_two.optimizer_lrs} / {capture.optimizer_lrs}")
     checks["resume_uses_same_step_three_rows"] = (
         len(uninterrupted_rows) == STEPS
         and len(resumed_rows) == STEPS - CHECKPOINT_STEP
@@ -587,8 +480,8 @@ def run(ctx) -> dict:
     checks["resume_next_optimizer_step"] = (
         resumed.state.global_step == STEPS
         and math.isfinite(resumed_result.training_loss)
-        and capture.optimizer_has_moments
-        and capture.scheduler_epoch == CHECKPOINT_STEP
+        and _has_second_moments(at_resume.get("optimizer") or {"state": {}})
+        and at_resume.get("sched_last_epoch") == CHECKPOINT_STEP
     )
     checks["resumed_eval_finite"] = any(
         entry.get("step") == STEPS and math.isfinite(entry["eval_loss"])
@@ -607,7 +500,8 @@ def run(ctx) -> dict:
         checks["hf_export_loads_and_scores"] = loadable
     checks = ctx.broadcast_checks(checks)
     metrics = ctx.metrics(resumed)
-    resumed.cleanup_ep()
+    finish_phase(resumed)
+    restored_state.trainer = None
     return {"checks": checks, "metrics": metrics}
 
 

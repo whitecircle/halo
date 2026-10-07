@@ -67,8 +67,8 @@ def _model_with_ep_layer() -> nn.Module:
 def test_lone_expert_target_still_peels_despite_trl_string_collapse():
     """``lora_target_modules: [experts]`` arrives as the string ``"experts"`` — it must still peel.
 
-    Skipping it left the spec None (no expert LoRA, and no realized-check to catch that) and handed
-    PEFT a regex that fullmatches no module."""
+    Skipping it would leave the spec None (no expert LoRA, and no realized-check to catch that) and
+    hand PEFT a regex that fullmatches no module."""
     config = _model_config(lora_target_modules=["experts"])
     assert config.lora_target_modules == "experts", "trl no longer collapses; this test's premise moved"
 

@@ -6,8 +6,8 @@ Two things break if it is pinned to ``create_ep_buffers``:
 * it runs only on the DeepEP path, while ``HALO_GRAD_BUCKET_MB`` also sets the chunk boundaries of
   the TP replicated sweep and the QLoRA sweep — both bucketed reductions over groups that span OS
   nodes, both of which desync silently when one node's buckets are a different size;
-* it runs AFTER the FS-heavy weight load. A world ``all_gather_object`` placed there is the first
-  collective a straggler node can miss, so the job dies at ``DIST_NCCL_TIMEOUT_MINUTES`` with a
+* it runs AFTER the FS-heavy weight load. A world collective placed there is the first collective
+  a straggler node can miss, so the job dies at ``DIST_NCCL_TIMEOUT_MINUTES`` with a
   traceback naming the env check rather than the load that ran long. Every value it compares is
   known at import, so there is nothing to wait for.
 
@@ -21,6 +21,7 @@ import importlib
 from unittest.mock import patch
 
 import pytest
+import torch
 
 from src.distributed.expert_parallel import dispatcher as dispatcher_mod
 from src.distributed.runtime import divergent_settings, reject_divergent_settings
@@ -57,10 +58,16 @@ def test_the_collective_raises_with_the_caller_s_guidance():
         del obj
         out_list[:] = [{"HALO_GRAD_BUCKET_MB": 256}] * 4 + [{"HALO_GRAD_BUCKET_MB": 64}] * 4
 
+    def disagreeing_digests(slots, op=None):
+        slots.copy_(torch.tensor([7, -3, 0, 0]))  # max(d) != -max(-d): two digests met
+
     with (
         patch(f"{_MOD}.dist.is_available", return_value=True),
         patch(f"{_MOD}.dist.is_initialized", return_value=True),
         patch(f"{_MOD}.dist.get_world_size", return_value=8),
+        patch(f"{_MOD}.dist.get_rank", return_value=0),
+        patch(f"{_MOD}.collective_device", return_value=torch.device("cpu")),
+        patch(f"{_MOD}.dist.all_reduce", side_effect=disagreeing_digests),
         patch(f"{_MOD}.dist.all_gather_object", side_effect=fake_all_gather),
         pytest.raises(ValueError) as excinfo,
     ):

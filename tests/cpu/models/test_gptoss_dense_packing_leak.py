@@ -67,7 +67,7 @@ def test_dense_leak_defect_pin(attn_impl):
     test."""
     torch.manual_seed(SEED)
     model = GptOssForCausalLM(_tiny_config()).eval()
-    # Post-construction write: 5.14.1's _sdpa_can_dispatch refuses gpt-oss at _from_config, but the
+    # Post-construction write: transformers' _sdpa_can_dispatch refuses gpt-oss at _from_config, but the
     # mask math this probes is the same one a future dispatchable build would run.
     model.config._attn_implementation = attn_impl
 

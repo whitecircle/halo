@@ -57,7 +57,7 @@ NUM_TRAIN_SAMPLES = 32
 NUM_EVAL_SAMPLES = 8
 SEED = 42
 
-# Bailing fuses QKV; attention only, since expert layers are distributed across ranks
+# Bailing fuses QKV; attention only: PEFT does not wrap the EP/ETP expert layers
 LORA_TARGET_MODULES = ["query_key_value", "dense", "g_proj"]
 LORA_R = 8
 LORA_ALPHA = 16
@@ -132,7 +132,7 @@ def run_lora_ep(
             processing_class=tokenizer,
             parallelism_config=parallelism_config,
         )
-        log(f"  EP mode: {trainer.is_ep_mode}")
+        log(f"  EP mode: {trainer.parallelism_config.is_ep_mode}")
 
         log(f"  Training for {MAX_STEPS} steps...")
         barrier()

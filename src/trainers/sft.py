@@ -56,7 +56,10 @@ class DistributedSFTTrainer(DistributedTrainerMixin, SFTTrainer):
 
     def __init__(self, *args, **kwargs):
         kwargs = self._init_distributed_config(kwargs, ctor_args=args, ctor_positions=_CTOR_POSITIONS)
-        self._reject_cp_incompatible_collator(ctor_value(args, kwargs, "data_collator", _CTOR_POSITIONS))
+        collator = ctor_value(args, kwargs, "data_collator", _CTOR_POSITIONS)
+        self._reject_cp_incompatible_collator(collator)
+        model = ctor_value(args, kwargs, "model", _CTOR_POSITIONS)
+        self._reject_compressed_kv_collator(collator, getattr(model, "config", None))
         super().__init__(*args, **kwargs)
         self._setup_distributed_modes()
 

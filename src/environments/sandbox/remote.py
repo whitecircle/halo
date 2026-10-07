@@ -173,8 +173,7 @@ class RemoteSession(SandboxSession):
         language: str = "python",
         files: dict[str, str] | None = None,
     ) -> SandboxResult:
-        # `or None` is intentional: an empty merged dict must forward as files=None, not {}
-        merged = {**self._files, **(files or {})} or None  # noqa: SIM222
+        merged = {**self._files, **(files or {})}
         return self._executor.run(code, stdin=stdin, timeout=timeout, language=language, files=merged)
 
     def write_file(self, path: str, content: str) -> None:

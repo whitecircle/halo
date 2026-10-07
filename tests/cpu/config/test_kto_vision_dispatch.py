@@ -223,8 +223,8 @@ def test_images_field_naming_a_missing_column_raises(tmp_path):
 
 
 def test_an_empty_eval_split_is_still_the_eval_split(tmp_path):
-    """A pre-sharded eval split can leave a rank no rows. Read by truthiness it turned into ``None``
-    on that rank alone, which then skipped the evaluation its peers entered."""
+    """A pre-sharded eval split can leave a rank no rows. Read by truthiness it would turn into
+    ``None`` on that rank alone, which would then skip the evaluation its peers entered."""
     dataset = _dataset()
     dataset["test"] = dataset["test"].select([])
     logged: dict = {}

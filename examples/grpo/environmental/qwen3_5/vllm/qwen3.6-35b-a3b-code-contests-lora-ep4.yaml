@@ -45,19 +45,19 @@ environment_kwargs:
   max_length_cutoff_recoveries: 2  # two recoveries, cut and empty turns together: the third such turn ends the episode truncated
   # max_output_size (grader stdout cap, NOT a generation budget) stays at the env default.
   # One profile per effort level: submissions and test calls scale with effort, one repair everywhere.
-  # thinking_tokens is the episode's reasoning total (rollout_thinking_budget_scope below); the first turn's
-  # share of it also bounds the turn total (thinking + answer headroom).
+  # thinking_tokens is the level's per-turn reasoning cap (vLLM enforces it); the episode's output is bounded
+  # by rollout_max_episode_tokens below.
   reasoning_effort_profiles:
-    low: {thinking_tokens: 24576, max_submissions: 1, max_test_calls: 2}
-    medium: {thinking_tokens: 32768, max_submissions: 2, max_test_calls: 4}
-    high: {thinking_tokens: 36000, max_submissions: 3, max_test_calls: 6}
-  # The thinking caps and interaction budgets bound each level; the trainer's effort length terms price its reasoning.
+    low: {thinking_tokens: 8192, max_submissions: 1, max_test_calls: 2}
+    medium: {thinking_tokens: 12288, max_submissions: 2, max_test_calls: 4}
+    high: {thinking_tokens: 16384, max_submissions: 3, max_test_calls: 6}
+  # The thinking caps and interaction budgets bound each level; the trainer's reasoning terms price its reasoning.
   # Reward ladder: see code_contests.py _grade_episode.
   submission_reward: 0.1     # bonus for reaching the graded channel
   verdict_detail: outcome    # a failed test's verdict class only; expected/got would make the judge a free test oracle
   resubmission_penalty: 0.2  # magnitude, >= 0 — charged per graded submission after the first
   no_tool_use_penalty: 0.1   # ending with 0 tool calls
-  turn_overflow_penalty: 0.15 # magnitude, >= 0 — charged once when the episode ends truncated (max_turns spent, or a cut/empty turn it could not retry)
+  turn_overflow_penalty: 0.15 # magnitude, >= 0 — charged once when the episode ends truncated (max_turns or the output budget spent, or a cut/empty turn it could not retry)
   length_cutoff_penalty: 0.08  # magnitude, >= 0 — charged per recovered turn that produced nothing: engine-cut, or ended without a call or an answer
   tool_error_penalty: 0.05   # magnitude, >= 0 — per call that fails to parse/execute
 
@@ -82,15 +82,12 @@ episode_timeout: 2700         # whole-episode deadline in engine-serving time (a
 # --- Rollout Generation ---
 rollout_temperature: 1.0     # on-policy; the trainer and the engine's IS reference must score at this temperature
 rollout_top_p: 1.0           # a top-p cut renormalizes uncertain positions, which the geometric band below reads as drift
-rollout_max_tokens: 30000              # per-turn total: the turn's thinking cap + a 12k answer headroom
-rollout_max_thinking_tokens: 18000     # the most one turn may reason of the episode's budget
-rollout_thinking_budget_scope: episode # a level's thinking_tokens covers the whole episode: a recovered turn gets only what is left
-rollout_thinking_turn_reserve: 2048    # the reasoning a turn keeps once the budget is spent: room to read a verdict, fix and act
-effort_length_penalty_k0: 0.015        # reasoning tokens are priced per level: -min(c_max, k(level) x tokens / 8192), with k
-effort_length_penalty_c_max: 0.08      #   falling by e per 25 effort units (low 25, medium 50, high 100): low pays ~20x high
-effort_length_floor_weight: 0.10       # the one term that pays for MORE reasoning: an episode whose turns together reason
-                                       #   under 0.375x its thinking_tokens pays up to this; price + floor < a resubmission
-effort_length_floor_budgets: 0.375     # the floor's reference, as a fraction of the episode's thinking_tokens
+rollout_max_tokens: 30000              # per-turn total; the level's thinking_tokens caps the reasoning within it
+rollout_max_episode_tokens: 131072   # the most an episode may sample over all its turns, reasoning and visible output together (never stated to the model; a turn's caps narrow to what is left)
+reasoning_price: {low: 0.0027, medium: 0.001, high: 0.00014}  # reward units per 1k reasoning tokens, by level: the same trace costs most where little reasoning was asked
+reasoning_price_cap: 0.09  # the price's cap per episode; cap + floor stay under the resubmission price
+reasoning_floor: 0.10  # the one term that pays for MORE reasoning: an episode reasoning under 0.75x its level's per-turn budget, summed over its turns, pays up to this
+turn_overlong_penalty: 0.05    # a turn that reasons into the last quarter under its cap pays up to this, once per episode
 
 # --- Prefetch ---
 enable_prefetch: true       # one-step staleness corrected by the sampling-logprob IS ratio
@@ -119,6 +116,7 @@ isr_veto_min: 1.0e-4         # any corrected token below this raw ratio masks it
 isr_opsm_delta: 0.05         # masks negative-advantage trajectories with |mean log-ratio| > delta (nats)
 skip_update_masked_frac: 0.4  # skip the optimizer step when > this fraction of corrected trajectories or tokens is masked
 early_stop_on_skipped_updates: true  # end the run once the breaker has skipped every update of early_stop_patience (3) rounds in a row
+early_stop_entropy_band: [0.12, 0.40]  # healthy Qwen3.6 runs hold 0.20-0.29: collapse falls below the band, explosion rises above
 early_stop_logratio_gap: 0.005         # the healthy |log-ratio| here is ~0.002, the sampler numerics; it widens as the policy drifts
 scale_rewards_std_floor: 0.2  # floor (reward units) on the batch-std divisor
 num_generations_eval: 1
@@ -126,7 +124,7 @@ scale_rewards: batch        # global batch std — never per-group (degenerate-g
 drop_degenerate_groups: true  # groups alike in reward (the length terms aside) would still inflate the DAPO normalizer
 balance_token_mass: true    # failures run longer than solves: cancel each round's net token-weighted push, or entropy climbs
 top_entropy_quantile: 1.0   # train ALL tokens: tool-format tokens need direct reinforcement at beta=0
-mask_truncated_completions: false  # `truncated` = the max_turns overflow, or a cut/empty turn past the recovery
+mask_truncated_completions: false  # `truncated` = the max_turns or output-budget overflow, or a cut/empty turn past the recovery
                                    # cap or on the last turn: a real failure worth its negative advantage; a
                                    # cut turn within the cap is priced and retried in-episode
 

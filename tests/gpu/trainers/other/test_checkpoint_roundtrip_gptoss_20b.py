@@ -3,24 +3,26 @@
 Comprehensive Checkpoint Save/Load Roundtrip Test for GptOss-20B (MoE).
 
 Validates that DistributedSFTTrainer can train, save, and reload GptOss-20B
-checkpoints correctly under EP and EP+TP parallelism configurations. For each
-mode the test:
+checkpoints correctly under EP, EP+TP and pure-ETP parallelism configurations. For
+each mode the test:
 
-1. Loads model with appropriate parallelism config (EP or EP+TP)
-2. Trains for a few steps (verifies loss is finite and decreasing)
+1. Loads model with appropriate parallelism config (EP, EP+TP or ETP)
+2. Trains for a few steps (verifies the loss is finite)
 3. Saves checkpoint via trainer.save_model()
 4. Tears down trainer/model (frees GPU, avoids collective hazards)
 5. Rank 0 reloads checkpoint via from_pretrained (CPU) and verifies:
    a. Checkpoint files exist (config.json + weights)
-   b. Parameter count and names match the model architecture
+   b. Parameter count is in the full-model range and every MoE layer carries both expert biases
    c. No NaN/Inf in any parameter
    d. Weights differ from untrained pretrained (training happened)
    e. Forward pass produces valid logits (no NaN/Inf, correct shape)
    f. Save-load roundtrip is lossless (save again, compare state dicts)
 
 Modes tested (one per invocation via --mode flag):
-  ep2      : ParallelismConfig(ep_size=2)          -- Expert Parallelism
-  ep2_tp2  : ParallelismConfig(ep_size=2, tp_size=2) -- EP + Tensor Parallelism
+  ep2        : ParallelismConfig(ep_size=2)                          -- Expert Parallelism
+  ep2_tp2    : ParallelismConfig(ep_size=2, tp_size=2)               -- EP + Tensor Parallelism
+  ep2_no_gmm : ParallelismConfig(ep_size=2, use_grouped_gemm=False)  -- EP on the non-grouped-mm gather
+  etp        : ParallelismConfig(ep_size=1, expert_tp_size=2)        -- pure Expert-Tensor Parallelism
 
 Model: unsloth/gpt-oss-20b-BF16 (MoE, 32 experts, top_k=4)
 
@@ -129,9 +131,9 @@ def train_and_save(
             parallelism_config=parallelism_config,
         )
 
-        assert trainer.is_ep_mode, f"Trainer should be in EP mode for {mode_name}"
+        assert trainer.parallelism_config.is_ep_mode, f"Trainer should be in EP mode for {mode_name}"
         if parallelism_config.is_tp_mode:
-            assert trainer.is_tp_mode, f"Trainer should be in TP mode for {mode_name}"
+            assert trainer.parallelism_config.is_tp_mode, f"Trainer should be in TP mode for {mode_name}"
         log("  Parallelism modes confirmed")
 
         train_result = trainer.train()
@@ -210,8 +212,8 @@ def verify_checkpoint_on_rank0(
     details.append(f"    Total parameters: {num_params:,}")
     details.append(f"    State dict keys: {num_keys}")
 
-    # The EP non-grouped-mm gather can drop 2D expert biases silently, so every layer carrying an
-    # `experts.gate_up_proj` must also carry both biases.
+    # A save that dropped the 2D expert biases would still load (re-initialized), so every layer
+    # carrying an `experts.gate_up_proj` must also carry both biases.
     moe_layer_indices = sorted(
         {
             int(k.split(".")[2])
@@ -448,8 +450,8 @@ def _format_checks(checks: dict[str, bool]) -> str:
 MODE_LABELS = {
     "ep2": "EP=2 (Expert Parallelism)",
     "ep2_tp2": "EP=2+TP=2 (Expert + Tensor Parallelism)",
-    # ep2/ep2_tp2 both take the grouped-mm path on SM90+, which handles expert biases; only an
-    # explicitly off-grouped run reaches the fallback gather that can drop them.
+    # ep2/ep2_tp2 both take the grouped-mm path on SM90+; only an explicitly off-grouped run reaches
+    # the non-grouped-mm bias gather.
     "ep2_no_gmm": "EP=2 (no grouped_mm — exercises bias-gather fallback)",
     # Pure expert-TP: experts are reconstructed across the ETP group before the HF-layout save.
     "etp": "ETP (ep_size=1, expert_tp_size=2 — expert-TP gather path)",

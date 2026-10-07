@@ -91,7 +91,7 @@ def test_load_full_state_dict_rejects_an_index_without_weight_map(tmp_path):
 
 
 def test_load_full_state_dict_reads_a_gathered_index(tmp_path):
-    """The gathered/FSDP2 resume path is untouched by the single-parse rewrite."""
+    """A gathered/FSDP2 index still reads back every tensor through the single parse."""
     tensors = {"a": torch.zeros(2), "b": torch.ones(3)}
     save_file({"a": tensors["a"]}, os.path.join(tmp_path, "model-00001.safetensors"), metadata={"format": "pt"})
     save_file({"b": tensors["b"]}, os.path.join(tmp_path, "model-00002.safetensors"), metadata={"format": "pt"})

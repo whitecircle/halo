@@ -23,7 +23,7 @@ from accelerate import PartialState
 from src.args.mixins import PRIVILEGED_HINT_TEMPLATE, SDPGArguments, format_field_names
 from src.args.rlvr_online_grpo_args import RLVROnlineGRPOScriptArguments
 from src.args.self_distill_args import SelfDistillationArguments
-from src.data.collators.self_distill import inject_privileged_hint
+from src.data.collators.self_distill import inject_privileged_hint, privileged_hint
 from src.trainers.distillation.sdpg import DistributedSDPGTrainer
 from tests.common.utils import load_script_module
 
@@ -72,7 +72,8 @@ def test_each_formatter_fills_every_placeholder_its_arm_admits():
     assert _online_teacher_hint(online, "42") == online.replace("{answer}", "42")
 
     offline = _placeholders(SelfDistillationArguments.HINT_PLACEHOLDERS)
-    history = inject_privileged_hint([{"role": "user", "content": "Q"}], offline, answer="42", solution="6 * 7")
+    hint = privileged_hint(offline, answer="42", solution="6 * 7")
+    history = inject_privileged_hint([{"role": "user", "content": "Q"}], hint)
     assert history[-1]["content"] == "Q" + offline.replace("{answer}", "42").replace("{solution}", "6 * 7")
 
 
@@ -192,6 +193,27 @@ def test_the_boundary_values_still_parse(arm):
     """``sdpg_beta_base: 0`` is the documented way to drop the term, and 0-step ramps are the defaults."""
     parsed = arm(sdpg_beta_base=0.0, sdpg_beta_warmup_steps=0, sdpg_beta_decay_steps=10, sdpg_temperature=0.5)
     assert (parsed.sdpg_beta_base, parsed.sdpg_beta_decay_steps, parsed.sdpg_temperature) == (0.0, 10, 0.5)
+
+
+@pytest.mark.parametrize(
+    ("template", "unset"),
+    [("{answer}", "sdpg_answer_field"), ("{solution}", "privileged_solution_field")],
+)
+def test_self_distillation_needs_a_column_for_each_slot_its_hint_names(template, unset):
+    """With no column to fill a named slot no row could render the hint; a slot the template does not
+    name needs none — a solution-only template takes no answer column."""
+    with pytest.raises(ValueError, match=rf"column is unset \(\['{unset}'\]\)"):
+        SelfDistillationArguments(sdpg_hint_template=template, **{unset: None})
+    assert SelfDistillationArguments(sdpg_hint_template=template, sdpg_beta_base=0.0, **{unset: None})
+    other = {"sdpg_answer_field": "privileged_solution_field", "privileged_solution_field": "sdpg_answer_field"}[unset]
+    assert SelfDistillationArguments(sdpg_hint_template=template, **{other: None})
+
+
+def test_self_distillation_may_supervise_the_prompt_only_with_the_opd_term_off():
+    """With the prompt in the labels the hint shifts every OPD pair; SFT alone has no pairs."""
+    with pytest.raises(ValueError, match="train_on_completions_only: false while sdpg_beta_base > 0"):
+        SelfDistillationArguments(train_on_completions_only=False)
+    assert not SelfDistillationArguments(train_on_completions_only=False, sdpg_beta_base=0.0).train_on_completions_only
 
 
 if __name__ == "__main__":

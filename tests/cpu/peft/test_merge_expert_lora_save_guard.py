@@ -13,7 +13,7 @@
   with the attention delta already folded into the base weights being gathered. This is what makes
   "re-save with ``merge_expert_lora_on_save=True``" a real export route for the mixed shape rather
   than an adapter file no tool folds, and it is the behavior
-  ``src.distributed.checkpoint.peft._expert_lora_merge_remedy`` points users at.
+  ``src.checkpoint.adapters._expert_lora_merge_remedy`` points users at.
 * the QLoRA post-backward sweep — it must honor
   ``parallelism_config.fp32_grad_reduce`` (the QLoRA path bypasses FSDP2's ``reduce_dtype``, so
   dropping the flag silently reduces adapter grads in bf16).
@@ -28,6 +28,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 import torch
+from accelerate import PartialState
 from peft import LoraConfig, get_peft_model
 from torch import nn
 
@@ -38,6 +39,8 @@ import src.trainers.mixins.grad_sync as grad_sync_mod
 from src.models.structure import lora_folded_data
 from src.trainers.mixins.base import DistributedTrainerMixin
 from tests.common.peft_helpers import randomize_adapters
+
+PartialState()  # the mixin's accelerate logger refuses to emit without an initialized state
 
 
 class _TinyLM(nn.Module):
@@ -63,7 +66,7 @@ class _StubTrainer:
         )
 
     _validate_merge_expert_lora_save = DistributedTrainerMixin._validate_merge_expert_lora_save
-    _setup_qlora_gradient_sync = DistributedTrainerMixin._setup_qlora_gradient_sync
+    _setup_qlora_sync = DistributedTrainerMixin._setup_qlora_sync
     _sync_qlora_grads = DistributedTrainerMixin._sync_qlora_grads
 
     state = SimpleNamespace(global_step=0)
@@ -170,6 +173,7 @@ class _SaveRoutingTrainer(_StubTrainer):
         self.parallel_dims = SimpleNamespace(tp_local_rank=lambda: 0)
 
     save_model = DistributedTrainerMixin.save_model
+    _write_model_payload = DistributedTrainerMixin._write_model_payload
     _mark_model_save_collectives_done = DistributedTrainerMixin._mark_model_save_collectives_done
     _checkpoint_context = DistributedTrainerMixin._checkpoint_context
     _persist_router_balancing_biases = DistributedTrainerMixin._persist_router_balancing_biases
@@ -262,7 +266,7 @@ def test_adapter_only_save_of_a_mixed_run_goes_to_the_peft_saver(tmp_path):
 
 
 # --------------------------------------------------------------------------- #
-# PEFT-4: QLoRA grad-sync hooks must thread fp32_grad_reduce into reduce_grad
+# The QLoRA post-backward sweep must thread fp32_grad_reduce into reduce_grads_bucketed
 # --------------------------------------------------------------------------- #
 
 
@@ -274,8 +278,9 @@ def test_qlora_grad_sync_threads_fp32_grad_reduce(fp32_flag):
 
     calls: list[dict] = []
 
-    with patch.object(grad_sync_mod, "get_global_world_size", return_value=2):
-        trainer._setup_qlora_gradient_sync()
+    trainer._reject_fsdp_knobs_under_qlora = lambda: None
+    trainer._patch_gradient_clipping_for_qlora = lambda: None
+    trainer._setup_qlora_sync("data parallel")
     assert getattr(trainer, "_qlora_grad_sync", False), "the sweep was never enabled — the test is vacuous"
 
     trainer.model(torch.randn(2, 8)).sum().backward()

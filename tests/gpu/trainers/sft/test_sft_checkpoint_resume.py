@@ -120,8 +120,8 @@ def load_model_for_mode(mode: str, parallelism_config: ParallelismConfig, model_
     """Load the model for ``mode`` from ``model_path``.
 
     For EP/CP resume ``model_path`` must be the checkpoint dir: the CheckpointLoader deliberately skips
-    base-weight reload for EP/CP (loader.py docstring — "saved HF-format weights are reloaded by
-    load_distributed_model, not here"), so the trained weights are restored ONLY by loading the model
+    base-weight reload for EP/CP (its docstring: their "weights are reloaded by
+    ``load_distributed_model`` (not here)"), so the trained weights are restored ONLY by loading the model
     from the checkpoint here. fsdp/tp instead reload weights via the loader's set_model_state_dict
     path, so they load from base.
     """

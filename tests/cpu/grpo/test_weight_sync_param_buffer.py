@@ -377,7 +377,7 @@ def test_chunks_are_cut_before_the_budget_is_exceeded(monkeypatch):
 def test_the_whole_payload_path_cuts_on_the_same_boundaries(monkeypatch):
     """One chunker: a payload handed over in one call is cut where streaming it would have cut it.
 
-    Two rules meant the SGLang client re-split every already-budgeted chunk at a second, stricter
+    A second rule would make the SGLang client re-split every already-budgeted chunk at a stricter
     boundary — one `/update_weights_from_distributed` declare, thread and round-trip per fragment.
     """
     monkeypatch.setattr("src.distributed.nccl.clients.base.WEIGHT_SYNC_CHUNK_BYTES", 4096)
@@ -402,7 +402,7 @@ def test_sglang_declares_one_request_per_chunk(monkeypatch):
     """The chunk budget IS the server-side bound on SGLang: the engine allocates ``torch.empty`` for
     every declared name before receiving any of them.
 
-    A second, stricter budget inside the client re-split every already-budgeted chunk — each
+    A second, stricter budget inside the client would re-split every already-budgeted chunk — each
     fragment its own ``/update_weights_from_distributed`` declare, thread and round-trip.
     """
     monkeypatch.setattr("src.distributed.nccl.clients.base.WEIGHT_SYNC_CHUNK_BYTES", 4096)

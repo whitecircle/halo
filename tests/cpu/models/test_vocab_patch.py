@@ -132,7 +132,8 @@ def test_embedding_never_shrinks_below_padded_size():
 
 def test_high_special_token_rows_preserved_byte_identical():
     """Rows in the padding region ABOVE the new vocab boundary (the harmony stop tokens) must be
-    untouched — byte-identical before and after. Dropping them was the garbage-generation cause."""
+    untouched — byte-identical before and after. Dropping them leaves the served model unable to emit
+    its stop tokens."""
     model, tok = _build_model_and_tokenizer()
     before_in = model.get_input_embeddings().weight.detach().clone()
     before_out = model.get_output_embeddings().weight.detach().clone()

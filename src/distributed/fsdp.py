@@ -2,9 +2,8 @@
 helpers its consumers need afterwards (:func:`fsdp2_modules`, :func:`reshard_fsdp2_modules`,
 :func:`make_disable_adapter_fsdp2_safe`).
 
-:func:`setup_fsdp2_for_dp` / :func:`setup_fsdp2_for_tp` build the mesh themselves; a caller that
-already holds one (the trainer's EP+TP wrap reuses the loader's 2D mesh) composes
-:func:`create_mixed_precision_policy_v2` with :func:`apply_fsdp2_per_layer` instead.
+:func:`setup_fsdp2_for_dp` builds its DP mesh; :func:`setup_fsdp2_for_tp` takes the loader's 2D
+``(dp, tp)`` mesh (TP and EP+TP alike). Both run one wrap body, :func:`_apply_fsdp2`.
 
 ``reshard_after_forward``: False (default) = SHARD_GRAD_OP (faster, higher peak memory);
 True = FULL_SHARD (lower peak memory, slightly slower).
@@ -40,7 +39,7 @@ logger = logging.getLogger(__name__)
 
 
 def reshard_label(reshard_after_forward: bool) -> str:
-    """FSDP2 sharding-strategy name for this ``reshard_after_forward``, as the setup logs spell it."""
+    """FSDP2 sharding strategy under this ``reshard_after_forward``, as the setup logs name it."""
     return "FULL_SHARD" if reshard_after_forward else "SHARD_GRAD_OP"
 
 
@@ -64,9 +63,9 @@ class IdentityParamSet:
 def _require_single_device_params(model: nn.Module) -> None:
     """Raise unless every param is on one device (FSDP requires single-device modules).
 
-    Raises rather than falling back: the check is rank-local while the mesh construction that
-    follows is collective, so one rank bailing out hangs the others in ``split_group`` and leaves
-    itself unsharded with no gradient sync.
+    A raise, not a fallback: the predicate is RANK-LOCAL while the mesh construction that follows is
+    collective, so one rank bailing out both hangs the others in ``split_group`` and leaves itself
+    unsharded with no gradient sync, under a caller that still reports success.
     """
     devices = {p.device for p in model.parameters()}
     if len(devices) > 1:
@@ -80,8 +79,8 @@ def _require_single_device_params(model: nn.Module) -> None:
 def _get_underlying_model(model: nn.Module) -> nn.Module:
     """The transformer backbone to shard, falling back to ``model`` itself when none is reachable.
 
-    Layout knowledge lives in :func:`backbone_with_layers`; FSDP must still wrap something when a
-    model exposes no recognizable layer list.
+    Layout knowledge lives in :func:`backbone_with_layers`; the fallback is local because FSDP must
+    still wrap something when a model exposes no recognizable layer list.
     """
     return backbone_with_layers(model) or model
 
@@ -89,10 +88,10 @@ def _get_underlying_model(model: nn.Module) -> nn.Module:
 def _reject_unreachable_decoder_layers(model: nn.Module) -> None:
     """Raise when a generative decoder exposes no decoder-layer list :func:`decoder_layers` reaches.
 
-    Without one the whole model becomes a single shard group, all-gathered for the entire forward,
-    and the wrap still reports success. The gate is the class hierarchy: the layer-less shapes this
-    wrap legitimately serves (a SentenceTransformer, a classification backbone, a PP stage) are not
-    generative decoders.
+    Without one the whole model becomes a SINGLE shard group, all-gathered for the entire forward —
+    the per-DP-rank memory ceiling FSDP2 exists to remove — and the wrap still reports success. The
+    gate is the class hierarchy: the layer-less shapes this wrap legitimately serves (a
+    SentenceTransformer, a classification backbone, a PP stage) are not generative decoders.
     """
     inner = base_transformers_model(model)
     if not (isinstance(inner, PreTrainedModel) and inner.can_generate()):
@@ -156,9 +155,10 @@ def _apply_fsdp2(
     reshard_after_forward: bool = False,
     fp32_master_weights: bool = False,
 ) -> None:
-    """Wrap ``model`` over ``dp_mesh`` and log what it did; shared by both entry points.
+    """Wrap ``model`` over ``dp_mesh`` and log what it did — the one body both entry points share.
 
-    ``topology`` names the mesh in the caller's terms (full-shard/HSDP, or the DP×TP grid).
+    ``topology`` names the mesh in the caller's own terms (full-shard/HSDP, or the DP×TP grid);
+    everything else is identical, and a second copy is how the two paths drift on a policy knob.
     """
     mp_policy = create_mixed_precision_policy_v2(
         args,
@@ -219,8 +219,8 @@ def _tied_parameters(model: nn.Module) -> "IdentityParamSet":
     """Parameters reachable under more than one name (``tie_word_embeddings``).
 
     ``fully_shard`` rebinds a shared parameter only among the modules of the *same* call, so a tie
-    whose two names straddle two calls is split into two independent parameters that each receive
-    only their own half of the true gradient.
+    whose two names straddle two calls is silently split into two independent parameters that each
+    receive only their own half of the true gradient and diverge from step 1.
     """
     seen: set[int] = set()
     tied = []
@@ -328,8 +328,8 @@ def apply_fsdp2_per_layer(
     # it after the composite parent above has already embedded the ids.
     embed_backbone = input_embedding_backbone(model) or underlying_model
 
-    # A tied weight spans two `_shard` calls; reserve it for the root call or fully_shard severs the
-    # tie, leaving each half with half the gradient.
+    # A tied weight spans two `_shard` calls; reserve it for the root call or fully_shard silently
+    # severs the tie, leaving each half with half the gradient.
     root_reserved = _tied_parameters(model) if model is not embed_backbone else IdentityParamSet()
 
     def _left_out(module: nn.Module, reserved: "IdentityParamSet") -> "IdentityParamSet":
@@ -345,7 +345,7 @@ def apply_fsdp2_per_layer(
             **({"ignored_params": scoped} if scoped else {}),
         )
 
-    # Via decoder_layers, so a backbone spelling reaches this wrap as soon as it is registered.
+    # Through decoder_layers, so a backbone spelling reaches this wrap as soon as it is registered.
     layers = decoder_layers(underlying_model)
     if layers is None:
         _reject_unreachable_decoder_layers(model)
@@ -375,8 +375,8 @@ def apply_fsdp2_per_layer(
         sharded += 1
     elif layers is None:
         # No reachable layer list (a SentenceTransformer, a classification backbone): shard the root
-        # anyway. The caller reports success and suppresses the DDP fallback, so leaving it
-        # unsharded would mean no gradient sync at all.
+        # anyway. The caller reports success and suppresses the DDP fallback, so leaving it unsharded
+        # is not a missed optimization but no gradient sync at all.
         _shard(model, reserved=IdentityParamSet())
         sharded += 1
 
@@ -389,6 +389,7 @@ def setup_fsdp2_for_tp(
     args,
     *,
     dp_size: int,
+    ignored_params: list[nn.Parameter] | None = None,
     fp32_master_weights: bool = False,
     reshard_after_forward: bool = False,
 ) -> tuple[bool, DeviceMesh | None]:
@@ -396,19 +397,20 @@ def setup_fsdp2_for_tp(
 
     ``dp_size`` is the caller's ``ParallelismConfig.data_parallel_size``, never ``world // tp_size``:
     the two agree only while every other axis that divides DP is rejected alongside TP, so deriving
-    it here would double the DP mesh the day such a combination is allowed and shard params over
-    ranks holding a different batch.
+    it here would silently double the DP mesh the day such a combination is allowed and shard params
+    over ranks holding a different batch. ``ignored_params`` stay out of the shard groups, as in
+    :func:`setup_fsdp2_for_dp`: the EP modules of an EP+TP run, which sync their own gradients.
 
     Returns ``(fsdp_wrapped, device_mesh)``. ``fp32_master_weights`` reduces DP grads in fp32.
     """
     if dp_size <= 1:
-        logger.info("  TP mode: Pure TP (no DP), skipping FSDP2")
+        logger.info("  DP=1 under TP: no FSDP2 wrap (DTensor and EP sync carry the gradients)")
         return False, None
 
     # Rank-local, so it has to run before the collective mesh construction below.
     _require_single_device_params(model)
 
-    # The loader's mesh is taken as-is, or built here when there is none; a wrongly shaped one raises
+    # The loader's mesh is taken as-is, or built here when there is none; a wrongly shaped one RAISES
     # rather than being rebuilt around, since the params stay sharded on the mesh that made them.
     device_mesh = getattr(model, "_device_mesh", None)
     if device_mesh is None:
@@ -430,12 +432,10 @@ def setup_fsdp2_for_tp(
         device_mesh[MeshDim.DP],
         args,
         topology=f"DP×TP {dp_size}×{tp_size}",
+        ignored_params=ignored_params,
         reshard_after_forward=reshard_after_forward,
         fp32_master_weights=fp32_master_weights,
     )
-    if is_global_main_process():
-        logger.info("✓ TP mode configured with FSDP2 for DP")
-
     return True, device_mesh
 
 
@@ -459,7 +459,7 @@ def create_mixed_precision_policy_v2(
             cast_forward_inputs=cast_forward_inputs,
         )
 
-    # Accumulate the reduction in fp32 to bound bf16 rounding error over many summed gradients.
+    # Summing many bf16 grads loses ~10^4x precision vs fp32 (TorchTitan/Megatron/DeepSpeed default).
     fp32_grad_reduce = getattr(args, "fp32_grad_reduce", False)
     reduce_dtype = torch.float32 if (fp32_master_weights or fp32_grad_reduce) else compute_dtype
     return MixedPrecisionPolicy(
@@ -477,7 +477,7 @@ def _should_cast_forward_inputs(model: nn.Module) -> bool:
     forward saves the bf16 view, recompute keeps fp32, torch rejects it.
 
     Read off the module tree, from the ``_fp32_interlayer_residual`` class attribute the owning layer
-    declares; a model_type list would go stale, and its failure surfaces as a torch error inside a
+    declares — a model_type list would go stale, and its failure is a torch error deep inside a
     recompute rather than a message about this policy.
     """
     return not any(getattr(type(module), "_fp32_interlayer_residual", False) for module in model.modules())
@@ -496,10 +496,10 @@ def fsdp2_modules(model: nn.Module) -> list[FSDPModule]:
 def reshard_fsdp2_modules(model: nn.Module) -> None:
     """Re-register every FSDP2 module's sharded DTensor params before a state-dict API call.
 
-    An eval-only forward leaves the transient unsharded plain params registered (no backward to
-    reshard, and the toolkit's ``reshard_after_forward=False`` skips the post-forward one; the root
+    An eval-only forward leaves the transient UNSHARDED plain params registered (no backward to
+    reshard, and the toolkit's ``reshard_after_forward=False`` skips the post-forward one; the ROOT
     module skips it even at ``True``), and HF evaluates immediately before the end-of-training save.
-    ``get_optimizer_state_dict`` then maps params to FQNs by identity against ``named_parameters()``
+    ``get_optimizer_state_dict`` then maps params to FQNs by IDENTITY against ``named_parameters()``
     while the optimizer holds the sharded DTensors, so every FSDP2 param goes unmapped
     (``KeyError: 0``), and ``set_model_state_dict`` would write into buffers the next unshard
     discards. ``reshard()`` is per-rank and a no-op when already sharded.

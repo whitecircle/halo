@@ -56,15 +56,15 @@ from src.distributed.expert_parallel.base_layer import has_grouped_mm
 from src.distributed.loading.model_loading import load_distributed_model
 from src.distributed.nccl.clients.vllm import VLLMWeightSyncClient
 from src.distributed.parallelism_config import ParallelismConfig
-from src.env import env_int, env_str
+from src.env import env_str
 from src.trainers.grpo.rollout.weight_sync import sync_weights_to_client, validate_weight_sync_support
 from src.trainers.mixins.ep_introspection import named_ep_layers
 from tests.common.harness import gpu_test_main
 from tests.common.utils import log, max_or_nan
+from tests.common.weight_sync import weight_transfer_port
 
 VLLM_SERVER_URL = env_str("VLLM_SERVER_URL") or "http://localhost:8000"
 CHECKPOINT = env_str("HALO_TEST_STEP3P7_MODEL")
-GROUP_PORT = env_int("HALO_TEST_VLLM_GROUP_PORT", 51220)
 HUB_REPO = "stepfun-ai/Step-3.7-Flash"
 # Tokenizer, chat template and the vendor config class the served checkpoint copies from the hub.
 HUB_FILES = (
@@ -298,7 +298,8 @@ def run(ctx) -> dict:
     checks["server_matches_trainer_before_sync"] = gap < MATCH_TOL
     log(f"  pre-sync gap (same checkpoint both sides): {gap:.4f}")
 
-    client = VLLMWeightSyncClient(base_url=VLLM_SERVER_URL, group_port=GROUP_PORT, connection_timeout=120)
+    group_port = weight_transfer_port("HALO_TEST_VLLM_GROUP_PORT")
+    client = VLLMWeightSyncClient(base_url=VLLM_SERVER_URL, group_port=group_port, connection_timeout=120)
     client.init_communicator(device=torch.device("cuda", torch.cuda.current_device()))
     generator = torch.Generator(device="cuda").manual_seed(SEED)
     previous, previous_expected = baseline, _trainer_logprobs(model, prompt_ids)

@@ -64,12 +64,15 @@ RUN mkdir -p /opt/nccl_compat/src/distributed/nccl \
     && touch /opt/nccl_compat/src/distributed/nccl/__init__.py \
     && echo 'from vllm.distributed.device_communicators.pynccl_wrapper import *' \
        > /opt/nccl_compat/src/distributed/nccl/_nccl_wrapper.py
-# Both patches are required: vLLM's layerwise reload puts each layer's tensors on the meta device,
-# so layers that write weights with a direct `param.copy_()` revert on every /update_weights, and
+# All three patches are required: vLLM's layerwise reload puts each layer's tensors on the meta
+# device, so layers that write weights with a direct `param.copy_()` revert on every /update_weights;
 # the re-init patch destroys the NCCL communicator the engine would otherwise leak per trainer
-# connection. `sitecustomize` applies both in the API server and every engine-core worker.
+# connection; and under speculative decoding the drafter's CUDA graph overwrites the hidden states
+# prompt log-probs are read from. `sitecustomize` applies them in the API server and every
+# engine-core worker.
 COPY docker/vllm/patches/vllm_layerwise_reload_patch.py \
      docker/vllm/patches/vllm_weight_transfer_reinit_patch.py \
+     docker/vllm/patches/vllm_spec_decode_prompt_logprobs_patch.py \
      docker/vllm/patches/sitecustomize.py /opt/vllm_patches/
 # No `:${PYTHONPATH:-}` tail: it is unset in the base image, so the suffix would render an empty
 # sys.path entry (the server's CWD) that a stray module could import-shadow.
@@ -116,6 +119,20 @@ assert p._APPLIED, 'sitecustomize hook did not fire on nccl_engine import'; \
 assert getattr(E.init_transfer_engine, p.PATCH_MARKER, False), 'init_transfer_engine not patched'; \
 assert getattr(E.shutdown, p.PATCH_MARKER, False), 'shutdown not patched'; \
 print('weight-transfer re-init patch: OK (communicator destroyed on re-init and on shutdown)')"
+
+# Verify that the spec-decode prompt-log-prob patch took: unpatched, the drafter's CUDA graph
+# overwrites the target hidden states prompt log-probs are read from, and every prompt position comes
+# back garbage. The patch reads the runner's per-request table and the pending state's fields by name.
+RUN python3 -c "\
+import inspect; \
+import vllm_spec_decode_prompt_logprobs_patch as p; \
+from vllm.v1.worker.gpu_model_runner import ExecuteModelState, GPUModelRunner as R; \
+assert p._APPLIED, 'sitecustomize hook did not fire on gpu_model_runner import'; \
+assert getattr(R.sample_tokens, p.PATCH_MARKER, False), 'sample_tokens not patched'; \
+missing = {'scheduler_output', 'hidden_states'} - set(ExecuteModelState._fields); \
+assert not missing, f'ExecuteModelState lost {missing}'; \
+assert 'self.num_prompt_logprobs' in inspect.getsource(R.__init__), 'GPUModelRunner lost num_prompt_logprobs'; \
+print('spec-decode prompt-logprobs patch: OK (sample_tokens wrapped, runner fields present)')"
 
 # Verify both parser plugins during the build: they import vLLM, so no test suite covers them.
 COPY docker/vllm/plugins/verify_gptoss_plugins.py /tmp/verify_gptoss_plugins.py

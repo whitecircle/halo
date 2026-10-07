@@ -47,6 +47,17 @@ TRAINERS = [
 ]
 
 
+# Ctor knobs a trainer requires beyond the model and config.
+REQUIRED_KWARGS = {
+    DistributedSelfDistillationTrainer: {
+        "reference_kl_coef": 0.0,
+        "reference_kl_loss": "unnormalized_kl",
+        "confidence_weight_opd": True,
+        "opd_exclude_eos": True,
+    },
+}
+
+
 class _SetupDone(Exception):
     """Carries control out of the trainer ctor once the distributed setup has run."""
 
@@ -70,6 +81,7 @@ def _training_args():
         bf16=False,
         optim="adamw_torch",
         save_on_each_node=False,
+        output_dir="unused",
     )
 
 
@@ -82,7 +94,7 @@ def _moe_model():
 
 def _construct(trainer_cls, *args, **kwargs):
     with pytest.raises(_SetupDone):
-        trainer_cls(*args, parallelism_config=ParallelismConfig(), **kwargs)
+        trainer_cls(*args, parallelism_config=ParallelismConfig(), **REQUIRED_KWARGS.get(trainer_cls, {}), **kwargs)
 
 
 def _assert_setup_applied(training_args):

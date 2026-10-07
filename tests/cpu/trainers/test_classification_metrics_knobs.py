@@ -11,6 +11,8 @@ knob's on/off gate. ``focal_alpha`` is asserted at its real consumer, the loss b
 Run: python tests/cpu/trainers/test_classification_metrics_knobs.py
 """
 
+from types import SimpleNamespace
+
 import numpy as np
 import pytest
 import torch
@@ -104,7 +106,8 @@ def _metrics(config, logits, labels, *, is_binary=True, is_multi_label=False, la
 def _build_loss_fn(config, *, is_multi_label: bool):
     trainer = ClassificationTrainer.__new__(ClassificationTrainer)
     trainer.is_multi_label = is_multi_label
-    return trainer._build_loss_fn(config, None)
+    model = SimpleNamespace(config=SimpleNamespace(num_labels=2))
+    return trainer._build_loss_fn(config, None, model)
 
 
 def test_shipped_defaults_compute_mcc_and_nothing_else(tmp_path):

@@ -1,10 +1,9 @@
 #!/usr/bin/env python
 """Ulysses' two collectives move real data — pin what they move, on CPU.
 
-``src/distributed/context_parallel/autograd.py`` had no CPU coverage beyond a divisibility guard,
-because neither collective can run for real here: gloo implements no alltoall at all, and the CP GPU
-suites only ever compare an end-to-end loss, where a transposed head/sequence axis or a
-non-inverted backward is one contribution among many.
+Neither collective in ``src/distributed/context_parallel/autograd.py`` can run for real here: gloo
+implements no alltoall at all, and the CP GPU suites only ever compare an end-to-end loss, where a
+transposed head/sequence axis or a non-inverted backward is one contribution among many.
 
 So both are driven against a simulated world instead. ``_CollectiveWorld`` runs every rank's
 computation TWICE — once recording what each rank contributes to a collective, once serving each
@@ -32,7 +31,12 @@ import pytest
 import torch
 import torch.distributed as dist
 
-from src.distributed.context_parallel.autograd import UlyssesAllToAll, gather_pos_embeddings
+from src.distributed.context_parallel.autograd import (
+    UlyssesAllToAll,
+    gather_pos_embeddings,
+    ulysses_all_to_all,
+    ulysses_all_to_all_fused_kv,
+)
 
 CP_SIZES = (2, 4)
 BATCH = 2
@@ -199,7 +203,7 @@ def test_the_backward_assertion_would_catch_a_corrupted_gradient(monkeypatch, cp
 def test_all_to_all_round_trips_back_to_the_sequence_shard(monkeypatch, cp_size):
     """Ulysses attention scatters in and gathers back out; the pair must be the identity.
 
-    ``base_layer`` follows ``(scatter_dim=2, gather_dim=1)`` with ``(scatter_dim=1, gather_dim=2)``.
+    ``ulysses_all_to_all_fused_kv`` scatters dim 2 and gathers dim 1; ``ulysses_all_to_all`` reverses it.
     Any rank-ordering error that the two directions do not share survives the round trip.
     """
     world = _CollectiveWorld(cp_size)
@@ -281,6 +285,30 @@ def test_gather_pos_embeddings_is_a_no_op_without_context_parallelism():
     out_cos, out_sin = gather_pos_embeddings(cos, sin, GROUP, 1)
 
     assert out_cos is cos and out_sin is sin
+
+
+@pytest.mark.parametrize("cp_size", CP_SIZES)
+def test_the_attention_wrappers_swap_into_heads_and_back(monkeypatch, cp_size):
+    """What the CP attention forward calls: Q/K/V go sequence-sharded → head-sharded (K and V fused
+    into one collective and split back exactly), and the attention output returns head-sharded →
+    sequence-sharded."""
+    world = _CollectiveWorld(cp_size)
+    world.install(monkeypatch)
+    q, k, v = (torch.randn(BATCH, SEQ, HEADS, HEAD_DIM) for _ in range(3))
+
+    swapped = world.run(
+        lambda rank: ulysses_all_to_all_fused_kv(*(_seq_shard(t, rank, cp_size) for t in (q, k, v)), GROUP)
+    )
+    for rank, outputs in enumerate(swapped):
+        for name, full, out in zip("qkv", (q, k, v), outputs, strict=True):
+            assert torch.equal(out, _head_shard(full, rank, cp_size)), (rank, name)
+
+    # A fresh world: each one serves the call indices of a single program.
+    world = _CollectiveWorld(cp_size)
+    world.install(monkeypatch)
+    restored = world.run(lambda rank: ulysses_all_to_all(_head_shard(q, rank, cp_size), GROUP))
+    for rank, out in enumerate(restored):
+        assert torch.equal(out, _seq_shard(q, rank, cp_size)), rank
 
 
 if __name__ == "__main__":

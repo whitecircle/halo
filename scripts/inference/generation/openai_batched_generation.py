@@ -41,7 +41,8 @@ from scripts.inference._common import (
     save_results_to_s3,
 )
 from src.data.pipeline.conversation import build_base_prompt, resolve_system_prompt
-from src.inference.openai_client import create_openai_client, parallel_openai_requests
+from src.inference.batch_requests import parallel_openai_requests
+from src.inference.openai_client import create_openai_client
 
 logger = logging.getLogger(__name__)
 
@@ -81,8 +82,8 @@ def process_response(
     row: dict,
     response,
     args,
+    initial_messages: list[dict],
     follow_up_response=None,
-    initial_messages=None,
 ) -> dict:
     """Process API response into output record.
 
@@ -90,11 +91,10 @@ def process_response(
         row: Original dataset row
         response: First OpenAI response
         args: CLI arguments (for field names and the model)
-        follow_up_response: Optional follow-up response
         initial_messages: Messages sent to API (including system prompt)
+        follow_up_response: Optional follow-up response
     """
-    conversation = list(initial_messages) if initial_messages else []
-
+    conversation = list(initial_messages)
     conversation.append(assistant_message_from_response(response))
 
     generated_message_indices = [len(conversation) - 1]
@@ -160,7 +160,7 @@ async def main() -> None:
     logger.info("Generating first responses...")
     first_responses = await parallel_openai_requests(
         model=args.model,
-        user_messages=messages,
+        messages=messages,
         response_format=None,
         use_native_json_schema=False,
         system_prompt=None,  # Already in messages
@@ -169,7 +169,7 @@ async def main() -> None:
         max_workers=args.n_parallel,
         checkpoint_interval=args.checkpoint_interval,
         disable_checkpoints=False,
-        custom_client=client,
+        client=client,
         tools=tools_list,
     )
 
@@ -187,7 +187,7 @@ async def main() -> None:
         if args.follow_up_prompt_field in row and row[args.follow_up_prompt_field] is not None:
             rows_with_followup.append((idx, row, msg, response))
         else:
-            results.append(process_response(row, response, args, initial_messages=msg))
+            results.append(process_response(row, response, args, msg))
 
     if rows_with_followup:
         logger.info(f"Generating {len(rows_with_followup)} follow-up responses...")
@@ -205,7 +205,7 @@ async def main() -> None:
 
         followup_responses = await parallel_openai_requests(
             model=args.model,
-            user_messages=followup_messages,
+            messages=followup_messages,
             response_format=None,
             use_native_json_schema=False,
             system_prompt=None,
@@ -214,7 +214,7 @@ async def main() -> None:
             max_workers=args.n_parallel,
             checkpoint_interval=args.checkpoint_interval,
             disable_checkpoints=False,
-            custom_client=client,
+            client=client,
             tools=followup_tools,
         )
 
@@ -223,11 +223,7 @@ async def main() -> None:
         ):
             if followup_response is None:
                 logger.warning(f"Row {idx}: follow-up failed, saving first response only")
-                results.append(process_response(row, first_response, args, initial_messages=initial_msg))
-            else:
-                results.append(
-                    process_response(row, first_response, args, followup_response, initial_messages=initial_msg)
-                )
+            results.append(process_response(row, first_response, args, initial_msg, followup_response))
 
     # A follow-up failure still records the first response, so an empty result set means every
     # pending row failed its first request.

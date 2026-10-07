@@ -4,7 +4,7 @@
   ``tests.gpu.manifest.ALL_MARKERS``) so ``--strict-markers`` rejects typos without the
   list being duplicated in ``pyproject.toml``.
 - Ensures the project root is importable (CPU tests do ``from src. ...``).
-- Sweeps stale scratch dirs left by crashed GPU runs out of the launcher's ``TMPDIR``
+- Sweeps stale scratch dirs left by crashed test runs out of the launcher's ``TMPDIR``
   (they sit on the volume the training data does, so leaks eat it).
 
 CPU tests run inside the image (they import torch); GPU nodes are launched as torchrun
@@ -39,7 +39,7 @@ def pytest_configure(config):
     described = {
         "gpu": "launches a torchrun GPU script (see tests/gpu/manifest.py)",
         "core": "small/fast tier (PR gate)",
-        "full": "large-model / many-GPU tier (nightly)",
+        "full": "large-model / many-GPU tier (run by hand)",
     }
     for m in ALL_MARKERS:
         config.addinivalue_line("markers", f"{m}: {described.get(m, m + ' test')}")
@@ -67,12 +67,12 @@ def pytest_collection_modifyitems(config, items):
 
 
 def pytest_sessionstart(session):
-    """Sweep stale GPU-test scratch dirs (a crash skips the in-test cleanup).
+    """Sweep stale test scratch dirs (a crash skips the in-test cleanup).
 
-    ``tests.common.distributed.setup_cache_dirs`` builds them with ``mkdtemp``, so they land under
-    the launcher's ``TMPDIR`` — read it rather than name a host path, which is wrong on every box
-    whose large volume is not ``/mnt``. Only names carrying ``SCRATCH_DIR_TAG`` are touched, since
-    that ``TMPDIR`` may be shared with other programs.
+    ``tests.common.distributed.setup_cache_dirs`` and ``tests/cpu/conftest.py`` build them with
+    ``mkdtemp``, so they land under the launcher's ``TMPDIR`` — read it rather than name a host path,
+    which is wrong on every box whose large volume is not ``/mnt``. Only names carrying
+    ``SCRATCH_DIR_TAG`` are touched, since that ``TMPDIR`` may be shared with other programs.
     """
     cutoff = time.time() - 6 * 3600
     for path in glob.glob(os.path.join(tempfile.gettempdir(), f"{SCRATCH_DIR_TAG}*")):

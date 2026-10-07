@@ -102,7 +102,7 @@ def _make_trainer(
         async_config=async_config,
         parallelism_config=parallelism_config,
         peft_config=peft_config,
-        environment_config=EnvironmentConfig(environment_type="native_math", environment_kwargs={"max_turns": 2}),
+        environment_config=EnvironmentConfig(environment_type="native_math", max_turns=2),
     )
 
 

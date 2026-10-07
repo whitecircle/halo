@@ -377,7 +377,7 @@ def main() -> None:
     env_kwargs = json.loads(args.env_kwargs)
     refuse_flag_owned_env_kwargs(env_kwargs)
     contract = load_training_contract(args.training_config)
-    trained_env = contract.env_config_dict() if contract is not None else {}
+    trained_env = contract.env_config.to_env_config() if contract is not None else {}
     env_type = resolve_setting(
         args.env_type, contract.env_config.environment_type if contract else None, DEFAULT_ENV_TYPE
     )
@@ -386,7 +386,7 @@ def main() -> None:
             f"{args.training_config} trains environment_type={env_type!r}, not a coding env {CODING_ENV_TYPES}"
         )
     env_config = resolve_env_config(args, trained_env, env_kwargs)
-    reasoning_effort, max_turns = env_config["reasoning_effort"], env_config["max_turns"]
+    reasoning_effort = env_config["reasoning_effort"]
     env = resolve_environment(env_type, env_config)
     # A judge or reward-model term is probed before any episode runs, as the trainer does at launch.
     env.verify_backend()
@@ -432,7 +432,6 @@ def main() -> None:
         traj_path=traj_path,
         env_type=env_type,
         split=args.split,
-        max_turns=max_turns,
         rollout=rollout,
         num_samples=args.num_samples,
         meta_extra=contest_meta(args.adapter, selection, env, reasoning_effort, env_config),

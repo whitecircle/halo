@@ -1,7 +1,7 @@
 """CPU tests for ``persistent_buffers`` — the shared save-path helper.
 
-Every gathered checkpoint save (EP via ``_persistent_non_ep_buffers``, TP via ``get_tp_state_dict``,
-plain FSDP2/CP via ``gather_full_state_dict``) routes non-parameter state through this helper. A
+Every gathered checkpoint save (EP via ``_persistent_non_ep_buffers``, TP and plain FSDP2/CP via
+``saveable_items``) routes non-parameter state through this helper. A
 param-only save loop silently drops PERSISTENT buffers (e.g. a Gemma4 ``layer_scalar`` residual
 scalar, vision ``std_scale``) — corrupting every layer on reload — while NON-persistent buffers
 (rotary caches, causal masks) must be excluded (HF recomputes them). This is model-agnostic: any
@@ -82,11 +82,11 @@ def test_never_builds_a_state_dict():
 
     Under FSDP2 ``state_dict()`` reshards the module's parameters: after a forward with
     ``reshard_after_forward=False`` every rank holds plain unsharded tensors, and the rank that calls
-    ``state_dict()`` drops back to ``DTensor(Shard(0))`` while its peers do not. Every caller of this
-    helper runs it on the save rank alone, so deriving persistence by diffing a state dict split the
-    ranks' sharding state — and the next op over those params (a PEFT adapter unmerge in the merged EP
-    save) was then a collective on the writer and local on everyone else. The job desynchronized and
-    died in DeepEP's teardown barrier, blaming DeepEP for a save-path defect.
+    ``state_dict()`` drops back to ``DTensor(Shard(0))`` while its peers do not. A caller that
+    runs it on the save rank alone would, if persistence were derived by diffing a state dict, split
+    the ranks' sharding state — the next op over those params (a PEFT adapter unmerge in the merged
+    EP save) is then a collective on the writer and local on everyone else, and the job
+    desynchronizes in DeepEP's teardown barrier.
     """
     calls = []
 

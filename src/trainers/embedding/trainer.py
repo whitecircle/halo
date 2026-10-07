@@ -21,7 +21,7 @@ from peft import LoraConfig
 from peft.tuners.tuners_utils import BaseTunerLayer
 from safetensors.torch import save_file
 from sentence_transformers import SentenceTransformer, SentenceTransformerTrainer
-from sentence_transformers.base.sampler import BatchSamplers
+from sentence_transformers.base.sampler import BatchSamplers, NoDuplicatesBatchSampler
 from sentence_transformers.evaluation import SentenceEvaluator
 from sentence_transformers.losses import (
     AnglELoss,
@@ -71,11 +71,10 @@ from src.distributed.runtime import (
     fs_aware_makedirs,
     fs_aware_save_rank,
     is_global_main_process,
+    launcher_global_world_size,
     reject_across_ranks,
 )
 from src.log import KEY_PREVIEW_COUNT
-from src.models.loading.config_levels import restore_special_token_ids
-from src.models.loading.tokenizer_setup import pristine_model_max_length
 from src.models.structure import (
     lora_fold_targets,
     lora_folded_data,
@@ -84,6 +83,7 @@ from src.models.structure import (
     tuner_adapter_param_ids,
 )
 from src.trainers.mixins.base import DistributedTrainerMixin
+from src.trainers.mixins.validation import keep_all_dataset_columns
 
 logger = logging.getLogger(__name__)
 
@@ -133,6 +133,58 @@ def create_loss(model: SentenceTransformer, config: EmbeddingConfig) -> nn.Modul
         loss = MatryoshkaLoss(model=model, loss=loss, **matryoshka_kwargs)
 
     return loss
+
+
+def reject_uneven_sentence_transformers_batches(
+    args: EmbeddingConfig | None,
+    train_dataset: Dataset | DatasetDict | IterableDataset | None,
+    *,
+    toolkit_loader: bool,
+) -> None:
+    """Refuse a multi-process run whose sentence-transformers train loader cannot give every rank its batches alike.
+
+    That loader (plain DP, pure EP; ``toolkit_loader`` is
+    :func:`~src.trainers.mixins.dataloader.needs_dp_sharded_loader`) prepares with accelerate's
+    ``even_batches`` off:
+
+    * a map-style dataset keeping its remainder (``dataloader_drop_last: false``): the batch-sampler shard
+      hands the first ``batches % world`` ranks one batch more, and that step hangs in its collectives;
+      ``drop_last`` yields only complete rounds;
+    * a ``datasets.IterableDataset`` runs only with ``accelerator_config.dispatch_batches: false`` and either
+      ``split_batches`` or at most one file shard per process, where accelerate's ``IterableDatasetShard``
+      gives every rank the same batches. Left unset, ``dispatch_batches`` dispatches an iterable from the
+      main process by concatenating its collated batches, and the sentence-transformers collator's string
+      ``<column>_modality`` fields raise there; with more shards than processes accelerate splits the
+      dataset by shard, so the ranks' row counts differ whatever ``drop_last`` says.
+
+    Decided from the config, the dataset's shard count and the launcher's world size alone, so every rank
+    decides alike. The entry script calls it right after the datasets load; the trainer again for a
+    hand-built one.
+    """
+    world_size = launcher_global_world_size()
+    if args is None or toolkit_loader or world_size <= 1:
+        return
+    if isinstance(train_dataset, IterableDataset):
+        loader_config = args.accelerator_config
+        if loader_config.dispatch_batches is False and (
+            loader_config.split_batches or train_dataset.n_shards <= world_size
+        ):
+            return
+        raise ValueError(
+            f"An iterable train dataset ({train_dataset.n_shards} shard(s), {world_size} processes) with "
+            f"accelerator_config dispatch_batches={loader_config.dispatch_batches} and "
+            f"split_batches={loader_config.split_batches} cannot reach every rank alike: dispatched, the "
+            f"sentence-transformers collator's string modality fields cannot be concatenated; split by shard, "
+            f"the ranks get different row counts and the run hangs. Set dispatch_batches: false, and either "
+            f"reshard the dataset to at most {world_size} shards or set split_batches: true."
+        )
+    if not args.dataloader_drop_last:
+        raise ValueError(
+            "dataloader_drop_last: false is not supported for multi-process embedding training on plain DP "
+            "or pure EP: the sentence-transformers loader shards batches with accelerate's even_batches off, "
+            "so when the batch count is not a multiple of the world size some ranks run one step more than "
+            "the others and the run hangs in that step's collectives. Set dataloader_drop_last: true."
+        )
 
 
 def _folded_backbone_items(backbone: nn.Module) -> Iterator[tuple[str, torch.Tensor]]:
@@ -188,10 +240,11 @@ class EmbeddingTrainer(DistributedTrainerMixin, SentenceTransformerTrainer):
     CP is unsupported because pooling requires the full sequence.
     """
 
-    _tag_names = ["trl", "embedding"]
     # SBERT losses return the batch's own mean and ignore num_items_in_batch, while
     # SentenceTransformer.forward's **kwargs would otherwise make HF infer the opposite.
     _loss_is_own_mean = True
+    # no_duplicates defers a row that repeats a batch's value to a later batch, never drops it.
+    _dataset_drawing_batch_samplers = (NoDuplicatesBatchSampler,)
     _supports_pp = False
     _pp_unsupported_reason = (
         "the default and most registered losses (MNRL, CoSENT/AnglE, online-contrastive, the "
@@ -221,14 +274,18 @@ class EmbeddingTrainer(DistributedTrainerMixin, SentenceTransformerTrainer):
         dataset_presharded: bool = False,
         moe_balancing: str = "auto",
     ):
+        # The SentenceTransformer's ``config`` is its backbone's, so the seam sees a MoE's experts.
         self._init_distributed_config(
-            {"args": args},
+            {"model": model, "args": args},
             parallelism_config=parallelism_config,
             save_sharded_ep=save_sharded_ep,
             dataset_presharded=dataset_presharded,
             moe_balancing=moe_balancing,
         )
         self._reject_batch_sampler_on_toolkit_loader(args)
+        reject_uneven_sentence_transformers_batches(
+            args, train_dataset, toolkit_loader=self._needs_custom_dataloader()
+        )
 
         if loss is None and model is not None and args is not None:
             loss = create_loss(model, args)
@@ -237,8 +294,7 @@ class EmbeddingTrainer(DistributedTrainerMixin, SentenceTransformerTrainer):
             disable_dropout_in_model(model)
 
         # SentenceTransformerDataCollator does its own column conversion, so keep every column.
-        if args is not None:
-            args.remove_unused_columns = False
+        keep_all_dataset_columns(args)
 
         super().__init__(
             model=model,
@@ -265,8 +321,8 @@ class EmbeddingTrainer(DistributedTrainerMixin, SentenceTransformerTrainer):
     def _reject_batch_sampler_on_toolkit_loader(self, args: EmbeddingConfig | None) -> None:
         """Refuse a batch sampler the toolkit's loader would drop.
 
-        The runs :meth:`get_train_dataloader` hands to the mixin's DP-sharded loader (TP/ETP, a
-        pre-sharded dataset) batch a plain sampler and never read ``batch_sampler``, so
+        The runs the mixin's DP-sharded loader batches (TP/ETP, a pre-sharded dataset:
+        :meth:`_needs_custom_dataloader`) take a plain sampler and never read ``batch_sampler``, so
         ``no_duplicates`` would let in-batch duplicates through as false negatives, silently.
         """
         if args is None or not self._needs_custom_dataloader():
@@ -438,12 +494,10 @@ class EmbeddingTrainer(DistributedTrainerMixin, SentenceTransformerTrainer):
         with torch.no_grad():
             for prefix in prefixes:
                 features = {k[len(prefix) :]: v for k, v in inputs.items() if k.startswith(prefix)}
-                if not features:
-                    continue
                 output = model(self._cap_group_samples(features))
                 embeddings.append(output["sentence_embedding"].detach())
 
-        return self._compute_embedding_metrics(embeddings) if embeddings else {}
+        return self._compute_embedding_metrics(embeddings)
 
     def _cap_group_samples(self, features: dict[str, Any]) -> dict[str, Any]:
         """Cap one text group at ``_METRIC_MAX_SAMPLES`` samples, or return it whole.
@@ -547,51 +601,19 @@ class EmbeddingTrainer(DistributedTrainerMixin, SentenceTransformerTrainer):
         self._eval_embedding_accum = {}
         return output
 
-    def get_train_dataloader(self) -> DataLoader:
-        """Train dataloader with TP-aware sharding.
-
-        Plain DP and pure EP delegate to ST (preserves batch samplers like NO_DUPLICATES). TP/ETP take
-        the mixin's dataloader: ST shards across ``world_size``, but ranks sharing a batch leave
-        ``dp_size`` < ``world_size``. A pre-sharded dataset takes it too, since ST would re-shard an
-        already-disjoint per-rank slice.
-        """
-        if self._needs_custom_dataloader():
-            return DistributedTrainerMixin.get_train_dataloader(self)
-        return SentenceTransformerTrainer.get_train_dataloader(self)
-
-    def get_eval_dataloader(self, eval_dataset=None) -> DataLoader:
-        """Eval dataloader with TP-aware sharding."""
-        if self._needs_custom_dataloader():
-            return DistributedTrainerMixin.get_eval_dataloader(self, eval_dataset)
-        return SentenceTransformerTrainer.get_eval_dataloader(self, eval_dataset)
-
-    def save_model(self, output_dir: str = None, _internal_call: bool = False):
-        """Save model with parallelism-aware handling.
+    def _write_model_payload(self, ctx: CheckpointContext, output_dir: str, _internal_call: bool) -> None:
+        """Write the backbone through the distributed path where ST's own writer cannot.
 
         EP/TP and mixin-managed FSDP2 hold the backbone as DTensors that ST's save_model would write
-        un-gathered (unloadable), so they take the distributed path (gather + ST pipeline config).
-        Single-GPU, DDP, accelerate-managed FSDP keep plain params → delegate to ST.
+        un-gathered (unloadable), and ST would write injected-LoRA adapter keys that reload as random
+        base weights, so those gather and write the ST pipeline config here. Single-GPU, DDP and
+        accelerate-managed FSDP take the mixin's payload, whose base fallback is ST's writer.
         """
-        output_dir = output_dir or self.args.output_dir
-        # A forward's transient unsharded params predate the last optimizer step; the resume adapter
-        # written after this save reads the resharded ones, and the fold must read the same tensors.
-        reshard_fsdp2_modules(self._top_level_model())
-        fs_aware_makedirs(output_dir)
-
-        # align_special_tokens collapsed the backbone eos list at train start; the mixin restore covers one branch.
-        restore_special_token_ids(self._pristine_special_token_ids)
-
-        ctx = self._checkpoint_context()
-        with pristine_model_max_length(ctx.tokenizer):
-            config = self.parallelism_config
-            # _has_injected_lora: ST's save would write adapter keys that reload as random base weights.
-            if config.is_ep_mode or config.is_tp_mode or self._fsdp_wrapped or self._has_injected_lora():
-                self._save_distributed_embedding_model(ctx, output_dir, _internal_call=_internal_call)
-            else:
-                super().save_model(output_dir, _internal_call=_internal_call)
-        # This override bypasses the mixin's sidecar; without it a resumed MoE run re-inits balancing.
-        self._persist_router_balancing_biases(output_dir)
-        self._mark_model_save_collectives_done()
+        config = self.parallelism_config
+        if config.is_ep_mode or config.is_tp_mode or self._fsdp_wrapped or self._has_injected_lora():
+            self._save_distributed_embedding_model(ctx, output_dir, _internal_call=_internal_call)
+        else:
+            super()._write_model_payload(ctx, output_dir, _internal_call)
 
     def _save_merged_checkpoint_resume_adapter(self, checkpoint_dir: str) -> None:
         """Write what an injected-LoRA checkpoint resumes from; the mixin's hook for any other run.
@@ -602,7 +624,7 @@ class EmbeddingTrainer(DistributedTrainerMixin, SentenceTransformerTrainer):
         trainable tensors unfolded, at their live dtype and under the top-level model's parameter
         names, in :data:`~src.checkpoint.format.RESUME_ADAPTER_DIR`; each save rank writes the marker
         the resume classifies on once its own copy is complete. With any older marker removed before
-        the save began (:func:`~src.distributed.checkpoint.save.remove_stale_resume_marker`), a failed
+        the save began (:func:`~src.distributed.checkpoint.save.remove_stale_completion_markers`), a failed
         write leaves the checkpoint unmarked. The final ``save_model`` export carries neither.
         Collective.
         """

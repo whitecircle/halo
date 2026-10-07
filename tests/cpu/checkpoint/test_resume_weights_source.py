@@ -146,7 +146,7 @@ def test_ep_adapter_bin_only_stays_base(tmp_path):
 @pytest.mark.parametrize("adapter_name", ["adapter_model.safetensors", "adapter_model.bin"])
 def test_classify_accepts_both_adapter_filenames(tmp_path, adapter_name):
     """The classifier must accept every filename PeftAdapterSaver can write (the loader restores
-    both); classifying the .bin fallback 'invalid' made those checkpoints un-resumable."""
+    both); classifying the .bin fallback 'invalid' would make those checkpoints un-resumable."""
     _touch(tmp_path / adapter_name)
     assert _classify_resume_checkpoint(str(tmp_path)) == "adapter"
 

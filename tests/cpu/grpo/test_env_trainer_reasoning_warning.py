@@ -2,7 +2,7 @@
 """A reasoning-consuming knob with no captured reasoning warns once per run.
 
 Reasoning reaches an assistant turn only through the rollout server's reasoning parser. Without one,
-the effort length floor scores every episode as maximal under-use, the length price charges nothing,
+the reasoning floor scores every episode as maximal under-use, the reasoning price charges nothing,
 and ``carry_reasoning`` sends nothing back — all silently. The trainer warns once, at the point the
 length terms are applied, when a step's assistant turns carry no reasoning while either knob is on; a
 step with reasoning, a step with no assistant turn, or a run with both knobs off warns nothing.
@@ -20,6 +20,7 @@ from src.configs.async_training_config import AsyncTrainingConfig
 from src.environments.base import Message, Trajectory
 from src.environments.episode import RolloutResult
 from src.trainers.grpo.environmental import DistributedAsyncEnvironmentalGRPOTrainer
+from src.trainers.grpo.reasoning_terms import reasoning_token_counts
 from tests.common.grpo_metrics import attach_world_metrics, flushed_metrics
 
 # The warning goes through the tokenize mixin's stdlib logger (the repo's warn_once convention).
@@ -33,7 +34,7 @@ class _StubTokenizer:
 
 def _trainer(floor_weight: float, carry_reasoning: bool):
     trainer = object.__new__(DistributedAsyncEnvironmentalGRPOTrainer)
-    trainer.async_config = AsyncTrainingConfig(effort_length_floor_weight=floor_weight)
+    trainer.async_config = AsyncTrainingConfig(reasoning_floor=floor_weight)
     trainer._tokenizer = _StubTokenizer()
     attach_world_metrics(trainer)
     trainer._metrics = {"train": defaultdict(list)}
@@ -48,6 +49,12 @@ def _rollouts(thinkings: list[str | None]) -> list[RolloutResult]:
     return [RolloutResult(prompt="task", trajectory=traj)]
 
 
+def _with_counts(rollouts: list[RolloutResult]) -> tuple:
+    """``_build_rollout_rewards``' arguments: the rollouts, their per-turn reasoning counts, the device."""
+    counts = [reasoning_token_counts(_StubTokenizer(), r.trajectory) for r in rollouts]
+    return rollouts, counts, torch.device("cpu")
+
+
 def _warnings(caplog) -> list[str]:
     return [r.getMessage() for r in caplog.records if r.levelno == logging.WARNING and "reasoning" in r.getMessage()]
 
@@ -56,31 +63,31 @@ def test_length_terms_with_no_captured_reasoning_warn_once_per_run(caplog):
     trainer = _trainer(0.15, carry_reasoning=False)
     with caplog.at_level(logging.WARNING, logger=LOGGER):
         for _ in range(2):
-            trainer._build_rollout_rewards(_rollouts([None, None]), torch.device("cpu"))
+            trainer._build_rollout_rewards(*_with_counts(_rollouts([None, None])))
             flushed_metrics(trainer)  # the step boundary: a second record before it is refused
     assert len(_warnings(caplog)) == 1
-    assert "the effort length terms" in _warnings(caplog)[0]
+    assert "the reasoning terms" in _warnings(caplog)[0]
     assert "carry_reasoning" not in _warnings(caplog)[0]
 
 
 def test_carried_reasoning_with_no_captured_reasoning_warns_by_its_own_name(caplog):
     trainer = _trainer(0.0, carry_reasoning=True)
     with caplog.at_level(logging.WARNING, logger=LOGGER):
-        trainer._build_rollout_rewards(_rollouts([None]), torch.device("cpu"))
+        trainer._build_rollout_rewards(*_with_counts(_rollouts([None])))
     assert len(_warnings(caplog)) == 1 and "carry_reasoning" in _warnings(caplog)[0]
 
 
 def test_a_step_with_captured_reasoning_warns_nothing(caplog):
     trainer = _trainer(0.15, carry_reasoning=True)
     with caplog.at_level(logging.WARNING, logger=LOGGER):
-        trainer._build_rollout_rewards(_rollouts([None, "let me think"]), torch.device("cpu"))
+        trainer._build_rollout_rewards(*_with_counts(_rollouts([None, "let me think"])))
     assert _warnings(caplog) == []
 
 
 def test_no_consumer_means_no_warning_and_no_turn_means_no_evidence(caplog):
     with caplog.at_level(logging.WARNING, logger=LOGGER):
-        _trainer(0.0, carry_reasoning=False)._build_rollout_rewards(_rollouts([None]), torch.device("cpu"))
-        _trainer(0.15, carry_reasoning=True)._build_rollout_rewards(_rollouts([]), torch.device("cpu"))
+        _trainer(0.0, carry_reasoning=False)._build_rollout_rewards(*_with_counts(_rollouts([None])))
+        _trainer(0.15, carry_reasoning=True)._build_rollout_rewards(*_with_counts(_rollouts([])))
     assert _warnings(caplog) == []
 
 

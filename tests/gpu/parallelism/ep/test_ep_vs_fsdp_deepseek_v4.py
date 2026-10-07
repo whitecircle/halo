@@ -11,7 +11,8 @@ batch through (a) the stock HF model and (b) the EP=2-patched model. Verifies:
   4. Router-gate and shared-expert gradients match the reference (DP-average hook path).
   5. Hash-layer routing: the captured EP selection is exactly tid2eid[input_ids].
   6. Bias balancing: hash layers refuse the bias (frozen selection), top-k layers accept it, and a
-     large balancing bias forces the target expert while a zero bias changes nothing.
+     large balancing bias forces the target expert into every selection, which the zero-bias
+     selection does not already do.
 
 Run with 2 GPUs:
     torchrun --nproc_per_node=2 \
@@ -106,7 +107,7 @@ def run(ctx):
     # Losses must agree across ranks (identical input; EP orthogonal to DP).
     spread = world_spread(ep_loss)
     metrics["rank_loss_spread"] = spread
-    checks["losses_match_across_ranks"] = spread < TOL.ep_identical_batch_rank_spread_abs
+    checks["losses_match_across_ranks"] = TOL.identical_batch_ranks_agree(spread)
 
     # ── 5. Hash-layer routing == tid2eid lookup (exact) ───────────────────────
     hash_layer._capture_routing = False

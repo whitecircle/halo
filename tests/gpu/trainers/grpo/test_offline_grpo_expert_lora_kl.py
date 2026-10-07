@@ -19,17 +19,26 @@ from scripts.training.offline_grpo import _load_kl_reference
 from src.args.distributed_args import DistributedArguments
 from src.args.offline_grpo_args import OfflineGRPOScriptArguments
 from src.checkpoint.format import RESUME_ADAPTER_DIR, RESUME_ADAPTER_MARKER_FILE
-from src.configs.offline_grpo_config import OfflineGRPOConfig
-from src.distributed.fsdp import reshard_fsdp2_modules
 from src.distributed.parallelism_config import ParallelismConfig
-from src.trainers.grpo.objective.logratio import KL_LOGRATIO_CLAMP
 from src.trainers.grpo.offline import OfflineGRPOTrainer
 from src.training.environment import resolve_resume_weights_source
 from src.training.script_runner import ScriptRuntime
 from tests.common.checkpoint_io import RestorePointSnapshot
-from tests.common.distributed import pin_deterministic_ep_dispatch
+from tests.common.distributed import pin_deterministic_ep_dispatch, shared_output_dir
 from tests.common.harness import gpu_test_main
-from tests.common.offline_grpo import offline_grpo_dataset, save_offline_moe_base
+from tests.common.offline_grpo import (
+    completion_logps,
+    doubled_head_kl_verdict,
+    doubled_output_head,
+    export_scores_finite,
+    offline_grpo_config,
+    offline_grpo_dataset,
+    offline_grpo_trainer,
+    pure_kl_batch,
+    pure_kl_objective,
+    save_offline_moe_base,
+    token_logps,
+)
 from tests.common.peft_helpers import (
     assert_only_adapters_trainable,
     is_expert_lora_active,
@@ -54,39 +63,10 @@ BETA = 0.2
 LR = 0.01
 
 
-def _config(output):
-    return OfflineGRPOConfig(
-        output_dir=output,
-        max_steps=STEPS,
-        per_device_train_batch_size=2,
-        per_device_eval_batch_size=2,
-        learning_rate=LR,
-        lr_scheduler_type="constant",
-        bf16=True,
-        gradient_checkpointing=True,
-        use_liger_kernel=False,
-        kl_beta=BETA,
-        use_chunked_grpo_logprobs=True,
-        loss_type="grpo",
-        policy_gradient_formulation="reinforce",
-        min_log_prob=None,
-        max_grad_norm=0.0,
-        logging_steps=1,
-        eval_strategy="steps",
-        eval_steps=1,
-        save_strategy="steps",
-        save_steps=SAVE_STEP,
-        save_total_limit=STEPS,
-        report_to="none",
-        max_prompt_length=16,
-        max_completion_length=16,
-        remove_unused_columns=False,
-        dataloader_drop_last=True,
-        dataloader_num_workers=0,
-        seed=SEED,
-        data_seed=SEED,
-        fsdp="",
-    )
+def _fa2_model(path, device):
+    """A separate full model on the loader's requested kernel, independent of the trainer's weights source."""
+    model = AutoModelForCausalLM.from_pretrained(path, dtype=torch.bfloat16, attn_implementation="flash_attention_2")
+    return model.to(device).eval()
 
 
 def _build(ctx, base, output, train, evaluation, *, checkpoint=None):
@@ -95,7 +75,16 @@ def _build(ctx, base, output, train, evaluation, *, checkpoint=None):
     model, tokenizer, peft_config = load_peft_model_from_config(
         configured, parallelism, attn_implementation="flash_attention_2", use_liger_kernel=False
     )
-    args = _config(output)
+    args = offline_grpo_config(
+        output,
+        steps=STEPS,
+        save_steps=SAVE_STEP,
+        seed=SEED,
+        kl_beta=BETA,
+        learning_rate=LR,
+        sequence_length=16,
+        lr_scheduler_type="constant",
+    )
     # A trained runtime source must not replace model_name_or_path as the reference's base.
     runtime = ScriptRuntime(parallelism, "ep8", ctx.local_rank, checkpoint, checkpoint or base)
     reference = _load_kl_reference(
@@ -109,43 +98,31 @@ def _build(ctx, base, output, train, evaluation, *, checkpoint=None):
         peft_config=peft_config,
         attn_default="flash_attention_2",
     )
-    return OfflineGRPOTrainer(
-        model=model,
+    return offline_grpo_trainer(
+        ctx,
+        model,
+        parallelism,
+        args,
+        train,
+        evaluation,
+        checkpoint=checkpoint,
+        tokenizer=tokenizer,
         ref_model=reference,
-        args=args,
-        train_dataset=train,
-        eval_dataset=evaluation,
-        processing_class=tokenizer,
         peft_config=peft_config,
-        parallelism_config=parallelism,
-        resume_checkpoint=checkpoint,
-        moe_balancing="none",
     )
-
-
-def _token_logps(model, ids):
-    with torch.no_grad():
-        logits = model(input_ids=ids, use_cache=False).logits[:, :-1].float()
-        return logits.log_softmax(-1).gather(-1, ids[:, 1:].unsqueeze(-1)).squeeze(-1)
 
 
 def _reference_oracle(ctx, reference, base, checkpoint, checks):
     ids = torch.tensor([[3, 8, 4, 5, 8, 8, 1], [3, 9, 4, 6, 10, 7, 1]], device=ctx.device)
-    # Separate full models share the loader's requested kernel, not its choice of weights source.
-    original = AutoModelForCausalLM.from_pretrained(
-        base, dtype=torch.bfloat16, attn_implementation="flash_attention_2"
-    )
-    original.to(ctx.device).eval()
-    expected = _token_logps(original, ids)
-    actual = _token_logps(reference, ids)
+    original = _fa2_model(base, ctx.device)
+    with torch.no_grad():
+        expected = token_logps(original, ids)
+        actual = token_logps(reference, ids)
     checks["live_reference_matches_configured_base_exactly"] = torch.equal(expected, actual)
     del original
-    trained = (
-        AutoModelForCausalLM.from_pretrained(checkpoint, dtype=torch.bfloat16, attn_implementation="flash_attention_2")
-        .to(ctx.device)
-        .eval()
-    )
-    wrong = _token_logps(trained, ids)
+    trained = _fa2_model(checkpoint, ctx.device)
+    with torch.no_grad():
+        wrong = token_logps(trained, ids)
     effect = (wrong - expected).abs().max().item()
     checks["trained_checkpoint_is_a_distinct_kl_anchor"] = effect > TOL.control_min_loss_shift(TOL.weight_atol)
     checks["reference_is_not_trained_checkpoint"] = not torch.equal(actual, wrong)
@@ -157,51 +134,21 @@ def _reference_oracle(ctx, reference, base, checkpoint, checks):
 
 
 def _kl_oracle(ctx, trainer, export, checks):
-    batch = trainer._prepare_inputs(trainer.data_collator([trainer.train_dataset[index] for index in range(2)]))
-    batch["advantage"].zero_()
-    ids = torch.cat([batch["prompt_input_ids"], batch["completion_input_ids"]], dim=1)
-    mask = torch.cat([batch["prompt_attention_mask"], batch["completion_attention_mask"]], dim=1)
-    width = batch["completion_input_ids"].size(1)
-    oracle = (
-        AutoModelForCausalLM.from_pretrained(export, dtype=torch.bfloat16, attn_implementation="flash_attention_2")
-        .to(ctx.device)
-        .eval()
-    )
-    with torch.no_grad():
-        oracle.get_output_embeddings().weight.mul_(2)
-        logits = oracle(input_ids=ids, attention_mask=mask, use_cache=False).logits[:, :-1, :].float()
-        policy = logits.log_softmax(-1).gather(-1, ids[:, 1:].unsqueeze(-1)).squeeze(-1)[:, -width:]
-        logits = trainer.ref_model(input_ids=ids, attention_mask=mask, use_cache=False).logits[:, :-1, :].float()
-        reference = logits.log_softmax(-1).gather(-1, ids[:, 1:].unsqueeze(-1)).squeeze(-1)[:, -width:]
-        delta = torch.minimum(reference, policy + KL_LOGRATIO_CLAMP) - policy
-        valid = batch["completion_attention_mask"]
-        weights = batch["group_size"].float().reciprocal()
-        expected = BETA * (((delta.exp() - delta - 1) * valid).sum(1) / valid.sum(1) * weights).sum() / weights.sum()
+    batch = pure_kl_batch(trainer)
+    oracle = _fa2_model(export, ctx.device)
+    with doubled_output_head(oracle), torch.no_grad():
+        policy = completion_logps(oracle, batch)
+        reference = completion_logps(trainer.ref_model, batch)
+    expected = pure_kl_objective(policy, reference, batch["completion_attention_mask"], batch["group_size"], BETA)
     del oracle
-    reshard_fsdp2_modules(trainer.model)
-    original = trainer.model.get_output_embeddings().weight.detach().clone()
-    was_training = trainer.model.training
-    trainer.model.eval()
-    try:
-        with torch.no_grad():
-            trainer.model.get_output_embeddings().weight.mul_(2)
-            actual = trainer.compute_loss(trainer.model, batch)
-    finally:
-        reshard_fsdp2_modules(trainer.model)
-        with torch.no_grad():
-            trainer.model.get_output_embeddings().weight.copy_(original)
-        trainer.model.train(was_training)
-    error = abs((actual - expected).item())
-    checks["live_reference_kl_oracle_is_nonzero"] = bool(expected > 0)
-    checks["live_reference_kl_matches_independent_logits"] = error < TOL.exact_objective_rel * expected.item()
-    log(f"native expert-LoRA pure KL: expected={expected.item():.5g}, error={error:.5g}")
+    checks["live_reference_kl_oracle_is_nonzero"], checks["live_reference_kl_matches_independent_logits"] = (
+        doubled_head_kl_verdict(trainer, batch, lambda _model: expected, "native expert-LoRA pure KL")
+    )
 
 
 def run(ctx):
     pin_deterministic_ep_dispatch()
-    paths = [ctx.output_dir]
-    dist.broadcast_object_list(paths, src=0)
-    shared = paths[0]
+    shared = shared_output_dir(ctx)
     base, output = os.path.join(shared, "base"), os.path.join(shared, "train")
     if ctx.rank == 0:
         save_offline_moe_base(base, SEED)
@@ -276,11 +223,7 @@ def run(ctx):
     dist.barrier()
     _kl_oracle(ctx, resumed, export, checks)
     if ctx.rank == 0:
-        served = AutoModelForCausalLM.from_pretrained(export, dtype=torch.bfloat16, attn_implementation="eager")
-        checks["merged_hf_export_loads_and_scores"] = bool(
-            served(torch.tensor([[3, 8, 4, 5, 1]])).logits.isfinite().all()
-        )
-        del served
+        checks["merged_hf_export_loads_and_scores"] = export_scores_finite(export, ctx.device)
     metrics = ctx.metrics(resumed)
     finish_phase(resumed)
     del resumed

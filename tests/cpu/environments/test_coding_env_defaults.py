@@ -24,7 +24,7 @@ import pytest
 from datasets import Dataset
 
 from scripts.environments.inference import run_env
-from src.environments.base import OBJECTIVE_REWARD_KEY, REWARD_COMPONENTS_KEY
+from src.environments.base import REWARD_COMPONENTS_KEY
 from src.environments.envs.tasks.coding.code_contests import CodeContestsEnvironment
 from src.environments.envs.tasks.coding.grading import (
     VERDICT_DETAIL_FULL,
@@ -41,6 +41,7 @@ from src.environments.sandbox.base import SandboxExecutor, SandboxResult
 from src.environments.sandbox.bubblewrap import BubblewrapSandbox
 from src.environments.sandbox.local import LocalSubprocessSandbox
 from src.environments.sandbox.remote import RemoteSandbox
+from src.rewards.terms import OBJECTIVE_REWARD_KEY
 from tests.common.code_contests import RecordingSandboxSession, StubSandbox
 
 _JUDGE = {"source": "judge", "name": "quality", "requirements": [{"name": "done", "description": "Done."}]}
@@ -421,7 +422,7 @@ def test_bubblewrap_confines_only_without_network(fresh_warnings):
     SweEnvironment(sandbox=_bubblewrap(allow_network=False))
     assert not _unconfined_warnings(fresh_warnings)
     SweEnvironment(sandbox=_bubblewrap(allow_network=True))
-    assert len(_unconfined_warnings(fresh_warnings)) == 1, "--share-net gives the program the host's network"
+    assert len(_unconfined_warnings(fresh_warnings)) == 1, "allow_network gives the program the host's network"
 
 
 if __name__ == "__main__":

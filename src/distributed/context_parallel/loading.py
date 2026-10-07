@@ -16,9 +16,9 @@ from transformers import AutoModelForCausalLM
 from src.distributed.context_parallel.config import CPConfig
 from src.distributed.context_parallel.wrapper import patch_model_for_cp
 from src.distributed.expert_parallel.loading import cast_loaded_parameters, load_ep_model
+from src.distributed.expert_parallel.master_weights import restore_fp32_master_parameters
 from src.distributed.expert_parallel.patching import create_ep_buffers, patch_moe_model_for_ep
-from src.distributed.filesystem import sequential_load_within_node
-from src.distributed.loading.master_weights import restore_fp32_master_parameters
+from src.distributed.filesystem import joined_node_load
 from src.distributed.runtime import DeferredRankFailure, get_global_rank, move_model_to_local_device
 from src.models.loading.checkpoint_coverage import from_pretrained_verified
 from src.models.patches.attention import revalidate_attn_kwarg
@@ -45,12 +45,12 @@ def load_model_for_cp(
     For non-MoE models, and for MoE models taking CP without EP.
 
     Args:
-        config: the resolved HF config; required, as in the EP and PP loaders.
-            :func:`validate_attn_implementation` checks the requested backend against it, so an
-            optional one would let a caller install an unvalidated implementation.
+        config: the resolved HF config, REQUIRED — like the EP and PP loaders. It is what
+            :func:`validate_attn_implementation` judges the requested backend against, so an
+            optional one would let a caller that omitted it install an UNVALIDATED implementation.
         model_class: defaults to ``AutoModelForCausalLM``.
         max_concurrent_loading: ranks that may load weights in parallel within a node
-            (passed to :func:`sequential_load_within_node`).
+            (passed to :func:`~src.distributed.filesystem.joined_node_load`).
         ep_config: when given (an ``ep_size == 1`` config), the MoE blocks get the grouped-GEMM
             expert wrappers before the CP wrap — same ordering as EP+CP, so the generation hook and
             the state-dict expert paths land on the inner HF model, not on the CP wrapper. Without
@@ -67,9 +67,9 @@ def load_model_for_cp(
 
     revalidate_attn_kwarg(model_kwargs, config)
 
-    # Sequential loading within each node avoids CPU OOM: each rank loads to CPU, then to GPU.
+    # Bounded ranks per node at a time avoid CPU OOM: each rank loads to CPU, then to GPU.
     precision_guard = DeferredRankFailure(f"FP32-master checkpoint load from {model_name_or_path}")
-    with sequential_load_within_node(max_concurrent=max_concurrent_loading):
+    with joined_node_load(f"CP model load from {model_name_or_path}", max_concurrent_loading):
         model = from_pretrained_verified(
             model_class,
             model_name_or_path,
@@ -95,7 +95,7 @@ def load_model_for_cp(
 
     precision_guard.reject()
 
-    # Before the CP wrap, on the inner HF model: the wrapper carries no tie_weights.
+    # Before the CP wrap, on the inner HF model — the wrapper carries no tie_weights.
     finalize_loaded_model(model)
 
     if ep_config is not None:
@@ -126,7 +126,7 @@ def load_model_for_ep_cp(
     """Load a MoE model with both EP and Ulysses CP support.
 
     Args:
-        config: the resolved HF config; required, see :func:`load_model_for_cp`.
+        config: the resolved HF config, REQUIRED — see :func:`load_model_for_cp`.
         lazy: passed to :func:`load_ep_model`. ``False`` falls back to
             ``from_pretrained`` + EP patching (vs lazy safetensors).
         revision: Hub revision pin, passed to :func:`load_ep_model` so the lazy

@@ -42,6 +42,7 @@ from src.data.pipeline.processing import (
     coordinated_filter,
     coordinated_map,
     report_rejected_rows,
+    resolve_map_num_proc,
 )
 from src.data.probe_consensus import agree_probe_across_ranks
 from src.distributed.pipeline_parallel.losses import (
@@ -52,6 +53,7 @@ from src.distributed.pipeline_parallel.losses import (
 )
 from src.models.structure import resolve_tokenizer
 from src.trainers.mixins.base import DistributedTrainerMixin
+from src.trainers.mixins.trl_dataset_prep import CoordinatedTRLDatasetPrepMixin
 from src.trainers.mixins.validation import ctor_config, ctor_positions
 from src.trainers.reward.pooling import (
     decode_pooling_plane,
@@ -82,7 +84,7 @@ def _rendered_sides_fit(row: dict, tokenizer, max_length: int) -> bool:
     )
 
 
-class DistributedRewardTrainer(DistributedTrainerMixin, RewardTrainer):
+class DistributedRewardTrainer(DistributedTrainerMixin, CoordinatedTRLDatasetPrepMixin, RewardTrainer):
     """TRL RewardTrainer plus EP/TP/PP via DistributedTrainerMixin (CP excluded;
     pooled representations are incompatible with sequence splitting)."""
 
@@ -153,7 +155,7 @@ class DistributedRewardTrainer(DistributedTrainerMixin, RewardTrainer):
             logger.info(f"Dataset '{dataset_name}' already rendered, skipping the VLM preference map")
             return dataset
 
-        num_proc = self._dataset_map_num_proc(args.dataset_num_proc)
+        num_proc = resolve_map_num_proc(args.dataset_num_proc)
         dataset = coordinated_map(
             dataset,
             render_vlm_preference_row,

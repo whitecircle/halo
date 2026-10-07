@@ -3,12 +3,22 @@
 import hashlib
 
 import numpy as np
+import pyarrow as pa
+import torch.distributed as dist
 from accelerate.logging import get_logger
 from datasets import Dataset, DatasetDict, concatenate_datasets, load_dataset, load_from_disk
+from datasets.features.features import require_decoding
 
 from src.data.pipeline.preprocessed_metadata import is_preprocessed_dataset
-from src.data.pipeline.processing import coordinated_filter, missing_render_column_splits, require_render_column
-from src.data.probe_consensus import agree_probe_across_ranks
+from src.data.pipeline.processing import (
+    carry_cache_key,
+    coordinated_filter,
+    missing_render_column_splits,
+    require_render_column,
+    run_load_rank_first,
+)
+from src.data.probe_consensus import agree_input_probe_across_ranks, agree_probe_across_ranks
+from src.data.sources.dataset_cache import HALO_S3_DATASET_CACHE_DIR
 from src.data.sources.paths import (
     DATA_FILE_BUILDERS,
     eval_split_name,
@@ -19,8 +29,15 @@ from src.data.sources.paths import (
 from src.data.sources.s3_client import load_dataset_from_s3_uri
 from src.data.sources.sharded_dataset import ShardedDatasetLoader
 from src.data.vlm import VLM_IMAGE_COLUMNS, VLM_RAW_IMAGE_COLUMNS, carried_image_columns
-from src.distributed.filesystem import fs_aware_main_first, store_join_recorded_failure
-from src.distributed.runtime import get_global_world_size, rank_consensus
+from src.distributed.filesystem import store_join_recorded_failure
+from src.distributed.runtime import (
+    agree_across_ranks,
+    get_global_world_size,
+    get_local_world_size,
+    rank_consensus,
+    reject_divergent_settings,
+)
+from src.log import KEY_PREVIEW_COUNT
 
 # INFO opt-in (the convention vlm_setup and the training scripts use): this module's INFO lines are
 # the run's only record of what data actually loaded (columns kept, split sizes, source dispatch).
@@ -31,12 +48,16 @@ _PLACEHOLDER_TEST_ROWS = 100
 # Fixed so every rank derives the same train/test split independently of the caller's data seed.
 _TRAIN_TEST_SPLIT_SEED = 42
 
-# Default for the caller-facing ``seed`` (ratio-subsetting), shared so the entry points and the
-# subset helpers cannot drift onto different defaults.
+# Rows per split hashed into the identity the holders of one replica compare: spread over the split,
+# so a re-push that kept the row count still differs somewhere among them.
+_IDENTITY_SAMPLE_ROWS = 16
+
+# Default for the caller-facing ``seed`` (ratio-subsetting). One spelling, so the entry points and
+# the subset helpers cannot drift onto different defaults.
 _DEFAULT_DATA_SEED = 42
 
 # ``load_datasets``' conversation-column fallback, and the sentinel separating it from a column the
-# caller declared. Only a declared column is a render contract worth failing on: the
+# caller actually DECLARED. Only a declared column is a render contract worth failing on: the
 # preference/reward/classification scripts pass no field and carry no such column.
 _FALLBACK_CONVERSATION_FIELD = "conversation"
 _UNDECLARED = object()
@@ -48,9 +69,9 @@ _VISION_ROUTE_COLUMN = VLM_RAW_IMAGE_COLUMNS[0]
 # The tools column TRL's RewardTrainer hands to the chat template (:func:`alias_tools_column`).
 _TOOLS_ROUTE_COLUMN = "tools"
 
-# Columns whose loss changes what a run trains on: the row fields of the supported dataset formats
-# and the tokenized triple a prepared dataset carries. The run's own declared render columns are
-# threaded in by the caller and pinned through the concatenation rather than only warned about.
+# Columns whose silent loss changes what a run trains on: the row fields of the supported dataset
+# formats and the tokenized triple a prepared dataset carries. The run's OWN declared render columns
+# are threaded in by the caller and pinned through the concatenation rather than merely warned about.
 _ESSENTIAL_COLUMNS = (
     _FALLBACK_CONVERSATION_FIELD,
     "prompt",
@@ -123,8 +144,8 @@ def load_dataset_from_source(path: str) -> Dataset | DatasetDict:
 
 
 def _require_train_test_splits(ds: DatasetDict, path: str) -> None:
-    """Raise on a partial DatasetDict: sharded/preprocessed loads skip missing splits, and the
-    trainers index ``ds["test"]`` unconditionally, giving a ``KeyError`` far from the cause."""
+    """Fail loud on a partial DatasetDict: sharded/preprocessed loads skip missing splits, and the
+    trainers index ``ds["test"]`` unconditionally — a bare ``KeyError`` far from the cause."""
     missing = [split for split in ("train", "test") if split not in ds]
     if missing:
         raise ValueError(
@@ -139,7 +160,8 @@ def _warn_test_size_ignored(path: str, test_size: float | None, kind: str) -> No
 
     It re-splits only a dataset loaded whole; a sharded or pre-processed one carries the split that
     was decided at preparation time, so a ``test_size`` in the training YAML does nothing. Silent
-    when unset, so a normal run does not warn.
+    when unset — a warning on every normal run only trains operators to ignore this module's
+    warnings.
     """
     if test_size is None:
         return
@@ -158,46 +180,135 @@ def _placeholder_test_split(train_ds: Dataset, path: str) -> DatasetDict:
     return DatasetDict({"train": train_ds, "test": train_ds.select(range(min(_PLACEHOLDER_TEST_ROWS, len(train_ds))))})
 
 
-def _sharded_load_with_join(loader: ShardedDatasetLoader) -> DatasetDict:
-    """This rank's shard load, joined across the world on the c10d store.
+def _load_sharded(
+    path: str, data_parallel_rank: int, data_parallel_size: int
+) -> tuple[DatasetDict, ShardedDatasetLoader]:
+    """This rank's shard load, joined across the world on the c10d store, with the loader that read it.
 
-    A rank-local failure (a cold per-shard cache during an S3 outage, ENOSPC on one volume) reaches
-    every rank as the real cause instead of blocking the peers, and the widely varying first-run
-    download times of disjoint shards are absorbed under ``DIST_STORE_TIMEOUT_HOURS`` rather than the
-    next collective's NCCL budget. Collective-equivalent: the sharded verdict is agreed beforehand.
+    Two jobs in one seam: a rank-local failure (a cold per-shard cache during an S3 outage, ENOSPC on
+    one volume) reaches every rank as the real cause instead of stranding the peers, and the very
+    different first-run download times of disjoint shards are absorbed under
+    ``DIST_STORE_TIMEOUT_HOURS`` rather than eating the next collective's NCCL budget.
+    Collective-equivalent — the sharded verdict is cross-rank-agreed before this point.
     """
+    logger.info(f"Loading sharded dataset from {path}")
+    logger.info(f"  Data parallel rank: {data_parallel_rank}/{data_parallel_size}")
+    loader = ShardedDatasetLoader(dataset_path=path, global_rank=data_parallel_rank, world_size=data_parallel_size)
     result, failure = None, None
     try:
         result = loader.load()
     except BaseException as e:  # a KeyboardInterrupt must reach the join too, or peers hang
         failure = e
     store_join_recorded_failure("sharded_dataset_load", failure, "Sharded dataset load")
-    _reject_divergent_split_presence(result, loader.dataset_path)
-    return result
+    # Keyed by split, so a split whose index only some ranks found diverges here as well.
+    reject_divergent_settings(
+        loader.shard_index_digests(),
+        f"The shard index of {loader.dataset_path}",
+        "Every rank assigns its shards off its own read of each split's shard_index.json, so ranks "
+        "reading different ones (a stale per-node copy or control-file mirror, a re-prepare racing "
+        "the launch) load overlapping or missing shards.",
+    )
+    _reject_divergent_replicas(result, path, replica=data_parallel_rank, num_replicas=data_parallel_size)
+    return result, loader
 
 
-def _reject_divergent_split_presence(dataset: DatasetDict, path: str) -> None:
-    """Raise when the set of splits a load produced differs across ranks.
+def _split_identity(split: Dataset) -> str:
+    """Row count, schema and a digest of evenly spaced rows — what the holders of one replica compare.
 
-    Which splits a source yields drives how many coordinated dataset operations its consumers run, so
-    a rank that reads a different set desynchronizes the store phases its peers enter.
-    ``ShardedDatasetLoader.load`` skips a split whose index it cannot find, and a half-populated cache
-    directory does the same to a plain load. Verdict and refusal are both world-agreed.
+    Media columns (images, audio) stay out of the digest: their stored ``path`` can name a file under
+    a node's own HF cache, which differs between nodes for the same rows. The sampled values reach the
+    hash one at a time through :func:`_feed_values`, since a preprocessed VLM row carries megabytes of
+    ``pixel_values``.
     """
-    if get_global_world_size() <= 1:
+    rows = len(split)
+    columns = [name for name, feature in split.features.items() if not require_decoding(feature)]
+    picks = (
+        sorted({i * (rows - 1) // (_IDENTITY_SAMPLE_ROWS - 1) for i in range(_IDENTITY_SAMPLE_ROWS)})
+        if rows and columns
+        else []
+    )
+    hasher = hashlib.blake2b(str(split.features).encode(), digest_size=8)
+    arrow_rows = split.with_format("arrow")
+    for pick in picks:
+        row = arrow_rows[pick]
+        for name in columns:
+            _feed_values(hasher, row.column(name).combine_chunks())
+    return f"{rows} rows, content {hasher.hexdigest()}"
+
+
+def _feed_values(hasher, array: pa.Array) -> None:
+    """Feed ``array``'s logical values to ``hasher`` leaf array by leaf array, never as a ``repr``.
+
+    Equal values feed equal bytes whatever the chunking, slicing or buffer layout of the copy they
+    were read from — each level's nulls and list lengths, then its leaves — and the bytes held at once
+    are one leaf array or one binary value.
+    """
+    if isinstance(array.type, pa.BaseExtensionType):
+        array = array.storage
+    if pa.types.is_dictionary(array.type):
+        array = array.dictionary_decode()
+    hasher.update(array.is_null().to_numpy(zero_copy_only=False).tobytes())
+    kind = array.type
+    if pa.types.is_struct(kind):
+        for field in array.flatten():
+            _feed_values(hasher, field)
+    elif pa.types.is_list(kind) or pa.types.is_large_list(kind) or pa.types.is_fixed_size_list(kind):
+        hasher.update(array.value_lengths().fill_null(0).to_numpy(zero_copy_only=False).astype(np.int64).tobytes())
+        _feed_values(hasher, array.flatten())
+    elif pa.types.is_integer(kind) or pa.types.is_floating(kind) or pa.types.is_boolean(kind):
+        hasher.update(array.drop_null().to_numpy(zero_copy_only=False).tobytes())
+    else:
+        for value in array.drop_null():
+            # Binary and string values hash their own buffer; the rare remaining types are small.
+            payload = value.as_buffer() if hasattr(value, "as_buffer") else repr(value.as_py()).encode()
+            hasher.update(len(payload).to_bytes(8, "little"))
+            hasher.update(payload)
+
+
+def _reject_divergent_replicas(dataset: DatasetDict, path: str, *, replica: int, num_replicas: int) -> None:
+    """Fail loud when ranks that must hold the same rows loaded different ones. COLLECTIVE.
+
+    A replicated load holds one copy of the rows on every rank (``num_replicas=1``); a sharded one
+    holds one per data-parallel replica, shared by its TP/CP/ETP siblings and pipeline peers. Every
+    rank reads its own copy of the source — a per-node S3 cache or pre-staged directory, a cached hub
+    revision — so one node serving a stale copy trains other rows than its peers with nothing
+    raised: rows duplicated or skipped across DP ranks, a hang where step counts differ, and under PP
+    a first stage forwarding one row set while the last stage scores another's labels. The identity
+    names every split, so a split one copy lacks diverges too — the split set decides how many
+    coordinated operations the consumers run.
+
+    One all-reduce when every rank holds the same replica; a gather of one short identity per rank
+    otherwise, skipped when no replica has a second holder.
+    """
+    world = get_global_world_size()
+    if world <= 1 or num_replicas >= world:
         return
-    diverged = []
-    for name in ("train", "test"):
-        everywhere, anywhere = rank_consensus(name in dataset)
-        if anywhere and not everywhere:
-            diverged.append(name)
-    if diverged:
-        raise ValueError(
-            f"Dataset {path} loaded split(s) {diverged} on some ranks but not others — the per-rank "
-            f"read disagreed (a transient S3 credential/throttling fault, or a half-populated cache "
-            f"directory, is the usual cause). Ranks would then run different numbers of coordinated "
-            f"dataset operations. Re-launch, or pre-cache the dataset so every rank reads the same source."
-        )
+    identity = {name: _split_identity(dataset[name]) for name in sorted(dataset)}
+    if num_replicas == 1 and agree_across_ranks(identity).agreed:
+        return
+    gathered: list = [None] * world
+    dist.all_gather_object(gathered, (replica, identity))
+    holders: dict[int, dict[str, list[int]]] = {}
+    for rank, (rank_replica, rank_identity) in enumerate(gathered):
+        holders.setdefault(rank_replica, {}).setdefault(repr(rank_identity), []).append(rank)
+    divergent = [(held, versions) for held, versions in sorted(holders.items()) if len(versions) > 1]
+    if not divergent:
+        return
+    held, versions = divergent[0]
+    local_world = get_local_world_size()
+    described = "; ".join(
+        f"ranks {ranks[:KEY_PREVIEW_COUNT]}{'…' if len(ranks) > KEY_PREVIEW_COUNT else ''} "
+        f"(node(s) {sorted({rank // local_world for rank in ranks})[:KEY_PREVIEW_COUNT]}) hold {version}"
+        for version, ranks in sorted(versions.items(), key=lambda item: item[1][0])
+    )
+    scope = f" of data-parallel replica {held}" if num_replicas > 1 else ""
+    raise ValueError(
+        f"Dataset {path}: the ranks{scope} that must hold the same rows loaded different ones — "
+        f"{described}. Each rank reads its own copy of the source, so a node serving a stale one (S3 "
+        f"unreachable there with an old cache under {HALO_S3_DATASET_CACHE_DIR}, an older pre-staged "
+        f"directory, a different cached hub revision) trains other rows than its peers. Re-sync or "
+        f"clear the stale copy and relaunch."
+    )
 
 
 def _load_dataset_from_path(
@@ -215,63 +326,71 @@ def _load_dataset_from_path(
     reads its validation split as test; with neither, train is re-split by test_size, else its first
     100 rows are used as test.
     ``placeholder_test=False`` returns a train-only source as a train-only ``DatasetDict`` instead.
+    A corpus of several entries owns that decision itself: seeding a held-out split with an entry's
+    own training rows is only acceptable when nothing else can supply one.
     """
-    # Cross-rank-agreed probe: a per-rank S3-creds fault must not split ranks onto different data
-    # paths. No dp_size gate: a sharded layout has no root dataset_info.json, so a fall-through load
-    # fails at dp==1.
+    # Cross-rank-agreed probe: a per-rank S3-creds flake must not split ranks onto different data paths.
+    # No dp_size gate — a sharded layout has no root dataset_info.json, so a fall-through load crashes at dp==1.
     if is_sharded_dataset_coordinated(path):
-        logger.info(f"Loading sharded dataset from {path}")
-        logger.info(f"  Data parallel rank: {data_parallel_rank}/{data_parallel_size}")
-        # Every sharded load passes through here, single path and list entry alike.
+        # The single seam every sharded load passes through — single path and each list entry alike.
         _warn_test_size_ignored(path, test_size, kind="sharded")
-        loader = ShardedDatasetLoader(
-            dataset_path=path,
-            global_rank=data_parallel_rank,
-            world_size=data_parallel_size,
+        return _load_sharded(path, data_parallel_rank, data_parallel_size)[0], True
+    return _load_replicated(path, test_size, placeholder_test=placeholder_test), False
+
+
+def _load_replicated(path: str, test_size: float | None, *, placeholder_test: bool) -> DatasetDict:
+    """A non-sharded source, loaded whole on every rank and agreed across them.
+
+    The first run fills the source's cache (an S3 download, a hub prepare, the split's indices
+    file); the rest read it back.
+    """
+    dataset = run_load_rank_first(
+        lambda: _load_whole_dataset(path, test_size, placeholder_test=placeholder_test), f"loading dataset {path}"
+    )
+    _reject_divergent_replicas(dataset, path, replica=0, num_replicas=1)
+    return dataset
+
+
+def _load_whole_dataset(path: str, test_size: float | None, *, placeholder_test: bool) -> DatasetDict:
+    """One rank's read of a non-sharded source, shaped into train/test (:func:`_load_dataset_from_path`)."""
+    dataset = load_dataset_from_source(path)
+
+    if isinstance(dataset, Dataset):
+        if test_size is not None:
+            return dataset.train_test_split(test_size, seed=_TRAIN_TEST_SPLIT_SEED)
+        if placeholder_test:
+            return _placeholder_test_split(dataset, path)
+        return DatasetDict({"train": dataset})
+
+    if "train" not in dataset:
+        available = [str(s) for s in dataset]
+        train_like = [s for s in available if s.startswith("train")]
+        suggestion = (train_like or available)[0]
+        raise ValueError(
+            f"Dataset {path} has no 'train' split (available splits: {available}). "
+            f"Append an '@split' selector to pick one, e.g. '{path}@{suggestion}'."
         )
-        return _sharded_load_with_join(loader), True
-
-    with fs_aware_main_first("dataset_load"):
-        dataset = load_dataset_from_source(path)
-
-        if isinstance(dataset, Dataset):
-            if test_size is not None:
-                dataset = dataset.train_test_split(test_size, seed=_TRAIN_TEST_SPLIT_SEED)
-            elif placeholder_test:
-                dataset = _placeholder_test_split(dataset, path)
-            else:
-                dataset = DatasetDict({"train": dataset})
-        elif isinstance(dataset, DatasetDict):
-            if "train" not in dataset:
-                available = [str(s) for s in dataset]
-                train_like = [s for s in available if s.startswith("train")]
-                suggestion = (train_like or available)[0]
-                raise ValueError(
-                    f"Dataset {path} has no 'train' split (available splits: {available}). "
-                    f"Append an '@split' selector to pick one, e.g. '{path}@{suggestion}'."
-                )
-            held_out = eval_split_name(dataset)
-            if held_out not in (None, "test"):
-                logger.info(f"Dataset {path} has no test split; its {held_out!r} split is the test split")
-                dataset["test"] = dataset.pop(held_out)
-            if "test" not in dataset:
-                if test_size is not None:
-                    dataset = dataset["train"].train_test_split(test_size, seed=_TRAIN_TEST_SPLIT_SEED)
-                elif placeholder_test:
-                    dataset = _placeholder_test_split(dataset["train"], path)
-            elif test_size is not None:
-                combined = concatenate_datasets([dataset["train"], dataset["test"]])
-                dataset = combined.train_test_split(test_size, seed=_TRAIN_TEST_SPLIT_SEED)
-                logger.info(f"Re-split dataset {path} with test_size={test_size}")
-
-    return dataset, False
+    held_out = eval_split_name(dataset)
+    if held_out not in (None, "test"):
+        logger.info(f"Dataset {path} has no test split; its {held_out!r} split is the test split")
+        dataset["test"] = dataset.pop(held_out)
+    if "test" not in dataset:
+        if test_size is not None:
+            return dataset["train"].train_test_split(test_size, seed=_TRAIN_TEST_SPLIT_SEED)
+        if placeholder_test:
+            return _placeholder_test_split(dataset["train"], path)
+    elif test_size is not None:
+        combined = concatenate_datasets([dataset["train"], dataset["test"]])
+        logger.info(f"Re-split dataset {path} with test_size={test_size}")
+        return combined.train_test_split(test_size, seed=_TRAIN_TEST_SPLIT_SEED)
+    return dataset
 
 
 def _content_signature(dataset: DatasetDict) -> str:
     """Content-derived, process-stable signature of a freshly loaded DatasetDict.
 
-    The raw per-split ``_fingerprint``, read before any coordinated map/filter, whose writer and
-    loader fingerprints diverge. At load time it is content-derived and stable within a filesystem
+    The raw per-split ``_fingerprint``, read BEFORE any coordinated map/filter (whose writer and
+    loader fingerprints diverge). At load time it is content-derived and stable within a filesystem
     domain, so a re-push with identical shapes still changes it and the forced cache keys built from
     it cannot serve stale mapped rows.
     """
@@ -294,31 +413,25 @@ def _get_subset_from_dataset_dict(
 ) -> DatasetDict:
     """Subset both train and test to dataset_ratio (test uses seed+1 to avoid overlap).
 
-    A corpus entry that shipped no test split stays train-only; the ratio applies to what is there.
+    A corpus entry that shipped no test split stays train-only — the ratio applies to what is there.
     """
     dataset["train"] = _get_subset_from_dataset(dataset["train"], dataset_ratio, seed)
     if "test" in dataset:
-        dataset["test"] = _get_subset_from_dataset(
-            dataset["test"], dataset_ratio, seed + 1
-        )  # Different seed for test to avoid overlap
+        dataset["test"] = _get_subset_from_dataset(dataset["test"], dataset_ratio, seed + 1)
     return dataset
 
 
 def _filter_empty_conversations(dataset: Dataset, conversation_field: str, split_name: str = "") -> Dataset:
     """Filter out rows where the conversation field is None or empty.
 
-    ``split_name`` is threaded into the cache desc so train/test caches do not collide. No-op when
-    the field is absent, since filtering on a non-existent column would drop every row.
+    ``split_name`` is threaded into the cache desc so train/test caches don't collide. No-op when the
+    field is absent (else filtering on a non-existent column would drop every row).
     """
     if conversation_field not in dataset.column_names:
         return dataset
 
     def has_valid_conversation(example):
-        return (
-            conversation_field in example
-            and example[conversation_field] is not None
-            and len(example[conversation_field]) > 0
-        )
+        return example[conversation_field] is not None and len(example[conversation_field]) > 0
 
     # num_proc=None avoids spawning processes during the distributed loading phase.
     desc = f"filtering empty {conversation_field}"
@@ -334,11 +447,12 @@ def _filter_empty_conversations(dataset: Dataset, conversation_field: str, split
 
 
 def reject_image_columns(dataset, method: str) -> None:
-    """Raise when a method with no vision path is handed a dataset carrying images.
+    """Fail loud when a method with NO vision path is handed a dataset carrying images.
 
-    Every such method prunes its dataset to the columns it names, so an image column would be dropped
-    with no diagnostic and the run would train on text alone at full cost. Read off the shared
-    :data:`~src.data.vlm.VLM_IMAGE_COLUMNS` spellings.
+    Every such method prunes its dataset to the columns it names, so an image column is dropped
+    without a word and the run trains on the rows' text alone at full cost. Read off the shared
+    :data:`~src.data.vlm.VLM_IMAGE_COLUMNS` spellings, so a VLM-capable method routes on the
+    same declaration a text-only method refuses.
     """
     carried = sorted(carried_image_columns(dataset))
     if not carried:
@@ -374,7 +488,9 @@ def _alias_render_column(
         )
     return DatasetDict(
         {
-            name: split.rename_column(field, target) if field in split.column_names else split
+            name: carry_cache_key(split, split.rename_column(field, target), f"rename:{field}->{target}")
+            if field in split.column_names
+            else split
             for name, split in dataset.items()
         }
     )
@@ -384,10 +500,10 @@ def alias_images_column(dataset: DatasetDict, images_field: str | None, path: st
     """Rename a declared image column to ``images``, the spelling the vision routes hard-code.
 
     TRL's preference trainers decide their vision route by probing a sample for an ``image`` /
-    ``images`` key, and their signature columns name only those two, so images stored under any
+    ``images`` key, and their signature columns name only those two — so images stored under any
     other name are pruned to text while :func:`~src.data.vlm.is_vlm_run`, which reads
-    ``images_field``, calls the same run multimodal. Aliasing ahead of the dispatch keeps the two
-    verdicts identical.
+    ``images_field``, calls the same run multimodal. Aliasing ahead of the dispatch is what keeps
+    the two verdicts identical.
     """
     return _alias_render_column(
         dataset, "images_field", images_field, _VISION_ROUTE_COLUMN, VLM_RAW_IMAGE_COLUMNS, path
@@ -395,21 +511,22 @@ def alias_images_column(dataset: DatasetDict, images_field: str | None, path: st
 
 
 def alias_tools_column(dataset: DatasetDict, tools_field: str | None, path: str) -> DatasetDict:
-    """Rename a declared tools column to ``tools``, the only column TRL's ``RewardTrainer`` renders.
+    """Rename a declared tools column to ``tools``, the one column TRL's ``RewardTrainer`` renders.
 
     The reward trainer chat-templates ``chosen``/``rejected`` itself and hands the row's ``tools``
     (a tool-schema list or its JSON string) to the template; no other column reaches it, so tools
-    stored under another name would render without tools and without a diagnostic.
+    stored under another name would render toolless without a word.
     """
     return _alias_render_column(dataset, "tools_field", tools_field, _TOOLS_ROUTE_COLUMN, (_TOOLS_ROUTE_COLUMN,), path)
 
 
 def _require_tools_field_somewhere(paths: list, datasets: list, tools_field: str) -> None:
-    """Hold ``tools_field`` to the dataset list rather than to each entry.
+    """Hold ``tools_field`` to the dataset LIST, not to each entry.
 
-    A mixed corpus is a legitimate shape (a tool-use dataset concatenated with plain chat), and a
-    source without the column renders its rows without tools. Only a knob no source can honour is
-    treated as a typo and raises.
+    A mixed corpus is a legitimate shape — a tool-use dataset concatenated with plain chat — and a
+    source without the column simply renders its rows without tools, which is what those rows are.
+    Only a knob NO source can honour is a typo, and that one raises: the alternative is a run whose
+    entire tool-calling corpus renders toolless in silence.
     """
     without = [
         entry_path
@@ -435,9 +552,9 @@ def _apply_conversation_field(
 ) -> None:
     """Drop rows with an empty conversation from whichever of train/test ``dataset`` carries, in place.
 
-    ``required`` (the caller declared its render column, see :data:`_UNDECLARED`) additionally makes
-    the column's absence fatal instead of the no-op filtering below, naming ``knob``, the config
-    field the script reads the column name from.
+    ``required`` (the caller DECLARED its render column, see :data:`_UNDECLARED`) additionally makes
+    the column's absence fatal instead of the silent no-op filtering below, naming ``knob``, the
+    config field the script reads the column name from.
     """
     if conversation_field is None:
         return
@@ -449,11 +566,12 @@ def _apply_conversation_field(
 
 
 def _find_common_columns(datasets):
-    """Find columns that exist in all datasets with compatible types."""
-    if not datasets:
-        return []
+    """Columns every dataset carries with one feature type, in the first dataset's column order.
 
-    common_columns = set(datasets[0].column_names)
+    A list, never a set: the order becomes the concatenation's column order, which every map keying
+    on ``column_names`` reads, and a set's string order is hash-randomized per process — per rank.
+    """
+    common_columns = list(datasets[0].column_names)
 
     feature_types = {col: str(datasets[0].features[col]) for col in common_columns}
 
@@ -463,21 +581,22 @@ def _find_common_columns(datasets):
                 common_columns.remove(col)
                 continue
 
-            if col in feature_types and str(ds.features[col]) != feature_types[col]:
+            if str(ds.features[col]) != feature_types[col]:
                 common_columns.remove(col)
                 logger.warning(
                     f"Removing column '{col}' due to schema mismatch: {feature_types[col]} vs {str(ds.features[col])}"
                 )
 
-    return list(common_columns)
+    return common_columns
 
 
 def _pin_declared_columns(datasets: list[Dataset], declared_columns) -> list[Dataset]:
     """Union-fill each declared render column into the entries that do not carry it.
 
-    A mixed corpus is a legitimate shape, but the schema intersection below would drop the column
-    from the whole concatenation. A null fill is what a source without the column means, and it takes
-    the carrying entry's feature type so it survives the intersection.
+    A mixed corpus is a legitimate shape, but the schema intersection below would drop the column from
+    the WHOLE concatenation and render every row toolless. A null fill is what a source without the
+    column means (``chat_template_kwargs`` passes no ``tools`` for ``None``), and it takes the carrying
+    entry's feature type so it survives the intersection instead of being dropped as a mismatch.
     """
     donor_features = {}
     for column in declared_columns:
@@ -510,8 +629,9 @@ def _normalize_dataset_schema(datasets, declared_columns=()):
     if not common_columns:
         raise ValueError("No common columns found across datasets! Cannot concatenate.")
 
-    # Warn once, and only about essential columns some dataset actually had: a column no dataset
-    # carries was never lost, and warning about it on every multi-dataset run would be noise.
+    # Warn once, and only about essential columns some dataset actually HAD: a column no dataset
+    # carries was never lost, and warning about it on every multi-dataset run just trains operators
+    # to ignore this module's warnings.
     essential_columns = (*_ESSENTIAL_COLUMNS, *declared_columns)
     present_somewhere = set().union(*(ds.column_names for ds in datasets))
     lost_essentials = sorted(
@@ -546,11 +666,11 @@ def load_datasets(
     A declared ``conversation_field`` must exist; the refusal names ``conversation_knob``, the config
     field the caller read the column name from (``prompt_field`` on the GRPO prompt scripts).
     """
-    # No outer barrier: _load_dataset_from_path coordinates the downloads and the rest is
-    # rank-deterministic.
+    # No outer barrier: _load_dataset_from_path coordinates the downloads and the rest is rank-deterministic.
     if dataset_ratio is None:
-        # Unset means the whole dataset, which is the normal case; warning here would fire on almost
-        # every run to restate a default.
+        # Unset means "use all of it", which is the normal case — almost no config sets a ratio. A
+        # warning here fires on almost every run to restate a default, which only trains operators to
+        # ignore warnings from this module.
         dataset_ratio = [1] * len(path) if isinstance(path, list) else 1
     if isinstance(path, list) and isinstance(dataset_ratio, (int, float)):
         dataset_ratio = [float(dataset_ratio)] * len(path)
@@ -573,30 +693,25 @@ def load_datasets(
     # below must carry the DP identity.
     sharded = False
     if isinstance(path, list):
-        # Load each entry in full: a list is replicated and accelerate shards the concatenation once.
-        # Passing DP rank/size here would double-shard a sharded entry (1/dp of its own 1/dp),
-        # dropping data with no diagnostic.
+        # Load each entry FULLY: a list is replicated and accelerate shards the concatenation once.
+        # Passing DP rank/size here would double-shard a sharded entry (1/dp of its own 1/dp) — silent data loss.
         loaded = [_load_dataset_from_path(d, test_size, placeholder_test=False) for d in path]
         all_datasets = [entry_ds for entry_ds, _ in loaded]
         content_sig = ",".join(_content_signature(d) for d in all_datasets)
 
         # Per entry, so a partial split or a missing render column names the offending dataset rather
-        # than the whole list. A sharded entry missing a split is a per-rank shard-index fault rather
-        # than a source that ships only train, so it raises; a plain train-only pool is handled below.
+        # than the whole list. A SHARDED entry missing a split is a per-rank shard-index fault, not a
+        # source that ships only train — fail loud there; a plain train-only pool is handled below.
         for entry_path, (ds_dict, entry_sharded) in zip(path, loaded, strict=True):
             if entry_sharded:
                 _require_train_test_splits(ds_dict, entry_path)
-            else:
-                # An entry's split set decides how many coordinated operations run over it below, so
-                # a per-rank read that disagrees would desynchronize the store phases.
-                _reject_divergent_split_presence(ds_dict, entry_path)
             _apply_conversation_field(
                 ds_dict, entry_path, conversation_field, required=declared_conversation_field, knob=conversation_knob
             )
         if tools_field:
             _require_tools_field_somewhere(path, all_datasets, tools_field)
 
-        # Declared render columns are contracts rather than candidates for the schema intersection:
+        # Declared render columns are contracts, not merely candidates for the schema intersection:
         # pinned through the concatenation below, then re-checked on its result.
         declared_render_columns = {
             knob: column
@@ -614,8 +729,8 @@ def load_datasets(
         ]
         ds = DatasetDict()
 
-        # An entry that ships no test split contributes training rows only, rather than 100 of its
-        # own train rows into a sibling's real held-out split.
+        # Held-out means held out: an entry that ships no test split contributes training rows only,
+        # never 100 of its own train rows into a sibling's real held-out split.
         train_datasets = [d["train"] for d in truncated_datasets]
         test_datasets = [d["test"] for d in truncated_datasets if "test" in d]
         train_only_entries = [p for p, d in zip(path, truncated_datasets, strict=True) if "test" not in d]
@@ -629,8 +744,8 @@ def load_datasets(
         logger.info("Normalizing dataset schemas before concatenation...")
 
         # One column intersection over everything that gets concatenated: only some entries may
-        # contribute test rows, and a per-side intersection would render the two splits under
-        # different schemas, which the shared row processor downstream cannot map.
+        # contribute test rows, and a per-side intersection would then render the two splits under
+        # different schemas — which the shared row processor downstream cannot map.
         num_train = len(train_datasets)
         normalized = _normalize_dataset_schema(train_datasets + test_datasets, declared_render_columns.values())
         train_datasets, test_datasets = normalized[:num_train], normalized[num_train:]
@@ -642,26 +757,26 @@ def load_datasets(
             logger.info(f"Concatenating {len(test_datasets)} test datasets")
             ds["test"] = concatenate_datasets(test_datasets)
         else:
-            # No entry shipped one, so there is no held-out split to protect: the same fallback the
+            # No entry shipped one, so there is no held-out split to protect — same last resort the
             # single-path load takes, over the whole corpus.
             ds["test"] = _placeholder_test_split(ds["train"], corpus_path)["test"]
 
         # The pin has to hold on the result: a declared column the intersection dropped anyway (a
         # schema mismatch across the entries, which no null fill can bridge) would render the whole
-        # corpus without it, and for tools_field nothing downstream would report that.
+        # corpus without it, and for tools_field nothing downstream would ever say so.
         for knob, column in declared_render_columns.items():
             require_render_column(ds, corpus_path, knob, column)
 
     else:
         ds, sharded = _load_dataset_from_path(path, test_size, data_parallel_rank, data_parallel_size)
-        # Only a raw sharded load can return a partial DatasetDict (missing splits are skipped).
+        # Only a raw sharded load can return a partial DatasetDict (missing splits are skipped) — fail loud here.
         _require_train_test_splits(ds, path)
         content_sig = _content_signature(ds)
         _apply_conversation_field(
             ds, path, conversation_field, required=declared_conversation_field, knob=conversation_knob
         )
         if tools_field:
-            # Optional knob, so a typo does not surface downstream: rows render without tools.
+            # Optional knob, so a typo NEVER surfaces downstream: rows just render without tools.
             require_render_column(ds, path, "tools_field", tools_field)
         ds = _get_subset_from_dataset_dict(ds, dataset_ratio, seed)
 
@@ -683,8 +798,8 @@ def load_datasets(
     logger.info(f"Columns in test dataset: {ds['test'].column_names}")
 
     # HF's own fingerprints diverge between writer and loader ranks, breaking downstream cache keys.
-    # Unguarded: a failure here would leave the ranks disagreeing on every downstream cache key, and
-    # string formatting and attribute stamping have no expected failure mode.
+    # Unguarded: a failure here means the ranks disagree on every downstream cache key, which is data
+    # corruption by another name — string formatting and attribute stamping have no expected failure.
     path_repr = ",".join(path) if isinstance(path, list) else str(path)
     ratio_repr = ",".join([str(r) for r in dataset_ratio]) if isinstance(dataset_ratio, list) else str(dataset_ratio)
     meta = (
@@ -692,7 +807,7 @@ def load_datasets(
         f"|{conversation_field}|{content_sig}"
     )
     # Without the DP identity, equal-length shards stamp identical keys and every downstream
-    # coordinated map/filter cache collides, so non-writer ranks would load rank 0's mapped shard.
+    # coordinated map/filter cache collides — non-writer ranks would load rank 0's mapped shard.
     if sharded:
         meta += f"|dp{data_parallel_rank}/{data_parallel_size}"
     base_fp = hashlib.md5(meta.encode()).hexdigest()
@@ -708,8 +823,8 @@ def is_sharded_dataset_coordinated(path) -> bool:
     """``ShardedDatasetLoader.is_sharded_dataset`` agreed across all ranks.
 
     The per-rank S3 probe can transiently disagree (a creds error returns False on some ranks),
-    splitting ranks onto sharded vs full paths and hanging NCCL. The probe only errs toward False, so
-    the agreed MAX restores the sharded verdict on every rank.
+    splitting ranks onto sharded vs full paths → NCCL hang. The probe only errs toward False, so
+    the agreed MAX recovers "sharded" for every rank.
     """
     local = isinstance(path, str) and ShardedDatasetLoader.is_sharded_dataset(path)
     return agree_probe_across_ranks(local, path, "is_sharded_dataset")
@@ -719,7 +834,7 @@ def is_presharded_dataset_load(path, data_parallel_size: int) -> bool:
     """Whether loading ``path`` shards data per data-parallel rank.
 
     True only for a sharded dataset with >1 DP rank (each holds a disjoint slice). Trainers pass this
-    as ``dataset_presharded`` so the DataLoader does not re-shard already-split data. Uses the
+    as ``dataset_presharded`` so the DataLoader does NOT re-shard already-split data. Uses the
     cross-rank-agreed probe so all ranks decide identically.
     """
     return data_parallel_size > 1 and isinstance(path, str) and is_sharded_dataset_coordinated(path)
@@ -732,7 +847,7 @@ def load_preprocessed_dataset(
 ) -> DatasetDict:
     """Load a pre-processed dataset; sharded datasets load only this rank's shards.
 
-    Pass the data-parallel rank/size, not global rank/world_size: CP/TP-group siblings must share
+    Pass the DATA-PARALLEL rank/size, not global rank/world_size: CP/TP-group siblings must share
     data, while EP ranks (orthogonal to DP) get disjoint shards.
     """
     if parse_dataset_source(path)[0] == "hf_hub":
@@ -745,25 +860,16 @@ def load_preprocessed_dataset(
         )
 
     if is_sharded_dataset_coordinated(path):
-        logger.info(f"Loading sharded pre-processed dataset from {path}")
-        logger.info(f"  Data parallel rank: {data_parallel_rank}/{data_parallel_size}")
-        loader = ShardedDatasetLoader(
-            dataset_path=path,
-            global_rank=data_parallel_rank,
-            world_size=data_parallel_size,
-        )
-        ds = _sharded_load_with_join(loader)
-        # Global emptiness is read from the shard index, giving the same verdict on every rank, so no
-        # collective is needed. Per-rank emptiness is caught later by the trainer's pre-sharded eval
-        # equalization.
+        ds, loader = _load_sharded(path, data_parallel_rank, data_parallel_size)
+        # Global emptiness is read from the shard index — same verdict on every rank, so no collective.
+        # Per-rank-only emptiness is caught later by the trainer's pre-sharded eval equalization.
         totals = {split: loader.get_total_examples(split) for split in ("train", "test") if split in ds}
     else:
-        logger.info(f"Loading non-sharded pre-processed dataset from {path}")
-        ds, _ = _load_dataset_from_path(path, test_size=None)
+        ds = _load_replicated(path, test_size=None, placeholder_test=True)
         # Non-sharded data is replica-identical, so a local empty split is globally empty.
         totals = {split: len(ds[split]) for split in ("train", "test") if split in ds}
 
-    # The sharded loader skips missing splits; without this the consumer fails on ds["test"] later.
+    # The sharded loader skips missing splits; without this the consumer dies on ds["test"] later.
     _require_train_test_splits(ds, path)
     empty = sorted(split for split, total in totals.items() if total == 0)
     if empty:
@@ -787,17 +893,17 @@ def load_datasets_auto(
 ) -> tuple[DatasetDict, bool]:
     """Load SFT datasets, auto-detecting pre-processed (load directly) vs raw (tokenize at train).
 
-    Detection works only for single-path SFT datasets. For sharded datasets pass data-parallel
+    Detection works only for single-path SFT datasets. For sharded datasets pass DATA-PARALLEL
     rank/size so CP/TP-group siblings share shards. Returns (DatasetDict, is_preprocessed).
     """
     # Cross-rank agreed, same split-brain hazard as the sharded probe: a transient S3 error would
-    # split ranks onto the raw vs preprocessed path and hang NCCL.
-    preprocessed = isinstance(path, str) and agree_probe_across_ranks(
-        is_preprocessed_dataset(path), path, "is_preprocessed_dataset"
+    # split ranks onto the raw vs preprocessed path → NCCL hang.
+    preprocessed = isinstance(path, str) and agree_input_probe_across_ranks(
+        lambda: is_preprocessed_dataset(path), path, "is_preprocessed_dataset"
     )
     if preprocessed:
         logger.info(f"Detected pre-processed dataset at {path}")
-        # test_size is applied only here on this branch: ``load_preprocessed_dataset`` never takes it.
+        # The only seam holding test_size on this branch: ``load_preprocessed_dataset`` never takes it.
         _warn_test_size_ignored(path, test_size, kind="pre-processed")
         ds = load_preprocessed_dataset(path, data_parallel_rank, data_parallel_size)
         return ds, True

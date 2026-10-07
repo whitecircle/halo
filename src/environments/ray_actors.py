@@ -268,7 +268,7 @@ class EnvironmentActor:
     ) -> RolloutResult:
         """Run a complete multi-turn episode."""
         start = time.time()
-        generation_tokens = 0
+        generated = 0
         logp_sum, logp_count = 0.0, 0
         eid = None
         sync_expiries = _SyncExpiries()
@@ -287,22 +287,16 @@ class EnvironmentActor:
                 env,
                 max_tokens=config.max_tokens,
                 max_thinking_tokens=config.max_thinking_tokens,
-                scope=config.thinking_budget_scope,
-                turn_reserve=config.thinking_turn_reserve,
+                max_episode_tokens=config.max_episode_tokens,
             )
-            reasoning_spent = 0
 
             for _ in range(env.max_turns):
-                if step.done:
+                # The engine caps this turn: the level's reasoning cap and the turn total, both narrowed
+                # to what the output budget has left; none once it holds no turn.
+                caps = effort.turn_caps(generated)
+                if step.done or caps is None:
                     break
-
-                # The engine caps this turn: the level's budget, or under the episode scope what it has
-                # left, with the turn's total bounded alongside it.
-                turn_config = replace(
-                    config,
-                    max_tokens=effort.turn_max_tokens(reasoning_spent),
-                    max_thinking_tokens=effort.turn_thinking_cap(reasoning_spent),
-                )
+                turn_config = replace(config, **caps)
                 gen = await self._generate_turn(
                     client,
                     server_url,
@@ -312,18 +306,28 @@ class EnvironmentActor:
                     effort.thinking_budget,
                     sync_expiries,
                 )
-                reasoning_spent += effort.spend_of(gen, config.reasoning_end_token_id)
-                generation_tokens += gen.tokens
+                generated += gen.tokens
                 if gen.token_logprobs:
                     logp_sum += sum(gen.token_logprobs)
                     logp_count += len(gen.token_logprobs)
 
-                steps = await episode.step([eid], [gen.text], [step_context_from_generation(context, gen)])
+                step_ctx = step_context_from_generation(
+                    context,
+                    gen,
+                    thinking_cap=effort.thinking_budget,
+                    reasoning_end_token_id=config.reasoning_end_token_id,
+                    last_turn=effort.turn_caps(generated) is None,
+                )
+                steps = await episode.step([eid], [gen.text], [step_ctx])
                 step = steps[0]
                 length += 1
 
+            if not step.done:
+                # The output budget ran out with the episode open: closed as truncated, priced like a
+                # max_turns overflow — the budget is the episode's, not the driver's fault.
+                step = (await episode.finalize_truncated([eid]))[0]
             traj = env.get_trajectories([eid])[0]
-            effort.stamp(traj, reasoning_spent)
+            effort.stamp(traj, generated)
 
             episode_metrics = env.rollout_metrics(traj) if traj else {}
             if logp_count:
@@ -338,7 +342,7 @@ class EnvironmentActor:
                 # Natural terminal state, not a max_turns truncation; both set done=True.
                 success=bool(traj and traj.done and not traj.truncated),
                 latency=time.time() - start,
-                generation_tokens=generation_tokens,
+                generation_tokens=generated,
                 requests_expired_in_sync=sync_expiries.count,
             )
 

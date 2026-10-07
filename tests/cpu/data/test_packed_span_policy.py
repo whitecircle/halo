@@ -3,11 +3,11 @@
 
 The packed collator, the padding-free collator and the offline label bake all mask assistant
 completions. They agree on every row that carries a turn terminator; the row that does not is where
-they diverge — an unnamed third policy in the packed runtime collators (the collator policy plus an
-end-of-sequence fallback) against the padded one in the bake makes the SAME YAML train different
-tokens depending on whether its dataset was pre-processed.
+they diverge — the packed runtime collators add an end-of-sequence fallback to the collator policy,
+so baking the padded policy into a packed artifact makes the SAME YAML train different tokens
+depending on whether its dataset was pre-processed.
 
-:data:`PACKED_SPAN_POLICY` names that third policy, both packed collators take it, and the bake takes
+:data:`PACKED_SPAN_POLICY` names that policy, both packed collators take it, and the bake takes
 it exactly when the artifact it writes will be packed — which is exactly when the packing collator is
 the one that would have masked those rows at runtime.
 
@@ -128,7 +128,7 @@ def test_every_route_masks_a_terminated_row_identically(input_ids):
 
 
 def test_the_packed_bake_and_the_packed_collators_agree_on_a_terminator_less_turn():
-    """The divergent case, now agreed: a packed artifact's baked labels equal what the packed
+    """The divergent row: a packed artifact's baked labels equal what the packed
     collator would have produced for the same row — the turn trains to the sequence end instead of
     dropping out of the loss on one of the two paths."""
     packed_runtime = _packed_collator_labels(UNTERMINATED_ROW)

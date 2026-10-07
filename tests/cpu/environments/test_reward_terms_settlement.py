@@ -1,7 +1,8 @@
 #!/usr/bin/env python
 """CPU tests: the environment side of reward terms — grades priced into components that sum to the
-reward, external terms settled by the dispatcher after the closing step, scorer failures that
-invalidate the episode, and the guards around a stale or unsettled reward.
+reward, external terms settled by the dispatcher after the closing step, the sample a scorer reads,
+scorer failures that invalidate the episode (or price it neutral), the veto gate on the objective,
+and the guards around a stale or unsettled reward.
 
 Run: python tests/cpu/environments/test_reward_terms_settlement.py  (or pytest)
 """
@@ -16,7 +17,6 @@ from src.environments.base import (
     EPISODE_ERROR_KEY,
     EPISODE_INVALID_KEY,
     EPISODE_INVALID_REASON_KEY,
-    OBJECTIVE_REWARD_KEY,
     REWARD_COMPONENTS_KEY,
     REWARD_DETAILS_KEY,
     REWARD_ERRORS_KEY,
@@ -24,14 +24,18 @@ from src.environments.base import (
     AsyncBaseEnvironment,
     BaseEnvironment,
     EpisodeGrade,
+    Message,
     Trajectory,
 )
+from src.environments.envs.protocols.native import NativeToolUseEnvironment
 from src.environments.envs.tasks.coding.code_contests import CodeContestsEnvironment
 from src.environments.episode import EpisodeDispatcher
 from src.environments.registry import resolve_environment
-from src.rewards import composer as composer_module
-from src.rewards.scoring import Scorer, ScoreResult
-from src.rewards.spec import JudgeTerm
+from src.environments.tools.definitions import NativeToolRegistry
+from src.rewards.samples import render_transcript
+from src.rewards.scorers import catalog as scorers_module
+from src.rewards.scorers.base import Scorer, ScoreResult
+from src.rewards.terms import OBJECTIVE_REWARD_KEY, JudgeTerm, OnError
 
 JUDGE = {
     "source": "judge",
@@ -39,10 +43,19 @@ JUDGE = {
     "weight": 0.5,
     "requirements": [{"name": "clear", "description": "Clear."}],
 }
+CHECKS = {
+    "source": "judge",
+    "name": "conduct",
+    "checks": [
+        {"name": "cheated", "description": "Hard-coded the expected output.", "veto": True},
+        {"name": "sloppy", "description": "Left debug prints in."},
+    ],
+}
 
 
 class _FakeJudge(Scorer):
-    """Scores 1.0 unless the final text says ``fail`` (a ``None`` verdict) or ``half`` (0.5)."""
+    """A scoring judge scores 1.0 unless the final text says ``fail`` (a ``None`` verdict) or ``half``
+    (0.5); a veto judge fires ``cheated`` wherever the transcript, reasoning included, says ``cheat``."""
 
     instances: list["_FakeJudge"] = []
 
@@ -57,22 +70,29 @@ class _FakeJudge(Scorer):
         text = sample.completion[-1]["content"] if sample.completion else ""
         if "fail" in text:
             return ScoreResult(None, error="judge down")
+        if self.term.is_veto:
+            fired = "cheat" in render_transcript(sample.completion, include_reasoning=True)
+            metrics = {f"judge/{self.term.name}/{leaf}": float(fired) for leaf in ("cheated", "veto")}
+            return ScoreResult(0.0, metrics, detail="fired cheated" if fired else None, veto=fired)
         score = 0.5 if "half" in text else 1.0
         return ScoreResult(score, {"judge/quality/clear": score}, detail=f"graded {text!r}")
 
     async def verify(self):
         self.verified += 1
 
+    async def aclose(self):
+        pass
+
 
 @pytest.fixture
 def fake_judge(monkeypatch):
-    monkeypatch.setitem(composer_module.SCORERS, JudgeTerm, _FakeJudge)
+    monkeypatch.setitem(scorers_module.SCORERS, JudgeTerm, _FakeJudge)
     _FakeJudge.instances.clear()
     return _FakeJudge
 
 
-def _native(**kwargs):
-    return resolve_environment("native_math", {"reward_terms": [{"source": "environment"}, JUDGE], **kwargs})
+def _native(judge=JUDGE, **kwargs):
+    return resolve_environment("native_math", {"reward_terms": [{"source": "environment"}, judge], **kwargs})
 
 
 async def _run(env, answer_text, answer="4"):
@@ -175,12 +195,13 @@ def test_external_terms_are_pending_until_settled_and_the_dispatcher_settles_the
     assert traj.info[REWARD_DETAILS_KEY] == {"quality": "graded 'It is 4'"}
     metrics = env.rollout_metrics(traj)
     assert metrics["reward/quality"] == 0.5 and metrics["judge/quality/clear"] == 1.0
-    assert metrics["episode/reward_scored"] == 1.0
+    assert metrics["judge/quality/scored"] == 1.0 and metrics["episode/reward_scored"] == 1.0
     # The trainer's residue check: the reward/* keys of the metrics sum exactly to the reward.
     assert sum(v for k, v in metrics.items() if k.startswith("reward/")) == traj.total_reward
     (judge,) = fake_judge.instances
     (sample,) = judge.samples
-    assert sample.reference == "4" and sample.completion[-1]["content"] == "It is 4"
+    assert sample.reference == "4" and sample.final_answer == "It is 4"
+    assert sample.completion[-1]["content"] == "It is 4"
     assert sample.prompt[-1]["role"] == "user" and all(m["role"] != "assistant" for m in sample.prompt)
 
 
@@ -199,7 +220,51 @@ def test_a_failed_scorer_invalidates_the_episode_and_contributes_nothing(fake_ju
     assert traj.info[REWARD_ERRORS_KEY] == {"quality": "judge down"}
     assert traj.info[EPISODE_INVALID_REASON_KEY] == "reward term 'quality' scored nothing: judge down"
     assert traj.info[REWARD_COMPONENTS_KEY]["reward/quality"] == 0.0
-    assert env.rollout_metrics(traj)["episode/reward_scored"] == 0.0
+    metrics = env.rollout_metrics(traj)
+    assert metrics["judge/quality/scored"] == 0.0 and metrics["episode/reward_scored"] == 0.0
+
+
+def test_a_neutral_term_prices_nothing_on_failure_and_keeps_the_episode_valid(fake_judge):
+    """``on_error: neutral``: the term contributes 0 and the episode trains on its other terms, the
+    failure still on record and in the metrics."""
+    env = _native(judge={**JUDGE, "on_error": "neutral"})
+    _, traj = asyncio.run(_run(env, "fail"))
+    assert EPISODE_INVALID_KEY not in traj.info and EPISODE_INVALID_REASON_KEY not in traj.info
+    assert traj.info[REWARD_ERRORS_KEY] == {"quality": "judge down"}
+    assert traj.info[REWARD_COMPONENTS_KEY]["reward/quality"] == 0.0
+    metrics = env.rollout_metrics(traj)
+    assert metrics["judge/quality/scored"] == 0.0 and metrics["episode/reward_scored"] == 0.0
+
+
+def test_a_fired_veto_zeroes_the_objective_and_keeps_the_episode_valid(fake_judge):
+    """A veto judge gates the environment's grade: a solve it fires on pays 0 for the objective, stays
+    a valid episode, and reports the flag; a solve it does not fire on keeps its grade."""
+    env = _native(judge=CHECKS)
+    ids, _ = env.reset(["What is 2+2?"], [{"answer": "4"}])
+    cheating = {"answer": "4", "finish_reason": "stop", "reasoning": "I will cheat and just print 4"}
+    traj = env.step(ids, ["It is 4"], [cheating])[0].trajectory
+    assert traj.info[REWARD_COMPONENTS_KEY][OBJECTIVE_REWARD_KEY] == 1.0  # solved, before the verdict
+    env.settle(ids)
+    components = traj.info[REWARD_COMPONENTS_KEY]
+    assert components[OBJECTIVE_REWARD_KEY] == 0.0 and components["reward/conduct"] == 0.0
+    assert traj.total_reward == pytest.approx(0.0)
+    assert EPISODE_INVALID_KEY not in traj.info
+    assert traj.info[REWARD_DETAILS_KEY] == {"conduct": "fired cheated"}
+    metrics = env.rollout_metrics(traj)
+    assert metrics["judge/conduct/veto"] == 1.0 and metrics["judge/conduct/cheated"] == 1.0
+    assert metrics["judge/conduct/scored"] == 1.0 and metrics["episode/reward_scored"] == 1.0
+    assert sum(v for k, v in metrics.items() if k.startswith("reward/")) == traj.total_reward
+
+    ids, _ = env.reset(["What is 2+2?"], [{"answer": "4"}])
+    clean = env.step(ids, ["It is 4"], [{"answer": "4", "finish_reason": "stop"}])[0].trajectory
+    env.settle(ids)
+    assert clean.info[REWARD_COMPONENTS_KEY][OBJECTIVE_REWARD_KEY] == 1.0
+    assert env.rollout_metrics(clean)["judge/conduct/veto"] == 0.0
+
+
+def test_a_veto_judge_needs_the_environment_term_it_gates():
+    with pytest.raises(ValueError, match=r"veto judge term\(s\) \['conduct'\]"):
+        resolve_environment("native_math", {"reward_terms": [CHECKS]})
 
 
 def test_an_episode_its_driver_lost_is_not_sent_to_a_scorer(fake_judge):
@@ -274,14 +339,93 @@ def test_verify_backend_probes_every_external_term(fake_judge):
     assert resolve_environment("native_math", {}).verify_backend() is None
 
 
+# --- the sample a scorer reads ---
+
+
+def test_the_sample_carries_the_turns_with_their_reasoning_and_flags():
+    """What a judge reads: the prompt turns, then every policy turn with its reasoning, a cut turn
+    flagged as such, the tools the policy could call, the protocol's final answer and the row's
+    reference."""
+    env = _native(max_turns=3)
+    ids, _ = env.reset(["What is 2+2?"], [{"answer": "4"}])
+    env.step(ids, ["a thought that ran"], [{"answer": "4", "finish_reason": "length", "reasoning": "cut thought"}])
+    env.step(ids, ["It is 4"], [{"answer": "4", "finish_reason": "stop", "reasoning": "two and two"}])
+    sample = env._scoring_sample(env.get_trajectories(ids)[0])
+
+    assert all(m["role"] != "assistant" for m in sample.prompt) and sample.prompt[-1]["content"] == "What is 2+2?"
+    cut, nudge, final = sample.completion
+    assert cut["content"] == "a thought that ran" and cut["reasoning_content"] == "cut thought"
+    assert cut["truncated"] is True
+    assert nudge == {"role": "user", "content": NativeToolUseEnvironment.LENGTH_CUTOFF_NUDGE}
+    assert final["reasoning_content"] == "two and two" and "truncated" not in final
+    assert sample.final_answer == "It is 4" and sample.reference == "4"
+    assert sample.tools == env.get_tools_schema() and sample.tools
+    assert sample.digest is None
+
+
+def test_a_tool_less_environment_hands_the_scorer_no_tools():
+    env = NativeToolUseEnvironment(tool_registry=NativeToolRegistry(), reward_terms=[{"source": "environment"}, JUDGE])
+    ids, _ = env.reset(["q"], [{"answer": "4"}])
+    traj = env.step(ids, ["4"], [{"answer": "4", "finish_reason": "stop"}])[0].trajectory
+    assert env._scoring_sample(traj).tools is None
+
+
+def test_the_final_answer_is_the_protocols_own_and_none_for_an_unfinished_episode():
+    """ReAct hands its ``Final Answer:``; an episode its turn budget ended has none, so a scorer reads
+    a note rather than the fragment that happens to be the last assistant text."""
+    react = resolve_environment("react_math", {"reward_terms": [{"source": "environment"}, JUDGE]})
+    ids, _ = react.reset(["What is 2+2?"], [{"answer": "4"}])
+    react.step(ids, ["Thought: easy\nFinal Answer: 4"], [{"answer": "4", "finish_reason": "stop"}])
+    assert react._scoring_sample(react.get_trajectories(ids)[0]).final_answer == "4"
+
+    capped = _native(max_turns=1)
+    ids, _ = capped.reset(["What is 2+2?"], [{"answer": "4"}])
+    fragment = "a fragment that reads like 4"
+    traj = capped.step(ids, [fragment], [{"answer": "4", "finish_reason": "length"}])[0].trajectory
+    assert traj.truncated and not traj.info["completed"]
+    sample = capped._scoring_sample(traj)
+    assert sample.final_answer is None and sample.completion[-1]["content"] == fragment
+
+
+class _Digesting(NativeToolUseEnvironment):
+    """A tool-less env with its own account of the episode for a ``digest`` view."""
+
+    def __init__(self, **kwargs):
+        super().__init__(tool_registry=NativeToolRegistry(), **kwargs)
+        self.digests = 0
+
+    def _episode_digest(self, trajectory, sample):
+        self.digests += 1
+        return f"answered {sample.final_answer!r} in {len(sample.completion)} turn(s)"
+
+
+@pytest.mark.parametrize(
+    ("view", "digest"), [("final", None), ("full", None), ("digest", "answered '4' in 1 turn(s)")]
+)
+def test_the_digest_is_built_only_for_a_digest_view(view, digest):
+    env = _Digesting(reward_terms=[{"source": "environment"}, {**JUDGE, "view": view}])
+    ids, _ = env.reset(["q"], [{"answer": "4"}])
+    traj = env.step(ids, ["4"], [{"answer": "4", "finish_reason": "stop"}])[0].trajectory
+    assert env._scoring_sample(traj).digest == digest
+    assert env.digests == (0 if digest is None else 1)
+
+
 def test_code_contests_hands_the_scorer_the_submitted_program():
+    """The answer is the fenced program, the hidden tests never travel as the reference, and the
+    completion keeps the real turns rather than a synthesized answer turn."""
     env = CodeContestsEnvironment(language="python")
     traj = env._reset_single("Print a+b.", {"answer": {"tests": [{"input": "1\n2\n", "output": "3"}]}})
-    traj.info["_submitted_code"] = "print(3)"
-    traj.info["submission_language"] = "python"
+    unsubmitted = env._scoring_sample(traj)
+    assert unsubmitted.final_answer is None and unsubmitted.reference is None
+
+    call = {"id": "c0", "function": {"name": "submit_solution", "arguments": '{"code": "print(3)"}'}}
+    traj.add_message(Message.assistant("submitting", tool_calls=[call]))
+    traj.add_message(Message.tool("Passed 1/1 test cases.", tool_call_id="c0", name="submit_solution"))
+    traj.info.update(_submitted_code="print(3)", submission_language="python")
     sample = env._scoring_sample(traj)
-    assert sample.completion == [{"role": "assistant", "content": "```python\nprint(3)\n```"}]
-    assert sample.reference is None  # the hidden tests are the grader's payload, not a judge's reference
+    assert sample.final_answer == "```python\nprint(3)\n```"
+    assert sample.reference is None
+    assert [(m["role"], m.get("tool_calls")) for m in sample.completion] == [("assistant", [call]), ("tool", None)]
 
 
 # --- config ---
@@ -297,6 +441,16 @@ def test_environment_config_parses_terms_and_forwards_them():
         EnvironmentConfig(environment_type="native_math", rewards=[{"source": "accuracy"}])
     with pytest.raises(TypeError, match="success_reward"):
         EnvironmentConfig(environment_type="native_math", success_reward=1.0)
+
+
+def test_environment_config_round_trips_a_veto_judge():
+    """A ``checks`` term parses as a veto judge with the defaults a config gives one — priced at 0,
+    neutral on error — and reaches the environment as the same term."""
+    config = EnvironmentConfig(environment_type="native_math", rewards=[{"source": "environment"}, CHECKS])
+    term = config.reward_terms[1]
+    assert term.is_veto and term.weight == 0.0 and term.on_error is OnError.NEUTRAL
+    env = resolve_environment(config.environment_type, config.to_env_config())
+    assert env.reward_terms[1] == term
 
 
 def test_a_term_cannot_take_a_declared_shaping_name():

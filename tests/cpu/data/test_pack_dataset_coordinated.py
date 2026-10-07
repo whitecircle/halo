@@ -28,7 +28,7 @@ def _on_disk_dataset(dirpath: str, data: dict, fingerprint: str) -> Dataset:
     ds = Dataset.from_dict(data)
     ds.save_to_disk(dirpath)
     reloaded = Dataset.load_from_disk(dirpath)
-    # Force a different `_fingerprint` to mimic the rank-divergence we observed:
+    # Force a different `_fingerprint` to mimic rank divergence:
     # two ranks reading the same on-disk shards but ending up with different
     # `_fingerprint` attributes after upstream operations.
     reloaded._fingerprint = fingerprint

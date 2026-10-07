@@ -57,7 +57,7 @@ def _script_teacher_load_capturing(
 
 
 def test_a_teacher_path_is_refused_so_the_trainer_cannot_load_one_itself():
-    """The trainer must not re-grow a second frozen-teacher loader.
+    """The trainer must not hold a second frozen-teacher loader.
 
     A trainer-local loader resolves no backend (auto-detect), applies no VLM device placement and
     reads the pin off a ctor knob no script passes — a silently different teacher from the shipped
@@ -67,6 +67,7 @@ def test_a_teacher_path_is_refused_so_the_trainer_cannot_load_one_itself():
         DistributedDistillationTrainer(
             student_model="org/student",
             teacher_model="org/teacher",
+            teacher_tokenizer=MagicMock(spec=PreTrainedTokenizerBase),
             processing_class=MagicMock(spec=PreTrainedTokenizerBase),
         )
 
@@ -119,8 +120,8 @@ def test_script_text_teacher_load_takes_no_device_map():
 
 def test_script_teacher_fetch_is_coordinated_main_rank_first():
     """8 ranks fetching the same teacher repo at once is the download this tag exists to serialize."""
-    caps = _script_teacher_load_capturing()
-    caps.fetch_scope.assert_called_once_with("teacher_model")
+    caps = _script_teacher_load_capturing(revision=PINNED_SHA)
+    caps.fetch_scope.assert_called_once_with("org/teacher", PINNED_SHA, tag="teacher_model")
 
 
 def test_script_teacher_backend_is_resolved_against_the_teacher_config():

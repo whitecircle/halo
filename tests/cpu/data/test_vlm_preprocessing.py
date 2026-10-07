@@ -8,7 +8,7 @@ This test verifies the VLM preprocessing pipeline:
 3. Using PreprocessedVLMDataCollator for batching
 
 Usage:
-    python tests/data/test_vlm_preprocessing.py
+    python tests/cpu/data/test_vlm_preprocessing.py
 """
 
 import base64
@@ -237,8 +237,8 @@ def test_collator_text_only_has_no_pixel_keys():
 
 
 class _FakeVLMProcessor(FakeVLMProcessorBase):
-    """Declares the legacy truncation/max_length kwargs explicitly and accepts NO ``**kwargs`` — so
-    a caller that reintroduces ``truncation=True`` silently cuts sequences here and these
+    """Declares the truncation/max_length kwargs explicitly and accepts NO ``**kwargs`` — so
+    a caller that passes ``truncation=True`` silently cuts sequences here and these
     regression tests see it, instead of the drop/raise the collator owes."""
 
     def __call__(
@@ -266,7 +266,7 @@ def test_vlm_collator_raises_on_over_length_instead_of_truncating():
 
 
 def test_vlm_collator_within_budget_pads_and_builds_labels():
-    """Under the budget the collator behaves as before: right-padded batch + pad-masked labels."""
+    """Under the budget the collator pads and builds labels: right-padded batch + pad-masked labels."""
     tok = FakeVLMTokenizer()
     collator = VLMDataCollator(_FakeVLMProcessor(tok), tok, max_length=16)
     examples = [
@@ -498,7 +498,7 @@ def test_vlm_preprocessing_merges_a_separate_images_column():
 @pytest.mark.parametrize("column", VLM_IMAGE_COLUMNS)
 @pytest.mark.parametrize("is_vlm", [True, False])
 def test_preprocessing_refuses_an_image_column_nothing_consumes(column, is_vlm):
-    """The backstop for the same silent drop without the new flag: tokenization removes every source
+    """The backstop for the same silent drop when no ``images_field`` is set: tokenization removes every source
     column, so an image column no ``images_field`` names is deleted without a word."""
     dataset = DatasetDict({"train": Dataset.from_list([{"conversation": _IMAGELESS_TURNS, column: "img"}])})
     config = _vlm_config() if is_vlm else PreprocessingConfig(model_name_or_path="fake/vlm", num_proc=1)
@@ -551,10 +551,9 @@ def test_a_registered_text_only_config_beats_a_name_hint_matching_mid_word():
     """A path substring must not override a config transformers can vouch for as text-only.
 
     The hints are unanchored, so ``vision`` matches ``revision-8472618`` and ``-vl`` matches
-    ``-vllm``. While a text-only verdict fell through to them, such a path routed a registered
-    text-only checkpoint into the VLM path — where the image collator and the packing /
-    padding-free rejection make it fail — and forced text-only re-publishes of natively-multimodal
-    MoEs into directories named to dodge the list.
+    ``-vllm``. A text-only verdict that fell through to them would route a registered text-only
+    checkpoint into the VLM path, where the image collator and the packing / padding-free rejection
+    make it fail.
     """
     text_only = SimpleNamespace(model_type="qwen3_5_moe_text", vision_config=None)
     for path in (

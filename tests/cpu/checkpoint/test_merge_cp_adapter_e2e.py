@@ -146,7 +146,7 @@ def _train_cp_adapter(base_dir: Path, adapter_dir: Path) -> dict[str, torch.Tens
             lora_b = module.lora_B["default"].weight.detach().to(torch.bfloat16).float()
             deltas[f"model.layers.{layer_index}.self_attn.{target}.weight"] = (lora_b @ lora_a) * scaling
 
-    assert PeftAdapterSaver().save(_cp_context(peft_model), peft_model, str(adapter_dir))
+    PeftAdapterSaver().save(_cp_context(peft_model), peft_model, str(adapter_dir))
     return deltas
 
 
@@ -218,7 +218,7 @@ def test_cp_saved_exclusions_are_spelled_for_a_plain_model():
         assert peft_config.exclude_modules == wrapped_spelling
         peft_model = get_peft_model(wrapper, peft_config)
 
-        assert PeftAdapterSaver().save(_cp_context(peft_model), peft_model, str(adapter))
+        PeftAdapterSaver().save(_cp_context(peft_model), peft_model, str(adapter))
 
         saved = json.loads((adapter / ADAPTER_CONFIG_FILE).read_text())
         assert saved["exclude_modules"] == ["model.layers.0.self_attn.q_proj"]

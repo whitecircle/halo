@@ -21,8 +21,8 @@ converges the shard cap, the Hub source, the dtype and the device map the same w
 one helper (``add_max_shard_size_arg`` / ``add_hub_source_args`` / ``add_dtype_arg`` /
 ``add_device_map_arg``), and the assertions below read what that helper declares off each tool's
 parser — a re-typed flag lands off it, quietly shipping a different spelling or default, or
-promising a pin the tool never threads. Which tools those two assertions cover is swept
-off the tree and read off each parser, so a new tool is covered by existing.
+promising a pin the tool never threads. Which tools those assertions cover is swept
+off the tree and read off each parser, so a new tool is covered as soon as it exists.
 
 Parser-level for the surface — no model is loaded, so this stays a fast CPU test that reads the exact
 surface a user gets from ``--help`` — plus one load-site check per default, where the tool runs as far

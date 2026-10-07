@@ -1,4 +1,4 @@
-"""CPU tests for ``sequential_load_within_node`` (``src/distributed/runtime.py``).
+"""CPU tests for ``sequential_load_within_node`` (``src/distributed/filesystem.py``).
 
 The throttle coordinates via done-keys in the torch.distributed store. Repeated uses of one tag
 must stay isolated — otherwise the second use sees the first call's done-keys and runs completely

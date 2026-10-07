@@ -16,7 +16,7 @@ the playgrounds. Flags only; the drivers they feed live in ``src/``.
 import argparse
 
 from src.checkpoint.format import DEFAULT_MAX_SHARD_SIZE
-from src.inference.openai_client import DEFAULT_LOCAL_BASE_URL, resolve_local_api_key
+from src.inference.endpoints import DEFAULT_LOCAL_BASE_URL, resolve_local_api_key
 from src.models.loading.dtype import DTYPE_BY_NAME
 
 # What ``--model_id`` accepts; kept in step with ``resolve_checkpoint_source``.

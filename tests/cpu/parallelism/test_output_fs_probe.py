@@ -5,7 +5,7 @@ The flags are pure declarations — nothing else in the toolkit checks them agai
 and both ways of getting them wrong are silent at 2+ nodes:
 
 * declared SHARED on per-node storage: only global rank 0 writes ``trainer_state.json`` /
-  ``scheduler.pt`` / ``rng_state``, so nodes 1..N resume at ``global_step=0`` and the run desyncs
+  ``scheduler.pt`` / ``rng_state``, so no checkpoint resumes on nodes 1..N
   (the mixin's ``save_on_each_node`` forcing keys off exactly this flag);
 * declared PER-NODE on shared storage: every node's local rank 0 writes the SAME paths at once.
 
@@ -18,11 +18,14 @@ Run: pytest tests/cpu/parallelism/test_output_fs_probe.py
 """
 
 import os
+from types import SimpleNamespace
 
 import pytest
 
+import src.trainers.mixins.base as base_mixin
 from src.distributed import filesystem, runtime
 from src.distributed.filesystem import output_filesystem_contradiction
+from src.distributed.parallelism_config import ParallelismConfig
 
 
 def test_declared_shared_on_per_node_storage_is_rejected():
@@ -32,7 +35,7 @@ def test_declared_shared_on_per_node_storage_is_rejected():
     assert reason is not None, "the resume-desync case must not pass silently"
     assert "rank 8" in reason, f"the first blind rank must be named: {reason}"
     assert "DIST_OUTPUT_SHARED_FILESYSTEM" in reason, f"the fix must be actionable: {reason}"
-    assert "global_step=0" in reason, f"the consequence must be stated: {reason}"
+    assert "no checkpoint would resume" in reason, f"the consequence must be stated: {reason}"
 
 
 def test_declared_per_node_on_shared_storage_is_rejected():
@@ -118,6 +121,60 @@ def test_a_per_node_declaration_never_waits_out_the_poll(monkeypatch, tmp_path):
     monkeypatch.setattr(filesystem, "_visible_within", lambda path, seconds: budgets.append(seconds) or False)
     filesystem.verify_output_filesystem_sharing(str(tmp_path))
     assert budgets == [0.0], f"a per-node declaration waited on a file it does not expect: {budgets}"
+
+
+def test_a_directory_is_probed_once_per_process(monkeypatch, tmp_path):
+    """The entry scripts probe before resume detection and every trainer probes again at construction;
+    the second call must not write another sentinel or enter the gather again."""
+    _fake_world(monkeypatch, world=16, local_world=8, rank=0, seen=[True] * 16)
+    monkeypatch.setattr(filesystem, "is_output_shared_filesystem", lambda: True)
+    monkeypatch.setattr(filesystem, "_PROBED_OUTPUT_DIRS", set())
+    gathers = []
+    real_gather = runtime.dist.all_gather_object
+    monkeypatch.setattr(runtime.dist, "all_gather_object", lambda out, obj: gathers.append(1) or real_gather(out, obj))
+
+    filesystem.verify_output_filesystem_sharing(str(tmp_path))
+    filesystem.verify_output_filesystem_sharing(str(tmp_path))
+
+    assert gathers == [1], f"the second probe of one directory gathered again: {gathers}"
+
+
+def test_a_contradiction_is_never_remembered_as_probed(monkeypatch, tmp_path):
+    _fake_world(monkeypatch, world=16, local_world=8, rank=9, seen=[True] * 8 + [False] * 8)
+    monkeypatch.setattr(filesystem, "is_output_shared_filesystem", lambda: True)
+    monkeypatch.setattr(filesystem, "_PROBED_OUTPUT_DIRS", set())
+    for _ in range(2):
+        with pytest.raises(RuntimeError, match="declared SHARED"):
+            filesystem.verify_output_filesystem_sharing(str(tmp_path))
+
+
+class _ProbeReached(Exception):
+    """Carries control out of the trainer's shared init once the output directory was handed over."""
+
+
+class _InitHost:
+    """A bare trainer host for the shared init, stopped right after the output-filesystem probe."""
+
+    def _configure_mixed_precision(self, kwargs, training_args):
+        pass
+
+
+def test_every_trainer_construction_probes_its_output_dir(monkeypatch):
+    """A Python-API run never passes through the entry scripts' probe, so the trainer runs it itself."""
+    probed = []
+    monkeypatch.setattr(base_mixin, "verify_output_filesystem_sharing", probed.append)
+
+    def stop(_training_args):
+        raise _ProbeReached
+
+    monkeypatch.setattr(base_mixin, "align_save_on_each_node", stop)
+    args = SimpleNamespace(output_dir="/runs/api-launched", use_liger_kernel=False)
+    kwargs = {"parallelism_config": ParallelismConfig(), "model": SimpleNamespace(config=None), "args": args}
+
+    with pytest.raises(_ProbeReached):
+        base_mixin.DistributedTrainerMixin._init_distributed_config(_InitHost(), kwargs)
+
+    assert probed == ["/runs/api-launched"]
 
 
 if __name__ == "__main__":

@@ -4,11 +4,15 @@ Every MFU number the toolkit reports divides by an entry of ``GPU_PEAK_FLOPS``, 
 silently rescales the headline metric with nothing else in the system disagreeing. These tests pin the
 registry against an INDEPENDENT source — the die's own SM count and clock — rather than against the
 constants themselves, so they also reject the next SKU added with a marketing (or sparsity) figure.
+The device-name detection that picks the entry is pinned too, nvidia-smi fallback included.
 """
+
+import subprocess
 
 import pytest
 
-from src.hardware import GPU_PEAK_FLOPS, GpuPeak, _classify_gpu_name, get_gpu_peak_flops
+import src.hardware as hardware
+from src.hardware import GPU_PEAK_FLOPS, GpuPeak, _classify_gpu_name, detect_gpu_model, get_gpu_peak_flops
 
 # Dense bf16/fp16 tensor-core FLOPs per SM per clock, by architecture. Blackwell doubles Hopper's
 # per-SM rate; GA102 (workstation) ships a lower per-SM tensor rate than GA100.
@@ -86,6 +90,36 @@ def test_every_entry_is_reachable_through_its_own_aliases():
             )
 
 
+def _fake_device(monkeypatch, torch_name: str, smi):
+    """A CUDA device torch names ``torch_name``; ``smi`` is the nvidia-smi stdout, or an exception."""
+    monkeypatch.setattr(hardware.torch.cuda, "is_available", lambda: True)
+    monkeypatch.setattr(hardware.torch.cuda, "get_device_name", lambda index: torch_name)
+
+    def run(cmd, **kwargs):
+        if isinstance(smi, BaseException):
+            raise smi
+        return subprocess.CompletedProcess(cmd, 0, stdout=smi, stderr="")
+
+    monkeypatch.setattr(hardware.subprocess, "run", run)
+
+
+def test_detection_prefers_the_torch_name_and_falls_back_to_nvidia_smi(monkeypatch):
+    _fake_device(monkeypatch, "NVIDIA B300 SXM6 AC", smi=AssertionError("nvidia-smi must not run"))
+    assert detect_gpu_model() == "B300"
+    _fake_device(monkeypatch, "GRID vGPU", smi="NVIDIA H100 PCIe\n")
+    assert detect_gpu_model() == "H100_PCIE"
+
+
+@pytest.mark.parametrize(
+    "smi", [FileNotFoundError("nvidia-smi"), subprocess.TimeoutExpired("nvidia-smi", 5), "Unknown GPU\n"]
+)
+def test_detection_answers_none_when_no_name_classifies(monkeypatch, smi):
+    """An absent, hung or unrecognized nvidia-smi is "unknown model", never an exception: MFU is
+    then left out of the metrics rather than taking the run down."""
+    _fake_device(monkeypatch, "GRID vGPU", smi=smi)
+    assert detect_gpu_model() is None
+
+
 @pytest.mark.parametrize("gpu_key", sorted(_DIE_SPECS))
 def test_bf16_peak_does_not_exceed_architectural_ceiling(gpu_key):
     """bf16 peak must sit under SMs x clock x FLOPs-per-SM-per-clock.
@@ -137,8 +171,8 @@ def test_tensor_core_dtype_ratios_match_the_datapath(gpu_key):
 def test_b300_matches_the_b200_dense_tensor_core_rates():
     """B300 is the same 148-SM die as B200: Blackwell Ultra's uplift is FP4 and HBM, not bf16.
 
-    Pins the specific regression this file was written for — B300 once carried a ~1.47x-inflated row,
-    which understated every MFU on the toolkit's primary training hardware by ~32%.
+    A ~1.47x-inflated B300 row would understate every MFU on the toolkit's primary training hardware
+    by ~32%.
     """
     for dtype in ("bf16", "fp16", "fp8", "tf32"):
         assert GPU_PEAK_FLOPS["B300"].flops[dtype] == GPU_PEAK_FLOPS["B200"].flops[dtype], (

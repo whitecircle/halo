@@ -12,6 +12,7 @@ from src.environments.base import (
     CUT_IN_TOOL_CALL_KEY,
     EPISODE_ERROR_KEY,
     EPISODE_TOOL_BUDGETS_KEY,
+    LAST_TURN_KEY,
     TOOL_CALL_COUNTS_KEY,
     AsyncBaseEnvironment,
     BaseEnvironment,
@@ -29,7 +30,7 @@ from src.environments.tools.definitions import (
     ToolBudgetExhausted,
 )
 from src.inference.response import ENGINE_CUT_FINISH_REASONS
-from src.rewards.matching import validate_answer
+from src.rewards.graders.matching import validate_answer
 
 logger = logging.getLogger(__name__)
 
@@ -70,7 +71,7 @@ def admit_tool_call(
     bound = tool.bind(arguments, for_async=for_async)
     cap = env._tool_budget_exhausted(trajectory, tool.name)
     if cap is not None:
-        raise ToolBudgetExhausted(tool.budget_exhausted_message(cap, env._tool_budgets_left(trajectory)))
+        raise ToolBudgetExhausted(tool.budget_exhausted_message())
     env._count_tool_call(trajectory, tool.name)
     return bound
 
@@ -116,9 +117,22 @@ class NativeToolUseEnvironment(BaseEnvironment):
         "nothing was recorded. Make the call again, keeping your reasoning out of its arguments."
     )
     EMPTY_TURN_NUDGE = (
-        "Your previous turn ended without a tool call or an answer, so nothing was recorded. Make "
-        "your tool call now, or give your final answer, with the best solution you have."
+        "Your previous turn ended without a tool call or an answer (a call written inside your reasoning "
+        "is not run), so nothing was recorded. Make your tool call now, or give your final answer, with the "
+        "best solution you have."
     )
+    # The same facts for an instance whose registry holds no tool: a nudge asking for a tool call there
+    # is an instruction the model cannot follow, and the turn that answers it is trained.
+    TOOLLESS_LENGTH_CUTOFF_NUDGE = (
+        "Your previous turn was cut off before you gave your answer, so nothing was recorded. Give your "
+        "final answer now with the best solution you have."
+    )
+    TOOLLESS_EMPTY_TURN_NUDGE = (
+        "Your previous turn ended without an answer (text written inside your reasoning is not read), so "
+        "nothing was recorded. Give your final answer now with the best solution you have."
+    )
+    # A cut the driver flags as inside a call is told the same: there is no call to make again.
+    TOOLLESS_LENGTH_CUTOFF_IN_CALL_NUDGE = TOOLLESS_LENGTH_CUTOFF_NUDGE
 
     def __init__(
         self,
@@ -159,6 +173,17 @@ class NativeToolUseEnvironment(BaseEnvironment):
         """Get tools in OpenAI format for the rollout engine's generation request."""
         return self.registry.to_openai_tools()
 
+    def _unproductive_turn_nudge(self, nudge_attr: str) -> str | None:
+        """The protocol's nudge, or its ``TOOLLESS_`` counterpart when the registry holds no tool, so a
+        tool-less environment is never told to make a tool call."""
+        if not self.registry.names():
+            nudge_attr = f"TOOLLESS_{nudge_attr}"
+        return super()._unproductive_turn_nudge(nudge_attr)
+
+    def _final_answer(self, trajectory: Trajectory) -> str | None:
+        """The text answer that completed the episode, where one did."""
+        return trajectory.info.get("final_response") if trajectory.info.get("completed") else None
+
     def _reset_single(self, prompt: str | list[dict[str, str]], context: dict[str, Any] | None = None) -> Trajectory:
         """Initialize episode with task prompt."""
         return self._init_trajectory(
@@ -180,9 +205,9 @@ class NativeToolUseEnvironment(BaseEnvironment):
         return _ACTIVE_TRAJECTORY.get()
 
     @staticmethod
-    def _coerce_tool_calls(tool_calls_data: list[Any]) -> list[NativeToolCall]:
-        """Normalize a context's raw tool-call payload (OpenAI dicts and/or already-parsed calls)."""
-        return [NativeToolCall.from_openai_format(tc) if isinstance(tc, dict) else tc for tc in tool_calls_data]
+    def _coerce_tool_calls(tool_calls_data: list[dict[str, Any]]) -> list[NativeToolCall]:
+        """Parse a context's raw OpenAI-format tool-call payload."""
+        return [NativeToolCall.from_openai_format(tc) for tc in tool_calls_data]
 
     def _unknown_tool_result(self, tc: NativeToolCall) -> NativeToolResult:
         """Build the error result for a tool call naming a tool not in the registry.
@@ -300,10 +325,12 @@ class NativeToolUseEnvironment(BaseEnvironment):
     ) -> tuple[Trajectory, float, bool, bool, dict[str, Any]]:
         """Handle a turn that called no tool, shared by the sync and async steps: an engine-cut turn
         and a turn that ended on nothing recover, anything else is the model's final text answer."""
+        last_turn = bool(ctx.get(LAST_TURN_KEY))
         if ctx.get("finish_reason") in ENGINE_CUT_FINISH_REASONS:
-            return self._handle_length_cutoff(trajectory, in_tool_call=bool(ctx.get(CUT_IN_TOOL_CALL_KEY)))
+            in_call = bool(ctx.get(CUT_IN_TOOL_CALL_KEY))
+            return self._handle_length_cutoff(trajectory, in_tool_call=in_call, last_turn=last_turn)
         if not action.strip():
-            return self._handle_empty_turn(trajectory)
+            return self._handle_empty_turn(trajectory, last_turn=last_turn)
         return self._finalize_text_response(trajectory, action)
 
     def _tool_use_shaping(self, trajectory: Trajectory) -> float:
@@ -340,7 +367,7 @@ class NativeToolUseEnvironment(BaseEnvironment):
         ctx = context or trajectory.info.get("context") or {}
 
         validator = ctx.get("validator")
-        if validator and callable(validator):
+        if callable(validator):
             return EpisodeGrade(1.0 if validator(trajectory) else 0.0)
 
         expected = ctx.get(ANSWER_KEY)

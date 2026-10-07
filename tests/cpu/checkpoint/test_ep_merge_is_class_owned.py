@@ -7,7 +7,7 @@ gather override) and still be rejected by ``save_sharded_ep=True`` despite a per
 layout.
 
 The property pinned here: a family that declares its layout in its OWN layer module is merge-supported
-immediately — no edit to ``expert_weights.py``, ``saving.py`` or ``merge_ep_shards.py``. The
+immediately — no edit to ``expert_weights.py``, ``ep_save.py`` or ``merge_ep_shards.py``. The
 synthetic family below is registered at test time and must be supported end to end.
 
 Run: pytest tests/cpu/checkpoint/test_ep_merge_is_class_owned.py
@@ -21,6 +21,7 @@ import pytest
 import torch
 import torch.nn as nn
 
+from src.distributed.checkpoint.ep_save import _check_ep_merge_family_supported
 from src.distributed.expert_parallel import expert_weights as ew
 from src.distributed.expert_parallel.base_layer import EPMoELayerBase
 from src.distributed.expert_parallel.expert_weights import (
@@ -28,7 +29,6 @@ from src.distributed.expert_parallel.expert_weights import (
     supported_ep_merge_model_types,
 )
 from src.distributed.expert_parallel.layers.gpt_oss import EPGptOssMoELayer
-from src.distributed.expert_parallel.saving import _check_ep_merge_family_supported
 
 E, H, M = 3, 8, 5
 
@@ -189,8 +189,8 @@ def test_gather_override_without_merge_override_is_rejected_at_class_creation():
 
 def test_declaring_per_expert_keys_and_overriding_the_gather_is_rejected():
     """The per-expert split is applied BY the base gather, so an override silently ignores the
-    declaration and the checkpoint/vLLM layout drifts from the declared one. Zaya is the legitimate
-    shape: override both and set ``_PER_EXPERT_UNFUSED_KEYS = None`` explicitly."""
+    declaration and the checkpoint/vLLM layout drifts from the declared one. GptOss and Gemma 4 are
+    the legitimate shape: they override both and leave ``_PER_EXPERT_UNFUSED_KEYS`` at ``None``."""
     with pytest.raises(TypeError, match="_PER_EXPERT_UNFUSED_KEYS"):
 
         class _Contradictory(EPMoELayerBase):

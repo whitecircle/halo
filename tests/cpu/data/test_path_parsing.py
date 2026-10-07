@@ -6,7 +6,7 @@ These tests verify the path parsing utilities that distinguish between
 S3 URIs, HuggingFace Hub IDs, and local paths.
 
 Usage:
-    python tests/data/test_path_parsing.py
+    python tests/cpu/data/test_path_parsing.py
 """
 
 import pytest

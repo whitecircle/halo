@@ -1,14 +1,14 @@
 #!/usr/bin/env python
 """Row construction under ``max_train_row_tokens`` and the empty-capture case, on both tokenize paths.
 
-* The context-window check runs BEFORE the row cap on the per-turn path, as it always did on the
-  whole-trajectory path: a row the served model could not have produced is a config error, and a cap
+* The context-window check runs BEFORE the row cap on the per-turn path, as on the whole-trajectory
+  path: a row the served model could not have produced is a config error, and a cap
   set below the context must not absorb it as "over cap". On both paths a row of exactly the window
   trains and one token more is recorded, the first failure of a step kept; a malformed
   ``routed_experts`` payload is recorded too, never raised on one rank.
 * ``sampling/rows_over_cap_frac`` counts each row once: rows the cap left out over those plus the rows
   that train. An over-cap trajectory comes back as a zero-weight placeholder, which is neither — a
-  count that took the placeholder as a built row read eight all-over-cap trajectories as 0.5.
+  count that took the placeholder as a built row would read eight all-over-cap trajectories as 0.5.
 * A zero-token assistant turn (``token_ids == []``) is a capture that succeeded, distinct from a
   missing one (``None``): it yields no row, the rest of the trajectory trains per turn, and the
   re-render fallback (with its server-flag warning) is reserved for a trainable turn with no ids.
@@ -31,7 +31,12 @@ from trl.trainer.utils import pad
 from src.environments.base import Message, Trajectory
 from src.environments.engine_wire import capture_generation_tokens
 from src.environments.episode import RolloutResult, TurnGeneration, step_context_from_generation
-from src.trainers.grpo.environmental import BatchRows, DistributedAsyncEnvironmentalGRPOTrainer, rollout_valid_mask
+from src.trainers.grpo.environmental import (
+    BatchBuildFence,
+    BatchRows,
+    DistributedAsyncEnvironmentalGRPOTrainer,
+    rollout_valid_mask,
+)
 from src.trainers.grpo.objective.logratio import zero_engine_forced_closes
 from src.trainers.grpo.rollout.routing_replay import RoutingReplayInjector
 from src.trainers.grpo.rollout.trajectory_tokenize import (
@@ -64,7 +69,7 @@ def _trainer(cap: int | None = None, per_turn: bool = True, context_limit: int =
     trainer = object.__new__(DistributedAsyncEnvironmentalGRPOTrainer)
     trainer._rollout_routing_replay = False
     trainer._rollout_backend = "vllm"
-    trainer._batch_build_error = None
+    trainer._batch_errors = BatchBuildFence()
     trainer._warned_once = set()
     trainer._rollout_template_kwargs = {}
     trainer._carry_reasoning = False
@@ -98,14 +103,14 @@ def _turn(comp: list[int] | None, prompt_len: int = 2, **fields) -> Message:
 def test_a_per_turn_row_over_the_context_is_recorded_even_when_the_cap_is_lower():
     trainer = _trainer(cap=3, context_limit=4)
     rows = trainer._tokenize_trajectory_turns(_result(_turn([1, 2, 3, 4, 5], prompt_len=3)))  # 8 tokens
-    assert trainer._batch_build_error is not None and "context window" in trainer._batch_build_error
+    assert trainer._batch_errors.reason is not None and "context window" in trainer._batch_errors.reason
     assert trainer._rows_over_cap == 1 and [r.completion_mask.tolist() for r in rows] == [[0]]
 
 
 def test_a_per_turn_row_under_the_context_but_over_the_cap_is_only_over_cap():
     trainer = _trainer(cap=3, context_limit=100)
     trainer._tokenize_trajectory_turns(_result(_turn([1, 2, 3, 4, 5], prompt_len=3)))
-    assert trainer._batch_build_error is None and trainer._rows_over_cap == 1
+    assert trainer._batch_errors.reason is None and trainer._rows_over_cap == 1
 
 
 # --- the context check's recording sites -----------------------------------------------------------------
@@ -125,11 +130,11 @@ def test_a_row_of_exactly_the_context_trains_and_one_token_more_is_recorded(per_
 
     at_window = _trainer(per_turn=per_turn, context_limit=tokens)
     getattr(at_window, tokenize)(result)
-    assert at_window._batch_build_error is None, at_window._batch_build_error
+    assert at_window._batch_errors.reason is None, at_window._batch_errors.reason
 
     one_over = _trainer(per_turn=per_turn, context_limit=tokens - 1)
     getattr(one_over, tokenize)(result)
-    error = one_over._batch_build_error
+    error = one_over._batch_errors.reason
     assert error is not None and f"of {tokens} tokens" in error and f"context window {tokens - 1}" in error, error
 
 
@@ -137,7 +142,7 @@ def test_a_whole_trajectory_overflow_is_recorded_and_the_steps_first_failure_kep
     first, second = _result(Message.assistant("aaaa")), _result(Message.assistant("bb"))
     trainer = _trainer(per_turn=False, context_limit=2)
     trainer._tokenize_step_rows([first, second])
-    error = trainer._batch_build_error
+    error = trainer._batch_errors.reason
     assert error is not None and error.startswith(f"Trajectory of {_trajectory_tokens(first)} tokens"), error
 
 
@@ -150,7 +155,7 @@ def test_a_malformed_routed_experts_payload_is_recorded_and_the_turn_trains_unro
     )
     payload = npy_routing_payload(np.zeros((5, 1, 2), dtype=np.int32))
     rows = trainer._tokenize_trajectory_turns(_result(_turn([5, 6, 7], routing_mask=payload, routing_prompt_tokens=2)))
-    error = trainer._batch_build_error
+    error = trainer._batch_errors.reason
     assert error is not None and error.startswith("routing_replay='rollout': malformed routed_experts payload:"), error
     assert "decoder layers" in error, error
     assert [row.turn_routing for row in rows] == [None]
@@ -171,7 +176,7 @@ def test_eight_all_over_cap_trajectories_read_one():
 
 def test_a_mixed_step_reads_rows_left_out_over_rows_left_out_plus_rows_that_train():
     """Per-turn path, cap 6: A's two turns are both over (one placeholder), B loses one of two, C's
-    single turn fits — 3 rows left out, 2 rows train, so 0.6; a count over built rows read 0.5."""
+    single turn fits — 3 rows left out, 2 rows train, so 0.6; a count over built rows would read 0.5."""
     trainer = _trainer(cap=6)
     results = [
         _result(_turn([7, 8, 9, 10], prompt_len=4), _turn([7, 8, 9, 10], prompt_len=4)),
@@ -224,7 +229,7 @@ def test_an_all_excluded_trajectory_is_one_masked_row_without_a_re_render(turns)
     rows = trainer._tokenize_trajectory_turns(result)
     assert len(rows) == 1 and rows[0].completion_mask.tolist() == [0]
     assert not result.trajectory.episode_invalid, "an excluded turn leaves its episode in the group baseline"
-    assert trainer._batch_build_error is None
+    assert trainer._batch_errors.reason is None
 
 
 def test_a_trainable_turn_with_no_capture_still_falls_the_trajectory_back():

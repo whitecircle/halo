@@ -6,13 +6,15 @@ a call — binds its arguments, checks the episode's cap, counts it — before t
 the handler could never run or one past the cap is refused as a tool error without spending the
 budget, and a one-call cap cannot be double-spent by two calls in one turn. Every env binds an
 effort profile at reset: the thinking budget is the base key; a task adds its own through
-``EFFORT_PROFILE_KEY_MINIMA`` and ``_apply_effort_profile``.
+``EFFORT_PROFILE_KEY_MINIMA`` and ``_apply_effort_profile``. A refusal states the fact, never the cap:
+what an episode may do is the chat template's and the engine's to control, not a number the model reads.
 
 Run: python tests/cpu/environments/test_tool_budgets.py  (or pytest)
 """
 
 import asyncio
 import json
+import re
 
 import pytest
 
@@ -20,6 +22,9 @@ from src.environments.base import EPISODE_TOOL_BUDGETS_KEY, TOOL_CALL_COUNTS_KEY
 from src.environments.envs.protocols.native import AsyncNativeToolUseEnvironment, NativeToolUseEnvironment
 from src.environments.envs.protocols.react import ReActEnvironment
 from src.environments.tools.definitions import NativeTool, NativeToolRegistry, ToolParameter
+
+# The generic refusal, as the protocol prefixes it: the tool's name and the fact, no cap and no count.
+_ECHO_SPENT = "Error: Not executed: this task's budget for echo is spent."
 
 
 def _registry(budget_message=None, slow=False):
@@ -66,7 +71,7 @@ def test_native_budget_refuses_past_the_cap_and_counts_only_admitted_calls():
     observations = _observations(traj)
     assert "echo: missing a required argument: 'code'" in observations[0]
     assert observations[1] == "echo:x"
-    assert observations[2] == "Error: echo limit reached (1); this call was not executed."
+    assert observations[2] == _ECHO_SPENT
     assert observations[3] == "pong"
     assert traj.info[TOOL_CALL_COUNTS_KEY] == {"echo": 1, "ping": 1}
     assert traj.total_reward == pytest.approx(-0.2), "two refusals charged as tool errors; admitted calls pay 0"
@@ -82,29 +87,32 @@ def test_a_zero_cap_disables_the_tool_for_the_episode():
     env = NativeToolUseEnvironment(tool_registry=_registry(), tool_budgets={"echo": 0})
     ids, _ = env.reset(["t"])
     env.step(ids, [""], [{"tool_calls": [_call("a", "echo", code="x")]}])
-    assert _observations(env.get_trajectories(ids)[0]) == [
-        "Error: echo limit reached (0); this call was not executed."
-    ]
+    assert _observations(env.get_trajectories(ids)[0]) == [_ECHO_SPENT]
 
 
 def test_the_refusal_wording_is_the_tools_own():
     env = NativeToolUseEnvironment(
-        tool_registry=_registry(budget_message="No more {name} this task ({cap})."), tool_budgets={"echo": 1}
+        tool_registry=_registry(budget_message="No more echo this task; ping instead."), tool_budgets={"echo": 1}
     )
     ids, _ = env.reset(["t"])
     env.step(ids, [""], [{"tool_calls": [_call("a", "echo", code="x"), _call("b", "echo", code="y")]}])
-    assert _observations(env.get_trajectories(ids)[0])[1] == "Error: No more echo this task (1)."
+    assert _observations(env.get_trajectories(ids)[0])[1] == "Error: No more echo this task; ping instead."
 
 
-def test_a_refusal_can_name_another_tools_calls_left():
-    env = NativeToolUseEnvironment(
-        tool_registry=_registry(budget_message="No more {name} ({cap}); {left_ping} ping call(s) left."),
-        tool_budgets={"echo": 1, "ping": 3},
-    )
+def test_a_refusal_names_neither_the_cap_nor_what_another_tool_has_left():
+    """The refusal is the same text at every cap and beside any other budget, with no number in it:
+    the tool's message, or the generic one, is used verbatim."""
+    env = NativeToolUseEnvironment(tool_registry=_registry(), tool_budgets={"echo": 1, "ping": 3})
     ids, _ = env.reset(["t"])
     calls = [_call("p", "ping"), _call("a", "echo", code="x"), _call("b", "echo", code="y")]
     env.step(ids, [""], [{"tool_calls": calls}])
-    assert _observations(env.get_trajectories(ids)[0])[2] == "Error: No more echo (1); 2 ping call(s) left."
+    refusal = _observations(env.get_trajectories(ids)[0])[2]
+    assert refusal == _ECHO_SPENT and not re.search(r"\d", refusal)
+    tool = NativeTool(name="echo", description="Echoes.")
+    assert tool.budget_exhausted_message() == _ECHO_SPENT.removeprefix("Error: ")
+    assert (
+        NativeTool(name="echo", description="Echoes.", budget_message="Spent.").budget_exhausted_message() == "Spent."
+    )
 
 
 def test_an_enum_argument_outside_the_schema_is_refused_unspent():
@@ -132,7 +140,7 @@ async def test_two_calls_in_one_async_turn_cannot_double_spend_a_one_call_cap():
     await env.step_async(ids, [""], [{"tool_calls": calls}])
     traj = env.get_trajectories(ids)[0]
     observations = _observations(traj)
-    assert sorted(observations) == sorted(["echo:x", "Error: echo limit reached (1); this call was not executed."])
+    assert sorted(observations) == sorted(["echo:x", _ECHO_SPENT])
     assert traj.info[TOOL_CALL_COUNTS_KEY] == {"echo": 1}
 
 
@@ -144,7 +152,7 @@ def test_react_budget_refuses_past_the_cap():
     traj = env.get_trajectories(ids)[0]
     observations = _react_observations(traj)
     assert observations[0] == "echo:x"
-    assert observations[1] == "Error: echo limit reached (1); this call was not executed."
+    assert observations[1] == _ECHO_SPENT
     assert traj.info[TOOL_CALL_COUNTS_KEY] == {"echo": 1}
     with pytest.raises(ValueError, match="tool_budgets"):
         ReActEnvironment(tool_registry=_registry(), tool_budgets={"nope": 1})

@@ -4,9 +4,8 @@ Once rewards exist, both trainers mask the rows of degenerate (all-equal-reward)
 loss, recompute the gathered-global DAPO normalizer from the post-drop loss mask, and balance the
 round's token-weighted advantage mass: the online trainer on TRL's result dict, the environmental
 trainer on the tensors it builds itself. The mask, normalizer and token-mass helpers serve both, so
-their numerics match; :func:`degenerate_drop_rows` is the online trainer's framing of the drop, and
-:func:`expand_traj_to_rows` the environmental trainer's layout of per-trajectory values over its
-per-turn rows.
+their numerics match; :func:`expand_traj_to_rows` is the environmental trainer's layout of
+per-trajectory values over its per-turn rows.
 """
 
 import math
@@ -14,8 +13,6 @@ from collections.abc import Callable, MutableMapping
 from dataclasses import dataclass
 
 import torch
-
-from src.trainers.grpo.objective.advantages import degenerate_group_mask
 
 # Metric keys both GRPO trainers log under.
 DEGENERATE_GROUP_FRAC_KEY = "sampling/degenerate_group_frac"
@@ -50,23 +47,6 @@ class TokenMassBalance:
 
     def apply(self, advantages: torch.Tensor) -> torch.Tensor:
         return torch.where(advantages > 0, advantages * self.positive_scale, advantages * self.negative_scale)
-
-
-def token_mass_balance(
-    advantages: torch.Tensor, token_weights: torch.Tensor, gather_fn: Callable[[torch.Tensor], torch.Tensor]
-) -> TokenMassBalance:
-    """The scales that shrink the heavier sign of a round's advantages until its token mass nets to zero.
-
-    Under a token-sum loss a row pulls with its advantage times its trained token weight. The advantages
-    of a group sum to zero, their token-weighted sum does not: where failures run longer than solves the
-    round pushes down the tokens the policy itself sampled, which flattens it (entropy rises), and where
-    solves run longer it sharpens it. Scaling down the heavier side, never up, removes that net push and
-    keeps every row's sign and its order within its sign. ``advantages`` and ``token_weights`` are
-    per-row and rank-local; the masses are summed over every rank (the gather is collective), so all
-    ranks take the same scales. The heavier sign's scale falls continuously to 0 as the lighter side's
-    mass does, so a round with mass on one sign only trains nothing on its advantages.
-    """
-    return _balance(*_world_masses(_signed_masses(advantages, token_weights), gather_fn))
 
 
 def _signed_masses(advantages: torch.Tensor, token_weights: torch.Tensor) -> torch.Tensor:
@@ -108,6 +88,14 @@ def record_token_mass(
     negative_only: torch.Tensor | None = None,
 ) -> TokenMassBalance | None:
     """Log a generation round's net token mass and return the balance to apply, or ``None`` when off.
+
+    Under a token-sum loss a row pulls with its advantage times its trained token weight. The advantages
+    of a group sum to zero, their token-weighted sum does not: where failures run longer than solves the
+    round pushes down the tokens the policy itself sampled, which flattens it (entropy rises), and where
+    solves run longer it sharpens it. The balance scales the heavier sign down, never up, until that net
+    push is zero, keeping every row's sign and its order within its sign; its scale falls continuously to 0
+    as the lighter side's mass does, so a round with mass on one sign only trains nothing on its advantages.
+    The masses are summed over every rank (the gather is collective), so all ranks take the same scales.
 
     A token weighs what the policy gradient multiplies it by: its place in the loss (``loss_mask``, every
     drop already in it) times its truncated, masked IS ratio (``None`` when the loss applies none). The
@@ -158,19 +146,6 @@ def validate_token_mass_balance(args) -> None:
             "negative-advantage sequences inside the loss, after the balance has weighed them, so the round's net "
             "push turns positive. Unset one of them."
         )
-
-
-def degenerate_drop_rows(
-    rewards: torch.Tensor, num_generations: int, valid_mask: torch.Tensor | None = None
-) -> tuple[torch.Tensor, float]:
-    """Per-row drop mask for all-equal-reward groups plus the dropped fraction (the logged metric).
-
-    A zero-spread group's advantage is already 0 (no gradient), but its tokens would still swell the
-    DAPO normalizer and dilute the groups that carry signal. ``valid_mask`` restricts degeneracy to
-    valid members (see :func:`degenerate_group_mask`).
-    """
-    drop = degenerate_group_mask(rewards, num_generations, valid_mask=valid_mask)
-    return drop, drop.float().mean().item()
 
 
 def narrow_loss_masks(drop_rows: torch.Tensor, *masks: torch.Tensor) -> tuple[torch.Tensor, ...]:

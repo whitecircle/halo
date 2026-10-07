@@ -2,7 +2,7 @@
 """``EPConfig`` and ``ParallelismConfig`` must accept and refuse the SAME EP group shapes.
 
 Both classes gate the EP dispatch group: ``ParallelismConfig`` at config time for every training
-run, ``EPConfig`` for the 30 files (tests, ``tests/common/pp_equivalence``) that build it directly.
+run, ``EPConfig`` for the tests that build it directly.
 Spelling the fit/divide predicates and their messages separately on each side lets them drift, so a
 shape one accepts the other rejects — either a run refused for the wrong reason or, worse, a
 directly built EPConfig admitting a topology the run-level gate exists to stop. The predicates live

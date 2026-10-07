@@ -13,15 +13,15 @@ import os
 from dataclasses import asdict, dataclass, replace
 from typing import Any
 
-from transformers import AutoTokenizer, PreTrainedTokenizerBase
+from transformers import AutoTokenizer
 from trl import ModelConfig
 
 from scripts._common import add_openai_endpoint_args
 from src.configs.async_training_config import AsyncTrainingConfig
 from src.configs.environment_config import EnvironmentConfig
-from src.configs.rollout_config import DEFAULT_ROLLOUT_TOP_P, THINKING_SCOPE_EPISODE, RolloutConfig
+from src.configs.rollout_config import DEFAULT_ROLLOUT_TOP_P, RolloutConfig
 from src.environments.base import BaseEnvironment
-from src.environments.episode import resolve_reasoning_end_token_id
+from src.environments.episode import resolve_rollout_stop_token_ids
 from src.environments.eval_runner import DEFAULT_REQUEST_TIMEOUT_S, trajectory_path, write_trajectories_jsonl
 from src.training.parser import H4ArgumentParser
 
@@ -55,7 +55,7 @@ def add_endpoint_args(parser: argparse.ArgumentParser) -> None:
         "--training_config",
         default=None,
         help="Environmental-GRPO training YAML to evaluate under: its rollout contract (chat-template "
-        "variables, stop tokens, thinking budget, backend, sampling) and its environment config become "
+        "variables, stop tokens, thinking budget, episode output budget, backend, sampling) and its environment config become "
         "the eval's, with any sampling flag passed explicitly laid over them. Without it the eval samples "
         "under the flags alone.",
     )
@@ -90,24 +90,6 @@ def add_endpoint_args(parser: argparse.ArgumentParser) -> None:
     )
 
 
-def resolve_stop_token_ids(tokenizer: PreTrainedTokenizerBase, names: list[str]) -> list[int]:
-    """The ids of ``rollout_stop_tokens`` under the training tokenizer, every name required to resolve.
-
-    Stricter than the trainer, which warns and skips a partially unresolved set: an eval that silently
-    dropped a terminator would sample under a contract the policy was not trained with, the drift
-    ``--training_config`` exists to close.
-    """
-    unk = getattr(tokenizer, "unk_token_id", None)
-    ids = {name: tokenizer.convert_tokens_to_ids(name) for name in names}
-    unresolved = sorted(name for name, tid in ids.items() if tid is None or tid == unk)
-    if unresolved:
-        raise ValueError(
-            f"rollout_stop_tokens {unresolved} are not tokens of the training config's tokenizer, so the "
-            f"eval cannot stop turns where training did; fix the YAML or the tokenizer it names."
-        )
-    return list(ids.values())
-
-
 @dataclass(frozen=True)
 class TrainingContract:
     """What a training YAML fixes about generation and the environment, for an eval to sample under.
@@ -120,49 +102,26 @@ class TrainingContract:
     env_config: EnvironmentConfig
     async_config: AsyncTrainingConfig
     stop_token_ids: list[int] | None
-    reasoning_end_token_id: int | None = None
 
     @classmethod
     def load(cls, path: str) -> "TrainingContract":
-        """Parse ``path``; the stop tokens and the reasoning-end marker go through the tokenizer of the
-        model the YAML trains."""
+        """Parse ``path``; the stop tokens go through the tokenizer of the model the YAML trains."""
         parser = H4ArgumentParser(TRAINING_CONTRACT_CLASSES)
         env_config, async_config, model_config = parser.parse_yaml_file(path, allow_extra_keys=True)
-        episode_scope = async_config.rollout_thinking_budget_scope == THINKING_SCOPE_EPISODE
-        stop_token_ids = reasoning_end_token_id = None
-        if async_config.rollout_stop_tokens or episode_scope:
+        stop_token_ids = None
+        if async_config.rollout_stop_tokens:
             tokenizer = AutoTokenizer.from_pretrained(
                 model_config.model_name_or_path, trust_remote_code=model_config.trust_remote_code
             )
-            if async_config.rollout_stop_tokens:
-                stop_token_ids = resolve_stop_token_ids(tokenizer, async_config.rollout_stop_tokens)
-            if episode_scope:
-                reasoning_end_token_id = resolve_reasoning_end_token_id(
-                    tokenizer, async_config.rollout_reasoning_end_token
-                )
-        return cls(
-            path=path,
-            env_config=env_config,
-            async_config=async_config,
-            stop_token_ids=stop_token_ids,
-            reasoning_end_token_id=reasoning_end_token_id,
-        )
+            stop_token_ids = resolve_rollout_stop_token_ids(tokenizer, async_config.rollout_stop_tokens)
+        return cls(path=path, env_config=env_config, async_config=async_config, stop_token_ids=stop_token_ids)
 
     def rollout_config(self) -> RolloutConfig:
         """The training run's own ``RolloutConfig``, minus the engine captures the eval transport never
-        requests (ids, logprobs, routing) — recorded as off so the meta line does not claim them. The
-        episode thinking scope still gets the ids it counts with: its own request flag asks for them. The
-        eval joins no process group, so the NCCL watchdog bound on the run's timeouts does not apply."""
-        rollout = self.async_config.get_rollout_config(
-            stop_token_ids=self.stop_token_ids,
-            reasoning_end_token_id=self.reasoning_end_token_id,
-            in_process_group=False,
-        )
+        requests (ids, logprobs, routing) — recorded as off so the meta line does not claim them. The eval
+        joins no process group, so the NCCL watchdog bound on the run's timeouts does not apply."""
+        rollout = self.async_config.get_rollout_config(stop_token_ids=self.stop_token_ids, in_process_group=False)
         return replace(rollout, capture_token_ids=False, capture_routed_experts=False)
-
-    def env_config_dict(self) -> dict[str, Any]:
-        """The dict the training run hands its environment factory (rewards, turn cap, env kwargs)."""
-        return self.env_config.to_env_config()
 
 
 def load_training_contract(path: str | None) -> TrainingContract | None:
@@ -228,7 +187,6 @@ def write_eval_outputs(
     traj_path: str | None,
     env_type: str,
     split: str,
-    max_turns: int | None,
     rollout: RolloutConfig,
     num_samples: int,
     meta_extra: dict[str, Any] | None = None,
@@ -262,9 +220,8 @@ def write_eval_outputs(
         "dataset": args.dataset,
         "config": args.config,
         "split": split,
-        # The effective cap rather than the flag: an omitted --max_turns leaves the env's own value,
-        # and a null here would leave a trajectory with no record of the budget it ran under.
-        "max_turns": max_turns if max_turns is not None else env.max_turns,
+        # The env's resolved cap, not a flag: an omitted --max_turns leaves the env class's own value.
+        "max_turns": env.max_turns,
         "rollout": asdict(rollout),
         "training_config": args.training_config,
         "num_samples": num_samples,

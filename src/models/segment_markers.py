@@ -3,9 +3,12 @@
 Attention isolates the documents of a packed or flattened row from its ``position_ids``, which
 restart at 0 at every document. Some families' conv and linear-attention mixers read their document
 boundaries from forward kwargs instead, and carry state across documents when those are absent. This
-module holds which families read which markers, the refusal for the families whose torch fallbacks
-drop them, and the markers themselves — shared by the SFT packing / padding-free collators and SMPO's
-padding-free forward. Per-family isolation matrix: ``agent-docs/data/collators.md``.
+module holds which families read which markers, the refusals for the families whose documents no
+marker can keep apart (a dense mask that drops ``position_ids``, KV windows cut by row index, torch
+fallbacks that drop the markers), and the markers themselves — shared by the SFT packing /
+padding-free collators and SMPO's padding-free forward — plus the positions and the left flush that
+put a padded row's real tokens where they sit unpadded. Per-family isolation matrix:
+``agent-docs/data/collators.md``.
 """
 
 from dataclasses import dataclass
@@ -13,6 +16,7 @@ from dataclasses import dataclass
 import torch
 from transformers.utils.import_utils import is_causal_conv1d_available, is_flash_linear_attention_available
 
+from src.models.attention_layout import compressed_layer_types
 from src.models.patches.attention import GDN_MODEL_TYPE_PREFIXES, model_type_matches
 
 # Families whose forward never passes ``position_ids`` into mask construction, so on a dense backend
@@ -59,6 +63,22 @@ def segment_markers_for(model_config) -> SegmentMarkers:
     )
 
 
+def reject_compressed_kv_rows(model_config, mode: str) -> None:
+    """Refuse a multi-document row (``mode``, the flag that asks for one) on a model with
+    compressed-KV layers (:func:`~src.models.attention_layout.compressed_layer_types`), on every
+    backend: no segment marker or ``position_ids`` reaches windows cut by row index."""
+    compressed = compressed_layer_types(model_config) if model_config is not None else []
+    if not compressed:
+        return
+    raise ValueError(
+        f"{mode} is refused for model_type={getattr(model_config, 'model_type', None)!r}: its {compressed} "
+        f"layers pool KV over windows cut at fixed indices of the row and judge their causality by "
+        f"position, so in a multi-document row, whose positions restart at every document, each document "
+        f"after the first attends the compressed KV of the row's first tokens instead of its own. Train "
+        f"one document per row (turn {mode} off)."
+    )
+
+
 def require_segment_aware_kernels(model_config, mode: str) -> None:
     """Refuse a multi-document row (``mode``) on a GatedDeltaNet family lacking its segment-aware kernels.
 
@@ -84,6 +104,25 @@ def require_segment_aware_kernels(model_config, mode: str) -> None:
 def document_ids(position_ids: torch.Tensor) -> torch.Tensor:
     """Per-token document index of each row, counting the ``position_ids`` restarts at 0."""
     return (position_ids == 0).cumsum(dim=-1) - 1
+
+
+def flattened_document_positions(attention_mask: torch.Tensor) -> torch.Tensor:
+    """``position_ids`` of a padded batch flattened into one ``[1, real_tokens]`` row: each row's real
+    tokens become one document, counted from 0 wherever the row's padding sat."""
+    return (attention_mask.cumsum(dim=1) - 1)[attention_mask.bool()].unsqueeze(0)
+
+
+def flush_rows_left(attention_mask: torch.Tensor, *tensors: torch.Tensor) -> tuple[torch.Tensor, ...]:
+    """Roll each row left by its leading-pad count, so every pad trails its real tokens; ``tensors``
+    share the mask's shape and move with it. Returns the mask first.
+
+    Reads nothing back from the device: unlike TRL's ``flush_left``, the columns no row reaches are
+    kept rather than truncated.
+    """
+    width = attention_mask.size(1)
+    leading_pads = (attention_mask.cumsum(dim=1) == 0).sum(dim=1, keepdim=True)
+    index = (torch.arange(width, device=attention_mask.device) + leading_pads) % width
+    return tuple(tensor.gather(1, index) for tensor in (attention_mask, *tensors))
 
 
 def segment_marker_kwargs(position_ids: torch.Tensor, markers: SegmentMarkers) -> dict[str, torch.Tensor | int]:

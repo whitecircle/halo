@@ -22,6 +22,7 @@ from tqdm.auto import tqdm
 
 from src.checkpoint.format import REFERENCE_LOGPS_FILE
 from src.trainers.mixins.reference_logps import (
+    LOGPROB_PRECISION_KEY,
     ReferenceLogpsCheckpointMixin,
     is_reference_entry,
     is_token_type,
@@ -30,9 +31,6 @@ from src.trainers.mixins.reference_logps import (
 )
 
 logger = get_logger(__name__, log_level="info")
-
-# The settings key recording the precision the sweep summed a split's log-probs in.
-_PRECISION_KEY = "logprob_precision"
 
 
 def _attach_reference_columns(dataset: Dataset, columns: Mapping[str, torch.Tensor]) -> Dataset:
@@ -68,7 +66,7 @@ class PrecomputeRefLogpsRankConsistentMixin(ReferenceLogpsCheckpointMixin):
                 f"{type(self).__name__} must declare the logprob_precision its reference sweep sums in "
                 "(list FP32LogprobsMixin in its bases)"
             )
-        return {**self._reference_settings(), _PRECISION_KEY: self.logprob_precision}
+        return {**self._reference_settings(), LOGPROB_PRECISION_KEY: self.logprob_precision}
 
     def _precompute_ref_logps(self, dataset, name, batch_size):
         needed = self._required_ref_logps_columns()
@@ -149,14 +147,14 @@ class PrecomputeRefLogpsRankConsistentMixin(ReferenceLogpsCheckpointMixin):
 
     def _reference_mismatch_refusal(self, name: str, entry: object, identity: Mapping, mismatch: str) -> str:
         """A split summed at another precision names only the regeneration: no setting selects it."""
-        ours = identity["settings"][_PRECISION_KEY]
-        if not is_reference_entry(entry) or entry["settings"].get(_PRECISION_KEY) == ours:
+        ours = identity["settings"][LOGPROB_PRECISION_KEY]
+        if not is_reference_entry(entry) or entry["settings"].get(LOGPROB_PRECISION_KEY) == ours:
             return super()._reference_mismatch_refusal(name, entry, identity, mismatch)
         return (
             f"Regenerate the '{name}' reference log-probs for this run: "
             f"{reference_regeneration_steps(self._reference_resume_checkpoint)}. The saved ones in "
             f"{self._reference_saved_path} were summed at "
-            f"{entry['settings'].get(_PRECISION_KEY, 'unrecorded')} precision, and this run sums them in "
+            f"{entry['settings'].get(LOGPROB_PRECISION_KEY, 'unrecorded')} precision, and this run sums them in "
             f"{ours}, which no setting changes."
         )
 

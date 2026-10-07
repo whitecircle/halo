@@ -3,7 +3,7 @@
 SMPO with Tensor Parallelism (TP=2): smoke test.
 
 Runs SmoothMarginPOTrainer for 10 steps with tp_size=2 (TP shards attention/embedding/lm_head
-weights as DTensors, FSDP2 syncs gradients when DP > 1). It checks only that ``trainer.is_tp_mode``
+weights as DTensors, FSDP2 syncs gradients when DP > 1). It checks only that ``trainer.parallelism_config.is_tp_mode``
 is set, that every configured step ran and that the final training loss is finite.
 It does not compare the SMPO objective or gradients against a reference, so a wrong-but-finite
 TP loss passes.
@@ -134,7 +134,7 @@ def run(ctx) -> dict:
     )
 
     # ---- Check 1: TP mode is active ----
-    checks = {"tp_mode_active": bool(trainer.is_tp_mode)}
+    checks = {"tp_mode_active": bool(trainer.parallelism_config.is_tp_mode)}
 
     # ---- Train ----
     log(f"\nStarting training for {NUM_TRAIN_STEPS} steps...")

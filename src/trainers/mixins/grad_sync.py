@@ -15,20 +15,15 @@ from collections.abc import Callable
 
 import torch
 import torch.distributed as dist
+import torch.nn as nn
 from accelerate.logging import get_logger
 from torch.distributed.tensor import DTensor
 from transformers.trainer_utils import IntervalStrategy
 
-from src.distributed.fsdp import (
-    IdentityParamSet,
-    apply_fsdp2_per_layer,
-    create_mixed_precision_policy_v2,
-    fsdp2_modules,
-    reshard_label,
-)
-from src.distributed.grad_reduce import reduce_grads_bucketed
+from src.distributed.fsdp import fsdp2_modules, setup_fsdp2_for_tp
+from src.distributed.grad_reduce import agree_grad_presence, reduce_grads_bucketed
 from src.distributed.mesh import MeshDim, mesh_dim_names
-from src.distributed.runtime import current_device, get_global_world_size
+from src.distributed.runtime import current_device
 from src.distributed.tensor_parallel.state_dict import tp_sharded_non_dtensor_suffixes
 from src.models.structure import model_has_quantized_params
 from src.trainers.mixins.ep_introspection import require_ep_config
@@ -36,6 +31,7 @@ from src.trainers.mixins.grad_clip import (
     bucketed_grad_norm_sq,
     clip_coefficient,
     clipping_enabled,
+    require_l2,
     scale_shards_to_max_norm_,
     trainable_clip_params,
 )
@@ -68,28 +64,24 @@ def register_grad_sync_step_hook(
 class GradientSyncMixin:
     """Gradient sync and global-norm clipping for :class:`DistributedTrainerMixin`."""
 
-    def _setup_qlora_gradient_sync(self):
-        """Enable the post-backward DP average for QLoRA (FSDP2 unusable: quantized base weights
-        conflict with DTensor inputs), which :meth:`_sync_qlora_grads` performs.
+    def _setup_qlora_sync(self, mode: str) -> None:
+        """QLoRA's gradient sync in place of FSDP2, whose ``fully_shard`` cannot wrap bnb's non-float
+        ``Params4bit``: the post-backward DP average :meth:`_sync_qlora_grads` performs, ordered ahead
+        of the clip. The callers return at one rank, so there is always a peer to average with.
 
         A flag, not a hook per parameter: ``register_post_accumulate_grad_hook`` fires only for
         params that received a grad on this rank, so its all-reduce would have rank-local
         membership and hang whenever a microbatch skips a branch on one rank. Per-microbatch firing
         also ignores ``no_sync``, paying a full all-reduce per accumulation step.
         """
-        if get_global_world_size() <= 1:
-            return
+        self._reject_fsdp_knobs_under_qlora()
         self._qlora_grad_sync = True
+        self._patch_gradient_clipping_for_qlora()
+        logger.info(f"✓ QLoRA gradient sync for {mode} (FSDP2 skipped: quantized 4-bit base weights)")
 
     def _sync_qlora_grads(self) -> None:
-        """DP-average every trainable grad once per optimizer step, with structural membership.
-
-        Grad presence is rank-local, so which params to reduce is agreed first with a single
-        all-reduce over a presence mask: a param some rank produced a grad for is reduced on every
-        rank (zero-filled where absent, which is its true contribution), and one no rank touched is
-        skipped everywhere. Materializing a zero grad there would apply weight decay and momentum to
-        a parameter the step should have left alone.
-        """
+        """DP-average every trainable grad once per optimizer step, over the membership
+        :func:`agree_grad_presence` agrees across the world."""
         if not getattr(self, "_qlora_grad_sync", False):
             return
         current_step = self.state.global_step
@@ -98,18 +90,7 @@ class GradientSyncMixin:
         self._qlora_sweep_last_step = current_step
 
         params = [p for _name, p in self._top_level_model().named_parameters() if p.requires_grad]
-        if not params:
-            return
-        present = torch.tensor([p.grad is not None for p in params], dtype=torch.uint8, device=current_device())
-        dist.all_reduce(present, op=dist.ReduceOp.MAX)
-
-        grads = []
-        for param, any_rank_has_grad in zip(params, present.tolist(), strict=True):
-            if not any_rank_has_grad:
-                continue
-            if param.grad is None:
-                param.grad = torch.zeros_like(param)
-            grads.append(param.grad)
+        grads = [p.grad for p in agree_grad_presence(params)]
         reduce_grads_bucketed(grads, op=dist.ReduceOp.AVG, fp32=self.parallelism_config.fp32_grad_reduce)
 
     def _setup_grad_accum_window(self) -> None:
@@ -154,63 +135,34 @@ class GradientSyncMixin:
         self._window_end_armed = is_last
 
     def _setup_ep_gradient_sync(self) -> None:
-        """FSDP2 for the EP (and EP+CP) gradient sync: experts FSDP-ignored, everything else sharded.
-
-        One ``_fsdp_exclusions`` derivation (a walk over every parameter's dtype) feeds both the
-        EP-module presence check and the wrap.
-        """
+        """FSDP2 for the EP (and EP+CP) gradient sync: experts FSDP-ignored, everything else sharded."""
         config = self.parallelism_config
         # Rank-block width, not the global world (identical without PP).
         if config.stage_world_size <= 1:
             return
-        exclusions = self._fsdp_exclusions()
-        if not exclusions.ep_modules and config.is_ep_mode:
-            raise RuntimeError(
-                "EP mode is active but no EP-patched modules found in the model. "
-                "This means expert gradient synchronization will not work — experts "
-                "on different ranks will silently diverge. Ensure the model was loaded "
-                "with EP patching (via load_distributed_model)."
-            )
         self._apply_ep_aware_dp_fsdp2(
             self.model,
-            exclusions=exclusions,
+            exclusions=self._fsdp_exclusions(),
             fallback_dp_size=config.stage_world_size,
             dp_replicate_size=config.dp_replicate_size,
             topo=f", HSDP {config.dp_replicate_size}×{config.dp_shard_size}" if config.is_hsdp else "",
         )
 
     def _setup_ep_tp_gradient_sync(self) -> None:
-        """FSDP2 over the loader's 2D (dp, tp) mesh: the EP+TP DP leg."""
-        config = self.parallelism_config
-        if config.stage_world_size <= 1:
-            return
-        dp_size = config.data_parallel_size
-        if dp_size <= 1:
-            logger.info("  DP=1, gradient sync handled by DTensor (TP) and EP hooks")
-            return
+        """FSDP2 over the loader's 2D (dp, tp) mesh with the EP modules left out: the EP+TP DP leg.
 
-        # Reuse the loader's 2D (dp, tp) mesh; a fresh 1D mesh would be a duplicate communicator.
-        device_mesh = getattr(self.model, "_device_mesh", None)
-        if MeshDim.DP not in mesh_dim_names(device_mesh):
-            raise RuntimeError(
-                "EP+TP gradient sync needs the loader's 2D (dp, tp) DeviceMesh, but the model "
-                "carries none — the load/trainer contract broke (load_distributed_model attaches "
-                "the mesh when it TP-shards). A hand-rolled DP-group fallback here would mint a "
-                "duplicate communicator and silently diverge from the mesh the DTensors shard "
-                "over; load the model through load_distributed_model."
-            )
-        mp_policy = create_mixed_precision_policy_v2(self.args, fp32_master_weights=config.fp32_non_ep_params)
-        apply_fsdp2_per_layer(
+        Through the TP entry point, so it runs the shared wrap body (the forward-input cast policy,
+        the single-device check) and takes the mesh the DTensors are sharded on, never a fresh one.
+        """
+        config = self.parallelism_config
+        self._fsdp_wrapped, _ = setup_fsdp2_for_tp(
             self.model,
-            device_mesh[MeshDim.DP],
-            mp_policy,
-            config.fsdp_reshard_after_forward,
-            IdentityParamSet(self._fsdp_exclusions().params),
-        )
-        self._fsdp_wrapped = True
-        logger.info(
-            f"  ✓ FSDP2 ({reshard_label(config.fsdp_reshard_after_forward)}) applied for EP+TP gradient "
-            f"sync (DP={dp_size}, reused 2D mesh)"
+            config.tp_size,
+            self.args,
+            dp_size=config.data_parallel_size,
+            ignored_params=self._fsdp_exclusions().params,
+            fp32_master_weights=config.fp32_non_ep_params,
+            reshard_after_forward=config.fsdp_reshard_after_forward,
         )
 
     def _setup_cp_gradient_sync(self) -> None:
@@ -218,12 +170,8 @@ class GradientSyncMixin:
         config = self.parallelism_config
         if config.stage_world_size <= 1:
             return
-        # QLoRA skips FSDP2 (quantized weights cannot coexist with DTensor inputs) → AllReduce.
         if model_has_quantized_params(self.model):
-            self._reject_fsdp_knobs_under_qlora()
-            self._setup_qlora_gradient_sync()
-            self._patch_gradient_clipping_for_qlora()
-            logger.info("✓ QLoRA gradient sync applied for CP gradient sync")
+            self._setup_qlora_sync("context parallel")
             return
         self._apply_dp_fsdp2(
             self._top_level_model(),
@@ -237,9 +185,8 @@ class GradientSyncMixin:
     def _patch_gradient_clipping_for_qlora(self):
         """Run the QLoRA DP average before the norm, so the clip coefficient matches on every rank.
 
-        The per-parameter hooks this replaces synced during backward, so clipping already saw
-        averaged grads. A post-backward sweep has to be ordered ahead of the norm explicitly, or
-        each rank would clip by its own local coefficient and the weights would diverge.
+        The average is a post-backward sweep, so it has to be ordered ahead of the norm explicitly,
+        or each rank would clip by its own local coefficient and the weights would diverge.
         """
         trainer = self
         base_clip = self.accelerator.clip_grad_norm_
@@ -251,51 +198,57 @@ class GradientSyncMixin:
         self.accelerator.clip_grad_norm_ = qlora_clip_grad_norm_
 
     def _patch_gradient_clipping_for_ep(self):
-        """Patch gradient clipping to compute true global gradient norm for EP."""
+        """Install the EP clip: the deferred sweep, the EP+TP replicated sync, then the true global norm.
+
+        Every caller sets up a mode whose model carries EP layers, so one without any is a load that
+        skipped EP patching: its experts would have no gradient sync and drift apart silently. That
+        raises here, once, at install, and so does a missing EP config, whose groups the norm's expert
+        legs reduce over; the clip itself assumes both on every step.
+        """
+        if not self._has_ep_layers:
+            raise RuntimeError(
+                "EP gradient clipping is being installed on a model with no EP-patched layers, so expert "
+                "gradient synchronization will not work and experts on different ranks would silently "
+                "diverge. Load the model with EP patching (via load_distributed_model), or drop "
+                "expert_parallel_size for a dense model."
+            )
+        require_ep_config(self._ep_config)
         trainer = self
 
         def ep_clip_grad_norm_(parameters, max_norm, norm_type=2):
+            require_l2(norm_type, "Expert-parallel")
             all_params = trainable_clip_params(parameters)
-            # Structural, never grad-presence: the EP branch issues collectives, so the early return
-            # must be rank-uniform.
+            # Structural, never grad-presence: the sweeps and the norm issue collectives, so the early
+            # return must be rank-uniform.
             if not all_params:
                 return torch.tensor(0.0, device=current_device())
 
-            device = current_device()
+            # Before the norm, so the clip runs on fully-synced grads and matches on every rank.
+            trainer._sync_deferred_expert_grads()
 
-            if trainer._has_ep_layers:
-                # Before the norm, so the clip runs on fully-synced grads and matches on every rank.
-                trainer._sync_deferred_expert_grads()
+            # EP+TP: TP-average replicated grads first, else norms / the shared expert drift across the TP axis.
+            if trainer.parallelism_config.is_tp_mode:
+                expert_ids = trainer._get_sharded_expert_param_ids()
+                trainer._sync_tp_replicated_grads([p for p in all_params if id(p) not in expert_ids])
 
-                # EP+TP: TP-average replicated grads first, else norms / the shared expert drift across the TP axis.
-                if trainer.parallelism_config.is_tp_mode:
-                    expert_ids = trainer._get_sharded_expert_param_ids()
-                    trainer._sync_tp_replicated_grads([p for p in all_params if id(p) not in expert_ids])
+            global_norm = trainer._compute_global_grad_norm(all_params)
 
-                global_norm = trainer._compute_global_grad_norm()
+            # Device-resident: reading the norm back stalls the launch queue; max_norm <= 0 disables clipping (HF).
+            if clipping_enabled(max_norm):
+                deferred = trainer._grad_scale_deferring_optimizer(all_params)
+                if deferred is not None:
+                    deferred.defer_grad_scale(clip_coefficient(float(max_norm), global_norm))
+                    return global_norm
+                # Scale local shards: _foreach_mul_ refuses DTensor + plain EP tensors together.
+                shards = [
+                    g.to_local() if isinstance(g, DTensor) else g
+                    for g in (p.grad for p in all_params)
+                    if g is not None
+                ]
+                if shards:
+                    scale_shards_to_max_norm_(shards, float(max_norm), global_norm)
 
-                # Device-resident: reading the norm back stalls the launch queue; max_norm <= 0 disables clipping (HF).
-                if clipping_enabled(max_norm):
-                    deferred = trainer._grad_scale_deferring_optimizer(all_params)
-                    if deferred is not None:
-                        deferred.defer_grad_scale(clip_coefficient(float(max_norm), global_norm))
-                        return global_norm
-                    # Scale local shards: _foreach_mul_ refuses DTensor + plain EP tensors together.
-                    shards = [
-                        g.to_local() if isinstance(g, DTensor) else g
-                        for g in (p.grad for p in all_params)
-                        if g is not None
-                    ]
-                    if shards:
-                        scale_shards_to_max_norm_(shards, float(max_norm), global_norm)
-
-                return global_norm
-            else:
-                # No EP layers → torch clip issues no collectives, so a rank-local filter is safe.
-                params = [p for p in all_params if p.grad is not None]
-                if not params:
-                    return torch.tensor(0.0, device=device)
-                return torch.nn.utils.clip_grad_norm_(params, max_norm, norm_type=norm_type, foreach=False)
+            return global_norm
 
         self.accelerator.clip_grad_norm_ = ep_clip_grad_norm_
 
@@ -328,7 +281,8 @@ class GradientSyncMixin:
         - non-expert FSDP shards: replica-group ``AVG`` of the local slice, but only when sharded
           within the EP group — otherwise reduce-scatter already produced the average.
 
-        Collectives issue in a fixed ``named_parameters`` order identical on every rank. No-op
+        Collectives issue in a fixed ``named_parameters`` order identical on every rank, each
+        bucket's membership agreed over its own reduce group (:func:`agree_grad_presence`). No-op
         unless ``defer_grad_sync``; both callers run only with EP layers present, so a missing EP
         config raises.
         """
@@ -351,18 +305,17 @@ class GradientSyncMixin:
         expert_ids = self._get_sharded_expert_param_ids()
         ep_ids = self._get_ep_param_ids()
 
-        # Membership must be structural: a grad can be None on some ranks only, so params enter zero-filled.
-        expert_sum_grads: list = []
-        world_avg_grads: list = []
-        replica_avg_grads: list = []
+        expert_params: list[nn.Parameter] = []
+        world_params: list[nn.Parameter] = []
+        replica_params: list[nn.Parameter] = []
 
         for _name, param in self._top_level_model().named_parameters():
             if not param.requires_grad:
                 continue
             pid = id(param)
-            target = world_avg_grads
+            target = world_params
             if pid in expert_ids:
-                target = expert_sum_grads
+                target = expert_params
             elif pid not in ep_ids and isinstance(param.data, DTensor):
                 if not ep_cfg.is_deferred_dp:
                     # PP stage: sharded over the block's full DP scope, so reduce-scatter averaged it.
@@ -375,32 +328,35 @@ class GradientSyncMixin:
                         f"(1D mesh of {ep_cfg.ep_group_size}), got a {tuple(mesh.shape)} mesh for "
                         f"'{_name}'. This topology must not set is_deferred_dp."
                     )
-                target = replica_avg_grads
-            # Zero-fill only params that enter a collective, else AdamW gets a zero grad where it had None.
-            if param.grad is None:
-                param.grad = torch.zeros_like(param)
-            target.append(param.grad._local_tensor if target is replica_avg_grads else param.grad)
+                target = replica_params
+            target.append(param)
 
         if replica_group is not None:
+            expert_grads = [p.grad for p in agree_grad_presence(expert_params, replica_group)]
             reduce_grads_bucketed(
-                expert_sum_grads, op=dist.ReduceOp.SUM, divisor=expert_divisor, group=replica_group, fp32=fp32
+                expert_grads, op=dist.ReduceOp.SUM, divisor=expert_divisor, group=replica_group, fp32=fp32
             )
-        elif expert_sum_grads:
-            # R==1: the combine already summed every replica, so only the storage-dtype divide remains.
-            torch._foreach_div_(expert_sum_grads, expert_divisor)
+        else:
+            # R==1: the combine already summed every replica, so only the storage-dtype divide remains,
+            # and with no collective an expert this rank never touched keeps grad None.
+            expert_grads = [p.grad for p in expert_params if p.grad is not None]
+            if expert_grads:
+                torch._foreach_div_(expert_grads, expert_divisor)
         # DP-scope AVG, not data_parallel_size: the per-rank loss is mean-normalized.
-        reduce_grads_bucketed(world_avg_grads, op=dist.ReduceOp.AVG, group=ep_cfg.dp_scope_group, fp32=fp32)
-        if replica_avg_grads and replica_group is None:
+        world_grads = [p.grad for p in agree_grad_presence(world_params, ep_cfg.dp_scope_group)]
+        reduce_grads_bucketed(world_grads, op=dist.ReduceOp.AVG, group=ep_cfg.dp_scope_group, fp32=fp32)
+        if replica_params and replica_group is None:
             # group=None is the world group, which under PP spans stages holding different layers.
             # Unreachable in practice (these grads are collected only under is_deferred_dp, which is
             # what builds the replica group), so this is a contract check rather than a fallback.
             raise RuntimeError(
-                f"Deferred cross-replica DP sync collected {len(replica_avg_grads)} sharded expert "
+                f"Deferred cross-replica DP sync collected {len(replica_params)} sharded expert "
                 f"gradient(s) but has no expert replica group to average them over. Reducing over "
                 f"the default world group would average across pipeline stages / dispatch groups "
                 f"that hold different parameters."
             )
-        reduce_grads_bucketed(replica_avg_grads, op=dist.ReduceOp.AVG, group=replica_group, fp32=fp32)
+        replica_grads = [p.grad._local_tensor for p in agree_grad_presence(replica_params, replica_group)]
+        reduce_grads_bucketed(replica_grads, op=dist.ReduceOp.AVG, group=replica_group, fp32=fp32)
 
     @staticmethod
     def _sharded_grad_bucket(grad: torch.Tensor, tp_disjoint: bool) -> str:
@@ -485,79 +441,75 @@ class GradientSyncMixin:
                 return self._fsdp_shard_group(param.device_mesh)
         return self._pp_stage_group
 
-    def _compute_global_grad_norm(self) -> torch.Tensor:
-        """Global gradient norm across all EP ranks for clipping, as a 0-dim device tensor.
+    def _compute_global_grad_norm(self, params: list[nn.Parameter]) -> torch.Tensor:
+        """Global L2 gradient norm of ``params`` for every EP and TP clip, as a 0-dim device tensor.
 
-        Expert grads are local (different experts per rank); non-expert grads are FSDP2-synced. EP+TP:
-        non-expert params are Shard DTensors, so shard norms are local and then all-reduced over the
-        TP group. Expert-TP: expert shards summed within the expert-TP group; expert norms aggregate
-        across sub-EP (dispatch) groups. Iterates the full top-level model so ``lm_head`` (untied
-        models) contributes. Kept on device: reading it back would block the launch queue every step.
+        Each local grad's squared norm lands in the bucket whose reduce group tiles that tensor once:
+
+        - ``expert``: EP/ETP-distributed expert shards (rank-owned) → summed over the expert-TP group,
+          then over the dispatch group, which counts each shard once. Their replicas across EP groups
+          hold identical grads by now (every multi-group topology defers, and the clip runs the sweep
+          first), so no replica-group reduce runs;
+        - ``fsdp_full``: EP-only / EP+CP non-expert FSDP2 shards (no device mesh) → the FSDP shard
+          group;
+        - ``tp1d`` / ``tp2d`` / ``dp``: DTensor or hand-sliced TP grads under a device mesh →
+          :meth:`_reduce_shard_norm_buckets`;
+        - ``other``: plain replicated grads (routers after the sweep, TP replicas after their sync),
+          counted locally.
+
+        A grad-less param contributes nothing; every reduce is gated on config, never on which grads
+        exist, so the collectives stay rank-uniform and their count does not grow with the world. Under
+        PP each reduce is stage-scoped and the chain sum adds the disjoint stages. Kept on device:
+        reading it back would block the launch queue every step.
         """
-        model = self._top_level_model()
-
         # Only EP/ETP-distributed expert weights: replicated router / shared-expert params would be over-counted.
         sharded_expert_ids = self._get_sharded_expert_param_ids()
         # Plain tensors the TP plan sharded by hand (GptOss sinks): disjoint slices, not replicas.
         tp_sharded_plain_ids = self._tp_sharded_plain_param_ids()
 
-        device = current_device()
         shards: dict[str, list[torch.Tensor]] = {
             name: [] for name in ("expert", "fsdp_full", "tp1d", "tp2d", "dp", "other")
         }
-
-        for _name, param in model.named_parameters():
-            if param.grad is None:
+        for param in params:
+            grad = param.grad
+            if grad is None:
                 continue
-
-            is_expert = id(param) in sharded_expert_ids
-            is_dtensor = isinstance(param.grad, DTensor)
+            is_dtensor = isinstance(grad, DTensor)
             tp_disjoint = id(param) in tp_sharded_plain_ids
-            if is_expert:
+            if id(param) in sharded_expert_ids:
                 bucket = "expert"
             elif is_dtensor and self._device_mesh is None:
-                # EP-only / EP+CP: non-expert params FSDP2-sharded over the DP world.
                 bucket = "fsdp_full"
             elif is_dtensor or tp_disjoint:
                 # Route by mesh dims plus TP-plan disjointness; the mesh alone cannot distinguish it.
-                bucket = self._sharded_grad_bucket(param.grad, tp_disjoint)
+                bucket = self._sharded_grad_bucket(grad, tp_disjoint)
             else:
                 bucket = "other"
-            shards[bucket].append(param.grad._local_tensor if is_dtensor else param.grad)
+            shards[bucket].append(grad._local_tensor if is_dtensor else grad)
 
-        norm_sq = bucketed_grad_norm_sq(shards, device=device)
-        other_norm_sq = norm_sq["other"]
-
-        # Config-gated (identical branch on all ranks) so collectives never desync.
+        norm_sq = bucketed_grad_norm_sq(shards, device=current_device())
+        total_norm_sq = norm_sq["other"]
         if self._device_mesh is not None:
-            other_norm_sq = other_norm_sq + self._reduce_shard_norm_buckets(
+            total_norm_sq = total_norm_sq + self._reduce_shard_norm_buckets(
                 norm_sq["tp1d"], norm_sq["tp2d"], norm_sq["dp"]
             )
         elif self._fsdp_wrapped:
-            fsdp_dp_group = self._canonical_fsdp_shard_group(model, sharded_expert_ids)
-            dist.all_reduce(norm_sq["fsdp_full"], op=dist.ReduceOp.SUM, group=fsdp_dp_group)
-            other_norm_sq = other_norm_sq + norm_sq["fsdp_full"]
+            fsdp_group = self._canonical_fsdp_shard_group(self._top_level_model(), sharded_expert_ids)
+            dist.all_reduce(norm_sq["fsdp_full"], op=dist.ReduceOp.SUM, group=fsdp_group)
+            total_norm_sq = total_norm_sq + norm_sq["fsdp_full"]
 
-        # Expert legs read straight off the EP config, which holds those process groups. Only the EP
-        # grad clip calls this, with EP layers present, so a missing config raises.
-        global_expert_norm_sq = norm_sq["expert"]
-        ep_cfg = require_ep_config(self._ep_config)
-        if ep_cfg.expert_tp_size > 1 and ep_cfg.expert_tp_group is not None:
-            dist.all_reduce(global_expert_norm_sq, op=dist.ReduceOp.SUM, group=ep_cfg.expert_tp_group)
+        # The EP config holds the expert groups; a dense TP run has none and no expert bucket.
+        ep_cfg = self._ep_config
+        if ep_cfg is not None:
+            expert_norm_sq = norm_sq["expert"]
+            if ep_cfg.expert_tp_size > 1 and ep_cfg.expert_tp_group is not None:
+                dist.all_reduce(expert_norm_sq, op=dist.ReduceOp.SUM, group=ep_cfg.expert_tp_group)
+            if ep_cfg.dispatch_ep_group is not None:
+                dist.all_reduce(expert_norm_sq, op=dist.ReduceOp.SUM, group=ep_cfg.dispatch_ep_group)
+            total_norm_sq = total_norm_sq + expert_norm_sq
 
-        if ep_cfg.dispatch_ep_group is not None:
-            dist.all_reduce(global_expert_norm_sq, op=dist.ReduceOp.SUM, group=ep_cfg.dispatch_ep_group)
-
-        # Experts replicated across EP groups: avoid counting duplicates.
-        if ep_cfg.num_ep_groups > 1 and ep_cfg.expert_replica_group is not None:
-            dist.all_reduce(global_expert_norm_sq, op=dist.ReduceOp.SUM, group=ep_cfg.expert_replica_group)
-            global_expert_norm_sq.div_(ep_cfg.num_ep_groups)
-
-        total_norm_sq = global_expert_norm_sq + other_norm_sq
         if self._pp_chain_group is not None:
-            # Every reduce above is stage-scoped; the chain sum over disjoint stages gives the whole model's norm.
             dist.all_reduce(total_norm_sq, op=dist.ReduceOp.SUM, group=self._pp_chain_group)
-
         return total_norm_sq.sqrt()
 
     def _patch_gradient_clipping_for_tp(self):
@@ -570,11 +522,7 @@ class GradientSyncMixin:
         trainer = self
 
         def tp_clip_grad_norm_(parameters, max_norm, norm_type=2):
-            if norm_type != 2:
-                raise NotImplementedError(
-                    f"TP grad clipping computes an L2 norm over DTensor shards; norm_type={norm_type} "
-                    f"would silently return the wrong norm."
-                )
+            require_l2(norm_type, "Tensor-parallel")
             all_params = trainable_clip_params(parameters)
             # Structural, never grad-presence: the sync + norm below issue TP/DP collectives that would desync.
             if not all_params:
@@ -582,13 +530,13 @@ class GradientSyncMixin:
 
             # Replicated grads must match across the TP group, else the weights and norm diverge.
             trainer._sync_tp_replicated_grads(all_params)
-            params = [p for p in all_params if p.grad is not None]
-
-            total_norm = trainer._compute_tp_grad_norm(params)
+            total_norm = trainer._compute_global_grad_norm(all_params)
 
             # Device-resident like the EP clip path; scales local shards, mixing DTensor and plain TP grads.
-            if clipping_enabled(max_norm) and params:
-                shards = [g.to_local() if isinstance(g, DTensor) else g for g in (p.grad for p in params)]
+            shards = [
+                g.to_local() if isinstance(g, DTensor) else g for g in (p.grad for p in all_params) if g is not None
+            ]
+            if clipping_enabled(max_norm) and shards:
                 scale_shards_to_max_norm_(shards, float(max_norm), total_norm)
 
             return total_norm
@@ -651,11 +599,11 @@ class GradientSyncMixin:
           shard (TP siblings hold the same shard of the same replica).
 
         Plain tensors the TP plan sharded by hand (:meth:`_tp_sharded_plain_param_ids`) are excluded
-        from both, since their per-rank slices are disjoint. No-op without a TP group. A param
-        missing a grad gets a zero one (a router tie-break can leave grad=None on one rank only) so
-        the collective count stays structural.
+        from both, since their per-rank slices are disjoint. No-op without a TP group. Membership is
+        agreed over the TP group (:func:`agree_grad_presence`): a router tie-break can leave
+        grad=None on one rank only.
         """
-        tp_group = self._get_tp_process_group()
+        tp_group = self.parallel_dims.tp_group()
         if tp_group is None or dist.get_world_size(group=tp_group) <= 1:
             return
         # Once per step: max_grad_norm == 0 still reaches the clip via _get_grad_norm, and the SUM is not idempotent.
@@ -665,14 +613,12 @@ class GradientSyncMixin:
         self._tp_sync_last_step = step
         sharded_plain_ids = self._tp_sharded_plain_param_ids()
         per_head_norm_ids = self._tp_per_head_norm_param_ids()
-        replicated_grads = []
-        per_head_norm_grads = []
+        candidates = []
         for p in params:
             if not p.requires_grad or id(p) in sharded_plain_ids:
                 continue
-            is_per_head_norm = id(p) in per_head_norm_ids
             if (
-                not is_per_head_norm
+                id(p) not in per_head_norm_ids
                 and isinstance(p.data, DTensor)
                 and MeshDim.TP in mesh_dim_names(p.data.device_mesh)
             ):
@@ -681,52 +627,18 @@ class GradientSyncMixin:
                 # runs per TP column, so without the AVG below the TP siblings' replicas are never
                 # re-synced and drift apart on any nondeterministic backward.
                 continue
-            if p.grad is None:
-                p.grad = torch.zeros_like(p)
-            if is_per_head_norm:
-                # SUM, not AVG: each rank's gradient covers its own heads, and DP shards the norm identically.
-                per_head_norm_grads.append(p.grad.to_local() if isinstance(p.grad, DTensor) else p.grad)
-            else:
-                # TP siblings hold the same dp shard of the same replica, so reducing local shards
-                # is the exact cross-replica sync.
-                replicated_grads.append(p.grad.to_local() if isinstance(p.grad, DTensor) else p.grad)
+            candidates.append(p)
+        replicated_grads = []
+        per_head_norm_grads = []
+        for p in agree_grad_presence(candidates, tp_group):
+            # TP siblings hold the same dp shard of the same replica, so reducing local shards is the
+            # exact cross-replica sync. Per-head norms SUM, not AVG: each rank's gradient covers its
+            # own heads, and DP shards the norm identically.
+            local = p.grad.to_local() if isinstance(p.grad, DTensor) else p.grad
+            (per_head_norm_grads if id(p) in per_head_norm_ids else replicated_grads).append(local)
         fp32 = bool(self.parallelism_config.fp32_grad_reduce)
         reduce_grads_bucketed(replicated_grads, op=dist.ReduceOp.AVG, group=tp_group, fp32=fp32)
         reduce_grads_bucketed(per_head_norm_grads, op=dist.ReduceOp.SUM, group=tp_group, fp32=fp32)
-
-    def _compute_tp_grad_norm(self, params: list) -> torch.Tensor:
-        """Global L2 gradient norm for TP / TP+DP mode (mixed DTensor + replicated), on device.
-
-        Each DTensor grad's local-shard norm is summed over the ranks tiling it, by sharding:
-        - 1D ``tp`` mesh → TP group;
-        - 2D ``(dp, tp)`` mesh → the whole ``(dp, tp)`` plane (shards tile it once);
-        - 1D ``dp`` mesh (FSDP2-sharded replica) → DP group only (a wider reduce over-counts by tp_size);
-        - plain tensor hand-sliced under TP (GptOss sinks) → TP group;
-        - plain replicated tensor (DP=1) → counted locally, no reduce.
-
-        Reduces run even with empty ``params`` (zero contribution) so the collectives stay
-        rank-uniform. Under PP every reduce is stage-scoped; the chain sum below covers the rest.
-        """
-        device = current_device()
-        shards: dict[str, list[torch.Tensor]] = {name: [] for name in ("tp1d", "tp2d", "dp", "replicated")}
-        sharded_plain_ids = self._tp_sharded_plain_param_ids()
-
-        for p in params:
-            grad = p.grad
-            is_dtensor = isinstance(grad, DTensor)
-            tp_disjoint = id(p) in sharded_plain_ids
-            # A disjoint slice tiles the tensor once across the TP group; counting it as replicated
-            # skews the norm. What lands in ``replicated`` is reduced by nothing.
-            sharded = is_dtensor or tp_disjoint
-            bucket = self._sharded_grad_bucket(grad, tp_disjoint) if sharded else "replicated"
-            shards[bucket].append(grad._local_tensor if is_dtensor else grad)
-
-        norm_sq = bucketed_grad_norm_sq(shards, device=device)
-        sharded_norm_sq = self._reduce_shard_norm_buckets(norm_sq["tp1d"], norm_sq["tp2d"], norm_sq["dp"])
-        total_norm_sq = sharded_norm_sq + norm_sq["replicated"]
-        if self._pp_chain_group is not None:
-            dist.all_reduce(total_norm_sq, op=dist.ReduceOp.SUM, group=self._pp_chain_group)
-        return total_norm_sq.sqrt()
 
     def _logs_after_this_step(self) -> bool:
         """Whether ``_maybe_log_save_evaluate`` will log the step now being completed.

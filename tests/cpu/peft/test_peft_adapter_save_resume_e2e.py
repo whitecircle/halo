@@ -3,9 +3,8 @@
 
 ``tests/cpu/peft/test_peft_cp_adapter_keys.py`` pins the key algebra (normalize / remap) and
 ``test_adapter_state_includes_buffers.py`` pins ``_resolve_adapter_state``, but both stop short of
-the artifact: neither calls :meth:`PeftAdapterSaver.save`, and nothing anywhere calls
-:func:`_load_peft_adapter_state`, the function resume actually runs. So the three
-contracts that only hold END TO END are pinned nowhere else:
+the artifact: neither calls :meth:`PeftAdapterSaver.save` nor :func:`_load_peft_adapter_state`, the
+function resume actually runs. So the three contracts that only hold END TO END are pinned here:
 
 * a ``modules_to_save`` router's balancing buffer reaches ``adapter_model.safetensors`` — a filter
   that dropped buffers, or a writer branch that never saw them, leaves the serving bias at init;
@@ -133,7 +132,7 @@ def _train_adapters(peft_model: PeftModel) -> None:
 
 
 def _save_adapter(peft_model: PeftModel, output_dir: str, **ctx_kwargs) -> dict[str, torch.Tensor]:
-    assert PeftAdapterSaver().save(_context(peft_model, **ctx_kwargs), peft_model, output_dir)
+    PeftAdapterSaver().save(_context(peft_model, **ctx_kwargs), peft_model, output_dir)
     return load_file(os.path.join(output_dir, ADAPTER_SAFETENSORS_FILE))
 
 
@@ -291,7 +290,7 @@ def test_non_save_rank_writes_no_adapter_and_no_provenance():
     peft_model = _cp_peft_model()
     setattr(peft_model.get_base_model(), LIVE_SINKS_ATTR, SinksPolicy.NEUTRALIZED)
     with tempfile.TemporaryDirectory() as tmp:
-        assert PeftAdapterSaver().save(_context(peft_model, is_save_rank=False), peft_model, tmp)
+        PeftAdapterSaver().save(_context(peft_model, is_save_rank=False), peft_model, tmp)
         assert not os.path.isfile(os.path.join(tmp, ADAPTER_SAFETENSORS_FILE))
         assert not os.path.isfile(os.path.join(tmp, TRAINING_PROVENANCE_FILE))
 

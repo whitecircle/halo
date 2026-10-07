@@ -5,8 +5,8 @@ Tests for log_dataset_examples decoded-sample dumping.
 On-disk decoded-sample writing is opt-in via the ``write_decoded_samples`` flag
 (wired from the ``log_decoded_samples`` YAML field on CommonScriptArguments). It
 is off by default so ordinary training runs do not emit sample files. These tests
-cover the gate, file naming, the input_ids skip, the back-compat (no-kwargs)
-path, DatasetDict handling, the FS-aware writer gate (the same one ``run.log``
+cover the gate, file naming, the input_ids skip, the no-tokenizer skip,
+DatasetDict handling, the FS-aware writer gate (the same one ``run.log``
 uses, so a non-shared filesystem gets the samples on every node), and the config
 default.
 
@@ -91,7 +91,7 @@ def test_skips_dataset_without_input_ids():
         assert not os.path.exists(os.path.join(d, "log")), "dataset without input_ids must be skipped"
 
 
-def test_backcompat_no_tokenizer_no_write():
+def test_no_tokenizer_no_write():
     """Enabled with an output_dir but no tokenizer: there is nothing to decode with, so the dump
     must be skipped rather than written from raw ids."""
     with tempfile.TemporaryDirectory() as d:

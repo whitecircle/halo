@@ -110,8 +110,8 @@ def _load(path: str, *, excuse_task_head: bool):
 
 
 def test_a_missing_score_head_the_adapter_cannot_supply_is_refused(causal_lm_checkpoint):
-    """Pre-gate this returned a model with a random ``score`` and the merge saved it: every reward
-    the checkpoint went on to produce was noise that looks like a score."""
+    """Ungated, this returns a model with a random ``score`` and the merge saves it: every reward
+    the checkpoint goes on to produce is noise that looks like a score."""
     with pytest.raises(RuntimeError, match="randomly initialized"):
         _load(causal_lm_checkpoint, excuse_task_head=False)
 
@@ -151,13 +151,13 @@ def _keyword_values(source_path: pathlib.Path, call_name: str, keyword: str) -> 
 
 def test_the_excuse_is_derived_from_the_adapter_config():
     """The flag must come from what the adapter declares, not from a caller's default: excusing the
-    head unconditionally is the pre-gate behaviour under a new name — and a literal ``True`` here
+    head unconditionally is the ungated behaviour under another name — and a literal ``True`` here
     is exactly that. Read at the shared merge, which is where every merge tool's base load goes: the
     one call that derives it, and every base load below it forwarding what it was handed."""
     source = pathlib.Path(adapters.__file__)
     (derived,) = _keyword_values(source, "load_base_for_adapter", "excuse_task_head")
     assert not isinstance(derived, ast.Constant), (
-        "adapter_supplies_task_head is passed as a literal — the excuse must be read off peft_config.modules_to_save"
+        "excuse_task_head is passed as a literal — the excuse must be read off peft_config.modules_to_save"
     )
     assert "modules_to_save" in ast.dump(derived), "the excuse must be read off peft_config.modules_to_save"
     for forwarded in _keyword_values(source, "load_base_model", "excuse_task_head"):
@@ -171,14 +171,15 @@ def test_the_excuse_is_derived_from_the_adapter_config():
 
 @pytest.mark.parametrize("model_type", ["causal_lm", "classifier", "base"])
 def test_a_truncated_source_is_refused_on_every_conversion_path(model_type, causal_lm_checkpoint, tmp_path):
-    """``--model_type classifier`` / ``base`` reached ``from_pretrained`` directly, so a checkpoint
-    missing tensors was random-initialized and written back out as a complete-looking bf16 model."""
+    """Through a direct ``from_pretrained``, ``--model_type classifier`` / ``base`` would
+    random-initialize a checkpoint's missing tensors and write them out as a complete-looking bf16
+    model."""
     with pytest.raises(RuntimeError, match="randomly initialized"):
         convert_to_bf16.load_model(_truncate(causal_lm_checkpoint, tmp_path), model_type, dtype=torch.float32)
 
 
 def test_a_truncated_base_is_refused_under_peft(causal_lm_checkpoint, tmp_path):
-    """PEFT's auto-class loads the base through a raw ``from_pretrained``, so ``--peft`` inherited
+    """PEFT's auto-class loads the base through a raw ``from_pretrained``, so ``--peft`` would inherit
     the hole for the merge that follows."""
     adapter_dir = _adapter_for(_truncate(causal_lm_checkpoint, tmp_path), tmp_path)
     with pytest.raises(RuntimeError, match="randomly initialized"):
@@ -245,9 +246,8 @@ def test_the_shared_loader_applies_the_remote_code_shims_before_the_config_fetch
 
 def test_the_string_path_loader_applies_the_shims_before_it_materializes_weights(causal_lm_checkpoint):
     """``load_model_from_pretrained`` is the seam SMPO / offline-GRPO / teacher-distillation reach
-    when their ``model:`` is a path string, and it was the one terminal loader in this module that
-    never applied the shims — so a Bailing/Ling base loaded through it imported its modeling file
-    with the v4-era ``_tied_weights_keys`` list intact (``save_pretrained`` crashes) and without the
+    when their ``model:`` is a path string, and a terminal loader there that skipped the shims would
+    import a Bailing/Ling modeling file with the v4-era ``_tied_weights_keys`` list intact (``save_pretrained`` crashes) and without the
     SDPA dispatch shim (the ~190 GiB eager score plane). The shims must also precede the WEIGHT load,
     not just the config fetch: a caller that pins ``model_cls`` skips the fetch entirely.
     """
@@ -326,8 +326,8 @@ def test_the_sweep_found_the_model_loading_tools():
 
 @pytest.mark.parametrize("script", MODEL_LOADING_SCRIPTS, ids=lambda p: p.stem)
 def test_no_tool_re_applies_the_shims_around_the_loader(script):
-    """The shims moved INTO the loader, so a tool applying them again is a copy of a contract that
-    now has one owner — and the copy is what made "did this CLI remember?" a live question."""
+    """The shims live INSIDE the loader, so a tool applying them again is a second copy of a contract
+    with one owner — and a per-tool copy is what makes "did this CLI remember?" a live question."""
     assert not imports_name(script, REMOTE_CODE_SHIMS), (
         f"{script.name} applies the remote-code shims itself; {SHARED_MODEL_LOADER} owns them"
     )

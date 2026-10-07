@@ -1,11 +1,9 @@
 #!/usr/bin/env python
 """Environmental GRPO end-to-end against a live SGLang server, under plain FSDP2 and under EP.
 
-The SGLang counterpart of ``test_env_grpo_vllm_e2e.py``, and the only coverage of MoE expert weights
-going through SGLang's own ``load_weights``. vLLM needs a server-side patch for its expert sync to
-land — an expert layer missing from the layerwise-reload skip list silently reverts every update —
-and whether SGLang needs the equivalent is only answerable against a live engine. A no-op sync leaves
-the served logprobs bit-identical, which is exactly what this asserts against.
+The SGLang counterpart of ``test_env_grpo_vllm_e2e.py``: MoE expert weights through SGLang's own
+``load_weights`` (``test_env_grpo_sglang_4gpu_e2e.py`` covers the four-rank shapes). A no-op sync
+leaves the served logprobs bit-identical, which is exactly what this asserts against.
 
 The shared body, and what these assert beyond the existing tier, is in
 :mod:`tests.common.env_grpo_e2e`.
@@ -18,8 +16,8 @@ tensors — and only a live engine shows the loader consumed it.
 Prerequisites (``make test-gpu-sglang`` sets these up):
     SGLANG_CUDA_DEVICES=7 SGLANG_MODEL=unsloth/gpt-oss-20b-BF16 \
         docker compose -f docker-compose.sglang.yml up -d
-    # the NCCL-aligned sglang-server image — upstream's NCCL is two minors behind the training image
-    # and the weight-sync group will not form against it
+    # the NCCL-aligned sglang-server image — upstream's NCCL differs from the training image's and
+    # the weight-sync group will not form against it
 
 Usage (trainer on GPUs the server does NOT own — a rank cannot NCCL broadcast to itself; the
 server side needs cuMem parity, which docker-compose.sglang.yml sets):
@@ -30,15 +28,15 @@ server side needs cuMem parity, which docker-compose.sglang.yml sets):
 
 import argparse
 
-from src.env import env_int, env_str
+from src.env import env_str
 from tests.common.env_grpo_e2e import run_env_grpo_e2e
 from tests.common.harness import gpu_test_main
 from tests.common.models import GPT_OSS_20B
+from tests.common.weight_sync import weight_transfer_port
 
 # ``or`` (not an env_str default): an exported-but-empty SGLANG_SERVER_URL passes the conftest gate,
 # which reads it the same way, so the client must fall back to the same URL rather than to "".
 SERVER_URL = env_str("SGLANG_SERVER_URL") or "http://localhost:30000"
-GROUP_PORT = env_int("HALO_TEST_SGLANG_GROUP_PORT", 51216)
 # Its own knob: the server and the default family differ from the vLLM leg's.
 MODEL_NAME = env_str("HALO_TEST_ENV_GRPO_SGLANG_MODEL", GPT_OSS_20B)
 
@@ -59,7 +57,7 @@ def run(ctx):
         ctx,
         backend="sglang",
         server_url=SERVER_URL,
-        group_port=GROUP_PORT,
+        group_port=weight_transfer_port("HALO_TEST_SGLANG_GROUP_PORT"),
         ep_size=args.ep_size,
         tp_size=args.tp_size,
         peft=args.peft,

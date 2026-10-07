@@ -1,9 +1,9 @@
 """Checkpoint file-format I/O: the on-disk spellings every reader and writer shares, the save-dtype
 casts, the layout cascade the readers resolve through, and the state-dict write helpers built on them.
 
-Format layer only, with no ``torch.distributed``, so the standalone ``scripts/after_training/`` tools
+Format layer only — no ``torch.distributed``, so the standalone ``scripts/after_training/`` tools
 and the parallel save paths read and write one artifact layout; rank coordination around these calls
-belongs to the caller. What an exported ``config.json`` must contain is
+belongs to the caller. What an exported ``config.json`` must CONTAIN is
 :mod:`src.checkpoint.config_export`, which this module calls but never the other way round.
 """
 
@@ -16,7 +16,7 @@ import os
 import re
 import shutil
 from collections.abc import Mapping
-from contextlib import ExitStack, suppress
+from contextlib import ExitStack
 from dataclasses import dataclass
 from functools import cached_property
 from typing import Any
@@ -30,9 +30,9 @@ from transformers.conversion_mapping import get_model_conversion_mapping
 from transformers.core_model_loading import PrefixChange, revert_weight_conversion
 from transformers.trainer_utils import PREFIX_CHECKPOINT_DIR
 
-from src.checkpoint.atomic import is_staged_file
+from src.checkpoint.atomic import is_atomic_staging_file
 from src.checkpoint.config_export import save_model_config
-from src.checkpoint.model_card import is_staged_card, tag_exported_model_card
+from src.checkpoint.model_card import tag_exported_model_card
 from src.models.moe_balancing import balancing_param_keys
 from src.models.structure import fp32_pinned_state_keys, norm_param_keys, strip_peft_adapter_segment
 
@@ -45,17 +45,17 @@ _SAVE_DTYPE = torch.bfloat16
 # Per-file cap for gathered safetensors saves, shared by every save path and the arg default.
 DEFAULT_MAX_SHARD_SIZE = "5GB"
 
-# One spelling per artifact for every reader/writer; a typo produces no error, only a weightless
-# checkpoint or an LR schedule re-warming from step 0.
+# One spelling per artifact for every reader/writer: a typo degrades silently (weightless
+# checkpoint, LR schedule re-warming from step 0).
 SAFETENSORS_INDEX_FILE = "model.safetensors.index.json"
-# Format marker every safetensors writer stamps; the readers must agree, so it is defined once.
+# Format marker every safetensors writer stamps; the readers must agree, so it has one home.
 SAFETENSORS_METADATA = {"format": "pt"}
 # The index ``metadata.format`` stamp of a per-rank EP save, and one rank's slice of an EP-sharded
 # expert tensor. One spelling each: a reader that misses them takes a partial tensor for a whole one.
 EP_SHARDED_FORMAT = "ep_sharded"
 EP_SHARD_KEY_INFIX = ".shard_"
 EP_SHARD_KEY_RE = re.compile(rf"(.+)\{EP_SHARD_KEY_INFIX}(\d+)$")
-# HF's shard filename pattern and the spellings derived from it: the single-file name a one-shard
+# HF's shard filename pattern and the spellings DERIVED from it — the single-file name a one-shard
 # save degenerates to, the stale sweep's glob, and the per-rank EP save's own filename and reader.
 # A writer and a sweep that disagree orphan shards.
 SAFETENSORS_SHARD_PATTERN = "model{suffix}.safetensors"
@@ -66,21 +66,28 @@ _EP_SHARD_FILE_RE = re.compile(
     f"^{re.escape(SAFETENSORS_SHARD_PATTERN).replace(re.escape('{suffix}'), r'-\d+-of-\d+')}$"
 )
 # In-flight part name for a writer that finalizes by renaming: outside the final ``model-{i}-of-{n}``
-# pattern so it cannot collide with one, inside the sweep's glob so leftovers cannot outlive it.
+# pattern so it can never collide with one, inside the sweep's glob so leftovers cannot outlive it.
 HF_STREAM_PART_PREFIX = "model-streaming"
 LEGACY_WEIGHTS_FILE = "pytorch_model.bin"
-# Every filename that makes a directory a whole-model checkpoint, in the layout cascade's order.
-# Read by :func:`has_whole_model_weight_file`, whose safetensors-only mode is the lazy gate's.
+# Every filename that makes a directory a whole-model checkpoint, in the layout cascade's order — one
+# list behind :func:`has_whole_model_weight_file`, whose safetensors-only mode is the lazy gate's.
 WHOLE_MODEL_WEIGHT_FILES = (SAFETENSORS_INDEX_FILE, SAFETENSORS_WEIGHTS_FILE, LEGACY_WEIGHTS_FILE)
 
 SCHEDULER_STATE_FILE = "scheduler.pt"
 # HF Trainer's replicated optimizer state, which the sharded modes deliberately replace.
 OPTIMIZER_STATE_FILES = ("optimizer.pt", "optimizer.bin")
+# Written after every rank's optimizer shard, so its presence vouches for a complete shard set.
+OPTIMIZER_META_FILE = "optimizer_meta.pt"
 ROUTER_BALANCING_BIASES_FILE = "router_balancing_biases.pt"
 # Checkpointed DPO/KTO and offline GRPO reference scores, with validated split identity.
 REFERENCE_LOGPS_FILE = "reference_logps.pt"
+# An output_dir entry the run keeps beside its checkpoints and never exports: the Trainer's Hub push
+# skips ``_*`` and so does the aux copy.
+RUN_INTERNAL_PREFIX = "_"
 # Run-local reference scratch, excluded from fresh-output-dir validation and Hub uploads.
-REFERENCE_CACHE_DIR_NAME = "_reference_cache"
+REFERENCE_CACHE_DIR_NAME = f"{RUN_INTERNAL_PREFIX}reference_cache"
+# Where a resume moves the step directories whose save never completed, out of rotation's sight.
+INCOMPLETE_CHECKPOINTS_DIR_NAME = f"{RUN_INTERNAL_PREFIX}incomplete_checkpoints"
 # The environmental GRPO prefetch's submitted-but-untrained rounds, one file per rank.
 PREFETCH_PENDING_PREFIX = "prefetch_pending"
 
@@ -91,7 +98,7 @@ ADAPTER_BIN_FILE = "adapter_model.bin"
 ADAPTER_CONFIG_FILE = "adapter_config.json"
 ADAPTER_WEIGHT_NAMES = (ADAPTER_SAFETENSORS_FILE, ADAPTER_BIN_FILE)
 # Training-time model state a merge tool cannot recover from the adapter artifacts alone (the GptOss
-# sink policy). A sidecar rather than adapter_config.json, so stock PEFT loads the adapter unchanged.
+# sink policy). A sidecar, never adapter_config.json: stock PEFT must load the adapter unchanged.
 TRAINING_PROVENANCE_FILE = "training_provenance.json"
 PROVENANCE_GPT_OSS_SINKS = "gpt_oss_attention_sinks"
 # A merged checkpoint's unmerged adapter, the state it resumes from, in a subdirectory: a root
@@ -103,10 +110,10 @@ RESUME_ADAPTER_MARKER_FILE = "resume_adapter.json"
 # default and drops them by name where ``include_resume_sidecars`` is off.
 _RESUME_ADAPTER_ENTRIES = (RESUME_ADAPTER_DIR, RESUME_ADAPTER_MARKER_FILE)
 
-# Never carried over: a stray pytorch_model.bin or optimizer*.pt would shadow the fresh safetensors.
+# Never carried over: a stray pytorch_model.bin / optimizer*.pt would shadow the fresh safetensors.
 _WEIGHT_FILE_SUFFIXES = (".safetensors", ".bin", ".pt")
 # Foreign-framework exports, never weights this toolkit reads. The aux copy and the hub-download
-# ignore list share this tuple so they cannot disagree.
+# ignore list share this ONE tuple so they cannot disagree.
 _FOREIGN_EXPORT_SUFFIXES = (".pth", ".gguf", ".h5", ".msgpack", ".onnx", ".onnx_data", ".tflite", ".ot", ".mlmodel")
 # Exempt from that skip: dropping these restarts the LR schedule, zeroes the router biases, or leaves
 # a precompute resume with no untrained reference to restore.
@@ -129,9 +136,9 @@ _TIE_KEY_SUFFIXES = ("lm_head.weight", "embed_tokens.weight")
 def ep_shard_filename(rank: int, world_size: int) -> str:
     """Filename of one rank's slice of a per-rank EP save.
 
-    HF's shard pattern with a 0-based index: this save writes one file per rank, so rank 0 must still
-    carry a suffix. :func:`shard_file_name`'s 1-based numbering degenerates to the unsuffixed
-    ``model.safetensors`` at a single part, which every reader takes for a whole model.
+    HF's shard pattern with a 0-BASED index: this save writes one file per rank, so rank 0 must
+    still carry a suffix — :func:`shard_file_name`'s 1-based numbering degenerates to the
+    unsuffixed ``model.safetensors`` at a single part, which every reader takes for a whole model.
     """
     return SAFETENSORS_SHARD_PATTERN.format(suffix=f"-{rank:05d}-of-{world_size:05d}")
 
@@ -148,14 +155,14 @@ def prefetch_pending_filename(rank: int, world_size: int) -> str:
 def is_ep_shard(name: str) -> bool:
     """Whether ``name`` is a per-rank EP save slice.
 
-    Narrower than a ``.safetensors`` glob: a sibling ``adapter_model.safetensors`` or a stale
-    ``model.safetensors`` must not be swept into a merge.
+    Narrower than a ``.safetensors`` glob on purpose: a sibling ``adapter_model.safetensors`` or a
+    stale ``model.safetensors`` must not be swept into a merge.
     """
     return _EP_SHARD_FILE_RE.match(name) is not None
 
 
 def shard_file_name(part: int, total_parts: int) -> str:
-    """HF's own name for part ``part`` of ``total_parts``; the unsharded file when there is only one.
+    """HF's own name for part ``part`` of ``total_parts`` — the unsharded file when there is only one.
 
     ``split_torch_state_dict_into_shards`` is handed :data:`SAFETENSORS_SHARD_PATTERN` and fills the
     same suffix, so a streamed checkpoint is indistinguishable from a ``save_pretrained`` one.
@@ -165,9 +172,9 @@ def shard_file_name(part: int, total_parts: int) -> str:
 
 
 def cast_to_save_dtype(t: torch.Tensor) -> torch.Tensor:
-    """Cast a tensor to the distributed save dtype (bf16) if it is floating point.
+    """Cast a tensor to the distributed save dtype (BF16) if it's floating point.
 
-    A blanket cast; save paths that hold the live model use :func:`save_dtype_caster` instead, so
+    Blanket cast — save paths that hold the live model use :func:`save_dtype_caster` instead, so
     normalization params keep their trained dtype.
     """
     if torch.is_tensor(t) and t.is_floating_point() and t.dtype != _SAVE_DTYPE:
@@ -188,18 +195,19 @@ def save_dtype_caster(model: torch.nn.Module, *, keep_live_dtype: bool = False):
     """``cast(name, tensor)`` for checkpoint saves that hold the live model.
 
     Floating tensors go to the save dtype except three tree-derived keep-sets that hold their trained
-    dtype: the normalization params, the live router-balancing tensors (hub-respelled) and the
-    family's fp32 pins, buffers included. That way a direct EP/TP save of an fp32-master run matches
-    its merged-shards save, and the export quantizes neither the balancing state nor a family's
-    declared fp32 modules.
+    dtype — the normalization params, the live router-balancing tensors (hub-respelled) and the
+    family's fp32 pins, buffers included — so a direct EP/TP save of an fp32-master run matches its
+    merged-shards save and the export quantizes neither the balancing state nor a family's declared
+    fp32 modules away.
 
     ``keep_live_dtype`` (a training checkpoint) casts nothing: every tensor is written at the dtype the
     gather produced, which is the live one, so fp32 masters (``fp32_router``, ``fp32_experts``,
     ``fp32_non_ep_params``) reach disk unrounded. The Path-A ``set_model_state_dict`` load, the PP
-    stage load and every adapter restore read them back exactly. Construction from a checkpoint
-    (Path B) restores the configured parameter masters before parallel wrapping too, or into the
-    existing 1-D TP placement before DP/FSDP2 wrapping. A BF16 export cannot recover discarded FP32
-    precision; promotion from it retains only the values that export stored.
+    stage reload after wrapping and every adapter restore read them back exactly. Construction from a
+    checkpoint (Path B), a PP stage's included, restores the configured parameter masters before
+    parallel wrapping too, or into the existing 1-D TP placement before DP/FSDP2 wrapping. A BF16
+    export cannot recover discarded FP32 precision; promotion from it retains only the values that
+    export stored.
     Decided on the tensor, not its name, since a gathered expert's hub key need not name any live
     parameter.
 
@@ -218,7 +226,7 @@ def save_dtype_caster(model: torch.nn.Module, *, keep_live_dtype: bool = False):
 
 def _has_child_at_prefix(model: torch.nn.Module, dotted_prefix: str) -> bool:
     """Whether ``model`` (under its ``base_model_prefix``, when present) has a submodule at
-    ``dotted_prefix``, which decides whether a ``PrefixChange`` revert re-adds a real prefix."""
+    ``dotted_prefix`` — the oracle for whether a ``PrefixChange`` revert re-adds a real prefix."""
     node = getattr(model, getattr(model, "base_model_prefix", ""), model)
     for part in dotted_prefix.split("."):
         node = getattr(node, part, None)
@@ -228,7 +236,7 @@ def _has_child_at_prefix(model: torch.nn.Module, dotted_prefix: str) -> bool:
 
 
 def registry_weight_conversions(model: torch.nn.Module, *, keep_prefix_change: bool) -> list:
-    """The family's declared conversion mapping: what a load that recorded nothing reverts through.
+    """The family's declared conversion mapping — what a load that recorded nothing reverts through.
 
     Empty for a module carrying no ``config``: the registry is keyed by the config's family.
     """
@@ -239,14 +247,15 @@ def registry_weight_conversions(model: torch.nn.Module, *, keep_prefix_change: b
 
 
 def revert_conversions_for(model: torch.nn.Module) -> list:
-    """The conversions a save-side revert, or a hub-namespace weight sync, inverts.
+    """The conversions a save-side revert — or a hub-namespace weight sync — inverts.
 
     What the load recorded, minus a ``PrefixChange`` whose stripped prefix is not a child of the
     saved tree: a text-only load of a multimodal checkpoint consumes
     ``PrefixChange(prefix_to_remove="language_model")``, and reverting that at save would re-emit
-    wrapper-prefixed keys under a text-only config, which engine loaders keyed on the architectures
-    cannot read. A load that recorded nothing falls back to the family's registry mapping minus its
-    ``PrefixChange``, as transformers' own revert does.
+    wrapper-prefixed keys under a text-only config — transformers re-strips them on reload, engine
+    loaders keyed on the architectures do not, and the artifact is serving-dead. A load that recorded
+    nothing falls back to the family's registry mapping minus its ``PrefixChange``, as transformers'
+    own revert does. One resolution, so the gathered save, the EP export and the sync cannot drift.
     """
     load_conversions = getattr(model, "_weight_conversions", None)
     if not load_conversions:
@@ -263,14 +272,15 @@ def revert_conversions_for(model: torch.nn.Module) -> list:
 def revert_load_conversions(model: torch.nn.Module, state_dict: dict) -> dict:
     """Map a module-layout state dict back to the hub checkpoint layout before writing.
 
-    transformers loads several MoE families into a module-fused expert layout and reverts it inside
-    ``save_pretrained``, which the gathered/TP writers bypass, so without this a wrapper-less MoE
-    save emits fused keys that per-expert engine loaders reject (vLLM 0.26.0: GLM-4/LFM-2) or drop
-    without error (Laguna). Identity for dense models; EP-gathered dicts never come here.
+    transformers loads several MoE families into a module-FUSED expert layout and reverts it inside
+    ``save_pretrained``, which the gathered/TP writers bypass — so without this a wrapper-less MoE
+    save emits fused keys that per-expert engine loaders hard-fail on (vLLM 0.26.0: GLM-4/LFM-2) or
+    silently drop (Laguna). Identity for dense models; EP-gathered dicts never come here.
 
-    Reverts :func:`revert_conversions_for`'s list, restoring the model's own value afterwards. A
-    failure warns rather than raising: the pre-revert dict is a loadable checkpoint that only needs
-    ``unfuse_moe_experts.py`` before a per-expert engine.
+    Reverts :func:`revert_conversions_for`'s list, restoring the model's own value afterwards so
+    later saves see exactly what the load left behind. A failure warns instead of raising: the
+    config may already be on disk with the peer ranks past their barrier, and the pre-revert dict is
+    a loadable checkpoint that only needs ``unfuse_moe_experts.py`` before a per-expert engine.
     """
     load_conversions = getattr(model, "_weight_conversions", None)
     model._weight_conversions = revert_conversions_for(model) or None
@@ -302,9 +312,9 @@ def normalize_gathered_state_dict(model: torch.nn.Module, state_dict: dict, *, k
 def sweep_after_full_save(output_dir: str) -> None:
     """Remove weight files a *completed* ``save_pretrained``-style write did not produce.
 
-    Failure-safe by construction: it runs after the save and derives the keep-set from what is then
-    on disk (a consistent index keeps its shards, else a single ``model.safetensors`` keeps itself),
-    so a save that failed mid-way, torn index included, sweeps nothing and leaves the directory
+    Failure-safe by construction: it runs AFTER the save and derives the keep-set from what is on
+    disk NOW (a consistent index keeps its shards, else a single ``model.safetensors`` keeps itself),
+    so a save that crashed mid-way — torn index included — sweeps nothing and leaves the directory
     intact. Sweeping first would let a failed save destroy the good checkpoint it held.
     """
     index_path = os.path.join(output_dir, SAFETENSORS_INDEX_FILE)
@@ -315,10 +325,10 @@ def sweep_after_full_save(output_dir: str) -> None:
             index = read_checkpoint_index(output_dir)
         except (OSError, json.JSONDecodeError):
             index = {}
-        # A per-rank EP/TP index is not a full save's product; accepting its shard list as a
-        # keep-set would leave behind a layout these callers must never produce.
+        # A per-rank EP/TP index is not a full save's product; blessing its shard list as a keep-set
+        # would leave behind a layout these callers must never produce.
         shards = set() if _index_declares_per_rank_shards(index) else set(index.get("weight_map", {}).values())
-        # Both layouts present means one is a previous run's leftover and the newer write is this
+        # Both layouts present means one is a previous run's leftover, and the newer write is this
         # one; without the tie-break a single-file writer (reset_sinks) loses to the stale shards.
         newer_than_single = not os.path.isfile(single_path) or os.path.getmtime(index_path) >= os.path.getmtime(
             single_path
@@ -335,10 +345,11 @@ def remove_stale_checkpoint_files(output_dir: str, keep: set[str]) -> None:
     """Delete every ``model*.safetensors``/index in ``output_dir`` this save did not write.
 
     ``from_pretrained`` prefers a single ``model.safetensors`` over the index, so a previous save's
-    leftover (a single file where this one sharded, or a higher shard count) would be loaded instead
-    of what was just written. A caller that only sometimes owns the directory (``reset_sinks``
-    in-place, an unmerged-PEFT save) must gate the call rather than pass ``keep=set()``
-    unconditionally.
+    leftover — a single file where this one sharded, or a higher shard count — would be loaded
+    instead of what was just written. One sweep for every writer that owns a model directory, since
+    it ``os.remove``s checkpoint files and the callers must not drift apart. A caller that only
+    sometimes owns the directory (``reset_sinks`` in-place, an unmerged-PEFT save) must gate the
+    call, never pass ``keep=set()`` unconditionally.
     """
     for stale in glob.glob(os.path.join(output_dir, SAFETENSORS_FAMILY_GLOB)) + glob.glob(
         os.path.join(output_dir, SAFETENSORS_INDEX_FILE)
@@ -350,12 +361,14 @@ def remove_stale_checkpoint_files(output_dir: str, keep: set[str]) -> None:
 def write_merged_index(output_dir: str, weight_map: dict[str, str], metadata: Mapping[str, Any]) -> None:
     """Sweep the model files this save did not write, then write the safetensors index over the rest.
 
-    Every sharded save writes its index through here. The sweep runs after the shards and before the
-    index: the parts are on disk and ``weight_map`` names exactly the ones this save claims, which is
-    the keep-set needed to drop a stale leftover before it can outrank the fresh index.
+    The one index writer every sharded save funnels through, so the metadata shape and the sweep
+    contract cannot drift between them. The sweep runs after the shards and BEFORE the index: the
+    parts are on disk and ``weight_map`` names exactly the ones this save claims, which is the
+    keep-set needed to drop a stale leftover before it can outrank the fresh index.
 
-    ``metadata`` is the index's metadata block verbatim. A non-mapping is refused, since a bare scalar
-    would produce ``{"metadata": 12345}``, an index every reader parses and none can use.
+    ``metadata`` is the index's metadata block verbatim — ``total_size`` plus whatever the layout
+    declares. A non-mapping is refused: a bare scalar would produce ``{"metadata": 12345}``, an
+    index every reader parses without complaint and no reader can use.
     """
     if not isinstance(metadata, Mapping):
         raise TypeError(
@@ -377,10 +390,11 @@ def save_sharded_state_dict(
     or shards + ``model.safetensors.index.json`` loadable one at a time at 100B+).
 
     Every shard lands as a ``model-streaming-*`` part and is renamed into its final name only once
-    all of them are on disk. Writing final names directly is unsafe on a re-save into a populated
-    directory: the splitter's names are deterministic, so a same-shard-count re-save that fails after
-    shard k leaves new shards 1..k beside old shards k+1..N under the old index, and
-    ``from_pretrained`` then loads half of each model. Stale files are swept only at the end.
+    they are ALL on disk — :meth:`~src.checkpoint.shard_writer.StageShardWriter.close_as_hf_checkpoint`'s
+    protocol. Writing final names directly is unsafe on a re-save into a populated directory: the
+    splitter's names are deterministic, so a same-shard-count re-save that dies after shard *k*
+    leaves new shards 1..k beside old shards k+1..N under the old index, and ``from_pretrained``
+    then loads half of each model silently. Stale files are swept only once every shard is on disk.
     """
     state_dict = {k: (v.contiguous() if torch.is_tensor(v) else v) for k, v in state_dict.items()}
     split = split_torch_state_dict_into_shards(
@@ -398,7 +412,7 @@ def save_sharded_state_dict(
         )
         parts[filename] = part
     # Only now, with every part written: renames are metadata operations, so the window in which the
-    # directory holds a mix is the loop below rather than the whole I/O-bound write.
+    # directory holds a mix is the loop below rather than the whole (I/O-bound) write.
     for filename, part in parts.items():
         os.replace(os.path.join(output_dir, part), os.path.join(output_dir, filename))
     if split.is_sharded:
@@ -417,25 +431,25 @@ def write_gathered_checkpoint(
 
     For a caller that already holds the whole dict (an injected-LoRA merge); the parallel gathered
     saves stream through :func:`~src.distributed.checkpoint.write.stream_gathered_checkpoint` instead,
-    with the same normalization applied chunk by chunk. The ``.bin`` fallback is specific to this
-    path: it needs a dict still whole after the safetensors write failed, which a streamed save no
-    longer has, and at that scale a single ``torch.save`` is not a writable artifact anyway.
+    with the same normalization applied chunk by chunk. The ``.bin`` fallback is this path's alone:
+    it needs a dict still whole after the safetensors write failed, which a streamed save no longer
+    has, and at that scale a single ``torch.save`` is not a writable artifact anyway.
 
-    Only the config write is gated on the model carrying one; the weights take the same normalization
-    and layout either way, and a raw ``.bin`` is an artifact no export tool reads.
+    Only the config write is gated on the model carrying one — the weights owe the same
+    normalization and layout either way, and a raw ``.bin`` is an artifact no export tool reads.
     """
     if hasattr(model, "config"):
-        # FSDP2 sharding can break tied embeddings; keep the config consistent with the tensors.
+        # FSDP2 sharding can break tied embeddings; keep the config honest.
         reconcile_tie_word_embeddings(model, state_dict)
         save_model_config(model, output_dir)
-    # Save dtype and hub expert layout. EP-gathered dicts never arrive here: ``select_checkpoint_saver``
+    # Save dtype + hub expert layout. EP-gathered dicts never arrive here: ``select_checkpoint_saver``
     # routes every ``has_ep_layers`` context to the EP saver, whose gather emits hub-layout expert keys.
     state_dict = normalize_gathered_state_dict(model, state_dict)
     try:
         save_sharded_state_dict(state_dict, output_dir, max_shard_size=max_shard_size)
     except Exception as e:
         logger.warning(f"sharded safetensors save failed: {e}, using pytorch format")
-        # The .bin goes on disk first, then the safetensors leftovers are swept: resume prefers an
+        # The .bin goes on disk FIRST, then the safetensors leftovers are swept: resume prefers an
         # index over the .bin so they must go, but sweeping first would let a second failure destroy
         # the only checkpoint the directory held. The sweep never matches the .bin itself.
         torch.save(state_dict, os.path.join(output_dir, LEGACY_WEIGHTS_FILE))
@@ -468,9 +482,11 @@ def copy_checkpoint_aux_files(
 
     Subdirectories are copied whole, weight files included: a SentenceTransformer module directory
     carries weights no caller rewrites, and filtering them out leaves ``modules.json`` pointing at
-    modules that no longer exist. Three kinds of directory stay behind: a nested ``checkpoint-N``
-    (resume state rather than the artifact), a vendor weight dump, and a hidden one. So does a card a
-    crashed tagging write left staged, or a reference sidecar's interrupted staging file.
+    modules that no longer exist. Four kinds of directory stay behind: a nested ``checkpoint-N``
+    (resume state rather than the artifact), a run's own :data:`RUN_INTERNAL_PREFIX` state (its
+    reference scratch, the incomplete checkpoints a resume set aside), a vendor weight dump, and a
+    hidden one. So does any file a crashed staged write left unpublished
+    (:func:`~src.checkpoint.atomic.is_atomic_staging_file`).
 
     ``output_dir`` nested inside ``input_dir`` raises: the walk would copy the destination into
     itself until the disk fills.
@@ -490,11 +506,11 @@ def copy_checkpoint_aux_files(
             continue
         src = os.path.join(input_dir, name)
         if os.path.isdir(src):
-            if name.startswith((".", f"{PREFIX_CHECKPOINT_DIR}-")) or name in _WEIGHT_DUMP_DIRS:
+            if name.startswith((".", RUN_INTERNAL_PREFIX, f"{PREFIX_CHECKPOINT_DIR}-")) or name in _WEIGHT_DUMP_DIRS:
                 continue
             shutil.copytree(src, os.path.join(output_dir, name), dirs_exist_ok=True)
             if verbose:
-                print(f"Copied: {name}/")  # noqa: T201 - CLI-facing helper; the merge scripts report via print
+                print(f"Copied: {name}/")  # noqa: T201 — CLI-facing helper; the merge scripts report via print
             continue
         skip_as_weight = (
             name.endswith(_WEIGHT_FILE_SUFFIXES)
@@ -504,11 +520,7 @@ def copy_checkpoint_aux_files(
         keep_as_sidecar = include_resume_sidecars and (
             name in _RESUME_SIDECAR_FILES or name.startswith(_RESUME_SIDECAR_PREFIXES)
         )
-        if (
-            (skip_as_weight and not keep_as_sidecar)
-            or is_staged_card(name)
-            or is_staged_file(name, REFERENCE_LOGPS_FILE)
-        ):
+        if (skip_as_weight and not keep_as_sidecar) or is_atomic_staging_file(name):
             continue
         if os.path.isfile(src):
             shutil.copy2(src, os.path.join(output_dir, name))
@@ -522,9 +534,9 @@ def read_checkpoint_index(checkpoint_dir: str, *, missing_ok: bool = False) -> d
 
     ``OSError`` / ``json.JSONDecodeError`` propagate by default so each caller applies its own policy
     to a torn index (an empty keep-set, a rank-0 ``False``, a raise naming a non-shared filesystem).
-    ``missing_ok`` returns ``{}`` for a directory with no index at all: a checkpoint small enough for
-    a single ``model.safetensors`` has none, and the merge scripts must be able to inspect the format
-    marker without an unhandled ``ENOENT`` hiding the refusal that names the fix.
+    ``missing_ok`` returns ``{}`` for a directory with no index at all — a checkpoint small enough
+    for a single ``model.safetensors`` has none, and the merge scripts must be able to inspect the
+    format marker without an unhandled ``ENOENT`` hiding the refusal that names the fix.
     """
     index_path = os.path.join(checkpoint_dir, SAFETENSORS_INDEX_FILE)
     if missing_ok and not os.path.isfile(index_path):
@@ -545,13 +557,13 @@ def _index_declares_per_rank_shards(index: dict) -> bool:
 
 def is_sharded_checkpoint(checkpoint_dir: str) -> bool:
     """True when the directory holds a per-rank EP-sharded save (partial tensors under a reused
-    index filename), which is loadable only after merging."""
+    index filename) — loadable only after merging, never directly."""
     if not os.path.isfile(os.path.join(checkpoint_dir, SAFETENSORS_INDEX_FILE)):
         return False
     try:
         index = read_checkpoint_index(checkpoint_dir)
     except (OSError, json.JSONDecodeError):
-        # Callers decide on rank 0 then broadcast, so raising on a torn index would block peer ranks.
+        # Callers decide on rank 0 then broadcast, so raising on a torn index would strand peer ranks.
         return False
     return _index_declares_per_rank_shards(index)
 
@@ -593,12 +605,13 @@ class CheckpointWeights:
 
 
 def resolve_checkpoint_weights(checkpoint_dir: str) -> CheckpointWeights:
-    """Where a checkpoint directory's tensors live: the layout cascade, stated once.
+    """Where a checkpoint directory's tensors live — the one statement of the layout cascade.
 
     Sharded index first (authoritative, and read as the map itself so no shard is opened), then a
     single ``model.safetensors``, then the legacy ``pytorch_model.bin``. Reports what is on disk and
     applies no policy: whether an empty layout, a per-rank sharded index or an index without a
-    ``weight_map`` is an error is the caller's decision. A torn index raises through.
+    ``weight_map`` is an error is the caller's to decide, because the resume gates, the lazy loaders
+    and the standalone tools each answer differently. A torn index raises through.
     """
     if os.path.isfile(os.path.join(checkpoint_dir, SAFETENSORS_INDEX_FILE)):
         index = read_checkpoint_index(checkpoint_dir)
@@ -615,9 +628,9 @@ def has_whole_model_weight_file(checkpoint_dir: str, *, safetensors_only: bool =
     """Whether a directory holds a whole-model weight file, from stats alone.
 
     Parse-free by design: callers probe on rank 0 and broadcast, so a torn index must read as present
-    here and fail in the reader that follows rather than raise on the one rank that looked.
-    ``safetensors_only`` drops the legacy ``pytorch_model.bin`` (the lazy gate's narrower question)
-    from the same filename list, since a second list minus one name would route a new whole-model
+    here and fail loudly in the reader that follows rather than raise on the one rank that looked.
+    ``safetensors_only`` drops the legacy ``pytorch_model.bin`` — the lazy gate's narrower question —
+    off the same filename list, since a second list minus one name would route a new whole-model
     filename down the eager fallback.
     """
     names = (SAFETENSORS_INDEX_FILE, SAFETENSORS_WEIGHTS_FILE) if safetensors_only else WHOLE_MODEL_WEIGHT_FILES
@@ -647,12 +660,6 @@ def write_resume_adapter_marker(checkpoint_dir: str) -> None:
     """
     with open(os.path.join(checkpoint_dir, RESUME_ADAPTER_MARKER_FILE), "w") as fh:
         json.dump({"adapter_dir": RESUME_ADAPTER_DIR}, fh, indent=2)
-
-
-def remove_resume_adapter_marker(checkpoint_dir: str) -> None:
-    """Unmark ``checkpoint_dir``, so it no longer resumes from its adapter; a no-op when unmarked."""
-    with suppress(FileNotFoundError):
-        os.remove(os.path.join(checkpoint_dir, RESUME_ADAPTER_MARKER_FILE))
 
 
 def resume_adapter_dir(checkpoint_dir: str) -> str | None:
@@ -698,7 +705,7 @@ def unmarked_merged_checkpoint_reason(checkpoint_dir: str) -> str:
 
 
 def load_full_state_dict(checkpoint_dir: str, device: str = "cpu") -> dict[str, torch.Tensor] | None:
-    """Load a gathered checkpoint into one full state dict, resolving the sharded layouts.
+    """Load a gathered checkpoint into one full state dict — sharded-aware.
 
     Read-side mirror of :func:`save_sharded_state_dict`, accepting the index+shards, single
     ``model.safetensors``, or legacy ``pytorch_model.bin`` layouts. ``None`` when none exist.
@@ -759,11 +766,12 @@ class StreamingCheckpointReader:
 
     The read side of the PP save's streaming contract: every rank of a stage reads the same non-EP
     tensors before distributing its own FSDP2 shard, so buffering them into one dict would put
-    ``gpus_per_node x`` the stage's bytes on a host at once.
+    ``gpus_per_node ×`` the stage's bytes on a host at once (~280 GB per node for a dense 70B at
+    ``pp_size=4``).
 
-    Construction opens every shard holding a requested key, so a truncated file raises there, before
-    the caller's cross-rank consensus and therefore before any collective. A legacy ``.bin`` is one
-    pickle, read whole.
+    Construction opens every shard holding a requested key, so a truncated file raises THERE —
+    before the caller's cross-rank consensus, hence before any collective — and :meth:`get` serves
+    from the validated handles at one tensor of peak. A legacy ``.bin`` is one pickle, read whole.
     """
 
     def __init__(self, checkpoint: str, keys):

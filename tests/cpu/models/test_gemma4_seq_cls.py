@@ -5,7 +5,7 @@ Verifies (registration itself, both ``gemma4`` spellings, is pinned by
 ``test_seq_cls_head_registration.py``):
   1. A miniaturised model builds from a multimodal ``Gemma4Config`` (null towers), runs a CPU
      forward, and pools pad-aware when given ``input_ids``.
-  2. The head exposes the ``.model``/``.score`` Generic surface the prompts-RM tuner requires.
+  2. The head exposes the ``.model``/``.score`` Generic surface the reward-model trainers dispatch on.
 
 Run: python tests/cpu/models/test_gemma4_seq_cls.py
 """

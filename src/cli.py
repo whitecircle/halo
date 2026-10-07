@@ -195,16 +195,6 @@ def resolve_config(config: Path, root: Path) -> Path:
     return resolved.resolve()
 
 
-def _extra_args(ctx: typer.Context) -> list[str]:
-    """The pass-through args, as typed.
-
-    Unknown flags pass through on their own, so the ``--`` separator is needed only before a flag
-    that collides with the launcher's. Click consumes that separator itself: a ``--`` found here was
-    typed after it and belongs to the script.
-    """
-    return list(ctx.args)
-
-
 def _reject_option_as_positional(value: str | Path | None, name: str, usage: str) -> None:
     """Refuse a flag that landed in a positional slot.
 
@@ -334,7 +324,7 @@ def launch(
         raise click.UsageError("halo launch requires METHOD and CONFIG")
     script = _lookup(index, method, "method", root)
     accelerate_config = resolve_config(accelerate, root) if accelerate is not None else None
-    extra = _extra_args(ctx)
+    extra = ctx.args
     reject_multinode_flags(extra)
     argv = command(
         script,
@@ -382,7 +372,7 @@ def run(
     if tool is None:
         raise click.UsageError("halo run requires a TOOL name (use --list to see options)")
     script = _lookup(index, tool, "tool", root)
-    argv = command(script, None, nproc=nproc, args=_extra_args(ctx), port=port)
+    argv = command(script, None, nproc=nproc, args=ctx.args, port=port)
     _execute(argv, None, dry_run=dry_run)
 
 

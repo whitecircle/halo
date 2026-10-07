@@ -1,12 +1,13 @@
 #!/usr/bin/env python
 """The SGLang image patch must rewrite exactly the upstream code it names, and refuse anything else.
 
-``docker/sglang/patches/patch_sglang_weight_updates.py`` runs at image build against the pinned
-sglang; the fixtures below are the verbatim upstream code of that pin, so the build's pre-image
-assertions are exercised here without the image. What is pinned:
+``docker/sglang/patches/patch_sglang.py`` runs at image build against the pinned sglang; the
+fixtures below are the verbatim upstream code of that pin, so the build's pre-image assertions are
+exercised here without the image. What is pinned:
 
   * the GLM gate rewrite leaves no fp32 cache and reads the parameter live;
   * the Gemma 4 router rewrite gives ``scale`` a loader that releases the fold latch;
+  * the prefill-loop rewrite steps the log-prob offset over a skipped request before ``continue``;
   * a file without the pre-image, or with it twice, fails the build rather than patching around it;
   * ``--verify`` refuses the unpatched file.
 
@@ -17,7 +18,7 @@ import pytest
 
 from tests.common.utils import load_script_module
 
-patches = load_script_module("docker/sglang/patches/patch_sglang_weight_updates.py")
+patches = load_script_module("docker/sglang/patches/patch_sglang.py")
 
 # sglang 0.5.17 srt/models/glm4_moe_lite.py, class Glm4MoeLiteGate (the glm4_moe.py gate differs
 # only by an ``is_nextn`` argument the rewrite does not touch).
@@ -76,6 +77,24 @@ class Gemma4Router(nn.Module):
         return router_logits
 '''
 
+# sglang 0.5.17 srt/managers/scheduler_components/batch_result_processor.py, the head of the
+# process_batch_result_prefill loop (its hidden-state capture elided).
+PREFILL_LOOP = """            # Check finish conditions
+            logprob_pt = 0
+
+            for i, (req, next_token_id) in enumerate(zip(batch.reqs, next_token_ids)):
+                if (
+                    req.finished() and req.inflight_middle_chunks <= 0
+                ) or req.is_retracted:
+                    # Decode req in a mixed batch, or a retracted req. Keep an
+                    # aborted middle chunk in the chunked branch long enough to
+                    # drain its accounting without streaming it.
+                    continue
+
+                if req.inflight_middle_chunks <= 0:
+                    req.time_stats.set_prefill_finished_time()
+"""
+
 
 def test_glm_gate_reads_its_weight_live_after_the_rewrite():
     patched = patches.patch_glm_gate(GLM_GATE)
@@ -94,7 +113,19 @@ def test_gemma4_scale_loader_releases_the_fold_latch():
     patches.verify_gemma4_router(patched, "gemma4_causal.py")
 
 
-@pytest.mark.parametrize("patch", [patches.patch_glm_gate, patches.patch_gemma4_router])
+def test_the_prefill_skip_steps_over_the_skipped_requests_log_probs():
+    patched = patches.patch_prefill_logprob_cursor(PREFILL_LOOP)
+    skip_branch = patched.split("or req.is_retracted:")[1].split("continue")[0]
+    assert "if batch.return_logprob:" in skip_branch
+    assert "logprob_pt += (" in skip_branch
+    assert "calculate_num_input_logprobs(" in skip_branch
+    assert "extend_input_len_per_req[i]" in skip_branch and "extend_logprob_start_len_per_req[i]" in skip_branch
+    patches.verify_prefill_logprob_cursor(patched, "batch_result_processor.py")
+
+
+@pytest.mark.parametrize(
+    "patch", [patches.patch_glm_gate, patches.patch_gemma4_router, patches.patch_prefill_logprob_cursor]
+)
 def test_a_missing_pre_image_fails_the_build(patch):
     with pytest.raises(SystemExit, match="upstream changed"):
         patch("class Something(nn.Module):\n    pass\n")
@@ -105,10 +136,14 @@ def test_a_pre_image_seen_twice_fails_the_build():
         patches.patch_glm_gate(GLM_GATE + GLM_GATE)
 
 
-def test_an_already_patched_file_is_not_patched_twice():
-    patched = patches.patch_glm_gate(GLM_GATE)
+@pytest.mark.parametrize(
+    ("patch", "upstream"),
+    [(patches.patch_glm_gate, GLM_GATE), (patches.patch_prefill_logprob_cursor, PREFILL_LOOP)],
+)
+def test_an_already_patched_file_is_not_patched_twice(patch, upstream):
+    """Also the build's signal that upstream merged a fix this image carries: the pre-image is gone."""
     with pytest.raises(SystemExit, match="upstream changed"):
-        patches.patch_glm_gate(patched)
+        patch(patch(upstream))
 
 
 def test_verify_refuses_a_gate_whose_weight_was_left_in_the_default_dtype():
@@ -129,6 +164,8 @@ def test_verify_refuses_the_unpatched_files():
         patches.verify_glm_gate(GLM_GATE, "glm4_moe.py")
     with pytest.raises(SystemExit, match="fold latch"):
         patches.verify_gemma4_router(GEMMA4_ROUTER, "gemma4_causal.py")
+    with pytest.raises(SystemExit, match="without stepping over"):
+        patches.verify_prefill_logprob_cursor(PREFILL_LOOP, "batch_result_processor.py")
 
 
 if __name__ == "__main__":

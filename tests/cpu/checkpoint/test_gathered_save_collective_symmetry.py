@@ -4,12 +4,12 @@ A gathered save (FSDP2 / TP / CP) resolves parameters, persistent buffers and th
 sinks, but only the writer keeps the host copies. Resolving a DTensor is ``full_tensor()`` — a
 mesh-wide collective — so a leg placed behind the ``retain`` gate hangs the save: the writer enters
 the all-gather and its peers never do, and the run dies on the NCCL watchdog with no diagnostic.
-Buffers are the leg at risk (no DTensor persistent buffer exists in the shipped roster today, but the
-bias-update balancing slot is already contemplated as one), so these tests count gather calls on both
+Buffers are the leg at risk (no shipped family carries a DTensor persistent buffer, but nothing
+prevents one), so these tests count gather calls on both
 sides of ``retain`` rather than waiting for a live hang to prove it.
 
-Counting is done by replacing the gather primitives where every branch reads them — the shared
-``checkpoint_write`` pair. The tensors themselves stay plain, since a real DTensor needs an initialized
+Counting is done by replacing the gather primitives where every branch reads them — the pair
+``src.distributed.checkpoint.write`` reads (``resolve_param_tensor`` / ``materialize_dtensor``). The tensors themselves stay plain, since a real DTensor needs an initialized
 process group.
 """
 

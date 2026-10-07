@@ -3,10 +3,9 @@
 
 Complements ``test_parallelism_config.py`` with the cases it does not cover:
 
-* H1 — the multi-group pure-EP REJECT guard (the documented ep4-on-8 run-killer). It lives on
-  ``EpIntrospectionMixin._setup_ep_gradient_checkpointing`` (not in ParallelismConfig), so this
-  drives the REAL method via a minimal stub trainer — a regression in the actual guard predicate
-  fails the test, which a re-implementation of the predicate could not.
+* H1 — the multi-group pure-EP REJECT (the documented ep4-on-8 run-killer), refused when the
+  ``ParallelismConfig`` is built; the accept shapes drive the REAL
+  ``EpIntrospectionMixin._setup_ep_gradient_checkpointing`` through a minimal stub trainer.
 * H2 — EP+ETP ``get_data_parallel_rank`` correctness with ep_size>1 (exercises the ``% ep_size``
   modulo that ep_size=1 makes a no-op): the DP-rank partition + genuine ETP-partner geometry.
 * H3 — cross-node column-block layout at a SECOND topology (world=32, 4 domains of 8).
@@ -44,21 +43,19 @@ class _GCModel(nn.Module):
         self._gradient_checkpointing_func = checkpoint
 
 
-# H1 — Multi-group pure-EP reject matrix (drives the REAL guard)
+# H1 — Multi-group pure-EP reject matrix (config-time reject; accepts drive the REAL GC setup)
 
 
 def _run_ep_gc_guard(config):
-    """Invoke the real ``_setup_ep_gradient_checkpointing`` guard against ``config``.
+    """Invoke the real ``_setup_ep_gradient_checkpointing`` against ``config``.
 
     Binds the unbound mixin method to a minimal stub that carries exactly the attributes the method
-    reads: ``parallelism_config``, ``_has_ep_layers`` (True so the guard runs), ``_ep_config`` (the
-    EPConfig — production guarantees it is set whenever ``_has_ep_layers`` is True; the guard reads
+    reads: ``parallelism_config``, ``_has_ep_layers`` (True so the method runs), ``_ep_config`` (the
+    EPConfig — production guarantees it is set whenever ``_has_ep_layers`` is True; the method reads
     ``_ep_config.is_deferred_dp``), and ``args.gradient_checkpointing`` (True so an ACCEPT shape falls
-    through to the real GC-enable path rather than short-circuiting before the guard's downstream
-    work). The stub ``model`` is an empty
-    nn.Module: it owns no ``EPMoELayerBase`` and no ``gradient_checkpointing_enable``, so the accept
-    path completes (logs + sets args.gradient_checkpointing=False) without needing a real model. A
-    REJECT shape raises RuntimeError before reaching any of that.
+    through to the real GC-enable path rather than returning early). The stub ``model`` owns no
+    ``EPMoELayerBase``, so the accept path completes (logs + sets args.gradient_checkpointing=False)
+    without needing a real model.
     """
 
     class _Args:
@@ -70,23 +67,24 @@ def _run_ep_gc_guard(config):
     stub = _Stub()
     stub.parallelism_config = config
     stub._has_ep_layers = True
-    # Production captures _ep_config from the first EP module; _has_ep_layers being True guarantees it
-    # is set (the property is literally ``_ep_config is not None``). The guard reads
-    # ``_ep_config.is_deferred_dp`` — mirror EPConfig.is_deferred_dp (config.py): the deferred
-    # post-backward DP sweep engages only for multi-group, multi-node, non-expert-TP EP.
+    # Production captures _ep_config from the first EP module, so it is set whenever _has_ep_layers is
+    # True. The method reads ``_ep_config.is_deferred_dp`` — mirror EPConfig.is_deferred_dp
+    # (config.py): the deferred post-backward DP sweep engages only for multi-group, multi-node,
+    # non-expert-TP EP.
     stub._ep_config = SimpleNamespace(
         is_deferred_dp=config.num_ep_groups > 1 and config.num_nodes > 1 and config.expert_tp_size == 1
     )
     stub.args = _Args()
     stub.model = _GCModel()
-    stub._get_unwrapped_model = lambda: stub.model
+    stub._top_level_model = lambda: stub.model
+    stub._find_ep_modules = lambda: []
 
     with patch("src.trainers.mixins.ep_introspection.is_global_main_process", return_value=True):
         EpIntrospectionMixin._setup_ep_gradient_checkpointing(stub)
 
 
 def _assert_config_rejects_multigroup_ep(*, ep_size, world, gpus_per_node):
-    """The reject fires at ParallelismConfig construction, ahead of the trainer guard."""
+    """The reject fires at ParallelismConfig construction, before any trainer exists."""
     try:
         create_config(ep_size=ep_size, world_size=world, gpus_per_node=gpus_per_node, ep_scope="node")
     except ValueError as e:
@@ -147,39 +145,6 @@ def test_h1_ep_etp_exempt_from_multigroup_reject():
     """
     cfg = create_config(ep_size=4, expert_tp_size=2, world_size=8, gpus_per_node=8, ep_scope="node")
     _run_ep_gc_guard(cfg)  # must not raise
-
-
-def test_h1_guard_skipped_when_no_ep_layers():
-    """The trainer guard is gated on _has_ep_layers — a reject shape with no EP layers must NOT raise.
-
-    Config-time validation rejects this shape outright, so build a legal ep2-on-8 config and
-    mutate it into the ep4-on-8 reject shape (simulating a config that escaped validation) to prove
-    the trainer guard is defense-in-depth: hot when _has_ep_layers is True, skipped when False.
-    """
-    cfg = create_config(ep_size=2, world_size=8, gpus_per_node=8, ep_scope="node")
-    cfg.ep_size = 4
-    cfg.ep_group_size = 4  # stored in __post_init__, must track the mutated ep_size
-
-    class _Args:
-        gradient_checkpointing = True
-
-    class _Stub:
-        pass
-
-    stub = _Stub()
-    stub.parallelism_config = cfg
-    stub._has_ep_layers = False  # no EP layers → early return before the guard
-    stub.args = _Args()
-    stub.model = _GCModel()
-    stub._get_unwrapped_model = lambda: stub.model
-    EpIntrospectionMixin._setup_ep_gradient_checkpointing(stub)  # must not raise
-
-    # Prove the mutated shape actually arms the guard (the skip assertion above is not vacuous).
-    stub._has_ep_layers = True
-    stub._ep_config = SimpleNamespace(is_deferred_dp=False)
-    with patch("src.trainers.mixins.ep_introspection.is_global_main_process", return_value=True):
-        with pytest.raises(RuntimeError, match="dispatch groups"):
-            EpIntrospectionMixin._setup_ep_gradient_checkpointing(stub)
 
 
 # H2 — EP+ETP get_data_parallel_rank correctness (ep_size > 1 exercises % ep_size)

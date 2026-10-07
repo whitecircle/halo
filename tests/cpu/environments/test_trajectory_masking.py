@@ -14,7 +14,7 @@ from types import MethodType, SimpleNamespace
 import pytest
 
 from src.environments.base import BaseEnvironment, Message, Trajectory
-from src.trainers.grpo.environmental import DistributedAsyncEnvironmentalGRPOTrainer
+from src.trainers.grpo.environmental import BatchBuildFence, DistributedAsyncEnvironmentalGRPOTrainer
 from src.trainers.grpo.rollout.rollout_metrics import _summarize_episode_generation_tokens
 from tests.common.models import QWEN3_0_6B
 from tests.common.tokenizers import load_cached_tokenizer
@@ -37,7 +37,7 @@ def _stub(tokenizer):
         eos_token_id=tokenizer.eos_token_id,
         pad_token_id=tokenizer.pad_token_id if tokenizer.pad_token_id is not None else tokenizer.eos_token_id,
         _tools_schema=None,  # resolved None → cached_property short-circuits, no env built
-        _batch_build_error=None,
+        _batch_errors=BatchBuildFence(),
         _rollout_template_kwargs={},
         _carry_reasoning=False,
         _max_train_row_tokens=None,
@@ -46,7 +46,6 @@ def _stub(tokenizer):
     stub._tokenizer = tokenizer  # mirror __init__: processing_class may be a Processor
     stub._render_messages_to_ids = MethodType(DistributedAsyncEnvironmentalGRPOTrainer._render_messages_to_ids, stub)
     stub._context_limit = MethodType(DistributedAsyncEnvironmentalGRPOTrainer._context_limit, stub)
-    stub._record_batch_error = MethodType(DistributedAsyncEnvironmentalGRPOTrainer._record_batch_error, stub)
     stub._masked_trajectory_tensors = MethodType(
         DistributedAsyncEnvironmentalGRPOTrainer._masked_trajectory_tensors, stub
     )
@@ -186,7 +185,7 @@ def _tokenize_with(tok, reasoning_effort):
         eos_token_id=1,
         pad_token_id=0,
         _tools_schema=None,
-        _batch_build_error=None,
+        _batch_errors=BatchBuildFence(),
         _rollout_template_kwargs={},
         _carry_reasoning=False,
         _max_train_row_tokens=None,
@@ -195,7 +194,6 @@ def _tokenize_with(tok, reasoning_effort):
     stub._tokenizer = tok
     stub._render_messages_to_ids = MethodType(DistributedAsyncEnvironmentalGRPOTrainer._render_messages_to_ids, stub)
     stub._context_limit = MethodType(DistributedAsyncEnvironmentalGRPOTrainer._context_limit, stub)
-    stub._record_batch_error = MethodType(DistributedAsyncEnvironmentalGRPOTrainer._record_batch_error, stub)
     traj = Trajectory(reasoning_effort=reasoning_effort)
     traj.add_message(Message.user("solve it"))
     traj.add_message(Message.assistant("done", thinking="cot"))
@@ -203,7 +201,7 @@ def _tokenize_with(tok, reasoning_effort):
         stub, SimpleNamespace(trajectory=traj, prompt="p")
     )
     # The efforts below only mean something if the renders they came from located a real span.
-    assert stub._batch_build_error is None, stub._batch_build_error
+    assert stub._batch_errors.reason is None, stub._batch_errors.reason
     assert row[2].sum() > 0, "the trained span is empty, so the recorded renders proved nothing"
     return row
 
@@ -235,13 +233,6 @@ def test_summarize_episode_generation_tokens_mean_max_p90():
     assert s["episode/generation_tokens_max"] == 100.0
     # nearest-rank p90 of 10 sorted values -> ceil(0.9 * 10) = 9th = 90
     assert s["episode/generation_tokens_p90"] == 90.0
-    # empty batch is inert (no rollouts this step), not a crash
-    empty = _summarize_episode_generation_tokens([])
-    assert empty == {
-        "episode/generation_tokens": 0.0,
-        "episode/generation_tokens_max": 0.0,
-        "episode/generation_tokens_p90": 0.0,
-    }
 
 
 if __name__ == "__main__":

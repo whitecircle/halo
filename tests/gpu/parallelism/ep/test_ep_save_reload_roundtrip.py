@@ -40,8 +40,8 @@ import torch
 from safetensors import safe_open
 from transformers import AutoTokenizer
 
+from src.distributed.checkpoint.ep_save import save_ep_model
 from src.distributed.expert_parallel.base_layer import EPMoELayerBase
-from src.distributed.expert_parallel.saving import save_ep_model
 from src.distributed.loading.model_loading import load_distributed_model
 from src.distributed.parallelism_config import ParallelismConfig
 from src.distributed.runtime import barrier, is_global_main_process
@@ -62,7 +62,7 @@ EXPERT_TP = env_int("HALO_TEST_EP_RT_EXPERT_TP", 1)
 # EP scope. "auto" keeps the group node-local when it fits one NVLink domain and
 # resolves to "global" (cross-node, RDMA) when ep_group_size exceeds the domain — so the
 # same test validates the cross-node gathered-save path (ep_size=16 on 2×8) without a
-# config change. Single-node usage (ep_group_size <= domain) stays node-local as before.
+# config change. Single-node usage (ep_group_size <= domain) stays node-local.
 EP_SCOPE = env_str("HALO_TEST_EP_RT_SCOPE", "auto")
 # Reloaded-vs-reference loss must match to bf16 round-trip noise. A dropped expert
 # axis shifts the loss by >>1, so this tolerance is comfortably discriminating.

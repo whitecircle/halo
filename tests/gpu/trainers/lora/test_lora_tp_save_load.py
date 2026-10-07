@@ -152,7 +152,7 @@ def verify_saved_adapters(checkpoint_dir: str, live_weights: dict, rank: int) ->
         details.append("  Key format: clean PEFT format")
 
     # Check 5: All keys should have standard LoRA structure
-    # Expected pattern: model.layers.N.self_attn.{q_proj,v_proj}.lora_{A,B}.weight
+    # Expected pattern: base_model.model.model.layers.N.self_attn.{q_proj,v_proj}.lora_{A,B}.weight
     lora_keys = [k for k in saved_dict if "lora_" in k]
     checks["has_lora_keys"] = len(lora_keys) > 0
     details.append(f"  LoRA keys: {len(lora_keys)}")
@@ -160,9 +160,6 @@ def verify_saved_adapters(checkpoint_dir: str, live_weights: dict, rank: int) ->
         details.append(f"  Sample key: {lora_keys[0]}")
 
     # Check 6: Compare saved weights to live gathered weights
-    # Build mapping from PEFT save keys to live parameter names.
-    # Live keys: base_model.model.model.layers.N.self_attn.q_proj.lora_A.default.weight
-    # Saved keys: model.layers.N.self_attn.q_proj.lora_A.weight
     match_count = 0
     mismatch_count = 0
     missing_count = 0
@@ -375,7 +372,7 @@ def run_gptoss_ep_save_load(rank: int, local_rank: int, base_output_dir: str) ->
             processing_class=tokenizer,
             parallelism_config=parallelism_config,
         )
-        log(f"  EP mode: {trainer.is_ep_mode}, TP mode: {trainer.is_tp_mode}")
+        log(f"  EP mode: {trainer.parallelism_config.is_ep_mode}, TP mode: {trainer.parallelism_config.is_tp_mode}")
 
         log(f"[C.6] Training ({MAX_STEPS} steps)...")
         train_result = trainer.train()
@@ -388,8 +385,8 @@ def run_gptoss_ep_save_load(rank: int, local_rank: int, base_output_dir: str) ->
         checks["lora_updated"] = lora_updated
         log(f"  LoRA weights updated: {'PASS' if lora_updated else 'FAIL'} ({lora_details})")
 
-        checks["ep_mode"] = trainer.is_ep_mode
-        checks["no_tp_mode"] = not trainer.is_tp_mode
+        checks["ep_mode"] = trainer.parallelism_config.is_ep_mode
+        checks["no_tp_mode"] = not trainer.parallelism_config.is_tp_mode
         log(f"  EP mode active: {'PASS' if checks['ep_mode'] else 'FAIL'}")
         log(f"  TP mode inactive: {'PASS' if checks['no_tp_mode'] else 'FAIL'}")
 
@@ -507,7 +504,7 @@ def run_qwen3_fsdp_save_load(rank: int, local_rank: int, base_output_dir: str) -
             processing_class=tokenizer,
             parallelism_config=parallelism_config,
         )
-        log(f"  EP mode: {trainer.is_ep_mode}, TP mode: {trainer.is_tp_mode}")
+        log(f"  EP mode: {trainer.parallelism_config.is_ep_mode}, TP mode: {trainer.parallelism_config.is_tp_mode}")
         log(f"  FSDP wrapped: {trainer._fsdp_wrapped}")
 
         log(f"[D.6] Training ({MAX_STEPS} steps)...")
@@ -521,8 +518,8 @@ def run_qwen3_fsdp_save_load(rank: int, local_rank: int, base_output_dir: str) -
         checks["lora_updated"] = lora_updated
         log(f"  LoRA weights updated: {'PASS' if lora_updated else 'FAIL'} ({lora_details})")
 
-        checks["no_ep_mode"] = not trainer.is_ep_mode
-        checks["no_tp_mode"] = not trainer.is_tp_mode
+        checks["no_ep_mode"] = not trainer.parallelism_config.is_ep_mode
+        checks["no_tp_mode"] = not trainer.parallelism_config.is_tp_mode
         log(f"  EP mode inactive: {'PASS' if checks['no_ep_mode'] else 'FAIL'}")
         log(f"  TP mode inactive: {'PASS' if checks['no_tp_mode'] else 'FAIL'}")
 

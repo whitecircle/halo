@@ -28,9 +28,9 @@ import torch.distributed as dist
 from safetensors import safe_open
 from transformers import AutoConfig, AutoTokenizer
 
+from src.distributed.checkpoint.ep_save import save_ep_model
 from src.distributed.context_parallel.wrapper import UlyssesCPModelWrapper
 from src.distributed.expert_parallel.base_layer import EPMoELayerBase
-from src.distributed.expert_parallel.saving import save_ep_model
 from src.distributed.loading.model_loading import load_distributed_model
 from src.distributed.parallelism_config import ParallelismConfig
 from src.env import env_flag, env_str

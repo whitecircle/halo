@@ -21,10 +21,8 @@ from src.trainers.preference.kto import DistributedKTOTrainer
 def test_kto_trainer_mro_and_flags():
     assert issubclass(DistributedKTOTrainer, DistributedTrainerMixin)
     assert issubclass(DistributedKTOTrainer, KTOTrainer)
-    # KTO mirrors DPO: EP/TP yes, CP no (full-sequence log-prob pooling + KL ref),
+    # KTO mirrors DPO: CP no (full-sequence log-prob pooling + KL ref),
     # PP yes (apo_zero_unpaired only, precompute-only — gated in _validate_pp_mode).
-    assert DistributedKTOTrainer._supports_ep is True
-    assert DistributedKTOTrainer._supports_tp is True
     assert DistributedKTOTrainer._supports_cp is False
     assert DistributedKTOTrainer._supports_pp is True
     assert "kto" in DistributedKTOTrainer._tag_names

@@ -5,8 +5,8 @@
 (``_sync_tp_replicated_grads``). Grad presence is rank-local (sparse routing / idle VLM tower can
 leave every grad ``None`` on one rank only), so gating the call on ``any(p.grad is not None)``
 desyncs the TP ranks into a hang — the codebase's structural-collective invariant (see
-``tp_clip_grad_norm_``). The hook must call the sync unconditionally; the sync itself zero-fills
-missing grads so the collective count stays uniform.
+``tp_clip_grad_norm_``). The hook must call the sync unconditionally; the sync itself agrees grad
+presence over the TP group, so the collective count stays uniform.
 
 Run: ``python tests/cpu/parallelism/test_tp_grad_sync_hook_structural.py`` (or ``pytest -m cpu``).
 """
@@ -67,7 +67,7 @@ def test_sync_is_idempotent_within_one_step():
     trainer = _trainer(max_grad_norm=0.0)
     trainer.state = SimpleNamespace(global_step=7)
     trainer.parallelism_config = SimpleNamespace(is_tp_mode=True, fp32_grad_reduce=False)
-    trainer._get_tp_process_group = lambda: object()  # a group with peers, per the patch below
+    trainer.parallel_dims = SimpleNamespace(tp_group=lambda: object())  # a group with peers, per the patch below
     trainer._tp_sharded_plain_param_ids = lambda: set()
     trainer._tp_per_head_norm_param_ids = lambda: set()
     params = list(trainer.model.parameters())
@@ -75,6 +75,7 @@ def test_sync_is_idempotent_within_one_step():
     reduce_calls = Mock()
     with (
         patch.object(grad_sync_mod.dist, "get_world_size", return_value=2),
+        patch.object(grad_sync_mod.dist, "all_reduce"),
         patch.object(grad_sync_mod, "reduce_grads_bucketed", reduce_calls),
     ):
         DistributedTrainerMixin._sync_tp_replicated_grads(trainer, params)

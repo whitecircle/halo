@@ -1,9 +1,9 @@
 #!/usr/bin/env python
-"""The one bucketed grad-norm accumulation the EP, TP and PP clip paths share.
+"""The one bucketed grad-norm accumulation the mixin's EP/TP norm and the PP clip share.
 
-``bucketed_grad_norm_sq`` / ``local_grad_norm_sq`` (``src/trainers/mixins/grad_clip.py``) replaced
-three per-path accumulations, so two properties have to hold or a clip threshold silently drifts
-between topologies:
+``bucketed_grad_norm_sq`` / ``local_grad_norm_sq`` (``src/trainers/mixins/grad_clip.py``) serve
+every norm path, so two properties have to hold or a clip threshold silently drifts between
+topologies:
 
   * the local value is the fp32 sum of squared per-tensor norms — accumulating in a bf16 shard's own
     dtype, or widening an already-rounded value with a trailing ``.float()``, moves the norm;
@@ -25,13 +25,11 @@ from tests.common.gloo import run_gloo_ranks
 
 WORLD_SIZE = 2
 
-# The bucket dicts the three clip paths build, each keyed exactly as its call site keys it. The EP
-# path routes expert / FSDP-full / TP-mesh / replicated grads apart because each reduces over a
-# different group; the TP path splits the same mesh buckets from the replicated remainder; the PP
-# path has one bucket, the whole stage.
+# The bucket dicts the two norm paths build, each keyed exactly as its call site keys it. The EP/TP
+# norm routes expert / FSDP-full / TP-mesh / replicated grads apart because each reduces over a
+# different group; the PP clip has one bucket, the whole stage.
 TOPOLOGY_BUCKETS = {
-    "ep": ("expert", "fsdp_full", "tp1d", "tp2d", "dp", "other"),
-    "tp": ("tp1d", "tp2d", "dp", "replicated"),
+    "ep_tp": ("expert", "fsdp_full", "tp1d", "tp2d", "dp", "other"),
     "pp": ("stage",),
 }
 
@@ -54,7 +52,7 @@ def _shards(rank: int, bucket: str, index: int) -> list[torch.Tensor]:
 
 
 def _reference_norm_sq(shards: list[torch.Tensor]) -> torch.Tensor:
-    """The pre-fold accumulation: per-tensor fp32 norm, squared and summed."""
+    """Per-tensor fp32 norm, squared and summed."""
     total = torch.zeros((), dtype=torch.float32)
     for shard in shards:
         total = total + shard.norm(dtype=torch.float32) ** 2
@@ -62,7 +60,7 @@ def _reference_norm_sq(shards: list[torch.Tensor]) -> torch.Tensor:
 
 
 @pytest.mark.parametrize("topology", sorted(TOPOLOGY_BUCKETS))
-def test_local_value_matches_the_accumulation_it_replaced(topology):
+def test_local_value_matches_the_per_tensor_reference(topology):
     buckets = {name: _shards(0, name, i) for i, name in enumerate(TOPOLOGY_BUCKETS[topology])}
 
     got = bucketed_grad_norm_sq(buckets, device="cpu")

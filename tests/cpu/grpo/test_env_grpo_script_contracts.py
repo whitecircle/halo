@@ -7,7 +7,6 @@
 - ``measure_env_prompt_overhead`` measures the environment's real preamble (system prompt + tool
   schema) so the startup context-window check validates the prompt the model actually sees, with a
   conservative fallback when the template cannot render it.
-- The retired ``use_parallel_weight_sync`` knob is refused by the same unknown-key check.
 - ``process_dataset`` carries the ``answer`` column where the dataset has one and continues where it
   does not: whether an answer is required is the environment's ``requires_answer`` declaration, which
   the trainer gates on. An ``answer_field`` renamed away from the default still has to name a real
@@ -16,7 +15,6 @@
     python tests/cpu/grpo/test_env_grpo_script_contracts.py
 """
 
-import dataclasses
 import logging
 import re
 import sys
@@ -80,25 +78,6 @@ def test_unknown_environment_type_fails_before_any_load(env_grpo_module, tmp_pat
         env_grpo_module.main()
 
 
-def test_retired_parallel_weight_sync_key_rejected_at_startup(env_grpo_module, tmp_path):
-    """``use_parallel_weight_sync`` is retired — multi-server weight sync is always rolling. A YAML
-    still carrying it must reach the parser's strict unknown-key check, not be absorbed while the
-    run silently syncs in a shape the key no longer selects."""
-    declared = {field.name for field in dataclasses.fields(AsyncTrainingConfig)}
-    assert "use_parallel_weight_sync" not in declared, "the retired knob is still a declared field"
-    config = tmp_path / "config.yaml"
-    config.write_text(
-        f"model_name_or_path: dummy/model\noutput_dir: {tmp_path / 'out'}\n"
-        "bf16: false\nuse_cpu: true\nenvironment_type: code_contests\nuse_parallel_weight_sync: true\n"
-    )
-    with (
-        mock.patch("src.training.parser.install_log_tee"),
-        mock.patch.object(sys, "argv", ["prog", str(config)]),
-        pytest.raises(ValueError, match="use_parallel_weight_sync"),
-    ):
-        env_grpo_module.main()
-
-
 # Environment prompt overhead measurement
 
 
@@ -144,18 +123,21 @@ def test_overhead_renders_under_the_rollout_template_kwargs(env_grpo_module):
 
 def test_the_probe_states_the_budget_an_episode_binds(env_grpo_module):
     """The probe renders the budget variable the rollout requests carry, which is the episode's bound
-    budget: under the per-turn scope the level's 36000 clamped to the 18000 ceiling, under the episode
-    scope the level's whole 36000 beside the scope variable."""
+    per-turn cap: the level's 36000 clamped to the run's 18000, the level's own 12000 where the run
+    sets no cap, and nothing but the level and that cap."""
     env = types.SimpleNamespace(reasoning_effort="high", thinking_budget_for_effort=lambda level: 36000)
-    ceiling = {"rollout_max_tokens": 30000, "rollout_max_thinking_tokens": 18000}
-    per_turn = env_grpo_module.probe_template_kwargs(AsyncTrainingConfig(**ceiling), env)
-    assert per_turn == {"reasoning_effort": "high", "reasoning_budget": 18000}
-    episode = AsyncTrainingConfig(**ceiling, rollout_thinking_budget_scope="episode")
-    assert env_grpo_module.probe_template_kwargs(episode, env) == {
-        "reasoning_budget_scope": "episode",
+    clamped = env_grpo_module.probe_template_kwargs(
+        AsyncTrainingConfig(rollout_max_tokens=30000, rollout_max_thinking_tokens=18000), env
+    )
+    assert clamped == {"reasoning_effort": "high", "reasoning_budget": 18000}
+    level = types.SimpleNamespace(reasoning_effort="high", thinking_budget_for_effort=lambda level: 12000)
+    assert env_grpo_module.probe_template_kwargs(AsyncTrainingConfig(rollout_max_tokens=30000), level) == {
         "reasoning_effort": "high",
-        "reasoning_budget": 36000,
+        "reasoning_budget": 12000,
     }
+    # A level whose budget fills the turn binds no episode, and the probe says so before the servers are up.
+    with pytest.raises(ValueError, match="must sit below rollout_max_tokens"):
+        env_grpo_module.probe_template_kwargs(AsyncTrainingConfig(rollout_max_tokens=30000), env)
 
 
 def test_overhead_without_env_system_prompt_still_measures(env_grpo_module):
@@ -270,6 +252,15 @@ def test_a_renamed_answer_field_is_carried_into_the_answer_column(env_grpo_modul
 
     assert sorted(processed["train"].column_names) == ["answer", "prompt"]
     assert processed["train"][0]["answer"] == "42"
+
+
+def test_the_context_check_takes_the_episode_budget_where_it_binds_first(env_grpo_module):
+    """The worst case the servers' context is checked against: ``max_turns`` turns of the turn cap, or the
+    episode output budget when it is smaller — a budget above the product changes nothing."""
+    cfg = AsyncTrainingConfig(rollout_max_tokens=30000, rollout_max_episode_tokens=131072)
+    assert env_grpo_module.worst_case_generation(cfg, 16) == 131072
+    assert env_grpo_module.worst_case_generation(cfg, 4) == 120000
+    assert env_grpo_module.worst_case_generation(AsyncTrainingConfig(rollout_max_tokens=30000), 16) == 480000
 
 
 if __name__ == "__main__":

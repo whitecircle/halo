@@ -46,7 +46,9 @@ def _script_module(relative_path: str):
 
 def _runtime():
     return types.SimpleNamespace(
-        parallelism_config=types.SimpleNamespace(cp_size=1, is_cp_mode=False, pp_size=1, is_ep_mode=False),
+        parallelism_config=types.SimpleNamespace(
+            cp_size=1, is_cp_mode=False, pp_size=1, is_ep_mode=False, non_dp_replication_factor=1
+        ),
         model_source=_MODEL_ID,
         mode_suffix="",
         local_rank=0,

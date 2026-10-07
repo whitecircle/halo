@@ -77,8 +77,8 @@ def test_a_real_pad_token_still_pads_the_batch():
 
 
 def test_pad_token_id_zero_is_a_valid_pad_token():
-    """``or 0`` collapsed 'no pad token' and 'pad token is id 0' into one branch; id 0 is a real
-    tokenizer setting (Llama-family pad) and must go through, not trip the new raise."""
+    """An ``or 0`` fallback would collapse 'no pad token' and 'pad token is id 0' into one branch; id 0
+    is a real tokenizer setting (Llama-family pad) and must go through, not trip the raise."""
     captured = _run(SimpleNamespace(pad_token_id=0), seq_len=3)
     assert captured["input_ids"].tolist() == [[1, 2, 3, 0]]
 

@@ -1,9 +1,9 @@
 #!/usr/bin/env python
 """LoRA / QLoRA / native-expert-LoRA on the off-policy teacher-distillation trainer (+ adapter ckpt).
 
-``DistributedDistillationTrainer`` is a plain ``Trainer`` (no ``peft_config`` kwarg), so the script
-wraps the student with ``get_peft_model`` before construction — this test mirrors that exactly and
-asserts the adapter-only invariant, that the adapters move, and that an adapter checkpoint
+``DistributedDistillationTrainer`` takes ``peft_config`` and wraps the student through
+``prepare_peft_model`` (k-bit prep, the QLoRA bf16 cast and its autocast), as the script passes it.
+The test asserts the adapter-only invariant, that the adapters move, and that an adapter checkpoint
 round-trips. Liger is left on (toolkit default) so the LoRA path is exercised with fused kernels.
 
 Modes (``--mode``): lora / qlora (dense Qwen3-0.6B, FSDP2) · lora_ep / expert_lora (GptOss-20B, EP=2).
@@ -20,7 +20,6 @@ import random
 
 import torch
 from datasets import Dataset
-from peft import get_peft_model
 from transformers import AutoModelForCausalLM, DataCollatorForLanguageModeling
 
 from src.configs.distillation_config import DistillationConfig
@@ -75,11 +74,9 @@ def run(ctx) -> dict:
     checks: dict[str, bool] = {}
     parallelism_config = ParallelismConfig(ep_size=ep) if mode in ("lora_ep", "expert_lora") else ParallelismConfig()
     attn = "flex_attention" if parallelism_config.is_ep_mode else "sdpa"
-    # Student + adapters via the production path; teacher_distill wraps with get_peft_model itself.
+    # Student + adapter config via the production path; the trainer wraps it, as the script has it do.
     student, tokenizer, peft_config = load_peft_model(mode, parallelism_config, attn_implementation=attn)
     expert_lora = is_expert_lora_active(student)
-    if peft_config is not None:
-        student = get_peft_model(student, peft_config)
     log(f"  expert_lora_active={expert_lora}, peft_config={'set' if peft_config else 'None'}")
 
     # Frozen teacher: same architecture, unparallelized (full copy per rank).
@@ -119,10 +116,12 @@ def run(ctx) -> dict:
     trainer = DistributedDistillationTrainer(
         student_model=student,
         teacher_model=teacher,
+        teacher_tokenizer=tokenizer,
         args=config,
         train_dataset=_distill_dataset(tokenizer, NUM_TRAIN_SAMPLES),
         data_collator=DataCollatorForLanguageModeling(tokenizer=tokenizer, mlm=False),
         processing_class=tokenizer,
+        peft_config=peft_config,
         parallelism_config=parallelism_config,
     )
     ctx.on_teardown(trainer.cleanup_ep)

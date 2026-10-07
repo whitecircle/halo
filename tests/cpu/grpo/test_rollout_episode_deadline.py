@@ -1,8 +1,7 @@
 """Wall-clock deadline for a rollout episode (``_await_with_deadline``).
 
 ``request_timeout`` bounds one HTTP call; a wedged tool/sandbox hangs the episode itself. Without an
-episode deadline the awaiting rank never reaches the next collective and every peer blocks behind it
-(observed: three ranks spinning in ``dist.all_reduce`` while one waited on a rollout forever).
+episode deadline the awaiting rank never reaches the next collective and every peer blocks behind it.
 """
 
 import asyncio

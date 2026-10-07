@@ -59,7 +59,7 @@ def test_logit_reading_trainer_is_excluded():
     ],
 )
 def test_existing_exclusions_still_hold(kwargs, inputs, prediction_loss_only):
-    """The pre-existing guards must survive the added one."""
+    """The other exclusions hold beside the trainer's declaration."""
     gate = _Gate(loss_reads_logits=False, **kwargs)
     assert gate._should_skip_eval_logits(prediction_loss_only, inputs) is False
 

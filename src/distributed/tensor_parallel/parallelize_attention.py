@@ -28,8 +28,8 @@ from src.models.structure import DECODER_LAYER_LIST_ATTRS, backbone_with_layers,
 
 logger = logging.getLogger(__name__)
 
-# transformers' replicated-norm gradient handling, retargeted below: the plan style a config asks
-# for, and the class that installs the per-backward all-reduce for it.
+# transformers' own replicated-norm gradient handling, which this module retargets: the plan style a
+# config asks for, and the class that installs the per-backward all-reduce for it.
 _HF_REPLICATED_GRAD_STYLE = "replicated_with_grad_allreduce"
 _HF_REPLICATED_GRAD_CLASS = "ReplicatedWithGradAllReduce"
 
@@ -37,9 +37,9 @@ _HF_REPLICATED_GRAD_CLASS = "ReplicatedWithGradAllReduce"
 # compression replicated, so the KV-head rule below does not apply to it.
 _MLA_CONFIG_FIELDS = ("kv_lora_rank", "qk_rope_head_dim")
 
-# Attention projection -> its TP style, in application order. Colwise splits an output landing on the
-# head dim, including the MLA expansions (q_b_proj / kv_b_proj) while the compressions stay
-# replicated; the output projection reduces back over it. A family exposing none of these shards
+# Attention projection -> its TP style, in application order. Colwise splits an output that lands on
+# the head dim — the MLA EXPANSIONS (q_b_proj / kv_b_proj) included, while its compressions stay
+# replicated — and the output projection reduces back over it. A family exposing none of these shards
 # nothing, which the zero-shard guard below turns into a raise.
 _ATTENTION_TP_STYLES: dict[str, type] = {
     "q_proj": ColwiseParallel,
@@ -53,11 +53,12 @@ _ATTENTION_TP_STYLES: dict[str, type] = {
 
 
 def _declared_head_counts(text_config, field: str) -> tuple[int, ...]:
-    """Every distinct declared value of ``field``: one entry for a homogeneous config, each per-layer
-    value for a heterogeneous one (step3p7's 64 full / 96 sliding heads), empty when unset.
+    """Every distinct declared value of ``field`` — one entry for a homogeneous config, each
+    per-layer value for a per-layer-heterogeneous one (step3p7's 64 full / 96 sliding heads),
+    empty when unset.
 
     A bare attribute read raises transformers' ``AmbiguousGlobalPerLayerAttributeError`` on a
-    heterogeneous family, and TP must split every layer's heads evenly, so the gate checks each
+    heterogeneous family, and TP must split EVERY layer's heads evenly, so the gate checks each
     declared value rather than one reduced number.
     """
     value = get_config_field(text_config, field, per_layer_reduce=frozenset)
@@ -73,9 +74,9 @@ def validate_tp_head_divisibility(text_config, tp_size: int, *, uses_mla: bool |
 
     Both loaders route here: the toolkit's selective-TP path with the module tree in hand, and
     :meth:`ParallelismConfig.validate_against_model_config` before any weight is read. Without the
-    second, dense TP (HF-native ``tp_plan="auto"`` validates no head count of its own) gets a per-rank
-    shard that is not a multiple of ``head_dim`` and fails on the first forward's reshape, after the
-    whole checkpoint has been pulled and placed on every rank.
+    second, dense TP (HF-native ``tp_plan="auto"``, which validates no head count of its own) gets a
+    per-rank shard that is not a multiple of ``head_dim`` and dies on the first forward's reshape —
+    after the whole checkpoint has been pulled and placed on every rank.
 
     ``uses_mla`` defaults to a config probe; the module-tree caller passes what it observed.
     """
@@ -115,9 +116,9 @@ def shard_sinks_param(
     ``model._tp_sharded_non_dtensor`` for save-time all-gather.
 
     ``attn_name`` is the attribute the family holds its attention module under (``self_attn``,
-    ``attention``, ``attn``), so the registered suffix matches the parameter's real FQN. A fixed
-    spelling would match nothing on the other families, leaving every rank's partial head slice in the
-    checkpoint and out of the TP gradient reduction.
+    ``attention``, ``attn``), so the registered suffix matches the parameter's real FQN — a fixed
+    spelling would silently match nothing on the other families, leaving every rank's partial head
+    slice in the checkpoint and out of the TP gradient reduction.
     """
     tp_size = tp_mesh.size()
     tp_rank = tp_mesh.get_local_rank()
@@ -138,7 +139,7 @@ def shard_sinks_param(
 
     if not hasattr(model, "_tp_sharded_non_dtensor"):
         model._tp_sharded_non_dtensor = []
-    # One (suffix, shard_dim) entry covers every layer's sinks, so register it once.
+    # One (suffix, shard_dim) entry covers every layer's sinks — register it once, not per layer.
     entry = (f"{attn_name}.sinks", 0)
     if entry not in model._tp_sharded_non_dtensor:
         model._tp_sharded_non_dtensor.append(entry)
@@ -148,17 +149,17 @@ def shard_sinks_param(
 
 
 def _parallelize_or_raise(module: nn.Module, tp_mesh: DeviceMesh, plan: dict, what: str) -> None:
-    """Apply a TP ``plan`` to ``module``, raising ``RuntimeError`` on failure.
+    """Apply a TP ``plan`` to ``module``, raising a loud ``RuntimeError`` on any failure.
 
-    A skipped shard leaves a full-size weight while the DTensor mesh assumes sharded dims, which
-    surfaces later as a shape mismatch.
+    A silently-skipped shard leaves a full-size weight while the DTensor mesh assumes sharded dims,
+    surfacing later as cryptic shape corruption.
     """
     try:
         parallelize_module(module, tp_mesh, plan)
     except Exception as e:
         raise RuntimeError(f"TP sharding failed for {what}: {e}") from e
 
-    # Plan keys resolve against child modules; a parameter-keyed plan leaves weights full-size.
+    # Plan keys resolve against child MODULES: a parameter-keyed plan silently leaves weights full-size.
     if not any(isinstance(p, DTensor) for p in module.parameters(recurse=True)):
         logger.warning(
             f"TP plan for {what} was a no-op: no parameter became a DTensor. Plan keys must name "
@@ -180,15 +181,15 @@ def _find_attention(layer: nn.Module) -> tuple[nn.Module | None, str | None]:
 def _per_head_norm_modules(attn: nn.Module, plan: dict) -> list[nn.Module]:
     """Attention children whose gradient covers only this rank's heads.
 
-    A normalization applied after a colwise projection (Qwen3/Qwen3.5 ``q_norm``/``k_norm``, LFM2
+    A normalization applied AFTER a colwise projection (Qwen3/Qwen3.5 ``q_norm``/``k_norm``, LFM2
     ``q_layernorm``/``k_layernorm``) is a replicated ``(head_dim,)`` parameter shared across heads.
     ``ColwiseParallel`` defaults ``use_local_output=True``, so the projection returns a plain
-    per-rank-heads tensor and the DTensor graph ends there: each rank's gradient for that norm covers
-    its own heads only, and the true gradient is the sum over the group.
+    per-rank-heads tensor and the DTensor graph ends there — each rank's gradient for that norm covers
+    its own heads only, and the true gradient is the SUM over the group.
 
-    Discovered structurally (any unplanned direct child with trainable parameters) rather than by
-    name. MLA families are exempt: their ``q_a``/``kv_a`` norms sit before the colwise expansion,
-    where DTensor's ``Replicate`` backward already all-reduces.
+    Discovered structurally (any unplanned direct child with trainable parameters), never by name.
+    MLA families are exempt: their ``q_a``/``kv_a`` norms sit BEFORE the colwise expansion, where
+    DTensor's ``Replicate`` backward already all-reduces.
     """
     if "q_b_proj" in plan or "kv_b_proj" in plan:  # MLA: norms precede the expansion
         return []
@@ -200,18 +201,18 @@ def _per_head_norm_modules(attn: nn.Module, plan: dict) -> list[nn.Module]:
 
 
 def register_mla_rope_grad_reduction(attn: nn.Module, tp_mesh: DeviceMesh, config) -> None:
-    """Sum the MLA ``kv_a_proj_with_mqa`` rope gradient over the TP group, in backward.
+    """SUM the MLA ``kv_a_proj_with_mqa`` rope gradient over the TP group, in backward.
 
     That projection emits ``[kv_lora_rank | qk_rope_head_dim]``. The ``kv_lora_rank`` half feeds
     ``kv_b_proj`` (colwise), whose ``Replicate`` input redistribute all-reduces its gradient, so those
     rows are already complete. The rope half bypasses ``kv_b_proj``: it is expanded to this rank's
-    local head count and concatenated into ``key_states``, never crossing a DTensor boundary, so each
-    rank's gradient for those rows covers only its own heads and the true gradient is the sum over the
-    group. The weight is a plain replica, so the trainer's replicated bucket averages it and would
-    train the rope rows on 1/tp_size of their gradient while the lora rows stay correct.
+    LOCAL head count and concatenated into ``key_states``, never crossing a DTensor boundary, so each
+    rank's gradient for those rows covers only its own heads and the true gradient is the SUM over the
+    group. The weight is a plain replica, so the trainer's replicated bucket AVG-reduces it and would
+    train the rope rows on 1/tp_size of their gradient — silently, since the lora rows stay correct.
 
-    Reducing at the module output (transformers' own ``mla_kv_a_proj`` remedy) keeps the weight a
-    plain replica and makes its gradient complete on every rank, leaving that average idempotent.
+    Reducing at the module OUTPUT (transformers' own ``mla_kv_a_proj`` remedy) keeps the weight a
+    plain replica and makes its gradient complete on every rank, leaving that AVG idempotent.
     """
     text_config = config.get_text_config() if config is not None else None
     rope_dim = getattr(text_config, "qk_rope_head_dim", None)
@@ -232,17 +233,17 @@ def register_mla_rope_grad_reduction(attn: nn.Module, tp_mesh: DeviceMesh, confi
 
 
 def _register_per_head_norm_params(model: nn.Module, modules: list[nn.Module]) -> None:
-    """Record the per-head norm parameters on ``model`` for the step-time TP gradient sum.
+    """Record the per-head norm parameters on ``model`` for the step-time TP gradient SUM.
 
-    Parameter names rather than ids: FSDP2 replaces managed ``Parameter`` objects after this runs.
-    transformers' ``ReplicatedWithGradAllReduce`` is not used, because its
-    ``register_full_backward_hook`` re-reduces whatever sits in ``.grad`` on every backward, which
-    under gradient accumulation multiplies each earlier micro-batch's contribution by ``tp_size``
+    Parameter NAMES, not ids: FSDP2 replaces managed ``Parameter`` objects after this runs. The
+    reduction deliberately does not use transformers' ``ReplicatedWithGradAllReduce``, whose
+    ``register_full_backward_hook`` re-reduces whatever sits in ``.grad`` on EVERY backward — with
+    gradient accumulation that multiplies each earlier micro-batch's contribution by ``tp_size``
     again per micro-step. The trainer reduces these once per optimizer step instead.
 
-    Accumulates across writers (the HF-native ``tp_plan`` retarget and the toolkit's selective TP both
-    register here); a name missing from the set is averaged as a plain replica instead of summed,
-    leaving it on ``1/tp_size`` of its true gradient.
+    Accumulates across writers: both the HF-native ``tp_plan`` retarget and the toolkit's selective
+    TP register here, and a name dropped from the set is AVG-reduced as a plain replica instead of
+    SUMmed — exactly ``1/tp_size`` of its true gradient, silently.
     """
     if not modules:
         return
@@ -252,17 +253,17 @@ def _register_per_head_norm_params(model: nn.Module, modules: list[nn.Module]) -
     model._tp_per_head_norm_params = sorted(registered)
 
 
-def retarget_hf_replicated_grad_hooks(model: nn.Module) -> int:
+def retarget_hf_replicated_grad_hooks(model: nn.Module) -> None:
     """Move transformers' per-backward norm all-reduce onto the trainer's step-time SUM.
 
     ``tp_plan="auto"`` installs :class:`ReplicatedWithGradAllReduce`, whose ``full_backward_hook``
-    all-reduces ``param.grad`` in place on every backward, so under gradient accumulation each earlier
-    micro-batch's contribution is multiplied by ``tp_size`` again per micro-step (GA=8, tp=2 scales the
-    first micro-batch by 128). Those hooks are stripped and their parameters registered the way the
-    toolkit TP path does, so the reduction happens once per optimizer step.
+    all-reduces ``param.grad`` in place on EVERY backward — so under gradient accumulation each
+    earlier micro-batch's contribution is multiplied by ``tp_size`` again per micro-step (GA=8, tp=2
+    scales the first micro-batch by 128). Strip those hooks and register their parameters the same
+    way the toolkit TP path does, so the reduction happens exactly once per optimizer step.
 
-    Returns the number of modules retargeted. Raises when the plan asks for the layer and no hook was
-    found, since doing nothing would leave the norms on 1/tp_size of their gradient.
+    Raises when the plan asks for the layer and no hook was found: silently doing nothing would leave
+    the norms on 1/tp_size of their gradient.
     """
     plan = getattr(model, "_tp_plan", None) or {}
     plan_wants_it = any(style == _HF_REPLICATED_GRAD_STYLE for style in plan.values())
@@ -294,7 +295,6 @@ def retarget_hf_replicated_grad_hooks(model: nn.Module) -> int:
     _register_per_head_norm_params(model, modules)
     if modules:
         logger.info(f"Retargeted {len(modules)} per-backward norm all-reduces to the step-time TP SUM")
-    return len(modules)
 
 
 def apply_tp_to_attention_only(
@@ -315,18 +315,20 @@ def apply_tp_to_attention_only(
     underlying = backbone_with_layers(model)
     layers = decoder_layers(underlying) if underlying is not None else None
     if layers is None:
-        # Raise rather than skip: returning 0 would leave every weight replicated while the (dp, tp)
-        # mesh assumes sharding, the same state the patched==0 check below prevents.
+        # Raise, never skip: returning 0 here leaves every weight replicated while the (dp, tp) mesh
+        # assumes sharding — the same silent state the patched==0 check below exists to prevent, and
+        # which the caller documents as impossible.
         raise ValueError(
             f"Tensor parallelism found no decoder-layer list on {type(model).__name__}: "
             f"backbone_with_layers could not reach a module holding {DECODER_LAYER_LIST_ATTRS}. "
             f"TP cannot shard this layout — train it without tensor parallelism, or teach the "
-            f"backbone descent in src/distributed/runtime.py about it."
+            f"backbone descent in src/models/structure.py about it."
         )
 
     tp_size = tp_mesh.size()
     cfg = getattr(model, "config", None)
-    # Module-tree MLA detection where available; the pre-load gate uses the helper's config fallback.
+    # Module-tree MLA detection where it is available; the config-only fallback inside the helper is
+    # what the pre-load gate uses.
     first_attn = next((a for a in (_find_attention(layer)[0] for layer in layers) if a is not None), None)
     uses_mla = first_attn is not None and (hasattr(first_attn, "kv_b_proj") or hasattr(first_attn, "q_b_proj"))
     validate_tp_head_divisibility(cfg.get_text_config() if cfg is not None else None, tp_size, uses_mla=uses_mla)
@@ -346,7 +348,7 @@ def apply_tp_to_attention_only(
             unsharded[class_name] += 1
             continue
 
-        # ``is not None`` rather than ``hasattr``: transformers keeps an unused MLA Q-branch attribute
+        # ``is not None``, not ``hasattr``: transformers keeps an unused MLA Q-branch attribute
         # present but None, and a plan entry naming it would shard nothing.
         plan = {name: style() for name, style in _ATTENTION_TP_STYLES.items() if getattr(attn, name, None) is not None}
 
@@ -362,8 +364,8 @@ def apply_tp_to_attention_only(
         if hasattr(attn, "sinks") and isinstance(attn.sinks, nn.Parameter):
             shard_sinks_param(model, attn, attn_name, tp_mesh, log_first=(layer_idx == 0))
 
-    # Zero shardable layers under tp_size>1 leaves the model replicated while the (dp, tp) mesh
-    # assumes sharding: a memory blowup and a wrong DP gradient denominator.
+    # Zero shardable layers under tp_size>1 leaves the model replicated while the (dp, tp) mesh assumes
+    # sharding: silent memory blowup and a wrong DP gradient denominator.
     if tp_size > 1 and patched == 0:
         model_type = getattr(cfg, "model_type", "unknown")
         attn_classes = sorted({type(a).__name__ for a in (_find_attention(layer)[0] for layer in layers) if a})
@@ -376,10 +378,12 @@ def apply_tp_to_attention_only(
             f"src/distributed/tensor_parallel/module_types.py."
         )
 
-    # Partial sharding is numerically correct: an unsharded layer's weights are plain replicas that
-    # `_sync_tp_replicated_grads` averages over the TP group. Only the memory expectation breaks, since
-    # every TP rank keeps a full copy of those layers. Warned once rather than rejected, which would
-    # drop Qwen3.5/3.6 and LFM2, whose attention layers TP shards correctly.
+    # PARTIAL sharding is correct but not free: an unsharded layer's weights are plain replicas, which
+    # `_sync_tp_replicated_grads` AVG-reduces over the TP group (the documented "replica" kind), so the
+    # numerics match a non-TP run. What does not hold is the memory expectation — every TP rank keeps a
+    # full copy of those layers, so a hybrid model's per-rank footprint falls by far less than 1/tp_size.
+    # Loud once, not per layer, and not a raise: rejecting would drop Qwen3.5/3.6 and LFM2, whose
+    # attention layers TP shards correctly today.
     if tp_size > 1 and unsharded:
         detail = ", ".join(f"{name} x{count}" for name, count in sorted(unsharded.items()))
         logger.warning(

@@ -16,7 +16,6 @@ Run: python tests/cpu/models/test_frozen_auxiliary_loader.py  (or pytest)
 """
 
 import ast
-import contextlib
 import inspect
 import pathlib
 import types
@@ -47,7 +46,7 @@ AUX_MODEL = "org/auxiliary"
 # The steps no call site may own itself: resolving the backend and applying the sinks policy are one
 # decision (``sinks_reset=True`` is what APPROVES a sink-dropping backend), so a site that binds
 # either of them again owns a second copy of it, free to drift from the loaders that own the first.
-# The two sink primitives are not swept: only their definer binds them now, and every caller reaches
+# The two sink primitives are not swept: only their definer binds them, and every caller reaches
 # them through ``apply_sinks_policy`` — which is what a drifting copy would have to bind.
 FROZEN_LOAD_STEPS = ("resolve_attn_implementation", "apply_sinks_policy")
 
@@ -130,11 +129,14 @@ def _script_teacher(*, reset_sinks):
 
 def _sdpg_reference(*, reset_sinks):
     """The SDPG self-distillation ``L_ref`` KL anchor."""
+    args = _token_setup_args()
+    args.reference_kl_coef, args.reference_model_name_or_path = 0.1, AUX_MODEL
     return self_distill_script._load_sdpg_reference(
-        args=types.SimpleNamespace(reference_kl_coef=0.1, reference_model_name_or_path=AUX_MODEL),
+        args=args,
         model_config=ModelConfig(model_name_or_path=AUX_MODEL),
         sft_config=types.SimpleNamespace(bf16=True, fp16=False),
         dist_args=types.SimpleNamespace(reset_sinks=reset_sinks),
+        tokenizer=_tokenizer(),
         is_vlm=False,
     )
 
@@ -188,6 +190,56 @@ def test_every_frozen_load_site_reaches_the_shared_loader(site):
     assert captured.config["revision"] == captured.load["revision"]
     assert captured.load["attn_implementation"] == STUB_RESOLVED_ATTN
     assert captured.load["dtype"] is torch.bfloat16
+
+
+def _repo_tokenizers(vocabs):
+    """``AutoTokenizer`` stand-in serving one vocabulary per repo, recording each fetch's revision."""
+    fetched = {}
+
+    def from_pretrained(path, revision=None, **_):
+        fetched[path] = revision
+        return types.SimpleNamespace(get_vocab=lambda: dict(vocabs[path]))
+
+    return types.SimpleNamespace(from_pretrained=from_pretrained), fetched
+
+
+POLICY_CONFIG = ModelConfig(model_name_or_path=AUX_MODEL, model_revision="abc123")
+
+
+def _anchor_args(reference):
+    args = _token_setup_args()
+    args.reference_kl_coef, args.reference_model_name_or_path = 0.1, reference
+    return args
+
+
+@pytest.mark.parametrize(("reference", "pinned"), [(AUX_MODEL, "abc123"), ("org/other-reference", None)])
+def test_the_sdpg_reference_takes_the_policy_pin_only_from_the_policy_repo(reference, pinned):
+    """The pin names a commit in the policy's repo; sent to another repo it 404s."""
+    with stub_frozen_loader() as caps:
+        self_distill_script._load_sdpg_reference(
+            args=_anchor_args(reference),
+            model_config=POLICY_CONFIG,
+            sft_config=types.SimpleNamespace(bf16=True, fp16=False),
+            dist_args=types.SimpleNamespace(reset_sinks=True),
+            tokenizer=_tokenizer(),
+            is_vlm=False,
+        )
+    captured = captured_load(caps)
+    assert captured.load_positional[0] == reference
+    assert captured.config["revision"] == captured.load["revision"] == pinned
+
+
+def test_a_separate_reference_repo_of_another_tokenizer_is_refused():
+    """The reference is grown and keyed to the policy's tokenizer, so a different id map scores other
+    tokens; the policy's own repo needs no second tokenizer. main runs this before any load."""
+    auto_tokenizer, fetched = _repo_tokenizers({AUX_MODEL: {"a": 0, "b": 1}, "org/other-reference": {"a": 1, "b": 0}})
+    with patch.object(self_distill_script, "AutoTokenizer", auto_tokenizer):
+        with pytest.raises(ValueError, match="disagree on"):
+            self_distill_script._require_reference_token_ids(_anchor_args("org/other-reference"), POLICY_CONFIG)
+        assert fetched == {AUX_MODEL: "abc123", "org/other-reference": None}
+        fetched.clear()
+        self_distill_script._require_reference_token_ids(_anchor_args(AUX_MODEL), POLICY_CONFIG)
+    assert fetched == {}
 
 
 @pytest.mark.parametrize("reset_sinks", [True, False])
@@ -323,7 +375,7 @@ def test_vlm_load_pins_the_image_text_class_and_placement():
     captured = captured_load(caps, is_vlm=True)
     assert captured.load_positional[0] is AutoModelForImageTextToText
     assert captured.load["device_map"] == {"": 2}
-    captured.fetch_scope.assert_called_once_with("aux")
+    captured.fetch_scope.assert_called_once_with(AUX_MODEL, None, tag="aux")
 
 
 @pytest.mark.parametrize("is_vlm", [False, True], ids=["text", "vlm"])
@@ -354,22 +406,16 @@ def test_the_frozen_load_applies_the_remote_code_shims_before_the_config_fetch()
     assert order == ["shims", "config"]
 
 
-def test_the_frozen_load_warms_the_fa4_kernels_outside_the_coordination_scope():
+def test_the_frozen_load_warms_the_fa4_kernels_after_the_load():
     """This model's first scoring forward must not be the one that JIT-compiles FA4.
 
     The policy loader warms them; a frozen teacher/reference left cold pays a ~10s compile inside a
     training step, on whichever rank reaches it first, while its peers run ahead into the next
     collective — the desync the warm-up exists to prevent, moved onto the auxiliary model. The
-    warm-up barriers, so it must sit OUTSIDE the main-first block, where the peers sit on a store
-    key rather than in a matching collective.
+    warm-up barriers, so it must follow the coordinated source resolution and the weight load,
+    never sit inside either.
     """
     order: list = []
-
-    @contextlib.contextmanager
-    def _recording_scope(*args, **kwargs):
-        order.append("scope-enter")
-        yield
-        order.append("scope-exit")
 
     with (
         stub_frozen_loader() as caps,
@@ -379,10 +425,11 @@ def test_the_frozen_load_warms_the_fa4_kernels_outside_the_coordination_scope():
             lambda model, *, dtype: order.append(("warmup", dtype)),
         ),
     ):
-        caps.fetch_scope.side_effect = _recording_scope
+        caps.fetch_scope.side_effect = lambda path, revision, *, tag: order.append(("resolve", tag)) or revision
+        caps.auto_load.side_effect = lambda *args, **kwargs: order.append("weights") or caps.auto_load.return_value
         load_frozen_auxiliary_model(AUX_MODEL, dtype=torch.bfloat16, download_tag="teacher")
 
-    assert order == ["scope-enter", "scope-exit", ("warmup", torch.bfloat16)]
+    assert order == [("resolve", "teacher"), "weights", ("warmup", torch.bfloat16)]
 
 
 def test_an_untagged_fetch_opens_no_coordination_scope():

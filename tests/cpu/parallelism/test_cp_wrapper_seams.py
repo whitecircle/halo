@@ -104,7 +104,7 @@ def test_every_patched_layer_is_collected_for_the_publish(tmp_path):
 @pytest.mark.parametrize("explicit_positions", [False, True], ids=["arange", "given"])
 def test_wrapper_publishes_the_full_positions_while_the_model_gets_the_chunk(tmp_path, explicit_positions):
     """The published tensor must span the whole sequence even though the model call is narrowed —
-    the exact distinction the deleted per-layer all-gather existed to recover."""
+    the distinction a per-layer all-gather would otherwise have to recover."""
     dist.init_process_group("gloo", rank=0, world_size=1, init_method=f"file://{tmp_path / 'pg'}")
     try:
         wrapper, config = _cp_wrapped_model()
@@ -131,7 +131,7 @@ def test_wrapper_publishes_the_full_positions_while_the_model_gets_the_chunk(tmp
 
 
 def test_inputs_embeds_only_and_multimodal_calls_report_different_problems(tmp_path):
-    """One branch for both meant an ``inputs_embeds``-only call was blamed on pixel features."""
+    """One branch for both would blame an ``inputs_embeds``-only call on pixel features."""
     dist.init_process_group("gloo", rank=0, world_size=1, init_method=f"file://{tmp_path / 'pg'}")
     try:
         wrapper, config = _cp_wrapped_model()

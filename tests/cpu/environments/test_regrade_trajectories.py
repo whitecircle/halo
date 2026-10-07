@@ -118,8 +118,8 @@ def test_the_regrader_rebuilds_the_run_s_contract_not_the_class_defaults():
 
 
 def test_a_retired_meta_spelling_is_refused_rather_than_defaulted():
-    """The old block spelled two knobs after the ENV constructor (``output_comparison``,
-    ``timeout_per_test``). Silently ignoring them would re-grade at the class defaults and report a
+    """A meta block that spells two knobs after the ENV constructor (``output_comparison``,
+    ``timeout_per_test``) is refused: silently ignoring them would re-grade at the class defaults and report a
     solve rate the run never produced."""
     spec = CodeContestsEnvironment(language="python", sandbox_backend="local").grading_spec
     with pytest.raises(ValueError, match="output_comparison"):
@@ -160,14 +160,14 @@ def test_submitted_solutions_keep_only_the_calls_the_environment_admitted():
         ]
     }
     choosing = CodeContestsEnvironment(language=["python", "cpp"], sandbox_backend="local")
-    assert regrade_trajectories.submitted_solutions(episode, choosing.registry.get("submit_solution")) == [
+    assert regrade_trajectories.submitted_solutions(episode, choosing) == [
         ("x", "cpp"),
         ("w", "python"),
     ]
     fixed = CodeContestsEnvironment(language="python", sandbox_backend="local")
     # A fixed-language run declares no language argument, so a call naming one is refused like any other
     # undeclared argument, and only the bare coded call binds.
-    assert regrade_trajectories.submitted_solutions(episode, fixed.registry.get("submit_solution")) == [("y", None)]
+    assert regrade_trajectories.submitted_solutions(episode, fixed) == [("y", None)]
 
 
 def test_submitted_solutions_read_arguments_the_way_the_environment_admitted_them():
@@ -180,10 +180,24 @@ def test_submitted_solutions_read_arguments_the_way_the_environment_admitted_the
     ]
     episode = {"messages": [{"role": "assistant", "tool_calls": tool_calls}]}
     env = CodeContestsEnvironment(language=["python", "cpp"], sandbox_backend="local")
-    assert regrade_trajectories.submitted_solutions(episode, env.registry.get("submit_solution")) == [
+    assert regrade_trajectories.submitted_solutions(episode, env) == [
         ("print(1)", "python"),
         ("print(2)", "python"),
     ]
+
+
+def test_submitted_solutions_skip_a_program_the_environment_refused_for_its_language():
+    """A submission whose code the environment refused as written in another listed language was never
+    graded and spent no budget; replayed, it would take the slot of the real first submission and
+    score s@1 on a program the run never judged."""
+    cpp = "#include <bits/stdc++.h>\nusing namespace std;\nint main() { cout << 1; }"
+    tool_calls = [
+        {"function": {"name": "submit_solution", "arguments": json.dumps({"code": cpp, "language": "python"})}},
+        {"function": {"name": "submit_solution", "arguments": json.dumps({"code": cpp, "language": "cpp"})}},
+    ]
+    episode = {"messages": [{"role": "assistant", "tool_calls": tool_calls}]}
+    env = CodeContestsEnvironment(language=["python", "cpp"], sandbox_backend="local")
+    assert regrade_trajectories.submitted_solutions(episode, env) == [(cpp, "cpp")]
 
 
 def test_display_language_joins_a_model_chosen_set():

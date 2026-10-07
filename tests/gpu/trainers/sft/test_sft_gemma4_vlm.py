@@ -8,7 +8,7 @@ alongside the EPGemma4MoELayer expert wrapping to confirm the two
 components coexist correctly under FSDP+EP.
 
 Usage:
-    torchrun --nproc_per_node=4 \\
+    torchrun --nproc_per_node=2 \\
         tests/gpu/trainers/sft/test_sft_gemma4_vlm.py
 
 Requirements:

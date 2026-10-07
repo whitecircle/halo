@@ -68,9 +68,6 @@ SEED = 42
 LOSS_TOL = TOL.resume_fixed_batch_loss_abs
 
 
-# Checkpoint file verification
-
-
 # Phase 1: Train + Save Checkpoint
 
 
@@ -137,7 +134,7 @@ def phase1_train_and_save(
             parallelism_config=parallelism_config,
         )
 
-        assert trainer.is_tp_mode, "trainer.is_tp_mode should be True"
+        assert trainer.parallelism_config.is_tp_mode, "trainer.parallelism_config.is_tp_mode should be True"
 
         log(f"Training for {SAVE_AT_STEP} steps...")
         train_result = trainer.train()
@@ -249,7 +246,7 @@ def phase2_resume_and_train(
             parallelism_config=parallelism_config,
         )
 
-        assert trainer.is_tp_mode, "trainer.is_tp_mode should be True"
+        assert trainer.parallelism_config.is_tp_mode, "trainer.parallelism_config.is_tp_mode should be True"
 
         # Capture restored state at on_train_begin (post-resume, pre-first-step).
         ids, labels = fixed_text_batch(tokenizer, torch.cuda.current_device(), TP_RESUME_PROBE_TEXT)

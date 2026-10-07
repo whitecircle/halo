@@ -1,6 +1,6 @@
 # DPO — GPT-OSS 20B on the Tulu-3 preference mixture, EP=8, LoRA (the PEFT adapters are the implicit
-# reference — an explicit reference model is rejected under EP/TP; full fine-tuning there needs
-# precompute_ref_log_probs: true instead).
+# reference; full fine-tuning under EP/TP takes precompute_ref_log_probs: true, or loads a frozen
+# reference as a whole dense replica on every rank).
 # Launch: torchrun --nproc_per_node=8 scripts/training/preference/dpo.py <this config>
 
 # --- Model ---

@@ -26,9 +26,9 @@ import pytest
 import torch
 import torch.nn as nn
 
+from src.distributed.checkpoint.ep_save import _check_ep_sharded_save_supported
 from src.distributed.expert_parallel import expert_gather
 from src.distributed.expert_parallel.expert_weights import gather_ep_layer_weights
-from src.distributed.expert_parallel.saving import _check_ep_sharded_save_supported
 from tests.common.ep_stubs import StubEPLayerBase
 
 

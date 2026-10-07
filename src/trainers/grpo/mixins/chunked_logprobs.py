@@ -237,14 +237,13 @@ def _selective_logprob_entropy_forward(
     n_rows, _ = hidden.shape
     vocab_size, _ = weight.shape
     inv_t = 1.0 / temperature
-    seq_chunk_size = _SEQ_CHUNK
 
     logprobs = torch.empty((n_rows,), device=device, dtype=torch.float32)
     log_z = torch.empty((n_rows,), device=device, dtype=torch.float32)
     entropy = torch.zeros((n_rows,), device=device, dtype=torch.float32)
 
-    for seq_start in range(0, n_rows, seq_chunk_size):
-        seq_end = min(seq_start + seq_chunk_size, n_rows)
+    for seq_start in range(0, n_rows, _SEQ_CHUNK):
+        seq_end = min(seq_start + _SEQ_CHUNK, n_rows)
         n_chunk = seq_end - seq_start
         hidden_chunk = hidden[seq_start:seq_end]
         targets_chunk = targets[seq_start:seq_end]
@@ -423,7 +422,7 @@ class ChunkedLogprobsCore:
     """Trainer-agnostic chunked-logprob machinery: the batched implementation, the FA4 per-row dense
     forward, and the FSDP2-safe redirection. Subclasses provide ``_get_last_hidden_state`` (the
     backbone forward), ``self.temperature`` and ``self.accelerator``; the construction-time head-path
-    check also reads ``self.model``, ``self._use_chunked_grpo_logprobs`` and ``self._pp_runtime``.
+    check also reads ``self.model`` and ``self._use_chunked_grpo_logprobs``.
     """
 
     def _check_full_logits_fit(self, width: LogitsWidth | None) -> None:
@@ -567,8 +566,9 @@ class ChunkedLogprobsCore:
         """Verify the policy's head path at construction when the chunked sweep will score it, so a
         family it cannot reproduce is refused before the first rollout rather than at the first loss
         forward. Pure local computation on the class and config: every rank reaches the same verdict.
-        Under PP the sweep never runs; the last stage verifies the same contract when it is built."""
-        if self._use_chunked_grpo_logprobs and self._pp_runtime is None:
+        PP never gets here with the sweep on (offline GRPO refuses ``use_chunked_grpo_logprobs`` under
+        PP); its last stage verifies the same contract when it is built."""
+        if self._use_chunked_grpo_logprobs:
             self._head_transform(self.accelerator.unwrap_model(self.model))
 
     def _chunked_logps_impl(

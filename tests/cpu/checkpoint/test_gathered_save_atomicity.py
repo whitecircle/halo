@@ -1,8 +1,8 @@
 #!/usr/bin/env python
 """A gathered save that dies mid-write must leave the previous checkpoint loadable.
 
-``save_sharded_state_dict`` is the writer for EVERY gathered save (FSDP2, CP, gathered TP,
-``write_gathered_checkpoint``). HF's splitter names shards deterministically from the model and
+``save_sharded_state_dict`` is the writer behind ``write_gathered_checkpoint`` (a caller already
+holding the whole state dict; the parallel saves stream through ``StageShardWriter``). HF's splitter names shards deterministically from the model and
 ``max_shard_size``, so re-saving into a directory that already holds a same-shaped checkpoint reuses
 the very filenames that are on disk: writing them directly and crashing after shard *k* leaves new
 shards 1..k beside old shards k+1..N under the old — still valid, still same-named — index.

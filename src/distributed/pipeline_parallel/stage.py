@@ -23,7 +23,7 @@ from torch.distributed.tensor import DTensor
 from torch.utils.checkpoint import checkpoint
 from transformers import PretrainedConfig
 
-from src.checkpoint.config_export import hf_architecture_name
+from src.checkpoint.config_export import LOADED_WEIGHTS_FROM_ATTR, hf_architecture_name
 from src.distributed.expert_parallel.base_layer import find_ep_layers
 from src.distributed.expert_parallel.dispatcher import register_forward_generation_hook
 from src.distributed.pipeline_parallel.split import (
@@ -524,8 +524,11 @@ def build_pipeline_stage(
     )
     # HF Trainer and the checkpoint writers read ``model.config``; it is what a reassembled ckpt ships.
     stage.config = model.config
-    # ``architectures`` still carries the hub's class (e.g. ``*ForCausalLM`` on a model built as
-    # ``*ForSequenceClassification`` — PP supports reward and classification), and save_model_config
+    # Where load_distributed_model read the weights: the resume's construction-identity verdict.
+    if hasattr(model, LOADED_WEIGHTS_FROM_ATTR):
+        setattr(stage, LOADED_WEIGHTS_FROM_ATTR, getattr(model, LOADED_WEIGHTS_FROM_ATTR))
+    # ``architectures`` still carries the hub's class (e.g. ``*ForCausalLM`` on a reward or
+    # classification model built as ``*ForSequenceClassification``), and save_model_config
     # cannot re-derive it from this nn.Module carrier, so the live class is stamped here. An
     # ``architectures``-keyed consumer (vLLM, TGI, Auto* resolution) would otherwise serve the wrong
     # head.

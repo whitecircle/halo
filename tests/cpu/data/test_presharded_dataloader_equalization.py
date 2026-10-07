@@ -39,7 +39,8 @@ def _make_stub(trainer_cls, *, presharded: bool, tp: bool):
     get_train_dataloader/get_eval_dataloader prefix, recording each _equalize_presharded_length
     call's split."""
     t = object.__new__(trainer_cls)
-    t.parallelism_config = SimpleNamespace(is_tp_mode=tp, is_cp_mode=False, is_expert_tp_mode=False, is_pp_mode=False)
+    # A TP group of 2 replicates each batch on two ranks.
+    t.parallelism_config = SimpleNamespace(is_tp_mode=tp, is_pp_mode=False, non_dp_replication_factor=2 if tp else 1)
     t._dataset_presharded = presharded
     t.train_dataset = [{"x": 1}, {"x": 2}, {"x": 3}]
     t.eval_dataset = [{"x": 1}, {"x": 2}]
@@ -52,6 +53,8 @@ def _make_stub(trainer_cls, *, presharded: bool, tp: bool):
         dataloader_persistent_workers=False,
         dataloader_drop_last=False,
         dataloader_prefetch_factor=None,
+        dataloader_multiprocessing_context=None,
+        dataloader_in_order=True,
         process_index=0,
         eval_batch_size=1,
     )
@@ -132,12 +135,15 @@ def _equalize_with_forced_min(dataset, forced_min: int, split: str):
         return DataParallelDataLoaderMixin._equalize_presharded_length(None, dataset, split=split)
 
 
-def test_eval_zero_row_rank_raises():
-    """A rank with zero eval rows (fewer non-empty test shards than DP ranks) must raise, not
-    silently truncate to an empty eval or hang at the metrics gather."""
+@pytest.mark.parametrize("split", ["eval", "test"])
+def test_eval_zero_row_rank_raises(split):
+    """A rank with zero eval or test rows (fewer non-empty shards than DP ranks) must raise, not
+    silently truncate to an empty eval or hang at the metrics gather, and name the split it read."""
     ds = Dataset.from_dict({"x": [1, 2, 3]})
-    with pytest.raises(ValueError, match="(?i)eval.*zero|zero.*eval"):
-        _equalize_with_forced_min(ds, forced_min=0, split="eval")
+    with pytest.raises(ValueError, match=rf"Pre-sharded {split} dataset: .* zero {split} examples") as raised:
+        _equalize_with_forced_min(ds, forced_min=0, split=split)
+    other = {"eval": "test", "test": "eval"}[split]
+    assert other not in str(raised.value), f"the {split} error names the {other} split: {raised.value}"
 
 
 def test_train_zero_row_rank_raises():

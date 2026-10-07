@@ -6,12 +6,10 @@
 from __future__ import annotations
 
 import gc
-import os
 import time
 
 import torch
 from accelerate.logging import get_logger
-from huggingface_hub import snapshot_download
 from torch.distributed.tensor import DTensor
 from transformers import (
     AutoConfig,
@@ -36,19 +34,20 @@ from src.distributed.expert_parallel.loading import (
     reject_ep_sharded_checkpoint,
     resolve_hub_or_local_dir,
 )
+from src.distributed.expert_parallel.master_weights import restore_fp32_master_parameters
 from src.distributed.expert_parallel.patching import create_ep_buffers, patch_moe_model_for_ep
-from src.distributed.filesystem import fs_aware_main_first, sequential_load_within_node
-from src.distributed.loading.master_weights import restore_fp32_master_parameters
+from src.distributed.filesystem import joined_node_load
+from src.distributed.loading.model_source import resolve_model_source
 from src.distributed.loading.warmup import warm_attention_kernels
 from src.distributed.mesh import create_dp_tp_mesh, get_tp_submesh
 from src.distributed.parallelism_config import ParallelismConfig, accelerate_launch_rejection
 from src.distributed.pipeline_parallel.lazy_loader import load_pp_stage_model
 from src.distributed.runtime import (
     DeferredRankFailure,
-    fs_aware_load_rank,
     get_global_rank,
     get_local_rank,
     log_global_load_duration_seconds,
+    reject_across_ranks,
 )
 from src.distributed.tensor_parallel.parallelize_attention import (
     apply_tp_to_attention_only,
@@ -90,10 +89,10 @@ from src.models.patches.remote_code_compat import apply_remote_code_compat_shims
 
 logger = get_logger(__name__)
 
-# Precision is a run knob, not a model-config field: every loader passes the run's dtype explicitly
-# and it overrides whatever the config carries, so these override keys would be accepted and then
-# discarded. Both spellings, since transformers 5 renamed ``torch_dtype`` to ``dtype`` and keeps the
-# old name as a deprecated alias, so a config declares both.
+# Precision is a RUN knob, not a model-config field: every loader passes the run's dtype explicitly
+# and it wins over whatever the config carries, so these override keys would be accepted and then
+# discarded. Both spellings, because transformers 5 renamed ``torch_dtype`` to ``dtype`` and keeps
+# the old name as a deprecated alias — a config declares both, so both would pass the exists check.
 _REJECTED_CONFIG_OVERRIDE_KEYS = ("dtype", "torch_dtype")
 
 # Keys the lazy loaders take as their own named parameters, so passing them again out of
@@ -105,10 +104,11 @@ def _validate_launch_method_for_parallelism(pc: ParallelismConfig) -> None:
     """Reject EP/CP/TP/PP under any ``accelerate launch`` (FSDP and MULTI_GPU/DDP alike — all need
     torchrun).
 
-    Same axis set as the trainer's ``ParallelismValidationMixin._validate_parallelism_modes``, but
-    reached first, so a PP job is rejected before stage construction while the message can still name
-    the launcher. The grouped-GEMM-only case is gated in ``_validate_gmm_launch_method``, which needs
-    the loaded config: those wrappers activate only on a MoE.
+    Same axis set as the trainer's own ``ParallelismValidationMixin._validate_parallelism_modes``,
+    reached first: a PP job is rejected here, before stage construction, while the message can still
+    name the launcher. The grouped-GEMM-only case is gated separately in
+    ``_validate_gmm_launch_method``, which needs the loaded config — those wrappers activate only on
+    a MoE, so a dense model must not be rejected for a knob that is inert on it.
     """
     if message := accelerate_launch_rejection(pc):
         raise ValueError(message)
@@ -117,9 +117,10 @@ def _validate_launch_method_for_parallelism(pc: ParallelismConfig) -> None:
 def _validate_fp32_non_ep_params(pc: ParallelismConfig, model_config) -> None:
     """Reject ``fp32_non_ep_params`` for a family whose EP layer declares it unsupported.
 
-    Class-declared (``_supports_fp32_non_ep_params``) and resolved through the model-type registry.
-    Without this gate the failure is DeepEP's C++ assert at the first dispatch, after the whole
-    multi-GPU load, naming neither fp32 nor the knob.
+    Class-declared (``_supports_fp32_non_ep_params``) and resolved through the model-type registry,
+    so a family opts out where its own layout knowledge lives instead of in a string list here. The
+    alternative is DeepEP's raw C++ assert at the first dispatch, after the whole multi-GPU load,
+    naming neither fp32 nor the knob.
     """
     if not (pc.fp32_non_ep_params and pc.ep_size > 1):
         return
@@ -138,10 +139,10 @@ def _validate_fp32_non_ep_params(pc: ParallelismConfig, model_config) -> None:
 def _validate_gmm_launch_method(pc: ParallelismConfig, model_config) -> None:
     """Reject grouped-GEMM MoE expert wrappers under any ``accelerate launch`` (need torchrun).
 
-    Runs after the model config is loaded so it only fires when the wrappers would actually activate
-    (MoE model). Under accelerate MULTI_GPU the wrapped experts take over accelerate's DDP management
-    (custom accelerator, unrequested FSDP2 grad sync); under accelerate FSDP they are unvalidated
-    against the plugin's wrapping.
+    Runs after the model config is loaded so it only fires when the wrappers would actually
+    activate (MoE model): under accelerate MULTI_GPU the wrapped experts would silently hijack
+    accelerate's DDP management (custom accelerator, FSDP2 grad sync the user never asked for),
+    and under accelerate FSDP they are unvalidated against the plugin's wrapping.
     """
     if pc.is_ep_mode or pc.is_cp_mode or pc.is_tp_mode:
         return  # already rejected above for accelerate launches
@@ -164,36 +165,18 @@ def _validate_gmm_launch_method(pc: ParallelismConfig, model_config) -> None:
     )
 
 
-def _ensure_model_downloaded(model_name_or_path: str, revision: str | None = None) -> None:
-    """Download model files to cache before all processes load.
-
-    FS-aware: shared input FS → global rank 0 downloads, others wait; non-shared → each node's
-    local rank 0. Peers wait on the c10d store (hours-scale timeout), not a NCCL barrier — a 100B+
-    ``snapshot_download`` outlives the NCCL watchdog (``DIST_NCCL_TIMEOUT_MINUTES``).
-    """
-    with fs_aware_main_first("model_download"):
-        if fs_aware_load_rank() and not os.path.isdir(model_name_or_path):
-            _download_model_to_cache(model_name_or_path, revision=revision)
-
-
-def _download_model_to_cache(model_name_or_path: str, revision: str | None = None) -> None:
-    """Download model to cache via ``snapshot_download``."""
-    logger.info(f"Downloading model to cache: {model_name_or_path}")
-    snapshot_download(model_name_or_path, revision=revision)
-    logger.info("Model downloaded to cache")
-
-
 def _apply_config_overrides(model_config: AutoConfig, overrides: dict | None) -> None:
-    """Apply model config overrides from a dict; unknown keys raise, since a skipped typo would
-    train with the stock config.
+    """Apply model config overrides from a dict; unknown keys raise (a typo'd override that
+    silently skips would train with the stock config).
 
     Each key is written to every config level that declares it. On a composite config (Qwen3.5/3.6,
-    Gemma 4, VLM wrappers) the decoder knobs a run overrides (``output_router_logits``,
-    ``router_aux_loss_coef``) exist only on ``text_config``, so a top-level-only write would either
+    Gemma 4, VLM wrappers) the decoder knobs a run overrides — ``output_router_logits``,
+    ``router_aux_loss_coef`` — exist only on ``text_config``, so a top-level-only write would either
     reject a valid override or land where the decoder never reads it.
 
-    Precision keys (:data:`_REJECTED_CONFIG_OVERRIDE_KEYS`) are rejected rather than written: they
-    exist on every config and would then be overruled by the explicit ``dtype=`` the loader passes.
+    The run's precision (:data:`_REJECTED_CONFIG_OVERRIDE_KEYS`) is refused rather than written: the
+    key exists on every config, so it would pass the check above and then be overruled by the
+    explicit ``dtype=`` the loader passes.
     """
     if not overrides:
         return
@@ -255,9 +238,9 @@ def load_distributed_model(
     _validate_launch_method_for_parallelism(parallelism_config)
     sinks_policy = SinksPolicy.from_flags(reset_sinks=reset_sinks, train_sinks=train_sinks)
 
-    # DeepEP's dispatch buffer is sized for 2-byte tokens; fp32 activations trip a C++ assert in
+    # DeepEP's dispatch buffer is sized for 2-byte tokens; fp32 activations trip a raw C++ assert in
     # `get_dispatch_buffer_size` at the first dispatch, naming neither fp32 nor the config. Keyed on
-    # ep_size rather than is_ep_mode: pure ETP folds into is_ep_mode but never reaches the transport.
+    # ep_size, not is_ep_mode: pure ETP folds into is_ep_mode but never reaches the transport.
     if dtype == torch.float32 and parallelism_config.ep_size > 1:
         raise ValueError(
             f"fp32 training is not supported under Expert Parallelism "
@@ -268,18 +251,20 @@ def load_distributed_model(
             f"activations into the dispatch — it is refused separately)."
         )
 
-    # Full fp32 matmul precision before any forward: the image's TF32 default degrades long-context RoPE.
+    # True fp32 matmuls before any forward — the image's TF32 default corrupts long-context RoPE.
     configure_float32_matmul_precision()
 
     apply_remote_code_compat_shims()
-    _ensure_model_downloaded(model_name_or_path, revision=revision)
+    # Every read below — config, tokenizer, weights — takes this revision, so a Hub source loads one
+    # agreed commit on every rank, straight from the cache.
+    revision = resolve_model_source(model_name_or_path, revision, tag="policy")
 
     model_config = AutoConfig.from_pretrained(
         model_name_or_path, trust_remote_code=trust_remote_code, revision=revision
     )
     _apply_config_overrides(model_config, model_config_overrides)
-    # Before the process groups and the meta shell: config.json is all the sharding arithmetic
-    # needs, so failing here costs a second instead of minutes.
+    # Before the process groups and the meta shell: config.json is all the sharding arithmetic needs,
+    # so failing here costs a second instead of minutes.
     parallelism_config.validate_against_model_config(model_config)
     _validate_gmm_launch_method(parallelism_config, model_config)
     if parallelism_config.is_cp_mode and model_has_sinks(model_config) and sinks_policy.live:
@@ -320,8 +305,8 @@ def load_distributed_model(
             f"flex_attention is not supported with Context Parallelism (Ulysses always uses "
             f"flash_attn). Switching to {cp_fa}. A native flex_attention Ulysses path may be added later."
         )
-        # Re-validated rather than assigned: the substitute must clear the same sink-capability
-        # matrix, or a run keeping live sinks (reset_sinks=false) moves to a sink-dropping kernel.
+        # Re-validated, not assigned: the substitute must clear the same sink-capability matrix, or a
+        # run keeping live sinks (reset_sinks=false) silently moves to a sink-dropping kernel.
         attn_implementation = validate_attn_implementation(
             model_config, cp_fa, sinks_reset=(reset_sinks and not init_from_scratch)
         )
@@ -358,9 +343,9 @@ def load_distributed_model(
     tokenizer = AutoTokenizer.from_pretrained(
         model_name_or_path, trust_remote_code=trust_remote_code, revision=revision
     )
-    # Training pads right. Collators that don't set their own side inherit this, so a left-padding
-    # tokenizer (GLM-4.7-Flash, Gemma 4) would make the packing collator read leading pads as an
-    # attended document and drop the last real document's labels.
+    # Training pads right. Half the collators force their side per call, the other half inherit this
+    # one — so a left-padding tokenizer (GLM-4.7-Flash, Gemma 4) makes the packing collator read
+    # leading pads as an attended document and drop the last real document's labels.
     tokenizer.padding_side = "right"
 
     common_kwargs = dict(
@@ -370,7 +355,7 @@ def load_distributed_model(
         attn_implementation=attn_implementation,
         **model_kwargs,
     )
-    if preserve_checkpoint_precision and not parallelism_config.is_pp_mode:
+    if preserve_checkpoint_precision:
         common_kwargs["preserve_checkpoint_precision"] = True
     if revision is not None:
         common_kwargs["revision"] = revision
@@ -419,7 +404,7 @@ def load_distributed_model(
 
     model = _dispatch_model_loading(model_name_or_path, parallelism_config, model_class, common_kwargs)
 
-    # Where the weights were read from, or None for a random init: the resume loaders key their
+    # Where weights were actually READ, or None for a random init: the resume loaders key their
     # "already holds these weights" skip on this, since ``_name_or_path`` survives init_from_scratch.
     setattr(model, LOADED_WEIGHTS_FROM_ATTR, None if init_from_scratch else model_name_or_path)
 
@@ -469,7 +454,7 @@ def _dispatch_model_loading(
     model_config = common_kwargs.get("config")
     is_moe = config_has_experts(model_config)
 
-    # First, because a stage holds only its layer slice: any other loader materializes pp_size x too much.
+    # First: a stage owns only its layer slice, so every other loader materializes pp_size× too much.
     if pc.is_pp_mode:
         return _load_pp_stage_model(model_name_or_path, pc, model_class, common_kwargs, is_moe)
 
@@ -518,7 +503,7 @@ def _sequential_load_to_cuda(
     ``keep_fp32`` and ``ep_wrapped`` are :func:`cast_loaded_parameters`'."""
     strict = common_kwargs.pop("preserve_checkpoint_precision", False)
     precision_guard = DeferredRankFailure(f"FP32-master checkpoint load from {model_name_or_path}")
-    with sequential_load_within_node(max_concurrent=max_concurrent):
+    with joined_node_load(f"Model load from {model_name_or_path}", max_concurrent):
         model = from_pretrained_verified(
             model_class,
             model_name_or_path,
@@ -566,7 +551,7 @@ def _from_pretrained_on_local_gpu(
     if common_kwargs.pop("_init_from_scratch", False):
         config = common_kwargs.get("config")
         # from_config materializes on CPU before .to(cuda), so it needs the same concurrency gate.
-        with sequential_load_within_node(max_concurrent=max_concurrent):
+        with joined_node_load(f"Model build from {model_class.__name__} config", max_concurrent):
             model = model_class.from_config(
                 config,
                 dtype=common_kwargs.get("dtype"),
@@ -577,7 +562,7 @@ def _from_pretrained_on_local_gpu(
             # A random-init model has no checkpoint masters to replay.
             cast_loaded_parameters(model, common_kwargs.get("dtype"), keep_fp32=keep_fp32, ep_wrapped=ep_wrapped)
     else:
-        with sequential_load_within_node(max_concurrent=max_concurrent):
+        with joined_node_load(f"Model load from {model_name_or_path}", max_concurrent):
             ddp_kwargs = {"device_map": {"": local_rank}, **common_kwargs}
             model = from_pretrained_verified(model_class, model_name_or_path, **ddp_kwargs)
             cast_loaded_parameters(model, common_kwargs.get("dtype"), keep_fp32=keep_fp32, ep_wrapped=ep_wrapped)
@@ -637,8 +622,8 @@ def _load_pp_stage_model(
     """
     rank = get_global_rank()
     t_start_wall = time.time()
-    # Built before the checkpoint probe below: create_ep_config() issues new_group on every rank, so
-    # a per-rank filesystem decision must not come first.
+    # Built BEFORE the checkpoint probe below: create_ep_config() issues new_group on every rank, so
+    # a per-rank filesystem decision must never come first.
     ep_config = pc.create_ep_config() if (is_moe and pc.needs_ep_wrappers) else None  # is_ep_mode implies it
 
     local_dir = resolve_hub_or_local_dir(model_name_or_path, revision=common_kwargs.get("revision"))
@@ -657,13 +642,17 @@ def _load_pp_stage_model(
             f"use PP at all (see src/distributed/expert_parallel/layers/ and "
             f"agent-docs/parallelism/pipeline-parallelism.md)."
         )
-    if local_dir is None:
-        raise RuntimeError(
-            f"[Rank {rank}] Global rank 0 resolved a stage-loadable checkpoint for "
-            f"{model_name_or_path!r} but this rank could not resolve it to a local directory — a "
-            f"partially populated cache on a non-shared filesystem. Pre-download the checkpoint on "
-            f"every node."
-        )
+    # Joined, not raised: the healthy ranks would otherwise walk into the stage load's collectives.
+    reject_across_ranks(
+        None
+        if local_dir is not None
+        else (
+            f"Global rank 0 resolved a stage-loadable checkpoint for {model_name_or_path!r} but rank "
+            f"{rank} could not resolve it to a local directory — a partially populated cache on a "
+            f"non-shared filesystem. Pre-download the checkpoint on every node."
+        ),
+        "Resolving the pipeline stage checkpoint",
+    )
 
     model = load_pp_stage_model(
         local_dir,
@@ -679,8 +668,7 @@ def _load_pp_stage_model(
         **_lazy_loader_passthrough(common_kwargs),
     )
 
-    # Deliberately not in a ``finally``: this collective would turn one rank's traceback into a
-    # peer-wide timeout.
+    # Not in a ``finally``: this collective would turn one rank's traceback into a peer-wide timeout.
     log_global_load_duration_seconds(
         tag="PP",
         method="pp_stage_lazy",
@@ -709,13 +697,13 @@ def _load_ep_tp_model(
     logger.info(f"[Rank {rank}] Loading model for EP+TP mode...")
     logger.info(f"  EP size: {pc.ep_size}, TP size: {pc.tp_size}, DP size: {pc.data_parallel_size}")
 
-    # Built before the branch: create_ep_config() issues new_group on every rank while the lazy-path
+    # Built BEFORE the branch: create_ep_config() issues new_group on every rank while the lazy-path
     # predicate below is a per-rank FS probe, so branching first orders the groups per rank (deadlock).
     ep_config = pc.create_ep_config()
 
-    # Parity with load_ep_model: an ep_sharded dir would otherwise reach the lazy loader, whose keys
-    # match no expert pattern, leaving every expert on meta. Rank-0-decided like the lazy gate below;
-    # both sit in front of the same world collectives.
+    # Parity with load_ep_model: an ep_sharded dir would otherwise fall into the lazy loader, whose
+    # keys match no expert pattern — every expert stays on meta until a copy-out-of-meta error.
+    # Rank-0-decided like the lazy gate below; both sit in front of the same world collectives.
     sharded_probe = resolve_hub_or_local_dir(model_name_or_path, revision=common_kwargs.get("revision"))
     reject_ep_sharded_checkpoint(sharded_probe, model_name_or_path)
 
@@ -759,8 +747,7 @@ def _load_ep_tp_model(
         _apply_attention_only_tp(model, rank, pc.tp_size, pc.data_parallel_size)
         model = _apply_ep_wrappers(model, ep_config)
 
-    # Deliberately not in a ``finally``: this collective would turn one rank's traceback into a
-    # peer-wide timeout.
+    # Not in a ``finally``: this collective would turn one rank's traceback into a peer-wide timeout.
     log_global_load_duration_seconds(
         tag="EP+TP",
         method=load_method,
@@ -785,32 +772,36 @@ def _load_tp_model(
     tp_mesh = get_tp_submesh(device_mesh)
     logger.info(f"Created device mesh ({'DP x TP' if dp_size > 1 else 'TP only'}): {device_mesh}")
 
-    # No max_concurrent_loading throttle here, unlike the other loaders: this load ends in
-    # ``tie_weights``, whose equality check on a tied pair of DTensors is an all-reduce on the default
-    # process group, which a rank-serialized region deadlocks. The throttle would buy little anyway:
-    # transformers streams the checkpoint key by key straight onto each rank's GPU.
+    # No max_concurrent_loading throttle around the load itself: it ends in ``tie_weights``, whose
+    # equality check on a tied pair of DTensors is an all-reduce on the DEFAULT process group, and a
+    # rank-serialized region deadlocks it (the loading rank blocks in the collective while its peers
+    # wait their turn). It would buy little anyway — transformers streams the checkpoint key by key and
+    # places each rank's shard straight on its GPU, so host RAM never holds the model.
     with consistent_tied_tp_plan(model_class, common_kwargs.get("config")):
         model = from_pretrained_verified(
             model_class,
             model_name_or_path,
             # The 5.16 spelling of tp_plan="auto" (removal slated for 5.18); with an explicit
-            # device_mesh the mesh is authoritative for the load. The config's derived tp_size is
-            # read only by the model's own save_pretrained, which no toolkit path calls on a live
-            # TP model: every TP save goes through save_tp_model.
+            # device_mesh the mesh is authoritative for the load. The config's derived tp_size
+            # (WORLD_SIZE) is read only by the model's own save_pretrained, which no toolkit path
+            # calls on a live TP model — every TP save goes through save_tp_model.
             distributed_config=DistributedConfig(tp_plan="auto"),
             device_mesh=tp_mesh,
             **common_kwargs,
         )
     precision_guard = DeferredRankFailure(f"FP32-master TP checkpoint load from {model_name_or_path}")
-    precision_guard.run(
-        lambda: restore_fp32_master_parameters(
-            model,
-            model_name_or_path,
-            keep_non_ep=pc.fp32_non_ep_params,
-            strict=strict,
-            revision=common_kwargs.get("revision"),
+    # The master restore is throttled: it is collective-free, and every rank stages each full FP32
+    # tensor in host memory before keeping its own shard.
+    with joined_node_load(f"FP32-master TP restore from {model_name_or_path}", pc.max_concurrent_loading):
+        precision_guard.run(
+            lambda: restore_fp32_master_parameters(
+                model,
+                model_name_or_path,
+                keep_non_ep=pc.fp32_non_ep_params,
+                strict=strict,
+                revision=common_kwargs.get("revision"),
+            )
         )
-    )
     precision_guard.reject()
     # tp_plan="auto" resolves to an empty plan for architectures shipping no base_model_tp_plan
     # (Qwen3-VL); transformers only warns, and the run becomes tp_size replicas at 1/tp_size
@@ -835,7 +826,7 @@ def _load_tp_model(
             )
     model._device_mesh = device_mesh
     retarget_hf_replicated_grad_hooks(model)
-    # After the tie check above, since the seam re-ties and would mask a load that left the pair untied.
+    # After the tie check above: the seam re-ties, which would mask a load that left the pair untied.
     finalize_loaded_model(model)
 
     logger.info(f"Model loaded with TP (tp_size={tp_size})")
@@ -993,22 +984,31 @@ def load_model_from_pretrained(
     An already-instantiated model must have ``model_init_kwargs`` unset. ``model_cls`` None → resolved
     via `resolve_auto_model_class()`. ``keep_fp32`` (the run keeps fp32 masters, ``fp32_non_ep_params``)
     keeps the stored fp32 parameters for the trainer's fp32 upcast; no EP wrapper follows this load.
+
+    A path string is the trainer-constructor route, so it is COLLECTIVE-EQUIVALENT like the scripts'
+    loaders: the source is fetched main-rank-first and agreed across ranks
+    (:func:`~src.distributed.loading.model_source.resolve_model_source`), every rank reads the agreed
+    commit, and a rank-local load failure raises on every rank.
     """
     if isinstance(model, str):
         model_id = model
         model_init_kwargs = getattr(args, "model_init_kwargs", None) or {}
         resolve_model_dtype(model_init_kwargs)
+        revision = resolve_model_source(model, model_init_kwargs.get("revision"), tag="trainer_model")
 
-        # Applied run-scoped after the load rather than through from_pretrained: a kwarg write lands
-        # in the artifact's config, so the exported config.json would default the KV cache off for
-        # downstream consumers. An explicit use_cache in model_init_kwargs still wins.
+        # Applied RUN-scoped after the load, never through from_pretrained: a kwarg write lands in
+        # the artifact's config, and the exported config.json would default the KV cache off for
+        # every downstream consumer. An explicit user use_cache in model_init_kwargs still wins.
         run_scoped_cache_off = (
             args is not None
             and getattr(args, "gradient_checkpointing", False)
             and "use_cache" not in model_init_kwargs
         )
 
-        model = auto_load_model(model, model_class=model_cls, **model_init_kwargs)
+        # Unthrottled, as the frozen loads: each rank keeps its copy in host memory until the trainer
+        # places it, so admitting the ranks in batches would bound nothing.
+        with joined_node_load(f"Model load from {model_id}", max_concurrent=0):
+            model = auto_load_model(model_id, model_class=model_cls, **{**model_init_kwargs, "revision": revision})
         # An unset or "auto" dtype loads at the checkpoint's own dtype (recorded on the config), pins
         # aside; the cast unifies the pins to it.
         requested = model_init_kwargs.get("dtype")

@@ -13,6 +13,11 @@ Two ranks, real gloo, ``max_concurrent_loading=1``: the reads must not overlap, 
 throttle buys and what an unwrapped ``torch.load`` cannot deliver. A dense model is used on purpose —
 the throttle is entered by every rank, not only the ones with a replica writer to read.
 
+The batches end at different times, so the read's exit joins the world over the store: the rank
+that read first waits there for the last batch, not in the next collective under the process-group
+watchdog (here a 3 s gloo timeout against a 6 s read), and an exception escaping one rank's read
+raises on every rank instead of leaving the peer in that collective.
+
     python tests/cpu/checkpoint/test_optimizer_shard_read_throttle.py
 """
 
@@ -35,6 +40,8 @@ WORLD_SIZE = 2
 # enough to keep the suite fast.
 READ_SECONDS = 0.4
 PG_TIMEOUT_SEC = 60
+# Twice the gloo timeout the join test runs under.
+SLOW_READ_SECONDS = 6
 
 
 class _Config:
@@ -79,6 +86,47 @@ def _worker(rank: int, tmp_dir: str) -> None:
 
     with open(os.path.join(tmp_dir, f"window_{rank}.txt"), "w") as fh:
         fh.write(f"{failure}|{window[0]}|{window[1]}")
+
+
+def _slow_or_failing_last_batch(rank: int, tmp_dir: str, mode: str) -> None:
+    """Rank 1 reads in the second batch: slowly past the gloo timeout, or raising out of the read."""
+    store = OptimizerShardStore(_context(nn.Linear(2, 2)))
+
+    def read(_path):
+        if rank == 1 and mode == "slow":
+            time.sleep(SLOW_READ_SECONDS)
+        if rank == 1 and mode == "raises":
+            raise ValueError("shard decoder bug on rank 1")
+        return {"state": {}, "param_groups": []}, None
+
+    store._read_shard = read
+    try:
+        store._read_local_state(tmp_dir, os.path.join(tmp_dir, "optimizer_shard_00000.pt"))
+        dist.barrier()
+        outcome = "joined"
+    except Exception as e:  # the verdict file must be written whatever the rank raised
+        outcome = f"{type(e).__name__}: {e}"
+    with open(os.path.join(tmp_dir, f"join_{rank}.txt"), "w") as fh:
+        fh.write(outcome)
+
+
+def test_the_first_batch_waits_for_the_last_over_the_store(tmp_path):
+    run_gloo_ranks(
+        _slow_or_failing_last_batch, WORLD_SIZE, str(tmp_path), "slow", pg_timeout=datetime.timedelta(seconds=3)
+    )
+    for rank in range(WORLD_SIZE):
+        outcome = (tmp_path / f"join_{rank}.txt").read_text()
+        assert outcome == "joined", f"rank {rank} waited for the slow batch under the collective watchdog: {outcome}"
+
+
+def test_an_exception_escaping_one_ranks_read_raises_on_every_rank(tmp_path):
+    run_gloo_ranks(
+        _slow_or_failing_last_batch, WORLD_SIZE, str(tmp_path), "raises", pg_timeout=datetime.timedelta(seconds=30)
+    )
+    assert (tmp_path / "join_1.txt").read_text() == "ValueError: shard decoder bug on rank 1"
+    peer = (tmp_path / "join_0.txt").read_text()
+    assert peer.startswith("RuntimeError") and "shard decoder bug on rank 1" in peer, peer
+    assert "timed out" not in peer.lower(), peer
 
 
 def _windows(tmp_path) -> list[tuple[float, float]]:

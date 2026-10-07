@@ -7,15 +7,19 @@ Two independent failures live here, both silent:
    allocated on every other stage — rows x max_length x vocab.
 2. **Shape.** Every rank of a chain returns the SAME rows (the last stage's predictions are
    broadcast down it), so a world gather repeats each data-parallel replica ``pp_size`` times, and
-   accelerate's end-of-dataloader remainder trim then keeps a prefix of the duplicates rather than
-   the real tail. Means survive both; nothing else does.
+   the final round's padding cut, which keeps a prefix, then keeps a prefix of the duplicates
+   rather than the real tail. Means survive both; nothing else does.
 
     python tests/cpu/parallelism/test_pp_eval_metrics_scope.py
 """
 
+from types import SimpleNamespace
+
 import pytest
 import torch
 from accelerate import PartialState
+from accelerate.data_loader import prepare_data_loader
+from torch.utils.data import DataLoader
 
 from src.distributed.pipeline_parallel.losses import PPLossAdapter, causal_lm_token_loss
 from src.trainers.mixins.dataloader import (
@@ -85,25 +89,30 @@ def test_no_compute_metrics_leaves_the_contract_untouched():
 
 
 class _FakeAccelerator:
-    """accelerate's gather-then-trim contract over a fixed world, with no distributed backend."""
+    """accelerate's world gather over a fixed world, with no distributed backend, at the final round
+    of ``loader`` — the eval loader one DP replica's ranks iterate."""
 
-    def __init__(self, per_rank_rows: list[torch.Tensor], remainder: int):
+    def __init__(self, per_rank_rows: list[torch.Tensor], loader):
         self._per_rank_rows = per_rank_rows
-        self.remainder = remainder
+        self.gradient_state = SimpleNamespace(end_of_dataloader=True, active_dataloader=loader)
 
     def gather(self, tensor):
         del tensor  # every rank contributes its own chunk; the fake holds them all
         return torch.cat(self._per_rank_rows)
 
-    def gather_for_metrics(self, input_data, **kwargs):
-        data = self.gather(input_data)
-        return data[: self.remainder] if self.remainder > 0 else data
-
 
 class _EvalTrainer(DataParallelDataLoaderMixin):
     def __init__(self, accelerator, keep, world_size):
         self.accelerator = accelerator
+        self.args = SimpleNamespace(eval_use_gather_object=False)
         self._dp_metric_gather_scope = (keep, world_size)
+
+
+def _eval_loader(split_rows: int):
+    """DP rank 0's eval loader over a split whose final round holds ``split_rows`` real rows."""
+    rows = list(range(STAGE_WORLD * ROWS_PER_RANK + split_rows))
+    loader = DataLoader(rows, batch_size=ROWS_PER_RANK)
+    return prepare_data_loader(loader, num_processes=STAGE_WORLD, process_index=0, put_on_device=False)
 
 
 def _pipeline_rank_map() -> list[int]:
@@ -126,26 +135,19 @@ def test_the_chains_duplicate_copies_are_dropped():
     assert deduped.tolist() == [0.0] * ROWS_PER_RANK + [1.0] * ROWS_PER_RANK
 
 
-def test_the_remainder_trim_runs_after_the_dedup_not_before():
-    """The order is the whole bug: accelerate keeps the FIRST ``remainder`` rows, which before the
+def test_the_padding_cut_runs_after_the_dedup_not_before():
+    """The order is the whole bug: the cut keeps the FIRST ``split_rows`` rows, which before the
     dedup are duplicates of replica 0 rather than the batch's real tail."""
     per_rank = [torch.full((ROWS_PER_RANK,), float(dp)) for dp in _pipeline_rank_map()]
-    remainder = 6  # a partial final batch: 6 real samples across the 2 DP replicas
-    accelerator = _FakeAccelerator(per_rank, remainder)
+    split_rows = 6  # a partial final batch: 6 real samples across the 2 DP replicas
     keep = dp_representative_ranks(_pipeline_rank_map())
-    trainer = _EvalTrainer(accelerator, keep, WORLD)
+    trainer = _EvalTrainer(_FakeAccelerator(per_rank, _eval_loader(split_rows)), keep, WORLD)
 
-    naive = accelerator.gather_for_metrics(per_rank[0])
     scoped = trainer._dp_gather_for_metrics(per_rank[0])
 
-    assert scoped.numel() == remainder
     assert scoped.tolist() == [0.0] * ROWS_PER_RANK + [1.0, 1.0], "replica 1's rows must be reached"
-    assert naive.tolist() == [0.0] * ROWS_PER_RANK + [1.0, 1.0][:0] + [1.0, 1.0], "guard the fake"
-    assert torch.equal(naive, torch.cat(per_rank)[:remainder])
-    # The naive trim never reaches ranks 2-3, so it cannot tell duplicates from real rows: with a
-    # remainder covering only the first replica it would report replica 0 twice.
-    accelerator.remainder = ROWS_PER_RANK
-    assert accelerator.gather_for_metrics(per_rank[0]).tolist() == [0.0] * ROWS_PER_RANK
+    split_rows = ROWS_PER_RANK  # a final round covering only the first replica
+    trainer = _EvalTrainer(_FakeAccelerator(per_rank, _eval_loader(split_rows)), keep, WORLD)
     assert trainer._dp_gather_for_metrics(per_rank[0]).tolist() == [0.0] * ROWS_PER_RANK
 
 
@@ -153,7 +155,7 @@ def test_the_scoped_gather_is_restored_after_use():
     """It patches ``accelerator.gather`` for one call; a leak would silently halve every later
     gather in the run, including the ones that are not metric gathers."""
     per_rank = [torch.zeros(ROWS_PER_RANK) for _ in range(WORLD)]
-    accelerator = _FakeAccelerator(per_rank, 0)
+    accelerator = _FakeAccelerator(per_rank, _eval_loader(0))
     original = accelerator.gather
 
     with dp_scoped_gather(accelerator, [0, 1], WORLD):

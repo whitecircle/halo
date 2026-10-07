@@ -7,7 +7,7 @@ step 0:
 
 * ``metadata.json`` is a common file name. A hub dataset shipping its own must load RAW, not be
   judged against this build's stamp schema (which would raise on every rank that managed to read it).
-* An artifact prepared before a default moved carries the OLD default in its recorded render config.
+* An artifact's recorded render config can differ from the training args' own default.
   Comparing it against the training args' own default rejects every such artifact over a knob that
   cannot affect a preprocessed run at all — only a knob the YAML actually states is a claim.
 * A dataset LIST is a mixed corpus by design: ``tools_field`` present in some sources and absent in
@@ -49,9 +49,9 @@ def _write_metadata(directory, payload: dict) -> str:
 
 
 def test_a_foreign_metadata_json_loads_raw(tmp_path):
-    """A hub dataset's own metadata.json ({"license": ...}) has no 'preprocessed' field. Judging it
-    against the stamp schema raised on every rank that read it — right before the consensus
-    all-reduce, so ranks whose read flaked blocked there until the watchdog fired."""
+    """A hub dataset's own metadata.json ({"license": ...}) has no 'preprocessed' field. Judged
+    against the stamp schema it would raise on every rank that read it — right before the consensus
+    all-reduce, so ranks whose read flaked would block there until the watchdog fired."""
     path = _write_metadata(tmp_path / "hub-corpus", {"license": "mit", "language": ["en"]})
     assert is_preprocessed_dataset(path) is False
 
@@ -100,15 +100,15 @@ def _artifact(**config_overrides) -> PreprocessedDatasetMetadata:
     return PreprocessedDatasetMetadata(config=config.__dict__.copy())
 
 
-def test_an_artifact_prepared_under_an_older_default_is_not_rejected(caplog):
-    """The prep-side --conversation-field default moved (conversation -> prompt). An artifact
-    prepared before that plus a YAML that states nothing must still train: rendering is baked, so
+def test_an_artifact_baked_under_another_default_is_not_rejected(caplog):
+    """An artifact baked with conversation_field='conversation' (the run default is 'prompt') plus a
+    YAML that states nothing must still train: rendering is baked, so
     the run's value is inert and the prepared value is what trained."""
     metadata = _artifact(conversation_field="conversation")
     with caplog.at_level("WARNING"):
         _validate_render_compatibility(metadata, _RenderArgs())
     assert any("does not state" in record.message for record in caplog.records), (
-        "the grandfathered mismatch must still be reported, just not fatally"
+        "the unstated mismatch must still be reported, just not fatally"
     )
 
 

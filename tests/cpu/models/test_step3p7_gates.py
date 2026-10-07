@@ -263,7 +263,7 @@ def test_per_layer_head_reads_resolve_through_the_registry_seam():
 
 def test_sink_reconstruction_is_family_gated_before_the_head_read():
     """``neutralized_gpt_oss_sinks`` runs on every gathered save and RL weight sync; reading the
-    head count before the family gate raised on step3p7's ambiguous ``num_attention_heads``. A
+    head count before the family gate would raise on step3p7's ambiguous ``num_attention_heads``. A
     non-sinks model must come back empty without touching that field."""
     assert neutralized_gpt_oss_sinks(_tiny_text_model()) == {}
 

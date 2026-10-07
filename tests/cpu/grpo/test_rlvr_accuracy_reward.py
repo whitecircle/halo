@@ -6,7 +6,7 @@ answer 0.0 with no error — a brace-unaware match turns every LaTeX answer carr
 (``\\frac{1}{2}``, ``\\text{...}``, ``\\sqrt{...}``) into silent negative reward. Plain-numeric
 datasets (GSM8K) never trip it, so the defect is invisible without these cases.
 
-Extraction is shared with ``src.rewards.matching.extract_last_boxed``; here it is pinned
+Extraction is shared with ``src.rewards.graders.matching.extract_last_boxed``; here it is pinned
 end-to-end through the production reward, including the GSM8K ``####`` ground-truth split and the
 comma/``$`` normalization on both sides.
 
@@ -17,7 +17,7 @@ import time
 
 import pytest
 
-from src.rewards.verifiable import accuracy_reward as _accuracy_reward
+from src.rewards.graders.verifiable import accuracy_reward as _accuracy_reward
 
 
 @pytest.fixture(scope="module")

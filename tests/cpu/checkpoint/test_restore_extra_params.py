@@ -1,7 +1,7 @@
 """CPU tests for the checkpoint loader's targeted extra-param read.
 
 ``read_specific_keys_from_checkpoint`` backs ``CheckpointLoader._restore_extra_trained_params``,
-which restores wrapper-level trained params (e.g. a prompt-tuning codebook) on the EP/CP skip-reload
+which restores wrapper-level trained params (e.g. a learned adapter table) on the EP/CP skip-reload
 path. It must read ONLY the requested keys (never materialize the full frozen-base checkpoint) and
 handle single-file, sharded-index, and legacy ``pytorch_model.bin`` layouts.
 
@@ -28,8 +28,8 @@ _LOADER_LOGGER = "src.distributed.checkpoint.loader"
 
 def _full_state():
     return {
-        "codebook": torch.randn(2, 4, 8),
-        "gumbel_noise_scale": torch.tensor(0.1),
+        "adapter_table": torch.randn(2, 4, 8),
+        "temperature": torch.tensor(0.1),
         "model.layers.0.weight": torch.randn(8, 8),
         "model.layers.1.weight": torch.randn(8, 8),
     }
@@ -39,20 +39,20 @@ def test_reads_only_requested_keys_single_file(tmp_path):
     state = _full_state()
     save_file(state, os.path.join(tmp_path, "model.safetensors"))
 
-    got = read_specific_keys_from_checkpoint(str(tmp_path), ("codebook", "gumbel_noise_scale"))
+    got = read_specific_keys_from_checkpoint(str(tmp_path), ("adapter_table", "temperature"))
 
-    assert set(got) == {"codebook", "gumbel_noise_scale"}
-    assert torch.equal(got["codebook"], state["codebook"])
-    assert torch.equal(got["gumbel_noise_scale"], state["gumbel_noise_scale"])
+    assert set(got) == {"adapter_table", "temperature"}
+    assert torch.equal(got["adapter_table"], state["adapter_table"])
+    assert torch.equal(got["temperature"], state["temperature"])
     # The large base weights must NOT be loaded.
     assert "model.layers.0.weight" not in got
 
 
 def test_reads_from_sharded_index(tmp_path):
     state = _full_state()
-    # codebook in shard 1, base weights in shard 2 — the reader must follow the weight_map.
+    # Extras in shard 1, base weights in shard 2 — the reader must follow the weight_map.
     save_file(
-        {"codebook": state["codebook"], "gumbel_noise_scale": state["gumbel_noise_scale"]},
+        {"adapter_table": state["adapter_table"], "temperature": state["temperature"]},
         os.path.join(tmp_path, "model-00001-of-00002.safetensors"),
     )
     save_file(
@@ -63,36 +63,36 @@ def test_reads_from_sharded_index(tmp_path):
         os.path.join(tmp_path, "model-00002-of-00002.safetensors"),
     )
     weight_map = {
-        "codebook": "model-00001-of-00002.safetensors",
-        "gumbel_noise_scale": "model-00001-of-00002.safetensors",
+        "adapter_table": "model-00001-of-00002.safetensors",
+        "temperature": "model-00001-of-00002.safetensors",
         "model.layers.0.weight": "model-00002-of-00002.safetensors",
         "model.layers.1.weight": "model-00002-of-00002.safetensors",
     }
     with open(os.path.join(tmp_path, "model.safetensors.index.json"), "w") as f:
         json.dump({"metadata": {}, "weight_map": weight_map}, f)
 
-    got = read_specific_keys_from_checkpoint(str(tmp_path), ("codebook", "gumbel_noise_scale"))
-    assert set(got) == {"codebook", "gumbel_noise_scale"}
-    assert torch.equal(got["codebook"], state["codebook"])
+    got = read_specific_keys_from_checkpoint(str(tmp_path), ("adapter_table", "temperature"))
+    assert set(got) == {"adapter_table", "temperature"}
+    assert torch.equal(got["adapter_table"], state["adapter_table"])
 
 
 def test_missing_key_omitted(tmp_path):
-    save_file({"codebook": torch.randn(2, 4, 8)}, os.path.join(tmp_path, "model.safetensors"))
-    got = read_specific_keys_from_checkpoint(str(tmp_path), ("codebook", "gumbel_noise_scale"))
-    assert set(got) == {"codebook"}  # gumbel_noise_scale absent → silently omitted (caller warns)
+    save_file({"adapter_table": torch.randn(2, 4, 8)}, os.path.join(tmp_path, "model.safetensors"))
+    got = read_specific_keys_from_checkpoint(str(tmp_path), ("adapter_table", "temperature"))
+    assert set(got) == {"adapter_table"}  # temperature absent → silently omitted (caller warns)
 
 
 def test_no_checkpoint_returns_empty(tmp_path):
-    got = read_specific_keys_from_checkpoint(str(tmp_path), ("codebook",))
+    got = read_specific_keys_from_checkpoint(str(tmp_path), ("adapter_table",))
     assert got == {}
 
 
 def test_reads_from_pytorch_bin(tmp_path):
     state = _full_state()
     torch.save(state, os.path.join(tmp_path, "pytorch_model.bin"))
-    got = read_specific_keys_from_checkpoint(str(tmp_path), ("codebook", "gumbel_noise_scale"))
-    assert set(got) == {"codebook", "gumbel_noise_scale"}
-    assert torch.equal(got["codebook"], state["codebook"])
+    got = read_specific_keys_from_checkpoint(str(tmp_path), ("adapter_table", "temperature"))
+    assert set(got) == {"adapter_table", "temperature"}
+    assert torch.equal(got["adapter_table"], state["adapter_table"])
 
 
 def _write_layout(directory, layout, state):
@@ -117,9 +117,9 @@ def test_both_readers_resolve_the_same_layout(tmp_path, layout):
     _write_layout(tmp_path, layout, state)
 
     assert read_checkpoint_key_set(str(tmp_path)) == set(state)
-    got = read_specific_keys_from_checkpoint(str(tmp_path), ("codebook", "gumbel_noise_scale"))
-    assert set(got) == {"codebook", "gumbel_noise_scale"}
-    assert torch.equal(got["codebook"], state["codebook"])
+    got = read_specific_keys_from_checkpoint(str(tmp_path), ("adapter_table", "temperature"))
+    assert set(got) == {"adapter_table", "temperature"}
+    assert torch.equal(got["adapter_table"], state["adapter_table"])
 
 
 def test_both_readers_agree_on_layout_precedence(tmp_path):
@@ -136,14 +136,14 @@ def test_both_readers_agree_on_layout_precedence(tmp_path):
     assert set(read_specific_keys_from_checkpoint(str(tmp_path), keys | set(stale))) == set(indexed)
 
 
-class _TunerLike(nn.Module):
+class _ExtraParamWrapper(nn.Module):
     """A wrapper whose declared extras ARE its trained parameters."""
 
     def __init__(self):
         super().__init__()
-        self.codebook = nn.Parameter(torch.zeros(2, 4, 8))
-        self.gumbel_noise_scale = nn.Parameter(torch.tensor([1.0]))
-        self._extra_checkpoint_param_names = ("codebook", "gumbel_noise_scale")
+        self.adapter_table = nn.Parameter(torch.zeros(2, 4, 8))
+        self.temperature = nn.Parameter(torch.tensor([1.0]))
+        self._extra_checkpoint_param_names = ("adapter_table", "temperature")
 
 
 def _loader(model):
@@ -167,20 +167,20 @@ def _loader(model):
 
 
 def test_an_unreadable_extra_param_checkpoint_raises(tmp_path):
-    """A torn sidecar that warns and continues leaves these params at initialization — and for a
-    prompt-optimization run they are the ONLY trained state, so the run restarts from scratch
-    under a resumed step count, LR schedule and dataloader position. Nothing distinguishes that
-    from a working resume in the metrics, so it must raise."""
-    save_file({"codebook": torch.randn(2, 4, 8)}, os.path.join(tmp_path, "model.safetensors"))
+    """A torn sidecar that warns and continues leaves these params at initialization — and when
+    they are the run's ONLY trained state, the run restarts from scratch under a resumed step
+    count, LR schedule and dataloader position. Nothing distinguishes that from a working resume
+    in the metrics, so it must raise."""
+    save_file({"adapter_table": torch.randn(2, 4, 8)}, os.path.join(tmp_path, "model.safetensors"))
     with open(os.path.join(tmp_path, "model.safetensors"), "wb") as fh:
         fh.write(b"truncated, not a safetensors file")
-    model = _TunerLike()
-    before = model.codebook.detach().clone()
+    model = _ExtraParamWrapper()
+    before = model.adapter_table.detach().clone()
 
     with pytest.raises(RuntimeError, match="Resume from a complete checkpoint"):
         _loader(model)._restore_extra_trained_params(str(tmp_path), model)
 
-    assert torch.equal(model.codebook.data, before), "a refused restore must not half-apply"
+    assert torch.equal(model.adapter_table.data, before), "a refused restore must not half-apply"
 
 
 def test_a_readable_extra_param_checkpoint_still_restores(tmp_path, caplog):
@@ -188,22 +188,22 @@ def test_a_readable_extra_param_checkpoint_still_restores(tmp_path, caplog):
     warning — a checkpoint predating a newly declared extra is a legitimate resume, so the raise
     above must fire on an unreadable checkpoint only, never on a merely incomplete one.
 
-    ``gumbel_noise_scale`` is declared but absent here, which is exactly that case: the restore
+    ``temperature`` is declared but absent here, which is exactly that case: the restore
     proceeds, the present key lands, the absent one keeps its initialization, and the run is told."""
     saved = torch.randn(2, 4, 8)
-    save_file({"codebook": saved}, os.path.join(tmp_path, "model.safetensors"))
-    model = _TunerLike()
-    initialized = model.gumbel_noise_scale.detach().clone()
+    save_file({"adapter_table": saved}, os.path.join(tmp_path, "model.safetensors"))
+    model = _ExtraParamWrapper()
+    initialized = model.temperature.detach().clone()
 
     with caplog.at_level(logging.WARNING, logger=_LOADER_LOGGER):
         _loader(model)._restore_extra_trained_params(str(tmp_path), model)
 
-    assert torch.equal(model.codebook.data, saved)
-    assert torch.equal(model.gumbel_noise_scale.data, initialized), "an absent key must be left alone"
+    assert torch.equal(model.adapter_table.data, saved)
+    assert torch.equal(model.temperature.data, initialized), "an absent key must be left alone"
     warnings = [r.getMessage() for r in caplog.records if r.levelno >= logging.WARNING]
     assert len(warnings) == 1, warnings
-    assert "gumbel_noise_scale" in warnings[0], warnings[0]
-    assert "codebook" not in warnings[0].split("(Restored:")[0], (
+    assert "temperature" in warnings[0], warnings[0]
+    assert "adapter_table" not in warnings[0].split("(Restored:")[0], (
         f"the key that WAS restored is named as missing: {warnings[0]}"
     )
 
@@ -219,9 +219,9 @@ def test_the_restore_branches_on_the_shared_multi_rank_probe(tmp_path, monkeypat
     first would produce.
     """
     saved = torch.randn(2, 4, 8)
-    save_file({"codebook": saved}, os.path.join(tmp_path, "model.safetensors"))
-    model = _TunerLike()
-    initialized = model.codebook.detach().clone()
+    save_file({"adapter_table": saved}, os.path.join(tmp_path, "model.safetensors"))
+    model = _ExtraParamWrapper()
+    initialized = model.adapter_table.detach().clone()
 
     collective_writes = []
     monkeypatch.setattr(loader_module, "is_multi_rank_run", lambda: multi_rank)
@@ -234,12 +234,12 @@ def test_the_restore_branches_on_the_shared_multi_rank_probe(tmp_path, monkeypat
     _loader(model)._restore_extra_trained_params(str(tmp_path), model)
 
     if multi_rank:
-        assert [(module, keys) for module, keys, _ in collective_writes] == [(model, ["codebook"])]
+        assert [(module, keys) for module, keys, _ in collective_writes] == [(model, ["adapter_table"])]
         assert collective_writes[0][2].broadcast_from_rank0, "peers hold no tensors; rank 0's must be sent"
-        assert torch.equal(model.codebook.data, initialized), "the collective owns the write, not a local copy"
+        assert torch.equal(model.adapter_table.data, initialized), "the collective owns the write, not a local copy"
     else:
         assert not collective_writes, "a lone rank has no peer to broadcast to"
-        assert torch.equal(model.codebook.data, saved)
+        assert torch.equal(model.adapter_table.data, saved)
 
 
 if __name__ == "__main__":

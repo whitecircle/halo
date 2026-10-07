@@ -45,8 +45,8 @@ per_device_eval_batch_size: 1
 gradient_accumulation_steps: 8
 num_train_epochs: 1.0
 gradient_checkpointing: true
-# padding_free is rejected for V4 (eager attention has no varlen path). packing is legal but left off
-# here (padded batches): the CSA/HCA compressors pool KV across packed documents.
+# packing and padding_free are refused for V4: the CSA/HCA compressors cut KV windows at row indices,
+# so a packed document would read another's compressed KV. Padded batches only.
 packing: false
 max_length: 8192
 

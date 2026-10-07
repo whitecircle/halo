@@ -39,7 +39,6 @@ import src.environments.eval_runner as eval_runner
 from src.configs.rollout_config import RolloutConfig
 from src.environments.base import (
     EPISODE_ERROR_KEY,
-    OBJECTIVE_REWARD_KEY,
     RANDOM_REASONING_EFFORT,
     REWARD_COMPONENTS_KEY,
     SOLVE_RATE_KEY,
@@ -60,6 +59,7 @@ from src.environments.eval_runner import (
 )
 from src.environments.tools.definitions import NativeTool, NativeToolRegistry
 from src.environments.tools.factories import create_native_file_tools
+from src.rewards.terms import OBJECTIVE_REWARD_KEY
 
 
 def test_trajectory_path_slugifies_per_run():
@@ -96,6 +96,17 @@ def test_serialize_trajectory_keeps_messages_and_verdict():
     assert s["total_reward"] == 1.0 and s["done"] is True and s["truncated"] is False
     assert s["info"]["tests_passed"] == 2 and s["info"]["submission_result"] == "Passed 2/2 test cases."
     assert s["info"]["eval_stats"]["completion_tokens"] == 50  # telemetry renamed from _eval_stats
+
+
+def test_serialize_trajectory_keeps_each_turns_cap():
+    """The reasoning cap each turn ran under is what a record of an eval shows beside the render; the eval
+    counts no reasoning (it asks for no ids), so no count rides along, and a turn that recorded no cap
+    carries no key."""
+    trajectory = _leaky_traj()
+    trajectory.messages.append(Message.assistant("again", thinking_cap=18000, reasoning_tokens=17999))
+    turns = [m for m in serialize_trajectory(trajectory)["messages"] if m["role"] == "assistant"]
+    assert "thinking_cap" not in turns[0]
+    assert turns[1]["thinking_cap"] == 18000 and "reasoning_tokens" not in turns[1]
 
 
 def test_serialize_trajectory_drops_answer_key_and_internals():
@@ -184,11 +195,18 @@ def _tool_call_response():
     )
 
 
+def _call_record(model, messages, client, kwargs) -> dict:
+    """One transport call as a keyword view: the positional ``model``/``messages`` and the keyword-only
+    ``client`` beside the rest."""
+    return {"model": model, "messages": messages, "client": client, **kwargs}
+
+
 def _scripted_generate(script):
-    """Return an async stand-in for generate_openai_response driven by a list of responses/exceptions."""
+    """An async stand-in for ``generate_openai_response`` — in its call shape, ``(model, messages, *,
+    client, ...)`` — driven by a list of responses/exceptions."""
     queue = list(script)
 
-    async def _generate(**kwargs):
+    async def _generate(model, messages, *, client, **kwargs):
         item = queue.pop(0)
         if isinstance(item, Exception):
             raise item
@@ -325,8 +343,8 @@ async def test_run_episode_reads_the_tool_schema_after_reset(monkeypatch):
     def _schema():
         return real_schema() if seen.get("reset_done") else []
 
-    async def _generate(**kwargs):
-        seen["tools"] = kwargs["tools"]
+    async def _generate(model, messages, *, client, tools, **kwargs):
+        seen["tools"] = tools
         return types.SimpleNamespace(
             answer="done", finish_reason="stop", completion_tokens=1, tool_calls=None, reasoning=None, token_ids=None
         )
@@ -356,7 +374,7 @@ async def test_a_random_level_is_drawn_from_the_problem_so_reruns_agree(monkeypa
         levels.append(contexts[0]["reasoning_effort"])
         return real_reset(prompts, contexts)
 
-    async def _generate(**kwargs):
+    async def _generate(model, messages, *, client, **kwargs):
         return types.SimpleNamespace(
             answer="done", finish_reason="stop", completion_tokens=1, tool_calls=None, reasoning=None, token_ids=None
         )
@@ -385,7 +403,7 @@ async def test_run_episode_cleans_up_on_mid_episode_exception(monkeypatch):
     every failed episode leaks its trajectory + sandbox session for the run's lifetime."""
     env = _tooled_env()
 
-    async def _boom(**kwargs):
+    async def _boom(model, messages, *, client, **kwargs):
         raise RuntimeError("boom")
 
     monkeypatch.setattr(eval_runner, "generate_openai_response", _boom)
@@ -453,8 +471,8 @@ async def test_collect_results_forwards_the_whole_rollout_contract(monkeypatch):
     """
     seen: list[dict] = []
 
-    async def _capture(**kwargs):
-        seen.append(kwargs)
+    async def _capture(model, messages, *, client, **kwargs):
+        seen.append(_call_record(model, messages, client, kwargs))
         return types.SimpleNamespace(
             answer="done", finish_reason="stop", completion_tokens=1, tool_calls=None, reasoning=None, token_ids=None
         )
@@ -502,7 +520,7 @@ async def test_a_conversation_prompt_hands_the_environment_its_last_user_turn(mo
 
 
 async def test_a_conversation_without_a_user_turn_is_refused_before_any_episode(monkeypatch):
-    async def _never(**kwargs):
+    async def _never(model, messages, *, client, **kwargs):
         raise AssertionError("no episode may run for a prompt with no task in it")
 
     monkeypatch.setattr(eval_runner, "generate_openai_response", _never)
@@ -536,8 +554,8 @@ async def test_collect_results_omits_the_model_for_a_single_model_endpoint(monke
     model instead of answering with what it serves."""
     seen: list[dict] = []
 
-    async def _capture(**kwargs):
-        seen.append(kwargs)
+    async def _capture(model, messages, *, client, **kwargs):
+        seen.append(_call_record(model, messages, client, kwargs))
         return types.SimpleNamespace(
             answer="done", finish_reason="stop", completion_tokens=1, tool_calls=None, reasoning=None, token_ids=None
         )
@@ -553,9 +571,9 @@ async def test_eval_driver_keeps_contextvar_writes_across_turns(monkeypatch):
     """The eval and training drivers share one dispatcher, so a sync env's ContextVar store must
     survive from turn to turn here too.
 
-    Per-call ``asyncio.to_thread`` copies a FRESH context each time, which re-seeded the simulated
-    file tools every turn: a file written on turn 1 was gone on turn 2, so an offline eval scored a
-    capability the online rollout (one context per episode) had.
+    Per-call ``asyncio.to_thread`` copies a FRESH context each time, which would re-seed the simulated
+    file tools every turn: a file written on turn 1 would be gone on turn 2, and an offline eval would
+    miss a capability the online rollout (one context per episode) has.
     """
     registry = create_native_file_tools()
     env = NativeToolUseEnvironment(tool_registry=registry, max_turns=3)
@@ -642,9 +660,9 @@ async def _episode_under_retries(env, script, monkeypatch, rollout=_RETRYING):
     calls = []
     scripted = _scripted_generate(script)
 
-    async def _counting(**kwargs):
-        calls.append(kwargs)
-        return await scripted(**kwargs)
+    async def _counting(model, messages, *, client, **kwargs):
+        calls.append(_call_record(model, messages, client, kwargs))
+        return await scripted(model, messages, client=client, **kwargs)
 
     monkeypatch.setattr(eval_runner, "generate_openai_response", _counting)
     traj = await run_episode(env, "task", {}, client=object(), rollout=rollout)

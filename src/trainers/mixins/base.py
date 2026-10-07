@@ -23,8 +23,8 @@ from transformers.utils.output_capturing import _CAN_RECORD_REGISTRY
 from trl.trainer.utils import disable_dropout_in_model
 
 from src.data.collators.packing import DataCollatorWithFlattening, DataCollatorWithPacking
-from src.data.pipeline.processing import resolve_map_num_proc
 from src.data.spans import LABEL_IGNORE_INDEX
+from src.distributed.checkpoint.ep_save import validate_ep_sharded_save
 from src.distributed.checkpoint.peft import find_peft_model
 from src.distributed.context_parallel.validation import validate_trainer_args_for_cp
 from src.distributed.context_parallel.wrapper import UlyssesCPModelWrapper, find_cp_wrapper
@@ -35,7 +35,7 @@ from src.distributed.expert_parallel.dispatcher import (
     verify_rank_uniform_env,
 )
 from src.distributed.expert_parallel.expert_weights import has_ep_lora
-from src.distributed.expert_parallel.saving import validate_ep_sharded_save
+from src.distributed.filesystem import verify_output_filesystem_sharing
 from src.distributed.fsdp import (
     IdentityParamSet,
     make_disable_adapter_fsdp2_safe,
@@ -52,6 +52,7 @@ from src.distributed.runtime import (
     collective_device,
     get_global_rank,
     get_global_world_size,
+    get_num_nodes,
     is_global_main_process,
     is_output_shared_filesystem,
     nccl_safe_broadcast,
@@ -69,6 +70,7 @@ from src.models.loading.config_levels import config_sources, snapshot_special_to
 from src.models.loading.dtype import resolve_training_dtype
 from src.models.moe_balancing import ep_wraps_experts
 from src.models.patches.flex_sliding_attention import reject_full_determinism_after_warmup
+from src.models.segment_markers import reject_compressed_kv_rows
 from src.models.structure import lora_fold_targets, model_has_quantized_params, unwrap_framework_wrappers
 from src.optimizers.adamw_bf16 import build_bf16_optimizer
 from src.optimizers.param_groups import build_tensor_type_grouped_optimizer
@@ -172,6 +174,38 @@ def emit_primary_failure(rank: int, exc: BaseException) -> None:
     logger.error(oom_banner(rank, exc), main_process_only=False)
 
 
+def align_save_on_each_node(training_args) -> None:
+    """Make HF's ``save_on_each_node`` name the writers the toolkit's own saves use.
+
+    The base save writes ``trainer_state.json``, ``scheduler.pt`` and ``optimizer.pt`` and rotates
+    old checkpoints on ``args.should_save``, while every toolkit writer follows the output
+    filesystem (:func:`~src.distributed.runtime.fs_aware_save_rank`). On per-node storage the flag
+    must be on, or nodes 1..N hold no trainer state and no checkpoint resumes there. On shared storage across
+    nodes it must be off, or every node's local rank 0 writes and rotates the same files at once.
+    One node has one local rank 0, so either value is correct there.
+    """
+    per_node = not is_output_shared_filesystem()
+    requested = bool(getattr(training_args, "save_on_each_node", False))
+    if requested == per_node or (requested and get_num_nodes() <= 1):
+        return
+    training_args.save_on_each_node = per_node
+    if not is_global_main_process():
+        return
+    if per_node:
+        logger.info(
+            "Non-shared output filesystem → forcing save_on_each_node=True so trainer_state.json / "
+            "scheduler.pt / rng_state are written on every node (otherwise no checkpoint resumes on "
+            "the non-zero nodes)."
+        )
+    else:
+        logger.warning(
+            f"save_on_each_node=True on a shared output filesystem across {get_num_nodes()} nodes → "
+            "forcing it off: every node's local rank 0 would write and rotate the same checkpoint "
+            "files concurrently. Set DIST_OUTPUT_SHARED_FILESYSTEM=0 if each node writes its own "
+            "output directory."
+        )
+
+
 def _knobs_set_by_user(config, names: Iterable[str]) -> list[str]:
     """``names`` whose value on ``config`` differs from :class:`ParallelismConfig`'s own default.
 
@@ -195,17 +229,16 @@ class DistributedTrainerMixin(
 
     Lifecycle: subclasses call ``_init_distributed_config()`` to extract parallelism
     kwargs before ``super().__init__()``, then ``_setup_distributed_modes()`` after it,
-    and override the ``_supports_*`` flags to declare supported modes.
+    and override ``_supports_cp`` / ``_supports_pp`` to enable those axes (EP, ETP and TP run under
+    every trainer).
 
     ``parallelism_config`` holds the resolved configuration; ``cp_config`` is set only when CP is
     enabled, ``_ep_config`` whenever the model carries EP layers.
     """
 
-    _supports_ep: bool = True
     # CP/PP default off: both fail without an error — CP mis-pools log-probs, a PP stage holds only
     # some layers.
     _supports_cp: bool = False
-    _supports_tp: bool = True
     # A subclass restates a flag only where it changes the default, except ``_supports_pp = False``,
     # which every PP-refusing trainer keeps beside its paired ``_pp_unsupported_reason`` (the gate
     # quotes that reason, so the two belong together).
@@ -278,19 +311,10 @@ class DistributedTrainerMixin(
         model_config = getattr(model, "config", None)
         self._configure_mixed_precision(kwargs, training_args)
 
-        # Non-shared FS: without a per-node write, nodes 1..N resume at global_step=0 and desync the step.
-        if (
-            training_args is not None
-            and not is_output_shared_filesystem()
-            and not getattr(training_args, "save_on_each_node", False)
-        ):
-            training_args.save_on_each_node = True
-            if is_global_main_process():
-                logger.info(
-                    "Non-shared output filesystem → forcing save_on_each_node=True so "
-                    "trainer_state.json / scheduler.pt / rng_state are written on every "
-                    "node (otherwise non-zero nodes resume at global_step=0 → step desync)."
-                )
+        if training_args is not None:
+            # Every entry point, the Python API included; free after an entry script's own probe.
+            verify_output_filesystem_sharing(training_args.output_dir)
+            align_save_on_each_node(training_args)
 
         # HF re-applies Liger at train() on the wrapped model, bypassing the load-time filtering and
         # running upstream's applier alone.
@@ -344,8 +368,7 @@ class DistributedTrainerMixin(
                     "Expert/Context Parallelism and MoE routing use use_reentrant=True for gradient "
                     "checkpointing; overriding the configured use_reentrant=False. CP's sequence "
                     "all-to-alls do not survive non-reentrant recompute, and a recomputed router may "
-                    "route differently, which non-reentrant checkpointing rejects; non-reentrant is "
-                    "validated only under pipeline parallelism, which requires it."
+                    "route differently, which non-reentrant checkpointing rejects."
                 )
             gc_kwargs["use_reentrant"] = True
             training_args.gradient_checkpointing_kwargs = gc_kwargs
@@ -393,27 +416,18 @@ class DistributedTrainerMixin(
         else:
             self._bf16_optimizer = False
 
-    def _no_custom_parallelism(self) -> bool:
-        """Whether no custom parallelism (EP/CP/TP/PP) is configured.
-
-        use_grouped_gemm is excluded: it only activates for MoE models during loading.
-        """
-        return (
-            self.parallelism_config.ep_group_size <= 1
-            and self.parallelism_config.cp_size == 1
-            and self.parallelism_config.tp_size == 1
-            and self.parallelism_config.pp_size == 1
-        )
-
     def _should_accelerate_manage_fsdp(self) -> bool:
         """Check if accelerate should manage FSDP (launched with accelerate launch + FSDP config)."""
-        has_accelerate_fsdp = is_accelerate_fsdp_launch()
-        return has_accelerate_fsdp and self._no_custom_parallelism()
+        return is_accelerate_fsdp_launch() and not self.parallelism_config.has_custom_parallelism
 
     def _should_accelerate_manage_ddp(self) -> bool:
         """Whether accelerate manages DDP (MULTI_GPU, no custom parallelism): accelerate launcher
         detected without FSDP enabled."""
-        return is_accelerate_launch() and not is_accelerate_fsdp_launch() and self._no_custom_parallelism()
+        return (
+            is_accelerate_launch()
+            and not is_accelerate_fsdp_launch()
+            and not self.parallelism_config.has_custom_parallelism
+        )
 
     def _disable_dropout_for_onpolicy(self):
         """Force dropout off for on-policy RL. Must be called after ``_setup_distributed_modes`` so
@@ -851,8 +865,8 @@ class DistributedTrainerMixin(
         dp_replicate_size: int = 1,
         topo: str = "",
         detail: str,
-    ) -> bool:
-        """Apply FSDP2 for DP gradient sync, record it, and log it. Returns whether it ran.
+    ) -> None:
+        """Apply FSDP2 for DP gradient sync, record it, and log it.
 
         Shared by every parallelism mode's DP wrap: ``reshard_after_forward`` and
         ``fp32_master_weights`` always come from ``parallelism_config``, so a mode cannot diverge
@@ -875,7 +889,6 @@ class DistributedTrainerMixin(
             logger.info(
                 f"✓ FSDP2 ({reshard_label(self.parallelism_config.fsdp_reshard_after_forward)}{topo}) {detail}"
             )
-        return applied
 
     def _setup_standard_data_parallel(self):
         """Setup standard data parallel gradient sync (no EP/CP/TP) via FSDP v2.
@@ -888,12 +901,8 @@ class DistributedTrainerMixin(
         if world_size <= 1:
             return
 
-        # QLoRA: fully_shard cannot wrap non-float Params4bit, and the base is replicated anyway.
         if model_has_quantized_params(self.model):
-            self._reject_fsdp_knobs_under_qlora()
-            self._setup_qlora_gradient_sync()
-            self._patch_gradient_clipping_for_qlora()
-            logger.info("✓ QLoRA gradient sync (FSDP2 skipped: quantized 4-bit base weights)")
+            self._setup_qlora_sync("data parallel")
             return
 
         excluded = self._fsdp_exclusions().params
@@ -1046,10 +1055,6 @@ class DistributedTrainerMixin(
         off ``_ep_config`` directly, which is where they are stored."""
         return ParallelDims(device_mesh=self._device_mesh)
 
-    def _get_tp_process_group(self) -> dist.ProcessGroup | None:
-        """Get the TP process group from the device mesh."""
-        return self.parallel_dims.tp_group()
-
     def _get_tp_rank(self) -> int:
         """Get TP rank from DeviceMesh if available, fallback to modular arithmetic."""
         tp_local_rank = self.parallel_dims.tp_local_rank()
@@ -1061,7 +1066,7 @@ class DistributedTrainerMixin(
         """The process group whose ranks must share identical generation data: TP group (TP mode),
         expert-TP group (ETP mode), or None."""
         if self.parallelism_config.is_tp_mode:
-            return self._get_tp_process_group()
+            return self.parallel_dims.tp_group()
         if self.parallelism_config.is_expert_tp_mode:
             return require_ep_config(self._ep_config).expert_tp_group
         return None
@@ -1174,6 +1179,18 @@ class DistributedTrainerMixin(
                 f"Use a padding collator (padding_free/packing off) under CP."
             )
 
+    @staticmethod
+    def _reject_compressed_kv_collator(collator: Any, model_config) -> None:
+        """Refuse a packing / padding-free collator for a model with compressed-KV layers, for
+        trainers handed one straight (:func:`~src.models.segment_markers.reject_compressed_kv_rows`,
+        which the factory runs for configs that go through it). Matched on the same two roots as
+        :meth:`_reject_cp_incompatible_collator`.
+        """
+        if isinstance(collator, DataCollatorWithPacking):
+            reject_compressed_kv_rows(model_config, "packing")
+        elif isinstance(collator, DataCollatorWithFlattening):
+            reject_compressed_kv_rows(model_config, "padding_free")
+
     def _move_model_to_device(self, model, device):
         """Reject leftover meta tensors — parameters and buffers — before ``model.to(device)``.
 
@@ -1235,28 +1252,10 @@ class DistributedTrainerMixin(
         """
         return unwrap_framework_wrappers(self.model)
 
-    def _dataset_map_num_proc(self, configured: int | None) -> int:
-        """Worker count for this trainer's own ``dataset.map``/``filter`` passes.
-
-        Same count in every parallelism mode: the map callables are module-level functions taking
-        their state through ``fn_kwargs``, so a worker never pickles ``self``.
-        """
-        return resolve_map_num_proc(configured)
-
     @property
     def cp_size(self) -> int:
         """Context parallel size."""
         return self.parallelism_config.cp_size
-
-    @property
-    def is_tp_mode(self) -> bool:
-        """Whether TP is enabled."""
-        return self.parallelism_config.is_tp_mode
-
-    @property
-    def is_ep_mode(self) -> bool:
-        """Whether EP is enabled."""
-        return self.parallelism_config.is_ep_mode
 
     @property
     def is_cp_mode(self) -> bool:

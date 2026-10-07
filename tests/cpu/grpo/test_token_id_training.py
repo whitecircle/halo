@@ -21,6 +21,7 @@ import torch
 from src.environments.base import Message, Trajectory
 from src.environments.engine_wire import _extract_token_ids, _extract_token_logprobs
 from src.environments.episode import RolloutResult
+from src.trainers.grpo.environmental import BatchBuildFence
 from src.trainers.grpo.environmental import DistributedAsyncEnvironmentalGRPOTrainer as Trainer
 from tests.common.models import GPT_OSS_20B
 from tests.common.tokenizers import load_cached_tokenizer
@@ -168,7 +169,7 @@ def test_prompt_render_includes_tool_schema():
     """The recompute prompt must condition on the SAME tool-definition block vLLM sampled under: the
     rollout sends env.get_tools_schema() as chat-template `tools=`, so the trainer render must too.
     Omitting it drops ~2/3 of the prompt (the harmony tool block) and mis-conditions every completion
-    token — the mechanism behind is_ratio≈0.47. This fails if the render stops passing tools."""
+    token. This fails if the render stops passing tools."""
     tok = load_cached_tokenizer(GPT_OSS_20B)
     # Production pins this harmony template on both the trainer and the vLLM server; mirror it.
     with open("jinja-templates/gpt-oss/gpt-oss-harmony.jinja") as f:
@@ -314,8 +315,7 @@ def test_turns_path_records_context_overflow():
     turns path, which every shipped env config uses."""
     stub = _turns_stub()
     stub._context_limit = lambda: 4  # render=3 prompt tokens + 5 completion ids = 8 > 4
-    stub._batch_build_error = None
-    stub._record_batch_error = types.MethodType(Trainer._record_batch_error, stub)
+    stub._batch_errors = BatchBuildFence()
     stub._rollout_template_kwargs = {}
     stub._carry_reasoning = False
     stub._max_train_row_tokens = None
@@ -325,8 +325,8 @@ def test_turns_path_records_context_overflow():
     traj.add_message(Message.assistant("a", token_ids=[1, 2, 3, 4, 5], token_logprobs=[-0.1] * 5))
 
     stub._tokenize_trajectory_turns(RolloutResult(prompt="q", trajectory=traj))
-    assert stub._batch_build_error is not None
-    assert "context window" in stub._batch_build_error
+    assert stub._batch_errors.reason is not None
+    assert "context window" in stub._batch_errors.reason
 
 
 def _render_stub(render):
@@ -335,7 +335,7 @@ def _render_stub(render):
         _warned_once=set(),
         _rollout_routing_replay=False,
         _rollout_backend="vllm",
-        _batch_build_error=None,
+        _batch_errors=BatchBuildFence(),
         _rollout_template_kwargs={},
         _carry_reasoning=False,
         _max_train_row_tokens=None,
@@ -346,7 +346,6 @@ def _render_stub(render):
     )
     stub._render_messages_to_ids = render
     stub._context_limit = lambda: 10**9
-    stub._record_batch_error = types.MethodType(Trainer._record_batch_error, stub)
     stub._masked_trajectory_tensors = types.MethodType(Trainer._masked_trajectory_tensors, stub)
     stub._invalidate_untrainable_episode = types.MethodType(Trainer._invalidate_untrainable_episode, stub)
     stub._tokenize_trajectory = types.MethodType(Trainer._tokenize_trajectory, stub)
@@ -371,7 +370,7 @@ def test_unrenderable_trajectory_invalidates_the_episode_instead_of_the_run():
 
     rows = stub._tokenize_trajectory_turns(result)
 
-    assert stub._batch_build_error is None, "a data-local template failure must not fail the run"
+    assert stub._batch_errors.reason is None, "a data-local template failure must not fail the run"
     assert traj.episode_invalid
     assert len(rows) == 1 and int(rows[0][2].sum()) == 0, "the fallback row must carry zero loss weight"
 
@@ -394,7 +393,7 @@ def test_per_turn_prefix_render_failure_drops_the_episode_not_the_run():
     rows = stub._tokenize_trajectory_turns(result)
 
     assert calls, "the prefix re-render must have been attempted"
-    assert stub._batch_build_error is None
+    assert stub._batch_errors.reason is None
     assert traj.episode_invalid
     assert len(rows) == 1 and int(rows[0][2].sum()) == 0
 
@@ -414,7 +413,7 @@ def test_an_untrainable_turns_prefix_render_failure_drops_only_that_turn():
     traj.add_message(Message.assistant("a2", token_ids=[20, 21], prompt_token_ids=[1, 2, 3]))
     rows = stub._tokenize_trajectory_turns(RolloutResult(prompt="q", trajectory=traj))
 
-    assert not traj.episode_invalid and stub._batch_build_error is None
+    assert not traj.episode_invalid and stub._batch_errors.reason is None
     assert [(r.completion_ids.tolist(), r.negative_only) for r in rows] == [([20, 21], False)]
 
 

@@ -4,7 +4,9 @@ Read-only checks run once during setup: inspect ``self.parallelism_config`` / ``
 raise with an actionable message, or return. :func:`ctor_positions` / :func:`ctor_value` /
 :func:`ctor_config` / :func:`ctor_model_and_config` read the argument a gate validates out of a
 trainer ``__init__``'s ``*args``, before the checks below run, :func:`disable_trl_liger` clears
-the TRL flag a gate rejects, and :func:`evaluation_runs` says whether an eval-side gate applies.
+the TRL flag a gate rejects, :func:`evaluation_runs` says whether an eval-side gate applies, and
+``warn_unparallelized_reference`` (``src.distributed.loading.frozen_models``) reports the cost of a
+dense frozen reference under EP/TP.
 """
 
 from __future__ import annotations
@@ -19,6 +21,7 @@ from peft import PeftModel
 from src.distributed.checkpoint.peft import find_peft_model
 from src.distributed.expert_parallel.base_layer import find_ep_layers
 from src.distributed.expert_parallel.expert_weights import has_ep_lora
+from src.distributed.loading.frozen_models import PREFERENCE_REFERENCE_ALTERNATIVES, warn_unparallelized_reference
 from src.distributed.parallelism_config import accelerate_launch_rejection
 from src.log import KEY_PREVIEW_COUNT
 from src.models.loading.config_levels import config_sources, set_config_field_run_scoped
@@ -126,6 +129,17 @@ def disable_trl_liger(training_args, reason: str | None = None) -> bool:
     return True
 
 
+def keep_all_dataset_columns(training_args, reason: str | None = None) -> None:
+    """Force ``remove_unused_columns`` off for a trainer whose collator or rollout reads columns the
+    model's forward signature does not name, which the HF pruning would strip. ``reason`` (the
+    caller's rationale) is logged as a warning when the flag was on."""
+    if training_args is None or not training_args.remove_unused_columns:
+        return
+    if reason:
+        logger.warning(reason)
+    training_args.remove_unused_columns = False
+
+
 def evaluation_runs(training_args) -> bool:
     """Whether the HF loop evaluates at all: an eval strategy, or ``eval_on_start`` under ``"no"``."""
     return training_args.eval_strategy not in ("no", None) or bool(training_args.eval_on_start)
@@ -154,13 +168,12 @@ class ParallelismValidationMixin:
     """Validates requested parallelism modes and LoRA/EP/TP compatibility. Mixed into the trainer."""
 
     def _validate_parallelism_modes(self):
-        """Validate that the requested parallelism modes are supported by this trainer."""
+        """Validate that the requested parallelism modes are supported by this trainer.
+
+        CP and PP are declare-to-enable per trainer; EP, ETP and TP run under every trainer.
+        """
         config = self.parallelism_config
 
-        if config.is_tp_mode and not self._supports_tp:
-            raise ValueError(f"{self.__class__.__name__} does not support Tensor Parallelism (TP)")
-        if config.needs_ep_wrappers and not self._supports_ep:
-            raise ValueError(f"{self.__class__.__name__} does not support Expert Parallelism (EP) / Grouped GEMM")
         if config.is_cp_mode and not self._supports_cp:
             raise ValueError(f"{self.__class__.__name__} does not support Context Parallelism (CP)")
         if config.is_pp_mode and not self._supports_pp:
@@ -177,21 +190,9 @@ class ParallelismValidationMixin:
             raise ValueError(message)
 
     def _validate_reference_model(self, ref_model):
-        """Reject an explicit reference model under EP/TP, which never parallelizes it.
-
-        It stays a plain dense replica running the unpatched MoE path, so its log-probs mismatch the
-        policy and the KL term is wrong. Use PEFT/LoRA (``ref_model=None``) or
-        ``precompute_ref_log_probs=True``.
-        """
-        config = self.parallelism_config
-        if ref_model is not None and (config.is_ep_mode or config.is_tp_mode):
-            raise ValueError(
-                f"An explicit ref_model is not supported under EP/TP "
-                f"(expert_parallel_size={config.ep_size}, tensor_parallel_size={config.tp_size}): "
-                f"the reference is not parallelized, so it would run the unpatched dense path and "
-                f"its log-probs would not match the policy's. Use PEFT/LoRA (ref_model=None) or "
-                f"precompute_ref_log_probs=True."
-            )
+        """Warn about an explicit reference model under EP/TP (:func:`warn_unparallelized_reference`)."""
+        if ref_model is not None:
+            warn_unparallelized_reference(self.parallelism_config, PREFERENCE_REFERENCE_ALTERNATIVES)
 
     def _validate_implicit_reference_model(self) -> None:
         """Guard the reference model TRL builds for itself when it cannot match the policy.
@@ -202,11 +203,13 @@ class ParallelismValidationMixin:
         ``model_init_kwargs`` after loading the policy, so it loads fp32, from the hub's default
         revision, with the config-default attention, as a dense replica no parallelism touches.
 
-        Two problems with two gates. Live attention sinks make the KL wrong: the policy is
-        restricted to sink-carrying attention while the reference is not, so the pair compute
-        different log-probs for identical tokens. That is a property of the loaded weights rather
-        than the sharding, so it raises unconditionally. The un-sharded fp32 replica is only
-        wasteful, worst under EP, so that stays a warning.
+        Two separate problems, with two separate gates. Live attention sinks make the KL **wrong**:
+        the policy is restricted to sink-carrying attention while the reference is not, so the pair
+        compute different log-probs for identical tokens. That is a property of the loaded weights,
+        not of the sharding — it holds under plain FSDP2 DP, TP and ``ep_size == 1`` exactly as it
+        does under EP, so it raises unconditionally. The un-sharded replica is merely **wasteful** —
+        its log-probs match the policy's up to kernel numerics (:func:`warn_unparallelized_reference`) —
+        and worst under EP (experts replicated per rank), so that is a warning.
         """
         # TRL nulls ref_model in its no-reference cases (PEFT; precompute for DPO/KTO; beta == 0 for
         # GRPO), so a live one is implicit.
@@ -219,7 +222,8 @@ class ParallelismValidationMixin:
                 "passed) and this policy carries LIVE attention sinks (reset_sinks: false). The policy is restricted to "
                 "sink-carrying attention while the reference is not, so their log-probs differ for "
                 "identical tokens and the KL term is biased on every token. Use use_peft: true (the "
-                "adapter is disabled to get the reference), precompute_ref_log_probs: true (DPO/KTO), "
+                "adapter is disabled to get the reference), precompute_ref_log_probs: true (DPO/KTO under "
+                "EP or TP; on plain data parallelism the scripts still load a reference copy), "
                 "or beta: 0 (GRPO; the bands/clip are the trust region)."
             )
         if not self.parallelism_config.is_ep_mode:

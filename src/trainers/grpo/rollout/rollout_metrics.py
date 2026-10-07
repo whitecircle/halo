@@ -21,6 +21,7 @@ from src.distributed.runtime import (
 )
 from src.environments.base import EPISODE_SLICES_KEY, SOLVE_RATE_KEY, Trajectory
 from src.environments.episode import RolloutResult
+from src.rewards.terms import REWARD_COMPONENT_PREFIX
 from src.trainers.grpo.rollout.completions_logging import emit_completion_artifacts
 
 logger = logging.getLogger(__name__)
@@ -52,23 +53,15 @@ def _gather_to_completion_writers(values: list) -> list | None:
 
 
 def _percentile(values: list[float], q: float) -> float:
-    """Nearest-rank percentile (``q`` in [0, 100]) of a numeric list. Empty list → 0.0."""
-    if not values:
-        return 0.0
+    """Nearest-rank percentile (``q`` in [0, 100]) of a non-empty numeric list."""
     ordered = sorted(values)
     rank = max(1, min(len(ordered), math.ceil(q / 100.0 * len(ordered))))
     return float(ordered[rank - 1])
 
 
 def _summarize_episode_generation_tokens(generation_tokens: list[float]) -> dict[str, float]:
-    """Per-episode generation-token summary (mean / max / p90). Each element is one episode's total
-    generated tokens summed across its turns. Empty batch → all zeros."""
-    if not generation_tokens:
-        return {
-            "episode/generation_tokens": 0.0,
-            "episode/generation_tokens_max": 0.0,
-            "episode/generation_tokens_p90": 0.0,
-        }
+    """Per-episode generation-token summary (mean / max / p90) of a non-empty step. Each element is one
+    episode's total generated tokens summed across its turns."""
     return {
         "episode/generation_tokens": sum(generation_tokens) / len(generation_tokens),
         "episode/generation_tokens_max": float(max(generation_tokens)),
@@ -137,10 +130,10 @@ class RolloutMetricsMixin:
         All four gathers run on every rank before any of them is consumed, so the writer's early
         return cannot skip a collective. Rows of the other mode still waiting for their log (an eval
         round on a step ``logging_steps`` skipped) are written under their own mode first, never into
-        this round's file."""
+        this round's file; every rank enters that write, whose failure is raised on all of them."""
         if not (self._save_completions or self.log_completions):
             return
-        if self._completion_logs_mode not in (None, mode) and self._logs["prompt"]:
+        if self._completion_logs_mode not in (None, mode):
             emit_completion_artifacts(
                 self, console=False, save=self._save_completions, mode=self._completion_logs_mode
             )
@@ -176,18 +169,6 @@ class RolloutMetricsMixin:
             parts.append(seg)
         return "\n".join(parts)
 
-    def _assistant_turn_reasoning_tokens(self, traj) -> list[int]:
-        """Per-assistant-turn CoT token counts for the effort length terms and the per-effort metrics.
-
-        Every assistant turn counts, a thinking-free one as 0, so the list's sum is the episode's
-        reasoning and its length the turn count the metrics average over.
-        """
-        return [
-            len(self._tokenizer(m.thinking, add_special_tokens=False)["input_ids"]) if m.thinking else 0
-            for m in traj.messages
-            if m.role == "assistant"
-        ]
-
     @staticmethod
     def _episode_slices(traj) -> dict[str, str]:
         """The categorical facts an episode's metrics are sliced by: its resolved effort level under
@@ -207,9 +188,10 @@ class RolloutMetricsMixin:
                 slices[str(name)] = value
         return slices
 
-    def _log_rollout_metrics(self, results: list[RolloutResult], mode: str):
+    def _log_rollout_metrics(self, results: list[RolloutResult], mode: str, reasoning_tokens: list[list[int]]):
         """Log per-rollout diagnostics grouped by prefix (``async/*``, ``episode/*``, ``outcome/*``,
-        ``reward/*``). Means are over the gathered-global population; ``results`` is rank-local, gathered here."""
+        ``reward/*``). Means are over the gathered-global population; ``results`` is rank-local, gathered here.
+        ``reasoning_tokens`` is each episode's per-turn count, taken once for the step."""
         # Lightweight, picklable per-episode summary (the full RolloutResult carries a heavy trajectory).
         local = [
             {
@@ -222,10 +204,10 @@ class RolloutMetricsMixin:
                 "error": bool(r.error),
                 "total_reward": r.total_reward,
                 "slices": self._episode_slices(r.trajectory),
-                "reasoning_tokens": sum(self._assistant_turn_reasoning_tokens(r.trajectory)) if r.trajectory else 0,
+                "reasoning_tokens": sum(tokens),
                 "metrics": r.metrics,
             }
-            for r in results
+            for r, tokens in zip(results, reasoning_tokens, strict=True)
         ]
         episodes = gather_object(local)
         if not episodes:
@@ -262,9 +244,9 @@ class RolloutMetricsMixin:
 
         # Components must sum EXACTLY to the reward; a nonzero mean |residue| means a channel bypasses them.
         residues = [
-            abs(e["total_reward"] - sum(v for k, v in e["metrics"].items() if k.startswith("reward/")))
+            abs(e["total_reward"] - sum(v for k, v in e["metrics"].items() if k.startswith(REWARD_COMPONENT_PREFIX)))
             for e in episodes
-            if any(k.startswith("reward/") for k in e["metrics"])
+            if any(k.startswith(REWARD_COMPONENT_PREFIX) for k in e["metrics"])
         ]
         if residues:
             m["reward/composition_residue"].append(_mean(residues))
@@ -309,8 +291,9 @@ class RolloutMetricsMixin:
             )
             logger.warning(
                 f"{truncation_rate:.0%} of this {mode} round's episodes ended truncated, over "
-                f"truncation_alarm_rate={self._truncation_alarm_rate}: the turn cap (max_turns) or a token "
-                f"budget (rollout_max_tokens, the thinking budget) binds, and {in_loss}. Warned again once "
+                f"truncation_alarm_rate={self._truncation_alarm_rate}: the turn cap (max_turns), the episode "
+                f"output budget (rollout_max_episode_tokens) or unrecovered cut turns (rollout_max_tokens) bind, and "
+                f"{in_loss}. Warned again once "
                 f"the rate has dropped back under the threshold."
             )
         self._truncation_alarmed = self._truncation_alarmed | {mode} if alarmed else self._truncation_alarmed - {mode}

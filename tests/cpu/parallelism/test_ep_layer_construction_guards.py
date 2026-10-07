@@ -392,7 +392,7 @@ def test_deepseek_v4_rejects_experts_missing_an_activation_attribute(missing):
     """A default substituted for a missing attribute is a silent numerics change, not a fallback.
 
     ``limit`` is ``config.swiglu_limit`` and clamps both GLU halves of every expert; ``act_fn`` is
-    ``config.hidden_act`` and additionally decides ``_glu_is_silu``, which selects the compiled
+    ``config.hidden_act`` and additionally decides whether ``_fused_glu_mul`` latches the compiled
     SiLU-only combine. Standing a literal in for either — the layout drift a transformers rename
     would cause — trains the model against a different activation than the checkpoint was built
     with, and nothing says so. GptOss reads ``experts.alpha`` / ``experts.limit`` directly for the

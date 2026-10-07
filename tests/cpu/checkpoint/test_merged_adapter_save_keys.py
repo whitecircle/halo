@@ -26,7 +26,7 @@ import pytest
 from peft import LoraConfig, get_peft_model
 from torch import nn
 
-from src.distributed.expert_parallel.saving import _save_key_remap, save_ep_model
+from src.distributed.checkpoint.ep_save import _save_key_remap, save_ep_model
 
 PEFT_PREFIX = "lora_"  # PeftModel.prefix for LoRA; read off the live model in production.
 

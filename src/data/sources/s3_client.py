@@ -1,8 +1,9 @@
 """S3 transport: the boto3 ``S3Client``, small control-file reads, and the default-bucket helpers.
 
-``S3Client`` takes keys relative to a bucket; the module-level ``*_from_s3_uri`` helpers take full
-URIs and build their own client. Dataset trees move through the staged-push protocol described at
-:data:`_STAGING_INFIX` and are served locally through :mod:`src.data.sources.dataset_cache`.
+``S3Client`` takes keys relative to a bucket; the module-level ``load_dataset_from_s3_uri`` /
+``push_dataset_to_s3_uri`` helpers take full URIs and build their own client. Dataset trees move
+through the staged-push protocol described at :data:`_STAGING_INFIX` and are served locally through
+:mod:`src.data.sources.dataset_cache`.
 """
 
 import contextlib
@@ -35,8 +36,8 @@ from src.data.sources.dataset_cache import (
 from src.data.sources.paths import METADATA_FILE, parse_s3_uri
 from src.env import env_int, env_str
 
-# ``src`` pins the root level to WARNING, so without the child level this module's INFO record of
-# what data moved is dropped. Plain logging, not the accelerate adapter: entry points that
+# ``src`` pins the ROOT level to WARNING, so without the child level this module's INFO record of
+# what data moved lands nowhere. Plain logging, not the accelerate adapter: entry points that
 # initialize no accelerate state (the S3 CLI, ``scripts/inference/*``) reach here too.
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
@@ -47,7 +48,6 @@ __all__ = [
     "build_s3_uri",
     "default_bucket",
     "exists",
-    "has_control_json_mirror",
     "load_dataset_from_s3_uri",
     "push_dataset_to_s3_uri",
     "read_control_json_with_cache",
@@ -55,7 +55,6 @@ __all__ = [
 
 # No fallback name: a placeholder would address a real, globally named bucket someone else owns.
 DEFAULT_BUCKET = env_str("HALO_S3_DEFAULT_BUCKET")
-
 
 # The client's connection pool and the threads one multipart transfer takes from it (boto3 takes 10).
 _S3_MAX_POOL_CONNECTIONS = 50
@@ -66,11 +65,11 @@ _S3_TRANSFER_THREADS = 5
 # the default.
 _S3_FOLDER_CONCURRENCY = max(1, env_int("HALO_S3_MAX_FOLDER_CONCURRENCY", 16))
 
-# Staged-push protocol (push_dataset): the tree uploads whole to a dot-prefixed sibling prefix
+# Staged-push protocol (push_dataset): the tree uploads whole to a dot-prefixed SIBLING prefix
 # (outside the destination's anchored listings), is sealed with the sentinel, then promoted with the
 # load gates deleted first and copied last. A complete copy therefore exists at every instant, an
-# interrupted promote leaves the destination unreadable rather than partial, and the sealed tree is
-# what ``load_dataset`` recovers from.
+# interrupted promote leaves the destination loudly unreadable, and the sealed tree is what
+# ``load_dataset`` recovers from.
 _STAGING_INFIX = ".staging-"
 _PUSH_COMPLETE_MARKER = ".push_complete"
 # The staging scan prefix is a plain string prefix, so a sibling dataset name extending this one
@@ -78,8 +77,8 @@ _PUSH_COMPLETE_MARKER = ".push_complete"
 # a sweep from destroying the sibling's only complete copy and a recovery from serving its rows.
 _STAGING_ID_RE = re.compile(r"^[0-9a-f]{8}/")
 
-# The files whose absence makes load_from_disk refuse a dataset directory, which are the promote's
-# ordering gates. dataset_dict.json is the DatasetDict root gate and goes last of all.
+# The files whose absence makes load_from_disk refuse a dataset directory — the promote's ordering
+# gates. dataset_dict.json is the DatasetDict root gate and goes last of all.
 _DATASET_DICT_GATE = "dataset_dict.json"
 _SPLIT_GATE_BASENAME = "state.json"
 
@@ -117,7 +116,7 @@ def _parallel_s3_transfer(items: list, transfer_one: Callable[[Any], int], *, de
 def read_json_from_s3(bucket: str, key: str) -> Any:
     """Read and parse a small JSON control file (``metadata.json``, ``shard_index.json``) from S3.
 
-    ``key`` is the object path within ``bucket``. Uses s3fs on the default credential chain, since a
+    ``key`` is the object path within ``bucket``. Uses s3fs on the default credential chain — a
     single small read needs none of ``S3Client``'s caching/transfer machinery. Raises
     ``FileNotFoundError`` for an absent key (authoritative), other exceptions for an unreachable S3.
     """
@@ -132,19 +131,16 @@ def _control_json_mirror_path(bucket: str, key: str) -> str:
     return os.path.join(HALO_S3_DATASET_CACHE_DIR, "control", f"{s3_cache_key(bucket, key)}.json")
 
 
-def has_control_json_mirror(bucket: str, key: str) -> bool:
-    """Whether a local mirror of this control file exists (a prior run reached it live)."""
-    return os.path.exists(_control_json_mirror_path(bucket, key))
-
-
 def read_control_json_with_cache(bucket: str, key: str) -> Any:
     """Read a small S3 JSON control file, mirroring it locally; serve the mirror when S3 is down.
 
-    Control files (``metadata.json``, ``shard_index.json``) are what training needs from S3 before
-    the dataset bytes, which the completion-marker caches already serve offline. A live read wins and
-    refreshes the mirror. ``FileNotFoundError`` is an authoritative absence: the mirror is dropped and
-    the error propagates. Any other failure serves the mirror with a warning, or re-raises when there
-    is none. The mirror write is temp-file plus atomic ``os.replace``.
+    Control files (``metadata.json``, ``shard_index.json``) are what training needs from S3 *before*
+    the dataset bytes, which the completion-marker caches already serve offline — without this a
+    warm-cache relaunch dies on the first control read during an S3/SSO outage. Live wins and
+    refreshes the mirror. ``FileNotFoundError`` is an authoritative ABSENCE: the mirror is dropped and
+    the error propagates, so a re-push without the control file cannot keep serving a stale mirror.
+    Any other failure serves the mirror with a warning, or re-raises when there is none. The mirror
+    write is temp-file + atomic ``os.replace``, so a crashed writer never leaves a torn one.
     """
     mirror_path = _control_json_mirror_path(bucket, key)
     try:
@@ -162,9 +158,9 @@ def read_control_json_with_cache(bucket: str, key: str) -> Any:
             with open(mirror_path) as f:
                 payload = json.load(f)
         except (OSError, ValueError) as mirror_error:
-            # A torn or corrupt mirror (a disk fault; the atomic publish cannot produce one) counts
-            # as no mirror: drop it so probes stop trusting its existence, and surface the outage,
-            # which is the actionable error.
+            # A torn/corrupt mirror (disk fault — the atomic publish cannot produce one) is NO
+            # mirror: drop it so probes stop trusting its existence, and surface the outage, which
+            # is the actionable error.
             logger.warning(
                 f"Local mirror for s3://{bucket}/{key} at {mirror_path} is unreadable "
                 f"({type(mirror_error).__name__}: {mirror_error}); dropping it."
@@ -177,14 +173,14 @@ def read_control_json_with_cache(bucket: str, key: str) -> Any:
             f"serving the local mirror at {mirror_path}."
         )
         return payload
-    os.makedirs(os.path.dirname(mirror_path), exist_ok=True)
     tmp_path = f"{mirror_path}.tmp-{uuid.uuid4().hex}"
     try:
+        os.makedirs(os.path.dirname(mirror_path), exist_ok=True)
         with open(tmp_path, "w") as f:
             json.dump(payload, f)
         os.replace(tmp_path, mirror_path)
     except OSError as e:
-        # The live payload is in hand, so a full or read-only cache volume must not fail the read.
+        # The live payload is in hand — a full/read-only cache volume must not fail the read itself.
         logger.warning(f"Could not mirror control file s3://{bucket}/{key} to {mirror_path}: {e}")
         with contextlib.suppress(OSError):
             os.unlink(tmp_path)
@@ -265,12 +261,12 @@ class S3Client:
         return f"s3://{self.bucket}/{full_key}"
 
     def object_exists(self, key: str, subfolder: str | None = None) -> bool:
-        """Whether an object exists at exactly this key.
+        """Whether an object exists at EXACTLY this key.
 
         Unlike :meth:`exists`, a folder-like prefix with children but no object of its own is False.
         Callers that must not treat a prefix as a deletable object need this distinction: S3's
-        DeleteObject on a prefix succeeds as a no-op, so acting on :meth:`exists` would report
-        success having done nothing.
+        DeleteObject on a prefix succeeds as a no-op, so acting on :meth:`exists` reports success
+        having done nothing.
         """
         full_key = self._get_full_key(key, subfolder)
         try:
@@ -284,9 +280,10 @@ class S3Client:
     def exists(self, key: str, subfolder: str | None = None) -> bool:
         """Check if key exists as an exact object or as a (folder-like) prefix.
 
-        Only an authoritative absence of the key reads as False: expired credentials, a 403 or a
-        throttle answer "unknown", and reporting that as absence would make a push overwrite-check
-        pass. A missing bucket is reported as such rather than as a missing key.
+        Only an authoritative absence of the KEY reads as False: expired credentials, a 403 or a
+        throttle answer "unknown", and reporting that as absence makes a push overwrite-check pass and
+        a delete claim there was nothing there. A missing BUCKET is a misspelled bucket or a wrong
+        region, and says so rather than sending every caller after the key.
         """
         if self.object_exists(key, subfolder):
             return True
@@ -362,8 +359,7 @@ class S3Client:
         full_key = self._get_full_key(key, subfolder)
 
         if recursive:
-            # The trailing slash anchors the prefix to children: without it "run1" also matches
-            # "run10/...".
+            # The trailing slash anchors the prefix to children: without it "run1" also matches "run10/...".
             prefix = full_key.rstrip("/") + "/" if full_key else full_key
             objects_to_delete = []
             paginator = self._client.get_paginator("list_objects_v2")
@@ -377,8 +373,8 @@ class S3Client:
                     batch = objects_to_delete[i : i + 1000]
                     self._client.delete_objects(Bucket=self.bucket, Delete={"Objects": batch})
                 logger.info(f"Deleted {len(objects_to_delete)} objects from s3://{self.bucket}/{full_key}")
-            # False when the prefix matched nothing, so a caller reporting success off this cannot
-            # claim data was deleted while it is still there.
+            # False when the prefix matched nothing: a caller that reports success off this would
+            # tell the user their data is gone while it is still there.
             return bool(objects_to_delete)
         else:
             try:
@@ -392,8 +388,8 @@ class S3Client:
     def content_entries(self, full_key: str) -> list[tuple[str, str, int]]:
         """(key, ETag, size) of every object under the prefix, raising on any listing failure.
 
-        The raising counterpart of :meth:`content_fingerprint`: both an unreachable S3 and a prefix
-        that genuinely holds nothing fingerprint as ``None``, so a caller that must tell those apart
+        The raising half of :meth:`content_fingerprint`: both an unreachable S3 and a prefix that
+        genuinely holds nothing fingerprint as ``None``, so a caller that must tell those apart
         lists here instead.
         """
         return [
@@ -405,12 +401,12 @@ class S3Client:
         """Best-effort content identity of every object under the prefix (aggregate ETag fingerprint).
 
         None when S3 is unreachable (no credentials, expired SSO, network outage) or the prefix lists
-        empty. Callers treat None as unvalidatable and keep serving the local cache, so offline cache
-        use keeps working.
+        empty — callers treat None as "cannot validate" and keep serving the local cache, so offline
+        cache use keeps working.
         """
         try:
             return compute_etag_fingerprint(self.content_entries(full_key))
-        except Exception as e:  # any botocore/network error: cannot validate, keep the cache usable
+        except Exception as e:  # any botocore/network error → cannot validate, keep the cache usable
             logger.info(
                 f"S3 unreachable for cache validation of s3://{self.bucket}/{full_key} "
                 f"({type(e).__name__}: {e}); serving the local cache as-is."
@@ -423,9 +419,9 @@ class S3Client:
         return f"{parent}/{_STAGING_INFIX}{base}-" if parent else f"{_STAGING_INFIX}{base}-"
 
     def _new_staging_key(self, full_key: str) -> str:
-        """A fresh staging prefix for this dataset, unique per push and never reused: the previous
-        push's sealed staging tree may be the only complete copy while the destination is torn, so it
-        must not be overwritten before a new complete copy exists."""
+        """A fresh unique staging prefix for this dataset. Unique per push, never reused: the
+        previous push's sealed staging tree may be the only complete copy while the destination is
+        torn, so it must never be overwritten before a new complete copy exists."""
         return f"{self._staging_scan_prefix(full_key)}{uuid.uuid4().hex[:8]}"
 
     def _list_prefix_keys(self, prefix: str) -> list[dict[str, Any]]:
@@ -437,8 +433,8 @@ class S3Client:
         return entries
 
     def _own_staging_entries(self, full_key: str) -> list[dict[str, Any]]:
-        """Objects of this dataset's staging trees only, with the remainder anchored to the 8-hex
-        staging id (see ``_STAGING_ID_RE``) so a hyphen-sibling dataset's trees never match."""
+        """Objects of THIS dataset's staging trees only — remainder anchored to the 8-hex staging id
+        (see ``_STAGING_ID_RE``), never a hyphen-sibling dataset's trees."""
         scan_prefix = self._staging_scan_prefix(full_key)
         return [
             obj for obj in self._list_prefix_keys(scan_prefix) if _STAGING_ID_RE.match(obj["Key"][len(scan_prefix) :])
@@ -456,10 +452,10 @@ class S3Client:
         return newest["Key"][: -len(f"/{_PUSH_COMPLETE_MARKER}")]
 
     def _delete_staging_trees(self, full_key: str) -> None:
-        """Remove every staging tree of this dataset, once a promote has completed and they are unneeded.
+        """Remove every staging tree of this dataset, once a promote has completed and they are garbage.
 
         Deletion follows lexicographic listing order, so the dot-prefixed sentinel goes before its
-        tree's data keys: a crash mid-delete leaves the tree unsealed and unpickable by recovery.
+        tree's data keys: a crash mid-delete leaves the tree UNSEALED and unpickable by recovery.
         """
         keys = [{"Key": obj["Key"]} for obj in self._own_staging_entries(full_key)]
         for i in range(0, len(keys), 1000):
@@ -471,9 +467,10 @@ class S3Client:
         """Server-side copy of a sealed staging tree onto the destination, load-gates last.
 
         Ordering: the destination's existing gate files are deleted first, the bulk copies in
-        parallel, per-split ``state.json`` files after it, and ``dataset_dict.json`` last, so the
-        destination is never a readable old/new mixture. Stale objects the new tree lacks are swept
-        only after the gates land.
+        parallel, per-split ``state.json`` files after it, ``dataset_dict.json`` last — so at every
+        instant the destination is either the old complete tree, loudly unreadable (a gate missing),
+        or the new complete tree; never a readable old/new mixture. Stale objects the new tree lacks
+        are swept only after the gates landed.
         """
         staging_prefix = f"{staging_key}/"
         new_files: dict[str, int] = {}
@@ -483,8 +480,8 @@ class S3Client:
                 new_files[rel] = obj["Size"]
         split_gates = sorted(rel for rel in new_files if os.path.basename(rel) == _SPLIT_GATE_BASENAME)
         if not split_gates:
-            # save_to_disk not writing state.json means the layout contract changed; promoting would
-            # leave a tree with no gate ordering at all.
+            # save_to_disk not writing state.json means the layout contract changed under us; promoting
+            # would leave a tree with no gate ordering at all.
             raise RuntimeError(
                 f"Staged dataset at s3://{self.bucket}/{staging_key} has no {_SPLIT_GATE_BASENAME}; "
                 f"refusing to promote an ungated tree."
@@ -512,7 +509,7 @@ class S3Client:
             desc=f"Promoting {full_key}",
             show_progress=False,
         )
-        for rel in split_gates:  # sequential and gate-ordered; the parallel bulk gives no ordering
+        for rel in split_gates:  # sequential and gate-ordered — the parallel bulk gives no ordering
             _copy_one(rel)
         if _DATASET_DICT_GATE in gate_set:
             _copy_one(_DATASET_DICT_GATE)
@@ -530,11 +527,12 @@ class S3Client:
     ) -> str:
         """Save a Dataset/DatasetDict to S3 through the staged-push protocol, returning the S3 URI.
 
-        The destination is never deleted first: the generation CLIs push their accumulated results
-        through here every checkpoint interval. A crash anywhere in this protocol leaves a complete
-        copy either at the destination or in the sealed staging tree :meth:`load_dataset` falls back
-        to. Raises FileExistsError for an existing dataset unless ``overwrite=True``. One writer per
-        destination at a time; concurrent pushers interleave promotes.
+        Never delete-destination-first: the generation CLIs push their accumulated results through
+        here every checkpoint interval, and a crash between a prefix delete and the re-upload would
+        erase all of it. A crash anywhere in this protocol instead leaves a complete copy either at
+        the destination or in the sealed staging tree :meth:`load_dataset` falls back to. Raises
+        FileExistsError for an existing dataset unless ``overwrite=True``. One writer per destination
+        at a time — concurrent pushers interleave promotes.
         """
         full_key = self._get_full_key(key, subfolder)
         s3_uri = f"s3://{self.bucket}/{full_key}"
@@ -562,8 +560,8 @@ class S3Client:
     ) -> Dataset | DatasetDict | None:
         """Torn-destination fallback: the newest sealed staging tree an interrupted push left behind.
 
-        None when there is none, when the listing itself fails (offline, where the original error is
-        the diagnostic one), or when this load already targets a staging tree (one recovery level).
+        None when there is none, when the listing itself fails (offline — the original error is the
+        diagnostic one), or when this load already targets a staging tree (one recovery level).
         """
         if _STAGING_INFIX in os.path.basename(full_key):
             return None
@@ -606,15 +604,14 @@ class S3Client:
 
         os.makedirs(cache_dir, exist_ok=True)
 
-        # Probe S3 only when a fetch would follow, so a complete cache survives an outage or an
-        # expired SSO session.
+        # Probe S3 only when we would really fetch, so a complete cache survives an outage / expired SSO.
         cache_complete = use_cache and os.path.exists(complete_marker)
         if not cache_complete:
             try:
                 found = self.exists(key, subfolder)
             except Exception as e:
-                # A cold cache with unreachable S3 is unloadable either way, but the raw
-                # NoCredentialsError names neither the dataset nor the remedy.
+                # A cold cache with unreachable S3 is unloadable either way — but the raw
+                # NoCredentialsError names neither the dataset nor the way out.
                 raise FileNotFoundError(
                     f"Dataset {s3_uri} is not in the local cache ({cache_path}) and S3 is unreachable "
                     f"({type(e).__name__}: {e}). Restore S3 access (see agent-docs/infrastructure/aws-auth.md) "
@@ -623,7 +620,7 @@ class S3Client:
             if not found:
                 raise FileNotFoundError(f"Dataset not found: {s3_uri}")
 
-        # Staleness probe outside the lock (network I/O); None (unreachable or empty) skips validation.
+        # Staleness probe outside the lock (network I/O); None (unreachable / empty) skips validation.
         live_fingerprint = self.content_fingerprint(full_key) if cache_complete else None
 
         def _fetch(tmp_path: str) -> None:
@@ -679,10 +676,10 @@ class S3Client:
     ) -> str:
         """Upload a local directory tree to S3, returning the S3 URI.
 
-        An existing prefix raises FileExistsError unless ``overwrite=True``. Overwrite does not clear
-        the prefix up front, which would leave no copy anywhere until the first byte lands. The
-        top-level ``metadata.json`` (the preprocessed-dataset marker) is deleted first and re-uploaded
-        last, so a mid-failure leaves a prefix the preprocessed probe rejects.
+        An existing prefix raises FileExistsError unless ``overwrite=True``. Overwrite never clears
+        the prefix up front — that leaves no copy anywhere until the first byte lands. The top-level
+        ``metadata.json`` (the preprocessed-dataset marker) is deleted FIRST and re-uploaded LAST, so
+        a mid-failure leaves a prefix the preprocessed probe rejects rather than one it accepts.
         """
         local_path = os.path.abspath(local_path)
         if not os.path.isdir(local_path):
@@ -696,8 +693,8 @@ class S3Client:
             if not overwrite:
                 raise FileExistsError(f"Folder already exists: {s3_uri}. Use overwrite=True to replace.")
             logger.info(f"Overwriting existing folder at {s3_uri}")
-            # Uncapped: the stale sweep below deletes what this set does not contain, so a listing
-            # truncated at any max_keys would keep objects it never saw.
+            # Uncapped: the stale sweep below deletes what this set does NOT contain, so a listing
+            # truncated at any max_keys would silently re-upload-and-keep objects it never saw.
             existing_keys = {entry["Key"] for entry in self._list_prefix_keys(f"{full_key}/")}
 
         files_to_upload = []
@@ -724,11 +721,11 @@ class S3Client:
             return file_size
 
         _parallel_s3_transfer(bulk_items, _upload_one, desc=f"Uploading to {key}", show_progress=show_progress)
-        for item in marker_items:  # sequential and last; the parallel bulk gives no ordering
+        for item in marker_items:  # sequential and last — the parallel bulk gives no ordering
             _upload_one(item)
 
         # Only after the complete upload: a stale shard numbering left behind would otherwise ride
-        # into the new dataset, since an index-less reader globs the prefix.
+        # into the new dataset (an index-less reader globs the prefix).
         stale = sorted(existing_keys - {f"{full_key}/{rel}" for _, rel, _ in files_to_upload})
         for stale_key in stale:
             self._client.delete_object(Bucket=self.bucket, Key=stale_key)
@@ -784,8 +781,7 @@ class S3Client:
                 files_to_download.append((s3_key, relative_path, file_size))
                 total_size += file_size
 
-        # Pre-create the tree single-threaded so the workers do not race on os.makedirs of a shared
-        # parent.
+        # Pre-create the tree single-threaded so the workers never race on os.makedirs of a shared parent.
         for _s3_key, relative_path, _size in files_to_download:
             os.makedirs(os.path.dirname(os.path.join(local_path, relative_path)), exist_ok=True)
 

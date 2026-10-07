@@ -559,7 +559,7 @@ def test_closure_chat_template_changes_cache_filename():
 
     Regression: --chat_template/--force_chat_template overrides tokenizer.chat_template in place;
     the closure fingerprint keys the tokenizer by identity, so without folding in the template two
-    runs over the same dataset+model differing only in the template silently shared a cache file.
+    runs over the same dataset+model differing only in the template would silently share a cache file.
     """
     ds = _StubDataset()
     tok_a = _StubTokenizer("modelA", 201088)

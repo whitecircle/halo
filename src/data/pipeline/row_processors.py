@@ -1,8 +1,9 @@
 """Row-processor factories for the dataset maps: the per-row chat render, tokenization and VLM reshape.
 
-Each ``create_*`` returns the closure a coordinated map in :mod:`src.data.pipeline.processing` runs
-over the corpus. Also defines the Arrow-type-stable rejection sentinel those closures emit and the
-predicate that drops it; nothing here imports the coordinated-map module.
+Each ``create_*`` returns the closure a coordinated map in
+:mod:`src.data.pipeline.processing` runs over the corpus. Also the home of the Arrow-type-stable
+rejection sentinel those closures emit and of the predicate that drops it, so the row shape and the
+map machinery stay separable: nothing here imports the coordinated-map module.
 """
 
 import json
@@ -44,10 +45,10 @@ def _rejection_sentinel(sample_output: dict[str, Any] | None = None) -> dict[str
     """An Arrow-type-stable rejection sentinel row for tokenization maps.
 
     Every key holds a one-element list of the real element type, never ``None`` or ``[]``: a worker
-    whose first writer batch is entirely rejected would infer a ``null`` column and then fail casting
-    the real ``list<int64>`` batches. ``attention_mask`` is ``[0]``, which a real row never is, and is
-    what :func:`is_valid_example` drops these on. ``sample_output`` supplies the key set and element
-    types; ``None`` yields the minimal shape.
+    whose first writer batch is entirely rejected would infer a ``null`` column and crash casting the
+    real ``list<int64>`` batches. ``attention_mask`` is ``[0]`` — a real row always attends to at least
+    one token — which is what :func:`is_valid_example` drops these on. ``sample_output`` supplies the
+    key set and element types; ``None`` yields the minimal shape.
     """
     if sample_output is None:
         return {"input_ids": [0], "attention_mask": [0]}
@@ -64,11 +65,11 @@ def create_tokenizer_none_example(tokenizer, **tokenizer_kwargs) -> dict[str, li
 def _is_content_bearing(value: Any) -> bool:
     """Whether a filter-field value carries real content.
 
-    ``None``, blank strings and empty lists do not (an empty or whitespace-only prompt is invalid); a
-    message list does only when at least one message content is non-blank, which is the type-stable
-    rejection shape for conversational prompt columns. Message-shaped dicts are recognized by a
-    ``role``/``content`` key, so multimodal content-part lists (``type``/``image`` dicts) and every
-    other value (token-id lists, scalars, ...) count as content-bearing.
+    ``None``, blank strings, and empty lists do not (an empty or whitespace-only prompt is genuinely
+    invalid); a message list does only when at least one message content is non-blank — the
+    type-stable rejection shape for conversational prompt columns. Message-shaped dicts are
+    recognized by a ``role``/``content`` key, so multimodal content-part lists (``type``/``image``
+    dicts) and every other value (token-id lists, scalars, …) count as content-bearing.
     """
     if value is None:
         return False
@@ -86,8 +87,8 @@ def is_valid_example(row: dict[str, Any], filter_field: str = "input_ids") -> bo
     """Keep-predicate shared by every post-processing filter: True iff ``row`` is a real example,
     not a rejection sentinel.
 
-    Sentinels come in two shapes: a content-free ``filter_field`` (the rejection rows the GRPO
-    scripts emit, blank rather than ``None`` so an all-rejected first writer batch cannot infer a
+    Sentinels come in two shapes — a content-free ``filter_field`` (the rejection rows the GRPO
+    scripts emit; blank rather than ``None``, so an all-rejected first writer batch cannot infer a
     ``null`` column), or the typed sentinel from :func:`create_tokenizer_none_example`, recognized by
     an all-zero ``attention_mask``. Rows without that column are judged by ``filter_field`` alone.
     """
@@ -106,17 +107,16 @@ def apply_chat_template_to_conversations(
     add_generation_prompt: bool = False,
     interleaved_thinking: bool = False,
     tools_field: str | None = None,
-    drop_last_turn_on_generation: bool = False,
 ) -> str:
     """Chat-template the conversation at ``row[conversation_field]``, returning the formatted string.
 
-    Handles row extraction; :func:`~src.data.pipeline.rendered.render_conversation` performs the
-    render. ``drop_last_turn_on_generation`` renders the conversation without its final message when
-    ``add_generation_prompt`` is set, for the generation-eval path where the row's trailing assistant
-    turn is the reference answer to be regenerated.
+    The row-extraction half of :func:`~src.data.pipeline.rendered.render_conversation`, which
+    owns the render itself. ``add_generation_prompt`` renders the conversation WITHOUT its final
+    message — the generation-eval path, where the row's trailing assistant turn is the reference
+    answer to be regenerated.
     """
     conversation = maybe_parse_json(row[conversation_field])
-    if add_generation_prompt and drop_last_turn_on_generation:
+    if add_generation_prompt:
         conversation = conversation[:-1]
 
     return render_conversation(
@@ -142,8 +142,8 @@ def prepare_generative_row(row, tokenizer, max_length, tools_field=None):
         **chat_template_kwargs(row, interleaved_thinking=False, tools_field=tools_field),
     )
     # for_generation: specials apply exactly once and no trailing terminator ends the prompt early.
-    # truncation follows the cap: an unset cap means no cap, rather than tokenizer.model_max_length,
-    # which is what HF resolves `truncation=True, max_length=None` to.
+    # truncation follows the cap: an unset one means "no cap", not "cap at tokenizer.model_max_length"
+    # (which is what HF resolves `truncation=True, max_length=None` to).
     return tokenize_rendered(
         tokenizer,
         constructed_prompt,
@@ -183,7 +183,6 @@ def create_llm_processor(
             add_generation_prompt=add_generation_prompt,
             interleaved_thinking=interleaved_thinking,
             tools_field=tools_field,
-            drop_last_turn_on_generation=True,
         )
 
         # Generation prompts must not end with a tokenizer-appended turn terminator (Zaya-style).
@@ -195,7 +194,7 @@ def create_llm_processor(
 
         if not use_padding:
             # Already the final form: the row fits the budget, so `truncation=True` would cut nothing
-            # and padding is off, leaving nothing for a re-tokenization to change.
+            # and padding is off — re-tokenizing would only repeat the work.
             return tokenized
 
         return tokenize_rendered(
@@ -217,12 +216,12 @@ def create_text_processor(
     append_eos: bool = True,
     truncate: bool = True,
 ) -> Callable[[dict[str, Any]], dict[str, Any]]:
-    """Build a row processor for raw-text (pretraining) data, with no chat template.
+    """Build a row processor for RAW-TEXT (pretraining) data — no chat template.
 
     Each document gets a trailing EOS (``append_eos``) so packing preserves boundaries. Set
-    ``truncate=False`` when packing so the packing strategy decides what happens past max_length:
-    ``bfd_split`` keeps the overflow, ``bfd`` discards it. Empty or missing text yields the typed
-    rejection sentinel, dropped downstream by :func:`is_valid_example`.
+    ``truncate=False`` when packing so the packing strategy owns the overflow past max_length —
+    ``bfd_split`` keeps it, ``bfd`` discards it. Empty/missing text yields the typed rejection
+    sentinel (dropped downstream by :func:`is_valid_example`).
     """
     eos_id = tokenizer.eos_token_id
 
@@ -258,7 +257,7 @@ def normalize_vlm_conversation(conversation: list[dict[str, Any]], images: Any =
     for turn in conversation:
         if "role" in turn:
             content = turn["content"]
-            if isinstance(content, list):  # copy part dicts so image fill-in does not mutate the source row
+            if isinstance(content, list):  # copy part dicts so image fill-in never mutates the source row
                 content = [dict(part) for part in content]
             messages.append({"role": turn["role"], "content": content})
         elif "user" in turn:
@@ -274,7 +273,7 @@ def normalize_vlm_conversation(conversation: list[dict[str, Any]], images: Any =
     if not image_list:
         return messages
 
-    # Placeholders pair with the images column by order (TRL): fill in place rather than inject.
+    # Placeholders pair with the images column by order (TRL): fill in place, never inject on top.
     placeholders = [
         part
         for message in messages
@@ -308,16 +307,13 @@ def build_vlm_history(
     *,
     system_prompt: str | None = None,
     model_supports_system_role: bool = True,
-    drop_last_turn: bool = False,
 ) -> tuple[list[dict[str, Any]], list[Image.Image]]:
-    """One raw dataset row to the placeholder history and PIL images every VLM render takes.
+    """One raw dataset row → the placeholder history and PIL images every VLM render takes.
 
-    The pre-render step the runtime row map and the offline tokenizer share: JSON-string parse,
-    hub-shape normalization plus ``images`` column merge, the optional generation-prompt slice (taken
-    after normalization, since otherwise a paired ``{user, assistant}`` turn drops whole) and image
-    extraction. Emptiness is the caller's policy, so an empty conversation passes through as an empty
-    history; a ``None`` or unparseable JSON string raises, being a malformed column rather than an
-    empty row.
+    The pre-render half the runtime row map and the offline tokenizer share: JSON-string parse,
+    hub-shape normalization plus ``images`` column merge, and image extraction. Emptiness is the
+    caller's policy, so an empty conversation passes through as an empty history; a ``None`` or
+    unparseable JSON string still raises, being a malformed column rather than an empty row.
     """
     conversation = maybe_parse_json(raw_conversation)
     if conversation is None or isinstance(conversation, str):
@@ -325,12 +321,8 @@ def build_vlm_history(
             f"The conversation column holds a string that is not a valid JSON conversation: {conversation}"
         )
 
-    conversation = normalize_vlm_conversation(conversation, images)
-    if drop_last_turn:
-        conversation = conversation[:-1]
-
     return process_vlm_conversation(
-        conversation,
+        normalize_vlm_conversation(conversation, images),
         system_prompt=system_prompt,
         model_supports_system_role=model_supports_system_role,
     )
@@ -340,17 +332,16 @@ def create_vlm_processor(
     conversation_field: str = "messages",
     system_prompt: str | None = None,
     model_supports_system_role: bool = True,
-    add_generation_prompt: bool = False,
     tools_field: str | None = None,
     images_field: str | None = None,
 ) -> Callable[[dict[str, Any]], dict[str, Any]]:
     """Build a VLM row processor: extract images and reshape the conversation into history.
 
-    Takes no tokenizer: this map only reshapes the row and the render runs later in
-    ``VLMDataCollator``, so the output is tokenizer-independent and the map's cache key must not
-    claim otherwise. Nothing downstream truncates; over-length rows raise at collation, so pre-filter
-    via ``prepare_vlm_dataset`` or preprocess offline. ``images_field`` names a top-level image
-    column merged into the conversation via :func:`normalize_vlm_conversation`.
+    Takes no tokenizer: this map only reshapes the row, and the render that needs one runs later in
+    ``VLMDataCollator`` — so the output is tokenizer-independent and the map's cache key must not
+    pretend otherwise. No truncation anywhere downstream: over-length rows fail loud at collation
+    (pre-filter via ``prepare_vlm_dataset`` or preprocess offline). ``images_field`` names a
+    top-level image column merged into the conversation via :func:`normalize_vlm_conversation`.
     """
 
     def process_row(row: dict[str, Any]) -> dict[str, Any]:
@@ -359,7 +350,6 @@ def create_vlm_processor(
             row.get(images_field) if images_field else None,
             system_prompt=system_prompt,
             model_supports_system_role=model_supports_system_role,
-            drop_last_turn=add_generation_prompt,
         )
 
         # JSON keeps the column str|None; native list-of-dicts risks Arrow schema drift across rows.

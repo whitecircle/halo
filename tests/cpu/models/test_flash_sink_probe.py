@@ -149,8 +149,8 @@ def warmed(monkeypatch):
 
 
 def test_the_warmup_compiles_both_entry_points(warmed):
-    """Only the dense kernel was warmed, so the first packed step JIT-compiled the varlen one
-    mid-forward — one rank stalling ~10s while its peers ran ahead into the next collective."""
+    """Warming only the dense kernel leaves the varlen one to JIT-compile mid-forward on the first
+    packed step — one rank stalls ~10s while its peers run ahead into the next collective."""
     warmup_fa4_kernels(_fa4_model(), dtype=torch.bfloat16, device=torch.device("cpu"))
     assert [call["entry"] for call in warmed.calls] == ["dense", "varlen"]
 

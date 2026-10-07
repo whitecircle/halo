@@ -3,12 +3,12 @@
 
 ``convert_to_bf16 --peft --merge_adapter`` and ``merge_peft_adapters`` both fold a saved adapter into
 its base through ``merge_adapter_into_base``. Every gate in front of that fold answers a failure that
-is silent without it — a per-rank EP/TP directory whose real expert keys read as MISSING and get
+is silent without it — a per-rank EP directory whose real expert keys read as MISSING and get
 randomly initialized, an ``--output_dir`` aimed at an input whose weight files the save then deletes,
 a native expert-LoRA adapter whose deltas ``merge_and_unload`` drops — and each is only worth having
 if it runs BEFORE the base model is loaded and the output directory created. The base directory is
-re-checked separately because under a merge the WEIGHTS come from the base, so the adapter-side gates
-covered the wrong directory.
+re-checked separately because under a merge the WEIGHTS come from the base, so the adapter-side gates alone
+would cover the wrong directory.
 
 One sequence serves both tools, and its gates (``adapter_input_gates``) also front the unmerged
 ``convert_to_bf16 --peft`` re-save, whose adapter a later merge reads. These assertions pin that

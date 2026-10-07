@@ -120,10 +120,10 @@ def test_jagged_backward_correctness():
 
 def test_swiglu_moe_forward_backward():
     """Test the full MoE FFN: gate_proj, up_proj, down_proj with grouped_mm,
-    matching the compute path in ep_moe_layer.py (_fused_glu_experts_gmm)."""
+    matching the compute path of EPMoELayerBase._separate_glu_experts_gmm."""
     G = N_ROUTED_EXPERTS
     M = 16
-    # Weights in matmul convention [E, K, N] as used in ep_moe_layer.py
+    # Weights in matmul convention [E, K, N], as the EP MoE layers store them
     gate_proj = torch.randn(G, K, N, dtype=torch.bfloat16, device=device)
     up_proj = torch.randn(G, K, N, dtype=torch.bfloat16, device=device)
     down_proj = torch.randn(G, N, K, dtype=torch.bfloat16, device=device)
@@ -141,11 +141,11 @@ def test_swiglu_moe_forward_backward():
 
 
 class MoEFFN(nn.Module):
-    """Mini MoE FFN using grouped_mm, matching ep_moe_layer compute path."""
+    """Mini MoE FFN using grouped_mm, matching the EP MoE layers' compute path."""
 
     def __init__(self, num_experts, hidden_size, intermediate_size):
         super().__init__()
-        # Weights in matmul convention [E, K, N] like ep_moe_layer
+        # Weights stored [E, out, in]; forward transposes them to the [E, K, N] matmul convention
         self.gate_proj = nn.Parameter(
             torch.randn(num_experts, intermediate_size, hidden_size, dtype=torch.bfloat16) * 0.02
         )

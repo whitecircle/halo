@@ -53,6 +53,7 @@ MAIN_FIRST_MANAGERS = frozenset({"main_process_first", "local_main_process_first
 COLLECTIVE_CALLEES = frozenset(
     {
         "coordinated_dataset_operation",
+        "run_load_rank_first",
         "coordinated_map",
         "coordinated_filter",
         "process_dataset_with_map_and_filter",
@@ -163,7 +164,7 @@ def find_collective_in_main_first(*roots: str) -> list[str]:
 
 
 def test_no_collective_inside_a_main_first_block():
-    """The regression detector: re-adding the wrapper around SMPO's dataset prep fails here."""
+    """The regression detector: a main-first wrapper around SMPO's dataset prep fails here."""
     offenders = find_collective_in_main_first(*(os.path.join(REPO_ROOT, name) for name in SCANNED_ROOTS))
 
     assert not offenders, (

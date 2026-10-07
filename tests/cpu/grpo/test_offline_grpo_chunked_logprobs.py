@@ -152,7 +152,6 @@ _TOKENIZE_KWARGS = {
     "max_completion_length": None,
     "advantage_method": "z_norm",
     "best_completion_emphasis": 0.0,
-    "is_encoder_decoder": False,
 }
 
 

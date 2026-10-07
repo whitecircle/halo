@@ -77,11 +77,6 @@ def _without(env_config: dict, *exclude: str) -> dict:
     return {k: v for k, v in env_config.items() if k not in exclude}
 
 
-def _native_env(tool_registry, env_config: dict):
-    """Create a NativeToolUseEnvironment with the full env config forwarded."""
-    return NativeToolUseEnvironment(tool_registry=tool_registry, **env_config)
-
-
 def _react_env(name: str, create: Callable[..., Any], env_config: dict):
     """Create a ReAct preset, refusing a configured ``system_prompt``: the preset hardcodes the prompt
     that states the Thought/Action/Final Answer format its parser reads, so the value would be dropped."""
@@ -105,16 +100,19 @@ def _register_builtins():
 
     register_environment(
         "native_math",
-        lambda c: _native_env(
-            NativeToolRegistry.combine(create_native_math_tools(), create_native_python_tools()),
-            c,
+        lambda c: NativeToolUseEnvironment(
+            tool_registry=NativeToolRegistry.combine(create_native_math_tools(), create_native_python_tools()), **c
         ),
     )
     register_environment(
         "native_coding",
-        lambda c: _native_env(create_native_code_tools(language="python", tool_name="python_repl"), c),
+        lambda c: NativeToolUseEnvironment(
+            tool_registry=create_native_code_tools(language="python", tool_name="python_repl"), **c
+        ),
     )
-    register_environment("native_combined", lambda c: _native_env(create_all_native_tools(), c))
+    register_environment(
+        "native_combined", lambda c: NativeToolUseEnvironment(tool_registry=create_all_native_tools(), **c)
+    )
 
     # No default for mcp_server here; the factory supplies it, since an sse config names no preset.
     register_environment(

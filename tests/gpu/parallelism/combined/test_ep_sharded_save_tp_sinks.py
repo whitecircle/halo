@@ -32,7 +32,7 @@ from safetensors.torch import load_file
 from torch.distributed.device_mesh import init_device_mesh
 from transformers import GptOssConfig, GptOssForCausalLM
 
-from src.distributed.expert_parallel.saving import save_ep_model
+from src.distributed.checkpoint.ep_save import save_ep_model
 from src.distributed.tensor_parallel.parallelize_attention import shard_sinks_param
 from tests.common.distributed import shared_scratch_dir
 from tests.common.harness import gpu_test_main

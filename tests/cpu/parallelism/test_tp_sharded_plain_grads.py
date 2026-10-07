@@ -60,8 +60,13 @@ class _Model(nn.Module):
 def _trainer(model: nn.Module) -> SimpleNamespace:
     trainer = SimpleNamespace(
         _top_level_model=lambda: model,
-        _get_tp_process_group=lambda: "tp-group",
+        parallel_dims=SimpleNamespace(tp_group=lambda: "tp-group"),
         _sharded_grad_bucket=DistributedTrainerMixin._sharded_grad_bucket,
+        # A TP run: the mesh is present (its groups are the stubbed reduce below), no expert shards.
+        _device_mesh=object(),
+        _fsdp_wrapped=False,
+        _ep_config=None,
+        _get_sharded_expert_param_ids=lambda: set(),
         # The PP scope the norm path reads: None on every non-PP run (the stage IS the world, and
         # there is no chain to reduce over), which is what this stub models.
         _pp_stage_group=None,
@@ -162,6 +167,7 @@ def test_sharded_sinks_are_excluded_from_the_tp_average(monkeypatch):
 
     reduced: dict[object, list[torch.Tensor]] = {}
     monkeypatch.setattr(dist, "get_world_size", lambda group=None: TP_SIZE)
+    monkeypatch.setattr(dist, "all_reduce", lambda tensor, op=None, group=None: None)  # every grad is present
     monkeypatch.setattr(
         grad_sync_module, "reduce_grads_bucketed", lambda grads, **kw: reduced.setdefault(kw["op"], []).extend(grads)
     )
@@ -196,7 +202,7 @@ def test_grad_norm_sums_sharded_sinks_over_the_tp_group(monkeypatch):
     trainer._reduce_shard_norm_buckets = _fake_reduce
 
     params = list(model.parameters())
-    norm = DistributedTrainerMixin._compute_tp_grad_norm(trainer, params)
+    norm = DistributedTrainerMixin._compute_global_grad_norm(trainer, params)
 
     sink_sq = sum(float(p.grad.norm() ** 2) for p in _sink_params(model))
     sink_ids = {id(p) for p in _sink_params(model)}
@@ -217,7 +223,7 @@ def test_grad_norm_unchanged_without_hand_sharded_params(monkeypatch):
     trainer._reduce_shard_norm_buckets = lambda tp1d_sq, tp2d_sq, dp_sq: tp1d_sq + tp2d_sq + dp_sq
 
     params = list(model.parameters())
-    norm = DistributedTrainerMixin._compute_tp_grad_norm(trainer, params)
+    norm = DistributedTrainerMixin._compute_global_grad_norm(trainer, params)
     total_sq = sum(float(p.grad.norm() ** 2) for p in params)
     assert norm == pytest.approx(math.sqrt(total_sq))
 

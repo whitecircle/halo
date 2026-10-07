@@ -348,8 +348,8 @@ def test_post_process_glm4():
 
 
 def test_post_process_lfm2_feed_forward_container():
-    """LFM2 MoE: experts live under ``feed_forward`` (regression: the merge once required ``.mlp.``
-    so LFM2 experts passed through unmerged → dropped on reload) and the hub layout is per-expert
+    """LFM2 MoE: experts live under ``feed_forward`` (a merge requiring ``.mlp.``
+    would pass LFM2 experts through unmerged → dropped on reload) and the hub layout is per-expert
     Llama-style names ``experts.{i}.w{1,3,2}.weight`` (w1 = gate, w3 = up, w2 = down) — the split
     order must match the class-declared _PER_EXPERT_UNFUSED_KEYS exactly (a swap has identical
     shapes and corrupts the SwiGLU silently)."""
@@ -548,7 +548,7 @@ def test_full_merge_re_emits_every_tensor_at_its_stored_dtype():
     """The sharded writer already applied ``save_dtype_caster`` (bf16 everywhere except the
     module-tree keep-set: norms, balancing tensors, the family's fp32 pins), so the merge must
     re-emit each tensor exactly as stored. A second, name-only cast has no model tree to derive the
-    pins from and folded them to bf16 — GLM-5 Next's ``A_log``/``dt_bias``, Inkling's short
+    pins from and would fold them to bf16 — GLM-5 Next's ``A_log``/``dt_bias``, Inkling's short
     convolutions, DeepSeek-V4's ``attn_hc`` — breaking merged-from-sharded == gathered on the very
     tensors pinned because bf16 breaks their arithmetic."""
     ep_size = 2
@@ -855,9 +855,9 @@ def _assert_failed_merge_preserves_inputs(monkeypatch, writer_method, failing):
 
 
 def test_delete_input_shards_survives_midstream_write_failure(monkeypatch):
-    """A merge that fails while streaming tensors out must leave every input shard on disk — the
-    pre-streaming code once deleted each shard right after loading it, so a failed save destroyed
-    the only copy of the trained weights."""
+    """A merge that fails while streaming tensors out must leave every input shard on disk — a merge
+    that deleted each shard right after loading it would let a failed save destroy the only copy of
+    the trained weights."""
 
     def exploding_add(self, key, tensor):
         raise OSError("No space left on device")
@@ -893,7 +893,7 @@ def test_delete_input_shards_after_successful_merge():
 def test_expert_suffixes_cover_every_class_declared_root():
     """Every expert-weight root any EP family declares (_EXPERT_WEIGHT_ATTR_ROOTS union) must be
     captured by the merge pattern — a missed root passes expert shards through as 'non-expert'
-    weights and silently corrupts the merged checkpoint. Pre-derivation the hand list missed the
+    weights and silently corrupts the merged checkpoint. A hand list misses roots such as the
     GptOss ETP-layout biases (gate_proj_bias/up_proj_bias)."""
     roots = expert_weight_roots()
     assert roots, "EP layer classes declare no expert-weight roots — the subclass walk is broken"
@@ -985,7 +985,8 @@ def test_merge_refuses_a_checkpoint_that_is_not_ep_sharded(metadata):
 
 
 def test_merge_refuses_to_write_into_its_own_input_dir():
-    """save_sharded_state_dict deletes the ``model*.safetensors`` it does not own, so an in-place
+    """``StageShardWriter.close_as_hf_checkpoint`` deletes the ``model*.safetensors`` it did not
+    write, so an in-place
     merge destroys the source shards — and ``--delete_input_shards`` would then remove the freshly
     written merged ones."""
     with tempfile.TemporaryDirectory() as tmp:
@@ -998,7 +999,7 @@ def test_merge_refuses_to_write_into_its_own_input_dir():
 
 
 def test_the_reader_accepts_exactly_what_the_writer_names():
-    """The per-rank shard filename has ONE home — ``save_ep_model``'s ``ep_shard_filename``.
+    """The per-rank shard filename has ONE home — ``src.checkpoint.format.ep_shard_filename``.
 
     A reader carrying its own copy of the pattern matches nothing after a writer-side rename (an
     empty merge on a full directory), and a loosened copy sweeps in a sibling adapter or a stale

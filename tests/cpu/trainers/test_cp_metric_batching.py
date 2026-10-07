@@ -77,8 +77,8 @@ def _microbatch(seed, rows=2, aux_loss=None, attended=SEQ):
 def _run(ranks, batches, *, drain_every_microbatch):
     """Accumulate ``batches`` on both ranks, draining once at the end or after every micro-batch.
 
-    Draining per micro-batch reproduces exactly what the pre-batching code did (one reduce per
-    quantity per micro-batch, its ratio appended for TRL to average); draining once is the shipped
+    Draining per micro-batch is the unbatched formulation (one reduce per quantity per
+    micro-batch, its ratio appended for TRL to average); draining once is the shipped
     behaviour. Both go through the SAME code, so the comparison cannot drift.
     """
     for batch in batches:

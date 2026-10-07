@@ -15,20 +15,26 @@ import torch
 import torch.distributed as dist
 import torch.nn as nn
 from accelerate import PartialState
+from bitsandbytes.nn import Linear4bit, Params4bit
 from safetensors.torch import save_file
 from torch.distributed.device_mesh import init_device_mesh
 from torch.distributed.tensor import DTensor, Replicate, Shard, distribute_tensor
 from torch.distributed.tensor.placement_types import _StridedShard
-from transformers import AutoConfig, Qwen3Config, Qwen3ForCausalLM
+from transformers import AutoConfig, BitsAndBytesConfig, Qwen3Config, Qwen3ForCausalLM
+from transformers.core_model_loading import Chunk, WeightConverter, WeightRenaming
+from transformers.quantizers.quantizer_bnb_4bit import Bnb4BitHfQuantizer
 
 import src.distributed.context_parallel.loading as cp_loading
+import src.distributed.expert_parallel.master_weights as master_loading
 import src.distributed.filesystem as filesystem
-import src.distributed.loading.master_weights as master_loading
 import src.distributed.loading.model_loading as loading
 from src.distributed.context_parallel.wrapper import patch_model_for_cp
-from src.distributed.expert_parallel.lazy_loader import ExpertFuser
-from src.distributed.loading.precision import fp32_master_param_keys
+from src.distributed.expert_parallel.config import EPConfig
+from src.distributed.expert_parallel.fp32_masters import fp32_master_param_keys
+from src.distributed.expert_parallel.hub_conversion import resolve_loaded_conversion_steps
+from src.distributed.expert_parallel.lazy_loader import ExpertFuser, build_family_key_mapping
 from tests.common.gloo import run_gloo_ranks
+from tests.common.tiny_models import module_with_weight_keys
 
 PartialState()
 
@@ -118,7 +124,7 @@ def _native_tp_rank(rank, source, strict, keep):
             "create_dp_tp_mesh",
             lambda tp_size, dp_size: init_device_mesh("cpu", (tp_size,), mesh_dim_names=("tp",)),
         )
-        pc = SimpleNamespace(tp_size=2, data_parallel_size=1, fp32_non_ep_params=keep)
+        pc = SimpleNamespace(tp_size=2, data_parallel_size=1, fp32_non_ep_params=keep, max_concurrent_loading=None)
         model = loading._load_tp_model(
             source,
             pc,
@@ -313,6 +319,78 @@ def test_fused_master_replay_preserves_live_device_instead_of_staging_device(tmp
     assert model.experts.down_proj.device.type == "cpu"
     assert model.experts.down_proj.dtype == torch.float32
     assert torch.equal(model.experts.down_proj.detach(), expected)
+
+
+def test_eager_fp32_reread_uses_the_loaded_nested_rename_and_its_scope(tmp_path):
+    vision_key = "model.vision_model.q_proj.weight"
+    text_key = "model.language_model.wq_du.weight"
+    disk_vision_key = "model.vision_model.wq_du.weight"
+    model = module_with_weight_keys([vision_key, text_key]).to(torch.bfloat16)
+    model.base_model_prefix = "model"
+    model.config = SimpleNamespace(model_type="qwen3_moe")
+    rename = WeightRenaming(source_patterns=r"^wq_du\.", target_patterns="q_proj.")
+    rename.scope_prefix = "vision_model"
+    model._weight_conversions = [rename]
+    stored = {disk_vision_key: torch.tensor([1.00001]), text_key: torch.tensor([2.00001])}
+    assert all(not torch.equal(value, value.bfloat16().float()) for value in stored.values())
+    save_file(stored, str(tmp_path / "model.safetensors"))
+    state = model.state_dict(keep_vars=True)
+    for key, disk_key in ((vision_key, disk_vision_key), (text_key, text_key)):
+        state[key].data.copy_(stored[disk_key])
+    plain_mapping, _ = build_family_key_mapping(model, list(stored))
+    assert plain_mapping[disk_vision_key] not in state, "the declared lazy family cannot do this nested rename"
+    master_loading.restore_fp32_master_parameters(model, str(tmp_path), EPConfig(ep_size=1), keep_non_ep=True)
+    restored = model.state_dict(keep_vars=True)
+    for key, disk_key in ((vision_key, disk_vision_key), (text_key, text_key)):
+        assert restored[key] is state[key]
+        assert restored[key].dtype == torch.float32 and torch.equal(restored[key], stored[disk_key])
+
+
+@pytest.mark.parametrize("deserialize_first", (False, True))
+def test_prequantized_float_storage_keeps_codes_and_restores_plain_masters(tmp_path, deserialize_first):
+    """The real HF broad deserializer also matches plain weights, which it leaves unchanged.
+
+    Packed floating-storage Params4bit and their quantization statistics come from a real bnb
+    serialization. The streamed master replay must leave them intact without dropping a separate
+    recorded vendor rename or rounding the ordinary master's checkpoint value.
+    """
+    model = module_with_weight_keys(["norm.weight"]).to(torch.bfloat16)
+    model.config = SimpleNamespace(model_type="qwen3")
+    model.quantized = Linear4bit(64, 64, bias=False, quant_storage=torch.bfloat16, quant_type="nf4")
+    model.quantized.weight = Params4bit(
+        torch.randn(64, 64, dtype=torch.bfloat16),
+        requires_grad=False,
+        quant_storage=torch.bfloat16,
+        quant_type="nf4",
+    )
+    model.quantized.to("cpu")
+    packed = model.quantized.weight
+    codes = packed.data.view(torch.uint8).clone()
+    assert packed.bnb_quantized and packed.dtype == torch.bfloat16
+    original = torch.tensor([1.00001])
+    stored = {key: value.clone().contiguous() for key, value in model.quantized.state_dict().items()}
+    assert any("quant_state" in key for key in stored), "the checkpoint must carry prequantized statistics"
+    stored = {f"quantized.{key}": value for key, value in stored.items()}
+    stored["vendor_norm.weight"] = original
+    save_file(stored, str(tmp_path / "model.safetensors"))
+    quantizer = Bnb4BitHfQuantizer(BitsAndBytesConfig(load_in_4bit=True), pre_quantized=True)
+    (deserialize,) = quantizer.get_weight_conversions()
+    rename = WeightRenaming(source_patterns=r"^vendor_norm\.", target_patterns="norm.")
+    model._weight_conversions = [deserialize, rename] if deserialize_first else [rename, deserialize]
+    model.norm.weight.data.copy_(original)
+    assert not torch.equal(model.norm.weight.float(), original)
+    # The actual op's identity branch is the premise for skipping only this storage conversion.
+    assert deserialize.operations[0].convert({"weight": original})["weight"] is original
+
+    master_loading.restore_fp32_master_parameters(model, str(tmp_path), keep_non_ep=True, strict=True)
+
+    assert model.quantized.weight is packed and torch.equal(packed.data.view(torch.uint8), codes)
+    assert model.norm.weight.dtype == torch.float32 and torch.equal(model.norm.weight, original)
+    model._weight_conversions.append(
+        WeightConverter(source_patterns=["a", "b"], target_patterns="c", operations=[Chunk(dim=0)])
+    )
+    with pytest.raises(ValueError, match="multi-source.*qwen3"):
+        resolve_loaded_conversion_steps(model)
 
 
 if __name__ == "__main__":

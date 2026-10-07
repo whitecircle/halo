@@ -1,8 +1,8 @@
 """CPU test for the ``liger_cross_entropy`` CPU fallback (``src/kernels/liger/cross_entropy.py``).
 
-The mistral4/zaya appliers patch ``F.cross_entropy`` process-globally; Liger's kernel is
-Triton/CUDA-only, so a CPU-side CE call in the same process must fall back to torch instead of
-crashing inside the Triton launcher.
+Every toolkit applier routes ``transformers.loss.loss_utils``' cross-entropy through
+``liger_cross_entropy``; Liger's kernel is Triton/CUDA-only, so a CPU-side CE call on that path must
+fall back to torch instead of crashing inside the Triton launcher.
 
     python tests/cpu/kernels/test_liger_cpu_cross_entropy.py
 """

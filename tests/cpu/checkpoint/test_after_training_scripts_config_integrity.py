@@ -325,7 +325,7 @@ def test_merge_models_hub_source_ships_the_modules_its_auto_map_names():
         out.mkdir()
 
         with patch.object(mm, "snapshot_download", side_effect=lambda repo_id, **kwargs: str(repo)) as download:
-            # allow_missing_tokenizer: this fake repo ships config + modules only, and the merge now
+            # allow_missing_tokenizer: this fake repo ships config + modules only, and the merge
             # REFUSES a tokenizer-less artifact by default — a separate contract from the auto_map one
             # under test here.
             mm._copy_aux_files(

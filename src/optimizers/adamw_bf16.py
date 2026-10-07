@@ -344,29 +344,28 @@ class AdamWBF16(torch.optim.Optimizer):
                         fp32_params.append((p, p.grad, state))
                 index += 1
 
-            if bf16_params:
-                for p, grad, state, param_index in bf16_params:
-                    update_fn = _triton_adam_bf16_step if self._triton_for(p) else _eager_adam_bf16_step
-                    step = state["step"]
-                    bc1 = 1.0 - beta1**step
-                    bc2_sqrt = math.sqrt(1.0 - beta2**step)
-                    step_size = lr / bc1
-                    wd_factor = 1.0 - lr * wd
+            for p, grad, state, param_index in bf16_params:
+                update_fn = _triton_adam_bf16_step if self._triton_for(p) else _eager_adam_bf16_step
+                step = state["step"]
+                bc1 = 1.0 - beta1**step
+                bc2_sqrt = math.sqrt(1.0 - beta2**step)
+                step_size = lr / bc1
+                wd_factor = 1.0 - lr * wd
 
-                    update_fn(
-                        p,
-                        grad,
-                        state["exp_avg"],
-                        state["exp_avg_sq"],
-                        step_size,
-                        bc2_sqrt,
-                        eps,
-                        wd_factor,
-                        beta1,
-                        beta2,
-                        sr_seed_pair(_SR_KEY, step, param_index),
-                        grad_scale,
-                    )
+                update_fn(
+                    p,
+                    grad,
+                    state["exp_avg"],
+                    state["exp_avg_sq"],
+                    step_size,
+                    bc2_sqrt,
+                    eps,
+                    wd_factor,
+                    beta1,
+                    beta2,
+                    sr_seed_pair(_SR_KEY, step, param_index),
+                    grad_scale,
+                )
 
             # Per-param updates (no _foreach_* — FSDP2 DTensor params can't mix with plain Tensors).
             for p, grad, state in fp32_params:
@@ -379,8 +378,7 @@ class AdamWBF16(torch.optim.Optimizer):
                 p_data = to_local(p.detach())
                 exp_avg = to_local(state["exp_avg"])
                 exp_avg_sq = to_local(state["exp_avg_sq"])
-                grad_fp32 = _scaled_grad(to_local(grad), grad_scale)
-                grad_fp32 = grad_fp32.float() if grad_fp32.dtype != torch.float32 else grad_fp32
+                grad_fp32 = _scaled_grad(to_local(grad), grad_scale).float()
 
                 exp_avg.mul_(beta1).add_(grad_fp32, alpha=1.0 - beta1)
                 exp_avg_sq.mul_(beta2).addcmul_(grad_fp32, grad_fp32, value=1.0 - beta2)

@@ -15,10 +15,9 @@
 - Collator selection: no script may construct a completion-only collator directly — the
   null-marker raise and ``verify_marker_renders_in_chat_template`` live in ``select_data_collator``,
   and a direct build trains on every token while the log still says completion-only masking.
-- PEFT wrapping: no script may call bare ``get_peft_model`` — self-wrapping scripts
-  (``teacher_distill.py``) must route through ``prepare_peft_model`` (k-bit prep) — and none may
-  call bare ``get_peft_config``, which would skip ``build_peft_config``'s exclusion of target-name
-  matches PEFT cannot adapt.
+- PEFT wrapping: no script may call bare ``get_peft_model`` — a self-wrapping script must route
+  through ``prepare_peft_model`` (k-bit prep) — and none may call bare ``get_peft_config``, which
+  would skip ``build_peft_config``'s exclusion of target-name matches PEFT cannot adapt.
 
 Run: pytest tests/cpu/config/test_training_script_contracts.py
 """
@@ -60,7 +59,7 @@ def _named_calls(tree: ast.AST, func_name: str) -> list[ast.Call]:
 # Loader-kwarg threading (revision + quantization_config)
 
 
-# Every training script now loads through ``script_runner.load_script_model`` or
+# Every training script loads through ``script_runner.load_script_model`` or
 # ``vlm_setup.load_model_for_training``, both of which route the one ``load_distributed_model`` call
 # through ``vlm_setup.load_model_consuming_init_kwargs``; a script may still call the loader directly,
 # so all are held to the same contract. The shared helper is listed explicitly because a vacuous
@@ -137,10 +136,11 @@ _VLM_PROBE_CALL_SITES = [
 
 
 def _vlm_probe_calls(path: Path) -> list[ast.Call]:
-    """Both entry points into the modality probe — ``is_vlm_run`` forwards its pin to
-    ``is_vlm_model``, so an unpinned call to either loads hub main's config."""
+    """Every entry point into the modality probe — ``is_vlm_run`` forwards its pin to
+    ``is_vlm_model``, which reads through ``probe_checkpoint``, so an unpinned call to any of them
+    loads hub main's config."""
     tree = ast.parse(path.read_text(encoding="utf-8"))
-    return _named_calls(tree, "is_vlm_model") + _named_calls(tree, "is_vlm_run")
+    return sum((_named_calls(tree, name) for name in ("is_vlm_model", "is_vlm_run", "probe_checkpoint")), [])
 
 
 def test_vlm_probe_contract_is_not_vacuous():
@@ -326,16 +326,7 @@ def test_no_script_calls_bare_get_peft_model(script: Path):
     source = script.read_text(encoding="utf-8")
     assert not _named_calls(ast.parse(source), "get_peft_model"), (
         f"{script}: calls bare get_peft_model — route through prepare_peft_model "
-        f"(src/distributed/loading/model_loading.py) like SMPO/classification/offline-GRPO."
-    )
-
-
-def test_teacher_distill_wraps_peft_via_prepare_peft_model():
-    """Keeps the blanket get_peft_model ban above non-vacuous: teacher_distill.py wraps the student
-    itself (plain Trainer, no peft_config kwarg) and must do so through prepare_peft_model."""
-    source = (_TRAINING_DIR / "distillation/teacher_distill.py").read_text(encoding="utf-8")
-    assert _named_calls(ast.parse(source), "prepare_peft_model"), (
-        "teacher_distill.py no longer calls prepare_peft_model — its PEFT wrap lost the k-bit prep."
+        f"(src/distributed/loading/peft_setup.py) like SMPO/classification/offline-GRPO."
     )
 
 
@@ -386,8 +377,8 @@ def _assigned_targets(tree: ast.AST, call: ast.Call) -> list[ast.expr] | None:
 def test_scripts_bind_the_tokenizer_their_length_seam_returns(script: Path):
     """The length seams RESOLVE the tokenizer (``tokenizer_backend`` swaps in a gigatoken proxy) and
     return it. Dropping the return value leaves the script holding the pre-resolution object, so the
-    knob parses, validates, logs — and does nothing. That is invisible at runtime, which is how one
-    dropped return sits unnoticed on three GRPO scripts at once.
+    knob parses, validates, logs — and does nothing. That is invisible at runtime, so a dropped
+    return can sit unnoticed on several scripts at once.
 
     ``apply_prompt_completion_window`` returns ``(tokenizer, window)``, so a tuple target counts.
     """

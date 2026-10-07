@@ -875,7 +875,7 @@ def test_expert_replica_ranks_at_ep_group_size_one_span_the_stage():
     """``ep_group_size == 1``: every rank is a singleton EP group holding the FULL expert set, so the
     whole rank block is ONE replica set — which is exactly the single group ``EPConfig`` builds there
     (``test_ep_group_size_one_agrees_with_a_real_eight_rank_ep_config``). Returning ``[global_rank]``
-    said "nothing replicates my experts" for the default MoE shape, contradicting the group the
+    would say "nothing replicates my experts" for the default MoE shape, contradicting the group the
     deferred sweep actually reduces over."""
     cfg = create_config(world_size=8, gpus_per_node=8, rank=3)
     assert cfg.ep_group_size == 1

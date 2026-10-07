@@ -8,7 +8,7 @@ from src.environments.base import ANSWER_KEY, EpisodeGrade, Trajectory
 from src.environments.envs.protocols.native import NativeToolUseEnvironment
 from src.environments.tools.definitions import NativeToolRegistry
 from src.environments.tools.factories import create_native_python_tools, create_native_search_tools
-from src.rewards.matching import validate_answer
+from src.rewards.graders.matching import validate_answer
 
 # The choice letters :func:`multiple_choice_match` scores (MMLU-Pro tops out at 10 options).
 # ``ExamQAEnvironment``'s system prompt is built from this same range, so the instruction the model
@@ -202,6 +202,10 @@ class ExamQAEnvironment(NativeToolUseEnvironment):
             traj.append_to_last_user(f"\n\nChoices:\n{choices_text}")
 
         return traj
+
+    def _scoring_reference(self, trajectory: Trajectory) -> Any:
+        """The answer as the grader compares it: a multiple-choice row's letter, not its index."""
+        return trajectory.info.get("expected_answer")
 
     def _grade_episode(self, trajectory: Trajectory, context: dict[str, Any] | None = None) -> EpisodeGrade:
         """Grade the answer by multiple-choice letter match or the shared validation chain."""

@@ -31,7 +31,7 @@ from accelerate import PartialState
 from datasets import Dataset, DatasetDict
 from transformers.models.auto.configuration_auto import CONFIG_MAPPING
 from transformers.models.auto.modeling_auto import MODEL_FOR_IMAGE_TEXT_TO_TEXT_MAPPING_NAMES
-from trl import RewardTrainer
+from trl import RewardConfig, RewardTrainer
 
 from src.data.collators.vlm_preference import DataCollatorForVLMPreference
 from src.distributed.loading import vlm_setup
@@ -323,14 +323,16 @@ def test_vlm_prepare_raises_when_the_budget_empties_the_split():
     assert probes == [True]
 
 
-def test_text_prepare_still_runs_trls_own_tokenize_map():
+def test_text_prepare_still_runs_trls_own_tokenize_map(tmp_path, monkeypatch):
     """Anti-vacuity: the text branch must produce TRL's chosen_ids/rejected_ids, not our columns."""
+    monkeypatch.setenv("HF_DATASETS_CACHE", str(tmp_path / "hf_datasets"))
     tokenizer = StubTextTokenizer()
     dataset = Dataset.from_dict({"prompt": [_PROMPT], "chosen": [_CHOSEN], "rejected": [_REJECTED]})
-
-    prepared = _bare_trainer(False)._prepare_dataset(
-        dataset, tokenizer, SimpleNamespace(dataset_num_proc=1, max_length=512), "train"
+    args = RewardConfig(
+        output_dir=str(tmp_path), use_cpu=True, bf16=False, report_to=[], dataset_num_proc=1, max_length=512
     )
+
+    prepared = _bare_trainer(False)._prepare_dataset(dataset, tokenizer, args, "train")
 
     assert {"chosen_ids", "rejected_ids"} <= set(prepared.column_names)
     assert "chosen_text" not in prepared.column_names

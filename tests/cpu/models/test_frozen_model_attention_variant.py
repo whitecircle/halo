@@ -66,7 +66,7 @@ def _load_policy(config, seam, seen) -> None:
     with (
         patch.object(model_loading, "configure_float32_matmul_precision"),
         patch.object(model_loading, "apply_remote_code_compat_shims"),
-        patch.object(model_loading, "_ensure_model_downloaded"),
+        patch.object(model_loading, "resolve_model_source", lambda path, revision, **kwargs: revision),
         patch.object(model_loading, "AutoConfig", SimpleNamespace(from_pretrained=lambda *a, **k: config)),
         patch.object(model_loading, "resolve_attn_implementation", lambda *a, **k: "sdpa"),
         patch.object(model_loading, "apply_family_attention_patches", seam),

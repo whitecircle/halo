@@ -73,9 +73,10 @@ class DistributedArguments:
         default=False,
         metadata={
             "help": "Resume only. When restoring per-rank optimizer shards that match this run's "
-            "topology fails on any rank (an unreadable shard, a CUDA OOM while applying it), continue "
-            "with a freshly initialized optimizer (weights, step and LR schedule still resume) instead "
-            "of raising on every rank. Off by default: a warm restart resets the optimizer moments "
+            "topology fails on any rank (an unreadable shard, a CUDA OOM while applying it), or the "
+            "checkpoint holds the optimizer half of an interrupted save, continue with a freshly "
+            "initialized optimizer (weights, step and LR schedule still resume) instead of raising on "
+            "every rank. Off by default: a warm restart resets the optimizer moments "
             "mid-run. A changed parallelism layout and a checkpoint saved without optimizer state are "
             "not failures; see agent-docs/reference/checkpoints.md for every resume outcome."
         },

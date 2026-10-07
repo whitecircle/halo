@@ -7,7 +7,8 @@ teacher forwards for L = L_sft + beta(k) * L_OPD. It checks only that every conf
 that every logged step loss is finite and that the opd_loss metric was recorded (the
 privileged-teacher forward ran); it does not compare either loss term against a reference. The
 student/teacher response-token alignment is pinned on CPU by
-tests/cpu/trainers/test_self_distillation_text_collator.py.
+tests/cpu/data/test_self_distill_collator.py, and the objective by
+tests/cpu/trainers/test_self_distillation_trainer.py.
 
 Model defaults to Qwen3-0.6B (CI); set HALO_TEST_MODEL to override (e.g. Qwen/Qwen3.5-4B).
 
@@ -104,6 +105,10 @@ def run(ctx) -> dict:
         parallelism_config=ParallelismConfig(),
         sdpg_loss="reverse_kl",
         sdpg_beta_base=1.0,
+        reference_kl_coef=0.0,
+        reference_kl_loss="unnormalized_kl",
+        confidence_weight_opd=True,
+        opd_exclude_eos=True,
     )
 
     trainer.train()

@@ -6,7 +6,7 @@ via ``tests/gpu/conftest.py``, into one launch per ``(script, args)`` in
 classifies the result (PASS / FAIL / ERROR / SKIP). Run it with the usual selectors::
 
     pytest -m "gpu and core"      # PR tier
-    pytest -m gpu                 # full nightly tier
+    pytest -m gpu                 # full tier
     pytest -m "gpu and ep"        # just Expert-Parallelism tests
 """
 

@@ -1,6 +1,6 @@
 #!/usr/bin/env python
 """
-Tests for select_data_collator routing logic in collator_factory.py.
+Tests for select_data_collator routing logic in src/data/collators/factory.py.
 
 Run: python tests/cpu/data/test_collator_factory.py
 """

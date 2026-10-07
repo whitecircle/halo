@@ -3,7 +3,7 @@
 
 Tests needing the real Rust encoder skip when the optional extra is absent; the equivalence-probe
 tests at the end drive a fake backend instead, so the guard that rejects a divergent tokenizer is
-pinned in every environment (including images built before the extra landed)."""
+pinned in every environment (including those without the optional extra)."""
 
 import pickle
 

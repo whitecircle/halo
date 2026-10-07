@@ -30,11 +30,17 @@ from src.checkpoint.format import (
 )
 from src.checkpoint.model_card import with_halo_tags
 from src.distributed.checkpoint.context import CheckpointContext, CheckpointLoadContext
-from src.distributed.checkpoint.coordination import consensus_read
+from src.distributed.checkpoint.coordination import consensus_read, resolve_resume_checkpoint
 from src.distributed.checkpoint.loader import CheckpointLoader
 from src.distributed.checkpoint.optimizer import OptimizerShardStore
 from src.distributed.checkpoint.peft import PeftAdapterSaver, find_peft_model
-from src.distributed.checkpoint.save import remove_stale_resume_marker, save_checkpoint, save_resume_adapter
+from src.distributed.checkpoint.save import (
+    commit_trainer_state,
+    remove_stale_completion_markers,
+    save_checkpoint,
+    save_resume_adapter,
+    trainer_state_withheld,
+)
 from src.distributed.expert_parallel.expert_weights import has_ep_lora
 from src.distributed.fsdp import reshard_fsdp2_modules
 from src.distributed.runtime import (
@@ -79,6 +85,20 @@ class CheckpointingMixin:
     # True while :meth:`_save_checkpoint`'s base save runs ``save_model``, whose context then marks a
     # training checkpoint (tensors at their live dtype) rather than an export.
     _writing_training_checkpoint: bool = False
+
+    def train(self, resume_from_checkpoint=None, *args, **kwargs):
+        """``Trainer.train`` with ``resume_from_checkpoint=True`` resolved as the entry scripts resolve it.
+
+        The base takes the highest-numbered ``checkpoint-<N>`` whether or not its save completed, and
+        fails reading the trainer state a stopped save never published; this resolves the newest
+        checkpoint complete on every rank (:func:`resolve_resume_checkpoint`) and raises the base's error
+        when there is none. Collective.
+        """
+        if resume_from_checkpoint is True:
+            resume_from_checkpoint = resolve_resume_checkpoint(self.args.output_dir)
+            if resume_from_checkpoint is None:
+                raise ValueError(f"No valid checkpoint found in output directory ({self.args.output_dir})")
+        return super().train(resume_from_checkpoint, *args, **kwargs)
 
     def _checkpoint_load_context(self) -> CheckpointLoadContext:
         """Capture the current model/optimizer/scheduler for a resume path (rebuilt per call so the
@@ -168,25 +188,34 @@ class CheckpointingMixin:
         for the ``super()`` call and re-run only once every toolkit sidecar is on disk: with
         ``save_total_limit: 1`` a preemption between the base's rotation and the optimizer-shard
         writes would leave one checkpoint with no optimizer state. For the same reason the base's
-        rank-0 optimizer.pt stays in place until its replacement shards are written.
+        rank-0 optimizer.pt stays in place until its replacement shards are written. The base's
+        checkpoint push to the Hub, which starts a background upload of the directory, waits the same
+        way (:meth:`_publish_checkpoint`).
 
         The weights keep their live dtype (``CheckpointContext.training_checkpoint``), so fp32 masters
         are written unrounded; the final ``save_model`` export casts to the save dtype.
+
+        ``trainer_state.json`` is the file resume detection takes a checkpoint by, so it is the last
+        one published: an earlier save's copy is removed before anything is written, and the base
+        save writes its own under the withheld name until every sidecar and optimizer shard is on disk.
+        A save stopped at any point therefore leaves a directory resume detection passes over.
         """
         checkpoint_folder = f"{PREFIX_CHECKPOINT_DIR}-{self.state.global_step}"
         output_dir = os.path.join(self._get_output_dir(trial=trial), checkpoint_folder)
         # Any run type: a marker left in a directory this save rewrites is stale by definition.
-        remove_stale_resume_marker(output_dir)
+        remove_stale_completion_markers(output_dir)
         # Do not force save_only_model for EP/CP here: it drops scheduler.pt and RNG.
         guard = DeferredRankFailure(f"checkpoint write to step {self.state.global_step}")
-        save_total_limit = self.args.save_total_limit
-        self.args.save_total_limit = None  # rotation is deferred below, not dropped
+        save_total_limit, push_to_hub = self.args.save_total_limit, self.args.push_to_hub
+        # Deferred to _publish_checkpoint, not dropped.
+        self.args.save_total_limit, self.args.push_to_hub = None, False
         self._model_save_collectives_done = False
         self._writing_training_checkpoint = True
         try:
-            guard.run(partial(super()._save_checkpoint, model, trial))
+            with trainer_state_withheld(self.state):
+                guard.run(partial(super()._save_checkpoint, model, trial))
         finally:
-            self.args.save_total_limit = save_total_limit
+            self.args.save_total_limit, self.args.push_to_hub = save_total_limit, push_to_hub
             self._writing_training_checkpoint = False
         # The fence covers the base's writer-local tail (rank-0 optimizer.pt, RNG,
         # trainer_state.json), so an ENOSPC there reaches every rank as a diagnostic rather than
@@ -208,7 +237,7 @@ class CheckpointingMixin:
         # Pure TP skips FSDP2 but keeps per-rank TP optimizer shards; one optimizer.pt clobbers them.
         pure_tp = self.parallelism_config.is_tp_mode and not self._fsdp_wrapped
         if (not self._fsdp_wrapped and not pure_tp) or self.args.save_only_model:
-            self._rotate_checkpoints_after_sidecars(trial)
+            self._publish_checkpoint(output_dir, trial)
             return
 
         # Sync before modifying checkpoint files (base Trainer's post-save I/O is async across ranks).
@@ -227,6 +256,18 @@ class CheckpointingMixin:
                     if os.path.exists(incorrect_optim):
                         os.remove(incorrect_optim)
 
+        self._publish_checkpoint(output_dir, trial)
+
+    def _publish_checkpoint(self, checkpoint_dir: str, trial) -> None:
+        """Commit the complete checkpoint's trainer state, then run what the base save runs after
+        writing it: the checkpoint push to the Hub (on world process zero, per ``hub_strategy``), then
+        rotation. Collective. The push uploads the directory as it stands, so started inside the base
+        save it would ship the checkpoint without its optimizer shards and with its trainer state
+        missing or under its withheld name.
+        """
+        commit_trainer_state(checkpoint_dir)
+        if self.args.push_to_hub:
+            self._push_from_checkpoint(checkpoint_dir)
         self._rotate_checkpoints_after_sidecars(trial)
 
     def _rotate_checkpoints_after_sidecars(self, trial) -> None:
@@ -247,8 +288,8 @@ class CheckpointingMixin:
     def _save_merged_checkpoint_resume_adapter(self, checkpoint_dir: str) -> None:
         """Write a ``merge_expert_lora_on_save`` checkpoint's unmerged adapters, which it resumes from
         (:func:`~src.distributed.checkpoint.save.save_resume_adapter`); no-op for any other run. A
-        trainer whose own ``save_model`` folds adapters overrides it (the embedding trainer's
-        injected LoRA).
+        trainer whose model payload folds adapters overrides it (the embedding trainer's injected
+        LoRA).
 
         A checkpoint sidecar rather than part of ``save_model``: the final export is a serving
         artifact with no training state to resume, so it carries none. Written under
@@ -446,37 +487,47 @@ class CheckpointingMixin:
 
         ctx = self._checkpoint_context()
         with pristine_model_max_length(ctx.tokenizer):
-            peft_model = find_peft_model(ctx.model)
-            # merge_expert_lora_on_save needs a merged base, so it takes the mode's saver even with adapters.
-            # Under accelerate FSDP v1 adapters are flat-param shards, which the base Trainer's save handles.
-            wants_merged_base = ctx.has_expert_lora and ctx.merge_expert_lora_on_save
-            if peft_model is not None and not ctx.accelerate_manages_fsdp and not wants_merged_base:
-                PeftAdapterSaver().save(ctx, peft_model, output_dir)
-            elif not save_checkpoint(ctx, output_dir):
-                # The base save has no re-emission seam: restore the sinks FA2 drops to None for the
-                # write, and serialize the config with its run-scoped router mutations restored (the
-                # parallel paths get both through save_model_config / the gathered state dict).
-                with (
-                    gpt_oss_sinks_restored(ctx.model),
-                    config_export_ready(getattr(ctx.model, "config", None)),
-                ):
-                    super().save_model(output_dir, _internal_call=_internal_call)
-                # The base save's config write lands on the ranks HF Trainer writes from; the
-                # parallel paths get the same rewrites through save_model_config, and this path
-                # needs the identical set. Without it a family-less vendor config (Bailing/Ling) or
-                # a source-schema family (Step-3.7) saved single-GPU/DDP is unreadable to the merge
-                # tools and the pinned server, with nothing visibly wrong at train time.
-                if self.args.should_save:
-                    finalize_exported_config(ctx.model.config, output_dir, source=checkpoint_source_ref(ctx.model))
+            self._write_model_payload(ctx, output_dir, _internal_call)
         self._mark_model_save_collectives_done()
+
+    def _write_model_payload(self, ctx: CheckpointContext, output_dir: str, _internal_call: bool) -> None:
+        """Write the model itself: PEFT adapters, the mode's saver, or the base Trainer's save.
+
+        The one step of :meth:`save_model` a trainer with its own model layout overrides; the steps
+        around it (the reshard, the special-token restore, the balancing sidecar, the max-length pin,
+        the collectives mark) stay shared. Runs on every rank: the savers gather.
+        """
+        peft_model = find_peft_model(ctx.model)
+        # merge_expert_lora_on_save wants a merged base, so it takes the mode's saver even with adapters.
+        # Under accelerate FSDP v1 adapters are flat-param shards, so the base Trainer's save owns that layout.
+        wants_merged_base = ctx.has_expert_lora and ctx.merge_expert_lora_on_save
+        if peft_model is not None and not ctx.accelerate_manages_fsdp and not wants_merged_base:
+            PeftAdapterSaver().save(ctx, peft_model, output_dir)
+        elif not save_checkpoint(ctx, output_dir):
+            # The base save has no re-emission seam: restore the sinks FA2 drops to None for the
+            # write, and serialize the config with its run-scoped router mutations restored (the
+            # parallel paths get both through save_model_config / the gathered state dict).
+            with (
+                gpt_oss_sinks_restored(ctx.model),
+                config_export_ready(getattr(ctx.model, "config", None)),
+            ):
+                super().save_model(output_dir, _internal_call=_internal_call)
+            # The base save's config write lands on the ranks HF Trainer writes from; the
+            # parallel paths get the same rewrites through save_model_config, and this path owes
+            # the identical set — a family-less vendor config (Bailing/Ling) or a source-schema
+            # family (Step-3.7) saved single-GPU/DDP is unreadable to the merge tools and the
+            # pinned server otherwise, with nothing wrong at train time to show for it.
+            if self.args.should_save:
+                finalize_exported_config(ctx.model.config, output_dir, source=checkpoint_source_ref(ctx.model))
 
     def _mark_model_save_collectives_done(self) -> None:
         """Record that this save's collectives are behind it: the fence in :meth:`_save_checkpoint`
         defers a failure only past this mark, and re-raises anything earlier on the spot.
 
-        Every ``save_model`` implementation calls it as its last step, including the trainers that
-        replace the mixin's (embedding). ``tests/cpu/checkpoint/test_save_fence_placement.py``
-        fails if an override forgets.
+        EVERY ``save_model`` implementation calls it as its last step, an override of the mixin's
+        included: its gathers are collectives just the same, and an unmarked save would downgrade a
+        writer-local tail failure to a rank-local raise.
+        ``tests/cpu/checkpoint/test_save_fence_placement.py`` fails if an override forgets.
         """
         self._model_save_collectives_done = True
 

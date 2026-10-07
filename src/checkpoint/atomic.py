@@ -2,6 +2,8 @@
 
 import errno
 import os
+import pickle
+import re
 import shutil
 import uuid
 from collections.abc import Callable
@@ -10,6 +12,12 @@ from pathlib import Path
 import torch
 
 FILE_STAGING_SUFFIX = ".tmp"
+# A complete file held off its published name until the rest of its checkpoint is on disk.
+WITHHELD_FILE_SUFFIX = ".uncommitted"
+# What earlier releases staged under: ``.<name>.<token>`` with no suffix, and the pending prefetch
+# rounds' ``<name>.staged``. Their leftovers can still sit in a checkpoint an export reads.
+_SUFFIXLESS_STAGE_RE = re.compile(rf"^\..+\.[0-9a-f]{{{len(uuid.uuid4().hex)}}}$")
+_LEGACY_STAGED_SUFFIX = ".staged"
 _LINK_COPY_ERRNOS = {errno.EXDEV, errno.EPERM, errno.EACCES, errno.ENOSYS, errno.EOPNOTSUPP}
 
 
@@ -20,17 +28,39 @@ def create_staged_file(directory: str | Path, filename: str) -> Path:
     return staged
 
 
-def is_staged_file(name: str, filename: str) -> bool:
-    """Recognize interrupted staging writes, including names without the ``.tmp`` suffix."""
-    prefix = f".{filename}."
-    return name.startswith(prefix) and len(name) > len(prefix)
+def withheld_file_name(filename: str) -> str:
+    """The name ``filename`` waits under until its checkpoint is complete."""
+    return f".{filename}{WITHHELD_FILE_SUFFIX}"
 
 
-def atomic_torch_save(path: str, payload: Callable[[], object], previous: str | None = None) -> None:
+def is_atomic_staging_file(name: str) -> bool:
+    """Whether ``name`` is an unpublished stage a crash left: one :func:`create_staged_file` made, a
+    :func:`withheld_file_name`, or an earlier release's staging spelling."""
+    if name.endswith(_LEGACY_STAGED_SUFFIX):
+        return True
+    return name.startswith(".") and (
+        name.endswith((FILE_STAGING_SUFFIX, WITHHELD_FILE_SUFFIX)) or _SUFFIXLESS_STAGE_RE.match(name) is not None
+    )
+
+
+def link_or_copy_file(source: str | Path, destination: str | Path) -> None:
+    """Hard-link ``source`` to ``destination``, copying it where the filesystem refuses links."""
+    try:
+        os.link(source, destination)
+    except OSError as exc:
+        if exc.errno not in _LINK_COPY_ERRNOS:
+            raise
+        shutil.copyfile(source, destination)
+
+
+def atomic_torch_save(
+    path: str, payload: Callable[[], object], previous: str | None = None, *, pickle_module=pickle
+) -> None:
     """Publish a complete payload, reusing an unchanged immutable file where available.
 
     The payload stays lazy so an unchanged reference table is not materialized again. Sync the
     file before its rename and the directory afterward, before a caller rotates older checkpoints.
+    ``pickle_module`` is ``torch.save``'s, for a payload the stdlib pickler refuses.
     """
     destination = Path(path)
     directory = destination.parent
@@ -39,20 +69,20 @@ def atomic_torch_save(path: str, payload: Callable[[], object], previous: str | 
     try:
         if previous is not None and os.path.isfile(previous):
             staged.unlink()
-            try:
-                os.link(previous, staged)
-            except OSError as exc:
-                if exc.errno not in _LINK_COPY_ERRNOS:
-                    raise
-                shutil.copyfile(previous, staged)
+            link_or_copy_file(previous, staged)
         else:
-            torch.save(payload(), staged)
-        with staged.open("rb") as completed:
-            os.fsync(completed.fileno())
-        os.replace(staged, destination)
-        fsync_directory(directory)
+            torch.save(payload(), staged, pickle_module=pickle_module)
+        publish_staged_file(staged, destination)
     finally:
         staged.unlink(missing_ok=True)
+
+
+def publish_staged_file(staged: str | Path, destination: str | Path) -> None:
+    """Sync ``staged``, rename it over ``destination`` and sync their directory, in that order."""
+    with open(staged, "rb") as completed:
+        os.fsync(completed.fileno())
+    os.replace(staged, destination)
+    fsync_directory(Path(destination).parent)
 
 
 def fsync_directory(directory: str | Path) -> None:

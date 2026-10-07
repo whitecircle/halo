@@ -1,5 +1,5 @@
 #!/usr/bin/env python
-"""Distributed SFT training (text or VLM) with Expert, Context, and Tensor Parallelism support.
+"""Distributed SFT training (text or VLM).
 
 Supervised fine-tuning for both language and vision-language models. The model class follows the
 checkpoint; the data path follows the run (``is_vlm_run``), so a natively-multimodal checkpoint
@@ -8,8 +8,9 @@ pre-processed datasets, QLoRA and ``init_from_scratch``; the VLM path loads an
 ``AutoModelForImageTextToText`` plus processor and uses the VLM collators (packing/padding-free do
 not apply to images).
 
-Supported Parallelism Modes: EP, CP, TP, EP+CP, EP+TP (TP+CP unsupported; CP incompatible with
-padding-free, and CP is text-only: the CP wrapper raises on a batch carrying ``pixel_values``).
+Parallelism: every axis set ``ParallelismConfig`` admits (``SUPPORTED_AXIS_SETS``), CP included;
+PP is declared but not yet available in this release. CP is incompatible with padding-free, and CP
+is text-only: the CP wrapper raises on a batch carrying ``pixel_values``.
 
 Usage:
     torchrun --nproc_per_node=8 scripts/training/sft.py \\
@@ -38,7 +39,8 @@ from src.distributed.loading.peft_setup import setup_peft_model
 from src.distributed.loading.vlm_setup import load_model_for_training
 from src.distributed.runtime import barrier, init_distributed, is_global_main_process
 from src.models.loading.model_preparation import log_model_info
-from src.models.modality import is_vlm_model
+from src.models.modality import probe_checkpoint
+from src.models.segment_markers import reject_compressed_kv_rows
 from src.trainers.sft import DistributedSFTTrainer
 from src.training.environment import run_training
 from src.training.parser import H4ArgumentParser
@@ -240,11 +242,14 @@ def main():
     # that guards transformers' unlocked remote-code module cache needs a live group; without it
     # every rank of every node fetches at once.
     init_distributed()
-    is_vlm_checkpoint = is_vlm_model(
+    checkpoint_config, is_vlm_checkpoint = probe_checkpoint(
         model_config.model_name_or_path,
         revision=model_config.model_revision,
         trust_remote_code=model_config.trust_remote_code,
     )
+    # The collator factory refuses the same rows, but only after the model load and the packing pass.
+    if sft_config.packing or sft_config.padding_free:
+        reject_compressed_kv_rows(checkpoint_config, "packing" if sft_config.packing else "padding_free")
     runtime = init_training_script(
         args,
         sft_config,

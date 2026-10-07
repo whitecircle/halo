@@ -105,7 +105,7 @@ class _RecordingSender:
 def _sync(layer: nn.Module) -> tuple[_RecordingSender, _Model]:
     model = _Model(layer)
     sender = _RecordingSender()
-    assert gather_and_send_weights(model, sender) is False
+    gather_and_send_weights(model, sender)
     return sender, model
 
 
@@ -123,7 +123,7 @@ def test_sync_keys_equal_the_gathered_checkpoint_keys():
 
 
 def test_renamed_modules_are_forwarded_under_the_hub_spelling():
-    """The two Laguna renames, named explicitly: these are the tensors vLLM was dropping."""
+    """The two Laguna renames, named explicitly: these are the tensors vLLM drops under the module spelling."""
     sender, _model = _sync(_LagunaEPLayerStub())
 
     assert f"{LAYER_PATH}.experts.e_score_correction_bias" in sender.sent
@@ -148,7 +148,7 @@ def test_renaming_moves_the_key_not_the_payload():
 
 
 def test_a_family_without_renames_is_untouched():
-    """Anti-over-rejection: every other family's forwarded names must be byte-identical to before."""
+    """Anti-over-rejection: every other family forwards the gathered checkpoint's names unrenamed."""
     layer = _PlainEPLayerStub()
     sender, _model = _sync(layer)
 

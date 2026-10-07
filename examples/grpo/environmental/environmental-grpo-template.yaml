@@ -18,9 +18,11 @@ max_turns: 10
 # shaping terms add on top.
 rewards:
   - source: environment      # the env's own grade, logged as reward/objective; weight 1.0, exponent 1.0
-  # - {source: judge, name: quality, weight: 0.3, requirements: [{name: correctness, description: "..."}]}
+  # - {source: judge, name: quality, weight: 0.3, view: final, requirements: [{name: correctness, description: "..."}]}
+  # - {source: judge, name: audit, view: digest, checks: [{name: hardcoded_output, description: "...", veto: true}]}  # a fired veto check zeroes reward/objective
   # - {source: reward_model, name: preference, weight: 0.5, url: "http://localhost:8100", model: <BT model id>}
   # judge needs OPENROUTER_API_KEY; reward_model needs a served BT model (vllm --runner pooling / sglang --is-embedding)
+  # view: final | full | digest (judge only); on_error: invalid (the episode leaves the baseline) | neutral (the term scores 0)
 
 # --- Environment kwargs (per environment: agent-docs/training-methods/grpo/environments/README.md) ---
 # environment_kwargs:
@@ -57,19 +59,22 @@ sync_weights_every_n_steps: 1
 # --- Rollout Generation (AsyncTrainingConfig fields) ---
 rollout_temperature: 0.7
 rollout_top_p: 0.95
+# rollout_top_k: -1                   # -1 = off; sent on every request, as are the two below
+# rollout_min_p: 0.0                  # 0 = off
+# rollout_repetition_penalty: 1.0     # 1 = off
 rollout_max_tokens: 8192
-# rollout_max_thinking_tokens: null   # per-turn reasoning-token budget; vLLM only
-# rollout_thinking_budget_scope: turn # `episode`: a level's thinking_tokens is the episode's total; vLLM only
+# rollout_max_thinking_tokens: null   # per-turn reasoning-token cap; vLLM only. A level's thinking_tokens below it caps the turn instead
+# rollout_max_episode_tokens: null    # the most an episode may sample over all its turns, reasoning and visible output together
 # rollout_chat_template_kwargs: {}    # chat-template variables sent with every rollout request
 # rollout_stop_tokens: []             # special-token strings that end a turn (e.g. gpt-oss "<|call|>")
 # train_on_sampled_tokens: true       # the engine's sampled token ids (vLLM needs --return-tokens-as-token-ids)
 # max_train_row_tokens: null          # longest training row a rank takes; null = no cap beyond the context check
 
-# --- Effort-length reward economy (agent-docs/training-methods/grpo/async-grpo/rollouts.md#effort-length-reward) ---
-# effort_length_penalty_k0: null      # capped, effort-conditioned price on reasoning tokens (null = off)
-# effort_length_penalty_c_max: 0.1    # that price's cap, in reward units
-# effort_length_floor_weight: 0.0     # weight of the under-use floor (0 = off)
-# effort_length_floor_budgets: 0.75   # the floor's reference, in thinking budgets (the episode's under the episode scope)
+# --- Reasoning length economy (agent-docs/training-methods/grpo/async-grpo/rollouts.md#reasoning-length-reward) ---
+# reasoning_price: null              # per level, reward units per 1k reasoning tokens, e.g. {low: 0.0037, medium: 0.0013, high: 0.00018} (null = off)
+# reasoning_price_cap: 0.1           # that price's cap per episode, in reward units
+# reasoning_floor: 0.0               # weight of the under-use floor: an episode reasoning under 0.75x its level's per-turn budget pays up to it (0 = off)
+# turn_overlong_penalty: 0.0         # most a turn reasoning into the last quarter under its cap costs (0 = off)
 
 # --- Prefetch (AsyncTrainingConfig fields) ---
 enable_prefetch: false    # needs a rollout_server_configs list of 2+ servers; with one server the

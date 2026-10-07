@@ -13,8 +13,13 @@ import pytest
 import torch
 import torch.nn as nn
 
-import src.distributed.expert_parallel.saving as ep_saving_mod
+import src.distributed.checkpoint.ep_save as ep_saving_mod
 from src.distributed import runtime
+from src.distributed.checkpoint.ep_save import (
+    _check_ep_merge_family_supported,
+    _check_ep_sharded_save_supported,
+    validate_ep_sharded_save,
+)
 from src.distributed.expert_parallel.base_layer import EPMoELayerBase
 from src.distributed.expert_parallel.expert_weights import (
     ep_layer_classes,
@@ -24,11 +29,6 @@ from src.distributed.expert_parallel.layers.bailing import EPBailingMoELayer
 from src.distributed.expert_parallel.layers.glm4 import EPGlm4MoELayer
 from src.distributed.expert_parallel.layers.qwen3_5 import EPQwen3_5MoELayer
 from src.distributed.expert_parallel.layers.zaya import EPZayaMoELayer
-from src.distributed.expert_parallel.saving import (
-    _check_ep_merge_family_supported,
-    _check_ep_sharded_save_supported,
-    validate_ep_sharded_save,
-)
 
 
 def _fake_model(model_type):

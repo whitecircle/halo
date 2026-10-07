@@ -23,8 +23,7 @@ the slow per-expert loop for the loop-vs-grouped contrast.
 Usage (8x B300):
     torchrun --nproc_per_node=8 \
         tests/gpu/profiling/benchmark_trl_baseline.py --seq 4096 --batch_size 1
-    # --no_grad_checkpoint disables GC; --no_liger disables Liger;
-    # --fsdp_version 1 for the legacy sharding backend.
+    # --no_grad_checkpoint disables GC; --no_liger disables Liger.
 """
 
 import sys
@@ -98,13 +97,6 @@ def main() -> int:
         require_ep=False,
     )
     parser.add_argument("--no_grad_checkpoint", action="store_true", help="Disable gradient checkpointing")
-    parser.add_argument(
-        "--fsdp_version",
-        type=int,
-        default=2,
-        choices=[1, 2],
-        help="Deprecated / ignored — this baseline is FSDP2-only (kept so older invocations still parse).",
-    )
     parser.add_argument(
         "--fsdp_sharding",
         type=str,

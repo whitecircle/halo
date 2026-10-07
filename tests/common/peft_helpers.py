@@ -8,9 +8,11 @@ teacher-distill, self-distill), so each test file builds its own dataset and tra
 holds the model/adapter build and the adapter-invariant assertions shared across them.
 
 Modes:
-    lora        — attention PEFT LoRA (q_proj/v_proj). Dense under FSDP, MoE attention under EP.
+    lora        — attention PEFT LoRA on the checkpoint's attention projections
+                  (:func:`attention_target_modules`). Dense under FSDP, MoE attention under EP.
     qlora       — LoRA on a 4-bit bitsandbytes base (dense, FSDP/DDP only; QLoRA+EP/TP is rejected).
     expert_lora — native grouped LoRA on the MoE expert FFNs (gate/up/down), built inside EP layers.
+    mixed       — ``lora`` and ``expert_lora`` together, from one target list.
 """
 
 from __future__ import annotations
@@ -244,9 +246,8 @@ def load_peft_model(
 
     ``expert_lora`` and any EP mode use the MoE model; ``lora``/``qlora`` without EP use the dense
     model. ``peft_config`` is the attention PEFT config (or None for expert-LoRA-only); the caller
-    wires it into the trainer (``peft_config=`` kwarg, or ``get_peft_model`` for the plain-Trainer
-    distillation trainer). QLoRA quantization is derived from ``model_config`` exactly as the scripts
-    do.
+    hands it to the trainer's ``peft_config=`` kwarg. QLoRA quantization is derived from
+    ``model_config`` exactly as the scripts do.
 
     ``model_name``/``revision`` override the mode's default model, so one test file can sweep the
     other MoE families (each with its own expert storage layout and export renames) rather than being

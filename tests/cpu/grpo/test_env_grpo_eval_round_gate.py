@@ -1,10 +1,10 @@
 #!/usr/bin/env python
 """Env-GRPO checks its eval round only when the run evaluates.
 
-``_validate_eval_round`` runs in the trainer's ``__init__`` after the model has loaded. It refused a
-``per_device_eval_batch_size`` that no eval round would ever use (``eval_strategy: no``), which TRL's
-own check (gated on evaluation) accepts, so a recipe could die at startup over a dead key. The gate
-applies whenever the loop evaluates: an eval strategy, or ``eval_on_start``. Every shipped env-GRPO
+``_validate_eval_round`` runs in the trainer's ``__init__`` after the model has loaded. Refusing a
+``per_device_eval_batch_size`` that no eval round uses (``eval_strategy: no``), which TRL's own check
+(gated on evaluation) accepts, would kill a recipe at startup over a dead key. The gate applies
+whenever the loop evaluates: an eval strategy, or ``eval_on_start``. Every shipped env-GRPO
 recipe is run through it with the values its own parser produces.
 
 Run: pytest tests/cpu/grpo/test_env_grpo_eval_round_gate.py

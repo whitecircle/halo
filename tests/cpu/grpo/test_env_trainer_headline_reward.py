@@ -3,8 +3,8 @@
 episodes — the rows that train.
 
 An infra-errored or env-invalid episode carries a forced failure reward that says nothing about the
-policy and is already excluded from the group baseline; averaged into the headline it read a grader
-outage as a policy collapse, and its spread against valid siblings as group contrast the advantage
+policy and is already excluded from the group baseline; averaged into the headline it would read a
+grader outage as a policy collapse, and its spread against valid siblings as group contrast the advantage
 never sees. A step with no valid episode logs none of them rather than a NaN or a zero that would fold
 into the logging window.
 

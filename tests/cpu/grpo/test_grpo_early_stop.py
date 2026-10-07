@@ -27,6 +27,7 @@ from src.trainers.grpo.early_stop import SAMPLING_LOGP_GAP_KEY, GRPOEarlyStopCal
 from src.trainers.grpo.environmental import DistributedAsyncEnvironmentalGRPOTrainer
 from src.trainers.grpo.objective.logratio import LOGRATIO_MEAN_KEY, UPDATE_SKIPPED_KEY
 from src.trainers.grpo.online import DistributedGRPOTrainer
+from src.training.early_stopping import StopsTrainingEarly
 from src.training.environment import TrainingStoppedEarly
 from src.training.script_runner import run_trainer
 from tests.common.utils import REPO_ROOT
@@ -134,6 +135,23 @@ def test_a_stopped_run_exits_non_zero_after_its_cleanup_and_any_other_returns():
     for healthy in (_StoppableTrainer([_step()] * 5), _StoppableTrainer([_step()] * 4, max_steps=5)):
         run_trainer(healthy, _RUNTIME, method_name="GRPO")
         assert healthy.events == ["train", "cleanup"]
+
+
+class _AnyMethodsStop(StopsTrainingEarly):
+    """A stop callback of some other method: the runner reads the marker, not one family's class."""
+
+    stopped = True
+
+
+def test_the_runner_exits_on_any_callback_that_stopped_the_run():
+    trainer = types.SimpleNamespace(
+        callback_handler=types.SimpleNamespace(callbacks=[_AnyMethodsStop()]),
+        state=TrainerState(max_steps=5),
+        train=lambda resume_from_checkpoint=None: None,
+        cleanup_ep=lambda: None,
+    )
+    with pytest.raises(TrainingStoppedEarly):
+        run_trainer(trainer, _RUNTIME, method_name="SFT")
 
 
 def test_entropy_below_the_band_stops_too():

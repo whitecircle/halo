@@ -27,9 +27,9 @@ from datasets import Dataset, DatasetDict
 PartialState()  # loading.py logs via the accelerate logger
 
 from src.data.pipeline.preprocessing import shard_dataset
-from src.data.pipeline.processing import _build_cache_file_name
+from src.data.pipeline.processing import _build_cache_file_name, _rank_stable_dataset_id
 from src.data.shard_index import SHARD_INDEX_FILE
-from src.data.sources.loading import load_datasets
+from src.data.sources.loading import alias_tools_column, load_datasets
 
 
 def _make_sharded_dataset(tmp_dir: str, num_rows: int = 100, num_shards: int = 2) -> str:
@@ -136,6 +136,26 @@ def test_same_shape_different_content_changes_cache_key():
         _save(1)  # same shapes, different content
         key_b = _load(path, rank=0, size=1)["train"]._toolkit_cache_key
         assert key_a != key_b, "same-shape content change must invalidate the forced cache key"
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def test_an_aliased_split_keys_apart_from_its_source():
+    """``datasets`` deep-copies the stamp onto a renamed split unchanged. A TRL preparation renders the
+    aliased ``tools`` column and ignores the unaliased one, so the two must not share a cache key."""
+    tmp = tempfile.mkdtemp()
+    try:
+        path = os.path.join(tmp, "ds")
+        rows = {"x": list(range(40)), "my_tools": ["[]"] * 40}
+        DatasetDict({"train": Dataset.from_dict(rows), "test": Dataset.from_dict(rows)}).save_to_disk(path)
+        ds = load_datasets(path=path, test_size=None, dataset_ratio=1, conversation_field=None)
+
+        aliased = alias_tools_column(ds, "my_tools", path)["train"]
+
+        assert _rank_stable_dataset_id(aliased) != _rank_stable_dataset_id(ds["train"])
+        assert _rank_stable_dataset_id(aliased) == _rank_stable_dataset_id(
+            alias_tools_column(ds, "my_tools", path)["train"]
+        )
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
 

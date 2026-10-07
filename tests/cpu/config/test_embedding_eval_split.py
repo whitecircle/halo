@@ -33,7 +33,9 @@ def _eval_dataset_handed_to_the_trainer(tmp_path, dataset: DatasetDict):
         "bf16: false\nuse_cpu: true\nmax_length: 512\n"
     )
     runtime = types.SimpleNamespace(
-        parallelism_config=types.SimpleNamespace(cp_size=1, is_cp_mode=False, pp_size=1, is_ep_mode=False),
+        parallelism_config=types.SimpleNamespace(
+            cp_size=1, is_cp_mode=False, pp_size=1, is_ep_mode=False, non_dp_replication_factor=1
+        ),
         model_source=_MODEL_ID,
         mode_suffix="",
         local_rank=0,

@@ -4,8 +4,8 @@
 transformers 5.16 ships no classification head for Gemma 4 or for MoE Qwen3.5/3.6, and each family
 has TWO config classes a checkpoint can carry — the composite (``gemma4``, ``qwen3_5_moe``) and the
 text tower (``gemma4_text``, ``qwen3_5_moe_text``), the latter being what a CausalLM SFT on a
-text-only artifact writes. Reward modeling, classification and prompts-RM all resolve the model
-through ``AutoModelForSequenceClassification``, so a missing spelling is a hard failure
+text-only artifact writes. Reward modeling and classification both resolve the model through
+``AutoModelForSequenceClassification``, so a missing spelling is a hard failure
 ("Unrecognized configuration class") at load, on a checkpoint that trained fine.
 
 All four go through ``src.models.seq_cls_heads``, which writes the auto mapping's ``_extra_content``

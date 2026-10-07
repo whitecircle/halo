@@ -16,7 +16,7 @@ from transformers.data.data_collator import DataCollatorMixin
 from trl.trainer.utils import pad
 
 from src.data.pipeline.rendered import lacks_emitted_bos
-from src.data.vlm import run_vlm_processor
+from src.data.vlm import SEQUENCE_ALIGNED_VISION_KEYS, run_vlm_processor
 
 _TEXT_SIDES = ("prompt", "chosen", "rejected")
 
@@ -24,9 +24,6 @@ _TEXT_SIDES = ("prompt", "chosen", "rejected")
 PREFERENCE_BATCH_KEYS = frozenset(
     {f"{side}_{suffix}" for side in _TEXT_SIDES for suffix in ("input_ids", "attention_mask")}
 )
-
-# Per-token type tensors (M-RoPE): 1:1 with input_ids, so they ride the pad/concat transforms, never a row-major cat.
-SEQUENCE_ALIGNED_VISION_KEYS = frozenset({"mm_token_type_ids", "token_type_ids"})
 
 
 @dataclass

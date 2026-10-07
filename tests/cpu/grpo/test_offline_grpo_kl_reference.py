@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import contextlib
+import os
 import types
 
 import pytest
@@ -15,12 +16,14 @@ from transformers import AutoConfig, AutoModelForCausalLM
 from trl import ModelConfig
 
 import scripts.training.offline_grpo as offline_grpo_script
-import src.trainers.grpo.reference_logps as reference_logps_module
+import src.trainers.grpo.mixins.offline_reference as reference_logps_module
+from src.checkpoint.format import REFERENCE_LOGPS_FILE
 from src.configs.offline_grpo_config import OfflineGRPOConfig
 from src.data.collators.offline_grpo import REF_PER_TOKEN_LOGPS_COLUMN
 from src.distributed.expert_parallel.config import ExpertLoraSpec
 from src.distributed.parallelism_config import ParallelismConfig
 from src.trainers.grpo.offline import OfflineGRPOTrainer
+from src.trainers.mixins.reference_logps import LOGPROB_PRECISION_KEY
 from tests.common.ep_stubs import StubEPLayerBase
 from tests.common.frozen_loader import captured_load, stub_frozen_loader
 from tests.common.offline_grpo import make_offline_tokenizer, offline_grpo_dataset
@@ -360,7 +363,9 @@ def test_a_held_reference_model_forwards_with_no_grad_and_the_policy_adapters_un
     assert reference_forward == {"model": reference, "grad": False, "adapters_off": False}
 
 
-def _anchor_trainer(*, checkpoint=None, trained=False, output_dir=None):
+def _anchor_trainer(*, checkpoint=None, trained=False, output_dir=None, chunked=False, pipeline=False, bf16=True):
+    """A trainer whose sweep scores rows off ``lm_head``; ``chunked`` and ``pipeline`` pick the scoring
+    path the reference identity records, which the stub sweep does not otherwise follow."""
     trainer = OfflineGRPOTrainer.__new__(OfflineGRPOTrainer)
     trainer.model = _tiny_llama()
     with torch.no_grad():
@@ -369,8 +374,10 @@ def _anchor_trainer(*, checkpoint=None, trained=False, output_dir=None):
     trainer.parallelism_config = ParallelismConfig()
     trainer.temperature = 0.75
     trainer.beta = 0.2
+    trainer._use_chunked_grpo_logprobs = chunked
+    trainer._pp_runtime = object() if pipeline else None
     trainer.args = types.SimpleNamespace(
-        disable_dropout=True, resume_from_checkpoint=checkpoint, output_dir=output_dir or checkpoint
+        disable_dropout=True, resume_from_checkpoint=checkpoint, output_dir=output_dir or checkpoint, bf16=bf16
     )
     trainer._dataset_presharded = False
     trainer._init_reference_logps(resume_checkpoint=checkpoint)
@@ -435,6 +442,54 @@ def test_explicit_reference_does_not_allow_a_resume_to_replace_its_missing_ancho
     with pytest.raises(RuntimeError, match="TRAINED checkpoint policy"):
         resumed._precompute_reference_logps(_anchor_dataset(), "training")
     assert resumed.sweep_count == 0
+
+
+@pytest.mark.parametrize(
+    "scoring,precision",
+    [({}, "bfloat16"), ({"bf16": False}, "float32"), ({"chunked": True}, "float32"), ({"pipeline": True}, "float32")],
+    ids=["full-logits-bf16", "full-logits-fp32", "chunked", "pipeline"],
+)
+def test_a_reference_split_records_the_precision_its_scoring_path_returns(tmp_path, scoring, precision):
+    """TRL's full-logits ``selective_log_softmax`` returns the logits' (compute) dtype; the chunked
+    kernel and the pipeline's last stage return fp32."""
+    trainer = _anchor_trainer(output_dir=str(tmp_path), **scoring)
+    trainer._precompute_reference_logps(_anchor_dataset(), "training")
+    assert trainer._reference_logps_by_split["training"]["settings"][LOGPROB_PRECISION_KEY] == precision
+
+
+def _saved_anchor(tmp_path, **scoring) -> dict:
+    first = _anchor_trainer(output_dir=str(tmp_path), **scoring)
+    first._precompute_reference_logps(_anchor_dataset(), "training")
+    first._persist_trainer_sidecars(str(tmp_path))
+    return torch.load(os.path.join(tmp_path, REFERENCE_LOGPS_FILE), weights_only=True)
+
+
+def _assert_resume_refuses_the_saved_anchor(tmp_path, **scoring) -> None:
+    resumed = _anchor_trainer(checkpoint=str(tmp_path), trained=True, **scoring)
+    with pytest.raises(ValueError, match=LOGPROB_PRECISION_KEY) as raised:
+        resumed._precompute_reference_logps(_anchor_dataset(), "training")
+    assert "--max_steps=1" in str(raised.value), "the refusal must name how to regenerate the file"
+    assert resumed.sweep_count == 0, "the trained policy was swept as its own reference"
+
+
+@pytest.mark.parametrize(
+    "saved,resumed",
+    [({}, {"chunked": True}), ({"chunked": True}, {}), ({}, {"pipeline": True}), ({"pipeline": True}, {})],
+    ids=["full-to-chunked", "chunked-to-full", "full-to-pipeline", "pipeline-to-full"],
+)
+def test_a_resume_scoring_at_another_precision_refuses_the_saved_reference(tmp_path, saved, resumed):
+    """The saved scores carry their path's rounding: attached to a run that scores the policy at
+    another precision, the KL would start off zero at the first step."""
+    _saved_anchor(tmp_path, **saved)
+    _assert_resume_refuses_the_saved_anchor(tmp_path, **resumed)
+
+
+def test_a_reference_saved_without_a_recorded_precision_is_not_restored(tmp_path):
+    """As for DPO/KTO, a split that records no precision is never assumed to match this run's."""
+    saved = _saved_anchor(tmp_path)
+    del saved["training"]["settings"][LOGPROB_PRECISION_KEY]
+    torch.save(saved, os.path.join(tmp_path, REFERENCE_LOGPS_FILE))
+    _assert_resume_refuses_the_saved_anchor(tmp_path)
 
 
 if __name__ == "__main__":

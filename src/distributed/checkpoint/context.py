@@ -1,6 +1,7 @@
-"""Trainer-state snapshots passed to the checkpoint savers and loaders.
+"""Checkpoint context — the trainer-state snapshot threaded into every saver.
 
-Built once per save/load call by the trainer's ``_checkpoint_context()`` factory. Carries object
+Built once per save/load call by the trainer's ``_checkpoint_context()`` factory. The savers read
+only this object (never the trainer), keeping collective/rank invariants explicit. Carries object
 references plus bound ``super()`` callables for the base-Trainer fallback.
 """
 
@@ -15,7 +16,7 @@ import torch.nn as nn
 
 @dataclass
 class CheckpointContext:
-    """Trainer state a checkpoint saver needs, captured at call time."""
+    """Everything a checkpoint saver needs, captured from the trainer at call time."""
 
     # The unwrapped module the save gathers iterate.
     model: nn.Module
@@ -42,7 +43,7 @@ class CheckpointContext:
     cp_wrapper: Any
     tokenizer: Any
 
-    # PP only: tensors no stage holds (a multimodal wrapper's vision tower), by global name, which the
+    # PP only: tensors no stage holds (a multimodal wrapper's vision tower), by global name, that the
     # save rank re-emits so the checkpoint keeps the wrapper layout. Empty for a plain causal LM.
     pp_wrapper_state: dict[str, Any] | None = None
 
@@ -53,15 +54,15 @@ class CheckpointContext:
 
 @dataclass
 class CheckpointLoadContext:
-    """Trainer state :class:`~src.distributed.checkpoint.loader.CheckpointLoader` needs on resume.
+    """Everything :class:`~src.distributed.checkpoint.loader.CheckpointLoader` needs on resume.
 
-    Separate from :class:`CheckpointContext` because ``fsdp_wrapped`` here is the bare
-    ``trainer._fsdp_wrapped`` (mixin-managed FSDP2 only), while the save context widens it with
-    ``isinstance(model, FSDP)``; merging the two would route accelerate-FSDP into the FSDP2 load path.
-    Built fresh per call so the ``optimizer`` / ``lr_scheduler`` references are current.
+    Separate from :class:`CheckpointContext`: the load paths gate on the bare ``trainer._fsdp_wrapped``
+    (mixin-managed FSDP2 only), whereas the save context widens ``fsdp_wrapped`` with
+    ``isinstance(model, FSDP)`` — folding the two would route accelerate-FSDP into the FSDP2 load
+    path. Built fresh per call so the ``optimizer`` / ``lr_scheduler`` references are current.
     """
 
-    # model = the FSDP2/parallel wrapper, not the unwrapped module the save gathers iterate.
+    # model = the FSDP2/parallel wrapper (NOT the unwrapped module the save gathers iterate).
     model: nn.Module
     optimizer: Any
     lr_scheduler: Any
@@ -76,9 +77,10 @@ class CheckpointLoadContext:
     tp_rank: int
     tp_size: int
 
-    # Bound base-Trainer fallbacks, reaching super() without holding the trainer.
+    # Bound base-Trainer fallbacks — reach super() without holding the trainer.
     super_load_from_checkpoint: Callable[..., None]
     super_load_optimizer_and_scheduler: Callable[..., None]
 
-    # A shard restore that fails under a matching topology warm-restarts instead of failing the resume.
+    # A shard restore that fails under a matching topology, or an interrupted save's shard set,
+    # warm-restarts instead of failing the resume.
     allow_optimizer_warm_restart: bool = False

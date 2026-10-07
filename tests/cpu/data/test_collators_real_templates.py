@@ -11,7 +11,7 @@ terminator is frequently NOT ``tokenizer.eos_token_id``:
 
 For each model it asserts the shared builder and every completion collator (standard, packing,
 flattening/padding-free) unmask the assistant content and mask the user content, and that a
-single-eos search masks the whole instance for GLM/Gemma.
+single-eos search gets GLM/Gemma wrong (whole instance masked, or user content leaked).
 
 Run: python tests/cpu/data/test_collators_real_templates.py
 Requires the model tokenizers/configs in the HF cache (offline-friendly).

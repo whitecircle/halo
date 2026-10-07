@@ -2,7 +2,7 @@
 """``VLLMWeightSyncClient.generate`` must take its completion IDs from the server, or fail.
 
 The request sets ``return_token_ids``, so every choice carries the sampled ``token_ids``. Rebuilding
-them from the decoded text instead (the old fallback) can differ from the sampled stream token for
+them from the decoded text instead can differ from the sampled stream token for
 token, which silently desyncs the GRPO importance-sampling ratio — a missing field has to raise.
 """
 
@@ -18,7 +18,7 @@ PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..
 
 
 def _build_import_stubs() -> dict:
-    """Lightweight stand-ins so ``vllm_client`` loads without real torch / src.
+    """Lightweight stand-ins so the vLLM client module loads without real torch / src.
 
     Returned as a ``{name: module}`` mapping so the caller can install them into
     ``sys.modules`` and then restore the originals — leaking these globally shadows the

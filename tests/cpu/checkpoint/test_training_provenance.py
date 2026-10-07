@@ -96,7 +96,7 @@ def test_stamp_readable_through_a_non_delegating_wrapper():
 @pytest.mark.parametrize("policy", list(SinksPolicy))
 def test_failed_layer_walk_raises_instead_of_stamping(policy):
     """A sinks-carrying config whose layer walk finds nothing (unrecognized layout) must raise for
-    EVERY policy. Stamping from the zero count recorded ``neutralized`` on a model whose sinks are
+    EVERY policy. Stamping from the zero count would record ``neutralized`` on a model whose sinks are
     live — silencing the RL sink gate and steering a later merge to neutralize a live artifact."""
     model = _GptOssStub()
     del model.model  # no walkable backbone -> _gpt_oss_sink_attentions yields nothing

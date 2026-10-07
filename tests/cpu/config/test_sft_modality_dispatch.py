@@ -182,7 +182,7 @@ def _run_dpo(tmp_path, dataset: DatasetDict, tokenizer):
         mock.patch.object(module, "log_model_info"),
         mock.patch.object(module, "load_script_datasets", return_value=(dataset, False)),
         # The preference prep and the example log both live in the shared script_runner helper the
-        # script now calls, so the two arms are distinguished on ITS globals: the text arm reaches
+        # script calls, so the two arms are distinguished on ITS globals: the text arm reaches
         # the tokenizing prep first, the VLM arm (which has no prep) reaches the log.
         mock.patch("src.training.script_runner.prepare_preference_datasets", side_effect=fail_text),
         mock.patch("src.training.script_runner.log_dataset_examples", side_effect=fail_vlm),
@@ -213,7 +213,7 @@ def test_text_dataset_on_a_multimodal_checkpoint_takes_the_text_path_with_packin
 def test_text_path_settles_the_padding_side_the_text_collators_require(tmp_path):
     """A multimodal checkpoint hands back the processor's tokenizer, which keeps the checkpoint's own
     side — left for Gemma 4. The packing collator refuses a left-padding tokenizer outright, so
-    without this the recipes the dispatch fix unlocks would still not run."""
+    without this the text recipes on a multimodal checkpoint would still not run."""
     tokenizer = types.SimpleNamespace(padding_side="left")
     with pytest.raises(_TextPathReached):
         _run_sft(tmp_path, "packing: true\n", _dataset(), stub_vlm_prep=False, tokenizer=tokenizer)
@@ -343,8 +343,8 @@ def test_every_dispatching_script_settles_the_text_path_padding_side(script):
 @pytest.mark.parametrize("script", _DISPATCHING_SCRIPTS)
 def test_data_dispatch_goes_through_the_shared_seam(script):
     """Each script that branches its data path on modality must ask ``resolve_vlm_run``. A local
-    ``is_vlm_model`` / column check here is the copy that drifts: it is exactly what made the SFT
-    text recipes unrunnable while DPO's own dataset-keyed copy kept working."""
+    ``is_vlm_model`` / column check here is a copy that drifts: a checkpoint-keyed one makes the
+    script's text recipes unrunnable while a dataset-keyed one elsewhere keeps working."""
     tree = ast.parse((_TRAINING_DIR / script).read_text(encoding="utf-8"))
     called = {
         node.func.id for node in ast.walk(tree) if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)

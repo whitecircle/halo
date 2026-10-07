@@ -2,18 +2,16 @@
 
 ``coordinated_dataset_operation`` runs the map/filter on ONE rank while the others wait. Joining the
 two phases with a bare barrier would leave a raise in ``operation_fn`` stranding the peers there for
-the whole watchdog window, while the failing rank goes straight into ``run_training``'s
-``destroy_process_group`` — which blocks too, so the interpreter never prints the traceback. That is
-a 20-minute silence for an error a single-rank re-run surfaces in seconds, so the join carries the
-failure instead.
+the whole watchdog window — a 20-minute silence for an error a single-rank re-run surfaces in
+seconds — so the join carries the failure instead.
 
 Proven on a real gloo group, with a deliberately short process-group timeout so a regression FAILS
 rather than stalling the suite: (1) both ranks raise, (2) the non-failing rank is told the actual
 cause rather than a timeout, (3) the rank that failed keeps its OWN exception type — the peers take
 the uniform ``RuntimeError``, but ``tokenize_vlm_dataset``'s ``NotImplementedError`` capability
 refusal is a contract, and (4) a failure on a NON-main rank (a torn cache read) propagates the same
-way. The teardown half is pinned separately: ``run_training`` must print the traceback BEFORE its own
-blocking teardown.
+way. The teardown half is pinned too: ``run_training`` enters no teardown collective when the entry
+point raises, so the failing rank exits with its traceback.
 
     python tests/cpu/data/test_coordinated_operation_failure.py
 """
@@ -57,7 +55,9 @@ def _worker(rank: int, tmp_dir: str, failing_rank: int, exc_name: str) -> None:
 
     # BaseException, so a KeyboardInterrupt raised out of the operation is recorded like any other.
     try:
-        coordinated_dataset_operation(operation_fn, dataset, operation_name="unit-test op", num_proc=1)
+        coordinated_dataset_operation(
+            operation_fn, dataset, operation_name="unit-test op", num_proc=1, cache_file_name="cache-op.arrow"
+        )
         _record(tmp_dir, rank, "NO RAISE")
     except BaseException as e:
         _record(tmp_dir, rank, f"{type(e).__name__}: {e}")
@@ -136,7 +136,9 @@ def _slow_map_worker(rank: int, tmp_dir: str) -> None:
         return dataset
 
     try:
-        coordinated_dataset_operation(operation_fn, dataset, operation_name="slow map", num_proc=1)
+        coordinated_dataset_operation(
+            operation_fn, dataset, operation_name="slow map", num_proc=1, cache_file_name="cache-slow.arrow"
+        )
         result = "PASS"
     except BaseException as e:
         result = f"FAIL: {type(e).__name__}: {str(e).splitlines()[0][:160]}"

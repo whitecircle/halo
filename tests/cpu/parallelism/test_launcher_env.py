@@ -158,7 +158,7 @@ def test_bare_srun_with_rendezvous_hands_c10d_the_launcher_rank_and_world(pre_in
     captured: dict = {}
     monkeypatch.setattr(runtime.dist, "init_process_group", lambda **kwargs: captured.update(kwargs))
     monkeypatch.setattr(runtime, "apply_default_pg_timeout", lambda timeout: None)
-    monkeypatch.setattr(runtime, "resolve_shared_filesystem_consensus", lambda: {})
+    monkeypatch.setattr(runtime, "resolve_shared_filesystem_consensus", lambda: None)
 
     assert runtime.init_distributed(backend="gloo") is True
     assert captured["rank"] == 3 and captured["world_size"] == 16
@@ -175,7 +175,7 @@ def test_torchrun_launch_leaves_rank_and_world_to_the_env_handler(pre_init, monk
     captured: dict = {}
     monkeypatch.setattr(runtime.dist, "init_process_group", lambda **kwargs: captured.update(kwargs))
     monkeypatch.setattr(runtime, "apply_default_pg_timeout", lambda timeout: None)
-    monkeypatch.setattr(runtime, "resolve_shared_filesystem_consensus", lambda: {})
+    monkeypatch.setattr(runtime, "resolve_shared_filesystem_consensus", lambda: None)
 
     assert runtime.init_distributed(backend="gloo") is True
     assert "rank" not in captured and "world_size" not in captured

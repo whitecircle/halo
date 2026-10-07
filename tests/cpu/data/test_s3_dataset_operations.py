@@ -112,8 +112,8 @@ def test_push_dataset_saves_to_a_staging_sibling():
 
 
 def test_push_dataset_overwrite_never_deletes_the_destination_first():
-    """The pre-staging protocol deleted the destination before uploading — a crash in that window
-    silently erased the only copy. Overwrite must reach save_to_disk with zero destination deletes."""
+    """Deleting the destination before uploading leaves a crash window that silently erases the only
+    copy. Overwrite must reach save_to_disk with zero destination deletes."""
     print("Testing push_dataset (overwrite is delete-free before save)...")
 
     mock_dataset = MagicMock(spec=Dataset)

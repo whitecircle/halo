@@ -1,4 +1,4 @@
-"""Unified parallelism configuration: EP/CP/TP/expert-TP/DP sizes and ranks, validated at config time.
+"""Unified parallelism configuration: single source of truth for EP/CP/TP/expert-TP/DP sizes and ranks.
 
 EP is orthogonal to DP (all-to-all routing); only TP/CP/expert_tp reduce data_parallel_size.
 ep_scope "node" keeps EP within one NVLink domain, "global" spans domains over RDMA.
@@ -71,7 +71,7 @@ EP_BUFFER_BACKENDS: tuple[str, ...] = get_args(EPBufferBackend)
 LowpPrecision = Literal["bf16", "fp8", "fp4", "mxfp4"]
 LOWP_PRECISIONS: tuple[str, ...] = get_args(LowpPrecision)
 
-# Axis → CLI flag, so rejection messages quote the flag the user typed rather than the field name.
+# Axis → CLI flag: rejection messages quote the flag the user typed, not the internal field name.
 AXIS_FLAGS: dict[str, str] = {
     "pp": "pipeline_parallel_size",
     "ep": "expert_parallel_size",
@@ -80,8 +80,8 @@ AXIS_FLAGS: dict[str, str] = {
     "cp": "context_parallel_size",
 }
 
-# Allowlist of combinable model-sharding axes (FSDP is not an axis — it shards the leftover DP
-# width). Unlisted combinations are rejected rather than running unvalidated.
+# ALLOWLIST of combinable model-sharding axes (FSDP is not an axis — it shards the leftover DP
+# width). Unlisted combinations are rejected rather than running unvalidated, as a denylist allows.
 SUPPORTED_AXIS_SETS: frozenset[frozenset[str]] = frozenset(
     map(
         frozenset,
@@ -101,7 +101,7 @@ SUPPORTED_AXIS_SETS: frozenset[frozenset[str]] = frozenset(
     )
 )
 
-# Explanation per rejected combination; a missing entry only shortens the message.
+# Why a rejected combination is rejected; a missing entry degrades the explanation, not the rejection.
 AXIS_SET_MECHANISMS: dict[frozenset[str], str] = {
     frozenset({"tp", "cp"}): (
         "TP and CP would partition the same ranks twice: both groups are contiguous rank blocks, so "
@@ -168,14 +168,15 @@ AXIS_SET_MECHANISMS: dict[frozenset[str], str] = {
 def _divisors_up_to(value: int, ceiling: int) -> list[int]:
     """Divisors of ``value`` in ``2..ceiling`` — the sizes a rejection may suggest.
 
-    1 is excluded (it means no expert parallelism). Suggestions are arithmetic about the model only;
-    filtering them against the topology gates is the caller's job.
+    1 is excluded because it means "no expert parallelism", which is not an answer to "pick a
+    working ep_size". Whether a suggestion also survives the topology gates is the caller's to
+    filter: this is arithmetic about the model, not about the job's rank layout.
     """
     return [d for d in range(2, min(value, ceiling) + 1) if value % d == 0]
 
 
 def _render_axis_set(axes: frozenset[str]) -> str:
-    """Axis set rendered for messages: 'PP + EP', or 'plain data parallelism' when empty."""
+    """Axis set as the user's mental model: 'PP + EP', or 'plain data parallelism' when empty."""
     ordered = [a for a in AXIS_FLAGS if a in axes]
     return " + ".join(a.upper() for a in ordered) if ordered else "plain data parallelism"
 
@@ -199,7 +200,7 @@ class ParallelismConfig:
     tp_size: int = 1
     expert_tp_size: int = 1  # Expert FFN TP (independent of tp_size, MoE-only, node-local)
 
-    # Outermost dimension, the only one meant to cross NVLink domains: the world splits into pp_size
+    # OUTERMOST dimension, the only one meant to cross NVLink domains: the world splits into pp_size
     # contiguous rank blocks and every other mode runs unchanged inside one block (only P2P uses RDMA).
     pp_size: int = 1
     pp_schedule: PPSchedule = PP_DEFAULT_SCHEDULE
@@ -208,8 +209,8 @@ class ParallelismConfig:
     # head-weighted default, shrinking the last stage's budget by the lm_head's layer-equivalent cost.
     pp_split: list[int] | None = None
 
-    # "auto" resolves below to node/global from ep_group_size vs the NVLink domain; same default as
-    # DistributedArguments, so a hand-built config behaves like a YAML-built one.
+    # "auto" (resolved below to node/global from ep_group_size vs the NVLink domain) — the same
+    # default DistributedArguments declares, so a hand-built config behaves like a YAML-built one.
     ep_scope: EPScope = "auto"
 
     ep_fp32_router: bool = False
@@ -237,8 +238,8 @@ class ParallelismConfig:
     lowp_keep_last_blocks: int = 0
 
     # Max ranks loading simultaneously per node. None = derive from the node width (half of it, capped
-    # at 4); 1 = sequential (lowest CPU-RAM peak), 0 = all parallel. An explicit value is used verbatim
-    # (see resolve_load_concurrency).
+    # at 4); 1 = sequential (lowest CPU-RAM peak), 0 = all parallel. Any explicit value is honoured
+    # verbatim — see resolve_load_concurrency.
     max_concurrent_loading: int | None = None
 
     # True: every EP path (EP, EP+CP, EP+TP, pure ETP) loads lazily from safetensors (meta init +
@@ -249,10 +250,11 @@ class ParallelismConfig:
     # DeepEP transport: "auto"=="elastic" (ElasticBuffer/NCCL Gin, cross-node); "legacy" = V1 CUDA-IPC.
     ep_buffer_backend: EPBufferBackend = "auto"
 
-    # The run's per-rank shape for the dispatch-ceiling gate below, derived from the training config by
-    # ``parallelism_config_from_args``: rows one MoE forward carries per device (rows_per_forward x
-    # per_device_train_batch_size) and the config's max_length. Length 0 means ``max_length: null``,
-    # resolved by the gate against the model's context window; 0 rows declares no budget.
+    # The run's per-rank shape for the dispatch-ceiling gate, from ``parallelism_config_from_args``: rows
+    # one MoE forward carries per device (forward_rows_per_example x per_device_train_batch_size) and max_length
+    # (0 = ``max_length: null``, resolved against the model's context window). 0 rows (a hand-built
+    # config, or a trainer with no max_length knob) declares no budget, leaving the ceilings to the
+    # dispatcher's runtime backstop.
     ep_rows_per_device: int = 0
     ep_declared_max_length: int = 0
 
@@ -307,25 +309,33 @@ class ParallelismConfig:
     _cp_config: Optional["CPConfig"] = field(default=None, init=False, repr=False)
 
     def __post_init__(self):
-        """Resolve the computed fields and validate, reporting the verdict world-uniformly.
+        """Resolve the computed fields, then validate — with the verdict made world-uniform.
 
-        Every rule in :meth:`_resolve_and_validate` is rank-local, while ``gpus_per_node`` and
-        ``nvlink_domain_size`` are per-node inputs: a drift that trips a divisibility rule raises on
-        one node's ranks alone, leaving the rest blocked in the fabric collective below.
+        Every rule in :meth:`_resolve_and_validate` is rank-LOCAL, and two of its inputs are
+        per-NODE rather than per-job: ``gpus_per_node`` from the launcher and ``nvlink_domain_size``
+        from ``NVLINK_DOMAIN_SIZE``. A drift that also trips a divisibility rule therefore raises on
+        one node's ranks alone — and every other rank walks into the fabric ``all_gather_object``
+        below and sits there for the full watchdog, so the operator sees 504 timeouts and has to
+        find the 8 real tracebacks. Gathering the verdict first turns that into one uniform
+        ValueError carrying the actual reason.
         """
         try:
             self._resolve_and_validate()
-        except Exception as exc:  # the reason is re-raised world-uniformly below
-            # Any exception, not just ValueError: one escaping this block would skip the gather below
-            # and leave every peer blocked in it. The type is kept in the message across the re-raise.
+        except Exception as exc:  # see below; the reason is re-raised world-uniformly
+            # ANY exception, not just ValueError: one that escaped this block would skip the gather
+            # below and leave every peer blocked in it. The type is carried in the message so the
+            # diagnostic survives being re-raised as the ValueError this gate documents.
             local_reason = str(exc) if isinstance(exc, ValueError) else f"{type(exc).__name__}: {exc}"
         else:
             local_reason = None
         reject_across_ranks(local_reason, "parallelism config", exc_type=ValueError)
 
-        # Both inputs to the MNNVL gate below are per-node, and that gate runs a collective only above
-        # ``nvlink_domain_size > gpus_per_node``: a drift straddling that threshold splits the world at
-        # it, and no rank-local divisibility check catches it. Rejected before either collective.
+        # Both inputs to the MNNVL gate below are per-NODE, and that gate runs a collective only
+        # above ``nvlink_domain_size > gpus_per_node``. A drift straddling that threshold therefore
+        # SPLITS the world at it — the nodes above join its all_gather_object, the nodes below return
+        # without one — and neither value's own uniformity rule catches it: two nodes can declare
+        # different domains (or different widths) and still pass every rank-local divisibility check.
+        # So the drift is rejected here, before either collective, naming the actual values.
         reject_divergent_settings(
             {"nvlink_domain_size": self.nvlink_domain_size, "gpus_per_node": self.gpus_per_node},
             "NVLink topology",
@@ -342,8 +352,8 @@ class ParallelismConfig:
     def _resolve_and_validate(self) -> None:
         """Fill the computed fields and apply every rank-local rule. Raises ``ValueError``.
 
-        Must stay collective-free: :meth:`__post_init__` runs it inside the uniformity gather, so a
-        rule added here is reported world-uniformly.
+        Collective-free by construction: :meth:`__post_init__` runs this inside the uniformity gather,
+        so a rule added here is automatically reported world-uniformly. Do not put a collective in it.
         """
         if self.world_size == 0:
             self.world_size = get_global_world_size()
@@ -367,8 +377,8 @@ class ParallelismConfig:
             raise ValueError(f"pipeline_microbatches must be >= 0 (0 = auto), got {self.pp_microbatches}")
         if self.ep_scope not in EP_SCOPES:
             raise ValueError(f"ep_scope must be one of {EP_SCOPES}, got {self.ep_scope!r}")
-        # The dispatcher's own check runs after the whole model has loaded and returns early at
-        # ep_size <= 1, so a hand-built config's typo would not surface there.
+        # The dispatcher's own check runs after the whole model has loaded, and returns early at
+        # ep_size <= 1 — so a hand-built config's typo would never surface.
         if self.ep_buffer_backend not in EP_BUFFER_BACKENDS:
             raise ValueError(f"ep_buffer_backend must be one of {EP_BUFFER_BACKENDS}, got {self.ep_buffer_backend!r}")
         if self.max_concurrent_loading is not None and self.max_concurrent_loading < 0:
@@ -377,12 +387,13 @@ class ParallelismConfig:
                 f"the node width), got {self.max_concurrent_loading}"
             )
 
-        # Before any rank math: a combination with no validated composition is rejected as
-        # unsupported rather than as a divisibility error. Reads only the five axis sizes above.
+        # Genuinely first, before any rank math: a combination with no validated composition should
+        # be refused as unsupported, not as a divisibility error about a shape that was never going
+        # to run. Reads only the five axis sizes above, so nothing resolved later is needed.
         self._validate_capability_matrix()
 
-        # Before the domain math, which is expressed in whole nodes: an unequal node size would make
-        # every domain rule below report a domain problem for what is really a node-count problem.
+        # Before the domain math, which is expressed in whole nodes: an unequal node size makes every
+        # domain rule below report a domain problem for what is really a node-count problem.
         self._validate_node_topology()
 
         if self.gpus_per_node <= 0:
@@ -393,14 +404,14 @@ class ParallelismConfig:
             )
         if self.nvlink_domain_size < 0:
             # Python modulo would pass a negative multiple through both divisibility gates below,
-            # leaving num_nvlink_domains negative.
+            # leaving num_nvlink_domains negative and every domain rule reporting nonsense.
             raise ValueError(
                 f"nvlink_domain_size must be positive (0 = resolve from NVLINK_DOMAIN_SIZE / "
                 f"gpus_per_node), got {self.nvlink_domain_size}."
             )
         if self.nvlink_domain_size == 0:
             self.nvlink_domain_size = get_nvlink_domain_size(self.gpus_per_node)
-        # A rack-wide domain must not be shrunk onto a multi-node sub-job, which may span racks.
+        # A rack-wide domain must never be silently shrunk onto a multi-node sub-job (may span racks).
         if self.nvlink_domain_size > self.world_size and self.world_size > self.gpus_per_node:
             raise ValueError(
                 f"NVLINK_DOMAIN_SIZE ({self.nvlink_domain_size}) exceeds this job's world_size "
@@ -409,9 +420,9 @@ class ParallelismConfig:
                 f"if they span racks, unset it (per-node NVLink only)."
             )
         if self.nvlink_domain_size > self.world_size:
-            # Single-node only (the multi-node case raised above), and legal — a rack-wide
-            # NVLINK_DOMAIN_SIZE on a small job. The summary prints only the clamped value, so this
-            # log is the record of the adjustment.
+            # Only reachable single-node (the multi-node case raised above). Legal — a rack-wide
+            # NVLINK_DOMAIN_SIZE on a small job — but the summary shows only the clamped value,
+            # so this line is the sole record of the adjustment.
             if is_global_main_process():
                 logger.info(
                     f"nvlink_domain_size ({self.nvlink_domain_size}) exceeds this job's world_size; "
@@ -449,8 +460,8 @@ class ParallelismConfig:
             self.ep_scope = "node" if self.ep_group_size <= self.nvlink_domain_size else "global"
         elif self.ep_group_size == 1:
             # A one-rank group spans no domain, so an explicit 'global' (copied off an EP config onto
-            # a dense run) describes nothing, and ``_validate_ep_group`` skips it at this size — the
-            # cross-node rank math would then raise about expert parallelism the run does not use.
+            # a dense run) has nothing to describe — and ``_validate_ep_group`` skips it at this size,
+            # leaving the cross-node rank math to raise about expert parallelism the run does not use.
             self.ep_scope = "node"
 
         self.num_nodes = self.world_size // self.gpus_per_node  # gpus_per_node > 0, checked above
@@ -473,9 +484,9 @@ class ParallelismConfig:
     def _validate(self):
         """Validate the parallelism configuration (one sub-validator per topology concern).
 
-        ``_validate_node_topology`` and ``_validate_capability_matrix`` run earlier, from
-        ``__post_init__``: the domain math divides by ``gpus_per_node``, and an unsupported axis set
-        must be rejected before any rank math reports a divisibility error.
+        ``_validate_node_topology`` and ``_validate_capability_matrix`` are missing here on purpose:
+        both run earlier in ``__post_init__`` — the domain math divides by ``gpus_per_node``, and an
+        unsupported axis set must be refused before any rank math reports a divisibility error.
         """
         self._validate_pipeline_parallel()
         self._validate_ep_group()
@@ -491,19 +502,20 @@ class ParallelismConfig:
 
     @property
     def experts_fsdp_managed(self) -> bool:
-        """Mirrors :attr:`EPConfig.experts_fsdp_managed` for call sites that run before (or without)
-        an ``EPConfig``. Both must agree: the EP layer's grad hooks and FSDP's reduce-scatter each
-        assume the other is not syncing the experts."""
+        """Mirrors :attr:`EPConfig.experts_fsdp_managed` for the call sites that run before (or
+        without) an ``EPConfig`` — the FSDP-ignored set, the PP stage wrap, and this class's own
+        validators. Both must give the same answer: the EP layer's grad hooks and FSDP's
+        reduce-scatter each assume the other is not syncing the experts."""
         return self.fsdp_shard_ep1_experts and self.ep_group_size == 1
 
     @property
     def _is_multi_domain_multi_group_ep(self) -> bool:
-        """More than one EP dispatch group laid across more than one NVLink domain — the shape the TP
-        and ETP composition validators reject, each for its own gradient-sync reason."""
+        """More than one EP dispatch group laid across more than one NVLink domain — the shape both
+        the TP and the ETP composition validators reject, each for its own gradient-sync reason."""
         return self.ep_size > 1 and self.num_nvlink_domains > 1 and self.stage_world_size // self.ep_group_size > 1
 
     def _axis_sizes(self) -> dict[str, int]:
-        """This config's size per :data:`AXIS_FLAGS` axis."""
+        """This config's size per :data:`AXIS_FLAGS` axis — the one place the mapping is spelled out."""
         return {
             "pp": self.pp_size,
             "ep": self.ep_size,
@@ -514,14 +526,15 @@ class ParallelismConfig:
 
     @property
     def active_axes(self) -> frozenset[str]:
-        """The model-sharding axes this config turns on, derived from the sizes."""
+        """The model-sharding axes this config turns on, derived from the sizes (never hand-listed)."""
         return frozenset(axis for axis, size in self._axis_sizes().items() if size > 1)
 
     def _validate_capability_matrix(self):
         """Reject any axis combination outside :data:`SUPPORTED_AXIS_SETS`.
 
-        Called from ``__post_init__`` ahead of every rank-math check, so an unsupported combination
-        is reported as such rather than as a divisibility error about a shape that cannot run.
+        Called from ``__post_init__`` ahead of every rank-math check, so a combination with no
+        validated composition reads "this is not supported and here is why" rather than a
+        divisibility error about a shape that was never going to run.
         """
         axes = self.active_axes
         if axes in SUPPORTED_AXIS_SETS:
@@ -554,12 +567,13 @@ class ParallelismConfig:
         """PP stages must be whole NVLink domains, and PP must not be combined with modes whose
         collectives or loss aggregation it would break.
 
-        Stage boundaries on domain boundaries keep every EP/CP/TP/ETP group (all domain-local rank
-        blocks) inside one stage, so no intra-stage collective straddles a pipeline boundary and only
-        PP's point-to-point activations cross RDMA.
+        Stage boundaries on domain boundaries is the load-bearing rule: it keeps every EP/CP/TP/ETP
+        group (all of which are domain-local rank blocks) strictly inside one stage, so no intra-stage
+        collective can straddle a pipeline boundary and only PP's point-to-point activations cross RDMA.
         """
         if self.pp_size == 1:
-            # Nothing reads the PP-only knobs at pp_size == 1, so a set value would have no effect.
+            # Every PP-only knob is rejected, not just pp_split: nothing reads them at pp_size == 1,
+            # so a set value is a config that does not do what it says.
             for name, value, default in (
                 ("pipeline_split", self.pp_split, None),
                 ("pipeline_microbatches", self.pp_microbatches, 0),
@@ -601,8 +615,8 @@ class ParallelismConfig:
             )
 
         if self.stage_world_size == 1:
-            # setup_fsdp2_for_dp skips wrapping at dp <= 1, so the runtime FSDP contract assert would
-            # report a missing wrap instead of the stage width that caused it.
+            # setup_fsdp2_for_dp skips wrapping at dp<=1, so the runtime FSDP contract assert would
+            # blame a wrap bug that doesn't exist. Reject honestly instead.
             raise ValueError(
                 f"pipeline_parallel_size={self.pp_size} leaves each pipeline stage with a single "
                 f"rank (world_size={self.world_size}): unsharded one-rank stages are not "
@@ -622,8 +636,8 @@ class ParallelismConfig:
             )
 
         if self.use_hsdp:
-            # The shape is coherent whenever a stage holds >1 domain (its domains hold the same
-            # layers, so replicating across them is ordinary HSDP); the mesh is what is missing.
+            # The shape itself is coherent whenever a stage owns >1 domain (a stage's domains hold the
+            # SAME layers, so replicating across them is ordinary HSDP); what is missing is the mesh.
             raise ValueError(
                 f"PP + HSDP is not supported (pipeline_parallel_size={self.pp_size}, "
                 f"stage_world_size={self.stage_world_size}, {self.num_nvlink_domains} NVLink domain(s) "
@@ -638,11 +652,12 @@ class ParallelismConfig:
             )
 
         if (self.fp32_grad_reduce or self.fp32_non_ep_params) and is_global_main_process():
-            # torch's schedule disables FSDP gradient sync for the whole microbatch loop
-            # (set_requires_gradient_sync(False)) and reduce-scatters once per optimizer step, so FSDP2
-            # accumulates into an unsharded grad buffer at reduce_dtype — 4 B/param in fp32, double the
-            # bf16 accumulator and not shrinking with DP width. Without PP the knob changes only the
-            # reduction.
+            # torch's schedule turns FSDP gradient sync off for the whole microbatch loop
+            # (set_requires_gradient_sync(False)) and reduce-scatters once per optimizer step, so
+            # FSDP2 accumulates into an UNSHARDED grad buffer at reduce_dtype for the whole loop.
+            # In fp32 that is 4 B/param on top of the unsharded bf16 params reshard_after_forward=False
+            # already pins — double the bf16 accumulator, and it does not shrink with DP width. Off PP
+            # the knob really does change only the reduction, which is what the docs describe.
             logger.warning(
                 "fp32 gradient reduction under pipeline parallelism doubles the PERSISTENT gradient "
                 "buffer: the schedule defers FSDP's reduce-scatter to the optimizer step, so each "
@@ -652,8 +667,8 @@ class ParallelismConfig:
             )
 
         if self.fsdp_reshard_after_forward:
-            # The two settings agree numerically; the composition is untested at the trainer level
-            # (clip / checkpoint / EP) and pays an all-gather the schedule does not need.
+            # Not a correctness claim — the two settings agree numerically. It is unproven at the
+            # trainer level (clip / checkpoint / EP) and pays an all-gather the schedule does not want.
             raise ValueError(
                 f"PP + fsdp_reshard_after_forward=True (FULL_SHARD / ZeRO-3) is not enabled "
                 f"(pipeline_parallel_size={self.pp_size}): torch's pipeline schedule already pins "
@@ -707,7 +722,7 @@ class ParallelismConfig:
                     expert_tp_size=self.expert_tp_size,
                 )
                 # Cross-node EP groups must tile the world as equal contiguous per-domain blocks, else
-                # DeepEP's intranode IPC peers are strided; cross_node_layout raises if they cannot.
+                # DeepEP's intranode IPC peers would be strided; cross_node_layout raises if they can't.
                 cross_node_layout(self.stage_world_size, self.ep_group_size, self.nvlink_domain_size)
 
     def _validate_cp_locality(self):
@@ -764,10 +779,10 @@ class ParallelismConfig:
 
     def _validate_expert_tp(self):
         """Expert-TP topology (MoE-only, independent of tp_size): NVLink-local, and node-local ETP
-        groups even under cross-node EP. Which axes may accompany it is the capability matrix's rule."""
+        groups even under cross-node EP. Which axes may accompany it is the matrix's job."""
         if self.expert_tp_size > 1:
-            # EPConfig enforces the same contract at group construction, i.e. only after the whole
-            # checkpoint has downloaded.
+            # The same contract EPConfig enforces at group construction, but at CONFIG time — the
+            # late check only fires after the whole checkpoint has downloaded.
             if self.expert_lora is not None:
                 reject_expert_lora_with_expert_tp()
             if self.nvlink_domain_size % self.expert_tp_size != 0:
@@ -787,9 +802,10 @@ class ParallelismConfig:
                     f"single EP group (expert_parallel_size * expert_tensor_parallel_size == world size) or set "
                     f"expert_tensor_parallel_size to 1."
                 )
-            # Global-scope EP+ETP must form one ETP group per NVLink domain, keeping the ETP
-            # all-reduce on NVLink. Not gated on multi-domain: on one domain the rule degenerates to
-            # pure ETP and EPConfig raises there too, only after the whole model has loaded.
+            # Global-scope EP+ETP must form one ETP group per NVLink domain (keeps the ETP all-reduce
+            # on NVLink) — the rule EPConfig enforces at group construction, checked before model load.
+            # Not gated on multi-domain: on one domain the rule degenerates to pure ETP, and EPConfig
+            # would still raise, only after the whole model has loaded.
             if self.ep_scope == "global":
                 _, members_per_domain, num_domains = cross_node_layout(
                     self.stage_world_size, self.ep_group_size, self.nvlink_domain_size
@@ -826,31 +842,33 @@ class ParallelismConfig:
     @property
     def is_racy_single_domain_multigroup_ep(self) -> bool:
         """Multiple >2-rank DeepEP dispatch groups whose combine barrier races an FSDP2 collective of
-        different membership. Shared by the config-time validator and the trainer-side guard.
+        DIFFERENT membership. The topology predicate the config-time validator rejects on.
 
         Both backends fail, with different symptoms: ``legacy`` (V1 ``Buffer``) deadlocks around step
         2; the ``elastic`` default (V2 over NCCL Gin) faults with ``CUDA error: Invalid access of peer
         GPU memory over nvlink``. ``CUDA_DEVICE_MAX_CONNECTIONS=1`` does not cover it.
 
-        ``num_nvlink_domains == 1`` stands for "FSDP2 does not share the EP group's membership":
+        ``num_nvlink_domains == 1`` is the proxy for "FSDP2 does not share the EP group's membership":
         :attr:`EPConfig.is_deferred_dp` engages only above one domain, and it is what makes
         ``_apply_ep_aware_dp_fsdp2`` shard the non-expert params over the EP group instead of the whole
-        DP world. On one domain the reduce-scatter spans every rank while the combine spans a subset.
+        DP world. On one domain no such deferral exists, so the reduce-scatter spans every rank while
+        the combine spans a strict subset.
 
         Keyed on ``ep_group_size``, not ``ep_size``, so EP+ETP passes: ``_create_expert_tp_groups``
         splits an ``ep_group_size``-wide group into ``expert_tp_size`` dispatch groups of ``ep_size``,
-        and ep4+etp2 on one 8-GPU domain runs clean where bare ep4 faults.
+        and ep4+etp2 on one 8-GPU domain runs clean where bare ep4 faults — keying on ``ep_size``
+        would reject the only 4-way-on-8 shape that works.
         """
         return self.num_nvlink_domains == 1 and self.ep_size > 2 and self.nvlink_domain_size > self.ep_group_size
 
     @property
     def racy_ep_topology_message(self) -> str:
-        """Rejection message for the racy-EP topology, shared by the config gate and trainer guard."""
+        """The one wording of the racy-EP rejection the config gate raises."""
         return (
             f"expert_parallel_size={self.ep_size} on a single {self.nvlink_domain_size}-GPU NVLink "
             f"domain forms {self.nvlink_domain_size // self.ep_size} concurrent >2-rank DeepEP dispatch "
             f"groups (ep_group_size={self.ep_group_size}), whose combine barriers race FSDP2's "
-            f"DP-wide collectives. Measured on an 8-GPU node: the legacy buffer deadlocks, the elastic "
+            f"DP-wide collectives. Measured on 8xB300: the legacy buffer deadlocks, the elastic "
             f"default faults with 'Invalid access of peer GPU memory over nvlink' — both with and "
             f"without gradient checkpointing. Use a SINGLE dispatch group per domain: expert_parallel_size=2, "
             f"or raise expert_parallel_size * expert_tensor_parallel_size to the domain "
@@ -861,16 +879,17 @@ class ParallelismConfig:
         )
 
     def _validate_ep_buffer_backend(self):
-        """Reject at config time a ``legacy`` (DeepEP V1) backend this topology cannot drive.
+        """Reject a ``legacy`` (DeepEP V1) backend this topology cannot drive — at CONFIG time.
 
-        The rules live with the V1 limits they read
+        The rules themselves live with the V1 limits they read
         (:func:`~src.distributed.expert_parallel.config.reject_legacy_backend_topology`); the
-        dispatcher applies the same function to a hand-built ``EPConfig`` inside
-        ``EPMoELayerBase.__init__``, after the checkpoint download and the model load on every rank.
+        dispatcher applies the same function to a hand-built ``EPConfig``, but only inside
+        ``EPMoELayerBase.__init__`` — after the checkpoint download and the model load on every rank.
+        They are pure arithmetic over the declared topology, so they belong before any of that.
         """
         if self.ep_buffer_backend != "legacy" or self.ep_size <= 1:
             return
-        # The dispatch group is what rides the buffer; under expert-TP it is narrower than the EP group.
+        # The DISPATCH group is what rides the buffer; under expert-TP it is narrower than the EP group.
         reject_legacy_backend_topology(
             self.ep_size,
             is_cross_node=self.num_nodes > 1 and not self.is_node_local_ep,
@@ -879,10 +898,10 @@ class ParallelismConfig:
         )
 
     def _validate_single_domain_multigroup_ep(self):
-        """Reject single-domain multi-group EP with >2-rank dispatch groups, before any model loading.
-
-        Covers pure EP and EP+TP alike (attention TP leaves ``ep_group_size`` untouched); EP+ETP is
-        exempt — see :attr:`is_racy_single_domain_multigroup_ep`."""
+        """Reject single-domain multi-group EP with >2-rank dispatch groups at config time — before
+        any model loading. Covers pure EP and EP+TP alike (attention TP leaves ``ep_group_size``
+        untouched); EP+ETP is the documented exemption — see
+        :attr:`is_racy_single_domain_multigroup_ep`."""
         if self.is_racy_single_domain_multigroup_ep:
             raise ValueError(self.racy_ep_topology_message)
 
@@ -948,7 +967,7 @@ class ParallelismConfig:
             )
         if not self.fsdp_shard_ep1_experts and (self.tp_size > 1 or self.cp_size > 1):
             # The TP and CP setup paths FSDP-shard ep1 experts unconditionally (their fully_shard
-            # replaces the params), so the flag would have no effect.
+            # replaces the params), so the flag would be a silent no-op rather than the mode asked for.
             raise ValueError(
                 f"fsdp_shard_ep1_experts=False is not honored under TP or CP "
                 f"(tensor_parallel_size={self.tp_size}, context_parallel_size={self.cp_size}): those paths "
@@ -1015,10 +1034,11 @@ class ParallelismConfig:
     def validate_against_model_config(self, model_config) -> None:
         """Reject expert-sharding shapes this model cannot take, before any weight is read.
 
-        ``ParallelismConfig`` is otherwise model-blind, so the expert-divisibility rules are reached
-        only once the shapes are in hand — ``EPConfig.finalize_expert_assignment`` after the EP process
-        groups exist, and the expert-TP split during layer construction — minutes and several
-        collectives into a job. The arithmetic needs nothing but ``config.json``.
+        ``ParallelismConfig`` is model-blind by construction, so the expert-divisibility rules are
+        otherwise reached only once the shapes are in hand — ``EPConfig.finalize_expert_assignment`` after the EP
+        process groups exist, and the expert-TP split during layer construction. Both are minutes and
+        several collectives into a job. The arithmetic needs nothing but ``config.json``, so it runs
+        here too, off the same registry the rest of the toolkit reads expert fields through.
         """
         if self.ep_size > 1:
             num_experts = get_first_router_field(model_config, ROUTER_EXPERT_COUNT_FIELDS)
@@ -1045,9 +1065,9 @@ class ParallelismConfig:
             and self.experts_fsdp_managed
             and get_first_router_field(model_config, ROUTER_EXPERT_COUNT_FIELDS)
         ):
-            # Config-time and rank-symmetric: under PP a hybrid stack can leave one stage with no MoE
-            # layer, so the equivalent check on the trainer's per-rank module walk would raise on MoE
-            # stages while the dense stages walked into the wrap and hung the job.
+            # Config-time and rank-symmetric on purpose: under PP a hybrid stack can give one stage
+            # no MoE layer, so the equivalent check on the trainer's per-rank module walk would
+            # raise on MoE stages while dense stages walked into the wrap and hung the job.
             remedy = (
                 "drop fp32_non_ep_params (fsdp_shard_ep1_experts=false is refused under PP/TP/CP)"
                 if self.pp_size > 1 or self.tp_size > 1 or self.cp_size > 1
@@ -1059,26 +1079,29 @@ class ParallelismConfig:
                 f"FSDP-managed experts stay bf16 in the same shard group, and FSDP2 asserts "
                 f"'uniform original parameter dtype' at the first forward. Remedy: {remedy}."
             )
-        # Dense TP goes through HF's tp_plan="auto", which checks no head count of its own, so
-        # without this it fails on the first forward's reshape, after the full load.
+        # Dense TP goes through HF's tp_plan="auto", which validates no head count of its own, so
+        # without this it fails on the first forward's reshape — after the full load.
         validate_tp_head_divisibility(text_config(model_config), self.tp_size)
         self._validate_ep_token_budget(model_config)
 
     def _validate_ep_token_budget(self, model_config) -> None:
-        """Reject a per-rank token budget the first MoE dispatch would reject, before any weight is read.
+        """Refuse a per-rank token budget the first MoE dispatch would refuse, before any weight is read.
 
-        The dispatcher sizes its arena from the all-reduced max tokens/rank of the EP group, aligned by
-        :func:`ep_dispatch_capacity`, and rejects a capacity past DeepEP's 32-bit wire index or past the
-        validated cross-node Gin ceiling. That max is knowable here: every rank of a group carries the
-        same declared per-device shape, so the group max is ``per_device_train_batch_size × max_length``.
-        Left to the dispatcher, the same verdict lands only after the full load, and for a corpus whose
-        early batches are short only at the step that first reaches ``max_length``.
+        The dispatcher sizes its arena from the all-reduced MAX tokens/rank of the EP group, aligned
+        by :func:`ep_dispatch_capacity`, and refuses a capacity past DeepEP's 32-bit wire index or
+        past the validated cross-node Gin ceiling. That MAX is knowable here: every rank of a group
+        carries the same declared per-device shape, so the group max IS
+        ``per_device_train_batch_size × max_length``. Left to the dispatcher, the same verdict lands
+        after the whole multi-hundred-GB load — and, for a corpus whose early batches are short, only
+        at the step whose batch first reaches ``max_length``.
 
-        ``max_length: null`` resolves here against ``config.json`` (:func:`context_window_from_config`):
-        the "use the model's own limit" spelling, and therefore the largest budget a run can declare.
+        ``max_length: null`` resolves here against ``config.json`` (:func:`context_window_from_config`,
+        the window ``apply_max_length`` writes back after the load). It is the documented "use the
+        model's own limit" spelling and therefore the LARGEST budget a run can declare, so treating it
+        as undeclared would switch the gate off exactly where it binds.
 
         Keyed on ``ep_size``, not ``is_ep_mode``: pure ETP folds into the latter but never reaches the
-        transport. The inter-node question is the NVLink domain's, not the OS node's
+        transport. The inter-node question is the NVLink DOMAIN's, not the OS node's
         (:attr:`requires_rdma`), so an NVL72 rack-wide group stays on MNNVL and is not Gin-bound.
         """
         if self.ep_size <= 1 or self.ep_rows_per_device <= 0:
@@ -1142,12 +1165,12 @@ class ParallelismConfig:
 
     @property
     def num_ep_groups(self) -> int:
-        """Number of EP groups, computed per scope from the same layout ``EPConfig`` builds its groups
-        from, so the count cannot drift from the groups that exist."""
+        """Number of EP groups — read off the same layout ``EPConfig`` builds its groups from, per
+        scope, so the count here cannot drift from the groups that actually exist."""
         if self.ep_group_size <= 1:
-            # Degenerate layout: one singleton group per rank, matching what
-            # ``node_local_groups_per_domain(domain, 1) * domains`` gives ``EPConfig``. Own branch
-            # because ``cross_node_layout`` cannot express a group that spans no domain evenly.
+            # Degenerate layout: one singleton group per rank, which is what
+            # ``node_local_groups_per_domain(domain, 1) * domains`` gives ``EPConfig``. It needs its own
+            # branch because ``cross_node_layout`` cannot express a group that spans no domain evenly.
             return self.stage_world_size
         if self.ep_scope == "node":
             per_domain = node_local_groups_per_domain(self.nvlink_domain_size, self.ep_group_size)
@@ -1183,12 +1206,12 @@ class ParallelismConfig:
 
     @property
     def is_first_pp_stage(self) -> bool:
-        """This rank holds the pipeline's first stage (the embedding; consumes input_ids)."""
+        """This rank holds the pipeline's first stage (owns the embedding and consumes input_ids)."""
         return self.pp_rank == 0
 
     @property
     def is_last_pp_stage(self) -> bool:
-        """This rank holds the pipeline's last stage (the head; computes the loss)."""
+        """This rank holds the pipeline's last stage (owns the head and computes the loss)."""
         return self.pp_rank == self.pp_size - 1
 
     def get_pp_group_ranks(self) -> list[int]:
@@ -1198,6 +1221,14 @@ class ParallelismConfig:
         coordinate and therefore a batch. Members are ``stage_world_size`` apart, so on the intended
         placement each is on a different NVLink domain and only their P2P activations use RDMA."""
         return [self.stage_local_rank + s * self.stage_world_size for s in range(self.pp_size)]
+
+    @property
+    def has_custom_parallelism(self) -> bool:
+        """EP (ETP included), CP, TP or PP: an axis whose mesh only the toolkit's torchrun path builds.
+
+        ``use_grouped_gemm`` is not one: it only swaps a MoE's expert compute at load, under any launcher.
+        """
+        return self.is_ep_mode or self.is_cp_mode or self.is_tp_mode or self.is_pp_mode
 
     @property
     def is_ep_tp_mode(self) -> bool:
@@ -1224,7 +1255,7 @@ class ParallelismConfig:
 
     @property
     def non_dp_replication_factor(self) -> int:
-        """How many ranks see the same batch: ``world_size // data_parallel_size``.
+        """How many ranks see the SAME batch: ``world_size // data_parallel_size``.
 
         Equals ``pp_size * max(tp_size, cp_size, expert_tp_size)`` — the stage split times the
         non-DP divisor — since both divisions are validated exact and EP is orthogonal to DP. Token
@@ -1292,9 +1323,9 @@ class ParallelismConfig:
         """Data parallel rank (which batch this rank processes). Ranks in the same TP/CP/expert_tp
         group share a batch; expert-TP partners key on dispatch_ep_rank, not floor-division.
 
-        Stage-local: every rank of one pipeline chain (same stage_local_rank, different pp_rank)
-        returns the same value, so the whole chain consumes the same batch — stage 0 reads input_ids,
-        the last stage reads labels."""
+        Stage-local by construction: every rank of one pipeline chain (same stage_local_rank, different
+        pp_rank) returns the same value, so the whole chain consumes the same batch — stage 0 reads
+        input_ids, the last stage reads labels."""
         if self.expert_tp_size > 1:
             # ETP partners share dispatch_ep_rank (same formula EPConfig builds its groups from) →
             # identical DP batches → matching shapes in the ReduceFromExpertTP all_reduce.
@@ -1315,8 +1346,9 @@ class ParallelismConfig:
     def get_ep_group_ranks(self) -> list[int]:
         """Global ranks in this rank's EP group (node-local groups are contiguous within one domain).
 
-        Also a test seam, with :meth:`get_cp_group_ranks`, :meth:`get_expert_replica_ranks` and
-        :meth:`get_cp_rank`: the CPU tests check ``EPConfig``/``CPConfig`` membership against these.
+        Test seam, like :meth:`get_cp_group_ranks`, :meth:`get_expert_replica_ranks` and
+        :meth:`get_cp_rank`: the independent oracle the CPU tests check ``EPConfig``/``CPConfig``'s
+        own membership against — the only cross-implementation gate the rank math has.
         """
         if self.ep_scope == "node":
             local = node_local_group_ranks(self.get_ep_group_idx(), self.nvlink_domain_size, self.ep_group_size)
@@ -1335,12 +1367,12 @@ class ParallelismConfig:
     def get_expert_replica_ranks(self) -> list[int]:
         """Ranks holding the same experts (for gradient sync across EP groups).
 
-        Confined to this rank's pipeline stage: under PP, the same ep_rank in a *different* stage holds
+        Confined to this rank's pipeline stage: under PP, the same ep_rank in a *different* stage owns
         a different set of layers, so averaging across stages would corrupt gradients."""
         if self.ep_group_size <= 1:
-            # Every rank is a singleton EP group holding the full expert set, so the stage's rank block
-            # is one replica set — the single group ``EPConfig`` builds here. Not routed through the
-            # layout helpers: the cross-node one cannot take a group of 1.
+            # Every rank is a singleton EP group holding the FULL expert set, so the stage's whole rank
+            # block is ONE replica set — the single group ``EPConfig`` builds here. Spelled out rather
+            # than routed through the layout helpers: the cross-node one cannot take a group of 1.
             return self._to_global_ranks(list(range(self.stage_world_size)))
         if self.num_ep_groups <= 1:
             return [self.global_rank]
@@ -1453,11 +1485,13 @@ class ParallelismConfig:
 def accelerate_launch_rejection(pc: ParallelismConfig) -> str | None:
     """Why this config cannot run under ``accelerate launch``, or ``None`` when it can.
 
-    ``accelerate launch`` performs the FSDP/DDP wrapping for every ``distributed_type``, so the custom
-    EP/CP/TP/PP meshes need ``torchrun``. Shared by the trainer's ``_validate_parallelism_modes`` and
-    the loader's ``_validate_launch_method_for_parallelism`` so both report the same recipe.
+    ``accelerate launch`` owns the FSDP/DDP wrapping for every ``distributed_type``, so the custom
+    EP/CP/TP/PP meshes need ``torchrun``. One message for both gates that ask the question — the
+    trainer's ``_validate_parallelism_modes`` and the loader's
+    ``_validate_launch_method_for_parallelism`` — so the recipe a user sees does not depend on which
+    one fired first.
     """
-    if not (pc.is_ep_mode or pc.is_cp_mode or pc.is_tp_mode or pc.is_pp_mode) or not is_accelerate_launch():
+    if not pc.has_custom_parallelism or not is_accelerate_launch():
         return None
 
     return (

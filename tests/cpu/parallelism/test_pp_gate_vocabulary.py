@@ -24,7 +24,6 @@ from types import SimpleNamespace
 
 import pytest
 
-from src.data.spans import LABEL_IGNORE_INDEX
 from src.trainers.grpo.offline import OfflineGRPOTrainer
 from src.trainers.mixins.pipeline import PipelineTrainerMixin
 from src.trainers.mixins.pp_gates import (
@@ -249,7 +248,6 @@ def _drive_smpo(peft_config=None):
         padding_free=False,
         lower_clip_percentile=None,
         upper_clip_percentile=None,
-        label_pad_token_id=LABEL_IGNORE_INDEX,
     )
     SmoothMarginPOTrainer._reject_pp_explicit_options(trainer, _pp_config(), peft_config)
 

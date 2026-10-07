@@ -229,8 +229,8 @@ def test_bos_template_no_double_bos():
     tok = BosTokenizer()
     text = tok.bos_token + "hello world"
 
-    legacy_ids = tok(text)["input_ids"]
-    assert legacy_ids[:2] == [BOS_ID, BOS_ID], "precondition: the legacy call double-added BOS"
+    plain_ids = tok(text)["input_ids"]
+    assert plain_ids[:2] == [BOS_ID, BOS_ID], "precondition: a plain add_special_tokens=True call doubles BOS"
 
     ids = tokenize_rendered(tok, text)["input_ids"]
     assert ids[0] == BOS_ID and ids[1] != BOS_ID, f"expected a single leading BOS, got {ids}"
@@ -242,8 +242,8 @@ def test_stripped_render_gains_single_bos():
     tok = BosTokenizer()
     text = "hello world"
 
-    legacy_ids = tok(text, add_special_tokens=False)["input_ids"]
-    assert BOS_ID not in legacy_ids, "precondition: the legacy call had no BOS"
+    plain_ids = tok(text, add_special_tokens=False)["input_ids"]
+    assert BOS_ID not in plain_ids, "precondition: a plain add_special_tokens=False call has no BOS"
 
     ids = tokenize_rendered(tok, text)["input_ids"]
     assert ids[0] == BOS_ID and ids[1] != BOS_ID

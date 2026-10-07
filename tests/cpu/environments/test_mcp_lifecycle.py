@@ -142,8 +142,8 @@ async def test_sync_close_from_running_loop_drives_disconnect():
     await env.connect()
 
     env.close()
-    assert env._close_task is not None
-    await env._close_task
+    assert env._background_tasks, "close() on the owning loop schedules the disconnect"
+    await asyncio.gather(*env._background_tasks)
     assert env.stub_session.exited and env.stub_transport.exited
     assert env._session is None and not env._connected
 
@@ -204,6 +204,46 @@ async def test_a_failing_mcp_tool_is_logged_once_by_the_protocol(caplog):
     logged = [r for r in caplog.records if r.levelno >= logging.WARNING]
     assert len(logged) == 1 and logged[0].exc_info is not None
     assert "server down" in env.get_trajectories(ids)[0].messages[-1].content
+
+
+async def test_an_mcp_property_without_a_declared_type_takes_any_value():
+    """A property typed through ``anyOf`` (an int-or-null) declares no top-level ``type``: the schema
+    shown to the engine carries none, and ``3`` and ``null`` both reach the server as sent. Only a
+    declared ``string`` is held to one, so a list there is refused before the server is called."""
+    env = _StubMCPEnv()
+    input_schema = {
+        "properties": {
+            "url": {"type": "string", "description": "page"},
+            "max_length": {"anyOf": [{"type": "integer"}, {"type": "null"}], "default": None},
+        },
+        "required": ["url"],
+    }
+
+    async def list_tools():
+        tool = types.SimpleNamespace(name="fetch", description="fetch a page", inputSchema=input_schema)
+        return types.SimpleNamespace(tools=[tool])
+
+    received = []
+
+    async def call_tool(name, arguments):
+        received.append(arguments)
+        return types.SimpleNamespace(content=[types.SimpleNamespace(type="text", text="ok")], isError=False)
+
+    env.stub_session.list_tools = list_tools
+    env.stub_session.call_tool = call_tool
+    ids, _ = await env.reset_async(["task"])
+    (schema,) = env.get_tools_schema()
+    assert schema["function"]["parameters"]["properties"]["max_length"] == {"description": ""}
+    calls = [
+        {"id": "a", "function": {"name": "fetch", "arguments": '{"url": "x", "max_length": 3}'}},
+        {"id": "b", "function": {"name": "fetch", "arguments": '{"url": "x", "max_length": null}'}},
+        {"id": "c", "function": {"name": "fetch", "arguments": '{"url": ["x"]}'}},
+    ]
+    await env.step_async(ids, ["calling"], [{"finish_reason": "tool_calls", "tool_calls": calls}])
+    await env.disconnect()
+    assert received == [{"url": "x", "max_length": 3}, {"url": "x", "max_length": None}]
+    replies = [m.content for m in env.get_trajectories(ids)[0].messages if m.role == "tool"]
+    assert replies[2] == "Error: fetch: url must be a string, got list"
 
 
 # Factory credential forwarding: MCP_SERVERS[...]["env"] must reach the server

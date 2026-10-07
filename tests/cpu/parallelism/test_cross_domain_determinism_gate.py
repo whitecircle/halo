@@ -46,7 +46,7 @@ def test_an_ep_group_spanning_domains_is_refused():
     [(16, "node", True), (8, "global", True), (16, "global", False)],
     ids=["node_local_groups", "global_group_inside_one_domain", "no_full_determinism"],
 )
-def test_runs_deepep_can_serve_build(world_size, ep_scope, full_determinism):
+def test_groups_inside_one_domain_or_runs_without_full_determinism_build(world_size, ep_scope, full_determinism):
     config = _built(world_size=world_size, ep_scope=ep_scope, full_determinism=full_determinism)
     assert config.ep_size == 8
     assert config.requires_rdma == (world_size > 8 and ep_scope == "global")

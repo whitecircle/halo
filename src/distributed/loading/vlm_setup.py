@@ -98,8 +98,8 @@ def load_vlm_processor(model_config: ModelConfig, *, required: bool = True):
     checkpoint (Step-3.7 Flash) has no processor for the export to carry. That verdict is agreed
     across ranks, so every rank makes the call alike.
 
-    Main-rank-first like every other pre-download hub read: the processor pulls several small files
-    and, under ``trust_remote_code``, writes transformers' unlocked dynamic-module cache.
+    Main-rank-first, like every other pre-download hub read: the processor pulls several small
+    files.
     """
     model_path = model_config.model_name_or_path
     revision = getattr(model_config, "model_revision", None)
@@ -139,13 +139,15 @@ def _ships_processor_config(model_path: str, revision: str | None) -> bool:
 
 
 def multimodal_sequence_classification_model_types() -> list[str]:
-    """Model types with both a registered sequence-classification head and a vision tower.
+    """Model types that have BOTH a registered sequence-classification head and a vision tower.
 
-    Read off the live registry (the transformers mapping plus the ``_extra_content`` the toolkit's
-    own heads register into it, :mod:`src.models.seq_cls_heads`), so families added upstream or by
-    the toolkit appear without a maintained list. Modality is decided by the same
-    :func:`~src.models.modality.config_declares_multimodality` the run-time probe uses, applied to
-    the config class, so this list agrees with that probe.
+    Read off the live registry — the transformers mapping plus the ``_extra_content`` the toolkit's
+    own heads register into it (:mod:`src.models.seq_cls_heads`) — so a family added upstream or by
+    the toolkit appears here without anyone maintaining a list. The modality verdict comes from the
+    same :func:`~src.models.modality.config_declares_multimodality` the run-time probe uses,
+    read off the config CLASS (instantiating every registered config to ask would be slow and
+    fragile), so this roster cannot name a family that probe would call text-only, or omit one it
+    would call multimodal.
     """
     # ``_extra_content`` is the same storage src/models/seq_cls_heads.py writes the toolkit heads into.
     config_classes = list(AutoModelForSequenceClassification._model_mapping._extra_content)
@@ -158,9 +160,10 @@ def multimodal_sequence_classification_model_types() -> list[str]:
 def require_multimodal_sequence_classification_head(model_config: ModelConfig) -> None:
     """Gate a pooled-head script (reward modeling) on a multimodal checkpoint.
 
-    ``AutoModelForSequenceClassification`` rejects a family it has no head for with "Unrecognized
-    configuration class", after the distributed init and on every rank. Raising here instead names
-    the families that do work, from the same registry the resolution reads.
+    ``AutoModelForSequenceClassification`` refuses a family it has no head for with "Unrecognized
+    configuration class", naming neither the modality nor any alternative — and it does so only
+    after the distributed init, on every rank. Raising here instead names the families that do work,
+    from the same registry the resolution reads.
     """
     config = hub_metadata_main_first(
         "seq_cls_head_probe",
@@ -201,18 +204,18 @@ def load_vlm_model_and_processor(
     processor, required when ``vlm_run`` (the run feeds images, :func:`~src.data.vlm.is_vlm_run`); a
     run without image data takes the tokenizer instead when the checkpoint ships no processor config.
 
-    The model load goes through ``load_distributed_model`` rather than a bare ``from_pretrained``, which
-    is what gives MoE VLMs EP/TP/CP wrapping, attention fallbacks, QLoRA and Liger. ``model_init_kwargs``
-    is consumed so TRL doesn't re-apply it. ``weights_source`` overrides where the weights load from
-    (EP/CP resume checkpoint); the processor/tokenizer still load from ``model_config.model_name_or_path``.
-    The sinks flags reach the loader as on the text branch, so a contradictory pair is rejected here too.
+    Delegating the model load to ``load_distributed_model`` (not a bare ``from_pretrained``) is what gives
+    MoE VLMs full EP/TP/CP wrapping + attention fallbacks + QLoRA + Liger. ``model_init_kwargs`` is consumed
+    so TRL doesn't re-apply it. ``weights_source`` overrides where the weights load from (EP/CP resume
+    checkpoint); the processor/tokenizer still load from ``model_config.model_name_or_path``. The sinks
+    flags reach the loader exactly as on the text branch, so a contradictory pair is refused here too.
 
-    The caller has already decided the modality; do not re-probe it here.
-    :func:`~src.models.modality.is_vlm_model` enters the ``vlm_probe`` store phase, and only multimodal
-    runs reach this function, so a phase entered here would leave text-only ranks waiting on a key
-    nobody writes.
+    The caller has already resolved the modality verdict; this function must not re-probe it:
+    :func:`~src.models.modality.is_vlm_model` enters the ``vlm_probe`` store phase, and only
+    multimodal runs reach here — a phase entered from a branch some ranks do not take leaves the rest
+    waiting on a key nobody writes.
     """
-    # Same revision as the model weights: an unpinned processor/tokenizer loads hub main.
+    # Same revision as the model weights — an unpinned processor/tokenizer silently loads hub main.
     revision = getattr(model_config, "model_revision", None)
 
     processor = load_vlm_processor(model_config, required=vlm_run)
@@ -260,7 +263,7 @@ def load_model_for_training(
     text_only_model: bool = False,
     preserve_checkpoint_precision: bool = False,
 ):
-    """Modality-aware model load; the entry point used by every training script.
+    """Modality-aware model load — the single entry point for every training script.
 
     Returns ``(model, processing_class, tokenizer, is_vlm)``, ``is_vlm`` being the checkpoint's verdict.
     A multimodal checkpoint loads through :func:`load_vlm_model_and_processor`, whose processing class
@@ -268,9 +271,10 @@ def load_model_for_training(
     the tokenizer. Both apply QLoRA + parallelism-aware Liger, leaving parallelism wrapping to the trainer.
     ``attn_default`` is the fallback attn impl when the config sets none. ``init_from_scratch`` (text only)
     loads fresh weights. ``weights_source`` overrides where the weights load from (EP/CP resume checkpoint).
-    ``text_only_model`` skips the VLM branch: the multimodal checkpoint loads through its text-only
-    CausalLM sibling with the text processing path. That flag is a rank-uniform YAML key, so every rank
-    takes the same branch and any ``vlm_probe`` store phase a caller enters stays uniform too.
+    ``text_only_model`` skips the VLM branch entirely — the multimodal checkpoint loads through its
+    text-only CausalLM sibling with the text processing path. The flag is a rank-uniform YAML key,
+    so every rank takes the same branch and any ``vlm_probe`` store phase a caller enters for its
+    own reasons (sft.py's pre-load run-label probe) stays uniform too.
     """
     revision = getattr(model_config, "model_revision", None)
     if not text_only_model and is_vlm_model(

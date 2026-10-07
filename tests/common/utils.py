@@ -145,18 +145,14 @@ def finish_phase(trainer) -> None:
     cleanup_memory()
 
 
-def gpu_mem_gb(device=None) -> float:
-    """Current GPU memory usage in GB."""
-    if device is None:
-        device = torch.cuda.current_device()
-    return torch.cuda.memory_allocated(device) / 1e9
+def gpu_mem_gb() -> float:
+    """Current GPU memory usage of the current device, in GB."""
+    return torch.cuda.memory_allocated() / 1e9
 
 
-def gpu_peak_mem_gb(device=None) -> float:
-    """Peak GPU memory usage in GB."""
-    if device is None:
-        device = torch.cuda.current_device()
-    return torch.cuda.max_memory_allocated(device) / 1e9
+def gpu_peak_mem_gb() -> float:
+    """Peak GPU memory usage of the current device, in GB."""
+    return torch.cuda.max_memory_allocated() / 1e9
 
 
 def cos_sim(a: torch.Tensor, b: torch.Tensor, *, label: str) -> float:
@@ -369,6 +365,20 @@ def snapshot_trainable(model: torch.nn.Module) -> dict[str, torch.Tensor]:
             data = param.data.full_tensor() if isinstance(param.data, DTensor) else param.data
             snapshot[name] = data.detach().cpu().clone()
     return snapshot
+
+
+def autograd_nodes(tensor: torch.Tensor) -> list[torch.autograd.graph.Node]:
+    """Every autograd node reachable from ``tensor``'s ``grad_fn``, each once: the backward a loss or
+    kernel test reads its graph's shape off (which ops, how many, on what inputs)."""
+    nodes, seen, pending = [], set(), [tensor.grad_fn]
+    while pending:
+        node = pending.pop()
+        if node is None or node in seen:
+            continue
+        seen.add(node)
+        nodes.append(node)
+        pending.extend(parent for parent, _ in node.next_functions)
+    return nodes
 
 
 def params_off_dtype(model: torch.nn.Module, dtype: torch.dtype) -> list[str]:

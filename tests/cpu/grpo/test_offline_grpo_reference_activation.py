@@ -1,6 +1,7 @@
 #!/usr/bin/env python
 """Offline GRPO activation checks that require the real trainer and grouped loader."""
 
+import datetime
 from types import SimpleNamespace
 
 import pytest
@@ -12,6 +13,7 @@ import src.trainers.grpo.offline as offline_module
 from src.trainers.grpo.offline import OfflineGRPOTrainer
 from src.trainers.mixins.checkpointing import CheckpointingMixin
 from src.trainers.mixins.reference_logps import ReferenceLogpsCheckpointMixin
+from tests.common.gloo import run_gloo_ranks
 
 
 def _real_loader_trainer():
@@ -72,6 +74,30 @@ def test_trainer_sidecar_hook_is_shared_and_does_not_override_checkpoint_rotatio
     assert (
         OfflineGRPOTrainer._rotate_checkpoints_after_sidecars is CheckpointingMixin._rotate_checkpoints_after_sidecars
     )
+
+
+def _ranked_dynamic_loader(rank: int) -> None:
+    trainer = _real_loader_trainer()
+    builds = []
+    trainer._prepare_dataloader = lambda loader, **kwargs: builds.append(loader) or loader
+    dynamic = trainer.eval_dataset.select([4, 0, 5, 1])
+    # A transform the fingerprinter cannot pickle leaves each process its own random fingerprint.
+    dynamic._fingerprint = f"process-local-{rank}"
+    first = trainer.get_eval_dataloader(dynamic)
+    assert trainer.get_eval_dataloader(dynamic) is first, "the persistent loader was rebuilt"
+    assert len(builds) == 1
+    if rank == 1:
+        trainer._eval_dataloaders.clear()
+    after_split = trainer.get_eval_dataloader(dynamic)
+    assert len(builds) == 2, "a rank skipped the rebuild (and its collectives) a peer entered"
+    # The rank still holding its loader keeps it: its persistent workers are already running.
+    assert (after_split is first) == (rank == 0), "the cache was displaced, or a rank reused nothing"
+    assert trainer.get_eval_dataloader(dynamic) is after_split, "the split left a rank without a cached loader"
+    assert len(builds) == 2
+
+
+def test_a_process_local_fingerprint_neither_refuses_nor_splits_the_persistent_loader_cache():
+    run_gloo_ranks(_ranked_dynamic_loader, 2, pg_timeout=datetime.timedelta(seconds=30))
 
 
 if __name__ == "__main__":

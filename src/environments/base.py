@@ -17,13 +17,14 @@ from typing import Any
 from src.environments.sandbox.base import SandboxAgentFault, SandboxInfraError
 from src.inference.response import ENGINE_CUT_FINISH_REASONS
 from src.rewards.composer import RewardComposer
-from src.rewards.samples import ScoringSample
-from src.rewards.scoring import ScoreResult
-from src.rewards.spec import (
+from src.rewards.samples import TURN_FLAG_NOTES, ScoringSample
+from src.rewards.scorers.base import ScoreResult
+from src.rewards.terms import (
     ENVIRONMENT_REWARD_SOURCES,
     OBJECTIVE_TERM_NAME,
     EnvironmentTerm,
     RewardTerm,
+    View,
     component_key,
     parse_reward_terms,
 )
@@ -40,8 +41,8 @@ RANDOM_REASONING_EFFORT = "random"
 ANSWER_KEY = "answer"
 
 # Set in ``info`` when an episode's reward carries no learning signal (the grade reached no verdict, a
-# grading or sandbox backend failed, a scorer returned nothing, a null ``answer`` cell); the trainer
-# excludes it from the GRPO group baseline.
+# grading or sandbox backend failed, a scorer that is ``invalid`` on error returned nothing, a null
+# ``answer`` cell); the trainer excludes it from the GRPO group baseline.
 EPISODE_INVALID_KEY = "episode_invalid"
 # Why an episode is invalid (a grade with no signal, a sandbox or scorer fault, a trajectory the chat
 # template cannot re-render); read by the all-invalid step halt and the eval runner so each names the cause.
@@ -50,12 +51,15 @@ EPISODE_INVALID_REASON_KEY = "episode_invalid_reason"
 # stamps on the row it hands back for one. A driver stamps it before closing the episode through
 # ``finalize_truncated``, and the turn-overflow price then stays off it: the fault is not the policy's.
 EPISODE_ERROR_KEY = "error"
-# Stamped by the rollout driver under the episode thinking scope: whether the episode's reasoning budget
-# ran down to the per-turn reserve (a later turn would have reasoned only its reserve).
-THINKING_BUDGET_EXHAUSTED_KEY = "thinking_budget_exhausted"
+# Stamped by the rollout driver under an episode output budget: whether the budget no longer held a
+# turn's answer room, so the episode ended there (truncated) or could not have run another turn.
+OUTPUT_BUDGET_EXHAUSTED_KEY = "output_budget_exhausted"
 # Set in a turn's step context by the rollout driver when the engine cut the turn while it held an unfinished
 # tool call, so the recovery can say the call ran past the turn's length limit (``LENGTH_CUTOFF_IN_CALL_NUDGE``).
 CUT_IN_TOOL_CALL_KEY = "cut_in_tool_call"
+# Step-context key the driver sets on the last turn the episode's output budget affords: a turn that
+# produced nothing cannot be retried after it, so it ends the episode like a max_turns overflow.
+LAST_TURN_KEY = "last_turn"
 # Set in ``info`` when a sandbox fault ended the episode, naming its class: ``SANDBOX_FAULT_INFRA`` for
 # a backend/transport failure (the episode is also marked invalid and leaves the GRPO group baseline),
 # ``SANDBOX_FAULT_AGENT`` for a sandbox the program's own action broke (the episode stays in the
@@ -64,8 +68,6 @@ SANDBOX_FAULT_KEY = "sandbox_fault"
 SANDBOX_FAULT_INFRA = "infra"
 SANDBOX_FAULT_AGENT = "agent"
 
-# The environment's own grade, priced by the reward's environment term, in ``reward_components``.
-OBJECTIVE_REWARD_KEY = component_key(OBJECTIVE_TERM_NAME)
 # Every term of the episode reward, ``reward/<name>`` → contribution; the values sum to the reward.
 REWARD_COMPONENTS_KEY = "reward_components"
 # Set in ``info`` while an episode's externally scored terms (a judge, a reward model) are still owed;
@@ -79,7 +81,10 @@ REWARD_ERRORS_KEY = "reward_errors"
 # The component holding the accrued per-turn deltas; the base owns it, an environment may not reuse it.
 TURN_SHAPING_COMPONENT = "turn_shaping"
 
-# The per-episode solve flag the rollout metrics average into the group solve rate; a misspelled key
+# What follows a tool observation cut at its length cap, counting what it dropped.
+TRUNCATION_MARKER = "\n…[truncated {dropped} chars]"
+
+# The per-episode solve flag the rollout metrics average into the group solve rate; a misspelling
 # drops the metric rather than raising.
 SOLVE_RATE_KEY = "outcome/solve_rate"
 
@@ -94,6 +99,8 @@ EPISODE_TOOL_BUDGETS_KEY = "episode_tool_budgets"
 TOOL_CALL_COUNTS_KEY = "tool_call_counts"
 # What the episode has been paid for successful tool calls so far, against ``tool_reward_cap``.
 TOOL_REWARD_PAID_KEY = "tool_reward_paid"
+# Calls a handler returned to the budget that the accounting has yet to book (:meth:`_refund_tool_call`).
+REFUNDED_TOOL_CALLS_KEY = "_refunded_tool_calls"
 
 # CJK ideographs, kana and hangul: the scripts a Latin-script task's CoT drifts into under RL.
 # ``episode/reasoning_cjk_rate`` counts the episodes whose reasoning carries any of them.
@@ -147,6 +154,14 @@ def solve_verdict(metrics: Mapping[str, float]) -> bool | None:
     (:data:`SOLVE_RATE_KEY`), or ``None`` where the environment reports none."""
     verdict = metrics.get(SOLVE_RATE_KEY)
     return None if verdict is None else verdict >= 1.0
+
+
+def truncate_text(text: str, max_chars: int) -> str:
+    """``text`` cut to ``max_chars`` with the cut marked (:data:`TRUNCATION_MARKER`), so a reader knows
+    it read a prefix."""
+    if len(text) <= max_chars:
+        return text
+    return text[:max_chars] + TRUNCATION_MARKER.format(dropped=len(text) - max_chars)
 
 
 def require_magnitudes(**knobs: float) -> None:
@@ -205,6 +220,11 @@ class Message:
     routing_mask: str | None = None
     routing_prompt_tokens: int | None = None
     prompt_token_ids: list[int] | None = None
+    # The reasoning cap the turn's level set (an output budget may narrow the request's own below it;
+    # SGLang ignores the field), and the reasoning tokens the turn sampled, counted off its ids by
+    # ``episode.sampled_reasoning_tokens`` (``None`` without them): the pair the trainer's overlong charge reads.
+    thinking_cap: int | None = None
+    reasoning_tokens: int | None = None
     # Engine cut the turn off at its token cap: the text is a fragment, never rewarded (``untrainable``).
     truncated: bool = False
     # Every tool call named a tool that does not exist, so the turn accomplished nothing — never
@@ -293,9 +313,8 @@ class Trajectory:
     info: dict[str, Any] = field(default_factory=dict)
     # Set by the rollout so re-tokenization renders the same steer the model generated under.
     reasoning_effort: str | None = None
-    # The CoT budget the episode ran under — per turn, or for the whole episode under the episode
-    # scope: the template states it, so a re-render needs it, and the trainer's under-use floor is a
-    # multiple of it.
+    # The per-turn CoT budget the episode ran under: the template states it, so a re-render needs it,
+    # and the trainer's under-use floor is a share of it.
     reasoning_budget: int | None = None
 
     _assistant_count: int = field(default=0, repr=False)
@@ -409,8 +428,8 @@ class BaseEnvironment(ABC):
 
     # Profile keys this class admits and the minimum each takes; a subclass declares only the keys it
     # adds, and the union over the MRO is what a profile may carry. ``thinking_tokens`` is the
-    # level's CoT budget (per turn, or the episode's total under the episode thinking scope). An int
-    # minimum declares a count (only ints admitted); a float minimum admits any finite number.
+    # level's per-turn CoT budget. An int minimum declares a count (only ints admitted); a float
+    # minimum admits any finite number.
     EFFORT_PROFILE_KEY_MINIMA: dict[str, int | float] = {"thinking_tokens": 1}
 
     def __init__(
@@ -449,7 +468,7 @@ class BaseEnvironment(ABC):
         ``answer`` column rather than score the whole run on nothing. ``None`` keeps the declaration,
         so read the resolved verdict off an INSTANCE: the class attribute is only the default, which a
         class deriving its own (ReAct, from ``answer_validator``) overrides per instance.
-        ``reward_terms`` are the episode reward's terms (:mod:`src.rewards.spec`, ``source`` in
+        ``reward_terms`` are the episode reward's terms (:mod:`src.rewards.terms`, ``source`` in
         ``environment`` / ``judge`` / ``reward_model``), as typed terms or config mappings; ``None`` is
         the environment's own grade at weight 1. The accrued per-turn deltas and the protocol's and
         environment's shaping add on top of them.
@@ -602,12 +621,6 @@ class BaseEnvironment(ABC):
             return cap
         return None
 
-    @classmethod
-    def _tool_budgets_left(cls, trajectory: Trajectory) -> dict[str, int]:
-        """The calls each capped tool has left in the episode, by tool name."""
-        budgets = trajectory.info.get(EPISODE_TOOL_BUDGETS_KEY, {})
-        return {name: max(0, cap - cls._tool_calls_made(trajectory, name)) for name, cap in budgets.items()}
-
     @staticmethod
     def _count_tool_call(trajectory: Trajectory, name: str) -> int:
         """Count one admitted call of tool ``name`` for the episode; returns the new count."""
@@ -618,18 +631,27 @@ class BaseEnvironment(ABC):
     @staticmethod
     def _refund_tool_call(trajectory: Trajectory, name: str) -> None:
         """Return one admitted call of tool ``name`` to the episode's budget, for a handler that found the
-        call spent nothing (the inverse of :meth:`_count_tool_call`)."""
+        call spent nothing (the inverse of :meth:`_count_tool_call`); the accounting then books the call
+        as neither paid nor successful (:meth:`_credit_tool_call`)."""
         counts = trajectory.info.setdefault(TOOL_CALL_COUNTS_KEY, {})
         counts[name] = max(0, counts.get(name, 0) - 1)
+        trajectory.info[REFUNDED_TOOL_CALLS_KEY] = trajectory.info.get(REFUNDED_TOOL_CALLS_KEY, 0) + 1
 
     def _credit_tool_call(self, trajectory: Trajectory, success: bool) -> float:
         """Book one executed tool call on the episode's counters and return its reward delta:
         ``-tool_error_penalty`` for a failed call; for a successful one ``tool_success_reward``, less
         whatever would take the episode's paid total (``TOOL_REWARD_PAID_KEY``) past
-        ``tool_reward_cap``. The one accounting every protocol pays through."""
+        ``tool_reward_cap``; nothing for a call its handler refunded, which counts in
+        ``total_tool_calls`` but not as successful. The one accounting every protocol pays through."""
         trajectory.info["total_tool_calls"] += 1
         if not success:
             return -self.tool_error_penalty
+        refunded = trajectory.info.get(REFUNDED_TOOL_CALLS_KEY, 0)
+        if refunded:
+            # A refunded call returns its reply as a success; within one turn's batch every one does, so
+            # booking the next successes unpaid books exactly the refunded ones.
+            trajectory.info[REFUNDED_TOOL_CALLS_KEY] = refunded - 1
+            return 0.0
         trajectory.info["successful_tool_calls"] += 1
         paid = trajectory.info.get(TOOL_REWARD_PAID_KEY, 0.0)
         credit = max(0.0, min(self.tool_success_reward, self.tool_reward_cap - paid))
@@ -689,13 +711,12 @@ class BaseEnvironment(ABC):
         (:attr:`Message.calls_rejected`), so no tokenization path rewards it."""
         self._last_assistant_message(trajectory).calls_rejected = True
 
-    def _truncate_observation(self, content: str) -> str:
-        """Cap a tool observation's length. An unbounded output bloats the trajectory and makes the
-        per-turn re-render slow; capping at the source keeps rollout and recompute identical."""
-        limit = self.max_observation_chars
-        if limit and len(content) > limit:
-            return content[:limit] + f"\n…[truncated {len(content) - limit} chars]"
-        return content
+    def _truncate_observation(self, content: str, limit: int | None = None) -> str:
+        """Cap a tool observation's length at ``limit`` characters (``max_observation_chars`` by default;
+        0 caps nothing), the cut marked (:func:`truncate_text`). An unbounded output bloats the trajectory
+        and makes the per-turn re-render slow; capping at the source keeps rollout and recompute identical."""
+        limit = self.max_observation_chars if limit is None else limit
+        return truncate_text(content, limit) if limit else content
 
     def get_tools_schema(self) -> list[dict[str, Any]] | None:
         """OpenAI-format tool schema passed to the rollout engine as ``tools=``. Default ``None``;
@@ -703,8 +724,8 @@ class BaseEnvironment(ABC):
         return None
 
     def thinking_budget_for_effort(self, effort: str) -> int | None:
-        """The thinking-token budget for a resolved effort level (the level's profile ``thinking_tokens``;
-        per turn, or the episode's total under the episode scope), or ``None`` to use the global one."""
+        """The per-turn thinking-token budget for a resolved effort level (the level's profile
+        ``thinking_tokens``), or ``None`` to use the global one."""
         return self.reasoning_effort_profiles.get(effort, {}).get("thinking_tokens")
 
     def reset_effort_level(self, context: dict[str, Any] | None) -> str | None:
@@ -738,10 +759,8 @@ class BaseEnvironment(ABC):
         metrics["episode/length_cutoff_turns"] = float(trajectory.info.get("length_cutoff_turns", 0))
         metrics["episode/length_cutoff_in_call_turns"] = float(trajectory.info.get("length_cutoff_in_call_turns", 0))
         metrics["episode/empty_turns"] = float(trajectory.info.get("empty_turns", 0))
-        if THINKING_BUDGET_EXHAUSTED_KEY in trajectory.info:
-            metrics["episode/thinking_budget_exhausted"] = (
-                1.0 if trajectory.info[THINKING_BUDGET_EXHAUSTED_KEY] else 0.0
-            )
+        if OUTPUT_BUDGET_EXHAUSTED_KEY in trajectory.info:
+            metrics["episode/output_budget_exhausted"] = 1.0 if trajectory.info[OUTPUT_BUDGET_EXHAUSTED_KEY] else 0.0
         metrics["episode/reasoning_cjk_rate"] = (
             1.0
             if any(
@@ -815,13 +834,15 @@ class BaseEnvironment(ABC):
                 routing_mask=ctx.get("routing_mask"),
                 routing_prompt_tokens=ctx.get("routing_prompt_tokens"),
                 prompt_token_ids=ctx.get("prompt_token_ids"),
+                thinking_cap=ctx.get("thinking_cap"),
+                reasoning_tokens=ctx.get("reasoning_tokens"),
                 # An engine abort is a cut turn too: the fragment must never train as a natural stop.
                 truncated=ctx.get("finish_reason") in ENGINE_CUT_FINISH_REASONS,
             )
         )
 
     def _handle_length_cutoff(
-        self, trajectory: Trajectory, in_tool_call: bool = False
+        self, trajectory: Trajectory, in_tool_call: bool = False, *, last_turn: bool = False
     ) -> tuple[Trajectory, float, bool, bool, dict[str, Any]]:
         """Handle a turn the engine cut short — at its token cap, or by aborting it
         (:data:`~src.inference.response.ENGINE_CUT_FINISH_REASONS`) — before a finished call or answer.
@@ -837,9 +858,11 @@ class BaseEnvironment(ABC):
             trajectory.info["length_cutoff_in_call_turns"] = trajectory.info.get("length_cutoff_in_call_turns", 0) + 1
             if self.LENGTH_CUTOFF_IN_CALL_NUDGE is not None:
                 nudge = "LENGTH_CUTOFF_IN_CALL_NUDGE"
-        return self._recover_unproductive_turn(trajectory, "length_cutoff", nudge)
+        return self._recover_unproductive_turn(trajectory, "length_cutoff", nudge, last_turn=last_turn)
 
-    def _handle_empty_turn(self, trajectory: Trajectory) -> tuple[Trajectory, float, bool, bool, dict[str, Any]]:
+    def _handle_empty_turn(
+        self, trajectory: Trajectory, *, last_turn: bool = False
+    ) -> tuple[Trajectory, float, bool, bool, dict[str, Any]]:
         """Handle a turn the model ended with neither visible content nor a tool call: a stop inside
         its reasoning, below the cap.
 
@@ -848,7 +871,7 @@ class BaseEnvironment(ABC):
         does from a cut. The wording is each protocol's (:data:`EMPTY_TURN_NUDGE`).
         """
         self._last_assistant_message(trajectory).empty = True
-        return self._recover_unproductive_turn(trajectory, "empty", "EMPTY_TURN_NUDGE")
+        return self._recover_unproductive_turn(trajectory, "empty", "EMPTY_TURN_NUDGE", last_turn=last_turn)
 
     @staticmethod
     def _unproductive_turns(trajectory: Trajectory) -> int:
@@ -856,16 +879,16 @@ class BaseEnvironment(ABC):
         return trajectory.info.get("length_cutoff_turns", 0) + trajectory.info.get("empty_turns", 0)
 
     def _recover_unproductive_turn(
-        self, trajectory: Trajectory, kind: str, nudge_attr: str
+        self, trajectory: Trajectory, kind: str, nudge_attr: str, *, last_turn: bool
     ) -> tuple[Trajectory, float, bool, bool, dict[str, Any]]:
         """Nudge and retry a turn that produced nothing, within ``max_turns`` and within
         ``max_length_cutoff_recoveries``, which the two kinds of unproductive turn share. The turn is
-        counted under ``<kind>_turns`` and stamped ``<kind>`` in the step info. A turn past the cap, or
-        on the episode's last turn, cannot be retried: it ends the episode truncated, priced like a
-        ``max_turns`` overflow and never as a recovered turn (``unrecovered_turn``).
-        A recovered one is priced by the protocol where it configures ``length_cutoff_penalty``,
-        never here."""
-        nudge = getattr(self, nudge_attr)
+        counted under ``<kind>_turns`` and stamped ``<kind>`` in the step info. A turn past the cap, on
+        the episode's last turn, or on the last turn its output budget affords (``last_turn``, the
+        driver's word: :data:`LAST_TURN_KEY`) cannot be retried: it ends the episode truncated, priced
+        like a ``max_turns`` overflow and never as a recovered turn (``unrecovered_turn``). A recovered
+        one is priced by the protocol where it configures ``length_cutoff_penalty``, never here."""
+        nudge = self._unproductive_turn_nudge(nudge_attr)
         if nudge is None:
             raise NotImplementedError(
                 f"{type(self).__name__} routed an unproductive turn to recovery without declaring "
@@ -875,10 +898,15 @@ class BaseEnvironment(ABC):
         trajectory.info[counter] = trajectory.info.get(counter, 0) + 1
         cap = self.max_length_cutoff_recoveries
         past_cap = cap is not None and self._unproductive_turns(trajectory) > cap
-        if past_cap or trajectory.num_turns >= self.max_turns:
+        if past_cap or last_turn or trajectory.num_turns >= self.max_turns:
             return trajectory, 0.0, True, True, {kind: True, "unrecovered_turn": True}
         trajectory.add_message(Message.user(nudge))
         return trajectory, 0.0, False, False, {kind: True}
+
+    def _unproductive_turn_nudge(self, nudge_attr: str) -> str | None:
+        """The text sent after an unproductive turn: the class attribute ``nudge_attr`` names. A protocol
+        whose wording depends on the instance (a tool-less tool registry) overrides this."""
+        return getattr(self, nudge_attr)
 
     def _first_step(self, trajectory: Trajectory) -> EnvStep:
         """Opening :class:`EnvStep` for a freshly reset episode (sync + async reset paths)."""
@@ -1016,46 +1044,75 @@ class BaseEnvironment(ABC):
                 components[key] = float(value)
         term = self._rewards.environment_term
         if term is not None:
-            components[term.key] = term.price(grade.objective)
+            components[component_key(term.name)] = term.price(grade.objective)
         # Every external term contributes 0 until it is scored, so the record holds the whole key set.
         for external in self._rewards.external_terms:
-            components[external.key] = 0.0
+            components[component_key(external.name)] = 0.0
         trajectory.info[REWARD_COMPONENTS_KEY] = components
         trajectory.total_reward = sum(components.values())
 
+    def _final_answer(self, trajectory: Trajectory) -> str | None:
+        """What the episode delivered, for a scorer's ``final`` view: the final text answer, a submitted
+        program. The base knows no answer channel, so it returns ``None`` — a judge then reads a note
+        that there is none, the other scorers an empty answer, never a fragment as the answer. A protocol
+        that records one overrides this."""
+        return None
+
+    def _scoring_reference(self, trajectory: Trajectory) -> Any:
+        """The reference a scorer may read beside the episode: the row's ``answer`` as the grader
+        compares it. An environment whose ``answer`` cell is a grading payload (hidden tests) or is
+        converted before grading (a choice index to its letter) overrides this."""
+        return (trajectory.info.get("context") or {}).get(ANSWER_KEY)
+
+    def _episode_digest(self, trajectory: Trajectory, sample: ScoringSample) -> str | None:
+        """The environment's own compact account of the episode for a ``digest`` view, or ``None`` for
+        the generic one — every turn's actions and results in short, then the final answer
+        (:func:`~src.rewards.samples.render_digest`), which the judge renders with its term's options.
+        An environment whose evidence lives in its own counters overrides this."""
+        return None
+
     def _scoring_sample(self, trajectory: Trajectory) -> ScoringSample:
         """What an external scorer reads of a finished episode: the prompt turns (everything before the
-        first assistant turn), the policy's turns after them, and the row's reference answer. A task
-        environment overrides this to hand the scorer its graded artifact (a submitted program)
-        instead of the last visible message."""
-        messages = [message.to_dict() for message in trajectory.messages]
-        first = next(
-            (i for i, message in enumerate(trajectory.messages) if message.role == "assistant"), len(messages)
+        first assistant turn), the policy's turns after them with their reasoning and turn flags, the
+        final answer (:meth:`_final_answer`), the reference (:meth:`_scoring_reference`), the tools
+        the policy could call, and the digest when a term reads one."""
+        messages = [self._sample_message(message) for message in trajectory.messages]
+        first = next((i for i, m in enumerate(trajectory.messages) if m.role == "assistant"), len(messages))
+        sample = ScoringSample(
+            prompt=messages[:first],
+            completion=messages[first:],
+            final_answer=self._final_answer(trajectory),
+            reference=self._scoring_reference(trajectory),
+            tools=self.get_tools_schema() or None,
         )
-        context = trajectory.info.get("context") or {}
-        return ScoringSample(prompt=messages[:first], completion=messages[first:], reference=context.get(ANSWER_KEY))
+        if View.DIGEST in self._rewards.views:
+            sample = replace(sample, digest=self._episode_digest(trajectory, sample))
+        return sample
+
+    @staticmethod
+    def _sample_message(message: Message) -> dict[str, Any]:
+        """A message as a scorer reads it: the wire fields with the reasoning, and the turn flags
+        (:data:`~src.rewards.samples.TURN_FLAG_NOTES`) a judge should see named."""
+        rendered = message.to_dict(include_thinking=True)
+        rendered.update({flag: True for flag in TURN_FLAG_NOTES if getattr(message, flag)})
+        return rendered
 
     def _apply_external_scores(self, trajectory: Trajectory, verdict: Mapping[str, ScoreResult]) -> None:
-        """Price the external terms' verdicts into the components, record their diagnostics, and close
-        the episode's reward: the pending mark goes, the grading payload with it."""
-        components = trajectory.info[REWARD_COMPONENTS_KEY]
-        for term in self._rewards.external_terms:
-            result = verdict[term.name]
-            if result.metrics:
-                trajectory.info.setdefault(REWARD_METRICS_KEY, {}).update(result.metrics)
-            if result.detail is not None:
-                trajectory.info.setdefault(REWARD_DETAILS_KEY, {})[term.name] = result.detail
-            if result.score is None:
-                # The scorer, not the policy, failed: the term contributes nothing and the episode
-                # leaves the group baseline rather than teaching a forced verdict. The reason is
-                # stamped where the trainer's all-invalid halt reads it, so a dead judge names itself.
-                error = result.error or "no score"
-                trajectory.info.setdefault(REWARD_ERRORS_KEY, {})[term.name] = error
-                trajectory.info[EPISODE_INVALID_KEY] = True
-                trajectory.info[EPISODE_INVALID_REASON_KEY] = f"reward term {term.name!r} scored nothing: {error}"
-            else:
-                components[term.key] = term.price(result.score)
-        trajectory.total_reward = sum(components.values())
+        """Settle the external terms' verdicts into the components (:meth:`RewardComposer.settle`),
+        record their diagnostics, and close the episode's reward: the pending mark goes, the grading
+        payload with it."""
+        settlement = self._rewards.settle(trajectory.info[REWARD_COMPONENTS_KEY], verdict)
+        trajectory.info[REWARD_COMPONENTS_KEY] = settlement.components
+        if settlement.metrics:
+            trajectory.info.setdefault(REWARD_METRICS_KEY, {}).update(settlement.metrics)
+        if settlement.details:
+            trajectory.info.setdefault(REWARD_DETAILS_KEY, {}).update(settlement.details)
+        if settlement.errors:
+            trajectory.info.setdefault(REWARD_ERRORS_KEY, {}).update(settlement.errors)
+        if settlement.invalid_reason is not None:
+            trajectory.info[EPISODE_INVALID_KEY] = True
+            trajectory.info[EPISODE_INVALID_REASON_KEY] = settlement.invalid_reason
+        trajectory.total_reward = settlement.reward
         del trajectory.info[REWARD_PENDING_KEY]
         self._drop_grading_payload(trajectory)
 
@@ -1161,9 +1218,10 @@ class BaseEnvironment(ABC):
     def finalize_truncated(self, episode_ids: list[int]) -> list[EnvStep]:
         """Finalize still-open episodes as truncated, without a synthetic model turn.
 
-        For drivers whose episode ended mid-flight (generation failure, external abort). An empty-text
-        step would take the plain-text terminal path and mark the episode ``completed``, paying
-        completion-graded envs the full objective for an episode that never finished. Here
+        For an episode the driver closes with no further model turn — its output budget holds none, a
+        generation failed past every retry, an external abort: a fake
+        empty-text step would take the plain-text terminal path and mark the episode ``completed``,
+        paying completion-graded envs the full objective for an episode that never finished. Here
         ``info["completed"]`` stays False while reward already earned (tool rewards, a graded
         ``submit_solution``) is preserved by the grade. A driver that lost the episode
         stamps :data:`EPISODE_ERROR_KEY` first, which keeps the turn-overflow price off it. No-op for

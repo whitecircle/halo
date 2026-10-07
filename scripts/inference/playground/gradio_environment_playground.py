@@ -29,7 +29,8 @@ from src.configs.rollout_config import RolloutConfig
 from src.environments.base import ANSWER_KEY, Trajectory
 from src.environments.eval_runner import require_answers, run_episode
 from src.environments.registry import get_registered_environments, resolve_environment
-from src.inference.openai_client import DEFAULT_LOCAL_BASE_URL, create_openai_client
+from src.inference.endpoints import DEFAULT_LOCAL_BASE_URL
+from src.inference.openai_client import create_openai_client
 
 logger = logging.getLogger(__name__)
 
@@ -93,8 +94,10 @@ def render_summary(env_type: str, trajectory: Trajectory | None, elapsed: float,
         parts.append(f"**Length-capped turns:** {trajectory.info.get('length_cutoff_turns', 0)}")
     if trajectory.info.get("empty_turns"):
         parts.append(f"**Empty turns:** {trajectory.info['empty_turns']}")
-    if trajectory.info.get("final_answer"):
-        parts.append(f"**Final answer:** {trajectory.info['final_answer']}")
+    # ReAct records its answer as ``final_answer``, the native protocol as ``final_response``.
+    final = trajectory.info.get("final_answer") or trajectory.info.get("final_response")
+    if final:
+        parts.append(f"**Final answer:** {final}")
     if trajectory.info.get("total_tool_calls"):
         parts.append(
             f"**Tool calls:** {trajectory.info['total_tool_calls']} "

@@ -2,7 +2,7 @@
 """Adversarial / edge-case tests for rule-based rewards and RLRR advantage shaping.
 
 Covers three modules:
-  * src/rewards/matching.py — numeric and exact matching against crafted distractor inputs, and
+  * src/rewards/graders/matching.py — numeric and exact matching against crafted distractor inputs, and
     the empty-answer floor of the validation chain.
   * src/environments/envs/tasks/qa.py — multiple-choice letter extraction, which lives with the
     only environment that grades by letter.
@@ -24,7 +24,7 @@ from src.environments.envs.tasks.qa import (
     ExamQAEnvironment,
     multiple_choice_match,
 )
-from src.rewards.matching import (
+from src.rewards.graders.matching import (
     exact_match,
     extract_last_boxed,
     normalize_text,
@@ -298,7 +298,7 @@ def test_multiple_choice_extracts_from_phrase():
 
 def test_multiple_choice_no_startswith_fallback():
     """A response that merely STARTS with the letter (here "Apple") must not score
-    as choice "A" — the guard removed the startswith fallback."""
+    as choice "A": there is no startswith fallback."""
     assert multiple_choice_match("Apple", "A") is False
 
 
@@ -312,8 +312,8 @@ def test_multiple_choice_rejects_an_index_expected_answer():
 
     Coercing "1" → "B" here would guess at a choice ordering the matcher cannot see (``choices``
     lives in the trajectory context, not in either of its two string arguments) and would make a
-    malformed answer column look like a working one. The conversion belongs in dataset prep, so
-    ``run_env.py``'s example points at a letter-answer dataset instead.
+    malformed answer column look like a working one. The conversion is
+    ``ExamQAEnvironment._expected_choice_letter``'s, which reads ``choices``.
     """
     for index in ("0", "1", 1, "3"):
         assert multiple_choice_match("The answer is B", index) is False
@@ -340,7 +340,7 @@ def test_exam_prompt_states_the_full_graded_letter_range():
 
 
 def test_empty_prediction_does_not_validate():
-    """An empty prediction matches nothing in the default chain, so the objective grades 0."""
+    """An empty prediction is neither an exact nor a numeric match, so the objective grades 0."""
     assert validate_answer("", "the expected answer") is False
 
 

@@ -114,7 +114,7 @@ def test_an_attention_lora_run_still_advances_the_ep_capacity_generation(tmp_pat
 
 
 def test_the_same_run_without_an_adapter_advances_it_exactly_once_per_forward(tmp_path):
-    """Anti-vacuity for the LoRA case, and the ceiling on the fix.
+    """Anti-vacuity for the LoRA case, and the ceiling on the hook.
 
     An unwrapped model already carries the hook from EP patching, so this measures the harness
     itself: a forward that never reaches an EP-patched module, or a counter nothing owns, would

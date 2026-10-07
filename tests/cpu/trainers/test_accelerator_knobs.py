@@ -89,7 +89,7 @@ def test_names_every_unapplicable_knob_that_is_set():
     warnings = _capture_warnings(lambda: _warn_unapplied(me))
     assert len(warnings) == 1, warnings
     assert "use_hsdp" in warnings[0] and "fp32_grad_reduce" in warnings[0]
-    # Not listed: it IS applied on this branch (moved out of the plain-accelerator path).
+    # Not listed: it IS applied on this branch.
     assert "fp32_output_conversion" not in warnings[0]
 
 

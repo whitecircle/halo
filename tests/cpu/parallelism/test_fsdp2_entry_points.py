@@ -1,14 +1,17 @@
 #!/usr/bin/env python
-"""The two FSDP2 entry points must wrap a model identically — one body, one mesh.
+"""The two FSDP2 entry points must wrap a model identically — one body, one mesh — and the EP+TP
+wrap must go through the TP one.
 
 ``setup_fsdp2_for_dp`` (plain/EP/CP data parallelism) and ``setup_fsdp2_for_tp`` (the DP dimension of
-a TP run) differ only in how the DP mesh is obtained. When each carried its own copy of the wrap, a
-policy or reshard fix landed on one path and left the other behind — silently, because both still
-report success and every failure mode of a wrong FSDP2 policy (a cast that should not happen, a
-reduce dtype, a layer that never became its own shard group) shows up as drift, not as an error.
+a TP run) differ only in how the DP mesh is obtained. A copy of the wrap per path would let a policy
+or reshard fix land on one path and leave the other behind — silently, because both still report
+success and every failure mode of a wrong FSDP2 policy (a cast that should not happen, a reduce
+dtype, a layer that never became its own shard group) shows up as drift, not as an error.
 
 The TP path also takes the mesh the loader already attached: rebuilding one there would leave the
-model's params sharded on the first mesh while FSDP2 reduces their grads over the second.
+model's params sharded on the first mesh while FSDP2 reduces their grads over the second. EP+TP
+takes the same path with its EP modules as ignored params, so it inherits the cast policy and the
+single-device check rather than wrapping beside them.
 
     python tests/cpu/parallelism/test_fsdp2_entry_points.py
 """
@@ -23,6 +26,7 @@ import torch.nn as nn
 
 import src.distributed.fsdp as fsdp
 from src.distributed.mesh import MeshDim
+from src.trainers.mixins.grad_sync import GradientSyncMixin
 
 _ARGS = SimpleNamespace(bf16=True, fp16=False, fp32_grad_reduce=False)
 _FP32_ARGS = SimpleNamespace(bf16=False, fp16=False, fp32_grad_reduce=False)
@@ -164,6 +168,68 @@ def test_the_tp_entry_point_refuses_a_mesh_with_no_dp_dimension():
         pytest.raises(RuntimeError, match="requires a device mesh with a 'dp' dimension"),
     ):
         fsdp.setup_fsdp2_for_tp(model, tp_size=2, dp_size=4, args=_ARGS)
+
+
+class _Fp32ResidualLayer(nn.Linear):
+    """A layer declaring an fp32 activation across layer boundaries (Zaya's residual)."""
+
+    _fp32_interlayer_residual = True
+
+
+class _EPTPHost(GradientSyncMixin):
+    """What the EP+TP wrap reads: the config, the args, the model and the FSDP exclusions."""
+
+    def __init__(self, model, excluded):
+        self.model = model
+        self.args = _ARGS
+        self.parallelism_config = SimpleNamespace(
+            tp_size=2, data_parallel_size=4, fp32_non_ep_params=False, fsdp_reshard_after_forward=False
+        )
+        self._excluded = excluded
+
+    def _fsdp_exclusions(self):
+        return SimpleNamespace(params=self._excluded)
+
+
+def _ep_tp_model() -> _CausalLmLike:
+    model = _CausalLmLike()
+    model.model.layers[0] = _Fp32ResidualLayer(8, 8)
+    model._device_mesh = _FakeMesh(4, (MeshDim.DP, MeshDim.TP))
+    return model
+
+
+def test_the_ep_tp_wrap_runs_the_shared_body_with_its_ep_modules_left_out():
+    """EP+TP wraps over the loader's mesh like TP does, plus the EP modules as ignored params; the
+    shared body is what reads the model's fp32-residual declaration into the cast policy."""
+    model = _ep_tp_model()
+    expert = model.model.layers[1].weight
+    calls = []
+
+    def fake_fully_shard(module, **kwargs):
+        calls.append((module, kwargs["mp_policy"], kwargs.get("ignored_params")))
+
+    with (
+        _fake_world(),
+        patch.object(fsdp, "fully_shard", side_effect=fake_fully_shard),
+        patch.object(fsdp, "create_dp_tp_mesh", side_effect=AssertionError("built a second mesh")),
+    ):
+        _EPTPHost(model, [expert])._setup_ep_tp_gradient_sync()
+
+    assert calls, "the EP+TP wrap sharded nothing"
+    assert {policy.cast_forward_inputs for _, policy, _ in calls} == {False}, (
+        "the fp32 inter-layer residual must keep its dtype across the layer boundary"
+    )
+    layer_ignored = next(ignored for module, _, ignored in calls if module is model.model.layers[1])
+    assert layer_ignored is not None and expert in layer_ignored, "the EP module was sharded with the layer"
+
+
+def test_the_ep_tp_wrap_refuses_a_model_spread_over_two_devices():
+    """The single-device check is rank-local and must run before the wrap's collective mesh work."""
+    model = _ep_tp_model()
+    model.lm_head.to("meta")
+
+    with _fake_world(), patch.object(fsdp, "fully_shard"), pytest.raises(RuntimeError, match="single-device"):
+        _EPTPHost(model, [])._setup_ep_tp_gradient_sync()
 
 
 def test_neither_entry_point_wraps_a_single_rank_dp_group():

@@ -6,6 +6,8 @@
 * ``max_train_row_tokens`` must exceed ``rollout_max_tokens``: a training row is prompt + completion
   and the completion alone may run to the per-turn budget, so a cap at or below it leaves out every
   turn that used its budget — a length bias against long turns, not the memory bound the knob is.
+* ``rollout_max_episode_tokens`` bounds the episode's sampled tokens and must hold one whole turn,
+  so the first turn can use the per-turn cap the run states.
 
     python tests/cpu/config/test_env_trainer_config_ranges.py
 """
@@ -37,6 +39,16 @@ def test_a_row_cap_at_or_below_the_per_turn_budget_is_refused(cap):
 def test_a_row_cap_above_the_per_turn_budget_passes():
     assert AsyncTrainingConfig(rollout_max_tokens=1000, max_train_row_tokens=1001).max_train_row_tokens == 1001
     assert AsyncTrainingConfig(rollout_max_tokens=1000).max_train_row_tokens is None
+
+
+def test_an_episode_budget_holds_one_whole_turn_and_is_unbounded_when_null():
+    with pytest.raises(ValueError, match="rollout_max_episode_tokens must be an int >= rollout_max_tokens"):
+        AsyncTrainingConfig(rollout_max_tokens=1000, rollout_max_episode_tokens=999)
+    assert (
+        AsyncTrainingConfig(rollout_max_tokens=1000, rollout_max_episode_tokens=1000).rollout_max_episode_tokens
+        == 1000
+    )
+    assert AsyncTrainingConfig(rollout_max_tokens=1000).rollout_max_episode_tokens is None
 
 
 if __name__ == "__main__":

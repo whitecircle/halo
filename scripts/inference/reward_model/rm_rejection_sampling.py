@@ -295,11 +295,6 @@ async def join_worker_queue(queue: asyncio.Queue, worker: asyncio.Task) -> None:
     if worker in done:
         join.cancel()
         await worker
-        return
-    if join in done:
-        return
-    join.cancel()
-    await worker
 
 
 async def main():

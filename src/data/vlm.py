@@ -42,6 +42,11 @@ VLM_RAW_IMAGE_COLUMNS = ("images", "image")
 # :class:`~src.data.collators.vlm.PreprocessedVLMDataCollator`.
 VLM_IMAGE_COLUMNS = (*VLM_RAW_IMAGE_COLUMNS, "pixel_values")
 
+# Per-token type tensors a processor emits beside ``input_ids`` (M-RoPE): 1:1 with the token positions,
+# so they follow every pad, concat and teacher-branch swap applied to ``input_ids`` — never a row-major
+# cat like the vision tensors.
+SEQUENCE_ALIGNED_VISION_KEYS = frozenset({"mm_token_type_ids", "token_type_ids"})
+
 
 def carried_image_columns(dataset) -> set[str]:
     """The :data:`VLM_IMAGE_COLUMNS` spellings present in any split of ``dataset``.
@@ -145,12 +150,10 @@ def get_image_token_ids(tokenizer, processor=None) -> set:
     image_token_ids = set()
 
     for obj in (processor, getattr(processor, "tokenizer", None), tokenizer):
-        token_id = getattr(obj, "image_token_id", None) if obj is not None else None
-        if token_id is not None:
-            image_token_ids.add(token_id)
-        video_id = getattr(obj, "video_token_id", None) if obj is not None else None
-        if video_id is not None:
-            image_token_ids.add(video_id)
+        for attr in ("image_token_id", "video_token_id"):
+            token_id = getattr(obj, attr, None)
+            if token_id is not None:
+                image_token_ids.add(token_id)
 
     vocab = tokenizer.get_vocab()
     common_image_tokens = [
@@ -168,7 +171,7 @@ def get_image_token_ids(tokenizer, processor=None) -> set:
             image_token_ids.add(vocab[token])
 
     for obj in (processor, tokenizer):
-        token = getattr(obj, "image_token", None) if obj is not None else None
+        token = getattr(obj, "image_token", None)
         if isinstance(token, str) and token in vocab:
             image_token_ids.add(vocab[token])
 
@@ -324,14 +327,14 @@ def process_vlm_conversation(
 ) -> tuple[list[dict[str, Any]], list[Image.Image]]:
     """Extract images from a conversation, replacing them with bare image-type placeholders.
 
-    Returns (processed_conversation, images), images separate for the processor.
+    Returns ``(history, images)``, images separate for the processor.
     """
     # Without a system role the prompt is folded into the first turn, not emitted as one the template drops.
     conversation = fold_system_into_conversation(
         conversation, system_prompt, model_supports_system_role, demote_existing_system=False
     )
 
-    processed_conversation = []
+    history = []
     images = []
 
     for msg in conversation:
@@ -339,7 +342,9 @@ def process_vlm_conversation(
         content = msg["content"]
 
         if isinstance(content, str):
-            processed_conversation.append({"role": role, "content": content})
+            # Uniformly parts-form: mixed string/list content makes Arrow type inference diverge across
+            # .map workers (struct vs Json vs null). Processors render parts-form text byte-identically.
+            history.append({"role": role, "content": [{"type": "text", "text": content}]})
         elif isinstance(content, list):
             new_content = []
             for item in content:
@@ -359,15 +364,8 @@ def process_vlm_conversation(
                     # content`), rendering a vision placeholder with no image behind it.
                     new_content.append({key: value for key, value in item.items() if value is not None})
 
-            processed_conversation.append({"role": role, "content": new_content})
+            history.append({"role": role, "content": new_content})
         else:
             raise ValueError(f"Unsupported message content type {type(content).__name__} for role '{role}'")
-
-    # Content must be uniformly parts-form: mixed string/list makes Arrow type inference diverge across
-    # .map workers (struct vs Json vs null). Processors render parts-form text byte-identically.
-    history = [
-        msg if isinstance(msg["content"], list) else {**msg, "content": [{"type": "text", "text": msg["content"]}]}
-        for msg in processed_conversation
-    ]
 
     return history, images

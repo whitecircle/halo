@@ -628,7 +628,7 @@ def test_dashed_and_underscored_spellings_are_one_flag():
         os.unlink(path)
 
 
-# mixed_precision stays in sync with post-parse fp16/bf16 mutation (F1-A)
+# mixed_precision stays in sync with post-parse fp16/bf16 mutation
 
 
 def test_toolkit_bf16_default_syncs_mixed_precision():
@@ -684,7 +684,7 @@ def test_cli_fp16_override_conflicting_with_yaml_bf16_raises():
         os.unlink(path)
 
 
-# Literal-annotated fields are validated at parse time (F1-D)
+# Literal-annotated fields are validated at parse time
 
 
 @dataclass
@@ -855,7 +855,7 @@ def test_bool_union_with_string_member_admits_strings():
         os.unlink(path)
 
 
-# Un-castable CLI overrides fail loud instead of setattr-ing a raw string (F1-E)
+# Un-castable CLI overrides fail loud instead of setattr-ing a raw string
 
 
 @dataclass

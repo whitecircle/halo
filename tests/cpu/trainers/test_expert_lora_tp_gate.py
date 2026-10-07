@@ -68,8 +68,8 @@ def test_a_full_finetune_under_tp_is_not_refused(monkeypatch):
 
 
 def test_attention_lora_under_tp_still_names_its_own_mechanism(monkeypatch):
-    """The pre-existing arm, unchanged: a PEFT-wrapped run is rejected for the DTensor-graph reason,
-    not swallowed by the new expert-LoRA branch."""
+    """A PEFT-wrapped run is rejected for the DTensor-graph reason, not swallowed by the expert-LoRA
+    branch."""
     monkeypatch.setattr(validation_mod, "has_ep_lora", lambda m: False)
     peft_model = get_peft_model(_TinyLM(), LoraConfig(r=4, target_modules=["q_proj"]))
 

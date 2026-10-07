@@ -1,21 +1,24 @@
 """Loading for the frozen teacher / reference models a run holds beside its policy.
 
 These models are never sharded, but their load must match the policy's in everything that changes a
-logprob: attention backend, GptOss sink policy, pinned revision. The parallelism gates on holding a
+logprob: attention backend, GptOss sink policy, pinned revision. The parallelism rules on holding a
 separate dense reference are here too.
 """
 
 import contextlib
+import logging
 
 import torch
 from transformers import AutoConfig, AutoModelForImageTextToText, PreTrainedModel
 from trl import ModelConfig
 
-from src.distributed.filesystem import fs_aware_main_first
+from src.distributed.filesystem import joined_node_load
+from src.distributed.loading.model_source import resolve_model_source
 from src.distributed.loading.peft_setup import has_attention_lora_targets
 from src.distributed.loading.warmup import warm_attention_kernels
 from src.distributed.parallelism_config import ParallelismConfig
 from src.distributed.tensor_parallel.state_dict import input_embeddings_tp_sharded
+from src.log import warn_once
 from src.models.loading.checkpoint_coverage import from_pretrained_verified
 from src.models.loading.dtype import cast_parameters_to_run_dtype, resolve_training_dtype
 from src.models.loading.model_preparation import (
@@ -28,6 +31,43 @@ from src.models.patches.attention import resolve_attn_implementation
 from src.models.patches.buffer_fixes import finalize_loaded_model
 from src.models.patches.gpt_oss_sinks import SinksPolicy
 from src.models.patches.remote_code_compat import apply_remote_code_compat_shims
+
+# Stdlib, not accelerate's adapter: warn_once marks a message seen on every rank, so each rank must emit it.
+logger = logging.getLogger(__name__)
+
+# ``load_frozen_reference_model``'s default ``revision``: the policy's own pin.
+_POLICY_REVISION = object()
+
+# The DPO/KTO way around a dense reference, shared by the script loader and the trainer gate so the
+# two report it once.
+PREFERENCE_REFERENCE_ALTERNATIVES = (
+    "precompute_ref_log_probs: true scores the same reference once, from the untrained policy, exactly "
+    "and with no second model; PEFT (use_peft: true, ref_model=None) is the other way around it."
+)
+
+# Messages already reported: the script loader and the trainer gate report one reference once.
+_REPORTED_REFERENCES: set[str] = set()
+
+
+def warn_unparallelized_reference(parallelism_config, avoid: str) -> None:
+    """Warn that a frozen reference beside a policy sharded by EP, ETP or TP is a whole dense replica per rank.
+
+    Its log-probs are still the policy's function on the reference weights. The model's own MoE forward is
+    what the EP layers are tested to reproduce (tests/gpu/parallelism/ep/test_ep_correctness.py), so the
+    two differ by kernel numerics only, as they do under the grouped-GEMM wrapper at ``ep_size == 1``,
+    which nothing refuses. The cost is memory and time: every rank holds the full model the parallelism
+    shards, experts included, and runs the per-expert forward. ``avoid`` is the caller's way around it.
+    """
+    if parallelism_config.is_ep_mode or parallelism_config.is_tp_mode:
+        message = (
+            f"A frozen, unparallelized reference beside a policy sharded by EP/ETP/TP "
+            f"(expert_parallel_size={parallelism_config.ep_size}, "
+            f"expert_tensor_parallel_size={parallelism_config.expert_tp_size}, "
+            f"tensor_parallel_size={parallelism_config.tp_size}) is a whole dense replica on every rank, "
+            f"experts included, run through the model's own MoE forward: its log-probs match the policy's "
+            f"up to kernel numerics, but budget for its memory and its slower forward. {avoid}"
+        )
+        warn_once(logger, _REPORTED_REFERENCES, message, message)
 
 
 def load_frozen_auxiliary_model(
@@ -63,26 +103,37 @@ def load_frozen_auxiliary_model(
       so an absent head means a randomly initialized one on one side of the objective.
 
     ``is_vlm`` pins ``AutoModelForImageTextToText`` rather than resolving the class from the config;
-    ``download_tag`` coordinates the hub fetch main-rank-first (every rank must reach it equally often);
-    ``device_map`` is forwarded to the weight load.
+    ``download_tag`` fetches the source main-rank-first and agrees it across ranks before the first
+    read (:func:`~src.distributed.loading.model_source.resolve_model_source`; every rank must reach
+    it equally often, and an untagged load is a single-process one); ``device_map`` is forwarded to
+    the weight load.
     """
     # Before the config fetch, which can already import a remote modeling file: a teacher preloaded
     # ahead of the policy would otherwise be the process's first remote-code load and miss the shims.
     apply_remote_code_compat_shims()
-    # The config fetch is inside the coordinated block: it is this path's first hub contact for the
-    # repo, so on a cold cache every rank of every node would otherwise hit the hub at once.
-    with fs_aware_main_first(download_tag) if download_tag else contextlib.nullcontext():
-        config = AutoConfig.from_pretrained(model_name_or_path, trust_remote_code=trust_remote_code, revision=revision)
-        backend = resolve_attn_implementation(config, attn_implementation, dtype, sinks_reset=reset_sinks)
-        resolved_attn = apply_family_attention_patches(config, backend)
-        load_kwargs = {
-            "revision": revision,
-            "dtype": dtype,
-            "trust_remote_code": trust_remote_code,
-            "attn_implementation": resolved_attn,
-            "device_map": device_map,
-            "excuse_task_head": False,
-        }
+    # This path's first hub contact for the repo: on a cold cache every rank of every node would
+    # otherwise hit the hub at once, and per-node caches could each hold a different commit.
+    if download_tag:
+        revision = resolve_model_source(model_name_or_path, revision, tag=download_tag)
+    config = AutoConfig.from_pretrained(model_name_or_path, trust_remote_code=trust_remote_code, revision=revision)
+    backend = resolve_attn_implementation(config, attn_implementation, dtype, sinks_reset=reset_sinks)
+    resolved_attn = apply_family_attention_patches(config, backend)
+    load_kwargs = {
+        "revision": revision,
+        "dtype": dtype,
+        "trust_remote_code": trust_remote_code,
+        "attn_implementation": resolved_attn,
+        "device_map": device_map,
+        "excuse_task_head": False,
+    }
+    # Joined, so a load failing on one node (a torn local copy, a host OOM) raises on every rank.
+    # Unthrottled: the text path keeps each rank's copy in host memory until the trainer places it,
+    # so admitting the ranks in batches would bound nothing.
+    with (
+        joined_node_load(f"Frozen model load from {model_name_or_path}", max_concurrent=0)
+        if download_tag
+        else contextlib.nullcontext()
+    ):
         if is_vlm:
             model = from_pretrained_verified(AutoModelForImageTextToText, model_name_or_path, **load_kwargs)
         else:
@@ -99,7 +150,7 @@ def load_frozen_auxiliary_model(
     )
     # Same attention warm-up as the policy loader: the first scoring forward would otherwise JIT-compile its
     # kernels mid-step on whichever rank reaches it first, while peers run ahead into the next
-    # collective. Outside the coordinated block, since the warm-up itself barriers.
+    # collective.
     warm_attention_kernels(model, dtype=dtype)
     return model
 
@@ -128,19 +179,21 @@ def load_frozen_reference_model(
     is_vlm: bool,
     reset_sinks: bool,
     attn_default: str | None,
+    revision: str | None | object = _POLICY_REVISION,
 ) -> PreTrainedModel:
     """Load the frozen reference a policy is scored against, from ``model_name_or_path``, as the policy loaded.
 
     The policy's revision pin, remote-code flag, attention request and sinks policy, then the same
     tokenizer-driven vocabulary and special-token ids. ``model_name_or_path`` is the weights the
-    reference anchors to: the base checkpoint for a preference reference, the policy's own weights
-    source for a KL reference that follows a resume.
+    reference anchors to: the run's configured model (never a trained resume checkpoint) unless the
+    caller names a separate reference repo. A reference from another repo passes that repo's
+    own ``revision`` (``None`` for its main): the policy's pin names a commit in the policy's repo only.
     """
     model_ref = load_frozen_auxiliary_model(
         model_name_or_path,
         dtype=resolve_training_dtype(training_config),
         # Unpinned, the reference loads hub main and shifts every logratio.
-        revision=getattr(model_config, "model_revision", None),
+        revision=getattr(model_config, "model_revision", None) if revision is _POLICY_REVISION else revision,
         trust_remote_code=model_config.trust_remote_code,
         # The policy's own request, resolved against the reference's config: a logratio is a
         # difference of two logprobs, so a kernel differing between them biases the objective. The
@@ -168,14 +221,15 @@ def load_reference_model_for_preference(
     reset_sinks: bool = True,
     attn_default: str | None = None,
 ):
-    """Load the frozen reference model for a preference trainer (DPO/KTO), or ``None`` under PEFT.
+    """Load the frozen reference model for a preference trainer (DPO/KTO), or ``None`` where none is held.
 
     Under PEFT the reference is the adapter-free base → ``None``: TRL scores it inside the
     ``PeftModel``'s ``disable_adapter()``, which also drops the native EP expert adapters
     (``make_disable_adapter_ep_aware``). Expert-only LoRA has no ``PeftModel``, so it must set
-    ``precompute_ref_log_probs``. Full finetune loads an unparallelized copy. ``reset_sinks`` and
-    ``attn_default`` must mirror the policy load so the reference's logprobs come from the same
-    kernel and the same sink semantics.
+    ``precompute_ref_log_probs``. Full finetune loads an unparallelized copy, under EP/TP with the
+    replica's cost reported (:func:`warn_unparallelized_reference`), or precomputes where the
+    parallelism shards the policy. ``reset_sinks`` and ``attn_default`` must mirror the policy load so
+    the reference's logprobs come from the same kernel and the same sink semantics.
     """
     if model_config.use_peft:
         if (
@@ -192,18 +246,19 @@ def load_reference_model_for_preference(
             )
         return None
 
-    # PP is included for the same reason as EP/TP: the trainer refuses a live reference under it
-    # (``reject_pp_ref_model``), and without this branch a pure-PP run (pp>1, ep_group_size==1,
-    # tp_size==1) loads a full dense reference on every rank before reaching that refusal.
-    if parallelism_config.is_ep_mode or parallelism_config.is_tp_mode or parallelism_config.is_pp_mode:
-        # Precomputed log-probs come from the untrained policy; a resume restores them from the checkpoint.
-        if training_config.precompute_ref_log_probs:
-            return None
+    sharded = parallelism_config.is_ep_mode or parallelism_config.is_tp_mode or parallelism_config.is_pp_mode
+    # Precomputed log-probs come from the untrained policy; a resume restores them from the checkpoint.
+    if sharded and training_config.precompute_ref_log_probs:
+        return None
+    # A pipeline stage holds a slice of the model and the schedule owns every forward, so the trainer
+    # refuses a live reference (``reject_pp_ref_model``); refused here before a dense copy loads.
+    if parallelism_config.is_pp_mode:
         raise ValueError(
-            f"Full-finetune {method} under EP/TP/PP cannot hold a separate dense reference model. "
-            f"Set precompute_ref_log_probs: true (reference log-probs are computed from the "
-            f"untrained policy before the first step), or use PEFT (--use_peft)."
+            f"Full-finetune {method} under PP needs precompute_ref_log_probs: true: a pipeline stage holds a "
+            f"slice of the model and the schedule owns every forward, so no stage can score a live "
+            f"reference model, and the trainer refuses one."
         )
+    warn_unparallelized_reference(parallelism_config, PREFERENCE_REFERENCE_ALTERNATIVES)
     return load_frozen_reference_model(
         args,
         model_config,

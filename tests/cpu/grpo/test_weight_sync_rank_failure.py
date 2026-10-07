@@ -129,7 +129,7 @@ def _run_ranks(tmp_path, mode: str) -> tuple[dict[int, str], dict[int, tuple[int
 
 
 def test_a_mid_loop_send_failure_raises_on_every_rank(tmp_path):
-    """The P0: rank 0's client fails on the 3rd param while rank 1 still has two gathers to go.
+    """Rank 0's client fails on the 3rd param while rank 1 still has two gathers to go.
 
     Rank 1 reaching the uniform error is the whole proof — it can only get there if rank 0 entered
     every gather after the failure and joined the reject. Without the deferral rank 1 sits in

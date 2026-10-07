@@ -1,14 +1,14 @@
 #!/usr/bin/env python
 """CPU tests: a scorer that cannot build its request books a verdict-less result, it does not raise.
 
-:class:`src.rewards.scoring.Scorer` promises that ``score`` never raises for a sample — "one bad call
-cannot take a rollout batch down with it". The request itself was already guarded; what was not is the
-work BEFORE it: the reward model's chat-template render (under ``transcript: full`` the messages carry
-tool turns and ``tool_calls``, which a reward model's template may refuse) and the judge's prompt
-build (which serializes the row's reference). Either raise escapes ``RewardComposer.score`` — it
-gathers without ``return_exceptions`` — then ``settle_async`` and the episode dispatcher, and lands in
-the Ray actor's catch-all, which masks the WHOLE episode. For a template mismatch that is every
-episode of the run, with the launch probe green: its sample is a plain user/assistant pair.
+:class:`src.rewards.scorers.base.Scorer` promises that ``score`` never raises for a sample — "one bad
+call cannot take a rollout batch down with it". That covers the work before the request too: the
+reward model's chat-template render (under ``view: full`` the messages carry tool turns and
+``tool_calls``, which a reward model's template may refuse) and the judge's prompt build (which
+serializes the row's reference). A raise there would escape ``RewardComposer.score`` — it gathers
+without ``return_exceptions`` — then the settlement and the episode dispatcher, and land in the Ray
+actor's catch-all, which masks the WHOLE episode; for a template mismatch that is every episode of
+the run, with the launch probe green, since its sample is a plain user/assistant pair.
 
 Run: python tests/cpu/rewards/test_scorer_render_failures.py  (or pytest)
 """
@@ -17,10 +17,10 @@ import asyncio
 
 import pytest
 
-from src.rewards.judge import GenerativeJudge
-from src.rewards.reward_model import ServedRewardModel
 from src.rewards.samples import ScoringSample
-from src.rewards.spec import JudgeTerm, Requirement, RewardModelTerm
+from src.rewards.scorers.judge import GenerativeJudge
+from src.rewards.scorers.reward_model import ServedRewardModel
+from src.rewards.terms import JudgeTerm, Requirement, RewardModelTerm
 
 REQUIREMENTS = (Requirement(name="correctness", description="The answer is right."),)
 
@@ -46,7 +46,7 @@ def _sample(reference=None) -> ScoringSample:
 
 
 def test_a_reward_model_render_failure_scores_the_batch_with_errors():
-    term = RewardModelTerm(name="pref", url="http://rm:8100", model="org/rm", transcript="full")
+    term = RewardModelTerm(name="pref", url="http://rm:8100", model="org/rm", view="full")
     scorer = ServedRewardModel(term)
     scorer._tokenizer = _RefusingTemplate()
     samples = [_sample(), _sample()]
@@ -70,7 +70,7 @@ def test_a_judge_prompt_build_failure_scores_the_sample_with_an_error():
 
     assert len(results) == 1
     assert results[0].score is None
-    assert results[0].error and "TypeError" in results[0].error, results[0].error
+    assert results[0].error.startswith("prompt build failed: TypeError"), results[0].error
 
 
 def test_a_scorable_sample_is_unaffected_by_the_guards():

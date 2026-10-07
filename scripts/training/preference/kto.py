@@ -1,5 +1,5 @@
 #!/usr/bin/env python
-"""Distributed KTO training (text or VLM) with EP and TP support.
+"""Distributed KTO training (text or VLM).
 
 Kahneman-Tversky Optimization on *unpaired* preference data — each row is a single
 ``{prompt, completion, label}`` triple (``label`` marks the completion desirable or not). One
@@ -12,8 +12,9 @@ The vision-vs-text data path follows the dataset, and TRL decides it from the ro
 image parts embedded in the messages of a column-less dataset are refused here, since nothing on
 the text path would render them with pixels behind them.
 
-CP is not supported (full-sequence log-prob pooling + KL reference term); use EP and/or TP. Under
-EP/TP use PEFT (``ref_model=None``) or ``precompute_ref_log_probs``.
+CP is not supported (full-sequence log-prob pooling + KL reference term). Under EP/TP use PEFT
+(``ref_model=None``) or ``precompute_ref_log_probs``. PP is declared but not yet available in this
+release.
 
 Usage:
     torchrun --nproc_per_node=8 scripts/training/preference/kto.py \\
@@ -24,7 +25,7 @@ from trl import KTOConfig, ModelConfig
 
 from src.args.distributed_args import DistributedArguments
 from src.args.kto_args import KTOScriptArguments
-from src.data.pipeline.processing import require_render_column
+from src.data.pipeline.processing import carry_cache_key, require_render_column
 from src.data.sources.loading import alias_images_column
 from src.data.vlm import dataset_declares_images
 from src.distributed.loading.frozen_models import load_reference_model_for_preference
@@ -103,7 +104,7 @@ def _rename_kto_columns(dataset, args):
     for knob, target in _KTO_RENAMED_FIELDS:
         source = getattr(args, knob)
         if source != target:
-            dataset = dataset.rename_column(source, target)
+            dataset = carry_cache_key(dataset, dataset.rename_column(source, target), f"rename:{source}->{target}")
     return dataset
 
 

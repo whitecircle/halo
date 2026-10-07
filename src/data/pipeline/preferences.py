@@ -1,5 +1,5 @@
 """Dataset-time preparation of preference corpora (DPO, SMPO, reward): row normalization, the
-chat-template map for both sides of a pair, and the vision pair's render.
+chat-template map for both sides of a pair, the vision pair's render, and SMPO's row tokenizers.
 
 Batch-time collation of the vision pair is :mod:`src.data.collators.vlm_preference`.
 """
@@ -9,12 +9,15 @@ from typing import Any
 
 from datasets import Dataset, Features, Sequence, Value
 from datasets import Image as ImageFeature
-from transformers import PreTrainedTokenizer, ProcessorMixin
+from transformers import PreTrainedTokenizer, PreTrainedTokenizerBase, ProcessorMixin
 
 from src.data.pipeline.conversation import as_conversation, chat_template_kwargs, reject_image_content
 from src.data.pipeline.processing import DATASET_NUM_PROC, coordinated_map
+from src.data.pipeline.rendered import lacks_emitted_bos
 from src.data.pipeline.row_processors import normalize_vlm_conversation, prepare_generative_row
+from src.data.spans import lacks_terminator
 from src.data.vlm import VLM_RAW_IMAGE_COLUMNS, process_vlm_conversation, render_vlm_text
+from src.models.structure import resolve_tokenizer
 
 __all__ = [
     "MARGIN_COLUMN",
@@ -26,6 +29,8 @@ __all__ = [
     "render_vlm_preference_row",
     "split_rendered_completion",
     "split_vlm_preference_row",
+    "tokenize_preference_row",
+    "tokenize_vlm_preference_row",
     "vlm_preference_features",
 ]
 
@@ -163,6 +168,122 @@ def render_vlm_preference_row(features: dict[str, Any], processing_class: Proces
         for field, history in completions.items()
     }
     return {**rendered, "images": pil_images}
+
+
+def tokenize_preference_row(
+    features: dict[str, str],
+    processing_class: PreTrainedTokenizerBase,
+    *,
+    max_prompt_length: int | None,
+    max_completion_length: int | None,
+    truncation_mode: str,
+    eos_token_ids: frozenset[int] = frozenset(),
+) -> dict[str, list[int]]:
+    """Tokenize one (prompt, chosen, rejected) example.
+
+    Tokenizes full prompt+completion sequences to handle boundary token-merging correctly.
+    """
+    prompt = features["prompt"]
+    chosen = features["chosen"]
+    rejected = features["rejected"]
+
+    prompt_tokens = processing_class(prompt, add_special_tokens=False)["input_ids"]
+
+    full_chosen = processing_class(prompt + chosen, add_special_tokens=False)
+    full_rejected = processing_class(prompt + rejected, add_special_tokens=False)
+
+    # Token merging at the prompt/completion boundary shifts the split point by one. The prompt must
+    # move with it: the trainer concatenates prompt_input_ids ⧺ completion_input_ids verbatim, so
+    # keeping the full prompt while the completion starts one token earlier duplicates the boundary
+    # token. The split must be the same for both completions — they share one prompt field, and a
+    # per-side split would condition chosen and rejected on different contexts, making the margin a
+    # comparison between two different prompts.
+    split = len(prompt_tokens)
+    if full_chosen["input_ids"][:split] != prompt_tokens or full_rejected["input_ids"][:split] != prompt_tokens:
+        # full_*[: split - 1] == prompt_tokens[: split - 1] holds on the non-merging side too, so
+        # rolling both back stays exact there.
+        split -= 1
+        prompt_tokens = prompt_tokens[:split]
+
+    chosen_input_ids = full_chosen["input_ids"][split:]
+    rejected_input_ids = full_rejected["input_ids"][split:]
+
+    if lacks_emitted_bos(prompt_tokens, processing_class):
+        prompt_tokens = [processing_class.bos_token_id] + prompt_tokens
+
+    # A spurious ender would sit inside the mean log-prob the SMPO margin is computed from.
+    eos_id = processing_class.eos_token_id
+    if lacks_terminator(chosen_input_ids, processing_class, eos_token_ids):
+        chosen_input_ids = chosen_input_ids + [eos_id]
+    if lacks_terminator(rejected_input_ids, processing_class, eos_token_ids):
+        rejected_input_ids = rejected_input_ids + [eos_id]
+
+    if max_prompt_length and len(prompt_tokens) > max_prompt_length:
+        if truncation_mode == "keep_start":
+            prompt_tokens = prompt_tokens[:max_prompt_length]
+        else:  # keep_end
+            prompt_tokens = prompt_tokens[-max_prompt_length:]
+
+    if max_completion_length:
+        # A plain tail slice would cut the EOS appended above, so the model never learns to stop there.
+        def _truncate_keep_eos(ids: list[int]) -> list[int]:
+            if len(ids) <= max_completion_length:
+                return ids
+            if eos_id is None:
+                return ids[:max_completion_length]
+            return ids[: max_completion_length - 1] + [eos_id]
+
+        chosen_input_ids = _truncate_keep_eos(chosen_input_ids)
+        rejected_input_ids = _truncate_keep_eos(rejected_input_ids)
+
+    return {
+        "prompt_input_ids": prompt_tokens,
+        "chosen_input_ids": chosen_input_ids,
+        "rejected_input_ids": rejected_input_ids,
+    }
+
+
+def tokenize_vlm_preference_row(
+    features: dict[str, Any],
+    processing_class: ProcessorMixin,
+    *,
+    max_prompt_length: int | None,
+    max_completion_length: int | None,
+    truncation_mode: str,
+    eos_token_ids: frozenset[int] = frozenset(),
+) -> dict[str, Any]:
+    """Prepare one raw VLM (prompt, chosen, rejected [, images]) example.
+
+    The pre-render half is :func:`split_vlm_preference_row`, shared with the VLM reward map.
+    Completions are then rendered by the same prefix-strip invariant as the text pipeline
+    (``template(prompt + completion)`` minus ``template(prompt)``) and tokenized through
+    :func:`tokenize_preference_row`, so boundary merges, EOS appending and truncation stay
+    byte-identical to it. The prompt stays text + PIL images; the collator expands placeholders per
+    batch.
+    """
+    tokenizer = resolve_tokenizer(processing_class)
+    prompt_history, pil_images, completions = split_vlm_preference_row(features, "VLM SMPO row")
+
+    prompt_text = render_vlm_text(processing_class, prompt_history)
+    completion_texts = {
+        side: split_rendered_completion(prompt_text, render_vlm_text(processing_class, prompt_history + history), side)
+        for side, history in completions.items()
+    }
+
+    tokenized = tokenize_preference_row(
+        {"prompt": prompt_text, "chosen": completion_texts["chosen"], "rejected": completion_texts["rejected"]},
+        tokenizer,
+        max_prompt_length=max_prompt_length,
+        max_completion_length=max_completion_length,
+        truncation_mode=truncation_mode,
+        eos_token_ids=eos_token_ids,
+    )
+    return {
+        "prompt_text": prompt_text,
+        "images": pil_images,
+        "chosen_input_ids": tokenized["chosen_input_ids"],
+        "rejected_input_ids": tokenized["rejected_input_ids"],
+    }
 
 
 def apply_chat_template_to_preference_data(

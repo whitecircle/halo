@@ -178,7 +178,7 @@ def test_an_unreadable_image_path_drops_the_row():
 
 def test_an_oversized_image_drops_the_row(monkeypatch, tmp_path):
     """PIL refuses a decompression bomb with ``DecompressionBombError``, which subclasses plain
-    ``Exception`` — outside the tuple it aborted the whole map over one oversized image."""
+    ``Exception`` — outside the row-error tuple it would abort the whole map over one oversized image."""
     dataset = _mixed_vlm_dataset(num_text=2, num_image=1)
 
     baseline = tokenize_vlm_dataset(dataset, _ImageTolerantVLMProcessor(), _vlm_config(), split_name="train")
@@ -194,8 +194,7 @@ def test_an_oversized_image_drops_the_row(monkeypatch, tmp_path):
 
 
 def test_a_filesystem_error_aborts_the_map():
-    """An OS fault is not a bad row: counting ENOSPC/EIO as one thins the corpus silently, exactly
-    the failure the blanket catch was narrowed to prevent."""
+    """An OS fault is not a bad row: counting ENOSPC/EIO as one thins the corpus silently."""
 
     class _OutOfSpaceProcessor(_ImageTolerantVLMProcessor):
         def apply_chat_template(self, history, **kwargs):

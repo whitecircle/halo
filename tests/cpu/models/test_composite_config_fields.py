@@ -6,8 +6,8 @@ field simply does not exist at the top level. Four toolkit seams read or write s
 is silently or loudly wrong for those families unless it goes through the nested config:
 
   * ``_apply_config_overrides`` must not reject a ``model_init_kwargs`` key living on ``text_config``
-    (``output_router_logits`` / ``router_aux_loss_coef`` — the aux-loss router balancing the shipped
-    Qwen3.6 GRPO configs enable), or those runs die at model load.
+    (``output_router_logits``, which the shipped Qwen3.6 GRPO configs set for MoE metrics, or
+    ``router_aux_loss_coef``), or those runs die at model load.
   * ``setup_model_and_tokenizer`` must not write the tokenizer's ``pad_token_id`` to the top level
     only, while transformers' own sequence-classification pooling reads
     ``config.get_text_config().pad_token_id`` — leaving it ``None`` (batch > 1 then raises) or stale
@@ -290,7 +290,6 @@ def test_zero_bias_routing_matches_the_stock_qwen3_5_router():
         _deepseek_biased_route = EPMoELayerBase._deepseek_biased_route
         _biased_topk = EPMoELayerBase._biased_topk
         _balancing_bias = EPMoELayerBase._balancing_bias
-        _forced_topk_indices = None
 
         def _maybe_replace_selection(self, indices):
             return indices
@@ -320,8 +319,8 @@ def test_resolve_head_dim_matches_the_declared_value(model_type):
     """The declared ``head_dim`` wins over ``hidden_size // num_attention_heads`` on every family.
 
     They are not interchangeable — Gemma 4 declares a head_dim its hidden/heads ratio does not
-    reproduce — and the fallback was spelled by hand at three sites (the RoPE inv_freq rebuild, the
-    flash-attention warm-up, the pipeline-split cost model). A site computing the ratio where the
+    reproduce — and three sites size off it (the RoPE inv_freq rebuild, the flash-attention warm-up,
+    the pipeline-split cost model). A site computing the ratio where the
     family declares otherwise sizes its table, kernel, or cost estimate to the wrong dimension.
     """
     config = _config(model_type)
@@ -336,7 +335,7 @@ def test_resolve_head_dim_reads_through_a_composite_wrapper():
     ``PreTrainedConfig`` defines no ``__getattr__``, so ``getattr(config, "head_dim", None)`` on a
     composite config returns ``None`` and the caller falls through to ``config.hidden_size`` — which
     is not there either, raising, or is the VISION tower's, silently sizing a decoder table from an
-    unrelated dimension. ``buffer_fixes`` read the raw config exactly that way.
+    unrelated dimension.
     """
     config = _config("gemma4")
     assert getattr(config, "head_dim", None) is None, "premise: the wrapper hides it"

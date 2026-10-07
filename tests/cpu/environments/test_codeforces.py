@@ -21,8 +21,13 @@ import pytest
 
 from scripts.environments.preparation.prepare_code_dataset import rating_in_bounds
 from src.configs.environment_config import EnvironmentConfig
-from src.environments.base import OBJECTIVE_REWARD_KEY, REWARD_COMPONENTS_KEY
-from src.environments.envs.tasks.coding.code_contests import DEFAULT_REASONING_EFFORT, CodeContestsEnvironment
+from src.environments.base import REWARD_COMPONENTS_KEY
+from src.environments.envs.tasks.coding.code_contests import (
+    DEFAULT_REASONING_EFFORT,
+    NO_STDIN_NOTE,
+    SCRATCHPAD_BUDGET_SPENT_REPLY,
+    CodeContestsEnvironment,
+)
 from src.environments.envs.tasks.coding.datasets import (
     CODE_DATASET_ADAPTERS,
     format_codeforces_prompt,
@@ -45,6 +50,8 @@ from src.environments.envs.tasks.coding.grading import (
 from src.environments.registry import get_registered_environments, resolve_environment
 from src.environments.sandbox.base import SandboxExecutor, SandboxResult
 from src.environments.sandbox.resolve import resolve_sandbox
+from src.rewards.terms import OBJECTIVE_REWARD_KEY
+from tests.common.code_contests import StubSandbox
 
 # A tolerance special-judge: accept any float within 1e-4 of the reference (argv = 3 file paths).
 _CHECKER_TOLERANCE = (
@@ -132,11 +139,8 @@ def test_backend_outage_counts_infra_errors():
     must report it as infra_errors so the reward layer can withhold every rung (an all-infra-error
     grade carries no signal about the code)."""
 
-    class _DownSandbox:
-        def run(self, code, **kwargs):
-            return SandboxResult(stdout="", stderr="", returncode=None, timed_out=False, error="backend down")
-
-    result = run_solution_against_tests("print(1)", _ADD_TESTS, sandbox=_DownSandbox())
+    down = StubSandbox(SandboxResult(stdout="", stderr="", returncode=None, timed_out=False, error="backend down"))
+    result = run_solution_against_tests("print(1)", _ADD_TESTS, sandbox=down)
     assert result.infra_errors == result.total == 2
     assert result.ran_ok == 0 and result.passed == 0
 
@@ -357,25 +361,25 @@ def test_python_test_tool_runs_complete_program_with_imports():
 
     It must allow the standard library and print, matching what ``submit_solution`` grades. Routed to
     the in-process restricted REPL instead, ``import sys`` is rejected ("imports are not allowed in
-    the sandbox") and so is a bare ``print(...)`` ("name 'print' is not defined"), leaving a model
-    unable to test a real stdin/stdout solution before submitting.
+    the sandbox"), leaving a model unable to test a real stdin/stdout solution before submitting.
     """
     env = CodeContestsEnvironment(language="python")
     tool = env.registry.get("python_repl")
     assert tool is not None
     out = tool.execute(code="import sys\nfrom collections import Counter\nprint(sum(Counter([1, 1, 2]).values()))")
-    assert out.strip() == "3"
+    assert out == f"3\n{NO_STDIN_NOTE}"
 
 
 def test_scratchpad_feeds_the_programs_stdin():
     """The scratchpad runs the program on the stdin the call supplies, so a model can try the
     statement's sample input on the exact program it will submit; an omitted stdin reads as
-    end-of-file rather than blocking, and the schema declares it optional."""
+    end-of-file rather than blocking, the schema declares it optional, and output computed from no
+    input says it got none."""
     env = CodeContestsEnvironment(language="python")
     tool = env.registry.get("python_repl")
     program = "import sys\ndata = sys.stdin.read().split()\nprint(sum(int(x) for x in data) if data else 'no input')"
-    assert tool.execute(code=program, stdin="1 2\n3\n").strip() == "6"
-    assert tool.execute(code=program).strip() == "no input"
+    assert tool.execute(code=program, stdin="1 2\n3\n") == "6"
+    assert tool.execute(code=program) == f"no input\n{NO_STDIN_NOTE}"
     (schema,) = [t for t in env.get_tools_schema() if t["function"]["name"] == "python_repl"]
     assert "stdin" in schema["function"]["parameters"]["properties"]
     assert "stdin" not in schema["function"]["parameters"]["required"]
@@ -425,17 +429,14 @@ def test_completed_without_submitting_scores_zero():
     assert traj.total_reward == pytest.approx(0.0)
 
 
-def test_passing_submit_truncated_at_max_turns_still_rewarded():
-    """A passing submit_solution on the last allowed turn is rewarded even though the episode truncates.
-
-    submit_solution is a tool call, so it does not end the episode; if the model submits on its final
-    turn it is truncated at max_turns with ``completed`` unset. Gating the reward on ``completed``
-    scores a fully passing submission at the tool bonus alone (0.2). A correct solution must score the
-    full objective regardless — otherwise training punishes models that solve a problem while still
-    using tools. (``max_submissions=2`` so the submit does not end the episode via the submission cap;
-    max_turns truncation is what ends it here.)
+def test_a_passing_submit_on_the_last_turn_completes_the_episode_at_the_full_objective():
+    """A submission passing every hidden test ends the episode, so one made on the final allowed turn
+    completes it instead of truncating it at ``max_turns``: it scores the full objective and pays no
+    ``turn_overflow_penalty``. (``max_submissions=2`` so the submission cap is not what ends it.)
     """
-    env = CodeContestsEnvironment(max_turns=1, language="python", output_comparison="tokens", max_submissions=2)
+    env = CodeContestsEnvironment(
+        max_turns=1, language="python", output_comparison="tokens", max_submissions=2, turn_overflow_penalty=0.5
+    )
     ctx = {"answer": {"tests": _ADD_TESTS, "checker": None, "time_limit": 2.0}}
     eids, _ = env.reset(["Read a and b; print a+b."], [ctx])
 
@@ -447,10 +448,9 @@ def test_passing_submit_truncated_at_max_turns_still_rewarded():
     env.step(eids, [""], [{"tool_calls": [tool_call]}])
 
     traj = env.get_trajectories(eids)[0]
-    assert traj.done and traj.truncated
-    assert not traj.info.get("completed")
+    assert traj.done and not traj.truncated and traj.info["completed"]
     assert traj.info["tests_passed"] == 2 and traj.info["tests_total"] == 2
-    assert traj.total_reward == pytest.approx(1.0)  # the full objective, not a partial/0 score
+    assert traj.total_reward == pytest.approx(1.0)  # the full objective, no overflow price
 
 
 def _submit_call(cid, code):
@@ -483,7 +483,7 @@ def test_test_tool_capped_per_episode():
     assert traj.info["tool_call_counts"]["python_repl"] == 2
     tool_msgs = [m.content for m in traj.messages if m.role == "tool"]
     assert "scratch" in tool_msgs[0] and "scratch" in tool_msgs[1]
-    assert "Test limit reached" in tool_msgs[2]
+    assert tool_msgs[2] == f"Error: {SCRATCHPAD_BUDGET_SPENT_REPLY}"
     assert not traj.done  # an exhausted test budget must not end the episode; the model can still submit
 
 

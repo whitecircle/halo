@@ -6,13 +6,13 @@ Validates that TP=2 produces the same forward pass loss AND the same total
 gradient L2 norm as a single-GPU baseline on Qwen3-0.6B (dense model). This
 tests DTensor weight sharding correctness for attention and MLP layers, and
 guards the TP grad-norm aggregation path: a TP grad-norm that silently drops
-the lm_head/embedding contribution or mis-aggregates across the TP axis (the
-"grad-norm spread 31→0" class) must fail the grad-norm check.
+the lm_head/embedding contribution or mis-aggregates across the TP axis must fail the grad-norm
+check.
 
 Rank 0 records the baseline loss and total fp32 grad L2 norm with no TP; all ranks
 then run the SAME deterministic input through a TP=2 DistributedSFTTrainer, and both
 the loss (tight conjunctive tolerance) and the TP-aware grad norm
-(trainer._compute_tp_grad_norm, the production clipping path) are compared against
+(trainer._compute_global_grad_norm, the production clipping path) are compared against
 that baseline within a tight relative tolerance.
 
 Run with 2 GPUs:
@@ -166,13 +166,13 @@ def compute_tp_loss_and_grad_norm(tokenizer, local_rank, output_dir):
 
     All ranks build a ``DistributedSFTTrainer`` with ``tp_size=2`` — this is what
     sets ``trainer._device_mesh`` and installs the TP grad-norm machinery
-    (``_sync_tp_replicated_grads`` + ``_compute_tp_grad_norm``, the exact path
+    (``_sync_tp_replicated_grads`` + ``_compute_global_grad_norm``, the exact path
     ``tp_clip_grad_norm_`` calls in production). We then run, on the SAME fixed
     batch used by the baseline:
 
       * a forward (no_grad) for the loss, and
       * a forward+backward for the gradients, after which we call the trainer's
-        ``_sync_tp_replicated_grads`` then ``_compute_tp_grad_norm`` — i.e. the
+        ``_sync_tp_replicated_grads`` then ``_compute_global_grad_norm`` — i.e. the
         production TP grad-norm, which must reproduce the unsharded baseline.
 
     Returns:
@@ -202,7 +202,7 @@ def compute_tp_loss_and_grad_norm(tokenizer, local_rank, output_dir):
         )
 
     # The trainer supplies the TP-aware grad-norm path (device mesh + _sync_tp_replicated_grads /
-    # _compute_tp_grad_norm) and the production FSDP2-for-TP wrapping; forward/backward is manual.
+    # _compute_global_grad_norm) and the production FSDP2-for-TP wrapping; forward/backward is manual.
     train_dataset = create_sft_dataset(8, tokenizer, seed=SEED)
     sft_config = SFTConfig(
         output_dir=output_dir,
@@ -230,7 +230,7 @@ def compute_tp_loss_and_grad_norm(tokenizer, local_rank, output_dir):
         processing_class=tokenizer,
         parallelism_config=parallelism_config,
     )
-    assert trainer.is_tp_mode, "expected TP mode"
+    assert trainer.parallelism_config.is_tp_mode, "expected TP mode"
 
     log(f"  GPU memory after TP load: {gpu_mem_gb():.2f} GB")
 
@@ -254,7 +254,7 @@ def compute_tp_loss_and_grad_norm(tokenizer, local_rank, output_dir):
     # Mirrors tp_clip_grad_norm_ — sync replicated grads across the TP axis, then take the global norm.
     trainer._sync_tp_replicated_grads(params)
     tp_synced_identical, tp_synced_count = assert_tp_synced_grads_identical(trainer, tp_model)
-    tp_grad_norm_local = float(trainer._compute_tp_grad_norm(params))
+    tp_grad_norm_local = float(trainer._compute_global_grad_norm(params))
     log_all(f"  TP grad norm: {tp_grad_norm_local:.6f}")
 
     tp_loss = (world_mean(tp_loss_local), world_spread(tp_loss_local))
@@ -277,7 +277,7 @@ def assert_tp_synced_grads_identical(trainer, tp_model) -> tuple[bool, int]:
     Collective on every rank — the identical fixed batch keeps the walk order and grad-presence
     pattern rank-uniform."""
     unwrapped = tp_model.module if hasattr(tp_model, "module") else tp_model
-    tp_group = trainer._get_tp_process_group()
+    tp_group = trainer.parallel_dims.tp_group()
     checked, diffs = 0, []
     for _name, p in unwrapped.named_parameters():
         if p.grad is None:

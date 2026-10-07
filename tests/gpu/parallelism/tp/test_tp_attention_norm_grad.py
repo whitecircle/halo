@@ -18,8 +18,9 @@ before the reduction (the shipped configs use ``gradient_accumulation_steps > 1`
 
 Both land far from the reference; a correct once-per-step SUM lands on it.
 
-This test is on the TOOLKIT path (a MoE model), which builds its own plan — the existing
-``test_tp_correctness.py`` uses dense Qwen3, where transformers supplies its own handling.
+This test is on the TOOLKIT path (a MoE model), which builds its own plan — ``test_tp_correctness.py``
+covers dense Qwen3 under transformers' ``tp_plan``, whose hook the loader moves onto the same
+once-per-step SUM.
 
 Run:
     torchrun --nproc_per_node=2 \
@@ -27,6 +28,7 @@ Run:
 """
 
 from pathlib import Path
+from types import SimpleNamespace
 
 import torch
 import torch.distributed as dist
@@ -82,8 +84,9 @@ class _StepSync:
     def _top_level_model(self):
         return self._model
 
-    def _get_tp_process_group(self):
-        return self._tp_group
+    @property
+    def parallel_dims(self):
+        return SimpleNamespace(tp_group=lambda: self._tp_group)
 
     _tp_sharded_plain_param_ids = DistributedTrainerMixin._tp_sharded_plain_param_ids
     _tp_per_head_norm_param_ids = DistributedTrainerMixin._tp_per_head_norm_param_ids

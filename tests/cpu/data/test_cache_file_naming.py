@@ -372,7 +372,7 @@ def test_kwargs_name_or_path_takes_priority():
 
 def test_kwargs_tokenizer_content_beats_path():
     """A tokenizer's cache identity is its CONTENT, not its directory: the same vocab reloaded
-    from a resume checkpoint keys the SAME cache (a path term re-tokenized the whole dataset on
+    from a resume checkpoint keys the SAME cache (a path term would re-tokenize the whole dataset on
     every resume leg), while a different vocab at the same path keys a different one."""
 
     class Tok:
@@ -421,7 +421,7 @@ def test_tokenizer_content_sig_ignores_per_call_padding_and_truncation():
 
 def test_tokenizer_content_sig_still_separates_different_vocabs():
     """Dropping the mutable state must not flatten the term: two backends differing only in vocab
-    still key different caches (otherwise the fix would trade a race for a cross-model collision)."""
+    still key different caches (otherwise dropping it would trade a race for a cross-model collision)."""
 
     class _Fast:
         def __init__(self, backend):
@@ -451,7 +451,7 @@ def test_tokenizer_content_sig_still_separates_different_vocabs():
 
 def test_kwargs_scalar_lists_distinct():
     """Scalar lists/tuples serialize by value: two different eos_token_id lists must key
-    different caches (collapsing to the type name served one list's cache for every other)."""
+    different caches (collapsing to the type name would serve one list's cache for every other)."""
     fp_a = _get_kwargs_fingerprint({"eos_token_ids": [1, 2, 3]})
     fp_b = _get_kwargs_fingerprint({"eos_token_ids": [4, 5, 6]})
     assert fp_a != fp_b, "Different scalar lists must produce different fingerprints"
@@ -581,8 +581,8 @@ def test_cache_name_breaks_cross_tokenizer_collision():
     """End-to-end regression: identical factory + dataset + tokenizer-name but
     different captured tokenizers must NOT share a cache file.
 
-    This is the exact scenario that corrupted token IDs across models — the
-    map function source and fn_kwargs are identical, only the closure differs.
+    The map function source and fn_kwargs are identical, only the closure differs; a shared file
+    would load another model's token IDs.
     """
     ds = _make_dataset(10)
     proc_262k = _make_processor(_MockTokenizer("org/model-262k", 262000), 4096)
@@ -771,6 +771,7 @@ def test_non_processor_carrying_a_tokenizer_is_not_keyed_as_that_tokenizer():
         ("solution_field", None),
         ("confidence_field", "conf"),
         ("confidence_power", 2.0),
+        ("confidence_normalizer", 0.25),
         ("response_prompt_template", "<|assistant|>"),
         ("train_on_completions_only", False),
         ("system_prompt", "be terse"),
@@ -792,6 +793,7 @@ def test_self_distill_cache_signature_covers_every_render_knob(knob, value):
         "solution_field": "solution",
         "confidence_field": None,
         "confidence_power": 4.0,
+        "confidence_normalizer": 0.5,
         # A marker on the baseline: completion-only masking without one is refused at construction.
         "response_prompt_template": "<|im_start|>assistant",
         "train_on_completions_only": True,
@@ -840,6 +842,26 @@ def test_the_worker_count_is_a_named_parameter_not_a_cache_keyed_kwarg():
             f"{operation.__name__} must take num_proc as a named parameter, else it lands in "
             f"**kwargs and the worker count keys the dataset cache"
         )
+
+
+def _bump(row):
+    return {"value": row["value"] + 1}
+
+
+def test_coordinated_map_stamps_the_cache_file_it_wrote_as_the_rank_stable_key(tmp_path, monkeypatch):
+    """Every downstream cache key reads this stamp in place of HF's per-rank fingerprint, so it must
+    name the file the map wrote: a Dataset's own, a DatasetDict's per split."""
+    monkeypatch.setenv("HF_DATASETS_CACHE", str(tmp_path))
+    single = coordinated_map(_make_dataset(4), _bump, desc="stamp", num_proc=1)
+    assert single._toolkit_cache_key.endswith(".arrow")
+    assert (tmp_path / single._toolkit_cache_key).is_file()
+
+    splits = coordinated_map(
+        DatasetDict({"train": _make_dataset(4), "test": _make_dataset(2, seed=9)}), _bump, desc="stamp", num_proc=1
+    )
+    for split, split_ds in splits.items():
+        assert split_ds._toolkit_cache_key.endswith(f"_{split}.arrow")
+        assert (tmp_path / split_ds._toolkit_cache_key).is_file()
 
 
 @pytest.mark.parametrize("knob", ["load_from_cache_file", "keep_in_memory"])

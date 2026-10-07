@@ -26,10 +26,10 @@ from transformers.models.gemma4.modeling_gemma4 import Gemma4ForCausalLM
 
 PartialState()  # save_ep_model logs through accelerate's logger
 
+from src.distributed.checkpoint.ep_save import save_ep_model
 from src.distributed.expert_parallel.base_layer import EPMoELayerBase
 from src.distributed.expert_parallel.config import EPConfig
 from src.distributed.expert_parallel.patching import patch_moe_model_for_ep
-from src.distributed.expert_parallel.saving import save_ep_model
 from tests.common.checkpoint_io import written_keys
 from tests.common.models import TINY_GEMMA4_MOE_CONFIG
 

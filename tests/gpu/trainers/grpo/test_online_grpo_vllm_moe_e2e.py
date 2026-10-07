@@ -27,24 +27,22 @@ Usage:
 
 import argparse
 
-from src.env import env_int, env_str
+from src.env import env_str
 from tests.common.harness import gpu_test_main
 from tests.common.models import QWEN3_30B_A3B
 from tests.common.online_grpo_e2e import modes_for, run_online_grpo_e2e
+from tests.common.weight_sync import weight_transfer_port
 
 MODEL_NAME = env_str("HALO_TEST_ONLINE_GRPO_MOE_MODEL", QWEN3_30B_A3B)
 SERVER_URL = env_str("VLLM_SERVER_URL") or "http://localhost:8000"
-# Trainer-side NCCL weight-transfer port. A resume row rebinds it for phase 2, which phase 1's
-# close_communicator makes available again on both ends.
-GROUP_PORT = env_int("HALO_TEST_VLLM_GROUP_PORT", 51340)
 
 
-def _row_group_port(base: int, trainer: str, mode: str, resume: bool, family: str) -> int:
-    """A deterministic per-row port: 22 rows share one pass back-to-back, and a listener freed by
-    one row sits in TIME_WAIT while the next binds — so every row owns two ports (phase 2 of a
-    resume binds ``+1``)."""
-    rows = [(t, m, r) for t in ("online", "sdpg") for m in modes_for(family) for r in (False, True)]
-    return base + 2 * rows.index((trainer, mode, resume))
+def _row_index(trainer: str, mode: str, resume: bool) -> int:
+    """This row's place in the suite's matrix. A pinned group port is offset by it, so back-to-back rows of
+    one pass never bind the same port; a resume row rebinds its own for phase 2, which phase 1's
+    close_communicator makes available again on both ends."""
+    rows = [(t, m, r) for t in ("online", "sdpg") for m in modes_for("moe") for r in (False, True)]
+    return rows.index((trainer, mode, resume))
 
 
 def _parse_args() -> argparse.Namespace:
@@ -63,7 +61,9 @@ def run(ctx) -> dict:
         mode=args.mode,
         resume=args.resume,
         server_url=SERVER_URL,
-        group_port=_row_group_port(GROUP_PORT, args.trainer, args.mode, args.resume, "moe"),
+        group_port=weight_transfer_port(
+            "HALO_TEST_VLLM_GROUP_PORT", offset=_row_index(args.trainer, args.mode, args.resume)
+        ),
         model_name=MODEL_NAME,
     )
 

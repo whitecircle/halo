@@ -159,27 +159,17 @@ def detect_gpu_model() -> str | None:
         return None
 
     try:
-        gpu_name = torch.cuda.get_device_name(0)
-        result = _classify_gpu_name(gpu_name.upper())
+        result = _classify_gpu_name(torch.cuda.get_device_name(0).upper())
         if result is not None:
             return result
-
         # nvidia-smi exposes vGPU / MIG names torch does not.
-        try:
-            proc = subprocess.run(
-                ["nvidia-smi", "--query-gpu=name", "--format=csv,noheader,nounits"],
-                capture_output=True,
-                text=True,
-                timeout=5,
-            )
-            if proc.returncode == 0:
-                result = _classify_gpu_name(proc.stdout.strip().upper())
-                if result is not None:
-                    return result
-        except (subprocess.TimeoutExpired, FileNotFoundError):
-            pass
-
-        return None
+        proc = subprocess.run(
+            ["nvidia-smi", "--query-gpu=name", "--format=csv,noheader,nounits"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+        return _classify_gpu_name(proc.stdout.strip().upper()) if proc.returncode == 0 else None
     except Exception:
         logger.debug("GPU model detection failed", exc_info=True)
         return None

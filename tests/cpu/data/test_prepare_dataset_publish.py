@@ -217,8 +217,8 @@ def test_tokenizer_overrides_reach_the_recorded_config():
 
 
 def test_script_uses_the_shared_chat_template_resolver():
-    """A second, differently-behaving copy of the path-vs-text resolver made the recorded template
-    and the training-side one disagree on what counts as a file. Asserted on the bound OBJECT, not
+    """A second, differently-behaving copy of the path-vs-text resolver would make the recorded
+    template and the training-side one disagree on what counts as a file. Asserted on the bound OBJECT, not
     on an import line: a re-implementation that kept the import would satisfy the string."""
     assert mod.load_chat_template is tokenizer_setup.load_chat_template
 

@@ -1,15 +1,23 @@
 #!/usr/bin/env python
-"""The pure-NumPy half of ``src/data/deduplication.py``: row normalization and the seeded shuffle
-that decides which member of a near-duplicate group survives."""
+"""``src/data/deduplication.py``: row normalization, the seeded shuffle that decides which member of
+a near-duplicate group survives, and the FAISS passes' surviving indices."""
+
+import time
 
 import numpy as np
 import pytest
 
+from src.data import deduplication
 from src.data.deduplication import (
     DEDUP_SHUFFLE_SEED,
     _normalize_embeddings,
     _shuffle_matrix_with_mapping,
+    faiss_deduplicate_mr,
+    faiss_deduplicate_mr_multistep,
 )
+
+# Four orthogonal unit rows, each repeated once: rows i and i + 4 are exact duplicates.
+DUPLICATED_BASIS = np.concatenate([np.eye(4, dtype=np.float32)] * 2)
 
 # _normalize_embeddings
 
@@ -75,6 +83,46 @@ def test_shuffle_threaded_rng_permutes_differently_each_step():
     replay_rng = np.random.default_rng(DEDUP_SHUFFLE_SEED)
     for step, mapping in enumerate(mappings):
         np.testing.assert_array_equal(_shuffle_matrix_with_mapping(matrix, replay_rng)[1], mapping, err_msg=f"{step=}")
+
+
+# faiss_deduplicate_mr / faiss_deduplicate_mr_multistep
+
+
+def test_single_pass_keeps_the_first_row_of_each_duplicate_group():
+    survivors = faiss_deduplicate_mr(DUPLICATED_BASIS, max_workers=1, batch_size=8, similarity_threshold=0.9)
+    assert sorted(survivors.tolist()) == [0, 1, 2, 3]
+
+
+def test_single_pass_returns_global_indices_and_dedups_within_a_batch_only():
+    # Duplicates sit in different batches here, so every row survives — under its GLOBAL index.
+    survivors = faiss_deduplicate_mr(DUPLICATED_BASIS, max_workers=2, batch_size=4, similarity_threshold=0.9)
+    assert sorted(survivors.tolist()) == list(range(8))
+
+
+def test_survivors_come_back_in_batch_order_whatever_order_the_batches_finish(monkeypatch):
+    """The next pass shuffles the survivors with the seeded generator and the script selects rows in
+    this order, so a thread-completion order would make a seeded run keep different rows. The batches
+    are made to finish last-first here."""
+    real_single = deduplication._faiss_deduplicate_single
+
+    def last_batch_finishes_first(batch, similarity_threshold):
+        time.sleep(0.1 * (3 - int(batch[0].argmax()) // 2))
+        return real_single(batch, similarity_threshold)
+
+    monkeypatch.setattr(deduplication, "_faiss_deduplicate_single", last_batch_finishes_first)
+    survivors = faiss_deduplicate_mr(
+        np.eye(8, dtype=np.float32), max_workers=4, batch_size=2, similarity_threshold=0.9
+    )
+    assert survivors.tolist() == list(range(8))
+
+
+def test_multistep_maps_survivors_back_to_the_input_rows():
+    survivors, sizes = faiss_deduplicate_mr_multistep(
+        DUPLICATED_BASIS, steps_count=3, max_workers=1, batch_size=8, similarity_threshold=0.9
+    )
+    assert sizes == [8, 4, 4, 4]
+    assert sorted(i % 4 for i in survivors.tolist()) == [0, 1, 2, 3], "one survivor per duplicate pair"
+    np.testing.assert_array_equal(np.sort(DUPLICATED_BASIS[survivors].argmax(axis=1)), [0, 1, 2, 3])
 
 
 if __name__ == "__main__":

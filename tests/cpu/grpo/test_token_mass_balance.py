@@ -23,7 +23,6 @@ from src.trainers.grpo.objective.application import (
     NET_TOKEN_MASS_KEY,
     TOKEN_MASS_SCALE_KEY,
     record_token_mass,
-    token_mass_balance,
     validate_token_mass_balance,
 )
 from src.trainers.grpo.online import DistributedGRPOTrainer
@@ -31,6 +30,11 @@ from src.trainers.grpo.online import DistributedGRPOTrainer
 
 def _local(x):
     return x
+
+
+def _balance(advantages, weights, gather_fn=_local):
+    """The balance :func:`record_token_mass` returns for rows of the given trained token weights."""
+    return record_token_mass(advantages, weights.unsqueeze(1), None, gather_fn, defaultdict(list), enabled=True)
 
 
 def _net(advantages, weights):
@@ -41,7 +45,7 @@ def _net(advantages, weights):
 def test_long_failures_shrink_the_negatives_until_the_push_nets_to_zero():
     advantages = torch.tensor([0.8, 0.8, -0.8, -0.8])
     weights = torch.tensor([100.0, 100.0, 300.0, 300.0])  # failures three times as long as solves
-    balance = token_mass_balance(advantages, weights, _local)
+    balance = _balance(advantages, weights)
     assert balance.net == pytest.approx((160 - 480) / 640)
     assert balance.positive_scale == 1.0 and balance.scale == pytest.approx(1 / 3)
     balanced = balance.apply(advantages)
@@ -52,7 +56,7 @@ def test_long_failures_shrink_the_negatives_until_the_push_nets_to_zero():
 def test_long_solves_shrink_the_positives_instead():
     advantages = torch.tensor([1.0, -0.5, -0.5])
     weights = torch.tensor([400.0, 100.0, 100.0])
-    balance = token_mass_balance(advantages, weights, _local)
+    balance = _balance(advantages, weights)
     assert balance.net > 0 and balance.negative_scale == 1.0
     assert _net(balance.apply(advantages), weights) == pytest.approx(0.0, abs=1e-6)
 
@@ -60,7 +64,7 @@ def test_long_solves_shrink_the_positives_instead():
 def test_balancing_keeps_every_sign_and_the_order_within_a_sign():
     advantages = torch.tensor([1.2, 0.3, -0.1, -0.9, -2.0])
     weights = torch.tensor([50.0, 80.0, 400.0, 500.0, 900.0])
-    balanced = token_mass_balance(advantages, weights, _local).apply(advantages)
+    balanced = _balance(advantages, weights).apply(advantages)
     assert torch.equal(torch.sign(balanced), torch.sign(advantages))
     negatives = balanced[advantages < 0]
     assert torch.equal(torch.argsort(negatives), torch.argsort(advantages[advantages < 0]))
@@ -74,7 +78,7 @@ def test_balancing_keeps_every_sign_and_the_order_within_a_sign():
 def test_a_round_with_mass_on_one_sign_only_trains_nothing_on_its_advantages(advantages, net):
     """Nothing on the other side cancels it, so the whole push is net: kept, a round whose positives the IS
     masks all dropped would push down every sampled token at full strength."""
-    balance = token_mass_balance(advantages, torch.full_like(advantages, 10.0), _local)
+    balance = _balance(advantages, torch.full_like(advantages, 10.0))
     assert balance.net == net and balance.scale == 0.0
     assert torch.equal(balance.apply(advantages), torch.zeros_like(advantages))
 
@@ -84,7 +88,7 @@ def test_the_heavier_sign_shrinks_continuously_to_nothing_as_the_lighter_side_em
     jump back to full strength."""
     advantages = torch.tensor([1.0, -1.0, -1.0])
     scales = [
-        token_mass_balance(advantages, torch.tensor([positive_tokens, 500.0, 500.0]), _local).negative_scale
+        _balance(advantages, torch.tensor([positive_tokens, 500.0, 500.0])).negative_scale
         for positive_tokens in (1.0, 1e-3, 1e-6, 0.0)
     ]
     assert scales[:3] == [pytest.approx(1 / 1000), pytest.approx(1e-6), pytest.approx(1e-9)]
@@ -93,7 +97,7 @@ def test_the_heavier_sign_shrinks_continuously_to_nothing_as_the_lighter_side_em
 
 def test_a_round_with_no_mass_keeps_its_advantages():
     advantages = torch.zeros(3)
-    balance = token_mass_balance(advantages, torch.full_like(advantages, 10.0), _local)
+    balance = _balance(advantages, torch.full_like(advantages, 10.0))
     assert balance.net == 0.0 and balance.scale == 1.0
     assert torch.equal(balance.apply(advantages), advantages)
 
@@ -127,9 +131,9 @@ def test_every_rank_takes_the_scales_of_the_whole_round():
     # What each rank hands the collective, recorded off a first pass; the gather then returns them all.
     sent = []
     for a, w in (rank0, rank1):
-        token_mass_balance(a, w, lambda local: sent.append(local) or local)
+        _balance(a, w, lambda local: sent.append(local) or local)
     world = torch.cat(sent)
-    scales = [token_mass_balance(a, w, lambda _local: world) for a, w in (rank0, rank1)]
+    scales = [_balance(a, w, lambda _local: world) for a, w in (rank0, rank1)]
     assert scales[0] == scales[1]
     assert scales[0].negative_scale == pytest.approx(1 / 3)
 
@@ -137,8 +141,8 @@ def test_every_rank_takes_the_scales_of_the_whole_round():
 def test_rows_replicated_across_tensor_parallel_ranks_change_nothing():
     advantages = torch.tensor([0.6, -0.6])
     weights = torch.tensor([100.0, 250.0])
-    once = token_mass_balance(advantages, weights, _local)
-    twice = token_mass_balance(advantages, weights, lambda x: torch.cat([x, x]))
+    once = _balance(advantages, weights)
+    twice = _balance(advantages, weights, lambda x: torch.cat([x, x]))
     assert once == twice
 
 

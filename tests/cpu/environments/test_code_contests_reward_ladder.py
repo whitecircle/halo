@@ -21,7 +21,6 @@ import pytest
 from src.environments.base import (
     EPISODE_ERROR_KEY,
     EPISODE_INVALID_REASON_KEY,
-    OBJECTIVE_REWARD_KEY,
     REWARD_COMPONENTS_KEY,
     Message,
     Trajectory,
@@ -31,6 +30,7 @@ from src.environments.envs.tasks.coding.swe import SweEnvironment
 from src.environments.envs.tasks.qa import ExamQAEnvironment
 from src.environments.sandbox.base import SandboxInfraError
 from src.environments.tools.definitions import NativeToolResult
+from src.rewards.terms import OBJECTIVE_REWARD_KEY
 
 SUB, PEN = 0.1, 0.1
 
@@ -129,7 +129,7 @@ def test_an_episode_its_driver_lost_pays_no_turn_overflow():
 
 def test_tool_error_penalty_is_applied_negative():
     """The per-call error knob is a MAGNITUDE: a failed tool call must REDUCE the reward. A signed knob
-    silently turned a positive YAML value into +0.05 per malformed call — farmable above a solve's
+    would silently turn a positive YAML value into +0.05 per malformed call — farmable above a solve's
     objective reward and invisible in the logged components."""
     env = _env(tool_error_penalty=0.5, tool_success_reward=0.05)
     traj = _traj()

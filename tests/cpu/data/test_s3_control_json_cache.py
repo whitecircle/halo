@@ -18,7 +18,7 @@ from unittest.mock import patch
 import pytest
 
 from src.data.pipeline.preprocessed_metadata import is_preprocessed_dataset
-from src.data.sources.s3_client import has_control_json_mirror, read_control_json_with_cache
+from src.data.sources.s3_client import read_control_json_with_cache
 from src.data.sources.sharded_dataset import ShardedDatasetLoader
 
 PAYLOAD = {"num_shards": 4, "shards": []}
@@ -34,7 +34,6 @@ def cache_root(tmp_path):
 def test_live_read_returns_payload_and_writes_the_mirror(cache_root):
     with patch("src.data.sources.s3_client.read_json_from_s3", return_value=PAYLOAD):
         assert read_control_json_with_cache("b", "d/train/shard_index.json") == PAYLOAD
-    assert has_control_json_mirror("b", "d/train/shard_index.json")
     mirror_files = list((cache_root / "control").glob("*.json"))
     assert len(mirror_files) == 1
     assert json.loads(mirror_files[0].read_text()) == PAYLOAD
@@ -73,20 +72,22 @@ def test_authoritative_absence_drops_the_mirror_and_raises(cache_root):
     with patch("src.data.sources.s3_client.read_json_from_s3", side_effect=FileNotFoundError("404")):
         with pytest.raises(FileNotFoundError):
             read_control_json_with_cache("b", "d/metadata.json")
-    assert not has_control_json_mirror("b", "d/metadata.json")
+    assert not list((cache_root / "control").glob("*.json"))
     with patch("src.data.sources.s3_client.read_json_from_s3", side_effect=OUTAGE):
         with pytest.raises(OSError, match="endpoint"):
             read_control_json_with_cache("b", "d/metadata.json")
 
 
-def test_unwritable_mirror_does_not_fail_the_live_read(cache_root, monkeypatch):
-    """A full/read-only cache volume must cost the mirror, not the training run's control read."""
-    monkeypatch.setattr("src.data.sources.s3_client.os.replace", _raise_enospc)
+@pytest.mark.parametrize("failing_step", ["makedirs", "replace"])
+def test_unwritable_mirror_does_not_fail_the_live_read(cache_root, monkeypatch, failing_step):
+    """A full/read-only cache volume must cost the mirror, not the training run's control read —
+    whether it refuses the mirror directory or the publish into it."""
+    monkeypatch.setattr(f"src.data.sources.s3_client.os.{failing_step}", _raise_enospc)
     with patch("src.data.sources.s3_client.read_json_from_s3", return_value=PAYLOAD):
         assert read_control_json_with_cache("b", "d/x.json") == PAYLOAD
 
 
-def _raise_enospc(src, dst):
+def _raise_enospc(*args, **kwargs):
     raise OSError(28, "No space left on device")
 
 
@@ -142,7 +143,7 @@ def test_preprocessed_probe_false_and_quiet_on_live_absence(cache_root):
     """An absent metadata.json is the NORMAL raw-dataset case — no mirror, no warning-tone failure."""
     with patch("src.data.sources.s3_client.read_json_from_s3", side_effect=FileNotFoundError("404")):
         assert is_preprocessed_dataset("s3://b/raw") is False
-    assert not has_control_json_mirror("b", "raw/metadata.json")
+    assert not list((cache_root / "control").glob("*.json"))
 
 
 if __name__ == "__main__":

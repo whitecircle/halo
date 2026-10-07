@@ -154,7 +154,7 @@ def _config(**kwargs):
 
 def test_guard_raises_on_undeclared_trainable_param_without_peft():
     """FULL-FT run (no PeftModel anywhere): an undeclared trainable EP param must still raise —
-    the PEFT-only early-out hid exactly this family-wrapper bug."""
+    a PEFT-only early-out would hide exactly this family-wrapper bug."""
     with pytest.raises(RuntimeError, match="rogue_scale"):
         _StubTrainer([_StubEPLayer(rogue=True)]).check()
 

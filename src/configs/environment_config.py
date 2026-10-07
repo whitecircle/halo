@@ -5,7 +5,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from src.args.validation import RangeValidatedConfig
-from src.rewards.spec import ENVIRONMENT_REWARD_SOURCES, RewardTerm, parse_reward_terms
+from src.rewards.terms import ENVIRONMENT_REWARD_SOURCES, RewardTerm, parse_reward_terms
 
 
 @dataclass
@@ -25,11 +25,11 @@ class EnvironmentConfig(RangeValidatedConfig):
     rewards: list[dict[str, Any]] = field(
         default_factory=lambda: [{"source": "environment"}],
         metadata={
-            "help": "Reward terms, each {source, name?, weight?, exponent?, ...}, summed into the episode "
-            "reward as weight x score^exponent over a score in [0, 1]: 'environment' (the environment's "
-            "own grade, logged as reward/objective), 'judge' (a generative judge; model, requirements, "
-            "reasoning_effort, ...) and 'reward_model' (a served Bradley-Terry model; url, model, "
-            "backend, ...). The environment's per-turn and shaping terms add on top. YAML-only; see "
+            "help": "Reward terms, each {source, name (required for judge/reward_model), weight?, exponent?, ...}, "
+            "summed into the episode reward as weight x score^exponent over a score in [0, 1]: 'environment' (the "
+            "environment's own grade, logged as reward/objective), 'judge' (a generative judge; model, requirements "
+            "or checks, view, ...) and 'reward_model' (a served Bradley-Terry model; url, model, backend, ...). The "
+            "environment's per-turn and shaping terms add on top. YAML-only; see "
             "agent-docs/training-methods/grpo/rewards.md."
         },
     )
@@ -78,19 +78,29 @@ class EnvironmentConfig(RangeValidatedConfig):
         if not self.rewards:
             raise ValueError("rewards must list at least one reward term")
         self.reward_terms  # noqa: B018  parse at config time so a bad term fails here
+        # Merged last in to_env_config, a key it writes from a top-level field would override that field
+        # past the validation above.
+        shadowing = sorted(set(self.environment_kwargs) & set(self._core_env_config()))
+        if shadowing:
+            raise ValueError(
+                f"environment_kwargs must not carry {shadowing}: the config writes them from its own validated "
+                "top-level fields (rewards for reward_terms, max_turns). Set those instead."
+            )
 
     @property
     def reward_terms(self) -> tuple[RewardTerm, ...]:
         """The typed reward terms of ``rewards``, validated."""
         return parse_reward_terms(self.rewards, ENVIRONMENT_REWARD_SOURCES)
 
+    def _core_env_config(self) -> dict[str, Any]:
+        """The environment-config keys the top-level fields write, ``None`` where a field is unset."""
+        return {"reward_terms": [dict(term) for term in self.rewards], "max_turns": self.max_turns}
+
     def to_env_config(self) -> dict[str, Any]:
         """Merge the reward terms and turn budget with ``environment_kwargs`` into the dict passed to
         ``resolve_environment(environment_type, config)``."""
-        config: dict[str, Any] = {"reward_terms": [dict(term) for term in self.rewards]}
         # Only an explicitly configured turn cap is forwarded; injecting the dataclass default would
         # override the per-class defaults (listed in the ``max_turns`` help).
-        if self.max_turns is not None:
-            config["max_turns"] = self.max_turns
+        config = {key: value for key, value in self._core_env_config().items() if value is not None}
         config.update(self.environment_kwargs)
         return config

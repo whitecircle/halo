@@ -112,8 +112,8 @@ def benchmark_grouped_mm(stacked_weights, all_tokens, offsets, num_iters=100, wa
     This mirrors the grouped GEMM path in EP MoE layers where all expert
     matmuls are batched into a single kernel launch using cumulative offsets.
 
-    The `offs` parameter uses cumulative token counts (matching the EP MoE layer
-    implementation in ep_moe_layer.py::_sort_tokens_for_grouped_mm).
+    The `offs` parameter uses cumulative token counts (matching
+    EPMoELayerBase._sort_tokens_for_grouped_mm in src/distributed/expert_parallel/base_layer.py).
 
     Args:
         stacked_weights: [E, H, I] stacked expert weights.
@@ -355,7 +355,7 @@ def main():
 
     all_tokens = torch.cat(token_lists, dim=0)  # [T, H]
 
-    # Create cumulative offsets (matching ep_moe_layer.py::_sort_tokens_for_grouped_mm)
+    # Create cumulative offsets (matching EPMoELayerBase._sort_tokens_for_grouped_mm)
     expert_counts = torch.tensor([tl.shape[0] for tl in token_lists], device=device, dtype=torch.int32)
     offsets = torch.cumsum(expert_counts, dim=0).to(torch.int32)
 
@@ -524,7 +524,7 @@ def _run_fp32_experts_benchmark(args, device, offsets, all_tokens_bf16, token_li
     stacked_bf16 = stacked_fp32.to(torch.bfloat16)
     expert_weights_bf16 = [stacked_bf16[i] for i in range(E)]
 
-    # Dtype mismatch check (the bug that use_grouped_gemm=False was introduced for)
+    # Dtype mismatch check: F.grouped_mm refuses fp32 weights beside bf16 tokens
     print("  Dtype safety check:")
     print("    F.grouped_mm(bf16_tokens, fp32_weights): ", end="", flush=True)
     try:

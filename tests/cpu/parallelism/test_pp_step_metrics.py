@@ -5,14 +5,19 @@ Under PP only the LAST stage runs the loss closure, so a trainer's per-step metr
 stage alone — while HF logs from global rank 0, which sits on the FIRST stage. The mixin pins the
 metric names at setup and broadcasts the values down the chain every step; these tests drive that
 against a fake two-stage chain and fail if the metrics stop arriving, arrive with the wrong values,
-or stop being rank-uniform.
+or stop being rank-uniform. An eval step's real examples weigh them: the examples padding an eval
+split's final round leave the batch before its step state, normalizer and loss read it, and come back
+as the inert filler rows a partial batch is padded with.
 
     python tests/cpu/parallelism/test_pp_step_metrics.py
 """
 
+from types import SimpleNamespace
+
 import pytest
 import torch
 
+from src.data.spans import LABEL_IGNORE_INDEX
 from src.distributed.pipeline_parallel.losses import PPLossAdapter, causal_lm_token_loss
 from src.trainers.mixins.pipeline import PipelineTrainerMixin
 
@@ -60,8 +65,9 @@ class _Stage(PipelineTrainerMixin):
     def _pp_last_stage_rank(self) -> int:
         return LAST_STAGE_RANK
 
-    def store_metrics(self, metrics, train_eval="train"):
+    def store_metrics(self, metrics, train_eval="train", rows=1):
         self.stored.append(({key: float(value) for key, value in metrics.items()}, train_eval))
+        self.stored_rows = rows
 
 
 @pytest.fixture
@@ -146,6 +152,104 @@ def test_no_metrics_fn_costs_no_collective(chain):
 
     assert chain.broadcasts == 0 and chain.object_broadcasts == 0
     assert stage.stored == [], "no key pin, so not even the setup probe"
+
+
+class _Runtime:
+    """The two eval schedules: the loss-only one records the batch and the normalizer it was handed;
+    the forward-only one (``compute_metrics``) returns the last stage's per-token logits."""
+
+    def eval_loss(self, input_ids, labels, *, attention_mask, position_ids, num_items_in_batch, extra_targets):
+        self.input_ids, self.labels, self.count = input_ids, labels, num_items_in_batch
+        return torch.zeros(())
+
+    def forward_only(self, input_ids, *, attention_mask, position_ids):
+        self.input_ids = input_ids
+        return torch.zeros(*input_ids.shape, 5)
+
+
+def _eval_stage(real_examples: int, compute_metrics=None, pairs: int = 2) -> _Stage:
+    """A last-stage rank evaluating a ``pairs``-pair interleaved batch, frozen at that many pairs."""
+    seen = {}
+    stage = _Stage(_metrics(m=1.0), is_last=True)
+    stage._pp_adapter = PPLossAdapter(
+        token_loss_fn=causal_lm_token_loss,
+        rows_per_example=2,
+        step_state_fn=lambda inputs: seen.update(state_rows=inputs["input_ids"].size(0)),
+        eval_normalizer=lambda inputs: seen.setdefault("normalizer_rows", inputs["labels"].size(0)),
+        metrics_fn=_metrics(m=1.0),
+    )
+    stage.seen = seen
+    stage._pp_runtime = _Runtime()
+    stage.args = SimpleNamespace(per_device_train_batch_size=pairs)
+    stage.data_collator = SimpleNamespace(pad_values={"input_ids": 0, "labels": LABEL_IGNORE_INDEX})
+    stage.compute_metrics = compute_metrics
+    stage._prepare_inputs = lambda inputs: inputs
+    stage._pp_broadcast_loss_from_last_stage = lambda loss: loss
+    stage._pp_broadcast_output_from_last_stage = lambda tensor: tensor
+    stage.eval_split_rows = lambda num_rows: real_examples
+    return stage
+
+
+def test_an_eval_split_s_padding_examples_leave_the_step_as_inert_rows(chain):
+    """Pair 1 pads the eval split's final round: the step state and the normalizer see pair 0's two
+    rows alone, the schedule scores pair 1's rows as all-ignore filler, and the metrics weigh one."""
+    stage = _eval_stage(real_examples=1)
+    stage._pp_pin_metric_keys()
+    labels = torch.arange(1, 13).view(4, 3)
+    batch = {"input_ids": torch.arange(12).view(4, 3), "attention_mask": torch.ones(4, 3), "labels": labels}
+
+    stage._pp_prediction_step(batch, prediction_loss_only=True)
+
+    assert stage.seen == {"state_rows": 2, "normalizer_rows": 2}
+    runtime = stage._pp_runtime
+    assert runtime.input_ids.shape == (4, 3), "the frozen batch shape is kept"
+    torch.testing.assert_close(runtime.labels[:2], labels[:2])
+    assert (runtime.labels[2:] == LABEL_IGNORE_INDEX).all(), "the padding pair must score as inert rows"
+    assert stage.stored[-1] == ({"m": 1.0}, "eval") and stage.stored_rows == 1
+
+
+def test_the_metrics_path_weighs_the_real_examples_too(chain):
+    """With ``compute_metrics`` the eval step drives the forward-only schedule instead; its shared
+    metrics weigh the two real pairs of three alone, and its predictions keep the batch's rows for the
+    gather to cut."""
+    stage = _eval_stage(real_examples=2, compute_metrics=lambda eval_pred: {}, pairs=3)
+    stage._pp_pin_metric_keys()
+    labels = torch.arange(1, 19).view(6, 3) % 5
+
+    _, predictions, returned_labels = stage._pp_prediction_step(
+        {"input_ids": torch.zeros(6, 3, dtype=torch.long), "labels": labels}, prediction_loss_only=False
+    )
+
+    assert stage.stored[-1] == ({"m": 1.0}, "eval") and stage.stored_rows == 2
+    assert stage.seen == {"state_rows": 4, "normalizer_rows": 4}, "the step reads the two real pairs' rows"
+    assert predictions.shape[0] == returned_labels.shape[0] == 6
+
+
+def test_a_step_of_padding_alone_divides_by_one(chain):
+    """No example is real: the schedule scores filler rows alone, and the normalizer it divides by is 1,
+    never a pair or row count of 0 (DPO's and KTO's normalizers count rows)."""
+    stage = _eval_stage(real_examples=0)
+    stage._pp_pin_metric_keys()
+
+    stage._pp_prediction_step(
+        {"input_ids": torch.zeros(4, 3), "labels": torch.arange(1, 13).view(4, 3)}, prediction_loss_only=True
+    )
+
+    assert stage._pp_runtime.count == 1.0
+    assert (stage._pp_runtime.labels == LABEL_IGNORE_INDEX).all()
+    assert stage.stored_rows == 0
+
+
+def test_a_round_without_padding_reaches_the_schedule_whole(chain):
+    stage = _eval_stage(real_examples=2)
+    stage._pp_pin_metric_keys()
+    labels = torch.arange(1, 13).view(4, 3)
+
+    stage._pp_prediction_step({"input_ids": torch.zeros(4, 3), "labels": labels}, prediction_loss_only=True)
+
+    assert stage.seen == {"state_rows": 4, "normalizer_rows": 4}
+    torch.testing.assert_close(stage._pp_runtime.labels, labels)
+    assert stage.stored_rows == 2
 
 
 if __name__ == "__main__":

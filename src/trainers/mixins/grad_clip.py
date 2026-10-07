@@ -1,5 +1,5 @@
-"""Shared pieces of the distributed gradient-clip paths: argument normalization, the enable
-predicate, and the clip coefficient.
+"""The pieces every distributed gradient-clip path shares: argument normalization, the L2 gate, the
+enable predicate, and the clip coefficient.
 
 Imports nothing from the trainer package, so both the mixin's EP/TP clips and the pipeline mixin's
 whole-chain clip can use it. Each path reduces its own global norm (the collectives differ per
@@ -13,6 +13,16 @@ import torch.nn as nn
 
 # Guards the divide against a ~0 global norm (an all-zero gradient step), matching torch's own clip.
 _CLIP_NORM_EPS = 1e-6
+
+
+def require_l2(norm_type, path: str) -> None:
+    """Raise unless ``norm_type`` is 2: every distributed clip sums squared L2 shard norms across
+    ranks, so any other norm would come back silently wrong. ``path`` names the clip in the error."""
+    if norm_type != 2:
+        raise ValueError(
+            f"{path} gradient clipping sums squared L2 norms across shards and supports norm_type=2 only, "
+            f"got {norm_type}."
+        )
 
 
 def clip_parameters(parameters) -> list[nn.Parameter]:

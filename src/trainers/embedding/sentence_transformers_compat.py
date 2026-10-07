@@ -10,7 +10,6 @@ an embedding run with checkpointing enabled fails at the call.
 import inspect
 
 import torch
-from peft import PeftModelForFeatureExtraction
 from sentence_transformers.base.model import BaseModel
 from sentence_transformers.base.modules.input_module import InputModule
 from transformers import PreTrainedModel, PreTrainedTokenizerBase
@@ -55,19 +54,6 @@ class PreloadedTransformer(InputModule):
 
         token_embeddings = outputs[0]  # last_hidden_state
         features["token_embeddings"] = token_embeddings
-
-        if (
-            isinstance(self.auto_model, PeftModelForFeatureExtraction)
-            and self.auto_model.active_peft_config.is_prompt_learning
-        ):
-            num_virtual = self.auto_model.active_peft_config.num_virtual_tokens
-            attention_mask = features["attention_mask"]
-            prefix_mask = torch.ones(
-                token_embeddings.size(0),
-                num_virtual,
-                device=attention_mask.device,
-            )
-            features["attention_mask"] = torch.cat((prefix_mask, attention_mask), dim=1)
 
         if self.auto_model.config.output_hidden_states and "hidden_states" in outputs:
             features["all_layer_embeddings"] = outputs["hidden_states"]

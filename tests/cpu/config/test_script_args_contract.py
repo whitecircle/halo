@@ -97,7 +97,7 @@ def test_cli_override_cannot_null_the_project_name(cls, value, tmp_path):
     """``--project_name=`` lands by ``setattr``, so ``__post_init__`` never re-runs.
 
     ``project_name`` is annotated ``str``, so the parser's null-spelling conversion (Optional fields
-    only) leaves ``None`` as four literal characters: the run then reported itself to a tracking
+    only) leaves ``None`` as four literal characters: the run would then report itself to a tracking
     project literally named "None", or to ``WANDB_PROJECT=""`` — both silently, and both landing in
     a different place from every other run of the same experiment.
     """

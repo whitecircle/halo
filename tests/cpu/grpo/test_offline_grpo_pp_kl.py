@@ -106,7 +106,8 @@ def _stub(*, beta, loss_type, pg, min_log_prob, policy, reference) -> types.Simp
         model=types.SimpleNamespace(training=True),
         ref_model=_FixedLogits(reference),
         _precompute_reference=False,
-        _use_chunked_grpo_logprobs=False,
+        # The non-PP side scores through TRL's full-logits path, the one PP's last stage replaces.
+        _scores_full_logits=True,
         _sign_metric_buffer={"train": defaultdict(list), "eval": defaultdict(list)},
         _pp_ref_sweep=None,
         _pp_min_log_prob=min_log_prob,
@@ -341,11 +342,21 @@ def test_all_empty_completions_keep_reference_and_completion_shapes_aligned():
 
 
 def test_the_pp_ctor_gate_accepts_a_kl_term():
-    """The construction gate no longer refuses ``kl_beta != 0`` under PP."""
+    """The construction gate accepts ``kl_beta != 0`` under PP."""
     trainer = types.SimpleNamespace(max_prompt_length=PROMPT, max_completion_length=COMPLETION)
     args = types.SimpleNamespace(kl_beta=0.1, use_chunked_grpo_logprobs=False, max_length=None)
     OfflineGRPOTrainer._reject_pp_explicit_options(trainer, args, types.SimpleNamespace(is_pp_mode=True), None, None)
     assert args.max_length == PROMPT + COMPLETION
+
+
+def test_the_pp_ctor_gate_refuses_chunked_logprobs():
+    """The pipeline's last stage materializes its own logits plane; the switch would parse and do nothing."""
+    trainer = types.SimpleNamespace(max_prompt_length=PROMPT, max_completion_length=COMPLETION)
+    args = types.SimpleNamespace(kl_beta=0.0, use_chunked_grpo_logprobs=True, max_length=None)
+    with pytest.raises(ValueError, match="use_chunked_grpo_logprobs does nothing under pipeline parallelism"):
+        OfflineGRPOTrainer._reject_pp_explicit_options(
+            trainer, args, types.SimpleNamespace(is_pp_mode=True), None, None
+        )
 
 
 if __name__ == "__main__":

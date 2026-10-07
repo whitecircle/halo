@@ -20,6 +20,7 @@ The reason string is a pure per-rank verdict, so the aggregation is the existing
 from unittest.mock import patch
 
 import pytest
+import torch
 
 from src.distributed.nvlink import NO_FABRIC, check_mnnvl_prerequisites, mnnvl_prerequisite_reason
 
@@ -59,11 +60,17 @@ def _run_required(clique, imex_ok: bool, *, world: int = 16, all_reasons=None):
     def fake_all_gather(out_list, obj):
         out_list[:] = gathered if gathered is not None else [obj] * world
 
+    def fake_has_reason_flag(flag, op=None, group=None):
+        # The rejection's fast path: the MAX of every rank's has-reason flag.
+        flag.fill_(int(any(gathered or ())) or int(flag.item()))
+
     with (
         patch(f"{_MOD}.dist.is_available", return_value=True),
         patch(f"{_MOD}.dist.is_initialized", return_value=True),
         patch(f"{_MOD}.dist.get_world_size", return_value=world),
         patch(f"{_MOD}.dist.get_rank", return_value=0),
+        patch("src.distributed.runtime.collective_device", return_value=torch.device("cpu")),
+        patch(f"{_MOD}.dist.all_reduce", side_effect=fake_has_reason_flag),
         patch(f"{_MOD}.dist.all_gather_object", side_effect=fake_all_gather),
         patch(f"{_MOD}.imex_channels_present", return_value=imex_ok),
         patch(f"{_MOD}.nvlink_fabric_clique_id", return_value=clique),
@@ -76,8 +83,8 @@ def test_a_provisioned_job_passes():
 
 
 def test_one_bad_node_fails_the_job_by_name():
-    """Rank 8 (node 1) has no IMEX channels while rank 0's node is perfect — the rank-0-only check
-    saw nothing and the job went on to fault inside a dispatch."""
+    """Rank 8 (node 1) has no IMEX channels while rank 0's node is perfect — a rank-0-only check
+    sees nothing and the job goes on to fault inside a dispatch."""
     reasons = [None] * 8 + ["no IMEX channels at /dev/nvidia-caps-imex-channels"] * 8
     with pytest.raises(ValueError) as excinfo:
         _run_required(clique=3, imex_ok=True, all_reasons=reasons)

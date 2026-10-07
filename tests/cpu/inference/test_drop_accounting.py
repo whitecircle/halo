@@ -47,8 +47,8 @@ class _DeadClient:
 
 
 def test_rm_scoring_names_how_many_rows_the_endpoint_lost(monkeypatch, tmp_path):
-    """The guard fired on "nothing produced" but could not say why; the failure count is what points
-    at the endpoint rather than at the input columns."""
+    """A guard firing on "nothing produced" cannot say why; the failure count is what points at the
+    endpoint rather than at the input columns."""
     prompts = tmp_path / "prompts.jsonl"
     prompts.touch()
     df = pd.DataFrame({"id": [1, 2, 3], "prompt": [[{"role": "user", "content": "q"}] for _ in range(3)]})

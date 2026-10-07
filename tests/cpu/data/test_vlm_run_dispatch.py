@@ -111,8 +111,8 @@ class _UnreachableTokenizer:
 
 
 def test_multimodal_checkpoint_with_text_data_is_a_text_run():
-    """The regression: keying the dispatch on the checkpoint alone sent every Gemma 4 / Qwen3.5
-    text recipe down the VLM path, which refuses packing outright."""
+    """Keying the dispatch on the checkpoint alone would send every Gemma 4 / Qwen3.5 text recipe
+    down the VLM path, which refuses packing outright."""
     assert not is_vlm_run(_args(), "google/gemma-4-26B-A4B-it", _dataset([TEXT_TURNS]), config=VLM_CONFIG)
 
 
@@ -313,13 +313,15 @@ def test_text_renderer_refuses_an_image_content_part():
 
 
 def test_self_distill_text_collator_refuses_an_image_content_part():
-    """``SelfDistillTextCollator`` renders directly instead of through the shared renderer, so the
-    backstop has to be on it too — its shipped VLM configs declare no images column and reach the
-    dispatch on the conversation column alone."""
+    """``SelfDistillTextCollator`` renders at collate time rather than in the row map, so the backstop
+    has to reach it too — its shipped VLM configs declare no images column and reach the dispatch on
+    the conversation column alone."""
     collator = SelfDistillTextCollator(
         tokenizer=SimpleNamespace(eos_token_id=0),
+        max_length=256,
         conversation_field="prompt",
         hint_template="{answer}",
+        train_on_completions_only=False,
         model_config=None,
     )
     with pytest.raises(ValueError, match="image content part"):
@@ -453,8 +455,8 @@ def test_no_module_re_inlines_the_image_part_spelling():
 
 def test_text_path_forces_right_padding():
     """A VLM processor's tokenizer keeps the checkpoint's side (left for Gemma 4 / GLM-4.7-Flash);
-    the text load normalizes it and this path never did. The packing collator refuses a
-    left-padding tokenizer outright, so the newly-reachable text run would die at collator build."""
+    the text path normalizes it as the text load does. The packing collator refuses a left-padding
+    tokenizer outright, so a multimodal checkpoint's text run would otherwise die at collator build."""
     tokenizer = SimpleNamespace(padding_side="left")
     enforce_text_path_padding_side(tokenizer, False)
     assert tokenizer.padding_side == "right"

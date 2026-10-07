@@ -432,7 +432,7 @@ def test_verify_refuses_a_non_finite_weight(fmt, poison):
     """``--verify`` must not report a non-finite weight as a clean round-trip.
 
     The relative error of a poisoned weight is NaN, and ``max(x, nan)`` returns ``x``, so the running
-    maximum stayed 0.0 and the tool printed "OK (inherent format error)" over an export that dequantizes
+    maximum would stay 0.0 and the tool would print "OK (inherent format error)" over an export that dequantizes
     to inf/NaN. Parametrized over the formats because each spreads the poison differently — NVFP4's
     per-tensor global scale carries it to every block, MX keeps it in one.
     """

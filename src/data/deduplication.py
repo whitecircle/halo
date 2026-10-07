@@ -3,7 +3,7 @@
 Driver behind ``scripts/inference/generation/dataset_deduplication.py``.
 """
 
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import ThreadPoolExecutor
 from multiprocessing import cpu_count
 
 import faiss
@@ -18,7 +18,7 @@ __all__ = [
 ]
 
 
-# Fixed default seed: the shuffle decides which member of a near-duplicate group survives dedup, so
+# Fixed default seed: the shuffle decides WHICH member of a near-duplicate group survives dedup, so
 # an unseeded global RNG would make two runs over identical data keep different rows.
 DEDUP_SHUFFLE_SEED = 42
 
@@ -26,8 +26,8 @@ DEDUP_SHUFFLE_SEED = 42
 def _shuffle_matrix_with_mapping(matrix: np.ndarray, rng: np.random.Generator | None = None):
     """Row-shuffle ``matrix``, returning it alongside the permutation that produced it.
 
-    ``rng`` threads a caller's generator through: :func:`faiss_deduplicate_mr_multistep` advances a
-    single generator across its steps, so each step shuffles differently while the whole run stays
+    ``rng`` threads a caller's generator through — :func:`faiss_deduplicate_mr_multistep` advances
+    ONE generator across its steps, so each step shuffles differently while the whole run stays
     reproducible. ``None`` builds a generator seeded with :data:`DEDUP_SHUFFLE_SEED`.
     """
     generator = rng if rng is not None else np.random.default_rng(DEDUP_SHUFFLE_SEED)
@@ -66,10 +66,9 @@ def process_texts(texts, batch_size, model, tokenizer, device, normalize=True):
     return embeddings
 
 
-def _faiss_deduplicate_single(
-    embeddings: np.ndarray,
-    similarity_threshold=0.9,
-):
+def _faiss_deduplicate_single(embeddings: np.ndarray, similarity_threshold=0.9) -> np.ndarray:
+    """Indices of the rows of ``embeddings`` that survive: each kept row drops every neighbor above
+    ``similarity_threshold``."""
     index = faiss.IndexFlatIP(embeddings.shape[1])
     index.add(embeddings)
 
@@ -92,8 +91,7 @@ def _faiss_deduplicate_single(
         visited[neighbors] = True
         keep[neighbors] = False
 
-    unique_indices = np.where(keep)[0]
-    return embeddings[unique_indices], unique_indices
+    return np.where(keep)[0]
 
 
 def faiss_deduplicate_mr(
@@ -101,40 +99,26 @@ def faiss_deduplicate_mr(
     max_workers=cpu_count(),  # noqa: B008  intentional import-time default
     batch_size=100_000,
     similarity_threshold=0.9,
-):
-    num_embeddings = embeddings.shape[0]
-    batch_starts = list(range(0, num_embeddings, batch_size))
+) -> np.ndarray:
+    """Indices of the rows that survive deduplication within each ``batch_size`` block of ``embeddings``,
+    in batch order.
 
-    batches = [embeddings[start : min(start + batch_size, num_embeddings)] for start in batch_starts]
-
-    all_unique_indices = []
-
+    Batch order, not completion order: the next multistep pass shuffles the survivors with the seeded
+    generator, and the script selects the output rows in this order, so an order set by which thread
+    finished first would make a seeded run keep different rows.
+    """
+    starts = range(0, embeddings.shape[0], batch_size)
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
-        future_to_start = {
-            executor.submit(
-                _faiss_deduplicate_single,
-                batch,
-                similarity_threshold,
-            ): start
-            for start, batch in zip(batch_starts, batches, strict=False)
-        }
-
-        for future in tqdm(
-            as_completed(future_to_start),
-            total=len(future_to_start),
-            desc="Processing batches",
-            unit="batch",
-        ):
-            batch_start = future_to_start[future]
-            _, unique_indices = future.result()
-
-            unique_indices_global = unique_indices + batch_start
-
-            all_unique_indices.append(unique_indices_global)
-
-    all_unique_indices = np.concatenate(all_unique_indices)
-
-    return embeddings[all_unique_indices], all_unique_indices
+        futures = [
+            executor.submit(_faiss_deduplicate_single, embeddings[start : start + batch_size], similarity_threshold)
+            for start in starts
+        ]
+        return np.concatenate(
+            [
+                future.result() + start
+                for start, future in zip(starts, tqdm(futures, desc="Processing batches", unit="batch"), strict=True)
+            ]
+        )
 
 
 def faiss_deduplicate_mr_multistep(
@@ -144,9 +128,11 @@ def faiss_deduplicate_mr_multistep(
     batch_size=100_000,
     similarity_threshold=0.9,
     seed: int = DEDUP_SHUFFLE_SEED,
-):
-    # One generator for the whole run: the steps must shuffle differently, which is what re-batches
-    # near-duplicates across batch boundaries, while the run as a whole stays reproducible.
+) -> tuple[np.ndarray, list[int]]:
+    """Indices of the surviving rows of ``embeddings`` after ``steps_count`` reshuffled passes of
+    :func:`faiss_deduplicate_mr`, and the row count before and after each pass."""
+    # One generator for the whole run: the steps must shuffle differently (that is what re-batches
+    # near-duplicates across batch boundaries) while the run as a whole stays reproducible.
     rng = np.random.default_rng(seed)
     progress_indicies_mapping = np.arange(len(embeddings))
     progress_embeddings = embeddings
@@ -155,13 +141,15 @@ def faiss_deduplicate_mr_multistep(
     for _ in tqdm(range(steps_count), desc="Running global dedup step", total=steps_count):
         shuffled_embeddings, shuffled_indices = _shuffle_matrix_with_mapping(progress_embeddings, rng)
         progress_indicies_mapping = progress_indicies_mapping[shuffled_indices]
-        progress_embeddings, unique_indices = faiss_deduplicate_mr(
-            shuffled_embeddings.astype(np.float32),
+        shuffled_embeddings = shuffled_embeddings.astype(np.float32)
+        unique_indices = faiss_deduplicate_mr(
+            shuffled_embeddings,
             max_workers=max_workers,
             batch_size=batch_size,
             similarity_threshold=similarity_threshold,
         )
+        progress_embeddings = shuffled_embeddings[unique_indices]
         sizes_history.append(len(progress_embeddings))
         progress_indicies_mapping = progress_indicies_mapping[unique_indices]
 
-    return progress_embeddings, progress_indicies_mapping, sizes_history
+    return progress_indicies_mapping, sizes_history

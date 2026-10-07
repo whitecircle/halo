@@ -9,10 +9,11 @@ Two independent mechanisms, pinned separately:
    training path always runs with ``False`` (``TrainingArguments.use_cache`` defaults False and
    ``Trainer.__init__`` writes it into ``model.config``; TRL's SFT ``compute_loss`` also forces the
    kwarg).
-2. The KV compressor. ``compressed_sparse_attention`` layers pool KV spans across the whole row
-   with no document awareness, so they cross packed boundaries BY CONSTRUCTION even under a
-   correct packed mask — the same accepted class as the linear-attention/conv mixers
-   (see ``agent-docs/data/collators.md``).
+2. The KV compressor. ``compressed_sparse_attention`` / ``heavily_compressed_attention`` layers pool
+   KV over windows cut at fixed row indices and judge their causality by position, so they cross
+   packed boundaries BY CONSTRUCTION even under a correct packed mask. This is the mechanism behind
+   the collator factory's refusal of DSv4 ``packing`` / ``padding_free``
+   (``reject_compressed_kv_rows``).
 
     python tests/cpu/models/test_deepseek_v4_packed_isolation.py
 """
@@ -71,8 +72,8 @@ def test_cache_still_suppresses_the_packed_mask():
 
 def test_compressed_attention_crosses_documents_by_construction():
     """The compressor pin: one ``compressed_sparse_attention`` layer leaks regardless of the packed
-    mask. If this ever nears zero, upstream made the compressor document-aware — update the
-    per-family isolation matrix in agent-docs/data/collators.md."""
+    mask. If this ever nears zero, upstream made the compressor document-aware — re-examine the
+    DSv4 packing refusal and the per-family isolation matrix in agent-docs/data/collators.md."""
     layer_types = ["sliding_attention", "compressed_sparse_attention", "sliding_attention"]
     assert _drift(layer_types, use_cache=False) > 1e-3
 

@@ -4,18 +4,20 @@
 The shared eval flags carry temperature, top-p, max tokens and a request timeout; the training
 rollout also fixes chat-template variables, stop tokens, a thinking budget and the backend. A policy
 trained with ``preserve_thinking`` or ``rollout_stop_tokens`` and evaluated without them is measured
-under a different contract, and the meta line recorded three knobs of it.
+under a different contract; the meta line records the whole contract.
 
     python tests/cpu/environments/test_eval_scripts_training_contract.py
 """
 
 import argparse
+import dataclasses
 import json
 from types import SimpleNamespace
 
 import pytest
 
 import scripts.environments._common as common
+import src.environments.episode as episode
 from scripts.environments._common import (
     TrainingContract,
     load_training_contract,
@@ -51,6 +53,7 @@ rollout_backend: vllm
 rollout_temperature: 1.0
 rollout_top_p: 1.0
 rollout_max_tokens: 4096
+rollout_max_episode_tokens: 16384
 rollout_max_thinking_tokens: 2048
 rollout_chat_template_kwargs:
   preserve_thinking: true
@@ -84,6 +87,7 @@ def test_the_yaml_rollout_contract_reaches_the_eval(contract):
     assert rollout.chat_template_kwargs == {"preserve_thinking": True}
     assert rollout.stop_token_ids == [_CALL_TOKEN_ID]
     assert rollout.max_thinking_tokens == 2048
+    assert rollout.max_episode_tokens == 16384, "the episode output budget is part of the trained contract"
     assert rollout.backend == "vllm"
     assert (rollout.temperature, rollout.top_p, rollout.max_tokens, rollout.request_timeout) == (1.0, 1.0, 4096, 300.0)
     assert rollout.model_name == "served-name", "the served name comes from --model, never the YAML"
@@ -113,7 +117,7 @@ def test_without_the_flag_the_script_defaults_stand():
 
 def test_the_yaml_environment_config_reaches_the_eval(contract):
     assert contract.env_config.environment_type == "code_contests"
-    assert contract.env_config_dict() == {
+    assert contract.env_config.to_env_config() == {
         "reward_terms": [{"source": "environment"}],
         "max_turns": 7,
         "language": "cpp",
@@ -144,6 +148,8 @@ def test_a_shipped_recipe_evaluates_without_the_training_watchdog(default_watchd
     """The eval joins no process group, so the recipe's contract builds on the default watchdog."""
     rollout = default_watchdog_recipe.rollout_config()
     assert rollout.episode_timeout == default_watchdog_recipe.async_config.episode_timeout
+    trained_budget = default_watchdog_recipe.async_config.rollout_max_episode_tokens
+    assert trained_budget is not None and rollout.max_episode_tokens == trained_budget
 
 
 def test_training_still_refuses_the_recipe_on_the_default_watchdog(default_watchdog_recipe):
@@ -159,6 +165,27 @@ def test_an_unresolvable_stop_token_is_refused(tmp_path, monkeypatch):
         TrainingContract.load(str(path))
 
 
+def test_the_contract_loads_the_tokenizer_for_the_stop_tokens_alone(tmp_path, monkeypatch):
+    """Only the stop tokens go through the tokenizer: a contract without them never loads one, and no
+    reasoning-end id is resolved for the eval (the trainer's overlong charge is the one reader of it)."""
+    path = tmp_path / "train.yaml"
+    path.write_text(_TRAINING_YAML.replace('rollout_stop_tokens: ["<|call|>"]\n', ""))
+
+    def never(*a, **k):
+        raise AssertionError("the contract loaded a tokenizer with no stop tokens to resolve")
+
+    monkeypatch.setattr(common.AutoTokenizer, "from_pretrained", never)
+    contract = TrainingContract.load(str(path))
+    assert contract.stop_token_ids is None
+    assert "reasoning_end_token_id" not in {f.name for f in dataclasses.fields(contract)}
+    assert contract.rollout_config().reasoning_end_token_id is None
+
+
+def test_the_eval_resolves_stop_tokens_as_the_trainer_does():
+    """One resolver, one policy: a recipe the trainer accepts is one its eval accepts."""
+    assert common.resolve_rollout_stop_token_ids is episode.resolve_rollout_stop_token_ids
+
+
 @pytest.mark.parametrize(
     ("effort_line", "level"),
     [("  reasoning_effort: null\n", None), ("", DEFAULT_REASONING_EFFORT)],
@@ -172,7 +199,7 @@ def test_the_coding_eval_takes_the_level_the_training_env_was_built_with(tmp_pat
     path.write_text(_TRAINING_YAML.replace("  timeout_per_test: 3\n", f"  timeout_per_test: 3\n{effort_line}"))
     monkeypatch.setattr(common.AutoTokenizer, "from_pretrained", lambda *a, **k: _Tokenizer())
     contract = TrainingContract.load(str(path))
-    trained_env = contract.env_config_dict()
+    trained_env = contract.env_config.to_env_config()
     training = resolve_environment(contract.env_config.environment_type, {**trained_env, "sandbox": StubSandbox()})
     flags = SimpleNamespace(eval_protocol=None, language=None, reasoning_effort=None, max_turns=None)
     assert resolve_env_config(flags, trained_env, {})["reasoning_effort"] == training.reasoning_effort == level
@@ -191,17 +218,18 @@ def test_the_meta_line_records_the_whole_generation_contract(contract, tmp_path)
         traj_path=str(traj_path),
         env_type="code_contests",
         split="train",
-        max_turns=None,
         rollout=rollout,
         num_samples=1,
     )
 
     meta = json.loads(traj_path.read_text().splitlines()[0])
     assert meta["split"] == "train"
+    assert meta["max_turns"] == 7, "the meta line records the cap the env resolved"
     assert meta["training_config"] == contract.path
     assert meta["rollout"]["chat_template_kwargs"] == {"preserve_thinking": True}
     assert meta["rollout"]["stop_token_ids"] == [_CALL_TOKEN_ID]
     assert meta["rollout"]["max_thinking_tokens"] == 2048
+    assert meta["rollout"]["max_episode_tokens"] == 16384
     assert meta["rollout"]["temperature"] == 1.0 and meta["rollout"]["max_tokens"] == 4096
 
 

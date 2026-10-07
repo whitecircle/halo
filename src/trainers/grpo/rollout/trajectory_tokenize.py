@@ -60,10 +60,9 @@ def rollout_template_kwargs(
     rollout_kwargs: dict, reasoning_effort: str | None, reasoning_budget: int | None = None
 ) -> dict:
     """Chat-template kwargs a rollout's requests carry: the run's template variables
-    (``AsyncTrainingConfig.rollout_template_variables``, which adds the episode scope's variable to
-    ``rollout_chat_template_kwargs``) plus the ``reasoning_effort`` the episode ran under and its
-    thinking budget (per turn, or the episode's total under the episode scope), so a trainer-side
-    render reproduces the template's effort-dependent preamble. Either key is absent when the episode
+    (``rollout_chat_template_kwargs``) plus the ``reasoning_effort`` the episode ran
+    under and its per-turn thinking budget, so a trainer-side render reproduces the template's
+    effort-dependent preamble. Either key is absent when the episode
     carries none. One owner for every render that stands in for the engine's."""
     kwargs = dict(rollout_kwargs)
     if reasoning_effort is not None:
@@ -91,8 +90,8 @@ class TrajectoryTokenizeMixin:
     """Chat-template rendering and trajectory tokenization for the environmental GRPO trainer.
 
     Reads the trainer's tokenizer/processor, environment spec, context window and routing-replay
-    state. Fatal per-row failures are recorded through the trainer's ``_record_batch_error`` rather than
-    raised, so its rank-uniform fence raises them together.
+    state. Fatal per-row failures are recorded on the trainer's ``_batch_errors`` fence rather than
+    raised, so the fence raises them on every rank together.
     """
 
     def _render_messages_to_ids(
@@ -139,8 +138,8 @@ class TrajectoryTokenizeMixin:
     def _warn_if_no_reasoning_captured(self, rollout_results: list[RolloutResult], length_terms_on: bool) -> None:
         """Once per run: a step whose assistant turns carry no reasoning while a knob consumes it.
 
-        Reasoning reaches a turn only through the server's reasoning parser; without one the length
-        floor scores every episode as maximal under-use, the length price charges nothing, and
+        Reasoning reaches a turn only through the server's reasoning parser; without one the reasoning
+        floor scores every episode as maximal under-use, the reasoning price charges nothing, and
         ``carry_reasoning`` carries nothing — and none says a word on its own. A step with no
         assistant turn is no evidence.
         """
@@ -150,7 +149,7 @@ class TrajectoryTokenizeMixin:
         consumers = [
             name
             for name, on in (
-                ("the effort length terms", length_terms_on),
+                ("the reasoning terms", length_terms_on),
                 ("carry_reasoning", self._carry_reasoning),
             )
             if on
@@ -160,8 +159,8 @@ class TrajectoryTokenizeMixin:
             self._warned_once,
             "no_reasoning_captured",
             "No assistant turn in this step carried reasoning, but %s consume it: the rollout server is most "
-            "likely running without a reasoning parser (or the model emits none). The length floor then "
-            "scores every episode as maximal under-use, the length price charges nothing, and a carried "
+            "likely running without a reasoning parser (or the model emits none). The reasoning floor then "
+            "scores every episode as maximal under-use, the reasoning price charges nothing, and a carried "
             "thought is never sent. Serve with the family's reasoning parser, or turn the knob off.",
             " and ".join(consumers),
         )
@@ -308,7 +307,7 @@ class TrajectoryTokenizeMixin:
         context_limit = self._context_limit()
         total_len = len(prompt_token_ids) + len(completion_ids)
         if total_len > context_limit:
-            self._record_batch_error(
+            self._batch_errors.record(
                 context_overflow_error(
                     "Trajectory",
                     len(prompt_token_ids),
@@ -426,7 +425,7 @@ class TrajectoryTokenizeMixin:
             # The context check comes first, as on the whole-trajectory path: a row the served model
             # could not have produced is a config error, not a row the memory cap below may absorb.
             if row_len > context_limit:
-                self._record_batch_error(
+                self._batch_errors.record(
                     context_overflow_error(
                         "Per-turn training row",
                         len(prompt_ids),
@@ -448,7 +447,7 @@ class TrajectoryTokenizeMixin:
                 try:
                     turn_routing = (self._routing_injector.decode_engine_mask(m.routing_mask), m.routing_prompt_tokens)
                 except ValueError as e:
-                    self._record_batch_error(f"routing_replay='rollout': malformed routed_experts payload: {e}")
+                    self._batch_errors.record(f"routing_replay='rollout': malformed routed_experts payload: {e}")
             rows.append(
                 TurnRow(
                     prompt_ids=torch.tensor(prompt_ids, dtype=torch.long),

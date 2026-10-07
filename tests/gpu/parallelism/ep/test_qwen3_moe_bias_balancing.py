@@ -1,9 +1,8 @@
 #!/usr/bin/env python
 """Qwen3-MoE bias-update balancing: inert at zero bias, and it actually steers at nonzero bias.
 
-Under pipeline parallelism ``aux_loss`` is rejected — a PP stage never runs ``*ForCausalLM.forward``,
-where HF adds the auxiliary term — so ``bias_update`` is the only balancing this family can get. Two
-properties make it safe to enable:
+Qwen3-MoE has no checkpoint slot for a routing bias, so its EP layer balances through the trainer-side
+buffer ``moe_balancing: bias_update_transient`` enables. Two properties make it safe to enable:
 
   1. **Zero bias is a no-op.** Turning balancing on must reproduce the unbalanced route exactly, or
      every run pays a silent routing change for a feature it never asked to engage. This is the half
@@ -82,7 +81,7 @@ def run(ctx) -> dict:
     model.eval()
     layers = ep_layers(model)
     assert layers, "no EP layers built — this model should be EP-wrapped"
-    # Without the declaration bias_update raises, and this family would have no balancing under PP.
+    # Without the declaration both bias modes raise.
     checks["supports_bias_balancing"] = bool(type(layers[0])._supports_bias_balancing)
     log(f"EP layers: {len(layers)}  ({type(layers[0]).__name__})")
     log(f"norm_topk_prob = {layers[0].gate.norm_topk_prob}")

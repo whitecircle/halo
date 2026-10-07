@@ -57,6 +57,8 @@ from tests.common.ports import free_port
 
 # Well above the client deadlines each test monkeypatches down, so a block is observed, not waited out.
 JOIN_TIMEOUT_S = 30.0
+# vLLM 0.26.0's default CUDA-graph capture range: prefills up to this many tokens replay a captured graph.
+GRAPH_CAPTURE_TOKENS = 512
 
 
 class FakeVLLMServer:
@@ -78,8 +80,13 @@ class FakeVLLMServer:
         # What /v1/completions logprobs account for: vLLM's raw default, its processed mode
         # (temperature + nucleus renormalization), or SGLang's default (temperature only).
         self.logprobs_mode = "raw_logprobs"
+        # Added to every prefill log-prob of a request within the capture range: an engine whose prompt
+        # log-probs depend on whether the prefill replayed a graph (vLLM 0.26.0's spec-decode overwrite).
+        self.graph_prefill_shift = 0.0
+        self.graph_capture_tokens = GRAPH_CAPTURE_TOKENS
         self.requests: list[str] = []
         self.bodies: dict[str, dict] = {}
+        self.posted: list[tuple[str, dict]] = []
         self.queries: dict[str, str] = {}
         self.status: dict[str, int] = {}
         self.refuse: set[str] = set()
@@ -140,6 +147,7 @@ class FakeVLLMServer:
                     server.queries[path] = query
                     if raw:
                         server.bodies[path] = json.loads(raw)
+                        server.posted.append((path, server.bodies[path]))
                     if path in server.refuse:
                         self._reply(503)
                         return
@@ -147,14 +155,16 @@ class FakeVLLMServer:
                         # SGLang's prefill log-probs: [logprob, token_id, text] per input token from
                         # logprob_start_len; the window's first entry is its anchor and carries None.
                         body = server.bodies[path]
+                        shift = server.prefill_shift(len(body["input_ids"]))
                         ids = body["input_ids"][body["logprob_start_len"] :]
-                        echo = [[None, ids[0], None]] + [[-((tok % 7) + 1) / 10, tok, None] for tok in ids[1:]]
+                        echo = [[None, ids[0], None]] + [[-((tok % 7) + 1) / 10 + shift, tok, None] for tok in ids[1:]]
                         self._reply(200, {"meta_info": {"input_token_logprobs": echo}})
                         return
                     if path == "/v1/completions" and "prompt_logprobs" in server.bodies[path]:
                         # Prefill echo: one entry per prompt token (None for the first), keyed by token id.
                         prompt = server.bodies[path]["prompt"]
-                        echo = [None] + [{str(tok): {"logprob": -((tok % 7) + 1) / 10}} for tok in prompt[1:]]
+                        shift = server.prefill_shift(len(prompt))
+                        echo = [None] + [{str(tok): {"logprob": -((tok % 7) + 1) / 10 + shift}} for tok in prompt[1:]]
                         self._reply(200, {"choices": [{"text": "", "prompt_logprobs": echo}]})
                         return
                     if path == "/v1/completions":
@@ -187,6 +197,9 @@ class FakeVLLMServer:
         self.url = f"http://127.0.0.1:{self._httpd.server_address[1]}"
         self._thread = threading.Thread(target=self._httpd.serve_forever, daemon=True)
         self._thread.start()
+
+    def prefill_shift(self, num_tokens: int) -> float:
+        return self.graph_prefill_shift if num_tokens <= self.graph_capture_tokens else 0.0
 
     def count(self, entry: str) -> int:
         with self._lock:
@@ -615,30 +628,49 @@ def test_context_window_preflight_raises_on_a_server_that_cannot_hold_one_turn(s
     verify_context_window(VLLMWeightSyncClient, [server.url], 512, None)
 
 
+# The filters' off values the preflight hands the probe, so each probe request moves one knob only.
+_FILTERS_OFF = {"top_k": -1, "min_p": 0.0, "repetition_penalty": 1.0}
+
+
+def _preflight(
+    url: str,
+    temperature: float,
+    top_p: float,
+    sequence_ratio_active: bool,
+    *,
+    top_k=-1,
+    min_p=0.0,
+    repetition_penalty=1.0,
+):
+    verify_sampler_logprob_reference(
+        VLLMWeightSyncClient, [url], temperature, top_p, top_k, min_p, repetition_penalty, sequence_ratio_active
+    )
+
+
 def test_sampler_logprob_probe_reads_each_engine_default(server, client):
     """vLLM's raw default carries neither temperature nor nucleus; its processed mode carries both;
     SGLang's default carries the temperature only."""
-    assert client.probe_sampler_logprob_semantics() == (False, False)
+    assert client.probe_sampler_logprob_semantics(**_FILTERS_OFF) == (False, False)
     server.logprobs_mode = "processed_logprobs"
-    assert client.probe_sampler_logprob_semantics() == (True, True)
+    assert client.probe_sampler_logprob_semantics(**_FILTERS_OFF) == (True, True)
     server.logprobs_mode = "sglang_default"
-    assert client.probe_sampler_logprob_semantics() == (True, False)
+    assert client.probe_sampler_logprob_semantics(**_FILTERS_OFF) == (True, False)
 
 
 def test_sampler_logprob_preflight_refuses_a_raw_reference_at_any_temperature_but_one(server):
     """Raw (pre-temperature) logprobs make every IS weight π^T/π^1: refused whenever the trainer scores
     at a temperature other than 1, and the refusal names the server flag that fixes it."""
     with pytest.raises(ValueError, match="processed_logprobs"):
-        verify_sampler_logprob_reference(VLLMWeightSyncClient, [server.url], 1.1, 1.0, True)
+        _preflight(server.url, 1.1, 1.0, True)
     with pytest.raises(ValueError, match="RAW"):
-        verify_sampler_logprob_reference(VLLMWeightSyncClient, [server.url], 0.7, 1.0, False)
+        _preflight(server.url, 0.7, 1.0, False)
     # At temperature 1 with no band a raw reference is the sampling distribution's: nothing to probe.
     probes_before = server.count("POST /v1/completions")
-    verify_sampler_logprob_reference(VLLMWeightSyncClient, [server.url], 1.0, 0.95, False)
+    _preflight(server.url, 1.0, 0.95, False, top_k=20, min_p=0.05)
     assert server.count("POST /v1/completions") == probes_before, "temperature 1 without a band must not spend a probe"
 
     server.logprobs_mode = "processed_logprobs"
-    verify_sampler_logprob_reference(VLLMWeightSyncClient, [server.url], 1.1, 1.0, True)
+    _preflight(server.url, 1.1, 1.0, True)
 
 
 def test_sampler_logprob_preflight_refuses_a_nucleus_reference_under_the_geometric_band(server):
@@ -646,17 +678,51 @@ def test_sampler_logprob_preflight_refuses_a_nucleus_reference_under_the_geometr
     mass, which the geometric band reads as drift; pre-nucleus references (SGLang, raw at T=1) pass."""
     server.logprobs_mode = "processed_logprobs"
     with pytest.raises(ValueError, match="rollout_top_p: 1.0"):
-        verify_sampler_logprob_reference(VLLMWeightSyncClient, [server.url], 1.0, 0.95, True)
-    verify_sampler_logprob_reference(VLLMWeightSyncClient, [server.url], 1.0, 0.95, False)
+        _preflight(server.url, 1.0, 0.95, True)
+    _preflight(server.url, 1.0, 0.95, False)
     server.logprobs_mode = "sglang_default"
-    verify_sampler_logprob_reference(VLLMWeightSyncClient, [server.url], 1.1, 0.95, True)
+    _preflight(server.url, 1.1, 0.95, True)
+
+
+@pytest.mark.parametrize("cut", [{"top_k": 20}, {"min_p": 0.05}], ids=["top_k", "min_p"])
+def test_sampler_logprob_preflight_refuses_a_top_k_or_min_p_cut_like_a_nucleus(server, cut):
+    """vLLM's processed logprobs are taken after top-k and min-p as after top-p, so either cut lifts the
+    tokens it keeps the way the nucleus does; the probe still runs with every filter off, so the cut it
+    measures is its own top-p 0.5, not the run's."""
+    server.logprobs_mode = "processed_logprobs"
+    name = next(iter(cut))
+    with pytest.raises(ValueError, match=f"{name}={cut[name]}"):
+        _preflight(server.url, 1.0, 1.0, True, **cut)
+    probes = [body for path, body in server.posted if path == "/v1/completions"]
+    assert len(probes) == 3
+    assert all({key: body[key] for key in _FILTERS_OFF} == _FILTERS_OFF for body in probes)
+    _preflight(server.url, 1.0, 1.0, False, **cut)
+
+
+def test_trl_s_top_k_off_value_is_no_cut(server):
+    """TRL spells an off top-k 0, the rollout config -1: neither is a cut, so neither is refused under a
+    sequence-summed ratio and, at temperature 1, neither spends a probe."""
+    server.logprobs_mode = "processed_logprobs"
+    for off in (0, -1):
+        _preflight(server.url, 1.0, 1.0, True, top_k=off)
+    assert server.count("POST /v1/completions") == 0
+
+
+def test_a_repetition_penalty_is_refused_under_a_sequence_summed_ratio_without_a_probe(server):
+    """Both engines' sampling logprobs carry the penalty and the trainer's never do, so no server
+    verdict clears the pairing; a token-level ratio takes it per token and passes."""
+    server.logprobs_mode = "sglang_default"
+    with pytest.raises(ValueError, match="repetition_penalty=1.1"):
+        _preflight(server.url, 1.0, 1.0, True, repetition_penalty=1.1)
+    assert server.count("POST /v1/completions") == 0
+    _preflight(server.url, 1.0, 1.0, False, repetition_penalty=1.1)
 
 
 def test_sampler_logprob_preflight_warns_on_an_unreachable_server(server, caplog):
     """An unreadable probe must never be what fails the run — it warns and moves on."""
     server.close()
     with caplog.at_level(logging.WARNING):
-        verify_sampler_logprob_reference(VLLMWeightSyncClient, [server.url], 1.1, 1.0, True)
+        _preflight(server.url, 1.1, 1.0, True)
     assert any("could not verify" in r.getMessage() for r in caplog.records)
 
 

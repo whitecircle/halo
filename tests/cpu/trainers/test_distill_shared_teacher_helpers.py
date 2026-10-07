@@ -1,16 +1,12 @@
 #!/usr/bin/env python
-"""Self-distillation's reference gate, and the two primitives the distillation trainers share.
+"""Self-distillation's construction gates, and the two primitives the distillation trainers share.
 
-1. ``DistributedSelfDistillationTrainer`` declares EP and TP support and accepts an explicit
-   ``reference_model``, but that reference is never parallelized: under EP/TP it stays a dense
-   replica running the unpatched MoE path, so every reference log-prob — and the KL built from
-   them — is silently biased. It must go through the same ``_validate_reference_model`` gate DPO
-   uses, and it must fail BEFORE the model is moved to the device. Either term with nothing to
-   compute it from (a weighted anchor without a reference, OPD on without a teacher branch) raises
-   rather than dropping out of the loss.
+1. ``DistributedSelfDistillationTrainer`` sets a weighted reference up, and only a weighted one.
+   Either term with nothing to compute it from (a weighted anchor without a reference, OPD on with a
+   collator that builds no teacher branch) raises at construction rather than dropping out of the
+   loss. The EP/TP report on the reference lives in tests/cpu/parallelism/test_reference_model_gate.py.
 2. ``privileged_teacher_pass`` and ``shifted_token_cross_entropy`` each serve two trainers; the
-   equivalence checks below pin them to the per-trainer formulas, and the last test states the
-   difference the sharing deliberately keeps (per-sample vs global denominator).
+   cross-entropy is pinned to an independent ``-log_softmax`` gather.
 
 Run: python tests/cpu/trainers/test_distill_shared_teacher_helpers.py
 """
@@ -22,33 +18,35 @@ import pytest
 import torch
 import torch.nn as nn
 from accelerate import PartialState
-from torch.nn.functional import cross_entropy
+from torch.nn.functional import log_softmax
 from trl import SFTTrainer
 
 from src.data.spans import LABEL_IGNORE_INDEX
 from src.distributed.parallelism_config import ParallelismConfig
-from src.trainers.distillation.losses import (
-    masked_token_mean,
-    privileged_teacher_pass,
-    shifted_token_cross_entropy,
-)
+from src.trainers.distillation.losses import privileged_teacher_pass, shifted_token_cross_entropy
 from src.trainers.distillation.self_distillation import DistributedSelfDistillationTrainer
 from src.trainers.sft import DistributedSFTTrainer
 
 PartialState()  # the trainers' accelerate logger requires an initialized state
 
+_TEACHER_BRANCH_COLLATOR = types.SimpleNamespace(builds_teacher_branch=True)
 
-def _build(ep_size=1, tp_size=1, reference_model=None, reference_kl_coef=1.0):
-    """Construct the trainer with only the HF/TRL machinery stubbed out; returns the setup calls."""
-    setup_calls = []
+
+def _build(
+    setup_calls, ep_size=1, tp_size=1, reference_model=None, reference_kl_coef=1.0, sdpg_beta_base=0.0, collator=None
+):
+    """Construct the trainer with only the HF/TRL machinery stubbed out, recording every reference setup."""
 
     def _init_cfg(self, kwargs, **_):
         self.parallelism_config = ParallelismConfig(world_size=8, gpus_per_node=8, ep_size=ep_size, tp_size=tp_size)
         return kwargs
 
+    def _sft_init(self, *args, **kwargs):
+        self.data_collator = collator
+
     with (
         mock.patch.object(DistributedSFTTrainer, "_init_distributed_config", _init_cfg),
-        mock.patch.object(SFTTrainer, "__init__", return_value=None),
+        mock.patch.object(SFTTrainer, "__init__", _sft_init),
         mock.patch.object(DistributedSelfDistillationTrainer, "_setup_distributed_modes", return_value=None),
         mock.patch.object(DistributedSelfDistillationTrainer, "_resolve_stop_token_ids", return_value=None),
         mock.patch.object(
@@ -57,152 +55,94 @@ def _build(ep_size=1, tp_size=1, reference_model=None, reference_kl_coef=1.0):
             lambda self: setup_calls.append(self._reference_model),
         ),
     ):
-        DistributedSelfDistillationTrainer(reference_model=reference_model, reference_kl_coef=reference_kl_coef)
-    return setup_calls
+        return DistributedSelfDistillationTrainer(
+            reference_model=reference_model,
+            reference_kl_coef=reference_kl_coef,
+            reference_kl_loss="unnormalized_kl",
+            confidence_weight_opd=True,
+            opd_exclude_eos=True,
+            sdpg_beta_base=sdpg_beta_base,
+        )
 
 
-def test_explicit_reference_is_rejected_under_ep():
-    with pytest.raises(ValueError, match="explicit ref_model is not supported under EP/TP"):
-        _build(ep_size=8, reference_model=nn.Linear(2, 2))
+@pytest.mark.parametrize(("ep_size", "tp_size"), [(1, 1), (8, 1), (1, 8)], ids=["dp", "ep", "tp"])
+def test_a_weighted_reference_is_set_up_on_every_axis(ep_size, tp_size):
+    setup_calls = []
+    reference = nn.Linear(2, 2)
+    _build(setup_calls, ep_size=ep_size, tp_size=tp_size, reference_model=reference)
+    assert setup_calls == [reference]
 
 
-def test_explicit_reference_is_rejected_under_tp():
-    with pytest.raises(ValueError, match="explicit ref_model is not supported under EP/TP"):
-        _build(tp_size=8, reference_model=nn.Linear(2, 2))
-
-
-def test_the_gate_runs_before_the_reference_is_set_up():
-    """Ordering is load-bearing: ``_setup_reference_model`` moves the whole replica onto the GPU."""
-    with pytest.raises(ValueError, match="explicit ref_model is not supported under EP/TP"):
-        _build(ep_size=8, reference_model=nn.Linear(2, 2), reference_kl_coef=0.5)
-    assert _build(ep_size=1, reference_model=nn.Linear(2, 2)), "plain DP must still set the reference up"
-
-
-def test_plain_data_parallel_reference_is_accepted():
-    """Anti-vacuity: the reference is correct wherever nothing shards the policy differently."""
-    assert len(_build(ep_size=1, tp_size=1, reference_model=nn.Linear(2, 2))) == 1
-
-
-def test_no_reference_model_is_never_gated():
-    assert _build(ep_size=8, reference_model=None, reference_kl_coef=0.0) == []
+@pytest.mark.parametrize("reference_model", [None, nn.Linear(2, 2)], ids=["no-reference", "unused-reference"])
+def test_an_unweighted_anchor_is_never_gated(reference_model):
+    """``reference_kl_coef == 0`` never reads the reference, so the gate stays on the branch that does."""
+    setup_calls = []
+    _build(setup_calls, ep_size=8, reference_model=reference_model, reference_kl_coef=0.0)
+    assert setup_calls == []
 
 
 def test_a_weighted_anchor_without_a_reference_raises():
     """``reference_kl_coef > 0`` with nothing to anchor to would drop ``L_ref`` from every step."""
     with pytest.raises(ValueError, match="no reference_model was passed"):
-        _build(reference_model=None, reference_kl_coef=0.5)
+        _build([], reference_model=None, reference_kl_coef=0.5)
 
 
-class _LogitsModel(nn.Module):
-    """Returns zero logits over a small vocab for whatever sequence it is handed."""
+@pytest.mark.parametrize("collator", [None, types.SimpleNamespace(builds_teacher_branch=False)], ids=["plain", "off"])
+def test_opd_on_needs_a_collator_that_builds_the_teacher_branch(collator):
+    """Refused at construction, on every rank alike: a batch without ``teacher_*`` keys would skip OPD."""
+    with pytest.raises(ValueError, match="needs the privileged teacher branch"):
+        _build([], reference_kl_coef=0.0, sdpg_beta_base=1.0, collator=collator)
 
-    def forward(self, input_ids=None, **_):
-        return types.SimpleNamespace(logits=torch.zeros(*input_ids.shape, 5))
+
+def test_opd_on_accepts_a_teacher_branch_collator_and_opd_off_needs_none():
+    _build([], reference_kl_coef=0.0, sdpg_beta_base=1.0, collator=_TEACHER_BRANCH_COLLATOR)
+    _build([], reference_kl_coef=0.0, sdpg_beta_base=0.0, collator=None)
 
 
-def _self_distill_step(inputs, sdpg_beta_base=1.0):
-    """Run the real ``compute_loss`` on a bare trainer; returns the loss."""
+class _Rows(nn.Module):
+    def __init__(self, rows):
+        super().__init__()
+        self.weight = nn.Parameter(torch.zeros(1))
+        self.config = types.SimpleNamespace(get_text_config=lambda: types.SimpleNamespace(vocab_size=rows))
+        self.device = torch.device("cpu")
+
+
+class _Tokenizer:
+    def __init__(self, size):
+        self.size = size
+
+    def __len__(self):
+        return self.size
+
+
+def _reference_setup(policy_rows, reference_rows, tokenizer_len=10):
     trainer = object.__new__(DistributedSelfDistillationTrainer)
-    trainer.model = _LogitsModel()
-    trainer.sdpg_beta_base = sdpg_beta_base
-    trainer.reference_kl_coef = 0.0
-    trainer._warned_empty_labels = True
-    trainer._vision_reuse_setup, trainer._vision_reuse_active = True, False
-    trainer.store_metrics = lambda metrics, train_eval: None
-    return trainer.compute_loss(trainer.model, inputs)
+    trainer.model, trainer._reference_model = _Rows(policy_rows), _Rows(reference_rows)
+    trainer.processing_class = _Tokenizer(tokenizer_len)
+    trainer.reference_kl_coef = 0.1
+    trainer._setup_reference_model()
+    return trainer
 
 
-def _student_batch():
-    return {"input_ids": torch.ones(1, 4, dtype=torch.long), "labels": torch.ones(1, 4, dtype=torch.long)}
+def test_the_reference_shares_the_policy_vocab_check():
+    """Same tokenizer: equal rows compare whole, padding past it is sliced away, too few rows raise."""
+    assert _reference_setup(16, 16)._reference_vocab_width is None
+    assert _reference_setup(16, 12)._reference_vocab_width == 10
+    with pytest.raises(ValueError, match="fewer logit rows than the tokenizer"):
+        _reference_setup(16, 8)
 
 
-def test_a_batch_without_the_teacher_branch_raises_while_opd_is_on():
-    """With no rank carrying ``teacher_*`` keys the step would train SFT alone under a self-distillation config."""
-    with pytest.raises(RuntimeError, match="privileged teacher branch"):
-        _self_distill_step(_student_batch())
-
-
-def test_opd_off_needs_no_teacher_branch():
-    """Anti-vacuity: ``sdpg_beta_base: 0`` is the documented SFT-only setting and still trains."""
-    assert torch.isfinite(_self_distill_step(_student_batch(), sdpg_beta_base=0.0))
-
-
-def test_an_unused_reference_is_not_gated():
-    """``reference_kl_coef == 0`` never reads the reference (compute_loss skips the term), so the
-    gate must stay on the branch that actually consumes it."""
-    assert _build(ep_size=8, reference_model=nn.Linear(2, 2), reference_kl_coef=0.0) == []
-
-
-def _logits_and_labels(ignore_positions=((0, 2),)):
+def test_shifted_ce_is_the_negative_gold_log_prob_and_zero_where_ignored():
+    """Pinned to an independent ``-log_softmax`` gather, in fp32 from bf16 logits."""
     torch.manual_seed(0)
-    logits = torch.randn(2, 5, 7)
-    labels = torch.randint(0, 7, (2, 5))
-    for row, col in ignore_positions:
-        labels[row, col] = LABEL_IGNORE_INDEX
-    return logits, labels
-
-
-def test_shifted_ce_matches_the_global_token_mean_it_replaced():
-    """Teacher distillation's formula: one ``reduction='sum'`` over a clamped valid-token count."""
-    logits, labels = _logits_and_labels()
-    shift_logits, shift_labels = logits[:, :-1, :], labels[:, 1:]
-    count = (shift_labels != LABEL_IGNORE_INDEX).sum().clamp(min=1)
-
-    before = (
-        cross_entropy(
-            shift_logits.reshape(-1, shift_logits.size(-1)).float(),
-            shift_labels.reshape(-1),
-            ignore_index=LABEL_IGNORE_INDEX,
-            reduction="sum",
-        )
-        / count
-    )
-    after = shifted_token_cross_entropy(shift_logits, shift_labels).sum() / count
-    assert torch.allclose(before, after, rtol=0, atol=1e-5), (before.item(), after.item())
-
-
-def test_shifted_ce_matches_the_per_sample_mean_it_replaced():
-    """Self-distillation's formula: per-token CE reduced by ``masked_token_mean``."""
-    logits, labels = _logits_and_labels()
-    shift_logits, shift_labels = logits[:, :-1, :], labels[:, 1:]
-    mask = shift_labels != LABEL_IGNORE_INDEX
-
-    before = masked_token_mean(
-        cross_entropy(
-            shift_logits.reshape(-1, shift_logits.size(-1)).float(),
-            shift_labels.reshape(-1),
-            ignore_index=LABEL_IGNORE_INDEX,
-            reduction="none",
-        ).view(shift_labels.shape),
-        mask,
-    )
-    after = masked_token_mean(shifted_token_cross_entropy(shift_logits, shift_labels), mask)
-    assert torch.equal(before, after)
-
-
-def test_shifted_ce_evaluates_in_fp32_and_zeroes_ignored_positions():
-    """bf16 logits must not decide a log-sum-exp over the vocab, and an ignored target contributes
-    nothing — the sum reduction above relies on that being exactly 0."""
-    logits, labels = _logits_and_labels(ignore_positions=((0, 1), (1, 3)))
-    token_ce = shifted_token_cross_entropy(logits[:, :-1, :].bfloat16(), labels[:, 1:])
+    logits = torch.randn(2, 4, 7).bfloat16()
+    labels = torch.randint(0, 7, (2, 4))
+    labels[0, 1] = labels[1, 3] = LABEL_IGNORE_INDEX
+    token_ce = shifted_token_cross_entropy(logits, labels)
     assert token_ce.dtype is torch.float32
-    assert token_ce.shape == labels[:, 1:].shape
-    assert token_ce[labels[:, 1:] == LABEL_IGNORE_INDEX].abs().max() == 0
-
-
-def test_the_two_reductions_are_genuinely_different():
-    """Why the two call sites keep their own denominators: on ragged rows a per-sample mean and a
-    global token mean disagree, so collapsing them would have silently reweighted one trainer."""
-    logits = torch.randn(2, 5, 7)
-    labels = torch.randint(0, 7, (2, 5))
-    labels[0, 1:] = LABEL_IGNORE_INDEX  # one short row, one full row
-    shift_logits, shift_labels = logits[:, :-1, :], labels[:, 1:]
-    token_ce = shifted_token_cross_entropy(shift_logits, shift_labels)
-    mask = shift_labels != LABEL_IGNORE_INDEX
-
-    per_sample = masked_token_mean(token_ce, mask)
-    global_mean = token_ce.sum() / mask.sum().clamp(min=1)
-    assert not torch.allclose(per_sample, global_mean)
+    expected = -log_softmax(logits.float(), dim=-1).gather(-1, labels.clamp_min(0).unsqueeze(-1)).squeeze(-1)
+    expected[labels == LABEL_IGNORE_INDEX] = 0.0
+    torch.testing.assert_close(token_ce, expected)
 
 
 class _Probe(nn.Module):

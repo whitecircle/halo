@@ -5,7 +5,8 @@ Tests for Ray actors with local Ray (no GPU/vLLM required).
 Run with:
     python tests/cpu/environments/test_ray_actors.py
 
-These tests use Ray in local mode and mock the vLLM HTTP calls.
+One test starts a local Ray instance; the rest drive the actors off-cluster with the engine's HTTP
+calls stubbed.
 """
 
 import ast
@@ -99,13 +100,7 @@ def test_rollout_manager_round_robins_across_servers():
 
 
 async def test_rollout_manager_start_shutdown():
-    """Test RolloutManager start and shutdown with Ray.
-
-    Note: Async Ray actors don't work in local_mode, so we skip the actual
-    actor creation test when local_mode would be used.
-    """
-    # Skip test if we can only use local mode (async actors not supported)
-    # This test requires a real Ray cluster or non-local mode
+    """RolloutManager start and shutdown on a local Ray instance."""
     try:
         if ray.is_initialized():
             ray.shutdown()
@@ -143,12 +138,6 @@ async def test_rollout_manager_start_shutdown():
         assert not manager._started
         assert len(manager._actors) == 0
         assert manager._actor_pause_clock is None
-
-    except ray.exceptions.RaySystemError as e:
-        if "Async actor" in str(e):
-            print("  Skipping: Async actors not supported in local mode")
-            return
-        raise
     finally:
         ray.shutdown()
 
@@ -217,15 +206,11 @@ def test_rollout_config_defaults():
     """Fields RolloutConfig must NOT carry, and picklability (the actors receive it pickled).
 
     The default VALUES are pinned against their ``AsyncTrainingConfig`` counterparts in
-    ``tests/cpu/config/test_rollout_config_mirror.py``. Echoing them here as well was the second
-    source of truth that let the two sides drift 32x on ``max_tokens``.
+    ``tests/cpu/config/test_rollout_config_mirror.py``.
     """
     config = RolloutConfig()
 
     # Must NOT have removed fields
-    assert not hasattr(config, "top_k")
-    assert not hasattr(config, "min_p")
-    assert not hasattr(config, "repetition_penalty")
     assert not hasattr(config, "max_concurrent_per_actor")
 
     # RolloutConfig should be fully picklable (no unpicklable callables)
@@ -234,9 +219,6 @@ def test_rollout_config_defaults():
     assert restored.temperature == config.temperature
     assert restored.max_retries == config.max_retries
     assert restored.model_name == config.model_name
-
-
-# Test: Error Handling
 
 
 # Test: Bounded Concurrency and Positional Mapping (fake actor pool, no Ray)
@@ -416,9 +398,10 @@ def test_build_payload_sends_only_supported_params_and_env_tools():
     assert payload["temperature"] == 0.9 and payload["top_p"] == 0.8 and payload["max_tokens"] == 512
     # Env tools are attached and in OpenAI function format.
     assert payload["tools"] and payload["tools"][0]["type"] == "function" and "function" in payload["tools"][0]
-    # model is omitted when model_name is unset, and no unsupported sampling knob leaks through.
+    # model is omitted when model_name is unset, and no unsupported sampling knob leaks through (the
+    # sampler filters each request carries are pinned in tests/cpu/grpo/test_rollout_backend_selection.py).
     assert "model" not in payload
-    for leaked in ("top_k", "min_p", "repetition_penalty", "frequency_penalty"):
+    for leaked in ("frequency_penalty", "presence_penalty"):
         assert leaked not in payload
 
 
@@ -589,7 +572,7 @@ async def test_a_turn_that_used_its_whole_cap_is_a_cut_even_when_vllm_says_tool_
     )
 
 
-# Test: stateful-env session cleanup across rollouts (leak fix)
+# Test: stateful-env session cleanup across rollouts
 
 
 async def test_actor_releases_session_when_episode_errors():
@@ -715,6 +698,47 @@ async def test_run_episode_generation_tokens_sum_across_turns():
     # Per-EPISODE total = 10 + 20 + 30 = 60. A per-turn/last-turn/mean bug would give 30 or 20, not 60.
     assert result.generation_tokens == 60
     assert result.generation_tokens == sum(per_turn)
+
+
+async def test_each_assistant_turn_records_the_levels_cap_and_the_reasoning_it_sampled():
+    """The overlong charge reads each turn's own pair: the cap the turn's level set — not the narrower
+    one the output budget may have put on the request — beside the reasoning the turn sampled through
+    its close. Drives the real loop in run_episode (native_math): 400-token turns with a 100-token
+    reasoning cap under a 1050-token episode budget, so the third request is narrowed to 350 and 50."""
+    end = 151668
+    actor = _make_actor("native_math", {"max_turns": 5})
+
+    async def _fake_client():
+        return None
+
+    actor._get_http_client = _fake_client
+    caps_sent: list[tuple[int, int | None]] = []
+    reasoning = [[1] * 30 + [end, 2], [1] * 60 + [end], [1] * 5 + [end]]
+    sampled = [350, 350, 6]
+
+    async def _fake_generate(client, url, messages, config, reasoning_effort=None, reasoning_budget=None):
+        i = len(caps_sent)
+        caps_sent.append((config.max_tokens, config.max_thinking_tokens))
+        if i < 2:
+            tc = [{"id": f"c{i}", "function": {"name": "calculate", "arguments": '{"expression": "1+1"}'}}]
+            return TurnGeneration("", tc, "r", sampled[i], token_ids=reasoning[i])
+        return TurnGeneration("final answer: 4", [], "r", sampled[i], token_ids=reasoning[i])
+
+    actor._generate = _fake_generate
+    config = RolloutConfig(
+        max_retries=1,
+        max_tokens=400,
+        max_thinking_tokens=100,
+        max_episode_tokens=1050,
+        capture_token_ids=True,
+        reasoning_end_token_id=end,
+    )
+    result = await actor.run_episode("2+2?", {"answer": "4"}, "http://x", config)
+
+    assert caps_sent == [(400, 100), (400, 100), (350, 50)], "the setup no longer narrows the third request"
+    turns = [m for m in result.trajectory.messages if m.role == "assistant"]
+    assert [(m.thinking_cap, m.reasoning_tokens) for m in turns] == [(100, 31), (100, 61), (100, 6)]
+    assert result.generation_tokens == sum(sampled)
 
 
 # Test: concurrent CodeContests episodes grade against their OWN tests
@@ -906,8 +930,7 @@ def test_is_client_error():
     assert not _is_client_error(ConnectionError("Connection refused"))
 
     # 429 (rate limit) and 408 (request timeout) are 4xx but transient — they MUST be
-    # retried, not given up on. A `"status 4" in str(exc)` substring test gave up
-    # immediately the instant the engine was briefly overloaded.
+    # retried, not given up on.
     assert not _is_client_error(_http(429, "Too Many Requests"))
     assert not _is_client_error(_http(408, "Request Timeout"))
 
@@ -974,6 +997,9 @@ def test_async_training_config_to_rollout_config():
     config = AsyncTrainingConfig(
         rollout_temperature=0.9,
         rollout_top_p=0.8,
+        rollout_top_k=40,
+        rollout_min_p=0.02,
+        rollout_repetition_penalty=1.05,
         rollout_max_tokens=2048,
         model_name="test-model",
         request_timeout=60.0,
@@ -984,16 +1010,12 @@ def test_async_training_config_to_rollout_config():
     rc = config.get_rollout_config()
     assert rc.temperature == 0.9
     assert rc.top_p == 0.8
+    assert (rc.top_k, rc.min_p, rc.repetition_penalty) == (40, 0.02, 1.05)
     assert rc.max_tokens == 2048
     assert rc.model_name == "test-model"
     assert rc.request_timeout == 60.0
     assert rc.max_retries == 5
     assert rc.retry_base_wait == 2.0
-
-    # Verify removed fields don't exist on AsyncTrainingConfig
-    assert not hasattr(config, "rollout_top_k")
-    assert not hasattr(config, "rollout_min_p")
-    assert not hasattr(config, "rollout_repetition_penalty")
 
 
 if __name__ == "__main__":

@@ -350,7 +350,7 @@ def keep_icpc(row: dict[str, Any]) -> bool:
 
 def load_icpc(dataset: str, config: str | None, split: str) -> Iterator[dict[str, Any]]:
     """Stream ICPC-Eval rows. Streaming avoids pulling the full multi-GB test payload for a small probe."""
-    yield from load_dataset(dataset, config, split=split or "test", streaming=True)
+    yield from load_dataset(dataset, config, split=split, streaming=True)
 
 
 def hardtests_rating(row: dict[str, Any]) -> int | None:

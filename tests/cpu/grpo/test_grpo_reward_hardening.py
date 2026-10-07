@@ -22,8 +22,11 @@ from accelerate import PartialState
 
 from src.trainers.grpo.mixins.entropy_mask import ProtectedTokenEntropyMixin
 from src.trainers.grpo.objective import advantages as advantages_module
-from src.trainers.grpo.objective.advantages import degenerate_group_mask, group_relative_advantages
-from src.trainers.grpo.offline import compute_group_advantages
+from src.trainers.grpo.objective.advantages import (
+    compute_group_advantages,
+    degenerate_group_mask,
+    group_relative_advantages,
+)
 
 # The mixin logs through accelerate's adapter, which needs the process state to exist.
 PartialState()

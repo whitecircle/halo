@@ -24,7 +24,6 @@ from src.configs.environment_config import EnvironmentConfig
 from src.environments.base import (
     EPISODE_INVALID_KEY,
     EPISODE_INVALID_REASON_KEY,
-    OBJECTIVE_REWARD_KEY,
     REWARD_COMPONENTS_KEY,
     AsyncBaseEnvironment,
     BaseEnvironment,
@@ -68,8 +67,9 @@ from src.environments.tools.factories import (
     create_native_search_tools,
 )
 from src.environments.tools.web_search import _format_results, async_web_search, web_search, web_search_raw
-from src.rewards.matching import exact_match, normalize_text, numeric_match, validate_answer
-from src.rewards.spec import EnvironmentTerm
+from src.rewards.graders.matching import exact_match, normalize_text, numeric_match, validate_answer
+from src.rewards.terms import OBJECTIVE_REWARD_KEY, EnvironmentTerm
+from tests.common.code_contests import StubSandbox
 
 
 @pytest.fixture
@@ -159,7 +159,7 @@ def test_trajectory_tool_messages_are_not_turns():
 def test_append_to_last_user_refuses_a_trajectory_without_a_user_message():
     traj = Trajectory()
     with pytest.raises(ValueError, match="no user message"):
-        traj.append_to_last_user("\n\nBudgets for this task: 1 graded submission.")
+        traj.append_to_last_user("\n\nEach test of this problem runs under 5 s.")
     traj.add_message(Message.system("s"))
     traj.add_message(Message.user("q"))
     traj.add_message(Message.assistant("a"))
@@ -484,6 +484,22 @@ def test_parse_react_output_keeps_the_pattern_for_text_that_is_no_python_call():
     assert step.action_args == {"query": "a b", "filters": {"exact": True}, "limit": 3}
 
 
+@pytest.mark.parametrize(
+    ("action", "parsed"),
+    [
+        ('calculate(expression="2 + 2")', ("calculate", {"expression": "2 + 2"})),
+        ('calculate: expression="2 + 2"', ("calculate", {"expression": "2 + 2"})),
+        ("list_files", ("list_files", {})),
+        ("not a call!", (None, None)),
+    ],
+    ids=["call", "colon", "bare", "none"],
+)
+def test_parse_react_output_reads_every_action_spelling(action, parsed):
+    """``tool(arg=...)`` and ``tool: arg=...`` carry the same arguments; a bare name calls with none."""
+    step = parse_react_output(f"Thought: t\nAction: {action}")
+    assert (step.action, step.action_args) == parsed
+
+
 def test_parse_react_output_final_answer():
     """Test parsing ReAct output with final answer."""
 
@@ -701,6 +717,45 @@ def test_react_tool_that_raises_is_logged_and_charged(caplog):
     )
     assert any(record.exc_info for record in caplog.records), "the traceback is what localizes the fault"
     assert steps[0].reward == pytest.approx(-0.1)
+
+
+def test_native_call_missing_a_required_argument_is_a_refusal_not_a_fault(caplog):
+    """A model that calls ``submit_solution`` with no ``code`` is charged the tool error and told which
+    argument it dropped, without the traceback the log reserves for a tool that actually broke."""
+    env = CodeContestsEnvironment(language="python", sandbox_backend="local", tool_error_penalty=0.05)
+    caplog.clear()  # the local sandbox's once-per-process isolation warning fires at construction
+    trajectory = Trajectory()
+    trajectory.info.update(total_tool_calls=0, successful_tool_calls=0)
+    call = NativeToolCall(id="1", name="submit_solution", arguments={})
+    with caplog.at_level(logging.WARNING, logger="src.environments.envs.protocols.native"):
+        results, reward = env._execute_tool_calls([call], trajectory)
+
+    assert results[0].success is False
+    assert results[0].content == "Error: submit_solution: missing a required argument: 'code'"
+    assert reward == pytest.approx(-0.05)
+    assert trajectory.info["total_tool_calls"] == 1 and trajectory.info["successful_tool_calls"] == 0
+    assert not caplog.records, "a refused call is control flow, not a tool fault: no warning, no traceback"
+
+
+def test_react_call_missing_a_required_argument_is_a_refusal_not_a_fault(caplog):
+    """The ReAct twin of the native refusal: charged, told, not traced."""
+    registry = NativeToolRegistry()
+    registry.register(
+        NativeTool(
+            name="calculate",
+            description="calculate",
+            parameters=[ToolParameter("expression", "string", "expr")],
+            handler=lambda expression: "2",
+        )
+    )
+    env = ReActEnvironment(tool_registry=registry, max_turns=5, tool_error_penalty=0.1, thought_reward=0.0)
+    episode_ids, _ = env.reset(["Test"])
+    with caplog.at_level(logging.WARNING, logger="src.environments.envs.protocols.react"):
+        steps = env.step(episode_ids, ["Thought: compute\nAction: calculate()"])
+
+    assert steps[0].reward == pytest.approx(-0.1)
+    assert steps[0].info["tool_error"] == "calculate: missing a required argument: 'expression'"
+    assert not caplog.records, "a refused call is control flow, not a tool fault: no warning, no traceback"
 
 
 def test_react_math_factory():
@@ -1291,9 +1346,6 @@ def test_tool_openai_schema_complex():
     assert "optional_number" not in required
 
 
-# Test: Utility Functions
-
-
 # Test: Async Multi-Tool Scenarios
 
 
@@ -1395,7 +1447,7 @@ async def test_web_search_async_mock(monkeypatch):
 def test_web_search_raises_on_backend_failure_no_mock_fabrication():
     """A failing real backend must raise — never silently return fabricated mock results.
 
-    Returning _search_mock() output on error fed the model invented evidence and scored a
+    Returned on error, _search_mock() output would feed the model invented evidence and score a
     tool success in the RL envs. The error must propagate so the tool layer records a real
     failure.
     """
@@ -1547,7 +1599,7 @@ def test_multiple_choice_match():
     assert not multiple_choice_match("F", "G")
 
     # Reward inflation guard: prose that merely *starts* with the expected letter must NOT
-    # score as that choice (the removed startswith fallback granted full reward here).
+    # score as that choice (a startswith fallback would grant full reward here).
     assert not multiple_choice_match("Although I'm not sure, the reasoning is complex", "A")
     assert not multiple_choice_match("Based on the above, several options apply", "B")
 
@@ -1561,12 +1613,9 @@ def test_validate_answer():
     # Numeric match
     assert validate_answer("The result is 110", "110")
 
-    # Substring containment is not in the default chain: it must not inflate the score
+    # Substring containment is no match: it must not inflate the score
     # (an expected "7" inside "17" would otherwise score a full match).
     assert not validate_answer("17", "7")
-
-    # A custom chain replaces the default one rather than extending it.
-    assert validate_answer("17", "7", methods=[lambda p, e: e in p])
 
 
 def test_answer_grading_is_all_or_nothing():
@@ -1584,7 +1633,7 @@ def test_answer_grading_is_all_or_nothing():
     assert objectives == [1.0, 0.0, 0.0]
 
 
-# NativeToolUse Reward Fix
+# NativeToolUse rewards
 
 
 def test_native_tool_use_reward_with_answer():
@@ -1694,7 +1743,7 @@ def test_react_missing_answer_key_still_pays_for_finishing():
     env.cleanup(episode_ids)
 
 
-# SearchQAEnvironment
+# qa_search preset (create_qa_search_environment)
 
 
 def test_qa_search_environment_init(allow_mock_search):
@@ -1890,6 +1939,21 @@ def test_exam_qa_index_answer_is_graded_as_its_choice_letter():
     env.cleanup(episode_ids + other_ids)
 
 
+def test_exam_qa_hands_a_scorer_the_letter_not_the_index():
+    """A judge's reference is the answer as the grader compares it: an MMLU row's int index arrives
+    as its letter, an open-ended row's answer as is."""
+    env = ExamQAEnvironment(max_turns=3)
+    choices = ["Mars", "Jupiter", "Saturn", "Neptune"]
+    (mc_id,), _ = env.reset(["Which is the largest planet?"], [{"answer": 1, "choices": choices}])
+    (open_id,), _ = env.reset(["What is the capital of France?"], [{"answer": "Paris"}])
+    multiple_choice, open_ended = env.get_trajectories([mc_id, open_id])
+
+    assert multiple_choice.info["context"]["answer"] == 1
+    assert env._scoring_reference(multiple_choice) == "B"
+    assert env._scoring_reference(open_ended) == "Paris"
+    env.cleanup([mc_id, open_id])
+
+
 @pytest.mark.parametrize("answer", ["1", "2", "4"])
 def test_exam_qa_digit_string_answer_is_refused_not_read_as_an_index(answer):
     """ARC's ``answerKey`` labels some rows ``"1"``-``"4"``, 1-based: read 0-based, ``"2"`` would grade
@@ -2025,7 +2089,7 @@ def test_all_registered_envs_resolvable():
         assert env.max_turns == 3, f"{env_name} ignored max_turns from env_config (got {env.max_turns})"
 
 
-# Registry Integration
+# Protocol and grading edge cases
 
 
 def test_react_step_does_not_double_add_assistant_message():
@@ -2050,25 +2114,18 @@ def test_grading_nonzero_exit_is_runtime_error_not_pass():
     """A solution that prints the correct answer but exits non-zero is a Runtime Error — it must fail
     even though stdout matches (reward-leakage regression)."""
 
-    class _FakeSandbox:
-        def __init__(self, result):
-            self._result = result
-
-        def run(self, *args, **kwargs):
-            return self._result
-
     tests = [{"input": "", "output": "42"}]
 
-    crashed = _FakeSandbox(SandboxResult(stdout="42", returncode=1))
+    crashed = StubSandbox(SandboxResult(stdout="42", returncode=1))
     assert run_solution_against_tests("code", tests, sandbox=crashed)[:2] == (0, 1), "non-zero exit must not pass"
 
-    clean = _FakeSandbox(SandboxResult(stdout="42", returncode=0))
+    clean = StubSandbox(SandboxResult(stdout="42", returncode=0))
     assert run_solution_against_tests("code", tests, sandbox=clean)[:2] == (1, 1), "clean exit must pass"
 
 
 def test_react_parse_empty_string_argument_preserved():
-    """A quoted empty argument (expression=\"\") must parse to "" — truthiness-based group selection
-    turned it into None, so the tool then executed with a None argument."""
+    """A quoted empty argument (expression=\"\") must parse to "", not None: a truthiness-based group
+    selection would hand the tool a None argument."""
 
     step = parse_react_output('Thought: try it\nAction: calculate(expression="")')
     assert step.action == "calculate"
@@ -2080,7 +2137,7 @@ def test_react_parse_empty_string_argument_preserved():
 
 def test_native_step_tool_calls_counts_executed_not_requested():
     """step_tool_calls must count EXECUTED calls (post per-turn cap), matching total_tool_calls —
-    counting the requested list made the two metrics disagree on a capped turn."""
+    counting the requested list would make the two metrics disagree on a capped turn."""
 
     registry = NativeToolRegistry()
     registry.register(NativeTool(name="echo", description="echo", parameters=[], handler=lambda **a: "ok"))
@@ -2093,45 +2150,6 @@ def test_native_step_tool_calls_counts_executed_not_requested():
     traj = env.get_trajectories([eid])[0]
     assert steps[0].info["step_tool_calls"] == 2  # executed (capped), not the 5 requested
     assert traj.info["total_tool_calls"] == 2  # and consistent with the per-episode counter
-
-
-def test_native_call_missing_a_required_argument_is_a_refusal_not_a_fault(caplog):
-    """A model that calls ``submit_solution`` with no ``code`` is charged the tool error and told which
-    argument it dropped, without the traceback the log reserves for a tool that actually broke."""
-    env = CodeContestsEnvironment(language="python", sandbox_backend="local", tool_error_penalty=0.05)
-    caplog.clear()  # the local sandbox's once-per-process isolation warning fires at construction
-    trajectory = Trajectory()
-    trajectory.info.update(total_tool_calls=0, successful_tool_calls=0)
-    call = NativeToolCall(id="1", name="submit_solution", arguments={})
-    with caplog.at_level(logging.WARNING, logger="src.environments.envs.protocols.native"):
-        results, reward = env._execute_tool_calls([call], trajectory)
-
-    assert results[0].success is False
-    assert results[0].content == "Error: submit_solution: missing a required argument: 'code'"
-    assert reward == pytest.approx(-0.05)
-    assert trajectory.info["total_tool_calls"] == 1 and trajectory.info["successful_tool_calls"] == 0
-    assert not caplog.records, "a refused call is control flow, not a tool fault: no warning, no traceback"
-
-
-def test_react_call_missing_a_required_argument_is_a_refusal_not_a_fault(caplog):
-    """The ReAct twin of the native refusal: charged, told, not traced."""
-    registry = NativeToolRegistry()
-    registry.register(
-        NativeTool(
-            name="calculate",
-            description="calculate",
-            parameters=[ToolParameter("expression", "string", "expr")],
-            handler=lambda expression: "2",
-        )
-    )
-    env = ReActEnvironment(tool_registry=registry, max_turns=5, tool_error_penalty=0.1, thought_reward=0.0)
-    episode_ids, _ = env.reset(["Test"])
-    with caplog.at_level(logging.WARNING, logger="src.environments.envs.protocols.react"):
-        steps = env.step(episode_ids, ["Thought: compute\nAction: calculate()"])
-
-    assert steps[0].reward == pytest.approx(-0.1)
-    assert steps[0].info["tool_error"] == "calculate: missing a required argument: 'expression'"
-    assert not caplog.records, "a refused call is control flow, not a tool fault: no warning, no traceback"
 
 
 if __name__ == "__main__":

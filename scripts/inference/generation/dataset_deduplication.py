@@ -249,7 +249,7 @@ def deduplicate_embeddings(
 
     if steps > 1:
         logger.info(f"Using multi-step deduplication with {steps} steps")
-        _, unique_indices, sizes_history = faiss_deduplicate_mr_multistep(
+        unique_indices, sizes_history = faiss_deduplicate_mr_multistep(
             embeddings=embeddings.astype(np.float32),
             steps_count=steps,
             max_workers=max_workers or os.cpu_count(),
@@ -267,7 +267,7 @@ def deduplicate_embeddings(
                 logger.info(f"  Step {i}: {size} examples (removed {reduction}, -{reduction_pct:.1f}%)")
     else:
         logger.info("Using single-step deduplication")
-        _, unique_indices = faiss_deduplicate_mr(
+        unique_indices = faiss_deduplicate_mr(
             embeddings=embeddings.astype(np.float32),
             max_workers=max_workers or os.cpu_count(),
             batch_size=batch_size,

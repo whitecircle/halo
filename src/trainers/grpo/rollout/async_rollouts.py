@@ -21,10 +21,10 @@ from functools import partial
 
 import ray
 import torch
-from accelerate.utils import is_peft_model
 from transformers import TrainerCallback
 from trl.extras.profiling import profiling_context
 
+from src.checkpoint.atomic import atomic_torch_save
 from src.checkpoint.format import PREFETCH_PENDING_PREFIX, prefetch_pending_filename
 from src.distributed.checkpoint.coordination import consensus_read
 from src.distributed.nccl.clients.base import BaseWeightSyncClient, resolve_sync_device
@@ -36,17 +36,13 @@ from src.distributed.runtime import (
     get_global_world_size,
     get_num_nodes,
     is_global_main_process,
-    raise_rank0_failure,
     rank_consensus,
 )
 from src.environments.episode import RolloutResult
 from src.environments.ray_actors import RolloutManager, ray_init_kwargs
-from src.trainers.grpo.rollout.weight_sync import (
-    sync_trainer_weights,
-    sync_weights_to_client,
-)
+from src.trainers.grpo.rollout.weight_sync import sync_trainer_weights
 from src.trainers.grpo.rollout.weight_sync_clients import InferenceClientManager
-from src.trainers.mixins.ep_introspection import named_ep_layers
+from src.trainers.grpo.world_metrics import world_sums
 
 logger = logging.getLogger(__name__)
 
@@ -60,20 +56,8 @@ _PREFETCH_POLL_TIMEOUT_S = 0.5
 _PREFETCH_DELIVER_TIMEOUT_S = 1.0
 # Grace for the worker to finish its current poll slice and exit at shutdown.
 _PREFETCH_JOIN_TIMEOUT_S = 5.0
-# Suffix of the file a pending-rounds write stages before swapping it in.
-_PENDING_ROUNDS_STAGING_SUFFIX = ".staged"
-
-
-def _save_pending_rounds(payload: dict, path: str) -> None:
-    """Write a rank's pending rounds whole or not at all, with the pickler Ray ships the same contexts
-    with: a row's context may carry a callable (an answer ``validator``) that the stdlib pickler refuses."""
-    staged = f"{path}{_PENDING_ROUNDS_STAGING_SUFFIX}"
-    try:
-        torch.save(payload, staged, pickle_module=ray.cloudpickle)
-        os.replace(staged, path)
-    finally:
-        with contextlib.suppress(FileNotFoundError):
-            os.remove(staged)
+# Rounds the prefetch pipeline holds: a round pops the previous round's result before it submits its own.
+_PREFETCH_DEPTH = 1
 
 
 class _RolloutStartCallback(TrainerCallback):
@@ -111,6 +95,10 @@ class AsyncRolloutMixin:
     initialized by :meth:`_init_async_state` from the trainer's ``__init__``.
     """
 
+    # Whether the weight-sync group is formed, held alike on every rank (the client itself is the main
+    # process's alone): set by the fenced formation, cleared first thing by the cleanup.
+    _weight_sync_group_formed: bool = False
+
     @property
     def _rollout_engine_name(self) -> str:
         """Display name of the configured rollout engine (``vLLM`` / ``SGLang``).
@@ -129,8 +117,8 @@ class AsyncRolloutMixin:
         """Rollout-manager, weight-sync-client and prefetch state, before any of them is built."""
         self._rollout_manager = None
         self._weight_sync_client = None  # one engine client, or an InferenceClientManager over several
-        # Score-only clients, one per rollout server on EVERY rank (isr_engine_reference); built on first use.
-        self._engine_rescore_clients_list: list[BaseWeightSyncClient] | None = None
+        # Score-only clients, one per rollout server on EVERY rank (isr_engine_reference).
+        self._engine_rescore_clients: list[BaseWeightSyncClient] | None = None
         self._loop = None
         # Two separate questions: which client shape to build (a configs list of any length carries
         # its own per-server url/ports) and how many engines serve, which prefetch_active counts (a
@@ -147,8 +135,8 @@ class AsyncRolloutMixin:
             )
 
         self._prefetch_thread = None
-        self._prefetch_queue = queue.Queue(maxsize=self.async_config.num_prefetch_batches)
-        self._prefetch_input_queue = queue.Queue(maxsize=self.async_config.num_prefetch_batches + 1)
+        self._prefetch_queue = queue.Queue(maxsize=_PREFETCH_DEPTH)
+        self._prefetch_input_queue = queue.Queue(maxsize=_PREFETCH_DEPTH)
         self._prefetch_stop_event = threading.Event()
 
         self._prefetch_hits = 0
@@ -168,10 +156,32 @@ class AsyncRolloutMixin:
         self._rollout_generation_started = False
 
     def _init_async_components(self):
-        """Initialize Ray actors and the engine weight-sync client (main process only for the client)."""
+        """Start every rank's rollout components, then form the weight-sync group. COLLECTIVE.
+
+        Each fails on one rank alone: a rank's own components (Ray not reachable from its node, an
+        actor that will not place, a server its re-score client cannot reach) and the main process's
+        client. Each is deferred to a verdict all ranks join — the start's, then the formation's
+        (:meth:`_form_weight_sync_group`) — so none is raised on its rank alone while the peers wait in
+        a collective.
+        """
         if self._rollout_manager is not None:
             return
 
+        guard = DeferredRankFailure("Rollout component start")
+        guard.run(self._start_rank_rollout_components)
+        guard.reject()
+        self._form_weight_sync_group()
+
+        # The first push and the prefetch thread wait for train-begin — see _RolloutStartCallback:
+        # this runs before the resume restore, and both would otherwise generate from pre-restore
+        # weights. Registered once; a second train() re-arms it through _cleanup_async_components.
+        if self._rollout_start_callback is None:
+            self._rollout_start_callback = _RolloutStartCallback(self)
+            self.add_callback(self._rollout_start_callback)
+
+    def _start_rank_rollout_components(self) -> None:
+        """This rank's half of :meth:`_init_async_components`: Ray, the rollout manager and its actors,
+        and under ``isr_engine_reference`` the score-only clients the engine re-score fans out over."""
         if not ray.is_initialized():
             ray.init(**ray_init_kwargs(address=self.async_config.ray_address))
 
@@ -183,7 +193,7 @@ class AsyncRolloutMixin:
             env_config=self._env_config_dict,
             server_urls=self.async_config.get_server_urls(),
             rollout_config=self.async_config.get_rollout_config(
-                stop_token_ids=self._resolve_rollout_stop_token_ids(),
+                stop_token_ids=self._rollout_stop_token_ids,
                 reasoning_end_token_id=self._resolve_reasoning_end_token_id(),
             ),
             max_concurrent_rollouts=self.async_config.max_concurrent_rollouts,
@@ -197,18 +207,8 @@ class AsyncRolloutMixin:
         asyncio.set_event_loop(self._loop)
         self._check_eval_round_fits_cap(self._rollout_manager.max_concurrent)
         self._loop.run_until_complete(self._rollout_manager.start())
-
-        raise_rank0_failure(
-            self._init_weight_sync_client,
-            lambda e: f"{self._rollout_engine_name} weight-sync client init failed on the main process: {e!r}",
-        )
-
-        # The first push and the prefetch thread wait for train-begin (see _RolloutStartCallback):
-        # this runs before the resume restore, and both would otherwise generate from pre-restore
-        # weights. Registered once; a second train() re-arms it through _cleanup_async_components.
-        if self._rollout_start_callback is None:
-            self._rollout_start_callback = _RolloutStartCallback(self)
-            self.add_callback(self._rollout_start_callback)
+        if self.async_config.isr_engine_reference:
+            self._engine_rescore_clients = self._build_engine_rescore_clients()
 
     def _start_rollout_generation(self):
         """Push the trainer's weights to the engines and start the prefetch thread. Collective.
@@ -242,42 +242,53 @@ class AsyncRolloutMixin:
             )
 
     def _sync_weights_to_engine_fenced(self, force: bool = False) -> bool:
-        """``_sync_weights_to_engine`` with the rank-0 failure joined to every rank. Collective.
+        """``_sync_weights_to_engine`` with every rank's verdict joined. COLLECTIVE.
 
-        The client lives on the main process, so a sync failure there (duplicate group port, dead
-        server, trainer and engine on one GPU) would be a rank-0-only raise leaving every peer blocked
-        in the next collective until the watchdog fires. Both the train-begin push and the per-step
-        sync need this fence.
+        What a rank raises out of the push is raised on every rank: the forwarding rank's failed sends
+        (deferred inside the gather to a reject every rank joins, so all ranks arrive here with it), or
+        a failure on any rank outside the gather's own collectives, which raised there alone would
+        strand the peers in the barrier after the sync. Both callers — the train-begin push and the
+        per-step sync — need that fence, so it lives with the push rather than being written twice.
+        A client that fails to form is raised by the formation's own verdict, ahead of any gather.
 
-        The push's duration rides the same broadcast: the servers were paused for it, so every rank
-        credits it to its in-flight episodes' deadlines (:meth:`RolloutManager.end_engine_pause`)
-        instead of charging a frozen generation to the episode.
+        The main process's push duration is broadcast before the verdict: the servers were paused for
+        it, so every rank credits it to its in-flight episodes' deadlines
+        (:meth:`RolloutManager.end_engine_pause`) instead of charging a frozen generation to the episode,
+        and the window closes whether or not the push failed.
         """
         manager = self._rollout_manager
         if manager is not None:
             manager.begin_engine_pause()
-        local_error: str | None = None
-        synced = False
+        guard = DeferredRankFailure(f"{self._rollout_engine_name} weight sync at step {self.state.global_step}")
         started = time.monotonic()
-        try:
-            synced = self._sync_weights_to_engine(force=force)
-        except Exception as e:  # re-raised on all ranks below
-            local_error = f"{self._rollout_engine_name} weight sync failed at step {self.state.global_step}: {e!r}"
-        main_error, paused_seconds = broadcast_from_rank0(
-            (local_error, time.monotonic() - started if synced else 0.0) if self.accelerator.is_main_process else None
-        )
+        synced = bool(guard.run(partial(self._sync_weights_to_engine, force=force)))
+        paused_seconds = broadcast_from_rank0(time.monotonic() - started if synced else 0.0)
         if manager is not None:
             manager.end_engine_pause(paused_seconds)
-        if main_error is not None:
-            raise RuntimeError(main_error)
-        if local_error is not None:
-            raise RuntimeError(local_error)
+        guard.reject()
         return synced
+
+    def _form_weight_sync_group(self) -> None:
+        """Form the engine weight-sync group unless it is formed. COLLECTIVE while it forms.
+
+        The main process builds the client (:meth:`_init_weight_sync_client`) under a deferred failure
+        every rank joins, so a client that cannot form raises on every rank before any gather rather
+        than on the main process alone while its peers enter one. Entered on every rank alike, since
+        ``_weight_sync_group_formed`` is: a formed group costs no collective.
+        """
+        if self._weight_sync_group_formed:
+            return
+        guard = DeferredRankFailure("Weight-sync client formation")
+        guard.run(self._init_weight_sync_client)
+        guard.reject()
+        self._weight_sync_group_formed = True
 
     def _init_weight_sync_client(self):
         """Initialize the engine weight-sync client(s) (main process only, idempotent).
 
-        Called before training so the NCCL group is established while the engine is idle.
+        Reached only through :meth:`_form_weight_sync_group`, whose fence every rank joins: at component
+        start, so the NCCL group is established while the engine is idle, and in a push that finds no
+        group formed.
         """
         if self._weight_sync_client is not None:
             return
@@ -313,24 +324,28 @@ class AsyncRolloutMixin:
                 f"device={device}, group_port={self.args.vllm_group_port}"
             )
 
-    def _engine_rescore_clients(self) -> list[BaseWeightSyncClient]:
+    def _build_engine_rescore_clients(self) -> list[BaseWeightSyncClient]:
         """The score-only clients the engine re-score fans out over, one per rollout server.
 
         Every rank builds its own: the re-score is an HTTP prefill each rank issues for its own rows,
         unlike the weight sync, which only the main process drives over NCCL (its client is
         ``None`` everywhere else). No communicator is formed — the constructor only opens the HTTP
-        session and checks the server.
+        session and checks the server, which raises on a server this rank cannot reach.
+
+        A round's trajectory ``t`` re-scores on server ``t mod N`` (:meth:`_rescore_rows_on_engine`), so a
+        rank whose round holds fewer trajectories than there are servers reaches only the first ones.
         """
-        if self._engine_rescore_clients_list is None:
-            client_cls = resolve_weight_sync_client(self.async_config.rollout_backend)
-            self._engine_rescore_clients_list = [
-                client_cls(base_url=url, connection_timeout=self.async_config.rollout_connection_timeout)
-                for url in self.async_config.get_server_urls()
-            ]
-        return self._engine_rescore_clients_list
+        client_cls = resolve_weight_sync_client(self.async_config.rollout_backend)
+        return [
+            client_cls(base_url=url, connection_timeout=self.async_config.rollout_connection_timeout)
+            for url in self.async_config.get_server_urls()[: self._train_loader_batch_size()]
+        ]
 
     def _cleanup_async_components(self):
-        """Cleanup Ray actors and the engine weight-sync client(s)."""
+        """Cleanup Ray actors and the engine weight-sync client(s). Run by every rank."""
+        # First, on every rank: the client below is the main process's alone, and a teardown step that
+        # raises must not leave the ranks disagreeing on whether the next push forms the group.
+        self._weight_sync_group_formed = False
         self._stop_prefetch_thread()
 
         if self._rollout_manager and self._loop:
@@ -348,10 +363,10 @@ class AsyncRolloutMixin:
             self._weight_sync_client = None
 
         # Score-only clients formed no communicator; their HTTP sessions are what they hold.
-        if self._engine_rescore_clients_list is not None:
-            for client in self._engine_rescore_clients_list:
+        if self._engine_rescore_clients is not None:
+            for client in self._engine_rescore_clients:
                 client.session.close()
-            self._engine_rescore_clients_list = None
+            self._engine_rescore_clients = None
 
         self._loop = None
         # Re-arm: a second train() rebuilds the components above and needs a fresh push to the
@@ -476,22 +491,24 @@ class AsyncRolloutMixin:
     def _wait_for_inflight_prefetch(self) -> list[RolloutResult] | None:
         """Block for an in-flight prefetched batch (counted as a miss — the latency was not hidden).
 
-        Called on a miss with submissions in flight: waiting trains each dataset batch once, where a
-        synchronous re-collection would duplicate it. Skips failure markers and returns None when
-        every in-flight submission failed or the worker produces nothing within the episode deadline;
-        either way the caller falls back to synchronous collection.
+        Called on a miss with submissions in flight: the worker is still rolling out a previous
+        round's prompts, and waiting trains each dataset batch exactly once where a synchronous
+        re-collection would duplicate it. Skips over failure markers; returns None when every
+        in-flight submission failed, and also when the worker produces nothing within the episode
+        deadline — a wedged prefetch pipeline. Either way the caller falls back to synchronous
+        collection.
 
-        A wedged pipeline is recorded through ``_record_batch_error`` rather than raised: the prefetch
-        counters and worker thread are per-rank, so a rank whose engine route is wedged would raise
-        alone while its peers entered the collectives below. ``_raise_batch_error_uniformly`` then
-        fails every rank together and names the first failing one.
+        A wedge is RECORDED on the ``_batch_errors`` fence, not raised: prefetch hit/miss, the in-flight
+        counter and the worker thread are strictly per-rank, so a rank whose engine route is wedged
+        would raise alone while every peer took the hit path and walked into the collectives below.
+        The fence's ``reject`` then fails every rank together and names the first failing one.
         """
         timeout = self.async_config.episode_timeout + _PREFETCH_SUBMIT_TIMEOUT_S
         while self._prefetch_inflight > 0:
             try:
                 _count, results = self._prefetch_queue.get(timeout=timeout)
             except queue.Empty:
-                self._record_batch_error(
+                self._batch_errors.record(
                     f"Prefetch worker produced no rollouts within {timeout:.0f}s with "
                     f"{self._prefetch_inflight} batch(es) in flight — the prefetch pipeline is wedged "
                     f"({self._rollout_engine_name} unreachable or the worker thread died)."
@@ -526,6 +543,18 @@ class AsyncRolloutMixin:
             return
         self._prefetch_pending.append((prompts, contexts))
 
+    def prefetch_metrics(self) -> dict[str, float]:
+        """The ``async/*`` prefetch counters since train start, summed over the world. COLLECTIVE — every
+        rank calls it under the run's prefetch gate."""
+        hits, misses, skips = world_sums([self._prefetch_hits, self._prefetch_misses, self._prefetch_input_skips])
+        metrics = {}
+        if hits + misses > 0:
+            metrics = {"async/prefetch_hit_rate": hits / (hits + misses), "async/prefetch_hits": hits}
+            metrics["async/prefetch_misses"] = misses
+        if skips > 0:
+            metrics["async/prefetch_input_skips"] = skips
+        return metrics
+
     def _prefetch_round_layout(self) -> dict[str, int]:
         """What a round's prompts were drawn and grouped under: the group size, the rows of one round and
         this rank's DP slice. A resume under any other layout would group or place them differently."""
@@ -551,7 +580,9 @@ class AsyncRolloutMixin:
         path = os.path.join(checkpoint_dir, prefetch_pending_filename(get_global_rank(), get_global_world_size()))
         payload = {"layout": self._prefetch_round_layout(), "rounds": list(self._prefetch_pending)}
         guard = DeferredRankFailure(f"pending prefetch rounds write to {checkpoint_dir}")
-        guard.run(partial(_save_pending_rounds, payload, path))
+        # Ray's pickler, which ships the same contexts: a row's may carry a callable (an answer
+        # ``validator``) that the stdlib pickler refuses.
+        guard.run(partial(atomic_torch_save, path, lambda: payload, pickle_module=ray.cloudpickle))
         guard.reject()
 
     def _restore_trainer_sidecars(self, checkpoint: str) -> None:
@@ -595,77 +626,26 @@ class AsyncRolloutMixin:
         self._resumed_prefetch_rounds = list(payload["rounds"])
 
     def _sync_cadence_declines(self, force: bool) -> bool:
-        """Whether ``sync_weights_every_n_steps`` declines this step (``force`` overrides it).
-
-        Both push paths gate on this, and the collective one must evaluate it identically on every
-        rank or the ranks split over a gather.
-        """
+        """Whether ``sync_weights_every_n_steps`` declines this step (``force`` overrides it); evaluated
+        identically on every rank, since the push it gates is a collective gather."""
         return not force and self.state.global_step % self.async_config.sync_weights_every_n_steps != 0
 
-    def _sync_weights_to_engine_single(self, force: bool = False) -> bool:
-        """Sync weights to the rollout engine via NCCL from a single-process run; ``force`` ignores the step gate.
-
-        Only the raw-model path below — a single training process, no adapters, no EP wrappers — syncs
-        a multi-server pool one server at a time; every other shape gathers and pauses all servers
-        together for the push. Returns whether weights were pushed, so the caller does not record a
-        sync the cadence gate declined.
-        """
-        if self._sync_cadence_declines(force):
-            return False
-
-        self._init_weight_sync_client()
-
-        unwrapped_model = self.accelerator.unwrap_model(self.model)
-
-        # Rolling sync uses the raw-model client API, which forwards ``named_parameters()``
-        # untouched, so it is reachable for plain adapter-free dense models only.
-        if self._multi_server_mode and not named_ep_layers(unwrapped_model) and not is_peft_model(unwrapped_model):
-            self._weight_sync_client.update_model_params(unwrapped_model)
-            num_servers = self._weight_sync_client.num_servers
-            logger.debug(f"Synced weights to {num_servers} rollout servers (rolling) at step {self.state.global_step}")
-        else:
-            # One gather for every remaining case: the EP-wrapped layouts the engine cannot map (EP
-            # wrappers are present even at ep_size==1), PEFT (the push folds the adapters into each
-            # base weight it sends, out of place), and plain dense, where ``update_model_params`` would
-            # forward raw ``named_parameters()`` — which FSDP2 hands out as DTensors describing a
-            # local shard under the global shape, so the broadcast reads past the shard.
-            sync_weights_to_client(
-                unwrapped_model,
-                self._weight_sync_client,
-                is_main=True,
-                is_tp_main=True,
-            )
-            logger.debug(f"Synced weights to the {self._rollout_engine_name} engine at step {self.state.global_step}")
-        return True
-
     def _sync_weights_to_engine(self, force: bool = False) -> bool:
-        """Sync weights to the rollout engine with EP/TP/FSDP/PEFT awareness; ``force`` ignores the step gate.
+        """Push the trainer's weights to every rollout engine; ``force`` ignores the step gate. COLLECTIVE.
 
-        A single-process run takes :meth:`_sync_weights_to_engine_single`; EP/TP/ETP and any multi-rank
-        run route through the all-ranks collective gather. Returns whether weights were pushed, which
-        is what the caller records: the cadence gate declines most steps, so a stamp taken on the
-        attempt would claim the engines hold weights that were never sent.
+        One path for every shape: every rank joins the gather (``full_tensor()`` on an FSDP2 param is a
+        DP-mesh collective, the EP and TP gathers are group collectives), the main process forwards, and
+        every server is paused together for the push. Returns whether weights were actually pushed,
+        which is what the caller records — the cadence gate declines most steps, and a stamp taken on
+        the attempt claims the engines hold weights nobody sent them.
+
+        A push that finds no group formed forms it first (:meth:`_form_weight_sync_group`), fenced ahead
+        of the gather: after ``train()`` returns, its cleanup has dropped the client, and a push from
+        there (a test's forced push) must still reach the engine.
         """
-        config = self.parallelism_config
-
-        # full_tensor() on an FSDP2 param is a DP-mesh collective: every rank must enter, or main-only deadlocks.
-        needs_collective_gather = (
-            config.is_ep_mode or config.is_tp_mode or config.is_expert_tp_mode or self.accelerator.num_processes > 1
-        )
-
-        if not needs_collective_gather:
-            with profiling_context(self, "weight_sync"):
-                return self._sync_weights_to_engine_single(force=force)
-
-        # The step gate must evaluate identically on all ranks: the collectives need all of them.
         if self._sync_cadence_declines(force):
             return False
-
-        # Called on every rank of the collective path: the method is main-process-gated and
-        # idempotent, so a caller-side rank gate here would put the fence on the wrong side of a push
-        # that every rank has to enter.
-        self._init_weight_sync_client()
-
+        self._form_weight_sync_group()
         with profiling_context(self, "weight_sync"):
             sync_trainer_weights(self, self._weight_sync_client)
         return True

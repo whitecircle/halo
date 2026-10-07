@@ -22,9 +22,8 @@ attention sinks and a sink-dropping backend moves the loss by nats), and ``reset
 parallel load (the loader's fine-tuning reset would make the two models different models).
 
 Division of labour: this is the per-PR (``core``) gate — loss, router gradient, determinism, control,
-one parallel model plus a briefly-held reference. ``test_ep_vs_no_ep.py`` is the nightly (``full``)
-counterpart that holds both models at once and additionally compares per-token logits and top-1
-agreement.
+one parallel model plus a briefly-held reference. ``test_ep_vs_no_ep.py`` is the ``full``-tier
+counterpart that additionally compares per-token logits and top-1 agreement.
 
 Run with 2 GPUs:
     torchrun --nproc_per_node=2 \
@@ -169,7 +168,7 @@ def run(ctx):
 
     spread = world_spread(loss.item())
     metrics["rank_loss_spread"] = spread
-    checks["losses_agree_across_ranks"] = spread < TOL.ep_identical_batch_rank_spread_abs
+    checks["losses_agree_across_ranks"] = TOL.identical_batch_ranks_agree(spread)
 
     loss.backward()
     router_name, router_weight = find_router_weight(model)

@@ -2,18 +2,18 @@
 """Resume provenance makes checkpoint master coverage strict across every supported Path-B loader."""
 
 import ast
+import re
 from types import SimpleNamespace
 from unittest.mock import Mock
 
 import pytest
 import torch
 from accelerate import PartialState
-from transformers import Qwen3MoeConfig
+from transformers import Qwen3Config, Qwen3MoeConfig
 from trl import ModelConfig
 
 import src.distributed.loading.model_loading as loading
 import src.distributed.loading.vlm_setup as vlm_setup
-from src.distributed.parallelism_config import ParallelismConfig
 from src.training.environment import prepare_distributed_resume
 from src.training.script_runner import ScriptRuntime, load_script_model
 from tests.common.parallelism import make_parallelism_config
@@ -23,52 +23,64 @@ PartialState()
 
 
 class _Dispatched(Exception):
-    """Stop a public-loader plumbing probe before weights or distributed groups are constructed."""
+    """Stop the public loader at the leaf the dispatcher picked, before weights or groups are built."""
+
+    def __init__(self, loader: str, common_kwargs: dict):
+        super().__init__(loader)
+        self.loader = loader
+        self.common_kwargs = common_kwargs
 
 
-@pytest.mark.parametrize(
-    "axes,expected",
-    [
-        pytest.param({}, True, id="dp"),
-        pytest.param({"cp": True}, True, id="cp_only"),
-        pytest.param({"ep": True}, True, id="ep"),
-        pytest.param({"ep": True, "cp": True}, True, id="ep_cp"),
-        pytest.param({"tp": True}, True, id="tp"),
-        pytest.param({"ep": True, "tp": True}, True, id="ep_tp"),
-        pytest.param({"etp": True}, True, id="pure_etp"),
-        pytest.param({"ep": True, "etp": True}, True, id="ep_etp"),
-        pytest.param({"pp": True}, False, id="pp"),
-        pytest.param({"ep": True, "pp": True}, False, id="pp_ep"),
-    ],
-)
-@pytest.mark.parametrize("preserve", (False, True))
-def test_public_loader_forwards_strict_master_coverage_to_supported_loaders(monkeypatch, axes, expected, preserve):
-    pc = Mock(spec=ParallelismConfig)
-    pc.ep_size = 8 if axes.get("ep") else 1
-    pc.is_cp_mode = axes.get("cp", False)
-    pc.is_tp_mode = axes.get("tp", False)
-    pc.is_expert_tp_mode = axes.get("etp", False)
-    pc.is_pp_mode = axes.get("pp", False)
-    config = Qwen3MoeConfig()
-    monkeypatch.setattr(loading, "_validate_launch_method_for_parallelism", lambda config: None)
-    monkeypatch.setattr(loading, "_validate_gmm_launch_method", lambda *args: None)
-    monkeypatch.setattr(loading, "_validate_fp32_non_ep_params", lambda *args: None)
-    monkeypatch.setattr(loading, "_ensure_model_downloaded", lambda *args, **kwargs: None)
+# Each axis set the public loader serves: its parallel sizes, the checkpoint family it is asked to
+# build (a dense and a MoE TP load take different leaves) and the leaf loader the dispatch must reach.
+# PP rows sit on two NVLink domains, so each stage owns a whole one.
+DISPATCH_CASES = {
+    "dp": ({}, Qwen3MoeConfig, "_load_undistributed_model"),
+    "cp_only": ({"cp_size": 2}, Qwen3MoeConfig, "_load_cp_model"),
+    "ep": ({"ep_size": 8}, Qwen3MoeConfig, "_load_ep_model"),
+    "ep_cp": ({"ep_size": 8, "cp_size": 2}, Qwen3MoeConfig, "_load_ep_cp_model"),
+    "dense_tp": ({"tp_size": 2}, Qwen3Config, "_load_tp_model"),
+    "moe_tp": ({"tp_size": 2}, Qwen3MoeConfig, "_load_tp_moe_model"),
+    "ep_tp": ({"ep_size": 8, "tp_size": 2}, Qwen3MoeConfig, "_load_ep_tp_model"),
+    "pure_etp": ({"expert_tp_size": 2}, Qwen3MoeConfig, "_load_ep_model"),
+    "ep_etp": ({"ep_size": 4, "expert_tp_size": 2}, Qwen3MoeConfig, "_load_ep_model"),
+    "pp": ({"pp_size": 2}, Qwen3MoeConfig, "_load_pp_stage_model"),
+    "pp_ep": ({"pp_size": 2, "ep_size": 8}, Qwen3MoeConfig, "_load_pp_stage_model"),
+}
+
+
+def _leaf_loaders() -> list[str]:
+    """The per-mode loaders ``_dispatch_model_loading`` chooses among, by the module's naming."""
+    return sorted(
+        name for name, value in vars(loading).items() if re.fullmatch(r"_load_\w+_model", name) and callable(value)
+    )
+
+
+def _stopping_loader(name: str):
+    def load(source, parallelism, model_class, common_kwargs, *args, **kwargs):
+        raise _Dispatched(name, dict(common_kwargs))
+
+    return load
+
+
+@pytest.mark.parametrize("case", sorted(DISPATCH_CASES))
+@pytest.mark.parametrize("preserve", (False, True), ids=("fresh", "strict_resume"))
+def test_the_real_dispatch_hands_each_axis_set_its_loader_and_the_strict_master_flag(monkeypatch, case, preserve):
+    axes, config_class, expected_loader = DISPATCH_CASES[case]
+    pc = make_parallelism_config(world_size=16 if "pp_size" in axes else 8, gpus_per_node=8, **axes)
+    config = config_class()
+    monkeypatch.setattr(loading, "resolve_model_source", lambda path, revision, **kwargs: revision)
     monkeypatch.setattr(loading.AutoConfig, "from_pretrained", lambda *args, **kwargs: config)
     monkeypatch.setattr(loading.AutoTokenizer, "from_pretrained", lambda *args, **kwargs: SimpleNamespace())
-    seen = {}
-
-    def dispatch(source, parallelism, model_class, kwargs):
-        seen.update(kwargs)
-        raise _Dispatched
-
-    monkeypatch.setattr(loading, "_dispatch_model_loading", dispatch)
-    with pytest.raises(_Dispatched):
+    for name in _leaf_loaders():
+        monkeypatch.setattr(loading, name, _stopping_loader(name))
+    with pytest.raises(_Dispatched) as dispatched:
         loading.load_distributed_model(
             "org/base", pc, dtype=torch.bfloat16, attn_implementation="eager", preserve_checkpoint_precision=preserve
         )
-    assert seen.get("preserve_checkpoint_precision", False) is (preserve and expected)
-    assert seen["dtype"] is torch.bfloat16
+    assert dispatched.value.loader == expected_loader
+    assert dispatched.value.common_kwargs.get("preserve_checkpoint_precision", False) is preserve
+    assert dispatched.value.common_kwargs["dtype"] is torch.bfloat16
 
 
 @pytest.mark.parametrize("resume", (False, "explicit", True, "adapter"), ids=("fresh", "explicit", "auto", "adapter"))
@@ -119,6 +131,10 @@ def test_modality_aware_training_calls_forward_the_runtime_checkpoint_identity()
         value = {keyword.arg: keyword.value for keyword in call.keywords}.get("preserve_checkpoint_precision")
         assert isinstance(value, ast.Attribute) and value.attr == "policy_from_checkpoint", path
         assert isinstance(value.value, ast.Name) and value.value.id == "runtime", path
+
+
+def test_the_dispatch_matrix_reaches_every_leaf_loader():
+    assert {loader for _, _, loader in DISPATCH_CASES.values()} == set(_leaf_loaders())
 
 
 if __name__ == "__main__":

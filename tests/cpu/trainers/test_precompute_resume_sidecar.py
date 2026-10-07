@@ -70,7 +70,8 @@ SCRIPT_CONFIGS = {
 
 _REFERENCE_WORLD_SIZE = 2
 _REFERENCE_PG_TIMEOUT = datetime.timedelta(seconds=120)
-_LEGACY_TOKEN_DIGESTS = {
+# The token digests of the fixture rows as the sidecar schema stores them.
+_SIDECAR_TOKEN_DIGESTS = {
     "dpo": {
         "prompt_ids": "22b7c1ed76f6e7e90ec08c0f1cb911415391eb6198dd44efdaf5050ea7f8e28d",
         "chosen_ids": "b0e3d982120f58bbb6a11b088d85ea429a06549b261deaf1d3e32f7a17539ed4",
@@ -153,8 +154,9 @@ def test_a_resume_attaches_the_saved_columns_instead_of_sweeping_the_trained_pol
         assert torch.equal(again["columns"][name], first["columns"][name])
 
 
-def test_pre_extraction_reference_schema_resumes_without_rewriting_its_identity(kind, tmp_path):
-    """The fixed fixture pins the existing sidecar schema and token digest, not the new writer."""
+def test_a_sidecar_in_the_on_disk_schema_resumes_and_resaves_its_identity_unchanged(kind, tmp_path):
+    """The sidecar is written field by field, its token digests pinned as literals, so the on-disk
+    schema is held to itself rather than to whatever the current writer emits."""
     columns = (
         {
             "ref_chosen_logps": torch.tensor([-6.0, -12.0, -18.0, -24.0]),
@@ -169,13 +171,13 @@ def test_pre_extraction_reference_schema_resumes_without_rewriting_its_identity(
     settings = {"max_length": MAX_LENGTH, "logprob_precision": "float32"}
     if kind == "dpo":
         settings.update(truncation_mode="keep_start", ld_alpha=None)
-    legacy = {
+    on_disk = {
         "num_rows": N_ROWS,
-        "token_digests": _LEGACY_TOKEN_DIGESTS[kind],
+        "token_digests": _SIDECAR_TOKEN_DIGESTS[kind],
         "settings": settings,
         "columns": columns,
     }
-    torch.save({"train": legacy}, tmp_path / REFERENCE_LOGPS_FILE)
+    torch.save({"train": on_disk}, tmp_path / REFERENCE_LOGPS_FILE)
 
     trainer = _resumed(kind, tmp_path)
     restored = trainer._precompute_ref_logps(token_rows(kind), "train", SWEEP_BATCH_SIZE)
@@ -185,9 +187,9 @@ def test_pre_extraction_reference_schema_resumes_without_rewriting_its_identity(
 
     trainer._persist_trainer_sidecars(str(tmp_path / "next"))
     saved = torch.load(tmp_path / "next" / REFERENCE_LOGPS_FILE, weights_only=True)["train"]
-    assert saved.keys() == legacy.keys()
+    assert saved.keys() == on_disk.keys()
     for name in ("num_rows", "token_digests", "settings"):
-        assert saved[name] == legacy[name]
+        assert saved[name] == on_disk[name]
     for name, expected in columns.items():
         assert torch.equal(saved["columns"][name], expected)
 
@@ -568,7 +570,7 @@ def test_partial_reference_write_does_not_replace_the_complete_sidecar(kind, tmp
     trainer = precompute_trainer(kind, weights=TRAINED)
     trainer._precompute_ref_logps(token_rows(kind), "train", SWEEP_BATCH_SIZE)
 
-    def interrupted_save(payload, destination):
+    def interrupted_save(payload, destination, **save_options):
         with open(destination, "wb") as incomplete:
             incomplete.write(b"partial sidecar")
         raise OSError("interrupted reference write")
@@ -786,12 +788,12 @@ def test_the_token_digest_reads_content_in_row_order():
     assert _token_digest(narrowed, "ids") == digest
     remapped = Dataset.from_dict({"ids": list(reversed(ids))}).select([2, 1, 0])
     assert _token_digest(remapped, "ids") == digest
-    original_batch_rows = precompute_mod._DIGEST_BATCH_ROWS
+    original_batch_rows = precompute_mod.REFERENCE_SCAN_ROWS
     try:
-        precompute_mod._DIGEST_BATCH_ROWS = 2
+        precompute_mod.REFERENCE_SCAN_ROWS = 2
         assert _token_digest(Dataset.from_dict({"ids": ids}), "ids") == digest
     finally:
-        precompute_mod._DIGEST_BATCH_ROWS = original_batch_rows
+        precompute_mod.REFERENCE_SCAN_ROWS = original_batch_rows
 
     assert _token_digest(Dataset.from_dict({"ids": list(reversed(ids))}), "ids") != digest
     assert _token_digest(Dataset.from_dict({"ids": [[5], [6, 7], [8, 9, 10]]}), "ids") != digest

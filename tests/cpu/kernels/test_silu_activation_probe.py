@@ -1,11 +1,11 @@
 #!/usr/bin/env python
 """The fused-GLU probes must recognize the activation a REAL transformers block carries.
 
-The activation-hardcoding kernels (`fused_silu_mul`, `fused_gelu_tanh_mul`, DeepSeek-V4's compiled
-clamped SwiGLU) are only valid where the wrapped block's activation really is the one they implement,
-so the gates deciding that are load-bearing for throughput: answering False everywhere is numerically
-invisible and silently drops every GLM-4 Lite / Laguna / DeepSeek-V4 / Gemma-4 MoE onto the eager
-combine. Answering True wrongly is worse — it changes the activation on every expert.
+The activation-hardcoding kernels (`fused_silu_mul`, `fused_gelu_tanh_mul`, DeepSeek-V4's
+`fused_clamped_silu_mul`) are only valid where the wrapped block's activation really is the one they
+implement, so the gates deciding that are load-bearing for throughput: answering False everywhere is
+numerically invisible and silently drops every GLM-4 Lite / Laguna / DeepSeek-V4 / Gemma-4 MoE onto
+the eager combine. Answering True wrongly is worse — it changes the activation on every expert.
 
 A nominal test cannot hold that line. ``ACT2FN["silu"]`` is `transformers.activations.SiLUActivation`,
 a bare `nn.Module` subclass that is neither `nn.SiLU` nor `F.silu`, so a hand-built `nn.SiLU()`

@@ -66,6 +66,8 @@ ENV EP_SUPPRESS_NCCL_CHECK=1
 ARG TARGET_GPU=hopper
 RUN echo $([ "$TARGET_GPU" = "blackwell" ] && echo "10.0+PTX" || echo "9.0") > /etc/cuda_arch
 
+# uidmap and a subordinate id range: the bubblewrap sandbox maps its jail's root to root's first
+# subordinate id (newuidmap, /etc/subuid, /etc/subgid).
 RUN apt-get update && apt-get install -y --no-install-recommends \
     git \
     git-lfs \
@@ -80,12 +82,14 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     build-essential \
     ninja-build \
     bubblewrap \
+    uidmap \
     sudo \
     bc \
     unzip \
     screen \
     && rm -rf /var/lib/apt/lists/* \
-    && git lfs install
+    && git lfs install \
+    && usermod --add-subuids 165536-231071 --add-subgids 165536-231071 root
 
 RUN curl -fsSL "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip" -o /tmp/awscliv2.zip \
     && unzip -q /tmp/awscliv2.zip -d /tmp \
@@ -352,6 +356,8 @@ RUN echo "=== Verifying Installation (TARGET_GPU=${TARGET_GPU}) ===" \
     && python -c "import nvidia.nvshmem; print('NVSHMEM: installed')" \
     && python -c "from src.distributed.nccl.clients.vllm import VLLMWeightSyncClient; print('Vendored NCCL client: OK')" \
     && halo --help >/dev/null && echo "halo CLI: $(command -v halo)" \
+    && command -v newuidmap newgidmap >/dev/null && grep -q '^root:' /etc/subuid /etc/subgid \
+    && echo "bubblewrap jail ids: $(grep '^root:' /etc/subuid)" \
     && echo "=== Build-time verification complete ===" \
     && echo "=== Note: DeepEP will be verified at runtime with GPU access ==="
 

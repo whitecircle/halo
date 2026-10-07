@@ -53,7 +53,7 @@ def test_1d_dp_mesh_rejects_a_sub_world_dp_size(monkeypatch):
 
 
 def test_2d_dp_mesh_rejects_a_sub_world_dp_size(monkeypatch):
-    """The sibling branch's guard, pinned alongside so the two cannot drift apart again."""
+    """The sibling branch's guard, pinned alongside so the two cannot drift apart."""
     monkeypatch.setattr(mesh_mod.dist, "is_initialized", lambda: True)
     monkeypatch.setattr(mesh_mod.dist, "get_world_size", lambda: 8)
     with pytest.raises(ValueError, match="must span the whole world"):

@@ -69,7 +69,7 @@ def _worker(rank: int, cp_size: int) -> None:
     local_expected = cp_size * (COEFFICIENTS[rank] * ROW_WEIGHTS).sum()
     torch.testing.assert_close(weight.grad, local_expected, atol=0, rtol=0)
     dist.all_reduce(weight.grad, op=dist.ReduceOp.SUM)
-    weight.grad /= cp_size  # Halo's world-wide mean parameter-gradient synchronization.
+    weight.grad /= cp_size  # The toolkit's world-wide mean parameter-gradient synchronization.
     torch.testing.assert_close(weight.grad, baseline.grad, atol=0, rtol=0)
 
     with torch.no_grad():

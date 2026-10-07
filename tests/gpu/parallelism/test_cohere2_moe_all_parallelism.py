@@ -34,7 +34,7 @@ from torch.distributed.tensor import DTensor
 from transformers import AutoTokenizer
 from transformers.models.cohere2_moe import Cohere2MoeConfig, Cohere2MoeForCausalLM
 
-from src.distributed.expert_parallel.saving import save_ep_model
+from src.distributed.checkpoint.ep_save import save_ep_model
 from src.distributed.loading.model_loading import load_distributed_model
 from src.distributed.parallelism_config import ParallelismConfig
 from tests.common.distributed import cleanup_dirs, shared_scratch_dir, world_spread
@@ -46,7 +46,7 @@ from tests.common.tolerances import TOL
 from tests.common.utils import cleanup_memory, gpu_mem_gb, log
 
 # 8 Q / 8 KV heads so cp8 and tp8 shard heads evenly; hidden 256 keeps the DeepEP transport pad
-# (multiple of 256) exact; 4 layers keep the sliding/full interleave present on every pp-free mode.
+# (multiple of 256) exact; 4 layers keep the sliding/full interleave present in every mode.
 TINY_CONFIG_KWARGS = {
     "vocab_size": 512,
     "hidden_size": 256,
@@ -130,7 +130,7 @@ def run_mode(
         parallelism_config=pc,
         dtype=torch.bfloat16,
         attn_implementation=attn_implementation,
-        use_liger_kernel=False,  # no cohere2_moe Liger applier
+        use_liger_kernel=False,
     )
     log(f"  GPU memory after load: {gpu_mem_gb():.2f}GB")
 
@@ -183,7 +183,7 @@ def run_mode(
         # (the spread is inf when any rank is non-finite).
         checks["losses_finite_across_ranks"] = math.isfinite(spread)
     else:
-        checks["losses_consistent_across_ranks"] = spread < TOL.ep_identical_batch_rank_spread_abs
+        checks["losses_consistent_across_ranks"] = TOL.identical_batch_ranks_agree(spread)
         log(f"  Cross-rank max loss diff: {spread:.6e}")
 
     loss.backward()

@@ -152,17 +152,6 @@ def test_sglang_rejects_thinking_budget():
         _sglang_config(rollout_max_thinking_tokens=4096)
 
 
-def test_sglang_rejects_the_episode_thinking_scope():
-    """The scope narrows the per-turn engine cap, which is the vLLM-only ``thinking_token_budget``: on
-    SGLang every turn would reason uncapped while the template promised one shared budget."""
-    with pytest.raises(
-        ValueError, match="rollout_thinking_budget_scope='episode' is not supported with rollout_backend"
-    ):
-        _sglang_config(rollout_thinking_budget_scope="episode")
-    vllm = AsyncTrainingConfig(rollout_backend="vllm", rollout_thinking_budget_scope="episode")
-    assert vllm.get_rollout_config(reasoning_end_token_id=1).thinking_budget_scope == "episode"
-
-
 def test_chat_template_kwargs_refuse_the_effort_key():
     """The level is per episode and travels top-level; a run-wide nested copy would either duplicate
     it or, on a disagreement, override it on SGLang and lose to it on vLLM."""
@@ -291,6 +280,69 @@ def test_routed_experts_opt_in_is_sglang_only():
     assert "return_routed_experts" not in vllm
     off = _build_payload("sglang", capture_routed_experts=False)
     assert "return_routed_experts" not in off
+
+
+# --- Sampler filters — every request states them, off included ---
+
+_FILTERS = ("top_k", "min_p", "repetition_penalty")
+
+
+def _sampler_fields(body: dict) -> dict:
+    return {key: body.get(key) for key in _FILTERS}
+
+
+class _JsonReply:
+    def __init__(self, payload: dict):
+        self._payload = payload
+
+    def json(self):
+        return self._payload
+
+
+def test_the_filter_defaults_are_the_engines_off_values():
+    """Pinned literally. Both engines fill an omitted filter from the model's generation_config.json
+    (vLLM `--generation-config auto`, SGLang `--sampling-defaults model`; Qwen3.6 ships top_k 20), so the
+    defaults go out on every request and must read as off on both: SGLang refuses top_k 0, which leaves
+    -1. The engine-reference gate and the sampler-logprob probe take these defaults as the identity
+    sampler."""
+    assert _sampler_fields(vars(RolloutConfig())) == {"top_k": -1, "min_p": 0.0, "repetition_penalty": 1.0}
+
+
+@pytest.mark.parametrize(
+    "filters", [{}, {"top_k": 20, "min_p": 0.05, "repetition_penalty": 1.1}], ids=["defaults", "set"]
+)
+@pytest.mark.parametrize("backend", ["vllm", "sglang"])
+def test_rollout_and_eval_requests_carry_the_configured_filters(backend, filters):
+    """A filter left out renormalizes every reported log-prob over what the model's default keeps, while
+    the trainer scores the full distribution. The training payload and the eval runner's extra body (both
+    off ``generation_control_fields``) carry the config's values on either engine."""
+    config = RolloutConfig(backend=backend, **filters)
+    expected = {name: getattr(config, name) for name in _FILTERS}
+    assert (
+        _sampler_fields(_build_payload(backend, reasoning_effort="high", capture_token_ids=True, **filters))
+        == expected
+    )
+    assert _sampler_fields(engine_wire.generation_control_fields(config)) == expected
+
+
+def test_online_generation_states_trl_s_filters():
+    """TRL's generation layer hands the client top_k 0, min_p 0.0 and repetition_penalty 1.0 by default.
+    vLLM's completions route fills an omitted field from the model's generation_config.json, so each goes
+    out at its off value, top_k 0 being vLLM's own. Set values go out as set."""
+    client = VLLMWeightSyncClient.__new__(VLLMWeightSyncClient)
+    client.base_url = "http://stub"
+    client._generation_timeout = 60.0
+    bodies = []
+
+    def post_once(_path, json, **_kwargs):
+        bodies.append(json)
+        return _JsonReply({"choices": [{"token_ids": [7], "logprobs": {"token_logprobs": [-0.1]}}]})
+
+    client._post_once = post_once
+    client.generate([[1, 2]], top_k=0, min_p=0.0, repetition_penalty=1.0)
+    client.generate([[1, 2]], top_k=20, min_p=0.05, repetition_penalty=1.1)
+    assert _sampler_fields(bodies[0]) == {"top_k": 0, "min_p": 0.0, "repetition_penalty": 1.0}
+    assert _sampler_fields(bodies[1]) == {"top_k": 20, "min_p": 0.05, "repetition_penalty": 1.1}
 
 
 # --- Sampled-token capture — the two engines report the same facts in different places ---

@@ -19,8 +19,7 @@ finiteness cannot see any of them. This test reimplements the objective independ
     desirable mask (the sign flip) and ignoring the reference log-probs must each move the reference
     loss far outside the tolerance the pin is asserted at.
 
-The reference consumes the trainer's own frozen reference model, exactly as
-``pp/test_pp_dpo_precompute.py`` consumes captured ref columns: the reference model is an *input* to
+The reference consumes the trainer's own frozen reference model: the reference model is an *input* to
 the objective, so only its transport is under test here, not its provenance. The policy side is an
 independently constructed copy of the checkpoint loaded with the weight snapshot taken at the pinned
 step, so the two sides see byte-identical policy weights.

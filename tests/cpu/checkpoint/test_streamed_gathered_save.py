@@ -22,16 +22,16 @@ PartialState()  # save_model_config logs through accelerate's logger
 from safetensors import safe_open
 
 import src.checkpoint.shard_writer as shard_writer_mod
+import src.distributed.checkpoint.tp_save as tp_checkpoint_mod
 import src.distributed.checkpoint.write as checkpoint_write_mod
-import src.distributed.tensor_parallel.checkpoint as tp_checkpoint_mod
 from src.checkpoint.format import load_full_state_dict, write_gathered_checkpoint
 from src.checkpoint.shard_writer import StageShardWriter
+from src.distributed.checkpoint.tp_save import save_tp_model
 from src.distributed.checkpoint.write import (
     chunked_saveable_tensors,
     conversion_chunk_key,
     stream_gathered_checkpoint,
 )
-from src.distributed.tensor_parallel.checkpoint import save_tp_model
 from tests.common.checkpoint_io import weight_files
 
 SHARD_SIZE = "64KB"

@@ -286,7 +286,7 @@ def test_the_recorded_id_binds_padding_idx_on_the_next_load(tmp_path):
     carries a pad token of its own — the whole Qwen3 family — comes back with ``padding_idx`` bound,
     and from then on that row's INPUT-embedding gradient is masked. The weights themselves are
     untouched and the output side still trains, which is exactly what ``padding_idx`` means; it is
-    pinned here so the cost is a chosen one, and it is why eos borrowed as pad is left unrecorded.
+    pinned here so the cost is a chosen one.
     """
     model = Qwen3ForCausalLM(Qwen3Config(**TINY_QWEN3_CONFIG))
     setup_model_and_tokenizer(CommonScriptArguments(), model, _Tokenizer(), MAX_LENGTH)

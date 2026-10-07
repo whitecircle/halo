@@ -8,6 +8,7 @@ the per-rope-type inv_freq buffer fix, and the moe_balancing auto resolution.
 
 import tempfile
 from functools import partial
+from types import SimpleNamespace
 
 import pytest
 import torch
@@ -25,10 +26,12 @@ from src.kernels.fused_glu import clamped_silu_mul_eager, fused_clamped_silu_mul
 from src.models.moe_balancing import resolve_balancing_mode
 from src.models.patches.attention import _model_is_deepseek_v4
 from src.models.patches.buffer_fixes import finalize_loaded_model
+from src.models.segment_markers import reject_compressed_kv_rows
 from tests.common.models import TINY_DSV4_CONFIG
 from tests.common.tiny_models import randomize_tid2eid
 
 SEED = 1234
+COMPRESSED_KV_REFUSAL = "layers pool KV over windows cut at fixed indices"
 
 
 def _tiny_config(**overrides) -> DeepseekV4Config:
@@ -97,16 +100,14 @@ def test_model_is_deepseek_v4_detection():
     assert not _model_is_deepseek_v4(type("Cfg", (), {"model_type": "gpt_oss"})())
 
 
-def test_collator_factory_rejects_padding_free_but_allows_packing():
-    """DeepSeek-V4 resolves to eager: ``padding_free`` is refused, ``packing`` is not.
+def test_collator_factory_refuses_multi_document_rows():
+    """DeepSeek-V4 trains one document per row: ``padding_free`` and ``packing`` are both refused.
 
-    The gate is derived from the RESOLVED ``_attn_implementation``, not the model family, so this
-    asserts the outcome for DSv4 without pinning the mechanism to its name. Only ``padding_free`` is
-    refused — it exists solely to emit cu_seqlens no eager kernel reads. ``packing`` stays allowed
-    because DSv4's masked attention isolates documents on the training path (transformers >= 5.14
-    creates the cache only under ``use_cache``, which training runs with ``False``); the
-    compressed-attention layers still cross boundaries by construction, the documented mixer-class
-    behavior — both behaviorally pinned in ``test_deepseek_v4_packed_isolation.py``.
+    ``padding_free`` falls to the varlen gate, derived from the RESOLVED ``_attn_implementation``
+    (eager here). ``packing`` falls to the compressed-KV refusal: the CSA/HCA compressors cut their
+    KV windows at row indices while positions restart per document, so every packed document after
+    the first attends the row-start windows — pinned behaviorally in
+    ``test_deepseek_v4_packed_isolation.py``.
     """
     config = _tiny_config()
     config._attn_implementation = "eager"
@@ -117,10 +118,38 @@ def test_collator_factory_rejects_padding_free_but_allows_packing():
 
     with pytest.raises(ValueError, match="varlen"):
         select_data_collator(tokenizer=_Tok(), padding_free=True, model_config=config)
-
-    assert select_data_collator(tokenizer=_Tok(), packing=True, model_config=config) is not None
+    with pytest.raises(ValueError, match=COMPRESSED_KV_REFUSAL):
+        select_data_collator(tokenizer=_Tok(), packing=True, model_config=config)
     # Padded batches stay allowed (default TRL collator).
     assert select_data_collator(tokenizer=_Tok(), model_config=config) is None
+
+
+def _legacy_compress_ratios_config() -> DeepseekV4Config:
+    """The hub's legacy spelling: per-layer ``compress_ratios`` ints, no ``layer_types``."""
+    fields = {key: value for key, value in TINY_DSV4_CONFIG.items() if key != "layer_types"}
+    return DeepseekV4Config(**fields, compress_ratios=[0, 4, 128])
+
+
+@pytest.mark.parametrize(
+    "build, refused",
+    [
+        (_tiny_config, True),
+        (_legacy_compress_ratios_config, True),
+        (lambda: SimpleNamespace(model_type="v4_wrapper", get_text_config=_tiny_config), True),
+        (lambda: _tiny_config(layer_types=["sliding_attention"] * 3), False),
+    ],
+    ids=["layer-types", "legacy-compress-ratios", "wrapper", "no-compressed-layer"],
+)
+def test_the_refusal_follows_the_compressed_layer_types(build, refused):
+    """The refusal reads the layer kinds, not the model type: a wrapper resolves like its decoder, the
+    legacy spelling resolves through the config's own ``layer_types`` fill, and a V4 stack with no
+    compressed layer is isolated by its masked attention alone, so it packs."""
+    config = build()
+    if refused:
+        with pytest.raises(ValueError, match=COMPRESSED_KV_REFUSAL):
+            reject_compressed_kv_rows(config, "packing")
+    else:
+        reject_compressed_kv_rows(config, "packing")
 
 
 # Clamped-GLU equivalence vs the HF experts module

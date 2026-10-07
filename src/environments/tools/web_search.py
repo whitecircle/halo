@@ -201,11 +201,11 @@ def validate_search_backend(backend: str | None) -> None:
         raise ValueError(f"Unknown search backend: {backend}. Available: {list(selectable)}.{hint}")
 
 
-def _resolve_backend(backend: str | None, query: str, max_results: int) -> tuple[str, SearchBackend, dict[str, Any]]:
-    """Resolve the search backend and build the call kwargs shared by every entry point."""
+def _resolve_backend(backend: str | None) -> tuple[str, SearchBackend]:
+    """The backend a search runs on, by name: the named one, else the first this process can reach."""
     backend = backend or _auto_select_backend()
     validate_search_backend(backend)
-    return backend, _selectable_backends()[backend], {"query": query, "max_results": max_results}
+    return backend, _selectable_backends()[backend]
 
 
 def _backend_failure(backend: str, exc: Exception) -> RuntimeError:
@@ -223,10 +223,10 @@ def web_search_raw(query: str, max_results: int = 5, backend: str | None = None)
     ``backend=None`` auto-selects by available API keys; an unknown name raises ``ValueError`` and a
     backend fault ``RuntimeError``.
     """
-    backend, impl, kwargs = _resolve_backend(backend, query, max_results)
+    backend, impl = _resolve_backend(backend)
 
     try:
-        return impl.sync(**kwargs)
+        return impl.sync(query=query, max_results=max_results)
     except Exception as e:
         raise _backend_failure(backend, e) from e
 
@@ -241,10 +241,10 @@ def web_search(query: str, max_results: int = 5, backend: str | None = None) -> 
 
 async def async_web_search(query: str, max_results: int = 5, backend: str | None = None) -> str:
     """Async version of web_search."""
-    backend, impl, kwargs = _resolve_backend(backend, query, max_results)
+    backend, impl = _resolve_backend(backend)
 
     try:
-        results = await impl.async_(**kwargs)
+        results = await impl.async_(query=query, max_results=max_results)
     except Exception as e:
         raise _backend_failure(backend, e) from e
     return _format_results(results, max_results)

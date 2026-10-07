@@ -2,7 +2,7 @@
 
 Each helper raises the mechanism-naming error its trainers share; only the per-trainer parts
 (column names, trainer name, the mechanism clause) are parameters. Gates unique to one trainer
-(DPO's loss-type subset, KTO's ``apo_zero_unpaired`` restriction, SMPO's clip/label gates, offline
+(DPO's loss-type subset, KTO's ``apo_zero_unpaired`` restriction, SMPO's clip-percentile gate, offline
 GRPO's length caps) stay in that trainer's ``_validate_pp_mode`` hook, or in its
 ``_reject_pp_explicit_options`` where the options are explicit ctor parameters the mixin cannot see.
 """

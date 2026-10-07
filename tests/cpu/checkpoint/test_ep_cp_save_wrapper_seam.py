@@ -23,9 +23,9 @@ import torch.nn as nn
 from accelerate import PartialState
 from safetensors import safe_open
 
+from src.distributed.checkpoint.ep_save import save_ep_model, validate_ep_sharded_save
 from src.distributed.context_parallel.base_layer import UlyssesAttentionBase
 from src.distributed.context_parallel.wrapper import UlyssesCPModelWrapper
-from src.distributed.expert_parallel.saving import save_ep_model, validate_ep_sharded_save
 from src.models.structure import unwrap_model
 from tests.common.ep_stubs import StubEPLayerBase
 

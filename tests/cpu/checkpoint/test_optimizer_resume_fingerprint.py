@@ -7,6 +7,7 @@ Per-rank optimizer shards restore only into the exact topology that wrote them, 
 - fingerprint matches → full restore (EP/CP included);
 - fingerprint mismatch → warm restart with a warning naming the mismatched fields;
 - shards present with no fingerprint in the meta (a pre-fingerprint checkpoint) → raise;
+- shards present with no meta at all (an interrupted save) → raise, unless the run opted in;
 - shards missing everywhere with no trace they were written → warm restart (save_only_model);
 - shards missing everywhere while other ranks' shard files or a fingerprint-matched meta prove
   state WAS written (a wholesale rank→node permutation on a non-shared FS) → raise;
@@ -339,9 +340,10 @@ def test_partial_shards_with_matching_fingerprint_raise_torn(tmp_path, monkeypat
         OptimizerShardStore(_ctx(model, optimizer)).load(str(tmp_path))
 
 
-def test_partial_shards_without_a_meta_warm_restart(tmp_path, monkeypatch, caplog):
-    """A peer holds a shard but there is no meta at all: the rank-count gate fails first, so this is
-    a warm restart, not the unfingerprinted-shards raise (nothing here can be gated either way)."""
+def test_partial_shards_without_a_meta_are_refused_as_torn(tmp_path, monkeypatch):
+    """A peer holds a shard but there is no meta at all: the save stopped between its shards and its
+    meta, which is a torn checkpoint — not a topology change to warm-restart over, and not the
+    unfingerprinted-shards case either. The torn gate runs ahead of the rank-count gate."""
     model = _TinyModel()
     optimizer = _sgd(model)
     _write_checkpoint(tmp_path, shard=False, meta=False)
@@ -358,7 +360,7 @@ def test_partial_shards_without_a_meta_warm_restart(tmp_path, monkeypatch, caplo
     restore = _Recorder()
     monkeypatch.setattr(optimizer_mod, "set_optimizer_state_dict", restore)
 
-    with caplog.at_level("WARNING", logger=optimizer_mod.logger.name):
+    with pytest.raises(RuntimeError, match="torn set of an interrupted save"):
         OptimizerShardStore(_ctx(model, optimizer)).load(str(tmp_path))
 
     assert restore.calls == []
@@ -367,8 +369,8 @@ def test_partial_shards_without_a_meta_warm_restart(tmp_path, monkeypatch, caplo
 def test_all_shards_missing_under_matched_meta_raises_permutation(tmp_path, monkeypatch):
     """No rank sees its own shard, but the meta's fingerprint MATCHED this run — the complete shard
     set was written and is merely elsewhere (on a non-shared FS: a restart permuted the rank→node
-    placement wholesale). Warm-restarting here silently reset Adam moments while weights, step and
-    LR schedule resumed."""
+    placement wholesale). Warm-restarting here would silently reset Adam moments while weights, step
+    and LR schedule resumed."""
     model = _TinyModel()
     optimizer = _sgd(model)
     _write_checkpoint(tmp_path, shard=False, fingerprint=_live_fp(optimizer).to_dict())
@@ -409,8 +411,7 @@ def test_ep_and_cp_modes_restore_optimizer_state(tmp_path, monkeypatch, mode_kwa
 
 def test_non_fsdp_ep_falls_through_to_base_trainer(tmp_path):
     """ep_size==1 grouped-GEMM MoE without mixin FSDP2 (single GPU / replicated DDP): optimizer
-    state is replicated, so the base Trainer's optimizer.pt path restores it (the pre-continuity
-    code skipped restore entirely)."""
+    state is replicated, so the base Trainer's optimizer.pt path restores it."""
     model = _TinyModel()
     optimizer = _sgd(model)
     super_optim = _Recorder()

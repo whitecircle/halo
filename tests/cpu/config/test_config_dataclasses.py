@@ -13,10 +13,11 @@ import os
 import pytest
 
 import src.configs.async_training_config as async_training_config
+from src.args.rlvr_online_grpo_args import RLVROnlineGRPOScriptArguments
 from src.configs.async_training_config import POSITIVE_ROLLOUT_FIELDS, AsyncTrainingConfig
 from src.configs.environment_config import EnvironmentConfig
 from src.configs.smpo_config import SmoothMarginPOConfig
-from src.rewards.spec import EnvironmentTerm
+from src.rewards.terms import EnvironmentTerm
 from src.training.parser import H4ArgumentParser
 
 OUTPUT_DIR = "/tmp/test_output"
@@ -63,7 +64,6 @@ def test_smpo_defaults():
     assert cfg.max_completion_length is None
     assert cfg.resolve_length_budget() == (1024, 512, 512)
     assert cfg.truncation_mode == "keep_end"
-    assert cfg.label_pad_token_id == -100
     assert cfg.disable_dropout is True
     assert cfg.padding_free is False
 
@@ -321,16 +321,13 @@ def test_env_config_to_env_config_empty_kwargs():
     assert result == {"reward_terms": [{"source": "environment", "weight": 1.5}], "max_turns": 5}
 
 
-def test_env_config_kwargs_override_core_key():
-    """environment_kwargs is applied via dict.update LAST, so it overrides a core key.
-
-    This is a real footgun: putting ``max_turns`` inside environment_kwargs shadows the
-    top-level ``max_turns``. Pinning the precedence (kwargs win) documents it.
-    """
-
-    cfg = EnvironmentConfig(max_turns=10, environment_kwargs={"max_turns": 99})
-    result = cfg.to_env_config()
-    assert result["max_turns"] == 99
+@pytest.mark.parametrize(("key", "owner"), [("max_turns", "max_turns"), ("reward_terms", "rewards")])
+def test_env_config_kwargs_may_not_shadow_a_top_level_field(key, owner):
+    """``to_env_config`` applies environment_kwargs last, so a key it writes from a top-level field would
+    override that field past its validation (a ``max_turns: 0`` turning every episode into a no-op)."""
+    with pytest.raises(ValueError, match=f"must not carry \\['{key}'\\].*top-level fields .*{owner}"):
+        EnvironmentConfig(environment_kwargs={key: 0})
+    assert key in EnvironmentConfig(max_turns=3)._core_env_config(), "the refused keys are the ones the config writes"
 
 
 def test_env_config_rejects_non_positive_max_turns():
@@ -387,6 +384,21 @@ def test_env_config_spells_environment_type_as_the_registry_keys_it(tmp_path):
         EnvironmentConfig(environment_type=None)
 
 
+# RLVROnlineGRPOScriptArguments reward terms
+
+
+def test_rlvr_args_refuse_a_veto_judge():
+    """A ``checks`` judge gates an environment objective; the online arm's reward functions are
+    independent, with no objective to gate, so the term is refused at parse time."""
+    judge = {"source": "judge", "name": "conduct"}
+    checks = [{"name": "cheated", "description": "Hard-coded the expected output.", "veto": True}]
+    with pytest.raises(ValueError, match=r"\['conduct'\] list 'checks'.*list 'requirements' instead"):
+        RLVROnlineGRPOScriptArguments(rewards=[{**judge, "checks": checks}])
+    requirements = [{"name": "clear", "description": "Clear."}]
+    (term,) = RLVROnlineGRPOScriptArguments(rewards=[{**judge, "requirements": requirements}]).reward_terms
+    assert not term.is_veto
+
+
 # AsyncTrainingConfig tests
 
 
@@ -400,7 +412,6 @@ def test_async_config_defaults():
     assert cfg.rollout_top_p == 0.95
     assert cfg.rollout_max_tokens == 32768
     assert cfg.enable_prefetch is True
-    assert cfg.num_prefetch_batches == 1
     assert cfg.max_retries == 3
     assert cfg.retry_base_wait == 1.0
 
@@ -549,6 +560,34 @@ def test_async_config_rejects_out_of_range_top_p(bad):
         AsyncTrainingConfig(rollout_top_p=bad)
 
 
+@pytest.mark.parametrize(
+    ("knob", "bad"),
+    [
+        ("rollout_top_k", 0),
+        ("rollout_top_k", -2),
+        ("rollout_min_p", 1.5),
+        ("rollout_min_p", -0.1),
+        ("rollout_min_p", float("nan")),
+        ("rollout_repetition_penalty", 0.0),
+        ("rollout_repetition_penalty", 2.5),
+        ("rollout_repetition_penalty", float("nan")),
+    ],
+)
+def test_async_config_rejects_a_filter_the_engines_refuse(knob, bad):
+    """Each filter goes out on every request, so a value SGLang refuses (top_k 0, min_p outside
+    [0, 1], a penalty outside (0, 2]) is a per-request rejection on every episode."""
+    with pytest.raises(ValueError, match=knob):
+        AsyncTrainingConfig(**{knob: bad})
+
+
+@pytest.mark.parametrize(
+    ("knob", "good"), [("rollout_top_k", 1), ("rollout_min_p", 1.0), ("rollout_repetition_penalty", 2.0)]
+)
+def test_async_config_accepts_a_filter_at_its_range_edge(knob, good):
+    """Anti-vacuity for the refusals above: the edge of each accepted range constructs."""
+    assert getattr(AsyncTrainingConfig(**{knob: good}), knob) == good
+
+
 @pytest.mark.parametrize("bad", [-0.5, float("nan"), float("inf")])
 def test_async_config_rejects_a_non_finite_or_negative_retry_base_wait(bad):
     """The retry backoff grows from ``retry_base_wait``: a negative base shrinks it, NaN slips past
@@ -559,7 +598,7 @@ def test_async_config_rejects_a_non_finite_or_negative_retry_base_wait(bad):
 
 
 def test_async_config_rejects_a_thinking_budget_that_eats_the_whole_turn():
-    """The answer headroom is ``rollout_max_tokens - rollout_max_thinking_tokens``, floored at 0.
+    """The answer room is ``rollout_max_tokens - rollout_max_thinking_tokens``, none where they meet.
 
     At or above the turn cap the floor hides the mistake: every turn spends its whole budget on
     reasoning and is cut before the answer or tool call, which trains as a length-cut turn forever.
@@ -569,16 +608,41 @@ def test_async_config_rejects_a_thinking_budget_that_eats_the_whole_turn():
     AsyncTrainingConfig(rollout_max_tokens=4096, rollout_max_thinking_tokens=4095)  # no raise
 
 
-@pytest.mark.parametrize("bad", [-1, float("nan")])
-def test_async_config_rejects_a_negative_or_non_finite_thinking_budget(bad):
-    """A negative budget is below every turn cap and NaN passes every ordered comparison, so the
-    headroom check alone would pass either through to the engine as a nonsense ``thinking_token_budget``;
-    ``null`` is the spelling for unbounded reasoning."""
-    with pytest.raises(ValueError, match="rollout_max_thinking_tokens must be a finite number >= 0"):
+@pytest.mark.parametrize("bad", [4095, 0, -1, True, 4096.0, "4096"])
+def test_async_config_rejects_an_episode_budget_below_one_turn_or_not_a_count(bad):
+    """The episode budget narrows every turn's cap to what is left: below ``rollout_max_tokens`` the
+    first turn could never use the per-turn cap the run states, a bool is an int that spells a mistake,
+    and a float or a string would reach the engine's ``max_tokens`` as no count. Re-checked on a CLI
+    override, which never re-runs ``__post_init__``."""
+    with pytest.raises(ValueError, match="rollout_max_episode_tokens must be an int >= rollout_max_tokens"):
+        AsyncTrainingConfig(rollout_max_tokens=4096, rollout_max_episode_tokens=bad)
+    cfg = AsyncTrainingConfig(rollout_max_tokens=4096)
+    cfg.rollout_max_episode_tokens = bad
+    with pytest.raises(ValueError, match="rollout_max_episode_tokens must be an int >= rollout_max_tokens"):
+        cfg.__post_override__({"rollout_max_episode_tokens"})
+
+
+def test_async_config_mirrors_the_episode_budget_into_the_rollout_config():
+    """One whole turn fits at equality, null is unbounded, and the actors read only the built
+    ``RolloutConfig``, so the knob has to land on ``max_episode_tokens``."""
+    one_turn = AsyncTrainingConfig(rollout_max_tokens=4096, rollout_max_episode_tokens=4096)
+    assert one_turn.get_rollout_config().max_episode_tokens == 4096
+    bounded = AsyncTrainingConfig(rollout_max_tokens=4096, rollout_max_episode_tokens=65536)
+    assert bounded.get_rollout_config().max_episode_tokens == 65536
+    assert AsyncTrainingConfig(rollout_max_episode_tokens=None).get_rollout_config().max_episode_tokens is None
+
+
+@pytest.mark.parametrize("bad", [-1, 0, float("nan"), True, 8000.5], ids=["negative", "zero", "nan", "bool", "float"])
+def test_async_config_rejects_a_thinking_budget_that_is_not_a_positive_int(bad):
+    """A negative budget is below every turn cap, NaN passes every ordered comparison, a bool or a float
+    would reach the engine as a nonsense ``thinking_token_budget``, and 0 would be sent as 1 while counting
+    as no cap at all (the forced-close gates then never arm); the one range check refuses them all.
+    ``null`` is the spelling for no run-wide cap."""
+    with pytest.raises(ValueError, match="rollout_max_thinking_tokens must be an int in"):
         AsyncTrainingConfig(rollout_max_thinking_tokens=bad)
     cfg = AsyncTrainingConfig()
     cfg.rollout_max_thinking_tokens = bad
-    with pytest.raises(ValueError, match="rollout_max_thinking_tokens must be a finite number >= 0"):
+    with pytest.raises(ValueError, match="rollout_max_thinking_tokens must be an int in"):
         cfg.__post_override__({"rollout_max_thinking_tokens"})
 
 
@@ -591,64 +655,17 @@ def test_async_config_range_guards_survive_a_cli_override():
         cfg.__post_override__({"rollout_temperature"})
 
 
-def test_async_config_rejects_an_unknown_thinking_budget_scope():
-    """The drivers compare the scope against the two spellings by equality, so a misspelling would run
-    as the per-turn scope while the YAML promised a shared budget."""
-    with pytest.raises(ValueError, match="rollout_thinking_budget_scope must be one of"):
-        AsyncTrainingConfig(rollout_thinking_budget_scope="task")
-    cfg = AsyncTrainingConfig()
-    cfg.rollout_thinking_budget_scope = "task"
-    with pytest.raises(ValueError, match="rollout_thinking_budget_scope must be one of"):
-        cfg.__post_override__({"rollout_thinking_budget_scope"})
-
-
-@pytest.mark.parametrize("bad", [0, -1, True])
-def test_async_config_rejects_a_thinking_turn_reserve_below_one(bad):
-    """A reserve of 0 hands a spent episode's later turns an engine cap of 0, closing their reasoning
-    before it opens; a bool is an int that spells a mistake, not a token count. Guarded under either
-    scope, so flipping the scope later cannot uncover a stored bad value."""
-    with pytest.raises(ValueError, match="rollout_thinking_turn_reserve must be an int >= 1"):
-        AsyncTrainingConfig(rollout_thinking_turn_reserve=bad)
-
-
-def test_async_config_episode_scope_requires_what_the_reasoning_count_reads():
-    """The episode scope counts a turn's reasoning off the sampled ids up to and including the reasoning-end marker:
-    without the capture or the marker there is nothing to count. A reserve above the per-turn ceiling
-    would let a spent episode's turn exceed the ceiling the reserve is meant to sit beneath."""
-    episode = {"rollout_thinking_budget_scope": "episode"}
-    with pytest.raises(ValueError, match="requires train_on_sampled_tokens"):
-        AsyncTrainingConfig(**episode, train_on_sampled_tokens=False)
-    with pytest.raises(ValueError, match="requires rollout_reasoning_end_token"):
-        AsyncTrainingConfig(**episode, rollout_reasoning_end_token="")
-    with pytest.raises(ValueError, match=r"rollout_thinking_turn_reserve \(600\) must not exceed"):
-        AsyncTrainingConfig(**episode, rollout_max_thinking_tokens=512, rollout_thinking_turn_reserve=600)
-    # Anti-vacuity: the same shapes construct under the per-turn scope, where nothing reads the ids or
-    # the marker, and the episode scope constructs once every requirement is met.
-    AsyncTrainingConfig(
-        train_on_sampled_tokens=False,
-        rollout_reasoning_end_token="",
-        rollout_max_thinking_tokens=512,
-        rollout_thinking_turn_reserve=600,
-    )
-    ok = AsyncTrainingConfig(**episode, rollout_max_thinking_tokens=4096, rollout_thinking_turn_reserve=4096)
-    assert ok.rollout_thinking_budget_scope == "episode"
-
-
-def test_async_config_injects_the_scope_variable_only_under_the_episode_scope():
-    """The effort templates read ``reasoning_budget_scope`` to state what the budget covers. The config
-    owns it — a YAML copy could disagree with the scope the drivers narrow by — so every request and
-    every trainer-side render sees it exactly when the scope is the episode's."""
-    with pytest.raises(ValueError, match="must not carry 'reasoning_budget_scope'"):
-        AsyncTrainingConfig(rollout_chat_template_kwargs={"reasoning_budget_scope": "episode"})
+def test_async_config_template_variables_are_the_yamls_own_kwargs():
+    """Every request and every trainer-side render carries exactly the YAML's ``rollout_chat_template_kwargs``:
+    no run-wide variable is injected beside them (the per-episode level and budget travel per request), and
+    the rollout config gets its own copy, never the YAML's mapping."""
     run_kwargs = {"preserve_thinking": True}
-    episode = AsyncTrainingConfig(rollout_thinking_budget_scope="episode", rollout_chat_template_kwargs=run_kwargs)
-    stated = {"preserve_thinking": True, "reasoning_budget_scope": "episode"}
-    assert episode.rollout_template_variables() == stated
-    assert episode.get_rollout_config(reasoning_end_token_id=1).chat_template_kwargs == stated
-    assert episode.rollout_chat_template_kwargs == run_kwargs, "the YAML's own kwargs are never mutated"
-    turn = AsyncTrainingConfig(rollout_chat_template_kwargs=run_kwargs)
-    assert turn.rollout_template_variables() == run_kwargs
-    assert turn.get_rollout_config().chat_template_kwargs == run_kwargs
+    config = AsyncTrainingConfig(rollout_chat_template_kwargs=run_kwargs)
+    mirrored = config.get_rollout_config().chat_template_kwargs
+    assert mirrored == run_kwargs and mirrored is not config.rollout_chat_template_kwargs
+    assert AsyncTrainingConfig().get_rollout_config().chat_template_kwargs == {}
+    with pytest.raises(ValueError, match="must not carry"):
+        AsyncTrainingConfig(rollout_chat_template_kwargs={"reasoning_budget": 8192})
 
 
 if __name__ == "__main__":

@@ -1,10 +1,10 @@
 #!/usr/bin/env python
 """``_apply_liger_for_standard_models`` must not swallow the appliers' deliberate failures.
 
-The toolkit appliers raise on purpose: ``ImportError`` when Liger is absent (mistral4, zaya),
-``ValueError`` for a contradictory option pair, ``NotImplementedError`` for an unimplemented one. A
-blanket ``except ImportError: return None`` around the resolve-and-apply block turns any of them into
-a log line about an unrelated cause, and the run that asked for Liger trains UNPATCHED.
+The toolkit appliers raise on purpose: ``ValueError`` for a contradictory option pair,
+``NotImplementedError`` for an unimplemented one. A blanket ``except ImportError: return None``
+around the resolve-and-apply block turns a failure into a log line about an unrelated cause, and the
+run that asked for Liger trains UNPATCHED.
 
 Run: pytest tests/cpu/kernels/test_liger_orchestrator_propagates.py
 """
@@ -21,7 +21,7 @@ from tests.common.utils import probe_findings
 # The orchestrator logs through accelerate's rank-aware logger, which requires an initialized state.
 PartialState()
 
-# The exception types the registered toolkit appliers actually raise. Each must reach the caller.
+# The exception types an applier can raise. Each must reach the caller.
 _APPLIER_EXCEPTIONS = (ImportError, ValueError, NotImplementedError, RuntimeError)
 
 
@@ -69,10 +69,7 @@ def test_every_registered_model_type_applies_without_raising():
     """Every model_type the orchestrator can resolve must apply cleanly under the toolkit defaults.
 
     Once an applier's failure propagates (above), any upstream applier that cannot honour those defaults
-    takes the run down at model load. liger-kernel 0.8.0's Qwen3.5 applier is one (its ``cross_entropy``
-    branch imports ``liger_cross_entropy`` from the wrong module while the toolkit defaults that flag ON);
-    four more raise ``NotImplementedError`` on ``rope``. Sweeping the whole registry is what turns "we know
-    about Qwen3.5" into "we find the next one".
+    takes the run down at model load. Sweeping the whole registry catches the next such applier.
 
     Run in a subprocess: applying an applier rebinds upstream HF module classes for the rest of the
     process, which would poison every later test in the session.

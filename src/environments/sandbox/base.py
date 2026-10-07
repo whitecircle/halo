@@ -23,10 +23,9 @@ SANDBOX_DEFAULT_COMPILE_TIMEOUT = 30.0
 SANDBOX_DEFAULT_COMPILE_MEMORY_MB = 2048
 # Largest file a local-backend child may write (bytes); bounds FS disk-fill and binary size.
 LOCAL_FSIZE_LIMIT = 64 * 1024 * 1024
-# RLIMIT_NPROC for the run step. The kernel ignores it for root (how the training containers run), so
-# it binds only unprivileged runs such as a bubblewrap jail; the timeout's process-group kill remains
-# the primary fork-bomb defense. It counts the user's entire task set, so it must clear the
-# trainer + Ray baseline.
+# RLIMIT_NPROC for the run step. The kernel exempts uid 0: it binds every bubblewrap run (the jail's root
+# is a subordinate uid, counted per run in its own user namespace), and `local` only in a container run as
+# another user, whose WHOLE task set it counts — there it must clear the trainer+Ray baseline.
 LOCAL_NPROC_LIMIT = 4096
 
 INTERPRETER_PLACEHOLDER = "$INTERPRETER"
@@ -346,6 +345,12 @@ class SandboxExecutor(ABC):
     def open_session(self) -> SandboxSession:
         """Open a persistent :class:`SandboxSession` (one per episode for multi-turn rollouts)."""
         raise NotImplementedError
+
+    def toolchain(self, language: str) -> str | None:
+        """How this backend builds or runs a ``language`` program, as the predicate a tool description
+        states (``is compiled with g++ -O2 -pipe -std=c++17``, ``runs on CPython 3.12``); ``None`` where the
+        backend does not say, as a service answering for its own toolchain."""
+        return None
 
     def run(
         self,

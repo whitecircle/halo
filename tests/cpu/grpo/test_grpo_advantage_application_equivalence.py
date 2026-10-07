@@ -148,11 +148,7 @@ def _rollouts(truncated: list[bool], rewards: list[float], valid: list[bool] | N
     """Rollout stand-ins exposing exactly what the narrow phase reads off them."""
     valid = [True] * len(truncated) if valid is None else valid
     return [
-        types.SimpleNamespace(
-            trajectory=types.SimpleNamespace(truncated=t, episode_invalid=not v),
-            error=None,
-            total_reward=r,
-        )
+        types.SimpleNamespace(trajectory=types.SimpleNamespace(truncated=t), counts_toward_baseline=v, total_reward=r)
         for t, r, v in zip(truncated, rewards, valid, strict=True)
     ]
 
@@ -329,7 +325,7 @@ def test_env_application_no_drops_keeps_masks_and_counts_loss_tokens():
 
 
 def test_an_invalid_episode_is_dropped_and_excluded_from_degeneracy():
-    """The two things a transcription of this block kept missing: the drop set is SEEDED with the
+    """The two things a transcription of this block misses: the drop set is SEEDED with the
     invalid episodes, and degeneracy is judged over the VALID members only.
 
     Rewards [1, 1, 0] with the last episode invalid: counting it would make the group non-degenerate

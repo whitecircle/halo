@@ -9,9 +9,8 @@ visible from a single-node run — which is the only kind that can be launched h
   gets exactly this wrong, so the per-node-count table below is pinned.
 * A stage must own whole NVLink domains, which makes the legal ``pp_size`` values the divisors of
   the domain count — and makes PP unreachable on a single node.
-* Therefore a node never straddles a stage. ``is_pp_shard_writer`` relies on that to pick one
-  checkpoint writer per NODE on a non-shared filesystem; if it failed, two stages' shards would be
-  written by ranks that disagree about which layers they hold.
+* Therefore a configured node never straddles a stage, which keeps a non-shared filesystem's
+  checkpoint writers (``is_pp_shard_writer``) at one per node in production layouts.
 
 Usage:
     python tests/cpu/parallelism/test_pp_data_parallel_composition.py
@@ -63,8 +62,7 @@ def test_data_parallel_size_divides_the_stage_world(nodes, pp, kwargs, expected_
 @pytest.mark.parametrize("nodes", [1, 2, 3, 4, 8])
 def test_legal_pp_sizes_are_the_divisors_of_the_domain_count(nodes):
     """A stage owns whole NVLink domains, so on N single-domain nodes the legal pp sizes are exactly
-    the divisors of N — in particular PP cannot run on one node, which is why no GPU test here
-    launches PP without simulating smaller domains."""
+    the divisors of N — in particular PP cannot run on one node."""
     world = nodes * GPUS
     accepted = []
     for pp in range(1, world + 1):

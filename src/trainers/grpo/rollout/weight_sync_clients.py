@@ -1,5 +1,5 @@
-"""Pool of vendored NCCL weight-sync clients, one per rollout server, plus the context-window
-preflight that reads each server's model card before the trainer is built.
+"""Pool of vendored NCCL weight-sync clients, one per rollout server, plus the preflights that probe
+each server before the trainer is built (context window, sampler and prompt log-prob semantics).
 
 No vllm/sglang package dependency; generation requests go over HTTP separately (see ray_actors.py).
 Constraints: weight sync runs from the main process only; the trainer must use a different GPU than
@@ -8,13 +8,17 @@ the rollout server (NCCL requires distinct devices); one server URL per weight-s
 
 import concurrent.futures
 import logging
+import math
 import threading
 from collections.abc import Callable, Iterable
 from functools import partial
 from typing import Any
 
 import torch
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
 
+from src.configs.rollout_config import SAMPLER_FILTERS_OFF
 from src.distributed.nccl.clients.base import (
     WEIGHT_SYNC_CHUNK_BYTES,
     BaseWeightSyncClient,
@@ -27,8 +31,34 @@ from src.distributed.nccl.clients.base import (
 )
 from src.distributed.nccl.registry import resolve_weight_sync_client
 from src.distributed.runtime import raise_rank0_failure
+from src.models.structure import resolve_tokenizer
 
 logger = logging.getLogger(__name__)
+
+# A preflight request retries a refused connection or a 5xx, never a read past its timeout: every rank
+# waits on rank 0's probes, so a stalled server must cost one timeout per request, not six.
+_PREFLIGHT_RETRY = Retry(
+    total=3,
+    connect=3,
+    read=0,
+    status=3,
+    status_forcelist=[500, 502, 503],
+    backoff_factor=1,
+    allowed_methods=["POST", "GET"],
+)
+
+# Prompt-log-prob consistency probe: a counting sequence cut past vLLM's CUDA-graph capture range
+# (512 tokens), so the whole prefills eagerly, and prefixes that each prefill as a captured graph.
+_PROMPT_LOGPROB_PROBE_TEXT = " ".join(str(n) for n in range(2048))
+_PROMPT_LOGPROB_PROBE_TOKENS = 1100
+_PROMPT_LOGPROB_PROBE_PREFIXES = (8, 64, 128, 256, 448)
+# Batch-shape bf16 noise stays under ~0.5 nats per token; the drafter overwrite moves every one by 8-22.
+_PROMPT_LOGPROB_TOLERANCE_NATS = 2.0
+# Any servable model all but predicts a counting sequence, while garbage prompt log-probs average 12-22
+# nats: the bound catches a whole sequence that itself prefilled as a graph (a raised capture range).
+_PROMPT_LOGPROB_PROBE_MAX_MEAN_NLL = 4.0
+# Every rank waits on rank 0's probe in the verdict broadcast, so a hung server must not outlast it.
+_PROMPT_LOGPROB_PROBE_TIMEOUT_S = 60.0
 
 
 def _probe_server(
@@ -44,6 +74,8 @@ def _probe_server(
     client = None
     try:
         client = client_cls(base_url=url)
+        for scheme in ("http://", "https://"):
+            client.session.mount(scheme, HTTPAdapter(max_retries=_PREFLIGHT_RETRY))
         return probe(client)
     except Exception as e:
         logger.warning(f"Could not {failure} {url}: {e}")
@@ -79,9 +111,10 @@ def verify_context_window(
         if full_trajectory_tokens and full_trajectory_tokens > mml:
             logger.warning(
                 f"Rollout server {url} context window ({mml}) < worst-case trajectory budget "
-                f"({full_trajectory_tokens} = max_prompt_length + max_turns × rollout_max_tokens). A long "
-                f"multi-turn rollout that grows past {mml} tokens can OOM the training forward before the "
-                f"fail-on-overflow check — lower max_turns or rollout_max_tokens so the worst case fits."
+                f"({full_trajectory_tokens} = max_prompt_length + what an episode may generate: the smaller of "
+                f"max_turns × rollout_max_tokens and rollout_max_episode_tokens). A long multi-turn rollout that "
+                f"grows past {mml} tokens can OOM the training forward before the fail-on-overflow check — set "
+                f"rollout_max_episode_tokens, or lower max_turns or rollout_max_tokens, so the worst case fits."
             )
 
 
@@ -90,6 +123,9 @@ def verify_sampler_logprob_reference(
     urls: list[str],
     temperature: float,
     top_p: float,
+    top_k: int,
+    min_p: float,
+    repetition_penalty: float,
     sequence_ratio_active: bool,
 ) -> None:
     """Refuse a rollout server whose per-token logprobs are not the reference the IS ratio divides by.
@@ -97,22 +133,42 @@ def verify_sampler_logprob_reference(
     The trainer scores its log-probs at the sampling temperature and divides by the engine's reported
     sampling log-probs, so those must already carry the temperature: against vLLM's default raw
     (pre-temperature) values every weight becomes π^T / π^1, tilted toward improbable tokens on every
-    step — entropy inflates at T > 1, collapses at T < 1 — while the ratio still reads ≈ 1. A nucleus-
-    renormalized reference (vLLM ``processed_logprobs`` with top-p < 1) lifts every uncertain position
-    by its nucleus mass; a consumer that sums the per-token log-ratios over a sequence
+    step — entropy inflates at T > 1, collapses at T < 1 — while the ratio still reads ≈ 1. A reference
+    renormalized over the sampler's cut (vLLM ``processed_logprobs`` under a top-p < 1, a top-k or a
+    min-p, all applied before its logprobs; SGLang's reference precedes all three) lifts every uncertain
+    position by the mass the cut kept; a consumer that sums the per-token log-ratios over a sequence
     (``sequence_ratio_active``: the trajectory geometric band, OPSM's per-trajectory mean, or a
     sequence-level IS mode) reads the sum as drift or a collapsing sequence weight, so that pairing is
-    refused. An unverifiable server warns: a preflight probe never fails the run by itself.
+    refused. The probe reads the renormalization off a top-p cut. ``top_k`` cuts above 0, the reading
+    TRL's off value (0) and the rollout config's (-1) share. A ``repetition_penalty`` other than 1 is
+    refused under the same consumers without a probe: both engines' reported logprobs carry it and the
+    trainer's never do. An unverifiable server warns: a preflight probe never fails the run by itself.
     """
-    if temperature == 1.0 and not (top_p < 1.0 and sequence_ratio_active):
+    if sequence_ratio_active and repetition_penalty != 1.0:
+        raise ValueError(
+            f"repetition_penalty={repetition_penalty} while the per-token log-ratios are summed over each "
+            f"sequence: both engines' sampling logprobs carry the penalty and the trainer's recomputed ones do "
+            f"not, so every penalized position reads as drift in the trajectory geometric band and OPSM, and a "
+            f"sequence-level vLLM IS ratio collapses. Sample with repetition_penalty: 1.0 "
+            f"(rollout_repetition_penalty: 1.0 on the environmental arm), or take the ratio per token: a "
+            f"token_* vllm_importance_sampling_mode, or drop isr_geo_band_min/max and isr_opsm_delta."
+        )
+    cuts = [
+        f"{name}={value}"
+        for name, value, on in (
+            ("top_p", top_p, top_p < 1.0),
+            ("top_k", top_k, top_k > 0),
+            ("min_p", min_p, min_p > 0),
+        )
+        if on
+    ]
+    if temperature == 1.0 and not (cuts and sequence_ratio_active):
         return
+    # Each probe request moves one knob from the identity sampler, so every other filter goes out off.
+    probe = partial(client_cls.probe_sampler_logprob_semantics, **SAMPLER_FILTERS_OFF)
     for url in urls:
         semantics = _probe_server(
-            client_cls,
-            url,
-            client_cls.probe_sampler_logprob_semantics,
-            SamplerLogprobSemantics(None, None),
-            "probe the sampler-logprob semantics of",
+            client_cls, url, probe, SamplerLogprobSemantics(None, None), "probe the sampler-logprob semantics of"
         )
         if temperature != 1.0:
             if semantics.temperature_applied is None:
@@ -128,23 +184,76 @@ def verify_sampler_logprob_reference(
                     f"`--logprobs-mode processed_logprobs` (the compose recipe sets it), or leave "
                     f"SGLANG_RETURN_ORIGINAL_LOGPROB unset on SGLang, or sample at temperature 1.0."
                 )
-        if top_p < 1.0 and sequence_ratio_active:
+        if cuts and sequence_ratio_active:
             if semantics.nucleus_renormalized is None:
                 logger.warning(
                     f"Rollout server {url}: could not verify whether its logprobs are renormalized over the "
-                    f"top-p nucleus; with top_p={top_p} a renormalized reference biases every sequence-summed "
-                    f"log-ratio (geometric band, OPSM, sequence-level IS)."
+                    f"sampler's cut; with {', '.join(cuts)} a renormalized reference biases every "
+                    f"sequence-summed log-ratio (geometric band, OPSM, sequence-level IS)."
                 )
             elif semantics.nucleus_renormalized:
                 raise ValueError(
-                    f"Rollout server {url} reports logprobs renormalized over the top-p nucleus while top_p={top_p} "
-                    f"and the per-token log-ratios are summed over each sequence: every uncertain position is "
-                    f"lifted by its nucleus mass, so the trajectory geometric band and OPSM's per-trajectory "
-                    f"mean log-ratio read the sum as drift and a sequence-level vLLM IS ratio collapses toward 0 "
-                    f"(sequence_mask only zeroes ratios ABOVE the cap, so the run stalls silently). Sample at "
-                    f"top_p: 1.0 (rollout_top_p: 1.0 on the environmental arm), or take the ratio per token: a "
-                    f"token_* vllm_importance_sampling_mode, or drop isr_geo_band_min/max and isr_opsm_delta."
+                    f"Rollout server {url} reports logprobs renormalized over the sampler's cut while "
+                    f"{', '.join(cuts)} and the per-token log-ratios are summed over each sequence: every "
+                    f"uncertain position is lifted by the mass the cut kept, so the trajectory geometric band and "
+                    f"OPSM's per-trajectory mean log-ratio read the sum as drift and a sequence-level vLLM IS ratio "
+                    f"collapses toward 0 (sequence_mask only zeroes ratios ABOVE the cap, so the run stalls "
+                    f"silently). Sample with every cut off — top_p: 1.0, top_k: 0, min_p: 0.0 (rollout_top_p: 1.0, "
+                    f"rollout_top_k: -1, rollout_min_p: 0.0 on the environmental arm) — or take the ratio per "
+                    f"token: a token_* vllm_importance_sampling_mode, or drop isr_geo_band_min/max and isr_opsm_delta."
                 )
+
+
+def _probe_prompt_logprobs(client: BaseWeightSyncClient, token_ids: list[int]) -> tuple[float, float, int]:
+    """``(mean NLL, gap, length)``: the whole sequence's mean negative log-prob, and the largest per-position
+    gap between it and a prefix scored alone, with that prefix's length. A non-finite log-prob reads as an
+    infinite gap."""
+    anchor, rest = token_ids[:1], token_ids[1:]
+    score = partial(client.score_completion_logprobs, anchor, timeout=_PROMPT_LOGPROB_PROBE_TIMEOUT_S)
+    whole = score(rest)
+    divergences = []
+    for length in _PROMPT_LOGPROB_PROBE_PREFIXES:
+        gaps = [abs(a - b) for a, b in zip(score(rest[: length - 1]), whole[: length - 1], strict=True)]
+        divergences.append((max(gaps) if all(map(math.isfinite, gaps)) else math.inf, length))
+    gap, length = max(divergences)
+    return -sum(whole) / len(whole), gap, length
+
+
+def verify_engine_prompt_logprobs(client_cls: type[BaseWeightSyncClient], urls: list[str], tokenizer) -> None:
+    """Refuse a rollout server whose prompt log-probs do not follow from the tokens alone.
+
+    ``isr_engine_reference`` reads every re-scored row off the engine's prompt log-probs. vLLM 0.26.0 under
+    speculative decoding corrupts them whenever the target prefill runs as a CUDA graph: the drafter's graph
+    overwrites the hidden states they are read from, and every position of the request comes back garbage
+    while sampling stays correct (vllm-project/vllm#53488; the toolkit's vLLM image patches it). The probe
+    scores a counting sequence long enough to prefill eagerly, which any servable model predicts, then
+    prefixes of it alone at captured-graph lengths, and compares the shared positions. An unverifiable
+    server warns: a preflight probe never fails the run by itself.
+    """
+    token_ids = resolve_tokenizer(tokenizer)(_PROMPT_LOGPROB_PROBE_TEXT)["input_ids"][:_PROMPT_LOGPROB_PROBE_TOKENS]
+    probe = partial(_probe_prompt_logprobs, token_ids=token_ids)
+    for url in urls:
+        result = _probe_server(client_cls, url, probe, None, "probe the prompt log-probs of")
+        if result is None:
+            continue
+        mean_nll, gap, length = result
+        # Negated so a NaN mean, for which every comparison is False, is refused too.
+        if not (mean_nll <= _PROMPT_LOGPROB_PROBE_MAX_MEAN_NLL and gap <= _PROMPT_LOGPROB_TOLERANCE_NATS):
+            raise ValueError(
+                f"Rollout server {url} returns prompt log-probs that do not follow from the tokens: a "
+                f"{len(token_ids)}-token counting probe scored whole averages {mean_nll:.2f} nats per token (bound "
+                f"{_PROMPT_LOGPROB_PROBE_MAX_MEAN_NLL}), and its first {length} tokens scored alone differ from the "
+                f"same positions by up to {gap:.2f} nats (tolerance {_PROMPT_LOGPROB_TOLERANCE_NATS}), so "
+                f"isr_engine_reference would compare the sampling log-probs against garbage. The known cause is "
+                f"vLLM 0.26.0 with speculative decoding (MTP) and without the toolkit image's prompt-log-prob patch: "
+                f"the drafter's CUDA graph overwrites the hidden states the prompt log-probs are read from whenever "
+                f"the prefill runs as a graph (vllm-project/vllm#53488). Serve vLLM from the image Dockerfile.vllm "
+                f"builds, turn speculative decoding off, or set isr_engine_reference: false."
+            )
+        logger.info(
+            f"Rollout server {url}: prompt log-probs follow from the tokens (probe mean NLL {mean_nll:.3f}, "
+            f"largest prefix gap {gap:.3f} nats)"
+        )
 
 
 def _preflight_failure(error: Exception) -> str:
@@ -169,14 +278,40 @@ def verify_context_window_synced(
 
 
 def verify_sampler_logprob_reference_synced(
-    urls: list[str], *, temperature: float, top_p: float, sequence_ratio_active: bool, backend: str
+    urls: list[str],
+    *,
+    temperature: float,
+    top_p: float,
+    top_k: int,
+    min_p: float,
+    repetition_penalty: float,
+    sequence_ratio_active: bool,
+    backend: str,
 ) -> None:
     """Collective-safe :func:`verify_sampler_logprob_reference`; call on every rank."""
     client_cls = resolve_weight_sync_client(backend)
     raise_rank0_failure(
-        partial(verify_sampler_logprob_reference, client_cls, urls, temperature, top_p, sequence_ratio_active),
+        partial(
+            verify_sampler_logprob_reference,
+            client_cls,
+            urls,
+            temperature,
+            top_p,
+            top_k,
+            min_p,
+            repetition_penalty,
+            sequence_ratio_active,
+        ),
         _preflight_failure,
         ValueError,
+    )
+
+
+def verify_engine_prompt_logprobs_synced(urls: list[str], tokenizer, *, backend: str) -> None:
+    """Collective-safe :func:`verify_engine_prompt_logprobs`; call on every rank."""
+    client_cls = resolve_weight_sync_client(backend)
+    raise_rank0_failure(
+        partial(verify_engine_prompt_logprobs, client_cls, urls, tokenizer), _preflight_failure, ValueError
     )
 
 
@@ -291,30 +426,8 @@ class InferenceClientManager:
         self._initialized = True
         logger.info(f"InferenceClientManager initialized: {len(self._clients)} clients connected")
 
-    def update_model_params(self, model: torch.nn.Module):
-        """Sync every parameter to the rollout servers one server at a time: the raw-model path (a
-        single training process, no adapters, no EP wrappers). Every other shape streams the gather
-        and pauses all servers together."""
-        if not self._initialized:
-            raise RuntimeError("InferenceClientManager not initialized. Call init_communicators() first.")
-
-        # Scoped to the model this push sends, as the streamed path is in ``sync_weights_to_client``.
-        self.scope_co_load_groups(name for name, _ in model.named_modules())
-        for i, client in enumerate(self._clients):
-            url = self.server_configs[i]["url"]
-            logger.debug(f"Rolling sync: updating server {i + 1}/{len(self._clients)} ({url})")
-            try:
-                client.update_model_params(model)
-            except Exception as e:
-                # The raise alone does not name which of the N servers refused the weights.
-                logger.error(f"Rolling sync failed for server {i + 1} ({url}): {e}")
-                raise
-
-        logger.debug(f"Synced weights to {len(self._clients)} {self._client_factory.BACKEND_NAME} servers")
-
     def update_named_param(self, name: str, weights: torch.Tensor):
-        """Send one pre-gathered named parameter to all servers, for trainers that must gather EP/TP
-        weights first (``update_model_params`` iterates ``model.named_parameters()`` instead).
+        """Send one pre-gathered named parameter to all servers.
 
         One read-only snapshot per param on the sync device is shared by reference across every
         client's buffer, so the staged chunk costs ~1× rather than N_servers×, and a client's

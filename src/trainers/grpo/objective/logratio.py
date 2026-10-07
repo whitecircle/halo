@@ -18,9 +18,9 @@ over the episode. Pure functions: no trainer state.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
-
 import torch
+
+from src.configs.async_training_config import ISMaskConfig
 
 KL_LOGRATIO_CLAMP = 5.0
 """Cap on ``ref − logp`` (nats) in the k3 KL estimator, bounding per-token KL at ``exp(5) ≈ 148``."""
@@ -40,12 +40,18 @@ SAMPLER_CERTAIN_LOGPROB = 0.0
 forced it (vLLM's thinking budget closing ``</think>``) or the nucleus collapsed onto it."""
 
 
+def sampled_token_mask(completion_mask: torch.Tensor, row_has_sampling: torch.Tensor) -> torch.Tensor:
+    """The completion tokens of rows that carry sampling logprobs: the only tokens a sampler-side
+    quantity (a forced close, a certain token, the IS ratio) can be read on."""
+    return completion_mask.bool() & row_has_sampling.unsqueeze(1)
+
+
 def sampler_certain_mask(
     sampling_logps: torch.Tensor, completion_mask: torch.Tensor, row_has_sampling: torch.Tensor
 ) -> torch.Tensor:
     """Policy tokens the sampler emitted with probability 1 (:data:`SAMPLER_CERTAIN_LOGPROB`), on rows that
     carry sampling logprobs: no sampling choice was made there, so they carry no importance weight."""
-    return completion_mask.bool() & row_has_sampling.unsqueeze(1) & (sampling_logps >= SAMPLER_CERTAIN_LOGPROB)
+    return sampled_token_mask(completion_mask, row_has_sampling) & (sampling_logps >= SAMPLER_CERTAIN_LOGPROB)
 
 
 def zero_engine_forced_closes(
@@ -91,6 +97,17 @@ def clamp_ref_logps(ref_logps: torch.Tensor, policy_logps: torch.Tensor) -> tupl
     return torch.minimum(ref_logps, ceiling), ref_logps > ceiling
 
 
+def kl_clamp_counts(clamped: torch.Tensor, loss_mask: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+    """``(clamped loss tokens, loss tokens)``, the pair :data:`KL_CLAMP_FRAC_KEY` is the world ratio of.
+
+    Over the loss mask the KL term is averaged on (TRL's ``kl``: the completion mask times the tool mask,
+    after every drop), so a cap that bit on padding, on a tool-output token or on a dropped row is not
+    counted, nor is any of them in the denominator.
+    """
+    loss_mask = loss_mask.bool()
+    return (clamped & loss_mask).sum(), loss_mask.sum()
+
+
 def compute_is_ratio(
     recompute_logps: torch.Tensor,
     sampling_logps: torch.Tensor,
@@ -106,10 +123,8 @@ def compute_is_ratio(
     there, so it carries no importance weight and cannot trip a band or the veto.
     Returns ``(ratio, logps_diff, corrected_mask)``, all shaped like ``completion_mask``.
     """
-    corrected_mask = (
-        completion_mask.bool()
-        & row_has_sampling.unsqueeze(1)
-        & ~sampler_certain_mask(sampling_logps, completion_mask, row_has_sampling)
+    corrected_mask = sampled_token_mask(completion_mask, row_has_sampling) & ~sampler_certain_mask(
+        sampling_logps, completion_mask, row_has_sampling
     )
     logps_diff = (recompute_logps - sampling_logps) * corrected_mask
     return torch.clamp(torch.exp(logps_diff), max=clip_max), logps_diff, corrected_mask
@@ -141,43 +156,6 @@ def select_mask_logratio(
         "sampling/engine_rescore_coverage": (n, corrected_mask.sum()),
     }
     return mask_diff, stats
-
-
-@dataclass(frozen=True)
-class ISMaskConfig:
-    """Mask/veto stages layered on the truncated IS ratio (see module docstring). All default off.
-
-    * ``geo_band_min``/``geo_band_max`` — trajectory geometric-mean band: mask the whole trajectory when
-      ``exp(mean log-ratio over its corrected tokens)`` leaves the band. Both bounds must be set.
-    * ``veto_min`` — catastrophic-token veto: mask the trajectory when any corrected token's ratio is below it.
-    * ``opsm_delta`` — see :func:`apply_opsm` (applied separately, once advantages exist).
-    """
-
-    geo_band_min: float | None = None
-    geo_band_max: float | None = None
-    veto_min: float | None = None
-    opsm_delta: float | None = None
-
-    def __post_init__(self):
-        lo, hi = self.geo_band_min, self.geo_band_max
-        if (lo is None) != (hi is None):
-            raise ValueError("isr_geo_band_min and isr_geo_band_max must be set together")
-        if lo is not None and not 0 < lo < 1 < hi:
-            raise ValueError(f"isr_geo_band bounds must satisfy 0 < min < 1 < max, got [{lo}, {hi}]")
-        if self.veto_min is not None and not 0 < self.veto_min < 1:
-            raise ValueError(f"isr_veto_min must be in (0, 1), got {self.veto_min}")
-        if self.opsm_delta is not None and self.opsm_delta <= 0:
-            raise ValueError(f"isr_opsm_delta must be > 0 (nats), got {self.opsm_delta}")
-
-    @property
-    def any_mask_active(self) -> bool:
-        """Whether a stage :func:`apply_is_masks` applies (the geometric band or the veto) is set."""
-        return self.geo_band_min is not None or self.veto_min is not None
-
-    @property
-    def any_stage_active(self) -> bool:
-        """Whether any stage is set, OPSM included."""
-        return self.any_mask_active or self.opsm_delta is not None
 
 
 def _num_trajs(traj_ids: torch.Tensor) -> int:

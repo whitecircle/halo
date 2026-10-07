@@ -1,14 +1,14 @@
 """Named tolerances shared by correctness tests.
 
-Each value is keyed to what it compares rather than to a number, so two tests asserting
+Each value is keyed to *what it compares*, not to a number, so two tests asserting
 the same invariant ("EP loss matches the non-parallel reference") move together.
-Import the named constant rather than inlining a literal: the name states which
-invariant the bound guards, which is what a reviewer needs to judge whether it is
-too loose to catch a regression or tight enough to flake.
+Import the named constant rather than re-inlining a literal — the name states which
+invariant the bound guards, which is what a reviewer needs in order to judge whether
+it is too loose to catch a regression or tight enough to flake.
 
-A test whose comparison is different (a different model scale, a different
+A test whose comparison is genuinely different (a different model scale, a different
 aggregation) declares its own module-level constant with the measured noise floor and
-the bug signal it must stay under, rather than stretching a shared value to fit.
+the bug signal it must stay under; it does not stretch a shared value to fit.
 
     from tests.common.tolerances import TOL
     assert abs(ep_loss - fsdp_loss) < TOL.parallel_vs_baseline_loss_abs
@@ -26,8 +26,9 @@ class _Tolerances:
     # path's un-permute is a fixed-order gather-reduce, and the per-expert loop's (use_grouped_gemm:
     # false) index_add_ adds each row once per local expert, in a fixed expert order. DeepEP's receive
     # order does vary without full_determinism, but it reorders only the expert weight-gradient sums.
-    # 1e-3 is headroom; a real mis-dispatch or mis-shard moves one rank's loss well past it.
-    ep_identical_batch_rank_spread_abs: float = 1e-3
+    # So every rank's loss is the same float (measured 0.0 on every row reading this); compare through
+    # :meth:`identical_batch_ranks_agree`. A mis-dispatch or mis-shard moves one rank's loss off it.
+    ep_identical_batch_rank_spread_abs: float = 0.0
     # Identical batch through an all-reduce with no EP un-permute in the path (pure TP, pure ETP): the
     # all-reduce hands every rank one sum, and a loss or grad norm read off a shard misses by orders of
     # magnitude more.
@@ -68,10 +69,10 @@ class _Tolerances:
     resume_fixed_batch_loss_abs: float = 1e-2
 
     # ── Gradients through a sharded axis ────────────────────────────────────
-    # Two independent bug classes a collapsed relative-L2 bound cannot separate. Scale: a missing
-    # cross-rank reduction multiplies the norm by the axis size (>=2x) with direction intact, so the
-    # ceiling sits between bf16 reduction noise and that factor. Direction: routing/permutation/sign
-    # corruption reorients the gradient at unchanged norm, which no norm ratio can see.
+    # Two independent bug classes a collapsed relative-L2 bound cannot separate. SCALE: a
+    # missing cross-rank reduction multiplies the norm by the axis size, direction intact
+    # (measured 2.14 at axis 2 vs a 1.10 noise ceiling). DIRECTION: routing/permutation/sign
+    # corruption reorients at unchanged norm (noise floor 0.96, 24-layer bf16 MoE router).
     grad_norm_ratio_max: float = 1.25
     grad_direction_cosine_min: float = 0.90
 
@@ -91,10 +92,10 @@ class _Tolerances:
     ep_grad_norm_ratio_band: tuple[float, float] = (0.67, 1.5)
 
     # ── Exact-objective pins ────────────────────────────────────────────────
-    # Independent reimplementation vs the logged loss. The residual is dtype rather than objective:
-    # an fp32 reference of a preference objective over bf16 sequence log-prob sums lands 4e-3 relative
-    # away (KTO on Qwen3-0.6B), while degenerate objectives miss by >0.5. Relative, applied against
-    # max(1, |expected|).
+    # Independent reimplementation vs the logged loss. Residual is dtype, not objective: an
+    # fp32 reference of a preference objective over bf16 sequence log-prob sums lands 4e-3
+    # relative away (measured, KTO on Qwen3-0.6B). Degenerate objectives miss by >0.5 (25x).
+    # Relative, applied against max(1, |expected|).
     exact_objective_rel: float = 2e-2
 
     # ── Generic finite-difference / numerical kernels ───────────────────────
@@ -116,6 +117,11 @@ class _Tolerances:
     muon_band_domain_square: float = 1.4e-3
     muon_band_domain_rectangular: float = 4e-3
 
+    def identical_batch_ranks_agree(self, spread: float) -> bool:
+        """Whether an identical-batch loss spread across ranks is within
+        :attr:`ep_identical_batch_rank_spread_abs` (inclusive: the bound is an exact 0.0)."""
+        return spread <= self.ep_identical_batch_rank_spread_abs
+
     def muon_polar_cosine_min(self) -> float:
         """Smallest cosine between an orthogonalized update and its source's polar factor ``U V^T``.
 
@@ -127,16 +133,16 @@ class _Tolerances:
         return 2 * math.sqrt(low * high) / (low + high)
 
     def control_min_loss_shift(self, bound: float | None = None) -> float:
-        """Minimum loss shift a negative control must produce for a match to be meaningful.
+        """Minimum loss shift a negative control must produce to prove a match is non-vacuous.
 
-        Derived rather than declared: a control that perturbs the mechanism under test has to move
-        the compared quantity by more than the tolerance guarding it, or the "it matches" verdict
-        carries no information. 2x leaves room for a partial perturbation (rotating only the experts
-        one rank owns, say) without letting noise satisfy it.
+        Derived rather than declared: a control that perturbs the mechanism under test has to
+        move the compared quantity by more than the tolerance guarding it, or the "it matches"
+        verdict carries no information. 2x leaves room for the perturbation being partial (e.g.
+        rotating only the experts one rank owns) without letting noise satisfy it.
 
-        ``bound`` is the tolerance in force at the call site, so a test on a wider bound cannot keep
-        a control floor derived from a narrower one, which would let a control pass without
-        underwriting the match.
+        ``bound`` is the tolerance actually in force at the call site, so a test on a wider bound
+        cannot keep a control floor derived from a narrower one — which would let a control pass
+        while proving nothing about the match it is supposed to underwrite.
         """
         return 2 * (self.parallel_vs_baseline_loss_abs if bound is None else bound)
 

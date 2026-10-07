@@ -6,7 +6,7 @@ Focuses on verifying train_on_last_assistant_only behavior across all collator
 code paths (packed vs non-packed, standard vs flattening).
 
 Usage:
-    python tests/data/test_collators.py
+    python tests/cpu/data/test_collators.py
 """
 
 import warnings
@@ -230,8 +230,8 @@ def test_packing_completion_packed_last_turn_only():
 def test_packing_completion_nonpacked_last_turn_only():
     """Non-packed path: only last turn when train_on_last_assistant_only=True.
 
-    This is the bug that was fixed — _apply_completion_mask_standard was missing
-    the train_on_last_assistant_only check.
+    The non-packed route masks through ``mask_batch_to_completion_spans``; dropping
+    train_on_last_assistant_only there would train turn 1.
     """
     tok = make_tokenizer()
     collator = DataCollatorForCompletionOnlyLMWithPacking(
@@ -256,10 +256,10 @@ def test_packing_completion_nonpacked_pad_equals_eos():
     """Non-packed path with pad_token_id == eos_token_id: the assistant tokens AND the
     turn-ending EOS must still be trained — not masked away to a zero-loss instance.
 
-    The parent LM collator masks pad positions (which share the EOS id here) to -100 first, so
-    ``_apply_completion_mask_standard`` searching the *labels* tensor never finds the EOS: the
-    "missing template/EOS" branch fires and the whole sequence is masked (zero tokens trained).
-    Detection and the unmasked copy must come from ``input_ids``, which is immune to that masking.
+    The parent LM collator masks pad positions (which share the EOS id here) to -100 first, so a
+    mask searching the *labels* tensor would never find the EOS: the "missing template/EOS" branch
+    would fire and mask the whole sequence (zero tokens trained). Detection and the unmasked copy
+    must come from ``input_ids`` (``mask_batch_to_completion_spans``), which is immune to that masking.
     """
     tok = make_tokenizer(pad_token_id=EOS, eos_token_id=EOS)
     collator = DataCollatorForCompletionOnlyLMWithPacking(
@@ -285,14 +285,13 @@ def test_packing_completion_packed_pad_equals_eos():
     """PACKED path with pad_token_id == eos_token_id: each document's turn-ending EOS must be
     trained, not masked away.
 
-    ``_mask_sequence`` (the packed path) detects the template/EOS on input_ids and must
-    copy the unmasked span from input_ids too, never from the parent-masked ``labels``. When
-    pad_token_id == eos_token_id the parent ``DataCollatorForLanguageModeling`` masks every
-    EOS-valued position (incl. the real turn-ending EOS) to -100, so copying from labels silently
-    drops the EOS — teaching the model not to stop at turn boundaries. The non-packed paths copy
-    from input_ids; the packed path must too. The discriminating assertions below are the EOS
-    positions (5 and 10): copied from labels they are masked; assistant content tokens (not
-    EOS-valued) stay unmasked either way.
+    ``_mask_sequence`` (the packed path) detects the template/EOS on input_ids and copies the span
+    from ``labels`` (so a doc-boundary mask survives), then restores the turn-ending EOS from
+    input_ids. When pad_token_id == eos_token_id the parent ``DataCollatorForLanguageModeling``
+    masks every EOS-valued position (incl. the real turn-ending EOS) to -100, so a labels copy
+    without that restore drops the EOS — teaching the model not to stop at turn boundaries. The
+    discriminating assertions below are the EOS positions (5 and 10): without the restore they are
+    masked; assistant content tokens (not EOS-valued) stay unmasked either way.
     """
     tok = make_tokenizer(pad_token_id=EOS, eos_token_id=EOS)
     collator = DataCollatorForCompletionOnlyLMWithPacking(
@@ -327,11 +326,9 @@ def test_packing_completion_packed_pad_equals_eos():
 def test_packing_completion_consistency():
     """Packed and non-packed paths must agree on which assistant CONTENT tokens are masked.
 
-    Note: the packed path (_mask_sequence) starts unmasking AFTER the response template,
-    while the non-packed path (_apply_completion_mask_standard) includes the template.
-    This is a pre-existing semantic difference. Here we only check that the actual
-    assistant content tokens (not template tokens) are consistently masked/unmasked
-    when train_on_last_assistant_only is toggled.
+    Template-token inclusion is pinned by test_template_tokens_included_in_training; here we only
+    check that the assistant content tokens are consistently masked/unmasked when
+    train_on_last_assistant_only is toggled.
     """
     tok = make_tokenizer()
 
@@ -1013,8 +1010,8 @@ def test_empty_response():
 def test_truncated_response_no_eos():
     """Response template at end of sequence with no following EOS.
 
-    Packed _mask_sequence falls back to end of sequence; standard collator
-    and flattening should mask everything (no matching EOS found).
+    Both packed routes (``_mask_sequence`` and the flattening collator) take PACKED_SPAN_POLICY,
+    whose end-of-sequence fallback trains template+content through the row end.
     """
     tok = make_tokenizer()
 
@@ -1539,7 +1536,7 @@ def test_filter_eos_after_responses_empty_inputs():
 
 def test_completion_only_unterminated_turn_does_not_leak_into_user_message():
     """End-to-end span-leak regression: a mid-conversation assistant turn missing its EOS must NOT
-    unmask the following user message (the bug bound its start to a later turn's EOS)."""
+    unmask the following user message by binding its start to a later turn's EOS."""
     tok = make_tokenizer()
     collator = DataCollatorForCompletionOnlyLM(
         response_prompt_template=RESPONSE_TEMPLATE_IDS,
@@ -1635,8 +1632,8 @@ def test_last_only_unterminated_final_turn_warns_and_masks():
     """train_on_last_assistant_only + a terminator-less FINAL turn: the surviving span is a single
     -1 no-op, so the row trains ZERO tokens — that must WARN, not silently all-mask.
 
-    Regression: the existing missing-template warning did not fire here (response_starts is
-    non-empty), so the loss-0 row was invisible.
+    The missing-template warning does not cover this row (response_starts is non-empty), so
+    without the no-terminator warning the loss-0 row is invisible.
     """
     tok = make_tokenizer()
     collator = DataCollatorForCompletionOnlyLM(
@@ -1717,8 +1714,8 @@ def _glm_agent_trace():
 
 def test_completion_only_stops_at_config_eos_markers():
     """End-to-end: with the config eos set, each assistant turn ends at its role marker (inclusive),
-    while user/observation content stays masked — even though tokenizer.eos_token_id is absent. With the
-    old single-eos search this sequence trained ZERO tokens (whole instance masked)."""
+    while user/observation content stays masked — even though tokenizer.eos_token_id is absent. A
+    single-eos search trains ZERO tokens on this sequence (whole instance masked; see the control below)."""
     tok = make_tokenizer(pad_token_id=0, eos_token_id=GLM_ENDOFTEXT)
     collator = DataCollatorForCompletionOnlyLM(
         response_prompt_template=RESPONSE_TEMPLATE_IDS,
@@ -1736,26 +1733,26 @@ def test_completion_only_stops_at_config_eos_markers():
     print("  PASS: test_completion_only_stops_at_config_eos_markers")
 
 
-def test_completion_only_old_single_eos_would_mask_everything():
-    """Guards the regression: searching for ONLY tokenizer.eos_token_id (absent here) finds no turn end,
-    so the whole instance is masked. Confirms the GLM trace genuinely exercises the bug."""
+def test_completion_only_single_eos_search_masks_everything():
+    """Negative control: searching for ONLY tokenizer.eos_token_id (absent here) finds no turn end,
+    so the whole instance is masked — the GLM trace genuinely needs the config eos set."""
     tok = make_tokenizer(pad_token_id=99, eos_token_id=GLM_ENDOFTEXT)  # pad distinct and absent too
     collator = DataCollatorForCompletionOnlyLM(
         response_prompt_template=RESPONSE_TEMPLATE_IDS,
         tokenizer=tok,
         train_on_last_assistant_only=False,
-        eos_token_ids=frozenset({GLM_ENDOFTEXT}),  # old behavior: single eos only
+        eos_token_ids=frozenset({GLM_ENDOFTEXT}),  # single-eos search: tokenizer eos only
     )
     ids = _glm_agent_trace()
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
         batch = collator.torch_call([{"input_ids": ids, "attention_mask": [1] * len(ids)}])
     assert get_unmasked_positions(batch["labels"][0]) == [], "expected whole-instance mask under single-eos search"
-    print("  PASS: test_completion_only_old_single_eos_would_mask_everything")
+    print("  PASS: test_completion_only_single_eos_search_masks_everything")
 
 
 def test_packing_completion_stops_at_config_eos_markers():
-    """Packed path (the SFT grad-test config's collator) ends each turn at its role marker."""
+    """Packed path (DataCollatorForCompletionOnlyLMWithPacking) ends each turn at its role marker."""
     tok = make_tokenizer(pad_token_id=0, eos_token_id=GLM_ENDOFTEXT)
     collator = DataCollatorForCompletionOnlyLMWithPacking(
         response_prompt_template=RESPONSE_TEMPLATE_IDS,

@@ -40,7 +40,7 @@ from tests.common.models import TINY_STEP3P7_CONFIG, TINY_STEP3P7_VISION_CONFIG
 # spellings at the roster's geometry. Every MoE/attention field is the vendor's, not transformers' —
 # ``moe_num_experts``/``moe_top_k``/``num_attention_groups`` are ``attribute_map`` aliases, and
 # ``moe_layers_enum``/``attention_other_setting`` are derived away into ``mlp_layer_types`` /
-# ``num_sliding_attention_heads`` + ``per_layer_config``. ``_parses_to_the_roster_geometry`` below
+# ``num_sliding_attention_heads`` + ``per_layer_config``. ``test_the_source_config_parses_to_the_roster_geometry`` below
 # pins it against ``TINY_STEP3P7_CONFIG``, so it cannot drift into a different model.
 TINY_STEP3P7_SOURCE_CONFIG = {
     "architectures": ["Step3p7ForConditionalGeneration"],

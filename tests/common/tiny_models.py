@@ -75,6 +75,8 @@ from tests.common.models import (
     TINY_QWEN35_MOE_CONFIG,
     TINY_STEP3P7_CONFIG,
     TINY_STEP3P7_VISION_CONFIG,
+    TINY_TIED_QWEN3_CONFIG,
+    TINY_TIED_QWEN3_MOE_FIELDS,
     TINY_ZAYA_CONFIG,
 )
 
@@ -88,6 +90,35 @@ DSV4_TID2EID_SEED = 1234
 PINNED_FP32_FAMILIES = ("deepseek_v4", "glm5_next", "inkling_text")
 # The files a synthetic checkpoint copies from its release so ``AutoTokenizer`` loads it offline.
 TOKENIZER_FILE_PREFIXES = ("tokenizer", "special_tokens", "chat_template")
+
+
+def padded_vocab_size(tokenizer) -> int:
+    """``tokenizer``'s vocab rounded up to :data:`VOCAB_PAD_MULTIPLE`, as a release pads it so a TP-sharded
+    embedding and head divide it."""
+    return -(-len(tokenizer) // VOCAB_PAD_MULTIPLE) * VOCAB_PAD_MULTIPLE
+
+
+class _WeightLeaf(torch.nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.weight = torch.nn.Parameter(torch.zeros(1))
+
+
+def module_with_weight_keys(paths: list[str]) -> torch.nn.Module:
+    """A module tree whose state dict is exactly ``paths`` (each ending in ``.weight``): the key space a
+    checkpoint-conversion or master-replay test maps disk keys onto, without a model behind it."""
+    root = torch.nn.Module()
+    for path in paths:
+        parent = root
+        parts = path.split(".")
+        for name in parts[:-2]:
+            child = parent._modules.get(name)
+            if child is None:
+                child = torch.nn.Module()
+                parent.add_module(name, child)
+            parent = child
+        parent.add_module(parts[-2], _WeightLeaf())
+    return root
 
 
 def randomize_tid2eid(model, seed: int = DSV4_TID2EID_SEED) -> None:
@@ -112,6 +143,19 @@ def copy_release_tokenizer(repo_id: str, out_dir: Path) -> None:
     for src in tokenizer_dir.iterdir():
         if src.is_file() and src.name.startswith(TOKENIZER_FILE_PREFIXES):
             shutil.copy2(src, out_dir / src.name)
+
+
+def build_tied_qwen3_checkpoint(target_dir: str, tokenizer, *, moe: bool, seed: int) -> None:
+    """Save a random-init :data:`TINY_TIED_QWEN3_CONFIG` model (Qwen3-MoE with ``moe``) at ``tokenizer``'s
+    padded vocab, with that tokenizer, as a checkpoint the production loaders read. Rank 0 only."""
+    torch.manual_seed(seed)
+    fields = {**TINY_TIED_QWEN3_CONFIG, "vocab_size": padded_vocab_size(tokenizer)}
+    if moe:
+        model = Qwen3MoeForCausalLM(Qwen3MoeConfig(**fields, **TINY_TIED_QWEN3_MOE_FIELDS))
+    else:
+        model = Qwen3ForCausalLM(Qwen3Config(**fields))
+    model.to(torch.bfloat16).save_pretrained(target_dir)
+    tokenizer.save_pretrained(target_dir)
 
 
 def build_tiny_mistral4_checkpoint(out_dir: Path, seed: int = 0) -> Path:
@@ -266,8 +310,7 @@ def tiny_family_model(family: TinyFamily, tokenizer=None, *, overrides: dict | N
     overrides = {**family.text_overrides, **(overrides or {})}
     if tokenizer is not None:
         overrides |= {
-            # Padded as a release vocab is, so a TP-sharded head divides it.
-            "vocab_size": -(-len(tokenizer) // VOCAB_PAD_MULTIPLE) * VOCAB_PAD_MULTIPLE,
+            "vocab_size": padded_vocab_size(tokenizer),
             "pad_token_id": tokenizer.pad_token_id,
             "eos_token_id": tokenizer.eos_token_id,
         }

@@ -19,6 +19,7 @@ from src.models.patches.attention import (
 )
 from src.models.segment_markers import (
     DENSE_PACKING_LEAK_MODEL_TYPES,
+    reject_compressed_kv_rows,
     require_segment_aware_kernels,
     segment_markers_for,
 )
@@ -41,21 +42,22 @@ def _validate_collator_options(
 ) -> None:
     """Refuse (or warn about) option combinations no collator can serve.
 
-    Guards over the caller's arguments only: it reads nothing the dispatch in
-    :func:`select_data_collator` produces and produces nothing that dispatch reads.
+    Pure guards over the caller's arguments: raises, warnings and the guard-local attention
+    implementation. Reads nothing the dispatch in :func:`select_data_collator` produces, and
+    produces nothing it reads.
     """
     if packing and padding_free:
         raise ValueError(
             "Cannot use both 'packing' and 'padding_free' simultaneously. "
             "Choose one:\n"
             "  - packing=True: Traditional sequence packing (pad to max_length)\n"
-            "  - padding_free=True: Flash Attention 2 flattening (no padding, ~2-3x faster)"
+            "  - padding_free=True: flattening for a varlen flash-attention kernel (no padding)"
         )
 
-    # Backend-independent, unlike the dense-mask warning below: flatten_packed_batch merges the
+    # Backend-INDEPENDENT, unlike the dense-mask warning below: flatten_packed_batch merges the
     # mini-batch into one row because transformers derives cu_seqlens from position_ids only at
-    # batch size 1, so batch>1 is one row of up to B*max_length real tokens rather than B independent
-    # sequences. Document isolation is preserved, hence a warning. PP keeps its rows and is exempt.
+    # batch size 1, so batch>1 is one row of up to B*max_length real tokens, not B independent
+    # sequences. Loss-less and throughput-equivalent, hence a warning; PP keeps its rows, excepted.
     if packing and per_device_train_batch_size > 1 and not keeps_packed_rows and PartialState().is_main_process:
         logger.warning(
             "packing=True with per_device_train_batch_size=%d does not run %d independent sequences: "
@@ -68,7 +70,7 @@ def _validate_collator_options(
             per_device_train_batch_size,
         )
 
-    # The decoder's backend: a VLM wrapper records it on its text sub-config, so a top-level-only
+    # The DECODER's backend: a VLM wrapper records it on its text sub-config, so a top-level-only
     # read would report None and refuse padding_free on a model that does run flash attention.
     attn_impl = effective_attn_implementation(model_config)
     if model_config is not None and attn_impl not in VARLEN_ATTN_IMPLEMENTATIONS:
@@ -137,9 +139,10 @@ def select_data_collator(
 
     assistant_message_template is required when train_on_completions_only=True.
     model_config (the HF PretrainedConfig) supplies the eos_token_id set used to find assistant-turn
-    ends; pass it so templates that delimit turns with role markers (e.g. GLM-4, no per-turn eos) are
-    masked correctly. Returns None to fall back to TRL's default collator. Raises ValueError on
-    incompatible options (packing+padding_free, CP+padding_free).
+    ends — pass it so templates that delimit turns with role markers (e.g. GLM-4, no per-turn eos) are
+    masked correctly. Returns None to fall back to TRL's default collator. Raises ValueError on an
+    option combination no collator can serve: the guards in :func:`_validate_collator_options`, and the
+    packing/padding-free gates on the model's segment markers, pipeline and context parallelism here.
     """
     _validate_collator_options(
         tokenizer,
@@ -158,7 +161,9 @@ def select_data_collator(
 
     markers = segment_markers_for(model_config)
     if packing or padding_free:
-        require_segment_aware_kernels(model_config, "packing" if packing else "padding_free")
+        mode = "packing" if packing else "padding_free"
+        reject_compressed_kv_rows(model_config, mode)
+        require_segment_aware_kernels(model_config, mode)
 
     if packing and markers.cu_seq_lens and keeps_packed_rows:
         raise ValueError(
@@ -197,7 +202,7 @@ def select_data_collator(
 
     elif padding_free and train_on_completions_only:
         prefix = "⚡"
-        collator_name = f"DataCollatorWithFlatteningAndCompletionMask (padding-free + FA2{last_only_suffix})"
+        collator_name = f"DataCollatorWithFlatteningAndCompletionMask (padding-free, varlen{last_only_suffix})"
         collator = DataCollatorWithFlatteningAndCompletionMask(
             response_prompt_template=assistant_message_template,
             tokenizer=tokenizer,
@@ -209,7 +214,7 @@ def select_data_collator(
 
     elif padding_free:
         prefix = "⚡"
-        collator_name = "DataCollatorWithFlattening (padding-free + FA2)"
+        collator_name = "DataCollatorWithFlattening (padding-free, varlen)"
         collator = DataCollatorWithFlattening(
             tokenizer=tokenizer,
             return_flash_attn_kwargs=True,

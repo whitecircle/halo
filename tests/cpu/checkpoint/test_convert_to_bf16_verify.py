@@ -170,8 +170,8 @@ def test_verify_accepts_an_unmerged_peft_save(tmp_path):
 
 def test_an_unmerged_peft_save_verifies_its_adapter_not_a_stale_model(tmp_path):
     """An unmerged --peft save removes nothing, so an --output_dir that held an earlier fp32 full save
-    still carries its model.safetensors. Verifying that stale file failed the adapter the run just
-    wrote (and a stale bf16 one would have passed it unchecked)."""
+    still carries its model.safetensors. Verifying that stale file would fail the adapter the run just
+    wrote (and a stale bf16 one would pass it unchecked)."""
     adapter = _lora_adapter(tmp_path, _fp32_checkpoint(tmp_path / "base"))
     out = _fp32_checkpoint(tmp_path / "out")
     convert_to_bf16(adapter, out, "causal_lm", is_peft=True, verify=True)  # raises if verification fails

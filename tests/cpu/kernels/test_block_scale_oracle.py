@@ -44,16 +44,14 @@ def _expected_e8m0_exp(amax: float, fmt_max: float) -> int:
 def _ref_e2m1_code(value: float, divisor: float) -> int:
     """Reference e2m1 code for one element: sign<<3 | nearest-level index.
 
-    Round-to-nearest using the midpoints between adjacent levels, matching the
-    bucketize used by the module (lower level chosen at an exact midpoint).
+    Round-to-nearest using the midpoints between adjacent levels, an exact midpoint going to the
+    LOWER level — what the module's round-half-to-even does wherever the lower level's code is even
+    (the 2.5 tie this file pins).
     """
     scaled = value / divisor
     sign = 1 if scaled < 0 else 0
     mag = min(abs(scaled), E2M1_MAX)
-    # Nearest level by midpoint boundaries. torch.bucketize(v, edges) with the default
-    # right=False returns the count of edges with edge < v ... in fact maps a value
-    # exactly ON a boundary to the LOWER level (it returns bucket i for edges[i-1] < v <= edges[i]).
-    # Mirror that with mag <= edge so an exact midpoint (e.g. 2.5) lands on the lower level.
+    # Nearest level by midpoint boundaries; mag <= edge sends an exact midpoint to the lower level.
     boundaries = [(a + b) / 2 for a, b in zip(_LEVELS[:-1], _LEVELS[1:], strict=False)]
     level = len(_LEVELS) - 1
     for i, edge in enumerate(boundaries):
@@ -115,9 +113,9 @@ def test_mxfp4_codes_match_first_principles():
 
 
 def test_mxfp4_boundary_straddle_2p5_rounds_to_lower():
-    """2.5 is the exact midpoint between levels 2.0 and 3.0. bucketize(right=False)
-    sends a value on the boundary to the LOWER level (2.0, code 4). This pins the
-    tie-break direction so a flip in rounding mode breaks the test."""
+    """2.5 is the exact midpoint between levels 2.0 and 3.0; round-half-to-even sends it
+    to the LOWER level (2.0, the even code 4). This pins the tie-break direction so a
+    flip in rounding mode breaks the test."""
     block = torch.zeros(32, dtype=torch.float32)
     block[0] = 6.0  # forces amax=6 -> divisor 1.0
     block[1] = 2.5  # exactly on the 2.0/3.0 boundary

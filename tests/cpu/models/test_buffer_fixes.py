@@ -145,8 +145,8 @@ def _tiny_tied_lm() -> nn.Module:
 
 def test_finalize_keeps_a_loaded_distinct_head():
     """transformers 5 honours a checkpoint that ships a DISTINCT ``lm_head.weight`` even under
-    ``tie_word_embeddings: true``; an unconditional ``tie_weights()`` in the finalize seam silently
-    overwrote it with the embedding on every non-lazy load path."""
+    ``tie_word_embeddings: true``; an unconditional ``tie_weights()`` in the finalize seam would
+    silently overwrite it with the embedding on every non-lazy load path."""
     model = _tiny_tied_lm()
     distinct = torch.randn_like(model.get_input_embeddings().weight)
     model.set_output_embeddings(nn.Linear(16, 32, bias=False))

@@ -95,7 +95,6 @@ class NativeMCPClientEnvironment(AsyncNativeToolUseEnvironment):
 
         self._session = None
         self._conn_task: asyncio.Task | None = None
-        self._close_task: asyncio.Task | None = None
         self._stop: asyncio.Event | None = None
         # Serialize the lazy first-episode connect so concurrent episodes don't each spawn a server.
         self._connect_lock = asyncio.Lock()
@@ -189,7 +188,7 @@ class NativeMCPClientEnvironment(AsyncNativeToolUseEnvironment):
             parameters.append(
                 ToolParameter(
                     name=param_name,
-                    type=param_info.get("type", "string"),
+                    type=param_info.get("type"),
                     description=param_info.get("description", ""),
                     enum=param_info.get("enum"),
                     required=param_name in required,
@@ -263,7 +262,7 @@ class NativeMCPClientEnvironment(AsyncNativeToolUseEnvironment):
             except RuntimeError:
                 running = None
             if running is loop:
-                self._close_task = loop.create_task(self.disconnect())
+                self._run_or_schedule(self.disconnect())
             elif loop.is_running():
                 asyncio.run_coroutine_threadsafe(self.disconnect(), loop).result(timeout=MCP_DISCONNECT_TIMEOUT_S)
             else:

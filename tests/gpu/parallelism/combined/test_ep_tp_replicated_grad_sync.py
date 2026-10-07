@@ -105,7 +105,7 @@ def run(ctx):
     train_result = trainer.train()
     log(f"Final loss: {train_result.training_loss:.6f}")
 
-    tp_group = trainer._get_tp_process_group()
+    tp_group = trainer.parallel_dims.tp_group()
     assert tp_group is not None and dist.get_world_size(tp_group) == TP_SIZE, "TP group not reachable"
     expert_ids = trainer._get_sharded_expert_param_ids()
 

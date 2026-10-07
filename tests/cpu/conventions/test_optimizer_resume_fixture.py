@@ -1,48 +1,39 @@
 #!/usr/bin/env python
-"""The optimizer-resume GPU fixture writes a tied vocabulary that native TP can shard."""
+"""The tied-Qwen3 checkpoint the optimizer-resume GPU suite trains has a vocabulary native TP can shard."""
 
 import pytest
-
-from tests.common.utils import probe_findings
-
-
-def test_optimizer_resume_checkpoint_pads_an_odd_tokenizer_vocab():
-    script = """
-import tempfile
-from pathlib import Path
-from unittest.mock import patch
-
 import torch
 from tokenizers import Tokenizer, models
 from transformers import AutoTokenizer, PreTrainedTokenizerFast, Qwen3ForCausalLM, Qwen3MoeForCausalLM
 
-from tests.common.tiny_models import VOCAB_PAD_MULTIPLE
-from tests.common.utils import load_script_module
+from tests.common.tiny_models import build_tied_qwen3_checkpoint
 
-suite = load_script_module("tests/gpu/parallelism/ep/test_ep_optimizer_resume.py")
-vocab = {"<unk>": 0, "<eos>": 1, **{f"token{i}": i + 2 for i in range(63)}}
-tokenizer = PreTrainedTokenizerFast(
-    tokenizer_object=Tokenizer(models.WordLevel(vocab, unk_token="<unk>")),
-    unk_token="<unk>", eos_token="<eos>", pad_token="<eos>",
-)
-assert len(tokenizer) % 2 == 1, "the fixture must catch an unshardable TP2 vocabulary"
-expected_vocab = -(-len(tokenizer) // VOCAB_PAD_MULTIPLE) * VOCAB_PAD_MULTIPLE
-findings = []
-with tempfile.TemporaryDirectory() as root:
-    for mode, model_class in (("tp", Qwen3ForCausalLM), ("ep", Qwen3MoeForCausalLM)):
-        checkpoint = str(Path(root, mode))
-        with patch.object(suite.AutoTokenizer, "from_pretrained", return_value=tokenizer):
-            suite._build_tiny_checkpoint(mode, checkpoint)
-        restored = model_class.from_pretrained(checkpoint, dtype=torch.bfloat16, attn_implementation="eager")
-        actual = (restored.config.vocab_size, restored.get_input_embeddings().num_embeddings,
-                  restored.get_output_embeddings().out_features)
-        if actual != (expected_vocab,) * 3:
-            findings.append(f"{mode}: config/embedding/head vocab {actual}, expected {expected_vocab}")
-        assert restored.get_input_embeddings().weight is restored.get_output_embeddings().weight
-        assert len(AutoTokenizer.from_pretrained(checkpoint)) == len(tokenizer)
-print("VOCAB_MISMATCHES:" + "|".join(findings))
-"""
-    assert not probe_findings(script, "VOCAB_MISMATCHES:")
+# 65 tokens: odd, so a TP2 embedding cannot split it until it is padded to the next multiple of 128.
+ODD_VOCAB = {"<unk>": 0, "<eos>": 1, **{f"token{i}": i + 2 for i in range(63)}}
+PADDED_VOCAB = 128
+
+
+@pytest.mark.parametrize(("moe", "model_class"), [(False, Qwen3ForCausalLM), (True, Qwen3MoeForCausalLM)])
+def test_the_checkpoint_pads_an_odd_tokenizer_vocab_and_keeps_the_tie(tmp_path, moe, model_class):
+    tokenizer = PreTrainedTokenizerFast(
+        tokenizer_object=Tokenizer(models.WordLevel(ODD_VOCAB, unk_token="<unk>")),
+        unk_token="<unk>",
+        eos_token="<eos>",
+        pad_token="<eos>",
+    )
+    assert len(tokenizer) % 2 == 1, "the fixture must catch an unshardable TP2 vocabulary"
+
+    build_tied_qwen3_checkpoint(str(tmp_path), tokenizer, moe=moe, seed=0)
+
+    restored = model_class.from_pretrained(tmp_path, dtype=torch.bfloat16, attn_implementation="eager")
+    vocab = (
+        restored.config.vocab_size,
+        restored.get_input_embeddings().num_embeddings,
+        restored.get_output_embeddings().out_features,
+    )
+    assert vocab == (PADDED_VOCAB,) * 3
+    assert restored.get_input_embeddings().weight is restored.get_output_embeddings().weight
+    assert len(AutoTokenizer.from_pretrained(tmp_path)) == len(tokenizer)
 
 
 if __name__ == "__main__":

@@ -20,16 +20,12 @@ from src.models.structure import DECODER_LAYER_INDEX, decoder_layer_index
 
 logger = logging.getLogger(__name__)
 
-# The dense projections converted to low precision; attention q/k/v/o stay bf16 (small GEMMs handled by
-# FA4). The export tool (``scripts/after_training/quantize_to_lowp.py``) reads this list so it quantizes
-# what the QAT forward quantized.
+# The dense projections converted to low precision; attention q/k/v/o stay bf16 (small GEMMs, FA4's
+# domain). The export tool (``scripts/after_training/quantize_to_lowp.py``) reads this roster so it
+# quantizes exactly what the QAT forward did, instead of drifting behind a second list.
 MLP_PROJECTIONS = ("gate_proj", "up_proj", "down_proj")
-# Only used to detect a family naming its projections differently (w1/w2/w3, fc1/fc2), where the
-# conversion would otherwise be a no-op.
+# Only used to detect a family naming its projections differently (w1/w2/w3, fc1/fc2) — a silent no-op.
 _MLP_CONTAINERS = ("mlp", "feed_forward", "ffn")
-
-# The knob spellings are the LinearPrecision values, so the enum doubles as the accepted-value list.
-_LOWP_PRECISIONS = tuple(precision.value for precision in LinearPrecision)
 
 
 def _text_backbone_prefix(model: nn.Module) -> str | None:
@@ -50,8 +46,8 @@ def _text_backbone_prefix(model: nn.Module) -> str | None:
 def block_index(module_name: str, backbone_prefix: str | None = None) -> int | None:
     """Transformer-block index of ``module_name``, or None outside the text backbone.
 
-    The export tool numbers checkpoint keys through this same function, so the blocks the QAT forward
-    kept in bf16 are not quantized on export.
+    The export tool numbers CHECKPOINT KEYS through this same function, or the blocks the QAT forward
+    kept in bf16 would ship quantized.
     """
     if backbone_prefix is not None:
         if not module_name.startswith(f"{backbone_prefix}."):
@@ -61,11 +57,11 @@ def block_index(module_name: str, backbone_prefix: str | None = None) -> int | N
 
 
 def block_numbering_root(module_name: str) -> str | None:
-    """The stack ``module_name``'s block index counts within: everything before ``layers.<N>``.
+    """The stack ``module_name``'s block index counts within — everything before ``layers.<N>``.
 
     :func:`block_index` numbers a name in whatever stack it finds, which is unambiguous only while one
-    stack is in play. The export tool has no live module to resolve a backbone prefix from, so it
-    asserts on this instead: two roots among its selected weights would keep the wrong blocks.
+    stack is in play. Having no live module to resolve a backbone prefix from, the export tool asserts
+    that instead: two roots among its selected weights means a keep-window would keep the wrong blocks.
     """
     match = DECODER_LAYER_INDEX.search(module_name)
     return module_name[: match.start()] if match else None
@@ -74,8 +70,8 @@ def block_numbering_root(module_name: str) -> str | None:
 def kept_block_indices(n_blocks: int, keep_first: int, keep_last: int) -> set[int]:
     """Blocks held at high precision at the two ends of an ``n_blocks``-deep backbone.
 
-    Implements the ``lowp_keep_first_blocks`` / ``lowp_keep_last_blocks`` window for both the
-    training-time conversion and the export, so a checkpoint quantizes what its forward quantized.
+    The one home for the ``lowp_keep_first_blocks`` / ``lowp_keep_last_blocks`` window, shared by the
+    training-time conversion and the export so a checkpoint quantizes what its forward quantized.
     Out-of-range ends are clamped, not rejected: keeping more blocks than exist keeps all of them.
     """
     kept = set(range(keep_first)) | {n_blocks - 1 - i for i in range(keep_last)}
@@ -84,7 +80,7 @@ def kept_block_indices(n_blocks: int, keep_first: int, keep_last: int) -> set[in
 
 def _warn_if_dense_mlp_unmatched(model: nn.Module, precision: str) -> None:
     """Warn when the dense-MLP swap matched nothing because the family names its projections differently
-    (``w1``/``w2``/``w3``, ``fc1``/``fc2``), leaving the request a no-op. Stays quiet for an all-MoE
+    (``w1``/``w2``/``w3``, ``fc1``/``fc2``) and the request is a silent no-op. Stays quiet for an all-MoE
     model, whose dense-MLP count is legitimately zero."""
     linears = {
         child_name
@@ -109,7 +105,7 @@ def _convert_dense_linear(linear: nn.Linear, name: str, precision: LinearPrecisi
 
     transformers' TP installs a module's transforms as an instance-level ``forward`` closed over the bound
     ``nn.Linear.forward``, which a class retype cannot reach. Strip it, retype, then let the plan's own
-    style re-install the identical transforms via the same ``install_forward`` the load ran.
+    style re-install the identical transforms — the same ``install_forward`` the load ran.
     """
     if "forward" not in vars(linear):
         LowPrecisionLinear.convert_(linear, precision)
@@ -157,9 +153,8 @@ def apply_mixed_precision_compute(
     """
     if precision == "bf16":
         return {"precision": "bf16", "moe_layers": 0, "dense_linears": 0, "kept_blocks": []}
-    if precision not in _LOWP_PRECISIONS:
-        accepted = ", ".join(repr(p) for p in ("bf16", *_LOWP_PRECISIONS))
-        raise ValueError(f"precision must be one of {accepted}, got {precision!r}")
+    # The knob spellings are the LinearPrecision values, so the enum raises on any other one.
+    lin_precision = LinearPrecision(precision)
 
     backbone_prefix = _text_backbone_prefix(model)
     block_indices = {
@@ -171,7 +166,7 @@ def apply_mixed_precision_compute(
     moe_count = 0
     loop_path_layers = 0
     if apply_moe_experts:
-        grouped_precision = GroupedGemmPrecision(PRECISION_TO_FORMAT[LinearPrecision(precision)])
+        grouped_precision = GroupedGemmPrecision(PRECISION_TO_FORMAT[lin_precision])
         for name, module in model.named_modules():
             if isinstance(module, EPMoELayerBase):
                 if block_index(name, backbone_prefix) in kept:
@@ -193,14 +188,13 @@ def apply_mixed_precision_compute(
 
     dense_count = 0
     if apply_dense_mlp:
-        lin_precision = LinearPrecision(precision)
         tp_plan = getattr(model, "_tp_plan", None) or {}
         tp_mesh = get_tp_mesh(model)
         for name, module in model.named_modules():
             if isinstance(module, EPMoELayerBase):
                 continue  # MoE experts use the grouped path, not nn.Linear
             # Text backbone only: a vision tower or projector naming its projections like the text
-            # MLP stays bf16, matching the export's tower fence.
+            # MLP stays bf16, which is what the export's tower fence reproduces.
             if backbone_prefix is not None and not name.startswith(f"{backbone_prefix}."):
                 continue
             if block_index(name, backbone_prefix) in kept:
@@ -213,11 +207,11 @@ def apply_mixed_precision_compute(
         if dense_count == 0:
             _warn_if_dense_mlp_unmatched(model, precision)
 
-    # Layers on the loop path carry the precision but never honor it, so they do not count as
-    # converted: a model whose matches all loop quantizes as little as one that matched none.
+    # Layers on the loop path carry the precision but never honor it, so they count as converted
+    # nowhere: a model whose every match loops quantizes exactly as little as one that matched none.
     effective_moe = moe_count - loop_path_layers
     if effective_moe == 0 and dense_count == 0:
-        # Converting nothing means the run trains in bf16 with no signal that the request was lost
+        # Converting nothing means the run trains pure bf16 with no signal that the request was lost
         # (e.g. a fused-expert MoE at ep1 with use_grouped_gemm=false: no EP wrapper, no nn.Linear).
         if kept and not block_indices - kept:
             cause = (

@@ -16,6 +16,7 @@ disk by then, carries it verbatim and untagged with a warning naming the card it
     python tests/cpu/checkpoint/test_hub_model_card_tags.py
 """
 
+import contextlib
 import json
 import logging
 import os
@@ -36,6 +37,7 @@ from trl import ModelConfig
 from trl.trainer import base_trainer as trl_base_trainer
 from trl.trainer.utils import generate_model_card
 
+import src.distributed.checkpoint.peft as peft_saver
 import src.distributed.expert_parallel.layers.roster  # noqa: F401  registers the roster every config writer requires
 from scripts.after_training import merge_models as merge_models_script
 from scripts.after_training.convert_to_bf16 import convert_to_bf16
@@ -48,8 +50,8 @@ from src.checkpoint.format import ADAPTER_SAFETENSORS_FILE, copy_checkpoint_aux_
 from src.checkpoint.model_card import MalformedModelCardError, tag_model_card
 from src.configs.embedding_config import EmbeddingConfig
 from src.distributed.checkpoint.context import CheckpointContext
+from src.distributed.checkpoint.ep_save import save_ep_lora_adapters
 from src.distributed.checkpoint.peft import PeftAdapterSaver
-from src.distributed.expert_parallel.saving import save_ep_lora_adapters
 from src.models.loading.model_preparation import finalize_run_model
 from src.models.patches.gpt_oss_sinks import SinksPolicy
 from src.trainers.sft import DistributedSFTTrainer
@@ -493,7 +495,9 @@ def test_the_embedding_pipeline_card_carries_the_tag(tmp_path):
     _tiny_qwen3().save_pretrained(base)
     _tiny_tokenizer().save_pretrained(base)
     runtime = SimpleNamespace(
-        parallelism_config=SimpleNamespace(is_ep_mode=False, is_tp_mode=False, fp32_non_ep_params=False),
+        parallelism_config=SimpleNamespace(
+            is_ep_mode=False, is_tp_mode=False, fp32_non_ep_params=False, max_concurrent_loading=None
+        ),
         model_source=str(base),
     )
     embedding_config = EmbeddingConfig(
@@ -540,9 +544,36 @@ def _cp_adapter_save_context(peft_model) -> CheckpointContext:
 def test_a_hand_written_adapter_save_carries_the_tag(tmp_path):
     """The CP / DTensor / expert-LoRA branches write the adapter files themselves, so no PEFT card."""
     peft_model = get_peft_model(_tiny_qwen3(), LoraConfig(r=4, lora_alpha=8, target_modules=["q_proj"]))
-    assert PeftAdapterSaver().save(_cp_adapter_save_context(peft_model), peft_model, str(tmp_path))
+    PeftAdapterSaver().save(_cp_adapter_save_context(peft_model), peft_model, str(tmp_path))
     assert (tmp_path / ADAPTER_SAFETENSORS_FILE).is_file(), "premise: the hand-written branch wrote the adapter"
     assert metadata_load(tmp_path / CARD) == {"library_name": "peft", "tags": [HALO_TAG]}
+
+
+def test_the_adapter_savers_card_write_is_fenced(tmp_path, monkeypatch):
+    """The card and provenance follow the adapter's own barrier, so a save-rank failure there (a full
+    disk, a malformed card) must still release the peers through a fence of its own."""
+    events: list[str] = []
+
+    @contextlib.contextmanager
+    def fence(*_args, **_kwargs):
+        events.append("enter")
+        try:
+            yield
+        finally:
+            events.append("barrier")
+
+    def failing_card(_output_dir):
+        events.append("card")
+        raise OSError(28, "No space left on device")
+
+    monkeypatch.setattr(peft_saver, "barrier_on_exit", fence)
+    monkeypatch.setattr(peft_saver, "tag_model_card", failing_card)
+    peft_model = get_peft_model(_tiny_qwen3(), LoraConfig(r=4, lora_alpha=8, target_modules=["q_proj"]))
+
+    with pytest.raises(OSError, match="No space left"):
+        PeftAdapterSaver().save(_cp_adapter_save_context(peft_model), peft_model, str(tmp_path))
+
+    assert events[-3:] == ["enter", "card", "barrier"], events
 
 
 def test_an_adapter_save_onto_a_malformed_card_fails_naming_it(tmp_path):

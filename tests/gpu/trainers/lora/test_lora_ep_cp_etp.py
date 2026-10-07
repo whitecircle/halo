@@ -121,7 +121,7 @@ def run_lora_ep_cp(
             processing_class=tokenizer,
             parallelism_config=parallelism_config,
         )
-        log(f"  EP mode: {trainer.is_ep_mode}, CP mode: {trainer.is_cp_mode}")
+        log(f"  EP mode: {trainer.parallelism_config.is_ep_mode}, CP mode: {trainer.is_cp_mode}")
 
         log(f"  Training for {MAX_STEPS} steps...")
         train_result = trainer.train()

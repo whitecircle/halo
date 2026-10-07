@@ -32,8 +32,9 @@ expert_parallel_size: 16
 ep_scope: global
 
 save_sharded_ep: false
-use_grouped_gemm: false               # gpt-oss: per-expert loop beats grouped GEMM at high EP
-max_concurrent_loading: 1             # 120B weights: load one rank at a time per node
+# Read only by the eager from_pretrained fallback (ep_lazy_loading: false) and an optimizer-state
+# resume: one rank at a time per node. The default lazy EP load reads on every rank at once.
+max_concurrent_loading: 1
 
 # --- Attention & kernels ---
 # attn_implementation unset — auto-selects FA4 on Blackwell, FA3/FA2 on Hopper

@@ -10,6 +10,7 @@ import torch
 import torch.distributed as dist
 from datasets import Dataset
 
+import src.distributed.runtime as runtime
 import src.trainers.grpo.reference_cache as cache_module
 from src.checkpoint.format import REFERENCE_CACHE_DIR_NAME
 from src.data.collators.offline_grpo import REF_PER_TOKEN_LOGPS_COLUMN
@@ -26,6 +27,15 @@ from tests.common.offline_grpo_reference import (
     reference_rows,
     restore_reference,
 )
+
+
+def _scratch_files(root) -> list[str]:
+    """The scratch's files, minus the lock a live launch holds beside its directory for the run."""
+    return sorted(
+        str(path.relative_to(root))
+        for path in (root / REFERENCE_CACHE_DIR_NAME).rglob("*")
+        if path.is_file() and path.suffix != ".lock"
+    )
 
 
 @pytest.mark.parametrize("owners", [(1, 0, 0, 0), (0, 1, 0, 1), (1, 1, 1, 1)])
@@ -144,7 +154,6 @@ def test_ephemeral_cache_needs_no_durable_publication(tmp_path, monkeypatch):
     monkeypatch.setattr(os, "replace", unavailable)
     mapped = cache.finish(dataset)
     assert mapped.column().to_pylist() == [[-0.25], [-0.75, -1.5]]
-    assert not list((tmp_path / REFERENCE_CACHE_DIR_NAME).iterdir())
     _validate_output_dir(str(tmp_path))
 
 
@@ -170,7 +179,6 @@ def test_reference_cache_maps_one_arrow_token_buffer_and_serializes_it_without_r
     payload = trainer._reference_checkpoint_payload()["train"]
     assert payload["values"].data_ptr() == owner.values.data_ptr()
     assert not allocated, "attachment or save repacked the whole completion-token table"
-    assert not list((tmp_path / REFERENCE_CACHE_DIR_NAME).iterdir()), "mapped scratch files were retained"
     owner.values[0] = -9.25
     assert attached[REF_PER_TOKEN_LOGPS_COLUMN][0][0] == -9.25
     trainer.save_checkpoint()
@@ -202,7 +210,6 @@ def test_empty_reference_buffers_skip_file_mapping_and_preserve_ragged_rows(tmp_
     assert mapped.column().to_pylist() == [[-0.5] * length for length in lengths]
     expected_files = (["merged.lengths"] if lengths else []) + (["merged.values"] if any(lengths) else [])
     assert mapped_files == expected_files * 2
-    assert not list((tmp_path / REFERENCE_CACHE_DIR_NAME).iterdir())
 
 
 @pytest.mark.parametrize(
@@ -224,7 +231,7 @@ def test_incomplete_or_corrupt_cache_is_rejected_and_removed(tmp_path, damage):
                 output.write(b"!" if damage == "truncated" else torch.tensor([float("nan")]).numpy().tobytes())
     with pytest.raises(ValueError, match="Incomplete|truncated"):
         cache.finish(dataset)
-    assert not list((tmp_path / REFERENCE_CACHE_DIR_NAME).iterdir())
+    assert not _scratch_files(tmp_path)
 
 
 def test_buffered_validation_detects_corruption_after_the_first_chunk(tmp_path, monkeypatch):
@@ -249,7 +256,7 @@ def test_failed_cache_write_is_cleaned_up_before_checkpointing(tmp_path, monkeyp
     monkeypatch.setattr(ReferenceScoreCache, "_append", fail_write)
     with pytest.raises(ValueError, match="reference cache disk full"):
         attach_reference(trainer, reference_dataset(), "train", reference_rows(), settings=SETTINGS)
-    assert not list((tmp_path / REFERENCE_CACHE_DIR_NAME).iterdir())
+    assert not _scratch_files(tmp_path)
     assert not trainer._reference_logps_by_split
 
 
@@ -304,7 +311,7 @@ def _node_local_cache(rank, root, damage):
             dataset, "train", mapped, identity=trainer._reference_split_identity(dataset, "train", SETTINGS)
         )
         assert attached[REF_PER_TOKEN_LOGPS_COLUMN] == expected
-        assert not os.listdir(os.path.join(output, REFERENCE_CACHE_DIR_NAME))
+        assert sorted(os.listdir(cache.directory)) == ["merged.lengths", "merged.values"]
         trainer.save_checkpoint()
         restored = ReferenceStorageTrainer(output, checkpoint=os.path.join(output, "checkpoint-1"))
         assert restore_reference(restored, dataset, "train")[REF_PER_TOKEN_LOGPS_COLUMN] == expected
@@ -350,12 +357,13 @@ def _bounded_batch(rank, root, failure, dp_size, writers, buffer_values):
     cache.writers = writers
     rejects = []
     metadata = []
-    original_gather = dist.all_gather_object
+    original_join = runtime._rank_max
     original_metadata_gather = dist.all_gather_into_tensor
 
-    def record_reject(output, value):
-        rejects.append(value)
-        return original_gather(output, value)
+    def record_reject(slots):
+        # Every failure join opens with one has-reason reduce; reasons are gathered only on a failure.
+        rejects.append(slots)
+        return original_join(slots)
 
     def record_metadata(output, value):
         assert value.dtype == torch.int64 and value.shape == (2,)
@@ -366,7 +374,7 @@ def _bounded_batch(rank, root, failure, dp_size, writers, buffer_values):
     def unexpected_broadcast(*args, **kwargs):
         pytest.fail("batch metadata used per-shard broadcasts")
 
-    patch.setattr(dist, "all_gather_object", record_reject)
+    patch.setattr(runtime, "_rank_max", record_reject)
     patch.setattr(dist, "all_gather_into_tensor", record_metadata)
     patch.setattr(dist, "broadcast", unexpected_broadcast)
     if failure == "write" and rank == writers[-1]:
@@ -490,6 +498,7 @@ def test_transport_failure_is_not_deferred_to_a_world_failure_join(tmp_path, mon
         output[2:].zero_()
 
     monkeypatch.setattr(dist, "all_gather_into_tensor", gather_metadata)
+    monkeypatch.setattr(dist, "new_group", lambda *args, **kwargs: object())
     original = OSError("original reference transport failed")
 
     def fail_send(*args, **kwargs):
@@ -503,6 +512,83 @@ def test_transport_failure_is_not_deferred_to_a_world_failure_join(tmp_path, mon
     with pytest.raises(OSError, match="original reference transport failed") as caught:
         cache.collect_batch([torch.tensor([-1.0])], {0: 0})
     assert caught.value is original
+
+
+def test_completed_scores_stay_on_disk_for_the_launch(tmp_path):
+    """Every rank maps the merged files for the run: on NFS a reader on another node faults on a stale
+    handle once the file is unlinked and the unlinking host closes its own mappings."""
+    first = mapped_scores(tmp_path, reference_dataset(), reference_rows())
+    mapped_scores(tmp_path, reference_dataset(), reference_rows())
+    launches = [path for path in (tmp_path / REFERENCE_CACHE_DIR_NAME).iterdir() if path.is_dir()]
+    assert len(launches) == 1, launches
+    caches = sorted(path.name for path in launches[0].iterdir())
+    assert len(caches) == 2, "a later cache of the same launch removed an earlier one still mapped"
+    for cache in caches:
+        assert sorted(path.name for path in (launches[0] / cache).iterdir()) == ["merged.lengths", "merged.values"]
+    assert first.column().to_pylist() == [[-0.25, -1.5], [-0.75], []]
+    _validate_output_dir(str(tmp_path))
+
+
+def test_a_new_launch_removes_earlier_launches_scratch_but_not_live_nfs_remnants(tmp_path, monkeypatch):
+    mapped_scores(tmp_path, reference_dataset(), reference_rows())
+    (earlier,) = (path for path in (tmp_path / REFERENCE_CACHE_DIR_NAME).iterdir() if path.is_dir())
+    held = earlier / "remnant-cache"
+    held.mkdir()
+    (held / ".nfs000000001").write_bytes(b"a file a process on another host still maps")
+    # The earlier launch's process exits, which releases its lock.
+    os.close(cache_module._HELD_LAUNCH_LOCKS.pop(str(tmp_path / REFERENCE_CACHE_DIR_NAME)))
+    monkeypatch.setattr(cache_module, "_launch_id", lambda: "next-launch")
+    current = mapped_scores(tmp_path, reference_dataset(), reference_rows())
+    remaining = sorted(_scratch_files(tmp_path))
+    assert [name for name in remaining if "next-launch" not in name] == [
+        f"{REFERENCE_CACHE_DIR_NAME}/{earlier.name}/remnant-cache/.nfs000000001"
+    ], "the earlier launch's scratch survived, or its live NFS remnant was removed"
+    assert current.column().to_pylist() == [[-0.25, -1.5], [-0.75], []]
+
+
+def _transfer_over_a_sweep_group(rank: int, root: str) -> None:
+    patch = pytest.MonkeyPatch()
+    groups = []
+    original_send, original_recv = dist.send, dist.recv
+
+    def send(tensor, dst, group=None, **kwargs):
+        groups.append(group)
+        return original_send(tensor, dst, group=group, **kwargs)
+
+    def recv(tensor, src, group=None, **kwargs):
+        groups.append(group)
+        return original_recv(tensor, src, group=group, **kwargs)
+
+    patch.setattr(dist, "send", send)
+    patch.setattr(dist, "recv", recv)
+    world_groups = len(dist.distributed_c10d._world.pg_map)
+    dataset = Dataset.from_dict({"completion_input_ids": [[1], [2, 3]]})
+    rows = [torch.tensor([-0.25]), torch.tensor([-0.75, -1.5])]
+    try:
+        cache = ReferenceScoreCache(root, dp_size=2)
+        # Rank 2 is a model-parallel sibling: no DP shard of its own, so no transfer either.
+        cache.collect_batch([rows[rank]] if rank < 2 else None, {0: 0, 1: 1})
+        if rank < 2:
+            assert dist.get_process_group_ranks(cache._transfer_group) == [0, 1]
+        mapped = cache.finish(dataset)
+    finally:
+        patch.undo()
+    assert mapped.column().to_pylist() == [[-0.25], [-0.75, -1.5]]
+    assert groups if rank < 2 else not groups
+    assert all(group is not None and group is not dist.GroupMember.WORLD for group in groups), (
+        "the sweep's sends ran over the world group, whose communicator keeps a buffer per peer for the run"
+    )
+    assert len(dist.distributed_c10d._world.pg_map) == world_groups, "the sweep's transfer group outlived it"
+
+
+def test_sweep_transfers_run_on_a_group_of_their_own_destroyed_after_the_sweep(tmp_path):
+    run_gloo_ranks(
+        _transfer_over_a_sweep_group,
+        3,
+        str(tmp_path),
+        env={"DIST_OUTPUT_SHARED_FILESYSTEM": "1"},
+        pg_timeout=datetime.timedelta(seconds=30),
+    )
 
 
 if __name__ == "__main__":

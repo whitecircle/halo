@@ -9,11 +9,10 @@ partners" refusal of a model without ``q_a_proj``) or, scoped to no model at all
 sends the halves in separate requests — which the engine drops, leaving it serving stale attention
 weights with no error.
 
-What is pinned: the environmental trainer's single-process push scopes on both of its branches (one
-SGLang client through the streamed gather; a pool of SGLang clients through the rolling one), a
-manager's clients keep the engine's full groups until a push scopes them, a reconnected client is built
-like the first connect (scope, group port, NIC and device), and the collective push scopes its
-forwarding client exactly once.
+What is pinned: the environmental trainer's push scopes its client whether that is one SGLang client
+or a pool of them, a manager's clients keep the engine's full groups until a push scopes them, a
+reconnected client is built like the first connect (scope, group port, NIC and device), and the
+collective push scopes its forwarding client exactly once.
 
 Run: ``python tests/cpu/grpo/test_weight_sync_push_scoping.py`` (or ``pytest -m cpu``).
 """
@@ -27,6 +26,7 @@ import torch
 import torch.nn as nn
 
 import src.distributed.nccl.clients.base as base_module
+import src.trainers.grpo.rollout.weight_sync_clients as pool_module
 from src.distributed.nccl.clients.sglang import SGLangWeightSyncClient
 from src.distributed.parallelism_config import ParallelismConfig
 from src.trainers.grpo.environmental import DistributedAsyncEnvironmentalGRPOTrainer
@@ -79,17 +79,16 @@ class _ServerlessSGLangClient(SGLangWeightSyncClient):
         self._resolve_sync_device(device)
 
 
-def _stub_trainer(model: nn.Module, client, *, multi_server: bool):
-    """The environmental trainer's single-process sync entrypoint, on the smallest object it needs."""
+def _stub_trainer(model: nn.Module, client):
+    """The environmental trainer's sync entrypoint, on the smallest object it needs."""
     trainer = object.__new__(DistributedAsyncEnvironmentalGRPOTrainer)
     trainer.model = model
-    trainer.accelerator = SimpleNamespace(is_main_process=True, unwrap_model=lambda m: m)
+    trainer.accelerator = SimpleNamespace(is_main_process=True)
     trainer.state = SimpleNamespace(global_step=1)
+    trainer.args = SimpleNamespace(report_to=[])
     trainer.async_config = SimpleNamespace(sync_weights_every_n_steps=1, rollout_backend="sglang")
     trainer.parallelism_config = ParallelismConfig()
     trainer._weight_sync_client = client
-    trainer._multi_server_mode = multi_server
-    trainer._init_weight_sync_client = lambda: None
     return trainer
 
 
@@ -107,7 +106,8 @@ def _sglang_pool(num_servers: int) -> InferenceClientManager:
 
 @pytest.fixture(autouse=True)
 def _two_params_per_chunk(monkeypatch):
-    monkeypatch.setattr(base_module, "WEIGHT_SYNC_CHUNK_BYTES", _BUDGET)
+    for module in (base_module, pool_module):  # a client's own budget, and the pool's
+        monkeypatch.setattr(module, "WEIGHT_SYNC_CHUNK_BYTES", _BUDGET)
 
 
 def test_the_streamed_push_does_not_refuse_a_model_without_q_a_proj():
@@ -117,7 +117,7 @@ def test_the_streamed_push_does_not_refuse_a_model_without_q_a_proj():
     wire = Wire()
     client = wire.attach(offline_sglang_client())
 
-    _stub_trainer(model, client, multi_server=False)._sync_weights_to_engine_single(force=True)
+    _stub_trainer(model, client)._sync_weights_to_engine(force=True)
 
     assert [name for name, _ in wire.sent] == [_param(leaf) for leaf in ("q_b_proj", "kv_a_proj_with_mqa", "o_proj")]
     assert client._co_load_groups == (("self_attn.kv_a_proj_with_mqa.weight",),)
@@ -128,7 +128,7 @@ def test_the_streamed_push_keeps_a_declared_pair_in_one_request():
     wire = Wire()
     client = wire.attach(offline_sglang_client())
 
-    _stub_trainer(_MLAModel(_MLA_LEAVES), client, multi_server=False)._sync_weights_to_engine_single(force=True)
+    _stub_trainer(_MLAModel(_MLA_LEAVES), client)._sync_weights_to_engine(force=True)
 
     assert wire.chunk_names == [
         [_param("q_b_proj")],
@@ -144,11 +144,11 @@ def test_a_pool_keeps_the_engines_groups_until_a_push_scopes_them():
     assert all(client._co_load_groups == SGLangWeightSyncClient.CO_LOADED_PARAM_GROUPS for client in manager._clients)
 
 
-def test_the_rolling_push_keeps_a_declared_pair_in_one_request_on_every_server():
-    """The raw-model branch sends one server at a time; each request that splits the pair loses a half."""
+def test_a_pool_push_keeps_a_declared_pair_in_one_request_on_every_server():
+    """The pool drains each chunk on every server; a request that splits the pair loses a half."""
     manager = _sglang_pool(2)
 
-    _stub_trainer(_MLAModel(_MLA_LEAVES), manager, multi_server=True)._sync_weights_to_engine_single(force=True)
+    _stub_trainer(_MLAModel(_MLA_LEAVES), manager)._sync_weights_to_engine(force=True)
 
     for client in manager._clients:
         assert client.wire.chunk_names == [
@@ -158,11 +158,11 @@ def test_the_rolling_push_keeps_a_declared_pair_in_one_request_on_every_server()
         ], f"{client.base_url} received the MLA pair split across requests"
 
 
-def test_the_rolling_push_does_not_refuse_a_model_without_q_a_proj():
+def test_a_pool_push_does_not_refuse_a_model_without_q_a_proj():
     manager = _sglang_pool(2)
     model = _MLAModel(("q_b_proj", "kv_a_proj_with_mqa", "o_proj"))
 
-    _stub_trainer(model, manager, multi_server=True)._sync_weights_to_engine_single(force=True)
+    _stub_trainer(model, manager)._sync_weights_to_engine(force=True)
 
     for client in manager._clients:
         assert [name for name, _ in client.wire.sent] == [

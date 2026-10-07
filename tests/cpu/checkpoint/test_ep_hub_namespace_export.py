@@ -22,10 +22,10 @@ from transformers.core_model_loading import revert_weight_conversion
 from transformers.models.step3p7.configuration_step3p7 import Step3p7Config
 from transformers.models.step3p7.modeling_step3p7 import Step3p7ForConditionalGeneration
 
+from src.distributed.checkpoint.ep_save import _hub_namespace_export
 from src.distributed.expert_parallel.base_layer import EPMoELayerBase
 from src.distributed.expert_parallel.expert_weights import ep_layer_classes
 from src.distributed.expert_parallel.layers.step3p7 import EPStep3p7MoELayer
-from src.distributed.expert_parallel.saving import _hub_namespace_export
 from tests.common.models import TINY_STEP3P7_CONFIG, TINY_STEP3P7_VISION_CONFIG
 from tests.common.utils import safetensors_state_dict
 

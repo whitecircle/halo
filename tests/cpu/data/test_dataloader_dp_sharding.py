@@ -20,6 +20,7 @@ from src.distributed.parallelism_config import ParallelismConfig
 from src.trainers.mixins.dataloader import (
     DataParallelDataLoaderMixin,
     dp_representative_ranks,
+    needs_dp_sharded_loader,
     select_gathered_chunks,
 )
 from tests.common.parallelism import make_parallelism_config
@@ -170,6 +171,26 @@ def test_data_seed_unset_falls_back_to_the_ambient_torch_seed():
     assert _rank_rows(_Trainer(config), shuffle=True) == order
     torch.manual_seed(999)
     assert _rank_rows(_Trainer(config), shuffle=True) != order
+
+
+@pytest.mark.parametrize(
+    "shape, presharded, expected",
+    [
+        ({}, False, False),
+        ({"ep_size": 2}, False, False),
+        ({"world_size": 16, "use_hsdp": True}, False, False),
+        ({"tp_size": 2}, False, True),
+        ({"cp_size": 2}, False, True),
+        ({"expert_tp_size": 2}, False, True),
+        ({"world_size": 16, "pp_size": 2}, False, True),
+        ({}, True, True),
+    ],
+    ids=["dp", "ep2", "hsdp", "tp2", "cp2", "etp2", "pp2", "presharded"],
+)
+def test_the_dp_sharded_loader_takes_every_run_whose_ranks_share_batches(shape, presharded, expected):
+    """DP and EP (orthogonal to DP) and HSDP keep the base flow; every axis that replicates a batch
+    across ranks, and a dataset already cut per DP rank, takes the DP-sharded loader."""
+    assert needs_dp_sharded_loader(make_parallelism_config(**shape), presharded) is expected
 
 
 if __name__ == "__main__":

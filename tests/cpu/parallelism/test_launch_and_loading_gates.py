@@ -88,8 +88,6 @@ def _pc(**kwargs) -> ParallelismConfig:
 
 
 class _Validating(ParallelismValidationMixin):
-    _supports_tp = True
-    _supports_ep = True
     _supports_cp = True
 
     def __init__(self, pc: ParallelismConfig):
@@ -178,18 +176,27 @@ def _load_collaborators(model):
     The applied ``_tp_plan``, the parameter names and the predicate are all genuine — which is the
     whole point, since the guard's correctness is exactly "does it read what HF's sharder read".
 
-    ``sequential_load_within_node`` is stubbed to RAISE, not to a nullcontext: this load must never
-    be rank-serialized (see the test below).
+    ``joined_node_load`` is stubbed to a region the weight load must not run inside, rather than to a
+    nullcontext: the load must never be rank-serialized (see the test below), while the collective-free
+    FP32-master restore after it may be.
     """
+    throttled = []
 
-    def _refuse(**_kwargs):
-        raise AssertionError("_load_tp_model must not rank-serialize its load")
+    @contextlib.contextmanager
+    def _throttle(*_args, **_kwargs):
+        throttled.append(True)
+        yield
+        throttled.pop()
+
+    def _load(*_args, **_kwargs):
+        assert not throttled, "_load_tp_model must not rank-serialize its load"
+        return model
 
     with (
         patch.object(model_loading, "create_dp_tp_mesh", return_value=_DP_TP_MESH),
         patch.object(model_loading, "get_tp_submesh", return_value="tp-mesh"),
-        patch.object(model_loading, "sequential_load_within_node", _refuse),
-        patch.object(model_loading, "from_pretrained_verified", return_value=model),
+        patch.object(model_loading, "joined_node_load", _throttle),
+        patch.object(model_loading, "from_pretrained_verified", _load),
         patch.object(model_loading, "retarget_hf_replicated_grad_hooks", lambda _model: None),
     ):
         yield
@@ -206,6 +213,32 @@ def test_tp_load_never_rank_serializes_its_load(tp_materialized_model):
     """
     with _load_collaborators(tp_materialized_model):
         _load_tp_model("org/x", _pc(tp_size=_TP_SIZE), AutoModelForCausalLM, {"config": tp_materialized_model.config})
+
+
+def test_the_tp_fp32_master_restore_is_node_batched(tp_materialized_model):
+    """After the load, the FP32-master restore stages each full FP32 tensor in host memory on every
+    rank before keeping its own shard, and runs no collective — so unlike the load it is batched per
+    node by ``max_concurrent_loading``, like every other CPU-staged read."""
+    events = []
+
+    @contextlib.contextmanager
+    def throttle(what, max_concurrent):
+        events.append(("batched", max_concurrent))
+        yield
+        events.append("released")
+
+    with (
+        _load_collaborators(tp_materialized_model),
+        patch.object(model_loading, "joined_node_load", throttle),
+        patch.object(model_loading, "restore_fp32_master_parameters", lambda *a, **k: events.append("restore")),
+    ):
+        _load_tp_model(
+            "org/x",
+            _pc(tp_size=_TP_SIZE, max_concurrent_loading=1),
+            AutoModelForCausalLM,
+            {"config": tp_materialized_model.config},
+        )
+    assert events == [("batched", 1), "restore", "released"], events
 
 
 @pytest.fixture
@@ -398,7 +431,7 @@ def test_the_family_gate_is_wired_into_the_loader_right_after_the_config_read():
     config = _ModelConfig("gemma4")
     with (
         patch.dict(os.environ, _env({}), clear=True),
-        patch.object(model_loading, "_ensure_model_downloaded", lambda *args, **kwargs: None),
+        patch.object(model_loading, "resolve_model_source", lambda path, revision, **kwargs: revision),
         patch.object(model_loading, "AutoConfig", SimpleNamespace(from_pretrained=lambda *a, **k: config)),
         pytest.raises(ValueError, match="fp32_non_ep_params"),
     ):
@@ -406,7 +439,7 @@ def test_the_family_gate_is_wired_into_the_loader_right_after_the_config_read():
 
 
 def test_should_accelerate_manage_ddp_semantics():
-    trainer = SimpleNamespace(_no_custom_parallelism=lambda: True)
+    trainer = SimpleNamespace(parallelism_config=SimpleNamespace(has_custom_parallelism=False))
     manage_ddp = DistributedTrainerMixin._should_accelerate_manage_ddp
     with patch.dict(os.environ, _env(_MULTI_GPU_ENV), clear=True):
         assert manage_ddp(trainer) is True
@@ -447,7 +480,7 @@ def test_the_cp_loader_cannot_install_an_unvalidated_attention_implementation():
     validator rejects, so the run would train on a silently different attention kernel.
     """
     assert inspect.signature(load_model_for_cp).parameters["config"].default is inspect.Parameter.empty, (
-        "config must stay REQUIRED: an optional one is what let an unvalidated impl through"
+        "config must stay REQUIRED: an optional one lets an unvalidated impl through"
     )
 
     seen = {}

@@ -33,16 +33,19 @@ logger = logging.getLogger(__name__)
 
 
 def _reject_left_padding(attention_mask) -> None:
-    """Raise if any row is left-padded.
+    """Raise if any row is left-padded. Correctness of the CP path depends on it.
 
     The Ulysses path drops the mask (dense flash attention with ``causal=`` only, no varlen), so it
-    tolerates only padding a causal mask already ignores: trailing pads with ignored labels. With
-    leading pads every real token attends them and the loss differs from the same batch without CP.
+    tolerates only padding a causal mask already ignores — TRAILING pads with ignored labels. With
+    leading pads every real token attends them and the loss silently differs from the same batch
+    without CP. ``DataCollatorForSMPO`` left-pads prompts unconditionally; SMPO's concat flushes
+    those pads behind each completion before the forward, and this refuses any batch that skipped it.
 
-    Checked on every forward rather than cached, because padding varies per batch:
-    ``DataCollatorForSMPO`` left-pads prompts and right-pads completions, so a batch with
-    equal-length prompts carries only trailing pads while the next ragged one carries leading pads.
-    The check costs one device→host sync per step.
+    Runs on EVERY forward. No batch can certify the ones after it: under a collator that left-pads
+    prompts and right-pads completions, as SMPO's does, a batch whose prompts happen to be equal-length
+    carries only trailing pads while the next ragged batch carries leading ones. Caching the verdict
+    off the first padded batch disarms the guard exactly where it is needed, so the check pays its one
+    device→host sync per step instead — negligible beside CP's all-to-alls.
     """
     if attention_mask is None:
         return
@@ -53,23 +56,21 @@ def _reject_left_padding(attention_mask) -> None:
             "Context Parallelism received a LEFT-padded batch (row starts with attention_mask == 0). "
             "The CP attention path ignores the mask and runs dense causal attention, so every real "
             "token would attend the leading pads and the loss would differ from the same batch "
-            "without CP. Use right padding (tokenizer.padding_side='right'); SMPO's collator "
-            "left-pads prompts, so under CP run it with per_device_train_batch_size=1, where no "
-            "padding is emitted."
+            "without CP. Use right padding (tokenizer.padding_side='right')."
         )
 
 
 def stale_dense_mlp_keys(keys, ep_mlp_paths=frozenset()):
     """Stale duplicate dense-MLP keys to drop from a CP-wrapped model's state dict.
 
-    Everything is derived from the state dict and the model itself:
+    Everything is derived from the state dict / model itself, never a hand-maintained name list:
 
-    - a layer counts as sparse when its ``.mlp`` scope carries ``experts.`` / ``router.`` sub-keys;
+    - a layer is SPARSE when its ``.mlp`` scope carries ``experts.`` / ``router.`` sub-keys;
       ``ep_mlp_paths`` (module paths of live :class:`EPMoELayerBase` instances) exempts EP-wrapped
-      layers, whose dense-named params are the grouped expert weights;
-    - dense-MLP names come from the model's genuinely dense ``.mlp`` layers (hybrid families), and a
-      sparse key is stale only on an exact relative-name match, so a substring collision cannot drop
-      a live param.
+      layers, whose dense-named params ARE the grouped expert weights;
+    - dense-MLP names are harvested from the model's own genuinely-dense ``.mlp`` layers (hybrid
+      families), and a sparse key is stale only on an EXACT relative-name match, so a substring
+      collision cannot drop a live param.
     """
     suffixes_by_prefix: dict[str, set[str]] = {}
     for key in keys:
@@ -123,8 +124,9 @@ class UlyssesCPModelWrapper(nn.Module):
             self.cp_size,
             validate=True,
         )
-        # Collected once at patch time: forward publishes the full-sequence position_ids onto these,
-        # and re-walking the module tree every step would cost more than the publish itself.
+        # Collected once, at the only moment the wrappers are installed: forward publishes the
+        # full-sequence position_ids onto them (see :meth:`forward`), and walking the module tree
+        # per step to find them again would cost more than the publish itself.
         self._attention_layers = [m for m in self.model.modules() if isinstance(m, UlyssesAttentionBase)]
 
         logger.info(
@@ -141,10 +143,10 @@ class UlyssesCPModelWrapper(nn.Module):
     ):
         """Forward with Ulysses CP and boundary-aware causal LM loss.
 
-        Each rank holds ``seq_len / cp_size`` tokens but sees the full sequence in attention after
-        the all-to-all. Causal LM shifts labels, so a plain split would lose each rank's prediction
-        of the next chunk's first token; that token is passed through as the boundary label and
-        predicted from the current chunk's last logit (the final rank has none).
+        Each rank holds ``seq_len / cp_size`` tokens but sees the full sequence in attention
+        after the all-to-all. Boundary handling: causal LM shifts labels, so naive splitting
+        loses each rank's prediction of the next chunk's first token — passed through as the
+        boundary label and predicted from the current chunk's last logit (final rank exempt).
         """
         local_input_ids, local_attention_mask, local_position_ids = self._prepare_cp_inputs(
             input_ids, attention_mask, position_ids, kwargs
@@ -168,9 +170,9 @@ class UlyssesCPModelWrapper(nn.Module):
             if aux_loss is not None:
                 aux_loss = aux_loss.to(loss.device)
                 if not torch.is_grad_enabled() and self.cp_group is not None:
-                    # Eval: the DP-scoped metric gather keeps one CP sibling's copy, so the
-                    # chunk-local aux must be averaged over the group here rather than through the
-                    # training-only grad average.
+                    # Eval: same rank-uniformity contract as the CE term — the DP-scoped metric
+                    # gather keeps one CP sibling's copy, so the chunk-local aux must become the
+                    # group mean here rather than through the training-only grad average.
                     aux_loss = aux_loss.detach().clone()
                     dist.all_reduce(aux_loss, op=dist.ReduceOp.AVG, group=self.cp_group)
                 loss = loss + self._router_aux_loss_coef() * aux_loss
@@ -239,19 +241,20 @@ class UlyssesCPModelWrapper(nn.Module):
             )
         local_position_ids = split_sequence_for_cp(position_ids, self.cp_config)
 
-        # The legacy attention path RoPEs after the all-to-all, where Q/K span the whole sequence, so
-        # its hooks (Mistral4's llama-4 scale) need the full positions this wrapper holds before the
-        # split. Not cleared afterwards: gradient-checkpoint recompute re-runs attention during the
-        # backward, and the CP trainers run one forward per backward.
+        # Published, not gathered per layer: the legacy attention path RoPEs after the all-to-all,
+        # where Q/K span the whole sequence, so its hooks (Mistral4's llama-4 scale) need the FULL
+        # positions — which this wrapper holds, before the split. Not cleared afterwards, because
+        # gradient-checkpoint recompute re-runs attention during the backward; the CP trainers run
+        # one forward per backward, so the live value is always that forward's.
         for layer in self._attention_layers:
             layer.global_position_ids = position_ids
         return local_input_ids, local_attention_mask, local_position_ids
 
     def _router_aux_loss_coef(self) -> float:
-        """The family's MoE router aux-loss weight. Raises when the config declares none.
+        """The family's MoE router aux-loss weight. Raises when the config does not declare one.
 
-        The model emitted an ``aux_loss`` term, so it must also say how to weigh it; a stand-in
-        default would train a different objective than the same config without CP.
+        The model emitted an ``aux_loss`` term, so it must also say how to weigh it: a stand-in
+        default would silently train a different objective than the same config without CP.
         """
         config = self.model.config
         coef = get_config_field(config, "router_aux_loss_coef")
@@ -286,11 +289,11 @@ class UlyssesCPModelWrapper(nn.Module):
         if self.cp_group is not None:
             dist.all_reduce(global_tokens, op=dist.ReduceOp.SUM, group=self.cp_group)
 
-        # Eval (no grad): return the rank-uniform group mean. HF's DP-scoped metric gather keeps only
-        # cp_rank 0's copy, so with loss tokens unevenly spread across chunks (any completion-masked
-        # eval set) the rank-varying training form below would bias eval_loss by chunk 0's share. The
-        # training path cannot use this all_reduce: it is not autograd-aware, and each rank must
-        # backward its own chunk-partial sum.
+        # No grad (the eval loop): return the rank-UNIFORM group mean. The rank-varying training
+        # form below feeds HF's DP-scoped metric gather, which keeps only cp_rank 0's copy — with
+        # loss tokens unevenly spread across chunks (any completion-masked eval set) that biases
+        # eval_loss by chunk 0's share. The training path cannot take this all_reduce: it is not
+        # autograd-aware, and each rank must backward its own chunk-partial sum.
         if not torch.is_grad_enabled() and self.cp_group is not None:
             group_loss_sum = local_loss_sum.detach().clone()
             dist.all_reduce(group_loss_sum, op=dist.ReduceOp.SUM, group=self.cp_group)
@@ -310,17 +313,18 @@ class UlyssesCPModelWrapper(nn.Module):
 
     @property
     def dtype(self):
-        """The first parameter's dtype, unlike the delegated ``PreTrainedModel.dtype``, which skips
-        non-floating parameters. The two differ under QLoRA, whose ``Params4bit`` weights are uint8;
-        ``config`` and ``device`` carry no such difference and stay delegated."""
+        """The FIRST parameter's dtype, unlike the delegated ``PreTrainedModel.dtype``, which skips
+        non-floating parameters. QLoRA under CP holds ``Params4bit`` (uint8) weights, where the two
+        answers differ; ``config`` and ``device`` carry no such difference and are delegated."""
         return next(self.model.parameters()).dtype
 
     def generate(self, *args, **kwargs):
-        """Raise instead of letting ``__getattr__`` delegate generation to the wrapped model.
+        """Refuse generation instead of letting ``__getattr__`` delegate it to the wrapped model.
 
-        Delegated, the patched layers would all-to-all over the CP group with no cache path, and the
-        legacy-path hooks would re-read the ``global_position_ids`` of the previous forward. PEFT
-        delegates through its own ``__getattr__``, so a caller-side isinstance guard cannot cover it.
+        Delegated, the patched layers all-to-all over the CP group with no cache path, and the
+        legacy-path hooks re-read the ``global_position_ids`` the LAST forward published — a stale
+        scale that only raises when the generated length happens to differ. PEFT delegates through
+        its own ``__getattr__``, so no caller-side isinstance guard can close this.
         """
         raise NotImplementedError(
             "Context Parallelism does not support generate(): each rank holds one sequence chunk and "
@@ -331,9 +335,10 @@ class UlyssesCPModelWrapper(nn.Module):
         """Resolve on the wrapper first (``nn.Module`` params/buffers/submodules, incl. ``model``),
         then delegate to the wrapped model.
 
-        Delegation is gated on ``model`` being registered: before ``__init__`` runs (``cls.__new__``
-        during deepcopy/pickle, which then probes ``__setstate__``) the fallback would look up
-        ``self.model``, re-enter here and recurse instead of raising the expected ``AttributeError``.
+        The delegation is gated on ``model`` actually being registered: before ``__init__`` runs
+        (``cls.__new__`` during deepcopy/pickle, which then probes ``__setstate__``) the fallback
+        would look up ``self.model``, re-enter here, and recurse until the stack blows instead of
+        raising the ``AttributeError`` the probe expects.
         """
         try:
             return super().__getattr__(name)
@@ -343,11 +348,12 @@ class UlyssesCPModelWrapper(nn.Module):
             return getattr(self.model, name)
 
     def parameters(self, recurse=True):
-        """The inner model's parameters, not ``nn.Module``'s walk of this wrapper.
+        """The inner model's parameters, NOT ``nn.Module``'s walk of this wrapper.
 
-        That walk yields each attention weight twice, under the wrapper's own name and under
-        ``original_attention.``. :meth:`named_parameters` deduplicates, and this getter must agree
-        with it, or an optimizer built from it steps the same tensor twice.
+        Kept because the walk would yield each attention weight twice — once under the wrapper's own
+        name, once under ``original_attention.`` — which the overridden :meth:`named_parameters`
+        deduplicates and this getter must agree with (an optimizer built from it would otherwise
+        step the same tensor twice).
         """
         return self.model.parameters(recurse=recurse)
 
@@ -360,22 +366,22 @@ class UlyssesCPModelWrapper(nn.Module):
                 yield clean_name, param
 
     def state_dict(self, *args, destination=None, prefix="", keep_vars=False):
-        """Return the state dict with the ``original_attention.`` prefix stripped for HF compatibility.
+        """Return state dict with the ``original_attention.`` prefix stripped for HF compatibility.
 
-        Params present both directly on the wrapper and via ``original_attention`` (GptOss sinks) are
-        deduplicated, the direct one winning. Stale duplicate dense-MLP keys are dropped on sparse
-        (MoE) layers only.
+        Params present both directly on the wrapper and via ``original_attention`` (e.g. GptOss
+        sinks) are deduplicated (direct wins). Also drops the stale duplicate dense MLP keys on
+        SPARSE (MoE) layers only.
 
-        A nested call — an outer module's ``state_dict`` recursion (a PeftModel root) passing
-        ``destination``/``prefix`` — gets plain ``nn.Module`` behavior instead: raw module-tree keys
-        under the wrapper's own ``model.`` level, which is the spelling ``named_parameters()`` and
-        ``load_state_dict()`` resolve from that root, since recursion bypasses those overrides.
-        Cleaning there instead (or forwarding the shared ``destination`` to the inner model, which
-        writes raw keys at the wrapper's prefix and collapses its ``model.`` level) would respell the
-        root's state dict away from its own load path, and PEFT adapter save/resume reads through
-        this seam.
+        A NESTED call — an outer module's ``state_dict`` recursion (a PeftModel root) passing
+        ``destination``/``prefix`` — gets the plain ``nn.Module`` behavior instead: raw module-tree
+        keys under the wrapper's own ``model.`` level, the spelling ``named_parameters()`` and
+        ``load_state_dict()`` resolve from that same root (recursion bypasses those overrides).
+        Cleaning here — or forwarding the shared ``destination`` to the inner model, which writes
+        raw keys at the wrapper's prefix and collapses its ``model.`` level — respells the root's
+        state dict away from its own load path, and PEFT adapter save/resume reads through this
+        seam.
         """
-        if args:  # legacy positional (destination, prefix, keep_vars), as nn.Module accepts
+        if args:  # legacy positional (destination, prefix, keep_vars) — the contract nn.Module honors
             if destination is None:
                 destination = args[0]
             if len(args) > 1 and prefix == "":
@@ -417,10 +423,11 @@ def find_cp_wrapper(model: nn.Module) -> UlyssesCPModelWrapper | None:
 
 
 def patch_model_for_cp(model: nn.Module, cp_config: CPConfig) -> nn.Module:
-    """Wrap a model for Ulysses CP. Idempotent for the same ``cp_config`` object.
+    """Wrap a model for Ulysses CP. Idempotent for the SAME ``cp_config`` object.
 
-    A re-wrap cannot retarget the patched layers' process groups, so any other config raises,
-    including one with the same ``cp_size`` but different groups.
+    A re-wrap cannot retarget the patched layers' process groups, so any other config — even one
+    with the same ``cp_size`` but different groups — raises rather than silently keeping the old
+    groups.
     """
     if cp_config.cp_size == 1:
         logger.info("CP size is 1, no wrapping needed")

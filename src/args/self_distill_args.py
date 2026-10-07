@@ -1,9 +1,10 @@
 """Script arguments for offline privileged-context self-distillation."""
 
+import math
 from dataclasses import dataclass, field, fields
 from typing import ClassVar
 
-from src.args.mixins import SDPGArguments, SelfDistillationLoss
+from src.args.mixins import SDPGArguments, SelfDistillationLoss, format_field_names
 from src.args.sft_args import SFTScriptArguments
 
 
@@ -18,13 +19,19 @@ class SelfDistillationArguments(SDPGArguments, SFTScriptArguments):
     # SDPG fields the script applies while building the teacher prompts; every other SDPG field is
     # forwarded to the trainer, which takes the complement.
     DATASET_SIDE_SDPG_FIELDS: ClassVar[frozenset[str]] = frozenset({"sdpg_hint_template"})
-    # inject_privileged_hint (src/data/collators/self_distill.py) fills the reference solution too.
-    SOLUTION_PLACEHOLDER: ClassVar[str] = "solution"
-    HINT_PLACEHOLDERS: ClassVar[frozenset[str]] = SDPGArguments.HINT_PLACEHOLDERS | {SOLUTION_PLACEHOLDER}
+    # The field naming the column that fills each slot privileged_hint renders
+    # (src/data/collators/self_distill.py); this arm fills the reference solution too.
+    HINT_SLOT_FIELDS: ClassVar[dict[str, str]] = {
+        "answer": "sdpg_answer_field",
+        "solution": "privileged_solution_field",
+    }
+    HINT_PLACEHOLDERS: ClassVar[frozenset[str]] = frozenset(HINT_SLOT_FIELDS)
 
     sdpg_answer_field: str | None = field(
         default="answer",
-        metadata={"help": "Dataset field holding the ground-truth answer for the hint."},
+        metadata={
+            "help": "Dataset field holding the ground-truth answer for the hint (required while sdpg_beta_base > 0)."
+        },
     )
     privileged_solution_field: str | None = field(
         default="solution",
@@ -34,7 +41,7 @@ class SelfDistillationArguments(SDPGArguments, SFTScriptArguments):
     reference_kl_coef: float = field(
         default=0.0,
         metadata={
-            "help": "Alpha for KL regularization to a frozen reference model. 0 disables "
+            "help": "Alpha for KL regularization to a frozen reference model (finite, >= 0). 0 disables "
             "(no reference model is loaded)."
         },
     )
@@ -54,13 +61,13 @@ class SelfDistillationArguments(SDPGArguments, SFTScriptArguments):
         default=None,
         metadata={
             "help": "Dataset field with a per-sample confidence in [0, 1]. When set, the "
-            "SFT and OPD losses are weighted by confidence**confidence_power "
-            "(mean-normalized), mirroring the soft-weighted (w_conf) SFT arm."
+            "SFT and OPD losses are weighted by confidence**confidence_power, divided by its mean over "
+            "the train split, mirroring the soft-weighted (w_conf) SFT arm."
         },
     )
     confidence_power: float = field(
         default=4.0,
-        metadata={"help": "Exponent p in the per-sample weight conf**p."},
+        metadata={"help": "Exponent p in the per-sample weight conf**p (finite, > 0)."},
     )
     confidence_weight_opd: bool = field(
         default=True,
@@ -88,3 +95,30 @@ class SelfDistillationArguments(SDPGArguments, SFTScriptArguments):
     def __post_init__(self):
         self._apply_default_project_name("self-distillation")
         self._validate_ranges()
+
+    def _validate_ranges(self) -> None:
+        super()._validate_ranges()
+        # A NaN coefficient NaNs every loss; a negative one pushes the student away from the anchor.
+        if not math.isfinite(self.reference_kl_coef) or self.reference_kl_coef < 0:
+            raise ValueError(f"reference_kl_coef must be a finite value >= 0, got {self.reference_kl_coef}")
+        # p <= 0 inverts or flattens the weighting, and a zero confidence then divides by zero.
+        if not math.isfinite(self.confidence_power) or self.confidence_power <= 0:
+            raise ValueError(f"confidence_power must be a finite value > 0, got {self.confidence_power}")
+        unfilled = sorted(
+            self.HINT_SLOT_FIELDS[slot]
+            for slot in format_field_names(self.sdpg_hint_template)
+            if not getattr(self, self.HINT_SLOT_FIELDS[slot])
+        )
+        if self.sdpg_beta_base > 0 and unfilled:
+            raise ValueError(
+                f"sdpg_hint_template names a slot whose column is unset ({unfilled}) while sdpg_beta_base > 0: "
+                f"no row could render the hint, so every teacher would run on the plain prompt. Set the "
+                f"column, or set sdpg_beta_base: 0."
+            )
+        if self.sdpg_beta_base > 0 and not self.train_on_completions_only:
+            raise ValueError(
+                "train_on_completions_only: false while sdpg_beta_base > 0: OPD pairs the student's and the "
+                "hinted teacher's supervised tokens in order, and with the prompt supervised the hint "
+                "shifts every pair after it onto a different token. Supervise the completions only "
+                "(train_on_completions_only: true with assistant_message_template), or set sdpg_beta_base: 0."
+            )

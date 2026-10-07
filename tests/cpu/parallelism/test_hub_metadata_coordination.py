@@ -1,13 +1,13 @@
 #!/usr/bin/env python
 """Pre-download hub reads are ordered main-rank-first, and stay free without a process group.
 
-Three sites contact the hub before ``fs_aware_main_first("model_download")`` ever runs: the
-text-vs-multimodal probe (``is_vlm_model``), the expert-LoRA peel (``split_expert_lora_targets``),
-and the VLM processor/tokenizer load. Each is one small ``from_pretrained``; at 512 ranks it is 512
-simultaneous requests for the same files (HTTP 429, after which the probe silently falls back to a
-name heuristic that can DISAGREE with the config answer and route ranks to different model classes)
+Three sites contact the hub before the coordinated source resolution (``resolve_model_source``) ever
+runs: the text-vs-multimodal probe (``is_vlm_model``), the expert-LoRA peel
+(``split_expert_lora_targets``), and the VLM processor/tokenizer load. Each is one small
+``from_pretrained``; at 512 ranks it is 512 simultaneous requests for the same files (HTTP 429, after
+which the probe falls back to a name heuristic that can DISAGREE with the config answer its peers read)
 — and under ``trust_remote_code`` every rank also races to populate transformers' dynamic-module
-cache, which is written with no lock, so a peer can import a truncated module.
+cache.
 
 ``hub_metadata_main_first`` is the one seam they share. What these tests pin: the ordering actually
 happens (the fetch runs inside the coordination, under a tag namespaced away from the other

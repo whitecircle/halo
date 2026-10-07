@@ -157,7 +157,7 @@ def test_backfill_never_overwrites_a_head_dim_the_family_carries():
 @pytest.mark.parametrize("cls", [Glm4MoeLiteUlyssesAttention, Mistral4UlyssesAttention])
 def test_mla_geometry_is_read_off_the_wrapped_module_by_the_base(cls):
     """The base compute reads these attributes off the module; every family must get them, with the
-    SAME answer — the hand-copied blocks this replaced disagreed on three of them."""
+    SAME answer — per-family copies drift on exactly these."""
     attn = _FakeMLAAttention()
     wrapper = _make_wrapper(cls, attn)
 
@@ -171,8 +171,8 @@ def test_mla_geometry_is_read_off_the_wrapped_module_by_the_base(cls):
 
 
 def test_glm4_carries_no_layer_of_its_own():
-    """GLM4-MoE-Lite is pure MLA: it declares its HF class names and nothing else. A re-added
-    ``__init__`` here is the hand-copied geometry block coming back."""
+    """GLM4-MoE-Lite is pure MLA: it declares its HF class names and nothing else. An ``__init__``
+    here would be a forked geometry block."""
     assert "__init__" not in vars(Glm4MoeLiteUlyssesAttention)
 
 

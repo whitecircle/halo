@@ -56,13 +56,19 @@ def _build_sampling_params(
     logprobs: int = 1,
     extra: dict | None = None,
 ) -> dict:
-    params = {"n": n, "temperature": temperature, "top_p": top_p, "max_tokens": max_tokens, "logprobs": logprobs}
-    if repetition_penalty != 1.0:
-        params["repetition_penalty"] = repetition_penalty
-    if top_k > 0:
-        params["top_k"] = top_k
-    if min_p > 0.0:
-        params["min_p"] = min_p
+    """TRL's sampling arguments as a completions body. Every filter is stated, an off one included,
+    since the server fills an omitted one from the model's generation_config.json; TRL's top_k 0 is
+    vLLM's own off value."""
+    params = {
+        "n": n,
+        "temperature": temperature,
+        "top_p": top_p,
+        "top_k": top_k,
+        "min_p": min_p,
+        "repetition_penalty": repetition_penalty,
+        "max_tokens": max_tokens,
+        "logprobs": logprobs,
+    }
     if extra:
         params.update(extra)
     return params

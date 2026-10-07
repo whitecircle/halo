@@ -34,6 +34,7 @@ os.environ.setdefault("HF_HUB_OFFLINE", "1")
 
 from src.environments.base import Message, Trajectory
 from src.environments.episode import RolloutResult
+from src.trainers.grpo.environmental import BatchBuildFence
 from src.trainers.grpo.environmental import DistributedAsyncEnvironmentalGRPOTrainer as Trainer
 from tests.common.models import GEMMA3_4B_IT, GPT_OSS_20B_OPENAI, QWEN3_0_6B
 from tests.common.tokenizers import try_cached_tokenizer
@@ -125,7 +126,7 @@ def _stub(tok):
         processing_class=tok,
         _tokenizer=tok,
         _tools_schema=None,
-        _batch_build_error=None,
+        _batch_errors=BatchBuildFence(),
         _rollout_template_kwargs={},
         _carry_reasoning=False,
         _max_train_row_tokens=None,
@@ -143,7 +144,6 @@ def _stub(tok):
     stub._invalidate_untrainable_episode = types.MethodType(Trainer._invalidate_untrainable_episode, stub)
     stub._render_messages_to_ids = types.MethodType(Trainer._render_messages_to_ids, stub)
     stub._context_limit = types.MethodType(Trainer._context_limit, stub)
-    stub._record_batch_error = types.MethodType(Trainer._record_batch_error, stub)
     stub._tokenize_trajectory = types.MethodType(Trainer._tokenize_trajectory, stub)
     stub._tokenize_trajectory_turns = types.MethodType(Trainer._tokenize_trajectory_turns, stub)
     return stub
@@ -192,7 +192,7 @@ def _assert_dropped_not_guessed(stub, result, row, caplog, *needles):
     fully masked row), the episode is invalidated so it leaves the group baseline, the cause is logged
     with its name — and nothing is recorded as the batch error that fails every rank."""
     _prompt, completion, mask = row
-    assert stub._batch_build_error is None, "a data-local template failure must not fail the run"
+    assert stub._batch_errors.reason is None, "a data-local template failure must not fail the run"
     assert result.trajectory.episode_invalid
     assert sum(mask) == 0, "an unlocatable trajectory must not contribute gradient"
     assert len(completion) == 1
@@ -276,7 +276,7 @@ def test_trained_row_is_exactly_the_authoritative_render(model, convo_name):
 
     assert prompt + completion == full, "the trained row is not the serving-template render"
     assert len(mask) == len(completion)
-    assert stub._batch_build_error is None, stub._batch_build_error
+    assert stub._batch_errors.reason is None, stub._batch_errors.reason
 
 
 @pytest.mark.parametrize(("model", "convo_name"), CASES)
@@ -468,7 +468,7 @@ def test_sampled_token_path_bypasses_re_rendering():
 
     assert [row.completion_ids.tolist() for row in rows] == [sampled[1], sampled[3]]
     assert [row.prompt_ids.tolist() for row in rows] == [[901, 902], [903, 904]]
-    assert stub._batch_build_error is None
+    assert stub._batch_errors.reason is None
 
 
 def test_sampled_token_path_falls_back_to_the_identical_render_row():

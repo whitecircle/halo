@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Load-time guards in ``src/data/sources/loading.py``.
 
-Two guards pinned here:
+Four guards pinned here:
 
 * a **declared** render column (``conversation_field``) the dataset does not carry must not be
   accepted silently: ``_filter_empty_conversations`` no-ops on a missing column, so a typo surfaces
@@ -277,8 +277,8 @@ def test_mixed_corpus_keeps_the_tools_column_through_the_concatenation():
     """The mixed-corpus shape the tools warning promises: only the rows of the source WITHOUT the
     column render toolless.
 
-    The schema intersection dropped a column missing from any entry, so the whole corpus — the
-    tool-use half included — rendered without tools, and nothing downstream ever said so
+    A schema intersection would drop a column missing from any entry, so the whole corpus — the
+    tool-use half included — would render without tools, and nothing downstream would say so
     (``tools_field`` is optional at render time).
     """
     with_tools = tempfile.mkdtemp()

@@ -56,7 +56,7 @@ def _sft_config() -> SimpleNamespace:
 
 @pytest.fixture(autouse=True)
 def _writable_dataset_cache(tmp_path, monkeypatch):
-    """The map passes spill through the datasets cache, which the CPU tier mounts read-only."""
+    """The map passes spill through the datasets cache; a per-test dir keeps them off the shared cache."""
     monkeypatch.setattr(datasets.config, "HF_DATASETS_CACHE", tmp_path)
 
 

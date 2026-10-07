@@ -21,55 +21,10 @@ from src.trainers.grpo.offline import OfflineGRPOTrainer
 from tests.common.gloo import run_gloo_ranks
 
 _KL_SCORES = [[-2.0, -2.3, -1.8, -2.2, -2.6, -1.7, -3.2], [-1.2, -2.7, -3.1, -1.9, -2.8, -1.5, -2.4]]
-# CP2 loss and full gradient over _KL_SCORES (reinforce, kl_beta 0.2), pinned bit for bit: integer
-# token counts are exact in fp32 wherever they come from.
-_CP2_FROZEN = {
-    "grpo": (
-        1.4572901725769043,
-        [
-            [
-                -0.09460652619600296,
-                -0.17928069829940796,
-                -0.09499384462833405,
-                -0.17928069829940796,
-                -0.10344026982784271,
-                -0.11641031503677368,
-                -0.0957413837313652,
-            ],
-            [0.0, 0.0, 0.0, 0.0, -0.01850668340921402, 0.11364273726940155, -0.04843444377183914],
-        ],
-    ),
-    "bnpo": (
-        2.3402340412139893,
-        [
-            [
-                -0.13244913518428802,
-                -0.25099295377731323,
-                -0.13299137353897095,
-                -0.25099295377731323,
-                -0.14481636881828308,
-                -0.16297443211078644,
-                -0.13403794169425964,
-            ],
-            [0.0, 0.0, 0.0, 0.0, -0.011104006320238113, 0.06818564236164093, -0.029060665518045425],
-        ],
-    ),
-    "dr_grpo": (
-        1.6715956926345825,
-        [
-            [
-                -0.09460652619600296,
-                -0.17928069829940796,
-                -0.09499384462833405,
-                -0.17928069829940796,
-                -0.10344026982784271,
-                -0.11641031503677368,
-                -0.0957413837313652,
-            ],
-            [0.0, 0.0, 0.0, 0.0, -0.007931429892778397, 0.048704031854867935, -0.02075761929154396],
-        ],
-    ),
-}
+# CP2 splits each row's loss numerator into one partial sum per rank, so the loss reassociates one fp32
+# addition per row against the full-row oracle (measured within one rounding step); every gradient
+# element is a per-token term over integer token counts and matches the oracle bit for bit.
+_CP2_LOSS_RTOL = 2 * torch.finfo(torch.float32).eps
 
 
 def _inputs(with_reference: bool):
@@ -239,7 +194,7 @@ def _cp_sum_count_worker(rank: int) -> None:
     trainer = _trainer(scores, beta=0.2, loss_type="grpo")
     trainer.cp_config = SimpleNamespace(cp_size=cp_size, cp_rank=rank, process_group=dist.group.WORLD)
     trainer.max_completion_length = 7
-    for loss_type, (frozen_loss, frozen_grad) in _CP2_FROZEN.items():
+    for loss_type in ("grpo", "bnpo", "dr_grpo"):
         policy = scores.clone().requires_grad_()
         trainer.loss_type = loss_type
         trainer._cp_chunked_logps = lambda model, ids, mask, labels, policy=policy: (
@@ -252,11 +207,17 @@ def _cp_sum_count_worker(rank: int) -> None:
         assert cp_sums.call_count == 2, (loss_type, cp_sums.call_count)
         (loss / cp_size).backward()
         dist.all_reduce(policy.grad)
-        assert torch.equal(loss.detach(), torch.tensor(frozen_loss)), (loss_type, loss.item())
-        assert torch.equal(policy.grad, torch.tensor(frozen_grad)), (loss_type, policy.grad.tolist())
+        oracle_policy = scores.clone().requires_grad_()
+        expected = _kl_oracle(batch, oracle_policy, loss_type, "reinforce")
+        expected.backward()
+        torch.testing.assert_close(loss.detach(), expected.detach(), rtol=_CP2_LOSS_RTOL, atol=0)
+        assert torch.equal(policy.grad, oracle_policy.grad), (
+            loss_type,
+            (policy.grad - oracle_policy.grad).abs().max(),
+        )
 
 
-def test_cp2_loss_reduces_twice_per_microbatch_and_keeps_its_exact_values():
+def test_cp2_loss_reduces_twice_per_microbatch_and_matches_the_full_row_oracle():
     run_gloo_ranks(_cp_sum_count_worker, 2, pg_timeout=datetime.timedelta(seconds=30))
 
 

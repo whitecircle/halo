@@ -8,7 +8,7 @@ The rest are about scratch: a GPU test allocates its dirs through the launcher a
 
 ``tests.common.distributed.setup_cache_dirs`` hands back two ``tempfile.mkdtemp`` dirs — an
 output dir and an HF datasets cache. Nothing reclaims them on its own, so a test that allocates
-and never frees leaks two directories per rank per run; across a nightly suite that is thousands
+and never frees leaks two directories per rank per run; across a full GPU suite run that is thousands
 of stale trees on the scratch volume, and the HF cache half is not small.
 
 Four spellings discharge the obligation, and the scan accepts any of them: a ``cleanup_dirs``

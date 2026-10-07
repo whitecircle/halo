@@ -70,7 +70,7 @@ class _Validating(ParallelismValidationMixin):
 
     def __init__(self, pc, supports_pp, reason=""):
         self.parallelism_config = pc
-        self._supports_tp = self._supports_ep = self._supports_cp = True
+        self._supports_cp = True
         self._supports_pp = supports_pp
         self._pp_unsupported_reason = reason
 
@@ -313,6 +313,30 @@ def test_eval_batch_mismatch_is_rejected_whenever_an_evaluation_runs(eval_strate
     args = _pp_args(eval_strategy=eval_strategy, eval_on_start=eval_on_start, per_device_eval_batch_size=4)
     with pytest.raises(ValueError, match=r"per_device_eval_batch_size \(4\) must equal per_device_train_batch_size"):
         PipelineTrainerMixin._maybe_prepare_pipeline_model(stub, {}, args)
+
+
+@pytest.mark.parametrize(
+    ("output_shared", "local_world_size", "refused"),
+    [("0", "2", True), ("0", "4", False), ("1", "2", False)],
+    ids=["per-node-across-nodes", "per-node-single-node", "shared-across-nodes"],
+)
+def test_push_to_hub_is_refused_only_where_nodes_hold_different_stages(
+    monkeypatch, output_shared, local_world_size, refused
+):
+    """Per-node storage across nodes leaves each node only the shards of the stages it runs beside the
+    full index, and the Trainer uploads from global rank 0 alone, so a push would publish an index
+    naming files the Hub repo never receives. A shared output directory, or the one node of a
+    single-node launch, holds every stage's shards and passes the gate."""
+    monkeypatch.setenv("DIST_OUTPUT_SHARED_FILESYSTEM", output_shared)
+    monkeypatch.setenv("WORLD_SIZE", "4")
+    monkeypatch.setenv("LOCAL_WORLD_SIZE", local_world_size)
+    stub = _pipeline_stub(parallelism_config=SimpleNamespace(is_pp_mode=True), save_sharded_ep=False)
+    if refused:
+        with pytest.raises(ValueError, match="push_to_hub is not supported under pipeline parallelism"):
+            PipelineTrainerMixin._maybe_prepare_pipeline_model(stub, {}, _pp_args(push_to_hub=True))
+    else:
+        with pytest.raises(ValueError, match="requires the model to be passed"):
+            PipelineTrainerMixin._maybe_prepare_pipeline_model(stub, {}, _pp_args(push_to_hub=True))
 
 
 def test_eval_batch_mismatch_passes_when_no_evaluation_runs():

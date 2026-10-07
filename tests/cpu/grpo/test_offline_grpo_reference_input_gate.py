@@ -13,8 +13,8 @@ from src.configs.offline_grpo_config import OfflineGRPOConfig
 from src.data.collators.offline_grpo import REF_PER_TOKEN_LOGPS_COLUMN
 from src.distributed.expert_parallel.config import ExpertLoraSpec
 from src.distributed.parallelism_config import ParallelismConfig
+from src.trainers.grpo.mixins.offline_reference import reject_unsupported_reference_input
 from src.trainers.grpo.offline import OfflineGRPOTrainer, tokenize_offline_grpo_rows
-from src.trainers.grpo.reference_lifecycle import reject_unsupported_reference_input
 from tests.common.gloo import run_gloo_ranks
 from tests.common.offline_grpo import make_offline_tokenizer, offline_grpo_dataset
 
@@ -127,7 +127,6 @@ def test_grouped_tokenization_discards_unused_supplied_scores():
         max_completion_length=16,
         advantage_method="z_norm",
         best_completion_emphasis=0.0,
-        is_encoder_decoder=False,
     )
     assert len(result["completion_input_ids"]) == 2
     assert REF_PER_TOKEN_LOGPS_COLUMN not in result

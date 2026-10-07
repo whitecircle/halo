@@ -24,10 +24,9 @@ from dataclasses import dataclass
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from torch.utils.checkpoint import checkpoint
 
 from src.data.spans import LABEL_IGNORE_INDEX
-from src.kernels.logprobs import logit_chunk_rows, selective_logprobs
+from src.kernels.logprobs import at_least_fp32, checkpointed_chunks, logit_chunk_rows, selective_logprobs
 from src.models.head_transform import HeadTransform
 
 
@@ -44,14 +43,14 @@ def _shift_labels_left(labels: torch.Tensor) -> torch.Tensor:
 
 
 def _ce_sum_chunk(chunk_logits: torch.Tensor, chunk_labels: torch.Tensor) -> torch.Tensor:
-    return F.cross_entropy(chunk_logits.float(), chunk_labels, ignore_index=LABEL_IGNORE_INDEX, reduction="sum")
+    return F.cross_entropy(at_least_fp32(chunk_logits), chunk_labels, ignore_index=LABEL_IGNORE_INDEX, reduction="sum")
 
 
 def _head_ce_sum_chunk(
     head: nn.Module, head_transform: HeadTransform, chunk_hidden: torch.Tensor, chunk_labels: torch.Tensor
 ) -> torch.Tensor:
-    """Project one token chunk through the family's head path and sum its fp32 CE — the unit the
-    checkpoint recomputes."""
+    """Project one token chunk through the family's head path and sum its CE, at least fp32
+    (:func:`~src.kernels.logprobs.at_least_fp32`) — the unit the checkpoint recomputes."""
     return _ce_sum_chunk(head_transform.project(head, chunk_hidden), chunk_labels)
 
 
@@ -61,25 +60,23 @@ def _chunked_token_sum(
     flat_labels: torch.Tensor,
     chunk_rows: int,
 ) -> torch.Tensor:
-    """``sum(fn(rows[chunk], flat_labels[chunk]))`` over token chunks, accumulated in fp32.
+    """``sum(fn(rows[chunk], flat_labels[chunk]))`` over token chunks, accumulated in at least fp32 (a
+    wider chunk result, such as an fp64 oracle's, widens the sum).
 
-    ``rows`` is the flattened logits plane (unfused) or the flattened hidden states (fused), sliced
-    in lockstep with its labels. Each chunk runs under a non-reentrant checkpoint, which bounds the
-    held fp32 state to one chunk; a single chunk needs none, so the short-sequence case keeps the
-    plain call.
+    ``rows`` is the flattened logits plane (unfused) or the flattened hidden states (fused), chunked
+    in lockstep with its labels by :func:`~src.kernels.logprobs.checkpointed_chunks`. A single chunk
+    needs no checkpoint, so the short-sequence case keeps the plain call.
     """
     total = rows.new_zeros((), dtype=torch.float32)
-    n_tokens = flat_labels.numel()
-    if n_tokens <= chunk_rows:
+    if flat_labels.numel() <= chunk_rows:
         return total + fn(rows, flat_labels)
-    for start in range(0, n_tokens, chunk_rows):
-        end = start + chunk_rows
-        total = total + checkpoint(fn, rows[start:end], flat_labels[start:end], use_reentrant=False)
+    for value in checkpointed_chunks(fn, rows, flat_labels, chunk_rows):
+        total = total + value
     return total
 
 
 def _chunked_ce_sum(flat_logits: torch.Tensor, flat_labels: torch.Tensor) -> torch.Tensor:
-    """Summed fp32 cross-entropy over an already-flattened ``[tokens, V]`` plane, chunked."""
+    """Summed cross-entropy, at least fp32, over an already-flattened ``[tokens, V]`` plane, chunked."""
     return _chunked_token_sum(_ce_sum_chunk, flat_logits, flat_labels, logit_chunk_rows(flat_logits.size(-1)))
 
 
@@ -98,6 +95,10 @@ class PPLossAdapter:
             that no pair is split across microbatches.
         batch_transform: collator-space transform applied to the prepared inputs before the step
             (interleaving pairs, deriving pool positions); ``None`` = identity.
+        step_state_fn: ``(inputs) -> None`` — derives the per-step constants a closure loss divides
+            by (pair and token counts) from the batch the step scores: the transformed batch in
+            train, its real examples in eval (an eval split's final-round padding leaves first).
+            ``None`` = the loss needs none.
         normalizer: ``(inputs) -> step normalizer`` for the runtime's division; ``None`` =
             the mixin's default DP-global loss-token count / dp (the SFT semantics).
         extra_target_keys: batch keys shipped to the last stage's loss as per-example side tensors
@@ -127,23 +128,23 @@ class PPLossAdapter:
             ``inputs["labels"]``. Trainers whose ``batch_transform`` rewrites ``labels`` into a
             runtime-shaped plane recover the real targets here.
         metrics_fn: ``() -> {name: 0-dim tensor}`` — this rank's per-step metrics, drained once per
-            pipeline step. Only the last stage runs ``token_loss_fn``, so only it holds real values;
+            pipeline step, in eval over the step's real examples, which weigh them when stored.
+            Only the last stage runs ``token_loss_fn``, so only it holds real values;
             the mixin broadcasts them down the chain (one small collective per step) so every rank
             logs the same numbers. The key set must be rank-uniform — derived from config, never
             from the batch — because the broadcast carries values only; the mixin pins the keys at
             setup and validates them across the chain there. ``None`` = the trainer logs nothing
             per step (the causal-LM contract, whose only per-step scalar is the loss).
-        row_aligned_eval_outputs: ``False`` when ``predictions_fn``/``eval_labels_fn`` reduce the
-            whole batch to a fixed-size summary rather than one entry per example: the fixed-shape
-            padding is then already folded away, so trimming the filler rows would cut into the
-            summary. It governs the prediction and label legs together — ``compute_metrics`` zips
-            them, and trimming one without the other yields mismatched lengths on a partial final
-            eval batch.
+
+    ``predictions_fn`` and ``eval_labels_fn`` emit one entry per example, or a fixed number per
+    example (one per pair for a preference adapter), so the mixin trims the frozen shape's filler
+    rows off both legs in that unit.
     """
 
     token_loss_fn: Callable[[torch.Tensor, torch.Tensor | dict], torch.Tensor]
     paired_examples: bool = False
     batch_transform: Callable[[dict], dict] | None = None
+    step_state_fn: Callable[[dict], None] | None = None
     normalizer: Callable[[dict], torch.Tensor | float] | None = None
     extra_target_keys: tuple[str, ...] = ()
     pad_spec: Mapping[str, int] | None = None
@@ -154,7 +155,6 @@ class PPLossAdapter:
     predictions_fn: Callable[[torch.Tensor, dict], torch.Tensor] | None = None
     eval_labels_fn: Callable[[dict], torch.Tensor] | None = None
     metrics_fn: Callable[[], dict[str, torch.Tensor]] | None = None
-    row_aligned_eval_outputs: bool = True
 
     @property
     def supports_fused_head_loss(self) -> bool:
@@ -275,16 +275,39 @@ def split_pairs(interleaved: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
     return interleaved[0::2], interleaved[1::2]
 
 
+def next_token_logprobs(
+    logits: torch.Tensor, labels: torch.Tensor, start: int = 0
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Log-prob each position of ``logits`` gives its next token in ``labels``, plus the non-ignored mask.
+
+    ``logits`` covers positions ``[start, start + logits.size(1))`` of the full ``[B, S]`` ``labels``,
+    so a sequence chunk (a CP rank's) is scored against the labels it was cut from, its last
+    position against the next chunk's first token. Returns two ``[B, logits.size(1)]`` tensors, the
+    log-probs in fp32 (fp64 logits keep fp64); the sequence's final position has no next token and
+    is masked. The log-probs are not pre-masked: ignored positions carry the (finite) log-prob of
+    label 0, so callers that clamp or reweight per token do so before applying the mask, which is
+    the order the trainer losses need.
+    """
+    if logits.size(0) != labels.size(0) or start < 0 or start + logits.size(1) > labels.size(1):
+        raise ValueError(
+            f"logits {tuple(logits.shape[:2])} at start={start} do not lie inside labels "
+            f"{tuple(labels.shape)}: the rows must match and positions [start, start + "
+            f"{logits.size(1)}) must fall within the labels' {labels.size(1)}."
+        )
+    targets = _shift_labels_left(labels)[:, start : start + logits.size(1)]
+    mask = targets != LABEL_IGNORE_INDEX
+    return selective_logprobs(logits, targets.masked_fill(~mask, 0)), mask
+
+
 def token_logprobs(logits: torch.Tensor, labels: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
     """Shifted per-token log-probs of ``labels`` under ``logits`` plus the non-ignored mask.
 
-    Returns ``([B, S-1]`` fp32 log-probs, ``[B, S-1]`` bool mask``)``. The log-probs are not
-    pre-masked: ignored positions carry the (finite) log-prob of label 0, so callers that clamp or
-    reweight per token do so before applying the mask, which is the order the trainer losses need.
+    Returns ``([B, S-1]`` log-probs, ``[B, S-1]`` bool mask``)``: :func:`next_token_logprobs` over
+    the whole sequence without its final, ignore-only position. That position is dropped from the
+    ``[B, S]`` result rather than sliced off the logits, whose backward would rebuild a full plane.
     """
-    shift_labels = labels[:, 1:]
-    mask = shift_labels != LABEL_IGNORE_INDEX
-    return selective_logprobs(logits[:, :-1], shift_labels.masked_fill(~mask, 0)), mask
+    logps, mask = next_token_logprobs(logits, labels)
+    return logps[:, :-1], mask[:, :-1]
 
 
 def sequence_logprobs(logits: torch.Tensor, labels: torch.Tensor) -> torch.Tensor:

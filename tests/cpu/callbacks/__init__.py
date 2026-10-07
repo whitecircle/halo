@@ -1,1 +1,1 @@
-# Callback tests - run with: python tests/callbacks/test_*.py
+# Callback tests - run with: python tests/cpu/callbacks/test_*.py

@@ -12,7 +12,7 @@ Both modes use the same config matching production training:
 - gradient_accumulation_steps: 8
 - gradient_checkpointing with non-reentrant
 - cosine LR schedule with warmup
-- best_completion_emphasis: 1.5 (a real boost; the consumer ignores factors <= 1.0)
+- best_completion_emphasis: 1.5 (a real boost; values in (0, 1] are refused at config time)
 - initial_min_log_prob scheduling: -0.2 -> -3.0
 - GenerateExamplesCallback for text generation during eval
 
@@ -183,7 +183,7 @@ def run_training(
     )
 
     if is_tp:
-        assert trainer.is_tp_mode, "Expected is_tp_mode=True"
+        assert trainer.parallelism_config.is_tp_mode, "Expected is_tp_mode=True"
     log(
         f"Trainer ready: loss_type={config.loss_type}, "
         f"best_completion_emphasis={config.best_completion_emphasis}, "
@@ -221,7 +221,7 @@ def run(ctx) -> dict:
     log(f"  World: {ctx.world_size}, GPU: {torch.cuda.get_device_name(ctx.local_rank)}")
     log(f"  Mode: {args.mode}")
     log(f"  Config: bs={BATCH_SIZE}, grad_accum={GRAD_ACCUM}, lr={LEARNING_RATE}")
-    log("  GRPO: loss=bnpo, bce=1.0, init_min_log_prob=-0.2")
+    log("  GRPO: loss=bnpo, bce=1.5, init_min_log_prob=-0.2")
     log(f"{'#' * 70}")
 
     # One output dir for the whole world (ctx.output_dir is per-rank).

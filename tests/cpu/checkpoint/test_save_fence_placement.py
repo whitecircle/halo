@@ -13,61 +13,53 @@ watchdog timeout, which is the exact failure the fence exists to prevent.
 So the mixin splits it: ``save_model`` records that its collectives are behind it, and
 ``_save_checkpoint`` defers only failures that carry that mark. Anything earlier is re-raised here
 and now, rank-locally — the launcher tears the job down instead of the world timing out one rank at
-a time. Both halves are pinned below, plus the mark on both of the mixin ``save_model``'s exits and
-a structural sweep over every ``save_model`` in the trainer tree — the two that replace the mixin's
-gather just as hard.
+a time. Both halves are pinned below, plus the mark on both payload branches of the mixin's
+``save_model``, the ``_write_model_payload`` seam a trainer with its own layout overrides, and a
+structural sweep requiring any ``save_model`` override to mark it too.
 
     python tests/cpu/checkpoint/test_save_fence_placement.py
 """
 
 import ast
-import os
 import pathlib
 from types import SimpleNamespace
 
 import pytest
 import torch.nn as nn
+from transformers import TrainerState
 
 import src.trainers.mixins.checkpointing as checkpointing_mod
 from src.distributed.checkpoint.context import CheckpointContext
 from src.distributed.runtime import DeferredRankFailure
 from src.trainers.mixins.base import DistributedTrainerMixin
+from tests.common.base_save import BaseTrainerSave
 
 
-class _BaseWithTailWrites:
-    """Stands in for HF's ``_save_checkpoint``: the toolkit's ``save_model`` (world collectives),
-    then its own writer-local tail writes — the shape the fence has to split."""
-
-    def _save_checkpoint(self, model, trial):
-        output_dir = os.path.join(self.run_dir, f"checkpoint-{self.state.global_step}")
-        os.makedirs(output_dir, exist_ok=True)
-        self.save_model(output_dir, _internal_call=True)
-        if self.tail_write_fails:
-            raise OSError(28, "No space left on device")
-
-
-class _Trainer(DistributedTrainerMixin, _BaseWithTailWrites):
-    """The mixin's ``_save_checkpoint`` over that base. ``save_model`` is stubbed to the contract the
-    real one holds: it sets the collectives-done mark at its end, and raising before that stands for
-    a failure inside the gather region."""
+class _Trainer(DistributedTrainerMixin, BaseTrainerSave):
+    """The mixin's ``_save_checkpoint`` over HF's: the toolkit's ``save_model`` (world collectives),
+    then the base's writer-local tail — the shape the fence has to split. ``save_model`` is stubbed to
+    the contract the real one holds: it sets the collectives-done mark at its end, and raising before
+    that stands for a failure inside the gather region. The tail's first write, the rank-0
+    ``optimizer.pt``, fails on ``tail_write_fails``."""
 
     def __init__(self, run_dir, *, save_model_fails=False, tail_write_fails=False):
         self.run_dir = run_dir
         self.save_model_fails = save_model_fails
         self.tail_write_fails = tail_write_fails
-        self.args = SimpleNamespace(save_total_limit=1, save_only_model=False, should_save=True)
-        self.state = SimpleNamespace(global_step=2, best_model_checkpoint=None)
+        self.args = SimpleNamespace(save_total_limit=1, save_only_model=False, should_save=True, push_to_hub=False)
+        self.state = TrainerState(global_step=2)
         self.parallelism_config = SimpleNamespace(is_tp_mode=False, merge_expert_lora_on_save=False)
         self._fsdp_wrapped = True
         self.lr_scheduler = None
-
-    def _get_output_dir(self, trial=None):
-        return self.run_dir
 
     def save_model(self, output_dir, _internal_call=False):
         if self.save_model_fails:
             raise OSError(28, "No space left on device")
         self._model_save_collectives_done = True
+
+    def _save_optimizer_and_scheduler(self, output_dir):
+        if self.tail_write_fails:
+            raise OSError(28, "No space left on device")
 
 
 def _recording_guards(monkeypatch) -> list:
@@ -160,7 +152,7 @@ def test_save_model_marks_its_collectives_done_on_the_strategy_exit(tmp_path, mo
 
 
 def test_save_model_marks_its_collectives_done_on_the_adapter_exit(tmp_path, monkeypatch):
-    """The PEFT branch returns before the strategy ladder; unmarked, every adapter run's saves would
+    """The PEFT branch skips the strategy ladder; unmarked, every adapter run's saves would
     take the immediate-raise path even for a failure the fence could have made uniform."""
     saved = []
     monkeypatch.setattr(checkpointing_mod, "find_peft_model", lambda model: object())
@@ -177,10 +169,33 @@ def test_save_model_marks_its_collectives_done_on_the_adapter_exit(tmp_path, mon
     assert trainer._model_save_collectives_done
 
 
+def test_a_payload_override_keeps_the_shared_steps_around_it(tmp_path, monkeypatch):
+    """A trainer with its own model layout overrides ``_write_model_payload`` alone: the ladder is
+    not reached, while the balancing sidecar before the payload and the collectives mark after it
+    stay the mixin's, in that order on every rank."""
+    order = []
+    monkeypatch.setattr(checkpointing_mod, "save_checkpoint", lambda ctx, out: pytest.fail("ran the mixin's ladder"))
+
+    class _OwnLayout(_SaveModelTrainer):
+        def _persist_router_balancing_biases(self, output_dir):
+            order.append("sidecar")
+
+        def _write_model_payload(self, ctx, output_dir, _internal_call):
+            order.append(("payload", output_dir, _internal_call, self._model_save_collectives_done))
+
+    trainer = _OwnLayout(_context(nn.Linear(4, 4)))
+    trainer._model_save_collectives_done = False
+
+    trainer.save_model(str(tmp_path), _internal_call=True)
+
+    assert order == ["sidecar", ("payload", str(tmp_path), True, False)]
+    assert trainer._model_save_collectives_done, "the mark must follow the overridden payload"
+
+
 def test_every_save_model_marks_its_collectives_done():
-    """Structural, over the whole trainer tree: a ``save_model`` that replaces the mixin's (the
-    embedding trainer does) still gathers, and an unmarked one silently
-    downgrades every deferred tail failure of that trainer to a rank-local raise."""
+    """Structural, over the whole trainer tree: a ``save_model`` that replaces the mixin's still
+    gathers, and an unmarked one silently downgrades every deferred tail failure of that trainer to a
+    rank-local raise."""
     trainers = pathlib.Path(__file__).resolve().parents[3] / "src" / "trainers"
     assert trainers.is_dir(), f"premise: {trainers} must exist, else this test scans nothing"
     unmarked = []

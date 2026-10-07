@@ -3,8 +3,8 @@
 
 Covers the two accepted conversation shapes (native role/content and the HuggingFaceM4
 paired {user, assistant} ``texts`` shape shared by FineVision / the_cauldron / Docmatix),
-top-level image injection into the first user turn (``images_field``), input immutability,
-and the generation-branch slicing through ``create_vlm_processor``.
+top-level image injection into the first user turn (``images_field``, also through
+``create_vlm_processor``), and input immutability.
 
 Usage:
     python tests/cpu/data/test_vlm_normalize_conversation.py
@@ -126,7 +126,7 @@ def test_normalized_output_feeds_process_vlm_conversation():
 
 @pytest.mark.parametrize("payload", [b"", ""], ids=["empty-bytes", "empty-path"])
 def test_a_falsy_but_present_image_payload_fails_loud(payload):
-    """A truthiness test here dropped the payload while still emitting the placeholder, handing the
+    """A truthiness test here would drop the payload while still emitting the placeholder, handing the
     processor a prompt with an image placeholder and no image — which surfaces later as a
     placeholder-count mismatch, if at all. A present payload must reach ``process_image``.
     """
@@ -143,21 +143,13 @@ def test_an_absent_image_payload_is_still_a_bare_placeholder():
     assert history[0]["content"] == [{"type": "image"}]
 
 
-def test_create_vlm_processor_images_field_and_generation_slice():
+def test_create_vlm_processor_images_field():
     img = _image()
     row = {"texts": [{"user": "describe", "assistant": "a cat"}], "images": [img]}
 
-    train_fn = create_vlm_processor(conversation_field="texts", images_field="images")
-    example = train_fn(dict(row))
+    example = create_vlm_processor(conversation_field="texts", images_field="images")(dict(row))
     assert [m["role"] for m in example["history"]] == ["user", "assistant"]
     assert example["images"] == [img]
-
-    generate_fn = create_vlm_processor(conversation_field="texts", images_field="images", add_generation_prompt=True)
-    prompt_example = generate_fn(dict(row))
-    assert [m["role"] for m in prompt_example["history"]] == ["user"], (
-        "generation branch must drop only the final assistant message, not the whole user+assistant pair"
-    )
-    assert prompt_example["images"] == [img], "the image lives in the kept user turn"
 
 
 if __name__ == "__main__":

@@ -144,6 +144,42 @@ def test_defer_true_under_pp_for_pure_etp():
     assert cfg.defer_grad_sync
 
 
+_TOPOLOGIES = [
+    # (world, stage, ep_size, expert_tp_size, node_local, fsdp_shard_ep1_experts)
+    (world, stage, ep, etp, node_local, managed)
+    for world, stage in ((8, 8), (16, 16), (16, 8), (32, 16))
+    for ep, etp in ((1, 1), (1, 2), (2, 1), (4, 2), (8, 1))
+    for node_local in (True, False)
+    for managed in (True, False)
+    if stage % (ep * etp) == 0 and not (node_local and ep * etp > 8)
+]
+
+
+@pytest.mark.parametrize(("world", "stage", "ep_size", "etp", "node_local", "managed"), _TOPOLOGIES)
+def test_every_topology_with_expert_replicas_defers_their_sync(world, stage, ep_size, etp, node_local, managed):
+    """The global norm sums expert shards within the dispatch group only, which is right only if the
+    clip's sweep has already made every replica's expert grads identical: so every topology with
+    expert replicas (more than one EP group) defers, unless FSDP2 owns the experts — and then they
+    are DTensors outside the expert bucket, normed over their FSDP shard group instead."""
+    try:
+        cfg, _ = _make_ep(
+            0,
+            world_size=world,
+            stage_world_size=stage,
+            ep_size=ep_size,
+            expert_tp_size=etp,
+            gpus_per_node=8,
+            node_local=node_local,
+            fsdp_shard_ep1_experts=managed,
+        )
+    except ValueError as rejected:
+        pytest.skip(f"EPConfig rejects this layout: {rejected}")
+    if cfg.num_ep_groups > 1:
+        assert cfg.defer_grad_sync or cfg.experts_fsdp_managed, (world, stage, ep_size, etp, node_local, managed)
+    if cfg.experts_fsdp_managed:
+        assert cfg.ep_group_size == 1
+
+
 def test_single_process_mode_defaults():
     """Bare ``python`` launch (dist never initialized): one block, no deferral, world-scope group."""
     cfg = EPConfig(ep_size=1, world_size=1, gpus_per_node=1)
@@ -301,6 +337,8 @@ def test_deferred_replica_average_uses_the_replica_group_when_there_is_one():
     reduced: list = []
     with (
         patch(f"{_MIXIN_MOD}.DTensor", _FakeDTensor),
+        # The membership mask's MAX over a group this stub cannot reduce: the one grad is present.
+        patch(f"{_MIXIN_MOD}.dist.all_reduce"),
         patch(
             f"{_MIXIN_MOD}.reduce_grads_bucketed",
             lambda grads, **kwargs: reduced.append((len(grads), kwargs.get("group"))),

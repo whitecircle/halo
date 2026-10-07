@@ -152,8 +152,8 @@ def test_padded_terminator_less_span_never_trains_padding(padding_side):
     """A terminator-less final turn must not train the padding tail.
 
     The self-distill policy's ``eos_fallback_to_end`` ends such a span at the last position of the
-    row; searched over the PADDED row that is a pad token, so every pad became a training target —
-    silently undoing the attention-mask pad masking done a few lines earlier.
+    row; searched over the PADDED row that is a pad token, so every pad would become a training
+    target — silently undoing the attention-mask pad masking applied first.
     """
     real = [U, M1, M2, A, A]  # marker present, NO terminator
     pad_len = 6

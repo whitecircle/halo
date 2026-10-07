@@ -22,12 +22,12 @@ Usage (trainer on GPUs the server does NOT own — a rank cannot NCCL broadcast 
 
 import argparse
 
-from src.env import env_int, env_str
+from src.env import env_str
 from tests.common.env_grpo_e2e import run_env_grpo_e2e
 from tests.common.harness import gpu_test_main
+from tests.common.weight_sync import weight_transfer_port
 
 SERVER_URL = env_str("VLLM_SERVER_URL") or "http://localhost:8000"
-GROUP_PORT = env_int("HALO_TEST_VLLM_GROUP_PORT", 51216)
 
 
 @gpu_test_main(exact_world_size=2, prefix="env_grpo_vllm_e2e")
@@ -50,7 +50,7 @@ def run(ctx):
         ctx,
         backend="vllm",
         server_url=SERVER_URL,
-        group_port=GROUP_PORT,
+        group_port=weight_transfer_port("HALO_TEST_VLLM_GROUP_PORT"),
         ep_size=args.ep_size,
         tp_size=args.tp_size,
         expert_tp_size=args.etp_size,

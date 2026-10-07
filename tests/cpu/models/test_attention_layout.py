@@ -23,7 +23,7 @@ from src.models.attention_layout import (
     attention_layout_from_config,
 )
 
-# gpt-oss-120b: 18 full + 18 sliding(128) layers, 64 heads of 64 — the geometry the bug was found on.
+# gpt-oss-120b: 18 full + 18 sliding(128) layers, 64 heads of 64.
 DEPTH = 36
 WINDOW = 128
 HEADS, HEAD_DIM, HIDDEN = 64, 64, 2880
@@ -72,8 +72,8 @@ def _per_token(full_layers: int, window_layers: int, seq_len: int, width=WIDTH, 
     return SCORE_PASSES * width * (full_layers * seq_len + window_layers * min(seq_len, window))
 
 
-def _old_formula(seq_len: int) -> float:
-    """``12·L·S·H`` over every layer — the accounting this module replaces."""
+def _full_attention_formula(seq_len: int) -> float:
+    """The PaLM ``12·L·S·H`` full-attention accounting over every layer."""
     return 12.0 * DEPTH * seq_len * HIDDEN
 
 
@@ -81,7 +81,9 @@ def test_sliding_layers_are_costed_at_their_window_not_the_sequence():
     layout = attention_layout_from_config(_Config(_alternating()))
     got = layout.flops_per_token(MAX_LENGTH)
     assert got == pytest.approx(_per_token(18, 18, MAX_LENGTH), rel=1e-12)
-    assert got < 0.75 * _old_formula(MAX_LENGTH), "the sliding half of the stack is still costed as full attention"
+    assert got < 0.75 * _full_attention_formula(MAX_LENGTH), (
+        "the sliding half of the stack is still costed as full attention"
+    )
 
 
 def test_the_score_width_is_heads_times_head_dims_not_hidden_size():

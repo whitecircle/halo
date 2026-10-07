@@ -3,7 +3,7 @@
 
 The dispatch rule under test end-to-end: the model CLASS follows the checkpoint
 (``AutoModelForImageTextToText``), the DATA path follows the run (``is_vlm=False`` for text pairs).
-Forcing this shape onto the VLM branch instead would deny it CP, PP and ``padding_free`` and
+Forcing this shape onto the VLM branch instead would deny it CP and ``padding_free`` and
 template rows through the processor. Two things only a GPU run proves:
 
   * the text branch trains a real multimodal model on text preference pairs — finite loss, margins

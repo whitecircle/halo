@@ -1,8 +1,8 @@
 #!/usr/bin/env python
 """Optimizer-state continuity and checkpoint master precision under EP, CP, TP and FSDP2 (2 GPUs).
 
-The checkpoint loader restores per-rank optimizer shards for EP/CP whenever the topology
-fingerprint in ``optimizer_meta.pt`` matches; a mismatch warm-restarts loudly. This test pins
+The checkpoint loader restores per-rank optimizer shards for every sharded run (FSDP2, EP, CP, TP)
+whenever the topology fingerprint in ``optimizer_meta.pt`` matches; a mismatch warm-restarts loudly. This test pins
 the whole contract on a tiny random-init model through the real trainer save/resume flow:
 
 ``--mode ep`` (tiny Qwen3 MoE, ep_size=2):
@@ -48,7 +48,7 @@ import os
 import torch
 import torch.distributed as dist
 from torch.distributed.tensor import DTensor
-from transformers import AutoTokenizer, Qwen3Config, Qwen3ForCausalLM, Qwen3MoeConfig, Qwen3MoeForCausalLM
+from transformers import AutoTokenizer
 from transformers.trainer_callback import TrainerCallback
 from trl import SFTConfig
 
@@ -64,7 +64,7 @@ from tests.common.datasets import create_sft_dataset
 from tests.common.distributed import pin_deterministic_ep_dispatch, world_all
 from tests.common.harness import gpu_test_main
 from tests.common.models import QWEN3_0_6B
-from tests.common.tiny_models import VOCAB_PAD_MULTIPLE
+from tests.common.tiny_models import build_tied_qwen3_checkpoint
 from tests.common.tolerances import TOL
 from tests.common.utils import (
     cleanup_memory,
@@ -79,6 +79,17 @@ from tests.common.utils import (
 
 # Modes whose tiny model is MoE — the only ones with expert weights to gather on save.
 MOE_MODES = ("ep", "ep1", "ep_cp")
+# The parameter groups each mode's model holds, every one of which keeps an fp32 master under
+# --fp32-masters (router, expert and non-expert flags together). An ep1 row takes it only with
+# --unsharded-ep1-experts: FSDP-managed ep1 experts and fp32_non_ep_params refuse each other.
+FP32_MASTER_GROUPS = {
+    "ep": {"expert", "router", "non_expert"},
+    "ep1": {"expert", "router", "non_expert"},
+    "ep_cp": {"expert", "router", "non_expert"},
+    "cp": {"non_expert"},
+    "tp": {"non_expert"},
+    "fsdp": {"non_expert"},
+}
 
 SEED = 42
 TOTAL_STEPS = 6
@@ -91,17 +102,6 @@ MAX_SEQ_LENGTH = 256
 # trajectory by the full Adam-moment reset, and a replayed rounding stream by ~1e-3.
 LOSS_TOL = TOL.replayed_resume_loss_abs
 
-_TINY_COMMON = {
-    "hidden_size": 256,
-    "intermediate_size": 512,
-    "num_hidden_layers": 2,
-    "num_attention_heads": 4,
-    "num_key_value_heads": 2,
-    "head_dim": 64,
-    "max_position_embeddings": 4096,
-    "tie_word_embeddings": True,
-}
-
 
 def optimizer_resume_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
@@ -112,29 +112,6 @@ def optimizer_resume_parser() -> argparse.ArgumentParser:
         "--unsharded-ep1-experts", action="store_true", help="keep EP1 experts outside FSDP2's shard groups"
     )
     return parser
-
-
-def _build_tiny_checkpoint(mode: str, target_dir: str) -> None:
-    """Rank 0: random-init tiny model + Qwen tokenizer saved as a loadable HF checkpoint."""
-    tokenizer = AutoTokenizer.from_pretrained(QWEN3_0_6B, trust_remote_code=True)
-    vocab_size = -(-len(tokenizer) // VOCAB_PAD_MULTIPLE) * VOCAB_PAD_MULTIPLE
-    torch.manual_seed(SEED)
-    if mode in MOE_MODES:
-        config = Qwen3MoeConfig(
-            **_TINY_COMMON,
-            vocab_size=vocab_size,
-            moe_intermediate_size=128,
-            num_experts=8,
-            num_experts_per_tok=2,
-            decoder_sparse_step=1,
-            mlp_only_layers=[],
-        )
-        model = Qwen3MoeForCausalLM(config)
-    else:
-        config = Qwen3Config(**_TINY_COMMON, vocab_size=vocab_size)
-        model = Qwen3ForCausalLM(config)
-    model.to(torch.bfloat16).save_pretrained(target_dir)
-    tokenizer.save_pretrained(target_dir)
 
 
 def _parallelism_config(
@@ -181,7 +158,7 @@ def _sft_config(output_dir: str, max_steps: int, save_at: int | None) -> SFTConf
 
 def _make_trainer(model_path, pc, tokenizer, train_dataset, config, *, preserve_checkpoint_precision=False):
     # CP rejects sdpa (Ulysses needs a Flash kernel), so let CP auto-detect (FA4 on Blackwell) and
-    # keep the cheaper sdpa path for the EP mode, which does not constrain the kernel.
+    # keep the cheaper sdpa path for the other modes, which do not constrain the kernel.
     model, _ = load_distributed_model(
         model_name_or_path=model_path,
         parallelism_config=pc,
@@ -228,8 +205,9 @@ def _trainable_weights(model) -> dict[str, torch.Tensor]:
     return snapshot_trainable(model)
 
 
-def _configured_master_checks(model, pc: ParallelismConfig, *, expect_moe: bool) -> dict[str, bool]:
-    """Live parameter identities separate routers, experts and the remaining masters."""
+def _configured_master_checks(model, mode: str) -> dict[str, bool]:
+    """Live parameter identities separate routers, experts and the remaining parameters; each group
+    :data:`FP32_MASTER_GROUPS` names for ``mode`` must hold fp32 masters carrying more than bf16 precision."""
     reshard_fsdp2_modules(model)
     layers = list(find_ep_layers(model))
     experts = {id(parameter) for _, layer in layers for _, parameter in layer.expert_named_params()}
@@ -244,28 +222,19 @@ def _configured_master_checks(model, pc: ParallelismConfig, *, expect_moe: bool)
         if parameter.requires_grad:
             group = "expert" if id(parameter) in experts else "router" if id(parameter) in routers else "non_expert"
             groups[group][name] = parameter
-    checks = {"master_parameter_groups_present": bool(groups["non_expert"])}
-    if expect_moe:
-        checks["master_parameter_groups_present"] &= bool(groups["expert"]) and bool(groups["router"])
-    for group, parameters in groups.items():
-        if not parameters:
-            continue
-        keep_fp32 = (
-            pc.ep_fp32_experts and not pc.experts_fsdp_managed
-            if group == "expert"
-            else pc.fp32_non_ep_params or (group == "router" and pc.ep_fp32_router)
+    expected = FP32_MASTER_GROUPS[mode]
+    checks = {
+        "master_parameter_groups_present": {group for group, parameters in groups.items() if parameters} == expected
+    }
+    for group in expected:
+        parameters = groups[group].values()
+        checks[f"{group}_configured_master_dtype"] = all(parameter.dtype == torch.float32 for parameter in parameters)
+        # A BF16-exact source would pass a loader that discards its stored FP32 mantissa.
+        checks[f"{group}_masters_exceed_bf16_precision"] = any(
+            not torch.equal(local, local.to(torch.bfloat16).float())
+            for parameter in parameters
+            for local in [parameter.detach().to_local() if isinstance(parameter, DTensor) else parameter.detach()]
         )
-        expected_dtype = torch.float32 if keep_fp32 else torch.bfloat16
-        checks[f"{group}_configured_master_dtype"] = all(
-            parameter.dtype == expected_dtype for parameter in parameters.values()
-        )
-        if keep_fp32:
-            # A BF16-exact source would pass a loader that discards its stored FP32 mantissa.
-            checks[f"{group}_masters_exceed_bf16_precision"] = any(
-                not torch.equal(local, local.to(torch.bfloat16).float())
-                for parameter in parameters.values()
-                for local in [parameter.detach().to_local() if isinstance(parameter, DTensor) else parameter.detach()]
-            )
     return checks
 
 
@@ -370,7 +339,8 @@ def run(ctx):
     ckpt_dir = os.path.join(train_out, f"checkpoint-{SAVE_AT_STEP}")
 
     if ctx.rank == 0:
-        _build_tiny_checkpoint(mode, tiny_dir)
+        release_tokenizer = AutoTokenizer.from_pretrained(QWEN3_0_6B, trust_remote_code=True)
+        build_tied_qwen3_checkpoint(tiny_dir, release_tokenizer, moe=mode in MOE_MODES, seed=SEED)
     ctx.barrier()
 
     pc = _parallelism_config(
@@ -411,7 +381,7 @@ def run(ctx):
     if args.fp32_masters:
         checks |= {
             f"saved_{name}": world_all(ok, device)
-            for name, ok in _configured_master_checks(trainer.model, pc, expect_moe=mode in MOE_MODES).items()
+            for name, ok in _configured_master_checks(trainer.model, mode).items()
         }
     checks["saved_state_nonempty"] = any(
         torch.is_tensor(v) and v.dtype.is_floating_point and (v != 0).any() for _, v in _snapshot_values(snapshot_ref)

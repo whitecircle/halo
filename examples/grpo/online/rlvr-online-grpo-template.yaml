@@ -26,9 +26,11 @@ answer_field: solution    # DeepMath's ground-truth column is `solution` (there 
 rewards:
   - source: accuracy         # the last \boxed{} equals the answer; name: accuracy, weight 1.0
   # - {source: format, weight: 0.5, pattern: "<think>.*?</think>\\s*<answer>.*?</answer>"}
-  # - {source: judge, name: quality, weight: 0.3, requirements: [{name: correctness, description: "..."}]}
+  # - {source: judge, name: quality, weight: 0.3, view: final, requirements: [{name: correctness, description: "..."}]}
   # - {source: reward_model, name: preference, weight: 0.5, url: "http://localhost:8100", model: <BT model id>}
   # judge needs OPENROUTER_API_KEY; reward_model needs a served BT model (vllm --runner pooling / sglang --is-embedding)
+  # view: final | full | digest (judge only); on_error: invalid (TRL drops the term for the row) | neutral (the term scores 0);
+  # a judge listing checks (a veto judge) is refused here — it gates an environment objective
 
 # --- GRPO Hyperparameters ---
 beta: 0.0

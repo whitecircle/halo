@@ -1,12 +1,13 @@
 #!/usr/bin/env python
-"""The DP-scoped eval metric gather must survive more than one evaluation loop.
+"""The toolkit's eval metric gather must survive more than one evaluation loop.
 
 ``_install_dp_metric_gather`` runs once, at construction, and points ``gather_function`` at the
-DP-scoped gather — TP/CP/ETP/PP siblings return the same rows, so a world gather repeats every
-replica once per sibling and accelerate's remainder trim then keeps a prefix of the duplicates.
-``Trainer.evaluation_loop`` resets ``gather_function`` back to ``accelerator.gather_for_metrics`` on
-its way out, so without a per-loop re-arm only the FIRST evaluate() of a run is scoped and every
-later one silently reports duplicated metrics.
+toolkit gather — DP-scoped where TP/CP/ETP/PP siblings return the same rows (a world gather repeats
+every replica once per sibling), and cutting the final round's padding by the loader's geometry
+everywhere (accelerate's own trim miscounts it). ``Trainer.evaluation_loop`` resets
+``gather_function`` back to ``accelerator.gather_for_metrics`` on its way out, so without a per-loop
+re-arm only the FIRST evaluate() of a run uses it and every later one silently reports duplicated
+or mis-trimmed metrics.
 
     python tests/cpu/trainers/test_dp_metric_gather_rearm.py
 """
@@ -16,9 +17,12 @@ import re
 import types
 
 import pytest
+from accelerate import PartialState
 from transformers import Trainer
 
 from src.trainers.mixins.base import DistributedTrainerMixin
+
+PartialState()  # the mixin's accelerate logger refuses to emit without an initialized state
 
 WORLD, KEEP = 4, [0, 2]
 
@@ -41,7 +45,7 @@ class _Trainer(DistributedTrainerMixin, _HFEvaluationLoop):
         self.gathers_used = []
         if scoped:
             self._dp_metric_gather_scope = (KEEP, WORLD)
-            self.gather_function = self._dp_gather_for_metrics
+        self.gather_function = self._dp_gather_for_metrics
 
 
 def test_upstream_still_resets_the_gather_function():
@@ -59,14 +63,16 @@ def test_every_evaluation_loop_gathers_over_the_dp_replicas():
     assert trainer.gathers_used == [trainer._dp_gather_for_metrics] * 3
 
 
-def test_a_world_scoped_trainer_is_left_on_accelerate_s_gather():
-    """No scope means the loader is not DP-sharded — re-arming there would drop real rows."""
+def test_a_world_scoped_trainer_is_re_armed_too():
+    """No scope means a world gather, but the final round's padding still has to be cut by the
+    loader's geometry: back on accelerate's trim, a one-process or RepeatSampler loader is
+    mis-trimmed from the second evaluate() on."""
     trainer = _Trainer(scoped=False)
 
     trainer.evaluation_loop()
     trainer.evaluation_loop()
 
-    assert trainer.gathers_used == [trainer.accelerator.gather_for_metrics] * 2
+    assert trainer.gathers_used == [trainer._dp_gather_for_metrics] * 2
 
 
 class _PerSplitEvaluate(_HFEvaluationLoop):

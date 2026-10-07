@@ -15,6 +15,7 @@ from types import SimpleNamespace
 import pytest
 from torch.utils.data import SequentialSampler
 
+import src.trainers.mixins.dataloader as dataloader_mod
 from src.distributed.parallelism_config import ParallelismConfig
 from src.trainers.grpo.offline import OfflineGRPOTrainer
 from src.trainers.mixins.base import DistributedTrainerMixin
@@ -108,6 +109,34 @@ def test_a_second_evaluation_reuses_the_cached_loader(path):
     assert len(trainer.builds) == 1, f"{path} rebuilt the underlying loader {len(trainer.builds)} times"
 
 
+@pytest.mark.parametrize("held", [True, False], ids=["rank-holding-the-key", "rank-that-missed-it"])
+def test_a_split_cache_hit_rebuilds_in_lockstep_and_displaces_no_live_loader(monkeypatch, held):
+    """A loader keyed by a process-local fingerprint hits only when every rank holds it, so on a split
+    every rank rebuilds (the build issues collectives). A rank that held the key keeps its own loader,
+    whose persistent workers are running: replaced in the cache, it would stay referenced by accelerate
+    with its pool alive for the rest of the run. A rank that missed caches the rebuilt one."""
+    trainer, _ = _offline_stub()
+    live = _Prepared("a loader whose persistent workers are running")
+    if held:
+        trainer._eval_dataloaders["eval/fingerprint"] = live
+    monkeypatch.setattr(dataloader_mod, "rank_consensus", lambda local_ok: (False, True))
+    built = []
+
+    def build(dataset):
+        built.append(_Prepared(dataset))
+        return built[-1]
+
+    loader = DataParallelDataLoaderMixin._cached_eval_dataloader(trainer, _ROWS, build, key="eval/fingerprint")
+
+    assert len(built) == 1, "a rank skipped the rebuild its peers run in lockstep"
+    expected = live if held else built[0]
+    assert loader is expected and trainer._eval_dataloaders["eval/fingerprint"] is expected, (
+        "the rank's cached loader was displaced, leaving its worker pool running"
+        if held
+        else "the rebuilt loader was not cached"
+    )
+
+
 class _InitStopped(Exception):
     """Carries control out of the shared init once it is past the declarations."""
 
@@ -128,6 +157,20 @@ def test_the_cache_is_declared_by_the_shared_init():
         DistributedTrainerMixin._init_distributed_config(host, {"parallelism_config": ParallelismConfig()})
 
     assert host._eval_dataloaders == {}, "the shared init no longer declares the eval-loader cache"
+
+
+def test_the_test_loader_takes_the_eval_loaders_dp_sharded_body():
+    """``predict()`` gathers through the same DP-scoped gather, so its loader must be the DP-sharded
+    one too: HF's own shards by world rank, handing TP/CP/PP siblings different rows."""
+    trainer, get_eval_dataloader = _mixin_stub()
+    eval_loader = get_eval_dataloader()
+
+    test_loader = DataParallelDataLoaderMixin.get_test_dataloader(trainer, _ROWS)
+
+    assert isinstance(test_loader, _Prepared), "the test loader skipped the DP-aware prepare"
+    assert type(test_loader.raw.sampler) is type(eval_loader.raw.sampler), "the test loader drew another sampler"
+    assert trainer.builds == ["evaluation", "test"], trainer.builds
+    assert "test" not in trainer._eval_dataloaders, "the test loader must not enter the eval cache"
 
 
 if __name__ == "__main__":

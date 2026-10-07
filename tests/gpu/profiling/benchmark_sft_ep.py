@@ -409,10 +409,9 @@ def main() -> int:
                 _reenable_expert_lora(model)
 
         # --- Setup EfficiencyCallback ---
-        # Pass the REAL cp/tp/etp sizes so per-GPU tokens/s and cluster throughput come from the actual
-        # parallel layout rather than the token-count sanity-clamp fallback: under CP the Trainer counts
-        # the full (pre-split) sequence, so the callback divides per-GPU tokens by cp_size; under TP/ETP
-        # the dp_actual denominator needs the group size. Matches the production callback-wiring path.
+        # The callback reads every divisor off the run's ParallelismConfig: under CP the Trainer counts
+        # the full (pre-split) sequence, so per-GPU tokens divide by cp_size. Matches the production
+        # callback-wiring path.
         efficiency_cb = EfficiencyCallback(
             parallelism_config,
             n_warmup_steps=args.warmup,
@@ -440,10 +439,10 @@ def main() -> int:
             bf16=not args.fp32,
             gradient_checkpointing=not args.no_gc,
             # Pass the real flag and let the mixin defer it across TRL's __init__ then restore it
-            # (_init_distributed_config / _setup_distributed_modes), exactly as production does.
-            # Hardcoding False here left nothing to restore, so TRL's entropy guard stayed off and
-            # compute_loss dereferenced outputs.logits — None on every family whose Liger patch
-            # fuses the head into the loss (GLM-4 MoE Lite, Zaya default fused_linear_cross_entropy).
+            # (_init_distributed_config / _setup_distributed_modes), exactly as production does. With
+            # it off, TRL's entropy guard is off and compute_loss dereferences outputs.logits — None on
+            # every family whose Liger patch fuses the head into the loss (GLM-4 MoE Lite, Zaya default
+            # fused_linear_cross_entropy).
             use_liger_kernel=not args.no_liger,
             logging_steps=1,
             save_strategy="no",

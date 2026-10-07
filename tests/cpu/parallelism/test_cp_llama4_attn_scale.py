@@ -6,8 +6,9 @@ original_max_position_embeddings)`` unconditionally. The CP wrapper must do the 
 trains a different attention than every non-CP run of the same checkpoint — silently, since the
 scale is a smooth ramp. Two ways it can be lost, pinned here:
 
-* the wrapper returned Q UNSCALED when ``rope_parameters`` lacked either key (the config injects
-  them only when ``rope_parameters`` is None, so a checkpoint shipping its own dict can lack them);
+* the wrapper must not return Q UNSCALED when ``rope_parameters`` lacks either key (the config
+  injects them only when ``rope_parameters`` is None, so a checkpoint shipping its own dict can lack
+  them);
 * the scale is indexed by GLOBAL position and the legacy path applies it after the all-to-all, so
   this rank's chunk positions are the wrong tensor — the CP wrapper publishes the full ones.
 
@@ -136,7 +137,7 @@ def test_absent_global_positions_raise_rather_than_silently_skipping_the_scale()
 
 
 def test_no_per_layer_position_gather_survives():
-    """The positions are threaded down once by the wrapper: a per-layer all-gather here was one
+    """The positions are threaded down once by the wrapper: a per-layer all-gather here would be one
     extra collective per attention layer per forward."""
     assert not hasattr(Mistral4UlyssesAttention, "_gather_position_ids")
     assert not hasattr(Mistral4UlyssesAttention, "_compute_llama_4_attn_scale")

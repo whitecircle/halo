@@ -1,11 +1,12 @@
-"""``gpu_test_main``: the shared lifecycle for torchrun-native GPU tests.
+"""``gpu_test_main`` — the shared lifecycle for torchrun-native GPU tests.
 
 Covers the lifecycle every torchrun test needs: deterministic kernel env → ``init_distributed`` →
 ``PartialState`` → validate world size → ``setup_cache_dirs`` → ``try`` body →
-``finally`` (``cleanup_ep`` → ``cleanup_memory`` → ``cleanup_dirs`` → ``barrier``
-→ ``teardown_distributed``) → ``sys.exit``. Hand-rolled copies drift (a skipped
-barrier, a dir leaked on the error path, a missing ``cleanup_ep``), so with the
-decorator handling it a test body is load, train, assert.
+``finally`` (the ``ctx.on_teardown`` finalizers, ``cleanup_ep`` among them → ``cleanup_memory`` →
+``cleanup_dirs`` → ``barrier`` → ``teardown_distributed``, the last two skipped on an ``error``
+status, since a rank whose body raised abandoned a collective its peers are still inside) →
+``sys.exit``. Hand-rolled copies drift — a skipped barrier, a dir leaked on the error path, a
+missing ``cleanup_ep``. With the decorator owning it, a test body is just *load → train → assert*.
 
     from tests.common.harness import gpu_test_main
 
@@ -30,10 +31,10 @@ computes ``all(checks.values())``, emits the machine-readable result line
 exits ``0`` (pass) / ``1`` (fail or body raised) / ``2`` (bad launch: wrong world
 size, emitted as a ``status="error"`` result that the GPU launcher reports as a FAIL).
 
-A decorator rather than a bare context manager because world size is validated
-per test, ``--cp/--ep/--tp`` change the required ``nproc``, and ``cleanup_ep`` is
-trainer-scoped; none of that is reachable from a plain ``with`` block, and all of
-it is handled here via ``ctx``.
+Why a decorator and not a bare context manager: world size is validated per
+test, ``--cp/--ep/--tp`` change the required ``nproc``, and ``cleanup_ep`` is
+trainer-scoped — none reachable from a plain ``with`` block, all handled here via
+``ctx``.
 """
 
 import functools
@@ -98,10 +99,10 @@ class Ctx:
         """Share rank 0's verdict with every rank, without masking another rank's own failure.
 
         Checks only rank 0 can make (a served model's response, an HTTP probe) are missing on the
-        other ranks, and the harness exits per rank, so a server-side failure would leave rank 0
-        exiting 1 while its peers exit 0, which the launcher reports as a teardown race. Rank 0's
-        entries are AND-ed into the local dict rather than replacing it, so a check that failed only
-        on rank 1 survives the merge.
+        other ranks, and the harness exits per rank — so a real server-side failure would leave
+        rank 0 exiting 1 while its peers exit 0, which the launcher reports as a teardown race.
+        Rank 0's entries are AND-ed into the local dict rather than replacing it: a check that
+        failed only on rank 1 must survive the merge.
         """
         if not dist.is_initialized() or self.world_size == 1:
             return checks
@@ -115,8 +116,8 @@ class Ctx:
     def metrics(self, trainer_or_cb) -> dict:
         """Snapshot headline metrics from a trainer (or an EfficiencyCallback).
 
-        Returns ``{}`` if no ``EfficiencyCallback`` is attached; metrics are
-        optional and correctness tests can omit them.
+        Returns ``{}`` if no ``EfficiencyCallback`` is attached — metrics are
+        optional; correctness tests can omit them.
         """
         cb = trainer_or_cb if isinstance(trainer_or_cb, EfficiencyCallback) else _efficiency_callback(trainer_or_cb)
         return snapshot_efficiency(cb) if cb is not None else {}
@@ -135,8 +136,8 @@ class Ctx:
 def record_check(checks: dict[str, bool], name: str, fn: Callable[[], None]) -> None:
     """Run ``fn`` and record its verdict under ``name`` instead of aborting the body.
 
-    For a suite that asserts many independent properties in one launch: a raise would end the body at
-    the first failure and the harness would report a single error, hiding every later property.
+    For a suite that asserts many INDEPENDENT properties in one launch: a raise would end the body
+    at the first failure and the harness would report a single error, hiding every later property.
     Recording keeps each verdict in the dict ``gpu_test_main`` reports and exits on.
 
     Continuing past a failure is only safe while no rank is left misaligned on a later collective, so
@@ -194,7 +195,7 @@ def gpu_test_main(
             if partial_state:
                 PartialState()
 
-            # ── Validate the launch before allocating anything ──────────────
+            # ── Validate the launch BEFORE allocating anything ──────────────
             bad = None
             if exact_world_size is not None and world_size != exact_world_size:
                 bad = f"requires exactly {exact_world_size} GPUs, launched with {world_size}"
@@ -240,21 +241,21 @@ def gpu_test_main(
                     log_all("cleanup_memory raised after the body failed")
                     traceback.print_exc()
                 cleanup_dirs(output_dir, cache_dir)
-                # Clean path only. A rank whose body raised has abandoned a collective its peers are
+                # Clean path only. A rank whose body RAISED has abandoned a collective its peers are
                 # still inside, so both the barrier and the NCCL group teardown block until the
-                # watchdog timeout, and the job hangs and reports an infra error instead of this
-                # rank's traceback. Exiting immediately lets the launcher reap the group, so a
-                # single-rank failure stays a failure.
+                # watchdog timeout — the whole job hangs and reports an undiagnosable infra error
+                # instead of this rank's traceback. Exiting straight away is what makes the launcher
+                # reap the group, so a single-rank failure stays a FAIL.
                 if status != "error":
                     ctx.barrier()
                     teardown_distributed()
 
             failed = [k for k, v in checks.items() if not v]
             # A non-zero rank whose checks disagree with rank 0's exits non-zero while rank 0 prints
-            # RESULT: PASS, and reporting only from rank 0 would make that look like a teardown race
-            # with no diagnosable cause, so every rank announces its own failures.
-            # Printed directly rather than via log_all: the process group is torn down by here, so
-            # log_all cannot read the rank and would label every line "[Rank 0]".
+            # RESULT: PASS — reporting only from rank 0 makes that look like a teardown race with no
+            # diagnosable cause. Every rank announces its own failures.
+            # Printed directly rather than via log_all: the process group is already torn down by
+            # here, so log_all cannot read the rank and would label every line "[Rank 0]".
             if rank != 0 and failed:
                 print(f"[Rank {rank}] FAILED CHECKS: {failed} (metrics: {metrics})", flush=True)
 

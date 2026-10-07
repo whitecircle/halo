@@ -52,9 +52,9 @@ from tests.common.utils import gpu_mem_gb, log
 # HALO_TEST_ATTN) to exercise the other storage layouts (fused-GLU, separate-GLU) without new files.
 MODEL_NAME = env_str("HALO_TEST_MODEL", GPT_OSS_20B)
 ATTN_IMPL = env_str("HALO_TEST_ATTN", "flex_attention")
-# Parallelism is env-overridable so one file covers EP-only / pure-ETP / EP+ETP / EP+CP. EP=2 default;
-# the sweep runs ep8 (nproc=8), etp2 (ep1), ep2+etp2 (nproc=4), ep2+cp2 (nproc=4). Under any ETP shape
-# EPConfig refuses expert adapters outright, so those rows assert the refusal, not a sharded gather.
+# Parallelism is env-overridable so one file covers EP-only and EP+CP. EP=2 default; the sweep runs ep8
+# (nproc=8) and ep2+cp2 (nproc=4). Any ETP shape refuses expert adapters at config time
+# (``reject_expert_lora_with_expert_tp``).
 EP_SIZE = env_int("HALO_TEST_EP", 2)
 EXPERT_TP_SIZE = env_int("HALO_TEST_ETP", 1)
 CP_SIZE = env_int("HALO_TEST_CP", 1)
@@ -96,7 +96,7 @@ def run(ctx) -> dict:
         tokenizer.pad_token = tokenizer.eos_token
     train_dataset = create_sft_dataset(NUM_TRAIN_SAMPLES, tokenizer, seed=SEED)
 
-    log("\n[3/8] Loading model with EP=2 + native expert-LoRA spec...")
+    log(f"\n[3/8] Loading model with EP={EP_SIZE} + native expert-LoRA spec...")
     parallelism_config = ParallelismConfig(ep_size=EP_SIZE, expert_tp_size=EXPERT_TP_SIZE, cp_size=CP_SIZE)
     # Mirror the trainer script: attach the spec BEFORE load so EP layers build adapters at init.
     parallelism_config.expert_lora = ExpertLoraSpec(
@@ -169,11 +169,11 @@ def run(ctx) -> dict:
 
     # --- Check 2: init delta == 0 (adapters present vs disabled produce the same output) ---
     # B is zero-initialized so the LoRA delta is structurally 0; _expert_proj must therefore be a
-    # no-op at init. The forward is deterministic on both expert paths: the grouped scatter-back is a
-    # fixed-order gather-reduce, and the per-expert loop's index_add_ adds each row once per local expert
-    # in a fixed expert order. DeepEP's receive order varies between passes, but no row's output reads
-    # it, so the noise floor below (two adapters-on passes) measures 0.
-    log("\n[5/8] Checking init delta == 0 (within the EP forward's run-to-run noise floor)...")
+    # no-op at init, bit for bit. The forward is deterministic on both expert paths: the grouped
+    # scatter-back is a fixed-order gather-reduce, and the per-expert loop's index_add_ adds each row
+    # once per local expert in a fixed expert order. DeepEP's receive order varies between passes, but
+    # no row's output reads it, so a second adapters-on pass (logged as the noise floor) matches too.
+    log("\n[5/8] Checking init delta == 0 (bit for bit)...")
     enc = tokenizer(["The quick brown fox jumps over the lazy dog."], return_tensors="pt")
     input_ids = enc["input_ids"].to(ctx.local_rank)
     attn = enc["attention_mask"].to(ctx.local_rank)
@@ -190,11 +190,8 @@ def run(ctx) -> dict:
     model.train()
     noise = (out_with_a - out_with_b).abs().max().item()
     delta = (out_with_a - out_without).abs().max().item()
-    # Adding the zero delta leaves the expert outputs unchanged, so delta should measure 0 like the
-    # noise floor; the 1e-3 floor is headroom. A real wiring bug (nonzero/duplicated delta) lands
-    # orders of magnitude above it.
-    checks["init_delta_zero"] = delta <= max(4.0 * noise, 1e-3)
-    log(f"  adapter delta={delta:.3e} vs forward noise floor={noise:.3e} (same order ⇒ no-op)")
+    checks["init_delta_zero"] = torch.equal(out_with_a, out_without)
+    log(f"  adapter delta={delta:.3e}, forward noise floor={noise:.3e} (both exactly 0 for a no-op adapter)")
 
     # --- Snapshot gathered base + adapters before training (collective: all ranks) ---
     log("\n[6/8] Snapshotting gathered base + adapters...")
@@ -267,7 +264,7 @@ def run(ctx) -> dict:
     checks["roundtrip_restores_adapters"] = roundtrip_ok
     log(f"  gather/load round-trip exact: {roundtrip_ok}")
 
-    # --- Check 5: trainer.save_model() writes a standalone adapter file (save_ep_checkpoint Case B) ---
+    # --- Check 5: trainer.save_model() writes a standalone adapter file (save_ep_lora_adapters) ---
     log("\n[+] trainer.save_model() adapter-only write...")
     apply_ep_lora_adapters(unwrapped, gathered)  # restore the trained adapters (zeroed above)
     save_dir = os.path.join(ctx.output_dir, "adapter")

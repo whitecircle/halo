@@ -153,7 +153,7 @@ def test_ep_every_rank_selects_a_group_containing_itself():
     """Every rank of every stage lands in an EP group it is a member of.
 
     Without this, stage-1 ranks match no created group and EPConfig raises
-    "EP group selection inconsistency" — the exact 16-GPU crash.
+    "EP group selection inconsistency".
     """
     for ep_size, groups_per_stage in _NODE_LOCAL_EP_SHAPES:
         built = _ep_over_world(world_size=16, stage_world_size=8, ep_size=ep_size, gpus_per_node=8, node_local=True)

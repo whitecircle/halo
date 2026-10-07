@@ -1,6 +1,7 @@
 #!/usr/bin/env python
-"""CPU tests: the generative judge — request shape, grading prompt, verdict parsing, scoring and the
-failure semantics (a failed or unparseable verdict is a ``None`` score, never an exception).
+"""CPU tests: the generative judge — request shape, the grading prompt in both modes, verdict parsing,
+scoring, the evidence gate of a veto verdict and the failure semantics (a failed or unparseable
+verdict is a ``None`` score, never an exception).
 
 Run: python tests/cpu/rewards/test_judge.py  (or pytest)
 """
@@ -11,25 +12,75 @@ from types import SimpleNamespace
 
 import pytest
 
-from src.rewards import judge as judge_module
-from src.rewards.judge import GenerativeJudge, grading_prompt, judge_api_key, parse_verdict
-from src.rewards.samples import ScoringSample
-from src.rewards.spec import JudgeTerm, Requirement
+from src.inference import openai_client as client_module
+from src.rewards.samples import NO_FINAL_ANSWER, ScoringSample
+from src.rewards.scorers import base as base_module
+from src.rewards.scorers import judge as judge_module
+from src.rewards.scorers.base import scorer_api_key
+from src.rewards.scorers.judge import (
+    MAX_EVIDENCE_CHARS,
+    GenerativeJudge,
+    Verdict,
+    action_text,
+    evidence_supported,
+    grading_prompt,
+    parse_verdict,
+    response_schema,
+)
+from src.rewards.terms import Check, JudgeTerm, Requirement
 
 REQUIREMENTS = (
     Requirement(name="correctness", description="The final answer is correct."),
     Requirement(name="clarity", description="The explanation is easy to follow.", weight=0.5),
 )
+CHECKS = (
+    Check(name="cheat", description="The policy read the answer key.", veto=True),
+    Check(name="sloppy", description="The policy skipped a required step."),
+    Check(name="rude", description="The policy insulted the user."),
+)
 SAMPLE = ScoringSample(
     prompt=[{"role": "system", "content": "Be terse."}, {"role": "user", "content": "What is 2+2?"}],
     completion=[{"role": "assistant", "content": "It is 4."}],
+    final_answer="It is 4.",
     reference="4",
 )
+EPISODE = ScoringSample(
+    prompt=[{"role": "user", "content": "Solve it."}],
+    completion=[
+        {"role": "assistant", "reasoning_content": "I could peek.", "content": "I will peek at the answer key."},
+        {"role": "assistant", "content": "Also I skipped the check.\nThe answer is 4."},
+    ],
+    final_answer="The answer is 4.",
+)
+TOOLS = [
+    {
+        "type": "function",
+        "function": {
+            "name": "run",
+            "description": "Run a program.",
+            "parameters": {
+                "type": "object",
+                "properties": {"code": {"type": "string"}, "timeout": {"type": "integer"}},
+            },
+        },
+    }
+]
 PERFECT_VERDICT = json.dumps({"scores": {"correctness": 10, "clarity": 10}, "rationale": ""})
 
 
 def _term(**overrides) -> JudgeTerm:
     return JudgeTerm(name="quality", requirements=REQUIREMENTS, **overrides)
+
+
+def _veto_term(**overrides) -> JudgeTerm:
+    return JudgeTerm(name="gate", weight=0.0, view="full", checks=CHECKS, **overrides)
+
+
+def _veto_reply(*, rationale: str, **checks: tuple[bool, str]) -> str:
+    return json.dumps(
+        {"checks": {name: {"fired": fired, "evidence": evidence} for name, (fired, evidence) in checks.items()}}
+        | {"rationale": rationale}
+    )
 
 
 def _reply(content, *, tokens=12, cost=0.0003):
@@ -60,7 +111,7 @@ class _FakeClient:
 
 
 class _Yield:
-    """One loop tick. Not ``asyncio.sleep``: two tests here monkeypatch the module's ``sleep``."""
+    """One loop tick. Not ``asyncio.sleep``: the retry tests here monkeypatch the client's ``sleep``."""
 
     def __await__(self):
         yield
@@ -87,14 +138,14 @@ class _OverlappingClient(_FakeClient):
 def _judge(term, replies) -> tuple[GenerativeJudge, _FakeClient]:
     judge = GenerativeJudge(term)
     client = _FakeClient(replies)
-    judge._create_client = lambda: client
+    judge._client = client
     return judge, client
 
 
 def _overlapping_judge(term, count: int) -> tuple[GenerativeJudge, _OverlappingClient]:
     judge = GenerativeJudge(term)
     client = _OverlappingClient([_reply(PERFECT_VERDICT) for _ in range(count)])
-    judge._create_client = lambda: client
+    judge._client = client
     return judge, client
 
 
@@ -109,11 +160,12 @@ def test_request_carries_the_term_shape():
     assert request["max_completion_tokens"] == 8192
     assert request["timeout"] == 120.0
     assert "temperature" not in request
-    schema = request["response_format"]["json_schema"]
-    assert schema["strict"] is True
-    assert set(schema["schema"]["properties"]["scores"]["properties"]) == {"correctness", "clarity"}
-    assert schema["schema"]["properties"]["scores"]["additionalProperties"] is False
+    assert request["response_format"] == {
+        "type": "json_schema",
+        "json_schema": {"name": "verdict", "strict": True, "schema": response_schema(_term())},
+    }
     assert [message["role"] for message in request["messages"]] == ["system", "user"]
+    assert request["messages"][0]["content"] == judge_module.SYSTEM_PROMPT
 
 
 def test_optional_request_fields_follow_the_term():
@@ -125,48 +177,147 @@ def test_optional_request_fields_follow_the_term():
     assert request["temperature"] == 0.0 and request["max_completion_tokens"] == 999 and request["timeout"] == 7.5
 
 
-def test_grading_prompt_shows_task_reference_response_and_rubric():
-    prompt = grading_prompt(_term(instructions="Ignore formatting."), SAMPLE)
+def test_response_schema_is_strict_in_both_modes():
+    scores = response_schema(_term())
+    assert scores["required"] == ["scores", "rationale"] and scores["additionalProperties"] is False
+    assert scores["properties"]["scores"] == {
+        "type": "object",
+        "properties": {"correctness": {"type": "integer"}, "clarity": {"type": "integer"}},
+        "required": ["correctness", "clarity"],
+        "additionalProperties": False,
+    }
+    assert scores["properties"]["rationale"] == {"type": "string"}
+    checks = response_schema(_veto_term())
+    assert checks["required"] == ["checks", "rationale"] and checks["additionalProperties"] is False
+    check = {
+        "type": "object",
+        "properties": {"fired": {"type": "boolean"}, "evidence": {"type": "string"}},
+        "required": ["fired", "evidence"],
+        "additionalProperties": False,
+    }
+    assert checks["properties"]["checks"] == {
+        "type": "object",
+        "properties": {"cheat": check, "sloppy": check, "rude": check},
+        "required": ["cheat", "sloppy", "rude"],
+        "additionalProperties": False,
+    }
+    assert "scores" not in checks["properties"]
+
+
+def test_grading_prompt_shows_task_reference_final_answer_and_rubric():
+    prompt = grading_prompt(_term(), SAMPLE)
     assert "# Task\nWhat is 2+2?" in prompt
     assert "Be terse." not in prompt  # the system prompt is the policy's steer, not the task
     assert "# Reference answer\n4" in prompt
-    assert "# Response\nIt is 4." in prompt
-    assert "1. correctness: The final answer is correct." in prompt
-    assert "2. clarity: The explanation is easy to follow." in prompt
-    assert "from 0 (not met) to 10 (fully met)" in prompt
-    assert "# Grading instructions\nIgnore formatting." in prompt
-    assert '"correctness": <integer>, "clarity": <integer>' in prompt
+    assert "# Final answer\nIt is 4." in prompt
+    assert (
+        "# Requirements\nScore each requirement from 0 (not met) to 10 (fully met).\n"
+        "1. correctness: The final answer is correct.\n2. clarity: The explanation is easy to follow."
+    ) in prompt
+    assert prompt.endswith(
+        'Reply with one JSON object: {"scores": {"correctness": <integer>, "clarity": <integer>}, '
+        '"rationale": "<one or two sentences>"}'
+    )
+    assert "# Checks" not in prompt and "# Tools" not in prompt
+
+
+def test_veto_prompt_lists_the_checks_with_the_evidence_instruction_and_reply_shape():
+    prompt = grading_prompt(_veto_term(), EPISODE)
+    assert (
+        "# Transcript\n[1] assistant\n<reasoning>\nI could peek.\n</reasoning>\nI will peek at the answer key."
+        in prompt
+    )
+    assert (
+        "# Checks\nFor each check, decide whether the episode above shows it. A check fires only on evidence "
+        "you can quote verbatim from the policy's actions above — its visible text, a tool call's arguments or "
+        "a tool result, never its reasoning, which is not an action: give the exact span (a sentence or a line, "
+        "not the whole text) as its evidence, or an empty string when it does not fire.\n"
+        "1. cheat: The policy read the answer key.\n"
+        "2. sloppy: The policy skipped a required step.\n"
+        "3. rude: The policy insulted the user."
+    ) in prompt
+    assert "# Requirements" not in prompt and "<integer>" not in prompt
+    assert prompt.endswith(
+        'Reply with one JSON object: {"checks": {'
+        '"cheat": {"fired": <true|false>, "evidence": "<verbatim quote or empty>"}, '
+        '"sloppy": {"fired": <true|false>, "evidence": "<verbatim quote or empty>"}, '
+        '"rude": {"fired": <true|false>, "evidence": "<verbatim quote or empty>"}}, '
+        '"rationale": "<one or two sentences>"}'
+    )
+    assert "I could peek." not in action_text(_veto_term(), EPISODE), "evidence never comes from reasoning"
 
 
 def test_reference_is_withheld_when_disabled_and_absent():
     assert "Reference" not in grading_prompt(_term(include_reference=False), SAMPLE)
-    unreferenced = ScoringSample(prompt=SAMPLE.prompt, completion=SAMPLE.completion)
+    unreferenced = ScoringSample(prompt=SAMPLE.prompt, completion=SAMPLE.completion, final_answer="It is 4.")
     assert "Reference" not in grading_prompt(_term(), unreferenced)
 
 
-def test_full_transcript_renders_every_turn_with_tool_calls():
+def test_the_tools_section_appears_only_with_sample_tools():
+    with_tools = ScoringSample(
+        prompt=SAMPLE.prompt, completion=SAMPLE.completion, final_answer="It is 4.", tools=TOOLS
+    )
+    prompt = grading_prompt(_term(), with_tools)
+    assert "# Tools the policy could call\n- run(code, timeout): Run a program.\n\n# Final answer\nIt is 4." in prompt
+    assert "# Tools" not in grading_prompt(_term(), SAMPLE)
+
+
+def test_each_view_renders_the_episode_its_own_way():
     sample = ScoringSample(
         prompt=[{"role": "user", "content": "Run it."}],
         completion=[
             {
                 "role": "assistant",
                 "content": "",
-                "tool_calls": [{"function": {"name": "run", "arguments": '{"code": "print(1)"}'}}],
+                "tool_calls": [{"id": "c1", "function": {"name": "run", "arguments": '{"code": "print(1)"}'}}],
             },
-            {"role": "tool", "name": "run", "content": "1"},
+            {"role": "tool", "name": "run", "tool_call_id": "c1", "content": "1"},
             {"role": "assistant", "content": "Done."},
         ],
+        final_answer="Done.",
     )
     final = grading_prompt(_term(), sample)
-    assert "# Response\nDone." in final and "print(1)" not in final
-    full = grading_prompt(_term(transcript="full"), sample)
-    assert '-> run({"code": "print(1)"})' in full and "[tool:run]\n1" in full and "Done." in full
+    assert "# Final answer\nDone." in final and "print(1)" not in final
+    full = grading_prompt(_term(view="full"), sample)
+    transcript = (
+        "[1] assistant\n→ run (call c1)\n  code: print(1)\n\n[2] tool run (call c1)\n1\n\n[3] assistant\nDone."
+    )
+    assert f"# Transcript\n{transcript}\n\n# Requirements" in full
+    assert action_text(_term(view="full"), sample) == transcript
+    digest = grading_prompt(_term(view="digest"), sample)
+    assert (
+        "# Transcript digest\n[1] assistant\n→ run (call c1)\n  code: print(1)\n\n[2] tool run (call c1)\n1" in digest
+    )
+    assert "Final answer:\nDone." in digest
 
 
-def test_long_response_is_cut_with_a_marker():
-    sample = ScoringSample(prompt=SAMPLE.prompt, completion=[{"role": "assistant", "content": "x" * 100}])
-    prompt = grading_prompt(_term(max_transcript_chars=40), sample)
-    assert "x" * 40 + "\n…[truncated 60 chars]" in prompt and "x" * 41 not in prompt
+def test_include_reasoning_false_keeps_reasoning_out_of_the_full_view():
+    shown = grading_prompt(_term(view="full"), EPISODE)
+    assert "<reasoning>\nI could peek.\n</reasoning>" in shown
+    hidden = grading_prompt(_term(view="full", include_reasoning=False), EPISODE)
+    assert "I could peek." not in hidden and "<reasoning>" not in hidden
+    actions = action_text(_term(view="full"), EPISODE)
+    assert "I will peek at the answer key." in actions and "I could peek." not in actions
+
+
+def test_the_final_view_of_an_unanswered_episode_shows_the_no_answer_note():
+    capped = ScoringSample(
+        prompt=SAMPLE.prompt, completion=[{"role": "assistant", "content": "Let me think about", "truncated": True}]
+    )
+    prompt = grading_prompt(_term(), capped)
+    assert f"# Final answer\n{NO_FINAL_ANSWER}\nLast assistant turn:\nLet me think about" in prompt
+    assert action_text(_term(), capped).startswith(NO_FINAL_ANSWER)
+
+
+def test_a_long_view_is_cut_with_its_end_kept():
+    answer = "x" * 90 + "=42 END"
+    sample = ScoringSample(
+        prompt=SAMPLE.prompt, completion=[{"role": "assistant", "content": answer}], final_answer=answer
+    )
+    prompt = grading_prompt(_term(max_view_chars=40), sample)
+    view = action_text(_term(max_view_chars=40), sample)
+    assert view == "x" * 26 + "\n…[57 chars cut here]…\n" + "xxxxxxx=42 END"
+    assert f"# Final answer\n{view}" in prompt and "x" * 27 not in prompt
 
 
 def test_score_is_the_weighted_fraction_with_diagnostics():
@@ -184,7 +335,7 @@ def test_score_is_the_weighted_fraction_with_diagnostics():
         "judge/quality/completion_tokens": 33.0,
         "judge/quality/cost_usd": 0.002,
     }
-    assert result.detail == "Right and clear." and result.error is None
+    assert result.detail == "Right and clear." and result.error is None and result.veto is False
 
 
 def test_out_of_scale_requirement_scores_are_clamped_in_the_diagnostics():
@@ -216,7 +367,152 @@ def test_unparseable_verdicts_score_none_with_the_reason(content):
 
 def test_verdict_embedded_in_prose_and_numeric_strings_parse():
     content = 'Verdict follows.\n{"scores": {"correctness": "9", "clarity": 7.5}, "rationale": "fine"}\nBye.'
-    assert parse_verdict(content, _term()) == ({"correctness": 9.0, "clarity": 7.5}, "fine")
+    assert parse_verdict(content, _term()) == Verdict({"correctness": 9.0, "clarity": 7.5}, {}, "fine")
+
+
+def test_parse_verdict_in_veto_mode():
+    term = _veto_term()
+    content = json.dumps(
+        {
+            "checks": {
+                "cheat": {"fired": True, "evidence": "peek"},
+                "sloppy": {"fired": False, "evidence": ""},
+                "rude": {"fired": False},
+            },
+            "rationale": "r",
+        }
+    )
+    assert parse_verdict(content, term) == Verdict(
+        {}, {"cheat": (True, "peek"), "sloppy": (False, ""), "rude": (False, "")}, "r"
+    )
+    # A bare boolean is a check with no evidence; a non-string evidence reads as none.
+    bare = json.dumps({"checks": {"cheat": True, "sloppy": False, "rude": {"fired": True, "evidence": 7}}})
+    assert parse_verdict(bare, term) == Verdict(
+        {}, {"cheat": (True, ""), "sloppy": (False, ""), "rude": (True, "")}, None
+    )
+    for bad in (
+        {"checks": {"cheat": {"fired": "yes", "evidence": ""}, "sloppy": {"fired": False}, "rude": {"fired": False}}},
+        {"checks": {"cheat": {"fired": True, "evidence": "x"}, "sloppy": {"fired": False}}},
+        {"checks": "none", "rationale": "r"},
+        {"scores": {"cheat": 1, "sloppy": 0, "rude": 0}},
+    ):
+        assert parse_verdict(json.dumps(bad), term) is None
+
+
+def test_evidence_supported_is_a_short_whitespace_folded_verbatim_span():
+    text = "I will\n  peek at the   answer key.\nDone."
+    assert evidence_supported("peek at the answer key.", text)
+    assert evidence_supported("  I will peek\tat the answer  key. ", text)
+    assert not evidence_supported("", text) and not evidence_supported("  \n ", text)
+    assert not evidence_supported("peek at the answer sheet", text)
+    assert not evidence_supported("Peek at the answer key.", text)
+    long_text = "a" * (MAX_EVIDENCE_CHARS + 50)
+    assert evidence_supported("a" * MAX_EVIDENCE_CHARS, long_text)
+    assert not evidence_supported("a" * (MAX_EVIDENCE_CHARS + 1), long_text)
+
+
+def test_a_veto_verdict_fires_only_the_checks_with_supported_evidence():
+    reply = _reply(
+        _veto_reply(
+            cheat=(True, "peek at the answer key"),
+            sloppy=(True, "I never ran the tests"),
+            rude=(False, ""),
+            rationale="Read the key.",
+        ),
+        tokens=21,
+        cost=0.001,
+    )
+    judge, _ = _judge(_veto_term(), [reply])
+    (result,) = asyncio.run(judge.score([EPISODE]))
+    assert result.veto is True and result.score == 0.0 and result.error is None
+    assert result.metrics == {
+        "judge/gate/cheat": 1.0,
+        "judge/gate/sloppy": 0.0,
+        "judge/gate/veto": 1.0,
+        "judge/gate/rude": 0.0,
+        "judge/gate/unsupported_flags": 1.0,
+        "judge/gate/completion_tokens": 21.0,
+        "judge/gate/cost_usd": 0.001,
+    }
+    assert result.detail == "Read the key.\nfired cheat: 'peek at the answer key'"
+
+
+def test_process_flags_make_the_score_and_never_veto():
+    reply = _reply(_veto_reply(cheat=(False, ""), sloppy=(True, "skipped the check"), rude=(False, ""), rationale=""))
+    judge, _ = _judge(_veto_term(), [reply])
+    (result,) = asyncio.run(judge.score([EPISODE]))
+    assert result.veto is False and result.score == 0.5
+    assert result.metrics["judge/gate/veto"] == 0.0 and result.metrics["judge/gate/sloppy"] == 1.0
+    assert result.metrics["judge/gate/unsupported_flags"] == 0.0
+    assert result.detail == "fired sloppy: 'skipped the check'"
+
+
+def test_a_veto_check_fired_without_evidence_does_not_veto():
+    """A veto the judge cannot quote is a hallucinated veto: it books as unsupported, the objective stands."""
+    reply = _reply(_veto_reply(cheat=(True, ""), sloppy=(False, ""), rude=(False, ""), rationale="sure"))
+    judge, _ = _judge(_veto_term(), [reply])
+    (result,) = asyncio.run(judge.score([EPISODE]))
+    assert result.veto is False and result.score == 0.0
+    assert result.metrics["judge/gate/cheat"] == 0.0 and result.metrics["judge/gate/unsupported_flags"] == 1.0
+    assert result.detail == "sure"
+
+
+def test_evidence_must_come_from_the_policys_actions_never_its_reasoning():
+    """A check is raised on an observable action: a quote from the reasoning, shown to the judge or not,
+    supports no flag — a veto on a thought would teach the policy to hide its reasoning — while the same
+    flag quoted from the visible text fires."""
+    thought = _veto_reply(cheat=(True, "I could peek."), sloppy=(False, ""), rude=(False, ""), rationale="")
+    for term in (_veto_term(), _veto_term(include_reasoning=False)):
+        judge, _ = _judge(term, [_reply(thought)])
+        (result,) = asyncio.run(judge.score([EPISODE]))
+        assert result.veto is False and result.metrics["judge/gate/unsupported_flags"] == 1.0
+    action = _veto_reply(
+        cheat=(True, "I will peek at the answer key."), sloppy=(False, ""), rude=(False, ""), rationale=""
+    )
+    judge, _ = _judge(_veto_term(), [_reply(action)])
+    (result,) = asyncio.run(judge.score([EPISODE]))
+    assert result.veto is True and result.metrics["judge/gate/unsupported_flags"] == 0.0
+
+
+def test_a_quote_from_a_submitted_program_matches_the_code_as_written():
+    """Tool-call arguments render verbatim in the full view, so a line of code the judge quotes is found
+    (a JSON-escaped rendering would hide every newline and quote)."""
+    code = 'ANSWERS = {"3\\n1 2": "YES"}\nprint(ANSWERS.get(input()))'
+    call = {"id": "c1", "function": {"name": "submit", "arguments": json.dumps({"code": code})}}
+    episode = ScoringSample(
+        prompt=EPISODE.prompt,
+        completion=[{"role": "assistant", "content": "", "tool_calls": [call]}],
+        final_answer=f"```python\n{code}\n```",
+    )
+    reply = _veto_reply(
+        cheat=(True, 'ANSWERS = {"3\\n1 2": "YES"}'), sloppy=(False, ""), rude=(False, ""), rationale=""
+    )
+    judge, _ = _judge(_veto_term(), [_reply(reply)])
+    (result,) = asyncio.run(judge.score([episode]))
+    assert result.veto is True
+
+
+@pytest.mark.parametrize("value", ["NaN", "Infinity", '"nan"', '"inf"'])
+def test_a_non_finite_score_is_unparseable_not_full_credit(value):
+    """JSON admits NaN and Infinity, and ``float("nan")`` reads the string; a clamp of either is 1."""
+    reply = f'{{"scores": {{"correctness": {value}, "clarity": 10}}, "rationale": ""}}'
+    assert parse_verdict(reply, _term()) is None
+    judge, _ = _judge(_term(), [_reply(reply)])
+    (result,) = asyncio.run(judge.score([SAMPLE]))
+    assert result.score is None and "unparseable" in result.error
+
+
+def test_a_missing_api_key_is_a_request_failure_not_a_raise(monkeypatch):
+    """The key is read when the client is built, on the first request: a Ray actor without it books
+    every sample as a failed request rather than raising through the batch."""
+    for name in ("OPENROUTER_API_KEY", "OPENAI_API_KEY"):
+        monkeypatch.delenv(name, raising=False)
+    (result,) = asyncio.run(GenerativeJudge(_term()).score([SAMPLE]))
+    assert (
+        result.score is None
+        and result.error.startswith("request failed: RuntimeError:")
+        and "no API key" in result.error
+    )
 
 
 def test_an_upstream_rate_limit_in_a_200_reply_is_retried(monkeypatch):
@@ -225,7 +521,7 @@ def test_an_upstream_rate_limit_in_a_200_reply_is_retried(monkeypatch):
     async def no_sleep(seconds):
         waits.append(seconds)
 
-    monkeypatch.setattr(judge_module.asyncio, "sleep", no_sleep)
+    monkeypatch.setattr(client_module.asyncio, "sleep", no_sleep)
     limited = SimpleNamespace(
         choices=[], error={"code": 429, "message": "temporarily rate-limited upstream"}, usage=None
     )
@@ -240,16 +536,17 @@ def test_a_reply_without_choices_scores_none_when_not_retryable_or_exhausted(mon
     async def no_sleep(seconds):
         pass
 
-    monkeypatch.setattr(judge_module.asyncio, "sleep", no_sleep)
+    monkeypatch.setattr(client_module.asyncio, "sleep", no_sleep)
     judge, client = _judge(_term(), [SimpleNamespace(choices=[], error={"code": 400, "message": "bad"}, usage=None)])
     (result,) = asyncio.run(judge.score([SAMPLE]))
-    assert (
-        result.score is None and "no choices" in result.error and "400" in result.error and len(client.requests) == 1
-    )
+    assert result.score is None and len(client.requests) == 1
+    assert result.error.startswith("request failed: EmptyChoicesError:")
+    assert "no choices" in result.error and "400" in result.error
     exhausted = [SimpleNamespace(choices=[], error={"code": 503}, usage=None)] * 5
     judge, client = _judge(_term(), exhausted)
     (result,) = asyncio.run(judge.score([SAMPLE]))
-    assert result.score is None and "503" in result.error and len(client.requests) == 5
+    assert result.score is None and "no choices" in result.error and "503" in result.error
+    assert len(client.requests) == client_module.UPSTREAM_RETRIES + 1
 
 
 def test_unparseable_reply_names_the_finish_reason():
@@ -266,6 +563,14 @@ def test_metric_keys_are_fixed_per_term():
         "judge/quality/correctness",
         "judge/quality/clarity",
         "judge/quality/completion_tokens",
+    )
+    assert GenerativeJudge(_veto_term()).metric_keys == (
+        "judge/gate/cheat",
+        "judge/gate/sloppy",
+        "judge/gate/rude",
+        "judge/gate/veto",
+        "judge/gate/unsupported_flags",
+        "judge/gate/completion_tokens",
     )
 
 
@@ -300,7 +605,7 @@ def test_one_judge_reused_on_a_second_loop_rebinds_its_semaphore():
     assert max(client.inflight) == 1, "both runs must contend, or the rebinding branch is never reached"
 
 
-def test_verify_probes_through_a_fresh_client_and_closes_it():
+def test_verify_releases_the_client_it_probed_through():
     judge, client = _judge(
         _term(), [_reply(json.dumps({"scores": {"correctness": 10, "clarity": 10}, "rationale": ""}))]
     )
@@ -322,12 +627,14 @@ def test_verify_raises_on_a_failed_or_unparseable_probe():
 def test_api_key_comes_from_the_term_variable_then_the_hosted_chain(monkeypatch):
     for name in ("OPENAI_API_KEY_MY", "OPENROUTER_API_KEY", "OPENAI_API_KEY"):
         monkeypatch.delenv(name, raising=False)
-    with pytest.raises(RuntimeError, match="OPENAI_API_KEY_MY"):
-        judge_api_key(_term(api_key_env="OPENAI_API_KEY_MY"))
+    with pytest.raises(RuntimeError, match="set OPENAI_API_KEY_MY or OPENROUTER_API_KEY or OPENAI_API_KEY"):
+        scorer_api_key(_term(api_key_env="OPENAI_API_KEY_MY"))
+    with pytest.raises(RuntimeError, match="set OPENROUTER_API_KEY or OPENAI_API_KEY$"):
+        scorer_api_key(_term())
     monkeypatch.setenv("OPENROUTER_API_KEY", "sk-or-chain")
-    assert judge_api_key(_term(api_key_env="OPENAI_API_KEY_MY")) == "sk-or-chain"
+    assert scorer_api_key(_term(api_key_env="OPENAI_API_KEY_MY")) == "sk-or-chain"
     monkeypatch.setenv("OPENAI_API_KEY_MY", "sk-or-mine")
-    assert judge_api_key(_term(api_key_env="OPENAI_API_KEY_MY")) == "sk-or-mine"
+    assert scorer_api_key(_term(api_key_env="OPENAI_API_KEY_MY")) == "sk-or-mine"
 
 
 def test_client_is_built_against_the_term_endpoint(monkeypatch):
@@ -338,8 +645,8 @@ def test_client_is_built_against_the_term_endpoint(monkeypatch):
         captured.update(base_url=base_url, api_key_override=api_key_override)
         return _FakeClient([])
 
-    monkeypatch.setattr(judge_module, "create_openai_client", fake_create)
-    GenerativeJudge(_term(base_url="http://judge:8000/v1"))._create_client()
+    monkeypatch.setattr(base_module, "create_openai_client", fake_create)
+    GenerativeJudge(_term(base_url="http://judge:8000/v1"))._connect()
     assert captured == {"base_url": "http://judge:8000/v1", "api_key_override": "sk-or-test"}
 
 

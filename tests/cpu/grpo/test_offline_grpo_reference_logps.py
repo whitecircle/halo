@@ -9,8 +9,8 @@ import pytest
 import torch
 
 import src.trainers.mixins.reference_logps as reference_mod
+from src.checkpoint.format import REFERENCE_CACHE_DIR_NAME, REFERENCE_LOGPS_FILE
 from src.data.collators.offline_grpo import REF_PER_TOKEN_LOGPS_COLUMN
-from src.trainers.grpo.reference_logps import REFERENCE_LOGPS_FILE
 from tests.common.gloo import run_gloo_ranks
 from tests.common.offline_grpo_reference import (
     SETTINGS,
@@ -156,8 +156,11 @@ def test_a_failed_sidecar_write_keeps_the_previous_checkpoint(tmp_path, monkeypa
 
 
 def _ranked_restore(rank: int, root: str) -> None:
-    checkpoint = os.path.join(root, f"rank-{rank}", "checkpoint-1")
-    trainer = ReferenceStorageTrainer(root, checkpoint=checkpoint)
+    # Each rank is a node with its own output directory, holding its own copy of the checkpoint.
+    os.environ["LOCAL_RANK"] = "0"
+    os.environ["LOCAL_WORLD_SIZE"] = "1"
+    output = os.path.join(root, f"rank-{rank}")
+    trainer = ReferenceStorageTrainer(output, checkpoint=os.path.join(output, "checkpoint-1"))
     try:
         restore_reference(trainer, reference_dataset(), "train")
         outcome = "NO RAISE"
@@ -179,7 +182,13 @@ def test_one_nodes_corrupt_reference_is_rejected_on_every_rank(tmp_path, finite_
     saved["train"]["values"][0] = -9.0 if finite_damage else float("nan")
     torch.save(saved, bad_file)
 
-    run_gloo_ranks(_ranked_restore, 2, str(tmp_path), pg_timeout=datetime.timedelta(seconds=15))
+    run_gloo_ranks(
+        _ranked_restore,
+        2,
+        str(tmp_path),
+        env={"DIST_OUTPUT_SHARED_FILESYSTEM": "0"},
+        pg_timeout=datetime.timedelta(seconds=15),
+    )
     for rank in range(2):
         outcome = (tmp_path / f"outcome-{rank}.txt").read_text()
         assert "NO RAISE" not in outcome
@@ -194,7 +203,7 @@ def _ranked_interrupted_save(rank: int, root: str) -> None:
     attach_reference(trainer, reference_dataset(), "train", reference_rows(), settings=SETTINGS)
     patch = pytest.MonkeyPatch()
 
-    def interrupted_save(payload, destination):
+    def interrupted_save(payload, destination, **save_options):
         with open(destination, "wb") as incomplete:
             incomplete.write(b"partial sidecar")
         raise OSError("reference disk full")
@@ -223,6 +232,63 @@ def test_interrupted_writer_rejects_every_rank_before_checkpoint_rotation(tmp_pa
     checkpoint = tmp_path / "checkpoint-1"
     assert not (checkpoint / REFERENCE_LOGPS_FILE).exists()
     assert not list(checkpoint.glob(f".{REFERENCE_LOGPS_FILE}.*"))
+
+
+def _mapped_files() -> list[str]:
+    with open("/proc/self/maps") as maps:
+        return [line.split(maxsplit=5)[5].strip() for line in maps if len(line.split(maxsplit=5)) == 6]
+
+
+def test_a_resume_maps_a_staged_copy_so_rotation_can_remove_the_checkpoint(tmp_path):
+    """A resume maps its saved scores for the run. Mapped through the checkpoint's own entry, rotation's
+    removal of that checkpoint on NFS leaves a fresh ``.nfs*`` file keeping the directory, which HF's
+    newest-mtime rotation then keeps in place of a complete checkpoint."""
+    attached, checkpoint = _save_first_split(tmp_path)
+    resumed = ReferenceStorageTrainer(tmp_path, checkpoint=str(checkpoint), step=2)
+    restored = restore_reference(resumed, reference_dataset(), "train")
+    mapped = _mapped_files()
+    sidecar = os.path.realpath(checkpoint / REFERENCE_LOGPS_FILE)
+    assert not any(path.startswith(sidecar) for path in mapped), "the resume maps the checkpoint's own file"
+    assert any(f"/{REFERENCE_CACHE_DIR_NAME}/" in path and path.endswith(REFERENCE_LOGPS_FILE) for path in mapped)
+    shutil.rmtree(checkpoint)
+    assert restored[REF_PER_TOKEN_LOGPS_COLUMN] == attached[REF_PER_TOKEN_LOGPS_COLUMN]
+    resumed.save_checkpoint()
+    carried = torch.load(tmp_path / "checkpoint-2" / REFERENCE_LOGPS_FILE, weights_only=True)["train"]
+    assert torch.equal(carried["values"], torch.tensor([-0.25, -1.5, -0.75]))
+
+
+def _ranked_partial_restore(rank: int, root: str) -> None:
+    os.environ["LOCAL_RANK"] = "0"
+    os.environ["LOCAL_WORLD_SIZE"] = "1"
+    output = os.path.join(root, f"rank-{rank}")
+    trainer = ReferenceStorageTrainer(output, checkpoint=os.path.join(output, "checkpoint-1"))
+    try:
+        restore_reference(trainer, reference_dataset(), "train")
+        outcome = "NO RAISE"
+    except Exception as exc:
+        outcome = f"{type(exc).__name__}: {exc}"
+    with open(os.path.join(root, f"partial-outcome-{rank}.txt"), "w") as result:
+        result.write(outcome)
+
+
+def test_a_node_without_its_checkpoint_copy_fails_the_resume_on_every_rank(tmp_path):
+    """Node-local output: each node's writer stages its own copy, so a node missing it is the torn verdict
+    on every rank, not a silent resume from the other node's scores or a hang."""
+    _, source = _save_first_split(tmp_path / "source")
+    checkpoint = tmp_path / "rank-0" / "checkpoint-1"
+    checkpoint.mkdir(parents=True)
+    shutil.copy2(source / REFERENCE_LOGPS_FILE, checkpoint / REFERENCE_LOGPS_FILE)
+    (tmp_path / "rank-1" / "checkpoint-1").mkdir(parents=True)
+    run_gloo_ranks(
+        _ranked_partial_restore,
+        2,
+        str(tmp_path),
+        env={"DIST_OUTPUT_SHARED_FILESYSTEM": "0"},
+        pg_timeout=datetime.timedelta(seconds=15),
+    )
+    for rank in range(2):
+        outcome = (tmp_path / f"partial-outcome-{rank}.txt").read_text()
+        assert "present on some ranks but missing on others" in outcome, outcome
 
 
 if __name__ == "__main__":

@@ -129,6 +129,10 @@ def run(ctx) -> dict:
         parallelism_config=parallelism_config,
         sdpg_loss="reverse_kl",
         sdpg_beta_base=1.0,
+        reference_kl_coef=0.0,
+        reference_kl_loss="unnormalized_kl",
+        confidence_weight_opd=True,
+        opd_exclude_eos=True,
     )
     ctx.on_teardown(trainer.cleanup_ep)
 

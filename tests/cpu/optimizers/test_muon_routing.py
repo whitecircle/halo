@@ -113,7 +113,7 @@ def test_routing_by_module():
 
 
 class _UnconventionalNames(nn.Module):
-    """A family spelling its embedding/head outside ``_EMBEDDING_HEAD_MARKERS``.
+    """A family spelling its embedding/head outside ``EMBEDDING_HEAD_MARKERS``.
 
     ``embed_in`` / ``embed_out`` are GPT-NeoX's real spellings and match none of the markers.
     The model declares them the way every ``PreTrainedModel`` does — via the accessors.
@@ -136,11 +136,11 @@ def test_embedding_and_head_resolved_structurally_for_new_family():
     """A family whose embedding/head names match no marker must still land on AdamW.
 
     This is the point of routing on the module the model declares rather than on a name list:
-    adding a family must not require editing ``_EMBEDDING_HEAD_MARKERS``. Newton-Schulz on a
+    adding a family must not require editing ``EMBEDDING_HEAD_MARKERS``. Newton-Schulz on a
     vocab-indexed matrix is empirically harmful and would be applied silently.
     """
     model = _UnconventionalNames()
-    # The name-based fallback alone would misroute both — that is exactly the gap being closed.
+    # The name-based fallback alone would misroute both, which is why routing reads the accessors.
     assert not _is_embedding_or_head("embed_in.weight")
     assert not _is_embedding_or_head("embed_out.weight")
 

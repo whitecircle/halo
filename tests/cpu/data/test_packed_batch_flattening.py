@@ -136,7 +136,7 @@ def test_mostly_pad_row_adds_no_segments():
     n_segments = len(cu_q) - 1
     assert n_segments == 3, (
         f"{n_segments} attention segments for 3 documents — pad tokens are becoming length-1 "
-        f"segments again, which is the 275x FA4-backward cliff and the 330s training steps"
+        f"segments, the 275x FA4-backward cliff"
     )
 
 

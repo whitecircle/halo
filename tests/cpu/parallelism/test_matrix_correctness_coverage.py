@@ -3,9 +3,7 @@
 
 ``SUPPORTED_AXIS_SETS`` decides what may run; this map decides what must be *proven* to run
 correctly. Without it a combination reaches the allowlist with no test comparing its gradients
-against an unsplit reference — not a hypothetical: unguarded PP+ETP produces gradients at 0.32x the
-reference, and PP itself fails with a ``TypeError`` on its default normalizer path, both while the
-whole CPU suite stays green.
+against an unsplit reference, and a wrong reduction there passes the whole CPU suite.
 
 This test closes the loop from the other side: each allowlisted axis set names the GPU test that
 compares it to a single-GPU reference, and both directions are checked — an allowlisted set with

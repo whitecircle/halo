@@ -468,27 +468,7 @@ def shard_dataset(
     output_dir: str,
     split_name: str = "train",
 ) -> ShardIndex:
-    """Shard a dataset into Arrow files (remainder distributed to the first shards)."""
-    if num_shards <= 1:
-        shard_dir = os.path.join(output_dir, split_name)
-        os.makedirs(shard_dir, exist_ok=True)
-
-        shard_save_path = os.path.join(shard_dir, "shard_0000")
-        dataset.save_to_disk(shard_save_path)
-
-        return ShardIndex(
-            split=split_name,
-            num_shards=1,
-            total_examples=len(dataset),
-            shards=[
-                ShardInfo(
-                    id=0,
-                    path=f"{split_name}/shard_0000",
-                    num_examples=len(dataset),
-                )
-            ],
-        )
-
+    """Shard a dataset into Arrow files (remainder distributed to the first shards; empty shards skipped)."""
     total_examples = len(dataset)
     base_shard_size = total_examples // num_shards
     remainder = total_examples % num_shards
@@ -508,14 +488,9 @@ def shard_dataset(
         if shard_size == 0:
             continue
 
-        shard_data = dataset.select(range(start_idx, end_idx))
-        shard_data.save_to_disk(os.path.join(shard_dir, f"shard_{shard_id:04d}"))
-
-        byte_size = 0
         shard_folder = os.path.join(shard_dir, f"shard_{shard_id:04d}")
-        if os.path.exists(shard_folder):
-            for f in os.listdir(shard_folder):
-                byte_size += os.path.getsize(os.path.join(shard_folder, f))
+        dataset.select(range(start_idx, end_idx)).save_to_disk(shard_folder)
+        byte_size = sum(os.path.getsize(os.path.join(shard_folder, f)) for f in os.listdir(shard_folder))
 
         shards.append(
             ShardInfo(
@@ -548,8 +523,6 @@ def _warn_on_shard_count_ceiling(shard_indices: dict[str, ShardIndex], requested
     yields fewer shards than requested and a rank with no shard gets zero examples, which the
     trainer's pre-sharded equalizer turns into a failure (train) or a rejected eval-gather (eval).
     """
-    if not shard_indices:
-        return
     ceiling = min(index.num_shards for index in shard_indices.values())
     if ceiling >= requested_shards:
         return

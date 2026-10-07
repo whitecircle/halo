@@ -2,8 +2,8 @@
 """Merge an EP-sharded checkpoint into one ``from_pretrained``-loadable HuggingFace checkpoint.
 
 Required for sharded EP saves (``save_sharded_ep: true``): each rank writes its own expert slices
-under ``.shard_N`` suffixes for fast parallel I/O, and DeepEP's buffer recreation rules out loading
-that layout directly. Per-family expert layout comes from the owning EP layer class's
+under ``.shard_N`` suffixes for fast parallel I/O, a layout no loader reads (the EP loader refuses it
+with these merge instructions). Per-family expert layout comes from the owning EP layer class's
 ``gather_expert_state_dict``, so every MoE family in the roster merges through the same seam.
 A gathered save (``save_sharded_ep: false``) needs no merge; it is slower to write but directly
 loadable.

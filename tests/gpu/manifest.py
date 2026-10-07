@@ -690,7 +690,10 @@ MANIFEST: dict[str, TestSpec] = {
         nproc=8, markers=("gpu", "full", "8gpu", "ep", "moe", "lora", "qwen3"), timeout=1800
     ),
     "trainers/grpo/test_offline_grpo_ep_reference.py": TestSpec(
-        nproc=8, markers=("gpu", "full", "8gpu", "ep", "moe", "qwen3"), timeout=1800
+        nproc=8,
+        markers=("gpu", "full", "8gpu", "ep", "moe", "qwen3"),
+        args_matrix=("--ep-loading lazy", "--ep-loading eager"),
+        timeout=1800,
     ),
     "trainers/grpo/test_offline_grpo_sibling_reference.py": TestSpec(
         nproc=4,
@@ -705,9 +708,9 @@ MANIFEST: dict[str, TestSpec] = {
         markers=("gpu", "core", "2gpu", "tp", "qwen3"),
         timeout=2400,
     ),
-    # One node per leg: each leg holds its trainer-side weight-transfer port for the life of the
-    # process (only close_communicator frees it, which a leg never calls), and the environmental legs
-    # additionally stand up Ray actors.
+    # One node per leg: each leg binds its own trainer-side weight-transfer port. The online legs hold
+    # it until the client's atexit close_communicator; the environmental legs close it when train()
+    # ends and additionally stand up Ray actors.
     "trainers/grpo/test_online_grpo_vllm_e2e.py": TestSpec(
         nproc=1,
         markers=("gpu", "full", "1gpu", "lora", "qwen3", "vllm_server"),
@@ -1161,8 +1164,8 @@ MANIFEST: dict[str, TestSpec] = {
     "trainers/sft/test_optimizer_shard_save_after_eval.py": TestSpec(
         nproc=2,
         markers=("gpu", "core", "2gpu", "ep", "moe", "vlm", "qwen3"),
-        # Both modes: fsdp pins the family-agnostic FSDP2 mechanism, ep the reported
-        # composite-VLM + plain-expert + AdamWBF16 shape.
+        # Both modes: fsdp pins the family-agnostic FSDP2 mechanism, ep the composite-VLM +
+        # plain-expert + AdamWBF16 shape.
         args_matrix=("--mode fsdp", "--mode ep"),
         timeout=900,
     ),

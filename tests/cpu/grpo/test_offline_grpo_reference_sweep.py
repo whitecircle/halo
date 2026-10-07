@@ -3,7 +3,6 @@
 import datetime
 import math
 import os
-import time
 from types import SimpleNamespace
 
 import pytest
@@ -174,7 +173,9 @@ def test_collective_forward_failure_preserves_the_original_exception_and_trainin
     with pytest.raises(_ScoringFailure, match="injected reference forward OOM"):
         trainer._sweep_reference_logps(dataset, "training")
     assert trainer.model.training
-    assert not list((tmp_path / "_reference_cache").glob("*"))
+    # The launch's lock stays held beside its scratch for the run; no score file may.
+    scratch = (tmp_path / "_reference_cache").rglob("*")
+    assert not [path for path in scratch if path.is_file() and path.suffix != ".lock"]
 
 
 def test_reference_sweep_logs_progress_before_the_first_update(tmp_path, caplog):
@@ -207,12 +208,11 @@ def test_cleanup_failure_does_not_mask_the_collective_forward_exception(tmp_path
 
 
 def _ranked_forward_failure(rank, root):
+    """Rank 0's reference forward fails before its collective; rank 1's forward waits in that collective."""
     trainer = _failure_trainer(root)
 
     def fail_or_collect(batch):
         if rank == 0:
-            with open(os.path.join(root, "forward-start.txt"), "w") as output:
-                output.write(str(time.monotonic()))
             raise _ScoringFailure("injected reference forward OOM")
         value = torch.ones(1)
         dist.all_reduce(value)
@@ -220,17 +220,48 @@ def _ranked_forward_failure(rank, root):
 
     trainer._score_reference_batch = fail_or_collect
     dataset = Dataset.from_dict({"row_id": [0], "completion_input_ids": [[1]]})
-    trainer._sweep_reference_logps(dataset, "training")
+    try:
+        trainer._sweep_reference_logps(dataset, "training")
+        outcome = "NO RAISE"
+    except Exception as error:
+        outcome = f"{type(error).__name__}: {error}"
+    with open(os.path.join(root, f"forward_failure_{rank}.txt"), "w") as output:
+        output.write(outcome)
 
 
 def test_a_rank_failing_before_forward_collectives_stops_peers_without_the_pg_timeout(tmp_path):
-    # Gloo can surface the disconnected peer first; the single-rank test above pins the
-    # originating exception, while this real collective test pins prompt process exit.
-    with pytest.raises(torch.multiprocessing.ProcessRaisedException):
-        run_gloo_ranks(_ranked_forward_failure, 2, str(tmp_path), pg_timeout=datetime.timedelta(seconds=30))
-    # Ignore spawned interpreter/import startup: the bound begins at the injected forward fault.
-    started = float((tmp_path / "forward-start.txt").read_text())
-    assert time.monotonic() - started < 15, "a swallowed forward failure waited for the 30-second watchdog"
+    """The failing rank raises its own forward error at once, entering no consensus collective first, so
+    its exit (not the 30-second watchdog) is what releases the peer waiting in the forward's collective."""
+    run_gloo_ranks(_ranked_forward_failure, 2, str(tmp_path), pg_timeout=datetime.timedelta(seconds=30))
+    failed, peer = ((tmp_path / f"forward_failure_{rank}.txt").read_text() for rank in range(2))
+    assert failed == "_ScoringFailure: injected reference forward OOM", failed
+    # A closed connection, not the gloo watchdog's "Timed out waiting ... ms".
+    assert peer.startswith("RuntimeError: ") and "timed out" not in peer.lower(), peer
+
+
+def _empty_replica_sweep(rank: int, root: str) -> None:
+    """One replica of the sweep over a one-row split: rank 0's shard is empty, rank 1's holds the row."""
+    trainer = _failure_trainer(os.path.join(root, f"rank-{rank}"))
+    trainer.dp_shard_geometry = lambda: (2, rank)
+    dataset = Dataset.from_dict({"row_id": [0], "completion_input_ids": [[1]]})
+    try:
+        trainer._sweep_reference_logps(dataset, "training")
+        result = "NO RAISE"
+    except Exception as error:
+        result = f"{type(error).__name__}: {error}"
+    with open(os.path.join(root, f"result_{rank}.txt"), "w") as output:
+        output.write(result)
+
+
+def test_a_replica_with_no_rows_refuses_the_sweep_on_every_rank(tmp_path):
+    """Rank 0 has nothing to score while rank 1 heads into the batch-count all-reduce; a raise on rank 0
+    alone parks rank 1 there until the group timeout."""
+    run_gloo_ranks(_empty_replica_sweep, 2, str(tmp_path), pg_timeout=datetime.timedelta(seconds=90))
+    for rank in range(2):
+        path = tmp_path / f"result_{rank}.txt"
+        result = path.read_text() if path.exists() else "NO RESULT (the rank never returned)"
+        assert result.startswith("ValueError:"), f"rank {rank}: {result}"
+        assert "rank 0 no rows to score the KL reference" in result, f"rank {rank}: {result}"
 
 
 if __name__ == "__main__":

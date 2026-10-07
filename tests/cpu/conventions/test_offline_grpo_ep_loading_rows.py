@@ -1,30 +1,23 @@
-"""The EP+CP GRPO tier runs both checkpoint-loader implementations."""
+"""Each offline-GRPO EP tier runs both checkpoint-loader implementations, one manifest row each."""
 
 import shlex
 
 import pytest
 
-from tests.gpu.manifest import MANIFEST
-from tests.gpu.trainers.grpo.test_offline_grpo_ep_cp import ep_cp_parser
+from tests.common.offline_grpo import EP_LOADINGS, ep_loading_parser
+from tests.common.utils import imports_name
+from tests.gpu.manifest import MANIFEST, script_path
+
+EP_SUITES = ("trainers/grpo/test_offline_grpo_ep_cp.py", "trainers/grpo/test_offline_grpo_ep_reference.py")
 
 
-def test_ep_cp_manifest_runs_lazy_and_eager_loaders():
-    spec = MANIFEST["trainers/grpo/test_offline_grpo_ep_cp.py"]
-    rows = [ep_cp_parser().parse_args(shlex.split(row)).ep_loading for row in spec.args_matrix]
-    assert sorted(rows) == ["eager", "lazy"]
+@pytest.mark.parametrize("suite", EP_SUITES)
+def test_ep_manifest_rows_run_lazy_and_eager_loaders(suite):
+    spec = MANIFEST[suite]
+    assert imports_name(script_path(suite), ep_loading_parser.__name__), f"{suite} must read the shared flag"
+    rows = [ep_loading_parser().parse_args(shlex.split(row)).ep_loading for row in spec.args_matrix]
+    assert sorted(rows) == sorted(EP_LOADINGS)
     assert spec.nproc == 8
-
-
-@pytest.mark.parametrize("loading", ["eager", "lazy"])
-def test_explicit_ep_loader_row_overrides_environment_default(monkeypatch, loading):
-    monkeypatch.setenv("HALO_TEST_OFFLINE_GRPO_EP_LAZY", "1" if loading == "eager" else "0")
-    assert ep_cp_parser().parse_args(["--ep-loading", loading]).ep_loading == loading
-
-
-@pytest.mark.parametrize("enabled,loading", [("0", "eager"), ("1", "lazy")])
-def test_ep_loader_default_follows_environment(monkeypatch, enabled, loading):
-    monkeypatch.setenv("HALO_TEST_OFFLINE_GRPO_EP_LAZY", enabled)
-    assert ep_cp_parser().parse_args([]).ep_loading == loading
 
 
 if __name__ == "__main__":

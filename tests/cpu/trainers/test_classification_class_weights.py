@@ -111,7 +111,9 @@ def test_build_loss_fn_uses_global_counts():
         patch(f"{_MODULE}.dist", _FakeDist([RANK1_LABELS])),
         patch(f"{_MODULE}.current_device", return_value=torch.device("cpu")),
     ):
-        loss_fn = trainer._build_loss_fn(args, {"labels": RANK0_LABELS})
+        loss_fn = trainer._build_loss_fn(
+            args, {"labels": RANK0_LABELS}, SimpleNamespace(config=SimpleNamespace(num_labels=3))
+        )
 
     assert isinstance(loss_fn, nn.CrossEntropyLoss)
     assert torch.allclose(loss_fn.weight, GLOBAL_WEIGHTS, atol=1e-6), loss_fn.weight
@@ -159,7 +161,7 @@ def test_empty_labels_raise():
 
 
 def test_resolves_singular_label_column_from_script_dataset():
-    """The classification script's preprocess_function emits a ``label`` column (singular), while the
+    """The classification script's ``tokenize_classification_row`` emits a ``label`` column (singular), while the
     trainer's own _tokenize fallback emits ``labels`` — derive_class_weights must accept either.
 
     Hardcoding ``train_dataset["labels"]`` raises ``Column 'labels' doesn't exist`` at trainer

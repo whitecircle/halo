@@ -8,7 +8,9 @@ primitives share the ``(test_input, expected, actual) -> bool`` signature.
 """
 
 import logging
+import textwrap
 import time
+import warnings
 from collections import Counter
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
@@ -25,6 +27,7 @@ from src.environments.sandbox.base import (
     signal_description,
     stderr_head,
     stderr_tail,
+    utf8_encodable,
 )
 from src.environments.sandbox.resolve import resolve_sandbox
 
@@ -86,11 +89,6 @@ class _Failure:
         return f"Tests {named}{f' and {rest} more' if rest > 0 else ''}: {self.body}"
 
 
-def _tokenize(text: str) -> list[str]:
-    """Split into whitespace-separated tokens (handles ``\\r\\n``, trailing spaces, blank lines)."""
-    return text.split()
-
-
 def _tokens_equal(expected: str, actual: str) -> bool:
     """Compare one output token, tolerant of float rounding.
 
@@ -109,8 +107,9 @@ def _tokens_equal(expected: str, actual: str) -> bool:
 
 
 def compare_tokens(expected: str, actual: str) -> bool:
-    """Codeforces token comparison: same sequence of whitespace tokens (case-sensitive, float-tolerant)."""
-    et, at = _tokenize(expected), _tokenize(actual)
+    """Codeforces token comparison: same sequence of whitespace tokens (case-sensitive, float-tolerant), so
+    line endings, trailing spaces and blank lines do not count."""
+    et, at = expected.split(), actual.split()
     if len(et) != len(at):
         return False
     return all(_tokens_equal(e, a) for e, a in zip(et, at, strict=False))
@@ -126,8 +125,36 @@ def exact_output_match(expected: str, actual: str) -> bool:
     sides (legacy CodeContests), reading ``\r\n`` and ``\r`` as ``\n``: a judge compares lines, not
     line endings, so neither a CRLF test file nor a program ending lines the Windows way flips the
     verdict, whichever backend captured the output. Distinct from
-    :func:`src.rewards.matching.exact_match`, which normalizes a free-text answer."""
+    :func:`src.rewards.graders.matching.exact_match`, which normalizes a free-text answer."""
     return _lf_lines(expected) == _lf_lines(actual)
+
+
+def python_syntax_error(code: str) -> str | None:
+    """The interpreter's error line for ``code`` that does not compile as a Python program
+    (``SyntaxError: invalid syntax (line 3)``), else ``None``. The interpreter compiles the whole source
+    before running any of it, so the program fails on it before reading input, and the line quotes the
+    source alone. Compiled from the bytes every backend stages (:func:`utf8_encodable`), so an encoding
+    declaration or a byte-order mark reads as in a run; a compile the host cannot finish (nesting past its
+    recursion limit) is left to the sandbox."""
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", SyntaxWarning)
+        try:
+            compile(utf8_encodable(code).encode("utf-8"), "main.py", "exec")
+        except SyntaxError as exc:  # null bytes included, which name no line
+            return f"{type(exc).__name__}: {exc.msg}" + (f" (line {exc.lineno})" if exc.lineno else "")
+        except (RecursionError, MemoryError):
+            return None
+    return None
+
+
+def host_build_error(code: str, language: str, sandbox: SandboxExecutor) -> str | None:
+    """The error a ``language`` program fails to build with, where the host can tell before any run:
+    Python source that does not compile (:func:`python_syntax_error`), on a backend running this
+    process's interpreter (one stating its Python toolchain); ``None`` otherwise, the sandbox's to say."""
+    resolved = resolve_language(language)
+    if resolved is None or resolved.name != "python" or sandbox.toolchain(resolved.name) is None:
+        return None
+    return python_syntax_error(code)
 
 
 def as_verdict(comparator: Callable[[str, str], bool]) -> VerdictFn:
@@ -289,7 +316,10 @@ def run_solution_against_tests(
     runtime error's signal or exit status, an output-limit overrun's size and cap, the tail of stderr,
     where a traceback names the exception, and an infra error's text (``full``). A compile error shows the compiler's
     first error under ``full``, and under ``outcome`` only where the backend builds apart from every
-    test's stdin (``compiles_without_test_input``). An infra error's text always reaches the log.
+    test's stdin (``compiles_without_test_input``). A Python source that does not compile, on a backend
+    running this process's interpreter, is graded as a compile error without a run, its
+    :func:`python_syntax_error` line shown under both (:func:`host_build_error`). An infra error's text
+    always reaches the log.
 
     ``max_grading_seconds`` bounds one grade's total wall clock, since tests run sequentially and a
     several-hundred-test problem would otherwise stall the whole rollout round. It is checked between
@@ -340,6 +370,9 @@ def run_solution_against_tests(
         infra_texts[error] += 1
         add_detail(i, f"ERROR -- {error}" if full else _INFRA_VERDICT)
 
+    # Built here, before any test's stdin reaches the program, so its error line can show under ``outcome``.
+    build_error = host_build_error(code, language, sandbox)
+    host_build_failure = SandboxResult(stderr=build_error, compile_failed=True) if build_error else None
     with _grading_runner(sandbox, code, language=language, timeout=timeout_per_test) as run_test:
         for i, tc in enumerate(test_cases, 1):
             if deadline is not None and graded and time.monotonic() >= deadline:
@@ -349,15 +382,15 @@ def run_solution_against_tests(
             test_input = tc.get("input") or ""
             expected_output = tc.get("output", "")
 
-            result = run_test(test_input)
+            result = host_build_failure or run_test(test_input)
 
             if result.compile_failed:
                 # The source never built, so every test fails the same way: judged once, the whole
                 # pool counted, with the compiler's diagnostics as the verdict. The compiler names the
                 # first error first, so the head is the excerpt.
                 line = "COMPILATION ERROR (every test fails)"
-                if result.stderr and (full or sandbox.compiles_without_test_input):
-                    line += f"\n  {stderr_head(result.stderr, _STDERR_EXCERPT_CHARS)}"
+                if result.stderr and (full or host_build_failure is not None or sandbox.compiles_without_test_input):
+                    line += "\n" + textwrap.indent(stderr_head(result.stderr, _STDERR_EXCERPT_CHARS), "  ")
                 notes.append(line)
                 graded = total
                 break
@@ -425,9 +458,12 @@ def run_solution_against_tests(
     summary = f"Passed {passed}/{total} test cases."
     if budget_hit:
         # The graded prefix is reported for diagnosis, not for credit: the full pool stays the
-        # scoring denominator.
-        summary += f" (graded the first {graded} of {total}; {max_grading_seconds:g}s grading budget reached)"
-    return GradeResult(passed, total, summary + "\n" + "\n".join(details), ran_ok, graded, infra_errors, budget_hit)
+        # scoring denominator, so an ungraded test is never passed.
+        summary += (
+            f" (the {max_grading_seconds:g} s total grading time ran out after {graded} of {total} tests, so this "
+            "submission is not accepted; a program fast enough to finish every test within it is graded in full)"
+        )
+    return GradeResult(passed, total, "\n".join([summary, *details]), ran_ok, graded, infra_errors, budget_hit)
 
 
 def select_verdict(checker: str | None, comparison: str, sandbox: SandboxExecutor) -> VerdictFn:

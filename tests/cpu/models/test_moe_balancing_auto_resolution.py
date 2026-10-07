@@ -66,7 +66,7 @@ def _resolve(model):
 
 
 def test_auto_never_resolves_to_the_mode_this_tree_refuses():
-    """The bug: ``auto`` picked ``aux_loss``, which the strategy then raises on.
+    """``auto`` must never pick ``aux_loss`` where the strategy then raises on it.
 
     Pinned as the invariant rather than the string: whatever ``auto`` returns must survive
     ``apply_balancing_strategy``, the same call ``build_perf_callbacks`` makes.
@@ -125,7 +125,7 @@ def test_a_fused_loss_bound_on_the_instance_alone_is_seen():
 
 
 def test_auto_still_picks_aux_loss_where_the_forward_honours_the_flag():
-    """Anti-over-rejection: the fix must not disarm balancing for the families that do honour it."""
+    """Anti-over-rejection: the resolution must not disarm balancing for the families that do honour it."""
     model = _HonorsRouterLogitFlag()
     assert _resolve(model) == "aux_loss"
     apply_balancing_strategy(model, "aux_loss", is_moe=True)

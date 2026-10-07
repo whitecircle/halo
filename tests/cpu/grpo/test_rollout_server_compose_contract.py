@@ -125,8 +125,7 @@ def test_every_server_and_trainer_service_passes_nccl_proto_through_bare():
 def test_the_compose_command_carries_no_yaml_comment_lines():
     """A ``#`` inside a folded block scalar is text, not a comment — it becomes an argv entry.
 
-    Adding the token-ids flag with an explanatory comment inline did exactly this, and compose
-    rejected the service with 'invalid command line string'.
+    Compose then rejects the service with 'invalid command line string'.
     """
     for path, service in ((VLLM_COMPOSE, "vllm-server"), (SGLANG_COMPOSE, "sglang-server")):
         command = _server_command(path, service)

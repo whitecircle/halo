@@ -21,11 +21,10 @@ from unittest.mock import patch
 
 import torch
 import torch.distributed as dist
-from transformers import AutoConfig, AutoModelForCausalLM, AutoTokenizer
+from transformers import AutoTokenizer
 
 from src.configs.offline_grpo_config import OfflineGRPOConfig
 from src.distributed.parallelism_config import ParallelismConfig
-from src.kernels.liger.orchestrator import apply_liger_kernel
 from src.trainers.grpo.offline import OfflineGRPOTrainer
 from tests.common.checkpoint_io import (
     TP_RESUME_PROBE_TEXT,
@@ -39,6 +38,7 @@ from tests.common.datasets import create_offline_grpo_dataset
 from tests.common.distributed import shared_output_dir
 from tests.common.harness import gpu_test_main
 from tests.common.models import QWEN3_0_6B
+from tests.common.offline_grpo import load_liger_class_patched_model
 from tests.common.tolerances import TOL
 from tests.common.utils import cleanup_memory, log, resumed_loss_deltas, step_losses
 
@@ -58,19 +58,6 @@ PARITY_MEAN_TOL = 5e-2
 PARITY_MAX_TOL = 0.5
 
 
-def _load_model(model_path, *, attn_implementation="flash_attention_4"):
-    config = AutoConfig.from_pretrained(model_path, trust_remote_code=True)
-    # A late instance patch misses Qwen3's q/k norms, while later loads use the patched classes.
-    apply_liger_kernel(config, liger_kernel_config={"cross_entropy": False, "fused_linear_cross_entropy": False})
-    return AutoModelForCausalLM.from_pretrained(
-        model_path,
-        config=config,
-        dtype=torch.bfloat16,
-        trust_remote_code=True,
-        attn_implementation=attn_implementation,
-    )
-
-
 class _SavedWeights(RestorePointSnapshot):
     def extra(self):
         ids, labels = fixed_text_batch(
@@ -81,7 +68,7 @@ class _SavedWeights(RestorePointSnapshot):
         # The checkpoint oracle separates a stale live forward from an incorrect resume without
         # replacing the live loss that the resume comparison must still match.
         with torch.random.fork_rng(devices=[torch.cuda.current_device()]):
-            oracle = _load_model(checkpoint).to(ids.device)
+            oracle = load_liger_class_patched_model(checkpoint).to(ids.device)
             try:
                 checkpoint_loss = fixed_batch_loss(oracle, ids, labels)
             finally:
@@ -127,7 +114,7 @@ def run(ctx) -> dict:
 
     train_dataset = create_offline_grpo_dataset(tokenizer, NUM_TRAIN_SAMPLES, seed=SEED)
 
-    model = _load_model(MODEL_NAME)
+    model = load_liger_class_patched_model(MODEL_NAME)
 
     config = OfflineGRPOConfig(
         output_dir=output_dir,
@@ -184,15 +171,15 @@ def run(ctx) -> dict:
 
     checks = {"logprob_parity": parity_ok, "losses_finite": losses_finite}
     checkpoint = os.path.join(output_dir, f"checkpoint-{SAVE_STEP}")
-    checkpoint_loss = saved.captured["loss"]
+    live_loss_at_save = saved.captured["loss"]
     checks["save_probe_matches_plain_checkpoint"] = (
-        math.isfinite(checkpoint_loss)
-        and abs(checkpoint_loss - saved.captured["checkpoint_loss"]) < TOL.resume_fixed_batch_loss_abs
+        math.isfinite(live_loss_at_save)
+        and abs(live_loss_at_save - saved.captured["checkpoint_loss"]) < TOL.resume_fixed_batch_loss_abs
     )
     del trainer, model, saved
     cleanup_memory()
     dist.barrier()
-    model = _load_model(checkpoint)
+    model = load_liger_class_patched_model(checkpoint)
     with patch.object(OfflineGRPOTrainer, "_sweep_reference_logps", side_effect=AssertionError("resume re-swept")):
         resumed = OfflineGRPOTrainer(
             model=model,
@@ -212,7 +199,7 @@ def run(ctx) -> dict:
     result = resumed.train(resume_from_checkpoint=checkpoint)
     checks.update(
         resume_continuity_checks(
-            capture.capture, checkpoint_loss, save_step=SAVE_STEP, loss_tol=TOL.resume_fixed_batch_loss_abs
+            capture.capture, live_loss_at_save, save_step=SAVE_STEP, loss_tol=TOL.resume_fixed_batch_loss_abs
         )
     )
     deltas = resumed_loss_deltas(losses, step_losses(resumed), save_step=SAVE_STEP, total_steps=MAX_STEPS)
@@ -224,7 +211,7 @@ def run(ctx) -> dict:
     del resumed, model
     cleanup_memory()
     dist.barrier()
-    reloaded = _load_model(export).to(ctx.device)
+    reloaded = load_liger_class_patched_model(export).to(ctx.device)
     checks["export_reload_matches"] = (
         abs(fixed_batch_loss(reloaded, ids, labels) - trained_loss) < TOL.resume_fixed_batch_loss_abs
     )

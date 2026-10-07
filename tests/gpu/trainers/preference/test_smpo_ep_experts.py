@@ -122,7 +122,7 @@ def run(ctx) -> dict:
     )
     checks["adapters_moved"] = b_moved
 
-    # trainer.save_model adapter-only write (save_ep_checkpoint Case B)
+    # trainer.save_model adapter-only write (save_ep_checkpoint → save_ep_lora_adapters)
     save_dir = os.path.join(ctx.output_dir, "adapter")
     trainer.save_model(save_dir)
     ctx.barrier()

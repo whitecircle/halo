@@ -11,10 +11,11 @@ entered.
 
 The guarantee is structural, not a guard: ``EPConfig.defer_grad_sync`` covers EVERY multi-EP-group
 topology (not just the cross-node ``is_deferred_dp`` one), routing the sum through the trainer's
-post-backward sweep, which walks ``named_parameters()`` and zero-fills missing grads so membership is
-rank-uniform. Grad-equivalence holds: a zero grad contributes nothing to the SUM, and the sweep's
-expert divisor is the same ``world_size // expert_tp_size`` a hook would use. ``create_expert_grad_hook``
-refuses to build a reducing hook at all, so a regression fails loudly instead of hanging.
+post-backward sweep, which walks ``named_parameters()`` and agrees grad presence over its reduce group
+(zero-filling a grad only a peer holds) so membership is rank-uniform. Grad-equivalence holds: a zero
+grad contributes nothing to the SUM, and the sweep's expert divisor is the same
+``world_size // expert_tp_size`` a hook would use. ``create_expert_grad_hook`` refuses to build a
+reducing hook at all, so a regression fails loudly instead of hanging.
 
 The end-to-end proof is a GPU test: an 8-GPU ``ep_size=2`` run (4 EP groups, one NVLink domain — the
 shape an ``is_deferred_dp``-only rule leaves on the hook) with a batch small enough for a rank to be

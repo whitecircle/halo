@@ -20,6 +20,7 @@ from transformers import (
 )
 
 from src.distributed.context_parallel.wrapper import UlyssesCPModelWrapper
+from src.distributed.mesh import has_tp_dim
 from src.distributed.pipeline_parallel.stage import PipelineStageModule
 from src.distributed.runtime import barrier, get_global_rank, get_global_world_size, is_global_main_process
 from src.models.structure import unwrap_framework_wrappers
@@ -61,13 +62,7 @@ def _has_tp_dtensor_params(model) -> bool:
     attention-only TP alike. ``_tp_plan`` is populated on every load, TP or not, so it is not a
     usable signal.
     """
-    for param in model.parameters():
-        if isinstance(param.data, DTensor):
-            mesh = param.data.device_mesh
-            dim_names = getattr(mesh, "mesh_dim_names", None) or ()
-            if "tp" in dim_names:
-                return True
-    return False
+    return any(isinstance(param.data, DTensor) and has_tp_dim(param.data.device_mesh) for param in model.parameters())
 
 
 def _has_any_dtensor_params(model) -> bool:

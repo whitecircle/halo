@@ -3,7 +3,7 @@
 
 Uses local tiny Qwen3-MoE weights and a full-logits EP8 oracle, without context parallelism.
 Run: torchrun --nproc_per_node=8 tests/gpu/trainers/grpo/test_offline_grpo_ep_reference.py
-Set HALO_TEST_OFFLINE_GRPO_EP_LAZY=0 to exercise eager checkpoint loading.
+Use --ep-loading lazy or --ep-loading eager to select checkpoint loading.
 """
 
 import math
@@ -12,23 +12,30 @@ from unittest.mock import patch
 
 import torch
 import torch.distributed as dist
-from safetensors.torch import load_file
 from torch.distributed.tensor import DTensor
-from transformers import AutoModelForCausalLM
 
 from src.checkpoint.format import REFERENCE_LOGPS_FILE
-from src.configs.offline_grpo_config import OfflineGRPOConfig
 from src.data.collators.offline_grpo import REF_PER_TOKEN_LOGPS_COLUMN
 from src.distributed.fsdp import reshard_fsdp2_modules
-from src.distributed.loading.model_loading import load_distributed_model
 from src.distributed.parallelism_config import ParallelismConfig
-from src.env import env_flag
 from src.optimizers.adamw_bf16 import AdamWBF16
 from src.trainers.grpo.offline import OfflineGRPOTrainer
 from tests.common.checkpoint_io import RestorePointSnapshot
-from tests.common.distributed import pin_deterministic_ep_dispatch
+from tests.common.distributed import pin_deterministic_ep_dispatch, shared_output_dir
 from tests.common.harness import gpu_test_main
-from tests.common.offline_grpo import make_offline_tokenizer, offline_grpo_dataset, save_offline_moe_base
+from tests.common.offline_grpo import (
+    build_offline_grpo_trainer,
+    doubled_head_kl_verdict,
+    ep_loading_parser,
+    full_logits_kl,
+    offline_grpo_config,
+    offline_grpo_dataset,
+    pure_kl_batch,
+    reference_oracle_rows,
+    resumed_export_verdict,
+    save_offline_moe_base,
+    swept_reference_error,
+)
 from tests.common.tolerances import TOL
 from tests.common.utils import (
     cleanup_memory,
@@ -56,137 +63,46 @@ class _SavedState(RestorePointSnapshot):
         }
 
 
-def _build(source, output, train, evaluation=None, *, checkpoint=None, beta=BETA):
-    parallelism = ParallelismConfig(
-        ep_size=8, ep_fp32_router=True, ep_lazy_loading=env_flag("HALO_TEST_OFFLINE_GRPO_EP_LAZY", True)
-    )
-    model, _ = load_distributed_model(
-        model_name_or_path=source,
-        parallelism_config=parallelism,
-        dtype=torch.bfloat16,
-        trust_remote_code=False,
-        attn_implementation="flash_attention_2",
-        use_liger_kernel=False,
-        preserve_checkpoint_precision=checkpoint is not None,
-    )
-    args = OfflineGRPOConfig(
-        output_dir=output,
-        max_steps=STEPS,
-        per_device_train_batch_size=2,
-        per_device_eval_batch_size=2,
-        learning_rate=1e-3,
-        bf16=True,
-        gradient_checkpointing=True,
-        use_liger_kernel=False,
-        kl_beta=beta,
-        use_chunked_grpo_logprobs=True,
-        loss_type="grpo",
-        policy_gradient_formulation="reinforce",
-        min_log_prob=None,
-        max_grad_norm=0.0,
-        logging_steps=1,
-        eval_strategy="steps" if evaluation is not None else "no",
-        eval_steps=1,
-        save_strategy="steps" if evaluation is not None else "no",
+def _build(ctx, source, output, train, evaluation=None, *, ep_loading, checkpoint=None, beta=BETA):
+    parallelism = ParallelismConfig(ep_size=8, ep_fp32_router=True, ep_lazy_loading=ep_loading == "lazy")
+    args = offline_grpo_config(
+        output,
+        steps=STEPS,
         save_steps=SAVE_STEP,
-        save_total_limit=STEPS,
-        report_to="none",
-        max_prompt_length=32,
-        max_completion_length=32,
-        remove_unused_columns=False,
-        dataloader_drop_last=True,
-        dataloader_num_workers=0,
         seed=SEED,
-        data_seed=SEED,
-        fsdp="",
+        kl_beta=beta,
+        evaluate=evaluation is not None,
+        save=evaluation is not None,
     )
-    return OfflineGRPOTrainer(
-        model=model,
-        args=args,
-        train_dataset=train,
-        eval_dataset=evaluation,
-        processing_class=make_offline_tokenizer(),
-        parallelism_config=parallelism,
-        resume_checkpoint=checkpoint,
-        moe_balancing="none",
-    )
-
-
-def _full_logps(model, batch):
-    ids = torch.cat([batch["prompt_input_ids"], batch["completion_input_ids"]], dim=1)
-    attention = torch.cat([batch["prompt_attention_mask"], batch["completion_attention_mask"]], dim=1)
-    logits = model(input_ids=ids, attention_mask=attention, use_cache=False).logits[:, :-1].float()
-    width = batch["completion_input_ids"].size(1)
-    return logits.log_softmax(-1).gather(-1, ids[:, 1:].unsqueeze(-1)).squeeze(-1)[:, -width:]
-
-
-def _reference_oracle(source, output, train):
-    oracle = _build(source, output, train, beta=0.0)
-    batch = oracle._prepare_inputs(oracle.data_collator(list(oracle.train_dataset)))
-    oracle.model.eval()
-    with torch.no_grad():
-        logps = _full_logps(oracle.model, batch)
-    rows = [
-        row[: int(mask.sum())].detach().cpu().clone()
-        for row, mask in zip(logps, batch["completion_attention_mask"], strict=True)
-    ]
-    finish_phase(oracle)
-    del oracle
-    cleanup_memory()
-    return rows
-
-
-def _kl_oracle(trainer, checks):
-    batch = trainer._prepare_inputs(trainer.data_collator([trainer.train_dataset[index] for index in range(2)]))
-    batch["advantage"].zero_()
-    reshard_fsdp2_modules(trainer.model)
-    original = trainer.model.get_output_embeddings().weight.detach().clone()
-    was_training = trainer.model.training
-    trainer.model.eval()
-    try:
-        with torch.no_grad():
-            trainer.model.get_output_embeddings().weight.mul_(2)
-            policy = _full_logps(trainer.model, batch)
-            delta = batch[REF_PER_TOKEN_LOGPS_COLUMN] - policy
-            mask = batch["completion_attention_mask"]
-            weights = batch["group_size"].float().reciprocal()
-            expected = BETA * (((delta.exp() - delta - 1) * mask).sum(1) / mask.sum(1) * weights).sum() / weights.sum()
-            actual = trainer.compute_loss(trainer.model, batch)
-    finally:
-        reshard_fsdp2_modules(trainer.model)
-        with torch.no_grad():
-            trainer.model.get_output_embeddings().weight.copy_(original)
-        trainer.model.train(was_training)
-    error = abs((actual - expected).item())
-    checks["independent_kl_oracle_is_nonzero"] = bool(expected > 0)
-    checks["kl_matches_independent_full_logits"] = error < TOL.exact_objective_rel * expected.item()
-    log(f"EP8 non-CP pure KL: expected={expected.item():.5g}, error={error:.5g}")
+    return build_offline_grpo_trainer(ctx, source, parallelism, args, train, evaluation, checkpoint=checkpoint)
 
 
 def run(ctx):
+    ep_loading = ep_loading_parser().parse_args().ep_loading
     pin_deterministic_ep_dispatch()
-    paths = [ctx.output_dir]
-    dist.broadcast_object_list(paths, src=0)
-    shared = paths[0]
+    shared = shared_output_dir(ctx)
     base, output = os.path.join(shared, "base"), os.path.join(shared, "train")
     if ctx.rank == 0:
         save_offline_moe_base(base, SEED)
     dist.barrier()
     train, evaluation = offline_grpo_dataset(16), offline_grpo_dataset(8, 3)
-    expected = _reference_oracle(base, os.path.join(shared, "oracle"), train)
-    trainer = _build(base, output, train, evaluation)
+    expected = reference_oracle_rows(
+        _build(ctx, base, os.path.join(shared, "oracle"), train, ep_loading=ep_loading, beta=0.0)
+    )
+    trainer = _build(ctx, base, output, train, evaluation, ep_loading=ep_loading)
     checks = {
         "noncp_full_ft_without_live_reference": not trainer.parallelism_config.is_cp_mode and trainer.ref_model is None
     }
     references = trainer._reference_storage_by_split
     initial_train = references["training"].values.clone()
     initial_eval = references["evaluation"].values.clone()
-    errors = [
-        (torch.as_tensor(actual) - reference).abs().max().item()
-        for actual, reference in zip(trainer.train_dataset[REF_PER_TOKEN_LOGPS_COLUMN], expected, strict=True)
-    ]
-    checks["swept_reference_matches_full_logits"] = bool(errors) and max(errors) < TOL.logprob_atol
-    _kl_oracle(trainer, checks)
+    checks["swept_reference_matches_full_logits"] = (
+        swept_reference_error(trainer.train_dataset[REF_PER_TOKEN_LOGPS_COLUMN], expected) < TOL.logprob_atol
+    )
+    batch = pure_kl_batch(trainer)
+    checks["independent_kl_oracle_is_nonzero"], checks["kl_matches_independent_full_logits"] = doubled_head_kl_verdict(
+        trainer, batch, lambda model: full_logits_kl(model, batch, BETA), "EP8 non-CP pure KL"
+    )
     saved = _SavedState("save", trainer, capture_optimizer=True)
     trainer.add_callback(saved)
     result = trainer.train()
@@ -210,7 +126,7 @@ def run(ctx):
     cleanup_memory()
 
     with patch.object(OfflineGRPOTrainer, "_sweep_reference_logps", side_effect=AssertionError("reswept reference")):
-        resumed = _build(checkpoint, output, train, evaluation, checkpoint=checkpoint)
+        resumed = _build(ctx, checkpoint, output, train, evaluation, ep_loading=ep_loading, checkpoint=checkpoint)
     reshard_fsdp2_modules(resumed.model)
     masters = captured.get("masters", {})
     current = dict(resumed.model.named_parameters())
@@ -245,20 +161,11 @@ def run(ctx):
     resumed.save_model(export)
     dist.barrier()
     if ctx.rank == 0:
-        before, after = (
-            load_file(os.path.join(continuous, "model.safetensors")),
-            load_file(os.path.join(export, "model.safetensors")),
-        )
-        previous = load_file(os.path.join(checkpoint, "model.safetensors"))
-        checks["resumed_export_bit_exact"] = before.keys() == after.keys() and all(
-            torch.equal(before[name], after[name]) for name in before
-        )
-        checks["resumed_step_updates_weights"] = previous.keys() == after.keys() and any(
-            not torch.equal(previous[name], after[name]) for name in previous
-        )
-        served = AutoModelForCausalLM.from_pretrained(export, dtype=torch.bfloat16, attn_implementation="eager")
-        checks["hf_export_loads_and_scores"] = bool(served(torch.tensor([[3, 8, 4, 5, 1]])).logits.isfinite().all())
-        del served
+        (
+            checks["resumed_export_bit_exact"],
+            checks["resumed_step_updates_weights"],
+            checks["hf_export_loads_and_scores"],
+        ) = resumed_export_verdict(continuous, export, checkpoint, ctx.device)
     metrics = ctx.metrics(resumed)
     finish_phase(resumed)
     restored.trainer = None

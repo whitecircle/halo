@@ -1,5 +1,7 @@
 """Sharded dataset loader: each rank loads only its assigned shards (Megatron-LM style)."""
 
+import hashlib
+import json
 import logging
 import os
 
@@ -14,7 +16,7 @@ from src.data.sources.dataset_cache import (
     s3_cache_key,
 )
 from src.data.sources.paths import parse_dataset_source
-from src.data.sources.s3_client import S3Client, has_control_json_mirror, read_control_json_with_cache
+from src.data.sources.s3_client import S3Client, read_control_json_with_cache
 
 logger = logging.getLogger(__name__)
 
@@ -39,8 +41,7 @@ class ShardedDatasetLoader:
         self.source_type, self.bucket, self.key = parse_dataset_source(dataset_path)
 
         self._shard_indices: dict[str, ShardIndex] = {}
-        self._datasets: dict[str, Dataset] = {}
-        # Latched only by an unreachable S3, so a fully cached offline run does not pay a connection
+        # Latched by an UNREACHABLE S3 only: a fully cached offline run must not pay a connection
         # timeout per shard. An empty listing is a real absence, not a transport fault.
         self._s3_fingerprint_unavailable = False
         # Built on first use: an S3Client opens boto3 sessions a local-source loader never needs.
@@ -66,17 +67,11 @@ class ShardedDatasetLoader:
         return ShardIndex.from_dict(data)
 
     def _load_shard_index_from_local(self, split: str) -> ShardIndex:
-        """Load shard index from local path."""
-        index_path = os.path.join(self.dataset_path, split, SHARD_INDEX_FILE)
-        if not os.path.exists(index_path):
-            raise FileNotFoundError(f"Shard index not found at {index_path}")
-        return ShardIndex.load(index_path)
+        """Load shard index from local path; ``FileNotFoundError`` when the split has none."""
+        return ShardIndex.load(os.path.join(self.dataset_path, split, SHARD_INDEX_FILE))
 
     def _compute_shard_assignment(self, num_shards: int) -> tuple[int, int]:
         """Shard range (start, end-exclusive) for this rank."""
-        if num_shards == 0:
-            return (0, 0)
-
         shards_per_rank = num_shards // self.world_size
         remainder = num_shards % self.world_size
 
@@ -99,14 +94,14 @@ class ShardedDatasetLoader:
         """Best-effort content identity (aggregate ETag fingerprint) of a shard prefix on S3.
 
         The dataset cache's own probe, so a shard and a whole-dataset download are validated by
-        identical fingerprints. ``None`` means the cache cannot be validated (S3 unreachable, or an
-        empty listing) and is served as-is; only an unreachable S3 stops the remaining probes.
+        byte-identical fingerprints. ``None`` means "cannot validate" (S3 unreachable, or an empty
+        listing) and serves the local cache as-is; only an unreachable S3 stops the remaining probes.
         """
         if self._s3_fingerprint_unavailable:
             return None
         try:
             # Client construction is inside the probe's guard: it resolves credentials and a region,
-            # so a warm-cache relaunch without either would otherwise fail here instead of serving.
+            # so a warm-cache relaunch without either would otherwise die here instead of serving.
             if self._s3_client is None:
                 self._s3_client = S3Client(bucket=self.bucket)
             return compute_etag_fingerprint(self._s3_client.content_entries(shard_key))
@@ -122,11 +117,11 @@ class ShardedDatasetLoader:
     def _load_shard_from_s3(self, shard: ShardInfo) -> Dataset:
         """Load a single shard from S3 with a local per-shard cache.
 
-        Keyed by md5(bucket/key/shard.path) under a FileLock plus completion marker: disjoint shards
+        Keyed by md5(bucket/key/shard.path) under a FileLock + completion marker: disjoint shards
         download in parallel, identical shards (TP/CP siblings, reruns) download once and are reused,
-        and a complete cache lets a relaunch survive an S3/SSO outage offline. A best-effort
-        staleness probe compares the marker's content fingerprint against live S3 (in-place
-        re-preprocessing to the same URI changes the ETags) and re-downloads on mismatch.
+        and a complete cache lets a relaunch survive an S3/SSO blip offline. A best-effort staleness
+        probe compares the marker's content fingerprint against live S3 (in-place re-preprocessing
+        to the same URI changes the ETags) and re-downloads on mismatch.
         """
         shard_key = f"{self.key.rstrip('/')}/{shard.path}"
         shard_uri = f"s3://{self.bucket}/{shard_key}"
@@ -148,8 +143,7 @@ class ShardedDatasetLoader:
                 f"or it was cached by a build that fingerprinted shards differently); re-downloading."
             ),
         )
-        # Memory-map rather than keep_in_memory: at scale a rank holds tens of shards, which would
-        # exhaust host RAM.
+        # Memory-map, NOT keep_in_memory: at scale a rank holds tens of shards and would blow host RAM.
         return load_from_disk(cache_path)
 
     def _load_shard_from_local(self, shard: ShardInfo) -> Dataset:
@@ -166,15 +160,15 @@ class ShardedDatasetLoader:
     def _refuse_unusable_split(self, split: str, message: str) -> None:
         """Raise for ``train``, warn for any other split.
 
-        A small eval split whose shards do not reach every rank is legitimate; a train split in the
-        same state zeroes the world through the length equalizer.
+        A tiny eval split whose shards do not reach every rank is legitimate; a train split that
+        does not is not — it silently zeroes the world through the length equalizer.
         """
         if split == "train":
             raise ValueError(message)
         logger.warning(message)
 
     def _starved_split(self, split: str, index: ShardIndex) -> Dataset:
-        """Empty split, carrying the split's schema, for a rank the shard assignment left with nothing.
+        """Empty split for a rank the shard assignment left with nothing — WITH the split's schema.
 
         A column-less ``Dataset.from_dict({})`` makes every downstream ``column_names`` test answer
         differently here than on its peers, and those tests gate coordinated operations. Reading the
@@ -191,11 +185,8 @@ class ShardedDatasetLoader:
 
     def load_split(self, split: str = "train") -> Dataset:
         """Load and concatenate this rank's assigned shards for the split."""
-        if split in self._datasets:
-            return self._datasets[split]
-
-        # Both verdicts are read off the index, which every rank loads itself, so a refusal here is
-        # reached on every rank and cannot skew a collective.
+        # Both verdicts are read off the index, which every rank loads itself — the same answer on
+        # every rank, so a refusal here cannot skew a collective.
         index = self._load_shard_index(split)
         if index.num_shards == 0 or not index.shards:
             self._refuse_unusable_split(
@@ -205,7 +196,7 @@ class ShardedDatasetLoader:
                 f"nothing to load. Re-preprocess the dataset with "
                 f"scripts/before_training/prepare_dataset.py.",
             )
-        # Fewer shards than ranks starves a rank, and the train length equalizer all_reduce(MIN)s to 0.
+        # Fewer shards than ranks starves a rank, and the train length-equalizer all_reduce(MIN)s to 0.
         elif index.num_shards < self.world_size:
             self._refuse_unusable_split(
                 split,
@@ -229,8 +220,6 @@ class ShardedDatasetLoader:
         shard_datasets = [self._load_shard(shard) for shard in assigned_shards]
 
         dataset = shard_datasets[0] if len(shard_datasets) == 1 else concatenate_datasets(shard_datasets)
-
-        self._datasets[split] = dataset
         logger.info(f"Rank {self.global_rank} loaded {len(dataset)} examples for {split}")
 
         return dataset
@@ -265,8 +254,8 @@ class ShardedDatasetLoader:
 
         The S3 probe reads the index through the mirrored control-file read, so a warm run relaunched
         during an outage still classifies as sharded off the local mirror. A live 404 is False and
-        drops the mirror; any other failure without a mirror errs toward non-sharded with a warning.
-        This probe never raises: the caller reconciles across ranks, and a rank-local raise would
+        drops the mirror; a failure the mirror cannot serve errs toward "non-sharded" with a warning.
+        This probe must never raise: the caller reconciles across ranks, and a rank-local raise would
         skip that all-reduce and hang its peers.
         """
         source_type, bucket, key = parse_dataset_source(path)
@@ -278,13 +267,7 @@ class ShardedDatasetLoader:
                 return True
             except FileNotFoundError:
                 return False
-            except Exception as e:  # a transient creds/403/throttle must not kill one rank of a job
-                if has_control_json_mirror(bucket, index_key):
-                    logger.warning(
-                        f"S3 unreachable for sharded-dataset probe of s3://{bucket}/{index_key} "
-                        f"({type(e).__name__}: {e}); the local control-file mirror says sharded."
-                    )
-                    return True
+            except Exception as e:  # transient creds/403/throttle must not kill one rank of a job
                 logger.warning(
                     f"S3 sharded-dataset probe for s3://{bucket}/{index_key} failed ({type(e).__name__}: {e}); "
                     f"assuming non-sharded. Will attempt local cache fallback."
@@ -296,6 +279,13 @@ class ShardedDatasetLoader:
             return os.path.exists(index_path)
 
         return False
+
+    def shard_index_digests(self) -> dict[str, str]:
+        """Content digest of every shard index this loader read, by split — what all ranks must share."""
+        return {
+            split: hashlib.md5(json.dumps(index.to_dict(), sort_keys=True).encode()).hexdigest()
+            for split, index in sorted(self._shard_indices.items())
+        }
 
     def get_total_examples(self, split: str = "train") -> int:
         """Total examples in a split across all ranks."""

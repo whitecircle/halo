@@ -20,7 +20,7 @@ from unittest import mock
 import pytest
 
 import src.environments.envs.tasks.coding.grading as grading_module
-from src.environments.base import EPISODE_INVALID_REASON_KEY, OBJECTIVE_REWARD_KEY, REWARD_COMPONENTS_KEY
+from src.environments.base import EPISODE_INVALID_REASON_KEY, REWARD_COMPONENTS_KEY
 from src.environments.envs.tasks.coding.code_contests import CodeContestsEnvironment
 from src.environments.envs.tasks.coding.grading import (
     _MAX_FAILURE_DETAILS,
@@ -35,6 +35,7 @@ from src.environments.envs.tasks.coding.grading import (
     select_verdict,
 )
 from src.environments.sandbox.base import SANDBOX_DEFAULT_TIMEOUT, SandboxExecutor, SandboxResult
+from src.rewards.terms import OBJECTIVE_REWARD_KEY
 from tests.common.code_contests import StubSandbox
 
 
@@ -223,7 +224,10 @@ def test_max_grading_seconds_bounds_the_sequential_grading_cost():
     assert len(sandbox.calls) == 3
     assert grade.passed == 3
     assert grade.total == 50, "an ungraded test must not be scored as passed — that pays for slowness"
-    assert "first 3 of 50" in grade.details and "grading budget reached" in grade.details
+    assert grade.details.startswith(
+        "Passed 3/50 test cases. (the 25 s total grading time ran out after 3 of 50 tests, so this submission is "
+        "not accepted; a program fast enough to finish every test within it is graded in full)"
+    ), grade.details
 
     # At least one test always runs, even when a single run overshoots the whole budget.
     clock["t"] = 0.0
@@ -414,6 +418,72 @@ def test_an_outcome_verdict_carries_no_channel_the_program_controls(result, full
     assert "42" not in outcome.details and "5000" not in outcome.details, outcome.details
 
 
+class _HostPythonSandbox(_ScriptedSandbox):
+    """A scripted sandbox that states this process's Python, as the local backends do."""
+
+    def toolchain(self, language):
+        return "runs on CPython" if language == "python" else None
+
+
+def test_a_compile_errors_excerpt_is_indented_on_every_line():
+    """A compiler's diagnostics run over several lines (the source line, the caret): each sits under the
+    verdict, not only the first, so the excerpt reads as one block."""
+    diagnostics = "main.cpp:1:13: error: 'x' was not declared\n    1 | int main(){ x }\n      |             ^"
+    sandbox = StubSandbox(SandboxResult(stderr=diagnostics, returncode=1, compile_failed=True))
+    grade = run_solution_against_tests(
+        "int main(){ x }", [{"input": "", "output": "1"}], sandbox=sandbox, language="cpp", verdict_detail="full"
+    )
+    excerpt = grade.details.split("COMPILATION ERROR (every test fails)\n", 1)[1].splitlines()
+    assert excerpt == ["  " + line for line in diagnostics.splitlines()]
+
+
+@pytest.mark.parametrize("verdict_detail", ["outcome", "full"])
+def test_a_python_source_that_does_not_compile_is_a_compile_error_naming_its_first_error(verdict_detail):
+    """A SyntaxError stops the interpreter before the program reads its input, so every test fails the
+    same way: graded once as a build failure, like a C++ compile error, without a run. The error line
+    quotes the source alone, so it shows under ``outcome`` too, where a runtime error's stderr may not."""
+    sandbox = _HostPythonSandbox([])
+    tests = [{"input": str(i), "output": "42"} for i in range(3)]
+    grade = run_solution_against_tests(
+        "n = int(input())\nprint(n +)\n", tests, sandbox=sandbox, verdict_detail=verdict_detail
+    )
+    assert sandbox.calls == [], "a source that does not compile is never run"
+    assert grade.details == (
+        "Passed 0/3 test cases.\nCOMPILATION ERROR (every test fails)\n  SyntaxError: invalid syntax (line 2)"
+    )
+    assert (grade.passed, grade.total, grade.graded, grade.ran_ok, grade.infra_errors) == (0, 3, 3, 0, 0)
+
+    env = CodeContestsEnvironment(sandbox=_HostPythonSandbox([]), max_submissions=1)
+    ids, _ = env.reset(["p"], [{"answer": {"tests": tests}}])
+    traj = env.get_trajectories(ids)[0]
+    call = {"id": "s", "type": "function", "function": {"name": "submit_solution", "arguments": '{"code": "if x\\n"}'}}
+    env.step(ids, [""], [{"tool_calls": [call]}])
+    assert traj.done and not traj.episode_invalid, "a build failure is the program's verdict, not a lost grade"
+    assert "SyntaxError: expected ':' (line 1)" in traj.info["submission_result"]
+    assert traj.info[REWARD_COMPONENTS_KEY][OBJECTIVE_REWARD_KEY] == 0.0
+
+
+def test_a_backend_running_its_own_python_runs_the_source_the_host_would_not_compile():
+    """A backend stating no Python toolchain (a remote service) may run another interpreter version, so
+    the host does not judge its syntax: the program runs, and the sandbox's result is the verdict."""
+    sandbox = _ScriptedSandbox([SandboxResult(stderr="SyntaxError: invalid syntax", returncode=1)])
+    grade = run_solution_against_tests("print(n +)", [{"input": "1", "output": "42"}], sandbox=sandbox)
+    assert len(sandbox.calls) == 1 and "Test 1: RUNTIME ERROR" in grade.details, grade.details
+
+
+@pytest.mark.parametrize(
+    ("code", "error"),
+    [
+        ("﻿print(1)", None),  # a byte-order mark, which the interpreter of a staged file skips
+        ("x = " + "-" * 200_000 + "1", None),  # nesting past the host's recursion limit: the sandbox's call
+        ("x = " + "+".join(["1"] * 200_000), None),
+        ("# coding: nonsense\nprint(1)", "SyntaxError: unknown encoding: nonsense"),
+    ],
+)
+def test_the_host_compiles_the_bytes_a_run_stages(code, error):
+    assert grading_module.python_syntax_error(code) == error
+
+
 def test_a_backend_outage_logs_one_warning_per_grade(caplog):
     """A lost test's backend text reaches the log once per grade, tallied by message: an outage of a
     40-test pool is one line, not forty."""
@@ -505,8 +575,8 @@ def test_select_verdict_unknown_comparison_raises():
 
 
 def test_a_runtime_error_excerpt_ends_with_the_exception_line():
-    """A traceback names the exception on its last line; a head excerpt of a long one showed the frames
-    and dropped the error, and the policy then guessed at the cause."""
+    """A traceback names the exception on its last line; the excerpt keeps that line, where a head
+    excerpt of a long one would keep only the frames."""
     frames = "".join(f'  File "main.py", line {n}, in solve\n    step_{n}()\n' for n in range(12))
     stderr = (
         "Traceback (most recent call last):\n" + frames + "AttributeError: module 'math' has no attribute 'gamma2'"

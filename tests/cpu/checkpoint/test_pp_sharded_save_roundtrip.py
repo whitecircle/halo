@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import json
 import os
+import sys
 from types import SimpleNamespace
 from unittest.mock import patch
 
@@ -37,15 +38,17 @@ from safetensors import safe_open
 from safetensors.torch import save_file
 from transformers import Glm5NextConfig, Glm5NextForConditionalGeneration, Qwen3Config, Qwen3ForCausalLM
 
+import src.distributed.runtime as runtime
 from src.checkpoint.format import is_sharded_checkpoint, save_dtype_caster
 from src.checkpoint.tool_io import checkpoint_shard_files
 from src.distributed.checkpoint.context import CheckpointContext, CheckpointLoadContext
 from src.distributed.checkpoint.loader import CheckpointLoader
 from src.distributed.checkpoint.optimizer import OptimizerShardStore
-from src.distributed.checkpoint.save import save_pp_checkpoint
+from src.distributed.checkpoint.save import is_pp_shard_writer, save_pp_checkpoint
 from src.distributed.expert_parallel.base_layer import EPMoELayerBase
 from src.distributed.parallelism_config import ParallelismConfig
 from src.distributed.pipeline_parallel.stage import PipelineStageModule, build_pipeline_stage
+from src.distributed.runtime import fs_aware_save_rank
 from src.trainers.mixins.pipeline import stash_wrapper_state
 from tests.common.ep_stubs import StubEPLayerBase
 from tests.common.gloo import run_gloo_ranks
@@ -90,7 +93,7 @@ def _context(stage, config, max_shard_size: str = "5GB") -> CheckpointContext:
         has_ep_layers=any(isinstance(m, EPMoELayerBase) for m in stage.modules()),
         fsdp_wrapped=False,
         accelerate_manages_fsdp=False,
-        is_save_rank=dist.get_rank() == 0,
+        is_save_rank=fs_aware_save_rank(),
         max_shard_size=max_shard_size,
         save_sharded_ep=False,
         has_expert_lora=False,
@@ -200,6 +203,123 @@ def test_pp_save_reloads_unsplit_with_from_pretrained(tmp_path):
     with open(verdict) as fh:
         result = fh.read()
     assert result == "PASS", result
+
+
+def _host_copy_worker(rank: int, out_dir: str, verdict_path: str) -> None:
+    """Count this rank's host copies through the runtime primitive, wherever a module bound it."""
+    config = _parallelism_config()
+    stage = build_pipeline_stage(_tiny_qwen3(), config.pp_rank, PP_SIZE)
+    if rank == 0:
+        os.makedirs(out_dir, exist_ok=True)
+    dist.barrier()
+
+    original = runtime.resolve_param_tensor
+    copies: list[torch.Size] = []
+
+    def counting(tensor):
+        copies.append(tensor.shape)
+        return original(tensor)
+
+    bound = [
+        module for module in list(sys.modules.values()) if getattr(module, "resolve_param_tensor", None) is original
+    ]
+    for module in bound:
+        module.resolve_param_tensor = counting
+    try:
+        save_pp_checkpoint(_context(stage, config), out_dir)
+    finally:
+        for module in bound:
+            module.resolve_param_tensor = original
+
+    is_writer = is_pp_shard_writer(config, shared_fs=True)
+    if is_writer and not copies:
+        verdict = "FAIL: the writer resolved no tensor through the counted primitive (the probe is blind)"
+    elif not is_writer and copies:
+        verdict = f"FAIL: non-writer rank {rank} paid {len(copies)} host copies (first {list(copies[0])})"
+    else:
+        verdict = "PASS"
+    with open(f"{verdict_path}.{rank}", "w") as fh:
+        fh.write(verdict)
+
+
+def test_pp_save_non_writers_pay_no_host_copy(tmp_path):
+    """Every stage rank enters each tensor's gather, but only the stage's writer keeps the result.
+
+    A non-writer that resolves the full tensor to host memory pays the device-to-host copy and holds
+    the tensor for nothing; on a node that is ``local_world_size - 1`` such copies of every tensor at
+    every save, on top of the writer's own.
+    """
+    verdict = str(tmp_path / "verdict")
+    run_gloo_ranks(_host_copy_worker, WORLD_SIZE, str(tmp_path / "ckpt"), verdict)
+    for rank in range(WORLD_SIZE):
+        with open(f"{verdict}.{rank}") as fh:
+            result = fh.read()
+        assert result == "PASS", f"rank {rank}: {result}"
+
+
+# Per-node output storage: 8 ranks as 4 simulated nodes of 2, so each stage spans two nodes — the
+# shape where the per-node writer set (one rank per node) differs from the shared one (one per stage).
+PER_NODE_WORLD = 8
+RANKS_PER_NODE = 2
+
+
+def _per_node_worker(rank: int, root: str, verdict_path: str) -> None:
+    os.environ["LOCAL_RANK"] = str(rank % RANKS_PER_NODE)
+    config = ParallelismConfig(pp_size=PP_SIZE, nvlink_domain_size=RANKS_PER_NODE, max_concurrent_loading=0)
+    node = rank // RANKS_PER_NODE
+    nodes = PER_NODE_WORLD // RANKS_PER_NODE
+    node_dir = os.path.join(root, f"node{node}")
+    if rank % RANKS_PER_NODE == 0:
+        os.makedirs(node_dir)
+    dist.barrier()
+
+    save_pp_checkpoint(_context(build_pipeline_stage(_tiny_qwen3(), config.pp_rank, PP_SIZE), config), node_dir)
+
+    problems = []
+    shards = sorted(f for f in os.listdir(node_dir) if f.endswith(".safetensors"))
+    own_prefix = f"model-pp{config.pp_rank:05d}-of-{PP_SIZE:05d}-"
+    if not shards or any(not f.startswith(own_prefix) for f in shards):
+        problems.append(f"node {node} (stage {config.pp_rank}) holds {shards}, not its own stage's shard alone")
+
+    stage = build_pipeline_stage(_tiny_qwen3(), config.pp_rank, PP_SIZE)
+    with torch.no_grad():
+        for param in stage.parameters():
+            param.add_(1.0)
+    CheckpointLoader(_load_ctx(stage)).load_model(node_dir)
+    cast = save_dtype_caster(_tiny_qwen3())
+    reference = _tiny_qwen3().state_dict()
+    for local, value in stage.state_dict().items():
+        name = stage.global_parameter_name(local)
+        if not torch.equal(value, cast(name, reference[name]).to(value.dtype)):
+            problems.append(f"{name} did not resume from node {node}'s directory")
+
+    # A relaunch that hands this stage another stage's node directory has no shard for its layers.
+    elsewhere = os.path.join(root, f"node{(node + nodes // 2) % nodes}")
+    try:
+        CheckpointLoader(_load_ctx(stage)).load_model(elsewhere)
+        problems.append(f"stage {config.pp_rank} resumed from another stage's node directory {elsewhere}")
+    except RuntimeError:
+        pass
+    with open(f"{verdict_path}.{rank}", "w") as fh:
+        fh.write("PASS" if not problems else "FAIL: " + "; ".join(problems[:6]))
+
+
+def test_per_node_pp_checkpoint_resumes_each_node_and_refuses_a_moved_stage(tmp_path):
+    """Per-node output storage: every node's directory carries its own stage's shard and the full
+    index, so each node's ranks resume their stage from local disk alone; a stage moved onto another
+    stage's node fails on every rank instead of resuming base weights."""
+    verdict = str(tmp_path / "verdict")
+    run_gloo_ranks(
+        _per_node_worker,
+        PER_NODE_WORLD,
+        str(tmp_path),
+        verdict,
+        env={"DIST_OUTPUT_SHARED_FILESYSTEM": "0", "LOCAL_WORLD_SIZE": str(RANKS_PER_NODE)},
+    )
+    for rank in range(PER_NODE_WORLD):
+        with open(f"{verdict}.{rank}") as fh:
+            result = fh.read()
+        assert result == "PASS", f"rank {rank}: {result}"
 
 
 class _StubEPLayer(StubEPLayerBase):
@@ -434,7 +554,7 @@ def _optimizer_worker(rank: int, out_dir: str, verdict_path: str) -> None:
     # Hyperparameters must stay THIS run's, not the shard's rebuilt param_groups.
     if any(group["lr"] != 0.1 for group in fresh_optimizer.param_groups):
         problems.append("live param_group settings were overwritten by the shard")
-    # rank 0 has the only verdict file; every rank checks its own stage.
+    # Every rank checks its own stage and writes its own verdict file.
     with open(f"{verdict_path}.{rank}", "w") as fh:
         fh.write("PASS" if not problems else "FAIL: " + "; ".join(problems[:6]))
 

@@ -62,7 +62,6 @@ def run_code_via_sandbox(
     timeout: float = SANDBOX_DEFAULT_TIMEOUT,
     language: str = "python",
     session: SandboxSession | None = None,
-    stdin: str = "",
 ) -> str:
     """REPL handler that executes ``code`` through a :class:`SandboxExecutor` (or a live session).
 
@@ -71,9 +70,9 @@ def run_code_via_sandbox(
     Raises :class:`SandboxInfraError` when the backend itself failed and :class:`SandboxAgentFault`
     when the program broke its own sandbox (see :func:`format_sandbox_repl_output`).
 
-    ``stdin`` is what the program reads; a tool whose schema declares no stdin leaves it empty, so a
-    program reading input there sees end-of-file instead of blocking on input nothing can supply.
+    The program gets an empty stdin, since the tools running through here declare none: one reading
+    input sees end-of-file instead of blocking on input nothing can supply.
     """
     runner = session if session is not None else sandbox
-    result = runner.run(code, stdin=stdin, timeout=timeout, language=language)
+    result = runner.run(code, timeout=timeout, language=language)
     return format_sandbox_repl_output(result, timeout)

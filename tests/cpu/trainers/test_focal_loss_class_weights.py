@@ -46,7 +46,7 @@ def _logits_and_labels():
 
 
 def test_unweighted_focal_matches_canonical():
-    """The unweighted case was already correct and must stay so."""
+    """The unweighted case matches the textbook form."""
     logits, labels = _logits_and_labels()
     got = ClassificationTrainer._focal_loss(logits, labels, gamma=GAMMA)
     assert got.item() == pytest.approx(_canonical_focal(logits, labels, None).item(), rel=1e-5)
@@ -118,7 +118,7 @@ def test_per_element_form_recovers_the_mean_for_the_pipeline_normalizer():
 
 
 def test_an_unsupported_reduction_raises_instead_of_silently_meaning():
-    """Only the two reductions the trainer asks for exist; anything else was a silent mean."""
+    """Only the two reductions the trainer asks for exist; anything else would be a silent mean."""
     logits, labels = _logits_and_labels()
     with pytest.raises(ValueError, match="reduction"):
         ClassificationTrainer._focal_loss(logits, labels, gamma=GAMMA, reduction="sum")

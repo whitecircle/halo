@@ -6,7 +6,7 @@ These tests verify the distributed shard loading functionality
 similar to Megatron-LM's approach.
 
 Usage:
-    python tests/data/test_sharded_loading.py
+    python tests/cpu/data/test_sharded_loading.py
 """
 
 import os
@@ -328,8 +328,8 @@ def test_shard_index_unknown_field_raises():
 def test_zero_shard_train_index_raises(tmp_path):
     """An index claiming ZERO shards for train must raise, not hand every rank an empty Dataset.
 
-    The undersharded guard reads ``0 < num_shards < world_size``, so zero slipped past it and every
-    rank trained on an empty split behind a per-rank warning.
+    The undersharded guard reads ``0 < num_shards < world_size``, so zero would slip past it and every
+    rank would train on an empty split behind a per-rank warning.
     """
     (tmp_path / "train").mkdir()
     ShardIndex(split="train", num_shards=0, total_examples=0, shards=[]).save(
@@ -360,8 +360,8 @@ def test_load_datasets_list_entry_missing_test_split_fails_loud():
 def test_load_preprocessed_dataset_empty_test_split_raises():
     """A GLOBALLY empty test split (zero examples in the shard index) must fail loud at load.
 
-    Regression guard: without the guard the empty split flowed through and either KeyError'd
-    downstream or hung distributed eval. Mirrors load_datasets' empty-test guard. (Per-rank-only
+    Without the guard the empty split would flow through and either KeyError downstream or hang
+    distributed eval. Mirrors load_datasets' empty-test guard. (Per-rank-only
     emptiness — fewer non-empty shards than DP ranks — is the trainer-side equalize-raise case.)
     """
     temp_dir = tempfile.mkdtemp()
@@ -394,7 +394,7 @@ def test_load_preprocessed_dataset_empty_train_split_raises(monkeypatch):
             "test": Dataset.from_dict({"input_ids": [[1, 2, 3]], "attention_mask": [[1, 1, 1]], "example_id": [0]}),
         }
     )
-    monkeypatch.setattr(loading, "_load_dataset_from_path", lambda path, test_size: (ds, None))
+    monkeypatch.setattr(loading, "_load_replicated", lambda path, test_size, placeholder_test: ds)
     monkeypatch.setattr(loading, "is_sharded_dataset_coordinated", lambda path: False)
 
     with pytest.raises(ValueError, match="(?i)train"):

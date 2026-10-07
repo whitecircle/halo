@@ -11,18 +11,22 @@ import math
 import httpx
 import pytest
 
-from src.rewards.reward_model import ServedRewardModel
 from src.rewards.samples import ScoringSample
-from src.rewards.spec import RewardModelTerm
+from src.rewards.scorers.reward_model import ServedRewardModel
+from src.rewards.terms import RewardModelTerm
 
 
 class _Template:
     """A tokenizer stand-in: renders every message as ``role: content`` on its own line and tokenizes a
     text to its character codes, refusing to add special tokens."""
 
+    def __init__(self):
+        self.rendered: list[list[dict]] = []
+
     def apply_chat_template(self, messages, tokenize):
         assert tokenize is False
-        return "\n".join(f"{m['role']}: {m['content']}" for m in messages)
+        self.rendered.append(messages)
+        return "\n".join(f"{m['role']}: {m.get('content', '')}" for m in messages)
 
     def __call__(self, texts, add_special_tokens):
         assert add_special_tokens is False
@@ -31,7 +35,9 @@ class _Template:
 
 def _sample(text: str) -> ScoringSample:
     return ScoringSample(
-        prompt=[{"role": "user", "content": "Hi"}], completion=[{"role": "assistant", "content": text}]
+        prompt=[{"role": "user", "content": "Hi"}],
+        completion=[{"role": "assistant", "content": text}],
+        final_answer=text,
     )
 
 
@@ -44,7 +50,7 @@ def _scorer(term: RewardModelTerm, handler) -> tuple[ServedRewardModel, list[htt
         requests.append(request)
         return handler(request)
 
-    scorer._create_client = lambda: httpx.AsyncClient(transport=httpx.MockTransport(recording))
+    scorer._client = httpx.AsyncClient(transport=httpx.MockTransport(recording))
     return scorer, requests
 
 
@@ -165,25 +171,19 @@ def test_verify_scores_a_probe_and_raises_on_failure():
         asyncio.run(bad.verify())
 
 
-def test_verify_probes_through_a_fresh_client_and_closes_it():
+def test_verify_releases_the_client_it_probed_through():
     """The launch probe runs on a different loop than the Ray actor, and a cached AsyncClient carries a
-    pool bound to the loop it was built on — so the probe must build its own and close it."""
+    pool bound to the loop it was built on — so the probe's client is closed and dropped."""
     scorer, _ = _scorer(
         RewardModelTerm(name="pref", url="http://rm", model="m"),
         lambda r: httpx.Response(200, json={"data": [{"index": 0, "probs": [0.1]}]}),
     )
-    build, created = scorer._create_client, []
-
-    def tracked() -> httpx.AsyncClient:
-        created.append(client := build())
-        return client
-
-    scorer._create_client = tracked
+    client = scorer._client
     asyncio.run(scorer.verify())
-    assert len(created) == 1 and created[0].is_closed and scorer._client is None
+    assert client.is_closed and scorer._client is None
 
 
-def test_transcript_view_selects_what_is_rendered():
+def test_the_view_selects_what_is_rendered():
     rendered = []
 
     def handler(request: httpx.Request) -> httpx.Response:
@@ -200,9 +200,40 @@ def test_transcript_view_selects_what_is_rendered():
     )
     final, _ = _scorer(RewardModelTerm(name="p", url="http://rm", model="m"), handler)
     asyncio.run(final.score([sample]))
-    full, _ = _scorer(RewardModelTerm(name="p", url="http://rm", model="m", transcript="full"), handler)
+    full, _ = _scorer(RewardModelTerm(name="p", url="http://rm", model="m", view="full"), handler)
     asyncio.run(full.score([sample]))
-    assert rendered == ["user: Hi\nassistant: final", "user: Hi\nassistant: step\ntool: out\nassistant: final"]
+    # The final view scores what the episode delivered, not the last turn, when the sample says which.
+    delivered = ScoringSample(prompt=sample.prompt, completion=sample.completion, final_answer="FINAL")
+    asyncio.run(final.score([delivered]))
+    assert rendered == [
+        "user: Hi\nassistant: ",  # no final answer recorded: an empty answer, never the last turn's text
+        "user: Hi\nassistant: step\ntool: out\nassistant: final",
+        "user: Hi\nassistant: FINAL",
+    ]
+
+
+def test_the_full_view_hands_the_template_wire_messages_only():
+    """A judge's sample carries reasoning and turn flags; a chat template given those keys raises or
+    renders them, so the reward model reads the wire spelling."""
+    sample = ScoringSample(
+        prompt=[{"role": "user", "content": "Hi"}],
+        completion=[
+            {"role": "assistant", "content": "step", "reasoning_content": "hmm", "truncated": True},
+            {"role": "tool", "name": "run", "tool_call_id": "c1", "content": "out"},
+        ],
+    )
+    scorer, _ = _scorer(
+        RewardModelTerm(name="p", url="http://rm", model="m", view="full"),
+        lambda request: httpx.Response(200, json={"data": [{"index": 0, "probs": [0.0]}]}),
+    )
+    asyncio.run(scorer.score([sample]))
+    assert scorer._tokenizer.rendered == [
+        [
+            {"role": "user", "content": "Hi"},
+            {"role": "assistant", "content": "step"},
+            {"role": "tool", "name": "run", "tool_call_id": "c1", "content": "out"},
+        ]
+    ]
 
 
 if __name__ == "__main__":

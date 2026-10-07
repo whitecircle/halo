@@ -23,19 +23,18 @@ from accelerate import PartialState
 from src.environments.base import (
     EPISODE_INVALID_KEY,
     EPISODE_INVALID_REASON_KEY,
-    OBJECTIVE_REWARD_KEY,
     REWARD_COMPONENTS_KEY,
     Trajectory,
 )
 from src.environments.envs.tasks.coding.code_contests import CodeContestsEnvironment
 from src.environments.episode import RolloutResult
+from src.rewards.terms import OBJECTIVE_REWARD_KEY
 from src.trainers.grpo.environmental import (
     EMPTY_ROLLOUT_STEP_LIMIT,
     DistributedAsyncEnvironmentalGRPOTrainer,
     rollout_valid_mask,
 )
 from src.trainers.grpo.objective.advantages import degenerate_group_mask, group_relative_advantages
-from src.trainers.grpo.objective.application import degenerate_drop_rows
 
 PartialState()  # the trainer warns through accelerate's logger, which refuses to log without it
 
@@ -122,7 +121,7 @@ def test_outage_member_excluded_from_group_baseline():
     assert not torch.allclose(adv[:3], poisoned[:3])
 
 
-# --- Degenerate-group detection over valid members only (F3-D) ---
+# --- Degenerate-group detection over valid members only ---
 
 
 def test_degenerate_detection_ignores_invalid_member_spread():
@@ -150,14 +149,6 @@ def test_valid_spread_keeps_group_alive():
 def test_no_mask_behavior_unchanged():
     rewards = torch.tensor([1.0, 1.0, 0.0, 0.5])
     assert degenerate_group_mask(rewards, 2).tolist() == [True, True, False, False]
-
-
-def test_degenerate_drop_rows_threads_valid_mask():
-    rewards = torch.tensor([1.0, 1.0, 1.0, 0.0])
-    valid = torch.tensor([True, True, True, False])
-    drop, frac = degenerate_drop_rows(rewards, 4, valid_mask=valid)
-    assert drop.tolist() == [True] * 4
-    assert frac == pytest.approx(1.0)
 
 
 # --- A step in which NOTHING survived: zero gradient, so it must not pass silently ---

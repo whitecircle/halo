@@ -2,7 +2,7 @@
 """
 Test: Muon optimizer with FSDP2 on Qwen3.5-2B (real model).
 
-Validates that the _to_local() DTensor fix works with a production model
+Validates Muon's ``to_local`` DTensor unwrapping on a production model
 under FSDP2, not just synthetic FFN models. Qwen3.5-2B has a mix of
 2D (Linear.weight) and 1D (bias, LayerNorm) parameters that exercise
 both Muon and scalar AdamW optimizer paths.

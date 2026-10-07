@@ -31,7 +31,7 @@ from safetensors.torch import save_file
 from src.checkpoint import tool_io
 from src.checkpoint.format import SAFETENSORS_INDEX_FILE
 from src.checkpoint.tool_io import checkpoint_shard_files, reject_sharded_checkpoint, stored_tensor_nbytes
-from src.distributed.expert_parallel.saving import _save_ep_sharded
+from src.distributed.checkpoint.ep_save import _save_ep_sharded
 from tests.common.ep_stubs import StubEPLayerBase
 
 PartialState()  # the EP save logs through accelerate's logger
@@ -108,7 +108,7 @@ def test_a_per_rank_shard_is_one_file_and_the_save_says_so(tmp_path, caplog):
     user believing a cap applied. The save writes one file and reports the knob it does not read."""
     model = _stub_model()
 
-    with caplog.at_level(logging.INFO, logger="src.distributed.expert_parallel.saving"):
+    with caplog.at_level(logging.INFO, logger="src.distributed.checkpoint.ep_save"):
         _save_ep_sharded(model, str(tmp_path), max_shard_size="1KB")
 
     assert _shard_files(tmp_path) == ["model-00000-of-00001.safetensors"], "one shard per rank, cap or no cap"

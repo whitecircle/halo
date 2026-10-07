@@ -184,12 +184,14 @@ class _GroupedPathLayer(StubEPLayerBase):
         self._use_grouped_mm = True
 
 
-@pytest.mark.parametrize(("top_k", "ep_size"), ((4, 8), (2, 2), (1, 2)), ids=("below_top_k", "at_top_k", "top_1"))
+@pytest.mark.parametrize(
+    ("top_k", "ep_size"), ((4, 8), (2, 2), (1, 2)), ids=("top_k_below_ep_size", "top_k_at_ep_size", "top_1")
+)
 def test_the_grouped_path_permutes_atomic_free_at_every_top_k_and_ep_size(monkeypatch, top_k, ep_size):
-    """gpt-oss's top-4 at EP8 sits below ``top_k >= ep_size``, where the grouped path used to fall back to
-    ``index_select`` and a bf16 ``index_add_``. Every shape must build ``inv_map`` and go through both fused
-    Functions, and the scatter-back must equal the weighted ``index_add_`` reference, with dispatch padding
-    (``-1``) and other ranks' expert ids dropped."""
+    """Every shape, gpt-oss's top-4 at EP8 (``top_k < ep_size``) included, builds ``inv_map`` and goes
+    through both fused Functions rather than ``index_select`` and a bf16 ``index_add_``, and the
+    scatter-back equals the weighted ``index_add_`` reference, with dispatch padding (``-1``) and other
+    ranks' expert ids dropped."""
     calls = []
     for cls in (MoEGatherPermute, MoEWeightedUnpermute):
         apply = cls.apply

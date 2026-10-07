@@ -181,7 +181,7 @@ def build_examples(args: argparse.Namespace) -> list[dict[str, Any]]:
 def main() -> None:
     args = parse_args()
     contract = load_training_contract(args.training_config)
-    trained_env = contract.env_config_dict() if contract is not None else {}
+    trained_env = contract.env_config.to_env_config() if contract is not None else {}
     env_type = resolve_setting(args.env_type, contract.env_config.environment_type if contract else None, None)
     if env_type is None:
         raise SystemExit("--env_type is required unless --training_config names an environment_type")
@@ -221,7 +221,6 @@ def main() -> None:
         traj_path=traj_path,
         env_type=env_type,
         split=args.split,
-        max_turns=args.max_turns,
         rollout=rollout,
         num_samples=args.num_samples,
         meta_extra={"env_kwargs": {**trained_env, **env_kwargs}},

@@ -134,7 +134,7 @@ def test_index_merge_counts_each_file_once_across_node_writers():
 
     ``is_pp_shard_writer`` widens to one writer per NODE when the filesystem is not shared, and each
     of them emits its stage's shard under the identical ``model-pp{rank}-of-{size}`` name. Folding
-    every fragment's bytes reported ``total_size`` multiplied by the nodes per stage — 8x on a
+    every fragment's bytes would report ``total_size`` multiplied by the nodes per stage — 8x on a
     64-node job at pp8 — in an index that otherwise round-trips.
     """
     fragment = ({"model.layers.0.weight": "model-pp00000-of-00002-00001.safetensors"}, 100)
@@ -200,8 +200,8 @@ def _stream(dir_path, state_dict, max_shard_size):
 def test_hf_finalize_is_readable_exactly_like_the_buffered_splitter(tmp_path):
     """The streamed save must be READABLE like ``save_sharded_state_dict``'s output — not identical.
 
-    That helper is the one the gathered EP path calls after buffering the whole model in host
-    RAM. What a reader needs is the HF naming, an index naming every key, the same total_size, and
+    That helper is the whole-dict writer behind ``write_gathered_checkpoint``, for a caller already
+    holding every tensor in host RAM. What a reader needs is the HF naming, an index naming every key, the same total_size, and
     the same bytes reachable through it. Part BOUNDARIES are deliberately not guaranteed — see the
     next test — so asserting the same filenames or key→file map would pin a property the writer
     explicitly disclaims.
@@ -320,8 +320,8 @@ def test_hf_finalize_on_a_disabled_writer_touches_nothing(tmp_path):
 
 
 def test_the_index_writer_refuses_a_metadata_block_that_is_not_a_mapping(tmp_path):
-    """``metadata`` is written into the index verbatim, so a scalar — this argument's previous shape
-    was a bare ``total_size`` int — produces ``{"metadata": 12345}``: an index every reader parses
+    """``metadata`` is written into the index verbatim, so a scalar — a bare ``total_size`` int —
+    produces ``{"metadata": 12345}``: an index every reader parses
     without complaint and no reader can use."""
     with pytest.raises(TypeError, match="must be a mapping"):
         write_merged_index(str(tmp_path), {"w": "model-00001-of-00002.safetensors"}, 12345)

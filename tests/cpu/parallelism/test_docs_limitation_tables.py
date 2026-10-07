@@ -4,7 +4,7 @@
 ``agent-docs/parallelism/*`` and ``agent-docs/reference/trainer-architecture.md`` publish three matrices a
 reader configures a run from: which axis combinations may run, which trainer supports which axis,
 and which MoE family restricts an EP capability. All three are *derived* in the code — from
-:data:`SUPPORTED_AXIS_SETS`, from the per-class ``_supports_*`` attributes, and from the EP layer
+:data:`SUPPORTED_AXIS_SETS`, from the per-class ``_supports_cp`` / ``_supports_pp``, and from the EP layer
 classes' capability flags — so a published table is a second copy, free to drift from the gate it
 describes. Drift here is expensive: a wrong row sends a reader into a config-time raise, or promises
 a mode the trainer refuses, after the GPUs are allocated.
@@ -32,9 +32,9 @@ _PARALLELISM_INDEX = _REPO_ROOT / "agent-docs" / "parallelism" / "README.md"
 _EXPERT_PARALLELISM = _REPO_ROOT / "agent-docs" / "parallelism" / "expert-parallelism.md"
 _TRAINER_ARCHITECTURE = _REPO_ROOT / "agent-docs" / "reference" / "trainer-architecture.md"
 
-# Doc column header -> the class attribute that decides it. ETP has no attribute of its own: it
-# folds into ep_group_size, so _supports_ep gates it — the table must say the same in both columns.
-_TRAINER_AXIS_ATTRS = {"EP": "_supports_ep", "CP": "_supports_cp", "TP": "_supports_tp", "PP": "_supports_pp"}
+# Doc column header -> the class attribute that decides it. EP, ETP and TP run under every trainer,
+# so the matrix carries the two axes a trainer declares.
+_TRAINER_AXIS_ATTRS = {"CP": "_supports_cp", "PP": "_supports_pp"}
 
 # EP capability flags that default True on EPMoELayerBase, so a False IS the documented restriction.
 # DERIVED from the base class, never listed: a flag restated here is a second copy of the class's own
@@ -167,11 +167,10 @@ def test_supported_combinations_table_matches_the_allowlist():
 def test_trainer_compatibility_table_matches_the_support_flags():
     """Every cell of the trainer × axis matrix must equal the class attribute the mixin reads.
 
-    ``ParallelismValidationMixin`` raises off ``_supports_ep`` / ``_supports_cp`` / ``_supports_tp``
-    / ``_supports_pp``; a doc cell that disagrees promises (or denies) a mode the trainer will
-    refuse (or accept) at construction.
+    ``ParallelismValidationMixin`` raises off ``_supports_cp`` / ``_supports_pp``; a doc cell that
+    disagrees promises (or denies) a mode the trainer will refuse (or accept) at construction.
     """
-    rows = _table_with_headers(_TRAINER_ARCHITECTURE, "Trainer", "EP", "CP", "TP", "ETP", "PP")
+    rows = _table_with_headers(_TRAINER_ARCHITECTURE, "Trainer", *_TRAINER_AXIS_ATTRS)
     classes = {cls.__name__: cls for cls in distributed_trainer_classes()}
 
     documented = {_plain(row["Trainer"]) for row in rows}
@@ -188,10 +187,6 @@ def test_trainer_compatibility_table_matches_the_support_flags():
             assert documented_support == getattr(cls, attr), (
                 f"{name} row, {column} column: docs say {row[column]!r} but {attr}={getattr(cls, attr)!r}"
             )
-        assert _plain(row["ETP"]).lower().startswith("yes") == cls._supports_ep, (
-            f"{name} row, ETP column: ETP is gated by _supports_ep (there is no _supports_etp), so it "
-            f"must match the EP column; docs say {row['ETP']!r} with _supports_ep={cls._supports_ep!r}"
-        )
 
 
 def test_ep_supported_models_table_lists_every_registered_wrapper():
@@ -213,7 +208,7 @@ def test_ep_restriction_table_matches_the_layer_capability_flags():
 
     Each flag defaults ``True`` on ``EPMoELayerBase``, so a family turning one off is the whole
     limitation. A stale row promises a restriction that no longer exists; a missing row hides one
-    that does (Zaya under gradient checkpointing, DeepSeek-V4 under vLLM weight sync).
+    that does (Zaya under gradient checkpointing, Inkling under weight sync).
     """
     by_wrapper = {_ep_wrapper_class_name(row): _plain(row["Model"]) for row in _ep_model_rows()}
     documented = set()

@@ -42,7 +42,7 @@ def stub_frozen_loader():
         patch.object(frozen_loader, "resolve_attn_implementation", fake_resolve),
         patch.object(frozen_loader, "auto_load_model") as auto_load,
         patch.object(frozen_loader, "from_pretrained_verified") as vlm_load,
-        patch.object(frozen_loader, "fs_aware_main_first") as fetch_scope,
+        patch.object(frozen_loader, "resolve_model_source") as fetch_scope,
         # Patched where they are defined rather than where the loader imports from: the loader reaches
         # them through ``apply_sinks_policy``, so intercepting them here keeps the assertion
         # end-to-end (loader, shared policy, the branch that policy picks).
@@ -50,7 +50,8 @@ def stub_frozen_loader():
         patch.object(sink_patches, "_set_gpt_oss_sinks_trainable") as freeze_sinks,
     ):
         auto_config.from_pretrained.return_value = STUB_CONFIG
-        fetch_scope.return_value = contextlib.nullcontext()
+        # The source agreement hands back the revision every rank then reads at; unchanged here.
+        fetch_scope.side_effect = lambda model_name_or_path, revision, *, tag: revision
         # The real live branch returns the layer count, which apply_sinks_policy compares (> 0) to
         # stamp the model live-sinks; a bare MagicMock return would TypeError on that comparison.
         freeze_sinks.return_value = 1

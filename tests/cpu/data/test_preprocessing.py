@@ -5,7 +5,7 @@ Tests for dataset preprocessing utilities.
 These tests verify the tokenization, packing, and sharding functionality.
 
 Usage:
-    python tests/data/test_preprocessing.py
+    python tests/cpu/data/test_preprocessing.py
 """
 
 import json
@@ -213,8 +213,8 @@ def test_completion_only_validation():
 
 
 def test_invalid_mode_rejected_by_the_config():
-    """`mode` was unvalidated outside the CLI's choices=: a typo'd 'txt' fell through every
-    `mode == "text"` branch and silently CHAT-TEMPLATED a raw pretraining corpus."""
+    """An unvalidated `mode` lets a typo'd 'txt' fall through every `mode == "text"` branch and
+    silently CHAT-TEMPLATE a raw pretraining corpus."""
     with pytest.raises(ValueError, match="Invalid preprocessing mode 'txt'"):
         PreprocessingConfig(model_name_or_path="m", mode="txt")
 
@@ -387,7 +387,7 @@ def test_shard_count_ceiling_warns_with_the_usable_dp_degree(caplog):
 
 def test_max_length_compatibility_raises_both_directions():
     """A preprocessed/configured max_length mismatch must be loud in BOTH directions: smaller
-    preprocessed rows waste the budget (pre-existing raise); larger ones exceed the activation
+    preprocessed rows waste the budget; larger ones exceed the activation
     budget because the runtime preprocessed path never re-truncates (the dangerous direction)."""
     metadata = PreprocessedDatasetMetadata(
         model_name="Qwen/Qwen3-8B",
@@ -546,8 +546,8 @@ def test_render_check_set_is_derived_from_the_config_dataclass():
 
 
 def test_tokenizer_override_mismatch_raises():
-    """--pad/--eos/--bos/--chat-template mutate the tokenizer that bakes the ids, but were NOT
-    recorded — the artifact was byte-indistinguishable from an unmutated one and the check passed.
+    """--pad/--eos/--bos/--chat-template mutate the tokenizer that bakes the ids, so unless they are
+    recorded the artifact is byte-indistinguishable from an unmutated one and the check passes.
     An eos override in particular moves the completion-mask boundaries."""
     metadata = _metadata_with_recorded_config(eos_token="<|im_end|>")
     with pytest.raises(ValueError, match="eos_token"):
@@ -588,9 +588,9 @@ def test_chat_template_compared_as_resolved_text_not_as_a_path(tmp_path):
 
 
 def test_source_labels_column_is_not_baked_as_loss_targets():
-    """A source column named `labels` (classification/reward corpora carry one) survived the
-    tokenization map, and the labels step only fills in a MISSING column — so those source values
-    were baked as this dataset's loss targets."""
+    """A source column named `labels` (classification/reward corpora carry one) must not survive the
+    tokenization map: the labels step only fills in a MISSING column, so those source values would
+    be baked as this dataset's loss targets."""
     dataset = Dataset.from_dict(
         {
             "conversation": [[{"role": "user", "content": "hi"}, {"role": "assistant", "content": "yo"}]],
@@ -614,9 +614,9 @@ def test_source_labels_column_is_not_baked_as_loss_targets():
 
 
 def test_metadata_version_mismatch_raises_a_version_message():
-    """The stamp was written and never compared: a diverged schema surfaced as a bare TypeError
-    from cls(**data), and the detection probe swallowed it into a silent raw-path downgrade that
-    re-tokenizes pre-tokenized rows."""
+    """An uncompared stamp lets a diverged schema surface as a bare TypeError from cls(**data), which
+    the detection probe would swallow into a silent raw-path downgrade that re-tokenizes
+    pre-tokenized rows."""
     payload = PreprocessedDatasetMetadata(max_length=4096).to_dict()
     payload["version"] = "0.9"
     with pytest.raises(IncompatiblePreprocessedDataset, match="version"):
@@ -657,9 +657,8 @@ def test_hub_repo_id_strips_config_and_split_suffixes():
 
 
 def test_hub_preprocessed_dataset_is_detected_and_its_metadata_loads(tmp_path, monkeypatch):
-    """An `hf://`-published preprocessed dataset could NEVER be detected (the Hub branch returned
-    False unconditionally) and its metadata load raised outright — so training took the raw path and
-    KeyError'd on pre-tokenized rows."""
+    """An `hf://`-published preprocessed dataset must be detected and its metadata must load;
+    otherwise training takes the raw path and KeyErrors on pre-tokenized rows."""
     payload = PreprocessedDatasetMetadata(max_length=4096, model_name="Qwen/Qwen3-8B").to_dict()
     metadata_file = tmp_path / "metadata.json"
     metadata_file.write_text(json.dumps(payload))

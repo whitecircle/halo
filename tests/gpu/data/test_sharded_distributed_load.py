@@ -18,7 +18,7 @@ per data-parallel rank):
    rank holds zero examples (num_shards < data_parallel_size).
 
 Usage:
-    torchrun --nproc_per_node=4 \
+    torchrun --nproc_per_node=2 \
         tests/gpu/data/test_sharded_distributed_load.py
 """
 

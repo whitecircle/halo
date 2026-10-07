@@ -206,8 +206,8 @@ def liger_parallelism_overrides(
     engaged = [f"{name} (size {size})" for name, size in external_loss.items() if size > 1]
     if engaged:
         # CP's wrapper and PP's last stage compute the loss from logits and pass no labels, so Liger's
-        # `skip_logits` gate never fires; CE goes too, since upstream rebinds F.cross_entropy
-        # process-wide.
+        # `skip_logits` gate never fires; CE goes too, since the scoped CE patch reaches only the
+        # model's own loss.
         reason = f"{' and '.join(engaged)} computes the loss outside the model's forward, so the kernel never fires"
         overrides["cross_entropy"] = overrides["fused_linear_cross_entropy"] = reason
     return overrides
@@ -379,13 +379,8 @@ def _apply_liger_for_standard_models(
     signature_params = inspect.signature(apply_fn).parameters
     valid_params = set(signature_params.keys())
 
-    # FLCE-only appliers exist solely for the fused loss path; the generic FLCE=False would no-op them.
-    # Layered into a fresh dict rather than written into _LIGER_DEFAULTS, which is shared: the first
-    # FLCE-only family would otherwise flip the default for every later call in the process.
-    flce_only = "fused_linear_cross_entropy" in valid_params and "cross_entropy" not in valid_params
     config = {
         **_LIGER_DEFAULTS,
-        **({"fused_linear_cross_entropy": True} if flce_only else {}),
         **_PER_MODEL_DEFAULTS.get(model_type, {}),
         **user_overrides,
     }

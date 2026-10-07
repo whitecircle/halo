@@ -17,9 +17,25 @@ from transformers import CONFIG_MAPPING, PretrainedConfig
 from src.distributed.fsdp import reshard_fsdp2_modules
 from src.distributed.nccl.clients.base import BaseWeightSyncClient
 from src.distributed.nccl.clients.sglang import SGLangWeightSyncClient
-from src.distributed.runtime import DeferredRankFailure, materialize_dtensor, to_local
+from src.distributed.runtime import DeferredRankFailure, broadcast_from_rank0, materialize_dtensor, to_local
+from src.env import env_int
 from src.trainers.grpo.rollout.weight_sync import _HubForwarder
 from src.trainers.mixins.ep_introspection import named_ep_layers
+from tests.common.ports import free_port
+
+
+def weight_transfer_port(knob: str, offset: int = 0) -> int:
+    """The trainer-side weight-transfer group port a GPU suite binds. COLLECTIVE when drawn.
+
+    The ``HALO_TEST_*`` variable ``knob`` pins it, plus ``offset``. Unset, rank 0 draws one with
+    :func:`~tests.common.ports.free_port` and every rank takes it: a fixed default would sit inside the
+    kernel's ephemeral range, where an outbound connection elsewhere on the host can hold it. The engine
+    learns the port from the trainer's init request, so the server needs no matching setting.
+    """
+    pinned = env_int(knob, None)
+    if pinned is not None:
+        return pinned + offset
+    return broadcast_from_rank0(free_port())
 
 
 def offline_sglang_client(base_url: str = "http://localhost:30000") -> SGLangWeightSyncClient:

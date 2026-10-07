@@ -17,23 +17,19 @@ same rows; PP's microbatch numerators share the local loss's whole-batch denomin
 """
 
 import random
-import warnings
 from collections import defaultdict
 from collections.abc import Callable
-from contextlib import nullcontext
 from enum import Enum
 from functools import partial
 from typing import Any, Union
 
 import datasets
-import numpy as np
 import torch
 import torch.distributed as dist
 import torch.nn.functional as F
 from accelerate.logging import get_logger
 from accelerate.utils import is_peft_model
 from peft import PeftConfig
-from scipy import stats
 from torch import nn
 from torch.utils.data import (
     BatchSampler,
@@ -43,7 +39,6 @@ from torch.utils.data import (
     Sampler,
 )
 from transformers import (
-    AutoTokenizer,
     BaseImageProcessor,
     EvalPrediction,
     FeatureExtractionMixin,
@@ -66,7 +61,7 @@ from src.data.collators.offline_grpo import (
     OfflineGRPOCPDataCollatorWithPadding,
     OfflineGRPODataCollatorWithPadding,
 )
-from src.data.pipeline.processing import coordinated_map
+from src.data.pipeline.processing import coordinated_map, resolve_map_num_proc
 from src.data.pipeline.rendered import lacks_emitted_bos
 from src.data.spans import LABEL_IGNORE_INDEX, lacks_terminator, resolve_eos_token_ids
 from src.distributed.context_parallel.autograd import cp_sum_rows
@@ -90,15 +85,14 @@ from src.distributed.runtime import (
     get_global_rank,
     get_global_world_size,
     is_global_main_process,
-    rank_consensus,
     reject_across_ranks,
-    reject_divergent_settings,
 )
+from src.models.loading.dtype import resolve_training_dtype
 from src.models.loading.tokenizer_setup import is_bounded_length
-from src.models.modality import config_declares_multimodality
 from src.models.structure import base_transformers_model, resolve_tokenizer
 from src.trainers.grpo.mixins.chunked_logprobs import ChunkedLogprobsCore, LogitsWidth
-from src.trainers.grpo.objective.advantages import STD_EPS
+from src.trainers.grpo.mixins.offline_reference import OfflineGRPOReferenceMixin, reject_unsupported_reference_input
+from src.trainers.grpo.objective.advantages import GROUP_ADVANTAGE_METHODS, compute_group_advantages
 from src.trainers.grpo.objective.offline import (
     LOSS_TYPES,
     PG_FORMULATIONS,
@@ -109,12 +103,12 @@ from src.trainers.grpo.objective.offline import (
     offline_token_objective,
 )
 from src.trainers.grpo.reference_cache import MappedReferenceScores, ReferenceScoreCache
-from src.trainers.grpo.reference_lifecycle import (
-    OfflineGRPOReferenceLifecycleMixin,
-    reject_unsupported_reference_input,
-)
+from src.trainers.grpo.reference_policy import reference_policy
 from src.trainers.mixins.base import DistributedTrainerMixin
+from src.trainers.mixins.dataloader import run_data_seed
 from src.trainers.mixins.pp_gates import reject_pp_compute_metrics, reject_pp_peft
+from src.trainers.mixins.reference_logps import LOGPROB_PRECISION_KEY
+from src.trainers.mixins.validation import keep_all_dataset_columns
 
 logger = get_logger(__name__, log_level="INFO")
 
@@ -136,88 +130,6 @@ def _collate_reference_rows(rows, *, collator, batch_size: int):
     return collator(rows + [rows[-1]] * (batch_size - real_rows)), real_rows
 
 
-def compute_group_advantages(
-    rewards_list: list[float],
-    method: str,
-    best_completion_emphasis: float | str,
-) -> list[float]:
-    """Advantages from a group's rewards via ``method`` (z_norm, minmax, quantile_norm,
-    quantile_uniform, robust), with optional best-completion emphasis, clipped to [-10, 10].
-    """
-    # float64 explicitly: integral rewards (0/1 verifiable) would keep an int64 dtype through the
-    # `np.zeros_like` degenerate-group branches, and the in-place emphasis multiply below then raises
-    # UFuncTypeError inside datasets.map.
-    rewards_array = np.asarray(rewards_list, dtype=np.float64)
-    if not np.all(np.isfinite(rewards_array)):
-        # Every method divides by a spread derived from these rewards, so one NaN/Inf reaches the
-        # whole group's advantages and from there the micro-batch gradient.
-        raise ValueError(
-            f"Non-finite reward in a completion group: {rewards_list}. Fix the reward column — "
-            f"training through it silently either zeroes the row's advantage or NaNs the batch, "
-            f"depending only on the group size."
-        )
-
-    if method == "z_norm":
-        reward_mean = np.mean(rewards_array)
-        # ddof=1 explicitly: numpy defaults to 0 while torch's .std() is correction=1, and the online
-        # and environmental z-norms take the torch path; an implicit default would split the two by
-        # sqrt((n-1)/n).
-        reward_std = np.std(rewards_array, ddof=1) if len(rewards_array) > 1 else 1.0
-        advantages = (rewards_array - reward_mean) / (reward_std + STD_EPS)
-
-    elif method == "minmax":
-        reward_min = np.min(rewards_array)
-        reward_max = np.max(rewards_array)
-        if reward_max == reward_min:
-            advantages = np.zeros_like(rewards_array)
-        else:
-            advantages = 2 * (rewards_array - reward_min) / (reward_max - reward_min) - 1
-
-    elif method == "quantile_norm":
-        ranks = stats.rankdata(rewards_array)
-        # (ranks - 0.5)/n → uniform [0,1] avoiding exact boundaries, then to normal
-        uniform_scores = (ranks - 0.5) / len(ranks)
-        advantages = stats.norm.ppf(uniform_scores)
-
-    elif method == "quantile_uniform":
-        # A single or all-equal group has no spread to rank, and n-1 == 0 would divide by zero.
-        if len(rewards_array) == 1 or np.all(rewards_array == rewards_array[0]):
-            advantages = np.zeros(len(rewards_array))
-        else:
-            ranks = stats.rankdata(rewards_array)
-            uniform_scores = (ranks - 1) / (len(ranks) - 1)
-            advantages = 2 * uniform_scores - 1
-
-    elif method == "robust":
-        q75, q25 = np.percentile(rewards_array, [75, 25])
-        iqr = q75 - q25
-        median = np.median(rewards_array)
-        advantages = np.zeros_like(rewards_array) if iqr == 0 else (rewards_array - median) / iqr
-
-    else:
-        raise ValueError(f"Unknown advantage method: {method}")
-
-    if len(rewards_array) > 1:
-        if best_completion_emphasis == "auto":
-            # Scale emphasis with std: 3.0 at std=0 → 5.0 at std→∞. Population std (numpy's default),
-            # unlike the z_norm divisor above: this heuristic has no torch counterpart to match, and
-            # it multiplies the best row under every method, so aligning it here would also move the
-            # advantages of the rank/minmax methods.
-            reward_std = np.std(rewards_array)
-            emphasis_factor = 3.0 + 2.0 * reward_std / (1.0 + reward_std)
-        else:
-            emphasis_factor = float(best_completion_emphasis)
-
-        if emphasis_factor > 1.0:
-            max_reward = np.max(rewards_array)
-            best_mask = rewards_array == max_reward
-            advantages[best_mask] *= emphasis_factor
-
-    advantages = np.clip(advantages, -10.0, 10.0)
-
-    return advantages.tolist()
-
-
 def tokenize_prompt_completion(
     prompt: str,
     completion: str,
@@ -225,7 +137,6 @@ def tokenize_prompt_completion(
     *,
     max_prompt_length: int | None,
     max_completion_length: int | None,
-    is_encoder_decoder: bool,
     eos_token_ids: frozenset[int] = frozenset(),
 ) -> dict[str, list[int]]:
     """Tokenize one stored ``(prompt, completion)`` rollout under the two length budgets."""
@@ -255,9 +166,6 @@ def tokenize_prompt_completion(
     ):
         prompt_input_ids = [bos_token_id] + prompt_input_ids
 
-    if is_encoder_decoder and bos_token_id is not None:
-        completion_input_ids = [bos_token_id] + completion_input_ids if completion_input_ids else [bos_token_id]
-
     # EOS only within the budget: supervising it at a truncation cut teaches premature stopping.
     if lacks_terminator(completion_input_ids, tokenizer, eos_token_ids) and (
         not is_bounded_length(max_completion_length) or len(completion_input_ids) < max_completion_length
@@ -279,7 +187,6 @@ def tokenize_offline_grpo_rows(
     max_completion_length: int | None,
     advantage_method: str,
     best_completion_emphasis: float | str,
-    is_encoder_decoder: bool,
     eos_token_ids: frozenset[int] = frozenset(),
     drop_degenerate_groups: bool = False,
 ) -> dict[str, list]:
@@ -318,7 +225,6 @@ def tokenize_offline_grpo_rows(
                 processing_class,
                 max_prompt_length=max_prompt_length,
                 max_completion_length=max_completion_length,
-                is_encoder_decoder=is_encoder_decoder,
                 eos_token_ids=eos_token_ids,
             )
             # Raised here, inside the coordinated map, so every rank aborts: the collator is the one
@@ -418,7 +324,7 @@ class MultiGroupSampler(Sampler):
         return len(self.indices_sequence)
 
 
-class OfflineGRPOTrainer(ChunkedLogprobsCore, OfflineGRPOReferenceLifecycleMixin, DistributedTrainerMixin, Trainer):
+class OfflineGRPOTrainer(ChunkedLogprobsCore, OfflineGRPOReferenceMixin, DistributedTrainerMixin, Trainer):
     """Offline GRPO trainer for pre-computed-reward data (``prompt``/``completions``/``rewards``)
     under EP / TP / CP / PP (see ``_reject_pp_explicit_options`` for the PP-specific rejections).
 
@@ -483,6 +389,11 @@ class OfflineGRPOTrainer(ChunkedLogprobsCore, OfflineGRPOReferenceLifecycleMixin
         self._metrics = {"train": defaultdict(list), "eval": defaultdict(list)}
         self._sign_metric_buffer = {"train": defaultdict(list), "eval": defaultdict(list)}
 
+        if processing_class is None:
+            raise ValueError(
+                "OfflineGRPOTrainer requires processing_class: the stored prompts and completions are "
+                "tokenized with it at construction, and its pad id pads every batch."
+            )
         # A VLM ProcessorMixin keeps token ids on its inner tokenizer, not on itself.
         tokenizer = resolve_tokenizer(processing_class)
         self.padding_value = args.padding_value if args.padding_value is not None else tokenizer.pad_token_id
@@ -496,6 +407,10 @@ class OfflineGRPOTrainer(ChunkedLogprobsCore, OfflineGRPOReferenceLifecycleMixin
         # before model and dataset construction, not at the first microbatch or under PP alone.
         if self.loss_type not in LOSS_TYPES:
             raise ValueError(f"Unknown loss type: {self.loss_type!r}. Supported types: {list(LOSS_TYPES)}")
+        if self.advantage_method not in GROUP_ADVANTAGE_METHODS:
+            raise ValueError(
+                f"Unknown advantage_method: {self.advantage_method!r}. Supported: {list(GROUP_ADVANTAGE_METHODS)}"
+            )
         if args.policy_gradient_formulation not in PG_FORMULATIONS:
             raise ValueError(
                 f"Unknown policy_gradient_formulation: {args.policy_gradient_formulation!r}. "
@@ -511,9 +426,8 @@ class OfflineGRPOTrainer(ChunkedLogprobsCore, OfflineGRPOReferenceLifecycleMixin
         self.beta = args.kl_beta
         logger.info(f"Using loss type: {self.loss_type}")
         logger.info(f"Using PG formulation: {self.policy_gradient_formulation}")
-        self._precompute_reference = (
-            self.beta != 0.0
-            and self._reference_mode(model, parallelism_config, peft_config) is ReferenceMode.RUN_START
+        self._precompute_reference = self.sweeps_run_start_reference(
+            model, self.beta, parallelism_config, peft=peft_config is not None
         )
         reject_unsupported_reference_input(
             train_dataset,
@@ -522,9 +436,8 @@ class OfflineGRPOTrainer(ChunkedLogprobsCore, OfflineGRPOReferenceLifecycleMixin
             presharded=kwargs.get("dataset_presharded", False),
         )
 
-        # Read by ChunkedLogprobsCore (avoids full [B,T,vocab] logits). Inert under PP: the pipeline
-        # drives stages through the PP loss adapter and never calls _get_per_token_logps (the last
-        # stage still materializes its own logits plane — see _pp_loss_adapter).
+        # Read by ChunkedLogprobsCore (avoids full [B,T,vocab] logits); CP always scores through it.
+        # Refused under PP (_reject_pp_explicit_options), whose last stage keeps its own logits plane.
         self._use_chunked_grpo_logprobs = args.use_chunked_grpo_logprobs or (
             parallelism_config is not None and parallelism_config.is_cp_mode
         )
@@ -535,7 +448,7 @@ class OfflineGRPOTrainer(ChunkedLogprobsCore, OfflineGRPOReferenceLifecycleMixin
         self._reject_inert_max_length(args, parallelism_config)
         self._reject_pp_explicit_options(args, parallelism_config, peft_config, compute_metrics)
 
-        model, model_id = load_model_from_pretrained(
+        model, _ = load_model_from_pretrained(
             model, args, keep_fp32=parallelism_config is not None and parallelism_config.fp32_non_ep_params
         )
 
@@ -545,16 +458,10 @@ class OfflineGRPOTrainer(ChunkedLogprobsCore, OfflineGRPOReferenceLifecycleMixin
         if peft_config is not None:
             model, self._peft_has_been_casted_to_bf16 = prepare_peft_model(model, peft_config, args)
 
-        self.is_encoder_decoder = model.config.is_encoder_decoder
-        # The canonical predicate, not a raw ITT-mapping membership test: mistral4's ITT entry is a
-        # text-only quirk, and a remote-code VLM declaring vision_config is in no mapping at all.
-        self.is_vision_model = config_declares_multimodality(model.config)
-
-        if self.is_vision_model:
-            warnings.warn(
-                "Vision models are not fully supported in OfflineGRPOTrainer (no pixel_values)",
-                UserWarning,
-                stacklevel=2,
+        if model.config.is_encoder_decoder:
+            raise ValueError(
+                f"OfflineGRPOTrainer trains decoder-only models; {type(model).__name__} is an encoder-decoder. "
+                "The objective scores each completion as the continuation of its prompt in one causal sequence."
             )
 
         if args.disable_dropout:
@@ -570,28 +477,22 @@ class OfflineGRPOTrainer(ChunkedLogprobsCore, OfflineGRPOReferenceLifecycleMixin
         )
         model = dist_kwargs.pop("model")
 
-        if processing_class is None:
-            processing_class = AutoTokenizer.from_pretrained(model_id, padding_side="right")
-
         data_collator = (
             OfflineGRPOCPDataCollatorWithPadding(pad_token_id=self.padding_value, cp_size=parallelism_config.cp_size)
             if parallelism_config.is_cp_mode
             else OfflineGRPODataCollatorWithPadding(pad_token_id=self.padding_value)
         )
 
-        if args.remove_unused_columns:
-            args.remove_unused_columns = False
-            warnings.warn(
-                "OfflineGRPODataCollatorWithPadding requires remove_unused_columns=False (it reads "
-                "prompt/completion/reward columns the Trainer would otherwise strip); forcing it off. "
-                "Set it explicitly in your OfflineGRPOConfig.",
-                UserWarning,
-                stacklevel=2,
-            )
+        keep_all_dataset_columns(
+            args,
+            "OfflineGRPODataCollatorWithPadding requires remove_unused_columns=False (it reads "
+            "prompt/completion/reward columns the Trainer would otherwise strip); forcing it off. "
+            "Set it explicitly in your OfflineGRPOConfig.",
+        )
 
         original_columns = train_dataset.column_names
 
-        tokenize_num_proc = self._dataset_map_num_proc(args.dataset_num_proc)
+        tokenize_num_proc = resolve_map_num_proc(args.dataset_num_proc)
         # In fn_kwargs, not read off self: the map fn must stay picklable, and the cache key
         # fingerprints fn_kwargs.
         tokenize_kwargs = {
@@ -600,7 +501,6 @@ class OfflineGRPOTrainer(ChunkedLogprobsCore, OfflineGRPOReferenceLifecycleMixin
             "max_completion_length": self.max_completion_length,
             "advantage_method": self.advantage_method,
             "best_completion_emphasis": self.best_completion_emphasis,
-            "is_encoder_decoder": self.is_encoder_decoder,
             "eos_token_ids": resolve_eos_token_ids(
                 resolve_tokenizer(processing_class), getattr(model, "config", None)
             ),
@@ -757,11 +657,11 @@ class OfflineGRPOTrainer(ChunkedLogprobsCore, OfflineGRPOReferenceLifecycleMixin
         if parallelism_config is None or not parallelism_config.is_pp_mode:
             return
         if args.use_chunked_grpo_logprobs:
-            logger.warning(
-                "use_chunked_grpo_logprobs has NO EFFECT under pipeline parallelism: the pipeline drives "
+            raise ValueError(
+                "use_chunked_grpo_logprobs does nothing under pipeline parallelism: the pipeline drives "
                 "stages through the PP loss adapter and never calls _get_per_token_logps, so the last "
-                "stage still materializes its own [rows, max_length, vocab] logits plane. Lower "
-                "per_device_train_batch_size or raise pipeline_parallel_size to fit it instead."
+                "stage still materializes its own [rows, max_length, vocab] logits plane. Remove it, and "
+                "lower per_device_train_batch_size or raise pipeline_parallel_size to fit the plane."
             )
         reject_pp_compute_metrics(
             compute_metrics,
@@ -854,6 +754,18 @@ class OfflineGRPOTrainer(ChunkedLogprobsCore, OfflineGRPOReferenceLifecycleMixin
         )
 
     @classmethod
+    def sweeps_run_start_reference(
+        cls, model, kl_beta: float, parallelism_config: "ParallelismConfig | None", *, peft: bool
+    ) -> bool:
+        """Whether the run scores its KL reference once at run start: a full fine-tune with ``kl_beta``
+        set. ``model`` may still be a checkpoint id; ``peft`` is whether attention adapters wrap it."""
+        return (
+            kl_beta != 0.0
+            and not peft
+            and cls._reference_mode(model, parallelism_config, None) is ReferenceMode.RUN_START
+        )
+
+    @classmethod
     def requires_ref_model(
         cls, model, args: OfflineGRPOConfig, parallelism_config: "ParallelismConfig", peft_config
     ) -> bool:
@@ -908,8 +820,7 @@ class OfflineGRPOTrainer(ChunkedLogprobsCore, OfflineGRPOReferenceLifecycleMixin
                 rank=dp_rank,
                 world_size=dp_size,
                 shuffle=shuffle,
-                # HF's convention: data_seed decouples data order from the global seed when set.
-                seed=(self.args.data_seed if self.args.data_seed is not None else self.args.seed) if shuffle else 0,
+                seed=run_data_seed(self.args) if shuffle else 0,
             )
             if get_global_world_size() > 1:
                 # compute_loss gathers every batch: a rank with an extra batch blocks its peers.
@@ -970,21 +881,11 @@ class OfflineGRPOTrainer(ChunkedLogprobsCore, OfflineGRPOReferenceLifecycleMixin
 
         if eval_dataset is None or isinstance(eval_dataset, str) or eval_dataset is self.eval_dataset:
             return self._cached_eval_dataloader(eval_dataset, build)
-        # An explicit dynamic dataset is not the constructor's "eval" split. Persistent workers
-        # must retain its prepared loader separately, including its reference-column fingerprint.
-        cache_key = f"eval/{eval_dataset._fingerprint}" if isinstance(eval_dataset, datasets.Dataset) else None
-        if self.args.dataloader_persistent_workers and cache_key is not None:
-            reject_divergent_settings(
-                {"evaluation_cache_key": cache_key},
-                "Offline GRPO evaluation loader",
-                "Every rank must prepare the same dynamic evaluation dataset.",
-            )
-            if rank_consensus(cache_key in self._eval_dataloaders)[0]:
-                return self._eval_dataloaders[cache_key]
-        prepared = build(eval_dataset)
-        if self.args.dataloader_persistent_workers and cache_key is not None:
-            self._eval_dataloaders[cache_key] = prepared
-        return prepared
+        if isinstance(eval_dataset, datasets.Dataset):
+            # Not the constructor's "eval" split: keyed by its fingerprint, which an attached reference
+            # column derives from the scores' digest.
+            return self._cached_eval_dataloader(eval_dataset, build, key=f"eval/{eval_dataset._fingerprint}")
+        return build(eval_dataset)
 
     def _get_last_hidden_state(self, unwrapped_model, input_ids, attention_mask, logits_to_keep):
         """Backbone hidden states for the last ``logits_to_keep`` completion positions (text-only).
@@ -996,6 +897,13 @@ class OfflineGRPOTrainer(ChunkedLogprobsCore, OfflineGRPOReferenceLifecycleMixin
         backbone = base_transformers_model(unwrapped_model).base_model
         hidden = backbone(input_ids=input_ids, attention_mask=attention_mask, use_cache=False).last_hidden_state
         return hidden[:, :-1, :][:, -logits_to_keep:, :]  # (B, logits_to_keep, H)
+
+    @property
+    def _scores_full_logits(self) -> bool:
+        """Whether log-probs come from TRL's ``selective_log_softmax`` over full logits, which keeps the
+        logits' dtype, the run's compute dtype. The chunked kernel (always on under CP) and the
+        pipeline's last-stage loss score in fp32."""
+        return not self._use_chunked_grpo_logprobs and self._pp_runtime is None
 
     def _get_per_token_logps(
         self,
@@ -1013,9 +921,7 @@ class OfflineGRPOTrainer(ChunkedLogprobsCore, OfflineGRPOReferenceLifecycleMixin
         ``advantages``, which it requires (:func:`clamp_negative_advantage_logps`); with no floor both
         are the same tensor.
         """
-        if self._use_chunked_grpo_logprobs:
-            selected_logps, _ = self._chunked_logps(model, input_ids, attention_mask, logits_to_keep)
-        else:
+        if self._scores_full_logits:
             # +1 because the last logit (next-token pred) is excluded below.
             logits = model(
                 input_ids=input_ids,
@@ -1027,6 +933,8 @@ class OfflineGRPOTrainer(ChunkedLogprobsCore, OfflineGRPOReferenceLifecycleMixin
             input_ids = input_ids[:, -logits_to_keep:]
             logits = logits[:, -logits_to_keep:]  # restrict to completion tokens
             selected_logps = selective_log_softmax(logits, input_ids)
+        else:
+            selected_logps, _ = self._chunked_logps(model, input_ids, attention_mask, logits_to_keep)
 
         return clamp_negative_advantage_logps(selected_logps, advantages, min_log_prob), selected_logps
 
@@ -1067,20 +975,14 @@ class OfflineGRPOTrainer(ChunkedLogprobsCore, OfflineGRPOReferenceLifecycleMixin
         ref_per_token_logps = ref_per_token_logps_unclamped = None
         if self.beta != 0.0:
             if self._precompute_reference:
-                with torch.no_grad():
-                    ref_per_token_logps_unclamped = inputs.get(REF_PER_TOKEN_LOGPS_COLUMN)
-                    if ref_per_token_logps_unclamped is None:
-                        raise RuntimeError("Offline GRPO needs the checkpointed run-start reference on every row")
-                    ref_per_token_logps = clamp_negative_advantage_logps(
-                        ref_per_token_logps_unclamped, advantages, current_min_log_prob
-                    )
+                ref_per_token_logps_unclamped = inputs.get(REF_PER_TOKEN_LOGPS_COLUMN)
+                if ref_per_token_logps_unclamped is None:
+                    raise RuntimeError("Offline GRPO needs the checkpointed run-start reference on every row")
+                ref_per_token_logps = clamp_negative_advantage_logps(
+                    ref_per_token_logps_unclamped, advantages, current_min_log_prob
+                )
             else:
-                # A run that holds no reference model scores it as the PEFT policy with its adapters off.
-                if self.ref_model is not None:
-                    reference, adapters_off = self.ref_model, nullcontext()
-                else:
-                    reference, adapters_off = self.model, self.accelerator.unwrap_model(self.model).disable_adapter()
-                with torch.no_grad(), adapters_off:
+                with torch.no_grad(), reference_policy(self) as reference:
                     ref_per_token_logps, ref_per_token_logps_unclamped = self._get_per_token_logps(
                         reference,
                         input_ids,
@@ -1160,9 +1062,11 @@ class OfflineGRPOTrainer(ChunkedLogprobsCore, OfflineGRPOReferenceLifecycleMixin
 
     def _reference_settings(self) -> dict:
         """Values that affect run-start raw reference scores, excluding the live KL clamp."""
+        precision = resolve_training_dtype(self.args) if self._scores_full_logits else torch.float32
         return {
             "model_type": self.model.config.model_type,
             "temperature": self.temperature,
+            LOGPROB_PRECISION_KEY: str(precision).removeprefix("torch."),
         }
 
     def _precompute_reference_logps(self, dataset, split: str):
@@ -1198,8 +1102,13 @@ class OfflineGRPOTrainer(ChunkedLogprobsCore, OfflineGRPOReferenceLifecycleMixin
             )
         )
         guard.reject()
+        # A rank with no batch has nothing to replay, while its peers head into the batch-count
+        # all-reduce below: refuse on every rank before it.
         reject_across_ranks(
-            f"'{split}' has no reference rows on data-parallel rank {dp_rank}" if not len(loader) else None,
+            None
+            if len(loader)
+            else f"the '{split}' dataset leaves data-parallel rank {dp_rank} no rows to score the KL reference "
+            f"over ({rows} rows across {dp_size} replicas); the dataset is too small for this world size",
             f"Preparing the '{split}' reference sweep",
             exc_type=ValueError,
         )
@@ -1317,8 +1226,7 @@ class OfflineGRPOTrainer(ChunkedLogprobsCore, OfflineGRPOReferenceLifecycleMixin
             [mask.sum(dim=1, dtype=torch.float32)]
             + [(sample_values[key].detach() * mask).sum(dim=1, dtype=torch.float32) for key in keys]
         )
-        cp_config = getattr(self, "cp_config", None) if self.parallelism_config.is_cp_mode else None
-        totals = cp_sum_rows(totals, cp_config)
+        totals = cp_sum_rows(totals, self.cp_config if self.parallelism_config.is_cp_mode else None)
         counts = totals[0].clamp(min=1)
         buffer = self._sign_metric_buffer["train" if self.model.training else "eval"]
         positive = advantages.detach() >= 0

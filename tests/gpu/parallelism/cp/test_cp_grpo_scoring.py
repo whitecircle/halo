@@ -2,7 +2,7 @@
 """Offline-GRPO scoring equivalence on Qwen3 for CP1, CP2 and CP4.
 
 Exercises the production scoring and reduction helpers through real Ulysses attention,
-then applies Halo's mean gradient sync explicitly.
+then applies the toolkit's mean gradient sync explicitly.
 
 Run on four GPUs: torchrun --nproc_per_node=4 tests/gpu/parallelism/cp/test_cp_grpo_scoring.py
 """

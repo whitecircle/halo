@@ -20,7 +20,8 @@ def create_benchmark_parser(
     """Create ArgumentParser with common benchmark arguments.
 
     Common args: --model, --model_path, --attn_implementation, --no_liger,
-                 --ep, --seq, --steps, --warmup, --batch_size, --num_samples.
+                 --ep, --seq, --steps, --warmup, --batch_size, --grad_accum, --pp,
+                 --pp_microbatches, --num_samples.
 
     Returns parser that benchmarks can extend with custom args.
     """
@@ -88,16 +89,14 @@ def create_benchmark_parser(
         "--grad_accum",
         type=int,
         default=1,
-        help="Gradient accumulation steps. Under PP leave at 1 and set --pp_microbatches instead "
-        "(the pipeline's microbatches ARE the accumulation); >1 is for matching a baseline's "
-        "global batch to a PP run's.",
+        help="Gradient accumulation steps",
     )
     parser.add_argument(
         "--pp",
         type=int,
         default=1,
-        help="Pipeline parallel size (stages). Splits decoder layers into pp contiguous stages; "
-        "data_parallel_size divides by pp (a whole pipeline chain consumes one batch).",
+        help="Pipeline parallel size. Pipeline parallelism is not yet available in this release; "
+        "a benchmark that reads this rejects a value above 1 before the model loads.",
     )
     parser.add_argument(
         "--pp_microbatches",
@@ -116,12 +115,10 @@ def create_benchmark_parser(
 
 
 def pp_topology_kwargs(pp_size: int, world_size: int) -> dict:
-    """ParallelismConfig topology kwargs for benchmarking PP on a single physical NVLink domain.
+    """ParallelismConfig topology kwargs for a benchmark's ``--pp``: none at ``--pp 1``.
 
-    When the PP engine lands, this simulates one NVLink domain per stage (PP requires stage
-    boundaries on NVLink-domain boundaries, which one 8-GPU domain cannot satisfy for pp > 1), so
-    each stage owns a whole simulated domain and every intra-stage EP/FSDP group stays NVLink-local.
-    The benchmarks build ``ParallelismConfig`` directly, bypassing the config-time rejection in
+    Pipeline parallelism is not yet available in this release. The benchmarks build
+    ``ParallelismConfig`` directly, bypassing the config-time rejection in
     ``parallelism_config_from_args``, so this helper rejects ``--pp > 1`` up front rather than
     failing after model load.
     """

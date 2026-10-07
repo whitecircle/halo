@@ -8,6 +8,8 @@
   nothing, a pre-processed dataset is used as baked, and self-distillation refuses packing outright.
 * Environmental GRPO pins ``max_completion_length`` to ``rollout_max_tokens``; a third value would be
   overwritten. The value equal to either the field default or ``rollout_max_tokens`` stays legal.
+* SFT refuses ``packing`` / ``padding_free`` for a checkpoint with compressed-KV layers off the
+  config its modality probe already read, before the training setup and the model load.
 
 Each refusal must fire before the distributed init and the model load; the anti-over-rejection
 cases reach the first stubbed step past the guards instead.
@@ -18,12 +20,15 @@ Usage:
 
 import contextlib
 import sys
+from functools import partial
 from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
 
 import pytest
+from transformers.models.deepseek_v4 import DeepseekV4Config
 
+from tests.common.models import TINY_DSV4_CONFIG
 from tests.common.utils import load_script_module
 
 _REFUSED = "does not support these config fields"
@@ -98,7 +103,7 @@ def _run_sft_to_dataset(tmp_path, config_body: str, *, preprocessed: bool) -> No
         config_body,
         tmp_path,
         init_distributed=lambda: None,
-        is_vlm_model=lambda *args, **kwargs: False,
+        probe_checkpoint=lambda *args, **kwargs: (None, False),
         init_training_script=lambda *args, **kwargs: SimpleNamespace(parallelism_config=None),
         load_script_datasets=lambda *args, **kwargs: ((None, preprocessed), False),
         resolve_vlm_run=_stop,
@@ -114,6 +119,28 @@ def test_sft_refuses_eval_packing_on_a_preprocessed_dataset(tmp_path):
 def test_sft_keeps_eval_packing_on_a_raw_dataset(tmp_path):
     with pytest.raises(_PastTheGuards):
         _run_sft_to_dataset(tmp_path, "packing: true\nmax_length: 64\neval_packing: false\n", preprocessed=False)
+
+
+@pytest.mark.parametrize("config_body", ["packing: true\nmax_length: 64\n", "padding_free: true\n"])
+@pytest.mark.parametrize("compressed", [True, False], ids=["compressed-kv", "masked-attention-only"])
+def test_sft_refuses_multi_document_rows_on_compressed_kv_before_the_setup(config_body, compressed, tmp_path):
+    layer_types = TINY_DSV4_CONFIG["layer_types"] if compressed else ["sliding_attention"] * 3
+    checkpoint_config = DeepseekV4Config(**{**TINY_DSV4_CONFIG, "layer_types": layer_types})
+    run = partial(
+        _run_main,
+        "sft.py",
+        config_body,
+        tmp_path,
+        init_distributed=lambda: None,
+        probe_checkpoint=lambda *args, **kwargs: (checkpoint_config, False),
+        init_training_script=_stop,
+    )
+    if compressed:
+        with pytest.raises(ValueError, match="layers pool KV over windows cut at fixed indices"):
+            run()
+    else:
+        with pytest.raises(_PastTheGuards):
+            run()
 
 
 # Self-distillation: before init_training_script.
@@ -136,6 +163,59 @@ def test_self_distill_refuses_trl_dataset_prep_knobs(config_body, knob, tmp_path
 def test_self_distill_accepts_the_defaults(tmp_path):
     with pytest.raises(_PastTheGuards):
         _run_main("distillation/self_distill.py", "dataset_text_field: text\n", tmp_path, init_training_script=_stop)
+
+
+def test_self_distill_refuses_a_loss_type_its_own_cross_entropy_is_not(tmp_path):
+    """The trainer computes its own nll, so TRL's loss_type never reaches the loss: ``dft`` would be
+    silently ignored."""
+    with pytest.raises(ValueError, match="loss_type='dft' is not implemented for self-distillation"):
+        _run_main("distillation/self_distill.py", "loss_type: dft\n", tmp_path, init_training_script=_stop)
+
+
+def test_self_distill_checks_a_separate_reference_tokenizer_before_any_load(tmp_path):
+    """Only tokenizer files are read, so a mismatched anchor repo is refused before the dataset and
+    both model loads."""
+    parallelism = SimpleNamespace(is_ep_mode=False, is_tp_mode=False)
+    vocabs = {"stub/qwen3-4b": {"a": 0, "b": 1}, "org/other-reference": {"a": 1, "b": 0}}
+    tokenizers = SimpleNamespace(
+        from_pretrained=lambda path, **_: SimpleNamespace(get_vocab=lambda: dict(vocabs[path]))
+    )
+    stubs = {
+        "init_training_script": lambda *a, **k: SimpleNamespace(parallelism_config=parallelism),
+        "AutoTokenizer": tokenizers,
+        "load_script_datasets": _stop,
+    }
+    with pytest.raises(ValueError, match="disagree on"):
+        _run_main(
+            "distillation/self_distill.py",
+            "reference_kl_coef: 0.1\nreference_model_name_or_path: org/other-reference\n",
+            tmp_path,
+            **stubs,
+        )
+    with pytest.raises(_PastTheGuards):
+        _run_main("distillation/self_distill.py", "reference_kl_coef: 0.1\n", tmp_path, **stubs)
+
+
+def test_self_distill_refuses_confidence_weighting_over_a_presharded_load(tmp_path):
+    """The weights divide by the train split's mean confidence; per-rank shards would each divide by
+    their own, so a row's weight would depend on the rank that drew it."""
+    parallelism = SimpleNamespace(is_ep_mode=False, is_tp_mode=False)
+    runtime = SimpleNamespace(parallelism_config=parallelism)
+    with pytest.raises(ValueError, match="presharded dataset"):
+        _run_main(
+            "distillation/self_distill.py",
+            "confidence_field: conf\n",
+            tmp_path,
+            init_training_script=lambda *a, **k: runtime,
+            load_script_datasets=lambda *a, **k: (None, True),
+        )
+
+
+@pytest.mark.parametrize("loss_type", ["nll", "chunked_nll"])
+def test_self_distill_accepts_both_spellings_of_its_own_nll(loss_type, tmp_path):
+    """TRL's default either side of 1.7, and the loss the trainer computes."""
+    with pytest.raises(_PastTheGuards):
+        _run_main("distillation/self_distill.py", f"loss_type: {loss_type}\n", tmp_path, init_training_script=_stop)
 
 
 # Environmental GRPO: before init_training_script.

@@ -13,8 +13,8 @@ queue silently discards completed rollouts. The contract:
 - ``_submit_for_prefetch`` counts and warns on a queue-full skip instead of suppressing it;
 - the worker delivers exactly one output item per submission (results or a failure marker), so the
   trainer's in-flight accounting never strands a blocking consumer;
-- a WEDGED pipeline is recorded in ``_batch_build_error`` and fenced by
-  ``_raise_batch_error_uniformly``, never raised on the one rank that hit it — prefetch state is
+- a WEDGED pipeline is recorded on the ``_batch_errors`` fence and raised by its
+  ``reject``, never on the one rank that hit it — prefetch state is
   per-rank, so a lone raise between two collectives parks every peer until the NCCL watchdog;
 - a checkpoint carries the rounds submitted but not trained, and a resume submits them first, so a
   resumed run trains the same batch sequence as an uninterrupted one;
@@ -25,7 +25,9 @@ queue silently discards completed rollouts. The contract:
 """
 
 import logging
+import os
 import queue
+import stat
 import threading
 import types
 from collections import deque
@@ -35,6 +37,7 @@ import torch
 
 import src.trainers.grpo.rollout.async_rollouts as async_mod
 from src.configs.async_training_config import AsyncTrainingConfig
+from src.trainers.grpo.environmental import BatchBuildFence
 from src.trainers.grpo.environmental import DistributedAsyncEnvironmentalGRPOTrainer as _T
 from src.trainers.grpo.rollout.async_rollouts import AsyncRolloutMixin
 from src.trainers.mixins.checkpointing import CheckpointingMixin
@@ -49,8 +52,7 @@ class _Host(AsyncRolloutMixin, CheckpointingMixin):
 
     _generate_and_score_completions_base = _T._generate_and_score_completions_base
     _extract_prompts_and_contexts = _T._extract_prompts_and_contexts
-    _record_batch_error = _T._record_batch_error
-    _raise_batch_error_uniformly = _T._raise_batch_error_uniformly
+    eval_split_rows = _T.eval_split_rows
 
     def __init__(self, buffer_size: int = 1):
         self.model = types.SimpleNamespace(training=True)
@@ -60,7 +62,7 @@ class _Host(AsyncRolloutMixin, CheckpointingMixin):
         self.state = types.SimpleNamespace(global_step=0)
         self.args = types.SimpleNamespace(report_to=[])
         self._group_random_effort = False
-        self._batch_build_error = None
+        self._batch_errors = BatchBuildFence()
         self._prefetch_enabled = True
         self._prefetch_queue = queue.Queue(maxsize=buffer_size)
         self._prefetch_input_queue = queue.Queue(maxsize=buffer_size + 1)
@@ -85,11 +87,15 @@ class _Host(AsyncRolloutMixin, CheckpointingMixin):
     def _broadcast_rollouts_for_tp(self, rollout_results):
         return rollout_results
 
-    def _build_training_tensors(self, rollout_results, device, mode):
+    def _episode_reasoning_tokens(self, rollout_results):
+        return [[] for _ in rollout_results]
+
+    def _build_training_tensors(self, rollout_results, device, mode, num_padding, reasoning_tokens):
+        assert num_padding == 0, "a train round is never padded"
         self.trained.append(list(rollout_results))
         return {"rollouts": rollout_results}
 
-    def _log_rollout_metrics(self, results, mode):
+    def _log_rollout_metrics(self, results, mode, reasoning_tokens):
         pass
 
     def round(self, prompts: list[str]):
@@ -187,10 +193,10 @@ def test_wedged_pipeline_is_recorded_for_the_uniform_fence_not_raised():
         mp.setattr(async_mod, "_PREFETCH_SUBMIT_TIMEOUT_S", 0.01)
         assert host._wait_for_inflight_prefetch() is None, "the caller must fall back to sync collection"
 
-    assert "wedged" in (host._batch_build_error or ""), "the wedge must be recorded for the fence to raise"
+    assert "wedged" in (host._batch_errors.reason or ""), "the wedge must be recorded for the fence to raise"
     # The fence is what fails the job — and it fails on every rank, not just this one.
     with pytest.raises(ValueError, match="wedged"):
-        host._raise_batch_error_uniformly()
+        host._batch_errors.reject()
 
 
 def test_input_queue_full_skip_is_counted_not_silent():
@@ -222,6 +228,9 @@ class _LifecycleHost:
     """Runs the REAL component-init / generation-start flow with Ray, the manager and the push stubbed."""
 
     _init_async_components = _T._init_async_components
+    _form_weight_sync_group = _T._form_weight_sync_group
+    _weight_sync_group_formed = False
+    _start_rank_rollout_components = _T._start_rank_rollout_components
     _check_eval_round_fits_cap = _T._check_eval_round_fits_cap
     _start_rollout_generation = _T._start_rollout_generation
 
@@ -233,6 +242,7 @@ class _LifecycleHost:
             num_rollout_workers=2,
             max_concurrent_rollouts=2,
             eval_rollout_batch_size=None,
+            isr_engine_reference=False,
             get_server_urls=lambda: ["http://10.0.0.1:8000"],
             get_rollout_config=lambda stop_token_ids=None, reasoning_end_token_id=None: {},
         )
@@ -247,13 +257,11 @@ class _LifecycleHost:
         self._rollout_generation_started = False
         self._last_sync_attempt_step = -1
         self._resumed_prefetch_rounds = []
+        self._rollout_stop_token_ids = None
         self.callbacks: list = []
         # What the engines were handed, in order — the fingerprint of WHICH weights they serve.
         self.pushed: list[float] = []
         self.prefetch_starts = 0
-
-    def _resolve_rollout_stop_token_ids(self):
-        return None
 
     def _resolve_reasoning_end_token_id(self):
         return None
@@ -284,7 +292,6 @@ def test_generation_starts_only_after_the_resume_restore(monkeypatch):
     host = _LifecycleHost(weight)
     monkeypatch.setattr(async_mod, "ray", types.SimpleNamespace(is_initialized=lambda: True, init=lambda **kw: None))
     monkeypatch.setattr(async_mod, "RolloutManager", lambda **kwargs: _StubManager())
-    monkeypatch.setattr(async_mod, "broadcast_from_rank0", lambda value: value)
 
     try:
         host._init_async_components()
@@ -393,6 +400,29 @@ def test_a_failed_save_leaves_no_file_a_resume_would_read(tmp_path):
     assert list(tmp_path.iterdir()) == []
 
 
+def test_the_pending_rounds_are_durable_before_the_checkpoint_counts_as_written(tmp_path, monkeypatch):
+    """Synced before the rename and the directory after, like every other sidecar: unsynced, a crash
+    can leave the checkpoint a renamed but empty file after older checkpoints have rotated away."""
+    events = []
+    real_fsync, real_replace = os.fsync, os.replace
+
+    def recording_fsync(descriptor):
+        events.append("directory_sync" if stat.S_ISDIR(os.fstat(descriptor).st_mode) else "file_sync")
+        real_fsync(descriptor)
+
+    def recording_replace(source, destination):
+        real_replace(source, destination)
+        events.append("rename")
+
+    monkeypatch.setattr(os, "fsync", recording_fsync)
+    monkeypatch.setattr(os, "replace", recording_replace)
+    host = _Host()
+    host._prefetch_pending = _pending("b2")
+    host._persist_trainer_sidecars(str(tmp_path))
+
+    assert events == ["file_sync", "rename", "directory_sync"]
+
+
 class _LoadHost(CheckpointingMixin):
     """The mixin's resume entry with the weight loader and the bias restore stubbed out."""
 
@@ -474,10 +504,10 @@ _TWO_ENGINES = [{"url": "http://s0:8000"}, {"url": "http://s1:8000"}]
 def test_prefetch_is_disabled_whenever_a_single_engine_serves(server_configs):
     """One engine — however it is spelled — must turn prefetch off.
 
-    A one-entry ``rollout_server_configs`` is a single server dressed as a list: it stops serving for
-    the whole weight sync, so there is nothing to overlap against, and the rolling sync that prefetch
-    selects would leave ZERO servers live instead of N-1 while the prefetch thread keeps posting
-    rollouts into the paused engine.
+    A one-entry ``rollout_server_configs`` is a single server dressed as a list: the gate counts
+    servers, not spellings, so the list must not re-enable what the URL spelling disables. That one
+    engine is paused for every push, so a prefetched round would only sit frozen (vLLM) or be aborted
+    (SGLang) across it.
     """
     host = _async_state(server_configs)
     assert host._prefetch_enabled is False

@@ -52,7 +52,7 @@ from scripts.inference._common import add_prompt_field_args
 from scripts.inference.playground import gradio_environment_playground
 from scripts.inference.reward_model import _common as reward_model_common
 from scripts.inference.reward_model._common import build_generation_parser
-from src.inference.openai_client import DEFAULT_LOCAL_BASE_URL
+from src.inference.endpoints import DEFAULT_LOCAL_BASE_URL
 from tests.common.ports import free_port
 from tests.common.utils import load_script_module
 
@@ -166,7 +166,7 @@ def test_a_gradio_app_publishes_nothing_by_default(app):
     own tunnel. Publishing stays possible, on the explicit flag.
 
     Read off the app's real parser, since the block is declared once in
-    ``scripts/inference/_common.py``: a source-level literal is no longer the contract.
+    ``scripts/inference/_common.py``: a source-level literal is not the contract.
     """
     parser = _gradio_app(app).build_parser()
 
@@ -235,8 +235,8 @@ def _playground():
 
 
 def test_the_environment_playground_key_defaults_to_the_vllm_placeholder(monkeypatch):
-    """``AsyncOpenAI`` raises on ``api_key=None``, so a ``None`` default made every run against the
-    keyless local server the module's own usage block documents fail at client construction. The
+    """``AsyncOpenAI`` raises on ``api_key=None``, so a ``None`` default would fail every run against
+    the keyless local server the module's own usage block documents at client construction. The
     sibling gradio apps default to the served placeholder; this one must too."""
     mod = _playground()
     monkeypatch.delenv("VLLM_API_KEY", raising=False)
@@ -407,7 +407,7 @@ def test_the_local_endpoint_default_has_one_home():
     """One spelling of the value that decides whether a run's conversations stay on this host.
 
     Every CLI that defaults an endpoint takes it from ``add_openai_endpoint_args``, which reads
-    ``src.inference.openai_client``'s constant; a re-declaration anywhere under ``scripts/`` is a
+    ``src.inference.endpoints``'s constant; a re-declaration anywhere under ``scripts/`` is a
     second source of truth.
     """
     assert add_openai_endpoint_args(argparse.ArgumentParser()).get_default("base_url") is DEFAULT_LOCAL_BASE_URL

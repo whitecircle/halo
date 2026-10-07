@@ -33,12 +33,12 @@ import torch.nn as nn
 from accelerate import PartialState
 from peft import LoraConfig, PeftModel, get_peft_model
 from safetensors.torch import load_file, save_file
-from transformers import AutoConfig, AutoModelForCausalLM
+from transformers import AutoConfig, AutoModelForCausalLM, TrainerState
 
+import src.distributed.checkpoint.ep_save as saving_mod
 import src.distributed.checkpoint.loader as loader_mod
 import src.distributed.checkpoint.peft as peft_mod
 import src.distributed.checkpoint.save as save_mod
-import src.distributed.expert_parallel.saving as saving_mod
 import src.trainers.mixins.checkpointing as checkpointing_mod
 from src.checkpoint.adapters import EXPERT_LORA_PEFT_TYPE, MIXED_EXPERT_LORA_PEFT_TYPE
 from src.checkpoint.config_export import LOADED_WEIGHTS_FROM_ATTR
@@ -58,6 +58,7 @@ from src.distributed.checkpoint.save import save_resume_adapter
 from src.distributed.expert_parallel.config import ExpertLoraSpec
 from src.trainers.mixins.base import DistributedTrainerMixin
 from src.training.environment import _classify_resume_checkpoint, resolve_resume_weights_source
+from tests.common.base_save import BaseTrainerSave
 from tests.common.ep_stubs import StubEPLayerBase
 from tests.common.parallelism import make_parallelism_config
 from tests.common.peft_helpers import randomize_adapters
@@ -241,33 +242,24 @@ def test_a_failed_adapter_write_leaves_no_marker(tmp_path, monkeypatch):
     assert resume_adapter_dir(checkpoint) is None
 
 
-class _StepSave:
-    """Stands in for HF's ``Trainer._save_checkpoint``: rewrites the step's weights and trainer state
-    in place, as a resumed run saving a step it already saved does."""
-
-    def _save_checkpoint(self, model, trial):
-        checkpoint = os.path.join(self.run_dir, f"checkpoint-{self.state.global_step}")
-        _merged_checkpoint(checkpoint, marked=False)
-        with open(os.path.join(checkpoint, "trainer_state.json"), "w") as fh:
-            json.dump({"global_step": self.state.global_step, "trajectory": self.trajectory}, fh)
-
-
-class _RunTrainer(DistributedTrainerMixin, _StepSave):
-    """The real ``_save_checkpoint`` over a stub base save, merge-on-save or not."""
+class _RunTrainer(DistributedTrainerMixin, BaseTrainerSave):
+    """The real ``_save_checkpoint`` over HF's, merge-on-save or not: the base save rewrites the step's
+    weights and trainer state in place, as a resumed run saving a step it already saved does. The
+    trajectory a save belongs to is its trainer state's log history."""
 
     def __init__(self, run_dir, trajectory: str, *, merge_expert_lora_on_save: bool = True):
         self.run_dir = run_dir
-        self.trajectory = trajectory
-        self.args = SimpleNamespace(save_total_limit=None, save_only_model=True, should_save=True)
-        self.state = SimpleNamespace(global_step=3, best_model_checkpoint=None)
+        self.args = SimpleNamespace(save_total_limit=None, save_only_model=True, should_save=True, push_to_hub=False)
+        self.state = TrainerState(global_step=3, log_history=[{"trajectory": trajectory}])
         self.parallelism_config = SimpleNamespace(
             is_tp_mode=False, merge_expert_lora_on_save=merge_expert_lora_on_save
         )
         self._fsdp_wrapped = True
         self.lr_scheduler = None
 
-    def _get_output_dir(self, trial=None):
-        return self.run_dir
+    def save_model(self, output_dir=None, _internal_call=False):
+        _merged_checkpoint(output_dir, marked=False)
+        self._mark_model_save_collectives_done()
 
     def _checkpoint_context(self):
         return _save_context(_ExpertOnlyModel())
@@ -282,9 +274,18 @@ def _abandoned_merged_step(run_dir: str, monkeypatch) -> str:
     return checkpoint
 
 
-def _assert_resaved_unmarked(checkpoint: str) -> None:
-    with open(os.path.join(checkpoint, "trainer_state.json")) as fh:
-        assert json.load(fh)["trajectory"] == "resumed", "premise: the re-save rewrote the step's state"
+def _assert_resaved_unmarked(checkpoint: str, *, completed: bool) -> None:
+    """``completed``: the re-save finished, so its trainer state is published; a stopped one keeps it
+    withheld, which is what makes resume detection pass the step over."""
+    state_file = "trainer_state.json" if completed else ".trainer_state.json.uncommitted"
+    with open(os.path.join(checkpoint, state_file)) as fh:
+        assert json.load(fh)["log_history"] == [{"trajectory": "resumed"}], (
+            "premise: the re-save rewrote the step's state"
+        )
+    if not completed:
+        assert not os.path.exists(os.path.join(checkpoint, "trainer_state.json")), (
+            "the stopped re-save publishes a trainer state that vouches for it"
+        )
     assert resume_adapter_dir(checkpoint) is None, "the abandoned run's marker survived the re-save"
     assert _classify_resume_checkpoint(checkpoint) == "full"
 
@@ -294,7 +295,7 @@ def test_a_resave_torn_before_its_adapter_leaves_the_step_unmarked(tmp_path, mon
     abandoned trajectory wrote. If that save stops after the new weights and trainer state but before
     the new adapter, the old marker must not survive: it would resume the abandoned run's adapter
     beside this run's state. Unmarked, the loader refuses the checkpoint as a merged one without its
-    adapter instead."""
+    adapter, and its withheld trainer state keeps resume detection from picking it at all."""
     checkpoint = _abandoned_merged_step(str(tmp_path), monkeypatch)
 
     def full_disk(*args, **kwargs):
@@ -304,7 +305,7 @@ def test_a_resave_torn_before_its_adapter_leaves_the_step_unmarked(tmp_path, mon
     with pytest.raises(OSError, match="No space left"):
         _RunTrainer(str(tmp_path), "resumed")._save_checkpoint(model=None, trial=None)
 
-    _assert_resaved_unmarked(checkpoint)
+    _assert_resaved_unmarked(checkpoint, completed=False)
 
 
 def test_a_resave_by_a_run_that_writes_no_marker_removes_the_old_one(tmp_path, monkeypatch):
@@ -315,12 +316,12 @@ def test_a_resave_by_a_run_that_writes_no_marker_removes_the_old_one(tmp_path, m
 
     _RunTrainer(str(tmp_path), "resumed", merge_expert_lora_on_save=False)._save_checkpoint(model=None, trial=None)
 
-    _assert_resaved_unmarked(checkpoint)
+    _assert_resaved_unmarked(checkpoint, completed=True)
 
 
 def test_mixed_resume_adapter_round_trips_through_the_adapter_restore(tmp_path, monkeypatch):
     """A mixed run's resume adapter is ``PeftAdapterSaver``'s mixed artifact, and the restore reads it
-    back bit-equal onto fresh adapters — the resume that merge-on-save checkpoints could not do."""
+    back bit-equal onto fresh adapters."""
     monkeypatch.setattr(peft_mod, "gather_ep_lora_adapters", lambda model, retain: dict(EXPERT_STATE))
     trained = _tiny_peft_model(seed=1)
     randomize_adapters(trained, dtype=torch.bfloat16)  # on the bf16 grid, so the adapter file's cast is exact
@@ -486,7 +487,7 @@ def test_an_unmarked_merged_checkpoint_refuses_an_expert_only_adapter_run(tmp_pa
 
 def test_an_unmarked_full_checkpoint_still_resumes_a_full_fine_tune(tmp_path):
     """The other half: a full fine-tune built from its checkpoint trains no adapters, so the same
-    layout resumes as before."""
+    layout resumes as an ordinary full checkpoint."""
     checkpoint = _merged_checkpoint(tmp_path / "checkpoint-3", marked=False)
     model = _built_from(nn.Linear(4, 4), checkpoint)
 

@@ -18,9 +18,9 @@ Prerequisites:
         --weight-transfer-config '{"backend": "nccl"}'
 
 One leg per invocation, and ``--mode`` is required: each leg binds its own trainer-side
-weight-transfer port and holds it for the life of the process — only ``close_communicator`` frees it
-(``src/distributed/nccl/clients/vllm.py``), and a leg that trains to completion never calls it — and
-the environmental legs additionally stand up Ray actors. The manifest's args_matrix gives each leg
+weight-transfer port — the online legs hold it until the client's atexit ``close_communicator``
+(``src/distributed/nccl/clients/vllm.py``), the environmental legs close it when ``train()`` ends and
+additionally stand up Ray actors. The manifest's args_matrix gives each leg
 its own invocation; there is no mode that runs several. Every leg first checks server connectivity.
 
 Usage:
@@ -28,7 +28,7 @@ Usage:
     CUDA_VISIBLE_DEVICES=1 torchrun --nproc_per_node=1 \
         tests/gpu/trainers/grpo/test_online_grpo_vllm_e2e.py --mode online
 
-    # Rolling multi-server sync: one server per URL, each serving the same model on its own GPU.
+    # Pool push: one server per URL, each serving the same model on its own GPU.
     HALO_TEST_VLLM_SERVER_URLS=http://localhost:8000,http://localhost:8001 \
         CUDA_VISIBLE_DEVICES=1 torchrun --nproc_per_node=1 \
         tests/gpu/trainers/grpo/test_online_grpo_vllm_e2e.py --mode environmental
@@ -56,7 +56,7 @@ from src.distributed.parallelism_config import ParallelismConfig
 from src.env import env_str
 from src.environments.envs.protocols.react import ReActEnvironment
 from src.environments.tools.factories import create_native_math_tools, create_native_python_tools
-from src.rewards.matching import extract_last_boxed
+from src.rewards.graders.matching import extract_last_boxed
 from src.trainers.distillation.sdpg import DistributedSDPGTrainer
 from src.trainers.grpo.environmental import DistributedAsyncEnvironmentalGRPOTrainer
 from src.trainers.grpo.online import DistributedGRPOTrainer
@@ -69,9 +69,9 @@ from tests.common.weight_sync import moved_parameters
 
 MODEL_NAME = QWEN3_0_6B
 VLLM_SERVER_URL = env_str("VLLM_SERVER_URL") or "http://localhost:8000"
-# Rollout endpoints the environmental legs drive, comma-separated. Two or more put the weight sync on
-# the ROLLING path (an InferenceClientManager pushing to one server at a time while the rest keep
-# serving) — a shape a single URL never reaches. Every server must serve MODEL_NAME.
+# Rollout endpoints the environmental legs drive, comma-separated. Two or more put the single
+# process's push on an InferenceClientManager pool, which pauses every server together and streams
+# each chunk to all of them — a shape a single URL never reaches. Every server must serve MODEL_NAME.
 VLLM_SERVER_URLS = [
     url.strip() for url in (env_str("HALO_TEST_VLLM_SERVER_URLS") or VLLM_SERVER_URL).split(",") if url.strip()
 ]
@@ -172,9 +172,9 @@ def test_vllm_generation():
         result = json.loads(resp.read())
         assert "choices" in result, f"No choices in response: {result}"
         message = result["choices"][0]["message"]
-        # The required VLLM_REASONING_PARSER routes plain replies into ``reasoning`` (0.26.0
-        # spelling; older builds ``reasoning_content``), leaving ``content`` null — mirror the
-        # toolkit client's ``_get_reasoning`` fallback instead of assuming the unparsed shape.
+        # The required VLLM_REASONING_PARSER routes plain replies into ``reasoning``, leaving
+        # ``content`` null — read it as ``src.inference.response.get_reasoning_text`` does instead of
+        # assuming the unparsed shape.
         content = message.get("content") or message.get("reasoning") or message.get("reasoning_content") or ""
         assert len(content) > 0, f"Empty generation: {message}"
 
@@ -221,8 +221,7 @@ def test_online_grpo_e2e():
             vllm_server_host=vllm_host,
             vllm_server_port=vllm_port,
             vllm_server_timeout=60.0,
-            # Allocated, never a literal: a fixed port collides with foreign holders on a shared
-            # host (concurrent suites share the 512xx block).
+            # Allocated, never a literal: a fixed port collides with foreign holders on a shared host.
             vllm_group_port=free_port(),
             num_generations=2,
             max_completion_length=256,
@@ -266,10 +265,11 @@ def test_online_sdpg_e2e():
     """End-to-end online SDPG (DistributedSDPGTrainer) with live vLLM server.
 
     SDPG = online GRPO + a privileged-teacher reverse-KL OPD term on positive-advantage rollouts
-    (the faithful arXiv:2606.04036 method, run via rlvr_online_grpo.py --use_sdpg). This validates
-    the full path: vLLM rollouts → verifier advantages → privileged-teacher forward → OPD term.
+    (the faithful arXiv:2606.04036 method, run via ``scripts/training/online_grpo/rlvr.py
+    --use_sdpg=true``). This validates the full path: vLLM rollouts → verifier advantages →
+    privileged-teacher forward → OPD term.
     It asserts the OPD term actually fired (the ``opd_loss``/``opd_beta`` metrics are recorded), so a
-    regression that silently drops OPD (e.g. the fused-Liger loss bypass) fails here.
+    regression that silently drops OPD fails here.
     """
     output_dir = tempfile.mkdtemp(prefix="test_sdpg_vllm_e2e_")
 
@@ -440,9 +440,8 @@ def test_environmental_grpo_e2e():
         assert losses, f"no per-step loss was logged: {trainer.state.log_history}"
         assert all(math.isfinite(v) for v in losses), f"non-finite loss: {losses}"
 
-        # The sync has to reach EVERY configured server. With more than one it goes through the
-        # rolling path (one server at a time, the rest kept serving), where a fan-out that stops
-        # after the first leaves the others generating from a stale policy with no error at all.
+        # The sync has to reach EVERY configured server: a pool push whose chunks stop at the first
+        # leaves the others generating from a stale policy with no error at all.
         # Perturbed deliberately: a GRPO group whose samples tie has zero advantage and leaves the
         # weights bit-identical, and "the logprobs did not change" would then prove nothing.
         before = {url: probe_top_logprobs(url, MODEL_NAME) for url in VLLM_SERVER_URLS}
@@ -613,7 +612,7 @@ def _parse_args() -> argparse.Namespace:
         "--mode",
         required=True,
         choices=("online", "sdpg", "online_lora", "environmental", "environmental_lora"),
-        help="which leg to run; exactly one per invocation (the server's NCCL state is not reusable)",
+        help="which leg to run; exactly one per invocation (each leg binds its own weight-transfer port)",
     )
     return parser.parse_args()
 

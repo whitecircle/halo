@@ -21,21 +21,27 @@ python/remote/grading basics):
   file or an interpreted run changes the working dir, and a rejected compile is cached as
   ``compile_failed`` instead of recompiling per test.
 - RemoteSession: client-side file accumulation resent on every request (no network — fake session).
-- BubblewrapSandbox: construction guard when bwrap is absent, and — when bwrap IS present —
-  network is unshared and the host filesystem is hidden while the working dir stays writable.
+- BubblewrapSandbox: construction guard when bwrap is absent, a probe that names the clean-proc
+  remedy, the init reap and status read-back against a stand-in ``bwrap`` (no namespaces needed), and —
+  when bwrap IS present — network is unshared and the host filesystem is hidden while the working dir
+  stays writable, and no run leaves a process behind.
 
 Run: python tests/cpu/environments/test_sandbox_multilang.py
 """
 
 import os
 import shutil
-import tempfile
+import sys
 import threading
+import time
 import unittest
+from concurrent.futures import ThreadPoolExecutor
 
 import pytest
 
 from src.environments.sandbox import base as _base
+from src.environments.sandbox import bubblewrap as _bubblewrap
+from src.environments.sandbox import local as local_sandbox
 from src.environments.sandbox.base import LANGUAGES, resolve_language, supported_languages
 from src.environments.sandbox.bubblewrap import BubblewrapSandbox
 from src.environments.sandbox.local import TAMPERED_WORKDIR_RETURNCODE, LocalSubprocessSandbox
@@ -43,6 +49,7 @@ from src.environments.sandbox.remote import RemoteSandbox
 from src.environments.sandbox.resolve import resolve_sandbox
 from src.environments.tools.factories import create_session_bash_tools
 from tests.common.code_contests import RecordingSandboxSession
+from tests.common.utils import probe_findings
 
 _HAS_GPP = shutil.which("g++") is not None
 _HAS_GCC = shutil.which("gcc") is not None
@@ -432,9 +439,9 @@ class _CountingSandbox(LocalSubprocessSandbox):
         super().__init__(*args, **kwargs)
         self.compiles = 0
 
-    def _compile(self, workdir, spec, *, allow_network):
+    def _compile(self, workdir, spec):
         self.compiles += 1
-        return super()._compile(workdir, spec, allow_network=allow_network)
+        return super()._compile(workdir, spec)
 
 
 _CPP_HEADER_VAL = '#include <iostream>\n#include "h.h"\nint main(){ std::cout << val(); }'
@@ -539,13 +546,15 @@ def test_remote_session_resends_accumulated_files():
     sess = RecordingSandboxSession()
     sb = RemoteSandbox("http://sandbox:8080", session=sess)
     rsession = sb.open_session()
+    rsession.run("print(0)")
     rsession.write_file("util.py", "X = 1")
     rsession.run("import util; print(util.X)", language="python")
     rsession.write_file("util2.py", "Y = 2")
     rsession.run("print('again')", files={"adhoc.py": "Z=3"})
 
-    assert sess.posts[0].payload["files"] == {"util.py": "X = 1"}
-    assert sess.posts[1].payload["files"] == {"util.py": "X = 1", "util2.py": "Y = 2", "adhoc.py": "Z=3"}
+    assert "files" not in sess.posts[0].payload, "a session holding no files sends none"
+    assert sess.posts[1].payload["files"] == {"util.py": "X = 1"}
+    assert sess.posts[2].payload["files"] == {"util.py": "X = 1", "util2.py": "Y = 2", "adhoc.py": "Z=3"}
     assert rsession.list_files() == ["util.py", "util2.py"]
 
 
@@ -573,28 +582,13 @@ def test_bubblewrap_missing_binary_raises_clearly():
     assert raised, "construction must fail clearly when the bwrap binary is unavailable"
 
 
-def test_bubblewrap_probe_fails_fast_when_cannot_sandbox(tmp_path=None):
-    """If bwrap is present but can't create a namespace, construction must raise an actionable error.
-
-    Simulated with a fake 'bwrap' that is executable but exits non-zero (like a blocked user
-    namespace), so the construction probe detects it deterministically without needing a real
-    namespace failure.
-    """
-    d = tempfile.mkdtemp()
-    fake = os.path.join(d, "bwrap")
-    with open(fake, "w") as fh:
-        fh.write("#!/bin/sh\necho 'bwrap: No permissions to create new namespace' >&2\nexit 1\n")
-    os.chmod(fake, 0o755)
-    try:
-        raised_msg = ""
-        try:
-            BubblewrapSandbox(bwrap_path=fake)
-        except RuntimeError as exc:
-            raised_msg = str(exc).lower()
-        assert "cannot create a sandbox" in raised_msg, "probe must fail fast with an actionable message"
-        assert "namespace" in raised_msg
-    finally:
-        shutil.rmtree(d, ignore_errors=True)
+def test_bubblewrap_probe_fails_fast_when_cannot_sandbox(monkeypatch, tmp_path):
+    """A bwrap that cannot create its namespaces fails construction with an actionable error, never a
+    per-run failure grading would read as the program's."""
+    blocked = "#!/bin/sh\necho 'bwrap: No permissions to create new namespace' >&2\nexit 1\n"
+    _use_stand_in_jail(monkeypatch, tmp_path, bwrap=blocked)
+    with pytest.raises(RuntimeError, match="cannot create a sandbox in this environment .*namespaces"):
+        BubblewrapSandbox()
 
 
 def test_bubblewrap_resolve_backend_when_present():
@@ -669,6 +663,322 @@ def test_bubblewrap_parallel_safe():
     for t in threads:
         t.join()
     assert results == {i: str(i * i) for i in range(8)}, "concurrent jailed runs cross-contaminated"
+
+
+_LEFT_BEHIND = "LEFT_BEHIND:"
+# <linux/mount.h>
+_MS_BIND = 4096
+_MS_REMOUNT = 32
+# A clean exit, a failing one, a signal, a timeout, a compile error, a compiled run.
+_JAILED_RUNS = [
+    ("print(42)", "python", 10.0),
+    ("raise SystemExit(3)", "python", 10.0),
+    ("import os; os.abort()", "python", 10.0),
+    ("while True: pass", "python", 0.3),
+    ("int main() { syntax error }", "cpp", 10.0),
+    ("int main() { return 0; }", "cpp", 10.0),
+]
+_JAILED_HOST = f"""
+from src.environments.sandbox.bubblewrap import BubblewrapSandbox
+sandbox = BubblewrapSandbox()
+for code, language, timeout in {_JAILED_RUNS!r} * 2:
+    sandbox.run(code, language=language, timeout=timeout)
+"""
+
+# Stands in for bwrap without namespaces, as bwrap behaves on exit: its child (the jail's init) runs the
+# program and reports its status, 128 + n for a signal; bwrap exits on that status, never reaping it.
+# The program stays in the run's group: its own session needs the jail's PID namespace to end with a
+# killed run.
+_STAND_IN_BWRAP = """#!{python}
+import os, sys
+argv = sys.argv[sys.argv.index("--") + 1:]
+argv = argv[1:] if argv[0] == "setsid" else argv
+report_r, report_w = os.pipe()
+if os.fork() == 0:
+    program = os.fork()
+    if program == 0:
+        os.execvp(argv[0], argv)
+    code = os.waitstatus_to_exitcode(os.waitpid(program, 0)[1])
+    os.write(report_w, bytes([128 - code if code < 0 else code]))
+    os._exit(0)
+os.close(report_w)
+status = os.read(report_r, 1)
+os._exit(status[0] if status else 1)
+"""
+# Runs what follows its ``--`` (namespaces are the jail's, which the stand-in bwrap does without).
+_STAND_IN_UNSHARE = '#!/bin/sh\nwhile [ "$1" != "--" ]; do shift; done\nshift\nexec "$@"\n'
+# The jail ids the stand-in subordinate ranges grant.
+_STAND_IN_JAIL_ID = 165536
+
+
+def _stand_in_jail(tmp_path, bwrap: str = "") -> tuple[str, tuple[str, str]]:
+    """A ``PATH`` directory of stand-in jail launchers — ``bwrap`` (``_STAND_IN_BWRAP`` unless given),
+    ``unshare``, and the id-map helpers, which need only exist — and subordinate-id files granting this
+    user a range at :data:`_STAND_IN_JAIL_ID`."""
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    scripts = {
+        "bwrap": bwrap or _STAND_IN_BWRAP.format(python=sys.executable),
+        "unshare": _STAND_IN_UNSHARE,
+        "newuidmap": "#!/bin/sh\n",
+        "newgidmap": "#!/bin/sh\n",
+    }
+    for name, text in scripts.items():
+        (bin_dir / name).write_text(text)
+        (bin_dir / name).chmod(0o755)
+    subids = []
+    for name in ("subuid", "subgid"):
+        (tmp_path / name).write_text(f"{os.getuid()}:{_STAND_IN_JAIL_ID}:65536\n")
+        subids.append(str(tmp_path / name))
+    return str(bin_dir), (subids[0], subids[1])
+
+
+def _use_stand_in_jail(monkeypatch, tmp_path, bwrap: str = "") -> None:
+    bin_dir, subids = _stand_in_jail(tmp_path, bwrap)
+    monkeypatch.setenv("PATH", bin_dir + os.pathsep + os.environ["PATH"])
+    monkeypatch.setattr(_bubblewrap, "_SUBORDINATE_ID_FILES", subids)
+
+
+_STAND_IN_HOST = """
+import os, signal, threading
+from concurrent.futures import ThreadPoolExecutor
+os.environ["PATH"] = {bin_dir!r} + os.pathsep + os.environ["PATH"]
+from src.environments.sandbox import bubblewrap
+from src.environments.sandbox.bubblewrap import BubblewrapSandbox, _is_child_subreaper, _set_child_subreaper
+
+bubblewrap._SUBORDINATE_ID_FILES = {subids!r}
+sandbox = BubblewrapSandbox()
+assert not _is_child_subreaper(), "construction left the process a subreaper"
+assert sandbox.run("print(42)").stdout.strip() == "42"
+assert sandbox.run("raise SystemExit(3)").returncode == 3
+assert sandbox.run("import os; os.abort()").returncode == -signal.SIGABRT
+assert sandbox.run("while True: pass", timeout=0.5).timed_out
+with ThreadPoolExecutor(max_workers=8) as pool:
+    codes = list(pool.map(lambda code: sandbox.run(f"raise SystemExit({{code}})").returncode, range(24)))
+assert codes == list(range(24)), codes
+# A fork while a run is in flight: the child holds no window, whatever count it copied.
+in_flight = threading.Thread(target=sandbox.run, args=("import time; time.sleep(1)",))
+in_flight.start()
+threading.Event().wait(0.3)
+child = os.fork()
+if child == 0:
+    os._exit(0 if sandbox.run("print(1)").ok else 1)
+assert os.waitstatus_to_exitcode(os.waitpid(child, 0)[1]) == 0, "the forked child's run failed"
+in_flight.join()
+assert not _is_child_subreaper(), "the process stayed a subreaper after its runs"
+_set_child_subreaper(1)
+assert sandbox.run("print(1)").ok and _is_child_subreaper(), "a run cleared a flag the process held already"
+_set_child_subreaper(0)
+"""
+# Ignores SIGTERM and sends it to its own group, as a pool's shutdown can; unjailed, that reaches only it.
+_GROUP_SIGNAL = (
+    "import os, signal\nsignal.signal(signal.SIGTERM, signal.SIG_IGN)\nos.killpg(0, signal.SIGTERM)\nprint('done')"
+)
+
+
+def _non_reaping_ancestor(host: str) -> str:
+    """A probe standing in for a container PID 1 that never reaps: as a subreaper, it adopts whatever
+    the ``host`` script's runs orphan, and whatever the host adopted and left unreaped when it exits.
+    It reports those, or the host's failure."""
+    return f"""
+import ctypes, os, subprocess, sys
+assert ctypes.CDLL(None, use_errno=True).prctl({_bubblewrap._PR_SET_CHILD_SUBREAPER}, 1, 0, 0, 0) == 0
+host = subprocess.run([sys.executable, "-c", {host!r}], capture_output=True, text=True)
+left = open(f"/proc/self/task/{{os.getpid()}}/children").read().split()
+findings = [open(f"/proc/{{pid}}/comm").read().strip() + " " + pid for pid in left]
+if host.returncode:
+    findings.append("host failed: " + host.stderr.strip().splitlines()[-1])
+print({_LEFT_BEHIND!r} + "|".join(findings))
+"""
+
+
+def test_bubblewrap_runs_leave_no_process_behind():
+    """``bwrap`` exits without reaping the jail's init, so each run would leave a ``[bwrap] <defunct>`` to
+    the container's PID 1 (a ``torchrun`` never reaps it) unless the backend reaps it itself.
+
+    Needs a working jail, skipped otherwise; to run it in the image:
+
+        docker run --rm --cap-add SYS_ADMIN --security-opt seccomp=unconfined \\
+            --security-opt apparmor=unconfined -v "$(pwd)":/workspace -w /workspace halo:blackwell \\
+            bash -c "mkdir -p /run/fullproc && mount -t proc proc /run/fullproc && \\
+                pytest tests/cpu/environments/test_sandbox_multilang.py -k bubblewrap"
+    """
+    if _BWRAP is None or not _HAS_GPP:
+        return _skip("bubblewrap not usable here or g++ absent")
+    left = probe_findings(_non_reaping_ancestor(_JAILED_HOST), _LEFT_BEHIND)
+    assert left == [], f"jailed runs left processes to the host's ancestor: {left}"
+
+
+def test_bubblewrap_keeps_a_group_signal_inside_the_jail():
+    """A program that ignores SIGTERM and sends it to its own group finishes, as on ``local``: the signal
+    reaches neither ``bwrap`` nor the jail's init, whose death would tear the jail down mid-run."""
+    if _BWRAP is None:
+        return _skip("bubblewrap not usable here")
+    result = _BWRAP.run(_GROUP_SIGNAL)
+    assert result.ok and result.stdout.strip() == "done", result
+
+
+def test_bubblewrap_bounds_a_jailed_programs_process_count(monkeypatch):
+    """The jail's root is a subordinate uid, which RLIMIT_NPROC binds (uid 0 it never does), counted
+    in the run's own user namespace: a fork loop is stopped at the limit."""
+    if _BWRAP is None:
+        return _skip("bubblewrap not usable here")
+    monkeypatch.setattr(local_sandbox, "LOCAL_NPROC_LIMIT", 32)
+    forks = (
+        "import os, time\nn = 0\nfor _ in range(64):\n    try:\n        pid = os.fork()\n    except OSError:\n"
+        "        break\n    if pid == 0:\n        time.sleep(1); os._exit(0)\n    n += 1\nprint(n)"
+    )
+    result = _BWRAP.run(forks, timeout=10)
+    assert result.ok and int(result.stdout) < 32, result
+
+
+def test_bubblewrap_jail_holds_no_capability():
+    """The jail's root keeps no capability in its namespace, so it cannot remount a read-only bind
+    writable and reach the host files under it (a world-writable directory on the trainer's library
+    path among them)."""
+    if _BWRAP is None:
+        return _skip("bubblewrap not usable here")
+    remount = (
+        "import ctypes\nlibc = ctypes.CDLL(None, use_errno=True)\n"
+        f"rc = libc.mount(None, b'/usr', None, {_MS_REMOUNT | _MS_BIND}, None)\n"
+        "print(open('/proc/self/status').read().split('CapEff:')[1].split()[0], rc)"
+    )
+    result = _BWRAP.run(remount)
+    assert result.stdout.split() == ["0000000000000000", "-1"], result
+
+
+def test_bubblewrap_counts_each_runs_processes_alone(monkeypatch):
+    """The limit counts in the run's own user namespace (Linux 5.14+): two concurrent runs each hold
+    more than half of it, which one count shared by the jail's uid would refuse."""
+    if _BWRAP is None:
+        return _skip("bubblewrap not usable here")
+    monkeypatch.setattr(local_sandbox, "LOCAL_NPROC_LIMIT", 32)
+    hold = (
+        "import os, time\nn = 0\nfor _ in range(20):\n    try:\n        pid = os.fork()\n    except OSError:\n"
+        "        break\n    if pid == 0:\n        time.sleep(3); os._exit(0)\n    n += 1\nprint(n)"
+    )
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        held = [int(r.stdout) for r in pool.map(lambda _: _BWRAP.run(hold, timeout=15), range(2))]
+    assert held == [20, 20], held
+
+
+def test_bubblewrap_program_owns_its_workdir_at_a_fixed_path():
+    """The program works in a directory it owns, at a fixed path: it can extend a file the host wrote,
+    what it writes is the jail ids' on the host, and no host path reaches a traceback."""
+    if _BWRAP is None:
+        return _skip("bubblewrap not usable here")
+    with _BWRAP.open_session() as session:
+        session.write_file("data.txt", "a")
+        result = session.run(
+            "import os\nopen('data.txt', 'a').write('b')\nopen('new.txt', 'w').close()\nprint(os.getcwd())"
+        )
+        assert result.ok and result.stdout.strip() == "/sandbox", result
+        assert session.read_file("data.txt") == "ab"
+        assert os.stat(os.path.join(session.workdir, "new.txt")).st_uid == _BWRAP.program_owner[0]
+        failed = session.run("raise ValueError('x')")
+    assert 'File "/sandbox/main.py"' in failed.stderr and session.workdir not in failed.stderr, failed
+
+
+def test_bubblewrap_reaps_the_init_bwrap_leaves_and_reads_its_signal_status(tmp_path):
+    """Against a stand-in ``bwrap`` (no namespaces needed): a process is a subreaper only while a run is
+    in flight, sequential, concurrent and forked runs leave no init behind (a timed-out one included),
+    ``bwrap``'s ``128 + n`` reads as the signal it stands for, and a flag the process held already stays."""
+    bin_dir, subids = _stand_in_jail(tmp_path)
+    host = _STAND_IN_HOST.format(bin_dir=bin_dir, subids=subids)
+    left = probe_findings(_non_reaping_ancestor(host), _LEFT_BEHIND)
+    assert left == [], f"runs left processes to the host's ancestor, or the host failed: {left}"
+
+
+def test_a_group_that_outlives_its_wait_is_reaped_at_a_later_run(monkeypatch):
+    """A jail's init exits only once every task in it has, which a fork bomb's teardown can drag past the
+    run's bounded wait; the run then gives the group up to a later run's reap rather than leak it."""
+    monkeypatch.setattr(_bubblewrap, "_JAIL_TEARDOWN_SECONDS", 0.05)
+    reaper = _bubblewrap._JailReaper()
+    slow = os.posix_spawnp("sleep", ["sleep", "0.5"], os.environ, setsid=True)
+    reaper.reap(slow)
+    assert os.path.exists(f"/proc/{slow}"), "the wait was not bounded"
+    time.sleep(0.6)
+    fast = os.posix_spawnp("true", ["true"], os.environ, setsid=True)
+    reaper.reap(fast)
+    assert [pid for pid in (slow, fast) if os.path.exists(f"/proc/{pid}")] == []
+
+
+def test_bubblewrap_probe_names_a_bind_path_its_root_cannot_reach(monkeypatch, tmp_path):
+    """The jail's root is not this process's uid, so a working directory under a private directory is
+    out of its reach: the probe names the search permission it needs, not namespace rights."""
+    unreachable = '#!/bin/sh\necho "bwrap: Can\'t find source path /x/halo_sandbox_1: Permission denied" >&2\nexit 1\n'
+    _use_stand_in_jail(monkeypatch, tmp_path, bwrap=unreachable)
+    with pytest.raises(RuntimeError, match=r"searchable by other users.*point TMPDIR"):
+        BubblewrapSandbox()
+
+
+def test_bubblewrap_probe_names_the_clean_proc_remedy(monkeypatch, tmp_path):
+    """While parts of the container's ``/proc`` are masked (Docker's masks, the NVIDIA runtime's in a GPU
+    container) the kernel refuses the jail a fresh one; the probe names the clean mount beside it, not
+    namespace rights the container already has, and leaves the process no subreaper."""
+    refused = '#!/bin/sh\necho "bwrap: Can\'t mount proc on /newroot/proc: Operation not permitted" >&2\nexit 1\n'
+    _use_stand_in_jail(monkeypatch, tmp_path, bwrap=refused)
+    with pytest.raises(RuntimeError, match="mount -t proc proc /run/fullproc"):
+        BubblewrapSandbox()
+    assert not _bubblewrap._is_child_subreaper()
+
+
+@pytest.mark.parametrize("missing", ["newuidmap", "subuid"])
+def test_bubblewrap_refuses_a_host_that_cannot_map_the_jail_root(monkeypatch, tmp_path, missing):
+    """Without the id-map helpers or a subordinate range the jail's root would be this process's uid,
+    which RLIMIT_NPROC never binds: construction refuses, naming what is missing."""
+    _use_stand_in_jail(monkeypatch, tmp_path)
+    if missing == "newuidmap":
+        (tmp_path / "bin" / "newuidmap").unlink()
+        monkeypatch.setenv("PATH", str(tmp_path / "bin"))
+    else:
+        (tmp_path / "subuid").write_text("")
+    with pytest.raises(RuntimeError, match=r"uidmap package .* /etc/subuid"):
+        BubblewrapSandbox()
+
+
+def test_bubblewrap_hands_the_working_directory_and_host_writes_to_the_jail_ids(monkeypatch, tmp_path):
+    """The jail's root is a subordinate uid, so the working directory and every entry the host writes
+    there are made its own; the program can then change what the host staged (an edited source)."""
+    if os.geteuid() != 0:
+        return _skip("handing entries to another uid needs root")
+    _use_stand_in_jail(monkeypatch, tmp_path)
+    with BubblewrapSandbox().open_session() as session:
+        session.write_file("pkg/data.txt", "a")
+        assert session.run("print(1)").ok
+        owners = {
+            name: os.stat(os.path.join(session.workdir, name)).st_uid
+            for name in (".", "pkg", "pkg/data.txt", "main.py")
+        }
+    assert owners == dict.fromkeys(owners, _STAND_IN_JAIL_ID)
+
+
+def test_bubblewrap_hands_a_recreated_working_directory_to_the_jail_ids(monkeypatch, tmp_path):
+    """A working directory the program removed is recreated for the next run, the jail's again."""
+    if os.geteuid() != 0:
+        return _skip("handing entries to another uid needs root")
+    _use_stand_in_jail(monkeypatch, tmp_path)
+    with BubblewrapSandbox().open_session() as session:
+        shutil.rmtree(session.workdir)
+        assert session.run("print(1)").ok
+        assert os.stat(session.workdir).st_uid == _STAND_IN_JAIL_ID
+
+
+@pytest.mark.parametrize("allow_network", [False, True])
+def test_bubblewrap_unshares_the_network_unless_the_executor_allows_it(monkeypatch, tmp_path, allow_network):
+    """Every jailed run, a session's included, gets a network namespace of its own unless the executor
+    was built with ``allow_network``."""
+    if os.geteuid() != 0:
+        return _skip("handing entries to another uid needs root")
+    log = tmp_path / "unshare_net.log"
+    recording = _STAND_IN_BWRAP.format(python=sys.executable).replace(
+        "import os, sys\n",
+        f"import os, sys\nopen({str(log)!r}, 'a').write(str('--unshare-net' in sys.argv) + '\\n')\n",
+    )
+    _use_stand_in_jail(monkeypatch, tmp_path, bwrap=recording)
+    with BubblewrapSandbox(allow_network=allow_network).open_session() as session:
+        assert session.run("print(1)").ok
+    assert set(log.read_text().split()) == {str(not allow_network)}
 
 
 def test_session_reset_to_staged_drops_run_output_and_keeps_the_build():

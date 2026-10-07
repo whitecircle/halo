@@ -94,7 +94,7 @@ def test_keep_last_block_window_is_measured_against_the_checkpoints_own_depth():
 
 
 def test_no_scope_flags_quantizes_every_block():
-    """The defaults are the training defaults, so an unscoped run is unchanged by this feature."""
+    """The defaults are the training defaults, so an unscoped export quantizes every block."""
     with tempfile.TemporaryDirectory() as tmp:
         tensors, manifest = _export(tmp)
     assert _quantized_blocks(tensors) == set(range(_BLOCKS))

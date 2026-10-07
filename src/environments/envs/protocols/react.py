@@ -17,6 +17,7 @@ from src.environments.base import (
     EPISODE_INVALID_KEY,
     EPISODE_INVALID_REASON_KEY,
     EPISODE_TOOL_BUDGETS_KEY,
+    LAST_TURN_KEY,
     TOOL_CALL_COUNTS_KEY,
     BaseEnvironment,
     EpisodeGrade,
@@ -36,7 +37,7 @@ from src.environments.tools.factories import (
     create_native_search_tools,
 )
 from src.inference.response import ENGINE_CUT_FINISH_REASONS
-from src.rewards.matching import validate_answer
+from src.rewards.graders.matching import validate_answer
 
 logger = logging.getLogger(__name__)
 
@@ -118,19 +119,9 @@ def _parse_action(action_text: str) -> tuple[str | None, dict[str, Any] | None]:
         except MALFORMED_LITERAL_ERRORS:
             pass
 
-    func_match = _CALL_ACTION_RE.match(action_text)
-    if func_match:
-        name = func_match.group(1)
-        args_str = func_match.group(2).strip()
-        args = _parse_function_args(args_str)
-        return name, args
-
-    simple_match = _COLON_ACTION_RE.match(action_text)
-    if simple_match:
-        name = simple_match.group(1)
-        args_str = simple_match.group(2).strip()
-        args = _parse_function_args(args_str)
-        return name, args
+    call_match = _CALL_ACTION_RE.match(action_text) or _COLON_ACTION_RE.match(action_text)
+    if call_match:
+        return call_match.group(1), _parse_function_args(call_match.group(2).strip())
 
     name_match = _BARE_ACTION_RE.match(action_text)
     if name_match:
@@ -297,10 +288,10 @@ Always think before acting, and provide a Final Answer when you're done."""
         # base flags the message untrainable, so an Action executed or a Final Answer graded here would
         # earn a reward on a turn the trainer never rewards. Same rule as the native protocol.
         if (context or {}).get("finish_reason") in ENGINE_CUT_FINISH_REASONS:
-            return self._handle_length_cutoff(trajectory)
+            return self._handle_length_cutoff(trajectory, last_turn=bool((context or {}).get(LAST_TURN_KEY)))
         # Nothing to parse: not a format failure the hint below corrects, but a stop on nothing.
         if not action.strip():
-            return self._handle_empty_turn(trajectory)
+            return self._handle_empty_turn(trajectory, last_turn=bool((context or {}).get(LAST_TURN_KEY)))
 
         step = parse_react_output(action)
 
@@ -312,9 +303,6 @@ Always think before acting, and provide a Final Answer when you're done."""
         if step.has_final_answer:
             trajectory.info["completed"] = True
             trajectory.info["final_answer"] = step.final_answer
-
-            # Assistant message already appended by BaseEnvironment.step; re-adding doubles the turn.
-            info["final_answer"] = step.final_answer
             return trajectory, reward, True, False, info
 
         if step.has_action:
@@ -353,6 +341,10 @@ Always think before acting, and provide a Final Answer when you're done."""
 
         info["no_action"] = True
         return trajectory, reward, False, False, info
+
+    def _final_answer(self, trajectory: Trajectory) -> str | None:
+        """The ``Final Answer:`` that completed the episode, where one did."""
+        return trajectory.info.get("final_answer") if trajectory.info.get("completed") else None
 
     def _grade_episode(self, trajectory: Trajectory, context: dict[str, Any] | None = None) -> EpisodeGrade:
         """Grade the final answer: 1 when it validates against the expected one, else 0."""

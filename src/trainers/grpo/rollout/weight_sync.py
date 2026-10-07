@@ -439,21 +439,35 @@ def _flush_and_close(sender: Any) -> None:
         raise
 
 
-def sync_weights_to_client(model: torch.nn.Module, client: Any | None, is_main: bool, is_tp_main: bool) -> bool:
-    """Gather the policy and push it to ``client``, then flush the buffered broadcast. Returns is-PEFT.
+def _refuse_missing_client() -> None:
+    raise RuntimeError(
+        "The weight-sync push reached its forwarding rank with no engine client: the gather would run and "
+        "send nothing, leaving the engine serving the old weights. The client must be formed before a push "
+        "(the environmental trainer's _form_weight_sync_group; online GRPO's TRL vllm_client)."
+    )
+
+
+def sync_weights_to_client(model: torch.nn.Module, client: Any | None, is_main: bool, is_tp_main: bool) -> None:
+    """Gather the policy and push it to ``client``, then flush the buffered broadcast.
 
     Runs on **every** rank (the gathers are collective); only the forwarding rank (global-main, TP-rank 0
-    under TP) sends.
+    under TP) sends, and it must hold a ``client``: without one the push would gather the whole policy
+    and send none of it, leaving the engine on its old weights. That refusal is raised on every rank at
+    the flush's verdict, after the gather the peers are in, never on the forwarding rank alone.
     """
     # One forwarding-rank predicate for the push and the flush: two spellings that disagree would
     # leave the buffering rank never closing the update it opened.
-    sender = client if (is_main and is_tp_main) else None
+    forwarding = is_main and is_tp_main
+    sender = client if forwarding else None
+    flush = DeferredRankFailure("weight-sync flush to the rollout engine")
+    if forwarding and client is None:
+        flush.run(_refuse_missing_client)
     # The engine fuses a co-load group only where the pushed model declares every member, so the
     # client's groups are scoped to this module tree before the first chunk.
     if sender is not None:
         sender.scope_co_load_groups(name for name, _ in model.named_modules())
     try:
-        peft = gather_and_send_weights(model, sender)
+        gather_and_send_weights(model, sender)
     except BaseException:
         # The push streams chunks into an update it opened mid-gather, so a raise past this point
         # would leave the engine quiesced behind an open reload, refusing every later sync and
@@ -464,20 +478,17 @@ def sync_weights_to_client(model: torch.nn.Module, client: Any | None, is_main: 
     # The buffered broadcast lands after every gather, so a failure here blocks no peer inside a
     # collective, but a peer that continues past it drives its next rollout round against an engine
     # left paused mid-update. Same uniform verdict as the push, on the flush's own rank-local work.
-    flush = DeferredRankFailure("weight-sync flush to the rollout engine")
     if sender is not None:
         flush.run(partial(_flush_and_close, sender))
     flush.reject()
-    return peft
 
 
-def gather_and_send_weights(model: torch.nn.Module, sender: Any | None) -> bool:
+def gather_and_send_weights(model: torch.nn.Module, sender: Any | None) -> None:
     """Gather EP + dense/TP weights from ``model`` and forward to the engine via ``sender``.
 
     Runs on **every** rank (the gathers are collective); ``sender`` is the engine client on the
     forwarding rank and ``None`` elsewhere. PEFT/LoRA is folded into each base weight out of place and
     forwarded under base-model names. The caller flushes afterwards with ``sender.reset_prefix_cache()``.
-    Returns whether ``model`` is PEFT.
     """
     # FSDP2 leaves a forward's transient unsharded params registered while the optimizer steps the
     # shards, so the params a mid-training sync finds registered predate the last update: every
@@ -508,11 +519,10 @@ def gather_and_send_weights(model: torch.nn.Module, sender: Any | None) -> bool:
     # Collective on every rank. Raises on all of them with the forwarding rank's cause; the sync
     # writes none of the trainer's own weights, so a failed one leaves them untouched.
     guard.reject()
-    return peft
 
 
-def sync_trainer_weights(trainer, client: Any | None) -> bool:
-    """Gather a distributed trainer's policy and push it to ``client``. Returns is-PEFT.
+def sync_trainer_weights(trainer, client: Any | None) -> None:
+    """Gather a distributed trainer's policy and push it to ``client``.
 
     Every rank must call this (all ranks join the gathers; only global-main forwards). ``client`` is
     the caller's own handle, the only difference between the online and env sync paths.
@@ -531,7 +541,7 @@ def sync_trainer_weights(trainer, client: Any | None) -> bool:
     # against a mid-update engine. Fenced because the push is main-rank-only, so a raise must not skip
     # the barrier its peers block in.
     with barrier_on_exit():
-        peft = sync_weights_to_client(model, client, is_main, is_tp_main)
+        sync_weights_to_client(model, client, is_main, is_tp_main)
 
     if log_memory:
         log_cuda_memory("weight-sync post")
@@ -539,6 +549,5 @@ def sync_trainer_weights(trainer, client: Any | None) -> bool:
     logger.debug(
         f"Synced distributed weights to the rollout engine at step {trainer.state.global_step} "
         f"(ep={config.is_ep_mode}, tp={config.is_tp_mode}, "
-        f"expert_tp={config.is_expert_tp_mode}, peft={peft})"
+        f"expert_tp={config.is_expert_tp_mode}, peft={is_peft_model(model)})"
     )
-    return peft

@@ -9,6 +9,7 @@ import json
 import os
 import time
 from collections.abc import Callable
+from functools import partial
 from typing import TypeVar
 
 import torch
@@ -22,13 +23,13 @@ from src.distributed.expert_parallel.lazy_loader import (
     lazy_loader_supports_checkpoint,
     load_ep_model_lazy,
 )
+from src.distributed.expert_parallel.master_weights import restore_fp32_master_parameters
 from src.distributed.expert_parallel.patching import (
     create_ep_buffers,
     ep_claimed_blocks,
     patch_moe_model_for_ep,
 )
-from src.distributed.filesystem import sequential_load_within_node
-from src.distributed.loading.master_weights import restore_fp32_master_parameters
+from src.distributed.filesystem import joined_node_load
 from src.distributed.runtime import (
     DeferredRankFailure,
     broadcast_from_rank0,
@@ -66,16 +67,17 @@ def cast_loaded_parameters(model: torch.nn.Module, dtype, *, keep_fp32: bool, ep
 
 
 def decide_lazy_loadable(local_dir: str | None, layout_supported: Callable[[str], bool]) -> bool:
-    """Whether every rank takes the lazy safetensors path for ``local_dir``, decided by rank 0.
+    """Whether EVERY rank takes the lazy safetensors path for ``local_dir`` — decided by rank 0.
 
-    Collective — every rank must call it. The lazy and fallback branches enter different store phases
+    COLLECTIVE — every rank must call it. The lazy and fallback branches enter different store phases
     and different world collectives, while every input to the decision is a best-effort per-rank
-    filesystem probe: a partially populated cache on a non-shared filesystem splits the verdict, and
-    a split gate deadlocks. Rank 0's answer is therefore broadcast instead of each rank using its own.
+    filesystem probe: a partially populated cache on a non-shared filesystem splits the verdict, and a
+    split gate deadlocks with no diagnostic. So rank 0's answer is broadcast and nobody consults their
+    own.
 
     ``layout_supported`` (whether the lazy fuser can materialize this family's expert layout) is a
-    parameter because the EP and PP loaders answer it for their own layout. It is short-circuited, so
-    it is only called for a directory that exists and holds safetensors.
+    parameter, since the EP and PP loaders each answer it for their own layout. Short-circuited, so it
+    is only asked about a directory that exists and holds safetensors.
     """
     return broadcast_from_rank0(
         local_dir is not None and has_safetensors_checkpoint(local_dir) and layout_supported(local_dir)
@@ -95,14 +97,14 @@ def _detect_checkpoint_format(path: str) -> str:
 
 
 def reject_ep_sharded_checkpoint(local_dir: str | None, model_name_or_path: str) -> None:
-    """Reject a per-rank EP-sharded checkpoint on every rank, with the merge instructions.
+    """Refuse a per-rank EP-sharded checkpoint on EVERY rank, with the merge instructions.
 
-    Collective — every rank must call it, and only rank 0 probes. The probe is a filesystem read
-    (``json.load`` of the safetensors index) in front of world collectives, so it is fenced: a torn
-    or half-fetched index on a non-shared filesystem would otherwise take rank 0 out while its peers
-    block in the broadcast, and a split verdict sends ranks down different branches. An ep_sharded
-    directory's per-rank keys match no expert pattern, so a loader reaching past here plans nothing
-    and reports "never materialized" instead of "merge the shards".
+    COLLECTIVE — every rank must call it, and only rank 0 probes. The probe is a filesystem read
+    (``json.load`` of the safetensors index) sitting in front of world collectives, so it is fenced:
+    a torn or half-fetched index on a non-shared filesystem would otherwise take rank 0 out while its
+    peers block in the broadcast, and a split verdict sends ranks down different branches. An
+    ep_sharded directory's per-rank keys match no expert pattern, so a loader that got past here
+    would plan nothing and surface as "never materialized" instead of "merge the shards".
     """
     guard = DeferredRankFailure(f"EP checkpoint-format probe of {model_name_or_path!r}")
     local_verdict = None
@@ -130,9 +132,9 @@ def resolve_hub_or_local_dir(model_name_or_path: str, revision: str | None = Non
     """Resolve ``model_name_or_path`` to a local directory for disk-based EP loading.
 
     Local dirs → absolute paths; Hub repo ids → cache snapshot dir at ``revision`` (cache first,
-    download if needed). Returns ``None`` if unresolvable: a cache miss is routine (logged INFO), a
-    failed download is a network/auth/gated-repo problem that costs every rank the full checkpoint in
-    CPU RAM (logged WARNING).
+    download if needed). Returns ``None`` if unresolvable — a cache miss is routine (INFO), a failed
+    download is a network/auth/gated-repo problem that costs every rank the full checkpoint in CPU
+    RAM (WARNING).
     """
     if os.path.isdir(model_name_or_path):
         return os.path.abspath(model_name_or_path)
@@ -156,8 +158,8 @@ def _timed_ep_load(method: str, load_fn: Callable[[], _T]) -> _T:
     """Run an EP load path and log global wall span (earliest start → latest end across ranks)."""
     t_start_wall = time.time()
     loaded = load_fn()
-    # Not in a ``finally``: this is a collective, so running it while one rank unwinds an exception
-    # turns that rank's traceback into an NCCL timeout on the others.
+    # Deliberately not in a ``finally``: this is a collective, so running it while one rank is
+    # unwinding an exception turns that rank's traceback into an NCCL timeout on all the others.
     log_global_load_duration_seconds(
         tag="EP",
         method=method,
@@ -201,27 +203,26 @@ def load_ep_model(
 
     reject_ep_sharded_checkpoint(local_dir, model_name_or_path)
 
+    huggingface_load = partial(
+        _load_ep_model_huggingface,
+        model_name_or_path,
+        ep_config,
+        config,
+        dtype,
+        trust_remote_code,
+        model_class=model_class,
+        max_concurrent_loading=max_concurrent_loading,
+        revision=revision,
+        keep_fp32_params=keep_fp32_params,
+        preserve_checkpoint_precision=preserve_checkpoint_precision,
+        **model_kwargs,
+    )
     if not lazy:
         logger.info(
             f"[Rank {rank}] EP lazy loading disabled — using HuggingFace from_pretrained + EP patch "
             f"(higher CPU RAM than lazy safetensors path)"
         )
-        return _timed_ep_load(
-            "huggingface_ep_lazy_disabled",
-            lambda: _load_ep_model_huggingface(
-                model_name_or_path,
-                ep_config,
-                config,
-                dtype,
-                trust_remote_code,
-                model_class=model_class,
-                max_concurrent_loading=max_concurrent_loading,
-                revision=revision,
-                keep_fp32_params=keep_fp32_params,
-                preserve_checkpoint_precision=preserve_checkpoint_precision,
-                **model_kwargs,
-            ),
-        )
+        return _timed_ep_load("huggingface_ep_lazy_disabled", huggingface_load)
 
     # Lazy first; HF fallback when there is no snapshot/safetensors or the expert layout is unmappable.
     use_lazy = decide_lazy_loadable(local_dir, lazy_loader_supports_checkpoint)
@@ -250,11 +251,11 @@ def load_ep_model(
             ),
         )
 
-    # Diagnostic only, derived here rather than beside the gate so the probes cost nothing on the
-    # lazy path, and rank-local so a rank disagreeing with rank 0's verdict reports its own reason.
-    # The log level separates the two kinds: an unmappable expert layout is a class-declared family
-    # property whose supported route is the HF path, while a missing snapshot or missing safetensors
-    # is an environment problem costing every rank the full checkpoint in CPU RAM.
+    # Diagnostic only, and derived here rather than beside the gate so the probes cost nothing on the
+    # lazy path. Rank-local: a rank that disagreed with rank 0's verdict reports its own reason. The
+    # level separates the two kinds: an unmappable expert layout is a class-declared family property
+    # (the HF path IS its supported route), while a missing snapshot or missing safetensors is an
+    # environment problem that silently costs every rank the full checkpoint in CPU RAM.
     if local_dir is None:
         fallback_reason, log = "no_local_snapshot", logger.warning
     elif not has_safetensors_checkpoint(local_dir):
@@ -262,22 +263,7 @@ def load_ep_model(
     else:
         fallback_reason, log = "lazy_incompatible_expert_layout", logger.info
     log(f"[Rank {rank}] Using HuggingFace from_pretrained + EP patch (reason={fallback_reason})")
-    return _timed_ep_load(
-        f"huggingface_ep_fallback_{fallback_reason}",
-        lambda: _load_ep_model_huggingface(
-            model_name_or_path,
-            ep_config,
-            config,
-            dtype,
-            trust_remote_code,
-            model_class=model_class,
-            max_concurrent_loading=max_concurrent_loading,
-            revision=revision,
-            keep_fp32_params=keep_fp32_params,
-            preserve_checkpoint_precision=preserve_checkpoint_precision,
-            **model_kwargs,
-        ),
-    )
+    return _timed_ep_load(f"huggingface_ep_fallback_{fallback_reason}", huggingface_load)
 
 
 def _load_ep_model_sharded(checkpoint_dir: str) -> torch.nn.Module:
@@ -288,8 +274,7 @@ def _load_ep_model_sharded(checkpoint_dir: str) -> torch.nn.Module:
         f"    python scripts/after_training/merge_ep_shards.py \\\n"
         f"        --input_dir {checkpoint_dir} \\\n"
         f"        --output_dir /path/to/merged_checkpoint\n\n"
-        f"Then load the merged checkpoint:\n\n"
-        f"    model = load_ep_model('/path/to/merged_checkpoint', ep_config)\n\n"
+        f"Then set model_name_or_path to /path/to/merged_checkpoint.\n\n"
         f"Alternatively, train with save_sharded_ep: false to save in gathered format, "
         f"which loads directly without merging."
     )
@@ -311,10 +296,10 @@ def _load_ep_model_huggingface(
     """Load EP model from HuggingFace checkpoint.
 
     Files must be downloaded/cached first. ``device_map="cpu"`` keeps unconverted bf16 keys as
-    safetensors mmap views (page cache, shared across ranks), but every conversion-mapping result (a
-    fused ``gate_up_proj``, a stacked per-expert bank) is an anonymous CPU tensor, so a converted MoE
-    family stages its whole expert set per rank; ``max_concurrent_loading`` bounds how many ranks do
-    so at once.
+    safetensors mmap views (page cache, shared across ranks), but every conversion-mapping result —
+    a fused ``gate_up_proj`` or a stacked per-expert bank — is an anonymous CPU tensor, so a converted
+    MoE family stages its whole expert set per rank here; ``max_concurrent_loading`` bounds how many
+    ranks do so at once.
     """
     if model_class is None:
         model_class = AutoModelForCausalLM
@@ -335,7 +320,7 @@ def _load_ep_model_huggingface(
     # Bounded ranks per node at a time — an unbounded fan-in CPU-OOMs on large MoE.
     logger.info(f"[Rank {rank}] Waiting for sequential model loading (local_rank={get_local_rank()})...")
     precision_guard = DeferredRankFailure(f"FP32-master checkpoint load from {model_name_or_path}")
-    with sequential_load_within_node(max_concurrent=max_concurrent_loading):
+    with joined_node_load(f"EP model load from {model_name_or_path}", max_concurrent_loading):
         logger.info(f"[Rank {rank}] Loading model to CPU...")
         model = from_pretrained_verified(
             model_class,
@@ -370,8 +355,8 @@ def _load_ep_model_huggingface(
     create_ep_buffers(model)
 
     # from_pretrained materializes only the keys the checkpoint carries, so non-persistent buffers
-    # hold uninitialized memory and the tied lm_head shadow stays on meta. Repaired after the device
-    # move.
+    # hold garbage and the tied lm_head shadow stays on meta; the bf16 cast above compounds it.
+    # Repair after the device move.
     finalize_loaded_model(model)
 
     logger.info(f"[Rank {rank}] Model loaded successfully")

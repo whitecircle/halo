@@ -9,7 +9,9 @@
   printed summary, not recording a verdict the harness then returns.
 * A collection of the CPU tier from the repo root never imports a GPU script: everything under
   ``tests/gpu/`` except the launcher entry points is a torchrun script, and one that acts at import
-  takes the whole session down.
+  takes the whole session down. Nor does a CPU test or a ``tests/common`` helper reach one, by import
+  or ``load_script_module``, in its own body or in a probe script's source: a fixture both tiers share
+  lives in ``tests/common``.
 * No CPU test file re-declares the ``cpu`` marker: ``tests/conftest.py`` applies it by path to
   everything under ``tests/cpu/``, so a per-file ``pytestmark`` is a second mechanism for the same
   selection that only rots when the collector's rule changes.
@@ -50,6 +52,17 @@ SUMMARY_EXEMPT = {"tests/gpu/profiling/benchmark_collators.py"}
 # torchrun script.
 GPU_LAUNCHER_MODULES = {"__init__.py", "conftest.py", "manifest.py", *LAUNCHER_ENTRYPOINTS}
 COLLECTION_MARKER = "GPU_SCRIPTS_IMPORTED:"
+# The GPU tier as a package and as a path, assembled so the import pin below does not read its own
+# fixtures as offenders.
+GPU_PACKAGE = "tests" + ".gpu"
+GPU_DIR = "tests" + "/gpu"
+GPU_IMPORTABLE = {
+    GPU_PACKAGE,
+    *(f"{GPU_PACKAGE}.{name.removesuffix('.py')}" for name in GPU_LAUNCHER_MODULES - {"__init__.py"}),
+}
+SCRIPT_LOADER = "load_script_module"
+# Where the CPU tier's code lives: its tests and the helpers they import.
+CPU_TIER_ROOTS = ("tests/cpu", "tests/common")
 
 
 def _test_files():
@@ -113,6 +126,59 @@ def _sys_path_bootstrap_lines(tree: ast.Module) -> list[int]:
             for target in _assignment_targets(node)
         ):
             lines.append(node.lineno)
+    return lines
+
+
+def _imported_gpu_scripts(node: ast.AST) -> list[str]:
+    """The ``tests.gpu`` modules outside :data:`GPU_IMPORTABLE` an import statement binds."""
+    if isinstance(node, ast.Import):
+        modules = [alias.name for alias in node.names]
+    elif isinstance(node, ast.ImportFrom) and node.module == GPU_PACKAGE:
+        modules = [f"{GPU_PACKAGE}.{alias.name}" for alias in node.names]
+    elif isinstance(node, ast.ImportFrom) and node.module:
+        modules = [node.module]
+    else:
+        return []
+    return [
+        module
+        for module in modules
+        if (module == GPU_PACKAGE or module.startswith(f"{GPU_PACKAGE}.")) and module not in GPU_IMPORTABLE
+    ]
+
+
+def _loads_a_gpu_script(node: ast.AST) -> bool:
+    """A ``load_script_module`` call, bare or through its module, on a path under ``tests/gpu/``."""
+    if not isinstance(node, ast.Call) or not node.args:
+        return False
+    func = node.func
+    name = func.id if isinstance(func, ast.Name) else func.attr if isinstance(func, ast.Attribute) else None
+    path = node.args[0]
+    return (
+        name == SCRIPT_LOADER
+        and isinstance(path, ast.Constant)
+        and isinstance(path.value, str)
+        and path.value.startswith(f"{GPU_DIR}/")
+    )
+
+
+def _gpu_script_reach_lines(tree: ast.Module) -> list[int]:
+    """Lines that import a torchrun script from ``tests/gpu/`` or load one by path, also inside a string
+    that parses as the source of a probe script."""
+    lines = []
+    for node in ast.walk(tree):
+        if _imported_gpu_scripts(node) or _loads_a_gpu_script(node):
+            lines.append(node.lineno)
+        elif (
+            isinstance(node, ast.Constant)
+            and isinstance(node.value, str)
+            and (GPU_PACKAGE in node.value or GPU_DIR in node.value)
+        ):
+            try:
+                probe = ast.parse(textwrap.dedent(node.value))
+            except SyntaxError:
+                continue
+            if _gpu_script_reach_lines(probe):
+                lines.append(node.lineno)
     return lines
 
 
@@ -338,6 +404,49 @@ def test_the_conventions_scan_reads_the_whole_suite():
         assert BANNED_SUMMARY in (REPO_ROOT / rel).read_text(encoding="utf-8"), (
             f"{rel} no longer uses `{BANNED_SUMMARY}` — drop its exemption"
         )
+
+
+def test_no_cpu_tier_module_reaches_a_gpu_script():
+    """The collection probe above sees what a ``tests/gpu/`` collection imports; this pin reads what the
+    CPU tier itself imports, which a lazy or out-of-process load of a GPU script would slip past."""
+    paths = [path for root in CPU_TIER_ROOTS for path in sorted((REPO_ROOT / root).rglob("*.py"))]
+    assert len(paths) > 400, f"only {len(paths)} CPU-tier modules scanned — the sweep lost its roots"
+    offenders = [
+        f"{path.relative_to(REPO_ROOT)}:{line}" for path in paths for line in _gpu_script_reach_lines(_tree(path))
+    ]
+    assert not offenders, (
+        "a CPU test or tests/common helper reaches a torchrun script under tests/gpu/: move the fixture it "
+        "needs into tests/common and import it from both tiers. Offenders:\n  " + "\n  ".join(offenders)
+    )
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        f"from {GPU_PACKAGE}.trainers.grpo.test_offline_grpo_ep_cp import parser",
+        f"import {GPU_PACKAGE}.parallelism.ep.test_ep_optimizer_resume",
+        f"from {GPU_PACKAGE} import test_suite_helpers",
+        f'suite = load_script_module("{GPU_DIR}/trainers/grpo/test_offline_grpo_chunked.py")',
+        f'suite = utils.load_script_module("{GPU_DIR}/parallelism/ep/test_ep_optimizer_resume.py")',
+        f'script = """\nfrom {GPU_PACKAGE}.trainers.grpo.test_x import fixture\nprint(fixture())\n"""',
+    ],
+)
+def test_the_gpu_script_detector_fires_on_every_spelling(source):
+    assert len(_gpu_script_reach_lines(ast.parse(source))) == 1
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        f"from {GPU_PACKAGE}.manifest import MANIFEST",
+        f"from {GPU_PACKAGE} import manifest",
+        f"import {GPU_PACKAGE}.conftest",
+        'module = load_script_module("scripts/training/sft.py")',
+        f'"""A probe never imports from {GPU_DIR}/ trainers."""',
+    ],
+)
+def test_the_gpu_script_detector_passes_the_launcher_side_and_mentions(source):
+    assert _gpu_script_reach_lines(ast.parse(source)) == []
 
 
 if __name__ == "__main__":

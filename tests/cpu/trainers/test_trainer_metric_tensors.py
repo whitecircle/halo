@@ -14,7 +14,6 @@ import torch
 
 from src.distributed.parallelism_config import ParallelismConfig
 from src.trainers.distillation.sdpg import DistributedSDPGTrainer
-from src.trainers.distillation.self_distillation import DistributedSelfDistillationTrainer
 from src.trainers.mixins.stored_metrics import StoredMetricsMixin
 from src.trainers.preference.smpo import SmoothMarginPOTrainer
 
@@ -26,7 +25,7 @@ def _bare_smpo() -> SmoothMarginPOTrainer:
     t.target_margin = 0.5
     t.chosen_sft_ratio = 0.8
     t.parallelism_config = ParallelismConfig()  # cp_size property reads this (all-ones default)
-    t.concatenated_forward = lambda model, batch: {
+    t.concatenated_forward = lambda model, batch, real_pairs=None: {
         "chosen_logps": torch.tensor([-1.0, -2.0]),
         "rejected_logps": torch.tensor([-3.0, -4.0]),
         "chosen_sft_loss": torch.tensor(0.7),
@@ -46,7 +45,7 @@ def test_smpo_metrics_are_detached_tensors():
     """Every SMPO batch metric must be a detached 0-dim tensor — a float means an ``.item()`` host
     sync per metric per microbatch crept back in."""
     trainer = _bare_smpo()
-    loss, metrics = trainer.get_batch_loss_metrics(model=None, batch={}, train_eval="train")
+    loss, metrics, _ = trainer.get_batch_loss_metrics(model=None, batch={}, train_eval="train")
     assert torch.is_tensor(loss)
     assert metrics, "no metrics produced"
     for name, value in metrics.items():
@@ -57,22 +56,12 @@ def test_smpo_metrics_are_detached_tensors():
 
 def test_smpo_eval_metrics_are_tensors_and_prefixed():
     trainer = _bare_smpo()
-    _, metrics = trainer.get_batch_loss_metrics(model=None, batch={}, train_eval="eval")
+    trainer.eval_split_rows = lambda num_rows: num_rows
+    _, metrics, _ = trainer.get_batch_loss_metrics(
+        model=None, batch={"prompt_input_ids": torch.zeros(2, 1)}, train_eval="eval"
+    )
     assert all(name.startswith("eval_") for name in metrics)
     assert all(torch.is_tensor(v) for v in metrics.values())
-
-
-def test_self_distillation_records_tensors_via_stored_metrics():
-    """``_record_metrics`` must store detached tensors in the StoredMetricsMixin buffer (drained at
-    log time), never ``.item()`` every value into TRL's ``_metrics`` per microbatch."""
-    assert issubclass(DistributedSelfDistillationTrainer, StoredMetricsMixin)
-    t = DistributedSelfDistillationTrainer.__new__(DistributedSelfDistillationTrainer)
-    live = torch.tensor(0.5, requires_grad=True) * 2  # non-leaf, requires_grad
-    t._record_metrics({"opd_loss": live, "beta": 0.25}, "train")
-    stored = t._stored_metrics["train"]
-    assert torch.is_tensor(stored["opd_loss"][0])
-    assert not stored["opd_loss"][0].requires_grad, "stored metric must be detached"
-    assert stored["beta"][0] == pytest.approx(0.25)
 
 
 def test_sdpg_routes_through_stored_metrics_mixin():
@@ -81,7 +70,8 @@ def test_sdpg_routes_through_stored_metrics_mixin():
     assert issubclass(DistributedSDPGTrainer, StoredMetricsMixin)
     t = DistributedSDPGTrainer.__new__(DistributedSDPGTrainer)
     t.store_metrics({"opd_loss": torch.tensor(1.5)}, train_eval="train")
-    assert torch.is_tensor(t._stored_metrics["train"]["opd_loss"][0])
+    value, _rows = t._stored_metrics["train"]["opd_loss"][0]
+    assert torch.is_tensor(value)
 
 
 if __name__ == "__main__":

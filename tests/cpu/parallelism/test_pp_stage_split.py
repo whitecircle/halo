@@ -299,7 +299,7 @@ def test_ragged_layer_types_snap_to_whole_period_boundaries():
 def test_module_path_rejects_a_module_outside_the_tree():
     """The identity lookup behind global naming and the loader's droppable prefixes must fail loud.
 
-    A bare ``next(...)`` raised ``StopIteration`` here, which reads as an exhausted iterator rather
+    A bare ``next(...)`` would raise ``StopIteration`` here, which reads as an exhausted iterator rather
     than as "this model does not contain that module".
     """
     with pytest.raises(ValueError, match="is not a module of"):
@@ -571,7 +571,7 @@ def test_mtp_field_declared_but_not_built_is_accepted(field):
 
     Step3p7, Qwen3.5/3.6, Inkling, DeepSeek-V4 and GLM-5 hub configs declare 1-3 MTP tail layers as
     checkpoint metadata while the load drops the weights (``_keys_to_ignore_on_load_unexpected``);
-    a declaration-only gate refused every one of those checkpoints for layers that do not exist.
+    a declaration-only gate would refuse every one of those checkpoints for layers that do not exist.
     """
     model = Qwen3ForCausalLM(Qwen3Config(**TINY_QWEN3_CONFIG))
     setattr(model.config, field, 3)

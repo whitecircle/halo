@@ -9,12 +9,10 @@
 * A dataset with no ``answer`` column under an environment that grades against one scores a single
   constant — zero advantage in every GRPO group, nothing in the logs — so it is refused here, and
   ``remove_unused_columns`` is forced off because the rollout context IS the row's other columns.
-* The episode thinking scope needs a budget for every episode's turns to share (every level's
-  ``thinking_tokens`` under a set ``reasoning_effort``, or the run's ceiling) and a per-turn reserve no
-  level's budget falls below; either gap is refused.
+* A drawable effort level whose ``thinking_tokens`` reach ``rollout_max_tokens`` leaves its turns no
+  answer room, so every one is cut mid-reasoning; refused before the servers are up.
 * A vLLM thinking budget forces reasoning closes the loss must not train on: the run needs the IS
-  correction, and a close marker the tokenizer lacks is refused under the episode scope and warned
-  under the per-turn scope.
+  correction, and a close marker the tokenizer lacks is warned, the forced closes left in the loss.
 
     python tests/cpu/grpo/test_env_trainer_construction_gates.py
 """
@@ -55,10 +53,12 @@ _INIT_GATES = (
     "_validate_eval_round",
     "_force_full_dataset_columns",
     "_reject_answerless_datasets",
-    "_validate_effort_length_terms",
-    "_validate_thinking_budget_scope",
+    "_validate_reasoning_terms",
     "_require_forced_close_neutralized",
     "reject_off_policy_mask_threshold",
+    "reject_inert_std_floor",
+    "resolve_rollout_stop_token_ids",
+    "_arm_update_breaker",
 )
 
 
@@ -167,7 +167,7 @@ def test_a_non_grading_environment_accepts_an_answer_less_dataset():
     _answer_host("native_math", {}, _dataset(), eval_dataset=_dataset())._reject_answerless_datasets()
 
 
-def _scope_host(budgets: dict, effort: str | None = "random", **config):
+def _level_host(budgets: dict, effort: str | None = "random", **config):
     host = object.__new__(DistributedAsyncEnvironmentalGRPOTrainer)
     host.async_config = AsyncTrainingConfig(**config)
     host._rollout_env = types.SimpleNamespace(reasoning_effort=effort, thinking_budget_for_effort=budgets.get)
@@ -177,35 +177,20 @@ def _scope_host(budgets: dict, effort: str | None = "random", **config):
 _EVERY_LEVEL = {"low": 8192, "medium": 12288, "high": 16384}
 
 
-def test_episode_scope_refuses_a_run_where_an_episode_has_no_budget_to_share():
-    """Without the run's ceiling an episode's budget is its level's ``thinking_tokens`` alone, so an episode
-    that draws an unbudgeted level, or resolves no level, would fail at its first turn as a masked row,
-    after the servers are up. Every level budgeted under a set level, or the ceiling, is a whole contract."""
-    episode = {"rollout_thinking_budget_scope": "episode"}
-    with pytest.raises(ValueError, match=r"nothing to share.*unset for \['low', 'medium', 'high'\]"):
-        _scope_host({}, **episode)._validate_thinking_budget_scope()
-    with pytest.raises(ValueError, match=r"unset for \['low', 'medium'\]"):
-        _scope_host({"high": 16384}, **episode)._validate_thinking_budget_scope()
-    with pytest.raises(ValueError, match="reasoning_effort, got None"):
-        _scope_host(_EVERY_LEVEL, effort=None, **episode)._validate_thinking_budget_scope()
-    _scope_host(_EVERY_LEVEL, **episode)._validate_thinking_budget_scope()
-    # The ceiling budgets an episode its level leaves unbudgeted, with or without a level.
-    _scope_host({"high": 16384}, **episode, rollout_max_thinking_tokens=8000)._validate_thinking_budget_scope()
-    _scope_host({}, effort=None, **episode, rollout_max_thinking_tokens=8000)._validate_thinking_budget_scope()
-    # The per-turn scope shares nothing and runs uncapped as before.
-    _scope_host({}, effort=None)._validate_thinking_budget_scope()
-
-
-def test_episode_scope_refuses_a_reserve_a_level_budget_cannot_hold():
-    """The reserve is what every turn keeps, so a level whose whole budget sits below it would hand its
-    first turn more reasoning than the episode total the template states."""
-    episode = {"rollout_thinking_budget_scope": "episode"}
-    short_low = {**_EVERY_LEVEL, "low": 256}
-    with pytest.raises(ValueError, match=r"exceeds the thinking_tokens of \{'low': 256\}"):
-        _scope_host(short_low, **episode, rollout_thinking_turn_reserve=512)._validate_thinking_budget_scope()
-    _scope_host(short_low, **episode, rollout_thinking_turn_reserve=256)._validate_thinking_budget_scope()
-    # Not a per-turn-scope concern: there the reserve is never read.
-    _scope_host({"low": 256}, rollout_thinking_turn_reserve=512)._validate_thinking_budget_scope()
+def test_a_drawable_levels_budget_must_sit_below_the_turn_cap():
+    """A level's ``thinking_tokens`` at or above ``rollout_max_tokens`` leaves its turns no answer room:
+    each is cut mid-reasoning and trains as a length-cut turn forever. Only the levels the environment
+    can draw are checked, since a budget elsewhere binds no episode."""
+    turn = {"rollout_max_tokens": 16384}
+    with pytest.raises(
+        ValueError, match=r"'high' level's thinking_tokens \(16384\) must sit below rollout_max_tokens"
+    ):
+        _level_host(_EVERY_LEVEL, **turn)._validate_reasoning_terms()
+    with pytest.raises(ValueError, match="'high' level's thinking_tokens"):
+        _level_host(_EVERY_LEVEL, effort="high", **turn)._validate_reasoning_terms()
+    _level_host(_EVERY_LEVEL, effort="low", **turn)._validate_reasoning_terms()
+    _level_host(_EVERY_LEVEL, effort=None, **turn)._validate_reasoning_terms()
+    _level_host(_EVERY_LEVEL, rollout_max_tokens=16385)._validate_reasoning_terms()
 
 
 def test_column_pruning_is_forced_off(tmp_path):
@@ -256,7 +241,7 @@ class _Tokenizer:
 def _close_host(budgets: dict, knows_close: bool = True, **config):
     host = object.__new__(DistributedAsyncEnvironmentalGRPOTrainer)
     host.async_config = AsyncTrainingConfig(**config)
-    host._rollout_env = types.SimpleNamespace(thinking_budget_for_effort=budgets.get)
+    host._rollout_env = types.SimpleNamespace(reasoning_effort="random", thinking_budget_for_effort=budgets.get)
     host._tokenizer = _Tokenizer(knows_close)
     return host
 
@@ -282,33 +267,14 @@ def test_no_forced_close_where_no_budget_can_be_enforced():
     assert _close_host({})._resolve_forced_close_ids() is None
 
 
-def test_a_per_turn_scope_marker_the_tokenizer_does_not_write_warns_and_trains_on_the_forced_closes(caplog):
-    """Under the per-turn scope nothing else reads the marker, so a family whose reasoning ends otherwise
-    still runs, told that its forced closes stay in the loss."""
+def test_a_marker_the_tokenizer_does_not_write_warns_and_trains_on_the_forced_closes(caplog):
+    """Nothing else reads the marker, so a family whose reasoning ends otherwise still runs, told that
+    its forced closes stay in the loss."""
     host = _close_host({"high": 16384}, knows_close=False)
     with caplog.at_level(logging.WARNING, logger="src.trainers.grpo.environmental"):
         assert host._resolve_forced_close_ids() is None
     warnings = [r.getMessage() for r in caplog.records if r.levelno == logging.WARNING]
     assert any("stay in the policy loss" in w and DEFAULT_REASONING_END_TOKEN in w for w in warnings), warnings
-
-
-def test_an_episode_scope_marker_the_tokenizer_does_not_write_is_refused():
-    """The episode scope counts every turn's reasoning up to the marker, so an unknown one is a broken run."""
-    host = _close_host({"high": 16384}, knows_close=False, rollout_thinking_budget_scope="episode")
-    with pytest.raises(ValueError, match="not a reasoning marker of this tokenizer"):
-        host._resolve_forced_close_ids()
-
-
-def test_an_episode_scope_marker_of_several_tokens_is_refused():
-    """The episode scope counts a turn's reasoning up to one marker token, which a sequence does not name."""
-    host = _close_host(
-        {"high": 16384},
-        knows_close=False,
-        rollout_thinking_budget_scope="episode",
-        rollout_reasoning_end_token=_OPENER,
-    )
-    with pytest.raises(ValueError, match="encodes to 5 tokens"):
-        host._resolve_forced_close_ids()
 
 
 if __name__ == "__main__":

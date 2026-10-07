@@ -204,12 +204,17 @@ def _round(truncated: int, total: int = 4):
     ]
 
 
+def _log_round(host, results: list, mode: str = "train") -> None:
+    """``_log_rollout_metrics`` over episodes that carry no reasoning."""
+    host._log_rollout_metrics(results, mode, [[] for _ in results])
+
+
 def test_the_truncation_alarm_fires_on_a_crossing_and_logs_every_round(monkeypatch, caplog):
     monkeypatch.setattr(rm, "gather_object", lambda values: list(values))
     host = _RoundHost(alarm_rate=0.25)
     with caplog.at_level(logging.WARNING, logger=rm.__name__):
         for truncated in (2, 3, 0, 2):
-            host._log_rollout_metrics(_round(truncated), "train")
+            _log_round(host, _round(truncated))
 
     assert host._metrics["train"]["episode/truncation_alarm"] == [1.0, 1.0, 0.0, 1.0]
     warnings = [r for r in caplog.records if "truncation_alarm_rate" in r.getMessage()]
@@ -231,7 +236,7 @@ def test_the_truncation_warning_states_what_the_loss_does_with_a_truncated_episo
     monkeypatch.setattr(rm, "gather_object", lambda values: list(values))
     host = _RoundHost(alarm_rate=0.25, mask_truncated=mask_truncated)
     with caplog.at_level(logging.WARNING, logger=rm.__name__):
-        host._log_rollout_metrics(_round(2), "train")
+        _log_round(host, _round(2))
     (warning,) = [r.getMessage() for r in caplog.records if "truncation_alarm_rate" in r.getMessage()]
     assert said in warning and unsaid not in warning
 
@@ -246,7 +251,7 @@ def test_the_truncation_alarm_off_logs_nothing(monkeypatch, caplog):
     monkeypatch.setattr(rm, "gather_object", lambda values: list(values))
     host = _RoundHost(alarm_rate=None)
     with caplog.at_level(logging.WARNING, logger=rm.__name__):
-        host._log_rollout_metrics(_round(4), "train")
+        _log_round(host, _round(4))
     assert "episode/truncation_alarm" not in host._metrics["train"]
     assert not caplog.records
 

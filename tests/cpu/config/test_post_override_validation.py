@@ -28,6 +28,7 @@ from src.args.self_distill_args import SelfDistillationArguments
 from src.args.validation import RangeValidatedConfig
 from src.configs.async_training_config import AsyncTrainingConfig
 from src.configs.classification_config import ClassificationConfig
+from src.configs.distillation_config import DistillationConfig
 from src.configs.embedding_config import EmbeddingConfig
 from src.configs.environment_config import EnvironmentConfig
 from src.configs.offline_grpo_config import OfflineGRPOConfig
@@ -36,7 +37,7 @@ from src.distributed.module_registry import iter_subclasses
 from src.distributed.parallelism_config import PP_SCHEDULES
 from src.env import DEFAULT_NCCL_TIMEOUT_MINUTES
 from src.environments.base import VALID_REASONING_EFFORTS
-from src.trainers.distillation.losses import _SELF_DISTILL_LOSSES
+from src.trainers.distillation.losses import DIVERGENCES
 from src.training.parser import H4ArgumentParser, _literal_choices
 from src.training.script_runner import init_training_script
 
@@ -105,6 +106,10 @@ _RANGE_VIOLATIONS = [
     (RLVROnlineGRPOScriptArguments, "sdpg_hint_template", "{solution}"),
     (SelfDistillationArguments, "sdpg_beta_warmup_steps", "-1"),
     (SelfDistillationArguments, "sdpg_hint_template", "{answr}"),
+    (SelfDistillationArguments, "reference_kl_coef", "-0.1"),
+    (SelfDistillationArguments, "reference_kl_coef", "nan"),
+    (SelfDistillationArguments, "confidence_power", "0"),
+    (SelfDistillationArguments, "train_on_completions_only", "false"),
 ]
 
 # Presence guards rather than ranges, and the same bypass. Each needs a VALID yaml baseline so the
@@ -150,7 +155,7 @@ def test_in_range_cli_override_still_parses(config_cls, flag, value, tmp_path):
 )
 def test_cli_override_emptying_a_required_field_raises(config_cls, flag, yaml_body, value, tmp_path):
     """A valid YAML plus an emptying override must not parse clean: distillation would reach the
-    loader with a blank teacher id, and an environment run an empty required field."""
+    loader with a blank teacher id."""
     assert _parse(config_cls, tmp_path, [], yaml_body), "yaml baseline must parse, or the test is vacuous"
     with pytest.raises(ValueError, match=flag):
         _parse(config_cls, tmp_path, [f"--{flag}={value}"], yaml_body)
@@ -223,7 +228,7 @@ def test_every_guarded_parse_target_routes_through_the_override_hook():
 
 def test_dead_knobs_are_rejected_not_ignored():
     """``num_labels`` (derived from the dataset) and ``partial_reward`` (no reward tier the grader
-    ever pays) were settable no-ops; the parser must now refuse them."""
+    ever pays) would be settable no-ops; the parser refuses them."""
     for parser, key in (
         (H4ArgumentParser((ClassificationConfig,)), "num_labels"),
         (H4ArgumentParser((EnvironmentConfig,)), "partial_reward"),
@@ -263,15 +268,12 @@ def test_async_episode_timeout_default_clears_the_watchdog_warning():
     [
         (DistributedArguments, "pipeline_schedule", PP_SCHEDULES),
         (RLVROnlineGRPOScriptArguments, "reasoning_effort", (*VALID_REASONING_EFFORTS, "random", None)),
-        (SDPGArguments, "sdpg_loss", tuple(_SELF_DISTILL_LOSSES)),
-        (SelfDistillationArguments, "reference_kl_loss", tuple(_SELF_DISTILL_LOSSES)),
     ],
-    ids=["pipeline_schedule", "reasoning_effort", "sdpg_loss", "reference_kl_loss"],
+    ids=["pipeline_schedule", "reasoning_effort"],
 )
 def test_literal_annotation_matches_its_runtime_table(owner, field_name, expected):
-    """These fields restate a tuple that lives elsewhere (PP_SCHEDULES / VALID_REASONING_EFFORTS /
-    the self-distillation loss table) because importing it would drag torch or the environments
-    package into the arg dataclasses.
+    """These fields restate a tuple that lives elsewhere (PP_SCHEDULES / VALID_REASONING_EFFORTS)
+    because importing it would drag torch or the environments package into the arg dataclasses.
     Pin the equality — via the parser's own choice extractor — so the restatement cannot drift."""
     declared = _literal_choices(get_type_hints(owner)[field_name])
     assert declared is not None, (
@@ -280,8 +282,37 @@ def test_literal_annotation_matches_its_runtime_table(owner, field_name, expecte
     assert set(declared) == set(expected)
 
 
+# Each distillation arm admits its own slice of the one divergence registry.
+_DIVERGENCE_FIELDS = (
+    (SDPGArguments, "sdpg_loss"),
+    (SelfDistillationArguments, "reference_kl_loss"),
+    (DistillationConfig, "distill_loss"),
+)
+
+
+def _divergence_choices(owner, field_name) -> set:
+    declared = _literal_choices(get_type_hints(owner)[field_name])
+    assert declared is not None, (
+        f"{owner.__name__}.{field_name} is not Literal-annotated, so the parser cannot gate it"
+    )
+    return set(declared)
+
+
+@pytest.mark.parametrize(("owner", "field_name"), _DIVERGENCE_FIELDS, ids=[name for _, name in _DIVERGENCE_FIELDS])
+def test_every_admitted_divergence_resolves_in_the_registry(owner, field_name):
+    """A name the parser admits but the registry lacks raises only at trainer construction."""
+    unresolved = _divergence_choices(owner, field_name) - set(DIVERGENCES)
+    assert not unresolved, f"{owner.__name__}.{field_name} admits {sorted(unresolved)}, which DIVERGENCES lacks"
+
+
+def test_every_registered_divergence_is_admitted_by_some_arm():
+    """A registry entry no Literal admits is dead code that a YAML can never reach."""
+    admitted = set().union(*(_divergence_choices(owner, field_name) for owner, field_name in _DIVERGENCE_FIELDS))
+    assert set(DIVERGENCES) == admitted
+
+
 def test_unknown_pipeline_schedule_is_rejected_at_parse_time(tmp_path):
-    """Declared ``str``, pipeline_schedule skipped the parser's Literal gate entirely."""
+    """Declared ``str``, pipeline_schedule would skip the parser's Literal gate entirely."""
     path = tmp_path / "config.yaml"
     path.write_text("pipeline_schedule: 1f1c\n")
     with pytest.raises(ValueError, match="pipeline_schedule"):
@@ -289,8 +320,8 @@ def test_unknown_pipeline_schedule_is_rejected_at_parse_time(tmp_path):
 
 
 def test_unknown_reasoning_effort_is_rejected_at_parse_time(tmp_path):
-    """The env-GRPO path validates this steer in BaseEnvironment.__init__; the RLVR path did not,
-    and an unknown level is silently ignored by most chat templates (no steer at all)."""
+    """The env-GRPO path validates this steer in BaseEnvironment.__init__; the RLVR path has only the
+    parser, and an unknown level is silently ignored by most chat templates (no steer at all)."""
     with pytest.raises(ValueError, match="reasoning_effort"):
         _parse(RLVROnlineGRPOScriptArguments, tmp_path, ["--reasoning_effort=hgih"])
 

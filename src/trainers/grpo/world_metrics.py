@@ -9,9 +9,10 @@ from collections import defaultdict
 from collections.abc import Callable, MutableMapping, Sequence
 
 import torch
+import torch.distributed as dist
 from accelerate.utils import gather_object
 
-from src.distributed.runtime import current_device
+from src.distributed.runtime import collective_device, current_device, is_multi_rank_run
 
 Count = torch.Tensor | float | int
 
@@ -49,6 +50,19 @@ def gathered_fractions(
     local = torch.stack([torch.as_tensor(v, device=device).double() for pair in pairs for v in pair])
     counts = gather_fn(local).view(-1, 2 * len(pairs)).sum(dim=0)
     return (counts[0::2] / counts[1::2].clamp(min=1)).tolist()
+
+
+def world_sums(values: Sequence[Count]) -> list[float]:
+    """Each of ``values`` summed over the world, in one all-reduce of ``len(values)`` numbers.
+
+    COLLECTIVE — every rank calls it with the same number of values, a rank with nothing to report
+    sending zeros. For a counter kept across steps, read where TRL's ``log`` would report one rank's.
+    """
+    device = collective_device()
+    local = torch.stack([torch.as_tensor(v, device=device).double() for v in values])
+    if is_multi_rank_run():
+        dist.all_reduce(local)
+    return local.tolist()
 
 
 class WorldMetrics:

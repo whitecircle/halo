@@ -1,13 +1,13 @@
 #!/usr/bin/env python
 """Reward (Bradley-Terry) and Classification under Expert Parallelism (ep2, tiny Qwen3-MoE).
 
-Both trainers declare ``_supports_ep = True`` and ship EP example configs, while their other GPU
+Both trainers run EP and ship EP example configs, while their other GPU
 coverage runs plain FSDP data-parallel; this is the POOLED-HEAD MoE under EP. That
 matters because these two are the only supported trainers whose loss reads a single pooled position
 per row instead of per-token logits: the EP dispatch→expert→combine round trip has to reproduce the
 dense expert output at exactly the token the sequence-classification pooling later selects, and the
-head itself (``score``) is a non-expert parameter whose gradient rides the EP-mode gradient sync
-rather than the FSDP reduce-scatter that covers the expert weights.
+head itself (``score``) is a non-expert parameter synced by FSDP2's reduce-scatter, while the
+FSDP-ignored expert weights sync through the EP gradient hooks.
 
 Every seam is silent when it breaks — a mis-permuted combine or a dropped expert changes the pooled
 score, not the shape — so the step-1 loss is pinned against the trainer's exact objective recomputed
@@ -194,7 +194,7 @@ def run(ctx):
     dataset = build_reward_dataset(7) if kind == "reward" else build_classification_dataset(7)
     trainer = build_trainer(kind, model, dataset, tokenizer, config, ctx.output_dir)
     ctx.on_teardown(trainer.cleanup_ep)
-    checks["trainer_in_ep_mode"] = trainer.is_ep_mode is True
+    checks["trainer_in_ep_mode"] = trainer.parallelism_config.is_ep_mode is True
 
     # ── Capture step 1's batch straight off the trainer's own compute_loss, so the reference
     # consumes exactly the rows and padding the EP forward saw.

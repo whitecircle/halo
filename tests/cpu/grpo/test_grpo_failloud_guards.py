@@ -7,8 +7,8 @@
 - ``tokenize_offline_grpo_rows``: a row whose completions and rewards differ in length must
   raise with row context instead of ``zip`` silently truncating the pairing (and recording the
   pre-truncation ``group_size``).
-- ``_resolve_rollout_stop_token_ids``: stop tokens that resolve to NOTHING must raise, not degrade
-  to "the user configured no stop tokens" (which inverts the gpt-oss rollout shape).
+- ``resolve_rollout_stop_token_ids``: a stop token the tokenizer does not know must raise, not degrade
+  to fewer stop tokens or to "the user configured none" (which inverts the gpt-oss rollout shape).
 - ``_extract_prompts_and_contexts``: a conversation with no user turn must record a batch error
   instead of shipping a Python ``repr`` of the message list to the environment as the task.
 - ``OfflineGRPOTrainer``: an unknown ``loss_type`` / ``policy_gradient_formulation`` must be
@@ -19,17 +19,21 @@
 
 import math
 import types
+from typing import get_args
 
 import pytest
 import torch
 from accelerate import PartialState
 
-from src.trainers.grpo.environmental import DistributedAsyncEnvironmentalGRPOTrainer, batch_reward_std
+from src.configs.offline_grpo_config import OfflineGRPOConfig
+from src.environments.episode import resolve_rollout_stop_token_ids
+from src.trainers.grpo.environmental import BatchBuildFence, DistributedAsyncEnvironmentalGRPOTrainer, batch_reward_std
+from src.trainers.grpo.objective.advantages import GROUP_ADVANTAGE_METHODS
 from src.trainers.grpo.offline import OfflineGRPOTrainer, tokenize_offline_grpo_rows
 
 PartialState()  # both trainers log through accelerate, which refuses to log without it
 
-# --- _context_limit fail-loud (F3-F) ---
+# --- _context_limit fail-loud ---
 
 _UNSET_SENTINEL = int(1e30)  # HF tokenizers' "no limit" model_max_length
 
@@ -63,7 +67,7 @@ def test_context_limit_raises_when_underivable():
         _limit_host(_UNSET_SENTINEL, types.SimpleNamespace())()
 
 
-# --- Offline GRPO completions/rewards pairing (F3-G) ---
+# --- Offline GRPO completions/rewards pairing ---
 
 
 class _OneTokenTokenizer:
@@ -82,7 +86,6 @@ _TOKENIZE_KWARGS = {
     "max_completion_length": None,
     "advantage_method": "z_norm",
     "best_completion_emphasis": 0.0,
-    "is_encoder_decoder": False,
 }
 
 
@@ -103,7 +106,7 @@ def test_paired_row_tokenizes_with_true_group_size():
     assert out["group_size"] == [2, 2]
 
 
-# --- rollout stop tokens must resolve or raise (B-3) ---
+# --- rollout stop tokens must resolve or raise ---
 
 
 class _StopTokenTokenizer:
@@ -119,40 +122,30 @@ class _StopTokenTokenizer:
         return self._known.get(name, self.unk_token_id)
 
 
-def _stop_token_host(names, tokenizer):
-    host = types.SimpleNamespace(
-        async_config=types.SimpleNamespace(rollout_stop_tokens=names),
-        _tokenizer=tokenizer,
-    )
-    return DistributedAsyncEnvironmentalGRPOTrainer._resolve_rollout_stop_token_ids.__get__(host)
-
-
 def test_stop_tokens_that_all_fail_to_resolve_raise():
     # Returning None here is indistinguishable from "no stop tokens configured": a gpt-oss episode
     # would then play out in a single generation instead of stopping at <|call|>.
-    resolve = _stop_token_host(["<|call|>", "<|nope|>"], _StopTokenTokenizer({}))
-    with pytest.raises(ValueError, match=r"<\|call\|>"):
-        resolve()
+    with pytest.raises(ValueError, match=r"\['<\|call\|>', '<\|nope\|>'\].*stub/tokenizer"):
+        resolve_rollout_stop_token_ids(_StopTokenTokenizer({}), ["<|call|>", "<|nope|>"])
 
 
-def test_partially_resolved_stop_tokens_keep_the_ones_that_worked():
-    resolve = _stop_token_host(["<|call|>", "<|nope|>"], _StopTokenTokenizer({"<|call|>": 17}))
-    assert resolve() == [17]
+def test_one_unknown_stop_token_raises_beside_the_ones_that_resolve():
+    """Dropping it would train under fewer stop tokens than the YAML names, and the eval, resolving
+    through the same function, would refuse the recipe the run trained with."""
+    with pytest.raises(ValueError, match=r"\['<\|nope\|>'\]"):
+        resolve_rollout_stop_token_ids(_StopTokenTokenizer({"<|call|>": 17}), ["<|call|>", "<|nope|>"])
+    assert resolve_rollout_stop_token_ids(_StopTokenTokenizer({"<|call|>": 17}), ["<|call|>"]) == [17]
 
 
 def test_no_stop_tokens_configured_stays_none():
-    assert _stop_token_host([], _StopTokenTokenizer({}))() is None
+    assert resolve_rollout_stop_token_ids(_StopTokenTokenizer({}), []) is None
 
 
-# --- a conversation with no user turn is a batch error, not a repr (B-2) ---
+# --- a conversation with no user turn is a batch error, not a repr ---
 
 
 def _prompt_host():
-    host = types.SimpleNamespace(_batch_build_error=None, _group_random_effort=False)
-    host._record_batch_error = types.MethodType(DistributedAsyncEnvironmentalGRPOTrainer._record_batch_error, host)
-    host._raise_batch_error_uniformly = types.MethodType(
-        DistributedAsyncEnvironmentalGRPOTrainer._raise_batch_error_uniformly, host
-    )
+    host = types.SimpleNamespace(_batch_errors=BatchBuildFence(), _group_random_effort=False)
     return host
 
 
@@ -162,8 +155,8 @@ def test_conversation_without_a_user_turn_records_a_batch_error():
     prompts, _ = DistributedAsyncEnvironmentalGRPOTrainer._extract_prompts_and_contexts(host, [{"prompt": convo}])
 
     # A per-rank raise would strand DP peers in the next collective, so it is RECORDED.
-    assert host._batch_build_error is not None
-    assert "system" in host._batch_build_error
+    assert host._batch_errors.reason is not None
+    assert "system" in host._batch_errors.reason
     # And the environment must never be handed a Python repr of the message list as its task.
     assert "role" not in prompts[0] and "'content'" not in prompts[0]
 
@@ -172,11 +165,11 @@ def test_the_fence_raises_the_first_recorded_batch_error_and_clears_it():
     """A later failure on the same batch would replace the root cause the first one names; once
     raised, the next batch starts clean."""
     host = _prompt_host()
-    host._record_batch_error("root cause")
-    host._record_batch_error("a consequence of it")
+    host._batch_errors.record("root cause")
+    host._batch_errors.record("a consequence of it")
     with pytest.raises(ValueError, match="^root cause$"):
-        host._raise_batch_error_uniformly()
-    host._raise_batch_error_uniformly()
+        host._batch_errors.reject()
+    host._batch_errors.reject()
 
 
 def test_a_prompt_with_no_user_turn_raises_before_any_rollout_is_submitted():
@@ -193,7 +186,7 @@ def test_a_prompt_with_no_user_turn_raises_before_any_rollout_is_submitted():
 
     # A real (un-inited) trainer so the method resolution under test is the real one.
     host = object.__new__(DistributedAsyncEnvironmentalGRPOTrainer)
-    host._batch_build_error = None
+    host._batch_errors = BatchBuildFence()
     host._group_random_effort = False
     host.accelerator = types.SimpleNamespace(device=torch.device("cpu"))
     host.model = types.SimpleNamespace(training=True)
@@ -218,10 +211,10 @@ def test_last_user_turn_is_the_task_text():
     )
     assert prompts == ["second"]
     assert contexts == [{"answer": "42"}]
-    assert host._batch_build_error is None
+    assert host._batch_errors.reason is None
 
 
-# --- reward_std on a 1-element gathered batch (B-18) ---
+# --- reward_std on a 1-element gathered batch ---
 
 
 def test_reward_std_of_a_single_rollout_is_finite():
@@ -232,7 +225,7 @@ def test_reward_std_of_a_single_rollout_is_finite():
     assert batch_reward_std(torch.tensor([0.0, 2.0])) == pytest.approx(math.sqrt(2.0))
 
 
-# --- offline loss-type / PG-formulation validated off-PP too (B-10) ---
+# --- offline loss-type / PG-formulation validated off-PP too ---
 
 
 def _offline_args(**overrides):
@@ -245,6 +238,7 @@ def _offline_args(**overrides):
         min_log_prob=None,
         loss_type="grpo",
         policy_gradient_formulation="prob_weighted",
+        kl_beta=0.0,
     )
     for key, value in overrides.items():
         setattr(args, key, value)
@@ -269,9 +263,38 @@ def test_unknown_loss_type_is_rejected_at_construction_without_pp():
         _construct_offline(loss_type="nonsense")
 
 
+def test_unknown_advantage_method_is_rejected_at_construction():
+    """Otherwise it surfaces inside the tokenization map, after the model load."""
+    with pytest.raises(ValueError, match="Unknown advantage_method"):
+        _construct_offline(advantage_method="nonsense")
+
+
+def test_every_configurable_advantage_method_has_a_map():
+    assert set(GROUP_ADVANTAGE_METHODS) == set(get_args(OfflineGRPOConfig.__annotations__["advantage_method"]))
+
+
 def test_unknown_pg_formulation_is_rejected_at_construction_without_pp():
     with pytest.raises(ValueError, match="policy_gradient_formulation"):
         _construct_offline(policy_gradient_formulation="nonsense")
+
+
+def test_a_missing_processing_class_is_refused():
+    """The stored rollouts are tokenized at construction; without a tokenizer there is nothing to do it with."""
+    host = object.__new__(OfflineGRPOTrainer)
+    with pytest.raises(ValueError, match="requires processing_class"):
+        OfflineGRPOTrainer.__init__(host, model=None, args=_offline_args(), processing_class=None)
+
+
+def test_an_encoder_decoder_model_is_refused():
+    """The loss scores a completion as the causal continuation of its prompt, which an encoder-decoder
+    never computes."""
+    model = types.SimpleNamespace(config=types.SimpleNamespace(is_encoder_decoder=True, _name_or_path="t5"))
+    host = object.__new__(OfflineGRPOTrainer)
+    args = _offline_args(max_length=None, use_chunked_grpo_logprobs=False, model_init_kwargs=None)
+    with pytest.raises(ValueError, match="decoder-only"):
+        OfflineGRPOTrainer.__init__(
+            host, model=model, args=args, processing_class=types.SimpleNamespace(pad_token_id=0)
+        )
 
 
 def test_pp_normalizer_refuses_an_unknown_loss_type():

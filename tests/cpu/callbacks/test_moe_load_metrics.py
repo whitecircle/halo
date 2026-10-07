@@ -342,7 +342,7 @@ def test_callback_warns_once_when_no_router_logits() -> None:
     """No router_logits ever captured (EP recorder bypass / GRPO backbone-only forward): the
     callback must emit a single loud warning, not silently produce no moe/* metrics.
 
-    Fails if the loud-no-op guard is removed (then it would silently no-op as before).
+    Fails if the loud-no-op guard is removed (the callback would then silently no-op).
     """
     cb = MoEMetricsCallback(topk=1)
     model = _CfgModel(router_aux_loss_coef=0.0)
@@ -446,9 +446,9 @@ class _CompositeCfg:
 def test_detect_moe_reads_composite_text_config() -> None:
     """A MoE VLM must be detected through its text sub-config.
 
-    Regression guard: reading only the top level returned (0, 0), so ``moe_balancing: auto``
-    resolved to "none" and the flagship Qwen3.5/3.6 MoE runs trained with NO router balancing and
-    no moe/* metrics — silently. No family name is involved: any composite config must work.
+    Reading only the top level returns (0, 0), so ``moe_balancing: auto`` would resolve to "none"
+    and the Qwen3.5/3.6 MoE runs would train with NO router balancing and no moe/* metrics —
+    silently. No family name is involved: any composite config must work.
     """
     model = type("M", (), {"config": _CompositeCfg(num_experts=256, num_experts_per_tok=8)})()
     assert detect_moe_experts_topk(model) == (256, 8)

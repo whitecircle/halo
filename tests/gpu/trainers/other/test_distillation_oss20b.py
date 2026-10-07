@@ -3,8 +3,8 @@
 Distillation training test with EP/TP parallelism on GptOss-20B.
 
 Validates that DistributedDistillationTrainer works with different parallelism
-modes using GptOss-20B as both teacher and student (self-distillation for
-testing). The teacher is always loaded without parallelism; only the student
+modes using GptOss-20B as both teacher and student (one checkpoint on both
+sides). The teacher is always loaded without parallelism; only the student
 gets EP/TP.
 
 Modes:
@@ -112,7 +112,7 @@ def run_distillation_test(mode: str, rank: int, world_size: int, local_rank: int
 
     log(f"\n{'#' * 70}")
     log(f"  Distillation Test — {mode_label}")
-    log(f"  Model: {MODEL_NAME} (self-distillation)")
+    log(f"  Model: {MODEL_NAME} (teacher and student)")
     log(f"  World: {world_size}, GPU: {torch.cuda.get_device_name(local_rank)}")
     log(f"{'#' * 70}")
 
@@ -193,6 +193,7 @@ def run_distillation_test(mode: str, rank: int, world_size: int, local_rank: int
         trainer = DistributedDistillationTrainer(
             student_model=student_model,
             teacher_model=teacher_model,
+            teacher_tokenizer=tokenizer,
             args=config,
             train_dataset=train_dataset,
             eval_dataset=eval_dataset,
@@ -202,10 +203,10 @@ def run_distillation_test(mode: str, rank: int, world_size: int, local_rank: int
         )
 
         if pc.is_ep_mode:
-            assert trainer.is_ep_mode, "Expected EP mode"
+            assert trainer.parallelism_config.is_ep_mode, "Expected EP mode"
             log("Confirmed: EP mode active")
         if pc.is_tp_mode:
-            assert trainer.is_tp_mode, "Expected TP mode"
+            assert trainer.parallelism_config.is_tp_mode, "Expected TP mode"
             log("Confirmed: TP mode active")
 
         teacher_trainable = sum(1 for p in trainer.teacher_model.parameters() if p.requires_grad)
