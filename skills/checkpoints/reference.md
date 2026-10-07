@@ -51,11 +51,11 @@ additionally needs `ep_size` in the index metadata, not just the marker.
 
 All three restore `trainer_state.json`, the LR scheduler from `scheduler.pt` (written even under
 `save_only_model`), LoRA adapters (`restore_adapters`, `src/distributed/checkpoint/peft.py`),
-wrapper-level trained params (`_restore_extra_trained_params`), the router-balancing biases
+the router-balancing biases
 (`_restore_router_balancing_biases`, `src/trainers/mixins/checkpointing.py`) and the frozen reference
 scores in `reference_logps.pt` (DPO/KTO precompute, offline GRPO KL; `src/trainers/mixins/reference_logps.py`,
 which validates token digests and settings before attaching them). Optimizer state resumes from the per-rank shards when
-`OptimizerStateFingerprint` matches; a mismatch warm-restarts (under PP it raises instead), and
+`OptimizerStateFingerprint` matches; a mismatch warm-restarts, and
 shards whose `optimizer_meta.pt` carries no fingerprint at all raise — delete every
 `optimizer_shard_*.pt` + `optimizer_meta.pt` to accept a warm restart. A matched restore that fails
 on any rank (an unreadable shard, a CUDA OOM) raises on every rank unless `allow_optimizer_warm_restart: true`.

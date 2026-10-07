@@ -14,7 +14,7 @@ Qwen3.5 / Qwen3.6 share the name prefix but use a different `Qwen3_5*` class hie
 
 Standard transformer with GQA, RoPE, SwiGLU MLP. Stock `Qwen3ForCausalLM`, no patching.
 
-- **FSDP2** — default under both launchers.
+- **FSDP2** — default under torchrun; under `accelerate launch` the `--config_file` decides.
 - **TP** — native HF `tp_plan="auto"` shards attention and MLP.
 - **CP** — `Qwen3Attention` uses the same `Qwen3MoeUlyssesAttention` wrapper as Qwen3 MoE and Qwen3-VL.
 - **PP** — [not yet available in this release](../parallelism/pipeline-parallelism.md).

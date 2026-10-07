@@ -19,10 +19,12 @@ allowed-tools:
 # Distributed-training failure triage
 
 Diagnose a hang / OOM / NaN-loss / DeepEP fault / NCCL timeout. Every helper and
-env var below matches `src/diagnostics/debugging.py` **exactly** — do not
-invent flags. The full symptom→cause→fix table and helper-enable recipes are in
-**[playbook.md](playbook.md)**; read it before giving a verdict on anything
-non-trivial. User-facing guide: `agent-docs/reference/debugging.md`.
+env var below matches its owner **exactly** — `src/diagnostics/debugging.py` (consistency checks,
+py-spy capture), `src/diagnostics/profiling.py` (`cuda_memory_history`, `log_cuda_memory`),
+`src/env.py` (`DIST_NCCL_TIMEOUT_MINUTES`), `src/models/patches/attention.py`
+(`model_fa4_backward_nan_prone`) — do not invent flags. The full symptom→cause→fix table and
+helper-enable recipes are in **[playbook.md](playbook.md)**; read it before giving a verdict on
+anything non-trivial. User-facing guide: `agent-docs/reference/debugging.md`.
 
 **First, classify the symptom**, then follow the matching branch.
 
@@ -46,8 +48,9 @@ the others never reach.
 
 ### OOM (CUDA out of memory)
 
-1. Find *what* holds memory: `profiler_record_memory_snapshot: true` (or `cuda_memory_history(...)`)
-   → `.pickle` onto <https://pytorch.org/memory_viz> for the per-allocation flame graph.
+1. Find *what* holds memory: `enable_torch_profiler: true` + `profiler_record_memory_snapshot: true`
+   (or `cuda_memory_history(...)`) → `.pickle` onto <https://pytorch.org/memory_viz> for the
+   per-allocation flame graph.
 2. Reduce levers, cheapest first: **gradient checkpointing** on; lower
    `per_device_train_batch_size`; lower `max_length` / seq len; switch to a
    parallelism that lowers DP (CP/TP). GC is refused for Zaya in every mode (cuDNN CCA fault)

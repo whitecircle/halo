@@ -262,8 +262,8 @@ on every load path, off `config.json` before any weight is read.
 Transformers validates no head count of its own, so without it the run dies on the first forward's
 reshape, after the whole checkpoint has been pulled and placed on every rank.
 
-**Axis combinations.** TP composes with EP only. TP+CP, TP+ETP, EP+TP+ETP and PP+TP are refused by
-the [allowlist](README.md#supported-combinations). EP+TP also meets two topology rejections:
+**Axis combinations.** TP composes with EP only. TP+CP, TP+ETP and EP+TP+ETP are refused by the
+[allowlist](README.md#supported-combinations). EP+TP also meets two topology rejections:
 single-domain multi-group EP with `ep_size > 2` (`ep4+tp2` on 8) and multi-domain multi-group EP
 ([Multi-Node → EP+TP](multi-node.md#eptp-mode)).
 

@@ -44,7 +44,7 @@ It drops the dense `attention_mask` so Flash Attention builds a per-document blo
 
 Inter-row padding is dropped in the flatten. A pad carries position 0, so every kept pad would be its own varlen segment, and the FA4 backward pays a fixed per-segment cost.
 
-Where pads must survive (`pad_to_multiple_of`, the shipped PP seam's fixed shapes), the tail's position IDs are a ramp restarting every `PAD_TAIL_SEGMENT_CHUNK` (256) tokens, keeping it a handful of no-op segments.
+Where pads must survive (a fixed-shape batch), the tail's position IDs are a ramp restarting every `PAD_TAIL_SEGMENT_CHUNK` (256) tokens, keeping it a handful of no-op segments.
 
 Whether the packed documents actually stay isolated is **per family**, not universal; see [Document isolation under packing](#document-isolation-under-packing).
 
@@ -94,9 +94,8 @@ Flags: `padding_free=False`, `packing=False`, `train_on_completions_only=False`,
 `train_on_last_assistant_only=False`, `model_config=None`, `per_device_train_batch_size=1`,
 `keeps_packed_rows=False`. With `packing` above batch 1 the collator merges the mini-batch's packed
 rows into one row (document isolation and throughput unchanged), and the factory warns: raise
-`max_length` instead when a longer pack is the intent. `keeps_packed_rows` (set when `pp_size > 1`,
-a seam — PP itself is [not yet available](../parallelism/pipeline-parallelism.md)) suppresses that
-warning, because a pipeline keeps the packed rows and splits them into microbatches.
+`max_length` instead when a longer pack is the intent. `keeps_packed_rows` suppresses that warning;
+only the PP seam sets it.
 
 **Pass `model_config`.** It is what feeds `resolve_eos_token_ids(tokenizer, model_config)`; without
 it the collator falls back to the tokenizer's EOS alone and mis-masks any family whose turn
@@ -169,22 +168,15 @@ too, so a composite (VLM) wrapper is covered:
 Which families get which segment markers, and the kernel refusal below, live in
 `src/models/segment_markers.py`, shared by the collators and SMPO's padding-free forward.
 
-The GatedDeltaNet families (`qwen3_5*`, `qwen3_next*`) carry two more refusals, both about markers
-that would be emitted but not read:
+The GatedDeltaNet families (`qwen3_5*`, `qwen3_next*`) carry one more refusal, about markers that
+would be emitted but not read. transformers selects their segment-aware linear-attention kernels at
+modeling-import time via `is_causal_conv1d_available()` / `is_flash_linear_attention_available()`,
+which require the package installed, `fla >= 0.2.2`, **and** a CUDA-capable torch.
 
-- **Missing kernels.** transformers selects its segment-aware linear-attention kernels at
-  modeling-import time via `is_causal_conv1d_available()` / `is_flash_linear_attention_available()`,
-  which require the package installed, `fla >= 0.2.2`, **and** a CUDA-capable torch.
-
-    The torch fallbacks it takes otherwise drop `seq_idx` and `cu_seq_lens_q`, so conv and recurrent
-    state cross document boundaries while attention stays isolated, invisible in the loss. `packing`
-    and `padding_free` (SFT and SMPO) are refused unless those same predicates hold, so the refusal
-    cannot disagree with the kernels actually selected (the production images satisfy them).
-
-- **Pipeline parallelism** ([not yet available](../parallelism/pipeline-parallelism.md)) — its
-  collator seam keeps the packed rows instead of flattening them, and the delta rule's varlen
-  `cu_seq_lens` have no per-row convention, so the conv would isolate while the scan crossed
-  documents.
+The torch fallbacks it takes otherwise drop `seq_idx` and `cu_seq_lens_q`, so conv and recurrent
+state cross document boundaries while attention stays isolated, invisible in the loss. `packing`
+and `padding_free` (SFT and SMPO) are refused unless those same predicates hold, so the refusal
+cannot disagree with the kernels actually selected (the production images satisfy them).
 
 "Crosses by construction" applies where the mixer has no per-document boundary parameter at
 all (Zaya's CCA, Inkling's convs). Pack such a family only where a
@@ -212,11 +204,6 @@ they score packed rows under the same masks the student does.
 - **Padding-free is incompatible with Context Parallelism**, and **packing is rejected under CP**.
   Under CP use the padded collator, which sets `pad_to_multiple_of=cp_size`.
 
-- **Pipeline parallelism** is [not yet available in this release](../parallelism/pipeline-parallelism.md);
-  its shipped collator gates already reject padding-free (a flattened single row cannot split into
-  microbatches) and pin packing at one packed row per microbatch — a microbatch holding more than one
-  leaks attention across documents — padding every batch to `max_length` and raising on an
-  over-length one.
 - **Completion masking requires `assistant_message_template`** matching the tokenizer's exact
   assistant-header encoding; unmatched sequences are dropped from the loss.
 

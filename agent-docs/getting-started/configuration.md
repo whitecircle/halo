@@ -61,7 +61,7 @@ python scripts/training/sft.py examples/sft/qwen3/qwen3-4b-ultrachat.yaml \
 - **Unwrapped MoE experts** — `swiglu` off, even when requested, where Halo does not wrap the routed experts (`ep_size: 1` with `use_grouped_gemm: false`, or a family with no EP layer class) and upstream liger-kernel holds the flag, which its MoE appliers use to install `LigerExperts` (input gradient wrong on Blackwell in the pinned release). The flag goes whole, so upstream's dense, shared-expert and vision SwiGLU on such a model run eager too ([Routed experts](../optimization/liger-kernels.md#routed-experts)).
 
 - **TP** (`tp_size > 1`) — `cross_entropy` and `fused_linear_cross_entropy` off; the `lm_head` logits are DTensor-sharded across the vocab dim, so a fused softmax would see a partial vocab.
-- **CP or PP** (`cp_size > 1` or `pp_size > 1`; PP is [not yet available in this release](../parallelism/pipeline-parallelism.md)) — same two off: the CP wrapper or the last pipeline stage computes the loss outside the model's forward, so the fused path never fires and its memory saving does not exist.
+- **CP** (`cp_size > 1`) — same two off: the CP wrapper computes the loss outside the model's forward, so the fused path never fires and its memory saving does not exist.
 
 `fused_linear_cross_entropy` is otherwise opt-in, defaulting on only for DeepSeek-V4, GLM-4 MoE Lite, and Zaya. Override individual kernels with `liger_kernel_config`:
 
@@ -217,7 +217,7 @@ CLI flags under `torchrun` (also settable in YAML):
 | `--ep_lazy_loading` | Lazy safetensors loading for EP paths (default `true`); each rank reads only its expert slice |
 | `--max_concurrent_loading` | Ranks loading per node. Left unset it adapts to the node — `min(4, max(1, local_world_size // 2))`, so 4 on an 8-GPU node and 2 on a 4-GPU tray; any explicit value is used verbatim (`1` for CPU-RAM-constrained hosts, `0` for all-parallel) |
 
-EP is orthogonal to data parallelism; only TP, CP, and ETP reduce it — `data_parallel_size = (world_size / pp_size) / max(tp_size, cp_size, expert_tp_size)`. See [Parallelism](../parallelism/README.md) for supported and rejected combinations.
+EP is orthogonal to data parallelism; only TP, CP, and ETP reduce it — `data_parallel_size = world_size / max(tp_size, cp_size, expert_tp_size)`. See [Parallelism](../parallelism/README.md) for supported and rejected combinations.
 
 ## Environment variables
 

@@ -205,9 +205,6 @@ Every tool here refuses an input it cannot express, rather than writing a plausi
     `scripts/before_training/` bf16 converters refuse it on the same terms, since all of them also
     accept a local directory.
 
-    The pipeline-parallel save layout is not one of these: it uses global parameter names under a
-    standard HF index with no `format` marker, so every tool would take it directly.
-
 - **In-place conversion** (`--output_dir` equal to any input directory) is rejected by every tool
   that streams from the source while writing: the write deletes the weight files it does not
   overwrite and so destroys the source mid-read. A refused conversion creates no output directory.

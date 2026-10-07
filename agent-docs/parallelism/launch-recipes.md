@@ -9,7 +9,6 @@ These recipes assume **N × 8-GPU nodes on an RDMA fabric** (InfiniBand/RoCE or 
 One `torchrun` per node, incrementing `--node_rank`. The config sets the parallelism layout — it ships `expert_parallel_size: 16` / `ep_scope: global`, cross-node EP across both nodes — and every field overrides on the command line:
 
 - **Node-local EP + DP:** `--expert_parallel_size=8 --ep_scope=node`.
-- **PP+EP** — pipeline parallelism is [not yet available in this release](pipeline-parallelism.md). For cross-node depth use cross-node EP, node-local EP + DP, or EP+TP.
 
 ```bash
 # Node 0 (master): --node_rank=0 ; Node 1: --node_rank=1

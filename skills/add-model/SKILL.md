@@ -39,7 +39,7 @@ file-touch list, the traps and the commands; read it before editing.
    `HF_MODEL_TYPES` (the checkpoint `model_type`(s) — without it sharded EP save is rejected
    and the offline merge resolver finds nothing). `EPExpertGatherMixin.__init_subclass__`
    (`expert_gather.py`) enforces a paired-override contract, each breach a `TypeError` at import:
-   overriding `gather_expert_state_dict` requires also overriding `merge_shards_to_hf`; declaring
+   `gather_expert_state_dict` and `merge_shards_to_hf` are inverses — override both or neither; declaring
    `_PER_EXPERT_UNFUSED_KEYS` while overriding the gather, or resolving both it and
    `_HUB_PER_EXPERT_KEYS`, is refused.
    Reuse an existing wrapper if the expert-weight layout matches (layout→wrapper table in the guide).

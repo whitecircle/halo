@@ -32,8 +32,8 @@ Whatever the server advertises. Tools are discovered on the first episode from t
 | `fetch` | — | HTTP fetch for web content (`uvx`) |
 | `memory` | — | knowledge-graph memory |
 | `brave_search` | `BRAVE_API_KEY` | Brave web search |
-| `github` | `GITHUB_TOKEN` | GitHub API |
-| `slack` | `SLACK_TOKEN` | Slack messaging |
+| `github` | `GITHUB_PERSONAL_ACCESS_TOKEN` | GitHub API |
+| `slack` | `SLACK_BOT_TOKEN`, `SLACK_TEAM_ID` | Slack messaging |
 
 ## Evaluation
 

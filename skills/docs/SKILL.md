@@ -46,8 +46,8 @@ owning doc page). This skill does both, to the house voice.
    catches it.
 5. **Reconcile a changed fact across the tree.** When you change a fact that
    appears on more than one page (a support-matrix cell, a default, a migration
-   like DeepEP V1→V2), `grep` the whole `agent-docs/` tree for the old wording and fix
-   every copy — fixing only the owning page leaves the siblings stale. This is the
+   like DeepEP V1→V2), `grep` `agent-docs/`, `human-docs/` and `skills/` for the old wording
+   and fix every copy — fixing only the owning page leaves the siblings stale. This is the
    `style.md` "one home per fact" rule enforced after the fact.
 6. **Run the link check.** `./scripts/docs/check_links.sh` resolves every relative
    markdown link and heading anchor in `agent-docs/`, `human-docs/`, `skills/` and

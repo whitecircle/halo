@@ -106,8 +106,12 @@ also in `episode/length_cutoff_in_call_turns`) and pays the protocol's `length_c
 (default `0`); the turn that exhausts the cap, or lands on the last turn, ends the episode truncated,
 priced like a `max_turns` overflow. Under carried reasoning a cut costs the policy only a turn and
 the retry thinks on from where it stopped, so a per-turn budget binds only once the cut is priced.
-A recovery gets the whole per-turn budget again; the episode budget bounds what the recoveries may
-add in total, and every reasoning token they add is priced
+The turn after an unproductive one — cut, empty, or every call unknown or refused unrun — gets a
+quarter of its level's reasoning cap, not the whole budget again (`RECOVERY_THINKING_SHARE` in
+`src/environments/episode.py`, clamping what the output budget leaves): room to read the nudge or the
+refusal, fix and act, so a cut never buys a second budget; the template still states the level's
+budget, and the nudge asks for the action. The episode
+budget bounds what the recoveries may add in total, and every reasoning token they add is priced
 ([Reasoning length reward](#reasoning-length-reward)).
 
 An engine abort never reaches the environment: the actor re-issues the turn up to `max_retries` times
@@ -157,12 +161,16 @@ an extra tool turn never lowers the score. An episode with no thinking budget or
 pays nothing. A run where no drawable level sets a budget and `rollout_max_thinking_tokens` is unset
 is refused at trainer construction.
 
-**The overlong charge** (`turn_overlong_penalty`, default `0` = off) prices a turn that reasons up
-to its cap, where the engine forces the close and the turn otherwise pays nothing for running into
-it. A turn pays `-penalty × clamp((reasoning − 0.75 × cap) / (0.25 × cap), 0, 1)`: nothing until its
-reasoning enters the last quarter under its cap, the whole penalty at it. The cap is the turn's recorded
-`thinking_cap` (the level's, clamped by `rollout_max_thinking_tokens`), never the narrower request cap an episode output budget leaves a
-late turn, so a turn is never charged for the episode's budget running out. The reasoning is the
+**The overlong charge** (`turn_overlong_penalty`, default `0` = off) prices a turn that runs up to a
+cap, where the engine forces the close or the cut and the turn otherwise pays nothing for running into
+it. A turn pays the larger of two ramps, each `-penalty × clamp((count − 0.75 × cap) / (0.25 × cap), 0, 1)`:
+nothing until the count enters the last quarter under its cap, the whole penalty at it. The first reads the
+turn's reasoning against its recorded `thinking_cap` (the level's, clamped by `rollout_max_thinking_tokens`;
+a retry's reserve), never the narrower request cap an episode output budget leaves a late turn, so a turn
+is never charged for the episode's budget running out. The second reads every token the turn sampled
+against `rollout_max_tokens`, the wall the engine cuts a turn at: reasoning carried past the forced close
+into the call's arguments is sampled output like any other, and without this ramp the cut it ends in
+costs the cut price alone. The reasoning count is the
 turn's sampled ids up to and including `rollout_reasoning_end_token` (default `</think>`), all of
 them for a turn cut before its close. On a turn vLLM force-closes that count is exactly the budget:
 vLLM's counter starts after the last `<think>` the request holds, so it counts the generation
@@ -176,7 +184,7 @@ Like the price, the charge reaches the gradient only through groups the environm
 `drop_degenerate_groups` judges a group without the length terms, so a group whose members all settled
 the same reward is dropped whatever its members' charges ([Advantages](objective.md#advantages)).
 
-The charge is vLLM-only and needs `train_on_sampled_tokens` and a `rollout_reasoning_end_token` that
+The charge, both ramps, is vLLM-only and needs `train_on_sampled_tokens` and a `rollout_reasoning_end_token` that
 encodes to one token, the one the count reads up to (gpt-oss's five-token final-channel opener cannot
 run it; trainer construction refuses it). A run where no turn can carry a cap is refused at trainer
 construction: a budget only on a level the environment's `reasoning_effort` never draws counts as

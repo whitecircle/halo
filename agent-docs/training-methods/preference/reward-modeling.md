@@ -2,7 +2,7 @@
 
 A reward model scores a (prompt, completion) pair with one scalar, fit to pairwise preferences under the Bradley-Terry loss. Use it for rejection sampling or as an RL reward signal; to train a policy on the same pairs use [DPO](dpo.md) or [SMPO](smpo.md).
 
-Trainer `DistributedRewardTrainer`, script `scripts/training/preference/rewards.py`, model class `AutoModelForSequenceClassification` with `num_labels=1`. EP, TP, ETP and EP+TP apply; CP does not — the score head pools the whole sequence ([matrix](../../reference/trainer-architecture.md#trainer-compatibility)). It declares `_supports_pp`, but pipeline parallelism is [not yet available in this release](../../parallelism/pipeline-parallelism.md).
+Trainer `DistributedRewardTrainer`, script `scripts/training/preference/rewards.py`, model class `AutoModelForSequenceClassification` with `num_labels=1`. EP, TP, ETP and EP+TP apply; CP does not — the score head pools the whole sequence ([matrix](../../reference/trainer-architecture.md#trainer-compatibility)).
 
 ## Dataset
 
@@ -10,7 +10,7 @@ The pairwise `prompt` / `chosen` / `rejected` format DPO and SMPO use, plus impl
 
 TRL's `RewardTrainer` chat-templates and tokenizes the raw columns itself, concatenating `prompt + chosen` / `prompt + rejected` with no hub-shape normalization: a `prompt` column whose completions repeat those turns renders the prompt twice, silently. DPO and SMPO strip that prefix, and so does the reward VLM path.
 
-An optional `margin` column widens the target gap per row. It must be in both splits or in neither — under PP a margin on one side alone raises.
+An optional `margin` column widens the target gap per row.
 
 ## Configuration
 
@@ -42,10 +42,6 @@ The script defaults `attn_implementation` to `sdpa` for its right-padded batches
 
 Where the tokenizer pads with eos (DeepSeek-V4), an INFO line names the cost: the recorded `config.pad_token_id` binds `nn.Embedding(padding_idx=<eos id>)` on the next load, masking that row's input-embedding gradient. Give such a base its own `pad_token:` to keep the EOS embedding training on the input side.
 
-### Pipeline parallelism
-
-Pipeline parallelism is [not yet available in this release](../../parallelism/pipeline-parallelism.md); its shipped seams here move the pooling into the last-stage loss, which picks each row's rightmost non-pad token. That needs `config.pad_token_id` set and equal to the tokenizer's, and construction raises on either mismatch: a disagreement pools every row at the last filler token — a finite loss that learns nothing.
-
 ## Launch
 
 ```bash
@@ -71,7 +67,7 @@ lora_task_type: SEQ_CLS         # required for a pooled score head
 lora_modules_to_save: [score]
 ```
 
-LoRA is rejected under TP, EP+TP and PP ([PEFT](../../optimization/peft.md#parallelism-compatibility)).
+LoRA is rejected under TP and EP+TP ([PEFT](../../optimization/peft.md#parallelism-compatibility)).
 
 ## Vision-language
 
@@ -88,10 +84,7 @@ max_length: 4096
 
 Images merge into the **prompt** conversation, which both sides of a pair share: they fill unset `{"type": "image"}` placeholders in order, and otherwise lead the first user turn. Images inside a `chosen`/`rejected` completion are refused, as is `tools_field`. An `AutoProcessor` is the `processing_class` here, so every checkpoint exports `processor_config.json`.
 
-Two limits:
-
-- `max_length` filters on rendered **text** only. Vision tokens are counted at collation, where a batch over budget raises. Lower the image resolution or raise `max_length`.
-- PP refuses an image-feeding run: no stage holds the vision tower. A text-only run of the same checkpoint is admitted, and its untouched vision tensors ride every checkpoint.
+`max_length` filters on rendered **text** only. Vision tokens are counted at collation, where a batch over budget raises. Lower the image resolution or raise `max_length`.
 
 ## Testing a setup
 
@@ -115,5 +108,4 @@ Once trained, score fresh generations or build preference pairs with `scripts/in
 Failure signatures:
 
 - Rows vanishing at prep — `max_length` filters rather than truncates, and the text path drops them silently (only the VLM path reports a count). Compare the split sizes, then raise it or shorten the pairs.
-- A `config.pad_token_id` raise under PP — give the tokenizer a pad token, or sync the two ids.
 - Accuracy pinned near 0.5 under LoRA — the score head is freshly initialized, so it must be in `lora_modules_to_save`.

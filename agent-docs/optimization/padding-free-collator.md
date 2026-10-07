@@ -52,7 +52,7 @@ isolating mask is per-family, and the exceptions are tabulated in
 only difference is cost: a non-varlen backend materializes a dense `[L, L]` mask instead of consuming
 `cu_seq_lens`.
 
-Outside pipeline parallelism **both** collators flatten the mini-batch into a single row — padding-free by
+**Both** collators flatten the mini-batch into a single row — padding-free by
 construction, packing via `flatten_packed_batch` — so `L` is the whole batch's token count either way (the
 summed real tokens for padding-free, up to `per_device_train_batch_size × max_length` for packing), and at
 equal tokens per step the two masks are the same size.
@@ -80,22 +80,19 @@ The table uses `--attn_implementation flash_attention_2`. FA4 is also valid: FA4
 
 ## Parallelism compatibility
 
-| Collator | EP | TP | CP | PP ([not yet available](../parallelism/pipeline-parallelism.md)) |
-|----------|-----|-----|-----|-----|
-| `DataCollatorWithFlattening` (+ `…AndCompletionMask`) | Yes | Yes | **No** | **No** |
-| `DataCollatorWithPacking` (+ `DataCollatorForCompletionOnlyLMWithPacking`) | Yes | Yes | **No** | Yes |
-| `DataCollatorForCausalLMWithPadding` | Yes | Yes | Yes | Yes |
+| Collator | EP | TP | CP |
+|----------|-----|-----|-----|
+| `DataCollatorWithFlattening` (+ `…AndCompletionMask`) | Yes | Yes | **No** |
+| `DataCollatorWithPacking` (+ `DataCollatorForCompletionOnlyLMWithPacking`) | Yes | Yes | **No** |
+| `DataCollatorForCausalLMWithPadding` | Yes | Yes | Yes |
 
-CP requires fixed-length sequences for collective synchronization: padding-free (variable-length output) and packing (the Ulysses CP attention path has no per-document boundaries, so packed documents would attend across each other) are both rejected by `select_data_collator` when `use_context_parallel=True` — use the standard padded collator with `pad_to_multiple_of=cp_size`.
-
-Pipeline parallelism ([not yet available in this release](../parallelism/pipeline-parallelism.md)) will take packing but not padding-free: its shipped collator seam keeps packed rows padded to `max_length` as a fixed shape, while padding-free's flattened width varies every step. See [Context Parallelism](../parallelism/context-parallelism.md).
+CP requires fixed-length sequences for collective synchronization: padding-free (variable-length output) and packing (the Ulysses CP attention path has no per-document boundaries, so packed documents would attend across each other) are both rejected by `select_data_collator` when `use_context_parallel=True` — use the standard padded collator with `pad_to_multiple_of=cp_size` ([Context Parallelism](../parallelism/context-parallelism.md)).
 
 ## When to use each
 
 - **avg > 80% of max_length** — any collator (all within ~1%); use standard.
 - **avg << max_length** — packing (14.5× at ~75% waste; packing's own cross-sequence padding overhead is 1–5%).
 - **Need CP** — standard padding only; both packing and padding-free are rejected.
-- **Need PP** — packing or standard padding; padding-free is rejected.
 - **Want to skip padding FLOPS without cross-sequence boundaries** — padding-free.
 
 ## Running benchmarks

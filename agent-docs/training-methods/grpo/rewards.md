@@ -56,7 +56,7 @@ The grading prompt is the task (the prompt's user turns), the tools the policy c
 
 - `final` — the final answer as the protocol recorded it ([What a scorer reads](#what-a-scorer-reads)). An episode that ended without one shows `(The episode ended without a final answer.)` and the last assistant turn after it, so a cut-off fragment or a tool-call turn reads as what it is, never as the answer; a reward model reads an empty answer instead.
 - `full` — every turn after the prompt, numbered (`[3] assistant`), the reasoning set apart in a `<reasoning>` block, each tool call as `→ name (call id)` with every argument verbatim on its own lines (a program as the policy wrote it), and each result under its own `[4] tool name (call id)` header. A turn the engine cut at its length limit, one that ended with neither text nor a tool call, and one whose every call named a tool that does not exist carry that note in their header.
-- `digest` — the same blocks with each item cut to its head (reasoning, assistant text, each tool-call argument) or head and tail (tool results), then `Final answer:` whole, the artifact an audit reads. An environment may hand the judge its own digest instead.
+- `digest` — the same blocks with each item cut to its head (reasoning, assistant text, each tool-call argument) or head and tail (tool results), then `Final answer:` whole, the artifact an audit reads.
 
 A view past `max_view_chars` keeps two thirds of the budget from its head and the rest from its tail, marking the cut between them, so the answer or submission at the end of a long transcript is never what the cut removes. The reference is cut the same way. The renderers live in `src/rewards/samples.py`.
 
@@ -120,11 +120,10 @@ The trainer charges its length terms on top, outside these components: `reward/r
 
 ### What a scorer reads
 
-One sample serves every external term, each reading its own view of it: the prompt turns (everything before the first assistant turn), the policy's turns after them with their reasoning and the flags of a turn the engine cut, an empty one, or one whose calls were all rejected, the final answer, the reference, the environment's tool schemas, and the digest when a term reads one. Three hooks on `BaseEnvironment` fill the episode-specific parts:
+One sample serves every external term, each reading its own view of it: the prompt turns (everything before the first assistant turn), the policy's turns after them with their reasoning and the flags of a turn the engine cut, an empty one, or one whose calls were all rejected, the final answer, the reference and the environment's tool schemas. Two hooks on `BaseEnvironment` fill the episode-specific parts:
 
 - `_final_answer(trajectory)` — what the episode delivered, or `None` when it did not complete. The native protocol records its `final_response`, ReAct its `Final Answer`, code contests the submitted program as a fenced code block; the base returns `None`.
 - `_scoring_reference(trajectory)` — the reference as the grader compares it: `context["answer"]` by default; `exam_qa` hands the choice letter, not the index; code contests hands `None`, so the hidden tests never reach a judge.
-- `_episode_digest(trajectory, sample)` — the environment's own compact account for a `digest` view; `None` (the base) renders the generic one.
 
 ### Settlement
 

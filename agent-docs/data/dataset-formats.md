@@ -268,7 +268,7 @@ appends a trailing `<|im_end|>` instead of prepending BOS.
 - They are always stripped from generation prompts (`for_generation=True`), so a prompt never ends
   with a turn terminator.
 
-This seam covers SFT (runtime and offline), classification, the prompts-reward preprocess,
+This seam covers SFT (runtime and offline), classification, reward-model scoring (`encode_for_scoring`),
 teacher/self-distillation, and generation-eval prompts. The SMPO and offline-GRPO prompt paths use
 the same probe to prepend BOS only when the post-processor owns it.
 

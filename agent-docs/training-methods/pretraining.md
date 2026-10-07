@@ -19,7 +19,7 @@ The model is built with the resolved auto class's `from_config(config)`, so weig
 
 Three refusals:
 
-- **EP, TP, CP, ETP or PP** raise `NotImplementedError`: distributed random-init of sharded parameters is not implemented, and PP has nothing to be stage-aware about without a checkpoint. The gate reads `ep_group_size > 1`, so an MoE without EP or ETP random-inits fine.
+- **EP, TP, CP or ETP** raise `NotImplementedError`: distributed random-init of sharded parameters is not implemented. The gate reads `ep_group_size > 1`, so an MoE without EP or ETP random-inits fine.
 - **Quantization** raises — QLoRA loads pretrained weights.
 - **A multimodal checkpoint** raises at the VLM load; `text_only_model: true` routes it to the text-only sibling, which does random-init.
 

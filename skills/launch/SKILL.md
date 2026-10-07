@@ -71,7 +71,10 @@ make build-all                               # all four
 # DOCKER_RUN instead — start the server with its
 # compose EFA overlay (-f docker-compose.{vllm,sglang}.efa.yml) then. The SGLang server needs
 # NCCL_CUMEM_ENABLE=1 on top, the compose default.)
-# SERVER_TIER=moe runs the MoE half against a MoE-serving server — no one server satisfies both.
+# Server and trainer must hold the same checkpoint, so each tier runs one pass per served model:
+# SERVER_TIER defaults to 'not moe' (dense Qwen/Qwen3-0.6B); the vLLM MoE half is
+# SERVER_TIER='moe and not gptoss' against Qwen/Qwen3-30B-A3B-Instruct-2507, then
+# SERVER_TIER='moe and gptoss' against unsloth/gpt-oss-20b-BF16; SGLang's (SERVER_TIER=moe) is gpt-oss only.
 # The vLLM server needs VLLM_REASONING_PARSER=qwen3 VLLM_USE_V2_MODEL_RUNNER=0: the benchmarks
 # send a per-effort CoT budget, which draws a 400 without a reasoning parser and another under
 # Model Runner V2. The health guard prints the exact compose line when it is missing.

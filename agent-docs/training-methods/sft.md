@@ -49,7 +49,7 @@ output_dir: checkpoints/sft-qwen3-4b
 Refused at startup:
 
 - `packing` together with `padding_free`, and `packing` without an explicit `max_length` (the pack size bounds memory).
-- `padding_free` on a non-varlen attention implementation, under CP, or under PP — the flattened width changes every step while the P2P buffers freeze on the first. Use `packing`, except under CP, which refuses both.
+- `padding_free` on a non-varlen attention implementation, or under CP (which refuses `packing` too).
 - TRL's `completion_only_loss` / `assistant_only_loss`, and a non-default `dataset_text_field` / `dataset_kwargs`: they act inside the dataset prep and collator this script replaces. The script renders `conversation_field` itself; tokenize a raw-text column offline with `prepare_dataset.py --mode text`.
 
 Per-family configs live under `examples/sft/`; full field list in [Configuration Reference](../reference/configuration-reference.md#sftscriptarguments). The parser turns `use_liger_kernel` and `bf16` on and `logging_nan_inf_filter` off; `attn_implementation` auto-selects FA4 on Blackwell, FA3 on Hopper, else FA2 ([Flash Attention](../optimization/flash-attention.md)).
@@ -76,7 +76,7 @@ Any YAML field overrides on the command line (`--learning_rate=1e-5`); `accelera
 effective_batch = per_device_train_batch_size × gradient_accumulation_steps × data_parallel_size
 ```
 
-EP is orthogonal to DP, so `data_parallel_size = world_size` under pure EP; TP, CP, ETP and PP reduce it ([Parallelism](../parallelism/README.md)). `gptoss-20b-multinode-ep.yaml` runs batch 1 × accumulation 4 × DP=16 (2 nodes × 8 GPUs, EP orthogonal to DP) → effective batch 64; production full-FT configs land at **64–128**. Raise `gradient_accumulation_steps` (costs step latency, not memory) when HBM is tight, `per_device_train_batch_size` for throughput.
+EP is orthogonal to DP, so `data_parallel_size = world_size` under pure EP; TP, CP and ETP reduce it ([Parallelism](../parallelism/README.md)). `gptoss-20b-multinode-ep.yaml` runs batch 1 × accumulation 4 × DP=16 (2 nodes × 8 GPUs, EP orthogonal to DP) → effective batch 64; production full-FT configs land at **64–128**. Raise `gradient_accumulation_steps` (costs step latency, not memory) when HBM is tight, `per_device_train_batch_size` for throughput.
 
 Too high a learning rate erases pretrained capability without showing up in the training loss.
 
@@ -107,7 +107,7 @@ images_field: images
 
 Shipped configs: `examples/sft/qwen3_5/qwen3.5-9b-vl-ocr-olmocr.yaml`, `qwen3.5-9b-vl-docvqa.yaml`.
 
-VLM limits are fail-loud and bind the image-declaring **run**, not the multimodal checkpoint: `packing` / `padding_free` (images cannot be packed), `train_on_last_assistant_only` (all assistant turns train), `interleaved_thinking` (no VLM template renders `clear_thinking`), CP (patch features do not slice by token chunk), PP (no stage holds the vision tower), and `generate_eval_examples` (skipped). `init_from_scratch` is the exception, refused on the **checkpoint** at the model load.
+VLM limits are fail-loud and bind the image-declaring **run**, not the multimodal checkpoint: `packing` / `padding_free` (images cannot be packed), `train_on_last_assistant_only` (all assistant turns train), `interleaved_thinking` (no VLM template renders `clear_thinking`), CP (patch features do not slice by token chunk), and `generate_eval_examples` (skipped). `init_from_scratch` is the exception, refused on the **checkpoint** at the model load.
 
 The VLM collator never truncates: a batch whose vision plus text tokens exceed `max_length` raises rather than desync placeholders from `pixel_values`.
 
@@ -135,7 +135,7 @@ The training script detects the artifact from its `metadata.json`, skips tokeniz
 
 ## Testing a setup
 
-Smoke the config first: cut `max_length`, set `max_steps: 5`, launch on 2 GPUs. `examples/sft/deepseek_v4/v4-tiny-random-smoke-ep.yaml` is a tiny-model EP smoke needing no production checkpoint.
+Smoke the config first: cut `max_length`, set `max_steps: 5`, launch on 2 GPUs. `examples/sft/deepseek_v4/v4-tiny-random-smoke-ep.yaml` is a tiny-model EP smoke needing no production checkpoint; materialize its tiny checkpoint first with `build_tiny_family_checkpoint` (`tests/common/tiny_models.py`, steps in the recipe header).
 
 ```bash
 pytest tests/cpu/config tests/cpu/data -m cpu    # config gates, collators, render knobs

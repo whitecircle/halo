@@ -119,7 +119,7 @@ The default is 1D full-shard. Under `--use_hsdp` it is a 2D `(dp_replicate, dp_s
 shards within one NVLink domain (`dp_shard_size = nvlink_domain_size`) and replicates across domains
 (`dp_replicate_size = num_nvlink_domains`).
 
-HSDP composes only with pure DP and CP; TP, EP, ETP and PP each reject it for their own reason. On a
+HSDP composes only with pure DP and CP; TP, EP and ETP each reject it for their own reason. On a
 single domain it is a no-op ([HSDP](data-parallelism.md#hsdp-hybrid-sharded-data-parallel)).
 
 Node-local EP+CP reaches cross-domain depth without HSDP: EP dispatch/combine and CP Ulysses

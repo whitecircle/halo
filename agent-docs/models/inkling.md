@@ -18,7 +18,7 @@ Transformers ships `transformers.models.inkling` natively (the image pins 5.16.1
 
 `EPInklingMoELayer` (`src/distributed/expert_parallel/layers/inkling.py`) claims `InklingMoE` / `model_type: inkling_mm_model`, `inkling_text`. Fused `gate_up_proj`/`down_proj` routed experts in the GLM-4 layout, so the base fused-GLU storage, gather, and sharded merge apply unchanged.
 
-That includes ETP, whose split-shard path and token-space partial-sum reduce are validated by `tests/gpu/parallelism/combined/test_ep_etp_inkling.py` (pure ETP on 2 GPUs, EP+ETP on 4; the 2 shared experts stay replicated on every ETP rank). Two family quirks force a standalone wrapper rather than a GLM-4 subclass:
+That includes ETP, whose split-shard path and token-space partial-sum reduce are validated by `tests/gpu/parallelism/combined/test_ep_etp_inkling.py` (registered as EP+ETP on 4 GPUs; launched by hand at `--nproc_per_node=2` it runs pure ETP; the 2 shared experts stay replicated on every ETP rank). Two family quirks force a standalone wrapper rather than a GLM-4 subclass:
 
 - **Joint routed+shared normalization.** `InklingTopkRouter` emits `n_routed_experts + n_shared_experts` logits from one projection and normalizes the routed top-k and the shared experts **jointly** (`logsumexp` over `top_k + n_shared` logits), so the shared experts compete for probability mass.
 
@@ -80,7 +80,7 @@ multimodal is EP/ETP-only.
 
 Liger covers Inkling's RMSNorm and cross-entropy (the config runs it). Its MLP and head stay eager: `InklingMLP` scales its output by a trained `global_scale`, and the head divides by `logits_mup_width_multiplier` and truncates to `unpadded_vocab_size` before the loss. There is no rotary to fuse: position enters as a learned relative-logit bias.
 
-That division and cut are the family's declared head transform (`src/models/head_transform.py`), so offline GRPO's `use_chunked_grpo_logprobs` sweep and a last pipeline stage apply them too.
+That division and cut are the family's declared head transform (`src/models/head_transform.py`), so offline GRPO's `use_chunked_grpo_logprobs` sweep applies them too.
 
 Inkling loads as a `ConditionalGeneration` class, but the data path follows the run: text-only SFT rows take the text pipeline, so `packing` is available here ([SFT — VLMs](../training-methods/sft.md#vision-language-models)). The binding limit at EP=16 is the cross-node dispatch cap above — `per_device_train_batch_size × max_length ≤ 8192` tokens/rank, however the rows are formed.
 

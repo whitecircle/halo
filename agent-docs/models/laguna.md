@@ -31,7 +31,7 @@ Transformers ships `transformers.models.laguna` natively, and the released check
     `EPGroupLimitedMoELayerBase._init_routing` resolves each knob off the block, then the gate, then the config, accepting both the `n_group` and `num_group` spellings. An explicit declaration always wins over the family default, and with no group knob at all group-limited selection degenerates to a plain top-k. Both families list exactly the knobs they lack in `_OPTIONAL_ROUTING_KNOBS`; any other missing knob raises.
 
 - **A missing router bias** (inherited). The pinned remote-code revision omits `e_score_correction_bias` (the in-library format always writes it), so lazy loading leaves it on meta there. The wrapper materializes it at zero (a no-op additive bias) instead of letting the first routing matmul fault.
-- **Hub vs module key spelling.** Laguna is the only family on the roster whose checkpoint names differ from its in-library module names: module `mlp.shared_experts.` is hub `mlp.shared_expert.`, and module `mlp.gate.e_score_correction_bias` is hub `mlp.experts.e_score_correction_bias`.
+- **Hub vs module key spelling.** Laguna is the only family declaring `_EXPORT_KEY_RENAMES`: module `mlp.shared_experts.` is hub `mlp.shared_expert.`, and module `mlp.gate.e_score_correction_bias` is hub `mlp.experts.e_score_correction_bias`.
 
     Transformers declares both as `WeightRenaming` entries and applies them only inside `from_pretrained`, so `EPLagunaMoELayer._EXPORT_KEY_RENAMES` mirrors them for the three paths that bypass it: the gather, the RL weight sync, and the lazy loader (which applies the inverse on read). Without them the export writes keys vLLM silently skips and the loader leaves that submodule randomly initialized.
 
@@ -70,7 +70,7 @@ ETP is mechanically reachable (the experts use the shared fused-GLU storage, so 
 
     The configs use `packing: true`, which keeps documents isolated but materializes a dense mask over the flattened batch (side up to `per_device_train_batch_size * max_length`) instead of consuming `cu_seqlens`.
 
-- Liger covers `laguna` (RMSNorm, the fused SwiGLU on the dense and shared-expert MLPs, cross-entropy, and an opt-in fused loss); the shipped configs run it. RoPE stays eager — Laguna's full-attention layers rotate half the head and its sliding layers all of it, through one shared function.
+- Liger's `laguna` spec patches the in-library classes (`transformers.models.laguna`: RMSNorm, the fused SwiGLU on the dense and shared-expert MLPs, cross-entropy, an opt-in fused loss) and arms no remote classes, so under the shipped configs' pinned remote code (`trust_remote_code: true`) the norms and MLPs run eager. RoPE stays eager on either path — Laguna's full-attention layers rotate half the head and its sliding layers all of it, through one shared function.
 - `pad_token: "〈|PAD|〉"` / `eos_token: "〈|EOS|〉"` — Laguna's vocabulary really does use the CJK angle brackets U+3008/U+3009, not ASCII `<`/`>`. Substituting ASCII silently adds new tokens instead of resolving the existing ones.
 
 CPU parity coverage lives in `tests/cpu/parallelism/test_laguna_ep.py`, built against the real `transformers.models.laguna` block and covering both it and a remote-code-shaped one.

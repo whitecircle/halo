@@ -13,7 +13,11 @@ Authoritative: `agent-docs/data/dataset-formats.md`. Messages are OpenAI ChatML
 - **SFT / SFT-VLM** — `prompt: List[Dict]` (field = `conversation_field`). VLM runs through the same
   `scripts/training/sft.py`: images ride embedded in message content or in an `images_field` column
   (`agent-docs/training-methods/sft.md#vision-language-models`).
-- **DPO / SMPO** — `prompt`, `chosen`, `rejected`, all `List[Dict]`.
+- **DPO / SMPO** — `chosen`, `rejected` (`List[Dict]`) and an optional `prompt` (`List[Dict]`, or a
+  `str` that becomes a user turn). A missing prompt is the shared leading turns of chosen/rejected,
+  and chosen/rejected that repeat the prompt keep only the continuation (`normalize_preference_row`,
+  `src/data/pipeline/preferences.py`). Vision preference rows skip that normalization (the trainers render them
+  themselves), so they arrive as three `List[Dict]` columns.
 - **Offline GRPO** — `prompt: List[Dict]`, `completions: List[List[Dict]]`, `rewards: List[float]`;
   `len(rewards) == len(completions)`, variable group size. A full-fine-tuning KL run scores its own
   reference and needs a finite, unsharded dataset: pre-sharded KL inputs and a supplied grouped
@@ -108,7 +112,8 @@ JSON or a JSON file path).
 CP attention path has no per-document boundaries, so packed documents would attend across each
 other); `padding_free` on a non-varlen `attn_implementation`, and `packing` on a dense-mask backend
 for a family whose forward drops `position_ids` (gpt-oss); packing/padding-free for the
-GatedDeltaNet families without `causal_conv1d` + `fla>=0.2.2`, and GDN packing under PP;
+GatedDeltaNet families without `causal_conv1d` + `fla>=0.2.2`, and on a compressed-KV model
+(DeepSeek-V4's CSA/HCA layers, `reject_compressed_kv_rows`);
 `train_on_completions_only` needs `assistant_message_template` (and it must occur in the rendered
 chat template); `train_on_last_assistant_only` needs `train_on_completions_only`.
 
@@ -116,8 +121,8 @@ chat template); `train_on_last_assistant_only` needs `train_on_completions_only`
 |---|---|
 | CP + completions | `DataCollatorForCompletionOnlyLM` (pad_to_multiple_of=cp_size) |
 | CP | `DataCollatorForCausalLMWithPadding` (pad_to_multiple_of=cp_size) |
-| padding_free + completions | `DataCollatorWithFlatteningAndCompletionMask` (FA2, flash-attn kwargs) |
-| padding_free | `DataCollatorWithFlattening` (FA2, `cu_seq_lens`) |
+| padding_free + completions | `DataCollatorWithFlatteningAndCompletionMask` (varlen FA2/FA3/FA4, flash-attn kwargs) |
+| padding_free | `DataCollatorWithFlattening` (varlen FA2/FA3/FA4, `cu_seq_lens`) |
 | packing + completions | `DataCollatorForCompletionOnlyLMWithPacking` |
 | packing | `DataCollatorWithPacking` |
 | completions only | `DataCollatorForCompletionOnlyLM` |
@@ -129,10 +134,12 @@ that rows are flattened, as does packing on a dense-mask backend for a family th
 
 `bfd` packing emits `seq_lengths` per packed doc; collators reset `position_ids` at each boundary and
 build flash-attn `cu_seq_lens`. `wrapped` has no `seq_lengths` (cross-document attention — avoid with
-FlashAttention). VLM: packing/padding-free both unsupported. The scripts call
-`disable_trl_dataset_prep` (`src/training/script_runner.py`) after building the collator, which
-clears TRL's `packing` / `padding_free` and sets `skip_prepare_dataset`; do not set these in YAML
-(that turns the padding-free collator off). A custom script must call it.
+FlashAttention). VLM: packing/padding-free both unsupported. `packing` / `padding_free` in YAML
+choose the collator; after building it the scripts call `disable_trl_dataset_prep`
+(`src/training/script_runner.py`), which clears both on the TRL config and sets
+`dataset_kwargs: {skip_prepare_dataset: true}` so TRL keeps the script's collator. A custom script
+must call it. A non-default `dataset_kwargs` (or `dataset_text_field`) is refused at startup
+(`reject_trl_dataset_prep_args`).
 
 ## Footguns (source-cited)
 
