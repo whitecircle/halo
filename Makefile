@@ -9,7 +9,7 @@ SHELL := /bin/bash
 
 IMAGE        ?= halo:blackwell
 # SemVer for the versioned image tags the push targets publish alongside the moving tags.
-VERSION      ?= 1.0.0
+VERSION      ?= 1.1.0
 NPROC        ?= 8
 # Training method name for `make train` (any `halo launch --list` entry).
 METHOD       ?= sft

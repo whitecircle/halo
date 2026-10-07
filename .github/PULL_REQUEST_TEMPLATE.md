@@ -39,7 +39,7 @@
 <!-- Helpful for perf numbers and reproduction. Skip for docs-only / pure-refactor PRs. -->
 
 - GPU(s): <!-- e.g. 8x B300 / 8x H200 -->
-- Image tag: <!-- halo:blackwell / hopper, or public.ecr.aws/whitecircle/halo:blackwell-1.0.0 -->
+- Image tag: <!-- halo:blackwell / hopper, or public.ecr.aws/whitecircle/halo:blackwell-1.1.0 -->
 - Parallelism / model: <!-- FSDP / EP=? / CP=? / TP=? / ETP=?  +  HF id + config -->
 
 ## AI assistance

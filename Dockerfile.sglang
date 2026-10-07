@@ -9,7 +9,7 @@ ARG SGLANG_VERSION=0.5.17
 FROM lmsysorg/sglang:v${SGLANG_VERSION}
 
 # Label metadata; make build-sglang passes VERSION and BUILD_DATE.
-ARG VERSION=1.0.0
+ARG VERSION=1.1.0
 ARG BUILD_DATE
 
 LABEL maintainer="White Circle <hello@whitecircle.com>"

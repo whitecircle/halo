@@ -36,7 +36,7 @@ docker tag public.ecr.aws/whitecircle/halo:blackwell halo:blackwell
 
 Do the retag: the rest of this guide and the `make` targets look for
 `halo:blackwell`. The moving tags track the latest release and
-`:blackwell-1.0.0` / `:hopper-1.0.0` pin it; there is deliberately no `latest`,
+`:blackwell-1.1.0` / `:hopper-1.1.0` pin it; there is deliberately no `latest`,
 which would let a Hopper host silently pull a Blackwell image. The RL inference
 servers live in the same repository as `:vllm-0.26.0` and `:sglang-0.5.17`.
 

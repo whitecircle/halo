@@ -51,6 +51,10 @@ On 8× B300, Halo trains gpt-oss-20b at up to 3.5× the throughput of stock TRL 
 
 <!-- Newest first. This feed and GitHub Releases are Halo's changelog. -->
 
+- **2026-10-08 — Halo 1.1.0.** Hardening release: exact resume with fail-loud checkpoint checks,
+  multi-node runs on per-node disks, faster MoE training (atomic-free permute, fused GLU),
+  FlexAttention on sliding-window layers, context parallelism for offline GRPO, and composable reward
+  terms (generative judges, served reward models) with per-turn length controls for async GRPO.
 - **2026-08-20 — Halo 1.0.0.** First public release: EP / CP / TP / ETP on native HuggingFace models
   (LLM and VLM), 15 MoE families, pre-training through multi-turn RL with vLLM or SGLang rollouts,
   FlashAttention-4, DeepEP V2, DeepGEMM, and the bf16 `AdamW` optimizer.
@@ -71,7 +75,7 @@ docker pull public.ecr.aws/whitecircle/halo:blackwell
 docker pull public.ecr.aws/whitecircle/halo:hopper
 ```
 
-Versioned tags (`:blackwell-1.0.0`, `:hopper-1.0.0`) pin the release. There is
+Versioned tags (`:blackwell-1.1.0`, `:hopper-1.1.0`) pin the release. There is
  no `latest` tag, since the images are architecture-specific. The RL
 inference images are published alongside them (`:vllm-0.26.0`, `:sglang-0.5.17`).
 

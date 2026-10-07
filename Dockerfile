@@ -318,7 +318,7 @@ ARG SOURCE_REVISION=dev
 RUN echo "Building Halo source revision: ${SOURCE_REVISION}"
 
 LABEL org.opencontainers.image.revision="${SOURCE_REVISION}"
-ARG VERSION=1.0.0
+ARG VERSION=1.1.0
 LABEL version="${VERSION}"
 
 COPY src/ ./src/

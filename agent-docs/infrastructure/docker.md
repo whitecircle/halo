@@ -286,13 +286,13 @@ docker pull public.ecr.aws/whitecircle/halo:vllm-0.26.0
 docker pull public.ecr.aws/whitecircle/halo:sglang-0.5.17
 ```
 
-Each moving tag has immutable SemVer pins (`blackwell-1.0.0`); there is deliberately no `latest` — it
+Each moving tag has immutable SemVer pins (`blackwell-1.1.0`); there is deliberately no `latest` — it
 would let a Hopper host silently pull a Blackwell image. Pin a release by pulling its versioned tag
 and retagging locally:
 
 ```bash
-docker pull public.ecr.aws/whitecircle/halo:hopper-1.0.0
-docker tag  public.ecr.aws/whitecircle/halo:hopper-1.0.0 halo:hopper
+docker pull public.ecr.aws/whitecircle/halo:hopper-1.1.0
+docker tag  public.ecr.aws/whitecircle/halo:hopper-1.1.0 halo:hopper
 ```
 
 Maintainers publish with `make push-public-all` (`ecr-public-login` + the four `push-public-*`
