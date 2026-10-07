@@ -220,15 +220,16 @@ class Message:
     routing_mask: str | None = None
     routing_prompt_tokens: int | None = None
     prompt_token_ids: list[int] | None = None
-    # The reasoning cap the turn's level set (an output budget may narrow the request's own below it;
-    # SGLang ignores the field), and the reasoning tokens the turn sampled, counted off its ids by
+    # The reasoning cap the turn ran under, its level's or a retry's reserve (an output budget may narrow
+    # the request's own below it; SGLang ignores the field), and the reasoning tokens the turn sampled, counted off its ids by
     # ``episode.sampled_reasoning_tokens`` (``None`` without them): the pair the trainer's overlong charge reads.
     thinking_cap: int | None = None
     reasoning_tokens: int | None = None
     # Engine cut the turn off at its token cap: the text is a fragment, never rewarded (``untrainable``).
     truncated: bool = False
-    # Every tool call named a tool that does not exist, so the turn accomplished nothing — never
-    # rewarded like a fragment, or a recovering episode reinforces the invented call that cost it a turn.
+    # Every tool call named a tool that does not exist or was refused as carrying nothing to run, so the
+    # turn accomplished nothing — never rewarded like a fragment, or a recovering episode reinforces the
+    # invented call or the refused program that cost it a turn.
     calls_rejected: bool = False
     # The model ended the turn with neither visible content nor a tool call — never rewarded for the
     # same reason: a recovering episode would reinforce stopping on nothing.
@@ -252,8 +253,8 @@ class Message:
     @property
     def untrainable(self) -> bool:
         """An assistant turn no tokenization path may reward: an engine-cut fragment (``truncated``),
-        a turn whose every tool call named a nonexistent tool (``calls_rejected``) or one that ended
-        on nothing (``empty``). It stays in the render later turns condition on; its sampled ids train
+        a turn whose every tool call named a nonexistent tool or was refused unrun (``calls_rejected``)
+        or one that ended on nothing (``empty``). It stays in the render later turns condition on; its sampled ids train
         only under a negative advantage, so the runaway, the invented call or the empty stop takes the
         failure signal of an episode that fails and none of the credit of one that recovers."""
         return self.truncated or self.calls_rejected or self.empty
@@ -629,12 +630,18 @@ class BaseEnvironment(ABC):
         return counts[name]
 
     @staticmethod
-    def _refund_tool_call(trajectory: Trajectory, name: str) -> None:
-        """Return one admitted call of tool ``name`` to the episode's budget, for a handler that found the
-        call spent nothing (the inverse of :meth:`_count_tool_call`); the accounting then books the call
-        as neither paid nor successful (:meth:`_credit_tool_call`)."""
+    def _uncount_tool_call(trajectory: Trajectory, name: str) -> None:
+        """Return one admitted call of tool ``name`` to the episode's budget (the inverse of
+        :meth:`_count_tool_call`), for a handler that refuses the call as a tool error after admission."""
         counts = trajectory.info.setdefault(TOOL_CALL_COUNTS_KEY, {})
         counts[name] = max(0, counts.get(name, 0) - 1)
+
+    @classmethod
+    def _refund_tool_call(cls, trajectory: Trajectory, name: str) -> None:
+        """Return one admitted call of tool ``name`` to the episode's budget, for a handler that found the
+        call spent nothing and replies as a success; the accounting then books the call as neither paid
+        nor successful (:meth:`_credit_tool_call`)."""
+        cls._uncount_tool_call(trajectory, name)
         trajectory.info[REFUNDED_TOOL_CALLS_KEY] = trajectory.info.get(REFUNDED_TOOL_CALLS_KEY, 0) + 1
 
     def _credit_tool_call(self, trajectory: Trajectory, success: bool) -> float:
@@ -759,6 +766,14 @@ class BaseEnvironment(ABC):
         metrics["episode/length_cutoff_turns"] = float(trajectory.info.get("length_cutoff_turns", 0))
         metrics["episode/length_cutoff_in_call_turns"] = float(trajectory.info.get("length_cutoff_in_call_turns", 0))
         metrics["episode/empty_turns"] = float(trajectory.info.get("empty_turns", 0))
+        # Turns whose counted reasoning reached their recorded cap — where a cap binds, and where reasoning
+        # carried past the close into the call starts — emitted only where the rollout counts reasoning
+        # (a run pricing the overlong charge), never as a constant 0 that reads as "no cap binds".
+        counted = [m for m in trajectory.messages if m.role == "assistant" and m.reasoning_tokens is not None]
+        if counted:
+            metrics["episode/thinking_cap_turns"] = float(
+                sum(m.thinking_cap is not None and m.reasoning_tokens >= m.thinking_cap for m in counted)
+            )
         if OUTPUT_BUDGET_EXHAUSTED_KEY in trajectory.info:
             metrics["episode/output_budget_exhausted"] = 1.0 if trajectory.info[OUTPUT_BUDGET_EXHAUSTED_KEY] else 0.0
         metrics["episode/reasoning_cjk_rate"] = (

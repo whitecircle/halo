@@ -1,12 +1,8 @@
 #!/usr/bin/env python
-"""CPU tests for the per-turn overlong charge: a soft price on running a turn into its thinking cap.
-
-A turn pays ``-penalty * clamp((reasoning - start) / (cap - start), 0, 1)`` with the ramp's start a
-quarter of the cap below it: nothing until the turn's reasoning enters that last quarter, a linear ramp
-inside it, the whole penalty at the cap, where the engine forces the close and the turn otherwise pays
-nothing for running into it. The cap is the one the turn's level set, as the rollout recorded it — a
-request the output budget narrowed below it never changes the charge. The episode pays its
-most-charged turn once.
+"""CPU tests for the overlong charge: a turn pays the larger of two ramps, its reasoning against the thinking
+cap it ran under (its level's, or a retry's reserve) and every token it sampled against the turn cap, nothing
+until the count enters the last quarter under the cap and the whole penalty at it; the episode pays its
+most-charged turn once; the trainer's reward build logs the term and the share of turns charged, per level too.
 
 Run: python tests/cpu/grpo/test_turn_overlong_charge.py  (or pytest)
 """
@@ -97,6 +93,60 @@ def test_an_episode_pays_its_most_charged_turn_once():
     assert turn_overlong_term(halfway, penalty=PENALTY) == (pytest.approx(-PENALTY / 2), 2, 2)
 
 
+TURN_CAP = 30000
+
+
+def _turn(reasoning: int | None, cap: int | None, sampled: int | None) -> Trajectory:
+    """One assistant turn of ``reasoning`` tokens under ``cap`` that sampled ``sampled`` ids in all."""
+    ids = None if sampled is None else [0] * sampled
+    turn = Message.assistant("step", reasoning_tokens=reasoning, thinking_cap=cap, token_ids=ids)
+    return Trajectory(messages=[Message.user("task"), turn, Message.user("tool")])
+
+
+@pytest.mark.parametrize(
+    ("sampled", "charge"),
+    [(22500, 0.0), (26250, -PENALTY / 2), (TURN_CAP, -PENALTY), (TURN_CAP + 100, -PENALTY)],
+)
+def test_the_turn_ramp_charges_every_sampled_token_against_the_turn_cap(sampled, charge):
+    """A turn whose reasoning stays under its target still pays when the whole turn runs into the turn
+    cap: reasoning carried past the close into the call is sampled output, and the cut it ends in is
+    the wall this ramp prices."""
+    assert turn_overlong_term(_turn(1000, CAP, sampled), penalty=PENALTY, turn_cap=TURN_CAP)[0] == pytest.approx(
+        charge
+    )
+
+
+def test_the_turn_pays_the_larger_of_its_two_ramps_and_none_it_cannot_read():
+    at_cap = _turn(CAP, CAP, 23000)
+    assert turn_overlong_term(at_cap, penalty=PENALTY, turn_cap=TURN_CAP) == (pytest.approx(-PENALTY), 1, 1)
+    long_turn = _turn(START + RAMP // 4, CAP, TURN_CAP)
+    assert turn_overlong_term(long_turn, penalty=PENALTY, turn_cap=TURN_CAP) == (pytest.approx(-PENALTY), 1, 1)
+    # No turn cap, or no sampled ids: the reasoning ramp alone.
+    assert turn_overlong_term(_turn(1000, CAP, TURN_CAP), penalty=PENALTY) == (0.0, 0, 1)
+    assert turn_overlong_term(_turn(1000, CAP, None), penalty=PENALTY, turn_cap=TURN_CAP) == (0.0, 0, 1)
+    # An uncapped level still pays the turn ramp.
+    assert turn_overlong_term(_turn(None, None, TURN_CAP), penalty=PENALTY, turn_cap=TURN_CAP) == (
+        pytest.approx(-PENALTY),
+        1,
+        1,
+    )
+
+
+def test_the_reward_build_reads_the_turn_cap_off_the_run():
+    """The trainer passes the run's ``rollout_max_tokens``, not a constant: under a 40000-token turn a turn
+    that sampled 30000 is under the ramp and one that sampled 40000 pays in full, through the real reward
+    build."""
+    trainer = _host(rollout_max_tokens=40000)
+    episodes = [
+        RolloutResult(prompt="a", trajectory=_turn(1000, CAP, 40000)),
+        RolloutResult(prompt="b", trajectory=_turn(1000, CAP, 30000)),
+    ]
+    rewards = trainer._build_rollout_rewards(
+        episodes, trainer._episode_reasoning_tokens(episodes), torch.device("cpu")
+    )
+    assert rewards.tolist() == pytest.approx([-PENALTY, 0.0])
+
+
 def test_an_episode_with_no_cap_or_no_trajectory_pays_nothing():
     assert turn_overlong_term(_trajectory((CAP, None), (50000, None)), penalty=PENALTY) == (0.0, 0, 2)
     assert turn_overlong_term(None, penalty=PENALTY) == (0.0, 0, 0)
@@ -110,10 +160,13 @@ class _CharTokenizer:
         return {"input_ids": [0] * len(text)}
 
 
-def _host(**config) -> DistributedAsyncEnvironmentalGRPOTrainer:
+def _host(rollout_max_tokens: int = 30000, **config) -> DistributedAsyncEnvironmentalGRPOTrainer:
     trainer = attach_world_metrics(object.__new__(DistributedAsyncEnvironmentalGRPOTrainer))
     trainer.async_config = AsyncTrainingConfig(
-        rollout_max_tokens=30000, rollout_max_thinking_tokens=CAP, turn_overlong_penalty=PENALTY, **config
+        rollout_max_tokens=rollout_max_tokens,
+        rollout_max_thinking_tokens=CAP,
+        turn_overlong_penalty=PENALTY,
+        **config,
     )
     trainer._tokenizer = _CharTokenizer()
     trainer._metrics = {"train": defaultdict(list)}

@@ -35,9 +35,17 @@ class ToolArgumentError(TypeError):
     a list or an object for a ``string`` parameter, or a name its handler has no keyword for.
 
     Raised before the handler runs, so the model reads ``Error: <tool>: missing a required argument:
-    'code'`` instead of a Python signature. Expected control flow like :class:`ToolBudgetExhausted`:
-    booked as a tool ERROR, logged without a traceback.
+    'code'`` instead of a Python signature, or by a handler refusing an admitted call
+    (:class:`ToolCallRefused`). Expected control flow like :class:`ToolBudgetExhausted`: booked as a
+    tool ERROR, logged without a traceback.
     """
+
+
+class ToolCallRefused(ToolArgumentError):
+    """A handler refusing an admitted call it will not run, the call returned to the episode's budget:
+    the program carries nothing to run as written (code contests: reasoning in its comments). A turn
+    whose every call was refused this way is flagged like one that named no existing tool
+    (``calls_rejected``), so an episode that recovers never reinforces it."""
 
 
 def parse_python_expression(source: str) -> ast.expr:
@@ -303,6 +311,9 @@ class NativeToolResult:
     # can reproduce any wording of it (an MCP server answering "Tool not found: x" is a real failure of
     # a real tool), and the protocol drops a turn from training on this flag alone.
     unknown_tool: bool = False
+    # The handler refused the admitted call and ran nothing (:class:`ToolCallRefused`): structural like
+    # ``unknown_tool``, and read the same way.
+    refused: bool = False
     # The sandbox fault the call ended on, booked by type (infra or agent-caused) rather than as an
     # ordinary tool error, and ending the episode.
     sandbox_fault: SandboxInfraError | SandboxAgentFault | None = None

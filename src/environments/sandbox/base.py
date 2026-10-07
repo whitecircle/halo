@@ -212,6 +212,9 @@ class LanguageSpec:
     run_argv: tuple[str, ...]
     compile_argv: tuple[str, ...] | None = None
     aliases: tuple[str, ...] = field(default_factory=tuple)
+    # The language's comment syntax, what the coding environments' comment accounting reads.
+    line_comment: str = "#"
+    block_comment: tuple[str, str] | None = None
 
     @property
     def is_compiled(self) -> bool:
@@ -240,6 +243,8 @@ LANGUAGES: dict[str, LanguageSpec] = {
         compile_argv=("g++", "-O2", "-pipe", "-std=c++17", "-o", "main", "main.cpp"),
         run_argv=("./main",),
         aliases=("c++", "cxx", "cc"),
+        line_comment="//",
+        block_comment=("/*", "*/"),
     ),
     "c": LanguageSpec(
         name="c",
@@ -247,6 +252,8 @@ LANGUAGES: dict[str, LanguageSpec] = {
         compile_argv=("gcc", "-O2", "-pipe", "-std=c11", "-o", "main", "main.c"),
         run_argv=("./main",),
         aliases=(),
+        line_comment="//",
+        block_comment=("/*", "*/"),
     ),
 }
 

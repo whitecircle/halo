@@ -22,21 +22,28 @@ import pytest
 import src.environments.eval_runner as eval_runner
 import src.environments.ray_actors as ray_actors
 from src.environments import episode
-from src.environments.base import OUTPUT_BUDGET_EXHAUSTED_KEY, REWARD_COMPONENTS_KEY, VALID_REASONING_EFFORTS
+from src.environments.base import OUTPUT_BUDGET_EXHAUSTED_KEY, REWARD_COMPONENTS_KEY, VALID_REASONING_EFFORTS, Message
 from src.environments.engine_wire import generation_control_fields
 from src.environments.envs.protocols.native import NativeToolUseEnvironment
-from src.environments.tools.definitions import NativeToolRegistry
+from src.environments.tools.definitions import NativeTool, NativeToolRegistry
 
 _MAX_TOKENS = 20000
 # The reasoning-end marker's id the per-turn reasoning count reads up to: one no other id in a fake turn carries.
 _END = 151668
 
 
+def _echo_registry() -> NativeToolRegistry:
+    """One no-op tool, so a tool turn is an ordinary productive turn that keeps the episode open."""
+    registry = NativeToolRegistry()
+    registry.register(NativeTool(name="echo", description="echo", parameters=[], handler=lambda: "ok"))
+    return registry
+
+
 class _PlainEnv(NativeToolUseEnvironment):
-    """Tool-less env binding no per-level budget (the ``BaseEnvironment`` default)."""
+    """Env with one no-op tool binding no per-level budget (the ``BaseEnvironment`` default)."""
 
     def __init__(self, **kwargs):
-        super().__init__(tool_registry=NativeToolRegistry(), max_turns=4, **kwargs)
+        super().__init__(tool_registry=_echo_registry(), max_turns=4, **kwargs)
 
 
 class _BudgetEnv(_PlainEnv):
@@ -60,8 +67,8 @@ def _text_turn(text="the answer", token_ids=None, tokens=3):
 
 
 def _tool_turn(token_ids=None, tokens=3):
-    """A turn that calls a tool no registry has: the step is spent, the episode stays open."""
-    call = SimpleNamespace(id="c0", function=SimpleNamespace(name="nonexistent_tool", arguments="{}"))
+    """A turn that calls the no-op tool: the step is spent, the episode stays open."""
+    call = SimpleNamespace(id="c0", function=SimpleNamespace(name="echo", arguments="{}"))
     return SimpleNamespace(
         answer="",
         finish_reason="tool_calls",
@@ -79,8 +86,8 @@ def _actor_text_turn(token_ids=None, tokens=3):
 
 
 def _actor_tool_turn(token_ids=None, tokens=3):
-    """The actor-side twin of ``_tool_turn``: a call to a tool no registry has keeps the episode open."""
-    call = {"id": "c0", "type": "function", "function": {"name": "nonexistent_tool", "arguments": "{}"}}
+    """The actor-side twin of ``_tool_turn``: a call to the no-op tool keeps the episode open."""
+    call = {"id": "c0", "type": "function", "function": {"name": "echo", "arguments": "{}"}}
     return ray_actors.TurnGeneration(
         text="", tool_calls=[call], reasoning="", tokens=tokens, finish_reason="tool_calls", token_ids=token_ids
     )
@@ -450,6 +457,78 @@ async def test_a_cut_on_the_last_turn_the_budget_affords_closes_the_episode_as_o
     _, eval_traj = await _drive_eval(monkeypatch, _PlainEnv(**prices), None, responses=responses, config=config)
     assert eval_traj.done and eval_traj.truncated and eval_traj.messages[-1].role == "assistant"
     assert eval_traj.info[REWARD_COMPONENTS_KEY]["reward/tool_shaping"] == pytest.approx(-0.3)
+
+
+def test_a_retry_runs_under_a_quarter_of_its_levels_cap():
+    """The turn after a cut or empty one gets the reserve, never the whole budget again: a cut would
+    otherwise buy a second budget. The turn total is untouched, and a level without a cap keeps none."""
+    effort = _effort(thinking_budget=4000)
+    assert effort.turn_thinking_cap(recovery=True) == 1000 and effort.turn_thinking_cap() == 4000
+    assert _caps(effort, 0) == (_MAX_TOKENS, 4000)
+    assert effort.turn_caps(0, recovery=True) == {"max_tokens": _MAX_TOKENS, "max_thinking_tokens": 1000}
+    assert _effort(thinking_budget=2).turn_thinking_cap(recovery=True) == 1
+    assert _effort(thinking_budget=None).turn_caps(0, recovery=True) == {
+        "max_tokens": _MAX_TOKENS,
+        "max_thinking_tokens": None,
+    }
+    # Under an output budget the level's cap narrows first and the reserve clamps what is left: with 18000
+    # of 50000 left the narrowed 2000 clamps to the reserve, with 16500 left the narrowed 500 stands.
+    budgeted = _effort(thinking_budget=4000, episode_tokens=50000)
+    assert budgeted.turn_caps(32000, recovery=True) == {"max_tokens": 18000, "max_thinking_tokens": 1000}
+    assert budgeted.turn_caps(33500, recovery=True) == {"max_tokens": 16500, "max_thinking_tokens": 500}
+    assert budgeted.turn_caps(32000) == {"max_tokens": 18000, "max_thinking_tokens": 2000}
+
+
+def test_recovering_turn_reads_an_answered_unproductive_turn():
+    cut = episode.Trajectory(
+        messages=[Message.user("task"), Message.assistant("frag", truncated=True), Message.user("again")]
+    )
+    empty = episode.Trajectory(
+        messages=[Message.user("task"), Message.assistant("", empty=True), Message.user("again")]
+    )
+    tool = episode.Trajectory(
+        messages=[Message.user("task"), Message.assistant("call"), Message.tool("out", "c0", "t")]
+    )
+    fine = episode.Trajectory(messages=[Message.user("task"), Message.assistant("ans"), Message.user("next question")])
+    refused = episode.Trajectory(
+        messages=[
+            Message.user("task"),
+            Message.assistant("call", calls_rejected=True),
+            Message.tool("Error: refused", "c0", "t"),
+        ]
+    )
+    unanswered = episode.Trajectory(messages=[Message.user("task"), Message.assistant("frag", truncated=True)])
+    assert episode.recovering_turn(cut) and episode.recovering_turn(empty) and episode.recovering_turn(refused)
+    assert (
+        not episode.recovering_turn(tool)
+        and not episode.recovering_turn(fine)
+        and not episode.recovering_turn(unanswered)
+    )
+    assert not episode.recovering_turn(None) and not episode.recovering_turn(episode.Trajectory(messages=[]))
+
+
+async def test_both_drivers_give_a_retry_the_reserve_and_record_it_as_the_turns_cap(monkeypatch):
+    """After an engine cut the next request carries a quarter of the level's cap and the turn records
+    that cap, so the overlong charge reads the retry against the reserve; the turn after a normal call
+    is back on the whole cap. The retry closing its reasoning exactly at the reserve counts as a turn
+    the engine closed at its cap."""
+    context = {"reasoning_effort": "high"}
+    config = ray_actors.RolloutConfig(max_tokens=_MAX_TOKENS, reasoning_end_token_id=_END)
+    cut = SimpleNamespace(**{**vars(_actor_text_turn(tokens=5000)), "text": "half an ans", "finish_reason": "length"})
+    retry = _actor_tool_turn(_ids_closing_reasoning_after(1000))
+    gens = [cut, retry, _actor_tool_turn(_ids_closing_reasoning_after(1500)), _actor_text_turn()]
+    seen, result = await _drive_actor(_BudgetEnv, context, config, generations=gens)
+    assert _actor_caps(seen) == [(_MAX_TOKENS, 4000), (_MAX_TOKENS, 1000), (_MAX_TOKENS, 4000), (_MAX_TOKENS, 4000)]
+    turns = [m for m in result.trajectory.messages if m.role == "assistant"]
+    assert [m.thinking_cap for m in turns] == [4000, 1000, 4000, 4000]
+    assert result.trajectory.info["length_cutoff_turns"] == 1
+    assert result.metrics["episode/thinking_cap_turns"] == 1.0
+
+    eval_cut = SimpleNamespace(**{**vars(_text_turn(tokens=5000)), "answer": "half an ans", "finish_reason": "length"})
+    responses = [eval_cut, _tool_turn(), _tool_turn(), _text_turn()]
+    calls, eval_traj = await _drive_eval(monkeypatch, _BudgetEnv(), context, responses=responses, config=config)
+    assert _eval_caps(calls) == [(_MAX_TOKENS, 4000), (_MAX_TOKENS, 1000), (_MAX_TOKENS, 4000), (_MAX_TOKENS, 4000)]
+    assert [m.thinking_cap for m in eval_traj.messages if m.role == "assistant"] == [4000, 1000, 4000, 4000]
 
 
 async def test_the_eval_refuses_an_output_budget_under_one_turn_before_generating(monkeypatch):

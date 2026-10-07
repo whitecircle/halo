@@ -481,11 +481,12 @@ class AsyncTrainingConfig(AdvantageShapingArguments, GRPOEarlyStopArguments, Chu
     turn_overlong_penalty: float = field(
         default=0.0,
         metadata={
-            "help": "Most a turn that runs into its thinking cap costs its episode, in reward units (0 = off). A "
-            "turn pays -penalty x clamp((reasoning - 0.75 x cap) / (0.25 x cap), 0, 1) on the reasoning it "
-            "sampled, counted off its ids up to and including the close: nothing until its reasoning enters the "
-            "last quarter under its cap, the whole penalty at the cap. The episode pays its most-charged turn "
-            "once. vLLM only; needs train_on_sampled_tokens. Logged as reward/turn_overlong."
+            "help": "Most a turn that runs into a cap costs its episode, in reward units (0 = off). A turn pays "
+            "the larger of two ramps, each -penalty x clamp((count - 0.75 x cap) / (0.25 x cap), 0, 1): the "
+            "reasoning it sampled (its ids up to and including the close) against its thinking cap, and every "
+            "token it sampled against rollout_max_tokens. Nothing until the count enters the last quarter under "
+            "the cap, the whole penalty at it. The episode pays its most-charged turn once. vLLM only; needs "
+            "train_on_sampled_tokens. Logged as reward/turn_overlong."
         },
     )
 

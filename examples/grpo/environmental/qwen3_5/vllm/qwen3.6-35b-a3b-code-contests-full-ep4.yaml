@@ -74,9 +74,9 @@ rollout_top_p: 1.0           # a top-p cut renormalizes uncertain positions, whi
 rollout_max_tokens: 30000              # per-turn total; the level's thinking_tokens caps the reasoning within it
 rollout_max_episode_tokens: 131072   # the most an episode may sample over all its turns, reasoning and visible output together (never stated to the model; a turn's caps narrow to what is left)
 reasoning_price: {low: 0.0027, medium: 0.001, high: 0.00014}  # reward units per 1k reasoning tokens, by level: the same trace costs most where little reasoning was asked
-reasoning_price_cap: 0.09  # the price's cap per episode; cap + floor stay under the resubmission price
+reasoning_price_cap: 0.09  # the price's cap per episode; cap, floor and the overlong charge stay under the resubmission price
 reasoning_floor: 0.10  # the one term that pays for MORE reasoning: an episode reasoning under 0.75x its level's per-turn budget, summed over its turns, pays up to this
-turn_overlong_penalty: 0.05    # a turn that reasons into the last quarter under its cap pays up to this, once per episode
+turn_overlong_penalty: 0.05    # a turn that runs into the last quarter under a cap — its reasoning under the thinking cap, or the whole turn under rollout_max_tokens — pays up to this, once per episode
 
 # --- Prefetch ---
 enable_prefetch: true       # one-step staleness corrected by the sampling-logprob IS ratio

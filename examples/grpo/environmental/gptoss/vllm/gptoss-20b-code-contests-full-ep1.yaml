@@ -72,7 +72,7 @@ rollout_max_tokens: 30000              # per-turn total; the level's thinking_to
 rollout_max_episode_tokens: 131072   # the most an episode may sample over all its turns, reasoning and visible output together (never stated to the model; a turn's caps narrow to what is left)
 rollout_reasoning_end_token: "<|start|>assistant<|channel|>final<|message|>"  # the final-channel opener vLLM's budget forces (openai_gptoss plugin)
 reasoning_price: {low: 0.0037, medium: 0.0013, high: 0.00018}  # reward units per 1k reasoning tokens, by level: the same trace costs most where little reasoning was asked
-reasoning_price_cap: 0.1  # the price's cap per episode; cap + floor stay under the resubmission price
+reasoning_price_cap: 0.1  # the price's cap per episode; cap, floor and the overlong charge stay under the resubmission price
 reasoning_floor: 0.05  # the one term that pays for MORE reasoning: an episode reasoning under 0.75x its level's per-turn budget, summed over its turns, pays up to this
 
 # --- Prefetch ---
