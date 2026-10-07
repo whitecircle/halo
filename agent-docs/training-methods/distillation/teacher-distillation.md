@@ -37,7 +37,7 @@ output_dir: checkpoints/distill-qwen3.5-9b-from-qwen3.6-35b-a3b
 | `distill_loss` | `kl_divergence` | The divergence against the teacher; see below |
 | `distill_temperature` | `1.0` | Softmax temperature; reaches only the four losses that declare it |
 | `distill_alpha` | `1.0` | Weight on the distillation term, `1 − distill_alpha` on CLM; `1.0` drops CLM from the loss |
-| `apply_hard_labels` | `False` | Scales the distillation term per token by `(1 − student_prob[label]) · teacher_prob[label]`, a detached weight that carries no gradient of its own; ignored under `slim`, which weights by its own gold-token rule |
+| `apply_hard_labels` | `False` | Scales the distillation term per token by `(1 − student_prob[label]) · teacher_prob[label]`, a detached weight that carries no gradient of its own; refused at trainer construction under `slim`, which weights by its own gold-token rule |
 | `max_length` | `2048` | Over-length conversations are **dropped**, not truncated; `null` → context window |
 | `teacher_model_revision` | `None` | Pins the teacher repo; the student's `model_revision` names a commit elsewhere |
 
@@ -92,7 +92,7 @@ Covering tests: `pytest tests/cpu/trainers -m cpu`, `tests/gpu/trainers/other/te
 |---|---|
 | `distillation_loss` | The divergence term; should fall as the student matches the teacher |
 | `sft_loss` | Hard-label CE, logged at every alpha — a metric only when `distill_alpha: 1.0` |
-| `distillation_coef` | The mean gold-token gate; logged with `apply_hard_labels` except under `slim` |
+| `distillation_coef` | The mean gold-token gate; logged with `apply_hard_labels` |
 
 Failure signatures:
 

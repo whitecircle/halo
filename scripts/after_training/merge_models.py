@@ -59,11 +59,11 @@ from src.checkpoint.format import (
 )
 from src.checkpoint.shard_writer import StageShardWriter
 from src.checkpoint.tool_io import (
+    header_numel,
     iter_checkpoint_shard_entries,
     preflight_resource_warning,
     reject_in_place_conversion,
     stored_tensor_nbytes,
-    stored_tensor_numel,
 )
 from src.log import configure_cli_logging
 from src.models.loading.dtype import DTYPE_BY_NAME
@@ -100,21 +100,14 @@ def _parse_model_spec(spec: str) -> tuple[str, float | None]:
     return spec, None
 
 
-def _weight_map(model_dir: str) -> dict[str, str]:
-    """Map every parameter name to the safetensors file holding it (single-file or sharded).
-
-    Keys come from the shards themselves rather than the index's ``weight_map``, so a checkpoint
-    whose index has drifted from its files still merges the tensors that are actually there.
-    """
-    return {key: shard for shard, _reader, key in iter_checkpoint_shard_entries(model_dir)}
-
-
 class _TensorReader:
     """Lazy per-key tensor reader over a checkpoint's safetensors, caching open file handles."""
 
     def __init__(self, model_dir: str):
         self.model_dir = model_dir
-        self.weight_map = _weight_map(model_dir)
+        # Keys come from the shards themselves rather than the index's ``weight_map``, so a checkpoint
+        # whose index has drifted from its files still merges the tensors that are actually there.
+        self.weight_map = {key: shard for shard, _reader, key in iter_checkpoint_shard_entries(model_dir)}
         self._handles: dict[str, object] = {}
 
     def keys(self) -> set[str]:
@@ -129,7 +122,7 @@ class _TensorReader:
 
     def numel(self, key: str) -> int:
         """Element count of ``key`` from the safetensors header alone — no tensor read."""
-        return stored_tensor_numel(self._handle(key), key)
+        return header_numel(self._handle(key).get_slice(key))
 
     def _handle(self, key: str):
         # The RAM preflight sizes the reference key set (the base's, under task_arithmetic/ties)

@@ -5,7 +5,6 @@ dispatch moves each token to the rank that owns its expert, the experts run as o
 and the combine all-to-all returns every token to the rank it came from.
 """
 
-import matplotlib.pyplot as plt
 from _pipeline_style import *
 
 W, H = 12.4, 4.9
@@ -30,11 +29,7 @@ LANES = [
 EXPERT_LINES = ["grouped_mm(x, w, offs)", "tokens sorted by expert"]
 BACK_LINES = ["same rows, same order", "weighted by top-k probs"]
 
-fig, ax = plt.subplots(figsize=(W, H))
-fig.patch.set_facecolor(BG)
-ax.set_xlim(0, W)
-ax.set_ylim(0, H)
-ax.axis("off")
+fig, ax = canvas(W, H)
 
 title(ax, "EP token routing", "ep 2 · 32 experts → 16 per rank · dp 2 (EP ⊥ DP)")
 
@@ -71,5 +66,3 @@ footnote(
 )
 
 save(fig, "ep_token_routing")
-plt.close(fig)
-print("✓ ep_token_routing.png")

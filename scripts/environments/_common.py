@@ -22,7 +22,7 @@ from src.configs.environment_config import EnvironmentConfig
 from src.configs.rollout_config import DEFAULT_ROLLOUT_TOP_P, RolloutConfig
 from src.environments.base import BaseEnvironment
 from src.environments.episode import resolve_rollout_stop_token_ids
-from src.environments.eval_runner import DEFAULT_REQUEST_TIMEOUT_S, trajectory_path, write_trajectories_jsonl
+from src.environments.eval_runner import trajectory_path, write_trajectories_jsonl
 from src.training.parser import H4ArgumentParser
 
 logger = logging.getLogger(__name__)
@@ -36,6 +36,9 @@ TRAINING_CONTRACT_CLASSES = (EnvironmentConfig, AsyncTrainingConfig, ModelConfig
 _SAMPLING_FLAGS = ("temperature", "top_p", "max_tokens", "request_timeout")
 # The split an eval reads when --split is omitted, unless its dataset ships a single split of its own.
 DEFAULT_SPLIT = "test"
+# Per-generation HTTP timeout (seconds) without --training_config. Generous: an eval runs many episodes
+# concurrently against one endpoint, and a long reasoning turn queued behind them takes minutes to return.
+EVAL_REQUEST_TIMEOUT_SECONDS = 180.0
 
 
 def add_endpoint_args(parser: argparse.ArgumentParser) -> None:
@@ -72,7 +75,7 @@ def add_endpoint_args(parser: argparse.ArgumentParser) -> None:
         type=float,
         default=None,
         help=f"Per-generation HTTP timeout (s). Default: the training config's request_timeout under "
-        f"--training_config, else {DEFAULT_REQUEST_TIMEOUT_S:.0f}; raise it when running many concurrent "
+        f"--training_config, else {EVAL_REQUEST_TIMEOUT_SECONDS:.0f}; raise it when running many concurrent "
         f"episodes so long reasoning turns are not cut off.",
     )
     parser.add_argument("--output", default=None, help="Optional path to dump per-example JSON results.")
@@ -158,7 +161,7 @@ def rollout_config_from_args(
             temperature=default_temperature,
             top_p=DEFAULT_ROLLOUT_TOP_P,
             max_tokens=default_max_tokens,
-            request_timeout=DEFAULT_REQUEST_TIMEOUT_S,
+            request_timeout=EVAL_REQUEST_TIMEOUT_SECONDS,
         )
     explicit = {name: getattr(args, name) for name in _SAMPLING_FLAGS if getattr(args, name) is not None}
     return replace(base, model_name=args.model, **explicit)

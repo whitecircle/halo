@@ -329,6 +329,15 @@ def resolve_balancing_slot(
     return owner, name
 
 
+def apply_export_renames(key: str, renames) -> str:
+    """``key`` with the first ``(module spelling, hub spelling)`` pair it contains applied once;
+    unchanged when none matches. The one rename rule the EP gather and the balancing-slot lookups share."""
+    for module_spelling, hub_spelling in renames:
+        if module_spelling in key:
+            return key.replace(module_spelling, hub_spelling, 1)
+    return key
+
+
 def native_balancing_bias_attrs(layer_cls) -> tuple[str, ...]:
     """The declared ``_NATIVE_BALANCING_BIAS_ATTR`` plus its hub respelling (via the class's
     ``_EXPORT_KEY_RENAMES``, Laguna), for one EP layer class; empty when it declares no slot.
@@ -339,15 +348,8 @@ def native_balancing_bias_attrs(layer_cls) -> tuple[str, ...]:
     attr = getattr(layer_cls, "_NATIVE_BALANCING_BIAS_ATTR", None)
     if not attr:
         return ()
-    candidates = [attr]
-    # Same match semantics as the EP gather's ``to_hub_layer_key`` (first substring hit, replaced
-    # once): the two must name the same hub key, or the dtype keep-set and the sidecar apply miss the
-    # spelling the gather emits.
-    for live, hub in getattr(layer_cls, "_EXPORT_KEY_RENAMES", ()):
-        if live in attr:
-            candidates.append(attr.replace(live, hub, 1))
-            break
-    return tuple(candidates)
+    hub = apply_export_renames(attr, getattr(layer_cls, "_EXPORT_KEY_RENAMES", ()))
+    return (attr,) if hub == attr else (attr, hub)
 
 
 def balancing_param_keys(model: torch.nn.Module) -> frozenset[str]:

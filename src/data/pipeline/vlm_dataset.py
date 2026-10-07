@@ -7,17 +7,19 @@ from collections.abc import Callable
 from typing import Any
 
 import datasets
-from accelerate.logging import get_logger
 from datasets.features import Json
 
-from src.data.pipeline.processing import coordinated_filter, coordinated_map, dataset_total_size, require_render_column
+from src.data.pipeline.processing import (
+    coordinated_filter,
+    coordinated_map,
+    dataset_total_size,
+    report_rejected_rows,
+    require_render_column,
+)
 from src.data.pipeline.row_processors import create_vlm_processor
 from src.data.probe_consensus import agree_probe_across_ranks
 from src.data.spans import require_response_marker
 from src.data.vlm import render_vlm_text, vlm_row_tools
-from src.distributed.runtime import is_global_main_process
-
-logger = get_logger(__name__, log_level="INFO")
 
 # Maps a row's history to the longest conversation its collator renders from it (the
 # self-distillation teacher branch, longer by its hint), for the over-length filter to measure.
@@ -85,8 +87,7 @@ def _filter_vlm_over_length(
             f"All {before} rows exceed max_length={max_length} by text alone on at least one "
             f"data-parallel rank — raise the budget."
         )
-    if after < before and is_global_main_process():
-        logger.info(f"Dropped {before - after}/{before} VLM rows over max_length={max_length} (text tokens alone).")
+    report_rejected_rows(before, after, f"VLM over-length filtering (text tokens alone over max_length={max_length})")
     return ds
 
 
@@ -107,10 +108,11 @@ def prepare_vlm_dataset(
 
     Maps every split through the training row processor (dropping columns outside the collator
     signature except ``keep``), then drops rows whose rendered text alone exceeds ``max_length``.
-    ``features`` optionally pins the map's Arrow schema — only usable when ``keep`` is empty, since
-    the pinned schema covers exactly the mapped columns. ``measured_history`` makes the filter
-    measure the longer conversation a collator renders from a row; it must be a module-level
-    function or a ``functools.partial`` of one, which the filter's cache key fingerprints.
+    ``features`` pins the map's Arrow schema, :func:`vlm_map_features` when ``keep`` is empty; with
+    ``keep`` nothing is pinned, since the pinned schema covers exactly the mapped columns.
+    ``measured_history`` makes the filter measure the longer conversation a collator renders from a
+    row; it must be a module-level function or a ``functools.partial`` of one, which the filter's
+    cache key fingerprints.
     """
     # Here rather than at collation: the collator is built after this map, so a run missing its
     # marker would otherwise pay the whole VLM tokenization before failing.
@@ -126,6 +128,8 @@ def prepare_vlm_dataset(
             f"declares exactly the mapped columns, so the kept ones have no slot in it and the map "
             f"would die on an Arrow cast inside a worker. Pass one or the other."
         )
+    if features is None and not keep:
+        features = vlm_map_features()
     # Here, not per script: every prepare_vlm_dataset consumer (SFT + the distillation scripts)
     # would otherwise train text-only in silence on a mistyped column name.
     if args.images_field:

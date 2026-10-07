@@ -231,26 +231,30 @@ class GradientSyncMixin:
                 expert_ids = trainer._get_sharded_expert_param_ids()
                 trainer._sync_tp_replicated_grads([p for p in all_params if id(p) not in expert_ids])
 
-            global_norm = trainer._compute_global_grad_norm(all_params)
-
-            # Device-resident: reading the norm back stalls the launch queue; max_norm <= 0 disables clipping (HF).
-            if clipping_enabled(max_norm):
-                deferred = trainer._grad_scale_deferring_optimizer(all_params)
-                if deferred is not None:
-                    deferred.defer_grad_scale(clip_coefficient(float(max_norm), global_norm))
-                    return global_norm
-                # Scale local shards: _foreach_mul_ refuses DTensor + plain EP tensors together.
-                shards = [
-                    g.to_local() if isinstance(g, DTensor) else g
-                    for g in (p.grad for p in all_params)
-                    if g is not None
-                ]
-                if shards:
-                    scale_shards_to_max_norm_(shards, float(max_norm), global_norm)
-
-            return global_norm
+            return trainer._clip_to_global_norm(all_params, max_norm, defer_to_optimizer=True)
 
         self.accelerator.clip_grad_norm_ = ep_clip_grad_norm_
+
+    def _clip_to_global_norm(self, all_params: list, max_norm, *, defer_to_optimizer: bool) -> torch.Tensor:
+        """The global L2 norm of ``all_params``' synced grads, clipped to ``max_norm``.
+
+        With ``defer_to_optimizer`` the coefficient goes to an optimizer that applies it inside its own
+        step (:meth:`_grad_scale_deferring_optimizer`) instead of a pass over the grads.
+        """
+        global_norm = self._compute_global_grad_norm(all_params)
+        # Device-resident: reading the norm back stalls the launch queue; max_norm <= 0 disables clipping (HF).
+        if not clipping_enabled(max_norm):
+            return global_norm
+        if defer_to_optimizer:
+            deferred = self._grad_scale_deferring_optimizer(all_params)
+            if deferred is not None:
+                deferred.defer_grad_scale(clip_coefficient(float(max_norm), global_norm))
+                return global_norm
+        # Local shards: _foreach_mul_ refuses DTensor and plain tensors together.
+        shards = [g.to_local() if isinstance(g, DTensor) else g for g in (p.grad for p in all_params) if g is not None]
+        if shards:
+            scale_shards_to_max_norm_(shards, float(max_norm), global_norm)
+        return global_norm
 
     def _grad_scale_deferring_optimizer(self, params: list):
         """The optimizer that will apply the clip coefficient inside its own step, or ``None``.
@@ -530,16 +534,7 @@ class GradientSyncMixin:
 
             # Replicated grads must match across the TP group, else the weights and norm diverge.
             trainer._sync_tp_replicated_grads(all_params)
-            total_norm = trainer._compute_global_grad_norm(all_params)
-
-            # Device-resident like the EP clip path; scales local shards, mixing DTensor and plain TP grads.
-            shards = [
-                g.to_local() if isinstance(g, DTensor) else g for g in (p.grad for p in all_params) if g is not None
-            ]
-            if clipping_enabled(max_norm) and shards:
-                scale_shards_to_max_norm_(shards, float(max_norm), total_norm)
-
-            return total_norm
+            return trainer._clip_to_global_norm(all_params, max_norm, defer_to_optimizer=False)
 
         self.accelerator.clip_grad_norm_ = tp_clip_grad_norm_
 
@@ -714,7 +709,7 @@ class GradientSyncMixin:
         """
 
         def _sync() -> None:
-            if clipping_enabled(getattr(self.args, "max_grad_norm", None)):
+            if clipping_enabled(self.args.max_grad_norm):
                 return  # the clip path (tp_clip_grad_norm_ / ep_clip_grad_norm_) already synced
             # EP experts are rank-owned, not TP replicas, so exclude them; the selection stays
             # structural, never rank-local grad presence.

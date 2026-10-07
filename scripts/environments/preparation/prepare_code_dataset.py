@@ -45,9 +45,13 @@ from pathlib import Path
 from datasets import Dataset, DatasetDict, disable_caching, load_dataset
 
 from scripts.environments.preparation._common import parquet_parts
-from src.args.environmental_grpo_args import DEFAULT_ANSWER_FIELD
+from src.args.mixins import DEFAULT_ANSWER_FIELD
 from src.data.pipeline.processing import report_rejected_rows, resolve_map_num_proc
-from src.environments.envs.tasks.coding.datasets import CODE_DATASET_ADAPTERS
+from src.environments.envs.tasks.coding.datasets import (
+    CODE_DATASET_ADAPTERS,
+    JOINED_CHECKER_FIELD,
+    JOINED_TESTS_FIELD,
+)
 from src.environments.envs.tasks.coding.grading import select_verdict
 from src.environments.sandbox.resolve import resolve_sandbox
 from src.log import configure_cli_logging
@@ -132,9 +136,9 @@ def join_tests(row: dict, table: Dataset, index: dict[str, int]) -> dict:
     """The compacted suite for ``row`` (matched on its prepared ``id``), or nulls when it has none."""
     position = index.get(row.get("id") or "")
     if position is None:
-        return {"joined_tests": None, "joined_checker": None}
+        return {JOINED_TESTS_FIELD: None, JOINED_CHECKER_FIELD: None}
     entry = table[position]
-    return {"joined_tests": entry["tests"], "joined_checker": entry["checker"]}
+    return {JOINED_TESTS_FIELD: entry["tests"], JOINED_CHECKER_FIELD: entry["checker"]}
 
 
 @functools.cache
@@ -302,7 +306,7 @@ def main() -> None:
         if tests_table is not None:
             # Single process: the join indexes a memory-mapped table, and forked workers would copy it.
             split_ds = split_ds.map(join_tests, fn_kwargs={"table": tests_table[0], "index": tests_table[1]})
-            matched = len(split_ds) - split_ds.data.column("joined_tests").null_count
+            matched = len(split_ds) - split_ds.data.column(JOINED_TESTS_FIELD).null_count
             if matched == 0:
                 raise SystemExit(f"no {split} row matched a key of the tests table; the id spellings differ")
             logger.info("  %s: %d/%d rows matched a suite in the tests table", split, matched, len(split_ds))

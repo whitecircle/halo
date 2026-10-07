@@ -22,7 +22,7 @@ from trl import GRPOTrainer
 from trl.extras.profiling import profiling_context
 from trl.trainer.utils import pad
 
-from src.configs.async_training_config import AsyncTrainingConfig, rollout_field_sources
+from src.configs.async_training_config import AsyncTrainingConfig
 from src.configs.rollout_config import IDENTITY_SAMPLER
 from src.distributed.nccl.registry import resolve_weight_sync_client
 from src.distributed.runtime import (
@@ -1323,7 +1323,7 @@ class DistributedAsyncEnvironmentalGRPOTrainer(
                 f"isr_engine_reference is not available on {client_cls.BACKEND_NAME}: its client declares "
                 "no route that returns per-token log-probs of a given sequence under the current weights."
             )
-        sources = rollout_field_sources(type(self.async_config))
+        sources = self.async_config.rollout_field_sources()
         identity = {sources[name]: value for name, value in IDENTITY_SAMPLER.items()}
         moved = {
             name: current for name, value in identity.items() if (current := getattr(self.async_config, name)) != value
@@ -1506,8 +1506,7 @@ class DistributedAsyncEnvironmentalGRPOTrainer(
         read would charge nothing (a level the table misses too, and one it invents is a typo), and a floor or
         an overlong charge in a run where no episode carries a thinking cap would never fire."""
         cfg = self.async_config
-        caps = self._thinking_caps_by_level()
-        budgeted = any(cap is not None for cap in caps.values())
+        budgeted = self._any_episode_budgeted
         if cfg.reasoning_price is not None:
             if self._rollout_env.reasoning_effort is None:
                 raise ValueError(

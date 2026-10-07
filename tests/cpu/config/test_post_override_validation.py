@@ -34,7 +34,6 @@ from src.configs.environment_config import EnvironmentConfig
 from src.configs.offline_grpo_config import OfflineGRPOConfig
 from src.configs.smpo_config import SmoothMarginPOConfig
 from src.distributed.module_registry import iter_subclasses
-from src.distributed.parallelism_config import PP_SCHEDULES
 from src.env import DEFAULT_NCCL_TIMEOUT_MINUTES
 from src.environments.base import VALID_REASONING_EFFORTS
 from src.trainers.distillation.losses import DIVERGENCES
@@ -263,23 +262,13 @@ def test_async_episode_timeout_default_clears_the_watchdog_warning():
     assert AsyncTrainingConfig.episode_timeout < 0.8 * DEFAULT_NCCL_TIMEOUT_MINUTES * 60
 
 
-@pytest.mark.parametrize(
-    ("owner", "field_name", "expected"),
-    [
-        (DistributedArguments, "pipeline_schedule", PP_SCHEDULES),
-        (RLVROnlineGRPOScriptArguments, "reasoning_effort", (*VALID_REASONING_EFFORTS, "random", None)),
-    ],
-    ids=["pipeline_schedule", "reasoning_effort"],
-)
-def test_literal_annotation_matches_its_runtime_table(owner, field_name, expected):
-    """These fields restate a tuple that lives elsewhere (PP_SCHEDULES / VALID_REASONING_EFFORTS)
-    because importing it would drag torch or the environments package into the arg dataclasses.
-    Pin the equality — via the parser's own choice extractor — so the restatement cannot drift."""
-    declared = _literal_choices(get_type_hints(owner)[field_name])
-    assert declared is not None, (
-        f"{owner.__name__}.{field_name} is not Literal-annotated, so the parser cannot gate it"
-    )
-    assert set(declared) == set(expected)
+def test_reasoning_effort_literal_matches_its_runtime_table():
+    """The field restates VALID_REASONING_EFFORTS because importing it would drag the environments
+    package into the arg dataclasses. Pin the equality — via the parser's own choice extractor — so
+    the restatement cannot drift."""
+    declared = _literal_choices(get_type_hints(RLVROnlineGRPOScriptArguments)["reasoning_effort"])
+    assert declared is not None, "reasoning_effort is not Literal-annotated, so the parser cannot gate it"
+    assert set(declared) == {*VALID_REASONING_EFFORTS, "random", None}
 
 
 # Each distillation arm admits its own slice of the one divergence registry.

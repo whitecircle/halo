@@ -28,7 +28,7 @@ from transformers.models.auto.modeling_auto import MODEL_FOR_IMAGE_TEXT_TO_TEXT_
 from src.data.collators.vlm import PreprocessedVLMDataCollator, SelfDistillVLMDataCollator, VLMDataCollator
 from src.data.pipeline.preprocessed_metadata import PreprocessingConfig
 from src.data.pipeline.preprocessing import preprocess_dataset, tokenize_vlm_dataset
-from src.data.vlm import VLM_IMAGE_COLUMNS, VLM_OUTPUT_COLUMNS, VLM_OUTPUT_FEATURES, is_vlm_run
+from src.data.vlm import VLM_IMAGE_COLUMNS, VLM_OUTPUT_FEATURES, is_vlm_run
 from src.models import modality
 from src.models.modality import is_vlm_model
 from tests.common.models import QWEN2_5_VL_3B
@@ -128,7 +128,6 @@ def test_the_preprocessed_vlm_schema_is_the_declared_column_set():
         "image_grid_thw",
     }
     assert set(VLM_OUTPUT_FEATURES) == expected, "the offline writer's Arrow schema changed"
-    assert set(VLM_OUTPUT_COLUMNS) == expected
     assert set(PreprocessedVLMDataCollator.required_dataset_columns) == expected, (
         "column pruning would drop every stored column the collator does not declare"
     )

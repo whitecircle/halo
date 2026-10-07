@@ -11,6 +11,7 @@ from src.inference.openai_client import (
     UPSTREAM_RETRIES,
     EmptyChoicesError,
     chat_completion,
+    create_openai_client,
     generate_openai_response,
     parse_json_object,
 )
@@ -474,6 +475,21 @@ def test_parallel_requests_forwards_common_tools_to_every_row_and_per_message_to
     )
     assert tools_sent(per_message) == {"a": [tool], "b": None}
     assert all("tools" not in call for call in per_message.calls if call["messages"][-1]["content"] == "b")
+
+
+@pytest.mark.parametrize("exported", [None, ""])
+def test_the_client_refuses_to_build_without_a_key(monkeypatch, exported):
+    """A blank OPENAI_API_KEY (``.env.example`` ships one) is no key: the SDK would re-read it and build a
+    client whose every request fails as an opaque 401, so construction names the missing key instead."""
+    if exported is None:
+        monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    else:
+        monkeypatch.setenv("OPENAI_API_KEY", exported)
+    with pytest.raises(ValueError, match="OPENAI_API_KEY"):
+        create_openai_client(api_key_override="")
+    monkeypatch.setenv("OPENAI_API_KEY", "sdk-key")
+    assert create_openai_client().api_key == "sdk-key"
+    assert create_openai_client(api_key_override="override").api_key == "override"
 
 
 if __name__ == "__main__":

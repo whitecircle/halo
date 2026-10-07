@@ -31,14 +31,13 @@ VLM_OUTPUT_FEATURES = Features(
         "image_grid_thw": Sequence(Sequence(Value("int64"))),
     }
 )
-VLM_OUTPUT_COLUMNS = tuple(VLM_OUTPUT_FEATURES)
 
 # The raw spellings a dataset ships images in, in resolution order (``images`` wins). TRL's own
 # vision-dataset probe and the SMPO / reward vision routes read the same pair.
 VLM_RAW_IMAGE_COLUMNS = ("images", "image")
 
 # Every column that carries a run's images: the raw pair above plus ``pixel_values``, the pixels a
-# preprocessed ``--vlm`` artifact stores (:data:`VLM_OUTPUT_COLUMNS`) for
+# preprocessed ``--vlm`` artifact stores (:data:`VLM_OUTPUT_FEATURES`) for
 # :class:`~src.data.collators.vlm.PreprocessedVLMDataCollator`.
 VLM_IMAGE_COLUMNS = (*VLM_RAW_IMAGE_COLUMNS, "pixel_values")
 
@@ -48,6 +47,11 @@ VLM_IMAGE_COLUMNS = (*VLM_RAW_IMAGE_COLUMNS, "pixel_values")
 SEQUENCE_ALIGNED_VISION_KEYS = frozenset({"mm_token_type_ids", "token_type_ids"})
 
 
+def _splits(dataset) -> list:
+    """The splits of a ``DatasetDict``, or a single split as the only one."""
+    return list(dataset.values()) if isinstance(dataset, dict) else [dataset]
+
+
 def carried_image_columns(dataset) -> set[str]:
     """The :data:`VLM_IMAGE_COLUMNS` spellings present in any split of ``dataset``.
 
@@ -55,8 +59,7 @@ def carried_image_columns(dataset) -> set[str]:
     refusal and the multimodality verdict) so all three read a dataset the same way. ``dataset`` may
     be a ``DatasetDict`` or a single split.
     """
-    splits = dataset.values() if isinstance(dataset, dict) else [dataset]
-    return {column for split in splits for column in split.column_names} & set(VLM_IMAGE_COLUMNS)
+    return {column for split in _splits(dataset) for column in split.column_names} & set(VLM_IMAGE_COLUMNS)
 
 
 def vlm_row_tools(row: dict[str, Any]) -> list | None:
@@ -241,7 +244,7 @@ def _declares_images_locally(dataset, conversation_field: str | None) -> bool:
         return True
     return any(
         _column_embeds_images(split, conversation_field)
-        for split in (dataset.values() if isinstance(dataset, dict) else [dataset])
+        for split in _splits(dataset)
         if conversation_field in split.column_names
     )
 
@@ -267,7 +270,7 @@ def dataset_image_evidence(dataset) -> str | None:
     columns = carried_image_columns(dataset)
     if columns:
         return f"the image column(s) {sorted(columns)}"
-    for split in dataset.values() if isinstance(dataset, dict) else [dataset]:
+    for split in _splits(dataset):
         for column in split.column_names or ():
             if _column_embeds_images(split, column):
                 return f"image parts embedded in the {column!r} column"

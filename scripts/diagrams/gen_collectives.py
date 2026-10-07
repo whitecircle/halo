@@ -71,7 +71,6 @@ def panel(ax, x0, y0, name, users, before, after, cost, stroke, tint):
 
 
 fig, ax = plt.subplots(figsize=(12.8, 9.0))
-fig.patch.set_facecolor(BG)
 ax.set_xlim(0, 13.6)
 ax.set_ylim(0, 9.4)
 ax.axis("off")
@@ -159,5 +158,3 @@ ax.text(
 )
 
 save(plt.gcf(), "collective_ops")
-plt.close()
-print("✓ collective_ops.png")

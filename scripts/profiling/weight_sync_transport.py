@@ -26,7 +26,7 @@ import argparse
 import json
 import sys
 
-from src.diagnostics.weight_sync_transport import VERDICTS, format_report, run_preflight
+from src.diagnostics.weight_sync_transport import TRANSPORT_PREFIXES, format_report, run_preflight
 from src.distributed.nccl.registry import rollout_backends
 from src.log import configure_cli_logging
 
@@ -50,7 +50,10 @@ def main() -> int:
         "--connection-timeout", type=float, default=DEFAULT_CONNECTION_TIMEOUT_S, help="seconds to wait for /health"
     )
     parser.add_argument(
-        "--expect", choices=VERDICTS, default=None, help="exit 1 unless the group formed on this transport"
+        "--expect",
+        choices=list(TRANSPORT_PREFIXES),
+        default=None,
+        help="exit 1 unless the group formed on this transport",
     )
     parser.add_argument("--json", action="store_true", help="print the full result as JSON")
     args = parser.parse_args()

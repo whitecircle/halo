@@ -791,11 +791,9 @@ def init_distributed(backend: str = "nccl") -> bool:
         # Launcher's rank, not is_global_main_process(): pre-init the latter is 0 on every rank.
         if os.environ.get("CUDA_DEVICE_MAX_CONNECTIONS") != "1" and launcher_global_rank() == 0:
             logger.warning(
-                "CUDA_DEVICE_MAX_CONNECTIONS != 1 (currently %r). Expert Parallelism that forms "
-                "more than one DeepEP dispatch group per NVLink domain (ep_group_size < "
-                "nvlink_domain_size) may deadlock the combine barrier against FSDP2's DP-wide "
-                "collectives. Set it in the process environment (the prebuilt image already "
-                "does); a Python-level override here is too late (driver init at import).",
+                "CUDA_DEVICE_MAX_CONNECTIONS is %r; Expert Parallelism is validated with 1, the image "
+                "default. Set it in the process environment: the driver latches it at initialization, "
+                "so a Python-level override here is too late.",
                 os.environ.get("CUDA_DEVICE_MAX_CONNECTIONS"),
             )
         local_rank = get_local_rank()

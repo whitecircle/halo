@@ -7,16 +7,12 @@ comes off this rank's decoder layers), so the estimate describes what this GPU c
 
 from transformers.utils import logging
 
-from src.callbacks.parameter_stats import count_model_parameters
 from src.distributed.expert_parallel.expert_weights import expert_weight_roots, experts_container_attrs
 from src.distributed.runtime import local_numel
 from src.models.attention_layout import AttentionLayout, attention_layout
 from src.models.loading.config_levels import get_config_field, text_config
 
 logger = logging.get_logger(__name__)
-
-# Fallback when nothing declares a bound. Not a real upper bound, so callers must not clamp to it.
-ASSUMED_MAX_SEQ_LEN = 2048
 
 
 def _is_expert_param(name: str) -> bool:
@@ -52,9 +48,18 @@ def compute_expert_params(model, trainable_only: bool = False) -> float:
     )
 
 
-def estimate_linear_flops_per_token(model) -> float:
-    """The projection term: ``6·N_trainable + 4·N_frozen`` (fwd 2N + bwd 4N; a frozen LoRA base or
-    frozen layers skip the weight gradient). A parameter-less (meta) model falls back to ``12·d²·L``."""
+def training_flops_per_token(trainable_params: float, frozen_params: float) -> float:
+    """``6·N_trainable + 4·N_frozen``: forward 2N and input gradient 2N for every parameter, plus the
+    weight gradient 2N for a trainable one. A rank holding only frozen parameters (a frozen LoRA base,
+    a frozen stage) still back-propagates the input gradient the trainable ones need, hence 4N, not 6N."""
+    return 6.0 * trainable_params + 4.0 * frozen_params
+
+
+def estimate_linear_flops_per_token(model, local_params: int, trainable_params: int) -> float:
+    """The projection term over this rank's
+    :func:`~src.callbacks.parameter_stats.count_model_parameters` counts, by
+    :func:`training_flops_per_token`. A parameter-less (meta) model falls back to ``12·d²·L``
+    trainable parameters."""
     if next(model.parameters(), None) is None:
         config = getattr(model, "config", None)
         d_model = getattr(config, "hidden_size", None)
@@ -64,12 +69,8 @@ def estimate_linear_flops_per_token(model) -> float:
                 "Cannot estimate model FLOPS/token: the model exposes no parameters and its config "
                 "carries neither hidden_size nor num_hidden_layers."
             )
-        return 6 * (12 * d_model * d_model * n_layers)
-
-    all_params, trainable_params = count_model_parameters(model)
-    if trainable_params == 0:
-        return 6 * all_params
-    return 6 * trainable_params + 4 * max(all_params - trainable_params, 0)
+        return training_flops_per_token(12 * d_model * d_model * n_layers, 0)
+    return training_flops_per_token(trainable_params, local_params - trainable_params)
 
 
 def resolve_attention_layout(model, pp_size: int = 1) -> tuple[AttentionLayout, float] | None:

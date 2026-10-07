@@ -28,6 +28,10 @@ _LCB_RELEASE_FILES: dict[str, list[str]] = {
 # The LiveCodeBench platforms whose rows carry stdin tests, as the rows spell them. Its ``leetcode``
 # rows are functional, which ``keep_livecodebench`` drops, so a selection naming it would score nothing.
 _LCB_GRADABLE_PLATFORMS = ("atcoder", "codeforces")
+# The columns ``prepare_code_dataset.py`` joins onto a row from a compacted tests table: its suite and
+# its checker source.
+JOINED_TESTS_FIELD = "joined_tests"
+JOINED_CHECKER_FIELD = "joined_checker"
 # The one split each single-split benchmark ships; its loader reads it whatever split it is passed.
 _LCB_SPLIT = "test"
 _HLCE_SPLIT = "train"
@@ -146,7 +150,7 @@ def stdin_tests(items: Iterable[dict[str, Any]]) -> list[dict[str, str]]:
 def joined_tests(row: dict[str, Any]) -> list[dict[str, str]]:
     """Tests the preparation script joined onto the row from a compacted tests table (``joined_tests``,
     a JSON list of ``{input, output}``); empty when the row had no match."""
-    raw = row.get("joined_tests")
+    raw = row.get(JOINED_TESTS_FIELD)
     if not raw:
         return []
     tests = json.loads(raw) if isinstance(raw, str) else raw
@@ -424,7 +428,7 @@ def pack_hardtests_verification(row: dict[str, Any]) -> dict[str, Any]:
     """Pack the joined HardTests suite, its judging function as a checker, and the per-problem time limit."""
     return {
         "tests": joined_tests(row),
-        "checker": hardtests_checker(row.get("joined_checker")),
+        "checker": hardtests_checker(row.get(JOINED_CHECKER_FIELD)),
         "time_limit": _hardtests_time_limit_s(row.get("time_limit")),
     }
 

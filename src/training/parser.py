@@ -45,6 +45,9 @@ _NONE_STRINGS = ("None", "null", "none")
 
 _YAML_SUFFIXES = (".yaml", ".yml")
 
+# Pre-seeded on every argparse destination, so a flag left off the command line stays recognizable.
+_UNSET = object()
+
 # Matched left to right: an existing `%%` escape, a `%(name)s` placeholder, or (captured) a bare
 # percent that still needs escaping.
 _PERCENT_TOKENS = re.compile(r"%%|%\(|(%)")
@@ -153,6 +156,11 @@ def _argv_yaml_path() -> str | None:
     return None
 
 
+def _load_yaml(yaml_file: str) -> dict[str, Any]:
+    """The YAML config as a dict, read as YAML 1.2; an empty file is an empty config."""
+    return _yaml.load(Path(yaml_file)) or {}
+
+
 def _union_permits_str(annotation) -> bool:
     """Whether ``str`` is one of the union members (e.g. ``float | str``).
 
@@ -187,7 +195,7 @@ class H4ArgumentParser(HfArgumentParser):
         the string :meth:`_validate_field_values` rejects. No spelling is migrated: an unrecognized
         key reaches the strict check and raises, naming the field.
         """
-        return self.parse_dict(_yaml.load(Path(yaml_file)) or {}, allow_extra_keys=allow_extra_keys)
+        return self.parse_dict(_load_yaml(yaml_file), allow_extra_keys=allow_extra_keys)
 
     def parse_dict(self, args: dict[str, Any], allow_extra_keys: bool = False):
         """Override to validate raw values, which the dict path otherwise accepts unchecked.
@@ -229,8 +237,17 @@ class H4ArgumentParser(HfArgumentParser):
 
     def parse_yaml_and_args(self, yaml_arg: str, other_args: list[str] | None = None) -> list[Any]:
         """Parse a YAML file, then overwrite its values with CLI args (e.g. ['--arg=val'])."""
-        arg_list = self.parse_yaml_file(os.path.abspath(yaml_arg))
+        outputs, overridden = self._apply_cli_overrides(self.parse_yaml_file(os.path.abspath(yaml_arg)), other_args)
+        # Without re-deriving mixed_precision, the Accelerator autocasts with the pre-override dtype.
+        if overridden & set(_PRECISION_FLAGS):
+            self._sync_mixed_precision(outputs)
+        return outputs
 
+    def _apply_cli_overrides(
+        self, parsed: tuple[Any, ...], other_args: list[str] | None
+    ) -> tuple[list[Any], set[str]]:
+        """Overwrite the parsed dataclasses' values with CLI args, returning them and the overridden
+        field names. ``mixed_precision`` is left for the caller to re-derive."""
         outputs = []
         parsed_other_args = {}
         for arg in other_args or []:
@@ -246,7 +263,7 @@ class H4ArgumentParser(HfArgumentParser):
         used_args = set()
 
         # setattr, not re-instantiation: re-running __post_init__ trips validators on state it derived.
-        for data_yaml in arg_list:
+        for data_yaml in parsed:
             overridden_fields: set[str] = set()
             keys = {f.name for f in dataclasses.fields(data_yaml) if f.init}
             # HfArgumentParser.__init__ rewrites Field.type in place, so annotations come from the class.
@@ -334,10 +351,6 @@ class H4ArgumentParser(HfArgumentParser):
 
             outputs.append(data_yaml)
 
-        # Without re-deriving mixed_precision, the Accelerator autocasts with the pre-override dtype.
-        if set(parsed_other_args) & set(_PRECISION_FLAGS):
-            self._sync_mixed_precision(outputs)
-
         unmatched = set(parsed_other_args) - set(used_args)
         if unmatched:
             raise ValueError(
@@ -345,7 +358,22 @@ class H4ArgumentParser(HfArgumentParser):
                 f"of the parsed config dataclasses."
             )
 
-        return outputs
+        return outputs, used_args
+
+    def parse_flags(self, args: list[str] | None = None) -> tuple[Any, ...]:
+        """Parse a flags-only command line, handing each flag to every dataclass that declares it.
+
+        Stands in for ``parse_args_into_dataclasses``, which deletes a key from the shared namespace once
+        its first declaring dataclass consumes it, so a field two dataclasses declare (``pad_token``
+        on the script args and TRL's config) raises for the second. Only the flags given are handed
+        out, as :meth:`parse_dict` hands out a YAML's keys: an unset shared field keeps each
+        declarer's own default. An unknown flag is argparse's usage error.
+        """
+        seeded = argparse.Namespace(
+            **{action.dest: _UNSET for action in self._actions if action.dest != argparse.SUPPRESS}
+        )
+        namespace = self.parse_args(args, namespace=seeded)
+        return self.parse_dict({key: value for key, value in vars(namespace).items() if value is not _UNSET})
 
     def parse(self) -> Any:
         """Parse the script's YAML config and/or CLI overrides into its declared dataclasses.
@@ -359,15 +387,16 @@ class H4ArgumentParser(HfArgumentParser):
         # infer its device.
         init_distributed()
 
-        explicitly_set = self._get_explicitly_set_fields()
-
         yaml_path = _argv_yaml_path()
+        yaml_config = {} if yaml_path is None else _load_yaml(yaml_path)
+        explicitly_set = self._get_explicitly_set_fields(yaml_config)
+
         if yaml_path is None:
-            output = self.parse_args_into_dataclasses()
+            output = self.parse_flags()
         elif len(sys.argv) == 2:
-            output = self.parse_yaml_file(yaml_path)
+            output = self.parse_dict(yaml_config)
         else:
-            output = self.parse_yaml_and_args(yaml_path, sys.argv[2:])
+            output, _ = self._apply_cli_overrides(self.parse_dict(yaml_config), sys.argv[2:])
 
         self._apply_toolkit_defaults(output, explicitly_set)
         self._sync_mixed_precision(output)
@@ -383,17 +412,12 @@ class H4ArgumentParser(HfArgumentParser):
         return output
 
     @staticmethod
-    def _get_explicitly_set_fields() -> set:
-        """Determine which fields the user explicitly set via YAML file or CLI args."""
-        explicitly_set = set()
-
-        yaml_path = _argv_yaml_path()
-        if yaml_path and os.path.isfile(yaml_path):
-            raw = _yaml.load(Path(yaml_path)) or {}
-            explicitly_set.update(raw.keys())
+    def _get_explicitly_set_fields(yaml_config: dict[str, Any] | None = None) -> set:
+        """The fields the user explicitly set: the loaded YAML config's keys plus every CLI flag."""
+        explicitly_set = set(yaml_config or ())
 
         # Without a YAML, sys.argv[1] is already a flag; skipping it lets a default overwrite `--bf16 false`.
-        cli_args = sys.argv[2:] if yaml_path else sys.argv[1:]
+        cli_args = sys.argv[2:] if _argv_yaml_path() else sys.argv[1:]
         for arg in cli_args:
             # Underscore form: argparse accepts `--use-liger-kernel`, but the toolkit-default check
             # reads field names, and a dashed record would let the default overwrite the user's value.

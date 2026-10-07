@@ -17,10 +17,7 @@ ROW2_Y, ROW2_H = 1.17, card_height(4)
 ROW1_Y, ROW1_H = ROW2_Y + ROW2_H + LANE, card_height(3)
 SYNC_LANE_Y = ROW2_Y + ROW2_H + 0.45  # horizontal run of the weight-sync return
 
-fig, ax = plt.subplots(figsize=(W, H))
-ax.set_xlim(0, W)
-ax.set_ylim(0, H)
-ax.axis("off")
+fig, ax = canvas(W, H)
 
 title(ax, "Online GRPO (RLVR)", "A = (r − mean) / std over each group of num_generations")
 
@@ -162,5 +159,3 @@ footnote(
 )
 
 save(plt.gcf(), "online_grpo_pipeline")
-plt.close()
-print("✓ online_grpo_pipeline.png")

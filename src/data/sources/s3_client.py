@@ -8,7 +8,6 @@ through the staged-push protocol described at :data:`_STAGING_INFIX` and are ser
 
 import contextlib
 import json
-import logging
 import os
 import re
 import shutil
@@ -35,19 +34,15 @@ from src.data.sources.dataset_cache import (
 )
 from src.data.sources.paths import METADATA_FILE, parse_s3_uri
 from src.env import env_int, env_str
+from src.log import info_logger
 
-# ``src`` pins the ROOT level to WARNING, so without the child level this module's INFO record of
-# what data moved lands nowhere. Plain logging, not the accelerate adapter: entry points that
-# initialize no accelerate state (the S3 CLI, ``scripts/inference/*``) reach here too.
-logger = logging.getLogger(__name__)
-logger.setLevel(logging.INFO)
+logger = info_logger(__name__)
 
 __all__ = [
     "DEFAULT_BUCKET",
     "S3Client",
     "build_s3_uri",
     "default_bucket",
-    "exists",
     "load_dataset_from_s3_uri",
     "push_dataset_to_s3_uri",
     "read_control_json_with_cache",
@@ -64,6 +59,9 @@ _S3_TRANSFER_THREADS = 5
 # become 16 instead of the no-workers it asks for, and env_int already turns unset/malformed values into
 # the default.
 _S3_FOLDER_CONCURRENCY = max(1, env_int("HALO_S3_MAX_FOLDER_CONCURRENCY", 16))
+
+# DeleteObjects' per-request key limit.
+_S3_DELETE_BATCH = 1000
 
 # Staged-push protocol (push_dataset): the tree uploads whole to a dot-prefixed SIBLING prefix
 # (outside the destination's anchored listings), is sealed with the sentinel, then promoted with the
@@ -247,18 +245,19 @@ class S3Client:
             opts["client_kwargs"] = client_kwargs
         return opts
 
-    def _get_full_key(self, key: str, subfolder: str | None = None) -> str:
-        """Join an optional subfolder prefix onto key, normalizing surrounding slashes."""
-        if subfolder is not None:
+    @staticmethod
+    def _get_full_key(key: str, subfolder: str | None = None) -> str:
+        """Join an optional subfolder prefix onto key, normalizing surrounding slashes; an empty
+        subfolder is none."""
+        if subfolder:
             subfolder = subfolder.strip("/")
             key = key.strip("/")
             return f"{subfolder}/{key}"
         return key.strip("/")
 
-    def _get_s3_uri(self, key: str, subfolder: str | None = None) -> str:
-        """Get full S3 URI for a key."""
-        full_key = self._get_full_key(key, subfolder)
-        return f"s3://{self.bucket}/{full_key}"
+    def s3_uri(self, key: str, subfolder: str | None = None) -> str:
+        """The full ``s3://`` URI of ``key`` (under ``subfolder``) in this client's bucket."""
+        return f"s3://{self.bucket}/{self._get_full_key(key, subfolder)}"
 
     def object_exists(self, key: str, subfolder: str | None = None) -> bool:
         """Whether an object exists at EXACTLY this key.
@@ -354,28 +353,20 @@ class S3Client:
 
     def delete(self, key: str, subfolder: str | None = None, recursive: bool = True) -> bool:
         """Delete a single object, or with recursive=True every object under the prefix
-        (anchored with a trailing slash; deleted in batches of 1000, the S3 API limit).
+        (anchored with a trailing slash).
         """
         full_key = self._get_full_key(key, subfolder)
 
         if recursive:
             # The trailing slash anchors the prefix to children: without it "run1" also matches "run10/...".
             prefix = full_key.rstrip("/") + "/" if full_key else full_key
-            objects_to_delete = []
-            paginator = self._client.get_paginator("list_objects_v2")
-
-            for page in paginator.paginate(Bucket=self.bucket, Prefix=prefix):
-                for obj in page.get("Contents", []):
-                    objects_to_delete.append({"Key": obj["Key"]})
-
-            if objects_to_delete:
-                for i in range(0, len(objects_to_delete), 1000):
-                    batch = objects_to_delete[i : i + 1000]
-                    self._client.delete_objects(Bucket=self.bucket, Delete={"Objects": batch})
-                logger.info(f"Deleted {len(objects_to_delete)} objects from s3://{self.bucket}/{full_key}")
+            keys = [obj["Key"] for obj in self._list_prefix_keys(prefix)]
+            if keys:
+                self._delete_keys(keys)
+                logger.info(f"Deleted {len(keys)} objects from s3://{self.bucket}/{full_key}")
             # False when the prefix matched nothing: a caller that reports success off this would
             # tell the user their data is gone while it is still there.
-            return bool(objects_to_delete)
+            return bool(keys)
         else:
             try:
                 self._client.delete_object(Bucket=self.bucket, Key=full_key)
@@ -424,6 +415,12 @@ class S3Client:
         torn, so it must never be overwritten before a new complete copy exists."""
         return f"{self._staging_scan_prefix(full_key)}{uuid.uuid4().hex[:8]}"
 
+    def _delete_keys(self, keys: list[str]) -> None:
+        """Delete ``keys`` in listing order, batched to :data:`_S3_DELETE_BATCH` per request."""
+        for start in range(0, len(keys), _S3_DELETE_BATCH):
+            batch = [{"Key": key} for key in keys[start : start + _S3_DELETE_BATCH]]
+            self._client.delete_objects(Bucket=self.bucket, Delete={"Objects": batch})
+
     def _list_prefix_keys(self, prefix: str) -> list[dict[str, Any]]:
         """Raw object listing under an exact string prefix (no trailing-slash forcing)."""
         entries = []
@@ -457,9 +454,8 @@ class S3Client:
         Deletion follows lexicographic listing order, so the dot-prefixed sentinel goes before its
         tree's data keys: a crash mid-delete leaves the tree UNSEALED and unpickable by recovery.
         """
-        keys = [{"Key": obj["Key"]} for obj in self._own_staging_entries(full_key)]
-        for i in range(0, len(keys), 1000):
-            self._client.delete_objects(Bucket=self.bucket, Delete={"Objects": keys[i : i + 1000]})
+        keys = [obj["Key"] for obj in self._own_staging_entries(full_key)]
+        self._delete_keys(keys)
         if keys:
             logger.info(f"Removed {len(keys)} staged object(s) for s3://{self.bucket}/{full_key}")
 
@@ -535,7 +531,7 @@ class S3Client:
         at a time — concurrent pushers interleave promotes.
         """
         full_key = self._get_full_key(key, subfolder)
-        s3_uri = f"s3://{self.bucket}/{full_key}"
+        s3_uri = self.s3_uri(key, subfolder)
 
         if not overwrite and self.exists(key, subfolder):
             raise FileExistsError(f"Dataset already exists: {s3_uri}. Use overwrite=True to replace.")
@@ -595,7 +591,7 @@ class S3Client:
         forces a re-download.
         """
         full_key = self._get_full_key(key, subfolder)
-        s3_uri = f"s3://{self.bucket}/{full_key}"
+        s3_uri = self.s3_uri(key, subfolder)
 
         cache_dir = os.path.join(HALO_S3_DATASET_CACHE_DIR, s3_cache_key(self.bucket, full_key))
         cache_path = os.path.join(cache_dir, "dataset")
@@ -686,7 +682,7 @@ class S3Client:
             raise ValueError(f"Local path is not a directory: {local_path}")
 
         full_key = self._get_full_key(key, subfolder)
-        s3_uri = f"s3://{self.bucket}/{full_key}"
+        s3_uri = self.s3_uri(key, subfolder)
 
         existing_keys: set[str] = set()
         if self.exists(key, subfolder):
@@ -752,7 +748,7 @@ class S3Client:
         to avoid connection-pool overflow under parallel workers.
         """
         full_key = self._get_full_key(key, subfolder)
-        s3_uri = f"s3://{self.bucket}/{full_key}"
+        s3_uri = self.s3_uri(key, subfolder)
 
         if not self.exists(key, subfolder):
             raise FileNotFoundError(f"Folder not found: {s3_uri}")
@@ -769,17 +765,10 @@ class S3Client:
         os.makedirs(local_path, exist_ok=True)
 
         prefix = full_key.rstrip("/") + "/"
-        paginator = self._client.get_paginator("list_objects_v2")
-
-        files_to_download = []
-        total_size = 0
-        for page in paginator.paginate(Bucket=self.bucket, Prefix=prefix):
-            for obj in page.get("Contents", []):
-                s3_key = obj["Key"]
-                relative_path = s3_key[len(prefix) :]
-                file_size = obj["Size"]
-                files_to_download.append((s3_key, relative_path, file_size))
-                total_size += file_size
+        files_to_download = [
+            (obj["Key"], obj["Key"][len(prefix) :], obj["Size"]) for obj in self._list_prefix_keys(prefix)
+        ]
+        total_size = sum(size for _key, _relative_path, size in files_to_download)
 
         # Pre-create the tree single-threaded so the workers never race on os.makedirs of a shared parent.
         for _s3_key, relative_path, _size in files_to_download:
@@ -800,27 +789,10 @@ class S3Client:
         return local_path
 
 
-_default_client: S3Client | None = None
-
-
-def _get_default_client() -> S3Client:
-    """Get or create the default S3 client."""
-    global _default_client
-    if _default_client is None:
-        _default_client = S3Client()
-    return _default_client
-
-
 def build_s3_uri(key: str, subfolder: str | None = None) -> str:
     """Build a full S3 URI from key (+optional subfolder) under :func:`default_bucket`, without
     constructing a client."""
-    parts = [p for p in [subfolder, key] if p]
-    return f"s3://{default_bucket()}/{'/'.join(parts)}"
-
-
-def exists(key: str, subfolder: str | None = None) -> bool:
-    """Check if key exists (object or prefix) under the default client."""
-    return _get_default_client().exists(key, subfolder)
+    return f"s3://{default_bucket()}/{S3Client._get_full_key(key, subfolder)}"
 
 
 def load_dataset_from_s3_uri(

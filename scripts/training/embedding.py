@@ -50,6 +50,7 @@ from src.training.script_runner import (
     init_training_script,
     load_script_datasets,
     load_script_model,
+    reject_non_default_args,
     reject_unsupported_args,
     run_trainer,
 )
@@ -265,8 +266,6 @@ def main():
         added_special_tokens=args.added_special_tokens,
         unfreeze_layers_patterns=args.unfreeze_layers_patterns,
         freeze_layers_patterns=args.freeze_layers_patterns,
-        # SentenceTransformer owns tokenization; "hf" (the default) is not a request.
-        tokenizer_backend=args.tokenizer_backend if args.tokenizer_backend != "hf" else None,
         # No chat-template rendering and no log_dataset_examples stage on this path.
         tools_field=args.tools_field,
         log_decoded_samples=args.log_decoded_samples,
@@ -274,6 +273,8 @@ def main():
         # only warns), and the SentenceTransformer branch never reads the flag.
         text_only_model=dist_args.text_only_model,
     )
+    # SentenceTransformer owns tokenization, so only the default backend is accepted.
+    reject_non_default_args("Embedding training", args, "tokenizer_backend")
 
     # LoRA on the SentenceTransformer path is injected below via inject_adapter_in_model (not the EP
     # grouped-adapter split, which is rejected together with EP/TP further down).

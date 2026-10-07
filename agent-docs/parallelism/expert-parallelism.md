@@ -154,7 +154,7 @@ That sweep covers every shape holding more than one EP group, the single-node on
 `ep2+tp2`) included. Mechanism:
 [Multi-Node → deferred cross-replica sync](multi-node.md#deferred-cross-replica-sync).
 
-`CUDA_DEVICE_MAX_CONNECTIONS=1`, baked into the images, keeps the supported multi-group shapes (`ep2`, `ep4+etp2` on 8 GPUs) from deadlocking the DeepEP combine against FSDP2's collectives, at no
+`CUDA_DEVICE_MAX_CONNECTIONS=1`, baked into the images, is the setting the EP suites are validated with, at no
 measurable throughput cost ([DeepEP → Environment variables](../infrastructure/deepep.md#environment-variables)).
 
 ## Quick start

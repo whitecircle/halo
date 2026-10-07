@@ -10,7 +10,8 @@ Three layers, one per role a :class:`~src.kernels.liger.builder.LigerFamilySpec`
 * the fused head, whole-model: the fused loss must reproduce the family's own head, including a
   declared ``logit_scale`` (Cohere folds it onto the hidden states, which is exact only because
   ``(s·h) @ Wᵀ == s·(h @ Wᵀ)``);
-* every declared RMSNorm, against the family's own norm at the spec's ``offset``/``casting_mode``;
+* every declared RMSNorm, against the family's own norm at the spec's ``offset``/``casting_mode``, on a
+  contiguous and a strided input;
 * every declared gated (GDN) norm, against the family's own module in fp64 — the one role whose
   kernel is deliberately MORE precise than the eager module, so it is pinned to the function rather
   than to the module's own bf16 rounding;
@@ -99,6 +100,7 @@ def _flags(applier, **requested) -> dict:
 
 def _fwd_bwd(module, x: torch.Tensor):
     """Forward plus a scalar backward; returns the output and every gradient it produced."""
+    module.zero_grad(set_to_none=True)
     x = x.clone().requires_grad_(True)
     out = module(x)
     out.float().pow(2).sum().backward()
@@ -145,6 +147,9 @@ def _check_norms(spec, originals, device) -> None:
             patched_norm.weight.data.copy_(reference_norm.weight.data)
             x = torch.randn(BATCH, SEQ, HIDDEN, device=device, dtype=dtype)
             _compare(f"{name}[{dtype}]", _fwd_bwd(reference_norm, x), _fwd_bwd(patched_norm, x), tol)
+            # Strided, as Laguna's hub modeling code normalizes q/k per head after the head transpose.
+            x = torch.randn(BATCH, SEQ, 2, HIDDEN, device=device, dtype=dtype).transpose(1, 2)
+            _compare(f"{name}[{dtype}, strided]", _fwd_bwd(reference_norm, x), _fwd_bwd(patched_norm, x), tol)
 
 
 def _gated_norm_outputs(norm, x, gate, dy, dtype):

@@ -5,11 +5,12 @@ from typing import Literal
 
 from transformers import TrainingArguments
 
-from src.args.validation import RangeValidatedConfig
+from src.args.mixins import DatasetNumProcArguments
+from src.args.validation import RangeValidatedConfig, require_positive
 
 
 @dataclass
-class DistillationConfig(RangeValidatedConfig, TrainingArguments):
+class DistillationConfig(DatasetNumProcArguments, RangeValidatedConfig, TrainingArguments):
     """Configuration for distillation training, extending HuggingFace TrainingArguments."""
 
     # The teacher arm's names in the trainer-side divergence registry (losses.DIVERGENCES), pinned to it
@@ -41,7 +42,11 @@ class DistillationConfig(RangeValidatedConfig, TrainingArguments):
     )
     apply_hard_labels: bool = field(
         default=False,
-        metadata={"help": "Apply hard labels coefficient to distillation loss"},
+        metadata={
+            "help": "Scale the distillation term per token by the detached gold-token gate "
+            "(1 - student_prob[label]) * teacher_prob[label]. Refused under slim, which applies its own "
+            "gold-token weight."
+        },
     )
     max_length: int | None = field(
         default=2048,
@@ -50,10 +55,6 @@ class DistillationConfig(RangeValidatedConfig, TrainingArguments):
             "truncated. null / non-positive resolves to the student's context window at launch."
         },
     )
-    dataset_num_proc: int | None = field(
-        default=None,
-        metadata={"help": "Number of processes for dataset preprocessing"},
-    )
 
     def __post_init__(self):
         self._validate_ranges()
@@ -61,7 +62,6 @@ class DistillationConfig(RangeValidatedConfig, TrainingArguments):
 
     def _validate_ranges(self) -> None:
         super()._validate_ranges()
-        if self.distill_temperature <= 0:
-            raise ValueError(f"distill_temperature must be > 0, got {self.distill_temperature}")
+        require_positive(type(self).__name__, distill_temperature=self.distill_temperature)
         if not 0.0 <= self.distill_alpha <= 1.0:
             raise ValueError(f"distill_alpha must be in [0, 1], got {self.distill_alpha}")

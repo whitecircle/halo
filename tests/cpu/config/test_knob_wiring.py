@@ -431,6 +431,8 @@ def _run_script_main(script: str, config_body: str, tmp_path: Path) -> None:
         # Both only shape the confidence weights, which no row carries without the column.
         ("distillation/self_distill.py", "confidence_power: 2.0\n", "confidence_power"),
         ("distillation/self_distill.py", "confidence_weight_opd: false\n", "confidence_weight_opd"),
+        # SentenceTransformer tokenizes, so another text→ids backend would be read by nothing.
+        ("embedding.py", "tokenizer_backend: gigatoken\n", "tokenizer_backend"),
     ],
 )
 def test_script_main_refuses_the_knob_before_any_load(script, config_body, knob, tmp_path):

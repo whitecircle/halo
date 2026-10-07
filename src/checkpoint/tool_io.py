@@ -256,36 +256,6 @@ def reject_sibling_adapter(input_dir: str) -> None:
         )
 
 
-def finalize_merged_checkpoint(
-    input_dir: str,
-    output_dir: str,
-    shard_files: list[str],
-    *,
-    verbose: bool,
-    delete_input_shards: bool,
-) -> None:
-    """Carry a merge source's non-weight files across, then optionally drop its input shards.
-
-    The only-copy rule at the other end of a merge: called once the merged weights and their index
-    are on disk, removing the inputs LAST, so a merge that died earlier leaves the only copy of the
-    weights where it found them.
-
-    ``generation_config.json`` rides across verbatim because the input is always a directory this
-    toolkit's sharded writer produced (the format gate admits nothing else), which emits that file
-    only for a generating model off an already-sanitized config — both rules ``save_full_checkpoint``
-    applies, applied upstream, and re-deriving them here would need the model this merge never loads.
-    """
-    copy_checkpoint_aux_files(input_dir, output_dir, verbose=verbose)
-
-    if delete_input_shards:
-        for shard_file in shard_files:
-            os.remove(os.path.join(input_dir, shard_file))
-        if verbose:
-            print(f"Deleted {len(shard_files)} input shard files (--delete_input_shards)")  # noqa: T201 — CLI-facing
-
-    print(f"\n✓ Merged EP checkpoint saved to: {output_dir}")  # noqa: T201 — CLI-facing
-
-
 def reject_sharded_checkpoint(checkpoint_dir: str) -> None:
     """Refuse a checkpoint directory that does not hold the whole model.
 
@@ -588,11 +558,6 @@ def header_numel(header) -> int:
 def header_nbytes(header) -> int:
     """Storage size of a tensor from its ``safe_open`` slice header alone (no data read)."""
     return header_numel(header) * _SAFETENSORS_DTYPE_BYTES.get(header.get_dtype(), 2)
-
-
-def stored_tensor_numel(reader, key: str) -> int:
-    """Element count of one tensor in an open ``safe_open`` reader, from the header alone (no data read)."""
-    return header_numel(reader.get_slice(key))
 
 
 def stored_tensor_nbytes(reader, key: str) -> int:

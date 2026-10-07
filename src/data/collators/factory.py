@@ -12,11 +12,8 @@ from src.data.collators.packing import (
     DataCollatorWithPacking,
 )
 from src.data.spans import require_rendered_response_marker, resolve_eos_token_ids
-from src.models.patches.attention import (
-    VARLEN_ATTN_IMPLEMENTATIONS,
-    effective_attn_implementation,
-    model_type_matches,
-)
+from src.models.loading.config_levels import model_type_matches
+from src.models.patches.attention import VARLEN_ATTN_IMPLEMENTATIONS, effective_attn_implementation
 from src.models.segment_markers import (
     DENSE_PACKING_LEAK_MODEL_TYPES,
     reject_compressed_kv_rows,

@@ -6,7 +6,15 @@ it pickled, so those imports must not be pulled into every ``import src.configs`
 """
 
 from dataclasses import dataclass, field
-from typing import Any, Literal
+from typing import Any, Literal, get_args
+
+from src.env import DEFAULT_NCCL_TIMEOUT_MINUTES
+
+# The rollout engines a run selects between: the type both config surfaces declare, and the spellings
+# every consumer branching on the engine without its weight-sync client (whose ``BACKEND_KEY`` carries
+# the same value) compares against.
+RolloutBackend = Literal["vllm", "sglang"]
+VLLM_BACKEND, SGLANG_BACKEND = get_args(RolloutBackend)
 
 # ``AsyncTrainingConfig`` is the validated YAML surface and supplies every mirrored field below, so a
 # directly-built RolloutConfig defaults to what that path would produce; one shared constant per pair
@@ -33,10 +41,10 @@ DEFAULT_REQUEST_TIMEOUT_SECONDS = 120.0
 DEFAULT_MAX_RETRIES = 3
 DEFAULT_RETRY_BASE_WAIT_SECONDS = 1.0
 
-# Two thirds of the 30-min default NCCL watchdog, so a straggler episode is cancelled before its
-# peers' per-step collective aborts. Shared with ``AsyncTrainingConfig.episode_timeout`` so a
-# directly built RolloutConfig does not default above what that validated path allows.
-DEFAULT_EPISODE_TIMEOUT_SECONDS = 1200.0
+# Two thirds of the default NCCL watchdog, so a straggler episode is cancelled before its peers'
+# per-step collective aborts. Shared with ``AsyncTrainingConfig.episode_timeout`` so a directly built
+# RolloutConfig does not default above what that validated path allows.
+DEFAULT_EPISODE_TIMEOUT_SECONDS = DEFAULT_NCCL_TIMEOUT_MINUTES * 60 * 2 / 3
 
 # Chat-template variable carrying an episode's per-turn thinking budget, the pair of the request's
 # top-level ``reasoning_effort``; both are per episode, never run-wide.
@@ -52,7 +60,7 @@ REASONING_END_TOKEN_EXAMPLES = (
 class RolloutConfig:
     """Generation and retry configuration for rollout collection."""
 
-    backend: Literal["vllm", "sglang"] = "vllm"
+    backend: RolloutBackend = VLLM_BACKEND
     """Rollout engine serving these requests. Both speak OpenAI chat completions, but SGLang drops
     unknown request keys rather than rejecting them, so the payload builder gates the vLLM-only
     fields below on this value. Mirrors ``AsyncTrainingConfig.rollout_backend``, which validates

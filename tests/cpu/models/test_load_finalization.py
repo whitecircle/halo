@@ -64,15 +64,13 @@ DISPATCHED_LOADERS = frozenset(
 # lost its call could still "reach" the seam through a sibling branch. Closed-world by assumption —
 # a new terminal loader belongs here, and the reachability sweep is what catches one that is missing.
 TERMINAL_LOADERS = (
-    (DISPATCHER, "_sequential_load_to_cuda"),
     (DISPATCHER, "_from_pretrained_on_local_gpu"),
     (DISPATCHER, "_load_tp_model"),
     ("src/distributed/loading/frozen_models.py", "load_frozen_auxiliary_model"),
     ("src/distributed/loading/model_loading.py", "load_model_from_pretrained"),
-    ("src/distributed/expert_parallel/loading.py", "_load_ep_model_huggingface"),
+    ("src/distributed/expert_parallel/loading.py", "load_through_cpu"),
     ("src/distributed/expert_parallel/lazy_loader.py", "load_ep_model_lazy"),
     ("src/distributed/pipeline_parallel/lazy_loader.py", "load_pp_stage_model"),
-    ("src/distributed/context_parallel/loading.py", "load_model_for_cp"),
 )
 
 # Tool loaders whose model is handed to a FORWARD — reward scores, dedup embeddings, the
@@ -171,16 +169,17 @@ def test_seam_reties_shared_weights():
 
 
 def _graph_modules() -> list[str]:
-    """Every module the sweep must see, DERIVED: the loading package plus every ``src`` module that
-    names the seam (the EP/PP/CP loaders live in their own packages).
+    """Every module the sweep must see, DERIVED: the loading package, all of ``src/distributed`` (the
+    EP/PP/CP loaders and the load core they delegate to) and every other ``src`` module naming the seam.
 
-    A new loader module that finalizes joins the graph on its own. One that does NOT is absent from
-    it, so the dispatcher path delegating to it stops reaching the seam and the sweep below fails —
-    the failure direction this test exists for.
+    A loader that delegates across modules is followed to wherever the load happens; one that never
+    finalizes is in the graph without reaching the seam, so the sweep below fails — the failure
+    direction this test exists for.
     """
     package = (REPO_ROOT / "src/models/loading").rglob("*.py")
+    distributed = (REPO_ROOT / "src/distributed").rglob("*.py")
     callers = (path for path in (REPO_ROOT / "src").rglob("*.py") if SEAM in path.read_text(encoding="utf-8"))
-    return sorted({path.relative_to(REPO_ROOT).as_posix() for path in (*package, *callers)})
+    return sorted({path.relative_to(REPO_ROOT).as_posix() for path in (*package, *distributed, *callers)})
 
 
 @functools.cache

@@ -7,6 +7,7 @@ from math import isfinite
 from typing import Any, Literal
 
 from src.args.mixins import AdvantageShapingArguments, ChunkedLogprobsArguments, GRPOEarlyStopArguments
+from src.args.validation import require_positive
 from src.configs.rollout_config import (
     DEFAULT_EPISODE_TIMEOUT_SECONDS,
     DEFAULT_MAX_RETRIES,
@@ -21,10 +22,13 @@ from src.configs.rollout_config import (
     DEFAULT_ROLLOUT_TOP_P,
     REASONING_BUDGET_TEMPLATE_VAR,
     REASONING_END_TOKEN_EXAMPLES,
+    SGLANG_BACKEND,
+    VLLM_BACKEND,
+    RolloutBackend,
     RolloutConfig,
 )
 from src.distributed.runtime import is_global_main_process
-from src.env import WATCHDOG_WARN_FRACTION, resolve_nccl_timeout_minutes
+from src.env import DEFAULT_NCCL_TIMEOUT_MINUTES, WATCHDOG_WARN_FRACTION, resolve_nccl_timeout_minutes
 
 logger = logging.getLogger(__name__)
 
@@ -39,26 +43,6 @@ POSITIVE_ROLLOUT_FIELDS = (
     "episode_timeout",
     "rollout_connection_timeout",
 )
-
-
-def rollout_field_sources(config_cls) -> dict[str, str]:
-    """Map each ``RolloutConfig`` field to the ``config_cls`` field
-    :meth:`AsyncTrainingConfig.get_rollout_config` copies into it.
-
-    Derived from the two declarations rather than listed, so a knob added to both sides forwards
-    itself: the YAML surface spells a rollout knob ``rollout_<name>`` where the bare name would be
-    ambiguous (that spelling wins where both exist) and identically otherwise. ``RolloutConfig``
-    fields with no counterpart here are derived by the builder from other state.
-
-    Takes the config class as an argument because it is declared below this function.
-    """
-    declared = {f.name for f in fields(config_cls)}
-    return {
-        target.name: source
-        for target in fields(RolloutConfig)
-        for source in (target.name, f"rollout_{target.name}")
-        if source in declared
-    }
 
 
 @dataclass(frozen=True)
@@ -85,8 +69,8 @@ class ISMaskConfig:
             raise ValueError(f"isr_geo_band bounds must satisfy 0 < min < 1 < max, got [{lo}, {hi}]")
         if self.veto_min is not None and not 0 < self.veto_min < 1:
             raise ValueError(f"isr_veto_min must be in (0, 1), got {self.veto_min}")
-        if self.opsm_delta is not None and not (isfinite(self.opsm_delta) and self.opsm_delta > 0):
-            raise ValueError(f"isr_opsm_delta must be a finite number > 0 (nats), got {self.opsm_delta}")
+        if self.opsm_delta is not None:
+            require_positive(type(self).__name__, isr_opsm_delta=self.opsm_delta)
 
     @property
     def any_mask_active(self) -> bool:
@@ -101,8 +85,8 @@ class ISMaskConfig:
     @property
     def sums_sequence_logratio(self) -> bool:
         """Whether a stage reads the per-token log-ratio summed over a trajectory (the geometric band's
-        and OPSM's per-trajectory mean); the veto reads single tokens. The consumer the sampler-logprob preflight holds to a reference not
-        renormalized over the sampler's cut."""
+        and OPSM's per-trajectory mean); the veto reads single tokens. The sampler-logprob preflight
+        holds such a run to engine log-probs not renormalized over the sampler's cut."""
         return self.geo_band_min is not None or self.opsm_delta is not None
 
 
@@ -152,8 +136,8 @@ class AsyncTrainingConfig(AdvantageShapingArguments, GRPOEarlyStopArguments, Chu
 
     ray_address: str | None = field(default=None, metadata={"help": "Ray cluster address. None for local mode."})
 
-    rollout_backend: Literal["vllm", "sglang"] = field(
-        default="vllm",
+    rollout_backend: RolloutBackend = field(
+        default=VLLM_BACKEND,
         metadata={
             "help": "Inference engine serving rollouts and receiving weight updates. Both support "
             "generation, NCCL weight sync, `train_on_sampled_tokens` and `routing_replay: rollout`. "
@@ -524,8 +508,9 @@ class AsyncTrainingConfig(AdvantageShapingArguments, GRPOEarlyStopArguments, Chu
                 "(generation + tool execution + grading), unlike request_timeout which bounds a single "
                 "HTTP call. Without it a wedged tool/sandbox blocks its rank forever, and the other ranks "
                 "block behind it at the next collective. A timed-out episode is cancelled and counted in "
-                "episode/error_rate. The default sits at two thirds of the 30-min default NCCL watchdog "
-                "so a straggler is cancelled with ~10 min of margin; raise DIST_NCCL_TIMEOUT_MINUTES "
+                "episode/error_rate. The default sits at two thirds of the "
+                f"{DEFAULT_NCCL_TIMEOUT_MINUTES}-min default NCCL watchdog so a straggler is cancelled "
+                f"with ~{DEFAULT_NCCL_TIMEOUT_MINUTES // 3} min of margin; raise DIST_NCCL_TIMEOUT_MINUTES "
                 "before raising this."
             )
         },
@@ -579,12 +564,8 @@ class AsyncTrainingConfig(AdvantageShapingArguments, GRPOEarlyStopArguments, Chu
         # the knob: rollout_temperature divides the log-prob sweep (the trainer scores at the
         # sampling temperature, so a 0 is a ZeroDivisionError mid-step), rollout_max_tokens doubles
         # as the dr_grpo loss normalizer, and the deadlines are compared against wall-clock, where a
-        # non-positive one cancels every episode on entry and halts the run as an empty batch. A NaN
-        # passes every ordered comparison, so finiteness is checked first.
-        for name in POSITIVE_ROLLOUT_FIELDS:
-            value = getattr(self, name)
-            if not isfinite(value) or value <= 0:
-                raise ValueError(f"{name} must be a finite number > 0, got {value}")
+        # non-positive one cancels every episode on entry and halts the run as an empty batch.
+        require_positive(type(self).__name__, **{name: getattr(self, name) for name in POSITIVE_ROLLOUT_FIELDS})
         # Sent verbatim on the wire; outside these ranges the server rejects every rollout request
         # (SGLang's, the narrower of the two engines': it refuses top_k 0 and a penalty above 2).
         if not 0 < self.rollout_top_p <= 1:
@@ -622,10 +603,6 @@ class AsyncTrainingConfig(AdvantageShapingArguments, GRPOEarlyStopArguments, Chu
                 f"rollout_max_episode_tokens must be an int >= rollout_max_tokens ({self.rollout_max_tokens}), so "
                 f"one whole turn fits the episode, or null, got {self.rollout_max_episode_tokens!r}"
             )
-        if self.max_train_row_tokens is not None and (
-            isinstance(self.max_train_row_tokens, bool) or self.max_train_row_tokens < 1
-        ):
-            raise ValueError(f"max_train_row_tokens must be a positive int or null, got {self.max_train_row_tokens!r}")
         # A row is a turn's prompt plus its completion, and the completion alone may run to
         # rollout_max_tokens: a cap at or below it leaves out every turn that used its budget — a
         # length bias against long turns, not the memory bound the knob is.
@@ -690,8 +667,7 @@ class AsyncTrainingConfig(AdvantageShapingArguments, GRPOEarlyStopArguments, Chu
             for level, price in self.reasoning_price.items():
                 if isinstance(price, bool) or not isinstance(price, int | float) or not isfinite(price) or price < 0:
                     raise ValueError(f"reasoning_price[{level!r}] must be a finite number >= 0, got {price!r}")
-        if not (isfinite(self.reasoning_price_cap) and self.reasoning_price_cap > 0):
-            raise ValueError(f"reasoning_price_cap must be a finite positive number, got {self.reasoning_price_cap}")
+        require_positive(type(self).__name__, reasoning_price_cap=self.reasoning_price_cap)
         if not isfinite(self.reasoning_floor) or self.reasoning_floor < 0:
             raise ValueError(f"reasoning_floor must be a finite number >= 0 (0 = off), got {self.reasoning_floor}")
         penalty = self.turn_overlong_penalty
@@ -727,7 +703,7 @@ class AsyncTrainingConfig(AdvantageShapingArguments, GRPOEarlyStopArguments, Chu
         refused here are the ones whose point is the enforced cap: ``rollout_max_thinking_tokens`` is a
         cap and nothing else, and the overlong charge prices a turn against the cap the engine forced.
         """
-        if self.rollout_backend != "sglang":
+        if self.rollout_backend != SGLANG_BACKEND:
             return
         if self.rollout_max_thinking_tokens is not None:
             raise ValueError(
@@ -752,6 +728,24 @@ class AsyncTrainingConfig(AdvantageShapingArguments, GRPOEarlyStopArguments, Chu
         pauses a lone engine for its whole push, so with one server there is nothing to overlap against."""
         return self.enable_prefetch and len(self.get_server_urls()) > 1
 
+    @classmethod
+    def rollout_field_sources(cls) -> dict[str, str]:
+        """Map each ``RolloutConfig`` field to the field of this config :meth:`get_rollout_config`
+        copies into it.
+
+        Derived from the two declarations rather than listed, so a knob added to both sides forwards
+        itself: the YAML surface spells a rollout knob ``rollout_<name>`` where the bare name would be
+        ambiguous (that spelling wins where both exist) and identically otherwise. ``RolloutConfig``
+        fields with no counterpart here are derived by the builder from other state.
+        """
+        declared = {f.name for f in fields(cls)}
+        return {
+            target.name: source
+            for target in fields(RolloutConfig)
+            for source in (target.name, f"rollout_{target.name}")
+            if source in declared
+        }
+
     def get_rollout_config(
         self,
         stop_token_ids: list[int] | None = None,
@@ -767,7 +761,7 @@ class AsyncTrainingConfig(AdvantageShapingArguments, GRPOEarlyStopArguments, Chu
         default); an eval sampling under a training contract joins none and passes False."""
         if in_process_group:
             self._validate_timeouts_against_nccl_watchdog()
-        mirrored = {target: getattr(self, source) for target, source in rollout_field_sources(type(self)).items()}
+        mirrored = {target: getattr(self, source) for target, source in self.rollout_field_sources().items()}
         mirrored["chat_template_kwargs"] = dict(self.rollout_chat_template_kwargs)
         return RolloutConfig(
             **mirrored,

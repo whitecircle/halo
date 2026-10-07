@@ -12,7 +12,7 @@ import logging
 import torch.nn as nn
 
 from src.distributed.context_parallel.base_layer import HUB_FLASH_ATTN2_KERNEL
-from src.distributed.context_parallel.layers.registry import CP_SUPPORTED_ATTENTION_CLASSES, WRAPPER_CLASS_MAP
+from src.distributed.context_parallel.layers.registry import WRAPPER_CLASS_MAP
 from src.models.loading.config_levels import text_config
 from src.models.patches.attention import effective_attn_implementation
 
@@ -145,7 +145,7 @@ def validate_model_for_ulysses(model: nn.Module, cp_size: int) -> None:
     if wrapper_cls is None:
         raise UlyssesConfigError(
             f"Ulysses CP only supports specific attention architectures. "
-            f"Supported: {CP_SUPPORTED_ATTENTION_CLASSES}. "
+            f"Supported: {tuple(WRAPPER_CLASS_MAP)}. "
             f"Model type '{model_type}' does not appear to use a supported attention module."
         )
 

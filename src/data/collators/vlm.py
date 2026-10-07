@@ -12,13 +12,7 @@ from typing import Any
 import numpy as np
 import torch
 
-from src.data.collators.self_distill import (
-    SelfDistillTextCollator,
-    confidence_weights,
-    require_aligned_responses,
-    require_confidence_normalizer,
-    teacher_history,
-)
+from src.data.collators.self_distill import SelfDistillBranchMixin, require_aligned_responses
 from src.data.spans import (
     COLLATOR_SPAN_POLICY,
     LABEL_IGNORE_INDEX,
@@ -28,7 +22,7 @@ from src.data.spans import (
 )
 from src.data.vlm import (
     SEQUENCE_ALIGNED_VISION_KEYS,
-    VLM_OUTPUT_COLUMNS,
+    VLM_OUTPUT_FEATURES,
     get_image_token_ids,
     raise_if_over_length,
     render_vlm_text,
@@ -124,7 +118,7 @@ class PreprocessedVLMDataCollator:
     # The trainer's dataloader mixin unions these into HF's signature-column set. Without the
     # declaration, TRL's SFT signature list drops every stored column it does not name
     # (pixel_values_shape, attention_mask, ...) before collation, and the first batch crashes.
-    required_dataset_columns: tuple[str, ...] = VLM_OUTPUT_COLUMNS
+    required_dataset_columns: tuple[str, ...] = tuple(VLM_OUTPUT_FEATURES)
 
     def __init__(self, tokenizer, max_length: int = 2048):
         self.tokenizer = tokenizer
@@ -197,7 +191,7 @@ class PreprocessedVLMDataCollator:
         return batch
 
 
-class SelfDistillVLMDataCollator(VLMDataCollator):
+class SelfDistillVLMDataCollator(SelfDistillBranchMixin, VLMDataCollator):
     """VLM collator for SDPG-style self-distillation (arXiv:2606.04036).
 
     Emits the student batch plus a teacher branch (``teacher_*``) whose last user turn carries a
@@ -224,20 +218,9 @@ class SelfDistillVLMDataCollator(VLMDataCollator):
         **kwargs,
     ):
         super().__init__(*args, **kwargs)
-        require_confidence_normalizer(confidence_field, confidence_normalizer)
-        self.hint_template = hint_template
-        self.answer_field = answer_field
-        self.solution_field = solution_field
-        self.confidence_field = confidence_field
-        self.confidence_power = confidence_power
-        self.confidence_normalizer = confidence_normalizer
-
-    @property
-    def builds_teacher_branch(self) -> bool:
-        """Whether batches carry the ``teacher_*`` branch the OPD term reads."""
-        return self.hint_template is not None
-
-    cache_signature = SelfDistillTextCollator.cache_signature
+        self._init_self_distill_fields(
+            hint_template, answer_field, solution_field, confidence_field, confidence_power, confidence_normalizer
+        )
 
     def audit_row(self, example: dict[str, Any]) -> dict[str, Any]:
         """Refuse a row whose two branches would supervise different tokens; returns no columns.
@@ -258,16 +241,6 @@ class SelfDistillVLMDataCollator(VLMDataCollator):
             labels.append(self._build_labels(input_ids, torch.ones_like(input_ids)))
         require_aligned_responses({"labels": labels[0], "teacher_labels": labels[1]})
         return {}
-
-    def _teacher_history(self, history: list[dict[str, Any]], example: dict[str, Any]) -> list[dict[str, Any]]:
-        """``history`` with the row's privileged hint appended to its last user turn."""
-        return teacher_history(
-            history,
-            example,
-            hint_template=self.hint_template,
-            answer_field=self.answer_field,
-            solution_field=self.solution_field,
-        )
 
     def __call__(self, examples):
         batch = super().__call__(examples)
@@ -298,9 +271,5 @@ class SelfDistillVLMDataCollator(VLMDataCollator):
                     batch[f"teacher_{key}"] = teacher_batch[key]
             require_aligned_responses(batch)
 
-        if self.confidence_field is not None:
-            batch["confidence_weights"] = confidence_weights(
-                examples, self.confidence_field, self.confidence_power, self.confidence_normalizer
-            )
-
+        self._add_confidence_weights(batch, examples)
         return batch

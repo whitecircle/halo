@@ -59,9 +59,6 @@ from src.inference.response import FINISH_REASON_LENGTH, get_finish_reason
 
 logger = logging.getLogger(__name__)
 
-# Per-generation HTTP timeout (seconds). Generous by default: eval runs many episodes concurrently
-# against one endpoint, and a long reasoning turn queued behind them takes minutes to come back.
-DEFAULT_REQUEST_TIMEOUT_S = 180.0
 # ``info`` keys a persisted trajectory leaves out: the row payload; ``_``-prefixed grading stamps
 # (hidden tests, checker source) go with it.
 _SERIALIZED_INFO_DROP = frozenset({"context"})
@@ -72,6 +69,9 @@ _SERIALIZED_TURN_FIELDS = ("thinking_cap",)
 # carries no verdict. Stamped on the trajectory under the private key, which the serializer drops.
 GENERATION_ERROR_KEY = "generation_error"
 _DRIVER_FAULT_KEY = "_driver_fault"
+# The driver's per-episode telemetry (generations, completion tokens, tool calls), stamped on ``info`` once
+# the episode closes; a persisted trajectory carries it as ``eval_stats``.
+EVAL_STATS_KEY = "_eval_stats"
 
 
 def load_hf_split(dataset: str, config: str | None, split: str) -> Dataset:
@@ -113,7 +113,7 @@ def serialize_trajectory(traj: Trajectory | None) -> dict[str, Any] | None:
     if traj is None:
         return None
     info = {k: v for k, v in traj.info.items() if not k.startswith("_") and k not in _SERIALIZED_INFO_DROP}
-    info["eval_stats"] = traj.info.get("_eval_stats")
+    info["eval_stats"] = traj.info.get(EVAL_STATS_KEY)
     return {
         "messages": [_serialized_message(m) for m in traj.messages],
         "total_reward": traj.total_reward,
@@ -342,7 +342,7 @@ async def run_episode(
 
         effort.stamp(traj, generated)
         if traj is not None:
-            traj.info["_eval_stats"] = {
+            traj.info[EVAL_STATS_KEY] = {
                 "generations": len(finish_reasons),
                 "tool_calls": traj.info.get("total_tool_calls", 0),
                 "completion_tokens": generated,
@@ -402,7 +402,7 @@ async def collect_results(
                 async with semaphore:
                     traj = await run_episode(env, task, example["context"], client, rollout=rollout)
                 reward = traj.total_reward if traj and traj.done else 0.0
-                stats = (traj.info.get("_eval_stats") if traj else None) or {}
+                stats = (traj.info.get(EVAL_STATS_KEY) if traj else None) or {}
                 rec: dict[str, Any]
                 if traj is not None and _DRIVER_FAULT_KEY in traj.info:
                     # The episode stopped on the driver's fault, not the policy's: what it earned before

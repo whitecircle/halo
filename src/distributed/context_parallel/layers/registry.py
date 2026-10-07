@@ -18,6 +18,3 @@ def build_wrapper_class_map() -> dict[str, type[UlyssesAttentionBase]]:
 
 
 WRAPPER_CLASS_MAP = build_wrapper_class_map()
-
-# The attention classes CP can wrap: by construction, the ones a wrapper claims.
-CP_SUPPORTED_ATTENTION_CLASSES = tuple(WRAPPER_CLASS_MAP)

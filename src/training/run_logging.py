@@ -16,7 +16,7 @@ from src.distributed.filesystem import RUN_LOG_DIR_NAME
 from src.distributed.runtime import fs_aware_save_rank
 
 if TYPE_CHECKING:
-    # Importing TrainingArguments eagerly pulls the whole TRL/peft/pandas stack; the YAML parser
+    # Importing TrainingArguments eagerly pulls the peft/pandas/accelerate stack; the YAML parser
     # imports this module for install_log_tee alone.
     from transformers import TrainingArguments
 

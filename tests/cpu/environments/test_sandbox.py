@@ -27,16 +27,13 @@ import requests
 from src.environments.envs.tasks.coding.code_contests import CodeContestsEnvironment
 from src.environments.envs.tasks.coding.grading import run_solution_against_tests
 from src.environments.envs.tasks.coding.swe import SweEnvironment
-from src.environments.sandbox import base as sandbox_base
-from src.environments.sandbox.base import (
+from src.environments.sandbox.base import SANDBOX_DEFAULT_MEMORY_MB, SandboxInfraError, SandboxResult
+from src.environments.sandbox.local import (
     LOCAL_NPROC_LIMIT,
-    SANDBOX_DEFAULT_MEMORY_MB,
     ExecutionGate,
-    SandboxInfraError,
-    SandboxResult,
+    LocalSubprocessSandbox,
     _resolve_execution_slots,
 )
-from src.environments.sandbox.local import LocalSubprocessSandbox
 from src.environments.sandbox.remote import RemoteSandbox
 from src.environments.sandbox.repl import format_sandbox_repl_output, run_code_via_sandbox
 from src.environments.sandbox.resolve import resolve_sandbox
@@ -229,8 +226,8 @@ def test_execution_slots_default_to_the_cpus_the_process_may_use(monkeypatch):
     """A container cpuset leaves the process fewer CPUs than the host reports; sizing the gate off the
     host count oversubscribes the cores the runs actually get, and a correct solution then times out."""
     monkeypatch.delenv("HALO_SANDBOX_MAX_CONCURRENCY", raising=False)
-    monkeypatch.setattr(sandbox_base.os, "cpu_count", lambda: 240)
-    monkeypatch.setattr(sandbox_base.os, "sched_getaffinity", lambda pid: set(range(216)))
+    monkeypatch.setattr(os, "cpu_count", lambda: 240)
+    monkeypatch.setattr(os, "sched_getaffinity", lambda pid: set(range(216)))
     assert _resolve_execution_slots() == 216
 
 

@@ -48,6 +48,17 @@ _COMPLETION_TOKENS_MISSING_WARNED: set[str] = set()
 # call (a read of the Ray copy an actor process holds).
 PausedClock = Callable[[], float | Awaitable[float]]
 
+# Ray's plasma socket lives under the temp dir and AF_UNIX paths cap at ~107 bytes: a deep TMPDIR
+# overflows it and crashes ``ray.init``.
+MAX_RAY_TEMP_DIR_LEN = 40
+RAY_FALLBACK_TEMP_DIR = "/tmp/ray"
+
+# In-flight rollouts per actor when ``max_concurrent_rollouts`` is unset. Actors multiplex episodes on
+# one event loop, so the pool size is not the concurrency limit; this oversubscribes it enough to keep
+# the servers fed while a turn is being graded. Documented as the derived default in
+# ``agent-docs/reference/configuration-reference.md``.
+DEFAULT_ROLLOUTS_PER_WORKER = 4
+
 
 class RolloutHTTPError(RuntimeError):
     """A non-200 from the rollout server, carrying its status as data.
@@ -189,18 +200,6 @@ class _SyncExpiries:
     def record(self, exc: BaseException) -> None:
         if isinstance(exc, DeadlineExpired) and exc.paused_seconds > 0:
             self.count += 1
-
-
-# Ray's plasma socket lives under the temp dir and AF_UNIX paths cap at ~107 bytes: a deep TMPDIR
-# overflows it and crashes ``ray.init``.
-MAX_RAY_TEMP_DIR_LEN = 40
-RAY_FALLBACK_TEMP_DIR = "/tmp/ray"
-
-# In-flight rollouts per actor when ``max_concurrent_rollouts`` is unset. Actors multiplex episodes on
-# one event loop, so the pool size is not the concurrency limit; this oversubscribes it enough to keep
-# the servers fed while a turn is being graded. Documented as the derived default in
-# ``agent-docs/reference/configuration-reference.md``.
-DEFAULT_ROLLOUTS_PER_WORKER = 4
 
 
 def ray_init_kwargs(**overrides) -> dict:
@@ -394,7 +393,7 @@ class EnvironmentActor:
         return await generate_turn(
             partial(self._generate, client, server_url, messages, config, reasoning_effort, reasoning_budget),
             config,
-            retry_on=(asyncio.TimeoutError, aiohttp.ClientError, RuntimeError),
+            retry_on=(TimeoutError, aiohttp.ClientError, RuntimeError),
             giveup=_should_giveup,
             log_prefix=f"Actor {self.actor_id}",
             on_failure=sync_expiries.record,
@@ -597,21 +596,11 @@ class RolloutManager:
         # the actor there and waits indefinitely, which on the CPU-actor-tier topology
         # (agent-docs/infrastructure/ray.md) keeps every actor on the training node instead of
         # spilling. `_spill_on_unavailable` makes the affinity an actual preference.
-        try:
-            local_node_id = ray.get_runtime_context().get_node_id()
-            strategy = NodeAffinitySchedulingStrategy(node_id=local_node_id, soft=True, _spill_on_unavailable=True)
-        except (TypeError, ValueError) as exc:
-            # A Ray without the private spill argument (TypeError), or a node id it refuses (ValueError).
-            logger.warning(
-                "RolloutManager: node affinity unavailable (%s); the environment actors are placed anywhere in "
-                "the Ray cluster instead of preferring this node",
-                describe_exception(exc),
-            )
-            actor_cls, clock_cls = EnvironmentActor, _RemoteEnginePauseClock
-        else:
-            actor_cls = EnvironmentActor.options(scheduling_strategy=strategy)
-            clock_cls = _RemoteEnginePauseClock.options(scheduling_strategy=strategy)
-        self._actor_pause_clock = clock_cls.remote()
+        strategy = NodeAffinitySchedulingStrategy(
+            node_id=ray.get_runtime_context().get_node_id(), soft=True, _spill_on_unavailable=True
+        )
+        self._actor_pause_clock = _RemoteEnginePauseClock.options(scheduling_strategy=strategy).remote()
+        actor_cls = EnvironmentActor.options(scheduling_strategy=strategy)
         self._actors = [
             actor_cls.remote(i, self.env_type, self.env_config, self._actor_pause_clock)
             for i in range(self.num_workers)

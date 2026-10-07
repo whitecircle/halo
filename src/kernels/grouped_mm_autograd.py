@@ -43,9 +43,8 @@ class _GroupedMMFunction(Function):
 
     @staticmethod
     def forward(ctx, mat_a, mat_b, offs):
-        if offs is not None and offs.dtype != torch.int32:
+        if offs is not None:
             offs = offs.to(torch.int32)
-
         ctx.save_for_backward(mat_a, mat_b, offs)
         return F.grouped_mm(mat_a, mat_b, offs=offs)
 

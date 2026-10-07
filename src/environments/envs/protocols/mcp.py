@@ -160,7 +160,7 @@ class NativeMCPClientEnvironment(AsyncNativeToolUseEnvironment):
     def _discover_tools(self, list_tools_response) -> None:
         """Register the server's tools in native OpenAI format."""
         for mcp_tool in list_tools_response.tools:
-            self.registry.register(self._create_mcp_tool(mcp_tool.name, mcp_tool))
+            self.registry.register(self._create_mcp_tool(mcp_tool))
         logger.info(f"MCP connected: {len(self.registry)} tools discovered")
 
     async def connect(self) -> None:
@@ -177,10 +177,11 @@ class NativeMCPClientEnvironment(AsyncNativeToolUseEnvironment):
             raise
         self._conn_task = task
 
-    def _create_mcp_tool(self, name: str, mcp_tool: Any) -> NativeTool:
+    def _create_mcp_tool(self, mcp_tool: Any) -> NativeTool:
         """Create a NativeTool from an MCP tool definition."""
+        name = mcp_tool.name
         parameters = []
-        schema = getattr(mcp_tool, "inputSchema", {})
+        schema = mcp_tool.inputSchema
         properties = schema.get("properties", {})
         required = schema.get("required", [])
 

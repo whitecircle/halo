@@ -257,6 +257,19 @@ def test_an_episode_the_driver_lost_leaves_n_and_is_counted(tmp_path, monkeypatc
     assert (metrics["n"], metrics["s@1"], metrics["generation_errors"]) == (2, 0.5, 1)
 
 
+def test_an_episode_past_the_rebuilt_problems_refuses_the_file(tmp_path, monkeypatch):
+    """An index the rebuilt dataset does not reach means the dataset or its selection changed since the
+    run: re-grading on would score that episode unsolved with nothing saying why."""
+    payload = {"tests": [{"input": "", "output": "X"}], "checker": None, "time_limit": None}
+    monkeypatch.setattr(regrade_trajectories, "build_payloads", lambda meta: (payload,))
+    episode = {"type": "episode", "index": 3, "messages": [_submission("print('X')")], "generation_error": None}
+    path = tmp_path / "run.jsonl"
+    path.write_text("\n".join(json.dumps(r) for r in [{"type": "meta", **_FULL_META}, episode]) + "\n")
+
+    with pytest.raises(SystemExit, match=r"index\(es\) \[3\] address none of the 1 problems"):
+        regrade_trajectories.regrade_file(str(path), workers=1)
+
+
 def test_a_language_list_in_the_meta_rebuilds_the_choosing_environment():
     env = regrade_trajectories.resolve_environment("code_contests", {"language": ["python", "cpp"]})
     assert env.chooses_language and env.languages == ("python", "cpp")

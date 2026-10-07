@@ -2,7 +2,7 @@
 
 `NativeToolUseEnvironment` runs the OpenAI/vLLM function-calling protocol: the environment advertises its tools as schemas, the rollout server's `--tool-call-parser` extracts the model's calls, and each result comes back as a `tool` message the next turn conditions on. Serve the model with the parser its family needs. Without one vLLM rejects the request (400), and SGLang returns the calls as plain text, which the environment reads as a final answer, so every episode ends on its first turn.
 
-Three registry presets wrap a tool registry directly: `native_math` (`calculate`, `python`), `native_coding` (`python_repl`), `native_combined` (math, python, search, simulated files). `qa_search`, `exam_qa`, `swe`, `code_contests`, `codeforces` and `mcp` are subclasses or factory presets over the same protocol, so everything on this page applies to them.
+Three registry presets wrap a tool registry directly: `native_math` (`calculate`, `python`), `native_coding` (`python_repl`), `native_combined` (math, python, search, simulated files; `search_backend` names the search backend as on [`qa_search`](benchmarks.md#configuration)). `qa_search`, `exam_qa`, `swe`, `code_contests`, `codeforces` and `mcp` are subclasses or factory presets over the same protocol, so everything on this page applies to them.
 
 ## Configuration
 

@@ -21,9 +21,19 @@ DATA_FILE_BUILDERS = {
 # second spelling would break that ordering.
 METADATA_FILE = "metadata.json"
 
+# The split pair every trainer reads (``ds["train"]``, ``ds["test"]``): what a loader renders and
+# checks, and what a preprocessed artifact writes.
+TRAIN_TEST_SPLITS = ("train", "test")
+
 # A source's held-out split, in lookup order: one that ships no ``test`` split evaluates on (and
 # bakes as ``test``) its ``validation`` split.
 EVAL_SPLIT_NAMES = ("test", "validation")
+
+
+def data_file_builder(path: str) -> str | None:
+    """The ``datasets`` builder that reads ``path`` as a data file (:data:`DATA_FILE_BUILDERS`), or
+    ``None`` when its extension names none."""
+    return next((builder for ext, builder in DATA_FILE_BUILDERS.items() if path.endswith(ext)), None)
 
 
 def eval_split_name(splits) -> str | None:
@@ -82,7 +92,7 @@ def parse_dataset_source(path: str) -> tuple[str, str | None, str]:
     if path.startswith("./") or path.startswith("../"):
         return ("local", None, path)
 
-    if path.endswith(tuple(DATA_FILE_BUILDERS)):
+    if data_file_builder(path) is not None:
         return ("local", None, path)
 
     if "/" in path:

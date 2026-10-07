@@ -8,15 +8,10 @@ return those facts in different places. Transport and the episode loop belong to
 import logging
 from typing import Any, get_args, get_type_hints
 
-from src.configs.rollout_config import REASONING_BUDGET_TEMPLATE_VAR, RolloutConfig
+from src.configs.rollout_config import REASONING_BUDGET_TEMPLATE_VAR, SGLANG_BACKEND, VLLM_BACKEND, RolloutConfig
 from src.log import warn_once
 
 logger = logging.getLogger(__name__)
-
-# The ``rollout_backend`` spellings, one home for every consumer that branches on the engine without
-# needing its weight-sync client (whose ``BACKEND_KEY`` carries the same value).
-VLLM_BACKEND = "vllm"
-SGLANG_BACKEND = "sglang"
 
 # Backends already warned that a per-effort thinking budget reaches no engine field (once per process).
 _THINKING_BUDGET_UNENFORCED_WARNED: set[str] = set()

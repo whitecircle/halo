@@ -73,11 +73,9 @@ LOAD_CORE = "src/models/loading/"
 EAGER_LOADERS = frozenset(
     {
         ("scripts/training/embedding.py", "build_sentence_transformer"),
-        ("src/distributed/context_parallel/loading.py", "load_model_for_cp"),
-        ("src/distributed/expert_parallel/loading.py", "_load_ep_model_huggingface"),
+        ("src/distributed/expert_parallel/loading.py", "load_through_cpu"),
         ("src/distributed/loading/frozen_models.py", "load_frozen_auxiliary_model"),
         ("src/distributed/loading/model_loading.py", "_from_pretrained_on_local_gpu"),
-        ("src/distributed/loading/model_loading.py", "_sequential_load_to_cuda"),
         ("src/distributed/loading/model_loading.py", "load_model_from_pretrained"),
     }
 )

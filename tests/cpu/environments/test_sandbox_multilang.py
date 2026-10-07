@@ -42,7 +42,7 @@ import pytest
 from src.environments.sandbox import base as _base
 from src.environments.sandbox import bubblewrap as _bubblewrap
 from src.environments.sandbox import local as local_sandbox
-from src.environments.sandbox.base import LANGUAGES, resolve_language, supported_languages
+from src.environments.sandbox.base import LANGUAGES, resolve_language
 from src.environments.sandbox.bubblewrap import BubblewrapSandbox
 from src.environments.sandbox.local import TAMPERED_WORKDIR_RETURNCODE, LocalSubprocessSandbox
 from src.environments.sandbox.remote import RemoteSandbox
@@ -99,7 +99,7 @@ def test_language_registry_resolves_aliases():
     assert resolve_language("sh").name == "bash"
     assert resolve_language("SHELL").name == "bash"  # case-insensitive
     assert resolve_language("ruby") is None
-    assert set(supported_languages()) == set(LANGUAGES.keys()) == {"python", "bash", "cpp", "c"}
+    assert set(LANGUAGES) == {"python", "bash", "cpp", "c"}
 
 
 def test_language_compiled_flag():

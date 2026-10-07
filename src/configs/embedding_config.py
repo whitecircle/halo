@@ -5,7 +5,7 @@ from typing import Literal
 
 from sentence_transformers import SentenceTransformerTrainingArguments
 
-from src.args.validation import RangeValidatedConfig
+from src.args.validation import RangeValidatedConfig, require_positive
 
 
 @dataclass
@@ -110,8 +110,7 @@ class EmbeddingConfig(RangeValidatedConfig, SentenceTransformerTrainingArguments
 
     def _validate_ranges(self) -> None:
         super()._validate_ranges()
-        if self.loss_scale <= 0:
-            raise ValueError(f"loss_scale must be > 0, got {self.loss_scale}")
+        require_positive(type(self).__name__, loss_scale=self.loss_scale)
         if self.cached_mnrl_mini_batch_size <= 0:
             raise ValueError(f"cached_mnrl_mini_batch_size must be > 0, got {self.cached_mnrl_mini_batch_size}")
         if self.matryoshka_dimensions is None and self.matryoshka_weights is not None:

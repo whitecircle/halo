@@ -49,21 +49,15 @@ logger = logging.getLogger(__name__)
 # language model (``model.embed_tokens.weight``; ``model.language_model.embed_tokens.weight`` on the
 # multimodal ones).
 DEFAULT_PARAM_SUFFIX = "embed_tokens.weight"
-# Transport verdicts, keyed by the prefix NCCL prints after ``via`` on each channel line.
-VERDICT_EFA = "efa"
-VERDICT_IB = "ib"
-VERDICT_SOCKET = "socket"
-VERDICT_P2P = "p2p"
-VERDICT_SHM = "shm"
+# Transport verdict → the prefix NCCL prints after ``via`` on a channel line of that transport.
+TRANSPORT_PREFIXES = {
+    "efa": "NET/Libfabric",
+    "ib": "NET/IB",
+    "socket": "NET/Socket",
+    "p2p": "P2P/",
+    "shm": "SHM",
+}
 VERDICT_UNKNOWN = "unknown"
-VERDICTS = (VERDICT_EFA, VERDICT_IB, VERDICT_SOCKET, VERDICT_P2P, VERDICT_SHM)
-_VERDICT_PREFIXES = (
-    ("NET/Libfabric", VERDICT_EFA),
-    ("NET/IB", VERDICT_IB),
-    ("NET/Socket", VERDICT_SOCKET),
-    ("P2P/", VERDICT_P2P),
-    ("SHM", VERDICT_SHM),
-)
 _NCCL_DEBUG_ENV = {"NCCL_DEBUG": "INFO", "NCCL_DEBUG_SUBSYS": "INIT,NET,P2P"}
 _LOG_STEM = "nccl-weight-sync-preflight"
 # ``NET/<net>/<device>[(proxy rank)][/GDRDMA]``, ``P2P/<kind>[/<mode>...][ pointer]`` or ``SHM[/<mode>...]``.
@@ -106,7 +100,7 @@ class TransportReport:
     def verdict(self) -> str:
         """One word for the data path: the first channel transport's family."""
         for transport in self.transports:
-            for prefix, verdict in _VERDICT_PREFIXES:
+            for verdict, prefix in TRANSPORT_PREFIXES.items():
                 if transport.startswith(prefix):
                     return verdict
         return VERDICT_UNKNOWN
@@ -171,7 +165,10 @@ def _checkpoint_file(model_id: str, filename: str, revision: str | None) -> str:
     try:
         return hf_hub_download(model_id, filename, revision=revision)
     except LocalEntryNotFoundError:
-        raise  # not in the cache and the Hub unreachable: not the same as the file not existing
+        # Kept apart from EntryNotFoundError, which it subclasses: offline it says the file is not
+        # cached, not that the repo lacks it. Still a FileNotFoundError, so an uncached index falls
+        # through to the single-file layout, the only one an offline single-file checkpoint has.
+        raise
     except EntryNotFoundError as e:
         raise FileNotFoundError(f"{model_id}/{filename}") from e
     except (HFValidationError, RepositoryNotFoundError) as e:

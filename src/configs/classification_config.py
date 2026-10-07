@@ -5,11 +5,12 @@ from typing import Literal
 
 from transformers import TrainingArguments
 
-from src.args.validation import RangeValidatedConfig
+from src.args.mixins import DatasetNumProcArguments
+from src.args.validation import RangeValidatedConfig, require_finite
 
 
 @dataclass
-class ClassificationConfig(RangeValidatedConfig, TrainingArguments):
+class ClassificationConfig(DatasetNumProcArguments, RangeValidatedConfig, TrainingArguments):
     r"""TrainingArguments for [`ClassificationTrainer`]; per-field docs are in each field's ``help`` metadata."""
 
     max_length: int | None = field(
@@ -23,10 +24,6 @@ class ClassificationConfig(RangeValidatedConfig, TrainingArguments):
     disable_dropout: bool = field(
         default=True,
         metadata={"help": "Whether to disable dropout in the model."},
-    )
-    dataset_num_proc: int | None = field(
-        default=None,
-        metadata={"help": "Number of processes to use for processing the dataset."},
     )
     remove_unused_columns: bool = field(
         default=False,
@@ -116,6 +113,7 @@ class ClassificationConfig(RangeValidatedConfig, TrainingArguments):
 
     def _validate_ranges(self) -> None:
         super()._validate_ranges()
+        require_finite(type(self).__name__, focal_gamma=self.focal_gamma)
         if self.focal_gamma < 0:
             raise ValueError(f"focal_gamma must be >= 0, got {self.focal_gamma}")
         if not (0.0 <= self.label_smoothing < 1.0):

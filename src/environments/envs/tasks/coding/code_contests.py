@@ -23,6 +23,7 @@ from src.environments.base import (
     TRUNCATION_MARKER,
     EpisodeGrade,
     Trajectory,
+    require_count,
     require_magnitudes,
 )
 from src.environments.envs.protocols.native import NativeToolUseEnvironment
@@ -30,7 +31,6 @@ from src.environments.envs.tasks.coding.comments import comment_chars, reasoning
 from src.environments.envs.tasks.coding.grading import (
     DEFAULT_MAX_OUTPUT_SIZE,
     VERDICT_DETAIL_OUTCOME,
-    VERDICT_DETAILS,
     GradeResult,
     GradingSpec,
     grade_solution,
@@ -55,14 +55,6 @@ from src.environments.tools.definitions import (
 
 logger = logging.getLogger(__name__)
 
-# Effort level -> profile. ``thinking_tokens`` is the level's per-turn CoT budget; a config adds the
-# interaction budgets (``max_submissions``,
-# ``max_test_calls``) so effort buys iteration too.
-REASONING_EFFORT_PROFILES: dict[str, dict[str, int | float]] = {
-    "low": {"thinking_tokens": 4096},
-    "medium": {"thinking_tokens": 8192},
-    "high": {"thinking_tokens": 16384},
-}
 DEFAULT_REASONING_EFFORT = "medium"
 
 # The knobs an evaluation protocol may pin, at the value a run takes when neither its config nor its
@@ -241,7 +233,13 @@ class CodeContestsEnvironment(NativeToolUseEnvironment):
         "now with the best solution you have."
     )
 
-    REASONING_EFFORT_PROFILES = REASONING_EFFORT_PROFILES
+    # Effort level -> profile. ``thinking_tokens`` is the level's per-turn CoT budget; a config adds the
+    # interaction budgets (``max_submissions``, ``max_test_calls``) so effort buys iteration too.
+    REASONING_EFFORT_PROFILES = {
+        "low": {"thinking_tokens": 4096},
+        "medium": {"thinking_tokens": 8192},
+        "high": {"thinking_tokens": 16384},
+    }
     # The task's own profile keys over the base's: the per-episode interaction budgets.
     EFFORT_PROFILE_KEY_MINIMA = {"max_submissions": 1, "max_test_calls": 0}
 
@@ -296,22 +294,9 @@ class CodeContestsEnvironment(NativeToolUseEnvironment):
         max_submissions, max_test_calls = knobs["max_submissions"], knobs["max_test_calls"]
         self.eval_protocol = eval_protocol
         specs = self._resolve_languages(language)
-        if output_comparison not in ("exact", "tokens"):
-            raise ValueError(f"output_comparison must be 'exact' or 'tokens', got {output_comparison!r}")
-        if verdict_detail not in VERDICT_DETAILS:
-            raise ValueError(f"verdict_detail must be one of {VERDICT_DETAILS}, got {verdict_detail!r}")
-        if max_submissions < 1:
-            raise ValueError(f"max_submissions must be >= 1, got {max_submissions}")
-        if max_test_calls < 0:
-            raise ValueError(f"max_test_calls must be >= 0, got {max_test_calls}")
-        if (
-            isinstance(max_starved_run_refunds, bool)
-            or not isinstance(max_starved_run_refunds, int)
-            or max_starved_run_refunds < 0
-        ):
-            raise ValueError(f"max_starved_run_refunds must be an int >= 0, got {max_starved_run_refunds!r}")
-        if max_grading_seconds is not None and max_grading_seconds <= 0:
-            raise ValueError(f"max_grading_seconds must be > 0 or None, got {max_grading_seconds}")
+        require_count("max_submissions", max_submissions, 1)
+        require_count("max_test_calls", max_test_calls, 0)
+        require_count("max_starved_run_refunds", max_starved_run_refunds, 0)
         if max_time_limit < timeout_per_test:
             # The prompt promises an interpreted solution at least timeout_per_test per test; a clamp
             # below it would grade under a contract the model was never told.

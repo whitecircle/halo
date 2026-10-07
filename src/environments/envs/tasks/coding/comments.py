@@ -5,7 +5,7 @@ the guard reads off that count."""
 import ast
 import warnings
 
-from src.environments.sandbox.base import resolve_language
+from src.environments.sandbox.base import require_language
 
 # A program whose comments reach this many characters and outweigh its code carries the reasoning the
 # thinking cap closed, not documentation.
@@ -21,9 +21,7 @@ def comment_chars(code: str, language: str) -> tuple[int, int]:
     syntax; a language the registry does not hold raises): line comments wherever they start, block
     comments anywhere, string literals skipped, a C-family ``#if 0`` block counted whole, and under
     Python a bare string statement (a docstring) counted as a comment."""
-    spec = resolve_language(language)
-    if spec is None:
-        raise ValueError(f"no comment syntax for language {language!r}: it is not in the sandbox's language registry")
+    spec = require_language(language)
     comments = _scan(code, spec.line_comment, spec.block_comment)
     if spec.name == "python":
         comments += _bare_string_chars(code)

@@ -16,7 +16,6 @@ Output JSONL format:
 """
 
 import asyncio
-import json
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
@@ -30,6 +29,7 @@ from scripts.inference._common import reject_empty_results, run_async_cli
 from scripts.inference.reward_model._common import (
     OverlongConversationError,
     TruncatedGenerationError,
+    append_jsonl_record,
     boot_scoring_run,
     build_generation_parser,
     build_output_path,
@@ -53,7 +53,6 @@ async def generate_and_evaluate(
     row: pd.Series,
     args,
     semaphore: asyncio.Semaphore,
-    write_lock: asyncio.Lock,
     output_path: Path,
     executor: ThreadPoolExecutor,
     rm_tokenizer,
@@ -94,9 +93,7 @@ async def generate_and_evaluate(
             if correct_answer is not None:
                 record["target_answer"] = correct_answer
 
-            async with write_lock:
-                with open(output_path, "a", encoding="utf-8") as f:
-                    f.write(json.dumps(record, ensure_ascii=False) + "\n")
+            append_jsonl_record(output_path, record)
 
             responses.append(response["content"])
             rewards.append(reward)
@@ -183,7 +180,6 @@ async def main():
         print(f"Processing {len(pending)} prompts...")
 
         semaphore = asyncio.Semaphore(args.n_parallel)
-        write_lock = asyncio.Lock()
         executor = ThreadPoolExecutor(max_workers=1)
 
         try:
@@ -193,7 +189,6 @@ async def main():
                     row,
                     args,
                     semaphore,
-                    write_lock,
                     output_path,
                     executor,
                     rm_tokenizer,

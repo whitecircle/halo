@@ -28,6 +28,7 @@ from datasets import Dataset
 from safetensors.torch import load_file
 from torch.distributed.tensor import DTensor
 
+from src.checkpoint.format import ADAPTER_SAFETENSORS_FILE
 from src.distributed.expert_parallel.config import ExpertLoraSpec
 from src.distributed.fsdp import reshard_fsdp2_modules
 from src.distributed.loading.model_loading import load_distributed_model
@@ -509,7 +510,7 @@ def adapter_file_agreement(restored: dict[str, torch.Tensor], checkpoint: str) -
     would conflate the save's cast with the restore. PEFT drops its active-adapter infix on the way
     to disk, so the attention keys are matched with it stripped.
     """
-    path = os.path.join(checkpoint, "adapter_model.safetensors")
+    path = os.path.join(checkpoint, ADAPTER_SAFETENSORS_FILE)
     if not os.path.isfile(path):
         return 0, 0, 0
     saved = load_file(path)

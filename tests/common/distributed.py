@@ -97,16 +97,14 @@ def init_distributed() -> tuple[int, int, int]:
     # ``from_pretrained`` directly would otherwise leave the CuTe DSL with the cache enabled but no
     # directory and re-JIT every kernel on every run, past any suite timeout.
     ensure_fa4_kernel_cache_env()
-    # CUDA_DEVICE_MAX_CONNECTIONS=1 (serialize device work onto one hardware queue) is what
-    # keeps EP with more than one dispatch group per NVLink domain (e.g. ep_size=2 on 8 GPUs) from
-    # deadlocking the DeepEP combine barrier against FSDP2's NCCL collectives. It must already be
-    # in the process environment (the image ENV / Makefile DOCKER_RUN set it): the driver
-    # latches it at cuInit, which ``import deep_ep`` triggers before this runs, so a
-    # write here would be a no-op. Warn (rank 0) if a launch is missing it.
+    # CUDA_DEVICE_MAX_CONNECTIONS=1 is the setting the EP suites are validated with. It must already
+    # be in the process environment (the image ENV / Makefile DOCKER_RUN set it): the driver latches
+    # it at cuInit, which ``import deep_ep`` triggers before this runs, so a write here would be a
+    # no-op. Warn (rank 0) if a launch is missing it.
     if os.environ.get("CUDA_DEVICE_MAX_CONNECTIONS") != "1" and os.environ.get("RANK", "0") == "0":
         print(
             "[init_distributed] WARNING: CUDA_DEVICE_MAX_CONNECTIONS != 1 "
-            f"({os.environ.get('CUDA_DEVICE_MAX_CONNECTIONS')!r}); multi-group EP may deadlock.",
+            f"({os.environ.get('CUDA_DEVICE_MAX_CONNECTIONS')!r}); the EP suites are validated with 1.",
             flush=True,
         )
     local_rank = int(os.environ.get("LOCAL_RANK", os.environ.get("RANK", "0")))

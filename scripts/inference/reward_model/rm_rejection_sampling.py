@@ -28,7 +28,6 @@ Output formats:
 """
 
 import asyncio
-import json
 from collections.abc import Sequence
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
@@ -40,6 +39,7 @@ from scripts.inference._common import reject_empty_results, run_async_cli
 from scripts.inference.reward_model._common import (
     OverlongConversationError,
     TruncatedGenerationError,
+    append_jsonl_record,
     boot_scoring_run,
     build_generation_parser,
     build_output_path,
@@ -60,7 +60,7 @@ def parse_args():
         "--output_format",
         type=str,
         default="preference",
-        choices=["preference", "offline_grpo"],
+        choices=list(OUTPUT_FORMATS),
         help="Output format: preference (DPO/SMPO) or offline_grpo (default: preference)",
     )
     parser.add_argument("--rm_max_batch_size", type=int, default=8)
@@ -209,6 +209,13 @@ def build_offline_grpo_result(
     return record
 
 
+# ``--output_format`` -> the record builder and the output file's suffix.
+OUTPUT_FORMATS = {
+    "preference": (build_preference_result, "rs"),
+    "offline_grpo": (build_offline_grpo_result, "offline_grpo"),
+}
+
+
 async def score_and_select(
     scoring_queue: asyncio.Queue,
     result_queue: asyncio.Queue,
@@ -220,7 +227,7 @@ async def score_and_select(
     stats: dict,
 ):
     """Score hypotheses and build output record."""
-    build_fn = build_offline_grpo_result if args.output_format == "offline_grpo" else build_preference_result
+    build_fn, _ = OUTPUT_FORMATS[args.output_format]
 
     while True:
         # Outside the try: the cancellation that stops this worker arrives here, and a task_done() in
@@ -258,16 +265,13 @@ async def score_and_select(
 async def save_results(
     result_queue: asyncio.Queue,
     output_path: Path,
-    write_lock: asyncio.Lock,
     stats: dict,
 ):
     """Persist results to JSONL file."""
     while True:
         result = await result_queue.get()
         try:
-            async with write_lock:
-                with open(output_path, "a", encoding="utf-8") as f:
-                    f.write(json.dumps(result, ensure_ascii=False) + "\n")
+            append_jsonl_record(output_path, result)
             stats["written"] += 1
         except Exception as e:
             # A write failure is not row-local: ENOSPC, a read-only mount and a deleted output
@@ -303,7 +307,7 @@ async def main():
     client, rm_tokenizer, rm_model, rm_device = boot_scoring_run(args)
 
     Path(args.output_folder).mkdir(parents=True, exist_ok=True)
-    suffix = "offline_grpo" if args.output_format == "offline_grpo" else "rs"
+    _, suffix = OUTPUT_FORMATS[args.output_format]
     output_path = build_output_path(args.output_folder, args.prompts_source, args.model, suffix)
 
     df = load_prompts_dataframe(args)
@@ -322,7 +326,6 @@ async def main():
     scoring_queue = asyncio.Queue()
     result_queue = asyncio.Queue()
     semaphore = asyncio.Semaphore(args.n_parallel)
-    write_lock = asyncio.Lock()
     executor = ThreadPoolExecutor(max_workers=1)
 
     stats = {
@@ -346,7 +349,7 @@ async def main():
             stats,
         )
     )
-    saving_task = asyncio.create_task(save_results(result_queue, output_path, write_lock, stats))
+    saving_task = asyncio.create_task(save_results(result_queue, output_path, stats))
     try:
         tasks = [
             generate_hypotheses(client, row, args, semaphore, scoring_queue, stats) for _, row in pending.iterrows()

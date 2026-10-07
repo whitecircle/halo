@@ -62,7 +62,6 @@ if IDLE * (M + P - 1) != (P - 1) * SLOTS:
     raise RuntimeError("simulated bubble disagrees with (p-1)/(m+p-1)")
 
 fig, ax = plt.subplots(figsize=(12.0, 4.9))
-fig.patch.set_facecolor(BG)
 ax.set_xlim(-1.75, SLOTS + 0.15)
 ax.set_ylim(-1.95, P + 1.8)
 ax.axis("off")
@@ -158,5 +157,3 @@ ax.text(
 
 plt.tight_layout()
 save(plt.gcf(), "pp_bubble")
-plt.close()
-print("✓ pp_bubble.png")

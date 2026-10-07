@@ -35,6 +35,7 @@ from src.configs.classification_config import ClassificationConfig
 from src.configs.smpo_config import SmoothMarginPOConfig
 from src.distributed.parallelism_config import ParallelismConfig
 from src.distributed.runtime import barrier
+from src.distributed.tensor_parallel.state_dict import input_embeddings_tp_sharded
 from src.models.loading.tokenizer_setup import setup_model_and_tokenizer
 from src.trainers.preference.dpo import DistributedDPOTrainer
 from src.trainers.preference.kto import DistributedKTOTrainer
@@ -267,7 +268,9 @@ def run(ctx) -> dict:
     # Through the seam the training scripts run (apply_max_length → setup_model_and_tokenizer),
     # never a hand-written config.pad_token_id: the two seq-cls heads pool against that id, so
     # recording it here by hand would keep this test green through a regression in the sync.
-    tokenizer = setup_model_and_tokenizer(CommonScriptArguments(), model, tokenizer, MAXLEN)
+    tokenizer = setup_model_and_tokenizer(
+        CommonScriptArguments(), model, tokenizer, MAXLEN, embeddings_sharded=input_embeddings_tp_sharded
+    )
 
     parallelism_config = ParallelismConfig()
     trainer = _build_trainer(

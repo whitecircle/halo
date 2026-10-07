@@ -109,7 +109,6 @@ xs = [m for m, _ in DATA]
 ys = [e for _, e in DATA]
 
 fig, ax = plt.subplots(figsize=(8.4, 5.6))
-fig.patch.set_facecolor(BG)
 ax.set_xlim(0, 8300)
 ax.set_ylim(0, 106)
 
@@ -185,5 +184,3 @@ ax.tick_params(colors=INK2)
 
 plt.tight_layout()
 save(plt.gcf(), "tile_quantization")
-plt.close()
-print("✓ tile_quantization.png")

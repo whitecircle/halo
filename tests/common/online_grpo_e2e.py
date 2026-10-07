@@ -230,8 +230,7 @@ def _release(trainer) -> None:
     frees the trainer-side group port and drops the server's weight-transfer engine, and phase 2
     rebinds both.
     """
-    if hasattr(trainer, "cleanup_ep"):
-        trainer.cleanup_ep()
+    trainer.cleanup_ep()
     if trainer.accelerator.is_main_process:
         trainer.vllm_generation.vllm_client.close_communicator()
     cleanup_memory()

@@ -88,19 +88,15 @@ class DistributedSFTTrainer(DistributedTrainerMixin, SFTTrainer):
                             "processing_class passed to the trainer has none. Set one (commonly the "
                             "EOS token) rather than padding with vocabulary token 0."
                         )
-                    for key in ("input_ids", "labels", "attention_mask", "position_ids"):
-                        if key not in inputs:
-                            continue
-                        t = inputs[key]
-                        if key == "labels":
-                            fill = LABEL_IGNORE_INDEX
-                        elif key == "attention_mask":
-                            fill = 0
-                        elif key == "input_ids":
-                            fill = pad_token_id
-                        else:
-                            fill = 0
-                        inputs[key] = torch.nn.functional.pad(t, (0, pad_len), value=fill)
+                    fills = {
+                        "input_ids": pad_token_id,
+                        "labels": LABEL_IGNORE_INDEX,
+                        "attention_mask": 0,
+                        "position_ids": 0,
+                    }
+                    for key, fill in fills.items():
+                        if key in inputs:
+                            inputs[key] = torch.nn.functional.pad(inputs[key], (0, pad_len), value=fill)
                     full_labels = inputs.get("labels")
                     full_attention_mask = inputs.get("attention_mask")
 

@@ -177,6 +177,21 @@ def select_gathered_chunks(tensor: torch.Tensor, keep: Sequence[int], world_size
 
 
 @contextlib.contextmanager
+def _instance_override(obj, name: str, value):
+    """Shadow ``obj.name`` with ``value`` for the block, then restore exactly what ``obj``'s instance
+    ``__dict__`` held: the earlier instance attribute, or none, so the class attribute shows again."""
+    saved = obj.__dict__.get(name, _UNSET)
+    setattr(obj, name, value)
+    try:
+        yield
+    finally:
+        if saved is _UNSET:
+            delattr(obj, name)
+        else:
+            setattr(obj, name, saved)
+
+
+@contextlib.contextmanager
 def dp_scoped_gather(accelerator, keep: Sequence[int], world_size: int):
     """Bind ``accelerator.gather`` to keep one chunk per DP rank for the duration of the block.
 
@@ -185,21 +200,14 @@ def dp_scoped_gather(accelerator, keep: Sequence[int], world_size: int):
     ``dp_size == world_size``.
     """
     original = accelerator.gather
-    saved = accelerator.__dict__.get("gather", _UNSET)
 
     def _gather(input_data):
         return recursively_apply(
             partial(select_gathered_chunks, keep=keep, world_size=world_size), original(input_data)
         )
 
-    accelerator.gather = _gather
-    try:
+    with _instance_override(accelerator, "gather", _gather):
         yield
-    finally:
-        if saved is _UNSET:
-            del accelerator.gather
-        else:
-            accelerator.gather = saved
 
 
 def set_sampler_epoch(dataloader: DataLoader, epoch: int) -> int:
@@ -584,18 +592,13 @@ class DataParallelDataLoaderMixin:
         def _dp_prepare_data_loader(data_loader, device_placement=None, slice_fn_for_dispatch=None):
             return self._prepare_dataloader(data_loader)
 
-        saved = accelerator.__dict__.get("prepare_data_loader", _UNSET)
-        accelerator.prepare_data_loader = _dp_prepare_data_loader
-        try:
-            with dp_scoped_gather(
+        with (
+            _instance_override(accelerator, "prepare_data_loader", _dp_prepare_data_loader),
+            dp_scoped_gather(
                 accelerator, dp_representative_ranks(dp_rank_by_global_rank), len(dp_rank_by_global_rank)
-            ):
-                yield
-        finally:
-            if saved is _UNSET:
-                delattr(accelerator, "prepare_data_loader")
-            else:
-                accelerator.prepare_data_loader = saved
+            ),
+        ):
+            yield
 
     def eval_split_rows(self, num_rows: int) -> int:
         """How many of this rank's ``num_rows`` batch rows are the eval split's own; the rest pad it.

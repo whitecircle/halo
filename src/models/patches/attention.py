@@ -31,18 +31,14 @@ from src.models.attention_geometry import (
     resolve_head_dim,
     resolve_num_key_value_heads,
 )
-from src.models.loading.config_levels import set_config_field_run_scoped, text_config
+from src.models.loading.config_levels import model_type_matches, set_config_field_run_scoped, text_config
+from src.models.segment_markers import GDN_MODEL_TYPE_PREFIXES
 
 logger = get_logger(__name__)
 
 # Varlen backends consume cu_seqlens from packed position_ids. Dense backends isolate packed
 # documents only where the model plumbs position_ids into its mask — see agent-docs/data/collators.md.
 VARLEN_ATTN_IMPLEMENTATIONS = ("flash_attention_2", "flash_attention_3", "flash_attention_4")
-
-# Families interleaving GatedDeltaNet (linear-attention) layers with softmax attention. Prefixes
-# rather than exact spellings, so text-tower variants (``qwen3_5_moe_text``) match; shared by the
-# segment-marker gate (``src/models/segment_markers.py``) and the FA4 backward gate below.
-GDN_MODEL_TYPE_PREFIXES = ("qwen3_5", "qwen3_next")
 
 # The two spellings a flash kernel gives the learnable-sink argument (FA3's ``s_aux``, FA4's
 # ``learnable_sink``). transformers keys sink support off exactly these two names; the second is its
@@ -347,15 +343,6 @@ def effective_attn_implementation(model_config) -> str | None:
     )
 
 
-def model_type_matches(model_config, *prefixes: str) -> bool:
-    """Whether ``model_type`` (top-level or decoder-level) starts with any of ``prefixes``."""
-    candidates = (
-        getattr(model_config, "model_type", "") or "",
-        getattr(text_config(model_config), "model_type", "") or "",
-    )
-    return any(mt.startswith(prefixes) for mt in candidates if mt)
-
-
 def model_has_sinks(model_config) -> bool:
     """Whether this architecture's sinks constrain the attention implementation.
 
@@ -381,16 +368,6 @@ def _model_is_deepseek_v4(model_config) -> bool:
     return model_type_matches(model_config, "deepseek_v4")
 
 
-def model_is_mistral4(model_config) -> bool:
-    """Whether this is Mistral4 (MLA + llama-4 attention scaling)."""
-    return model_type_matches(model_config, "mistral4")
-
-
-def model_is_zaya(model_config) -> bool:
-    """Whether this is Zaya (CCA Conv1d attention, EDA router, native balancing biases)."""
-    return model_type_matches(model_config, "zaya")
-
-
 def model_fa4_backward_nan_prone(model_config) -> bool:
     """Whether the FA4 backward emits NaN gradients for this model on Blackwell.
 
@@ -409,8 +386,9 @@ def patch_sdpa_for_wide_heads() -> None:
 
     Such a head (Gemma 4's 512-wide global heads) is rejected by FA2 and cuDNN SDPA, and the math
     kernel OOMs on the full score matrix; only mem-efficient handles arbitrary head_dim. Forces
-    ``use_gqa_in_sdpa`` to False (it rejects ``enable_gqa=True`` at head_dim=512 but accepts it after
-    a manual KV repeat).
+    ``use_gqa_in_sdpa`` to False: transformers already declines GQA past head_dim 256, but with
+    mem-efficient the only enabled backend process-wide, native ``enable_gqa`` on narrower heads
+    (Gemma 4's 256-wide sliding layers) is unverified, and the manual KV repeat is the measured path.
     """
     logger.warning(
         "Wide-head SDPA patch: forcing mem-efficient SDPA and use_gqa_in_sdpa=False PROCESS-GLOBALLY — "
@@ -607,8 +585,7 @@ def validate_attn_implementation(model_config, attn_impl: str, sinks_reset: bool
                 f"Model {type(model_config).__name__} does not support "
                 f"attn_implementation='{attn_impl}', using '{candidate}'"
             )
-        if candidate == "flash_attention_2":
-            # Stop transformers swapping this FA2 for the SM90-only kernel-hub package.
+        if candidate.startswith("flash_attention"):
             _disable_gpt_oss_fa_fallback(model_config)
         return candidate
     raise ValueError(
@@ -682,14 +659,17 @@ def resolve_attn_implementation(
 
 
 def _disable_gpt_oss_fa_fallback(model_config: AutoConfig) -> None:
-    """Stop transformers auto-swapping GptOss FA2 for the kernel-hub vllm-flash-attn3 package.
+    """Keep the local flash build the validator chose for a GptOss model.
 
-    That package ships only SM 9.0 binaries and crashes on B200/B300. Setting the attribute to
-    ``None`` runs local flash_attn FA2. Must be called before ``from_pretrained``.
+    transformers swaps a flash implementation the class's compatible list does not name (the local
+    FA2 and FA3 builds) for that list's first entry, the kernel-hub vllm-flash-attn3 package: SM 9.0
+    binaries that crash on B200/B300, a Hub download an offline run cannot make, and not the build
+    the sink checks validated. Clearing the list runs the requested implementation. Must be called
+    before ``from_pretrained``.
     """
     if not model_has_sinks(model_config):
         return
-    if getattr(GptOssPreTrainedModel, "_compatible_flash_implementations", None) is not None:
+    if GptOssPreTrainedModel._compatible_flash_implementations is not None:
         GptOssPreTrainedModel._compatible_flash_implementations = None
         logger.info(
             "Disabled GptOss flash-attn auto-fallback "

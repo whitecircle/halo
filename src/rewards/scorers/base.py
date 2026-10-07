@@ -1,13 +1,16 @@
 """The scorer contract every external reward source implements, and what a verdict carries."""
 
 import asyncio
+import logging
 from abc import ABC, abstractmethod
 from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass, field
 from typing import ClassVar
 
 from src.rewards.samples import ScoringSample
-from src.rewards.terms import RewardTerm, ScoredTerm
+from src.rewards.terms import SCORED_METRIC_LEAF, RewardTerm, ScoredTerm, metric_key
+
+logger = logging.getLogger(__name__)
 
 # The sample a scorer's launch probe grades: tiny, so the probe costs nothing, yet in the run's exact shape.
 PROBE_SAMPLE = ScoringSample(
@@ -20,7 +23,7 @@ PROBE_SAMPLE = ScoringSample(
 def scored_metric_key(term: RewardTerm) -> str:
     """The per-sample 1/0 of whether the term reached a verdict, ``<source>/<name>/scored``: the metric
     that says a scorer is failing, logged by both arms."""
-    return f"{term.source}/{term.name}/scored"
+    return metric_key(term, SCORED_METRIC_LEAF)
 
 
 @dataclass(frozen=True)
@@ -65,7 +68,13 @@ class Scorer(ABC):
 
     def _key(self, leaf: str) -> str:
         """A per-sample metric key of this scorer, ``<source>/<name>/<leaf>``."""
-        return f"{self.term.source}/{self.term.name}/{leaf}"
+        return metric_key(self.term, leaf)
+
+    def _failed(self, stage: str, exc: Exception) -> str:
+        """Log a scoring ``stage`` that raised, and return the ``error`` its verdict-less results carry."""
+        error = f"{stage} failed: {type(exc).__name__}: {exc}"
+        logger.warning("%s: %s", self.term.owner, error)
+        return error
 
     async def score(self, samples: Sequence[ScoringSample]) -> list[ScoreResult]:
         """One verdict per sample, scored concurrently up to the term's ``max_concurrency``."""

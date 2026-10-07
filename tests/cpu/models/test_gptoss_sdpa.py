@@ -17,6 +17,7 @@ import pytest
 import torch
 from accelerate import PartialState
 from transformers import AutoModelForCausalLM, GptOssConfig, LlamaConfig
+from transformers.models.gpt_oss.modeling_gpt_oss import GptOssPreTrainedModel
 from trl import ModelConfig
 
 from src.distributed.loading.frozen_models import load_reference_model_for_preference
@@ -71,6 +72,17 @@ def test_sink_dropping_impls_rejected_for_gptoss_without_reset():
         validate_attn_implementation(_gptoss(), "flash_attention_2", sinks_reset=False)
     assert validate_attn_implementation(_gptoss(), "eager", sinks_reset=False) == "eager"
     assert validate_attn_implementation(_gptoss(), "flex_attention", sinks_reset=False) == "flex_attention"
+
+
+@pytest.mark.parametrize("backend", ["flash_attention_2", "flash_attention_3"])
+def test_a_local_flash_build_is_not_swapped_for_the_hub_kernel(monkeypatch, backend):
+    """transformers swaps a GptOss flash implementation its compatible list does not name for the list's
+    first entry, the kernel-hub vllm-flash-attn3 build; the validator keeps the local build it chose."""
+    monkeypatch.setattr(
+        GptOssPreTrainedModel, "_compatible_flash_implementations", ["kernels-community/vllm-flash-attn3"]
+    )
+    assert validate_attn_implementation(_gptoss(), backend, sinks_reset=True) == backend
+    assert GptOssPreTrainedModel._compatible_flash_implementations is None
 
 
 def test_enable_sink_model_sdpa_idempotent():

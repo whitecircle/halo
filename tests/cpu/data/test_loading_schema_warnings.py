@@ -4,7 +4,8 @@
 Two properties pinned here:
 
 * the module logger must not be pinned to WARNING — that silences its load-bearing INFO lines (which
-  columns were kept, split sizes after normalization) on every run;
+  columns were kept, split sizes after normalization) on every run; the same holds for the S3 and
+  shard-cache modules beside it, whose INFO lines are the run's only record of what data moved;
 * ``_normalize_dataset_schema`` warning once per "essential" column absent from the common set gives
   five spurious warnings on a perfectly normal multi-dataset run, naming columns NO dataset ever had.
   The warning must fire once, and only for columns actually lost from a dataset that had them.
@@ -26,19 +27,32 @@ from datasets import Dataset
 # The module logs through the accelerate logger, which requires an initialized state.
 PartialState()
 
+import src.data.sources.dataset_cache
+import src.data.sources.s3_client
+import src.data.sources.sharded_dataset  # noqa: F401  each module sets its logger level at import
 from src.data.sources.loading import _normalize_dataset_schema
 
 _LOADING_LOGGER = "src.data.sources.loading"
 
 
-def test_loading_logger_is_pinned_at_info():
-    """A WARNING pin would silence the column-drop notice and the post-normalization dataset columns —
-    the run's only record of what data actually trained.
+@pytest.mark.parametrize(
+    "name",
+    [
+        _LOADING_LOGGER,
+        "src.data.sources.dataset_cache",
+        "src.data.sources.s3_client",
+        "src.data.sources.sharded_dataset",
+    ],
+)
+def test_data_source_loggers_are_pinned_at_info(name):
+    """``src`` pins the root to WARNING, so a module logger left unset silences the column-drop
+    notice, the cache and transfer records and each rank's loaded-split size — the run's only record
+    of what data actually trained.
 
-    The logger's OWN level, not the effective one: accelerate's ``get_logger(..., log_level="INFO")``
-    sets it on this logger, so reading the inherited level would pass on any ambient root
-    configuration (pytest's, or a sibling test's ``caplog``) and certify nothing about this module."""
-    assert logging.getLogger(_LOADING_LOGGER).level == logging.INFO
+    The logger's OWN level, not the effective one: reading the inherited level would pass on any
+    ambient root configuration (pytest's, or a sibling test's ``caplog``) and certify nothing about
+    the module."""
+    assert logging.getLogger(name).level == logging.INFO
 
 
 def test_schema_warning_names_only_columns_actually_lost(caplog):

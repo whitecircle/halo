@@ -29,8 +29,8 @@ under `--training_config`, else their off values (`-1`, `0.0`, `1.0`), so a serv
 `generation_config.json` defaults never filter the eval.
 
 A `prompt` given as a message list reaches the environment as its last `user` turn, the task
-training hands it ([Async GRPO with Environments](../async-grpo/README.md)); a row with no `user` turn
-is refused before any episode runs.
+training hands it ([Async GRPO with Environments](../async-grpo/README.md)); a row with no `user` turn,
+or a non-text content part in it, is refused before any episode runs.
 
 `run_env.py` reads `--prompt_field` / `--answer_field`, passes extra columns through
 `--context_fields`, buckets by `--group_by` and names each example by `--id_field` (default `id`);
@@ -120,10 +120,13 @@ python scripts/environments/inference/regrade_trajectories.py \
     "$HALO_DATA_ROOT/eval/trajectories"/*.jsonl --workers 64 --output regraded.jsonl
 ```
 
-It rebuilds each problem's hidden tests by `index` under the meta line's contest `selection`, and
+It rebuilds each problem's hidden tests by `index` under the meta line's contest `selection` (an
+`index` past the rebuilt problems refuses the file: the dataset no longer matches the run's), and
 replays every recorded `submit_solution`, its arguments read as the environment read them (a
 Python-literal arguments string included), up to that episode's own budget, through `grade_solution`
-under the meta line's `env_grading` contract. The meta's `eval_protocol` only rebuilds the
+under the meta line's `env_grading` contract, which is refused before any grade when it names a field the
+contract does not declare or holds a value the contract refuses (an unknown `comparison` or `verdict_detail`, a
+non-positive time limit). The meta's `eval_protocol` only rebuilds the
 environment, whose `max_submissions` is the budget of an episode that stamped none. Grading stops at
 the first failing test and `max_grading_seconds` does not apply. It reports, per file, the protocol
 and, over the episodes that carry a verdict (`n`): `s@1`, the fraction whose first admitted submission

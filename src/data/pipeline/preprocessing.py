@@ -38,7 +38,7 @@ from src.data.pipeline.row_processors import (
 )
 from src.data.pipeline.tokenizer_backend import resolve_processor_backend, resolve_tokenizer_backend
 from src.data.shard_index import SHARD_INDEX_FILE, ShardIndex, ShardInfo
-from src.data.sources.paths import METADATA_FILE, eval_split_name
+from src.data.sources.paths import METADATA_FILE, TRAIN_TEST_SPLITS, eval_split_name
 from src.data.spans import (
     COLLATOR_SPAN_POLICY,
     LABEL_IGNORE_INDEX,
@@ -49,7 +49,6 @@ from src.data.spans import (
     tokenize_response_template,
 )
 from src.data.vlm import (
-    VLM_OUTPUT_COLUMNS,
     VLM_OUTPUT_FEATURES,
     carried_image_columns,
     get_image_token_ids,
@@ -75,6 +74,9 @@ _VLM_ROW_DATA_ERRORS = (
     DecompressionBombError,
     TemplateError,
 )
+
+# Rows the fully-masked-labels refusal probes at each end of a baked split.
+_LABEL_PROBE_ROWS = 64
 
 
 def _completion_only_labels(
@@ -166,9 +168,9 @@ def _reject_fully_masked_labels(tokenized: Dataset, split_name: str) -> None:
     total = len(tokenized)
     if total == 0 or "labels" not in tokenized.column_names:
         return
-    indices = list(range(min(total, 64)))
-    if total > 64:
-        indices += list(range(max(total - 64, 64), total))
+    indices = list(range(min(total, _LABEL_PROBE_ROWS)))
+    if total > _LABEL_PROBE_ROWS:
+        indices += list(range(max(total - _LABEL_PROBE_ROWS, _LABEL_PROBE_ROWS), total))
     probe = tokenized.select(indices)
     if all(all(v == LABEL_IGNORE_INDEX for v in row) for row in probe["labels"]):
         raise ValueError(
@@ -293,7 +295,7 @@ def tokenize_dataset(
 def _vlm_none_row() -> dict[str, Any]:
     """Schema-uniform dropped/failed VLM row. All-None is Arrow-safe here because the map pins
     ``VLM_OUTPUT_FEATURES``; dropped downstream by :func:`is_valid_example`."""
-    return dict.fromkeys(VLM_OUTPUT_COLUMNS)
+    return dict.fromkeys(VLM_OUTPUT_FEATURES)
 
 
 def tokenize_vlm_dataset(
@@ -352,7 +354,7 @@ def tokenize_vlm_dataset(
 
             # Vision tensors the stored schema cannot hold are refused rather than dropped;
             # text-only rows may drop such extras, being derivable from input_ids alone.
-            unsupported = set(result) - set(VLM_OUTPUT_COLUMNS)
+            unsupported = set(result) - set(VLM_OUTPUT_FEATURES)
             if unsupported and images:
                 raise NotImplementedError(
                     f"Processor emitted vision keys {sorted(unsupported)} the preprocessed VLM schema "
@@ -418,7 +420,7 @@ def tokenize_vlm_dataset(
             logger.warning(f"Dropping VLM example ({type(e).__name__}: {e})")
             return _vlm_none_row()
 
-    columns_to_remove = [col for col in dataset.column_names if col not in VLM_OUTPUT_COLUMNS]
+    columns_to_remove = [col for col in dataset.column_names if col not in VLM_OUTPUT_FEATURES]
 
     # process_vlm_example closes over the whole `config` dataclass, which the closure fingerprint does
     # not see: output-affecting fields must go through cache_key_extras or a re-run reuses a stale cache.
@@ -542,10 +544,10 @@ def _reject_unconsumed_image_columns(dataset: Dataset | DatasetDict, config: Pre
     """Refuse a source carrying an image column this run does not consume.
 
     Tokenization drops every source column (the text path removes all of them, the VLM path keeps
-    only :data:`VLM_OUTPUT_COLUMNS`), so an image column no ``images_field`` names is deleted with no
-    diagnostic and a ``--vlm`` run would stamp ``is_vlm=True`` on rows holding no pixels. Read off the
-    shared :data:`~src.data.vlm.VLM_IMAGE_COLUMNS` spellings, so preparation refuses exactly what the
-    runtime dispatch routes on.
+    only the :data:`~src.data.vlm.VLM_OUTPUT_FEATURES` columns), so an image column no ``images_field``
+    names is deleted with no diagnostic and a ``--vlm`` run would stamp ``is_vlm=True`` on rows
+    holding no pixels. Read off the shared :data:`~src.data.vlm.VLM_IMAGE_COLUMNS` spellings, so
+    preparation refuses exactly what the runtime dispatch routes on.
     """
     unconsumed = sorted(carried_image_columns(dataset) - {config.images_field})
     if not unconsumed:
@@ -677,7 +679,7 @@ def preprocess_dataset(
 
     if output_dir is not None:
         os.makedirs(output_dir, exist_ok=True)
-        splits = {split: result[split] for split in ("train", "test") if split in result}
+        splits = {split: result[split] for split in TRAIN_TEST_SPLITS if split in result}
 
         if config.num_shards > 1:
             shard_indices = {}

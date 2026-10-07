@@ -533,6 +533,47 @@ async def test_a_conversation_without_a_user_turn_is_refused_before_any_episode(
         )
 
 
+async def test_a_content_part_user_turn_hands_the_environment_its_text(monkeypatch):
+    """A last user turn whose ``content`` is an OpenAI content-part list is the task as its text parts
+    concatenated, as a chat template renders them. Handed the part list, the environment's reset reads
+    each part as a message and raises ``KeyError: 'role'``."""
+    convo = [
+        {"role": "system", "content": "dataset framing"},
+        {"role": "user", "content": [{"type": "text", "text": "the "}, {"type": "text", "text": "task"}]},
+    ]
+    done = types.SimpleNamespace(
+        answer="done", finish_reason="stop", completion_tokens=1, tool_calls=None, reasoning=None, token_ids=None
+    )
+    monkeypatch.setattr(eval_runner, "generate_openai_response", _scripted_generate([done]))
+    (row,) = await collect_results(
+        _tooled_env(),
+        [{"prompt": convo, "context": {}}],
+        client=object(),
+        rollout=_RETRYING,
+        collect_trajectories=True,
+    )
+    messages = row["samples"][0]["trajectory"]["messages"]
+    assert [(m["role"], m["content"]) for m in messages] == [("user", "the task"), ("assistant", "done")]
+
+
+async def test_a_content_part_the_environment_cannot_carry_is_refused_before_any_episode(monkeypatch):
+    """An environment's conversation is text, so an image part would be dropped and the task graded
+    without it; the row is refused, naming the part, before anything is generated."""
+
+    async def _never(model, messages, *, client, **kwargs):
+        raise AssertionError("no episode may run for a task the environment cannot carry")
+
+    monkeypatch.setattr(eval_runner, "generate_openai_response", _never)
+    content = [{"type": "text", "text": "what is shown?"}, {"type": "image_url", "image_url": {"url": "x"}}]
+    with pytest.raises(ValueError, match=r"other than text \(\['image_url'\]\)"):
+        await collect_results(
+            _tooled_env(),
+            [{"prompt": [{"role": "user", "content": content}], "context": {}}],
+            object(),
+            rollout=_RETRYING,
+        )
+
+
 async def test_a_recorded_native_episode_carries_its_tool_calls_once(monkeypatch):
     """The messages carry every call and result; a second log of them in ``info`` would be pickled through
     Ray and the TP broadcast and written to the JSONL for nothing."""

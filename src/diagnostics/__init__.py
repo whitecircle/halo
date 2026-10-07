@@ -1,1 +1,2 @@
-"""Opt-in diagnostics: torch-profiler / CUDA-memory capture and cross-rank failure triage."""
+"""Opt-in diagnostics: torch-profiler / CUDA-memory capture, cross-rank failure triage, EP span timing and
+the trainer↔rollout-server weight-sync transport preflight."""

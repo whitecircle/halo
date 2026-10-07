@@ -2,7 +2,6 @@
 classify route: vLLM (``--runner pooling``) or SGLang (``--is-embedding``)."""
 
 import asyncio
-import logging
 import math
 from collections.abc import Sequence
 
@@ -12,8 +11,6 @@ from transformers import AutoTokenizer
 from src.rewards.samples import ScoringSample, scored_messages
 from src.rewards.scorers.base import Scorer, ScoreResult
 from src.rewards.terms import RewardModelBackend, RewardModelTerm
-
-logger = logging.getLogger(__name__)
 
 
 class ServedRewardModel(Scorer):
@@ -38,11 +35,7 @@ class ServedRewardModel(Scorer):
 
     @property
     def metric_keys(self) -> tuple[str, ...]:
-        return (self._logit_key,)
-
-    @property
-    def _logit_key(self) -> str:
-        return f"reward_model/{self.term.name}/logit"
+        return (self._key("logit"),)
 
     def _tokenizer_for_rendering(self):
         """The reward model's tokenizer, loaded on first use; a load failure raises through the caller
@@ -75,17 +68,16 @@ class ServedRewardModel(Scorer):
         try:
             texts = [tokenizer.apply_chat_template(scored_messages(s, term.view), tokenize=False) for s in samples]
         except Exception as e:
-            logger.warning("reward model %r render failed: %s: %s", term.name, type(e).__name__, e)
-            error = f"render failed: {type(e).__name__}: {e}"
+            error = self._failed("render", e)
             return [ScoreResult(None, error=error) for _ in samples]
         client = self._connect()
         try:
             logits = await self._logits(client, texts)
         except Exception as e:
-            logger.warning("reward model %r request failed: %s: %s", term.name, type(e).__name__, e)
-            error = f"request failed: {type(e).__name__}: {e}"
+            error = self._failed("request", e)
             return [ScoreResult(None, error=error) for _ in samples]
-        return [ScoreResult(term.normalize(logit), {self._logit_key: logit}) for logit in logits]
+        logit_key = self._key("logit")
+        return [ScoreResult(term.normalize(logit), {logit_key: logit}) for logit in logits]
 
     async def _logits(self, client: httpx.AsyncClient, texts: list[str]) -> list[float]:
         """The head output at ``label_index`` for each text, in order, from the engine's classify route."""

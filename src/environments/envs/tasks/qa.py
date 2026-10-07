@@ -16,18 +16,42 @@ from src.rewards.graders.matching import validate_answer
 MULTIPLE_CHOICE_LETTERS = "ABCDEFGHIJ"
 
 _CHOICE_LETTER = f"[{MULTIPLE_CHOICE_LETTERS}]"
+# A choice already led by its own letter ("B: Jupiter", "(B) Jupiter", "B. Jupiter") is shown as written.
+_LETTER_LABEL = re.compile(rf"\(?({_CHOICE_LETTER})[).:]\s")
 
-# Priority order, most specific first: "The answer is A" / "(A)" / "A." / "Option A" / a bare letter.
+# Priority order, most specific first: "The answer is A" / "(A)" / "A." / "Option A" / a bare letter. In
+# prose a choice is an uppercase letter standing alone: read case-insensitively or up to the next letter,
+# "the answer is a tie", "the answer is definitely C" and "e.g." would each name a choice. A bracketed or
+# bare letter is a choice in either case.
 _MULTIPLE_CHOICE_PATTERNS = [
-    re.compile(pattern, re.IGNORECASE)
+    re.compile(pattern)
     for pattern in (
-        rf"(?:the\s+)?answer\s+is\s*:?\s*\(?({_CHOICE_LETTER})\)?",
-        rf"[\(\[]({_CHOICE_LETTER})[\)\]]",
-        rf"(?:^|\s)({_CHOICE_LETTER})[.):]",
-        rf"(?:option|choice)\s+({_CHOICE_LETTER})",
-        rf"^({_CHOICE_LETTER})$",
+        rf"(?i:answer\s+is)\s*:?\s*[(*]*({_CHOICE_LETTER})(?![A-Za-z])",
+        rf"[\(\[]((?i:{_CHOICE_LETTER}))[\)\]]",
+        rf"(?:^|\s)({_CHOICE_LETTER})[.):](?![A-Za-z])",
+        rf"(?i:option|choice)\s+({_CHOICE_LETTER})(?![A-Za-z])",
+        rf"^((?i:{_CHOICE_LETTER}))$",
     )
 ]
+
+
+def render_choices(choices: list[Any]) -> str:
+    """One line per choice, each led by the letter :func:`multiple_choice_match` scores it as.
+
+    MMLU-style rows carry the bare option texts with an index answer, so without the letters the model
+    could not name the choice the grader expects; a choice already labelled with its letter is kept.
+    """
+    if len(choices) > len(MULTIPLE_CHOICE_LETTERS):
+        raise ValueError(
+            f"{len(choices)} choices, but only {MULTIPLE_CHOICE_LETTERS[0]}-{MULTIPLE_CHOICE_LETTERS[-1]} "
+            f"are gradable: the later choices could never be scored."
+        )
+    lines = []
+    for letter, choice in zip(MULTIPLE_CHOICE_LETTERS, choices, strict=False):
+        text = str(choice)
+        label = _LETTER_LABEL.match(text)
+        lines.append(text if label is not None and label.group(1) == letter else f"{letter}. {text}")
+    return "\n".join(lines)
 
 
 def multiple_choice_match(predicted: str, expected: str) -> bool:
@@ -198,8 +222,7 @@ class ExamQAEnvironment(NativeToolUseEnvironment):
             )
 
         if traj.info["choices"]:
-            choices_text = "\n".join(traj.info["choices"])
-            traj.append_to_last_user(f"\n\nChoices:\n{choices_text}")
+            traj.append_to_last_user(f"\n\nChoices:\n{render_choices(traj.info['choices'])}")
 
         return traj
 

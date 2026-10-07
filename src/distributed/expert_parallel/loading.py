@@ -66,6 +66,50 @@ def cast_loaded_parameters(model: torch.nn.Module, dtype, *, keep_fp32: bool, ep
             cast_parameters_to_run_dtype(block, dtype)
 
 
+def load_through_cpu(
+    model_class,
+    model_name_or_path: str,
+    *,
+    load_phase: str,
+    max_concurrent_loading: int | None,
+    ep_config: EPConfig | None,
+    keep_fp32: bool,
+    ep_wrapped: bool,
+    preserve_checkpoint_precision: bool = False,
+    before_move: Callable[[torch.nn.Module], torch.nn.Module] | None = None,
+    **from_pretrained_kwargs,
+) -> torch.nn.Module:
+    """``from_pretrained`` on CPU, a node's ranks in bounded batches, then onto this rank's device.
+
+    The weights are cast to the run dtype (:func:`cast_loaded_parameters`) and the checkpoint's FP32
+    masters restored before the move; ``before_move`` runs on the CPU model last (the EP patch). A
+    failed restore is raised on every rank only after all have left the node-serialized region, where
+    a world collective would wait on queued ranks. Ends in :func:`finalize_loaded_model`, which is
+    local, so a caller's own collectives may follow.
+    """
+    precision_guard = DeferredRankFailure(f"FP32-master checkpoint load from {model_name_or_path}")
+    with joined_node_load(f"{load_phase} from {model_name_or_path}", max_concurrent_loading):
+        model = from_pretrained_verified(model_class, model_name_or_path, device_map="cpu", **from_pretrained_kwargs)
+        cast_loaded_parameters(model, from_pretrained_kwargs.get("dtype"), keep_fp32=keep_fp32, ep_wrapped=ep_wrapped)
+        precision_guard.run(
+            lambda: restore_fp32_master_parameters(
+                model,
+                model_name_or_path,
+                ep_config,
+                keep_non_ep=keep_fp32,
+                strict=preserve_checkpoint_precision,
+                revision=from_pretrained_kwargs.get("revision"),
+            )
+        )
+        if precision_guard.reason is None:
+            if before_move is not None:
+                model = before_move(model)
+            model = move_model_to_local_device(model)
+    precision_guard.reject()
+    finalize_loaded_model(model)
+    return model
+
+
 def decide_lazy_loadable(local_dir: str | None, layout_supported: Callable[[str], bool]) -> bool:
     """Whether EVERY rank takes the lazy safetensors path for ``local_dir`` — decided by rank 0.
 
@@ -319,45 +363,25 @@ def _load_ep_model_huggingface(
 
     # Bounded ranks per node at a time — an unbounded fan-in CPU-OOMs on large MoE.
     logger.info(f"[Rank {rank}] Waiting for sequential model loading (local_rank={get_local_rank()})...")
-    precision_guard = DeferredRankFailure(f"FP32-master checkpoint load from {model_name_or_path}")
-    with joined_node_load(f"EP model load from {model_name_or_path}", max_concurrent_loading):
-        logger.info(f"[Rank {rank}] Loading model to CPU...")
-        model = from_pretrained_verified(
-            model_class,
-            model_name_or_path,
-            config=config,
-            dtype=dtype,
-            trust_remote_code=trust_remote_code,
-            device_map="cpu",
-            revision=revision,
-            **model_kwargs,
-        )
-        cast_loaded_parameters(model, dtype, keep_fp32=keep_fp32_params, ep_wrapped=True)
-        precision_guard.run(
-            lambda: restore_fp32_master_parameters(
-                model,
-                model_name_or_path,
-                ep_config,
-                keep_non_ep=keep_fp32_params,
-                strict=preserve_checkpoint_precision,
-                revision=revision,
-            )
-        )
-        if precision_guard.reason is None:
-            logger.info(f"[Rank {rank}] Applying EP patching...")
-            model = patch_moe_model_for_ep(model, ep_config)
-            model = move_model_to_local_device(model)
-
-    # Outside the node-serialized region: a world collective inside it would wait on queued ranks.
-    precision_guard.reject()
+    model = load_through_cpu(
+        model_class,
+        model_name_or_path,
+        load_phase="EP model load",
+        max_concurrent_loading=max_concurrent_loading,
+        ep_config=ep_config,
+        keep_fp32=keep_fp32_params,
+        ep_wrapped=True,
+        preserve_checkpoint_precision=preserve_checkpoint_precision,
+        before_move=partial(patch_moe_model_for_ep, ep_config=ep_config),
+        config=config,
+        dtype=dtype,
+        trust_remote_code=trust_remote_code,
+        revision=revision,
+        **model_kwargs,
+    )
 
     # Collective — every EP rank must participate, and only once all ranks are loaded and on GPU.
     create_ep_buffers(model)
-
-    # from_pretrained materializes only the keys the checkpoint carries, so non-persistent buffers
-    # hold garbage and the tied lm_head shadow stays on meta; the bf16 cast above compounds it.
-    # Repair after the device move.
-    finalize_loaded_model(model)
 
     logger.info(f"[Rank {rank}] Model loaded successfully")
     return model

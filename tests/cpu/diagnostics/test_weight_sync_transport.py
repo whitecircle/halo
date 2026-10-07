@@ -74,7 +74,7 @@ _PROVIDER_LINE = "host:1:257 [0] NCCL INFO NET/OFI Selected provider"
 
 def test_efa_log_reads_as_efa_with_gpudirect_and_the_plugin_identity():
     report = wst.parse_nccl_log(EFA_LOG)
-    assert report.verdict == wst.VERDICT_EFA
+    assert report.verdict == "efa"
     assert report.gpudirect is True
     assert report.transports == ["NET/Libfabric/0/GDRDMA"], "channel lines must be deduplicated, flush suffix dropped"
     assert report.plugin == "git-1f0a976"
@@ -110,23 +110,23 @@ def test_a_plugin_that_forced_the_simple_protocol_is_reported():
 
 def test_infiniband_reads_as_ib_not_efa():
     report = wst.parse_nccl_log(IB_LOG)
-    assert report.verdict == wst.VERDICT_IB
+    assert report.verdict == "ib"
     assert report.gpudirect is True
     assert report.plugin is None and report.provider is None
 
 
 def test_socket_fallback_reads_as_socket_and_names_the_missing_plugin():
     report = wst.parse_nccl_log(SOCKET_LOG)
-    assert report.verdict == wst.VERDICT_SOCKET
+    assert report.verdict == "socket"
     assert report.gpudirect is False
     assert report.plugin is None
     assert report.plugin_missing == ["ofi libnccl-net-ofi.so"]
 
 
 def test_same_host_cuda_ipc_reads_as_p2p_and_shared_memory_as_shm():
-    assert wst.parse_nccl_log(P2P_LOG).verdict == wst.VERDICT_P2P
+    assert wst.parse_nccl_log(P2P_LOG).verdict == "p2p"
     assert wst.parse_nccl_log(P2P_LOG).transports == ["P2P/CUMEM"]
-    assert wst.parse_nccl_log(SHM_LOG).verdict == wst.VERDICT_SHM
+    assert wst.parse_nccl_log(SHM_LOG).verdict == "shm"
 
 
 def test_a_proxied_net_channel_keeps_its_gpudirect_suffix():
@@ -135,7 +135,7 @@ def test_a_proxied_net_channel_keeps_its_gpudirect_suffix():
     proxied = EFA_LOG.replace("[send] via NET/Libfabric/0/GDRDMA", "[send] via NET/Libfabric/0(1)/GDRDMA")
     report = wst.parse_nccl_log(proxied)
     assert "NET/Libfabric/0(1)/GDRDMA" in report.transports
-    assert report.verdict == wst.VERDICT_EFA and report.gpudirect is True
+    assert report.verdict == "efa" and report.gpudirect is True
 
 
 def test_a_log_without_channel_lines_is_unknown_not_a_guess():
@@ -253,7 +253,7 @@ def _result(**overrides) -> dict:
         "close_seconds": 0.1,
         "rates_gbps": [40.0, 41.0],
         "served_unchanged": True,
-        "verdict": wst.VERDICT_EFA,
+        "verdict": "efa",
         "gpudirect": True,
         "nccl_log_dir": "/tmp/preflight",
         **asdict(wst.parse_nccl_log(EFA_LOG)),
@@ -287,7 +287,7 @@ def test_the_cli_gates_on_the_expected_transport_and_an_unchanged_server(monkeyp
 
     results.append(_result())
     assert run("--json") == 0
-    assert json.loads(capsys.readouterr().out)["verdict"] == wst.VERDICT_EFA
+    assert json.loads(capsys.readouterr().out)["verdict"] == "efa"
 
 
 if __name__ == "__main__":

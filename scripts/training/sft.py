@@ -32,13 +32,14 @@ from src.data.pipeline.processing import (
     resolve_map_num_proc,
 )
 from src.data.pipeline.row_processors import create_llm_processor, text_render_kwargs
-from src.data.pipeline.vlm_dataset import prepare_vlm_dataset, vlm_map_features
+from src.data.pipeline.vlm_dataset import prepare_vlm_dataset
 from src.data.probe_consensus import agree_probe_across_ranks
 from src.data.sources.loading import load_datasets_auto
 from src.distributed.loading.peft_setup import setup_peft_model
 from src.distributed.loading.vlm_setup import load_model_for_training
 from src.distributed.runtime import barrier, init_distributed, is_global_main_process
 from src.models.loading.model_preparation import log_model_info
+from src.models.loading.tokenizer_setup import is_bounded_length
 from src.models.modality import probe_checkpoint
 from src.models.segment_markers import reject_compressed_kv_rows
 from src.trainers.sft import DistributedSFTTrainer
@@ -189,7 +190,6 @@ def _prepare_vlm_data(ds, is_preprocessed, args, sft_config, model_config, proce
         tokenizer,
         sft_config.max_length,
         num_proc,
-        features=vlm_map_features(),  # pinned schema — shard-wise inference diverges on mixed datasets
         desc="Processing train/eval dataset",
     )
     # The mapped columns (history/images/…) are not model-forward kwargs — HF's default
@@ -223,6 +223,13 @@ def main():
         )
     if sft_config.packing and sft_config.padding_free:
         raise ValueError("Cannot use both 'packing' and 'padding_free' simultaneously.")
+    # A null/non-positive max_length resolves to the model's context window, but packing uses it as the
+    # fixed pack size that bounds memory, so it must be explicit there.
+    if sft_config.packing and not is_bounded_length(sft_config.max_length):
+        raise ValueError(
+            "packing=True requires an explicit max_length (the fixed pack/sequence size that bounds "
+            "memory); it cannot default to the model context window. Set max_length in the config."
+        )
     if sft_config.eval_packing and not sft_config.packing:
         raise ValueError(
             "eval_packing=True packs nothing without packing=True: it can only turn packing off for the "
@@ -293,13 +300,6 @@ def main():
         text_only_model=dist_args.text_only_model,
     )
 
-    # Resolve max_length: null/non-positive → the model's context window. Packing uses it as the fixed
-    # pack size that bounds memory, so require it explicitly there rather than defaulting to full context.
-    if (sft_config.max_length is None or sft_config.max_length <= 0) and sft_config.packing:
-        raise ValueError(
-            "packing=True requires an explicit max_length (the fixed pack/sequence size that bounds "
-            "memory); it cannot default to the model context window. Set max_length in the config."
-        )
     tokenizer = apply_max_length(sft_config, args, model, tokenizer)
     processing_class = install_resolved_tokenizer(processing_class, tokenizer)
     enforce_text_path_padding_side(tokenizer, is_vlm)

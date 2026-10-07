@@ -25,10 +25,7 @@ N2_Y = FRAME_Y + (FRAME_H - N2_H) / 2
 CARD_X, CARD_W = N1_X + FRAME_PAD, N1_W - 2 * FRAME_PAD
 ENGINE_X, ENGINE_W = N2_X + FRAME_PAD, N2_W - 2 * FRAME_PAD
 
-fig, ax = plt.subplots(figsize=(W1, H1))
-ax.set_xlim(0, W1)
-ax.set_ylim(0, H1)
-ax.axis("off")
+fig, ax = canvas(W1, H1)
 
 title(ax, "Separate inference node", "one server · one NCCL group · actors beside the trainer")
 
@@ -142,8 +139,6 @@ for x, (name, lines) in zip(cell_xs, STRIP, strict=True):
     card(ax, x, STRIP_Y, cell_w, STRIP_H, name, lines, color=SLATE)
 
 save(plt.gcf(), "multi_node_separate_inference")
-plt.close()
-print("✓ multi_node_separate_inference.png")
 
 
 # ── Scenario 2: dedicated rollout nodes ──────────────────────────────────────────────────────
@@ -157,10 +152,7 @@ TOP2 = H2 - 0.95
 L_CARD_X, L_CARD_W = L_X + FRAME_PAD, L_W - 2 * FRAME_PAD
 R_CARD_X, R_CARD_W = R_X + FRAME_PAD, R_W - 2 * FRAME_PAD
 
-fig, ax = plt.subplots(figsize=(W2, H2))
-ax.set_xlim(0, W2)
-ax.set_ylim(0, H2)
-ax.axis("off")
+fig, ax = canvas(W2, H2)
 
 title(ax, "Dedicated rollout nodes", "rollout_server_configs: one entry per inference node")
 
@@ -260,5 +252,3 @@ arrow(
 arrow(ax, L_X + L_W, TOP2 - 3.26, R_X, TOP2 - 3.26, "HTTP per turn", color=TEAL)
 
 save(plt.gcf(), "multi_node_dedicated_rollout")
-plt.close()
-print("✓ multi_node_dedicated_rollout.png")

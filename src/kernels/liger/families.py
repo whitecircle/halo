@@ -58,7 +58,8 @@ LIGER_FAMILY_SPECS: tuple[LigerFamilySpec, ...] = (
     # Laguna. `LagunaMLP` serves both the dense layers and every block's shared expert, which the EP
     # wrapper adopts unchanged. Rotary is half-width on the full-attention layers and full-width on
     # the sliding ones, through one shared function. The head adds the router aux loss after the
-    # projection.
+    # projection. The released repos also ship their own modeling file through `auto_map`, whose norm,
+    # MLP and head are the in-library classes verbatim, so a `trust_remote_code` load takes the same swaps.
     LigerFamilySpec(
         model_types=("laguna",),
         modeling_module="transformers.models.laguna.modeling_laguna",
@@ -66,6 +67,7 @@ LIGER_FAMILY_SPECS: tuple[LigerFamilySpec, ...] = (
         glu_mlp=("LagunaMLP",),
         causal_lm=("LagunaForCausalLM",),
         router_aux_loss_in_head=True,
+        remote_classes=("LagunaRMSNorm", "LagunaMLP", "LagunaForCausalLM"),
     ),
     # GLM-5.3-Flash. The two plain norms take Liger's kernel; the GDN blocks' gated norm takes fla's
     # (34 of 45 layers apply it per head on the attention output, eager otherwise — the hub-kernel

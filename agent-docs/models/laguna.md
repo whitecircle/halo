@@ -2,7 +2,7 @@
 
 Poolside's `LagunaForCausalLM` (`poolside/Laguna-S-2.1`, `poolside/Laguna-XS-2.1`) — a MoE with a sigmoid top-k router, fused 3D expert storage, and one shared expert on every token. Both released sizes route to 256 experts: **S** is 48 layers / hidden 3072 / top-10 at 1M positions, **XS** is 40 layers / hidden 2048 / top-8 at 256K.
 
-Transformers ships `transformers.models.laguna` natively, and the released checkpoints also load through `auto_map`, so both implementations are reachable: the shipped configs set `trust_remote_code: true` with a pinned `model_revision` (the revisions the EP path was validated against), while a checkpoint converted to library format loads the in-library classes. The EP wrapper claims both by class name and by `model_type`.
+Transformers ships `transformers.models.laguna` natively, and the released checkpoints also load through `auto_map`, so both implementations are reachable: the shipped configs set `trust_remote_code: true` with a pinned `model_revision` (the revisions the EP path was validated against); with it off, the same checkpoints load into the in-library classes, which compute the same forward. The EP wrapper claims both by class name and by `model_type`, and Liger patches both ([Configs](#configs)).
 
 | | EP | CP | TP | ETP | PP | EP+CP | EP+TP | LoRA |
 |---|:--:|:--:|:--:|:--:|:--:|:--:|:--:|:--:|
@@ -30,7 +30,7 @@ Transformers ships `transformers.models.laguna` natively, and the released check
 
     `EPGroupLimitedMoELayerBase._init_routing` resolves each knob off the block, then the gate, then the config, accepting both the `n_group` and `num_group` spellings. An explicit declaration always wins over the family default, and with no group knob at all group-limited selection degenerates to a plain top-k. Both families list exactly the knobs they lack in `_OPTIONAL_ROUTING_KNOBS`; any other missing knob raises.
 
-- **A missing router bias** (inherited). The pinned remote-code revision omits `e_score_correction_bias` (the in-library format always writes it), so lazy loading leaves it on meta there. The wrapper materializes it at zero (a no-op additive bias) instead of letting the first routing matmul fault.
+- **A missing router bias** (inherited). A checkpoint without `e_score_correction_bias` would leave it on meta under lazy loading; the wrapper materializes it at zero (a no-op additive bias) instead of letting the first routing matmul fault. The released Laguna checkpoints carry it.
 - **Hub vs module key spelling.** Laguna is the only family declaring `_EXPORT_KEY_RENAMES`: module `mlp.shared_experts.` is hub `mlp.shared_expert.`, and module `mlp.gate.e_score_correction_bias` is hub `mlp.experts.e_score_correction_bias`.
 
     Transformers declares both as `WeightRenaming` entries and applies them only inside `from_pretrained`, so `EPLagunaMoELayer._EXPORT_KEY_RENAMES` mirrors them for the three paths that bypass it: the gather, the RL weight sync, and the lazy loader (which applies the inverse on read). Without them the export writes keys vLLM silently skips and the loader leaves that submodule randomly initialized.
@@ -41,7 +41,7 @@ Routing is otherwise unchanged: sigmoid the logits, add the correction bias (and
 
 Gathered saves restore the hub layout `experts.{i}.{gate,up,down}_proj.weight` through `_PER_EXPERT_UNFUSED_KEYS`.
 
-Balancing is where the two families diverge. `LagunaConfig` ships `router_aux_loss_coef: 0.001` and `LagunaForCausalLM.forward` declares `output_router_logits`, so `moe_balancing: auto` resolves to `aux_loss` — GLM-4 MoE Lite, which has neither, lands on `bias_update`. That term is transformers' shared switch-style aux loss: it softmaxes the raw router logits and counts their top-k, so it balances the unbiased routing, not the selection `e_score_correction_bias` shifts.
+Balancing is where the two families diverge. `LagunaForCausalLM.forward` declares `output_router_logits`, so `moe_balancing: auto` resolves to `aux_loss` — GLM-4 MoE Lite, which does not, lands on `bias_update`. The released checkpoints set `router_aux_loss_coef: 0.0`, so that term stays off, with a warning, unless the run sets a coefficient through `model_init_kwargs`. That term is transformers' shared switch-style aux loss: it softmaxes the raw router logits and counts their top-k, so it balances the unbiased routing, not the selection `e_score_correction_bias` shifts.
 
 The inherited `_supports_bias_balancing` still accepts an explicit `bias_update` ([Callbacks](../training-methods/callbacks.md#moe-balancing-modes)). Under it the sign-updates land in the gate's own `e_score_correction_bias` (the inherited native-slot adoption), so the trained bias is part of the checkpoint and a transformers reload routes exactly as training did.
 
@@ -57,20 +57,21 @@ Laguna's experts use a standard SwiGLU, so the base combine latch runs the fused
 
 Both are registry-gated, and Laguna is in neither registry:
 
-- **CP** needs a Ulysses attention wrapper. `LagunaAttention` is absent from `CP_SUPPORTED_ATTENTION_CLASSES` — the registered wrappers in `src/distributed/context_parallel/layers/` — so CP, and therefore EP+CP, is rejected.
+- **CP** needs a Ulysses attention wrapper. `LagunaAttention` is absent from `WRAPPER_CLASS_MAP` — the registered wrappers in `src/distributed/context_parallel/layers/` — so CP, and therefore EP+CP, is rejected.
 - **TP** on a MoE model takes the selective attention-only path (HF's `tp_plan="auto"` mis-shards expert weights), gated on `TP_SHARDABLE_ATTENTION_CLASSES` (`src/distributed/tensor_parallel/module_types.py`). `LagunaAttention` is not listed, so there is nothing for the DTensor path to shard.
 
 ETP is mechanically reachable (the experts use the shared fused-GLU storage, so `_init_fused_glu_params` handles `expert_tp_size > 1`); its only GPU coverage is the tiny-model LoRA row in footnote ².
 
 ## Configs
 
-`examples/sft/laguna/laguna-s-2.1-ultrachat-ep.yaml` (EP=4, 256 experts → 64/rank) and `examples/sft/laguna/laguna-xs-2.1-ultrachat.yaml`. Launch the EP config at `--nproc_per_node=4`: `ep_size=4` is one dispatch group on 4 GPUs, but two racy 4-rank groups on 8, which `ParallelismConfig` rejects at config time. Three more settings are load-bearing:
+`examples/sft/laguna/laguna-s-2.1-ultrachat-ep.yaml` (EP=4, 256 experts → 64/rank) and `examples/sft/laguna/laguna-xs-2.1-ultrachat.yaml`. Launch the EP config at `--nproc_per_node=4`: `ep_size=4` is one dispatch group on 4 GPUs, but two racy 4-rank groups on 8, which `ParallelismConfig` rejects at config time. Two more settings are load-bearing:
 
 - `attn_implementation: sdpa` — the pinned hub revision provides no Flash-Attention path. SDPA is not a varlen backend, so the collator factory ([Collators](../data/collators.md)) rejects `padding_free` outright.
 
     The configs use `packing: true`, which keeps documents isolated but materializes a dense mask over the flattened batch (side up to `per_device_train_batch_size * max_length`) instead of consuming `cu_seqlens`.
 
-- Liger's `laguna` spec patches the in-library classes (`transformers.models.laguna`: RMSNorm, the fused SwiGLU on the dense and shared-expert MLPs, cross-entropy, an opt-in fused loss) and arms no remote classes, so under the shipped configs' pinned remote code (`trust_remote_code: true`) the norms and MLPs run eager. RoPE stays eager on either path — Laguna's full-attention layers rotate half the head and its sliding layers all of it, through one shared function.
 - `pad_token: "〈|PAD|〉"` / `eos_token: "〈|EOS|〉"` — Laguna's vocabulary really does use the CJK angle brackets U+3008/U+3009, not ASCII `<`/`>`. Substituting ASCII silently adds new tokens instead of resolving the existing ones.
+
+[Liger](../optimization/liger-kernels.md)'s `laguna` spec patches both implementations: the in-library classes, and, through `remote_classes`, the `LagunaRMSNorm` / `LagunaMLP` / `LagunaForCausalLM` of the pinned hub modeling file, which are the in-library classes verbatim. Under either load that is RMSNorm, the fused SwiGLU on the dense and shared-expert MLPs, cross-entropy and an opt-in fused loss. RoPE stays eager on either path — Laguna's full-attention layers rotate half the head and its sliding layers all of it, through one shared function.
 
 CPU parity coverage lives in `tests/cpu/parallelism/test_laguna_ep.py`, built against the real `transformers.models.laguna` block and covering both it and a remote-code-shaped one.

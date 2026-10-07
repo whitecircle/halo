@@ -46,7 +46,9 @@ The Bailing families are `trust_remote_code`, so their modeling module does not 
 Their patch is registered on the shared hook over `transformers.dynamic_module_utils.get_class_in_module`
 (`src/models/patches/remote_code_hooks.py`, wrapped once for every registrant), the funnel every remote
 class loads through, and fires on the module defining the declared classes
-(`src/kernels/liger/remote_modules.py`).
+(`src/kernels/liger/remote_modules.py`). Laguna is native to transformers, but its released repos also ship
+their own modeling file through `auto_map`, which the shipped recipes load; its spec names that file's
+classes too, so either load takes the same swaps.
 
 Ling 3.0's KDA layers already run `fla`'s fused gated norm, short convolutions and delta-rule recurrence;
 only the attention/MoE norms and the GLU MLPs are left to fuse.

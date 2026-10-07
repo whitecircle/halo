@@ -154,7 +154,7 @@ Full procedure in [Context Parallelism — Adding a new model](../parallelism/co
 
 1. **Write a wrapper** under `layers/` and declare `HF_MODULE_NAMES`. Two templates: subclass `UlyssesAttentionBase` for the optimized path (RoPE before all-to-all, native GQA — copy `Qwen3MoeUlyssesAttention`), or `MLAUlyssesAttentionBase` when Q/K and V head dims differ (copy `Glm4MoeLiteUlyssesAttention`).
 
-    There is no accept list to edit. `layers/registry.py` imports every module in the package and derives `WRAPPER_CLASS_MAP` — and `CP_SUPPORTED_ATTENTION_CLASSES` from it — by walking the `UlyssesAttentionBase` subclass tree, so the wrapper registers by existing and a duplicate HF name raises.
+    There is no accept list to edit. `layers/registry.py` imports every module in the package and derives `WRAPPER_CLASS_MAP` by walking the `UlyssesAttentionBase` subclass tree, so the wrapper registers by existing and a duplicate HF name raises.
 
 2. **Runtime requirements**: a real Flash Attention impl (`SUPPORTED_ATTN_IMPLEMENTATIONS` in `validation.py`) unless the wrapper declares `REQUIRES_FLASH_ATTN_LABEL = False` (modeling code that cannot carry a flash label, e.g. Bailing), and both `num_attention_heads` and `num_key_value_heads` divisible by `cp_size`.
 
@@ -206,7 +206,7 @@ Upstream Liger's `MODEL_TYPE_TO_APPLY_LIGER_FN` doesn't cover every supported mo
 
     Then the variant parameters: `rms_norm_offset` / `rms_norm_casting_mode` for a Gemma-style `(1 + w)` norm or an fp32 weight multiply, `rms_norm_kernel="native"` to serve an offset-free norm with torch's fused `F.rms_norm` instead of Liger's, `logit_scale_attr` for a head that scales its logits, `router_aux_loss_in_head` for a head that adds the router aux loss after the projection, `rope=True` only for a full-width `rotate_half` rotary.
 
-    A `trust_remote_code` family sets `remote_classes` instead of `modeling_module`; its patch fires when transformers loads the modeling file.
+    A `trust_remote_code` family sets `remote_classes` (every class a role names) instead of `modeling_module`; its patch fires when transformers loads the modeling file. A native family whose hub repos also ship their own modeling file through `auto_map` (Laguna) sets both.
 
     List a multimodal wrapper's `model_type` only when its text tower can be nothing but this family. Otherwise the orchestrator resolves it through `text_config`, and the fused loss is forced off there because the wrapper's own head runs.
 

@@ -311,6 +311,22 @@ def test_self_distill_rejects_train_on_last_assistant_only(tmp_path):
         _run_main_with_yaml(module, "train_on_last_assistant_only: true\n", tmp_path)
 
 
+def test_self_distill_requires_a_conversation_column(tmp_path):
+    """The loader only checks a declared column; an unset one would reach the collators."""
+    module = _load_script_module("distillation/self_distill.py")
+    with pytest.raises(ValueError, match="conversation_field must name its column"):
+        _run_main_with_yaml(module, "conversation_field: null\n", tmp_path)
+
+
+@pytest.mark.parametrize("max_length", ["null", "0"])
+def test_sft_refuses_packing_without_a_length_before_touching_the_checkpoint(tmp_path, max_length):
+    """The pack size bounds memory, so it cannot default to the context window; the refusal is pure
+    config and lands before the checkpoint probe (``dummy/model`` would fail that first)."""
+    module = _load_script_module("sft.py")
+    with pytest.raises(ValueError, match="packing=True requires an explicit max_length"):
+        _run_main_with_yaml(module, f"packing: true\nmax_length: {max_length}\n", tmp_path)
+
+
 # PEFT wrapping: scripts must route through prepare_peft_model (k-bit prep)
 
 

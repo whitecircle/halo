@@ -58,21 +58,19 @@ def format_sandbox_repl_output(result: SandboxResult, timeout: float) -> str:
 
 def run_code_via_sandbox(
     code: str,
-    sandbox: SandboxExecutor | None,
+    runner: SandboxExecutor | SandboxSession,
     timeout: float = SANDBOX_DEFAULT_TIMEOUT,
     language: str = "python",
-    session: SandboxSession | None = None,
 ) -> str:
-    """REPL handler that executes ``code`` through a :class:`SandboxExecutor` (or a live session).
+    """REPL handler that executes ``code`` on ``runner``: a :class:`SandboxExecutor` for a one-shot run,
+    or a live :class:`SandboxSession` for a persistent working dir.
 
     Runs in a real interpreter / compiled binary (imports + stdlib), so only appropriate when the
-    sandbox provides isolation. Pass a ``session`` for a persistent working dir; omit for one-shot.
-    Raises :class:`SandboxInfraError` when the backend itself failed and :class:`SandboxAgentFault`
+    sandbox provides isolation. Raises :class:`SandboxInfraError` when the backend itself failed and :class:`SandboxAgentFault`
     when the program broke its own sandbox (see :func:`format_sandbox_repl_output`).
 
     The program gets an empty stdin, since the tools running through here declare none: one reading
     input sees end-of-file instead of blocking on input nothing can supply.
     """
-    runner = session if session is not None else sandbox
     result = runner.run(code, timeout=timeout, language=language)
     return format_sandbox_repl_output(result, timeout)

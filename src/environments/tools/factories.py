@@ -24,41 +24,12 @@ from src.environments.tools.definitions import (
     NativeToolRegistry,
     ToolParameter,
 )
-from src.environments.tools.web_search import async_web_search, validate_search_backend, web_search
-
-
-def _code_repl_handler(language: str, timeout: float, sandbox: SandboxExecutor | None) -> Callable[..., str]:
-    """Pick the code-execution handler. Python with no ``sandbox`` uses the in-process REPL; otherwise
-    (or any non-Python language) runs via a :class:`SandboxExecutor`, resolving a default when none given."""
-    spec = require_language(language)
-
-    if spec.name == "python" and sandbox is None:
-        return functools.partial(run_python_sandboxed, timeout=timeout)
-
-    executor = sandbox or resolve_sandbox()
-    return functools.partial(run_code_via_sandbox, sandbox=executor, timeout=timeout, language=spec.name)
-
-
-def _code_tool(
-    name: str,
-    description: str,
-    language: str,
-    timeout: float,
-    sandbox: SandboxExecutor | None,
-) -> NativeTool:
-    """Build a code-execution :class:`NativeTool`."""
-    return NativeTool(
-        name=name,
-        description=description,
-        parameters=[
-            ToolParameter(
-                name="code",
-                type="string",
-                description="Source code to execute. Writes results to stdout/print; it is given no stdin.",
-            ),
-        ],
-        handler=_code_repl_handler(language, timeout, sandbox),
-    )
+from src.environments.tools.web_search import (
+    DEFAULT_MAX_RESULTS,
+    async_web_search,
+    validate_search_backend,
+    web_search,
+)
 
 
 def create_native_math_tools(timeout: float = SANDBOX_DEFAULT_TIMEOUT) -> NativeToolRegistry:
@@ -103,12 +74,8 @@ def create_native_code_tools(
     """
     spec = require_language(language)
 
-    if spec.is_compiled:
-        description = (
-            f"Execute a complete {spec.name} program (compiled, then run). It is given no stdin and "
-            "writes to stdout. Include a main() and any needed includes."
-        )
-    elif spec.name == "python" and sandbox is None:
+    if spec.name == "python" and sandbox is None:
+        handler = functools.partial(run_python_sandboxed, timeout=timeout)
         # The math names are the in-process REPL's injected builtins; in a real interpreter they are
         # not bare names, so this wording belongs to that handler, not to the language.
         description = (
@@ -117,16 +84,30 @@ def create_native_code_tools(
             "floor, ceil, factorial, pi, e."
         )
     else:
-        description = f"Execute a complete {spec.name} script. It is given no stdin and writes to stdout."
+        handler = functools.partial(
+            run_code_via_sandbox, runner=sandbox or resolve_sandbox(), timeout=timeout, language=spec.name
+        )
+        if spec.is_compiled:
+            description = (
+                f"Execute a complete {spec.name} program (compiled, then run). It is given no stdin and "
+                "writes to stdout. Include a main() and any needed includes."
+            )
+        else:
+            description = f"Execute a complete {spec.name} script. It is given no stdin and writes to stdout."
 
     registry = NativeToolRegistry()
     registry.register(
-        _code_tool(
+        NativeTool(
             name=tool_name or spec.name,
             description=description,
-            language=spec.name,
-            timeout=timeout,
-            sandbox=sandbox,
+            parameters=[
+                ToolParameter(
+                    name="code",
+                    type="string",
+                    description="Source code to execute. Writes results to stdout/print; it is given no stdin.",
+                ),
+            ],
+            handler=handler,
         )
     )
     return registry
@@ -161,12 +142,14 @@ def create_native_search_tools(backend: str | None = None) -> NativeToolRegistry
                 ToolParameter(
                     name="max_results",
                     type="integer",
-                    description="Maximum number of results (default 5)",
+                    description=f"Maximum number of results (default {DEFAULT_MAX_RESULTS})",
                     required=False,
                 ),
             ],
-            handler=lambda query, max_results=5: web_search(query, max_results=int(max_results), backend=backend),
-            async_handler=lambda query, max_results=5: async_web_search(
+            handler=lambda query, max_results=DEFAULT_MAX_RESULTS: web_search(
+                query, max_results=int(max_results), backend=backend
+            ),
+            async_handler=lambda query, max_results=DEFAULT_MAX_RESULTS: async_web_search(
                 query, max_results=int(max_results), backend=backend
             ),
         )
@@ -273,13 +256,16 @@ def create_native_file_tools() -> NativeToolRegistry:
 
 
 def create_all_native_tools(
-    timeout: float = SANDBOX_DEFAULT_TIMEOUT, sandbox: SandboxExecutor | None = None
+    timeout: float = SANDBOX_DEFAULT_TIMEOUT,
+    sandbox: SandboxExecutor | None = None,
+    search_backend: str | None = None,
 ) -> NativeToolRegistry:
-    """Registry with all native tools: math, python, search, and (simulated) file."""
+    """Registry with all native tools: math, python, search (on ``search_backend``, see
+    :func:`create_native_search_tools`), and (simulated) file."""
     return NativeToolRegistry.combine(
         create_native_math_tools(timeout=timeout),
         create_native_python_tools(timeout=timeout, sandbox=sandbox),
-        create_native_search_tools(),
+        create_native_search_tools(backend=search_backend),
         create_native_file_tools(),
     )
 
@@ -311,8 +297,7 @@ def create_session_code_tools(
     spec = require_language(language)
 
     def _run(code: str) -> str:
-        session = _require_session(session_getter)
-        return run_code_via_sandbox(code, sandbox=None, timeout=timeout, language=spec.name, session=session)
+        return run_code_via_sandbox(code, _require_session(session_getter), timeout=timeout, language=spec.name)
 
     registry = NativeToolRegistry()
     registry.register(
@@ -340,11 +325,9 @@ def create_session_bash_tools(
     ordinary observation; a backend failure and a working directory the command replaced raise their
     sandbox fault, which the protocol books by class.
     """
-    spec = require_language("bash")
 
     def _run(command: str) -> str:
-        session = _require_session(session_getter)
-        return run_code_via_sandbox(command, sandbox=None, timeout=timeout, language=spec.name, session=session)
+        return run_code_via_sandbox(command, _require_session(session_getter), timeout=timeout, language="bash")
 
     registry = NativeToolRegistry()
     registry.register(

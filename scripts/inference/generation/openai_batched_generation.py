@@ -34,6 +34,7 @@ from scripts.inference._common import (
     add_generation_args,
     add_s3_dataset_args,
     assistant_message_from_response,
+    follow_up_messages,
     load_prompts_with_resume,
     parse_dataset_args,
     reject_empty_results,
@@ -181,7 +182,7 @@ async def main() -> None:
             logger.warning(f"Skipping row {idx}: error in first response")
             continue
 
-        if args.follow_up_prompt_field in row and row[args.follow_up_prompt_field] is not None:
+        if follow_up_messages(row, args.follow_up_prompt_field) is not None:
             rows_with_followup.append((idx, row, msg, response))
         else:
             results.append(process_response(row, response, args, msg))

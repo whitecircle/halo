@@ -200,8 +200,14 @@ rewrite cannot update — raises instead of serving a geometry the trainer never
 A source declaring no `auto_map` has no schema to hand on; the export warns and keeps transformers'
 own.
 
-All three rewrites — the `model_type` restore, the legacy per-layer keys, the source schema — are
-one step, `finalize_exported_config` (`src/checkpoint/config_export.py`, which owns the whole
+An `auto_map` entry naming a module the directory does not carry is dropped. transformers copies
+remote code only for a class registered to an auto class, yet serializes the `auto_map` an in-library
+load read off the hub config (Laguna without `trust_remote_code`), so the entry would make every
+`trust_remote_code=True` reload raise on the missing file; a cross-repo `repo--module.Class`
+reference stays.
+
+All four rewrites — the `model_type` restore, the legacy per-layer keys, the source schema, the
+`auto_map` trim — are one step, `finalize_exported_config` (`src/checkpoint/config_export.py`, which owns the whole
 exported-config contract). Every writer calls it last: the parallel saves through
 `save_model_config`, `save_full_checkpoint`, and the single-GPU/DDP/accelerate-FSDP fallback in the
 trainer.

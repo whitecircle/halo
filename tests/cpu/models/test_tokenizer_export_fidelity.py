@@ -78,7 +78,9 @@ def _saved_config(tokenizer, tmp_path) -> dict:
 
 
 def test_the_export_carries_the_tokenizers_own_bound(tmp_path):
-    tokenizer = setup_model_and_tokenizer(CommonScriptArguments(), None, _tokenizer(), RUN_BUDGET)
+    tokenizer = setup_model_and_tokenizer(
+        CommonScriptArguments(), None, _tokenizer(), RUN_BUDGET, embeddings_sharded=input_embeddings_tp_sharded
+    )
     with pristine_model_max_length(tokenizer):
         assert _saved_config(tokenizer, tmp_path)["model_max_length"] == MODEL_CONTEXT
     assert tokenizer.model_max_length == RUN_BUDGET, "the run keeps truncating at its budget after a checkpoint"
@@ -88,8 +90,12 @@ def test_a_second_pin_does_not_overwrite_the_snapshot(tmp_path):
     """A preference or distillation script runs the seam once per model against one tokenizer; the
     second pass must not record the first pass's budget as the tokenizer's own bound."""
     tokenizer = _tokenizer()
-    setup_model_and_tokenizer(CommonScriptArguments(), None, tokenizer, RUN_BUDGET)
-    setup_model_and_tokenizer(CommonScriptArguments(), None, tokenizer, RUN_BUDGET)
+    setup_model_and_tokenizer(
+        CommonScriptArguments(), None, tokenizer, RUN_BUDGET, embeddings_sharded=input_embeddings_tp_sharded
+    )
+    setup_model_and_tokenizer(
+        CommonScriptArguments(), None, tokenizer, RUN_BUDGET, embeddings_sharded=input_embeddings_tp_sharded
+    )
     with pristine_model_max_length(tokenizer):
         assert _saved_config(tokenizer, tmp_path)["model_max_length"] == MODEL_CONTEXT
 
@@ -97,7 +103,9 @@ def test_a_second_pin_does_not_overwrite_the_snapshot(tmp_path):
 def test_a_processor_reaches_its_nested_tokenizer():
     """A VLM run hands the trainer the processor, whose save delegates to the tokenizer the seam
     pinned — so the restore has to reach through it."""
-    tokenizer = setup_model_and_tokenizer(CommonScriptArguments(), None, _tokenizer(), RUN_BUDGET)
+    tokenizer = setup_model_and_tokenizer(
+        CommonScriptArguments(), None, _tokenizer(), RUN_BUDGET, embeddings_sharded=input_embeddings_tp_sharded
+    )
     processor = types.SimpleNamespace(tokenizer=tokenizer)
     with pristine_model_max_length(processor):
         assert tokenizer.model_max_length == MODEL_CONTEXT
@@ -165,7 +173,9 @@ def test_a_trainer_save_exports_the_models_own_bound(tmp_path):
     Driven through a real save and read back off disk: the claim is about the number in the file the
     run ships, which a check that ``save_model``'s source mentions the context manager cannot make —
     it holds just as well when the manager is applied to the wrong object or after the write."""
-    tokenizer = setup_model_and_tokenizer(CommonScriptArguments(), None, _tokenizer(), RUN_BUDGET)
+    tokenizer = setup_model_and_tokenizer(
+        CommonScriptArguments(), None, _tokenizer(), RUN_BUDGET, embeddings_sharded=input_embeddings_tp_sharded
+    )
     # Premise: there IS a pin to keep off disk, so the assertion below is not the tokenizer's default.
     assert tokenizer.model_max_length == RUN_BUDGET
 
@@ -182,7 +192,11 @@ def test_a_trainer_save_exports_the_models_own_bound(tmp_path):
 
 def test_added_special_tokens_keep_the_checkpoints_own(tmp_path):
     tokenizer = setup_model_and_tokenizer(
-        CommonScriptArguments(added_special_tokens=["<newtok>"]), None, _tokenizer(), RUN_BUDGET
+        CommonScriptArguments(added_special_tokens=["<newtok>"]),
+        None,
+        _tokenizer(),
+        RUN_BUDGET,
+        embeddings_sharded=input_embeddings_tp_sharded,
     )
     assert tokenizer.extra_special_tokens == [*CONTROL_TOKENS, "<newtok>"]
     for control in CONTROL_TOKENS:
@@ -195,7 +209,11 @@ def test_added_special_tokens_keep_the_checkpoints_own(tmp_path):
 
 def test_re_adding_an_existing_special_token_does_not_duplicate_it():
     tokenizer = setup_model_and_tokenizer(
-        CommonScriptArguments(added_special_tokens=[CONTROL_TOKENS[0]]), None, _tokenizer(), RUN_BUDGET
+        CommonScriptArguments(added_special_tokens=[CONTROL_TOKENS[0]]),
+        None,
+        _tokenizer(),
+        RUN_BUDGET,
+        embeddings_sharded=input_embeddings_tp_sharded,
     )
     assert tokenizer.extra_special_tokens == CONTROL_TOKENS
 
@@ -227,10 +245,9 @@ def test_growing_the_vocabulary_under_tp_is_refused():
 def test_every_production_caller_passes_the_sharding_predicate():
     """The refusal above only fires where the caller supplies the verdict.
 
-    ``setup_model_and_tokenizer`` is sharding-agnostic by construction (no ``torch.distributed``), so
-    a call site that omits ``embeddings_sharded`` silently grows a TP-sharded embedding instead of
-    naming ``patch_vocab.py``. Source-level because reaching the seam any other way needs a whole
-    parallel model load.
+    ``embeddings_sharded`` is a required keyword, so a call site without it raises ``TypeError`` —
+    but only once that call runs, behind a whole (often parallel) model load. Source-level so the CPU
+    suite names such a call site first.
     """
     missing = []
     for path in sorted((*(REPO_ROOT / "src").rglob("*.py"), *(REPO_ROOT / "scripts").rglob("*.py"))):

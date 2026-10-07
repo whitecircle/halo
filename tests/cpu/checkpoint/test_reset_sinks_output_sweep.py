@@ -174,6 +174,27 @@ def test_the_single_file_branch_stamps_the_safetensors_format(tmp_path):
         assert handle.metadata() == SAFETENSORS_METADATA
 
 
+def test_an_interrupted_single_file_write_leaves_the_target_and_no_stage(tmp_path, monkeypatch):
+    """A kill mid-write under ``--in_place`` must leave the only copy untouched and no partial file
+    behind: an unrecognized leftover beside the weights rides along into every later aux-file copy."""
+    source = tmp_path / "src"
+    _build_source(source, sharded=False)
+    before = sorted(os.listdir(source))
+    original = (source / SINGLE).read_bytes()
+
+    def interrupted(tensors, filename, metadata=None):
+        with open(filename, "wb") as handle:
+            handle.write(b"partial")
+        raise OSError(28, "No space left on device")
+
+    monkeypatch.setattr(reset_sinks_mod, "save_file", interrupted)
+    with pytest.raises(OSError, match="No space left"):
+        reset_sinks(str(source), in_place=True)
+
+    assert sorted(os.listdir(source)) == before, "the interrupted write left a staged file behind"
+    assert (source / SINGLE).read_bytes() == original
+
+
 def test_the_sharded_branch_sweeps_the_previous_runs_index(tmp_path):
     """The ``from_pretrained`` branch: ``save_pretrained`` removes the numbered shards it did not
     write but leaves the index naming them, so index-first readers resolve files that are gone."""

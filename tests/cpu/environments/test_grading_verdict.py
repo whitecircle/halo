@@ -563,6 +563,28 @@ def test_verdict_detail_travels_with_the_grading_contract():
         CodeContestsEnvironment(language="python", sandbox=sandbox, verdict_detail="diff")
 
 
+@pytest.mark.parametrize(
+    ("field", "env_knob", "value"),
+    [
+        ("comparison", "output_comparison", "diff"),
+        ("verdict_detail", "verdict_detail", "diff"),
+        ("max_grading_seconds", "max_grading_seconds", 0.0),
+        ("max_grading_seconds", "max_grading_seconds", float("nan")),
+    ],
+)
+def test_the_grading_contract_refuses_a_bad_value_wherever_it_is_built(field, env_knob, value):
+    """The contract checks its own fields, so a block the re-grader restores through ``with_meta`` is
+    refused when it loads, not at its first grade, and the env constructor refuses the knob through the
+    same check."""
+    spec = GradingSpec(sandbox=StubSandbox())
+    with pytest.raises(ValueError, match=field):
+        spec.with_meta({field: value})
+    with pytest.raises(ValueError, match=field):
+        GradingSpec(sandbox=StubSandbox(), **{field: value})
+    with pytest.raises(ValueError, match=env_knob):
+        CodeContestsEnvironment(language="python", sandbox=StubSandbox(), **{env_knob: value})
+
+
 def test_select_verdict_prefers_checker():
     """A non-empty checker always wins over the comparison mode."""
     v = select_verdict("# checker", "tokens", StubSandbox(SandboxResult(stdout="1", returncode=0)))

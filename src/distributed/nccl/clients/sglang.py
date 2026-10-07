@@ -61,7 +61,6 @@ logger = logging.getLogger(__name__)
 # or both the sync and the teardown path), so a route rename cannot leave a stale label behind.
 _EP_INIT_GROUP = "/init_weights_update_group"
 _EP_UPDATE_FROM_DIST = "/update_weights_from_distributed"
-_EP_CONTINUE = "/continue_generation"
 # Byte alignment of each tensor inside the staging arena: a multiple of every dtype's element size,
 # so a uint8 slice can be viewed as the tensor's dtype.
 _ARENA_ALIGNMENT = 256
@@ -109,7 +108,7 @@ class SGLangWeightSyncClient(BaseWeightSyncClient):
     # same request is discarded without error. The fusion exists only where the model has both
     # projections (``q_lora_rank`` set), which the per-model scoping reads off the module tree.
     CO_LOADED_PARAM_GROUPS = (("self_attn.q_a_proj.weight", "self_attn.kv_a_proj_with_mqa.weight"),)
-    RESUME_ENDPOINT = _EP_CONTINUE
+    RESUME_ENDPOINT = "/continue_generation"
     # An empty body is rejected: the endpoint takes a request dataclass, so it needs JSON.
     RESUME_PAYLOAD: dict | None = {}
 

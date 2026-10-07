@@ -80,13 +80,15 @@ plt.rcParams.update(
 )
 
 
-def save(fig, name, dpi=200):
-    """Write `<name>.png` into agent-docs/assets/diagrams with consistent options."""
+def save(fig, name):
+    """Write `<name>.png` into agent-docs/assets/diagrams with consistent options, then close `fig`."""
     save_figure(
         fig,
         os.path.join(ASSETS, f"{name}.png"),
-        dpi=dpi,
+        dpi=200,
         bbox_inches="tight",
         facecolor=BG,
         edgecolor="none",
     )
+    plt.close(fig)
+    print(f"✓ {name}.png")

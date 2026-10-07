@@ -3,7 +3,6 @@ and answers with one JSON verdict — integer scores per requirement, or per che
 and the verbatim span of the policy's actions that shows it."""
 
 import json
-import logging
 import math
 import re
 from collections.abc import Mapping
@@ -20,11 +19,10 @@ from src.inference.openai_client import (
     json_schema_response_format,
     parse_json_object,
 )
+from src.inference.response import get_finish_reason
 from src.rewards.samples import ScoringSample, cut_middle, render_tools, task_text, view_text
 from src.rewards.scorers.base import Scorer, ScoreResult
-from src.rewards.terms import JudgeTerm, View
-
-logger = logging.getLogger(__name__)
+from src.rewards.terms import JudgeMetric, JudgeTerm, View
 
 SYSTEM_PROMPT = (
     "You are a strict, impartial grader of a policy model's episode. Judge only what the episode "
@@ -188,12 +186,12 @@ class GenerativeJudge(Scorer):
         if term.is_veto:
             keys = [
                 *(self._key(check.name) for check in term.checks),
-                self._key("veto"),
-                self._key("unsupported_flags"),
+                self._key(JudgeMetric.VETO),
+                self._key(JudgeMetric.UNSUPPORTED_FLAGS),
             ]
         else:
             keys = [self._key(requirement.name) for requirement in term.requirements]
-        return (*keys, self._key("completion_tokens"))
+        return (*keys, self._key(JudgeMetric.COMPLETION_TOKENS))
 
     def _connect(self) -> AsyncOpenAI:
         if self._client is None:
@@ -212,10 +210,10 @@ class GenerativeJudge(Scorer):
         metrics: dict[str, float] = {}
         usage = getattr(completion, "usage", None)
         if usage is not None:
-            metrics[self._key("completion_tokens")] = float(getattr(usage, "completion_tokens", 0) or 0)
+            metrics[self._key(JudgeMetric.COMPLETION_TOKENS)] = float(getattr(usage, "completion_tokens", 0) or 0)
             cost = getattr(usage, "cost", None)
             if isinstance(cost, int | float):
-                metrics[self._key("cost_usd")] = float(cost)
+                metrics[self._key(JudgeMetric.COST_USD)] = float(cost)
         return metrics
 
     def _request(self, prompt: str) -> dict[str, Any]:
@@ -241,20 +239,19 @@ class GenerativeJudge(Scorer):
         try:
             request = self._request(grading_prompt(term, sample))
         except Exception as e:
-            logger.warning("judge %r prompt build failed: %s: %s", term.name, type(e).__name__, e)
-            return ScoreResult(None, error=f"prompt build failed: {type(e).__name__}: {e}")
+            return ScoreResult(None, error=self._failed("prompt build", e))
         try:
             completion = await chat_completion(self._connect(), **request)
         except Exception as e:
-            logger.warning("judge %r request failed: %s: %s", term.name, type(e).__name__, e)
-            return ScoreResult(None, error=f"request failed: {type(e).__name__}: {e}")
+            return ScoreResult(None, error=self._failed("request", e))
         choice = completion.choices[0]
         content = choice.message.content or ""
         verdict = parse_verdict(content, term)
         if verdict is None:
-            finish = getattr(choice, "finish_reason", None)
             excerpt = content[:REPLY_EXCERPT_CHARS]
-            return ScoreResult(None, error=f"unparseable judge reply (finish_reason={finish!r}): {excerpt!r}")
+            return ScoreResult(
+                None, error=f"unparseable judge reply (finish_reason={get_finish_reason(choice)!r}): {excerpt!r}"
+            )
         metrics = self._usage_metrics(completion)
         if term.is_veto:
             return self._veto_result(verdict, action_text(term, sample), metrics)
@@ -278,7 +275,7 @@ class GenerativeJudge(Scorer):
             if supported:
                 quotes.append(f"{check.name}: {evidence.strip()!r}")
         veto = any(fired[check.name] for check in term.checks if check.veto)
-        metrics[self._key("veto")] = 1.0 if veto else 0.0
-        metrics[self._key("unsupported_flags")] = float(unsupported)
+        metrics[self._key(JudgeMetric.VETO)] = 1.0 if veto else 0.0
+        metrics[self._key(JudgeMetric.UNSUPPORTED_FLAGS)] = float(unsupported)
         detail = "\n".join(filter(None, [verdict.rationale, *(f"fired {quote}" for quote in quotes)])) or None
         return ScoreResult(term.flag_fraction(fired), metrics, detail=detail, veto=veto)

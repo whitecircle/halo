@@ -28,7 +28,7 @@ import logging
 
 import torch
 from accelerate import PartialState
-from transformers import AutoTokenizer, PreTrainedModel, PreTrainedTokenizer
+from transformers import PreTrainedModel, PreTrainedTokenizer
 
 import src.distributed.expert_parallel.layers.roster  # noqa: F401 — registers the EP export roster the config finalizer requires
 from scripts._common import (
@@ -47,7 +47,7 @@ from src.checkpoint.tool_io import (
 from src.log import configure_cli_logging
 from src.models.loading.dtype import DTYPE_BY_NAME
 from src.models.loading.model_preparation import auto_load_model
-from src.models.loading.tokenizer_setup import load_processing_class
+from src.models.loading.tokenizer_setup import load_chat_template, load_processing_class
 from src.models.patches.gpt_oss_sinks import SinksPolicy, apply_sinks_policy, stamped_sinks_policy
 from src.models.structure import resolve_tokenizer
 
@@ -81,7 +81,8 @@ def parse_args():
         "--chat_template",
         type=str,
         default=None,
-        help="Optional: Path to a file containing a custom chat template to set on the tokenizer",
+        help="Optional custom chat template to set on the tokenizer: a .jinja/.jinja2/.j2 file, or the "
+        "template string itself (the spelling the training configs' chat_template takes).",
     )
     parser.add_argument(
         "--reset_sinks",
@@ -227,28 +228,22 @@ def main():
     logger.info("Loading tokenizer/processor...")
     processing_class = load_processing_class(args.model_id, trust_remote_code=args.trust_remote_code)
     if processing_class is None:
-        processing_class = AutoTokenizer.from_pretrained(args.model_id, trust_remote_code=args.trust_remote_code)
+        raise ValueError(f"{args.model_id} ships no tokenizer, so there is no vocabulary to add tokens to.")
     tokenizer = resolve_tokenizer(processing_class)
 
     if args.chat_template:
-        logger.info(f"Loading custom chat template from: {args.chat_template}")
-        with open(args.chat_template) as f:
-            chat_template = f.read()
-        tokenizer.chat_template = chat_template
+        tokenizer.chat_template = load_chat_template(args.chat_template)
 
     # auto_load_model resolves the widest Auto* class (AutoModelForCausalLM would drop a vision
     # tower) and routes through the checkpoint-coverage gate: a truncated or key-mismatched source
     # would otherwise load with randomly initialized tensors and be saved as a complete-looking
     # patch.
     logger.info("Loading model...")
-    model_kwargs = {"dtype": DTYPE_BY_NAME[args.dtype]}
-    if args.device_map:
-        model_kwargs["device_map"] = args.device_map
-
     model = auto_load_model(
         args.model_id,
         trust_remote_code=args.trust_remote_code,
-        **model_kwargs,
+        dtype=DTYPE_BY_NAME[args.dtype],
+        device_map=args.device_map,
     )
     logger.info(f"Loaded model class: {type(model).__name__} (model_type={model.config.model_type})")
 

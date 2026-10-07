@@ -5,7 +5,6 @@
 
 from __future__ import annotations
 
-import gc
 import time
 
 import torch
@@ -31,6 +30,7 @@ from src.distributed.expert_parallel.loading import (
     cast_loaded_parameters,
     decide_lazy_loadable,
     load_ep_model,
+    load_through_cpu,
     reject_ep_sharded_checkpoint,
     resolve_hub_or_local_dir,
 )
@@ -486,50 +486,6 @@ def _dispatch_model_loading(
     )
 
 
-def _sequential_load_to_cuda(
-    model_name_or_path: str,
-    model_class,
-    local_rank: int,
-    max_concurrent: int,
-    common_kwargs: dict,
-    *,
-    keep_fp32: bool,
-    ep_wrapped: bool,
-    ep_config: EPConfig | None = None,
-) -> PreTrainedModel:
-    """Load to CPU one rank at a time (low CPU peak), move to this rank's GPU, then
-    free CPU memory. Shared by the EP+TP sequential fallback and the TP-MoE loader.
-
-    ``keep_fp32`` and ``ep_wrapped`` are :func:`cast_loaded_parameters`'."""
-    strict = common_kwargs.pop("preserve_checkpoint_precision", False)
-    precision_guard = DeferredRankFailure(f"FP32-master checkpoint load from {model_name_or_path}")
-    with joined_node_load(f"Model load from {model_name_or_path}", max_concurrent):
-        model = from_pretrained_verified(
-            model_class,
-            model_name_or_path,
-            device_map="cpu",
-            **common_kwargs,
-        )
-        cast_loaded_parameters(model, common_kwargs.get("dtype"), keep_fp32=keep_fp32, ep_wrapped=ep_wrapped)
-        precision_guard.run(
-            lambda: restore_fp32_master_parameters(
-                model,
-                model_name_or_path,
-                ep_config,
-                keep_non_ep=keep_fp32,
-                strict=strict,
-                revision=common_kwargs.get("revision"),
-            )
-        )
-        if precision_guard.reason is None:
-            model = model.to(f"cuda:{local_rank}")
-        gc.collect()
-        torch.cuda.empty_cache()
-    precision_guard.reject()
-    finalize_loaded_model(model)
-    return model
-
-
 def _from_pretrained_on_local_gpu(
     model_name_or_path: str,
     model_class,
@@ -734,15 +690,15 @@ def _load_ep_tp_model(
     else:
         if pc.ep_lazy_loading:
             logger.info(f"[Rank {rank}] Lazy path unavailable, falling back to sequential loading")
-        model = _sequential_load_to_cuda(
-            model_name_or_path,
+        model = load_through_cpu(
             model_class,
-            local_rank,
-            pc.max_concurrent_loading,
-            common_kwargs,
+            model_name_or_path,
+            load_phase="Model load",
+            max_concurrent_loading=pc.max_concurrent_loading,
+            ep_config=ep_config,
             keep_fp32=pc.fp32_non_ep_params,
             ep_wrapped=True,
-            ep_config=ep_config,
+            **common_kwargs,
         )
         _apply_attention_only_tp(model, rank, pc.tp_size, pc.data_parallel_size)
         model = _apply_ep_wrappers(model, ep_config)
@@ -853,15 +809,15 @@ def _load_tp_moe_model(
     logger.info(f"  TP size: {tp_size}, DP size: {dp_size}")
 
     ep_config = pc.create_ep_config() if pc.needs_ep_wrappers else None
-    model = _sequential_load_to_cuda(
-        model_name_or_path,
+    model = load_through_cpu(
         model_class,
-        local_rank,
-        pc.max_concurrent_loading,
-        common_kwargs,
+        model_name_or_path,
+        load_phase="Model load",
+        max_concurrent_loading=pc.max_concurrent_loading,
+        ep_config=ep_config,
         keep_fp32=pc.fp32_non_ep_params,
         ep_wrapped=pc.needs_ep_wrappers,
-        ep_config=ep_config,
+        **common_kwargs,
     )
     _apply_attention_only_tp(model, rank, tp_size, dp_size)
 

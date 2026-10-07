@@ -93,7 +93,6 @@ _STAGE_TOKEN = "0123456789abcdef0123456789abcdef"
 LEFTOVER_STAGES = (
     ".trainer_state.json.uncommitted",
     f".reference_logps.pt.{_STAGE_TOKEN}.tmp",
-    f".reference_logps.pt.{_STAGE_TOKEN}",
     "prefetch_pending-0-of-2.pt.staged",
 )
 

@@ -18,9 +18,10 @@ from src.environments.base import (
     BaseEnvironment,
     EpisodeGrade,
     Trajectory,
+    require_count,
     require_magnitudes,
 )
-from src.environments.sandbox.base import SANDBOX_FAULTS, SandboxAgentFault, SandboxInfraError
+from src.environments.sandbox.base import SandboxFault
 from src.environments.tools.definitions import (
     NativeTool,
     NativeToolCall,
@@ -50,10 +51,20 @@ def validate_tool_budgets(budgets: dict[str, int] | None, registry: NativeToolRe
             raise ValueError(
                 f"tool_budgets names {name!r}, which is not a registered tool: {sorted(registry.names())}"
             )
-        if isinstance(cap, bool) or not isinstance(cap, int) or cap < 0:
-            raise ValueError(f"tool_budgets[{name!r}] must be an int >= 0, got {cap!r}")
+        require_count(f"tool_budgets[{name!r}]", cap, 0)
         validated[name] = cap
     return validated
+
+
+def tool_accounting_info(budgets: dict[str, int]) -> dict[str, Any]:
+    """The per-episode tool counters a protocol seeds at reset, which the base's accounting books every
+    call into, and the episode's copy of the per-tool ``budgets``."""
+    return {
+        "total_tool_calls": 0,
+        "successful_tool_calls": 0,
+        TOOL_CALL_COUNTS_KEY: {},
+        EPISODE_TOOL_BUDGETS_KEY: dict(budgets),
+    }
 
 
 def admit_tool_call(
@@ -77,9 +88,7 @@ def admit_tool_call(
     return bound
 
 
-def tool_call_outcome(
-    name: str, outcome: str | Exception
-) -> tuple[str, bool, SandboxInfraError | SandboxAgentFault | None]:
+def tool_call_outcome(name: str, outcome: str | Exception) -> tuple[str, bool, SandboxFault | None]:
     """A call's observation, whether it succeeded, and the sandbox fault it ended on, from what tool
     ``name`` returned or raised (admission included), under either protocol.
 
@@ -91,7 +100,7 @@ def tool_call_outcome(
     """
     if not isinstance(outcome, Exception):
         return outcome, True, None
-    fault = outcome if isinstance(outcome, SANDBOX_FAULTS) else None
+    fault = outcome if isinstance(outcome, SandboxFault) else None
     if isinstance(outcome, ToolBudgetExhausted | ToolArgumentError):
         logger.debug("Tool %r refused the call: %s", name, outcome)
     elif fault is None:
@@ -191,12 +200,7 @@ class NativeToolUseEnvironment(BaseEnvironment):
             prompt,
             context,
             system_prompt=self.system_prompt,
-            extra_info={
-                "total_tool_calls": 0,
-                "successful_tool_calls": 0,
-                TOOL_CALL_COUNTS_KEY: {},
-                EPISODE_TOOL_BUDGETS_KEY: dict(self.tool_budgets),
-            },
+            extra_info=tool_accounting_info(self.tool_budgets),
         )
 
     @staticmethod

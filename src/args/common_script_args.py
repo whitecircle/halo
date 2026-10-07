@@ -1,6 +1,7 @@
 """``CommonScriptArguments`` — the dataset / logging / callback knobs every training script shares."""
 
 from dataclasses import dataclass, field
+from typing import ClassVar
 
 from src.args.validation import RangeValidatedConfig
 from src.data.pipeline.tokenizer_backend import TokenizerBackend
@@ -13,6 +14,10 @@ _DEFAULT_PROJECT = "default-project"
 
 @dataclass
 class CommonScriptArguments(RangeValidatedConfig):
+    # The tracking project a run lands in when the config names none, declared per script class so the
+    # ``project_name`` field and its help stay declared once rather than redeclared in every subclass.
+    PROJECT_NAME: ClassVar[str] = _DEFAULT_PROJECT
+
     dataset: str | list[str] = field(
         default="/path/to/dataset",
         metadata={
@@ -210,19 +215,16 @@ class CommonScriptArguments(RangeValidatedConfig):
         },
     )
 
-    def _apply_default_project_name(self, name: str):
-        """Set project_name to ``name`` if it still holds the shared placeholder default.
-
-        Called from each script-arg class's ``__post_init__``, ahead of :meth:`_validate_ranges`.
-        """
+    def __post_init__(self):
         if self.project_name == _DEFAULT_PROJECT:
-            self.project_name = name
+            self.project_name = self.PROJECT_NAME
+        self._validate_ranges()
 
     def _validate_ranges(self) -> None:
         """Guard ``project_name``, which becomes ``WANDB_PROJECT`` / ``CLEARML_PROJECT`` verbatim.
 
-        Checked here rather than in :meth:`_apply_default_project_name` so the CLI path is held to
-        the same rule: ``--project_name=`` and ``--project_name=None`` land by ``setattr``, skipping
+        Checked here rather than where ``__post_init__`` applies :data:`PROJECT_NAME`, so the CLI path
+        is held to the same rule: ``--project_name=`` and ``--project_name=None`` land by ``setattr``, skipping
         ``__post_init__``, and would otherwise name the tracking project ``""`` or ``"None"``. A YAML
         ``project_name: null`` reaches ``os.environ`` as ``None``, where the assignment raises
         TypeError later in the run.

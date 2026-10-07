@@ -197,13 +197,12 @@ def run_test_inference(model_path, model_type, is_peft=False, trust_remote_code=
     so the caller has nothing to branch on. ``--verify`` is the gate that raises. ``is_peft`` takes
     :func:`load_model`'s adapter path, the same split the ``--verify`` gate makes.
     """
-    logger.info(f"Running test inference on model at {model_path}...")
-
-    tokenizer = AutoTokenizer.from_pretrained(model_path, trust_remote_code=trust_remote_code)
-
     if model_type == "base":
         logger.warning("Test inference not implemented for base model type — skipping the inference check")
         return
+
+    logger.info(f"Running test inference on model at {model_path}...")
+    tokenizer = AutoTokenizer.from_pretrained(model_path, trust_remote_code=trust_remote_code)
 
     model = load_model(
         model_path,
@@ -232,11 +231,10 @@ def run_test_inference(model_path, model_type, is_peft=False, trust_remote_code=
 
         return
 
-    test_text = _SMOKE_CLASSIFICATION_TEXT
-    inputs = tokenizer(test_text, return_tensors="pt")
+    inputs = tokenizer(_SMOKE_CLASSIFICATION_TEXT, return_tensors="pt")
     inputs = {k: v.to(next(model.parameters()).device) for k, v in inputs.items()}
 
-    logger.info(f"Running classification for: '{test_text}'")
+    logger.info(f"Running classification for: '{_SMOKE_CLASSIFICATION_TEXT}'")
     with torch.no_grad():
         outputs = model(**inputs)
 

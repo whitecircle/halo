@@ -12,6 +12,9 @@ Two of those things are load-bearing and go missing silently when they are not w
   config classes Bailing/Ling ship, so the key vanishes and every model-type-keyed reader
   downstream (the sharded-EP merge, the hub key renames) sees no family at all.
 
+The converse holds for every writer: an ``auto_map`` an in-library load carried over from the hub
+config must not name modules the export does not ship.
+
 Run: ``pytest -m cpu tests/cpu/checkpoint/test_parallel_config_save.py``
 """
 
@@ -22,10 +25,22 @@ import json
 import sys
 
 import pytest
-from transformers import PretrainedConfig
+from transformers import AutoConfig, AutoModelForCausalLM, LagunaConfig, PretrainedConfig
 
 import src.distributed.expert_parallel.layers.roster  # noqa: F401  registers the roster every config writer requires
-from src.checkpoint.config_export import save_model_config
+from src.checkpoint.config_export import (
+    checkpoint_source_ref,
+    drop_unshipped_auto_map,
+    finalize_exported_config,
+    save_model_config,
+)
+from tests.common.models import TINY_LAGUNA_CONFIG
+
+# What ``poolside/Laguna-S-2.1``'s config.json declares beside the in-library ``laguna`` model type.
+_LAGUNA_HUB_AUTO_MAP = {
+    "AutoConfig": "configuration_laguna.LagunaConfig",
+    "AutoModelForCausalLM": "modeling_laguna.LagunaForCausalLM",
+}
 
 
 class _VendorConfig(PretrainedConfig):
@@ -76,6 +91,9 @@ def test_remote_code_modules_travel_with_the_checkpoint(tmp_path, monkeypatch):
 
     written = sorted(p.name for p in out.iterdir())
     assert "modeling_vendor_moe.py" in written, f"auto_map names a module the save did not write: {written}"
+    assert json.loads((out / "config.json").read_text())["auto_map"] == {
+        "AutoModelForCausalLM": "modeling_vendor_moe.VendorForCausalLM"
+    }, "the entry naming a shipped module must survive the export"
 
 
 def test_remote_code_modules_travel_from_an_fsdp2_sharded_model(tmp_path, monkeypatch):
@@ -141,6 +159,59 @@ def test_a_plain_model_writes_no_remote_code(tmp_path):
     save_model_config(_VendorModel(_PlainConfig()), str(out))
 
     assert not [p.name for p in out.iterdir() if p.suffix == ".py"]
+
+
+def _in_library_laguna(source_dir):
+    """Laguna as a run without ``trust_remote_code`` loads it: the in-library classes, read off a
+    config.json whose ``auto_map`` names the release's remote modules."""
+    source_dir.mkdir()
+    payload = LagunaConfig(**TINY_LAGUNA_CONFIG).to_dict() | {"auto_map": _LAGUNA_HUB_AUTO_MAP}
+    (source_dir / "config.json").write_text(json.dumps(payload))
+    config = AutoConfig.from_pretrained(str(source_dir))
+    assert type(config) is LagunaConfig and config.auto_map == _LAGUNA_HUB_AUTO_MAP, (
+        "fixture no longer reproduces an in-library load that keeps the hub auto_map"
+    )
+    return AutoModelForCausalLM.from_config(config)
+
+
+def _save_pretrained_export(model, output_dir: str) -> None:
+    """The single-GPU / tool path: ``save_pretrained``, then the shared finalizer."""
+    model.save_pretrained(output_dir)
+    finalize_exported_config(model.config, output_dir, source=checkpoint_source_ref(model))
+
+
+@pytest.mark.parametrize("export", [save_model_config, _save_pretrained_export], ids=["parallel", "save_pretrained"])
+def test_an_in_library_load_exports_no_auto_map_naming_unshipped_modules(tmp_path, export):
+    """transformers ships remote code only for a class registered to an auto class, yet serializes
+    the hub ``auto_map``; the export then names modules it never wrote and a ``trust_remote_code``
+    reload (the checkpoint tools' default for a local source) raises on the missing file."""
+    model = _in_library_laguna(tmp_path / "src")
+    out = tmp_path / "out"
+    out.mkdir()
+
+    export(model, str(out))
+
+    assert "auto_map" not in json.loads((out / "config.json").read_text())
+    assert type(AutoConfig.from_pretrained(str(out), trust_remote_code=True)) is LagunaConfig
+
+
+def test_only_the_unshipped_auto_map_entries_are_dropped(tmp_path):
+    """A shipped module, a cross-repo ``repo--module.Class`` reference and a tokenizer pair whose
+    shipped slot sits beside an absent one all still resolve on reload; only the dangling entry goes."""
+    (tmp_path / "modeling_vendor.py").write_text("")
+    (tmp_path / "tokenization_vendor.py").write_text("")
+    kept = {
+        "AutoModelForCausalLM": "modeling_vendor.VendorForCausalLM",
+        "AutoModel": "org/vendor-1.0--modeling_shared.SharedModel",
+        "AutoTokenizer": ["tokenization_vendor.VendorTokenizer", None],
+    }
+    (tmp_path / "config.json").write_text(
+        json.dumps({"model_type": "vendor", "auto_map": kept | {"AutoConfig": "configuration_vendor.VendorConfig"}})
+    )
+
+    drop_unshipped_auto_map(str(tmp_path))
+
+    assert json.loads((tmp_path / "config.json").read_text())["auto_map"] == kept
 
 
 if __name__ == "__main__":

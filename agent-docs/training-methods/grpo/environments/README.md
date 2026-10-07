@@ -30,7 +30,7 @@ Actors run environments on CPU and inherit the `ray start` daemon's environment 
 |---|---|
 | `code_contests`, `codeforces`, `swe` | A sandbox backend and a large `TMPDIR`: the local backend runs each program in a temp dir |
 | `react_math`, `native_math`, `native_coding`, closed-book `exam_qa` | Nothing beyond the image: `calculate` and the `python` REPL run in-process with imports blocked |
-| `react_search`, `qa_search`, `native_combined`, open-book `exam_qa` | Outbound network. `SERPER_API_KEY` / `BRAVE_API_KEY` / `TAVILY_API_KEY` picks a keyed search backend; with none, keyless DuckDuckGo |
+| `react_search`, `qa_search`, `native_combined`, open-book `exam_qa` | Outbound network. `SERPER_API_KEY` / `BRAVE_API_KEY` / `TAVILY_API_KEY` picks a keyed search backend; with none, keyless DuckDuckGo. `search_backend` names one instead ([QA Benchmarks](benchmarks.md#configuration)) |
 | `mcp` | The preset's launcher on `PATH` (`npx`; `uvx` for `fetch`) and its credential. An SSE server needs only network to `server_url` |
 
 The code-executing environments take `sandbox_backend` / `sandbox_url` in `environment_kwargs`, else `HALO_SANDBOX_BACKEND` / `HALO_SANDBOX_URL` — [Code Execution Sandboxes](sandbox.md).
@@ -50,7 +50,7 @@ environment_kwargs:
   tool_error_penalty: 0.1
 ```
 
-The factory forwards the merged dict whole, so any constructor parameter of the resolved class is settable from `environment_kwargs`. A key no constructor binds — a typo, or an option of another `environment_type` — raises `TypeError` at construction. Two keys the factories consume themselves: the ReAct presets refuse a set `system_prompt`, and `mcp` reads `mcp_server`. `rewards` reaches the constructor as `reward_terms`.
+The factory forwards the merged dict whole, so any constructor parameter of the resolved class is settable from `environment_kwargs`. A key no constructor binds — a typo, or an option of another `environment_type` — raises `TypeError` at construction. Keys the factories consume themselves: the ReAct presets refuse a set `system_prompt`, `mcp` reads `mcp_server`, and `native_combined` reads `search_backend`. `rewards` reaches the constructor as `reward_terms`.
 
 [Reward Terms](../rewards.md#environment-arm) defines how the episode reward is composed.
 

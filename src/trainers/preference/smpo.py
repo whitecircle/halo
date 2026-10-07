@@ -65,7 +65,7 @@ from src.distributed.pipeline_parallel.losses import (
     split_pairs,
     token_logprobs,
 )
-from src.models.patches.attention import VARLEN_ATTN_IMPLEMENTATIONS
+from src.models.patches.attention import VARLEN_ATTN_IMPLEMENTATIONS, effective_attn_implementation
 from src.models.segment_markers import (
     document_ids,
     flattened_document_positions,
@@ -82,6 +82,24 @@ from src.trainers.mixins.pp_gates import reject_pp_peft
 from src.trainers.mixins.stored_metrics import StoredMetricsMixin
 
 logger = get_logger(__name__, log_level="info")
+
+
+def reject_padding_free_without_varlen(model_config) -> None:
+    """Refuse a padding-free run unless the decoder runs a varlen kernel.
+
+    Read off the decoder's own config level: a VLM wrapper records the backend on its text
+    sub-config, so a top-level read reports ``None`` and would refuse a model running flash attention.
+    """
+    attn_impl = effective_attn_implementation(model_config)
+    if attn_impl not in VARLEN_ATTN_IMPLEMENTATIONS:
+        raise ValueError(
+            f"padding_free is not supported with attn_implementation='{attn_impl}': it has no "
+            f"varlen kernel. Padding-free flattens the batch into one [1, total_tokens] "
+            f"sequence carrying no attention mask, so every example would attend across the "
+            f"whole batch and the preference logps would be computed on contaminated "
+            f"contexts — silently. Use one of {list(VARLEN_ATTN_IMPLEMENTATIONS)}, or set "
+            f"padding_free: false."
+        )
 
 
 @dataclass
@@ -203,16 +221,7 @@ class SmoothMarginPOTrainer(StoredMetricsMixin, DistributedTrainerMixin, Trainer
 
         if self.padding_free:
             reject_compressed_kv_rows(model.config, "padding_free")
-            attn_impl = getattr(model.config, "_attn_implementation", None)
-            if attn_impl not in VARLEN_ATTN_IMPLEMENTATIONS:
-                raise ValueError(
-                    f"padding_free is not supported with attn_implementation='{attn_impl}': it has no "
-                    f"varlen kernel. Padding-free flattens the batch into one [1, total_tokens] "
-                    f"sequence carrying no attention mask, so every example would attend across the "
-                    f"whole batch and the preference logps would be computed on contaminated "
-                    f"contexts — silently. Use one of {list(VARLEN_ATTN_IMPLEMENTATIONS)}, or set "
-                    f"padding_free: false."
-                )
+            reject_padding_free_without_varlen(model.config)
             require_segment_aware_kernels(model.config, "padding_free")
         # position_ids alone keep the padding-free row's documents apart in attention; these are the
         # segment markers this family's conv / linear-attention mixers read on top.

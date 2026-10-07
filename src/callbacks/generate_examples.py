@@ -141,7 +141,7 @@ class GenerateExamplesCallback(TrainerCallback):
         tokenized ``input_ids``: generation replays the tokenized prompt, so an untokenized or absent
         generate split (the VLM path, for instance) cannot be generated from.
         """
-        if not getattr(args, "generate_eval_examples", False):
+        if not args.generate_eval_examples:
             return None
         if generate_dataset is None or "input_ids" not in generate_dataset.column_names:
             return None

@@ -12,12 +12,18 @@ import tempfile
 from dataclasses import dataclass, field, make_dataclass
 from datetime import datetime
 from typing import Literal
+from unittest import mock
 
 import pytest
 from transformers import TrainingArguments
+from trl import DPOConfig, ModelConfig, RewardConfig, SFTConfig
 
 from src.args.distributed_args import DistributedArguments
+from src.args.dpo_args import DPOScriptArguments
 from src.args.environmental_grpo_args import EnvironmentalGRPOScriptArguments
+from src.args.reward_args import RMScriptArguments
+from src.args.self_distill_args import SelfDistillationArguments
+from src.args.sft_args import SFTScriptArguments
 from src.configs.async_training_config import AsyncTrainingConfig
 from src.configs.offline_grpo_config import OfflineGRPOConfig
 from src.training.parser import (
@@ -608,6 +614,65 @@ def test_explicit_set_scan_normalizes_dashed_flags():
         sys.argv = old_argv
     assert "use_liger_kernel" in explicitly_set
     assert "per_device_train_batch_size" in explicitly_set
+
+
+@pytest.mark.parametrize(
+    "script_args_cls, trl_config_cls",
+    [
+        (SFTScriptArguments, SFTConfig),
+        (SelfDistillationArguments, SFTConfig),
+        (DPOScriptArguments, DPOConfig),
+        (RMScriptArguments, RewardConfig),
+    ],
+    ids=["sft", "self_distill", "dpo", "reward"],
+)
+def test_flags_only_launch_hands_shared_field_to_every_declarer(script_args_cls, trl_config_cls, tmp_path):
+    """A launch with no YAML, on a script whose tuple declares ``pad_token`` twice (its script args
+    and TRL's config), parses and gives the value to both — the tokenizer setup reads the
+    script-args copy, TRL its own."""
+    parser = H4ArgumentParser((script_args_cls, trl_config_cls, ModelConfig, DistributedArguments))
+    argv = [
+        "prog",
+        "--model_name_or_path=dummy/model",
+        f"--output_dir={tmp_path}",
+        "--pad_token=<|pad|>",
+        "--use_cpu=true",
+        "--bf16=false",
+    ]
+    with mock.patch("src.training.parser.install_log_tee"):
+        script_args, trl_config, model_config, _ = _parse_with_argv(parser, argv)
+    assert (script_args.pad_token, trl_config.pad_token) == ("<|pad|>", "<|pad|>")
+    assert script_args.eos_token is None
+    assert model_config.model_name_or_path == "dummy/model"
+    assert trl_config.output_dir == str(tmp_path)
+
+
+def test_flags_only_launch_leaves_unset_shared_field_at_each_default():
+    """Only the flags given are handed out, as a YAML hands out only its keys: a shared field left
+    off the command line keeps each declarer's own default, not the last declarer's for all."""
+
+    @dataclass
+    class OverlapA:
+        shared_field: int = 0
+        only_a: str = "a"
+
+    @dataclass
+    class OverlapB:
+        shared_field: int = 99
+
+    parser = H4ArgumentParser((OverlapA, OverlapB))
+    result_a, result_b = _parse_with_argv(parser, ["prog", "--only_a=hello"])
+    assert (result_a.only_a, result_a.shared_field, result_b.shared_field) == ("hello", 0, 99)
+
+    result_a, result_b = _parse_with_argv(parser, ["prog", "--shared_field=7"])
+    assert (result_a.shared_field, result_b.shared_field) == (7, 7)
+
+
+def test_flags_only_launch_rejects_an_unknown_flag(capsys):
+    parser = H4ArgumentParser((SimpleConfig,))
+    with pytest.raises(SystemExit):
+        _parse_with_argv(parser, ["prog", "--name=cli", "--no_such_field=1"])
+    assert "unrecognized arguments: --no_such_field=1" in capsys.readouterr().err
 
 
 def test_dashed_cli_override_with_yaml():

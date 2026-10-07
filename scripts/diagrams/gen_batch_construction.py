@@ -16,11 +16,7 @@ TOTAL = DP * ROUND
 # ======================================================================================
 # batch_rollout_pipeline.png — one training step
 # ======================================================================================
-fig, ax = plt.subplots(figsize=(12.6, 8.95))
-fig.patch.set_facecolor(BG)
-ax.set_xlim(0, 12.6)
-ax.set_ylim(0, 8.95)
-ax.axis("off")
+fig, ax = canvas(12.6, 8.95)
 
 L, R = 0.25, 12.35
 W = R - L
@@ -153,18 +149,12 @@ footnote(
 )
 
 save(plt.gcf(), "batch_rollout_pipeline")
-plt.close()
-print("✓ batch_rollout_pipeline.png")
 
 
 # ======================================================================================
 # batch_prompt_expansion.png — the counting
 # ======================================================================================
-fig, ax = plt.subplots(figsize=(10.2, 6.6))
-fig.patch.set_facecolor(BG)
-ax.set_xlim(0, 10.2)
-ax.set_ylim(0, 6.6)
-ax.axis("off")
+fig, ax = canvas(10.2, 6.6)
 
 title(ax, "Batch construction", sub_mono=f"dp {DP} × bs {BS} × steps_per_generation {GA} = {TOTAL} rows")
 
@@ -256,5 +246,3 @@ footnote(
 )
 
 save(plt.gcf(), "batch_prompt_expansion")
-plt.close()
-print("✓ batch_prompt_expansion.png")

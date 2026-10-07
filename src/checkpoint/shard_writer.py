@@ -17,12 +17,7 @@ import torch
 from huggingface_hub.serialization._base import parse_size_to_int
 from safetensors.torch import save_file
 
-from src.checkpoint.format import (
-    SAFETENSORS_METADATA,
-    remove_stale_checkpoint_files,
-    shard_file_name,
-    write_merged_index,
-)
+from src.checkpoint.format import SAFETENSORS_METADATA, publish_streamed_parts, shard_file_name
 
 
 class StageShardWriter:
@@ -111,19 +106,8 @@ class StageShardWriter:
                 f"the existing files there would be deleted for nothing."
             )
         renamed = {part_name: shard_file_name(i, self._part) for i, part_name in enumerate(self._part_names, start=1)}
-        for part_name, final_name in renamed.items():
-            # Overwrites a same-named leftover, which is intended; the stale sweep below then only
-            # has to consider names this save did not claim.
-            os.replace(os.path.join(self.output_dir, part_name), os.path.join(self.output_dir, final_name))
         weight_map = {key: renamed[part_name] for key, part_name in self._weight_map.items()}
-        self._weight_map = weight_map
-        self._part_names = list(renamed.values())
-
-        if self._part > 1:
-            write_merged_index(self.output_dir, weight_map, {"total_size": self._total_bytes})
-        else:
-            # A single part is the unsharded ``model.safetensors``, which carries no index of its own.
-            remove_stale_checkpoint_files(self.output_dir, set(renamed.values()))
+        publish_streamed_parts(self.output_dir, renamed, weight_map, {"total_size": self._total_bytes})
         return self._total_bytes
 
     def _flush(self) -> None:

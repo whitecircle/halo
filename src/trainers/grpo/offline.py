@@ -490,8 +490,6 @@ class OfflineGRPOTrainer(ChunkedLogprobsCore, OfflineGRPOReferenceMixin, Distrib
             "Set it explicitly in your OfflineGRPOConfig.",
         )
 
-        original_columns = train_dataset.column_names
-
         tokenize_num_proc = resolve_map_num_proc(args.dataset_num_proc)
         # In fn_kwargs, not read off self: the map fn must stay picklable, and the cache key
         # fingerprints fn_kwargs.
@@ -507,34 +505,25 @@ class OfflineGRPOTrainer(ChunkedLogprobsCore, OfflineGRPOReferenceMixin, Distrib
             "drop_degenerate_groups": args.drop_degenerate_groups,
         }
 
-        num_train_groups_in = len(train_dataset) if args.drop_degenerate_groups else 0
-        train_dataset = coordinated_map(
-            train_dataset,
-            tokenize_offline_grpo_rows,
-            num_proc=tokenize_num_proc,
-            remove_columns=original_columns,
-            desc="Tokenizing and expanding training dataset",
-            batched=True,
-            batch_size=32,
-            with_indices=True,
-            fn_kwargs=tokenize_kwargs,
-        )
-        self._check_degenerate_drop(args, train_dataset, num_train_groups_in, "training")
-        if eval_dataset is not None:
-            eval_original_columns = eval_dataset.column_names
-            num_eval_groups_in = len(eval_dataset) if args.drop_degenerate_groups else 0
-            eval_dataset = coordinated_map(
-                eval_dataset,
+        def tokenize_split(dataset, split: str):
+            num_groups_in = len(dataset) if args.drop_degenerate_groups else 0
+            tokenized = coordinated_map(
+                dataset,
                 tokenize_offline_grpo_rows,
                 num_proc=tokenize_num_proc,
-                remove_columns=eval_original_columns,
-                desc="Tokenizing and expanding evaluation dataset",
+                remove_columns=dataset.column_names,
+                desc=f"Tokenizing and expanding {split} dataset",
                 batched=True,
                 batch_size=32,
                 with_indices=True,
                 fn_kwargs=tokenize_kwargs,
             )
-            self._check_degenerate_drop(args, eval_dataset, num_eval_groups_in, "evaluation")
+            self._check_degenerate_drop(args, tokenized, num_groups_in, split)
+            return tokenized
+
+        train_dataset = tokenize_split(train_dataset, "training")
+        if eval_dataset is not None:
+            eval_dataset = tokenize_split(eval_dataset, "evaluation")
 
         self.ref_model = self._kl_reference(model, ref_model, self.beta, self.parallelism_config, peft_config)
         if self.ref_model is not None and args.disable_dropout:

@@ -18,11 +18,17 @@ from src.env import env_str
 from src.inference.endpoints import DEFAULT_LOCAL_BASE_URL
 from src.inference.response import OpenAIResponse, get_finish_reason, get_reasoning_text
 
+# Client-error statuses that report a transient server condition, not a bad request: retried here and
+# by the rollout drivers (:func:`src.environments.episode.is_terminal_client_status`).
+TRANSIENT_CLIENT_ERROR_CODES = frozenset({408, 429})
 # An aggregator can answer 200 with no choices and an error body the SDK does not retry (OpenRouter
 # spells an upstream rate limit this way); these codes are retried here with this backoff.
-RETRYABLE_UPSTREAM_CODES = (408, 429, 500, 502, 503, 504)
+RETRYABLE_UPSTREAM_CODES = TRANSIENT_CLIENT_ERROR_CODES | {500, 502, 503, 504}
 UPSTREAM_RETRIES = 4
 UPSTREAM_BACKOFF_SECONDS = 2.0
+# The SDK's own transport retries (connection errors, 408/409/429, 5xx), enough for a long eval to
+# survive transient errors under load.
+SDK_MAX_RETRIES = 4
 
 _JSON_OBJECT = re.compile(r"\{.*\}", re.DOTALL)
 
@@ -35,19 +41,18 @@ class EmptyChoicesError(RuntimeError):
         self.error = error
 
 
-def create_openai_client(
-    base_url: str | None = None, api_key_override: str | None = None, max_retries: int = 4
-) -> AsyncOpenAI:
+def create_openai_client(base_url: str | None = None, api_key_override: str | None = None) -> AsyncOpenAI:
     """Create an ``AsyncOpenAI`` client with optional base URL and API key override.
 
-    An omitted ``base_url`` targets :data:`DEFAULT_LOCAL_BASE_URL`, never the public OpenAI API.
-    ``max_retries`` defaults to 4 so a long eval survives transient 429/5xx errors under load.
+    An omitted ``base_url`` targets :data:`DEFAULT_LOCAL_BASE_URL`, never the public OpenAI API. No key (an
+    empty override and an unset or blank ``OPENAI_API_KEY``) raises ``ValueError``: the SDK re-reads a
+    blank variable itself, and the empty key it builds with fails only later, as an opaque 401
+    (``.env.example`` ships the variable blank).
     """
-    # `or None`, never "": the SDK raises its own named "api_key must be set" error on None, while an
-    # empty string passes construction and fails later as an opaque 401 (`.env.example` ships it blank).
-    client_api_key = api_key_override or env_str("OPENAI_API_KEY") or None
-
-    return AsyncOpenAI(base_url=base_url or DEFAULT_LOCAL_BASE_URL, api_key=client_api_key, max_retries=max_retries)
+    api_key = api_key_override or env_str("OPENAI_API_KEY")
+    if not api_key:
+        raise ValueError("no API key for the OpenAI-compatible client: pass one, or set OPENAI_API_KEY")
+    return AsyncOpenAI(base_url=base_url or DEFAULT_LOCAL_BASE_URL, api_key=api_key, max_retries=SDK_MAX_RETRIES)
 
 
 async def chat_completion(client: AsyncOpenAI, **request: Any):

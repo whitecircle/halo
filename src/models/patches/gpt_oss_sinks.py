@@ -269,9 +269,9 @@ def install_fa4_trainable_sink_rescale() -> bool:
         setattr(fn, _FA4_RESCALE_ATTR, True)
     cute.flash_attn_varlen_func = varlen_with_sink_grad
     cute.flash_attn_func = dense_with_sink_grad
-    if getattr(flash_utils, "_flash_varlen_fn", None) is orig_varlen:
+    if flash_utils._flash_varlen_fn is orig_varlen:
         flash_utils._flash_varlen_fn = varlen_with_sink_grad
-    if getattr(flash_utils, "_flash_fn", None) is orig_dense:
+    if flash_utils._flash_fn is orig_dense:
         flash_utils._flash_fn = dense_with_sink_grad
     logger.info("Installed the FA4 trainable-sink rescale (sink-less kernel + sigmoid(lse - sink) gate)")
     return True

@@ -111,7 +111,11 @@ def _register_builtins():
         ),
     )
     register_environment(
-        "native_combined", lambda c: NativeToolUseEnvironment(tool_registry=create_all_native_tools(), **c)
+        "native_combined",
+        lambda c: NativeToolUseEnvironment(
+            tool_registry=create_all_native_tools(search_backend=c.get("search_backend")),
+            **_without(c, "search_backend"),
+        ),
     )
 
     # No default for mcp_server here; the factory supplies it, since an sse config names no preset.

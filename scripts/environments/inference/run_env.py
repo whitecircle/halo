@@ -53,7 +53,7 @@ from scripts.environments._common import (
     rollout_config_from_args,
     write_eval_outputs,
 )
-from src.args.environmental_grpo_args import DEFAULT_ANSWER_FIELD
+from src.args.mixins import DEFAULT_ANSWER_FIELD
 from src.configs.rollout_config import DEFAULT_ROLLOUT_MAX_TOKENS, DEFAULT_ROLLOUT_TEMPERATURE
 from src.environments.base import ANSWER_KEY
 from src.environments.eval_runner import (
@@ -189,30 +189,35 @@ def main() -> None:
     turns_override = {"max_turns": args.max_turns} if args.max_turns is not None else {}
     # The training run's env config first, the flags over it: an eval under a contract grades as the run did.
     env = resolve_environment(env_type, {**trained_env, **turns_override, **env_kwargs})
-    # A judge or reward-model term is probed before any episode runs, as the trainer does at launch.
-    env.verify_backend()
-    examples = build_examples(args)
-    require_answers(env, examples, f"the {args.answer_field!r} field of {args.dataset} (--answer_field)")
-    client = create_openai_client(base_url=args.base_url, api_key_override=args.api_key)
-    rollout = rollout_config_from_args(
-        args, contract, default_temperature=DEFAULT_ROLLOUT_TEMPERATURE, default_max_tokens=DEFAULT_ROLLOUT_MAX_TOKENS
-    )
-
-    traj_path = resolve_trajectory_path(args, env_type, args.split)
-
-    results = asyncio.run(
-        collect_results(
-            env,
-            examples,
-            client,
-            rollout=rollout,
-            num_samples=args.num_samples,
-            success_threshold=args.success_threshold,
-            max_workers=args.max_workers,
-            collect_trajectories=bool(traj_path),
+    try:
+        # A judge or reward-model term is probed before any episode runs, as the trainer does at launch.
+        env.verify_backend()
+        examples = build_examples(args)
+        require_answers(env, examples, f"the {args.answer_field!r} field of {args.dataset} (--answer_field)")
+        client = create_openai_client(base_url=args.base_url, api_key_override=args.api_key)
+        rollout = rollout_config_from_args(
+            args,
+            contract,
+            default_temperature=DEFAULT_ROLLOUT_TEMPERATURE,
+            default_max_tokens=DEFAULT_ROLLOUT_MAX_TOKENS,
         )
-    )
-    env.close()
+
+        traj_path = resolve_trajectory_path(args, env_type, args.split)
+
+        results = asyncio.run(
+            collect_results(
+                env,
+                examples,
+                client,
+                rollout=rollout,
+                num_samples=args.num_samples,
+                success_threshold=args.success_threshold,
+                max_workers=args.max_workers,
+                collect_trajectories=bool(traj_path),
+            )
+        )
+    finally:
+        env.close()
     report(results, num_samples=args.num_samples, title=f"{env_type} on {args.dataset}", group_label=args.group_by)
     write_eval_outputs(
         args,

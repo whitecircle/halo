@@ -63,9 +63,10 @@ _RMS_NORM_KERNELS = get_args(RmsNormKernel)
 class LigerFamilySpec:
     """The Liger-patchable surface of one model family, by role.
 
-    ``modeling_module`` is a dotted path for a family native to transformers; a remote-code family
-    leaves it empty and names ``remote_classes`` instead, which drives the deferred patch in
-    :mod:`~src.kernels.liger.remote_modules`.
+    ``modeling_module`` is the dotted path of a family's in-library module; ``remote_classes`` names the
+    classes that identify a ``trust_remote_code`` modeling module, which drives the deferred patch in
+    :mod:`~src.kernels.liger.remote_modules`. A family native to transformers whose hub repos also ship
+    their own modeling file through ``auto_map`` sets both, so either load path is patched.
 
     A family upstream Liger already covers sets ``delegates_to_upstream``: its applier keeps every
     role it declares, and the spec names only the roles the toolkit adds on top — or takes over, by
@@ -110,8 +111,8 @@ class LigerFamilySpec:
     # Per-family loss default. True mirrors Liger's own (FLCE on, CE off) for the families whose
     # vocab makes the logits plane the binding memory constraint.
     flce_default: bool = False
-    # Remote-code (`trust_remote_code`) families: the class names that identify the modeling module
-    # once transformers loads it. Empty for a native family.
+    # The class names that identify a `trust_remote_code` modeling module once transformers loads it,
+    # every class a role names included. Empty for a family that only loads from transformers.
     remote_classes: tuple[str, ...] = ()
     # Upstream Liger covers these model types: its applier runs first with every flag, and the roles
     # above are added on top. Which roles it serves is read off Liger's registry, not restated here.
@@ -123,10 +124,20 @@ class LigerFamilySpec:
     upstream_off: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
-        if bool(self.modeling_module) == bool(self.remote_classes):
+        if not (self.modeling_module or self.remote_classes):
             raise ValueError(
-                f"LigerFamilySpec for {self.model_types} must set exactly one of modeling_module "
-                f"(native) or remote_classes (trust_remote_code)."
+                f"LigerFamilySpec for {self.model_types} names no module to patch: set modeling_module "
+                f"(in-library), remote_classes (trust_remote_code), or both."
+            )
+        # The remote patch runs only on a module defining every identifying class, which is what lets
+        # a revision that renamed one be reported rather than fail its model load.
+        unidentified = sorted(
+            set(self.rms_norm + self.gated_rms_norm + self.glu_mlp + self.causal_lm) - set(self.remote_classes)
+        )
+        if self.remote_classes and unidentified:
+            raise ValueError(
+                f"LigerFamilySpec for {self.model_types} patches {unidentified} on the remote module "
+                f"without listing them in remote_classes."
             )
         if (self.logit_scale_attr or self.router_aux_loss_in_head) and not self.causal_lm:
             raise ValueError(
@@ -558,13 +569,13 @@ class LigerApplier:
             on = sorted(name for name, enabled in upstream_flags.items() if enabled)
             patched.append(f"{self.upstream.__name__}({', '.join(on)})")
 
+        if spec.modeling_module:
+            patched += _patch_module(importlib.import_module(spec.modeling_module), spec, flags)
         if spec.remote_classes:
             # The modeling module does not exist until transformers loads the remote file; arm the
             # patch instead of importing it here.
             patch_remote_modules(spec.remote_classes, lambda module: _patch_module(module, spec, flags))
             patched.append(f"armed for the remote module defining {spec.remote_classes[0]}")
-        else:
-            patched += _patch_module(importlib.import_module(spec.modeling_module), spec, flags)
 
         if flags.get("cross_entropy"):
             patch_loss_utils_cross_entropy()

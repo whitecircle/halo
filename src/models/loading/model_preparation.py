@@ -23,10 +23,9 @@ import src.models.seq_cls_heads  # noqa: F401  registers the heads before any Au
 from src.checkpoint.model_card import HUB_TAGS
 from src.kernels.liger.orchestrator import LIGER_APPLIED_CONFIG_ATTR, trl_reapplication_config
 from src.models.loading.checkpoint_coverage import from_pretrained_verified
+from src.models.loading.config_levels import model_type_matches
 from src.models.patches.attention import (
     head_dim_exceeds_flash,
-    model_is_mistral4,
-    model_is_zaya,
     patch_mistral4_flash_packed_position_ids,
     patch_sdpa_for_wide_heads,
     patch_transformers_flash_varlen_int_seqlen,
@@ -42,7 +41,6 @@ logger = get_logger(__name__)
 # explicitly because the stock GenerationConfig() instance carries None for all three fields, so
 # comparing against the instance would read a neutral temperature=1.0 as a sampling request.
 _NEUTRAL_SAMPLING_VALUES = {"temperature": 1.0, "top_p": 1.0, "top_k": 50}
-_SAMPLING_FIELDS = tuple(_NEUTRAL_SAMPLING_VALUES)
 
 
 # Auto-map keys under which a hub repo names its multimodal (vision-bearing) class. Read to spot a
@@ -152,11 +150,11 @@ def apply_family_attention_patches(model_config, attn_implementation: str) -> st
         patch_sdpa_for_wide_heads()
     # Else Mistral4's attention swallows position_ids before the flash interface, so the varlen
     # packed path never engages and packed documents attend across each other.
-    if attn_implementation.startswith("flash_attention") and model_is_mistral4(model_config):
+    if attn_implementation.startswith("flash_attention") and model_type_matches(model_config, "mistral4"):
         patch_mistral4_flash_packed_position_ids()
     # Load recording for the native balancing buffer, the GC refusal, and (on flash) the same
     # position_ids plumbing as Mistral4, since Zaya's model forward never passes the tensor down.
-    if model_is_zaya(model_config):
+    if model_type_matches(model_config, "zaya"):
         apply_zaya_patches(attn_implementation)
     # Else FA4's varlen backward JIT-recompiles every step on transformers' 0-dim max_seqlen tensor.
     if attn_implementation == "flash_attention_4":
@@ -176,8 +174,8 @@ def sanitize_generation_config(model: PreTrainedModel) -> None:
 
     # None means explicitly unset rather than a sampling request; a neutral value is not one either.
     sampling_params_set = any(
-        (value := getattr(generation_config, field, None)) is not None and value != _NEUTRAL_SAMPLING_VALUES[field]
-        for field in _SAMPLING_FIELDS
+        (value := getattr(generation_config, field, None)) is not None and value != neutral
+        for field, neutral in _NEUTRAL_SAMPLING_VALUES.items()
     )
     if sampling_params_set and not getattr(generation_config, "do_sample", False):
         generation_config.do_sample = True

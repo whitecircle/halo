@@ -35,6 +35,7 @@ from tests.common.utils import (
     step_losses,
     training_run_checks,
 )
+from tests.common.weight_sync import moved_parameters
 
 RUN_DTYPE = torch.bfloat16
 SEED = 42
@@ -158,7 +159,7 @@ def train_row(ctx, model, tokenizer, pc: ParallelismConfig, peft_config, *, chec
         return {"checks": checks, "metrics": metrics}
 
     after = snapshot_trainable(trainer.model)
-    moved = [name for name in before if not torch.equal(before[name], after[name])]
+    moved = moved_parameters(before, after)
     log(f"{len(moved)}/{len(before)} trainable params moved")
     checks["trainable_params_moved"] = bool(moved) and all(torch.isfinite(t).all() for t in after.values())
     adapters = [name for name in before if "lora_" in name]

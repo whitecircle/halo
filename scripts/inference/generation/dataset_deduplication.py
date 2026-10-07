@@ -19,6 +19,7 @@ import logging
 import os
 import sys
 import time
+from collections.abc import Callable
 from pathlib import Path
 
 import numpy as np
@@ -28,13 +29,20 @@ from transformers import AutoModel, AutoTokenizer
 
 from scripts._common import add_trust_remote_code_arg
 from src.data.deduplication import faiss_deduplicate_mr, faiss_deduplicate_mr_multistep, process_texts
-from src.data.sources.paths import DATA_FILE_BUILDERS, parse_dataset_source
+from src.data.sources.paths import DATA_FILE_BUILDERS, data_file_builder, parse_dataset_source
 from src.log import configure_cli_logging
 from src.models.loading.checkpoint_coverage import from_pretrained_verified
 from src.models.patches.buffer_fixes import finalize_loaded_model
 
-configure_cli_logging()
 logger = logging.getLogger(__name__)
+
+# ``--output_format`` -> how the deduplicated dataset is written.
+_WRITERS: dict[str, Callable[[Dataset, str], object]] = {
+    "jsonl": lambda dataset, path: dataset.to_json(path, lines=True),
+    "json": lambda dataset, path: dataset.to_json(path, lines=False),
+    "parquet": lambda dataset, path: dataset.to_parquet(path),
+    "csv": lambda dataset, path: dataset.to_csv(path, index=False),
+}
 
 
 def parse_arguments() -> argparse.Namespace:
@@ -55,7 +63,7 @@ def parse_arguments() -> argparse.Namespace:
     parser.add_argument(
         "--output_format",
         type=str,
-        choices=["jsonl", "json", "parquet", "csv"],
+        choices=list(_WRITERS),
         default="jsonl",
         help="Output format for the deduplicated dataset",
     )
@@ -148,17 +156,17 @@ def setup_device(device_arg: str) -> torch.device:
 def load_dataset_from_path(
     input_path: str,
     text_field: str,
-    dataset_config: str | None = None,
-    dataset_split: str = "train",
-    sample_size: int | None = None,
+    dataset_config: str | None,
+    dataset_split: str,
+    sample_size: int | None,
 ) -> Dataset:
     """Load the input dataset from a local data file or the HuggingFace Hub.
 
     Classified by :func:`parse_dataset_source` rather than by whether the path exists on this host: an
     existence probe would read a stale local file shadowing a Hub id, and read a mistyped local path
     as a Hub id whose failure names the network instead of the typo. The builder comes from
-    ``DATA_FILE_BUILDERS``, the same table the classifier and ``src.data.sources.loading`` read, so an
-    extension accepted as local always has a builder here.
+    :func:`data_file_builder`, over the same table the classifier and ``src.data.sources.loading`` read,
+    so an extension accepted as local always has a builder here.
     """
     logger.info(f"Loading dataset from: {input_path}")
 
@@ -173,7 +181,7 @@ def load_dataset_from_path(
         logger.info(f"Loading dataset from the HuggingFace Hub: {path}")
         dataset = load_dataset(path, name=dataset_config, split=dataset_split)
     else:
-        builder = next((b for ext, b in DATA_FILE_BUILDERS.items() if path.endswith(ext)), None)
+        builder = data_file_builder(path)
         if builder is None:
             raise ValueError(
                 f"'{input_path}' is neither a data file ({', '.join(DATA_FILE_BUILDERS)}) nor a Hub "
@@ -198,10 +206,10 @@ def compute_embeddings(
     texts: list[str],
     model_name: str,
     device: torch.device,
-    batch_size: int = 32,
-    max_length: int = 512,
-    save_path: str | None = None,
-    trust_remote_code: bool = False,
+    batch_size: int,
+    max_length: int,
+    save_path: str | None,
+    trust_remote_code: bool,
 ) -> np.ndarray:
     """Compute embeddings for a list of texts."""
     logger.info(f"Computing embeddings using model: {model_name}")
@@ -236,10 +244,10 @@ def compute_embeddings(
 
 def deduplicate_embeddings(
     embeddings: np.ndarray,
-    similarity_threshold: float = 0.95,
-    batch_size: int = 100000,
-    steps: int = 3,
-    max_workers: int | None = None,
+    similarity_threshold: float,
+    batch_size: int,
+    steps: int,
+    max_workers: int | None,
 ) -> np.ndarray:
     """Perform deduplication on embeddings."""
     logger.info(f"Starting deduplication with threshold {similarity_threshold}")
@@ -319,16 +327,7 @@ def save_deduplicated_dataset(
     output_dir = Path(output_path).parent
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    if output_format == "jsonl":
-        deduplicated_dataset.to_json(output_path, lines=True)
-    elif output_format == "json":
-        deduplicated_dataset.to_json(output_path, lines=False)
-    elif output_format == "parquet":
-        deduplicated_dataset.to_parquet(output_path)
-    elif output_format == "csv":
-        deduplicated_dataset.to_csv(output_path, index=False)
-    else:
-        raise ValueError(f"Unsupported output format: {output_format}")
+    _WRITERS[output_format](deduplicated_dataset, output_path)
 
     logger.info(f"Saved {len(deduplicated_dataset)} deduplicated examples")
 
@@ -336,15 +335,13 @@ def save_deduplicated_dataset(
 def main() -> int:
     """Run the deduplication pipeline, returning the process exit code."""
     args = parse_arguments()
+    configure_cli_logging(verbose=args.verbose)
 
     # Attached once the output path is known, so the log lands next to the dataset it describes
     # rather than in whatever directory the script was launched from.
     log_path = Path(args.output_path).with_suffix(".log")
     log_path.parent.mkdir(parents=True, exist_ok=True)
     logging.getLogger().addHandler(logging.FileHandler(log_path))
-
-    if args.verbose:
-        logging.getLogger().setLevel(logging.DEBUG)
 
     logger.info("Starting dataset deduplication")
     logger.info(f"Arguments: {vars(args)}")

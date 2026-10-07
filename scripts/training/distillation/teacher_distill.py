@@ -26,9 +26,8 @@ from src.configs.distillation_config import DistillationConfig
 from src.data.collators.factory import select_data_collator
 from src.data.collators.packing import DataCollatorForCausalLMWithPadding
 from src.data.collators.vlm import VLMDataCollator
-from src.data.pipeline.processing import coordinated_map, filter_by_length, resolve_map_num_proc
-from src.data.pipeline.rendered import tokenize_rendered
-from src.data.pipeline.row_processors import apply_chat_template_to_conversations, text_render_kwargs
+from src.data.pipeline.processing import process_dataset_with_map_and_filter, resolve_map_num_proc
+from src.data.pipeline.row_processors import create_llm_processor, text_render_kwargs
 from src.data.pipeline.vlm_dataset import prepare_vlm_dataset
 from src.distributed.filesystem import hub_metadata_main_first
 from src.distributed.loading.frozen_models import load_frozen_auxiliary_model
@@ -122,42 +121,22 @@ def _text_distill_collator(args, tokenizer, model_config):
 
 
 def _prepare_text_distill_data(ds, args, training_config, tokenizer, model_config):
-    """Chat-template → length-filter → tokenize; the collator derives the labels the losses mask on."""
-    num_proc_kwargs = {"num_proc": resolve_map_num_proc(training_config.dataset_num_proc)}
+    """SFT's chat row processor: each conversation is templated and tokenized once, and one over
+    ``max_length`` is dropped rather than truncated mid-turn, measured on the ids it trains on. The
+    collator derives the labels the losses mask on."""
     render_kwargs = text_render_kwargs(args)
-    ds = coordinated_map(
+    ds = process_dataset_with_map_and_filter(
         ds,
-        lambda row: {"text": apply_chat_template_to_conversations(row, tokenizer, **render_kwargs)},
-        desc="Applying chat template",
-        cache_key_extras=render_kwargs,
-        **num_proc_kwargs,
+        create_llm_processor(
+            tokenizer=tokenizer, max_length=training_config.max_length, use_padding=False, **render_kwargs
+        ),
+        # sorted: this list feeds the coordinated-map cache key — set order is hash-randomized per process.
+        remove_columns=sorted(set(ds["train"].column_names)),
+        desc="Processing distillation dataset",
+        cache_key_extras={**render_kwargs, "add_generation_prompt": False},
+        num_proc=resolve_map_num_proc(training_config.dataset_num_proc),
     )
-    train_dataset = filter_by_length(ds["train"], training_config.max_length, tokenizer, **num_proc_kwargs)
-    # Same policy as train: drop over-length conversations instead of truncating them mid-turn.
-    eval_dataset = filter_by_length(ds["test"], training_config.max_length, tokenizer, **num_proc_kwargs)
-
-    def _tokenize(row):
-        # tokenize_rendered applies the tokenizer's own special-token post-processing exactly once.
-        enc = tokenize_rendered(tokenizer, row["text"], truncation=True, max_length=training_config.max_length)
-        return {"input_ids": enc["input_ids"], "attention_mask": enc["attention_mask"]}
-
-    train_dataset = coordinated_map(
-        train_dataset,
-        _tokenize,
-        remove_columns=train_dataset.column_names,
-        desc="Tokenizing train",
-        cache_key_extras={"max_length": training_config.max_length},
-        **num_proc_kwargs,
-    )
-    eval_dataset = coordinated_map(
-        eval_dataset,
-        _tokenize,
-        remove_columns=eval_dataset.column_names,
-        desc="Tokenizing eval",
-        cache_key_extras={"max_length": training_config.max_length},
-        **num_proc_kwargs,
-    )
-    return train_dataset, eval_dataset, _text_distill_collator(args, tokenizer, model_config)
+    return ds["train"], ds["test"], _text_distill_collator(args, tokenizer, model_config)
 
 
 def _prepare_vlm_distill_data(ds, args, training_config, processor, tokenizer, model_config):

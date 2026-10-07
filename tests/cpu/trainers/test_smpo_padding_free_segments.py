@@ -23,7 +23,7 @@ from transformers.models.deepseek_v4 import DeepseekV4Config, DeepseekV4ForCausa
 from src.configs.smpo_config import SmoothMarginPOConfig
 from src.models import segment_markers
 from src.models.segment_markers import GDN_SEGMENT_AWARE_BACKENDS, SegmentMarkers, segment_markers_for
-from src.trainers.preference.smpo import SmoothMarginPOTrainer
+from src.trainers.preference.smpo import SmoothMarginPOTrainer, reject_padding_free_without_varlen
 from tests.common.models import TINY_DSV4_CONFIG
 from tests.common.segment_isolation import (
     FAMILIES,
@@ -139,6 +139,28 @@ def test_padding_free_is_refused_on_compressed_kv_layers(tmp_path):
             processing_class=SimpleNamespace(pad_token_id=PAD_ID, eos_token_id=1),
             is_vlm=False,
         )
+
+
+def _composite_config(text_attn: str | None, top_attn: str | None = None) -> SimpleNamespace:
+    """A VLM-wrapper-shaped config: the decoder's backend on the text sub-config, the wrapper's own
+    left unset as transformers leaves it on a composite."""
+    text = SimpleNamespace(_attn_implementation=text_attn, get_text_config=None)
+    return SimpleNamespace(_attn_implementation=top_attn, get_text_config=lambda: text)
+
+
+@pytest.mark.parametrize("backend", ["flash_attention_2", "flash_attention_3", "flash_attention_4"])
+def test_padding_free_admits_a_composite_whose_decoder_runs_varlen(backend):
+    """A multimodal checkpoint records the backend on its text sub-config only; a top-level read
+    sees None and would refuse a run whose decoder does consume cu_seqlens."""
+    reject_padding_free_without_varlen(_composite_config(backend))
+
+
+@pytest.mark.parametrize(
+    "config", [_composite_config("sdpa"), _composite_config(None), _composite_config(None, "sdpa")]
+)
+def test_padding_free_refuses_a_decoder_without_a_varlen_kernel(config):
+    with pytest.raises(ValueError, match="no varlen kernel"):
+        reject_padding_free_without_varlen(config)
 
 
 if __name__ == "__main__":

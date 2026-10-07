@@ -25,7 +25,7 @@ def _run_delete(delete_result: bool, *, is_object: bool = True, recursive: bool 
     with (
         patch("src.data.sources.s3_client.S3Client.__post_init__"),
         patch("src.data.sources.s3_client.S3Client.delete", return_value=delete_result),
-        patch("src.data.sources.s3_client.S3Client._get_s3_uri", return_value=_URI),
+        patch("src.data.sources.s3_client.S3Client.s3_uri", return_value=_URI),
         patch("src.data.sources.s3_client.S3Client.exists", return_value=True),
         patch("src.data.sources.s3_client.S3Client.object_exists", return_value=is_object),
         patch.object(sys, "argv", argv),

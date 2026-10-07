@@ -307,6 +307,30 @@ def test_multiple_choice_paren_and_invalid_expected():
     assert multiple_choice_match("answer is A", "AB") is False
 
 
+@pytest.mark.parametrize(
+    ("response", "expected"),
+    [
+        ("The answer is definitely C", "D"),
+        ("The answer is clearly B", "C"),
+        ("The answer is a tie, so B", "A"),
+        ("I pick this option because it fits: C", "B"),
+        ("The largest, i.e. the gas giant, is B", "I"),
+        ("E.g. Jupiter, the largest planet", "E"),
+    ],
+)
+def test_multiple_choice_reads_no_choice_out_of_a_word(response, expected):
+    """Prose around a choice letter must not be read as one: a word after "the answer is" or "option" that
+    starts with the expected letter, the article "a", "i.e." and "E.g." would each pay that choice."""
+    assert multiple_choice_match(response, expected) is False
+
+
+def test_multiple_choice_reads_a_marked_up_or_bracketed_letter():
+    assert multiple_choice_match("The answer is Jupiter (B)", "B") is True
+    assert multiple_choice_match("The answer is: **B**", "B") is True
+    assert multiple_choice_match("(b)", "B") is True
+    assert multiple_choice_match("c", "C") is True
+
+
 def test_multiple_choice_rejects_an_index_expected_answer():
     """MMLU's ``answer`` column is an int INDEX, and the matcher must keep refusing it.
 

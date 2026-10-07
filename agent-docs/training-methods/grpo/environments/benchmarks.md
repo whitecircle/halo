@@ -64,7 +64,10 @@ survives. It does not split a GSM8K-style `#### N` suffix: reduce such an
 
 A row with `choices` switches `exam_qa` to letter grading: the response's choice letter (A–J) is
 extracted from "A", "(A)", "A.", "The answer is A" and compared to the expected letter, and the
-choices are appended to the prompt.
+choices are appended to the prompt, each led by its letter (a choice already labelled with its own
+letter, `"B: Jupiter"`, is shown as written; more than ten choices are refused). In prose only an uppercase letter standing alone counts ("the
+answer is a tie" and "the answer is definitely C" name no choice); a bracketed or bare letter may be
+lowercase.
 
 `answer` may be that letter or a 0-based int index into `choices` (MMLU ships the index). A digit
 string raises: ARC's `answerKey` is sometimes a 1-based label (`"1"`–`"5"`), so convert it to a

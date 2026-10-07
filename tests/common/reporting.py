@@ -41,8 +41,8 @@ def snapshot_efficiency(cb) -> dict:
         "avg_step_time_seconds": cb.time.avg_step_time_seconds,
     }
     diagnostics = {
-        "gpu_model": cb.mfu.gpu_model,
-        "precision": cb.mfu.precision,
+        "gpu_model": cb.state.gpu_model,
+        "precision": cb.state.precision,
         "mfu_percent": cb.mfu.avg_mfu_percent,
         "smfu_percent": cb.smfu.avg_smfu_percent,
         "achieved_tflops_dense": cb.mfu.avg_tflops_per_sec,

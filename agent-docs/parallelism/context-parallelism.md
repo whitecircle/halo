@@ -119,8 +119,8 @@ Offline GRPO's CP collator right-pads each joined prompt+completion row
 
 Source of truth: `WRAPPER_CLASS_MAP` in `src/distributed/context_parallel/layers/registry.py`, built
 by walking the `UlyssesAttentionBase` subclass tree and reading each wrapper's `HF_MODULE_NAMES` (a
-duplicate HF name raises). `CP_SUPPORTED_ATTENTION_CLASSES` is `tuple(WRAPPER_CLASS_MAP)` — there is
-no separate accept list to keep in sync.
+duplicate HF name raises). The validator and the patcher both read that map — there is no separate
+accept list to keep in sync.
 
 | Attention class | Wrapper | Path | Page |
 |---|---|---|---|

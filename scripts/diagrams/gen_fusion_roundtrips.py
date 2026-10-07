@@ -10,7 +10,6 @@ from _theory_style import *
 from matplotlib.patches import FancyBboxPatch, Rectangle
 
 fig, ax = plt.subplots(figsize=(11.4, 5.6))
-fig.patch.set_facecolor(BG)
 ax.set_xlim(0, 11.5)
 ax.set_ylim(0, 5.8)
 ax.axis("off")
@@ -149,5 +148,3 @@ ax.text(
 )
 
 save(plt.gcf(), "fusion_roundtrips")
-plt.close()
-print("✓ fusion_roundtrips.png")

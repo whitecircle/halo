@@ -485,15 +485,13 @@ def test_the_cp_loader_cannot_install_an_unvalidated_attention_implementation():
 
     seen = {}
 
-    def fake_from_pretrained_verified(model_class, path, **kwargs):
+    def fake_load_through_cpu(model_class, path, **kwargs):
         seen.update(kwargs)
         return torch.nn.Linear(2, 2)
 
     config = Qwen3Config(num_hidden_layers=1, hidden_size=8, intermediate_size=8, num_attention_heads=2)
     with (
-        patch(f"{_CP_LOADING}.from_pretrained_verified", fake_from_pretrained_verified),
-        patch(f"{_CP_LOADING}.move_model_to_local_device", lambda model: model),
-        patch(f"{_CP_LOADING}.finalize_loaded_model", lambda model: None),
+        patch(f"{_CP_LOADING}.load_through_cpu", fake_load_through_cpu),
         patch(f"{_CP_LOADING}.patch_model_for_cp", lambda model, cp_config: model),
         patch("src.models.patches.attention.validate_attn_implementation", return_value="sdpa") as validator,
     ):

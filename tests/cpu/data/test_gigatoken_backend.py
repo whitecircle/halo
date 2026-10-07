@@ -21,6 +21,7 @@ from src.data.pipeline.tokenizer_backend import (
     resolve_processor_backend,
     resolve_tokenizer_backend,
 )
+from src.distributed.tensor_parallel.state_dict import input_embeddings_tp_sharded
 from src.models.loading.tokenizer_setup import setup_model_and_tokenizer
 from tests.common.models import PINNED_REVISIONS, QWEN2_5_VL_3B, QWEN3_0_6B
 from tests.common.tokenizers import load_cached_processor, load_cached_tokenizer
@@ -169,9 +170,14 @@ def test_setup_model_and_tokenizer_resolves_backend():
 
     tokenizer = load_cached_tokenizer(MODEL_NAME)
     hf_args = PreprocessingArgsStub("hf")
-    assert setup_model_and_tokenizer(hf_args, None, tokenizer, 512) is tokenizer
+    assert (
+        setup_model_and_tokenizer(hf_args, None, tokenizer, 512, embeddings_sharded=input_embeddings_tp_sharded)
+        is tokenizer
+    )
 
-    proxy = setup_model_and_tokenizer(PreprocessingArgsStub("gigatoken"), None, tokenizer, 512)
+    proxy = setup_model_and_tokenizer(
+        PreprocessingArgsStub("gigatoken"), None, tokenizer, 512, embeddings_sharded=input_embeddings_tp_sharded
+    )
     assert type(proxy) is GigatokenTokenizerProxy
     text = tokenizer.apply_chat_template(CONVERSATIONS[0], tokenize=False)
     assert list(proxy(text)["input_ids"]) == tokenizer(text)["input_ids"]

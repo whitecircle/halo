@@ -142,11 +142,8 @@ def vlm_preference_features(dataset: Dataset) -> Features:
     ``margin`` is the only source column the map keeps, so it belongs in the schema exactly when the
     dataset carries it: a pinned schema must name every column of the mapped table.
     """
-    features = {
-        "chosen_text": Value("string"),
-        "rejected_text": Value("string"),
-        "images": Sequence(ImageFeature()),
-    }
+    chosen, rejected, images = VLM_PREFERENCE_COLUMNS
+    features = {chosen: Value("string"), rejected: Value("string"), images: Sequence(ImageFeature())}
     if MARGIN_COLUMN in dataset.column_names:
         features[MARGIN_COLUMN] = Value("float32")
     return Features(features)

@@ -469,5 +469,14 @@ def test_invalid_profiles_raise():
         _make_env(reasoning_effort_profiles={"low": {"max_test_calls": -1}})
 
 
+@pytest.mark.parametrize(
+    ("knob", "value"), [("max_submissions", 1.5), ("max_submissions", True), ("max_test_calls", 2.0)]
+)
+def test_a_count_knob_takes_only_an_int(knob, value):
+    """A budget is stamped as a per-tool call cap, so a float or a bool standing in for a count is refused."""
+    with pytest.raises(ValueError, match=f"{knob} must be an int"):
+        _make_env(**{knob: value})
+
+
 if __name__ == "__main__":
     raise SystemExit(pytest.main([__file__, "-v"]))

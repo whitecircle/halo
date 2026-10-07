@@ -21,6 +21,8 @@ from src.data.probe_consensus import agree_input_probe_across_ranks, agree_probe
 from src.data.sources.dataset_cache import HALO_S3_DATASET_CACHE_DIR
 from src.data.sources.paths import (
     DATA_FILE_BUILDERS,
+    TRAIN_TEST_SPLITS,
+    data_file_builder,
     eval_split_name,
     hub_repo_id,
     parse_dataset_source,
@@ -126,7 +128,7 @@ def load_dataset_from_source(path: str) -> Dataset | DatasetDict:
             ) from e
 
     elif source_type == "local":
-        builder = next((b for ext, b in DATA_FILE_BUILDERS.items() if path.endswith(ext)), None)
+        builder = data_file_builder(path)
         logger.info(f"Loading dataset from local {'file' if builder else 'path'}: {path}")
         try:
             if builder is not None:
@@ -146,7 +148,7 @@ def load_dataset_from_source(path: str) -> Dataset | DatasetDict:
 def _require_train_test_splits(ds: DatasetDict, path: str) -> None:
     """Fail loud on a partial DatasetDict: sharded/preprocessed loads skip missing splits, and the
     trainers index ``ds["test"]`` unconditionally — a bare ``KeyError`` far from the cause."""
-    missing = [split for split in ("train", "test") if split not in ds]
+    missing = [split for split in TRAIN_TEST_SPLITS if split not in ds]
     if missing:
         raise ValueError(
             f"Dataset {path} is missing the {missing} split(s). Trainers require both 'train' and "
@@ -394,7 +396,7 @@ def _content_signature(dataset: DatasetDict) -> str:
     domain, so a re-push with identical shapes still changes it and the forced cache keys built from
     it cannot serve stale mapped rows.
     """
-    return ",".join(f"{name}:{getattr(dataset[name], '_fingerprint', None) or 'nofp'}" for name in sorted(dataset))
+    return ",".join(f"{name}:{dataset[name]._fingerprint}" for name in sorted(dataset))
 
 
 def _get_subset_from_dataset(dataset: Dataset, dataset_ratio: float | None, seed: int = _DEFAULT_DATA_SEED) -> Dataset:
@@ -421,7 +423,7 @@ def _get_subset_from_dataset_dict(
     return dataset
 
 
-def _filter_empty_conversations(dataset: Dataset, conversation_field: str, split_name: str = "") -> Dataset:
+def _filter_empty_conversations(dataset: Dataset, conversation_field: str, split_name: str) -> Dataset:
     """Filter out rows where the conversation field is None or empty.
 
     ``split_name`` is threaded into the cache desc so train/test caches don't collide. No-op when the
@@ -434,14 +436,10 @@ def _filter_empty_conversations(dataset: Dataset, conversation_field: str, split
         return example[conversation_field] is not None and len(example[conversation_field]) > 0
 
     # num_proc=None avoids spawning processes during the distributed loading phase.
-    desc = f"filtering empty {conversation_field}"
-    if split_name:
-        desc = f"{desc} ({split_name})"
-
     return coordinated_filter(
         dataset,
         has_valid_conversation,
-        desc=desc,
+        desc=f"filtering empty {conversation_field} ({split_name})",
         num_proc=None,
     )
 
@@ -560,7 +558,7 @@ def _apply_conversation_field(
         return
     if required:
         require_render_column(dataset, path, knob, conversation_field)
-    for split in ("train", "test"):
+    for split in TRAIN_TEST_SPLITS:
         if split in dataset:
             dataset[split] = _filter_empty_conversations(dataset[split], conversation_field, split_name=split)
 
@@ -863,11 +861,11 @@ def load_preprocessed_dataset(
         ds, loader = _load_sharded(path, data_parallel_rank, data_parallel_size)
         # Global emptiness is read from the shard index — same verdict on every rank, so no collective.
         # Per-rank-only emptiness is caught later by the trainer's pre-sharded eval equalization.
-        totals = {split: loader.get_total_examples(split) for split in ("train", "test") if split in ds}
+        totals = {split: loader.get_total_examples(split) for split in TRAIN_TEST_SPLITS if split in ds}
     else:
         ds = _load_replicated(path, test_size=None, placeholder_test=True)
         # Non-sharded data is replica-identical, so a local empty split is globally empty.
-        totals = {split: len(ds[split]) for split in ("train", "test") if split in ds}
+        totals = {split: len(ds[split]) for split in TRAIN_TEST_SPLITS if split in ds}
 
     # The sharded loader skips missing splits; without this the consumer dies on ds["test"] later.
     _require_train_test_splits(ds, path)

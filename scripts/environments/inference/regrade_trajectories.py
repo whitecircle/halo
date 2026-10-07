@@ -185,6 +185,13 @@ def regrade_file(path: str, workers: int) -> dict[str, Any]:
     validate_meta(path, meta)
     episodes = [episode for episode in recorded if not episode.get(GENERATION_ERROR_KEY)]
     payloads = build_payloads(meta)
+    # An index past the rebuilt problems means the dataset or its selection no longer matches the run's.
+    stray = sorted({episode["index"] for episode in episodes if not 0 <= episode["index"] < len(payloads)})
+    if stray:
+        raise SystemExit(
+            f"{path}: episode index(es) {stray} address none of the {len(payloads)} problems the rebuilt "
+            f"dataset yields; it no longer matches the one the run was scored on"
+        )
     env = rebuild_environment(meta)
     # The run's own grading contract off its meta line, minus the two knobs an offline re-grade must
     # not inherit. ``stop_on_first_failure``: s@1/s@2 need the all-pass verdict, not the pass
@@ -198,8 +205,8 @@ def regrade_file(path: str, workers: int) -> dict[str, Any]:
 
     def grade(idx: int, code: str | None, language: str | None) -> bool:
         """True iff ``code`` passes all of problem ``idx``'s tests, graded in the submission's language."""
-        payload = payloads[idx] if 0 <= idx < len(payloads) else None
-        if not code or not payload or not payload.get("tests"):
+        payload = payloads[idx]
+        if not code or not payload.get("tests"):
             return False
         passed, total, *_ = grade_solution(
             code,
@@ -221,7 +228,7 @@ def regrade_file(path: str, workers: int) -> dict[str, Any]:
         verdicts = list(pool.map(lambda t: grade(episodes[t[0]]["index"], t[1], t[2]), tasks))
 
     per_episode: dict[int, list[bool]] = {}
-    for (ep_i, _, _), ok in zip(tasks, verdicts, strict=False):
+    for (ep_i, _, _), ok in zip(tasks, verdicts, strict=True):
         per_episode.setdefault(ep_i, []).append(ok)
 
     n = len(episodes)

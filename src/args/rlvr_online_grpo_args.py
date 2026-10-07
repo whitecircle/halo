@@ -5,6 +5,7 @@ from typing import Any, ClassVar, Literal
 
 from src.args.common_script_args import CommonScriptArguments
 from src.args.mixins import (
+    DEFAULT_ANSWER_FIELD,
     AdvantageShapingArguments,
     ChunkedLogprobsArguments,
     GRPOEarlyStopArguments,
@@ -33,8 +34,8 @@ class RLVROnlineGRPOScriptArguments(
     AdvantageShapingArguments,
     GRPOEarlyStopArguments,
     RLRRArguments,
-    SDPGArguments,
     CommonScriptArguments,
+    SDPGArguments,
 ):
     """Arguments for RLVR (Reinforcement Learning with Verifiable Rewards) Online GRPO.
 
@@ -45,14 +46,18 @@ class RLVROnlineGRPOScriptArguments(
     relative-ranking ones, so the trainer refuses it beside the std floor or the degenerate-group drop.
     """
 
-    # The tunables ``use_sdpg`` gates: the shared block plus the RLVR-only advantage gate.
+    PROJECT_NAME: ClassVar[str] = "rlvr-online-grpo"
+
+    # The tunables ``use_sdpg`` gates, each under the name the trainer takes it by: the shared block
+    # plus the advantage gate, declared here rather than on SDPGArguments because the offline
+    # self-distillation arm has no advantages to gate on.
     SDPG_TUNABLES: ClassVar[tuple[str, ...]] = (
         *(f.name for f in fields(SDPGArguments)),
         "opd_positive_advantage_only",
     )
 
     answer_field: str = field(
-        default="answer",
+        default=DEFAULT_ANSWER_FIELD,
         metadata={"help": "Field in the dataset containing the ground truth answer for verification"},
     )
     system_prompt: str | None = field(
@@ -100,20 +105,13 @@ class RLVROnlineGRPOScriptArguments(
     )
 
     def build_sdpg_kwargs(self) -> dict:
-        """SDPG trainer kwargs from these args (empty when SDPG is disabled).
-
-        :class:`SDPGArguments` declares every tunable under the name the trainer takes it by, so the
-        block forwards itself; the two entries outside that mapping stay explicit.
-        """
+        """SDPG trainer kwargs from these args (empty when SDPG is disabled)."""
         if not self.use_sdpg:
             return {}
         return {
-            **{f.name: getattr(self, f.name) for f in fields(SDPGArguments)},
+            **{name: getattr(self, name) for name in self.SDPG_TUNABLES},
             # process_for_rlvr normalizes the answer column to "answer", so use that, not answer_field.
             "sdpg_answer_field": "answer",
-            # Declared here rather than on SDPGArguments: the gate is RLVR-only (the offline
-            # self-distillation arm has no advantages to gate on).
-            "opd_positive_advantage_only": self.opd_positive_advantage_only,
         }
 
     @property
@@ -133,10 +131,4 @@ class RLVROnlineGRPOScriptArguments(
 
     def _validate_ranges(self) -> None:
         super()._validate_ranges()
-        if not self.rewards:
-            raise ValueError("rewards must list at least one reward term")
-        self.reward_terms  # noqa: B018  parse at config time so a bad term fails before any server is touched
-
-    def __post_init__(self):
-        self._apply_default_project_name("rlvr-online-grpo")
-        self._validate_ranges()
+        self.reward_terms  # noqa: B018  parse at config time so a bad or empty list fails before any server is touched

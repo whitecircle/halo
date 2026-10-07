@@ -11,7 +11,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from src.environments.base import Message
-from src.environments.sandbox.base import SandboxAgentFault, SandboxInfraError
+from src.environments.sandbox.base import SandboxFault
 
 # What reading model-authored arguments as JSON or a Python literal raises on malformed text, past a
 # syntax error: an unhashable dict key or set member (``{[1]: 2}``) is a TypeError, deep nesting a
@@ -316,7 +316,7 @@ class NativeToolResult:
     refused: bool = False
     # The sandbox fault the call ended on, booked by type (infra or agent-caused) rather than as an
     # ordinary tool error, and ending the episode.
-    sandbox_fault: SandboxInfraError | SandboxAgentFault | None = None
+    sandbox_fault: SandboxFault | None = None
 
     def to_message(self):
         """Convert to a tool :class:`Message` for the conversation."""

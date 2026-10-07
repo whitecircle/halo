@@ -293,7 +293,6 @@ class DataCollatorForCompletionOnlyLMWithPacking(DataCollatorWithPacking):
         self,
         response_prompt_template: str | list[int],
         tokenizer: PreTrainedTokenizerBase,
-        ignore_index: int = LABEL_IGNORE_INDEX,
         train_on_last_assistant_only: bool = False,
         eos_token_ids: frozenset[int] | None = None,
         return_seq_idx: bool = False,
@@ -306,7 +305,6 @@ class DataCollatorForCompletionOnlyLMWithPacking(DataCollatorWithPacking):
         )
 
         self.response_prompt_template = response_prompt_template
-        self.ignore_index = ignore_index
         self.train_on_last_assistant_only = train_on_last_assistant_only
         self.response_token_ids = tokenize_response_template(response_prompt_template, self.tokenizer)
         self.eos_token_ids = eos_token_ids if eos_token_ids is not None else resolve_eos_token_ids(self.tokenizer)
@@ -324,7 +322,7 @@ class DataCollatorForCompletionOnlyLMWithPacking(DataCollatorWithPacking):
                 batch,
                 self.response_token_ids,
                 self.eos_token_ids,
-                self.ignore_index,
+                LABEL_IGNORE_INDEX,
                 self.train_on_last_assistant_only,
                 self.response_prompt_template,
                 tokenizer=self.tokenizer,
@@ -341,7 +339,7 @@ class DataCollatorForCompletionOnlyLMWithPacking(DataCollatorWithPacking):
                 batch["labels"][i] = self._mask_sequence(labels, input_ids=input_ids)
                 continue
 
-            new_labels = torch.full_like(labels, self.ignore_index)
+            new_labels = torch.full_like(labels, LABEL_IGNORE_INDEX)
             offset = 0
             for seq_len in example["seq_lengths"]:
                 seq_labels = labels[offset : offset + seq_len]
@@ -371,10 +369,10 @@ class DataCollatorForCompletionOnlyLMWithPacking(DataCollatorWithPacking):
             row_label="packed document",
         )
         if spans is None:
-            return torch.full_like(labels, self.ignore_index)
+            return torch.full_like(labels, LABEL_IGNORE_INDEX)
         response_starts, eos_ends = spans
 
-        new_labels = torch.full_like(labels, self.ignore_index)
+        new_labels = torch.full_like(labels, LABEL_IGNORE_INDEX)
         for start, end in zip(response_starts, eos_ends, strict=False):
             # Copy from `labels`, not input_ids: a template starting at a doc boundary must keep its mask.
             new_labels[start : end + 1] = labels[start : end + 1]
@@ -448,7 +446,6 @@ class DataCollatorWithFlatteningAndCompletionMask(DataCollatorWithFlattening):
     """
 
     response_prompt_template: str | list[int] = None
-    ignore_index: int = LABEL_IGNORE_INDEX
     train_on_last_assistant_only: bool = False
     eos_token_ids: frozenset[int] | None = None
 
@@ -483,10 +480,10 @@ class DataCollatorWithFlatteningAndCompletionMask(DataCollatorWithFlattening):
             row_label="flattened sample",
         )
         if spans is None:
-            return [self.ignore_index] * len(labels)
+            return [LABEL_IGNORE_INDEX] * len(labels)
         response_starts, eos_ends = spans
 
-        new_labels = [self.ignore_index] * len(labels)
+        new_labels = [LABEL_IGNORE_INDEX] * len(labels)
         for start, end in zip(response_starts, eos_ends, strict=False):
             for i in range(start, min(end + 1, len(labels))):
                 new_labels[i] = labels[i]

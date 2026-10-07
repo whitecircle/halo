@@ -6,7 +6,6 @@ only, the logits stay sharded, and the loss is normalized over the CP group's al
 count.
 """
 
-import matplotlib.pyplot as plt
 from _pipeline_style import *
 
 W, H = 11.9, 6.6
@@ -19,11 +18,7 @@ OUT_Y, (OUT_XS, OUT_W) = 1.32, columns(W, 2, 0.3, 0.5)
 ENTER_X = TOP_XS[-1] + TOP_W / 2  # the stack is entered under the last top-band card
 EXIT_X = OUT_XS[0] + OUT_W / 2  # and left again above the first output card
 
-fig, ax = plt.subplots(figsize=(W, H))
-fig.patch.set_facecolor(BG)
-ax.set_xlim(0, W)
-ax.set_ylim(0, H)
-ax.axis("off")
+fig, ax = canvas(W, H)
 
 title(ax, "A training step under CP", "cp 4 · S 32768 → 8192 tokens per rank")
 
@@ -62,5 +57,3 @@ footnote(
 )
 
 save(fig, "cp_training_step")
-plt.close(fig)
-print("✓ cp_training_step.png")

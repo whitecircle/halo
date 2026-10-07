@@ -20,9 +20,12 @@ from src.distributed.runtime import (
     get_global_rank,
     rank_tag,
 )
-from src.env import memory_snapshot_dir, torch_trace_dir
+from src.env import data_path, torch_trace_dir
 
 logger = logging.getLogger(__name__)
+
+# Alloc/free events the recorded CUDA memory history keeps before dropping the oldest.
+_MEMORY_HISTORY_MAX_ENTRIES = 100_000
 
 __all__ = [
     "should_profile_this_rank",
@@ -103,7 +106,7 @@ def log_cuda_memory(tag: str = "") -> dict[str, float]:
     return stats
 
 
-def start_memory_history(max_entries: int = 100_000) -> bool:
+def start_memory_history(max_entries: int = _MEMORY_HISTORY_MAX_ENTRIES) -> bool:
     """Begin recording CUDA allocation history (call sites + stacks).
 
     Returns True if started, False without CUDA. Recording has measurable overhead, so scope it to
@@ -144,27 +147,25 @@ def cuda_memory_history(
     output_dir: str | None = None,
     *,
     ranks: str | int | None = "0",
-    max_entries: int = 100_000,
+    max_entries: int = _MEMORY_HISTORY_MAX_ENTRIES,
     label: str = "snapshot",
 ) -> Iterator[None]:
     """Record CUDA allocation history for the region and dump a snapshot to
     ``<output_dir>/<label>-rankNN.pickle``. Only ``ranks`` record/dump; the rest no-op.
     ``output_dir`` defaults under ``HALO_DATA_ROOT``."""
-    output_dir = output_dir or memory_snapshot_dir()
+    output_dir = output_dir or data_path("profiling", "memory")
     active = torch.cuda.is_available() and should_profile_this_rank(ranks)
     if not active:
         yield
         return
 
     ensure_artifact_dir(output_dir)
-    started = start_memory_history(max_entries=max_entries)
+    start_memory_history(max_entries=max_entries)
     try:
         yield
     finally:
-        if started:
-            path = os.path.join(output_dir, f"{label}-{rank_tag()}.pickle")
-            dump_memory_snapshot(path)
-            stop_memory_history()
+        dump_memory_snapshot(os.path.join(output_dir, f"{label}-{rank_tag()}.pickle"))
+        stop_memory_history()
 
 
 def export_profiler_artifacts(

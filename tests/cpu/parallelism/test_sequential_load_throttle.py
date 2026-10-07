@@ -36,7 +36,7 @@ def fake_node(monkeypatch):
 def _run_call(monkeypatch, local_rank):
     """Simulate one use by ``local_rank`` (its phase number lives in the shared store)."""
     monkeypatch.setattr(filesystem, "get_local_rank", lambda: local_rank)
-    with filesystem.sequential_load_within_node(tag="model", max_concurrent=1):
+    with filesystem.sequential_load_within_node(max_concurrent=1):
         pass
 
 
@@ -130,10 +130,10 @@ def test_under_counted_participants_raises_instead_of_hanging_the_node(fake_node
 
 def test_unthrottled_shapes_touch_no_store(fake_node, monkeypatch):
     monkeypatch.setattr(filesystem, "get_local_rank", lambda: 0)
-    with filesystem.sequential_load_within_node(tag="model", max_concurrent=0):
+    with filesystem.sequential_load_within_node(max_concurrent=0):
         pass
     monkeypatch.setattr(filesystem, "get_local_world_size", lambda: 1)
-    with filesystem.sequential_load_within_node(tag="model", max_concurrent=1):
+    with filesystem.sequential_load_within_node(max_concurrent=1):
         pass
     assert fake_node.set_keys == [] and fake_node.kv == {}
 

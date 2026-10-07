@@ -19,6 +19,7 @@ import pytest
 import scripts.environments._common as common
 import src.environments.episode as episode
 from scripts.environments._common import (
+    EVAL_REQUEST_TIMEOUT_SECONDS,
     TrainingContract,
     load_training_contract,
     rollout_config_from_args,
@@ -28,7 +29,6 @@ from scripts.environments.inference.run_code_contests import CODING_ENV_TYPES, r
 from src.configs.rollout_config import DEFAULT_ROLLOUT_TOP_P
 from src.env import resolve_nccl_timeout_minutes
 from src.environments.envs.tasks.coding.code_contests import DEFAULT_REASONING_EFFORT
-from src.environments.eval_runner import DEFAULT_REQUEST_TIMEOUT_S
 from src.environments.registry import resolve_environment
 from tests.common.code_contests import StubSandbox
 from tests.common.utils import REPO_ROOT
@@ -110,7 +110,7 @@ def test_without_the_flag_the_script_defaults_stand():
         0.2,
         DEFAULT_ROLLOUT_TOP_P,
         99,
-        DEFAULT_REQUEST_TIMEOUT_S,
+        EVAL_REQUEST_TIMEOUT_SECONDS,
     )
     assert rollout.stop_token_ids is None and rollout.chat_template_kwargs == {}
 

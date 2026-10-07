@@ -326,7 +326,6 @@ def test_map_and_filter_combined() -> None:
             num_proc=1,
             remove_columns=dataset.column_names,
             desc="map_and_filter_test",
-            log_stats=True,
         )
 
         expected_count = sum(1 for i in range(30) if i % 2 != 0)

@@ -17,21 +17,24 @@ import stat
 import subprocess
 import sys
 import tempfile
+import threading
+from collections.abc import Iterator
+from contextlib import contextmanager
 
+from src.env import env_int
 from src.environments.sandbox.base import (
+    COMMAND_NOT_FOUND_RETURNCODE,
     INTERPRETER_PLACEHOLDER,
-    LOCAL_FSIZE_LIMIT,
-    LOCAL_NPROC_LIMIT,
     SANDBOX_DEFAULT_COMPILE_MEMORY_MB,
     SANDBOX_DEFAULT_COMPILE_TIMEOUT,
     SANDBOX_DEFAULT_MEMORY_MB,
     SANDBOX_DEFAULT_TIMEOUT,
-    SANDBOX_EXECUTION_GATE,
     LanguageSpec,
     SandboxAgentFault,
     SandboxExecutor,
     SandboxResult,
     SandboxSession,
+    compile_failure_verdict,
     compile_limit_verdict,
     require_language,
     require_session_path,
@@ -45,6 +48,12 @@ PYTHON_INTERPRETER = sys.executable or "python"
 # That interpreter as a tool description names it (``CPython 3.12``).
 PYTHON_RUNTIME = f"{platform.python_implementation()} {sys.version_info.major}.{sys.version_info.minor}"
 
+# Largest file a local-backend child may write (bytes); bounds FS disk-fill and binary size.
+LOCAL_FSIZE_LIMIT = 64 * 1024 * 1024
+# RLIMIT_NPROC for the run step. The kernel exempts uid 0: it binds every bubblewrap run (the jail's root
+# is a subordinate uid, counted per run in its own user namespace), and `local` only in a container run as
+# another user, whose WHOLE task set it counts — there it must clear the trainer+Ray baseline.
+LOCAL_NPROC_LIMIT = 4096
 # RLIMIT_CPU headroom over the wall-clock timeout, so SIGXCPU only fires as the backstop.
 RLIMIT_CPU_SLACK_SECONDS = 1.0
 
@@ -64,6 +73,44 @@ _DIR_OPEN_FLAGS = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
 _BuildKey = tuple[str, str, tuple[tuple[str, str], ...]]
 # Directory entries by name and file type (``lstat``, so a link is a link, not its target).
 _EntryKinds = set[tuple[str, int]]
+
+
+def _usable_cpus() -> int:
+    """CPUs this process may run on: its affinity set (a container cpuset), else the host count."""
+    if hasattr(os, "sched_getaffinity"):
+        return len(os.sched_getaffinity(0))
+    return os.cpu_count() or 1
+
+
+def _resolve_execution_slots() -> int:
+    """Max concurrent sandboxed executions; the usable CPU count by default, ``HALO_SANDBOX_MAX_CONCURRENCY``
+    overrides (parsed via :func:`env_int` — a malformed value warns and falls back to the default)."""
+    override = env_int("HALO_SANDBOX_MAX_CONCURRENCY", None)
+    if override is not None:
+        return max(1, override)
+    return max(1, _usable_cpus())
+
+
+class ExecutionGate:
+    """Fixed pool of execution slots; caps host oversubscription so a per-test wall-clock limit
+    measures near-dedicated-core time. Thread-safe; a run acquires its slot before its timeout starts.
+    """
+
+    def __init__(self, slots: int):
+        self._semaphore = threading.BoundedSemaphore(max(1, slots))
+
+    @contextmanager
+    def slot(self) -> Iterator[None]:
+        """Hold one execution slot for the ``with`` block, queueing if saturated."""
+        self._semaphore.acquire()
+        try:
+            yield
+        finally:
+            self._semaphore.release()
+
+
+# One gate per process, shared by every env instance in it; processes sharing a host each hold their own.
+SANDBOX_EXECUTION_GATE = ExecutionGate(_resolve_execution_slots())
 
 
 class SessionPathError(ValueError):
@@ -451,13 +498,10 @@ class LocalSubprocessSandbox(SandboxExecutor):
             # The compile holds an execution slot, so outrunning the timeout is the source's doing
             # (a template or constexpr blow-up), not a starved host.
             return compile_limit_verdict(f"compilation timed out after {self.compile_timeout:g} s")
-        # 127 = the wrapper shell could not exec the compiler: a backend failure, not a bad-source verdict.
-        if returncode == 127:
+        if returncode == COMMAND_NOT_FOUND_RETURNCODE:
             return SandboxResult(error=f"compiler not found: {spec.compile_argv[0]!r}", stderr=stderr.strip())
         if returncode != 0:
-            # gcc/g++ emit diagnostics on stderr; fall back to stdout if a toolchain uses it.
-            diagnostics = stderr.strip() or stdout.strip() or "compilation failed"
-            return SandboxResult(stderr=diagnostics, returncode=returncode, compile_failed=True)
+            return compile_failure_verdict(stderr, stdout, returncode)
         return None
 
     def _run_program(self, workdir: str, spec: LanguageSpec, *, stdin: str, timeout: float) -> SandboxResult:

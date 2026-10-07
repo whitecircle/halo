@@ -45,6 +45,9 @@ _CLASS_DEFAULT_MAX_TURNS = {"code_contests": 15, "codeforces": 15, "swe": 20, "e
 # dataset gate are held to, and deriving it from the classes would make the check agree with itself.
 _REQUIRES_ANSWER = {"code_contests", "codeforces", "exam_qa", "qa_search", "react_math", "react_search", "swe"}
 
+# The environments that register ``web_search``, with the options that make them register it.
+_SEARCH_ENV_KWARGS = {"exam_qa": {"open_book": True}, "native_combined": {}, "qa_search": {}, "react_search": {}}
+
 
 def _base_default_max_turns() -> int:
     """``BaseEnvironment``'s own default — the value every env inherits unless it declares one."""
@@ -174,6 +177,30 @@ def test_valid_environment_kwarg_still_reaches_the_environment():
     """Guards the rejection above from being satisfied by rejecting everything."""
     env = resolve_environment("code_contests", {"timeout_per_test": 3, "sandbox_backend": "local"})
     assert env.grading_spec.default_timeout == 3
+
+
+@pytest.mark.parametrize("env_type", sorted(_SEARCH_ENV_KWARGS))
+def test_every_search_environment_takes_its_backend_from_the_config(env_type, monkeypatch):
+    """``search_backend`` picks the backend of every environment that registers ``web_search``, and a
+    name no backend answers to is refused when the env is built. Refused as an unknown option instead,
+    a preset can only auto-select, so a run searches on whichever API key its actor nodes hold."""
+    monkeypatch.setenv("HALO_ALLOW_MOCK_SEARCH", "1")
+    config = {**_ENV_KWARGS[env_type], **_SEARCH_ENV_KWARGS[env_type]}
+    env = resolve_environment(env_type, {**config, "search_backend": "mock"})
+    assert "Wikipedia: pytest" in env.registry.get("web_search").execute(query="pytest")
+    with pytest.raises(ValueError, match="Unknown search backend: nonexistent"):
+        resolve_environment(env_type, {**config, "search_backend": "nonexistent"})
+
+
+def test_the_search_table_names_every_environment_that_registers_web_search():
+    """Anti-rot: a preset that gains a ``web_search`` tool must arrive in the table above, so the backend
+    knob is held to it too."""
+    registering = set()
+    for env_type, kwargs in _ENV_KWARGS.items():
+        env = resolve_environment(env_type, {**kwargs, **_SEARCH_ENV_KWARGS.get(env_type, {})})
+        if "web_search" in env.registry.names():
+            registering.add(env_type)
+    assert registering == set(_SEARCH_ENV_KWARGS)
 
 
 @pytest.mark.parametrize("max_turns", [0, -1])

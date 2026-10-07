@@ -1,12 +1,15 @@
 """Script arguments for sequence-classification training."""
 
 from dataclasses import dataclass, field
+from typing import ClassVar
 
 from src.args.common_script_args import CommonScriptArguments
 
 
 @dataclass
 class CLFScriptArguments(CommonScriptArguments):
+    PROJECT_NAME: ClassVar[str] = "classification"
+
     text_field: str | None = field(
         default=None,
         metadata={
@@ -14,7 +17,3 @@ class CLFScriptArguments(CommonScriptArguments):
             "no pre-built 'prompt' conversation — e.g. text/label datasets like imdb."
         },
     )
-
-    def __post_init__(self):
-        self._apply_default_project_name("classification")
-        self._validate_ranges()

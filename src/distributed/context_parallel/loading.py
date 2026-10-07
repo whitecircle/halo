@@ -15,14 +15,10 @@ from transformers import AutoModelForCausalLM
 
 from src.distributed.context_parallel.config import CPConfig
 from src.distributed.context_parallel.wrapper import patch_model_for_cp
-from src.distributed.expert_parallel.loading import cast_loaded_parameters, load_ep_model
-from src.distributed.expert_parallel.master_weights import restore_fp32_master_parameters
+from src.distributed.expert_parallel.loading import load_ep_model, load_through_cpu
 from src.distributed.expert_parallel.patching import create_ep_buffers, patch_moe_model_for_ep
-from src.distributed.filesystem import joined_node_load
-from src.distributed.runtime import DeferredRankFailure, get_global_rank, move_model_to_local_device
-from src.models.loading.checkpoint_coverage import from_pretrained_verified
+from src.distributed.runtime import get_global_rank
 from src.models.patches.attention import revalidate_attn_kwarg
-from src.models.patches.buffer_fixes import finalize_loaded_model
 
 logger = logging.getLogger(__name__)
 
@@ -67,36 +63,21 @@ def load_model_for_cp(
 
     revalidate_attn_kwarg(model_kwargs, config)
 
-    # Bounded ranks per node at a time avoid CPU OOM: each rank loads to CPU, then to GPU.
-    precision_guard = DeferredRankFailure(f"FP32-master checkpoint load from {model_name_or_path}")
-    with joined_node_load(f"CP model load from {model_name_or_path}", max_concurrent_loading):
-        model = from_pretrained_verified(
-            model_class,
-            model_name_or_path,
-            config=config,
-            dtype=dtype,
-            trust_remote_code=trust_remote_code,
-            device_map="cpu",
-            **model_kwargs,
-        )
-        cast_loaded_parameters(model, dtype, keep_fp32=keep_fp32_params, ep_wrapped=ep_config is not None)
-        precision_guard.run(
-            lambda: restore_fp32_master_parameters(
-                model,
-                model_name_or_path,
-                ep_config,
-                keep_non_ep=keep_fp32_params,
-                strict=preserve_checkpoint_precision,
-                revision=model_kwargs.get("revision"),
-            )
-        )
-        if precision_guard.reason is None:
-            model = move_model_to_local_device(model)
-
-    precision_guard.reject()
-
-    # Before the CP wrap, on the inner HF model — the wrapper carries no tie_weights.
-    finalize_loaded_model(model)
+    # Finalized before the CP wrap, on the inner HF model — the wrapper carries no tie_weights.
+    model = load_through_cpu(
+        model_class,
+        model_name_or_path,
+        load_phase="CP model load",
+        max_concurrent_loading=max_concurrent_loading,
+        ep_config=ep_config,
+        keep_fp32=keep_fp32_params,
+        ep_wrapped=ep_config is not None,
+        preserve_checkpoint_precision=preserve_checkpoint_precision,
+        config=config,
+        dtype=dtype,
+        trust_remote_code=trust_remote_code,
+        **model_kwargs,
+    )
 
     if ep_config is not None:
         model = patch_moe_model_for_ep(model, ep_config)

@@ -234,7 +234,6 @@ def deepgemm_grouped_gemm(x, w, *, offs, precision, weight_cacheable=True):
     """
     if precision not in DEEPGEMM_FORMATS:
         raise ValueError(
-            f"deepgemm_grouped_gemm supports only 'mxfp8' / 'nvfp4', got {precision!r} (mxfp4 is simulated-only)"
+            f"deepgemm_grouped_gemm supports only {DEEPGEMM_FORMATS}, got {precision!r} (mxfp4 is simulated-only)"
         )
-    offs_i32 = offs.to(torch.int32) if offs.dtype != torch.int32 else offs
-    return _DeepGEMMGroupedFn.apply(x, w, offs_i32, precision, weight_cacheable)
+    return _DeepGEMMGroupedFn.apply(x, w, offs.to(torch.int32), precision, weight_cacheable)

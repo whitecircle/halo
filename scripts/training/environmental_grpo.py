@@ -39,7 +39,8 @@ from accelerate.logging import get_logger
 from trl import GRPOConfig, ModelConfig
 
 from src.args.distributed_args import DistributedArguments
-from src.args.environmental_grpo_args import DEFAULT_ANSWER_FIELD, EnvironmentalGRPOScriptArguments
+from src.args.environmental_grpo_args import EnvironmentalGRPOScriptArguments
+from src.args.mixins import DEFAULT_ANSWER_FIELD
 from src.configs.async_training_config import AsyncTrainingConfig
 from src.configs.environment_config import EnvironmentConfig
 from src.data.pipeline.conversation import as_conversation
@@ -334,10 +335,11 @@ def main():
     max_turns = probe_env.max_turns
     template_kwargs = probe_template_kwargs(async_config, probe_env)
     prompt_budget = (args.max_prompt_length or 0) + measure_env_prompt_overhead(probe_env, tokenizer, template_kwargs)
+    full_trajectory_tokens = prompt_budget + worst_case_generation(async_config, max_turns)
     verify_context_window_synced(
         async_config.get_server_urls(),
         single_turn_tokens=prompt_budget + async_config.rollout_max_tokens,
-        full_trajectory_tokens=prompt_budget + worst_case_generation(async_config, max_turns),
+        full_trajectory_tokens=full_trajectory_tokens,
         backend=async_config.rollout_backend,
     )
     # The IS ratio divides by the engine's logprobs: they must be the sampling distribution's.
@@ -378,7 +380,7 @@ def main():
         syncs_to_external_generator=True,
         # A trajectory accumulates every turn, so the declared prompt + per-turn budgets are not its
         # bound — throughput/MFU would be reported against a length the batches routinely exceed.
-        max_seq_len=prompt_budget + worst_case_generation(async_config, max_turns),
+        max_seq_len=full_trajectory_tokens,
     )
     trainer = DistributedAsyncEnvironmentalGRPOTrainer(
         model=model,

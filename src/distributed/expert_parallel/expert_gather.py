@@ -342,7 +342,7 @@ class EPExpertGatherMixin:
             state[f"experts.{i}.{down_key}.weight"] = down[i].transpose(0, 1).contiguous().to(device)
         return state
 
-    def gather_expert_lora_state_dict(self, device: str = "cpu", retain: bool = True) -> dict:
+    def gather_expert_lora_state_dict(self, retain: bool = True) -> dict:
         """Gather this layer's grouped LoRA adapters into a checkpoint dict, keyed relative to the layer.
 
         Adapters in matmul convention, gathered to full expert count across the dispatch-EP group.
@@ -358,8 +358,8 @@ class EPExpertGatherMixin:
             lora_b = self._ep_all_gather_cat(lora_b)
             if not retain:
                 continue
-            state[f"experts.{attr}.lora_A"] = lora_a.contiguous().to(device)
-            state[f"experts.{attr}.lora_B"] = lora_b.contiguous().to(device)
+            state[f"experts.{attr}.lora_A"] = lora_a.contiguous().cpu()
+            state[f"experts.{attr}.lora_B"] = lora_b.contiguous().cpu()
         return state
 
     def load_expert_lora_state_dict(self, layer_state: dict) -> None:

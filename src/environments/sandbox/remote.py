@@ -11,10 +11,12 @@ import math
 import requests
 
 from src.environments.sandbox.base import (
+    COMMAND_NOT_FOUND_RETURNCODE,
     SANDBOX_DEFAULT_TIMEOUT,
     SandboxExecutor,
     SandboxResult,
     SandboxSession,
+    compile_failure_verdict,
     compile_limit_verdict,
     require_session_path,
     utf8_encodable,
@@ -29,8 +31,6 @@ _STEP_FINISHED_STATUSES = ("finished", "success", "")
 # The response ``status`` SandboxFusion reports when a step exited non-zero or hit its time limit: the
 # program's verdict, read off the step blocks. Any other non-success status is the service's failure.
 _PROGRAM_FAILED_STATUS = "failed"
-# The shell's exit code for a command it could not exec: a missing compiler, not a source verdict.
-_COMMAND_NOT_FOUND = 127
 
 
 def _command_result(value: object) -> dict[str, object]:
@@ -121,7 +121,9 @@ class RemoteSandbox(SandboxExecutor):
         if _is_time_limit(compile_status):
             return compile_limit_verdict("remote compilation exceeded the service's compile time limit")
         compile_rc = _return_code(compile_step.get("return_code"))
-        if compile_step and (compile_status not in _STEP_FINISHED_STATUSES or compile_rc == _COMMAND_NOT_FOUND):
+        if compile_step and (
+            compile_status not in _STEP_FINISHED_STATUSES or compile_rc == COMMAND_NOT_FOUND_RETURNCODE
+        ):
             # The compiler step did not run to completion (or the compiler is absent): the service's
             # fault, never a verdict on the source.
             diagnostics = str(compile_step.get("stderr") or compile_step.get("stdout") or compile_status)
@@ -129,8 +131,9 @@ class RemoteSandbox(SandboxExecutor):
                 stderr=diagnostics.strip(), error=f"remote compile step failed: {diagnostics.strip()}"
             )
         if compile_step and compile_rc not in (0, None):
-            diagnostics = str(compile_step.get("stderr") or compile_step.get("stdout") or "compilation failed")
-            return SandboxResult(stderr=diagnostics.strip(), returncode=compile_rc, compile_failed=True)
+            return compile_failure_verdict(
+                str(compile_step.get("stderr") or ""), str(compile_step.get("stdout") or ""), compile_rc
+            )
 
         run = _command_result(data.get("run_result"))
         timed_out = _is_time_limit(str(run.get("status", "")).lower())

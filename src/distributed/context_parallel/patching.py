@@ -11,7 +11,7 @@ import logging
 import torch.distributed as dist
 import torch.nn as nn
 
-from src.distributed.context_parallel.layers.registry import CP_SUPPORTED_ATTENTION_CLASSES, WRAPPER_CLASS_MAP
+from src.distributed.context_parallel.layers.registry import WRAPPER_CLASS_MAP
 from src.distributed.context_parallel.validation import (
     UlyssesConfigError,
     validate_model_for_ulysses,
@@ -60,7 +60,7 @@ def patch_attention_for_ulysses(
         raise UlyssesConfigError(
             f"No attention layers were patched for Ulysses CP — the run would silently attend over "
             f"each rank's local sequence chunk only. The model has none of the supported attention "
-            f"classes: {CP_SUPPORTED_ATTENTION_CLASSES}."
+            f"classes: {tuple(WRAPPER_CLASS_MAP)}."
         )
     logger.info(f"✓ Patched {patched} attention layers for Ulysses CP")
 

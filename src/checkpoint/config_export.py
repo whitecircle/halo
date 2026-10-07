@@ -11,7 +11,6 @@ from __future__ import annotations
 
 import copy
 import json
-import logging
 import os
 import shutil
 import tempfile
@@ -20,6 +19,7 @@ from transformers.dynamic_module_utils import custom_object_save, get_relative_i
 from transformers.utils import CONFIG_NAME, cached_file
 
 from src.checkpoint.model_card import tag_exported_model_card
+from src.log import info_logger
 from src.models.loading.config_levels import config_export_ready
 from src.models.moe_balancing import (
     ep_roster_registered,
@@ -28,7 +28,7 @@ from src.models.moe_balancing import (
 )
 from src.models.structure import transformers_model_class
 
-logger = logging.getLogger(__name__)
+logger = info_logger(__name__)
 
 # Stamped by load_distributed_model on the loaded model: where its weights were actually read (None
 # under init_from_scratch). One spelling for the writer and the resume-coverage reader.
@@ -37,6 +37,14 @@ LOADED_WEIGHTS_FROM_ATTR = "_loaded_weights_from"
 # Marks a key the serialized config does not spell, in the source-schema diff. Distinct from a key
 # spelled as JSON ``null``, which is a value the run may legitimately have set.
 _CONFIG_KEY_ABSENT = object()
+
+
+def write_config_json(config_file: str, payload: dict) -> None:
+    """Write a rewritten ``config.json`` in the one form every toolkit rewrite emits (2-space indent,
+    sorted keys, trailing newline), so a re-export diffs only where the content changed."""
+    with open(config_file, "w", encoding="utf-8") as handle:
+        json.dump(payload, handle, indent=2, sort_keys=True)
+        handle.write("\n")
 
 
 def hf_architecture_name(model) -> str | None:
@@ -78,9 +86,7 @@ def restore_model_type(config, output_dir: str) -> None:
     if payload.get("model_type"):
         return
     payload["model_type"] = live
-    with open(config_file, "w", encoding="utf-8") as handle:
-        json.dump(payload, handle, indent=2, sort_keys=True)
-        handle.write("\n")
+    write_config_json(config_file, payload)
 
 
 def flatten_per_layer_config(section: dict, legacy_keys: dict[str, tuple[str, str]]) -> bool:
@@ -145,9 +151,7 @@ def export_legacy_per_layer_config(output_dir: str) -> None:
             changed |= flatten_per_layer_config(section, legacy_keys)
     if not changed:
         return
-    with open(config_file, "w", encoding="utf-8") as handle:
-        json.dump(payload, handle, indent=2, sort_keys=True)
-        handle.write("\n")
+    write_config_json(config_file, payload)
 
 
 def checkpoint_source_ref(model) -> str | None:
@@ -190,6 +194,12 @@ def _source_config_payload(source: str) -> dict | None:
     return payload
 
 
+def _auto_map_references(entry: str | list | tuple) -> tuple[str, ...]:
+    """The class references one ``auto_map`` entry holds: ``module.Class``, or the tokenizer's
+    ``[slow, fast]`` pair with an absent slot as None."""
+    return tuple(value for value in ((entry,) if isinstance(entry, str) else entry) if value)
+
+
 def _copy_auto_map_modules(source: str, auto_map: dict, output_dir: str) -> None:
     """Copy the remote-code modules ``auto_map`` names from ``source`` into ``output_dir``.
 
@@ -197,12 +207,7 @@ def _copy_auto_map_modules(source: str, auto_map: dict, output_dir: str) -> None
     sibling (Step-3.7's ``vision_encoder``) loads nowhere without it, and only the module the
     ``auto_map`` entry spells is named there.
     """
-    pending = {
-        value.split(".")[0]
-        for entry in auto_map.values()
-        for value in ((entry,) if isinstance(entry, str) else entry)
-        if value
-    }
+    pending = {reference.split(".")[0] for entry in auto_map.values() for reference in _auto_map_references(entry)}
     copied: set[str] = set()
     while pending:
         module = pending.pop()
@@ -329,19 +334,58 @@ def export_source_config_schema(config, output_dir: str, *, source: str | None) 
             f"served model would run a geometry the trainer never had. Apply the change to the "
             f"source checkpoint's own config.json and re-export."
         )
-    with open(config_file, "w", encoding="utf-8") as handle:
-        json.dump(payload, handle, indent=2, sort_keys=True)
-        handle.write("\n")
+    write_config_json(config_file, payload)
     _copy_auto_map_modules(source, payload["auto_map"], output_dir)
+
+
+def drop_unshipped_auto_map(output_dir: str) -> None:
+    """Drop the ``auto_map`` entries of ``output_dir``'s ``config.json`` whose modules it does not carry.
+
+    transformers copies remote code only for a class registered to an auto class (``_auto_class``),
+    yet serializes whatever ``auto_map`` the loaded config.json held. An in-library load of a hub
+    checkpoint that also ships remote code (Laguna without ``trust_remote_code``) therefore exports a
+    config naming ``modeling_<x>.py`` it never wrote, and every ``trust_remote_code=True`` reload
+    raises on the missing file; without the entry it reloads the in-library class the run trained.
+    A ``repo--module.Class`` reference resolves from its own repo and stays.
+    """
+    config_file = os.path.join(output_dir, CONFIG_NAME)
+    if not os.path.isfile(config_file):
+        return
+    with open(config_file, encoding="utf-8") as handle:
+        payload = json.load(handle)
+    auto_map = payload.get("auto_map")
+    if not auto_map:
+        return
+    unshipped = {
+        auto_class
+        for auto_class, entry in auto_map.items()
+        if any(
+            "--" not in reference and not os.path.isfile(os.path.join(output_dir, f"{reference.split('.')[0]}.py"))
+            for reference in _auto_map_references(entry)
+        )
+    }
+    if not unshipped:
+        return
+    logger.info(
+        f"drop_unshipped_auto_map: {config_file} names remote code the export does not carry for "
+        f"{sorted(unshipped)}; dropped those auto_map entries, so a reload uses the in-library class."
+    )
+    kept = {auto_class: entry for auto_class, entry in auto_map.items() if auto_class not in unshipped}
+    if kept:
+        payload["auto_map"] = kept
+    else:
+        del payload["auto_map"]
+    write_config_json(config_file, payload)
 
 
 def finalize_exported_config(config, output_dir: str, *, source: str | None) -> None:
     """Bring a just-written ``config.json`` up to the artifact contract. Every writer's last step.
 
-    Three rewrites transformers' serialization does not do, in the order they compose: the live
+    Four rewrites transformers' serialization does not do, in the order they compose: the live
     ``model_type`` restored for vendor classes declaring none, the flat legacy per-layer keys the
-    pinned servers read, and the source repo's own schema where the family declares it. Each is a
-    no-op for a family that needs none, so the writers call the whole set rather than selecting.
+    pinned servers read, the source repo's own schema where the family declares it, and the
+    ``auto_map`` entries naming modules the directory does not carry dropped. Each is a no-op for a
+    family that needs none, so the writers call the whole set rather than selecting.
     The directory's ``README.md`` card then gets the Halo Hub tag (:func:`tag_exported_model_card`).
 
     One function because the parallel writers and the single-GPU save must produce the same
@@ -357,6 +401,7 @@ def finalize_exported_config(config, output_dir: str, *, source: str | None) -> 
     restore_model_type(config, output_dir)
     export_legacy_per_layer_config(output_dir)
     export_source_config_schema(config, output_dir, source=source)
+    drop_unshipped_auto_map(output_dir)
     tag_exported_model_card(output_dir)
 
 

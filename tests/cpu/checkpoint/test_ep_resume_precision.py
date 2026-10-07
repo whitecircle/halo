@@ -144,7 +144,6 @@ def _patch_cpu_loading(monkeypatch):
     """No forward or distributed collective runs; the actual checkpoint materialization does."""
     monkeypatch.setattr(torch.cuda, "is_available", lambda: False)
     monkeypatch.setattr(eager_loading, "move_model_to_local_device", lambda model: model)
-    monkeypatch.setattr(cp_loading, "move_model_to_local_device", lambda model: model)
     monkeypatch.setattr(model_loading, "create_ep_buffers", lambda model: 0)
     verified = model_loading.from_pretrained_verified
 
@@ -625,18 +624,8 @@ TP_SIZE = 2
 
 
 def _patch_cpu_tp_loading(monkeypatch):
-    """:func:`_patch_cpu_loading` for the TP loaders on gloo ranks: the sequential loader's move of its
-    CPU-staged model onto the rank's GPU stays on the CPU, and the TP mesh is laid on CPU devices."""
+    """:func:`_patch_cpu_loading` for the TP loaders on gloo ranks, with the TP mesh laid on CPU devices."""
     _patch_cpu_loading(monkeypatch)
-    cpu_pretrained = model_loading.from_pretrained_verified
-
-    def staged_on_cpu(model_class, source, **kwargs):
-        model = cpu_pretrained(model_class, source, **kwargs)
-        move = model.to
-        model.to = lambda *args, **kw: model if args and str(args[0]).startswith("cuda") else move(*args, **kw)
-        return model
-
-    monkeypatch.setattr(model_loading, "from_pretrained_verified", staged_on_cpu)
     monkeypatch.setattr(
         model_loading,
         "create_dp_tp_mesh",

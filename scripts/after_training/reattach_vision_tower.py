@@ -27,6 +27,7 @@ import os
 import shutil
 
 from transformers import AutoConfig
+from transformers.utils import IMAGE_PROCESSOR_NAME, PROCESSOR_NAME, VIDEO_PROCESSOR_NAME
 
 import src.distributed.expert_parallel.layers.roster  # noqa: F401 — registers the EP export roster the config finalizer requires
 from scripts._common import add_hub_source_args, add_max_shard_size_arg, add_trust_remote_code_arg
@@ -52,7 +53,7 @@ logger = logging.getLogger(__name__)
 
 TEXT_PREFIX = "model."
 WRAPPER_TEXT_PREFIX = "model.language_model."
-_PROCESSOR_FILES = ("processor_config.json", "preprocessor_config.json", "video_preprocessor_config.json")
+_PROCESSOR_FILES = (PROCESSOR_NAME, IMAGE_PROCESSOR_NAME, VIDEO_PROCESSOR_NAME)
 
 
 def _require_text_only_export(input_dir: str, trust_remote_code: bool) -> AutoConfig:

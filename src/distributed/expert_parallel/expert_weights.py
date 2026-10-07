@@ -31,6 +31,7 @@ from src.distributed.runtime import (
     resolve_param_tensor,
 )
 from src.models.loading.config_levels import config_sources
+from src.models.moe_balancing import apply_export_renames
 from src.models.structure import persistent_buffers, unwrap_framework_wrappers
 
 
@@ -215,10 +216,7 @@ def to_hub_layer_key(key: str, layer_cls: type[EPMoELayerBase]) -> str:
 
     Identity for every family that declares no :attr:`~EPMoELayerBase._EXPORT_KEY_RENAMES`.
     """
-    for module_spelling, hub_spelling in layer_cls._EXPORT_KEY_RENAMES:
-        if module_spelling in key:
-            return key.replace(module_spelling, hub_spelling, 1)
-    return key
+    return apply_export_renames(key, layer_cls._EXPORT_KEY_RENAMES)
 
 
 def hub_to_module_key_renames(model_type: str) -> tuple[tuple[str, str], ...]:

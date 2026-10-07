@@ -52,6 +52,7 @@ import torch
 from safetensors.torch import save_file
 from transformers.utils import CONFIG_NAME
 
+from src.checkpoint.config_export import write_config_json
 from src.checkpoint.format import (
     SAFETENSORS_METADATA,
     SAFETENSORS_WEIGHTS_FILE,
@@ -72,6 +73,7 @@ from src.distributed.expert_parallel.expert_weights import (
     hf_fused_expert_keys,
     per_expert_layouts,
 )
+from src.kernels.lowp.linear import PRECISION_TO_FORMAT
 from src.kernels.lowp.mixed_precision import MLP_PROJECTIONS, block_index, block_numbering_root, kept_block_indices
 from src.kernels.lowp.quantization import FORMAT_BLOCK_SIZE, QUANTIZERS, BlockScaledTensor, dequantize
 from src.log import configure_cli_logging
@@ -105,8 +107,6 @@ _DEFAULT_EXCLUDE = (
 # nvfp4 ~0.08-0.15) with headroom. Above it the cause is structural, usually the contraction axis. The
 # QAT forward is exact wherever a value lands in this band.
 _VERIFY_RELERR_TOL = {"mxfp8": 0.08, "nvfp4": 0.25, "mxfp4": 0.35}
-# Storage format -> the ``lowp_precision`` spelling that trains it.
-_FMT_TO_LOWP_PRECISION = {"mxfp8": "fp8", "nvfp4": "fp4", "mxfp4": "mxfp4"}
 # Per-expert un-fused hub layout (``...experts.3.gate_proj.weight``): expert weights other than the
 # 3-D fused tensor, told apart from a dense MLP projection by this segment alone. The container
 # spellings are the EP layer classes' own (``routed_experts`` beside ``experts``).
@@ -122,7 +122,7 @@ def _is_expert_weight(name: str, ndim: int) -> bool:
     This is the seam ``--lowp_apply_moe_experts`` turns on, so it is the complement of "dense MLP
     projection" under the same include roster.
     """
-    if ndim == 3 and any(name.endswith(suffix) for suffix in _FUSED_EXPERT_SUFFIXES):
+    if ndim == 3 and name.endswith(_FUSED_EXPERT_SUFFIXES):
         return True
     return _PER_EXPERT_SEGMENT.search(name) is not None
 
@@ -148,7 +148,7 @@ def _should_quantize(
     """
     if include.search(name) is None or exclude.search(name) is not None or tensor.dim() < 2:
         return False
-    if not (name.endswith(".weight") or (tensor.dim() == 3 and any(name.endswith(s) for s in _FUSED_EXPERT_SUFFIXES))):
+    if not (name.endswith(".weight") or (tensor.dim() == 3 and name.endswith(_FUSED_EXPERT_SUFFIXES))):
         return False
     if block_index(name) in kept_blocks:
         return False
@@ -185,7 +185,7 @@ def _reject_unexportable_experts(
         ndim = len(header.get_shape())
         if header.get_dtype() not in SAFETENSORS_FLOAT_DTYPES:
             continue
-        if ndim == 3 and not any(name.endswith(suffix) for suffix in _FUSED_EXPERT_SUFFIXES):
+        if ndim == 3 and not name.endswith(_FUSED_EXPERT_SUFFIXES):
             raise ValueError(
                 f"{name!r} is a 3-D floating expert tensor in the low-precision scope, but no EP layer "
                 f"class declares its name as a fused expert key ({', '.join(_FUSED_EXPERT_SUFFIXES)}), so "
@@ -405,6 +405,8 @@ def _write_manifest(
     """Copy every non-weight file (config, tokenizer, chat_template.jinja, remote-code .py) + drop a
     quantization_config.json describing the block-scaled scheme."""
     copy_checkpoint_aux_files(input_dir, output_dir)
+    # The ``lowp_precision`` spelling that trains this storage format.
+    lowp_precision = next(precision.value for precision, trained in PRECISION_TO_FORMAT.items() if trained == fmt)
     manifest = {
         "quant_method": "block_scaled",
         "format": fmt,
@@ -424,7 +426,7 @@ def _write_manifest(
         "scope": scope,
         "quantized_weights": names,
         "note": (
-            f"Trained with mixed-precision QAT (lowp_precision: {_FMT_TO_LOWP_PRECISION[fmt]}, "
+            f"Trained with mixed-precision QAT (lowp_precision: {lowp_precision}, "
             f"i.e. {fmt}); quantizing the bf16/fp32 master to this format reproduces the QAT "
             "forward exactly. Dequantize via src.kernels.lowp.quantization.dequantize."
         ),
@@ -441,8 +443,7 @@ def _write_manifest(
         with open(config_path) as f:
             config = json.load(f)
         config["quantization_config"] = manifest
-        with open(config_path, "w") as f:
-            json.dump(config, f, indent=2)
+        write_config_json(config_path, config)
 
 
 def parse_args():

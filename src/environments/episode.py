@@ -27,6 +27,7 @@ from src.environments.base import (
     Trajectory,
     resolve_reasoning_effort,
 )
+from src.inference.openai_client import TRANSIENT_CLIENT_ERROR_CODES
 from src.inference.response import ENGINE_CUT_FINISH_REASONS, FINISH_REASON_ABORT, FINISH_REASON_LENGTH
 
 logger = logging.getLogger(__name__)
@@ -34,8 +35,6 @@ logger = logging.getLogger(__name__)
 # vLLM answers 400 when a NaN log-prob keeps it from serialising its OWN response: the request was
 # valid and a fresh one succeeds, so both drivers retry it rather than lose the turn.
 ENGINE_SERIALIZATION_FAULT = "not JSON compliant"
-# Client-error statuses that report a transient server condition, not a bad request.
-RETRYABLE_4XX = frozenset({408, 429})
 # What an engine's client error says when the conversation outgrew the served context, lowercased:
 # vLLM's and SGLang's "maximum context length" / "model's context length", vLLM's "maximum model
 # length", and the OpenAI API's error code.
@@ -291,7 +290,7 @@ def is_engine_fault(status: int, body: str) -> bool:
 def is_terminal_client_status(status: int, body: str) -> bool:
     """A client error the request itself caused (the conversation outgrew the served context, a
     malformed request): retrying the same request cannot succeed."""
-    return 400 <= status < 500 and status not in RETRYABLE_4XX and not is_engine_fault(status, body)
+    return 400 <= status < 500 and status not in TRANSIENT_CLIENT_ERROR_CODES and not is_engine_fault(status, body)
 
 
 def is_context_overflow(status: int, body: str) -> bool:

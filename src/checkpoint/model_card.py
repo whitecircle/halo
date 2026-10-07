@@ -20,7 +20,7 @@ from huggingface_hub.constants import REPOCARD_NAME
 from huggingface_hub.repocard import metadata_load, metadata_save
 from huggingface_hub.utils import HFValidationError, validate_repo_id
 from peft import PeftType
-from peft.utils import CONFIG_NAME as ADAPTER_CONFIG_NAME
+from peft.utils import CONFIG_NAME as ADAPTER_CONFIG_FILE
 
 from src.checkpoint.atomic import create_staged_file
 from src.log import warn_once
@@ -128,7 +128,7 @@ def _fresh_card_metadata(directory: Path) -> dict:
     carries. A ``peft_type`` outside PEFT's registry (the native EP expert adapters) and a full-model
     directory declare no library, so the card claims no loader that would refuse the files.
     """
-    adapter_config = directory / ADAPTER_CONFIG_NAME
+    adapter_config = directory / ADAPTER_CONFIG_FILE
     if not adapter_config.is_file():
         return {}
     config = json.loads(adapter_config.read_text())

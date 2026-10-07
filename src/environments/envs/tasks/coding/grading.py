@@ -129,6 +129,10 @@ def exact_output_match(expected: str, actual: str) -> bool:
     return _lf_lines(expected) == _lf_lines(actual)
 
 
+# A GradingSpec's ``comparison`` (the env's ``output_comparison``) -> the comparator it names.
+OUTPUT_COMPARATORS: dict[str, Callable[[str, str], bool]] = {"exact": exact_output_match, "tokens": compare_tokens}
+
+
 def python_syntax_error(code: str) -> str | None:
     """The interpreter's error line for ``code`` that does not compile as a Python program
     (``SyntaxError: invalid syntax (line 3)``), else ``None``. The interpreter compiles the whole source
@@ -474,11 +478,9 @@ def select_verdict(checker: str | None, comparison: str, sandbox: SandboxExecuto
     tight C++-tuned limit must TLE the solution, not the trusted judge grading it."""
     if checker:
         return CheckerVerdict(checker, sandbox, timeout=SANDBOX_DEFAULT_TIMEOUT)
-    if comparison == "tokens":
-        return as_verdict(compare_tokens)
-    if comparison == "exact":
-        return as_verdict(exact_output_match)
-    raise ValueError(f"unknown output comparison {comparison!r} (expected 'tokens' or 'exact')")
+    if comparison not in OUTPUT_COMPARATORS:
+        raise ValueError(f"unknown output comparison {comparison!r} (expected one of {list(OUTPUT_COMPARATORS)})")
+    return as_verdict(OUTPUT_COMPARATORS[comparison])
 
 
 @dataclass(frozen=True)
@@ -521,6 +523,18 @@ class GradingSpec:
             raise ValueError(
                 f"compiled_time_limit_scale must be a finite number > 0, got {self.compiled_time_limit_scale}"
             )
+        if self.max_grading_seconds is not None and not (
+            isfinite(self.max_grading_seconds) and self.max_grading_seconds > 0
+        ):
+            raise ValueError(
+                f"max_grading_seconds must be a finite number > 0 or None, got {self.max_grading_seconds}"
+            )
+        if self.comparison not in OUTPUT_COMPARATORS:
+            raise ValueError(
+                f"comparison (output_comparison) must be one of {list(OUTPUT_COMPARATORS)}, got {self.comparison!r}"
+            )
+        if self.verdict_detail not in VERDICT_DETAILS:
+            raise ValueError(f"verdict_detail must be one of {VERDICT_DETAILS}, got {self.verdict_detail!r}")
 
     def to_meta(self) -> dict[str, Any]:
         """This contract as a JSON-able block for a trajectory meta line."""

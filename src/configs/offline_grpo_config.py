@@ -5,12 +5,18 @@ from typing import Literal
 
 from transformers import TrainingArguments
 
-from src.args.mixins import ChunkedLogprobsArguments
+from src.args.mixins import ChunkedLogprobsArguments, DatasetNumProcArguments, ModelInitKwargsArguments
 from src.args.validation import RangeValidatedConfig
 
 
 @dataclass
-class OfflineGRPOConfig(ChunkedLogprobsArguments, RangeValidatedConfig, TrainingArguments):
+class OfflineGRPOConfig(
+    ChunkedLogprobsArguments,
+    DatasetNumProcArguments,
+    ModelInitKwargsArguments,
+    RangeValidatedConfig,
+    TrainingArguments,
+):
     r"""Training arguments for [`OfflineGRPOTrainer`]; per-field docs are in each field's ``help`` metadata."""
 
     max_prompt_length: int | None = field(
@@ -55,16 +61,6 @@ class OfflineGRPOConfig(ChunkedLogprobsArguments, RangeValidatedConfig, Training
         default=None,
         metadata={"help": "Pad token id used by the collator. None takes the processing class's pad token."},
     )
-
-    model_init_kwargs: dict | None = field(
-        default=None,
-        metadata={
-            "help": "Model-config overrides on every entry-script path: written onto the loaded "
-            "config's fields before the load, raising on a key that config does not declare and "
-            "on dtype/torch_dtype. Model-loading kwargs only where a trainer is constructed "
-            "programmatically with the model as a path string."
-        },
-    )
     advantage_method: Literal["z_norm", "minmax", "quantile_norm", "quantile_uniform", "robust"] = field(
         default="quantile_norm",
         metadata={
@@ -96,10 +92,6 @@ class OfflineGRPOConfig(ChunkedLogprobsArguments, RangeValidatedConfig, Training
             "over training (None = constant). Requires min_log_prob — without a final value to "
             "schedule toward no scheduler is added (warned). Recommend ~the mean CE loss on the SFT data."
         },
-    )
-    dataset_num_proc: int | None = field(
-        default=None,
-        metadata={"help": "Number of processes to use for processing the dataset."},
     )
     drop_degenerate_groups: bool = field(
         default=False,

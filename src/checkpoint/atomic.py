@@ -3,7 +3,6 @@
 import errno
 import os
 import pickle
-import re
 import shutil
 import uuid
 from collections.abc import Callable
@@ -14,9 +13,8 @@ import torch
 FILE_STAGING_SUFFIX = ".tmp"
 # A complete file held off its published name until the rest of its checkpoint is on disk.
 WITHHELD_FILE_SUFFIX = ".uncommitted"
-# What earlier releases staged under: ``.<name>.<token>`` with no suffix, and the pending prefetch
-# rounds' ``<name>.staged``. Their leftovers can still sit in a checkpoint an export reads.
-_SUFFIXLESS_STAGE_RE = re.compile(rf"^\..+\.[0-9a-f]{{{len(uuid.uuid4().hex)}}}$")
+# ``<name>.staged``: the async-GRPO ``prefetch_pending`` sidecars a pre-1.1 main checkpoint can carry
+# from an interrupted write. An export must not ship it.
 _LEGACY_STAGED_SUFFIX = ".staged"
 _LINK_COPY_ERRNOS = {errno.EXDEV, errno.EPERM, errno.EACCES, errno.ENOSYS, errno.EOPNOTSUPP}
 
@@ -35,12 +33,10 @@ def withheld_file_name(filename: str) -> str:
 
 def is_atomic_staging_file(name: str) -> bool:
     """Whether ``name`` is an unpublished stage a crash left: one :func:`create_staged_file` made, a
-    :func:`withheld_file_name`, or an earlier release's staging spelling."""
+    :func:`withheld_file_name`, or an older checkpoint's staging spelling."""
     if name.endswith(_LEGACY_STAGED_SUFFIX):
         return True
-    return name.startswith(".") and (
-        name.endswith((FILE_STAGING_SUFFIX, WITHHELD_FILE_SUFFIX)) or _SUFFIXLESS_STAGE_RE.match(name) is not None
-    )
+    return name.startswith(".") and name.endswith((FILE_STAGING_SUFFIX, WITHHELD_FILE_SUFFIX))
 
 
 def link_or_copy_file(source: str | Path, destination: str | Path) -> None:

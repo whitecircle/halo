@@ -23,6 +23,7 @@ from typing import Any
 
 import torch
 from huggingface_hub import split_torch_state_dict_into_shards
+from peft.utils import CONFIG_NAME as PEFT_ADAPTER_CONFIG_NAME
 from safetensors import safe_open
 from safetensors.torch import load_file as _safetensors_load_file
 from safetensors.torch import save_file as _safetensors_save_file
@@ -95,7 +96,7 @@ PREFETCH_PENDING_PREFIX = "prefetch_pending"
 # falls back to .bin, so detection must accept both.
 ADAPTER_SAFETENSORS_FILE = "adapter_model.safetensors"
 ADAPTER_BIN_FILE = "adapter_model.bin"
-ADAPTER_CONFIG_FILE = "adapter_config.json"
+ADAPTER_CONFIG_FILE = PEFT_ADAPTER_CONFIG_NAME
 ADAPTER_WEIGHT_NAMES = (ADAPTER_SAFETENSORS_FILE, ADAPTER_BIN_FILE)
 # Training-time model state a merge tool cannot recover from the adapter artifacts alone (the GptOss
 # sink policy). A sidecar, never adapter_config.json: stock PEFT must load the adapter unchanged.
@@ -202,14 +203,8 @@ def save_dtype_caster(model: torch.nn.Module, *, keep_live_dtype: bool = False):
 
     ``keep_live_dtype`` (a training checkpoint) casts nothing: every tensor is written at the dtype the
     gather produced, which is the live one, so fp32 masters (``fp32_router``, ``fp32_experts``,
-    ``fp32_non_ep_params``) reach disk unrounded. The Path-A ``set_model_state_dict`` load, the PP
-    stage reload after wrapping and every adapter restore read them back exactly. Construction from a
-    checkpoint (Path B), a PP stage's included, restores the configured parameter masters before
-    parallel wrapping too, or into the existing 1-D TP placement before DP/FSDP2 wrapping. A BF16
-    export cannot recover discarded FP32 precision; promotion from it retains only the values that
-    export stored.
-    Decided on the tensor, not its name, since a gathered expert's hub key need not name any live
-    parameter.
+    ``fp32_non_ep_params``) reach disk unrounded for a resume to read back exactly. Decided on the
+    tensor, not its name, since a gathered expert's hub key need not name any live parameter.
 
     Keys also match with their PEFT adapter segment stripped: the EP gather feeds this pre-remap
     keys, where a ``modules_to_save`` router spells its bias ``router.modules_to_save.default.bias``.
@@ -381,6 +376,28 @@ def write_merged_index(output_dir: str, weight_map: dict[str, str], metadata: Ma
         json.dump(index, f, indent=2, sort_keys=True)
 
 
+def publish_streamed_parts(
+    output_dir: str, final_names: dict[str, str], weight_map: dict[str, str], metadata: Mapping[str, Any]
+) -> None:
+    """Rename every streamed part (``{part name: final HF name}``) into place, then index a sharded
+    result or sweep the leftovers beside a single ``model.safetensors``.
+
+    The finalize half of a renaming writer's protocol, called once every part is on disk: renames are
+    metadata operations, so the window in which the directory mixes two saves is this loop rather
+    than the whole (I/O-bound) write. ``weight_map`` already names the final files; ``metadata`` is
+    the index's block (:func:`write_merged_index`).
+    """
+    for part, final in final_names.items():
+        # Overwrites a same-named leftover, which is intended; the sweep then only has to consider
+        # names this save did not claim.
+        os.replace(os.path.join(output_dir, part), os.path.join(output_dir, final))
+    if len(final_names) > 1:
+        write_merged_index(output_dir, weight_map, metadata)
+    else:
+        # A single part is the unsharded ``model.safetensors``, which carries no index of its own.
+        remove_stale_checkpoint_files(output_dir, set(final_names.values()))
+
+
 def save_sharded_state_dict(
     state_dict: dict[str, torch.Tensor], output_dir: str, max_shard_size: str = DEFAULT_MAX_SHARD_SIZE
 ) -> None:
@@ -390,8 +407,8 @@ def save_sharded_state_dict(
     or shards + ``model.safetensors.index.json`` loadable one at a time at 100B+).
 
     Every shard lands as a ``model-streaming-*`` part and is renamed into its final name only once
-    they are ALL on disk — :meth:`~src.checkpoint.shard_writer.StageShardWriter.close_as_hf_checkpoint`'s
-    protocol. Writing final names directly is unsafe on a re-save into a populated directory: the
+    they are ALL on disk (:func:`publish_streamed_parts`, which
+    :meth:`~src.checkpoint.shard_writer.StageShardWriter.close_as_hf_checkpoint` shares). Writing final names directly is unsafe on a re-save into a populated directory: the
     splitter's names are deterministic, so a same-shard-count re-save that dies after shard *k*
     leaves new shards 1..k beside old shards k+1..N under the old index, and ``from_pretrained``
     then loads half of each model silently. Stale files are swept only once every shard is on disk.
@@ -402,7 +419,7 @@ def save_sharded_state_dict(
         filename_pattern=SAFETENSORS_SHARD_PATTERN,
         max_shard_size=max_shard_size,
     )
-    parts: dict[str, str] = {}
+    final_names: dict[str, str] = {}
     for part_index, (filename, keys) in enumerate(split.filename_to_tensors.items(), start=1):
         part = f"{HF_STREAM_PART_PREFIX}-{part_index:05d}.safetensors"
         _safetensors_save_file(
@@ -410,15 +427,8 @@ def save_sharded_state_dict(
             os.path.join(output_dir, part),
             metadata=SAFETENSORS_METADATA,
         )
-        parts[filename] = part
-    # Only now, with every part written: renames are metadata operations, so the window in which the
-    # directory holds a mix is the loop below rather than the whole (I/O-bound) write.
-    for filename, part in parts.items():
-        os.replace(os.path.join(output_dir, part), os.path.join(output_dir, filename))
-    if split.is_sharded:
-        write_merged_index(output_dir, split.tensor_to_filename, split.metadata)
-    else:
-        remove_stale_checkpoint_files(output_dir, set(split.filename_to_tensors))
+        final_names[part] = filename
+    publish_streamed_parts(output_dir, final_names, split.tensor_to_filename, split.metadata)
 
 
 def write_gathered_checkpoint(
@@ -435,13 +445,13 @@ def write_gathered_checkpoint(
     it needs a dict still whole after the safetensors write failed, which a streamed save no longer
     has, and at that scale a single ``torch.save`` is not a writable artifact anyway.
 
-    Only the config write is gated on the model carrying one — the weights owe the same
-    normalization and layout either way, and a raw ``.bin`` is an artifact no export tool reads.
+    Only the config write is gated on the model carrying one (both config steps skip a model
+    without) — the weights owe the same normalization and layout either way, and a raw ``.bin`` is an
+    artifact no export tool reads.
     """
-    if hasattr(model, "config"):
-        # FSDP2 sharding can break tied embeddings; keep the config honest.
-        reconcile_tie_word_embeddings(model, state_dict)
-        save_model_config(model, output_dir)
+    # FSDP2 sharding can break tied embeddings; keep the config honest.
+    reconcile_tie_word_embeddings(model, state_dict)
+    save_model_config(model, output_dir)
     # Save dtype + hub expert layout. EP-gathered dicts never arrive here: ``select_checkpoint_saver``
     # routes every ``has_ep_layers`` context to the EP saver, whose gather emits hub-layout expert keys.
     state_dict = normalize_gathered_state_dict(model, state_dict)
@@ -633,8 +643,11 @@ def has_whole_model_weight_file(checkpoint_dir: str, *, safetensors_only: bool =
     off the same filename list, since a second list minus one name would route a new whole-model
     filename down the eager fallback.
     """
-    names = (SAFETENSORS_INDEX_FILE, SAFETENSORS_WEIGHTS_FILE) if safetensors_only else WHOLE_MODEL_WEIGHT_FILES
-    return any(os.path.isfile(os.path.join(checkpoint_dir, name)) for name in names)
+    return any(
+        os.path.isfile(os.path.join(checkpoint_dir, name))
+        for name in WHOLE_MODEL_WEIGHT_FILES
+        if not (safetensors_only and name == LEGACY_WEIGHTS_FILE)
+    )
 
 
 def adapter_weight_paths(adapter_dir: str) -> tuple[str, ...]:
@@ -740,12 +753,11 @@ def load_full_state_dict(checkpoint_dir: str, device: str = "cpu") -> dict[str, 
                 f"{index_path} parsed but carries no 'weight_map' — not a safetensors index. "
                 f"Resume from a complete checkpoint."
             )
+    if layout.shard_files:
         state_dict: dict[str, torch.Tensor] = {}
         for shard_file in layout.shard_files:
             state_dict.update(_safetensors_load_file(layout.path(shard_file), device=device))
         return state_dict
-    if layout.shard_files:
-        return _safetensors_load_file(layout.path(layout.shard_files[0]), device=device)
     if layout.legacy_bin is not None:
         return torch.load(layout.path(layout.legacy_bin), map_location=device, weights_only=True)
     return None

@@ -25,6 +25,7 @@ from transformers.core_model_loading import Chunk, WeightConverter, WeightRenami
 from transformers.quantizers.quantizer_bnb_4bit import Bnb4BitHfQuantizer
 
 import src.distributed.context_parallel.loading as cp_loading
+import src.distributed.expert_parallel.loading as eager_loading
 import src.distributed.expert_parallel.master_weights as master_loading
 import src.distributed.filesystem as filesystem
 import src.distributed.loading.model_loading as loading
@@ -93,7 +94,7 @@ def test_real_dense_and_cp_construction_retains_checkpoint_masters(tmp_path, mon
     expected = _dense_checkpoint(tmp_path / "source")
     source = str(tmp_path / "source")
     monkeypatch.setattr(loading, "from_pretrained_verified", _cpu_pretrained(loading.from_pretrained_verified))
-    monkeypatch.setattr(cp_loading, "move_model_to_local_device", lambda model: model)
+    monkeypatch.setattr(eager_loading, "move_model_to_local_device", lambda model: model)
     monkeypatch.setattr(cp_loading, "patch_model_for_cp", _cpu_cp_wrap)
     kwargs = {
         "config": AutoConfig.from_pretrained(source),

@@ -15,10 +15,7 @@ M = 0.305  # left/right margin, matching `title`'s 2.5% inset
 ROW1_Y, ROW1_H = 3.49, card_height(3)
 ROW2_Y, ROW2_H = 1.17, card_height(4)
 
-fig, ax = plt.subplots(figsize=(W, H))
-ax.set_xlim(0, W)
-ax.set_ylim(0, H)
-ax.axis("off")
+fig, ax = canvas(W, H)
 
 title(ax, "Offline GRPO — pre-scored data", "per-token loss = −(π · A), every row × 1/group_size")
 
@@ -138,5 +135,3 @@ footnote(
 )
 
 save(plt.gcf(), "offline_grpo_pipeline")
-plt.close()
-print("✓ offline_grpo_pipeline.png")

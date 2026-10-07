@@ -24,7 +24,6 @@ TIERS = [
 ]
 
 fig, ax = plt.subplots(figsize=(9.9, 4.4))
-fig.patch.set_facecolor(BG)
 ax.set_xscale("log")
 ax.set_xlim(9, 30000)
 ax.set_ylim(-0.52, len(TIERS) - 0.48)
@@ -76,5 +75,3 @@ ax.text(
 
 plt.tight_layout()
 save(plt.gcf(), "interconnect_tiers")
-plt.close()
-print("✓ interconnect_tiers.png")

@@ -82,7 +82,7 @@ def test_the_throttle_actually_uses_the_resolved_width(monkeypatch):
 
     # FakeStore.wait raises instead of blocking, so "would have blocked" is observable.
     with pytest.raises(RuntimeError, match="seq_load/model"):
-        with filesystem.sequential_load_within_node(tag="model", max_concurrent=None):
+        with filesystem.sequential_load_within_node(max_concurrent=None):
             pass
 
 

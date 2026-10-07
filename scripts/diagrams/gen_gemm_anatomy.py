@@ -10,7 +10,6 @@ from _theory_style import *
 from matplotlib.patches import FancyBboxPatch
 
 fig, ax = plt.subplots(figsize=(9.6, 4.7))
-fig.patch.set_facecolor(BG)
 ax.set_xlim(0, 9.6)
 ax.set_ylim(0.42, 4.7)
 ax.axis("off")
@@ -99,5 +98,3 @@ ax.text(
 )
 
 save(plt.gcf(), "gemm_anatomy")
-plt.close()
-print("✓ gemm_anatomy.png")

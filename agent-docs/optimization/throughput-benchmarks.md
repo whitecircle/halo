@@ -279,7 +279,7 @@ The roofline crossover (gpt-oss expert K=N=2880: weight-bandwidth-bound below â‰
 compute-bound above; ridge AI â‰ˆ 275 on B300) is why bf16 stays optimal: the small-`M` experts sit in the
 bandwidth-bound regime where fp8/fp4 quant overhead only loses.
 
-`CUDA_DEVICE_MAX_CONNECTIONS=1` (baked into the image) is a correctness setting that costs no throughput:
+`CUDA_DEVICE_MAX_CONNECTIONS=1` (baked into the image), the setting EP is validated with, costs no throughput:
 ep8 b1 reads +1.5% against `8` ([DeepEP](../infrastructure/deepep.md#environment-variables)).
 
 **EP throughput vs sequence length (ep8, b1, liger + FA4):**

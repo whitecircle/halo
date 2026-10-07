@@ -128,6 +128,32 @@ def _oracle(trainer, *, gate: bool = False, slim: bool = False):
     return ALPHA * distill + (1 - ALPHA) * clm, distill, clm
 
 
+def _construct(args, *, peft_config=None):
+    """The real ``__init__`` with the model loads, the distributed setup and HF's Trainer stubbed."""
+
+    def init_config(self, kwargs, **explicit):
+        self.parallelism_config = explicit["parallelism_config"]
+        return {**kwargs, "model": explicit["model"]}
+
+    with (
+        mock.patch.object(teacher_distillation, "load_model_from_pretrained", lambda model, *a, **k: (model, None)),
+        mock.patch.object(DistributedDistillationTrainer, "_init_distributed_config", init_config),
+        mock.patch.object(Trainer, "__init__", lambda self, model, **kwargs: setattr(self, "model", model)),
+        mock.patch.object(nn.Linear, "add_model_tags", create=True),
+        mock.patch.object(DistributedDistillationTrainer, "_setup_distributed_modes"),
+        mock.patch.object(DistributedDistillationTrainer, "_setup_teacher_model"),
+    ):
+        return DistributedDistillationTrainer(
+            student_model=nn.Linear(2, 2),
+            teacher_model=nn.Linear(2, 2),
+            teacher_tokenizer=_Tokenizer(TOKENS),
+            args=args,
+            processing_class=_Tokenizer(TOKENS),
+            peft_config=peft_config,
+            parallelism_config=ParallelismConfig(),
+        )
+
+
 def test_the_loss_is_the_alpha_mix_of_two_global_token_means():
     trainer, stored = _trainer()
     expected, distill, clm = _oracle(trainer)
@@ -168,11 +194,17 @@ def test_the_hard_label_gate_weights_the_divergence():
     assert "distillation_coef" in stored
 
 
-def test_slim_takes_its_own_weight_and_not_the_hard_label_gate_on_top():
-    trainer, stored = _trainer("slim", apply_hard_labels=True)
+def test_slim_takes_its_own_gold_token_weight():
+    trainer, stored = _trainer("slim")
     expected, _, _ = _oracle(trainer, slim=True)
     torch.testing.assert_close(_loss(trainer), expected)
     assert "distillation_coef" not in stored
+
+
+def test_the_hard_label_gate_is_refused_beside_a_loss_that_weights_gold_tokens_itself():
+    """slim applies its own gold-token weight, so the gate on top would count it twice."""
+    with pytest.raises(ValueError, match="apply_hard_labels cannot combine with distill_loss='slim'"):
+        _construct(types.SimpleNamespace(distill_loss="slim", apply_hard_labels=True))
 
 
 def test_a_casted_peft_student_forwards_under_bf16_autocast():
@@ -194,28 +226,9 @@ def test_a_casted_peft_student_forwards_under_bf16_autocast():
 def test_the_trainer_wraps_peft_through_prepare_peft_model_and_keeps_its_cast_flag():
     """The PEFT wrap lives in the trainer, as in every sibling, so the cast flag reaches compute_loss."""
     peft_config, wrapped = LoraConfig(), nn.Linear(2, 2)
-
-    def init_config(self, kwargs, **explicit):
-        self.parallelism_config = explicit["parallelism_config"]
-        return {**kwargs, "model": explicit["model"]}
-
-    with (
-        mock.patch.object(teacher_distillation, "load_model_from_pretrained", lambda model, *a, **k: (model, None)),
-        mock.patch.object(DistributedDistillationTrainer, "_init_distributed_config", init_config),
-        mock.patch.object(teacher_distillation, "prepare_peft_model", return_value=(wrapped, True)) as prepare,
-        mock.patch.object(Trainer, "__init__", lambda self, model, **kwargs: setattr(self, "model", model)),
-        mock.patch.object(nn.Linear, "add_model_tags", create=True),
-        mock.patch.object(DistributedDistillationTrainer, "_setup_distributed_modes"),
-        mock.patch.object(DistributedDistillationTrainer, "_setup_teacher_model"),
-    ):
-        trainer = DistributedDistillationTrainer(
-            student_model=nn.Linear(2, 2),
-            teacher_model=nn.Linear(2, 2),
-            teacher_tokenizer=_Tokenizer(TOKENS),
-            args=types.SimpleNamespace(distill_loss="kl_divergence"),
-            processing_class=_Tokenizer(TOKENS),
-            peft_config=peft_config,
-            parallelism_config=ParallelismConfig(),
+    with mock.patch.object(teacher_distillation, "prepare_peft_model", return_value=(wrapped, True)) as prepare:
+        trainer = _construct(
+            types.SimpleNamespace(distill_loss="kl_divergence", apply_hard_labels=False), peft_config=peft_config
         )
     assert prepare.call_args.args[1] is peft_config
     assert trainer.model is wrapped

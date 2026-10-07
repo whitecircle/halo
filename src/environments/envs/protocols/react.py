@@ -14,18 +14,19 @@ from typing import Any
 
 from src.environments.base import (
     ANSWER_KEY,
-    EPISODE_INVALID_KEY,
-    EPISODE_INVALID_REASON_KEY,
-    EPISODE_TOOL_BUDGETS_KEY,
     LAST_TURN_KEY,
-    TOOL_CALL_COUNTS_KEY,
     BaseEnvironment,
     EpisodeGrade,
     Message,
     Trajectory,
     require_magnitudes,
 )
-from src.environments.envs.protocols.native import admit_tool_call, tool_call_outcome, validate_tool_budgets
+from src.environments.envs.protocols.native import (
+    admit_tool_call,
+    tool_accounting_info,
+    tool_call_outcome,
+    validate_tool_budgets,
+)
 from src.environments.tools.definitions import (
     MALFORMED_LITERAL_ERRORS,
     NativeToolRegistry,
@@ -258,23 +259,11 @@ Always think before acting, and provide a Final Answer when you're done."""
 
     def _reset_single(self, prompt: str | list[dict[str, str]], context: dict[str, Any] | None = None) -> Trajectory:
         """Initialize episode with task prompt."""
-        context = context or {}
         return self._init_trajectory(
             prompt,
             context,
             system_prompt=self.system_prompt,
-            extra_info={
-                "expected_answer": context.get(ANSWER_KEY),
-                # Presence, not value: a row whose ``answer`` cell is null is a data fault, an absent
-                # key an ungraded episode, and the reward pays them differently. Read off the RESET
-                # context, the only one that carries the row (a lost episode is graded with none).
-                "_answer_in_context": ANSWER_KEY in context,
-                "final_answer": None,
-                "total_tool_calls": 0,
-                "successful_tool_calls": 0,
-                TOOL_CALL_COUNTS_KEY: {},
-                EPISODE_TOOL_BUDGETS_KEY: dict(self.tool_budgets),
-            },
+            extra_info={"final_answer": None, **tool_accounting_info(self.tool_budgets)},
         )
 
     def _step_single(
@@ -287,11 +276,13 @@ Always think before acting, and provide a Final Answer when you're done."""
         # A turn the engine cut short is a fragment whatever the parser would salvage from it — the
         # base flags the message untrainable, so an Action executed or a Final Answer graded here would
         # earn a reward on a turn the trainer never rewards. Same rule as the native protocol.
-        if (context or {}).get("finish_reason") in ENGINE_CUT_FINISH_REASONS:
-            return self._handle_length_cutoff(trajectory, last_turn=bool((context or {}).get(LAST_TURN_KEY)))
+        ctx = context or {}
+        last_turn = bool(ctx.get(LAST_TURN_KEY))
+        if ctx.get("finish_reason") in ENGINE_CUT_FINISH_REASONS:
+            return self._handle_length_cutoff(trajectory, last_turn=last_turn)
         # Nothing to parse: not a format failure the hint below corrects, but a stop on nothing.
         if not action.strip():
-            return self._handle_empty_turn(trajectory, last_turn=bool((context or {}).get(LAST_TURN_KEY)))
+            return self._handle_empty_turn(trajectory, last_turn=last_turn)
 
         step = parse_react_output(action)
 
@@ -352,7 +343,8 @@ Always think before acting, and provide a Final Answer when you're done."""
             return EpisodeGrade(0.0)
 
         final_answer = trajectory.info.get("final_answer")
-        expected = trajectory.info.get("expected_answer")
+        ctx = context or trajectory.info.get("context") or {}
+        expected = ctx.get(ANSWER_KEY)
 
         if final_answer is None:
             return EpisodeGrade(0.0)
@@ -366,13 +358,12 @@ Always think before acting, and provide a Final Answer when you're done."""
                 # The grader failed, not the policy: no check stands in for it (the default one pays any
                 # Final Answer on a row with no expected answer), so the episode leaves the baseline.
                 logger.warning("answer_validator raised; scoring the episode invalid", exc_info=True)
-                trajectory.info[EPISODE_INVALID_KEY] = True
-                trajectory.info[EPISODE_INVALID_REASON_KEY] = f"answer_validator raised {type(exc).__name__}: {exc}"
-                return EpisodeGrade(0.0)
+                return self._invalid_grade(trajectory, f"answer_validator raised {type(exc).__name__}: {exc}")
             return EpisodeGrade(1.0 if validated else 0.0)
 
         if expected is None:
-            if trajectory.info.get("_answer_in_context"):
+            # Presence, not value: a null ``answer`` cell is a data fault, an absent key an ungraded row.
+            if ANSWER_KEY in ctx:
                 return self._null_answer_grade(trajectory)
             # Nothing to grade against: reaching a Final Answer is the objective. ``requires_answer``
             # keeps an answer-graded run off this path rather than paying it the full objective.
@@ -408,9 +399,10 @@ Always show your reasoning in the Thought section."""
     )
 
 
-def create_react_search_environment(**kwargs) -> ReActEnvironment:
-    """Create a ReAct environment for search/QA tasks (web search + basic tools)."""
-    registry = create_native_search_tools()
+def create_react_search_environment(search_backend: str | None = None, **kwargs) -> ReActEnvironment:
+    """Create a ReAct environment for search/QA tasks (web search + basic tools). ``search_backend``
+    names the search backend (:func:`create_native_search_tools`; ``None`` auto-selects)."""
+    registry = create_native_search_tools(backend=search_backend)
 
     system_prompt = """You are a research assistant that finds information to answer questions.
 

@@ -284,15 +284,18 @@ class MoEMetricsCallback(MoELoadMetricsCallback):
     def on_train_end(self, args, state, control, **kwargs):
         self._remove_hooks()
 
+    def _reset_counters(self) -> None:
+        """Zero every router's counts; done each optimizer step, logged or not, so each metric covers one."""
+        for counter in self._counters:
+            if counter is not None:
+                counter.zero_()
+
     @torch.no_grad()
     def on_step_end(self, args, state, control, **kwargs):
         counters = self._counters
-        # Counters are zeroed every step, logged or not, so each metric covers one optimizer step.
         # The gate reads rank-uniform trainer state, so no rank can skip the collective below.
         if state.global_step % self.log_every_n_steps != 0:
-            for c in counters:
-                if c is not None:
-                    c.zero_()
+            self._reset_counters()
             return
 
         # Rank-uniform: a rank whose hook captured nothing must not return early or build a
@@ -338,7 +341,4 @@ class MoEMetricsCallback(MoELoadMetricsCallback):
         if self._first_log and is_global_main_process():
             logger.info(f"MoEMetricsCallback first metrics: L={num_layers}, {self._pending}")
         self._first_log = False
-
-        for c in counters:
-            if c is not None:
-                c.zero_()
+        self._reset_counters()

@@ -11,7 +11,6 @@ from _theory_style import *
 from matplotlib.patches import FancyBboxPatch, Rectangle
 
 fig, ax = plt.subplots(figsize=(11.4, 6.2))
-fig.patch.set_facecolor(BG)
 ax.set_xlim(0, 11.5)
 ax.set_ylim(0, 6.2)
 ax.axis("off")
@@ -162,5 +161,3 @@ ax.text(
 )
 
 save(plt.gcf(), "step_dataflow")
-plt.close()
-print("✓ step_dataflow.png")

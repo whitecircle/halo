@@ -10,6 +10,7 @@ import time
 
 import pytest
 
+from src.environments.sandbox.base import REPL_NO_OUTPUT_MESSAGE
 from src.environments.sandbox.inprocess import (
     SAFE_MATH_BUILTINS,
     SAFE_PYTHON_BUILTINS,
@@ -216,6 +217,27 @@ def test_sandbox_statement_nameerror_caught():
     assert "undefined_name" in result
 
 
+def test_sandbox_functions_see_their_own_name_and_the_names_beside_them():
+    """The code runs in one namespace, as a module does: a recursive function and one reading a top-level
+    name both work, where class-body scoping (separate globals and locals) raises NameError on each."""
+    recursive = "def fact(n):\n    return 1 if n < 2 else n * fact(n - 1)\nprint(fact(5))"
+    assert run_python_sandboxed(recursive) == "120"
+    assert run_python_sandboxed("k = 3\ndef f(x):\n    return x * k\nprint(f(2))") == "6"
+
+
+def test_calc_walrus_binding_stays_in_its_own_call():
+    """A walrus binds into the call's own namespace: on a table shared across calls one episode's
+    ``pi := 3`` (or ``sqrt := abs``) would answer every later calculation in the process."""
+    assert safe_calculate("(pi := 3)") == "3"
+    assert safe_calculate("pi") == str(math.pi)
+    assert safe_calculate("(sqrt := abs)(-4)") == "4"
+    assert "Error" in safe_calculate("sqrt(-4)")
+
+
+def test_calc_function_bodies_see_the_math_names():
+    assert safe_calculate("(lambda x: sqrt(x))(16)") == "4.0"
+
+
 def test_sandbox_renders_the_real_message_for_every_user_error():
     """Whatever the submitted code raises must come back as an actionable ``Error: <message>``.
 
@@ -248,6 +270,30 @@ def test_sandbox_bare_print_outputs():
     call returns ``Error: name 'print' is not defined``.
     """
     assert run_python_sandboxed("print('hi')") == "hi"
+
+
+@pytest.mark.parametrize(
+    ("code", "printed"),
+    [
+        ("for i in range(3):\n    print(i, end='')", "012"),
+        ("print('a', end=', ')\nprint('b')", "a, b"),
+        ("print('a', 'b', sep='-', end='!\\n')\nprint('c')", "a-b!\nc"),
+        ("print('row', end='\\n\\n')\nprint('next')", "row\n\nnext"),
+        ("print('x', sep=None, end=None, flush=True)", "x"),
+    ],
+)
+def test_sandbox_print_writes_what_python_s_print_writes(code, printed):
+    """``end`` replaces the newline, ``sep`` the space, ``None`` keeps either default and ``flush`` is
+    accepted, as in Python: a capture that joins one line per call turns ``end=''`` output into one
+    value per line, and a program written for real Python reads back differently than it would run."""
+    assert run_python_sandboxed(code) == printed
+
+
+def test_sandbox_print_of_nothing_reads_as_no_output():
+    """What the program printed is read like the subprocess REPL reads stdout: trailing newlines dropped,
+    and an empty print is no output rather than an empty observation."""
+    assert run_python_sandboxed("print('a')\nprint()") == "a"
+    assert run_python_sandboxed("print('', end='')") == REPL_NO_OUTPUT_MESSAGE
 
 
 def test_calc_negative_result():

@@ -7,7 +7,6 @@ against a live prefix without downloading it.
 """
 
 import hashlib
-import logging
 import os
 import re
 import shutil
@@ -23,12 +22,9 @@ from src.env import (
     env_str,
     resolve_store_timeout_hours,
 )
+from src.log import info_logger
 
-# ``src`` pins the root level to WARNING, so without the child level this module's INFO record of
-# what the cache did is dropped. Plain logging, not the accelerate adapter: entry points that
-# initialize no accelerate state (the S3 CLI, ``scripts/inference/*``) reach here too.
-logger = logging.getLogger(__name__)
-logger.setLevel(logging.INFO)
+logger = info_logger(__name__)
 
 # Explicit env override wins, else the toolkit scratch root (<root>/s3_datasets). ``or``-chained
 # because a set-but-empty override would resolve every cache path against the CWD, scattering

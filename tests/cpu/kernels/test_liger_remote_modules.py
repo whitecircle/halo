@@ -3,9 +3,10 @@
 
 A ``trust_remote_code`` family's modeling module does not exist when Liger is applied, so its patch
 is armed on the shared ``get_class_in_module`` funnel hook and fires later
-(:mod:`src.kernels.liger.remote_modules`). This is the ONLY path by which Ling/Ring get any fused
-kernel, and it has two silent failure modes worth pinning: the hook never firing, and a revision that
-renamed one of the spec's classes being skipped without a word.
+(:mod:`src.kernels.liger.remote_modules`). It is the ONLY path by which Ling/Ring get any fused kernel
+and the one Laguna's released repos load through. Three silent failure modes are worth pinning: the
+hook never firing, a revision that renamed one of the spec's classes being skipped without a word, and
+a native family's spec patching only the in-library module its hub code bypasses.
 
 The funnel is driven for real — a modeling file written to a temp dir, then loaded through
 transformers' own ``get_class_in_module`` — because a hand-called ``_fire`` would not prove the hook
@@ -25,6 +26,7 @@ import transformers.dynamic_module_utils
 from accelerate import PartialState
 
 from src.kernels.liger import remote_modules
+from src.kernels.liger.builder import _PATCHED_MARKER, LigerFamilySpec
 from tests.common.utils import probe_findings
 
 PartialState()  # the module logs through accelerate's rank-aware logger
@@ -38,6 +40,38 @@ _MODULE_SOURCE = textwrap.dedent(
 
     class ProbeRemoteBeta:
         pass
+    """
+)
+
+# The classes Laguna's spec patches, as the released repos' own `modeling_laguna.py` declares them
+# (constructor signatures and the MLP's `act_fn` included); everything else in that file is omitted.
+_LAGUNA_HUB_MODULE_SOURCE = textwrap.dedent(
+    """
+    import torch
+    from torch import nn
+    from transformers.activations import ACT2FN
+
+
+    class LagunaRMSNorm(nn.Module):
+        def __init__(self, hidden_size, eps: float = 1e-6) -> None:
+            super().__init__()
+            self.weight = nn.Parameter(torch.ones(hidden_size))
+            self.variance_epsilon = eps
+
+
+    class LagunaMLP(nn.Module):
+        def __init__(self, config, intermediate_size=None):
+            super().__init__()
+            size = config.intermediate_size if intermediate_size is None else intermediate_size
+            self.gate_proj = nn.Linear(config.hidden_size, size, bias=False)
+            self.up_proj = nn.Linear(config.hidden_size, size, bias=False)
+            self.down_proj = nn.Linear(size, config.hidden_size, bias=False)
+            self.act_fn = ACT2FN[config.hidden_act]
+
+
+    class LagunaForCausalLM(nn.Module):
+        def forward(self, input_ids=None, labels=None, **kwargs):
+            raise NotImplementedError
     """
 )
 
@@ -112,6 +146,59 @@ def test_arming_twice_does_not_stack(armed, tmp_path):
         remote_modules.patch_remote_modules(("ProbeRemoteAlpha", "ProbeRemoteBeta"), seen.append)
     _load_through_transformers(tmp_path, "ProbeRemoteAlpha", "idempotent")
     assert len(seen) == 1, f"the patch ran {len(seen)} times; arming is not idempotent"
+
+
+def test_lagunas_hub_modeling_code_takes_the_library_swaps(tmp_path):
+    """Laguna's released repos load their own modeling file under ``trust_remote_code``.
+
+    Its norm, MLP and head are the in-library classes verbatim, so the family spec has to reach both
+    modules: one naming only ``transformers.models.laguna`` logs every kernel as applied while the
+    classes the run actually builds stay eager. Subprocess: the applier swaps classes process-wide.
+    """
+    module_file = tmp_path / "modeling_laguna.py"
+    module_file.write_text(_LAGUNA_HUB_MODULE_SOURCE, encoding="utf-8")
+    script = f"""
+import inspect, sys, types
+import transformers.dynamic_module_utils as dmu
+from accelerate import PartialState
+
+PartialState()
+from transformers.models.laguna import modeling_laguna
+from src.kernels.liger.orchestrator import resolve_liger_applier
+
+applier = resolve_liger_applier("laguna")
+requested = {{"rms_norm", "swiglu", "fused_linear_cross_entropy"}}
+applier(**{{name: name in requested for name in set(inspect.signature(applier).parameters) - {{"model"}}}})
+hub = sys.modules[dmu.get_class_in_module("LagunaForCausalLM", {str(module_file)!r}).__module__]
+
+problems = []
+for origin, module in (("library", modeling_laguna), ("hub", hub)):
+    for name, role in (("LagunaRMSNorm", "rms_norm"), ("LagunaMLP", "glu_mlp")):
+        if getattr(getattr(module, name), {_PATCHED_MARKER!r}, None) != role:
+            problems.append(f"{{origin}} {{name}} kept its eager forward")
+    if module.LagunaForCausalLM.forward.__module__ != "src.kernels.liger.lce_forward":
+        problems.append(f"{{origin}} LagunaForCausalLM kept its unfused head")
+mlp = hub.LagunaMLP(types.SimpleNamespace(hidden_size=8, intermediate_size=16, hidden_act="silu"))
+if getattr(mlp, "_halo_glu_mul", None) is None:
+    problems.append("the hub LagunaMLP's SiLU was not recognized as fusable")
+print("PROBLEMS:" + "|".join(problems))
+"""
+    problems = probe_findings(script, "PROBLEMS:")
+    assert not problems, "Laguna's two modeling modules are not patched alike:\n" + "\n".join(problems)
+
+
+def test_a_remote_spec_identifies_its_module_by_every_class_it_patches():
+    """A module missing an identifying class is reported and left unpatched; one missing a class the
+    roles swap but the identifying set omits would fail its model load instead."""
+    with pytest.raises(ValueError, match="without listing them in remote_classes"):
+        LigerFamilySpec(
+            model_types=("probe",),
+            remote_classes=("ProbeRMSNorm",),
+            rms_norm=("ProbeRMSNorm",),
+            glu_mlp=("ProbeMLP",),
+        )
+    with pytest.raises(ValueError, match="no module to patch"):
+        LigerFamilySpec(model_types=("probe",), rms_norm=("ProbeRMSNorm",))
 
 
 @pytest.mark.parametrize("liger_first", [False, True])

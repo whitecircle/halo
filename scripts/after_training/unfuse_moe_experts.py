@@ -31,6 +31,7 @@ import os
 from functools import lru_cache
 
 import torch
+from transformers.utils import CONFIG_NAME
 
 from scripts._common import add_max_shard_size_arg
 from src.checkpoint.format import DEFAULT_MAX_SHARD_SIZE, HF_STREAM_PART_PREFIX, copy_checkpoint_aux_files
@@ -66,9 +67,9 @@ def resolve_per_expert_layout(ckpt_dir: str) -> tuple[str, str, str]:
     written under names its own loader never reads, and transformers would then re-initialize the
     whole expert bank with a warning rather than an error.
     """
-    if not os.path.isfile(os.path.join(ckpt_dir, "config.json")):
+    if not os.path.isfile(os.path.join(ckpt_dir, CONFIG_NAME)):
         raise ValueError(
-            f"{ckpt_dir} has no config.json, so the checkpoint's model_type — and with it the per-expert "
+            f"{ckpt_dir} has no {CONFIG_NAME}, so the checkpoint's model_type — and with it the per-expert "
             f"names its loader reads — cannot be resolved. Convert a complete checkpoint directory."
         )
     model_type = detect_model_type(ckpt_dir)
@@ -99,7 +100,7 @@ def _moe_dims(ckpt_dir: str) -> tuple[int | None, int | None, str]:
     The family comes from :func:`detect_model_type`, which the family gates here also use (text_config
     fallback included), rather than a second parse of the same key.
     """
-    with open(os.path.join(ckpt_dir, "config.json")) as f:
+    with open(os.path.join(ckpt_dir, CONFIG_NAME)) as f:
         cfg = json.load(f)
     tc = cfg.get("text_config", {})
     hidden = cfg.get("hidden_size") or tc.get("hidden_size")

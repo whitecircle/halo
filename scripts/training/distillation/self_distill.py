@@ -140,12 +140,6 @@ def _audit_rows(collator, train_dataset, eval_dataset, num_proc) -> None:
 def _build_text_dataset_and_collator(ds, args, tokenizer, max_length, model_config, num_proc, hint_template):
     train_dataset = ds["train"]
     eval_dataset = ds.get("test")
-    if args.conversation_field not in train_dataset.column_names:
-        raise ValueError(
-            f"self_distillation requires a RAW conversation dataset with a '{args.conversation_field}' "
-            f"field plus the privileged answer field ('{args.sdpg_answer_field}'); "
-            f"got columns {train_dataset.column_names}."
-        )
     collator = SelfDistillTextCollator(
         tokenizer=tokenizer,
         max_length=max_length,
@@ -291,6 +285,13 @@ def main():
             f"Remove loss_type from the YAML."
         )
 
+    # The loader refuses a declared column the dataset lacks; an undeclared one would reach the
+    # collators, which render every branch from it.
+    if args.conversation_field is None:
+        raise ValueError(
+            "self-distillation renders each row's raw conversation, so conversation_field must name its "
+            "column. Set conversation_field in the YAML."
+        )
     # Reject inherited options the SelfDistill collators do not implement; ignoring them would train
     # something other than the config states.
     if args.train_on_last_assistant_only:

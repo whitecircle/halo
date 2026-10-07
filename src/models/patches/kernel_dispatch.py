@@ -85,7 +85,7 @@ def _segmented_chunk_gated_delta_rule(torch_function, query, key, value, **kwarg
 
 
 # CPU-route fixups: the original packages are CUDA-only, and 5.16's torch fallbacks are not always
-# faithful to them. Keyed by the decorated function name.
+# faithful to them. Keyed by the kernel name the decorator factory is called with.
 _CPU_FALLBACK_FIXUPS = {
     "causal_conv1d_fn": _segmented_conv1d,
     "chunk_gated_delta_rule": _segmented_chunk_gated_delta_rule,

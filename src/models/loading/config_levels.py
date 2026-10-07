@@ -15,20 +15,20 @@ from transformers.integrations.heterogeneity import AmbiguousGlobalPerLayerAttri
 
 _SPECIAL_TOKEN_ID_FIELDS = ("eos_token_id", "bos_token_id", "pad_token_id")
 
-# Sentinel for a level that did not declare the field at snapshot time: composite wrappers carry no
-# top-level ids, align_special_tokens plants one there, and the restore has to remove it.
-_SPECIAL_TOKEN_ID_ABSENT = object()
+# A field the level did not hold when its value was captured, so the restore removes it rather than
+# writing a value back: a special-token id a composite wrapper lacked until align_special_tokens
+# planted one, or a run-scoped field absent from the instance ``__dict__`` (serialization fell through
+# to the class default).
+_ABSENT = object()
 
 # Pre-mutation values of run-scoped config writes, kept outside the config object so nothing carries
 # them into ``to_dict()``/``config.json``. Keyed by ``id``: transformers 5 configs define ``__eq__``
-# without ``__hash__``, which a WeakKeyDictionary rejects. ``_MISSING`` means the field was absent
-# from the instance ``__dict__``, so serialization fell through to the class default.
+# without ``__hash__``, which a WeakKeyDictionary rejects.
 _RUN_SCOPED_FIELD_ORIGINALS: dict[int, dict[str, Any]] = {}
 # Config objects that take no weak reference (a ``__slots__`` stand-in), pinned so their ``id``
 # cannot be recycled onto another config that would inherit their originals, which is the aliasing
 # the finalizer prevents for everything else.
 _RUN_SCOPED_UNFINALIZABLE: list[Any] = []
-_MISSING = object()
 
 
 def text_config(cfg):
@@ -48,6 +48,11 @@ def config_sources(cfg) -> tuple:
     config, which therefore yields one level."""
     text_cfg = text_config(cfg)
     return (cfg,) if text_cfg is cfg else (cfg, text_cfg)
+
+
+def model_type_matches(cfg, *prefixes: str) -> bool:
+    """Whether the ``model_type`` of any :func:`config_sources` level starts with one of ``prefixes``."""
+    return any((getattr(level, "model_type", "") or "").startswith(prefixes) for level in config_sources(cfg))
 
 
 def get_config_field(cfg, field: str, default=None, *, per_layer_reduce=None):
@@ -137,7 +142,7 @@ def set_config_field_run_scoped(cfg, field: str, value) -> None:
     """
     for source in config_sources(cfg):
         storage = _config_storage_field(source, field)
-        _run_scoped_originals(source).setdefault(storage, source.__dict__.get(storage, _MISSING))
+        _run_scoped_originals(source).setdefault(storage, source.__dict__.get(storage, _ABSENT))
     set_config_field(cfg, field, value, only_declared=False)
 
 
@@ -152,8 +157,8 @@ def config_export_ready(cfg):
     reapply: list[tuple[Any, str, Any]] = []
     for source in config_sources(cfg):
         for field, original in (_RUN_SCOPED_FIELD_ORIGINALS.get(id(source)) or {}).items():
-            reapply.append((source, field, source.__dict__.get(field, _MISSING)))
-            if original is _MISSING:
+            reapply.append((source, field, source.__dict__.get(field, _ABSENT)))
+            if original is _ABSENT:
                 source.__dict__.pop(field, None)
             else:
                 setattr(source, field, original)
@@ -161,7 +166,7 @@ def config_export_ready(cfg):
         yield
     finally:
         for source, field, value in reversed(reapply):
-            if value is _MISSING:
+            if value is _ABSENT:
                 source.__dict__.pop(field, None)
             else:
                 setattr(source, field, value)
@@ -182,7 +187,7 @@ def snapshot_special_token_ids(config) -> list[tuple[object, str, object]]:
                 value = getattr(level, field)
                 snapshot.append((level, field, list(value) if isinstance(value, list) else value))
             else:
-                snapshot.append((level, field, _SPECIAL_TOKEN_ID_ABSENT))
+                snapshot.append((level, field, _ABSENT))
     return snapshot
 
 
@@ -193,7 +198,7 @@ def restore_special_token_ids(snapshot: list[tuple[object, str, object]]) -> Non
     the alignment is correct and preserved), only the model config's collapse is undone.
     """
     for level, field, value in snapshot:
-        if value is _SPECIAL_TOKEN_ID_ABSENT:
+        if value is _ABSENT:
             if field in getattr(level, "__dict__", {}):
                 delattr(level, field)
         else:

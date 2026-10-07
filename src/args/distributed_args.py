@@ -1,9 +1,9 @@
 """Combined distributed training arguments for EP, CP, and TP parallelism."""
 
 from dataclasses import dataclass, field
-from typing import Literal
 
 from src.checkpoint.format import DEFAULT_MAX_SHARD_SIZE
+from src.distributed.parallelism_config import EPBufferBackend, EPScope, LowpPrecision, PPSchedule
 
 
 @dataclass
@@ -27,7 +27,7 @@ class DistributedArguments:
         },
     )
 
-    ep_scope: Literal["auto", "node", "global"] = field(
+    ep_scope: EPScope = field(
         default="auto",
         metadata={
             "help": "EP scope for multi-node training. "
@@ -174,7 +174,7 @@ class DistributedArguments:
         },
     )
 
-    lowp_precision: Literal["bf16", "fp8", "fp4", "mxfp4"] = field(
+    lowp_precision: LowpPrecision = field(
         default="bf16",
         metadata={
             "help": "Low-precision matmul compute (mixed precision: bf16/fp32 master weights with "
@@ -240,7 +240,7 @@ class DistributedArguments:
         },
     )
 
-    ep_buffer_backend: Literal["auto", "elastic", "legacy"] = field(
+    ep_buffer_backend: EPBufferBackend = field(
         default="auto",
         metadata={
             "help": "DeepEP transport backend for the EP all-to-all. 'auto' (default) == 'elastic': "
@@ -317,7 +317,7 @@ class DistributedArguments:
         },
     )
 
-    pipeline_schedule: Literal["1f1b", "gpipe"] = field(
+    pipeline_schedule: PPSchedule = field(
         default="1f1b",
         metadata={
             "help": "PP-only, and PP is not yet available in this release: at pipeline_parallel_size=1 "

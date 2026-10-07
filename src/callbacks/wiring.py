@@ -11,7 +11,7 @@ import logging
 
 from transformers import TrainerCallback
 
-from src.callbacks.efficiency import EfficiencyCallback, resolve_max_seq_len
+from src.callbacks.efficiency import EfficiencyCallback
 from src.callbacks.moe_metrics import MoEMetricsCallback
 from src.callbacks.profiler import TorchProfilerCallback
 from src.callbacks.router_bias_balancing import RouterBiasBalancingCallback
@@ -75,8 +75,8 @@ def build_perf_callbacks(
             ``none`` for trainer↔generator routing parity — which, with ``aux_loss`` inert under a
             policy-gradient loss, leaves such runs with no router balancing at all.
         max_seq_len: explicit per-sequence token bound for ``EfficiencyCallback``, for runs whose real
-            bound is not the sum of the declared length fields (a multi-turn RL trajectory). Defaults
-            to :func:`resolve_max_seq_len` over the training config + script args.
+            bound is not the sum of the declared length fields (a multi-turn RL trajectory). Unset, the
+            callback resolves it over the training config + script args.
 
     Returns:
         List of TrainerCallback instances (may be empty).
@@ -116,7 +116,8 @@ def build_perf_callbacks(
                 parallelism_config=parallelism_config,
                 num_full_model_params=args.num_full_model_params,
                 report_mfu_diagnostics=args.report_mfu_diagnostics,
-                max_seq_len=max_seq_len or resolve_max_seq_len(training_config, args),
+                max_seq_len=max_seq_len,
+                script_args=args,
             )
         )
 

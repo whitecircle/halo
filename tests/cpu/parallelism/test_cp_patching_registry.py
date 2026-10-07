@@ -1,9 +1,9 @@
 #!/usr/bin/env python
 """CPU tests for the Ulysses CP patching registry and the zero-patch guard.
 
-* ``CP_SUPPORTED_ATTENTION_CLASSES`` (what the validator accepts) must BE the wrapper registry
-  derived from the ``UlyssesAttentionBase`` subclass tree — a listed class without a wrapper would
-  pass validation and then silently skip patching (local-chunk-only attention).
+* The validator must read ``WRAPPER_CLASS_MAP``, the wrapper registry derived from the
+  ``UlyssesAttentionBase`` subclass tree, rather than a copy — a class listed there without a wrapper
+  would pass validation and then silently skip patching (local-chunk-only attention).
 * ``patch_attention_for_ulysses`` must RAISE when zero attention layers were patched — a warning
   alone leaves the CP run training on truncated context.
 * Every registered wrapper must be constructible the one way the patcher constructs them
@@ -21,17 +21,12 @@ import pytest
 import torch.nn as nn
 
 from src.distributed.context_parallel import validation
-from src.distributed.context_parallel.layers.registry import (
-    CP_SUPPORTED_ATTENTION_CLASSES,
-    WRAPPER_CLASS_MAP,
-    build_wrapper_class_map,
-)
+from src.distributed.context_parallel.layers.registry import WRAPPER_CLASS_MAP, build_wrapper_class_map
 from src.distributed.context_parallel.patching import patch_attention_for_ulysses
 from src.distributed.context_parallel.validation import UlyssesConfigError
 
 
-def test_supported_classes_match_wrapper_registry_exactly():
-    assert set(WRAPPER_CLASS_MAP) == set(CP_SUPPORTED_ATTENTION_CLASSES)
+def test_wrapper_registry_is_the_subclass_tree_derivation():
     # The module-level map is the subclass-tree derivation (nothing hand-patched it since import).
     assert build_wrapper_class_map() == WRAPPER_CLASS_MAP
 
@@ -39,7 +34,7 @@ def test_supported_classes_match_wrapper_registry_exactly():
 def test_validator_reads_the_derived_registry():
     """The validator must not carry its own copy of the list — importing it from anywhere else
     lets the two drift."""
-    assert validation.CP_SUPPORTED_ATTENTION_CLASSES is CP_SUPPORTED_ATTENTION_CLASSES
+    assert validation.WRAPPER_CLASS_MAP is WRAPPER_CLASS_MAP
 
 
 def test_every_wrapper_takes_the_one_constructor_signature_the_patcher_calls():

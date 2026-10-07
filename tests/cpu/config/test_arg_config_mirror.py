@@ -2,11 +2,10 @@
 """Parity between ``DistributedArguments`` (the YAML/CLI surface) and ``ParallelismConfig``.
 
 Several knobs are declared TWICE: once as a script argument the parser gates, once as a
-``ParallelismConfig`` field the runtime reads. Nothing links the two declarations, so a value added
-to one Literal or a default changed on one side alone fails silently rather than loudly:
+``ParallelismConfig`` field the runtime reads. The enum-like ones share their ``Literal`` type, but
+nothing links the two defaults, so a default changed on one side alone fails silently rather than
+loudly:
 
-  * a Literal that gains a member only on ``ParallelismConfig`` is rejected by the parser before it
-    can ever reach the runtime (and vice versa: the parser admits a value the config then rejects);
   * a default that drifts breaks ``parallelism_config_from_args``' non-SFT gate, which compares the
     parsed ``DistributedArguments`` values against ``ParallelismConfig``'s DEFAULTS
     (``_LOWP_SHAPE_DEFAULTS``) — a one-sided change makes EVERY non-SFT script reject a config
@@ -37,13 +36,7 @@ from typing import get_args, get_type_hints
 import pytest
 
 from src.args.distributed_args import DistributedArguments
-from src.distributed.parallelism_config import (
-    EP_BUFFER_BACKENDS,
-    EP_SCOPES,
-    LOWP_PRECISIONS,
-    PP_SCHEDULES,
-    ParallelismConfig,
-)
+from src.distributed.parallelism_config import ParallelismConfig
 from src.trainers.mixins.base import DistributedTrainerMixin
 from src.training.parallelism_args import _LOWP_SHAPE_DEFAULTS, parallelism_config_from_args
 from src.training.parser import _literal_choices
@@ -70,15 +63,6 @@ _MIRRORED_DEFAULTS = {
     "lowp_keep_first_blocks": "lowp_keep_first_blocks",
     "lowp_keep_last_blocks": "lowp_keep_last_blocks",
 }
-
-# DistributedArguments field -> the runtime table its Literal restates.
-_MIRRORED_LITERALS = {
-    "ep_scope": EP_SCOPES,
-    "ep_buffer_backend": EP_BUFFER_BACKENDS,
-    "pipeline_schedule": PP_SCHEDULES,
-    "lowp_precision": LOWP_PRECISIONS,
-}
-
 
 # DistributedArguments fields the builder deliberately never touches, each named with the consumer
 # that reads it instead. Adding an entry must be a decision, not an omission.
@@ -139,17 +123,6 @@ def _config_kwargs_built_by_builder() -> set[str]:
         elif isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute) and node.func.attr == "update":
             keys |= {kw.arg for kw in node.keywords if kw.arg}
     return keys | _SAME_NAME_FIELDS
-
-
-@pytest.mark.parametrize(("arg_field", "expected"), sorted(_MIRRORED_LITERALS.items()))
-def test_mirrored_literal_admits_exactly_the_runtime_table(arg_field, expected):
-    """The parser gates YAML/CLI on the ARGUMENT's Literal; the config validates against the runtime
-    tuple. A member present in only one is either unreachable or unvalidated."""
-    declared = _literal_choices(get_type_hints(DistributedArguments)[arg_field])
-    assert declared is not None, f"DistributedArguments.{arg_field} is not Literal-annotated"
-    assert set(declared) == set(expected), (
-        f"DistributedArguments.{arg_field} admits {sorted(declared)} but the runtime table is {sorted(expected)}"
-    )
 
 
 @pytest.mark.parametrize(("arg_field", "config_field"), sorted(_MIRRORED_DEFAULTS.items()))

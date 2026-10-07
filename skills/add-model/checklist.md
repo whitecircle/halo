@@ -20,7 +20,7 @@ run. Paths are relative to the repo root; anything that executes runs **inside t
 | CP wrapper | `src/distributed/context_parallel/layers/<name>.py` |
 | Selective TP | `src/distributed/tensor_parallel/module_types.py` (`TP_SHARDABLE_ATTENTION_CLASSES`) |
 | Head transform (forward scales, caps or cuts logits around `lm_head`) | `src/models/head_transform.py` (`HeadTransformSpec`) + the family's tiny model in `tests/cpu/models/test_head_transform.py` |
-| Attention backend (auto-detection falls short) | family predicate in `src/models/patches/attention.py`, wired into `resolve_attn_implementation` or `apply_family_attention_patches` (`src/models/loading/model_preparation.py`) |
+| Attention backend (auto-detection falls short) | the family's patch in `src/models/patches/attention.py`, gated on `model_type_matches` (`src/models/loading/config_levels.py`) in `resolve_attn_implementation` or `apply_family_attention_patches` (`src/models/loading/model_preparation.py`) |
 | Vendoring | `src/models/<name>/` + a side-effect import in `src/models/loading/model_preparation.py` |
 | Configs | `examples/sft/<family>/` |
 | Tests | `tests/gpu/parallelism/ep/`, `tests/gpu/trainers/sft/`, `tests/cpu/models/`, `tests/gpu/manifest.py` |

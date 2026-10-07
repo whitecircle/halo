@@ -47,7 +47,12 @@ from src.environments.envs.protocols.react import (
 from src.environments.envs.tasks.coding.code_contests import CodeContestsEnvironment
 from src.environments.envs.tasks.coding.grading import run_solution_against_tests
 from src.environments.envs.tasks.coding.swe import SweEnvironment
-from src.environments.envs.tasks.qa import ExamQAEnvironment, create_qa_search_environment, multiple_choice_match
+from src.environments.envs.tasks.qa import (
+    ExamQAEnvironment,
+    create_qa_search_environment,
+    multiple_choice_match,
+    render_choices,
+)
 from src.environments.ray_actors import RolloutConfig, RolloutManager
 from src.environments.registry import (
     create_environment,
@@ -1488,7 +1493,7 @@ def test_web_search_format_results():
     """Test result formatting."""
 
     # Empty results
-    assert _format_results([]) == "No results found."
+    assert _format_results([], max_results=5) == "No results found."
 
     # Normal results
     results = [
@@ -1578,6 +1583,17 @@ def test_numeric_match():
     assert numeric_match("50%", "0.5")
     assert numeric_match("The answer is 110", "110")
     assert not numeric_match("no numbers here", "42")
+
+
+def test_choices_render_with_the_letter_the_grader_scores():
+    """MMLU ships bare option texts with an index answer, so each line must carry the letter the grader
+    expects; a choice already labelled with its own letter is shown as written."""
+    assert render_choices(["Mars", "Jupiter"]) == "A. Mars\nB. Jupiter"
+    assert render_choices(["A: Mars", "B: Jupiter"]) == "A: Mars\nB: Jupiter"
+    assert render_choices(["(A) Mars", "Jupiter"]) == "(A) Mars\nB. Jupiter"
+    assert render_choices(["B: Mars"]) == "A. B: Mars", "a label naming another letter is option text"
+    with pytest.raises(ValueError, match="gradable"):
+        render_choices([str(i) for i in range(11)])
 
 
 def test_multiple_choice_match():
@@ -1741,6 +1757,24 @@ def test_react_missing_answer_key_still_pays_for_finishing():
     assert not traj.episode_invalid
 
     env.cleanup(episode_ids)
+
+
+@pytest.mark.parametrize("step_context", [None, {"finish_reason": "stop"}], ids=["reset-context", "step-context"])
+def test_react_grades_off_the_context_and_keeps_no_copy_of_the_answer(step_context):
+    """A settled episode sheds its grading payload before it rides Ray and the TP broadcast. ReAct
+    grades the answer off the row's context, as the native protocol does, so no copy of it outlives
+    the grade in ``info``; the drivers' step context carries the row as well, and grades the same."""
+    env = create_react_math_environment(thought_reward=0.0)
+    answer = "4.000-graded"
+    row = {"answer": answer}
+    episode_ids, _ = env.reset(["What is 2 + 2?", "What is 2 + 2?"], [row, row])
+    contexts = None if step_context is None else [{**row, **step_context}] * 2
+    env.step(episode_ids, ["Thought: add\nFinal Answer: 4.000-graded", "Thought: add\nFinal Answer: 5"], contexts)
+    right, wrong = env.get_trajectories(episode_ids)
+
+    assert (right.total_reward, wrong.total_reward) == (1.0, 0.0)
+    for traj in (right, wrong):
+        assert answer not in repr({key: value for key, value in traj.info.items() if key != "final_answer"})
 
 
 # qa_search preset (create_qa_search_environment)
@@ -2023,7 +2057,7 @@ def test_exam_qa_states_the_choices_inside_the_prompt_the_model_reads():
     env = ExamQAEnvironment(max_turns=2)
     traj = env._reset_single("Which planet is largest?", {"answer": 1, "choices": ["Mars", "Jupiter"]})
     last_user = [m for m in traj.messages if m.role == "user"][-1]
-    assert last_user.content.endswith("\n\nChoices:\nMars\nJupiter")
+    assert last_user.content.endswith("\n\nChoices:\nA. Mars\nB. Jupiter")
     assert traj.info["expected_answer"] == "B"
 
 

@@ -37,7 +37,7 @@ from src.training.environment import _setup_tracking_env_vars
 from src.training.parser import H4ArgumentParser
 
 # Every script-arg class and the tracking project its runs land in. Pinned by NAME, not merely "not
-# the placeholder": a class that declares no ``__post_init__`` of its own inherits a parent's project
+# the placeholder": a class that declares no ``PROJECT_NAME`` of its own inherits a parent's project
 # and silently files its runs under another method's experiments.
 _PROJECT_NAMES = {
     CLFScriptArguments: "classification",

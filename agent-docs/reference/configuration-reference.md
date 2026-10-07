@@ -161,7 +161,7 @@ Read from the environment (not the YAML); set in the launch command / `.env`. To
 | `HALO_TORCH_NUM_THREADS` | `1` | CPU threads per rank, applied with `torch.set_num_threads` at package import (one process per GPU, so 1 avoids contention); it overrides `OMP_NUM_THREADS`, PyTorch's own knob. |
 | `HF_HOME` / `HF_DATASETS_CACHE` | `~/.cache/huggingface` / `$HF_HOME/datasets` | Hugging Face caches; point both at the scratch volume. `HF_HOME` also anchors the two JIT kernel caches below, and one elected reader per filesystem creates the datasets cache before the dataset load. |
 | `TRITON_CACHE_DIR` / `FLASH_ATTENTION_CUTE_DSL_CACHE_DIR` | `$HF_HOME/triton_cache` / `$HF_HOME/flash_attn_cute_dsl_cache` (the temp dir without `HF_HOME`) | JIT kernel caches, set at script start unless already exported, so a `--rm` container does not recompile every kernel on each launch. |
-| `CUDA_DEVICE_MAX_CONNECTIONS` | `1` (baked into both images) | Driver-owned, latched at `deep_ep`'s `cuInit`, so a Python write is too late. `1` serializes work submission, which keeps the supported multi-group EP shapes (`ep2`, `ep4+etp2` on 8 GPUs) from deadlocking the combine against FSDP2's collectives, at no measurable throughput cost ([DeepEP](../infrastructure/deepep.md#environment-variables)); the trainer reads it only to warn when it is not `1`. |
+| `CUDA_DEVICE_MAX_CONNECTIONS` | `1` (baked into both images) | Driver-owned, latched at `deep_ep`'s `cuInit`, so a Python write is too late. `1` serializes work submission; it is the setting the EP suites are validated with, at no measurable throughput cost ([DeepEP](../infrastructure/deepep.md#environment-variables)). The trainer reads it only to warn when it is not `1`. |
 | `VLLM_DISABLE_PYNCCL` / `VLLM_NCCL_SO_PATH` | off / `libnccl.so.2` | Vendored from vLLM. `VLLM_NCCL_SO_PATH` is honored by the **trainer-side** weight-sync client; `VLLM_DISABLE_PYNCCL` set in the trainer process is **refused** (RuntimeError): it belongs to the vLLM server only, and honoring it would silently disable the weight-sync broadcast. It is parsed the way vLLM parses it (`1`/`true` only, not the toolkit's `yes`/`on`), so the trainer's verdict matches the server's. |
 | `VLLM_USE_V2_MODEL_RUNNER` | unset | Read by the **vLLM server**, not the toolkit: must be `0` for any run whose turns carry a thinking cap (`rollout_max_thinking_tokens`, or a level's `thinking_tokens`): Model Runner V2 answers `thinking_token_budget` with a 400 on every request. Set it in the server's environment (compose passes it through); `0` or `1` only — vLLM parses it with `int()`, so `false` or an empty value kills the server at startup. |
 | `NCCL_CUMEM_ENABLE` | `1` in `docker-compose.sglang.yml` | Read by NCCL in the **SGLang server**, never the toolkit: SGLang otherwise turns cuMem off process-wide while the trainer's stays on, and the mismatch fails the first cross-container buffer import ([why](../infrastructure/rollout-servers.md#nccl-transport-sglang)). Keep both ends equal; the compose default does. |
@@ -365,7 +365,7 @@ torchrun --nproc_per_node=8 scripts/training/sft.py \
 | `disable_dropout` | `bool` | `True` | Disable dropouts. |
 | `padding_value` | `int \| None` | `None` | Override padding value (defaults to tokenizer `pad_token_id`). |
 | `model_init_kwargs` | `dict \| None` | `None` | On every entry-script path these are **model-config overrides**, written onto the loaded config's fields before the load: a key that config does not declare **raises**, and so does `dtype`/`torch_dtype` (the run's precision comes from `bf16` / `fp32_*`). They are model-loading kwargs only where a trainer is constructed programmatically with the model as a path string; beside an already-built model, a non-`null` value raises. |
-| `dataset_num_proc` | `int \| None` | `None` | Dataset preprocessing processes. |
+| `dataset_num_proc` | `int \| None` | `None` | Dataset preprocessing worker processes; unset means the toolkit default (`HALO_DATASET_NUM_PROC`), not one worker. |
 | `advantage_method` | `"z_norm" \| "minmax" \| "quantile_norm" \| "quantile_uniform" \| "robust"` | `"quantile_norm"` | How rewards map to advantages: `z_norm` (z-score), `minmax` and `quantile_uniform` (to [-1, 1]), `robust` (median/IQR, outlier-resistant). |
 | `best_completion_emphasis` | `float \| str` | `0.0` | Boost for the best completion(s) per group: `0.0` = off, a float **> 1.0** = fixed boost (`1.5` = +50%), `"auto"` = std-adaptive. A value in `(0.0, 1.0]` **raises**: the consumer applies the factor only above 1.0, so it would be a silent no-op. |
 | `min_log_prob` | `float \| None` | `-3.0` | Min log prob for negative-advantage tokens (numerical stability). |
@@ -400,7 +400,7 @@ The class also overrides four `TrainingArguments` defaults: `learning_rate=1e-6`
 | `max_completion_length` | `int \| None` | `None` | Completion share; longer completions truncate from the end, keeping the terminal EOS. `null` (default) = the `max_length − max_prompt_length` remainder. An explicit value must still fit that remainder (else the config raises). |
 | `truncation_mode` | `"keep_end" \| "keep_start"` | `"keep_end"` | Which end of an over-long prompt to keep (`keep_end` = the tokens nearest the completion); completions always truncate from the end. |
 | `disable_dropout` | `bool` | `True` | Disable dropout. |
-| `dataset_num_proc` | `int \| None` | `None` | Dataset preprocessing processes. |
+| `dataset_num_proc` | `int \| None` | `None` | Dataset preprocessing worker processes; unset means the toolkit default (`HALO_DATASET_NUM_PROC`), not one worker. |
 | `model_init_kwargs` | `dict \| None` | `None` | Model-config overrides applied before the load — see [OfflineGRPOConfig](#offlinegrpoconfig). |
 
 ---
@@ -414,9 +414,9 @@ The class also overrides four `TrainingArguments` defaults: `learning_rate=1e-6`
 | `distill_loss` | `"kl_divergence" \| "mse" \| "soft_cross_entropy" \| "cosine_similarity" \| "jensen_shannon" \| "slim"` | `"kl_divergence"` | Teacher-distillation divergence. |
 | `distill_temperature` | `float` | `1.0` | Softmax temperature — forwarded only to the losses that declare it (`kl_divergence`, `soft_cross_entropy`, `jensen_shannon`, `slim`). Ignored by `mse` and `cosine_similarity`. Must be `> 0`. |
 | `distill_alpha` | `float` | `1.0` | Weight of distillation vs CLM loss. `1.0` = distillation only. Must be in `[0, 1]`. |
-| `apply_hard_labels` | `bool` | `False` | Apply hard-labels coefficient to distillation loss. |
+| `apply_hard_labels` | `bool` | `False` | Gate the distillation term per token on the gold token ([Teacher Distillation](../training-methods/distillation/teacher-distillation.md)). Refused at trainer construction with `distill_loss: slim`, which applies its own gold-token weight. |
 | `max_length` | `int \| None` | `2048` | Maximum tokenized sequence length. Over-length conversations are **dropped**, not truncated; `null` → the student's context window. |
-| `dataset_num_proc` | `int \| None` | `None` | Dataset preprocessing processes. |
+| `dataset_num_proc` | `int \| None` | `None` | Dataset preprocessing worker processes; unset means the toolkit default (`HALO_DATASET_NUM_PROC`), not one worker. |
 
 ### DistillScriptArguments
 
@@ -444,7 +444,7 @@ The class also overrides four `TrainingArguments` defaults: `learning_rate=1e-6`
 |-----------|------|---------|-------------|
 | `max_length` | `int \| None` | `1024` | Truncation length at tokenization (`scripts/training/classification.py`). A raw `text`/`label` dataset passed straight to the trainer is instead tokenized untruncated and filtered to it. Batches pad to the batch longest, not to this. `null` → model context window. |
 | `disable_dropout` | `bool` | `True` | Disable dropout. |
-| `dataset_num_proc` | `int \| None` | `None` | Preprocessing processes. |
+| `dataset_num_proc` | `int \| None` | `None` | Dataset preprocessing worker processes; unset means the toolkit default (`HALO_DATASET_NUM_PROC`), not one worker. |
 | `remove_unused_columns` | `bool` | `False` | Set `True` only for pre-tokenized datasets. |
 | `loss_type` | `"cross_entropy" \| "focal" \| "label_smoothing_ce"` | `"cross_entropy"` | `label_smoothing_ce` is single-label only (softmax CE) and raises on a multi-label dataset — use `focal` or `class_weights` there. |
 | `focal_gamma` | `float` | `2.0` | Focusing parameter (focal loss). Ignored unless `loss_type="focal"`. |
@@ -472,7 +472,7 @@ Environment selection, reward terms and turn budget for Async GRPO with Environm
 
 Common `environment_kwargs` keys:
 
-- `search_backend` (`qa_search` / open-book `exam_qa`): `duckduckgo`, `serper`, `brave`, `tavily`; `mock` only with `HALO_ALLOW_MOCK_SEARCH=1`. Setting it with `open_book: false` is refused at construction.
+- `search_backend` (`qa_search`, `react_search`, `native_combined`, open-book `exam_qa`): `duckduckgo`, `serper`, `brave`, `tavily`; `mock` only with `HALO_ALLOW_MOCK_SEARCH=1`. Setting it with `open_book: false` is refused at construction.
 - `open_book` (`exam_qa`, default `false`).
 - `timeout_per_test` (`code_contests`, seconds per test, default `15`; a non-finite or non-positive value raises at construction, as does such a `max_time_limit`).
 - `compiled_time_limit_scale` (`code_contests`, multiplier on a compiled language's per-test limit, default `1`; the interpreted floor and the `max_time_limit` clamp are unchanged; see [Code Contests → Grading rules](../training-methods/grpo/environments/code-contests.md#grading-rules)).

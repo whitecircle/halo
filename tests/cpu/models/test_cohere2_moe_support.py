@@ -26,7 +26,7 @@ from transformers.models.cohere2_moe.modeling_cohere2_moe import (
 )
 
 from src.distributed.context_parallel.layers.cohere2_moe import Cohere2MoeUlyssesAttention
-from src.distributed.context_parallel.layers.registry import CP_SUPPORTED_ATTENTION_CLASSES, WRAPPER_CLASS_MAP
+from src.distributed.context_parallel.layers.registry import WRAPPER_CLASS_MAP
 from src.distributed.expert_parallel.expert_weights import ep_layer_class_by_model_type
 from src.distributed.expert_parallel.layers.cohere2_moe import EPCohere2MoELayer
 from src.distributed.expert_parallel.patching import MOE_LAYER_MAP
@@ -64,7 +64,6 @@ def _wrapped_block(**config_overrides) -> tuple[Cohere2MoeSparseMoeBlock, EPCohe
 def test_registrations():
     assert MOE_LAYER_MAP["Cohere2MoeSparseMoeBlock"] is EPCohere2MoELayer
     assert WRAPPER_CLASS_MAP["Cohere2MoeAttention"] is Cohere2MoeUlyssesAttention
-    assert "Cohere2MoeAttention" in CP_SUPPORTED_ATTENTION_CLASSES
     assert "Cohere2MoeAttention" in TP_SHARDABLE_ATTENTION_CLASSES
 
     assert EPCohere2MoELayer._PER_EXPERT_UNFUSED_KEYS is None  # base gather emits the fused pair

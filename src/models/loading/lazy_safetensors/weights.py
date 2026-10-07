@@ -397,8 +397,8 @@ def materialize_empty_like(model: nn.Module, key: str, device: str, dtype: torch
     since an integer buffer (routing tables, position ids) would have its indices corrupted and a
     float one may be fp32 by design (Zaya's balancing biases).
     """
-    parent = model.get_submodule(key.rpartition(".")[0]) if "." in key else model
-    old = getattr(parent, key.rpartition(".")[2])
+    owner, _, attr = key.rpartition(".")
+    old = getattr(model.get_submodule(owner), attr)
     follows_run_dtype = dtype is not None and old.is_floating_point() and isinstance(old, nn.Parameter)
     target_dtype = dtype if follows_run_dtype else old.dtype
     assign_tensor_to_model(model, key, torch.empty_like(old, device=device, dtype=target_dtype))

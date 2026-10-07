@@ -313,10 +313,9 @@ def _validate_render_compatibility(metadata: PreprocessedDatasetMetadata, render
         # Raw-text pretraining artifacts render no chat template: every knob below was inert at
         # preparation time, so there is nothing baked for the run's values to disagree with.
         return
-    checked = _RENDER_CHECKED_FIELDS
     stated = _stated_render_knobs(render_args)
 
-    unrecorded = [name for name in checked if name not in recorded and hasattr(render_args, name)]
+    unrecorded = [name for name in _RENDER_CHECKED_FIELDS if name not in recorded and hasattr(render_args, name)]
     if unrecorded:
         logger.warning(
             f"Preprocessed dataset metadata predates recording of {unrecorded}; cannot verify these "
@@ -325,7 +324,7 @@ def _validate_render_compatibility(metadata: PreprocessedDatasetMetadata, render
 
     mismatched: dict[str, tuple[Any, Any]] = {}
     unstated: dict[str, tuple[Any, Any]] = {}
-    for name in checked:
+    for name in _RENDER_CHECKED_FIELDS:
         if name not in recorded or not hasattr(render_args, name):
             continue
         if name == "assistant_message_template" and not metadata.train_on_completions_only:

@@ -2,13 +2,15 @@
 """Tests for EfficiencyCallback. Run: python tests/cpu/callbacks/test_efficiency_callback.py"""
 
 import logging
+from types import SimpleNamespace
 
 import pytest
 import torch
 
-from src.callbacks import efficiency
+from src.callbacks import efficiency, wiring
 from src.callbacks.efficiency import _PRECISION_KEY_BY_LOWP, EfficiencyCallback, _detect_precision
 from src.callbacks.model_flops import _is_expert_param, compute_expert_params, estimate_linear_flops_per_token
+from src.callbacks.parameter_stats import count_model_parameters
 from src.distributed.parallelism_config import LOWP_PRECISIONS
 from src.hardware import GPU_PEAK_FLOPS, _classify_gpu_name, get_gpu_peak_flops
 from src.models.moe_balancing import detect_moe_experts_topk
@@ -211,7 +213,6 @@ def test_low_precision_compute_scores_against_its_own_peak(monkeypatch, lowp_pre
     callback._initialize_metrics(MockTrainingArgs(bf16=True))
 
     assert callback.state.precision == expected
-    assert callback.mfu.precision == expected
     assert callback.state.gpu_peak_flops == GPU_PEAK_FLOPS["B300"].flops[expected]
 
 
@@ -309,8 +310,20 @@ def test_estimate_linear_flops():
     # We use a small tensor but override numel via a wrapper
     p = MockParam(num_params, dtype=torch.bfloat16, requires_grad=True)
     model = MockModel(named_params=[("weight", p)])
-    flops = estimate_linear_flops_per_token(model)
+    flops = estimate_linear_flops_per_token(model, *count_model_parameters(model))
     assert flops == 6 * num_params, f"Expected {6 * num_params}, got {flops}"
+
+
+def test_a_fully_frozen_rank_is_charged_forward_and_input_gradient():
+    """A rank with no trainable parameter (a frozen stage, a frozen base) still runs the forward and
+    the input gradient its upstream needs, never a weight gradient: 4N in the dense and the active
+    estimate alike, which agree on a model without routed experts."""
+    model = torch.nn.Linear(10, 10, bias=False).requires_grad_(False)
+    model.config = None
+    cb = EfficiencyCallback(_NO_PARALLELISM)
+    cb._initialize_model_flops(model, 128)
+    assert cb.state.model_flops_per_token == 4 * model.weight.numel()
+    assert cb.state.active_model_flops_per_token == cb.state.model_flops_per_token
 
 
 def test_compute_expert_params():
@@ -394,18 +407,6 @@ def test_estimate_model_flops_includes_attention():
     flops = cb.state.model_flops_per_token
     expected = 6 * n_params + 12 * 4 * seq_len * 128
     assert flops == expected, f"expected {expected}, got {flops}"
-
-
-def test_estimate_model_flops_config_fallback():
-    """When param counting yields zero AND no requires_grad params, fall to 6N over all params."""
-    # All params frozen → requires_grad sum is 0, falls to all-params sum.
-    p = MockParam(2000, requires_grad=False)
-    model = MockModel(named_params=[("w", p)], config=MockConfig())
-    cb = EfficiencyCallback(_NO_PARALLELISM)
-    cb._initialize_model_flops(model, 128)
-    flops = cb.state.model_flops_per_token
-    # No num_hidden_layers/hidden_size on the bare config → 0 attention flops.
-    assert flops == 6 * 2000
 
 
 def test_compute_mfu_value():
@@ -526,7 +527,7 @@ def test_initialize_metrics_survives_unmeasurable_model():
     """
     shell = MockModel(named_params=[], config=MockConfig(model_type="mystery"))
     with pytest.raises(ValueError):  # the estimator itself stays fail-loud
-        estimate_linear_flops_per_token(shell)
+        estimate_linear_flops_per_token(shell, *count_model_parameters(shell))
 
     cb = EfficiencyCallback(_NO_PARALLELISM)
     cb.model_ref = shell
@@ -559,6 +560,26 @@ def test_on_log_skips_during_warmup():
     logs: dict = {}
     cb.on_log(MockTrainingArgs(), MockTrainerState(global_step=2), None, logs=logs)
     assert logs == {}
+
+
+def test_the_wired_length_bound_spans_the_training_config_and_the_script_args():
+    """GRPO's config declares neither max_length nor max_prompt_length and the scripts carry the
+    prompt budget on their own args, so the bound the wired callback measures against reads both."""
+    script_args = SimpleNamespace(
+        moe_balancing="none",
+        enable_efficiency_metrics=True,
+        enable_moe_metrics=False,
+        enable_torch_profiler=False,
+        num_full_model_params=None,
+        report_mfu_diagnostics=False,
+        max_prompt_length=100,
+    )
+    training_config = SimpleNamespace(max_completion_length=50, gradient_accumulation_steps=1)
+    model = torch.nn.Linear(2, 2)
+    model.config = None
+    (callback,) = wiring.build_perf_callbacks(script_args, training_config, model, _NO_PARALLELISM)
+    callback.training_args = training_config
+    assert callback._max_seq_len() == (150, True)
 
 
 if __name__ == "__main__":

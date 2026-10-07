@@ -19,12 +19,12 @@ from dataclasses import fields
 
 import pytest
 
-from src.configs.async_training_config import AsyncTrainingConfig, rollout_field_sources
+from src.configs.async_training_config import AsyncTrainingConfig
 from src.configs.rollout_config import RolloutConfig
 
 # RolloutConfig field -> the AsyncTrainingConfig field that supplies it, read from the builder's own
 # mapping rather than restated: the map has to exist exactly once to be worth testing.
-_FORWARDED = rollout_field_sources(AsyncTrainingConfig)
+_FORWARDED = AsyncTrainingConfig.rollout_field_sources()
 
 # The fields get_rollout_config computes instead of copying, each named with what it computes from.
 _DERIVED = {

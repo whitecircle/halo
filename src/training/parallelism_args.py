@@ -64,7 +64,7 @@ def parallelism_config_from_args(
     allow_low_precision: bool = False,
     supports_init_from_scratch: bool = False,
     expert_lora: "ExpertLoraSpec | None" = None,
-) -> "ParallelismConfig":
+) -> ParallelismConfig:
     """Build a :class:`ParallelismConfig` from parsed ``DistributedArguments`` — shared EP/CP/TP/ETP
     wiring for every training entry script.
 

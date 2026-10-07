@@ -230,7 +230,7 @@ def load_script_datasets(
     # Threaded for every script so a declared tools column is validated at load; a typo'd knob
     # otherwise renders the whole run without tools. The scripts that cannot render it (KTO,
     # environmental GRPO) reject the knob through reject_unsupported_args before their load.
-    loader_kwargs.setdefault("tools_field", getattr(args, "tools_field", None))
+    loader_kwargs.setdefault("tools_field", args.tools_field)
     ds = loader(
         args.dataset,
         args.test_size,

@@ -122,17 +122,14 @@ def _guarded_factorial(n):
     return math.factorial(n)
 
 
-_POW_GUARD_NAME = "_sandbox_pow"
-_OPERATOR_GUARDS: dict[str, Callable] = {
-    _POW_GUARD_NAME: _guarded_pow,
-    "_sandbox_lshift": _guarded_lshift,
-    "_sandbox_mul": _guarded_mul,
+# Operator -> its symbol, the name its uses are rewritten to call, and the guard bound to that name in
+# every sandbox namespace (``_sandbox_*``, a prefix user code may not name).
+_GUARDED_OPS: dict[type, tuple[str, str, Callable]] = {
+    ast.Pow: ("**", "_sandbox_pow", _guarded_pow),
+    ast.LShift: ("<<", "_sandbox_lshift", _guarded_lshift),
+    ast.Mult: ("*", "_sandbox_mul", _guarded_mul),
 }
-_GUARDED_OPS: dict[type, tuple[str, str]] = {
-    ast.Pow: ("**", _POW_GUARD_NAME),
-    ast.LShift: ("<<", "_sandbox_lshift"),
-    ast.Mult: ("*", "_sandbox_mul"),
-}
+_OPERATOR_GUARDS: dict[str, Callable] = {name: guard for _, name, guard in _GUARDED_OPS.values()}
 
 
 class _GuardedOpTransformer(ast.NodeTransformer):
@@ -146,7 +143,8 @@ class _GuardedOpTransformer(ast.NodeTransformer):
         guarded = _GUARDED_OPS.get(type(node.op))
         if guarded is None:
             return node
-        guard = ast.Name(id=guarded[1], ctx=ast.Load())
+        _, guard_name, _ = guarded
+        guard = ast.Name(id=guard_name, ctx=ast.Load())
         return ast.copy_location(ast.Call(func=guard, args=[node.left, node.right], keywords=[]), node)
 
     def visit_AugAssign(self, node: ast.AugAssign):
@@ -154,7 +152,7 @@ class _GuardedOpTransformer(ast.NodeTransformer):
         guarded = _GUARDED_OPS.get(type(node.op))
         if guarded is None:
             return node
-        symbol, guard_name = guarded
+        symbol, guard_name, _ = guarded
         if not isinstance(node.target, ast.Name):
             # Leaving x[i] **= y (or <<=, *=) unguarded would bypass the result-size bounds.
             raise ValueError(f"{symbol}= on a non-name target is not supported in the sandbox")
@@ -238,33 +236,6 @@ def _run_with_timeout(fn: Callable[[], str], timeout: float) -> str:
     return result.get("value", "Error: execution produced no result")
 
 
-def safe_calculate(expression: str, timeout: float = SANDBOX_DEFAULT_TIMEOUT) -> str:
-    """Evaluate a math expression under restricted builtins, bounded by a wall-clock timeout.
-
-    An empty ``__builtins__`` does not block attribute access, so the AST escape-guard runs before
-    ``eval``. The timeout bounds an expression the guard admits but that runs indefinitely (a large
-    comprehension), which would otherwise block the caller: sync tool execution runs on a Ray actor's
-    event loop.
-    """
-    try:
-        expr = expression.strip().replace("^", "**").replace("\u00d7", "*").replace("\u00f7", "/")
-        _validate_sandbox_ast(expr)
-    except ValueError as e:
-        return f"Error: {str(e)}"
-
-    def _evaluate() -> str:
-        try:
-            code_obj = _compile_sandboxed(expr, "eval")
-            result = eval(code_obj, {"__builtins__": {}, **_OPERATOR_GUARDS}, SAFE_MATH_BUILTINS)
-            return str(result)
-        except ZeroDivisionError:
-            return "Error: Division by zero"
-        except Exception as e:
-            return f"Error: {str(e) or type(e).__name__}"
-
-    return _run_with_timeout(_evaluate, timeout)
-
-
 def _validate_sandbox_ast(code: str) -> None:
     """Reject sandbox-escape constructs before execution. Raises ValueError on a violation.
 
@@ -302,6 +273,19 @@ def _validate_sandbox_ast(code: str) -> None:
             raise ValueError("format string with dunder field access is not allowed in the sandbox")
 
 
+def _error_observation(exc: Exception) -> str:
+    """The observation for an exception the code raised or the guard refused it with; a bare one (an
+    ``assert`` without a message) by its class name."""
+    return f"Error: {str(exc) or type(exc).__name__}"
+
+
+def _printed_output(printed: list[str]) -> str:
+    """What the captured ``print`` calls wrote, read the way the subprocess REPL reads a program's stdout
+    (:func:`~src.environments.sandbox.repl.format_sandbox_repl_output`): trailing newlines dropped, and
+    nothing written reported as no output."""
+    return "".join(printed).rstrip("\n") or REPL_NO_OUTPUT_MESSAGE
+
+
 def _run_python_sandboxed_inner(code: str) -> str:
     """Run validated code under restricted builtins (no timeout — see run_python_sandboxed).
 
@@ -311,39 +295,61 @@ def _run_python_sandboxed_inner(code: str) -> str:
     and surface as "produced no result" plus a traceback in the actor log. ``BaseException``
     (``SystemExit``, ``KeyboardInterrupt``) still propagates.
     """
-    output_lines: list[str] = []
+    printed: list[str] = []
 
-    def capture_print(*args, sep=" ", end="\n"):
-        output_lines.append(sep.join(str(a) for a in args))
+    def capture_print(*args, sep=None, end=None, flush=False):
+        printed.append((" " if sep is None else sep).join(str(a) for a in args) + ("\n" if end is None else end))
 
-    # A bare ``print(...)`` takes the eval path, so the capture must be in scope there too.
-    sandbox_globals = {
-        "__builtins__": SAFE_PYTHON_BUILTINS,
-        "print": capture_print,
-        **_OPERATOR_GUARDS,
-    }
-    local_vars: dict = {}
+    # One namespace, as a module runs: with separate globals and locals the code would run under class-body
+    # scoping, where a function sees neither the names defined beside it nor itself (no recursion). A bare
+    # ``print(...)`` takes the eval path, so the capture must be in scope there too.
+    namespace = {"__builtins__": SAFE_PYTHON_BUILTINS, "print": capture_print, **_OPERATOR_GUARDS}
+    injected = set(namespace)
 
     # Captured print output takes precedence over the expression value, so ``print(x)`` returns x.
     try:
-        result = eval(_compile_sandboxed(code, "eval"), sandbox_globals, local_vars)
-        return "\n".join(output_lines) if output_lines else str(result)
+        result = eval(_compile_sandboxed(code, "eval"), namespace)
+        return _printed_output(printed) if printed else str(result)
     except SyntaxError:
         # Not an expression — fall through to the statement (exec) path.
         pass
     except Exception as e:
-        return f"Error: {str(e) or type(e).__name__}"
+        return _error_observation(e)
 
     try:
-        exec(_compile_sandboxed(code, "exec"), sandbox_globals, local_vars)
-        if output_lines:
-            return "\n".join(output_lines)
-        elif local_vars:
-            return str(list(local_vars.values())[-1])
-        else:
-            return REPL_NO_OUTPUT_MESSAGE
+        exec(_compile_sandboxed(code, "exec"), namespace)
     except Exception as e:
-        return f"Error: {str(e) or type(e).__name__}"
+        return _error_observation(e)
+    if printed:
+        return _printed_output(printed)
+    defined = [value for name, value in namespace.items() if name not in injected]
+    return str(defined[-1]) if defined else REPL_NO_OUTPUT_MESSAGE
+
+
+def safe_calculate(expression: str, timeout: float = SANDBOX_DEFAULT_TIMEOUT) -> str:
+    """Evaluate a math expression under restricted builtins, bounded by a wall-clock timeout.
+
+    An empty ``__builtins__`` does not block attribute access, so the AST escape-guard runs before
+    ``eval``. The timeout bounds an expression the guard admits but that runs indefinitely (a large
+    comprehension), which would otherwise block the caller: sync tool execution runs on a Ray actor's
+    event loop.
+    """
+    try:
+        expr = expression.strip().replace("^", "**").replace("\u00d7", "*").replace("\u00f7", "/")
+        _validate_sandbox_ast(expr)
+    except ValueError as e:
+        return _error_observation(e)
+
+    def _evaluate() -> str:
+        # A namespace of its own per call: a walrus binds into it, and on a shared table the binding
+        # (``pi := 3``) would carry into every later call in the process.
+        namespace = {"__builtins__": {}, **_OPERATOR_GUARDS, **SAFE_MATH_BUILTINS}
+        try:
+            return str(eval(_compile_sandboxed(expr, "eval"), namespace))
+        except Exception as e:
+            return _error_observation(e)
+
+    return _run_with_timeout(_evaluate, timeout)
 
 
 def run_python_sandboxed(code: str, timeout: float = SANDBOX_DEFAULT_TIMEOUT) -> str:
@@ -354,6 +360,6 @@ def run_python_sandboxed(code: str, timeout: float = SANDBOX_DEFAULT_TIMEOUT) ->
     try:
         _validate_sandbox_ast(code)
     except ValueError as e:
-        return f"Error: {str(e)}"
+        return _error_observation(e)
 
     return _run_with_timeout(lambda: _run_python_sandboxed_inner(code), timeout)

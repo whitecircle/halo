@@ -5,7 +5,6 @@ sequence → all-to-all back), and under it the ownership transpose the two coll
 one sequence chunk with every head, to every token with a slice of the heads.
 """
 
-import matplotlib.pyplot as plt
 from _pipeline_style import *
 
 W, H = 12.4, 5.85
@@ -30,11 +29,7 @@ STAGES = [
 CARD_XS, CARD_W = columns(W, len(STAGES), CARD_X0, CARD_GAP)
 
 
-fig, ax = plt.subplots(figsize=(W, H))
-fig.patch.set_facecolor(BG)
-ax.set_xlim(0, W)
-ax.set_ylim(0, H)
-ax.axis("off")
+fig, ax = canvas(W, H)
 
 title(ax, "Ulysses attention", "cp 4 · 64 Q / 8 KV heads → 16 Q / 2 KV per rank")
 
@@ -96,5 +91,3 @@ footnote(
 )
 
 save(fig, "ulysses_attention_flow")
-plt.close(fig)
-print("✓ ulysses_attention_flow.png")

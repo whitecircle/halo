@@ -32,13 +32,11 @@ class FormatTerm(RewardTerm):
     def __post_init__(self) -> None:
         super().__post_init__()
         try:
-            re.compile(self.pattern, re.DOTALL)
+            compiled = re.compile(self.pattern, re.DOTALL)
         except re.error as e:
             raise ValueError(f"format term {self.name!r}: invalid pattern {self.pattern!r}: {e}") from e
-
-    @property
-    def compiled(self) -> re.Pattern:
-        return re.compile(self.pattern, re.DOTALL)
+        # Not a field: a config cannot set it, and the term compares by its pattern.
+        object.__setattr__(self, "compiled", compiled)
 
 
 def completion_text(completion: Any) -> str:
@@ -87,10 +85,8 @@ def accuracy_grader(term: RewardTerm):
 
 
 def format_grader(term: FormatTerm):
-    compiled = term.compiled
-
     def grader(completions: Sequence[Any], **kwargs: Any) -> list[float]:
-        return format_reward(completions, compiled)
+        return format_reward(completions, term.compiled)
 
     return grader
 

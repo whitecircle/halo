@@ -1,6 +1,7 @@
 """Script arguments for KTO (Kahneman-Tversky Optimization) training."""
 
 from dataclasses import dataclass, field
+from typing import ClassVar
 
 from src.args.common_script_args import CommonScriptArguments
 
@@ -14,6 +15,8 @@ class KTOScriptArguments(CommonScriptArguments):
     Conversational ``prompt``/``completion`` (lists of role/content dicts) are
     auto-templated by TRL's KTOTrainer via ``processing_class``.
     """
+
+    PROJECT_NAME: ClassVar[str] = "kto-tuning"
 
     completion_field: str = field(
         default="completion",
@@ -33,7 +36,3 @@ class KTOScriptArguments(CommonScriptArguments):
             "path makes TRL refuse precompute_ref_log_probs and any chosen/rejected column."
         },
     )
-
-    def __post_init__(self):
-        self._apply_default_project_name("kto-tuning")
-        self._validate_ranges()

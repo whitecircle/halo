@@ -23,10 +23,10 @@ from pathlib import Path
 import torch
 from accelerate import PartialState
 from safetensors.torch import load_file, save_file
-from transformers import AutoTokenizer
 
 import src.distributed.expert_parallel.layers.roster  # noqa: F401 — registers the EP export roster the config finalizer requires
 from scripts._common import add_hub_source_args, add_max_shard_size_arg, add_trust_remote_code_arg
+from src.checkpoint.atomic import create_staged_file, link_or_copy_file, publish_staged_file
 from src.checkpoint.format import (
     DEFAULT_MAX_SHARD_SIZE,
     SAFETENSORS_METADATA,
@@ -44,9 +44,8 @@ from src.checkpoint.tool_io import (
     save_full_checkpoint,
 )
 from src.log import configure_cli_logging
-from src.models.loading.model_preparation import (
-    auto_load_model,
-)
+from src.models.loading.model_preparation import auto_load_model
+from src.models.loading.tokenizer_setup import load_processing_class
 from src.models.patches.gpt_oss_sinks import (
     SinksPolicy,
     apply_sinks_policy,
@@ -156,35 +155,24 @@ def _reset_sinks_safetensors(safetensors_path: Path, output_dir: Path, dry_run: 
         logger.info(f"Copying checkpoint files to {output_dir}...")
         shutil.copytree(str(checkpoint_dir), str(output_dir), dirs_exist_ok=True)
 
-    # Write via a sibling temp file and atomic rename: under --in_place this replaces the only copy,
-    # which a kill mid-write would otherwise destroy.
+    # Staged write, verify, then publish: under --in_place the rename replaces the only copy, which a
+    # kill mid-write, or a write that kept live sinks, must not reach.
     logger.info(f"Saving updated checkpoint to {output_safetensors}...")
-    tmp_path = output_safetensors.with_suffix(".safetensors.tmp")
-    save_file(state_dict, str(tmp_path), metadata=SAFETENSORS_METADATA)
-
-    # Verify the staged file before the rename: under --in_place the rename replaces the only copy,
-    # so a write that kept live sinks must not get that far.
-    logger.info("Verifying...")
+    staged = create_staged_file(output_dir, SAFETENSORS_WEIGHTS_FILE)
     try:
-        written = {key: tensor for key, tensor in load_file(str(tmp_path), device="cpu").items() if is_sink_key(key)}
-        _assert_sinks_at_min(written, sink_keys, str(tmp_path))
-    except BaseException:
-        tmp_path.unlink(missing_ok=True)  # discard a staged file that failed verification
-        raise
-    tmp_path.replace(output_safetensors)
+        save_file(state_dict, str(staged), metadata=SAFETENSORS_METADATA)
+        logger.info("Verifying...")
+        written = {key: tensor for key, tensor in load_file(str(staged), device="cpu").items() if is_sink_key(key)}
+        _assert_sinks_at_min(written, sink_keys, str(staged))
+        publish_staged_file(staged, output_safetensors)
+    finally:
+        staged.unlink(missing_ok=True)
     logger.info(f"All {len(sink_keys)} sink tensors verified — reset to dtype min.")
     # The copytree carries the source's card over untagged; save_full_checkpoint tags the
     # from_pretrained branch's.
     tag_exported_model_card(str(output_dir), source_dir=str(checkpoint_dir))
 
     return len(sink_keys)
-
-
-def _verify_sinks_reset(directory: Path, sink_keys: list[str]) -> None:
-    """``_assert_sinks_at_min`` over a written checkpoint directory (sharded or single-file)."""
-    _assert_sinks_at_min(
-        dict(iter_checkpoint_tensors(str(directory), predicate=is_sink_key)), sink_keys, str(directory)
-    )
 
 
 def _discard_path(path: Path) -> None:
@@ -199,8 +187,8 @@ def _swap_staged_checkpoint(staging_dir: Path, output_dir: Path) -> None:
     """Publish a verified staged checkpoint onto ``output_dir``, entry by entry (``os.replace`` is
     atomic per name on one filesystem, and the staging directory is a sibling).
 
-    Every entry is cloned beside its final name first (a hard link, so it costs no I/O) and the clone
-    is replaced into place. Moving the staged entries instead would empty the staging directory as
+    Every entry is cloned beside its final name first (a hard link where the filesystem allows one, so
+    it costs no I/O) and the clone is replaced into place. Moving the staged entries instead would empty the staging directory as
     the swap proceeds, so a failure part-way would leave neither directory holding a whole checkpoint
     (and under ``--in_place`` that is the only copy). Cloning keeps the staged checkpoint intact
     until the last entry lands.
@@ -214,7 +202,7 @@ def _swap_staged_checkpoint(staging_dir: Path, output_dir: Path) -> None:
             if staged.is_dir():
                 shutil.copytree(staged, clone)
             else:
-                os.link(staged, clone)
+                link_or_copy_file(staged, clone)
             if final.is_dir():
                 shutil.rmtree(final)
             os.replace(clone, final)
@@ -270,13 +258,7 @@ def _reset_sinks_from_pretrained(
         return len(sink_keys)
 
     logger.info(f"Saving updated model to {output_dir}...")
-    try:
-        tokenizer = AutoTokenizer.from_pretrained(str(checkpoint_dir), trust_remote_code=trust_remote_code)
-    except Exception as exc:
-        # Report the underlying error: a network or permission failure is not the same as a
-        # checkpoint that ships no tokenizer, which the aux-file copy already covers.
-        logger.warning(f"Tokenizer not saved from {checkpoint_dir} ({type(exc).__name__}: {exc}).")
-        tokenizer = None
+    processing_class = load_processing_class(str(checkpoint_dir), trust_remote_code=trust_remote_code)
 
     # Staged write, verify, then swap, for the same reason the single-file branch stages its temp
     # file: under --in_place this writes over the only copy, and save_pretrained writes many files, so
@@ -287,11 +269,12 @@ def _reset_sinks_from_pretrained(
         save_full_checkpoint(
             model,
             str(tmp_dir),
-            processing_class=tokenizer,
+            processing_class=processing_class,
             source_dir=str(checkpoint_dir),
             max_shard_size=max_shard_size,
         )
-        _verify_sinks_reset(tmp_dir, sink_keys)
+        written = dict(iter_checkpoint_tensors(str(tmp_dir), predicate=is_sink_key))
+        _assert_sinks_at_min(written, sink_keys, str(tmp_dir))
     except BaseException:
         shutil.rmtree(tmp_dir, ignore_errors=True)  # discard a staged save that failed verification
         raise

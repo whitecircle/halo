@@ -143,26 +143,28 @@ async def test_rollout_manager_start_shutdown():
 
 
 class _Spawner:
-    """Stands in for a ``@ray.remote`` class: records each spawn, refuses an affinity it was not given."""
+    """Stands in for a ``@ray.remote`` class: records each spawn with the scheduling strategy it was placed under."""
 
-    def __init__(self, name: str, spawned: list[str]):
-        self.name, self.spawned = name, spawned
+    def __init__(self, name: str, spawned: list[tuple[str, object]], strategy: object = None):
+        self.name, self.spawned, self.strategy = name, spawned, strategy
 
-    def options(self, **kwargs):
-        raise AssertionError(f"{self.name} placed with a scheduling strategy that could not be built")
+    def options(self, *, scheduling_strategy):
+        return _Spawner(self.name, self.spawned, scheduling_strategy)
 
     def remote(self, *args):
-        self.spawned.append(self.name)
+        self.spawned.append((self.name, self.strategy))
         return SimpleNamespace()
 
 
-def _manager_on_a_fake_cluster(monkeypatch, strategy) -> tuple[ray_actors.RolloutManager, list[str]]:
-    spawned: list[str] = []
+async def test_the_pool_and_its_clock_prefer_this_node_and_spill_off_a_busy_one(monkeypatch):
+    """The actors and their pause clock are placed under a soft affinity to this node that also spills when
+    the node is merely saturated: ``soft`` alone pins every actor to a live, busy training node, which stalls."""
+    spawned: list[tuple[str, object]] = []
     runtime = SimpleNamespace(get_node_id=lambda: "node")
     monkeypatch.setattr(
         ray_actors, "ray", SimpleNamespace(is_initialized=lambda: True, get_runtime_context=lambda: runtime)
     )
-    monkeypatch.setattr(ray_actors, "NodeAffinitySchedulingStrategy", strategy)
+    monkeypatch.setattr(ray_actors, "NodeAffinitySchedulingStrategy", lambda **kwargs: kwargs)
     monkeypatch.setattr(ray_actors, "EnvironmentActor", _Spawner("actor", spawned))
     monkeypatch.setattr(ray_actors, "_RemoteEnginePauseClock", _Spawner("clock", spawned))
     manager = ray_actors.RolloutManager(
@@ -172,31 +174,11 @@ def _manager_on_a_fake_cluster(monkeypatch, strategy) -> tuple[ray_actors.Rollou
         server_urls=["http://localhost:8000"],
         rollout_config=ray_actors.RolloutConfig(),
     )
-    return manager, spawned
 
+    await manager.start()
 
-async def test_a_ray_without_the_affinity_spills_the_actors_with_a_warning(monkeypatch, caplog):
-    """Affinity is a placement preference, so a Ray that cannot build it still starts the pool, but
-    says so: the actors may then land on any node, where a loopback server URL reaches nothing."""
-
-    def unsupported(**kwargs):
-        raise TypeError("__init__() got an unexpected keyword argument '_spill_on_unavailable'")
-
-    manager, spawned = _manager_on_a_fake_cluster(monkeypatch, unsupported)
-    with caplog.at_level(logging.WARNING, logger=ray_actors.__name__):
-        await manager.start()
-    assert spawned == ["clock", "actor", "actor"]
-    assert "node affinity unavailable" in caplog.text and "_spill_on_unavailable" in caplog.text
-
-
-async def test_an_unexpected_affinity_failure_is_not_swallowed(monkeypatch):
-    def broken(**kwargs):
-        raise RuntimeError("the raylet is gone")
-
-    manager, spawned = _manager_on_a_fake_cluster(monkeypatch, broken)
-    with pytest.raises(RuntimeError, match="raylet"):
-        await manager.start()
-    assert spawned == []
+    affinity = {"node_id": "node", "soft": True, "_spill_on_unavailable": True}
+    assert spawned == [("clock", affinity), ("actor", affinity), ("actor", affinity)]
 
 
 # Test: RolloutConfig

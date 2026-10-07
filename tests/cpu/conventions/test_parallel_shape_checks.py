@@ -5,7 +5,7 @@ The SFT mode suites gate "the mode engaged" on these probes and run only on the 
 that stopped reading the model (and started agreeing with the config again) would go unnoticed. Each
 probe is driven here with the model the axis leaves behind and with one it left untouched: real
 Ulysses wrappers on a tiny Qwen3, a real TP DTensor over a fake process group, and EP layers stubbed
-down to the attributes the probe reads.
+down to the class and attributes the probe reads.
 
 Run: python tests/cpu/conventions/test_parallel_shape_checks.py
 """
@@ -18,6 +18,7 @@ from torch.distributed.tensor import Shard, distribute_tensor
 from transformers import Qwen3Config, Qwen3ForCausalLM, Qwen3MoeConfig
 
 from src.distributed.context_parallel.patching import patch_attention_for_ulysses
+from src.distributed.expert_parallel.base_layer import EPMoELayerBase
 from src.distributed.mesh import MeshDim
 from tests.common.distributed import fake_process_group_mesh
 from tests.common.models import TINY_QWEN3_CONFIG, TINY_QWEN3_MOE_CONFIG
@@ -29,12 +30,12 @@ NUM_EXPERTS = TINY_QWEN3_MOE_CONFIG["num_experts"]
 HIDDEN = 8
 
 
-class _StubEPLayer(nn.Module):
-    """The attributes and expert weights an EP wrapper carries, for ``expert_count`` local experts."""
+class _StubEPLayer(EPMoELayerBase):
+    """The attributes and expert weights an EP wrapper carries, for ``expert_count`` local experts.
+    The base ``__init__`` needs a live process group, so only the ``nn.Module`` half is initialized."""
 
     def __init__(self, ep_size: int, *, expert_count: int | None = None, expert_tp_size: int = 1):
-        super().__init__()
-        self.ep_config = object()
+        nn.Module.__init__(self)
         self.num_experts = NUM_EXPERTS
         self.ep_size = ep_size
         self.experts_per_rank = NUM_EXPERTS // ep_size
@@ -45,6 +46,9 @@ class _StubEPLayer(nn.Module):
 
     def expert_named_params(self):
         return [("gate_up_proj", self.gate_up_proj)]
+
+    def forward(self, hidden_states, **kwargs):
+        raise NotImplementedError
 
 
 def _moe(*layers) -> nn.Module:

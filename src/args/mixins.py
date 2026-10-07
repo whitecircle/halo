@@ -11,14 +11,13 @@ import string
 from dataclasses import dataclass, field, fields, make_dataclass
 from typing import Any, ClassVar, Literal, get_args
 
-from src.args.validation import RangeValidatedConfig
+from src.args.validation import RangeValidatedConfig, require_finite, require_positive, require_positive_int
 
 # The RLRR shaping modes: the annotation gates YAML/CLI and RLRRConfig validates against it.
 RLRRMode = Literal["hrr", "prr"]
 
 # The script-argument spelling of each RLRRConfig field is ``rlrr_<field>``, except λ: ``lambda`` is a
 # keyword, so the config field is ``lam`` while the YAML keeps the full word.
-RLRR_ARG_PREFIX = "rlrr_"
 _RLRR_ARG_SPELLINGS = {"lam": "rlrr_lambda"}
 
 # The OPD arms' names in the trainer-side divergence registry (``losses.DIVERGENCES``), pinned to it by a
@@ -26,13 +25,16 @@ _RLRR_ARG_SPELLINGS = {"lam": "rlrr_lambda"}
 # against it.
 SelfDistillationLoss = Literal["reverse_kl", "forward_kl", "unnormalized_kl"]
 
+# The dataset column a ground-truth answer is read from unless a config renames it.
+DEFAULT_ANSWER_FIELD = "answer"
+
 # The teacher hint both OPD flows default to, through SDPGArguments.
 PRIVILEGED_HINT_TEMPLATE = "\n[Hint] The correct answer is: {answer}. Do NOT state that you were given the answer.\n"
 
 
 def rlrr_arg_name(config_field: str) -> str:
     """The YAML/CLI spelling of one :class:`RLRRConfig` field."""
-    return _RLRR_ARG_SPELLINGS.get(config_field, RLRR_ARG_PREFIX + config_field)
+    return _RLRR_ARG_SPELLINGS.get(config_field, f"rlrr_{config_field}")
 
 
 def format_field_names(template: str) -> set[str]:
@@ -171,16 +173,13 @@ class RLRRConfig:
             raise ValueError(f"{rlrr_arg_name('mode')} must be one of {get_args(RLRRMode)}, got {self.mode!r}")
         # Both divide inside the shaping (Eq. 3 / Eq. 6): zero is a ZeroDivisionError deep in the advantage
         # pass, a negative one inverts the ranking, an infinite λ silently disables the length tie-break.
-        for name in ("tau", "lam"):
-            value = getattr(self, name)
-            if not math.isfinite(value) or value <= 0:
-                raise ValueError(f"{rlrr_arg_name(name)} must be a finite value > 0, got {value}")
+        require_positive(type(self).__name__, **{rlrr_arg_name(name): getattr(self, name) for name in ("tau", "lam")})
         # A NaN band or threshold fails silently: NaN clip bounds NaN every advantage, and no reward
         # ever compares >= NaN, so every response reads as incorrect.
-        for name in ("xi_pos", "xi_neg", "correctness_threshold"):
-            value = getattr(self, name)
-            if not math.isfinite(value):
-                raise ValueError(f"{rlrr_arg_name(name)} must be finite, got {value}")
+        require_finite(
+            type(self).__name__,
+            **{rlrr_arg_name(name): getattr(self, name) for name in ("xi_pos", "xi_neg", "correctness_threshold")},
+        )
         if self.xi_neg > self.xi_pos:
             raise ValueError(
                 f"RLRR requires {rlrr_arg_name('xi_neg')} <= {rlrr_arg_name('xi_pos')}, "
@@ -296,14 +295,11 @@ class EarlyStopConfig:
             len(band) == 2 and all(math.isfinite(v) for v in band) and 0.0 <= band[0] < band[1]
         ):
             raise ValueError(f"early_stop_entropy_band must be [low, high] with 0 <= low < high, got {list(band)}")
-        gap = self.logratio_gap
-        if gap is not None and not (math.isfinite(gap) and gap > 0.0):
-            raise ValueError(f"early_stop_logratio_gap must be a finite positive number or null, got {gap}")
-        patience = self.patience
-        if isinstance(patience, bool) or not isinstance(patience, int) or patience < 1:
-            raise ValueError(f"early_stop_patience must be an int >= 1, got {patience!r}")
-        if not self.active and patience != EarlyStopConfig.patience:
-            raise ValueError(f"early_stop_patience is {patience} but no early-stop condition is set to count it")
+        if self.logratio_gap is not None:
+            require_positive(type(self).__name__, early_stop_logratio_gap=self.logratio_gap)
+        require_positive_int(type(self).__name__, early_stop_patience=self.patience)
+        if not self.active and self.patience != EarlyStopConfig.patience:
+            raise ValueError(f"early_stop_patience is {self.patience} but no early-stop condition is set to count it")
 
     @property
     def active(self) -> bool:
@@ -370,6 +366,35 @@ class GRPOEarlyStopArguments(RangeValidatedConfig):
         """Whether a step whose every update was skipped counts toward the stop; only a config whose trainer
         has a trust-region breaker overrides it."""
         return False
+
+
+@dataclass
+class DatasetNumProcArguments:
+    """Dataset-preprocessing worker count of the trainer configs that map their own data, read through
+    :func:`~src.data.pipeline.processing.resolve_map_num_proc`."""
+
+    dataset_num_proc: int | None = field(
+        default=None,
+        metadata={
+            "help": "Worker processes for dataset preprocessing (map/filter). Unset means the toolkit "
+            "default (HALO_DATASET_NUM_PROC, else max(1, min(cpu_count // 4, 4))), not one worker."
+        },
+    )
+
+
+@dataclass
+class ModelInitKwargsArguments:
+    """``model_init_kwargs`` of the trainer configs whose trainer also takes the model as a path string."""
+
+    model_init_kwargs: dict[str, Any] | None = field(
+        default=None,
+        metadata={
+            "help": "Model-config overrides on every entry-script path: written onto the loaded "
+            "config's fields before the load, raising on a key that config does not declare and "
+            "on dtype/torch_dtype. Model-loading kwargs only where a trainer is constructed "
+            "programmatically with the model as a path string."
+        },
+    )
 
 
 @dataclass
@@ -453,8 +478,7 @@ class SDPGArguments(RangeValidatedConfig):
             raise ValueError(f"sdpg_loss must be one of {get_args(SelfDistillationLoss)}, got {self.sdpg_loss!r}")
         # Divides both distributions' logits: zero turns them infinite and NaNs the OPD loss without a
         # raise, a negative one inverts them.
-        if not math.isfinite(self.sdpg_temperature) or self.sdpg_temperature <= 0:
-            raise ValueError(f"sdpg_temperature must be a finite value > 0, got {self.sdpg_temperature}")
+        require_positive(type(self).__name__, sdpg_temperature=self.sdpg_temperature)
         # A NaN coefficient NaNs every loss; a negative one trains the student away from the teacher.
         if not math.isfinite(self.sdpg_beta_base) or self.sdpg_beta_base < 0:
             raise ValueError(

@@ -39,6 +39,7 @@ from src.distributed.runtime import (
     is_global_main_process,
     reject_across_ranks,
 )
+from src.log import KEY_PREVIEW_COUNT
 from src.models.loading.dtype import configure_float32_matmul_precision
 from src.models.patches.attention import anchor_jit_cache_dir, ensure_fa4_kernel_cache_env
 from src.training.parser import is_true_string
@@ -78,7 +79,8 @@ def _validate_output_dir(output_dir: str) -> None:
         if contents:
             raise ValueError(
                 f"Output directory '{output_dir}' already exists and is not empty. "
-                f"Found {len(contents)} items: {contents[:5]}{'...' if len(contents) > 5 else ''}. "
+                f"Found {len(contents)} items: {contents[:KEY_PREVIEW_COUNT]}"
+                f"{'...' if len(contents) > KEY_PREVIEW_COUNT else ''}. "
                 f"Set resume_from_checkpoint to resume training, or use a new output_dir "
                 f"(or clear this one) to avoid overwriting previous runs."
             )
@@ -135,7 +137,7 @@ def _tear_down_distributed() -> None:
         dist.destroy_process_group()
 
 
-def setup_training_environment(args, training_config, script_name: str = "train") -> None:
+def setup_training_environment(args, training_config, script_name: str) -> None:
     """Setup common training environment: logging, seeds, and environment variables."""
     # Both kernel caches, anchored on HF_HOME, before any model/attention import: they read their env
     # lazily at first compile, and a cold cache re-benchmarks per packed-row width (fla keys on
@@ -147,9 +149,6 @@ def setup_training_environment(args, training_config, script_name: str = "train"
     # does not load through load_distributed_model, and the image's TF32 default collapses adjacent
     # RoPE positions past 2048 tokens.
     configure_float32_matmul_precision()
-
-    # output_dir may carry per-rank strftime codes; broadcast rank 0's value so all ranks agree.
-    training_config.output_dir = broadcast_from_rank0(getattr(training_config, "output_dir", None))
 
     # Config-derived → rank-uniform; a resume request defers this guard to detect_resume_checkpoint.
     skip_validation = getattr(training_config, "resume_from_checkpoint", None) or getattr(

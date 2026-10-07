@@ -13,7 +13,6 @@ import ast
 import base64
 import inspect
 import io
-import logging
 import pathlib
 
 import numpy as np
@@ -32,7 +31,6 @@ from src.data.pipeline.preferences import (
 )
 from src.data.pipeline.preprocessed_metadata import PreprocessingConfig
 from src.data.pipeline.preprocessing import tokenize_vlm_dataset
-from src.data.pipeline.processing import filter_by_length
 from src.data.pipeline.rendered import render_conversation
 from src.data.pipeline.row_processors import (
     apply_chat_template_to_conversations,
@@ -41,7 +39,7 @@ from src.data.pipeline.row_processors import (
     create_vlm_processor,
 )
 from src.data.pipeline.vlm_dataset import _VLM_SIGNATURE_COLUMNS, vlm_map_features
-from src.data.vlm import VLM_OUTPUT_COLUMNS
+from src.data.vlm import VLM_OUTPUT_FEATURES
 from tests.common.vlm_fakes import FakeVLMProcessorBase, FakeVLMTokenizer
 
 
@@ -225,7 +223,7 @@ def test_the_vlm_map_output_is_one_declaration():
 
 def test_the_preprocessed_vision_key_refusal_reads_the_declared_schema():
     """The offline bake refuses processor keys its stored schema cannot hold — the set is read off
-    VLM_OUTPUT_COLUMNS, not hand-typed beside it.
+    VLM_OUTPUT_FEATURES, not hand-typed beside it.
 
     ``pixel_values_shape`` is the proof: the schema stores it, and a hand-typed copy that omits it
     refuses a processor emitting it as unstorable. Widening the schema must widen the refusal with
@@ -258,7 +256,7 @@ def test_the_preprocessed_vision_key_refusal_reads_the_declared_schema():
             {"role": "assistant", "content": [{"type": "text", "text": "ok"}]},
         ]
     }
-    assert "pixel_values_shape" in VLM_OUTPUT_COLUMNS and "pixel_attention_mask" not in VLM_OUTPUT_COLUMNS
+    assert "pixel_values_shape" in VLM_OUTPUT_FEATURES and "pixel_attention_mask" not in VLM_OUTPUT_FEATURES
 
     with pytest.raises(NotImplementedError, match="pixel_attention_mask"):
         tokenize_vlm_dataset(Dataset.from_list([row]), _emitting("pixel_attention_mask"), config, split_name="train")
@@ -344,27 +342,6 @@ def test_the_row_map_factories_expose_no_dead_injection_knobs():
     assert "none_example" not in inspect.signature(create_llm_processor).parameters
     for fn in (create_vlm_processor, build_vlm_history):
         assert "process_vlm_conversation_fn" not in inspect.signature(fn).parameters
-
-
-# --- one drop-rate reporter ----------------------------------------------------------------------
-
-
-def test_filter_by_length_reports_through_the_shared_rejection_reporter(caplog):
-    """It is a drop-and-continue filter like every other, so it owes the high-rejection WARNING:
-    a max_length that removes most of the corpus is usually a config bug, and a private INFO line
-    would let that scroll by. It returns the dataset alone; no caller reads drop stats."""
-
-    class _CharTokenizer:
-        def __call__(self, text, **kwargs):
-            return {"input_ids": list(range(len(text))), "attention_mask": [1] * len(text)}
-
-    dataset = Dataset.from_dict({"text": ["ab", *["a very long document" for _ in range(9)]]})
-    with caplog.at_level(logging.WARNING, logger="src.data.pipeline.processing"):
-        filtered = filter_by_length(dataset, max_length=4, tokenizer=_CharTokenizer(), num_proc=1)
-
-    assert isinstance(filtered, Dataset), "filter_by_length must return the dataset, not a stats tuple"
-    assert len(filtered) == 1
-    assert "rejection rate this high" in caplog.text, caplog.text
 
 
 # --- the completion marker is required where the pair is accepted --------------------------------

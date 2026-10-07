@@ -17,7 +17,12 @@ import torch
 from transformers.utils.import_utils import is_causal_conv1d_available, is_flash_linear_attention_available
 
 from src.models.attention_layout import compressed_layer_types
-from src.models.patches.attention import GDN_MODEL_TYPE_PREFIXES, model_type_matches
+from src.models.loading.config_levels import model_type_matches
+
+# Families interleaving GatedDeltaNet (linear-attention) layers with softmax attention. Prefixes
+# rather than exact spellings, so text-tower variants (``qwen3_5_moe_text``) match; shared by the
+# segment-marker gates below and the FA4 backward gate in ``src/models/patches/attention.py``.
+GDN_MODEL_TYPE_PREFIXES = ("qwen3_5", "qwen3_next")
 
 # Families whose forward never passes ``position_ids`` into mask construction, so on a dense backend
 # (eager/SDPA/flex) a packed row runs as one causal sequence and documents attend across each other.

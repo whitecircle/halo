@@ -6,7 +6,6 @@
 Both figures use one layout so the modes can be compared square on.
 """
 
-import matplotlib.pyplot as plt
 from _pipeline_style import *
 
 W, H = 10.0, 7.15
@@ -26,11 +25,7 @@ def draw(mode):
     multi = mode == "multi"
     n_trainer = 6 if multi else 7
 
-    fig, ax = plt.subplots(figsize=(W, H))
-    fig.patch.set_facecolor(BG)
-    ax.set_xlim(0, W)
-    ax.set_ylim(0, H)
-    ax.axis("off")
+    fig, ax = canvas(W, H)
 
     title(
         ax,
@@ -166,8 +161,6 @@ def draw(mode):
 
     name = f"environmental_grpo_{mode}_server"
     save(fig, name)
-    plt.close(fig)
-    print(f"✓ {name}.png")
 
 
 draw("single")

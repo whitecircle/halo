@@ -17,10 +17,7 @@ ROW2_Y, ROW2_H = 1.17, card_height(2)
 TOTAL_X = COL_B
 TOTAL_W = W - M - TOTAL_X
 
-fig, ax = plt.subplots(figsize=(W, H))
-ax.set_xlim(0, W)
-ax.set_ylim(0, H)
-ax.axis("off")
+fig, ax = canvas(W, H)
 
 title(ax, "SMPO — the preference pair", "z = mean logp(chosen) − mean logp(rejected) − margin")
 
@@ -126,5 +123,3 @@ footnote(
 )
 
 save(plt.gcf(), "smpo_pipeline")
-plt.close()
-print("✓ smpo_pipeline.png")

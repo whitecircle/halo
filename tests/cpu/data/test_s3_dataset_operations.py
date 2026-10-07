@@ -592,6 +592,8 @@ def test_build_s3_uri(monkeypatch):
 
     assert build_s3_uri("my_dataset", "datasets") == "s3://team-bucket/datasets/my_dataset"
     assert build_s3_uri("my_dataset", None) == "s3://team-bucket/my_dataset"
+    assert build_s3_uri("/my_dataset/", "") == "s3://team-bucket/my_dataset"
+    assert build_s3_uri("my_dataset", "/datasets/") == S3Client(bucket="team-bucket").s3_uri("my_dataset", "datasets")
     assert build_s3_uri("nested/path/data") == "s3://team-bucket/nested/path/data"
 
 
@@ -651,7 +653,7 @@ def _run_cli(
     with (
         patch("src.data.sources.s3_client.S3Client.__post_init__"),
         patch("src.data.sources.s3_client.S3Client.delete", return_value=True) as mock_delete,
-        patch("src.data.sources.s3_client.S3Client._get_s3_uri", return_value="s3://test-bucket/my_folder"),
+        patch("src.data.sources.s3_client.S3Client.s3_uri", return_value="s3://test-bucket/my_folder"),
         patch("src.data.sources.s3_client.S3Client.exists", return_value=exists),
         patch("src.data.sources.s3_client.S3Client.object_exists", return_value=object_exists),
         patch("builtins.input", return_value=answer),

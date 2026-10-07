@@ -26,6 +26,7 @@ environment_kwargs:
 | `no_thought_penalty` | `0.05` | subtracted on a turn that acts or answers with no Thought |
 | `require_thought` | `true` | gate for that penalty; a turn doing neither is free either way |
 | `tool_budgets` | `{}` | per-tool episode caps, `{tool: cap}`; `0` disables a tool, an over-cap call is refused as a tool error |
+| `search_backend` | auto | `react_search` only: the `web_search` backend, named and validated as on [`qa_search`](benchmarks.md#configuration) |
 
 The knobs every environment shares are in the [overview](README.md#configuration). The native protocol's episode-level knobs (`no_tool_use_penalty`, `turn_overflow_penalty`, `length_cutoff_penalty`) are not parameters here and raise `TypeError`.
 

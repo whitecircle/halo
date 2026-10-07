@@ -9,6 +9,7 @@ prompt assembly (``resolve_system_prompt`` / ``build_base_prompt``) lives in
 import argparse
 import asyncio
 import hashlib
+import json
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any
@@ -19,7 +20,7 @@ import torch
 from transformers import AutoModelForSequenceClassification, AutoTokenizer
 
 from scripts._common import add_dtype_arg, add_openai_endpoint_args, add_trust_remote_code_arg
-from scripts.inference._common import add_generation_args, add_prompt_field_args
+from scripts.inference._common import add_generation_args, add_prompt_field_args, follow_up_messages
 from src.checkpoint.tool_io import reject_sharded_checkpoint
 from src.data.pipeline.conversation import build_base_prompt, reject_image_content, resolve_system_prompt
 from src.data.pipeline.rendered import tokenize_rendered
@@ -214,8 +215,8 @@ async def prepare_generation_prompt(client, row: pd.Series, args) -> tuple[list[
     base_prompt = build_base_prompt(row, args.prompt_field, system_prompt)
     response_format = _resolve_response_format(row)
 
-    follow_up = row.get(args.follow_up_prompt_field)
-    if isinstance(follow_up, list) and len(follow_up) > 0:
+    follow_up = follow_up_messages(row, args.follow_up_prompt_field)
+    if follow_up is not None:
         answer, finish_reason = await generate_chat_message(client, base_prompt, args, response_format)
         if finish_reason in ENGINE_CUT_FINISH_REASONS:
             # The follow-up turn conditions on this answer, so a fragment (token cap or engine abort)
@@ -351,3 +352,10 @@ def load_local_jsonl_resume(output_path: Path, id_field: str) -> tuple[set, pd.D
         return set(), pd.DataFrame()
     existing = pd.read_json(output_path, lines=True)
     return set(existing[id_field]), existing
+
+
+def append_jsonl_record(output_path: Path, record: dict) -> None:
+    """Append one finished row to the run's JSONL output, the file :func:`load_local_jsonl_resume` reads
+    back. The write holds no ``await``, so coroutines sharing the loop never interleave lines."""
+    with open(output_path, "a", encoding="utf-8") as f:
+        f.write(json.dumps(record, ensure_ascii=False) + "\n")

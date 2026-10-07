@@ -58,7 +58,6 @@ from src.environments.envs.tasks.coding.code_contests import (
     DEFAULT_EVAL_PROTOCOL,
     DEFAULT_REASONING_EFFORT,
     EVAL_PROTOCOLS,
-    REASONING_EFFORT_PROFILES,
     CodeContestsEnvironment,
     without_eval_protocol_pins,
 )
@@ -297,7 +296,7 @@ def parse_args() -> argparse.Namespace:
     p.add_argument(
         "--reasoning_effort",
         default=None,
-        choices=[*sorted(REASONING_EFFORT_PROFILES), NO_REASONING_EFFORT],
+        choices=[*sorted(CodeContestsEnvironment.REASONING_EFFORT_PROFILES), NO_REASONING_EFFORT],
         help=f"Solver reasoning effort, passed to the model's chat template (low/medium/high), or "
         f"{NO_REASONING_EFFORT}: no level and no thinking budget, for a non-thinking model. Default: the "
         f"training config's under --training_config (a null there is {NO_REASONING_EFFORT}), else "
@@ -310,7 +309,9 @@ def parse_args() -> argparse.Namespace:
         default=None,
         help="Max tokens per generation. Default: the training config's rollout_max_tokens under "
         "--training_config, else the effort profile's thinking budget ("
-        + ", ".join(f"{level}={p['thinking_tokens']}" for level, p in REASONING_EFFORT_PROFILES.items())
+        + ", ".join(
+            f"{level}={p['thinking_tokens']}" for level, p in CodeContestsEnvironment.REASONING_EFFORT_PROFILES.items()
+        )
         + ", or a reasoning_effort_profiles override in --env_kwargs)"
         + f" plus {SOLUTION_HEADROOM_TOKENS} solution headroom; under --reasoning_effort {NO_REASONING_EFFORT}, "
         f"the training rollout's default {DEFAULT_ROLLOUT_MAX_TOKENS}.",
@@ -388,36 +389,38 @@ def main() -> None:
     env_config = resolve_env_config(args, trained_env, env_kwargs)
     reasoning_effort = env_config["reasoning_effort"]
     env = resolve_environment(env_type, env_config)
-    # A judge or reward-model term is probed before any episode runs, as the trainer does at launch.
-    env.verify_backend()
-    examples = build_examples(args, adapter, selection)
-    client = create_openai_client(base_url=args.base_url, api_key_override=args.api_key)
+    try:
+        # A judge or reward-model term is probed before any episode runs, as the trainer does at launch.
+        env.verify_backend()
+        examples = build_examples(args, adapter, selection)
+        client = create_openai_client(base_url=args.base_url, api_key_override=args.api_key)
 
-    # Without a training config the flag's effort level sets the generation budget unless --max_tokens
-    # overrides it: too small a budget truncates the chain of thought before any solution and scores
-    # the problem 0.
-    rollout = rollout_config_from_args(
-        args,
-        contract,
-        default_temperature=DEFAULT_TEMPERATURE,
-        default_max_tokens=default_max_tokens(env, args.reasoning_effort),
-    )
-    logger.info("reasoning_effort=%s, max_tokens=%d", reasoning_effort, rollout.max_tokens)
-
-    traj_path = run_trajectory_path(args, env, selection)
-
-    results = asyncio.run(
-        collect_results(
-            env,
-            examples,
-            client,
-            rollout=rollout,
-            num_samples=args.num_samples,
-            max_workers=args.max_workers,
-            collect_trajectories=bool(traj_path),
+        # Without a training config the flag's effort level sets the generation budget unless --max_tokens
+        # overrides it: too small a budget truncates the chain of thought before any solution and scores
+        # the problem 0.
+        rollout = rollout_config_from_args(
+            args,
+            contract,
+            default_temperature=DEFAULT_TEMPERATURE,
+            default_max_tokens=default_max_tokens(env, args.reasoning_effort),
         )
-    )
-    env.close()
+        logger.info("reasoning_effort=%s, max_tokens=%d", reasoning_effort, rollout.max_tokens)
+
+        traj_path = run_trajectory_path(args, env, selection)
+
+        results = asyncio.run(
+            collect_results(
+                env,
+                examples,
+                client,
+                rollout=rollout,
+                num_samples=args.num_samples,
+                max_workers=args.max_workers,
+                collect_trajectories=bool(traj_path),
+            )
+        )
+    finally:
+        env.close()
     scope = ", ".join(part for part in (args.adapter, selection.label, f"{env.eval_protocol} protocol") if part)
     report(
         results,

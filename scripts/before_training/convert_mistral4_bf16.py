@@ -24,7 +24,7 @@ import torch
 from scripts._common import add_hub_source_args, add_max_shard_size_arg
 from src.checkpoint.format import cast_to_save_dtype
 from src.checkpoint.fp8_dequant import DequantRules, run_dequant_conversion
-from src.checkpoint.tool_io import SAFETENSORS_FLOAT_DTYPES, header_numel
+from src.checkpoint.tool_io import SAFETENSORS_FLOAT_DTYPES, header_nbytes, header_numel
 from src.log import configure_cli_logging
 
 configure_cli_logging()
@@ -73,7 +73,7 @@ def static_fp8_rules(_source: str) -> DequantRules:
     """This release's rules: per-matrix (or per-expert) static scales, no block grid.
 
     The accepted scale layouts are :func:`_scale_layout_ok`'s; every unquantized float lands as bf16,
-    so the disk preflight sizes it that way rather than at its stored width.
+    so the disk preflight sizes it that way, and every other tensor at its stored width.
     """
 
     def validate_scale(name: str, shape: tuple[int, ...], scale_shape: tuple[int, ...]) -> None:
@@ -81,8 +81,9 @@ def static_fp8_rules(_source: str) -> DequantRules:
             raise ValueError(f"Unsupported FP8 scale layout for {name}: weight={shape}, scale={scale_shape}")
 
     def passthrough_nbytes(header) -> int:
-        itemsize = torch.bfloat16.itemsize if header.get_dtype() in SAFETENSORS_FLOAT_DTYPES else torch.int8.itemsize
-        return header_numel(header) * itemsize
+        if header.get_dtype() in SAFETENSORS_FLOAT_DTYPES:
+            return header_numel(header) * torch.bfloat16.itemsize
+        return header_nbytes(header)
 
     return DequantRules(
         scale_suffix=_SCALE_SUFFIX,

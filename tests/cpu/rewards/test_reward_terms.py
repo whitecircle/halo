@@ -8,6 +8,7 @@ import math
 
 import pytest
 
+from src.args.rlvr_online_grpo_args import RLVROnlineGRPOScriptArguments
 from src.configs.environment_config import EnvironmentConfig
 from src.inference.endpoints import DEFAULT_OPENROUTER_BASE_URL
 from src.rewards.composer import RewardComposer
@@ -289,11 +290,16 @@ def test_reward_model_normalization_is_a_shifted_scaled_logistic():
 def test_a_reward_with_no_terms_is_refused():
     """``rewards: []`` leaves the episode reward as turn shaping alone — a run with no objective at
     all, which trains on shaping and reports nothing wrong. The composer refuses it wherever it is
-    built (including inside a Ray actor), and the config refuses it before the cluster comes up."""
+    built (including inside a Ray actor), and the term parser refuses it for both arms' configs
+    before the cluster comes up."""
     with pytest.raises(ValueError, match="at least one term"):
         RewardComposer([])
     with pytest.raises(ValueError, match="at least one reward term"):
+        parse_reward_terms([], SOURCES)
+    with pytest.raises(ValueError, match="at least one reward term"):
         EnvironmentConfig(rewards=[])
+    with pytest.raises(ValueError, match="at least one reward term"):
+        RLVROnlineGRPOScriptArguments(rewards=[])
     # The upper bound and the lower bound are the same guard's two sides.
     with pytest.raises(ValueError, match="at most one environment term"):
         RewardComposer([EnvironmentTerm(), EnvironmentTerm()])

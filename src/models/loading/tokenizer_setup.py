@@ -190,7 +190,7 @@ def setup_model_and_tokenizer(
     tokenizer: PreTrainedTokenizer,
     max_seq_len: int | None = None,
     *,
-    embeddings_sharded: Callable[[PreTrainedModel], bool] = lambda _model: False,
+    embeddings_sharded: Callable[[PreTrainedModel], bool],
 ) -> PreTrainedTokenizer:
     """Apply args-driven tokenizer/model token setup; returns the tokenizer to use.
 
@@ -201,7 +201,7 @@ def setup_model_and_tokenizer(
     ``embeddings_sharded`` says whether a vocabulary grow is impossible because the model's input
     embedding is a parallelism shard — a parameter rather than an import, since what sharding is
     lives under ``src.distributed`` and this layer stays sharding-agnostic. Asked only about a run
-    that actually grows the vocabulary; the default suits a caller that shards nothing.
+    that actually grows the vocabulary.
     """
     if max_seq_len is not None:
         # Recorded once, before the first pin overwrites it (a script holding a frozen reference —

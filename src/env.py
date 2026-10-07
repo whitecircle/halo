@@ -183,14 +183,9 @@ def torch_trace_dir() -> str:
     return data_path("profiling", "torch")
 
 
-def memory_snapshot_dir() -> str:
-    """Default scratch directory for CUDA memory snapshots."""
-    return data_path("profiling", "memory")
-
-
 def is_accelerate_fsdp_launch() -> bool:
     """Whether this process was launched by ``accelerate launch`` with FSDP enabled."""
-    return os.environ.get("ACCELERATE_USE_FSDP", "").strip().lower() in _TRUE_VALUES
+    return env_flag("ACCELERATE_USE_FSDP")
 
 
 def is_accelerate_launch() -> bool:
@@ -199,4 +194,4 @@ def is_accelerate_launch() -> bool:
     ``ACCELERATE_MIXED_PRECISION`` is set by the launcher for every config (MULTI_GPU/DDP and
     FSDP alike); torchrun launches never set it.
     """
-    return os.environ.get("ACCELERATE_MIXED_PRECISION") is not None or is_accelerate_fsdp_launch()
+    return env_str("ACCELERATE_MIXED_PRECISION") is not None or is_accelerate_fsdp_launch()

@@ -81,12 +81,10 @@ class OfflineGRPODataCollatorWithPadding:
             for input_ids, substituted in zip(completion_input_ids, substituted_completion, strict=True)
         ]
 
-        pad_value = self.pad_token_id
-
         output = {
-            "prompt_input_ids": pad(prompt_input_ids, padding_value=pad_value, padding_side="left"),
+            "prompt_input_ids": pad(prompt_input_ids, padding_value=self.pad_token_id, padding_side="left"),
             "prompt_attention_mask": pad(prompt_attention_mask, padding_value=0, padding_side="left"),
-            "completion_input_ids": pad(completion_input_ids, padding_value=pad_value),
+            "completion_input_ids": pad(completion_input_ids, padding_value=self.pad_token_id),
             "completion_attention_mask": pad(completion_attention_mask, padding_value=0),
             **_group_tensors(features),
         }

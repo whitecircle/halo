@@ -118,6 +118,11 @@ class DistributedDistillationTrainer(StoredMetricsMixin, DistributedTrainerMixin
         # The method knobs live on ``args`` (DistillationConfig) and are read there; only the
         # resolved loss callable is worth holding.
         self.distillation_loss_fn = get_divergence(args.distill_loss)
+        if args.apply_hard_labels and consumes_hard_labels(self.distillation_loss_fn):
+            raise ValueError(
+                f"apply_hard_labels cannot combine with distill_loss={args.distill_loss!r}, which applies its "
+                f"own gold-token weight in place of the hard-label gate. Set apply_hard_labels: false."
+            )
 
         self.teacher_model = teacher_model
 
@@ -180,9 +185,7 @@ class DistributedDistillationTrainer(StoredMetricsMixin, DistributedTrainerMixin
         )
         metrics = {}
 
-        # A loss that takes hard_labels applies its own gold-token weight (slim), so the shared one
-        # would be counted twice — the same signature the dispatcher reads.
-        if self.args.apply_hard_labels and not consumes_hard_labels(self.distillation_loss_fn):
+        if self.args.apply_hard_labels:
             gate = hard_labels_coefficient(student_logits, teacher_logits, hard_labels)
             distillation_loss = (gate.unsqueeze(-1) if distillation_loss.dim() == gate.dim() + 1 else gate) * (
                 distillation_loss

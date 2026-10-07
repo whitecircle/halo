@@ -12,12 +12,13 @@ from dataclasses import dataclass, fields
 from enum import StrEnum
 from typing import Any, ClassVar, Self
 
+from src.args.validation import require_finite, require_positive, require_positive_int
 from src.inference.endpoints import DEFAULT_OPENROUTER_BASE_URL
 
 # Metric key of a term's contribution, ``reward/<name>``; the keys of one reward sum to the reward.
 REWARD_COMPONENT_PREFIX = "reward/"
-# The leaves of a judge term's own metric keys, which a requirement or check may not be named after.
-JUDGE_METRIC_LEAVES = frozenset({"scored", "completion_tokens", "cost_usd", "veto", "unsupported_flags"})
+# The leaf of every scored term's per-sample 1/0 of whether it reached a verdict.
+SCORED_METRIC_LEAF = "scored"
 # The environment's own grade always logs under this name.
 OBJECTIVE_TERM_NAME = "objective"
 
@@ -28,6 +29,16 @@ class View(StrEnum):
     FINAL = "final"
     FULL = "full"
     DIGEST = "digest"
+
+
+class JudgeMetric(StrEnum):
+    """The leaves of a judge's own per-sample metrics beside its requirements' and checks'; with
+    :data:`SCORED_METRIC_LEAF` they are the names a requirement or check may not take."""
+
+    COMPLETION_TOKENS = "completion_tokens"
+    COST_USD = "cost_usd"
+    VETO = "veto"
+    UNSUPPORTED_FLAGS = "unsupported_flags"
 
 
 class OnError(StrEnum):
@@ -61,27 +72,13 @@ def component_key(name: str) -> str:
     return REWARD_COMPONENT_PREFIX + name
 
 
+def metric_key(term: "RewardTerm", leaf: str) -> str:
+    """A per-sample diagnostic key of ``term``, ``<source>/<name>/<leaf>``."""
+    return f"{term.source}/{term.name}/{leaf}"
+
+
 # The environment's own grade, priced by the reward's environment term, in ``reward_components``.
 OBJECTIVE_REWARD_KEY = component_key(OBJECTIVE_TERM_NAME)
-
-
-def _require_finite(owner: str, **values: Any) -> None:
-    for key, value in values.items():
-        if isinstance(value, bool) or not isinstance(value, int | float) or not math.isfinite(value):
-            raise ValueError(f"{owner}: {key} must be a finite number, got {value!r}")
-
-
-def _require_positive(owner: str, **values: Any) -> None:
-    _require_finite(owner, **values)
-    for key, value in values.items():
-        if value <= 0:
-            raise ValueError(f"{owner}: {key} must be > 0, got {value!r}")
-
-
-def _require_positive_int(owner: str, **values: Any) -> None:
-    for key, value in values.items():
-        if isinstance(value, bool) or not isinstance(value, int) or value < 1:
-            raise ValueError(f"{owner}: {key} must be an integer >= 1, got {value!r}")
 
 
 def _require_text(owner: str, **values: Any) -> None:
@@ -171,8 +168,8 @@ class RewardTerm:
 
     def __post_init__(self) -> None:
         _require_name("reward term", self.name)
-        _require_finite(self.owner, weight=self.weight)
-        _require_positive(self.owner, exponent=self.exponent)
+        require_finite(self.owner, weight=self.weight)
+        require_positive(self.owner, exponent=self.exponent)
 
     @property
     def owner(self) -> str:
@@ -235,8 +232,8 @@ class ScoredTerm(RewardTerm):
             raise ValueError(
                 f"{self.owner}: view must be one of {tuple(v.value for v in self.views)}, got {self.view!r}"
             )
-        _require_positive(self.owner, request_timeout=self.request_timeout)
-        _require_positive_int(self.owner, max_concurrency=self.max_concurrency)
+        require_positive(self.owner, request_timeout=self.request_timeout)
+        require_positive_int(self.owner, max_concurrency=self.max_concurrency)
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -250,7 +247,7 @@ class Requirement:
     def __post_init__(self) -> None:
         _require_name("requirement", self.name)
         _require_text(f"requirement {self.name!r}", description=self.description)
-        _require_positive(f"requirement {self.name!r}", weight=self.weight)
+        require_positive(f"requirement {self.name!r}", weight=self.weight)
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -318,7 +315,7 @@ class JudgeTerm(ScoredTerm):
             raise ValueError(f"{owner}: list either 'requirements' (a scoring judge) or 'checks' (a veto judge)")
         names = [item.name for item in (*self.requirements, *self.checks)]
         require_unique_names(f"{owner}: requirement or check", names)
-        reserved = sorted(set(names) & JUDGE_METRIC_LEAVES)
+        reserved = sorted(set(names) & {SCORED_METRIC_LEAF, *JudgeMetric})
         if reserved:
             raise ValueError(
                 f"{owner}: {reserved} are the term's own metric keys; name the requirement or check otherwise"
@@ -329,11 +326,11 @@ class JudgeTerm(ScoredTerm):
                 f"must be <= 0 (0 logs them unpriced), got {self.weight}"
             )
         _require_text(owner, model=self.model, base_url=self.base_url, api_key_env=self.api_key_env)
-        _require_positive_int(owner, scale=self.scale, max_tokens=self.max_tokens, max_view_chars=self.max_view_chars)
+        require_positive_int(owner, scale=self.scale, max_tokens=self.max_tokens, max_view_chars=self.max_view_chars)
         if self.reasoning_effort is not None:
             _coerce_enum(self, "reasoning_effort", ReasoningEffort)
         if self.temperature is not None:
-            _require_finite(owner, temperature=self.temperature)
+            require_finite(owner, temperature=self.temperature)
             if self.temperature < 0:
                 raise ValueError(f"{owner}: temperature must be >= 0, got {self.temperature}")
         _require_bool(
@@ -418,9 +415,9 @@ class RewardModelTerm(ScoredTerm):
         _coerce_enum(self, "backend", RewardModelBackend)
         if isinstance(self.label_index, bool) or not isinstance(self.label_index, int) or self.label_index < 0:
             raise ValueError(f"{owner}: label_index must be an integer >= 0, got {self.label_index!r}")
-        _require_finite(owner, logit_shift=self.logit_shift)
-        _require_positive(owner, logit_scale=self.logit_scale)
-        _require_positive_int(owner, batch_size=self.batch_size)
+        require_finite(owner, logit_shift=self.logit_shift)
+        require_positive(owner, logit_scale=self.logit_scale)
+        require_positive_int(owner, batch_size=self.batch_size)
 
     def normalize(self, logit: float) -> float:
         """The score of a head output: a numerically safe logistic of the shifted, scaled logit."""
@@ -444,9 +441,12 @@ def parse_reward_terms(
 ) -> tuple[RewardTerm, ...]:
     """The typed terms of a ``rewards:`` list. Every entry names its ``source`` (a key of ``sources``);
     its other keys are that term type's fields. Term names must be unique. Already-typed terms pass
-    through when their type is admitted."""
+    through when their type is admitted. An empty list is refused: the reward would carry no
+    objective, and the run would train on shaping alone with nothing reported wrong."""
     if isinstance(raw, Mapping | str) or not isinstance(raw, Sequence):
         raise ValueError(f"rewards must be a list of reward terms, got {type(raw).__name__}")
+    if not raw:
+        raise ValueError(f"rewards must list at least one reward term; available sources: {sorted(sources)}")
     terms: list[RewardTerm] = []
     for index, item in enumerate(raw):
         where = f"rewards[{index}]"
@@ -466,10 +466,8 @@ def parse_reward_terms(
             raise ValueError(f"{where}: unknown reward source {source!r}; available: {sorted(sources)}")
         try:
             terms.append(term_type.from_config(spec))
-        except TypeError as e:
+        except (TypeError, ValueError) as e:
             # A missing required field surfaces as the dataclass constructor's TypeError.
-            raise ValueError(f"{where} ({source}): {e}") from e
-        except ValueError as e:
             raise ValueError(f"{where} ({source}): {e}") from e
     require_unique_names("reward term", [term.name for term in terms])
     return tuple(terms)

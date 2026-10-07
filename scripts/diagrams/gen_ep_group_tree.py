@@ -8,7 +8,6 @@ slice are DP replicas averaged after the backward.
 node-local TP groups under one global EP group spanning the job.
 """
 
-import matplotlib.pyplot as plt
 from _pipeline_style import *
 
 # The shapes the two figures depict, replayed through ParallelismConfig by
@@ -38,11 +37,7 @@ def gpu_center(group_idx, gpu_idx):
     return GROUP_XS[group_idx] + GPU_DXS[gpu_idx] + GPU_W / 2
 
 
-fig, ax = plt.subplots(figsize=(W, H))
-fig.patch.set_facecolor(BG)
-ax.set_xlim(0, W)
-ax.set_ylim(0, H)
-ax.axis("off")
+fig, ax = canvas(W, H)
 
 T = TOPOLOGIES["ep_group_hierarchy"]
 title(ax, "EP groups", f"world {T['gpus'] * T['nodes']} · ep {T['ep']} · 32 experts → 16 per rank · dp {T['dp']}")
@@ -111,8 +106,6 @@ footnote(
 )
 
 save(fig, "ep_group_hierarchy")
-plt.close(fig)
-print("✓ ep_group_hierarchy.png")
 
 
 # ── Multi-node EP + TP ────────────────────────────────────────────────────────
@@ -127,11 +120,7 @@ EP_Y, EP_H = 2.55, card_height(3)
 DP_Y, DP_H = 1.10, card_height(2)
 BAND_W = 12.4
 
-fig, ax = plt.subplots(figsize=(MW, MH))
-fig.patch.set_facecolor(BG)
-ax.set_xlim(0, MW)
-ax.set_ylim(0, MH)
-ax.axis("off")
+fig, ax = canvas(MW, MH)
 
 M = TOPOLOGIES["ep_multi_node_layout"]
 title(
@@ -200,5 +189,3 @@ footnote(
 )
 
 save(fig, "ep_multi_node_layout")
-plt.close(fig)
-print("✓ ep_multi_node_layout.png")

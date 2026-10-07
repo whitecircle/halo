@@ -10,11 +10,11 @@ from transformers import TrainerControl, TrainerState, TrainingArguments
 from transformers.utils import logging
 
 from src.callbacks.model_flops import (
-    ASSUMED_MAX_SEQ_LEN,
     compute_expert_params,
     estimate_linear_flops_per_token,
     rank_attention_flops,
     resolve_attention_layout,
+    training_flops_per_token,
 )
 from src.callbacks.parameter_stats import count_model_parameters
 from src.distributed.parallelism_config import ParallelismConfig
@@ -28,6 +28,9 @@ logger = logging.get_logger(__name__)
 
 _ESTIMATE_FILL_FRACTION = 0.8
 
+# Fallback when nothing declares a bound. Not a real upper bound, so callers must not clamp to it.
+_ASSUMED_MAX_SEQ_LEN = 2048
+
 # Smallest params_ratio that counts as a sharding-derived speed-up when scoring distributed
 # efficiency. Plain FSDP/DP sits at ~1.001, which is rounding rather than a real speed-up.
 _DISTRIBUTED_EFFICIENCY_PARAMS_RATIO_MIN = 1.05
@@ -39,6 +42,7 @@ _MAX_ROWS_PER_EXAMPLE = 2.0
 _TOKEN_COUNT_SANITY_FACTOR = 1.25
 
 _TERA = 10**12
+_GIB = 1024**3
 
 # Decimals every reported metric is rounded to before it reaches the logs dict.
 _DISPLAY_DECIMALS = 2
@@ -141,9 +145,6 @@ class MFU:
 
     step_distributed_efficiency: float = 1.0
     avg_distributed_efficiency: float = 1.0
-
-    gpu_model: str = "Unknown"
-    precision: str = "bf16"
 
     local_params: float = 0.0
     full_params: float = 0.0
@@ -302,6 +303,10 @@ class EfficiencyCallback(transformers.TrainerCallback):
     Args:
         parallelism_config: the run's validated axis sizes; every divisor here is read off it.
         num_full_model_params: total full-model params; enables ``distributed_efficiency = params_ratio x local_mfu``.
+        max_seq_len: explicit per-sequence token bound, for runs whose real bound is not the sum of the
+            declared length fields (a multi-turn RL trajectory). Unset, :func:`resolve_max_seq_len`
+            reads it off the training arguments and ``script_args``.
+        script_args: the entry script's own arguments, the second place a length bound is declared.
     """
 
     def __init__(
@@ -311,6 +316,7 @@ class EfficiencyCallback(transformers.TrainerCallback):
         num_full_model_params: float | None = None,
         report_mfu_diagnostics: bool = False,
         max_seq_len: int | None = None,
+        script_args=None,
     ):
         self.state = State(n_warmup_steps)
         self.time = Time()
@@ -325,8 +331,8 @@ class EfficiencyCallback(transformers.TrainerCallback):
         self._attention_source = None
         self._parallelism_config = parallelism_config
         self._full_model_params = num_full_model_params
-        # Caller-resolved: the GRPO configs declare neither max_length nor max_prompt_length.
         self._max_seq_len_override = max_seq_len
+        self._script_args = script_args
         # MFU / S-MFU / achieved TFLOPS are setup-dependent, so they stay out of the headline logs dict.
         self._report_mfu_diagnostics = report_mfu_diagnostics
 
@@ -339,12 +345,12 @@ class EfficiencyCallback(transformers.TrainerCallback):
     ):
         # Tri-state in transformers 5 ("no" | "all" | "non_padding"): "no" is truthy, so a plain
         # falsiness check never fires.
-        if args.include_num_input_tokens_seen in ("no", False):
+        if args.include_num_input_tokens_seen == "no":
             logger.warning("--include_num_input_tokens_seen not enabled. Using fallback token estimation.")
         if args.logging_steps != 1:
             logger.info(f"logging_steps={args.logging_steps}. Metrics logged every {args.logging_steps} steps.")
 
-        self._try_get_model_reference(kwargs)
+        self.model_ref = kwargs.get("model")
         self._initialize_metrics(args)
 
     def on_train_begin(
@@ -354,10 +360,7 @@ class EfficiencyCallback(transformers.TrainerCallback):
         control: TrainerControl,
         **kwargs,
     ):
-        if self.model_ref is None:
-            self._try_get_model_reference(kwargs)
-            if self.model_ref is not None:
-                self._initialize_metrics(args)
+        self._initialize_once_model_arrives(args, kwargs)
 
         self.state.global_start_step = state.global_step
 
@@ -389,10 +392,7 @@ class EfficiencyCallback(transformers.TrainerCallback):
         control: TrainerControl,
         **kwargs,
     ):
-        if self.model_ref is None:
-            self._try_get_model_reference(kwargs)
-            if self.model_ref is not None:
-                self._initialize_metrics(args)
+        self._initialize_once_model_arrives(args, kwargs)
 
         self.state.step_start_time = _step_clock()
 
@@ -483,9 +483,7 @@ class EfficiencyCallback(transformers.TrainerCallback):
             step_tokens_cluster = self._fallback_step_tokens(world_size, None)
 
         # Under CP the Trainer counts the full sequence (CP splits inside forward()).
-        step_tokens_seen = step_tokens_cluster // world_size if world_size > 1 else step_tokens_cluster
-        if parallelism.cp_size > 1:
-            step_tokens_seen = step_tokens_seen // parallelism.cp_size
+        step_tokens_seen = step_tokens_cluster // world_size // parallelism.cp_size
         self.state.elapsed_tokens_seen += step_tokens_seen
 
         self.tps.step_tokens_per_second = round(
@@ -531,10 +529,7 @@ class EfficiencyCallback(transformers.TrainerCallback):
         parallelism = self._parallelism_config
         # The rank's share of the layout, its 1/tp of every layer's heads, and under Ulysses CP its
         # 1/cp of the sequence's heads — the divisors the per-token config term carries too.
-        scaled = flops * self.state.attention_share / max(parallelism.tp_size, 1)
-        if parallelism.cp_size > 1:
-            scaled /= parallelism.cp_size
-        return scaled
+        return flops * self.state.attention_share / parallelism.tp_size / parallelism.cp_size
 
     def _step_flops(self, per_token: float, step_tokens_seen: int, measured_attention_flops: float | None) -> float:
         """``step_tokens × per_token``, with the config attention share replaced by the measurement
@@ -607,14 +602,14 @@ class EfficiencyCallback(transformers.TrainerCallback):
         """Update GPU memory tracking metrics."""
         if torch.cuda.is_available():
             self.memory.allocated_gb = round(
-                torch.cuda.memory_allocated() / (1024**3),
+                torch.cuda.memory_allocated() / _GIB,
                 _DISPLAY_DECIMALS,
             )
             self.memory.reserved_gb = round(
-                torch.cuda.memory_reserved() / (1024**3),
+                torch.cuda.memory_reserved() / _GIB,
                 _DISPLAY_DECIMALS,
             )
-            step_peak = torch.cuda.max_memory_allocated() / (1024**3)
+            step_peak = torch.cuda.max_memory_allocated() / _GIB
             self.memory.peak_allocated_gb = round(step_peak, _DISPLAY_DECIMALS)
             self.memory.training_peak_allocated_gb = round(
                 max(self.memory.training_peak_allocated_gb, step_peak),
@@ -623,27 +618,24 @@ class EfficiencyCallback(transformers.TrainerCallback):
 
     def _max_seq_len(self) -> tuple[int, bool]:
         """Return ``(max_seq, is_real_bound)``; ``is_real_bound`` is False when nothing declares a bound."""
-        resolved = self._max_seq_len_override or resolve_max_seq_len(self.training_args)
-        return (int(resolved), True) if resolved else (ASSUMED_MAX_SEQ_LEN, False)
+        resolved = self._max_seq_len_override or resolve_max_seq_len(self.training_args, self._script_args)
+        return (int(resolved), True) if resolved else (_ASSUMED_MAX_SEQ_LEN, False)
 
     def _nominal_step_tokens(self) -> int:
         """PER-GPU tokens a step would carry with every sequence padded to the length bound."""
-        batch_size = getattr(self.training_args, "per_device_train_batch_size", 1)
-        grad_accum = getattr(self.training_args, "gradient_accumulation_steps", 1)
-        return int(batch_size * grad_accum * self._max_seq_len()[0])
+        args = self.training_args
+        return int(args.per_device_train_batch_size * args.gradient_accumulation_steps * self._max_seq_len()[0])
 
     def _estimate_step_tokens(self) -> int:
         """Fallback: estimate PER-GPU tokens when num_input_tokens_seen is unavailable."""
         return int(self._nominal_step_tokens() * _ESTIMATE_FILL_FRACTION)
 
-    def _try_get_model_reference(self, kwargs):
-        """Capture the model from the HF callback kwargs (``model`` — the only handle HF passes)."""
-        if self.model_ref is not None:
-            return
-
-        model = kwargs.get("model")
-        if model is not None:
-            self.model_ref = model
+    def _initialize_once_model_arrives(self, args, kwargs) -> None:
+        """Re-run :meth:`_initialize_metrics` the first time HF hands the model over (``model`` in the
+        callback kwargs is the only handle it passes), since ``on_init_end`` may have run without it."""
+        if self.model_ref is None and kwargs.get("model") is not None:
+            self.model_ref = kwargs["model"]
+            self._initialize_metrics(args)
 
     def _initialize_metrics(self, args):
         """Initialize GPU detection, peak FLOPS, and local param counting."""
@@ -656,9 +648,6 @@ class EfficiencyCallback(transformers.TrainerCallback):
                 self.state.gpu_model,
                 self.state.precision,
             )
-
-        self.mfu.gpu_model = self.state.gpu_model or "Unknown"
-        self.mfu.precision = self.state.precision
 
         if self.model_ref:
             try:
@@ -729,10 +718,11 @@ class EfficiencyCallback(transformers.TrainerCallback):
             self.state.attention_layout, self.state.attention_share = resolved
             attn_flops = rank_attention_flops(*resolved, seq_len, parallelism.tp_size)
         self.state.attention_flops_per_token = attn_flops
-        self.state.model_flops_per_token = estimate_linear_flops_per_token(model) + attn_flops
-
         local_params, trainable_params = count_model_parameters(model)
-        frozen_params = max(local_params - trainable_params, 0.0)
+        frozen_params = local_params - trainable_params
+        self.state.model_flops_per_token = (
+            estimate_linear_flops_per_token(model, local_params, trainable_params) + attn_flops
+        )
 
         self.mfu.local_params = float(local_params)
 
@@ -770,7 +760,9 @@ class EfficiencyCallback(transformers.TrainerCallback):
         trainable_active_flops = trainable_params - trainable_expert_params * (1.0 - expert_duty)
         frozen_active_flops = frozen_params - frozen_expert_params * (1.0 - expert_duty)
 
-        self.state.active_model_flops_per_token = 6.0 * trainable_active_flops + 4.0 * frozen_active_flops + attn_flops
+        self.state.active_model_flops_per_token = (
+            training_flops_per_token(trainable_active_flops, frozen_active_flops) + attn_flops
+        )
 
         self.smfu.num_experts = num_experts
         self.smfu.top_k = top_k

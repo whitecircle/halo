@@ -212,5 +212,14 @@ def test_a_resume_over_another_record_layout_keeps_the_fresh_batch_columns(monke
     assert fresh["chosen"] is None, "a column only the resumed rows carry is filled, not dropped"
 
 
+def test_an_empty_follow_up_is_no_follow_up():
+    """Both generation paths read the follow-up column through one predicate: an empty list (or a null)
+    sends no second request, which would follow the answer with a second assistant turn."""
+    turn = [{"role": "user", "content": "And why?"}]
+    assert _common.follow_up_messages({"follow_up_prompt": turn}, "follow_up_prompt") == turn
+    for row in ({"follow_up_prompt": []}, {"follow_up_prompt": None}, {}):
+        assert _common.follow_up_messages(row, "follow_up_prompt") is None
+
+
 if __name__ == "__main__":
     raise SystemExit(pytest.main([__file__, "-v"]))

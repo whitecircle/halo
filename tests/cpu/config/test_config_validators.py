@@ -1,7 +1,7 @@
 #!/usr/bin/env python
 """Validation tests for ClassificationConfig, EmbeddingConfig,
 DistillScriptArguments and RLVROnlineGRPOScriptArguments ``__post_init__`` (and the CLI-override
-re-run of the same guards).
+re-run of the same guards), plus the NaN refusal on every float those configs and SMPO range-check.
 
 Each boundary the validator rejects is exercised (raise expected) alongside a valid
 neighbor (no raise), mirroring the SMPO validator-test style in test_config_dataclasses.py.
@@ -20,6 +20,7 @@ from src.args.rlvr_online_grpo_args import RLVROnlineGRPOScriptArguments
 from src.configs.classification_config import ClassificationConfig
 from src.configs.distillation_config import DistillationConfig
 from src.configs.embedding_config import EmbeddingConfig
+from src.configs.smpo_config import SmoothMarginPOConfig
 
 OUTPUT_DIR = "/tmp/test_config_validators"
 # Clears the bf16/GPU tail check for configs expected to construct successfully.
@@ -214,6 +215,23 @@ def test_distill_teacher_model_still_required_on_the_script_args():
 def test_rlvr_rlrr_out_of_range_raises(kwargs, match):
     with pytest.raises(ValueError, match=match):
         RLVROnlineGRPOScriptArguments(**kwargs)
+
+
+@pytest.mark.parametrize(
+    ("config_cls", "field_name"),
+    [
+        (ClassificationConfig, "focal_gamma"),
+        (DistillationConfig, "distill_temperature"),
+        (EmbeddingConfig, "loss_scale"),
+        (SmoothMarginPOConfig, "target_margin"),
+        (SmoothMarginPOConfig, "initial_margin"),
+        (SmoothMarginPOConfig, "min_log_prob"),
+    ],
+)
+def test_a_nan_float_is_refused(config_cls, field_name):
+    """NaN passes every ordered comparison, so a bare range check admits it and the loss goes NaN."""
+    with pytest.raises(ValueError, match=f"{field_name} must be a finite number"):
+        config_cls(output_dir=OUTPUT_DIR, **{field_name: float("nan")})
 
 
 if __name__ == "__main__":

@@ -36,7 +36,14 @@ from torch.distributed.tensor import DTensor
 from transformers import AutoModelForCausalLM
 from trl import ModelConfig, get_quantization_config
 
-from src.checkpoint.format import SAFETENSORS_INDEX_FILE, cast_to_save_dtype, read_checkpoint_index
+from src.checkpoint.format import (
+    ADAPTER_CONFIG_FILE,
+    ADAPTER_SAFETENSORS_FILE,
+    SAFETENSORS_INDEX_FILE,
+    cast_to_save_dtype,
+    has_adapter_weight_file,
+    read_checkpoint_index,
+)
 from src.distributed.checkpoint.peft import PeftAdapterSaver
 from src.distributed.expert_parallel.expert_weights import gather_ep_lora_adapters, has_ep_lora
 from src.distributed.loading.model_loading import load_distributed_model
@@ -364,9 +371,9 @@ def assert_adapter_checkpoint(trainer, output_dir: str, rank: int, *, expert_lor
     if rank != 0:
         return True, "non-zero rank (save participated)"
 
-    path = os.path.join(adapter_dir, "adapter_model.safetensors")
+    path = os.path.join(adapter_dir, ADAPTER_SAFETENSORS_FILE)
     if not os.path.exists(path):
-        return False, f"adapter_model.safetensors not written to {adapter_dir}"
+        return False, f"{ADAPTER_SAFETENSORS_FILE} not written to {adapter_dir}"
     saved = load_file(path)
     lora_keys = [k for k in saved if "lora_" in k]
     if not lora_keys:
@@ -417,11 +424,11 @@ def adapter_save_checks(save_dir: str, rank: int) -> dict[str, bool]:
     contents = os.listdir(save_dir)
     log(f"  Save contents: {sorted(contents)}")
 
-    has_adapter_config = "adapter_config.json" in contents
+    has_adapter_config = ADAPTER_CONFIG_FILE in contents
     checks["has_adapter_config"] = has_adapter_config
-    log(f"  Has adapter_config.json: {'PASS' if has_adapter_config else 'FAIL'}")
+    log(f"  Has {ADAPTER_CONFIG_FILE}: {'PASS' if has_adapter_config else 'FAIL'}")
 
-    has_adapter_weights = any("adapter" in f and (f.endswith(".safetensors") or f.endswith(".bin")) for f in contents)
+    has_adapter_weights = has_adapter_weight_file(save_dir)
     checks["has_adapter_weights"] = has_adapter_weights
     log(f"  Has adapter weights: {'PASS' if has_adapter_weights else 'FAIL'}")
 

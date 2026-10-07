@@ -231,7 +231,7 @@ class CheckpointingMixin:
         guard.reject()
         self._save_merged_checkpoint_resume_adapter(output_dir)
         # save_only_model drops scheduler.pt on every mode, re-warming the LR from step 0 on resume.
-        self._persist_lr_scheduler_for_resume(trial)
+        self._persist_lr_scheduler_for_resume(output_dir)
         self._persist_trainer_sidecars(output_dir)
 
         # Pure TP skips FSDP2 but keeps per-rank TP optimizer shards; one optimizer.pt clobbers them.
@@ -318,23 +318,22 @@ class CheckpointingMixin:
         best-model load, which continues no training. An override reads through :func:`consensus_read`.
         """
 
-    def _persist_lr_scheduler_for_resume(self, trial) -> None:
-        """Write ``scheduler.pt`` even under ``save_only_model`` (which makes the base Trainer drop it).
+    def _persist_lr_scheduler_for_resume(self, checkpoint_dir: str) -> None:
+        """Write ``scheduler.pt`` into ``checkpoint_dir`` even under ``save_only_model`` (which makes the
+        base Trainer drop it).
 
         The structure-independent LR scheduler must resume so the schedule continues from the resumed
         step. Written on the FS-aware save rank(s); no-op without a scheduler or when save_only_model
         is False (already written).
         """
-        if self.lr_scheduler is None or not getattr(self.args, "save_only_model", False):
+        if self.lr_scheduler is None or not self.args.save_only_model:
             return
-        checkpoint_folder = f"{PREFIX_CHECKPOINT_DIR}-{self.state.global_step}"
-        output_dir = os.path.join(self._get_output_dir(trial=trial), checkpoint_folder)
         with barrier_on_exit():
             if fs_aware_save_rank():
-                os.makedirs(output_dir, exist_ok=True)
-                torch.save(self.lr_scheduler.state_dict(), os.path.join(output_dir, SCHEDULER_STATE_FILE))
+                os.makedirs(checkpoint_dir, exist_ok=True)
+                torch.save(self.lr_scheduler.state_dict(), os.path.join(checkpoint_dir, SCHEDULER_STATE_FILE))
                 if is_global_main_process():
-                    logger.info(f"✓ Persisted LR scheduler to {output_dir} (EP/CP resume under save_only_model)")
+                    logger.info(f"✓ Persisted LR scheduler to {checkpoint_dir} (EP/CP resume under save_only_model)")
 
     def _persist_router_balancing_biases(self, output_dir: str) -> None:
         """Save DeepSeek-V3 router balancing biases so a resume continues balancing rather than

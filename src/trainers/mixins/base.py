@@ -1130,18 +1130,18 @@ class DistributedTrainerMixin(
 
     def _apply_torch_compile(self):
         """Apply torch.compile after FSDP wrapping and distributed setup."""
-        training_args = getattr(self, "args", None)
-        if training_args is None or not getattr(training_args, "torch_compile", False):
+        training_args = self.args
+        if not training_args.torch_compile:
             return
 
-        compile_mode = getattr(training_args, "torch_compile_mode", None) or "reduce-overhead"
-        compile_backend = getattr(training_args, "torch_compile_backend", None) or "inductor"
+        compile_mode = training_args.torch_compile_mode or "reduce-overhead"
+        compile_backend = training_args.torch_compile_backend or "inductor"
 
         # Packed batches at bs>1 flatten to a variable-width row, so reduce-overhead's CUDA graphs stop applying.
         if (
             compile_mode == "reduce-overhead"
             and getattr(training_args, "packing", False)
-            and getattr(training_args, "per_device_train_batch_size", 1) > 1
+            and training_args.per_device_train_batch_size > 1
             and is_global_main_process()
         ):
             logger.warning(
@@ -1402,7 +1402,7 @@ class DistributedTrainerMixin(
         """
         if self.parallelism_config.fp32_output_conversion:
             return
-        if getattr(self.args, "fp16", False):
+        if self.args.fp16:
             logger.warning(
                 "fp32_output_conversion=false is IGNORED under fp16: accelerate's native_amp also "
                 "owns GradScaler unscaling, so disabling it would clip and step on scaled gradients. "

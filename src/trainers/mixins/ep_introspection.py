@@ -215,7 +215,7 @@ class EpIntrospectionMixin:
                 f"gradient_checkpointing for this model."
             )
 
-        gc_kwargs = getattr(self.args, "gradient_checkpointing_kwargs", None) or {}
+        gc_kwargs = self.args.gradient_checkpointing_kwargs or {}
         # The config the constructor forced use_reentrant from, read off the same top-level model.
         use_reentrant = forces_reentrant_checkpointing(config, getattr(self._top_level_model(), "config", None))
         if gc_kwargs.get("use_reentrant") not in (None, use_reentrant) and is_global_main_process():

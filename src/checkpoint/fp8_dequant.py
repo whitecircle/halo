@@ -17,6 +17,7 @@ import torch
 from safetensors import safe_open
 from transformers.utils import CONFIG_NAME
 
+from src.checkpoint.config_export import write_config_json
 from src.checkpoint.format import DEFAULT_MAX_SHARD_SIZE, HF_STREAM_PART_PREFIX, copy_checkpoint_aux_files
 from src.checkpoint.shard_writer import StageShardWriter
 from src.checkpoint.tool_io import (
@@ -149,6 +150,4 @@ def _copy_dequantized_assets(source: str, output_dir: str) -> None:
         config = json.load(f)
     config.pop("quantization_config", None)
     config["dtype"] = "bfloat16"
-    with open(config_path, "w") as f:
-        json.dump(config, f, indent=2, sort_keys=True)
-        f.write("\n")
+    write_config_json(config_path, config)

@@ -4,8 +4,8 @@ A thin layer over `_theory_style` (palette, fonts, `save`) so every pipeline fig
 parallelism, dataloader — draws the same box, the same labelled arrow and the same takeaway strip.
 Import with `from _pipeline_style import *`, which re-exports `_theory_style`.
 
-Geometry convention: **one data unit is one inch** — set `xlim`/`ylim` to the figsize,
-and the fixed paddings here stay proportionate to the point sizes in `_theory_style`.
+Geometry convention: **one data unit is one inch** — :func:`canvas` sets `xlim`/`ylim` to the
+figsize, and the fixed paddings here stay proportionate to the point sizes in `_theory_style`.
 """
 
 from _theory_style import *
@@ -21,6 +21,15 @@ COLUMN_GAP = 1.0  # column gap, wide enough to hold an arrow label clear of both
 DASH = (0, (4, 2))
 
 TINTS = {BLUE: BLUE_T, AMBER: AMBER_T, TEAL: TEAL_T, VIOLET: VIOLET_T, ROSE: ROSE_T, SLATE: SLATE_T}
+
+
+def canvas(width, height):
+    """A ``width`` x ``height`` inch figure whose axes span it one data unit per inch, frame hidden."""
+    fig, ax = plt.subplots(figsize=(width, height))
+    ax.set_xlim(0, width)
+    ax.set_ylim(0, height)
+    ax.axis("off")
+    return fig, ax
 
 
 def tint(color):

@@ -6,7 +6,6 @@ rank** (the ranks of a TP/CP/ETP group read the same batch). The worked
 shape is world 16 with `tp_size=2` → `data_parallel_size = 8`.
 """
 
-import matplotlib.pyplot as plt
 from _pipeline_style import *
 
 W, H = 11.6, 5.7
@@ -50,11 +49,7 @@ def custom_batches(ax):
 
 def panel(name, head, sub, gate_title, gate_note, stages, batches, strip_caption, foot):
     """Gate strip → four stage cards → the rank/batch strip → the takeaway."""
-    fig, ax = plt.subplots(figsize=(W, H))
-    fig.patch.set_facecolor(BG)
-    ax.set_xlim(0, W)
-    ax.set_ylim(0, H)
-    ax.axis("off")
+    fig, ax = canvas(W, H)
 
     title(ax, head, sub)
 
@@ -79,8 +74,6 @@ def panel(name, head, sub, gate_title, gate_note, stages, batches, strip_caption
     footnote(ax, STRIP_X, 0.3, STRIP_W, foot)
 
     save(fig, name)
-    plt.close(fig)
-    print(f"✓ {name}.png")
 
 
 panel(

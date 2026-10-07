@@ -367,12 +367,12 @@ def resolve_load_concurrency(max_concurrent: int | None, local_world_size: int) 
 
 
 @contextmanager
-def sequential_load_within_node(tag: str = "model", max_concurrent: int | None = 1):
+def sequential_load_within_node(max_concurrent: int | None = 1):
     """Throttle a node's local ranks in batches of ``max_concurrent`` (0=all, 1=sequential).
 
     For loading large models, where simultaneous CPU allocation by every rank would OOM. Coordinates
-    over the store rather than NCCL barriers, which a long load would time out, and a repeated
-    ``tag`` stays throttled because :class:`_StorePhase` isolates it from the previous done-keys.
+    over the store rather than NCCL barriers, which a long load would time out, and a repeated load
+    stays throttled because :class:`_StorePhase` isolates it from the previous done-keys.
     ``None`` resolves node-width-aware through :func:`resolve_load_concurrency`.
     """
     if not (dist.is_available() and dist.is_initialized()):
@@ -387,7 +387,7 @@ def sequential_load_within_node(tag: str = "model", max_concurrent: int | None =
         yield
         return
 
-    phase = _StorePhase(f"seq_load/{tag}", f"node{get_node_rank()}", local_rank, local_world_size, get_store_timeout())
+    phase = _StorePhase("seq_load/model", f"node{get_node_rank()}", local_rank, local_world_size, get_store_timeout())
 
     batch = local_rank // max_concurrent
     try:

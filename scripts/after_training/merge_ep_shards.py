@@ -36,6 +36,7 @@ from src.checkpoint.format import (
     DEFAULT_MAX_SHARD_SIZE,
     EP_SHARD_KEY_RE,
     HF_STREAM_PART_PREFIX,
+    copy_checkpoint_aux_files,
     ep_shard_filename,
     is_ep_shard,
     is_sharded_checkpoint,
@@ -44,7 +45,6 @@ from src.checkpoint.format import (
 from src.checkpoint.shard_writer import StageShardWriter
 from src.checkpoint.tool_io import (
     detect_model_type,
-    finalize_merged_checkpoint,
     preflight_resource_warning,
     reject_in_place_conversion,
     reject_sibling_adapter,
@@ -315,13 +315,17 @@ def merge_ep_shards(
     if verbose:
         logger.info(f"Saved merged weights to {output_dir}")
 
-    finalize_merged_checkpoint(
-        input_dir,
-        output_dir,
-        shard_files,
-        verbose=verbose,
-        delete_input_shards=delete_input_shards,
-    )
+    # The inputs go LAST, once the merged weights and their index are on disk, so a merge that died
+    # earlier leaves the only copy of the weights where it found them. generation_config.json rides
+    # across verbatim: the format gate admits only this toolkit's sharded writer's output, which
+    # emits that file only for a generating model off an already-sanitized config.
+    copy_checkpoint_aux_files(input_dir, output_dir, verbose=verbose)
+    if delete_input_shards:
+        for shard_file in shard_files:
+            os.remove(os.path.join(input_dir, shard_file))
+        if verbose:
+            logger.info(f"Deleted {len(shard_files)} input shard files (--delete_input_shards)")
+    print(f"\n✓ Merged EP checkpoint saved to: {output_dir}")  # noqa: T201 — CLI-facing
 
 
 def main():

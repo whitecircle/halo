@@ -17,9 +17,11 @@ from src.env import env_flag, env_str
 
 # Per-request wall-clock cap (seconds) for every HTTP search backend.
 SEARCH_TIMEOUT = 15.0
+# Results a search returns when the call names no count.
+DEFAULT_MAX_RESULTS = 5
 
 
-def _format_results(results: list[dict[str, Any]], max_results: int = 5) -> str:
+def _format_results(results: list[dict[str, Any]], max_results: int) -> str:
     """Format search results into a readable string for the model."""
     if not results:
         return "No results found."
@@ -32,12 +34,12 @@ def _format_results(results: list[dict[str, Any]], max_results: int = 5) -> str:
     return "\n\n".join(lines)
 
 
-def _search_duckduckgo(query: str, max_results: int = 5) -> list[dict[str, Any]]:
+def _search_duckduckgo(query: str, max_results: int) -> list[dict[str, Any]]:
     raw = DDGS().text(query, max_results=max_results)
     return [{"title": r.get("title", ""), "url": r.get("href", ""), "snippet": r.get("body", "")} for r in raw]
 
 
-async def _async_search_duckduckgo(query: str, max_results: int = 5) -> list[dict[str, Any]]:
+async def _async_search_duckduckgo(query: str, max_results: int) -> list[dict[str, Any]]:
     return await asyncio.to_thread(_search_duckduckgo, query, max_results)
 
 
@@ -60,14 +62,14 @@ class HttpSearchSpec:
         return self.build(query, max_results, env_str(self.env_key, ""))
 
 
-def _sync_call(spec: HttpSearchSpec, query: str, max_results: int = 5) -> list[dict[str, Any]]:
+def _sync_call(spec: HttpSearchSpec, query: str, max_results: int) -> list[dict[str, Any]]:
     """Run ``spec`` over a blocking httpx request."""
     resp = httpx.request(spec.method, spec.url, timeout=SEARCH_TIMEOUT, **spec.request_kwargs(query, max_results))
     resp.raise_for_status()
     return spec.parse(resp.json())[:max_results]
 
 
-async def _async_call(spec: HttpSearchSpec, query: str, max_results: int = 5) -> list[dict[str, Any]]:
+async def _async_call(spec: HttpSearchSpec, query: str, max_results: int) -> list[dict[str, Any]]:
     """Run ``spec`` over an async httpx client."""
     async with httpx.AsyncClient(timeout=SEARCH_TIMEOUT) as client:
         resp = await client.request(spec.method, spec.url, **spec.request_kwargs(query, max_results))
@@ -116,7 +118,7 @@ _TAVILY = HttpSearchSpec(
 )
 
 
-def _search_mock(query: str, max_results: int = 5) -> list[dict[str, Any]]:
+def _search_mock(query: str, max_results: int) -> list[dict[str, Any]]:
     return [
         {
             "title": f"Wikipedia: {query}",
@@ -136,7 +138,7 @@ def _search_mock(query: str, max_results: int = 5) -> list[dict[str, Any]]:
     ][:max_results]
 
 
-async def _async_search_mock(query: str, max_results: int = 5) -> list[dict[str, Any]]:
+async def _async_search_mock(query: str, max_results: int) -> list[dict[str, Any]]:
     return _search_mock(query, max_results)
 
 
@@ -217,7 +219,9 @@ def _backend_failure(backend: str, exc: Exception) -> RuntimeError:
     return RuntimeError(f"web_search backend '{backend}' failed: {exc}")
 
 
-def web_search_raw(query: str, max_results: int = 5, backend: str | None = None) -> list[dict[str, Any]]:
+def web_search_raw(
+    query: str, max_results: int = DEFAULT_MAX_RESULTS, backend: str | None = None
+) -> list[dict[str, Any]]:
     """Search the web, returning the raw ``{"title", "url", "snippet"}`` results.
 
     ``backend=None`` auto-selects by available API keys; an unknown name raises ``ValueError`` and a
@@ -231,7 +235,7 @@ def web_search_raw(query: str, max_results: int = 5, backend: str | None = None)
         raise _backend_failure(backend, e) from e
 
 
-def web_search(query: str, max_results: int = 5, backend: str | None = None) -> str:
+def web_search(query: str, max_results: int = DEFAULT_MAX_RESULTS, backend: str | None = None) -> str:
     """Search the web and return results formatted as a string for LLM consumption.
 
     ``backend=None`` auto-selects by available API keys; pass a name to force one.
@@ -239,7 +243,7 @@ def web_search(query: str, max_results: int = 5, backend: str | None = None) -> 
     return _format_results(web_search_raw(query, max_results, backend), max_results)
 
 
-async def async_web_search(query: str, max_results: int = 5, backend: str | None = None) -> str:
+async def async_web_search(query: str, max_results: int = DEFAULT_MAX_RESULTS, backend: str | None = None) -> str:
     """Async version of web_search."""
     backend, impl = _resolve_backend(backend)
 

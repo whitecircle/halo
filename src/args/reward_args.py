@@ -1,12 +1,15 @@
 """Script arguments for Bradley-Terry reward-model training."""
 
 from dataclasses import dataclass, field
+from typing import ClassVar
 
 from src.args.common_script_args import CommonScriptArguments
 
 
 @dataclass
 class RMScriptArguments(CommonScriptArguments):
+    PROJECT_NAME: ClassVar[str] = "reward-modeling"
+
     images_field: str | None = field(
         default=None,
         metadata={
@@ -20,7 +23,3 @@ class RMScriptArguments(CommonScriptArguments):
             "without the knob."
         },
     )
-
-    def __post_init__(self):
-        self._apply_default_project_name("reward-modeling")
-        self._validate_ranges()

@@ -53,13 +53,15 @@ def _run_ep_gc_guard(config):
     reads: ``parallelism_config``, ``_has_ep_layers`` (True so the method runs), ``_ep_config`` (the
     EPConfig — production guarantees it is set whenever ``_has_ep_layers`` is True; the method reads
     ``_ep_config.is_deferred_dp``), and ``args.gradient_checkpointing`` (True so an ACCEPT shape falls
-    through to the real GC-enable path rather than returning early). The stub ``model`` owns no
+    through to the real GC-enable path rather than returning early) beside its
+    ``gradient_checkpointing_kwargs`` (TrainingArguments' ``None`` default). The stub ``model`` owns no
     ``EPMoELayerBase``, so the accept path completes (logs + sets args.gradient_checkpointing=False)
     without needing a real model.
     """
 
     class _Args:
         gradient_checkpointing = True
+        gradient_checkpointing_kwargs = None
 
     class _Stub:
         pass

@@ -509,11 +509,7 @@ class ChunkedLogprobsCore:
         if labels.shape != input_ids.shape:
             raise ValueError("CP GRPO scoring needs labels aligned with the full input row")
 
-        lm_head = unwrapped_model.get_output_embeddings()
-        self._assert_output_embeddings_unadapted(unwrapped_model, lm_head)
-        weight = materialize_dtensor(lm_head.weight)
-        bias = materialize_dtensor(getattr(lm_head, "bias", None))
-        head_transform = self._head_transform(unwrapped_model)
+        weight, bias, head_transform = self._scoring_head(unwrapped_model)
 
         # One CP-divisible backbone forward per loss graph also keeps the legacy attention's
         # full-position hooks stable through gradient-checkpoint recomputation.
@@ -525,6 +521,15 @@ class ChunkedLogprobsCore:
             shifted_hidden, weight, shifted_labels, bias, self.temperature, head_transform
         )
         return logps, shifted_labels
+
+    def _scoring_head(self, unwrapped_model) -> tuple[torch.Tensor, torch.Tensor | None, HeadTransform]:
+        """The output embedding's weight and bias, materialized off any DTensor, and the verified head
+        transform: what every chunked sweep scores with."""
+        lm_head = unwrapped_model.get_output_embeddings()
+        self._assert_output_embeddings_unadapted(unwrapped_model, lm_head)
+        weight = materialize_dtensor(lm_head.weight)
+        bias = materialize_dtensor(getattr(lm_head, "bias", None))
+        return weight, bias, self._head_transform(unwrapped_model)
 
     def _assert_output_embeddings_unadapted(self, unwrapped_model, lm_head) -> None:
         """Reject a PEFT tuner on the output embedding rather than ignore its delta.
@@ -571,11 +576,7 @@ class ChunkedLogprobsCore:
         self, unwrapped_model, input_ids, attention_mask, logits_to_keep, batch_size, compute_entropy
     ):
         batch_size = batch_size or input_ids.size(0)
-        lm_head = unwrapped_model.get_output_embeddings()
-        self._assert_output_embeddings_unadapted(unwrapped_model, lm_head)
-        weight = materialize_dtensor(lm_head.weight)
-        bias = materialize_dtensor(getattr(lm_head, "bias", None))
-        head_transform = self._head_transform(unwrapped_model)
+        weight, bias, head_transform = self._scoring_head(unwrapped_model)
         dense = rows_forward_densely(unwrapped_model, batch_size)
 
         def sweep(hidden, completion_ids):

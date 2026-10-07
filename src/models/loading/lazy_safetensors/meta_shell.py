@@ -191,27 +191,26 @@ def instantiate_on_meta(
     """
     model_class = _resolve_remote_code_class(model_class, config, trust_remote_code)
     dtype = resolve_run_dtype(dtype, config)
-    if config_only:
-        model = _instantiate_from_config_on_meta(model_class, config, dtype, trust_remote_code, **model_kwargs)
-        _restore_checkpoint_generation_config(model, model_name_or_path, model_kwargs.get("revision"))
-        return model
-    common = dict(
-        config=config,
-        dtype=dtype,
-        trust_remote_code=trust_remote_code,
-        **model_kwargs,
-    )
-    try:
-        model = model_class.from_pretrained(model_name_or_path, device_map="meta", **common)
-    except (AttributeError, ValueError) as e:
-        logger.warning(
-            f"from_pretrained(device_map='meta') failed for {model_class.__name__} "
-            f"({type(e).__name__}: {e}); building the shell from the config alone instead."
-        )
-        model = _instantiate_from_config_on_meta(model_class, config, dtype, trust_remote_code, **model_kwargs)
-        _restore_checkpoint_generation_config(model, model_name_or_path, model_kwargs.get("revision"))
-        return model
-    _materialize_nonpersistent_buffers_from_config_twin(
-        model, model_class, config, dtype, trust_remote_code, **model_kwargs
-    )
+    if not config_only:
+        try:
+            model = model_class.from_pretrained(
+                model_name_or_path,
+                device_map="meta",
+                config=config,
+                dtype=dtype,
+                trust_remote_code=trust_remote_code,
+                **model_kwargs,
+            )
+        except (AttributeError, ValueError) as e:
+            logger.warning(
+                f"from_pretrained(device_map='meta') failed for {model_class.__name__} "
+                f"({type(e).__name__}: {e}); building the shell from the config alone instead."
+            )
+        else:
+            _materialize_nonpersistent_buffers_from_config_twin(
+                model, model_class, config, dtype, trust_remote_code, **model_kwargs
+            )
+            return model
+    model = _instantiate_from_config_on_meta(model_class, config, dtype, trust_remote_code, **model_kwargs)
+    _restore_checkpoint_generation_config(model, model_name_or_path, model_kwargs.get("revision"))
     return model

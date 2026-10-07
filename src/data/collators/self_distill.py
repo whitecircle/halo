@@ -139,7 +139,61 @@ def confidence_weights(
     return confidences**power / normalizer
 
 
-class SelfDistillTextCollator:
+class SelfDistillBranchMixin:
+    """What both self-distillation collators (text and VLM) add to a student batch: the privileged
+    fields, the hinted teacher history and the per-row confidence weights."""
+
+    def _init_self_distill_fields(
+        self,
+        hint_template: str | None,
+        answer_field: str | None,
+        solution_field: str | None,
+        confidence_field: str | None,
+        confidence_power: float,
+        confidence_normalizer: float | None,
+    ) -> None:
+        require_confidence_normalizer(confidence_field, confidence_normalizer)
+        self.hint_template = hint_template
+        self.answer_field = answer_field
+        self.solution_field = solution_field
+        self.confidence_field = confidence_field
+        self.confidence_power = confidence_power
+        self.confidence_normalizer = confidence_normalizer
+
+    @property
+    def builds_teacher_branch(self) -> bool:
+        """Whether batches carry the ``teacher_*`` branch the OPD term reads."""
+        return self.hint_template is not None
+
+    def cache_signature(self) -> dict[str, Any]:
+        """Every knob this collator renders with, to thread through the audit map's cache key.
+
+        The collator rides ``fn_kwargs`` (see :func:`audit_self_distill_row`), and a dataset-map
+        fingerprint reads an object that is neither tokenizer nor processor as its class name alone
+        — so without this the audit's verdict outlives a change to any knob below and a stale cache
+        skips it entirely. Read off ``__dict__``, not a hand-listed subset: a field added to
+        ``__init__`` enters the key with it.
+        """
+        return dict(vars(self))
+
+    def _teacher_history(self, history: list[dict[str, Any]], example: dict[str, Any]) -> list[dict[str, Any]]:
+        """``history`` with the row's privileged hint appended to its last user turn."""
+        return teacher_history(
+            history,
+            example,
+            hint_template=self.hint_template,
+            answer_field=self.answer_field,
+            solution_field=self.solution_field,
+        )
+
+    def _add_confidence_weights(self, batch: dict[str, torch.Tensor], examples: list[dict[str, Any]]) -> None:
+        if self.confidence_field is not None:
+            batch["confidence_weights"] = confidence_weights(
+                examples, self.confidence_field, self.confidence_power, self.confidence_normalizer
+            )
+
+
+class SelfDistillTextCollator(SelfDistillBranchMixin):
     """Text collator for SDPG-style self-distillation (arXiv:2606.04036).
 
     Reads raw conversation rows + privileged answer/solution fields, emitting the student batch and a
@@ -172,39 +226,19 @@ class SelfDistillTextCollator:
         require_rendered_response_marker(
             tokenizer, response_prompt_template, train_on_completions_only, "Self-distillation"
         )
-        require_confidence_normalizer(confidence_field, confidence_normalizer)
+        self._init_self_distill_fields(
+            hint_template, answer_field, solution_field, confidence_field, confidence_power, confidence_normalizer
+        )
         self.tokenizer = tokenizer
         self.max_length = max_length
         self.conversation_field = conversation_field
-        self.hint_template = hint_template
         self.system_prompt = system_prompt
         self.model_supports_system_role = model_supports_system_role
         self.tools_field = tools_field
         self.interleaved_thinking = interleaved_thinking
-        self.answer_field = answer_field
-        self.solution_field = solution_field
-        self.confidence_field = confidence_field
-        self.confidence_power = confidence_power
-        self.confidence_normalizer = confidence_normalizer
         self.response_prompt_template = response_prompt_template
         self.train_on_completions_only = train_on_completions_only
         self.eos_token_ids = resolve_eos_token_ids(tokenizer, model_config)
-
-    @property
-    def builds_teacher_branch(self) -> bool:
-        """Whether batches carry the ``teacher_*`` branch the OPD term reads."""
-        return self.hint_template is not None
-
-    def cache_signature(self) -> dict[str, Any]:
-        """Every knob this collator renders with, to thread through the audit map's cache key.
-
-        The collator rides ``fn_kwargs`` (see :func:`audit_self_distill_row`), and a dataset-map
-        fingerprint reads an object that is neither tokenizer nor processor as its class name alone
-        — so without this the audit's verdict outlives a change to any knob below and a stale cache
-        skips it entirely. Read off ``__dict__``, not a hand-listed subset: a field added to
-        ``__init__`` enters the key with it.
-        """
-        return dict(vars(self))
 
     def _render(self, history: list[dict[str, Any]], row: dict[str, Any]) -> str:
         """Chat-template one conversation through the shared text renderer, so the student and
@@ -274,25 +308,13 @@ class SelfDistillTextCollator:
             "labels": self._build_labels(student["input_ids"], student["attention_mask"]),
         }
         if self.builds_teacher_branch:
-            histories = [
-                teacher_history(
-                    ex[self.conversation_field],
-                    ex,
-                    hint_template=self.hint_template,
-                    answer_field=self.answer_field,
-                    solution_field=self.solution_field,
-                )
-                for ex in examples
-            ]
+            histories = [self._teacher_history(ex[self.conversation_field], ex) for ex in examples]
             teacher = self._tokenize(histories, examples, branch="teacher")
             batch["teacher_input_ids"] = teacher["input_ids"]
             batch["teacher_attention_mask"] = teacher["attention_mask"]
             batch["teacher_labels"] = self._build_labels(teacher["input_ids"], teacher["attention_mask"])
             require_aligned_responses(batch)
-        if self.confidence_field is not None:
-            batch["confidence_weights"] = confidence_weights(
-                examples, self.confidence_field, self.confidence_power, self.confidence_normalizer
-            )
+        self._add_confidence_weights(batch, examples)
         return batch
 
 

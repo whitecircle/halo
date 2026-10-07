@@ -90,7 +90,7 @@ crashing mid-run. These are the ones that come up:
 | `HALO_FLEX_SLIDING` | `1` | `0` builds Gemma 4 on plain SDPA instead of FlexAttention on its sliding layers — the switch when that kernel fails on your GPU, or to run `full_determinism` on more than one GPU |
 | `HALO_SANDBOX_BACKEND` / `HALO_SANDBOX_URL` | `local` / unset | code-execution sandbox for RL environments: `local`, `bubblewrap`, or `remote`. `local` does not confine the program; `bubblewrap` needs root and extra container rights ([Async GRPO](training-methods/async-grpo-environments.md#the-environments)) |
 | `HALO_ALLOW_MISSING_CHECKPOINT_KEYS` | `0` | demote the missing-checkpoint-key error to a warning; only for deliberately partial checkpoints |
-| `CUDA_DEVICE_MAX_CONNECTIONS` | `1`, baked into both images | driver-owned, latched at `deep_ep`'s `cuInit` — a Python write is too late; `1` keeps the supported multi-group EP shapes from deadlocking the DeepEP combine against FSDP2's NCCL, at no measurable throughput cost |
+| `CUDA_DEVICE_MAX_CONNECTIONS` | `1`, baked into both images | driver-owned, latched at `deep_ep`'s `cuInit` — a Python write is too late; `1` is the setting EP is validated with, at no measurable throughput cost |
 
 The compose files' rollout-server switches (`VLLM_ENABLE_R3` / `SGLANG_ENABLE_R3`,
 `VLLM_SPECULATIVE_CONFIG`, `VLLM_ATTENTION_BACKEND` / `SGLANG_ATTENTION_BACKEND`, …)

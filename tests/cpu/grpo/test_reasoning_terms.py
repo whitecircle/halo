@@ -181,7 +181,7 @@ def test_config_refuses_values_that_would_invert_or_poison_the_terms():
         with pytest.raises(ValueError, match=r"reasoning_price\['low'\] must be a finite number >= 0"):
             AsyncTrainingConfig(reasoning_price={**PRICE, "low": bad})
     for bad in (0.0, -1.0, float("nan"), float("inf")):
-        with pytest.raises(ValueError, match="reasoning_price_cap must be a finite positive number"):
+        with pytest.raises(ValueError, match=r"reasoning_price_cap must be (a finite number|> 0)"):
             AsyncTrainingConfig(reasoning_price=PRICE, reasoning_price_cap=bad)
     for bad in (-0.01, float("nan"), float("inf")):
         with pytest.raises(ValueError, match="reasoning_floor must be a finite number >= 0"):

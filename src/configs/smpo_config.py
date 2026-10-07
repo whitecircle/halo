@@ -3,15 +3,16 @@ Configuration for Smooth Margin Preference Optimization (SMPO) Trainer.
 """
 
 from dataclasses import dataclass, field
-from typing import Any, Literal
+from typing import Literal
 
 from transformers import TrainingArguments
 
-from src.args.validation import RangeValidatedConfig
+from src.args.mixins import DatasetNumProcArguments, ModelInitKwargsArguments
+from src.args.validation import RangeValidatedConfig, require_finite
 
 
 @dataclass
-class SmoothMarginPOConfig(RangeValidatedConfig, TrainingArguments):
+class SmoothMarginPOConfig(DatasetNumProcArguments, ModelInitKwargsArguments, RangeValidatedConfig, TrainingArguments):
     """Config for SmoothMarginPOTrainer (SMPO): a reference-model-free, margin-based preference
     method with optional SFT loss. Per-field docs are in each field's ``help`` metadata."""
 
@@ -113,20 +114,6 @@ class SmoothMarginPOConfig(RangeValidatedConfig, TrainingArguments):
         default=True,
         metadata={"help": "Disable dropout for training stability."},
     )
-    dataset_num_proc: int | None = field(
-        default=None,
-        metadata={"help": "Number of processes for dataset preprocessing."},
-    )
-
-    model_init_kwargs: dict[str, Any] | None = field(
-        default=None,
-        metadata={
-            "help": "Model-config overrides on every entry-script path: written onto the loaded "
-            "config's fields before the load, raising on a key that config does not declare and "
-            "on dtype/torch_dtype. Model-loading kwargs only where a trainer is constructed "
-            "programmatically with the model as a path string."
-        },
-    )
 
     def resolve_length_budget(self) -> tuple[int, int, int]:
         """Split ``max_length`` into ``(max_length, max_prompt_length, max_completion_length)``.
@@ -178,6 +165,7 @@ class SmoothMarginPOConfig(RangeValidatedConfig, TrainingArguments):
 
     def _validate_ranges(self) -> None:
         super()._validate_ranges()
+        require_finite(type(self).__name__, target_margin=self.target_margin, initial_margin=self.initial_margin)
         if self.target_margin < 0:
             raise ValueError("target_margin must be >= 0")
 
@@ -193,8 +181,10 @@ class SmoothMarginPOConfig(RangeValidatedConfig, TrainingArguments):
         if self.upper_clip_percentile is not None and not (0.5 <= self.upper_clip_percentile < 1):
             raise ValueError("upper_clip_percentile must be in [0.5, 1)")
 
-        if self.min_log_prob is not None and self.min_log_prob >= 0:
-            raise ValueError("min_log_prob must be negative (log probabilities are <= 0)")
+        if self.min_log_prob is not None:
+            require_finite(type(self).__name__, min_log_prob=self.min_log_prob)
+            if self.min_log_prob >= 0:
+                raise ValueError("min_log_prob must be negative (log probabilities are <= 0)")
 
         if not (0 <= self.chosen_sft_ratio <= 1):
             raise ValueError("chosen_sft_ratio must be in [0, 1]")

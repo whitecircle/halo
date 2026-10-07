@@ -150,7 +150,7 @@ class ReferenceLogpsCheckpointMixin:
         if not self._reference_saved_loaded:
             saved, _ = consensus_read(
                 self._saved_reference_file(checkpoint),
-                self._read_reference_checkpoint,
+                partial(torch.load, map_location="cpu", weights_only=True, mmap=self._maps_saved_reference),
                 what=REFERENCE_LOGPS_FILE,
                 checkpoint=checkpoint,
             )
@@ -194,9 +194,6 @@ class ReferenceLogpsCheckpointMixin:
     def _saved_reference_file(self, checkpoint: str) -> str:
         """The file a resume reads ``checkpoint``'s saved references from. Collective where overridden."""
         return os.path.join(checkpoint, REFERENCE_LOGPS_FILE)
-
-    def _read_reference_checkpoint(self, path: str):
-        return torch.load(path, map_location="cpu", weights_only=True, mmap=self._maps_saved_reference)
 
     def _reference_entry_mismatch(self, entry, dataset, needed, identity) -> str | None:
         if not is_reference_entry(entry):

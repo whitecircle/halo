@@ -219,7 +219,7 @@ QUANTIZERS = {"mxfp8": quantize_mxfp8, "mxfp4": quantize_mxfp4, "nvfp4": quantiz
 def _block_round_trip(t: torch.Tensor, fmt: str, axis: int) -> torch.Tensor:
     quantizer = QUANTIZERS.get(fmt)
     if quantizer is None:
-        raise ValueError(f"unknown block-scaled format {fmt!r} (expected 'mxfp8', 'mxfp4' or 'nvfp4')")
+        raise ValueError(f"unknown block-scaled format {fmt!r} (expected one of {sorted(QUANTIZERS)})")
     return dequantize(quantizer(t, axis=axis))
 
 

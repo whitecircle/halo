@@ -75,9 +75,7 @@ class EnvironmentConfig(RangeValidatedConfig):
             raise ValueError(
                 f"max_turns must be >= 1 (null keeps the environment class default), got {self.max_turns}"
             )
-        if not self.rewards:
-            raise ValueError("rewards must list at least one reward term")
-        self.reward_terms  # noqa: B018  parse at config time so a bad term fails here
+        self.reward_terms  # noqa: B018  parse at config time so a bad or empty list fails here
         # Merged last in to_env_config, a key it writes from a top-level field would override that field
         # past the validation above.
         shadowing = sorted(set(self.environment_kwargs) & set(self._core_env_config()))

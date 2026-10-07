@@ -4,17 +4,20 @@ import math
 from dataclasses import dataclass, field, fields
 from typing import ClassVar
 
-from src.args.mixins import SDPGArguments, SelfDistillationLoss, format_field_names
+from src.args.mixins import DEFAULT_ANSWER_FIELD, SDPGArguments, SelfDistillationLoss, format_field_names
 from src.args.sft_args import SFTScriptArguments
+from src.args.validation import require_positive
 
 
 @dataclass
-class SelfDistillationArguments(SDPGArguments, SFTScriptArguments):
+class SelfDistillationArguments(SFTScriptArguments, SDPGArguments):
     """Args for SDPG-style offline privileged-context self-distillation SFT (text or VLM).
 
     One model is both student (prompt only) and teacher (plus a gold-answer hint). The teacher's
     full-vocab distribution supervises the student on shared response tokens via an OPD loss, atop SFT.
     """
+
+    PROJECT_NAME: ClassVar[str] = "self-distillation"
 
     # SDPG fields the script applies while building the teacher prompts; every other SDPG field is
     # forwarded to the trainer, which takes the complement.
@@ -28,7 +31,7 @@ class SelfDistillationArguments(SDPGArguments, SFTScriptArguments):
     HINT_PLACEHOLDERS: ClassVar[frozenset[str]] = frozenset(HINT_SLOT_FIELDS)
 
     sdpg_answer_field: str | None = field(
-        default="answer",
+        default=DEFAULT_ANSWER_FIELD,
         metadata={
             "help": "Dataset field holding the ground-truth answer for the hint (required while sdpg_beta_base > 0)."
         },
@@ -92,18 +95,13 @@ class SelfDistillationArguments(SDPGArguments, SFTScriptArguments):
             f.name: getattr(self, f.name) for f in fields(SDPGArguments) if f.name not in self.DATASET_SIDE_SDPG_FIELDS
         }
 
-    def __post_init__(self):
-        self._apply_default_project_name("self-distillation")
-        self._validate_ranges()
-
     def _validate_ranges(self) -> None:
         super()._validate_ranges()
         # A NaN coefficient NaNs every loss; a negative one pushes the student away from the anchor.
         if not math.isfinite(self.reference_kl_coef) or self.reference_kl_coef < 0:
             raise ValueError(f"reference_kl_coef must be a finite value >= 0, got {self.reference_kl_coef}")
         # p <= 0 inverts or flattens the weighting, and a zero confidence then divides by zero.
-        if not math.isfinite(self.confidence_power) or self.confidence_power <= 0:
-            raise ValueError(f"confidence_power must be a finite value > 0, got {self.confidence_power}")
+        require_positive(type(self).__name__, confidence_power=self.confidence_power)
         unfilled = sorted(
             self.HINT_SLOT_FIELDS[slot]
             for slot in format_field_names(self.sdpg_hint_template)

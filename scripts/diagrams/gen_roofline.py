@@ -17,7 +17,6 @@ X_MIN, X_MAX = 2.0, 8000.0
 Y_MIN, Y_MAX = 10.0, 3200.0
 
 fig, ax = plt.subplots(figsize=(9.2, 6.3))
-fig.patch.set_facecolor(BG)
 ax.set_xscale("log")
 ax.set_yscale("log")
 ax.set_xlim(X_MIN, X_MAX)
@@ -178,5 +177,3 @@ ax.text(
 )
 
 save(plt.gcf(), "roofline")
-plt.close()
-print("✓ roofline.png")

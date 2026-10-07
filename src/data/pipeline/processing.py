@@ -28,6 +28,7 @@ from trl.data_utils import pack_dataset as _trl_pack_dataset
 
 from src.data.pipeline.row_processors import is_valid_example
 from src.data.sources.dataset_cache import publish_cached_download
+from src.data.sources.paths import TRAIN_TEST_SPLITS
 from src.distributed.filesystem import RUN_LOG_DIR_NAME, store_join_recorded_failure
 from src.distributed.runtime import (
     broadcast_from_rank0,
@@ -58,7 +59,6 @@ __all__ = [
     "coordinated_dataset_transform",
     "carry_cache_key",
     "run_load_rank_first",
-    "filter_by_length",
     "log_dataset_examples",
     "process_dataset_with_map_and_filter",
     "pack_dataset_coordinated",
@@ -438,14 +438,18 @@ def report_rejected_rows(original_size: int, kept_size: int, context: str) -> No
         logger.info(message)
 
 
+def _rendered_splits(dataset: DatasetDict) -> list[str]:
+    """The splits of ``dataset`` the loader renders: the :data:`TRAIN_TEST_SPLITS` it carries."""
+    return [split for split in TRAIN_TEST_SPLITS if split in dataset]
+
+
 def missing_render_column_splits(dataset: DatasetDict, column: str) -> list[str]:
     """Splits this loader will render that do not carry ``column``.
 
     Only the splits the loader goes on to render: an extra split a source happens to carry
     (e.g. "validation") is never filtered or mapped here, so its schema is not a contract.
     """
-    consumed = [split for split in ("train", "test") if split in dataset]
-    return sorted(split for split in consumed if column not in dataset[split].column_names)
+    return sorted(split for split in _rendered_splits(dataset) if column not in dataset[split].column_names)
 
 
 def require_render_column(dataset: DatasetDict, path: str, knob: str, column: str) -> None:
@@ -459,8 +463,7 @@ def require_render_column(dataset: DatasetDict, path: str, knob: str, column: st
     missing = missing_render_column_splits(dataset, column)
     if not missing:
         return
-    consumed = [split for split in ("train", "test") if split in dataset]
-    available = sorted(set().union(*(dataset[split].column_names for split in consumed)))
+    available = sorted(set().union(*(dataset[split].column_names for split in _rendered_splits(dataset))))
     raise ValueError(
         f"{knob}='{column}' names a column the dataset {path} does not carry (missing from split(s) "
         f"{missing}; available columns: {available}). Point {knob} at an existing column in the YAML."
@@ -630,32 +633,6 @@ def coordinated_filter(
 ) -> Dataset | DatasetDict:
     """Coordinated, deterministically-cached ``dataset.filter``."""
     return _cached_map_or_filter("filter", dataset, filter_fn, desc, num_proc, filter_kwargs)
-
-
-def filter_by_length(
-    dataset: Dataset,
-    max_length: int,
-    tokenizer: PreTrainedTokenizer,
-    num_proc: int = DATASET_NUM_PROC,
-) -> Dataset:
-    """Drop rows whose tokenized ``text`` column exceeds ``max_length``.
-
-    Reports through :func:`report_rejected_rows` like every other drop-and-continue filter, so a
-    length budget that removes most of the corpus takes the high-rejection warning instead of
-    scrolling by at INFO.
-    """
-    original_size = len(dataset)
-
-    def check_length(example):
-        if example.get("text") is None:
-            return False
-        tokenized = tokenizer(example["text"], truncation=False, padding=False)
-        return len(tokenized["input_ids"]) <= max_length
-
-    context = f"length filtering (max_length={max_length})"
-    filtered_dataset = coordinated_filter(dataset, check_length, desc=context, num_proc=num_proc)
-    report_rejected_rows(original_size, len(filtered_dataset), context)
-    return filtered_dataset
 
 
 def log_dataset_examples(
@@ -918,7 +895,6 @@ def process_dataset_with_map_and_filter(
     num_proc: int = DATASET_NUM_PROC,
     remove_columns: list[str] | None = None,
     desc: str | None = None,
-    log_stats: bool = True,
     cache_key_extras: dict | None = None,
 ) -> Dataset | DatasetDict:
     """Coordinated map then drop rejection sentinels (see :func:`is_valid_example` on filter_field)."""
@@ -940,9 +916,7 @@ def process_dataset_with_map_and_filter(
         num_proc=num_proc,
     )
 
-    if log_stats:
-        report_rejected_rows(original_size, dataset_total_size(filtered), f"processing (checked via {filter_field})")
-
+    report_rejected_rows(original_size, dataset_total_size(filtered), f"processing (checked via {filter_field})")
     return filtered
 
 

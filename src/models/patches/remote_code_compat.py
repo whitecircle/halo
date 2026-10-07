@@ -20,18 +20,12 @@ from src.models.patches.remote_code_hooks import register_remote_class_hook
 # correct, only its import list is incomplete.
 _UNIMPORTED_REMOTE_GLOBALS = {"DynamicLayer": DynamicLayer}
 
-_applied = False
-
 
 def apply_remote_code_compat_shims() -> None:
-    """Apply all compatibility shims for remote-code models."""
-    global _applied
-    if _applied:
-        return
+    """Apply all compatibility shims for remote-code models; each one is idempotent."""
     _patch_is_torch_fx_available()
     _patch_rope_init_default()
     register_remote_class_hook(_repair_remote_module)
-    _applied = True
 
 
 def _halo_is_torch_fx_available() -> bool:

@@ -60,7 +60,7 @@ def test_comment_chars_skips_string_literals_and_counts_python_bare_strings():
 
 
 def test_an_unregistered_language_has_no_comment_syntax():
-    with pytest.raises(ValueError, match="language registry"):
+    with pytest.raises(ValueError, match="unsupported language 'fortran'"):
         comment_chars("x", "fortran")
 
 

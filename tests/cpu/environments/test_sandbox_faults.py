@@ -46,14 +46,10 @@ from src.environments.envs.tasks.coding.code_contests import CodeContestsEnviron
 from src.environments.envs.tasks.coding.grading import GradingSpec, grade_solution, run_solution_against_tests
 from src.environments.envs.tasks.coding.swe import SweEnvironment
 from src.environments.episode import RolloutResult
-from src.environments.sandbox.base import (
-    LOCAL_FSIZE_LIMIT,
-    SandboxAgentFault,
-    SandboxInfraError,
-    SandboxResult,
-)
+from src.environments.sandbox.base import SandboxAgentFault, SandboxInfraError, SandboxResult
 from src.environments.sandbox.bubblewrap import BubblewrapSandbox
 from src.environments.sandbox.local import (
+    LOCAL_FSIZE_LIMIT,
     TAMPERED_WORKDIR_RETURNCODE,
     LocalSubprocessSandbox,
     _grant_owner,

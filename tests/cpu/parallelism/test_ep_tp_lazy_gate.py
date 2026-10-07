@@ -61,7 +61,7 @@ def _run_dispatch(monkeypatch, model_dir: str) -> dict:
     )
     monkeypatch.setattr(
         model_loading,
-        "_sequential_load_to_cuda",
+        "load_through_cpu",
         lambda *a, **k: calls.__setitem__("sequential", calls["sequential"] + 1) or sentinel,
     )
     monkeypatch.setattr(model_loading, "_apply_attention_only_tp", lambda *a, **k: None)

@@ -14,7 +14,7 @@ from src.data.spans import (
 
 
 class DataCollatorForCompletionOnlyLM(DataCollatorForLanguageModeling):
-    """Completion-only collator: masks all non-assistant label tokens to ignore_index
+    """Completion-only collator: masks all non-assistant label tokens to ``LABEL_IGNORE_INDEX``
     so loss is computed only on assistant completions.
 
     response_prompt_template (str or token IDs) marks the response start (e.g.
@@ -27,7 +27,6 @@ class DataCollatorForCompletionOnlyLM(DataCollatorForLanguageModeling):
         self,
         response_prompt_template: str | list[int],
         *args,
-        ignore_index: int = LABEL_IGNORE_INDEX,
         train_on_last_assistant_only: bool = False,
         eos_token_ids: frozenset[int] | None = None,
         **kwargs,
@@ -41,14 +40,12 @@ class DataCollatorForCompletionOnlyLM(DataCollatorForLanguageModeling):
 
         warn_if_pad_equals_eos(self.tokenizer)
 
-        self.ignore_index = ignore_index
-
     def torch_call(self, examples: list[list[int] | Any | dict[str, Any]]) -> dict[str, Any]:
         return mask_batch_to_completion_spans(
             super().torch_call(examples),
             self.response_token_ids,
             self.eos_token_ids,
-            self.ignore_index,
+            LABEL_IGNORE_INDEX,
             self.train_on_last_assistant_only,
             self.response_prompt_template,
             tokenizer=self.tokenizer,

@@ -2,7 +2,6 @@
 
 import hashlib
 import json
-import logging
 import os
 
 from datasets import Dataset, DatasetDict, concatenate_datasets, load_from_disk
@@ -17,8 +16,9 @@ from src.data.sources.dataset_cache import (
 )
 from src.data.sources.paths import parse_dataset_source
 from src.data.sources.s3_client import S3Client, read_control_json_with_cache
+from src.log import info_logger
 
-logger = logging.getLogger(__name__)
+logger = info_logger(__name__)
 
 
 class ShardedDatasetLoader:
@@ -220,7 +220,6 @@ class ShardedDatasetLoader:
         shard_datasets = [self._load_shard(shard) for shard in assigned_shards]
 
         dataset = shard_datasets[0] if len(shard_datasets) == 1 else concatenate_datasets(shard_datasets)
-        logger.info(f"Rank {self.global_rank} loaded {len(dataset)} examples for {split}")
 
         return dataset
 

@@ -27,7 +27,7 @@ from scripts._common import add_openai_endpoint_args
 from scripts.inference._common import add_gradio_server_args, launch_gradio
 from src.configs.rollout_config import RolloutConfig
 from src.environments.base import ANSWER_KEY, Trajectory
-from src.environments.eval_runner import require_answers, run_episode
+from src.environments.eval_runner import EVAL_STATS_KEY, require_answers, run_episode
 from src.environments.registry import get_registered_environments, resolve_environment
 from src.inference.endpoints import DEFAULT_LOCAL_BASE_URL
 from src.inference.openai_client import create_openai_client
@@ -45,7 +45,7 @@ def build_context(expected_answer: str) -> dict[str, Any]:
     if expected_answer:
         try:
             context[ANSWER_KEY] = json.loads(expected_answer)
-        except (json.JSONDecodeError, TypeError):
+        except json.JSONDecodeError:
             context[ANSWER_KEY] = expected_answer
     return context
 
@@ -73,11 +73,11 @@ def render_transcript(trajectory: Trajectory | None) -> list[dict[str, str]]:
 
 
 def render_summary(env_type: str, trajectory: Trajectory | None, elapsed: float, max_turns: int) -> str:
-    """Episode verdict for the summary panel, read off the driver's own ``_eval_stats``."""
+    """Episode verdict for the summary panel, read off the driver's own stats (:data:`EVAL_STATS_KEY`)."""
     if trajectory is None:
         return f"**Environment:** {env_type}\n\n**No episode** — the environment produced no trajectory."
 
-    stats = trajectory.info.get("_eval_stats", {})
+    stats = trajectory.info.get(EVAL_STATS_KEY, {})
     parts = [
         f"**Environment:** {env_type}",
         f"**Turns:** {trajectory.num_turns}/{max_turns}",

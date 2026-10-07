@@ -100,6 +100,37 @@ def _forward_ast(cls: type) -> ast.FunctionDef:
     return ast.parse(textwrap.dedent(inspect.getsource(cls.forward))).body[0]
 
 
+def _cached_remote_sources(spec) -> list[str]:
+    """Every hub-cached modeling file defining all of ``spec.remote_classes``; skips when none is cached.
+
+    These modules cannot be imported standalone (they relative-import their sibling configuration),
+    and a revision bump is the one thing that can move them under a pinned toolkit, so their checks
+    read the source.
+    """
+    sources = []
+    for path in Path(HF_HUB_CACHE).glob(_HUB_MODELING_FILES):
+        source = path.read_text(encoding="utf-8")
+        if all(f"class {name}(" in source for name in spec.remote_classes):
+            sources.append(source)
+    if not sources:
+        pytest.skip(f"no cached modeling module defines {spec.remote_classes}")
+    return sources
+
+
+def _remote_forward_ast(source: str, class_name: str) -> ast.FunctionDef:
+    cls = next(node for node in ast.parse(source).body if isinstance(node, ast.ClassDef) and node.name == class_name)
+    return next(node for node in cls.body if isinstance(node, ast.FunctionDef) and node.name == "forward")
+
+
+def _attributes_between_head_and_loss(forward: ast.FunctionDef, name: str) -> set[str]:
+    """The ``self.*`` attributes a head's forward touches after ``lm_head`` and before ``loss_function``."""
+    body = forward.body
+    head = next(i for i, stmt in enumerate(body) if "lm_head" in _self_attributes(stmt))
+    loss = next(i for i, stmt in enumerate(body) if "loss_function" in _self_attributes(stmt))
+    assert head < loss, f"{name}.forward calls loss_function before lm_head"
+    return set().union(*(_self_attributes(stmt) for stmt in body[head + 1 : loss])) - {"config", "vocab_size"}
+
+
 def _liger_rms_norm_reference(x, weight, eps, offset, casting_mode):
     """LigerRMSNorm's semantics in plain torch, selected by the two parameters a spec chooses."""
     normed = x.float() * torch.rsqrt(x.float().pow(2).mean(-1, keepdim=True) + eps)
@@ -218,20 +249,12 @@ def test_declared_norms_are_what_the_chosen_liger_variant_computes(spec, dtype):
 
 @pytest.mark.parametrize("spec", REMOTE_SPECS, ids=lambda s: s.model_types[0])
 def test_declared_remote_norms_are_llama_style(spec):
-    """Same assertion for the ``trust_remote_code`` families, read off the modeling files the hub cache holds.
+    """Same assertion for the ``trust_remote_code`` modules, read off the modeling files the hub cache holds.
 
-    Their modules cannot be imported standalone (they relative-import their sibling configuration),
-    and a revision bump is the one thing that can move them under a pinned toolkit, so the check is
-    on the source: the fp32-upcast, weight-multiply body that ``casting_mode="llama", offset=0.0``
-    reproduces — and NOT the grouped variant sitting next to it in the same file.
+    The check is on the source: the fp32-upcast, weight-multiply body that ``casting_mode="llama",
+    offset=0.0`` reproduces — and NOT the grouped variant sitting next to it in the same file.
     """
-    sources = [
-        path.read_text(encoding="utf-8")
-        for path in Path(HF_HUB_CACHE).glob(_HUB_MODELING_FILES)
-        if all(f"class {name}(" in path.read_text(encoding="utf-8") for name in spec.remote_classes)
-    ]
-    if not sources:
-        pytest.skip(f"no cached modeling module defines {spec.remote_classes}")
+    sources = _cached_remote_sources(spec)
     assert spec.rms_norm_casting_mode == "llama" and spec.rms_norm_offset == 0.0
     for source in sources:
         for name in spec.rms_norm:
@@ -354,6 +377,18 @@ def test_declared_glu_mlps_are_the_canonical_gated_body(spec):
         )
 
 
+@pytest.mark.parametrize("spec", [s for s in REMOTE_SPECS if s.glu_mlp], ids=lambda s: s.model_types[0])
+def test_declared_remote_glu_mlps_are_the_canonical_gated_body(spec):
+    """Same assertion for the ``trust_remote_code`` modules, read off the modeling files the hub cache holds."""
+    for source in _cached_remote_sources(spec):
+        for name in spec.glu_mlp:
+            attributes = _self_attributes(_remote_forward_ast(source, name))
+            assert attributes == CANONICAL_GLU_ATTRIBUTES, (
+                f"remote {name}.forward touches {sorted(attributes)}, not the canonical "
+                f"{sorted(CANONICAL_GLU_ATTRIBUTES)} — the fused GLU would compute a different function"
+            )
+
+
 def test_the_glu_check_rejects_a_scaled_or_clamped_body():
     """Anti-vacuity: the three MLPs deliberately left undeclared must all fail the same check."""
     undeclared = {
@@ -381,15 +416,24 @@ def test_declared_heads_do_nothing_the_fused_loss_would_drop(spec):
     module = importlib.import_module(spec.modeling_module)
     allowed = {spec.logit_scale_attr} if spec.logit_scale_attr else set()
     for name in spec.causal_lm:
-        body = _forward_ast(getattr(module, name)).body
-        head = next(i for i, stmt in enumerate(body) if "lm_head" in _self_attributes(stmt))
-        loss = next(i for i, stmt in enumerate(body) if "loss_function" in _self_attributes(stmt))
-        assert head < loss, f"{name}.forward calls loss_function before lm_head"
-        between = set().union(*(_self_attributes(stmt) for stmt in body[head + 1 : loss])) - {"config", "vocab_size"}
+        between = _attributes_between_head_and_loss(_forward_ast(getattr(module, name)), name)
         assert between <= allowed, (
             f"{name}.forward applies {sorted(between - allowed)} between lm_head and the loss; the "
             f"fused loss replaces both and would drop it. Declare it on the spec or drop causal_lm."
         )
+
+
+@pytest.mark.parametrize("spec", [s for s in REMOTE_SPECS if s.causal_lm], ids=lambda s: s.model_types[0])
+def test_declared_remote_heads_do_nothing_the_fused_loss_would_drop(spec):
+    """Same assertion for the ``trust_remote_code`` modules, read off the modeling files the hub cache holds."""
+    allowed = {spec.logit_scale_attr} if spec.logit_scale_attr else set()
+    for source in _cached_remote_sources(spec):
+        for name in spec.causal_lm:
+            between = _attributes_between_head_and_loss(_remote_forward_ast(source, name), name)
+            assert between <= allowed, (
+                f"remote {name}.forward applies {sorted(between - allowed)} between lm_head and the "
+                f"loss; the fused loss replaces both and would drop it."
+            )
 
 
 def test_the_fused_head_does_not_declare_output_router_logits():
@@ -428,10 +472,7 @@ def test_the_router_logits_probe_really_keys_on_that_parameter_name():
 def test_the_head_check_rejects_inklings_rescaled_head():
     """Anti-vacuity: Inkling's head is the shape the check must reject, and it is undeclared."""
     cls = importlib.import_module("transformers.models.inkling.modeling_inkling").InklingForCausalLM
-    body = _forward_ast(cls).body
-    head = next(i for i, stmt in enumerate(body) if "lm_head" in _self_attributes(stmt))
-    loss = next(i for i, stmt in enumerate(body) if "loss_function" in _self_attributes(stmt))
-    between = set().union(*(_self_attributes(stmt) for stmt in body[head + 1 : loss])) - {"config", "vocab_size"}
+    between = _attributes_between_head_and_loss(_forward_ast(cls), cls.__name__)
     assert between, "InklingForCausalLM no longer rescales/truncates its logits — re-check the exclusion"
     assert not any(spec.causal_lm for spec in LIGER_FAMILY_SPECS if "inkling_text" in spec.model_types)
 

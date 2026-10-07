@@ -14,7 +14,7 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from typing import Any
 
-from src.environments.sandbox.base import SandboxAgentFault, SandboxInfraError
+from src.environments.sandbox.base import SandboxFault, SandboxInfraError
 from src.inference.response import ENGINE_CUT_FINISH_REASONS
 from src.rewards.composer import RewardComposer
 from src.rewards.samples import TURN_FLAG_NOTES, ScoringSample
@@ -123,16 +123,37 @@ def resolve_reasoning_effort(effort: str | None) -> str | None:
     return effort
 
 
+def _content_text(content: Any) -> Any:
+    """A user turn's ``content`` as the text an environment carries: a string as is, a list of content
+    parts as its ``text`` parts concatenated, the way a chat template renders them. Any other part raises
+    ``ValueError``: an environment's conversation is text, so an image part would be dropped unseen."""
+    if not isinstance(content, list):
+        return content
+    other = [
+        part
+        for part in content
+        if not (isinstance(part, dict) and part.get("type") == "text" and isinstance(part.get("text"), str))
+    ]
+    if other:
+        kinds = sorted({str(part.get("type")) if isinstance(part, dict) else type(part).__name__ for part in other})
+        raise ValueError(
+            f"the task's user turn carries content parts other than text ({kinds}); an environment's "
+            "conversation is text, so only {'type': 'text', 'text': ...} parts can be handed to it"
+        )
+    return "".join(part["text"] for part in content)
+
+
 def task_prompt(prompt: str | list[dict[str, Any]]) -> Any:
     """What an environment is handed as the task for a dataset prompt: a string as is, or a conversation's
-    LAST user turn (its earlier turns and system message are the dataset's framing, not the task). The
-    trainer and the eval driver both reduce a prompt through here, so an environment gets the same task
-    from either. A conversation with no user turn raises ``ValueError``: there is nothing to hand it."""
+    LAST user turn (its earlier turns and system message are the dataset's framing, not the task), a
+    content-part list read as its text (:func:`_content_text`). The trainer and the eval driver both
+    reduce a prompt through here, so an environment gets the same task from either. A conversation with
+    no user turn raises ``ValueError``: there is nothing to hand it."""
     if not isinstance(prompt, list):
         return prompt
     for message in reversed(prompt):
         if message.get("role") == "user":
-            return message["content"]
+            return _content_text(message["content"])
     raise ValueError(
         f"the conversation has no 'user' message (roles: {[m.get('role') for m in prompt]}); an environment "
         "is handed the last user turn as the task, so there is nothing to send it"
@@ -173,6 +194,13 @@ def require_magnitudes(**knobs: float) -> None:
     for name, value in knobs.items():
         if not math.isfinite(value) or value < 0:
             raise ValueError(f"{name} must be a finite value >= 0 (a magnitude), got {value}")
+
+
+def require_count(name: str, value: Any, minimum: int) -> None:
+    """Reject anything but an int of at least ``minimum`` for a count knob (a budget, a cap). A bool is an
+    int subclass and a float compares like a count, so either would otherwise stand in for one."""
+    if isinstance(value, bool) or not isinstance(value, int) or value < minimum:
+        raise ValueError(f"{name} must be an int >= {minimum}, got {value!r}")
 
 
 @dataclass(frozen=True)
@@ -669,7 +697,7 @@ class BaseEnvironment(ABC):
         trajectory: Trajectory,
         tool: str,
         success: bool,
-        fault: SandboxInfraError | SandboxAgentFault | None = None,
+        fault: SandboxFault | None = None,
     ) -> float:
         """Book one executed tool call and return its reward delta: by the class of the sandbox fault
         that ended it (:meth:`_book_sandbox_fault`), else as a success or a failure
@@ -678,9 +706,7 @@ class BaseEnvironment(ABC):
             return self._book_sandbox_fault(trajectory, tool, fault)
         return self._credit_tool_call(trajectory, success)
 
-    def _book_sandbox_fault(
-        self, trajectory: Trajectory, tool: str, fault: SandboxInfraError | SandboxAgentFault
-    ) -> float:
+    def _book_sandbox_fault(self, trajectory: Trajectory, tool: str, fault: SandboxFault) -> float:
         """Book one tool call a sandbox fault ended and return its reward delta; the step then ends the
         episode on :data:`SANDBOX_FAULT_KEY`, uncompleted (:meth:`_finalize_step`).
 
@@ -916,24 +942,14 @@ class BaseEnvironment(ABC):
         whose wording depends on the instance (a tool-less tool registry) overrides this."""
         return getattr(self, nudge_attr)
 
-    def _first_step(self, trajectory: Trajectory) -> EnvStep:
-        """Opening :class:`EnvStep` for a freshly reset episode (sync + async reset paths)."""
+    def _env_step(self, trajectory: Trajectory, reward: float = 0.0) -> EnvStep:
+        """The :class:`EnvStep` mirroring ``trajectory`` as it stands, carrying this step's ``reward``
+        delta: a freshly reset episode's opening step, a no-op step on one already done, a taken step."""
         return EnvStep(
             trajectory=trajectory,
             observation=trajectory.get_conversation(include_thinking=self.carry_reasoning),
-            reward=0.0,
-            done=False,
-            truncated=False,
-            info=trajectory.info,
-        )
-
-    def _done_step(self, trajectory: Trajectory) -> EnvStep:
-        """Terminal :class:`EnvStep` for an episode that is already complete (a no-op step)."""
-        return EnvStep(
-            trajectory=trajectory,
-            observation=trajectory.get_conversation(include_thinking=self.carry_reasoning),
-            reward=0.0,
-            done=True,
+            reward=reward,
+            done=trajectory.done,
             truncated=trajectory.truncated,
             info=trajectory.info,
         )
@@ -981,15 +997,7 @@ class BaseEnvironment(ABC):
                 self._drop_grading_payload(trajectory)
 
         self._trajectories[episode_id] = trajectory
-
-        return EnvStep(
-            trajectory=trajectory,
-            observation=trajectory.get_conversation(include_thinking=self.carry_reasoning),
-            reward=reward,
-            done=done,
-            truncated=truncated,
-            info=trajectory.info,
-        )
+        return self._env_step(trajectory, reward)
 
     @abstractmethod
     def _reset_single(self, prompt: str | list[dict[str, str]], context: dict[str, Any] | None = None) -> Trajectory:
@@ -1006,7 +1014,16 @@ class BaseEnvironment(ABC):
         """Grade a finished episode: the objective in ``[0, 1]`` and the environment's own shaping terms."""
 
     @staticmethod
-    def _null_answer_grade(trajectory: Trajectory) -> EpisodeGrade:
+    def _invalid_grade(trajectory: Trajectory, reason: str) -> EpisodeGrade:
+        """The grade of an episode whose grading reached no verdict (a grader that raised, nothing to grade
+        against): 0, with the episode marked invalid for ``reason`` so it leaves the GRPO group baseline
+        rather than biasing every sibling's advantage with a forced failure."""
+        trajectory.info[EPISODE_INVALID_KEY] = True
+        trajectory.info[EPISODE_INVALID_REASON_KEY] = reason
+        return EpisodeGrade(0.0)
+
+    @classmethod
+    def _null_answer_grade(cls, trajectory: Trajectory) -> EpisodeGrade:
         """The grade of an episode whose row is answer-graded but whose ``answer`` cell is null.
 
         Nothing was verified, so the completion payout would hand the full objective to any episode
@@ -1014,9 +1031,7 @@ class BaseEnvironment(ABC):
         episode leaves the baseline instead, the contract of a grading-infra outage.
         """
         logger.warning("Episode context carries a null %r; scoring it invalid, not a success", ANSWER_KEY)
-        trajectory.info[EPISODE_INVALID_KEY] = True
-        trajectory.info[EPISODE_INVALID_REASON_KEY] = f"the row's {ANSWER_KEY!r} cell is null: nothing to grade"
-        return EpisodeGrade(0.0)
+        return cls._invalid_grade(trajectory, f"the row's {ANSWER_KEY!r} cell is null: nothing to grade")
 
     @staticmethod
     def _cut_short(trajectory: Trajectory) -> bool:
@@ -1159,7 +1174,7 @@ class BaseEnvironment(ABC):
         self._bind_effort_profile(trajectory, context)
         trajectory.info["episode_id"] = episode_id
         self._trajectories[episode_id] = trajectory
-        return self._first_step(trajectory)
+        return self._env_step(trajectory)
 
     def _run_or_schedule(self, coroutine) -> None:
         """Run a teardown coroutine to completion when no loop runs here, else schedule it on the
@@ -1204,7 +1219,7 @@ class BaseEnvironment(ABC):
         for episode_id, action, context in zip(episode_ids, actions, contexts, strict=True):
             trajectory = self._episode(episode_id)
             if trajectory.done:
-                steps.append(self._done_step(trajectory))
+                steps.append(self._env_step(trajectory))
                 continue
 
             self._add_action_message(trajectory, action, context)
@@ -1229,7 +1244,7 @@ class BaseEnvironment(ABC):
         for episode_id in episode_ids:
             trajectory = self._episode(episode_id)
             if trajectory.done:
-                steps.append(self._done_step(trajectory))
+                steps.append(self._env_step(trajectory))
                 continue
             steps.append(self._finalize_step(episode_id, trajectory, 0.0, True, True, {}, None))
         return steps
@@ -1307,7 +1322,7 @@ class AsyncBaseEnvironment(BaseEnvironment):
         async def step_one(episode_id, action, context):
             trajectory = self._episode(episode_id)
             if trajectory.done:
-                return self._done_step(trajectory)
+                return self._env_step(trajectory)
 
             self._add_action_message(trajectory, action, context)
             trajectory, reward, done, truncated, info = await self._step_single_async(trajectory, action, context)

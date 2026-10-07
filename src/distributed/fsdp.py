@@ -76,15 +76,6 @@ def _require_single_device_params(model: nn.Module) -> None:
         )
 
 
-def _get_underlying_model(model: nn.Module) -> nn.Module:
-    """The transformer backbone to shard, falling back to ``model`` itself when none is reachable.
-
-    Layout knowledge lives in :func:`backbone_with_layers`; the fallback is local because FSDP must
-    still wrap something when a model exposes no recognizable layer list.
-    """
-    return backbone_with_layers(model) or model
-
-
 def _reject_unreachable_decoder_layers(model: nn.Module) -> None:
     """Raise when a generative decoder exposes no decoder-layer list :func:`decoder_layers` reaches.
 
@@ -322,7 +313,9 @@ def apply_fsdp2_per_layer(
     cannot reach is caught by :func:`_reject_unreachable_decoder_layers`.
     """
     _warn_fp32_pins_cast_by_policy(model, mp_policy)
-    underlying_model = _get_underlying_model(model)
+    # The backbone holding the layer list, or the model itself when none is reachable: FSDP must still
+    # wrap something.
+    underlying_model = backbone_with_layers(model) or model
 
     # Shard the module whose forward consumes ``embed_tokens``: a group on a nested backbone unshards
     # it after the composite parent above has already embedded the ids.
