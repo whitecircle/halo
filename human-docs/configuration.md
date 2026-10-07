@@ -79,8 +79,8 @@ the field alone:
 And four things a launch refuses up front rather than deep inside training — the
 first three in the parser:
 
-- An unknown or retired key, named in the message. No spelling is migrated — TRL's
-  retired `max_seq_length` (the field is `max_length`) raises like any other.
+- An unknown key, named in the message — ecosystem spellings included (TRL's
+  `max_seq_length`; the field is `max_length`).
 - YAML 1.1 booleans on a boolean field (`packing: no`, `bf16: off`) — YAML 1.2
   reads those as truthy strings, inverting what you wrote. Use `true` / `false`.
 - A value outside a field's declared choices (`advantage_method: banana`).

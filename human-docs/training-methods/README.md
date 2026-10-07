@@ -38,8 +38,9 @@ parallelism supports SFT, SMPO and offline GRPO full fine-tuning, and pipeline p
 release. The axis sizes are config fields or CLI flags, identical across methods
 ([Parallelism](../parallelism.md)).
 
-HuggingFace in, HuggingFace out. Checkpoints are written in standard form, so `from_pretrained`,
-vLLM and the Hub take them as they are; LoRA runs write an adapter you can merge with one command,
+HuggingFace in, HuggingFace out. Checkpoints load with `from_pretrained` and upload to the Hub as
+written; vLLM and SGLang serve them where the pinned engine reads the family's layout, some MoE
+families after `unfuse-moe-experts` and a few not at all. LoRA runs write an adapter you can merge with one command,
 except expert LoRA under EP, which folds at save time instead (`merge_expert_lora_on_save: true`)
 ([Checkpoints & Export](../checkpoints.md)).
 

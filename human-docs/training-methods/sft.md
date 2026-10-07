@@ -52,8 +52,9 @@ showing up in the loss curve.
 only and masks the prompt. It needs `assistant_message_template` (see [Chat templates](#chat-templates)).
 
 **Packing** (`packing: true`) concatenates short rows into fixed `max_length` blocks so no GPU time
-goes into padding. It requires an explicit `max_length`, which becomes both the pack size and the
-memory bound, and it is the default choice for text SFT.
+goes into padding. It requires an explicit `max_length`, the pack size, and it is the default choice
+for text SFT. With `per_device_train_batch_size` N > 1 the packed rows merge into one row of up to
+N × `max_length` tokens, so that product is the memory bound.
 
 **Padding-free** (`padding_free: true`) flattens a batch into one variable-length sequence instead.
 It needs a varlen Flash Attention kernel and cannot be combined with packing. Context parallelism

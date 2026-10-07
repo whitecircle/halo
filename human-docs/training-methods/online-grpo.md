@@ -39,8 +39,8 @@ and each logs separately as `rewards/<name>/mean`.
 | --- | --- | --- |
 | `accuracy` | the last `\boxed{...}` equals `answer` | nothing |
 | `format` | the completion matches `pattern` | `pattern`, default `<think>…</think>\s*<answer>…</answer>` |
-| `judge` | a generative judge grades the response against your rubric | `requirements` (name + description + weight), optionally `model`, `base_url`, `scale` |
-| `reward_model` | a served Bradley-Terry or classification model scores it | `url`, `model` |
+| `judge` | a generative judge grades the response against your rubric | `name`, `requirements` (name + description + weight), optionally `model`, `base_url`, `scale` |
+| `reward_model` | a served Bradley-Terry or classification model scores it | `name`, `url`, `model` |
 
 ```yaml
 rewards:

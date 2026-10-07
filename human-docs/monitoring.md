@@ -27,9 +27,9 @@ run_name: qwen3-sft-lr1e5 # optional; defaults to <script>-<output dir name>
 
 Credentials come from your `.env` (`WANDB_API_KEY`; ClearML uses its usual
 `clearml.conf` / `CLEARML_API_*` setup), which the container only sees via
-`--env-file .env`. Halo sets the project and run-name environment variables for
-both backends from the fields above, so you don't juggle `WANDB_PROJECT`
-yourself.
+`--env-file .env`. Halo sets `WANDB_PROJECT` and `CLEARML_PROJECT` from
+`project_name` and `CLEARML_TASK` from the run name, which W&B takes through
+`run_name`, so you don't juggle `WANDB_PROJECT` yourself.
 
 When resuming a run and you want the curves to continue in the same W&B run,
 export `WANDB_RUN_ID=<id>` and `WANDB_RESUME=allow` before relaunching;
@@ -45,7 +45,7 @@ metric groups on top:
 | --- | --- | --- |
 | `enable_efficiency_metrics` | off | step time, tokens/s per GPU and cluster-wide, allocated/peak GPU memory — the numbers [Performance](performance.md) quotes |
 | `report_mfu_diagnostics` | off | logs MFU and achieved TFLOPS; needs `enable_efficiency_metrics` on. The S-MFU variants appear only for MoE, where plain MFU misreads sparse models |
-| `enable_moe_metrics` | on | per-layer expert load balance: `moe/load_max`, `moe/load_cv`, `moe/dead_frac`, … (no-op on dense models) |
+| `enable_moe_metrics` | on | expert load balance averaged over the MoE layers: `moe/load_max`, `moe/load_cv`, `moe/dead_frac`, …, plus `moe/load_max_first` / `moe/load_max_last` for the first and last layer (no-op on dense models) |
 | `generate_eval_examples` | on (off for SFT) | a table of sample generations at each evaluation (skipped under TP/CP) |
 | `save_completions` (online / async GRPO) | on | writes each step's rollouts to `<output_dir>/completions/completions_<step>.parquet` (prompt, completion, reward, advantage), plus a `completions` table in W&B when `report_to` includes `wandb` |
 | `log_completions` (online / async GRPO) | off | additionally prints the per-sample table to the console |

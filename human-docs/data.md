@@ -86,7 +86,8 @@ to the Hub or S3. Five flags decide whether the output is usable:
 `--tokenizer-backend gigatoken` swaps the HF tokenizer for a Rust bulk encoder,
 roughly 6× faster on UltraChat 200K with the Qwen3-0.6B tokenizer. It verifies
 its IDs against the HF tokenizer at startup and raises on any divergence. It
-ships in the training image; outside it, `uv pip install 'halo[gigatoken]'`.
+ships in the training image; outside it, install the extra from a checkout:
+`uv pip install -e '.[gigatoken]'`.
 
 Training configs carry the matching field `tokenizer_backend` (`hf` by default,
 `gigatoken` to opt in). Embedding training rejects anything but `hf` —

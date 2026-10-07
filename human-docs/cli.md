@@ -51,8 +51,8 @@ halo run <tool> [launcher flags] [tool flags]
 ```
 
 Same flags minus `--accelerate`; everything else goes to the tool. A standalone `--` is only
-needed before a flag the launcher owns itself (`--help`, `--dry-run`, `--port`, `--root`, `--list`,
-`-n`, `-p`) when you mean the tool's: `halo run <tool> -- --help` prints the tool's help, not the
+needed before a flag the launcher owns itself (`--help`, `--dry-run`, `--nproc`, `--port`, `--root`,
+`--list`, `-n`, `-p`) when you mean the tool's: `halo run <tool> -- --help` prints the tool's help, not the
 launcher's. `halo run --list` prints the full catalog. The ones you'll actually reach for:
 
 | Tool | Purpose |

@@ -61,8 +61,9 @@ AWS_SECRET_ACCESS_KEY=...
 AWS_DEFAULT_REGION=...
 ```
 
-Nothing reads this file automatically — you pass it to Docker with
-`--env-file .env`. Skip any key you don't need; a public-model,
+Halo never loads this file itself. A hand-typed `docker run` needs
+`--env-file .env`; the `make` targets and the compose `training` service pass
+it for you. Skip any key you don't need; a public-model,
 no-tracking run works with an empty file.
 
 ## 3. Point caches at a big disk
@@ -110,8 +111,8 @@ same host. Drop `-v ~/.aws:/root/.aws` unless you want S3 access through your AW
 profile. The repo mounts at `/workspace`, so host-side edits are live in the
 container.
 
-`make train` wraps this invocation if you'd rather not type it, and the test
-targets bring their own.
+`make train` wraps this invocation if you'd rather not type it, adding
+`--network host` but not `--cap-add=SYS_PTRACE`; the test targets bring their own.
 
 ## 5. Verify
 

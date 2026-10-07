@@ -10,8 +10,8 @@ reference.
   for B200/B300, `halo:hopper` for H100/H200. The host has no usable Python;
   import errors for `flash_attn` or `deep_ep` almost always mean the wrong image.
 - The container got `--gpus all` and `--env-file .env`. Missing
-  `HF_TOKEN`/`WANDB_API_KEY` failures mean the second one — `.env` is never
-  loaded automatically.
+  `HF_TOKEN`/`WANDB_API_KEY` failures mean the second one — Halo never loads
+  `.env` itself; only the `make` targets and the compose `training` service pass it.
 - Caches point at a disk with space: `df -h` on whatever `HF_HOME`,
   `HF_DATASETS_CACHE`, `TMPDIR`, and `HALO_DATA_ROOT` resolve to.
 

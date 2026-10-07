@@ -234,8 +234,8 @@ model generates past its tool call and hallucinates the result for most of the t
 GPT-OSS's ~201k vocabulary makes too large; every shipped GPT-OSS environment recipe sets it, and
 the trainer refuses a full-logits plane that does not fit.
 `fsdp_reshard_after_backward: false` is optional: it leaves one FSDP2 re-gather per
-optimizer step instead of one per grad-accumulation microstep, for one unsharded bf16
-parameter copy per GPU (fine at 20B).
+optimizer step instead of one per grad-accumulation microstep. Peak memory is unchanged:
+the unsharded parameters it keeps are the ones ZeRO-2 already holds from forward to backward.
 `reset_sinks: false` keeps the checkpoint's sinks live and frozen so the trainer's log
 probabilities match the served policy. Live sinks need a sink-carrying attention
 implementation (FA4 on Blackwell); FA2 and SDPA are rejected and CP is unavailable

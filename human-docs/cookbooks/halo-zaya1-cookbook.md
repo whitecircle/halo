@@ -62,7 +62,7 @@ gradient_checkpointing: false
 optim: adamw_torch_fused
 learning_rate: 5.0e-06
 lr_scheduler_type: cosine
-warmup_steps: 0.03
+warmup_steps: 32
 max_grad_norm: 1.0
 
 save_strategy: steps

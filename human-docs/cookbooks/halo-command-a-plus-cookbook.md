@@ -17,7 +17,9 @@ adapters at EP2, EP1 and EP2+CP2, through a merged save and an exact resume.
 |:---:|:---:|:---:|:---:|:---:|:---:|:---:|:---:|
 | Yes | Yes | Yes | Yes | Yes | Yes | Yes | Yes |
 
-Halo wraps the Cohere2 MoE blocks inside the vision model. It keeps the native Hugging Face checkpoint format.
+Halo wraps the Cohere2 MoE blocks inside the vision model. The EP-gathered save keeps transformers' fused expert
+pair, which `from_pretrained` and vLLM 0.26.0 read; `halo run unfuse-moe-experts` rewrites it to the hub's
+per-expert spelling.
 
 The EP path preserves the sigmoid router and averaged shared expert. The CP path preserves each layer's positional-encoding rule.
 

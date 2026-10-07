@@ -127,7 +127,7 @@ test-gpu-full: ## pytest full GPU tier (heavy, many-GPU)
 # compose files): weight sync is an NCCL broadcast, and a rank cannot broadcast to itself.
 TRAINER_CUDA_DEVICES ?= 0,1,2,3,4,5,6
 # Both ends of a weight-sync test must serve the same checkpoint, so the dense and MoE halves are
-# separate passes with the server restarted in between; SERVER_TIER=moe selects the MoE half.
+# separate passes with the server restarted in between; SERVER_TIER selects the pass.
 #   dense: Qwen/Qwen3-0.6B on either engine (VLLM_MODEL / SGLANG_MODEL)
 #   MoE:   SERVER_TIER='moe and not gptoss' with VLLM_MODEL=Qwen/Qwen3-30B-A3B-Instruct-2507, and
 #          SERVER_TIER='moe and gptoss' with VLLM_MODEL / SGLANG_MODEL=unsloth/gpt-oss-20b-BF16
@@ -141,7 +141,7 @@ SERVER_TIER ?= not moe
 test-gpu-vllm: SERVER_TIER_DOCKER_ENV = $(NO_FABRIC_ENV) \
   -e CUDA_VISIBLE_DEVICES=$(TRAINER_CUDA_DEVICES) \
   -e VLLM_SERVER_URL=$(VLLM_SERVER_URL) -e HALO_TEST_REQUIRE_SERVER=vllm
-test-gpu-vllm: ## pytest the vLLM-server GPU tier (server on a GPU outside TRAINER_CUDA_DEVICES; SERVER_TIER=moe for the MoE half; EFA=1 on an EFA host)
+test-gpu-vllm: ## pytest the vLLM-server GPU tier (server on a GPU outside TRAINER_CUDA_DEVICES; SERVER_TIER picks the dense or a MoE pass, see above; EFA=1 on an EFA host)
 	@curl -sf $(VLLM_SERVER_URL)/health >/dev/null || { echo "No vLLM server at $(VLLM_SERVER_URL). Start it on a \
 	  GPU the trainer does not use: VLLM_CUDA_DEVICES=7 VLLM_REASONING_PARSER=qwen3 \
 	  VLLM_USE_V2_MODEL_RUNNER=0 docker compose -f docker-compose.vllm.yml up -d vllm-server \
@@ -152,7 +152,7 @@ test-gpu-vllm: ## pytest the vLLM-server GPU tier (server on a GPU outside TRAIN
 test-gpu-sglang: SERVER_TIER_DOCKER_ENV = $(NO_FABRIC_ENV) \
   -e CUDA_VISIBLE_DEVICES=$(TRAINER_CUDA_DEVICES) \
   -e SGLANG_SERVER_URL=$(SGLANG_SERVER_URL) -e HALO_TEST_REQUIRE_SERVER=sglang
-test-gpu-sglang: ## pytest the SGLang-server GPU tier (server on a GPU outside TRAINER_CUDA_DEVICES; SERVER_TIER=moe for the MoE half; EFA=1 on an EFA host)
+test-gpu-sglang: ## pytest the SGLang-server GPU tier (server on a GPU outside TRAINER_CUDA_DEVICES; SERVER_TIER picks the dense or a MoE pass, see above; EFA=1 on an EFA host)
 	@curl -sf $(SGLANG_SERVER_URL)/health >/dev/null || { echo "No SGLang server at $(SGLANG_SERVER_URL). Start it on a \
 	  GPU the trainer does not use: SGLANG_CUDA_DEVICES=7 SGLANG_MODEL=Qwen/Qwen3-0.6B docker compose -f docker-compose.sglang.yml up -d \
 	  (EFA=1: add -f docker-compose.sglang.efa.yml)"; exit 1; }
