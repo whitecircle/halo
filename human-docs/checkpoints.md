@@ -100,8 +100,7 @@ weights without an error; `unfuse-moe-experts` rewrites such a checkpoint first
 ([per-engine loaders](../agent-docs/reference/checkpoints.md#serving-on-vllm--sglang) ↗).
 Step-3.7 Flash needs no rewrite — its gathered save is already in the hub layout
 vLLM reads, and the tool refuses it accordingly. Merge sharded saves first, and
-serve a LoRA run either as base-plus-adapter or merged (EP expert LoRA only
-merged, through `merge_expert_lora_on_save: true`). Serving *during*
+serve a LoRA run either as base-plus-adapter or merged. Serving *during*
 training — the rollout server the RL methods generate against — is
 [Rollout Servers](rollout-servers.md).
 
