@@ -224,7 +224,7 @@ class _Props:
 
 _FABRIC_QUERY = """GPU 00000000:04:00.0
     Product Name                          : NVIDIA B300
-    GPU Fabric GUID                       : 0x6d9419000347bb4c
+    GPU Fabric GUID                       : 0x0000000000000000
     Inforom Version
         State                             : NotAFabricField
         CliqueId                          : 999

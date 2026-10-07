@@ -1,7 +1,7 @@
 #!/usr/bin/env python
 """Repo pin: every ``warn_once`` caller logs through a stdlib logger.
 
-``warn_once`` forwards only ``exc_info`` (:mod:`src.log`), so it cannot ask
+``warn_once`` forwards no logging keyword (:mod:`src.log`), so it cannot ask
 accelerate's ``MultiProcessAdapter`` for ``main_process_only=False`` — and that adapter defaults it
 to ``True``. A module that warns once through ``accelerate.logging.get_logger`` therefore drops the
 warning on every rank but 0, which is precisely the rank a per-row / per-shard condition tends to

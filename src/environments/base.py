@@ -24,7 +24,6 @@ from src.rewards.terms import (
     OBJECTIVE_TERM_NAME,
     EnvironmentTerm,
     RewardTerm,
-    View,
     component_key,
     parse_reward_terms,
 )
@@ -818,13 +817,7 @@ class BaseEnvironment(ABC):
             for msg in prompt:
                 traj.add_message(Message.from_dict(msg))
 
-        traj.info.update(
-            {
-                "task": prompt if isinstance(prompt, str) else str(prompt),
-                "context": context,
-                "completed": False,
-            }
-        )
+        traj.info.update({"context": context, "completed": False})
         if extra_info:
             traj.info.update(extra_info)
         return traj
@@ -1079,30 +1072,20 @@ class BaseEnvironment(ABC):
         converted before grading (a choice index to its letter) overrides this."""
         return (trajectory.info.get("context") or {}).get(ANSWER_KEY)
 
-    def _episode_digest(self, trajectory: Trajectory, sample: ScoringSample) -> str | None:
-        """The environment's own compact account of the episode for a ``digest`` view, or ``None`` for
-        the generic one — every turn's actions and results in short, then the final answer
-        (:func:`~src.rewards.samples.render_digest`), which the judge renders with its term's options.
-        An environment whose evidence lives in its own counters overrides this."""
-        return None
-
     def _scoring_sample(self, trajectory: Trajectory) -> ScoringSample:
         """What an external scorer reads of a finished episode: the prompt turns (everything before the
         first assistant turn), the policy's turns after them with their reasoning and turn flags, the
-        final answer (:meth:`_final_answer`), the reference (:meth:`_scoring_reference`), the tools
-        the policy could call, and the digest when a term reads one."""
+        final answer (:meth:`_final_answer`), the reference (:meth:`_scoring_reference`) and the tools
+        the policy could call."""
         messages = [self._sample_message(message) for message in trajectory.messages]
         first = next((i for i, m in enumerate(trajectory.messages) if m.role == "assistant"), len(messages))
-        sample = ScoringSample(
+        return ScoringSample(
             prompt=messages[:first],
             completion=messages[first:],
             final_answer=self._final_answer(trajectory),
             reference=self._scoring_reference(trajectory),
             tools=self.get_tools_schema() or None,
         )
-        if View.DIGEST in self._rewards.views:
-            sample = replace(sample, digest=self._episode_digest(trajectory, sample))
-        return sample
 
     @staticmethod
     def _sample_message(message: Message) -> dict[str, Any]:

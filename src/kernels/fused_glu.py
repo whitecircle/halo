@@ -20,13 +20,9 @@ from typing import NamedTuple
 import torch
 import triton
 import triton.language as tl
+from triton.language.extra.libdevice import tanh
 
 from src.env import env_flag
-
-try:
-    from triton.language.extra.libdevice import tanh
-except ImportError:  # Triton < 3.4 packages CUDA libdevice under a vendor namespace.
-    from triton.language.extra.cuda.libdevice import tanh
 
 logger = logging.getLogger(__name__)
 

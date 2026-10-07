@@ -336,7 +336,11 @@ def test_cli_override_applies_after_yaml_value():
 
 
 def test_overlapping_fields_resolved():
-    """Overlapping fields across dataclasses should be resolved (last wins) without error."""
+    """A field two dataclasses declare reaches BOTH, from the YAML and from a CLI override alike.
+
+    The training scripts rely on it: ``pad_token``/``eos_token`` sit on the script args and on TRL's
+    configs, and the tokenizer setup reads the script-args copy.
+    """
 
     @dataclass
     class OverlapA:
@@ -351,14 +355,15 @@ def test_overlapping_fields_resolved():
     # Should not raise — conflict_handler='resolve' allows duplicate fields
     parser = H4ArgumentParser((OverlapA, OverlapB))
 
-    # Parse with a YAML that sets the shared field
     path = _write_yaml("shared_field: 42\nonly_a: hello\nonly_b: world\n")
     try:
         result_a, result_b = parser.parse_yaml_file(path, allow_extra_keys=False)
-        # Last dataclass (OverlapB) wins for the shared field
-        assert result_b.shared_field == 42, f"Expected 42, got {result_b.shared_field}"
+        assert (result_a.shared_field, result_b.shared_field) == (42, 42)
         assert result_a.only_a == "hello"
         assert result_b.only_b == "world"
+
+        result_a, result_b = parser.parse_yaml_and_args(path, ["--shared_field=7"])
+        assert (result_a.shared_field, result_b.shared_field) == (7, 7)
     finally:
         os.unlink(path)
 

@@ -20,6 +20,7 @@ from transformers import (
 )
 
 from src.distributed.context_parallel.wrapper import UlyssesCPModelWrapper
+from src.distributed.expert_parallel.base_layer import find_ep_layers
 from src.distributed.mesh import has_tp_dim
 from src.distributed.pipeline_parallel.stage import PipelineStageModule
 from src.distributed.runtime import barrier, get_global_rank, get_global_world_size, is_global_main_process
@@ -81,12 +82,7 @@ def _is_fsdp2_model(model) -> bool:
 
 def _is_distributed_parallel_model(model) -> bool:
     """Whether the model uses parallelism (EP, FSDP2, TP DTensors) requiring all ranks in forward."""
-    if _is_fsdp2_model(model):
-        return True
-    for module in model.modules():
-        if hasattr(module, "ep_config") or hasattr(module, "dispatcher"):
-            return True
-    return _has_any_dtensor_params(model)
+    return _is_fsdp2_model(model) or bool(find_ep_layers(model)) or _has_any_dtensor_params(model)
 
 
 def _disable_gradient_checkpointing(model) -> list[torch.nn.Module]:
@@ -193,11 +189,11 @@ class GenerateExamplesCallback(TrainerCallback):
         if _is_distributed_parallel_model(unwrapped):
             # FSDP2/EP generation is collective, so swallowing a per-rank error would desync the
             # next collective.
-            self._generate_standard(unwrapped, state)
+            self._generate_standard(unwrapped, state, is_parallel=True)
             return
         try:
             # DDP / single GPU: generation is rank-local, so a failure can be swallowed.
-            self._generate_standard(unwrapped, state)
+            self._generate_standard(unwrapped, state, is_parallel=False)
         except RuntimeError as e:
             if is_global_main_process():
                 logger.warning(
@@ -205,12 +201,11 @@ class GenerateExamplesCallback(TrainerCallback):
                     f"{state.global_step}: {e}. Training will continue."
                 )
 
-    def _generate_standard(self, gen_model, state: TrainerState):
+    def _generate_standard(self, gen_model, state: TrainerState, *, is_parallel: bool):
         """Generate examples using model.generate().
 
         Distributed parallel models (FSDP2, EP): all ranks participate in forward. DDP: work split.
         """
-        is_parallel = _is_distributed_parallel_model(gen_model)
         world_size = get_global_world_size()
 
         gc_enabled_modules = _disable_gradient_checkpointing(gen_model)

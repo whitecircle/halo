@@ -92,17 +92,17 @@ def split_rows_head(tensor: torch.Tensor, real_rows: int) -> torch.Tensor:
     return tensor if real_rows >= tensor.size(0) else tensor[:real_rows]
 
 
-def split_rows_mean(values: torch.Tensor, real_rows: int, dim: int = 0, *, whole: bool = False) -> torch.Tensor:
-    """The mean over ``values``' first ``real_rows`` rows along ``dim`` — over every element of them
-    under ``whole`` — and 0 over none (a rank holding only an eval split's final-round padding).
+def split_rows_mean(values: torch.Tensor, real_rows: int) -> torch.Tensor:
+    """The mean over every element of ``values``' first ``real_rows`` rows, and 0 over none (a rank
+    holding only an eval split's final-round padding).
 
-    Every row is ``values.mean(dim)`` (``values.mean()``) itself, so a train batch reduces bit for bit
-    like a plain mean.
+    Over every row it is ``values.mean()`` itself, so a train batch reduces bit for bit like a plain
+    mean.
     """
-    if real_rows >= values.size(dim):
-        return values.mean() if whole else values.mean(dim)
-    head = values.narrow(dim, 0, real_rows)
-    return head.sum() / max(head.numel(), 1) if whole else head.sum(dim) / max(real_rows, 1)
+    if real_rows >= values.size(0):
+        return values.mean()
+    head = values[:real_rows]
+    return head.sum() / max(head.numel(), 1)
 
 
 def rank_split_rows(split_rows: int, rows_per_rank: int, rank: int) -> int:

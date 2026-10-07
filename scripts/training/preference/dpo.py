@@ -55,8 +55,6 @@ def main():
     parser = H4ArgumentParser((DPOScriptArguments, DPOConfig, ModelConfig, DistributedArguments))
     args, dpo_config, model_config, dist_args = parser.parse()
 
-    # DPOConfig also declares pad_token; the resolve-conflict parser captures the YAML key there,
-    # so sync_tokens mirrors it back onto the script args the tokenizer setup reads.
     runtime = init_training_script(
         args,
         dpo_config,
@@ -64,7 +62,6 @@ def main():
         dist_args,
         script_prefix="dpo",
         trainer_cls=DistributedDPOTrainer,
-        sync_tokens=("pad_token",),
     )
     parallelism_config = runtime.parallelism_config
 

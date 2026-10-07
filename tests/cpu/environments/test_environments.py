@@ -1023,7 +1023,7 @@ def test_get_mcp_server_config():
     assert "BRAVE_API_KEY" in config["env"]
 
     config = get_mcp_server_config("github")
-    assert "GITHUB_TOKEN" in config["env"]
+    assert "GITHUB_PERSONAL_ACCESS_TOKEN" in config["env"]
 
     try:
         get_mcp_server_config("nonexistent_server")

@@ -9,8 +9,6 @@ import json
 from dataclasses import dataclass
 from pathlib import Path
 
-from pydantic import BaseModel
-
 from src.inference.response import OpenAIResponse
 
 
@@ -21,12 +19,7 @@ class CheckpointLoad:
     skipped_records: int = 0
 
 
-def load_openai_checkpoint(
-    checkpoint_file: str,
-    *,
-    result_count: int,
-    response_format: type[BaseModel] | None,
-) -> CheckpointLoad:
+def load_openai_checkpoint(checkpoint_file: str, *, result_count: int) -> CheckpointLoad:
     results: list[OpenAIResponse | None] = [None] * result_count
     processed_indices: set[int] = set()
     skipped_records = 0
@@ -38,7 +31,7 @@ def load_openai_checkpoint(
     with path.open("r", encoding="utf-8") as file:
         for line in file:
             try:
-                index, response = _checkpoint_line_to_response(line, response_format)
+                index, response = _checkpoint_line_to_response(line)
             except (TypeError, ValueError):
                 skipped_records += 1
                 continue
@@ -70,24 +63,14 @@ def append_openai_checkpoint(
         for index, response in records:
             file.write(
                 json.dumps(
-                    {"index": index, "result": _response_to_checkpoint(response)},
+                    {"index": index, "result": response.model_dump()},
                     ensure_ascii=False,
                 )
                 + "\n"
             )
 
 
-def _response_to_checkpoint(response: OpenAIResponse) -> dict[str, object]:
-    result = response.model_dump()
-    if isinstance(response.answer, BaseModel):
-        result["answer"] = response.answer.model_dump()
-    return result
-
-
-def _checkpoint_line_to_response(
-    line: str,
-    response_format: type[BaseModel] | None,
-) -> tuple[int, OpenAIResponse]:
+def _checkpoint_line_to_response(line: str) -> tuple[int, OpenAIResponse]:
     data = json.loads(line)
     if not isinstance(data, dict):
         raise TypeError("checkpoint record must be an object")
@@ -102,19 +85,11 @@ def _checkpoint_line_to_response(
     if not isinstance(result, dict):
         raise TypeError("checkpoint result must be an object")
 
-    return index, _openai_response_from_checkpoint(result, response_format)
+    return index, _openai_response_from_checkpoint(result)
 
 
-def _openai_response_from_checkpoint(
-    result: dict[str, object],
-    response_format: type[BaseModel] | None,
-) -> OpenAIResponse:
+def _openai_response_from_checkpoint(result: dict[str, object]) -> OpenAIResponse:
     answer = result.get("answer")
-    if response_format is not None and isinstance(answer, dict):
-        # A ValidationError is a ValueError: the record is skipped and the request re-issued, as a
-        # live response that fails validation is.
-        answer = response_format.model_validate(answer)
-
     # A null answer is legitimate with tool_calls; only neither-present is genuinely corrupt.
     if answer is None and not result.get("tool_calls"):
         raise ValueError("checkpoint result is missing answer")

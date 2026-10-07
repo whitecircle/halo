@@ -10,7 +10,6 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from openai import AsyncOpenAI
-from pydantic import BaseModel
 from tqdm.asyncio import tqdm as async_tqdm
 
 from src.inference.openai_client import generate_openai_response
@@ -59,28 +58,20 @@ def resolve_request_tools(
 
 
 def resolve_checkpoint_file(
-    checkpoint_file: str | None,
     *,
     model: str,
     messages: list[str] | list[list[dict]],
-    system_prompt: str | None,
     temperature: float | None,
     max_tokens: int,
     request_tools: RequestTools,
-    response_format: type[BaseModel] | None,
 ) -> str:
-    """``checkpoint_file`` as given, else a path under the temp dir keyed by the request identity."""
-    if checkpoint_file is not None:
-        return checkpoint_file
-
+    """The resume-store path under the temp dir, keyed by the request identity."""
     hash_content = {
         "model": model,
-        "system_prompt": system_prompt,
         "temperature": temperature,
         "max_tokens": max_tokens,
         "tools": request_tools.hash_sample(),
         "per_message_tools": request_tools.per_message,
-        "response_format": response_format.__name__ if response_format else None,
         "messages_sample": _sequence_digest(messages),
     }
     task_hash = hashlib.md5(json.dumps(hash_content, sort_keys=True).encode()).hexdigest()
@@ -92,24 +83,18 @@ async def parallel_openai_requests(
     messages: list[str] | list[list[dict]],
     *,
     client: AsyncOpenAI,
-    response_format: type[BaseModel] | None = None,
-    use_native_json_schema: bool = True,
-    system_prompt: str | None = None,
     temperature: float | None = 0.0,
     max_tokens: int = 512,
     max_workers: int = 8,
-    checkpoint_file: str | None = None,
     checkpoint_interval: int = 10,
     disable_checkpoints: bool = False,
     tools: list[dict] | list[list[dict] | None] | None = None,
-    request_timeout: float = 180,
 ) -> list[OpenAIResponse | None]:
     """One :func:`generate_openai_response` per entry of ``messages``, ``max_workers`` in flight, with
     incremental checkpointing: completed results are appended so a re-run resumes, and a failed
     request is left ``None`` and un-checkpointed, so it retries on the next run.
 
     ``tools`` is either a single list applied to every message, or one list per message.
-    ``request_timeout`` bounds each individual request.
     """
     request_tools = resolve_request_tools(tools, len(messages))
 
@@ -123,13 +108,9 @@ async def parallel_openai_requests(
                     model,
                     messages[index],
                     client=client,
-                    response_format=response_format,
-                    system_prompt=system_prompt,
                     temperature=temperature,
                     max_tokens=max_tokens,
-                    use_native_json_schema=use_native_json_schema,
                     tools=request_tools.for_message(index),
-                    request_timeout=request_timeout,
                 )
                 return index, response
         except Exception:
@@ -140,21 +121,17 @@ async def parallel_openai_requests(
 
     processed: set[int] = set()
     pending_records: list[tuple[int, OpenAIResponse]] = []
+    checkpoint_file = None
     if not disable_checkpoints:
         checkpoint_file = resolve_checkpoint_file(
-            checkpoint_file,
             model=model,
             messages=messages,
-            system_prompt=system_prompt,
             temperature=temperature,
             max_tokens=max_tokens,
             request_tools=request_tools,
-            response_format=response_format,
         )
         logger.info("Checkpoint file path: %s", checkpoint_file)
-        checkpoint = load_openai_checkpoint(
-            checkpoint_file, result_count=len(results), response_format=response_format
-        )
+        checkpoint = load_openai_checkpoint(checkpoint_file, result_count=len(results))
         results = checkpoint.results
         processed = checkpoint.processed_indices
         if checkpoint.skipped_records:

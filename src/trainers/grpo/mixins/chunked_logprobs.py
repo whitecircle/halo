@@ -26,8 +26,8 @@ from src.distributed.expert_parallel.dispatcher import bump_forward_generation
 from src.distributed.runtime import materialize_dtensor, rank_consensus
 from src.distributed.tensor_parallel.state_dict import tp_plan_shards_params
 from src.models.head_transform import IDENTITY_HEAD_TRANSFORM, HeadTransform, resolve_head_transform
-from src.models.loading.config_levels import text_config
 from src.models.modality import config_declares_multimodality
+from src.models.patches.attention import effective_attn_implementation
 from src.models.structure import base_transformers_model
 from src.trainers.mixins.validation import evaluation_runs
 
@@ -112,11 +112,7 @@ def dense_row_spans(attention_mask: torch.Tensor) -> list[tuple[int, int]]:
 def uses_fa4(model) -> bool:
     """Whether ``model`` runs FlashAttention-4. The chunked forward then trims to a dense per-row call
     for exact RoPE positions and rank-uniform collective counts (see ``_dense_last_hidden_state``)."""
-    config = getattr(model, "config", None)
-    if config is None:
-        return False
-    impl = getattr(text_config(config), "_attn_implementation", None) or getattr(config, "_attn_implementation", None)
-    return impl == "flash_attention_4"
+    return effective_attn_implementation(getattr(model, "config", None)) == "flash_attention_4"
 
 
 def rows_forward_densely(model, batch_size: int) -> bool:

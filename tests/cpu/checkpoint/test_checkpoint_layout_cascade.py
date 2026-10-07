@@ -18,10 +18,10 @@ from safetensors.torch import save_file
 from src.checkpoint.format import (
     LEGACY_WEIGHTS_FILE,
     WHOLE_MODEL_WEIGHT_FILES,
+    StreamingCheckpointReader,
     has_whole_model_weight_file,
     load_full_state_dict,
     read_checkpoint_key_set,
-    read_specific_keys_from_checkpoint,
     resolve_checkpoint_weights,
 )
 from src.checkpoint.tool_io import checkpoint_shard_files
@@ -55,7 +55,8 @@ def test_readers_agree_on_a_sharded_index(tmp_path):
         "model-00001-of-00002.safetensors",
         "model-00002-of-00002.safetensors",
     }
-    assert torch.equal(read_specific_keys_from_checkpoint(directory, ["b.weight"])["b.weight"], torch.full((3,), 2.0))
+    with StreamingCheckpointReader(directory, ["b.weight"]) as reader:
+        assert torch.equal(reader.get("b.weight"), torch.full((3,), 2.0))
 
 
 def test_readers_agree_on_a_single_file(tmp_path):

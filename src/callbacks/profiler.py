@@ -63,7 +63,6 @@ class TorchProfilerCallback(TrainerCallback):
         self.warmup = warmup
         self.active = active
         self.repeat = repeat
-        self.ranks = ranks
         # CPU op tracing is single-threaded and starves the GPUs on a large model; False = CUDA-only.
         self.cpu_activity = cpu_activity
         self.record_shapes = record_shapes

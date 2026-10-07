@@ -27,7 +27,6 @@ from src.checkpoint.format import (
     load_full_state_dict,
     missing_resume_adapter_reason,
     read_checkpoint_key_set,
-    read_specific_keys_from_checkpoint,
     resolve_checkpoint_weights,
     resume_adapter_dir,
     resume_adapter_on_own_weights_reason,
@@ -41,12 +40,10 @@ from src.distributed.expert_parallel.expert_weights import has_ep_lora
 from src.distributed.fsdp import reshard_fsdp2_modules
 from src.distributed.pipeline_parallel.lazy_loader import PER_NODE_PLACEMENT_REMEDY
 from src.distributed.runtime import (
-    DeferredRankFailure,
     barrier,
     broadcast_from_rank0,
     copy_full_tensor,
     is_global_main_process,
-    is_multi_rank_run,
     reject_across_ranks,
 )
 from src.log import KEY_PREVIEW_COUNT
@@ -233,14 +230,6 @@ class CheckpointLoader:
         if ctx.is_pp_mode:
             # Dispatched first: a stage's re-based local names misresolve under every other path.
             return self._load_pp_stage(resume_from_checkpoint, model, for_best_model=for_best_model)
-        if self._is_extras_only_checkpoint(resume_from_checkpoint, model if model is not None else ctx.model):
-            # Frozen-base runs save only wrapper params; a full load misreads that as a mismatch.
-            restore_adapters(
-                resume_from_checkpoint, model if model is not None else ctx.model, is_cp_mode=ctx.is_cp_mode
-            )
-            self._restore_extra_trained_params(resume_from_checkpoint, model if model is not None else ctx.model)
-            return
-
         if self._needs_skip_weight_load():
             live_model = model if model is not None else ctx.model
             live_source = weights_read_from(live_model)
@@ -289,8 +278,6 @@ class CheckpointLoader:
                 ships_base_weights=ships_base_weights,
                 built_from_ckpt=built_from_ckpt,
             )
-            # Wrapper-level trained params are dropped by the base-only reload too.
-            self._restore_extra_trained_params(resume_from_checkpoint, live_model)
             if is_global_main_process():
                 mode = "+".join(
                     m
@@ -405,7 +392,6 @@ class CheckpointLoader:
         if not for_best_model and constructed_from_ckpt:
             if is_global_main_process():
                 logger.info(f"TP resume: model was constructed from {checkpoint}; skipping the weight reload.")
-            self._restore_extra_trained_params(checkpoint, model)
             return
         if ctx.fsdp_wrapped:
             if for_best_model:
@@ -569,84 +555,6 @@ class CheckpointLoader:
             logger.info(f"✓ PP stage checkpoint loaded from {checkpoint} ({len(local_by_global)} tensors)")
         barrier()
 
-    def _is_extras_only_checkpoint(self, resume_from_checkpoint: str, model) -> bool:
-        """Whether the checkpoint contains ONLY the model's declared extra trained params.
-
-        Rank-uniform (rank 0 reads the key set, decision broadcast) — the verdict gates collective
-        restore paths. False when the model declares no extras or the checkpoint has base weights.
-        """
-        unwrapped = unwrap_framework_wrappers(model)
-        names = set(getattr(unwrapped, "_extra_checkpoint_param_names", ()) or ())
-        if not names:
-            return False
-        verdict = False
-        if is_global_main_process():
-            try:
-                keys = read_checkpoint_key_set(resume_from_checkpoint)
-                verdict = bool(keys) and keys <= names
-            except Exception as e:
-                logger.warning(f"Unreadable checkpoint key set at {resume_from_checkpoint}: {e}")
-        return broadcast_from_rank0(verdict)
-
-    def _restore_extra_trained_params(self, resume_from_checkpoint: str, model) -> None:
-        """Restore wrapper-level trained params that are NOT base-model weights (EP/CP skip path).
-
-        A wrapper adding trained params after ``from_pretrained`` has them reset to init since the
-        base reload never sees them. Params are declared via ``_extra_checkpoint_param_names``; read
-        only those and broadcast into the live (possibly FSDP2-sharded) params. Collective-safe: rank 0
-        reads, every rank enters ``broadcast_from_rank0`` ``set_model_state_dict``. No-op when none
-        declared, and a raise (not a warning) when the checkpoint cannot be read — see below.
-        """
-        unwrapped = unwrap_framework_wrappers(model)
-        names = tuple(getattr(unwrapped, "_extra_checkpoint_param_names", ()) or ())
-        if not names:
-            return
-
-        def _read_declared_extras() -> dict[str, torch.Tensor]:
-            try:
-                return read_specific_keys_from_checkpoint(resume_from_checkpoint, names)
-            except Exception as e:
-                raise RuntimeError(
-                    f"unreadable checkpoint at {resume_from_checkpoint} ({type(e).__name__}: {e}). "
-                    f"{list(names)} are this run's trained state, so continuing would resume them at "
-                    f"INITIALIZATION under a resumed step count, LR schedule and dataloader "
-                    f"position — a silent restart. Resume from a complete checkpoint."
-                ) from e
-
-        found_extras: dict[str, torch.Tensor] = {}
-        # Fenced rather than raised bare: the read is rank 0's alone and the broadcast below is
-        # collective, so a lone raise would strand the peers there.
-        guard = DeferredRankFailure(f"extra trained param restore from {resume_from_checkpoint}")
-        if is_global_main_process():
-            found_extras = guard.run(_read_declared_extras) or {}
-            if guard.reason is None:  # a failed read is reported uniformly by reject() below
-                missing = [n for n in names if n not in found_extras]
-                if missing:
-                    logger.warning(
-                        f"Resume: extra trained param(s) {missing} not found in {resume_from_checkpoint}; "
-                        f"they stay at initialization. (Restored: {sorted(found_extras)})"
-                    )
-                else:
-                    logger.info(
-                        f"Restored extra trained param(s) {sorted(found_extras)} from {resume_from_checkpoint}."
-                    )
-        guard.reject()
-
-        if is_multi_rank_run():
-            # Only rank 0's dict is used under broadcast_from_rank0, but every rank must call in.
-            options = StateDictOptions(full_state_dict=True, broadcast_from_rank0=True, strict=False)
-            set_model_state_dict(model, found_extras, options=options)
-        else:
-            # The unwrapped names: a torch.compile'd model's params are ``_orig_mod.*`` and every
-            # declared key would silently find no home.
-            named = dict(unwrapped.named_parameters())
-            for key, value in found_extras.items():
-                param = named.get(key)
-                if param is not None:
-                    param.data.copy_(value.to(device=param.device, dtype=param.dtype))
-        del found_extras
-        barrier()
-
     def _load_fsdp2(self, resume_from_checkpoint: str, model=None, *, for_best_model: bool = False) -> None:
         """Load weights into an FSDP2-wrapped model. Plain load_state_dict() fails on DTensor params;
         set_model_state_dict() distributes full-tensor weights into them.
@@ -685,7 +593,6 @@ class CheckpointLoader:
         if not for_best_model and constructed_from_ckpt:
             if is_global_main_process():
                 logger.info(f"FSDP2 resume: model was constructed from {resume_from_checkpoint}; skipping re-load.")
-            self._restore_extra_trained_params(resume_from_checkpoint, model)
             return
 
         # Only rank 0's dict is used under broadcast_from_rank0, but every rank must call in — agree on

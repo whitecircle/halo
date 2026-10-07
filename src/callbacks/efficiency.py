@@ -732,8 +732,6 @@ class EfficiencyCallback(transformers.TrainerCallback):
         self.state.model_flops_per_token = estimate_linear_flops_per_token(model) + attn_flops
 
         local_params, trainable_params = count_model_parameters(model)
-        if local_params == 0:
-            local_params = trainable_params
         frozen_params = max(local_params - trainable_params, 0.0)
 
         self.mfu.local_params = float(local_params)

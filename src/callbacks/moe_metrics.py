@@ -221,8 +221,6 @@ class MoEMetricsCallback(MoELoadMetricsCallback):
             if len(self._counters) != len(router_logits):
                 self._counters = [None] * len(router_logits)
             for i, logits in enumerate(router_logits):
-                if logits is None:
-                    continue
                 _, top_idx = torch.topk(logits, self.topk, dim=-1)
                 self._counters[i] = accumulate_bincount(self._counters[i], top_idx, logits.shape[-1])
 

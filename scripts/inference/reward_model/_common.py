@@ -23,7 +23,7 @@ from scripts.inference._common import add_generation_args, add_prompt_field_args
 from src.checkpoint.tool_io import reject_sharded_checkpoint
 from src.data.pipeline.conversation import build_base_prompt, reject_image_content, resolve_system_prompt
 from src.data.pipeline.rendered import tokenize_rendered
-from src.inference.openai_client import create_openai_client
+from src.inference.openai_client import chat_completion, create_openai_client
 from src.inference.response import ENGINE_CUT_FINISH_REASONS, get_finish_reason
 from src.models.loading.checkpoint_coverage import from_pretrained_verified
 from src.models.loading.dtype import DTYPE_BY_NAME
@@ -192,7 +192,8 @@ async def generate_chat_message(client, messages: list[dict], args, response_for
     because a hypothesis cut at the token cap is a fragment: the reward model would score it as a
     complete answer and the number would land in a preference / offline-GRPO file.
     """
-    completion = await client.chat.completions.create(
+    completion = await chat_completion(
+        client,
         messages=messages,
         model=args.model,
         temperature=args.temperature,

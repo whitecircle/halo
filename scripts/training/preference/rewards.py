@@ -70,8 +70,6 @@ def main():
         log_decoded_samples=args.log_decoded_samples,
     )
 
-    # RewardConfig also declares eos_token/pad_token; the resolve-conflict parser captures the YAML
-    # keys there, so sync_tokens mirrors them back onto the script args the tokenizer setup reads.
     runtime = init_training_script(
         args,
         reward_config,
@@ -79,7 +77,6 @@ def main():
         dist_args,
         script_prefix="reward",
         trainer_cls=DistributedRewardTrainer,
-        sync_tokens=("eos_token", "pad_token"),
     )
     parallelism_config = runtime.parallelism_config
 
