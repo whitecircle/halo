@@ -38,7 +38,7 @@ whose big disk lives elsewhere and every `make` target mounts and caches there.
 | `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` / `AWS_DEFAULT_REGION` | `s3://` datasets and checkpoints (mounting `~/.aws` works too) |
 | `OPENAI_API_KEY` / `OPENROUTER_API_KEY` | the external-LLM judge and generation scripts |
 | `SERPER_API_KEY` / `TAVILY_API_KEY` / `BRAVE_API_KEY` | the matching web-search backend in the search RL environments (`duckduckgo` needs none) |
-| `VLLM_API_KEY` | the `scripts/inference/` and `scripts/environments/` CLIs dialing an authenticated rollout server (vLLM or SGLang); falls back to `OPENAI_API_KEY`, then to the `EMPTY` placeholder a keyless local server accepts |
+| `VLLM_API_KEY` | the `scripts/inference/` and `scripts/environments/` CLIs dialing an authenticated OpenAI-compatible endpoint (a vLLM or SGLang server, or a hosted one); falls back to `OPENAI_API_KEY`, then to the `EMPTY` placeholder a keyless local server accepts |
 
 ## Logging and run identity
 

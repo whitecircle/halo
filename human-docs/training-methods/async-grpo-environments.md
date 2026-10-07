@@ -104,8 +104,8 @@ learning_rate: 1.0e-06
 ```
 
 Sampling is `rollout_temperature` (`0.7`) and `rollout_top_p` (`0.95`); `rollout_top_k`, `rollout_min_p` and
-`rollout_repetition_penalty` are off by default. Every rollout and eval request sends all five, so the model's
-`generation_config.json` defaults never apply.
+`rollout_repetition_penalty` are off by default. Every rollout and eval request sends all five
+([Rollout servers](../rollout-servers.md) explains why).
 
 Three decisions matter more than the rest.
 
