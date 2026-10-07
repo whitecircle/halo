@@ -506,11 +506,11 @@ def test_resolve_remote_from_env():
     saved_backend = os.environ.get("HALO_SANDBOX_BACKEND")
     saved_url = os.environ.get("HALO_SANDBOX_URL")
     os.environ["HALO_SANDBOX_BACKEND"] = "remote"
-    os.environ["HALO_SANDBOX_URL"] = "http://sandbox.internal:8080"
+    os.environ["HALO_SANDBOX_URL"] = "http://sandbox.example:8080"
     try:
         sb = resolve_sandbox()
         assert isinstance(sb, RemoteSandbox)
-        assert sb.endpoint == "http://sandbox.internal:8080/run_code"
+        assert sb.endpoint == "http://sandbox.example:8080/run_code"
     finally:
         for key, val in (("HALO_SANDBOX_BACKEND", saved_backend), ("HALO_SANDBOX_URL", saved_url)):
             if val is None:

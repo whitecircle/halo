@@ -26,6 +26,7 @@ from src.environments.base import (
     require_magnitudes,
 )
 from src.environments.envs.protocols.native import NativeToolUseEnvironment
+from src.environments.envs.tasks.coding.comments import comment_chars, reasoning_in_comments
 from src.environments.envs.tasks.coding.grading import (
     DEFAULT_MAX_OUTPUT_SIZE,
     VERDICT_DETAIL_OUTCOME,
@@ -44,7 +45,13 @@ from src.environments.sandbox.base import (
 )
 from src.environments.sandbox.repl import format_sandbox_repl_output
 from src.environments.sandbox.resolve import resolve_sandbox, warn_if_unisolated
-from src.environments.tools.definitions import NativeTool, NativeToolRegistry, ToolArgumentError, ToolParameter
+from src.environments.tools.definitions import (
+    NativeTool,
+    NativeToolRegistry,
+    ToolArgumentError,
+    ToolCallRefused,
+    ToolParameter,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -80,6 +87,16 @@ STARVED_RUN_NOTE = (
 )
 # Scratchpad runs returned for getting no input and printing nothing (``episode/starved_test_runs``).
 STARVED_TEST_RUNS_KEY = "starved_test_runs"
+# Programs refused for carrying the reasoning in their comments (``episode/reasoning_in_comments_calls``),
+# and the comment and code characters of every program a call carried (``episode/code_comment_share``).
+REASONING_IN_COMMENTS_KEY = "reasoning_in_comments_calls"
+COMMENT_CHARS_KEY = "comment_chars"
+CODE_CHARS_KEY = "code_chars"
+# The refusal of a program whose comments carry its reasoning (:mod:`.comments`): the fact and what to do.
+REASONING_IN_COMMENTS_REPLY = (
+    "Not {verb}: the program's comments carry your reasoning. Keep the reasoning in your thinking and send the "
+    "program again with documentation comments only."
+)
 # Follows a scratchpad timeout, whose limit is the one this problem's graded tests run under.
 SCRATCHPAD_TIME_LIMIT_NOTE = "(the per-test time limit this problem is graded at)"
 # The refusals of a call past the episode's budget for the tool: the fact and what to do, never the
@@ -550,6 +567,28 @@ class CodeContestsEnvironment(NativeToolUseEnvironment):
         verb, spent = ("run", "scratchpad run") if tool == self.test_tool_name else ("graded", "submission")
         return MISLABELLED_LANGUAGE_REPLY.format(verb=verb, evident=evident, language=language, spent=spent)
 
+    def _refuse_reasoning_in_comments(
+        self, code: str, language: str, tool: str, trajectory: Trajectory | None
+    ) -> None:
+        """Refuse a program whose comments carry its reasoning (:func:`reasoning_in_comments` on its
+        :func:`comment_chars`) unrun, the call returned to the budget: it costs the turn and the protocol's
+        error price, never a run or a submission, and a turn of nothing else is flagged untrainable
+        (:class:`ToolCallRefused`). Records every program's comment and code characters first, the guard's
+        own signal. The reasoning terms never count a call's arguments and the turn-total overlong ramp
+        prices them only near ``rollout_max_tokens``; this reads them before that."""
+        comments, rest = comment_chars(code, language)
+        if trajectory is not None:
+            trajectory.info[COMMENT_CHARS_KEY] = trajectory.info.get(COMMENT_CHARS_KEY, 0) + comments
+            trajectory.info[CODE_CHARS_KEY] = trajectory.info.get(CODE_CHARS_KEY, 0) + rest
+        if not reasoning_in_comments(comments, rest):
+            return
+        if trajectory is not None:
+            self._uncount_tool_call(trajectory, tool)
+            trajectory.info[REASONING_IN_COMMENTS_KEY] = trajectory.info.get(REASONING_IN_COMMENTS_KEY, 0) + 1
+        raise ToolCallRefused(
+            REASONING_IN_COMMENTS_REPLY.format(verb="run" if tool == self.test_tool_name else "graded")
+        )
+
     def _fit_observation(self, output: str, notes: list[str]) -> str:
         """``output`` with ``notes`` on lines after it, the output cut when the whole would pass the
         protocol's observation cap (``max_observation_chars``), which cuts from the end, so the notes stay whole."""
@@ -571,6 +610,7 @@ class CodeContestsEnvironment(NativeToolUseEnvironment):
         refusal = self._refuse_mislabelled(code, language, self.test_tool_name, trajectory)
         if refusal is not None:
             return refusal
+        self._refuse_reasoning_in_comments(code, language, self.test_tool_name, trajectory)
         if trajectory is not None:
             self._note_language(trajectory, language)
         stated = trajectory.info.get("_time_limit") if trajectory is not None else None
@@ -615,6 +655,7 @@ class CodeContestsEnvironment(NativeToolUseEnvironment):
             # grading another program could only replace the solve.
             self._refund_tool_call(trajectory, SUBMIT_TOOL)
             return SUBMISSION_AFTER_ACCEPT_REPLY
+        self._refuse_reasoning_in_comments(code, language, SUBMIT_TOOL, trajectory)
         self._note_language(trajectory, language)
 
         if self._submissions(trajectory) == 1:
@@ -833,6 +874,10 @@ class CodeContestsEnvironment(NativeToolUseEnvironment):
         metrics["episode/submission_rate"] = 1.0 if submissions > 0 else 0.0
         metrics["episode/test_calls"] = float(self._test_calls(trajectory))
         metrics["episode/starved_test_runs"] = float(info.get(STARVED_TEST_RUNS_KEY, 0))
+        metrics["episode/reasoning_in_comments_calls"] = float(info.get(REASONING_IN_COMMENTS_KEY, 0))
+        program_chars = info.get(COMMENT_CHARS_KEY, 0) + info.get(CODE_CHARS_KEY, 0)
+        if program_chars:
+            metrics["episode/code_comment_share"] = info.get(COMMENT_CHARS_KEY, 0) / program_chars
         if submissions > 0:
             # Mean over submitting episodes: the share that ran the scratchpad before submitting.
             metrics["episode/tested_before_submission"] = 1.0 if info.get("tested_before_submission") else 0.0

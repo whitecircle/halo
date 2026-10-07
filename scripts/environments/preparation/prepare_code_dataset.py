@@ -27,7 +27,7 @@ Usage (inside the training image):
     # pushed as one Hub config per training stage (full + one per band) over that shared test split
     python scripts/environments/preparation/prepare_code_dataset.py \
         --adapter hardtests --dataset sigcp/hardtests_problems \
-        --tests_table "$HALO_DATA_ROOT/s3_datasets/hardtests-tests-compact" --holdout_per_band 100 \
+        --tests_table "$HALO_DATA_ROOT/hardtests-tests-compact" --holdout_per_band 100 \
         --min_rating 800 --push_to_hub org/hardtests-rl --push_bands
 
 A bulky test corpus (open-r1's generated tests, HardTests' suites) is first reduced by

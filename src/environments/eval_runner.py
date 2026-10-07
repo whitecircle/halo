@@ -50,6 +50,7 @@ from src.environments.episode import (
     generate_turn,
     is_context_overflow,
     is_engine_fault,
+    recovering_turn,
     step_context_from_generation,
     thinking_caps_by_level,
 )
@@ -64,7 +65,7 @@ DEFAULT_REQUEST_TIMEOUT_S = 180.0
 # ``info`` keys a persisted trajectory leaves out: the row payload; ``_``-prefixed grading stamps
 # (hidden tests, checker source) go with it.
 _SERIALIZED_INFO_DROP = frozenset({"context"})
-# Message fields a persisted turn carries beside its render: the reasoning cap the turn's level set.
+# Message fields a persisted turn carries beside its render: the reasoning cap the turn ran under.
 # ``Message.to_dict`` is the chat-template and API render, which must not carry it.
 _SERIALIZED_TURN_FIELDS = ("thinking_cap",)
 # The sample-record key of an episode that lost a generation on the driver's side past every retry: it
@@ -294,7 +295,8 @@ async def run_episode(
         for _ in range(env.max_turns):
             # The per-turn contract, narrowed as the training actor narrows it, so the request sets the
             # level's CoT budget here too (vLLM enforces it) rather than the trajectory only recording it.
-            caps = effort.turn_caps(generated)
+            recovery = recovering_turn(step.trajectory)
+            caps = effort.turn_caps(generated, recovery=recovery)
             if step.done or caps is None:
                 break
             turn_rollout = replace(rollout, **caps)
@@ -316,7 +318,10 @@ async def run_episode(
             finish_reasons.append(gen.finish_reason)
             generated += gen.tokens
             step_ctx = step_context_from_generation(
-                context, gen, thinking_cap=effort.thinking_budget, last_turn=effort.turn_caps(generated) is None
+                context,
+                gen,
+                thinking_cap=effort.turn_thinking_cap(recovery),
+                last_turn=effort.turn_caps(generated) is None,
             )
             steps = await episode.step([eid], [gen.text], [step_ctx])
             step = steps[0]

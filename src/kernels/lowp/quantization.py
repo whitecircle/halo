@@ -152,8 +152,9 @@ def _as_blocks(t: torch.Tensor, axis: int, block_size: int) -> tuple[torch.Tenso
     return work.reshape(*lead, k // block_size, block_size), axis, lead, k
 
 
-def quantize_mxfp8(t: torch.Tensor, axis: int = -1, block_size: int = 32) -> BlockScaledTensor:
+def quantize_mxfp8(t: torch.Tensor, axis: int = -1) -> BlockScaledTensor:
     """Quantize ``t`` to MXFP8 (``e4m3`` data + ``e8m0`` scales) along ``axis`` (storage form)."""
+    block_size = FORMAT_BLOCK_SIZE["mxfp8"]
     blocks, axis, lead, k = _as_blocks(t, axis, block_size)
     quant, scales = _mxfp8_core(blocks)
     data = _restore_axis(quant.reshape(*lead, k), axis, t.ndim)
@@ -180,14 +181,14 @@ def _quantize_fp4(t: torch.Tensor, axis: int, block_size: int, core, pow2_scale:
     )
 
 
-def quantize_mxfp4(t: torch.Tensor, axis: int = -1, block_size: int = 32) -> BlockScaledTensor:
+def quantize_mxfp4(t: torch.Tensor, axis: int = -1) -> BlockScaledTensor:
     """Quantize ``t`` to MXFP4 (packed ``e2m1`` data + ``e8m0`` power-of-two scales) along ``axis``."""
-    return _quantize_fp4(t, axis, block_size, _mxfp4_core, pow2_scale=True)
+    return _quantize_fp4(t, axis, FORMAT_BLOCK_SIZE["mxfp4"], _mxfp4_core, pow2_scale=True)
 
 
-def quantize_nvfp4(t: torch.Tensor, axis: int = -1, block_size: int = 16) -> BlockScaledTensor:
+def quantize_nvfp4(t: torch.Tensor, axis: int = -1) -> BlockScaledTensor:
     """Quantize ``t`` to NVFP4 (packed ``e2m1`` data + ``e4m3`` scales) along ``axis`` (storage form)."""
-    return _quantize_fp4(t, axis, block_size, _nvfp4_core, pow2_scale=False)
+    return _quantize_fp4(t, axis, FORMAT_BLOCK_SIZE["nvfp4"], _nvfp4_core, pow2_scale=False)
 
 
 def dequantize(q: BlockScaledTensor) -> torch.Tensor:
@@ -212,11 +213,11 @@ def dequantize(q: BlockScaledTensor) -> torch.Tensor:
     return _restore_axis(out, axis, q.data.ndim).to(torch.bfloat16)
 
 
-_QUANTIZERS = {"mxfp8": quantize_mxfp8, "mxfp4": quantize_mxfp4, "nvfp4": quantize_nvfp4}
+QUANTIZERS = {"mxfp8": quantize_mxfp8, "mxfp4": quantize_mxfp4, "nvfp4": quantize_nvfp4}
 
 
 def _block_round_trip(t: torch.Tensor, fmt: str, axis: int) -> torch.Tensor:
-    quantizer = _QUANTIZERS.get(fmt)
+    quantizer = QUANTIZERS.get(fmt)
     if quantizer is None:
         raise ValueError(f"unknown block-scaled format {fmt!r} (expected 'mxfp8', 'mxfp4' or 'nvfp4')")
     return dequantize(quantizer(t, axis=axis))

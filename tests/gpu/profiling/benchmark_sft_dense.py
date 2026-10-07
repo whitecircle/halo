@@ -7,14 +7,17 @@ for dense (non-MoE) models using DistributedSFTTrainer with EfficiencyCallback.
 
 Supports modes: FSDP (default), TP, LoRA, QLoRA.
 
+``--model`` and ``--seq`` default to the shared benchmark parser's values
+(``tests/common/benchmark_args.py``), whose default model is a MoE, so every example names a dense one.
+
 Usage:
-    # FSDP mode, default model (Qwen3-8B), seq_len=4096, 10 steps
+    # FSDP mode, Qwen3-8B, seq_len=4096, 10 steps
     torchrun --nproc_per_node=2 \
-        tests/gpu/profiling/benchmark_sft_dense.py --seq 4096 --steps 10
+        tests/gpu/profiling/benchmark_sft_dense.py --model qwen3-8b --seq 4096 --steps 10
 
     # TP mode (tp=2) with Qwen3-8B
     torchrun --nproc_per_node=2 \
-        tests/gpu/profiling/benchmark_sft_dense.py --seq 4096 --steps 10 --tp 2
+        tests/gpu/profiling/benchmark_sft_dense.py --model qwen3-8b --seq 4096 --steps 10 --tp 2
 
     # LoRA r=64, attention-only targets
     torchrun --nproc_per_node=1 \
@@ -34,7 +37,7 @@ Usage:
 
     # Disable Liger kernels
     torchrun --nproc_per_node=2 \
-        tests/gpu/profiling/benchmark_sft_dense.py --seq 4096 --no_liger
+        tests/gpu/profiling/benchmark_sft_dense.py --model qwen3-8b --seq 4096 --no_liger
 """
 
 import sys

@@ -38,7 +38,7 @@ host:1:257 [0] NCCL INFO Connected all rings, use ring PXN 0 GDR 1
 
 IB_LOG = """\
 host:1:257 [0] NCCL INFO NCCL version 2.31.2+cuda13.3
-host:1:257 [0] NCCL INFO NET/IB : Using [0]mlx5_0:1/IB [RO]; OOB enp71s0:10.0.0.7<0>
+host:1:257 [0] NCCL INFO NET/IB : Using [0]mlx5_0:1/IB [RO]; OOB eth0:10.0.0.7<0>
 host:1:257 [0] NCCL INFO Channel 00/0 : 1[0] -> 0[0] [receive] via NET/IB/0/GDRDMA
 host:1:257 [0] NCCL INFO Channel 00/0 : 0[0] -> 1[0] [send] via NET/IB/0/GDRDMA
 """

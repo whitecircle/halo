@@ -54,12 +54,12 @@ MCP_SERVERS = {
     "github": {
         "command": "npx",
         "args": ["-y", "@modelcontextprotocol/server-github"],
-        "env": ["GITHUB_TOKEN"],
+        "env": ["GITHUB_PERSONAL_ACCESS_TOKEN"],
     },
     "slack": {
         "command": "npx",
         "args": ["-y", "@modelcontextprotocol/server-slack"],
-        "env": ["SLACK_TOKEN"],
+        "env": ["SLACK_BOT_TOKEN", "SLACK_TEAM_ID"],
     },
 }
 

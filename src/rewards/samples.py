@@ -50,16 +50,13 @@ class ScoringSample:
     and task turns), ``completion`` its turns after that (assistant turns with their reasoning and
     tool calls, tool results), ``final_answer`` what the episode delivered — the final text answer,
     a submitted program — or ``None`` when it ended without one, ``reference`` the row's reference
-    answer when it carries one, ``tools`` the OpenAI tool schemas the policy could call, and
-    ``digest`` the environment's own compact account of the episode (rendered from the transcript
-    when absent)."""
+    answer when it carries one, and ``tools`` the OpenAI tool schemas the policy could call."""
 
     prompt: list[Message]
     completion: list[Message]
     final_answer: str | None = None
     reference: Any = None
     tools: list[dict[str, Any]] | None = field(default=None, compare=False)
-    digest: str | None = None
 
 
 def final_assistant_text(messages: Sequence[Message]) -> str:
@@ -99,9 +96,7 @@ def view_text(sample: ScoringSample, view: View, *, include_reasoning: bool, max
     elif view is View.FULL:
         text = render_transcript(sample.completion, include_reasoning=include_reasoning)
     elif view is View.DIGEST:
-        text = (
-            sample.digest if sample.digest is not None else render_digest(sample, include_reasoning=include_reasoning)
-        )
+        text = render_digest(sample, include_reasoning=include_reasoning)
     else:
         raise ValueError(f"unknown view {view!r}")
     return cut_middle(text, max_chars)

@@ -161,9 +161,6 @@ async def main() -> None:
     first_responses = await parallel_openai_requests(
         model=args.model,
         messages=messages,
-        response_format=None,
-        use_native_json_schema=False,
-        system_prompt=None,  # Already in messages
         temperature=args.temperature,
         max_tokens=args.max_gen_tokens,
         max_workers=args.n_parallel,
@@ -206,9 +203,6 @@ async def main() -> None:
         followup_responses = await parallel_openai_requests(
             model=args.model,
             messages=followup_messages,
-            response_format=None,
-            use_native_json_schema=False,
-            system_prompt=None,
             temperature=args.temperature,
             max_tokens=args.max_gen_tokens,
             max_workers=args.n_parallel,

@@ -1562,14 +1562,17 @@ class DistributedAsyncEnvironmentalGRPOTrainer(
             self._world_metrics.fraction("reward/reasoning_floor", sum(floors), len(floors))
 
     def _apply_turn_overlong_charge(self, rewards: torch.Tensor, rollout_results: list[RolloutResult]) -> None:
-        """Charge each episode the turn that ran furthest into its thinking cap (:func:`turn_overlong_term`), in
-        place. Logs the batch mean under ``reward/turn_overlong`` and the share of assistant turns charged under
-        ``reward/turn_overlong_turn_frac``, both again per effort level (``effort/<level>/...``)."""
+        """Charge each episode the turn that ran furthest into its thinking cap or the turn cap
+        (:func:`turn_overlong_term`), in place. Logs the batch mean under ``reward/turn_overlong`` and the share
+        of assistant turns charged under ``reward/turn_overlong_turn_frac``, both again per effort level
+        (``effort/<level>/...``)."""
         penalty = self.async_config.turn_overlong_penalty
         # Per episode: its level (None without one), term, charged turns and assistant turns.
         rows = []
         for i, result in enumerate(rollout_results):
-            term, charged, turns = turn_overlong_term(result.trajectory, penalty=penalty)
+            term, charged, turns = turn_overlong_term(
+                result.trajectory, penalty=penalty, turn_cap=self.async_config.rollout_max_tokens
+            )
             rewards[i] += term
             rows.append(
                 (result.trajectory.reasoning_effort if result.trajectory is not None else None, term, charged, turns)

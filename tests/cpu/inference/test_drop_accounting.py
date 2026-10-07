@@ -27,6 +27,7 @@ import pytest
 from scripts.inference import _common
 from scripts.inference.reward_model import _common as rm_common
 from scripts.inference.reward_model import rm_rejection_sampling, rm_scoring
+from src.inference.openai_client import EmptyChoicesError
 
 
 def _prompt_rows(count: int) -> list[dict]:
@@ -117,6 +118,25 @@ def test_generate_chat_message_reports_the_finish_reason():
     )
     assert finish_reason == "length"
     assert message["content"] == "frag"
+
+
+def test_generate_chat_message_names_a_reply_without_choices():
+    """An aggregator can answer 200 with no choices; that is a named per-row failure carrying the
+    reply's error body, never an ``IndexError`` from indexing the empty list."""
+
+    class _EmptyClient:
+        def __init__(self):
+            async def _create(**_kwargs):
+                return types.SimpleNamespace(choices=[], error={"code": 400, "message": "bad request"})
+
+            self.chat = types.SimpleNamespace(completions=types.SimpleNamespace(create=_create))
+
+    with pytest.raises(EmptyChoicesError, match="'gen-model'.*bad request"):
+        asyncio.run(
+            rm_common.generate_chat_message(
+                _EmptyClient(), [{"role": "user", "content": "q"}], _rm_args(), {"type": "text"}
+            )
+        )
 
 
 def test_rm_scoring_drops_and_counts_a_truncated_hypothesis(monkeypatch, tmp_path):

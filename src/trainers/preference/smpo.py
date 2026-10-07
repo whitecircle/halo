@@ -265,7 +265,6 @@ class SmoothMarginPOTrainer(StoredMetricsMixin, DistributedTrainerMixin, Trainer
                 attribute_name="target_margin",
                 initial_value=self.initial_margin,
                 final_value=self.final_margin,
-                schedule_type="linear",
             )
             callbacks.append(margin_scheduler)
             logger.info(f"Added target_margin scheduler: {self.initial_margin} → {self.final_margin}")
@@ -1143,7 +1142,7 @@ class SmoothMarginPOTrainer(StoredMetricsMixin, DistributedTrainerMixin, Trainer
 
         # No cp_size factor under CP: both terms reach the loss through autograd all-reduces, whose
         # backward sums the cp_size rank-identical copies and so cancels FSDP2's 1/cp_size average.
-        total_loss = split_rows_mean(margin_losses, kept_pairs, whole=True) + combined_sft_loss
+        total_loss = split_rows_mean(margin_losses, kept_pairs) + combined_sft_loss
 
         # Every pair kept here is the split's own, and the logit means / SFT losses already arrive as
         # means over them (under CP, CP-global ones) — unit divisors report them as they are.

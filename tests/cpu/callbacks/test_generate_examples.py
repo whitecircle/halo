@@ -16,6 +16,7 @@ from src.callbacks.generate_examples import (
     _is_distributed_parallel_model,
     _pretty_print_dataframe,
 )
+from src.distributed.expert_parallel.base_layer import EPMoELayerBase
 
 # Mock helpers
 
@@ -23,17 +24,19 @@ from src.callbacks.generate_examples import (
 class MockModule:
     """A mock nn.Module-like object."""
 
-    def __init__(self, has_ep_config=False, has_dispatcher=False):
-        if has_ep_config:
-            self.ep_config = {}
-        if has_dispatcher:
-            self.dispatcher = object()
-
-    def modules(self):
-        return iter([self])
-
     def parameters(self):
         return iter([torch.randn(10)])
+
+
+class _StandInEPLayer(EPMoELayerBase):
+    """A real ``EPMoELayerBase`` instance, which is what ``find_ep_layers`` keys on; the heavy base
+    ``__init__`` (process groups, DeepEP buffers) is skipped."""
+
+    def __init__(self):
+        torch.nn.Module.__init__(self)
+
+    def forward(self, hidden_states, **kwargs):
+        raise NotImplementedError("stand-in: never invoked")
 
 
 class MockTokenizer:
@@ -99,18 +102,11 @@ class MockDataset:
 
 
 def test_is_distributed_parallel_model():
-    """Test _is_distributed_parallel_model with mock objects."""
-    # Model without EP/TP
-    plain_model = MockModule(has_ep_config=False)
-    assert _is_distributed_parallel_model(plain_model) is False
+    """An EP layer anywhere in the tree makes generation collective; a plain model generates per rank."""
+    assert _is_distributed_parallel_model(torch.nn.Sequential(torch.nn.Linear(4, 4))) is False
 
-    # Model with ep_config attribute (EP mode)
-    ep_model = MockModule(has_ep_config=True)
-    assert _is_distributed_parallel_model(ep_model) is True
-
-    # Model with dispatcher attribute (EP dispatcher)
-    disp_model = MockModule(has_dispatcher=True)
-    assert _is_distributed_parallel_model(disp_model) is True
+    nested_ep = torch.nn.Sequential(torch.nn.Linear(4, 4), torch.nn.Sequential(_StandInEPLayer()))
+    assert _is_distributed_parallel_model(nested_ep) is True
 
 
 def test_callback_init():
@@ -234,8 +230,8 @@ def test_fsdp2_routes_to_all_ranks():
         def parameters(self):
             return iter(self._params)
 
-        def modules(self):
-            return iter([self])
+        def named_modules(self):
+            return iter([("", self)])
 
     # Patch DTensor so isinstance checks work with our mocks
     with patch.object(cb_module, "DTensor", FakeDTensorBase):
@@ -363,7 +359,7 @@ def test_gradient_checkpointing_restored_when_generation_raises():
     model = RaisingModel()
 
     with pytest.raises(RuntimeError, match="boom"):
-        cb._generate_standard(model, type("S", (), {"global_step": 1})())
+        cb._generate_standard(model, type("S", (), {"global_step": 1})(), is_parallel=False)
     assert model.gradient_checkpointing is True, "generation failure left gradient checkpointing off"
 
 

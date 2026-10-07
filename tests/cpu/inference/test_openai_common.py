@@ -1,10 +1,10 @@
 import asyncio
 import inspect
 import json
+import tempfile
 import types
 
 import pytest
-from pydantic import BaseModel
 
 from src.inference.batch_requests import parallel_openai_requests, resolve_checkpoint_file, resolve_request_tools
 from src.inference.openai_client import (
@@ -75,26 +75,6 @@ def test_generate_keeps_the_sampled_ids_an_engine_attaches_to_the_choice():
     assert asyncio.run(generate_openai_response("m", "hi", client=_RecordingClient())).token_ids is None
 
 
-def test_parallel_requests_forwards_request_timeout_to_each_call():
-    """The batch path has to carry the caller's timeout down to the HTTP request.
-
-    Forwarding only ``reasoning_effort`` pins every batch caller to the 180s default however short a
-    deadline it enforces around the batch — an outer ``wait_for`` gives up while the socket it
-    abandoned stays live for another minute.
-    """
-    client = _RecordingClient()
-    asyncio.run(parallel_openai_requests("m", ["hi"], client=client, disable_checkpoints=True, request_timeout=12.5))
-    assert client.captured["timeout"] == 12.5
-
-
-def test_parallel_requests_default_timeout_matches_the_single_request_path():
-    """Plumbing only: an omitted timeout still resolves to the same default a direct call gets."""
-    batch, single = _RecordingClient(), _RecordingClient()
-    asyncio.run(parallel_openai_requests("m", ["hi"], client=batch, disable_checkpoints=True))
-    asyncio.run(generate_openai_response("m", "hi", client=single))
-    assert batch.captured["timeout"] == single.captured["timeout"]
-
-
 class _FlakyClient:
     """AsyncOpenAI stand-in that fails create() for designated message contents."""
 
@@ -126,44 +106,6 @@ def test_parallel_requests_failed_request_yields_none_without_clobbering_others(
     assert results[2] is not None and results[2].answer == "echo:m2"  # last result NOT clobbered
 
 
-class StructuredAnswer(BaseModel):
-    value: int
-
-
-def test_checkpoint_round_trip_reconstructs_response_format(tmp_path):
-    checkpoint_file = tmp_path / "requests.jsonl"
-    append_openai_checkpoint(
-        str(checkpoint_file),
-        [
-            (
-                1,
-                OpenAIResponse(
-                    answer=StructuredAnswer(value=7),
-                    reasoning="ok",
-                    finish_reason="stop",
-                    tool_calls=None,
-                    prompt_tokens=2,
-                    completion_tokens=3,
-                    total_tokens=5,
-                ),
-            )
-        ],
-    )
-
-    checkpoint = load_openai_checkpoint(
-        str(checkpoint_file),
-        result_count=3,
-        response_format=StructuredAnswer,
-    )
-
-    assert checkpoint.processed_indices == {1}
-    assert checkpoint.skipped_records == 0
-    result = checkpoint.results[1]
-    assert result is not None
-    assert result.answer == StructuredAnswer(value=7)
-    assert result.total_tokens == 5
-
-
 def test_checkpoint_round_trip_restores_the_sampled_token_ids(tmp_path):
     """A resumed row must carry the ids it was sampled with, as the live response did: a caller that
     asked for them (``return_token_ids``) reads ``None`` as "the engine returned none"."""
@@ -171,21 +113,21 @@ def test_checkpoint_round_trip_restores_the_sampled_token_ids(tmp_path):
     response = OpenAIResponse(answer="a", reasoning=None, finish_reason="stop", tool_calls=None, token_ids=[5, 6, 7])
     append_openai_checkpoint(checkpoint_file, [(0, response)])
 
-    checkpoint = load_openai_checkpoint(checkpoint_file, result_count=1, response_format=None)
+    checkpoint = load_openai_checkpoint(checkpoint_file, result_count=1)
 
     assert checkpoint.results[0] == response
 
 
-def test_checkpoint_loader_retries_a_record_that_fails_its_response_format(tmp_path):
-    """A structured record that no longer validates is re-requested, as a live response that fails
-    validation is, rather than handed back as a raw dict to a caller that asked for the model."""
+def test_checkpoint_loader_retries_a_record_whose_answer_is_not_text(tmp_path):
+    """An answer is the reply's text: a record holding anything else (a parsed JSON object) is
+    re-requested rather than handed back as an answer no caller reads."""
     checkpoint_file = tmp_path / "requests.jsonl"
     checkpoint_file.write_text(
-        json.dumps({"index": 0, "result": {"answer": {"value": "not-an-int"}, "finish_reason": "stop"}}) + "\n",
+        json.dumps({"index": 0, "result": {"answer": {"value": 1}, "finish_reason": "stop"}}) + "\n",
         encoding="utf-8",
     )
 
-    checkpoint = load_openai_checkpoint(str(checkpoint_file), result_count=1, response_format=StructuredAnswer)
+    checkpoint = load_openai_checkpoint(str(checkpoint_file), result_count=1)
 
     assert checkpoint.processed_indices == set()
     assert checkpoint.skipped_records == 1
@@ -207,11 +149,7 @@ def test_checkpoint_loader_skips_bad_records_and_retries_none_results(tmp_path):
         encoding="utf-8",
     )
 
-    checkpoint = load_openai_checkpoint(
-        str(checkpoint_file),
-        result_count=2,
-        response_format=None,
-    )
+    checkpoint = load_openai_checkpoint(str(checkpoint_file), result_count=2)
 
     assert checkpoint.processed_indices == {1}
     assert checkpoint.skipped_records == 3
@@ -245,24 +183,10 @@ def test_request_tools_rejects_per_message_length_mismatch():
 def test_checkpoint_file_hash_is_stable_for_same_request_shape():
     request_tools = resolve_request_tools(None, message_count=1)
     first = resolve_checkpoint_file(
-        None,
-        model="model",
-        messages=["hello"],
-        system_prompt=None,
-        temperature=0.0,
-        max_tokens=32,
-        request_tools=request_tools,
-        response_format=None,
+        model="model", messages=["hello"], temperature=0.0, max_tokens=32, request_tools=request_tools
     )
     second = resolve_checkpoint_file(
-        None,
-        model="model",
-        messages=["hello"],
-        system_prompt=None,
-        temperature=0.0,
-        max_tokens=32,
-        request_tools=request_tools,
-        response_format=None,
+        model="model", messages=["hello"], temperature=0.0, max_tokens=32, request_tools=request_tools
     )
     assert first == second
     assert first.endswith(".jsonl")
@@ -271,14 +195,11 @@ def test_checkpoint_file_hash_is_stable_for_same_request_shape():
 def test_checkpoint_file_hash_differs_for_different_request_shape():
     request_tools = resolve_request_tools(None, message_count=1)
     base_kwargs = {
-        "checkpoint_file": None,
         "model": "model",
         "messages": ["hello"],
-        "system_prompt": None,
         "temperature": 0.0,
         "max_tokens": 32,
         "request_tools": request_tools,
-        "response_format": None,
     }
     baseline = resolve_checkpoint_file(**base_kwargs)
     # Every hashed field must change the resolved filename.
@@ -286,19 +207,15 @@ def test_checkpoint_file_hash_differs_for_different_request_shape():
     assert resolve_checkpoint_file(**{**base_kwargs, "temperature": 0.7}) != baseline
     assert resolve_checkpoint_file(**{**base_kwargs, "max_tokens": 64}) != baseline
     assert resolve_checkpoint_file(**{**base_kwargs, "messages": ["world"]}) != baseline
-    assert resolve_checkpoint_file(**{**base_kwargs, "response_format": StructuredAnswer}) != baseline
 
 
 def _checkpoint_file_for(messages):
     return resolve_checkpoint_file(
-        None,
         model="model",
         messages=messages,
-        system_prompt=None,
         temperature=0.0,
         max_tokens=32,
         request_tools=resolve_request_tools(None, message_count=len(messages)),
-        response_format=None,
     )
 
 
@@ -344,7 +261,7 @@ def test_tools_hash_covers_a_common_schema_to_its_full_length():
 
 
 def test_load_checkpoint_missing_file_returns_empty_slots():
-    checkpoint = load_openai_checkpoint("/nonexistent/path/requests.jsonl", result_count=3, response_format=None)
+    checkpoint = load_openai_checkpoint("/nonexistent/path/requests.jsonl", result_count=3)
     assert checkpoint.results == [None, None, None]
     assert checkpoint.processed_indices == set()
     assert checkpoint.skipped_records == 0
@@ -363,7 +280,7 @@ def test_append_round_trip_via_loader(tmp_path):
         str(checkpoint_file),
         [(0, OpenAIResponse(answer="hi", reasoning=None, finish_reason="stop", tool_calls=None, total_tokens=4))],
     )
-    loaded = load_openai_checkpoint(str(checkpoint_file), result_count=1, response_format=None)
+    loaded = load_openai_checkpoint(str(checkpoint_file), result_count=1)
     assert loaded.processed_indices == {0}
     assert loaded.results[0].answer == "hi"
     assert loaded.results[0].total_tokens == 4
@@ -379,66 +296,6 @@ def test_request_tools_none_is_not_per_message():
 def test_request_tools_empty_list_is_not_per_message():
     rt = resolve_request_tools([], message_count=0)
     assert rt.per_message is False
-
-
-class _SchemaCrashingFormat(BaseModel):
-    """A response_format whose parse blows up for a reason that is NOT a schema mismatch."""
-
-    value: int
-
-    @classmethod
-    def model_validate_json(cls, *_args, **_kwargs):
-        raise RuntimeError("schema construction bug")
-
-
-def test_structured_parse_does_not_swallow_non_validation_errors():
-    """A parse failure that is not a schema/JSON mismatch must surface, not be reported as bad JSON.
-
-    The fallback chain (native parse -> regex extraction -> ValueError) exists for payloads that are
-    not the requested model's JSON. Catching everything there turns a real defect — a broken schema,
-    a caller passing a non-model — into "Response does not contain valid JSON", blaming the served
-    model.
-    """
-
-    class _JsonClient:
-        def __init__(self):
-            self.chat = types.SimpleNamespace(completions=types.SimpleNamespace(create=self._create))
-
-        async def _create(self, **_kwargs):
-            return _fake_completion('{"value": 1}')
-
-    with pytest.raises(RuntimeError, match="schema construction bug"):
-        asyncio.run(generate_openai_response("m", "hi", response_format=_SchemaCrashingFormat, client=_JsonClient()))
-
-
-def test_structured_parse_still_falls_back_to_regex_extraction():
-    """A schema mismatch on the native parse still falls through to regex extraction."""
-
-    class _ProseWrappedClient:
-        def __init__(self):
-            self.chat = types.SimpleNamespace(completions=types.SimpleNamespace(create=self._create))
-
-        async def _create(self, **_kwargs):
-            return _fake_completion('here you go: {"value": 7} hope that helps')
-
-    resp = asyncio.run(
-        generate_openai_response("m", "hi", response_format=StructuredAnswer, client=_ProseWrappedClient())
-    )
-    assert resp.answer == StructuredAnswer(value=7)
-
-
-def test_structured_parse_raises_when_no_json_present():
-    """No JSON at all in the content still raises the caller-facing ValueError."""
-
-    class _ProseClient:
-        def __init__(self):
-            self.chat = types.SimpleNamespace(completions=types.SimpleNamespace(create=self._create))
-
-        async def _create(self, **_kwargs):
-            return _fake_completion("no json here")
-
-    with pytest.raises(ValueError, match="does not contain valid JSON"):
-        asyncio.run(generate_openai_response("m", "hi", response_format=StructuredAnswer, client=_ProseClient()))
 
 
 def test_generate_requires_an_explicit_keyword_only_client():
@@ -526,18 +383,6 @@ def test_chat_completion_gives_up_after_the_retry_budget(monkeypatch):
     assert waits == [2.0, 4.0, 8.0, 16.0]
 
 
-def test_generate_sends_a_pydantic_response_format_as_a_lenient_json_schema_and_parses_the_reply():
-    client = _RecordingClient(completion=_fake_completion('{"value": 7}'))
-
-    resp = asyncio.run(generate_openai_response("m", "hi", client=client, response_format=StructuredAnswer))
-
-    assert client.captured["response_format"] == {
-        "type": "json_schema",
-        "json_schema": {"name": "StructuredAnswer", "strict": False, "schema": StructuredAnswer.model_json_schema()},
-    }
-    assert resp.answer == StructuredAnswer(value=7)
-
-
 def test_generate_sends_the_default_temperature_and_omits_a_none():
     """``None`` keeps the served default, which reasoning models require; the default still pins 0.0."""
     client = _RecordingClient()
@@ -565,21 +410,20 @@ def test_parse_json_object_reads_the_value_or_the_object_embedded_in_prose():
     assert parse_json_object("no json here") is None
 
 
-def test_parallel_requests_checkpoints_the_rows_that_succeeded_and_retries_the_failed_one(tmp_path):
+def test_parallel_requests_checkpoints_the_rows_that_succeeded_and_retries_the_failed_one(tmp_path, monkeypatch):
     """A failed row stays out of the store, so a re-run requests it and only it; the rows beside it
     are replayed from the store."""
-    checkpoint_file = str(tmp_path / "requests.jsonl")
+    monkeypatch.setattr(tempfile, "tempdir", str(tmp_path))
     prompts = ["m0", "m1", "m2"]
 
-    first = asyncio.run(
-        parallel_openai_requests("m", prompts, client=_FlakyClient(fail_on={"m1"}), checkpoint_file=checkpoint_file)
-    )
+    first = asyncio.run(parallel_openai_requests("m", prompts, client=_FlakyClient(fail_on={"m1"})))
     assert first[1] is None
-    stored = load_openai_checkpoint(checkpoint_file, result_count=3, response_format=None)
+    (store,) = tmp_path.glob("openai_requests_*.jsonl")
+    stored = load_openai_checkpoint(str(store), result_count=3)
     assert stored.processed_indices == {0, 2}
 
     retry = _RecordingClient(completion=_fake_completion("echo:m1"))
-    second = asyncio.run(parallel_openai_requests("m", prompts, client=retry, checkpoint_file=checkpoint_file))
+    second = asyncio.run(parallel_openai_requests("m", prompts, client=retry))
     assert [call["messages"][-1]["content"] for call in retry.calls] == ["m1"]
     assert [response.answer for response in second] == ["echo:m0", "echo:m1", "echo:m2"]
 

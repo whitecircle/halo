@@ -102,9 +102,6 @@ def test_the_check_runs_at_most_once_per_process(monkeypatch):
     dispatcher_mod.verify_rank_uniform_env()
     assert len(calls) == 1, f"the world join ran {len(calls)} times; it is latched to one"
 
-    dispatcher_mod.verify_rank_uniform_env(force=True)
-    assert len(calls) == 2, "force= must still re-run it for a caller without the script scaffold"
-
 
 def test_a_pre_init_call_does_not_disarm_the_backstop(monkeypatch):
     """``reject_divergent_settings`` no-ops before ``init_process_group``, so a call that lands

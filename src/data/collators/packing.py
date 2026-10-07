@@ -166,7 +166,6 @@ class DataCollatorWithPacking(DataCollatorForLanguageModeling):
     def __init__(
         self,
         tokenizer: PreTrainedTokenizerBase,
-        pad_to_multiple_of: int | None = None,
         return_seq_idx: bool = False,
         return_flash_attn_kwargs: bool = False,
     ):
@@ -178,7 +177,7 @@ class DataCollatorWithPacking(DataCollatorForLanguageModeling):
                 f"document out of the loss entirely. The training loaders force right padding; set "
                 f"tokenizer.padding_side='right' if you are constructing this collator directly."
             )
-        super().__init__(tokenizer=tokenizer, mlm=False, pad_to_multiple_of=pad_to_multiple_of, return_tensors="pt")
+        super().__init__(tokenizer=tokenizer, mlm=False, return_tensors="pt")
         self.return_seq_idx = return_seq_idx
         self.return_flash_attn_kwargs = return_flash_attn_kwargs
 
@@ -217,8 +216,6 @@ class DataCollatorWithPacking(DataCollatorForLanguageModeling):
             batch = self._mask_packed_labels(batch, examples)
             if self.flatten_to_single_row:
                 batch = flatten_packed_batch(batch, self._real_row_lengths(batch, examples))
-                if self.pad_to_multiple_of:
-                    batch = self._pad_flattened_tail(batch)
             # The varlen set is only defined on the flattened [1, total] row — PP keeps its rows.
             markers = SegmentMarkers(
                 seq_idx=self.return_seq_idx,
@@ -243,31 +240,6 @@ class DataCollatorWithPacking(DataCollatorForLanguageModeling):
             seq_lengths = example.get("seq_lengths") if isinstance(example, dict) else None
             lengths.append(min(sum(seq_lengths), width) if isinstance(seq_lengths, list) else width)
         return lengths
-
-    def _pad_flattened_tail(self, batch: dict[str, Any]) -> dict[str, Any]:
-        """Re-pad the flattened row to ``pad_to_multiple_of`` as a chunked-ramp tail.
-
-        ``pad_tail_positions`` keeps the tail a handful of no-op documents — re-padding with
-        position-0 tokens would rebuild the per-pad length-1 segments the flatten just removed.
-        """
-        total = batch["input_ids"].shape[1]
-        missing = -total % self.pad_to_multiple_of
-        if not missing:
-            return batch
-        batch["input_ids"] = torch.cat(
-            [
-                batch["input_ids"],
-                torch.full((1, missing), self.tokenizer.pad_token_id, dtype=batch["input_ids"].dtype),
-            ],
-            dim=1,
-        )
-        batch["labels"] = torch.cat(
-            [batch["labels"], torch.full((1, missing), LABEL_IGNORE_INDEX, dtype=batch["labels"].dtype)], dim=1
-        )
-        batch["position_ids"] = torch.cat(
-            [batch["position_ids"], pad_tail_positions(missing, batch["position_ids"].dtype).unsqueeze(0)], dim=1
-        )
-        return batch
 
     def _mask_packed_labels(self, batch: dict[str, Any], examples: list[dict[str, Any]]) -> dict[str, Any]:
         """Per-row label hook, run on the ``[B, L]`` packed batch after ``_handle_packing`` and
@@ -322,7 +294,6 @@ class DataCollatorForCompletionOnlyLMWithPacking(DataCollatorWithPacking):
         response_prompt_template: str | list[int],
         tokenizer: PreTrainedTokenizerBase,
         ignore_index: int = LABEL_IGNORE_INDEX,
-        pad_to_multiple_of: int | None = None,
         train_on_last_assistant_only: bool = False,
         eos_token_ids: frozenset[int] | None = None,
         return_seq_idx: bool = False,
@@ -330,7 +301,6 @@ class DataCollatorForCompletionOnlyLMWithPacking(DataCollatorWithPacking):
     ):
         super().__init__(
             tokenizer=tokenizer,
-            pad_to_multiple_of=pad_to_multiple_of,
             return_seq_idx=return_seq_idx,
             return_flash_attn_kwargs=return_flash_attn_kwargs,
         )

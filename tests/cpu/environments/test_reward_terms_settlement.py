@@ -360,7 +360,6 @@ def test_the_sample_carries_the_turns_with_their_reasoning_and_flags():
     assert final["reasoning_content"] == "two and two" and "truncated" not in final
     assert sample.final_answer == "It is 4" and sample.reference == "4"
     assert sample.tools == env.get_tools_schema() and sample.tools
-    assert sample.digest is None
 
 
 def test_a_tool_less_environment_hands_the_scorer_no_tools():
@@ -385,29 +384,6 @@ def test_the_final_answer_is_the_protocols_own_and_none_for_an_unfinished_episod
     assert traj.truncated and not traj.info["completed"]
     sample = capped._scoring_sample(traj)
     assert sample.final_answer is None and sample.completion[-1]["content"] == fragment
-
-
-class _Digesting(NativeToolUseEnvironment):
-    """A tool-less env with its own account of the episode for a ``digest`` view."""
-
-    def __init__(self, **kwargs):
-        super().__init__(tool_registry=NativeToolRegistry(), **kwargs)
-        self.digests = 0
-
-    def _episode_digest(self, trajectory, sample):
-        self.digests += 1
-        return f"answered {sample.final_answer!r} in {len(sample.completion)} turn(s)"
-
-
-@pytest.mark.parametrize(
-    ("view", "digest"), [("final", None), ("full", None), ("digest", "answered '4' in 1 turn(s)")]
-)
-def test_the_digest_is_built_only_for_a_digest_view(view, digest):
-    env = _Digesting(reward_terms=[{"source": "environment"}, {**JUDGE, "view": view}])
-    ids, _ = env.reset(["q"], [{"answer": "4"}])
-    traj = env.step(ids, ["4"], [{"answer": "4", "finish_reason": "stop"}])[0].trajectory
-    assert env._scoring_sample(traj).digest == digest
-    assert env.digests == (0 if digest is None else 1)
 
 
 def test_code_contests_hands_the_scorer_the_submitted_program():

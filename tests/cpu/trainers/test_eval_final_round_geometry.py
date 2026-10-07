@@ -236,15 +236,14 @@ def test_a_batch_of_real_rows_alone_is_handed_back_unsliced():
 
 def test_a_split_rows_mean_is_the_plain_mean_over_every_row_and_zero_over_none():
     """Over every row it is ``mean`` itself, bit for bit, so a train batch reduces to its plain mean; over
-    the split's first rows it is their mean; over none (a rank of padding alone) it is 0, not NaN."""
-    values = torch.randn(3, 5, generator=torch.Generator().manual_seed(0))
+    the split's first rows it is the mean of their elements; over none (a rank of padding alone) it is 0,
+    not NaN."""
+    values = torch.randn(5, 3, generator=torch.Generator().manual_seed(0))
 
-    assert torch.equal(split_rows_mean(values, 5, dim=1), values.mean(dim=1))
-    assert torch.equal(split_rows_mean(values, 5, dim=1, whole=True), values.mean())
-    torch.testing.assert_close(split_rows_mean(values, 2, dim=1), values[:, :2].mean(dim=1))
-    torch.testing.assert_close(split_rows_mean(values, 2, dim=1, whole=True), values[:, :2].mean())
-    assert torch.equal(split_rows_mean(values, 0, dim=1), torch.zeros(3))
-    assert split_rows_mean(values, 0, whole=True).item() == 0.0
+    assert torch.equal(split_rows_mean(values, 5), values.mean())
+    assert torch.equal(split_rows_mean(values, 7), values.mean())
+    torch.testing.assert_close(split_rows_mean(values, 2), values[:2].mean())
+    assert split_rows_mean(values, 0).item() == 0.0
 
 
 def _rollout_round_worker(rank: int) -> None:

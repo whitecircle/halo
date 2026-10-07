@@ -146,13 +146,12 @@ def test_render_final_answer_with_and_without_a_final_answer():
 
 def test_view_text_dispatches_per_view_and_keeps_the_end_of_a_long_transcript():
     long_turns = [{"role": "assistant", "content": "x" * 5000}, {"role": "assistant", "content": "ANSWER=42"}]
-    sample = ScoringSample(prompt=PROMPT, completion=long_turns, final_answer="ANSWER=42", digest="own digest")
+    sample = ScoringSample(prompt=PROMPT, completion=long_turns, final_answer="ANSWER=42")
     full = view_text(sample, View.FULL, include_reasoning=True, max_chars=300)
     assert full.startswith("[1] assistant\n" + "x" * 150) and full.endswith("[2] assistant\nANSWER=42")
     dropped = len(render_transcript(long_turns, include_reasoning=True)) - 300
     assert CUT_MARKER.format(dropped=dropped) in full
     assert view_text(sample, View.FINAL, include_reasoning=True, max_chars=300) == "ANSWER=42"
-    assert view_text(sample, View.DIGEST, include_reasoning=True, max_chars=300) == "own digest"
     rendered = ScoringSample(prompt=PROMPT, completion=TURNS, final_answer="1")
     digest = view_text(rendered, View.DIGEST, include_reasoning=False, max_chars=10_000)
     assert digest == render_digest(rendered, include_reasoning=False)
@@ -217,7 +216,7 @@ def test_samples_from_completions_sets_the_final_answer_to_the_last_assistant_te
     assert second.prompt == [{"role": "user", "content": "q"}]
     assert second.completion == [{"role": "assistant", "content": "plain answer"}]
     assert second.final_answer == "plain answer"
-    assert second.reference is None and second.tools is None and second.digest is None
+    assert second.reference is None and second.tools is None
     with pytest.raises(ValueError):
         samples_from_completions(["a", "b"], ["x"])
 

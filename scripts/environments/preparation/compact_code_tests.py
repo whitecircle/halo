@@ -16,7 +16,7 @@ built it, so an interrupted run resumes and a run with other caps rebuilds.
 
     python scripts/environments/preparation/compact_code_tests.py --source hardtests \\
         --input_dir "$HF_HOME/hub/datasets--sigcp--hardtests_tests/snapshots/<rev>/data" \\
-        --output_dir "$HALO_DATA_ROOT/s3_datasets/hardtests-tests-compact"
+        --output_dir "$HALO_DATA_ROOT/hardtests-tests-compact"
 """
 
 import argparse

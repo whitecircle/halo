@@ -127,7 +127,7 @@ class AsyncTrainingConfig(AdvantageShapingArguments, GRPOEarlyStopArguments, Chu
         default=None,
         metadata={
             "help": "Per-rank asyncio-semaphore cap on rollouts in flight — the real generation-throughput "
-            "throttle. Server-pool load = this × data_parallel_size ÷ num_servers. Size it to the per-rank "
+            "throttle. Server-pool load = this × world_size ÷ num_servers (under TP every rank collects a full batch). Size it to the per-rank "
             "rollout demand of one generation cycle (per_device_train_batch_size × steps_per_generation, "
             "which itself defaults to gradient_accumulation_steps) with ~2× headroom for prefetch; raising "
             "it past the actual rollout count does nothing. "
@@ -141,7 +141,7 @@ class AsyncTrainingConfig(AdvantageShapingArguments, GRPOEarlyStopArguments, Chu
             "help": "Rows per rank in one evaluation rollout round (rows, not prompts: the eval sampler has already "
             "repeated each prompt num_generations_eval times). Eval rounds run without prefetch, so a round's wall "
             "time is its slowest episode and per_device_eval_batch_size-sized rounds idle the servers between them; "
-            "size it to what the servers sustain: rows × data_parallel_size requests are in flight at once, and a turn "
+            "size it to what the servers sustain: rows × world_size requests are in flight at once, and a turn "
             "that decodes slower than request_timeout allows fails the episode; a multiple of num_generations_eval, at "
             "most max_concurrent_rollouts (a wider round runs in serial waves). The final round's padding is never "
             "rolled out or scored. It bounds the loader's batch, "
@@ -481,11 +481,12 @@ class AsyncTrainingConfig(AdvantageShapingArguments, GRPOEarlyStopArguments, Chu
     turn_overlong_penalty: float = field(
         default=0.0,
         metadata={
-            "help": "Most a turn that runs into its thinking cap costs its episode, in reward units (0 = off). A "
-            "turn pays -penalty x clamp((reasoning - 0.75 x cap) / (0.25 x cap), 0, 1) on the reasoning it "
-            "sampled, counted off its ids up to and including the close: nothing until its reasoning enters the "
-            "last quarter under its cap, the whole penalty at the cap. The episode pays its most-charged turn "
-            "once. vLLM only; needs train_on_sampled_tokens. Logged as reward/turn_overlong."
+            "help": "Most a turn that runs into a cap costs its episode, in reward units (0 = off). A turn pays "
+            "the larger of two ramps, each -penalty x clamp((count - 0.75 x cap) / (0.25 x cap), 0, 1): the "
+            "reasoning it sampled (its ids up to and including the close) against its thinking cap, and every "
+            "token it sampled against rollout_max_tokens. Nothing until the count enters the last quarter under "
+            "the cap, the whole penalty at it. The episode pays its most-charged turn once. vLLM only; needs "
+            "train_on_sampled_tokens. Logged as reward/turn_overlong."
         },
     )
 

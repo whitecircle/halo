@@ -319,7 +319,6 @@ def main():
         distributed_args,
         script_prefix="self-distill",
         trainer_cls=DistributedSelfDistillationTrainer,
-        sync_tokens=("eos_token", "pad_token"),
     )
     parallelism_config = runtime.parallelism_config
     _require_reference_token_ids(args, model_config)

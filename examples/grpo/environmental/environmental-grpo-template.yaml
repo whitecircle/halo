@@ -74,7 +74,7 @@ rollout_max_tokens: 8192
 # reasoning_price: null              # per level, reward units per 1k reasoning tokens, e.g. {low: 0.0037, medium: 0.0013, high: 0.00018} (null = off)
 # reasoning_price_cap: 0.1           # that price's cap per episode, in reward units
 # reasoning_floor: 0.0               # weight of the under-use floor: an episode reasoning under 0.75x its level's per-turn budget pays up to it (0 = off)
-# turn_overlong_penalty: 0.0         # most a turn reasoning into the last quarter under its cap costs (0 = off)
+# turn_overlong_penalty: 0.0         # most a turn running into the last quarter under a cap (thinking cap or rollout_max_tokens) costs (0 = off)
 
 # --- Prefetch (AsyncTrainingConfig fields) ---
 enable_prefetch: false    # needs a rollout_server_configs list of 2+ servers; with one server the

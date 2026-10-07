@@ -8,11 +8,10 @@ FSDP-ignored plain tensors, report locally, mixing two scopes in one sum.
 import re
 
 import torch
-from accelerate import PartialState
 from transformers import TrainerCallback
 from transformers.utils import logging
 
-from src.distributed.runtime import local_numel
+from src.distributed.runtime import is_global_main_process, local_numel
 
 logger = logging.get_logger(__name__)
 
@@ -87,7 +86,7 @@ class ParameterStatsCallback(TrainerCallback):
     def on_train_begin(self, args, state, control, **kwargs):
         model = kwargs["model"]
 
-        if not PartialState().is_main_process:
+        if not is_global_main_process():
             return
 
         total_params, trainable_params = count_model_parameters(model)

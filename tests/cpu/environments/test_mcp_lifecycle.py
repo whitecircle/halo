@@ -268,9 +268,9 @@ def test_factory_missing_required_env_fails_at_construction(monkeypatch):
 
 def test_factory_explicit_env_vars_satisfy_and_override(monkeypatch):
     """Explicit env_vars satisfy a declared requirement (no process-env lookup) and win over it."""
-    monkeypatch.delenv("GITHUB_TOKEN", raising=False)
-    env = create_native_mcp_environment("github", env_vars={"GITHUB_TOKEN": "tok"})
-    assert env.server_env == {"GITHUB_TOKEN": "tok"}
+    monkeypatch.delenv("GITHUB_PERSONAL_ACCESS_TOKEN", raising=False)
+    env = create_native_mcp_environment("github", env_vars={"GITHUB_PERSONAL_ACCESS_TOKEN": "tok"})
+    assert env.server_env == {"GITHUB_PERSONAL_ACCESS_TOKEN": "tok"}
 
 
 def test_factory_no_declared_env_passes_none():
@@ -289,9 +289,9 @@ def test_sse_transport_is_registry_selectable_and_needs_a_url(monkeypatch):
     mcp_module = importlib.import_module("src.environments.envs.protocols.mcp")
     monkeypatch.setattr(mcp_module, "sse_client", lambda url: ("sse-ctx", url))
 
-    env = resolve_environment("mcp", {"transport": "sse", "server_url": "http://mcp.internal:9000/sse"})
+    env = resolve_environment("mcp", {"transport": "sse", "server_url": "http://mcp.example:9000/sse"})
     assert env.transport == "sse"
-    assert env._transport_context() == ("sse-ctx", "http://mcp.internal:9000/sse")
+    assert env._transport_context() == ("sse-ctx", "http://mcp.example:9000/sse")
 
     with pytest.raises(ValueError, match="server_url required"):
         NativeMCPClientEnvironment(transport="sse")._transport_context()

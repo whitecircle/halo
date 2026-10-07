@@ -40,6 +40,9 @@ RETRYABLE_4XX = frozenset({408, 429})
 # vLLM's and SGLang's "maximum context length" / "model's context length", vLLM's "maximum model
 # length", and the OpenAI API's error code.
 CONTEXT_OVERFLOW_MARKERS = ("context length", "maximum model length", "context_length_exceeded")
+# The share of its level's reasoning cap a turn retrying an unproductive one gets: room to read the
+# nudge or the refusal, fix and act, never a second budget a cut could buy.
+RECOVERY_THINKING_SHARE = 0.25
 
 
 @dataclass(frozen=True)
@@ -54,12 +57,20 @@ class EpisodeEffort:
     max_tokens: int
     episode_tokens: int | None = None
 
-    def turn_caps(self, generated: int) -> dict[str, int | None] | None:
-        """The engine caps of the turn about to start, as the request fields they set: the turn's own,
-        narrowed to what the output budget has left after ``generated`` tokens — the total first, and
-        the reasoning cap with it, so the turn keeps its answer room (what it may generate past its
-        reasoning cap; the whole turn without one). ``None`` once the budget no longer holds that
-        room: no further turn starts, and the driver closes the episode truncated."""
+    def turn_thinking_cap(self, recovery: bool = False) -> int | None:
+        """The reasoning cap the turn about to start runs under: the level's, or on a turn retrying an
+        unproductive one (``recovery``, :func:`recovering_turn`) :data:`RECOVERY_THINKING_SHARE` of it."""
+        if self.thinking_budget is None or not recovery:
+            return self.thinking_budget
+        return max(1, round(self.thinking_budget * RECOVERY_THINKING_SHARE))
+
+    def turn_caps(self, generated: int, *, recovery: bool = False) -> dict[str, int | None] | None:
+        """The engine caps of the turn about to start, as the request fields they set: the turn's own
+        (:meth:`turn_thinking_cap` for ``recovery``), narrowed to what the output budget has left after
+        ``generated`` tokens — the total first, and the reasoning cap with it, so the turn keeps its
+        answer room (what it may generate past its level's reasoning cap; the whole turn without one).
+        ``None`` once the budget no longer holds that room: no further turn starts, and the driver
+        closes the episode truncated."""
         total = (
             self.max_tokens if self.episode_tokens is None else min(self.max_tokens, self.episode_tokens - generated)
         )
@@ -68,8 +79,10 @@ class EpisodeEffort:
         thinking = self.thinking_budget
         if thinking is not None:
             # The cap gives up what the total gave up, never down to 0: a cap of 0 closes the reasoning
-            # before it opened.
+            # before it opened. A retry's reserve clamps what is left, never shrinks with it.
             thinking = max(thinking - (self.max_tokens - total), 1)
+            if recovery:
+                thinking = min(thinking, self.turn_thinking_cap(recovery=True))
         return {"max_tokens": total, "max_thinking_tokens": thinking}
 
     def stamp(self, trajectory: Trajectory | None, generated: int) -> None:
@@ -120,6 +133,15 @@ def bind_episode_effort(
             "so one whole turn fits the episode: below it no turn could start."
         )
     return EpisodeEffort(level=level, thinking_budget=budget, max_tokens=max_tokens, episode_tokens=max_episode_tokens)
+
+
+def recovering_turn(trajectory: Trajectory | None) -> bool:
+    """Whether the turn about to start retries an unproductive one: the episode's last assistant turn
+    is untrainable — cut by the engine, ended on nothing, or every call unknown or refused — and the
+    environment has answered it (the nudge, or the refusals' tool replies)."""
+    messages = trajectory.messages if trajectory is not None else []
+    last = next((m for m in reversed(messages) if m.role == "assistant"), None)
+    return last is not None and last is not messages[-1] and last.untrainable
 
 
 def thinking_caps_by_level(
@@ -371,8 +393,8 @@ def step_context_from_generation(
     client): a driver that omits ``finish_reason`` grades an engine-cut fragment as a deliberate final
     answer. The capture keys are forwarded only where they are id-aligned, since an unaligned logprob
     or routing vector would produce incorrect training data rather than a missing field. ``thinking_cap``
-    is the reasoning cap the turn's level set (the request's own cap may sit below it under an output
-    budget, and SGLang ignores the field); with it goes the reasoning the turn sampled
+    is the reasoning cap the turn ran under — its level's, or a retry's reserve (the request's own cap
+    may sit below it under an output budget, and SGLang ignores the field); with it goes the reasoning the turn sampled
     (:func:`sampled_reasoning_tokens`), the pair the trainer's per-turn overlong charge reads.
     ``last_turn`` says the output budget affords no turn after this one, so an unproductive turn is
     closed as an overflow rather than nudged into a retry that cannot run.

@@ -77,16 +77,15 @@ def init_training_script(
     *,
     script_prefix: str,
     trainer_cls,
-    sync_tokens: Sequence[str] = (),
     split_expert_lora: bool = True,
     **parallelism_kwargs,
 ) -> ScriptRuntime:
     """Run the common pre-model phase of a training entry script.
 
-    Token-field sync → ``init_distributed`` → ``PartialState`` → CUDA device pinning (a process
-    stays on that one GPU) → :func:`parallelism_config_from_args` (+ expert-LoRA split) →
-    ``setup_training_environment`` (run name ``{script_prefix}-{mode_suffix}``) → checkpoint-resume
-    resolution. Every entry script depends on that order.
+    ``init_distributed`` → ``PartialState`` → CUDA device pinning (a process stays on that one GPU) →
+    :func:`parallelism_config_from_args` (+ expert-LoRA split) → ``setup_training_environment`` (run
+    name ``{script_prefix}-{mode_suffix}``) → checkpoint-resume resolution. Every entry script depends
+    on that order.
 
     Args:
         args: parsed script-arguments dataclass.
@@ -97,16 +96,11 @@ def init_training_script(
         trainer_cls: the trainer class the script builds, forwarded to
             :func:`parallelism_config_from_args`, whose CP/PP gates it supplies: a mode the trainer
             refuses is rejected before the model — or a teacher/reference/vLLM probe — loads.
-        sync_tokens: token field names to mirror between ``args`` and ``training_config``
-            (configs that re-declare ``eos_token``/``pad_token`` under the resolve-conflict parser).
         split_expert_lora: peel MoE expert targets out of ``model_config.lora_target_modules`` into
             native EP grouped-LoRA (must run before the model load; no-op without expert targets).
         **parallelism_kwargs: extra :func:`parallelism_config_from_args` knobs
             (SFT passes ``allow_low_precision`` / ``supports_init_from_scratch``).
     """
-    for field_name in sync_tokens:
-        sync_token_field(args, training_config, field_name)
-
     # Every launcher that declares a world (torchrun/accelerate export RANK, a bare srun is caught by
     # its SLURM world size) gets the toolkit's watchdog timeout and eager device bind.
     init_distributed()
@@ -163,16 +157,6 @@ def pin_single_process_to_bound_gpu(training_config) -> None:
         f"takes one process per GPU: `halo launch <method> <config> -n <gpus>` (torchrun)."
     )
     training_config._n_gpu = 1
-
-
-def sync_token_field(args, training_config, field_name: str) -> None:
-    """Mirror a token field across ``args`` and ``training_config``; the config wins when both set."""
-    value = getattr(training_config, field_name, None)
-    if value is None:
-        value = getattr(args, field_name, None)
-    if value is not None:
-        setattr(args, field_name, value)
-        setattr(training_config, field_name, value)
 
 
 def _reject_images_under_text_only_model(args, datasets, *, text_only_model: bool) -> None:

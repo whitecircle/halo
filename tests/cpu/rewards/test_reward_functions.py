@@ -214,7 +214,7 @@ def test_composer_scores_external_terms_per_sample(fake_scorers):
 def test_composer_without_external_terms_builds_no_scorer():
     composer = RewardComposer((EnvironmentTerm(),))
     assert asyncio.run(composer.score([ScoringSample(prompt=[], completion=[])])) == [{}]
-    assert composer.scorers == {} and composer.external_terms == () and composer.views == frozenset()
+    assert composer.scorers == {} and composer.external_terms == ()
 
 
 def test_composer_construction_refuses_an_ungated_veto_judge_and_an_unscored_term():
@@ -223,7 +223,7 @@ def test_composer_construction_refuses_an_ungated_veto_judge_and_an_unscored_ter
     with pytest.raises(TypeError, match=r"reward source\(s\) \['local'\] have no external scorer"):
         RewardComposer((EnvironmentTerm(), _LocalTerm(name="local")))
     composer = RewardComposer((EnvironmentTerm(), GATE, PREF))
-    assert composer.external_terms == (GATE, PREF) and composer.views == {"full", "final"}
+    assert composer.external_terms == (GATE, PREF)
 
 
 def test_settle_prices_the_verdicts_and_merges_their_metrics():

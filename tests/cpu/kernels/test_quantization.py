@@ -36,7 +36,7 @@ _TOL = {"mxfp8": 0.05, "mxfp4": 0.25, "nvfp4": 0.25}
 def test_mxfp8_storage_shapes_and_dtypes():
     torch.manual_seed(0)
     x = torch.randn(64, 256) * 0.5
-    q = quantize_mxfp8(x, axis=-1, block_size=32)
+    q = quantize_mxfp8(x, axis=-1)
     assert q.data.shape == x.shape and q.data.dtype == torch.float8_e4m3fn
     assert q.scales.shape == (64, 256 // 32) and q.scales.dtype == torch.uint8  # e8m0
     assert not q.packed and q.pow2_scale
@@ -45,7 +45,7 @@ def test_mxfp8_storage_shapes_and_dtypes():
 def test_nvfp4_storage_shapes_and_dtypes():
     torch.manual_seed(0)
     x = torch.randn(64, 256) * 0.5
-    q = quantize_nvfp4(x, axis=-1, block_size=16)
+    q = quantize_nvfp4(x, axis=-1)
     assert q.data.shape == (64, 256 // 2) and q.data.dtype == torch.uint8  # 2 nibbles / byte
     assert q.scales.shape == (64, 256 // 16) and q.scales.dtype == torch.float8_e4m3fn
     assert q.packed and not q.pow2_scale
@@ -56,7 +56,7 @@ def test_nvfp4_storage_shapes_and_dtypes():
 def test_mxfp4_storage_shapes_and_dtypes():
     torch.manual_seed(0)
     x = torch.randn(64, 256) * 0.5
-    q = quantize_mxfp4(x, axis=-1, block_size=32)
+    q = quantize_mxfp4(x, axis=-1)
     assert q.data.shape == (64, 256 // 2) and q.data.dtype == torch.uint8
     assert q.scales.shape == (64, 256 // 32) and q.scales.dtype == torch.uint8  # e8m0 pow2
     assert q.packed and q.pow2_scale
@@ -86,7 +86,7 @@ def test_fp8_beats_fp4_accuracy():
 def test_axis_0_quantization():
     torch.manual_seed(0)
     x = torch.randn(128, 96) * 0.3
-    q = quantize_mxfp8(x, axis=0, block_size=32)
+    q = quantize_mxfp8(x, axis=0)
     assert q.scales.shape == (128 // 32, 96)  # blocks along axis 0
     assert fro_rel_err(dequantize(q), x) < _TOL["mxfp8"]
 
@@ -140,7 +140,7 @@ def test_nvfp4_saturating_scale_guards_against_outlier_nan():
     # Reconstruction must stay finite.
     x = torch.randn(16, 64) * 0.1
     x[0, 0] = 5000.0  # well past the saturation threshold
-    q = quantize_nvfp4(x, block_size=16)
+    q = quantize_nvfp4(x)
     recon = dequantize(q)
     assert torch.isfinite(q.scales.float()).all()
     assert torch.isfinite(recon).all()

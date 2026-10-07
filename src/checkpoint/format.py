@@ -824,16 +824,6 @@ class StreamingCheckpointReader:
         self.close()
 
 
-def read_specific_keys_from_checkpoint(checkpoint: str, keys) -> dict[str, torch.Tensor]:
-    """Read only ``keys`` from a checkpoint dir, returning ``{key: cpu tensor}`` for those present.
-
-    Buffering read for the callers whose key set is a handful of tensors; the stage-sized reads go
-    through :class:`StreamingCheckpointReader` directly rather than through this dict.
-    """
-    with StreamingCheckpointReader(checkpoint, keys) as reader:
-        return {key: reader.get(key) for key in reader.available}
-
-
 def _unique_key_by_suffix(state_dict: dict, suffix: str) -> str | None:
     """The single state-dict key equal to ``suffix`` or ending in ``.{suffix}``; None when absent.
     Warns and returns None on an ambiguous (multi-key) match."""

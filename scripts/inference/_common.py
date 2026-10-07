@@ -219,7 +219,7 @@ def assistant_message_from_response(response: OpenAIResponse) -> dict:
     ``content`` stays ``None`` on a tool-call-only or empty reply: ``str(None)`` sends the literal
     text "None" to the next turn, which the model reads as the assistant's answer.
     """
-    message: dict = {"role": "assistant", "content": response.answer if isinstance(response.answer, str) else None}
+    message: dict = {"role": "assistant", "content": response.answer}
     if response.tool_calls:
         message["tool_calls"] = [tool_call.model_dump() for tool_call in response.tool_calls]
     return message

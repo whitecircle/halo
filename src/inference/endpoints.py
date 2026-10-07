@@ -11,6 +11,9 @@ DEFAULT_LOCAL_BASE_URL = "http://localhost:8000/v1"
 # The hosted aggregator every off-site caller targets (the judges, demo chat).
 DEFAULT_OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
 
+# The variables a hosted (non-local) endpoint's key is read from, in order.
+EXTERNAL_API_KEY_CHAIN = ("OPENROUTER_API_KEY", "OPENAI_API_KEY")
+
 # The key a keyless local rollout server (vLLM / SGLang without --api-key) accepts. The SDK refuses to
 # construct a client without SOME key, so a None default would crash the documented local invocation.
 LOCAL_SERVER_API_KEY = "EMPTY"
@@ -27,8 +30,8 @@ def resolve_local_api_key() -> str:
 
 
 def resolve_external_api_key() -> str | None:
-    """Key for a hosted (non-local) endpoint: ``OPENROUTER_API_KEY`` → ``OPENAI_API_KEY``.
+    """Key for a hosted (non-local) endpoint: the first set :data:`EXTERNAL_API_KEY_CHAIN` variable.
 
     ``None`` when nothing is set — each caller decides whether that is fatal.
     """
-    return env_str("OPENROUTER_API_KEY") or env_str("OPENAI_API_KEY") or None
+    return next((key for name in EXTERNAL_API_KEY_CHAIN if (key := env_str(name))), None)
