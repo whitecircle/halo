@@ -29,8 +29,8 @@ prompt are two groups and are normalized separately.
 ```
 
 A mismatch between `completions` and `rewards` raises with the row index, and a non-finite reward raises with the
-group. The method is decoder-only and text-only: an encoder-decoder model is refused at construction, and so are image
-columns and image parts in the messages. If you don't have such a dataset yet, `halo run rm-rejection-sampling --output_format offline_grpo`
+group. The method is decoder-only and text-only: an encoder-decoder model is refused at construction, and the script
+refuses image columns and image parts in the messages. If you don't have such a dataset yet, `halo run rm-rejection-sampling --output_format offline_grpo`
 generates candidates against a served model, scores them with a reward model and writes exactly this shape.
 
 ## Config

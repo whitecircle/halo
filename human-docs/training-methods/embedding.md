@@ -83,7 +83,7 @@ Recipes for Qwen3-Embedding, Qwen3.5, GPT-OSS and Gemma 4 ship under `examples/e
 tensor and expert-tensor parallelism all work; context parallelism does not, because pooling needs
 the whole sequence on one rank. Tensor and expert-tensor parallelism, and a pre-sharded dataset,
 batch through Halo's own loader, which builds plain batches, so they refuse any other
-`batch_sampler` (`no_duplicates`, `group_by_label`): set `batch_sampler: batch_sampler` there (as
+`batch_sampler` (`no_duplicates`, `no_duplicates_hashed`, `group_by_label`): set `batch_sampler: batch_sampler` there (as
 `--batch_sampler=batch_sampler` on the command line). Multi-GPU plain data parallelism and pure EP
 over a map-style, not pre-sharded dataset need `dataloader_drop_last: true`: sentence-transformers
 sets it to `true` on any multi-process launch, and a command-line `--dataloader_drop_last=false` is
