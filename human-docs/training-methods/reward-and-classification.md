@@ -8,8 +8,8 @@ reward model to rank or filter generations, a classifier to tag them.
 ## Reward modeling
 
 The Bradley-Terry objective says the chosen answer should score above the rejected one. The output is
-a scorer you consume later — for rejection sampling, for filtering a dataset, or as the reward in
-GRPO. To move the policy itself on the same pairs, use [preference tuning](preference.md) instead.
+a scorer you consume later — for rejection sampling (building preference or offline-GRPO data from fresh
+generations), or as the reward in GRPO. To move the policy itself on the same pairs, use [preference tuning](preference.md) instead.
 
 ### Data
 
@@ -45,7 +45,8 @@ dataset. If your split shrinks unexpectedly, that is why. `center_rewards_coeffi
 `(chosen + rejected)²`, which pulls the score distribution toward zero mean.
 
 LoRA needs `lora_task_type: SEQ_CLS`, which is what keeps the freshly initialized `score` head
-trainable. Leave it out and Halo only warns, while the head never trains and accuracy sits at 0.5.
+trainable. Leave it out and Halo only warns, while the head stays frozen and accuracy barely moves (or add
+`lora_modules_to_save: [score]`).
 
 ### Run
 
