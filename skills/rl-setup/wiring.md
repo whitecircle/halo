@@ -183,8 +183,8 @@ the trainer's `_init_weight_sync_client` → `_sync_weights_to_engine`:
 
 The parallelism-aware gather is the shared `gather_and_send_weights`
 (`src/trainers/grpo/rollout/weight_sync.py`) that both the online trainer and env
-GRPO both reach through `sync_trainer_weights`: EP experts via
-`gather_expert_state_dict` / `gather_ep_layer_weights` (collective across the EP group); non-EP /
+GRPO reach through `sync_trainer_weights`: EP experts via each layer's
+`gather_expert_state_dict` (collective across the EP group); non-EP /
 router / shared / dense params through `materialize_dtensor`, which returns each FSDP2-DP and
 TP-mesh shard full (both HF's `tp_plan` and the toolkit's attention-only TP place theirs as
 DTensors). The hand-sliced non-DTensor TP shards — GptOss sinks — are skipped there and drained

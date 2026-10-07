@@ -149,7 +149,7 @@ manifest.
 
 - **The `cpu` marker is applied by path, once.** `tests/conftest.py` marks every item under
   `tests/cpu/` in `pytest_collection_modifyitems`, so `-m cpu` selects the tier without a per-file
-  `pytestmark`; adding one duplicates a marker the collector already applied.
+  `pytestmark`; re-declaring `cpu` in one duplicates a marker the collector already applied.
 - **Imports resolve from the image, not from `sys.path` surgery.** `PYTHONPATH=/workspace` is baked
   into the training images (and `tests/conftest.py` puts the repo root on the path for a pytest
   run), so `from src...` / `from tests.common...` work in both `pytest` and a standalone
@@ -277,7 +277,7 @@ below. The cross-suite ones:
 | `HALO_TEST_MAX_STEPS`, `HALO_TEST_BATCH_SIZE`, `HALO_TEST_GRAD_ACCUM`, `HALO_TEST_NUM_GENERATIONS`, `HALO_TEST_NUM_WORKERS`, `HALO_TEST_MAX_CONCURRENT`, `HALO_TEST_ROLLOUT_MAX_TOKENS`, `HALO_TEST_MAX_COMPLETION` | Step count and rollout sizing for `trainers/grpo/test_environmental_grpo_benchmarks.py`, whose defaults are sized for one vLLM server. |
 | `HALO_TEST_VLLM_GROUP_PORT` / `HALO_TEST_SGLANG_GROUP_PORT` | Pins the trainer-side weight-transfer group port the rollout e2e suites bind. Unset, each run draws one with `free_port()` (`tests/common/ports.py`), below the kernel's ephemeral range, so no outbound connection on the host can hold it; the engine learns the port from the trainer's init request, so the server needs no matching setting. The online-GRPO MoE / dense pair offsets a pinned port by the row's index, so back-to-back rows bind different ones. A resume row rebinds its port for phase 2, and the weight-transfer re-init suite rebinds it every cycle. |
 | `HALO_TEST_VLLM_SERVER_URLS` | Comma-separated rollout endpoints the environmental legs of `trainers/grpo/test_online_grpo_vllm_e2e.py` drive (default: the single `VLLM_SERVER_URL`). The leg always pushes through the single training process's `InferenceClientManager`; two or more URLs make it pause every server together and stream each chunk to all of them concurrently, and the leg then asserts the served policy moved on **every** one of them. Each server serves the same model on its own GPU; the leg binds one trainer-side group port per server, each allocated by `free_port()` (`tests/common/ports.py`) rather than pinned, so back-to-back rows cannot contend. |
-| `VLLM_MODEL` | Checkpoint the running vLLM server serves, read by the rollout benchmark itself — not by the launcher, and **not** forwarded by the `make` tiers, so put it in `.env` or export it. It must be the model the test trains: unset, the benchmark falls back to Qwen3-0.6B and a MoE-serving tier silently tests the wrong pairing. (`SGLANG_MODEL` is the compose file's server-side spelling; no test reads it.) |
+| `VLLM_MODEL` | Checkpoint the running vLLM server serves, read by the rollout benchmark itself — not by the launcher, and **not** forwarded by the `make` tiers, so put it in `.env` or pass `EXTRA_DOCKER_ENV="-e VLLM_MODEL=…"` (a host export never reaches the container). It must be the model the test trains: unset, the benchmark falls back to Qwen3-0.6B and a MoE-serving tier silently tests the wrong pairing. (`SGLANG_MODEL` is the compose file's server-side spelling; no test reads it.) |
 
 Suites that pin one family or one phase add their own `HALO_TEST_<SUITE>_*` knobs on top; the manifest
 entry and the script name them, and the non-obvious ones are:

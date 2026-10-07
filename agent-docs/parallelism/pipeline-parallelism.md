@@ -24,7 +24,9 @@ argument: [GPU Training Theory §9](../reference/gpu-training-theory.md#pipeline
   [capability-matrix allowlist](README.md#supported-combinations) admits PP alone, PP+EP and PP+ETP;
   every other axis combination (PP+TP, PP+CP, PP+EP+ETP, …) is refused with the breaking mechanism
   named in the error. `_validate_pipeline_parallel` separately refuses the PP-incompatible knobs
-  (HSDP, expert LoRA, ZeRO-3, non-`bf16` low precision).
+  (HSDP, expert LoRA, ZeRO-3, non-`bf16` low precision). These validators fire only on a directly
+  constructed `ParallelismConfig`: the production entry rejects every `pp_size > 1` before they run
+  ([below](#what-does-not-ship)).
 - **Trainer gates.** `_supports_pp` is declare-to-enable per trainer (like `_supports_cp`), and
   `src/trainers/mixins/pp_gates.py` is the shared rejection vocabulary (PEFT, live reference
   models, `compute_metrics`, activation offloading, precomputed-reference-column requirements);
@@ -57,7 +59,9 @@ argument: [GPU Training Theory §9](../reference/gpu-training-theory.md#pipeline
 forward-only pass — raises `NotImplementedError` on construction. Because
 `parallelism_config_from_args` (`src/training/parallelism_args.py`) rejects
 `pipeline_parallel_size > 1` at the single production entry point, before any rank math or model
-loading, no production path reaches it. No PP run is launchable.
+loading, no production path reaches it. A trainer without `_supports_pp` is refused there first, by
+its own gate (`<Trainer> does not support Pipeline Parallelism (PP)`); every other trainer by the
+release gate. No PP run is launchable.
 
 ## Sharding large models today
 

@@ -28,6 +28,7 @@ from src.environments.tools.definitions import (
     NativeToolResult,
     ToolArgumentError,
     ToolBudgetExhausted,
+    ToolCallRefused,
 )
 from src.inference.response import ENGINE_CUT_FINISH_REASONS
 from src.rewards.graders.matching import validate_answer
@@ -232,6 +233,7 @@ class NativeToolUseEnvironment(BaseEnvironment):
             name=tc.name,
             content=self._truncate_observation(content),
             success=success,
+            refused=isinstance(outcome, ToolCallRefused),
             sandbox_fault=fault,
         )
 
@@ -297,10 +299,11 @@ class NativeToolUseEnvironment(BaseEnvironment):
             trajectory.add_message(result.to_message())
 
         # Nothing this turn could execute: mark the assistant message so the trainer never rewards it
-        # (an episode that recovers must not reinforce the invented call). Read off ``unknown_tool``,
-        # never the error text — a tool whose backend answers "Tool not found: x" failed for real, and
-        # dropping that turn would hide a broken tool as a model mistake.
-        if results and all(r.unknown_tool for r in results):
+        # (an episode that recovers must not reinforce the invented call or the refused program). Read
+        # off the ``unknown_tool`` and ``refused`` flags, never the error text — a tool whose backend
+        # answers "Tool not found: x" failed for real, and dropping that turn would hide a broken tool
+        # as a model mistake.
+        if results and all(r.unknown_tool or r.refused for r in results):
             self._flag_calls_rejected(trajectory)
 
         # Executed calls (post per-turn cap), so this cannot disagree with total_tool_calls.

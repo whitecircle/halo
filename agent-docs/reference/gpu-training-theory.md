@@ -215,7 +215,7 @@ A naive activation is several such kernels, each a separate HBM round trip. Fusi
 
 The toolkit gets this fusion from two places:
 
-- **Liger**: hand-written Triton kernels (fused RMSNorm, RoPE, SwiGLU, cross-entropy, fused-linear-cross-entropy), auto-applied per model type. Conflicting ones auto-disable: SwiGLU when an EP wrapper replaced the MoE layer or when upstream holds it on a MoE whose routed experts Halo leaves unwrapped, the cross-entropy variants when TP shards the vocab, CP computes its own loss, or a per-microbatch PP loss would own the reduction. [Liger Kernels](../optimization/liger-kernels.md).
+- **Liger**: hand-written Triton kernels (fused RMSNorm, RoPE, SwiGLU, cross-entropy, fused-linear-cross-entropy), auto-applied per model type. Conflicting ones auto-disable: SwiGLU when an EP wrapper replaced the MoE layer or when upstream holds it on a MoE whose routed experts Halo leaves unwrapped, the cross-entropy variants when TP shards the vocab or CP computes its own loss. [Liger Kernels](../optimization/liger-kernels.md).
 - **torch.compile** (Inductor) auto-fuses pointwise chains. [torch.compile](../optimization/torch-compile.md).
 
 ### Fused-linear-cross-entropy (FLCE)
@@ -224,7 +224,7 @@ An LM's final step multiplies each position's hidden state by `lm_head` to produ
 
 FLCE never materializes it. It fuses the `lm_head` projection and cross-entropy into one kernel that processes the sequence in chunks, computing each block's logits, loss, and gradient and freeing them before the next — often the difference between a long sequence and OOM.
 
-The cost is that `outputs.logits` never exists. That makes FLCE SFT-only (preference and distillation need logits for log-probs), turns off entropy logging, and forces it off under TP, CP and PP. It is default-on for the large-vocab families whose logits plane is the binding limit (`zaya`, `deepseek_v4`, `glm4_moe_lite`), opt-in elsewhere (`liger_kernel_config: {fused_linear_cross_entropy: true}`). Per-model defaults and the measured savings: [Liger Kernels](../optimization/liger-kernels.md).
+The cost is that `outputs.logits` never exists. That makes FLCE SFT-only (preference and distillation need logits for log-probs), turns off entropy logging, and forces it off under TP and CP. It is default-on for the large-vocab families whose logits plane is the binding limit (`zaya`, `deepseek_v4`, `glm4_moe_lite`), opt-in elsewhere (`liger_kernel_config: {fused_linear_cross_entropy: true}`). Per-model defaults and the measured savings: [Liger Kernels](../optimization/liger-kernels.md).
 
 ### What fusion does not buy
 

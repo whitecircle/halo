@@ -14,7 +14,6 @@ generic path applies.
 
 from __future__ import annotations
 
-import logging
 from collections.abc import Callable
 from types import MethodType
 
@@ -22,7 +21,7 @@ import torch.nn as nn
 
 from src.distributed.module_registry import build_hf_module_name_map
 from src.distributed.pipeline_parallel.stage_adapters import deepseek_v4_stream_forward, glm5_next_stream_forward
-from src.models.attention_geometry import resolve_head_dim
+from src.models.attention_geometry import resolve_head_dim, resolve_num_key_value_heads
 from src.models.head_transform import resolve_head_transform
 from src.models.loading.config_levels import get_config_field, text_config
 from src.models.moe_balancing import (
@@ -31,8 +30,6 @@ from src.models.moe_balancing import (
     resolve_router_topk,
 )
 from src.models.structure import DECODER_LAYER_LIST_ATTRS, backbone_with_layers, decoder_layers
-
-logger = logging.getLogger(__name__)
 
 # The config field every family spells its input/output embedding tie with.
 TIE_WORD_EMBEDDINGS_FLAG = "tie_word_embeddings"
@@ -514,7 +511,7 @@ def head_cost_layer_equivalents(config) -> float:
     if not hidden or not vocab or not heads:
         return 0.0
     head_dim = resolve_head_dim(config)
-    kv_heads = get_config_field(config, "num_key_value_heads", per_layer_reduce=max) or heads
+    kv_heads = resolve_num_key_value_heads(config)
     attn = 2 * hidden * heads * head_dim + 2 * hidden * kv_heads * head_dim
     intermediate = get_config_field(config, "moe_intermediate_size", per_layer_reduce=max) or get_config_field(
         config, "intermediate_size", per_layer_reduce=max

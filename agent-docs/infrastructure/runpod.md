@@ -8,7 +8,7 @@ RunPod tooling in the repo — this is a manual runbook.
 | Node-local EP | `node` | Gradients only (NCCL AllReduce over IB) | Default — EP stays on NVLink |
 | Cross-node EP | `global` | Expert all-to-all (RDMA) + gradients | Maximum expert distribution for large MoE; higher comm overhead |
 
-`data_parallel_size = (world_size / pp_size) / max(cp_size, tp_size, expert_tp_size)`. With only EP active it reduces to
+`data_parallel_size = world_size / max(cp_size, tp_size, expert_tp_size)`. With only EP active it reduces to
 `world_size` — EP is orthogonal to DP. Theory: [Multi-Node Parallelism](../parallelism/multi-node.md).
 
 ## Prerequisites

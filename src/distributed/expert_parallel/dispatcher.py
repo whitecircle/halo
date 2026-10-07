@@ -140,7 +140,7 @@ def rank_uniform_ep_settings() -> dict[str, object]:
     }
 
 
-def verify_rank_uniform_env(force: bool = False) -> None:
+def verify_rank_uniform_env() -> None:
     """Collective. Raise when ranks disagree on a setting in :func:`rank_uniform_ep_settings`.
 
     A divergence is a hang, not a slow run: ranks with ``HALO_EP_CAPACITY_DEDUP`` off run the
@@ -148,14 +148,13 @@ def verify_rank_uniform_env(force: bool = False) -> None:
     collective counts diverge inside one EP group.
 
     Runs at most once per process; the entry scripts call it in distributed setup, before the weight
-    load. ``force`` re-runs it for a caller that reaches DeepEP without the script scaffold (a
-    standalone test harness). The latch closes only once the join could actually run: before
+    load. The latch closes only once the join could actually run: before
     ``init_process_group`` :func:`reject_divergent_settings` no-ops, and latching on such a call
     would compare nothing and then permanently disarm
     :func:`~src.distributed.expert_parallel.patching.create_ep_buffers`'s backstop.
     """
     global _ENV_UNIFORMITY_VERIFIED
-    if _ENV_UNIFORMITY_VERIFIED and not force:
+    if _ENV_UNIFORMITY_VERIFIED:
         return
     reject_divergent_settings(
         rank_uniform_ep_settings(),

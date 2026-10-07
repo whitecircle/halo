@@ -38,7 +38,7 @@ Leaf modules keep those imports one-way, each holding a contract several layers 
 | `src/models/structure.py` | module-tree introspection: wrapper peeling, PEFT name normalization, decoder-layer discovery, persistent buffers, norm / fp32-pin classification | FSDP2/TP/PP wraps, the attention patches, every checkpoint writer |
 | `src/models/segment_markers.py` | which families' conv / linear-attention mixers read per-document segment markers, the GatedDeltaNet kernel refusal, and the markers built from a row's `position_ids` | the collator factory, the packing and padding-free collators, and SMPO's padding-free forward |
 | `src/models/attention_layout.py` | per-layer attention cost rules off `layer_types` and head geometry — the MFU attention term | the token-metrics mixin and the efficiency callbacks |
-| `src/models/head_transform.py` | the head-path contract: each family's declared transform around `lm_head` (scale, softcap, vocabulary cut), verified against its own forward on a meta-device shell | the chunked GRPO log-prob sweep and the last pipeline stage, which apply the same verdict |
+| `src/models/head_transform.py` | the head-path contract: each family's declared transform around `lm_head` (scale, softcap, vocabulary cut), verified against its own forward on a meta-device shell | the chunked GRPO log-prob sweep (and the PP stage seam), which apply the same verdict |
 | `src/checkpoint/atomic.py` | exclusive staging with ordinary umask permissions, atomic Torch-file publication, directory fsync — no rank coordination | model-card writes, reference sidecars, the optimizer metadata, the async GRPO prefetch sidecar, the trainer-state commit, and checkpoint export filtering |
 | `src/checkpoint/format.py` | the on-disk checkpoint spellings, save-dtype casts, config/state-dict read-write — torch, safetensors, transformers and `huggingface_hub`, no `torch.distributed` | the parallel save paths and the standalone `scripts/after_training/` tools |
 | `src/data/sources/paths.py` | S3 / Hub / local classification of a dataset source or destination, pure string rules | the loader, the preprocessing pipeline and the scripts — without a boto3 import |
@@ -146,7 +146,6 @@ load_distributed_model            src/distributed/loading/model_loading.py
    │  • resolve_attn_implementation → FA4 (SM100+) / FA3 (SM90) / FA2; per-model SDPA/eager overrides
    │  • patch_moe_model_for_ep → EP wrappers (when ep_group_size > 1 — EP or ETP — or grouped GEMM on an MoE)
    │  • UlyssesCPModelWrapper (when cp_size > 1)
-   │  • load_pp_stage_model → this stage's decoder layers only (when pp_size > 1)
    ▼
 DistributedTrainerMixin._setup_distributed_modes
    │  • FSDP2 fully_shard (EP modules in ignored_params, except at ep_group_size == 1)

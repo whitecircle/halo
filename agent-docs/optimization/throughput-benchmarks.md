@@ -60,7 +60,7 @@ checkpointing when that runs out of memory:
 Per-run tokens/s, memory and step-1 loss: `agent-docs/assets/benchmarks/gemma4-sft-2026-09/summary_2048.tsv`
 and `agent-docs/assets/benchmarks/gemma4-sft-2026-09/summary_16384.tsv`. The protocol, the result JSONs and the harness are in the
 [benchmark gist](https://gist.github.com/advpropsys/0de3c36fd118a5ad18e4883ac15404a2); after `bash unpack.sh`,
-`BENCH_ROOT=<dir> HALO_TREE=<halo checkout> [BENCH_SEQ=16384 BENCH_STEPS=50] bash scripts/benchmarks/gemma4_sft/reproduce.sh`
+the gist's `BENCH_ROOT=<dir> HALO_TREE=<halo checkout> [BENCH_SEQ=16384 BENCH_STEPS=50] bash scripts/benchmarks/gemma4_sft/reproduce.sh`
 runs the data build, every framework and the summary.
 
 The kernels Halo runs for Gemma 4: [Gemma 4](../models/gemma4.md).
@@ -79,7 +79,7 @@ of all 20 post-warmup steps:
 
 ![Mistral Small 4 SFT throughput against memory](../assets/benchmarks/sft_memory_throughput_pareto_mistral4.png)
 
-Halo's trace runs synthetic tokens (`dataset_group: halo_synthetic`), so its loss and gradient-norm curves
+Halo's trace runs synthetic tokens (its run JSON records `"dataset_group": "halo_synthetic"`), so its loss and gradient-norm curves
 are numerical-health evidence, not a convergence comparison. The raw 20-step traces are in
 `agent-docs/assets/benchmarks/runs/`.
 
@@ -119,8 +119,7 @@ resets, or the padded row) and the callback swaps that rank-local measurement in
 row of 1–40k-token documents is not costed as one 64k sequence. A trainer whose collator emits no `input_ids`
 keeps the config term (every token in a `max_seq_len` document): online and async GRPO, offline GRPO outside CP, KTO, SMPO and embedding.
 
-The layer set is this rank's own, so under PP ([not yet available](../parallelism/pipeline-parallelism.md))
-each stage's term would match its real slice rather than an even split of the depth. The measured term
+The measured term
 carries the same divisors as the tokens: `tp_size` (heads are sharded) and, under Ulysses CP, `cp_size`
 (the wrapper splits the sequence's heads inside forward). Per-step wiring and the logged fields:
 [Callbacks](../training-methods/callbacks.md#efficiencycallback).
@@ -142,9 +141,9 @@ Compare configs with tok/s/GPU and achieved TFLOPS; reach for S-MFU only when yo
 (see [Why MoE utilization reads low](#why-moe-utilization-reads-low)).
 
 **Cluster throughput** = `per_gpu_tps × dp_actual × cp_size`, where
-`dp_actual = world_size / (pp_size × max(tp_size, cp_size, expert_tp_size))` (`ParallelismConfig.data_parallel_size`). `ep_size` is
-excluded (EP ⊥ DP, each EP rank processes a distinct batch); `expert_tp_size` and `pp_size` are included
-(their ranks share one input).
+`dp_actual = world_size / max(tp_size, cp_size, expert_tp_size)` (`ParallelismConfig.data_parallel_size`). `ep_size` is
+excluded (EP ⊥ DP, each EP rank processes a distinct batch); `expert_tp_size` is included (its ranks
+share one input).
 
 ## GPT-OSS-20B (8× B300)
 

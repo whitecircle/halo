@@ -30,9 +30,7 @@ the ranks agree on the key set (a mismatch raises on every rank). `store_metrics
 a value by the real rows it averages. Every eval store passes `rows=eval_split_rows(n)` (pairs for
 SMPO) and computes its values over those rows — the distillation and SDPG trainers through
 `store_batch_metrics`, which weighs a train micro-batch 1; the eval losses read
-the same rows, bar SDPG's GRPO term, which TRL computes over the whole batch. Under PP the store would
-be fed from the last stage ([Pipeline Parallelism](../parallelism/pipeline-parallelism.md), not yet
-available in this release).
+the same rows, bar SDPG's GRPO term, which TRL computes over the whole batch.
 TRL's DPO, KTO and reward trainers log through their own `_metrics` and accelerate's gather instead,
 so their eval metrics keep the final round's padding.
 
@@ -89,9 +87,10 @@ vocabulary, below).
 | `EmbeddingTrainer` | `SentenceTransformerTrainer` | No | No |
 
 EP, ETP and TP run under every trainer. The PP axis itself is **not yet available in this release**
-— `pipeline_parallel_size > 1` is rejected at config time, and the PP column records each trainer's
-`_supports_pp` declaration: which trainers take the axis when the engine lands
-([Pipeline Parallelism](../parallelism/pipeline-parallelism.md)).
+([Pipeline Parallelism](../parallelism/pipeline-parallelism.md)); the PP column records each
+trainer's `_supports_pp` declaration. At config time a **No** trainer is refused by that gate first
+(`<Trainer> does not support Pipeline Parallelism (PP)`), and a **Yes** trainer by the release gate
+right after it.
 
 CP and PP support is declared per class as `_supports_cp` /
 `_supports_pp` and enforced in `ParallelismValidationMixin`; `_pp_unsupported_reason` carries the
@@ -113,7 +112,9 @@ token objective across CP with the shared autograd SUM. Its CP path rejects adap
 recomputed from trained weights on resume.
 
 **PP** needs a single-forward objective on one stage's logits, and the conditional rows above are
-constructor-time gates rather than class attributes. Rejections land in three places.
+constructor-time gates rather than class attributes. These are the seam's gates: they fire only on a
+hand-built PP config, since the entry rejects every `pp_size > 1` before a trainer is constructed.
+Rejections land in three places.
 
 `PipelineTrainerMixin._maybe_prepare_pipeline_model` rejects the generic blockers on every trainer:
 an unset `max_length`, `save_sharded_ep`, reentrant gradient checkpointing, `peft_config`, TRL's
@@ -145,19 +146,13 @@ for an image run only.
 |---|---|---|
 | SFT | Yes | Conversation-embedded images or an `images_field` column; packing/padding-free rejected on the VLM path; CP is text-only (the CP wrapper raises on a batch carrying `pixel_values`). See [SFT — VLMs](../training-methods/sft.md#vision-language-models) |
 | DPO / KTO | Yes | `images`/`image` column routes to TRL's vision collators. Vision excludes `precompute_ref_log_probs`, so EP vision DPO takes standard-PEFT adapters or a frozen copy |
-| SMPO | Yes | `DataCollatorForVLMSMPO` processes images at collation; CP, padding-free and PP are text-only. See [SMPO — VLMs](../training-methods/preference/smpo.md) |
+| SMPO | Yes | `DataCollatorForVLMSMPO` processes images at collation; CP and padding-free are text-only. See [SMPO — VLMs](../training-methods/preference/smpo.md) |
 | Teacher distillation | Yes | Student and teacher share the processor's vision geometry; over-length rows pre-filtered |
 | Self-distillation (SDPG offline) | Yes | Privileged hint appended to the last user turn; teacher branch fails loud on overflow |
 | Reward | Yes, on score-headed families | `DataCollatorForVLMPreference` expands images into the shared prompt at collation. Refused before the distributed init on a multimodal family with no sequence-classification head. See [Reward — VLMs](../training-methods/preference/reward-modeling.md#vision-language) |
 | Classification | No | Same head roster as reward modeling, but the classification script has no vision data path; multimodal architectures still train on text |
 | GRPO (offline / online / async) | No | Text rollouts |
 | Embedding | No | Text towers only |
-
-Pipeline parallelism rejects a vision-language **run** on every trainer — an image column, embedded
-image parts, or an image-consuming collator — because a stage split keeps the text backbone and the
-task head only. A text-only run of a multimodal checkpoint is admitted: the vision tower and
-projector are held by no stage, kept untrained on the save rank, and re-emitted unchanged in every
-checkpoint.
 
 The data contract is the same across methods: conversations carry typed content parts
 (`{"type": "text" | "image", ...}`), a per-modality top-level column is injected into the
@@ -187,7 +182,7 @@ before the base trainer sees them: `parallelism_config` (a `ParallelismConfig`; 
 raises `ValueError`), the save flag `save_sharded_ep` (default `False`), `moe_balancing`,
 `dataset_presharded`, and `bf16_optimizer`. It also reconciles
 `save_on_each_node`, the Liger config and the GC `use_reentrant` kwarg with the requested mode and the model
-(every MoE, EP or CP run goes reentrant outside PP).
+(every MoE, EP or CP run goes reentrant).
 
 A trainer that forwards `**kwargs` calls it as above. One whose `__init__` names those parameters
 passes them through `**explicit` instead (SMPO, Classification, offline GRPO, teacher distillation);
@@ -199,9 +194,7 @@ resolved it first, and `EmbeddingTrainer` passes a synthetic `{"model": model, "
 
 `ParallelismConfig` validates the combination and exposes mode-flag properties (`is_ep_mode`,
 `is_cp_mode`, `is_tp_mode`, `is_expert_tp_mode`, `is_ep_tp_mode`, `is_ep_cp_mode`, `is_pp_mode`);
-`is_ep_mode` is `ep_group_size > 1`, covering both EP and pure ETP. Under PP,
-`PipelineTrainerMixin._maybe_prepare_pipeline_model` runs *before* `super().__init__()` to split the
-model into this rank's stage.
+`is_ep_mode` is `ep_group_size > 1`, covering both EP and pure ETP.
 
 **`create_accelerator_and_postprocess()`** is overridden during base init, on the custom path only
 (`_needs_custom_accelerator()`; otherwise it delegates to the base): no DDP wrapping (manual gradient
@@ -296,11 +289,11 @@ norms. The EP and TP clips share one norm, `_compute_global_grad_norm`:
 - Multiple EP groups: no replica reduce. Every multi-group topology defers, and the clip runs the
   deferred sweep before the norm, so the replicas already hold identical expert grads.
 
-Then `global_norm = sqrt(expert_norm_sq + other_norm_sq)` sets the clip. The pipeline clip reduces its
-own norm (one all-reduce over disjoint stages), and every clip derives one device-resident coefficient,
+Then `global_norm = sqrt(expert_norm_sq + other_norm_sq)` sets the clip. Every clip derives one
+device-resident coefficient,
 `clip_coefficient` (`src/trainers/mixins/grad_clip.py`), and refuses any `norm_type` but 2 (`require_l2`).
 The EP clip refuses to install on a model with no EP layers.
-The TP and pipeline clips, and the EP clip under any other optimizer, scale every local gradient by it
+The TP clip, and the EP clip under any other optimizer, scale every local gradient by it
 in place (`scale_shards_to_max_norm_`). Under EP with AdamWBF16 stepping exactly the clipped parameters
 that hold gradients, the EP clip hands the coefficient to the optimizer instead (`defer_grad_scale`),
 which multiplies it into each gradient inside its fused step; the gradients stay unscaled until then.
@@ -345,9 +338,8 @@ The three hooks above are what keeps the grad sweeps running on those steps. See
 
 `DataParallelDataLoaderMixin` overrides `get_train_dataloader()` / `get_eval_dataloader()` /
 `get_test_dataloader()` (the eval body, for `predict()`) to build
-dataloaders with a custom DP size/rank so ranks in the same TP/CP/ETP group — and every rank of one
-pipeline chain — receive identical data. The custom path fires when `_needs_custom_dataloader()` is
-True: TP, CP, ETP, or PP active, or the dataset is pre-sharded per DP rank. EP alone does not trigger
+dataloaders with a custom DP size/rank so ranks in the same TP/CP/ETP group receive identical data.
+The custom path fires when `_needs_custom_dataloader()` is True: TP, CP or ETP active, or the dataset is pre-sharded per DP rank. EP alone does not trigger
 it (EP is orthogonal to DP) unless the dataset is pre-sharded.
 
 Some trainers diverge: SMPO sets custom tokenized signature columns; Classification defaults
@@ -357,10 +349,8 @@ and rebuild TRL's `RepeatSampler` at the DP consumption rate
 Offline GRPO uses `MultiGroupSampler`.
 
 `ParallelismConfig` computes both. DP size is
-`(world_size / pp_size) / max(tp_size, cp_size, expert_tp_size)`; `get_data_parallel_rank()` derives
-the shard index per mode ([per-mode derivation](../parallelism/data-loading.md)). It divides the
-**stage-local** rank, not the global one, which is what makes every rank of one pipeline chain
-consume the same batch.
+`world_size / max(tp_size, cp_size, expert_tp_size)`; `get_data_parallel_rank()` derives
+the shard index per mode ([per-mode derivation](../parallelism/data-loading.md)).
 
 `_prepare_dataloader()` passes the computed size/rank to
 `accelerate.prepare_data_loader()` as `num_processes` / `process_index`. A dataset already sharded
@@ -439,8 +429,7 @@ but under CP they cover only the local chunk.
   all-reduce of log-prob sums and token counts. See [SMPO](../training-methods/preference/smpo.md).
 - **OfflineGRPOTrainer** — advantage methods `z_norm`, `minmax`, `quantile_norm`,
   `quantile_uniform`, `robust`; PG formulations `prob_weighted` or `reinforce`. `ChunkedLogprobsCore`
-  owns its log-prob path; `use_chunked_grpo_logprobs` is refused under PP, where the schedule never
-  calls `_get_per_token_logps`.
+  owns its log-prob path.
 - **DistributedDPOTrainer** — the reference model is never parallelized: under EP/TP a frozen copy is a
   whole dense replica per rank (warned); `precompute_ref_log_probs=True`, or PEFT/LoRA with
   `ref_model=None` (LoRA works under EP, not TP), avoids it.
@@ -455,7 +444,8 @@ but under CP they cover only the local chunk.
 The `src/trainers/grpo/` package keeps the three trainers (`environmental.py`, `online.py`,
 `offline.py`) and these shared leaves at the top level: `early_stop.py`; `world_metrics.py`, the step
 metrics folded from every rank's counts in one collective; `reference_policy.py`, the model the KL
-reference forward runs (a held `ref_model`, else the PEFT policy with its adapters disabled); and
+reference forward runs (a held `ref_model`, else the PEFT policy with its adapters disabled);
+`reasoning_terms.py`, the reasoning-length reward terms the environmental trainer charges; and
 `reference_cache.py`, the storage of offline GRPO's frozen-reference scores. Support code lives in
 `objective/` (pure loss-side functions), `mixins/` (offline GRPO's reference lifecycle among them,
 `mixins/offline_reference.py`), and `rollout/`. `environmental.py` keeps the objective itself: batch assembly, advantages, the IS

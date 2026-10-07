@@ -32,10 +32,6 @@ stop HF Trainer from compiling too early, the mixin clears Accelerate's `ACCELER
 building its plain accelerator and re-applies `torch.compile` itself, assigning both `self.model` and
 `self.model_wrapped` (the training loop runs the latter).
 
-**Rejected under pipeline parallelism** (itself [not yet available in this release](../parallelism/pipeline-parallelism.md)):
-a pipeline schedule captures the stage module at setup, so a compiled wrapper installed afterwards would
-never run — `torch_compile: true` with PP raises. No other parallelism mode blocks it.
-
 Compiling costs steps up front: `torch.compile()` returns immediately, the **first step compiles**
 (6–15 s on Qwen3-30B-A3B EP=2, against 4–5 s eager), and each rank recompiles for dynamic shapes when it
 first meets a second sequence length, a 2–7 s step each time. Under `reduce-overhead` slow steps keep coming

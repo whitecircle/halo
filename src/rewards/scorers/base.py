@@ -1,5 +1,4 @@
-"""The scorer contract every external reward source implements, what a verdict carries, and the
-OpenAI-compatible client a chat-model scorer holds."""
+"""The scorer contract every external reward source implements, and what a verdict carries."""
 
 import asyncio
 from abc import ABC, abstractmethod
@@ -7,13 +6,8 @@ from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass, field
 from typing import ClassVar
 
-from openai import AsyncOpenAI
-
-from src.env import env_str
-from src.inference.endpoints import resolve_external_api_key
-from src.inference.openai_client import create_openai_client
 from src.rewards.samples import ScoringSample
-from src.rewards.terms import JudgeTerm, RewardTerm, ScoredTerm
+from src.rewards.terms import RewardTerm, ScoredTerm
 
 # The sample a scorer's launch probe grades: tiny, so the probe costs nothing, yet in the run's exact shape.
 PROBE_SAMPLE = ScoringSample(
@@ -21,25 +15,12 @@ PROBE_SAMPLE = ScoringSample(
     completion=[{"role": "assistant", "content": "ready"}],
     final_answer="ready",
 )
-# How much of a reply an error result quotes.
-REPLY_EXCERPT_CHARS = 200
-# The key chain a chat-model scorer's key is read from after the term's own variable.
-HOSTED_KEY_CHAIN = ("OPENROUTER_API_KEY", "OPENAI_API_KEY")
 
 
 def scored_metric_key(term: RewardTerm) -> str:
     """The per-sample 1/0 of whether the term reached a verdict, ``<source>/<name>/scored``: the metric
     that says a scorer is failing, logged by both arms."""
     return f"{term.source}/{term.name}/scored"
-
-
-def scorer_api_key(term: JudgeTerm) -> str:
-    """A chat-model scorer's key: the term's ``api_key_env`` variable, then the hosted chain."""
-    key = env_str(term.api_key_env) or resolve_external_api_key()
-    if not key:
-        names = " or ".join(dict.fromkeys((term.api_key_env, *HOSTED_KEY_CHAIN)))
-        raise RuntimeError(f"{term.owner}: no API key — set {names}")
-    return key
 
 
 @dataclass(frozen=True)
@@ -118,33 +99,3 @@ class Scorer(ABC):
             self._semaphore_loop = loop
         async with self._semaphore:
             return await fn(*args)
-
-
-class ChatModelScorer(Scorer):
-    """A scorer over an OpenAI-compatible chat model: one lazily built client per instance (per Ray
-    actor or trainer rank), shared by every sample it grades, and the usage a reply reports."""
-
-    term: JudgeTerm
-    _client: AsyncOpenAI | None
-
-    def _connect(self) -> AsyncOpenAI:
-        if self._client is None:
-            self._client = create_openai_client(
-                base_url=self.term.base_url, api_key_override=scorer_api_key(self.term)
-            )
-        return self._client
-
-    def _usage_metrics(self, completion) -> dict[str, float]:
-        metrics: dict[str, float] = {}
-        usage = getattr(completion, "usage", None)
-        if usage is not None:
-            metrics[self._key("completion_tokens")] = float(getattr(usage, "completion_tokens", 0) or 0)
-            cost = getattr(usage, "cost", None)
-            if isinstance(cost, int | float):
-                metrics[self._key("cost_usd")] = float(cost)
-        return metrics
-
-    async def aclose(self) -> None:
-        client, self._client = self._client, None
-        if client is not None:
-            await client.close()

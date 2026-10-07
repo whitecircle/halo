@@ -64,10 +64,9 @@ Tracks per-expert load for any MoE model with a declared router. A forward hook 
 
 Counted is the router's **own** selection, not `topk(router_logits)`: a DeepSeek-style router selects over biased scores inside an `n_group` mask while publishing raw logits. Routers come from transformers' `_can_record_outputs["router_logits"]` declaration; one returning logits alone re-ranks them and warns once. Counters zero every step, and `log_every_n_steps` follows `logging_steps`.
 
-It emits nothing in three cases:
+It emits nothing in two cases:
 
 - Under either bias-update mode — `RouterBiasBalancingCallback` emits the same keys from its load counter.
-- Under pipeline parallelism, whose stage forward returns a bare tensor, not a `ModelOutput`; `bias_update` is the only route to `moe/*` there.
 - Where `output_router_logits` is off, stamped forced-off by the balancing strategy or just unset. The flag costs a `[B*S, num_experts]` tensor per MoE layer per forward **and** adds the aux loss, so metrics never enable it; opt in via `model_init_kwargs`.
 
 Two live paths bypass the hooks even when wired: a wrapper routing without the HF router module (`_ep_severs_aux_loss` — Bailing/Ling, Inkling, DeepSeek-V4), and a GRPO trainer taking log-probs from the backbone alone. Both warn once after the first step; use `bias_update` there.
@@ -104,12 +103,10 @@ The contract is checked on the **enabled tree**, not the class declaration: a re
 Schedules any numeric attribute on the model over training (`src/callbacks/variable_scheduler.py`) — `min_log_prob` for offline GRPO, `target_margin` for SMPO.
 
 ```python
-VariableSchedulerCallback("min_log_prob", -2.0, -5.0, schedule_type="cosine", warmup_steps=100)
+VariableSchedulerCallback("min_log_prob", -2.0, -5.0)
 ```
 
-The attribute lands on the model the Trainer passes in, unwrapped past a DDP/FSDP `.module`, so the value the loss reads is the scheduled one. It holds at `initial_value` through warmup, then runs the `cosine`, `linear` or `exponential` curve over the remaining steps.
-
-An unknown schedule type or an exponential one with a non-positive start or end raises at construction, `warmup_steps ≥ max_steps` at train begin — never on the first scheduled step.
+The attribute lands on the model the Trainer passes in, unwrapped past a DDP/FSDP `.module`, so the value the loss reads is the scheduled one. It moves linearly from `initial_value` to `final_value` over `max_steps`, then holds; a run with no training steps raises at train begin.
 
 ## MoE balancing modes
 
@@ -131,11 +128,11 @@ Both bias modes force `output_router_logits=False`, overriding `model_init_kwarg
 
 `aux_loss` sets `output_router_logits=True` only where `router_aux_loss_coef > 0`; without a usable coef, or where the EP wrappers sever the aux path (DeepSeek-V4), it leaves the flag off and warns rather than letting TRL read an `outputs.aux_loss` those models never populate. With a usable coef it **raises** where the `forward` declares no `output_router_logits` parameter — HF's config fallback lives on that parameter, and `Qwen3_5MoeForConditionalGeneration` reads the flag from `kwargs` only. The probe reads the model under a PEFT or CP wrapper, both of which pass the flag through.
 
-The resolved mode is reconciled world-wide with precedence `bias_update > bias_update_transient > aux_loss > none`: under PP a stage holding no MoE layer resolves `auto` out of ignorance, and a split verdict would send stages into different collectives.
+The resolved mode is reconciled world-wide with precedence `bias_update > bias_update_transient > aux_loss > none`, so every rank runs the same collectives.
 
 ### `aux_loss` under gradient checkpointing
 
-Every MoE run with gradient checkpointing is reentrant outside PP, and a reentrant checkpoint runs a layer's original forward under `no_grad`. transformers collects `router_logits` in that pass, so on its own a checkpointed layer's aux term reaches the loss with no graph and adds no router gradient.
+Every MoE run with gradient checkpointing is reentrant, and a reentrant checkpoint runs a layer's original forward under `no_grad`. transformers collects `router_logits` in that pass, so on its own a checkpointed layer's aux term reaches the loss with no graph and adds no router gradient.
 
 `aux_loss` therefore installs `install_router_aux_gradient` (`src/models/moe_aux_loss.py`) on the module collecting the logits, the innermost one declaring `router_logits` in `_can_record_outputs`. Each tensor collected under a checkpoint's `no_grad` pass becomes a carrier whose backward keeps the gradient the loss hands it. In the layer's recompute, an identity node on the output of the block owning the router passes that gradient to the router's recomputed logits.
 
@@ -169,17 +166,16 @@ Either way Gemma 4 gets no balancing **and** no `moe/*` metrics, and `output_rou
 - **Distillation (teacher and self)** — both strip `labels`, for full-vocab logits.
 - **Classification / embedding** — non-causal heads; the causal-LM forward never runs.
 - **GRPO (offline / online / async)** — the loss is per-token log-probs, so the mode warns and leaves the flag off; with `output_router_logits` already on at a positive `router_aux_loss_coef`, an explicit `aux_loss` raises at construction (below).
-- **Pipeline parallelism** (itself [not yet available](../parallelism/pipeline-parallelism.md)) — a stage would apply the head itself; the shipped split gate **raises** when `aux_loss` resolves with a positive coefficient.
 
 Inertness is a **trainer-class contract**: `_consumes_router_aux_loss` declares whether the objective goes through a `labels` forward (`True` only on `DistributedSFTTrainer` and `DistributedKTOTrainer`). An explicit `aux_loss` on a non-consuming trainer **raises**; an `auto` resolution landing there turns `output_router_logits` back off.
 
 Online and async GRPO go further: syncing weights to a live rollout engine downgrades **both bias modes to `none`**, since the sync ships parameters only — an adopted native slot is a buffer, a transient bias a plain attribute — and a bias the generator never sees drifts trainer routing off the trajectories it produced.
 
-With `aux_loss` inert under the same loss, those runs have **no router balancing on any family**, and Zaya / DeepSeek-V4 train unbalanced.
+With `aux_loss` inert under the same loss, those runs have **no router balancing on any family**.
 
 ### The balancing sidecar
 
-Every bias mode checkpoints its biases to `router_balancing_biases.pt` on the FS-aware save rank and restores them on resume; under PP the per-stage names go through `global_parameter_name` and merge on rank 0.
+Every bias mode checkpoints its biases to `router_balancing_biases.pt` on the FS-aware save rank and restores them on resume.
 
 The restore is all-or-nothing across ranks: a missing or torn file on some ranks raises, as does a saved bias whose shape does not match the live router, rather than being `copy_`-broadcast into it. A checkpoint without the file keeps zero-init biases and warns; a sidecar matching **no** live router drops every trained bias, loudly — what a weight-sync RL leg does to a `bias_update` checkpoint.
 

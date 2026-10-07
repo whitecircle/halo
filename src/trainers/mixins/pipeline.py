@@ -327,7 +327,7 @@ class PipelineTrainerMixin:
         if n_microbatches < _BUBBLE_WARN_FACTOR * config.pp_size:
             logger.warning(
                 "pipeline_microbatches=%d gives a large pipeline bubble at pipeline_parallel_size=%d (idle "
-                "fraction (pp-1)/(m+pp-1): ~22%% of the step measured at m=2*pp on 2 stages). For a 10%% "
+                "fraction (pp-1)/(m+pp-1): 1/5 of the step at m=2*pp on 2 stages). For a 10%% "
                 "bubble use at least %d microbatches (rule: %d*(pipeline_parallel_size-1)).",
                 n_microbatches,
                 config.pp_size,
@@ -380,7 +380,7 @@ class PipelineTrainerMixin:
                 f"{type(inner).__name__} (padding-free) is incompatible with pipeline parallelism: "
                 f"its flattened width is the summed document length, which varies every step, and "
                 f"the pipeline's P2P buffers are frozen after the first. Use packing instead "
-                f"(`packing: true`) — under PP it delivers the same throughput with fixed shapes."
+                f"(`packing: true`), whose packed rows are a fixed shape."
             )
         if isinstance(inner, DataCollatorWithPacking):
             # Packed rows padded to max_length are a fixed shape. The collator normally flattens

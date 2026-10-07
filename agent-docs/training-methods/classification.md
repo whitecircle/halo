@@ -2,7 +2,7 @@
 
 Sequence classification — single-label (multi-class) and multi-label — on `AutoModelForSequenceClassification`. Trainer `ClassificationTrainer` (`src/trainers/reward/classification.py`), script `scripts/training/classification.py`. Text-only. For a scalar preference score on the same architecture use [Reward Modeling](preference/reward-modeling.md).
 
-EP, TP, ETP, EP+TP and EP+ETP run, as does plain FSDP2 data parallelism. CP does not — the head pools the whole sequence ([matrix](../reference/trainer-architecture.md#trainer-compatibility)). The trainer declares `_supports_pp`, but pipeline parallelism is [not yet available in this release](../parallelism/pipeline-parallelism.md).
+EP, TP, ETP, EP+TP and EP+ETP run, as does plain FSDP2 data parallelism. CP does not — the head pools the whole sequence ([matrix](../reference/trainer-architecture.md#trainer-compatibility)).
 
 ## Dataset
 
@@ -59,11 +59,7 @@ torchrun --nproc_per_node=8 scripts/training/classification.py \
 halo launch classification examples/classification/qwen3_5/clf-qwen3.5-9b-mage.yaml --nproc 8
 ```
 
-LoRA takes `lora_task_type: SEQ_CLS` and is rejected under TP, EP+TP and PP ([PEFT](../optimization/peft.md#parallelism-compatibility)).
-
-### Pipeline parallelism
-
-Pipeline parallelism is [not yet available in this release](../parallelism/pipeline-parallelism.md); the shipped seams here would serve `compute_metrics`, since the trainer declares `PPLossAdapter.predictions_fn` and the pooled `[B, num_labels]` would cross the chain rather than the full plane. A construction gate ships with them and raises on a `config.pad_token_id` unset or disagreeing with the tokenizer's (pooling takes the rightmost non-pad position).
+LoRA takes `lora_task_type: SEQ_CLS` and is rejected under TP and EP+TP ([PEFT](../optimization/peft.md#parallelism-compatibility)).
 
 ## Vision-language
 

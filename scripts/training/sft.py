@@ -257,7 +257,6 @@ def main():
         dist_args,
         script_prefix=f"sft{'-vlm' if is_vlm_checkpoint and not dist_args.text_only_model else ''}",
         trainer_cls=DistributedSFTTrainer,
-        sync_tokens=("eos_token", "pad_token"),
         allow_low_precision=True,
         supports_init_from_scratch=True,
     )

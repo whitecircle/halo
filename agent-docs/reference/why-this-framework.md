@@ -89,13 +89,7 @@ subclassing `EPMoELayerBase` and declaring its `HF_MODULE_NAMES` /
 `HF_MODEL_TYPES`, with `MOE_LAYER_MAP` derived from the subclass tree so the family self-registers on
 import. Fifteen MoE families ship one; the per-family × per-mode matrix is
 [Supported Models](../models/README.md), and [Adding a New Model](../models/adding-a-model.md) is the
-procedure.
-
-PP — [not yet available in this release](../parallelism/pipeline-parallelism.md) — is orthogonal to
-that matrix and ships two model gates. A family whose `PPModelSpec` sets
-`SUPPORTS_PP = False` (Zaya, Gemma 4) is rejected at split time; separately, the stage
-loader streams layers from safetensors, so a family whose EP layer sets
-`_supports_lazy_loading = False` is rejected at load. Trainer × parallelism support is separate — see
+procedure. Trainer × parallelism support is separate — see
 [Trainer Compatibility](trainer-architecture.md#trainer-compatibility).
 
 ## Key dependencies

@@ -14,9 +14,7 @@ import pytest
 
 from src.inference import openai_client as client_module
 from src.rewards.samples import NO_FINAL_ANSWER, ScoringSample
-from src.rewards.scorers import base as base_module
 from src.rewards.scorers import judge as judge_module
-from src.rewards.scorers.base import scorer_api_key
 from src.rewards.scorers.judge import (
     MAX_EVIDENCE_CHARS,
     GenerativeJudge,
@@ -26,6 +24,7 @@ from src.rewards.scorers.judge import (
     grading_prompt,
     parse_verdict,
     response_schema,
+    scorer_api_key,
 )
 from src.rewards.terms import Check, JudgeTerm, Requirement
 
@@ -645,7 +644,7 @@ def test_client_is_built_against_the_term_endpoint(monkeypatch):
         captured.update(base_url=base_url, api_key_override=api_key_override)
         return _FakeClient([])
 
-    monkeypatch.setattr(base_module, "create_openai_client", fake_create)
+    monkeypatch.setattr(judge_module, "create_openai_client", fake_create)
     GenerativeJudge(_term(base_url="http://judge:8000/v1"))._connect()
     assert captured == {"base_url": "http://judge:8000/v1", "api_key_override": "sk-or-test"}
 

@@ -23,7 +23,7 @@ Add the family predicate beside the existing ones and wire it into whichever sea
 
 ## Declare the head transform
 
-The chunked GRPO log-probs (`use_chunked_grpo_logprobs`) and the last pipeline stage compute logits from the backbone's hidden state instead of calling `*ForCausalLM.forward`. Whatever that forward applies around `lm_head` — a hidden-state scale, a logit scale or division, a softcap, a vocabulary cut — has to be declared, or both paths refuse the family.
+The chunked GRPO log-probs (`use_chunked_grpo_logprobs`) compute logits from the backbone's hidden state instead of calling `*ForCausalLM.forward`, as does the PP stage seam. Whatever that forward applies around `lm_head` — a hidden-state scale, a logit scale or division, a softcap, a vocabulary cut — has to be declared, or the chunked path refuses the family.
 
 Declare it with a `HeadTransformSpec` subclass in `src/models/head_transform.py`: claim the causal-LM class names in `HF_MODULE_NAMES` and build the `HeadTransform` from the config in `transform`. Resolution walks the class's MRO. A family with no spec gets the base, which applies `final_logit_softcapping` where the config sets it.
 
@@ -102,7 +102,7 @@ No hook may allocate state sized by `world_size` either — invisible at 8 GPUs,
     Undeclared, the export writes keys vLLM silently skips and the lazy loader leaves that submodule randomly initialized (Laguna's `shared_expert` ↔ `shared_experts`).
 
 - `_supports_weight_sync` / `_supports_gradient_checkpointing` / `_supports_lazy_loading` — all default `True`. Set one `False` and the owning gate rejects loudly instead of corrupting silently. Which family switches off which flag is published, pinned against the classes, in [Per-family EP restrictions](../parallelism/expert-parallelism.md#per-family-ep-restrictions).
-- `_supports_bias_balancing` — `True` when routing *selection* happens in-layer: add `self._balancing_bias(scores)` before top-k, gather gate weights from the **unbiased** scores, and call `self._record_expert_load(indices)`. For logit-routed families `_deepseek_biased_route` does the biased selection and the unbiased gate; the caller still records the load on its indices.
+- `_supports_bias_balancing` — `True` when routing *selection* happens in-layer. Select through the shared helpers, not a hand-added `self._balancing_bias(...)`, which is `None` when balancing is off and in native-adoption mode (the adopted slot already sits in the selection): score-routed layers take top-k over `self._selection_scores(scores)` (the group-limited base, DeepSeek-V4, Inkling, LFM-2); logit-routed ones use `self._biased_topk(logits)` (Qwen3, Cohere2 MoE) or `_deepseek_biased_route`, which also returns the unbiased gate (GPT-OSS, Qwen3.5). Gate weights come from the **unbiased** scores, and the caller records the load with `self._record_expert_load(indices)`.
 
     A layer can refuse per-instance by overriding `enable_bias_balancing` (DeepSeek-V4 hash layers). Leave `False` when the router sits outside the wrapper (Gemma4) or the family's own gate owns a native balancing buffer (Zaya). An explicit `bias_update` on a model where no layer accepts the bias raises.
 

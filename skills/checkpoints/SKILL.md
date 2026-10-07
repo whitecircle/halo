@@ -41,14 +41,15 @@ before acting. Authoritative doc: `agent-docs/reference/checkpoints.md`.
   DPO/KTO/SDPG reference and the dataset-compat check, so repointing `model_name_or_path` yourself
   moves the reference onto trained weights. The model loads the
   trained weights at construction and the loader skips the re-read; it restores `trainer_state.json`,
-  the LR scheduler from `scheduler.pt`, LoRA adapters, wrapper-level trained params, the
-  router-balancing biases, the frozen reference scores (`reference_logps.pt`: DPO/KTO precompute,
+  the LR scheduler from `scheduler.pt`, LoRA adapters, the router-balancing
+  biases, the frozen reference scores (`reference_logps.pt`: DPO/KTO precompute,
   offline GRPO KL), and the **optimizer state from the per-rank shards when the topology
   fingerprint matches** (`OptimizerStateFingerprint`); a mismatch warm-restarts instead, and a
   matched restore that fails on any rank raises on every rank unless
   `allow_optimizer_warm_restart: true`. Only a
-  `use_grouped_gemm: false` run with no EP/ETP/CP/TP reloads weights, via `load_full_state_dict`;
-  PP takes its own `_load_pp_stage` path. A model built from anything but the checkpoint (a custom
+  `use_grouped_gemm: false` run with no EP/ETP/CP/TP reloads weights (FSDP2 via
+  `load_full_state_dict`; DDP and accelerate-managed FSDP via the base Trainer loader).
+  A model built from anything but the checkpoint (a custom
   script) makes the loader **refuse the resume** under EP/CP and TP+DP rather than continue on the base
   weights (`loader.py`); only an adapter-only checkpoint, which ships no base weights to check
   against, still resumes quietly. A merge-on-save checkpoint inverts the check: it refuses a model
@@ -70,7 +71,7 @@ before acting. Authoritative doc: `agent-docs/reference/checkpoints.md`.
 | TP-only | loadable | — (no per-rank TP save) | use directly |
 | EP — every family (each layer class in `src/distributed/expert_parallel/layers/` declares its own `HF_MODEL_TYPES`; read them there, and `supported_ep_merge_model_types()` for the resolved set) | loadable | `save_sharded_ep` → `ep_sharded` | **`merge_ep_shards.py`** |
 | CP / EP+CP | loadable | **rejected** — `save_sharded_ep` raises under Ulysses attention | use gathered directly |
-| ETP (`expert_tp_size > 1`), **any** multi-EP-group topology (`ep_group_size != world_size` — plain `ep2` on 8, or EP+TP with `ep_size < world_size`), native expert LoRA, `merge_expert_lora_on_save`, a run with no EP MoE layers (dense, or MoE at `use_grouped_gemm: false`), Step-3.7 Flash (`_EXPORTS_HUB_NAMESPACE`), PP, multi-node non-shared output FS | loadable | **rejected at construction** (`validate_ep_sharded_save`, re-checked at save) | use gathered directly |
+| ETP (`expert_tp_size > 1`), **any** multi-EP-group topology (`ep_group_size != world_size` — plain `ep2` on 8, or EP+TP with `ep_size < world_size`), native expert LoRA, `merge_expert_lora_on_save`, a run with no EP MoE layers (dense, or MoE at `use_grouped_gemm: false`), Step-3.7 Flash (`_EXPORTS_HUB_NAMESPACE`), multi-node non-shared output FS | loadable | **rejected at construction** (`validate_ep_sharded_save`, re-checked at save) | use gathered directly |
 | PP *(not producible — PP unavailable)* | per-stage parts + merged index, loadable | — | use directly |
 
 Extra normalizers: **`convert_to_bf16.py`** (fp32→bf16, keeps norms fp32), **`quantize_to_lowp.py`**

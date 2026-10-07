@@ -65,7 +65,6 @@ def warn_once(
     key: Hashable,
     message: str,
     *args: Any,
-    exc_info: bool = False,
 ) -> bool:
     """Log ``message`` at WARNING the first time ``key`` is seen, and return whether it did.
 
@@ -75,5 +74,5 @@ def warn_once(
     if key in seen:
         return False
     seen.add(key)
-    logger.warning(message, *args, exc_info=exc_info)
+    logger.warning(message, *args)
     return True

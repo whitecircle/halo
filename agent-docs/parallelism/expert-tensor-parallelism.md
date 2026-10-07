@@ -90,7 +90,7 @@ Enforced in `src/distributed/parallelism_config.py` before model loading:
 - `expert_tp_size` must divide the NVLink domain (= `gpus_per_node` on a standard node, the rack on
   NVL72).
 - `ep_group_size` must divide the NVLink domain (`ep_scope=node`). Under `ep_scope=global` it must
-  tile the stage world (`world_size / pp_size`) as equal contiguous per-domain blocks — divisibility
+  tile the world as equal contiguous per-domain blocks — divisibility
   alone is not sufficient ([Multi-Node](multi-node.md#node-local-vs-cross-node-ep)).
 - `tp_size > 1` with `expert_tp_size > 1` is rejected. Use EP+TP for attention memory or EP+ETP for
   expert memory, never both.
@@ -209,8 +209,7 @@ That helper is the one home for "what does ETP actually shard", so the config-ti
 layer that does the split cannot disagree on which config spelling carries the per-expert width.
 
 **Axis combinations.** ETP composes with EP. Pure ETP and EP+ETP are supported shapes; TP+ETP,
-ETP+CP and EP+TP+ETP are refused by the [allowlist](README.md#supported-combinations), and PP shapes
-are [not yet available in this release](pipeline-parallelism.md).
+ETP+CP and EP+TP+ETP are refused by the [allowlist](README.md#supported-combinations).
 
 **Knobs.** ETP inherits every [EP knob rule](expert-parallelism.md#limitations) (`is_ep_mode` is
 `ep_group_size > 1`, which pure ETP satisfies). On top of those:

@@ -1,7 +1,7 @@
 #!/usr/bin/env python
 """Validation tests for ClassificationConfig, EmbeddingConfig,
 DistillScriptArguments and RLVROnlineGRPOScriptArguments ``__post_init__`` (and the CLI-override
-re-run of the same guards), and the ``sync_token_field`` precedence helper.
+re-run of the same guards).
 
 Each boundary the validator rejects is exercised (raise expected) alongside a valid
 neighbor (no raise), mirroring the SMPO validator-test style in test_config_dataclasses.py.
@@ -20,7 +20,6 @@ from src.args.rlvr_online_grpo_args import RLVROnlineGRPOScriptArguments
 from src.configs.classification_config import ClassificationConfig
 from src.configs.distillation_config import DistillationConfig
 from src.configs.embedding_config import EmbeddingConfig
-from src.training.script_runner import sync_token_field
 
 OUTPUT_DIR = "/tmp/test_config_validators"
 # Clears the bf16/GPU tail check for configs expected to construct successfully.
@@ -171,44 +170,6 @@ def test_embedding_weights_without_dimensions_raises_on_cli_override():
     cfg.matryoshka_weights = [1.0, 0.5]
     with pytest.raises(ValueError, match="matryoshka_weights"):
         cfg.__post_override__({"matryoshka_weights"})
-
-
-# sync_token_field precedence
-
-
-class _Holder:
-    """Minimal stand-in for args / training_config carrying a token field."""
-
-    def __init__(self, **kw):
-        for k, v in kw.items():
-            setattr(self, k, v)
-
-
-def test_sync_token_field_args_value_used_when_config_none():
-    """config=None, args=X → X copied onto BOTH sides."""
-    args = _Holder(pad_token="<pad>")
-    cfg = _Holder(pad_token=None)
-    sync_token_field(args, cfg, "pad_token")
-    assert args.pad_token == "<pad>"
-    assert cfg.pad_token == "<pad>", "args value must propagate to config when config is None"
-
-
-def test_sync_token_field_config_wins_when_both_set():
-    """config=Y, args=X → config wins, Y on BOTH sides (config takes precedence)."""
-    args = _Holder(pad_token="<from_args>")
-    cfg = _Holder(pad_token="<from_config>")
-    sync_token_field(args, cfg, "pad_token")
-    assert cfg.pad_token == "<from_config>"
-    assert args.pad_token == "<from_config>", "config value must overwrite args when both are set"
-
-
-def test_sync_token_field_both_none_is_noop():
-    """config=None, args=None → neither side is touched (no spurious value written)."""
-    args = _Holder(pad_token=None)
-    cfg = _Holder(pad_token=None)
-    sync_token_field(args, cfg, "pad_token")
-    assert args.pad_token is None
-    assert cfg.pad_token is None
 
 
 # DistillationConfig / DistillScriptArguments / RLVROnlineGRPOScriptArguments range guards

@@ -47,17 +47,6 @@ class MockModel:
         return iter(self._named_params)
 
 
-class MockPartialState:
-    """Mock for accelerate.PartialState so we don't need accelerate init."""
-
-    def __init__(self, is_main=True):
-        self._is_main = is_main
-
-    @property
-    def is_main_process(self):
-        return self._is_main
-
-
 # Tests
 
 
@@ -169,7 +158,7 @@ def test_callback_main_process_runs(monkeypatch, caplog):
     """On the main process, on_train_begin must EMIT the three tables — totals, deduplicated module
     groups, dtype breakdown — with this rank's real counts. The report is the callback's only
     product, so a body that walks the model and logs nothing is the failure to catch."""
-    monkeypatch.setattr(mod, "PartialState", lambda: MockPartialState(is_main=True))
+    monkeypatch.setattr(mod, "is_global_main_process", lambda: True)
 
     model = MockModel(
         named_params=[
@@ -196,9 +185,9 @@ def test_callback_non_main_process_skips(monkeypatch):
     """Non-main ranks must return BEFORE touching the model (no logging duplication).
 
     We pass a model whose parameter walk would raise; reaching it means the
-    early ``is_main_process`` guard failed.
+    early ``is_global_main_process`` guard failed.
     """
-    monkeypatch.setattr(mod, "PartialState", lambda: MockPartialState(is_main=False))
+    monkeypatch.setattr(mod, "is_global_main_process", lambda: False)
 
     class ExplodingModel:
         def parameters(self):

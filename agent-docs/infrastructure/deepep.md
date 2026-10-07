@@ -184,8 +184,8 @@ rank-local. The rank that outgrows the arena raises while its peers reach the di
 `HALO_DEEPEP_GPU_TIMEOUT_SECONDS` bounds that wait rather than hanging the job.
 
 The same raise fires when the per-forward generation that scopes the cache stops advancing. A forward
-pre-hook bumps it, so it must sit on the **outermost** module the loop calls. A pipeline stage registers
-it on itself, and the trainer re-registers it after PEFT wrapping: a task-typed `PeftModel` reaches the
+pre-hook bumps it, so it must sit on the **outermost** module the loop calls. The trainer
+re-registers it after PEFT wrapping: a task-typed `PeftModel` reaches the
 model it wraps through `.forward()`, which runs no pre-hook on it.
 
 A caller entering the backbone directly is out of the hook's reach entirely (TRL's chunked log-prob
@@ -367,8 +367,8 @@ host-driven **proxy Gin** (`NCCL_GIN_TYPE=2`), copying completions to GPU memory
 
 Without these, NCCL reports `globalGinSupport 0` / `GIN/Plugin: Failed to initialize any GIN plugin` and
 DeepEP aborts with `NCCL GIN is unavailable`; `Failed to initialize GDRCopy` means the host is missing
-`/dev/gdrdrv`. The node's Mellanox `mlx5` devices are not a cross-node NCCL path on p6 (NCCL falls back to
-TCP sockets) — EFA is the fabric.
+`/dev/gdrdrv`. On AWS p6 instances the Mellanox `mlx5` devices are not a cross-node NCCL path (NCCL falls
+back to TCP sockets) — EFA is the fabric.
 
 Cross-node EP over EFA is bound by **proxy-Gin per-operation latency, not bandwidth**: the dispatch's
 layout-exchange round-trips through a CPU proxy, and the cost scales with the number of cross-node
@@ -384,8 +384,7 @@ alone predicts). Three consequences:
     [Expert Tensor Parallelism](../parallelism/expert-tensor-parallelism.md#process-groups-epetp-combo).
 
 - **At most ~8k tokens/rank per dispatch.** Above that a proxy-GIN dispatch **wedges instead of erroring**.
-  On 2× 8×B300, 8,192 tokens/rank trains and 16,384 hangs, on every node pair, at ep8 and ep16,
-  `num_sms` 24 and 48.
+  On 2× 8×B300, 8,192 tokens/rank trains and 16,384 hangs, at ep8 and ep16, `num_sms` 24 and 48.
 
     The receive counts never arrive, so the run dies in DeepEP's CPU wait (`Dispatch CPU wait ... received
     count 0`) or in a GPU spin-wait (Xid 109 `CTX SWITCH TIMEOUT`, cascading into Xid 43 and surfacing as

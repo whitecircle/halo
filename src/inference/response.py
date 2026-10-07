@@ -20,7 +20,7 @@ ENGINE_CUT_FINISH_REASONS = (FINISH_REASON_LENGTH, FINISH_REASON_ABORT)
 
 
 class OpenAIResponse(BaseModel):
-    answer: BaseModel | dict[str, object] | str | None
+    answer: str | None
     reasoning: str | None
     finish_reason: str
     tool_calls: list[ChatCompletionMessageToolCall] | None

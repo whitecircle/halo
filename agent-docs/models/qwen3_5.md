@@ -116,7 +116,7 @@ The family also carries the per-method canonical examples: Qwen3.5-9B (dense) fo
 
 ## RL chat template
 
-The async GRPO recipes for Qwen3.6 pin `jinja-templates/qwen3/qwen3.6-reasoning-effort.jinja` with
+The Qwen3.6 code-contests async GRPO recipes pin `jinja-templates/qwen3/qwen3.6-reasoning-effort.jinja` with
 `force_chat_template: true`, and the servers run `--chat-template` on the same file
 (`VLLM_CHAT_TEMPLATE` in the compose file). It is the hub template reduced to text-only tool use —
 thinking always on, carried reasoning always rendered, the vision branch and the

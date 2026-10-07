@@ -548,7 +548,6 @@ class OfflineGRPOTrainer(ChunkedLogprobsCore, OfflineGRPOReferenceMixin, Distrib
                 attribute_name="min_log_prob",
                 initial_value=args.initial_min_log_prob,
                 final_value=args.min_log_prob,
-                schedule_type="linear",
             )
 
             if callbacks is None:

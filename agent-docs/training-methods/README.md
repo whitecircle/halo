@@ -30,7 +30,7 @@ Per-method rules: [Modality support](../reference/trainer-architecture.md#modali
 
 EP, TP and ETP are available on every trainer. Context parallelism is declare-to-enable per trainer (`_supports_cp`): SFT, SMPO and offline GRPO full fine-tuning support it; online and environment GRPO do not.
 
-Pipeline parallelism is [not yet available in this release](../parallelism/pipeline-parallelism.md); `_supports_pp` records which trainers would take the axis when the engine lands — SFT, SMPO, reward, classification and offline GRPO, plus DPO and KTO with precomputed reference log probs only (DPO further restricted to `sigmoid`/`hinge`/`ipo`, KTO to `apo_zero_unpaired`).
+Pipeline parallelism is [not yet available in this release](../parallelism/pipeline-parallelism.md).
 
 Full trainer × mode matrix: [Trainer Compatibility](../reference/trainer-architecture.md#trainer-compatibility).
 

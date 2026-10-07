@@ -21,9 +21,10 @@ Python is pinned to 3.12 (`requires-python = ">=3.12,<3.13"`), the image's inter
 resolves `torch 2.11.0+cu130`, `transformers`, `trl`, `accelerate`, `peft`, `datasets`, `ray`, and
 `src` editable, enough for Pylance across the tree.
 
-It does **not** resolve `flash_attn` or `deep_ep` (both source-built in the `Dockerfile`, not in
-`[project.dependencies]`); navigation elsewhere is unaffected because both are imported behind
-optional-dependency guards. `vllm` is never imported into the training env; it runs in a separate
+It does **not** resolve `flash_attn` or `deep_ep`, which the `Dockerfile` installs outside
+`[project.dependencies]`: Blackwell takes FA2 from the NGC base and FA4 from a prebuilt wheel, Hopper
+source-builds FA2 and FA3, and DeepEP is source-built in both. Navigation elsewhere is unaffected
+because both are imported behind optional-dependency guards. `vllm` is never imported into the training env; it runs in a separate
 container reached over HTTP plus the vendored NCCL client (`src/distributed/nccl/`).
 
 The `.venv` torch is the cu130 wheel: it imports without a GPU, but CUDA operations fail. The

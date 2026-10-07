@@ -85,8 +85,8 @@ torchrun --nproc_per_node=2 tests/gpu/trainers/preference/test_smpo_fsdp.py   # 
 Never hardcode `--master_port` in a test — the launcher allocates a free one per run
 (`tests/common/ports.py::free_port`); a fixed port races back-to-back tests and CI shards.
 A CPU test ends in `raise SystemExit(pytest.main([__file__, "-v"]))`, a GPU test in the `gpu_test_main`
-entry (`tests/common/harness.py`) that owns its lifecycle; neither declares `pytestmark` (the `cpu`
-marker is applied by path) nor bootstraps `sys.path` (the root `tests/conftest.py` owns the import
+entry (`tests/common/harness.py`) that owns its lifecycle; neither re-declares the `cpu` marker in `pytestmark`
+(it is applied by path) nor bootstraps `sys.path` (the root `tests/conftest.py` owns the import
 path) — `tests/cpu/conventions/test_test_conventions.py` fails the suite over the CPU entry, the marker or the
 bootstrap, and `test_gpu_harness_conventions.py` over a GPU script off the harness (exemptions named in
 `_OWN_LIFECYCLE`). Per-suite
@@ -130,8 +130,8 @@ src/
 │                        #   attention_layout.py (per-layer attention cost rules off layer_types — the MFU term),
 │                        #   seq_cls_heads.py (Gemma4 + Qwen3.5-MoE seq-cls, registered by an explicit
 │                        #   import in loading/model_preparation.py),
-│                        #   head_transform.py (the verified head-path contract chunked log-probs and the PP
-│                        #     last stage apply), moe_aux_loss.py (router aux-loss gradient through reentrant
+│                        #   head_transform.py (the verified head-path contract chunked log-probs apply, as
+│                        #     does the PP stage seam), moe_aux_loss.py (router aux-loss gradient through reentrant
 │                        #     checkpointing), segment_markers.py (per-family segment markers — `seq_idx`,
 │                        #     `cu_seq_lens` — for the conv / linear-attention mixers of packed and
 │                        #     padding-free rows),
@@ -149,7 +149,8 @@ src/
 │                        #     lazy-load core — index, key alignment, plans, conversion ops, meta shell —
 │                        #     shared by the EP + PP loaders)
 ├── distributed/
-│   ├── parallelism_config.py  # ParallelismConfig — central validation gate (every config-time raise)
+│   ├── parallelism_config.py  # ParallelismConfig — central shape/axis validation gate (the per-trainer CP/PP,
+│   │                    #   lowp and PP-release gates are in src/training/parallelism_args.py)
 │   ├── group_layout.py mesh.py  # EP/CP rank math; DeviceMesh construction + the typed ParallelDims view
 │   ├── runtime.py filesystem.py fsdp.py nvlink.py  # rank/world + barriers + consensus, FS coordination
 │   │                    #   (joined_node_load = the per-node load throttle, joined over the c10d store), FSDP2

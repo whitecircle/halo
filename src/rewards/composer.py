@@ -72,11 +72,6 @@ class RewardComposer:
         self._scorers: dict[str, Scorer] | None = None
 
     @property
-    def views(self) -> frozenset[str]:
-        """The views the external terms read, so a sample builder renders only what is asked for."""
-        return frozenset(term.view for term in self.external_terms)
-
-    @property
     def scorers(self) -> dict[str, Scorer]:
         """One scorer per external term, keyed by term name; built on first access."""
         if self._scorers is None:

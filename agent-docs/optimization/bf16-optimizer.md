@@ -87,9 +87,6 @@ AdamWBF16 auto-detects dtype per param: bf16 params take the fused Triton SR pat
 
 `fp32_grad_reduce: true` upcasts gradients to fp32 for every cross-rank reduction the mixin owns (FSDP2 `reduce_dtype=fp32` for dense params, the EP router/expert grad-sync hooks, the TP replicated-grad sync, the QLoRA adapter AllReduce), then stores the averaged result bf16. It keeps bf16 master weights (6 B/param) — unlike `fp32_non_ep_params` it changes only the reduction, not storage.
 
-**Under pipeline parallelism** ([not yet available in this release](../parallelism/pipeline-parallelism.md)) it would also change storage: a pipeline schedule turns FSDP gradient sync off for the whole microbatch loop and reduce-scatters once per optimizer step, so each stage would hold a full *unsharded* fp32 gradient (4 B/param) for that loop instead of a bf16 one, on top of the unsharded params `fsdp_reshard_after_forward=False` already pins.
-
-Budget `2×P_stage` (params) + `4×P_stage` (grads) per rank; it does not shrink with DP width. `ParallelismConfig` warns when the two are combined.
 
 NCCL's bf16 all-reduce accumulates in bf16, so error grows with world size. On 8× B300 with real bf16 gradients, fp32 reduce is ~2.2× tighter (0.17% vs 0.37% of signal), and the gap widens with scale. The cost is ~2× bandwidth on that collective only.
 

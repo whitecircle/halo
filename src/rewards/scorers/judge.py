@@ -10,9 +10,18 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any
 
-from src.inference.openai_client import chat_completion, json_schema_response_format, parse_json_object
+from openai import AsyncOpenAI
+
+from src.env import env_str
+from src.inference.endpoints import EXTERNAL_API_KEY_CHAIN, resolve_external_api_key
+from src.inference.openai_client import (
+    chat_completion,
+    create_openai_client,
+    json_schema_response_format,
+    parse_json_object,
+)
 from src.rewards.samples import ScoringSample, cut_middle, render_tools, task_text, view_text
-from src.rewards.scorers.base import REPLY_EXCERPT_CHARS, ChatModelScorer, ScoreResult
+from src.rewards.scorers.base import Scorer, ScoreResult
 from src.rewards.terms import JudgeTerm, View
 
 logger = logging.getLogger(__name__)
@@ -26,6 +35,8 @@ SYSTEM_PROMPT = (
 VIEW_HEADINGS = {View.FINAL: "Final answer", View.FULL: "Transcript", View.DIGEST: "Transcript digest"}
 # A quote longer than this is a copy of the response, not evidence of one span in it.
 MAX_EVIDENCE_CHARS = 400
+# How much of a reply an error result quotes.
+REPLY_EXCERPT_CHARS = 200
 
 _WHITESPACE = re.compile(r"\s+")
 
@@ -38,6 +49,15 @@ class Verdict:
     scores: dict[str, float]
     checks: dict[str, tuple[bool, str]]
     rationale: str | None
+
+
+def scorer_api_key(term: JudgeTerm) -> str:
+    """The judge's key: the term's ``api_key_env`` variable, then the hosted chain."""
+    key = env_str(term.api_key_env) or resolve_external_api_key()
+    if not key:
+        names = " or ".join(dict.fromkeys((term.api_key_env, *EXTERNAL_API_KEY_CHAIN)))
+        raise RuntimeError(f"{term.owner}: no API key — set {names}")
+    return key
 
 
 def response_schema(term: JudgeTerm) -> dict[str, Any]:
@@ -154,11 +174,13 @@ def evidence_supported(evidence: str, text: str) -> bool:
     return 0 < len(quote) <= MAX_EVIDENCE_CHARS and quote in _WHITESPACE.sub(" ", text)
 
 
-class GenerativeJudge(ChatModelScorer):
-    """The judge behind a :class:`JudgeTerm`."""
+class GenerativeJudge(Scorer):
+    """The judge behind a :class:`JudgeTerm`: one lazily built OpenAI-compatible client per instance
+    (per Ray actor or trainer rank), shared by every sample it grades."""
 
     term_type = JudgeTerm
     term: JudgeTerm
+    _client: AsyncOpenAI | None
 
     @property
     def metric_keys(self) -> tuple[str, ...]:
@@ -172,6 +194,29 @@ class GenerativeJudge(ChatModelScorer):
         else:
             keys = [self._key(requirement.name) for requirement in term.requirements]
         return (*keys, self._key("completion_tokens"))
+
+    def _connect(self) -> AsyncOpenAI:
+        if self._client is None:
+            self._client = create_openai_client(
+                base_url=self.term.base_url, api_key_override=scorer_api_key(self.term)
+            )
+        return self._client
+
+    async def aclose(self) -> None:
+        client, self._client = self._client, None
+        if client is not None:
+            await client.close()
+
+    def _usage_metrics(self, completion) -> dict[str, float]:
+        """The usage a reply reports: its completion tokens and, where the endpoint prices it, its cost."""
+        metrics: dict[str, float] = {}
+        usage = getattr(completion, "usage", None)
+        if usage is not None:
+            metrics[self._key("completion_tokens")] = float(getattr(usage, "completion_tokens", 0) or 0)
+            cost = getattr(usage, "cost", None)
+            if isinstance(cost, int | float):
+                metrics[self._key("cost_usd")] = float(cost)
+        return metrics
 
     def _request(self, prompt: str) -> dict[str, Any]:
         term = self.term

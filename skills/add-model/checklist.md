@@ -43,12 +43,14 @@ Leave the YAML at `auto` and make the family resolvable:
 
 - **Selection inside the HF gate** and the loaded class's forward declares
   `output_router_logits` → `aux_loss`. Declare nothing.
-- **The wrapper selects** → `_supports_bias_balancing = True`, add `self._balancing_bias(scores)`
-  to the **selection** scores before top-k (gate weights come from the *unbiased* scores), then
-  `self._record_expert_load(indices)`. For logit-routed families `_deepseek_biased_route` does the
-  biased selection and the unbiased gate; call `self._record_expert_load(indices)` on its indices
-  yourself, or the bias never moves. A layer can refuse per-instance by overriding
-  `enable_bias_balancing`.
+- **The wrapper selects** → `_supports_bias_balancing = True` and select through the shared
+  helpers, not a hand-added `self._balancing_bias(...)` (it is `None` when balancing is off and in
+  native-adoption mode): top-k over `self._selection_scores(scores)` for score-routed layers
+  (group-limited base, DeepSeek-V4, Inkling, LFM-2), `self._biased_topk(logits)` or
+  `_deepseek_biased_route` (also returns the unbiased gate) for logit-routed ones (Qwen3, Cohere2
+  MoE, GPT-OSS). Gate weights come from the *unbiased* scores; call
+  `self._record_expert_load(indices)` on the selected indices yourself, or the bias never moves. A
+  layer can refuse per-instance by overriding `enable_bias_balancing`.
 - **`bias_update` ships only if the bias exports** — declare `_NATIVE_BALANCING_BIAS_ATTR` (plus
   `_NATIVE_BALANCING_CONFIG_FLAG` and the `_materialize_native_balancing_slot` hook for a
   config-gated slot). Without one, `_enforce_bias_export_contract` refuses `bias_update` and the

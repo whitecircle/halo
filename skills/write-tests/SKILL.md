@@ -57,9 +57,10 @@ if __name__ == "__main__":
 
 Rules:
 
-- End the file with that `__main__` guard, declare no `pytestmark` (the `cpu` marker is applied
-  by path) and no `sys.path` bootstrap — `tests/cpu/conventions/test_test_conventions.py` fails the
-  suite over any of those, and over a hand-rolled runner or a printed pass/fail summary.
+- End the file with that `__main__` guard, never re-declare the `cpu` marker in `pytestmark`
+  (`tests/conftest.py` applies it by path) and add no `sys.path` bootstrap —
+  `tests/cpu/conventions/test_test_conventions.py` fails the suite over any of those, and over a
+  hand-rolled runner or a printed pass/fail summary.
 - Assert the **behavior/invariant**, not the internal call sequence. A test that mirrors the
   implementation breaks on every refactor and catches nothing.
 - **It must fail when the behavior breaks.** Mentally mutate the function (flip a sign, drop a
@@ -128,9 +129,11 @@ is `SUPPORTED_AXIS_SETS` — plain DP, each axis alone (EP/ETP/TP/CP/PP), EP+TP,
 PP+ETP; everything else must raise, including TP+CP, TP+ETP, EP+TP+ETP, ETP+CP, and every PP pairing
 outside the expert axes (PP+TP, PP+CP, PP+EP+TP, PP+EP+CP, PP+EP+ETP). Also: QLoRA+EP/TP, LoRA+TP, and `_supports_cp=False` / `_supports_pp=False` trainers
 rejecting `cp_size>1` / `pp_size>1` at init. A support-matrix change isn't done until its rejection
-counterpart exists. **PP is not available in this release** — `pipeline_parallel_size > 1` is
-rejected at config time and `PipelineRuntime` raises, so every PP cell takes a rejection test and
-none takes a correctness suite (`matrix.md`).
+counterpart exists. **PP is not available in this release** — `parallelism_config_from_args`
+rejects `pipeline_parallel_size > 1` at config time (a `_supports_pp=False` trainer's gate first,
+then the release gate) and `PipelineRuntime` raises, so the PP allowlist rows above hold only for a
+directly constructed `ParallelismConfig`; every PP cell takes a rejection test and none takes a
+correctness suite (`matrix.md`).
 
 ## Verify before finishing
 

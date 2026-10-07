@@ -3,7 +3,7 @@
 LoRA trains small rank-decomposed adapter matrices while the base model stays frozen, eliminating optimizer
 states for frozen parameters.
 
-It runs under DDP/FSDP, EP, CP and pure ETP; **TP**, **EP+TP** and **PP** reject it, and QLoRA runs only
+It runs under DDP/FSDP, EP, CP and pure ETP; **TP** and **EP+TP** reject it, and QLoRA runs only
 under DDP/FSDP and CP-on-dense (full matrix and reasons: [Parallelism compatibility](#parallelism-compatibility)).
 Under EP, LoRA targets both attention (via PEFT) and the MoE experts (via native grouped adapters).
 
@@ -230,7 +230,6 @@ own ([Data Parallelism](../parallelism/data-parallelism.md#fsdp2-strategy-by-mod
 | EP+CP | Yes | No | Attention + experts | Both active |
 | EP+TP | **No** | No | — | Both adapter kinds rejected: attention LoRA as under TP, native expert LoRA by the gate's `has_ep_lora` arm |
 | ETP | Yes | No | Attention only | Expert adapters rejected at config time by `ParallelismConfig` (`expert_tp_size > 1` gives the replicated adapter half a partial, never-synced gradient) |
-| PP | **No** | No | — | Attention PEFT rejected at trainer construction, expert LoRA earlier by `ParallelismConfig`. The adapter save/resume path is not stage-aware: it would write stage-local layer indices |
 
 **EP.** The expert names [above](#moe-models--expert-targets-and-full-trained-modules) route to **native grouped
 LoRA** — grouped `[E_local, K, r]`/`[E_local, r, N]` adapters stored alongside each expert weight, applied in
@@ -366,9 +365,9 @@ QLoRA combines LoRA with 4-bit/8-bit base quantization under DDP/FSDP, and under
 keeps the standard `from_pretrained` loader, which preserves `Params4bit`. AdamWBF16 optimizes only the bf16
 adapter params; the frozen quantized base is skipped.
 
-`load_distributed_model` raises for EP, TP, PP, and the grouped-GEMM MoE loader — pure ETP included, since
+`load_distributed_model` raises for EP, TP, and the grouped-GEMM MoE loader — pure ETP included, since
 the gate reads `ep_group_size = ep_size × expert_tp_size`. Those loaders materialize plain de-quantized
-weights, so `Params4bit` are lost and PEFT's 4-bit adapter dispatch fails (PP rejects PEFT outright anyway).
+weights, so `Params4bit` are lost and PEFT's 4-bit adapter dispatch fails.
 
 The 4-bit **compute** dtype follows the run's own precision (`bf16`/`fp16` on the training config), not
 TRL's `ModelConfig.dtype` — whose `"float32"` default nothing else here reads, and which would otherwise

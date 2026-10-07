@@ -97,6 +97,8 @@ keeps its `thinking_tokens`. The task message states no budget under either prot
 - The scratchpad — `python_repl` when the run fixes `python`, else `run_code`. It runs a program through the grading sandbox, standard library included, on the `stdin` the call supplies (empty by default), so the model can feed it the statement's sample input or its own; it never sees the graded tests. Each call is one-shot — nothing a run writes survives into the next. Past `max_test_calls` a call is refused: `Error: Not run: this task's scratchpad budget is spent. Submit your solution with submit_solution.`
 - `submit_solution` — grades a complete stdin/stdout program against the hidden tests. The only graded channel, with no fenced-code-block fallback. A submission that passes every hidden test ends the episode, as reaching `max_submissions` does: past an accept a resubmission can only lose the solve, so one later in the same turn is not graded (`Not graded: an earlier submission already passed every test, …`), and one past the budget in the same turn is refused (`Error: Not graded: this task's submission budget is spent.`). Its description says a passing submission ends the task and the last graded one otherwise counts.
 
+- Both tools refuse a program whose comments carry the reasoning — 16384 characters inside comments or more, outweighing everything else in it (`comment_chars` in `src/environments/envs/tasks/coding/comments.py`: line and block comments by the language's registered syntax wherever they start, string literals skipped, a C-family `#if 0` block and a Python docstring or bare string counted too) — unrun, the call returned to its budget: `Not run: the program's comments carry your reasoning. Keep the reasoning in your thinking and send the program again with documentation comments only.` A turn the thinking cap closes can carry its thought on inside the program, which no reasoning term counts and the turn-total overlong ramp prices only near `rollout_max_tokens` ([Reasoning length reward](../async-grpo/rollouts.md#reasoning-length-reward)); this reads it first. The refusal costs the turn and `tool_error_penalty` (`0` on the class, `0.05` in the recipes), a turn of nothing else is flagged untrainable like one whose calls named no tool, and the turn after it runs on the retry reserve. The offline re-grader skips the same programs.
+
 Neither description states a budget, no reply counts what is left of one, and a refusal names what to do, never a number.
 
 Both tool descriptions name the toolchain where the sandbox states it (`SandboxExecutor.toolchain`): on `local` and `bubblewrap` the registry's compile flags and the interpreter a Python program runs on (`Here python runs on CPython 3.12 and cpp is compiled with g++ -O2 -pipe -std=c++17.`); `remote` states none.
@@ -218,8 +220,10 @@ the length terms) out-scores any zero-objective episode; each failed tool call a
 
 Behavior counters ride alongside: `episode/submission_rate`, `episode/test_calls` (runs that counted),
 `episode/starved_test_runs` (runs returned for having no input and nothing on stdout),
-`episode/tested_before_submission` (over submitting episodes), `episode/grading_budget_hit`, and
-`episode/language_switches` where the model picks the language.
+`episode/tested_before_submission` (over submitting episodes), `episode/grading_budget_hit`,
+`episode/reasoning_in_comments_calls` (programs refused for reasoning in their comments) and
+`episode/code_comment_share` (comment characters over the characters of every program that reached the
+guard, its own signal), and `episode/language_switches` where the model picks the language.
 
 ## Dataset
 
@@ -251,7 +255,7 @@ adapters:
 ```bash
 python scripts/environments/preparation/prepare_code_dataset.py \
     --adapter hardtests --dataset sigcp/hardtests_problems --min_rating 800 \
-    --tests_table "$HALO_DATA_ROOT/s3_datasets/hardtests-tests-compact" \
+    --tests_table "$HALO_DATA_ROOT/hardtests-tests-compact" \
     --holdout_per_band 100 --push_to_hub org/hardtests-rl --push_bands
 ```
 

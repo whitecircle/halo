@@ -73,14 +73,7 @@ from src.distributed.expert_parallel.expert_weights import (
     per_expert_layouts,
 )
 from src.kernels.lowp.mixed_precision import MLP_PROJECTIONS, block_index, block_numbering_root, kept_block_indices
-from src.kernels.lowp.quantization import (
-    FORMAT_BLOCK_SIZE,
-    BlockScaledTensor,
-    dequantize,
-    quantize_mxfp4,
-    quantize_mxfp8,
-    quantize_nvfp4,
-)
+from src.kernels.lowp.quantization import FORMAT_BLOCK_SIZE, QUANTIZERS, BlockScaledTensor, dequantize
 from src.log import configure_cli_logging
 
 configure_cli_logging()
@@ -108,7 +101,6 @@ _DEFAULT_EXCLUDE = (
     r"(norm|layernorm|embed|lm_head|\.bias$|rotary|router|gate\.weight$"
     r"|vision_tower|vision_model|visual|multi_modal_projector)"
 )
-_QUANTIZERS = {"mxfp8": quantize_mxfp8, "mxfp4": quantize_mxfp4, "nvfp4": quantize_nvfp4}
 # Round-trip dequant relerr --verify accepts: the format's own block-scaled error (mxfp8 ~0.02-0.05,
 # nvfp4 ~0.08-0.15) with headroom. Above it the cause is structural, usually the contraction axis. The
 # QAT forward is exact wherever a value lands in this band.
@@ -275,7 +267,7 @@ def quantize_checkpoint(
     keep_last_blocks: int = 0,
     verify: bool = False,
 ) -> None:
-    quantizer = _QUANTIZERS[fmt]
+    quantizer = QUANTIZERS[fmt]
     block = FORMAT_BLOCK_SIZE[fmt]
     inc, exc = re.compile(include), re.compile(exclude)
     reject_in_place_conversion(input_dir, output_dir)
@@ -338,9 +330,7 @@ def quantize_checkpoint(
                 skipped.append(name)
                 continue
             base = name[: -len(".weight")] if name.endswith(".weight") else name
-            q: BlockScaledTensor = quantizer(
-                t.cuda().float() if torch.cuda.is_available() else t.float(), axis=axis, block_size=block
-            )
+            q: BlockScaledTensor = quantizer(t.cuda().float() if torch.cuda.is_available() else t.float(), axis=axis)
             out_tensors[f"{base}.weight_packed"] = q.data.cpu().contiguous()
             out_tensors[f"{base}.weight_scale"] = q.scales.cpu().contiguous()
             out_tensors[f"{base}.weight_shape"] = torch.tensor(list(t.shape), dtype=torch.int64)
@@ -459,7 +449,7 @@ def parse_args():
     p = argparse.ArgumentParser(description="Quantize a bf16/fp32 checkpoint to block-scaled mxfp8/mxfp4/nvfp4.")
     p.add_argument("--input_dir", required=True, help="Source checkpoint directory (safetensors).")
     p.add_argument("--output_dir", required=True, help="Output directory for the quantized checkpoint.")
-    p.add_argument("--format", choices=list(_QUANTIZERS), required=True, help="Block-scaled target format.")
+    p.add_argument("--format", choices=list(QUANTIZERS), required=True, help="Block-scaled target format.")
     p.add_argument(
         "--contraction_axis",
         type=int,

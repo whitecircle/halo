@@ -70,9 +70,10 @@ and full launch examples see [`wiring.md`](wiring.md).
    `vllm_mode: server`, `vllm_server_host`, `vllm_server_port`).
 
 3. **NCCL weight sync** is the vendored `VLLMWeightSyncClient` (`SGLangWeightSyncClient` under
-   `rollout_backend: sglang`; `src/distributed/nccl/`) — trainer is NCCL rank 0, server workers rank 1+,
-   weights pushed as packed broadcasts (`pause → packed NCCL broadcast →
-   resume`). Online and env GRPO share **one** gather routine,
+   `rollout_backend: sglang`; `src/distributed/nccl/clients/`) — trainer is NCCL rank 0, server
+   workers rank 1+. vLLM takes each `/update_weights` chunk as packed uint8 broadcasts (flow in
+   step 1); SGLang takes one typed `dist.broadcast` per tensor in declaration order, bracketed by
+   `/pause_generation` and `/continue_generation`. Online and env GRPO share **one** gather routine,
    `gather_and_send_weights` (`src/trainers/grpo/rollout/weight_sync.py`), which is
    **parallelism- and PEFT-aware**: in EP / TP / ETP modes **and** under
    multi-rank FSDP2 DP, *every* rank joins the collective gather

@@ -16,7 +16,7 @@ changes.
 | `src/` area | Owning doc page(s) |
 |---|---|
 | `src/trainers/mixins/base.py` (DistributedTrainerMixin) | `agent-docs/reference/trainer-architecture.md` + every parallelism page under `agent-docs/parallelism/` |
-| `src/trainers/mixins/` (sub-mixins: checkpointing, dataloader, EP introspection, grad sync/clip, validation, pipeline, reference_logps) | `agent-docs/reference/trainer-architecture.md`; `agent-docs/reference/checkpoints.md` (checkpointing, the `reference_logps.pt` sidecar), `agent-docs/parallelism/pipeline-parallelism.md` (pipeline) |
+| `src/trainers/mixins/` (sub-mixins: checkpointing, dataloader, EP introspection, grad sync/clip, validation, pipeline, reference_logps, stored_metrics; the pp_gates and loss_masks helpers) | `agent-docs/reference/trainer-architecture.md`; `agent-docs/reference/checkpoints.md` (checkpointing, the `reference_logps.pt` sidecar), `agent-docs/parallelism/pipeline-parallelism.md` (pipeline, pp_gates) |
 | `src/trainers/mixins/trl_dataset_prep.py` (CoordinatedTRLDatasetPrepMixin) | `agent-docs/data/filesystem-handling.md` (the coordination contract); `agent-docs/reference/trainer-architecture.md` (one line + link) |
 | `src/trainers/mixins/token_metrics.py` (loss-token accumulation, per-document attention work behind `bind_attention_work_source`) | `agent-docs/training-methods/callbacks.md`, `agent-docs/optimization/throughput-benchmarks.md` |
 | `src/trainers/sft.py` | `agent-docs/training-methods/sft.md`, `agent-docs/training-methods/pretraining.md` |
@@ -39,7 +39,7 @@ changes.
 | `src/distributed/expert_parallel/` (DeepEP, all-to-all, per-family layers, expert compute) | `agent-docs/parallelism/expert-parallelism.md`, `agent-docs/parallelism/expert-tensor-parallelism.md`, `agent-docs/optimization/grouped-gemm.md`, `agent-docs/infrastructure/deepep.md` |
 | `src/distributed/context_parallel/` (Ulysses) | `agent-docs/parallelism/context-parallelism.md` |
 | `src/distributed/tensor_parallel/` (DTensor) | `agent-docs/parallelism/tensor-parallelism.md` |
-| `src/distributed/pipeline_parallel/` (stage split, schedules, stage loader) | `agent-docs/parallelism/pipeline-parallelism.md`, `agent-docs/reference/checkpoints.md` (stage shards) |
+| `src/distributed/pipeline_parallel/` (stage split + stage module, losses, P2P groups, stage loader, the `PipelineRuntime` stub) | `agent-docs/parallelism/pipeline-parallelism.md`, `agent-docs/reference/checkpoints.md` (stage shards) |
 | `src/models/loading/lazy_safetensors/` (safetensors lazy-load core shared by the EP + PP loaders) | `agent-docs/parallelism/expert-parallelism.md` (lazy loading), `agent-docs/parallelism/pipeline-parallelism.md`, `agent-docs/reference/checkpoints.md` |
 | `src/distributed/group_layout.py`, `mesh.py` (rank math, DeviceMesh + the typed group view) | `agent-docs/parallelism/multi-node.md`, `agent-docs/parallelism/data-parallelism.md`, `agent-docs/reference/architecture.md` |
 | `src/distributed/module_registry.py` (HF-class → wrapper registries) | `agent-docs/models/adding-a-model.md`, `agent-docs/reference/architecture.md` |
@@ -88,13 +88,13 @@ changes.
 | `src/models/seq_cls_heads.py` (Gemma 4 + MoE Qwen3.5/3.6 seq-cls heads, registered by an import in `src/models/loading/model_preparation.py`) | `agent-docs/training-methods/classification.md`, `agent-docs/training-methods/preference/reward-modeling.md` |
 | `src/models/loading/tokenizer_setup.py` (processing class + length budget, `resolve_peft_processing_class`) | `agent-docs/getting-started/configuration.md`, `agent-docs/reference/configuration-reference.md` |
 | `src/models/patches/buffer_fixes.py` (`finalize_loaded_model`: the non-persistent buffer repair every load path ends in) | `agent-docs/models/README.md`, `agent-docs/models/adding-a-model.md` |
-| `src/models/patches/kernel_dispatch.py` (device-aware repair of transformers' kernel-fallback dispatch) | `agent-docs/models/README.md`, `agent-docs/models/qwen3_5.md` |
+| `src/models/patches/kernel_dispatch.py` (device-aware repair of transformers' kernel-fallback dispatch, installed at package import by `src/__init__.py`) | `agent-docs/models/README.md`, `agent-docs/models/qwen3_5.md` |
 | `src/models/loading/checkpoint_coverage.py` (random-init load gate) | `agent-docs/reference/checkpoints.md`, `agent-docs/reference/troubleshooting.md` |
 | `src/models/loading/dtype.py` (run dtype, the loaded-parameter cast: fp32 pins → run dtype, fp8 refused; fp32-matmul precision) | `agent-docs/models/README.md` (Load precision), `agent-docs/reference/configuration-reference.md` (`HALO_FP32_MATMUL_PRECISION`) |
 | `src/models/loading/config_levels.py` (composite-config field access, run-scoped writes, `config_export_ready`) | `agent-docs/models/README.md`, `agent-docs/reference/checkpoints.md`, `agent-docs/training-methods/callbacks.md` |
 | `src/models/modality.py` (multimodal checkpoint detection) | `agent-docs/data/dataset-formats.md`, `agent-docs/models/README.md` |
 | `src/models/attention_geometry.py` (head-dim and KV-head resolution across composite/per-layer configs) | `agent-docs/models/README.md`, `agent-docs/optimization/flash-attention.md` |
-| `src/models/attention_layout.py` (per-layer attention cost rules off `layer_types` + head geometry — the MFU attention term) | `agent-docs/training-methods/callbacks.md`, `agent-docs/optimization/throughput-benchmarks.md` |
+| `src/models/attention_layout.py` (per-layer attention cost rules off `layer_types` + head geometry — the MFU attention term), `src/callbacks/model_flops.py` (the per-token training FLOPs behind MFU / S-MFU) | `agent-docs/training-methods/callbacks.md`, `agent-docs/optimization/throughput-benchmarks.md` |
 | `src/models/segment_markers.py` (per-family conv / linear-attention segment markers, the GatedDeltaNet kernel refusal) | `agent-docs/data/collators.md` (Document isolation under packing), `agent-docs/optimization/padding-free-collator.md`, `agent-docs/training-methods/preference/smpo.md` |
 | new model support | new `agent-docs/models/<family>.md` + every family roster listed in step 7 (*Wire the docs*) of `agent-docs/models/adding-a-model.md` |
 
@@ -160,7 +160,7 @@ changes.
 |---|---|
 | `src/configs/`, `src/args/` (config/arg dataclasses) | `agent-docs/reference/configuration-reference.md` + the method page that owns the config |
 | `src/training/parser.py` (H4ArgumentParser, toolkit defaults, the unknown-key raise) | `agent-docs/getting-started/configuration.md`, `agent-docs/reference/configuration-reference.md` |
-| `src/env.py` (the `env_*` readers, `HALO_DATA_ROOT` / `data_path`) and any `HALO_`/`DIST_`/`VLLM_`/`SGLANG_`/`NVLINK_`/`EP_` knob wherever it is read | `agent-docs/reference/configuration-reference.md` (Environment variables), `agent-docs/infrastructure/docker.md` |
+| `src/env.py` (the `env_*` readers, `HALO_DATA_ROOT` / `data_path`), `src/__init__.py` (the import-time process defaults: `HALO_TORCH_NUM_THREADS`, `TOKENIZERS_PARALLELISM`) and any `HALO_`/`DIST_`/`VLLM_`/`SGLANG_`/`NVLINK_`/`EP_` knob wherever it is read | `agent-docs/reference/configuration-reference.md` (Environment variables), `agent-docs/infrastructure/docker.md` |
 | `src/log.py` (root logging setup, CLI verbosity, `warn_once`) | `agent-docs/reference/debugging.md` |
 | `src/cli.py` (`halo launch` / `halo run` surface, tool aliases) | `README.md` quick start, `agent-docs/reference/scripts-reference.md` |
 
@@ -173,7 +173,7 @@ changes.
 | `src/training/parallelism_args.py` (`DistributedArguments` → `ParallelismConfig`, the per-script CP/PP/lowp gates) | `agent-docs/parallelism/*`, `agent-docs/reference/configuration-reference.md` |
 | `src/training/run_logging.py` (per-rank transformers verbosity, the `run.log` console tee) | `agent-docs/reference/debugging.md` |
 | `src/training/early_stopping.py` (`StopsTrainingEarly`, the marker the script runner reads to exit a stopped run non-zero) | `agent-docs/training-methods/grpo/async-grpo/monitoring.md`, `agent-docs/reference/scripts-reference.md` |
-| `src/inference/endpoints.py` (endpoint defaults, key resolution), `src/inference/openai_client.py` (async client, one request with the upstream retry, the structured single request), `src/inference/batch_requests.py` (the parallel resumable batch), `src/inference/response.py` (`OpenAIResponse`, the finish-reason contract), `src/inference/resume_store.py` (resumable request checkpoints) | `agent-docs/reference/scripts-reference.md`, `agent-docs/training-methods/grpo/rewards.md` (the judge's retry) |
+| `src/inference/endpoints.py` (endpoint defaults, key resolution), `src/inference/openai_client.py` (async client, one request with the upstream retry, the single-request helper), `src/inference/batch_requests.py` (the parallel resumable batch), `src/inference/response.py` (`OpenAIResponse`, the finish-reason contract), `src/inference/resume_store.py` (resumable request checkpoints) | `agent-docs/reference/scripts-reference.md`, `agent-docs/training-methods/grpo/rewards.md` (the judge's retry) |
 
 ## Scripts & infrastructure
 
@@ -216,6 +216,33 @@ changes on its owner page.
 | `agent-docs/contributing/development-environment.md` | the host setup, credentials and paths |
 | `agent-docs/optimization/halo-vs-stock-trl.md` | the measured toolkit-vs-TRL comparisons |
 | `agent-docs/reference/{glossary,gpu-training-theory,scale-and-limitations,why-this-framework}.md` | terms, the performance model, the known limits, the design rationale |
+
+## Human guide
+
+Each `human-docs/` page condenses the owners on its row for a human reader. When a change alters
+what a user sets, runs or can combine there, update the page with its owner. A new page goes into
+`human-docs/README.md` (a cookbook into `human-docs/cookbooks/README.md`).
+
+| `human-docs/` page | Condenses |
+|---|---|
+| `human-docs/cli.md` | `src/cli.py`; `agent-docs/reference/scripts-reference.md` |
+| `human-docs/configuration.md` | `src/training/parser.py`, `src/configs/`, `src/args/`; `agent-docs/getting-started/configuration.md`, `agent-docs/reference/configuration-reference.md` |
+| `human-docs/environment-variables.md` | `src/env.py` and every toolkit knob; `agent-docs/reference/configuration-reference.md` (Environment variables) |
+| `human-docs/parallelism.md` | `src/distributed/parallelism_config.py`, `src/training/parallelism_args.py`; `agent-docs/parallelism/` |
+| `human-docs/supported-matrix.md` | every support verdict: version pins, attention backends, trainer × mode, the rollout-engine roster (`src/distributed/nccl/clients/`), families, parallelism modes, PEFT and quantization |
+| `human-docs/clusters.md` | multi-node launch, `launcher-configs/**`; `agent-docs/parallelism/{multi-node,launch-recipes}.md`, `agent-docs/infrastructure/{skypilot,runpod,nomad}.md` |
+| `human-docs/checkpoints.md` | `src/distributed/checkpoint/`, `src/checkpoint/`, `scripts/after_training/**`; `agent-docs/reference/{checkpoints,model-merging}.md` |
+| `human-docs/data.md` | `src/data/`; `agent-docs/data/` |
+| `human-docs/monitoring.md` | `src/callbacks/`, `src/training/run_logging.py`, the tracking vars in `src/training/environment.py`; `agent-docs/training-methods/callbacks.md`, `agent-docs/reference/debugging.md`, `agent-docs/training-methods/grpo/async-grpo/monitoring.md` |
+| `human-docs/performance.md` | `src/kernels/`, `src/optimizers/`; `agent-docs/optimization/` (the numbers from `throughput-benchmarks.md`) |
+| `human-docs/rollout-servers.md` | `src/distributed/nccl/`, `Dockerfile.vllm` / `Dockerfile.sglang` + their compose files; `agent-docs/infrastructure/rollout-servers.md` |
+| `human-docs/troubleshooting.md` | a new user-facing failure mode; `agent-docs/reference/{troubleshooting,debugging}.md` |
+| `human-docs/models.md`, `human-docs/model-integration-cost.md` | the family roster, `src/distributed/expert_parallel/layers/`; `agent-docs/models/` |
+| `human-docs/cookbooks/*.md` | the family's `examples/` recipes; its `agent-docs/models/` page |
+| `human-docs/installation.md`, `human-docs/quickstart.md` | `Dockerfile*`, the image tags, `examples/`; `agent-docs/infrastructure/docker.md`, `agent-docs/getting-started/` |
+| `human-docs/choosing-a-method.md`, `human-docs/training-methods/*.md` | `src/trainers/`, `scripts/training/**`; the method's `agent-docs/training-methods/` page |
+| `human-docs/ai-tooling.md` | `skills/` |
+| `human-docs/contributing.md` | `CONTRIBUTING.md`, `agent-docs/contributing/` |
 
 ## When in doubt
 

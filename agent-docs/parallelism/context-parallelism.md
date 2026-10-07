@@ -246,7 +246,7 @@ are rejected by class name even when the surrounding attention is wrapped.
 **Generation.** `UlyssesCPModelWrapper.generate()` raises: each rank holds one sequence chunk and the
 Ulysses attention has no KV-cache path. Generate from a saved checkpoint without CP.
 
-**Axis combinations.** CP composes with EP only; TP+CP, ETP+CP and PP+CP are refused by the
+**Axis combinations.** CP composes with EP only; TP+CP and ETP+CP are refused by the
 [allowlist](README.md#supported-combinations). EP alone OOMs at long sequences (it shards experts,
 not activations) — that is the case CP exists for.
 

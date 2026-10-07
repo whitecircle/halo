@@ -69,7 +69,7 @@ def test_mxfp8_scale_exponent_first_principles():
     block = torch.zeros(32, dtype=torch.float32)
     block[0] = 100.0  # amax = 100
     block[5] = -12.5
-    bst = q.quantize_mxfp8(block, axis=-1, block_size=32)
+    bst = q.quantize_mxfp8(block, axis=-1)
     assert bst.pow2_scale is True
     assert bst.scales.numel() == 1
     expected = _expected_e8m0_exp(100.0, E4M3_MAX)
@@ -98,7 +98,7 @@ def test_mxfp4_codes_match_first_principles():
     for i, v in enumerate(vals):
         block[i] = v
 
-    bst = q.quantize_mxfp4(block, axis=-1, block_size=32)
+    bst = q.quantize_mxfp4(block, axis=-1)
     expected_exp = _expected_e8m0_exp(6.0, E2M1_MAX)
     assert int(bst.scales.item()) == expected_exp
     divisor = 2.0 ** (expected_exp - E8M0_BIAS)
@@ -121,7 +121,7 @@ def test_mxfp4_boundary_straddle_2p5_rounds_to_lower():
     block[1] = 2.5  # exactly on the 2.0/3.0 boundary
     block[2] = 2.6  # clearly above -> level 3.0 (code 5)
     block[3] = 2.4  # clearly below -> level 2.0 (code 4)
-    bst = q.quantize_mxfp4(block, axis=-1, block_size=32)
+    bst = q.quantize_mxfp4(block, axis=-1)
     codes = _unpack_codes(bst)
     assert codes[1] == 4, f"2.5 must round to level 2.0 (code 4), got {codes[1]}"
     assert codes[2] == 5, f"2.6 must round to level 3.0 (code 5), got {codes[2]}"
@@ -141,7 +141,7 @@ def test_nvfp4_scale_is_two_level_e4m3_not_pow2():
     """
     block = torch.zeros(16, dtype=torch.float32)
     block[0] = 30.0
-    bst = q.quantize_nvfp4(block, axis=-1, block_size=16)
+    bst = q.quantize_nvfp4(block, axis=-1)
     assert bst.pow2_scale is False
     assert bst.global_scale is not None, "nvfp4 must carry a per-tensor global scale"
 
@@ -157,7 +157,7 @@ def test_nvfp4_scale_is_two_level_e4m3_not_pow2():
     assert abs(float(q.dequantize(bst)[0]) - 30.0) < 1e-3
 
 
-@pytest.mark.parametrize("fmt", sorted(q._QUANTIZERS))
+@pytest.mark.parametrize("fmt", sorted(q.QUANTIZERS))
 def test_round_trip_is_scale_invariant_across_magnitudes(fmt):
     """A block-scaled round-trip's RELATIVE error must not depend on the tensor's magnitude.
 
@@ -180,7 +180,7 @@ def test_round_trip_is_scale_invariant_across_magnitudes(fmt):
     for exponent in range(4, -32, -4):  # 1e4 down to 1e-28
         std = 10.0**exponent
         x = base * std
-        recon = q.dequantize(q._QUANTIZERS[fmt](x)).double()
+        recon = q.dequantize(q.QUANTIZERS[fmt](x)).double()
         # float64 norms: at std 1e-28 the squared magnitudes underflow fp32 and the ratio reads NaN.
         errors[std] = ((recon - x.double()).norm() / x.double().norm()).item()
 
@@ -230,7 +230,7 @@ def test_mxfp4_round_trip_compile_bit_identical():
     assert torch.equal(off, on), "MXFP4 round-trip not bit-identical between compile off and on"
 
 
-@pytest.mark.parametrize("fmt", sorted(q._QUANTIZERS))
+@pytest.mark.parametrize("fmt", sorted(q.QUANTIZERS))
 @pytest.mark.parametrize("ep_size", [2, 4, 8])
 def test_quantizing_an_expert_shard_matches_quantizing_the_gathered_bank(fmt, ep_size):
     """Slicing a fused expert bank along the expert axis must not change any block's quantization.
@@ -247,8 +247,8 @@ def test_quantizing_an_expert_shard_matches_quantizing_the_gathered_bank(fmt, ep
     bank = torch.randn(8, 64, 256, dtype=torch.float32) * 0.02
     bank[0] *= 1e-3  # one expert far below the bank amax
 
-    gathered = q.dequantize(q._QUANTIZERS[fmt](bank, axis=-1))
-    sharded = torch.cat([q.dequantize(q._QUANTIZERS[fmt](s, axis=-1)) for s in bank.chunk(ep_size, dim=0)], dim=0)
+    gathered = q.dequantize(q.QUANTIZERS[fmt](bank, axis=-1))
+    sharded = torch.cat([q.dequantize(q.QUANTIZERS[fmt](s, axis=-1)) for s in bank.chunk(ep_size, dim=0)], dim=0)
     assert torch.equal(sharded, gathered), (
         f"{fmt} at ep{ep_size}: the shard-quantized bank differs from the gathered one by up to "
         f"{(sharded.float() - gathered.float()).abs().max().item():.3e}"
@@ -258,7 +258,7 @@ def test_quantizing_an_expert_shard_matches_quantizing_the_gathered_bank(fmt, ep
 # NaN must survive every format
 
 
-@pytest.mark.parametrize("fmt", sorted(q._QUANTIZERS))
+@pytest.mark.parametrize("fmt", sorted(q.QUANTIZERS))
 @pytest.mark.parametrize("poison", [float("nan"), float("inf"), float("-inf")])
 def test_non_finite_input_propagates_through_every_format(fmt, poison):
     """A non-finite element must come back non-finite, for every registered block-scaled format.
@@ -273,20 +273,20 @@ def test_non_finite_input_propagates_through_every_format(fmt, poison):
     torch.manual_seed(0)
     x = torch.randn(4, 64, dtype=torch.float32) * 0.3
     x[1, 7] = poison
-    recon = q.dequantize(q._QUANTIZERS[fmt](x))
+    recon = q.dequantize(q.QUANTIZERS[fmt](x))
     assert not torch.isfinite(recon).all(), (
         f"{fmt} absorbed a {poison} input: max |recon| = {recon.abs().max().item():.3e}"
     )
 
 
-@pytest.mark.parametrize("fmt", sorted(q._QUANTIZERS))
+@pytest.mark.parametrize("fmt", sorted(q.QUANTIZERS))
 def test_finite_input_never_produces_nan(fmt):
     """The other direction: no finite input may manufacture a NaN (the 0xFF code is reserved)."""
     torch.manual_seed(0)
     x = torch.randn(4, 64, dtype=torch.float32) * 0.3
     x[0, 0] = 5e4  # scale-saturating outlier
     x[2, :] = 0.0  # all-zero block
-    recon = q.dequantize(q._QUANTIZERS[fmt](x))
+    recon = q.dequantize(q.QUANTIZERS[fmt](x))
     assert torch.isfinite(recon).all(), f"{fmt} produced a non-finite value from finite input"
 
 

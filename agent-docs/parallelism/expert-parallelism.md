@@ -95,7 +95,7 @@ division. `ParallelismConfig.validate_against_model_config` raises off `config.j
 `EPConfig.finalize_expert_assignment` re-checks it once the EP groups exist.
 
 `ep_group_size` must divide the NVLink domain (node-local). Under `ep_scope="global"` the bound is
-the **stage** world (`world_size / pp_size`), and divisibility alone is not enough: the group must
+the world, and divisibility alone is not enough: the group must
 also tile that world as equal contiguous per-domain blocks
 ([Multi-Node](multi-node.md#node-local-vs-cross-node-ep)).
 
@@ -359,7 +359,7 @@ backward still calls `buffer.combine()` / `buffer.dispatch()` for the gradient c
 
 That cache lives on an `EPCheckpointScope` (`src/distributed/expert_parallel/gc_scope.py`) created
 per checkpoint invocation and entered by both passes, not on the layer: concurrent frames stay
-separate (a pipeline stage would keep several microbatches in flight), and a `no_grad` reference or teacher pass
+separate, and a `no_grad` reference or teacher pass
 cannot reach a scope it did not create. The recompute signal is the scope's pass counter, not grad
 mode, so replay works in both checkpoint modes — but the two modes are still **not**
 interchangeable.
@@ -368,9 +368,7 @@ interchangeable.
 lazily, when backward first needs a discarded tensor; nothing imposes a common order across ranks,
 they desynchronize, and DeepEP's barrier times out — `cudaErrorLaunchFailure`, an unrecoverable
 abort, not a raised error. Measured on 2 GPUs: reentrant is grad-exact (worst relative gradient
-error 4.3e-05 vs no checkpointing, across all 155 parameters), non-reentrant aborts. (Pipeline
-parallelism — [not yet available](pipeline-parallelism.md) — would invert the rule: its schedule
-serializes each microbatch's backward, and the shipped config-time gates already encode that.)
+error 4.3e-05 vs no checkpointing, across all 155 parameters), non-reentrant aborts.
 
 Under [routing replay](../training-methods/grpo/async-grpo/objective.md#routing-replay)
 the recompute reads the frame's saved expert selection. Expert-load counters record only a scope's
@@ -524,7 +522,7 @@ so the trained weights load at model construction. The training scripts repoint 
 the checkpoint, and the checkpoint loader raises when the live model was constructed from anything
 else, rather than silently continuing on stale weights.
 
-The loader then restores adapters and extra trained params; optimizer, scheduler and balancing
+The loader then restores adapters; optimizer, scheduler and balancing
 biases resume from trainer state. A `merge_expert_lora_on_save` checkpoint is the exception to the
 repoint: it resumes from the base plus its `resume_adapter/`
 ([Merge-on-save checkpoints](../reference/checkpoints.md#merge-on-save-checkpoints)). An unmerged
@@ -549,8 +547,7 @@ restrictions. A `ep_group_size > 1` run that patches **zero** MoE layers raises 
 dense model under EP or pure ETP is rejected.
 
 **Axis combinations.** EP composes with TP, CP and ETP; EP+TP+ETP, EP+TP+CP and EP+CP+ETP are
-refused by the [allowlist](README.md#supported-combinations), and PP shapes are
-[not yet available in this release](pipeline-parallelism.md). EP-specific topology rejections sit on
+refused by the [allowlist](README.md#supported-combinations). EP-specific topology rejections sit on
 top: single-domain multi-group EP with `ep_size > 2`
 ([above](#single-domain-multi-group-ep-races-and-hangs)), multi-domain multi-group EP+TP / EP+ETP,
 and EP+CP on anything but a node-local EP group filling the NVLink domain.
@@ -562,7 +559,7 @@ and EP+CP on anything but a node-local EP group filling the NVLink domain.
 | QLoRA / `load_in_4bit` | rejected — the EP loaders materialize plain de-quantized weights, losing `Params4bit` | `model_loading.py` |
 | fp32 training (`bf16: false`) | rejected at `expert_parallel_size > 1` — DeepEP's buffer carries 2-byte tokens; FP32 storage comes from the `fp32_*` masters ([Precision control](#precision-control)) | `model_loading.py` |
 | `use_peft` / LoRA | attention adapters are fine; a PEFT `LoraLayer` **inside** an EP layer is rejected — expert LoRA must go through the native grouped adapters | `_validate_lora_ep_compatibility` |
-| expert LoRA | rejected with `expert_tp_size > 1` at config time, before the checkpoint downloads (`EPConfig` re-checks hand-built configs at group construction); rejected under [TP](tensor-parallelism.md#limitations) and PP, and alongside `save_sharded_ep`; a `merge_lora` gather under ETP raises | `_validate_expert_tp`, `_validate_lora_tp_compatibility`, `_validate_pipeline_parallel`, `ep_save.py` |
+| expert LoRA | rejected with `expert_tp_size > 1` at config time, before the checkpoint downloads (`EPConfig` re-checks hand-built configs at group construction); rejected under [TP](tensor-parallelism.md#limitations) and alongside `save_sharded_ep`; a `merge_lora` gather under ETP raises | `_validate_expert_tp`, `_validate_lora_tp_compatibility`, `ep_save.py` |
 | `use_grouped_gemm: false` | drops the wrappers at `ep_size == 1`; peeled expert-LoRA targets then raise rather than silently vanish | `_validate_expert_lora_realized` |
 | `fsdp_reshard_after_forward` | rejected — the backward all-gather can race the DeepEP combine | `_validate_fsdp_settings` |
 | `use_hsdp` | rejected — EP already shards over the EP group | `_validate_hsdp` |

@@ -100,15 +100,19 @@ def _ramp_start(cap: int) -> int:
 
 def _worst_length(economy: dict, level: str) -> float:
     """The most the length terms can cost an episode at ``level``. With no turn charged, the price's cap and
-    the floor's weight. With one, the price's cap, the whole overlong penalty, and the floor on the least
-    reasoning a charged episode has done, the charged turn's ramp start: the floor and the charge price
-    opposite ends of the reasoning, so the floor's full weight never lands on a charged episode."""
+    the floor's weight. With a turn charged for its reasoning, the price's cap, the whole overlong penalty,
+    and the floor on the least reasoning such an episode has done, the charged turn's ramp start. With a
+    turn charged for its total alone (the whole turn sampled at next to no reasoning), the whole penalty
+    beside the larger of the floor's weight and the price's cap: the floor's slope outruns the price's at
+    every level (a case below), so price plus floor never passes that."""
     worst = economy["price_cap"] + economy["floor"]
     if not economy["overlong"]:
         return worst
     cap = _cap(economy, level)
     floor_left = -reasoning_floor_term([_ramp_start(cap)], cap, economy["floor"])
-    return max(worst, economy["price_cap"] + economy["overlong"] + floor_left)
+    reasoning_charged = economy["price_cap"] + economy["overlong"] + floor_left
+    turn_charged = economy["overlong"] + max(economy["floor"], economy["price_cap"])
+    return max(worst, reasoning_charged, turn_charged)
 
 
 def _price(economy: dict, level: str, tokens: int) -> float:

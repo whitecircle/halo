@@ -4,7 +4,7 @@ Offline GRPO trains on pre-collected, off-policy data: several completions per p
 
 Use it when the completions already exist, when scoring them is expensive, or when a reproducible run matters. For live generation use [Online GRPO](online-grpo.md) or [Async GRPO with Environments](async-grpo/README.md); for pairwise data, [SMPO](../preference/smpo.md) or DPO ([GRPO overview](README.md) compares all three).
 
-Decoder-only, text-only: an encoder-decoder model is refused at construction, and the script refuses an image column. Parallelism: EP, TP, EP+TP, EP+ETP, pure ETP (`ep_size=1`), CP and EP+CP. Under CP, full prompt+completion rows are right-padded to the CP degree, scored through Ulysses and the vocab-chunked head, and reduced per sequence across CP ranks. CP requires full fine-tuning and rejects PEFT and native expert LoRA, including at `kl_beta: 0`. The trainer declares `_supports_pp`, but [pipeline parallelism](../../parallelism/pipeline-parallelism.md) is not yet available in this release.
+Decoder-only, text-only: an encoder-decoder model is refused at construction, and the script refuses an image column. Parallelism: EP, TP, EP+TP, EP+ETP, pure ETP (`ep_size=1`), CP and EP+CP. Under CP, full prompt+completion rows are right-padded to the CP degree, scored through Ulysses and the vocab-chunked head, and reduced per sequence across CP ranks. CP requires full fine-tuning and rejects PEFT and native expert LoRA, including at `kl_beta: 0`.
 
 ![Offline GRPO in two bands: tokenization turns one dataset row (prompt, completions, rewards) into per-group advantages and then one training row per completion carrying its advantage, group_id and group_size; each training step draws a micro-batch from MultiGroupSampler, computes the per-token loss with the min_log_prob floor and the optional k3 KL, and normalizes it with bnpo, grpo or dr_grpo, every row weighted 1/group_size](../../assets/diagrams/offline_grpo_pipeline.png)
 
@@ -33,7 +33,7 @@ The training script renders `template(prompt + completion)` and strips the rende
 ```yaml
 model_name_or_path: Qwen/Qwen3.6-35B-A3B
 dataset:
-  - s3://bucket/gsm8k-qwen3.6-35b-a3b-offline-grpo
+  - path/to/gsm8k_<model>_offline_grpo.jsonl
 advantage_method: quantile_norm
 loss_type: bnpo
 kl_beta: 0.0
@@ -57,7 +57,7 @@ learning_rate: 5.0e-06
 | `use_chunked_grpo_logprobs` | `false` | Vocab-chunked log-probs, not full logits |
 | `max_prompt_length` | `512` | Prompt budget, left-truncated; `null` = no cap |
 | `max_completion_length` | `null` | Completion budget, cut from the end; `null` = no cap |
-| `max_length` | `null` | Pipeline-parallel only; rejected at construction off PP — on every run, since [PP is not yet available](../../parallelism/pipeline-parallelism.md) |
+| `max_length` | `null` | Rejected at construction on every run: only [pipeline parallelism](../../parallelism/pipeline-parallelism.md), not yet available, reads it |
 
 The shipped recipes run `learning_rate: 5.0e-06`, the top of the SFT full-FT band. Advantages are group-relative, so a wider batch helps ([sizing](../sft.md#learning-rate-and-global-batch-size)).
 
@@ -93,7 +93,7 @@ The default path materializes `[B, T_completion, vocab]` logits — twice per mi
 
 ### Reference model
 
-At `kl_beta > 0`, full fine-tuning scores the run-start policy once, before the first update, over the configured train and evaluation splits, through the same reference lifecycle off CP, under CP and at the PP loss seam ([not yet available](../../parallelism/pipeline-parallelism.md)). No second resident reference model is held. The sweep needs finite, unsharded `datasets.Dataset` splits: a pre-sharded dataset or a supplied `ref_per_token_logps` column is refused, by the training script before the model loads and by the trainer at construction. An explicit frozen `ref_model` is accepted outside CP and PP, swept once and released.
+At `kl_beta > 0`, full fine-tuning scores the run-start policy once, before the first update, over the configured train and evaluation splits, through the same reference lifecycle off CP and under CP. No second resident reference model is held. The sweep needs finite, unsharded `datasets.Dataset` splits: a pre-sharded dataset or a supplied `ref_per_token_logps` column is refused, by the training script before the model loads and by the trainer at construction. An explicit frozen `ref_model` is accepted outside CP, swept once and released.
 
 The sweep finishes before step 1, logging batch progress per split, and does not rerun on resume. With KL off, PEFT or expert LoRA, unused dataset reference columns are dropped at tokenization, and the finite-split and pre-sharded restrictions do not apply.
 

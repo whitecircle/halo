@@ -2,7 +2,7 @@
 
 DPO fits the policy to pairwise preferences against a frozen reference model, with no reward model. Use it on `prompt` / `chosen` / `rejected` rows when a reference fits the budget; for the same data without one use [SMPO](smpo.md), for unpaired thumbs-up/down rows [KTO](kto.md).
 
-Trainer `DistributedDPOTrainer`, script `scripts/training/preference/dpo.py` (text or VLM). EP, TP and ETP apply; CP does not — TRL's loss path is not CP-aware ([matrix](../../reference/trainer-architecture.md#trainer-compatibility)). It declares `_supports_pp`, but pipeline parallelism is [not yet available in this release](../../parallelism/pipeline-parallelism.md).
+Trainer `DistributedDPOTrainer`, script `scripts/training/preference/dpo.py` (text or VLM). EP, TP and ETP apply; CP does not — TRL's loss path is not CP-aware ([matrix](../../reference/trainer-architecture.md#trainer-compatibility)).
 
 ## Configuration
 
@@ -53,7 +53,7 @@ Three shapes, decided by `load_reference_model_for_preference` (`src/distributed
 - **EP / TP with `precompute_ref_log_probs: true`** — no reference is loaded either. Log-probs come from the untrained policy before step 1, and a resume restores them from the checkpoint ([below](#resuming-a-precompute-run)).
 - **A frozen copy** — every other shape, precompute on plain data parallelism included. It mirrors the policy load (same revision, attention validator, sink policy) and stays resident for the run.
 
-The frozen copy is never parallelized. Under EP or TP that makes it a whole dense replica on every rank, experts included, run through the model's own MoE forward. Its log-probs match the policy's up to kernel numerics, so it loads, with a warning about its memory: precompute scores the same reference once and is both exact and cheaper, and PEFT avoids it too. Under PP, not yet available in this release, the shipped gate refuses a frozen copy, since no stage holds the whole model. TP rejects PEFT, leaving precompute or the frozen copy. Expert-only native EP LoRA needs precompute: with no `PeftModel` nothing switches the adapters off. A mixed attention + expert adapter keeps the implicit reference, since `disable_adapter()` drops the expert adapters too.
+The frozen copy is never parallelized. Under EP or TP that makes it a whole dense replica on every rank, experts included, run through the model's own MoE forward. Its log-probs match the policy's up to kernel numerics, so it loads, with a warning about its memory: precompute scores the same reference once and is both exact and cheaper, and PEFT avoids it too. TP rejects PEFT, leaving precompute or the frozen copy. Expert-only native EP LoRA needs precompute: with no `PeftModel` nothing switches the adapters off. A mixed attention + expert adapter keeps the implicit reference, since `disable_adapter()` drops the expert adapters too.
 
 A policy carrying live attention sinks (`reset_sinks: false`) is refused whenever a reference model reaches the trainer, single GPU included. Only PEFT, or EP/TP with precompute, leaves none.
 
@@ -66,8 +66,6 @@ The sweep runs inside the trainer's `__init__`, over the policy when no separate
 - Splits the resumed run does not precompute (an eval dataset switched off) ride unchanged into its checkpoints, for a later resume that uses them again.
 - To give a checkpoint without the file one, run the same config for one step from the base into a scratch directory outside the run's `output_dir`, whose rotation could otherwise delete the checkpoint (`--output_dir=<scratch> --max_steps=1 --save_strategy=steps --save_steps=1 --save_only_model=true --resume_from_checkpoint=null`; the refusal names a scratch path), and copy its `checkpoint-1/reference_logps.pt` into the checkpoint, on every node when checkpoints are node-local; the resume validates it like its own. A checkpoint whose save stopped before the file can take the previous checkpoint's copy, which holds the same values.
 - Columns the dataset already carries are read from it and not persisted.
-
-Pipeline parallelism is [not yet available in this release](../../parallelism/pipeline-parallelism.md); the shipped PP gates (`src/trainers/mixins/pp_gates.py`) already pin its contract for this trainer — `precompute_ref_log_probs: true` with the `ref_chosen_logps` / `ref_rejected_logps` columns already in the train dataset, and in the eval dataset whenever one is passed (`test_size` alone creates one, whatever `eval_strategy` says); `loss_type` ∈ {`sigmoid`, `hinge`, `ipo`} with `f_divergence_type: reverse_kl`; and no `use_weighting`, `ld_alpha` or `compute_metrics`.
 
 ## Launch
 

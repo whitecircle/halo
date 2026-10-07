@@ -16,7 +16,7 @@ Runnable launches, SLURM, and troubleshooting live in [Launch Recipes](launch-re
 | ETP | always NVLink-local | `expert_tp_size` divides the domain |
 | CP | always NVLink-local | `cp_size <= nvlink_domain_size` and divides it (Ulysses all-to-all is bandwidth-bound) |
 | PP | — | not yet available in this release ([Pipeline Parallelism](pipeline-parallelism.md)) |
-| DP | automatic | `stage_world_size / max(tp_size, cp_size, expert_tp_size)` |
+| DP | automatic | `world_size / max(tp_size, cp_size, expert_tp_size)` |
 
 EP is **orthogonal** to DP — it routes tokens to experts and returns them to their originating
 ranks, so EP never reduces DP.
@@ -30,12 +30,11 @@ NVLink-wide TP/CP/EP — see [NVL72](#gb200gb300-nvl72-multi-node-nvlink).
 |------|------------|
 | `ep_size` | Number of distinct expert subsets |
 | `ep_group_size` | Full EP process group = `ep_size * expert_tp_size` (auto-computed) |
-| `stage_world_size` | `world_size / pp_size` — one pipeline stage's rank block |
-| `data_parallel_size` | `stage_world_size / max(tp_size, cp_size, expert_tp_size)`; drives DataLoader sharding |
+| `data_parallel_size` | `world_size / max(tp_size, cp_size, expert_tp_size)`; drives DataLoader sharding |
 | `nvlink_domain_size` | GPUs reachable over NVLink (= `gpus_per_node`, or `NVLINK_DOMAIN_SIZE` on NVL72) |
 
-Gradient-sync scope follows the mode — the world, the EP group, or the PP stage plus one reduce along
-the chain for the grad norm ([below](#gradient-synchronization)).
+Gradient-sync scope follows the mode — the world or the EP group
+([below](#gradient-synchronization)).
 
 ## Node-local vs cross-node EP
 
@@ -61,9 +60,9 @@ reachable widths follow from that rule: `ep_group_size = num_domains × d`, wher
 per domain) divides `nvlink_domain_size`. On 4 domains of 8 that admits 4, 8, 16 and 32 only, and
 with many small domains the narrowest cross-node group is `num_domains` wide.
 
-When `ep_group_size < stage_world_size` the EP groups are data-parallel replicas
+When `ep_group_size < world_size` the EP groups are data-parallel replicas
 (`num_ep_groups > 1`); that case, and node-local EP across domains, routes through the deferred sync
-below. The **single global group** (`ep_group_size == stage_world_size`) needs no cross-replica
+below. The **single global group** (`ep_group_size == world_size`) needs no cross-replica
 deferral: every collective already spans the same ranks.
 
 Cross-node EP runs DeepEP's hybrid RDMA dispatch, which has no deterministic mode, so `full_determinism`
@@ -72,7 +71,7 @@ on such a group is refused before the load ([Determinism](expert-parallelism.md#
 ### Deferred cross-replica sync
 
 **Every multi-EP-group topology defers**, single-node ones included. `EPConfig.defer_grad_sync` is
-`num_ep_groups > 1` (or more than one PP rank block) minus the FSDP-managed-expert case:
+`num_ep_groups > 1` minus the FSDP-managed-expert case:
 `fsdp_shard_ep1_experts` at `ep_group_size == 1`, where FSDP2's reduce-scatter over the DTensor
 experts is already the sole sync and deferring on top would double-sync it.
 
@@ -98,19 +97,16 @@ own: `ParallelismConfig` rejects multi-domain multi-group EP+TP at config time.)
 sweep. It decides that FSDP shards the non-expert params over `process_group` (the EP group) instead
 of the DP world, which is what adds the third leg below.
 
-The sweep lands every grad at the `/world_size` DP average over its rank block — the whole job, or
-the stage's block under PP:
+The sweep lands every grad at the `/world_size` DP average over the whole job:
 
 - expert shards: `all_reduce(SUM)` over the `expert_replica_group`, then
-  `/(world_size / expert_tp_size)`. With one EP group per rank block (a PP stage) there is no replica
-  group and only the divide runs.
+  `/(world_size / expert_tp_size)`.
 
     The ETP factor drops out because expert-TP partners hold slices of one expert and consume the
     same batch, so they are not DP replicas; at `expert_tp_size == 1` the divisor is just
     `world_size`.
 
-- router, replicated EP submodules and plain non-EP params: `all_reduce(AVG)` over the DP scope —
-  the world, or the stage's rank block under PP.
+- router, replicated EP submodules and plain non-EP params: `all_reduce(AVG)` over the world.
 - non-expert FSDP shards, **`is_deferred_dp` only**: `all_reduce(AVG)` over the replica group, since
   the reduce-scatter averaged them within the EP group alone. Everywhere else it already spanned the
   full DP scope, so they are left untouched.
@@ -137,21 +133,18 @@ which moving the cross-replica average out of the backward does not address.
 
 **2 nodes × 8 GPUs (16 total):**
 
-| Config | EP | CP | TP | ETP | PP | EP scope | DP |
-|--------|----|----|----|-----|----|----------|----|
-| Node-local EP+CP | 8 | 8 | 1 | 1 | 1 | node | 2 |
-| Cross-node EP | 16 | 1 | 1 | 1 | 1 | global | 16 |
-| Node-local EP | 8 | 1 | 1 | 1 | 1 | node | 16 |
-| Pure ETP per node | 1 | 1 | 1 | 8 | 1 | node | 2 |
-| EP+TP | 16 | 1 | 2 | 1 | 1 | global | 8 |
-| EP+ETP per domain | 2 | 1 | 1 | 8 | 1 | global | 2 |
-
-The PP column stays 1: `pipeline_parallel_size > 1` is rejected at config time — pipeline
-parallelism is [not yet available in this release](pipeline-parallelism.md).
+| Config | EP | CP | TP | ETP | EP scope | DP |
+|--------|----|----|----|-----|----------|----|
+| Node-local EP+CP | 8 | 8 | 1 | 1 | node | 2 |
+| Cross-node EP | 16 | 1 | 1 | 1 | global | 16 |
+| Node-local EP | 8 | 1 | 1 | 1 | node | 16 |
+| Pure ETP per node | 1 | 1 | 1 | 8 | node | 2 |
+| EP+TP | 16 | 1 | 2 | 1 | global | 8 |
+| EP+ETP per domain | 2 | 1 | 1 | 8 | global | 2 |
 
 Three shapes are narrower than they look; all are rejected at config time, not at runtime:
 
-- **EP+TP across domains must be a SINGLE global EP group** (`ep_size == stage_world_size`,
+- **EP+TP across domains must be a SINGLE global EP group** (`ep_size == world_size`,
   `ep_scope=global`). `ep8+tp2` on 16 GPUs is rejected; `ep16+tp2` is the working shape.
 
     Cross-domain multi-group EP needs FSDP to shard non-expert params over the EP group
@@ -195,7 +188,7 @@ switches to a 2D `(dp_replicate, dp_shard)` mesh that shards within each NVLink 
 replicates across domains, so only one gradient all-reduce crosses RDMA per backward (per step with
 [`fsdp_defer_grad_sync`](data-parallelism.md#deferred-gradient-reduce-fsdp_defer_grad_sync)). See
 [Data Parallelism → HSDP](data-parallelism.md#hsdp-hybrid-sharded-data-parallel). Rejected with EP,
-TP, EP+TP, Expert-TP, and PP.
+TP, EP+TP, and Expert-TP.
 
 **Multi-EP-group expert grad norm:** with `num_ep_groups > 1`, expert grad norms sum within each EP
 group only. The clip runs the deferred sweep first, so every replica already holds the same averaged
@@ -208,14 +201,14 @@ full-world FSDP shards are reduced over their own tiling group and counted once.
 
 TP (DTensor) shards attention within each NVLink domain; EP (DeepEP) distributes experts; FSDP2
 syncs DP across domains. Attention TP leaves `ep_group_size` at `ep_size`, so it adds no expert
-sharding. DP = `stage_world_size / tp_size`. Rules, all checked at config time:
+sharding. DP = `world_size / tp_size`. Rules, all checked at config time:
 
 - `tp_size` divides the NVLink domain, and `ep_size` is a multiple of `tp_size` (`_validate_tp`).
 - **One domain:** the
   [single-domain multi-group rule](expert-parallelism.md#single-domain-multi-group-ep-races-and-hangs)
   applies unchanged, so `ep_size` is 2 or fills the domain. `ep2+tp2` on 8 GPUs (four 2-rank EP
   groups) passes; `ep4+tp2` is rejected like bare `ep4`.
-- **More than one domain:** a **single** EP group spanning the job (`ep_size == stage_world_size`,
+- **More than one domain:** a **single** EP group spanning the job (`ep_size == world_size`,
   which `ep_scope=auto` resolves to `global`); multi-group EP+TP is rejected
   ([why](#configuration-matrix)).
 
