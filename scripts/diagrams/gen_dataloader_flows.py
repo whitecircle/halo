@@ -2,7 +2,7 @@
 
 One figure per path, drawn on the same grid so the pair reads as a before/after: the standard
 path shards batches by **global rank** (one distinct batch per rank), the custom path by **DP
-rank** (the ranks of a TP/CP/ETP group, and of a pipeline chain, read the same batch). The worked
+rank** (the ranks of a TP/CP/ETP group read the same batch). The worked
 shape is world 16 with `tp_size=2` → `data_parallel_size = 8`.
 """
 
@@ -103,7 +103,7 @@ panel(
 panel(
     "dataloader_custom",
     "Custom dataloader path",
-    "tp 2 · dp = (world / pp) / max(cp, tp, etp) = 16 / 2 = 8",
+    "tp 2 · dp = world / max(cp, tp, etp) = 16 / 2 = 8",
     "_needs_custom_dataloader() → True",
     "— either holds",
     [
@@ -114,6 +114,6 @@ panel(
     ],
     custom_batches,
     "What each rank reads — 8 distinct batches, one per TP group",
-    "dp_rank = stage_local_rank // max(tp, cp), so a pipeline chain shares it too;"
+    "dp_rank = rank // max(tp, cp) (ETP partners share their dispatch rank);"
     " a pre-sharded dataset passes num_processes = 1.",
 )
