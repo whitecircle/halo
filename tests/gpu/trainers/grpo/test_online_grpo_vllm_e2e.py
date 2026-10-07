@@ -69,9 +69,9 @@ from tests.common.weight_sync import moved_parameters
 
 MODEL_NAME = QWEN3_0_6B
 VLLM_SERVER_URL = env_str("VLLM_SERVER_URL") or "http://localhost:8000"
-# Rollout endpoints the environmental legs drive, comma-separated. Two or more put the single
-# process's push on an InferenceClientManager pool, which pauses every server together and streams
-# each chunk to all of them — a shape a single URL never reaches. Every server must serve MODEL_NAME.
+# Rollout endpoints the environmental legs drive, comma-separated. The single process always pushes
+# through an InferenceClientManager; two or more URLs make it pause every server together and stream
+# each chunk to all of them concurrently. Every server must serve MODEL_NAME.
 VLLM_SERVER_URLS = [
     url.strip() for url in (env_str("HALO_TEST_VLLM_SERVER_URLS") or VLLM_SERVER_URL).split(",") if url.strip()
 ]
