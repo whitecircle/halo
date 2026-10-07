@@ -161,7 +161,8 @@ manifest.
 - **Remote code loads into the test process's own module cache.** `tests/cpu/conftest.py` points
   `HF_MODULES_CACHE` at a scratch dir per process before transformers is imported, so remote-code
   loads need no writable HF home and no worker shares the copies another writes. A standalone
-  `python tests/cpu/<file>.py` that imports transformers keeps `$HF_HOME/modules`.
+  `python tests/cpu/<file>.py` that imports transformers keeps the environment's cache
+  (`HF_MODULES_CACHE`, by default `$HF_HOME/modules`).
 
     Do not redirect the cache inside a test around a `trust_remote_code` load. transformers puts
     each cache it copies into on `sys.path` and never takes it off, so the `transformers_modules`
@@ -275,7 +276,7 @@ below. The cross-suite ones:
 | `HALO_TEST_OFFGRPO_PARALLEL` | `tp` (default, dense Qwen3) or `ep` (gpt-oss MoE) leg of `trainers/grpo/test_offline_grpo_tp_resume.py`. |
 | `HALO_TEST_MAX_STEPS`, `HALO_TEST_BATCH_SIZE`, `HALO_TEST_GRAD_ACCUM`, `HALO_TEST_NUM_GENERATIONS`, `HALO_TEST_NUM_WORKERS`, `HALO_TEST_MAX_CONCURRENT`, `HALO_TEST_ROLLOUT_MAX_TOKENS`, `HALO_TEST_MAX_COMPLETION` | Step count and rollout sizing for `trainers/grpo/test_environmental_grpo_benchmarks.py`, whose defaults are sized for one vLLM server. |
 | `HALO_TEST_VLLM_GROUP_PORT` / `HALO_TEST_SGLANG_GROUP_PORT` | Pins the trainer-side weight-transfer group port the rollout e2e suites bind. Unset, each run draws one with `free_port()` (`tests/common/ports.py`), below the kernel's ephemeral range, so no outbound connection on the host can hold it; the engine learns the port from the trainer's init request, so the server needs no matching setting. The online-GRPO MoE / dense pair offsets a pinned port by the row's index, so back-to-back rows bind different ones. A resume row rebinds its port for phase 2, and the weight-transfer re-init suite rebinds it every cycle. |
-| `HALO_TEST_VLLM_SERVER_URLS` | Comma-separated rollout endpoints the environmental legs of `trainers/grpo/test_online_grpo_vllm_e2e.py` drive (default: the single `VLLM_SERVER_URL`). Two or more make the single training process's `InferenceClientManager` push pause every server together and stream each chunk to all of them, and the leg then asserts the served policy moved on **every** one of them. Each server serves the same model on its own GPU; the leg binds one trainer-side group port per server, each allocated by `free_port()` (`tests/common/ports.py`) rather than pinned, so back-to-back rows cannot contend. |
+| `HALO_TEST_VLLM_SERVER_URLS` | Comma-separated rollout endpoints the environmental legs of `trainers/grpo/test_online_grpo_vllm_e2e.py` drive (default: the single `VLLM_SERVER_URL`). The leg always pushes through the single training process's `InferenceClientManager`; two or more URLs make it pause every server together and stream each chunk to all of them concurrently, and the leg then asserts the served policy moved on **every** one of them. Each server serves the same model on its own GPU; the leg binds one trainer-side group port per server, each allocated by `free_port()` (`tests/common/ports.py`) rather than pinned, so back-to-back rows cannot contend. |
 | `VLLM_MODEL` | Checkpoint the running vLLM server serves, read by the rollout benchmark itself — not by the launcher, and **not** forwarded by the `make` tiers, so put it in `.env` or export it. It must be the model the test trains: unset, the benchmark falls back to Qwen3-0.6B and a MoE-serving tier silently tests the wrong pairing. (`SGLANG_MODEL` is the compose file's server-side spelling; no test reads it.) |
 
 Suites that pin one family or one phase add their own `HALO_TEST_<SUITE>_*` knobs on top; the manifest
