@@ -57,7 +57,8 @@ memory bound, and it is the default choice for text SFT.
 
 **Padding-free** (`padding_free: true`) flattens a batch into one variable-length sequence instead.
 It needs a varlen Flash Attention kernel and cannot be combined with packing. Context parallelism
-refuses both, and so does a vision run — images cannot be packed.
+refuses both, as do a vision run (images cannot be packed) and DeepSeek-V4, whose compressed-KV
+layers cannot keep the documents of one row apart.
 
 ## Chat templates
 
@@ -143,7 +144,7 @@ result. The config must state `train_on_completions_only: false` and the exact `
 preparation used, or startup raises.
 
 `init_from_scratch: true` builds random weights from the model's config instead of reading a
-checkpoint. It runs on plain FSDP2 data parallelism only — EP, TP, CP and ETP raise, since
+checkpoint. It runs without model parallelism only (one GPU, DDP or FSDP2) — EP, TP, CP and ETP raise, since
 distributed random-init of sharded parameters is not implemented. For a large or MoE model,
 materialize the random-init checkpoint once outside the job (`from_config` plus `save_pretrained`)
 and point `model_name_or_path` at it.

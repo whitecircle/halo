@@ -17,10 +17,10 @@ cannot reproduce, and SDPG inherits Online GRPO's refusal.
 ## Teacher distillation
 
 Both models sit on every rank — the student with its optimizer state, the teacher weights-only under
-`no_grad`. Construction raises unless the two vocabulary sizes match, so teacher and student should
-come from the same family: equal sizes over a different token map pass the check and train on
-misaligned targets. Memory is the binding constraint: LoRA on the student is the usual
-answer, and the shipped recipe uses it.
+`no_grad`. Before any teacher weight loads, the script checks that both tokenizers map every token
+to the same id, and raises otherwise; the two `vocab_size`s may differ only by embedding padding.
+In practice teacher and student share a tokenizer family. Memory is the binding constraint: LoRA on
+the student is the usual answer, and the shipped recipe uses it.
 
 Data is the SFT conversation format, under `conversation_field` (default `messages` for this script).
 From `examples/distillation/qwen3_5/distill-qwen3.5-9b-from-qwen3.6-35b-a3b.yaml`:
@@ -39,7 +39,7 @@ lora_r: 16
 ```
 
 `distill_alpha` weights the divergence term against the cross-entropy term; `1.0` drops
-cross-entropy entirely. `distill_loss` takes eight losses — `kl_divergence` is the default and
+cross-entropy entirely. `distill_loss` takes six losses — `kl_divergence` is the default and
 the one to start from; `cosine_similarity` tolerates teachers whose logit scale differs. Over-length
 conversations are dropped, not truncated.
 
@@ -75,13 +75,16 @@ learning_rate: 1.0e-5
 The hint is filled from the column named by `sdpg_answer_field` (default `answer`). The warmup and
 decay steps ramp the distillation coefficient in after the SFT term has settled and phase it back
 out near the end. `reference_kl_coef: 0` means no reference model is loaded at all; raise it only if
-you want an anchor against the starting weights, which costs a second resident model. It is refused
-under expert, expert-tensor and tensor parallelism.
+you want an anchor against the starting weights, which costs a second resident model. Under expert,
+expert-tensor or tensor parallelism that reference is a whole unsharded replica on every rank,
+experts included; the run warns, so budget its memory.
 
-Two things bite here. `max_length` must have headroom for the hint, because neither branch is ever
-truncated — the teacher branch is systematically longer and an over-length row raises. And
-`assistant_message_template` has to byte-match what the chat template renders, or every token is
-masked and the loss goes flat.
+Three things bite here. `max_length` must have headroom for the hint, because neither branch is ever
+truncated — the teacher branch is systematically longer and an over-length row raises.
+`assistant_message_template` has to byte-match what the chat template renders. On a text run with a chat
+template, a marker the template never renders raises at startup; a vision run checks only that a marker is set.
+A marker rendered only for some turns masks the rows it misses, so the loss goes flat. And `train_on_completions_only` must stay on while `sdpg_beta_base > 0`: with the
+prompt supervised, the hint would shift every teacher token against the student's.
 
 ```bash
 halo launch self-distill examples/distillation/qwen3_5/self-distill-qwen3.5-9b.yaml -n 8
@@ -110,15 +113,17 @@ CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6 halo launch rlvr \
     --use_sdpg=true --sdpg_beta_base=1.0
 ```
 
-Setting any `sdpg_*` knob without `use_sdpg: true` is refused rather than ignored. A train dataset
-with no `answer` column raises, since the hint has nothing to reveal.
+Setting an SDPG knob (`sdpg_*`, `opd_positive_advantage_only`) away from its default without
+`use_sdpg: true` is refused rather than ignored. While `sdpg_beta_base > 0` and the hint template
+names `{answer}`, a train dataset with no answer column raises at construction, since the hint has
+nothing to reveal; a row with a blank answer runs unhinted, with a warning.
 
 ## What to watch
 
 On teacher distillation, `distillation_loss` should fall while `sft_loss` stays sane; an OOM on the
 first step means both models did not fit, so cut `max_length` or move the student to LoRA. On the two
-self-distillation variants, watch `opd_loss` together with the live coefficient (`beta`, or
-`opd_beta` online) — a coefficient pinned at zero means the schedule never ramped. An `opd_loss` of
+self-distillation variants, watch `opd_loss` together with the live coefficient `opd_beta` — a
+coefficient pinned at zero means the schedule never ramped. An `opd_loss` of
 exactly zero under SDPG means no rollout in the batch earned a positive advantage, which is expected
 occasionally and a broken verifier if it persists.
 

@@ -19,7 +19,7 @@ wrappers, a tuned recipe, and GPU-validated coverage. Fifteen of them are MoE.
 | [Command A+](cookbooks/halo-command-a-plus-cookbook.md) | `CohereLabs/command-a-plus-05-2026-bf16` | MoE | 200B+; pinned revision and FA2 |
 | [Bailing / Ling](../agent-docs/models/bailing.md) ↗ | `inclusionAI/Ling-mini-2.0` | MoE | needs `trust_remote_code` and `sdpa` |
 | [Inkling](../agent-docs/models/inkling.md) ↗ | `thinkingmachines/Inkling-Small` | MoE | multimodal; pin `sdpa`, no pad token |
-| [DeepSeek-V4](../agent-docs/models/deepseek-v4.md) ↗ | `deepseek-ai/DeepSeek-V4-Flash` | MoE | eager attention only; convert to bf16 |
+| [DeepSeek-V4](../agent-docs/models/deepseek-v4.md) ↗ | `deepseek-ai/DeepSeek-V4-Flash` | MoE | eager attention only; one document per row (`packing` / `padding_free` refused); convert to bf16 |
 | [GLM-5 Next](../agent-docs/models/glm5-next.md) ↗ | `zai-org/GLM-5.3-Flash` | MoE | convert fp8 to bf16; SDPA only |
 | [Step-3.7 Flash](../agent-docs/models/step3p7.md) ↗ | `stepfun-ai/Step-3.7-Flash` | MoE | per-layer head counts rule out TP |
 | [Qwen3 dense](../agent-docs/models/qwen3.md) ↗ | `Qwen/Qwen3-4B-Instruct-2507` | dense | the reference dense family; CP and TP |

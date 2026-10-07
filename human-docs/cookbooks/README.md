@@ -71,6 +71,12 @@ host put both ends on the EFA recipe instead: a trainer left at `Socket` there s
 collective over TCP and breaks DeepEP
 ([Servers on other nodes](../../agent-docs/infrastructure/rollout-servers.md#servers-on-other-nodes-efa) ↗).
 
+The code-contests GRPO recipes run policy-written programs. On the default `local`
+sandbox those programs can read this container's environment, `HF_TOKEN` and
+`WANDB_API_KEY` included. Use the `remote` sandbox for such runs, or `bubblewrap`,
+which needs extra container rights beyond the `docker run` above
+([Async GRPO](../training-methods/async-grpo-environments.md#the-environments)).
+
 ## Serve from the host
 
 Rollout and serving containers start on the host from the repo root, never inside

@@ -34,7 +34,7 @@ curl -s localhost:8000/health
 | `VLLM_CUDA_DEVICES` | `7` | The server's GPUs. Must not overlap `TRAINER_CUDA_DEVICES` |
 | `VLLM_PORT` | `8000` | Bound on the host; it drives the serve command, the health check and the banner |
 | `VLLM_TP` | `1` | Tensor-parallel size, paired with the device list |
-| `VLLM_GPU_MEM` | `0.85` | Fraction of each GPU for weights and KV cache; raise to `0.9` on dedicated GPUs |
+| `VLLM_GPU_MEM` | `0.85` | Fraction of each GPU for weights and KV cache; raise to `0.9` on dedicated GPUs. With `isr_engine_reference`, lower it to ≤ `0.80` (or serve a smaller `--max-num-batched-tokens`) |
 | `VLLM_MOE_BACKEND` | `triton` | Leave it. Any other backend repacks expert weights and breaks the sync |
 | `VLLM_TOOL_PARSER` | `hermes` | Per family (below); needed by every tool-calling environment |
 | `VLLM_REASONING_PARSER` | unset | Required if the run sends a thinking budget |
@@ -50,6 +50,9 @@ the default `hermes`. ReAct environments send no tool schema at all and want **n
 
 Serve **bf16 weights**, not a quantized checkpoint — a quantized engine stores transformed tensors that an in-place
 weight update cannot reach. For GPT-OSS that means a BF16 conversion of the release, not the stock MXFP4 one.
+
+Both engines fill any sampling field a request omits from the model's `generation_config.json`, so the trainers send
+every sampling field with each request: the config's values, never the checkpoint's, decide how rollouts sample.
 
 ## SGLang instead
 
@@ -121,7 +124,8 @@ the group port.
 
 After an optimizer step the trainer streams the **whole model** into the running engine over NCCL and the engine
 keeps serving with the new weights — no restart, no checkpoint on disk. The server is paused for the push: vLLM
-freezes in-flight requests and resumes them, SGLang drops them and the rollout actor re-issues the turn.
+freezes in-flight requests and resumes them, SGLang drops them and the rollout actor re-issues the turn. With several
+servers, every push pauses all of them together.
 
 It has one hard requirement: MoE models must be served with `--moe-backend triton` (`--moe-runner-backend triton` on
 SGLang). The backends the engine picks automatically on Blackwell repack expert weights after loading, so an update

@@ -42,8 +42,9 @@ services:
       - ${SGLANG_MODEL_DIR:-/mnt/models}:${SGLANG_MODEL_DIR:-/mnt/models}:ro
     # Two flags are required and silent when wrong: --tool-call-parser (tool-using environments need
     # the calls parsed; `auto` reads the parser off the chat template) and --moe-runner-backend
-    # triton (the auto runners bypass R3 capture and repack expert weights). --attention-backend is a
-    # per-family need, --trust-remote-code a per-checkpoint one, and SGLANG_EXTRA_ARGS is appended
+    # triton (auto-selection picks a fused runner for most MoE shapes: triton_kernel and flashinfer
+    # skip R3 capture, and flashinfer_trtllm repacks the expert weights an update writes).
+    # --attention-backend is a per-family need, --trust-remote-code a per-checkpoint one, and SGLANG_EXTRA_ARGS is appended
     # last so a flag repeated there wins. Values per family: agent-docs/infrastructure/rollout-servers.md
     command: >
       python3 -m sglang.launch_server

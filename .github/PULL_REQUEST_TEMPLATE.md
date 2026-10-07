@@ -1,4 +1,4 @@
-<!-- Heads up: PRs without an accepted issue + maintainer approval are auto-closed — to keep review
+<!-- PRs without an accepted issue + maintainer approval are auto-closed — to keep review
      focused and AI-slop out, not to reject you. Before opening, both should be true:
        1. an accepted issue exists for this work, and
        2. a maintainer commented `/approve @your-handle` on it (you're on .github/APPROVED_CONTRIBUTORS).

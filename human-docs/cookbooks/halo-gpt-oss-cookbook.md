@@ -225,10 +225,14 @@ moe_balancing: none
 beta: 0.0
 output_dir: /data/checkpoints/gpt-oss-20b-grpo
 fsdp_reshard_after_backward: false
+use_chunked_grpo_logprobs: true
 ```
 
 `rollout_stop_tokens` matters because `<|call|>` is not an eos here: without it the
 model generates past its tool call and hallucinates the result for most of the turn.
+`use_chunked_grpo_logprobs: true` scores completions without the full logits plane, which
+GPT-OSS's ~201k vocabulary makes too large; every shipped GPT-OSS environment recipe sets it, and
+the trainer refuses a full-logits plane that does not fit.
 `fsdp_reshard_after_backward: false` is optional: it leaves one FSDP2 re-gather per
 optimizer step instead of one per grad-accumulation microstep, for one unsharded bf16
 parameter copy per GPU (fine at 20B).
@@ -261,13 +265,13 @@ CUDA_VISIBLE_DEVICES=4,5,6,7 halo launch environmental-grpo gpt-oss-grpo.yaml -n
 ```
 
 vLLM (`rollout_backend: vllm`, `rollout_server_url: http://localhost:8000`) is the engine
-the shipped ep4 configs target, and the only one for `rollout_max_thinking_tokens` and
-`carry_reasoning` ([Supported Matrix](../supported-matrix.md#rollout-engines)).
-`rollout_thinking_budget_scope: episode` is out of reach on GPT-OSS: SGLang refuses the
-scope for every model, and on vLLM it counts a turn's reasoning up to a one-token close,
-while GPT-OSS's close is five tokens.
+the shipped ep4 configs target, and the only one for `rollout_max_thinking_tokens`,
+`turn_overlong_penalty` and `carry_reasoning`
+([Supported Matrix](../supported-matrix.md#rollout-engines)). `turn_overlong_penalty` stays
+off on GPT-OSS, on vLLM too: it counts a turn's reasoning up to a one-token close,
+GPT-OSS's close is five tokens, and the trainer refuses it.
 GPT-OSS tool calls arrive as plain text that the default `hermes` parser cannot read, so
-vLLM needs the bundled text tool parser, and a thinking budget needs the bundled reasoning
+a native-tool environment on vLLM needs the bundled text tool parser, and a thinking budget needs the bundled reasoning
 parser with Model Runner V1 (V2 answers `thinking_token_budget` with a 400). Set
 `rollout_reasoning_end_token: "<|start|>assistant<|channel|>final<|message|>"` too, as the shipped
 vLLM configs do: it is the opener the budget forces, and naming it keeps those forced tokens out of the loss:

@@ -150,9 +150,9 @@ SGLANG_CUDA_DEVICES=0,1,2,3 SGLANG_TP=4 \
 
 ## Train a LoRA adapter
 
-These targets adapt the language model only. The vision and audio towers' projections share the
+These targets adapt the language model only. The vision tower's projections share the
 `q_proj`…`o_proj` names but are `Gemma4ClippableLinear`, a wrapper PEFT cannot adapt, so they are
-excluded from injection with a warning naming the count. `all-linear` adapts the towers too.
+excluded from injection with a warning naming the count. `all-linear` adapts the tower too.
 
 ```yaml
 use_peft: true

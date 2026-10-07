@@ -93,9 +93,10 @@ FA3 is absent) on Hopper.
 
 ## Add CP, TP, or ETP
 
-Every layout below stays on the same four ranks, where EP4 is one dispatch group. The
-same config on eight GPUs is rejected at config time
-([rules](../parallelism.md#rules-that-save-you-a-wasted-run)).
+Every layout below runs on four ranks, where EP4 is one dispatch group. The EP4 layouts
+are rejected on eight GPUs at config time; use EP8 there. For a 4-way expert split on
+eight GPUs, `ep4 + etp2` replaces the pure EP4 layout only: CP or TP on top of it is
+rejected ([rules](../parallelism.md#rules-that-save-you-a-wasted-run)).
 
 Use CP for longer sequences. EP4 and CP2 use the same four ranks. Disable packing, since
 the collator rejects it when CP splits the sequence.

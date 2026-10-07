@@ -5,8 +5,8 @@ Fine-tune a text encoder for retrieval, semantic similarity, deduplication or cl
 `SentenceTransformer(path)` — the pipeline config (`modules.json`, the per-module directories) is
 written alongside the weights.
 
-This is the one method that is not a causal-LM objective, so a few shared config knobs do not apply
-(see [What this path does not take](#what-this-path-does-not-take)).
+Here sentence-transformers owns tokenization and the pipeline around the backbone, so a few shared
+config knobs do not apply (see [What this path does not take](#what-this-path-does-not-take)).
 
 ## Data shapes
 
@@ -82,8 +82,12 @@ halo launch embedding examples/embedding/gptoss/embedding-gptoss-20b-gooaq-ep.ya
 Recipes for Qwen3-Embedding, Qwen3.5, GPT-OSS and Gemma 4 ship under `examples/embedding/`. Expert,
 tensor and expert-tensor parallelism all work; context parallelism does not, because pooling needs
 the whole sequence on one rank. Tensor and expert-tensor parallelism, and a pre-sharded dataset,
-batch through a loader that cannot apply `no_duplicates`, so they refuse it: set
-`batch_sampler: batch_sampler` there (as `--batch_sampler=batch_sampler` on the command line). A pipeline with weights after the backbone
+batch through Halo's own loader, which builds plain batches, so they refuse any other
+`batch_sampler` (`no_duplicates`, `group_by_label`): set `batch_sampler: batch_sampler` there (as
+`--batch_sampler=batch_sampler` on the command line). Multi-GPU plain data parallelism and pure EP
+over a map-style, not pre-sharded dataset need `dataloader_drop_last: true`: sentence-transformers
+sets it to `true` on any multi-process launch, and a command-line `--dataloader_drop_last=false` is
+refused at startup, since a kept remainder would give some ranks one more step than the others. A pipeline with weights after the backbone
 that train or that FSDP2 would shard (a `Dense` head) runs on one GPU or under DDP
 (`accelerate launch`) only: FSDP2, TP and EP refuse it at startup. LoRA (`use_peft: true`) is
 supported on the plain data-parallel path only and rejected under EP, ETP and TP; its targets may

@@ -58,7 +58,9 @@ rewards:
 A judge defaults to an OpenRouter model and reads `OPENROUTER_API_KEY`; a reward model is served by vLLM
 (`--runner pooling`) or SGLang (`--is-embedding`) on its own port. Both are probed once at launch with a sample
 request, so a bad URL, key or model name fails the launch rather than every step. A
-negative `weight` makes a term a penalty; the full option list is in
+negative `weight` makes a term a penalty. A judge that lists `checks` instead of `requirements` (a veto judge) is
+refused here: it gates an environment's grade, which only
+[Async GRPO](async-grpo-environments.md#rewards) has. The full option list is in
 [Reward Terms](../../agent-docs/training-methods/grpo/rewards.md) ↗.
 
 ## Config
@@ -130,8 +132,10 @@ which still exercises rendering, rewards, the loss and one weight sync.
 
 After an optimizer step the trainer pushes the whole model to the server over NCCL, before the next round of
 generation, so rollouts always come from the current policy. Whether a given shape can be synced at all is decided
-at construction: the trainer refuses a QLoRA base, a GPT-OSS whose attention sinks were reset away, and an MoE
-family the pinned engine cannot take an update for. Serve MoE models with `--moe-backend triton`, or the engine
+at construction: the trainer refuses a QLoRA base, an adapter the sync cannot fold, GPT-OSS sinks that were reset
+away or are being trained (`train_sinks: true`), an MoE family the pinned engine cannot take an update for, and an
+MoE run without EP wrappers (`expert_parallel_size: 1` with `use_grouped_gemm: false`). Serve MoE models with
+`--moe-backend triton`, or the engine
 repacks the expert weights the sync writes and the policy stops matching ([Rollout Servers](../rollout-servers.md)).
 
 ### LoRA
@@ -144,8 +148,10 @@ The weight sync folds the adapter into each base weight as it sends it, so the s
 
 Read `rewards/accuracy/mean` for progress and `frac_reward_zero_std` for how many groups produced no signal.
 `sampling/importance_sampling_ratio/mean` near 1 means trainer and engine agree on the policy; a drift away from 1
-means they disagree about the template, the sinks or dropout, and is the most useful alarm on this path. Every logged
-step's rollouts land in `<output_dir>/completions/` as parquet, which is where to look when rewards are all zero.
+means they disagree about the template, the sinks or dropout, and is the most useful alarm on this path. A judge or
+reward-model term logs `judge/<name>/scored` or `reward_model/<name>/scored`, the share of completions it reached a
+verdict on; below 1, the scorer is failing. Every logged step's rollouts land in `<output_dir>/completions/` as
+parquet, which is where to look when rewards are all zero.
 
 | Symptom | Cause | Fix |
 | --- | --- | --- |

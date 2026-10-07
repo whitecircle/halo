@@ -41,8 +41,8 @@ output_dir: checkpoints/rm-qwen3.5-9b-skywork-pref80k
 ```
 
 `max_length` here is a **filter**, not a truncation: pairs longer than it are dropped from the
-dataset. If your split shrinks unexpectedly, that is why. `center_rewards_coefficient` pulls the
-score distribution toward zero mean, which makes scores comparable across runs.
+dataset. If your split shrinks unexpectedly, that is why. `center_rewards_coefficient` penalizes
+`(chosen + rejected)²`, which pulls the score distribution toward zero mean.
 
 LoRA needs `lora_task_type: SEQ_CLS`, which is what keeps the freshly initialized `score` head
 trainable. Leave it out and Halo only warns, while the head never trains and accuracy sits at 0.5.
@@ -99,10 +99,12 @@ learning_rate: 2.0e-05
 output_dir: checkpoints/clf-qwen3.5-9b-mage
 ```
 
-For imbalanced data, either set `class_weights` per label id or turn on `derive_class_weights` to
-compute balanced weights from the observed counts — the two are mutually exclusive and setting both
-raises. `loss_type` also takes `focal` and `label_smoothing_ce`, and `multi_label_threshold` moves
-the sigmoid decision point on multi-label heads.
+For imbalanced data, set `class_weights` per label id (the BCE `pos_weight` on multi-label heads),
+or, on single-label data, turn on `derive_class_weights` to compute balanced weights from the
+observed counts; setting both raises. `loss_type` also takes `focal` and, on single-label heads,
+`label_smoothing_ce`, and `multi_label_threshold` moves the sigmoid decision point on multi-label
+heads. A single-label head needs at least two classes: a one-logit head is refused, since
+regression is not supported.
 
 ### Run
 
@@ -115,18 +117,19 @@ The MoE recipe is `examples/classification/gptoss/clf-gptoss-20b-mage-ep.yaml`. 
 
 ### What to watch
 
-`accuracy` (or `exact_match_accuracy` on multi-label), `f1`, and `mcc`, which stays honest under
-class imbalance — rank checkpoints on one of those. `metric_for_best_model: auc_roc` raises unless
+`accuracy` (`exact_match_accuracy` on multi-label), `f1`, and, on single-label runs, `mcc`, which
+stays honest under class imbalance — rank checkpoints on one of those. `metric_for_best_model: auc_roc` raises unless
 `compute_auc_roc` is on and every class appears in the eval slice.
 
 ## Heads and modality
 
 Both methods need the model family to have a sequence-classification head. transformers ships one
-for most text families and Halo registers Gemma 4 and MoE Qwen3.5/3.6 on top. A multimodal
-checkpoint without one is refused before the model loads, naming the families that work; a text
-family without one fails inside the `Auto*` load instead. Reward modeling takes
+for most dense text families, but of the MoE families only for GPT-OSS, Qwen3 MoE and Mistral 4;
+Halo registers Gemma 4 and MoE Qwen3.5/3.6 on top, and most other MoE families have none. A
+multimodal checkpoint without one is refused before the model loads, naming the families that work;
+a text family without one fails inside the `Auto*` load instead. Reward modeling takes
 images on those families (`images_field`, images merge into the shared prompt); classification is
-text-only and refuses any image column.
+text-only: it refuses an `images`, `image` or `pixel_values` column and image parts in the prompt.
 
 ## Go deeper
 

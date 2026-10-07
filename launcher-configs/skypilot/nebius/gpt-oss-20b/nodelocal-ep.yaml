@@ -39,7 +39,8 @@ envs:
   OUTPUT_DIR: /data/checkpoints/oss-20b
   DIST_SHARED_FILESYSTEM: "1"
   WANDB_PROJECT: halo-20b-nodelocal-nebius
-  # No NCCL env needed: the image bakes the IB defaults; NGC leaves NCCL_NET_PLUGIN unset on IB → HPC-X.
+  # No NCCL env needed: the image bakes the IB defaults, and on IB its OFI plugin yields to NCCL's
+  # built-in IB transport.
 
 file_mounts:
   /workspace: {source: ., mode: COPY}

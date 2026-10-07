@@ -4,7 +4,7 @@
 #   make ... IMAGE=halo:hopper      # H100/H200
 # Lint/format and the docs link check run on the host.
 
-# bash, not dash (the default /bin/sh on Debian/Ubuntu): several recipes use bashisms.
+# bash, not dash (the default /bin/sh on Debian/Ubuntu), so a recipe may use bash syntax.
 SHELL := /bin/bash
 
 IMAGE        ?= halo:blackwell
@@ -71,9 +71,9 @@ EFA_DOCKER_FLAGS = $(if $(filter 1,$(EFA)),--device=/dev/infiniband -e NCCL_NET=
 NO_FABRIC_ENV = $(if $(filter 1,$(EFA)),,-e NCCL_IB_DISABLE=1 -e NCCL_NET=Socket \
   -e NCCL_SOCKET_IFNAME=$(or $(NCCL_SOCKET_IFNAME),$(NO_FABRIC_SOCKET_IFNAME_DEFAULT)))
 NCCL_PROTO_ENV = $(if $(strip $(NCCL_PROTO)),-e NCCL_PROTO=$(NCCL_PROTO),)
-# CPU-only variant (no --gpus): CPU tests, lint, docs inside the image. The Hugging Face cache is
-# mounted read-write so the tests that load a real tokenizer work without the hub; set HF_CACHE= to
-# disable that mount.
+# CPU-only variant (no --gpus): install, the CPU tier, seed-hf-cache and diagrams. The Hugging Face
+# cache is mounted so the tests that load a real tokenizer work without the hub, read-write so
+# seed-hf-cache can fill it; set HF_CACHE= to disable that mount.
 HF_CACHE ?= $(HALO_SCRATCH)/hf
 DOCKER_RUN_CPU = docker run --rm $(if $(strip $(DOCKER_RUNTIME)),--runtime $(DOCKER_RUNTIME),) \
   $(if $(strip $(HF_CACHE)),-e HF_HOME=$(HF_CACHE) -v $(HF_CACHE):$(HF_CACHE),) \
@@ -96,7 +96,7 @@ install: ## check the lock installs into the image (throwaway container; fails o
 	  uv pip install --system --break-system-packages --no-deps -r /tmp/requirements.txt; \
 	  uv pip install --system --break-system-packages --no-deps -e ."
 
-lint: ## ruff check (pinned binary on host)
+lint: ## ruff check on the host (pinned via uvx, else the ruff on PATH)
 	if command -v uvx >/dev/null 2>&1; then uvx ruff@$(RUFF_VERSION) check .; else ruff check .; fi
 
 format: ## ruff format the tree
@@ -123,16 +123,21 @@ test-gpu-core: ## pytest core GPU tier (pre-merge, GPU changes) via the manifest
 test-gpu-full: ## pytest full GPU tier (heavy, many-GPU)
 	$(DOCKER_RUN) bash -lc "pytest -m gpu $(GPU_TEST_DIR) $(PYTEST_ARGS)"
 
-# GPUs the trainer may use — must exclude the server's (VLLM_CUDA_DEVICES in docker-compose.vllm.yml):
-# weight sync is an NCCL broadcast, and a rank cannot broadcast to itself.
+# GPUs the trainer may use — must exclude the server's (VLLM_CUDA_DEVICES / SGLANG_CUDA_DEVICES in the
+# compose files): weight sync is an NCCL broadcast, and a rank cannot broadcast to itself.
 TRAINER_CUDA_DEVICES ?= 0,1,2,3,4,5,6
 # Both ends of a weight-sync test must serve the same checkpoint, so the dense and MoE halves are
 # separate passes with the server restarted in between; SERVER_TIER=moe selects the MoE half.
+#   dense: Qwen/Qwen3-0.6B on either engine (VLLM_MODEL / SGLANG_MODEL)
+#   MoE:   SERVER_TIER='moe and not gptoss' with VLLM_MODEL=Qwen/Qwen3-30B-A3B-Instruct-2507, and
+#          SERVER_TIER='moe and gptoss' with VLLM_MODEL / SGLANG_MODEL=unsloth/gpt-oss-20b-BF16
+#   The Step-3.7 sync suite serves its own checkpoint (see its script header).
 SERVER_TIER ?= not moe
-# The trainer↔server weight-transfer group is NCCL between two containers: without EFA=1 the socket
-# recipe the compose bases default to (InfiniBand off, socket net; NCCL_SOCKET_IFNAME keeps it off
-# Docker's bridge and the per-container veth pairs, which NCCL otherwise enumerates and cannot carry
-# host-to-host traffic on). The SGLang server needs only cuMem parity on top (docker-compose.sglang.yml).
+# The trainer↔server weight-transfer group is NCCL between two containers. Without EFA=1 both ends
+# use the socket recipe the compose bases default to (InfiniBand off, socket net; NCCL_SOCKET_IFNAME
+# keeps it off Docker's bridge and the per-container veth pairs, which NCCL otherwise enumerates and
+# cannot carry host-to-host traffic on). The SGLang server needs only cuMem parity on top
+# (docker-compose.sglang.yml).
 test-gpu-vllm: SERVER_TIER_DOCKER_ENV = $(NO_FABRIC_ENV) \
   -e CUDA_VISIBLE_DEVICES=$(TRAINER_CUDA_DEVICES) \
   -e VLLM_SERVER_URL=$(VLLM_SERVER_URL) -e HALO_TEST_REQUIRE_SERVER=vllm
@@ -140,8 +145,8 @@ test-gpu-vllm: ## pytest the vLLM-server GPU tier (server on a GPU outside TRAIN
 	@curl -sf $(VLLM_SERVER_URL)/health >/dev/null || { echo "No vLLM server at $(VLLM_SERVER_URL). Start it on a \
 	  GPU the trainer does not use: VLLM_CUDA_DEVICES=7 VLLM_REASONING_PARSER=qwen3 \
 	  VLLM_USE_V2_MODEL_RUNNER=0 docker compose -f docker-compose.vllm.yml up -d vllm-server \
-	  (EFA=1: add -f docker-compose.vllm.efa.yml; both are required by the benchmarks: their per-effort \
-	  CoT budget draws a 400 without a reasoning parser, and another under Model Runner V2)"; exit 1; }
+	  (the benchmarks need both variables: their per-effort CoT budget draws a 400 without a reasoning \
+	  parser, and another under Model Runner V2; EFA=1: add -f docker-compose.vllm.efa.yml)"; exit 1; }
 	$(DOCKER_RUN) bash -lc "pytest -m 'gpu and vllm_server and ($(SERVER_TIER))' $(GPU_TEST_DIR) $(PYTEST_ARGS)"
 
 test-gpu-sglang: SERVER_TIER_DOCKER_ENV = $(NO_FABRIC_ENV) \
@@ -159,8 +164,8 @@ bench: ## run the EP/TP throughput benchmarks
 docs: ## link and anchor check over agent-docs/, human-docs/, skills/ and the root markdown
 	./scripts/docs/check_links.sh
 
-# One `python` per generator: each writes its figures at import time, and `_style_base.py` /
-# `_theory_style.py` / `_pipeline_style.py` are shared style, not generators.
+# One `python` per generator: most write their figures at import time with no `__main__` guard, and
+# `_style_base.py` / `_theory_style.py` / `_pipeline_style.py` are shared style, not generators.
 diagrams: ## regenerate agent-docs/assets figures from scripts/diagrams (in-image; matplotlib ships there)
 	$(DOCKER_RUN_CPU) bash -lc 'set -e; for g in scripts/diagrams/gen_*.py; do echo "$$g"; python "$$g"; done'
 

@@ -32,9 +32,13 @@ rank — one torchrun per node, not one per GPU.
 ## Storage: shared or not
 
 `DIST_SHARED_FILESYSTEM=1` (the default) means nodes share a filesystem
-(NFS/Lustre) and only rank 0 writes checkpoints and downloads. On per-node local
-disk — RunPod pods, ephemeral NVMe — set it to `0`; each node then saves its own
-copy and resume works without manual copying.
+(NFS/Lustre): only global rank 0 writes the model and downloads, and each rank
+writes its own optimizer shard. On per-node local disk — RunPod pods, ephemeral
+NVMe — set it to `0`: each node then saves its own copy, and resume needs no
+copying as long as every node keeps its `--node_rank`, since the optimizer shards
+stay on the node that wrote them. Resume on per-node storage is validated in CPU
+simulations only. A multi-node run checks the output side against `output_dir` at
+startup and refuses a contradicting declaration.
 
 It is an umbrella over a read side (`DIST_INPUT_SHARED_FILESYSTEM`) and a write
 side (`DIST_OUTPUT_SHARED_FILESYSTEM`), which want opposite settings on a flaky
@@ -45,7 +49,21 @@ output shared, so checkpoints stay one authoritative copy
 
 Either way, one rank going first is a bounded wait —
 `DIST_STORE_TIMEOUT_HOURS`, default 4. Raise it when a 100B-scale download or a
-whole-corpus pack outlasts that while the other ranks wait.
+whole-corpus pack outlasts that while the other ranks wait. That variable and
+`DIST_NCCL_TIMEOUT_MINUTES` must be identical on every rank; the job refuses to
+start otherwise.
+
+Every node must also see the same model source at the same commit. A local
+checkpoint missing on some nodes, or per-node Hub caches at different commits,
+raises on every rank before the load. Put the checkpoint or `HF_HOME` on a shared
+mount, or set `DIST_INPUT_SHARED_FILESYSTEM=0` so each node fetches its own Hub
+copy (a local checkpoint then has to exist on every node), and pin
+`model_revision` to one commit
+([Troubleshooting](troubleshooting.md#multi-node-and-clusters)).
+
+The FA4 kernel cache lives under `HF_HOME` and locks each file with `flock`. On a
+shared `HF_HOME` whose mount has no cross-node `flock` (Lustre without `flock`, NFS
+`nolock`), set `FLASH_ATTENTION_CUTE_DSL_CACHE_DIR` to node-local storage.
 
 ## Network fabric
 

@@ -252,9 +252,9 @@ VLLM_TOOL_PARSER=glm47 VLLM_ATTENTION_BACKEND=CUTLASS_MLA \
   docker compose -f docker-compose.vllm.yml up vllm-server
 ```
 
-`VLLM_TOOL_PARSER=glm47` is required: the compose default `hermes` cannot read GLM-4's
-tool-call format, so every episode scores zero and the run trains on a flat zero gradient
-without erroring. `VLLM_ATTENTION_BACKEND=CUTLASS_MLA` is required on Blackwell, whose
+`VLLM_TOOL_PARSER=glm47` is required for a native-tool environment: the compose default
+`hermes` cannot read GLM-4's tool-call format, so every episode scores zero and the run trains
+on a flat zero gradient without erroring. `VLLM_ATTENTION_BACKEND=CUTLASS_MLA` is required on Blackwell, whose
 auto-selected MLA kernel rejects GLM-4's head config.
 
 SGLang 0.5.17 also serves and weight-syncs this family. For it, set

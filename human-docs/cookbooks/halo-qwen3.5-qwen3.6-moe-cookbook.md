@@ -256,7 +256,8 @@ CUDA_VISIBLE_DEVICES=0,1,2,3,4,5 DIST_NCCL_TIMEOUT_MINUTES=60 \
   halo launch environmental-grpo qwen3.6-grpo-sglang.yaml -n 6
 ```
 
-`rollout_max_thinking_tokens`, `rollout_thinking_budget_scope: episode` and
-`carry_reasoning` are vLLM-only ([Supported Matrix](../supported-matrix.md#rollout-engines)).
-Full setup:
+On SGLang, `rollout_max_thinking_tokens`, `turn_overlong_penalty` and `carry_reasoning`
+are refused at startup, and the effort profiles' `thinking_tokens` cap nothing, so
+`rollout_max_tokens` is the per-turn bound
+([Supported Matrix](../supported-matrix.md#rollout-engines)). Full setup:
 [Async GRPO with Environments](../../agent-docs/training-methods/grpo/async-grpo/README.md) ↗.

@@ -31,8 +31,9 @@ envs:
   EXPERT_PARALLEL_SIZE: "16"
   EXPERT_PARALLEL_SCOPE: "global"
   # The config's max_length is a single-node NVLink shape. Cross-node dispatch is capped at 8192
-  # tokens/rank (HALO_DEEPEP_GIN_MAX_TOKENS_PER_RANK) and is rejected at the first MoE forward
-  # above it, so the cross-node layout overrides it. See agent-docs/infrastructure/deepep.md.
+  # tokens/rank (HALO_DEEPEP_GIN_MAX_TOKENS_PER_RANK), and a larger per_device_train_batch_size ×
+  # max_length is rejected at config time, before the model loads, so the cross-node layout
+  # overrides it. See agent-docs/infrastructure/deepep.md.
   MAX_LENGTH: "8192"
   HF_HOME: /data/hf_cache
   # Toolkit scratch (S3 dataset cache, profiler traces) beside the HF cache; the default

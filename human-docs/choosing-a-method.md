@@ -21,8 +21,9 @@ switching is a config change, not a rewrite. The last column is the `halo launch
 | Online SDPG | On-policy form of self-distillation | `prompt`, `answer` | `rlvr --use_sdpg=true` |
 | Embedding | Fine-tune for retrieval, similarity, or clustering | pairs / triplets / scored pairs | `embedding` |
 
-Pretraining runs the `sft` path on raw text. From-scratch adds `--init_from_scratch` and is dense FSDP only;
-EP/CP/TP/ETP are rejected there, so materialize the random-init checkpoint outside the job if you need parallelism.
+Pretraining runs the `sft` path on raw text. From-scratch adds `--init_from_scratch` and runs without model
+parallelism only (one GPU, DDP or FSDP2 data parallelism); EP/CP/TP/ETP are rejected there, so materialize the random-init checkpoint outside the job if you
+need parallelism.
 See the `agent-docs` [Pretraining](../agent-docs/training-methods/pretraining.md) ↗ guide.
 
 ## Which of these do I pick

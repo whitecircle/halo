@@ -31,9 +31,10 @@ envs:
   MODEL: unsloth/gpt-oss-120b-BF16      # override to train from a local mirror or a previous run's output_dir
   EXPERT_PARALLEL_SIZE: "16"
   EXPERT_PARALLEL_SCOPE: "global"
-  # Cross-node dispatch is capped at 8192 tokens/rank (HALO_DEEPEP_GIN_MAX_TOKENS_PER_RANK) and is
-  # rejected at buffer sizing in the first MoE forward above it. The config already sits at that
-  # ceiling; pinned here so an overridden CONFIG_PATH cannot exceed it. See agent-docs/infrastructure/deepep.md.
+  # Cross-node dispatch is capped at 8192 tokens/rank (HALO_DEEPEP_GIN_MAX_TOKENS_PER_RANK); a larger
+  # per_device_train_batch_size × max_length is rejected at config time, before the model loads. The
+  # config already sits at that ceiling; pinned here so an overridden CONFIG_PATH keeps max_length within it.
+  # See agent-docs/infrastructure/deepep.md.
   MAX_LENGTH: "8192"
   HF_HOME: /data/hf_cache
   # Toolkit scratch (S3 dataset cache, profiler traces) beside the HF cache; the default

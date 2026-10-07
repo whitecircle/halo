@@ -11,7 +11,7 @@ their combinations — produces a gathered checkpoint you can load with
 | EP, gathered (default) | gathered HF checkpoint, experts at global indices | yes |
 | TP | gathered HF checkpoint | yes |
 | EP with `save_sharded_ep: true` | one expert shard per rank | merge first |
-| LoRA / QLoRA | adapter only (`adapter_model.safetensors`) | serve as adapter, or merge into base |
+| LoRA / QLoRA | adapter only (`adapter_model.safetensors`) | serve as adapter, or merge into base; EP expert LoRA needs `merge_expert_lora_on_save: true` instead |
 
 The sharded EP save skips the gather, which speeds up checkpointing for very
 large models; the trade is a `halo run merge-ep-shards` before the checkpoint
@@ -24,7 +24,7 @@ sharded mode — full tensors are reconstructed from the DTensors at save time.
 ## Resume
 
 Point `resume_from_checkpoint` at a checkpoint directory, or set it to `true` to
-pick up the latest one in `output_dir`.
+pick up the newest complete one in `output_dir`.
 
 A torchrun run also saves per-rank optimizer shards (single-GPU, DDP and
 `accelerate` FSDP keep HF's own `optimizer.pt`), the schedule, and the step. Resume is **exact**, optimizer
@@ -38,9 +38,18 @@ moments fresh. MoE router-balancing state round-trips automatically where it
 applies.
 
 If the fingerprint matches but restoring the shards fails on some rank (a
-truncated shard or a CUDA OOM, for example), the resume stops on every rank with
-an error naming those ranks. Fix the cause and resume again, or set `allow_optimizer_warm_restart: true`
-to accept fresh optimizer moments.
+truncated shard, a CUDA OOM), or the checkpoint holds the optimizer half of an
+interrupted save, the resume stops on every rank with an error naming the cause.
+Fix it and resume again, or set `allow_optimizer_warm_restart: true` to accept
+fresh optimizer moments.
+
+A save is safe to interrupt. It writes `trainer_state.json` last, so a step
+directory without it never completed. `resume_from_checkpoint: true` skips such a
+directory and moves it into `output_dir/_incomplete_checkpoints/`. Naming one
+explicitly raises, and so does an `output_dir` whose step directories are all
+incomplete; one with no step directory at all starts fresh, with a warning.
+`save_total_limit` rotation never deletes the previous checkpoint before its
+successor is complete.
 
 Every torchrun resume at the default `use_grouped_gemm: true` (dense included),
 and every EP, TP or CP resume, rebuilds the model *from* the checkpoint rather than
@@ -70,7 +79,7 @@ All run as `halo run <tool> <flags>`; each answers `-- --help`.
 | `merge-peft-adapters` | fold a LoRA adapter into its base as one checkpoint |
 | `merge-models` | weight-space combine (linear, SLERP, task-arithmetic, TIES) |
 | `convert-to-bf16` | cast an fp32/mixed checkpoint down for serving |
-| `quantize-to-lowp` | write a block-scaled `compressed-tensors` checkpoint (mxfp8 / mxfp4 / nvfp4) |
+| `quantize-to-lowp` | write block-scaled mxfp8 / mxfp4 / nvfp4 weights: compressed-tensors tensor names plus a toolkit `block_scaled` manifest that serving engines do not load as-is |
 | `unfuse-moe-experts` | rewrite fused MoE expert weights to the per-expert hub layout, for a family whose hub form is per-expert (GLM-4 Lite, Laguna, LFM-2, Qwen3 MoE, Qwen3.5/3.6, DeepSeek-V4, Bailing/Ling, Command A+, GLM-5 Next); refuses the families that store fused |
 | `reset-sinks` | disable the attention-sink mechanism in a GPT-OSS checkpoint |
 | `reattach-vision-tower` | restore the base's vision tower and wrapper layout to a `text_only_model` Qwen3.5/3.6 export, which vLLM loads only in that layout |
@@ -91,17 +100,23 @@ weights without an error; `unfuse-moe-experts` rewrites such a checkpoint first
 ([per-engine loaders](../agent-docs/reference/checkpoints.md#serving-on-vllm--sglang) ↗).
 Step-3.7 Flash needs no rewrite — its gathered save is already in the hub layout
 vLLM reads, and the tool refuses it accordingly. Merge sharded saves first, and
-serve a LoRA run either as base-plus-adapter or merged. Serving *during*
+serve a LoRA run either as base-plus-adapter or merged (EP expert LoRA only
+merged, through `merge_expert_lora_on_save: true`). Serving *during*
 training — the rollout server the RL methods generate against — is
 [Rollout Servers](rollout-servers.md).
 
 ## Uploading to the HuggingFace Hub
 
-Halo wires no Hub upload into the save path. The inherited `push_to_hub` /
-`hub_model_id` `TrainingArguments` fields parse, but the upload they drive
-is unguarded and untested against Halo's overridden gathered/EP save — including
-for sharded and adapter layouts. Upload explicitly instead: a gathered checkpoint
-is a plain HF model directory, so the standard Hub CLI works:
+The inherited `push_to_hub` / `hub_strategy` upload starts only once each
+checkpoint is complete on disk, from global rank 0 (on per-node storage, that
+node's copy). Each push uploads the top level of `output_dir`: the model files
+copied there, plus `log/run.log` and an online or async GRPO run's `completions/`
+prompts. `hub_strategy: checkpoint` or `all_checkpoints` adds the checkpoint's
+training state, and `end` uploads nothing, since no training script pushes after
+training ([what each strategy uploads](../agent-docs/reference/checkpoints.md#interrupted-saves) ↗).
+No end-to-end upload is tested, so to publish a final model, upload the gathered
+checkpoint yourself; it is a plain HF model directory, so the standard Hub CLI
+works:
 
 ```bash
 hf auth login          # once, or set HF_TOKEN

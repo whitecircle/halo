@@ -10,7 +10,7 @@ ZAYA1 8B has 16 routed experts and selects one expert for each token. Halo suppo
 |:---:|:---:|:---:|:---:|:---:|:---:|:---:|:---:|
 | Yes* | Yes* | No | No | Yes* | No | No | Yes |
 
-`*` Gradient checkpointing is unavailable in every mode: FSDP2, EP, and ETP alike. The toolkit clears `ZayaPreTrainedModel.supports_gradient_checkpointing` at load, because recompute through CCA's `nn.Conv1d` pair faults in cuDNN on the CUDA 13.2 image; the launcher then raises rather than failing in the first backward. Halo supports neither CP nor TP here. The convolution-enhanced attention runs a `Conv1d` over the sequence axis and shifts each token's value one step, which breaks a Ulysses split, and it replaces QKV with `q_proj` / `k_proj` / `v_proj_current` / `v_proj_delayed` plus that conv stack, for which no DTensor sharding primitive exists.
+`*` Gradient checkpointing is unavailable in every mode: FSDP2, EP, and ETP alike. The toolkit clears `ZayaPreTrainedModel.supports_gradient_checkpointing` at load, because recompute through CCA's `nn.Conv1d` pair faults in cuDNN on the CUDA 13.2 image, so `gradient_checkpointing_enable` raises rather than failing in the first backward. Halo supports neither CP nor TP here. The convolution-enhanced attention runs a `Conv1d` over the sequence axis and shifts each token's value one step, which breaks a Ulysses split, and it replaces QKV with `q_proj` / `k_proj` / `v_proj_current` / `v_proj_delayed` plus that conv stack, for which no DTensor sharding primitive exists.
 
 ZAYA1 is a native transformers family: hub `main` loads directly, with no
 revision pin and no `trust_remote_code`.
@@ -93,6 +93,9 @@ halo launch sft zaya1-sft.yaml -n 1
 Keep `gradient_checkpointing: false`. The toolkit clears
 `ZayaPreTrainedModel.supports_gradient_checkpointing` at load, so every mode
 raises at `gradient_checkpointing_enable` — FSDP2, EP, and ETP alike.
+
+`packing: true` keeps attention isolated per document, but the CCA convolution
+still mixes across the documents of a packed row.
 
 The shipped equivalents are `examples/sft/zaya/zaya-1-8b-ultrachat.yaml` and, for the EP
 path, `examples/sft/zaya/zaya-1-8b-ultrachat-ep.yaml` (EP8, 16 routed experts → 2 per

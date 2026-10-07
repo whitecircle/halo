@@ -31,8 +31,9 @@ Pull the prebuilt images or build them from source: [Installation](installation.
 Halo picks the backend: FA4 on Blackwell, FA3 on Hopper, FA2 as the fallback,
 SDPA or eager where no Flash kernel serves the family; the padded-batch scripts
 (preference, reward, classification, teacher distillation, GRPO) default to SDPA
-when the YAML sets none, except offline GRPO under CP, which keeps the hardware
-pick. Gemma 4 gets no flash path at all (FA2 caps head_dim at
+when the YAML sets none, except under CP for SMPO and offline GRPO, and on a
+GPT-OSS run that keeps its sinks live (`reset_sinks: false`); those keep the
+hardware pick. Gemma 4 gets no flash path at all (FA2 caps head_dim at
 256 and FA4 overflows tensor memory at its 512-wide global layers); Qwen3.5/3.6
 and GLM-4 MoE Lite fall back from FA4 to SDPA (its backward NaNs at their shapes)
 and keep FA3 on Hopper; GLM-5 Next, Step-3.7 Flash and Inkling fall back to
@@ -86,8 +87,8 @@ the loader reason at construction, rather than failing mid-run.
   families, GPT-OSS, Qwen3 MoE, Qwen3.5/3.6, GLM-4 MoE Lite, Gemma 4, Ling 2.0,
   LFM-2.
 
-`rollout_max_thinking_tokens`, `rollout_thinking_budget_scope: episode` and
-`carry_reasoning` are vLLM-only and refused under SGLang. SGLang must be served
+`rollout_max_thinking_tokens`, `turn_overlong_penalty` and `carry_reasoning`
+are vLLM-only and refused under SGLang. SGLang must be served
 from this repo's image, not upstream. Engine setup, ports, weight sync and
 `routing_replay`: [Rollout Servers](rollout-servers.md).
 
@@ -102,7 +103,7 @@ from this repo's image, not upstream. Engine setup, ports, weight sync and
 | TP | supported | attention and weight sharding; family support varies |
 | ETP | experimental | expert FFN memory, experts replicated |
 | EP+CP · EP+TP | supported for selected families | MoE plus long context / attention sharding |
-| EP+ETP | experimental | MoE expert memory pressure, node-local |
+| EP+ETP | experimental | MoE expert memory pressure; each ETP group stays inside one NVLink domain (across domains, one ETP group per domain) |
 | TP+CP · TP+ETP · ETP+CP · any three axes | unsupported | rejected at config validation |
 | Pipeline parallelism | not yet available | `pipeline_parallel_size > 1` is rejected at config time |
 
@@ -126,11 +127,11 @@ CP wrapper drop CP. What each family is for: [Supported Models](models.md).
 | GLM-4 MoE Lite | Yes | Yes | Yes | Yes | Yes | Yes | Yes | Yes | LoRA-style attention compression |
 | Command A+ (Cohere2 MoE) | Yes | Yes | Yes | Yes | Yes | Yes | Yes | Yes | only EP is validated on the 200B+ checkpoint; the other modes and LoRA pass tiny-model GPU tests. No online RL, on either engine |
 | Laguna S / XS 2.1 | Yes | Yes | No | No | partial | No | No | Yes | native in transformers, but the released checkpoints load through remote code at a pinned revision; `sdpa`, so `padding_free` is rejected and they pack instead; weight sync on vLLM only |
-| Gemma 4 MoE | Yes | Yes | No | No | Yes | No | No | Yes | KV-shared layers block CP/TP; no router-balancing path at all; attention LoRA adapts the language model only — the vision/audio towers' same-named projections are wrappers PEFT cannot adapt and are excluded |
+| Gemma 4 MoE | Yes | Yes | No | No | Yes | No | No | Yes | KV-shared layers block CP/TP; no router-balancing path at all; attention LoRA adapts the language model only — the vision tower's same-named projections are wrappers PEFT cannot adapt and are excluded |
 | Bailing/Ling | Yes | Yes | Yes | No | Yes | partial | No | Yes | EP covers Ling 2.0, Ling 3.0 and the Ring siblings; CP on Ling 2.0 only; no DTensor attention plan. Ling 3.0 and Ring's linear spellings take no online weight update |
 | LFM-2 MoE | Yes | Yes | No | Yes | Yes | No | Yes | Yes | short-conv layers block CP |
 | Mistral4 MoE | Yes | Yes | Yes | Yes | Yes | partial | Yes | Yes | neither engine registers a `mistral4` class, so no online RL |
-| DeepSeek-V4 | Yes | Yes | No | No | untested | No | No | Yes | shared-KV MQA and the sparse-attention compressors block CP/TP; eager-only, so `padding_free` is rejected (packing works but warns). LoRA skips the grouped `o_a_proj`, which no stock adapter fits. No online RL |
+| DeepSeek-V4 | Yes | Yes | No | No | untested | No | No | Yes | shared-KV MQA and the sparse-attention compressors block CP/TP; eager-only; one document per row — `packing` and `padding_free` are refused (the compressors cut KV windows at fixed row indices). LoRA skips the grouped `o_a_proj`, which no stock adapter fits. No online RL |
 | Zaya | Yes | Yes | No | No | Yes | No | No | Yes | EP or ETP, always without gradient checkpointing; CCA blocks CP, its attention class carries no TP plan. No online RL on either engine |
 | Inkling | Yes | Yes | No | No | Yes | No | No | Yes | multimodal MoE; short-conv layers and a relative-logits bias block CP, and its attention class is not TP-shardable. LoRA passes tiny-model GPU tests only. No online RL |
 | GLM-5 Next (GLM-5.3-Flash) | Yes | Yes | No | No | Yes | No | No | Yes | composite VLM; KDA linear attention blocks CP and is not TP-shardable, SDPA only; the fp8 release needs `halo run convert-glm5-bf16` first. No online RL |
@@ -157,7 +158,7 @@ outright, and any `expert_tp_size > 1` additionally rejects adapters on the
 | --- | --- |
 | LoRA | supported, except under TP / EP+TP; expert-projection adapters are also refused once `expert_tensor_parallel_size > 1` |
 | QLoRA | DDP / FSDP / CP only; a MoE model also needs `use_grouped_gemm: false`. Rejected by both online RL methods in every mode |
-| Adapter merge | `halo run merge-peft-adapters` produces a standalone checkpoint |
+| Adapter merge | `halo run merge-peft-adapters` produces a standalone checkpoint; native EP expert LoRA folds at save time instead (`merge_expert_lora_on_save: true`) |
 | FP8 / FP4 MoE QAT and export | experimental; simulated backend for QAT, `quantize-to-lowp` for export |
 | Muon, FlashAdamW | supported optimizer options |
 | HuggingFace / local / `s3://` datasets | supported; offline tokenize-pack-shard via `halo run prepare-dataset` |
@@ -169,8 +170,11 @@ What each mode writes, and which resumes are exact:
 
 ## Limits
 
-- No hosted training UI, no hyperparameter search, no built-in model upload to the Hub
-  (the inherited `push_to_hub` fields parse but are unguarded and untested).
-- Pipeline parallelism is not yet available.
+- No hosted training UI and no hyperparameter search. The inherited `push_to_hub`
+  uploads a checkpoint only once it is complete on disk, along with the top level
+  of `output_dir` (`hub_strategy: end` uploads nothing), but no end-to-end upload
+  is tested; to publish a final model, upload the gathered checkpoint yourself
+  ([Checkpoints](checkpoints.md#uploading-to-the-huggingface-hub)).
+- Pipeline parallelism is not yet available in this release.
 - Advanced model-family support is explicit, not automatic.
 - vLLM and SGLang run outside the training environment, in their own containers.

@@ -34,12 +34,13 @@ and mix by list ([Datasets](../data.md)); the columns, and how each method rende
 them, differ per method.
 
 One parallelism stack. Expert, tensor and expert-tensor parallelism work on every trainer; context
-parallelism supports SFT, SMPO and offline GRPO full fine-tuning, and pipeline parallelism is not available in this
+parallelism supports SFT, SMPO and offline GRPO full fine-tuning, and pipeline parallelism is not yet available in this
 release. The axis sizes are config fields or CLI flags, identical across methods
 ([Parallelism](../parallelism.md)).
 
 HuggingFace in, HuggingFace out. Checkpoints are written in standard form, so `from_pretrained`,
-vLLM and the Hub take them as they are; LoRA runs write an adapter you can merge with one command
+vLLM and the Hub take them as they are; LoRA runs write an adapter you can merge with one command,
+except expert LoRA under EP, which folds at save time instead (`merge_expert_lora_on_save: true`)
 ([Checkpoints & Export](../checkpoints.md)).
 
 The exhaustive per-method reference, with every hyperparameter and every refusal, is the

@@ -107,7 +107,8 @@ Point the in-container steps below at this checkpoint.
 export LFM2_CHECKPOINT=/data/checkpoints/lfm2.5-8b-a1b-ultrachat-ep2
 ```
 
-Each rank owns 16 experts. Halo gathers the fused expert weights when it saves.
+Each rank owns 16 experts. On save Halo gathers them into the per-expert hub layout
+(`experts.{i}.w1/w3/w2`) that vLLM and SGLang read.
 
 LFM2 has no native router auxiliary loss. `moe_balancing: bias_update` corrects expert selection during training.
 
@@ -209,7 +210,7 @@ SGLANG_MODEL="$HALO_SCRATCH/checkpoints/lfm2.5-8b-a1b-ultrachat-ep2" \
   docker compose -f docker-compose.sglang.yml up
 ```
 
-## Train an attention LoRA adapter
+## Train a LoRA adapter
 
 Add this block to the SFT configuration.
 
@@ -228,7 +229,9 @@ learning_rate: 1.0e-04
 output_dir: /data/checkpoints/lfm2.5-8b-a1b-ultrachat-lora
 ```
 
-Keep EP enabled if the base model needs expert sharding. Keep TP disabled for LoRA.
+`out_proj` is also the output projection of every short-convolution block (18 of 24 layers on
+LFM2.5-8B-A1B), so this adapter trains both mixers. Keep EP enabled if the base model needs expert
+sharding. Keep TP disabled for LoRA.
 
 ## Continue with GRPO
 

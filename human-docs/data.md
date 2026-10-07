@@ -65,12 +65,14 @@ to the Hub or S3. Five flags decide whether the output is usable:
   your data-parallel size.
 - `--pack-sequences` turns packing on; without it the rows are tokenized and
   sharded one document each.
-- `--packing-strategy` then decides what happens to a document longer than
-  `--max-length`. The default `bfd` packs best-fit-decreasing and **discards**
-  the overflow; `bfd_split` carries the overflow into later examples and is the
-  lossless choice for pre-training; `wrapped` concatenates and chunks across
-  document boundaries, keeping every token but losing the boundaries the
-  collator needs to reset attention.
+- In `--mode text`, `--packing-strategy` then decides what happens to a
+  document longer than `--max-length`. The default `bfd` packs
+  best-fit-decreasing and **discards** the overflow; `bfd_split` carries the
+  overflow into later examples and is the lossless choice for pre-training;
+  `wrapped` concatenates and chunks across document boundaries, keeping every
+  token but losing the boundaries the collator needs to reset attention. In
+  `--mode chat` a conversation over `--max-length` is dropped, whatever the
+  strategy.
 - `--max-length` is stamped into the dataset metadata and must **equal** the
   training config's `max_length`. A mismatch either way raises at load, since
   rows are baked at prep time and never re-truncated.

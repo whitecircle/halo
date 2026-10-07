@@ -38,7 +38,7 @@ whose big disk lives elsewhere and every `make` target mounts and caches there.
 | `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` / `AWS_DEFAULT_REGION` | `s3://` datasets and checkpoints (mounting `~/.aws` works too) |
 | `OPENAI_API_KEY` / `OPENROUTER_API_KEY` | the external-LLM judge and generation scripts |
 | `SERPER_API_KEY` / `TAVILY_API_KEY` / `BRAVE_API_KEY` | the matching web-search backend in the search RL environments (`duckduckgo` needs none) |
-| `VLLM_API_KEY` | the playground and generation scripts dialing an authenticated vLLM endpoint; falls back to `OPENAI_API_KEY`, then to the `EMPTY` placeholder a keyless local server accepts |
+| `VLLM_API_KEY` | the `scripts/inference/` and `scripts/environments/` CLIs dialing an authenticated rollout server (vLLM or SGLang); falls back to `OPENAI_API_KEY`, then to the `EMPTY` placeholder a keyless local server accepts |
 
 ## Logging and run identity
 
@@ -57,7 +57,7 @@ whose big disk lives elsewhere and every `make` target mounts and caches there.
 | `DIST_SHARED_FILESYSTEM` | `1` | umbrella for the two below; set `0` when nodes have per-node local disk instead of shared NFS/Lustre |
 | `DIST_INPUT_SHARED_FILESYSTEM` | the umbrella | read side — model/dataset downloads, dataset map/pack, HF caches |
 | `DIST_OUTPUT_SHARED_FILESYSTEM` | the umbrella | write side — checkpoints, `run.log`, dumped artifacts |
-| `DIST_STORE_TIMEOUT_HOURS` | `4` | raise when one rank's model download or corpus pack runs longer than four hours while the others wait; this is not the NCCL watchdog |
+| `DIST_STORE_TIMEOUT_HOURS` | `4` | raise when one rank's download, dataset map or pack, or queued model load runs longer than four hours while the others wait; this is not the NCCL watchdog |
 | `DIST_NCCL_TIMEOUT_MINUTES` | `30` | raise when 100B-scale gathered checkpoint saves or large cross-node all-to-alls outlast the NCCL watchdog |
 | `NVLINK_DOMAIN_SIZE` | GPUs per node | `72` on an NVL72 rack, whose NVLink domain spans the rack |
 | `NCCL_SOCKET_IFNAME` | `^docker,veth` in the compose bases, `make test-gpu-vllm`/`-sglang` and the no-fabric GRPO recipe; `^lo,docker,veth,tailscale` under `EFA=1` and the EFA overlays; otherwise unset | pin NCCL to the fast NIC on multi-homed nodes |
@@ -88,7 +88,7 @@ crashing mid-run. These are the ones that come up:
 | `HALO_DEEPGEMM_NATIVE` | `0` | native DeepGEMM low-precision kernels — net-slower at the MoE shapes benchmarked here |
 | `HALO_FUSED_GLU` | `1` | `0` runs every GLU combine (experts and dense MLPs) eager instead of the fused Triton kernels — the switch when a GLU kernel fails to compile or launch on your GPU |
 | `HALO_FLEX_SLIDING` | `1` | `0` builds Gemma 4 on plain SDPA instead of FlexAttention on its sliding layers — the switch when that kernel fails on your GPU, or to run `full_determinism` on more than one GPU |
-| `HALO_SANDBOX_BACKEND` / `HALO_SANDBOX_URL` | `local` / unset | code-execution sandbox for RL environments: `local`, `bubblewrap`, or `remote` |
+| `HALO_SANDBOX_BACKEND` / `HALO_SANDBOX_URL` | `local` / unset | code-execution sandbox for RL environments: `local`, `bubblewrap`, or `remote`. `local` does not confine the program; `bubblewrap` needs root and extra container rights ([Async GRPO](training-methods/async-grpo-environments.md#the-environments)) |
 | `HALO_ALLOW_MISSING_CHECKPOINT_KEYS` | `0` | demote the missing-checkpoint-key error to a warning; only for deliberately partial checkpoints |
 | `CUDA_DEVICE_MAX_CONNECTIONS` | `1`, baked into both images | driver-owned, latched at `deep_ep`'s `cuInit` — a Python write is too late; `1` keeps the supported multi-group EP shapes from deadlocking the DeepEP combine against FSDP2's NCCL, at no measurable throughput cost |
 

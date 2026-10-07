@@ -105,7 +105,7 @@ halo launch sft mistral4-sft.yaml -n 8
 
 Bias-update balancing changes expert selection without adding an auxiliary loss. Mistral 4 needs the `_transient` spelling: the router has no exportable bias slot, so the bias balances training-time routing only and every exported checkpoint serves without it (near-tied top-k picks can flip vs training). Plain `bias_update` raises. Halo gathers the expert weights when it saves because `save_sharded_ep` is false.
 
-Keep `flash_attention_2` — it is what the shipped config pins and what this recipe was validated with.
+Keep `flash_attention_2`, the attention the shipped config pins.
 
 ## Add CP, TP, or ETP
 

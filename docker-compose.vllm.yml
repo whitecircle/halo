@@ -46,11 +46,13 @@ services:
             - driver: nvidia
               count: all
               capabilities: [gpu]
-    # `vllm serve` args. Three are load-bearing and silent when wrong: --moe-backend triton (the auto
-    # Blackwell backends repack expert weights, so a synced write corrupts the experts),
-    # --return-tokens-as-token-ids (train_on_sampled_tokens recovers the sampled ids) and
-    # --logprobs-mode processed_logprobs (the IS ratio divides by them; raw_logprobs are
-    # pre-temperature). Parsers, prefix caching, chat template: agent-docs/infrastructure/rollout-servers.md
+    # `vllm serve` args. Three are load-bearing: --moe-backend triton (the auto Blackwell backends
+    # repack expert weights, so a synced write silently corrupts the experts),
+    # --return-tokens-as-token-ids (train_on_sampled_tokens recovers the sampled ids; without them each
+    # trajectory falls back to re-tokenization, with one warning) and --logprobs-mode processed_logprobs
+    # (the IS ratio divides by them; raw_logprobs are pre-temperature, which the trainer's startup probe
+    # refuses at a sampling temperature other than 1). Parsers, prefix caching, chat template:
+    # agent-docs/infrastructure/rollout-servers.md
     # VLLM_TOOL_CALLING_FLAGS set to empty drops tool calling (the ReAct recipes); unset keeps it on.
     command: >
       ${VLLM_MODEL:-Qwen/Qwen3-0.6B}

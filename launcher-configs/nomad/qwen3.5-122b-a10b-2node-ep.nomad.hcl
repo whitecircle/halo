@@ -1,6 +1,7 @@
 # Qwen3.5-122B-A10B — two-node topology: node-local EP=8 within each client, data-parallel across the
 # pair. Experts stay on NVLink inside a node, so only the DP gradient sync crosses the fabric — no
 # cross-node all-to-all, no GIN, no gdrdrv. EP size and scope come from the training config.
+# Cross-node NCCL needs the RDMA device in the container — agent-docs/infrastructure/nomad.md#rdma-fabric.
 # Submit: nomad job run launcher-configs/nomad/qwen3.5-122b-a10b-2node-ep.nomad.hcl
 # Creds:  nomad var put nomad/jobs/halo-qwen35-122b-ep WANDB_API_KEY=... HF_TOKEN=...
 #
@@ -12,7 +13,7 @@
 variable "image" {
   type        = string
   default     = "public.ecr.aws/whitecircle/halo:blackwell"
-  description = "Halo training image. Use halo:hopper on H100/H200 clients."
+  description = "Halo training image. Node-local EP=8 at 122B needs Blackwell memory (B200/B300); this spec has no Hopper layout."
 }
 
 variable "scratch_host_path" {
@@ -116,7 +117,8 @@ locals {
     HALO_DATA_ROOT    = var.scratch_host_path
 
     DIST_SHARED_FILESYSTEM = var.shared_filesystem
-    # A 122B load across two nodes outruns the default collective timeout.
+    # Headroom for the gathered save: the non-writing ranks wait in its per-layer expert gathers while
+    # the save rank streams the 122B checkpoint to disk.
     DIST_NCCL_TIMEOUT_MINUTES = "60"
   }
 
@@ -151,8 +153,8 @@ job "halo-qwen35-122b-ep" {
     # Let the service registration drain before the alloc disappears.
     shutdown_delay = "5s"
 
-    # A training run that dies has consumed its GPUs and its dataset position; restarting it silently
-    # from step 0 wastes the node. Fail the alloc and leave it dead for an operator to look at.
+    # A restart re-runs the same command without resume_from_checkpoint: from step 0 before the first
+    # checkpoint, and into the non-empty output_dir check after it. Fail the alloc and leave it dead.
     restart {
       attempts = 0
       mode     = "fail"

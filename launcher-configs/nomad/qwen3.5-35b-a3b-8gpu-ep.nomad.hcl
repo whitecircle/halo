@@ -43,8 +43,8 @@ job "halo-qwen35-35b-ep" {
   group "train" {
     count = 1
 
-    # A training run that dies has consumed its GPUs and its dataset position; restarting it silently
-    # from step 0 wastes the node. Fail the alloc and leave it dead for an operator to look at.
+    # A restart re-runs the same command without resume_from_checkpoint: from step 0 before the first
+    # checkpoint, and into the non-empty output_dir check after it. Fail the alloc and leave it dead.
     restart {
       attempts = 0
       mode     = "fail"

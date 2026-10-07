@@ -29,7 +29,8 @@ prompt are two groups and are normalized separately.
 ```
 
 A mismatch between `completions` and `rewards` raises with the row index, and a non-finite reward raises with the
-group. If you don't have such a dataset yet, `halo run rm-rejection-sampling --output_format offline_grpo`
+group. The method is decoder-only and text-only: an encoder-decoder model is refused at construction, and so are image
+columns and image parts in the messages. If you don't have such a dataset yet, `halo run rm-rejection-sampling --output_format offline_grpo`
 generates candidates against a served model, scores them with a reward model and writes exactly this shape.
 
 ## Config
@@ -72,7 +73,9 @@ gradient_accumulation_steps: 8
 
 `max_completion_length` defaults to `null` and keeps every token; `max_prompt_length` defaults to
 `512`, so set it to `null` when you want prompts untouched. Add `use_chunked_grpo_logprobs: true` on a large-vocabulary
-model with long completions; it computes the same log-probs without materializing full logits.
+model with long completions; it computes the same log-probs in fp32 without materializing full logits. On a bf16 or
+fp16 full fine-tune with `kl_beta > 0` outside CP, keep the setting fixed across a resume: the saved reference
+scores record their precision, and a resume that toggles it is refused.
 
 ## Run
 
@@ -97,7 +100,7 @@ advantage-weighted policy term (π·A under the default `prob_weighted`), not th
 | Symptom | Cause | Fix |
 | --- | --- | --- |
 | Loss goes NaN or explodes | Low-probability tokens on negative-advantage rows | `initial_min_log_prob: -0.5` for a tighter floor early, `max_grad_norm: 1.0` |
-| Rewards fall through training | The policy drifted away from the distribution the data was collected under | `kl_beta: 0.05`, lower the learning rate |
+| `positive/pg_objective_mean` falls through training | The policy drifted away from the distribution the data was collected under | `kl_beta: 0.05`, lower the learning rate |
 | OOM | Full-vocabulary logits over long completions | `use_chunked_grpo_logprobs: true`, lower the batch or `max_completion_length` |
 
 Two mistakes are common. The first is splitting one prompt's completions across rows, which silently turns every
