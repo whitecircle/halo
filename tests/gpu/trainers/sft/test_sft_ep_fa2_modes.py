@@ -69,7 +69,8 @@ NUM_EVAL_SAMPLES = 8
 SEED = 42
 ATTN_IMPL = "flash_attention_2"
 
-# Expert projections are EP-sharded across ranks, so LoRA on them breaks grad sync.
+# Stock PEFT cannot wrap the grouped EP expert tensors; expert adapters take native EP expert LoRA
+# (tests/gpu/trainers/lora/test_lora_ep_experts.py).
 LORA_TARGET_MODULES = ["q_proj", "v_proj"]
 
 

@@ -8,13 +8,13 @@ logged losses are finite; no loss is compared against a reference.
 
 Test Setup:
 - Model: Qwen/Qwen3-VL-2B-Instruct (VLM with text+vision capabilities)
-- Parallelism: Standard DDP (no EP/CP/TP)
+- Parallelism: the mixin's FSDP2 data parallelism (no EP/CP/TP)
 - Dataset: the shared synthetic math SFT set, text-only (no images), 30% multi-turn
 
 Test Phases:
 1. Load VLM model via AutoModelForImageTextToText + AutoProcessor
 2. Create synthetic text-only dataset with chat-templated conversations
-3. Train for 5 steps with gradient checkpointing and Liger kernels
+3. Train for 5 steps with gradient checkpointing (Liger off)
 4. Validate: training completes, loss is finite
 
 Run with 2 GPUs:
@@ -102,7 +102,7 @@ def run(ctx):
         parallelism_config=parallelism_config,
     )
     log(f"  Trainer created: {type(trainer).__name__}")
-    log(f"  Parallelism: {parallelism_config.mode_string or 'Standard DDP'}")
+    log(f"  Parallelism: {parallelism_config.mode_string or 'dp'}")
 
     log("\n[5/5] Training...")
     train_result = trainer.train()

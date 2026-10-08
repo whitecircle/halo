@@ -16,13 +16,13 @@ The registries behind the matrix: EP wrappers under `src/distributed/expert_para
 | [Qwen3.5 / Qwen3.6 MoE](qwen3_5.md) | Yes | **No** ¹ | Yes | Yes | **No** | Yes | Yes | `examples/sft/qwen3_5/*` |
 | [GPT-OSS](gpt-oss.md) | Yes | Yes | Yes | Yes | Yes ⁶ | Yes | Yes | `examples/sft/gptoss/*` |
 | [GLM-4 MoE Lite](glm4.md) | Yes | Yes | Yes ² | Yes | Yes ⁶ | Yes | Yes | `examples/sft/glm4/*` |
-| [Laguna S / XS 2.1](laguna.md) | Yes | **No** | **No** | partial ¹³ | **No** | **No** | Yes | `examples/sft/laguna/*` |
+| [Laguna S / XS 2.1](laguna.md) | Yes | **No** | **No** | Yes | **No** | **No** | Yes | `examples/sft/laguna/*` |
 | [Inkling-Small](inkling.md) | Yes | **No** | **No** | Yes | **No** | **No** | Yes ¹² | `examples/sft/inkling/*` |
 | [Gemma 4 MoE](gemma4.md) | Yes | **No** | **No** | Yes | **No** | **No** | Yes | `examples/sft/gemma4/*` |
 | [Bailing MoE / Ling](bailing.md) | Yes | Yes ³ | **No** ³ | Yes | partial ⁶ ¹³ | **No** | Yes | `examples/sft/ling_mini_2/*` |
 | [LFM-2 MoE](lfm2.md) | Yes | **No** | Yes | Yes | **No** | Yes | Yes | `examples/sft/lfm2/*` |
 | [Mistral4 MoE](mistral4.md) | Yes | Yes | Yes | Yes | partial ⁶ ¹³ | Yes | Yes | `examples/sft/mistral4/*` |
-| [DeepSeek-V4](deepseek-v4.md) | Yes | **No** ⁸ | **No** ⁸ | untested | **No** | **No** | Yes | `examples/sft/deepseek_v4/*` |
+| [DeepSeek-V4](deepseek-v4.md) | Yes | **No** ⁸ | **No** ⁸ | Yes | **No** | **No** | Yes | `examples/sft/deepseek_v4/*` |
 | [Zaya (Zyphra/ZAYA1)](zaya.md) | Yes ⁴ | **No** ⁴ | **No** ⁴ | Yes | **No** | **No** | Yes | `examples/sft/zaya/*` |
 | [Cohere2 MoE (Command A+)](cohere2-moe.md) | Yes | Yes ⁹ | Yes ⁹ | Yes ⁹ | Yes ⁶ ⁹ | Yes ⁹ | Yes ¹² | `examples/sft/cohere2_moe/*` |
 | [GLM-5 Next (GLM-5.3-Flash)](glm5-next.md) | Yes | **No** ¹⁰ | **No** ¹⁰ | Yes | **No** | **No** | Yes | `examples/sft/glm5_next/*` |
@@ -57,7 +57,7 @@ Trainer × parallelism support is tracked in [Trainer Compatibility](../referenc
 
 ¹² Tiny-model LoRA verified: `tests/gpu/trainers/lora/test_lora_merged_save_resume_families.py` trains expert and mixed adapters at ep2, ep1 and ep2+cp2 (Inkling's CP row checks the refusal) through a merged save and an exact resume. No full-scale LoRA run.
 
-¹³ A tiny-model LoRA row is the only GPU test of the shape: Laguna pure ETP in `tests/gpu/trainers/lora/test_lora_weight_sync_exact_families.py` (`--mode etp2 --adapters peft`), Ling 2.0 and Mistral4 EP+CP in `test_lora_merged_save_resume_families.py` (`--cp-size 2`, ep2+cp2). Validate a short run first.
+¹³ A tiny-model LoRA row is the only GPU test of the shape: Ling 2.0 and Mistral4 EP+CP in `tests/gpu/trainers/lora/test_lora_merged_save_resume_families.py` (`--cp-size 2`, ep2+cp2). Validate a short run first.
 
 ## MoE knobs
 

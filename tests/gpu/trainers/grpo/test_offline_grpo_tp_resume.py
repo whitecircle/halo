@@ -210,7 +210,7 @@ def phase2_resume_and_train(
         # Resolve the weights source via the SAME production helper the training scripts use: EP skips the
         # loader's weight reload, so the trained weights must come from the checkpoint at construction (else
         # the model silently carries BASE weights and the by-value check passes only because few steps barely
-        # moved them). TP returns base and the loader reloads the checkpoint.
+        # moved them). TP gets the checkpoint dir too (``is_tp_mode``), and the TP loader skips its re-read.
         weights_source = resolve_resume_weights_source(
             checkpoint_path, SimpleNamespace(model_name_or_path=MODEL_NAME), parallelism_config
         )

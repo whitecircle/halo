@@ -22,8 +22,8 @@ silent when they break:
     replicas to disagree, and a dropped reduce-scatter would have every rank corrupt its own unique
     shard and still read back the same concatenation. What is pinned instead is the GRADIENT: the
     tensor FSDP2 produces must equal the DP average of the per-rank gradients, recomputed on an
-    unsharded replica of the same weights. The negative control turns the sync off for real with
-    ``set_requires_gradient_sync(False)`` and requires the same comparison to fail.
+    unsharded replica of the same weights. The negative control is the replica's own un-reduced
+    gradient, what a dropped reduce-scatter would leave, and requires the same comparison to fail.
 
 The reference and its controls only mean something if the KL baseline is non-degenerate, so the
 policy and the reference model are built from DIFFERENT seeds (a reference equal to the policy makes

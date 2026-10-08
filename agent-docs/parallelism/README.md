@@ -178,7 +178,7 @@ pooling and dual models are the reasons behind them, not properties CP itself de
 
 ⁶ LFM-2 — CP blocked by the sequence-axis short-conv layers in the hybrid stack (no Ulysses wrapper); see [lfm2.md](../models/lfm2.md).
 
-⁷ Laguna — `LagunaAttention` is in neither the Ulysses nor the TP registry, so CP and TP both raise; ETP is mechanically reachable, and its only GPU test is a tiny-model LoRA row (`test_lora_weight_sync_exact_families.py`, etp2). See [laguna.md](../models/laguna.md).
+⁷ Laguna — `LagunaAttention` is in neither the Ulysses nor the TP registry, so CP and TP both raise; pure ETP and EP+ETP train, save and resume on the tiny model (the precompute-resume suites). See [laguna.md](../models/laguna.md).
 
 ⁸ Inkling — CP blocked by the sequence-axis short convolutions, TP by the RoPE-free relative-logits attention. See [inkling.md](../models/inkling.md).
 

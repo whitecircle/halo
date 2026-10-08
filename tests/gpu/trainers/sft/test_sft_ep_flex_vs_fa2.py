@@ -14,7 +14,7 @@ Run each mode separately (DeepEP buffer cleanup requires separate processes):
         tests/gpu/trainers/sft/test_sft_ep_flex_vs_fa2.py --mode=flex
 
     torchrun --nproc_per_node=2 \
-        tests/gpu/trainers/sft/test_sft_ep_flex_vs_fa2.py --mode=fa2
+        tests/gpu/trainers/sft/test_sft_ep_flex_vs_fa2.py --mode=fa2 --reset_sinks
 
 Requirements:
     - 2x GPUs with >=80GB memory each

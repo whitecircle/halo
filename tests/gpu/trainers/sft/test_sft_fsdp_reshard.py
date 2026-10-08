@@ -1,6 +1,6 @@
 #!/usr/bin/env python
 """
-FULL_SHARD (ZeRO-3) vs SHARD_GRAD_OP (ZeRO-2) equivalence across the EP=1 paths.
+FULL_SHARD (ZeRO-3) vs SHARD_GRAD_OP (ZeRO-2) equivalence on a dense model (pure DP and CP).
 
 ``fsdp_reshard_after_forward`` selects FSDP2's resharding mode: False (default) =
 SHARD_GRAD_OP (params stay unsharded between forward and backward), True =
@@ -13,7 +13,7 @@ then ON and checks, per mode:
   * both runs produce finite, decreasing loss;
   * the FULL_SHARD loss curve matches the SHARD_GRAD_OP curve within tolerance.
 
-Modes (the EP=1 paths the config guard permits FULL_SHARD on). TP *with* DP is excluded:
+Modes (dense paths the config guard permits FULL_SHARD on). TP *with* DP is excluded:
 FSDP2's backward re-gather of the TP-sharded DTensor params has no registered all-gather
 strategy, so ParallelismConfig rejects TP+DP+FULL_SHARD (covered by
 test_reshard_rejects_tp_with_dp in tests/cpu/parallelism/test_parallelism_config.py). Pure TP (dp=1) has

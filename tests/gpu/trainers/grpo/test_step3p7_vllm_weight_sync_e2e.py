@@ -59,7 +59,7 @@ from src.distributed.parallelism_config import ParallelismConfig
 from src.env import env_str
 from src.trainers.grpo.rollout.weight_sync import sync_weights_to_client, validate_weight_sync_support
 from src.trainers.mixins.ep_introspection import named_ep_layers
-from tests.common.harness import gpu_test_main
+from tests.common.harness import gpu_test_main, skip_unless_local_checkpoint
 from tests.common.utils import log, max_or_nan
 from tests.common.weight_sync import weight_transfer_port
 
@@ -269,7 +269,6 @@ def _weight_groups(model) -> dict[str, list[torch.Tensor]]:
 def run(ctx) -> dict:
     checks: dict[str, bool] = {}
     metrics: dict[str, float] = {}
-    assert CHECKPOINT, "HALO_TEST_STEP3P7_MODEL must name the served checkpoint (--write-checkpoint)"
     model_id = _served_model_id()
     log(f"server {VLLM_SERVER_URL} serves {model_id}; trainer loads {CHECKPOINT}")
 
@@ -339,4 +338,5 @@ if __name__ == "__main__":
     if args.write_checkpoint is not None:
         write_checkpoint(args.write_checkpoint)
         sys.exit(0)
+    skip_unless_local_checkpoint(CHECKPOINT or "", "HALO_TEST_STEP3P7_MODEL")
     main()

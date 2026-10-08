@@ -131,7 +131,7 @@ TRAINER_CUDA_DEVICES ?= 0,1,2,3,4,5,6
 #   dense: Qwen/Qwen3-0.6B on either engine (VLLM_MODEL / SGLANG_MODEL)
 #   MoE:   SERVER_TIER='moe and not gptoss' with VLLM_MODEL=Qwen/Qwen3-30B-A3B-Instruct-2507, and
 #          SERVER_TIER='moe and gptoss' with VLLM_MODEL / SGLANG_MODEL=unsloth/gpt-oss-20b-BF16
-#   The Step-3.7 sync suite serves its own checkpoint (see its script header).
+#   The Step-3.7 sync suite serves its own checkpoint (see its script header) and skips without HALO_TEST_STEP3P7_MODEL.
 SERVER_TIER ?= not moe
 # The trainer↔server weight-transfer group is NCCL between two containers. Without EFA=1 both ends
 # use the socket recipe the compose bases default to (InfiniBand off, socket net; NCCL_SOCKET_IFNAME

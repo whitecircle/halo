@@ -12,7 +12,7 @@ The same recipe supports [Laguna XS 2.1](https://huggingface.co/poolside/Laguna-
 
 Halo supports Laguna's sigmoid router, correction bias, shared expert, fused expert weights, and standard Hugging Face checkpoint layout.
 
-ETP is mechanically reachable — the experts use the shared fused-GLU storage, so the generic sharding path handles `expert_tensor_parallel_size > 1` — but on Laguna its only GPU test is a tiny-model LoRA row at ETP2. Nothing rejects it; it is a validation gap, not a limit.
+ETP works through the shared fused-GLU storage: pure ETP and EP+ETP train, save and resume on a tiny Laguna in the GPU suite. The released checkpoints have not been run under ETP.
 
 ## Select a checkpoint
 
@@ -122,8 +122,8 @@ The shipped equivalent is `examples/sft/laguna/laguna-xs-2.1-ultrachat.yaml`.
 
 ## Use ETP
 
-Pure ETP shards each expert instead of distributing whole experts. On Laguna only a
-tiny-model LoRA row tests it — validate a short run before committing to it.
+Pure ETP shards each expert instead of distributing whole experts. The GPU suite runs it on a
+tiny Laguna only — validate a short run at full size before committing to it.
 
 ```yaml
 expert_parallel_size: 1

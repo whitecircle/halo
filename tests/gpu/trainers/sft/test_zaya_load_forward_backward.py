@@ -16,9 +16,9 @@ What this validates:
   5. Gradient checkpointing is REFUSED (``apply_zaya_patches`` clears
      ``supports_gradient_checkpointing``: the recompute faults in cuDNN on the CCA Conv1d pair).
 
-Each stage builds on the one before, so a failed stage ends the run with the checks so far. Plain
-DDP / FSDP / EP / TP / CP wrappers are exercised by separate tests; this one isolates the modeling +
-patch path.
+Each stage builds on the one before, so a failed stage ends the run with the checks so far. FSDP2
+(``test_zaya_fsdp.py``) and EP (``tests/gpu/parallelism/ep/test_zaya_ep*.py``) are exercised by
+separate tests; this one isolates the modeling + patch path.
 
 Memory budget (B300, 288 GB HBM):
   weights bf16: ~17 GB

@@ -1,7 +1,7 @@
 #!/usr/bin/env python
 """SFT smoke of inclusionAI/Ring-mini-linear-2.0 under FSDP and EP, and an EP overfit run.
 
-Modes, one per launch: ``fsdp`` (every expert on every GPU), ``ep`` (EP=2, grouped GEMM auto-enabled
+Modes, one per launch: ``fsdp`` (experts FSDP-sharded at ep_size 1), ``ep`` (EP=2, grouped GEMM auto-enabled
 on SM90+), ``ep_no_gmm`` (EP=2 on the per-expert loop), and ``overfit`` (EP=2, 4 samples for 40 steps,
 which must reach a peak logged token accuracy of 99%). Each checks, on the model, that its shape took
 effect, then that every step ran with finite losses, grad norms and final eval loss.

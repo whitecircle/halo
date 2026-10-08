@@ -86,7 +86,7 @@ ARGS, _ = parser.parse_known_args()
 
 SAVE_AT_STEP = 2
 TOTAL_STEPS = 4
-LEARNING_RATE = 1e-3  # large, so three steps move the adapters well clear of every tolerance below
+LEARNING_RATE = 1e-3  # large, so the steps before the save move the adapters well clear of every tolerance below
 MAX_PROMPT_LENGTH = 512
 MAX_COMPLETION_LENGTH = 512
 NUM_TRAIN_SAMPLES = 32
@@ -424,7 +424,7 @@ def run(ctx) -> dict:
     live: dict = {}
     ctx.on_teardown(lambda: _release(live))
 
-    # Phase 1: train 3 steps, checkpoint at step 2
+    # Phase 1: train 4 steps, checkpoint at step 2
 
     log(f"\n--- Phase 1 ({mode}): train {TOTAL_STEPS} steps, save at {SAVE_AT_STEP} ---")
     pc = parallelism_config_for(mode, ctx.world_size)

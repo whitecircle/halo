@@ -53,9 +53,10 @@ class _Tolerances:
     # save→load round-trip at bf16 ULP scale.
     weight_atol: float = 1e-6
     # A resume that restores the saved state and replays the uninterrupted run exactly: nothing is reset
-    # between the runs, the bf16 optimizer keys its rounding by step and parameter position, and an EP run
-    # pins deterministic dispatch. Every compared loss and final tensor measured bit-exact; 1e-4 is kernel
-    # headroom, under the 1.2e-4 first-step miss of adapters restarted from init.
+    # between the runs, the bf16 optimizer keys its rounding by step and parameter position, and the run is
+    # deterministic (``full_determinism``, or pinned DeepEP dispatch where only the dispatch reorders
+    # sums). Every compared loss and final tensor measured bit-exact; 1e-4 is kernel headroom, under the
+    # 1.2e-4 first-step miss of adapters restarted from init.
     replayed_resume_loss_abs: float = 1e-4
     # The same comparison on the final trainable tensors, as a relative L2; a restart misses by ~1.
     replayed_resume_weight_rtol: float = 1e-4

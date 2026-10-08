@@ -1,10 +1,11 @@
 #!/usr/bin/env python
 """SFT smoke of Qwen3.5-35B-A3B under each parallel shape, one ``--mode`` per launch.
 
-Modes: ``ep`` (EP=2, grouped GEMM auto-enabled on SM90+), ``ep_no_gmm`` (EP=2 on the per-expert loop),
-``tp`` (TP=2 on the full-attention layers) and ``etp`` (the MoE FFN weights split 2-way). Each checks,
-on the model, that its axis took effect, then that every step ran with finite losses, grad norms and
-final eval loss.
+Modes: ``ep`` (EP=2, grouped GEMM auto-enabled on SM90+), ``ep_no_gmm`` (EP=2 on the per-expert loop)
+and ``etp`` (the MoE FFN weights split 2-way). Each checks, on the model, that its axis took effect, then
+that every step ran with finite losses, grad norms and final eval loss. Attention TP leaves every expert
+replicated with no data-parallel axis to shard them over, which two GPUs cannot hold at this size; the
+tiny-model precompute-resume sweep runs Qwen3.5 under TP.
 
 Qwen3.5-35B-A3B interleaves 30 linear-attention (GatedDeltaNet) and 10 full-attention layers, every one
 with a 256-expert top-8 MoE MLP. FA2 crashes on its M-RoPE varlen path (cudaErrorIllegalAddress), so it
@@ -36,7 +37,6 @@ SUITE = SFTSuite(
 MODES = {
     "ep": SFTMode({"ep_size": 2}),
     "ep_no_gmm": SFTMode({"ep_size": 2, "use_grouped_gemm": False}),
-    "tp": SFTMode({"tp_size": 2}),
     "etp": SFTMode({"ep_size": 1, "expert_tp_size": 2}),
 }
 

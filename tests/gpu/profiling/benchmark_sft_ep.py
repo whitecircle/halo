@@ -448,7 +448,8 @@ def main() -> int:
             save_strategy="no",
             report_to="none",
             logging_nan_inf_filter=False,
-            max_length=args.seq,
+            # TRL refuses a max_length it cannot enforce under padding_free; the rows are built at --seq.
+            max_length=None if args.padding_free else args.seq,
             padding_free=args.padding_free,
             packing=args.packing,
             dataloader_drop_last=True,

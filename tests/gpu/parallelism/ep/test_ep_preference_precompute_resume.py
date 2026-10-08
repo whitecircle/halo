@@ -12,12 +12,14 @@ Run: torchrun --nproc_per_node=2 tests/gpu/parallelism/ep/test_ep_preference_pre
 """
 
 from tests.common.harness import gpu_test_main
-from tests.common.preference_precompute_e2e import DENSE, WORLD_SIZE, precompute_resume_parser, run_precompute_resume
+from tests.common.preference_precompute_e2e import DENSE, precompute_resume_parser, run_precompute_resume, world_size
 
 ARGS = precompute_resume_parser((DENSE, "qwen3_moe")).parse_args()
 
 
-@gpu_test_main(exact_world_size=WORLD_SIZE, prefix=f"pref_precompute_resume_{ARGS.trainer}_{ARGS.family}_{ARGS.mode}")
+@gpu_test_main(
+    exact_world_size=world_size(ARGS.mode), prefix=f"pref_precompute_resume_{ARGS.trainer}_{ARGS.family}_{ARGS.mode}"
+)
 def run(ctx):
     return run_precompute_resume(
         ctx, trainer=ARGS.trainer, family=ARGS.family, mode=ARGS.mode, peft=ARGS.peft, kto_loss=ARGS.kto_loss

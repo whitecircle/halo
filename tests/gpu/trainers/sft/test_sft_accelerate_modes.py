@@ -4,7 +4,7 @@ SFT Trainer test for accelerate launch configurations and torchrun standard DP.
 
 Smoke test of DistributedSFTTrainer under different launch methods and data parallel strategies:
 
-1. torchrun (FSDP NO_SHARD): standard DP via mixin, safe checkpoints
+1. torchrun (FSDP2 SHARD_GRAD_OP): standard DP via mixin, safe checkpoints
 2. accelerate MULTI_GPU (DDP): accelerate manages DDP wrapping
 3. accelerate FSDP2 SHARD_GRAD_OP: accelerate manages FSDP v2 (fully_shard)
 4. accelerate FSDP2 FULL_SHARD: accelerate manages FSDP v2 with resharding
@@ -14,7 +14,7 @@ and eval losses and a lower last-step loss than first, and that ``save_model`` w
 and weight files (rank 0). No loss is compared against a reference and the saved checkpoint is not
 reloaded.
 
-Run with torchrun (tests FSDP NO_SHARD path):
+Run with torchrun (tests the mixin's FSDP2 SHARD_GRAD_OP path):
     torchrun --nproc_per_node=2 \
         tests/gpu/trainers/sft/test_sft_accelerate_modes.py
 
@@ -68,7 +68,7 @@ def detect_launch_mode() -> str:
     elif is_accelerate_launch():
         return "accelerate_ddp"
     else:
-        return "torchrun_fsdp_no_shard"
+        return "torchrun_fsdp2_shard_grad_op"
 
 
 @gpu_test_main(min_world_size=1, prefix="test_sft_accel")

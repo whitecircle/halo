@@ -1,11 +1,12 @@
 #!/usr/bin/env python
 """
-Gemma4 VLM smoke test: SFT forward + backward with real images, EP enabled.
+Gemma4 VLM smoke test: one forward + backward with image inputs on the bare EP model (no trainer,
+no FSDP, no optimizer step).
 
 Mirrors test_sft_gemma4_moe.py but feeds image+text inputs through the
 processor instead of pure text. This exercises the vision encoder path
 alongside the EPGemma4MoELayer expert wrapping to confirm the two
-components coexist correctly under FSDP+EP.
+components coexist correctly under EP.
 
 Usage:
     torchrun --nproc_per_node=2 \\

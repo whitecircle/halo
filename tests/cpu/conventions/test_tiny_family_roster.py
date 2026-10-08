@@ -18,23 +18,28 @@ import pytest
 
 import src.distributed.expert_parallel.layers.roster  # noqa: F401  (registers every EP family)
 from src.distributed.expert_parallel.expert_weights import ep_layer_class_by_model_type
+from src.distributed.tensor_parallel.module_types import TP_SHARDABLE_ATTENTION_CLASSES
 from tests.common import ep_determinism
 from tests.common.lora_sync_exactness import REPRESENTATIVE_FAMILIES, parse_row, row_families, syncable_moe_families
 from tests.common.merged_resume_e2e import ADAPTER_MODES, LAYOUTS, merged_resume_parser
 from tests.common.preference_precompute_e2e import DENSE, precompute_resume_parser
-from tests.common.tiny_models import TINY_DENSE_FAMILIES, TINY_MOE_FAMILIES
+from tests.common.tiny_models import TINY_DENSE_FAMILIES, TINY_MOE_FAMILIES, tiny_family_model
 from tests.gpu.manifest import MANIFEST
 
 MERGED_RESUME_SUITES = (
     "trainers/lora/test_lora_merged_save_resume.py",
     "trainers/lora/test_lora_merged_save_resume_families.py",
 )
-PRECOMPUTE_RESUME_SUITES = (
-    "parallelism/ep/test_ep_preference_precompute_resume.py",
-    "trainers/preference/test_preference_precompute_resume_families.py",
-)
-# What every MoE family runs through the precompute-resume body: DPO on both expert layouts, KTO once.
-PRECOMPUTE_PER_FAMILY = (("dpo", "ep2"), ("dpo", "ep1"), ("kto", "ep2"))
+# Each precompute-resume suite with the world size its layouts run on.
+PRECOMPUTE_RESUME_SUITES = {
+    "parallelism/ep/test_ep_preference_precompute_resume.py": 2,
+    "trainers/preference/test_preference_precompute_resume_families.py": 2,
+    "trainers/preference/test_preference_precompute_resume_ep_etp.py": 4,
+}
+# What every MoE family runs through the precompute-resume body: DPO on every expert layout, KTO once;
+# and DPO under attention TP, with and without EP, where the family's attention has a TP plan.
+PRECOMPUTE_PER_FAMILY = (("dpo", "ep2"), ("dpo", "ep1"), ("kto", "ep2"), ("dpo", "etp2"), ("dpo", "ep2etp2"))
+PRECOMPUTE_PER_TP_FAMILY = (("dpo", "tp2"), ("dpo", "ep2tp2"))
 SYNC_EXACTNESS_SUITE = "trainers/lora/test_lora_weight_sync_exact.py"
 SYNC_EXACTNESS_SWEEP = "trainers/lora/test_lora_weight_sync_exact_families.py"
 DETERMINISM_SUITE = "parallelism/ep/test_ep_deterministic_expert_grads.py"
@@ -80,11 +85,30 @@ def test_the_merged_resume_rows_cover_every_family_adapter_shape_and_layout():
     assert len(set(covered)) == len(covered), "a merged-resume shape runs in two rows"
 
 
+def _has_tp_plan(family: str) -> bool:
+    """Whether ``family``'s attention is one the selective-TP path shards."""
+    model = tiny_family_model(TINY_MOE_FAMILIES[family])
+    return any(type(module).__name__ in TP_SHARDABLE_ATTENTION_CLASSES for module in model.modules())
+
+
 def test_the_precompute_resume_rows_cover_every_family():
-    rows = _rows(PRECOMPUTE_RESUME_SUITES, precompute_resume_parser((*TINY_MOE_FAMILIES, DENSE)))
+    rows = [
+        precompute_resume_parser((*TINY_MOE_FAMILIES, DENSE), world=world).parse_args(shlex.split(args))
+        for suite, world in PRECOMPUTE_RESUME_SUITES.items()
+        for args in MANIFEST[suite].args_matrix
+    ]
     covered = {(row.trainer, row.family, row.mode) for row in rows if not row.peft}
-    expected = {(trainer, family, mode) for family in TINY_MOE_FAMILIES for trainer, mode in PRECOMPUTE_PER_FAMILY}
+    tp_families = {family for family in TINY_MOE_FAMILIES if _has_tp_plan(family)}
+    expected = {(trainer, family, mode) for family in TINY_MOE_FAMILIES for trainer, mode in PRECOMPUTE_PER_FAMILY} | {
+        (trainer, family, mode) for family in tp_families for trainer, mode in PRECOMPUTE_PER_TP_FAMILY
+    }
     assert not sorted(expected - covered), f"precompute-resume shapes no row runs: {sorted(expected - covered)}"
+    tp_modes = {mode for _, mode in PRECOMPUTE_PER_TP_FAMILY}
+    off_plan = sorted(
+        {(family, mode) for _, family, mode in covered if mode in tp_modes}
+        - {(family, mode) for family in (*tp_families, DENSE) for mode in tp_modes}
+    )
+    assert not off_plan, f"precompute-resume TP rows on a family with no TP plan: {off_plan}"
 
 
 def test_the_sync_exactness_rows_run_every_syncable_family_once_per_shape():

@@ -49,20 +49,22 @@ from tests.common.tiny_models import TINY_DENSE_FAMILY, TINY_MOE_FAMILIES, share
 from tests.common.tolerances import TOL
 from tests.common.utils import cleanup_memory, finish_phase, log
 
-# The two-rank layouts: plain FSDP2 DP (dp2, the dense model's), plain per-rank experts (ep2),
-# FSDP-sharded DTensor experts over DP=2 (ep1), attention and MLP sharded over the TP mesh (tp2), and
-# the expert FFN sharded (etp2).
+# The layouts: plain FSDP2 DP (dp2, the dense model's), plain per-rank experts (ep2), FSDP-sharded
+# DTensor experts over DP=2 (ep1), attention and MLP sharded over the TP mesh (tp2), the expert FFN
+# sharded (etp2), per-rank experts under attention TP (ep2tp2), and per-rank experts each split two ways
+# (ep2etp2, an expert group of four).
 MODES = {
     "dp2": {},
     "ep2": {"ep_size": 2},
     "ep1": {"ep_size": 1},
     "tp2": {"tp_size": 2},
     "etp2": {"ep_size": 1, "expert_tp_size": 2},
+    "ep2tp2": {"ep_size": 2, "tp_size": 2},
+    "ep2etp2": {"ep_size": 2, "expert_tp_size": 2},
 }
 DENSE = "dense"
 # KTO's own loss computes a KL term from mismatched completions; ``apo_zero_unpaired`` has none.
 KTO_LOSSES = ("kto", "apo_zero_unpaired")
-WORLD_SIZE = 2
 SEED = 42
 N_ROWS = 16
 # Named eval splits and their sizes; TRL precomputes each under its dict key.
@@ -79,12 +81,19 @@ LEARNING_RATE = 2e-3
 CONTROL_MIN_LOGP_DELTA = 0.5
 
 
-def precompute_resume_parser(families: Iterable[str]) -> argparse.ArgumentParser:
-    """The CLI a precompute-resume suite takes, over the ``families`` it runs."""
+def world_size(mode: str) -> int:
+    """Ranks ``mode`` runs on: its expert group, never fewer than two."""
+    layout = MODES[mode]
+    return max(2, layout.get("ep_size", 1) * layout.get("expert_tp_size", 1))
+
+
+def precompute_resume_parser(families: Iterable[str], *, world: int = 2) -> argparse.ArgumentParser:
+    """The CLI a precompute-resume suite takes, over the ``families`` and the layouts of ``world`` ranks it runs."""
+    modes = sorted(mode for mode in MODES if world_size(mode) == world)
     parser = argparse.ArgumentParser()
     parser.add_argument("--trainer", choices=sorted(TRAINERS), default="dpo")
     parser.add_argument("--family", choices=sorted(families), required=True)
-    parser.add_argument("--mode", choices=sorted(MODES), default="ep2")
+    parser.add_argument("--mode", choices=modes, default="ep2" if "ep2" in modes else modes[0])
     parser.add_argument("--peft", action="store_true")
     parser.add_argument("--kto-loss", choices=KTO_LOSSES, default="kto")
     return parser
@@ -118,6 +127,9 @@ def _training_args(kind: str, output_dir: str, *, save_at: int | None, kto_loss:
         save_steps=save_at or 0,
         report_to=[],
         seed=SEED,
+        # Phase 2 replays phase 1 exactly: DeepEP dispatch and the per-expert loop's scatter both order
+        # their sums by atomics unless deterministic algorithms are on.
+        full_determinism=True,
         bf16=True,
         gradient_checkpointing=False,
         precompute_ref_log_probs=True,

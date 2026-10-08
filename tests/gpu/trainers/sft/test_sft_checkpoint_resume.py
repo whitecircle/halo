@@ -122,8 +122,8 @@ def load_model_for_mode(mode: str, parallelism_config: ParallelismConfig, model_
     For EP/CP resume ``model_path`` must be the checkpoint dir: the CheckpointLoader deliberately skips
     base-weight reload for EP/CP (its docstring: their "weights are reloaded by
     ``load_distributed_model`` (not here)"), so the trained weights are restored ONLY by loading the model
-    from the checkpoint here. fsdp/tp instead reload weights via the loader's set_model_state_dict
-    path, so they load from base.
+    from the checkpoint here. fsdp/tp load from it too: TP via ``is_tp_mode``, fsdp because the default
+    ``use_grouped_gemm`` sets ``needs_ep_wrappers`` even on a dense model.
     """
     if mode == "fsdp":
         return AutoModelForCausalLM.from_pretrained(
@@ -209,8 +209,8 @@ def phase2_resume_and_train(
     log(f"\n  Phase 2: Resume from checkpoint-{SAVE_AT_STEP} -> step {TOTAL_STEPS} ({mode})")
     checkpoint_path = os.path.join(output_dir, f"checkpoint-{SAVE_AT_STEP}")
     # Through the production helper, not a hardcoded path: EP/CP must get the checkpoint dir (the
-    # loader skips their base-weight reload), fsdp/tp base. Returning base for EP/CP loads untrained
-    # weights silently, which is what the by-value check catches.
+    # loader skips their base-weight reload), and fsdp/tp get it too. Returning base for EP/CP loads
+    # untrained weights silently, which is what the by-value check catches.
     model_cfg = SimpleNamespace(model_name_or_path=MODES[mode].model)
     resume_model_path = resolve_resume_weights_source(checkpoint_path, model_cfg, parallelism_config)
     model = load_model_for_mode(mode, parallelism_config, resume_model_path)

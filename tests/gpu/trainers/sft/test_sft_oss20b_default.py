@@ -3,7 +3,8 @@
 SFT training test with default mode (FSDP2, no EP/CP/TP) on GptOss-20B.
 
 Smoke test: DistributedSFTTrainer trains a MoE model with FSDP2 (fully_shard) data parallelism,
-per-layer wrapping with SHARD_GRAD_OP behavior and no expert parallelism (all experts on every GPU),
+per-layer wrapping with SHARD_GRAD_OP behavior and no expert parallelism (the experts FSDP-sharded as
+DTensors, ``fsdp_shard_ep1_experts``),
 then saves it. Checks that every logged loss and grad norm is finite, that the last-step loss is below
 the first, and that the save wrote ``config.json`` and the weights. No loss is compared against a
 reference and the saved weights are not reloaded.
@@ -13,7 +14,8 @@ Model: unsloth/gpt-oss-20b-BF16 (MoE, 32 experts)
 Note: Uses flash_attention_2. GptOss attention sinks require the
 flex_attention torch.compile patch (patch_flex_attention_compile) for
 FSDP2 compatibility — without it, the compiled backward produces NaN
-gradients. The patch is auto-applied in load_distributed_model().
+gradients. load_distributed_model() applies it only under flex_attention; under FA2 the default
+``reset_sinks`` drops the sinks instead.
 
 Usage:
     torchrun --nproc_per_node=2 \

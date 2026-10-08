@@ -102,7 +102,7 @@ Covering tests:
 
 - `pytest tests/cpu/trainers -m cpu`
 - `tests/gpu/trainers/preference/test_dpo.py`, `test_dpo_vlm.py` and `test_pref_ep_expert_lora_reference.py`
-- precompute resume, over `tests/common/preference_precompute_e2e.py`: `tests/gpu/parallelism/ep/test_ep_preference_precompute_resume.py` (Qwen3-MoE and the dense model) and `tests/gpu/trainers/preference/test_preference_precompute_resume_families.py` (every other EP family)
+- precompute resume, over `tests/common/preference_precompute_e2e.py`: `tests/gpu/parallelism/ep/test_ep_preference_precompute_resume.py` (Qwen3-MoE and the dense model) and `tests/gpu/trainers/preference/test_preference_precompute_resume_families.py` (every other EP family; TP and EP+TP where its attention has a TP plan), and `tests/gpu/trainers/preference/test_preference_precompute_resume_ep_etp.py` (EP+ETP on four ranks, every EP family)
 
 ## What to watch
 
