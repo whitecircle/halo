@@ -92,6 +92,16 @@ def test_an_empty_split_contributes_no_labels(classification):
     assert classification.get_label_list(ds, "test") == []
 
 
+def test_an_empty_presharded_train_shard_is_refused_before_its_label_type_is_read(classification):
+    """The label type is read from the first train row; a pre-sharded rank without one is refused
+    with a reason, on every rank, rather than raising alone ahead of the label-set gather."""
+    empty = Dataset.from_dict({"prompt": [], "label": []})
+    ds = DatasetDict({"train": empty})
+    with pytest.raises(ValueError, match="train shard holds no rows"):
+        classification.split_label_sets(ds, dataset_presharded=True)
+    assert classification.split_label_sets(ds, dataset_presharded=False) == {"train": set()}
+
+
 def _run_to_tokenization(classification, tmp_path, eval_strategy: str, test_labels: list) -> list[str]:
     """Run ``main()`` over a single-label dataset to its tokenization map; returns the splits it maps."""
     config = tmp_path / "config.yaml"

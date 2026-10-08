@@ -31,7 +31,7 @@ from src.data.sources.loading import reject_image_columns
 from src.data.sources.paths import EVAL_SPLIT_NAMES
 from src.distributed.loading.peft_setup import setup_peft_model
 from src.distributed.loading.vlm_setup import require_multimodal_sequence_classification_head
-from src.distributed.runtime import barrier, get_global_world_size, is_global_main_process
+from src.distributed.runtime import barrier, get_global_world_size, is_global_main_process, reject_across_ranks
 from src.models.loading.model_preparation import log_model_info
 from src.trainers.mixins.validation import evaluation_runs
 from src.trainers.reward.classification import ClassificationTrainer
@@ -140,8 +140,14 @@ def split_label_sets(ds, dataset_presharded: bool) -> dict[str, set[str]]:
 
     A pre-sharded dataset leaves each rank part of a split's labels, giving a rank-divergent
     num_labels and so a different [num_labels, hidden] score head per rank, which breaks the
-    FSDP2/DDP all-reduce over it.
+    FSDP2/DDP all-reduce over it. Every rank needs a train row, which the label type is read from.
     """
+    if dataset_presharded:
+        reject_across_ranks(
+            None if len(ds["train"]) else "its train shard holds no rows; shard so every rank gets one",
+            "Loading the pre-sharded dataset",
+            ValueError,
+        )
     labels = {split: set(get_label_list(ds, split)) for split in LABEL_SPLITS if split in ds}
     if dataset_presharded and get_global_world_size() > 1:
         gathered = [None] * get_global_world_size()
@@ -234,6 +240,7 @@ def main():
     reject_image_columns(ds, "Classification")
 
     require_prompt_or_text_column(ds["train"].column_names, args.text_field)
+    split_labels = split_label_sets(ds, dataset_presharded)
 
     is_multi_label = False
     if isinstance(ds["train"][0]["label"], list):
@@ -242,7 +249,6 @@ def main():
             logger.info("Label type is list, doing multi-label classification")
 
     used_splits = run_splits(classification_config)
-    split_labels = split_label_sets(ds, dataset_presharded)
     refuse_unlabeled_rows(split_labels, used_splits, is_multi_label)
     label_list = build_label_list(split_labels)
     num_labels = len(label_list)

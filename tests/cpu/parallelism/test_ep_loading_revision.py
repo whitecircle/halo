@@ -253,7 +253,6 @@ def test_ep_tp_lazy_resolution_uses_revision():
             pc,
             model_class=None,
             common_kwargs={"config": _MODEL_CONFIG, "dtype": None, "trust_remote_code": True, "revision": _REVISION},
-            local_rank=0,
         )
 
     assert seen["resolve_revision"] == _REVISION

@@ -6,7 +6,7 @@ These recipes assume **N × 8-GPU nodes on an RDMA fabric** (InfiniBand/RoCE or 
 
 ## torchrun
 
-One `torchrun` per node, incrementing `--node_rank`. The config sets the parallelism layout — it ships `expert_parallel_size: 16` / `ep_scope: global`, cross-node EP across both nodes — and every field overrides on the command line:
+One `torchrun` per node, incrementing `--node_rank`. The config sets the parallelism layout — it ships `expert_parallel_size: 16` / `ep_scope: global`, cross-node EP across both nodes — and every parallelism field overrides on the command line:
 
 - **Node-local EP + DP:** `--expert_parallel_size=8 --ep_scope=node`.
 

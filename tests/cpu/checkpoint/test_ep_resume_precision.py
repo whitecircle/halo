@@ -656,9 +656,9 @@ def _construct_tp(path, mode, *, fp32_router, fp32_experts, fp32_non_ep, preserv
     }
     load_class = model_class or TINY_MOE_FAMILIES[config.model_type].load_class
     if mode == "tp_moe":
-        model = _load_tp_moe_model(path, pc, load_class, common, 0)
+        model = _load_tp_moe_model(path, pc, load_class, common)
     else:
-        model = _load_ep_tp_model(path, pc, load_class, common, 0)
+        model = _load_ep_tp_model(path, pc, load_class, common)
     assert any(isinstance(param, DTensor) for param in model.parameters()), "attention must be TP-sharded"
     return model
 

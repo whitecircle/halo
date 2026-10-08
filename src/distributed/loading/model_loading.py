@@ -459,11 +459,11 @@ def _dispatch_model_loading(
         return _load_pp_stage_model(model_name_or_path, pc, model_class, common_kwargs, is_moe)
 
     if pc.is_ep_tp_mode:
-        return _load_ep_tp_model(model_name_or_path, pc, model_class, common_kwargs, local_rank)
+        return _load_ep_tp_model(model_name_or_path, pc, model_class, common_kwargs)
 
     if pc.is_tp_mode:
         if is_moe:
-            return _load_tp_moe_model(model_name_or_path, pc, model_class, common_kwargs, local_rank)
+            return _load_tp_moe_model(model_name_or_path, pc, model_class, common_kwargs)
         return _load_tp_model(model_name_or_path, pc, model_class, common_kwargs)
 
     if pc.is_ep_mode and pc.is_cp_mode:
@@ -636,11 +636,7 @@ def _load_pp_stage_model(
 
 
 def _load_ep_tp_model(
-    model_name_or_path: str,
-    pc: ParallelismConfig,
-    model_class,
-    common_kwargs: dict,
-    local_rank: int,
+    model_name_or_path: str, pc: ParallelismConfig, model_class, common_kwargs: dict
 ) -> PreTrainedModel:
     """Load model with EP+TP: attention sharded via DTensor, experts distributed via DeepEP.
 
@@ -792,11 +788,7 @@ def _load_tp_model(
 
 
 def _load_tp_moe_model(
-    model_name_or_path: str,
-    pc: ParallelismConfig,
-    model_class,
-    common_kwargs: dict,
-    local_rank: int,
+    model_name_or_path: str, pc: ParallelismConfig, model_class, common_kwargs: dict
 ) -> PreTrainedModel:
     """Load MoE model with TP: attention sharded via DTensor, MoE experts replicated.
 

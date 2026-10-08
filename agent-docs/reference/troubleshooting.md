@@ -148,7 +148,13 @@ DeepEP is required for EP — there is no NCCL fallback. The recurring failure m
     Check, on **every** node: the `gdrdrv` kernel module is loaded (`ls /dev/gdrdrv`; the host must
     install the gdrcopy driver), the container was started with `--device /dev/gdrdrv`, and
     `NCCL_GIN_TYPE=2` is exported. One node missing any of the three fails the whole job with this
-    assertion while node-local EP on the same machine runs fine.
+    assertion while node-local EP on the same machine runs fine; NCCL's log names the gap as
+    `Failed to initialize GDRCopy`.
+
+    A host can load the module without creating the device node (`grep gdrdrv /proc/devices` prints a
+    major number, `ls /dev/gdrdrv` fails). Create the node on the host, or inside the container:
+    start it with `--device-cgroup-rule='c <major>:0 rwm'` instead of `--device /dev/gdrdrv`, and run
+    `mknod -m 666 /dev/gdrdrv c <major> 0` before `torchrun`.
 
 - **`CUBLAS_STATUS_EXECUTION_FAILED` / DeepEP `combine.hpp` `CUDA_ERROR_LAUNCH_FAILED` + Xid 43 on
   several ranks at once, single-node EP.** Before reading it as a kernel or hardware fault, grep the

@@ -75,7 +75,6 @@ def _run_dispatch(monkeypatch, model_dir: str) -> dict:
         # The dispatcher always resolves the config before it picks a loader; the stubs above
         # never read it.
         common_kwargs={"config": SimpleNamespace()},
-        local_rank=0,
     )
     assert model is sentinel
     return calls

@@ -153,8 +153,9 @@ or `tee` that cannot be set up is warned on that rank, and the run continues wit
 
 ## 6. CLI overrides
 
-Any YAML field can be overridden as `--key=value`; CLI wins, and an unknown or repeated flag raises
-before training starts ([rules](configuration.md#cli-overrides)).
+Any scalar YAML field can be overridden as `--key=value`; CLI wins, and an unknown or repeated flag
+raises before training starts. Container-typed fields such as `dataset` stay in the YAML
+([rules](configuration.md#cli-overrides)).
 
 ```bash
 torchrun --nproc_per_node=8 scripts/training/sft.py examples/sft/qwen3/qwen3-4b-ultrachat.yaml \
