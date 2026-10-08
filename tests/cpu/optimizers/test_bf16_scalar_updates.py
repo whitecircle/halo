@@ -42,7 +42,11 @@ def test_stochastic_rounding_keeps_bf16_norm_weights_moving():
     writes bf16 with round-to-nearest, so every norm weight in the model is frozen for the whole run.
     """
     nearest_frozen = _frozen_fraction(lambda params: torch.optim.AdamW(params, lr=LR, weight_decay=0.0, foreach=False))
-    sr_frozen = _frozen_fraction(lambda params: AdamWBF16(params, lr=LR, weight_decay=0.0, use_triton=False))
+    sr_frozen = _frozen_fraction(
+        lambda params: AdamWBF16(
+            [(f"p{i}", p) for i, p in enumerate(params)], lr=LR, weight_decay=0.0, use_triton=False
+        )
+    )
 
     assert nearest_frozen == 1.0, (
         f"expected round-to-nearest AdamW to freeze every element at lr={LR} (that is the premise of "
@@ -89,8 +93,8 @@ def test_step_counter_advances_even_when_a_replica_has_no_grad():
     replica_a = nn.Parameter(start.clone())
     replica_b = nn.Parameter(start.clone())
 
-    opt_a = AdamWBF16([replica_a], lr=1e-2, weight_decay=0.0, use_triton=False)
-    opt_b = AdamWBF16([replica_b], lr=1e-2, weight_decay=0.0, use_triton=False)
+    opt_a = AdamWBF16([("weight", replica_a)], lr=1e-2, weight_decay=0.0, use_triton=False)
+    opt_b = AdamWBF16([("weight", replica_b)], lr=1e-2, weight_decay=0.0, use_triton=False)
 
     generator = torch.Generator().manual_seed(7)
     grads = [torch.randn(64, generator=generator, dtype=torch.bfloat16) * 0.1 for _ in range(4)]

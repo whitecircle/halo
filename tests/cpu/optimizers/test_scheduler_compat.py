@@ -70,7 +70,7 @@ def _assert_scheduler_drives_lr(opt, model: nn.Module, *, grad_max_ndim: int | N
 
 def test_adamw_bf16_scheduler_compat():
     model = _tiny_model()
-    opt = AdamWBF16(model.parameters(), lr=BASE_LR)
+    opt = AdamWBF16(model.named_parameters(), lr=BASE_LR)
     _assert_scheduler_drives_lr(opt, model)
 
 
@@ -96,7 +96,7 @@ def test_plain_function_step_breaks_scheduler_premise():
     """The failure the bound-method contract prevents: an instance-attribute function has no
     ``__func__``, so ``LambdaLR`` (``patch_track_step_called``) crashes at construction."""
     model = _tiny_model()
-    opt = AdamWBF16(model.parameters(), lr=BASE_LR)
+    opt = AdamWBF16(model.named_parameters(), lr=BASE_LR)
     opt.step = lambda closure=None: None  # instance-level plain function (the broken patch style)
     assert not inspect.ismethod(opt.step)
     with pytest.raises(AttributeError):

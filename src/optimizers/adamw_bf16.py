@@ -5,13 +5,15 @@ Stochastic rounding keeps the bf16 writes unbiased, where nearest rounding would
 ``p.detach()`` (``p.data`` carries its own version counter) and bump ``_version`` explicitly, since
 the raw-pointer Triton stores are invisible to ATen and the low-precision weight cache keys on it.
 
-The rounding noise is a pure function of the parameter's optimizer step and position
-(:func:`sr_seed_pair`), so replicas round alike and a resumed run rounds as the uninterrupted one did,
-with no generator state to checkpoint. An element's noise is keyed by its offset in the rank's local
-shard: reproducible for a given sharding layout (the one a resume must keep to restore optimizer
-shards), not across layouts.
+The rounding noise is a pure function of the parameter's optimizer step and name
+(:func:`sr_seed_pair`, :func:`sr_param_index`), so replicas round alike whatever else each rank's
+optimizer holds, and a resumed run rounds as the uninterrupted one did, with no generator state to
+checkpoint. An element's noise is keyed by its offset in the rank's local shard: reproducible for a
+given sharding layout (the one a resume must keep to restore optimizer shards), not across layouts.
 """
 
+import functools
+import hashlib
 import logging
 import math
 from collections.abc import Sequence
@@ -122,14 +124,31 @@ def _splitmix64(x: int) -> int:
     return x ^ (x >> 31)
 
 
-def sr_seed_pair(key: int, step: int, index: int) -> tuple[int, int]:
-    """The SR seed pair of the parameter at flat position ``index`` in its optimizer, at its ``step``.
+@functools.cache
+def sr_param_index(name: str) -> int:
+    """The rounding-noise key of the parameter named ``name``: a stable 64-bit hash of the name.
 
-    ``index`` is the parameter's position across the param groups, the index space of the optimizer's
-    state dict, so it is the same on every rank and in a rebuilt optimizer; ``step`` is the count the
-    restored state carries. Nothing is drawn, so the zero-LR step that materializes state before a
-    restore consumes nothing a later step reads. The eager step seeds its two SR writes with the
-    pair; the kernel derives both noise streams from the first.
+    Not its position: ranks can hold different parameter lists (an expert-TP rank owns a bias its
+    partners do not), and a replicated parameter must still round as it does on every other rank.
+    """
+    return int.from_bytes(hashlib.blake2b(name.encode(), digest_size=8).digest(), "little")
+
+
+def require_param_names(param_groups: list[dict], optimizer: str) -> None:
+    """Refuse param groups built without names, which :func:`sr_param_index` keys the rounding by."""
+    if any("param_names" not in group for group in param_groups):
+        raise ValueError(
+            f"{optimizer} keys its stochastic rounding by parameter name: build it from named parameters "
+            f"(decay_groups, or (name, param) pairs)."
+        )
+
+
+def sr_seed_pair(key: int, step: int, index: int) -> tuple[int, int]:
+    """The SR seed pair of the parameter keyed ``index`` (:func:`sr_param_index`), at its ``step``.
+
+    ``step`` is the count the restored state carries. Nothing is drawn, so the zero-LR step that
+    materializes state before a restore consumes nothing a later step reads. The eager step seeds its
+    two SR writes with the pair; the kernel derives both noise streams from the first.
     """
     mixed = _splitmix64(_splitmix64(key ^ step) ^ index)
     return mixed & _SR_SEED_MASK, (mixed >> 32) & _SR_SEED_MASK
@@ -279,6 +298,7 @@ class AdamWBF16(torch.optim.Optimizer):
 
         defaults = {"lr": lr, "betas": betas, "eps": eps, "weight_decay": weight_decay}
         super().__init__(params, defaults)
+        require_param_names(self.param_groups, type(self).__name__)
         # Resolved per parameter at step time from the tensor's own device: the eager path is
         # equivalent, and gating on `torch.cuda.is_available()` would send a CPU param to Triton.
         self._use_triton = use_triton
@@ -317,7 +337,6 @@ class AdamWBF16(torch.optim.Optimizer):
                 loss = closure()
 
         grad_scale, self._grad_scale = self._grad_scale, None
-        index = 0  # flat position across the groups, the state dict's index space
         for group in self.param_groups:
             beta1, beta2 = group["betas"]
             lr = group["lr"]
@@ -327,7 +346,7 @@ class AdamWBF16(torch.optim.Optimizer):
             bf16_params = []
             fp32_params = []
 
-            for p in group["params"]:
+            for p, name in zip(group["params"], group["param_names"], strict=True):
                 # The step count advances for every param, including one with no grad, so replicas
                 # whose grad presence differs still agree on the step a param's seed is keyed by.
                 state = self.state[p]
@@ -339,10 +358,9 @@ class AdamWBF16(torch.optim.Optimizer):
 
                 if p.grad is not None:
                     if p.dtype == torch.bfloat16:
-                        bf16_params.append((p, p.grad, state, index))
+                        bf16_params.append((p, p.grad, state, sr_param_index(name)))
                     else:
                         fp32_params.append((p, p.grad, state))
-                index += 1
 
             for p, grad, state, param_index in bf16_params:
                 update_fn = _triton_adam_bf16_step if self._triton_for(p) else _eager_adam_bf16_step

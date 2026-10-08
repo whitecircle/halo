@@ -377,7 +377,7 @@ def test_sr_under_ep() -> bool:
     nearest_mean = float(easq_nearest.float().mean())
 
     p = nn.Parameter(torch.zeros(size, dtype=torch.bfloat16, device=device))
-    opt = AdamWBF16([p], lr=1e-3, betas=(beta1, beta2), weight_decay=0.0)
+    opt = AdamWBF16([("p", p)], lr=1e-3, betas=(beta1, beta2), weight_decay=0.0)
     for _ in range(n_steps):
         p.grad = torch.full((size,), grad_val, dtype=torch.bfloat16, device=device)
         opt.step()
@@ -399,7 +399,7 @@ def test_sr_under_ep() -> bool:
     # Identical fixed input + state on every rank; SR-rounded weight must match bit-for-bit.
     torch.manual_seed(0)  # identical grad/init across ranks (no per-rank randomness)
     pr = nn.Parameter(torch.full((size,), 0.5, dtype=torch.bfloat16, device=device))
-    opt_r = AdamWBF16([pr], lr=1e-3, betas=(beta1, beta2), weight_decay=0.0)
+    opt_r = AdamWBF16([("p", pr)], lr=1e-3, betas=(beta1, beta2), weight_decay=0.0)
     # A small SIGNED gradient whose Adam step lands below the bf16 ULP of 0.5 (~0.004),
     # so SR is what carries the update — makes the rounding non-trivial.
     for _ in range(8):

@@ -26,22 +26,28 @@ def decay_groups(
 ) -> list[dict[str, Any]]:
     """``[decay group, no-decay group]`` over the trainable params, each in iteration order.
 
+    Each group carries its params' names under torch's own ``param_names`` key, which the
+    stochastically rounding optimizers key their noise by (:func:`~src.optimizers.adamw_bf16.sr_param_index`).
     ``decay_parameters=None`` decays everything. ``keep_empty`` emits a group that came out empty:
     the group count defines the index space of a saved optimizer state and of a scheduler's per-group
     updates, so a builder whose optimizer always carries two groups must keep emitting two.
     """
     decay_names = None if decay_parameters is None else set(decay_parameters)
-    decay: list[Parameter] = []
-    no_decay: list[Parameter] = []
+    decay: list[tuple[str, Parameter]] = []
+    no_decay: list[tuple[str, Parameter]] = []
     for name, param in named_parameters:
         if not param.requires_grad:
             continue
-        (decay if decay_names is None or name in decay_names else no_decay).append(param)
+        (decay if decay_names is None or name in decay_names else no_decay).append((name, param))
 
     return [
-        {"params": params, "weight_decay": group_decay}
-        for params, group_decay in ((decay, weight_decay), (no_decay, 0.0))
-        if params or keep_empty
+        {
+            "params": [param for _, param in named],
+            "param_names": [name for name, _ in named],
+            "weight_decay": group_decay,
+        }
+        for named, group_decay in ((decay, weight_decay), (no_decay, 0.0))
+        if named or keep_empty
     ]
 
 

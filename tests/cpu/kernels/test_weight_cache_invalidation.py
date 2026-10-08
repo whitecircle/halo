@@ -29,7 +29,7 @@ def test_optimizer_step_advances_the_parameter_version(optimizer_name):
     """Every optimizer the toolkit ships must bump ``_version`` on the parameter it updates."""
     param = nn.Parameter(torch.randn(32, 64, dtype=torch.bfloat16))
     if optimizer_name == "adamw_bf16":
-        optimizer = AdamWBF16([param], lr=1e-2, weight_decay=0.0, use_triton=False)
+        optimizer = AdamWBF16([("weight", param)], lr=1e-2, weight_decay=0.0, use_triton=False)
     else:
         optimizer = torch.optim.AdamW([param], lr=1e-2, weight_decay=0.0, foreach=False)
 
@@ -48,7 +48,7 @@ def test_cached_fake_quant_tracks_the_weight_across_steps():
     """The cached quantized weight must follow the master weight, not freeze at step 0."""
     torch.manual_seed(0)
     param = nn.Parameter(torch.randn(32, 64, dtype=torch.bfloat16))
-    optimizer = AdamWBF16([param], lr=1e-1, weight_decay=0.0, use_triton=False)
+    optimizer = AdamWBF16([("weight", param)], lr=1e-1, weight_decay=0.0, use_triton=False)
 
     first = cached_fake_quant(param, "mxfp8", BLOCK_AXIS).clone()
     master_start = param.detach().clone()

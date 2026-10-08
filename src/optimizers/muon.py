@@ -23,7 +23,7 @@ from gram_newton_schulz.muon.muon_utils.muon_opt_utils import adjust_lr_rms_norm
 
 from src.distributed.runtime import is_global_main_process, rank_consensus, to_local
 from src.models.structure import EMBEDDING_HEAD_MARKERS
-from src.optimizers.adamw_bf16 import BLOCK_SIZE, AdamWBF16, sr_seed_pair
+from src.optimizers.adamw_bf16 import BLOCK_SIZE, AdamWBF16, require_param_names, sr_param_index, sr_seed_pair
 from src.optimizers.param_groups import decay_groups
 
 logger = logging.getLogger(__name__)
@@ -177,16 +177,16 @@ def _fused_momentum_nesterov(grads, momentums, momentum_val, nesterov):
     return ns_inputs
 
 
-def _collect_params_with_sr_seeds(state: dict, params: list, first_index: int) -> tuple[list, list[int]]:
+def _collect_params_with_sr_seeds(state: dict, params: list, names: list[str]) -> tuple[list, list[int]]:
     """Count a step for every param in ``params`` and return those with grads, each with its SR seed.
 
     A param with no grad counts the step too, so replicas whose grad presence differs agree on the
-    step a param's seed is keyed by (:func:`~src.optimizers.adamw_bf16.sr_seed_pair`).
-    ``first_index`` is the group's offset in the optimizer's flat param order, the seed's other key.
-    The momentum buffer is allocated on a param's first grad, as upstream does.
+    step a param's seed is keyed by (:func:`~src.optimizers.adamw_bf16.sr_seed_pair`); its name
+    (``names``, aligned with ``params``) is the seed's other key. The momentum buffer is allocated on a
+    param's first grad, as upstream does.
     """
     with_grad, seeds = [], []
-    for index, p in enumerate(params, start=first_index):
+    for p, name in zip(params, names, strict=True):
         param_state = state[p]
         param_state["step"] = param_state.get("step", 0) + 1
         if p.grad is None:
@@ -194,7 +194,7 @@ def _collect_params_with_sr_seeds(state: dict, params: list, first_index: int) -
         if "momentum" not in param_state:
             param_state["momentum"] = torch.zeros_like(p)
         with_grad.append(p)
-        seeds.append(sr_seed_pair(_SR_KEY, param_state["step"], index)[0])
+        seeds.append(sr_seed_pair(_SR_KEY, param_state["step"], sr_param_index(name))[0])
     return with_grad, seeds
 
 
@@ -225,6 +225,7 @@ class Muon(UpstreamMuon):
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
+        require_param_names(self.param_groups, type(self).__name__)
         if self.scalar_optimizer is not None:
             # The scalar leg is AdamWBF16's own fused step; upstream's torch.compile wrapper around it
             # only adds graph breaks around a kernel launch.
@@ -237,10 +238,8 @@ class Muon(UpstreamMuon):
         GNS batching stacks same-shape params (tens of GB on large MoE models), so it runs in
         ``_GNS_CHUNK_SIZE`` chunks whose entries are freed as they are consumed.
         """
-        first_index = 0
         for group in param_groups:
-            group_params, sr_seeds = _collect_params_with_sr_seeds(self.state, group["params"], first_index)
-            first_index += len(group["params"])
+            group_params, sr_seeds = _collect_params_with_sr_seeds(self.state, group["params"], group["param_names"])
             if not group_params:
                 continue
 

@@ -18,13 +18,17 @@ def _params(n: int) -> list[nn.Parameter]:
     return params
 
 
+def _named(params: list[nn.Parameter]) -> list[tuple[str, nn.Parameter]]:
+    return [(f"p{i}", p) for i, p in enumerate(params)]
+
+
 def _target(trainer, params):
     return GradientSyncMixin._grad_scale_deferring_optimizer(trainer, params)
 
 
 def test_adamw_bf16_owning_every_param_takes_the_scale():
     params = _params(3)
-    optimizer = AdamWBF16(params)
+    optimizer = AdamWBF16(_named(params))
     assert _target(SimpleNamespace(optimizer=optimizer), params) is optimizer
     # accelerate wraps the optimizer; the inner one is the target
     assert _target(SimpleNamespace(optimizer=SimpleNamespace(optimizer=optimizer)), params) is optimizer
@@ -32,19 +36,19 @@ def test_adamw_bf16_owning_every_param_takes_the_scale():
 
 def test_a_clipped_param_outside_the_optimizer_keeps_in_place_scaling():
     params = _params(3)
-    assert _target(SimpleNamespace(optimizer=AdamWBF16(params[:2])), params) is None
+    assert _target(SimpleNamespace(optimizer=AdamWBF16(_named(params[:2]))), params) is None
 
 
 def test_an_optimizer_stepping_unclipped_grads_keeps_in_place_scaling():
     # The step would scale params[2] although the clip did not select it.
     params = _params(3)
-    assert _target(SimpleNamespace(optimizer=AdamWBF16(params)), params[:2]) is None
+    assert _target(SimpleNamespace(optimizer=AdamWBF16(_named(params))), params[:2]) is None
 
 
 def test_unclipped_optimizer_params_without_grads_do_not_block_deferral():
     params = _params(3)
     params[2].grad = None
-    optimizer = AdamWBF16(params)
+    optimizer = AdamWBF16(_named(params))
     assert _target(SimpleNamespace(optimizer=optimizer), params[:2]) is optimizer
 
 
@@ -58,10 +62,10 @@ def test_a_group_added_after_the_first_clip_is_weighed_too():
     """A parameter group added mid-training must block deferral when the clip did not select it, or the
     fused step would scale a gradient the clip never measured."""
     params = _params(2)
-    optimizer = AdamWBF16(params[:1])
+    optimizer = AdamWBF16(_named(params[:1]))
     trainer = SimpleNamespace(optimizer=optimizer)
     assert _target(trainer, params[:1]) is optimizer
-    optimizer.add_param_group({"params": params[1:]})
+    optimizer.add_param_group({"params": _named(params)[1:]})
     assert _target(trainer, params[:1]) is None
     assert _target(trainer, params) is optimizer
 
@@ -69,7 +73,7 @@ def test_a_group_added_after_the_first_clip_is_weighed_too():
 def test_params_without_grads_do_not_block_deferral():
     params = _params(3)
     params[2].grad = None
-    assert _target(SimpleNamespace(optimizer=AdamWBF16(params[:2])), params) is not None
+    assert _target(SimpleNamespace(optimizer=AdamWBF16(_named(params[:2]))), params) is not None
 
 
 if __name__ == "__main__":

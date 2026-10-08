@@ -46,7 +46,7 @@ def create_optimizer_for(name, model, lr):
     if name == "AdamW (fused)":
         return torch.optim.AdamW(model.parameters(), lr=lr, fused=True)
     elif name == "AdamWBF16 (SR)":
-        return AdamWBF16(model.parameters(), lr=lr)
+        return AdamWBF16(model.named_parameters(), lr=lr)
     elif name == "Muon (GNS)":
         return create_muon_optimizer(model, lr=lr)
     elif name == "Muon (std NS)":

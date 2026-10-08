@@ -47,6 +47,10 @@ def _params(dtype: torch.dtype = torch.float32, seed: int = 0) -> list[nn.Parame
     return params
 
 
+def _named(params: list[nn.Parameter]) -> list[tuple[str, nn.Parameter]]:
+    return [(f"p{i}", p) for i, p in enumerate(params)]
+
+
 def _clip_then_step(optimizer_cls, dtype: torch.dtype = torch.float32) -> torch.optim.Optimizer:
     """The reference: clip the gradients in place, then step; returns the stepped optimizer."""
     params = _params(dtype)
@@ -55,7 +59,7 @@ def _clip_then_step(optimizer_cls, dtype: torch.dtype = torch.float32) -> torch.
     )
     for p in params:
         p.grad.mul_(clip_coefficient(MAX_NORM, norm))
-    optimizer = optimizer_cls(params, lr=1e-2)
+    optimizer = optimizer_cls(_named(params), lr=1e-2)
     optimizer.step()
     return optimizer
 
@@ -77,7 +81,7 @@ def test_adamw_bf16_takes_the_scale_and_steps_as_if_clipped_first(dtype):
     bf16)."""
     params = _params(dtype)
     grads_before = [p.grad.clone() for p in params]
-    optimizer = AdamWBF16(params, lr=1e-2)
+    optimizer = AdamWBF16(_named(params), lr=1e-2)
     trainer = _EPTrainer(optimizer)
 
     norm = trainer.accelerator.clip_grad_norm_(params, MAX_NORM)
@@ -94,7 +98,7 @@ def test_adamw_bf16_takes_the_scale_and_steps_as_if_clipped_first(dtype):
 def test_another_optimizer_gets_the_gradients_scaled_in_place(optimizer_cls):
     params = _params()
     grads_before = [p.grad.clone() for p in params]
-    optimizer = optimizer_cls(params, lr=1e-2)
+    optimizer = optimizer_cls(_named(params), lr=1e-2)
     trainer = _EPTrainer(optimizer)
 
     norm = trainer.accelerator.clip_grad_norm_(params, MAX_NORM)

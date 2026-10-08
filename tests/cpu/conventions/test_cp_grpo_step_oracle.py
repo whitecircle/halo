@@ -19,8 +19,8 @@ def _fixture():
     gradients = {name: torch.randn(parameter.shape, generator=generator) * 0.1 for name, parameter in model.items()}
     optimizer = AdamWBF16(
         [
-            {"params": [model["second"], model["first"]], "lr": 0.001, "weight_decay": 0.03},
-            {"params": [model["router"]], "lr": 0.004, "betas": (0.8, 0.95), "eps": 1e-6},
+            {"params": [("second", model["second"]), ("first", model["first"])], "lr": 0.001, "weight_decay": 0.03},
+            {"params": [("router", model["router"])], "lr": 0.004, "betas": (0.8, 0.95), "eps": 1e-6},
         ],
         use_triton=False,
     )

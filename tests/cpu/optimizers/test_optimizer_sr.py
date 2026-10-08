@@ -199,7 +199,7 @@ def test_sr_removes_second_moment_bias():
     # AdamWBF16 eager path: step the real optimizer many times with a constant grad, so each step's
     # noise must be fresh for the average to come out unbiased.
     p = torch.nn.Parameter(torch.zeros(size, dtype=torch.bfloat16))
-    opt = AdamWBF16([p], lr=1e-3, betas=(0.9, beta2), weight_decay=0.0, use_triton=False)
+    opt = AdamWBF16([("p", p)], lr=1e-3, betas=(0.9, beta2), weight_decay=0.0, use_triton=False)
     for _ in range(n_steps):
         p.grad = torch.full((size,), grad_val, dtype=torch.bfloat16)
         opt.step()
@@ -226,13 +226,13 @@ def test_sr_removes_second_moment_bias():
     )
 
 
-# 4. SR seeds are keyed by (step, param position): replicas and resumes round alike
+# 4. SR seeds are keyed by (step, param name): replicas and resumes round alike
 
 
 def test_seed_pairs_differ_across_steps_and_params():
-    """Each (step, position) draws its own seeds, inside the kernel's int32-safe range, and the two
+    """Each (step, param key) draws its own seeds, inside the kernel's int32-safe range, and the two
     optimizers' keys give separate streams: a key that ignored the step would replay one step's noise
-    on the next and bias the rounding, one that ignored the position would share it across params."""
+    on the next and bias the rounding, one that ignored the param would share it across params."""
     key = adamw_mod._SR_KEY
     seeds = [sr_seed_pair(key, step, index) for step in range(1, 21) for index in range(10)]
     assert len({pair[0] for pair in seeds}) == len(seeds), "two (step, param) pairs share a kernel seed"
@@ -244,7 +244,7 @@ def test_seed_pairs_differ_across_steps_and_params():
 
 def test_adamw_missing_grad_leaves_the_replicated_params_rounding_alone():
     """Two 'ranks' hold p0 (grad present on rank A only) and p1 (replicated, identical grads). p1 must
-    round BIT-IDENTICALLY on both: its seed is keyed by its own position and step, which a grad-None p0
+    round BIT-IDENTICALLY on both: its seed is keyed by its own name and step, which a grad-None p0
     ahead of it does not shift."""
     torch.manual_seed(0)
     p0_init = (torch.randn(2048) * 0.02).to(torch.bfloat16)
@@ -254,7 +254,7 @@ def test_adamw_missing_grad_leaves_the_replicated_params_rounding_alone():
     def run_rank(p0_has_grad: bool):
         p0 = torch.nn.Parameter(p0_init.clone())
         p1 = torch.nn.Parameter(p1_init.clone())
-        opt = AdamWBF16([p0, p1], lr=1e-3, use_triton=False)
+        opt = AdamWBF16([("p0", p0), ("p1", p1)], lr=1e-3, use_triton=False)
         for _ in range(3):
             p0.grad = torch.full_like(p0, 1e-4) if p0_has_grad else None
             p1.grad = g1.clone()
@@ -267,26 +267,34 @@ def test_adamw_missing_grad_leaves_the_replicated_params_rounding_alone():
     assert torch.equal(easq_a, easq_b), "exp_avg_sq drifted: a grad-None param shifted its rounding"
 
 
-def test_a_param_rounds_by_its_position():
-    """The same param and grad at another position in the optimizer draws other noise, so the
-    position really keys the seed (else every param would share one noise pattern)."""
+def test_a_param_rounds_by_its_name_whatever_else_the_rank_holds():
+    """A replicated param must round as its replicas do even where one rank's optimizer holds a param
+    the others lack (an expert-TP rank's bias its partners do not own), so a param ahead of it does
+    not shift its noise; the same param and grad under another name draws other noise, so the name
+    really keys the seed (else every param would share one noise pattern)."""
     torch.manual_seed(1)
     p_init = (torch.randn(1024) * 0.02).to(torch.bfloat16)
 
-    def run(leading: int):
-        pads = [torch.nn.Parameter(torch.zeros(4, dtype=torch.bfloat16)) for _ in range(leading)]
+    def run(name: str, leading: int):
+        pads = [(f"pad{i}", torch.nn.Parameter(torch.zeros(4, dtype=torch.bfloat16))) for i in range(leading)]
         p = torch.nn.Parameter(p_init.clone())
         p.grad = torch.full_like(p, 2e-4)
-        AdamWBF16([*pads, p], lr=1e-3, use_triton=False).step()
+        AdamWBF16([*pads, (name, p)], lr=1e-3, use_triton=False).step()
         return p.detach().clone()
 
-    assert torch.equal(run(0), run(0))
-    assert not torch.equal(run(0), run(1))
+    assert torch.equal(run("router.bias", 0), run("router.bias", 1)), "a param on one rank only shifted the rounding"
+    assert not torch.equal(run("router.bias", 0), run("router.weight", 0))
+
+
+def test_an_optimizer_built_without_names_is_refused():
+    with pytest.raises(ValueError, match="keys its stochastic rounding by parameter name"):
+        AdamWBF16([torch.nn.Parameter(torch.zeros(4, dtype=torch.bfloat16))], lr=1e-3, use_triton=False)
 
 
 def _optimizer(params: list[torch.nn.Parameter]) -> AdamWBF16:
     """Two groups, so the restored positions span a group boundary."""
-    groups = [{"params": params[:2]}, {"params": params[2:], "weight_decay": 0.0}]
+    named = [(f"p{i}", p) for i, p in enumerate(params)]
+    groups = [{"params": named[:2]}, {"params": named[2:], "weight_decay": 0.0}]
     return AdamWBF16(groups, lr=1e-3, use_triton=False)
 
 
@@ -333,10 +341,10 @@ def test_restored_adamw_rounds_like_the_uninterrupted_one():
         assert torch.equal(uninterrupted_opt.state[a]["exp_avg_sq"], resumed_opt.state[b]["exp_avg_sq"])
 
 
-def test_muon_seeds_are_keyed_by_step_and_position():
-    """Muon's matrix step keys each seed by the param's step count and its flat position: a rank whose
-    param lacks a grad still counts that param's step, so the surviving params' seeds match the
-    all-grads rank's, and a later step draws new ones."""
+def test_muon_seeds_are_keyed_by_step_and_name():
+    """Muon's matrix step keys each seed by the param's step count and its name: a rank whose param
+    lacks a grad still counts that param's step, so the surviving params' seeds match the all-grads
+    rank's, a later step draws new ones, and a param's seed follows its name, not its place."""
 
     def params(grad_flags):
         out = []
@@ -348,22 +356,23 @@ def test_muon_seeds_are_keyed_by_step_and_position():
 
     all_grads = params([True, True, True])
     state_all: dict = {p: {} for p in all_grads}
-    with_grad_all, seeds_all = muon_mod._collect_params_with_sr_seeds(state_all, all_grads, 5)
+    names = ["w0", "w1", "w2"]
+    with_grad_all, seeds_all = muon_mod._collect_params_with_sr_seeds(state_all, all_grads, names)
     assert len(with_grad_all) == 3 and len(seeds_all) == 3
 
     skipped = params([True, False, True])
     state_skip: dict = {p: {} for p in skipped}
-    with_grad_skip, seeds_skip = muon_mod._collect_params_with_sr_seeds(state_skip, skipped, 5)
+    with_grad_skip, seeds_skip = muon_mod._collect_params_with_sr_seeds(state_skip, skipped, names)
     assert len(with_grad_skip) == 2
     assert seeds_skip == [seeds_all[0], seeds_all[2]], "a grad-None param shifted its neighbours' seeds"
     assert [state_skip[p]["step"] for p in skipped] == [1, 1, 1], "the grad-None param did not count the step"
     assert "momentum" not in state_skip[skipped[1]], "a param with no grad was given a momentum buffer"
 
-    _, seeds_next = muon_mod._collect_params_with_sr_seeds(state_all, all_grads, 5)
+    _, seeds_next = muon_mod._collect_params_with_sr_seeds(state_all, all_grads, names)
     assert not set(seeds_next) & set(seeds_all), "the next step replayed a seed"
-    # The group offset keys the seed: shifted by one, each param draws its right neighbour's seed.
-    _, seeds_shifted = muon_mod._collect_params_with_sr_seeds({p: {} for p in all_grads}, all_grads, 6)
-    assert seeds_shifted[:2] == seeds_all[1:] and seeds_shifted[0] != seeds_all[0]
+    # The name keys the seed: the same names in another order draw the same seeds, reordered.
+    _, seeds_reordered = muon_mod._collect_params_with_sr_seeds({p: {} for p in all_grads}, all_grads, names[::-1])
+    assert seeds_reordered == seeds_all[::-1]
 
 
 if __name__ == "__main__":

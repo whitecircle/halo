@@ -74,7 +74,7 @@ def make_optimizers(model, lr):
 
     # AdamWBF16 (stochastic rounding)
     m = create_model_copy(model)
-    optimizers["AdamWBF16 (SR)"] = (m, AdamWBF16(m.parameters(), lr=lr))
+    optimizers["AdamWBF16 (SR)"] = (m, AdamWBF16(m.named_parameters(), lr=lr))
 
     # Muon
     m = create_model_copy(model)
@@ -197,7 +197,7 @@ def bench_memory(model_template, hidden, intermediate, num_layers, lr, batch, se
         if opt_name == "AdamW (fused)":
             opt = torch.optim.AdamW(m.parameters(), lr=lr, fused=True)
         elif opt_name == "AdamWBF16 (SR)":
-            opt = AdamWBF16(m.parameters(), lr=lr)
+            opt = AdamWBF16(m.named_parameters(), lr=lr)
         elif opt_name == "FlashAdamW":
             opt = create_flash_adamw_optimizer(m, lr=lr)
         else:
