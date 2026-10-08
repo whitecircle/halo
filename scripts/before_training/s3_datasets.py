@@ -2,8 +2,7 @@
 """CLI over the toolkit's S3 dataset transport: push, download, list and delete S3 folders.
 
 Every handler acts through an :class:`~src.data.sources.s3_client.S3Client` built for the
-invocation's ``--bucket`` rather than the module default, since rebinding that singleton would hand
-this invocation's bucket to every other caller in the process.
+invocation's ``--bucket``.
 
 Usage:
     python scripts/before_training/s3_datasets.py <push|download|list|exists|delete> ...
