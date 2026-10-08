@@ -23,7 +23,9 @@ from tests.common.models import QWEN3_5_2B
 from tests.common.sft_modes import SFTMode, SFTSuite, run_sft_suite, sft_metric_checks
 
 FIRST_LOSS_BAND = (0.5, 12.0)
-MAX_GRAD_NORM = 500.0
+# One batch of the TP run spikes the pre-clip norm to 190-540 depending on the rounding stream; a
+# missing TP reduction lands far above this.
+MAX_GRAD_NORM = 1000.0
 
 SUITE = SFTSuite(
     model_name=QWEN3_5_2B,
