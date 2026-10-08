@@ -211,8 +211,8 @@ server, `make ... EFA=1` on the trainer, `scripts/profiling/weight_sync_transpor
 | `codeforces` | `CodeContestsEnvironment` (tokens preset) | Same, token compare + special-judge checkers | OpenAI function calling |
 | `exam_qa` | `ExamQAEnvironment` | Optional search (`open_book`) | OpenAI function calling |
 
-Per-env `environment_kwargs`: `search_backend` (qa_search/exam_qa only — `react_search` builds its
-tools with the default backend and refuses the key; `mock` needs `HALO_ALLOW_MOCK_SEARCH=1`),
+Per-env `environment_kwargs`: `search_backend` (qa_search, exam_qa, react_search and native_combined;
+`mock` needs `HALO_ALLOW_MOCK_SEARCH=1`),
 `open_book` (exam_qa), `mcp_server` (mcp), `timeout_per_test`, `max_grading_seconds`,
 `compiled_time_limit_scale` and `verdict_detail` (code_contests), `include_python_tools` (qa_search),
 `sandbox_backend` / `sandbox_url` (swe, code_contests). Every environment also takes the

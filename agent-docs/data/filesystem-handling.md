@@ -87,7 +87,7 @@ rank predicates, `fs_aware_makedirs` and `reject_across_ranks`).
     happened yet, since these reads can precede `init_distributed()` and a split scope would put the
     tag's participants where they never see each other's keys.
 
-- `sequential_load_within_node(tag, max_concurrent)` — store-coordinated throttle that admits at most
+- `sequential_load_within_node(max_concurrent)` — store-coordinated throttle that admits at most
   `max_concurrent` ranks per node at a time. `joined_node_load(what, max_concurrent)` wraps it with an
   exit joined over the store, and backs `max_concurrent_loading` at model load
   ([Multi-Node → Model loading](../parallelism/multi-node.md#model-loading)). Same
