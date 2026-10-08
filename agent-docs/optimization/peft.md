@@ -319,11 +319,11 @@ the script loads
 ([Offline GRPO → Reference model](../training-methods/grpo/offline-grpo.md#reference-model)).
 
 On online / async GRPO, where no adapter wraps the model — a full fine-tune, or an expert-only LoRA
-run, which builds no `PeftModel` — TRL builds its own reference model at `beta != 0`: an
-unparallelized fp32 replica per rank. `_validate_implicit_reference_model` warns about that under EP,
-and **raises** whenever the policy carries live attention sinks (`reset_sinks: false`), where the two
-models would compute different log-probs for identical tokens. Add an attention LoRA target (it wraps the
-model, and the disabled adapter is the reference) or set `beta: 0`.
+run, which builds no `PeftModel` — `beta != 0` holds a frozen reference: the script loads the base the
+way the policy loads and the trainer hands it to TRL in place of the fp32 copy TRL would build
+([Online GRPO](../training-methods/grpo/online-grpo.md#grpo-objective-for-verifiable-rewards)). It is an
+unparallelized replica per rank, warned about under EP and TP. Add an attention LoRA target (it wraps the
+model, and the disabled adapter is the reference) or set `beta: 0` to hold none.
 
 The DPO/KTO scripts never leave the reference to TRL: a full fine-tune gets a frozen copy, or no reference
 under `precompute_ref_log_probs: true` with EP or TP (plain data parallelism still loads the copy); an

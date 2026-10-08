@@ -56,10 +56,6 @@ class EnvironmentConfig(RangeValidatedConfig):
         self._normalize_environment_type()
         self._validate_ranges()
 
-    def __post_override__(self, overridden_fields: set[str]) -> None:
-        self._normalize_environment_type()
-        super().__post_override__(overridden_fields)
-
     def _normalize_environment_type(self) -> None:
         """Spell ``environment_type`` as the registry keys it (lowercased), so every consumer comparing
         the name — the run name, the coding eval's env check — reads the type the run resolves."""
@@ -71,9 +67,10 @@ class EnvironmentConfig(RangeValidatedConfig):
         super()._validate_ranges()
         # ``BaseEnvironment`` re-checks both, but that construction happens inside a Ray actor, after
         # the cluster and the vLLM servers are up. Check at parse time instead.
-        if self.max_turns is not None and self.max_turns < 1:
+        turns = self.max_turns
+        if turns is not None and (isinstance(turns, bool) or not isinstance(turns, int) or turns < 1):
             raise ValueError(
-                f"max_turns must be >= 1 (null keeps the environment class default), got {self.max_turns}"
+                f"max_turns must be an int >= 1 (null keeps the environment class default), got {turns!r}"
             )
         self.reward_terms  # noqa: B018  parse at config time so a bad or empty list fails here
         # Merged last in to_env_config, a key it writes from a top-level field would override that field

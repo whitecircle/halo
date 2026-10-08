@@ -37,11 +37,10 @@ _EXEMPT_RECEIVER_MARKERS = (
     "peft_model",
     "adapter",
 )
-# Functions whose save produces no artifact: adapter-only by construction (no config.json), or the
-# throwaway staging re-serialization the source-schema carry differences against — which runs the
-# finalizer's first two steps and cannot call the finalizer itself without recursing into it.
+# Functions whose save produces no artifact: the throwaway staging re-serialization the source-schema
+# carry differences against, which runs the finalizer's first two steps and cannot call the finalizer
+# itself without recursing into it.
 _EXEMPT_FUNCTIONS = {
-    ("scripts/after_training/convert_to_bf16.py", "convert_to_bf16"),
     ("src/checkpoint/config_export.py", "_serialized_config"),
 }
 _FINALIZERS = {"finalize_exported_config", "save_full_checkpoint", "save_model_config"}
@@ -94,6 +93,15 @@ def test_every_model_config_writer_finalizes_the_config(path):
         f"{relative}: {unfinalized} write a model config.json without finalize_exported_config "
         f"(or save_full_checkpoint / save_model_config) — a Gemma 4 export from here is unservable, "
         f"a Bailing one is family-less and a Step-3.7 one carries a schema no server parses"
+    )
+
+
+@pytest.mark.parametrize(("relative", "name"), sorted(_EXEMPT_FUNCTIONS))
+def test_every_exemption_names_an_unfinalized_writer(relative, name):
+    """An exemption whose function no longer writes an unfinalized config exempts nothing today and
+    silently covers whatever unfinalized save lands in that function next."""
+    assert (name, False) in _config_writers(REPO_ROOT / relative), (
+        f"{relative}:{name} is exempt but is no unfinalized config writer — drop the exemption"
     )
 
 

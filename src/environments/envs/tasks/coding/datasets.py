@@ -157,16 +157,30 @@ def joined_tests(row: dict[str, Any]) -> list[dict[str, str]]:
     return stdin_tests(tests)
 
 
-def pack_codeforces_verification(row: dict[str, Any]) -> dict[str, Any]:
-    """Extract the grading payload from an ``open-r1/codeforces`` row.
+def _test_input(test: dict[str, Any]) -> str:
+    """A test's input with whitespace runs collapsed: one input however a source spaces it."""
+    return " ".join((test.get("input") or "").split())
 
-    ``official_tests`` (only the ones Codeforces shows untruncated) plus the generated tests the
-    preparation script joined onto the row, falling back to ``examples``. ``None`` checker => token
-    grading.
-    """
-    tests = list(row.get("official_tests") or []) + joined_tests(row)
-    if not tests:
-        tests = stdin_tests(row.get("examples") or [])
+
+def _codeforces_graded_tests(row: dict[str, Any]) -> list[dict[str, Any]]:
+    """The tests an ``open-r1/codeforces`` row ships for grading: ``official_tests`` (only the ones Codeforces
+    shows untruncated) plus the generated tests the preparation script joined onto the row."""
+    return list(row.get("official_tests") or []) + joined_tests(row)
+
+
+def codeforces_examples_only(row: dict[str, Any]) -> bool:
+    """Whether an ``open-r1/codeforces`` row is graded only on its statement's example inputs: its official tests
+    are the samples the statement shows (half the ``verifiable`` test split), or it has none, and no joined suite
+    adds more. The prompt shows those inputs with answers, so a program printing the shown answers passes them,
+    under a special judge too where the official output is another valid answer."""
+    examples = {_test_input(test) for test in row.get("examples") or []}
+    return all(_test_input(test) in examples for test in _codeforces_graded_tests(row))
+
+
+def pack_codeforces_verification(row: dict[str, Any]) -> dict[str, Any]:
+    """Extract the grading payload from an ``open-r1/codeforces`` row: the tests it ships, falling back to
+    ``examples`` where it ships none. ``None`` checker => token grading."""
+    tests = _codeforces_graded_tests(row) or stdin_tests(row.get("examples") or [])
     return {
         "tests": tests,
         "checker": row.get("generated_checker") or None,
@@ -482,11 +496,14 @@ def _parse_day(name: str, value: str | None) -> date | None:
 class ContestSelection:
     """The rows of a benchmark a run scores: contests dated ``start_date`` through ``end_date``, both
     ends inclusive and compared by calendar day (either may be open), on ``platforms`` as the source
-    spells them (every platform when empty). The empty selection scores every row."""
+    spells them (every platform when empty). A problem whose only tests are its statement's examples
+    (:attr:`CodeDatasetAdapter.examples_only`) is scored only under ``include_examples_only``. The empty
+    selection scores every other row."""
 
     start_date: date | None = None
     end_date: date | None = None
     platforms: tuple[str, ...] = ()
+    include_examples_only: bool = False
 
     def __post_init__(self) -> None:
         if self.start_date is not None and self.end_date is not None and self.start_date > self.end_date:
@@ -496,15 +513,25 @@ class ContestSelection:
 
     @classmethod
     def parse(
-        cls, start_date: str | None = None, end_date: str | None = None, platforms: Iterable[str] = ()
+        cls,
+        start_date: str | None = None,
+        end_date: str | None = None,
+        platforms: Iterable[str] = (),
+        include_examples_only: bool = False,
     ) -> "ContestSelection":
         """A selection from its spelled form (the CLI flags, a trajectory meta line)."""
-        return cls(_parse_day("start_date", start_date), _parse_day("end_date", end_date), tuple(platforms))
+        return cls(
+            _parse_day("start_date", start_date),
+            _parse_day("end_date", end_date),
+            tuple(platforms),
+            include_examples_only,
+        )
 
     @classmethod
     def from_meta(cls, meta: dict[str, Any] | None) -> "ContestSelection":
-        """The selection a trajectory meta line records; a line recording none selected every row."""
-        return cls.parse(**(meta or {}))
+        """The selection a trajectory meta line records. A line recording none selected every row, and one
+        recording no ``include_examples_only`` predates the exclusion, so its run scored those problems too."""
+        return cls.parse(**{"include_examples_only": True, **(meta or {})})
 
     def to_meta(self) -> dict[str, Any]:
         """The spelled form :meth:`from_meta` reads back."""
@@ -512,6 +539,7 @@ class ContestSelection:
             "start_date": self.start_date.isoformat() if self.start_date else None,
             "end_date": self.end_date.isoformat() if self.end_date else None,
             "platforms": list(self.platforms),
+            "include_examples_only": self.include_examples_only,
         }
 
     @property
@@ -521,9 +549,10 @@ class ContestSelection:
 
     @property
     def label(self) -> str:
-        """A short name for the selection (``2025-01-04..2025-04-06_atcoder``); empty when it selects everything."""
+        """A short name for the selection (``2025-01-04..2025-04-06_atcoder``); empty for the default one."""
         window = f"{self.start_date or ''}..{self.end_date or ''}" if self.dated else ""
-        return "_".join(part for part in (window, "+".join(self.platforms)) if part)
+        examples = "with-examples-only" if self.include_examples_only else ""
+        return "_".join(part for part in (window, "+".join(self.platforms), examples) if part)
 
 
 @dataclass(frozen=True)
@@ -555,6 +584,10 @@ class CodeDatasetAdapter:
     contest_date: Callable[[dict[str, Any]], date] | None = None
     platform_field: str | None = None
     platforms: tuple[str, ...] = ()
+    # Whether a row's only tests are its statement's examples, which a constant print can pass: such a row
+    # is scored only under a selection's include_examples_only and joins a training pool only when asked.
+    # ``None`` => every row carries hidden tests.
+    examples_only: Callable[[dict[str, Any]], bool] | None = None
 
     def __post_init__(self) -> None:
         if self.platforms and self.platform_field is None:
@@ -589,12 +622,32 @@ class CodeDatasetAdapter:
                 f"platform(s) {unknown} are not ones this adapter grades; it grades {list(self.platforms)}"
             )
 
-    def scored_rows(self, rows: Iterable[dict[str, Any]], selection: ContestSelection) -> Iterator[dict[str, Any]]:
-        """The rows a run scores, in source order: inside ``selection`` and gradable (``keep``). The eval
-        builds its examples and the offline re-grader rebuilds their payloads by index from this one
-        sequence. The selection is validated here, before a row is read."""
+    def is_examples_only(self, row: dict[str, Any]) -> bool:
+        """Whether ``row``'s only tests are its statement's examples (:attr:`examples_only`)."""
+        return self.examples_only is not None and self.examples_only(row)
+
+    def scored_rows(
+        self, rows: Iterable[dict[str, Any]], selection: ContestSelection, left_out: list[Any] | None = None
+    ) -> Iterator[dict[str, Any]]:
+        """The rows a run scores, in source order: inside ``selection`` and gradable (``keep``), an
+        examples-only row (:meth:`is_examples_only`) only where the selection includes them; the ids of
+        those it leaves out are appended to ``left_out`` when given. The eval builds its examples and the
+        offline re-grader rebuilds their payloads by index from this one sequence. The selection is
+        validated here, before a row is read."""
         self.require_selectable(selection)
-        return (row for row in rows if self._selects(row, selection) and self.keep(row))
+        return self._scored(rows, selection, left_out)
+
+    def _scored(
+        self, rows: Iterable[dict[str, Any]], selection: ContestSelection, left_out: list[Any] | None
+    ) -> Iterator[dict[str, Any]]:
+        for row in rows:
+            if not (self._selects(row, selection) and self.keep(row)):
+                continue
+            if not selection.include_examples_only and self.is_examples_only(row):
+                if left_out is not None:
+                    left_out.append(row.get(self.id_field))
+                continue
+            yield row
 
     def _selects(self, row: dict[str, Any], selection: ContestSelection) -> bool:
         """Whether ``row`` falls inside ``selection``; the contest date is read only under a window."""
@@ -609,7 +662,12 @@ class CodeDatasetAdapter:
 
 
 CODE_DATASET_ADAPTERS: dict[str, CodeDatasetAdapter] = {
-    "codeforces": CodeDatasetAdapter(format_codeforces_prompt, pack_codeforces_verification, keep_codeforces),
+    "codeforces": CodeDatasetAdapter(
+        format_codeforces_prompt,
+        pack_codeforces_verification,
+        keep_codeforces,
+        examples_only=codeforces_examples_only,
+    ),
     "hardtests": CodeDatasetAdapter(
         format_hardtests_prompt, pack_hardtests_verification, keep_hardtests, normalize=normalize_hardtests
     ),

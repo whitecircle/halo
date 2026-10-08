@@ -722,10 +722,14 @@ class EmbeddingTrainer(DistributedTrainerMixin, SentenceTransformerTrainer):
         Every save writes the ``auto_model`` backbone's names (:meth:`_checkpoint_context`), so a
         loader handed the ``SentenceTransformer``, whose names carry its ``0.<module>.`` prefix, would
         match none of them, and the FSDP2 / TP coverage gates would refuse every full fine-tune reload.
-        The optimizer store keeps the ``SentenceTransformer``, whose parameters the optimizer steps.
+        An unsharded reload stays with sentence-transformers' own, which rebuilds the whole pipeline,
+        its modules past the backbone included. The optimizer store keeps the ``SentenceTransformer``,
+        whose parameters the optimizer steps.
         """
         return CheckpointLoader(
-            dataclasses.replace(self._checkpoint_load_context(), model=self._get_unwrapped_model())
+            dataclasses.replace(
+                self._checkpoint_load_context(), model=self._get_unwrapped_model(), base_owns_whole_weight_load=True
+            )
         )
 
     def _checkpoint_context(self) -> CheckpointContext:

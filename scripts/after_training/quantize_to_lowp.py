@@ -15,8 +15,10 @@ block-scaled convention:
   - ``<name>.weight_scale``  — one scale per block along the contraction axis: ``uint8`` e8m0 (mxfp8,
     block 32) or ``float8_e4m3fn`` (nvfp4, block 16),
   - ``<name>.weight_shape``  — the original ``[out, in]`` shape (the packed nvfp4 data halves the last dim),
-  - ``<name>.weight_global_scale`` — nvfp4 only: the per-tensor fp32 multiplier of its two-level scaling
-    (the ``e4m3`` block scale is relative to it, so dropping it rescales the weight).
+  - ``<name>.weight_global_scale`` — nvfp4 only: the per-tensor fp32 scale of its two-level scaling, in
+    compressed-tensors' spelling: an element is ``code x weight_scale / weight_global_scale``, so the
+    stored value is the reciprocal of :class:`~src.kernels.lowp.quantization.BlockScaledTensor`'s
+    multiplier (dropping it rescales the weight).
 
 Which weights those are is derived from the rosters that decide what QAT quantized (the trainer's
 dense ``MLP_PROJECTIONS`` plus the EP layer classes' expert layouts), so the export cannot quantize a
@@ -253,6 +255,26 @@ def _backbone_block_count(input_dir: str, include: re.Pattern, exclude: re.Patte
     return (max(indices) + 1) if indices else 0
 
 
+def _stored_global_scale(name: str, weight: torch.Tensor, global_scale: torch.Tensor) -> torch.Tensor:
+    """The ``weight_global_scale`` compressed-tensors stores for an nvfp4 weight, shape ``[1]`` as its
+    ``generate_gparam`` writes it: the reciprocal of the quantizer's power-of-two multiplier, so exact.
+
+    An all-zero weight's multiplier is far below fp32's reciprocal range; its codes and block scales are
+    all zero, so it stores compressed-tensors' own value for that case, 1.0. An ``inf`` would reach
+    vLLM's max over a fused layer's partition scales and zero every partition.
+    """
+    stored = global_scale.reciprocal().reshape(1).cpu()
+    if not torch.isposinf(stored).any():
+        return stored
+    if weight.any():
+        raise ValueError(
+            f"{name!r} has a nonzero max |w| of {weight.float().abs().max().item():.3e}, below the range an "
+            f"nvfp4 global scale can store (its reciprocal overflows fp32). Pass --exclude to keep it in "
+            f"high precision."
+        )
+    return torch.ones(1, dtype=stored.dtype)
+
+
 def quantize_checkpoint(
     input_dir: str,
     output_dir: str,
@@ -335,7 +357,7 @@ def quantize_checkpoint(
             out_tensors[f"{base}.weight_scale"] = q.scales.cpu().contiguous()
             out_tensors[f"{base}.weight_shape"] = torch.tensor(list(t.shape), dtype=torch.int64)
             if q.global_scale is not None:
-                out_tensors[f"{base}.weight_global_scale"] = q.global_scale.cpu().contiguous()
+                out_tensors[f"{base}.weight_global_scale"] = _stored_global_scale(name, t, q.global_scale)
             quantized.append(name)
             weight_axes[name] = axis
             if verify:
@@ -428,16 +450,19 @@ def _write_manifest(
         "note": (
             f"Trained with mixed-precision QAT (lowp_precision: {lowp_precision}, "
             f"i.e. {fmt}); quantizing the bf16/fp32 master to this format reproduces the QAT "
-            "forward exactly. Dequantize via src.kernels.lowp.quantization.dequantize."
+            "forward exactly. Dequantize via src.kernels.lowp.quantization.dequantize, whose nvfp4 "
+            "global scale is the reciprocal of the stored weight_global_scale."
         ),
     }
     with open(os.path.join(output_dir, "quantization_config.json"), "w") as f:
         json.dump(manifest, f, indent=2)
 
     # Stamp the scheme into config.json, the key readers consult; it also flips the toolkit's
-    # native-quantized detection (EP lazy loading routes such checkpoints to from_pretrained). Do not
-    # set quant_method to the raw format name: "mxfp8"/"mxfp4"/"nvfp4" are transformers methods with a
-    # different on-disk layout, which would turn the refusal into a wrong-layout load.
+    # native-quantized detection (EP lazy loading routes such checkpoints to from_pretrained, whose
+    # coverage gate refuses the missing *.weight keys). vLLM and SGLang refuse the unknown
+    # "block_scaled" method; plain transformers only warns, skips quantization and random-initializes
+    # every quantized weight. A raw format name ("mxfp4", "nvfp4", "mxfp8") would instead select a
+    # transformers or vLLM method that reads a different on-disk layout.
     config_path = os.path.join(output_dir, CONFIG_NAME)
     if os.path.exists(config_path):
         with open(config_path) as f:

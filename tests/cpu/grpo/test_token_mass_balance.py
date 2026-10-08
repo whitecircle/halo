@@ -6,8 +6,9 @@ advantages sum to zero, their token-weighted sum does not: when failures run lon
 round's net push lowers the probability of the tokens the policy sampled (entropy climbs), and when solves
 run longer it sharpens the policy. ``balance_token_mass`` scales the heavier sign down until that net
 push is zero, to nothing when the other sign has no mass; the net share is logged either way, and a mass
-that is not finite raises. Losses whose tokens do not share one normalizer are refused, since there a
-row does not pull with its token count.
+that is not finite raises. The negative-only rows of untrainable turns stay outside the balance at their
+raw advantage, so their own mass is the round's net push. Losses whose tokens do not share one
+normalizer are refused, since there a row does not pull with its token count.
 
     python tests/cpu/grpo/test_token_mass_balance.py
 """
@@ -160,6 +161,9 @@ def _env_round():
     return advantages, loss_mask, ratio
 
 
+_CUT_TURN = torch.tensor([False, False, True, False])  # the failure's 4-token row, a negative-only one
+
+
 def test_a_token_weighs_its_place_in_the_loss_times_its_is_ratio():
     """The masked failure's tokens carry no gradient and so no mass: the push is 2 positive against 6
     negative, the negatives shrink by a third, and the round nets to zero."""
@@ -182,45 +186,51 @@ def test_with_the_balance_off_the_net_mass_is_still_logged():
     assert TOKEN_MASS_SCALE_KEY not in metrics
 
 
-def test_the_negative_only_share_is_the_push_the_balance_leaves_on_every_other_row():
-    """The 4-token failing row is a cut turn, trained only on its negative advantage: 2 of the 6 negative
-    mass. Balanced, the negatives shrink by a third, so it carries 2/3 of a total of 4, and the solve's 2
-    against the other failure's 4/3 leaves that same 2/3 pushing up every other row's tokens."""
+def test_the_balance_nets_the_trainable_rows_to_zero_and_leaves_a_negative_only_row_raw():
+    """The 4-token failing row is a cut turn, trained only on its negative advantage. Weighed in, its 2 of
+    mass would shrink every negative and leave the other rows a net push up on their tokens. Left out, the
+    solve's 2 against the other failure's 4 halves the trainable negatives, which net to zero; the cut turn
+    keeps -0.5, and its 2 is the round's whole net push, a third of the 6 trained."""
     advantages, loss_mask, ratio = _env_round()
-    negative_only = torch.tensor([False, False, True, False])
     metrics = defaultdict(list)
-    balance = record_token_mass(
-        advantages, loss_mask, ratio, _local, metrics, enabled=True, negative_only=negative_only
-    )
-    assert metrics[NEGATIVE_ONLY_MASS_KEY] == [pytest.approx(1 / 6)]
-    weights = (loss_mask * ratio).sum(dim=1)
-    balanced = balance.apply(advantages)
-    others = ~negative_only
-    assert float((balanced[others] * weights[others]).sum()) == pytest.approx(2 / 3)
+    balance = record_token_mass(advantages, loss_mask, ratio, _local, metrics, enabled=True, negative_only=_CUT_TURN)
+    assert metrics[NET_TOKEN_MASS_KEY] == [pytest.approx((2 - 4) / 6)]
+    assert metrics[TOKEN_MASS_SCALE_KEY] == [pytest.approx(1 / 2)]
+    assert metrics[NEGATIVE_ONLY_MASS_KEY] == [pytest.approx(1 / 3)]
 
+    balanced = balance.apply(advantages, _CUT_TURN)
+    assert torch.equal(balanced, torch.tensor([1.0, -0.25, -0.5, -0.25]))
+    weights = (loss_mask * ratio).sum(dim=1)
+    assert _net(balanced[~_CUT_TURN], weights[~_CUT_TURN]) == pytest.approx(0.0, abs=1e-6)
+    assert float((balanced * weights).sum()) == pytest.approx(-2.0), "the net push is the cut turn's own mass"
+
+
+def test_with_the_balance_off_the_net_mass_is_the_trainable_rows_and_the_share_is_plain():
+    advantages, loss_mask, ratio = _env_round()
     metrics = defaultdict(list)
-    record_token_mass(advantages, loss_mask, ratio, _local, metrics, enabled=False, negative_only=negative_only)
-    assert metrics[NEGATIVE_ONLY_MASS_KEY] == [pytest.approx(2 / 8)], "unbalanced, it is the plain share"
+    assert (
+        record_token_mass(advantages, loss_mask, ratio, _local, metrics, enabled=False, negative_only=_CUT_TURN)
+        is None
+    )
+    assert metrics[NET_TOKEN_MASS_KEY] == [pytest.approx((2 - 4) / 6)]
+    assert metrics[NEGATIVE_ONLY_MASS_KEY] == [pytest.approx(2 / 8)]
 
     metrics = defaultdict(list)
     record_token_mass(advantages, loss_mask, ratio, _local, metrics, enabled=True)
     assert NEGATIVE_ONLY_MASS_KEY not in metrics, "a trainer with no negative-only rows logs no share"
 
 
-def test_a_one_sided_round_leaves_its_negative_only_rows_no_share():
-    """Balanced, a round with no positive mass trains nothing, so nothing is left for its negative-only rows to
-    push; unbalanced they keep their plain share."""
+def test_a_round_one_sided_on_its_trainable_rows_trains_only_its_negative_only_rows():
+    """With no positive mass on the trainable rows the balance trains nothing on them; the cut turn, outside
+    the balance, still takes its full negative advantage and carries the whole trained mass."""
     _, loss_mask, ratio = _env_round()
     advantages = torch.tensor([0.0, -0.5, -0.5, -0.5])  # the solve's positive advantage gone
-    negative_only = torch.tensor([False, False, True, False])
     metrics = defaultdict(list)
-    balance = record_token_mass(
-        advantages, loss_mask, ratio, _local, metrics, enabled=True, negative_only=negative_only
-    )
-    assert metrics[TOKEN_MASS_SCALE_KEY] == [0.0] and metrics[NEGATIVE_ONLY_MASS_KEY] == [0.0]
-    assert torch.equal(balance.apply(advantages), torch.zeros_like(advantages))
+    balance = record_token_mass(advantages, loss_mask, ratio, _local, metrics, enabled=True, negative_only=_CUT_TURN)
+    assert metrics[TOKEN_MASS_SCALE_KEY] == [0.0] and metrics[NEGATIVE_ONLY_MASS_KEY] == [1.0]
+    assert torch.equal(balance.apply(advantages, _CUT_TURN), torch.tensor([0.0, 0.0, -0.5, 0.0]))
     metrics = defaultdict(list)
-    record_token_mass(advantages, loss_mask, ratio, _local, metrics, enabled=False, negative_only=negative_only)
+    record_token_mass(advantages, loss_mask, ratio, _local, metrics, enabled=False, negative_only=_CUT_TURN)
     assert metrics[NEGATIVE_ONLY_MASS_KEY] == [pytest.approx(2 / 6)]
 
 

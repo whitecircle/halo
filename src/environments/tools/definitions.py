@@ -44,9 +44,17 @@ class ToolArgumentError(TypeError):
 class ToolCallRefused(ToolArgumentError):
     """A handler refusing an admitted call it will not run, the call returned to the episode's budget
     (code contests: a program whose comments carry its reasoning, or one identical to a program already
-    graded). A turn
-    whose every call was refused this way is flagged like one that named no existing tool
-    (``calls_rejected``), so an episode that recovers never reinforces it."""
+    graded). Under the native protocol a turn whose every call was refused this way is flagged like one
+    that named no existing tool (``calls_rejected``), so an episode that recovers never reinforces it."""
+
+
+class UninformativeReply(str):
+    """A handler's reply to an admitted call that ran and stays spent yet showed the model nothing to act
+    on (code contests: a program that reads input, run on none, that exited cleanly and printed nothing).
+    The text is the reply as written; the type is the mark, read like :class:`ToolCallRefused`: under the
+    native protocol a turn whose every call was refused, unknown or answered this way is flagged
+    ``calls_rejected``, so it is never rewarded and the turn after it runs on the recovery reserve instead
+    of buying a fresh reasoning budget."""
 
 
 def parse_python_expression(source: str) -> ast.expr:
@@ -315,6 +323,9 @@ class NativeToolResult:
     # The handler refused the admitted call and ran nothing (:class:`ToolCallRefused`): structural like
     # ``unknown_tool``, and read the same way.
     refused: bool = False
+    # The handler answered with an :class:`UninformativeReply`: the call ran and stays spent, but showed
+    # the model nothing. Read with ``refused`` and ``unknown_tool``.
+    uninformative: bool = False
     # The sandbox fault the call ended on, booked by type (infra or agent-caused) rather than as an
     # ordinary tool error, and ending the episode.
     sandbox_fault: SandboxFault | None = None

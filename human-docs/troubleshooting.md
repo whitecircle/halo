@@ -71,7 +71,8 @@ Setting the servers up in the first place is [Rollout Servers](rollout-servers.m
 
 ## Getting eyes on a hung run
 
-Attach from a second shell in the same container (needs `--cap-add=SYS_PTRACE`):
+Attach from a second shell in the same container (needs `--cap-add=SYS_PTRACE` unless the host's
+`kernel.yama.ptrace_scope` is 0):
 
 ```bash
 halo run py-spy-diag dump                 # Python stacks of every rank on this node

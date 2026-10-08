@@ -24,7 +24,13 @@ from huggingface_hub import snapshot_download
 from safetensors import SafetensorError, safe_open
 from transformers.core_model_loading import PrefixChange
 from transformers.integrations.finegrained_fp8 import Fp8Dequantize
-from transformers.utils import CONFIG_NAME, GENERATION_CONFIG_NAME
+from transformers.utils import (
+    CONFIG_NAME,
+    GENERATION_CONFIG_NAME,
+    IMAGE_PROCESSOR_NAME,
+    PROCESSOR_NAME,
+    VIDEO_PROCESSOR_NAME,
+)
 
 from src.checkpoint.config_export import (
     checkpoint_source_ref,
@@ -44,6 +50,7 @@ from src.checkpoint.format import (
     is_sharded_checkpoint,
     registry_weight_conversions,
     resolve_checkpoint_weights,
+    save_pretrained_layout,
     sweep_after_full_save,
 )
 from src.hardware import available_host_ram_bytes
@@ -57,6 +64,8 @@ logger = logging.getLogger(__name__)
 # load (pad/eos ids, the added-token set, the processor's chat template), so a copy carried over
 # from the source must not outlive a fresh save.
 _LEGACY_TOKENIZER_SIDECARS = ("special_tokens_map.json", "added_tokens.json", "chat_template.json")
+# A multimodal processor's own files beside its tokenizer's, in the spellings transformers reads.
+PROCESSOR_FILES = (PROCESSOR_NAME, IMAGE_PROCESSOR_NAME, VIDEO_PROCESSOR_NAME)
 
 # Header dtypes of full-precision floating tensors — the ones a conversion casts or quantizes.
 SAFETENSORS_FLOAT_DTYPES = frozenset({"F64", "F32", "F16", "BF16"})
@@ -114,7 +123,10 @@ def save_full_checkpoint(
 
     A model whose load DEQUANTIZED an fp8 source is reverted through its registry conversion mapping
     first, because the recorded conversions carry quantizer rewrites ``save_pretrained`` cannot
-    invert. ``source_dir`` doubles as the config schema source when the caller passes one.
+    invert. The save writes the layout the saved config declares
+    (:func:`~src.checkpoint.format.save_pretrained_layout`): a multimodal checkpoint loaded as its
+    text-only class keeps its text-only keys. ``source_dir`` doubles as the config schema source when
+    the caller passes one.
 
     ``include_resume_sidecars`` is :func:`~src.checkpoint.format.copy_checkpoint_aux_files`'s: a tool
     whose output is a new base model rather than the source run's weights passes ``False``, so no
@@ -133,7 +145,8 @@ def save_full_checkpoint(
     if source_dir is not None and os.path.isdir(source_dir):
         copy_checkpoint_aux_files(source_dir, output_dir, include_resume_sidecars=include_resume_sidecars)
     sanitize_generation_config(model)
-    model.save_pretrained(output_dir, **save_kwargs)
+    with save_pretrained_layout(model):
+        model.save_pretrained(output_dir, **save_kwargs)
     if not model.can_generate():
         # save_pretrained writes no generation config for a non-generating head, so one copied from
         # the source would survive and advertise sampling defaults this artifact has no forward for.

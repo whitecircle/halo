@@ -34,7 +34,8 @@ class ScorerRewardFunction:
 
     ``prompt_column`` names the dataset column holding the conversation the policy was prompted with,
     read in place of TRL's ``prompts`` (the rendered template text), and ``reference_column`` the one
-    TRL forwards as the sample's reference. A sample the scorer reached no verdict on returns
+    TRL forwards as the sample's reference. A declared column TRL did not forward raises rather than
+    scoring the rendered template or without the reference. A sample the scorer reached no verdict on returns
     ``None``, which TRL sums as 0 beside the row's other terms (the row leaves the baseline only when
     every term returned ``None``), or ``0`` under ``on_error: neutral``. The scorer's fixed diagnostic keys and the term's
     ``<source>/<name>/scored`` rate are averaged into TRL's metrics through the ``log_metric``
@@ -51,11 +52,9 @@ class ScorerRewardFunction:
         inspect.markcoroutinefunction(self)
 
     async def __call__(self, prompts: Sequence[Any], completions: Sequence[Any], **kwargs: Any) -> list[float | None]:
-        conversations = kwargs.get(self.prompt_column) if self.prompt_column else None
-        references = kwargs.get(self.reference_column) if self.reference_column else None
-        samples = samples_from_completions(
-            conversations if conversations is not None else prompts, completions, references
-        )
+        conversations = prompts if self.prompt_column is None else self._forwarded(kwargs, self.prompt_column)
+        references = None if self.reference_column is None else self._forwarded(kwargs, self.reference_column)
+        samples = samples_from_completions(conversations, completions, references)
         results = await self.scorer.score(samples)
         log_metric = kwargs.get("log_metric")
         if callable(log_metric):
@@ -65,6 +64,16 @@ class ScorerRewardFunction:
             log_metric(scored_metric_key(self.term), fmean(0.0 if r.score is None else 1.0 for r in results))
         missing = 0.0 if self.term.on_error is OnError.NEUTRAL else None
         return [missing if result.score is None else self.term.shape(result.score) for result in results]
+
+    def _forwarded(self, kwargs: Mapping[str, Any], column: str) -> Sequence[Any]:
+        """The values TRL forwarded for the dataset ``column`` this term reads."""
+        if column not in kwargs:
+            raise ValueError(
+                f"Reward term {self.term.name!r} reads the dataset column {column!r}, which did not reach "
+                f"the reward functions (forwarded: {sorted(kwargs)}). remove_unused_columns: true drops every "
+                f"column the model's forward does not take; set it to false."
+            )
+        return kwargs[column]
 
 
 def reward_functions(

@@ -1,22 +1,25 @@
 #!/usr/bin/env python
-"""The online arm's share of the sampler-logprob preflight: a sequence-level IS mode sums the per-token
-log-ratios, so a nucleus-renormalized reference is refused for it exactly as for the env trainer's
-geometric band.
+"""The online arm's share of the sampler-logprob preflight: a sequence-level IS mode, and VESPO's
+sequence weight in any mode, sum the per-token log-ratios, so a nucleus-renormalized reference is
+refused for them exactly as for the env trainer's geometric band.
 
 TRL's ``sequence_mask`` (its default) multiplies the sequence loss by ``exp(Σ(old − sampling))``.
 Against vLLM ``processed_logprobs`` with ``top_p < 1`` every uncertain token's sampling logprob is
 renormalized over its nucleus — lifted — so the sum drives the ratio toward 0, and ``sequence_mask``
 only zeroes ratios ABOVE the cap: the run stalls with no error. The gate is the CONSUMER ("sums
 per-token log-ratios over a sequence"), not one trainer's knob, and the RLVR script feeds it from the
-IS mode.
+IS mode and the loss. Each refusal points each arm at the remedy it honors.
 
     python tests/cpu/grpo/test_online_sampler_reference_gate.py
 """
 
 import ast
+import re
 import types
 
 import pytest
+import torch
+from trl import GRPOTrainer
 
 from src.configs.async_training_config import AsyncTrainingConfig
 from src.distributed.nccl.clients.vllm import VLLMWeightSyncClient
@@ -54,20 +57,34 @@ def nucleus_server():
 
 
 @pytest.mark.parametrize(
-    ("correction", "mode", "expected"),
+    ("correction", "mode", "loss_type", "expected"),
     [
-        (True, "sequence_mask", True),
-        (True, "sequence_truncate", True),
-        (True, "token_mask", False),
-        (True, "token_truncate", False),
-        (False, "sequence_mask", False),
+        (True, "sequence_mask", "dapo", True),
+        (True, "sequence_truncate", "dapo", True),
+        (True, "token_mask", "dapo", False),
+        (True, "token_truncate", "dapo", False),
+        (False, "sequence_mask", "dapo", False),
+        (True, "token_truncate", "vespo", True),
+        (True, "token_mask", "vespo", True),
+        (False, "token_truncate", "vespo", False),
     ],
 )
-def test_sequence_level_is_follows_the_mode_and_the_correction_switch(correction, mode, expected):
+def test_the_sequence_sum_follows_the_mode_the_loss_and_the_correction_switch(correction, mode, loss_type, expected):
+    """VESPO skips TRL's per-token IS multiply and folds the log of every token's ratio into one sequence
+    weight, so it sums in either token mode TRL lets it run; with the correction off TRL hands it no ratio."""
     grpo_args = types.SimpleNamespace(
-        vllm_importance_sampling_correction=correction, vllm_importance_sampling_mode=mode
+        vllm_importance_sampling_correction=correction, vllm_importance_sampling_mode=mode, loss_type=loss_type
     )
     assert DistributedGRPOTrainer.sums_sequence_logratio(grpo_args) is expected
+
+
+def test_vespo_folds_every_tokens_engine_ratio_into_one_sequence_weight():
+    """The premise behind counting VESPO, read off the installed TRL: a nucleus-lifted sampling reference
+    (each token's ratio a little under 1) shrinks the whole sequence's weight with its length."""
+    advantages, log_ratio, mask = torch.ones(1, 1), torch.zeros(1, 64), torch.ones(1, 64)
+    lifted = GRPOTrainer.get_gamma_weights(advantages, log_ratio, mask, torch.full((1, 64), 0.8))
+    exact = GRPOTrainer.get_gamma_weights(advantages, log_ratio, mask, torch.ones(1, 64))
+    assert lifted.item() < 1e-6 * exact.item()
 
 
 def test_a_nucleus_reference_is_refused_for_any_sequence_summing_consumer(nucleus_server):
@@ -82,6 +99,24 @@ def test_a_nucleus_reference_is_refused_for_any_sequence_summing_consumer(nucleu
     verify_sampler_logprob_reference(
         VLLMWeightSyncClient, [nucleus_server.url], 1.0, 0.95, 0, 0.0, 1.0, sequence_ratio_active=False
     )
+
+
+def test_both_refusals_point_each_arm_at_the_remedy_it_honors(nucleus_server):
+    """Online GRPO takes the ratio per token through TRL's mode, under any loss but VESPO. The environmental
+    correction is per token in every mode and loss its gates accept and refuses the others (``token_mask`` and
+    ``vespo`` among them), so there the remedy is dropping the ``isr_*`` stages, the only consumers that sum."""
+    per_arm = re.compile(
+        r"on online GRPO a token_\* vllm_importance_sampling_mode with a loss_type other than vespo; on the "
+        r"environmental arm[^;.]*drop isr_geo_band_min/max and isr_opsm_delta"
+    )
+    with pytest.raises(ValueError) as penalty:
+        verify_sampler_logprob_reference(VLLMWeightSyncClient, [], 1.0, 1.0, 0, 0.0, 1.1, sequence_ratio_active=True)
+    with pytest.raises(ValueError) as nucleus:
+        verify_sampler_logprob_reference(
+            VLLMWeightSyncClient, [nucleus_server.url], 1.0, 0.95, 0, 0.0, 1.0, sequence_ratio_active=True
+        )
+    for refusal in (penalty, nucleus):
+        assert per_arm.search(str(refusal.value)), str(refusal.value)
 
 
 def test_the_synced_form_takes_the_consumer_flag(nucleus_server):

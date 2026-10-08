@@ -15,7 +15,8 @@ TP + LoRA refusal and SDPG's OPD term.
 
 ``adapter`` puts the row on a fold no full fine-tune needs: attention PEFT reaches the engine through
 the sync's out-of-place PEFT fold, native grouped expert LoRA through ``merge_lora=True`` in the expert
-gather.
+gather. ``beta`` puts a full fine-tune on the KL term, whose frozen reference the row loads as the entry
+scripts do and the trainer hands to TRL.
 
 ``resume`` covers the invariant TRL's ``_last_loaded_step`` sentinel carries: a resumed run generates
 its first rollout from the checkpoint's weights rather than from whatever the engine still held.
@@ -38,6 +39,7 @@ from transformers.trainer_callback import TrainerCallback
 from trl import GRPOConfig
 
 from src.distributed.fsdp import reshard_fsdp2_modules
+from src.distributed.loading.frozen_models import load_frozen_auxiliary_model
 from src.distributed.parallelism_config import ParallelismConfig
 from src.trainers.distillation.sdpg import DistributedSDPGTrainer
 from src.trainers.grpo.online import DistributedGRPOTrainer
@@ -95,6 +97,8 @@ class _Mode:
     asserts the config-time expert-LoRA refusal before it loads anything. ``family`` is the script a
     mode belongs to, so neither script repeats the list.
 
+    ``beta`` is the KL coefficient; non-zero on a full fine-tune, the row holds a frozen reference.
+
     ``checkpoint_optimizer`` carries the optimizer and scheduler into the resume checkpoint, which
     makes the continuity assertions possible. Off for a full fine-tune of the MoE policy, where that
     state is 4 B/param of AdamWBF16 moments (over a hundred GB of disk, and the same again in host RAM
@@ -109,6 +113,7 @@ class _Mode:
     adapter: str | None = None
     refuses_lora_under_tp: bool = False
     rejects_expert_lora: bool = False
+    beta: float = 0.0
     checkpoint_optimizer: bool = True
 
     @property
@@ -125,6 +130,7 @@ MODES = {
     "full_tp2": _Mode("dense", tp_size=2),
     "lora_fsdp": _Mode("dense", adapter="lora"),
     "lora_tp2_rejected": _Mode("dense", tp_size=2, adapter="lora", refuses_lora_under_tp=True),
+    "full_fsdp_kl": _Mode("dense", beta=0.01),
 }
 
 
@@ -171,7 +177,7 @@ def _grpo_config(spec: _Mode, *, output_dir, server_url, group_port, max_steps, 
         vllm_group_port=group_port,
         num_generations=NUM_GENERATIONS,
         max_completion_length=MAX_COMPLETION_LENGTH,
-        beta=0.0,
+        beta=spec.beta,
         generation_kwargs={"temperature": 0.7},
         fsdp="",
         remove_unused_columns=False,
@@ -214,6 +220,11 @@ def _build_trainer(
         "parallelism_config": parallelism_config,
         "peft_config": peft_config,
     }
+    if spec.beta and not spec.adapter:
+        # As the entry scripts load it: from the configured model, as the policy loads (load_policy).
+        kwargs["ref_model"] = load_frozen_auxiliary_model(
+            model_name, dtype=torch.bfloat16, trust_remote_code=True, reset_sinks=False
+        )
     if trainer_kind == "sdpg":
         trainer = DistributedSDPGTrainer(
             **kwargs, sdpg_answer_field="answer", sdpg_loss="reverse_kl", sdpg_beta_base=1.0
@@ -331,6 +342,19 @@ def _sdpg_checks(trainer, checks: dict) -> None:
     checks["sdpg_opd_loss_finite"] = bool(opd) and all(math.isfinite(v) for v in opd)
     checks["sdpg_opd_term_contributed"] = any(v != 0.0 for v in opd)
     log(f"  OPD over {len(opd)} step(s): opd_loss={opd}")
+
+
+def _kl_checks(trainer, checks: dict) -> None:
+    """The KL term ran against the reference the row supplied: TRL holds it in the run dtype (its own build
+    is fp32), and logged a finite KL on every step, positive once the policy has moved off it."""
+    reference = trainer.accelerator.unwrap_model(trainer.ref_model) if trainer.ref_model is not None else None
+    checks["kl_reference_held_in_the_run_dtype"] = reference is not None and {
+        p.dtype for p in reference.parameters()
+    } == {torch.bfloat16}
+    kl = [float(entry["kl"]) for entry in trainer.state.log_history if "kl" in entry]
+    checks["kl_logged_finite"] = bool(kl) and all(math.isfinite(v) for v in kl)
+    checks["kl_engaged"] = any(v > 0 for v in kl)
+    log(f"  KL over {len(kl)} step(s): {kl}")
 
 
 def _lora_under_tp_refused(**build_kwargs) -> dict[str, bool]:
@@ -594,5 +618,7 @@ def run_online_grpo_e2e(
 
     if trainer_kind == "sdpg":
         _sdpg_checks(trainer, checks)
+    if spec.beta:
+        _kl_checks(trainer, checks)
 
     return {"checks": ctx.broadcast_checks(checks), "metrics": {"steps_logged": float(len(losses))}}

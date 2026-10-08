@@ -27,10 +27,10 @@ class EPQwen3_5MoELayer(EPMoELayerBase):
     # still fires, and the recorder path is live for the text-only ``ForCausalLM`` sibling.
     _supports_bias_balancing = True
 
-    # Hub layout: ``experts.{i}.{gate,up,down}_proj.weight`` per expert; transformers registers this
-    # family against the ``qwen2_moe`` converter, which fuses those into ``experts.gate_up_proj`` on
-    # load and reverts on save. The gather writes the fused tensor, so ``unfuse_moe_experts`` repairs
-    # a save that bypassed the revert under these names.
+    # Hub layout (Qwen3.5/3.6-35B-A3B): the fused ``experts.gate_up_proj`` / ``experts.down_proj`` pair
+    # the gather writes. transformers also registers this family against the ``qwen2_moe`` converter,
+    # which fuses a per-expert ``experts.{i}.{gate,up,down}_proj.weight`` spelling on load; that is the
+    # spelling ``unfuse_moe_experts`` writes.
     _HUB_PER_EXPERT_KEYS = ("gate_proj", "up_proj", "down_proj")
 
     # ``gate.weight`` is ``[num_experts, hidden]``, so its length is the expert count.

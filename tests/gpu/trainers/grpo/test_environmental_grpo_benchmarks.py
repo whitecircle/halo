@@ -52,6 +52,7 @@ from trl import GRPOConfig
 
 from src.configs.async_training_config import AsyncTrainingConfig
 from src.configs.environment_config import EnvironmentConfig
+from src.distributed.loading.frozen_models import load_frozen_auxiliary_model
 from src.distributed.parallelism_config import ParallelismConfig
 from src.env import env_int, env_str
 from src.environments.envs.protocols.react import ReActEnvironment
@@ -268,7 +269,6 @@ def run_env_grpo_training(
             "num_generations": num_generations,
             "max_completion_length": max_completion_length,
             "beta": 0.01,
-            "generation_kwargs": {"temperature": 0.7},
             "fsdp": "",
             "reward_weights": [1.0],
             "gradient_checkpointing": True,
@@ -327,6 +327,10 @@ def run_env_grpo_training(
             processing_class=tokenizer,
             async_config=async_config,
             parallelism_config=ParallelismConfig(),
+            # beta != 0 on a full fine-tune holds a frozen reference, loaded as the policy is.
+            ref_model=load_frozen_auxiliary_model(
+                MODEL_NAME, dtype=torch.bfloat16, trust_remote_code=True, attn_implementation="flash_attention_2"
+            ),
             **env_selector,
         )
 

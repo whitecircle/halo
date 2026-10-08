@@ -87,9 +87,9 @@ No hook may allocate state sized by `world_size` either — invisible at 8 GPUs,
 
     Genuinely distinct layouts override the gather instead: GptOss re-interleaves gate/up, Gemma4 strips the `experts.` prefix.
 
-- `_HUB_PER_EXPERT_KEYS` — the same triple, for a family whose hub checkpoint is per-expert while its gather does *not* do the split. That is exactly the pairing `__init_subclass__` forbids with `_PER_EXPERT_UNFUSED_KEYS`.
+- `_HUB_PER_EXPERT_KEYS` — the same triple, for a family with a per-expert spelling its gather does *not* split into. That is exactly the pairing `__init_subclass__` forbids with `_PER_EXPERT_UNFUSED_KEYS`.
 
-    Two cases: families storing gate/up/down separately, which subclass `EPSeparateGluMoELayerBase` for the `_gather_individual_glu_state_dict` / `_merge_individual_glu_shards` pair (Bailing, Qwen3); and families whose gather writes the fused tensor transformers reverts on save (Qwen3.5/3.6, DeepSeek-V4, Cohere2 MoE, GLM-5 Next).
+    Two cases: families storing gate/up/down separately, which subclass `EPSeparateGluMoELayerBase` for the `_gather_individual_glu_state_dict` / `_merge_individual_glu_shards` pair (Bailing, Qwen3); and families whose gather writes the fused tensor while transformers also loads the per-expert spelling — their hub's for DeepSeek-V4, Cohere2 MoE and GLM-5 Next, and for Qwen3.5/3.6, whose hub ships the fused tensor, the one `unfuse_moe_experts.py` writes.
 
     `EPMoELayerBase.hub_per_expert_keys()` unions the two. A family answering `None` there is one `unfuse_moe_experts.py` refuses.
 

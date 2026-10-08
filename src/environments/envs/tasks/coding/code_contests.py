@@ -27,7 +27,12 @@ from src.environments.base import (
     require_magnitudes,
 )
 from src.environments.envs.protocols.native import NativeToolUseEnvironment
-from src.environments.envs.tasks.coding.comments import comment_chars, reasoning_in_comments, strip_comments
+from src.environments.envs.tasks.coding.comments import (
+    comment_chars,
+    reads_stdin,
+    reasoning_in_comments,
+    strip_comments,
+)
 from src.environments.envs.tasks.coding.grading import (
     DEFAULT_MAX_OUTPUT_SIZE,
     VERDICT_DETAIL_OUTCOME,
@@ -48,9 +53,11 @@ from src.environments.sandbox.resolve import resolve_sandbox, warn_if_unisolated
 from src.environments.tools.definitions import (
     NativeTool,
     NativeToolRegistry,
+    NativeToolResult,
     ToolArgumentError,
     ToolCallRefused,
     ToolParameter,
+    UninformativeReply,
 )
 
 logger = logging.getLogger(__name__)
@@ -73,8 +80,11 @@ SUBMIT_TOOL = "submit_solution"
 # Pass fraction of each graded submission, in order: what ``episode/resubmission_improved`` reads.
 SUBMISSION_PASS_FRACS_KEY = "submission_pass_fracs"
 NO_STDIN_NOTE = "(No stdin was passed to this run; if the program reads input, pass it in the `stdin` argument.)"
-# Scratchpad runs given no input that exited cleanly with nothing on stdout (``episode/starved_test_runs``).
+# Scratchpad runs of a program that reads input, given none, that exited cleanly with nothing on stdout
+# (``episode/starved_test_runs``), and the turns flagged untrainable for holding one beside nothing but
+# refused or unknown calls (``episode/starved_turns``).
 STARVED_TEST_RUNS_KEY = "starved_test_runs"
+STARVED_TURNS_KEY = "starved_turns"
 # Programs refused for carrying the reasoning in their comments (``episode/reasoning_in_comments_calls``),
 # and the comment and code characters of every program a call carried (``episode/code_comment_share``).
 REASONING_IN_COMMENTS_KEY = "reasoning_in_comments_calls"
@@ -609,16 +619,24 @@ class CodeContestsEnvironment(NativeToolUseEnvironment):
         if result.timed_out:
             output += f" {SCRATCHPAD_TIME_LIMIT_NOTE}"
         notes = []
+        starved = False
         # A run on no input says so, since neither the parse error of a program that reads input nor
         # output computed from nothing names the cause; a build failure ran nothing.
         if not stdin and not result.compile_failed and not host_build_error(code, language, self.sandbox):
             notes.append(NO_STDIN_NOTE)
-            # Given no input, a clean exit with nothing on stdout showed the model nothing (its reply leaves
-            # stderr out).
-            starved = not result.timed_out and result.returncode in (0, None) and not result.stdout.strip()
+            # Given no input, a program that reads it and exits cleanly with nothing on stdout showed the model
+            # nothing (its reply leaves stderr out); a silent self-test that embeds its input passed.
+            starved = (
+                not result.timed_out
+                and result.returncode in (0, None)
+                and not result.stdout.strip()
+                and reads_stdin(code, language)
+            )
             if starved and trajectory is not None:
                 trajectory.info[STARVED_TEST_RUNS_KEY] = trajectory.info.get(STARVED_TEST_RUNS_KEY, 0) + 1
-        return self._fit_observation(output, notes)
+        reply = self._fit_observation(output, notes)
+        # Spent all the same: a turn of nothing else is flagged, so it cannot buy the next turn a full cap.
+        return UninformativeReply(reply) if starved else reply
 
     def _submit(self, code: str, language: str | None = None) -> str:
         """Grade a submission against the active episode's tests in ``language`` (the run's, or the
@@ -676,6 +694,13 @@ class CodeContestsEnvironment(NativeToolUseEnvironment):
     def _accepted(info: dict[str, Any]) -> bool:
         """Whether the last graded submission passed every hidden test."""
         return "submission_result" in info and 0 < info.get("tests_total", 0) == info.get("tests_passed", 0)
+
+    def _record_tool_interaction(self, results: list[NativeToolResult], trajectory: Trajectory) -> dict[str, Any]:
+        """The protocol's record, counting a turn it flagged that held a starved run (``episode/starved_turns``)."""
+        info = super()._record_tool_interaction(results, trajectory)
+        if any(r.uninformative for r in results) and self._last_assistant_message(trajectory).calls_rejected:
+            trajectory.info[STARVED_TURNS_KEY] = trajectory.info.get(STARVED_TURNS_KEY, 0) + 1
+        return info
 
     def _step_single(
         self, trajectory: Trajectory, action: str, context: dict[str, Any] | None = None
@@ -868,6 +893,7 @@ class CodeContestsEnvironment(NativeToolUseEnvironment):
         metrics["episode/submission_rate"] = 1.0 if submissions > 0 else 0.0
         metrics["episode/test_calls"] = float(self._test_calls(trajectory))
         metrics["episode/starved_test_runs"] = float(info.get(STARVED_TEST_RUNS_KEY, 0))
+        metrics["episode/starved_turns"] = float(info.get(STARVED_TURNS_KEY, 0))
         metrics["episode/reasoning_in_comments_calls"] = float(info.get(REASONING_IN_COMMENTS_KEY, 0))
         metrics["episode/identical_resubmissions"] = float(info.get(IDENTICAL_RESUBMISSIONS_KEY, 0))
         program_chars = info.get(COMMENT_CHARS_KEY, 0) + info.get(CODE_CHARS_KEY, 0)

@@ -20,7 +20,9 @@ from src.args.rlvr_online_grpo_args import RLVROnlineGRPOScriptArguments
 from src.data.pipeline.conversation import as_conversation, chat_template_kwargs, fold_system_into_conversation
 from src.data.pipeline.processing import process_dataset_with_map_and_filter, require_render_column
 from src.data.pipeline.rendered import render_generation_prompt
+from src.data.pipeline.row_processors import blank_conversation
 from src.data.sources.loading import reject_image_columns
+from src.distributed.loading.frozen_models import load_reference_model_for_on_policy_grpo
 from src.distributed.loading.peft_setup import setup_peft_model
 from src.distributed.nccl.clients.vllm import VLLMWeightSyncClient
 from src.distributed.runtime import barrier
@@ -51,6 +53,47 @@ from src.training.script_runner import (
     run_trainer,
     verify_backend_on_rank0,
 )
+
+
+def build_rlvr_row_fn(args: RLVROnlineGRPOScriptArguments, tokenizer):
+    """Row transform for the RLVR map: the rendered generation prompt, the conversation it was rendered
+    from and the ground-truth answer. Accepts conversational (list of messages) and string prompts."""
+
+    def process_for_rlvr(row):
+        prompt_data = as_conversation(row[args.prompt_field])
+        answer_data = row.get(args.answer_field)
+
+        if not isinstance(prompt_data, list):
+            raise ValueError(f"Invalid prompt format: {type(prompt_data)}")
+        # The system prompt leads only a conversation that does not already open with one; an
+        # unconditional insert stacks two.
+        messages = fold_system_into_conversation(
+            list(prompt_data), args.system_prompt, model_supports_system_role=True
+        )
+
+        template_kwargs = chat_template_kwargs(row, interleaved_thinking=False, tools_field=args.tools_field)
+        # Reasoning-effort steer ("random" → a level sampled per prompt). Single-turn, so per-prompt is
+        # the per-episode analogue of the env-GRPO rollout (src/environments/base.py).
+        effort = resolve_reasoning_effort(args.reasoning_effort)
+        if effort is not None:
+            template_kwargs["reasoning_effort"] = effort
+
+        formatted_prompt = render_generation_prompt(
+            tokenizer, messages, max_prompt_length=args.max_prompt_length, **template_kwargs
+        )
+        # Over-budget prompts are dropped by their blank prompt; every column keeps its real type, since
+        # an all-rejected first writer batch otherwise fixes a null column the real batches cannot cast to.
+        if formatted_prompt is None:
+            return {"prompt": "", "conversation": blank_conversation(messages), "answer": ""}
+
+        # The scored terms read the conversation itself, not the rendered template the engine takes.
+        return {
+            "prompt": formatted_prompt,
+            "conversation": messages,
+            "answer": str(answer_data) if answer_data is not None else "",
+        }
+
+    return process_for_rlvr
 
 
 def main():
@@ -102,45 +145,6 @@ def main():
     peft_config = setup_peft_model(args, model, model_config, "CAUSAL_LM")
     log_model_info(model, tokenizer)
 
-    def process_for_rlvr(row):
-        """Process a dataset row for RLVR training.
-
-        Extracts the prompt and ground truth answer from the dataset row.
-        Supports both conversational (list of messages) and string prompts.
-        """
-        prompt_data = as_conversation(row[args.prompt_field])
-        answer_data = row.get(args.answer_field)
-
-        if not isinstance(prompt_data, list):
-            raise ValueError(f"Invalid prompt format: {type(prompt_data)}")
-        # The system prompt leads only a conversation that does not already open with one; an
-        # unconditional insert stacks two.
-        messages = fold_system_into_conversation(
-            list(prompt_data), args.system_prompt, model_supports_system_role=True
-        )
-
-        template_kwargs = chat_template_kwargs(row, interleaved_thinking=False, tools_field=args.tools_field)
-        # Reasoning-effort steer ("random" → a level sampled per prompt). Single-turn, so per-prompt is
-        # the per-episode analogue of the env-GRPO rollout (src/environments/base.py).
-        effort = resolve_reasoning_effort(args.reasoning_effort)
-        if effort is not None:
-            template_kwargs["reasoning_effort"] = effort
-
-        formatted_prompt = render_generation_prompt(
-            tokenizer, messages, max_prompt_length=args.max_prompt_length, **template_kwargs
-        )
-        # Over-budget prompts are dropped with a blank-string sentinel, not None: an all-rejected first writer
-        # batch makes Arrow infer a null column and crash casting later real string batches.
-        if formatted_prompt is None:
-            return {"prompt": "", "conversation": [], "answer": ""}
-
-        # The scored terms read the conversation itself, not the rendered template the engine takes.
-        return {
-            "prompt": formatted_prompt,
-            "conversation": messages,
-            "answer": str(answer_data) if answer_data is not None else "",
-        }
-
     # Pre-sharded datasets are split per DP rank at load; the trainer gets dataset_presharded so it
     # does not re-shard (no-op for the usual raw prompt/answer dataset). The prompt column is the
     # loader's render column: it must exist, and rows with an empty prompt are dropped.
@@ -160,7 +164,7 @@ def main():
 
     processed_ds = process_dataset_with_map_and_filter(
         ds,
-        process_for_rlvr,
+        build_rlvr_row_fn(args, tokenizer),
         filter_field="prompt",
         remove_columns=columns_to_remove,
         desc="Processing dataset for RLVR Online GRPO",
@@ -217,6 +221,18 @@ def main():
         sequence_ratio_active=DistributedGRPOTrainer.sums_sequence_logratio(grpo_config),
         backend=VLLMWeightSyncClient.BACKEND_KEY,
     )
+    # The KL reference TRL would otherwise build itself; None where the run holds none. Loaded after the
+    # server preflights, so a misconfigured server fails before a second model load.
+    ref_model = load_reference_model_for_on_policy_grpo(
+        args,
+        model_config,
+        grpo_config,
+        parallelism_config,
+        tokenizer,
+        peft_config=peft_config,
+        reset_sinks=dist_args.reset_sinks,
+        attn_default=requested_attn,
+    )
 
     grpo_config.reward_weights = reward_weights
     apply_distributed_trainer_config(grpo_config, parallelism_config)
@@ -239,6 +255,7 @@ def main():
         eval_dataset=eval_dataset,
         processing_class=tokenizer,
         peft_config=peft_config,
+        ref_model=ref_model,
         callbacks=callbacks,
         **distributed_trainer_kwargs(args, dist_args, parallelism_config, dataset_presharded=dataset_presharded),
         rlrr_config=args.build_rlrr_config(),

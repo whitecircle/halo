@@ -5,7 +5,9 @@ The scratchpad is where the policy debugs, so its reply has to carry the diagnos
 a compile error as the compiler's first diagnostics (the last stderr line of g++ is a caret gutter),
 a crash as its signal and the traceback's tail, ahead of any stdout (the protocol cuts a long
 observation from the end), and a program run under the same limits its graded tests get — the
-problem's time limit, and a stack as large as the memory limit. Every program here really compiles
+problem's time limit, and a stack as large as the memory limit. A run that showed the model nothing
+(no input, a clean exit, nothing on stdout) stays spent, and a turn of nothing else is flagged
+untrainable, so the next turn retries on the recovery reserve. Every program here really compiles
 and runs on the local backend.
 
 Run: python tests/cpu/environments/test_scratchpad_feedback.py  (or pytest)
@@ -26,6 +28,7 @@ from src.environments.envs.tasks.coding.code_contests import (
     CodeContestsEnvironment,
 )
 from src.environments.envs.tasks.coding.grading import run_solution_against_tests
+from src.environments.episode import recovering_turn
 from src.environments.registry import resolve_environment
 from src.environments.sandbox.base import REPL_NO_OUTPUT_MESSAGE, SandboxExecutor, SandboxResult
 from src.environments.sandbox.local import LocalSubprocessSandbox
@@ -78,10 +81,27 @@ def _env(language="cpp", **kwargs):
     return CodeContestsEnvironment(language=language, max_test_calls=6, **kwargs)
 
 
-def _episode(env, time_limit=None):
+def _reset(env, time_limit=None):
     answer = {"tests": [{"input": "1\n", "output": "2\n"}], "time_limit": time_limit}
     ids, _ = env.reset(["solve it"], [{"answer": json.dumps(answer)}])
-    return env.get_trajectories(ids)[0]
+    return ids
+
+
+def _episode(env, time_limit=None):
+    return env.get_trajectories(_reset(env, time_limit))[0]
+
+
+def _turn(env, ids, *calls: tuple[str, dict]):
+    """One assistant turn through the protocol's step, its ``(tool, arguments)`` calls as the engine parses them."""
+    tool_calls = [
+        {"id": f"c{i}", "function": {"name": name, "arguments": json.dumps(arguments)}}
+        for i, (name, arguments) in enumerate(calls)
+    ]
+    return env.step(ids, [""], [{"finish_reason": "stop", "tool_calls": tool_calls}])[0]
+
+
+def _last_turn_flagged(traj) -> bool:
+    return next(m for m in reversed(traj.messages) if m.role == "assistant").calls_rejected
 
 
 def _scratchpad(env, traj, **arguments):
@@ -328,9 +348,111 @@ def test_a_clean_input_less_run_that_writes_only_to_stderr_is_starved():
     output: it counts as starved, and spends its run."""
     env = _env(language="python")
     traj = _episode(env)
-    reply = _scratchpad(env, traj, code="import sys\nsys.stderr.write('debug: read nothing\\n')")
+    reply = _scratchpad(
+        env, traj, code="import sys\ndata = sys.stdin.read()\nsys.stderr.write('debug: read nothing\\n')"
+    )
     assert reply == f"{REPL_NO_OUTPUT_MESSAGE}\n{NO_STDIN_NOTE}", reply
     assert env._test_calls(traj) == 1 and _starved_runs(env, traj) == 1.0
+
+
+def test_a_turn_of_only_starved_runs_is_flagged_stays_spent_and_the_next_turn_recovers():
+    """A turn whose every call was a silent input-less run showed the model nothing: it is flagged untrainable
+    like a turn of refused calls, so the next turn runs on the recovery reserve instead of a fresh cap. Unlike a
+    refusal the runs stay spent and booked as runs, their replies unchanged, and no recovery price is charged;
+    ``episode/starved_turns`` counts the turn, ``episode/starved_test_runs`` every run."""
+    env = _env(language="python", tool_success_reward=0.05, length_cutoff_penalty=0.3)
+    ids = _reset(env)
+    step = _turn(
+        env,
+        ids,
+        (env.test_tool_name, {"code": _READS_INPUT}),
+        (env.test_tool_name, {"code": "import sys\nsys.stdin.read()"}),
+    )
+    traj = step.trajectory
+    assert _last_turn_flagged(traj) and recovering_turn(traj)
+    replies = traj.messages[-2:]
+    assert [m.content for m in replies] == [f"{REPL_NO_OUTPUT_MESSAGE}\n{NO_STDIN_NOTE}"] * 2
+    assert all(type(m.content) is str for m in replies), "the reply's marker never reaches the conversation"
+    assert env._test_calls(traj) == 2 and traj.info["successful_tool_calls"] == 2
+    assert step.reward == pytest.approx(0.10), "paid as runs: no refund, no charge"
+    assert env._tool_use_shaping(traj) == 0.0, "not a cut or empty turn: no length_cutoff_penalty"
+    metrics = env.rollout_metrics(traj)
+    assert (metrics["episode/starved_test_runs"], metrics["episode/starved_turns"]) == (2.0, 1.0)
+
+    step = _turn(env, ids, (env.test_tool_name, {"code": _READS_INPUT, "stdin": "1\n"}))
+    assert step.trajectory.messages[-1].content == "2"
+    assert not _last_turn_flagged(step.trajectory) and not recovering_turn(step.trajectory)
+    assert env._test_calls(step.trajectory) == 3
+    assert env.rollout_metrics(step.trajectory)["episode/starved_turns"] == 1.0
+
+
+def test_a_starved_run_beside_a_productive_call_leaves_the_turn_trainable():
+    """A run that printed on its input, or a graded submission, did something: the turn trains, and the starved
+    run beside it is counted as a run, not as a starved turn."""
+    env = _env(language="python")
+    for productive in (
+        (env.test_tool_name, {"code": "print(int(input()) + 1)", "stdin": "1\n"}),
+        (SUBMIT_TOOL, {"code": "print(0)"}),
+    ):
+        step = _turn(env, _reset(env), (env.test_tool_name, {"code": _READS_INPUT}), productive)
+        traj = step.trajectory
+        assert not _last_turn_flagged(traj) and not recovering_turn(traj), productive
+        metrics = env.rollout_metrics(traj)
+        assert (metrics["episode/starved_test_runs"], metrics["episode/starved_turns"]) == (1.0, 0.0), productive
+
+
+@pytest.mark.parametrize(
+    "arguments",
+    [
+        {"code": "import sys\nsys.stdin.read()", "stdin": "1\n"},
+        {"code": "print(7)"},
+        {"code": "print(int(input()) + 1)"},
+    ],
+    ids=["silent-on-input", "output-on-no-input", "crash-on-no-input"],
+)
+def test_a_run_given_input_or_that_showed_something_is_not_flagged(arguments):
+    env = _env(language="python")
+    step = _turn(env, _reset(env), (env.test_tool_name, arguments))
+    assert not _last_turn_flagged(step.trajectory) and not recovering_turn(step.trajectory)
+    assert env.rollout_metrics(step.trajectory)["episode/starved_turns"] == 0.0
+
+
+@pytest.mark.parametrize(
+    ("language", "code", "starved"),
+    [
+        ("python", "def solve(n):\n    return n + 1\nassert solve(1) == 2\nassert solve(41) == 42", False),
+        ("python", "# reads input() later\nx = 1", False),
+        ("python", "import sys\nfor line in sys.stdin:\n    pass", True),
+        ("python", "data = open(0).read()", True),
+        (
+            "python",
+            'import io, sys\nsys.stdin = io.StringIO("1 2\\n")\nassert sum(map(int, input().split())) == 3',
+            False,
+        ),
+    ],
+    ids=["passing-assert-self-test", "input-only-in-a-comment", "sys-stdin-loop", "open-fd-0", "stringio-self-test"],
+)
+def test_only_a_silent_run_of_a_program_that_reads_input_is_starved(language, code, starved):
+    """A silent input-less run counts as starved only when its program reads input: a self-test that embeds its
+    own and passed told the model so, and a mention of an input call inside a comment reads nothing."""
+    env = _env(language=language)
+    step = _turn(env, _reset(env), (env.test_tool_name, {"code": code}))
+    assert step.trajectory.messages[-1].content == f"{REPL_NO_OUTPUT_MESSAGE}\n{NO_STDIN_NOTE}"
+    assert _last_turn_flagged(step.trajectory) is starved and recovering_turn(step.trajectory) is starved
+    assert env.rollout_metrics(step.trajectory)["episode/starved_test_runs"] == (1.0 if starved else 0.0)
+
+
+def test_starved_turns_separate_a_starved_run_flagging_its_turn_from_an_unknown_call_alone():
+    """A turn of unknown calls is flagged without a starved run; one whose only other call is unknown is flagged
+    for its starved run, and only that one counts in ``episode/starved_turns``."""
+    env = _env(language="python")
+    ids = _reset(env)
+    step = _turn(env, ids, ("test_tool", {}))
+    assert _last_turn_flagged(step.trajectory)
+    assert env.rollout_metrics(step.trajectory)["episode/starved_turns"] == 0.0
+    step = _turn(env, ids, ("test_tool", {}), (env.test_tool_name, {"code": _READS_INPUT}))
+    assert _last_turn_flagged(step.trajectory) and recovering_turn(step.trajectory)
+    assert env.rollout_metrics(step.trajectory)["episode/starved_turns"] == 1.0
 
 
 def test_a_direct_call_outside_an_episode_gets_the_plain_note():

@@ -16,7 +16,7 @@ from unittest import mock
 
 import pytest
 from transformers import TrainingArguments
-from trl import DPOConfig, ModelConfig, RewardConfig, SFTConfig
+from trl import DPOConfig, GRPOConfig, ModelConfig, RewardConfig, SFTConfig
 
 from src.args.distributed_args import DistributedArguments
 from src.args.dpo_args import DPOScriptArguments
@@ -26,9 +26,11 @@ from src.args.self_distill_args import SelfDistillationArguments
 from src.args.sft_args import SFTScriptArguments
 from src.configs.async_training_config import AsyncTrainingConfig
 from src.configs.offline_grpo_config import OfflineGRPOConfig
+from src.configs.smpo_config import SmoothMarginPOConfig
 from src.training.parser import (
     _TOOLKIT_DEFAULTS,
     H4ArgumentParser,
+    _expand_output_dir,
 )
 
 # Simple target dataclasses for parsing
@@ -65,6 +67,24 @@ def _write_yaml(content: str, suffix: str = ".yaml") -> str:
     with os.fdopen(fd, "w") as f:
         f.write(content)
     return path
+
+
+def _parse_with_argv(parser, argv):
+    old_argv = sys.argv
+    sys.argv = argv
+    try:
+        return parser.parse()
+    finally:
+        sys.argv = old_argv
+
+
+def _parse_yaml_launch(parser, yaml_body: str, *overrides: str):
+    """``parse()`` as a ``<script> config.yaml [--overrides]`` launch does it."""
+    path = _write_yaml(yaml_body)
+    try:
+        return _parse_with_argv(parser, ["prog", path, *overrides])
+    finally:
+        os.unlink(path)
 
 
 # parse_yaml_file: nothing is migrated, nothing is stripped
@@ -106,24 +126,14 @@ def test_plain_config_parses_unchanged():
         os.unlink(path)
 
 
-# _apply_toolkit_defaults
+# Toolkit defaults: a value the YAML did not write, applied before the dataclasses are built
 
 
 def test_toolkit_defaults_applied():
-    """use_liger_kernel and bf16 should default to True when not explicitly set."""
-    path = _write_yaml("name: defaults_test\n")
-    try:
-        parser = H4ArgumentParser((SimpleConfig,))
-        (result,) = parser.parse_yaml_file(path, allow_extra_keys=False)
-        # Before applying defaults
-        assert result.use_liger_kernel is False
-        assert result.bf16 is False
-        # Apply toolkit defaults (no fields explicitly set)
-        H4ArgumentParser._apply_toolkit_defaults([result], set())
-        assert result.use_liger_kernel is True, "use_liger_kernel should be True"
-        assert result.bf16 is True, "bf16 should be True"
-    finally:
-        os.unlink(path)
+    """use_liger_kernel and bf16 default to True when not explicitly set."""
+    result = _parse_yaml_launch(H4ArgumentParser((SimpleConfig,)), "name: defaults_test\n")
+    assert result.use_liger_kernel is True, "use_liger_kernel should be True"
+    assert result.bf16 is True, "bf16 should be True"
 
 
 def test_every_declared_toolkit_default_is_applied():
@@ -135,51 +145,40 @@ def test_every_declared_toolkit_default_is_applied():
     with nothing said.
     """
     opposites = {name: (not value if isinstance(value, bool) else None) for name, value in _TOOLKIT_DEFAULTS.items()}
-    config = make_dataclass("AllDefaults", [(name, bool, field(default=v)) for name, v in opposites.items()])()
+    all_defaults = make_dataclass("AllDefaults", [(name, bool, field(default=v)) for name, v in opposites.items()])
 
-    H4ArgumentParser._apply_toolkit_defaults([config], set())
+    config = _parse_yaml_launch(H4ArgumentParser((all_defaults,)), "{}\n")
 
     for name, expected in _TOOLKIT_DEFAULTS.items():
         assert getattr(config, name) == expected, f"toolkit default {name}={expected} was not applied"
 
 
 def test_toolkit_defaults_not_overridden():
-    """Explicitly set fields should not be overridden by toolkit defaults."""
-    path = _write_yaml("use_liger_kernel: false\nbf16: false\nname: explicit\n")
-    try:
-        parser = H4ArgumentParser((SimpleConfig,))
-        (result,) = parser.parse_yaml_file(path, allow_extra_keys=False)
-        # Simulate user explicitly setting these
-        explicitly_set = {"use_liger_kernel", "bf16"}
-        H4ArgumentParser._apply_toolkit_defaults([result], explicitly_set)
-        assert result.use_liger_kernel is False, "Should remain False when explicitly set"
-        assert result.bf16 is False, "Should remain False when explicitly set"
-    finally:
-        os.unlink(path)
+    """Explicitly set fields are not overridden by toolkit defaults."""
+    result = _parse_yaml_launch(
+        H4ArgumentParser((SimpleConfig,)), "use_liger_kernel: false\nbf16: false\nname: explicit\n"
+    )
+    assert result.use_liger_kernel is False, "Should remain False when explicitly set"
+    assert result.bf16 is False, "Should remain False when explicitly set"
 
 
 def test_toolkit_defaults_partial_override():
-    """Only non-explicitly-set toolkit defaults should be applied."""
-    path = _write_yaml("use_liger_kernel: false\nname: partial\n")
-    try:
-        parser = H4ArgumentParser((SimpleConfig,))
-        (result,) = parser.parse_yaml_file(path, allow_extra_keys=False)
-        # User explicitly set use_liger_kernel only
-        explicitly_set = {"use_liger_kernel"}
-        H4ArgumentParser._apply_toolkit_defaults([result], explicitly_set)
-        assert result.use_liger_kernel is False, "Explicitly set, should stay False"
-        assert result.bf16 is True, "Not explicitly set, should become True"
-    finally:
-        os.unlink(path)
+    """Only the toolkit defaults the user left unset are applied."""
+    result = _parse_yaml_launch(H4ArgumentParser((SimpleConfig,)), "use_liger_kernel: false\nname: partial\n")
+    assert result.use_liger_kernel is False, "Explicitly set, should stay False"
+    assert result.bf16 is True, "Not explicitly set, should become True"
 
 
-def test_toolkit_defaults_set_on_first_matching_dataclass_only():
-    """Each toolkit default is applied to exactly ONE object — the first that has the field.
+def test_cli_override_counts_as_explicitly_set():
+    """A CLI value, dashed spelling included, is explicit: the default must not reverse it."""
+    result = _parse_yaml_launch(H4ArgumentParser((SimpleConfig,)), "name: cli\n", "--use-liger-kernel=false")
+    assert result.use_liger_kernel is False, "toolkit default reversed --use-liger-kernel=false"
+    assert result.bf16 is True
 
-    The loop ``break``s after the first match, so when two parsed dataclasses both expose
-    bf16, only the first receives the default. Pinning this prevents a future refactor from
-    silently scattering the flag onto every config.
-    """
+
+def test_toolkit_default_reaches_every_declarer_like_a_yaml_value():
+    """A toolkit default is the value the YAML would carry, so it reaches every dataclass declaring
+    the field, as a YAML key does."""
 
     @dataclass
     class First:
@@ -189,14 +188,13 @@ def test_toolkit_defaults_set_on_first_matching_dataclass_only():
     class Second:
         bf16: bool = False
 
-    a, b = First(), Second()
-    H4ArgumentParser._apply_toolkit_defaults([a, b], set())
-    assert a.bf16 is True, "first matching dataclass gets the default"
-    assert b.bf16 is False, "second matching dataclass is left untouched (break after first)"
+    a, b = _parse_yaml_launch(H4ArgumentParser((First, Second)), "{}\n")
+    assert (a.bf16, b.bf16) == (True, True)
 
 
-def test_toolkit_defaults_skip_objects_without_field():
-    """Objects lacking a toolkit field are skipped; the default lands on the one that has it."""
+def test_toolkit_defaults_skip_dataclasses_without_the_field():
+    """A default lands only where a dataclass declares the field: injected into a parser none of whose
+    dataclasses does, it would be refused as an unknown key."""
 
     @dataclass
     class NoFlags:
@@ -206,10 +204,10 @@ def test_toolkit_defaults_skip_objects_without_field():
     class HasFlag:
         use_liger_kernel: bool = False
 
-    no_flags, has_flag = NoFlags(), HasFlag()
-    H4ArgumentParser._apply_toolkit_defaults([no_flags, has_flag], set())
+    no_flags, has_flag = _parse_yaml_launch(H4ArgumentParser((NoFlags, HasFlag)), "{}\n")
     assert has_flag.use_liger_kernel is True
     assert not hasattr(no_flags, "use_liger_kernel")
+    assert _parse_yaml_launch(H4ArgumentParser((NoFlags,)), "{}\n").x == 1
 
 
 # parse_yaml_and_args: CLI override type casting
@@ -389,97 +387,54 @@ def test_empty_yaml():
         os.unlink(path)
 
 
-# _format_output_dir: strftime expansion
+# _expand_output_dir: strftime expansion
+
+
+def _expanded(output_dir: str) -> str:
+    return _expand_output_dir({"output_dir": output_dir, "name": "fmt"})["output_dir"]
 
 
 def test_format_output_dir_with_strftime():
-    """output_dir containing strftime codes should be expanded."""
-    path = _write_yaml('output_dir: "output/run-%Y-%m-%d"\nname: fmt\n')
-    try:
-        parser = H4ArgumentParser((OutputDirConfig,))
-        (result,) = parser.parse_yaml_file(path, allow_extra_keys=False)
-        H4ArgumentParser._format_output_dir([result])
-        expected = datetime.now().strftime("output/run-%Y-%m-%d")
-        assert result.output_dir == expected, f"Expected {expected}, got {result.output_dir}"
-    finally:
-        os.unlink(path)
+    """output_dir containing strftime codes is expanded."""
+    expected = datetime.now().strftime("output/run-%Y-%m-%d")
+    assert _expanded("output/run-%Y-%m-%d") == expected
 
 
 def test_format_output_dir_no_strftime():
-    """output_dir without strftime codes should remain unchanged."""
-    path = _write_yaml('output_dir: "output/plain-run"\nname: nofmt\n')
-    try:
-        parser = H4ArgumentParser((OutputDirConfig,))
-        (result,) = parser.parse_yaml_file(path, allow_extra_keys=False)
-        H4ArgumentParser._format_output_dir([result])
-        assert result.output_dir == "output/plain-run"
-    finally:
-        os.unlink(path)
+    """output_dir without strftime codes remains unchanged."""
+    assert _expanded("output/plain-run") == "output/plain-run"
 
 
 def test_format_output_dir_full_datetime():
-    """output_dir with full datetime pattern should expand correctly."""
-    template = "output/sft-%Y-%m-%dT%H-%M-%S"
-    path = _write_yaml(f'output_dir: "{template}"\n')
-    try:
-        parser = H4ArgumentParser((OutputDirConfig,))
-        (result,) = parser.parse_yaml_file(path, allow_extra_keys=False)
-        H4ArgumentParser._format_output_dir([result])
-        assert "%" not in result.output_dir, f"Unexpanded codes in: {result.output_dir}"
-        assert result.output_dir.startswith("output/sft-")
-    finally:
-        os.unlink(path)
+    """output_dir with a full datetime pattern expands completely."""
+    expanded = _expanded("output/sft-%Y-%m-%dT%H-%M-%S")
+    assert "%" not in expanded, f"Unexpanded codes in: {expanded}"
+    assert expanded.startswith("output/sft-")
 
 
 def test_format_output_dir_percent_prose_survives():
     """Non-directive percent sequences are prose and must survive byte-identical — a whole-string
     strftime lets glibc expand `%-d` (no-padding day), turning `sft-100%-data` into `sft-10014ata`."""
     for raw in ("output/sft-100%-data", "output/50%_subset", "output/run-100%"):
-        path = _write_yaml(f'output_dir: "{raw}"\n')
-        try:
-            parser = H4ArgumentParser((OutputDirConfig,))
-            (result,) = parser.parse_yaml_file(path, allow_extra_keys=False)
-            H4ArgumentParser._format_output_dir([result])
-            assert result.output_dir == raw, f"prose percent mangled: {raw!r} -> {result.output_dir!r}"
-        finally:
-            os.unlink(path)
+        assert _expanded(raw) == raw, f"prose percent mangled: {raw!r} -> {_expanded(raw)!r}"
 
 
 def test_format_output_dir_mixed_prose_and_directives():
     """Real directives expand while adjacent prose percents stay intact."""
-    path = _write_yaml('output_dir: "output/run-50%_subset-%Y%m%d"\n')
-    try:
-        parser = H4ArgumentParser((OutputDirConfig,))
-        (result,) = parser.parse_yaml_file(path, allow_extra_keys=False)
-        H4ArgumentParser._format_output_dir([result])
-        expected = "output/run-50%_subset-" + datetime.now().strftime("%Y%m%d")
-        assert result.output_dir == expected, f"Expected {expected}, got {result.output_dir}"
-    finally:
-        os.unlink(path)
+    expected = "output/run-50%_subset-" + datetime.now().strftime("%Y%m%d")
+    assert _expanded("output/run-50%_subset-%Y%m%d") == expected
 
 
 def test_format_output_dir_percent_escape():
     """%% keeps its strftime escape meaning: a literal percent."""
-    path = _write_yaml('output_dir: "output/100%%-data"\n')
-    try:
-        parser = H4ArgumentParser((OutputDirConfig,))
-        (result,) = parser.parse_yaml_file(path, allow_extra_keys=False)
-        H4ArgumentParser._format_output_dir([result])
-        assert result.output_dir == "output/100%-data"
-    finally:
-        os.unlink(path)
+    assert _expanded("output/100%%-data") == "output/100%-data"
 
 
-def test_format_output_dir_no_output_dir_field():
-    """Objects without output_dir should be silently skipped."""
-    path = _write_yaml("name: no_outdir\n")
-    try:
-        parser = H4ArgumentParser((SimpleConfig,))
-        (result,) = parser.parse_yaml_file(path, allow_extra_keys=False)
-        H4ArgumentParser._format_output_dir([result])
-        assert not hasattr(result, "output_dir")
-    finally:
-        os.unlink(path)
+def test_format_output_dir_leaves_other_values_alone():
+    """Only output_dir expands, and only when it is a string."""
+    values = {"name": "run-%Y", "output_dir": None}
+    assert _expand_output_dir(values) == values
+    assert _expand_output_dir({"name": "run-%Y"}) == {"name": "run-%Y"}
 
 
 # YAML 1.2 numeric parsing (ruamel.yaml)
@@ -509,47 +464,6 @@ def test_scientific_notation_with_decimal_parsed_as_float():
         os.unlink(path)
 
 
-# __post_override__: re-deriving __post_init__ state after CLI overrides
-
-
-@dataclass
-class DerivedStateConfig:
-    base: int = 1
-    other: str = "x"
-
-    def __post_init__(self):
-        self.doubled = self.base * 2
-
-    def __post_override__(self, overridden_fields: set):
-        self.seen_overrides = set(overridden_fields)
-        if "base" in overridden_fields:
-            self.doubled = self.base * 2
-
-
-def test_post_override_hook_rederives_state():
-    """A CLI override bypasses __init__; the hook must re-derive __post_init__-derived state."""
-    path = _write_yaml("base: 3\n")
-    try:
-        parser = H4ArgumentParser((DerivedStateConfig,))
-        (result,) = parser.parse_yaml_and_args(path, ["--base=5"])
-        assert result.base == 5
-        assert result.doubled == 10, f"derived state stale after override: {result.doubled}"
-        assert result.seen_overrides == {"base"}
-    finally:
-        os.unlink(path)
-
-
-def test_post_override_hook_skipped_without_overrides():
-    path = _write_yaml("base: 3\n")
-    try:
-        parser = H4ArgumentParser((DerivedStateConfig,))
-        (result,) = parser.parse_yaml_and_args(path, [])
-        assert result.doubled == 6
-        assert not hasattr(result, "seen_overrides"), "__post_override__ must not run without overrides"
-    finally:
-        os.unlink(path)
-
-
 def test_list_cli_override_replaces_yaml_list():
     """A CLI list override must fully replace the YAML list, never merge with it."""
     path = _write_yaml("context_fields:\n- old_field\n")
@@ -564,15 +478,6 @@ def test_list_cli_override_replaces_yaml_list():
 
 
 # parse(): .yml suffix + explicit first-position CLI flag
-
-
-def _parse_with_argv(parser, argv):
-    old_argv = sys.argv
-    sys.argv = argv
-    try:
-        return parser.parse()
-    finally:
-        sys.argv = old_argv
 
 
 def test_parse_accepts_yml_suffix():
@@ -603,17 +508,6 @@ def test_dashed_cli_flag_counts_as_explicit():
     parser = H4ArgumentParser((SimpleConfig,))
     result = _parse_with_argv(parser, ["prog", "--use-liger-kernel=false", "--name", "cli"])
     assert result.use_liger_kernel is False, "toolkit default reversed the dashed-spelled --use-liger-kernel=false"
-
-
-def test_explicit_set_scan_normalizes_dashed_flags():
-    old_argv = sys.argv
-    sys.argv = ["prog", "--use-liger-kernel=false", "--per-device-train-batch-size", "2"]
-    try:
-        explicitly_set = H4ArgumentParser._get_explicitly_set_fields()
-    finally:
-        sys.argv = old_argv
-    assert "use_liger_kernel" in explicitly_set
-    assert "per_device_train_batch_size" in explicitly_set
 
 
 @pytest.mark.parametrize(
@@ -698,13 +592,14 @@ def test_dashed_and_underscored_spellings_are_one_flag():
         os.unlink(path)
 
 
-# mixed_precision stays in sync with post-parse fp16/bf16 mutation
+# mixed_precision follows the final fp16/bf16 flags
 
 
 def test_toolkit_bf16_default_syncs_mixed_precision():
-    """TrainingArguments.__post_init__ derives mixed_precision BEFORE the toolkit bf16 default is
-    applied; parse() must re-derive it or the Accelerator autocasts 'no' while bf16 is True."""
-    path = _write_yaml("output_dir: /tmp/h4_mp_default\n")
+    """TrainingArguments.__post_init__ derives mixed_precision from bf16, so the toolkit default must
+    reach it, or the Accelerator autocasts 'no' while bf16 is True."""
+    # use_cpu keeps TrainingArguments' bf16-support validation off GPU-less test machines.
+    path = _write_yaml("output_dir: /tmp/h4_mp_default\nuse_cpu: true\n")
     try:
         parser = H4ArgumentParser((TrainingArguments,))
         result = _parse_with_argv(parser, ["prog", path])
@@ -717,7 +612,7 @@ def test_toolkit_bf16_default_syncs_mixed_precision():
 def test_toolkit_bf16_default_yields_to_explicit_fp16():
     """An explicit fp16 must win over the toolkit bf16 default — applying both would form the
     fp16+bf16 pair TrainingArguments rejects (and an fp16 GradScaler over a bf16 autocast)."""
-    path = _write_yaml("output_dir: /tmp/h4_mp_fp16\nfp16: true\n")
+    path = _write_yaml("output_dir: /tmp/h4_mp_fp16\nfp16: true\nuse_cpu: true\n")
     try:
         parser = H4ArgumentParser((TrainingArguments,))
         result = _parse_with_argv(parser, ["prog", path])
@@ -743,8 +638,8 @@ def test_cli_bf16_false_override_rederives_mixed_precision():
 
 
 def test_cli_fp16_override_conflicting_with_yaml_bf16_raises():
-    """--fp16=true on top of bf16: true escapes __post_init__'s at-most-one check via setattr;
-    the re-derivation must fail loud instead of training with both flags set."""
+    """--fp16=true on top of bf16: true must meet __post_init__'s at-most-one check and fail loud
+    instead of training with both flags set."""
     path = _write_yaml("output_dir: /tmp/h4_mp_conflict\nbf16: true\nuse_cpu: true\n")
     try:
         parser = H4ArgumentParser((TrainingArguments,))
@@ -925,7 +820,7 @@ def test_bool_union_with_string_member_admits_strings():
         os.unlink(path)
 
 
-# Un-castable CLI overrides fail loud instead of setattr-ing a raw string
+# Un-castable CLI overrides fail loud instead of passing a raw string on
 
 
 @dataclass
@@ -961,14 +856,16 @@ def test_cli_override_dict_field_rejected():
         os.unlink(path)
 
 
-def test_cli_override_report_to_rejected():
-    """Pin the real seam: --report_to=none clears to None (never the raw string, which
-    report_to[0]-style consumers would index char-wise), and a value override still fails loud."""
-    path = _write_yaml("output_dir: /tmp/h4_report_to\n")
+@pytest.mark.parametrize("spelling", ["none", "None", "null"])
+def test_cli_override_report_to_none_silences_reporting(spelling):
+    """Pin the real seam: every none-spelling reaches transformers as its own "none", which
+    ``__post_init__`` turns into no integrations. None would come out as [None], which the Trainer
+    refuses; a value override still fails loud."""
+    path = _write_yaml("output_dir: /tmp/h4_report_to\nreport_to: wandb\n")
     try:
         parser = H4ArgumentParser((TrainingArguments,))
-        (parsed,) = parser.parse_yaml_and_args(path, ["--report_to=none"])
-        assert parsed.report_to is None
+        (parsed,) = parser.parse_yaml_and_args(path, [f"--report_to={spelling}"])
+        assert parsed.report_to == []
         with pytest.raises(ValueError, match="report_to"):
             parser.parse_yaml_and_args(path, ["--report_to=wandb"])
     finally:
@@ -1087,6 +984,101 @@ def test_help_renders_for_real_script_dataclasses():
     text = parser.format_help()
     assert "--fsdp_shard_ep1_experts" in text
     assert "--advantage_method" in text
+
+
+# CLI overrides are construction values: every __post_init__ derives from the final configuration
+
+
+@dataclass
+class _DerivedStateConfig:
+    base: int = 1
+
+    def __post_init__(self):
+        self.doubled = self.base * 2
+
+
+@dataclass
+class _GuardedConfig:
+    count: int = 1
+
+    def __post_init__(self):
+        if self.count < 1:
+            raise ValueError(f"count must be >= 1, got {self.count}")
+
+
+def test_cli_override_reaches_post_init_derived_state():
+    """State ``__post_init__`` derives from a field follows the CLI value, not the YAML one."""
+    path = _write_yaml("base: 3\n")
+    try:
+        (result,) = H4ArgumentParser((_DerivedStateConfig,)).parse_yaml_and_args(path, ["--base=5"])
+    finally:
+        os.unlink(path)
+    assert (result.base, result.doubled) == (5, 10), f"derived state kept the YAML value: {result.doubled}"
+
+
+def test_cli_override_meets_every_post_init_guard():
+    """A guard in any ``__post_init__`` holds a CLI value to the bound a YAML value meets, with no
+    opt-in base class on the config."""
+    path = _write_yaml("count: 2\n")
+    try:
+        with pytest.raises(ValueError, match="count must be >= 1"):
+            H4ArgumentParser((_GuardedConfig,)).parse_yaml_and_args(path, ["--count=0"])
+    finally:
+        os.unlink(path)
+
+
+@pytest.mark.parametrize(
+    ("override", "steps_per_generation", "generation_batch_size"),
+    [("--gradient_accumulation_steps=1", 1, 2), ("--per_device_train_batch_size=4", 8, 32)],
+)
+def test_cli_override_rederives_the_grpo_generation_geometry(
+    override, steps_per_generation, generation_batch_size, tmp_path
+):
+    """TRL's ``GRPOConfig.__post_init__`` derives ``steps_per_generation`` from
+    ``gradient_accumulation_steps`` and ``generation_batch_size`` from it and the per-device batch. Kept at
+    the YAML's 8, ``--gradient_accumulation_steps=1`` would still generate once every 8 steps."""
+    path = tmp_path / "grpo.yaml"
+    path.write_text(
+        f"output_dir: {tmp_path / 'out'}\nuse_cpu: true\nbf16: false\nnum_generations: 2\n"
+        "per_device_train_batch_size: 2\ngradient_accumulation_steps: 8\n"
+    )
+    (config,) = H4ArgumentParser((GRPOConfig,)).parse_yaml_and_args(str(path), [override])
+    assert config.world_size == 1
+    assert (config.steps_per_generation, config.generation_batch_size) == (
+        steps_per_generation,
+        generation_batch_size,
+    )
+
+
+def test_cli_fp16_override_reaches_the_toolkit_bf16_derivation(tmp_path):
+    """``SmoothMarginPOConfig.__post_init__`` derives an unset ``bf16`` from ``fp16``. Derived from the
+    YAML alone it comes out true, and ``--fp16=true`` then forms the fp16+bf16 pair the run never asked
+    for."""
+    path = tmp_path / "smpo.yaml"
+    path.write_text(f"output_dir: {tmp_path / 'out'}\nuse_cpu: true\n")
+    with mock.patch("src.training.parser.install_log_tee"):
+        config = _parse_with_argv(H4ArgumentParser((SmoothMarginPOConfig,)), ["prog", str(path), "--fp16=true"])
+    assert (config.fp16, config.bf16, config.mixed_precision) == (True, False, "fp16")
+
+
+def test_output_dir_is_rank0s_expansion_broadcast_once(tmp_path):
+    """Every rank builds the configs from rank 0's expansion: a per-rank ``datetime.now()`` can straddle a
+    second, and each node would then tee ``run.log`` into its own directory."""
+    path = tmp_path / "out.yaml"
+    path.write_text('output_dir: "run-%Y%m%d-%H%M%S"\n')
+    broadcasts = []
+
+    def rank0_value(value):
+        broadcasts.append(value)
+        return str(tmp_path / "rank0")
+
+    with (
+        mock.patch("src.training.parser.broadcast_from_rank0", side_effect=rank0_value),
+        mock.patch("src.training.parser.install_log_tee"),
+    ):
+        config = _parse_with_argv(H4ArgumentParser((OutputDirConfig,)), ["prog", str(path)])
+    assert config.output_dir == str(tmp_path / "rank0")
+    assert len(broadcasts) == 1 and "%" not in broadcasts[0], broadcasts
 
 
 if __name__ == "__main__":

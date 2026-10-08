@@ -501,7 +501,7 @@ def test_merge_models_refuses_asymmetric_key_sets(tmp_path):
     shared = {"model.embed_tokens.weight": torch.zeros(4, 8)}
     a = _write_gathered_checkpoint(tmp_path / "a", dict(shared))
     b = _write_gathered_checkpoint(tmp_path / "b", {**shared, "lm_head.weight": torch.ones(4, 8)})
-    with pytest.raises(ValueError, match="absent from the merge's reference key set"):
+    with pytest.raises(ValueError, match=r"does not carry the merge's reference key set.* carries 1 more \['lm_head"):
         _merge(models=[str(a), str(b)], output_dir=str(tmp_path / "out"))
 
 

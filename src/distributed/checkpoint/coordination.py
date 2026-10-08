@@ -109,8 +109,9 @@ def consensus_read(
 
 
 @contextmanager
-def joined_streaming_reader(checkpoint: str, keys: Iterable[str], *, what: str) -> Iterator[Any]:
-    """COLLECTIVE. Open the checkpoint's shards for ``keys``, agree every rank opened them, close on exit.
+def joined_streaming_reader(checkpoint: str, keys: Iterable[str] | None, *, what: str) -> Iterator[Any]:
+    """COLLECTIVE. Open the checkpoint's shards for ``keys`` (``None``: every key), agree every rank opened
+    them, close on exit.
 
     Opening is what validates: a truncated or torn shard raises inside the constructor, HERE, before
     the caller's own collectives — so the verdict is joined before anything downstream can strand a

@@ -319,7 +319,7 @@ GptOss `sinks` after it. Both are **collective**: every TP-mesh rank must drive 
 hangs.
 
 On resume every TP shape is Path B: the training scripts repoint `model_name_or_path` at the
-checkpoint, so the weights load at construction and `CheckpointLoader._load_tp` skips the re-read.
+checkpoint, so the weights load at construction and `CheckpointLoader._load_streamed` skips the re-read.
 Where it does read (a best-model reload, or a model built from elsewhere), each rank streams the
 checkpoint's full tensors and `distribute_tensor`s them into the live DTensor placements.
 

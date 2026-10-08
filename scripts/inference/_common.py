@@ -23,7 +23,6 @@ from typing import TYPE_CHECKING
 from datasets import Dataset
 
 from src.data.sources.s3_client import S3Client, build_s3_uri, load_dataset_from_s3_uri, push_dataset_to_s3_uri
-from src.inference.response import OpenAIResponse
 from src.log import configure_cli_logging
 
 if TYPE_CHECKING:
@@ -221,15 +220,17 @@ def follow_up_messages(row, field: str) -> list[dict] | None:
     return follow_up if isinstance(follow_up, list) and follow_up else None
 
 
-def assistant_message_from_response(response: OpenAIResponse) -> dict:
-    """The assistant turn for a generated response, as the wire and the saved record both spell it.
+def assistant_turn(content: str | None, tool_calls: list | None = None) -> dict:
+    """A generated assistant turn as the wire and every saved record spell it: ``role`` and
+    ``content``, plus ``tool_calls`` where the reply made any — never the reply object's other,
+    mostly null, SDK and engine fields.
 
     ``content`` stays ``None`` on a tool-call-only or empty reply: ``str(None)`` sends the literal
     text "None" to the next turn, which the model reads as the assistant's answer.
     """
-    message: dict = {"role": "assistant", "content": response.answer}
-    if response.tool_calls:
-        message["tool_calls"] = [tool_call.model_dump() for tool_call in response.tool_calls]
+    message: dict = {"role": "assistant", "content": content}
+    if tool_calls:
+        message["tool_calls"] = [tool_call.model_dump() for tool_call in tool_calls]
     return message
 
 

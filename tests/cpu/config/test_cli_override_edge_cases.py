@@ -1,9 +1,9 @@
 #!/usr/bin/env python
-"""CLI-override edge cases the naive setattr path gets wrong.
+"""CLI-override edge cases a naive cast gets wrong.
 
 Two classes of bug live here: a ``float | str`` field whose string sentinel (``"auto"``) cannot
-survive a blind ``float(val)`` cast, and a ``__post_init__`` cross-field guard that setattr bypasses
-because it never re-runs. Both are exercised through the real ``H4ArgumentParser`` override path.
+survive a blind ``float(val)`` cast, and a ``__post_init__`` cross-field guard the override must
+meet. Both are exercised through the real ``H4ArgumentParser`` override path.
 
 Run: ``python tests/cpu/config/test_cli_override_edge_cases.py`` (or ``pytest -m cpu``).
 """
@@ -69,7 +69,7 @@ def test_plain_float_still_rejects_a_non_numeric_override():
 
 
 def test_classification_mutual_exclusion_guard_fires_on_cli_override():
-    """The YAML path already rejects setting both; the CLI setattr path must too (__post_override__)."""
+    """The YAML path already rejects setting both; the CLI path must too."""
 
     parser = H4ArgumentParser((ClassificationConfig,))
     with pytest.raises(ValueError, match="mutually exclusive"):
@@ -84,11 +84,6 @@ def test_classification_single_class_weight_override_is_accepted():
     (parsed,) = _override(parser, ["--output_dir=/tmp/x", "--derive_class_weights=true"])
     assert parsed.derive_class_weights is True
     assert parsed.class_weights is None
-
-
-def test_post_override_guard_is_a_noop_when_neither_field_overridden():
-    cfg = ClassificationConfig(output_dir="/tmp/x", derive_class_weights=True)
-    cfg.__post_override__({"learning_rate"})  # must not raise on an unrelated override
 
 
 @dataclass

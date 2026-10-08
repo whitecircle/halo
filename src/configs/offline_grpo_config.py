@@ -6,7 +6,7 @@ from typing import Literal
 from transformers import TrainingArguments
 
 from src.args.mixins import ChunkedLogprobsArguments, DatasetNumProcArguments, ModelInitKwargsArguments
-from src.args.validation import RangeValidatedConfig
+from src.args.validation import RangeValidatedConfig, present, require_finite, require_int, require_positive_int
 
 
 @dataclass
@@ -127,10 +127,10 @@ class OfflineGRPOConfig(
         super().__post_init__()
 
     def _validate_ranges(self) -> None:
-        """The ``float | str`` union on ``best_completion_emphasis`` bypasses the parser's Literal
-        gate, so a misspelled sentinel would otherwise fail only inside ``datasets.map`` on
-        ``float(...)``."""
         super()._validate_ranges()
+        owner = type(self).__name__
+        # The ``float | str`` union bypasses the parser's Literal gate, so a misspelled sentinel would
+        # otherwise fail only inside ``datasets.map`` on ``float(...)``.
         emphasis = self.best_completion_emphasis
         if isinstance(emphasis, str):
             if emphasis != "auto":
@@ -138,9 +138,27 @@ class OfflineGRPOConfig(
                     f"best_completion_emphasis must be 'auto' or a number, got {emphasis!r}; "
                     f"'auto' is the only string sentinel (std-adaptive boost)."
                 )
-        elif emphasis != 0.0 and not emphasis > 1.0:
-            raise ValueError(
-                f"best_completion_emphasis must be 0.0 (off), a value > 1.0 (a boost), or 'auto', got "
-                f"{emphasis}. The consumer applies the factor only when it exceeds 1.0, so (0.0, 1.0] "
-                f"and negative values are silent no-ops."
-            )
+        else:
+            require_finite(owner, best_completion_emphasis=emphasis)
+            if emphasis != 0.0 and not emphasis > 1.0:
+                raise ValueError(
+                    f"best_completion_emphasis must be 0.0 (off), a value > 1.0 (a boost), or 'auto', got "
+                    f"{emphasis}. The consumer applies the factor only when it exceeds 1.0, so (0.0, 1.0] "
+                    f"and negative values are silent no-ops."
+                )
+        require_finite(owner, kl_beta=self.kl_beta)
+        if self.kl_beta < 0:
+            raise ValueError(f"{owner}: kl_beta must be >= 0 (0 = no KL term), got {self.kl_beta}")
+        require_finite(
+            owner, **present(min_log_prob=self.min_log_prob, initial_min_log_prob=self.initial_min_log_prob)
+        )
+        require_positive_int(
+            owner,
+            **present(
+                max_prompt_length=self.max_prompt_length,
+                max_completion_length=self.max_completion_length,
+                max_length=self.max_length,
+            ),
+        )
+        # A token id indexes the embedding table.
+        require_int(owner, minimum=0, **present(padding_value=self.padding_value))

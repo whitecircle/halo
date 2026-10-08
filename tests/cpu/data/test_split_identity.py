@@ -9,7 +9,9 @@ source differ then refuse to train. Proven on real ``datasets`` splits:
 2. a change to any sampled value, a list split differently over the same flat values, or a null where
    a copy holds an empty list, changes the digest;
 3. a binary column of large values (a preprocessed VLM split's ``pixel_values``) reaches the hash
-   one value at a time, never as one string spelling every sampled row.
+   one value at a time, never as one string spelling every sampled row;
+4. a media column stays out of the digest whether it decodes or not, nested or not: two nodes store
+   the same files under their own cache paths. A ``Json`` column, decodable but path-free, stays in.
 
     python tests/cpu/data/test_split_identity.py
 """
@@ -18,12 +20,31 @@ import hashlib
 import types
 
 import pytest
-from datasets import Dataset, Features, Sequence, Value, concatenate_datasets, load_from_disk
+from datasets import (
+    Audio,
+    Dataset,
+    Features,
+    Image,
+    Json,
+    List,
+    Sequence,
+    Value,
+    concatenate_datasets,
+    load_from_disk,
+)
 
 from src.data.sources import loading
 from src.data.sources.loading import _split_identity
 
 ROWS = 20
+# Each media feature with how one stored file sits in its column.
+MEDIA_FEATURES = {
+    "image": (Image(decode=False), lambda file: file),
+    "audio": (Audio(decode=False), lambda file: file),
+    "image-list": (List(Image(decode=False)), lambda file: [file]),
+    "image-in-struct": ({"picture": Image(decode=False)}, lambda file: {"picture": file}),
+    "decoded-image": (Image(), lambda file: file),
+}
 FEATURES = Features(
     {
         "text": Value("string"),
@@ -121,6 +142,38 @@ def test_large_binary_values_reach_the_hash_one_value_at_a_time(monkeypatch):
     assert identity.startswith("16 rows, content "), identity
     assert max(fed) <= LARGE_VALUE_BYTES, f"one update of {max(fed)} bytes: the sampled rows were spelled out whole"
     assert sum(fed) < 2 * 16 * LARGE_VALUE_BYTES, f"{sum(fed)} bytes fed for 16 values of {LARGE_VALUE_BYTES}"
+
+
+def _media_split(name: str, node: str, first_text: str = "row 0") -> Dataset:
+    """``ROWS`` rows whose media column stores each file under ``node``'s own cache path. Cast from the
+    stored struct rather than encoded, which for audio needs a codec the check never touches."""
+    feature, place = MEDIA_FEATURES[name]
+    stored = Dataset.from_dict(
+        {
+            "text": [first_text] + [f"row {i}" for i in range(1, ROWS)],
+            "media": [place({"bytes": bytes([i]) * 4, "path": f"/{node}/hf/blobs/{i}"}) for i in range(ROWS)],
+        }
+    )
+    return stored.cast(Features({"text": Value("string"), "media": feature}))
+
+
+@pytest.mark.parametrize("name", list(MEDIA_FEATURES))
+def test_media_paths_stay_out_of_the_digest_decoded_or_not(name):
+    node0, node1 = _media_split(name, "node0"), _media_split(name, "node1")
+    assert node0.data.column("media").to_pylist() != node1.data.column("media").to_pylist(), (
+        "premise: the two copies must store different paths"
+    )
+
+    assert _split_identity(node0) == _split_identity(node1), "identical rows refused over their cache paths"
+    assert _split_identity(_media_split(name, "node0", first_text="row 0 (re-pushed)")) != _split_identity(node0)
+
+
+def test_a_json_column_is_content_not_media():
+    def split(first: dict) -> Dataset:
+        rows = {"meta": [first] + [{"turn": i} for i in range(1, ROWS)]}
+        return Dataset.from_dict(rows, features=Features({"meta": Json()}))
+
+    assert _split_identity(split({"turn": 0, "tool": "search"})) != _split_identity(split({"turn": 0}))
 
 
 if __name__ == "__main__":

@@ -8,7 +8,9 @@ filesystem scope, so only the scope's load rank asks and the rest take the agree
 request on a shared input filesystem, one per node on per-node storage. Proven on a real gloo group
 by counting the requests each rank makes, and by every rank — probing or not — taking the branch the
 verdict decides. A probe that raises on a probing rank raises its cause on every rank, rather than
-leaving the peers in the consensus all-reduce until the process-group timeout.
+leaving the peers in the consensus all-reduce until the process-group timeout. Since one rank's
+answer is the whole scope's, a Hub it cannot reach must raise rather than read as a raw dataset;
+offline, a cache without the file is the absence it reads as.
 
     python tests/cpu/data/test_input_probe_scope.py
 """
@@ -19,7 +21,7 @@ import os
 
 import pytest
 from accelerate import PartialState
-from huggingface_hub.errors import EntryNotFoundError
+from huggingface_hub.errors import EntryNotFoundError, LocalEntryNotFoundError
 
 from src.data.pipeline import preprocessed_metadata
 from src.data.pipeline.preprocessed_metadata import PreprocessedDatasetMetadata, is_preprocessed_dataset
@@ -76,6 +78,28 @@ def _raising_probe_worker(rank: int, tmp_dir: str, ranks_per_node: int) -> None:
         outcome = f"{type(exc).__name__}: {exc}"
     with open(os.path.join(tmp_dir, f"rank_{rank}.json"), "w") as f:
         json.dump({"outcome": outcome}, f)
+
+
+def _uncached_hub_worker(rank: int, tmp_dir: str, offline: bool) -> None:
+    """Resolve the real probe against a Hub whose ``metadata.json`` download finds nothing in the cache,
+    which huggingface_hub raises online when the Hub is unreachable and offline when the file is uncached."""
+    requests = []
+
+    def _download(repo_id, filename, repo_type=None, **kwargs):
+        requests.append(repo_id)
+        raise LocalEntryNotFoundError("cannot find the requested files in the local cache")
+
+    preprocessed_metadata.hf_hub_download = _download
+    preprocessed_metadata.is_offline_mode = lambda: offline
+    try:
+        verdict = agree_input_probe_across_ranks(
+            lambda: is_preprocessed_dataset(HUB_PATH), HUB_PATH, "is_preprocessed_dataset"
+        )
+        outcome = f"verdict {verdict}"
+    except Exception as exc:  # the raise itself is the outcome under test
+        outcome = f"{type(exc).__name__}: {exc}"
+    with open(os.path.join(tmp_dir, f"rank_{rank}.json"), "w") as f:
+        json.dump({"requests": len(requests), "outcome": outcome}, f)
 
 
 def _run(tmp_path, *, shared: bool, ranks_per_node: int, stamped: bool) -> list[dict]:
@@ -137,6 +161,42 @@ def test_a_probe_raising_on_a_probing_rank_raises_its_cause_on_every_rank(tmp_pa
             f"RuntimeError: Probing {HUB_PATH} (is_preprocessed_dataset) failed on 1 of {WORLD_SIZE} rank(s) [0]. "
             "First (rank 0): ConnectionError: hub unreachable"
         ), f"rank {rank}: {outcomes[rank]}"
+
+
+def test_an_unreachable_hub_raises_on_every_rank_instead_of_reading_raw(tmp_path):
+    """Only rank 0 asks, so a transient Hub failure there is the whole job's answer: read as absence,
+    every rank would take the raw path for a dataset that may be preprocessed."""
+    run_gloo_ranks(
+        _uncached_hub_worker,
+        WORLD_SIZE,
+        str(tmp_path),
+        False,
+        pg_timeout=PG_TIMEOUT,
+        env={"DIST_SHARED_FILESYSTEM": "1"},
+    )
+    results = [json.loads((tmp_path / f"rank_{rank}.json").read_text()) for rank in range(WORLD_SIZE)]
+
+    assert sum(r["requests"] for r in results) == 1, results
+    for rank, result in enumerate(results):
+        assert not result["outcome"].startswith("verdict"), f"rank {rank} read an unreachable Hub as raw: {result}"
+        assert "The Hub could not be reached" in result["outcome"], f"rank {rank}: {result}"
+        assert "HF_HUB_OFFLINE=1" in result["outcome"], f"rank {rank}: {result}"
+
+
+def test_an_offline_cache_without_the_stamp_reads_raw_on_every_rank(tmp_path):
+    """Offline, the cache stands for the repo: a raw dataset cached without a ``metadata.json`` must still
+    train, so the same cache miss is a clean absence there."""
+    run_gloo_ranks(
+        _uncached_hub_worker,
+        WORLD_SIZE,
+        str(tmp_path),
+        True,
+        pg_timeout=PG_TIMEOUT,
+        env={"DIST_SHARED_FILESYSTEM": "1"},
+    )
+    outcomes = [json.loads((tmp_path / f"rank_{rank}.json").read_text())["outcome"] for rank in range(WORLD_SIZE)]
+
+    assert outcomes == ["verdict False"] * WORLD_SIZE, outcomes
 
 
 if __name__ == "__main__":

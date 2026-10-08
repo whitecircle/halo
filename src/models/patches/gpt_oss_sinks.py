@@ -62,7 +62,7 @@ class SinksPolicy(enum.StrEnum):
     @property
     def live(self) -> bool:
         """Whether the sink column participates in the softmax. Every gate keyed on live sinks
-        (kernel capability, implicit-reference KL, RL weight sync) applies to LIVE and TRAINABLE alike."""
+        (kernel capability, held-reference KL, RL weight sync) applies to LIVE and TRAINABLE alike."""
         return self is not SinksPolicy.NEUTRALIZED
 
 
@@ -356,7 +356,11 @@ def has_live_attention_sinks(model) -> bool:
     Read off the stamp rather than the tensors: the reset yields ``sinks is None`` only under
     flash_attention_2 and fills with ``dtype.min`` everywhere else, so a presence test reports reset
     sinks as live on the production Blackwell path, and by the time a trainer validates, ``sinks`` is
-    a sharded DTensor whose per-rank values would diverge.
+    a sharded DTensor whose per-rank values would diverge. A sinks model no toolkit loader stamped
+    (one TRL built itself) kept its pretrained sinks, which GptOss's default attention, eager, applies.
     """
     policy = stamped_sinks_policy(model)
-    return policy is not None and policy.live
+    if policy is not None:
+        return policy.live
+    config = getattr(model, "config", None)
+    return config is not None and model_has_sinks(config)

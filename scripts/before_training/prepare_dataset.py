@@ -33,13 +33,17 @@ from scripts._common import add_trust_remote_code_arg
 from src.checkpoint.tool_io import DISPLACED_SUFFIX, clear_staging_path
 from src.data.pipeline.preprocessed_metadata import PACKING_STRATEGIES, PREPROCESSING_MODES, PreprocessingConfig
 from src.data.pipeline.preprocessing import preprocess_dataset
-from src.data.pipeline.processing import resolve_map_num_proc
+from src.data.pipeline.processing import require_render_column, resolve_map_num_proc
 from src.data.pipeline.tokenizer_backend import TOKENIZER_BACKENDS
 from src.data.sources.loading import load_dataset_from_source
 from src.data.sources.paths import EVAL_SPLIT_NAMES, METADATA_FILE, parse_dataset_destination, parse_s3_uri
 from src.data.sources.s3_client import S3Client
 from src.log import configure_cli_logging
-from src.models.loading.tokenizer_setup import load_chat_template
+from src.models.loading.tokenizer_setup import (
+    adopt_tokenizer_chat_template,
+    load_chat_template,
+    set_run_chat_template,
+)
 from src.models.segment_markers import reject_compressed_kv_rows
 from src.models.structure import resolve_tokenizer
 
@@ -336,7 +340,7 @@ def apply_tokenizer_overrides(tokenizer, args) -> None:
     if args.bos_token:
         tokenizer.bos_token = args.bos_token
     if args.chat_template:
-        tokenizer.chat_template = load_chat_template(args.chat_template)
+        set_run_chat_template(tokenizer, load_chat_template(args.chat_template))
 
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
@@ -376,6 +380,7 @@ def setup_vlm_processor(args):
     tokenizer = resolve_tokenizer(processor)
 
     apply_tokenizer_overrides(tokenizer, args)
+    adopt_tokenizer_chat_template(processor)
 
     logger.info(f"VLM processor type: {type(processor).__name__}")
     logger.info(f"Tokenizer vocab size: {len(tokenizer)}")
@@ -421,6 +426,24 @@ def load_input_dataset(args) -> DatasetDict:
             logger.info(f"    columns: {ds.column_names}")
 
     return dataset
+
+
+def require_declared_columns(dataset: DatasetDict, config: PreprocessingConfig, source: str) -> None:
+    """Refuse a column flag naming no column of the splits the artifact bakes, before the tokenization
+    map reads it.
+
+    Takes the built ``config``, which has already refused a flag its mode does not read, so only the
+    columns this run consumes are checked. Unchecked, a missing conversation or text column dies as a
+    bare ``KeyError`` in a map worker, and a missing tools or images column bakes every row without it.
+    """
+    rendered = (
+        ("--text-field", config.text_field)
+        if config.mode == "text"
+        else ("--conversation-field", config.conversation_field)
+    )
+    for flag, column in (rendered, ("--tools-field", config.tools_field), ("--images-field", config.images_field)):
+        if column:
+            require_render_column(dataset, source, flag, column)
 
 
 def save_to_s3(output_dir: str, s3_uri: str, overwrite: bool = False):
@@ -601,6 +624,7 @@ def main():
         min_pixels=args.min_pixels,
         max_pixels=args.max_pixels,
     )
+    require_declared_columns(dataset, config, args.input)
 
     with tempfile.TemporaryDirectory() as temp_dir:
         logger.info(f"Processing dataset (temp dir: {temp_dir})")

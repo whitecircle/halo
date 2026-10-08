@@ -12,8 +12,8 @@ from dataclasses import fields as dataclass_fields
 from datetime import UTC, datetime
 from typing import Any
 
-from huggingface_hub import hf_hub_download
-from huggingface_hub.errors import EntryNotFoundError, RepositoryNotFoundError
+from huggingface_hub import hf_hub_download, is_offline_mode
+from huggingface_hub.errors import EntryNotFoundError, LocalEntryNotFoundError, RepositoryNotFoundError
 
 from src.data.shard_index import (
     PREPROCESSING_VERSION,
@@ -205,54 +205,69 @@ class PreprocessedDatasetMetadata:
         write_stamped_sidecar(path, self.to_dict())
 
 
-def _read_metadata_payload(path: str, *, best_effort: bool) -> dict[str, Any] | None:
+def _read_metadata_payload(path: str, *, s3_outage_reads_absent: bool) -> dict[str, Any] | None:
     """Raw ``metadata.json`` payload for a dataset path (local, S3 or Hub), or None if there is none.
 
     One reader behind both the detection probe and the metadata load, so the three sources cannot
-    drift apart. ``best_effort`` (the probe's contract) turns a transient failure into None after a
-    warning — an ABSENT metadata.json is the normal raw-dataset case and stays silent.
+    drift apart. None only on a confirmed absence: no file in the directory, a live S3 404, a Hub repo
+    without the file or a repo that is not there (offline, the cache stands for the repo). Every other
+    failure raises, so an unreachable source never reads as a raw dataset. The one exception is
+    ``s3_outage_reads_absent`` (the probe's): an S3 outage with no local mirror is read as absent with
+    a warning, since an absence is never mirrored and a warm-cache raw dataset loads without S3.
     """
     source_type, bucket, key = parse_dataset_source(path)
-    try:
-        if source_type == "s3":
-            # Mirrored read: an S3/SSO outage serves the local mirror, so a warm-cache run keeps
-            # classifying as preprocessed instead of degrading to "raw" and dying on the stripped
-            # source columns. A live absence still raises FileNotFoundError, the raw-dataset case.
-            try:
-                return read_control_json_with_cache(bucket, f"{key.rstrip('/')}/{METADATA_FILE}")
-            except FileNotFoundError:
-                return None
-
-        if source_type == "hf_hub":
-            local_path = hf_hub_download(hub_repo_id(path), METADATA_FILE, repo_type="dataset")
-            with open(local_path) as f:
-                return json.load(f)
-
-        metadata_path = os.path.join(path, METADATA_FILE)
-        if not os.path.exists(metadata_path):
+    if source_type == "s3":
+        # Mirrored read: an S3/SSO outage serves the local mirror, so a warm-cache run keeps
+        # classifying as preprocessed instead of degrading to "raw" and dying on the stripped
+        # source columns. A live absence still raises FileNotFoundError, the raw-dataset case.
+        try:
+            return read_control_json_with_cache(bucket, f"{key.rstrip('/')}/{METADATA_FILE}")
+        except FileNotFoundError:
             return None
-        with open(metadata_path) as f:
+        except ValueError:
+            # The live read parses the stamp itself: a stamp that does not parse is no outage.
+            raise
+        except Exception as e:
+            if not s3_outage_reads_absent:
+                raise
+            logger.warning(
+                f"S3 is unreachable for {path}/{METADATA_FILE} and no local mirror of it exists "
+                f"({type(e).__name__}: {e}); treating the dataset as raw."
+            )
+            return None
+
+    if source_type == "hf_hub":
+        try:
+            local_path = hf_hub_download(hub_repo_id(path), METADATA_FILE, repo_type="dataset")
+        except LocalEntryNotFoundError as e:
+            if is_offline_mode():
+                return None
+            raise ConnectionError(
+                f"The Hub could not be reached for {path}/{METADATA_FILE}, so whether the dataset is "
+                f"preprocessed is unknown. Retry, or set HF_HUB_OFFLINE=1 to run from the local cache."
+            ) from e
+        except (EntryNotFoundError, RepositoryNotFoundError):
+            return None
+        with open(local_path) as f:
             return json.load(f)
 
-    except (EntryNotFoundError, RepositoryNotFoundError):
-        # A Hub dataset without metadata.json is simply a raw dataset — the common case, not an error.
+    metadata_path = os.path.join(path, METADATA_FILE)
+    if not os.path.exists(metadata_path):
         return None
-    except Exception as e:  # transient creds/throttle/torn read must not kill one rank
-        if not best_effort:
-            raise
-        logger.warning(f"Metadata probe for {path} failed ({type(e).__name__}: {e}); treating as raw.")
-        return None
+    with open(metadata_path) as f:
+        return json.load(f)
 
 
 def is_preprocessed_dataset(path: str) -> bool:
     """True if ``path`` holds a toolkit ``metadata.json`` with ``preprocessed=True``.
 
-    Absent, unreadable, or someone else's ``metadata.json`` errs toward "raw"; the caller reconciles
-    the verdict across ranks. An INCOMPATIBLE toolkit stamp reports True: every rank takes the same
-    branch and :func:`load_preprocessed_metadata` raises the version error on all of them, rather
-    than the run silently re-tokenizing pre-tokenized rows.
+    Absent or someone else's ``metadata.json`` reads as "raw"; a read that fails raises
+    (:func:`_read_metadata_payload`), which the caller's input-probe consensus raises on every rank.
+    An INCOMPATIBLE toolkit stamp reports True: every rank takes the same branch and
+    :func:`load_preprocessed_metadata` raises the version error on all of them, rather than the run
+    silently re-tokenizing pre-tokenized rows.
     """
-    payload = _read_metadata_payload(path, best_effort=True)
+    payload = _read_metadata_payload(path, s3_outage_reads_absent=True)
     if payload is None:
         return False
     if not PreprocessedDatasetMetadata.claims_payload(payload):
@@ -269,7 +284,7 @@ def is_preprocessed_dataset(path: str) -> bool:
 
 def load_preprocessed_metadata(path: str) -> PreprocessedDatasetMetadata:
     """Load metadata from a preprocessed dataset (local, S3 or HF Hub)."""
-    payload = _read_metadata_payload(path, best_effort=False)
+    payload = _read_metadata_payload(path, s3_outage_reads_absent=False)
     if payload is None:
         raise FileNotFoundError(f"No {METADATA_FILE} at {path}: not a preprocessed dataset.")
     if not PreprocessedDatasetMetadata.claims_payload(payload):

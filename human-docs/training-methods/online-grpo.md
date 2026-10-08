@@ -97,7 +97,7 @@ gradient_accumulation_steps: 8
 
 - `num_generations` trades unique prompts per step for samples per prompt. Below about 4 a group's rewards are too
   often all equal, and an all-equal group produces no gradient.
-- `beta` above `0` adds a KL anchor; without PEFT, TRL builds its own reference for it — a full extra copy per rank.
+- `beta` above `0` adds a KL anchor; without PEFT, the script loads a frozen reference for it — a full extra copy per rank.
   Every shipped recipe keeps `beta: 0`. The `epsilon` clip binds only when a generation batch outlives one optimizer
   step, so at the recipes' `num_iterations: 1` it is inert too.
 - `scale_rewards: group` divides by the group's own spread. Keep it for a single binary reward, switch to `batch`

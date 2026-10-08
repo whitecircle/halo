@@ -8,7 +8,14 @@ from typing import Literal
 from transformers import TrainingArguments
 
 from src.args.mixins import DatasetNumProcArguments, ModelInitKwargsArguments
-from src.args.validation import RangeValidatedConfig, require_finite
+from src.args.validation import (
+    RangeValidatedConfig,
+    present,
+    require_finite,
+    require_int,
+    require_positive,
+    require_positive_int,
+)
 
 
 @dataclass
@@ -165,7 +172,23 @@ class SmoothMarginPOConfig(DatasetNumProcArguments, ModelInitKwargsArguments, Ra
 
     def _validate_ranges(self) -> None:
         super()._validate_ranges()
-        require_finite(type(self).__name__, target_margin=self.target_margin, initial_margin=self.initial_margin)
+        owner = type(self).__name__
+        require_finite(
+            owner,
+            target_margin=self.target_margin,
+            initial_margin=self.initial_margin,
+            chosen_sft_ratio=self.chosen_sft_ratio,
+            learning_rate=self.learning_rate,
+            logging_steps=self.logging_steps,
+        )
+        # Scales the preference logits: zero flattens the loss, a negative value inverts the preference.
+        require_positive(owner, beta=self.beta)
+        # A non-positive max_length is legal: it resolves to the model's context window at launch.
+        require_int(owner, **present(max_length=self.max_length))
+        require_positive_int(
+            owner,
+            **present(max_prompt_length=self.max_prompt_length, max_completion_length=self.max_completion_length),
+        )
         if self.target_margin < 0:
             raise ValueError("target_margin must be >= 0")
 

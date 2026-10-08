@@ -50,7 +50,7 @@ max_prompt_length: null  # prompt filter (drop over-long rows), not a truncation
 # --- GRPO ---
 num_generations: 4
 beta: 0.0  # KL-free. Non-zero beta under use_peft: false makes
-           # TRL instantiate a second full 35B model as the reference (there is no adapter to
+           # the script load a second full 35B model as the reference (there is no adapter to
            # disable instead), beside the EP-sharded policy this topology exists to fit
 num_iterations: 1
 epsilon: 0.2

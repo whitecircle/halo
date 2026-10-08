@@ -99,7 +99,7 @@ def test_render_transcript_marks_flagged_turns_with_their_notes():
     assert render_transcript(turns, include_reasoning=True) == (
         "[1] assistant  — cut by the engine at its length limit\nLet me th\n\n"
         "[2] assistant  — ended with neither visible text nor a tool call\n\n"
-        "[3] assistant  — cut by the engine at its length limit; every tool call named a tool that does not exist or was refused unrun\n"
+        "[3] assistant  — cut by the engine at its length limit; every tool call named a tool that does not exist, was refused unrun or ran and showed nothing\n"
         "→ nope"
     )
 

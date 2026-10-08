@@ -8,7 +8,7 @@ ends the episode at its last graded submission.
 
 The scratchpad half: a program run on no input says so, since one that reads input it was not given
 ends in a parse error or in silence, and the result names the cause so the next run is not spent the
-same way; a silent one counts in ``episode/starved_test_runs``.
+same way; a silent one counts in ``episode/starved_test_runs`` and its reply is marked uninformative.
 
 Run: python tests/cpu/environments/test_submission_scoring.py  (or pytest)
 """
@@ -221,12 +221,15 @@ def test_the_behavior_counter_is_the_share_of_resubmissions_that_improved():
 )
 def test_a_scratchpad_run_on_no_input_names_it_and_a_silent_one_counts_as_starved(result, stdin, noted, starved):
     """Every call here spends its slot; ``episode/starved_test_runs`` counts the input-less runs that exited
-    cleanly with nothing on stdout."""
+    cleanly with nothing on stdout, and exactly those come back marked uninformative, the mark that flags a
+    turn of nothing else."""
     env = _env(sandbox=StubSandbox(result))
     traj = _episode(env)
     arguments = {"code": "print(int(input()))", **({"stdin": stdin} if stdin else {})}
-    observation = _call(env, traj, "python_repl", **arguments)
+    (call,), _ = env._execute_tool_calls([NativeToolCall(id="c", name="python_repl", arguments=arguments)], traj)
+    observation = call.content
     assert (NO_STDIN_NOTE in observation) is noted, observation
+    assert call.uninformative is starved and call.success
     assert env._test_calls(traj) == 1
     assert env.rollout_metrics(traj)["episode/starved_test_runs"] == (1.0 if starved else 0.0)
     if starved and not result.stdout:

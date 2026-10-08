@@ -59,6 +59,14 @@ _PROMPT_LOGPROB_TOLERANCE_NATS = 2.0
 _PROMPT_LOGPROB_PROBE_MAX_MEAN_NLL = 4.0
 # Every rank waits on rank 0's probe in the verdict broadcast, so a hung server must not outlast it.
 _PROMPT_LOGPROB_PROBE_TIMEOUT_S = 60.0
+# How each arm stops summing the IS log-ratios over a sequence: online GRPO through TRL's mode and loss; the
+# environmental correction is per token in every mode and loss it accepts, so there the summing stages are the
+# isr_* ones.
+_PER_TOKEN_RATIO_REMEDY = (
+    "take the ratio per token: on online GRPO a token_* vllm_importance_sampling_mode with a loss_type other than "
+    "vespo; on the environmental arm, whose correction is per token already, drop isr_geo_band_min/max and "
+    "isr_opsm_delta"
+)
 
 
 def _probe_server(
@@ -137,9 +145,9 @@ def verify_sampler_logprob_reference(
     renormalized over the sampler's cut (vLLM ``processed_logprobs`` under a top-p < 1, a top-k or a
     min-p, all applied before its logprobs; SGLang's reference precedes all three) lifts every uncertain
     position by the mass the cut kept; a consumer that sums the per-token log-ratios over a sequence
-    (``sequence_ratio_active``: the trajectory geometric band, OPSM's per-trajectory mean, or a
-    sequence-level IS mode) reads the sum as drift or a collapsing sequence weight, so that pairing is
-    refused. The probe reads the renormalization off a top-p cut. ``top_k`` cuts above 0, the reading
+    (``sequence_ratio_active``: the trajectory geometric band, OPSM's per-trajectory mean, or online
+    GRPO's sequence-level IS mode or VESPO weight) reads the sum as drift or a collapsing sequence weight,
+    so that pairing is refused. The probe reads the renormalization off a top-p cut. ``top_k`` cuts above 0, the reading
     TRL's off value (0) and the rollout config's (-1) share. A ``repetition_penalty`` other than 1 is
     refused under the same consumers without a probe: both engines' reported logprobs carry it and the
     trainer's never do. An unverifiable server warns: a preflight probe never fails the run by itself.
@@ -150,8 +158,7 @@ def verify_sampler_logprob_reference(
             f"sequence: both engines' sampling logprobs carry the penalty and the trainer's recomputed ones do "
             f"not, so every penalized position reads as drift in the trajectory geometric band and OPSM, and a "
             f"sequence-level vLLM IS ratio collapses. Sample with repetition_penalty: 1.0 "
-            f"(rollout_repetition_penalty: 1.0 on the environmental arm), or take the ratio per token: a "
-            f"token_* vllm_importance_sampling_mode, or drop isr_geo_band_min/max and isr_opsm_delta."
+            f"(rollout_repetition_penalty: 1.0 on the environmental arm), or {_PER_TOKEN_RATIO_REMEDY}."
         )
     cuts = [
         f"{name}={value}"
@@ -199,8 +206,7 @@ def verify_sampler_logprob_reference(
                     f"OPSM's per-trajectory mean log-ratio read the sum as drift and a sequence-level vLLM IS ratio "
                     f"collapses toward 0 (sequence_mask only zeroes ratios ABOVE the cap, so the run stalls "
                     f"silently). Sample with every cut off — top_p: 1.0, top_k: 0, min_p: 0.0 (rollout_top_p: 1.0, "
-                    f"rollout_top_k: -1, rollout_min_p: 0.0 on the environmental arm) — or take the ratio per "
-                    f"token: a token_* vllm_importance_sampling_mode, or drop isr_geo_band_min/max and isr_opsm_delta."
+                    f"rollout_top_k: -1, rollout_min_p: 0.0 on the environmental arm) — or {_PER_TOKEN_RATIO_REMEDY}."
                 )
 
 

@@ -425,6 +425,11 @@ family's fp32 pins name it (GLM-5 Next's `e_score_correction_bias`), which then 
 loads it. Configured parameter masters are read and fused at FP32 instead
 ([Load precision](../models/README.md#load-precision)).
 
+A per-expert checkpoint (a per-expert hub, or `unfuse_moe_experts.py` output) is read local-only and
+fused per rank. Under `text_only_model` every key of the multimodal checkpoint drops its
+`language_model.` segment, a per-expert one included, which is how the fuser finds the text-only
+class's fused parameter it feeds.
+
 The eager fallback replays only selected masters after HF construction, using the same checkpoint
 mapping and expert layout. FP32-stored masters need a **second read**; BF16 safetensors masters
 promote the already-loaded values without rereading their payload. Under `fp32_experts`, FP32 replay

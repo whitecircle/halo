@@ -47,6 +47,7 @@ _NON_DEFAULT_VALUES = {
     "rollout_max_tokens": 4096,
     "rollout_max_episode_tokens": 65536,
     "rollout_max_thinking_tokens": 1024,
+    "rollout_max_answer_tokens": 2048,
     "model_name": "org/rollout-model",
     "request_timeout": 45.0,
     "episode_timeout": 600.0,

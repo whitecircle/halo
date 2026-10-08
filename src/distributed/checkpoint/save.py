@@ -292,20 +292,27 @@ def trainer_state_withheld(state) -> Iterator[None]:
 def commit_trainer_state(checkpoint_dir: str) -> None:
     """Publish the withheld trainer state as the checkpoint's last file, synced with its directory.
 
-    Collective: each FS-aware save rank publishes its own copy, and a failure raises on every rank. The
-    caller runs it once every other file of the checkpoint is on disk and before rotation can remove an
-    older one.
+    Collective: each FS-aware save rank publishes its own copy, and a failure raises on every rank, a
+    save rank holding no withheld state included: its checkpoint would never resume, and rotation, which
+    orders by mtime or step rather than completeness, could remove the last one that does. The caller
+    runs it once every other file of the checkpoint is on disk and before rotation can remove an older
+    one.
     """
     guard = DeferredRankFailure(f"Committing {TRAINER_STATE_NAME} in {checkpoint_dir}")
     if fs_aware_save_rank():
-        guard.run(partial(_move_if_present, checkpoint_dir, UNCOMMITTED_TRAINER_STATE, TRAINER_STATE_NAME))
+        guard.run(partial(_publish_withheld_trainer_state, checkpoint_dir))
     guard.reject()
 
 
-def _move_if_present(checkpoint_dir: str, source: str, destination: str) -> None:
-    staged = os.path.join(checkpoint_dir, source)
-    if os.path.isfile(staged):
-        publish_staged_file(staged, os.path.join(checkpoint_dir, destination))
+def _publish_withheld_trainer_state(checkpoint_dir: str) -> None:
+    staged = os.path.join(checkpoint_dir, UNCOMMITTED_TRAINER_STATE)
+    if not os.path.isfile(staged):
+        raise FileNotFoundError(
+            f"{staged} is missing: the base save wrote no trainer state on this save rank. Its writers "
+            f"(args.should_save, set by save_on_each_node) must be the output filesystem's save ranks "
+            f"(DIST_OUTPUT_SHARED_FILESYSTEM)."
+        )
+    publish_staged_file(staged, os.path.join(checkpoint_dir, TRAINER_STATE_NAME))
 
 
 def reject_unhandled_pp_axes(config, phase: str) -> None:

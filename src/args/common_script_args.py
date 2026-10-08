@@ -3,7 +3,14 @@
 from dataclasses import dataclass, field
 from typing import ClassVar
 
-from src.args.validation import RangeValidatedConfig
+from src.args.validation import (
+    RangeValidatedConfig,
+    present,
+    require_finite,
+    require_int,
+    require_positive,
+    require_positive_int,
+)
 from src.data.pipeline.tokenizer_backend import TokenizerBackend
 from src.env import torch_trace_dir
 from src.models.moe_balancing import BalancingMode
@@ -221,20 +228,33 @@ class CommonScriptArguments(RangeValidatedConfig):
         self._validate_ranges()
 
     def _validate_ranges(self) -> None:
-        """Guard ``project_name``, which becomes ``WANDB_PROJECT`` / ``CLEARML_PROJECT`` verbatim.
-
-        Checked here rather than where ``__post_init__`` applies :data:`PROJECT_NAME`, so the CLI path
-        is held to the same rule: ``--project_name=`` and ``--project_name=None`` land by ``setattr``, skipping
-        ``__post_init__``, and would otherwise name the tracking project ``""`` or ``"None"``. A YAML
-        ``project_name: null`` reaches ``os.environ`` as ``None``, where the assignment raises
-        TypeError later in the run.
-        """
         super()._validate_ranges()
+        # ``project_name`` becomes WANDB_PROJECT / CLEARML_PROJECT verbatim: ``--project_name=`` or
+        # ``--project_name=None`` would name the tracking project "" or "None", and a YAML null reaches
+        # os.environ as None, where the assignment raises TypeError later in the run. Annotated ``str``,
+        # so the parser leaves a null spelling as literal text on the CLI.
         project = self.project_name
-        # Annotated ``str``, so the parser leaves a null spelling as literal text on the CLI.
         if not isinstance(project, str) or not project.strip() or is_null_string(project):
             raise ValueError(
                 f"project_name must be a non-empty string and not a null spelling (it becomes "
                 f"WANDB_PROJECT / CLEARML_PROJECT), got {project!r}. Omit the key — from the YAML "
                 f"and the command line alike — to take this script's own default."
             )
+        owner = type(self).__name__
+        # One ratio per dataset when a list: each keeps that share of its rows, so 0 empties it and
+        # above 1 cannot be drawn without replacement.
+        if self.dataset_ratio is not None:
+            for ratio in self.dataset_ratio if isinstance(self.dataset_ratio, list) else [self.dataset_ratio]:
+                require_finite(owner, dataset_ratio=ratio)
+                if not 0 < ratio <= 1:
+                    raise ValueError(f"{owner}: dataset_ratio must be in (0, 1], got {ratio!r}")
+        # The proportion train_test_split re-splits at; an int there would be a row count.
+        if self.test_size is not None:
+            require_finite(owner, test_size=self.test_size)
+            if not 0 < self.test_size < 1:
+                raise ValueError(f"{owner}: test_size must be a proportion in (0, 1), got {self.test_size!r}")
+        require_positive(owner, **present(num_full_model_params=self.num_full_model_params))
+        require_positive(owner, router_balancing_rate=self.router_balancing_rate)
+        # torch.profiler.schedule's own bounds.
+        require_int(owner, minimum=0, profiler_wait=self.profiler_wait, profiler_warmup=self.profiler_warmup)
+        require_positive_int(owner, profiler_active=self.profiler_active)

@@ -62,8 +62,8 @@ python scripts/profiling/py_spy_diag.py dump --pid 1234   # explicit pid, repeat
 Output: a timestamped `$TMPDIR/halo_diag_stacks/<ts>-rank00/pid<pid>.txt` per pid (`--output-dir` to
 change; it walks torchrun's python children, so one invocation dumps the whole job). The rank NOT
 inside a collective is the culprit. Requires `py-spy` on `PATH` (ships in the image's `profiling`
-group) and `--cap-add=SYS_PTRACE` on the container (in the standard launch command), else py-spy
-fails with `Permission denied`. In-script equivalent: `dump_distributed_stacks`.
+group) and ptrace access: `--cap-add=SYS_PTRACE` on the container (in the standard launch command)
+unless the host's `kernel.yama.ptrace_scope` is 0, else py-spy fails with `Permission denied`. In-script equivalent: `dump_distributed_stacks`.
 
 ### 2.3 NCCL watchdog + flight recorder
 
@@ -93,7 +93,8 @@ record_distributed_flamegraph(duration=30)                  # this rank only
 record_distributed_flamegraph(duration=30, this_rank_only=False)  # every rank on node (spot a straggler)
 ```
 
-py-spy ships in the image (`profiling` dependency group); attach needs `--cap-add=SYS_PTRACE`.
+py-spy ships in the image (`profiling` dependency group); attach needs `--cap-add=SYS_PTRACE` unless the
+host's `kernel.yama.ptrace_scope` is 0.
 
 ## 3. GPU memory profiling (OOM)
 

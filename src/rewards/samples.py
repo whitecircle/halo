@@ -23,7 +23,7 @@ Message = dict[str, Any]
 TURN_FLAG_NOTES = {
     "truncated": "cut by the engine at its length limit",
     "empty": "ended with neither visible text nor a tool call",
-    "calls_rejected": "every tool call named a tool that does not exist or was refused unrun",
+    "calls_rejected": "every tool call named a tool that does not exist, was refused unrun or ran and showed nothing",
 }
 # The keys of a message as the chat wire spells it; a sample message's other keys (the reasoning under
 # either engine's spelling, the turn flags) are the sample's own.

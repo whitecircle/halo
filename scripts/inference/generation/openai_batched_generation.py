@@ -33,7 +33,7 @@ from scripts.inference._common import (
     add_checkpoint_interval_arg,
     add_generation_args,
     add_s3_dataset_args,
-    assistant_message_from_response,
+    assistant_turn,
     follow_up_messages,
     load_prompts_with_resume,
     parse_dataset_args,
@@ -96,7 +96,7 @@ def process_response(
         follow_up_response: Optional follow-up response
     """
     conversation = list(initial_messages)
-    conversation.append(assistant_message_from_response(response))
+    conversation.append(assistant_turn(response.answer, response.tool_calls))
 
     generated_message_indices = [len(conversation) - 1]
     finish_reasons = [response.finish_reason]
@@ -105,7 +105,7 @@ def process_response(
 
     if follow_up_response:
         conversation.extend(row[args.follow_up_prompt_field])
-        conversation.append(assistant_message_from_response(follow_up_response))
+        conversation.append(assistant_turn(follow_up_response.answer, follow_up_response.tool_calls))
         generated_message_indices.append(len(conversation) - 1)
         finish_reasons.append(follow_up_response.finish_reason)
         prompt_tokens += follow_up_response.prompt_tokens
@@ -194,7 +194,7 @@ async def main() -> None:
         followup_tools = []
         for _idx, row, initial_msg, first_response in rows_with_followup:
             conversation = list(initial_msg)
-            conversation.append(assistant_message_from_response(first_response))
+            conversation.append(assistant_turn(first_response.answer, first_response.tool_calls))
             conversation.extend(row[args.follow_up_prompt_field])
             followup_messages.append(conversation)
 

@@ -12,28 +12,8 @@ from contextlib import contextmanager
 from torch.distributed.tensor import DTensor
 
 from src.distributed.tensor_parallel.state_dict import tp_plan_shards_params
-from src.models.loading.config_levels import text_config
-
-
-def config_ties_word_embeddings(model_config) -> bool:
-    """Whether this checkpoint declares a tied embedding/head pair.
-
-    Read through the composite-config accessor: the flag lives on the text sub-config of a multimodal
-    wrapper, and a config class defining no ``get_text_config`` (remote code) resolves to itself.
-    """
-    return bool(getattr(text_config(model_config), "tie_word_embeddings", False))
-
-
-def _concrete_model_class(model_class, model_config):
-    """The class an Auto class dispatches ``model_config`` to, which carries ``_tp_plan`` and the tie
-    declaration. Returns the Auto class itself for a remote-code config outside the mapping."""
-    mapping = getattr(model_class, "_model_mapping", None)
-    if mapping is None:
-        return model_class
-    try:
-        return mapping[type(model_config)]
-    except KeyError:
-        return model_class
+from src.models.loading.config_levels import config_ties_word_embeddings, text_config
+from src.models.loading.model_preparation import concrete_model_class
 
 
 def _tied_module_names(concrete) -> tuple[set[str], set[str]]:
@@ -75,7 +55,7 @@ def consistent_tied_tp_plan(model_class, model_config):
     the first forward fails inside ``F.linear`` on mixed plain/DTensor operands. Dropping the lone
     entry for the load leaves the pair replicated: correct, but not sharded.
     """
-    concrete = _concrete_model_class(model_class, model_config)
+    concrete = concrete_model_class(model_class, model_config)
     heads, embeddings = _tied_module_names(concrete)
     if not config_ties_word_embeddings(model_config) or not heads or not embeddings:
         yield

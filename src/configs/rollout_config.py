@@ -86,6 +86,11 @@ class RolloutConfig:
     Requires a server-side reasoning parser. None = only a level's ``thinking_tokens`` caps reasoning, or
     nothing does."""
 
+    max_answer_tokens: int | None = None
+    """The most a turn may generate past its reasoning cap: a turn's ``max_tokens`` is at most that cap
+    (the level's, or a retry's reserve) plus this. None = ``max_tokens`` alone bounds the turn. Mirrors
+    ``AsyncTrainingConfig.rollout_max_answer_tokens``."""
+
     reasoning_end_token_id: int | None = None
     """The id of the token that closes reasoning, resolved from ``rollout_reasoning_end_token`` by the
     caller that owns the tokenizer: a turn's reasoning is counted as the sampled ids up to and including

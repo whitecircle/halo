@@ -29,6 +29,7 @@ _UNSEEDED = "halo-tests/no-such-repo"
         (QWEN3_0_6B, True),
         (GPT_OSS_20B_PATCHED, False),
         ("checkpoints/run/checkpoint-200", False),
+        ("checkpoints/stage1-run", False),
         ("gpt-oss-20b", False),
     ],
 )

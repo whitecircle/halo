@@ -5,8 +5,9 @@ A reference is never parallelized, so beside a policy sharded by EP, ETP or TP e
 dense replica, experts included. Its log-probs still match the policy's up to kernel numerics (the
 model's own MoE forward is what the EP layers are tested to reproduce), so this is a cost, reported once
 by ``warn_unparallelized_reference``: the DPO/KTO script loader, the DPO/KTO trainer gate
-(``_validate_reference_model``) and self-distillation (its constructor). Only PP refuses a live
-reference, since no pipeline stage holds the whole model.
+(``_validate_reference_model``), the on-policy GRPO script loader and trainer gate, and
+self-distillation (its constructor). Only PP refuses a live reference, since no pipeline stage holds
+the whole model.
 
 Run: pytest tests/cpu/parallelism/test_reference_model_gate.py
 """
@@ -22,10 +23,13 @@ from trl import ModelConfig, SFTTrainer
 
 import src.distributed.loading.frozen_models as frozen_models
 from src.distributed.loading.frozen_models import (
+    ON_POLICY_GRPO_REFERENCE_ALTERNATIVES,
     PREFERENCE_REFERENCE_ALTERNATIVES,
+    load_reference_model_for_on_policy_grpo,
     load_reference_model_for_preference,
 )
 from src.trainers.distillation.self_distillation import DistributedSelfDistillationTrainer
+from src.trainers.grpo.online import DistributedGRPOTrainer
 from src.trainers.mixins.validation import ParallelismValidationMixin
 from src.trainers.sft import DistributedSFTTrainer
 from tests.common.parallelism import make_parallelism_config
@@ -61,7 +65,10 @@ def _sizes(config) -> str:
 
 
 def _preference_gate(config, ref_model):
-    ParallelismValidationMixin._validate_reference_model(types.SimpleNamespace(parallelism_config=config), ref_model)
+    host = types.SimpleNamespace(
+        parallelism_config=config, _reference_alternatives=ParallelismValidationMixin._reference_alternatives
+    )
+    ParallelismValidationMixin._validate_reference_model(host, ref_model)
 
 
 def _self_distillation(config, reference_kl_coef):
@@ -103,7 +110,7 @@ def test_the_preference_gate_reports_the_replica_and_its_way_around(axes, caplog
         _preference_gate(config, object())
     (message,) = _warnings(caplog)
     assert message.startswith(PREFIX) and _sizes(config) in message
-    assert message.endswith(PREFERENCE_REFERENCE_ALTERNATIVES)
+    assert message.endswith(PREFERENCE_REFERENCE_ALTERNATIVES.under(config))
 
 
 @pytest.mark.parametrize("axes", SHARDED.values(), ids=list(SHARDED))
@@ -147,14 +154,33 @@ def _preference_reference(config, *, precompute=False):
     return result, loaded
 
 
+def _on_policy_grpo_reference(config):
+    """The on-policy GRPO script loader for a full fine-tune at ``beta != 0``, the frozen load stubbed;
+    returns ``(result, loaded)``."""
+    loaded = _LoadedReference()
+    with mock.patch.object(frozen_models, "load_frozen_reference_model", return_value=loaded):
+        result = load_reference_model_for_on_policy_grpo(
+            types.SimpleNamespace(),
+            ModelConfig(model_name_or_path="org/policy"),
+            types.SimpleNamespace(beta=0.1),
+            config,
+            None,
+            peft_config=None,
+            reset_sinks=True,
+            attn_default=None,
+        )
+    return result, loaded
+
+
 @pytest.mark.parametrize("axes", [SHARDED["ep"], SHARDED["tp"]], ids=["ep", "tp"])
 def test_the_preference_loader_reports_and_loads_a_dense_reference_under_ep_and_tp(axes, caplog):
     """The replica is correct, so it loads; precompute (exact and cheaper) and PEFT are named."""
+    config = _config(**axes)
     with caplog.at_level(logging.WARNING):
-        result, loaded = _preference_reference(_config(**axes))
+        result, loaded = _preference_reference(config)
     assert result is loaded
     (message,) = _warnings(caplog)
-    assert message.startswith(PREFIX) and message.endswith(PREFERENCE_REFERENCE_ALTERNATIVES)
+    assert message.startswith(PREFIX) and message.endswith(PREFERENCE_REFERENCE_ALTERNATIVES.under(config))
 
 
 def test_the_preference_loader_refuses_a_live_reference_under_pp():
@@ -171,6 +197,21 @@ def test_precomputed_reference_log_probs_load_no_reference(axes, caplog):
     assert _warnings(caplog) == []
 
 
+@pytest.mark.parametrize(
+    "report",
+    [lambda config: _preference_gate(config, object()), _on_policy_grpo_reference],
+    ids=["preference", "on-policy-grpo"],
+)
+@pytest.mark.parametrize("axes", SHARDED.values(), ids=list(SHARDED))
+def test_the_named_way_around_offers_peft_only_where_adapters_train(report, axes, caplog):
+    """TP refuses every LoRA shape, so under it the warning names only the PEFT-free way around the replica."""
+    config = _config(**axes)
+    with caplog.at_level(logging.WARNING):
+        report(config)
+    (message,) = _warnings(caplog)
+    assert ("use_peft" in message) is not config.is_tp_mode, message
+
+
 def test_the_script_loader_and_the_trainer_gate_report_one_reference_once(caplog):
     """The DPO script loads the reference and hands it to the trainer, whose gate sees it again."""
     config = _config(ep_size=8)
@@ -178,6 +219,23 @@ def test_the_script_loader_and_the_trainer_gate_report_one_reference_once(caplog
         result, _ = _preference_reference(config)
         _preference_gate(config, result)
     assert len(_warnings(caplog)) == 1
+
+
+def test_the_on_policy_grpo_loader_and_trainer_gate_report_one_reference_once(caplog):
+    """The GRPO scripts load the reference and the trainer's gate sees it again, naming the GRPO way around it."""
+    config = _config(ep_size=8)
+    with caplog.at_level(logging.WARNING):
+        result, loaded = _on_policy_grpo_reference(config)
+        host = types.SimpleNamespace(
+            model=None,
+            ref_model=result,
+            parallelism_config=config,
+            _reference_alternatives=DistributedGRPOTrainer._reference_alternatives,
+        )
+        DistributedGRPOTrainer._validate_held_reference_model(host)
+    assert result is loaded
+    (message,) = _warnings(caplog)
+    assert message.startswith(PREFIX) and message.endswith(ON_POLICY_GRPO_REFERENCE_ALTERNATIVES.under(config))
 
 
 class _TrainerReached(Exception):

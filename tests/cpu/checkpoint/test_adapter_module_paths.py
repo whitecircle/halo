@@ -6,7 +6,8 @@ PEFT's ``base_model.model.`` prefix, up to the segment PEFT appends (``.lora_A``
 ``.base_layer``), or minus the parameter leaf of a key ``save_embedding_layers`` writes whole.
 ``load_base_for_adapter`` retries the text-only class on any absent path — a
 ``modules_to_save`` lm_head resolves on both classes, so "every path absent" would never fire for it —
-and refuses a base neither class fits, chaining a loader that has no text-only class to offer.
+and refuses a base neither class fits, chaining a loader that has no text-only class to offer. It
+reports which class it returned: a text-only merge ships the tokenizer and no processor files.
 
 Run: pytest tests/cpu/checkpoint/test_adapter_module_paths.py
 """
@@ -97,9 +98,9 @@ def test_an_adapter_the_wrapper_carries_loads_once(tmp_path):
     adapter = _adapter(tmp_path, [f"{_PREFIX}model.language_model.layers.0.self_attn.q_proj.lora_A.weight"])
     load, requests = _loader(_text_only())
 
-    model = load_base_for_adapter(adapter, "/base", load, excuse_task_head=False, log=lambda _: None)
+    base = load_base_for_adapter(adapter, "/base", load, excuse_task_head=False, log=lambda _: None)
 
-    assert isinstance(model, Multimodal) and requests == [False]
+    assert isinstance(base.model, Multimodal) and not base.text_only and requests == [False]
 
 
 def test_a_shared_lm_head_does_not_hide_the_text_only_class(tmp_path):
@@ -109,9 +110,9 @@ def test_a_shared_lm_head_does_not_hide_the_text_only_class(tmp_path):
     load, requests = _loader(_text_only())
     logged = []
 
-    model = load_base_for_adapter(adapter, "/base", load, excuse_task_head=True, log=logged.append)
+    base = load_base_for_adapter(adapter, "/base", load, excuse_task_head=True, log=logged.append)
 
-    assert isinstance(model, TextOnly) and requests == [False, True]
+    assert isinstance(base.model, TextOnly) and base.text_only and requests == [False, True]
     assert logged and "text-only class of Multimodal" in logged[0]
 
 

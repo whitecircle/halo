@@ -213,7 +213,7 @@ def test_config_refuses_values_that_would_invert_or_poison_the_terms():
         with pytest.raises(ValueError, match=r"reasoning_price_cap must be (a finite number|> 0)"):
             AsyncTrainingConfig(reasoning_price=PRICE, reasoning_price_cap=bad)
     for bad in (-0.01, float("nan"), float("inf")):
-        with pytest.raises(ValueError, match="reasoning_floor must be a finite number >= 0"):
+        with pytest.raises(ValueError, match="reasoning_floor must be a finite number"):
             AsyncTrainingConfig(reasoning_floor=bad)
     # A price of zero on one level is a priced level that pays nothing, not a mistake.
     assert AsyncTrainingConfig(reasoning_price={**PRICE, "high": 0}).reasoning_price["high"] == 0
@@ -253,6 +253,17 @@ def test_construction_refuses_a_price_with_no_level_to_price_at():
     with pytest.raises(ValueError, match="reasoning_effort is unset"):
         _constructing({}, effort=None, reasoning_price=PRICE)._validate_reasoning_terms()
     _constructing({}, effort="low", reasoning_price=PRICE)._validate_reasoning_terms()
+
+
+def test_construction_refuses_an_answer_room_bound_on_a_level_with_no_reasoning_cap():
+    """The answer room is what a turn generates past its reasoning cap: a drawable level without one would leave
+    the bound bounding nothing, so the trainer refuses the run before any episode instead of every episode
+    raising in its actor."""
+    with pytest.raises(ValueError, match="rollout_max_answer_tokens"):
+        _constructing({"low": 8192, "medium": 12288}, rollout_max_answer_tokens=8192)._validate_reasoning_terms()
+    _constructing(
+        {"low": 8192, "medium": 12288, "high": 16384}, rollout_max_answer_tokens=8192
+    )._validate_reasoning_terms()
 
 
 def test_a_budget_on_a_level_the_environment_never_draws_budgets_no_episode():

@@ -6,7 +6,7 @@ from typing import Literal
 from transformers import TrainingArguments
 
 from src.args.mixins import DatasetNumProcArguments
-from src.args.validation import RangeValidatedConfig, require_finite
+from src.args.validation import RangeValidatedConfig, present, require_finite, require_int
 
 
 @dataclass
@@ -113,9 +113,17 @@ class ClassificationConfig(DatasetNumProcArguments, RangeValidatedConfig, Traini
 
     def _validate_ranges(self) -> None:
         super()._validate_ranges()
-        require_finite(type(self).__name__, focal_gamma=self.focal_gamma)
+        owner = type(self).__name__
+        require_finite(owner, focal_gamma=self.focal_gamma, label_smoothing=self.label_smoothing)
         if self.focal_gamma < 0:
             raise ValueError(f"focal_gamma must be >= 0, got {self.focal_gamma}")
+        # alpha_t = alpha*y + (1-alpha)*(1-y): outside [0, 1] one class's loss is negated.
+        if self.focal_alpha is not None:
+            require_finite(owner, focal_alpha=self.focal_alpha)
+            if not 0.0 <= self.focal_alpha <= 1.0:
+                raise ValueError(f"focal_alpha must be in [0, 1], got {self.focal_alpha}")
+        # A non-positive length is legal: it resolves to the model's context window at launch.
+        require_int(owner, **present(max_length=self.max_length))
         if not (0.0 <= self.label_smoothing < 1.0):
             raise ValueError(f"label_smoothing must be in [0, 1), got {self.label_smoothing}")
         if not (0.0 < self.multi_label_threshold < 1.0):

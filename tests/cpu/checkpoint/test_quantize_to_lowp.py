@@ -107,7 +107,8 @@ def test_quantize_to_lowp():
                 -1,
                 packed=(fmt in ("nvfp4", "mxfp4")),
                 pow2_scale=(fmt in ("mxfp8", "mxfp4")),
-                global_scale=global_scale,
+                # The export stores compressed-tensors' reciprocal of the in-memory multiplier.
+                global_scale=None if global_scale is None else global_scale.reciprocal(),
             )
             w_deq = dequantize(q)
             round_trip = ((w_deq.float() - gate.float()).norm() / gate.float().norm()).item()
@@ -125,6 +126,69 @@ def test_quantize_to_lowp():
                 mani["format"] == fmt and mani["block_size"] == block and len(mani["quantized_weights"]) == 2,
                 "manifest records scheme + quantized weights",
             )
+
+
+def _compressed_tensors_nvfp4_dequant(saved: dict, name: str) -> torch.Tensor:
+    """compressed-tensors' nvfp4 read of ``name``: unpack two e2m1 codes per byte (the even element in
+    the low nibble), then ``code x (weight_scale / weight_global_scale)`` per 16-element block — the
+    ``scale / global_scale`` its ``_dequantize`` applies and vLLM's nvfp4 schemes invert at load."""
+    packed = saved[f"{name}.weight_packed"]
+    codes = torch.stack([packed & 0x0F, packed >> 4], dim=-1).flatten(-2).long()
+    levels = torch.tensor([0.0, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0])
+    values = levels[codes & 0x7] * (1 - 2 * (codes >> 3))
+    block_scale = saved[f"{name}.weight_scale"].float().repeat_interleave(16, dim=-1)
+    return (values * (block_scale / saved[f"{name}.weight_global_scale"])).to(torch.bfloat16)
+
+
+def test_the_nvfp4_export_reads_back_under_the_compressed_tensors_convention(tmp_path):
+    """The export spells compressed-tensors' keys, so its ``weight_global_scale`` must carry that
+    library's meaning: ``E4M3_MAX * E2M1_MAX / amax`` (here within the power-of-two rounding), divided
+    out at dequant. The in-memory multiplier stored as-is reads back rescaled by its own square."""
+    src, out = tmp_path / "src", tmp_path / "out"
+    src.mkdir()
+    gate = _make_checkpoint(str(src))
+    quantize_checkpoint(str(src), str(out), "nvfp4")
+    saved = load_file(str(out / "model.safetensors"))
+    g = "model.layers.0.mlp.gate_proj"
+
+    ratio = saved[f"{g}.weight_global_scale"].item() * gate.float().abs().max().item() / (448.0 * 6.0)
+    assert 0.5 < ratio <= 1.0, f"weight_global_scale is not compressed-tensors' amax-normalizer (ratio {ratio})"
+    torch.testing.assert_close(_compressed_tensors_nvfp4_dequant(saved, g), fake_quant(gate, "nvfp4"), rtol=0, atol=0)
+
+
+def _write_mlp_checkpoint(directory, gate: torch.Tensor) -> None:
+    directory.mkdir()
+    down = torch.randn(64, 32, dtype=torch.bfloat16)
+    tensors = {"model.layers.0.mlp.gate_proj.weight": gate, "model.layers.0.mlp.down_proj.weight": down}
+    save_file(tensors, str(directory / "model.safetensors"), metadata={"format": "pt"})
+    (directory / "config.json").write_text(json.dumps({"model_type": "test"}))
+
+
+def test_an_all_zero_nvfp4_weight_stores_a_finite_global_scale(tmp_path):
+    """An all-zero weight (a zero-initialized projection, an expert that never trained) has no amax to
+    normalize, and the reciprocal of the quantizer's floor overflows to +inf, which vLLM's max over a
+    fused layer's partition scales would spread to every partition. It stores compressed-tensors' own
+    value for that case and reads back as zeros; every global scale is shaped ``[1]`` as that library
+    writes it."""
+    src, out = tmp_path / "src", tmp_path / "out"
+    _write_mlp_checkpoint(src, torch.zeros(32, 64, dtype=torch.bfloat16))
+    quantize_checkpoint(str(src), str(out), "nvfp4", verify=True)
+    saved = load_file(str(out / "model.safetensors"))
+    zero, live = "model.layers.0.mlp.gate_proj", "model.layers.0.mlp.down_proj"
+
+    assert torch.equal(saved[f"{zero}.weight_global_scale"], torch.ones(1))
+    assert torch.equal(_compressed_tensors_nvfp4_dequant(saved, zero), torch.zeros(32, 64, dtype=torch.bfloat16))
+    assert saved[f"{live}.weight_global_scale"].shape == (1,)
+    assert torch.isfinite(saved[f"{live}.weight_global_scale"]).all()
+
+
+def test_a_nonzero_weight_below_the_global_scale_range_is_refused(tmp_path):
+    """A nonzero weight whose global-scale reciprocal overflows fp32 has no stored value that reads it
+    back: 1.0 would rescale it, so the export refuses it rather than write a corrupt weight."""
+    src, out = tmp_path / "src", tmp_path / "out"
+    _write_mlp_checkpoint(src, torch.full((32, 64), 1e-37, dtype=torch.bfloat16))
+    with pytest.raises(ValueError, match="below the range an nvfp4 global scale can store"):
+        quantize_checkpoint(str(src), str(out), "nvfp4")
 
 
 def test_should_quantize_scoping():

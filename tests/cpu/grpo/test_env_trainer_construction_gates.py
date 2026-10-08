@@ -4,6 +4,13 @@
 * TRL's ``off_policy_mask_threshold`` masks on ``sampling_per_token_logps``, a batch key this trainer
   never emits; TRL then thresholds a KL of exactly 0 and the knob is a silent no-op. Refused, pointing
   at ``isr_opsm_delta``, ahead of the ``balance_token_mass`` gate that would name the pair instead.
+* TRL's ``vespo`` weighs a turn row by the sum of its per-token log IS ratios, which the mask stages and
+  the forced-close exemption set to 0 per token: one such token drops the whole row at weight ~1e-15, so
+  the loss is refused, naming the per-token losses, also ahead of the balance gate.
+* TRL's sampling knobs and its IS lower clip reach nothing here (the actors sample from the rollout
+  config; the IS correction truncates per token from above): one set away from its default is refused,
+  naming the ``rollout_*`` or IS knob that does the job. The IS mode passes at TRL's default or at
+  ``token_truncate``, the one the correction applies; any other is refused.
 * ``carry_reasoning`` on an SGLang rollout backend is refused until the engine's handling of an
   assistant message carrying ``reasoning_content`` is verified.
 * A dataset with no ``answer`` column under an environment that grades against one scores a single
@@ -21,13 +28,15 @@
 import ast
 import inspect
 import logging
+import re
 import textwrap
 import types
 
 import pytest
+import torch
 from accelerate import PartialState
 from datasets import Dataset
-from trl import GRPOConfig
+from trl import GRPOConfig, GRPOTrainer
 
 from src.configs.async_training_config import AsyncTrainingConfig
 from src.configs.rollout_config import DEFAULT_REASONING_END_TOKEN
@@ -38,7 +47,9 @@ from src.environments.registry import resolve_environment
 from src.trainers.grpo.environmental import (
     DistributedAsyncEnvironmentalGRPOTrainer,
     reject_off_policy_mask_threshold,
+    reject_vespo_loss,
 )
+from src.trainers.grpo.objective.logratio import compute_is_ratio, zero_engine_forced_closes
 
 PartialState()  # the per-turn close-marker warning logs through accelerate, which refuses to log without it
 
@@ -57,9 +68,11 @@ _INIT_GATES = (
     "_validate_reasoning_terms",
     "_require_forced_close_neutralized",
     "reject_off_policy_mask_threshold",
+    "reject_vespo_loss",
     "reject_inert_std_floor",
     "resolve_rollout_stop_token_ids",
     "_arm_update_breaker",
+    "_refuse_unread_grpo_knobs",
 )
 
 
@@ -85,14 +98,16 @@ def test_every_gate_is_still_called_from_the_trainers_init():
     assert not missing, f"DistributedAsyncEnvironmentalGRPOTrainer.__init__ no longer calls: {missing}"
 
 
-def test_the_off_policy_mask_is_refused_before_the_balance_gate_reads_it():
-    """Run first, the balance gate refuses the pair ("unset one of them") over a knob this trainer refuses
-    on its own: a user who unsets the balance meets the real refusal only on the next launch."""
+@pytest.mark.parametrize("gate", ["reject_off_policy_mask_threshold", "reject_vespo_loss"])
+def test_a_refused_knob_is_refused_before_the_balance_gate_reads_it(gate):
+    """Run first, the balance gate refuses the pair ("unset one of them", or a loss it cannot balance) over a
+    knob this trainer refuses on its own: a user who unsets the balance meets the real refusal only on the
+    next launch."""
     first_call = {}
     for node in ast.walk(_init_source()):
         if isinstance(node, ast.Call) and isinstance(node.func, ast.Name):
             first_call[node.func.id] = min(node.lineno, first_call.get(node.func.id, node.lineno))
-    assert first_call["reject_off_policy_mask_threshold"] < first_call["validate_token_mass_balance"]
+    assert first_call[gate] < first_call["validate_token_mass_balance"]
 
 
 def test_off_policy_mask_threshold_is_refused_with_the_working_knob_named(tmp_path):
@@ -102,6 +117,102 @@ def test_off_policy_mask_threshold_is_refused_with_the_working_knob_named(tmp_pa
 
 def test_the_trl_default_passes(tmp_path):
     reject_off_policy_mask_threshold(_grpo_config(tmp_path))
+
+
+def test_vespo_is_refused_naming_the_mechanism_and_the_per_token_losses(tmp_path):
+    with pytest.raises(ValueError, match=r"loss_type='vespo'") as refused:
+        reject_vespo_loss(_grpo_config(tmp_path, loss_type="vespo"))
+    message = str(refused.value)
+    # The drop is conditional on a zeroed ratio, which a run with no mask stage and no forced close never makes.
+    assert "whenever the IS correction masks a token (isr_*) or the engine forces a reasoning close" in message, (
+        message
+    )
+    named = re.findall(r"\b(dapo|dr_grpo|cispo|grpo)\b", re.search(r"Use a per-token loss: (.*)\.$", message).group(1))
+    assert named, message
+    for loss_type in named:
+        reject_vespo_loss(_grpo_config(tmp_path, loss_type=loss_type))
+
+
+def test_one_forced_close_drops_a_whole_turn_row_under_trls_vespo_weight():
+    """The premise of the refusal, on the installed TRL: the correction zeroes the ratio at a forced close, and
+    VESPO's weight takes the log of every token's ratio summed over the row, so the one token silences the
+    row that a per-token loss would only lose that token of."""
+    width, close = 32, 7
+    completion_ids = torch.full((1, width), 3)
+    completion_ids[0, 10] = close
+    sampling = torch.full((1, width), -0.5)
+    sampling[0, 10] = 0.0
+    mask, has_sampling = torch.ones(1, width), torch.ones(1, dtype=torch.bool)
+    ratio, _, _ = compute_is_ratio(sampling, sampling, mask, has_sampling, 3.0)
+    ratio, forced = zero_engine_forced_closes(ratio, sampling, mask, has_sampling, completion_ids, (close,))
+    assert forced.sum() == 1 and ratio.sum() == width - 1
+    weight = GRPOTrainer.get_gamma_weights(torch.ones(1, 1), torch.zeros(1, width), mask, ratio)
+    assert weight.item() < 1e-12
+
+
+def _knob_host(tmp_path, **overrides):
+    host = object.__new__(DistributedAsyncEnvironmentalGRPOTrainer)
+    host.args = _grpo_config(tmp_path, **overrides)
+    return host
+
+
+@pytest.mark.parametrize(
+    ("knob", "value", "named"),
+    [
+        ("top_p", 0.9, "rollout_top_p"),
+        ("top_k", 20, "rollout_top_k"),
+        ("min_p", 0.05, "rollout_min_p"),
+        ("repetition_penalty", 1.1, "rollout_repetition_penalty"),
+        ("generation_kwargs", {"temperature": 0.7}, "rollout_top_p"),
+        ("vllm_importance_sampling_clip_min", 0.5, "vllm_importance_sampling_clip_max"),
+    ],
+)
+def test_a_grpo_knob_this_trainer_never_reads_is_refused_when_set(tmp_path, knob, value, named):
+    """The actors sample from the rollout config and the IS correction truncates per token from above, so
+    each of these set away from TRL's default would change nothing: refused, naming what does the job."""
+    with pytest.raises(ValueError, match=rf"(?s)'{knob}'.*{named}"):
+        _knob_host(tmp_path, **{knob: value})._refuse_unread_grpo_knobs()
+
+
+@pytest.mark.parametrize("mode", ["token_mask", "sequence_truncate"])
+def test_an_is_mode_the_correction_does_not_apply_is_refused_naming_the_one_it_does(tmp_path, mode):
+    """``token_mask`` would zero a ratio above the cap that the correction clamps, ``sequence_truncate`` would take
+    one ratio per sequence: refused, naming the mode the trainer accepts, and that mode passes."""
+    with pytest.raises(ValueError, match=rf"vllm_importance_sampling_mode='{mode}'") as refused:
+        _knob_host(tmp_path, vllm_importance_sampling_mode=mode)._refuse_unread_grpo_knobs()
+    named = re.search(r"TRL's '(\w+)'", str(refused.value)).group(1)
+    assert named.startswith("token_")
+    _knob_host(tmp_path, vllm_importance_sampling_mode=named)._refuse_unread_grpo_knobs()
+
+
+def test_the_correction_is_trls_token_truncate_and_not_its_token_mask():
+    """The accepted mode is a claim about the objective: each token's ratio clamped from above at
+    ``vllm_importance_sampling_clip_max`` (TRL's ``token_truncate`` at an unset lower clip), not zeroed past it."""
+    generator = torch.Generator().manual_seed(0)
+    sampling = -torch.rand(2, 16, generator=generator) - 0.05
+    recompute = sampling + torch.randn(2, 16, generator=generator)
+    mask = torch.ones(2, 16)
+    clip_max = 2.0
+    ratio, _, _ = compute_is_ratio(recompute, sampling, mask, torch.ones(2, dtype=torch.bool), clip_max)
+    raw = torch.exp((recompute - sampling) * mask)
+    assert (raw > clip_max).any(), "the draw must cross the cap for the two modes to differ"
+    assert torch.equal(ratio, torch.clamp(raw, min=None, max=clip_max))
+    assert not torch.equal(ratio, raw.masked_fill(raw > clip_max, 0.0))
+
+
+def test_the_trl_defaults_of_the_unread_knobs_pass_even_when_spelled_out(tmp_path):
+    """Only a changed value is refused: a config that writes TRL's own defaults, or leaves them, starts."""
+    _knob_host(tmp_path)._refuse_unread_grpo_knobs()
+    _knob_host(
+        tmp_path,
+        top_p=1.0,
+        top_k=0,
+        min_p=None,
+        repetition_penalty=1.0,
+        generation_kwargs=None,
+        vllm_importance_sampling_mode="sequence_mask",
+        vllm_importance_sampling_clip_min=None,
+    )._refuse_unread_grpo_knobs()
 
 
 def _carry_host(backend: str, carry_reasoning: bool):

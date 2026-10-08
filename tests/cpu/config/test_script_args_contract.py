@@ -5,8 +5,8 @@
     ``setup_training_environment``. ``os.environ`` accepts strings only, so a YAML ``project_name:
     null`` would surface as a bare ``TypeError`` from the tracking setup, phases into the run and
     nowhere near the key that caused it. The gate is ``CommonScriptArguments._validate_ranges``,
-    which every script-arg class runs from ``__post_init__`` AND — via ``RangeValidatedConfig`` —
-    from ``__post_override__``, so a ``--project_name=`` override is held to the same rule.
+    which every script-arg class runs from ``__post_init__``, where a ``--project_name=`` override
+    is held to the same rule.
   * The SFT re-declarations of the ``GenerationEvalArguments`` / collator flags are plain ``bool``:
     every consumer declares ``bool``, nothing produces ``None``, and an Optional there would admit a
     third state no branch handles.
@@ -94,9 +94,7 @@ def test_yaml_null_project_name_is_refused_by_the_parser(tmp_path):
 @pytest.mark.parametrize("cls", _SCRIPT_ARG_CLASSES)
 @pytest.mark.parametrize("value", ["", "None", "null"])
 def test_cli_override_cannot_null_the_project_name(cls, value, tmp_path):
-    """``--project_name=`` lands by ``setattr``, so ``__post_init__`` never re-runs.
-
-    ``project_name`` is annotated ``str``, so the parser's null-spelling conversion (Optional fields
+    """``project_name`` is annotated ``str``, so the parser's null-spelling conversion (Optional fields
     only) leaves ``None`` as four literal characters: the run would then report itself to a tracking
     project literally named "None", or to ``WANDB_PROJECT=""`` — both silently, and both landing in
     a different place from every other run of the same experiment.

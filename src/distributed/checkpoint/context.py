@@ -84,3 +84,7 @@ class CheckpointLoadContext:
     # A shard restore that fails under a matching topology, or an interrupted save's shard set,
     # warm-restarts instead of failing the resume.
     allow_optimizer_warm_restart: bool = False
+    # The base Trainer's own loader owns an unsharded run's whole-weight reload: accelerate-managed FSDP
+    # reads its own sharded format, and sentence-transformers rebuilds its whole pipeline through
+    # ``from_pretrained``. Otherwise the base loader would read by raw key and the loader streams it.
+    base_owns_whole_weight_load: bool = False

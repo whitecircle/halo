@@ -17,7 +17,11 @@ from accelerate.logging import get_logger
 from src.args.self_distill_args import SelfDistillationArguments
 from src.data.spans import LABEL_IGNORE_INDEX, resolve_eos_token_ids
 from src.data.vlm import SEQUENCE_ALIGNED_VISION_KEYS
-from src.distributed.loading.frozen_models import place_and_freeze, warn_unparallelized_reference
+from src.distributed.loading.frozen_models import (
+    ReferenceAlternatives,
+    place_and_freeze,
+    warn_unparallelized_reference,
+)
 from src.models.structure import resolve_tokenizer
 from src.trainers.distillation.losses import (
     get_divergence,
@@ -103,7 +107,9 @@ class DistributedSelfDistillationTrainer(OPDTermMixin, StoredMetricsMixin, Distr
         self._resolve_stop_token_ids()
 
         if self.reference_kl_coef > 0:
-            warn_unparallelized_reference(self.parallelism_config, "reference_kl_coef: 0 loads no reference.")
+            warn_unparallelized_reference(
+                self.parallelism_config, ReferenceAlternatives("reference_kl_coef: 0 loads no reference.")
+            )
             self._setup_reference_model()
 
     def _resolve_stop_token_ids(self):

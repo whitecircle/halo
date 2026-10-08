@@ -9,9 +9,10 @@ trained text weights are re-prefixed to ``model.language_model.*``, the untraine
 composite config is regrafted with the trained text config, so the served model runs the trained
 text weights (router balancing included) under the class the engines register.
 
-The input must be a text-only export (its ``model_type`` names the ``*_text`` sub-config); a
-wrapper-layout checkpoint needs no re-attachment and is refused. The base must be the multimodal
-checkpoint the run trained from (same architecture); a base with no vision keys is refused.
+The input must be a text-only export (its ``model_type`` names the ``*_text`` sub-config) whose keys
+are in that layout; a wrapper-layout checkpoint, or text keys already under the wrapper prefix, is
+refused. The base must be the multimodal checkpoint the run trained from (same architecture); a base
+with no vision keys is refused.
 
 Usage:
     python scripts/after_training/reattach_vision_tower.py \\
@@ -27,7 +28,6 @@ import os
 import shutil
 
 from transformers import AutoConfig
-from transformers.utils import IMAGE_PROCESSOR_NAME, PROCESSOR_NAME, VIDEO_PROCESSOR_NAME
 
 import src.distributed.expert_parallel.layers.roster  # noqa: F401 — registers the EP export roster the config finalizer requires
 from scripts._common import add_hub_source_args, add_max_shard_size_arg, add_trust_remote_code_arg
@@ -39,6 +39,7 @@ from src.checkpoint.format import (
 )
 from src.checkpoint.shard_writer import StageShardWriter
 from src.checkpoint.tool_io import (
+    PROCESSOR_FILES,
     checkpoint_shard_files,
     iter_checkpoint_shard_entries,
     iter_checkpoint_tensors,
@@ -53,7 +54,7 @@ logger = logging.getLogger(__name__)
 
 TEXT_PREFIX = "model."
 WRAPPER_TEXT_PREFIX = "model.language_model."
-_PROCESSOR_FILES = (PROCESSOR_NAME, IMAGE_PROCESSOR_NAME, VIDEO_PROCESSOR_NAME)
+HEAD_PREFIX = "lm_head."
 
 
 def _require_text_only_export(input_dir: str, trust_remote_code: bool) -> AutoConfig:
@@ -64,6 +65,36 @@ def _require_text_only_export(input_dir: str, trust_remote_code: bool) -> AutoCo
             f"carries the multimodal layout and needs no re-attachment."
         )
     return config
+
+
+def _require_text_tower_keys(input_dir: str, model_type: str, base_text_children: set[str]) -> None:
+    """Refuse an export whose keys are not the text-only layout its config declares.
+
+    Each text key is re-prefixed onto the base's text tower, so it must name one of the modules the
+    base stores there (``base_text_children``); anything else lands on no slot of the wrapper class
+    and reloads as random-initialized. Header-only.
+    """
+    misplaced = [
+        key
+        for _shard, _reader, key in iter_checkpoint_shard_entries(input_dir)
+        if not key.startswith(HEAD_PREFIX)
+        and not (key.startswith(TEXT_PREFIX) and key[len(TEXT_PREFIX) :].split(".", 1)[0] in base_text_children)
+    ]
+    if not misplaced:
+        return
+    if any(key.startswith(WRAPPER_TEXT_PREFIX) for key in misplaced):
+        raise ValueError(
+            f"{input_dir} declares the text-only model_type {model_type!r} but stores its text tower under "
+            f"{WRAPPER_TEXT_PREFIX}* (e.g. {misplaced[0]!r}), the multimodal wrapper's layout, so its keys "
+            f"do not match its config and re-prefixing them would nest the wrapper prefix. Re-export it "
+            f"in the text-only layout: scripts/after_training/convert_to_bf16.py for a full checkpoint, "
+            f"merge_peft_adapters.py for an adapter."
+        )
+    raise ValueError(
+        f"{len(misplaced)} key(s) of {input_dir} address no module of the base's text tower "
+        f"({WRAPPER_TEXT_PREFIX}{{{', '.join(sorted(base_text_children))}}}; e.g. {misplaced[0]!r}): it is not "
+        f"a text-only export of this base."
+    )
 
 
 def _grafted_composite_config(base_dir: str, text_config: AutoConfig, trust_remote_code: bool):
@@ -113,8 +144,11 @@ def reattach_vision_tower(
     # trained tower, giving two text towers that collide on load. A base with nothing else to
     # contribute is not the multimodal checkpoint this export trained from.
     base_keys = [key for _shard, _reader, key in iter_checkpoint_shard_entries(base_dir)]
-    superseded = {key for key in base_keys if key.startswith((WRAPPER_TEXT_PREFIX, "lm_head."))}
-    if not any(key.startswith(WRAPPER_TEXT_PREFIX) for key in superseded):
+    superseded = {key for key in base_keys if key.startswith((WRAPPER_TEXT_PREFIX, HEAD_PREFIX))}
+    base_text_children = {
+        key[len(WRAPPER_TEXT_PREFIX) :].split(".", 1)[0] for key in superseded if key.startswith(WRAPPER_TEXT_PREFIX)
+    }
+    if not base_text_children:
         raise ValueError(
             f"the base checkpoint ({base_dir}) stores no text tower under {WRAPPER_TEXT_PREFIX}*, so the "
             f"trained export cannot supersede it — its text keys would be carried over beside the "
@@ -125,6 +159,7 @@ def reattach_vision_tower(
             f"the base checkpoint ({base_dir}) contributes no non-text tensors — nothing to "
             f"re-attach. Its weight layout does not match the expected multimodal wrapper."
         )
+    _require_text_tower_keys(input_dir, text_config.model_type, base_text_children)
 
     writer = StageShardWriter(output_dir, HF_STREAM_PART_PREFIX, max_shard_size, enabled=True)
     preflight_resource_warning(
@@ -139,7 +174,7 @@ def reattach_vision_tower(
     for key, tensor in iter_checkpoint_tensors(input_dir):
         if key.startswith(TEXT_PREFIX):
             key = WRAPPER_TEXT_PREFIX + key[len(TEXT_PREFIX) :]
-        writer.add(key, tensor)  # lm_head.* and any other root keys pass through verbatim
+        writer.add(key, tensor)  # lm_head.* passes through verbatim
         trained += 1
 
     carried = 0
@@ -151,7 +186,7 @@ def reattach_vision_tower(
     # Tokenizer, template and similar files follow the trained export; the processor files come from
     # the base, which is the only source for them.
     copy_checkpoint_aux_files(input_dir, output_dir)
-    for name in _PROCESSOR_FILES:
+    for name in PROCESSOR_FILES:
         src = os.path.join(base_dir, name)
         if os.path.isfile(src):
             shutil.copy2(src, os.path.join(output_dir, name))

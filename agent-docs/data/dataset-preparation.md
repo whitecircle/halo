@@ -194,6 +194,12 @@ fall-back to the raw (re-tokenizing) path. Unknown fields at a stamp this build 
 same way (a diverged build). A `metadata.json` carrying no `preprocessed` key is somebody else's
 file; the dataset is treated as raw with a warning.
 
+One rank per input-filesystem scope runs the detection probe, so its answer is the scope's. Only a
+confirmed absence reads as raw: no file, an S3 404, a Hub repo without it (offline, a cache without
+it). A stamp that does not parse or a Hub it cannot reach raises on every rank instead. The one
+tolerated failure is an S3 outage with no local mirror of the stamp, read as raw with a warning: an
+absence is never mirrored, and a warm-cache raw dataset loads without S3.
+
 Each split's `shard_index.json` (`ShardIndex`, `src/data/shard_index.py`) carries the same
 `version` stamp and is held to it the same way: a stamp this build does not read, or a field it does
 not know, raises the same `IncompatiblePreprocessedDataset` (defined in that leaf, so a loader can

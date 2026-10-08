@@ -32,7 +32,12 @@ Usage (inside the training image):
 
 A bulky test corpus (open-r1's generated tests, HardTests' suites) is first reduced by
 ``compact_code_tests.py`` to one capped row per problem; ``--tests_table`` joins it onto the source
-rows by problem id, and the adapter packs the joined suite.
+rows by problem id, and the adapter packs the joined suite. A table may cover some splits only; one
+matching no row of any split exits.
+
+A problem whose only tests are its statement's examples (a Codeforces row whose official tests are
+the statement's samples and that no joined suite covers) is dropped and counted per split unless
+``--include_examples_only``: a program printing a constant passes many of them.
 """
 
 import argparse
@@ -130,6 +135,22 @@ def load_tests_table(path: str) -> tuple[Dataset, dict[str, int]]:
             raise SystemExit(f"tests table {path} carries {key!r} twice; rebuild it into an empty directory")
         index[key] = position
     return table, index
+
+
+def join_suites(splits: dict[str, Dataset], table: Dataset, index: dict[str, int]) -> dict[str, Dataset]:
+    """Each split with its compacted suites joined on (:func:`join_tests`), its matches logged. A table may
+    cover some splits only (generated tests for train alone); one matching no row of any split is the wrong
+    table, or keys spelled otherwise than the ids, and exits before any split is filtered."""
+    joined: dict[str, Dataset] = {}
+    for split, split_ds in splits.items():
+        # Single process: the join indexes a memory-mapped table, and forked workers would copy it.
+        joined[split] = split_ds.map(join_tests, fn_kwargs={"table": table, "index": index})
+    matched = {split: len(ds) - ds.data.column(JOINED_TESTS_FIELD).null_count for split, ds in joined.items()}
+    if not any(matched.values()):
+        raise SystemExit("no row of any split matched a key of the tests table; the id spellings differ")
+    for split, count in matched.items():
+        logger.info("  %s: %d/%d rows matched a suite in the tests table", split, count, len(joined[split]))
+    return joined
 
 
 def join_tests(row: dict, table: Dataset, index: dict[str, int]) -> dict:
@@ -270,6 +291,13 @@ def parse_args() -> argparse.Namespace:
         default=True,
         help="Drop problems whose special judge rejects its own reference output or accepts garbage (first test).",
     )
+    p.add_argument(
+        "--include_examples_only",
+        action="store_true",
+        help="Keep problems whose only tests are the statement's examples (a codeforces row whose official tests "
+        "are the statement's samples and that no --tests_table suite covers), which a program printing a "
+        "constant passes for many. Default: dropped and counted per split.",
+    )
     return p.parse_args()
 
 
@@ -290,9 +318,8 @@ def main() -> None:
     exact, prefixes = load_exclusions(args.exclude_keys)
     tests_table = load_tests_table(args.tests_table) if args.tests_table else None
 
-    prepared = {}
+    staged = {}
     for split, split_ds in ds.items():
-        original = len(split_ds)
         if adapter.normalize is not None:
             split_ds = split_ds.map(adapter.normalize, num_proc=num_proc, desc=f"normalize[{split}]")
         if exact or prefixes:
@@ -303,15 +330,25 @@ def main() -> None:
             )
             report_rejected_rows(len(split_ds), len(excluded), f"exclude[{split}]")
             split_ds = excluded
-        if tests_table is not None:
-            # Single process: the join indexes a memory-mapped table, and forked workers would copy it.
-            split_ds = split_ds.map(join_tests, fn_kwargs={"table": tests_table[0], "index": tests_table[1]})
-            matched = len(split_ds) - split_ds.data.column(JOINED_TESTS_FIELD).null_count
-            if matched == 0:
-                raise SystemExit(f"no {split} row matched a key of the tests table; the id spellings differ")
-            logger.info("  %s: %d/%d rows matched a suite in the tests table", split, matched, len(split_ds))
+        staged[split] = split_ds
+    if tests_table is not None:
+        staged = join_suites(staged, *tests_table)
+
+    prepared = {}
+    for split, split_ds in staged.items():
         kept = split_ds.filter(keep_row, fn_kwargs=keep_kwargs, num_proc=num_proc, desc=f"filter[{split}]")
         report_rejected_rows(len(split_ds), len(kept), f"filter[{split}]")
+        if adapter.examples_only is not None and not args.include_examples_only:
+            graded = kept.filter(
+                lambda row: not adapter.is_examples_only(row), num_proc=num_proc, desc=f"examples_only[{split}]"
+            )
+            logger.info(
+                "  %s: left out %d problems graded only on their statement's examples (--include_examples_only "
+                "keeps them)",
+                split,
+                len(kept) - len(graded),
+            )
+            kept = graded
         mapped = kept.map(
             to_rl_row,
             fn_kwargs={"adapter": adapter},
@@ -324,7 +361,7 @@ def main() -> None:
             report_rejected_rows(len(mapped), len(sound), f"verify[{split}]")
             mapped = sound
         prepared[split] = mapped
-        logger.info("  %s: %d -> %d kept", split, original, len(mapped))
+        logger.info("  %s: %d -> %d kept", split, len(ds[split]), len(mapped))
 
     if args.holdout_per_band:
         if "test" in prepared:

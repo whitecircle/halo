@@ -10,7 +10,9 @@ solution `language`, and reports `success@1` / `success@k` bucketed by the adapt
 and reward aggregation are shared with the other eval scripts via :mod:`src.environments.eval_runner`.
 `--eval_protocol` names the evaluation contract (`harness`: the configured budgets; `leaderboard`: one
 graded program, no scratchpad), and on a benchmark that stamps contest dates
-`--start_date` / `--end_date` / `--platform` select the problems scored.
+`--start_date` / `--end_date` / `--platform` select the problems scored. A problem whose only tests are
+its statement's examples (a Codeforces row whose official tests are the statement's samples) is left
+out and counted unless `--include_examples_only`.
 
 The server must serve the model with tool calling enabled (e.g. vLLM
 `--tool-call-parser qwen3_xml --enable-auto-tool-choice`). A solution counts as solved when it passes
@@ -115,12 +117,14 @@ def refuse_flag_owned_env_kwargs(env_kwargs: dict) -> None:
 
 
 def resolve_selection(args: argparse.Namespace, adapter: CodeDatasetAdapter) -> ContestSelection:
-    """The contest window and platforms the run scores, validated against the adapter before any row
-    is read: an unparsable day, an empty window, an unknown platform, or a bound the dataset cannot
-    apply exits."""
+    """The contest window, platforms and examples-only choice the run scores, validated against the adapter
+    before any row is read: an unparsable day, an empty window, an unknown platform, a bound the dataset
+    cannot apply, or ``--include_examples_only`` on an adapter that marks no problem examples-only exits."""
+    if args.include_examples_only and adapter.examples_only is None:
+        raise SystemExit(f"--include_examples_only on --adapter {args.adapter}: it marks no problem examples-only")
     platforms = parse_list_flag("platform", args.platform) if args.platform is not None else ()
     try:
-        selection = ContestSelection.parse(args.start_date, args.end_date, platforms)
+        selection = ContestSelection.parse(args.start_date, args.end_date, platforms, args.include_examples_only)
         adapter.require_selectable(selection)
     except ValueError as exc:
         raise SystemExit(f"--start_date/--end_date/--platform on --adapter {args.adapter}: {exc}") from exc
@@ -257,6 +261,13 @@ def parse_args() -> argparse.Namespace:
         )
         + "). Default: every platform.",
     )
+    examples_only = ", ".join(sorted(name for name, a in CODE_DATASET_ADAPTERS.items() if a.examples_only))
+    p.add_argument(
+        "--include_examples_only",
+        action="store_true",
+        help="Also score problems whose only tests are the statement's examples, which a program printing a "
+        f"constant passes for many (adapters that mark them: {examples_only}). Default: left out and counted.",
+    )
     p.add_argument(
         "--eval_protocol",
         default=None,
@@ -298,7 +309,10 @@ def parse_args() -> argparse.Namespace:
         default=None,
         choices=[*sorted(CodeContestsEnvironment.REASONING_EFFORT_PROFILES), NO_REASONING_EFFORT],
         help=f"Solver reasoning effort, passed to the model's chat template (low/medium/high), or "
-        f"{NO_REASONING_EFFORT}: no level and no thinking budget, for a non-thinking model. Default: the "
+        f"{NO_REASONING_EFFORT}: no level and no thinking budget, for a non-thinking model. "
+        f"{NO_REASONING_EFFORT} sends no reasoning_effort, so a thinking template keeps its default: "
+        f"Qwen3/3.5/3.6 still think unless enable_thinking=false reaches the template (vLLM "
+        f"--default-chat-template-kwargs). Default: the "
         f"training config's under --training_config (a null there is {NO_REASONING_EFFORT}), else "
         f"{DEFAULT_REASONING_EFFORT}. Sets the default --max_tokens unless --max_tokens or "
         f"--training_config is given.",
@@ -330,7 +344,8 @@ def build_examples(
     args: argparse.Namespace, adapter: CodeDatasetAdapter, selection: ContestSelection
 ) -> list[dict[str, Any]]:
     """Compose the raw contest rows ``selection`` admits into eval examples via the chosen adapter,
-    bucketed by its group field and named by its id field.
+    bucketed by its group field and named by its id field. The examples-only problems it leaves out
+    among the rows read are counted in the log.
 
     Loading goes through the adapter's own ``load`` when it has one (LiveCodeBench and ICPC-Eval
     cannot be read with a plain ``load_dataset``), otherwise the standard HF split loader.
@@ -341,7 +356,8 @@ def build_examples(
         else load_hf_split(args.dataset, args.config, args.split)
     )
     examples = []
-    for row in adapter.scored_rows(rows, selection):
+    left_out: list[Any] = []
+    for row in adapter.scored_rows(rows, selection, left_out):
         examples.append(
             {
                 "prompt": adapter.format_prompt(row),
@@ -352,6 +368,11 @@ def build_examples(
         )
         if args.num_examples and len(examples) >= args.num_examples:
             break
+    if left_out:
+        logger.info(
+            "Left out %d problems graded only on their statement's examples (--include_examples_only scores them)",
+            len(left_out),
+        )
     if not examples:
         raise SystemExit(
             f"{args.dataset} ({args.adapter}) yielded no gradable problem; check the adapter, config, split "

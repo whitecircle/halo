@@ -2,9 +2,10 @@
 directories ride whole.
 
 A merged directory is the mandated resume source for sharded EP checkpoints
-(resolve_resume_weights_source), so the copy must keep ``scheduler.pt``,
+(resolve_resume_weights_source), so the copy must keep ``trainer_state.json``, ``scheduler.pt``,
 ``router_balancing_biases.pt``, ``reference_logps.pt``, every ``rng_state_<rank>.pth`` and every
-``prefetch_pending-<rank>-of-<world>.pt`` — dropping them re-warms the LR schedule from step 0,
+``prefetch_pending-<rank>-of-<world>.pt`` — dropping them leaves resume detection nothing to take the
+directory by, re-warms the LR schedule from step 0,
 zeroes the router balancing biases, leaves a precompute run no untrained reference to restore,
 re-draws every shuffle and dropout mask, and skips the batch an async GRPO prefetch had not trained —
 while still refusing to carry weight files that would shadow the freshly written safetensors. The
@@ -31,7 +32,7 @@ import pytest
 import torch
 from huggingface_hub.constants import REPOCARD_NAME
 from safetensors.torch import load_file, save_file
-from transformers.trainer import SCHEDULER_NAME
+from transformers.trainer import SCHEDULER_NAME, TRAINER_STATE_NAME
 
 from src.checkpoint.atomic import atomic_torch_save, create_staged_file
 from src.checkpoint.format import (
@@ -72,9 +73,9 @@ KEPT = (
     "chat_template.jinja",
     "preprocessor_config.json",
     "modeling_remote.py",
-    "trainer_state.json",
 )
 SIDECARS = (
+    TRAINER_STATE_NAME,
     "rng_state_0.pth",
     SCHEDULER_NAME,
     ROUTER_BALANCING_BIASES_FILE,
@@ -151,8 +152,9 @@ def test_resume_sidecars_survive_merge_copy(checkpoint_dir, tmp_path):
 
 
 def test_resume_sidecars_can_be_excluded(checkpoint_dir, tmp_path):
-    """The model-merge seam: an N-way merged artifact describes no single run, so its aux copy
-    passes include_resume_sidecars=False — sidecars dropped, everything else identical."""
+    """The new-base seam: an N-way merged artifact describes no single run, so its aux copy passes
+    include_resume_sidecars=False — the resume state, ``trainer_state.json`` included, dropped and
+    everything else identical."""
     out = tmp_path / "merged"
     out.mkdir()
     copy_checkpoint_aux_files(str(checkpoint_dir), str(out), include_resume_sidecars=False)

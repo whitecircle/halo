@@ -8,9 +8,11 @@ workers' real ``list<int64>`` shards raises
 ``TypeError: Couldn't cast array of type list<item: int64> to null`` — crashing the whole map. An
 all-``[]`` sentinel is equally broken (infers ``list<null>``): the sentinel must carry REAL typed
 values, which :func:`create_tokenizer_none_example` guarantees (one-element typed lists,
-``attention_mask=[0]``), with :func:`is_valid_example` as the shared drop-predicate. The VLM
-preprocessing map instead pins its full output schema via explicit ``features=`` (its vision columns
-are legitimately None on text-only rows, so typing can never be left to batch-wise inference there).
+``attention_mask=[0]``), with :func:`is_valid_example` as the shared drop-predicate. A message-list
+column rejects with :func:`blank_conversation` for the same reason, in every column a rejected row
+carries (RLVR's ``conversation`` beside its string ``prompt``). The VLM preprocessing map instead pins
+its full output schema via explicit ``features=`` (its vision columns are legitimately None on
+text-only rows, so typing can never be left to batch-wise inference there).
 
 Run: pytest tests/cpu/data/test_rejection_sentinels.py
 """
@@ -19,10 +21,13 @@ import pyarrow as pa
 import pytest
 from datasets import Dataset
 
+from scripts.training.online_grpo.rlvr import build_rlvr_row_fn
+from src.args.rlvr_online_grpo_args import RLVROnlineGRPOScriptArguments
 from src.data.pipeline.preprocessed_metadata import PreprocessingConfig
 from src.data.pipeline.preprocessing import tokenize_dataset, tokenize_vlm_dataset
 from src.data.pipeline.processing import process_dataset_with_map_and_filter
 from src.data.pipeline.row_processors import (
+    blank_conversation,
     create_llm_processor,
     create_tokenizer_none_example,
     is_valid_example,
@@ -57,7 +62,10 @@ class _WordTokenizer:
         return {"input_ids": ids, "attention_mask": [1] * len(ids)}
 
     def apply_chat_template(self, conversation, tokenize=False, add_generation_prompt=False, **kwargs):
-        return " ".join(m["content"] for m in conversation)
+        def text(content):
+            return content if isinstance(content, str) else " ".join(part["text"] for part in content)
+
+        return " ".join(text(m["content"]) for m in conversation)
 
     def decode(self, ids, **kwargs):
         return " ".join("w" for _ in ids)
@@ -140,6 +148,23 @@ def test_is_valid_example_blank_string_and_conversation_sentinels():
     )
 
 
+def test_blank_conversation_keeps_the_content_shape_and_is_dropped():
+    """Blanked text parts stay text parts — a string beside the real rows' part lists cannot share one
+    Arrow column — and read as blank, so the filter drops the row. A non-text part cannot be blanked
+    into something the filter drops, so it is refused."""
+    parts = [{"role": "user", "content": [{"type": "text", "text": "q"}, {"type": "text", "text": "r"}]}]
+    blank = blank_conversation(parts)
+    assert blank == [{"role": "user", "content": [{"type": "text", "text": ""}, {"type": "text", "text": ""}]}]
+    assert not is_valid_example({"prompt": blank}, filter_field="prompt")
+    assert is_valid_example({"prompt": parts}, filter_field="prompt")
+    assert blank_conversation([{"role": "user", "content": "q", "name": "asker"}]) == [
+        {"role": "user", "content": "", "name": "asker"}
+    ]
+    assert blank_conversation() == [{"role": "user", "content": ""}]
+    with pytest.raises(ValueError, match="Only text content can be blanked"):
+        blank_conversation([{"role": "user", "content": [{"type": "image", "image": "img0"}]}])
+
+
 def test_map_and_filter_survives_all_rejected_writer_batch():
     """num_proc=2 over a dataset whose first worker's FIRST writer batch is entirely over-length:
     an all-None sentinel raises ``TypeError: Couldn't cast array of type list<item: int64> to
@@ -218,12 +243,14 @@ def test_map_and_filter_survives_all_rejected_string_writer_batch():
 def test_map_and_filter_survives_all_rejected_conversation_writer_batch():
     """environmental_grpo shape: a MESSAGE-LIST prompt column with the blank-conversation sentinel.
     Same writer-batch crash class as the string column (all-None → null inference), plus the
-    sentinel must keep the real struct element type so later real batches cast cleanly."""
+    sentinel must keep the real struct — every key of the rejected messages, not just role and
+    content — so later real batches cast cleanly."""
 
     def process_conversation_row(row):
+        messages = [{"role": "user", "content": row["text"], "name": "asker"}]
         if len(row["text"].split()) > 8:
-            return {"prompt": [{"role": "user", "content": ""}], "answer": row["answer"]}
-        return {"prompt": [{"role": "user", "content": row["text"]}], "answer": row["answer"]}
+            return {"prompt": blank_conversation(messages), "answer": row["answer"]}
+        return {"prompt": messages, "answer": row["answer"]}
 
     dataset = Dataset.from_dict(
         {
@@ -248,8 +275,55 @@ def test_map_and_filter_survives_all_rejected_conversation_writer_batch():
         f"prompt element type inferred as {prompt_type.value_type} — the sentinel is not type-stable"
     )
     for row in result.select(range(0, len(result), 100)):
-        assert row["prompt"][0]["content"] == "short prompt"
+        assert row["prompt"] == [{"role": "user", "content": "short prompt", "name": "asker"}]
         assert row["answer"] == "a"
+
+
+def _text_content(text: str) -> str:
+    return text
+
+
+def _parts_content(text: str) -> list[dict[str, str]]:
+    return [{"type": "text", "text": text}]
+
+
+@pytest.mark.parametrize("content", [_text_content, _parts_content], ids=["string-content", "text-parts-content"])
+def test_rlvr_rows_survive_an_all_rejected_writer_batch(content):
+    """RLVR shape (:func:`build_rlvr_row_fn`): the rendered string prompt beside the CONVERSATION the
+    scorers read. An over-budget row's empty conversation infers ``list<null>`` for an all-rejected first
+    writer batch, and the real message structs after it raise ``Couldn't cast array of type
+    struct<role: string, content: string> to null``. The blanked conversation keeps the struct type —
+    text parts staying parts, since a blank string beside them in the mixed batch cannot share a
+    column — and the blank prompt still drops the row."""
+    args = RLVROnlineGRPOScriptArguments(dataset="org/rlvr", prompt_field="messages", max_prompt_length=8)
+    long_turn = [{"role": "user", "content": content(" ".join(["w"] * 32))}]
+    short_turn = [{"role": "user", "content": content("short prompt")}]
+    dataset = Dataset.from_dict(
+        {
+            "messages": [long_turn] * _NUM_REJECTED + [short_turn] * _NUM_VALID,
+            "answer": [str(i) for i in range(2 * _HALF)],
+        }
+    )
+
+    result = process_dataset_with_map_and_filter(
+        dataset,
+        build_rlvr_row_fn(args, _WordTokenizer()),
+        filter_field="prompt",
+        remove_columns=["messages"],
+        desc="regression rlvr sentinel",
+        num_proc=2,
+    )
+
+    assert len(result) == _NUM_VALID
+    conversation_type = result.data.schema.field("conversation").type
+    assert pa.types.is_struct(conversation_type.value_type), (
+        f"conversation element type inferred as {conversation_type.value_type} — the sentinel is not type-stable"
+    )
+    for offset in range(0, len(result), 100):
+        row = result[offset]
+        assert row["prompt"] == "short prompt"
+        assert row["conversation"] == short_turn
+        assert row["answer"] == str(_NUM_REJECTED + offset)
 
 
 # VLM path: the output schema is pinned via explicit features.

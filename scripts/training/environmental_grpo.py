@@ -50,7 +50,9 @@ from src.data.pipeline.processing import (
     require_render_column,
 )
 from src.data.pipeline.rendered import render_generation_prompt
+from src.data.pipeline.row_processors import blank_conversation
 from src.data.sources.loading import reject_image_columns
+from src.distributed.loading.frozen_models import load_reference_model_for_on_policy_grpo
 from src.distributed.loading.peft_setup import setup_peft_model
 from src.distributed.runtime import barrier
 from src.environments.base import ANSWER_KEY
@@ -189,11 +191,7 @@ def process_dataset(args: EnvironmentalGRPOScriptArguments, tokenizer, ds):
         return result
 
     def rejected_row(row, messages=None):
-        """Type-stable rejection sentinel: a blank message list, never None — an all-rejected first
-        writer batch of None rows makes Arrow infer a null prompt column and crash casting later
-        real batches. is_valid_example drops all-blank-content conversations downstream."""
-        blank = [{**m, "content": ""} for m in messages] if messages else [{"role": "user", "content": ""}]
-        return {"prompt": blank, **carried_columns(row)}
+        return {"prompt": blank_conversation(messages), **carried_columns(row)}
 
     def process_for_grpo(row):
         messages = as_conversation(row.get(args.prompt_field))
@@ -365,6 +363,18 @@ def main():
     verify_backend_on_rank0(
         probe_env.verify_backend, f"Environment backend of environment_type={env_config.environment_type!r}"
     )
+    # The KL reference TRL would otherwise build itself; None where the run holds none. Loaded after the
+    # server preflights, so a misconfigured server fails before a second model load.
+    ref_model = load_reference_model_for_on_policy_grpo(
+        args,
+        model_config,
+        grpo_config,
+        parallelism_config,
+        tokenizer,
+        peft_config=peft_config,
+        reset_sinks=dist_args.reset_sinks,
+        attn_default=requested_attn,
+    )
 
     grpo_config.reward_weights = [1.0]
     apply_distributed_trainer_config(grpo_config, parallelism_config)
@@ -389,6 +399,7 @@ def main():
         eval_dataset=eval_dataset,
         processing_class=tokenizer,
         peft_config=peft_config,
+        ref_model=ref_model,
         callbacks=callbacks,
         async_config=async_config,
         environment_config=env_config,

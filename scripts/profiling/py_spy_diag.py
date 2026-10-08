@@ -6,8 +6,10 @@ torchrun training ranks (or takes explicit ``--pid``) and either:
 
   - ``dump``   — instantaneous py-spy stack dump of every rank, for hang triage: one hung collective
     shows as N-1 ranks inside NCCL and one rank elsewhere,
-  - ``record`` — per-rank CPU flame-graph SVGs sampled over ``--duration`` seconds, for dataloader
-    stalls, tokenization and Python overhead between kernels.
+  - ``record`` — per-rank CPU flame-graph SVGs sampled over ``--duration`` seconds, every rank over
+    the same window, for dataloader stalls, tokenization and Python overhead between kernels.
+
+A pid py-spy could not attach to is reported by name and the CLI exits non-zero.
 
 GPU-side traces come from ``TorchProfilerCallback`` (``enable_torch_profiler: true``); this covers
 the host side. Attach from the same pid namespace as the job: for a containerized run, ``docker
@@ -24,6 +26,7 @@ from __future__ import annotations
 import argparse
 import logging
 import os
+import sys
 
 from src.diagnostics.debugging import (
     FLAMEGRAPH_DIR,
@@ -72,16 +75,25 @@ def main() -> None:
         parser.error("no torchrun training processes found on this node — pass --pid explicitly")
 
     if args.command == "dump":
-        target = dump_distributed_stacks(args.output_dir, pids=pids)
+        capture = dump_distributed_stacks(args.output_dir, pids=pids)
     else:
         logger.info(f"Sampling {len(pids)} process(es) for {args.duration}s…")
-        target = record_distributed_flamegraph(
+        capture = record_distributed_flamegraph(
             args.output_dir, duration=args.duration, rate=args.rate, native=args.native, pids=pids
         )
 
-    if target is None:
+    if capture is None:
         parser.error("py-spy is not installed (profiling dependency group) or not on PATH")
-    logger.info(f"{args.command} artifacts for pids {sorted(pids)} → {target}")
+    for pid, reason in capture.failures.items():
+        logger.error(f"pid {pid}: {args.command} failed — {reason}")
+    if capture.failures:
+        sys.exit(
+            f"{args.command}: {len(capture.failures)} of {len(pids)} attach(es) failed (pids "
+            f"{sorted(capture.failures)}; details in {capture.directory}/pid<pid>.error). py-spy needs "
+            f"ptrace permission (--cap-add=SYS_PTRACE) and the job's pid namespace (docker exec into "
+            f"its container), and the pid must still be running."
+        )
+    logger.info(f"{args.command} artifacts for pids {sorted(pids)} → {capture.directory}")
 
 
 if __name__ == "__main__":

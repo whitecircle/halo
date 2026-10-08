@@ -52,6 +52,7 @@ from transformers import AutoModelForCausalLM, AutoTokenizer
 from trl import GRPOConfig
 
 from src.configs.async_training_config import AsyncTrainingConfig
+from src.distributed.loading.frozen_models import load_frozen_auxiliary_model
 from src.distributed.parallelism_config import ParallelismConfig
 from src.env import env_str
 from src.environments.envs.protocols.react import ReActEnvironment
@@ -384,7 +385,6 @@ def test_environmental_grpo_e2e():
             num_generations=2,
             max_completion_length=256,
             beta=0.01,
-            generation_kwargs={"temperature": 0.7},
             fsdp="",
             reward_weights=[1.0],
         )
@@ -425,6 +425,10 @@ def test_environmental_grpo_e2e():
             environment_cls=ReActEnvironment,
             environment_kwargs=environment_kwargs,
             parallelism_config=ParallelismConfig(),
+            # beta != 0 on a full fine-tune holds a frozen reference, loaded as the policy is.
+            ref_model=load_frozen_auxiliary_model(
+                MODEL_NAME, dtype=torch.bfloat16, trust_remote_code=True, attn_implementation="sdpa"
+            ),
         )
 
         log("  Trainer created. Starting training for 2 steps...")
@@ -558,7 +562,6 @@ def test_environmental_grpo_lora_e2e():
             num_generations=2,
             max_completion_length=256,
             beta=0.01,
-            generation_kwargs={"temperature": 0.7},
             fsdp="",
             reward_weights=[1.0],
         )

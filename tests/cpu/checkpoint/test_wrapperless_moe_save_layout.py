@@ -1,19 +1,20 @@
 #!/usr/bin/env python
-"""Wrapper-less MoE gathered saves must write the HUB expert layout, not the module-fused one.
+"""Wrapper-less MoE gathered saves must write the layout the model was loaded from.
 
-transformers 5.16 loads several MoE families into a module-FUSED expert layout
+transformers 5.16 loads several MoE families from a per-expert hub into a module-FUSED expert layout
 (``experts.gate_up_proj [E,2M,H]``) and ``save_pretrained`` reverts to the per-expert hub layout at
 write time. The toolkit's gathered writer bypasses ``save_pretrained``, so a wrapper-less run
 (``use_grouped_gemm: false`` at ep1 — no EP layer, the FSDP2/CP/TP savers) that emits fused keys
 produces an artifact vLLM 0.26.0 hard-fails on for GLM-4/LFM-2 and silently mis-loads for Laguna.
 The writer applies ``revert_weight_conversion`` exactly when the model carries no EP layers.
 
-That revert has a second, quieter failure mode. transformers filters ``model._weight_conversions``
-down to the converters a load actually USED, and a source checkpoint already in the fused layout —
-a toolkit save read back in the stage1 -> stage2 flow — matches the module tree key-for-key, so the
-list comes back ``[]`` and the revert degenerates into an identity that re-emits the fused keys.
-``None`` (not ``[]``) is the sentinel that makes transformers fall back to the family's DECLARED
-mapping, so the writer swaps it in for an empty list and restores the model's own value afterwards.
+transformers records in ``model._weight_conversions`` the converters a load actually USED. A source
+already in the module layout converts nothing and records ``[]``: the Qwen3.5/3.6 hub ships its
+experts fused, and transformers still registers the per-expert converter for the family. Reverting
+an empty record through that registry mapping would save a fused-hub model per-expert, a layout
+neither its hub, its ``save_pretrained`` nor its EP save writes, and one its own FSDP2 resume cannot
+read back. Every saver writes what the load read; the registry mapping is only for a model no load
+recorded (``None``: built from its config), as in transformers' own revert.
 
     python tests/cpu/checkpoint/test_wrapperless_moe_save_layout.py
 """
@@ -25,13 +26,25 @@ import pytest
 import torch
 from accelerate import PartialState
 from safetensors.torch import save_file
-from transformers import CONFIG_MAPPING, AutoModelForCausalLM
+from transformers import (
+    CONFIG_MAPPING,
+    AutoModelForCausalLM,
+    AutoModelForImageTextToText,
+    Qwen3_5MoeConfig,
+    Qwen3_5MoeForConditionalGeneration,
+)
 
 PartialState()  # save_model_config logs through accelerate's logger
 
-from src.checkpoint.format import load_full_state_dict, write_gathered_checkpoint
+from src.checkpoint.format import (
+    load_full_state_dict,
+    save_pretrained_layout,
+    write_gathered_checkpoint,
+)
+from src.distributed.checkpoint.save import save_fsdp2_checkpoint
 from src.distributed.checkpoint.tp_save import save_tp_model
 from tests.common.checkpoint_io import written_keys
+from tests.common.models import TINY_QWEN35_MOE_CONFIG
 
 
 def _tiny_qwen3_moe():
@@ -99,14 +112,10 @@ def test_wrapperless_save_writes_hub_expert_layout(tmp_path):
     assert torch.equal(reloaded.state_dict()[fused_key], model.state_dict()[fused_key])
 
 
-def test_a_fused_layout_source_still_writes_the_hub_layout(tmp_path):
-    """The stage1 -> stage2 case: the source checkpoint is itself a fused-layout toolkit save.
-
-    Nothing is converted at load, so ``_weight_conversions`` is ``[]`` — and an empty list is NOT the
-    fallback sentinel, it is an empty transform set that renames every key to itself. Without the
-    swap to ``None`` the revert runs and changes nothing, and stage 2 re-emits the same unservable
-    fused artifact stage 1 produced.
-    """
+def test_a_fused_layout_source_writes_the_layout_it_read(tmp_path):
+    """A source already in the module layout records ``[]``: nothing was converted, so nothing is
+    reverted. Swapping in the family's registry mapping would respell the experts into a layout the
+    load never read, which is what turned the fused Qwen3.5/3.6 hub into a per-expert save."""
     source, out = tmp_path / "fused-source", tmp_path / "out"
     # bf16 end-to-end: the writer casts to the save dtype, and this test pins LAYOUT round-tripping —
     # a bf16 fixture keeps torch.equal exact instead of masking layout bugs behind rounding noise.
@@ -119,14 +128,13 @@ def test_a_fused_layout_source_still_writes_the_hub_layout(tmp_path):
 
     _write_gathered(model, str(out))
 
-    _assert_hub_expert_layout(written_keys(str(out)))
-    # Restored to the model's OWN value, not left on the sentinel: the model keeps training/saving
-    # after this call, and a later save must see exactly what the load left behind.
+    assert written_keys(str(out)) == written_keys(str(source)), "the save must write the layout the load read"
+    # The model keeps training and saving after this call; a later save must see what the load left.
     assert model._weight_conversions is conversions
 
     reloaded = AutoModelForCausalLM.from_pretrained(str(out), dtype=torch.bfloat16)
     for key, tensor in origin.state_dict().items():
-        assert torch.equal(reloaded.state_dict()[key], tensor), f"{key} did not survive the unfuse/re-fuse"
+        assert torch.equal(reloaded.state_dict()[key], tensor), f"{key} did not survive the round trip"
 
 
 def test_a_hub_layout_source_keeps_the_conversions_its_load_used(tmp_path):
@@ -202,6 +210,82 @@ def test_a_model_without_a_config_still_gets_the_normalized_safetensors_artifact
     assert state["model.embed_tokens.weight"].dtype == torch.bfloat16, "weights must export at the save dtype"
     norm_key = next(k for k in state if k.endswith("input_layernorm.weight"))
     assert state[norm_key].dtype == torch.float32, "norm params keep their trained dtype"
+
+
+def _tiny_qwen3_5_moe_multimodal() -> Qwen3_5MoeForConditionalGeneration:
+    vision = {"depth": 1, "hidden_size": 16, "intermediate_size": 16, "num_heads": 2}
+    config = Qwen3_5MoeConfig(
+        text_config=dict(TINY_QWEN35_MOE_CONFIG),
+        vision_config={**vision, "out_hidden_size": TINY_QWEN35_MOE_CONFIG["hidden_size"]},
+    )
+    return Qwen3_5MoeForConditionalGeneration(config)
+
+
+def _qwen3_5_hub_source(directory: str) -> None:
+    """The Qwen3.5/3.6-35B-A3B hub layout: experts FUSED under the multimodal prefix."""
+    _write_fused_checkpoint(_tiny_qwen3_5_moe_multimodal().to(torch.bfloat16), directory)
+
+
+def _qwen3_moe_hub_source(directory: str) -> None:
+    """The Qwen3-30B-A3B hub layout: one tensor per expert."""
+    _tiny_qwen3_moe().to(torch.bfloat16).save_pretrained(directory)
+
+
+def _text_only(keys: set[str]) -> set[str]:
+    """``keys`` as a text-only load of the multimodal checkpoint saves them: no tower, no wrapper prefix."""
+    return {k.replace("model.language_model.", "model.") for k in keys if not k.startswith("model.visual.")}
+
+
+_SOURCES = {
+    "qwen3_5_moe-hub-multimodal": (_qwen3_5_hub_source, AutoModelForImageTextToText, lambda keys: keys),
+    "qwen3_5_moe-hub-text-only": (_qwen3_5_hub_source, AutoModelForCausalLM, _text_only),
+    "qwen3_moe-hub": (_qwen3_moe_hub_source, AutoModelForCausalLM, lambda keys: keys),
+}
+
+
+def _save_fsdp2(model, output_dir: str) -> None:
+    ctx = SimpleNamespace(
+        model=model, is_save_rank=True, max_shard_size="5GB", training_checkpoint=False, tokenizer=None
+    )
+    save_fsdp2_checkpoint(ctx, output_dir)
+
+
+def _save_pretrained(model, output_dir: str) -> None:
+    with save_pretrained_layout(model):
+        model.save_pretrained(output_dir)
+
+
+_SAVERS = {
+    "fsdp2": _save_fsdp2,
+    "tp": save_tp_model,
+    "gathered": _write_gathered,
+    "save_pretrained": _save_pretrained,
+}
+
+
+@pytest.mark.parametrize("saver", _SAVERS)
+@pytest.mark.parametrize("source", _SOURCES)
+def test_every_saver_writes_the_layout_the_hub_ships(tmp_path, source, saver):
+    """Each wrapper-less saver, and ``save_pretrained``, writes a hub-loaded model back in its hub's
+    expert layout: fused for Qwen3.5/3.6 (whose load converts nothing), per-expert for Qwen3-MoE
+    (whose load fuses). A Qwen3.5 save that came out per-expert is the layout its FSDP2 resume, which
+    reads raw keys into the fused module, and the EP lazy loader under ``text_only_model`` cannot
+    read back."""
+    write_source, load_class, expected_keys = _SOURCES[source]
+    source_dir, out = str(tmp_path / "hub"), str(tmp_path / "out")
+    write_source(source_dir)
+    hub_keys = written_keys(source_dir)
+    fused_hub = any(k.endswith("mlp.experts.gate_up_proj") for k in hub_keys)
+    assert fused_hub == source.startswith("qwen3_5_moe"), "premise: the hub layout this case stands for"
+
+    model = load_class.from_pretrained(source_dir, dtype=torch.bfloat16)
+    os.makedirs(out, exist_ok=True)
+    _SAVERS[saver](model, out)
+
+    assert written_keys(out) == expected_keys(hub_keys), f"{saver} wrote a layout the hub does not ship"
+    reloaded = load_class.from_pretrained(out, dtype=torch.bfloat16)
+    for key, tensor in model.state_dict().items():
+        assert torch.equal(reloaded.state_dict()[key], tensor), f"{key} did not survive the {saver} round trip"
 
 
 if __name__ == "__main__":

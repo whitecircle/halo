@@ -1,7 +1,7 @@
 #!/usr/bin/env python
 """Validation tests for ClassificationConfig, EmbeddingConfig,
-DistillScriptArguments and RLVROnlineGRPOScriptArguments ``__post_init__`` (and the CLI-override
-re-run of the same guards), plus the NaN refusal on every float those configs and SMPO range-check.
+DistillScriptArguments and RLVROnlineGRPOScriptArguments ``__post_init__`` (a CLI override meets
+the same guards), plus the NaN refusal on every float those configs and SMPO range-check.
 
 Each boundary the validator rejects is exercised (raise expected) alongside a valid
 neighbor (no raise), mirroring the SMPO validator-test style in test_config_dataclasses.py.
@@ -21,6 +21,7 @@ from src.configs.classification_config import ClassificationConfig
 from src.configs.distillation_config import DistillationConfig
 from src.configs.embedding_config import EmbeddingConfig
 from src.configs.smpo_config import SmoothMarginPOConfig
+from src.training.parser import H4ArgumentParser
 
 OUTPUT_DIR = "/tmp/test_config_validators"
 # Clears the bf16/GPU tail check for configs expected to construct successfully.
@@ -164,13 +165,11 @@ def test_embedding_weights_without_dimensions_raises():
         EmbeddingConfig(output_dir=OUTPUT_DIR, matryoshka_weights=[1.0, 0.5])
 
 
-def test_embedding_weights_without_dimensions_raises_on_cli_override():
-    """The guard lives in ``_validate_ranges``, so the setattr override path re-runs it — a
-    ``--matryoshka_weights`` CLI override must not slip past ``__post_init__``."""
-    cfg = EmbeddingConfig(**_CPU_OK)
-    cfg.matryoshka_weights = [1.0, 0.5]
+def test_embedding_weights_without_dimensions_raises_on_cli_override(tmp_path):
+    config = tmp_path / "embedding.yaml"
+    config.write_text(f"output_dir: {OUTPUT_DIR}\nbf16: false\nuse_cpu: true\n")
     with pytest.raises(ValueError, match="matryoshka_weights"):
-        cfg.__post_override__({"matryoshka_weights"})
+        H4ArgumentParser((EmbeddingConfig,)).parse_yaml_and_args(str(config), ["--matryoshka_weights=1.0,0.5"])
 
 
 # DistillationConfig / DistillScriptArguments / RLVROnlineGRPOScriptArguments range guards

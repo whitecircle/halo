@@ -62,14 +62,39 @@ def create_tokenizer_none_example(tokenizer, **tokenizer_kwargs) -> dict[str, li
     return _rejection_sentinel(tokenizer("sample", **tokenizer_kwargs))
 
 
+def blank_conversation(messages: list[dict[str, Any]] | None = None) -> list[dict[str, Any]]:
+    """The rejection sentinel of a text message-list column: ``messages`` with every text blanked, or
+    one blank user turn when there are none.
+
+    Never ``None`` or ``[]``: a writer batch of rejected rows would infer a ``null`` or ``list<null>``
+    column and crash casting the real message structs after it. Each message keeps its keys and its
+    content keeps its shape (a string, or text parts), so the struct matches the real rows'.
+    :func:`is_valid_example` drops it.
+    """
+    if not messages:
+        return [{"role": "user", "content": ""}]
+    return [{**message, "content": _blank_text(message.get("content"))} for message in messages]
+
+
+def _blank_text(content: Any) -> Any:
+    """``content`` with its text emptied, in its own shape. A non-text part would keep the row
+    content-bearing past the filter, so it is refused."""
+    if not isinstance(content, list):
+        return ""
+    if any(part.get("type") != "text" for part in content):
+        raise ValueError(f"Only text content can be blanked, got parts of type {[p.get('type') for p in content]}.")
+    return [{**part, "text": ""} for part in content]
+
+
 def _is_content_bearing(value: Any) -> bool:
     """Whether a filter-field value carries real content.
 
     ``None``, blank strings, and empty lists do not (an empty or whitespace-only prompt is genuinely
     invalid); a message list does only when at least one message content is non-blank — the
-    type-stable rejection shape for conversational prompt columns. Message-shaped dicts are
-    recognized by a ``role``/``content`` key, so multimodal content-part lists (``type``/``image``
-    dicts) and every other value (token-id lists, scalars, …) count as content-bearing.
+    type-stable rejection shape for conversational prompt columns — and a list of text parts only when
+    one part's text is. Message-shaped dicts are recognized by a ``role``/``content`` key, so content
+    with a non-text part (an image) and every other value (token-id lists, scalars, …) count as
+    content-bearing.
     """
     if value is None:
         return False
@@ -80,6 +105,8 @@ def _is_content_bearing(value: Any) -> bool:
             return False
         if all(isinstance(item, dict) and ("role" in item or "content" in item) for item in value):
             return any(_is_content_bearing(item.get("content")) for item in value)
+        if all(isinstance(item, dict) and item.get("type") == "text" for item in value):
+            return any(_is_content_bearing(item.get("text")) for item in value)
     return True
 
 

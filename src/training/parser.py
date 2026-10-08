@@ -2,7 +2,6 @@
 
 import argparse
 import dataclasses
-import enum
 import os
 import re
 import sys
@@ -29,15 +28,11 @@ _TOOLKIT_DEFAULTS = {
     "logging_nan_inf_filter": False,
 }
 
-# A toolkit default applies only when its guard holds: bf16 yields to an explicitly-enabled fp16,
-# which would otherwise form the fp16+bf16 pair TrainingArguments.__post_init__ rejects.
+# A toolkit default applies only when its guard holds over the explicitly-set values: bf16 yields to
+# an explicitly-enabled fp16, which would otherwise form the fp16+bf16 pair TrainingArguments rejects.
 _TOOLKIT_DEFAULT_GUARDS = {
-    "bf16": lambda obj: not getattr(obj, "fp16", False),
+    "bf16": lambda values: not values.get("fp16"),
 }
-
-# TrainingArguments.__post_init__ derives ``mixed_precision`` from these; mutating them post-parse must re-run it.
-_PRECISION_FLAGS = ("fp16", "bf16")
-
 
 _TRUE_STRINGS = ("true", "1", "yes")
 _FALSE_STRINGS = ("false", "0", "no")
@@ -146,11 +141,8 @@ def _is_bool_only(annotation) -> bool:
 
 
 def _argv_yaml_path() -> str | None:
-    """Absolute path of the YAML config when ``sys.argv[1]`` is one, else ``None``.
-
-    Answers "was this invoked as ``<script> config.yaml [--overrides]``"; the parse dispatch and the
-    explicitly-set-field scan branch on the same answer.
-    """
+    """Absolute path of the YAML config when ``sys.argv[1]`` is one, else ``None``: whether this was
+    invoked as ``<script> config.yaml [--overrides]``."""
     if len(sys.argv) >= 2 and sys.argv[1].endswith(_YAML_SUFFIXES):
         return os.path.abspath(sys.argv[1])
     return None
@@ -172,6 +164,11 @@ def _union_permits_str(annotation) -> bool:
     return False
 
 
+def _init_field_names(dataclass_type) -> set[str]:
+    """The fields ``dataclass_type`` takes in ``__init__``, the keys ``parse_dict`` hands it."""
+    return {f.name for f in dataclasses.fields(dataclass_type) if f.init}
+
+
 def _expand_strftime_directives(template: str) -> str:
     """Expand ``%<letter>`` strftime directives in ``template``, leaving every other ``%`` intact.
 
@@ -180,6 +177,19 @@ def _expand_strftime_directives(template: str) -> str:
     """
     now = datetime.now()
     return _STRFTIME_DIRECTIVE.sub(lambda m: "%" if m.group(0) == "%%" else now.strftime(m.group(0)), template)
+
+
+def _expand_output_dir(values: dict[str, Any]) -> dict[str, Any]:
+    """``values`` with the strftime directives in ``output_dir`` expanded — rank 0's expansion, broadcast.
+
+    A per-rank ``datetime.now()`` can straddle a second boundary, and the log tee installs from the
+    built config: on a non-shared output filesystem each node's save rank would then tee ``run.log``
+    into a directory other than the run's output_dir.
+    """
+    output_dir = values.get("output_dir")
+    if not isinstance(output_dir, str):
+        return values
+    return {**values, "output_dir": broadcast_from_rank0(_expand_strftime_directives(output_dir))}
 
 
 class H4ArgumentParser(HfArgumentParser):
@@ -235,21 +245,17 @@ class H4ArgumentParser(HfArgumentParser):
                         f"spellings yes/no/on/off parse as (truthy) strings."
                     )
 
-    def parse_yaml_and_args(self, yaml_arg: str, other_args: list[str] | None = None) -> list[Any]:
-        """Parse a YAML file, then overwrite its values with CLI args (e.g. ['--arg=val'])."""
-        outputs, overridden = self._apply_cli_overrides(self.parse_yaml_file(os.path.abspath(yaml_arg)), other_args)
-        # Without re-deriving mixed_precision, the Accelerator autocasts with the pre-override dtype.
-        if overridden & set(_PRECISION_FLAGS):
-            self._sync_mixed_precision(outputs)
-        return outputs
+    def parse_yaml_and_args(self, yaml_arg: str, other_args: list[str] | None = None) -> tuple[Any, ...]:
+        """Parse a YAML file with CLI args (e.g. ``['--arg=val']``) overriding its values.
 
-    def _apply_cli_overrides(
-        self, parsed: tuple[Any, ...], other_args: list[str] | None
-    ) -> tuple[list[Any], set[str]]:
-        """Overwrite the parsed dataclasses' values with CLI args, returning them and the overridden
-        field names. ``mixed_precision`` is left for the caller to re-derive."""
-        outputs = []
-        parsed_other_args = {}
+        Each dataclass is built once from the merged values, so every ``__post_init__`` — TRL's,
+        transformers' and the toolkit's — derives its state from, and validates, the final config.
+        """
+        return self.parse_dict(self._merge_cli_overrides(_load_yaml(os.path.abspath(yaml_arg)), other_args))
+
+    def _merge_cli_overrides(self, values: dict[str, Any], other_args: list[str] | None) -> dict[str, Any]:
+        """``values`` with each ``--key=value`` CLI arg, cast to its field's annotation, set over it."""
+        overrides: dict[str, str] = {}
         for arg in other_args or []:
             if "=" not in arg:
                 raise ValueError(f"CLI overrides must be in --key=value form, got {arg!r}")
@@ -257,123 +263,108 @@ class H4ArgumentParser(HfArgumentParser):
             # Underscore form, matching argparse (which accepts both spellings) and the field names.
             key = key.strip("-").replace("-", "_")
             # Reject a repeated flag (--lr=1 --lr=2); the dict would otherwise keep only the last.
-            if key in parsed_other_args:
+            if key in overrides:
                 raise ValueError(f"Duplicate CLI override provided: {key!r}")
-            parsed_other_args[key] = value
-        used_args = set()
-
-        # setattr, not re-instantiation: re-running __post_init__ trips validators on state it derived.
-        for data_yaml in parsed:
-            overridden_fields: set[str] = set()
-            keys = {f.name for f in dataclasses.fields(data_yaml) if f.init}
-            # HfArgumentParser.__init__ rewrites Field.type in place, so annotations come from the class.
-            annotations = get_type_hints(type(data_yaml)) if keys & set(parsed_other_args) else {}
-            for arg, val in parsed_other_args.items():
-                if arg not in keys:
-                    continue
-
-                base_type = data_yaml.__dataclass_fields__[arg].type
-                origin = get_origin(base_type)
-                if origin in (Union, types.UnionType):
-                    members = [a for a in get_args(base_type) if a is not type(None)]
-                    if len(members) == 1:
-                        base_type = members[0]
-                        origin = get_origin(base_type)
-
-                cast_val: Any = val
-                literal_choices = _literal_choices(annotations[arg])
-                if literal_choices is not None:
-                    # setattr bypasses argparse choices; match by string form so str and int literals
-                    # cast alike. A literal choice spelled "none" takes precedence over
-                    # None-clearing, so --moe_balancing=none selects the string, while --field=None
-                    # still clears an Optional.
-                    matches = [c for c in literal_choices if c is not None and str(c) == val]
-                    if matches:
-                        cast_val = matches[0]
-                    elif val in _NONE_STRINGS and None in literal_choices:
-                        cast_val = None
-                    else:
-                        raise ValueError(
-                            f"Invalid value {val!r} for CLI override --{arg}: "
-                            f"allowed values are {list(literal_choices)}"
-                        )
-                elif (
-                    val in _NONE_STRINGS
-                    and type(None) in get_args(annotations[arg])
-                    and not _is_bool_only(annotations[arg])
-                ):
-                    # Symmetric with YAML's null: any optional field clears from the CLI, including
-                    # unions with no confident value cast (--report_to=none on None | str |
-                    # list[str], the usual way to silence logging on a smoke run). Optional bools are
-                    # exempt: --bf16=none reads as a mistyped boolean, and clearing it would flip the
-                    # run's precision or re-arm an auto-default, so the bool branch raises instead.
-                    cast_val = None
-                elif _is_cli_uncastable(annotations[arg]):
-                    # setattr-ing the raw string would corrupt the field: __post_init__ conversions
-                    # do not re-run, and a string in a list field is iterated char-wise.
-                    raise ValueError(
-                        f"CLI override --{arg} is not supported: field type {annotations[arg]} cannot "
-                        f"be cast from a string. Set '{arg}' in the YAML config instead."
-                    )
-                elif isinstance(base_type, type) and issubclass(base_type, enum.Enum):
-                    # setattr bypasses the enum coercion __post_init__ ran on the YAML value; a raw
-                    # string equals no enum member, so a typo'd --save_strategy would disable
-                    # checkpointing rather than fail. Let the enum's ValueError propagate.
-                    cast_val = base_type(val)
-                elif base_type in (int, float):
-                    try:
-                        cast_val = base_type(val)
-                    except ValueError:
-                        # ``float | str`` admits a sentinel its consumer resolves ("auto").
-                        if not _union_permits_str(annotations[arg]):
-                            raise
-                        cast_val = val
-                elif origin is list:
-                    elem_args = get_args(base_type)
-                    elem_cast = elem_args[0] if elem_args and elem_args[0] in (int, float, str) else str
-                    cast_val = [elem_cast(v) for v in val.split(",")]
-                elif base_type is bool:
-                    lowered = val.strip().lower()
-                    if is_true_string(lowered):
-                        cast_val = True
-                    elif lowered in _FALSE_STRINGS:
-                        cast_val = False
-                    else:
-                        raise ValueError(f"Cannot parse boolean CLI override --{arg}={val!r}")
-
-                setattr(data_yaml, arg, cast_val)
-                overridden_fields.add(arg)
-                used_args.add(arg)
-
-            # Overrides bypass __init__; __post_override__ re-derives state __post_init__ computed from them.
-            if overridden_fields and hasattr(data_yaml, "__post_override__"):
-                data_yaml.__post_override__(overridden_fields)
-
-            outputs.append(data_yaml)
-
-        unmatched = set(parsed_other_args) - set(used_args)
+            overrides[key] = value
+        unmatched = set(overrides) - self._declared_field_names()
         if unmatched:
             raise ValueError(
                 f"Unknown CLI override(s) {sorted(unmatched)}: no field with these names exists on any "
                 f"of the parsed config dataclasses."
             )
+        return {**values, **{key: self._cast_cli_override(key, raw) for key, raw in overrides.items()}}
 
-        return outputs, used_args
+    def _declared_field_names(self) -> set[str]:
+        return set().union(*(_init_field_names(dataclass_type) for dataclass_type in self.dataclass_types))
 
-    def parse_flags(self, args: list[str] | None = None) -> tuple[Any, ...]:
-        """Parse a flags-only command line, handing each flag to every dataclass that declares it.
+    def _cast_cli_override(self, name: str, raw: str) -> Any:
+        """``raw`` cast to the type field ``name`` declares, the value a YAML would carry for it.
+
+        The cast value reaches every dataclass declaring the field, so they must declare one type.
+        """
+        declarers = [dt for dt in self.dataclass_types if name in _init_field_names(dt)]
+        # HfArgumentParser.__init__ rewrites Field.type in place for argparse, so annotations come from the class.
+        annotation, *others = (get_type_hints(dataclass_type)[name] for dataclass_type in declarers)
+        if any(other != annotation for other in others):
+            raise ValueError(
+                f"CLI override --{name}: {[dt.__name__ for dt in declarers]} declare it with different types, "
+                f"so one string cannot be cast for all of them. Set '{name}' in the YAML config instead."
+            )
+        declared = declarers[0].__dataclass_fields__[name]
+        # The rewritten Field.type is the one member argparse would cast to (``float | str`` -> float).
+        base_type = declared.type
+        origin = get_origin(base_type)
+        if origin in (Union, types.UnionType):
+            members = [a for a in get_args(base_type) if a is not type(None)]
+            if len(members) == 1:
+                base_type = members[0]
+                origin = get_origin(base_type)
+
+        literal_choices = _literal_choices(annotation)
+        if literal_choices is not None:
+            # Match by string form so str and int literals cast alike. A literal choice spelled "none"
+            # takes precedence over None-clearing, so --moe_balancing=none selects the string, while
+            # --field=None still clears an Optional.
+            matches = [c for c in literal_choices if c is not None and str(c) == raw]
+            if matches:
+                return matches[0]
+            if raw in _NONE_STRINGS and None in literal_choices:
+                return None
+            raise ValueError(
+                f"Invalid value {raw!r} for CLI override --{name}: allowed values are {list(literal_choices)}"
+            )
+        if raw in _NONE_STRINGS and isinstance(declared.default, str) and is_null_string(declared.default):
+            # The field spells "no value" as a string of its own, which its __post_init__ reads and None
+            # is not: --report_to=none must reach transformers as "none" (no integrations), where None
+            # becomes [None] and fails the Trainer.
+            return declared.default
+        if raw in _NONE_STRINGS and type(None) in get_args(annotation) and not _is_bool_only(annotation):
+            # Symmetric with YAML's null: any optional field clears from the CLI, including unions with
+            # no confident value cast. Optional bools are exempt: --bf16=none reads as a mistyped
+            # boolean, and clearing it would flip the run's precision or re-arm an auto-default, so the
+            # bool branch raises instead.
+            return None
+        if _is_cli_uncastable(annotation):
+            # A raw string in a container field is iterated char-wise by its consumer.
+            raise ValueError(
+                f"CLI override --{name} is not supported: field type {annotation} cannot be cast from a "
+                f"string. Set '{name}' in the YAML config instead."
+            )
+        if base_type in (int, float):
+            try:
+                return base_type(raw)
+            except ValueError:
+                # ``float | str`` admits a sentinel its consumer resolves ("auto").
+                if not _union_permits_str(annotation):
+                    raise
+                return raw
+        if origin is list:
+            elem_args = get_args(base_type)
+            elem_cast = elem_args[0] if elem_args and elem_args[0] in (int, float, str) else str
+            return [elem_cast(v) for v in raw.split(",")]
+        if base_type is bool:
+            lowered = raw.strip().lower()
+            if is_true_string(lowered):
+                return True
+            if lowered in _FALSE_STRINGS:
+                return False
+            raise ValueError(f"Cannot parse boolean CLI override --{name}={raw!r}")
+        return raw
+
+    def _flag_values(self, args: list[str] | None = None) -> dict[str, Any]:
+        """The values of a flags-only command line, each flag given to every dataclass that declares it.
 
         Stands in for ``parse_args_into_dataclasses``, which deletes a key from the shared namespace once
         its first declaring dataclass consumes it, so a field two dataclasses declare (``pad_token``
-        on the script args and TRL's config) raises for the second. Only the flags given are handed
-        out, as :meth:`parse_dict` hands out a YAML's keys: an unset shared field keeps each
-        declarer's own default. An unknown flag is argparse's usage error.
+        on the script args and TRL's config) raises for the second. Only the flags given are returned,
+        as a YAML carries only its keys: an unset shared field keeps each declarer's own default. An
+        unknown flag is argparse's usage error.
         """
         seeded = argparse.Namespace(
             **{action.dest: _UNSET for action in self._actions if action.dest != argparse.SUPPRESS}
         )
         namespace = self.parse_args(args, namespace=seeded)
-        return self.parse_dict({key: value for key, value in vars(namespace).items() if value is not _UNSET})
+        return {key: value for key, value in vars(namespace).items() if value is not _UNSET}
 
     def parse(self) -> Any:
         """Parse the script's YAML config and/or CLI overrides into its declared dataclasses.
@@ -388,19 +379,11 @@ class H4ArgumentParser(HfArgumentParser):
         init_distributed()
 
         yaml_path = _argv_yaml_path()
-        yaml_config = {} if yaml_path is None else _load_yaml(yaml_path)
-        explicitly_set = self._get_explicitly_set_fields(yaml_config)
-
         if yaml_path is None:
-            output = self.parse_flags()
-        elif len(sys.argv) == 2:
-            output = self.parse_dict(yaml_config)
+            values = self._flag_values()
         else:
-            output, _ = self._apply_cli_overrides(self.parse_dict(yaml_config), sys.argv[2:])
-
-        self._apply_toolkit_defaults(output, explicitly_set)
-        self._sync_mixed_precision(output)
-        self._format_output_dir(output)
+            values = self._merge_cli_overrides(_load_yaml(yaml_path), sys.argv[2:])
+        output = self.parse_dict(_expand_output_dir(self._with_toolkit_defaults(values)))
 
         for obj in output:
             if isinstance(getattr(obj, "output_dir", None), str):
@@ -411,63 +394,12 @@ class H4ArgumentParser(HfArgumentParser):
             output = output[0]
         return output
 
-    @staticmethod
-    def _get_explicitly_set_fields(yaml_config: dict[str, Any] | None = None) -> set:
-        """The fields the user explicitly set: the loaded YAML config's keys plus every CLI flag."""
-        explicitly_set = set(yaml_config or ())
-
-        # Without a YAML, sys.argv[1] is already a flag; skipping it lets a default overwrite `--bf16 false`.
-        cli_args = sys.argv[2:] if _argv_yaml_path() else sys.argv[1:]
-        for arg in cli_args:
-            # Underscore form: argparse accepts `--use-liger-kernel`, but the toolkit-default check
-            # reads field names, and a dashed record would let the default overwrite the user's value.
-            key = arg.split("=")[0].lstrip("-").replace("-", "_")
-            explicitly_set.add(key)
-
-        return explicitly_set
-
-    @staticmethod
-    def _apply_toolkit_defaults(parsed_objects: list, explicitly_set: set) -> None:
-        """Apply toolkit-specific defaults to fields that weren't explicitly set by the user."""
-        for field_name, default_value in _TOOLKIT_DEFAULTS.items():
-            if field_name in explicitly_set:
-                continue
-            guard = _TOOLKIT_DEFAULT_GUARDS.get(field_name)
-            for obj in parsed_objects:
-                if hasattr(obj, field_name):
-                    if guard is None or guard(obj):
-                        setattr(obj, field_name, default_value)
-                    break
-
-    @staticmethod
-    def _sync_mixed_precision(parsed_objects: list) -> None:
-        """Re-derive ``mixed_precision`` after post-parse mutation of the precision flags.
-
-        Mirrors ``TrainingArguments.__post_init__`` (env fallback, fp16/bf16 precedence, at-most-one
-        enforcement): toolkit defaults and CLI overrides mutate the flags via setattr, and a stale
-        ``mixed_precision`` makes the Accelerator autocast a dtype the model was not loaded with.
-        """
-        for obj in parsed_objects:
-            if not all(hasattr(obj, name) for name in (*_PRECISION_FLAGS, "mixed_precision")):
-                continue
-            if obj.fp16 and obj.bf16:
-                raise ValueError("At most one of fp16 and bf16 can be True, but not both")
-            mixed_precision = os.environ.get("ACCELERATE_MIXED_PRECISION", "no")
-            if obj.fp16:
-                mixed_precision = "fp16"
-            elif obj.bf16:
-                mixed_precision = "bf16"
-            obj.mixed_precision = mixed_precision
-
-    @staticmethod
-    def _format_output_dir(parsed_objects: list) -> None:
-        """Expand strftime codes in ``output_dir`` — rank 0's expansion, broadcast.
-
-        A per-rank ``datetime.now()`` can straddle a second boundary, and the log tee installs right
-        after this with the local value: on a non-shared output filesystem each node's save rank
-        would then tee ``run.log`` into a directory other than the run's output_dir.
-        """
-        for obj in parsed_objects:
-            output_dir = getattr(obj, "output_dir", None)
-            if isinstance(output_dir, str):
-                obj.output_dir = broadcast_from_rank0(_expand_strftime_directives(output_dir))
+    def _with_toolkit_defaults(self, values: dict[str, Any]) -> dict[str, Any]:
+        """``values`` plus each toolkit default it leaves unset, as if the YAML carried it."""
+        declared = self._declared_field_names()
+        defaults = {}
+        for name, default in _TOOLKIT_DEFAULTS.items():
+            guard = _TOOLKIT_DEFAULT_GUARDS.get(name)
+            if name in declared and name not in values and (guard is None or guard(values)):
+                defaults[name] = default
+        return {**defaults, **values}

@@ -54,17 +54,17 @@ from src.distributed.tensor_parallel.parallelize_attention import (
     retarget_hf_replicated_grad_hooks,
 )
 from src.distributed.tensor_parallel.state_dict import reject_plan_sharded_plain_params, tp_plan_shards_params
-from src.distributed.tensor_parallel.tie_plan import (
-    config_ties_word_embeddings,
-    consistent_tied_tp_plan,
-    validate_tied_pair_consistent,
-)
+from src.distributed.tensor_parallel.tie_plan import consistent_tied_tp_plan, validate_tied_pair_consistent
 from src.env import is_accelerate_launch
 from src.hardware import is_blackwell_gpu
 from src.kernels.liger.orchestrator import apply_liger_kernel
 from src.kernels.lowp.mixed_precision import apply_mixed_precision_compute
 from src.models.loading.checkpoint_coverage import from_pretrained_verified
-from src.models.loading.config_levels import configs_declaring, set_config_field_run_scoped
+from src.models.loading.config_levels import (
+    config_ties_word_embeddings,
+    configs_declaring,
+    set_config_field_run_scoped,
+)
 from src.models.loading.dtype import (
     cast_parameters_to_run_dtype,
     configure_float32_matmul_precision,

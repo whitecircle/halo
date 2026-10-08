@@ -1,10 +1,12 @@
 #!/usr/bin/env python
 """Tests for scripts/after_training/merge_models.py.
 
-Four layers: (1) the pre-I/O input gates — method↔knob, knob ranges, finite weights; (2) the per-tensor
-merge math (linear / slerp / task_arithmetic / ties) on known values; (3) the RAM preflight — each
+Five layers: (1) the pre-I/O input gates — method↔knob, knob ranges, finite weights; (2) the per-tensor
+merge math (linear / slerp / task_arithmetic / ties) on known values; (3) the key-set gate — every input
+carries the reference keys at one shape, except a Hub base's keys the shipped model never reads (a
+stored tied head, the keys its class drops at load); (4) the RAM preflight — each
 method's declared float32 working set against the allocator's peak, and the estimate the preflight
-builds from it; (4) an end-to-end merge of two tiny **Qwen3.5 MoE** checkpoints through the streaming
+builds from it; (5) an end-to-end merge of two tiny **Qwen3.5 MoE** checkpoints through the streaming
 pipeline — write → reload with the real model class → verify the merged weights match the expected
 interpolation and the model forwards.
 
@@ -25,9 +27,9 @@ import pytest
 import torch
 from safetensors.torch import load_file, save_file
 from torch.profiler import ProfilerActivity, profile
-from transformers import CONFIG_MAPPING
+from transformers import CONFIG_MAPPING, Gemma3Config, Qwen3Config, Qwen3ForCausalLM
 from transformers.models.qwen3_5_moe import Qwen3_5MoeForCausalLM, Qwen3_5MoeTextConfig
-from transformers.trainer import SCHEDULER_NAME
+from transformers.trainer import SCHEDULER_NAME, TRAINER_STATE_NAME
 
 from src.checkpoint.format import (
     ADAPTER_CONFIG_FILE,
@@ -39,6 +41,8 @@ from src.checkpoint.format import (
     prefetch_pending_filename,
     write_resume_adapter_marker,
 )
+from src.checkpoint.tool_io import iter_checkpoint_shard_entries
+from tests.common.models import TINY_QWEN3_CONFIG
 from tests.common.utils import load_script_module
 
 mm = load_script_module("scripts/after_training/merge_models.py")
@@ -48,11 +52,12 @@ _WORKING_SET_NUMEL = 1 << 20
 _SCALAR_SLACK_BYTES = 4096
 
 
-def _write_tiny_checkpoint(path: Path, tensors: dict[str, torch.Tensor]) -> Path:
-    """A one-shard checkpoint beside a real config (the aux copy round-trips it through AutoConfig)."""
+def _write_tiny_checkpoint(path: Path, tensors: dict[str, torch.Tensor], config=None) -> Path:
+    """A one-shard checkpoint beside a real config (the aux copy round-trips it through AutoConfig),
+    Qwen3's default unless ``config`` is given."""
     path.mkdir(parents=True, exist_ok=True)
     save_file(tensors, str(path / "model.safetensors"))
-    CONFIG_MAPPING["qwen3"]().save_pretrained(str(path))
+    (config or CONFIG_MAPPING["qwen3"]()).save_pretrained(str(path))
     return path
 
 
@@ -315,6 +320,7 @@ def test_end_to_end_linear_merge_qwen3_5():
         _build_tiny_qwen35(a, seed=0)
         _build_tiny_qwen35(b, seed=1)
         sidecars = (
+            TRAINER_STATE_NAME,
             SCHEDULER_NAME,
             "rng_state_0.pth",
             ROUTER_BALANCING_BIASES_FILE,
@@ -406,18 +412,18 @@ def test_balancing_biases_keep_their_trained_dtype():
 
 
 def test_a_base_only_key_names_the_model_that_lacks_it():
-    """``task_arithmetic``/``ties`` merge over the BASE key set, and the RAM preflight sizes those
-    keys against ``model[0]`` — ahead of the merge loop's own coverage check. A base key no
-    fine-tune carries (the realistic case: a base saved untied, the runs saved tied) must raise
-    naming the model that lacks it, not as a bare ``KeyError: 'lm_head.weight'``."""
+    """``task_arithmetic``/``ties`` merge over the BASE key set. A base key no fine-tune carries under
+    a config that does not tie it (a base saved untied, the runs saved tied) is genuinely missing:
+    refused up front naming the model that lacks it, with no output directory left behind."""
     with tempfile.TemporaryDirectory(dir="/tmp") as tmp:
         base, a, b, out = Path(tmp) / "base", Path(tmp) / "a", Path(tmp) / "b", Path(tmp) / "merged"
-        shared = {"model.layers.0.mlp.down.weight": torch.zeros(4, 4)}
+        shared = {"model.embed_tokens.weight": torch.zeros(4, 4)}
         _write_tiny_checkpoint(base, {**shared, "lm_head.weight": torch.zeros(4, 4)})
         for path in (a, b):
             _write_tiny_checkpoint(path, dict(shared))
+        assert not CONFIG_MAPPING["qwen3"]().tie_word_embeddings, "premise: the shipped config does not tie"
 
-        with pytest.raises(KeyError, match=r"lm_head\.weight.* missing from"):
+        with pytest.raises(ValueError, match=rf"{re.escape(str(a))} does not carry .* lacks 1 tensor\(s\) \['lm_head"):
             mm.merge_models(
                 [str(a), str(b)],
                 str(out),
@@ -426,6 +432,216 @@ def test_a_base_only_key_names_the_model_that_lacks_it():
                 allow_missing_tokenizer=True,
                 verbose=False,
             )
+        assert not out.exists()
+
+
+# The methods that take a base, read off the method table: each merges over the base's key set.
+_BASE_METHODS = sorted(name for name, spec in mm._METHODS.items() if "base" in spec.tensor_args)
+
+
+def _tied_qwen3(path: Path, seed: int, *, store_head: bool, tie: bool = True) -> dict[str, torch.Tensor]:
+    """A tiny Qwen3 saved as transformers saves it: a tied head is left out unless ``store_head``
+    writes it back beside the embedding, as some Hub checkpoints ship it."""
+    torch.manual_seed(seed)
+    model = Qwen3ForCausalLM(Qwen3Config(**{**TINY_QWEN3_CONFIG, "tie_word_embeddings": tie}))
+    model.save_pretrained(path)
+    tensors = load_file(str(path / "model.safetensors"))
+    if store_head:
+        tensors["lm_head.weight"] = tensors["model.embed_tokens.weight"].clone()
+        save_file(tensors, str(path / "model.safetensors"), metadata={"format": "pt"})
+    return tensors
+
+
+@pytest.mark.parametrize("method", _BASE_METHODS)
+def test_a_tied_hub_base_storing_its_head_merges_into_a_tied_checkpoint(method, tmp_path):
+    """A Hub base that stores its tied head (Qwen3-0.6B does) carries ``lm_head.weight`` no tied
+    fine-tune saves. Under the tying config the merge ships, that head is the merged embedding: the
+    merge leaves it out, and the reload ties it to the merged embedding with nothing missing."""
+    base, a, b, out = (tmp_path / name for name in ("base", "a", "b", "merged"))
+    base_tensors = _tied_qwen3(base, seed=0, store_head=True)
+    tuned = [_tied_qwen3(path, seed, store_head=False) for path, seed in ((a, 1), (b, 2))]
+    assert "lm_head.weight" in base_tensors and all("lm_head.weight" not in t for t in tuned), "premise"
+
+    mm.merge_models(
+        [str(a), str(b)],
+        str(out),
+        method=method,
+        base_model=str(base),
+        dtype="float32",
+        allow_missing_tokenizer=True,
+        verbose=False,
+    )
+
+    merged_tensors = load_file(str(out / "model.safetensors"))
+    assert "lm_head.weight" not in merged_tensors
+    spec = mm._METHODS[method]
+    embed = "model.embed_tokens.weight"
+    per_key = {"base": base_tensors[embed], "tensors": [t[embed] for t in tuned], "weights": [1.0, 1.0]}
+    knobs = {mm._knob_dest(knob): default for knob, default in spec.knobs.items()}
+    expected = spec.op(**{name: per_key[name] for name in spec.tensor_args}, **knobs)
+    torch.testing.assert_close(merged_tensors[embed], expected)
+
+    merged, info = Qwen3ForCausalLM.from_pretrained(out, output_loading_info=True)
+    assert not info["missing_keys"] and not info["unexpected_keys"], info
+    assert merged.lm_head.weight is merged.model.embed_tokens.weight
+    torch.testing.assert_close(merged.lm_head.weight.detach(), expected)
+
+
+@pytest.mark.parametrize(
+    ("tie", "lacking_embedding"),
+    [(False, ()), (True, ("b",)), (True, ("a", "b"))],
+    ids=["untied-config", "a-fine-tune-lacks-the-embedding", "no-fine-tune-stores-either-half"],
+)
+def test_a_stored_base_head_is_missing_unless_the_tie_rebuilds_it(tie, lacking_embedding, tmp_path):
+    """The tie excuses the base's head only where it holds: a shipped config that does not tie
+    (the head would load random-initialized), or fine-tunes that do not all store the embedding the
+    tie rebuilds the head from, down to none of them storing either half, leave the head genuinely
+    missing and the merge refuses it."""
+    base, a, b, out = (tmp_path / name for name in ("base", "a", "b", "merged"))
+    _tied_qwen3(base, seed=0, store_head=True, tie=tie)
+    for path, seed in ((a, 1), (b, 2)):
+        tensors = _tied_qwen3(path, seed, store_head=False)
+        if path.name in lacking_embedding:
+            tensors.pop("model.embed_tokens.weight")
+        tensors.pop("lm_head.weight", None)
+        save_file(tensors, str(path / "model.safetensors"), metadata={"format": "pt"})
+
+    with pytest.raises(ValueError, match=r"does not carry the merge's reference key set"):
+        mm.merge_models(
+            [str(a), str(b)],
+            str(out),
+            method="ties",
+            base_model=str(base),
+            allow_missing_tokenizer=True,
+            verbose=False,
+        )
+    assert not out.exists()
+
+
+@pytest.mark.parametrize(
+    ("wrapper_ties", "text_ties"),
+    [(True, True), (False, True), (True, False)],
+    ids=["both", "text-only", "wrapper-only"],
+)
+def test_a_stored_base_head_is_excused_only_where_both_config_levels_tie(wrapper_ties, text_ties, tmp_path):
+    """transformers ties a multimodal wrapper's head on the wrapper's own ``tie_word_embeddings`` and a
+    text-only class's head on the text sub-config's, and Gemma 3's config lets the two disagree. A
+    base's stored head is the merged embedding again only where both levels tie; otherwise one of the
+    two classes loads the head random-initialized from the merged checkpoint."""
+    config = Gemma3Config(text_config={"tie_word_embeddings": text_ties}, tie_word_embeddings=wrapper_ties)
+    assert (config.tie_word_embeddings, config.get_text_config().tie_word_embeddings) == (wrapper_ties, text_ties)
+    embedding = {"model.language_model.embed_tokens.weight": torch.randn(8, 4)}
+    base = _write_tiny_checkpoint(tmp_path / "base", {**embedding, "lm_head.weight": torch.randn(8, 4)}, config)
+    tuned = [_write_tiny_checkpoint(tmp_path / name, {**embedding}, config) for name in ("a", "b")]
+    out = tmp_path / "merged"
+
+    def merge():
+        mm.merge_models(
+            [str(path) for path in tuned],
+            str(out),
+            method="task_arithmetic",
+            base_model=str(base),
+            allow_missing_tokenizer=True,
+            verbose=False,
+        )
+
+    if wrapper_ties and text_ties:
+        merge()
+        assert set(load_file(str(out / "model.safetensors"))) == set(embedding)
+        return
+    with pytest.raises(ValueError, match=r"lacks 1 tensor\(s\) \['lm_head.weight'\]"):
+        merge()
+    assert not out.exists()
+
+
+# A key each family's Hub base stores and its transformers class drops at load
+# (``_keys_to_ignore_on_load_unexpected``), so no fine-tune of that base carries it: Qwen3.5/3.6's MTP
+# head under the multimodal wrapper the Hub config resolves to and under the text-only class, and
+# GLM-4.7-Flash's MTP layer.
+_LOAD_DROPPED_BASE_KEYS = {
+    "qwen3_5_moe": "mtp.layers.0.mlp.experts.gate_up_proj",
+    "qwen3_5_moe_text": "mtp.fc.weight",
+    "glm4_moe_lite": "model.layers.47.eh_proj.weight",
+}
+
+
+@pytest.mark.parametrize("model_type", sorted(_LOAD_DROPPED_BASE_KEYS))
+@pytest.mark.parametrize("method", _BASE_METHODS)
+def test_base_keys_the_shipped_class_drops_at_load_are_left_out(method, model_type, tmp_path):
+    """A base key no fine-tune stores is excused where the shipped config's model class drops it at
+    load: the merge leaves it out, as every export of the fine-tunes does. A base-only key the class
+    does not drop stays a refusal."""
+    config = CONFIG_MAPPING[model_type]()
+    dropped = _LOAD_DROPPED_BASE_KEYS[model_type]
+    shared = {"model.embed_tokens.weight": torch.zeros(8, 4), "model.layers.0.mlp.down_proj.weight": torch.zeros(4, 4)}
+    tuned = [
+        _write_tiny_checkpoint(tmp_path / name, {key: value + seed for key, value in shared.items()}, config)
+        for seed, name in enumerate(("a", "b"), start=1)
+    ]
+
+    def merge(base_tensors, out):
+        base = _write_tiny_checkpoint(out.with_name(f"{out.name}-base"), base_tensors, config)
+        mm.merge_models(
+            [str(path) for path in tuned],
+            str(out),
+            method=method,
+            base_model=str(base),
+            dtype="float32",
+            allow_missing_tokenizer=True,
+            verbose=False,
+        )
+
+    merge({**shared, dropped: torch.ones(2, 2)}, tmp_path / "merged")
+    assert set(load_file(str(tmp_path / "merged" / "model.safetensors"))) == set(shared)
+
+    stray = tmp_path / "stray"
+    with pytest.raises(ValueError, match=r"lacks 1 tensor\(s\) \['model.stray.weight'\]"):
+        merge({**shared, dropped: torch.ones(2, 2), "model.stray.weight": torch.ones(2)}, stray)
+    assert not stray.exists()
+
+
+def test_a_qwen3_5_base_storing_its_mtp_head_merges_into_a_checkpoint_that_loads_whole(tmp_path):
+    """The Hub Qwen3.5/3.6 checkpoints store an MTP head their transformers class drops at load, so
+    no fine-tune of them carries it. A TIES merge onto such a base reloads through the family's class
+    with nothing missing, unexpected or left over."""
+    base, a, b, out = (tmp_path / name for name in ("base", "a", "b", "merged"))
+    for path, seed in ((base, 0), (a, 1), (b, 2)):
+        _build_tiny_qwen35(path, seed=seed)
+    base_tensors = load_file(str(base / "model.safetensors"))
+    mtp = {"mtp.fc.weight": torch.randn(64, 128), "mtp.norm.weight": torch.ones(64)}
+    save_file({**base_tensors, **mtp}, str(base / "model.safetensors"), metadata={"format": "pt"})
+
+    mm.merge_models(
+        [str(a), str(b)], str(out), method="ties", base_model=str(base), allow_missing_tokenizer=True, verbose=False
+    )
+
+    merged_keys = {key for _shard, _reader, key in iter_checkpoint_shard_entries(str(out))}
+    assert merged_keys == set(base_tensors), "the merge dropped a weight or carried the base's MTP head"
+    _, info = Qwen3_5MoeForCausalLM.from_pretrained(out, output_loading_info=True)
+    assert not info["missing_keys"] and not info["unexpected_keys"], info
+
+
+@pytest.mark.parametrize("mismatched", ["fine-tune", "base"])
+def test_a_shape_mismatch_is_refused_before_any_output(mismatched, tmp_path):
+    """A key whose stored shape differs between contributors has no merge. Read from the headers with
+    the key-set gate, so the refusal comes before the output directory exists, and the base is held
+    to it too: its task vector would otherwise broadcast into a tensor of neither shape."""
+    good, odd = {"w": torch.zeros(4, 4)}, {"w": torch.zeros(4)}
+    base = _write_tiny_checkpoint(tmp_path / "base", odd if mismatched == "base" else good)
+    a = _write_tiny_checkpoint(tmp_path / "a", good)
+    b = _write_tiny_checkpoint(tmp_path / "b", odd if mismatched == "fine-tune" else good)
+    out = tmp_path / "merged"
+
+    with pytest.raises(ValueError, match=r"shape mismatch for 'w'"):
+        mm.merge_models(
+            [str(a), str(b)],
+            str(out),
+            method="task_arithmetic",
+            base_model=str(base),
+            allow_missing_tokenizer=True,
+            verbose=False,
+        )
+    assert not out.exists()
 
 
 def _peak_allocated_bytes(fn: Callable[[], object], trace_path: Path) -> int:

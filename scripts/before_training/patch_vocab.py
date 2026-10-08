@@ -47,7 +47,12 @@ from src.checkpoint.tool_io import (
 from src.log import configure_cli_logging
 from src.models.loading.dtype import DTYPE_BY_NAME
 from src.models.loading.model_preparation import auto_load_model
-from src.models.loading.tokenizer_setup import load_chat_template, load_processing_class
+from src.models.loading.tokenizer_setup import (
+    adopt_tokenizer_chat_template,
+    load_chat_template,
+    load_processing_class,
+    set_run_chat_template,
+)
 from src.models.patches.gpt_oss_sinks import SinksPolicy, apply_sinks_policy, stamped_sinks_policy
 from src.models.structure import resolve_tokenizer
 
@@ -232,7 +237,8 @@ def main():
     tokenizer = resolve_tokenizer(processing_class)
 
     if args.chat_template:
-        tokenizer.chat_template = load_chat_template(args.chat_template)
+        set_run_chat_template(tokenizer, load_chat_template(args.chat_template))
+        adopt_tokenizer_chat_template(processing_class)
 
     # auto_load_model resolves the widest Auto* class (AutoModelForCausalLM would drop a vision
     # tower) and routes through the checkpoint-coverage gate: a truncated or key-mismatched source

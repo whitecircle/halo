@@ -17,7 +17,7 @@ from accelerate.logging import get_logger
 from huggingface_hub import snapshot_download
 from transformers import AutoModelForCausalLM
 
-from src.checkpoint.format import EP_SHARDED_FORMAT, SAFETENSORS_INDEX_FILE
+from src.checkpoint.format import EP_SHARDED_FORMAT, HUB_SUBFOLDER_IGNORE_PATTERNS, SAFETENSORS_INDEX_FILE
 from src.distributed.expert_parallel.config import EPConfig, get_num_experts
 from src.distributed.expert_parallel.lazy_loader import (
     lazy_loader_supports_checkpoint,
@@ -175,10 +175,10 @@ def reject_ep_sharded_checkpoint(local_dir: str | None, model_name_or_path: str)
 def resolve_hub_or_local_dir(model_name_or_path: str, revision: str | None = None) -> str | None:
     """Resolve ``model_name_or_path`` to a local directory for disk-based EP loading.
 
-    Local dirs → absolute paths; Hub repo ids → cache snapshot dir at ``revision`` (cache first,
-    download if needed). Returns ``None`` if unresolvable — a cache miss is routine (INFO), a failed
-    download is a network/auth/gated-repo problem that costs every rank the full checkpoint in CPU
-    RAM (WARNING).
+    Local dirs → absolute paths; Hub repo ids → cache snapshot dir at ``revision`` (cache first, else
+    a download of the top-level files a model load reads). Returns ``None`` if unresolvable — a cache
+    miss is routine (INFO), a failed download is a network/auth/gated-repo problem that costs every
+    rank the full checkpoint in CPU RAM (WARNING).
     """
     if os.path.isdir(model_name_or_path):
         return os.path.abspath(model_name_or_path)
@@ -187,7 +187,9 @@ def resolve_hub_or_local_dir(model_name_or_path: str, revision: str | None = Non
     except Exception as e:
         logger.info("No cached snapshot for %r (%s); resolving from the Hub.", model_name_or_path, e)
     try:
-        return snapshot_download(model_name_or_path, revision=revision)
+        return snapshot_download(
+            model_name_or_path, revision=revision, ignore_patterns=list(HUB_SUBFOLDER_IGNORE_PATTERNS)
+        )
     except Exception as e:
         logger.warning(
             "Could not resolve %r to a local snapshot (%s); skipping EP lazy loading via disk path — "

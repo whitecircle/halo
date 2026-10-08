@@ -10,6 +10,7 @@ skips, and fails under ``HALO_TEST_REQUIRE_HUB_CACHE`` (:mod:`tests.common.token
 """
 
 import argparse
+import functools
 import re
 from pathlib import Path
 
@@ -27,17 +28,40 @@ GATED_REPOS = frozenset({models.GEMMA3_4B_IT})
 _HUB_ID = re.compile(r"[A-Za-z0-9][\w.-]*/[\w.-]+")
 
 
+@functools.cache
+def _example_configs() -> tuple[dict, ...]:
+    return tuple(
+        yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+        for path in sorted((REPO_ROOT / "examples").rglob("*.yaml"))
+    )
+
+
+@functools.cache
+def local_output_roots() -> frozenset[str]:
+    """The top-level directories the example runs write into (``output_dir``).
+
+    A later stage trains the checkpoint an earlier one wrote, so ``checkpoints/<run>`` is a local
+    path with the shape of a Hub id and must not be fetched from the Hub.
+    """
+    return frozenset(
+        Path(config["output_dir"]).parts[0]
+        for config in _example_configs()
+        if isinstance(config.get("output_dir"), str) and not Path(config["output_dir"]).is_absolute()
+    )
+
+
 def is_hub_repo(reference: str) -> bool:
     """Whether ``reference`` names a Hub repo rather than a local checkpoint."""
-    return bool(_HUB_ID.fullmatch(reference)) and not Path(reference).exists()
+    return (
+        bool(_HUB_ID.fullmatch(reference))
+        and reference.split("/", 1)[0] not in local_output_roots()
+        and not Path(reference).exists()
+    )
 
 
 def example_repos() -> set[str]:
     """The Hub ids the shipped example configs train."""
-    references = (
-        (yaml.safe_load(path.read_text(encoding="utf-8")) or {}).get("model_name_or_path")
-        for path in (REPO_ROOT / "examples").rglob("*.yaml")
-    )
+    references = (config.get("model_name_or_path") for config in _example_configs())
     return {ref for ref in references if isinstance(ref, str) and is_hub_repo(ref)}
 
 

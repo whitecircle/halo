@@ -236,9 +236,7 @@ force-offs ([below](#ep--cp--tp-behavior)), the wrapper force-off and the [route
 force-off, which overwrite an explicit `true`.
 
 Per-model defaults are read off each applier's own signature (`_PER_MODEL_DEFAULTS`), derived from the spec's
-`flce_default`, set by the three large-vocab families above and nothing else. An applier accepting
-`fused_linear_cross_entropy` but not `cross_entropy` also defaults FLCE on, since the generic FLCE-off default
-would reduce it to a no-op.
+`flce_default`, set by the three large-vocab families above and nothing else.
 
 Two library defaults are overridden: TRL's `use_liger_kernel=False` (toolkit → `True`, via
 `_TOOLKIT_DEFAULTS` in `src/training/parser.py`), and Liger's `fused_linear_cross_entropy=True,

@@ -7,7 +7,7 @@ from math import isfinite
 from typing import Any, Literal
 
 from src.args.mixins import AdvantageShapingArguments, ChunkedLogprobsArguments, GRPOEarlyStopArguments
-from src.args.validation import require_positive
+from src.args.validation import require_finite, require_int, require_positive, require_positive_int
 from src.configs.rollout_config import (
     DEFAULT_EPISODE_TIMEOUT_SECONDS,
     DEFAULT_MAX_RETRIES,
@@ -65,8 +65,10 @@ class ISMaskConfig:
         lo, hi = self.geo_band_min, self.geo_band_max
         if (lo is None) != (hi is None):
             raise ValueError("isr_geo_band_min and isr_geo_band_max must be set together")
-        if lo is not None and not 0 < lo < 1 < hi:
-            raise ValueError(f"isr_geo_band bounds must satisfy 0 < min < 1 < max, got [{lo}, {hi}]")
+        if lo is not None:
+            require_finite(type(self).__name__, isr_geo_band_min=lo, isr_geo_band_max=hi)
+            if not 0 < lo < 1 < hi:
+                raise ValueError(f"isr_geo_band bounds must satisfy 0 < min < 1 < max, got [{lo}, {hi}]")
         if self.veto_min is not None and not 0 < self.veto_min < 1:
             raise ValueError(f"isr_veto_min must be in (0, 1), got {self.veto_min}")
         if self.opsm_delta is not None:
@@ -188,9 +190,9 @@ class AsyncTrainingConfig(AdvantageShapingArguments, GRPOEarlyStopArguments, Chu
     rollout_top_k: int = field(
         default=DEFAULT_ROLLOUT_TOP_K,
         metadata={
-            "help": "Top-k sampling for rollout generation: -1 (off) or >= 1; 0 is refused, since SGLang "
-            "rejects it. Sent on every request, as are rollout_min_p and rollout_repetition_penalty: both "
-            "engines fill an omitted one from the model's generation_config.json."
+            "help": "Top-k sampling for rollout generation: an int, -1 (off) or >= 1; 0 is refused, since SGLang "
+            "rejects it, and so are a bool and a float. Sent on every request, as are rollout_min_p and "
+            "rollout_repetition_penalty: both engines fill an omitted one from the model's generation_config.json."
         },
     )
 
@@ -228,10 +230,11 @@ class AsyncTrainingConfig(AdvantageShapingArguments, GRPOEarlyStopArguments, Chu
             "output together, recoveries included (null = unbounded: max_turns x rollout_max_tokens). Enforced "
             "by the engine per turn, never stated to the model: a turn's max_tokens is the smaller of its own "
             "cap and what the episode has left, its reasoning cap shrinks with it so the turn keeps its answer "
-            "room (rollout_max_tokens less its reasoning cap), and an episode left with less than that room "
-            "starts no further turn and ends truncated, priced like a max_turns overflow. Must be >= "
-            "rollout_max_tokens, so one whole turn fits. Logged as episode/output_budget_exhausted: the share of "
-            "episodes whose budget held no further turn when they ended, by the budget or done."
+            "room (rollout_max_tokens less its reasoning cap, or rollout_max_answer_tokens where smaller), and an "
+            "episode left with less than that room starts no further turn and ends truncated, priced like a "
+            "max_turns overflow. Must be >= rollout_max_tokens, so one whole turn fits. Logged as "
+            "episode/output_budget_exhausted: the share of episodes whose budget held no further turn when they "
+            "ended, by the budget or done."
         },
     )
 
@@ -243,6 +246,20 @@ class AsyncTrainingConfig(AdvantageShapingArguments, GRPOEarlyStopArguments, Chu
             "sets a smaller thinking_tokens runs under that instead. Requires a reasoning parser on the vLLM "
             "server (--reasoning-parser qwen3 for Qwen3.x; the openai_gptoss plugin for gpt-oss). None = only a "
             "level's thinking_tokens caps reasoning, or nothing does."
+        },
+    )
+
+    rollout_max_answer_tokens: int | None = field(
+        default=None,
+        metadata={
+            "help": "The most a turn may generate past its reasoning cap (null = rollout_max_tokens alone bounds "
+            "the turn). A turn's max_tokens becomes the smaller of rollout_max_tokens and its reasoning cap plus "
+            "this, the cap being its level's or, on a retry, the reserve; under rollout_max_episode_tokens a turn "
+            "starts only while the episode has its answer room left (the smaller of this and rollout_max_tokens less "
+            "the level's cap). Enforced per turn, never stated to the model. Every "
+            "episode needs a reasoning cap: a drawable level with no thinking_tokens while "
+            "rollout_max_thinking_tokens is unset is refused. On SGLang, which enforces no reasoning cap, it bounds "
+            "the whole turn at the cap plus this. Must be an int in [1, rollout_max_tokens)."
         },
     )
 
@@ -524,59 +541,78 @@ class AsyncTrainingConfig(AdvantageShapingArguments, GRPOEarlyStopArguments, Chu
 
     def _validate_ranges(self) -> None:
         super()._validate_ranges()
+        # A bare range check reads a bool as 0 or 1 and passes a NaN, so each knob goes through a finite or int
+        # guard first.
+        owner = type(self).__name__
         # 0 raises ZeroDivisionError at `global_step % sync_weights_every_n_steps`.
-        if self.sync_weights_every_n_steps < 1:
-            raise ValueError(
-                f"sync_weights_every_n_steps must be >= 1 (1 = every step), got {self.sync_weights_every_n_steps}"
-            )
+        require_positive_int(owner, sync_weights_every_n_steps=self.sync_weights_every_n_steps)
         self._validate_reasoning_price()
         # A NaN or negative weight would parse and leave the floor off without a word.
-        if not isfinite(self.reasoning_floor) or self.reasoning_floor < 0:
+        require_finite(owner, reasoning_floor=self.reasoning_floor)
+        if self.reasoning_floor < 0:
             raise ValueError(f"reasoning_floor must be a finite number >= 0 (0 = off), got {self.reasoning_floor}")
         # A negative budget reaches backoff as max_tries <= 0, which it treats as "no limit": a wedged
         # server is then retried until the NCCL watchdog kills the job.
-        if self.max_retries < 0:
-            raise ValueError(f"max_retries must be >= 0 (0 = one attempt, no retry), got {self.max_retries}")
+        retries = self.max_retries
+        if isinstance(retries, bool) or not isinstance(retries, int) or retries < 0:
+            raise ValueError(f"max_retries must be an int >= 0 (0 = one attempt, no retry), got {retries!r}")
         self.build_is_mask_config()
         # 0 workers builds an empty actor list and then divides by it.
-        if self.num_rollout_workers < 1:
-            raise ValueError(f"num_rollout_workers must be >= 1, got {self.num_rollout_workers}")
+        require_positive_int(owner, num_rollout_workers=self.num_rollout_workers)
         # `max_concurrent_rollouts or default` reads 0 as "unset", so the cap would vanish.
-        if self.max_concurrent_rollouts is not None and self.max_concurrent_rollouts < 1:
+        concurrency = self.max_concurrent_rollouts
+        if concurrency is not None and (
+            isinstance(concurrency, bool) or not isinstance(concurrency, int) or concurrency < 1
+        ):
             raise ValueError(
-                f"max_concurrent_rollouts must be >= 1 when set (null = derive from "
-                f"num_rollout_workers), got {self.max_concurrent_rollouts}"
+                f"max_concurrent_rollouts must be an int >= 1 when set (null = derive from num_rollout_workers), "
+                f"got {concurrency!r}"
             )
         # A non-positive batch raises inside the DataLoader, far from the knob; null is "unset".
-        if self.eval_rollout_batch_size is not None and self.eval_rollout_batch_size < 1:
+        eval_batch = self.eval_rollout_batch_size
+        if eval_batch is not None and (
+            isinstance(eval_batch, bool) or not isinstance(eval_batch, int) or eval_batch < 1
+        ):
             raise ValueError(
-                f"eval_rollout_batch_size must be >= 1 when set (null = one round per eval batch), "
-                f"got {self.eval_rollout_batch_size}"
+                f"eval_rollout_batch_size must be an int >= 1 when set (null = one round per eval batch), "
+                f"got {eval_batch!r}"
             )
         # None of these consumers can express a non-positive value, and each swallows one far from
         # the knob: rollout_temperature divides the log-prob sweep (the trainer scores at the
         # sampling temperature, so a 0 is a ZeroDivisionError mid-step), rollout_max_tokens doubles
         # as the dr_grpo loss normalizer, and the deadlines are compared against wall-clock, where a
         # non-positive one cancels every episode on entry and halts the run as an empty batch.
-        require_positive(type(self).__name__, **{name: getattr(self, name) for name in POSITIVE_ROLLOUT_FIELDS})
+        require_positive(owner, **{name: getattr(self, name) for name in POSITIVE_ROLLOUT_FIELDS})
+        # The request's max_tokens, which no engine reads as a fraction.
+        require_int(owner, rollout_max_tokens=self.rollout_max_tokens)
         # Sent verbatim on the wire; outside these ranges the server rejects every rollout request
         # (SGLang's, the narrower of the two engines': it refuses top_k 0 and a penalty above 2).
+        require_finite(
+            owner,
+            rollout_top_p=self.rollout_top_p,
+            rollout_min_p=self.rollout_min_p,
+            rollout_repetition_penalty=self.rollout_repetition_penalty,
+        )
         if not 0 < self.rollout_top_p <= 1:
             raise ValueError(f"rollout_top_p must be in (0, 1], got {self.rollout_top_p}")
-        if self.rollout_top_k != -1 and self.rollout_top_k < 1:
-            raise ValueError(f"rollout_top_k must be -1 (off) or >= 1, got {self.rollout_top_k}")
+        # True would pass as 1 and sample every rollout greedily; a fractional top-k fails every request.
+        top_k = self.rollout_top_k
+        if isinstance(top_k, bool) or not isinstance(top_k, int) or (top_k != -1 and top_k < 1):
+            raise ValueError(f"rollout_top_k must be an int, -1 (off) or >= 1, got {top_k!r}")
         if not 0 <= self.rollout_min_p <= 1:
             raise ValueError(f"rollout_min_p must be in [0, 1], got {self.rollout_min_p}")
         if not 0 < self.rollout_repetition_penalty <= 2:
             raise ValueError(f"rollout_repetition_penalty must be in (0, 2], got {self.rollout_repetition_penalty}")
         # A negative base shrinks the retry backoff instead of growing it.
-        if not isfinite(self.retry_base_wait) or self.retry_base_wait < 0:
+        require_finite(owner, retry_base_wait=self.retry_base_wait)
+        if self.retry_base_wait < 0:
             raise ValueError(
                 f"retry_base_wait must be a finite number >= 0 (0 = retry immediately), got {self.retry_base_wait}"
             )
-        # A turn's answer room is `rollout_max_tokens - rollout_max_thinking_tokens`, none where the caps
-        # meet: the turn would then spend its whole cap on reasoning and stop before the answer or tool
-        # call it exists to produce. A cap of 0 would still be sent (as 1) while counting as no cap.
+        # A turn's answer room is `rollout_max_tokens - rollout_max_thinking_tokens` (or rollout_max_answer_tokens
+        # where smaller), none where the caps meet: the turn would then spend its whole cap on reasoning and stop
+        # before the answer or tool call it exists to produce. A cap of 0 would still be sent (as 1) while counting
+        # as no cap.
         cap = self.rollout_max_thinking_tokens
         if cap is not None and (
             isinstance(cap, bool) or not isinstance(cap, int) or not 1 <= cap < self.rollout_max_tokens
@@ -586,7 +622,19 @@ class AsyncTrainingConfig(AdvantageShapingArguments, GRPOEarlyStopArguments, Chu
                 f"set (null = no run-wide cap): rollout_max_tokens bounds the whole turn, and at or above it the turn "
                 f"has no answer room and is cut mid-reasoning, got {cap!r}"
             )
-        # Below one turn's cap the first turn could never use the per-turn budget the run states.
+        # The turn total is min(rollout_max_tokens, reasoning cap + this): at or above rollout_max_tokens it
+        # shrinks no turn, and below 1 a turn the engine force-closed has no room left to answer.
+        answer = self.rollout_max_answer_tokens
+        if answer is not None and (
+            isinstance(answer, bool) or not isinstance(answer, int) or not 1 <= answer < self.rollout_max_tokens
+        ):
+            raise ValueError(
+                f"rollout_max_answer_tokens must be an int in [1, rollout_max_tokens={self.rollout_max_tokens}) when "
+                f"set (null = rollout_max_tokens alone bounds the turn): at or above it the bound shrinks no turn, "
+                f"got {answer!r}"
+            )
+        # Below one turn's cap the first turn could never use the per-turn budget the run states. A turn's
+        # total is at most rollout_max_tokens, so this also holds one reasoning cap plus its answer room.
         if self.rollout_max_episode_tokens is not None and (
             isinstance(self.rollout_max_episode_tokens, bool)
             or not isinstance(self.rollout_max_episode_tokens, int)
@@ -599,18 +647,25 @@ class AsyncTrainingConfig(AdvantageShapingArguments, GRPOEarlyStopArguments, Chu
         # A row is a turn's prompt plus its completion, and the completion alone may run to
         # rollout_max_tokens: a cap at or below it leaves out every turn that used its budget — a
         # length bias against long turns, not the memory bound the knob is.
-        if self.max_train_row_tokens is not None and self.max_train_row_tokens <= self.rollout_max_tokens:
+        row_cap = self.max_train_row_tokens
+        if row_cap is not None and (
+            isinstance(row_cap, bool) or not isinstance(row_cap, int) or row_cap <= self.rollout_max_tokens
+        ):
             raise ValueError(
-                f"max_train_row_tokens ({self.max_train_row_tokens}) must be above rollout_max_tokens "
+                f"max_train_row_tokens ({row_cap!r}) must be an int above rollout_max_tokens "
                 f"({self.rollout_max_tokens}): a row is prompt + completion, so a cap at or below the per-turn "
                 f"generation budget drops every turn that runs to it."
             )
         # A fraction of the step's corrected trajectories/tokens; 0 would trip on every step, >1 never.
-        if self.skip_update_masked_frac is not None and not 0.0 < self.skip_update_masked_frac <= 1.0:
-            raise ValueError(f"skip_update_masked_frac must be in (0, 1], got {self.skip_update_masked_frac}")
+        if self.skip_update_masked_frac is not None:
+            require_finite(owner, skip_update_masked_frac=self.skip_update_masked_frac)
+            if not 0.0 < self.skip_update_masked_frac <= 1.0:
+                raise ValueError(f"skip_update_masked_frac must be in (0, 1], got {self.skip_update_masked_frac}")
         # A rate is never above 1, so a threshold at 1 would never fire.
-        if self.truncation_alarm_rate is not None and not 0.0 <= self.truncation_alarm_rate < 1.0:
-            raise ValueError(f"truncation_alarm_rate must be in [0, 1) or null, got {self.truncation_alarm_rate}")
+        if self.truncation_alarm_rate is not None:
+            require_finite(owner, truncation_alarm_rate=self.truncation_alarm_rate)
+            if not 0.0 <= self.truncation_alarm_rate < 1.0:
+                raise ValueError(f"truncation_alarm_rate must be in [0, 1) or null, got {self.truncation_alarm_rate}")
         # The breaker is the only writer of the skip flag: without it the condition could never fire.
         if self.early_stop_on_skipped_updates and self.skip_update_masked_frac is None:
             raise ValueError(

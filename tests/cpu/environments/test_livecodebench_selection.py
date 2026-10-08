@@ -94,6 +94,7 @@ def _args(**overrides) -> SimpleNamespace:
         "start_date": None,
         "end_date": None,
         "platform": None,
+        "include_examples_only": False,
     }
     return SimpleNamespace(**{**flags, **overrides})
 
@@ -196,6 +197,9 @@ def test_the_eval_flags_exit_on_a_selection_the_adapter_refuses():
         resolve_selection(_args(start_date="2025-1-4"), _LCB)
     with pytest.raises(SystemExit, match="--adapter codeforces: this dataset stamps no contest date"):
         resolve_selection(_args(adapter="codeforces", end_date="2025-04-06"), CODE_DATASET_ADAPTERS["codeforces"])
+    # A flag that would only rename the run's files: livecodebench marks no problem examples-only.
+    with pytest.raises(SystemExit, match="--include_examples_only on --adapter livecodebench: it marks no problem"):
+        resolve_selection(_args(include_examples_only=True), _LCB)
 
 
 # --- The record a re-grade reads back ---
@@ -204,12 +208,23 @@ def test_the_eval_flags_exit_on_a_selection_the_adapter_refuses():
 def test_the_selection_round_trips_through_the_meta_line():
     selection = ContestSelection.parse("2025-01-04", "2025-04-06", ["codeforces", "atcoder"])
     meta = json.loads(json.dumps(selection.to_meta()))
-    assert meta == {"start_date": "2025-01-04", "end_date": "2025-04-06", "platforms": ["atcoder", "codeforces"]}
+    assert meta == {
+        "start_date": "2025-01-04",
+        "end_date": "2025-04-06",
+        "platforms": ["atcoder", "codeforces"],
+        "include_examples_only": False,
+    }
     assert ContestSelection.from_meta(meta) == selection
     assert selection.label == "2025-01-04..2025-04-06_atcoder+codeforces"
-    # A meta line recording no selection scored every row.
-    assert ContestSelection.from_meta(None) == ContestSelection()
-    assert ContestSelection().label == ""
+    included = ContestSelection(include_examples_only=True)
+    assert ContestSelection.from_meta(json.loads(json.dumps(included.to_meta()))) == included
+    assert ContestSelection().label == "" and included.label == "with-examples-only"
+    # A meta line recording no selection, or none of the examples-only choice, predates the exclusion: its run
+    # scored every row, examples-only problems included, and the re-grade must rebuild that same sequence.
+    assert ContestSelection.from_meta(None) == included
+    assert ContestSelection.from_meta({k: v for k, v in meta.items() if k != "include_examples_only"}) == (
+        ContestSelection.parse("2025-01-04", "2025-04-06", ["atcoder", "codeforces"], include_examples_only=True)
+    )
 
 
 def test_a_selection_has_one_spelling_however_it_is_built():

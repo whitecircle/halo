@@ -92,16 +92,22 @@ def load_model(model_path, model_type, is_peft=False, **load_kwargs):
         raise ValueError(f"Unknown model_type {model_type!r}; expected one of {sorted(_MODEL_CLASSES)}")
     if not is_peft:
         return _load_verified(model_path, model_type, excuse_task_head=False, **load_kwargs)
+    model, _text_only = _load_adapter_model(model_path, model_type, load_kwargs)
+    return model
+
+
+def _load_adapter_model(adapter_dir, model_type, load_kwargs) -> tuple[PeftModel, bool]:
+    """The adapter applied to its base, and whether that base is a multimodal checkpoint's text-only class."""
     _reject_unsupported_peft_type(model_type)
-    peft_config = PeftConfig.from_pretrained(model_path)
-    base_model = load_base_for_adapter(
-        model_path,
+    peft_config = PeftConfig.from_pretrained(adapter_dir)
+    base = load_base_for_adapter(
+        adapter_dir,
         peft_config.base_model_name_or_path,
         _base_loader(model_type, load_kwargs),
         excuse_task_head=bool(getattr(peft_config, "modules_to_save", None)),
         log=logger.info,
     )
-    return PeftModel.from_pretrained(base_model, model_path)
+    return PeftModel.from_pretrained(base.model, adapter_dir), base.text_only
 
 
 def _base_loader(model_type, load_kwargs):
@@ -297,12 +303,9 @@ def _convert_checkpoint_to_bf16(
     """A full checkpoint — or an adapter left unmerged — reloaded at bf16 and written back out."""
     # Guards before the load and os.makedirs: a per-rank EP/TP save loads its .shard_N expert keys as
     # missing and randomly initialized, which --verify's dtype count cannot catch. An adapter takes the
-    # merge's gates, and its processing class (a VLM's full processor) is resolved against the base too.
+    # merge's gates.
     if is_peft:
         weights_source = adapter_input_gates(model_path, output_path).base_model_name_or_path
-        processing_class = resolve_peft_processing_class(
-            model_path, weights_source, trust_remote_code=trust_remote_code
-        )
     else:
         reject_sharded_checkpoint(model_path)
         reject_in_place_conversion(model_path, output_path)
@@ -322,7 +325,14 @@ def _convert_checkpoint_to_bf16(
 
     if is_peft:
         logger.info("Loading PEFT adapter model...")
-    model = load_model(model_path, model_type, is_peft=is_peft, **load_kwargs)
+        model, text_only = _load_adapter_model(model_path, model_type, load_kwargs)
+        # The merge's choice too (the class the adapter addresses decides it), so the adapter-only and
+        # the merged export of one adapter ship the same processing class.
+        processing_class = resolve_peft_processing_class(
+            model_path, weights_source, text_only=text_only, trust_remote_code=trust_remote_code
+        )
+    else:
+        model = load_model(model_path, model_type, **load_kwargs)
 
     if not is_peft:
         # Skipped for an adapter-only save: it writes no weights, so nothing re-applied here would

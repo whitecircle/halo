@@ -38,6 +38,7 @@ from src.distributed.runtime import (
 )
 from src.distributed.tensor_parallel.state_dict import input_embeddings_tp_sharded
 from src.models.loading.tokenizer_setup import (
+    adopt_tokenizer_chat_template,
     get_model_context_window,
     is_bounded_length,
     resolve_length_to_context,
@@ -368,16 +369,18 @@ def apply_context_window(args, model: PreTrainedModel, tokenizer: PreTrainedToke
 
 
 def install_resolved_tokenizer(processing_class, tokenizer: PreTrainedTokenizer):
-    """Return the trainer's ``processing_class`` carrying the resolved tokenizer.
+    """Return the trainer's ``processing_class`` carrying the resolved tokenizer and its chat template.
 
     ``apply_max_length`` may hand back a different object than the one loaded (the
-    ``tokenizer_backend`` proxy), and a processor still holds the raw inner tokenizer. Read off the
-    loaded object rather than the checkpoint's modality: a multimodal checkpoint that ships no
-    processor loads a tokenizer for a run without image data.
+    ``tokenizer_backend`` proxy), and a processor still holds the raw inner tokenizer and its own
+    template (:func:`adopt_tokenizer_chat_template`). Read off the loaded object rather than the
+    checkpoint's modality: a multimodal checkpoint that ships no processor loads a tokenizer for a run
+    without image data.
     """
     if isinstance(processing_class, PreTrainedTokenizerBase):
         return tokenizer
     processing_class.tokenizer = tokenizer
+    adopt_tokenizer_chat_template(processing_class)
     return processing_class
 
 
@@ -554,8 +557,13 @@ def load_script_model(
             consumed ``model_init_kwargs``.
         attn_implementation: the request when ``model_config.attn_implementation`` is unset — pass
             :func:`padded_workload_attn_implementation` for scripts that forward right-padded batches.
+
+    A policy built from the resume checkpoint keeps the run's base as its config's ``_name_or_path``,
+    the name TRL's model card reads for ``base_model``, so a resumed run's card names the model an
+    uninterrupted run's does instead of none (a local checkpoint path). Where the weights were read
+    stays on the loader's ``LOADED_WEIGHTS_FROM_ATTR`` stamp, which the resume and the export read.
     """
-    return load_model_consuming_init_kwargs(
+    model, tokenizer = load_model_consuming_init_kwargs(
         model_config,
         training_config,
         runtime.parallelism_config,
@@ -570,6 +578,9 @@ def load_script_model(
         train_sinks=dist_args.train_sinks,
         preserve_checkpoint_precision=runtime.policy_from_checkpoint,
     )
+    if runtime.policy_from_checkpoint:
+        model.config._name_or_path = model_config.model_name_or_path
+    return model, tokenizer
 
 
 def build_training_callbacks(

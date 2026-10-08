@@ -98,7 +98,10 @@ class _Trainer(CheckpointingMixin, _BaseTrainer):
     def __init__(self, output_dir):
         super().__init__()
         self.args = types.SimpleNamespace(output_dir=output_dir, should_save=True)
-        self.model = types.SimpleNamespace(config=types.SimpleNamespace(model_type=BAILING), _name_or_path="")
+        # A real Module: the base path's save wrappers unwrap the model the base Trainer writes.
+        self.model = torch.nn.Module()
+        self.model.config = types.SimpleNamespace(model_type=BAILING)
+        self.model._name_or_path = ""
         self._pristine_special_token_ids = []
 
     def _persist_router_balancing_biases(self, output_dir):

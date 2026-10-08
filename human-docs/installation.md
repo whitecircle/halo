@@ -105,7 +105,8 @@ docker run --rm -it --gpus all \
 
 On the flags: `--ipc=host --shm-size=128g` and the ulimits are required, since
 NCCL and the dataloaders break without them. `--cap-add=SYS_PTRACE` is optional,
-but without it you cannot attach py-spy to a hung run later. Add `--network host`
+but without it py-spy attaches to a hung run later only on a host whose
+`kernel.yama.ptrace_scope` is 0. Add `--network host`
 for an RL run, so the trainer can reach a rollout server started by compose on the
 same host. Drop `-v ~/.aws:/root/.aws` unless you want S3 access through your AWS
 profile. The repo mounts at `/workspace`, so host-side edits are live in the

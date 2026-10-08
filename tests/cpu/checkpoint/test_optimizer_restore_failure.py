@@ -348,6 +348,7 @@ class _CheckpointingHost(CheckpointingMixin, _TrainerBase):
         self.parallelism_config = make_parallelism_config(world_size=1, gpus_per_node=1)
         self._has_ep_layers = False
         self._fsdp_wrapped = True
+        self._accelerate_manages_fsdp = False
 
     def _get_tp_rank(self) -> int:
         return 0

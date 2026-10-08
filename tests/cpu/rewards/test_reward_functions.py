@@ -177,6 +177,19 @@ def test_scorer_function_reads_the_conversation_column_over_the_rendered_prompt(
     assert sample.prompt == conversation and sample.reference == "a1"
 
 
+@pytest.mark.parametrize(
+    ("missing", "forwarded"),
+    [("conversation", {"answer": ["a1"]}), ("answer", {"conversation": [[{"role": "user", "content": "q"}]]})],
+)
+def test_a_declared_column_trl_did_not_forward_is_refused(fake_scorers, missing, forwarded):
+    """``remove_unused_columns: true`` keeps both columns from TRL's reward kwargs. The scorer must refuse,
+    not read the rendered template as the conversation or score without the reference."""
+    (function,), _ = reward_functions((JUDGE,), {}, prompt_column="conversation", reference_column="answer")
+    with pytest.raises(ValueError, match=rf"column '{missing}'.*remove_unused_columns"):
+        asyncio.run(function(prompts=["<|im_start|>user\nq<|im_end|>..."], completions=["12345"], **forwarded))
+    assert function.scorer.seen == [], "a sample was scored off the fallback"
+
+
 def test_unknown_term_type_is_refused():
     with pytest.raises(TypeError, match="neither a scorer nor a grader"):
         reward_functions((EnvironmentTerm(),), RLVR_GRADERS, reference_column=None)

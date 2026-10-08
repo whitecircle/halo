@@ -491,7 +491,7 @@ class LigerApplier:
     """The callable the orchestrator resolves for one family.
 
     A callable object rather than a generated function, so the per-family signature the orchestrator reads
-    for its FLCE-only, ``rope``-off and loss defaults is built from the spec instead of restated.
+    for its ``rope``-off and loss defaults is built from the spec instead of restated.
     ``upstream`` is set for a delegating spec: its applier runs first, then the spec's own roles on top.
     """
 

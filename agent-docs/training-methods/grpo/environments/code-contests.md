@@ -26,8 +26,9 @@ environment_kwargs:
     low: {thinking_tokens: 8192, max_submissions: 1, max_test_calls: 2}
     medium: {thinking_tokens: 12288, max_submissions: 2, max_test_calls: 4}
     high: {thinking_tokens: 16384, max_submissions: 3, max_test_calls: 6}
-rollout_max_tokens: 30000              # per-turn total: the level's reasoning cap plus the answer room
-rollout_max_episode_tokens: 81920      # the most an episode may sample over all its turns; never stated to the model
+rollout_max_tokens: 30000              # per-turn ceiling
+rollout_max_answer_tokens: 8192        # the most a turn generates past its reasoning cap; never stated to the model
+rollout_max_episode_tokens: 131072     # the most an episode may sample over all its turns; never stated to the model
 reasoning_floor: 0.05                  # an episode reasoning under 0.75x its level's per-turn budget pays up to this
 rewards:
   - source: environment      # 1 when the submitted solution passes every hidden test, else 0
@@ -62,10 +63,15 @@ The grade is all-or-nothing, matching the accept verdict pass@1 counts: partial 
 
 `sandbox_backend` / `sandbox_url` pick the [sandbox](sandbox.md#choosing-a-backend) both tools and the grader run on; one that does not confine the program, `local` included, [warns](sandbox.md#choosing-a-backend).
 
-Every shipped code-contests recipe sets `rollout_max_episode_tokens: 81920`, the most an episode may sample over
+Every shipped code-contests recipe sets `rollout_max_episode_tokens: 131072`, the most an episode may sample over
 all its turns. Without it a recipe admits `max_turns × rollout_max_tokens` (16 × 30,000 = 480,000
 tokens; 540,000 in the curriculum recipes at `max_turns: 18`)
-([Trajectory length](../async-grpo/rollouts.md#trajectory-length)).
+([Trajectory length](../async-grpo/rollouts.md#trajectory-length)). Each vLLM recipe also sets
+`rollout_max_answer_tokens: 8192`, so a turn runs at its reasoning cap plus 8,192 tokens (16,384–24,576 by level,
+the retry reserve plus 8,192 on a retry): a turn the cap closes cannot carry its reasoning on in a program's comments
+through the rest of a 30,000-token turn, and is cut instead ([Reasoning budget](../async-grpo/rollouts.md#reasoning-budget)).
+The Qwen3.6 vLLM recipes also stop a turn at `<|im_start|>` (`rollout_stop_tokens`): past a forced close the model can
+write a chat turn's start, and vLLM would read the `<think>` after it as a fresh reasoning budget.
 
 ### Reasoning effort
 
@@ -112,7 +118,7 @@ Neither description states a budget, no reply counts what is left of one, and a 
 
 Both tool descriptions name the toolchain where the sandbox states it (`SandboxExecutor.toolchain`): on `local` and `bubblewrap` the registry's compile flags and the interpreter a Python program runs on (`Here python runs on CPython 3.12 and cpp is compiled with g++ -O2 -pipe -std=c++17.`); `remote` states none.
 
-A scratchpad run gets the per-test time limit its language is graded at ([Grading rules](#grading-rules)), and a timeout says so. Its reply leads with any error — the compiler's first diagnostics, or a crash's signal and stderr tail — ahead of the program's stdout ([Sandboxes](sandbox.md#using-it-from-python)); a clean exit's reply is its stdout alone. A run with no `stdin` adds a note on a line of its own that none was passed: neither a parse error, nor output computed from nothing, nor a clean exit with nothing on stdout names the cause. It spends its run like any other; `episode/starved_test_runs` counts the silent ones. A build failure — a compile error, or Python source that does not compile (on `local` and `bubblewrap`) — ran nothing and gets no note. An empty `stdin` is never refused: a self-test that embeds its input is a real use.
+A scratchpad run gets the per-test time limit its language is graded at ([Grading rules](#grading-rules)), and a timeout says so. Its reply leads with any error — the compiler's first diagnostics, or a crash's signal and stderr tail — ahead of the program's stdout ([Sandboxes](sandbox.md#using-it-from-python)); a clean exit's reply is its stdout alone. A run with no `stdin` adds a note on a line of its own that none was passed: neither a parse error, nor output computed from nothing, nor a clean exit with nothing on stdout names the cause. It spends its run like any other. A silent one — a program that reads input (its language's input calls, found outside its comments and string literals; one that swaps its stdin for an in-memory buffer, Python `sys.stdin = io.StringIO(...)` or C++ `cin.rdbuf(...)`, reads none, nor does a read from an `istringstream`) exiting cleanly with nothing on stdout — showed the model nothing: it stays spent and paid as a run, its reply unchanged, but a turn whose every call was such a run, a refusal or an unknown tool is flagged untrainable like one whose calls named no tool, so the turn after it runs on the retry reserve instead of a fresh reasoning budget. A starved run beside a run that printed or a submission leaves its turn trainable. `episode/starved_test_runs` counts the silent runs, `episode/starved_turns` the turns they flagged. A build failure — a compile error, or Python source that does not compile (on `local` and `bubblewrap`) — ran nothing and gets no note. An empty `stdin` is never refused: a self-test that embeds its input is a real use, and a silent one that reads none passed.
 
 Output that would push a reply past `max_observation_chars` is cut (`…[truncated N chars]`) so the notes after it survive the protocol's cap, which cuts from the end.
 
@@ -213,9 +219,9 @@ The trainer's reasoning floor sits outside these components, as `reward/reasonin
 ([Reasoning length reward](../async-grpo/rollouts.md#reasoning-length-reward)); its reference is
 three quarters of each level's own per-turn `thinking_tokens`. Every code-contests recipe runs one
 economy, with no per-token reasoning price: the level's thinking caps and interaction budgets, the
-81,920-token episode output budget, the floor (`0.10` on the Qwen3.6 vLLM recipes, `0.05` elsewhere),
+8,192-token answer room past each cap (vLLM recipes; SGLang forces no close at the cap), the 131,072-token episode output budget, the floor (`0.10` on the Qwen3.6 vLLM recipes, `0.05` elsewhere),
 and a `judge` veto term (`openai/gpt-6-luna`, the digest without reasoning) that audits outputs the
-program did not compute (special-cased samples, guessed placeholders), sandbox probing, failed
+program did not compute (special-cased samples on any submission, guessed placeholders on a failed one), sandbox probing, failed
 submissions made for their verdict, and verdict mining ([Reward Terms](../rewards.md)); it reads `OPENROUTER_API_KEY`, so pass it with
 `--env-file` or drop the term to run without a judge. `verdict_probe` asks only about
 submissions that failed, so a passing program is not read as a probe because the policy's own sample
@@ -228,7 +234,8 @@ zero-objective episode; each failed tool call adds `tool_error_penalty` on top.
 `tests/cpu/config/test_env_grpo_reward_economy.py` holds the shipped recipes to those relations.
 
 Behavior counters ride alongside: `episode/submission_rate`, `episode/test_calls` (runs that counted),
-`episode/starved_test_runs` (runs given no `stdin` that exited cleanly with nothing on stdout),
+`episode/starved_test_runs` (runs of a program that reads input, given no `stdin`, that exited cleanly with nothing on stdout),
+`episode/starved_turns` (turns flagged untrainable that held such a run beside nothing but refused or unknown calls),
 `episode/tested_before_submission` (over submitting episodes), `episode/grading_budget_hit`,
 `episode/reasoning_in_comments_calls` (programs refused for reasoning in their comments), `episode/identical_resubmissions` (programs refused as already graded) and
 `episode/code_comment_share` (comment characters over the characters of every program that reached the
@@ -251,7 +258,7 @@ Adapters (`src/environments/envs/tasks/coding/datasets.py`) map a source's rows 
 
 | Adapter | Source | Role | Notes |
 |---|---|---|---|
-| `codeforces` | `open-r1/codeforces` | RL pool | `verifiable` config; `generated_checker` judges; interactive rows dropped; generated tests join via `--tests_table` |
+| `codeforces` | `open-r1/codeforces` | RL pool | `verifiable` config; `generated_checker` judges; interactive rows dropped; generated tests join via `--tests_table`; marks examples-only problems |
 | `hardtests` | `sigcp/hardtests_problems` + `_tests` | RL pool | Difficulty mapped to Codeforces ratings; needs `--tests_table`; judging function becomes the checker |
 | `deepcoder` | `agentica-org/DeepCoder-Preview-Dataset` | RL pool | stdin/stdout tests; functional specs skipped; no report bucket |
 | `livecodebench` | `livecodebench/code_generation_lite` | benchmark | Release `test*.jsonl` read directly, newest file first; functional rows skipped; contest-date window and platform filter |
@@ -269,6 +276,11 @@ python scripts/environments/preparation/prepare_code_dataset.py \
 ```
 
 It composes the statement, packs the payload, and drops rows this environment cannot grade.
+It also drops, counted per split, the problems an adapter marks examples-only: graded only on
+their statement's example inputs, which the prompt shows with their answers, so a program printing
+those answers passes. The `codeforces` adapter marks a row whose official tests are the statement's
+samples and that no joined suite covers: in `open-r1/codeforces` `verifiable`, 219 of the 422 `test`
+problems and 1,303 of the 8,299 `train` ones. `--include_examples_only` keeps them.
 `--min_rating` / `--max_rating` bound difficulty, dropping unrated rows with them, `--exclude_keys`
 removes listed ids, and `--holdout_per_band` carves a deterministic `test` split.
 
@@ -280,7 +292,8 @@ preparation host needs a backend.
 
 A bulky test corpus goes through `compact_code_tests.py` first: it reduces open-r1's generated tests
 or HardTests' encoded suites to one capped row per problem (40 tests within 256 KB, two of which may
-reach 4 MB so a maximum-size input survives), which `--tests_table` joins by problem id.
+reach 4 MB so a maximum-size input survives), which `--tests_table` joins by problem id. A table
+may cover some splits only; one matching no row of any split exits before any split is filtered.
 
 ## Evaluation
 
@@ -296,7 +309,9 @@ mean-over-samples pass@1, see [Evaluating on an Environment](evaluation.md#runni
 A problem counts solved when the submitted program passes every test in the pool — the environment's
 verdict, not the shaped total, so the recipe's shaping under `--training_config` (a
 `tool_error_penalty` on every refused scratchpad call under `leaderboard`, a submission bonus) moves
-it neither way, and the coding CLI takes no `--success_threshold`. The verdict is the episode's last
+it neither way, and the coding CLI takes no `--success_threshold`. Examples-only problems
+([Dataset](#dataset)) are left out and counted in the log unless `--include_examples_only`, which
+the trajectory meta records with the selection. The verdict is the episode's last
 graded submission and `success@1` each row's first scored sample, while the
 [re-grader](evaluation.md#re-grading-recorded-trajectories) scores every episode on its first
 submission (`s@1`) or any within its budget (`s@2`). The two score the same submission only on a
@@ -310,7 +325,10 @@ must exceed. Every episode sends its level's thinking budget, so the vLLM server
 without one vLLM rejects the request. A non-thinking model served with a think-tag parser gets its
 whole answer back as reasoning (no end marker reads as all reasoning), so evaluate one with
 `--reasoning_effort none`: no level, no budget, no parser needed, and a default `--max_tokens` of
-32768, the training rollout's. Under `--training_config` the level defaults to the YAML's, where a
+32768, the training rollout's. It does not switch a thinking model's reasoning off: the request then
+carries no `reasoning_effort`, so vLLM leaves `enable_thinking` unset and the template keeps its own
+default — Qwen3/3.5/3.6 still think, and stop only on `enable_thinking: false` (the server's
+`--default-chat-template-kwargs`, or `rollout_chat_template_kwargs` under `--training_config`). Under `--training_config` the level defaults to the YAML's, where a
 `reasoning_effort: null` is `none`; only a YAML without the key takes `medium`, as training does.
 The eval knows the server is SGLang only from a `--training_config` naming `rollout_backend: sglang`,
 which drops the budget as [training does](../async-grpo/rollouts.md#reasoning-budget).

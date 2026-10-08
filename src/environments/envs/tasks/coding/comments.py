@@ -1,9 +1,14 @@
 """Comment accounting for the coding environments: how many characters of a program sit in comments, by the
-language's registered syntax, the verdict the reasoning-in-comments guard reads off that count, and the
-program with its comments removed, what the identity of a resubmission is read on."""
+language's registered syntax, the verdict the reasoning-in-comments guard reads off that count, the
+program with its comments removed, what the identity of a resubmission is read on, and whether it reads
+standard input outside them and its string literals."""
 
 import ast
+import bisect
+import itertools
+import re
 import warnings
+from collections.abc import Callable
 
 from src.environments.sandbox.base import require_language
 
@@ -14,6 +19,8 @@ REASONING_IN_COMMENTS_MIN_CHARS = 16384
 _TRIPLE_QUOTES = ('"""', "'''")
 # A preprocessor block the compiler drops, the C family's other comment.
 _C_DISABLED_BLOCK = ("#if 0", "#endif")
+# The line ends the parser and ``ast.get_source_segment`` split source on (a form feed is not one).
+_LINE_BREAK = re.compile(r"\r\n|\r|\n")
 
 
 def comment_chars(code: str, language: str) -> tuple[int, int]:
@@ -32,12 +39,17 @@ def strip_comments(code: str, language: str) -> str:
     """``code`` without its comments (the same spans :func:`comment_chars` counts, bare strings kept): a
     resubmission that differs only in them is the same program."""
     spec = require_language(language)
-    out, last = [], 0
-    for start, end in _comment_spans(code, spec.line_comment, spec.block_comment):
-        out.append(code[last:start])
-        last = end
-    out.append(code[last:])
-    return "".join(out)
+    return _without(code, _comment_spans(code, spec.line_comment, spec.block_comment))
+
+
+def reads_stdin(code: str, language: str) -> bool:
+    """Whether ``code`` reads its standard input: its language's ``stdin_read`` pattern found outside its
+    comments and string literals, with no ``stdin_redirect`` there swapping that input for an in-memory buffer."""
+    spec = require_language(language)
+    bare = _without(code, _comment_spans(code, spec.line_comment, spec.block_comment, strings=True))
+    if spec.stdin_redirect is not None and re.search(spec.stdin_redirect, bare):
+        return False
+    return re.search(spec.stdin_read, bare) is not None
 
 
 def reasoning_in_comments(comments: int, rest: int) -> bool:
@@ -51,9 +63,21 @@ def carries_reasoning_in_comments(code: str, language: str) -> bool:
     return reasoning_in_comments(*comment_chars(code, language))
 
 
-def _comment_spans(code: str, line_marker: str, block: tuple[str, str] | None) -> list[tuple[int, int]]:
-    """The spans of ``code`` inside line and block comments (and a C-family ``#if 0`` block), string
-    literals skipped, in order."""
+def _without(code: str, spans: list[tuple[int, int]]) -> str:
+    """``code`` with the ordered, disjoint ``spans`` cut out."""
+    out, last = [], 0
+    for start, end in spans:
+        out.append(code[last:start])
+        last = end
+    out.append(code[last:])
+    return "".join(out)
+
+
+def _comment_spans(
+    code: str, line_marker: str, block: tuple[str, str] | None, *, strings: bool = False
+) -> list[tuple[int, int]]:
+    """The spans of ``code`` inside line and block comments (and a C-family ``#if 0`` block), in order.
+    String literals are skipped, or with ``strings`` returned among them."""
     n = len(code)
     i = 0
     spans: list[tuple[int, int]] = []
@@ -67,9 +91,11 @@ def _comment_spans(code: str, line_marker: str, block: tuple[str, str] | None) -
         elif block is not None and code.startswith(block[0], i):
             end = _end_of(code, i + len(block[0]), block[1])
         elif code[i] in "\"'":
-            i = _skip_string(code, i)
+            end = _skip_string(code, i)
             line_start = False
-            continue
+            if not strings:
+                i = end
+                continue
         else:
             line_start = code[i] == "\n" or (line_start and code[i] in " \t")
             i += 1
@@ -103,15 +129,39 @@ def _skip_string(code: str, i: int) -> int:
 
 
 def _bare_string_chars(code: str) -> int:
-    """Characters of Python string statements (docstrings and bare strings), 0 for code that does not parse."""
+    """Characters of Python string statements (docstrings and bare strings), 0 for code that does not parse:
+    the length of each statement's source segment, read off positions mapped in one pass over ``code``
+    (``ast.get_source_segment`` re-splits the source up to each node, quadratic over a program)."""
     with warnings.catch_warnings():
         warnings.simplefilter("ignore", SyntaxWarning)
         try:
             tree = ast.parse(code)
         except (SyntaxError, ValueError):
             return 0
+    offset = _char_offsets(code)
     return sum(
-        len(ast.get_source_segment(code, node) or "")
+        offset(node.end_lineno, node.end_col_offset) - offset(node.lineno, node.col_offset)
         for node in ast.walk(tree)
         if isinstance(node, ast.Expr) and isinstance(node.value, ast.Constant) and isinstance(node.value.value, str)
     )
+
+
+def _char_offsets(code: str) -> Callable[[int, int], int]:
+    """The character offset in ``code`` of an ast position: a 1-based line and a UTF-8 byte column. A
+    non-ASCII line's byte-to-character table is built the first time a position on it is read."""
+    starts = [0, *(match.end() for match in _LINE_BREAK.finditer(code)), len(code)]
+    if code.isascii():
+        return lambda line, col: starts[line - 1] + col
+    tables: dict[int, list[int] | None] = {}
+
+    def offset(line: int, col: int) -> int:
+        start = starts[line - 1]
+        if line not in tables:
+            text = code[start : starts[line]]
+            tables[line] = (
+                None if text.isascii() else list(itertools.accumulate((len(c.encode()) for c in text), initial=0))
+            )
+        table = tables[line]
+        return start + (col if table is None else bisect.bisect_left(table, col))
+
+    return offset

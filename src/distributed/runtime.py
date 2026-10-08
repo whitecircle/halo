@@ -825,7 +825,7 @@ def copy_full_tensor(target: torch.Tensor, value: torch.Tensor) -> None:
 
     A DTensor target is written through ``distribute_tensor`` at the default ``src_data_rank``: mesh
     rank 0's copy is broadcast, so every replica holds one node's bytes, and the call is a mesh
-    collective that callers issue in the same key order on every rank. ``CheckpointLoader._load_tp``
+    collective that callers issue in the same key order on every rank. ``CheckpointLoader._load_streamed``
     slices per rank instead, since its ranks each need the full tensor and it joins the key set
     explicitly. A plain target takes ``value`` as is.
     """

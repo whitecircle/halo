@@ -85,7 +85,7 @@ def test_online_setup_weight_sync_raises_without_vllm_generation():
 
 _SPINE_STEPS = (
     "_setup_distributed_modes",
-    "_validate_implicit_reference_model",
+    "_validate_held_reference_model",
     "_resolve_chunked_head_transform",
     "_setup_weight_sync",
     "_disable_dropout_for_onpolicy",
@@ -124,7 +124,7 @@ def test_both_trainers_reach_the_gate_through_the_shared_init_spine():
     # must run before anything can push weights.
     assert ran == [
         "_setup_distributed_modes",
-        "_validate_implicit_reference_model",
+        "_validate_held_reference_model",
         "_resolve_chunked_head_transform",
         "_check_full_logits_fit(7)",
         "_setup_weight_sync",

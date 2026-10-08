@@ -6,7 +6,7 @@ from typing import Literal
 from transformers import TrainingArguments
 
 from src.args.mixins import DatasetNumProcArguments
-from src.args.validation import RangeValidatedConfig, require_positive
+from src.args.validation import RangeValidatedConfig, present, require_finite, require_int, require_positive
 
 
 @dataclass
@@ -62,6 +62,10 @@ class DistillationConfig(DatasetNumProcArguments, RangeValidatedConfig, Training
 
     def _validate_ranges(self) -> None:
         super()._validate_ranges()
-        require_positive(type(self).__name__, distill_temperature=self.distill_temperature)
+        owner = type(self).__name__
+        require_positive(owner, distill_temperature=self.distill_temperature)
+        require_finite(owner, distill_alpha=self.distill_alpha)
+        # A non-positive length is legal: it resolves to the student's context window at launch.
+        require_int(owner, **present(max_length=self.max_length))
         if not 0.0 <= self.distill_alpha <= 1.0:
             raise ValueError(f"distill_alpha must be in [0, 1], got {self.distill_alpha}")

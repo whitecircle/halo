@@ -55,6 +55,15 @@ def model_type_matches(cfg, *prefixes: str) -> bool:
     return any((getattr(level, "model_type", "") or "").startswith(prefixes) for level in config_sources(cfg))
 
 
+def config_ties_word_embeddings(model_config) -> bool:
+    """Whether this checkpoint declares a tied embedding/head pair.
+
+    Read through the composite-config accessor: the flag lives on the text sub-config of a multimodal
+    wrapper, and a config class defining no ``get_text_config`` (remote code) resolves to itself.
+    """
+    return bool(getattr(text_config(model_config), "tie_word_embeddings", False))
+
+
 def get_config_field(cfg, field: str, default=None, *, per_layer_reduce=None):
     """First non-``None`` ``field`` across :func:`config_sources`, else ``default``.
 

@@ -55,7 +55,7 @@ Three shapes, decided by `load_reference_model_for_preference` (`src/distributed
 
 The frozen copy is never parallelized. Under EP or TP that makes it a whole dense replica on every rank, experts included, run through the model's own MoE forward. Its log-probs match the policy's up to kernel numerics, so it loads, with a warning about its memory: precompute scores the same reference once and is both exact and cheaper, and PEFT avoids it too. TP rejects PEFT, leaving precompute or the frozen copy. Expert-only native EP LoRA needs precompute: with no `PeftModel` nothing switches the adapters off. A mixed attention + expert adapter keeps the implicit reference, since `disable_adapter()` drops the expert adapters too.
 
-A policy carrying live attention sinks (`reset_sinks: false`) is refused whenever a reference model reaches the trainer, single GPU included. Only PEFT, or EP/TP with precompute, leaves none.
+A reference model whose attention sinks differ from the policy's is refused in every mode, single GPU included. The script's frozen copy takes the policy's `reset_sinks`, so it passes with live sinks (`reset_sinks: false`) too. A reference TRL builds itself neutralizes nothing, and GPT-OSS's default attention (eager) applies its pretrained sinks, so it is refused beside neutralized ones (`reset_sinks: true`, the default).
 
 ### Resuming a precompute run
 

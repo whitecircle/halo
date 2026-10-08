@@ -4,8 +4,9 @@ Reads the safetensors index and materializes only each rank's expert slice direc
 ranks in parallel. :func:`load_ep_model_lazy` orchestrates: meta-device shell → format detect →
 :class:`EPWeightPlanner` → :class:`ExpertFuser` → ``SafetensorsWeightLoader``.
 
-Handles fused-3D checkpoints (LFM2/GLM4 ``[E,2M,H]``, GptOss ``[E,H,2M]``) sliced directly, and
-individual per-expert checkpoints (Qwen3/Qwen3.5/Bailing) loaded local-only and fused into 3D tensors.
+Handles fused-3D checkpoints (the GptOss ``[E,H,2M]`` and Qwen3.5/3.6 ``[E,2M,H]`` hubs, a module-layout
+save) sliced directly, and per-expert checkpoints (the Qwen3-MoE, GLM-4, LFM-2 and Bailing hubs, an
+``unfuse_moe_experts`` output) loaded local-only and fused into 3D tensors.
 
 This module owns the EXPERT-domain knowledge: the checkpoint key patterns derived from the layer
 classes, the planner that classifies keys into shard/replicate/ignore, the per-expert fuser, and the
@@ -88,7 +89,7 @@ _FUSED_EXPERT_PATTERN = re.compile(
     rf"\.(?:{_CONTAINER_ALT})\.({'|'.join(re.escape(k) for k in hf_fused_expert_keys())})$"
 )
 
-# Individual expert keys (Qwen3/Qwen3.5/Bailing checkpoints): model.layers.X.mlp.experts.N.gate_proj.weight
+# Individual expert keys (the per-expert hubs, e.g. Qwen3-MoE): model.layers.X.mlp.experts.N.gate_proj.weight
 # Groups: (1) the expert-container attribute, (2) the expert index.
 _INDIVIDUAL_EXPERT_PATTERN = re.compile(rf"\.({_CONTAINER_ALT})\.(\d+)\.")
 
@@ -651,7 +652,8 @@ def load_ep_model_lazy(
     """Load a MoE model for EP using lazy safetensors slicing.
 
     All ranks run in parallel, each reading only its own expert slice from disk. Handles both fused 3D
-    checkpoints (GptOss, LFM2, GLM4) and individual-expert checkpoints (Qwen3, Qwen3.5, Bailing).
+    checkpoints (the GptOss and Qwen3.5/3.6 hubs) and per-expert ones (the Qwen3-MoE, GLM-4, LFM-2 and
+    Bailing hubs).
     Configured router/expert/non-EP masters retain FP32 checkpoint values on their first read or
     fusion, for fresh stages and resumes alike. ``preserve_checkpoint_precision`` marks a resume
     and additionally requires complete master coverage, without fresh-load missing-key exemptions.

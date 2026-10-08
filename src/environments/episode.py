@@ -47,14 +47,17 @@ RECOVERY_THINKING_SHARE = 0.25
 @dataclass(frozen=True)
 class EpisodeEffort:
     """The generation contract one episode runs under: its resolved reasoning-effort level, the per-turn
-    reasoning cap bound to that level (``None`` = uncapped), the turn's total token cap, and the
-    episode's output budget (``rollout_max_episode_tokens``: the most its turns may sample together,
-    reasoning and visible output alike; ``None`` leaves only the per-turn caps)."""
+    reasoning cap bound to that level (``None`` = uncapped), the turn's total token cap, the episode's
+    output budget (``rollout_max_episode_tokens``: the most its turns may sample together, reasoning and
+    visible output alike; ``None`` leaves only the per-turn caps), and the answer-room bound
+    (``rollout_max_answer_tokens``: the most a turn may generate past its reasoning cap; ``None`` leaves
+    the turn total at ``max_tokens``)."""
 
     level: str | None
     thinking_budget: int | None
     max_tokens: int
     episode_tokens: int | None = None
+    answer_tokens: int | None = None
 
     def turn_thinking_cap(self, recovery: bool = False) -> int | None:
         """The reasoning cap the turn about to start runs under: the level's, or on a turn retrying an
@@ -63,25 +66,37 @@ class EpisodeEffort:
             return self.thinking_budget
         return max(1, round(self.thinking_budget * RECOVERY_THINKING_SHARE))
 
+    def turn_total(self, thinking_cap: int | None) -> int:
+        """The total of a turn reasoning under ``thinking_cap``: ``max_tokens``, or the cap plus
+        ``answer_tokens`` where that is smaller."""
+        if thinking_cap is None or self.answer_tokens is None:
+            return self.max_tokens
+        return min(self.max_tokens, thinking_cap + self.answer_tokens)
+
+    @property
+    def answer_room(self) -> int:
+        """What a turn may generate past its level's reasoning cap; the whole turn without one."""
+        return self.turn_total(self.thinking_budget) - (self.thinking_budget or 0)
+
     def turn_caps(self, generated: int, *, recovery: bool = False) -> dict[str, int | None] | None:
-        """The engine caps of the turn about to start, as the request fields they set: the turn's own
-        (:meth:`turn_thinking_cap` for ``recovery``), narrowed to what the output budget has left after
-        ``generated`` tokens — the total first, and the reasoning cap with it, so the turn keeps its
-        answer room (what it may generate past its level's reasoning cap; the whole turn without one).
-        ``None`` once the budget no longer holds that room: no further turn starts, and the driver
-        closes the episode truncated."""
-        total = (
-            self.max_tokens if self.episode_tokens is None else min(self.max_tokens, self.episode_tokens - generated)
-        )
-        if total < self.max_tokens - (self.thinking_budget or 0):
+        """The engine caps of the turn about to start, as the request fields they set: the level's total
+        (:meth:`turn_total`) narrowed to what the output budget has left after ``generated`` tokens, and the
+        reasoning cap with it, so the turn keeps its :attr:`answer_room`; a retry (``recovery``) clamps
+        both to its reserve (:meth:`turn_thinking_cap`). ``None`` once the budget no longer holds that
+        room, whatever the turn: no further turn starts, and the driver closes the episode truncated."""
+        level_total = self.turn_total(self.thinking_budget)
+        total = level_total if self.episode_tokens is None else min(level_total, self.episode_tokens - generated)
+        if total < self.answer_room:
             return None
         thinking = self.thinking_budget
         if thinking is not None:
             # The cap gives up what the total gave up, never down to 0: a cap of 0 closes the reasoning
             # before it opened. A retry's reserve clamps what is left, never shrinks with it.
-            thinking = max(thinking - (self.max_tokens - total), 1)
+            thinking = max(thinking - (level_total - total), 1)
             if recovery:
-                thinking = min(thinking, self.turn_thinking_cap(recovery=True))
+                reserve = self.turn_thinking_cap(recovery=True)
+                thinking = min(thinking, reserve)
+                total = min(total, self.turn_total(reserve))
         return {"max_tokens": total, "max_thinking_tokens": thinking}
 
     def stamp(self, trajectory: Trajectory | None, generated: int) -> None:
@@ -103,6 +118,7 @@ def bind_episode_effort(
     max_tokens: int,
     max_thinking_tokens: int | None = None,
     max_episode_tokens: int | None = None,
+    max_answer_tokens: int | None = None,
 ) -> EpisodeEffort:
     """Resolve one episode's effort level and bind the env's per-level CoT budget into its token caps.
 
@@ -114,7 +130,8 @@ def bind_episode_effort(
 
     The level's ``thinking_tokens`` caps the reasoning channel of every turn, clamped by the run's
     ``max_thinking_tokens``, which alone caps an episode whose level sets none; ``max_tokens`` bounds
-    the whole turn, and ``max_episode_tokens`` the episode (:meth:`EpisodeEffort.turn_caps`).
+    the whole turn, ``max_answer_tokens`` what it generates past its reasoning cap, and
+    ``max_episode_tokens`` the episode (:meth:`EpisodeEffort.turn_caps`).
     """
     level = resolve_reasoning_effort((context or {}).get("reasoning_effort") or env.reasoning_effort)
     level_budget = env.thinking_budget_for_effort(level) if level is not None else None
@@ -131,12 +148,26 @@ def bind_episode_effort(
             f"rollout_max_episode_tokens ({max_episode_tokens}) must be at least rollout_max_tokens ({max_tokens}), "
             "so one whole turn fits the episode: below it no turn could start."
         )
-    return EpisodeEffort(level=level, thinking_budget=budget, max_tokens=max_tokens, episode_tokens=max_episode_tokens)
+    # Bounding past a cap the turn lacks would bound nothing: rollout_max_tokens already is its whole room.
+    if max_answer_tokens is not None and budget is None:
+        raise ValueError(
+            f"rollout_max_answer_tokens ({max_answer_tokens}) bounds what a turn generates past its reasoning cap, "
+            f"and an episode at reasoning_effort={level!r} has none: the level sets no thinking_tokens and "
+            "rollout_max_thinking_tokens is unset. Give every drawable level a cap, or unset "
+            "rollout_max_answer_tokens."
+        )
+    return EpisodeEffort(
+        level=level,
+        thinking_budget=budget,
+        max_tokens=max_tokens,
+        episode_tokens=max_episode_tokens,
+        answer_tokens=max_answer_tokens,
+    )
 
 
 def recovering_turn(trajectory: Trajectory | None) -> bool:
     """Whether the turn about to start retries an unproductive one: the episode's last assistant turn
-    is untrainable — cut by the engine, ended on nothing, or every call unknown or refused — and the
+    is untrainable — cut by the engine, ended on nothing, or every call unknown, refused or uninformative — and the
     environment has answered it (the nudge, or the refusals' tool replies)."""
     messages = trajectory.messages if trajectory is not None else []
     last = next((m for m in reversed(messages) if m.role == "assistant"), None)
@@ -144,13 +175,18 @@ def recovering_turn(trajectory: Trajectory | None) -> bool:
 
 
 def thinking_caps_by_level(
-    env: BaseEnvironment, *, max_tokens: int, max_thinking_tokens: int | None, max_episode_tokens: int | None = None
+    env: BaseEnvironment,
+    *,
+    max_tokens: int,
+    max_thinking_tokens: int | None,
+    max_episode_tokens: int | None = None,
+    max_answer_tokens: int | None = None,
 ) -> dict[str | None, int | None]:
     """The per-turn reasoning cap an episode of ``env`` binds at each level it can draw — every level
     under ``random``, the one it sets, or ``None`` with the run's own cap under no setting — bound as an
     episode binds it. Both drivers read it before their first request, so a level whose cap fills the
-    turn, or an output budget under one turn, refuses the run with one loud error rather than failing
-    every episode at its first turn."""
+    turn, a level without one under an answer-room bound, or an output budget under one turn refuses
+    the run with one loud error rather than failing every episode at its first turn."""
     levels = VALID_REASONING_EFFORTS if env.reasoning_effort == RANDOM_REASONING_EFFORT else (env.reasoning_effort,)
     return {
         level: bind_episode_effort(
@@ -159,6 +195,7 @@ def thinking_caps_by_level(
             max_tokens=max_tokens,
             max_thinking_tokens=max_thinking_tokens,
             max_episode_tokens=max_episode_tokens,
+            max_answer_tokens=max_answer_tokens,
         ).thinking_budget
         for level in levels
     }

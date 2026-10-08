@@ -14,7 +14,10 @@ into the fetching rank's cache; every other lookup is huggingface_hub's own cach
    training different weights on different nodes;
 4. a checkpoint directory present on one node only fails every rank instead of stranding the ranks
    that found it in the next collective;
-5. a trainer handed a path string loads the agreed commit, inside a world-joined load.
+5. a trainer handed a path string loads the agreed commit, inside a world-joined load;
+6. a model load fetches the repo's top-level files alone, judged by huggingface_hub's own pattern
+   filter: the vendor weight dumps in its subfolders (gpt-oss's ``original/`` and ``metal/``) stay on
+   the Hub unless the loader reads subfolders.
 
     python tests/cpu/parallelism/test_model_source_agreement.py
 """
@@ -30,9 +33,11 @@ import huggingface_hub
 import pytest
 import torch
 from huggingface_hub import constants as hub_constants
+from huggingface_hub.utils import filter_repo_objects
 from transformers import Qwen3Config, Qwen3ForCausalLM
 
 import src.distributed.loading.model_loading as model_loading
+from src.checkpoint.format import HUB_SUBFOLDER_IGNORE_PATTERNS
 from src.distributed.loading import model_source
 from src.distributed.loading.model_source import resolve_model_source
 from tests.common.gloo import run_gloo_ranks
@@ -42,14 +47,37 @@ REPO = "org/model"
 COMMIT_A = "a" * 40
 COMMIT_B = "b" * 40
 SHARDS = ("model-00001-of-00002.safetensors", "model-00002-of-00002.safetensors")
+# A gpt-oss-shaped repo: what from_pretrained reads at the top level (remote code included), and the
+# same weights again in vendor formats under subfolders.
+TOP_LEVEL_FILES = (
+    ".gitattributes",
+    "README.md",
+    "config.json",
+    "generation_config.json",
+    "chat_template.jinja",
+    "tokenizer.json",
+    "tokenizer_config.json",
+    "special_tokens_map.json",
+    "configuration_custom.py",
+    "modeling_custom.py",
+    "model.safetensors.index.json",
+    *SHARDS,
+)
+NESTED_FILES = (
+    "original/config.json",
+    "original/dtypes.json",
+    "original/model--00001-of-00002.safetensors",
+    "metal/model.bin",
+)
 RANKS_PER_NODE = 2
 TWO_NODES = 2 * RANKS_PER_NODE
 PG_TIMEOUT = datetime.timedelta(seconds=60)
 
 
-def _stage_snapshot(cache: Path, commit: str, *, weights: bool = True) -> str:
+def _stage_snapshot(cache: Path, commit: str, *, weights: bool = True, nested: tuple[str, ...] = ()) -> str:
     """What a finished ``snapshot_download`` leaves in a Hub cache: the ref, and the snapshot dir —
-    without its weights for the config and tokenizer reads that precede the load."""
+    without its weights for the config and tokenizer reads that precede the load — plus the ``nested``
+    files the fetch took."""
     storage = cache / f"models--{REPO.replace('/', '--')}"
     (storage / "refs").mkdir(parents=True, exist_ok=True)
     (storage / "refs" / "main").write_text(commit)
@@ -61,6 +89,9 @@ def _stage_snapshot(cache: Path, commit: str, *, weights: bool = True) -> str:
         (snapshot / "model.safetensors.index.json").write_text(json.dumps({"weight_map": weight_map}))
         for shard in SHARDS:
             (snapshot / shard).write_bytes(b"")
+    for name in nested:
+        (snapshot / name).parent.mkdir(parents=True, exist_ok=True)
+        (snapshot / name).write_bytes(b"")
     return str(snapshot)
 
 
@@ -76,12 +107,14 @@ def _enter_node(rank: int, tmp_dir: str, *, ranks_per_node: int) -> Path:
 
 def _fetching_stand_in(tmp_dir: str, rank: int, commit: str):
     """``snapshot_download`` whose online call stages ``commit`` into this rank's cache (and records
-    that it fetched); a cache-only call is huggingface_hub's own resolution."""
+    that it fetched), its nested files filtered as huggingface_hub filters a repo listing; a cache-only
+    call is huggingface_hub's own resolution."""
 
-    def snapshot_download(repo_id, *, revision=None, local_files_only=False):
+    def snapshot_download(repo_id, *, revision=None, local_files_only=False, ignore_patterns=None):
         if not local_files_only:
             Path(tmp_dir, f"fetched_by_rank{rank}").touch()
-            _stage_snapshot(Path(hub_constants.HF_HUB_CACHE), commit)
+            nested = tuple(filter_repo_objects(NESTED_FILES, ignore_patterns=ignore_patterns))
+            _stage_snapshot(Path(hub_constants.HF_HUB_CACHE), commit, nested=nested)
         return huggingface_hub.snapshot_download(repo_id, revision=revision, local_files_only=True)
 
     return snapshot_download
@@ -106,7 +139,7 @@ def _diverged_caches_worker(rank: int, tmp_dir: str) -> None:
     if rank % RANKS_PER_NODE == 0:
         _stage_snapshot(node_dir / "hub", COMMIT_A if rank == 0 else COMMIT_B)
     # An offline fetch: the cache answers, whatever commit it holds.
-    model_source.snapshot_download = lambda repo_id, *, revision=None, local_files_only=False: (
+    model_source.snapshot_download = lambda repo_id, *, revision=None, local_files_only=False, ignore_patterns=None: (
         huggingface_hub.snapshot_download(repo_id, revision=revision, local_files_only=True)
     )
     _record(tmp_dir, rank, REPO)
@@ -182,6 +215,27 @@ def test_a_checkpoint_directory_on_one_node_only_fails_every_rank(tmp_path):
 
 def test_a_local_directory_keeps_the_callers_revision(tmp_path):
     assert resolve_model_source(str(tmp_path), "v1", tag="policy") == "v1"
+
+
+def test_the_model_fetch_rule_keeps_the_top_level_files_alone():
+    """huggingface_hub's own filter, whose fnmatch ``*`` crosses ``/``: everything from_pretrained reads
+    stays, every nested file goes."""
+    listing = [*TOP_LEVEL_FILES, *NESTED_FILES]
+    kept = list(filter_repo_objects(listing, ignore_patterns=list(HUB_SUBFOLDER_IGNORE_PATTERNS)))
+    assert kept == list(TOP_LEVEL_FILES)
+
+
+@pytest.mark.parametrize("whole_repo", [False, True], ids=["model-load", "whole-repo"])
+def test_the_fetch_leaves_the_subfolders_unless_the_loader_reads_them(tmp_path, monkeypatch, whole_repo):
+    monkeypatch.setattr(hub_constants, "HF_HUB_CACHE", str(tmp_path / "hub"))
+    monkeypatch.setattr(model_source, "snapshot_download", _fetching_stand_in(str(tmp_path), 0, COMMIT_A))
+
+    assert resolve_model_source(REPO, None, tag="policy", whole_repo=whole_repo) == COMMIT_A
+
+    snapshot = tmp_path / "hub" / f"models--{REPO.replace('/', '--')}" / "snapshots" / COMMIT_A
+    fetched = {str(path.relative_to(snapshot)) for path in snapshot.rglob("*") if path.is_file()}
+    assert set(SHARDS) <= fetched
+    assert sorted(name for name in fetched if "/" in name) == (sorted(NESTED_FILES) if whole_repo else [])
 
 
 def test_a_trainer_model_path_loads_the_agreed_commit_inside_the_joined_load(tmp_path, monkeypatch):

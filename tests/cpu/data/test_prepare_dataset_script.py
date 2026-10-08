@@ -1,8 +1,8 @@
 #!/usr/bin/env python
 """``prepare_dataset.py`` must run the invocations the docs publish, and fail fast when it cannot.
 
-Three things this drives through the real ``main()`` in a fresh subprocess (so the accelerate
-singleton starts unset, as in a real CLI run):
+What this drives through the real ``main()`` in a fresh subprocess (so the accelerate singleton
+starts unset, as in a real CLI run):
 
 * **The documented raw-text pre-training command.** The shared data-loading helpers log through
   accelerate's logger, which raises unless ``PartialState()`` exists — and the completion-masking
@@ -15,6 +15,8 @@ singleton starts unset, as in a real CLI run):
   into the artifact here, so masking without a marker is unbuildable; the config that owns the pair
   is only constructed after the whole corpus is in hand, which is minutes of S3 download to report
   a two-flag mistake.
+* **A column flag naming no input column fails before tokenization**, naming the flag and the
+  columns the input carries.
 
 Plus the artifact contract, unstubbed: a ``--num-shards N`` publish must be what the training-side
 sharded loader hands ``N`` data-parallel ranks — every row exactly once, none twice.
@@ -30,11 +32,13 @@ import tempfile
 
 import pytest
 from accelerate import PartialState
-from datasets import Dataset
+from datasets import Dataset, DatasetDict
 from tokenizers import Tokenizer, models, pre_tokenizers
 from transformers import PreTrainedTokenizerFast
 
+from src.data.pipeline.preprocessed_metadata import PreprocessingConfig
 from src.data.sources.loading import load_preprocessed_dataset
+from tests.common.utils import load_script_module
 
 REPO = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", ".."))
 _SCRIPT = os.path.join(REPO, "scripts", "before_training", "prepare_dataset.py")
@@ -179,6 +183,52 @@ def test_the_documented_sft_invocation_runs_once_the_marker_is_supplied():
     output = _run([*_DOC_CHAT_ARGV, "--assistant-message-template", "<|im_start|>assistant\n"])
 
     assert "REACHED_PREPROCESS" in output, output
+
+
+@pytest.mark.parametrize(
+    ("argv", "flag", "column"),
+    [
+        (
+            [*_DOC_CHAT_ARGV, "--assistant-message-template", "<a>", "--conversation-field", "messages"],
+            "--conversation-field",
+            "messages",
+        ),
+        ([*_DOC_TEXT_ARGV, "--text-field", "body"], "--text-field", "body"),
+        ([*_DOC_CHAT_ARGV, "--assistant-message-template", "<a>", "--tools-field", "tools"], "--tools-field", "tools"),
+    ],
+    ids=["conversation", "text", "tools"],
+)
+def test_a_column_flag_naming_no_input_column_is_refused_before_tokenization(argv, flag, column):
+    """A ``messages`` corpus under the default ``--conversation-field prompt`` (and its text-mode and
+    tools twins) otherwise dies as a bare ``KeyError`` in a map worker, or bakes every row without the
+    column; the refusal names the flag, the column and what the input does carry."""
+    output = _run(argv)
+
+    assert "REACHED_LOAD" in output, output
+    assert "REACHED_PREPROCESS" not in output, f"the input reached tokenization with {flag}={column}:\n{output}"
+    assert f"{flag}='{column}' names a column" in output, output
+    assert "available columns: ['prompt', 'text']" in output, output
+
+
+@pytest.mark.parametrize(
+    ("splits", "refused"), [(("train", "validation"), True), (("train", "test", "validation"), False)]
+)
+def test_the_held_out_split_the_artifact_bakes_is_checked(splits, refused):
+    """A source with no ``test`` split bakes its ``validation`` split as the test split, so a column
+    missing only there would still die in that split's map; a ``validation`` split beside a ``test``
+    one is never baked, so its schema is not checked."""
+    conversation = [[{"role": "user", "content": "hi"}]]
+    dataset = DatasetDict(
+        {name: Dataset.from_dict({"messages" if name == "validation" else "prompt": conversation}) for name in splits}
+    )
+    script = load_script_module("scripts/before_training/prepare_dataset.py", "prepare_dataset_columns")
+    config = PreprocessingConfig(model_name_or_path="m")
+
+    if not refused:
+        script.require_declared_columns(dataset, config, "src")
+        return
+    with pytest.raises(ValueError, match=r"--conversation-field='prompt' .*\['validation'\]"):
+        script.require_declared_columns(dataset, config, "src")
 
 
 def test_a_multi_process_launch_is_refused_before_the_input_is_fetched():

@@ -110,14 +110,16 @@ Sampling is `rollout_temperature` (`0.7`) and `rollout_top_p` (`0.95`); `rollout
 Three decisions matter more than the rest.
 
 - **Turn budget.** `rollout_max_tokens` caps one turn and `max_turns` the turns. `rollout_max_episode_tokens` (off by
-  default, `81920` in the code-contests recipes) caps what one episode samples across all its turns, reasoning
-  included. The engine enforces it turn by turn and never tells the model, and an episode left without room for
+  default, `131072` in the code-contests recipes) caps what one episode samples across all its turns, reasoning
+  included. `rollout_max_answer_tokens` (off by default, `8192` in the vLLM code-contests recipes) caps what a turn
+  generates past its reasoning cap, so a turn whose reasoning the engine closed cannot carry it on in a tool call.
+  The engine enforces both turn by turn and never tells the model, and an episode left without room for
   another turn ends truncated. The trajectory itself is never cut: a row longer than the context window fails the
   step. Watch `episode/turns`: pinned at the cap, raise it; far below, lower it, since turns are sequential and set
-  step time. A turn cut at its cap, an empty turn, or one whose every call names a tool that does not exist or is
+  step time. A turn cut at its cap, an empty turn, or one whose every call names a tool that does not exist, is
   refused unrun (code contests refuses a program whose comments carry its reasoning, and a resubmission identical to
-  one already graded) is never rewarded: it trains
-  only as a penalty, when its episode scored below the group's mean
+  one already graded) or showed nothing (a code-contests scratchpad run of a program that reads input, given none,
+  that printed nothing) is never rewarded: it trains only as a penalty, when its episode scored below the group's mean
   ([Objective](../../agent-docs/training-methods/grpo/async-grpo/objective.md#untrainable-turns) ↗).
 - **Reasoning effort.** `environment_kwargs.reasoning_effort` (`low` / `medium` / `high` / `random`) sets how much the
   model should think, and `reasoning_effort_profiles` gives each level its own caps, as the code-contests recipes do

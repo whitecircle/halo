@@ -7,7 +7,9 @@ offline eval runner must both go through it: a driver that resolves the level it
 budget, generates under a different contract than the one the policy was trained on. The episode
 output budget (``rollout_max_episode_tokens``) rides the same seam: ``EpisodeEffort.turn_caps`` narrows
 a turn's request to what the budget has left and hands back none once it holds no turn, which ends
-the episode truncated.
+the episode truncated. So does the answer-room bound (``rollout_max_answer_tokens``): a capped turn's
+total is at most its reasoning cap plus the room, so a turn the engine force-closed cannot reason on in
+its visible output up to ``rollout_max_tokens``.
 
 Both drivers are exercised for real — the actor via the class ``@ray.remote`` wraps (no cluster), the
 eval runner with its generation call stubbed — so the tests fail if either one stops binding.
@@ -616,6 +618,161 @@ async def test_an_episode_inside_its_budget_records_false_and_one_without_a_budg
         monkeypatch, _PlainEnv(), None, responses=[_tool_turn(tokens=19000)] * 4, config=unbounded
     )
     assert OUTPUT_BUDGET_EXHAUSTED_KEY not in free.info
+
+
+# --- The answer-room bound ---
+
+# A code-contests-like shape: 30000-token turns, per-level caps 8192 / 12288 / 16384, an 81920-token
+# episode, and 8192 tokens of answer room past each cap.
+_CONTEST_TURN = 30000
+_CONTEST_EPISODE = 81920
+_ROOM = 8192
+
+
+class _ContestEnv(_PlainEnv):
+    BUDGETS = {"low": 8192, "medium": 12288, "high": 16384}
+
+    def thinking_budget_for_effort(self, effort):
+        return self.BUDGETS.get(effort)
+
+
+def _contest(level, *, answer=_ROOM, episode_tokens=None) -> episode.EpisodeEffort:
+    return episode.bind_episode_effort(
+        {"reasoning_effort": level},
+        _ContestEnv(),
+        max_tokens=_CONTEST_TURN,
+        max_episode_tokens=episode_tokens,
+        max_answer_tokens=answer,
+    )
+
+
+def _retry_caps(effort, generated):
+    caps = effort.turn_caps(generated, recovery=True)
+    return None if caps is None else (caps["max_tokens"], caps["max_thinking_tokens"])
+
+
+def test_an_answer_bound_totals_each_turn_at_its_reasoning_cap_plus_the_room():
+    """Each level's turn totals its cap plus 8192, not 30000, and a retry its reserve plus 8192, so a
+    turn the engine force-closed keeps 8192 tokens past the close whichever turn it is. Where the cap
+    plus the room exceeds the turn, ``rollout_max_tokens`` still binds; unset, every turn totals 30000."""
+    for level, total in {"low": 16384, "medium": 20480, "high": 24576}.items():
+        bounded = _contest(level)
+        cap = _ContestEnv.BUDGETS[level]
+        assert (bounded.answer_room, _caps(bounded, 0)) == (_ROOM, (total, cap))
+        assert _caps(bounded, 10**6) == (total, cap), "no output budget: nothing narrows"
+        reserve = bounded.turn_thinking_cap(recovery=True)
+        assert _retry_caps(bounded, 0) == (reserve + _ROOM, reserve)
+        unset = _contest(level, answer=None)
+        assert (unset.answer_room, _caps(unset, 0)) == (_CONTEST_TURN - cap, (_CONTEST_TURN, cap))
+        assert _retry_caps(unset, 0) == (_CONTEST_TURN, reserve)
+    assert [_retry_caps(_contest(level), 0) for level in ("low", "medium", "high")] == [
+        (10240, 2048),
+        (11264, 3072),
+        (12288, 4096),
+    ]
+    # 16384 + 20000 overruns the turn: the turn stays 30000 with 13616 of room, a retry 4096 + 20000.
+    wide = _contest("high", answer=20000)
+    assert (wide.answer_room, _caps(wide, 0), _retry_caps(wide, 0)) == (13616, (_CONTEST_TURN, 16384), (24096, 4096))
+
+
+def test_a_bound_at_or_past_a_levels_own_room_leaves_its_turns_as_unset():
+    """A bound at the level's own room (30000 less its cap) or past it shrinks none of that level's
+    turns: their caps match the unset ones at every point of the episode budget, since
+    ``rollout_max_tokens`` binds first."""
+    for level, cap in _ContestEnv.BUDGETS.items():
+        unset = _contest(level, answer=None, episode_tokens=_CONTEST_EPISODE)
+        for answer in (_CONTEST_TURN - cap, _CONTEST_TURN - cap + 5000):
+            wide = _contest(level, answer=answer, episode_tokens=_CONTEST_EPISODE)
+            for generated in range(0, _CONTEST_EPISODE + 1, 997):
+                assert wide.turn_caps(generated) == unset.turn_caps(generated), (level, answer, generated)
+
+
+def test_an_answer_bound_narrows_with_the_output_budget_and_starts_a_turn_only_while_the_room_is_left():
+    """Near the end of an 81920-token episode the total narrows to what is left and the reasoning cap
+    gives up the difference, so every turn keeps its 8192 of room; a retry takes the smaller of its
+    reserve and the narrowed cap. A turn starts while 8192 remain and not one token under, at every
+    level and on a retry alike — where unset, a low-level episode already stopped at 21808 left — and
+    the trajectory's exhausted flag reads the same gate."""
+    low = _contest("low", episode_tokens=_CONTEST_EPISODE)
+    assert _caps(low, 60000) == (16384, 8192), "21920 left: the turn's own caps stand"
+    assert _caps(low, 70000) == (11920, 3728)
+    assert _retry_caps(low, 70000) == (10240, 2048), "the reserve clamps the narrowed 3728"
+    assert _retry_caps(low, 72000) == (9920, 1728), "the narrowed 1728 sits under the reserve"
+    high = _contest("high", episode_tokens=_CONTEST_EPISODE)
+    assert _caps(high, 60000) == (21920, 13728)
+    for effort in (low, _contest("medium", episode_tokens=_CONTEST_EPISODE), high):
+        assert _caps(effort, _CONTEST_EPISODE - _ROOM) == (_ROOM, 1)
+        assert _retry_caps(effort, _CONTEST_EPISODE - _ROOM) == (_ROOM, 1)
+        last = _CONTEST_EPISODE - _ROOM + 1
+        assert _caps(effort, last) is None and _retry_caps(effort, last) is None
+        traj = episode.Trajectory(messages=[])
+        effort.stamp(traj, last)
+        assert traj.info[OUTPUT_BUDGET_EXHAUSTED_KEY] is True
+        effort.stamp(traj, last - 1)
+        assert traj.info[OUTPUT_BUDGET_EXHAUSTED_KEY] is False
+    assert _caps(_contest("low", answer=None, episode_tokens=_CONTEST_EPISODE), 70000) is None
+
+
+async def test_both_drivers_bound_a_turn_and_its_retry_by_the_answer_room(monkeypatch):
+    """A low-level episode under a 40000-token budget: the first turn asks for 8192 + 8192 and is cut
+    there; the retry asks for its 2048 reserve + 8192; the third turn has 13616 left and asks for all of
+    it, its cap down to 5424; after it 7616 remain, under the room, so no fourth turn starts and the
+    episode closes truncated. Both drivers request the same caps and record the level's cap or the
+    reserve on each turn."""
+    context = {"reasoning_effort": "low"}
+    config = ray_actors.RolloutConfig(max_tokens=_CONTEST_TURN, max_answer_tokens=_ROOM, max_episode_tokens=40000)
+    sampled = [16384, 10000, 6000]
+    expected = [(16384, 8192), (10240, 2048), (13616, 5424)]
+
+    cut = SimpleNamespace(**{**vars(_actor_text_turn(tokens=sampled[0])), "text": "half", "finish_reason": "length"})
+    gens = [cut, _actor_tool_turn(tokens=sampled[1]), _actor_tool_turn(tokens=sampled[2])]
+    seen, result = await _drive_actor(_ContestEnv, context, config, generations=gens)
+    assert result.error is None, result.error
+    assert _actor_caps(seen) == expected
+    traj = result.trajectory
+    assert [m.thinking_cap for m in traj.messages if m.role == "assistant"] == [8192, 2048, 8192]
+    assert len(seen) == 3 < _ContestEnv().max_turns and traj.truncated
+    assert traj.info[OUTPUT_BUDGET_EXHAUSTED_KEY] is True
+    assert result.generation_tokens == sum(sampled)
+
+    eval_cut = SimpleNamespace(**{**vars(_text_turn(tokens=sampled[0])), "answer": "half", "finish_reason": "length"})
+    responses = [eval_cut, _tool_turn(tokens=sampled[1]), _tool_turn(tokens=sampled[2])]
+    calls, eval_traj = await _drive_eval(monkeypatch, _ContestEnv(), context, responses=responses, config=config)
+    assert _eval_caps(calls) == expected
+    assert [m.thinking_cap for m in eval_traj.messages if m.role == "assistant"] == [8192, 2048, 8192]
+    assert eval_traj.truncated and eval_traj.info[OUTPUT_BUDGET_EXHAUSTED_KEY] is True
+
+
+async def test_an_answer_bound_is_refused_where_a_drawable_level_has_no_reasoning_cap(monkeypatch):
+    """The bound counts past a reasoning cap, so an episode without one has nothing to bound: the run's
+    cap gives every level one, and without it the binding and the eval's pre-generation gate refuse."""
+    context = {"reasoning_effort": "high"}
+    with pytest.raises(ValueError, match=r"rollout_max_answer_tokens \(8192\) bounds .* reasoning_effort='high'"):
+        episode.bind_episode_effort(context, _PlainEnv(), max_tokens=_MAX_TOKENS, max_answer_tokens=8192)
+    capped = episode.bind_episode_effort(
+        context, _PlainEnv(), max_tokens=_MAX_TOKENS, max_thinking_tokens=4000, max_answer_tokens=8192
+    )
+    assert (capped.answer_tokens, capped.answer_room) == (8192, 8192)
+
+    calls = []
+
+    async def fake_generate(model, messages, **kwargs):
+        calls.append(kwargs)
+        return _text_turn()
+
+    monkeypatch.setattr(eval_runner, "generate_openai_response", fake_generate)
+    uncapped = ray_actors.RolloutConfig(model_name="m", max_tokens=_MAX_TOKENS, max_answer_tokens=8192)
+    examples = [{"prompt": "solve it", "context": {}}]
+    with pytest.raises(ValueError, match="rollout_max_answer_tokens"):
+        await eval_runner.collect_results(_PlainEnv(reasoning_effort="random"), examples, None, rollout=uncapped)
+    assert calls == [], "the gate must refuse before the first request"
+    caps = episode.thinking_caps_by_level(
+        _ContestEnv(reasoning_effort="random"),
+        max_tokens=_CONTEST_TURN,
+        max_thinking_tokens=None,
+        max_answer_tokens=_ROOM,
+    )
+    assert caps == _ContestEnv.BUDGETS, "every drawable level capped: the gate passes"
 
 
 if __name__ == "__main__":

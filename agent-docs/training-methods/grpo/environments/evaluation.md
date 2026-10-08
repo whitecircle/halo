@@ -39,8 +39,8 @@ and id columns, which a dataset may lack; like the trainer, it refuses a dataset
 field before generating when the environment declares `requires_answer`. `run_code_contests.py`
 instead takes `--adapter` (which fixes the bucket and id fields per benchmark), `--language`,
 `--reasoning_effort` (`low` / `medium` / `high`, or `none` for no level; it also sets the default
-`--max_tokens`), `--eval_protocol`, and `--start_date` / `--end_date` / `--platform` on a benchmark
-that stamps contest dates ([Code Contests](code-contests.md#evaluation)). There an option with a
+`--max_tokens`), `--eval_protocol`, `--start_date` / `--end_date` / `--platform` on a benchmark
+that stamps contest dates, and `--include_examples_only` ([Code Contests](code-contests.md#evaluation)). There an option with a
 flag of its own (`--max_turns`, `--language`, `--eval_protocol`, `--reasoning_effort`) is refused in
 `--env_kwargs`, which would otherwise override the flag.
 
@@ -120,7 +120,8 @@ python scripts/environments/inference/regrade_trajectories.py \
     "$HALO_DATA_ROOT/eval/trajectories"/*.jsonl --workers 64 --output regraded.jsonl
 ```
 
-It rebuilds each problem's hidden tests by `index` under the meta line's contest `selection` (an
+It rebuilds each problem's hidden tests by `index` under the meta line's contest `selection` (one
+recording no `include_examples_only` predates that choice and scored every problem; an
 `index` past the rebuilt problems refuses the file: the dataset no longer matches the run's), and
 replays every recorded `submit_solution`, its arguments read as the environment read them (a
 Python-literal arguments string included), up to that episode's own budget, through `grade_solution`

@@ -1,17 +1,15 @@
 #!/usr/bin/env python
 """CLI overrides must clear the same guards a YAML value does.
 
-``H4ArgumentParser.parse_yaml_and_args`` applies ``--key=value`` with ``setattr``, so
-``__post_init__`` never re-runs and every range guard it holds is bypassed. ``RangeValidatedConfig``
-closes that hole: guards live in ``_validate_ranges``, which runs from ``__post_init__`` AND from
-``__post_override__``. These tests fail if a guard is dropped, if a guarded config stops routing
-through the base, or if a Literal field's allowed set drifts from the runtime table it mirrors.
+``H4ArgumentParser.parse_yaml_and_args`` builds each dataclass once from the YAML and the
+``--key=value`` overrides, so every guard ``__post_init__`` runs sees the CLI value. Guarded configs
+keep their guards in ``RangeValidatedConfig._validate_ranges``. These tests fail if a guard is
+dropped, if a guarded config stops running its chain, or if a Literal field's allowed set drifts
+from the runtime table it mirrors.
 
 Run: pytest tests/cpu/config/test_post_override_validation.py
 """
 
-import ast
-import importlib
 import inspect
 from dataclasses import fields
 from pathlib import Path
@@ -58,34 +56,7 @@ def _parse(dataclass_type, tmp_path, overrides: list[str], yaml_body: str = ""):
     return parsed
 
 
-def _parse_target_dataclasses() -> dict[str, type]:
-    """Every toolkit dataclass an entry script hands to ``H4ArgumentParser``, keyed by class name.
-
-    Read from the scripts' ASTs rather than a hand list so a new entry script — or a new config
-    tuple on an existing one — is covered the moment it lands.
-    """
-    targets: dict[str, type] = {}
-    for script in sorted((PROJECT_ROOT / "scripts" / "training").rglob("*.py")):
-        tree = ast.parse(script.read_text())
-        imported = {
-            alias.asname or alias.name: node.module
-            for node in ast.walk(tree)
-            if isinstance(node, ast.ImportFrom) and (node.module or "").startswith("src.")
-            for alias in node.names
-        }
-        for node in ast.walk(tree):
-            if not (isinstance(node, ast.Call) and getattr(node.func, "id", None) == "H4ArgumentParser"):
-                continue
-            for argument in node.args:
-                elements = argument.elts if isinstance(argument, ast.Tuple | ast.List) else [argument]
-                for element in elements:
-                    name = ast.unparse(element)
-                    if name in imported:
-                        targets[name] = getattr(importlib.import_module(imported[name]), name)
-    return targets
-
-
-# Every guard that must survive the setattr override path: (config class, flag, out-of-range value).
+# Every guard a CLI override must meet: (config class, flag, out-of-range value).
 _RANGE_VIOLATIONS = [
     (ClassificationConfig, "focal_gamma", "-1"),
     (ClassificationConfig, "label_smoothing", "1.5"),
@@ -111,8 +82,8 @@ _RANGE_VIOLATIONS = [
     (SelfDistillationArguments, "train_on_completions_only", "false"),
 ]
 
-# Presence guards rather than ranges, and the same bypass. Each needs a VALID yaml baseline so the
-# raise can only come from the override — parsing an empty config would trip the guard on its own.
+# Presence guards rather than ranges. Each needs a VALID yaml baseline so the raise can only come
+# from the override — parsing an empty config would trip the guard on its own.
 _EMPTIED_REQUIRED_FIELDS = [
     (DistillScriptArguments, "teacher_model", "teacher_model: some-org/teacher\n", ""),
 ]
@@ -124,7 +95,7 @@ _EMPTIED_REQUIRED_FIELDS = [
     ids=[f"{c.__name__}.{f}={v}" for c, f, v in _RANGE_VIOLATIONS],
 )
 def test_cli_override_violating_a_range_raises(config_cls, flag, value, tmp_path):
-    """The failure mode this pins: setattr overrides skip __post_init__, so --focal_gamma=-1 trains."""
+    """The failure mode this pins: an override that skips __post_init__ lets --focal_gamma=-1 train."""
     with pytest.raises(ValueError, match=flag):
         _parse(config_cls, tmp_path, [f"--{flag}={value}"])
 
@@ -173,8 +144,8 @@ def test_classification_class_weight_exclusivity_survives_override(tmp_path):
 
 def test_every_range_validated_subclass_implements_and_calls_the_hook():
     """Derived from the class hierarchy, not a hand list: inheriting the base without implementing
-    ``_validate_ranges`` would make every CLI override raise NotImplementedError, and defining
-    ``__post_init__`` without calling it would leave the YAML path unguarded."""
+    ``_validate_ranges`` runs no guard at all, and defining ``__post_init__`` without calling it leaves
+    the config unguarded."""
     configs = iter_subclasses(RangeValidatedConfig)
     assert configs, "no config routes through RangeValidatedConfig — the seam is dead"
     for cls in configs:
@@ -200,29 +171,6 @@ def test_every_validate_ranges_override_opens_the_cooperative_chain():
             f"{cls.__name__}._validate_ranges does not open with super()._validate_ranges(), so any "
             f"guarded base earlier in its MRO is skipped"
         )
-
-
-def test_every_guarded_parse_target_routes_through_the_override_hook():
-    """The converse of the test above.
-
-    A config whose ``__post_init__`` raises but which does NOT inherit ``RangeValidatedConfig`` is
-    guarded on the YAML path and unguarded on the CLI path: ``parse_yaml_and_args`` applies
-    ``--key=value`` with ``setattr``, so the guard never re-runs and the run starts with the very
-    value it exists to refuse (``DistillScriptArguments``' required teacher is one such field).
-    """
-    targets = _parse_target_dataclasses()
-    assert targets, "no H4ArgumentParser target resolved — the AST scan is broken, not the configs"
-    unguarded = [
-        name
-        for name, cls in targets.items()
-        if "__post_init__" in cls.__dict__
-        and any(isinstance(n, ast.Raise) for n in ast.walk(ast.parse(inspect.getsource(cls.__post_init__).strip())))
-        and not issubclass(cls, RangeValidatedConfig)
-    ]
-    assert not unguarded, (
-        f"{unguarded} raise from __post_init__ but do not inherit RangeValidatedConfig, so a CLI "
-        f"override bypasses the guard. Move the checks into _validate_ranges() and inherit the base."
-    )
 
 
 def test_dead_knobs_are_rejected_not_ignored():

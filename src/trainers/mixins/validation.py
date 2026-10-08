@@ -21,7 +21,11 @@ from peft import PeftModel
 from src.distributed.checkpoint.peft import find_peft_model
 from src.distributed.expert_parallel.base_layer import find_ep_layers
 from src.distributed.expert_parallel.expert_weights import has_ep_lora
-from src.distributed.loading.frozen_models import PREFERENCE_REFERENCE_ALTERNATIVES, warn_unparallelized_reference
+from src.distributed.loading.frozen_models import (
+    PREFERENCE_REFERENCE_ALTERNATIVES,
+    ReferenceAlternatives,
+    warn_unparallelized_reference,
+)
 from src.distributed.parallelism_config import accelerate_launch_rejection
 from src.log import KEY_PREVIEW_COUNT
 from src.models.loading.config_levels import config_sources, set_config_field_run_scoped
@@ -167,6 +171,9 @@ def active_router_aux_loss_coef(model) -> float:
 class ParallelismValidationMixin:
     """Validates requested parallelism modes and LoRA/EP/TP compatibility. Mixed into the trainer."""
 
+    # A trainer's way around holding a frozen reference, named by every reference warning and refusal.
+    _reference_alternatives: ReferenceAlternatives = PREFERENCE_REFERENCE_ALTERNATIVES
+
     def _validate_parallelism_modes(self):
         """Validate that the requested parallelism modes are supported by this trainer.
 
@@ -192,49 +199,40 @@ class ParallelismValidationMixin:
     def _validate_reference_model(self, ref_model):
         """Warn about an explicit reference model under EP/TP (:func:`warn_unparallelized_reference`)."""
         if ref_model is not None:
-            warn_unparallelized_reference(self.parallelism_config, PREFERENCE_REFERENCE_ALTERNATIVES)
+            warn_unparallelized_reference(self.parallelism_config, self._reference_alternatives)
 
-    def _validate_implicit_reference_model(self) -> None:
-        """Guard the reference model TRL builds for itself when it cannot match the policy.
+    def _validate_held_reference_model(self) -> None:
+        """Gate the reference model the trainer holds once TRL's constructor has run: the one passed, or the
+        one TRL builds itself when none is (DPO/KTO; the on-policy GRPO trainers refuse that build).
 
-        :meth:`_validate_reference_model` covers an explicit ``ref_model``. TRL also builds one
-        implicitly when none is passed and its no-reference cases do not apply (a PEFT-wrapped model;
-        ``precompute_ref_log_probs`` for DPO/KTO; ``beta == 0`` for GRPO), and the scripts clear
-        ``model_init_kwargs`` after loading the policy, so it loads fp32, from the hub's default
-        revision, with the config-default attention, as a dense replica no parallelism touches.
-
-        Two separate problems, with two separate gates. Live attention sinks make the KL **wrong**:
-        the policy is restricted to sink-carrying attention while the reference is not, so the pair
-        compute different log-probs for identical tokens. That is a property of the loaded weights,
-        not of the sharding — it holds under plain FSDP2 DP, TP and ``ep_size == 1`` exactly as it
-        does under EP, so it raises unconditionally. The un-sharded replica is merely **wasteful** —
-        its log-probs match the policy's up to kernel numerics (:func:`warn_unparallelized_reference`) —
-        and worst under EP (experts replicated per rank), so that is a warning.
+        Two separate problems, with two separate gates. A reference whose attention sinks differ from the
+        policy's makes the KL **wrong**: the pair compute different log-probs for identical tokens. That is a
+        property of the loaded weights, not of the sharding — it holds under plain FSDP2 DP, TP and
+        ``ep_size == 1`` exactly as it does under EP, so it raises unconditionally. A reference loaded with the
+        policy's ``reset_sinks`` carries the same sinks and passes; one TRL builds itself keeps GptOss's
+        pretrained sinks live (:func:`~src.models.patches.gpt_oss_sinks.has_live_attention_sinks`), so it
+        passes beside live sinks only. The un-sharded replica is merely **wasteful** — its log-probs match the
+        policy's up to kernel numerics — and worst under EP (experts replicated per rank), so that is
+        :func:`warn_unparallelized_reference`'s warning.
         """
-        # TRL nulls ref_model in its no-reference cases (PEFT; precompute for DPO/KTO; beta == 0 for
-        # GRPO), so a live one is implicit.
-        if getattr(self, "ref_model", None) is None:
+        # TRL nulls ref_model in its no-reference cases (PEFT; precompute for DPO/KTO; beta == 0 for GRPO).
+        ref_model = getattr(self, "ref_model", None)
+        if ref_model is None:
             return
         model = getattr(self, "model", None)
-        if model is not None and has_live_attention_sinks(model):
-            raise ValueError(
-                "A reference model reaches this trainer (explicit, or the one TRL builds when none is "
-                "passed) and this policy carries LIVE attention sinks (reset_sinks: false). The policy is restricted to "
-                "sink-carrying attention while the reference is not, so their log-probs differ for "
-                "identical tokens and the KL term is biased on every token. Use use_peft: true (the "
-                "adapter is disabled to get the reference), precompute_ref_log_probs: true (DPO/KTO under "
-                "EP or TP; on plain data parallelism the scripts still load a reference copy), "
-                "or beta: 0 (GRPO; the bands/clip are the trust region)."
+        if model is not None and has_live_attention_sinks(model) != has_live_attention_sinks(ref_model):
+            policy_sinks, reference_sinks = (
+                "live" if has_live_attention_sinks(side) else "not live" for side in (model, ref_model)
             )
-        if not self.parallelism_config.is_ep_mode:
-            return
-        logger.warning(
-            "Implicit reference under EP: TRL built its own reference model from the model path "
-            "with no dtype, revision or attn_implementation — an fp32 DENSE replica per rank "
-            "(experts included, un-sharded) loaded from the hub's default revision. Budget for it, "
-            "and do not expect a pinned model_revision to reach it. use_peft: true, "
-            "precompute_ref_log_probs: true (DPO/KTO) or beta: 0 (GRPO) avoids the second model entirely."
-        )
+            raise ValueError(
+                f"The reference model and the policy disagree on attention sinks (policy: {policy_sinks}, "
+                f"reference: {reference_sinks}), so they compute different log-probs for identical tokens and "
+                "the KL term is biased on every token. Load the reference through load_frozen_reference_model "
+                "with the policy's reset_sinks, as the training scripts do; a reference TRL builds itself keeps "
+                "the pretrained sinks live. Or hold none: "
+                f"{self._reference_alternatives.under(self.parallelism_config)}"
+            )
+        warn_unparallelized_reference(self.parallelism_config, self._reference_alternatives)
 
     def _validate_lora_ep_compatibility(self):
         """Reject PEFT-wrapped LoRA inside EP layers; allow the native grouped adapters.
@@ -408,7 +406,7 @@ class ParallelismValidationMixin:
         the end of training.
 
         Pure TP reloads through ``distribute_tensor`` into the live DTensor placements
-        (:meth:`~src.distributed.checkpoint.loader.CheckpointLoader._load_tp`). TP+DP composes
+        (:meth:`~src.distributed.checkpoint.loader.CheckpointLoader._load_streamed`). TP+DP composes
         FSDP2 over TP, whose 2-D placement ``distribute_tensor`` does not invert for packed
         projections, so its loader refuses every reload except the constructed-from-checkpoint skip.
         """

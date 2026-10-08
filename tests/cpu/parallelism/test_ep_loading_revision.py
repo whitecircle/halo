@@ -17,6 +17,7 @@ import pytest
 import torch.nn as nn
 from accelerate import PartialState
 
+from src.checkpoint.format import HUB_SUBFOLDER_IGNORE_PATTERNS
 from src.distributed.context_parallel.loading import load_model_for_ep_cp
 from src.distributed.expert_parallel.config import EPConfig
 from src.distributed.expert_parallel.loading import load_ep_model, resolve_hub_or_local_dir
@@ -72,7 +73,8 @@ def test_resolver_passes_revision_to_cached_snapshot():
 
 
 def test_resolver_passes_revision_to_download_fallback():
-    """A cache miss must download the pinned revision, not hub main."""
+    """A cache miss must download the pinned revision, not hub main, and only the top-level files the
+    lazy loader reads, not the weight dumps a repo also ships in subfolders."""
     fake = _RecordingSnapshotDownload(fail_local_files_only=True)
     with patch(f"{_EP_LOADING}.snapshot_download", fake):
         result = resolve_hub_or_local_dir("org/repo", revision=_REVISION)
@@ -80,6 +82,7 @@ def test_resolver_passes_revision_to_download_fallback():
     assert result == "/fake/snapshot"
     assert len(fake.calls) == 2
     assert all(call["revision"] == _REVISION for call in fake.calls)
+    assert fake.calls[1]["ignore_patterns"] == list(HUB_SUBFOLDER_IGNORE_PATTERNS)
 
 
 def test_resolver_defaults_to_none_revision():

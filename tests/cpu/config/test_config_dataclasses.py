@@ -345,18 +345,11 @@ def test_env_config_rejects_non_positive_max_turns():
     assert EnvironmentConfig().max_turns is None  # null still defers to the environment class
 
 
-def test_env_config_max_turns_guard_survives_cli_override():
-    """CLI overrides land via setattr, so ``__post_init__`` never re-runs; the RangeValidatedConfig
-    seam must re-check them."""
-
-    cfg = EnvironmentConfig()
-    cfg.max_turns = 0
-    try:
-        cfg.__post_override__({"max_turns"})
-    except ValueError as e:
-        assert "max_turns" in str(e)
-    else:
-        raise AssertionError("--max_turns=0 must be rejected on the override path too")
+def test_env_config_max_turns_guard_survives_cli_override(tmp_path):
+    config = tmp_path / "env.yaml"
+    config.write_text("max_turns: 4\n")
+    with pytest.raises(ValueError, match="max_turns"):
+        H4ArgumentParser((EnvironmentConfig,)).parse_yaml_and_args(str(config), ["--max_turns=0"])
 
 
 def test_env_config_custom_env_type_passthrough():
@@ -580,8 +573,18 @@ def test_async_config_rejects_a_filter_the_engines_refuse(knob, bad):
         AsyncTrainingConfig(**{knob: bad})
 
 
+@pytest.mark.parametrize("bad", [True, 20.5, 20.0, "20"])
+def test_async_config_rejects_a_top_k_that_is_not_an_int(bad):
+    """``rollout_top_k`` is the request's ``top_k``: ``true`` clears the range as 1, every rollout sampling
+    greedily, and a fractional one fails every request; a float or a string is not the int the field
+    declares."""
+    with pytest.raises(ValueError, match="rollout_top_k must be an int"):
+        AsyncTrainingConfig(rollout_top_k=bad)
+
+
 @pytest.mark.parametrize(
-    ("knob", "good"), [("rollout_top_k", 1), ("rollout_min_p", 1.0), ("rollout_repetition_penalty", 2.0)]
+    ("knob", "good"),
+    [("rollout_top_k", -1), ("rollout_top_k", 1), ("rollout_min_p", 1.0), ("rollout_repetition_penalty", 2.0)],
 )
 def test_async_config_accepts_a_filter_at_its_range_edge(knob, good):
     """Anti-vacuity for the refusals above: the edge of each accepted range constructs."""
@@ -612,14 +615,9 @@ def test_async_config_rejects_a_thinking_budget_that_eats_the_whole_turn():
 def test_async_config_rejects_an_episode_budget_below_one_turn_or_not_a_count(bad):
     """The episode budget narrows every turn's cap to what is left: below ``rollout_max_tokens`` the
     first turn could never use the per-turn cap the run states, a bool is an int that spells a mistake,
-    and a float or a string would reach the engine's ``max_tokens`` as no count. Re-checked on a CLI
-    override, which never re-runs ``__post_init__``."""
+    and a float or a string would reach the engine's ``max_tokens`` as no count."""
     with pytest.raises(ValueError, match="rollout_max_episode_tokens must be an int >= rollout_max_tokens"):
         AsyncTrainingConfig(rollout_max_tokens=4096, rollout_max_episode_tokens=bad)
-    cfg = AsyncTrainingConfig(rollout_max_tokens=4096)
-    cfg.rollout_max_episode_tokens = bad
-    with pytest.raises(ValueError, match="rollout_max_episode_tokens must be an int >= rollout_max_tokens"):
-        cfg.__post_override__({"rollout_max_episode_tokens"})
 
 
 def test_async_config_mirrors_the_episode_budget_into_the_rollout_config():
@@ -640,19 +638,13 @@ def test_async_config_rejects_a_thinking_budget_that_is_not_a_positive_int(bad):
     ``null`` is the spelling for no run-wide cap."""
     with pytest.raises(ValueError, match="rollout_max_thinking_tokens must be an int in"):
         AsyncTrainingConfig(rollout_max_thinking_tokens=bad)
-    cfg = AsyncTrainingConfig()
-    cfg.rollout_max_thinking_tokens = bad
-    with pytest.raises(ValueError, match="rollout_max_thinking_tokens must be an int in"):
-        cfg.__post_override__({"rollout_max_thinking_tokens"})
 
 
-def test_async_config_range_guards_survive_a_cli_override():
-    """``__post_init__`` never re-runs under ``--key=value``; the guards live in ``_validate_ranges``
-    so the override path re-runs them whole."""
-    cfg = AsyncTrainingConfig()
-    cfg.rollout_temperature = 0.0
+def test_async_config_range_guards_survive_a_cli_override(tmp_path):
+    config = tmp_path / "async.yaml"
+    config.write_text("rollout_temperature: 1.0\n")
     with pytest.raises(ValueError, match="rollout_temperature"):
-        cfg.__post_override__({"rollout_temperature"})
+        H4ArgumentParser((AsyncTrainingConfig,)).parse_yaml_and_args(str(config), ["--rollout_temperature=0"])
 
 
 def test_async_config_template_variables_are_the_yamls_own_kwargs():

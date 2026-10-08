@@ -47,14 +47,31 @@ TRAINERS = {
 }
 
 
+def _trainer_names(node: ast.AST) -> set[str]:
+    """The :data:`TRAINERS` classes an expression names."""
+    return {sub.id for sub in ast.walk(node) if isinstance(sub, ast.Name) and sub.id in TRAINERS}
+
+
 def _trainer_constructions() -> list[tuple[Path, str, ast.Call]]:
-    """Every ``<trainer>(...)`` call in ``scripts/training/``, with its source file."""
+    """Every trainer construction in ``scripts/training/``, with its source file: a call on a trainer
+    class, or on a local name bound to one (``trainer_cls = A if flag else B; trainer_cls(...)``)."""
     found = []
     for path in sorted(_SCRIPTS.rglob("*.py")):
         tree = ast.parse(path.read_text(), filename=str(path))
+        aliases = {
+            target.id: " | ".join(sorted(names))
+            for node in ast.walk(tree)
+            if isinstance(node, ast.Assign) and (names := _trainer_names(node.value))
+            for target in node.targets
+            if isinstance(target, ast.Name)
+        }
         for node in ast.walk(tree):
-            if isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id in TRAINERS:
-                found.append((path, node.func.id, node))
+            if isinstance(node, ast.Call) and isinstance(node.func, ast.Name):
+                name = node.func.id
+                if name in TRAINERS:
+                    found.append((path, name, node))
+                elif name in aliases:
+                    found.append((path, f"{name} ({aliases[name]})", node))
     return found
 
 
@@ -62,6 +79,18 @@ def test_training_scripts_are_discoverable():
     """Guard the guard: if the walk finds nothing, the assertion below is vacuous."""
     constructions = _trainer_constructions()
     assert len(constructions) >= 8, f"expected the shipped launch scripts, found {constructions}"
+
+
+def test_every_script_naming_a_trainer_has_its_construction_seen():
+    """A script that names a trainer class but whose construction the walk misses — a call through a
+    spelling it does not resolve — would pass the positional check below unread."""
+    constructed = {path for path, _trainer, _call in _trainer_constructions()}
+    unseen = [
+        str(path.relative_to(_REPO_ROOT))
+        for path in sorted(_SCRIPTS.rglob("*.py"))
+        if _trainer_names(ast.parse(path.read_text(), filename=str(path))) and path not in constructed
+    ]
+    assert not unseen, f"these scripts name a trainer but no construction of it was found: {unseen}"
 
 
 def test_no_script_passes_the_model_positionally():

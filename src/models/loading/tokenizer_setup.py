@@ -17,6 +17,7 @@ from transformers import AutoProcessor, AutoTokenizer, PreTrainedModel, PreTrain
 
 from src.data.pipeline.tokenizer_backend import resolve_tokenizer_backend
 from src.models.loading.config_levels import set_config_field, text_config
+from src.models.structure import resolve_tokenizer
 
 if TYPE_CHECKING:
     # Annotation only: the entry scripts' argument layer sits above this loading leaf, and nothing
@@ -29,6 +30,10 @@ logger = get_logger(__name__)
 # pinning the run's, for :func:`pristine_model_max_length` to serve back at save time. A plain int on
 # the instance, so the tokenizer stays picklable for the dataset-map fingerprint and the workers.
 _PRISTINE_MODEL_MAX_LENGTH_ATTR = "_halo_pristine_model_max_length"
+
+# Marks a tokenizer whose chat template the run chose (:func:`set_run_chat_template`), which its processor
+# then adopts (:func:`adopt_tokenizer_chat_template`); a template the checkpoint shipped stays each one's.
+_RUN_CHAT_TEMPLATE_ATTR = "_halo_run_chat_template"
 
 # Bound below which a ``model_max_length`` is a real context window. HF's "this tokenizer declares no
 # length" sentinel (``VERY_LARGE_INTEGER``, 1e30) sits above it and is a positive int, so
@@ -60,13 +65,21 @@ def load_processing_class(path: str, *, trust_remote_code: bool = False):
             return None
 
 
-def resolve_peft_processing_class(adapter_dir: str, base_model_path: str, *, trust_remote_code: bool = False):
+def resolve_peft_processing_class(
+    adapter_dir: str, base_model_path: str, *, text_only: bool, trust_remote_code: bool = False
+):
     """Resolve the processing class for a merged / converted PEFT checkpoint.
 
-    Prefer the base model's full processor when the adapter carries only a tokenizer (a VLM adapter dir
-    drops the image preprocessor); keep the adapter's class when it is itself a full processor.
+    The adapter directory holds the run's own processing class, with its chat template, special tokens
+    and added vocabulary. ``text_only`` (the adapter addresses a multimodal checkpoint's text-only
+    class) ships that run's tokenizer, falling back to the base's only where the adapter saved none.
+    Otherwise the base's full processor wins over an adapter carrying only a tokenizer (a tokenizer-only
+    save of a multimodal checkpoint is unloadable), and an adapter's own full processor is kept.
     """
     adapter_pc = load_processing_class(adapter_dir, trust_remote_code=trust_remote_code)
+    if text_only:
+        chosen = adapter_pc or load_processing_class(base_model_path, trust_remote_code=trust_remote_code)
+        return None if chosen is None else resolve_tokenizer(chosen)
     base_pc = load_processing_class(base_model_path, trust_remote_code=trust_remote_code)
     base_is_full = base_pc is not None and not isinstance(base_pc, PreTrainedTokenizerBase)
     adapter_is_full = adapter_pc is not None and not isinstance(adapter_pc, PreTrainedTokenizerBase)
@@ -270,10 +283,31 @@ def setup_model_and_tokenizer(
             f"cause; both the padding collators and sequence-classification pooling read this id."
         )
     if tokenizer.chat_template is None or (args.chat_template is not None and args.force_chat_template):
-        chat_template = load_chat_template(args.chat_template)
-        tokenizer.chat_template = chat_template
+        set_run_chat_template(tokenizer, load_chat_template(args.chat_template))
 
     return resolve_tokenizer_backend(tokenizer, args.tokenizer_backend)
+
+
+def set_run_chat_template(tokenizer: PreTrainedTokenizerBase, template: str | None) -> None:
+    """Set the chat template the run chose on ``tokenizer``, marked for its processor to adopt."""
+    tokenizer.chat_template = template
+    setattr(tokenizer, _RUN_CHAT_TEMPLATE_ATTR, True)
+
+
+def adopt_tokenizer_chat_template(processing_class) -> None:
+    """Give a processor the chat template the run chose for its tokenizer (:func:`set_run_chat_template`).
+
+    A processor's ``chat_template`` is its own attribute, apart from its tokenizer's: its
+    ``apply_chat_template`` renders with it, and its ``save_pretrained`` writes it over the
+    ``chat_template.jinja`` the tokenizer wrote. A template set on the tokenizer alone would leave the
+    processor training and exporting the checkpoint's original. A no-op for a plain tokenizer and
+    where the run chose no template: a processor keeps the one its checkpoint shipped for it.
+    """
+    if isinstance(processing_class, PreTrainedTokenizerBase):
+        return
+    tokenizer = resolve_tokenizer(processing_class)
+    if getattr(tokenizer, _RUN_CHAT_TEMPLATE_ATTR, False) and tokenizer.chat_template is not None:
+        processing_class.chat_template = tokenizer.chat_template
 
 
 def _length_pinned_tokenizer(processing_class):

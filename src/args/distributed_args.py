@@ -2,17 +2,19 @@
 
 from dataclasses import dataclass, field
 
+from src.args.validation import RangeValidatedConfig, present, require_int
 from src.checkpoint.format import DEFAULT_MAX_SHARD_SIZE
 from src.distributed.parallelism_config import EPBufferBackend, EPScope, LowpPrecision, PPSchedule
 
 
 @dataclass
-class DistributedArguments:
+class DistributedArguments(RangeValidatedConfig):
     """
     Combined arguments for all parallelism modes: EP, CP, and TP.
 
-    ParallelismConfig validates combinations and raises on incompatible ones
-    (e.g. TP+CP). See agent-docs/parallelism/ for the support matrix.
+    ParallelismConfig validates ranges and combinations and raises on incompatible ones
+    (e.g. TP+CP); this class refuses only a value that is not an int at all. See
+    agent-docs/parallelism/ for the support matrix.
     """
 
     expert_parallel_size: int = field(
@@ -486,3 +488,25 @@ class DistributedArguments:
             "Safe to leave off when the model is loaded in bf16 — forward/backward run in bf16 anyway."
         },
     )
+
+    def __post_init__(self):
+        self._validate_ranges()
+
+    def _validate_ranges(self) -> None:
+        super()._validate_ranges()
+        # ParallelismConfig's range checks read a bool as 0 or 1 and pass a fraction into the rank math.
+        require_int(
+            type(self).__name__,
+            **present(
+                expert_parallel_size=self.expert_parallel_size,
+                expert_tensor_parallel_size=self.expert_tensor_parallel_size,
+                context_parallel_size=self.context_parallel_size,
+                tensor_parallel_size=self.tensor_parallel_size,
+                pipeline_parallel_size=self.pipeline_parallel_size,
+                pipeline_microbatches=self.pipeline_microbatches,
+                nvlink_domain_size=self.nvlink_domain_size,
+                lowp_keep_first_blocks=self.lowp_keep_first_blocks,
+                lowp_keep_last_blocks=self.lowp_keep_last_blocks,
+                max_concurrent_loading=self.max_concurrent_loading,
+            ),
+        )

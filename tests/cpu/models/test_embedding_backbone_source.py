@@ -3,7 +3,9 @@
 
 sentence-transformers loads that backbone itself, outside ``load_distributed_model``, so
 ``build_sentence_transformer`` runs ``resolve_model_source`` on its own and must hand the agreed
-commit on — not the configured revision, which each node's Hub cache would resolve for itself.
+commit on — not the configured revision, which each node's Hub cache would resolve for itself. The
+pipeline reads its pooling and dense modules from the repo's subfolders, so the fetch takes the whole
+repo rather than the top-level files a model load reads.
 
     python tests/cpu/models/test_embedding_backbone_source.py
 """
@@ -27,8 +29,8 @@ class _BackboneBuilt(Exception):
 def test_the_embedding_backbone_loads_at_the_agreed_revision(monkeypatch, tmp_path):
     seen = {}
 
-    def resolve(model_name_or_path, revision, *, tag):
-        seen["resolve"] = (model_name_or_path, revision, tag)
+    def resolve(model_name_or_path, revision, *, tag, whole_repo=False):
+        seen["resolve"] = (model_name_or_path, revision, tag, whole_repo)
         return COMMIT_A
 
     def build(model_name_or_path, *, revision, **kwargs):
@@ -48,7 +50,7 @@ def test_the_embedding_backbone_loads_at_the_agreed_revision(monkeypatch, tmp_pa
             ModelConfig(model_name_or_path=REPO, model_revision="v1"),
             SimpleNamespace(reset_sinks=True, train_sinks=False),
         )
-    assert seen == {"resolve": (REPO, "v1", "embedding_model"), "load": (REPO, COMMIT_A)}
+    assert seen == {"resolve": (REPO, "v1", "embedding_model", True), "load": (REPO, COMMIT_A)}
 
 
 if __name__ == "__main__":

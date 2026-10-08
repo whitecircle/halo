@@ -118,9 +118,11 @@ def build_sentence_transformer(
         # The parallel loader's two seams, since sentence-transformers loads the backbone itself: the
         # source fetched once per scope and agreed across ranks (revision threaded as on the EP/TP
         # branch, so a pinned checkpoint does not depend on flags), then a node-batched load joined
-        # over the store.
+        # over the store. The whole repo: the pipeline's pooling and dense modules sit in subfolders.
         apply_remote_code_compat_shims()
-        revision = resolve_model_source(runtime.model_source, model_config.model_revision, tag="embedding_model")
+        revision = resolve_model_source(
+            runtime.model_source, model_config.model_revision, tag="embedding_model", whole_repo=True
+        )
         with joined_node_load(
             f"Embedding model load from {runtime.model_source}", parallelism_config.max_concurrent_loading
         ):

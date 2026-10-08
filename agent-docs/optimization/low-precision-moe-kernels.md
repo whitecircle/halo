@@ -165,11 +165,11 @@ A weight whose contraction axis is not block-divisible is copied through in high
 Consuming the result — per quantized weight `<name>`:
 
 - `<name>.weight_packed` (`float8_e4m3fn` for mxfp8, `uint8` with two `e2m1` nibbles per byte for fp4), `<name>.weight_scale` (one per block), `<name>.weight_shape` (the original shape — packed fp4 data halves the contraction axis).
-- `<name>.weight_global_scale` — **nvfp4 only**. An element is `code × block_scale × global_scale`; a loader that drops it reads the tensor rescaled by up to `E4M3_MAX × E2M1_MAX`.
+- `<name>.weight_global_scale` — **nvfp4 only**, in compressed-tensors' convention: shape `[1]`, `E4M3_MAX × E2M1_MAX / amax` (rounded to a power of two), and an element is `code × weight_scale / weight_global_scale`. A loader that drops it reads the tensor rescaled by up to `E4M3_MAX × E2M1_MAX`. An all-zero weight stores `1.0`, compressed-tensors' own value for it, never the `+inf` its amax implies, which vLLM's max over a fused layer's partitions would spread to every partition; a nonzero weight too small for the scale's fp32 range is refused.
 - The contraction axis is **per weight**, from `quantization_config.json`'s `weight_axes` map — fused 3-D experts differ by family (gpt-oss contracts on axis 1, the rest on the last), so the manifest's single `contraction_axis` is only the fallback for names absent from that map.
 - `quantization_config.json` also carries a `scope` block recording what this export reproduced: `apply_dense_mlp`, `apply_moe_experts`, `keep_first_blocks`, `keep_last_blocks` (the flags, minus the `lowp_` prefix) plus the resolved `kept_blocks` indices. The whole manifest is stamped into the output `config.json` under `quantization_config` as well.
 
-The dequantized weight reproduces the QAT forward exactly (relerr 0), so QAT→inference is consistent; `src.kernels.lowp.quantization.dequantize` is the reference reader. Engine loading — vLLM / TRT-LLM compressed-tensors — is the remaining integration step.
+The dequantized weight reproduces the QAT forward exactly (relerr 0), so QAT→inference is consistent; `src.kernels.lowp.quantization.dequantize` is the reference reader (its nvfp4 `global_scale` is the reciprocal of the stored one). Engine loading — vLLM / TRT-LLM compressed-tensors — is the remaining integration step.
 
 ## Usage
 

@@ -113,8 +113,8 @@ Notes that come straight from the Makefile recipes:
   `$(AWS_DIR):/root/.aws` (`AWS_DIR ?= ~/.aws`) mounts. `--env-file .env` and the AWS mount are
   conditional on `ENV_FILE`/`AWS_DIR` (CI drops both to run creds-free). Don't
   re-specify those by hand when a target works. `DOCKER_RUN` does **not** add
-  `--cap-add=SYS_PTRACE`, so py-spy cannot attach to a `make`-launched job — use §2
-  when you may need hang triage.
+  `--cap-add=SYS_PTRACE`, so py-spy attaches to a `make`-launched job only on a host whose
+  `kernel.yama.ptrace_scope` is 0 — use §2 when you may need hang triage.
 - **`HALO_SCRATCH` (default `/mnt`) is the one override for this host's large volume** — the
   bind mount, the in-container `HF_HOME`/`HF_DATASETS_CACHE`/`TMPDIR`/`HALO_DATA_ROOT`,
   and `make clean`'s prune all derive from it. `/mnt` is **not** guaranteed large (on

@@ -23,6 +23,7 @@ import types
 
 import pandas as pd
 import pytest
+from openai.types.chat import ChatCompletionMessage
 
 from scripts.inference import _common
 from scripts.inference.reward_model import _common as rm_common
@@ -83,7 +84,7 @@ class _TruncatingClient:
 
     def __init__(self):
         async def _create(**_kwargs):
-            message = types.SimpleNamespace(model_dump=lambda exclude=None: {"role": "assistant", "content": "frag"})
+            message = ChatCompletionMessage(role="assistant", content="frag")
             choice = types.SimpleNamespace(message=message, finish_reason="length")
             return types.SimpleNamespace(choices=[choice])
 

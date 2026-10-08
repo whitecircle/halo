@@ -8,7 +8,7 @@ Trainer GPUs must not overlap the server's: one process cannot NCCL-broadcast to
 
 `rollout_backend: vllm` (default) or `sglang`. Both serve rollouts over `/v1/chat/completions` and take weights over NCCL. A pair the engine cannot update online is refused at construction with its loader reason ([which families each serves](../../../infrastructure/rollout-servers.md#which-families-each-engine-serves)). SGLang also refuses `rollout_max_thinking_tokens` and [`carry_reasoning`](rollouts.md#carried-reasoning).
 
-TRL's `top_p`, `top_k`, `min_p`, `repetition_penalty` and `generation_kwargs` reach no sampler here; the first four have `rollout_*` equivalents (`rollout_top_p`, `rollout_top_k`, `rollout_min_p`, `rollout_repetition_penalty`). `temperature` is force-set to `rollout_temperature`, so log-probs are scored at the sampling temperature.
+TRL's `top_p`, `top_k`, `min_p`, `repetition_penalty` and `generation_kwargs` reach no sampler here, so one set away from its TRL default is refused at trainer construction; the first four have `rollout_*` equivalents (`rollout_top_p`, `rollout_top_k`, `rollout_min_p`, `rollout_repetition_penalty`). `temperature` is force-set to `rollout_temperature`, so log-probs are scored at the sampling temperature.
 
 Rank 0 probes each server at startup and broadcasts its verdict. The context check **raises** when a turn cannot fit (`max_prompt_length` + the environment's measured prompt overhead + `rollout_max_tokens`), and warns on the multi-turn worst case (that prompt budget plus the smaller of `max_turns × rollout_max_tokens` and `rollout_max_episode_tokens`). `verify_backend()` fails the launch on an unreachable external judge.
 
@@ -41,7 +41,7 @@ Dense models and `ep1` configs skip this. The trainer ranks must form **one** De
 
 - `ep_size: 8` needs 9 GPUs or a second node, since the server holds one.
 - ZeRO-3 (`fsdp_reshard_after_forward: true`) is rejected wherever an expert-distribution group exists: its backward all-gather races the DeepEP combine. Available at `ep_group_size: 1` — `ep_size: 1` with no expert TP ([ZeRO-2 vs ZeRO-3](../../../parallelism/data-parallelism.md#zero-2-vs-zero-3-reshard_after_forward)).
-- `beta > 0` without PEFT makes TRL build its own reference, an unsharded fp32 dense replica per rank. It raises on a policy with live attention sinks (`reset_sinks: false`), warns under EP. Use `beta: 0` or `use_peft: true`.
+- `beta > 0` without PEFT holds a frozen reference: the script loads it like the policy (run dtype, `model_revision`, attention, `reset_sinks`), from `model_name_or_path` and never a resume checkpoint, and hands it to TRL in place of TRL's fp32 copy ([Online GRPO](../online-grpo.md#grpo-objective-for-verifiable-rewards)). It is an unsharded dense replica per rank, warned about under EP, ETP and TP. Use `beta: 0`, or `use_peft: true` off TP (which refuses adapters), to hold none.
 
 ## Weight synchronization
 

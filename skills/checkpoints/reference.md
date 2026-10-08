@@ -28,7 +28,10 @@ additionally needs `ep_size` in the index metadata, not just the marker.
 - **Path A — reload from checkpoint** (only a `use_grouped_gemm: false` run with no EP/ETP/CP/TP):
   `model_name_or_path` stays the weights source. Under FSDP2 `_load_fsdp2` reshards, reads the whole
   dict on rank 0 via `load_full_state_dict()` and hands it to `set_model_state_dict(broadcast_from_rank0)`,
-  gated on key coverage; DDP falls through to the base Trainer's loader.
+  gated on key coverage; a single process or DDP streams it per rank (`_load_streamed`). Both map the
+  checkpoint onto the live names first (`ModuleLayoutView`, the inverse of the save-side revert), so a
+  per-expert expert checkpoint reaches the fused live experts. Accelerate-managed FSDP and the
+  sentence-transformers pipeline keep the base Trainer's loader.
 - **Path B — load at construction** (EP, ETP, EP+TP, EP+CP, CP, TP, and at the default
   `use_grouped_gemm: true` every other run, dense included): `resolve_resume_weights_source`
   (`src/training/environment.py`) repoints the policy's weights source at the checkpoint dir (an
@@ -37,7 +40,7 @@ additionally needs `ep_size` in the index metadata, not just the marker.
   `load_distributed_model()` builds the model from the trained
   weights. `model_config` is not mutated — the DPO/KTO/SDPG reference and the dataset-compat check
   keep the base, so **leave `model_name_or_path` at the base**. An unmerged per-rank save raises
-  here, before construction. The loader then skips the re-read: EP/CP always, `_load_tp` / `_load_fsdp2` when the model was
+  here, before construction. The loader then skips the re-read: EP/CP always, `_load_streamed` / `_load_fsdp2` when the model was
   constructed from that checkpoint. A model built from anything else makes the loader raise
   (rank-0 verdict, broadcast) under EP/CP when the checkpoint ships base weights (a marked
   merge-on-save checkpoint inverts this: it refuses a model built from itself), and under TP+DP,
@@ -60,10 +63,10 @@ shards whose `optimizer_meta.pt` carries no fingerprint at all raise — delete 
 `optimizer_shard_*.pt` + `optimizer_meta.pt` to accept a warm restart. A matched restore that fails
 on any rank (an unreadable shard, a CUDA OOM) raises on every rank unless `allow_optimizer_warm_restart: true`.
 
-Source: `src/distributed/checkpoint/loader.py` (`CheckpointLoader`, `_load_tp`, `_load_fsdp2`,
+Source: `src/distributed/checkpoint/loader.py` (`CheckpointLoader`, `_load_streamed`, `_load_fsdp2`,
 `_load_pp_stage`), `src/distributed/checkpoint/optimizer.py` (`OptimizerShardStore.load` / `.save` /
 `.restore_lr_scheduler`), `src/distributed/checkpoint/fingerprint.py`,
-`src/checkpoint/format.py` (`load_full_state_dict`).
+`src/checkpoint/format.py` (`load_full_state_dict`, `ModuleLayoutView`).
 `src/trainers/mixins/checkpointing.py::_load_from_checkpoint` is a thin delegate over the loader.
 
 ## Per-script reference (`scripts/after_training/`)
@@ -99,14 +102,16 @@ Load base + adapter, `merge_and_unload()`, save standalone HF checkpoint (base p
 `adapter_config.json`). Flags: `--adapter_dir`, `--output_dir`,
 `--task {causal_lm,classification}`, `--dtype` (`bfloat16`), `--device_map` (`auto`/`cpu` for big
 models), `--num_labels`, `--max_shard_size` (`5GB`), `--attn_implementation`, plus the shared
-`--trust_remote_code` / `--quiet`. Uses
-`resolve_auto_model_class`, so **VLM bases load as the full `*ForImageTextToText` wrapper** (avoids
-adapter-key mismatch). The work happens in the shared `merge_adapter_into_base`
-(`src/checkpoint/adapters.py`), which also refuses a per-rank-sharded adapter or base, an in-place
-output and a native expert-LoRA adapter, and picks the processing class through
-`resolve_peft_processing_class` (`src/models/loading/tokenizer_setup.py`): the adapter dir's when it
-is a full processor, otherwise the **base's** — a VLM adapter dir usually ships only a tokenizer, and
-a tokenizer-only save leaves an unloadable VLM. It applies `apply_training_sidecars` to the
+`--trust_remote_code` / `--quiet`. The base loads through the class the adapter's keys address
+(`load_base_for_adapter`): the widest one (`resolve_auto_model_class`, the full
+`*ForImageTextToText` wrapper for a VLM), or the `*ForCausalLM` sibling when the adapter came from a
+`text_only_model` run, whose merge keeps the text-only `model.*` layout. The work happens in the
+shared `merge_adapter_into_base` (`src/checkpoint/adapters.py`), which also refuses a
+per-rank-sharded adapter or base, an in-place output and a native expert-LoRA adapter, and picks the
+processing class through `resolve_peft_processing_class` (`src/models/loading/tokenizer_setup.py`):
+for a text-only merge the run's tokenizer from the adapter dir (the base's only when the adapter
+saved none) and no processor files; otherwise the adapter dir's when it is a full processor, else the
+**base's** — a tokenizer-only save leaves an unloadable VLM. It applies `apply_training_sidecars` to the
 merged model (see below) — the merge rebuilds the base from the hub, so without it a `bias_update`
 run's routing and a `reset_sinks` run's sinks are lost.
 
@@ -173,9 +178,12 @@ models, `--t`), `task_arithmetic` (`--base_model` + Σ wᵢ·task vector), `ties
 default base or first model, a Hub id is downloaded weights-excluded), `--max_shard_size`,
 `--quiet`, `--allow_missing_tokenizer`, `--trust_remote_code`. Streams one tensor at a time across the inputs, so peak host memory scales with the largest
 tensor, not N models (knob ranges and per-method working set: `agent-docs/reference/model-merging.md`).
-Deliberately copies **no** resume sidecars (`rng_state*`, `scheduler.pt`,
+Deliberately copies **no** resume sidecars (`trainer_state.json`, `rng_state*`, `scheduler.pt`,
 `router_balancing_biases.pt`, `reference_logps.pt`, `prefetch_pending-*`, `resume_adapter/` and its
-marker) — they describe one run, not the merge.
+marker) — they describe one run, not the merge. Inputs must share the reference key set at one shape
+(checked from the headers before any write), except a Hub base's keys the shipped model never reads:
+a stored tied head, and the keys its class drops at load (`_keys_to_ignore_on_load_unexpected`, e.g.
+Qwen3.5/3.6's `mtp.*`).
 
 ### `reattach_vision_tower.py`
 
@@ -236,7 +244,9 @@ and `convert_to_bf16.py` call it and print the returned actions; `copy_training_
   `scripts/before_training/patch_vocab.py`
   load the VLM class correctly and save the full **processor**, not just the tokenizer; saving only a
   tokenizer drops `preprocessor_config.json` / `processor_config.json` / `chat_template` and the result
-  fails to reload as a VLM. The shared `load_processing_class`
+  fails to reload as a VLM. The exception is an adapter from a `text_only_model` run: merged or
+  converted, it ships the run's tokenizer and no processor files, since the class it goes through has
+  no vision path (`reattach_vision_tower.py` restores the processor files for serving). The shared `load_processing_class`
   (`src/models/loading/tokenizer_setup.py`) returns the processor for multimodal models and a
   plain tokenizer otherwise; all three scripts call it, and `resolve_auto_model_class` /
   `auto_load_model` (`src/models/loading/model_preparation.py`) load a multimodal config as the

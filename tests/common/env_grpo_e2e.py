@@ -129,7 +129,6 @@ def _grpo_config(*, output_dir: str, max_steps: int, group_port: int, save: bool
         num_generations=2,
         max_completion_length=128,
         beta=0.0,
-        generation_kwargs={"temperature": 0.7},
         fsdp="",
         vllm_group_port=group_port,
         remove_unused_columns=False,

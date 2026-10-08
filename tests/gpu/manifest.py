@@ -777,6 +777,7 @@ MANIFEST: dict[str, TestSpec] = {
             "--trainer sdpg --mode lora_fsdp",
             "--trainer online --mode lora_tp2_rejected",
             "--trainer sdpg --mode lora_tp2_rejected",
+            "--trainer online --mode full_fsdp_kl",
             "--trainer online --mode full_tp2 --resume",
             "--trainer sdpg --mode full_tp2 --resume",
             "--trainer online --mode lora_fsdp --resume",

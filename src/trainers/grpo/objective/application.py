@@ -32,8 +32,9 @@ class TokenMassBalance:
     """A generation round's token-weighted advantage mass and the per-sign scales that cancel it.
 
     ``net`` is ``(P - N) / (P + N)`` before balancing, where ``P`` and ``N`` are the summed positive and
-    negative ``advantage x token weight`` of the whole round: the share of the round's push that raises
-    (``net > 0``) or lowers (``net < 0``) the probability of the tokens the policy sampled.
+    negative ``advantage x token weight`` of the round's trainable rows (all but the negative-only ones):
+    the share of their push that raises (``net > 0``) or lowers (``net < 0``) the probability of the
+    tokens the policy sampled.
     """
 
     net: float
@@ -45,8 +46,12 @@ class TokenMassBalance:
         """The factor the heavier sign takes (1.0 when nothing is balanced)."""
         return min(self.positive_scale, self.negative_scale)
 
-    def apply(self, advantages: torch.Tensor) -> torch.Tensor:
-        return torch.where(advantages > 0, advantages * self.positive_scale, advantages * self.negative_scale)
+    def apply(self, advantages: torch.Tensor, negative_only: torch.Tensor | None = None) -> torch.Tensor:
+        """``advantages`` with each sign scaled; the ``negative_only`` rows, outside the balance, keep theirs."""
+        scaled = torch.where(advantages > 0, advantages * self.positive_scale, advantages * self.negative_scale)
+        if negative_only is None:
+            return scaled
+        return torch.where(negative_only.to(advantages.device), advantages, scaled)
 
 
 def _signed_masses(advantages: torch.Tensor, token_weights: torch.Tensor) -> torch.Tensor:
@@ -94,29 +99,35 @@ def record_token_mass(
     round pushes down the tokens the policy itself sampled, which flattens it (entropy rises), and where
     solves run longer it sharpens it. The balance scales the heavier sign down, never up, until that net
     push is zero, keeping every row's sign and its order within its sign; its scale falls continuously to 0
-    as the lighter side's mass does, so a round with mass on one sign only trains nothing on its advantages.
+    as the lighter side's mass does, so a round whose weighed rows carry mass on one sign only trains none
+    of them on their advantages.
     The masses are summed over every rank (the gather is collective), so all ranks take the same scales.
 
     A token weighs what the policy gradient multiplies it by: its place in the loss (``loss_mask``, every
-    drop already in it) times its truncated, masked IS ratio (``None`` when the loss applies none). The
-    net share is logged whether or not the balance is on, as the early sign of an entropy drift.
+    drop already in it) times its truncated, masked IS ratio (``None`` when the loss applies none). The net
+    share of the rows it weighs is logged whether or not the balance is on, as the early sign of an entropy
+    drift.
 
-    ``negative_only`` flags the rows that train only on a negative advantage, and their share of the
-    round's trained mass is logged too, after the balance when it is on. The balance nets the whole round
-    to zero, so under it that share is the net push left on every other row, raising the tokens it sampled.
+    ``negative_only`` flags the rows that train only on a negative advantage (an untrainable turn's). The
+    balance neither weighs nor scales them (pass the same flags to :meth:`TokenMassBalance.apply`): the
+    other rows net to zero, and the round's net push is the flagged rows' own mass, lowering only the
+    tokens they sampled. That mass's share of the round's trained mass is logged, after the balance when it
+    is on.
     """
     weights = (loss_mask if is_ratio is None else loss_mask * is_ratio).sum(dim=1)
-    local = _signed_masses(advantages, weights)
-    if negative_only is not None:
+    if negative_only is None:
+        local = _signed_masses(advantages, weights)
+    else:
         flagged = negative_only.to(advantages.device)
-        local = torch.cat([local, _signed_masses(advantages[flagged], weights[flagged])[1:]])
+        trainable = _signed_masses(advantages[~flagged], weights[~flagged])
+        local = torch.cat([trainable, _signed_masses(advantages[flagged], weights[flagged])[1:]])
     masses = _world_masses(local, gather_fn)
     result = _balance(masses[0], masses[1])
     metrics[NET_TOKEN_MASS_KEY].append(result.net)
     if negative_only is not None:
         scales = result if enabled else TokenMassBalance(net=result.net)
-        trained = masses[0] * scales.positive_scale + masses[1] * scales.negative_scale
-        metrics[NEGATIVE_ONLY_MASS_KEY].append(masses[2] * scales.negative_scale / trained if trained > 0 else 0.0)
+        trained = masses[0] * scales.positive_scale + masses[1] * scales.negative_scale + masses[2]
+        metrics[NEGATIVE_ONLY_MASS_KEY].append(masses[2] / trained if trained > 0 else 0.0)
     if not enabled:
         return None
     metrics[TOKEN_MASS_SCALE_KEY].append(result.scale)

@@ -10,15 +10,17 @@ belongs to the caller. What an exported ``config.json`` must CONTAIN is
 from __future__ import annotations
 
 import glob
+import itertools
 import json
 import logging
 import os
 import re
 import shutil
-from collections.abc import Mapping
-from contextlib import ExitStack
+from collections.abc import Callable, Iterable, Iterator, Mapping
+from contextlib import ExitStack, contextmanager
+from copy import deepcopy
 from dataclasses import dataclass
-from functools import cached_property
+from functools import cached_property, partial
 from typing import Any
 
 import torch
@@ -28,14 +30,27 @@ from safetensors import safe_open
 from safetensors.torch import load_file as _safetensors_load_file
 from safetensors.torch import save_file as _safetensors_save_file
 from transformers.conversion_mapping import get_model_conversion_mapping
-from transformers.core_model_loading import PrefixChange, revert_weight_conversion
+from transformers.core_model_loading import (
+    PrefixChange,
+    WeightConverter,
+    WeightRenaming,
+    dot_natural_key,
+    rename_source_key,
+    revert_weight_conversion,
+)
 from transformers.trainer_utils import PREFIX_CHECKPOINT_DIR
 
 from src.checkpoint.atomic import is_atomic_staging_file
 from src.checkpoint.config_export import save_model_config
 from src.checkpoint.model_card import tag_exported_model_card
 from src.models.moe_balancing import balancing_param_keys
-from src.models.structure import fp32_pinned_state_keys, norm_param_keys, strip_peft_adapter_segment
+from src.models.structure import (
+    fp32_pinned_state_keys,
+    norm_param_keys,
+    persistent_buffers,
+    strip_peft_adapter_segment,
+    transformers_model_class,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -74,6 +89,9 @@ LEGACY_WEIGHTS_FILE = "pytorch_model.bin"
 # list behind :func:`has_whole_model_weight_file`, whose safetensors-only mode is the lazy gate's.
 WHOLE_MODEL_WEIGHT_FILES = (SAFETENSORS_INDEX_FILE, SAFETENSORS_WEIGHTS_FILE, LEGACY_WEIGHTS_FILE)
 
+# HF Trainer's own filenames, spelled here because transformers defines them only in
+# ``transformers.trainer``, a ~1 s import this leaf must not pay.
+TRAINER_STATE_FILE = "trainer_state.json"
 SCHEDULER_STATE_FILE = "scheduler.pt"
 # HF Trainer's replicated optimizer state, which the sharded modes deliberately replace.
 OPTIMIZER_STATE_FILES = ("optimizer.pt", "optimizer.bin")
@@ -108,8 +126,9 @@ PROVENANCE_GPT_OSS_SINKS = "gpt_oss_attention_sinks"
 RESUME_ADAPTER_DIR = "resume_adapter"
 RESUME_ADAPTER_MARKER_FILE = "resume_adapter.json"
 # Resume state like the sidecars below, but not weight-suffixed: the aux copy carries them by
-# default and drops them by name where ``include_resume_sidecars`` is off.
-_RESUME_ADAPTER_ENTRIES = (RESUME_ADAPTER_DIR, RESUME_ADAPTER_MARKER_FILE)
+# default and drops them by name where ``include_resume_sidecars`` is off. ``trainer_state.json`` is
+# the step a resume continues from and what resume detection takes a directory by.
+_UNSUFFIXED_RESUME_ENTRIES = (TRAINER_STATE_FILE, RESUME_ADAPTER_DIR, RESUME_ADAPTER_MARKER_FILE)
 
 # Never carried over: a stray pytorch_model.bin / optimizer*.pt would shadow the fresh safetensors.
 _WEIGHT_FILE_SUFFIXES = (".safetensors", ".bin", ".pt")
@@ -130,6 +149,10 @@ _WEIGHT_DUMP_DIRS = ("original", "consolidated", "metal")
 WEIGHT_FILE_IGNORE_PATTERNS = tuple(
     f"*{suffix}" for suffix in (*_WEIGHT_FILE_SUFFIXES, *_FOREIGN_EXPORT_SUFFIXES)
 ) + tuple(f"{name}/*" for name in _WEIGHT_DUMP_DIRS)
+# A model load's Hub fetch: the repo's top-level files, where its config, tokenizer, weights and remote
+# code sit. Hub patterns are fnmatch, whose ``*`` crosses ``/``, so this drops every nested file, the
+# weight dumps above included.
+HUB_SUBFOLDER_IGNORE_PATTERNS = ("*/*",)
 # The tied pair, in the order reconcile_tie_word_embeddings reads them.
 _TIE_KEY_SUFFIXES = ("lm_head.weight", "embed_tokens.weight")
 
@@ -230,55 +253,114 @@ def _has_child_at_prefix(model: torch.nn.Module, dotted_prefix: str) -> bool:
     return True
 
 
-def registry_weight_conversions(model: torch.nn.Module, *, keep_prefix_change: bool) -> list:
-    """The family's declared conversion mapping — what a load that recorded nothing reverts through.
+@contextmanager
+def _transformers_classes(model: torch.nn.Module) -> Iterator[None]:
+    """Give every module of ``model`` back the transformers class FSDP2 swapped out, for the duration.
 
-    Empty for a module carrying no ``config``: the registry is keyed by the config's family.
+    ``fully_shard`` replaces a sharded module's class in place with an ``FSDP<Name>`` subclass defined
+    in torch, which transformers' conversion registry neither finds by name nor accepts: it reads a
+    class defined outside transformers as custom code, so a wrapped model resolves no conversions.
     """
+    swapped = []
+    try:
+        for module in model.modules():
+            original = transformers_model_class(module)
+            if original is not None and type(module) is not original:
+                swapped.append((module, type(module)))
+                module.__class__ = original
+        yield
+    finally:
+        for module, wrapped_class in swapped:
+            module.__class__ = wrapped_class
+
+
+def _family_conversions(model: torch.nn.Module, *, add_legacy: bool) -> list:
+    """transformers' conversion mapping for ``model``'s family, resolved against its transformers
+    classes (an FSDP2-wrapped model included). Empty for a module carrying no ``config``: the registry
+    is keyed by the config's family."""
     if getattr(model, "config", None) is None:
         return []
-    pristine = get_model_conversion_mapping(model, add_legacy=False)
+    with _transformers_classes(model):
+        return get_model_conversion_mapping(model, add_legacy=add_legacy)
+
+
+def registry_weight_conversions(model: torch.nn.Module, *, keep_prefix_change: bool) -> list:
+    """The family's declared conversion mapping — what a model no load recorded conversions for reverts
+    through."""
+    pristine = _family_conversions(model, add_legacy=False)
     return [c for c in pristine if keep_prefix_change or not isinstance(c, PrefixChange)]
 
 
-def revert_conversions_for(model: torch.nn.Module) -> list:
-    """The conversions a save-side revert — or a hub-namespace weight sync — inverts.
+def _saved_tree_conversions(model: torch.nn.Module, conversions: list) -> list:
+    """``conversions`` minus each ``PrefixChange`` whose stripped prefix is not a child of ``model``.
 
-    What the load recorded, minus a ``PrefixChange`` whose stripped prefix is not a child of the
-    saved tree: a text-only load of a multimodal checkpoint consumes
+    A text-only load of a multimodal checkpoint consumes
     ``PrefixChange(prefix_to_remove="language_model")``, and reverting that at save would re-emit
     wrapper-prefixed keys under a text-only config — transformers re-strips them on reload, engine
-    loaders keyed on the architectures do not, and the artifact is serving-dead. A load that recorded
-    nothing falls back to the family's registry mapping minus its ``PrefixChange``, as transformers'
-    own revert does. One resolution, so the gathered save, the EP export and the sync cannot drift.
+    loaders keyed on the architectures and ``reattach_vision_tower.py`` do not, and the artifact is
+    serving-dead.
     """
-    load_conversions = getattr(model, "_weight_conversions", None)
-    if not load_conversions:
-        return registry_weight_conversions(model, keep_prefix_change=False)
     return [
         c
-        for c in load_conversions
+        for c in conversions
         if not (
             isinstance(c, PrefixChange) and c.prefix_to_remove and not _has_child_at_prefix(model, c.prefix_to_remove)
         )
     ]
 
 
-def revert_load_conversions(model: torch.nn.Module, state_dict: dict) -> dict:
-    """Map a module-layout state dict back to the hub checkpoint layout before writing.
+def revert_conversions_for(model: torch.nn.Module) -> list:
+    """The conversions a save-side revert — or a hub-namespace weight sync — inverts.
 
-    transformers loads several MoE families into a module-FUSED expert layout and reverts it inside
-    ``save_pretrained``, which the gathered/TP writers bypass — so without this a wrapper-less MoE
-    save emits fused keys that per-expert engine loaders hard-fail on (vLLM 0.26.0: GLM-4/LFM-2) or
-    silently drop (Laguna). Identity for dense models; EP-gathered dicts never come here.
+    What the load recorded, minus a ``PrefixChange`` the saved tree cannot carry
+    (:func:`_saved_tree_conversions`). An empty record is a load that converted nothing, its source
+    already in the module layout (the fused Qwen3.5/3.6 hub, a fused EP save), so the save writes what
+    the load read. Only a model with no record at all (built from its config) takes the family's
+    registry mapping minus its ``PrefixChange``, as transformers' own revert does. One resolution, so
+    the gathered save, ``save_pretrained``, the EP export and the sync cannot drift.
+    """
+    load_conversions = getattr(model, "_weight_conversions", None)
+    if load_conversions is None:
+        return registry_weight_conversions(model, keep_prefix_change=False)
+    return _saved_tree_conversions(model, load_conversions)
+
+
+@contextmanager
+def save_pretrained_layout(model: torch.nn.Module) -> Iterator[None]:
+    """Hold a ``save_pretrained`` of ``model`` to the layout its own tree and config declare.
+
+    ``save_pretrained`` reverts through the load's recorded conversions verbatim, so inside this
+    block they are :func:`revert_conversions_for`'s — minus the ``PrefixChange`` the saved tree cannot
+    carry — the list the gathered writers revert through, so both write one layout. The record is
+    restored on exit.
+    """
+    recorded = getattr(model, "_weight_conversions", None)
+    model._weight_conversions = revert_conversions_for(model)
+    try:
+        yield
+    finally:
+        model._weight_conversions = recorded
+
+
+def revert_load_conversions(model: torch.nn.Module, state_dict: dict) -> dict:
+    """Map a module-layout state dict back to the checkpoint layout the model was loaded from.
+
+    transformers loads several MoE families from a per-expert hub into a module-FUSED expert layout
+    and reverts it inside ``save_pretrained``, which the gathered/TP writers bypass — so without this
+    a wrapper-less MoE save emits fused keys that per-expert engine loaders hard-fail on (vLLM 0.26.0:
+    GLM-4/LFM-2) or silently drop (Laguna). Identity where the load converted nothing: dense models,
+    and a source already in the module layout. EP-gathered dicts never come here.
 
     Reverts :func:`revert_conversions_for`'s list, restoring the model's own value afterwards so
     later saves see exactly what the load left behind. A failure warns instead of raising: the
     config may already be on disk with the peer ranks past their barrier, and the pre-revert dict is
     a loadable checkpoint that only needs ``unfuse_moe_experts.py`` before a per-expert engine.
     """
+    conversions = revert_conversions_for(model)
+    if not conversions:
+        return state_dict
     load_conversions = getattr(model, "_weight_conversions", None)
-    model._weight_conversions = revert_conversions_for(model) or None
+    model._weight_conversions = conversions
     try:
         return revert_weight_conversion(model, state_dict)
     except Exception as e:
@@ -290,6 +372,75 @@ def revert_load_conversions(model: torch.nn.Module, state_dict: dict) -> dict:
         return state_dict
     finally:
         model._weight_conversions = load_conversions
+
+
+class ModuleLayoutView:
+    """A checkpoint's tensors under the live model's own names: the read side of
+    :func:`revert_load_conversions`.
+
+    A wrapper-less save writes the layout the model was loaded from (a per-expert hub's experts one
+    tensor each) while the live module holds them fused, so a reader that matches raw checkpoint keys
+    to live names keeps the experts it already had. This reads the checkpoint the way
+    ``from_pretrained`` does, through the family's whole conversion mapping: renames, then at most one
+    converter per key, and a key whose rename misses the live tree while the key itself hits is kept
+    as is. So it reads whichever layout a save wrote — the hub's, the module's (an EP-gathered save, a
+    load that converted nothing), a per-expert spelling the load itself never met.
+
+    ``read`` serves one checkpoint tensor by key, called only when :meth:`items` reaches the group
+    that needs it, so a streaming reader holds one converted group (a layer's experts) at a time.
+    """
+
+    def __init__(self, model: torch.nn.Module, checkpoint_keys: Iterable[str], read: Callable[[str], torch.Tensor]):
+        self._model = model
+        self._read = read
+        # A mapping, not a set: ``rename_source_key`` probes its ``meta_state_dict`` with ``.get``.
+        self._live = dict.fromkeys(
+            (name for name, _ in itertools.chain(model.named_parameters(), persistent_buffers(model))), True
+        )
+        conversions = _family_conversions(model, add_legacy=True)
+        renamings = [c for c in conversions if isinstance(c, WeightRenaming)]
+        converters = [c for c in conversions if isinstance(c, WeightConverter)]
+        by_source = {pattern: converter for converter in converters for pattern in converter.source_patterns}
+        prefix = getattr(model, "base_model_prefix", None) or None
+        self._renamed: dict[str, str] = {}
+        self._converted: dict[str, WeightConverter] = {}
+        # Natural order, as from_pretrained collects: a converter stacks experts in arrival order.
+        for key in sorted(checkpoint_keys, key=dot_natural_key):
+            target, pattern = rename_source_key(key, renamings, converters, prefix, self._live)
+            if target not in self._live and key in self._live:
+                target, pattern = rename_source_key(key, [], [], prefix, self._live)
+            if pattern is None:
+                self._renamed.setdefault(target, key)
+            else:
+                group = self._converted.setdefault(target, deepcopy(by_source[pattern]))
+                group.add_tensor(target, key, pattern, partial(read, key))
+        self.keys = frozenset(self._renamed).union(
+            *(self._targets(first, group) for first, group in self._converted.items())
+        )
+
+    @staticmethod
+    def _targets(first: str, group: WeightConverter) -> tuple[str, ...]:
+        """The live names a converter group produces, spelled off its first target as transformers does."""
+        return tuple(first.replace(group.target_patterns[0], target, 1) for target in group.target_patterns)
+
+    def items(self) -> Iterator[tuple[str, torch.Tensor]]:
+        """``(live name, tensor)`` for every live tensor the checkpoint supplies, one group at a time."""
+        for target, key in self._renamed.items():
+            if target in self._live:
+                yield target, self._read(key)
+        config = getattr(self._model, "config", None)
+        for first, group in self._converted.items():
+            expected = self._targets(first, group)
+            if not any(target in self._live for target in expected):
+                continue
+            for target, tensor in group.convert(first, model=self._model, config=config).items():
+                if target not in expected:
+                    raise RuntimeError(
+                        f"The load conversion for {first!r} produced {target!r}, outside the names "
+                        f"{list(expected)} the resume matched against the live model."
+                    )
+                if target in self._live:
+                    yield target, tensor[0] if isinstance(tensor, list) else tensor
 
 
 def normalize_gathered_state_dict(model: torch.nn.Module, state_dict: dict, *, keep_live_dtype: bool = False) -> dict:
@@ -485,10 +636,10 @@ def copy_checkpoint_aux_files(
     reads the card, and most callers run this copy after their weight pass.
 
     Skips every top-level weight file and safetensors index, which the caller writes fresh, but
-    preserves the resume sidecars (``scheduler.pt``, ``router_balancing_biases.pt``,
+    preserves the resume state (``trainer_state.json``, ``scheduler.pt``, ``router_balancing_biases.pt``,
     ``reference_logps.pt``, ``rng_state_*``, ``prefetch_pending-*``) a resume-from-merged run restores;
-    ``include_resume_sidecars=False`` drops them, for an artifact that describes no single run (an
-    N-way merge).
+    ``include_resume_sidecars=False`` drops it, for an artifact that is a new base rather than the
+    source run's weights (an N-way merge, an adapter folded into its base).
 
     Subdirectories are copied whole, weight files included: a SentenceTransformer module directory
     carries weights no caller rewrites, and filtering them out leaves ``modules.json`` pointing at
@@ -512,7 +663,7 @@ def copy_checkpoint_aux_files(
             f"artifact to a directory outside the source checkpoint."
         )
     for name in os.listdir(input_dir):
-        if name in _RESUME_ADAPTER_ENTRIES and not include_resume_sidecars:
+        if name in _UNSUFFIXED_RESUME_ENTRIES and not include_resume_sidecars:
             continue
         src = os.path.join(input_dir, name)
         if os.path.isdir(src):
@@ -781,13 +932,13 @@ class StreamingCheckpointReader:
     ``gpus_per_node ×`` the stage's bytes on a host at once (~280 GB per node for a dense 70B at
     ``pp_size=4``).
 
-    Construction opens every shard holding a requested key, so a truncated file raises THERE —
-    before the caller's cross-rank consensus, hence before any collective — and :meth:`get` serves
-    from the validated handles at one tensor of peak. A legacy ``.bin`` is one pickle, read whole.
+    Construction opens every shard holding a requested key (``keys=None`` requests them all), so a
+    truncated file raises THERE — before the caller's cross-rank consensus, hence before any
+    collective — and :meth:`get` serves from the validated handles at one tensor of peak. A legacy
+    ``.bin`` is one pickle, read whole.
     """
 
-    def __init__(self, checkpoint: str, keys):
-        keys = set(keys)
+    def __init__(self, checkpoint: str, keys: Iterable[str] | None):
         layout = resolve_checkpoint_weights(checkpoint)
         self._legacy: dict[str, torch.Tensor] | None = None
         self._handles: dict[str, Any] = {}
@@ -796,12 +947,13 @@ class StreamingCheckpointReader:
 
         if layout.legacy_bin is not None:
             state_dict = torch.load(layout.path(layout.legacy_bin), map_location="cpu", weights_only=True)
-            self._legacy = {k: state_dict[k] for k in keys & set(state_dict)}
+            self._legacy = state_dict if keys is None else {k: state_dict[k] for k in set(keys) & set(state_dict)}
             self.available = set(self._legacy)
             return
 
         weight_map = layout.weight_map
-        self._key_to_shard = {key: weight_map[key] for key in keys & set(weight_map)}
+        wanted = weight_map.keys() if keys is None else set(keys) & set(weight_map)
+        self._key_to_shard = {key: weight_map[key] for key in wanted}
         self.available = set(self._key_to_shard)
         try:
             for shard in sorted(set(self._key_to_shard.values())):

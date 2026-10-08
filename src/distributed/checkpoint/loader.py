@@ -14,13 +14,16 @@ from __future__ import annotations
 import itertools
 import logging
 import os
+from functools import partial
 
 import torch
 from torch.distributed.checkpoint.state_dict import StateDictOptions, set_model_state_dict
 from torch.distributed.tensor import DTensor, distribute_tensor
+from transformers import PreTrainedModel
 
 from src.checkpoint.config_export import LOADED_WEIGHTS_FROM_ATTR
 from src.checkpoint.format import (
+    ModuleLayoutView,
     has_adapter_weight_file,
     has_whole_model_weight_file,
     is_sharded_checkpoint,
@@ -40,10 +43,12 @@ from src.distributed.expert_parallel.expert_weights import has_ep_lora
 from src.distributed.fsdp import reshard_fsdp2_modules
 from src.distributed.pipeline_parallel.lazy_loader import PER_NODE_PLACEMENT_REMEDY
 from src.distributed.runtime import (
+    DeferredRankFailure,
     barrier,
     broadcast_from_rank0,
     copy_full_tensor,
     is_global_main_process,
+    raise_rank0_failure,
     reject_across_ranks,
 )
 from src.log import KEY_PREVIEW_COUNT
@@ -183,6 +188,19 @@ def _absent_stage_shards_reason(checkpoint: str, stage_keys, pp_rank: int) -> st
     )
 
 
+def _rank0_module_layout(model, state_dict: dict, checkpoint: str, mode: str) -> dict:
+    """Rank 0's checkpoint dict under the live model's names (:class:`ModuleLayoutView`), consumed as it
+    converts; every other rank's stays empty. COLLECTIVE: a failed conversion raises on every rank."""
+    converted: dict = {}
+    raise_rank0_failure(
+        lambda: converted.update(
+            ModuleLayoutView(unwrap_framework_wrappers(model), list(state_dict), state_dict.pop).items()
+        ),
+        lambda e: f"{mode} resume from {checkpoint}: mapping the checkpoint onto the live model's names failed: {e}",
+    )
+    return converted
+
+
 class CheckpointLoader:
     """Parallelism-aware model-weight resume.
 
@@ -221,10 +239,15 @@ class CheckpointLoader:
           :meth:`_restore_adapters_onto_constructed_model`).
         - FSDP2 only: set_model_state_dict() distributes full-tensor weights into DTensor params.
         - TP (pure, or TP+DP): each rank distributes the full tensors into its DTensor shards (see
-          :meth:`_load_tp`).
+          :meth:`_load_streamed`).
+        - Single process / DDP with whole weights: each rank streams them into its own copy, through
+          the same seam.
         - PP: skipped for a stage constructed from the checkpoint, else this rank's global-named
           tensors from the merged index into the stage (see :meth:`_load_pp_stage`).
-        - Other: falls through to base Trainer.
+        - Other (accelerate FSDP, adapter-only, non-transformers models): falls through to base Trainer.
+
+        Every whole-weight read maps the checkpoint onto the live names through
+        :class:`~src.checkpoint.format.ModuleLayoutView`, the inverse of the save-side revert.
         """
         ctx = self.ctx
         if ctx.is_pp_mode:
@@ -297,10 +320,25 @@ class CheckpointLoader:
         if ctx.fsdp_wrapped and not ctx.is_tp_mode:
             return self._load_fsdp2(resume_from_checkpoint, model, for_best_model=for_best_model)
 
-        if not ctx.is_tp_mode:
-            return ctx.super_load_from_checkpoint(resume_from_checkpoint, model)
+        if ctx.is_tp_mode or self._streams_unsharded_weights(resume_from_checkpoint, model):
+            return self._load_streamed(resume_from_checkpoint, model, for_best_model=for_best_model)
 
-        return self._load_tp(resume_from_checkpoint, model, for_best_model=for_best_model)
+        return ctx.super_load_from_checkpoint(resume_from_checkpoint, model)
+
+    def _streams_unsharded_weights(self, checkpoint: str, model) -> bool:
+        """Whether this rank holds a whole, unsharded transformers model the base Trainer would reload by
+        raw key from ``checkpoint``'s whole weights: a single-process or DDP run.
+
+        The base loader keeps a reload it owns (``base_owns_whole_weight_load``) and a model that is not a
+        transformers model (a PEFT wrapper), whose checkpoint is not keyed by its names. Rank-0 file
+        probe, broadcast.
+        """
+        if self.ctx.base_owns_whole_weight_load:
+            return False
+        live = unwrap_framework_wrappers(model if model is not None else self.ctx.model)
+        if not isinstance(live, PreTrainedModel):
+            return False
+        return broadcast_from_rank0(is_global_main_process() and has_whole_model_weight_file(checkpoint))
 
     def _restore_adapters_onto_constructed_model(
         self,
@@ -342,8 +380,11 @@ class CheckpointLoader:
             # Only a merged save ships base weights from an adapter run.
             raise ValueError(unmarked_merged_checkpoint_reason(checkpoint))
 
-    def _load_tp(self, checkpoint: str, model=None, *, for_best_model: bool = False) -> None:
-        """Load a gathered checkpoint into a TP model's DTensor params.
+    def _load_streamed(self, checkpoint: str, model=None, *, for_best_model: bool = False) -> None:
+        """Load a gathered checkpoint into a model each rank holds whole or TP-sharded.
+
+        Read through :class:`ModuleLayoutView`, so a checkpoint saved in the layout the model was loaded
+        from (a per-expert hub's experts, which the live module holds fused) lands on the live names.
 
         Both TP mechanisms — HF's ``tp_plan`` styles on a dense model and the toolkit's
         attention-only ``parallelize_module`` — place every sharded param as a DTensor on the TP
@@ -358,24 +399,26 @@ class CheckpointLoader:
         wrong rows — so that layout only resumes a model constructed FROM the checkpoint (the
         training scripts repoint the load) and raises otherwise.
 
-        Per-rank read, streamed one tensor at a time: a rank slices its own shard, so it needs only
-        its node's copy, and ``distribute_tensor`` is collective-free (``src_data_rank=None``).
-        Readability, reader construction, the key set and the coverage verdict are each joined across
-        ranks before any tensor is written, so a torn or key-losing per-node copy sends every rank to
-        the same verdict instead of resuming base weights on one.
+        Per-rank read, streamed one tensor at a time — a converted group (a layer's per-expert sources
+        and the fused tensor they make) at once: a rank slices its own shard, so it needs only its
+        node's copy, and ``distribute_tensor`` is collective-free (``src_data_rank=None``).
+        Readability, reader construction, the key sets and the coverage verdict are each joined across
+        ranks before any tensor is written, and a failed copy after them, so a torn or key-losing
+        per-node copy sends every rank to the same verdict instead of resuming base weights on one.
         """
         ctx = self.ctx
         if model is None:
             model = ctx.model
+        mode = "TP" if ctx.is_tp_mode else "Unsharded"
 
         self._reject_sharded_resume(checkpoint)
-        checkpoint_keys: set[str] = set()
+        readable = False
         if is_global_main_process():
             try:
-                checkpoint_keys = read_checkpoint_key_set(checkpoint)
+                readable = bool(read_checkpoint_key_set(checkpoint))
             except Exception as e:
                 logger.warning(f"Torn/unreadable model checkpoint at {checkpoint}: {e}")
-        if not broadcast_from_rank0(bool(checkpoint_keys)):
+        if not broadcast_from_rank0(readable):
             logger.warning(
                 f"No readable model weights (model.safetensors[.index.json] / pytorch_model.bin) "
                 f"found at {checkpoint} on global rank 0, falling back to standard checkpoint "
@@ -391,7 +434,7 @@ class CheckpointLoader:
         constructed_from_ckpt = broadcast_from_rank0(built_from_checkpoint(live_source, checkpoint))
         if not for_best_model and constructed_from_ckpt:
             if is_global_main_process():
-                logger.info(f"TP resume: model was constructed from {checkpoint}; skipping the weight reload.")
+                logger.info(f"{mode} resume: model was constructed from {checkpoint}; skipping the weight reload.")
             return
         if ctx.fsdp_wrapped:
             if for_best_model:
@@ -414,44 +457,54 @@ class CheckpointLoader:
         live.update(persistent_buffers(unwrapped))
         hand_sliced = dict(getattr(unwrap_model(model), "_tp_sharded_non_dtensor", None) or ())
 
-        with joined_streaming_reader(checkpoint, live, what="TP checkpoint") as reader:
+        with joined_streaming_reader(checkpoint, None, what=f"{mode} checkpoint") as reader:
+            view = ModuleLayoutView(unwrapped, reader.available, reader.get)
             # Coverage gate: the load below writes only the keys that match, so a checkpoint written
             # for another wrapper layout would resume BASE weights for most of the model. Verdict
-            # joined, and the matched key count agreed with rank 0's, so a per-node copy that lost
-            # keys cannot pass on one rank alone.
-            coverage_ok, unmatched, matched_numel, total_numel = resume_numel_coverage(model, reader.available)
-            same_keys = len(reader.available) == broadcast_from_rank0(len(reader.available))
+            # joined, and the key counts agreed with rank 0's — on disk too, since one fused tensor
+            # stands for every per-expert key — so a per-node copy that lost keys cannot pass alone.
+            coverage_ok, unmatched, matched_numel, total_numel = resume_numel_coverage(model, view.keys)
+            counts = (len(reader.available), len(view.keys))
+            same_keys = counts == broadcast_from_rank0(counts)
             if not all_ranks_ok(coverage_ok and same_keys):
                 raise RuntimeError(
-                    f"TP checkpoint resume from {checkpoint}: fewer than half of the live model's "
+                    f"{mode} checkpoint resume from {checkpoint}: fewer than half of the live model's "
                     f"PARAMETERS match the checkpoint's keys on at least one rank — resume would "
                     f"silently continue from base weights. The checkpoint was written for a "
                     f"different model or wrapper layout, or a per-node copy is incomplete."
                 )
             if is_global_main_process():
-                _report_unmatched_coverage("TP", checkpoint, unmatched, matched_numel, total_numel)
-                if unexpected := sorted(checkpoint_keys - live.keys()):
+                _report_unmatched_coverage(mode, checkpoint, unmatched, matched_numel, total_numel)
+                if unexpected := sorted(view.keys - live.keys()):
                     logger.warning(
-                        f"TP resume: {len(unexpected)} checkpoint keys have no live tensor: {unexpected[:KEY_PREVIEW_COUNT]}"
+                        f"{mode} resume: {len(unexpected)} checkpoint keys have no live tensor: {unexpected[:KEY_PREVIEW_COUNT]}"
                     )
 
-            with torch.no_grad():
-                for name in sorted(reader.available):
-                    target = live[name]
-                    data = target.data if isinstance(target, torch.nn.Parameter) else target
-                    value = reader.get(name).to(data.dtype)
-                    if isinstance(data, DTensor):
-                        value = distribute_tensor(value, data.device_mesh, data.placements, src_data_rank=None)
-                    else:
-                        dim = next((d for suffix, d in hand_sliced.items() if name.endswith(suffix)), None)
-                        if dim is not None:
-                            value = value.chunk(ctx.tp_size, dim=dim)[ctx.tp_rank]
-                    data.copy_(value)
-                    del value
+            guard = DeferredRankFailure(f"{mode} checkpoint reload from {checkpoint}")
+            guard.run(partial(self._copy_into_live, view, live, hand_sliced))
+            guard.reject()
 
         if is_global_main_process():
-            logger.info(f"✓ TP checkpoint loaded from {checkpoint} ({len(live)} live tensors, tp_size={ctx.tp_size})")
+            tp = f", tp_size={ctx.tp_size}" if ctx.is_tp_mode else ""
+            logger.info(f"✓ {mode} checkpoint loaded from {checkpoint} ({len(live)} live tensors{tp})")
         barrier()
+
+    def _copy_into_live(self, view: ModuleLayoutView, live: dict, hand_sliced: dict) -> None:
+        """Write every tensor ``view`` supplies into this rank's live tensor: DTensors take their own
+        placements' shard, hand-sliced TP params this ``tp_rank``'s chunk, everything else the whole."""
+        with torch.no_grad():
+            for name, value in view.items():
+                target = live[name]
+                data = target.data if isinstance(target, torch.nn.Parameter) else target
+                value = value.to(data.dtype)
+                if isinstance(data, DTensor):
+                    value = distribute_tensor(value, data.device_mesh, data.placements, src_data_rank=None)
+                else:
+                    dim = next((d for suffix, d in hand_sliced.items() if name.endswith(suffix)), None)
+                    if dim is not None:
+                        value = value.chunk(self.ctx.tp_size, dim=dim)[self.ctx.tp_rank]
+                data.copy_(value)
+                del value
 
     def _load_pp_stage(self, checkpoint: str, model=None, *, for_best_model: bool = False) -> None:
         """Load a PP checkpoint's global-named tensors into this rank's pipeline stage.
@@ -612,6 +665,7 @@ class CheckpointLoader:
         if not broadcast_from_rank0(read_ok):
             # Uniform fallback: the base loader re-reads and raises on every rank, failing loud.
             return ctx.super_load_from_checkpoint(resume_from_checkpoint, model)
+        state_dict = _rank0_module_layout(model, state_dict, resume_from_checkpoint, "FSDP2")
 
         # Coverage gate, decided on rank 0 and broadcast: the load below is strict=False, so keys that do
         # not match the live FQNs apply as a no-op and the run continues from BASE weights. Key sets, not

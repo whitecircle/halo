@@ -4,7 +4,7 @@
 ``patch_vocab.py`` grows a vocabulary and ``merge_adapter_into_base`` folds an adapter into its base:
 each output is a new model, a starting point for the next run rather than a checkpoint of the one it
 came from. Pointed at a training checkpoint, their aux-file copy would otherwise carry that run's
-``scheduler.pt``, ``rng_state_*``, ``reference_logps.pt`` and a merge-on-save checkpoint's
+``trainer_state.json``, ``scheduler.pt``, ``rng_state_*``, ``reference_logps.pt`` and a merge-on-save checkpoint's
 ``resume_adapter/`` with its marker. The marker is the worst of them: a resume from the output would
 build the policy from the ORIGINAL base plus that resume adapter and silently drop the new weights
 (the grown vocabulary, the folded adapter).
@@ -21,6 +21,7 @@ from peft import LoraConfig, get_peft_model
 from safetensors.torch import save_file
 from tokenizers import Tokenizer, models, pre_tokenizers
 from transformers import PreTrainedTokenizerFast, Qwen3Config, Qwen3ForCausalLM
+from transformers.trainer import TRAINER_STATE_NAME
 
 from scripts.after_training.merge_peft_adapters import merge_peft_adapter
 from src.checkpoint.format import (
@@ -40,6 +41,7 @@ PartialState()
 patch_vocab = load_script_module("scripts/before_training/patch_vocab.py")
 
 RESUME_STATE = (
+    TRAINER_STATE_NAME,
     SCHEDULER_STATE_FILE,
     "rng_state_0.pth",
     REFERENCE_LOGPS_FILE,
@@ -64,7 +66,7 @@ def _training_checkpoint(path) -> str:
         {"x.experts.down_proj.lora_A": torch.ones(2, 2)}, str(path / RESUME_ADAPTER_DIR / ADAPTER_SAFETENSORS_FILE)
     )
     write_resume_adapter_marker(str(path))
-    for name in (SCHEDULER_STATE_FILE, "rng_state_0.pth", REFERENCE_LOGPS_FILE):
+    for name in (TRAINER_STATE_NAME, SCHEDULER_STATE_FILE, "rng_state_0.pth", REFERENCE_LOGPS_FILE):
         (path / name).write_bytes(name.encode())
     assert _classify_resume_checkpoint(str(path)) == "merged_adapter", "premise: the source resumes from its adapter"
     return str(path)

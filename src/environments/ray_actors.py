@@ -288,6 +288,7 @@ class EnvironmentActor:
                 max_tokens=config.max_tokens,
                 max_thinking_tokens=config.max_thinking_tokens,
                 max_episode_tokens=config.max_episode_tokens,
+                max_answer_tokens=config.max_answer_tokens,
             )
 
             for _ in range(env.max_turns):

@@ -27,6 +27,7 @@ from src.checkpoint.format import (
     OPTIMIZER_STATE_FILES,
     ROUTER_BALANCING_BIASES_FILE,
     SCHEDULER_STATE_FILE,
+    save_pretrained_layout,
 )
 from src.checkpoint.model_card import with_halo_tags
 from src.distributed.checkpoint.context import CheckpointContext, CheckpointLoadContext
@@ -59,6 +60,7 @@ from src.models.loading.config_levels import config_export_ready, restore_specia
 from src.models.loading.tokenizer_setup import pristine_model_max_length
 from src.models.moe_balancing import BALANCING_BIASES_ATTR
 from src.models.patches.gpt_oss_sinks import gpt_oss_sinks_restored
+from src.models.structure import base_transformers_model
 
 logger = get_logger(__name__, log_level="info")
 
@@ -121,6 +123,7 @@ class CheckpointingMixin:
             super_load_optimizer_and_scheduler=super()._load_optimizer_and_scheduler,
             # Forwarded onto the training config by the entry scripts; a config built elsewhere keeps the raise.
             allow_optimizer_warm_restart=getattr(self.args, "allow_optimizer_warm_restart", False),
+            base_owns_whole_weight_load=self._accelerate_manages_fsdp,
         )
 
     def _checkpoint_loader(self) -> CheckpointLoader:
@@ -504,11 +507,13 @@ class CheckpointingMixin:
             PeftAdapterSaver().save(ctx, peft_model, output_dir)
         elif not save_checkpoint(ctx, output_dir):
             # The base save has no re-emission seam: restore the sinks FA2 drops to None for the
-            # write, and serialize the config with its run-scoped router mutations restored (the
-            # parallel paths get both through save_model_config / the gathered state dict).
+            # write, serialize the config with its run-scoped router mutations restored, and keep its
+            # stock save_pretrained from re-adding a prefix a text-only load stripped (the parallel
+            # paths get all three through save_model_config / the gathered state dict).
             with (
                 gpt_oss_sinks_restored(ctx.model),
                 config_export_ready(getattr(ctx.model, "config", None)),
+                save_pretrained_layout(base_transformers_model(ctx.model)),
             ):
                 super().save_model(output_dir, _internal_call=_internal_call)
             # The base save's config write lands on the ranks HF Trainer writes from; the

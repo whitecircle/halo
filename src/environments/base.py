@@ -185,15 +185,15 @@ def truncate_text(text: str, max_chars: int) -> str:
 
 
 def require_magnitudes(**knobs: float) -> None:
-    """Reject a negative or non-finite value for any reward/penalty magnitude knob.
+    """Reject a negative, non-finite or non-numeric value for any reward/penalty magnitude knob.
 
     The minus sign is applied at the use site, so a negative config value would farm a penalty as a
     bonus; NaN or infinity would pass a sign check and poison every reward the knob enters, even at a
-    zero multiplier.
+    zero multiplier; and a bool is an int subclass that would price the knob at 0 or 1.
     """
     for name, value in knobs.items():
-        if not math.isfinite(value) or value < 0:
-            raise ValueError(f"{name} must be a finite value >= 0 (a magnitude), got {value}")
+        if isinstance(value, bool) or not isinstance(value, int | float) or not math.isfinite(value) or value < 0:
+            raise ValueError(f"{name} must be a finite value >= 0 (a magnitude), got {value!r}")
 
 
 def require_count(name: str, value: Any, minimum: int) -> None:
@@ -254,9 +254,10 @@ class Message:
     reasoning_tokens: int | None = None
     # Engine cut the turn off at its token cap: the text is a fragment, never rewarded (``untrainable``).
     truncated: bool = False
-    # Every tool call named a tool that does not exist or was refused as carrying nothing to run, so the
-    # turn accomplished nothing — never rewarded like a fragment, or a recovering episode reinforces the
-    # invented call or the refused program that cost it a turn.
+    # Every tool call named a tool that does not exist, was refused as carrying nothing to run, or ran and
+    # showed nothing (``UninformativeReply``), so the turn accomplished nothing — never rewarded like a
+    # fragment, or a recovering episode reinforces the invented call, the refused program or the empty run
+    # that cost it a turn.
     calls_rejected: bool = False
     # The model ended the turn with neither visible content nor a tool call — never rewarded for the
     # same reason: a recovering episode would reinforce stopping on nothing.
@@ -280,10 +281,11 @@ class Message:
     @property
     def untrainable(self) -> bool:
         """An assistant turn no tokenization path may reward: an engine-cut fragment (``truncated``),
-        a turn whose every tool call named a nonexistent tool or was refused unrun (``calls_rejected``)
-        or one that ended on nothing (``empty``). It stays in the render later turns condition on; its sampled ids train
-        only under a negative advantage, so the runaway, the invented call or the empty stop takes the
-        failure signal of an episode that fails and none of the credit of one that recovers."""
+        a turn whose every tool call named a nonexistent tool, was refused unrun or ran and showed nothing
+        (``calls_rejected``) or one that ended on nothing (``empty``). It stays in the render later turns
+        condition on; its sampled ids train only under a negative advantage, so the runaway, the invented
+        call or the empty stop takes the failure signal of an episode that fails and none of the credit of
+        one that recovers."""
         return self.truncated or self.calls_rejected or self.empty
 
     @classmethod
@@ -739,8 +741,8 @@ class BaseEnvironment(ABC):
         return message
 
     def _flag_calls_rejected(self, trajectory: Trajectory) -> None:
-        """Mark the turn just taken as one whose every call named a nonexistent tool
-        (:attr:`Message.calls_rejected`), so no tokenization path rewards it."""
+        """Mark the turn just taken as one whose every call named a nonexistent tool, was refused unrun or
+        ran and showed nothing (:attr:`Message.calls_rejected`), so no tokenization path rewards it."""
         self._last_assistant_message(trajectory).calls_rejected = True
 
     def _truncate_observation(self, content: str, limit: int | None = None) -> str:

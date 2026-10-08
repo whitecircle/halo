@@ -13,7 +13,8 @@ episode is the price's cap plus the floor's weight. No shipped recipe runs a pri
 bind on a recipe that sets one, and a priced copy of a shipped recipe shows they refuse a bad one.
 
 The episode output budget (``rollout_max_episode_tokens``) is the other relation: it has to bind below
-what ``max_turns`` turns of ``rollout_max_tokens`` could sample, or it bounds nothing. And the per-turn
+what ``max_turns`` turns of ``rollout_max_tokens`` could sample, or it bounds nothing; on vLLM the answer
+room (``rollout_max_answer_tokens``) has to bind below ``rollout_max_tokens`` at every level. And the per-turn
 thinking budgets are one contract at every family, so a recipe states the same reasoning economy
 whichever model it trains.
 
@@ -70,6 +71,7 @@ def _economy(path: Path) -> dict:
         "ceiling": cfg.get("rollout_max_thinking_tokens"),
         "max_tokens": cfg.get("rollout_max_tokens", _DEFAULTS.rollout_max_tokens),
         "episode_tokens": cfg.get("rollout_max_episode_tokens"),
+        "answer_tokens": cfg.get("rollout_max_answer_tokens"),
         "max_turns": cfg["max_turns"],
     }
 
@@ -169,6 +171,24 @@ def test_the_episode_output_budget_binds_below_what_the_turn_caps_alone_allow(pa
         f"the per-turn caps alone let an episode sample {uncapped} tokens over {e['max_turns']} turns, so a "
         f"budget of {e['episode_tokens']} never binds"
     )
+
+
+@pytest.mark.parametrize("path", RECIPES, ids=_ids(RECIPES))
+def test_the_answer_room_binds_below_the_turn_ceiling_at_every_level(path):
+    """Past its reasoning cap a turn generates at most the answer room, at every level: a level whose cap
+    plus that room reached ``rollout_max_tokens`` would leave the turn its whole ceiling, room enough to
+    carry the reasoning on in a program's comments. SGLang forces no close at the cap, so its recipes run
+    without the bound."""
+    e = _economy(path)
+    if e["raw"].get("rollout_backend") == "sglang":
+        assert e["answer_tokens"] is None, f"{path.name} bounds an answer room SGLang never opens"
+        return
+    assert isinstance(e["answer_tokens"], int), f"{path.name} does not state rollout_max_answer_tokens"
+    for level in VALID_REASONING_EFFORTS:
+        assert _cap(e, level) + e["answer_tokens"] < e["max_tokens"], (
+            f"at {level}, a {_cap(e, level)}-token cap plus a {e['answer_tokens']}-token answer room does not "
+            f"bind below the {e['max_tokens']}-token turn ceiling"
+        )
 
 
 @pytest.mark.parametrize("path", RECIPES, ids=_ids(RECIPES))

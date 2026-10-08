@@ -104,9 +104,14 @@ def test_script_model_uses_resolved_checkpoint_identity_not_resume_flag(tmp_path
     pc = make_parallelism_config(world_size=8, gpus_per_node=8, ep_size=8)
     checkpoint, source = prepare_distributed_resume(training, model_config, pc)
     runtime = ScriptRuntime(pc, "ep", 0, checkpoint, source)
-    loader = Mock(return_value=(SimpleNamespace(), SimpleNamespace()))
+
+    def load(**kwargs):
+        # The name from_pretrained gives the config of the directory it read.
+        return SimpleNamespace(config=SimpleNamespace(_name_or_path=kwargs["model_name_or_path"])), SimpleNamespace()
+
+    loader = Mock(side_effect=load)
     monkeypatch.setattr(vlm_setup, "load_distributed_model", loader)
-    load_script_model(
+    model, _ = load_script_model(
         runtime,
         training,
         model_config,
@@ -117,6 +122,8 @@ def test_script_model_uses_resolved_checkpoint_identity_not_resume_flag(tmp_path
     assert runtime.policy_from_checkpoint is expected
     assert loader.call_args.kwargs["model_name_or_path"] == (str(checkpoint_dir) if expected else "org/base")
     assert model_config.model_name_or_path == "org/base"
+    # A resumed run's model card names this as its base_model (tests/cpu/grpo/test_resume_reference_source.py).
+    assert model.config._name_or_path == "org/base"
 
 
 def test_modality_aware_training_calls_forward_the_runtime_checkpoint_identity():

@@ -142,7 +142,7 @@ class DistributedDPOTrainer(
         super().__init__(*args, **kwargs)
         # Post-super: TRL builds its own reference inside __init__ when none is passed, the model is not
         # PEFT-wrapped and precompute_ref_log_probs is off.
-        self._validate_implicit_reference_model()
+        self._validate_held_reference_model()
         self._setup_distributed_modes()
 
     def _validate_pp_mode(self, ctor_args: tuple, kwargs: dict) -> None:

@@ -16,6 +16,8 @@ import subprocess
 import tempfile
 import time
 from collections.abc import Callable, Iterable
+from contextlib import ExitStack
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -30,6 +32,7 @@ logger = logging.getLogger(__name__)
 __all__ = [
     "FLAMEGRAPH_DIR",
     "STACK_DUMP_DIR",
+    "PySpyCapture",
     "assert_consistent",
     "assert_tensor_shape_consistent",
     "dump_distributed_stacks",
@@ -48,6 +51,14 @@ FLAMEGRAPH_DIR = os.path.join(tempfile.gettempdir(), "halo_diag_flamegraphs")
 _PY_SPY_DUMP_TIMEOUT_S = 10
 _PY_SPY_RECORD_GRACE_S = 30
 _PGREP_TIMEOUT_S = 5
+
+
+@dataclass(frozen=True)
+class PySpyCapture:
+    """One py-spy sweep: its artifact ``directory`` and, by pid, why each failed attach failed."""
+
+    directory: Path
+    failures: dict[int, str]
 
 
 def assert_consistent(
@@ -103,25 +114,23 @@ def dump_distributed_stacks(
     output_dir: str | Path = STACK_DUMP_DIR,
     *,
     pids: Iterable[int] | None = None,
-) -> Path | None:
+) -> PySpyCapture | None:
     """Capture a ``py-spy dump`` for every Python rank on this node.
 
-    Writes one file per pid into a timestamped sub-directory and returns that path, or ``None``
+    Writes one file per pid into a timestamped sub-directory and returns the capture, or ``None``
     without py-spy. A hang on one rank dumps the whole node (this process plus torchrun's other
     children); explicit ``pids`` overrides that discovery, as py_spy_diag.py does.
     """
     if not shutil.which("py-spy"):
         return None
 
-    target = _py_spy_artifact_dir(output_dir)
-    _run_py_spy_per_pid(
-        target,
+    return _run_py_spy_per_pid(
+        _py_spy_artifact_dir(output_dir),
         _py_spy_target_pids(pids, include_children=True),
         lambda pid, _target: ["py-spy", "dump", "--pid", str(pid)],
         timeout=_PY_SPY_DUMP_TIMEOUT_S,
-        stdout_suffix=".txt",
+        output_suffix=".txt",
     )
-    return target
 
 
 def record_distributed_flamegraph(
@@ -132,13 +141,13 @@ def record_distributed_flamegraph(
     native: bool = False,
     this_rank_only: bool = True,
     pids: Iterable[int] | None = None,
-) -> Path | None:
+) -> PySpyCapture | None:
     """Record a ``py-spy`` CPU flame graph (SVG) for this node's ranks.
 
     Samples over ``duration`` seconds to find CPU-side bottlenecks (dataloader stalls,
     tokenization), where :func:`dump_distributed_stacks` snapshots a hang instead. Writes one
-    ``pid<pid>.svg`` per process; ``this_rank_only=False`` profiles every torchrun child, and
-    explicit ``pids`` overrides discovery.
+    ``pid<pid>.svg`` (and its ``pid<pid>.log``) per process; ``this_rank_only=False`` profiles every
+    torchrun child, and explicit ``pids`` overrides discovery. ``None`` without py-spy.
     """
     if not shutil.which("py-spy"):
         return None
@@ -162,14 +171,13 @@ def record_distributed_flamegraph(
             command.append("--native")
         return command
 
-    target = _py_spy_artifact_dir(output_dir)
-    _run_py_spy_per_pid(
-        target,
+    return _run_py_spy_per_pid(
+        _py_spy_artifact_dir(output_dir),
         _py_spy_target_pids(pids, include_children=not this_rank_only),
         _record_command,
         timeout=duration + _PY_SPY_RECORD_GRACE_S,
+        output_suffix=".log",
     )
-    return target
 
 
 def torchrun_python_pids() -> set[int]:
@@ -239,21 +247,45 @@ def _run_py_spy_per_pid(
     build_command: Callable[[int, Path], list[str]],
     *,
     timeout: int,
-    stdout_suffix: str | None = None,
-) -> None:
-    """Run one ``build_command(pid, target)`` invocation per pid, recording failures beside the output.
+    output_suffix: str,
+) -> PySpyCapture:
+    """Run one ``build_command(pid, target)`` invocation per pid, all at once, and report each failure.
 
-    A failed attach writes ``pid<pid>.error`` and the loop continues, so one bad pid does not abort
-    a sweep over a hanging job. ``stdout_suffix`` captures the tool's stdout+stderr into
-    ``pid<pid><suffix>`` for the subcommands that write to stdout.
+    Concurrent, so every rank is captured over the same window: a sequential sweep samples the last
+    rank ``len(pids)`` windows late. The tool's stdout+stderr land in ``pid<pid><output_suffix>``. A
+    failed attach (a non-zero exit, the timeout, a launch error) writes ``pid<pid>.error`` while the
+    others run on, so one bad pid does not abort a sweep over a hanging job.
     """
-    for pid in sorted(pids):
-        command = build_command(pid, target)
-        try:
-            if stdout_suffix is None:
-                subprocess.run(command, timeout=timeout, check=False)
-            else:
-                with (target / f"pid{pid}{stdout_suffix}").open("w") as out_file:
-                    subprocess.run(command, stdout=out_file, stderr=subprocess.STDOUT, timeout=timeout, check=False)
-        except (subprocess.SubprocessError, OSError) as exc:
-            (target / f"pid{pid}.error").write_text(f"{type(exc).__name__}: {exc}\n")
+    running: dict[int, subprocess.Popen] = {}
+    failures: dict[int, str] = {}
+    with ExitStack() as stack:
+        # Unwinds last, so no py-spy stays attached to a rank: neither one past the timeout nor one
+        # still sampling when an error or an interrupt leaves this block early.
+        stack.callback(_stop_running, running)
+        for pid in sorted(pids):
+            output = stack.enter_context((target / f"pid{pid}{output_suffix}").open("w"))
+            try:
+                running[pid] = subprocess.Popen(build_command(pid, target), stdout=output, stderr=subprocess.STDOUT)
+            except OSError as exc:
+                failures[pid] = f"{type(exc).__name__}: {exc}"
+        deadline = time.monotonic() + timeout
+        for pid, process in running.items():
+            try:
+                returncode = process.wait(timeout=max(0.0, deadline - time.monotonic()))
+            except subprocess.TimeoutExpired:
+                failures[pid] = f"py-spy did not finish within {timeout}s"
+                continue
+            if returncode != 0:
+                lines = (target / f"pid{pid}{output_suffix}").read_text().strip().splitlines()
+                failures[pid] = f"py-spy exited {returncode}: {lines[-1] if lines else '(no output)'}"
+    for pid, reason in failures.items():
+        (target / f"pid{pid}.error").write_text(f"{reason}\n")
+    return PySpyCapture(target, dict(sorted(failures.items())))
+
+
+def _stop_running(processes: dict[int, subprocess.Popen]) -> None:
+    """Kill and reap every process in ``processes`` that is still running."""
+    for process in processes.values():
+        if process.poll() is None:
+            process.kill()
+            process.wait()

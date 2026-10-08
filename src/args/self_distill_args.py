@@ -1,12 +1,11 @@
 """Script arguments for offline privileged-context self-distillation."""
 
-import math
 from dataclasses import dataclass, field, fields
 from typing import ClassVar
 
 from src.args.mixins import DEFAULT_ANSWER_FIELD, SDPGArguments, SelfDistillationLoss, format_field_names
 from src.args.sft_args import SFTScriptArguments
-from src.args.validation import require_positive
+from src.args.validation import require_finite, require_positive
 
 
 @dataclass
@@ -98,7 +97,8 @@ class SelfDistillationArguments(SFTScriptArguments, SDPGArguments):
     def _validate_ranges(self) -> None:
         super()._validate_ranges()
         # A NaN coefficient NaNs every loss; a negative one pushes the student away from the anchor.
-        if not math.isfinite(self.reference_kl_coef) or self.reference_kl_coef < 0:
+        require_finite(type(self).__name__, reference_kl_coef=self.reference_kl_coef)
+        if self.reference_kl_coef < 0:
             raise ValueError(f"reference_kl_coef must be a finite value >= 0, got {self.reference_kl_coef}")
         # p <= 0 inverts or flattens the weighting, and a zero confidence then divides by zero.
         require_positive(type(self).__name__, confidence_power=self.confidence_power)

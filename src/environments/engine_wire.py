@@ -145,8 +145,8 @@ def generation_control_fields(
     cannot reach one and quietly miss the other.
 
     ``reasoning_effort`` goes out TOP-LEVEL: that spelling is the one both engines derive their
-    thinking toggles from (vLLM ``enable_thinking``, SGLang ``thinking`` + ``enable_thinking``) and
-    both hand the template. Each engine also reads a nested copy and lets one spelling override the
+    thinking toggles from (vLLM ``enable_thinking``, SGLang ``thinking`` + ``enable_thinking``: on for
+    any level but ``none``, unless ``chat_template_kwargs`` sets the toggle) and both hand the template. Each engine also reads a nested copy and lets one spelling override the
     other — vLLM the top-level field, SGLang the nested one, which it pops into the top-level field
     before rendering — so on SGLang the same value rides nested too, an exact copy that leaves one
     value whichever spelling the engine reads.

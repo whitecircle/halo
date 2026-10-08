@@ -133,7 +133,7 @@ def test_round_may_not_exceed_the_in_flight_cap():
 
 
 def test_config_refuses_a_non_positive_round():
-    with pytest.raises(ValueError, match="eval_rollout_batch_size must be >= 1"):
+    with pytest.raises(ValueError, match="eval_rollout_batch_size must be an int >= 1"):
         AsyncTrainingConfig(eval_rollout_batch_size=0)
 
 

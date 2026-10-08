@@ -176,6 +176,13 @@ class LanguageSpec:
     # The language's comment syntax, what the coding environments' comment accounting reads.
     line_comment: str = "#"
     block_comment: tuple[str, str] | None = None
+    # A pattern the language's usual reads of standard input match (a mention is not a read), searched with
+    # the source's comments and string literals removed: how code contests tells a draft run on no input from
+    # a self-test that embeds its own. A read it misses leaves such a run unflagged.
+    stdin_read: str = r"\bstdin\b"
+    # A pattern a source that swaps its standard input for an in-memory buffer matches, searched the same
+    # way: its reads then read the buffer, not the run's stdin.
+    stdin_redirect: str | None = None
 
     @property
     def is_compiled(self) -> bool:
@@ -190,6 +197,10 @@ LANGUAGES: dict[str, LanguageSpec] = {
         # so a session can import workspace modules written on earlier turns.
         run_argv=(INTERPRETER_PLACEHOLDER, "-s", "-E", "main.py"),
         aliases=("py", "python3"),
+        # Calls and iteration, so a template's `input = sys.stdin.readline` reads nothing until input() runs.
+        stdin_read=r"\binput\s*\(|\bstdin\s*\.\s*(?:buffer\s*\.\s*)?read\w*\s*\(|\bin\s+(?:sys\s*\.\s*)?stdin\b"
+        r"|[(,]\s*sys\s*\.\s*stdin\s*[),]|\bopen\s*\(\s*0\b|\bos\s*\.\s*read\s*\(\s*0\b|\bfileinput\b",
+        stdin_redirect=r"\bsys\s*\.\s*stdin\s*=\s*(?:io\s*\.\s*)?(?:StringIO|BytesIO)\s*\(",
     ),
     "bash": LanguageSpec(
         name="bash",
@@ -197,6 +208,7 @@ LANGUAGES: dict[str, LanguageSpec] = {
         # Run by name off the child's PATH: unlike Python there is no toolkit interpreter to pin to.
         run_argv=("bash", "main.sh"),
         aliases=("sh", "shell"),
+        stdin_read=r"\bread\b|\bcat\b|\bstdin\b",
     ),
     "cpp": LanguageSpec(
         name="cpp",
@@ -206,6 +218,12 @@ LANGUAGES: dict[str, LanguageSpec] = {
         aliases=("c++", "cxx", "cc"),
         line_comment="//",
         block_comment=("/*", "*/"),
+        # Reads, not mentions: fast-IO boilerplate (`cin.tie(nullptr)`) reads nothing, and a read that takes its
+        # stream (getline, fgets, fread, getc) names cin or stdin only when it reads standard input.
+        stdin_read=r"\bcin\s*>>|\bcin\s*\.\s*(?:get|getline|read|readsome|peek|ignore)\b"
+        r"|[(,=]\s*(?:std\s*::\s*)?cin\b(?!\s*\.)|\b(?:scanf|getchar|getchar_unlocked)\b|\bstdin\b"
+        r"|\bread\s*\(\s*(?:0|STDIN_FILENO)\b",
+        stdin_redirect=r"\bcin\s*\.\s*rdbuf\s*\(\s*[^\s)]",
     ),
     "c": LanguageSpec(
         name="c",
@@ -215,6 +233,7 @@ LANGUAGES: dict[str, LanguageSpec] = {
         aliases=(),
         line_comment="//",
         block_comment=("/*", "*/"),
+        stdin_read=r"\b(?:scanf|getchar|getchar_unlocked)\b|\bstdin\b|\bread\s*\(\s*(?:0|STDIN_FILENO)\b",
     ),
 }
 

@@ -94,8 +94,7 @@ def test_every_rlrr_invariant_fails_when_the_args_are_built(kwargs, match, use_r
 
 
 def test_an_inverted_band_fails_on_the_cli_override_path(tmp_path):
-    """``--key=value`` overrides bypass ``__post_init__``; the cooperative ``_validate_ranges`` re-run
-    must reach the RLRR block too."""
+    """A ``--key=value`` override meets the RLRR block of the cooperative ``_validate_ranges`` chain."""
     yaml_path = tmp_path / "rlvr.yaml"
     yaml_path.write_text("use_rlrr: true\n")
     parser = H4ArgumentParser((RLVROnlineGRPOScriptArguments,))

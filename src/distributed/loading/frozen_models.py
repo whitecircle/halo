@@ -6,9 +6,11 @@ separate dense reference are here too.
 """
 
 import contextlib
+import dataclasses
 import logging
 
 import torch
+from accelerate.utils import is_peft_model
 from transformers import AutoConfig, AutoModelForImageTextToText, PreTrainedModel
 from trl import ModelConfig
 
@@ -38,18 +40,43 @@ logger = logging.getLogger(__name__)
 # ``load_frozen_reference_model``'s default ``revision``: the policy's own pin.
 _POLICY_REVISION = object()
 
+
+@dataclasses.dataclass(frozen=True)
+class ReferenceAlternatives:
+    """A caller's ways around holding a frozen reference, named by every reference warning and refusal.
+
+    ``peft`` is named only where an adapter can train: tensor parallelism refuses every LoRA shape
+    (``_validate_lora_tp_compatibility``), so under TP the text is ``always`` alone.
+    """
+
+    always: str
+    peft: str | None = None
+
+    def under(self, parallelism_config: ParallelismConfig) -> str:
+        """The alternatives this parallelism shape can run."""
+        if self.peft is None or parallelism_config.is_tp_mode:
+            return self.always
+        return f"{self.always} {self.peft}"
+
+
 # The DPO/KTO way around a dense reference, shared by the script loader and the trainer gate so the
 # two report it once.
-PREFERENCE_REFERENCE_ALTERNATIVES = (
-    "precompute_ref_log_probs: true scores the same reference once, from the untrained policy, exactly "
-    "and with no second model; PEFT (use_peft: true, ref_model=None) is the other way around it."
+PREFERENCE_REFERENCE_ALTERNATIVES = ReferenceAlternatives(
+    always="precompute_ref_log_probs: true scores the same reference once, from the untrained policy, exactly "
+    "and with no second model.",
+    peft="PEFT (use_peft: true, ref_model=None) is the other way around it.",
+)
+# The on-policy GRPO way around it, shared the same way.
+ON_POLICY_GRPO_REFERENCE_ALTERNATIVES = ReferenceAlternatives(
+    always="beta: 0 drops the KL term and its reference.",
+    peft="use_peft: true with an attention target scores the reference as the policy with its adapter disabled.",
 )
 
 # Messages already reported: the script loader and the trainer gate report one reference once.
 _REPORTED_REFERENCES: set[str] = set()
 
 
-def warn_unparallelized_reference(parallelism_config, avoid: str) -> None:
+def warn_unparallelized_reference(parallelism_config: ParallelismConfig, avoid: ReferenceAlternatives) -> None:
     """Warn that a frozen reference beside a policy sharded by EP, ETP or TP is a whole dense replica per rank.
 
     Its log-probs are still the policy's function on the reference weights. The model's own MoE forward is
@@ -65,9 +92,18 @@ def warn_unparallelized_reference(parallelism_config, avoid: str) -> None:
             f"expert_tensor_parallel_size={parallelism_config.expert_tp_size}, "
             f"tensor_parallel_size={parallelism_config.tp_size}) is a whole dense replica on every rank, "
             f"experts included, run through the model's own MoE forward: its log-probs match the policy's "
-            f"up to kernel numerics, but budget for its memory and its slower forward. {avoid}"
+            f"up to kernel numerics, but budget for its memory and its slower forward. "
+            f"{avoid.under(parallelism_config)}"
         )
         warn_once(logger, _REPORTED_REFERENCES, message, message)
+
+
+def on_policy_grpo_holds_reference(beta: float, peft_config, model=None) -> bool:
+    """TRL ``GRPOTrainer``'s own rule for holding a frozen KL reference: ``beta != 0`` on a policy no PEFT
+    adapter wraps, neither through a ``peft_config`` nor as a ``PeftModel`` passed in. Native expert-only LoRA
+    builds no ``PeftModel``, so it holds one. ``model`` may be a name or absent, which no adapter wraps."""
+    wrapped = isinstance(model, torch.nn.Module) and is_peft_model(model)
+    return beta != 0.0 and peft_config is None and not wrapped
 
 
 def load_frozen_auxiliary_model(
@@ -207,6 +243,42 @@ def load_frozen_reference_model(
     )
     setup_model_and_tokenizer(args, model_ref, tokenizer, embeddings_sharded=input_embeddings_tp_sharded)
     return model_ref
+
+
+def load_reference_model_for_on_policy_grpo(
+    args,
+    model_config: ModelConfig,
+    training_config,
+    parallelism_config: ParallelismConfig,
+    tokenizer,
+    *,
+    peft_config,
+    reset_sinks: bool,
+    attn_default: str | None,
+) -> PreTrainedModel | None:
+    """Load the frozen KL reference of an on-policy GRPO run, or ``None`` where TRL's ``GRPOTrainer`` holds none.
+
+    TRL holds one at ``beta != 0`` on a policy no PEFT adapter wraps: a full fine-tune, or native expert-only
+    LoRA, which builds no ``PeftModel``. A PEFT policy is its own reference with the adapter disabled. The
+    trainer hands this model to TRL in place of the one TRL would build from the policy's name: fp32, the hub's
+    default revision, the default attention, no buffer repair. It loads from the run's configured model, never
+    a resume checkpoint, as the policy loaded, so ``reset_sinks`` and ``attn_default`` must be the policy's.
+    The class resolves from the config as the policy's does (the on-policy scripts refuse
+    ``text_only_model``), so a multimodal checkpoint gets its multimodal class on both sides.
+    """
+    if not on_policy_grpo_holds_reference(training_config.beta, peft_config):
+        return None
+    warn_unparallelized_reference(parallelism_config, ON_POLICY_GRPO_REFERENCE_ALTERNATIVES)
+    return load_frozen_reference_model(
+        args,
+        model_config,
+        training_config,
+        tokenizer,
+        model_config.model_name_or_path,
+        is_vlm=False,
+        reset_sinks=reset_sinks,
+        attn_default=attn_default,
+    )
 
 
 def load_reference_model_for_preference(

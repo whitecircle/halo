@@ -15,6 +15,10 @@ the base save's trainer state) or its optimizer shards (after it):
    midway, the rewrite leaves no trainer state vouching for the mix of old and new files, and
    detection again resumes from ``checkpoint-1``.
 3. **An explicit path** to the stopped step is refused on every rank, naming it.
+4. **No trainer state to commit.** A save rank the base save wrote no trainer state for (a base save
+   that wrote none, or writers that are not the output filesystem's save ranks) fails the save on
+   every rank before rotation, which under ``save_total_limit: 1`` would otherwise remove
+   ``checkpoint-1`` for a ``checkpoint-2`` no resume takes.
 
     python tests/cpu/checkpoint/test_interrupted_save_resume.py
 """
@@ -53,6 +57,13 @@ class _StateWriteThenStop(TrainerState):
     def save_to_json(self, json_path):
         super().save_to_json(json_path)
         raise _Preempted("stopped right after the trainer state was written (simulated preemption)")
+
+
+class _StateNeverWritten(TrainerState):
+    """A base save that leaves no trainer state behind."""
+
+    def save_to_json(self, json_path):
+        return None
 
 
 class _ShardSaveStopped:
@@ -174,6 +185,65 @@ def test_a_stopped_save_is_passed_over_by_resume_detection(tmp_path, per_node, r
         assert "checkpoint-2" in outcome["explicit"] and "incomplete" in outcome["explicit"], (
             f"rank {rank} accepted an explicit resume from the stopped step: {outcome['explicit']}"
         )
+
+
+def _uncommittable_worker(rank: int, root: str, per_node: bool, cause: str) -> None:
+    """Save step 2 under ``save_total_limit: 1`` with no trainer state for some save rank to commit."""
+    outcome = {}
+    try:
+        PartialState()
+        runtime.resolve_shared_filesystem_consensus()
+        run_dir = os.path.join(root, f"node_{rank}" if per_node else "shared", "out")
+        if fs_aware_save_rank():
+            _plant_complete_checkpoint(run_dir, 1, "previous")
+        runtime.barrier()
+
+        trainer = _Trainer(run_dir, stop="none")
+        trainer._fsdp_wrapped = False
+        trainer.args.save_total_limit = 1
+        if cause == "never-written":
+            trainer.state = _StateNeverWritten(global_step=2)
+        else:
+            trainer.args.should_save = get_global_rank() == 0
+        try:
+            trainer._save_checkpoint(model=None, trial=None)
+            outcome["save"] = "completed"
+        except RuntimeError as e:
+            outcome["save"] = str(e)
+        outcome["previous_kept"] = os.path.isfile(os.path.join(run_dir, "checkpoint-1", TRAINER_STATE))
+        auto = SimpleNamespace(output_dir=run_dir, resume_from_checkpoint=True, overwrite_output_dir=False)
+        resumed = detect_resume_checkpoint(auto)
+        outcome["auto_resume"] = resumed and os.path.basename(resumed)
+    except Exception as e:  # the setup failing must still leave a verdict file for the assertions
+        outcome["setup"] = f"{type(e).__name__}: {e}"
+    finally:
+        runtime.reset_shared_filesystem_consensus()
+    with open(os.path.join(root, f"result_{get_global_rank()}.json"), "w") as fh:
+        json.dump(outcome, fh)
+
+
+@pytest.mark.parametrize(
+    ("per_node", "cause"),
+    [(False, "never-written"), (True, "never-written"), (True, "writers-misaligned")],
+    ids=["shared-never-written", "per-node-never-written", "per-node-writers-misaligned"],
+)
+def test_a_save_rank_with_no_trainer_state_fails_the_save_before_rotation(tmp_path, per_node, cause):
+    run_gloo_ranks(
+        _uncommittable_worker,
+        WORLD_SIZE,
+        str(tmp_path),
+        per_node,
+        cause,
+        pg_timeout=PG_TIMEOUT,
+        env=PER_NODE_ENV if per_node else SHARED_ENV,
+    )
+    for rank in range(WORLD_SIZE):
+        outcome = json.loads((tmp_path / f"result_{rank}.json").read_text())
+        assert "setup" not in outcome, f"rank {rank}: {outcome['setup']}"
+        assert outcome["save"].startswith(f"Committing {TRAINER_STATE}"), f"rank {rank} saved: {outcome['save']}"
+        assert "wrote no trainer state on this save rank" in outcome["save"], f"rank {rank}: {outcome['save']}"
+        assert outcome["previous_kept"], f"rank {rank}: rotation removed checkpoint-1 for an uncommitted save"
+        assert outcome["auto_resume"] == "checkpoint-1", f"rank {rank} resumed from {outcome['auto_resume']}"
 
 
 if __name__ == "__main__":

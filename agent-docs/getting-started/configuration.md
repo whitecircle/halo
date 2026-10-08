@@ -10,7 +10,7 @@ python scripts/training/sft.py examples/sft/qwen3/qwen3-4b-ultrachat.yaml
 
 `H4ArgumentParser` (`src/training/parser.py`) extends `HfArgumentParser` with:
 
-- **Toolkit defaults**, applied unless explicitly set in the YAML or on the CLI: `use_liger_kernel: true`, `bf16: true`, `logging_nan_inf_filter: false`. The `bf16` default yields to an explicitly-enabled `fp16`, and `mixed_precision` is re-derived after defaults and CLI overrides so it always matches the final flags.
+- **Toolkit defaults**, applied unless explicitly set in the YAML or on the CLI: `use_liger_kernel: true`, `bf16: true`, `logging_nan_inf_filter: false`. Each is a value the YAML did not write, handed to every config declaring the field before it is built, so `TrainingArguments` derives `mixed_precision` from it. The `bf16` default yields to an explicitly-enabled `fp16`.
 
     Upstream's `logging_nan_inf_filter: true` reads a device scalar back to the host per micro-batch and logs the running average in place of a NaN loss: a per-step sync plus a hidden divergence.
 
@@ -28,20 +28,23 @@ must be in --key=value form".
 
 An override matching no field on any of the script's config dataclasses fails loudly, as does an
 unknown YAML key. `--field=None`, `--field=null` and `--field=none` all clear any Optional field
-instead of setting the literal string — including container unions like
-`report_to: None | str | list[str]`, the standard way to silence logging on a smoke run. Two
-carve-outs: a `Literal` whose choices include the string `"none"` gets the string
-(`--moe_balancing=none`), and an optional bool refuses the spelling outright (`--bf16=none` raises —
-clearing a precision flag silently is exactly the failure the parser exists to prevent).
+instead of setting the literal string, container unions included. Three carve-outs: a `Literal`
+whose choices include the string `"none"` gets the string (`--moe_balancing=none`); a field whose
+default spells "no value" as a string of its own gets that string — `--report_to=none` reaches
+transformers as `"none"`, no integrations, the standard way to silence logging on a smoke run, where
+`None` would come out of its `__post_init__` as `[None]`, which the Trainer refuses; and an optional
+bool refuses the spelling outright (`--bf16=none` raises — clearing a precision flag silently is
+exactly the failure the parser exists to prevent).
 
 Setting a value on a field with no confident string cast — dict-typed fields, lists of containers
 (`rollout_server_configs: list[dict]`), and unions with a container member (`dataset: str | list[str]`,
 `--report_to=wandb`) — still requires the YAML.
 
-Overrides are applied with `setattr`, so `__post_init__` does not re-run. Configs carrying numeric or
-cross-field guards inherit `RangeValidatedConfig` (`src/args/validation.py`) and put those guards in
-`_validate_ranges()`; the parser re-runs them through `__post_override__` after applying overrides,
-so a CLI value is held to exactly the bounds a YAML value is.
+Each override is cast to its field's type and merged over the YAML, and every config dataclass is
+built once from the merged values: each `__post_init__` — transformers', TRL's and the toolkit's —
+derives its state from, and validates, the final configuration. `--gradient_accumulation_steps=1`
+over a YAML's `8` therefore also re-derives GRPO's `steps_per_generation` and
+`generation_batch_size`, and a CLI value meets exactly the guards a YAML value does.
 
 ```bash
 python scripts/training/sft.py examples/sft/qwen3/qwen3-4b-ultrachat.yaml \

@@ -16,7 +16,11 @@ from huggingface_hub import constants as hub_constants
 from huggingface_hub import snapshot_download
 from huggingface_hub.errors import HFValidationError, LocalEntryNotFoundError
 
-from src.checkpoint.format import SAFETENSORS_INDEX_FILE, resolve_checkpoint_weights
+from src.checkpoint.format import (
+    HUB_SUBFOLDER_IGNORE_PATTERNS,
+    SAFETENSORS_INDEX_FILE,
+    resolve_checkpoint_weights,
+)
 from src.distributed.filesystem import fs_aware_main_first, store_join_recorded_failure
 from src.distributed.runtime import (
     broadcast_from_rank0,
@@ -42,10 +46,17 @@ class _SourceView(NamedTuple):
     weight_files: tuple[str, ...] = ()
 
 
-def resolve_model_source(model_name_or_path: str, revision: str | None, *, tag: str) -> str | None:
+def resolve_model_source(
+    model_name_or_path: str, revision: str | None, *, tag: str, whole_repo: bool = False
+) -> str | None:
     """Fetch ``model_name_or_path`` main-rank-first and return the revision every rank loads it at.
 
     COLLECTIVE-EQUIVALENT — every rank calls it with the same ``tag``, equally often.
+
+    The fetch takes the repo's top-level files (:data:`~src.checkpoint.format.HUB_SUBFOLDER_IGNORE_PATTERNS`),
+    where a model's config, tokenizer, weights and remote code sit, so the weight dumps a repo also ships
+    in subfolders stay on the Hub. ``whole_repo`` is for a loader that reads subfolders too (a
+    sentence-transformers pipeline keeps its modules in them).
 
     The fetch is scoped like :func:`~src.distributed.filesystem.fs_aware_main_first`: global rank 0
     on a shared input filesystem, each node's local rank 0 on a per-node one. Every rank then
@@ -67,7 +78,7 @@ def resolve_model_source(model_name_or_path: str, revision: str | None, *, tag: 
     view: _SourceView | None = None
     with fs_aware_main_first(f"model_source/{tag}"):
         try:
-            view = _resolve_on_this_rank(model_name_or_path, revision, fetch=fetch)
+            view = _resolve_on_this_rank(model_name_or_path, revision, fetch=fetch, whole_repo=whole_repo)
         except Exception as exc:  # joined below, so every rank raises with it
             failure = exc
     store_join_recorded_failure(f"model_source/{tag}", failure, f"Resolving the checkpoint {model_name_or_path!r}")
@@ -84,7 +95,9 @@ def resolve_model_source(model_name_or_path: str, revision: str | None, *, tag: 
     return view.resolved
 
 
-def _resolve_on_this_rank(model_name_or_path: str, revision: str | None, *, fetch: bool) -> _SourceView:
+def _resolve_on_this_rank(
+    model_name_or_path: str, revision: str | None, *, fetch: bool, whole_repo: bool
+) -> _SourceView:
     """This rank's view of the source: a local directory, or the snapshot its Hub cache holds.
 
     ``fetch`` downloads whatever the cache lacks; without it the cache alone answers, so a rank that
@@ -93,7 +106,12 @@ def _resolve_on_this_rank(model_name_or_path: str, revision: str | None, *, fetc
     if os.path.isdir(model_name_or_path):
         return _SourceView(_LOCAL_DIRECTORY)
     try:
-        snapshot = snapshot_download(model_name_or_path, revision=revision, local_files_only=not fetch)
+        snapshot = snapshot_download(
+            model_name_or_path,
+            revision=revision,
+            local_files_only=not fetch,
+            ignore_patterns=None if whole_repo else list(HUB_SUBFOLDER_IGNORE_PATTERNS),
+        )
     except (HFValidationError, LocalEntryNotFoundError) as exc:
         raise FileNotFoundError(_unresolvable_reason(model_name_or_path, revision, exc if fetch else None)) from exc
     return _SourceView(os.path.basename(snapshot), snapshot, _weight_files(snapshot))

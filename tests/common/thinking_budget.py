@@ -46,9 +46,10 @@ def _chat(server_url: str, model_name: str, budget: int | None, seed: int) -> re
         "max_tokens": _PROBE_MAX_TOKENS,
         "temperature": _PROBE_TEMPERATURE,
         "seed": seed,
-        # Top-level, exactly as generation_control_fields sends it: this spelling is what the engines
-        # derive their thinking toggles from — a request without it renders with thinking off and no
-        # reasoning channel ever opens, whatever the sampling.
+        # Top-level, exactly as generation_control_fields sends it. vLLM sets the template's
+        # enable_thinking from it (on unless "none"), without which an opt-in template such as Gemma 4's
+        # opens no reasoning channel whatever the sampling; gpt-oss reads it as the harmony level, and
+        # Qwen3/3.5/3.6 templates think either way unless enable_thinking is false.
         "reasoning_effort": "high",
     }
     if budget is not None:

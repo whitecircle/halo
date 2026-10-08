@@ -10,6 +10,8 @@ Rows (``--trainer {online,sdpg} --mode M [--resume]``):
     full_tp2            full fine-tune at ``tp_size=2`` — the served policy must move
     lora_fsdp           attention PEFT under plain FSDP2 DP — the merge path over DTensor adapters
     lora_tp2_rejected   ``tp_size=2`` + attention LoRA must raise at construction, naming TP
+    full_fsdp_kl        full fine-tune under plain FSDP2 DP at ``beta=0.01`` — TRL scores the KL against the
+                        frozen reference the trainer hands it
     --resume            the checkpoint's weights must generate the first resumed rollout
 
 Requires the vLLM container serving the SAME dense checkpoint on a GPU outside

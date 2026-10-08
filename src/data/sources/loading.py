@@ -6,8 +6,7 @@ import numpy as np
 import pyarrow as pa
 import torch.distributed as dist
 from accelerate.logging import get_logger
-from datasets import Dataset, DatasetDict, concatenate_datasets, load_dataset, load_from_disk
-from datasets.features.features import require_decoding
+from datasets import Dataset, DatasetDict, LargeList, List, concatenate_datasets, load_dataset, load_from_disk
 
 from src.data.pipeline.preprocessed_metadata import is_preprocessed_dataset
 from src.data.pipeline.processing import (
@@ -217,13 +216,13 @@ def _load_sharded(
 def _split_identity(split: Dataset) -> str:
     """Row count, schema and a digest of evenly spaced rows — what the holders of one replica compare.
 
-    Media columns (images, audio) stay out of the digest: their stored ``path`` can name a file under
-    a node's own HF cache, which differs between nodes for the same rows. The sampled values reach the
-    hash one at a time through :func:`_feed_values`, since a preprocessed VLM row carries megabytes of
-    ``pixel_values``.
+    Media columns (:func:`_stores_file_path`) stay out of the digest: their stored ``path`` can name a
+    file under a node's own HF cache, which differs between nodes for the same rows. The sampled values
+    reach the hash one at a time through :func:`_feed_values`, since a preprocessed VLM row carries
+    megabytes of ``pixel_values``.
     """
     rows = len(split)
-    columns = [name for name, feature in split.features.items() if not require_decoding(feature)]
+    columns = [name for name, feature in split.features.items() if not _stores_file_path(feature)]
     picks = (
         sorted({i * (rows - 1) // (_IDENTITY_SAMPLE_ROWS - 1) for i in range(_IDENTITY_SAMPLE_ROWS)})
         if rows and columns
@@ -236,6 +235,20 @@ def _split_identity(split: Dataset) -> str:
         for name in columns:
             _feed_values(hasher, row.column(name).combine_chunks())
     return f"{rows} rows, content {hasher.hexdigest()}"
+
+
+def _stores_file_path(feature) -> bool:
+    """Whether ``feature`` holds a media value at any depth: a type whose storage carries a ``path``
+    (image, audio, video, pdf, nifti), with or without ``decode``. ``require_decoding`` answers by the
+    ``decode`` flag, and drops ``ignore_decode_attribute`` when it recurses into nested features."""
+    if isinstance(feature, dict):
+        return any(_stores_file_path(sub) for sub in feature.values())
+    if isinstance(feature, (list, tuple)):
+        return _stores_file_path(feature[0])
+    if isinstance(feature, (List, LargeList)):
+        return _stores_file_path(feature.feature)
+    storage = getattr(feature, "pa_type", None)
+    return isinstance(storage, pa.StructType) and storage.get_field_index("path") >= 0
 
 
 def _feed_values(hasher, array: pa.Array) -> None:

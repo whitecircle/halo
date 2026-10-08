@@ -5,6 +5,7 @@ from typing import ClassVar
 
 from src.args.common_script_args import CommonScriptArguments
 from src.args.mixins import GenerationEvalArguments
+from src.args.validation import present, require_positive_int
 
 
 @dataclass
@@ -32,3 +33,9 @@ class DPOScriptArguments(GenerationEvalArguments, CommonScriptArguments):
             "the toolkit is a training-side budget."
         },
     )
+
+    def _validate_ranges(self) -> None:
+        super()._validate_ranges()
+        require_positive_int(
+            type(self).__name__, **present(generation_max_prompt_length=self.generation_max_prompt_length)
+        )

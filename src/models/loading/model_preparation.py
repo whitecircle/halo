@@ -107,6 +107,19 @@ def resolve_auto_model_class(model_config, *, text_only: bool = False):
     return AutoModelForCausalLM
 
 
+def concrete_model_class(model_class, model_config):
+    """The class an Auto class dispatches ``model_config`` to, which carries the class-level declarations
+    (``_tp_plan``, the tie, the load-ignored keys). Returns the Auto class itself for a remote-code
+    config outside the mapping."""
+    mapping = getattr(model_class, "_model_mapping", None)
+    if mapping is None:
+        return model_class
+    try:
+        return mapping[type(model_config)]
+    except KeyError:
+        return model_class
+
+
 def auto_load_model(
     model_name_or_path: str, *, trust_remote_code: bool = False, model_class=None, text_only: bool = False, **kwargs
 ):

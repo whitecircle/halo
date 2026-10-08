@@ -38,8 +38,8 @@ the others never reach.
 1. Dump every rank's stack — the rank *not* in a collective is the culprit:
    `python scripts/profiling/py_spy_diag.py dump` from a shell in the training container attaches
    py-spy to every torchrun rank. No launch-time setup, so it works on a job already hung; one file
-   per rank under `$TMPDIR/halo_diag_stacks`. The container must have `--cap-add=SYS_PTRACE`, else
-   py-spy fails with `Permission denied`.
+   per rank under `$TMPDIR/halo_diag_stacks`. Attaching needs `--cap-add=SYS_PTRACE` unless the
+   host's `kernel.yama.ptrace_scope` is 0, else py-spy fails with `Permission denied`.
 2. Suspect a shape/value divergence upstream of the stuck collective →
    `HALO_TP_CONSISTENCY_CHECK=1` + `assert_tensor_shape_consistent(t, group=..., label=...)`.
 3. An EP job that stops at startup with `ValueError: parallelism config failed on … First (rank 0):

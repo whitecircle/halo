@@ -22,12 +22,13 @@ episode may generate `max_turns × rollout_max_tokens`.
 The episode budget is enforced by the engine per turn and never stated to the model. A turn's
 `max_tokens` is the smaller of its own cap and what the episode has left, and its reasoning cap
 ([Reasoning budget](#reasoning-budget)) shrinks by the same amount, so the turn keeps its answer
-room: `rollout_max_tokens` less the turn's reasoning cap, the whole turn without one. An episode
-left with less than that room starts no further turn and ends truncated, priced like a `max_turns`
+room: `rollout_max_tokens` less the turn's reasoning cap, or `rollout_max_answer_tokens` where that is
+smaller, the whole turn without a cap. An episode left with less than that room starts no further
+turn and ends truncated, priced like a `max_turns`
 overflow; a cut or empty turn on the last turn the budget affords is closed the same way, never nudged into a
 retry that could not run. `episode/output_budget_exhausted` is the fraction of episodes whose budget ran below it.
 The budget must be at least `rollout_max_tokens`, so one whole turn fits; it is `max_tokens` on the
-wire, so it holds on both engines. Every shipped code-contests recipe sets `81920`.
+wire, so it holds on both engines. Every shipped code-contests recipe sets `131072`.
 
 The trajectory accumulates across turns within the model context window and is **never
 truncated**: a row over that window is recorded per rank, then raised on every rank together. The
@@ -92,9 +93,18 @@ bounds the whole turn either way, so a level's budget must sit below it (refused
 construction and at the start of an eval) and the difference is the turn's answer room. An episode output budget narrows both
 caps together ([Trajectory length](#trajectory-length)); `reasoning_budget` stays the level's budget.
 
+`rollout_max_answer_tokens` (default `null`) bounds the answer room. A turn's total becomes the
+smaller of `rollout_max_tokens` and its reasoning cap plus the bound, so a turn whose reasoning the
+engine closed cannot carry the reasoning on in its visible output, as comment lines of a tool call,
+until `rollout_max_tokens` cuts it. The bound is never stated to the model. Every episode needs a
+reasoning cap under it: a drawable level without `thinking_tokens` while
+`rollout_max_thinking_tokens` is unset is refused at trainer construction and at the start of an
+eval. On SGLang, which enforces no reasoning cap, the bound caps the whole turn at the level's cap
+plus the room. It must be an int in `[1, rollout_max_tokens)`.
+
 `thinking_tokens` is a **vLLM** request field (`thinking_token_budget`). On `rollout_backend:
 sglang` a level's budget reaches no request field (warned once per process): nothing caps CoT
-below `rollout_max_tokens`; the level still steers through the chat template (which states the
+below the turn's total; the level still steers through the chat template (which states the
 budget as a cut it cannot be on this engine), and the budget stays the reference of the
 [reasoning floor](#reasoning-length-reward).
 
@@ -106,9 +116,11 @@ also in `episode/length_cutoff_in_call_turns`) and pays the protocol's `length_c
 (default `0`); the turn that exhausts the cap, or lands on the last turn, ends the episode truncated,
 priced like a `max_turns` overflow. Under carried reasoning a cut costs the policy only a turn and
 the retry thinks on from where it stopped, so a per-turn budget binds only once the cut is priced.
-The turn after an unproductive one — cut, empty, or every call unknown or refused unrun — gets a
+The turn after an unproductive one — cut, empty, or every call unknown, refused unrun or a run that
+showed nothing (a code-contests [starved run](../environments/code-contests.md#tools)) — gets a
 quarter of its level's reasoning cap, not the whole budget again (`RECOVERY_THINKING_SHARE` in
-`src/environments/episode.py`, clamping what the output budget leaves): room to read the nudge or the
+`src/environments/episode.py`, clamping what the output budget leaves), and under
+`rollout_max_answer_tokens` a total of that reserve plus the room: room to read the nudge or the
 refusal, fix and act, so a cut never buys a second budget; the template still states the level's
 budget, and the nudge asks for the action. The episode
 budget bounds what the recoveries may add in total.
@@ -164,9 +176,11 @@ only — code and tool calls are free. An episode with no level pays nothing.
 
 A price is paid within the group, so the sibling that reasons less wins it whatever the outcome. That
 is why `reasoning_price_cap` (default `0.1`; refused at another value while the price is off) caps it
-per episode, and why it never runs alone: below its reference the floor must out-slope the price, so a
-level short of it is still paid to reason more. The code-contests recipes run no price; their caps,
-budgets and output budget are the dial.
+per episode. A price without the floor is accepted, and then nothing pays a level to reason more: every
+episode is pushed toward shorter reasoning, whatever its level asked for. Pair it with the floor, which
+must out-slope the price below its reference so a level short of it is still paid to reason more
+(`tests/cpu/config/test_env_grpo_reward_economy.py` holds a shipped recipe that sets a price to that). The code-contests
+recipes run no price; their caps, budgets and output budget are the dial.
 
 Both terms reach the gradient only through groups the environment's reward separates:
 `drop_degenerate_groups` judges a group without them ([Advantages](objective.md#advantages)).
@@ -188,11 +202,13 @@ governs the re-tokenization paths below: a differing template scores log-probs a
 policy never generated under. Per-turn rows take the engine's ids and cannot drift.
 
 `reasoning_effort` goes out as the request's **top-level** field — the spelling both engines derive
-their thinking toggle from and hand the template. SGLang lets a nested copy override that field (it
+their thinking toggle from (`enable_thinking`, plus `thinking` on SGLang: on for any level but `none`,
+unless `rollout_chat_template_kwargs` sets it) and hand the template. SGLang lets a nested copy override that field (it
 pops it into the top-level one before rendering), so on SGLang the same value is added nested too —
 an exact copy, so the render reads one value whichever spelling the engine consults. The level's
 per-turn thinking budget rides in the nested form as `reasoning_budget`, added per request; the
-trainer's own renders carry the same variables, and `rollout_chat_template_kwargs` refuses both keys.
+trainer's own renders carry the same variables, but not the derived toggle, and
+`rollout_chat_template_kwargs` refuses both keys.
 
 `jinja-templates/qwen3/qwen3.6-reasoning-effort.jinja` is the hub Qwen3.6 template cut to what the rollouts
 use — text only, thinking always on, an assistant turn rendering whatever reasoning it carries, the
@@ -214,7 +230,8 @@ flag. The importance-sampling correction additionally needs vLLM's
 `--logprobs-mode processed_logprobs` ([Objective](objective.md#importance-sampling-correction)).
 
 Turns the rollout marked untrainable — engine-cut (`truncated`), ended with neither a tool call nor
-visible content (`empty`), or every tool call naming a nonexistent tool (`calls_rejected`) — become
+visible content (`empty`), or every tool call naming a nonexistent tool, refused unrun or showing
+nothing (`calls_rejected`) — become
 rows too, tagged: a tagged row stays in the loss only when its trajectory's advantage is negative
 ([Objective](objective.md#untrainable-turns)). Such a turn stays in the next turn's prompt. An episode
 whose turns are all untrainable trains only when its advantage is negative; one that yields no row at all yields

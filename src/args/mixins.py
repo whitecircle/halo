@@ -6,12 +6,17 @@ field only to change its default (e.g. ``DistillScriptArguments``' ``conversatio
 ``SFTScriptArguments``' ``generate_eval_examples=False``).
 """
 
-import math
 import string
 from dataclasses import dataclass, field, fields, make_dataclass
 from typing import Any, ClassVar, Literal, get_args
 
-from src.args.validation import RangeValidatedConfig, require_finite, require_positive, require_positive_int
+from src.args.validation import (
+    RangeValidatedConfig,
+    present,
+    require_finite,
+    require_positive,
+    require_positive_int,
+)
 
 # The RLRR shaping modes: the annotation gates YAML/CLI and RLRRConfig validates against it.
 RLRRMode = Literal["hrr", "prr"]
@@ -93,15 +98,19 @@ class ConversationRenderArguments:
 
 
 @dataclass
-class GenerationEvalArguments:
+class GenerationEvalArguments(RangeValidatedConfig):
     """Eval-time example-generation knobs (SFT, DPO, SMPO, offline GRPO)."""
 
     generate_eval_examples: bool = field(default=True, metadata={"help": "Do generate examples on eval"})
     num_eval_examples: int = field(default=50, metadata={"help": "Number of examples to generate on eval phase"})
 
+    def _validate_ranges(self) -> None:
+        super()._validate_ranges()
+        require_positive_int(type(self).__name__, num_eval_examples=self.num_eval_examples)
+
 
 @dataclass
-class PromptDatasetArguments:
+class PromptDatasetArguments(RangeValidatedConfig):
     """Prompt-dataset shape shared by the GRPO-family trainers (prompt column + length cap).
 
     No ``system_prompt``: environmental GRPO builds the rollout conversation from the environment's
@@ -125,6 +134,11 @@ class PromptDatasetArguments:
         default="prompt",
         metadata={"help": "Field in the dataset containing the prompt (string or conversation list)"},
     )
+
+    def _validate_ranges(self) -> None:
+        super()._validate_ranges()
+        # A budget below one token drops every row.
+        require_positive_int(type(self).__name__, **present(max_prompt_length=self.max_prompt_length))
 
 
 @dataclass
@@ -260,8 +274,10 @@ class AdvantageShapingArguments(RangeValidatedConfig):
             "token-weighted advantage mass nets to zero. Under a token-sum loss a completion pulls with its "
             "advantage times its trained tokens; where failures run longer than solves the round pushes "
             "down the tokens the policy sampled and entropy climbs, where solves run longer it sharpens "
-            "the policy. Needs `loss_type` `cispo`, `dapo` or `dr_grpo`, `top_entropy_quantile` 1.0 and no "
-            "`off_policy_mask_threshold`, refused otherwise. The pre-balance share is logged as "
+            "the policy. Async GRPO leaves the rows of untrainable turns, which train on a negative advantage "
+            "only, out of the balance and unscaled. Needs `loss_type` `cispo`, `dapo` or `dr_grpo`, "
+            "`top_entropy_quantile` 1.0 and no `off_policy_mask_threshold`, refused otherwise. The pre-balance "
+            "share is logged as "
             "`advantage/net_token_mass` either way (its sign reads as the entropy push only under a "
             "token-sum loss) and the applied factor as `advantage/token_mass_scale`. Default off."
         },
@@ -271,7 +287,8 @@ class AdvantageShapingArguments(RangeValidatedConfig):
         """Refuse a negative or NaN std floor, which fails silently: ``max(std, floor)`` becomes a
         no-op or a NaN that propagates to every advantage in the batch."""
         super()._validate_ranges()
-        if not math.isfinite(self.scale_rewards_std_floor) or self.scale_rewards_std_floor < 0:
+        require_finite(type(self).__name__, scale_rewards_std_floor=self.scale_rewards_std_floor)
+        if self.scale_rewards_std_floor < 0:
             raise ValueError(
                 f"scale_rewards_std_floor must be a finite value >= 0 (0 = off), got {self.scale_rewards_std_floor}"
             )
@@ -291,10 +308,10 @@ class EarlyStopConfig:
 
     def __post_init__(self) -> None:
         band = self.entropy_band
-        if band is not None and not (
-            len(band) == 2 and all(math.isfinite(v) for v in band) and 0.0 <= band[0] < band[1]
-        ):
-            raise ValueError(f"early_stop_entropy_band must be [low, high] with 0 <= low < high, got {list(band)}")
+        if band is not None:
+            require_finite(type(self).__name__, **{f"early_stop_entropy_band[{i}]": v for i, v in enumerate(band)})
+            if not (len(band) == 2 and 0.0 <= band[0] < band[1]):
+                raise ValueError(f"early_stop_entropy_band must be [low, high] with 0 <= low < high, got {list(band)}")
         if self.logratio_gap is not None:
             require_positive(type(self).__name__, early_stop_logratio_gap=self.logratio_gap)
         require_positive_int(type(self).__name__, early_stop_patience=self.patience)
@@ -369,7 +386,7 @@ class GRPOEarlyStopArguments(RangeValidatedConfig):
 
 
 @dataclass
-class DatasetNumProcArguments:
+class DatasetNumProcArguments(RangeValidatedConfig):
     """Dataset-preprocessing worker count of the trainer configs that map their own data, read through
     :func:`~src.data.pipeline.processing.resolve_map_num_proc`."""
 
@@ -380,6 +397,10 @@ class DatasetNumProcArguments:
             "default (HALO_DATASET_NUM_PROC, else max(1, min(cpu_count // 4, 4))), not one worker."
         },
     )
+
+    def _validate_ranges(self) -> None:
+        super()._validate_ranges()
+        require_positive_int(type(self).__name__, **present(dataset_num_proc=self.dataset_num_proc))
 
 
 @dataclass
@@ -480,7 +501,8 @@ class SDPGArguments(RangeValidatedConfig):
         # raise, a negative one inverts them.
         require_positive(type(self).__name__, sdpg_temperature=self.sdpg_temperature)
         # A NaN coefficient NaNs every loss; a negative one trains the student away from the teacher.
-        if not math.isfinite(self.sdpg_beta_base) or self.sdpg_beta_base < 0:
+        require_finite(type(self).__name__, sdpg_beta_base=self.sdpg_beta_base)
+        if self.sdpg_beta_base < 0:
             raise ValueError(
                 f"sdpg_beta_base must be a finite value >= 0 (0 drops the OPD term), got {self.sdpg_beta_base}"
             )

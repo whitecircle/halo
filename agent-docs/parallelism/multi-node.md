@@ -312,10 +312,12 @@ teacher-distillation student included) and every frozen reference or teacher loa
 `resolve_model_source` (`src/distributed/loading/model_source.py`):
 
 - The fetch runs main-rank-first under the input-filesystem scope: global rank 0 on a shared input
-  filesystem, each node's local rank 0 under `DIST_INPUT_SHARED_FILESYSTEM=0`. It takes the whole
-  repository at the revision, not only the files the load reads, so weight formats a repo also ships
-  (gpt-oss's `original/` and `metal/`, a sentence-transformers repo's `onnx/` and `openvino/`
-  exports) are downloaded and cached too.
+  filesystem, each node's local rank 0 under `DIST_INPUT_SHARED_FILESYSTEM=0`. It takes the
+  repository's top-level files at the revision, where a model's config, tokenizer, weights and remote
+  code sit, so the weight formats a repo also ships in subfolders (gpt-oss's `original/` and `metal/`)
+  stay on the Hub. The default
+  embedding backbone is the exception: a sentence-transformers pipeline keeps its modules in
+  subfolders, so it takes the whole repository, `onnx/` and `openvino/` exports included.
 - Every rank then resolves the source on its own node: the local directory, or the snapshot in its
   Hub cache (`HF_HUB_CACHE`, under `HF_HOME` by default). The verdicts join over the c10d store, so per-node fetch skew
   waits under `DIST_STORE_TIMEOUT_HOURS`, not the NCCL watchdog.

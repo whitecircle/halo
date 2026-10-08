@@ -85,8 +85,10 @@ def test_all_shaping_off_by_default():
     assert _reward(env, _traj(tool_calls=2, submitted=True, passed=10)) == pytest.approx(1.0)
 
 
-def test_negative_magnitudes_rejected():
-    for bad in (
+@pytest.mark.parametrize("value", [-0.1, True, False, float("nan")], ids=["negative", "true", "false", "nan"])
+@pytest.mark.parametrize(
+    "knob",
+    [
         "submission_reward",
         "resubmission_penalty",
         "no_tool_use_penalty",
@@ -94,9 +96,12 @@ def test_negative_magnitudes_rejected():
         "tool_success_reward",
         "turn_overflow_penalty",
         "length_cutoff_penalty",
-    ):
-        with pytest.raises(ValueError, match=bad):
-            CodeContestsEnvironment(language="python", sandbox_backend="local", **{bad: -0.1})
+    ],
+)
+def test_a_magnitude_refuses_a_negative_a_bool_or_a_nan(knob, value):
+    """A bool is an int subclass a sign check passes, pricing the knob at 0 or 1."""
+    with pytest.raises(ValueError, match=knob):
+        CodeContestsEnvironment(language="python", sandbox_backend="local", **{knob: value})
 
 
 def test_turn_overflow_penalty_on_truncation():

@@ -32,14 +32,18 @@ from src.distributed.expert_parallel.balancing_strategy import apply_balancing_s
 from src.distributed.expert_parallel.base_layer import EPMoELayerBase
 from src.distributed.expert_parallel.layers.qwen3_5 import EPQwen3_5MoELayer
 from src.distributed.loading.model_loading import _apply_config_overrides
-from src.distributed.tensor_parallel.tie_plan import config_ties_word_embeddings
 from src.models import moe_balancing
 from src.models.attention_geometry import (
     resolve_head_dim,
     resolve_num_key_value_heads,
 )
 from src.models.loading import config_levels
-from src.models.loading.config_levels import config_sources, configs_declaring, set_config_field
+from src.models.loading.config_levels import (
+    config_sources,
+    config_ties_word_embeddings,
+    configs_declaring,
+    set_config_field,
+)
 from src.models.loading.tokenizer_setup import sync_special_token_id
 from src.models.moe_balancing import (
     ROUTER_EXPERT_COUNT_FIELDS,

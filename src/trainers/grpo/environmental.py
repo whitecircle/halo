@@ -121,6 +121,9 @@ ROUTING_REPLAY_MODES: tuple[str, ...] = get_args(AsyncTrainingConfig.__annotatio
 # from RolloutConfig, so a value set on GRPOConfig never reaches a sampler. ``temperature`` is the
 # one exception, reconciled the other way round: the trainer scores at the sampling temperature.
 _ROLLOUT_OWNED_SAMPLING_KNOBS = ("top_p", "top_k", "min_p", "repetition_penalty", "generation_kwargs")
+# The TRL vllm_importance_sampling_mode that names the environmental correction: each token's ratio truncated
+# from above at vllm_importance_sampling_clip_max. The gate accepts it and TRL's default, which reads as unset.
+_ENV_IS_MODE = "token_truncate"
 # Concurrent re-score prefills per rank under isr_engine_reference (each is one HTTP request in flight).
 _ENGINE_RESCORE_CONCURRENCY = 16
 
@@ -194,6 +197,23 @@ def reject_off_policy_mask_threshold(args) -> None:
             "GRPO: TRL's mask reads sampling_per_token_logps, which this trainer's batch never carries, so it "
             "thresholds a KL of exactly 0. Use isr_opsm_delta (DeepSeek-V3.2 off-policy sequence masking "
             "against the engine's sampling log-probs) instead."
+        )
+
+
+def reject_vespo_loss(args) -> None:
+    """Refuse TRL's ``vespo`` loss: its gamma weight sums the log of each token's IS ratio over the row in place
+    of the per-token multiply, and this trainer's ratio is 0 on every token an ``isr_*`` stage masks and at every
+    reasoning close the engine forced. One such token clamps the row's log weight at ``log(1e-8)``, which drives
+    the whole turn row's weight to ~1e-15 with no error. Refused in every config, one with no mask stage and no
+    forced close included: no shipped recipe runs vespo. TRL's own vespo mode check never runs here: ``use_vllm``
+    is still off when its constructor reads it."""
+    if args.loss_type == "vespo":
+        raise ValueError(
+            "loss_type='vespo' is not supported by environmental GRPO: VESPO weighs each turn row by the sum of its "
+            "per-token log IS ratios instead of multiplying each token by its own, so whenever the IS correction "
+            "masks a token (isr_*) or the engine forces a reasoning close, this trainer sets that token's ratio to 0 "
+            "and the one token silently drops its whole row (weight ~1e-15). Use a per-token loss: dapo (the "
+            "default), dr_grpo, cispo or grpo."
         )
 
 
@@ -310,7 +330,8 @@ class DistributedAsyncEnvironmentalGRPOTrainer(
         # Rewards come from the environment, so the GRPOTrainer reward function is a stub.
         kwargs.setdefault("reward_funcs", env_reward_func)
 
-        super().__init__(*args, **kwargs)
+        with self._supplying_kl_reference():
+            super().__init__(*args, **kwargs)
 
         # TRL exposes no self.{pad,eos}_token_id, and a VLM processing_class nests the real tokenizer;
         # TRL's __init__ has already set a missing pad token to eos on it.
@@ -355,8 +376,9 @@ class DistributedAsyncEnvironmentalGRPOTrainer(
         # Both range-validated by AsyncTrainingConfig._validate_ranges (finiteness included).
         self._scale_rewards_std_floor = self.async_config.scale_rewards_std_floor
         reject_inert_std_floor(self.args.scale_rewards, self._scale_rewards_std_floor)
-        # Ahead of the balance gate, which refuses the mask beside it: here the mask is refused on its own.
+        # Ahead of the balance gate, which refuses both beside it: here each is refused on its own.
         reject_off_policy_mask_threshold(self.args)
+        reject_vespo_loss(self.args)
         self._balance_token_mass = self.async_config.balance_token_mass
         if self._balance_token_mass:
             validate_token_mass_balance(self.args)
@@ -412,31 +434,7 @@ class DistributedAsyncEnvironmentalGRPOTrainer(
             self._validate_engine_reference(resolve_weight_sync_client(self._rollout_backend))
         if self._is_correction:
             self.use_vllm = True
-        if self.args.vllm_importance_sampling_mode != "sequence_mask":
-            logger.warning(
-                f"vllm_importance_sampling_mode={self.args.vllm_importance_sampling_mode!r} is ignored: "
-                "environmental GRPO always applies token-level truncated IS (clip_max only)."
-            )
-        if self.args.vllm_importance_sampling_clip_min:
-            logger.warning(
-                "vllm_importance_sampling_clip_min is ignored: environmental GRPO clips the IS ratio "
-                "from above only (vllm_importance_sampling_clip_max)."
-            )
-        # Derived from the config class rather than a literal table, so a TRL default change cannot
-        # turn this warning into a false positive.
-        arg_defaults = {f.name: f.default for f in dataclasses.fields(type(self.args))}
-        ignored_sampling = [
-            name
-            for name in _ROLLOUT_OWNED_SAMPLING_KNOBS
-            if name in arg_defaults and getattr(self.args, name) != arg_defaults[name]
-        ]
-        if ignored_sampling:
-            logger.warning(
-                f"These GRPOConfig sampling knobs are IGNORED by environmental GRPO: "
-                f"{sorted(ignored_sampling)}. Rollouts are generated by the environment actors from "
-                f"the rollout server config, so set the rollout_* equivalents (rollout_top_p, rollout_top_k, "
-                f"rollout_min_p, rollout_repetition_penalty) instead — these reach no sampler."
-            )
+        self._refuse_unread_grpo_knobs()
 
         self._init_async_state()
 
@@ -609,6 +607,38 @@ class DistributedAsyncEnvironmentalGRPOTrainer(
                 "engine forces at the budget would train with the episode's advantage."
             )
 
+    def _refuse_unread_grpo_knobs(self) -> None:
+        """Refuse a GRPOConfig knob this trainer does not honor: a sampling knob or the IS lower clip set away
+        from its default (the environment actors sample from the rollout config, and the IS correction truncates
+        each token's ratio from above only), and an IS mode other than the default or :data:`_ENV_IS_MODE`, the
+        one that names the correction. The defaults are read off the config class, so a TRL default change
+        refuses no default run."""
+        defaults = {f.name: f.default for f in dataclasses.fields(type(self.args))}
+
+        def changed(names: tuple[str, ...]) -> list[str]:
+            return [name for name in names if name in defaults and getattr(self.args, name) != defaults[name]]
+
+        sampling = changed(_ROLLOUT_OWNED_SAMPLING_KNOBS)
+        if sampling:
+            raise ValueError(
+                f"GRPOConfig {sampling} reach no sampler under environmental GRPO: the environment actors "
+                "generate from the rollout config. Remove them and set the rollout_* equivalents instead "
+                "(rollout_top_p, rollout_top_k, rollout_min_p, rollout_repetition_penalty)."
+            )
+        mode = self.args.vllm_importance_sampling_mode
+        if mode not in (defaults["vllm_importance_sampling_mode"], _ENV_IS_MODE):
+            raise ValueError(
+                f"GRPOConfig vllm_importance_sampling_mode={mode!r} is not the correction environmental GRPO "
+                f"applies: it truncates each token's ratio from above at vllm_importance_sampling_clip_max, TRL's "
+                f"{_ENV_IS_MODE!r}. Set that mode or leave the default; its masks are the isr_* knobs."
+            )
+        if changed(("vllm_importance_sampling_clip_min",)):
+            raise ValueError(
+                "GRPOConfig 'vllm_importance_sampling_clip_min' has no effect under environmental GRPO: its "
+                "importance-sampling correction truncates each token's ratio from above only, at "
+                "vllm_importance_sampling_clip_max. Remove it; its masks are the isr_* knobs."
+            )
+
     @property
     def _any_episode_budgeted(self) -> bool:
         """Whether some episode the run draws carries a per-turn thinking cap: a drawable level's
@@ -618,12 +648,14 @@ class DistributedAsyncEnvironmentalGRPOTrainer(
 
     def _thinking_caps_by_level(self) -> dict[str | None, int | None]:
         """The per-turn thinking cap of every level this run can draw (:func:`thinking_caps_by_level`), which
-        refuses a level whose cap fills the turn and an output budget under one turn."""
+        refuses a level whose cap fills the turn, a level without one under an answer-room bound, and an
+        output budget under one turn."""
         cfg = self.async_config
         return thinking_caps_by_level(
             self._rollout_env,
             max_tokens=cfg.rollout_max_tokens,
             max_thinking_tokens=cfg.rollout_max_thinking_tokens,
+            max_answer_tokens=cfg.rollout_max_answer_tokens,
             max_episode_tokens=cfg.rollout_max_episode_tokens,
         )
 
@@ -1030,8 +1062,9 @@ class DistributedAsyncEnvironmentalGRPOTrainer(
                 negative_only=negative_only,
             )
             if balance is not None:
-                # The per-trajectory values follow, so the completions record reports what the gradient carries.
-                local_advantages, traj_advantages = balance.apply(local_advantages), balance.apply(traj_advantages)
+                local_advantages = balance.apply(local_advantages, negative_only)
+                # The completions record reports what a trajectory's trainable rows carry.
+                traj_advantages = balance.apply(traj_advantages)
 
         # Padding fills whole groups, so dropping its rows keeps every episode's group aligned.
         episodes = gathered_state >= 0

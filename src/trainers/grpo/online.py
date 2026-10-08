@@ -102,7 +102,7 @@ class DistributedGRPOTrainer(
 
         self._use_chunked_grpo_logprobs = kwargs.pop("use_chunked_grpo_logprobs", False)
 
-        with self._patch_trl_for_vendored_vllm_client():
+        with self._patch_trl_for_vendored_vllm_client(), self._supplying_kl_reference():
             super().__init__(*args, **kwargs)
         if early_stop is not None:
             self.add_callback(early_stop)
@@ -158,13 +158,14 @@ class DistributedGRPOTrainer(
 
     @staticmethod
     def sums_sequence_logratio(grpo_args) -> bool:
-        """Whether TRL's vLLM IS correction takes ONE ratio per sequence (``sequence_*`` modes), i.e. sums
-        the per-token log-ratios — the online arm's counterpart of ``ISMaskConfig.sums_sequence_logratio``,
-        the consumer the sampler-logprob preflight gates a nucleus-renormalized reference against. Off with
-        the correction off, whatever the mode says."""
+        """Whether TRL's vLLM IS correction sums the per-token log-ratios over each sequence — the online arm's
+        counterpart of ``ISMaskConfig.sums_sequence_logratio``, the consumer the sampler-logprob preflight gates
+        a nucleus-renormalized reference against: one ratio per sequence (``sequence_*`` modes), or ``vespo``,
+        whose gamma weight takes the per-token ratios' log-sum in place of the per-token multiply. Off with the
+        correction off, whatever the mode or loss says."""
         if not grpo_args.vllm_importance_sampling_correction:
             return False
-        return grpo_args.vllm_importance_sampling_mode.startswith("sequence")
+        return grpo_args.loss_type == "vespo" or grpo_args.vllm_importance_sampling_mode.startswith("sequence")
 
     @staticmethod
     def _require_vllm_server_mode(grpo_args) -> None:

@@ -924,5 +924,26 @@ def test_the_weight_loader_covers_the_names_a_full_fine_tune_saves(tmp_path):
     assert trainer._optimizer_store().ctx.model is trainer.model
 
 
+def test_a_single_process_resume_restores_the_whole_pipeline(tmp_path):
+    """A single process trains and saves every module, a head past the backbone included, so its
+    reload stays with sentence-transformers' own, which rebuilds the pipeline from the checkpoint. The
+    mixin's whole-weight reload, pointed at the backbone, would leave the trained head at its init."""
+    PartialState()
+    base = _tiny_base(tmp_path / "base")
+    torch.manual_seed(1)
+    trained = SentenceTransformer(base, device="cpu")
+    head = _with_dense_head(trained).linear.weight
+    _trainer(trained, tmp_path / "out", max_steps=SAVE_AT_STEP).train()
+    checkpoint = str(tmp_path / "out" / f"checkpoint-{SAVE_AT_STEP}")
+    torch.manual_seed(2)
+    model = SentenceTransformer(base, device="cpu")
+    _with_dense_head(model)
+    resumed = _trainer(model, tmp_path / "resumed")
+
+    resumed._load_from_checkpoint(checkpoint)
+
+    assert torch.equal(resumed.model[-1].linear.weight, head.detach()), "the trained head was not restored"
+
+
 if __name__ == "__main__":
     raise SystemExit(pytest.main([__file__, "-v"]))

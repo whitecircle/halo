@@ -27,8 +27,9 @@ The Makefile's `DOCKER_RUN` is not identical to a hand-rolled launch. It runs in
 networking would silently fail them) plus `-e PYTHONPATH=/workspace -e CUDA_DEVICE_MAX_CONNECTIONS=1`.
 
 It makes `--env-file` and the `~/.aws` mount conditional on `ENV_FILE`/`AWS_DIR` so CI can run
-creds-free. It also **omits `--cap-add=SYS_PTRACE`**, so py-spy cannot attach to a job started through
-a `make` target.
+creds-free. It also **omits `--cap-add=SYS_PTRACE`**, so py-spy attaches to a job started through a
+`make` target only on a host whose `kernel.yama.ptrace_scope` is 0
+([Debugging §1c](../reference/debugging.md#1c-py-spy--cpu-flame-graph-dataloader--python-stalls)).
 
 The equivalent detached background job:
 

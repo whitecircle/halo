@@ -67,6 +67,23 @@ def test_corrupt_mirror_during_outage_degrades_loud_not_crash(cache_root):
         assert is_preprocessed_dataset("s3://b/raw") is False
 
 
+def test_an_unreadable_stamp_raises_rather_than_reading_raw(tmp_path, cache_root):
+    """One rank per filesystem scope probes, so its verdict is the whole scope's: a stamp it holds but
+    cannot read must raise, which the probe consensus raises on every rank, not send them all down the
+    raw path over pre-tokenized rows. On S3 the live read parses the stamp itself, so its parse error
+    must not pass for the outage the probe reads as raw."""
+    prepared = tmp_path / "prepared"
+    prepared.mkdir()
+    (prepared / "metadata.json").write_text('{"preprocessed": tr')
+    torn = json.JSONDecodeError("Expecting value", '{"preprocessed": tr', 17)
+
+    with pytest.raises(json.JSONDecodeError):
+        is_preprocessed_dataset(str(prepared))
+    with patch("src.data.sources.s3_client.read_json_from_s3", side_effect=torn):
+        with pytest.raises(json.JSONDecodeError):
+            is_preprocessed_dataset("s3://b/prepped")
+
+
 def test_absence_contract_survives_a_read_only_cache_volume(cache_root, monkeypatch):
     """The mirror drop on a live 404 must stay best-effort — on a read-only volume the unlink's
     PermissionError must not replace the FileNotFoundError the callers key on."""

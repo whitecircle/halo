@@ -30,6 +30,9 @@ from src.models.structure import fp32_pinned_state_keys
 
 logger = logging.getLogger(__name__)
 
+# The attribute a multimodal wrapper nests its text model under; a text-only load of its checkpoint drops it.
+_LANGUAGE_MODEL_PREFIX = "language_model."
+
 
 def resolve_safetensors_index(model_path: str) -> tuple[dict[str, str], list[str]]:
     """``(weight_map, shard_files)``: ``{disk_key: shard_filename}`` and the deduplicated shard list.
@@ -91,19 +94,22 @@ def build_key_mapping(
     prefix = getattr(model, "base_model_prefix", "")
     _prefix = f"{prefix}." if prefix else ""
     model_keys = set(model.state_dict().keys())
+    wrapperless = not any(f".{_LANGUAGE_MODEL_PREFIX}" in f".{key}" for key in model_keys)
     if steps is None:
-        return {key: _align_key(key, model_keys, _prefix, hub_renames) for key in disk_keys}, {}
+        return {key: _align_key(key, model_keys, _prefix, hub_renames, wrapperless) for key in disk_keys}, {}
 
     converted = convert_disk_keys(disk_keys, steps, _prefix)
 
     disk_to_model: dict[str, str] = {}
     fanout: dict[str, tuple] = {}
     for key in disk_keys:
-        plain = _align_key(key, model_keys, _prefix, hub_renames)
+        plain = _align_key(key, model_keys, _prefix, hub_renames, wrapperless)
         aligned = None
         targets = converted.get(key)
         if targets is not None:
-            aligned = tuple((_align_key(target, model_keys, _prefix, hub_renames), ops) for target, ops in targets)
+            aligned = tuple(
+                (_align_key(target, model_keys, _prefix, hub_renames, wrapperless), ops) for target, ops in targets
+            )
             if plain in model_keys and all(target not in model_keys for target, _ in aligned):
                 aligned = None  # already-canonical key caught by an unanchored source; keep it
         if aligned is None:
@@ -114,11 +120,15 @@ def build_key_mapping(
     return disk_to_model, fanout
 
 
-def _align_key(key: str, model_keys: set[str], _prefix: str, hub_renames) -> str:
+def _align_key(key: str, model_keys: set[str], _prefix: str, hub_renames, wrapperless: bool) -> str:
     """Align one checkpoint key with the model's state-dict spelling: the Mistral3 nested namespace,
     ``base_model_prefix`` added then stripped (a backbone checkpoint into a task wrapper, and the
     mirror case), the caller's hub → module renames, then a ``language_model.`` segment dropped for a
-    VLM checkpoint loaded as a text-only causal LM. Each step runs only while the key is unresolved."""
+    VLM checkpoint loaded as a text-only causal LM. Each step runs only while the key is unresolved.
+
+    Every other step keeps a candidate only when it is a model key. The segment drop also keeps one for
+    a ``wrapperless`` model (no key of its own carries the segment): a per-expert key never is one, and
+    the fuser locates the fused parameter it feeds from the namespace this step gives it."""
     new_key = key
     # Public multimodal Mistral3 checkpoints expose the nested text model as
     # ``language_model.model.*`` while the wrapper holds it at ``model.language_model.*``; mapped
@@ -145,13 +155,13 @@ def _align_key(key: str, model_keys: set[str], _prefix: str, hub_renames) -> str
                 new_key = candidate
                 break
 
-    if new_key not in model_keys and ".language_model." in new_key:
-        stripped = new_key.replace(".language_model.", ".", 1)
-        if stripped in model_keys:
+    if new_key not in model_keys and f".{_LANGUAGE_MODEL_PREFIX}" in new_key:
+        stripped = new_key.replace(f".{_LANGUAGE_MODEL_PREFIX}", ".", 1)
+        if stripped in model_keys or wrapperless:
             new_key = stripped
-    if new_key not in model_keys and new_key.startswith("language_model."):
-        stripped = new_key[len("language_model.") :]
-        if stripped in model_keys:
+    if new_key not in model_keys and new_key.startswith(_LANGUAGE_MODEL_PREFIX):
+        stripped = new_key[len(_LANGUAGE_MODEL_PREFIX) :]
+        if stripped in model_keys or wrapperless:
             new_key = stripped
 
     return new_key

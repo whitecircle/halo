@@ -14,7 +14,8 @@ the *same* batch.
 Every rank reads its own copy of the source — a per-node S3 cache, a pre-staged directory, a cached
 hub revision — so the load agrees the rows before any rank trains on them (`src/data/sources/loading.py`).
 A replicated load compares each split's row count, schema and a digest of 16 evenly spaced rows across
-the world (media columns excluded: their stored paths can name a node's own cache). A sharded load
+the world (media columns excluded, decoded or not and at any depth: their stored paths can name a
+node's own cache). A sharded load
 compares every split's `shard_index.json` across the world, and the same row identity among the ranks
 sharing a DP rank — TP/CP/ETP siblings. A disagreement
 raises `ValueError` on every rank: the row-identity check names the ranks and nodes holding each

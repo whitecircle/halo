@@ -28,7 +28,7 @@ from trl.data_utils import pack_dataset as _trl_pack_dataset
 
 from src.data.pipeline.row_processors import is_valid_example
 from src.data.sources.dataset_cache import publish_cached_download
-from src.data.sources.paths import TRAIN_TEST_SPLITS
+from src.data.sources.paths import eval_split_name
 from src.distributed.filesystem import RUN_LOG_DIR_NAME, store_join_recorded_failure
 from src.distributed.runtime import (
     broadcast_from_rank0,
@@ -439,15 +439,18 @@ def report_rejected_rows(original_size: int, kept_size: int, context: str) -> No
 
 
 def _rendered_splits(dataset: DatasetDict) -> list[str]:
-    """The splits of ``dataset`` the loader renders: the :data:`TRAIN_TEST_SPLITS` it carries."""
-    return [split for split in TRAIN_TEST_SPLITS if split in dataset]
+    """The splits of ``dataset`` a loader renders: ``train`` and its held-out split
+    (:func:`~src.data.sources.paths.eval_split_name`) — a lone ``validation`` split is rendered as
+    the test split, whether the training loader renamed it already or ``prepare_dataset`` bakes it."""
+    return [split for split in ("train", eval_split_name(dataset)) if split in dataset]
 
 
 def missing_render_column_splits(dataset: DatasetDict, column: str) -> list[str]:
     """Splits this loader will render that do not carry ``column``.
 
     Only the splits the loader goes on to render: an extra split a source happens to carry
-    (e.g. "validation") is never filtered or mapped here, so its schema is not a contract.
+    (a "validation" split beside a "test" one) is never filtered or mapped here, so its schema is
+    not a contract.
     """
     return sorted(split for split in _rendered_splits(dataset) if column not in dataset[split].column_names)
 
@@ -458,7 +461,7 @@ def require_render_column(dataset: DatasetDict, path: str, knob: str, column: st
     A typo'd column would otherwise surface inside an HF ``map`` worker, long after a multi-node model
     load, as a ``KeyError`` naming neither the knob nor the dataset — and for an optional knob
     (``tools_field``) not at all: the rows just render without tools. One home for every consumer that
-    declares a render column.
+    declares a render column, whether ``knob`` is a config field or a CLI flag.
     """
     missing = missing_render_column_splits(dataset, column)
     if not missing:
@@ -466,7 +469,7 @@ def require_render_column(dataset: DatasetDict, path: str, knob: str, column: st
     available = sorted(set().union(*(dataset[split].column_names for split in _rendered_splits(dataset))))
     raise ValueError(
         f"{knob}='{column}' names a column the dataset {path} does not carry (missing from split(s) "
-        f"{missing}; available columns: {available}). Point {knob} at an existing column in the YAML."
+        f"{missing}; available columns: {available}). Point {knob} at an existing column."
     )
 
 

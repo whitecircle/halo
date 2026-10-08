@@ -100,7 +100,7 @@ def test_dense_model_under_grouped_gemm_is_allowed():
 @pytest.mark.parametrize("moe", [False, True], ids=["dense", "moe-without-ep-wrappers"])
 def test_pure_tp_is_allowed(moe):
     """``tp_size == world_size`` shards into DTensors on a 1-D TP mesh, which the loader reloads by
-    ``distribute_tensor`` into the live placements (``_load_tp``). A blanket ``tp_size > 1`` arm
+    ``distribute_tensor`` into the live placements (``_load_streamed``). A blanket ``tp_size > 1`` arm
     would refuse a configuration that works."""
     _validate(tp=8, moe=moe)
 

@@ -31,7 +31,7 @@ class DistillScriptArguments(ConversationRenderArguments, CommonScriptArguments)
 
     def _validate_ranges(self) -> None:
         """Require ``teacher_model``: an empty value reaches the loader as a blank model id and only
-        fails there, and the CLI override path bypasses ``__post_init__``."""
+        fails there."""
         super()._validate_ranges()
         if not self.teacher_model:
             raise ValueError("teacher_model must be specified for distillation")

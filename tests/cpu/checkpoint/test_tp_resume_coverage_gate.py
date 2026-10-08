@@ -1,7 +1,7 @@
 #!/usr/bin/env python
 """The TP resume coverage gate: a checkpoint that matches too little of the live model must raise.
 
-``CheckpointLoader._load_tp`` writes only the keys the checkpoint and the live model share, so
+``CheckpointLoader._load_streamed`` writes only the keys the checkpoint and the live model share, so
 nothing else reports a bad checkpoint: a foreign key set applies as a no-op and the run trains on
 base weights while logging a successful resume. The gate is the same numel-weighted verdict the
 FSDP2 path uses; these tests drive it through :meth:`CheckpointLoader.load_model` so the wiring is

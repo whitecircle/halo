@@ -1,9 +1,9 @@
 #!/usr/bin/env python
 """Consolidation contract for the frozen auxiliary models: one loader, one sinks policy.
 
-The DPO/KTO reference, the SDPG KL anchor, the offline-GRPO native expert-LoRA KL reference and
-the distillation teacher all load an unparallelized frozen model whose logprobs are the other half of
-the objective. A per-site copy of that load buys a silent numerical bug the moment it drifts — a pin read off an object that cannot
+The DPO/KTO reference, the on-policy GRPO KL reference, the SDPG KL anchor, the offline-GRPO native
+expert-LoRA KL reference and the distillation teacher all load an unparallelized frozen model whose
+logprobs are the other half of the objective. A per-site copy of that load buys a silent numerical bug the moment it drifts — a pin read off an object that cannot
 carry it (a "pinned" teacher on hub ``main``), or a backend resolved under ``sinks_reset=True``
 whose sink reset is then never applied (a GptOss teacher running sdpa over live sinks, every
 logprob shifted by nats). Both are "this copy is missing a step the others have".
@@ -33,7 +33,11 @@ import scripts.training.distillation.teacher_distill as distill_script
 import scripts.training.offline_grpo as offline_grpo_script
 import src.distributed.loading.frozen_models as frozen_models
 from src.distributed.expert_parallel.config import ExpertLoraSpec
-from src.distributed.loading.frozen_models import load_frozen_auxiliary_model, load_reference_model_for_preference
+from src.distributed.loading.frozen_models import (
+    load_frozen_auxiliary_model,
+    load_reference_model_for_on_policy_grpo,
+    load_reference_model_for_preference,
+)
 from src.distributed.parallelism_config import ParallelismConfig
 from tests.common.ep_stubs import StubEPLayerBase
 from tests.common.frozen_loader import STUB_CONFIG, STUB_RESOLVED_ATTN, captured_load, stub_frozen_loader
@@ -158,8 +162,23 @@ def _offline_grpo_reference(*, reset_sinks):
     )
 
 
+def _on_policy_grpo_reference(*, reset_sinks):
+    """The online and environmental GRPO full-finetune KL reference, handed to TRL in place of its own."""
+    return load_reference_model_for_on_policy_grpo(
+        _token_setup_args(),
+        ModelConfig(model_name_or_path=AUX_MODEL),
+        types.SimpleNamespace(beta=0.1, bf16=True, fp16=False),
+        ParallelismConfig(),
+        _tokenizer(),
+        peft_config=None,
+        reset_sinks=reset_sinks,
+        attn_default=None,
+    )
+
+
 FROZEN_LOAD_SITES = {
     "preference-reference": _preference_reference,
+    "on-policy-grpo-reference": _on_policy_grpo_reference,
     "distillation-script": _script_teacher,
     "sdpg-reference": _sdpg_reference,
     "offline-grpo-reference": _offline_grpo_reference,

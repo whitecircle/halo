@@ -30,6 +30,7 @@ from src.environments.tools.definitions import (
     ToolArgumentError,
     ToolBudgetExhausted,
     ToolCallRefused,
+    UninformativeReply,
 )
 from src.inference.response import ENGINE_CUT_FINISH_REASONS
 from src.rewards.graders.matching import validate_answer
@@ -89,8 +90,9 @@ def admit_tool_call(
 
 
 def tool_call_outcome(name: str, outcome: str | Exception) -> tuple[str, bool, SandboxFault | None]:
-    """A call's observation, whether it succeeded, and the sandbox fault it ended on, from what tool
-    ``name`` returned or raised (admission included), under either protocol.
+    """A call's observation as plain text, whether it succeeded, and the sandbox fault it ended on, from
+    what tool ``name`` returned or raised (admission included), under either protocol. A reply's marker
+    type (:class:`UninformativeReply`) is read off the outcome, never carried into the conversation.
 
     A refusal (:class:`ToolBudgetExhausted`, :class:`ToolArgumentError`) is expected control flow,
     logged without a traceback: an env with a 2-submission cap in a 15-turn episode refuses by design.
@@ -99,7 +101,7 @@ def tool_call_outcome(name: str, outcome: str | Exception) -> tuple[str, bool, S
     a malformed payload would otherwise grade 0 with nothing anywhere saying why.
     """
     if not isinstance(outcome, Exception):
-        return outcome, True, None
+        return str(outcome), True, None
     fault = outcome if isinstance(outcome, SandboxFault) else None
     if isinstance(outcome, ToolBudgetExhausted | ToolArgumentError):
         logger.debug("Tool %r refused the call: %s", name, outcome)
@@ -238,6 +240,7 @@ class NativeToolUseEnvironment(BaseEnvironment):
             content=self._truncate_observation(content),
             success=success,
             refused=isinstance(outcome, ToolCallRefused),
+            uninformative=isinstance(outcome, UninformativeReply),
             sandbox_fault=fault,
         )
 
@@ -302,12 +305,12 @@ class NativeToolUseEnvironment(BaseEnvironment):
         for result in results:
             trajectory.add_message(result.to_message())
 
-        # Nothing this turn could execute: mark the assistant message so the trainer never rewards it
-        # (an episode that recovers must not reinforce the invented call or the refused program). Read
-        # off the ``unknown_tool`` and ``refused`` flags, never the error text — a tool whose backend
-        # answers "Tool not found: x" failed for real, and dropping that turn would hide a broken tool
+        # Nothing this turn did showed the model anything (an invented tool, a refused program, a reply its
+        # handler marked uninformative): mark the assistant message so the trainer never rewards it and the
+        # next turn retries on the recovery reserve. Read off the flags, never the reply text — a tool whose
+        # backend answers "Tool not found: x" failed for real, and dropping that turn would hide a broken tool
         # as a model mistake.
-        if results and all(r.unknown_tool or r.refused for r in results):
+        if results and all(r.unknown_tool or r.refused or r.uninformative for r in results):
             self._flag_calls_rejected(trajectory)
 
         # Executed calls (post per-turn cap), so this cannot disagree with total_tool_calls.

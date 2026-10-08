@@ -80,7 +80,7 @@ All run as `halo run <tool> <flags>`; each answers `-- --help`.
 | `merge-models` | weight-space combine (linear, SLERP, task-arithmetic, TIES) |
 | `convert-to-bf16` | cast an fp32/mixed checkpoint down for serving |
 | `quantize-to-lowp` | write block-scaled mxfp8 / mxfp4 / nvfp4 weights: compressed-tensors tensor names plus a toolkit `block_scaled` manifest that serving engines do not load as-is |
-| `unfuse-moe-experts` | rewrite fused MoE expert weights to the per-expert hub layout, for a family whose hub form is per-expert (GLM-4 Lite, Laguna, LFM-2, Qwen3 MoE, Qwen3.5/3.6, DeepSeek-V4, Bailing/Ling, Command A+, GLM-5 Next); refuses the families that store fused |
+| `unfuse-moe-experts` | rewrite fused MoE expert weights to the per-expert layout `from_pretrained` fuses on load, for a family that has one (GLM-4 Lite, Laguna, LFM-2, Qwen3 MoE, Qwen3.5/3.6 — whose hub itself ships fused — DeepSeek-V4, Bailing/Ling, Command A+, GLM-5 Next); refuses the families with no per-expert form |
 | `reset-sinks` | disable the attention-sink mechanism in a GPT-OSS checkpoint |
 | `reattach-vision-tower` | restore the base's vision tower and wrapper layout to a `text_only_model` Qwen3.5/3.6 export, which vLLM loads only in that layout |
 

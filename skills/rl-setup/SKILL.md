@@ -109,7 +109,8 @@ and full launch examples see [`wiring.md`](wiring.md).
    `VLLM_USE_V2_MODEL_RUNNER=0` and, when `rollout_reasoning_end_token` resolves, the IS
    correction that neutralizes its forced closes; it is refused under `rollout_backend: sglang` — as is
    `carry_reasoning`. On vLLM a level's `thinking_tokens` caps every turn's reasoning
-   below it (SGLang warns once and leaves it uncapped); `rollout_max_episode_tokens` bounds what an episode samples in total. The reasoning terms
+   below it (SGLang warns once and leaves it uncapped); `rollout_max_episode_tokens` bounds what an episode samples in total, and
+   `rollout_max_answer_tokens` what a turn generates past its reasoning cap. The reasoning terms
    (`reasoning_price` per level per 1k tokens with `reasoning_price_cap`, `reasoning_floor`; the price and
    the floor off by default) price an episode's reasoning length and its shortfall against three quarters
    of its per-turn cap.

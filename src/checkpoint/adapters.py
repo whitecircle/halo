@@ -7,9 +7,11 @@ model (the DTensor gather, the CP key remap) belongs to :mod:`src.distributed.ch
 
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 from collections.abc import Callable, Mapping
+from typing import NamedTuple
 
 import torch
 from accelerate.logging import get_logger
@@ -26,6 +28,7 @@ from src.checkpoint.format import (
     cast_to_save_dtype,
 )
 from src.checkpoint.tool_io import (
+    PROCESSOR_FILES,
     apply_training_sidecars,
     copy_training_sidecars,
     preflight_model_load_resources,
@@ -118,6 +121,13 @@ def _paths_absent_from(model: PreTrainedModel, paths: set[str]) -> list[str]:
     return absent
 
 
+class AdapterBase(NamedTuple):
+    """The base an adapter applies to, and whether it is a multimodal checkpoint's text-only class."""
+
+    model: PreTrainedModel
+    text_only: bool
+
+
 def load_base_for_adapter(
     adapter_dir: str,
     base_model_path: str,
@@ -125,7 +135,7 @@ def load_base_for_adapter(
     *,
     excuse_task_head: bool,
     log,
-) -> PreTrainedModel:
+) -> AdapterBase:
     """The base loaded through the class whose module tree the adapter's keys address.
 
     ``PeftModel.from_pretrained`` only warns when saved keys name no live module, then merges nothing
@@ -138,7 +148,7 @@ def load_base_for_adapter(
     base_model = load_base_model(base_model_path, excuse_task_head=excuse_task_head)
     absent = _paths_absent_from(base_model, paths)
     if not absent:
-        return base_model
+        return AdapterBase(base_model, text_only=False)
     # A path both classes carry (a ``modules_to_save`` lm_head) resolves on the wrapper too, so any
     # absence, not every absence, is the text-only hypothesis.
     wrapper = type(base_model).__name__
@@ -150,7 +160,7 @@ def load_base_for_adapter(
         raise ValueError(_no_module_message(adapter_dir, base_model_path, wrapper, absent)) from no_text_only_class
     if not _paths_absent_from(text_only_model, paths):
         log(f"The adapter addresses the text-only class of {wrapper}; merging as {type(text_only_model).__name__}.")
-        return text_only_model
+        return AdapterBase(text_only_model, text_only=True)
     raise ValueError(_no_module_message(adapter_dir, base_model_path, wrapper, absent))
 
 
@@ -329,22 +339,22 @@ def merge_adapter_into_base(
     # and the merged output is about the base checkpoint's size on disk.
     preflight_model_load_resources(base_model_path, output_dir, tool=tool, device_map=device_map)
 
-    # Full processor for VLM adapters (image preprocessor, tokenizer, chat template), else a plain
-    # tokenizer, taken from the adapter dir and falling back to the base: a tokenizer-only save
-    # leaves an unloadable VLM.
-    processing_class = resolve_peft_processing_class(adapter_dir, base_model_path, trust_remote_code=trust_remote_code)
-    if processing_class is None:
-        raise OSError(f"Could not load a processor or tokenizer from {adapter_dir} or {base_model_path}")
-
     log(f"Merging {adapter_dir} ({peft_config.peft_type}) into base model {base_model_path}...")
-    base_model = load_base_for_adapter(
+    base = load_base_for_adapter(
         adapter_dir,
         base_model_path,
         load_base_model,
         excuse_task_head=bool(getattr(peft_config, "modules_to_save", None)),
         log=log,
     )
-    merged_model = PeftModel.from_pretrained(base_model, adapter_dir).merge_and_unload()
+    # A text-only merge writes the export a text_only_model run writes: the run's tokenizer, and none
+    # of the multimodal base's processor files, since the class it merged through has no vision path.
+    processing_class = resolve_peft_processing_class(
+        adapter_dir, base_model_path, text_only=base.text_only, trust_remote_code=trust_remote_code
+    )
+    if processing_class is None:
+        raise OSError(f"Could not load a processor or tokenizer from {adapter_dir} or {base_model_path}")
+    merged_model = PeftModel.from_pretrained(base.model, adapter_dir).merge_and_unload()
 
     for action in apply_training_sidecars(merged_model, adapter_dir):
         log(action)
@@ -362,6 +372,10 @@ def merge_adapter_into_base(
         include_resume_sidecars=False,
         max_shard_size=max_shard_size,
     )
+    if base.text_only:
+        for name in PROCESSOR_FILES:
+            with contextlib.suppress(FileNotFoundError):
+                os.remove(os.path.join(output_dir, name))
     copy_training_sidecars(adapter_dir, output_dir)
     peft_config.save_pretrained(os.path.join(output_dir, MERGED_ADAPTER_CONFIG_DIR))
     return merged_model

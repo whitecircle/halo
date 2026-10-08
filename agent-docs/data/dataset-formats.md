@@ -252,6 +252,11 @@ GLM, Ling, and GPT-OSS (`gpt-oss-harmony.jinja`; `gpt-oss-multiturn.jinja` is th
 terminates every assistant turn). Pin a native template whenever the training
 render must match serving byte-for-byte.
 
+The template lands on the tokenizer and, for a VLM run, on its processor as well
+(`adopt_tokenizer_chat_template`): a processor renders and saves with a `chat_template` of its own,
+so the processor is what decides both the VLM rows and the exported `chat_template.jinja`. The same
+holds for `prepare_dataset.py --vlm` and `patch_vocab.py --chat_template`.
+
 ### Special-token ownership
 
 Rendered chat-template text tokenizes through `tokenize_rendered`

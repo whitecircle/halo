@@ -20,7 +20,7 @@ import torch
 from transformers import AutoModelForSequenceClassification, AutoTokenizer
 
 from scripts._common import add_dtype_arg, add_openai_endpoint_args, add_trust_remote_code_arg
-from scripts.inference._common import add_generation_args, add_prompt_field_args, follow_up_messages
+from scripts.inference._common import add_generation_args, add_prompt_field_args, assistant_turn, follow_up_messages
 from src.checkpoint.tool_io import reject_sharded_checkpoint
 from src.data.pipeline.conversation import build_base_prompt, reject_image_content, resolve_system_prompt
 from src.data.pipeline.rendered import tokenize_rendered
@@ -30,8 +30,9 @@ from src.models.loading.checkpoint_coverage import from_pretrained_verified
 from src.models.loading.dtype import DTYPE_BY_NAME
 from src.models.patches.buffer_fixes import finalize_loaded_model
 
-# Fields dropped from a serialized assistant message before it is re-appended to a conversation.
-_MESSAGE_DUMP_EXCLUDE = {"function_call", "tool_calls", "refusal", "audio"}
+# Reply fields a generated turn never carries: the role and content assistant_turn writes, and the
+# tool-call surface these scripts never request.
+_REPLY_FIELDS_DROPPED = {"role", "content", "function_call", "tool_calls", "refusal", "audio"}
 
 # Longest basename these scripts will build, in bytes. Common filesystems cap a single name at 255
 # bytes, and the failure surfaces as an uncaught OSError(ENAMETOOLONG) from the first
@@ -189,9 +190,12 @@ def resolve_correct_answer(row, args):
 async def generate_chat_message(client, messages: list[dict], args, response_format: dict) -> tuple[dict, str]:
     """One chat completion under the script's generation args.
 
-    Returns ``(assistant message dict, finish_reason)``. The finish reason is part of the contract
-    because a hypothesis cut at the token cap is a fragment: the reward model would score it as a
-    complete answer and the number would land in a preference / offline-GRPO file.
+    Returns ``(assistant turn, finish_reason)``. The turn is :func:`assistant_turn`'s plus the reply's
+    non-null extra fields, so an engine's reasoning (``reasoning_content``) reaches the chat template the
+    reward model scores with and the record a preference run trains on; the null SDK fields stay out.
+    The finish reason is part of the contract because a hypothesis cut at the token cap is a fragment:
+    the reward model would score it as a complete answer and the number would land in a preference /
+    offline-GRPO file.
     """
     completion = await chat_completion(
         client,
@@ -202,7 +206,9 @@ async def generate_chat_message(client, messages: list[dict], args, response_for
         max_tokens=args.max_gen_tokens,
     )
     choice = completion.choices[0]
-    return choice.message.model_dump(exclude=_MESSAGE_DUMP_EXCLUDE), get_finish_reason(choice) or ""
+    extras = choice.message.model_dump(exclude=_REPLY_FIELDS_DROPPED)
+    turn = {**assistant_turn(choice.message.content), **{k: v for k, v in extras.items() if v is not None}}
+    return turn, get_finish_reason(choice) or ""
 
 
 async def prepare_generation_prompt(client, row: pd.Series, args) -> tuple[list[dict], dict]:
@@ -331,10 +337,24 @@ async def score_conversations_offloaded(
     )
 
 
+def read_jsonl_frame(path: str | Path) -> pd.DataFrame:
+    """A JSONL file as an object-dtype DataFrame holding each field as the value ``json`` parses.
+
+    ``pd.read_json`` rewrites values: by default ``"007"`` becomes ``7`` and a ``*_at`` column
+    timestamps, and even with its inference off an int column beside a row lacking the field turns
+    float (``5`` reaches the reward model's prompt as ``5.0``) and ``0.3`` parses as
+    ``0.30000000000000004``. A field a row lacks reads as NaN. One reader for the prompts and the
+    resume output, so an id compares equal across the two.
+    """
+    with open(path, encoding="utf-8") as f:
+        records = [json.loads(line) for line in f if line.strip()]
+    return pd.DataFrame(records, dtype=object)
+
+
 def load_prompts_dataframe(args) -> pd.DataFrame:
     """Load the JSONL prompts source and validate the required columns."""
     print("Loading prompts...")
-    df = pd.read_json(args.prompts_source, lines=True)
+    df = read_jsonl_frame(args.prompts_source)
     if args.prompt_field not in df or args.id_field not in df:
         raise ValueError(f"Input must contain '{args.prompt_field}' and '{args.id_field}' columns")
     return df
@@ -350,7 +370,7 @@ def load_local_jsonl_resume(output_path: Path, id_field: str) -> tuple[set, pd.D
     """
     if not output_path.exists():
         return set(), pd.DataFrame()
-    existing = pd.read_json(output_path, lines=True)
+    existing = read_jsonl_frame(output_path)
     return set(existing[id_field]), existing
 
 

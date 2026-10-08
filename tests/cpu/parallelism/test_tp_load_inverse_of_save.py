@@ -1,7 +1,7 @@
 #!/usr/bin/env python
 """The TP resume load must place exactly what transformers' TP load placed, for every plan style.
 
-``CheckpointLoader._load_tp`` reads each checkpoint tensor whole and
+``CheckpointLoader._load_streamed`` reads each checkpoint tensor whole and
 ``distribute_tensor(value, mesh, param.placements, src_data_rank=None)``s it into the live DTensor.
 The checkpoint holds ``full_tensor()`` of the same DTensor, so the load is correct exactly when
 ``distribute_tensor`` under the live placements reproduces the shard ``shard_param`` created — a

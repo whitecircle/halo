@@ -11,7 +11,7 @@ Every helper here is opt-in and costs nothing when disabled.
 | Step time, tokens/s, peak memory, MFU/S-MFU | `EfficiencyCallback` | `enable_efficiency_metrics` YAML flag; MFU/S-MFU also need `report_mfu_diagnostics` |
 | Rank skew on a collective | TraceLens collective report | `profiler_ranks: "all"`, then `scripts/profiling/trace_report.py` |
 | Cross-rank value divergence | `assert_consistent` | add the call, then `HALO_TP_CONSISTENCY_CHECK=1` |
-| Hang stack dump (every rank on the node) | `scripts/profiling/py_spy_diag.py dump` | run standalone; needs `--cap-add=SYS_PTRACE` |
+| Hang stack dump (every rank on the node) | `scripts/profiling/py_spy_diag.py dump` | run standalone; needs ptrace access ([§1c](#1c-py-spy--cpu-flame-graph-dataloader--python-stalls)) |
 | NVLink lane health (hard errors: Rx, symbol, link recovery, link integrity) | `scripts/profiling/nvlink_health.py` | run standalone; exit 1 = hard lane errors, while a failed `nvidia-smi` or an unrecognized counter layout raises |
 | NCCL watchdog timeout | `init_distributed` | `DIST_NCCL_TIMEOUT_MINUTES` (default 30) |
 | Weight-sync hang or slow sync: the transport the trainer↔rollout-server group formed on (EFA, InfiniBand, sockets, CUDA IPC, shared memory), plugin build, GB/s | `scripts/profiling/weight_sync_transport.py` | run standalone against a live server; `--expect efa` exits 1 off the fabric ([Rollout Servers](../infrastructure/rollout-servers.md#servers-on-other-nodes-efa)) |
@@ -99,12 +99,26 @@ shell in the same container — no launch-time flags:
 python scripts/profiling/py_spy_diag.py record --duration 30
 ```
 
-One SVG per torchrun rank spots a single straggler; `--pid` narrows the target, `--rate` sets the
-sampling rate (default 100/s), `--native` adds C/CUDA-runtime frames. In-script,
-`record_distributed_flamegraph` defaults to `this_rank_only=True` — one SVG for the calling process;
-pass `this_rank_only=False` for the per-rank sweep. Without py-spy on `PATH` the CLI exits 2;
-attaching also needs ptrace permission — start the container with `--cap-add=SYS_PTRACE`, or py-spy
-itself fails with `Permission denied`.
+One SVG per torchrun rank, every rank sampled over the same window, spots a single straggler; `--pid`
+narrows the target, `--rate` sets the sampling rate (default 100/s), `--native` adds C/CUDA-runtime
+frames. In-script, `record_distributed_flamegraph` defaults to `this_rank_only=True` — one SVG for the
+calling process; pass `this_rank_only=False` for the per-rank sweep. Without py-spy on `PATH` the CLI
+exits 2. A pid either subcommand cannot attach to is named with its reason (also in
+`pid<pid>.error`) and the CLI exits 1.
+
+Attaching needs ptrace access to the target — py-spy reads its memory with `process_vm_readv` and
+pauses it with `ptrace` — which the host kernel's Yama setting (`kernel.yama.ptrace_scope`, not
+namespaced) and the container's capabilities decide, for a same-uid shell in the job's pid
+namespace (`docker exec`):
+
+| `ptrace_scope` | Attach from a sibling shell |
+|---|---|
+| 0 | works with Docker's default capabilities and seccomp profile, which admits `ptrace` and `process_vm_readv` on kernel ≥ 4.8 (Docker ≥ 19.03) |
+| 1 (Ubuntu's default: descendants only), 2 | needs `CAP_SYS_PTRACE` — `--cap-add=SYS_PTRACE` |
+| 3 | never |
+
+The launch recipe keeps `--cap-add=SYS_PTRACE` so triage works at every scope below 3; without the
+access py-spy fails with `Permission denied`.
 
 ## 2. Finding throughput bottlenecks
 
@@ -213,7 +227,7 @@ timing that decides which step the mismatch lands on.
 python scripts/profiling/py_spy_diag.py dump   # → $TMPDIR/halo_diag_stacks/<ts>-rank00/pid<pid>.txt (--output-dir moves it)
 ```
 
-It attaches to every training process on the node, so the container needs `--cap-add=SYS_PTRACE`.
+It attaches to every training process on the node, so it needs ptrace access to each ([§1c](#1c-py-spy--cpu-flame-graph-dataloader--python-stalls)).
 The rank *not* in a collective (still in the dataloader, or a different `if` branch) is the culprit.
 
 ### Catch divergence before it deadlocks

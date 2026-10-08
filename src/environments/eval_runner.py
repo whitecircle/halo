@@ -275,6 +275,7 @@ async def run_episode(
         max_tokens=rollout.max_tokens,
         max_thinking_tokens=rollout.max_thinking_tokens,
         max_episode_tokens=rollout.max_episode_tokens,
+        max_answer_tokens=rollout.max_answer_tokens,
     )
     if effort.level is not None:
         context = {**(context or {}), "reasoning_effort": effort.level}
@@ -391,6 +392,7 @@ async def collect_results(
         max_tokens=rollout.max_tokens,
         max_thinking_tokens=rollout.max_thinking_tokens,
         max_episode_tokens=rollout.max_episode_tokens,
+        max_answer_tokens=rollout.max_answer_tokens,
     )
     tasks = [task_prompt(example["prompt"]) for example in examples]
     semaphore = asyncio.Semaphore(max_workers)
