@@ -12,7 +12,8 @@
 * A drawable effort level whose ``thinking_tokens`` reach ``rollout_max_tokens`` leaves its turns no
   answer room, so every one is cut mid-reasoning; refused before the servers are up.
 * A vLLM thinking budget forces reasoning closes the loss must not train on: the run needs the IS
-  correction, and a close marker the tokenizer lacks is warned, the forced closes left in the loss.
+  correction, and a close marker the tokenizer lacks is warned, the forced closes left in the loss. A
+  one-token close also ends the rollout's per-turn reasoning count.
 
     python tests/cpu/grpo/test_env_trainer_construction_gates.py
 """
@@ -275,6 +276,26 @@ def test_a_marker_the_tokenizer_does_not_write_warns_and_trains_on_the_forced_cl
         assert host._resolve_forced_close_ids() is None
     warnings = [r.getMessage() for r in caplog.records if r.levelno == logging.WARNING]
     assert any("stay in the policy loss" in w and DEFAULT_REASONING_END_TOKEN in w for w in warnings), warnings
+
+
+def _count_end_id(budgets: dict, knows_close: bool = True, **config) -> int | None:
+    """The id the rollout counts a turn's reasoning up to, off the forced close construction resolved."""
+    host = _close_host(budgets, knows_close, **config)
+    host._forced_close_ids = host._resolve_forced_close_ids()
+    return host._resolve_reasoning_end_token_id()
+
+
+def test_the_reasoning_count_reads_up_to_a_one_token_close_wherever_a_vllm_cap_can_bind():
+    """``episode/thinking_cap_turns`` reads each turn's reasoning counted up to the forced close: resolved
+    wherever a vLLM cap can bind, a level's or the run's. Where none can (SGLang, or no budget), where the
+    tokenizer does not write the marker, and where the close spans several tokens (gpt-oss's opener) no one
+    id marks the count's end, and the run goes without it."""
+    assert _count_end_id({"high": 16384}) == _CLOSE_ID
+    assert _count_end_id({}, rollout_max_thinking_tokens=8192) == _CLOSE_ID
+    assert _count_end_id({}) is None
+    assert _count_end_id({"high": 16384}, rollout_backend=SGLANG_BACKEND) is None
+    assert _count_end_id({"high": 16384}, knows_close=False) is None
+    assert _count_end_id({"high": 16384}, knows_close=False, rollout_reasoning_end_token=_OPENER) is None
 
 
 if __name__ == "__main__":

@@ -265,11 +265,8 @@ CUDA_VISIBLE_DEVICES=4,5,6,7 halo launch environmental-grpo gpt-oss-grpo.yaml -n
 ```
 
 vLLM (`rollout_backend: vllm`, `rollout_server_url: http://localhost:8000`) is the engine
-the shipped ep4 configs target, and the only one for `rollout_max_thinking_tokens`,
-`turn_overlong_penalty` and `carry_reasoning`
-([Supported Matrix](../supported-matrix.md#rollout-engines)). `turn_overlong_penalty` stays
-off on GPT-OSS, on vLLM too: it counts a turn's reasoning up to a one-token close,
-GPT-OSS's close is five tokens, and the trainer refuses it.
+the shipped ep4 configs target, and the only one for `rollout_max_thinking_tokens` and
+`carry_reasoning` ([Supported Matrix](../supported-matrix.md#rollout-engines)).
 GPT-OSS tool calls arrive as plain text that the default `hermes` parser cannot read, so
 a native-tool environment on vLLM needs the bundled text tool parser, and a thinking budget needs the bundled reasoning
 parser with Model Runner V1 (V2 answers `thinking_token_budget` with a 400). Set

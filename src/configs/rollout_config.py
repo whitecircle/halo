@@ -89,7 +89,7 @@ class RolloutConfig:
     reasoning_end_token_id: int | None = None
     """The id of the token that closes reasoning, resolved from ``rollout_reasoning_end_token`` by the
     caller that owns the tokenizer: a turn's reasoning is counted as the sampled ids up to and including
-    it, the count the overlong charge reads. None = no count."""
+    it, the count ``episode/thinking_cap_turns`` reads. None = no count."""
 
     capture_token_ids: bool = False
     """Request per-token logprobs so the sampled generation token ids can be captured (needs the

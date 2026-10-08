@@ -141,8 +141,8 @@ class AsyncTrainingConfig(AdvantageShapingArguments, GRPOEarlyStopArguments, Chu
         metadata={
             "help": "Inference engine serving rollouts and receiving weight updates. Both support "
             "generation, NCCL weight sync, `train_on_sampled_tokens` and `routing_replay: rollout`. "
-            "'sglang' does not support `rollout_max_thinking_tokens` or `turn_overlong_penalty` (the trainer "
-            "wires neither of SGLang's budget mechanisms; harmony models have none server-side), needs cuMem parity on "
+            "'sglang' does not support `rollout_max_thinking_tokens` (the trainer wires neither of SGLang's "
+            "budget mechanisms; harmony models have none server-side), needs cuMem parity on "
             "the server (NCCL_CUMEM_ENABLE=1, which docker-compose.sglang.yml sets), and must be served "
             "from the NCCL-aligned Dockerfile.sglang image — the stock upstream image ships a "
             "different NCCL than the trainer and cannot form the weight-sync group."
@@ -252,8 +252,8 @@ class AsyncTrainingConfig(AdvantageShapingArguments, GRPOEarlyStopArguments, Chu
             "help": "The string the server's reasoning parser ends reasoning with, encoded as vLLM encodes it "
             f"({REASONING_END_TOKEN_EXAMPLES}). "
             "Wherever a vLLM thinking budget can bind, a forced run of its ids gets ratio 0 in the loss (a marker "
-            "holding none of the tokenizer's added tokens only warns). The overlong charge counts a turn's "
-            "reasoning as the sampled ids up to and including it, which needs it to be one added token."
+            "holding none of the tokenizer's added tokens only warns). Where it is one token, a turn's reasoning "
+            "is counted as its sampled ids up to and including it, the count episode/thinking_cap_turns reads."
         },
     )
 
@@ -399,10 +399,10 @@ class AsyncTrainingConfig(AdvantageShapingArguments, GRPOEarlyStopArguments, Chu
         default=True,
         metadata={
             "help": "Drop GRPO groups whose completions ALL settled the same environment reward (grade, "
-            "shaping and external scores; the trainer's own reasoning terms and turn overlong charge "
-            "excluded, since they make every total distinct). Such a group has no contrast to learn from beyond "
-            "those trainer terms, and its tokens would still inflate the loss normalizer and dilute the groups "
-            "that do carry signal. "
+            "shaping and external scores; the trainer's reasoning price and floor excluded: length regularizers, "
+            "with which a group tied on everything else would train on its members' reasoning lengths alone). Such "
+            "a group has no task contrast to learn from, and its tokens would still inflate the loss normalizer and "
+            "dilute the groups that do carry signal. "
             "Masking them restores the effective batch size (the cheap half of DAPO's dynamic sampling: "
             "drop, without resampling replacements). Logged as `sampling/degenerate_group_frac`. Default on."
         },
@@ -455,22 +455,12 @@ class AsyncTrainingConfig(AdvantageShapingArguments, GRPOEarlyStopArguments, Chu
         metadata={
             "help": "Weight of the reasoning under-use floor (0 = off): an episode whose reasoning tokens, summed "
             "over its turns, fall short of three quarters of its per-turn thinking cap (its level's thinking_tokens, "
-            "clamped by rollout_max_thinking_tokens) pays -weight x shortfall / that reference. The one term that pays "
-            "for more reasoning; it resists reasoning "
-            "shrinking toward nothing. An episode with no thinking budget is free of it, and a run where no "
-            "drawable level sets one and rollout_max_thinking_tokens is unset is refused at trainer construction. "
-            "Logged as reward/reasoning_floor."
-        },
-    )
-    turn_overlong_penalty: float = field(
-        default=0.0,
-        metadata={
-            "help": "Most a turn that runs into a cap costs its episode, in reward units (0 = off). A turn pays "
-            "the larger of two ramps, each -penalty x clamp((count - 0.75 x cap) / (0.25 x cap), 0, 1): the "
-            "reasoning it sampled (its ids up to and including the close) against its thinking cap, and every "
-            "token it sampled against rollout_max_tokens. Nothing until the count enters the last quarter under "
-            "the cap, the whole penalty at it. The episode pays its most-charged turn once. vLLM only; needs "
-            "train_on_sampled_tokens. Logged as reward/turn_overlong."
+            "clamped by rollout_max_thinking_tokens) pays -weight x shortfall / that reference. The one term that "
+            "pays for more reasoning; it resists reasoning shrinking toward nothing. Keep it, plus "
+            "reasoning_price_cap while the price is on, below what the environment charges for the decisions it "
+            "prices (a resubmission, in code contests). An episode with no thinking budget is free of it, and a "
+            "run where no drawable level sets one and rollout_max_thinking_tokens is unset is refused at trainer "
+            "construction. Logged as reward/reasoning_floor."
         },
     )
 
@@ -539,7 +529,10 @@ class AsyncTrainingConfig(AdvantageShapingArguments, GRPOEarlyStopArguments, Chu
             raise ValueError(
                 f"sync_weights_every_n_steps must be >= 1 (1 = every step), got {self.sync_weights_every_n_steps}"
             )
-        self._validate_reasoning_terms()
+        self._validate_reasoning_price()
+        # A NaN or negative weight would parse and leave the floor off without a word.
+        if not isfinite(self.reasoning_floor) or self.reasoning_floor < 0:
+            raise ValueError(f"reasoning_floor must be a finite number >= 0 (0 = off), got {self.reasoning_floor}")
         # A negative budget reaches backoff as max_tries <= 0, which it treats as "no limit": a wedged
         # server is then retried until the NCCL watchdog kills the job.
         if self.max_retries < 0:
@@ -650,10 +643,10 @@ class AsyncTrainingConfig(AdvantageShapingArguments, GRPOEarlyStopArguments, Chu
             opsm_delta=self.isr_opsm_delta,
         )
 
-    def _validate_reasoning_terms(self) -> None:
-        """A NaN passes every ordered comparison, a negative price, floor weight or overlong penalty would pay
-        for the length it prices, a cap set while the price is off parses and changes nothing, and an overlong
-        charge with no count to read would never charge a turn."""
+    def _validate_reasoning_price(self) -> None:
+        """A NaN passes every ordered comparison, a negative price would pay for the length it prices, and a
+        cap set while the price is off parses and changes nothing. The levels a price must map are checked at
+        trainer construction, beside the environment that draws them."""
         if self.reasoning_price is None and self.reasoning_price_cap != DEFAULT_REASONING_PRICE_CAP:
             raise ValueError(
                 "reasoning_price_cap set with reasoning_price unset: nothing reads it until the price is on. Remove "
@@ -668,23 +661,6 @@ class AsyncTrainingConfig(AdvantageShapingArguments, GRPOEarlyStopArguments, Chu
                 if isinstance(price, bool) or not isinstance(price, int | float) or not isfinite(price) or price < 0:
                     raise ValueError(f"reasoning_price[{level!r}] must be a finite number >= 0, got {price!r}")
         require_positive(type(self).__name__, reasoning_price_cap=self.reasoning_price_cap)
-        if not isfinite(self.reasoning_floor) or self.reasoning_floor < 0:
-            raise ValueError(f"reasoning_floor must be a finite number >= 0 (0 = off), got {self.reasoning_floor}")
-        penalty = self.turn_overlong_penalty
-        if not isfinite(penalty) or penalty < 0:
-            raise ValueError(f"turn_overlong_penalty must be a finite number >= 0 (0 = off), got {penalty}")
-        if penalty == 0:
-            return
-        if not self.train_on_sampled_tokens:
-            raise ValueError(
-                "turn_overlong_penalty requires train_on_sampled_tokens: a turn's reasoning is counted off the "
-                "sampled ids the capture returns."
-            )
-        if not self.rollout_reasoning_end_token:
-            raise ValueError(
-                "turn_overlong_penalty requires rollout_reasoning_end_token, the marker a turn's reasoning count "
-                "reads up to."
-            )
 
     def _validate_backend_capabilities(self) -> None:
         """Reject request knobs the selected engine does not implement.
@@ -699,9 +675,9 @@ class AsyncTrainingConfig(AdvantageShapingArguments, GRPOEarlyStopArguments, Chu
         Neither is the environment's per-effort ``thinking_tokens`` profile, whose budget reaches the
         same request field: the level it belongs to still reaches the chat template and the reasoning
         terms, so on an engine without the field the level keeps steering and only the hard
-        cap is lost. The rollout actor warns once per process that it is unenforced. The two knobs
-        refused here are the ones whose point is the enforced cap: ``rollout_max_thinking_tokens`` is a
-        cap and nothing else, and the overlong charge prices a turn against the cap the engine forced.
+        cap is lost. The rollout actor warns once per process that it is unenforced. The knob refused
+        here is the one whose point is the enforced cap: ``rollout_max_thinking_tokens`` is a cap and
+        nothing else.
         """
         if self.rollout_backend != SGLANG_BACKEND:
             return
@@ -710,11 +686,6 @@ class AsyncTrainingConfig(AdvantageShapingArguments, GRPOEarlyStopArguments, Chu
                 "rollout_max_thinking_tokens is not supported with rollout_backend='sglang': the "
                 "thinking_token_budget request field is vLLM-only and SGLang would silently ignore it, "
                 "leaving reasoning uncapped. Steer with the environment's reasoning_effort instead."
-            )
-        if self.turn_overlong_penalty > 0:
-            raise ValueError(
-                "turn_overlong_penalty is not supported with rollout_backend='sglang': it charges a turn against the "
-                "cap the engine enforces, the vLLM-only thinking_token_budget field SGLang ignores."
             )
 
     def get_server_urls(self) -> list[str]:
@@ -755,8 +726,8 @@ class AsyncTrainingConfig(AdvantageShapingArguments, GRPOEarlyStopArguments, Chu
     ):
         """Build RolloutConfig from this config. ``stop_token_ids`` (from ``rollout_stop_tokens``) and
         ``reasoning_end_token_id`` (from ``rollout_reasoning_end_token``) are resolved by the caller that
-        owns the tokenizer; the latter only matters to the overlong charge, whose reasoning count reads up
-        to it. ``in_process_group`` says the rollout runs inside a training
+        owns the tokenizer; the latter ends the per-turn reasoning count ``episode/thinking_cap_turns``
+        reads. ``in_process_group`` says the rollout runs inside a training
         process group, whose NCCL collective watchdog its timeouts must stay under (the trainer, the
         default); an eval sampling under a training contract joins none and passes False."""
         if in_process_group:

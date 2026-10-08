@@ -167,7 +167,7 @@ def test_an_unresolvable_stop_token_is_refused(tmp_path, monkeypatch):
 
 def test_the_contract_loads_the_tokenizer_for_the_stop_tokens_alone(tmp_path, monkeypatch):
     """Only the stop tokens go through the tokenizer: a contract without them never loads one, and no
-    reasoning-end id is resolved for the eval (the trainer's overlong charge is the one reader of it)."""
+    reasoning-end id is resolved for the eval (the trainer's per-turn reasoning count is the one reader of it)."""
     path = tmp_path / "train.yaml"
     path.write_text(_TRAINING_YAML.replace('rollout_stop_tokens: ["<|call|>"]\n', ""))
 

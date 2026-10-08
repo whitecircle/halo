@@ -1,12 +1,12 @@
 #!/usr/bin/env python
 """A GRPO group whose members tie on the environment's reward leaves the loss.
 
-The environmental trainer charges a reasoning-length price per episode on top of the reward the
-environment settled, so the totals it trains on almost never tie exactly: judged on them, an
-all-solved group would train on the price alone. The narrow phase judges degeneracy on each rollout's
-settled environment reward instead, which it reads off the rollouts. These tests drive it with a group
-tied on that reward, which leaves, and with a group one member of which a priced contrast (a
-resubmission) sets apart, which stays.
+The environmental trainer charges a reasoning under-use floor on top of the reward the environment
+settled: judged on the totals it trains on, an all-solved group whose members reasoned short of the
+floor by different amounts would train on that shortfall alone. The narrow phase judges degeneracy on
+each rollout's settled environment reward instead, which it reads off the rollouts. These tests drive it
+with a group tied on that reward, which leaves, and with a group one member of which a priced contrast
+(a resubmission) sets apart, which stays.
 
     python tests/cpu/grpo/test_env_degenerate_groups.py
 """

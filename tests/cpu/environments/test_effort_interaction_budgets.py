@@ -41,7 +41,6 @@ from src.environments.episode import (
     TurnGeneration,
     bind_episode_effort,
     resolve_reasoning_end_ids,
-    resolve_reasoning_end_token_id,
     sampled_reasoning_tokens,
     step_context_from_generation,
 )
@@ -126,7 +125,8 @@ def test_the_cap_still_ends_the_episode_at_the_last_graded_submission():
     ids, _ = env.reset(["solve it"], [{"reasoning_effort": "low", **_FAILING_ANSWER}])
     first = _step_call(env, ids, SUBMIT_TOOL)
     assert not first.done
-    last = _step_call(env, ids, SUBMIT_TOOL)
+    # A changed program (comments aside): the same one again would be refused as already graded, not graded a second time.
+    last = _step_call(env, ids, SUBMIT_TOOL, code="attempt = 2\nprint('X')")
     traj = last.trajectory
     assert last.done and traj.info["completed"] and not traj.truncated
     assert env._submissions(traj) == 2
@@ -167,8 +167,8 @@ def test_resubmission_penalty_prices_each_graded_submission_after_the_first():
     failing = {"answer": {"tests": [{"input": "", "output": "Y"}]}}
     env = _make_env(reasoning_effort_profiles=profiles, resubmission_penalty=0.1)
     traj = reset_episode(env, {"reasoning_effort": "high", **failing})
-    for _ in range(3):
-        call_tool(env, traj, "submit_solution")
+    for attempt in range(3):
+        call_tool(env, traj, "submit_solution", code=f"attempt = {attempt}\nprint('X')")
     env._settle_grade(traj, None)
     components = traj.info[REWARD_COMPONENTS_KEY]
     assert components["reward/resubmission"] == pytest.approx(-0.2)
@@ -371,9 +371,10 @@ def test_sampled_reasoning_tokens_counts_through_the_marker_and_is_absent_withou
 
 
 def test_a_turns_step_context_carries_its_cap_and_the_reasoning_it_sampled():
-    """The overlong charge reads the pair off each turn: the cap the turn's level set, and the reasoning
-    the turn sampled, counted as the budget counts it (the close included; a cut turn's every id). Without
-    the ids or the marker's id the count is absent rather than zero, which would read as a free turn."""
+    """``episode/thinking_cap_turns`` reads the pair off each turn: the cap the turn's level set, and the
+    reasoning the turn sampled, counted as the budget counts it (the close included; a cut turn's every id).
+    Without the ids or the marker's id the count is absent rather than zero, which would read as a turn
+    under its cap."""
     closed = step_context_from_generation(
         None, _gen([11, 12, _END, 14]), thinking_cap=18000, reasoning_end_token_id=_END
     )
@@ -419,18 +420,6 @@ def test_resolve_reasoning_end_ids_encodes_the_marker_as_the_engine_forces_it():
         resolve_reasoning_end_ids(_VOCAB, "<|end_reasoning|>")
     with pytest.raises(ValueError, match="not a reasoning marker of this tokenizer"):
         resolve_reasoning_end_ids(_VOCAB, "")
-
-
-def test_resolve_reasoning_end_token_id_requires_one_control_token():
-    """The overlong charge counts a turn's reasoning up to one marker token: one the tokenizer does not
-    write would count every turn's whole generation as reasoning. A marker of several tokens is refused,
-    and the charge told to turn off."""
-    assert resolve_reasoning_end_token_id(_VOCAB, "</think>") == _END
-    with pytest.raises(ValueError, match="not a reasoning marker of this tokenizer"):
-        resolve_reasoning_end_token_id(_VOCAB, "<|end_reasoning|>")
-    opener = "<|start|>assistant<|channel|>final<|message|>"
-    with pytest.raises(ValueError, match="encodes to 5 tokens.*turn it off for this model"):
-        resolve_reasoning_end_token_id(_VOCAB, opener)
 
 
 def test_stamp_records_output_budget_exhaustion_only_under_an_output_budget():

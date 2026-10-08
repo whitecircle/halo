@@ -111,10 +111,10 @@ An environment grades, the terms price. `_grade_episode(trajectory, context)` re
 - `reward/turn_shaping` — the per-turn deltas accrued during the episode (tool credit and penalties, ReAct thought credit).
 - `reward/tool_shaping` — native-protocol environments only: their episode-level knobs (`no_tool_use_penalty`, `turn_overflow_penalty`, `length_cutoff_penalty`), from `_episode_shaping`.
 - `reward/<name>` — each of the environment's shaping terms (code contests: `submission`, `resubmission`).
-- `reward/objective` — `weight × grade ^ exponent` from the `environment` term; 0 once a veto check fired.
+- `reward/objective` — `weight × grade ^ exponent` from the `environment` term; 0 once a veto check fired, as is every other positive component.
 - `reward/<name>` — each `judge` / `reward_model` term.
 
-The trainer charges its length terms on top, outside these components: `reward/reasoning_price`, `reward/reasoning_floor` and `reward/turn_overlong` ([Reasoning length reward](async-grpo/rollouts.md#reasoning-length-reward)).
+The trainer charges its length terms on top, outside these components: `reward/reasoning_floor` and, with the price on, `reward/reasoning_price` ([Reasoning length reward](async-grpo/rollouts.md#reasoning-length-reward)). Each episode's settled components and every scored term's rationale are also saved with its completion ([Saving trajectories](async-grpo/rollouts.md#saving-trajectories)).
 
 `rewards` defaults to `[{source: environment}]` and reaches the environment constructor as `reward_terms`. A class declares its shaping names in `SHAPING_COMPONENTS` (the union over the class hierarchy); `turn_shaping` and every declared shaping name are reserved for shaping, and a reward term may not take one. There is no failure offset: a constant cancels in the group baseline. An environment whose grade carries no signal (a null `answer` cell, a grader outage, a code grade that stopped before any test failed) grades 0 and marks the episode `episode_invalid`, out of the baseline.
 
@@ -127,7 +127,7 @@ One sample serves every external term, each reading its own view of it: the prom
 
 ### Settlement
 
-The external terms are scored after the episode ends. At the terminal step the environment prices its own side and marks the reward pending; the episode dispatcher — the Ray actor and the eval runner both drive through it — awaits `settle_async` for every episode it closed, and a sync caller uses `env.settle(ids)`. Reading `rollout_metrics` on an unsettled episode raises. Settlement prices each scored term, zeroes `reward/objective` when a veto check fired, and books a verdict-less term by its `on_error` ([Outages](#outages)); `episode/reward_scored` is 1 only when every external term reached a verdict, whichever way a miss was settled.
+The external terms are scored after the episode ends. At the terminal step the environment prices its own side and marks the reward pending; the episode dispatcher — the Ray actor and the eval runner both drive through it — awaits `settle_async` for every episode it closed, and a sync caller uses `env.settle(ids)`. Reading `rollout_metrics` on an unsettled episode raises. Settlement prices each scored term, zeroes `reward/objective` and every other positive component when a veto check fired, and books a verdict-less term by its `on_error` ([Outages](#outages)); `episode/reward_scored` is 1 only when every external term reached a verdict, whichever way a miss was settled.
 
 An episode the **eval** driver lost (a generation that failed past its retries) is graded on what it earned and never sent to a scorer; unless its own request caused the failure, the eval then discards that grade and reports the sample as a [generation error](environments/evaluation.md#running-an-evaluation). The training actor instead drops the partial trajectory and returns an error row at reward 0. An episode a [sandbox fault](environments/sandbox.md#sandbox-faults) ended is never sent to a scorer either, and logs no `episode/reward_scored`. The launch probe covers every external term through the environment's `verify_backend`. One scorer per environment instance, so judge concurrency is `max_concurrency` per Ray actor.
 

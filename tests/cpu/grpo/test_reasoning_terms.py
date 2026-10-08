@@ -25,6 +25,8 @@ from src.trainers.grpo.reasoning_terms import reasoning_floor_term, reasoning_pr
 from tests.common.grpo_metrics import attach_world_metrics, flushed_metrics
 
 PRICE = {"low": 0.01, "medium": 0.005, "high": 0.001}
+# The example prices the async-GRPO templates show.
+TEMPLATE_PRICE = {"low": 0.0037, "medium": 0.0013, "high": 0.00018}
 CAP = 0.1
 
 
@@ -35,6 +37,9 @@ def test_price_is_linear_in_reasoning_tokens_per_thousand_summed_over_turns():
     assert reasoning_price_term([], 0.01, CAP) == 0.0
     assert reasoning_price_term([0, 0], 0.01, CAP) == 0.0
     assert reasoning_price_term([4096], 0.0, CAP) == 0.0, "a level priced at zero pays nothing"
+    # The template's prices at the low and high levels' whole per-turn budgets.
+    assert reasoning_price_term([8192], TEMPLATE_PRICE["low"], CAP) == pytest.approx(-0.0303104)
+    assert reasoning_price_term([16384], TEMPLATE_PRICE["high"], CAP) == pytest.approx(-0.00294912)
 
 
 def test_price_is_capped_exactly_at_the_cap():
@@ -68,6 +73,12 @@ def test_floor_charges_silent_turns_in_full_and_a_lost_episode_nothing():
     # Off switches: no cap, or no weight.
     assert reasoning_floor_term([10], 0, 0.05) == 0.0
     assert reasoning_floor_term([10], 8192, 0.0) == 0.0
+
+
+def test_the_floor_target_rounds_a_cap_the_share_does_not_divide():
+    """0.75 x 1001 rounds to 751: 751 tokens clear the floor, 750 fall one short."""
+    assert reasoning_floor_term([751], 1001, 1.0) == 0.0
+    assert reasoning_floor_term([750], 1001, 1.0) == pytest.approx(-1 / 751)
 
 
 def _rollout(level, tokens, budget=None):
@@ -140,28 +151,46 @@ def _episode(thinkings, budget=1000, level="low"):
     return RolloutResult(prompt="task", trajectory=trajectory)
 
 
+def _reward_host(**config) -> DistributedAsyncEnvironmentalGRPOTrainer:
+    trainer = attach_world_metrics(object.__new__(DistributedAsyncEnvironmentalGRPOTrainer))
+    trainer.async_config = AsyncTrainingConfig(**config)
+    trainer._tokenizer = _CharTokenizer()
+    trainer._metrics = {"train": defaultdict(list)}
+    trainer._carry_reasoning = False
+    trainer._warned_once = set()
+    return trainer
+
+
 def test_the_reward_build_applies_both_terms_over_every_assistant_turn():
     """The real path: the trainer's own reward build and its per-turn token counter. Every assistant
     turn is one entry, a thinking-free one as 0 — a counter that skipped them would hand the floor an
     empty list, which it reads as a lost episode, so dropping the reasoning entirely would be free
     while brief reasoning paid nearly the whole weight."""
-    trainer = attach_world_metrics(object.__new__(DistributedAsyncEnvironmentalGRPOTrainer))
-    trainer.async_config = AsyncTrainingConfig(reasoning_price=PRICE, reasoning_floor=0.05)
-    trainer._tokenizer = _CharTokenizer()
-    trainer._metrics = {"train": defaultdict(list)}
-    trainer._carry_reasoning = False
-    trainer._warned_once = set()
+    trainer = _reward_host(reasoning_price=PRICE, reasoning_floor=0.05)
     episodes = [
         _episode([None, "", None]),  # three silent turns: the whole floor, nothing to price
         _episode([]),  # no assistant turn: a lost episode, free
         _episode(["x" * 750]),  # exactly 0.75 x its 1000 budget: no floor, 750 tokens priced
+        _episode(["x" * 300, "x" * 75]),  # 375 summed over two turns: half the target short, 375 priced
     ]
     rewards = trainer._build_rollout_rewards(
         episodes, trainer._episode_reasoning_tokens(episodes), torch.device("cpu")
     )
-    assert rewards[0].item() == pytest.approx(-0.05)
-    assert rewards[1].item() == 0.0
-    assert rewards[2].item() == pytest.approx(-0.01 * 750 / 1000)
+    assert rewards.tolist() == pytest.approx([-0.05, 0.0, -0.0075, -0.025 - 0.00375])
+    metrics = flushed_metrics(trainer)
+    assert metrics["reward/reasoning_floor"] == [pytest.approx(-0.075 / 4)]
+    assert metrics["reward/reasoning_price"] == [pytest.approx(-0.01125 / 4)]
+
+
+def test_with_both_terms_off_nothing_is_charged_or_logged():
+    trainer = _reward_host()
+    episodes = [_episode(["x" * 10])]
+    rewards = trainer._build_rollout_rewards(
+        episodes, trainer._episode_reasoning_tokens(episodes), torch.device("cpu")
+    )
+    assert rewards.tolist() == [0.0]
+    metrics = flushed_metrics(trainer)
+    assert "reward/reasoning_floor" not in metrics and "reward/reasoning_price" not in metrics
 
 
 def test_a_missing_trajectory_is_free():
@@ -188,6 +217,7 @@ def test_config_refuses_values_that_would_invert_or_poison_the_terms():
             AsyncTrainingConfig(reasoning_floor=bad)
     # A price of zero on one level is a priced level that pays nothing, not a mistake.
     assert AsyncTrainingConfig(reasoning_price={**PRICE, "high": 0}).reasoning_price["high"] == 0
+    assert AsyncTrainingConfig(reasoning_price=TEMPLATE_PRICE, reasoning_floor=0.05).reasoning_price == TEMPLATE_PRICE
 
 
 def test_a_price_cap_with_the_price_off_is_refused_as_inert():
@@ -207,11 +237,14 @@ def _constructing(budgets, effort="random", **config):
 
 
 def test_construction_refuses_a_price_table_that_misses_or_invents_a_level():
+    """The config parses any non-empty map; the trainer, beside the environment that draws the levels,
+    refuses one that is not exactly low, medium and high."""
     with pytest.raises(ValueError, match=r"missing \['high'\]"):
         _constructing({}, reasoning_price={"low": 0.01, "medium": 0.005})._validate_reasoning_terms()
     with pytest.raises(ValueError, match=r"unknown \['extreme'\]"):
         _constructing({}, reasoning_price={**PRICE, "extreme": 0.0})._validate_reasoning_terms()
     _constructing({}, reasoning_price=PRICE)._validate_reasoning_terms()
+    _constructing({}, reasoning_price=TEMPLATE_PRICE)._validate_reasoning_terms()
     _constructing({})._validate_reasoning_terms()  # the price off: no table to check
 
 
@@ -235,7 +268,7 @@ def test_a_budget_on_a_level_the_environment_never_draws_budgets_no_episode():
 
 
 def test_construction_refuses_a_floor_no_episode_can_ever_be_priced_by():
-    with pytest.raises(ValueError, match="no episode of this run carries one"):
+    with pytest.raises(ValueError, match="reasoning_floor prices an episode against its per-turn thinking cap"):
         _constructing({}, reasoning_floor=0.05)._validate_reasoning_terms()
     # One budgeted level is enough, and so is the run-wide cap.
     _constructing({"high": 16384}, reasoning_floor=0.05)._validate_reasoning_terms()
@@ -287,8 +320,8 @@ class _Round:
 
 
 def test_a_rounds_reasoning_is_counted_once_for_both_consumers():
-    """The price and the rollout metrics read one count: tokenizing every trace twice per step costs a
-    second pass over the longest text the step holds."""
+    """The reasoning terms and the rollout metrics read one count: tokenizing every trace twice per step
+    costs a second pass over the longest text the step holds."""
     host = _Round()
     host._generate_and_score_completions_base([{"prompt": "task"}, {"prompt": "task"}])
     assert host.handed["rewards"] == [[2, 0, 4], [3]]

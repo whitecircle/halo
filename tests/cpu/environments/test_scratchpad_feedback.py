@@ -22,11 +22,11 @@ from src.environments.envs.tasks.coding.code_contests import (
     NO_STDIN_NOTE,
     SCRATCHPAD_BUDGET_SPENT_REPLY,
     SCRATCHPAD_TIME_LIMIT_NOTE,
-    STARVED_RUN_NOTE,
     SUBMIT_TOOL,
     CodeContestsEnvironment,
 )
 from src.environments.envs.tasks.coding.grading import run_solution_against_tests
+from src.environments.registry import resolve_environment
 from src.environments.sandbox.base import REPL_NO_OUTPUT_MESSAGE, SandboxExecutor, SandboxResult
 from src.environments.sandbox.local import LocalSubprocessSandbox
 from src.environments.sandbox.repl import run_code_via_sandbox
@@ -262,9 +262,9 @@ def test_a_scalar_stdin_runs_as_its_string_and_a_null_one_as_none():
     assert reply.startswith("Error: ") and "EOFError" in reply and NO_STDIN_NOTE in reply, reply
 
 
-def test_a_refunded_run_is_neither_paid_nor_a_successful_call():
-    """A run returned to the budget spent nothing, so ``tool_success_reward`` does not pay it either; a
-    counted run beside it still is paid."""
+def test_a_silent_input_less_run_is_booked_like_any_run():
+    """A run given no input that prints nothing still ran: it spends its slot, counts as a successful call
+    and earns ``tool_success_reward`` like the run beside it."""
     env = _env(language="python", tool_success_reward=0.05)
     traj = _episode(env)
     calls = [
@@ -272,9 +272,10 @@ def test_a_refunded_run_is_neither_paid_nor_a_successful_call():
         NativeToolCall(id="b", name=env.test_tool_name, arguments={"code": "print(1)", "stdin": "1\n"}),
     ]
     results, reward = env._execute_tool_calls(calls, traj)
-    assert STARVED_RUN_NOTE in results[0].content
-    assert reward == pytest.approx(0.05), "only the counted run is paid"
-    assert (traj.info["total_tool_calls"], traj.info["successful_tool_calls"]) == (2, 1)
+    assert results[0].content == f"{REPL_NO_OUTPUT_MESSAGE}\n{NO_STDIN_NOTE}", results[0].content
+    assert reward == pytest.approx(0.10), "both runs are paid"
+    assert (traj.info["total_tool_calls"], traj.info["successful_tool_calls"]) == (2, 2)
+    assert env._test_calls(traj) == 2
 
 
 def test_output_computed_from_no_input_says_it_got_none():
@@ -298,71 +299,51 @@ def test_a_python_source_that_does_not_compile_gets_no_missing_input_note(code, 
     assert NO_STDIN_NOTE not in reply and not retired_budget_phrases(reply), reply
 
 
-def test_a_run_given_no_input_that_prints_nothing_spends_no_run():
-    """A solution run with no stdin reads nothing and prints nothing: the run is returned to the budget and the
-    reply says so. A starved run that crashes returns a traceback, and a run that prints (or is quiet on real
-    input) told the model something, so each of those spends its run."""
+def _starved_runs(env, traj) -> float:
+    return env.rollout_metrics(traj)["episode/starved_test_runs"]
+
+
+def test_every_silent_input_less_run_spends_its_run_and_counts_as_starved():
+    """A solution run with no stdin reads nothing and prints nothing: it spends its run, the reply carries the
+    plain no-stdin note, and ``episode/starved_test_runs`` counts it, again on every such run. A crash, output
+    and a quiet run on real input each told the model something: they spend their runs and are not starved."""
     env = _env(language="python")
     traj = _episode(env)
     silent = _scratchpad(env, traj, code=_READS_INPUT)
-    assert STARVED_RUN_NOTE in silent and env._test_calls(traj) == 0, silent
+    assert silent == f"{REPL_NO_OUTPUT_MESSAGE}\n{NO_STDIN_NOTE}", silent
+    assert env._test_calls(traj) == 1 and _starved_runs(env, traj) == 1.0
     crash = _scratchpad(env, traj, code="print(int(input()) + 1)")
-    assert NO_STDIN_NOTE in crash and env._test_calls(traj) == 1, crash
+    assert crash.startswith("Error: ") and "EOFError" in crash and crash.endswith(f"\n{NO_STDIN_NOTE}"), crash
     printed = _scratchpad(env, traj, code="print(7)")
-    assert STARVED_RUN_NOTE not in printed and env._test_calls(traj) == 2, printed
-    quiet_on_input = _scratchpad(env, traj, code=_READS_INPUT.replace("print", "len"), stdin="1\n")
-    assert STARVED_RUN_NOTE not in quiet_on_input and env._test_calls(traj) == 3, quiet_on_input
-    assert env.rollout_metrics(traj)["episode/starved_test_runs"] == 1.0
+    assert printed == f"7\n{NO_STDIN_NOTE}", printed
+    quiet_on_input = _scratchpad(env, traj, code="import sys\nsys.stdin.read()", stdin="1\n")
+    assert quiet_on_input == REPL_NO_OUTPUT_MESSAGE, quiet_on_input
+    assert env._test_calls(traj) == 4 and _starved_runs(env, traj) == 1.0
+    again = _scratchpad(env, traj, code=_READS_INPUT)
+    assert again == silent and env._test_calls(traj) == 5 and _starved_runs(env, traj) == 2.0
 
 
-def test_only_the_first_silent_input_less_run_of_an_episode_is_returned():
-    """Returning every such run would make one that reads nothing free to repeat: past
-    ``max_starved_run_refunds`` the run spends its turn of the budget and gets the plain no-stdin note."""
-    env = _env(language="python")
-    traj = _episode(env)
-    first = _scratchpad(env, traj, code=_READS_INPUT)
-    assert STARVED_RUN_NOTE in first and env._test_calls(traj) == 0, first
-    second = _scratchpad(env, traj, code=_READS_INPUT)
-    assert NO_STDIN_NOTE in second and env._test_calls(traj) == 1, second
-    assert env.rollout_metrics(traj)["episode/starved_test_runs"] == 1.0
-    never = _env(language="python", max_starved_run_refunds=0)
-    traj = _episode(never)
-    reply = _scratchpad(never, traj, code=_READS_INPUT)
-    assert NO_STDIN_NOTE in reply and never._test_calls(traj) == 1, reply
-
-
-def test_the_refund_cap_returns_exactly_that_many_silent_runs():
-    env = _env(language="python", max_starved_run_refunds=2)
-    traj = _episode(env)
-    replies = [_scratchpad(env, traj, code=_READS_INPUT) for _ in range(3)]
-    assert [STARVED_RUN_NOTE in reply for reply in replies] == [True, True, False], replies
-    assert NO_STDIN_NOTE in replies[2] and env._test_calls(traj) == 1, replies[2]
-    assert env.rollout_metrics(traj)["episode/starved_test_runs"] == 2.0
-
-
-@pytest.mark.parametrize("refunds", [0, 1])
-def test_a_direct_call_outside_an_episode_returns_every_silent_run(refunds):
-    """A direct call keeps no budget, so whatever the episode cap, a silent input-less run reads as returned."""
-    env = _env(language="python", max_starved_run_refunds=refunds)
-    assert env._run_test(_READS_INPUT) == f"{REPL_NO_OUTPUT_MESSAGE}\n{STARVED_RUN_NOTE}"
-
-
-def test_a_clean_input_less_run_that_writes_only_to_stderr_spends_no_run():
+def test_a_clean_input_less_run_that_writes_only_to_stderr_is_starved():
     """A clean exit's reply leaves stderr out, so a program that only logged to stderr showed the model no
-    output: the run is returned as a silent one is, not charged under a reply that reads as nothing."""
+    output: it counts as starved, and spends its run."""
     env = _env(language="python")
     traj = _episode(env)
     reply = _scratchpad(env, traj, code="import sys\nsys.stderr.write('debug: read nothing\\n')")
-    assert reply == f"{REPL_NO_OUTPUT_MESSAGE}\n{STARVED_RUN_NOTE}", reply
-    assert "the program printed nothing to stdout, so this run was not counted" in reply
-    assert env._test_calls(traj) == 0
-    assert env.rollout_metrics(traj)["episode/starved_test_runs"] == 1.0
+    assert reply == f"{REPL_NO_OUTPUT_MESSAGE}\n{NO_STDIN_NOTE}", reply
+    assert env._test_calls(traj) == 1 and _starved_runs(env, traj) == 1.0
 
 
-@pytest.mark.parametrize("cap", [-1, 1.5, True])
-def test_a_refund_cap_that_is_not_a_count_is_refused(cap):
-    with pytest.raises(ValueError, match="max_starved_run_refunds"):
-        _env(language="python", max_starved_run_refunds=cap)
+def test_a_direct_call_outside_an_episode_gets_the_plain_note():
+    env = _env(language="python")
+    assert env._run_test(_READS_INPUT) == f"{REPL_NO_OUTPUT_MESSAGE}\n{NO_STDIN_NOTE}"
+
+
+def test_a_config_spelling_the_starved_run_refund_cap_is_refused():
+    """No knob returns a silent input-less run to the budget: ``max_starved_run_refunds`` is refused at
+    construction, as any option the environment does not take is, never dropped."""
+    config = {"sandbox": LocalSubprocessSandbox(), "max_starved_run_refunds": 0}
+    with pytest.raises(TypeError, match=r"unexpected environment option\(s\) \['max_starved_run_refunds'\]"):
+        resolve_environment("codeforces", config)
 
 
 def test_a_garbled_argument_name_is_refused_unspent_and_named():

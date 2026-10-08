@@ -683,7 +683,7 @@ async def test_run_episode_generation_tokens_sum_across_turns():
 
 
 async def test_each_assistant_turn_records_the_levels_cap_and_the_reasoning_it_sampled():
-    """The overlong charge reads each turn's own pair: the cap the turn's level set — not the narrower
+    """``episode/thinking_cap_turns`` reads each turn's own pair: the cap the turn's level set — not the narrower
     one the output budget may have put on the request — beside the reasoning the turn sampled through
     its close. Drives the real loop in run_episode (native_math): 400-token turns with a 100-token
     reasoning cap under a 1050-token episode budget, so the third request is narrowed to 350 and 50."""

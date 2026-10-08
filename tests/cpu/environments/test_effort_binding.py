@@ -261,9 +261,9 @@ async def test_random_level_is_drawn_once_for_the_whole_episode(monkeypatch):
 
 
 async def test_the_actor_records_each_turns_cap_and_reasoning_and_the_eval_its_cap_alone(monkeypatch):
-    """The overlong charge reads each training turn's pair: the cap the turn's level set and the
-    reasoning it sampled through the close. The eval prices no charge and asks for no ids, so its
-    record carries the cap alone."""
+    """``episode/thinking_cap_turns`` reads each training turn's pair: the cap the turn's level set and
+    the reasoning it sampled through the close. The eval asks for no ids, so its record carries the cap
+    alone."""
     context = {"reasoning_effort": "high"}
     config = ray_actors.RolloutConfig(max_tokens=_MAX_TOKENS, reasoning_end_token_id=_END)
     ids = _ids_closing_reasoning_after(1500)
@@ -509,7 +509,7 @@ def test_recovering_turn_reads_an_answered_unproductive_turn():
 
 async def test_both_drivers_give_a_retry_the_reserve_and_record_it_as_the_turns_cap(monkeypatch):
     """After an engine cut the next request carries a quarter of the level's cap and the turn records
-    that cap, so the overlong charge reads the retry against the reserve; the turn after a normal call
+    that cap, so ``episode/thinking_cap_turns`` reads the retry against the reserve; the turn after a normal call
     is back on the whole cap. The retry closing its reasoning exactly at the reserve counts as a turn
     the engine closed at its cap."""
     context = {"reasoning_effort": "high"}
@@ -554,7 +554,8 @@ async def test_an_output_budget_shrinks_the_reasoning_cap_with_the_total_and_rec
     episode: the second turn has 19000 left, so its request drops to 19000 with a 3000 reasoning cap,
     the room kept whole; after it 1000 remain, under the room, and no third turn starts. The narrowed
     caps reach both drivers' requests, the eval's control fields are the actor's own turn by turn, and
-    each turn records the level's 4000 — the cap the overlong charge ramps to — not the narrowed one."""
+    each turn records the level's 4000 — the cap ``episode/thinking_cap_turns`` reads against — not the
+    narrowed one."""
     config = ray_actors.RolloutConfig(max_tokens=_MAX_TOKENS, max_thinking_tokens=4000, max_episode_tokens=38000)
     sampled = [19000, 18000]
     expected = [(_MAX_TOKENS, 4000), (19000, 3000)]

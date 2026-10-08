@@ -17,8 +17,6 @@ It speaks native tool calls, so the server needs a tool-call parser for the mode
 ```yaml
 environment_type: codeforces
 max_turns: 16                # 16 in most recipes, 18 in the three curriculum recipes; the class default is 15
-rewards:
-  - source: environment      # 1 when the submitted solution passes every hidden test, else 0
 environment_kwargs:
   language: python           # or cpp / c, or a list ([python, cpp]) the model picks from
   timeout_per_test: 5
@@ -29,10 +27,20 @@ environment_kwargs:
     medium: {thinking_tokens: 12288, max_submissions: 2, max_test_calls: 4}
     high: {thinking_tokens: 16384, max_submissions: 3, max_test_calls: 6}
 rollout_max_tokens: 30000              # per-turn total: the level's reasoning cap plus the answer room
-rollout_max_episode_tokens: 131072     # the most an episode may sample over all its turns; never stated to the model
-reasoning_price: {low: 0.0037, medium: 0.0013, high: 0.00018}  # reward units per 1k reasoning tokens, by level
-reasoning_price_cap: 0.1               # the price's cap per episode; cap + floor stay under the resubmission price
+rollout_max_episode_tokens: 81920      # the most an episode may sample over all its turns; never stated to the model
 reasoning_floor: 0.05                  # an episode reasoning under 0.75x its level's per-turn budget pays up to this
+rewards:
+  - source: environment      # 1 when the submitted solution passes every hidden test, else 0
+  - source: judge            # a veto on the hacks no counter sees
+    name: audit
+    model: openai/gpt-6-luna
+    view: digest
+    include_reasoning: false
+    checks:
+      - {name: hardcoded_output, description: "...", veto: true}
+      - {name: environment_probe, description: "...", veto: true}
+      - {name: verdict_probe, description: "...", veto: true}
+      - {name: verdict_mining, description: "...", veto: true}
 ```
 
 | Knob | Default | Effect |
@@ -47,7 +55,6 @@ reasoning_floor: 0.05                  # an episode reasoning under 0.75x its le
 | `max_output_size` | 1 MB | Over-cap stdout is OUTPUT LIMIT EXCEEDED, not truncated; a test's cap rises to 4× its expected output, so a large correct answer passes |
 | `stop_on_first_failure` | `false` | Stop at the first failing test; the grade is unchanged, `outcome/test_pass_frac` becomes a lower bound |
 | `max_submissions` / `max_test_calls` | 2 / 5 | Per-episode tool budgets, overridable per effort level; enforced per call, never stated to the model |
-| `max_starved_run_refunds` | 1 | Input-less scratchpad runs per episode that exit cleanly with nothing on stdout and are returned to the budget; later ones count. `0` returns none |
 | `max_turns` | 15 | Backstop; the tool budgets are the tuning lever |
 | `eval_protocol` | `harness` | Evaluation contract; `leaderboard` pins both tool budgets ([Evaluation protocols](#evaluation-protocols)) |
 
@@ -55,7 +62,7 @@ The grade is all-or-nothing, matching the accept verdict pass@1 counts: partial 
 
 `sandbox_backend` / `sandbox_url` pick the [sandbox](sandbox.md#choosing-a-backend) both tools and the grader run on; one that does not confine the program, `local` included, [warns](sandbox.md#choosing-a-backend).
 
-Every shipped recipe sets `rollout_max_episode_tokens: 131072`, the most an episode may sample over
+Every shipped code-contests recipe sets `rollout_max_episode_tokens: 81920`, the most an episode may sample over
 all its turns. Without it a recipe admits `max_turns × rollout_max_tokens` (16 × 30,000 = 480,000
 tokens; 540,000 in the curriculum recipes at `max_turns: 18`)
 ([Trajectory length](../async-grpo/rollouts.md#trajectory-length)).
@@ -97,16 +104,15 @@ keeps its `thinking_tokens`. The task message states no budget under either prot
 - The scratchpad — `python_repl` when the run fixes `python`, else `run_code`. It runs a program through the grading sandbox, standard library included, on the `stdin` the call supplies (empty by default), so the model can feed it the statement's sample input or its own; it never sees the graded tests. Each call is one-shot — nothing a run writes survives into the next. Past `max_test_calls` a call is refused: `Error: Not run: this task's scratchpad budget is spent. Submit your solution with submit_solution.`
 - `submit_solution` — grades a complete stdin/stdout program against the hidden tests. The only graded channel, with no fenced-code-block fallback. A submission that passes every hidden test ends the episode, as reaching `max_submissions` does: past an accept a resubmission can only lose the solve, so one later in the same turn is not graded (`Not graded: an earlier submission already passed every test, …`), and one past the budget in the same turn is refused (`Error: Not graded: this task's submission budget is spent.`). Its description says a passing submission ends the task and the last graded one otherwise counts.
 
-- Both tools refuse a program whose comments carry the reasoning — 16384 characters inside comments or more, outweighing everything else in it (`comment_chars` in `src/environments/envs/tasks/coding/comments.py`: line and block comments by the language's registered syntax wherever they start, string literals skipped, a C-family `#if 0` block and a Python docstring or bare string counted too) — unrun, the call returned to its budget: `Not run: the program's comments carry your reasoning. Keep the reasoning in your thinking and send the program again with documentation comments only.` A turn the thinking cap closes can carry its thought on inside the program, which no reasoning term counts and the turn-total overlong ramp prices only near `rollout_max_tokens` ([Reasoning length reward](../async-grpo/rollouts.md#reasoning-length-reward)); this reads it first. The refusal costs the turn and `tool_error_penalty` (`0` on the class, `0.05` in the recipes), a turn of nothing else is flagged untrainable like one whose calls named no tool, and the turn after it runs on the retry reserve. The offline re-grader skips the same programs.
+- Both tools refuse a program whose comments carry the reasoning — 16384 characters inside comments or more, outweighing everything else in it (`comment_chars` in `src/environments/envs/tasks/coding/comments.py`: line and block comments by the language's registered syntax wherever they start, string literals skipped, a C-family `#if 0` block and a Python docstring or bare string counted too) — unrun, the call returned to its budget: `Not run: the program's comments carry your reasoning. Keep the reasoning in your thinking and send the program again with documentation comments only.` A turn the thinking cap closes can carry its thought on inside the program, which neither the cap nor any reasoning term counts ([Reasoning length reward](../async-grpo/rollouts.md#reasoning-length-reward)); this guard reads it. The refusal costs the turn and `tool_error_penalty` (`0` on the class, `0.05` in the recipes), a turn of nothing else is flagged untrainable like one whose calls named no tool, and the turn after it runs on the retry reserve. The offline re-grader skips the same programs.
+
+- `submit_solution` also refuses a program identical to one this episode already graded (comments, trailing whitespace and blank lines aside) unrun, the submission returned to its budget: `Not graded: this program is identical to one already graded and would receive the same verdict. Change it before submitting again.` It would only probe the judge; the turn is flagged like any refusal and the offline re-grader takes no slot for it (`episode/identical_resubmissions`).
 
 Neither description states a budget, no reply counts what is left of one, and a refusal names what to do, never a number.
 
 Both tool descriptions name the toolchain where the sandbox states it (`SandboxExecutor.toolchain`): on `local` and `bubblewrap` the registry's compile flags and the interpreter a Python program runs on (`Here python runs on CPython 3.12 and cpp is compiled with g++ -O2 -pipe -std=c++17.`); `remote` states none.
 
-A scratchpad run gets the per-test time limit its language is graded at ([Grading rules](#grading-rules)), and a timeout says so. Its reply leads with any error — the compiler's first diagnostics, or a crash's signal and stderr tail — ahead of the program's stdout ([Sandboxes](sandbox.md#using-it-from-python)); a clean exit's reply is its stdout alone. Notes follow on lines of their own:
-
-- A run with no `stdin` that exits cleanly with nothing on stdout told the model nothing, so it is returned to the budget with a note saying so, up to `max_starved_run_refunds` per episode.
-- Every other run with no `stdin` notes that none was passed: neither a parse error nor output computed from nothing names the cause. A build failure — a compile error, or Python source that does not compile (on `local` and `bubblewrap`) — ran nothing and gets neither note. An empty `stdin` is never refused: a self-test that embeds its input is a real use.
+A scratchpad run gets the per-test time limit its language is graded at ([Grading rules](#grading-rules)), and a timeout says so. Its reply leads with any error — the compiler's first diagnostics, or a crash's signal and stderr tail — ahead of the program's stdout ([Sandboxes](sandbox.md#using-it-from-python)); a clean exit's reply is its stdout alone. A run with no `stdin` adds a note on a line of its own that none was passed: neither a parse error, nor output computed from nothing, nor a clean exit with nothing on stdout names the cause. It spends its run like any other; `episode/starved_test_runs` counts the silent ones. A build failure — a compile error, or Python source that does not compile (on `local` and `bubblewrap`) — ran nothing and gets no note. An empty `stdin` is never refused: a self-test that embeds its input is a real use.
 
 Output that would push a reply past `max_observation_chars` is cut (`…[truncated N chars]`) so the notes after it survive the protocol's cap, which cuts from the end.
 
@@ -123,14 +129,14 @@ as its Python string (`"stdin": 5` feeds the program `5`, `true` feeds `True`), 
 as its `language` slice, which the trainer slices metrics by
 ([Logged metrics](../async-grpo/monitoring.md#logged-metrics)).
 
-A call its handler returns to the budget — a starved run, a program sent with the wrong language
-(below), a submission after an accept — is neither paid nor charged: it counts in `total_tool_calls`
+A call its handler returns to the budget — a program sent with the wrong language (below), a
+submission after an accept — is neither paid nor charged: it counts in `total_tool_calls`
 (`episode/tool_calls`) but not as a successful call, and earns no `tool_success_reward`.
 
 With a language list, a program evidently written in another of its languages is not run
 (`evident_language`): `Not run: this looks like cpp code sent with language "python"; send it again
 with language "cpp". No scratchpad run was spent.` (`Not graded` and a submission for
-`submit_solution`). The call is returned to the budget like a starved run: it counts toward neither
+`submit_solution`). The call is returned to the budget as above: it counts toward neither
 `max_test_calls`, `max_submissions` nor the resubmission price, records no grade, and leaves the
 `language` slice as it was. The check reads the text, so a program it misses runs as labelled:
 
@@ -203,25 +209,28 @@ re-rolls. The price, like the budgets, is never stated to the model: when not to
 from the reward. `episode/resubmission_improved` is the share of resubmissions whose pass fraction
 beat every earlier one.
 
-The trainer's length terms — the reasoning price and floor and the overlong charge — sit outside
-these components, as `reward/reasoning_price`, `reward/reasoning_floor` and `reward/turn_overlong`
-([Reasoning length reward](../async-grpo/rollouts.md#reasoning-length-reward)); the floor's reference
-is three quarters of each level's own per-turn `thinking_tokens`. The recipes price reasoning at
-`{low: 0.0037, medium: 0.0013, high: 0.00018}` per 1,000 tokens, capped at `0.1`, with a `0.05`
-floor; the Qwen3.6 vLLM recipes at `{low: 0.0027, medium: 0.001, high: 0.00014}`, capped at `0.09`,
-with a `0.10` floor and a `0.05` overlong charge. Each keeps what it can cost an episode under the
-resubmission price, so how long an episode reasons never outweighs whether it resubmits;
-with `submission_reward` and `no_tool_use_penalty` at `0.1` each, a graded submission that passes
-nothing still scores above an episode that never attempts, and at every level a solve that pays
-every per-episode price (the level's resubmissions, the recoveries the cap admits, the overflow and
-the length terms) out-scores any zero-objective episode; each failed tool call adds
-`tool_error_penalty` on top.
+The trainer's reasoning floor sits outside these components, as `reward/reasoning_floor`
+([Reasoning length reward](../async-grpo/rollouts.md#reasoning-length-reward)); its reference is
+three quarters of each level's own per-turn `thinking_tokens`. Every code-contests recipe runs one
+economy, with no per-token reasoning price: the level's thinking caps and interaction budgets, the
+81,920-token episode output budget, the floor (`0.10` on the Qwen3.6 vLLM recipes, `0.05` elsewhere),
+and a `judge` veto term (`openai/gpt-6-luna`, the digest without reasoning) that audits outputs the
+program did not compute (special-cased samples, guessed placeholders), sandbox probing, failed
+submissions made for their verdict, and verdict mining ([Reward Terms](../rewards.md)); it reads `OPENROUTER_API_KEY`, so pass it with
+`--env-file` or drop the term to run without a judge. `verdict_probe` asks only about
+submissions that failed, so a passing program is not read as a probe because the policy's own sample
+run disagreed with it. The floor's weight stays under the resubmission price, so how long an episode
+reasons never outweighs whether it resubmits; with `submission_reward`
+and `no_tool_use_penalty` at `0.1` each, a graded submission that passes nothing still scores above
+an episode that never attempts, and at every level a solve that pays every per-episode price (the
+level's resubmissions, the recoveries the cap admits, the overflow and the floor) out-scores any
+zero-objective episode; each failed tool call adds `tool_error_penalty` on top.
 `tests/cpu/config/test_env_grpo_reward_economy.py` holds the shipped recipes to those relations.
 
 Behavior counters ride alongside: `episode/submission_rate`, `episode/test_calls` (runs that counted),
-`episode/starved_test_runs` (runs returned for having no input and nothing on stdout),
+`episode/starved_test_runs` (runs given no `stdin` that exited cleanly with nothing on stdout),
 `episode/tested_before_submission` (over submitting episodes), `episode/grading_budget_hit`,
-`episode/reasoning_in_comments_calls` (programs refused for reasoning in their comments) and
+`episode/reasoning_in_comments_calls` (programs refused for reasoning in their comments), `episode/identical_resubmissions` (programs refused as already graded) and
 `episode/code_comment_share` (comment characters over the characters of every program that reached the
 guard, its own signal), and `episode/language_switches` where the model picks the language.
 

@@ -253,8 +253,9 @@ class Requirement:
 @dataclass(frozen=True, kw_only=True)
 class Check:
     """One binary flag a veto judge raises on an observable action: a short name (its diagnostic key)
-    and what firing means. A ``veto`` check gates the objective — a solve it fires on scores 0; every
-    other check is a process flag, counted into the term's score."""
+    and what firing means. A ``veto`` check gates the episode's credit — the objective and every other
+    positive component go to 0, the penalties stand; every other check is a process flag, counted into
+    the term's score."""
 
     name: str
     description: str
@@ -274,9 +275,10 @@ class JudgeTerm(ScoredTerm):
     - ``requirements`` (score mode): each is scored from 0 to ``scale``; the term's score is their
       weight-averaged fraction of the scale, priced as every term is.
     - ``checks`` (veto mode): each either fires, with a verbatim quote of the span that shows it, or
-      does not. A fired ``veto`` check zeroes the objective component; the term's own score is the
-      fired fraction of the other checks, so its ``weight`` (0 by default when parsed from a config,
-      never positive) prices process flags without ever adding reward. A verdict the judge never
+      does not. A fired ``veto`` check zeroes the objective and every other positive component, the
+      penalties standing; the term's own score is the fired fraction of the other checks, so its
+      ``weight`` (0 by default when parsed from a config, never positive) prices process flags without
+      ever adding reward. A verdict the judge never
       reached defaults, from a config, to ``on_error: neutral``: no flag, and the exact grade stands.
 
     ``view`` selects what the judge reads: the final answer (``final``), every turn with its

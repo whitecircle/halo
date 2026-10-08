@@ -4,8 +4,9 @@
 Reasoning reaches an assistant turn only through the rollout server's reasoning parser. Without one,
 the reasoning floor scores every episode as maximal under-use, the reasoning price charges nothing,
 and ``carry_reasoning`` sends nothing back — all silently. The trainer warns once, at the point the
-length terms are applied, when a step's assistant turns carry no reasoning while either knob is on; a
-step with reasoning, a step with no assistant turn, or a run with both knobs off warns nothing.
+reasoning terms are applied, when a step's assistant turns carry no reasoning while any of the three
+is on, naming the ones that are; a step with reasoning, a step with no assistant turn, or a run with
+all three off warns nothing.
 
     python tests/cpu/grpo/test_env_trainer_reasoning_warning.py
 """
@@ -32,9 +33,9 @@ class _StubTokenizer:
         return {"input_ids": [0] * len(text)}
 
 
-def _trainer(floor_weight: float, carry_reasoning: bool):
+def _trainer(floor_weight: float, carry_reasoning: bool, price: dict[str, float] | None = None):
     trainer = object.__new__(DistributedAsyncEnvironmentalGRPOTrainer)
-    trainer.async_config = AsyncTrainingConfig(reasoning_floor=floor_weight)
+    trainer.async_config = AsyncTrainingConfig(reasoning_floor=floor_weight, reasoning_price=price)
     trainer._tokenizer = _StubTokenizer()
     attach_world_metrics(trainer)
     trainer._metrics = {"train": defaultdict(list)}
@@ -59,15 +60,23 @@ def _warnings(caplog) -> list[str]:
     return [r.getMessage() for r in caplog.records if r.levelno == logging.WARNING and "reasoning" in r.getMessage()]
 
 
-def test_length_terms_with_no_captured_reasoning_warn_once_per_run(caplog):
+def test_the_floor_with_no_captured_reasoning_warns_once_per_run(caplog):
     trainer = _trainer(0.15, carry_reasoning=False)
     with caplog.at_level(logging.WARNING, logger=LOGGER):
         for _ in range(2):
             trainer._build_rollout_rewards(*_with_counts(_rollouts([None, None])))
             flushed_metrics(trainer)  # the step boundary: a second record before it is refused
     assert len(_warnings(caplog)) == 1
-    assert "the reasoning terms" in _warnings(caplog)[0]
+    assert "(reasoning_floor)" in _warnings(caplog)[0]
     assert "carry_reasoning" not in _warnings(caplog)[0]
+
+
+def test_the_price_with_no_captured_reasoning_warns_by_its_own_name(caplog):
+    """A price over no captured reasoning charges every episode nothing, which no metric flags."""
+    trainer = _trainer(0.0, carry_reasoning=False, price={"low": 0.01, "medium": 0.005, "high": 0.001})
+    with caplog.at_level(logging.WARNING, logger=LOGGER):
+        trainer._build_rollout_rewards(*_with_counts(_rollouts([None])))
+    assert len(_warnings(caplog)) == 1 and "(reasoning_price)" in _warnings(caplog)[0]
 
 
 def test_carried_reasoning_with_no_captured_reasoning_warns_by_its_own_name(caplog):

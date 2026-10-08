@@ -122,8 +122,8 @@ def test_capture_token_ids_follows_train_on_sampled_tokens(sampled_tokens):
 def test_reasoning_end_token_id_is_the_id_the_caller_resolved():
     """The marker is a string knob on the YAML surface and an id on the wire, so no name pairing can
     carry it: the caller that owns the tokenizer resolves it and the builder passes it through
-    untouched (the overlong charge's reasoning count is what reads it)."""
-    config = AsyncTrainingConfig(turn_overlong_penalty=0.05)
+    untouched (the per-turn reasoning count ``episode/thinking_cap_turns`` reads stops at it)."""
+    config = AsyncTrainingConfig(rollout_max_thinking_tokens=8192)
     assert config.get_rollout_config(reasoning_end_token_id=7).reasoning_end_token_id == 7
     assert config.get_rollout_config().reasoning_end_token_id is None
     assert AsyncTrainingConfig().get_rollout_config().reasoning_end_token_id is None

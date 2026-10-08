@@ -201,21 +201,6 @@ def resolve_reasoning_end_ids(tokenizer, marker: str) -> tuple[int, ...]:
     return ids
 
 
-def resolve_reasoning_end_token_id(tokenizer, token: str) -> int:
-    """The one id a turn's reasoning is counted up to (:func:`sampled_reasoning_tokens`), which the overlong
-    charge reads: a marker the tokenizer does not know would count every turn's whole generation as
-    reasoning, and one of several tokens cannot be counted to, so the run is refused and told to turn
-    the charge off for that model."""
-    ids = resolve_reasoning_end_ids(tokenizer, token)
-    if len(ids) != 1:
-        raise ValueError(
-            f"rollout_reasoning_end_token {token!r} encodes to {len(ids)} tokens, and a turn's reasoning is "
-            "counted as the sampled ids up to and including one marker token: turn_overlong_penalty needs a "
-            "single-token reasoning end marker, so turn it off for this model."
-        )
-    return ids[0]
-
-
 @dataclass
 class RolloutResult:
     """One collected episode, as the rollout drivers hand it to the trainer.
@@ -394,7 +379,7 @@ def step_context_from_generation(
     or routing vector would produce incorrect training data rather than a missing field. ``thinking_cap``
     is the reasoning cap the turn ran under — its level's, or a retry's reserve (the request's own cap
     may sit below it under an output budget, and SGLang ignores the field); with it goes the reasoning the turn sampled
-    (:func:`sampled_reasoning_tokens`), the pair the trainer's per-turn overlong charge reads.
+    (:func:`sampled_reasoning_tokens`), the pair ``episode/thinking_cap_turns`` reads.
     ``last_turn`` says the output budget affords no turn after this one, so an unproductive turn is
     closed as an overflow rather than nudged into a retry that cannot run.
     """

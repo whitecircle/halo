@@ -46,7 +46,6 @@ from src.environments.engine_wire import SGLANG_BACKEND
 from src.environments.episode import (
     RolloutResult,
     resolve_reasoning_end_ids,
-    resolve_reasoning_end_token_id,
     resolve_rollout_stop_token_ids,
     thinking_caps_by_level,
 )
@@ -94,7 +93,6 @@ from src.trainers.grpo.reasoning_terms import (
     reasoning_floor_term,
     reasoning_price_term,
     reasoning_token_counts,
-    turn_overlong_term,
 )
 from src.trainers.grpo.reference_policy import reference_policy
 from src.trainers.grpo.rollout.async_rollouts import AsyncRolloutMixin
@@ -593,12 +591,12 @@ class DistributedAsyncEnvironmentalGRPOTrainer(
         return dense_row_spans(attention_mask)
 
     def _resolve_reasoning_end_token_id(self) -> int | None:
-        """The id of ``rollout_reasoning_end_token`` under the tokenizer, for the per-turn reasoning count the
-        overlong charge reads; a run without the charge never reads it."""
-        cfg = self.async_config
-        if cfg.turn_overlong_penalty == 0:
-            return None
-        return resolve_reasoning_end_token_id(self._tokenizer, cfg.rollout_reasoning_end_token)
+        """The id a turn's reasoning is counted up to, for ``episode/thinking_cap_turns``: the close the engine
+        forces wherever a vLLM thinking cap can bind (:meth:`_resolve_forced_close_ids`), where it is one token.
+        ``None`` where no close is forced, and for a close of several tokens (gpt-oss's final-channel opener),
+        which no one id marks: the count goes without."""
+        ids = self._forced_close_ids
+        return ids[0] if ids is not None and len(ids) == 1 else None
 
     def _require_forced_close_neutralized(self) -> None:
         """Forced reasoning closes are neutralized through the IS ratio, which only reaches the loss under the
@@ -1081,7 +1079,7 @@ class DistributedAsyncEnvironmentalGRPOTrainer(
     def _build_rollout_rewards(
         self, rollout_results: list[RolloutResult], reasoning_tokens: list[list[int]], device: torch.device
     ) -> torch.Tensor:
-        """Per-trajectory environment rewards with the trainer-side shaping terms charged in place."""
+        """Per-trajectory environment rewards with the trainer-side reasoning terms charged in place."""
         rewards = torch.tensor(
             [r.total_reward for r in rollout_results],
             device=device,
@@ -1089,13 +1087,11 @@ class DistributedAsyncEnvironmentalGRPOTrainer(
         )
 
         cfg = self.async_config
-        length_terms_on = cfg.reasoning_price is not None or cfg.reasoning_floor > 0
-        if length_terms_on or self._carry_reasoning:
-            self._warn_if_no_reasoning_captured(rollout_results, length_terms_on)
-        if length_terms_on:
+        price_on, floor_on = cfg.reasoning_price is not None, cfg.reasoning_floor > 0
+        if price_on or floor_on or self._carry_reasoning:
+            self._warn_if_no_reasoning_captured(rollout_results, price_on=price_on, floor_on=floor_on)
+        if price_on or floor_on:
             self._apply_reasoning_terms(rewards, rollout_results, reasoning_tokens)
-        if cfg.turn_overlong_penalty > 0:
-            self._apply_turn_overlong_charge(rewards, rollout_results)
         return rewards
 
     def _log_headline_rewards(
@@ -1419,8 +1415,8 @@ class DistributedAsyncEnvironmentalGRPOTrainer(
             world.fraction("sampling/invalid_episode_frac", drop_traj.sum(), drop_traj.numel())
 
             if self._drop_degenerate_groups:
-                # Judged on the environment's reward: the trainer's length and overlong terms price every
-                # episode differently, so no group would ever tie on the total it trains on.
+                # Judged on the environment's reward: the trainer's reasoning terms are length regularizers,
+                # and a group tied on everything else would train on its members' reasoning lengths alone.
                 env_rewards = torch.tensor([r.total_reward for r in rows.rollout_results], device=device)
                 degenerate = degenerate_group_mask(env_rewards, num_generations, valid_mask=valid_mask)
                 drop_traj |= degenerate
@@ -1502,9 +1498,10 @@ class DistributedAsyncEnvironmentalGRPOTrainer(
             )
 
     def _validate_reasoning_terms(self) -> None:
-        """A level whose cap fills the turn would be cut mid-reasoning every time, a price with no level to
-        read would charge nothing (a level the table misses too, and one it invents is a typo), and a floor or
-        an overlong charge in a run where no episode carries a thinking cap would never fire."""
+        """A drawable level whose cap fills the turn would be cut mid-reasoning every time (the caps' own
+        refusal, read whether the terms are on or off), a price with no level to read would charge nothing (a
+        level the table misses too, and one it invents is a typo), and a floor in a run where no episode
+        carries a thinking cap would never fire."""
         cfg = self.async_config
         budgeted = self._any_episode_budgeted
         if cfg.reasoning_price is not None:
@@ -1519,15 +1516,11 @@ class DistributedAsyncEnvironmentalGRPOTrainer(
                     f"reasoning_price must map exactly the effort levels {sorted(admitted)}; "
                     f"unknown {sorted(levels - admitted)}, missing {sorted(admitted - levels)}"
                 )
-        if (cfg.reasoning_floor > 0 or cfg.turn_overlong_penalty > 0) and not budgeted:
+        if cfg.reasoning_floor > 0 and not budgeted:
             raise ValueError(
-                "reasoning_floor and turn_overlong_penalty price an episode against its per-turn thinking cap, but "
-                "no episode of this run carries one: no drawable effort level sets thinking_tokens and "
-                "rollout_max_thinking_tokens is unset."
+                "reasoning_floor prices an episode against its per-turn thinking cap, but no episode of this run "
+                "carries one: no drawable effort level sets thinking_tokens and rollout_max_thinking_tokens is unset."
             )
-        if cfg.turn_overlong_penalty > 0:
-            # At construction: the rollout start that reads it next runs inside train(), after Ray is up.
-            self._resolve_reasoning_end_token_id()
 
     def _apply_reasoning_terms(
         self, rewards: torch.Tensor, rollout_results: list[RolloutResult], reasoning_tokens: list[list[int]]
@@ -1537,7 +1530,7 @@ class DistributedAsyncEnvironmentalGRPOTrainer(
         :func:`reasoning_price_term` prices the episode's reasoning tokens at its level's price;
         :func:`reasoning_floor_term` prices a shortfall against the per-turn thinking budget the episode ran
         under. An episode with no level is free of the price, one with no budget of the floor. Logs the batch
-        means under ``reward/reasoning_price`` and ``reward/reasoning_floor``.
+        means under ``reward/reasoning_price`` and ``reward/reasoning_floor``, each only while its term is on.
         """
         cfg = self.async_config
         price_on, floor_on = cfg.reasoning_price is not None, cfg.reasoning_floor > 0
@@ -1559,32 +1552,6 @@ class DistributedAsyncEnvironmentalGRPOTrainer(
             self._world_metrics.fraction("reward/reasoning_price", sum(prices), len(prices))
         if floor_on:
             self._world_metrics.fraction("reward/reasoning_floor", sum(floors), len(floors))
-
-    def _apply_turn_overlong_charge(self, rewards: torch.Tensor, rollout_results: list[RolloutResult]) -> None:
-        """Charge each episode the turn that ran furthest into its thinking cap or the turn cap
-        (:func:`turn_overlong_term`), in place. Logs the batch mean under ``reward/turn_overlong`` and the share
-        of assistant turns charged under ``reward/turn_overlong_turn_frac``, both again per effort level
-        (``effort/<level>/...``)."""
-        penalty = self.async_config.turn_overlong_penalty
-        # Per episode: its level (None without one), term, charged turns and assistant turns.
-        rows = []
-        for i, result in enumerate(rollout_results):
-            term, charged, turns = turn_overlong_term(
-                result.trajectory, penalty=penalty, turn_cap=self.async_config.rollout_max_tokens
-            )
-            rewards[i] += term
-            rows.append(
-                (result.trajectory.reasoning_effort if result.trajectory is not None else None, term, charged, turns)
-            )
-        # A config gate is rank-uniform, so every rank records the batch keys, a rank with no episode too; a
-        # level's keys come from the ranks that held it, and the flush folds the union.
-        for level in {None, *(row[0] for row in rows)}:
-            prefix = "reward" if level is None else f"effort/{level}"
-            held = rows if level is None else [row for row in rows if row[0] == level]
-            self._world_metrics.fraction(f"{prefix}/turn_overlong", sum(row[1] for row in held), len(held))
-            self._world_metrics.fraction(
-                f"{prefix}/turn_overlong_turn_frac", sum(row[2] for row in held), sum(row[3] for row in held)
-            )
 
     def _compute_ref_logps(
         self,

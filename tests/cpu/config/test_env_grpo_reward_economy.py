@@ -8,10 +8,9 @@ not attempting, at every effort level a solve paying every per-episode price bea
 zero-objective episode, and — per effort level — the under-use floor out-slopes the reasoning price, so
 below its floor a level is paid to reason more and never less.
 
-The length terms are the price, the floor and the per-turn overlong charge. What they can cost an
-episode is the larger of the price's cap plus the floor's weight, and — where a turn can be charged —
-the price's cap, the whole overlong penalty and what the floor still charges an episode that reasoned
-at least the charged turn's ramp start.
+The length terms are the floor and, where a recipe runs one, the price; the most they can cost an
+episode is the price's cap plus the floor's weight. No shipped recipe runs a price, so its relations
+bind on a recipe that sets one, and a priced copy of a shipped recipe shows they refuse a bad one.
 
 The episode output budget (``rollout_max_episode_tokens``) is the other relation: it has to bind below
 what ``max_turns`` turns of ``rollout_max_tokens`` could sample, or it bounds nothing. And the per-turn
@@ -27,13 +26,8 @@ import pytest
 from ruamel.yaml import YAML
 
 from src.configs.async_training_config import AsyncTrainingConfig
-from src.environments.base import VALID_REASONING_EFFORTS, Message, Trajectory
-from src.trainers.grpo.reasoning_terms import (
-    REASONING_TARGET_SHARE,
-    reasoning_floor_term,
-    reasoning_price_term,
-    turn_overlong_term,
-)
+from src.environments.base import VALID_REASONING_EFFORTS
+from src.trainers.grpo.reasoning_terms import REASONING_TARGET_SHARE, reasoning_floor_term, reasoning_price_term
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
 RECIPES = sorted((REPO_ROOT / "examples" / "grpo" / "environmental").rglob("*code-contests*.yaml"))
@@ -45,8 +39,8 @@ _EPISODE_TOKENS_CEILING = 131072
 # The per-turn thinking budget of each level, one contract at every family.
 _PER_TURN_BUDGETS = {"low": 8192, "medium": 12288, "high": 16384}
 # The knobs every code-contests recipe states explicitly, so a recipe never rides on a default it does
-# not spell.
-_REQUIRED_KEYS = ("reasoning_price", "reasoning_price_cap", "reasoning_floor", "rollout_max_episode_tokens")
+# not spell. The price is not among them: a recipe that runs none omits it and its cap.
+_REQUIRED_KEYS = ("reasoning_floor", "rollout_max_episode_tokens")
 
 
 def _economy(path: Path) -> dict:
@@ -65,9 +59,14 @@ def _economy(path: Path) -> dict:
         "recoveries": env.get("max_length_cutoff_recoveries"),
         "profiles": env["reasoning_effort_profiles"],
         "price": cfg.get("reasoning_price"),
-        "price_cap": cfg.get("reasoning_price_cap", _DEFAULTS.reasoning_price_cap),
+        # The cap is read only beside a price.
+        "price_cap": (
+            cfg.get("reasoning_price_cap", _DEFAULTS.reasoning_price_cap)
+            if cfg.get("reasoning_price") is not None
+            else 0.0
+        ),
+        # The floor's weight: the most it charges, an episode that reasoned nothing.
         "floor": cfg.get("reasoning_floor", _DEFAULTS.reasoning_floor),
-        "overlong": cfg.get("turn_overlong_penalty", _DEFAULTS.turn_overlong_penalty),
         "ceiling": cfg.get("rollout_max_thinking_tokens"),
         "max_tokens": cfg.get("rollout_max_tokens", _DEFAULTS.rollout_max_tokens),
         "episode_tokens": cfg.get("rollout_max_episode_tokens"),
@@ -82,41 +81,40 @@ def _cap(economy: dict, level: str) -> int:
 
 
 def _floor_tokens(economy: dict, level: str) -> int:
+    """The reasoning the floor asks of an episode at ``level``: its share of the level's per-turn budget."""
     return round(REASONING_TARGET_SHARE * _cap(economy, level))
 
 
-def _charge(reasoning: int, cap: int) -> float:
-    """What one turn of ``reasoning`` tokens under ``cap`` pays of a unit overlong penalty."""
-    turn = Message.assistant("step", reasoning_tokens=reasoning, thinking_cap=cap)
-    return turn_overlong_term(Trajectory(messages=[Message.user("task"), turn]), penalty=1.0)[0]
-
-
-def _ramp_start(cap: int) -> int:
-    """The least reasoning a charged turn has done: the last count under ``cap`` the charge leaves free."""
-    start = min(round(cap * REASONING_TARGET_SHARE), cap - 1)
-    assert _charge(start, cap) == 0.0 and _charge(start + 1, cap) < 0.0
-    return start
-
-
-def _worst_length(economy: dict, level: str) -> float:
-    """The most the length terms can cost an episode at ``level``. With no turn charged, the price's cap and
-    the floor's weight. With a turn charged for its reasoning, the price's cap, the whole overlong penalty,
-    and the floor on the least reasoning such an episode has done, the charged turn's ramp start. With a
-    turn charged for its total alone (the whole turn sampled at next to no reasoning), the whole penalty
-    beside the larger of the floor's weight and the price's cap: the floor's slope outruns the price's at
-    every level (a case below), so price plus floor never passes that."""
-    worst = economy["price_cap"] + economy["floor"]
-    if not economy["overlong"]:
-        return worst
-    cap = _cap(economy, level)
-    floor_left = -reasoning_floor_term([_ramp_start(cap)], cap, economy["floor"])
-    reasoning_charged = economy["price_cap"] + economy["overlong"] + floor_left
-    turn_charged = economy["overlong"] + max(economy["floor"], economy["price_cap"])
-    return max(worst, reasoning_charged, turn_charged)
+def _worst_length(economy: dict) -> float:
+    """The most the length terms can cost an episode: the price's cap (0 with the price off) and the
+    floor's whole weight, an episode that reasoned nothing."""
+    return economy["price_cap"] + economy["floor"]
 
 
 def _price(economy: dict, level: str, tokens: int) -> float:
+    if economy["price"] is None:
+        return 0.0
     return reasoning_price_term([tokens], economy["price"][level], economy["price_cap"])
+
+
+def _not_paid_to_reason_more(economy: dict, level: str) -> str | None:
+    """Why ``level`` is not paid to reason more below its floor, or None: reasoning the floor's tokens
+    must score above reasoning half of them, and the price must not be capped by then, which would
+    leave it no slope above the floor."""
+    full = _floor_tokens(economy, level)
+    half = full // 2
+    at_half = _price(economy, level, half) + reasoning_floor_term([half], _cap(economy, level), economy["floor"])
+    at_full = _price(economy, level, full) + reasoning_floor_term([full], _cap(economy, level), economy["floor"])
+    if at_full <= at_half:
+        return f"reasoning {full} tokens scores {at_full}, not above the {at_half} of reasoning {half}"
+    if economy["price"] is not None and _price(economy, level, full) <= -economy["price_cap"]:
+        return f"the price is already capped at the floor ({full} tokens), so it has no slope above it"
+    return None
+
+
+def _prices_fall_with_level(economy: dict) -> bool:
+    prices = [economy["price"][level] for level in VALID_REASONING_EFFORTS]
+    return prices == sorted(prices, reverse=True) and len(set(prices)) == 3
 
 
 def _ids(paths):
@@ -126,19 +124,22 @@ def _ids(paths):
 def test_the_scan_finds_the_code_contests_recipes():
     """Guards the scan: an empty roster would make every case below vacuously pass."""
     assert len(RECIPES) >= 20, f"only {len(RECIPES)} code-contests recipes found — the glob is broken"
-    assert all(_economy(p)["price"] is not None and _economy(p)["floor"] > 0 for p in RECIPES), (
-        "a code-contests recipe runs without the reasoning terms, which the per-level cases below read"
+    assert all(_economy(p)["floor"] > 0 for p in RECIPES), (
+        "a code-contests recipe runs without the reasoning floor, which the cases below price"
     )
 
 
 @pytest.mark.parametrize("path", RECIPES, ids=_ids(RECIPES))
 def test_every_recipe_states_the_reasoning_economy(path):
-    """The price, its cap, the floor and the episode budget are spelled in every recipe, and the price
-    maps exactly the effort levels."""
+    """The floor and the episode budget are spelled in every recipe; a price maps exactly the effort
+    levels and brings its cap, and a recipe without one states no cap."""
     e = _economy(path)
     missing = [key for key in _REQUIRED_KEYS if key not in e["raw"]]
     assert not missing, f"{path.name} does not state {missing}"
-    assert set(e["price"]) == set(VALID_REASONING_EFFORTS)
+    if e["price"] is None:
+        assert "reasoning_price_cap" not in e["raw"], f"{path.name} states a cap for a price it does not run"
+    else:
+        assert "reasoning_price_cap" in e["raw"] and set(e["price"]) == set(VALID_REASONING_EFFORTS)
 
 
 @pytest.mark.parametrize("path", RECIPES, ids=_ids(RECIPES))
@@ -173,14 +174,12 @@ def test_the_episode_output_budget_binds_below_what_the_turn_caps_alone_allow(pa
 @pytest.mark.parametrize("path", RECIPES, ids=_ids(RECIPES))
 def test_length_terms_stay_under_the_resubmission_price(path):
     """Resubmitting is the decision this ladder prices hardest; the length terms together bound what
-    reasoning length can ever cost, and that bound stays under it at every level."""
+    reasoning length can ever cost, and that bound stays under it."""
     e = _economy(path)
-    for level in VALID_REASONING_EFFORTS:
-        length = _worst_length(e, level)
-        assert length < e["resubmission"], (
-            f"{level}: the length terms can cost up to {length}, not under the {e['resubmission']} a resubmission "
-            "costs: how long an episode reasons would then outweigh whether it resubmits"
-        )
+    assert _worst_length(e) < e["resubmission"], (
+        f"the length terms can cost up to {_worst_length(e)}, not under the {e['resubmission']} a resubmission "
+        "costs: how long an episode reasons would then outweigh whether it resubmits"
+    )
 
 
 @pytest.mark.parametrize("path", RECIPES, ids=_ids(RECIPES))
@@ -198,8 +197,8 @@ def test_a_recovered_cut_costs_less_than_the_attempt_bonus_and_no_more_than_an_o
 @pytest.mark.parametrize("path", RECIPES, ids=_ids(RECIPES))
 def test_an_honest_failed_attempt_beats_not_attempting(path):
     e = _economy(path)
-    # Graded, passed nothing, the worst length terms of any level.
-    worst_attempt = e["submission"] - max(_worst_length(e, level) for level in VALID_REASONING_EFFORTS)
+    # Graded, passed nothing, the worst length terms.
+    worst_attempt = e["submission"] - _worst_length(e)
     best_no_attempt = -e["no_tool_use"]  # never called a tool, free of every length term
     assert worst_attempt > best_no_attempt, (
         f"a graded submission that passes nothing can score {worst_attempt}, not above the {best_no_attempt} of "
@@ -222,7 +221,7 @@ def test_at_every_level_the_worst_solve_beats_the_best_zero_objective_episode(pa
             - e["resubmission"] * (e["profiles"][level]["max_submissions"] - 1)
             - e["turn_overflow"]
             - e["cut"] * e["recoveries"]
-            - _worst_length(e, level)
+            - _worst_length(e)
         )
         assert worst_solve > best_zero_objective, (
             f"{level}: a full solve can score as low as {worst_solve}, not above the {best_zero_objective} a "
@@ -236,30 +235,40 @@ def test_below_its_floor_every_level_is_paid_to_reason_more(path):
     level short of its floor has no reason — or a reason not — to think."""
     e = _economy(path)
     for level in VALID_REASONING_EFFORTS:
-        minimum = _floor_tokens(e, level)
-        half, full = minimum // 2, minimum
-        at_half = _price(e, level, half) + reasoning_floor_term([half], _cap(e, level), e["floor"])
-        at_full = _price(e, level, full) + reasoning_floor_term([full], _cap(e, level), e["floor"])
-        assert at_full > at_half, (
-            f"{level}: reasoning {full} tokens scores {at_full}, not above the {at_half} of reasoning {half} — "
-            "below its floor the level is not paid to reason more"
-        )
-        assert _price(e, level, full) > -e["price_cap"], (
-            f"{level}: the price is already capped at the floor ({minimum} tokens), so it has no slope above it"
-        )
+        reason = _not_paid_to_reason_more(e, level)
+        assert reason is None, f"{level}: {reason} — below its floor the level is not paid to reason more"
 
 
 @pytest.mark.parametrize("path", RECIPES, ids=_ids(RECIPES))
 def test_a_higher_level_is_priced_lower_and_asked_for_no_less(path):
     e = _economy(path)
-    prices = [e["price"][level] for level in VALID_REASONING_EFFORTS]
-    assert prices == sorted(prices, reverse=True) and len(set(prices)) == 3, (
-        f"the per-level prices do not fall low > medium > high: {e['price']}"
-    )
+    if e["price"] is not None:
+        assert _prices_fall_with_level(e), f"the per-level prices do not fall low > medium > high: {e['price']}"
     floors = [_floor_tokens(e, level) for level in VALID_REASONING_EFFORTS]
     assert floors == sorted(floors), (
         f"a higher level is asked for less reasoning: {dict(zip(VALID_REASONING_EFFORTS, floors, strict=True))}"
     )
+
+
+def test_the_price_relations_pass_a_sound_price_and_refuse_a_bad_one():
+    """On a priced copy of a shipped recipe (floor 0.05): the templates' example price under a 0.05 cap
+    holds every relation, and each bad price breaks the one it should."""
+    base = _economy(RECIPES[0])
+
+    def priced(price: dict[str, float], cap: float) -> dict:
+        return {**base, "price": price, "price_cap": cap, "floor": 0.05}
+
+    sound = priced({"low": 0.0037, "medium": 0.0013, "high": 0.00018}, cap=0.05)
+    assert _worst_length(sound) < sound["resubmission"] and _prices_fall_with_level(sound)
+    assert all(_not_paid_to_reason_more(sound, level) is None for level in VALID_REASONING_EFFORTS)
+    # A cap that, with the floor, reaches the resubmission price.
+    assert _worst_length(priced(sound["price"], cap=base["resubmission"] - 0.05)) >= base["resubmission"]
+    # A higher level priced higher.
+    assert not _prices_fall_with_level(priced({"low": 0.00018, "medium": 0.0013, "high": 0.0037}, cap=0.05))
+    # 0.01 per 1k at low out-slopes a 0.05 floor over its 6144-token target (0.0081 per 1k).
+    assert _not_paid_to_reason_more(priced({"low": 0.01, "medium": 0.005, "high": 0.001}, cap=0.08), "low")
+    # A cap the low level's price reaches before its floor.
+    assert _not_paid_to_reason_more(priced({"low": 0.005, "medium": 0.002, "high": 0.0005}, cap=0.02), "low")
 
 
 if __name__ == "__main__":

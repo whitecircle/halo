@@ -291,11 +291,18 @@ def test_partial_grading_reaches_the_episode_metrics():
 def _budget_stopped_episode(*submissions):
     """One episode submitting once per entry of ``submissions`` against 50 tests at 10 s/test under a
     25 s grading budget, so each grade judges three tests (the entry's three sandbox results) and stops."""
-    submit = {
-        "id": "c1",
-        "type": "function",
-        "function": {"name": "submit_solution", "arguments": json.dumps({"code": "print(42)"})},
-    }
+
+    def submit(attempt: int) -> dict:
+        # A changed program per attempt (comments aside): the same one again is refused as already graded, not graded again.
+        return {
+            "id": f"c{attempt}",
+            "type": "function",
+            "function": {
+                "name": "submit_solution",
+                "arguments": json.dumps({"code": f"attempt = {attempt}\nprint(42)"}),
+            },
+        }
+
     clock = {"t": 0.0}
     env = CodeContestsEnvironment(
         language="python",
@@ -306,8 +313,8 @@ def _budget_stopped_episode(*submissions):
     )
     eids, _ = env.reset(["Print 42."], [{"answer": {"tests": [{"input": str(i), "output": "42"} for i in range(50)]}}])
     with mock.patch.object(grading_module.time, "monotonic", lambda: clock["t"]):
-        for _ in submissions:
-            env.step(eids, [""], [{"tool_calls": [submit]}])
+        for attempt in range(len(submissions)):
+            env.step(eids, [""], [{"tool_calls": [submit(attempt)]}])
     traj = env.get_trajectories(eids)[0]
     assert traj.done and traj.info["grading_budget_hit"] and traj.info["tests_graded"] == 3
     return env, traj

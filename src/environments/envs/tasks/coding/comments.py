@@ -1,6 +1,6 @@
-"""Comment accounting for the coding environments' guard on reasoning carried in a program's comments:
-how many characters of a program sit in comments, by the language's registered syntax, and the verdict
-the guard reads off that count."""
+"""Comment accounting for the coding environments: how many characters of a program sit in comments, by the
+language's registered syntax, the verdict the reasoning-in-comments guard reads off that count, and the
+program with its comments removed, what the identity of a resubmission is read on."""
 
 import ast
 import warnings
@@ -22,10 +22,22 @@ def comment_chars(code: str, language: str) -> tuple[int, int]:
     comments anywhere, string literals skipped, a C-family ``#if 0`` block counted whole, and under
     Python a bare string statement (a docstring) counted as a comment."""
     spec = require_language(language)
-    comments = _scan(code, spec.line_comment, spec.block_comment)
+    comments = sum(end - start for start, end in _comment_spans(code, spec.line_comment, spec.block_comment))
     if spec.name == "python":
         comments += _bare_string_chars(code)
     return comments, len(code) - comments
+
+
+def strip_comments(code: str, language: str) -> str:
+    """``code`` without its comments (the same spans :func:`comment_chars` counts, bare strings kept): a
+    resubmission that differs only in them is the same program."""
+    spec = require_language(language)
+    out, last = [], 0
+    for start, end in _comment_spans(code, spec.line_comment, spec.block_comment):
+        out.append(code[last:start])
+        last = end
+    out.append(code[last:])
+    return "".join(out)
 
 
 def reasoning_in_comments(comments: int, rest: int) -> bool:
@@ -39,10 +51,12 @@ def carries_reasoning_in_comments(code: str, language: str) -> bool:
     return reasoning_in_comments(*comment_chars(code, language))
 
 
-def _scan(code: str, line_marker: str, block: tuple[str, str] | None) -> int:
-    """Characters inside line and block comments (and a C-family ``#if 0`` block), string literals skipped."""
+def _comment_spans(code: str, line_marker: str, block: tuple[str, str] | None) -> list[tuple[int, int]]:
+    """The spans of ``code`` inside line and block comments (and a C-family ``#if 0`` block), string
+    literals skipped, in order."""
     n = len(code)
-    i = comments = 0
+    i = 0
+    spans: list[tuple[int, int]] = []
     line_start = True
     while i < n:
         if block is not None and line_start and code.startswith(_C_DISABLED_BLOCK[0], i):
@@ -60,9 +74,9 @@ def _scan(code: str, line_marker: str, block: tuple[str, str] | None) -> int:
             line_start = code[i] == "\n" or (line_start and code[i] in " \t")
             i += 1
             continue
-        comments += end - i
+        spans.append((i, end))
         i = end
-    return comments
+    return spans
 
 
 def _end_of(code: str, start: int, closer: str) -> int:

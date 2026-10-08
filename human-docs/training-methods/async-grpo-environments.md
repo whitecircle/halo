@@ -110,25 +110,26 @@ Sampling is `rollout_temperature` (`0.7`) and `rollout_top_p` (`0.95`); `rollout
 Three decisions matter more than the rest.
 
 - **Turn budget.** `rollout_max_tokens` caps one turn and `max_turns` the turns. `rollout_max_episode_tokens` (off by
-  default, `131072` in the code-contests recipes) caps what one episode samples across all its turns, reasoning
+  default, `81920` in the code-contests recipes) caps what one episode samples across all its turns, reasoning
   included. The engine enforces it turn by turn and never tells the model, and an episode left without room for
   another turn ends truncated. The trajectory itself is never cut: a row longer than the context window fails the
   step. Watch `episode/turns`: pinned at the cap, raise it; far below, lower it, since turns are sequential and set
   step time. A turn cut at its cap, an empty turn, or one whose every call names a tool that does not exist or is
-  refused unrun (code contests refuses a program whose comments carry its reasoning) is never rewarded: it trains
+  refused unrun (code contests refuses a program whose comments carry its reasoning, and a resubmission identical to
+  one already graded) is never rewarded: it trains
   only as a penalty, when its episode scored below the group's mean
   ([Objective](../../agent-docs/training-methods/grpo/async-grpo/objective.md#untrainable-turns) ↗).
 - **Reasoning effort.** `environment_kwargs.reasoning_effort` (`low` / `medium` / `high` / `random`) sets how much the
   model should think, and `reasoning_effort_profiles` gives each level its own caps, as the code-contests recipes do
   (`{high: {thinking_tokens: 16384, max_submissions: 3, max_test_calls: 6}}`). A thinking budget applies per turn.
-  `rollout_max_thinking_tokens`, `turn_overlong_penalty` and `carry_reasoning` are vLLM-only and refused under
+  `rollout_max_thinking_tokens` and `carry_reasoning` are vLLM-only and refused under
   `rollout_backend: sglang`, where a level's `thinking_tokens` caps nothing. The model sees the level only through a
   chat template that renders it
   ([Reasoning budget](../../agent-docs/training-methods/grpo/async-grpo/rollouts.md#reasoning-budget) ↗). Pin such a
   template with `chat_template:` plus `force_chat_template: true` and serve the same file
   ([Chat template](../../agent-docs/training-methods/grpo/async-grpo/rollouts.md#chat-template) ↗). To price reasoning
-  length, set any of `reasoning_price`, `reasoning_floor` and `turn_overlong_penalty`; the last two need a per-turn
-  thinking cap, from a level's `thinking_tokens` or `rollout_max_thinking_tokens`
+  length, set `reasoning_price`, `reasoning_floor` or both; the price needs the environment's `reasoning_effort`, the
+  floor a per-turn thinking cap, from a level's `thinking_tokens` or `rollout_max_thinking_tokens`
   ([Reasoning length reward](../../agent-docs/training-methods/grpo/async-grpo/rollouts.md#reasoning-length-reward) ↗).
 - **Tool budgets.** An environment pays `tool_success_reward` per successful call, charges `tool_error_penalty` per
   failure, and caps what successful calls earn across the episode — not the episode reward — at `tool_reward_cap`
@@ -183,11 +184,11 @@ once a multi-turn round outlasts the update.
 `reward/within_group_std` near zero is the quiet failure: every episode in a group scored the same, so that prompt
 teaches nothing. Such groups are dropped from the loss by default (`drop_degenerate_groups`), and
 `sampling/degenerate_group_frac` counts them. The tie is judged on the reward the environment settled (its grade, shaping and any judge or
-reward-model score), without the trainer's reasoning-length terms (reasoning price, reasoning floor, overlong charge),
+reward-model score), without the trainer's reasoning-length terms (reasoning price, reasoning floor),
 so a length price on top does not hide it. Rollouts land in `<output_dir>/completions/` as parquet.
 
-Some signals appear only with their knob on. With the reasoning length reward on, `reward/reasoning_price`,
-`reward/reasoning_floor` and `reward/turn_overlong` show what it charges. Under `rollout_max_episode_tokens`,
+Some signals appear only with their knob on. With the reasoning length reward on, `reward/reasoning_price` and
+`reward/reasoning_floor` show what it charges. Under `rollout_max_episode_tokens`,
 `episode/output_budget_exhausted` is the share of episodes the budget left without room for another turn. Each
 `judge` or `reward_model` term logs `<source>/<name>/scored`, and `episode/reward_scored` is 1 only when every external
 term reached a verdict: below 1, a scorer is failing. Under `on_error: invalid` (the default, except on a veto judge,

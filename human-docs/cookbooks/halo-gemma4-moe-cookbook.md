@@ -186,7 +186,8 @@ cp \
 
 The config contains a placeholder dataset. Prepare a HardTests pool as described in
 [Code Contests](../../agent-docs/training-methods/grpo/environments/code-contests.md#dataset) ↗,
-then replace `your-org/code-contests-hardtests-rl:medium` in `gemma4-grpo.yaml`.
+then replace `your-org/code-contests-hardtests-rl:medium` in `gemma4-grpo.yaml`. Its `audit` judge reads
+`OPENROUTER_API_KEY` (pass it with `--env-file`); drop that reward term to run without a judge.
 
 The shipped config uses two SGLang servers on four GPUs. Start both servers on the
 host ([server setup](README.md#serve-from-the-host)). The trainer will use GPUs 0–3.

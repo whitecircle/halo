@@ -39,6 +39,7 @@ from src.environments.envs.tasks.coding.code_contests import (
     DEFAULT_REASONING_EFFORT,
     SUBMIT_TOOL,
     CodeContestsEnvironment,
+    normalized_program,
 )
 from src.environments.envs.tasks.coding.comments import carries_reasoning_in_comments
 from src.environments.envs.tasks.coding.datasets import CODE_DATASET_ADAPTERS, ContestSelection
@@ -151,10 +152,12 @@ def submitted_solutions(episode: dict[str, Any], env: CodeContestsEnvironment) -
     Python literals included). A recorded call the tool refuses to bind (no code, a missing or foreign
     language, an argument the tool does not declare, unparseable arguments), or one whose code the
     environment refused as written in another language (:meth:`CodeContestsEnvironment.mislabelled_as`)
-    or for the reasoning in its comments (:func:`carries_reasoning_in_comments`), was never graded and
-    spent no budget, so it takes no slot here either."""
+    or for the reasoning in its comments (:func:`carries_reasoning_in_comments`), or identical, comments aside, to
+    one already graded (:func:`normalized_program`), was never graded and spent no budget, so it takes no slot here
+    either."""
     tool = env.registry.get(SUBMIT_TOOL)
     solutions: list[tuple[str, str | None]] = []
+    graded: set[str] = set()
     for message in episode.get("messages", []):
         for raw in message.get("tool_calls") or []:
             call = NativeToolCall.from_openai_format(raw)
@@ -165,9 +168,13 @@ def submitted_solutions(episode: dict[str, Any], env: CodeContestsEnvironment) -
             except ToolArgumentError:
                 continue
             language = bound.get("language")
-            if env.mislabelled_as(bound["code"], language) is None and not carries_reasoning_in_comments(
-                bound["code"], language or env.language
+            program = normalized_program(bound["code"], language or env.language)
+            if (
+                env.mislabelled_as(bound["code"], language) is None
+                and not carries_reasoning_in_comments(bound["code"], language or env.language)
+                and program not in graded
             ):
+                graded.add(program)
                 solutions.append((bound["code"], language))
     return solutions
 

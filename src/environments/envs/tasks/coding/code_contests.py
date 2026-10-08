@@ -27,7 +27,7 @@ from src.environments.base import (
     require_magnitudes,
 )
 from src.environments.envs.protocols.native import NativeToolUseEnvironment
-from src.environments.envs.tasks.coding.comments import comment_chars, reasoning_in_comments
+from src.environments.envs.tasks.coding.comments import comment_chars, reasoning_in_comments, strip_comments
 from src.environments.envs.tasks.coding.grading import (
     DEFAULT_MAX_OUTPUT_SIZE,
     VERDICT_DETAIL_OUTCOME,
@@ -73,11 +73,7 @@ SUBMIT_TOOL = "submit_solution"
 # Pass fraction of each graded submission, in order: what ``episode/resubmission_improved`` reads.
 SUBMISSION_PASS_FRACS_KEY = "submission_pass_fracs"
 NO_STDIN_NOTE = "(No stdin was passed to this run; if the program reads input, pass it in the `stdin` argument.)"
-STARVED_RUN_NOTE = (
-    "(No stdin was passed and the program printed nothing to stdout, so this run was not counted; give the "
-    "program its input in the `stdin` argument.)"
-)
-# Scratchpad runs returned for getting no input and printing nothing (``episode/starved_test_runs``).
+# Scratchpad runs given no input that exited cleanly with nothing on stdout (``episode/starved_test_runs``).
 STARVED_TEST_RUNS_KEY = "starved_test_runs"
 # Programs refused for carrying the reasoning in their comments (``episode/reasoning_in_comments_calls``),
 # and the comment and code characters of every program a call carried (``episode/code_comment_share``).
@@ -109,6 +105,16 @@ MISLABELLED_LANGUAGE_REPLY = (
 SUBMISSION_AFTER_ACCEPT_REPLY = (
     "Not graded: an earlier submission already passed every test, so it stands and the task ends."
 )
+# A program identical to one this episode already graded, comments aside, would draw the same verdict: refused
+# unspent, the turn flagged like any refusal (``episode/identical_resubmissions``). Graded programs are kept
+# normalized (``_graded_programs``, private: it leaves the record with the grading payload); one whose grade the
+# backend lost is not kept.
+IDENTICAL_RESUBMISSION_REPLY = (
+    "Not graded: this program is identical to one already graded and would receive the same verdict. Change it "
+    "before submitting again."
+)
+IDENTICAL_RESUBMISSIONS_KEY = "identical_resubmissions"
+GRADED_PROGRAMS_KEY = "_graded_programs"
 
 # Marks of C or C++ source for the language-label check: an include directive, a main function, a
 # namespace directive or a std-qualified name; else statements ending in ``;`` on this share of the
@@ -161,6 +167,14 @@ def _c_family_language(code: str, compiled: Sequence[str]) -> str | None:
     if "c" in compiled and _C_MARKS.search(code):
         return "c"
     return compiled[0] if compiled else None
+
+
+def normalized_program(code: str, language: str) -> str:
+    """``code`` in ``language`` as the identity check reads it: the language first (the same text is another
+    program in another language), then the code without its comments (:func:`strip_comments`), trailing
+    whitespace off every line and every blank line dropped, indentation kept (it is the program under Python)."""
+    lines = [line.rstrip() for line in strip_comments(code, language).splitlines()]
+    return f"{language}\n" + "\n".join(line for line in lines if line)
 
 
 def evident_language(code: str, language: str, offered: Sequence[str]) -> str | None:
@@ -280,7 +294,6 @@ class CodeContestsEnvironment(NativeToolUseEnvironment):
         max_grading_seconds: float | None = None,
         max_submissions: int | None = None,
         max_test_calls: int | None = None,
-        max_starved_run_refunds: int = 1,
         submission_reward: float = 0.0,
         resubmission_penalty: float = 0.0,
         reasoning_effort: str | None = DEFAULT_REASONING_EFFORT,
@@ -296,7 +309,6 @@ class CodeContestsEnvironment(NativeToolUseEnvironment):
         specs = self._resolve_languages(language)
         require_count("max_submissions", max_submissions, 1)
         require_count("max_test_calls", max_test_calls, 0)
-        require_count("max_starved_run_refunds", max_starved_run_refunds, 0)
         if max_time_limit < timeout_per_test:
             # The prompt promises an interpreted solution at least timeout_per_test per test; a clamp
             # below it would grade under a contract the model was never told.
@@ -318,9 +330,6 @@ class CodeContestsEnvironment(NativeToolUseEnvironment):
         # Reaching the cap ends the episode; further calls are rejected as tool errors.
         self.max_submissions = max_submissions
         self.max_test_calls = max_test_calls
-        # A first input-less silent run is a slip the note corrects; returning every one makes a run that
-        # reads nothing free to repeat, so past this many an episode's silent runs count like any other.
-        self.max_starved_run_refunds = max_starved_run_refunds
         self.sandbox = sandbox or resolve_sandbox(backend=sandbox_backend, url=sandbox_url)
         warn_if_unisolated(self.sandbox, type(self).__name__)
         # Built once and the single reader of these knobs: every submission of the run is graded under
@@ -519,11 +528,6 @@ class CodeContestsEnvironment(NativeToolUseEnvironment):
         """Scratchpad calls admitted so far."""
         return self._tool_calls_made(trajectory, self.test_tool_name)
 
-    def _refunds_left(self, trajectory: Trajectory | None) -> bool:
-        """Whether an input-less silent run is still returned to the budget: up to ``max_starved_run_refunds``
-        per episode, always outside one (a direct call keeps no budget)."""
-        return trajectory is None or trajectory.info.get(STARVED_TEST_RUNS_KEY, 0) < self.max_starved_run_refunds
-
     def _run_test_in(self, code: str, language: str, stdin: str = "") -> str:
         """The scratchpad handler when the run lets the model choose: ``language`` is required, so a
         call without it fails to bind and is refused unspent."""
@@ -543,7 +547,7 @@ class CodeContestsEnvironment(NativeToolUseEnvironment):
 
     def _refuse_mislabelled(self, code: str, language: str, tool: str, trajectory: Trajectory | None) -> str | None:
         """The reply refusing a program :meth:`mislabelled_as` names another language for, the call
-        returned to the budget unpaid, as a starved run is; ``None`` when the label fits."""
+        returned to the budget unpaid (:meth:`_refund_tool_call`); ``None`` when the label fits."""
         evident = self.mislabelled_as(code, language)
         if evident is None:
             return None
@@ -559,8 +563,8 @@ class CodeContestsEnvironment(NativeToolUseEnvironment):
         :func:`comment_chars`) unrun, the call returned to the budget: it costs the turn and the protocol's
         error price, never a run or a submission, and a turn of nothing else is flagged untrainable
         (:class:`ToolCallRefused`). Records every program's comment and code characters first, the guard's
-        own signal. The reasoning terms never count a call's arguments and the turn-total overlong ramp
-        prices them only near ``rollout_max_tokens``; this reads them before that."""
+        own signal. The thinking cap bounds the reasoning channel alone and no reasoning term counts a call's
+        arguments, so a turn the cap closes could carry its thought on in a program's comments; this reads them."""
         comments, rest = comment_chars(code, language)
         if trajectory is not None:
             trajectory.info[COMMENT_CHARS_KEY] = trajectory.info.get(COMMENT_CHARS_KEY, 0) + comments
@@ -608,20 +612,12 @@ class CodeContestsEnvironment(NativeToolUseEnvironment):
         # A run on no input says so, since neither the parse error of a program that reads input nor
         # output computed from nothing names the cause; a build failure ran nothing.
         if not stdin and not result.compile_failed and not host_build_error(code, language, self.sandbox):
-            if (
-                not result.timed_out
-                and result.returncode in (0, None)
-                and not result.stdout.strip()
-                and self._refunds_left(trajectory)
-            ):
-                # Given no input, the program told the model nothing (a clean exit's reply leaves stderr
-                # out), so the run is returned to the budget.
-                notes.append(STARVED_RUN_NOTE)
-                if trajectory is not None:
-                    self._refund_tool_call(trajectory, self.test_tool_name)
-                    trajectory.info[STARVED_TEST_RUNS_KEY] = trajectory.info.get(STARVED_TEST_RUNS_KEY, 0) + 1
-            else:
-                notes.append(NO_STDIN_NOTE)
+            notes.append(NO_STDIN_NOTE)
+            # Given no input, a clean exit with nothing on stdout showed the model nothing (its reply leaves
+            # stderr out).
+            starved = not result.timed_out and result.returncode in (0, None) and not result.stdout.strip()
+            if starved and trajectory is not None:
+                trajectory.info[STARVED_TEST_RUNS_KEY] = trajectory.info.get(STARVED_TEST_RUNS_KEY, 0) + 1
         return self._fit_observation(output, notes)
 
     def _submit(self, code: str, language: str | None = None) -> str:
@@ -641,6 +637,7 @@ class CodeContestsEnvironment(NativeToolUseEnvironment):
             self._refund_tool_call(trajectory, SUBMIT_TOOL)
             return SUBMISSION_AFTER_ACCEPT_REPLY
         self._refuse_reasoning_in_comments(code, language, SUBMIT_TOOL, trajectory)
+        self._refuse_identical_resubmission(code, language, trajectory)
         self._note_language(trajectory, language)
 
         if self._submissions(trajectory) == 1:
@@ -661,7 +658,19 @@ class CodeContestsEnvironment(NativeToolUseEnvironment):
         # The graded artifact an external scorer reads (``_scoring_sample``); private, so it leaves
         # the record with the grading payload.
         trajectory.info["_submitted_code"] = code
+        if not grade.infra_errors:
+            # A grade the backend lost says nothing about the program, so the same one may come back.
+            trajectory.info.setdefault(GRADED_PROGRAMS_KEY, []).append(normalized_program(code, language))
         return grade.details
+
+    def _refuse_identical_resubmission(self, code: str, language: str, trajectory: Trajectory) -> None:
+        """Refuse a program identical to one this episode already graded (:func:`normalized_program`) unrun, the
+        submission returned to the budget: it would draw the same verdict, so grading it only probes the judge."""
+        if normalized_program(code, language) not in trajectory.info.get(GRADED_PROGRAMS_KEY, []):
+            return
+        self._uncount_tool_call(trajectory, SUBMIT_TOOL)
+        trajectory.info[IDENTICAL_RESUBMISSIONS_KEY] = trajectory.info.get(IDENTICAL_RESUBMISSIONS_KEY, 0) + 1
+        raise ToolCallRefused(IDENTICAL_RESUBMISSION_REPLY)
 
     @staticmethod
     def _accepted(info: dict[str, Any]) -> bool:
@@ -860,6 +869,7 @@ class CodeContestsEnvironment(NativeToolUseEnvironment):
         metrics["episode/test_calls"] = float(self._test_calls(trajectory))
         metrics["episode/starved_test_runs"] = float(info.get(STARVED_TEST_RUNS_KEY, 0))
         metrics["episode/reasoning_in_comments_calls"] = float(info.get(REASONING_IN_COMMENTS_KEY, 0))
+        metrics["episode/identical_resubmissions"] = float(info.get(IDENTICAL_RESUBMISSIONS_KEY, 0))
         program_chars = info.get(COMMENT_CHARS_KEY, 0) + info.get(CODE_CHARS_KEY, 0)
         if program_chars:
             metrics["episode/code_comment_share"] = info.get(COMMENT_CHARS_KEY, 0) / program_chars

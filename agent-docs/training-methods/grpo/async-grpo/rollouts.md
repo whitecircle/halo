@@ -27,7 +27,7 @@ left with less than that room starts no further turn and ends truncated, priced 
 overflow; a cut or empty turn on the last turn the budget affords is closed the same way, never nudged into a
 retry that could not run. `episode/output_budget_exhausted` is the fraction of episodes whose budget ran below it.
 The budget must be at least `rollout_max_tokens`, so one whole turn fits; it is `max_tokens` on the
-wire, so it holds on both engines. Every shipped code-contests recipe sets `131072`.
+wire, so it holds on both engines. Every shipped code-contests recipe sets `81920`.
 
 The trajectory accumulates across turns within the model context window and is **never
 truncated**: a row over that window is recorded per rank, then raised on every rank together. The
@@ -111,8 +111,15 @@ quarter of its level's reasoning cap, not the whole budget again (`RECOVERY_THIN
 `src/environments/episode.py`, clamping what the output budget leaves): room to read the nudge or the
 refusal, fix and act, so a cut never buys a second budget; the template still states the level's
 budget, and the nudge asks for the action. The episode
-budget bounds what the recoveries may add in total, and every reasoning token they add is priced
-([Reasoning length reward](#reasoning-length-reward)).
+budget bounds what the recoveries may add in total.
+
+`episode/thinking_cap_turns` counts the turns whose reasoning reached the cap they recorded: the
+level's, or a retry's reserve, never the narrower request cap an output budget leaves a late turn. A
+turn's reasoning is its sampled ids up to and including `rollout_reasoning_end_token`, all of them for
+a turn cut before its close; on a turn vLLM force-closes at its recorded cap that is the cap, or one or
+two past it where the template's or the model's own `<think>` sits, so such a turn always counts. The
+metric needs a vLLM cap that can bind, `train_on_sampled_tokens`, and a marker that is one of the
+tokenizer's added tokens (gpt-oss's five-token final-channel opener logs none); the standalone eval scripts log none.
 
 An engine abort never reaches the environment: the actor re-issues the turn up to `max_retries` times
 (default `3`) rather than charging a length cut; past that the episode errors into a masked row.
@@ -135,72 +142,38 @@ them to the trainer's own renders, so both sides see one template state. `reason
 
 ## Reasoning length reward
 
-Four trainer-side knobs price an episode's reasoning: two terms on its reasoning tokens summed over
-its assistant turns, by its effort level, and one on a turn running into its thinking cap. All enter
-the task reward before advantages.
+Two trainer-side terms price an episode's reasoning tokens, summed over its assistant turns, on top of
+the task reward and before advantages.
+
+**The floor** (`reasoning_floor`, default `0` = off) pays for more reasoning. Its reference is three
+quarters of the per-turn thinking budget the episode ran under (its level's `thinking_tokens`, clamped
+by `rollout_max_thinking_tokens`). An episode whose reasoning tokens fall short of it pays
+`-floor × shortfall / reference`: the whole weight for an episode that reasoned nothing. The
+reference sits under one budget, so an episode of a single assistant turn can clear it without running
+into the cap the engine enforces per turn. It reads the episode's total, not a per-turn mean, so a
+terse repair turn after a verdict is not under-use and an extra tool turn never lowers the score.
+An episode with no thinking budget or no assistant turn pays nothing. A run where no drawable level
+sets a budget and `rollout_max_thinking_tokens` is unset is refused at trainer construction.
 
 **The price** (`reasoning_price`, default `null` = off) maps each effort level to reward units per
 1,000 reasoning tokens: an episode pays `-min(reasoning_price_cap, price[level] × tokens / 1000)`.
-The map must name exactly the three levels, `low`, `medium` and `high`, whatever the environment draws (refused at trainer construction); price the lowest
-level highest, so the same trace costs most where little reasoning was asked. It prices
-reasoning tokens only — code and tool calls are free — and `reasoning_price_cap` (default `0.1`;
-refused at another value while the price is off) caps it per episode, so a long trace cannot
-outweigh the task reward. An episode with no level pays nothing.
+The map must name exactly `low`, `medium` and `high` whatever the environment draws, and the
+environment must set `reasoning_effort` (both refused at trainer construction). Price the lowest level
+highest, so the same trace costs most where little reasoning was asked. It prices reasoning tokens
+only — code and tool calls are free. An episode with no level pays nothing.
 
 A price is paid within the group, so the sibling that reasons less wins it whatever the outcome. That
-is why it is capped and near zero at the highest level, and why the recipes never run it alone:
+is why `reasoning_price_cap` (default `0.1`; refused at another value while the price is off) caps it
+per episode, and why it never runs alone: below its reference the floor must out-slope the price, so a
+level short of it is still paid to reason more. The code-contests recipes run no price; their caps,
+budgets and output budget are the dial.
 
-**The floor** (`reasoning_floor`, default `0` = off) is the one term that pays for more reasoning.
-Its reference is three quarters of the per-turn thinking budget the episode ran under (its level's
-`thinking_tokens`, clamped by `rollout_max_thinking_tokens`); an episode whose reasoning tokens,
-summed over its turns, fall short of it pays `-floor × shortfall / reference`, the whole weight for
-an episode that reasoned nothing. The reference sits under one budget so that an episode of a single
-assistant turn can clear it without running into the cap the engine enforces per turn, and it reads
-the episode's total, not a per-turn mean, so a terse repair turn after a verdict is not under-use and
-an extra tool turn never lowers the score. An episode with no thinking budget or no assistant turn
-pays nothing. A run where no drawable level sets a budget and `rollout_max_thinking_tokens` is unset
-is refused at trainer construction.
-
-**The overlong charge** (`turn_overlong_penalty`, default `0` = off) prices a turn that runs up to a
-cap, where the engine forces the close or the cut and the turn otherwise pays nothing for running into
-it. A turn pays the larger of two ramps, each `-penalty × clamp((count − 0.75 × cap) / (0.25 × cap), 0, 1)`:
-nothing until the count enters the last quarter under its cap, the whole penalty at it. The first reads the
-turn's reasoning against its recorded `thinking_cap` (the level's, clamped by `rollout_max_thinking_tokens`;
-a retry's reserve), never the narrower request cap an episode output budget leaves a late turn, so a turn
-is never charged for the episode's budget running out. The second reads every token the turn sampled
-against `rollout_max_tokens`, the wall the engine cuts a turn at: reasoning carried past the forced close
-into the call's arguments is sampled output like any other, and without this ramp the cut it ends in
-costs the cut price alone. The reasoning count is the
-turn's sampled ids up to and including `rollout_reasoning_end_token` (default `</think>`), all of
-them for a turn cut before its close. On a turn vLLM force-closes that count is exactly the budget:
-vLLM's counter starts after the last `<think>` the request holds, so it counts the generation
-prompt's tokens after it (the `\n` the Qwen3.6 template ends on) but not the close it forces, and the
-two cancel; a prompt ending on a bare `<think>` reads one past the budget, a `<think>` the model
-emits itself two past, and either lands at the clamp, so a forced turn pays the whole penalty. A turn
-whose ids were not captured, or that ran uncapped, is not charged. The episode pays its most-charged
-turn once, so the term stays in `[-penalty, 0]` however many turns a run allows.
-
-Like the price, the charge reaches the gradient only through groups the environment's reward separates:
-`drop_degenerate_groups` judges a group without the length terms, so a group whose members all settled
-the same reward is dropped whatever its members' charges ([Advantages](objective.md#advantages)).
-
-The charge, both ramps, is vLLM-only and needs `train_on_sampled_tokens` and a `rollout_reasoning_end_token` that
-encodes to one token, the one the count reads up to (gpt-oss's five-token final-channel opener cannot
-run it; trainer construction refuses it). A run where no turn can carry a cap is refused at trainer
-construction: a budget only on a level the environment's `reasoning_effort` never draws counts as
-none.
+Both terms reach the gradient only through groups the environment's reward separates:
+`drop_degenerate_groups` judges a group without them ([Advantages](objective.md#advantages)).
 
 Keep `reasoning_price_cap + reasoning_floor` below what the environment charges for the decisions it
-prices (the Qwen3.6 vLLM code-contests recipes: `0.09 + 0.10`, the other code-contests recipes
-`0.1 + 0.05`, all under the `0.2` resubmission price). The overlong charge starts where the floor
-stops charging — both at three quarters of the turn's cap — so no episode pays both (to within the
-few tokens by which the floor's re-tokenized count and the charge's sampled count differ), and with the
-charge the bound is the larger of that sum and `reasoning_price_cap + turn_overlong_penalty`
-(`0.09 + 0.05` on the Qwen3.6 vLLM recipes, which charge `0.05`). Smaller shaping terms, a `0.05`
-tool error among them, can still be outweighed by a long trace at the lowest level. Watch
-`reward/reasoning_price`, `reward/reasoning_floor` and `reward/turn_overlong`, with
-`reward/turn_overlong_turn_frac`, the share of assistant turns charged; both overlong metrics are also
-logged per effort level (`effort/<level>/turn_overlong`).
+prices: the code-contests recipes run a floor of `0.10` (the Qwen3.6 vLLM recipes) or `0.05`, under
+the `0.2` resubmission price. Watch `reward/reasoning_price` and `reward/reasoning_floor`.
 
 ## Chat template
 
@@ -274,9 +247,14 @@ resolves is refused at construction, since its forced reasoning closes are neutr
 
 `save_completions` (default on) writes each log step's rollouts to
 `<output_dir>/completions/completions_<step>.parquet` — columns `step`, `prompt`, `completion`,
-`environment_reward`, `advantage` — plus a `completions` table when wandb is in `report_to`. A file
-holds every row since the previous log (one round at `logging_steps: 1`); eval logs keep the step
-number, take an `_eval` suffix and hold the whole eval set.
+`environment_reward`, `advantage`, `reward_components` and `reward_details` — plus a `completions`
+table when wandb is in `report_to`. A file holds every row since the previous log (one round at
+`logging_steps: 1`); eval logs keep the step number, take an `_eval` suffix and hold the whole eval set.
+
+`reward_components` is the episode's settled `reward/*` components as JSON; `environment_reward` less
+their sum is what the trainer's reasoning terms charged. `reward_details` holds each scored term's rationale by term
+name — a veto judge's fired checks with the quotes behind them — so a vetoed episode is read off the
+record without scoring it again. Both are `{}` for an episode that kept neither.
 
 The `completion` column renders detokenized message text, unaffected by `train_on_sampled_tokens`
 (raw ids feed the loss only). TRL's `log_completions` controls the console table alone, capped by

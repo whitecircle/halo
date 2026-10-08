@@ -201,7 +201,8 @@ cp examples/grpo/environmental/qwen3_5/vllm/qwen3.6-35b-a3b-code-contests-full-e
 
 Its dataset is a placeholder: prepare a HardTests pool as described in
 [Code Contests](../../agent-docs/training-methods/grpo/environments/code-contests.md#dataset) ↗,
-then replace `your-org/code-contests-hardtests-rl:medium`. The other configs under
+then replace `your-org/code-contests-hardtests-rl:medium`. Its `audit` judge reads `OPENROUTER_API_KEY` (pass
+it with `--env-file`); drop that reward term to run without a judge. The other configs under
 `examples/grpo/environmental/qwen3_5/vllm/` change the environment, adapter or EP size.
 The full-finetune ep1 code-contests recipe is a curriculum: run `-stage1-codeforces`,
 `-stage2-hard` and `-stage3-extra-hard` in order, each from the previous stage's checkpoint.
@@ -256,8 +257,7 @@ CUDA_VISIBLE_DEVICES=0,1,2,3,4,5 DIST_NCCL_TIMEOUT_MINUTES=60 \
   halo launch environmental-grpo qwen3.6-grpo-sglang.yaml -n 6
 ```
 
-On SGLang, `rollout_max_thinking_tokens`, `turn_overlong_penalty` and `carry_reasoning`
-are refused at startup, and the effort profiles' `thinking_tokens` cap nothing, so
+On SGLang, `rollout_max_thinking_tokens` and `carry_reasoning` are refused at startup, and the effort profiles' `thinking_tokens` cap nothing, so
 `rollout_max_tokens` is the per-turn bound
 ([Supported Matrix](../supported-matrix.md#rollout-engines)). Full setup:
 [Async GRPO with Environments](../../agent-docs/training-methods/grpo/async-grpo/README.md) ↗.

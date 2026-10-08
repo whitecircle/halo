@@ -8,7 +8,7 @@ ends the episode at its last graded submission.
 
 The scratchpad half: a program run on no input says so, since one that reads input it was not given
 ends in a parse error or in silence, and the result names the cause so the next run is not spent the
-same way.
+same way; a silent one counts in ``episode/starved_test_runs``.
 
 Run: python tests/cpu/environments/test_submission_scoring.py  (or pytest)
 """
@@ -20,7 +20,6 @@ import pytest
 from src.environments.base import EPISODE_TOOL_BUDGETS_KEY, REWARD_COMPONENTS_KEY
 from src.environments.envs.tasks.coding.code_contests import (
     NO_STDIN_NOTE,
-    STARVED_RUN_NOTE,
     SUBMISSION_PASS_FRACS_KEY,
     CodeContestsEnvironment,
 )
@@ -67,7 +66,8 @@ def _call(env, traj, name, **arguments):
 def _graded(env, programs):
     traj = _episode(env)
     for program in programs:
-        _call(env, traj, "submit_solution", code=f"# {program}")
+        # A distinct program per entry (comments aside: a repeat is refused unrun), carrying the text the stub reads.
+        _call(env, traj, "submit_solution", code=f"program = {program!r}")
     env._settle_grade(traj, None)
     components = traj.info[REWARD_COMPONENTS_KEY]
     assert traj.total_reward == pytest.approx(sum(components.values())), "the decomposition no longer sums"
@@ -90,8 +90,8 @@ def test_the_objective_is_the_judges_accept_of_the_last_submission(programs, obj
 
 
 def _step_submit(env, ids, program):
-    """One turn submitting ``program`` (as a comment, like :func:`_graded`) through the protocol's step."""
-    arguments = json.dumps({"code": f"# {program}"})
+    """One turn submitting ``program`` (as a string statement, like :func:`_graded`) through the protocol's step."""
+    arguments = json.dumps({"code": f"program = {program!r}"})
     call = {"id": "s", "type": "function", "function": {"name": "submit_solution", "arguments": arguments}}
     return env.step(ids, [""], [{"tool_calls": [call]}])[0]
 
@@ -201,28 +201,36 @@ def test_the_behavior_counter_is_the_share_of_resubmissions_that_improved():
 
 
 @pytest.mark.parametrize(
-    ("result", "stdin", "note"),
+    ("result", "stdin", "noted", "starved"),
     [
-        # Silent without input: nothing was learned, so the run is returned and the reply says so.
-        (SandboxResult(stdout="", returncode=0), "", STARVED_RUN_NOTE),
-        (SandboxResult(stdout="", stderr="ValueError: invalid literal for int()", returncode=1), "", NO_STDIN_NOTE),
-        (SandboxResult(stdout="3\n", stderr="IndexError: list index out of range", returncode=1), "", NO_STDIN_NOTE),
-        (SandboxResult(stdout="", stderr="ValueError: invalid literal for int()", returncode=1), "5\n", None),
-        (SandboxResult(stdout="", returncode=0), "5\n", None),
+        # Silent without input, stderr and blank lines aside (a clean exit's reply leaves stderr out).
+        (SandboxResult(stdout="", returncode=0), "", True, True),
+        (SandboxResult(stdout="", stderr="debug: read nothing", returncode=0), "", True, True),
+        (SandboxResult(stdout=" \n", returncode=0), "", True, True),
+        (SandboxResult(stdout="", stderr="ValueError: invalid literal for int()", returncode=1), "", True, False),
+        (SandboxResult(stdout="3\n", stderr="IndexError: list index out of range", returncode=1), "", True, False),
+        (SandboxResult(stdout="", stderr="ValueError: invalid literal for int()", returncode=1), "5\n", False, False),
+        (SandboxResult(stdout="", returncode=0), "5\n", False, False),
         # Output computed from no input, and a loop on end-of-file, ran on nothing too.
-        (SandboxResult(stdout="42\n", returncode=0), "", NO_STDIN_NOTE),
-        (SandboxResult(timed_out=True), "", NO_STDIN_NOTE),
-        # A build that failed ran nothing.
-        (SandboxResult(stderr="main.py: error: bad", returncode=1, compile_failed=True), "", None),
+        (SandboxResult(stdout="42\n", returncode=0), "", True, False),
+        (SandboxResult(timed_out=True), "", True, False),
+        # A build that failed, or ran past the compile limit, ran nothing.
+        (SandboxResult(stderr="main.py: error: bad", returncode=1, compile_failed=True), "", False, False),
+        (SandboxResult(stderr="compilation timed out after 10 s", compile_failed=True), "", False, False),
     ],
 )
-def test_a_starved_scratchpad_run_names_the_missing_stdin(result, stdin, note):
+def test_a_scratchpad_run_on_no_input_names_it_and_a_silent_one_counts_as_starved(result, stdin, noted, starved):
+    """Every call here spends its slot; ``episode/starved_test_runs`` counts the input-less runs that exited
+    cleanly with nothing on stdout."""
     env = _env(sandbox=StubSandbox(result))
+    traj = _episode(env)
     arguments = {"code": "print(int(input()))", **({"stdin": stdin} if stdin else {})}
-    observation = _call(env, _episode(env), "python_repl", **arguments)
-    assert [n for n in (NO_STDIN_NOTE, STARVED_RUN_NOTE) if n in observation] == ([note] if note else []), observation
-    if result.stdout == "" and result.returncode == 0:
-        assert observation.startswith(REPL_NO_OUTPUT_MESSAGE)
+    observation = _call(env, traj, "python_repl", **arguments)
+    assert (NO_STDIN_NOTE in observation) is noted, observation
+    assert env._test_calls(traj) == 1
+    assert env.rollout_metrics(traj)["episode/starved_test_runs"] == (1.0 if starved else 0.0)
+    if starved and not result.stdout:
+        assert observation == f"{REPL_NO_OUTPUT_MESSAGE}\n{NO_STDIN_NOTE}", observation
 
 
 if __name__ == "__main__":

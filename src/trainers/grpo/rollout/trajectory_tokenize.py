@@ -135,7 +135,9 @@ class TrajectoryTokenizeMixin:
         """Whether the rollout sent prior-turn reasoning to the engine, so a context re-render includes it."""
         return self._rollout_env.carry_reasoning
 
-    def _warn_if_no_reasoning_captured(self, rollout_results: list[RolloutResult], length_terms_on: bool) -> None:
+    def _warn_if_no_reasoning_captured(
+        self, rollout_results: list[RolloutResult], *, price_on: bool, floor_on: bool
+    ) -> None:
         """Once per run: a step whose assistant turns carry no reasoning while a knob consumes it.
 
         Reasoning reaches a turn only through the server's reasoning parser; without one the reasoning
@@ -149,7 +151,8 @@ class TrajectoryTokenizeMixin:
         consumers = [
             name
             for name, on in (
-                ("the reasoning terms", length_terms_on),
+                ("reasoning_price", price_on),
+                ("reasoning_floor", floor_on),
                 ("carry_reasoning", self._carry_reasoning),
             )
             if on
@@ -158,10 +161,10 @@ class TrajectoryTokenizeMixin:
             logger,
             self._warned_once,
             "no_reasoning_captured",
-            "No assistant turn in this step carried reasoning, but %s consume it: the rollout server is most "
+            "No assistant turn in this step carried reasoning, and the run reads it (%s): the rollout server is most "
             "likely running without a reasoning parser (or the model emits none). The reasoning floor then "
             "scores every episode as maximal under-use, the reasoning price charges nothing, and a carried "
-            "thought is never sent. Serve with the family's reasoning parser, or turn the knob off.",
+            "thought is never sent. Serve with the family's reasoning parser, or turn off what reads it.",
             " and ".join(consumers),
         )
 

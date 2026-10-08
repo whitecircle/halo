@@ -8,8 +8,9 @@ console prints, is the failure this forbids. The record follows the per-node wri
 console table global rank 0 alone.
 
 Also pins how the record REACHES that writer (``rollout_metrics._populate_completion_logs``): the
-full trajectory render is gathered to the writer rank, never all-gathered to all of them, and every
-rank enters the same four gathers whether or not it accumulates the result. WHEN it is called
+full trajectory render is gathered to the writer rank, never all-gathered to all of them, every
+rank enters the same gathers whether or not it accumulates the result, and each row carries its own
+episode's reward components and scored-term rationale. WHEN it is called
 relative to the env-GRPO trust-region breaker is pinned where the breaker lives
 (``test_grpo_update_breaker_and_group_effort.py``).
 
@@ -20,8 +21,10 @@ Run::
 
 from __future__ import annotations
 
+import json
 import os
 import types
+from collections import defaultdict
 
 import pandas as pd
 import pytest
@@ -30,6 +33,7 @@ import torch
 import src.trainers.grpo.rollout.completions_logging as cl
 import src.trainers.grpo.rollout.rollout_metrics as rm
 from src.distributed import runtime
+from src.environments.base import REWARD_COMPONENTS_KEY, REWARD_DETAILS_KEY, Message, Trajectory
 from src.trainers.grpo.environmental import DistributedAsyncEnvironmentalGRPOTrainer
 from src.trainers.grpo.mixins.on_policy_init import OnPolicyGRPOInitMixin
 from src.trainers.grpo.online import DistributedGRPOTrainer
@@ -254,7 +258,13 @@ class _MetricsHost(rm.RolloutMetricsMixin):
     def __init__(self, save=True, console=False):
         self._save_completions = save
         self.log_completions = console
-        self._logs = {"prompt": [], "completion": [], "rewards": {"environment_reward": []}, "advantages": []}
+        self._logs = {
+            "prompt": [],
+            "completion": [],
+            "rewards": {"environment_reward": []},
+            "advantages": [],
+            "extra": defaultdict(list),
+        }
 
 
 def _rollouts(*prompts):
@@ -317,15 +327,17 @@ def test_shared_fs_completion_logs_reach_the_writer_only(monkeypatch) -> None:
     host._populate_completion_logs(_rollouts("p0"), torch.tensor([1.0]), torch.tensor([0.25]), "train")
 
     assert calls["all_gather"] == 0, "the full-text payload must not be all-gathered to every rank"
-    assert calls["gather_dst"] == 4, "all four gathers must still run on every rank (lock-step)"
+    assert calls["gather_dst"] == 6, "all six gathers must still run on every rank (lock-step)"
     assert host._logs["prompt"] == ["p0", "peer1", "peer2", "peer3"], "the writer must hold the world record"
     assert host._logs["completion"] == ["(empty trajectory)", "peer1", "peer2", "peer3"]
     assert host._logs["rewards"]["environment_reward"] == [1.0, "peer1", "peer2", "peer3"]
     assert host._logs["advantages"] == [0.25, "peer1", "peer2", "peer3"]
+    assert host._logs["extra"][REWARD_COMPONENTS_KEY] == ["{}", "peer1", "peer2", "peer3"]
+    assert host._logs["extra"][REWARD_DETAILS_KEY] == ["{}", "peer1", "peer2", "peer3"]
 
 
 def test_shared_fs_non_writer_still_runs_every_gather(monkeypatch) -> None:
-    """A non-writer rank contributes to all four gathers and accumulates nothing.
+    """A non-writer rank contributes to every gather and accumulates nothing.
 
     Skipping a gather here desyncs the world; accumulating restores the cost the split removes.
     """
@@ -334,8 +346,9 @@ def test_shared_fs_non_writer_still_runs_every_gather(monkeypatch) -> None:
 
     host._populate_completion_logs(_rollouts("p2"), torch.tensor([1.0]), torch.tensor([0.25]), "train")
 
-    assert calls["gather_dst"] == 4, "a non-writer must enter every gather its peers enter"
+    assert calls["gather_dst"] == 6, "a non-writer must enter every gather its peers enter"
     assert host._logs["prompt"] == [] and host._logs["completion"] == []
+    assert not host._logs["extra"], "a non-writer must not accumulate the reward columns either"
 
 
 def test_non_shared_fs_keeps_the_all_gather_every_node_writer_needs(monkeypatch) -> None:
@@ -346,8 +359,46 @@ def test_non_shared_fs_keeps_the_all_gather_every_node_writer_needs(monkeypatch)
 
     host._populate_completion_logs(_rollouts("p2"), torch.tensor([1.0]), torch.tensor([0.25]), "train")
 
-    assert calls["gather_dst"] == 0 and calls["all_gather"] == 4
+    assert calls["gather_dst"] == 0 and calls["all_gather"] == 6
     assert host._logs["prompt"] == ["peer0", "peer1", "p2", "peer3"]
+
+
+def test_each_row_carries_its_episodes_reward_components_and_scored_term_rationale(tmp_path, monkeypatch) -> None:
+    """The parquet row of an episode holds that episode's settled components and every scored term's
+    rationale (a veto judge's fired checks with their quotes) as JSON, aligned with its prompt: a vetoed
+    solve is told from an honest failure on the record alone. An episode that kept neither (a lost
+    rollout, no scored term) records ``{}``."""
+    monkeypatch.setattr(cl, "print_prompt_completions_sample", lambda *a, **k: None)
+    host = _MetricsHost()
+    host.args, host.state, host.model = _Args(str(tmp_path)), _State(step=9), _Model(training=True)
+    host.num_completions_to_print, host.log_unique_prompts = 2, False
+    host._logs = cl.unbounded_completion_logs()
+    vetoed = Trajectory(messages=[Message.user("task"), Message.assistant("print(42)")])
+    vetoed.info[REWARD_COMPONENTS_KEY] = {
+        "reward/objective": 0.0,
+        "reward/submission": 0.0,
+        "reward/resubmission": -0.2,
+    }
+    vetoed.info[REWARD_DETAILS_KEY] = {"audit": "fired hardcoded_output: 'print(42)'"}
+    solved = Trajectory(messages=[Message.user("task"), Message.assistant("solve()")])
+    solved.info[REWARD_COMPONENTS_KEY] = {"reward/objective": 1.0, "reward/submission": 0.1}
+    rollouts = [
+        types.SimpleNamespace(prompt="vetoed", trajectory=vetoed),
+        types.SimpleNamespace(prompt="solved", trajectory=solved),
+        types.SimpleNamespace(prompt="lost", trajectory=None),
+    ]
+
+    host._populate_completion_logs(rollouts, torch.tensor([-0.2, 1.1, 0.0]), torch.tensor([-1.0, 1.0, 0.0]), "train")
+    emit_completion_artifacts(host, console=False, save=True, mode="train")
+
+    df = pd.read_parquet(_parquet_path(str(tmp_path), step=9))
+    assert list(df["prompt"]) == ["vetoed", "solved", "lost"]
+    assert [json.loads(cell) for cell in df[REWARD_COMPONENTS_KEY]] == [
+        vetoed.info[REWARD_COMPONENTS_KEY],
+        solved.info[REWARD_COMPONENTS_KEY],
+        {},
+    ]
+    assert [json.loads(cell) for cell in df[REWARD_DETAILS_KEY]] == [vetoed.info[REWARD_DETAILS_KEY], {}, {}]
 
 
 def test_a_mode_switch_writes_the_pending_rows_under_their_own_mode(tmp_path, monkeypatch) -> None:

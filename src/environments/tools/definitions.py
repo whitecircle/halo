@@ -42,8 +42,9 @@ class ToolArgumentError(TypeError):
 
 
 class ToolCallRefused(ToolArgumentError):
-    """A handler refusing an admitted call it will not run, the call returned to the episode's budget:
-    the program carries nothing to run as written (code contests: reasoning in its comments). A turn
+    """A handler refusing an admitted call it will not run, the call returned to the episode's budget
+    (code contests: a program whose comments carry its reasoning, or one identical to a program already
+    graded). A turn
     whose every call was refused this way is flagged like one that named no existing tool
     (``calls_rejected``), so an episode that recovers never reinforces it."""
 

@@ -249,7 +249,7 @@ class Message:
     prompt_token_ids: list[int] | None = None
     # The reasoning cap the turn ran under, its level's or a retry's reserve (an output budget may narrow
     # the request's own below it; SGLang ignores the field), and the reasoning tokens the turn sampled, counted off its ids by
-    # ``episode.sampled_reasoning_tokens`` (``None`` without them): the pair the trainer's overlong charge reads.
+    # ``episode.sampled_reasoning_tokens`` (``None`` without them): the pair ``episode/thinking_cap_turns`` reads.
     thinking_cap: int | None = None
     reasoning_tokens: int | None = None
     # Engine cut the turn off at its token cap: the text is a fragment, never rewarded (``untrainable``).
@@ -793,7 +793,7 @@ class BaseEnvironment(ABC):
         metrics["episode/empty_turns"] = float(trajectory.info.get("empty_turns", 0))
         # Turns whose counted reasoning reached their recorded cap — where a cap binds, and where reasoning
         # carried past the close into the call starts — emitted only where the rollout counts reasoning
-        # (a run pricing the overlong charge), never as a constant 0 that reads as "no cap binds".
+        # (wherever a vLLM thinking cap can bind), never as a constant 0 that reads as "no cap binds".
         counted = [m for m in trajectory.messages if m.role == "assistant" and m.reasoning_tokens is not None]
         if counted:
             metrics["episode/thinking_cap_turns"] = float(

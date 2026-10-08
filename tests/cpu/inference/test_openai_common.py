@@ -67,8 +67,8 @@ def test_generate_omits_extra_body_when_there_is_nothing_to_add():
 
 def test_generate_keeps_the_sampled_ids_an_engine_attaches_to_the_choice():
     """vLLM's ``return_token_ids`` puts the sampled ids on the choice outside the OpenAI schema; the SDK
-    keeps them as an extra attribute and the response carries them (the overlong charge reads a turn's
-    reasoning count off them). Anything but a list is not that capture and reads as absent."""
+    keeps them as an extra attribute and the response carries them (a turn's reasoning count is taken off
+    them). Anything but a list is not that capture and reads as absent."""
     with_ids = _RecordingClient(completion=_fake_completion(token_ids=[1, 2, 3]))
     assert asyncio.run(generate_openai_response("m", "hi", client=with_ids)).token_ids == [1, 2, 3]
     not_a_list = _RecordingClient(completion=_fake_completion(token_ids="1,2,3"))

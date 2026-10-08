@@ -119,12 +119,11 @@ docker run --gpus all --network=host --ipc=host \
 | `rollout_temperature` / `rollout_top_p` / `rollout_max_tokens` | `0.7` / `0.95` / `32768` | rollout sampling (max tokens per turn) |
 | `rollout_max_episode_tokens` | `None` | the most an episode may sample over all its turns, reasoning and visible output together; a turn's caps narrow to what is left, keeping the turn's answer room, and an episode with less than that room left ends truncated; never stated to the model; `>= rollout_max_tokens` |
 | `rollout_max_thinking_tokens` | `None` | per-turn CoT cap (vLLM `thinking_token_budget`); a level's smaller `thinking_tokens` caps the turn instead; needs a server reasoning parser + `VLLM_USE_V2_MODEL_RUNNER=0`, and the IS correction when the reasoning marker resolves; refused under `sglang` and at or above `rollout_max_tokens` |
-| `rollout_reasoning_end_token` | `</think>` | the server parser's reasoning end string, encoded as vLLM encodes it and holding at least one added token (Gemma 4 `<channel\|>`, gpt-oss `<\|start\|>assistant<\|channel\|>final<\|message\|>`); a forced run of its ids gets ratio 0 wherever a vLLM budget can bind, and the overlong charge counts a turn's reasoning as its sampled ids up to and including it (one token only) |
+| `rollout_reasoning_end_token` | `</think>` | the server parser's reasoning end string, encoded as vLLM encodes it and holding at least one added token (Gemma 4 `<channel\|>`, gpt-oss `<\|start\|>assistant<\|channel\|>final<\|message\|>`); a forced run of its ids gets ratio 0 wherever a vLLM budget can bind; a single-token marker also lets `episode/thinking_cap_turns` count each turn's reasoning |
 | `rollout_chat_template_kwargs` | `{}` | chat-template variables sent on every rollout request **and** applied to the trainer's own renders (Qwen3.x `preserve_thinking`); `reasoning_effort` and `reasoning_budget` are refused here — they travel per episode |
 | `max_train_row_tokens` | `None` | longest training row a rank takes; must exceed `rollout_max_tokens`. Over-cap per-turn rows are left out, whole-trajectory rows train at zero weight (`sampling/rows_over_cap_frac`) |
 | `eval_rollout_batch_size` | `None` | rows per rank in one eval rollout round (eval runs without prefetch); `None` = the eval batch |
 | `reasoning_price` / `reasoning_price_cap` / `reasoning_floor` | `None` / `0.1` / `0.0` | the price is off by default: per level, reward units per 1k reasoning tokens summed over the episode's turns, capped per episode by the cap (refused at a non-default value while the price is off); the floor (off at `0`) prices an episode's shortfall against 0.75 × the per-turn thinking budget it ran under |
-| `turn_overlong_penalty` | `0.0` | off by default; charges an episode, once, for its turn that reasoned furthest into the last quarter under its recorded cap. vLLM-only; needs `train_on_sampled_tokens` and a single-token `rollout_reasoning_end_token` |
 | `episode_timeout` | `1200.0` | per-episode deadline in engine-serving time (a weight-sync pause is credited back), checked against the NCCL watchdog — raise `DIST_NCCL_TIMEOUT_MINUTES` with it |
 | `train_on_sampled_tokens` | `True` | train on the server's actual sampled ids (needs `--return-tokens-as-token-ids`) rather than a re-tokenized re-render; off, a run with a bindable vLLM thinking budget and a resolvable `rollout_reasoning_end_token` is refused |
 | `enable_prefetch` | `True` | overlap rollout with training (auto-disabled in single-server mode) |
@@ -146,8 +145,7 @@ merged with `environment_kwargs`, to `resolve_environment(environment_type, conf
 `rewards` is parsed into typed dataclasses at config time (`src/rewards/terms.py`), so a bad term
 fails before any server is touched. Each term prices one source's score in `[0, 1]` as
 `weight × score ^ exponent` — `environment` (the episode grade), `judge` (a generative judge over
-`requirements`, or a veto judge over `checks` whose fired veto check zeroes `reward/objective` and
-every other positive component — environments only), `reward_model` (a served BT / seq-cls model); the external terms take `view`
+`requirements`, or a veto judge over `checks` whose fired veto check zeroes every positive component — environments only), `reward_model` (a served BT / seq-cls model); the external terms take `view`
 (`final` / `full` / judge-only `digest`) and `on_error` (`invalid` / `neutral`); the online arm adds
 `accuracy` and `format`. The `exponent` (`> 0`, above 1 convex) reshapes a fractional score (a judge's, a reward
 model's); a binary grade has nothing to reshape. There is **no failure offset**,

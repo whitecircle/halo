@@ -272,8 +272,9 @@ def test_a_program_sent_with_the_wrong_language_is_refused_without_spending_the_
     for key in ("submission_result", "submission_language", "_submitted_code", "tested_before_submission"):
         assert key not in traj.info, key
 
-    for cid in ("5", "6"):
-        env.step(ids, [""], [{"tool_calls": [_call(cid, "submit_solution", code=_PY_ADD, language="python")]}])
+    # Two different programs (comments aside): the same one again would be refused as already graded, not graded twice.
+    for cid, code in (("5", _PY_ADD), ("6", _PY_ADD + "attempt = 2\n")):
+        env.step(ids, [""], [{"tool_calls": [_call(cid, "submit_solution", code=code, language="python")]}])
     assert len(sandbox.runs) == 2 and traj.done, "both graded submissions of the cap were still there"
     components = traj.info[REWARD_COMPONENTS_KEY]
     assert components["reward/resubmission"] == pytest.approx(-0.2), "only the one real resubmission is priced"

@@ -4,6 +4,7 @@ Every number here is computed over the GATHERED-GLOBAL episode population, so a 
 set a logged value on their own.
 """
 
+import json
 import logging
 import math
 from collections import defaultdict
@@ -19,7 +20,13 @@ from src.distributed.runtime import (
     is_multi_rank_run,
     is_output_shared_filesystem,
 )
-from src.environments.base import EPISODE_SLICES_KEY, SOLVE_RATE_KEY, Trajectory
+from src.environments.base import (
+    EPISODE_SLICES_KEY,
+    REWARD_COMPONENTS_KEY,
+    REWARD_DETAILS_KEY,
+    SOLVE_RATE_KEY,
+    Trajectory,
+)
 from src.environments.episode import RolloutResult
 from src.rewards.terms import REWARD_COMPONENT_PREFIX
 from src.trainers.grpo.rollout.completions_logging import emit_completion_artifacts
@@ -50,6 +57,13 @@ def _gather_to_completion_writers(values: list) -> list | None:
     if chunks is None:
         return None
     return [item for chunk in chunks for item in chunk]
+
+
+def _episode_info_json(trajectory: Trajectory | None, key: str) -> str:
+    """One mapping the episode keeps under ``key`` in ``trajectory.info``, as sorted-key JSON for the
+    completion record; ``{}`` for an episode that kept none (a lost rollout, an unscored term)."""
+    value = trajectory.info.get(key, {}) if trajectory is not None else {}
+    return json.dumps(value, sort_keys=True, default=str)
 
 
 def _percentile(values: list[float], q: float) -> float:
@@ -127,10 +141,14 @@ class RolloutMetricsMixin:
         """Fill TRL's ``self._logs`` from this step's rollouts (TRL's base does so in its own generation
         path, which this trainer overrides). Gathered across ranks in lock-step when parquet/table is wanted.
 
-        All four gathers run on every rank before any of them is consumed, so the writer's early
-        return cannot skip a collective. Rows of the other mode still waiting for their log (an eval
-        round on a step ``logging_steps`` skipped) are written under their own mode first, never into
-        this round's file; every rank enters that write, whose failure is raised on all of them."""
+        Beside the text, reward and advantage, each row carries the episode's settled reward components
+        and every scored term's rationale (a veto judge's fired checks with their quotes) as JSON, so a
+        vetoed or oddly priced episode can be read off the record without scoring it again.
+
+        Every gather runs on every rank before any of them is consumed, so the writer's early return
+        cannot skip a collective. Rows of the other mode still waiting for their log (an eval round on
+        a step ``logging_steps`` skipped) are written under their own mode first, never into this
+        round's file; every rank enters that write, whose failure is raised on all of them."""
         if not (self._save_completions or self.log_completions):
             return
         if self._completion_logs_mode not in (None, mode):
@@ -140,9 +158,18 @@ class RolloutMetricsMixin:
         self._completion_logs_mode = mode
         prompts_text = [r.prompt for r in rollout_results]
         completions_text = [self._render_trajectory_for_log(r.trajectory) for r in rollout_results]
-        prompts, completions, reward_values, advantage_values = [
+        components_json = [_episode_info_json(r.trajectory, REWARD_COMPONENTS_KEY) for r in rollout_results]
+        details_json = [_episode_info_json(r.trajectory, REWARD_DETAILS_KEY) for r in rollout_results]
+        prompts, completions, reward_values, advantage_values, components, details = [
             _gather_to_completion_writers(values)
-            for values in (prompts_text, completions_text, rewards.tolist(), advantages.tolist())
+            for values in (
+                prompts_text,
+                completions_text,
+                rewards.tolist(),
+                advantages.tolist(),
+                components_json,
+                details_json,
+            )
         ]
         if prompts is None:
             return
@@ -150,6 +177,8 @@ class RolloutMetricsMixin:
         self._logs["completion"].extend(completions)
         self._logs["rewards"]["environment_reward"].extend(reward_values)
         self._logs["advantages"].extend(advantage_values)
+        self._logs["extra"][REWARD_COMPONENTS_KEY].extend(components)
+        self._logs["extra"][REWARD_DETAILS_KEY].extend(details)
 
     @staticmethod
     def _render_trajectory_for_log(trajectory: "Trajectory | None") -> str:

@@ -87,8 +87,8 @@ the loader reason at construction, rather than failing mid-run.
   families, GPT-OSS, Qwen3 MoE, Qwen3.5/3.6, GLM-4 MoE Lite, Gemma 4, Ling 2.0,
   LFM-2.
 
-`rollout_max_thinking_tokens`, `turn_overlong_penalty` and `carry_reasoning`
-are vLLM-only and refused under SGLang. SGLang must be served
+`rollout_max_thinking_tokens` and `carry_reasoning` are vLLM-only and refused
+under SGLang. SGLang must be served
 from this repo's image, not upstream. Engine setup, ports, weight sync and
 `routing_replay`: [Rollout Servers](rollout-servers.md).
 
