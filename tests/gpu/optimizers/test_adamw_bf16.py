@@ -120,7 +120,7 @@ def test_dtypes():
     """Verify that AdamWBF16 keeps weights in bf16 and states in bf16."""
     print("TEST 1: Dtype verification")
     model = create_model(torch.bfloat16)
-    opt = AdamWBF16(model.parameters(), lr=1e-4)
+    opt = AdamWBF16(model.named_parameters(), lr=1e-4)
 
     # Run one step to initialize states
     x = torch.randn(2, 16, HIDDEN_SIZE, device="cuda", dtype=torch.bfloat16)
@@ -157,7 +157,7 @@ def test_vs_baselines():
 
     # AdamWBF16 with SR
     model_sr = create_model(torch.bfloat16)
-    opt_sr = AdamWBF16(model_sr.parameters(), lr=1e-4)
+    opt_sr = AdamWBF16(model_sr.named_parameters(), lr=1e-4)
     losses_sr, stales_sr = run_training(model_sr, opt_sr)
 
     print(f"  Pure BF16:      loss={losses_bf16[-1]:.6f}  stale%={stales_bf16[-1]:.4f}")
@@ -190,7 +190,7 @@ def test_mixed_dtypes():
     fp32_count = sum(p.numel() for p in model.parameters() if p.dtype == torch.float32)
     print(f"  BF16 params: {bf16_count / 1e6:.1f}M, FP32 params: {fp32_count / 1e6:.1f}M")
 
-    opt = AdamWBF16(model.parameters(), lr=1e-4)
+    opt = AdamWBF16(model.named_parameters(), lr=1e-4)
 
     # Run training (autocast needed for mixed dtype, same as real training)
     losses, stales = run_training(model, opt, num_steps=50, use_autocast=True)
@@ -220,9 +220,9 @@ def test_weight_decay_groups():
     no_decay_params = []
     for name, p in model.named_parameters():
         if "norm" in name or "bias" in name:
-            no_decay_params.append(p)
+            no_decay_params.append((name, p))
         else:
-            decay_params.append(p)
+            decay_params.append((name, p))
 
     opt = AdamWBF16(
         [
@@ -279,7 +279,7 @@ def test_sr_removes_second_moment_bias():
 
     # AdamWBF16 with the fused Triton SR kernel.
     p = nn.Parameter(torch.zeros(size, dtype=torch.bfloat16, device=device))
-    opt = AdamWBF16([p], lr=1e-3, betas=(0.9, beta2), weight_decay=0.0, use_triton=True)
+    opt = AdamWBF16([("p", p)], lr=1e-3, betas=(0.9, beta2), weight_decay=0.0, use_triton=True)
     for _ in range(n_steps):
         p.grad = torch.full((size,), grad_val, dtype=torch.bfloat16, device=device)
         opt.step()
@@ -305,7 +305,7 @@ def test_exp_avg_stays_nearest():
     ever (wrongly) applied to exp_avg on either the Triton or eager path:
 
       1. DETERMINISM: run the identical step twice from identical inputs/state but with the
-         param at another position in the optimizer, which keys other SR noise. NEAREST rounding
+         param under another name, which keys other SR noise. NEAREST rounding
          is a pure function of the fp32 value, so exp_avg must be BIT-IDENTICAL across the two
          runs. exp_avg_sq and the weight, which DO use SR, must DIFFER (the negative control — it
          proves the noise actually changed, so the exp_avg equality is meaningful).
@@ -329,20 +329,19 @@ def test_exp_avg_stays_nearest():
             ea_fp32.mul_(beta1).add_(g32, alpha=1.0 - beta1)
         ea_nearest_ref = ea_fp32.to(torch.bfloat16)  # deterministic nearest-bf16 of the exact EMA
 
-        def run_once(leading: int):
-            # A grad-less param ahead of p shifts p's position, and with it both SR noise streams
-            # (weight + exp_avg_sq), while the inputs stay identical.
-            pads = [nn.Parameter(torch.zeros(1, dtype=torch.bfloat16, device=device)) for _ in range(leading)]
+        def run_once(name: str):
+            # Another name keys other noise for both SR streams (weight + exp_avg_sq), while the
+            # inputs stay identical.
             p = nn.Parameter(torch.zeros(size, dtype=torch.bfloat16, device=device))
-            opt = AdamWBF16([*pads, p], lr=1e-3, betas=(beta1, beta2), weight_decay=0.0, use_triton=use_triton)
+            opt = AdamWBF16([(name, p)], lr=1e-3, betas=(beta1, beta2), weight_decay=0.0, use_triton=use_triton)
             for _ in range(n_steps):
                 p.grad = torch.full((size,), grad_val, dtype=torch.bfloat16, device=device)
                 opt.step()
             st = opt.state[p]
             return p.data.clone(), st["exp_avg"].clone(), st["exp_avg_sq"].clone()
 
-        w_a, ea_a, easq_a = run_once(0)
-        w_b, ea_b, easq_b = run_once(1)
+        w_a, ea_a, easq_a = run_once("p")
+        w_b, ea_b, easq_b = run_once("q")
 
         # 1a. exp_avg is noise-independent => bit-identical across the two runs (NEAREST).
         assert torch.equal(ea_a, ea_b), (
@@ -398,7 +397,7 @@ def test_sr_removes_second_moment_bias_eager():
 
     # AdamWBF16 with the EAGER fallback (use_triton=False).
     p = nn.Parameter(torch.zeros(size, dtype=torch.bfloat16, device=device))
-    opt = AdamWBF16([p], lr=1e-3, betas=(0.9, beta2), weight_decay=0.0, use_triton=False)
+    opt = AdamWBF16([("p", p)], lr=1e-3, betas=(0.9, beta2), weight_decay=0.0, use_triton=False)
     for _ in range(n_steps):
         p.grad = torch.full((size,), grad_val, dtype=torch.bfloat16, device=device)
         opt.step()
@@ -436,7 +435,7 @@ def test_step_advances_the_version_counter():
         path = "Triton" if use_triton else "eager"
         # 3D, mxfp8-block-divisible: the EP expert-weight shape cached_fake_quant is built for.
         p = torch.nn.Parameter(torch.randn(4, 128, 128, device="cuda", dtype=torch.bfloat16))
-        opt = AdamWBF16([p], lr=1e-1, weight_decay=0.0, use_triton=use_triton)
+        opt = AdamWBF16([("p", p)], lr=1e-1, weight_decay=0.0, use_triton=use_triton)
 
         quant_before = cached_fake_quant(p, "mxfp8", 1).clone()
         weight_before = p.detach().clone()
@@ -483,8 +482,8 @@ def test_every_optimizer_advances_the_version_counter():
         return build
 
     builders = {
-        "AdamWBF16 (Triton)": lambda p: AdamWBF16([p], lr=1e-1, weight_decay=0.0),
-        "AdamWBF16 (eager)": lambda p: AdamWBF16([p], lr=1e-1, weight_decay=0.0, use_triton=False),
+        "AdamWBF16 (Triton)": lambda p: AdamWBF16([("p", p)], lr=1e-1, weight_decay=0.0),
+        "AdamWBF16 (eager)": lambda p: AdamWBF16([("p", p)], lr=1e-1, weight_decay=0.0, use_triton=False),
         "Muon (fused step)": _named(lambda m: create_muon_optimizer(m, lr=1e-1, weight_decay=0.01)),
         "FlashAdamW": _named(lambda m: create_flash_adamw_optimizer(m, lr=1e-1, weight_decay=0.0)),
     }
@@ -517,7 +516,7 @@ def _deferred_vs_prescaled(scale: float, device: str, use_triton: bool):
     """Step two identical bf16+fp32 parameter sets from the same SR stream: one with its gradients
     multiplied in place by ``scale`` beforehand (as the in-place clip does, a device fp32 scalar), one
     handing ``scale`` to ``defer_grad_scale``. The SR seeds depend
-    only on the step and the parameter's position, so two fresh optimizers round alike."""
+    only on the step and the parameter's name, so two fresh optimizers round alike."""
     torch.manual_seed(0)
     shapes = [((4099,), torch.bfloat16), ((33, 65), torch.bfloat16), ((17,), torch.float32)]
     base = [torch.randn(shape, device=device).to(dtype) for shape, dtype in shapes]
@@ -525,7 +524,9 @@ def _deferred_vs_prescaled(scale: float, device: str, use_triton: bool):
     results = []
     for deferred in (False, True):
         params = [nn.Parameter(t.clone()) for t in base]
-        optimizer = AdamWBF16(params, lr=1e-2, weight_decay=0.1, use_triton=use_triton)
+        optimizer = AdamWBF16(
+            [(f"p{i}", p) for i, p in enumerate(params)], lr=1e-2, weight_decay=0.1, use_triton=use_triton
+        )
         for _ in range(3):
             for p, g in zip(params, grads, strict=True):
                 p.grad = g.clone() if deferred else g.clone().mul_(torch.tensor(scale, device=device))
@@ -561,8 +562,8 @@ def test_deferred_grad_scale_is_consumed_once_and_cleared_by_zero_grad():
     grads = [torch.randn_like(base) for _ in range(3)]
     scale = torch.tensor(0.5, device="cuda")
     deferring, plain = nn.Parameter(base.clone()), nn.Parameter(base.clone())
-    deferring_opt = AdamWBF16([deferring], lr=1e-2, weight_decay=0.0)
-    plain_opt = AdamWBF16([plain], lr=1e-2, weight_decay=0.0)
+    deferring_opt = AdamWBF16([("p", deferring)], lr=1e-2, weight_decay=0.0)
+    plain_opt = AdamWBF16([("p", plain)], lr=1e-2, weight_decay=0.0)
 
     def agree() -> bool:
         a, b = deferring_opt.state[deferring], plain_opt.state[plain]
@@ -601,7 +602,7 @@ def test_state_dict_roundtrip():
     """
     print("\nTEST 5: State dict save/load roundtrip")
     model = create_model(torch.bfloat16)
-    opt = AdamWBF16(model.parameters(), lr=1e-4)
+    opt = AdamWBF16(model.named_parameters(), lr=1e-4)
 
     # Run a few steps to populate state
     for _ in range(5):
@@ -612,7 +613,7 @@ def test_state_dict_roundtrip():
         opt.zero_grad()
 
     saved = copy.deepcopy(opt.state_dict())
-    opt2 = AdamWBF16(model.parameters(), lr=1e-4)
+    opt2 = AdamWBF16(model.named_parameters(), lr=1e-4)
     opt2.load_state_dict(copy.deepcopy(saved))
     assert_optimizer_state_bit_exact(saved, opt2.state_dict())
 
@@ -637,7 +638,7 @@ def test_restore_replays_the_rounding():
     """
     print("\nTEST 11: A restored optimizer replays the uninterrupted run's rounding")
     builders = {
-        "AdamWBF16 (Triton)": lambda m: AdamWBF16(m.parameters(), lr=1e-3),
+        "AdamWBF16 (Triton)": lambda m: AdamWBF16(m.named_parameters(), lr=1e-3),
         "Muon (fused step)": lambda m: create_muon_optimizer(m, lr=1e-2, weight_decay=0.01),
     }
     for name, build in builders.items():

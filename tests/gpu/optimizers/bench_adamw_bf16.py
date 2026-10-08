@@ -193,7 +193,7 @@ def main():
 
     torch.cuda.reset_peak_memory_stats()
     opt_sr = AdamWBF16(
-        [p for p in model.parameters() if p.requires_grad],
+        [(name, p) for name, p in model.named_parameters() if p.requires_grad],
         lr=1e-4,
     )
 
