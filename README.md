@@ -52,10 +52,11 @@ On 8× B300, Halo trains gpt-oss-20b at up to 3.5× the throughput of stock TRL 
 <!-- Newest first. This feed and GitHub Releases are Halo's changelog. -->
 
 - **2026-10-09 — Halo 1.1.0.** Faster MoE training, exact resume and more reliable async RL: fused
-  expert kernels and an atomic-free combine (Gemma 4 26B-A4B trains 1.67× faster on two GPUs),
-  FlexAttention on wide-head sliding-window layers, fail-loud checkpoint and resume checks, LoRA syncs
-  that leave the frozen base untouched, token-mass balance and fixed engine log-probs for async GRPO,
-  RL environments that pay only for real solutions, and context parallelism for offline GRPO.
+  MoE kernels and FlexAttention on sliding-window layers (1.67× over Halo 1.0.0 for Gemma 4 26B-A4B on
+  two GPUs), an atomic-free expert permute (up to 27% faster for gpt-oss at EP8), checkpoint and resume
+  checks that stop the run instead of failing silently, LoRA syncs that leave the frozen base untouched,
+  token-mass balance and fixed engine log-probs for async GRPO, RL environments that pay only for real
+  solutions, and context parallelism for offline GRPO.
 - **2026-08-20 — Halo 1.0.0.** First public release: EP / CP / TP / ETP on native HuggingFace models
   (LLM and VLM), 15 MoE families, pre-training through multi-turn RL with vLLM or SGLang rollouts,
   FlashAttention-4, DeepEP V2, DeepGEMM, and the bf16 `AdamW` optimizer.
