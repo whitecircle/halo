@@ -65,18 +65,26 @@ def _pairing(source: str, data: object) -> tuple[str, str, str] | None:
     return None
 
 
-def _doc_fences() -> list[tuple[str, object]]:
-    """``(source, parsed)`` for every ```yaml fence of the doc trees; an unparseable fence is skipped."""
+def _page_fences(source: str, text: str) -> list[tuple[str, object]]:
+    """``(source#yaml[i], parsed)`` for every ```yaml fence of one page; an unparseable fence is skipped."""
     fences = []
-    for tree in _DOC_TREES:
-        for page in sorted((PROJECT_ROOT / tree).rglob("*.md")):
-            for index, block in enumerate(_YAML_FENCE.findall(page.read_text())):
-                try:
-                    data = _yaml.load(block)
-                except Exception:  # a fence that is not parseable YAML is not a config
-                    continue
-                fences.append((f"{page.relative_to(PROJECT_ROOT)}#yaml[{index}]", data))
+    for index, block in enumerate(_YAML_FENCE.findall(text)):
+        try:
+            data = _yaml.load(block)
+        except Exception:  # a fence that is not parseable YAML is not a config
+            continue
+        fences.append((f"{source}#yaml[{index}]", data))
     return fences
+
+
+def _doc_fences() -> list[tuple[str, object]]:
+    """``(source, parsed)`` for every ```yaml fence of the doc trees."""
+    return [
+        fence
+        for tree in _DOC_TREES
+        for page in sorted((PROJECT_ROOT / tree).rglob("*.md"))
+        for fence in _page_fences(str(page.relative_to(PROJECT_ROOT)), page.read_text())
+    ]
 
 
 def _marker_configs() -> list[tuple[str, str, str]]:
@@ -107,12 +115,16 @@ def test_some_config_pins_a_repo_template():
     assert _MARKER_CONFIGS, "no example or doc recipe pins a jinja-templates/* chat_template — the scan is broken"
 
 
-def test_the_scan_reaches_the_doc_trees():
-    """A doc recipe is held to the pairing contract only while the scan reaches the doc trees."""
-    assert any(source.endswith("]") for source, _, _ in _MARKER_CONFIGS), (
-        f"no ```yaml fence under {_DOC_TREES} pairs a chat_template with an assistant_message_template — "
-        f"the doc half of the scan is dead"
+def test_a_doc_fence_pairing_is_held_to_the_contract():
+    """The doc half of the scan finds a pairing in a page's ```yaml fence, so a doc recipe that pins a repo
+    template with a marker is checked like a shipped config (no doc page has to carry one)."""
+    page = (
+        "Intro.\n\n```yaml\n"
+        f"chat_template: {_GPT_OSS_TEMPLATE}\nassistant_message_template: '{_GPT_OSS_MARKER}'\n"
+        "```\n\n```yaml\nnot: [valid\n```\n"
     )
+    pairings = [pairing for source, data in _page_fences("page.md", page) if (pairing := _pairing(source, data))]
+    assert pairings == [("page.md#yaml[0]", _GPT_OSS_TEMPLATE, _GPT_OSS_MARKER)]
 
 
 @pytest.mark.parametrize("tree", _DOC_TREES)
