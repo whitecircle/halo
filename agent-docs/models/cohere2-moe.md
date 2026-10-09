@@ -59,8 +59,9 @@ and are never wrapped.
   num_shared_experts`), replicated per rank, combined after DeepEP combine by `sum` or `average`
   (the wrapper scales the summed output by 0.5).
 - Checkpoints: the hub stores one tensor per expert (`experts.{i}.{gate,up,down}_proj.weight`);
-  transformers fuses on load and reverts on save. The gather emits the fused pair, so
-  `scripts/after_training/unfuse_moe_experts.py` can rewrite a gathered save per-expert.
+  transformers fuses on load and reverts on save. The gather emits the fused pair, and
+  `scripts/after_training/unfuse_moe_experts.py` rewrites a gathered save into the hub's per-expert
+  layout.
 
 ## CP wrapper
 
@@ -91,11 +92,24 @@ memory-validated shape.
 
 ## Loading and serving
 
-- Lazy loading is off (`_supports_lazy_loading = False`): the Command A+ index spells the vision
-  tower `model.vision_tower.vision_model.*`, a `from_pretrained`-only conversion the lazy loader
-  does not apply — every load routes through `from_pretrained`.
-- vLLM 0.26.0 registers both `Cohere2MoeForCausalLM` and `Cohere2VisionForConditionalGeneration`
-  and its loader reads the fused expert pair, so gathered saves serve directly.
+- Lazy loading is off (`_supports_lazy_loading = False`): no lazy load of the Command A+ checkpoint
+  has been checked against `from_pretrained`, so every load routes through `from_pretrained`.
+- A gathered save writes the hub namespace
+  ([Checkpoints](../reference/checkpoints.md#serving-on-vllm--sglang)): the SigLIP tower under
+  `model.vision_tower.vision_model.*`, the text tower under `model.language_model.*`, no
+  `lm_head.weight` (the head is tied), and the fused expert pair.
+
+    vLLM 0.26.0 registers `Cohere2VisionForConditionalGeneration` and `Cohere2MoeForCausalLM`, and
+    its weight loader reads that save as written: the fused pair, the tower only with its
+    `vision_model` level (a flattened key raises), no top-level `lm_head.weight` (one raises). It
+    asserts `tie_word_embeddings: true`, so an export whose training untied the head does not load.
+
+    SGLang 0.5.17 registers both too, but its Cohere2 expert loader reads per-expert keys only and
+    drops the fused pair without an error: run `unfuse_moe_experts.py` first. Its tower loader takes
+    either spelling.
+
+    Both verdicts come from the pinned engines' loaders; no export of this family has been served end
+    to end.
 - RL weight sync is refused at construction (`_supports_weight_sync = False`): no end-to-end sync
   has been validated on either pinned engine
   ([Rollout Servers](../infrastructure/rollout-servers.md#which-families-each-engine-serves)).

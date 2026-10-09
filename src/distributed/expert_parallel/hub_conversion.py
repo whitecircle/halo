@@ -13,6 +13,9 @@ consumes, scoped as transformers scopes them: a key naming a sub-model of the sh
 The op vocabulary, the translator and the key walker are family-agnostic and live in
 ``src/models/loading/lazy_safetensors/``; this module holds the registry seam — which family
 declares which conversion key, and where in the module tree each key lives.
+
+The save side runs the other way: :func:`gathered_export_conversions` is what an EP export (the
+gathered save, the RL weight sync) inverts so it writes the namespace the load read.
 """
 
 from __future__ import annotations
@@ -21,10 +24,11 @@ import re
 
 import torch.nn as nn
 from transformers import PreTrainedModel
-from transformers.conversion_mapping import get_checkpoint_conversion_mapping
+from transformers.conversion_mapping import get_checkpoint_conversion_mapping, get_model_conversion_mapping
 from transformers.core_model_loading import WeightConverter, WeightRenaming
 from transformers.integrations.bitsandbytes import Bnb4bitDeserialize
 
+from src.checkpoint.format import is_sub_model_prefix_change, revert_conversions_for
 from src.distributed.expert_parallel.expert_weights import (
     ep_layer_class_by_model_type,
     experts_container_attrs,
@@ -38,14 +42,51 @@ from src.models.loading.lazy_safetensors.conversion import Convert, Rename, tran
 _PER_EXPERT_SOURCE = re.compile(rf"\.(?:{'|'.join(re.escape(a) for a in experts_container_attrs())})\.\*\.")
 
 
+def is_per_expert_merge(entry) -> bool:
+    """Whether ``entry`` fuses one-tensor-per-expert checkpoint keys into an expert bank.
+
+    That layout is owned at both ends by the expert code, never by a generic conversion replay: the
+    lazy loaders' ``ExpertFuser`` reads it, each family's ``gather_expert_state_dict`` writes it.
+    """
+    return isinstance(entry, WeightConverter) and all(_PER_EXPERT_SOURCE.search(p) for p in entry.source_patterns)
+
+
+def gathered_export_conversions(model: nn.Module) -> list:
+    """The conversions an EP export inverts: :func:`~src.checkpoint.format.revert_conversions_for`
+    minus the per-expert merges.
+
+    Every other rename and converter the load recorded is reverted, on the non-expert params and the
+    gathered layers alike, so the export writes the namespace the load read — a SigLIP tower's
+    ``vision_model`` level, a vendor namespace such as Inkling's ``model.llm.*`` — as
+    ``save_pretrained`` does. The expert banks keep the layout their family's gather emits (fused or
+    per expert), which ``from_pretrained`` and both engines read either way. Empty, and the export the
+    identity, for every load that converted nothing but the experts.
+    """
+    return [c for c in revert_conversions_for(model) if not is_per_expert_merge(c)]
+
+
+def reversed_export_transforms(conversions: list) -> tuple[list[WeightRenaming], list[WeightConverter]]:
+    """``conversions`` (:func:`gathered_export_conversions`) reversed in transformers' save-side order
+    and split for a key-by-key respell (``rename_source_key(..., reverse=True)``): a rename maps one
+    key on its own, a key a reverse converter claims needs that converter's other sources beside it."""
+    renamings: list[WeightRenaming] = []
+    converters: list[WeightConverter] = []
+    for transform in (c.reverse_transform() for c in conversions[::-1]):
+        (renamings if isinstance(transform, WeightRenaming) else converters).append(transform)
+    return renamings, converters
+
+
 def resolve_conversion_steps(model_type: str, model: nn.Module) -> tuple[Rename | Convert, ...] | None:
     """The ordered conversion steps for ``model_type``'s family on ``model``'s tree, or ``None``
-    when the family declares none.
+    when there are none.
 
     Resolution goes through the EP layer class (``ep_layer_class_by_model_type``) so a text-only
     artifact of a composite family (Inkling's ``inkling_text``) still finds the composite entry its
     weights were written under. Each declared key is scoped by :func:`_conversion_scopes`; ``model``
     is the meta shell, whose config also supplies the head counts a ``PermuteForRope`` entry reads.
+    The tree's own sub-model ``PrefixChange`` entries follow
+    (:func:`~src.checkpoint.format.is_sub_model_prefix_change`): a SigLIP tower's hub keys carry a
+    ``vision_model`` level the module drops, which every save writes back.
 
     A declared key resolving to no entries raises: ``None`` means "this checkpoint is already
     canonical", so returning it for a family that declares ``_HUB_CONVERSION_KEYS`` would load the
@@ -71,6 +112,9 @@ def resolve_conversion_steps(model_type: str, model: nn.Module) -> tuple[Rename 
             step = _translate_entry(entry, model, scope, key=key)
             if step is not None:
                 steps.append(step)
+    for entry in get_model_conversion_mapping(model, add_legacy=False):
+        if is_sub_model_prefix_change(entry):
+            steps.append(_translate_entry(entry, model, entry.scope_prefix, key=model_type))
     return tuple(steps) or None
 
 
@@ -123,7 +167,7 @@ def _translate_entry(
         return translate_renaming(entry, scope)
     if not isinstance(entry, WeightConverter):
         raise ValueError(f"Unsupported conversion entry type {type(entry).__name__} for {key!r}.")
-    if all(_PER_EXPERT_SOURCE.search(p) for p in entry.source_patterns):
+    if is_per_expert_merge(entry):
         unknown = {type(op).__name__ for op in entry.operations} - {"MergeModulelist", "Concatenate"}
         if unknown:
             raise ValueError(

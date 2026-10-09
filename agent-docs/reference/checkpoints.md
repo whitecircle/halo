@@ -280,6 +280,18 @@ A gathered checkpoint is a standard HF checkpoint — stock `from_pretrained` lo
 (That is serving a **saved artifact**; live RL weight-sync support is narrower —
 [Rollout Servers](../infrastructure/rollout-servers.md#which-families-each-engine-serves).)
 
+Every writer saves the names transformers' own `save_pretrained` writes: the reverse of what the
+load converted. transformers reads several hubs through renames its module tree drops: a SigLIP
+tower's `vision_model` level (Command A+, LFM2-VL), a vendor namespace (Inkling's `model.llm.*`,
+GLM-5 Next's `hc_attn_*`, Step-3.7's `moe.*`, DeepSeek-V4's `attn`/`ffn` names under the `model.`
+prefix the load added), Mistral 3's legacy llava prefixes. Each writer reverts the conversions the
+load recorded (`revert_conversions_for` in `src/checkpoint/format.py`); a model with no record (built
+from its config, or by the lazy loader), or whose load dequantized fp8/MXFP4 weights, reverts the
+family's registered mapping. The EP-gathered save and
+the RL weight sync leave out only the per-expert merges (`gathered_export_conversions` in
+`src/distributed/expert_parallel/hub_conversion.py`), since the gather owns the expert layout. vLLM
+0.26.0 raises on a SigLIP tower key that lacks its `vision_model` level.
+
 Two rules apply to some MoE families, on both engines.
 
 **Un-fuse experts.** transformers keeps MoE experts fused in memory
@@ -288,37 +300,37 @@ checkpoints are per-expert (`experts.{i}.{gate,up,down}_proj.weight` /
 `experts.{i}.w{1,3,2}.weight`) and `from_pretrained` fuses them on load; Qwen3.5/3.6 and Zaya ship
 the fused pair.
 
-The wrapper-less writers and the base-Trainer save revert through the conversions the load recorded
-(`revert_conversions_for`), so they write the layout the model was loaded from: per-expert for a
-per-expert hub, the fused pair for Qwen3.5/3.6, whose fused-hub load converts nothing. Only a model
-built from its config reverts through the family's registered mapping (per-expert for Qwen3.5/3.6,
-through `qwen2_moe`). An EP-gathered save writes whatever the family's own gather emits — the fused
+The wrapper-less writers and the base-Trainer save write the expert layout the model was loaded from:
+per-expert for a per-expert hub, the fused pair for Qwen3.5/3.6, whose fused-hub load converts nothing. A model with no
+record (built from its config, or by the lazy loader) reverts through the family's registered mapping
+(per-expert for Qwen3.5/3.6, through `qwen2_moe`). An EP-gathered save writes whatever the family's own gather emits — the fused
 pair for Qwen3.5/3.6, DeepSeek-V4, Cohere2 MoE and GLM-5 Next. A reload into a built model maps any of
 these back onto the live names ([Resuming training](#resuming-training)).
 
 Rewrite such a checkpoint only when the serving loader is per-expert-only, with
-`scripts/after_training/unfuse_moe_experts.py`. It emits the names that family declares and refuses
-the families whose checkpoints are not per-expert at all
-([Scripts](scripts-reference.md#post-training-scripts)).
+`scripts/after_training/unfuse_moe_experts.py`. It emits the names that family declares, so a gathered
+save comes out as the hub checkpoint, and it refuses the families whose checkpoints are not per-expert
+at all ([Scripts](scripts-reference.md#post-training-scripts)).
 
 Step-3.7 Flash is one of the refused (its hub layout is per-layer stacked, not per-expert) and needs
-no rewrite: its EP-gathered save already lands in that hub `moe.*` namespace
-(`_EXPORTS_HUB_NAMESPACE`, [Step-3.7](../models/step3p7.md#checkpoint)), which its pinned engines
-read directly.
+no rewrite: its EP-gathered save lands in that hub `moe.*` namespace
+([Step-3.7](../models/step3p7.md#checkpoint)), which its pinned engines read directly.
 
 | Serving loader | Families | Fused `gate_up_proj` / `down_proj` |
 |---|---|---|
 | vLLM 0.26.0 `RoutedExperts` | Qwen3.5/3.6, Gemma 4 | loaded directly |
-| vLLM 0.26.0 `FusedMoE` (`cohere2_moe`) | Cohere2 MoE | loaded directly |
+| vLLM 0.26.0 `FusedMoE` (`cohere2_moe`) | Cohere2 MoE ([Command A+](../models/cohere2-moe.md#loading-and-serving)) | loaded directly |
 | vLLM 0.26.0 `step3p5` | Step-3.7 Flash | not needed — the EP-gathered save writes the hub `moe.*` tensors |
 | vLLM 0.26.0 per-expert-only | GLM-4 MoE Lite, Laguna, LFM-2, Bailing/Ling 2.0 | hard-fail or silent drop — un-fuse first |
 | vLLM 0.26.0 — no model class | Mistral4, Ling 3.0 (`bailing_hybrid`), GLM-5 Next, Ring — its `BailingMoeLinearV2ForCausalLM` matches no registered architecture ([Rollout Servers](../infrastructure/rollout-servers.md#which-families-each-engine-serves)) | not servable at all ([Mistral4](../models/mistral4.md#serving), [Bailing](../models/bailing.md)) |
-| vLLM 0.26.0 — export layout not read | Inkling, DeepSeek-V4 (module-spelled exports, [below](#expert-parallelism-ep-eptp-epcp)), Zaya (no class) | not servable ([DeepSeek-V4](../models/deepseek-v4.md), [Zaya](../models/zaya.md)) |
+| vLLM 0.26.0 — release layout only | DeepSeek-V4 (fp8/fp4-packed release), Zaya (no class) | not servable ([DeepSeek-V4](../models/deepseek-v4.md), [Zaya](../models/zaya.md)) |
+| vLLM 0.26.0 `inkling` | Inkling | the export writes the hub's fused `w13_weight` under `model.llm.*`; unverified end to end |
 
 SGLang 0.5.17 reads each family's hub layout through its own per-family loader, so the same un-fuse
-rule applies; it registers no class for Mistral4, Ling 3.0 or GLM-5 Next, none matching Ring's
-architecture either, and its DeepSeek-V4 and Zaya loaders read per-expert layouts the gathered export
-does not carry.
+rule applies, Cohere2 MoE and DeepSeek-V4 included (their loaders drop the fused pair without an
+error; a DeepSeek-V4 export is unverified there even after the rewrite); it registers no class for
+Mistral4, Ling 3.0 or GLM-5 Next, none matching Ring's architecture either, and its Zaya loader reads a
+per-expert layout the gathered export does not carry.
 
 **MLA backend on Blackwell.** GLM-4 MoE Lite uses MLA; flashinfer's MLA kernel rejects its head
 config on SM100+ — serve with vLLM `--attention-backend CUTLASS_MLA` or SGLang
@@ -350,28 +362,22 @@ iteration runs on the unwrapped model with an explicit CP-prefix strip, so atten
 under their hub names; experts are replicated per CP rank (EP ⊥ DP), so any rank holds the complete
 set.
 
-Keys are written in the family's **hub** spelling. Where a family's live module names differ, the EP
-layer class declares the pairs in `_EXPORT_KEY_RENAMES` and the gather rewrites them (Laguna is the
-one such family). transformers expresses this as `WeightRenaming` and applies it only inside
-`from_pretrained`.
+Keys are written in the **hub** spelling. The save runs transformers' save-side revert of the
+load's conversions, minus the per-expert merges, on every streamed chunk — the non-expert params as
+one, each gathered layer as its own — so a vendor or wrapper namespace (Inkling, DeepSeek-V4, GLM-5
+Next, Step-3.7, a SigLIP tower) comes back as the hub spells it
+([Serving](#serving-on-vllm--sglang)). No reverse entry fuses tensors across two chunks, which
+`tests/cpu/checkpoint/test_ep_hub_namespace_export.py` pins per family by reloading every save into
+the tensors it was saved from. The RL weight sync forwards the same names.
 
-vLLM keys on hub names and silently skips unknown ones, so the module spelling would drop those
-tensors from serving and from the RL weight sync. The lazy loader applies the inverse of
-`_EXPORT_KEY_RENAMES` on read; `merge_ep_shards.py` and the GRPO weight sync apply the same rewrite,
-keeping merged-from-sharded and pushed-to-vLLM key-identical to gathered.
+Inside an EP layer, a family whose live names differ from its hub's declares the pairs in
+`_EXPORT_KEY_RENAMES` and the gather rewrites them (Laguna is the one such family). The lazy loader
+applies the inverse on read, and `merge_ep_shards.py` the same rewrite.
 
 Four families declare transformers' load-side conversion for their hub checkpoints
-(`_HUB_CONVERSION_KEYS`), which the lazy loaders replay per key. Three of them are bridged read-side
-only, so their gathered exports keep the canonical module spelling:
-
-- **Inkling** — which is exactly why its layer refuses weight sync (`_supports_weight_sync = False`).
-- **DeepSeek-V4**, whose sync neither pinned engine takes: vLLM's V4 loader targets the packed
-  fp8/fp4 release layout, SGLang's maps per-expert expert names.
-- **GLM-5 Next**, which no pinned engine loads.
-
-Step-3.7 Flash additionally declares `_EXPORTS_HUB_NAMESPACE`, so its gathered save runs
-transformers' own save-side revert per chunk and lands in the hub namespace
-([Step-3.7](../models/step3p7.md#checkpoint)).
+(`_HUB_CONVERSION_KEYS`), which the lazy loaders replay per key: Inkling, DeepSeek-V4, GLM-5 Next and
+Step-3.7 Flash. The lazy loaders also replay a sub-model's own prefix change (a SigLIP tower's
+`vision_model` level) for every family.
 
 The conversion sources are not all vendor-anchored (DeepSeek-V4's `\.norm\.` → `.kv_norm.` also
 matches the canonical final norm). So the lazy loaders keep a converted key whose targets all miss
@@ -393,9 +399,10 @@ construction** on any of:
   (`merge_shards_to_hf`, the inverse of its own gather; `__init_subclass__` requires the two be
   overridden together), resolved through the class-declared `HF_MODEL_TYPES`; an unclaimed
   `model_type` has no transform.
-- **A family that exports the hub namespace** (`_EXPORTS_HUB_NAMESPACE`, Step-3.7 Flash): its save
-  runs transformers' save-side conversion revert per chunk, which the merge's key-by-key stream
-  cannot apply.
+- **A load that converted names the merge cannot respell** (Step-3.7 Flash, Inkling, DeepSeek-V4,
+  GLM-5 Next, a SigLIP tower, a legacy Mistral 3 checkpoint): the gathered save reverts them through
+  transformers' save-side conversion, which the merge's key-by-key stream cannot apply. Decided per
+  model off the load's record, not per family.
 - **Native expert LoRA**: the grouped `_lora_A`/`_lora_B` adapters would be written as `.shard_N`
   keys the merge's base-root pattern never matches, passing through dead while the merged experts
   stay the frozen base.

@@ -21,10 +21,7 @@ from src.distributed.checkpoint.ep_save import (
     validate_ep_sharded_save,
 )
 from src.distributed.expert_parallel.base_layer import EPMoELayerBase
-from src.distributed.expert_parallel.expert_weights import (
-    ep_layer_classes,
-    resolve_ep_merge_layer_class,
-)
+from src.distributed.expert_parallel.expert_weights import resolve_ep_merge_layer_class
 from src.distributed.expert_parallel.layers.bailing import EPBailingMoELayer
 from src.distributed.expert_parallel.layers.glm4 import EPGlm4MoELayer
 from src.distributed.expert_parallel.layers.qwen3_5 import EPQwen3_5MoELayer
@@ -124,22 +121,6 @@ def test_ep_sharded_rejects_unclaimed_model_type(model_type):
 )
 def test_ep_sharded_accepts_mergeable_family(model_type):
     _check_ep_merge_family_supported(_fake_model(model_type))
-
-
-_HUB_NAMESPACE_MODEL_TYPES = sorted(
-    model_type for cls in ep_layer_classes() if cls._EXPORTS_HUB_NAMESPACE for model_type in cls.HF_MODEL_TYPES
-)
-assert _HUB_NAMESPACE_MODEL_TYPES, "no family declares _EXPORTS_HUB_NAMESPACE — the refusal below would be vacuous"
-
-
-@pytest.mark.parametrize("model_type", _HUB_NAMESPACE_MODEL_TYPES)
-def test_ep_sharded_rejects_hub_namespace_family(model_type):
-    """A family whose gathered save writes the hub namespace through transformers' save-side revert
-    cannot be merged from per-rank shards (the merge streams key by key), so the sharded save must be
-    refused up front — under EVERY model_type spelling the family claims — rather than producing
-    shards that merge into the module-tree spelling no serving engine reads."""
-    with pytest.raises(ValueError, match="hub checkpoint namespace"):
-        _check_ep_merge_family_supported(_fake_model(model_type))
 
 
 def test_ep_sharded_family_gate_wired_into_topology_check(monkeypatch):

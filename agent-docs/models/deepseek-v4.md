@@ -12,11 +12,11 @@ Around that sit Manifold-Constrained Hyper-Connections (`hc_mult` parallel resid
 - **TP** — `DeepseekV4Attention` (shared-KV MQA broadcast to all heads + the compressor branch) is not shardable; `apply_tp_to_attention_only` raises when a model ends up with zero shardable attention layers under `tp_size > 1`.
 - **ETP** — the experts use the shared fused-GLU storage, split through `_init_fused_glu_params`. Pure ETP and EP+ETP train, save and resume on the tiny model (the precompute-resume suites, `--mode etp2` / `ep2etp2`); the full V4-Flash checkpoint is not run under ETP.
 - **PP** — [not yet available in this release](../parallelism/pipeline-parallelism.md).
-- **RL weight sync** — online and async GRPO reject DeepSeek-V4 at trainer construction (`validate_weight_sync_support`, off each client's `UNSERVABLE_MODEL_TYPES`). The sync feeds trainer parameter names straight into the engine's `model.load_weights`, and neither pinned engine has a loader they land in ([Rollout Servers](../infrastructure/rollout-servers.md#which-families-each-engine-serves)).
+- **RL weight sync** — online and async GRPO reject DeepSeek-V4 at trainer construction (`validate_weight_sync_support`, off each client's `UNSERVABLE_MODEL_TYPES`). The sync feeds the engine's `model.load_weights` directly, and neither pinned engine has a loader that takes it ([Rollout Servers](../infrastructure/rollout-servers.md#which-families-each-engine-serves)).
 
-    vLLM 0.26.0 serves V4 from an out-of-tree package whose loader targets DeepSeek's original release checkpoint, not the HuggingFace module tree the toolkit trains: per-expert vs fused experts, fused vs separate attention projections, bare `embed.weight` vs `model.embed_tokens.weight`. Those weights are also fp8/fp4-packed and the o-projection reads a `weight_scale_inv` unconditionally, so the BF16 checkpoint is not servable there either.
+    vLLM 0.26.0 serves V4 from an out-of-tree package whose loader targets DeepSeek's original fp8/fp4-packed release: its o-projection reads a `weight_scale_inv` unconditionally, so a BF16 checkpoint is not servable there, whatever its names. A gathered save writes the names transformers' own `save_pretrained` reverts to (`model.layers.N.attn.*`, `model.layers.N.ffn.*`, `head.weight`), with the experts as the fused pair.
 
-    SGLang 0.5.17 maps per-expert `w1/w3/w2` names where the gather emits the fused pair, and no end-to-end sync has been validated for the family. No key mapping fixes this from the gather side.
+    SGLang 0.5.17 maps per-expert `w1/w3/w2` names where the gather emits the fused pair, and no end-to-end sync has been validated for the family. No key mapping fixes this from the gather side. A saved checkpoint reaches that layout through `unfuse_moe_experts.py`; serving one on SGLang is unverified.
 
 ## Attention: eager-only
 

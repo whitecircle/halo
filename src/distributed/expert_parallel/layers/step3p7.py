@@ -59,13 +59,6 @@ class EPStep3p7MoELayer(EPGroupLimitedMoELayerBase):
     # both sources on the expert axis), and the vision tower's entries. See ``hub_conversion.py``.
     _HUB_CONVERSION_KEYS = ("step3p7", "step3p5_vision")
 
-    # A module-spelled save has no consumer here, so the gathered save applies transformers' own
-    # save-side revert per chunk: prefix renames back, ``mlp.gate`` → ``moe.gate``/``moe.router_bias``,
-    # ``shared_experts`` → ``share_expert``, and ``gate_up_proj`` split back into the hub's two
-    # tensors. Chunk-safe, since the only reverse entry touching an EP layer is that single-source
-    # split. The RL weight sync reverts likewise, so vLLM's step3p5 loader gets the names it maps.
-    _EXPORTS_HUB_NAMESPACE = True
-
     # The pinned server has no ``step3p7`` config class: it reads the family only through the
     # release's own ``config.json`` and its ``auto_map`` modules (``moe_num_experts``, ``moe_top_k``,
     # ``moe_layers_enum``, ``attention_other_setting``, per-layer ``rope_theta``). transformers

@@ -39,9 +39,9 @@ class EPCohere2MoELayer(EPSharedExpertsMoELayerBase):
         "rollout engine (agent-docs/models/cohere2-moe.md)"
     )
 
-    # The Command A+ checkpoint index spells the vision tower ``model.vision_tower.vision_model.*``
-    # while the module tree drops the ``vision_model`` segment (a from_pretrained-only conversion),
-    # so the lazy loader would read all 437 tower tensors as absent. Route to ``from_pretrained``.
+    # The lazy loader maps the SigLIP tower's ``vision_model`` level the Command A+ index keeps, but no
+    # lazy load of this checkpoint has been checked against ``from_pretrained`` (the GPU lazy-load
+    # parity suite has no Cohere2 row), so every load routes through ``from_pretrained``.
     _supports_lazy_loading = False
 
     # Hub layout: ``experts.{i}.{gate,up,down}_proj.weight`` per expert; transformers fuses those

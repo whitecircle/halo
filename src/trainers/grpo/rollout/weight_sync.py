@@ -25,14 +25,9 @@ from typing import Any
 
 import torch
 from accelerate.utils import is_peft_model
-from transformers.core_model_loading import (
-    WeightConverter,
-    WeightRenaming,
-    rename_source_key,
-    revert_weight_conversion,
-)
+from transformers.core_model_loading import rename_source_key
 
-from src.checkpoint.format import revert_conversions_for
+from src.checkpoint.format import revert_conversions
 from src.diagnostics.profiling import log_cuda_memory
 from src.distributed.expert_parallel.base_layer import EPMoELayerBase
 from src.distributed.expert_parallel.expert_weights import (
@@ -41,6 +36,7 @@ from src.distributed.expert_parallel.expert_weights import (
     is_expert_weight_attr,
     to_hub_layer_key,
 )
+from src.distributed.expert_parallel.hub_conversion import gathered_export_conversions, reversed_export_transforms
 from src.distributed.fsdp import reshard_fsdp2_modules
 from src.distributed.nccl.clients.base import WEIGHT_SYNC_CHUNK_BYTES, payload_bytes
 from src.distributed.nccl.registry import resolve_weight_sync_client
@@ -95,9 +91,9 @@ def validate_weight_sync_support(model: torch.nn.Module, backend: str) -> None:
     - **GptOss with trainable sinks** (``train_sinks``): an SFT-only policy. The frozen live sinks of
       ``reset_sinks: false`` are on-policy by construction; a sink that moves every step has no
       validated end-to-end sync into either rollout engine.
-    - **Families whose layer class declares ``_supports_weight_sync = False``**: the names this sync
-      forwards go straight into the engine's ``model.load_weights`` and cannot land on any engine;
-      each class's ``_WEIGHT_SYNC_REFUSAL_REASON`` states the family's gap. Enforced through live EP
+    - **Families whose layer class declares ``_supports_weight_sync = False``**: no end-to-end sync
+      into either engine has been validated; each class's ``_WEIGHT_SYNC_REFUSAL_REASON`` states the
+      family's gap. Enforced through live EP
       instances when present, else through the registry off ``config.model_type``, since a
       wrapper-less run carries the same contract.
     - **An EP family with no live EP wrapper** (``ep_size: 1`` with ``use_grouped_gemm: false``): the
@@ -154,8 +150,8 @@ def validate_weight_sync_support(model: torch.nn.Module, backend: str) -> None:
     for where, cls in families:
         if not cls._supports_weight_sync:
             raise ValueError(
-                f"{cls.__name__} (at {where!r}) does not support weight sync: the sync forwards "
-                f"trainer parameter names straight into the engine's model.load_weights, but "
+                f"{cls.__name__} (at {where!r}) does not support weight sync: the sync feeds the "
+                f"engine's model.load_weights directly, but "
                 f"{cls._WEIGHT_SYNC_REFUSAL_REASON}. Online/environmental GRPO with weight sync "
                 f"is unsupported for this model — see {cls.__name__}._supports_weight_sync."
             )
@@ -266,10 +262,12 @@ class _HubForwarder:
 
     Live-tree names go through three rewrites in order: :attr:`~EPMoELayerBase._EXPORT_KEY_RENAMES`
     inside EP layers (Laguna); the PEFT base-name normalization (adapter-only tensors are dropped,
-    their delta already folded); and, for a family declaring ``_EXPORTS_HUB_NAMESPACE`` (Step-3.7),
-    transformers' save-side conversion revert. Renames are one-to-one and stream; a tensor a reverse
-    ``WeightConverter`` claims is held until :meth:`flush`, since a many-to-one revert needs all of
-    its sources together while the engine loads one tensor at a time.
+    their delta already folded); and the revert the gathered save applies
+    (:func:`~src.distributed.expert_parallel.hub_conversion.gathered_export_conversions`: what the load
+    converted outside the per-expert merges, such as Step-3.7's namespace or a SigLIP tower's
+    ``vision_model`` level). Renames are one-to-one and stream; a tensor a reverse ``WeightConverter``
+    claims is held until :meth:`flush`, since a many-to-one revert needs all of its sources together
+    while the engine loads one tensor at a time.
 
     Every forward runs under the caller's ``guard``: this object is the only part of the sync that can
     fail on one rank alone (a device OOM staging the snapshot, an HTTP/NCCL error from the client, a
@@ -288,19 +286,13 @@ class _HubForwarder:
         self._guard = guard
         self._ep_layers = ep_layers
         self._peft_prefix = peft_prefix
-        self._model: torch.nn.Module | None = None
-        self._renamings: list[WeightRenaming] = []
-        self._converters: list[WeightConverter] = []
         self._held: dict[str, torch.Tensor] = {}
         self._held_bytes = 0
-        if not any(cls._EXPORTS_HUB_NAMESPACE for _where, cls in _sync_contract_classes(model)):
-            return
+        # The list the gathered save inverts, so the streamed renames and the held converts write
+        # what a checkpoint of the same model carries.
         self._model = base_transformers_model(model)
-        # The resolution every save-side revert uses, so the streamed renames and the held converts
-        # come from the same reversed list the gathered save inverts.
-        conversions = revert_conversions_for(self._model)
-        for transform in (c.reverse_transform() for c in conversions[::-1]):
-            (self._renamings if isinstance(transform, WeightRenaming) else self._converters).append(transform)
+        self._conversions = gathered_export_conversions(self._model)
+        self._renamings, self._converters = reversed_export_transforms(self._conversions)
 
     def send(self, name: str, tensor: torch.Tensor) -> None:
         """Forward one live-tree tensor, deferring a failure to the sync's rank-uniform reject."""
@@ -317,7 +309,7 @@ class _HubForwarder:
             name = normalize_peft_param_name(name, self._peft_prefix)
             if name is None:
                 return
-        if self._model is None:
+        if not self._conversions:
             self._client.update_named_param(name, tensor)
             return
         renamed, claimed_by = rename_source_key(name, self._renamings, self._converters, reverse=True)
@@ -341,7 +333,7 @@ class _HubForwarder:
         if not self._held:
             return
         held, self._held, self._held_bytes = self._held, {}, 0
-        for hub_name, hub_tensor in revert_weight_conversion(self._model, held).items():
+        for hub_name, hub_tensor in revert_conversions(self._model, held, self._conversions).items():
             self._client.update_named_param(hub_name, hub_tensor)
 
 

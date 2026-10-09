@@ -39,7 +39,7 @@ its one-step staleness, sync cadence, trajectory-length knobs) stay on the
 | IS-reference logprobs (the sampling distribution's) | `--logprobs-mode processed_logprobs` (server flag; the default `raw_logprobs` is pre-temperature and refused at any `rollout_temperature` ≠ 1) | default (post-temperature, pre-nucleus; keep `SGLANG_RETURN_ORIGINAL_LOGPROB` unset) |
 | [R3 routing replay](../training-methods/grpo/async-grpo/objective.md#routing-replay) | `--enable-return-routed-experts` + `--moe-backend triton` | `--enable-return-routed-experts` + `--moe-runner-backend triton` |
 | Thinking budget (`rollout_max_thinking_tokens`) | enforced engine-side with a reasoning parser and `VLLM_USE_V2_MODEL_RUNNER=0`; harmony-disabled gpt-oss arms it off the toolkit plugin's marker ([GPT-OSS](../models/gpt-oss.md#serving-for-grpo-vllm)) | rejected at config time |
-| Expert layout on sync | the layout the family's own `gather_expert_state_dict` emits, per-expert or fused; 0.26.0's expert loader reads both. A family whose hub namespace differs from its module tree (Step-3.7's per-layer `moe.gate_proj`/`up_proj` stacks) is re-spelled through transformers' save-side revert, so the engine receives its hub keys | the same layouts, read by 0.5.17's per-family loaders; the families they cannot update are listed under [Which families each engine serves](#which-families-each-engine-serves) |
+| Expert layout on sync | the layout the family's own `gather_expert_state_dict` emits, per-expert or fused; 0.26.0's expert loader reads both. A load that renamed or converted names (Step-3.7's per-layer `moe.gate_proj`/`up_proj` stacks, a SigLIP tower's `vision_model` level) is re-spelled through transformers' save-side revert, so the engine receives its hub keys | the same layouts, read by 0.5.17's per-family loaders; the families they cannot update are listed under [Which families each engine serves](#which-families-each-engine-serves) |
 | Trainer expert distribution ([EP/ETP](../reference/glossary.md#parallelism)) | supported | supported |
 
 Both engines fill a sampling field a request omits from the model's `generation_config.json` (vLLM
@@ -251,19 +251,18 @@ expert tensors under module names, which the engine's loader drops with no error
 The gate reads the family's contract off the live wrapper, or off the `model_type` registry when a
 run has none; `use_grouped_gemm: true` (the torchrun default) installs the wrappers.
 
-**Hub-namespace families.** The sync forwards every tensor under the key a gathered checkpoint would
-carry. Where the live module tree and the hub checkpoint differ, the rewrite is derived, not
-tabulated: Laguna's `_EXPORT_KEY_RENAMES` pairs, and, for a family declaring
-`_EXPORTS_HUB_NAMESPACE` (Step-3.7 Flash), transformers' own save-side conversion revert (the
-reversed `WeightRenaming`/`WeightConverter` entries `save_pretrained` applies).
+**Hub names.** The sync forwards every tensor under the key a gathered checkpoint would carry. Where
+the live module tree and the hub checkpoint differ, the rewrite is derived, not tabulated: Laguna's
+`_EXPORT_KEY_RENAMES` pairs, then transformers' own save-side revert of what the load converted
+outside the per-expert merges (`gathered_export_conversions`, the list the gathered save inverts).
 
 One-to-one renames stream tensor by tensor. A tensor a reverse converter claims (a fused
 `gate_up_proj` the hub stores split, a vision tower's q/k/v the hub stores fused) is held until its
 sources are complete, since the engine loads one tensor at a time.
 
-Any family whose hub checkpoint sits behind such a conversion joins by declaring the flag on its EP
-layer once a pinned engine serves it (`_supports_weight_sync` stays off for GLM-5 Next and Inkling
-because none does). Per-family server flags: [Step-3.7](../models/step3p7.md#serving-for-grpo-vllm).
+`_supports_weight_sync` stays off for GLM-5 Next, which neither engine registers, and for Inkling,
+whose sync no engine run has validated. Per-family server flags:
+[Step-3.7](../models/step3p7.md#serving-for-grpo-vllm).
 
 **GptOss needs live attention sinks.** `reset_sinks: true` under `flash_attention_2` rebinds
 `attn.sinks = None`, and the sync forwards `named_parameters()` only, so nothing is ever pushed for

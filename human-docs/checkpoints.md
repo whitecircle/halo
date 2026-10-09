@@ -5,8 +5,9 @@ by `save_strategy` / `save_steps`. Every mode (FSDP2, EP, TP, CP and their
 combinations) writes a gathered checkpoint that `from_pretrained` loads. The
 exceptions are the opt-in sharded EP save and LoRA adapters.
 
-FSDP2, CP and TP saves keep the expert layout the run loaded. An EP save writes
-the family's own export layout: per-expert where the serving engines need it,
+Every save uses the tensor names of the checkpoint the run loaded, vision towers
+included. FSDP2, CP and TP saves also keep its expert layout. An EP save writes
+the family's own expert layout: per-expert where the serving engines need it,
 fused for Qwen3.5/3.6, DeepSeek-V4, Cohere2 MoE and GLM-5 Next, and the hub
 layout for Step-3.7 Flash
 ([details](../agent-docs/reference/checkpoints.md#serving-on-vllm--sglang) ↗).
@@ -126,14 +127,16 @@ flags.
 A gathered checkpoint loads with `from_pretrained`. vLLM and SGLang serve it
 only where the pinned engine reads that family's layout:
 
-- **No serving path** on either engine: Mistral4, Ling 3.0, Ring, Inkling,
-  GLM-5 Next, DeepSeek-V4 and Zaya.
-- **Every other family** serves its normal save as is: each saver writes the
-  layout that family's engine loader reads.
-- **Fused experts on a per-expert-only loader** can be dropped without an error.
-  This happens only with a checkpoint that still holds fused experts (a save
-  whose layout revert warned, or a fused checkpoint from elsewhere); rewrite it
-  with `unfuse-moe-experts` first
+- **No serving path** on either engine: Mistral4, Ling 3.0, Ring, GLM-5 Next
+  and Zaya. DeepSeek-V4 has none on vLLM, whose loader reads only the fp8/fp4
+  release.
+- **Untested:** Inkling exports, and DeepSeek-V4 exports on SGLang after
+  `unfuse-moe-experts`. Both use the hub's names, but no engine has served one.
+- **Every other family** serves its normal save as is, except a Cohere2 MoE
+  (Command A+) EP save on SGLang: rewrite it with `unfuse-moe-experts` first.
+- **Fused experts on a per-expert-only loader** are dropped without an error.
+  Rewrite such a checkpoint with `unfuse-moe-experts` first; the result is the
+  hub's own layout
   ([per-engine loaders](../agent-docs/reference/checkpoints.md#serving-on-vllm--sglang) ↗).
 - **Sharded EP saves** need `merge-ep-shards` first.
 - **LoRA runs** serve as base plus adapter, or merged.

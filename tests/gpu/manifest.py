@@ -404,7 +404,8 @@ MANIFEST: dict[str, TestSpec] = {
         nproc=2, markers=("gpu", "full", "2gpu", "ep", "moe"), timeout=1500
     ),
     "parallelism/ep/test_ep_sharded_merge_roundtrip.py": TestSpec(
-        # Hermetic tiny models, no DeepEP dispatch: merged-from-sharded == gathered for six families.
+        # Hermetic tiny models, no DeepEP dispatch: merged-from-sharded == gathered for six families,
+        # and the sharded save refused for three whose names the merge cannot respell.
         nproc=2,
         markers=(
             "gpu",
@@ -412,7 +413,9 @@ MANIFEST: dict[str, TestSpec] = {
             "2gpu",
             "ep",
             "moe",
-            *_family_markers(("gpt_oss", "qwen3_moe", "qwen3_5_moe_text", "deepseek_v4", "cohere2_moe", "glm5_next")),
+            *_family_markers(
+                ("gpt_oss", "qwen3_moe", "qwen3_5_moe_text", "laguna", "cohere2_moe", "deepseek_v4", "glm5_next")
+            ),
         ),
         timeout=900,
     ),

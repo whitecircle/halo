@@ -54,10 +54,10 @@ class EPGlm5NextMoELayer(EPGroupLimitedMoELayerBase):
     # ExpertFuser's.
     _HUB_CONVERSION_KEYS = ("glm5_next",)
 
-    # The live module tree spells the KDA/hyper-connection tensors differently from the checkpoint
-    # namespace a serving engine reads (the same from_pretrained-only conversion as above), so a
-    # sync would land nowhere; no pinned rollout engine loads glm5_next either.
     _supports_weight_sync = False
+    _WEIGHT_SYNC_REFUSAL_REASON = (
+        "neither pinned rollout engine (vLLM 0.26.0, SGLang 0.5.17) registers a glm5_next model"
+    )
 
     # The block always builds its shared expert, so an absent one is an upstream rename rather than a
     # configuration, and adopting nothing would drop it from every output.

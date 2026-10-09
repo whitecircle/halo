@@ -27,11 +27,11 @@ The release is plain bf16 (~403 GB of shards) — train from the repo id directl
 
 The hub spells the experts as per-layer fused 3D stacks — `moe.gate_proj [E, M, H]` / `moe.up_proj` / `moe.down_proj` — which transformers' weight converter concatenates into the native fused `experts.gate_up_proj [E, 2M, H]` on load and splits back on save, alongside the renames (`moe.router_bias` ↔ `gate.e_score_correction_bias`, `share_expert.*` ↔ `mlp.shared_experts.*`, the vendor-namespace vision tower). Embeddings are untied (a separate `lm_head.weight`).
 
-An EP-gathered save writes its **weights** in the hub layout the serving engines read: the family declares `_EXPORTS_HUB_NAMESPACE`, so the gathered save runs transformers' own save-side conversion revert on every streamed chunk (prefix renames back, `moe.gate.weight` / `moe.router_bias` / `share_expert.*`, the fused `gate_up_proj` split back into `moe.gate_proj` + `moe.up_proj`, the vendor-namespace vision tower).
+An EP-gathered save writes its **weights** in the hub layout the serving engines read: like every family's, it reverts the load's conversions through transformers' save-side revert on every streamed chunk ([Checkpoints](../reference/checkpoints.md#serving-on-vllm--sglang)) — here prefix renames back, `moe.gate.weight` / `moe.router_bias` / `share_expert.*`, the fused `gate_up_proj` split back into `moe.gate_proj` + `moe.up_proj`, the vendor-namespace vision tower.
 
 The EP SFT round-trip test pins the on-disk keys against a plain `save_pretrained` of the same config, the expert halves bit-exact against the live gathered tensor, the fp32 `moe.router_bias`, and reload-loss equality.
 
-Nothing else could restore that layout from a module-spelled save. `scripts/after_training/unfuse_moe_experts.py` refuses the family (its hub layout stores no per-expert tensors), and a transformers load + `save_pretrained` of a module-layout source reverts nothing (the load consumed no conversions). That is also why sharded EP saves (`save_sharded_ep: true`) are refused for the family: the offline merge streams key by key and cannot apply the same revert.
+Nothing restores that layout from a module-spelled file: `scripts/after_training/unfuse_moe_experts.py` refuses the family (its hub layout stores no per-expert tensors), and a transformers load + `save_pretrained` of a module-layout source reverts nothing (the load consumed no conversions). Sharded EP saves (`save_sharded_ep: true`) are refused for the family for the same reason: the offline merge streams key by key and cannot apply the revert.
 
 The `config.json` beside those weights is the **source checkpoint's own**, not transformers'. The serving engines have no `step3p7` config class (vLLM 0.26.0 ships transformers 5.14) and read the family only through the release's `config.json` and the modules its `auto_map` names, which spell it in the vendor's keys: `moe_num_experts`, `moe_top_k`, `moe_layers_enum`, `attention_other_setting`, per-layer `rope_theta`.
 
@@ -77,7 +77,7 @@ There is no full-model host residency at 198B ([host RAM under the lazy path](..
 
 Online and async GRPO sync into vLLM 0.26.0, which serves the family from the **hub** namespace (`model.layers.N.moe.gate_proj` / `up_proj` / `down_proj` stacks, `moe.gate.weight`, `share_expert.*`, the vendor-namespace vision tower) and silently drops any name it does not map.
 
-The sync forwards that namespace: the same save-side revert the gathered save runs (`_EXPORTS_HUB_NAMESPACE`) rewrites every forwarded key. The fused `experts.gate_up_proj` gather is split into the two hub stacks, the vision q/k/v are fused back into the un-permuted `in_proj`, and the `model.language_model.*` / `mlp.*` spellings return to the hub's, so the served model receives exactly the tensors a gathered checkpoint would carry.
+The sync forwards that namespace: the same save-side revert the gathered save runs rewrites every forwarded key. The fused `experts.gate_up_proj` gather is split into the two hub stacks, the vision q/k/v are fused back into the un-permuted `in_proj`, and the `model.language_model.*` / `mlp.*` spellings return to the hub's, so the served model receives exactly the tensors a gathered checkpoint would carry.
 
 `tests/cpu/grpo/test_weight_sync_hub_namespace.py` pins the two against `save_pretrained`; `tests/gpu/trainers/grpo/test_step3p7_vllm_weight_sync_e2e.py` proves the server's logprobs follow the trainer's, per weight group, on a live server. Serve the hub repo or a toolkit export directly, and note:
 

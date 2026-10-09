@@ -28,7 +28,7 @@ That includes ETP, whose split-shard path and token-space partial-sum reduce are
 
     The causal-LM loss never reads `router_logits`, so there is no aux-loss path and `moe_balancing: auto` resolves to `bias_update`.
 
-One contract fails closed: `_supports_weight_sync = False` refuses online/async GRPO — an inference server loading hub names would silently skip every module-spelled tensor the sync sends.
+One contract fails closed: `_supports_weight_sync = False` refuses online/async GRPO — no sync into either pinned engine's Inkling loader has been validated. An EP-gathered save of the composite writes the hub's own namespace (`model.llm.*`, the interleaved fused `w13_weight`) ([Checkpoints](../reference/checkpoints.md#serving-on-vllm--sglang)).
 
 ## Loading
 

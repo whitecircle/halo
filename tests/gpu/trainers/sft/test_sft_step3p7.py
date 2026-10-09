@@ -17,8 +17,8 @@ fused-but-split ``moe.gate_proj`` / ``moe.up_proj`` / ``moe.down_proj`` tensors,
      optimizer under FSDP2 + EP, dense+sparse MLP span, full/sliding attention interleave,
      per-layer clamps) with the script's own callback wiring, whose ``moe_balancing: auto``
      resolves to ``bias_update`` here and adopts the native ``e_score_correction_bias`` slot (fp32).
-  3. Save via the gathered EP save, which for this family (``_EXPORTS_HUB_NAMESPACE``) runs
-     transformers' save-side conversion revert per streamed chunk — the artifact must land in the
+  3. Save via the gathered EP save, which reverts what the load converted (here the whole vendor
+     namespace) per streamed chunk through transformers' save-side revert — the artifact must land in the
      hub layout the serving engines read: the on-disk key set equals the plain ``save_pretrained``
      key set of step 0, the expert halves are bit-exact against the live gathered fused tensor, the
      ``moe.router_bias`` carries a distinctive value written before the save at trained fp32 (a

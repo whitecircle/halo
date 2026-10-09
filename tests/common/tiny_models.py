@@ -18,9 +18,13 @@ from transformers import (
     AutoModelForImageTextToText,
     Cohere2MoeConfig,
     Cohere2MoeForCausalLM,
+    Cohere2VisionConfig,
+    Cohere2VisionForConditionalGeneration,
     DeepseekV4Config,
     DeepseekV4ForCausalLM,
+    Gemma4Config,
     Gemma4ForCausalLM,
+    Gemma4ForConditionalGeneration,
     Gemma4TextConfig,
     Glm4MoeLiteConfig,
     Glm4MoeLiteForCausalLM,
@@ -28,15 +32,23 @@ from transformers import (
     Glm5NextForConditionalGeneration,
     GptOssConfig,
     GptOssForCausalLM,
+    InklingConfig,
     InklingForCausalLM,
+    InklingForConditionalGeneration,
     InklingTextConfig,
     LagunaConfig,
     LagunaForCausalLM,
     Lfm2MoeConfig,
     Lfm2MoeForCausalLM,
+    Lfm2VlConfig,
+    Lfm2VlForConditionalGeneration,
+    Mistral3Config,
+    Mistral3ForConditionalGeneration,
     PreTrainedModel,
     Qwen3_5ForCausalLM,
+    Qwen3_5MoeConfig,
     Qwen3_5MoeForCausalLM,
+    Qwen3_5MoeForConditionalGeneration,
     Qwen3_5MoeTextConfig,
     Qwen3_5TextConfig,
     Qwen3Config,
@@ -61,18 +73,24 @@ from tests.common.models import (
     TINY_COHERE2_MOE_CONFIG,
     TINY_DSV4_CONFIG,
     TINY_GEMMA4_MOE_CONFIG,
+    TINY_GEMMA4_VISION_CONFIG,
     TINY_GLM4_MOE_LITE_CONFIG,
     TINY_GLM5_CONFIG,
     TINY_GLM5_VISION_CONFIG,
     TINY_GPTOSS_CONFIG,
     TINY_INKLING_CONFIG,
+    TINY_INKLING_VISION_CONFIG,
     TINY_LAGUNA_CONFIG,
     TINY_LFM2_MOE_CONFIG,
     TINY_MISTRAL4_CONFIG,
+    TINY_PIXTRAL_VISION_CONFIG,
     TINY_QWEN3_CONFIG,
     TINY_QWEN3_MOE_CONFIG,
     TINY_QWEN35_CONFIG,
     TINY_QWEN35_MOE_CONFIG,
+    TINY_QWEN35_VISION_CONFIG,
+    TINY_SIGLIP2_VISION_CONFIG,
+    TINY_SIGLIP_VISION_CONFIG,
     TINY_STEP3P7_CONFIG,
     TINY_STEP3P7_VISION_CONFIG,
     TINY_TIED_QWEN3_CONFIG,
@@ -199,8 +217,12 @@ def _causal(config_cls: type, model_cls: type, tiny: dict) -> Callable[[dict], P
     return lambda overrides: model_cls(config_cls(**{**tiny, **overrides}))
 
 
-def _composite(config_cls: type, model_cls: type, text: dict, vision: dict) -> Callable[[dict], PreTrainedModel]:
-    return lambda overrides: model_cls(config_cls(text_config={**text, **overrides}, vision_config=dict(vision)))
+def _composite(
+    config_cls: type, model_cls: type, text: dict, vision: dict, **wrapper
+) -> Callable[[dict], PreTrainedModel]:
+    return lambda overrides: model_cls(
+        config_cls(text_config={**text, **overrides}, vision_config=dict(vision), **wrapper)
+    )
 
 
 def _tiny_deepseek_v4(overrides: dict) -> PreTrainedModel:
@@ -294,6 +316,69 @@ TINY_MOE_FAMILIES: dict[str, TinyFamily] = {
         text_overrides={"max_position_embeddings": 512},
         ulysses_cp=False,
         attention_targets=("o_proj",),
+    ),
+}
+# The multimodal wrappers an EP family's text tower ships under, keyed by the wrapper's ``model_type``
+# (GLM-5 Next and Step-3.7 ship no text-only class, so their roster model above is already the
+# wrapper). A ``text_config`` names its ``model_type`` where the wrapper defaults to another family's
+# tower. ``tests/cpu/checkpoint/test_ep_hub_namespace_export.py`` holds the two rosters to every
+# multimodal ``model_type`` the EP registry claims.
+TINY_MOE_VLM_FAMILIES: dict[str, TinyFamily] = {
+    "cohere2_vision": TinyFamily(
+        _composite(
+            Cohere2VisionConfig,
+            Cohere2VisionForConditionalGeneration,
+            {**TINY_COHERE2_MOE_CONFIG, "model_type": "cohere2_moe"},
+            TINY_SIGLIP_VISION_CONFIG,
+            downsample_factor=2,
+            alignment_intermediate_size=64,
+        ),
+        load_class=AutoModelForImageTextToText,
+    ),
+    "gemma4": TinyFamily(
+        _composite(
+            Gemma4Config,
+            Gemma4ForConditionalGeneration,
+            TINY_GEMMA4_MOE_CONFIG,
+            TINY_GEMMA4_VISION_CONFIG,
+            audio_config=None,
+        ),
+        load_class=AutoModelForImageTextToText,
+        ulysses_cp=False,
+    ),
+    "inkling_mm_model": TinyFamily(
+        _composite(InklingConfig, InklingForConditionalGeneration, TINY_INKLING_CONFIG, TINY_INKLING_VISION_CONFIG),
+        load_class=AutoModelForImageTextToText,
+        ulysses_cp=False,
+    ),
+    "lfm2_vl": TinyFamily(
+        _composite(
+            Lfm2VlConfig,
+            Lfm2VlForConditionalGeneration,
+            {**TINY_LFM2_MOE_CONFIG, "model_type": "lfm2_moe"},
+            TINY_SIGLIP2_VISION_CONFIG,
+            projector_hidden_size=64,
+        ),
+        load_class=AutoModelForImageTextToText,
+        ulysses_cp=False,
+    ),
+    "mistral3": TinyFamily(
+        _composite(
+            Mistral3Config,
+            Mistral3ForConditionalGeneration,
+            {**TINY_MISTRAL4_CONFIG, "model_type": "mistral4"},
+            TINY_PIXTRAL_VISION_CONFIG,
+            spatial_merge_size=2,
+            tie_word_embeddings=TINY_MISTRAL4_CONFIG["tie_word_embeddings"],
+        ),
+        load_class=AutoModelForImageTextToText,
+    ),
+    "qwen3_5_moe": TinyFamily(
+        _composite(
+            Qwen3_5MoeConfig, Qwen3_5MoeForConditionalGeneration, TINY_QWEN35_MOE_CONFIG, TINY_QWEN35_VISION_CONFIG
+        ),
+        load_class=AutoModelForImageTextToText,
+        ulysses_cp=False,
     ),
 }
 # The dense model the family sweeps pair with the MoE roster.

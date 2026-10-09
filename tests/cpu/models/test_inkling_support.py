@@ -50,7 +50,7 @@ def test_registration():
 def test_capability_contracts():
     """The hub checkpoint keeps Thinking Machines' namespace (model.llm.*, wq_du/wk_dv, interleaved
     w13_weight). The lazy loaders translate it through the declared conversion entry; the RL weight
-    sync stays refused (it sends live module-tree names a hub-namespace server silently skips)."""
+    sync stays refused (no sync into either pinned engine's Inkling loader has been validated)."""
     assert EPInklingMoELayer._HUB_CONVERSION_KEYS == ("inkling_mm_model",)
     assert EPInklingMoELayer._supports_lazy_loading is True
     assert EPInklingMoELayer._supports_weight_sync is False

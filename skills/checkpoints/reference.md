@@ -87,11 +87,12 @@ every tensor at its live dtype), so the stored dtype is what the merge writes. T
   `to_hub_layer_key`) map a checkpoint's `model_type` to the EP layer class via each class's
   `HF_MODEL_TYPES`; the transform itself is that class's `merge_shards_to_hf` (`expert_gather.py`,
   overridden where the layout differs). Save time gates on `_check_ep_merge_family_supported`
-  (`ep_save.py`), which refuses two cases: a `model_type` no EP layer class claims, and a family
-  declaring `_EXPORTS_HUB_NAMESPACE` — Step-3.7 Flash, **both spellings** (`step3p7`, `step3p5`) —
-  whose hub layout comes from transformers'
-  save-side conversion revert that a key-by-key merge stream cannot apply. Every other shipped
-  family merges, mistral4, gemma4, laguna, glm5_next, cohere2_moe, inkling and Zaya included.
+  (`ep_save.py`), which refuses two cases: a `model_type` no EP layer class claims, and a model
+  whose load converted names the merge cannot respell (`_keys_merge_cannot_respell`: the gathered
+  save reverts them through transformers' save-side conversion, which a key-by-key merge stream
+  cannot apply) — Step-3.7 Flash, Inkling, DeepSeek-V4 and GLM-5 Next hubs, a SigLIP tower
+  (Command A+, LFM2-VL), a legacy Mistral 3 checkpoint. Laguna's renames are the merge's own
+  (`to_hub_layer_key`), so it merges, as do the families whose loads convert only the experts.
 - GptOss gate/up are de-interleaved for grouped-GEMM training and re-interleaved on merge; the expert
   key set (incl. the 2-D `gate_up_proj_bias`/`down_proj_bias`) is derived from `expert_weight_roots()`
   in `src/distributed/expert_parallel/expert_weights.py`, not hand-listed.

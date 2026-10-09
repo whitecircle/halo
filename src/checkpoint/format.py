@@ -284,29 +284,55 @@ def _family_conversions(model: torch.nn.Module, *, add_legacy: bool) -> list:
         return get_model_conversion_mapping(model, add_legacy=add_legacy)
 
 
+def is_sub_model_prefix_change(conversion) -> bool:
+    """Whether ``conversion`` strips the leading level of a sub-model's own keys: a ``PrefixChange``
+    scoped to the sub-model, such as the ``vision_model`` level of a SigLIP tower (Command A+,
+    LFM2-VL), which the hub index and both engines' loaders keep and the module tree drops."""
+    return (
+        isinstance(conversion, PrefixChange)
+        and bool(conversion.scope_prefix)
+        and bool(conversion.prefix_to_remove)
+        and not conversion.model_prefix
+    )
+
+
 def registry_weight_conversions(model: torch.nn.Module, *, keep_prefix_change: bool) -> list:
     """The family's declared conversion mapping — what a model no load recorded conversions for reverts
-    through."""
+    through. A sub-model's own ``PrefixChange`` (:func:`is_sub_model_prefix_change`) stays either way:
+    it is that sub-model's hub spelling, whatever checkpoint the model was built from."""
     pristine = _family_conversions(model, add_legacy=False)
-    return [c for c in pristine if keep_prefix_change or not isinstance(c, PrefixChange)]
+    return [
+        c for c in pristine if keep_prefix_change or not isinstance(c, PrefixChange) or is_sub_model_prefix_change(c)
+    ]
 
 
 def _saved_tree_conversions(model: torch.nn.Module, conversions: list) -> list:
-    """``conversions`` minus each ``PrefixChange`` whose stripped prefix is not a child of ``model``.
+    """``conversions`` minus each model-level ``PrefixChange`` whose stripped prefix is not a child of
+    ``model``.
 
     A text-only load of a multimodal checkpoint consumes
     ``PrefixChange(prefix_to_remove="language_model")``, and reverting that at save would re-emit
     wrapper-prefixed keys under a text-only config — transformers re-strips them on reload, engine
     loaders keyed on the architectures and ``reattach_vision_tower.py`` do not, and the artifact is
-    serving-dead.
+    serving-dead. A sub-model's own ``PrefixChange`` (:func:`is_sub_model_prefix_change`) always
+    reverts: the saved tree still holds that sub-model.
     """
     return [
         c
         for c in conversions
         if not (
-            isinstance(c, PrefixChange) and c.prefix_to_remove and not _has_child_at_prefix(model, c.prefix_to_remove)
+            isinstance(c, PrefixChange)
+            and c.prefix_to_remove
+            and not is_sub_model_prefix_change(c)
+            and not _has_child_at_prefix(model, c.prefix_to_remove)
         )
     ]
+
+
+def _carries_quantizer_ops(conversion) -> bool:
+    """Whether ``conversion`` holds an op a quantizer contributed: transformers' quantizer integrations
+    build each one around the quantizer that made it (``hf_quantizer``)."""
+    return any(hasattr(op, "hf_quantizer") for op in getattr(conversion, "operations", ()))
 
 
 def revert_conversions_for(model: torch.nn.Module) -> list:
@@ -315,13 +341,21 @@ def revert_conversions_for(model: torch.nn.Module) -> list:
     What the load recorded, minus a ``PrefixChange`` the saved tree cannot carry
     (:func:`_saved_tree_conversions`). An empty record is a load that converted nothing, its source
     already in the module layout (the fused Qwen3.5/3.6 hub, a fused EP save), so the save writes what
-    the load read. Only a model with no record at all (built from its config) takes the family's
-    registry mapping minus its ``PrefixChange``, as transformers' own revert does. One resolution, so
-    the gathered save, ``save_pretrained``, the EP export and the sync cannot drift.
+    the load read. A model with no record at all (built from its config, or by a lazy loader) takes
+    the family's registry mapping minus its model-level ``PrefixChange``, as transformers' own revert
+    does. One resolution, so the gathered save, ``save_pretrained``, the EP export and the sync cannot
+    drift.
+
+    A dequantizing load (fp8, MXFP4) records the quantizer's ops, whose reverse is a pass-through
+    with no target split that respells keys into names no checkpoint has; it reverts the registry
+    mapping instead, keeping a ``PrefixChange`` only where the load applied one.
     """
     load_conversions = getattr(model, "_weight_conversions", None)
     if load_conversions is None:
         return registry_weight_conversions(model, keep_prefix_change=False)
+    if any(_carries_quantizer_ops(c) for c in load_conversions):
+        prefix_applied = any(isinstance(c, PrefixChange) for c in load_conversions)
+        load_conversions = registry_weight_conversions(model, keep_prefix_change=prefix_applied)
     return _saved_tree_conversions(model, load_conversions)
 
 
@@ -342,6 +376,22 @@ def save_pretrained_layout(model: torch.nn.Module) -> Iterator[None]:
         model._weight_conversions = recorded
 
 
+def revert_conversions(model: torch.nn.Module, state_dict: dict, conversions: list) -> dict:
+    """transformers' save-side revert of ``state_dict`` through ``conversions``, raising on failure.
+
+    ``revert_weight_conversion`` reads the list off the model, so it is swapped in for the call and
+    the model's own record restored after it.
+    """
+    if not conversions:
+        return state_dict
+    recorded = getattr(model, "_weight_conversions", None)
+    model._weight_conversions = conversions
+    try:
+        return revert_weight_conversion(model, state_dict)
+    finally:
+        model._weight_conversions = recorded
+
+
 def revert_load_conversions(model: torch.nn.Module, state_dict: dict) -> dict:
     """Map a module-layout state dict back to the checkpoint layout the model was loaded from.
 
@@ -349,20 +399,15 @@ def revert_load_conversions(model: torch.nn.Module, state_dict: dict) -> dict:
     and reverts it inside ``save_pretrained``, which the gathered/TP writers bypass — so without this
     a wrapper-less MoE save emits fused keys that per-expert engine loaders hard-fail on (vLLM 0.26.0:
     GLM-4/LFM-2) or silently drop (Laguna). Identity where the load converted nothing: dense models,
-    and a source already in the module layout. EP-gathered dicts never come here.
+    and a source already in the module layout.
 
     Reverts :func:`revert_conversions_for`'s list, restoring the model's own value afterwards so
     later saves see exactly what the load left behind. A failure warns instead of raising: the
     config may already be on disk with the peer ranks past their barrier, and the pre-revert dict is
     a loadable checkpoint that only needs ``unfuse_moe_experts.py`` before a per-expert engine.
     """
-    conversions = revert_conversions_for(model)
-    if not conversions:
-        return state_dict
-    load_conversions = getattr(model, "_weight_conversions", None)
-    model._weight_conversions = conversions
     try:
-        return revert_weight_conversion(model, state_dict)
+        return revert_conversions(model, state_dict, revert_conversions_for(model))
     except Exception as e:
         logger.warning(
             f"revert_weight_conversion failed ({e}); writing the module-layout state "
@@ -370,8 +415,6 @@ def revert_load_conversions(model: torch.nn.Module, state_dict: dict) -> dict:
             f"serving this checkpoint on a per-expert engine."
         )
         return state_dict
-    finally:
-        model._weight_conversions = load_conversions
 
 
 class ModuleLayoutView:

@@ -9,8 +9,9 @@ carries them over from the source before the processing class is saved, so witho
 ``patch_vocab.py --chat_template`` on a base shipping ``chat_template.json`` serves the OLD
 template through ``AutoProcessor``. A processing class that still writes one of those files
 keeps it. And a model whose load dequantized an fp8 source must be reverted through its registry
-conversion mapping, not the quantizer-rewritten list the load recorded (which ``save_pretrained``
-cannot invert) and not ``save_original_format=False`` (the internal layout no loader reads).
+conversion mapping (``revert_conversions_for``, the rule every writer shares), not the
+quantizer-rewritten list the load recorded (which ``save_pretrained`` cannot invert) and not
+``save_original_format=False`` (the internal layout no loader reads).
 
     python tests/cpu/checkpoint/test_save_full_checkpoint_sidecars.py
 """
@@ -24,11 +25,12 @@ from types import SimpleNamespace
 import pytest
 import torch
 from tokenizers import Tokenizer, models, pre_tokenizers
-from transformers import PreTrainedTokenizerFast, Qwen3Config, Qwen3ForCausalLM
+from transformers import PreTrainedTokenizerFast, Qwen3Config, Qwen3ForCausalLM, Qwen3MoeConfig, Qwen3MoeForCausalLM
 from transformers.integrations.finegrained_fp8 import Fp8Dequantize
 
-from src.checkpoint.tool_io import _load_dequantized_fp8, save_full_checkpoint
-from tests.common.models import TINY_QWEN3_CONFIG
+from src.checkpoint.format import revert_conversions_for
+from src.checkpoint.tool_io import save_full_checkpoint
+from tests.common.models import TINY_QWEN3_CONFIG, TINY_QWEN3_MOE_CONFIG
 
 _STALE = {"special_tokens_map.json": {"pad_token": "<stale>"}, "chat_template.json": {"chat_template": "STALE"}}
 
@@ -85,28 +87,41 @@ def test_without_a_processing_class_the_sources_tokenizer_files_stay_consistent(
         assert os.path.isfile(out / name)
 
 
-def test_a_dequantizing_load_is_detected_off_the_consumed_conversions():
-    """The detection reads what the load recorded, so a from-scratch model (no conversions) and a
-    plain bf16 load (no fp8 op) are both negative, and only a consumed ``Fp8Dequantize`` is positive."""
-    assert not _load_dequantized_fp8(SimpleNamespace())
-    assert not _load_dequantized_fp8(SimpleNamespace(_weight_conversions=[]))
-    assert not _load_dequantized_fp8(SimpleNamespace(_weight_conversions=[SimpleNamespace(operations=[object()])]))
-    dequantize = Fp8Dequantize.__new__(Fp8Dequantize)
-    assert _load_dequantized_fp8(SimpleNamespace(_weight_conversions=[SimpleNamespace(operations=[dequantize])]))
+def test_a_dequantizing_load_reverts_the_family_registry_mapping():
+    """The revert reads what the load recorded, except a record carrying a quantizer's op: a plain
+    record (empty, or ops of the family's own) is reverted as recorded, a consumed ``Fp8Dequantize``
+    swaps in the family's registry mapping."""
+    model = Qwen3MoeForCausalLM(Qwen3MoeConfig(**TINY_QWEN3_MOE_CONFIG))
+    registry = revert_conversions_for(model)  # no record: the registry mapping
+    assert registry, "premise: the family registers conversions, so the swap is observable"
+
+    model._weight_conversions = []
+    assert revert_conversions_for(model) == []
+    model._weight_conversions = [SimpleNamespace(operations=[object()])]
+    assert len(revert_conversions_for(model)) == 1
+    model._weight_conversions = [SimpleNamespace(operations=[Fp8Dequantize(hf_quantizer=None)])]
+    assert [c.source_patterns for c in revert_conversions_for(model)] == [c.source_patterns for c in registry]
 
 
-def test_a_dequantized_load_is_reverted_through_the_registry_mapping(tmp_path, monkeypatch):
-    """With the op on the model, the recorded conversions are swapped for the registry mapping before
-    ``save_pretrained`` runs its default revert — no ``save_original_format`` override."""
+def test_a_dequantized_load_is_saved_through_the_registry_mapping(tmp_path, monkeypatch):
+    """``save_pretrained`` runs its default revert over the registry mapping — no
+    ``save_original_format`` override — and the load's own record is left as it was."""
     model = Qwen3ForCausalLM(Qwen3Config(**TINY_QWEN3_CONFIG))
-    model._weight_conversions = [SimpleNamespace(operations=[Fp8Dequantize.__new__(Fp8Dequantize)])]
+    recorded = [SimpleNamespace(operations=[Fp8Dequantize(hf_quantizer=None)])]
+    model._weight_conversions = recorded
     seen = []
     real_save = type(model).save_pretrained
-    monkeypatch.setattr(type(model), "save_pretrained", lambda self, d, **kw: (seen.append(kw), real_save(self, d))[1])
+    monkeypatch.setattr(
+        type(model),
+        "save_pretrained",
+        lambda self, d, **kw: (seen.append((kw, self._weight_conversions)), real_save(self, d))[1],
+    )
 
     save_full_checkpoint(model, str(tmp_path / "a"))
-    assert "save_original_format" not in seen[-1]
-    assert not _load_dequantized_fp8(model)
+    kwargs, conversions_during_save = seen[-1]
+    assert "save_original_format" not in kwargs
+    assert conversions_during_save is not recorded
+    assert model._weight_conversions is recorded
     assert os.path.isfile(tmp_path / "a" / "model.safetensors")
 
 

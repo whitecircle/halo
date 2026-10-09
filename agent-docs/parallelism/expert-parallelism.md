@@ -65,12 +65,12 @@ EP surface. The table is pinned against the classes by
 | Bailing MoE / Ling | transient balancing bias — routing runs entirely inside the hub gate, so bias-update balancing requires the native `expert_bias` slot and raises rather than falling back to a trainer-only side-buffer ([MoE balancing modes](../training-methods/callbacks.md#moe-balancing-modes)) | `_supports_transient_balancing_bias` |
 | Gemma 4 MoE | routing replay | `_supports_routing_replay` |
 | Gemma 4 MoE | `fp32_non_ep_params` — refused at load ([Precision control](#precision-control)) | `_supports_fp32_non_ep_params` |
-| Inkling | RL weight sync — the hub namespace is WeightConverters-only, so a server loading hub names would silently skip every synced tensor | `_supports_weight_sync` |
+| Inkling | RL weight sync — no sync into either pinned engine's Inkling loader validated | `_supports_weight_sync` |
 | Zaya | gradient checkpointing | `_supports_gradient_checkpointing` |
 | Zaya | routing replay | `_supports_routing_replay` |
 | Cohere2 MoE | RL weight sync — no end-to-end sync validated against either pinned server | `_supports_weight_sync` |
-| Cohere2 MoE | lazy loading — the Command A+ index spells the vision tower `model.vision_tower.vision_model.*`, a from_pretrained-only conversion the lazy loader does not apply | `_supports_lazy_loading` |
-| GLM-5 Next | RL weight sync — the live tree spells the KDA/hyper-connection tensors differently from the hub namespace a server reads, and no pinned rollout engine loads `glm5_next` | `_supports_weight_sync` |
+| Cohere2 MoE | lazy loading — no lazy load of the Command A+ checkpoint has been checked against `from_pretrained` | `_supports_lazy_loading` |
+| GLM-5 Next | RL weight sync — neither pinned rollout engine registers `glm5_next` | `_supports_weight_sync` |
 
 A second class of weight-sync restriction sits outside that table, keyed on the model type **and**
 the engine. Each client declares the model types its pinned release cannot take an online update for
@@ -510,8 +510,9 @@ holds:
 
 - `ep_group_size != world_size`, `expert_tp_size > 1`, or CP;
 - native expert LoRA or `merge_expert_lora_on_save`;
-- a `model_type` no EP layer class claims, or whose EP layer exports the hub namespace through
-  transformers' save-side revert (Step-3.7 Flash; the merge streams key by key and cannot apply it);
+- a `model_type` no EP layer class claims, or a load that converted names the gathered save reverts
+  through transformers' save-side revert (Step-3.7 Flash, a SigLIP tower, a vendor namespace; the
+  merge streams key by key and cannot apply it);
 - a non-shared multi-node filesystem;
 - **no EP layers at all** (dense, or an MoE without EP wrappers): every save would be an ordinary
   gathered checkpoint while a planned merge waits for shards that never appear.

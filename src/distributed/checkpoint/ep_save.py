@@ -6,6 +6,7 @@ shards.
 """
 
 import gc
+import itertools
 import json
 import os
 from collections.abc import Callable
@@ -15,6 +16,7 @@ import torch
 from accelerate.logging import get_logger
 from accelerate.utils import is_peft_model
 from safetensors.torch import save_file
+from transformers.core_model_loading import rename_source_key
 
 from src.checkpoint.config_export import save_model_config
 from src.checkpoint.format import (
@@ -27,7 +29,7 @@ from src.checkpoint.format import (
     cast_state_dict_to_save_dtype,
     ep_shard_filename,
     reconcile_tie_word_embeddings,
-    revert_load_conversions,
+    revert_conversions,
     save_dtype_caster,
     write_merged_index,
 )
@@ -43,7 +45,9 @@ from src.distributed.expert_parallel.expert_weights import (
     has_ep_lora,
     resolve_ep_merge_layer_class,
     supported_ep_merge_model_types,
+    to_hub_layer_key,
 )
+from src.distributed.expert_parallel.hub_conversion import gathered_export_conversions, reversed_export_transforms
 from src.distributed.runtime import (
     DeferredRankFailure,
     barrier_on_exit,
@@ -60,6 +64,7 @@ from src.distributed.tensor_parallel.state_dict import gather_tp_sharded_non_dte
 from src.models.patches.gpt_oss_sinks import neutralized_gpt_oss_sinks
 from src.models.structure import (
     LoraFolds,
+    base_transformers_model,
     lora_folded_data,
     normalize_peft_param_name,
     persistent_buffers,
@@ -96,17 +101,21 @@ def _persistent_non_ep_buffers(model: torch.nn.Module, ep_layer_names):
     return persistent_buffers(model, exclude_prefixes=tuple(f"{ep_name}." for ep_name in ep_layer_names))
 
 
-def _hub_namespace_export(model: torch.nn.Module, ep_layers) -> Callable[[dict], dict]:
+def _hub_namespace_export(model: torch.nn.Module) -> Callable[[dict], dict]:
     """Checkpoint-name transform the gathered save applies to each streamed chunk.
 
-    Identity unless a family declares ``_EXPORTS_HUB_NAMESPACE``, where it is transformers' own
-    save-side conversion revert, so the write lands in the hub namespace serving engines read.
-    Applied per chunk: the non-expert params as one (a reverse fusion such as a vision tower's
-    q/k/v → in_proj needs all its sources together), each gathered EP layer as its own.
+    transformers' save-side revert of what the load recorded, minus the per-expert merges the
+    gather owns (:func:`gathered_export_conversions`), so the write lands in the namespace the hub
+    and the serving engines use; the identity where the load converted nothing else. Applied per
+    chunk: the non-expert params as one (a reverse fusion such as a vision tower's q/k/v → in_proj
+    needs all its sources together), each gathered EP layer as its own. It raises rather than writing
+    a chunk in the module spelling beside hub-spelled ones; every caller runs it inside the save's
+    deferred-failure guard.
     """
-    if not any(type(module)._EXPORTS_HUB_NAMESPACE for _name, module in ep_layers):
+    conversions = gathered_export_conversions(model)
+    if not conversions:
         return lambda state: state
-    return partial(revert_load_conversions, model)
+    return partial(revert_conversions, model, conversions=conversions)
 
 
 def _save_config_and_tokenizer(model, output_dir: str, tokenizer=None):
@@ -250,27 +259,28 @@ def _save_ep_gathered(
     # then the family's hub-namespace revert. A ``None`` from ``remap`` is a tensor the checkpoint
     # must not carry — a folded LoRA adapter, or the frozen ``original_module`` half of a
     # ``modules_to_save`` pair — never an expert weight.
-    export = _hub_namespace_export(model, ep_layers)
+    export = _hub_namespace_export(model)
 
     def to_checkpoint_names(chunk: dict[str, torch.Tensor]) -> dict[str, torch.Tensor]:
         return export({hf_key: tensor for key, tensor in chunk.items() if (hf_key := remap(key)) is not None})
-
-    if is_save_rank:
-        # GptOss FA2 fine-tuning sets self_attn.sinks=None; the checkpoint still needs them.
-        for sink_name, sink_tensor in neutralized_gpt_oss_sinks(model).items():
-            state_dict.setdefault(sink_name, cast(sink_name, sink_tensor))
-        state_dict = to_checkpoint_names(state_dict)
-        # Must precede the config write below, which persists the flag this may clear. Fed the
-        # checkpoint key space: the probe is a `lm_head.weight` / `embed_tokens.weight` suffix match,
-        # which misses a LoRA-wrapped or modules_to_save head and would leave `config.json` claiming
-        # tied embeddings, so `from_pretrained` re-ties and discards the trained head.
-        reconcile_tie_word_embeddings(model, state_dict)
 
     # One writer (this rank), so the parts can be renamed to HF's own names once the count is known.
     writer = StageShardWriter(output_dir, HF_STREAM_PART_PREFIX, max_shard_size, enabled=is_save_rank)
     # Streaming puts the save rank's disk writes between the per-layer expert gathers below, so a
     # failing write must not raise here: the peers would block in the next layer's all-gather.
     guard = DeferredRankFailure(f"EP checkpoint write to {output_dir}")
+
+    def stage_non_expert(state: dict[str, torch.Tensor]) -> int:
+        """Respell and stage the non-expert params, inside the guard like every rank-local step here."""
+        state = to_checkpoint_names(state)
+        # Must precede the config write below, which persists the flag this may clear. Fed the
+        # checkpoint key space: the probe is a `lm_head.weight` / `embed_tokens.weight` suffix match,
+        # which misses a LoRA-wrapped or modules_to_save head and would leave `config.json` claiming
+        # tied embeddings, so `from_pretrained` re-ties and discards the trained head.
+        reconcile_tie_word_embeddings(model, state)
+        for key, tensor in state.items():
+            writer.add(key, tensor)
+        return len(state)
 
     def stage_expert_layer(gathered: dict[str, torch.Tensor]) -> None:
         """Cast, respell and stage one gathered EP layer.
@@ -281,9 +291,12 @@ def _save_ep_gathered(
         for key, tensor in chunk.items():
             writer.add(key, tensor)
 
-    for key, tensor in state_dict.items():
-        guard.run(partial(writer.add, key, tensor))
-    non_expert_keys = len(state_dict)
+    non_expert_keys = 0
+    if is_save_rank:
+        # GptOss FA2 fine-tuning sets self_attn.sinks=None; the checkpoint still needs them.
+        for sink_name, sink_tensor in neutralized_gpt_oss_sinks(model).items():
+            state_dict.setdefault(sink_name, cast(sink_name, sink_tensor))
+        non_expert_keys = guard.run(partial(stage_non_expert, state_dict)) or 0
     del state_dict
 
     # ``merge_lora`` folds the grouped expert-LoRA delta inside each family's gather, before any
@@ -417,11 +430,36 @@ def _check_ep_sharded_save_supported(
         )
 
 
-def _check_ep_merge_family_supported(model: torch.nn.Module) -> None:
-    """Raise if this model's ``config.model_type`` resolves to no registered EP layer class.
+def _keys_merge_cannot_respell(model: torch.nn.Module, layer_cls: type) -> list[str]:
+    """Live keys whose checkpoint name the gathered export respells but ``merge_ep_shards.py`` would
+    write unchanged.
 
-    ``merge_ep_shards.py`` picks the HF-layout transform through the same resolver, so an unclaimed
-    ``model_type`` could never be merged; the save is rejected up front.
+    The merge streams key by key with no model behind it: it applies only the family's
+    ``_EXPORT_KEY_RENAMES`` (:func:`to_hub_layer_key`), so a load that also renamed the namespace
+    (a SigLIP tower's ``vision_model`` level, a vendor namespace) or converted a tensor outside the
+    per-expert merges would merge into a layout no hub or engine uses. Name-only, so rank-uniform;
+    read off the plain transformers tree, whose names the checkpoint carries.
+    """
+    model = base_transformers_model(model)
+    renamings, converters = reversed_export_transforms(gathered_export_conversions(model))
+    if not renamings and not converters:
+        return []
+    names = (name for name, _ in itertools.chain(model.named_parameters(), persistent_buffers(model)))
+    stuck = []
+    for name in names:
+        merged = to_hub_layer_key(name, layer_cls)
+        hub, converted_by = rename_source_key(merged, renamings, converters, reverse=True)
+        if converted_by is not None or hub != merged:
+            stuck.append(merged)
+    return stuck
+
+
+def _check_ep_merge_family_supported(model: torch.nn.Module) -> None:
+    """Raise if ``merge_ep_shards.py`` could not turn this model's shards into its hub checkpoint.
+
+    The merge picks the HF-layout transform through the same resolver, so an unclaimed
+    ``model_type`` could never be merged, and it respells only the family's own key renames
+    (:func:`_keys_merge_cannot_respell`); either way the save is rejected up front.
     """
     config = getattr(model, "config", None)
     model_type = getattr(config, "model_type", "") or ""
@@ -434,12 +472,14 @@ def _check_ep_merge_family_supported(model: torch.nn.Module) -> None:
             f"per-rank shards could never be merged into a loadable checkpoint. Supported model types: "
             f"{', '.join(supported_ep_merge_model_types())}. Use save_sharded_ep=False (gathered) instead."
         )
-    if layer_cls._EXPORTS_HUB_NAMESPACE:
+    stuck = _keys_merge_cannot_respell(model, layer_cls)
+    if stuck:
         raise ValueError(
-            f"Sharded EP save (save_sharded_ep=True) is not supported for model_type {model_type!r}: "
-            f"{layer_cls.__name__} writes the hub checkpoint namespace through transformers' save-side "
-            f"conversion revert, which merge_ep_shards.py's key-by-key stream cannot apply — the merged "
-            f"checkpoint would carry the module-tree spelling no serving engine reads. Use "
+            f"Sharded EP save (save_sharded_ep=True) is not supported for this {model_type!r} model: its "
+            f"load converted {len(stuck)} tensor name(s) from the hub namespace (first few: {stuck[:4]}), "
+            f"which the gathered save reverts through transformers' save-side conversion but "
+            f"merge_ep_shards.py's key-by-key stream cannot — the merged checkpoint would carry the "
+            f"module-tree spelling the hub and the serving engines do not use. Use "
             f"save_sharded_ep=False (gathered) instead."
         )
 

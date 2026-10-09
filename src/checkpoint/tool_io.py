@@ -22,8 +22,6 @@ import torch
 from accelerate.utils import is_peft_model
 from huggingface_hub import snapshot_download
 from safetensors import SafetensorError, safe_open
-from transformers.core_model_loading import PrefixChange
-from transformers.integrations.finegrained_fp8 import Fp8Dequantize
 from transformers.utils import (
     CONFIG_NAME,
     GENERATION_CONFIG_NAME,
@@ -48,7 +46,6 @@ from src.checkpoint.format import (
     TRAINING_PROVENANCE_FILE,
     copy_checkpoint_aux_files,
     is_sharded_checkpoint,
-    registry_weight_conversions,
     resolve_checkpoint_weights,
     save_pretrained_layout,
     sweep_after_full_save,
@@ -121,12 +118,11 @@ def save_full_checkpoint(
     tokenizer sidecars the copy carried over are dropped unless the fresh processing class rewrote
     them, since each overrides its fresh neighbour on load.
 
-    A model whose load DEQUANTIZED an fp8 source is reverted through its registry conversion mapping
-    first, because the recorded conversions carry quantizer rewrites ``save_pretrained`` cannot
-    invert. The save writes the layout the saved config declares
+    The save writes the layout the saved config declares
     (:func:`~src.checkpoint.format.save_pretrained_layout`): a multimodal checkpoint loaded as its
-    text-only class keeps its text-only keys. ``source_dir`` doubles as the config schema source when
-    the caller passes one.
+    text-only class keeps its text-only keys, and a load that dequantized an fp8 source reverts its
+    family's registry mapping rather than the quantizer rewrites ``save_pretrained`` cannot invert.
+    ``source_dir`` doubles as the config schema source when the caller passes one.
 
     ``include_resume_sidecars`` is :func:`~src.checkpoint.format.copy_checkpoint_aux_files`'s: a tool
     whose output is a new base model rather than the source run's weights passes ``False``, so no
@@ -139,8 +135,6 @@ def save_full_checkpoint(
             "save_full_checkpoint writes full model directories; an unmerged PEFT adapter save must "
             "call model.save_pretrained directly (it writes adapter files only — nothing to sweep)."
         )
-    if _load_dequantized_fp8(model):
-        _restore_pristine_weight_conversions(model)
     os.makedirs(output_dir, exist_ok=True)
     if source_dir is not None and os.path.isdir(source_dir):
         copy_checkpoint_aux_files(source_dir, output_dir, include_resume_sidecars=include_resume_sidecars)
@@ -172,34 +166,6 @@ def _file_versions(directory: str, names: tuple[str, ...]) -> dict[str, tuple[in
             continue
         versions[name] = (stat.st_ino, stat.st_mtime_ns)
     return versions
-
-
-def _load_dequantized_fp8(model) -> bool:
-    """Whether ``model``'s load consumed an ``Fp8Dequantize`` conversion.
-
-    A dequantizing load of an fp8 checkpoint leaves that op on ``_weight_conversions``, where
-    ``save_pretrained``'s default revert would run its inverse.
-    """
-    return any(
-        isinstance(op, Fp8Dequantize)
-        for conversion in (getattr(model, "_weight_conversions", None) or [])
-        for op in getattr(conversion, "operations", ())
-    )
-
-
-def _restore_pristine_weight_conversions(model) -> None:
-    """Replace the conversions a dequantizing fp8 load recorded with the model's registry mapping.
-
-    The quantizer rewrites the model's converters for the load and adds a dequantizer whose reverse
-    is a pass-through with no target split, so ``save_pretrained``'s revert through the recorded list
-    fails — while its alternative (``save_original_format=False``) writes an internal layout neither
-    the EP lazy loader nor a serving engine reads. The registry mapping is the pristine rename/merge
-    chain, and reverting through it writes the hub layout minus the scales. A ``PrefixChange``
-    survives only where the load applied one; ``revert_weight_conversion``'s rebuild drops it.
-    """
-    recorded = getattr(model, "_weight_conversions", None) or []
-    prefix_applied = any(isinstance(conversion, PrefixChange) for conversion in recorded)
-    model._weight_conversions = registry_weight_conversions(model, keep_prefix_change=prefix_applied) or None
 
 
 def resolve_checkpoint_source(model_id: str, revision: str | None = None) -> str:

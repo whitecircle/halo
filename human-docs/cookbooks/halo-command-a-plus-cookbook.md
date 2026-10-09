@@ -73,19 +73,19 @@ pre-generated, scored completions and needs no server: see [Offline GRPO](../tra
 
 - No online RL. Weight sync for this family has not been validated on either engine, so Halo refuses
   online and async GRPO when it builds the trainer.
-- No verified serving engine for a gathered save. The save writes the vision tower under transformers'
-  in-memory names (`model.vision_tower.embeddings.*`), while vLLM 0.26.0's loader expects the hub's
-  `model.vision_tower.vision_model.*`, so expect vLLM to reject it at load.
+- Serving an export is not tested end to end. The steps below follow from the engines' loaders.
 
 ## Export and serve
 
-The gathered save keeps transformers' fused expert pair, which `from_pretrained` reads directly.
-`halo run unfuse-moe-experts` rewrites the experts in the hub's per-expert spelling; it does not touch
-the vision tower names.
+The gathered save uses the hub's tensor names, vision tower included, and keeps the experts as
+transformers' fused pair.
 
-Run inference with transformers: load the save with `AutoModelForImageTextToText` and `AutoTokenizer`,
-or `AutoProcessor` for images ([snippet](README.md#smoke-test-a-checkpoint)). To serve the base model,
-point vLLM 0.26.0 at the hub repo, which it registers.
+- **transformers:** load the save with `AutoModelForImageTextToText` and `AutoTokenizer`, or
+  `AutoProcessor` for images ([snippet](README.md#smoke-test-a-checkpoint)).
+- **vLLM 0.26.0:** point it at the save. It reads the fused experts. It also requires tied embeddings,
+  which training keeps unless it trained the output head on its own.
+- **SGLang 0.5.17:** run `halo run unfuse-moe-experts` first. SGLang's Cohere2 loader reads one tensor
+  per expert and skips the fused pair without an error. The rewrite gives the hub's exact layout.
 
 ## Reference
 

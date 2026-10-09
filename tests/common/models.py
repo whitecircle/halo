@@ -626,6 +626,60 @@ TINY_MISTRAL4_CONFIG = {
     "tie_word_embeddings": False,
 }
 
+# Tiny vision towers for the multimodal wrappers an EP family's text tower ships under: SigLIP for
+# Command A+ (``cohere2_vision``), SigLIP-2 for LFM2-VL, Pixtral for Mistral 3, plus the Gemma 4,
+# Qwen3.5/3.6 and Inkling towers. One layer each — the towers carry the checkpoint namespace under
+# test, not compute; an output width is the text tower's hidden size where the config asks for one.
+TINY_SIGLIP_VISION_CONFIG = {
+    "hidden_size": 32,
+    "intermediate_size": 64,
+    "num_hidden_layers": 1,
+    "num_attention_heads": 2,
+    "image_size": 28,
+    "patch_size": 14,
+}
+TINY_SIGLIP2_VISION_CONFIG = {
+    "hidden_size": 32,
+    "intermediate_size": 64,
+    "num_hidden_layers": 1,
+    "num_attention_heads": 2,
+    "num_patches": 16,
+    "patch_size": 14,
+}
+TINY_PIXTRAL_VISION_CONFIG = {
+    "hidden_size": 32,
+    "intermediate_size": 64,
+    "num_hidden_layers": 1,
+    "num_attention_heads": 2,
+    "head_dim": 16,
+    "image_size": 28,
+    "patch_size": 14,
+}
+TINY_GEMMA4_VISION_CONFIG = {
+    "hidden_size": 32,
+    "intermediate_size": 64,
+    "num_hidden_layers": 1,
+    "num_attention_heads": 2,
+    "num_key_value_heads": 2,
+    "head_dim": 16,
+}
+TINY_QWEN35_VISION_CONFIG = {
+    "depth": 1,
+    "hidden_size": 16,
+    "intermediate_size": 16,
+    "num_heads": 2,
+    "out_hidden_size": TINY_QWEN35_MOE_CONFIG["hidden_size"],
+}
+# The upstream scale planner (``plan_out_scales``) rejects most tiny shapes; this one builds a valid
+# 4-layer pixel-shuffle stack.
+TINY_INKLING_VISION_CONFIG = {
+    "temporal_patch_size": 2,
+    "patch_size": 4,
+    "n_layers": 4,
+    "hidden_size": 32,
+    "text_hidden_size": TINY_INKLING_CONFIG["hidden_size"],
+}
+
 # Special Models
 
 QWEN3_5_VLM_4B = "Qwen/Qwen3.5-4B"  # Natively multimodal (Image-Text-to-Text)

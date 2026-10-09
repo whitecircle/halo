@@ -1,12 +1,10 @@
 #!/usr/bin/env python
-"""EP families no engine can load must be rejected at trainer construction, not at the first sync.
+"""EP families with no validated sync into either engine must be rejected at trainer construction,
+not at the first sync.
 
-``sync_weights_to_client`` forwards trainer parameter names straight into the engine's
-``model.load_weights``, so a family whose served implementation uses a different checkpoint
-namespace than the HuggingFace module tree the trainer trains has nowhere to put the weights.
-Inkling is that family: its hub keeps Thinking Machines' namespace (``model.llm.*``, ``wq_du``,
-interleaved ``w13_weight``) that only a from_pretrained conversion maps onto the module tree, so
-the module-spelled names the sync sends land nowhere on either engine.
+``sync_weights_to_client`` feeds the engine's ``model.load_weights`` directly, so a family declaring
+``_supports_weight_sync = False`` (no engine registers it, or no end-to-end sync has been validated
+into the one that does) would otherwise fail, or land nowhere, mid-run.
 ``validate_weight_sync_support`` is the construction gate.
 
 Run: ``python tests/cpu/grpo/test_grpo_weight_sync_ep_family_gate.py`` (or ``pytest -m cpu``).
@@ -21,10 +19,9 @@ from src.distributed.expert_parallel.base_layer import EPMoELayerBase
 from src.distributed.expert_parallel.patching import MOE_LAYER_MAP
 from src.trainers.grpo.rollout.weight_sync import validate_weight_sync_support
 
-# Families whose gathered export no engine can load under the names the sync sends; each reason is
-# stated at the class declaration. What one engine alone cannot serve is that engine client's
-# ``UNSERVABLE_MODEL_TYPES`` (test_rollout_backend_selection.py); Step-3.7 sends hub names
-# (test_weight_sync_hub_namespace.py) and is not here.
+# Families refused on every engine; each reason is stated at the class declaration. What one engine
+# alone cannot serve is that engine client's ``UNSERVABLE_MODEL_TYPES``
+# (test_rollout_backend_selection.py).
 EXPECTED_UNSUPPORTED = {
     "EPCohere2MoELayer",
     "EPGlm5NextMoELayer",
@@ -75,7 +72,7 @@ def test_unsupported_family_roster_is_pinned():
 
 @pytest.mark.parametrize("backend", ["vllm", "sglang"])
 def test_gate_rejects_unsupported_ep_family(backend):
-    """The family flag is engine-independent: what no gather can spell lands on neither engine."""
+    """The family flag is engine-independent: the refusal holds on both engines."""
     model = nn.Module()
     model.mlp = _UnsupportedEPModuleStub()
     with pytest.raises(ValueError, match="does not support weight sync"):

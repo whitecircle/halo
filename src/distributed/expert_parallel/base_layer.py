@@ -212,13 +212,6 @@ class EPMoELayerBase(EPExpertGatherMixin, EPRouterBalancingMixin, nn.Module, ABC
     # transformers' conversion-mapping key(s) for this hub checkpoint (``hub_conversion.py``); empty = canonical.
     _HUB_CONVERSION_KEYS: tuple[str, ...] = ()
 
-    # True where the live tree exists only behind transformers' load-side conversion and nothing
-    # restores the hub namespace from a module-spelled save. The gathered save applies transformers'
-    # save-side revert to every streamed chunk. A declaring family's reverse map must not fuse tensors
-    # across an EP layer's boundary, and sharded EP saves are refused: the offline merge streams key by
-    # key and cannot revert.
-    _EXPORTS_HUB_NAMESPACE: bool = False
-
     # True where transformers' serialization of this config is a schema no pinned serving engine reads:
     # the engines parse the family only through the source repo's ``auto_map`` modules, whose vendor
     # spellings transformers absorbs at load (``attribute_map`` plus ``__post_init__`` kwargs) and never
@@ -226,15 +219,14 @@ class EPMoELayerBase(EPExpertGatherMixin, EPRouterBalancingMixin, nn.Module, ABC
     # (``export_source_config_schema``); registered per claimed ``model_type`` by ``__init_subclass__``.
     _EXPORTS_SOURCE_CONFIG_SCHEMA: bool = False
 
-    # False makes ``validate_weight_sync_support`` reject online/env GRPO on every engine: the names
-    # the trainer sends cannot land in the family's served namespace, or no end-to-end sync has been
-    # validated. What one pinned engine cannot serve is the engine client's ``UNSERVABLE_MODEL_TYPES``.
+    # False makes ``validate_weight_sync_support`` reject online/env GRPO on every engine: no
+    # end-to-end sync into the family's served model has been validated. What one pinned engine
+    # cannot serve is the engine client's ``UNSERVABLE_MODEL_TYPES``.
     _supports_weight_sync: bool = True
 
-    # Surfaced verbatim in the refusal above; override where the namespace is not the reason.
+    # Surfaced verbatim in the refusal above; a family overrides it with its own gap.
     _WEIGHT_SYNC_REFUSAL_REASON: str = (
-        "this family is served under a different checkpoint namespace/dtype than the HuggingFace "
-        "module tree the trainer holds, so no weight would land where it is read"
+        "no end-to-end weight sync into this family's served model has been validated on either pinned rollout engine"
     )
 
     # False where GC recompute on top of EP is architecturally broken (Zaya's cross-layer EDA/CCA state).
