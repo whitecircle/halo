@@ -20,7 +20,7 @@ reference.
 
 | Symptom | Cause → fix |
 | --- | --- |
-| CUDA out of memory | Activations dominate. In order: `gradient_checkpointing: true` (20–30% slower), a smaller `per_device_train_batch_size` or `max_length`, then sharding (TP for dense, EP or ETP for MoE) or LoRA/QLoRA. |
+| CUDA out of memory | Activations dominate. In order: `gradient_checkpointing: true` (adds about 20–30% to step time), a smaller `per_device_train_batch_size` or `max_length`, then sharding (TP for dense, EP or ETP for MoE) or LoRA/QLoRA. |
 | Config rejected at startup (`must divide`, `not supported`, …) | The validator refuses shapes that would hang or crash mid-run. The message names the rule; valid shapes are in [Parallelism](parallelism.md). |
 | `expert_parallel_size=N on a single M-GPU NVLink domain forms K concurrent >2-rank DeepEP dispatch groups` | EP between 2 and the NVLink domain size on a single-domain job. Use `ep_size=2`, `ep_size` = the domain size, or `ep4 + etp2` for a 4-way split on 8 GPUs. `ep4 + tp2` is rejected the same way. |
 | Missing dataset column | Each method reads fixed columns ([Datasets](data.md)). Mixing sources keeps only the columns common to all of them. |
