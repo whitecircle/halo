@@ -41,11 +41,11 @@ source instead).
 test together: a column missing from any dataset, or whose feature type differs across them, is
 dropped, with no fixed allowlist.
 
-The **declared** render columns are the exception. `conversation_field` and `tools_field` are pinned
-through the concatenation, an entry that lacks one getting a null-filled column of the carrying
-entry's type, so a mixed corpus keeps them. A declared column the intersection loses anyway (a type
-mismatch across the entries, which no fill can bridge) raises rather than rendering the whole corpus
-without it.
+The **declared** render columns are the exception. A declared `conversation_field` must be in every
+entry: a source without it raises, naming that source. `tools_field` may be missing from some entries,
+which get a null-filled column of the carrying entry's type, so a mixed corpus keeps its tools. A
+declared column the intersection loses anyway (a type mismatch across the entries, which no fill can
+bridge) raises rather than rendering the whole corpus without it.
 
 **Which rows a ratio keeps** is drawn without replacement from `numpy.random.default_rng(seed)`
 (PCG64) — seed `42`, `+1` for the `test` split and stepped per list entry, so every rank selects the
@@ -83,11 +83,11 @@ VLM, below).
 `train`/`test` schemas at load and raises, naming the available columns. Without it a typo silently
 no-ops the empty-conversation filter and surfaces much later as a `KeyError` inside the tokenizer map.
 
-The check follows the *script*, not the YAML. SFT, both distillation scripts and both
-prompt-rendering GRPO scripts (offline, environmental) declare a conversation column — each with its
-own default, `messages` for teacher distillation and `prompt` elsewhere — so a dataset without it raises
-whether or not the YAML names one; scripts that render no conversation (preference, reward,
-classification, online GRPO, embedding) declare none and skip the check.
+The check follows the *script*, not the YAML. SFT, both distillation scripts and the three
+prompt-rendering GRPO scripts (offline, online, environmental) declare a conversation column, each with
+its own default (`messages` for teacher distillation, `prompt` elsewhere), so a dataset without it
+raises whether or not the YAML names one. Scripts that render no conversation (preference, reward,
+classification, embedding) declare none and skip the check.
 
 `tools_field` is checked the same way for a single dataset. Across a `dataset:` list it raises only
 when **no** source carries the column and warns per source otherwise — a tool-use corpus concatenated

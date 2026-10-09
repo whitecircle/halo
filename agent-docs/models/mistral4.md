@@ -27,7 +27,7 @@ Coverage: `tests/gpu/parallelism/test_mistral4_all_parallelism.py` (one node per
 
 - Routed experts: `Mistral4Experts`, fused `gate_up_proj [E, 2M, H]` (F.linear convention; matmul-internal form `[E, H, 2M]`) and `down_proj [E, H, M]`. Same layout as Qwen3.5 / GLM-4, so the shared `EPMoELayerBase` fused-GLU helpers cover compute (Grouped GEMM on SM90+).
 - Shared expert: `Mistral4MLP`, replicated per rank, summed after DeepEP combine. Intermediate size = `moe_intermediate_size * n_shared_experts`.
-- Checkpoints: weights stored in matmul convention internally; `gather_expert_state_dict` transposes back to F.linear convention at save so `from_pretrained` reloads as-is. The public `mistralai/Mistral-Small-4-119B-*` checkpoint ships FP8 expert weights — dequantize once with `scripts/before_training/convert_mistral4_bf16.py` (streams shard-by-shard, handles scalar and per-expert `_scale_inv` layouts) before training.
+- Checkpoints: weights stored in matmul convention internally; `gather_expert_state_dict` transposes back to F.linear convention at save so `from_pretrained` reloads as-is. The public `mistralai/Mistral-Small-4-119B-*` checkpoint ships every language-model weight in FP8 — dequantize once with `scripts/before_training/convert_mistral4_bf16.py` (streams shard-by-shard, handles scalar and per-expert `_scale_inv` layouts) before training.
 - Activation: the routed-expert SwiGLU runs through the fused Triton kernel (`src/kernels/fused_glu.py`) when the gate is a genuine SiLU, logged as `glu_combine=fused_silu_mul`.
 
 ## Packing

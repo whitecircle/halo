@@ -1,187 +1,95 @@
-# Halo / ZAYA1 cookbook
+# ZAYA1 Cookbook
 
-Fine-tune [ZAYA1 8B](https://huggingface.co/Zyphra/ZAYA1-8B) with Halo.
+[ZAYA1-8B](https://huggingface.co/Zyphra/ZAYA1-8B) has 16 routed experts and picks one per token. Its
+attention runs a convolution over the sequence (CCA). ZAYA1 is native in transformers, so hub `main`
+loads with no revision pin and no remote code. It is the most constrained family in Halo.
 
-ZAYA1 8B has 16 routed experts and selects one expert for each token. Halo supports the model's hybrid attention and MoE layers.
+## Support
 
-## Halo support
+| FSDP | EP | CP | TP | ETP | EP+CP | EP+TP | LoRA | Online RL |
+|:---:|:---:|:---:|:---:|:---:|:---:|:---:|:---:|:---:|
+| Yes | Yes | No | No | Yes | No | No | Yes | No |
 
-| FSDP | EP | CP | TP | ETP | EP+CP | EP+TP | LoRA |
-|:---:|:---:|:---:|:---:|:---:|:---:|:---:|:---:|
-| Yes* | Yes* | No | No | Yes* | No | No | Yes |
+Every mode runs without gradient checkpointing.
 
-`*` Gradient checkpointing is unavailable in every mode: FSDP2, EP, and ETP alike. The toolkit clears `ZayaPreTrainedModel.supports_gradient_checkpointing` at load, because recompute through CCA's `nn.Conv1d` pair faults in cuDNN on the CUDA 13.2 image, so `gradient_checkpointing_enable` raises rather than failing in the first backward. Halo supports neither CP nor TP here. The convolution-enhanced attention runs a `Conv1d` over the sequence axis and shifts each token's value one step, which breaks a Ulysses split, and it replaces QKV with `q_proj` / `k_proj` / `v_proj_current` / `v_proj_delayed` plus that conv stack, for which no DTensor sharding primitive exists.
+- **Checkpoint:** `Zyphra/ZAYA1-8B` at hub `main`.
+- **GPUs:** one for plain training, eight at EP8 (two experts per GPU).
 
-ZAYA1 is a native transformers family: hub `main` loads directly, with no
-revision pin and no `trust_remote_code`.
+## Recipes
 
-This recipe starts with one NVIDIA B300 GPU. The ETP variant needs two.
+Run these in the [training container](README.md#start-the-training-container).
 
-## Start the training container
+### Full fine-tune
 
-Start the [cookbook container](README.md#start-the-training-container) and run the commands
-below inside it.
-
-## Train all weights
-
-Create `zaya1-sft.yaml`.
-
-```yaml
-model_name_or_path: Zyphra/ZAYA1-8B
-model_init_kwargs:
-  output_router_logits: false
-moe_balancing: bias_update
-router_balancing_rate: 0.001
-
-dataset:
-- HuggingFaceH4/ultrachat_200k@train_sft
-conversation_field: messages
-test_size: 0.01
-dataset_num_proc: 16
-train_on_completions_only: true
-train_on_last_assistant_only: true
-assistant_message_template: "<|im_start|>assistant\n<think>\n"
-pad_token: <pad>
-eos_token: <|im_end|>
-
-use_grouped_gemm: true
-
-attn_implementation: flash_attention_2
-use_liger_kernel: true
-packing: true
-padding_free: false
-max_length: 4096
-bf16: true
-
-per_device_train_batch_size: 1
-per_device_eval_batch_size: 1
-gradient_accumulation_steps: 16
-num_train_epochs: 1.0
-gradient_checkpointing: false
-
-optim: adamw_torch_fused
-learning_rate: 5.0e-06
-lr_scheduler_type: cosine
-warmup_steps: 32
-max_grad_norm: 1.0
-
-save_strategy: steps
-save_steps: 1000
-eval_strategy: steps
-eval_steps: 500
-save_total_limit: 2
-save_only_model: true
-output_dir: /data/checkpoints/zaya1-8b-ultrachat
-
-logging_steps: 1
-logging_first_step: true
-report_to: wandb
-remove_unused_columns: false
-dataloader_num_workers: 2
-generate_eval_examples: false
-seed: 42
-
-use_peft: false
-```
-
-Launch one process.
+On one GPU:
 
 ```bash
-halo launch sft zaya1-sft.yaml -n 1
+halo launch sft examples/sft/zaya/zaya-1-8b-ultrachat.yaml \
+  --output_dir=/data/checkpoints/zaya1-8b-sft
 ```
 
-Keep `gradient_checkpointing: false`. The toolkit clears
-`ZayaPreTrainedModel.supports_gradient_checkpointing` at load, so every mode
-raises at `gradient_checkpointing_enable` — FSDP2, EP, and ETP alike.
-
-`packing: true` keeps attention isolated per document, but the CCA convolution
-still mixes across the documents of a packed row.
-
-The shipped equivalents are `examples/sft/zaya/zaya-1-8b-ultrachat.yaml` and, for the EP
-path, `examples/sft/zaya/zaya-1-8b-ultrachat-ep.yaml` (EP8, 16 routed experts → 2 per
-rank, launched with `-n 8`).
-
-## Use ETP
-
-Use pure ETP to shard every expert across two GPUs. `expert_tensor_parallel_size` must
-divide the process count, so this needs two processes; with `-n 1` the config is rejected
-before the model loads.
-
-```yaml
-expert_parallel_size: 1
-expert_tensor_parallel_size: 2
-gradient_checkpointing: false
-```
+At EP8 on eight GPUs:
 
 ```bash
-halo launch sft zaya1-sft.yaml -n 2
+halo launch sft examples/sft/zaya/zaya-1-8b-ultrachat-ep.yaml -n 8 \
+  --output_dir=/data/checkpoints/zaya1-8b-sft-ep8
 ```
 
-Larger ETP sizes are valid when the process count and the expert FFN width both divide.
+Both recipes train at 4,096 tokens. For long context at EP8, raise the limit with
+`--max_length=32768`, which fits at `per_device_train_batch_size: 1` because the fused loss never builds
+the full logits tensor.
 
-## Run inference
+### Other layouts
 
-```python
-import torch
+- Pure ETP2, to shard every expert across two GPUs: add `-n 2 --expert_tensor_parallel_size=2` to the
+  one-GPU command.
 
-from transformers import AutoModelForCausalLM, AutoTokenizer
+### LoRA
 
-path = "/data/checkpoints/zaya1-8b-ultrachat"
-tokenizer = AutoTokenizer.from_pretrained(path)
-model = AutoModelForCausalLM.from_pretrained(
-    path,
-    dtype=torch.bfloat16,
-    device_map="auto",
-)
-
-messages = [{"role": "user", "content": "Give three checks for an imbalanced MoE router."}]
-inputs = tokenizer.apply_chat_template(
-    messages,
-    add_generation_prompt=True,
-    return_tensors="pt",
-).to(model.device)
-output = model.generate(**inputs, max_new_tokens=256, do_sample=True, temperature=0.2)
-print(tokenizer.decode(output[0][inputs["input_ids"].shape[-1]:], skip_special_tokens=True))
+```bash
+halo launch sft examples/sft/zaya/zaya-1-8b-ultrachat.yaml \
+  --use_peft=true --learning_rate=1e-4 \
+  --lora_target_modules=q_proj,k_proj,v_proj_current,v_proj_delayed,o_proj \
+  --output_dir=/data/checkpoints/zaya1-8b-lora
 ```
 
-Neither pinned engine serves a ZAYA1 export: vLLM 0.26.0 has no native Zaya class
-(its generic transformers backend is unverified), and SGLang 0.5.17's loader reads the
-pre-transformers-5.14 per-expert layout. Run inference from transformers.
+### GRPO
 
-## Train a LoRA adapter
+Online GRPO is not available for this family (see [Limits](#limits)). Offline GRPO trains on
+pre-generated, scored completions and needs no server: see [Offline GRPO](../training-methods/offline-grpo.md).
 
-Use the ZAYA1 projection names in the LoRA configuration.
+## Settings that matter
 
-```yaml
-use_peft: true
-lora_r: 16
-lora_alpha: 32
-lora_dropout: 0.05
-lora_target_modules:
-- q_proj
-- k_proj
-- v_proj_current
-- v_proj_delayed
-- o_proj
+- **Gradient checkpointing stays off.** Halo refuses it in every mode, so keep
+  `gradient_checkpointing: false`. Recomputing CCA's convolutions faults in cuDNN in Halo's CUDA 13.2
+  images.
+- **Router balancing.** `auto` picks `bias_update`, which updates the router's own `balancing_biases`
+  after each step, so the final bias ships in every checkpoint. `router_balancing_rate` sets the step
+  size. ZAYA1 has no auxiliary loss, which is why the recipes set `output_router_logits: false`.
+- **Packing.** The recipes pack. Attention stays within each packed document, but the CCA convolution
+  and the delayed value projection still mix neighboring documents. Add `--packing=false` where that
+  mixing is not acceptable.
 
-learning_rate: 1.0e-04
-output_dir: /data/checkpoints/zaya1-8b-ultrachat-lora
-gradient_checkpointing: false
-```
+## Limits
 
-## No online RL for ZAYA1
+- No gradient checkpointing, in any mode.
+- No CP or TP. CCA's sequence convolution breaks a sequence split, and its attention has no TP plan.
+- No online RL. vLLM 0.26.0 has no native ZAYA1 class, and SGLang 0.5.17's loader reads only the legacy
+  per-expert layout, so Halo refuses weight sync to either engine when it builds the trainer.
+- No routing replay.
+- The legacy checkpoint `Zyphra/ZAYA1-8B-legacy` doesn't load. Start from hub `main`.
 
-Online GRPO and async GRPO with environments are refused at construction for this family. Both
-need weight sync into a rollout server, and both pinned engines list `zaya` as
-unservable: vLLM 0.26.0 ships no native Zaya implementation, so there is no
-served model for the stream to land in, and SGLang 0.5.17's Zaya loader reads
-the pre-transformers-5.14 per-expert checkpoint rather than the native fused
-layout the trainer holds. Offline GRPO, which needs no rollout server, remains
-available: [Offline GRPO](../../agent-docs/training-methods/grpo/offline-grpo.md) ↗.
+## Export and serve
 
-## Sources
+The gathered save writes the two native fused expert tensors per layer, which `from_pretrained` reads
+back. `save_sharded_ep: true` works as well, and `halo run merge-ep-shards` rebuilds the same layout.
 
-- [ZAYA1 8B model card](https://huggingface.co/Zyphra/ZAYA1-8B)
-- [Halo Zaya model notes](../../agent-docs/models/zaya.md) ↗
-- Halo Zaya examples: `examples/sft/zaya/zaya-1-8b-ultrachat.yaml`,
-  `examples/sft/zaya/zaya-1-8b-ultrachat-ep.yaml`
+Neither pinned engine serves a Halo export. vLLM has only its generic transformers backend, which is
+untested on this family, and SGLang's loader reads only the legacy layout. Run inference with
+transformers and `AutoModelForCausalLM` ([snippet](README.md#smoke-test-a-checkpoint)).
+
+## Reference
+
+- [Zaya model notes](../../agent-docs/models/zaya.md) ↗: the router state, the GC refusal, packing
+- [Offline GRPO](../training-methods/offline-grpo.md)
+- [Model card](https://huggingface.co/Zyphra/ZAYA1-8B)

@@ -1,9 +1,9 @@
 # Training Methods
 
-Each method is one script under `scripts/training/` and one name you pass to `halo launch`. All of
-them read a YAML config, take a HuggingFace checkpoint and a dataset, and write a HuggingFace
-checkpoint back out. If you are still deciding, [Choosing a Method](../choosing-a-method.md) maps the
-data you already have to the trainer that reads it.
+Each method is one script under `scripts/training/` and one name you pass to `halo launch`. Every
+method reads a YAML config, takes a HuggingFace checkpoint and a dataset, and writes a HuggingFace
+checkpoint. If you are still deciding, [Choosing a Method](../choosing-a-method.md) maps the data you
+have to the trainer that reads it.
 
 | Method | Trains on | `halo launch` | Page |
 | --- | --- | --- | --- |
@@ -24,25 +24,19 @@ data you already have to the trainer that reads it.
 
 ## What every method shares
 
-One config format. A config is a flat YAML file of trainer fields, and any field can be overridden
-on the command line after the config path. The parser applies the same three toolkit defaults everywhere
-(`bf16: true`, `use_liger_kernel: true`, `logging_nan_inf_filter: false`) and raises on a key it does
-not know rather than ignoring it — see [Configuration](../configuration.md).
+- **One config format.** A config is a flat YAML file of trainer fields, and any field can be
+  overridden on the command line after the config path. Every method gets the same toolkit defaults
+  (`bf16: true`, `use_liger_kernel: true`, `logging_nan_inf_filter: false`), and an unknown key
+  raises ([Configuration](../configuration.md)).
+- **One data stack.** Datasets come from the Hub, a local path or `s3://` through the same `dataset:`
+  field, and a list mixes them ([Datasets](../data.md)). The columns each method reads differ.
+- **One parallelism stack.** Expert, tensor and expert-tensor parallelism work on every trainer.
+  Context parallelism covers SFT, SMPO and offline GRPO (full fine-tuning only for offline GRPO).
+  Pipeline parallelism is not available in this release ([Parallelism](../parallelism.md)).
+- **HuggingFace in, HuggingFace out.** Checkpoints load with `from_pretrained` and upload to the Hub
+  as written. Some MoE families need a conversion before vLLM or SGLang can serve them. A LoRA run
+  writes an adapter you merge with one command; expert LoRA under EP folds into the weights at save
+  time instead (`merge_expert_lora_on_save: true`). See [Checkpoints & Export](../checkpoints.md).
 
-One data stack. Datasets come from the Hub, a local path or `s3://` in the same `dataset:` field
-and mix by list ([Datasets](../data.md)); the columns, and how each method renders and collates
-them, differ per method.
-
-One parallelism stack. Expert, tensor and expert-tensor parallelism work on every trainer; context
-parallelism supports SFT, SMPO and offline GRPO full fine-tuning, and pipeline parallelism is not yet available in this
-release. The axis sizes are config fields or CLI flags, identical across methods
-([Parallelism](../parallelism.md)).
-
-HuggingFace in, HuggingFace out. Checkpoints load with `from_pretrained` and upload to the Hub as
-written; vLLM and SGLang serve them where the pinned engine reads the family's layout, some MoE
-families after `unfuse-moe-experts` and a few not at all. LoRA runs write an adapter you can merge with one command,
-except expert LoRA under EP, which folds at save time instead (`merge_expert_lora_on_save: true`)
-([Checkpoints & Export](../checkpoints.md)).
-
-The exhaustive per-method reference, with every hyperparameter and every refusal, is the
-[training-methods section](../../agent-docs/training-methods/README.md) ↗ of `agent-docs`.
+Every hyperparameter and refusal per method is in the
+[training-methods reference](../../agent-docs/training-methods/README.md) ↗.

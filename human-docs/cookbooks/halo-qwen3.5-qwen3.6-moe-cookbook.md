@@ -1,251 +1,97 @@
-# Halo / Qwen3.5 and Qwen3.6 MoE cookbook
+# Qwen3.5 / Qwen3.6 MoE Cookbook
 
-Fine-tune [Qwen3.6 35B A3B](https://huggingface.co/Qwen/Qwen3.6-35B-A3B) with Halo.
+[Qwen3.5-35B-A3B](https://huggingface.co/Qwen/Qwen3.5-35B-A3B) and
+[Qwen3.6-35B-A3B](https://huggingface.co/Qwen/Qwen3.6-35B-A3B) share one model family. Each has 256 routed
+experts plus a shared expert and picks eight per token. Of its 40 layers, 10 use full attention and 30
+use GatedDeltaNet linear attention. The checkpoints are multimodal, and the recipes train their language
+model on text.
 
-The same recipe covers Qwen3.5 35B A3B. Both checkpoints use the Qwen3.5 MoE model family in Transformers. They have 256 routed experts, select eight experts for each token, and combine full-attention layers with GatedDeltaNet linear-attention layers.
+## Support
 
-## Halo support
+| FSDP | EP | CP | TP | ETP | EP+CP | EP+TP | LoRA | Online RL |
+|:---:|:---:|:---:|:---:|:---:|:---:|:---:|:---:|:---:|
+| Yes | Yes | No | Yes, up to 2 | Yes | No | Yes | Yes | vLLM, SGLang |
 
-| FSDP | EP | CP | TP | ETP | EP+CP | EP+TP | LoRA |
-|:---:|:---:|:---:|:---:|:---:|:---:|:---:|:---:|
-| Yes | Yes | No | Yes | Yes | No | Yes | Yes |
+- **Checkpoints:** `Qwen/Qwen3.6-35B-A3B` at revision `995ad96eacd98c81ed38be0c5b274b04031597b0` and
+  `Qwen/Qwen3.5-35B-A3B` at `59d61f3ce65a6d9863b86d2e96597125219dc754`. The 122B-A10B trains from
+  `examples/sft/qwen3_5/qwen3.5-122b-a10b-ep.yaml` at EP8 on one node, or EP16 across two Hopper nodes.
+- **GPUs:** eight at EP8, 32 experts per GPU, at 33,000 tokens.
 
-CP is not supported because the recurrent linear-attention layers cannot use a Ulysses sequence split. TP is limited to two GPUs because the released checkpoints have two KV heads.
+## Recipes
 
-| Checkpoint | Revision | Experts | Active experts |
-|---|---|---:|---:|
-| `Qwen/Qwen3.5-35B-A3B` | `59d61f3ce65a6d9863b86d2e96597125219dc754` | 256 | 8 |
-| `Qwen/Qwen3.6-35B-A3B` | `995ad96eacd98c81ed38be0c5b274b04031597b0` | 256 | 8 |
+Run these in the [training container](README.md#start-the-training-container).
 
-This recipe starts with eight NVIDIA B300 GPUs; EP8 places 32 experts on each GPU.
+### Full fine-tune
 
-## Start the training container
-
-Start the [cookbook container](README.md#start-the-training-container) and run the commands
-below inside it, except the server commands marked for the host.
-
-## Train all weights with EP8
-
-Create `qwen3.6-sft.yaml`.
-
-```yaml
-model_name_or_path: Qwen/Qwen3.6-35B-A3B
-model_revision: 995ad96eacd98c81ed38be0c5b274b04031597b0
-moe_balancing: bias_update_transient
-
-dataset:
-- HuggingFaceH4/ultrachat_200k@train_sft
-conversation_field: messages
-test_size: 0.01
-train_on_completions_only: true
-assistant_message_template: "<|im_start|>assistant\n"
-pad_token: <|endoftext|>
-eos_token: <|im_end|>
-chat_template: jinja-templates/qwen3/qwen3-multiturn.jinja
-force_chat_template: true
-
-expert_parallel_size: 8
-save_sharded_ep: false
-use_grouped_gemm: true
-fp32_router: true
-fp32_experts: true
-fp32_non_ep_params: true
-fp32_output_conversion: false
-
-attn_implementation: flash_attention_2
-use_liger_kernel: true
-packing: true
-padding_free: false
-max_length: 33000
-bf16: true
-
-per_device_train_batch_size: 1
-per_device_eval_batch_size: 1
-gradient_accumulation_steps: 8
-num_train_epochs: 1.0
-gradient_checkpointing: true
-
-optim: adamw_torch_fused
-learning_rate: 5.0e-06
-lr_scheduler_type: cosine
-warmup_steps: 32
-max_grad_norm: 1.0
-
-save_strategy: steps
-save_steps: 1000
-eval_strategy: steps
-eval_steps: 300
-save_total_limit: 1
-save_only_model: true
-output_dir: /data/checkpoints/qwen3.6-35b-a3b-ultrachat-ep8
-
-logging_steps: 1
-logging_first_step: true
-report_to: wandb
-remove_unused_columns: false
-dataloader_num_workers: 2
-
-use_peft: false
-```
-
-Launch eight processes.
+The shipped recipe trains Qwen3.5. To train Qwen3.6, override the model and its revision:
 
 ```bash
-halo launch sft qwen3.6-sft.yaml -n 8
+halo launch sft examples/sft/qwen3_5/qwen3.5-35b-a3b-ultrachat-ep.yaml -n 8 \
+  --model_name_or_path=Qwen/Qwen3.6-35B-A3B \
+  --model_revision=995ad96eacd98c81ed38be0c5b274b04031597b0 \
+  --output_dir=/data/checkpoints/qwen3.6-35b-a3b-sft
 ```
 
-Keep Flash Attention 2. Flash Attention 4's backward emits NaN gradients on this
-architecture, so the loader demotes an FA4 selection to SDPA for the `qwen3_5*` model
-types. Keep `padding_free: false` — the multimodal RoPE crashes on the varlen path.
+Drop the first two overrides to train Qwen3.5.
 
-`moe_balancing: bias_update_transient` is the working choice here, and what the
-shipped config sets. `aux_loss` is refused: the multimodal forward reads
-`output_router_logits` from kwargs, never from the config, so the coefficient
-would never reach the loss. The `_transient` spelling is a deliberate trade-off.
-The architecture has no exportable bias slot, so the bias balances routing during
-training but every exported checkpoint serves without it, and near-tied top-k
-picks can flip between trainer and server. Plain `bias_update` raises here for
-exactly that reason.
+### Other layouts
 
-To train Qwen3.5, replace the model name, revision, and output directory with the values in the checkpoint table.
+Add one of these to the full fine-tune command:
 
-## Add TP or ETP
+- EP8 + TP2, when attention memory is the limit: `--tensor_parallel_size=2`
+- Pure ETP8, to shard every expert instead of placing whole experts: `--expert_parallel_size=1 --expert_tensor_parallel_size=8`
+- A 4-way expert split: `--expert_parallel_size=4 --expert_tensor_parallel_size=2`
 
-On one eight-GPU node pure EP is 8, 2 or 1, with or without attention TP; for a 4-way
-expert split use `ep4 + etp2` ([rules](../parallelism.md#rules-that-save-you-a-wasted-run)).
-
-Use EP8 with TP2 when attention memory is the limit.
-
-```yaml
-expert_parallel_size: 8
-tensor_parallel_size: 2
-```
-
-TP cannot exceed two for these checkpoints.
-
-Use pure ETP to shard every expert across GPUs.
-
-```yaml
-expert_parallel_size: 1
-expert_tensor_parallel_size: 8
-```
-
-Do not enable CP. Do not enable TP and ETP together.
-
-## Run inference
-
-```python
-import torch
-from transformers import AutoModelForImageTextToText, AutoTokenizer
-
-path = "/data/checkpoints/qwen3.6-35b-a3b-ultrachat-ep8"
-tokenizer = AutoTokenizer.from_pretrained(path)
-model = AutoModelForImageTextToText.from_pretrained(
-    path,
-    dtype=torch.bfloat16,
-    device_map="auto",
-)
-
-messages = [{"role": "user", "content": "Write a short plan to investigate a training loss spike."}]
-inputs = tokenizer.apply_chat_template(
-    messages,
-    add_generation_prompt=True,
-    return_tensors="pt",
-).to(model.device)
-output = model.generate(**inputs, max_new_tokens=512, do_sample=True, temperature=0.2)
-print(tokenizer.decode(output[0][inputs["input_ids"].shape[-1]:], skip_special_tokens=True))
-```
-
-Serve the gathered checkpoint with vLLM on port 8000, from the host
-([server setup](README.md#serve-from-the-host)); vLLM 0.26.0's expert loader reads the
-gathered save's fused layout directly. SGLang 0.5.17 registers the multimodal
-`Qwen3_5MoeForConditionalGeneration` as well as the text-only `Qwen3_5MoeForCausalLM`,
-so it serves the hub checkpoint and a `text_only_model` export alike; vLLM takes the
-latter only after `scripts/after_training/reattach_vision_tower.py`.
+### LoRA
 
 ```bash
-VLLM_MODEL=/data/checkpoints/qwen3.6-35b-a3b-ultrachat-ep8 \
-VLLM_CUDA_DEVICES=0,1,2,3 VLLM_TP=4 VLLM_TOOL_PARSER=qwen3_xml \
-  docker compose -f docker-compose.vllm.yml up vllm-server
+halo launch sft examples/sft/qwen3_5/qwen3.5-35b-a3b-ultrachat-ep.yaml -n 8 \
+  --model_name_or_path=Qwen/Qwen3.6-35B-A3B \
+  --model_revision=995ad96eacd98c81ed38be0c5b274b04031597b0 \
+  --use_peft=true --learning_rate=1e-4 \
+  --lora_target_modules=q_proj,k_proj,v_proj,o_proj \
+  --output_dir=/data/checkpoints/qwen3.6-35b-a3b-lora
 ```
 
-## Train a LoRA adapter
+### GRPO
 
-```yaml
-use_peft: true
-lora_r: 16
-lora_alpha: 32
-lora_dropout: 0.05
-lora_target_modules:
-- q_proj
-- k_proj
-- v_proj
-- o_proj
+The shipped recipes train Qwen3.6, most of them on code contests. Read
+[Before a GRPO run](README.md#before-a-grpo-run) first. This one is a full fine-tune at EP4 with two vLLM
+servers on GPUs 4–7.
 
-learning_rate: 1.0e-04
-output_dir: /data/checkpoints/qwen3.6-35b-a3b-ultrachat-lora
-```
-
-Keep TP disabled for LoRA.
-
-## Continue with GRPO
-
-Copy the shipped EP4 code-contests recipe, set `model_name_or_path` to the SFT
-checkpoint's `/data` path, and point `output_dir` at `/data/checkpoints/` too; the recipe
-writes under the repo checkout.
-
-```bash
-cp examples/grpo/environmental/qwen3_5/vllm/qwen3.6-35b-a3b-code-contests-full-ep4.yaml \
-  qwen3.6-grpo.yaml
-```
-
-Its dataset is a placeholder: prepare a HardTests pool as described in
-[Code Contests](../../agent-docs/training-methods/grpo/environments/code-contests.md#dataset) ↗,
-then replace `your-org/code-contests-hardtests-rl:medium`. Its `audit` judge reads `OPENROUTER_API_KEY` (pass
-it with `--env-file`); drop that reward term to run without a judge. The other configs under
-`examples/grpo/environmental/qwen3_5/vllm/` change the environment, adapter or EP size.
-The full-finetune ep1 code-contests recipe is a curriculum: run `-stage1-codeforces`,
-`-stage2-hard` and `-stage3-extra-hard` in order, each from the previous stage's checkpoint.
-
-The recipe pins `chat_template: jinja-templates/qwen3/qwen3.6-reasoning-effort.jinja` and
-sends a thinking budget, so its two servers must serve that same file, with the `qwen3_xml`
-tool parser, the `qwen3` reasoning parser and `VLLM_USE_V2_MODEL_RUNNER=0`. Start them on
-the host ([server setup](README.md#serve-from-the-host)), on GPUs 4–7:
+On the host, start the servers on the SFT checkpoint:
 
 ```bash
 cp jinja-templates/qwen3/qwen3.6-reasoning-effort.jinja "$HALO_SCRATCH/"
-export VLLM_MODEL=/data/checkpoints/qwen3.6-35b-a3b-ultrachat-ep8
+export VLLM_MODEL=/data/checkpoints/qwen3.6-35b-a3b-sft
 export VLLM_CHAT_TEMPLATE=/data/qwen3.6-reasoning-effort.jinja
 export VLLM_TOOL_PARSER=qwen3_xml VLLM_REASONING_PARSER=qwen3 VLLM_USE_V2_MODEL_RUNNER=0
-
 VLLM_CUDA_DEVICES=4,5 VLLM_TP=2 VLLM_PORT=8000 \
   docker compose -p qwen36-rollout-0 -f docker-compose.vllm.yml up -d vllm-server
 VLLM_CUDA_DEVICES=6,7 VLLM_TP=2 VLLM_PORT=8001 \
   docker compose -p qwen36-rollout-1 -f docker-compose.vllm.yml up -d vllm-server
 ```
 
-The `hermes` default cannot parse this family's XML tool calls, so without `qwen3_xml`
-every episode ends unsolved and training runs on a flat zero gradient. Model Runner V2
-answers the thinking budget with a 400 on every request.
-
-Launch the trainer in the training container on GPUs 0–3.
+In the training container, copy the recipe, set its `dataset`, and launch on GPUs 0–3:
 
 ```bash
+cp examples/grpo/environmental/qwen3_5/vllm/qwen3.6-35b-a3b-code-contests-full-ep4.yaml qwen3.6-grpo.yaml
 CUDA_VISIBLE_DEVICES=0,1,2,3 DIST_NCCL_TIMEOUT_MINUTES=60 \
-  halo launch environmental-grpo qwen3.6-grpo.yaml -n 4
+  halo launch environmental-grpo qwen3.6-grpo.yaml -n 4 \
+  --model_name_or_path=/data/checkpoints/qwen3.6-35b-a3b-sft \
+  --output_dir=/data/checkpoints/qwen3.6-35b-a3b-grpo
 ```
 
-SGLang 0.5.17 also serves and weight-syncs this family, from the ep1 configs under
-`examples/grpo/environmental/qwen3_5/sglang/`. For the full fine-tune, copy
-`qwen3.6-35b-a3b-code-contests-full-ep1.yaml` to `qwen3.6-grpo-sglang.yaml` with the same
-edits; it expects two TP=1 servers on ports 30000 and 30001, serving the template file
-copied above, and a six-GPU trainer:
+The other configs in `examples/grpo/environmental/qwen3_5/vllm/` change the environment, the adapter or
+the EP size. The full fine-tune ep1 code-contests recipe is a curriculum: run `-stage1-codeforces`,
+`-stage2-hard` and `-stage3-extra-hard` in order, each from the previous stage's checkpoint.
+
+The `sglang/` configs (ep1) run on SGLang. The full fine-tune expects two TP=1 servers on GPUs 6 and 7
+and a six-GPU trainer:
 
 ```bash
-export SGLANG_MODEL="$HALO_SCRATCH/checkpoints/qwen3.6-35b-a3b-ultrachat-ep8"
-export SGLANG_CHAT_TEMPLATE="$HALO_SCRATCH/qwen3.6-reasoning-effort.jinja"
-export SGLANG_REASONING_PARSER=qwen3
-
+export SGLANG_MODEL="$HALO_SCRATCH/checkpoints/qwen3.6-35b-a3b-sft"
+export SGLANG_CHAT_TEMPLATE="$HALO_SCRATCH/qwen3.6-reasoning-effort.jinja" SGLANG_REASONING_PARSER=qwen3
 SGLANG_CUDA_DEVICES=6 SGLANG_PORT=30000 \
   docker compose -p qwen36-sglang-0 -f docker-compose.sglang.yml up -d sglang-server
 SGLANG_CUDA_DEVICES=7 SGLANG_PORT=30001 \
@@ -253,11 +99,69 @@ SGLANG_CUDA_DEVICES=7 SGLANG_PORT=30001 \
 ```
 
 ```bash
+cp examples/grpo/environmental/qwen3_5/sglang/qwen3.6-35b-a3b-code-contests-full-ep1.yaml qwen3.6-grpo-sglang.yaml
 CUDA_VISIBLE_DEVICES=0,1,2,3,4,5 DIST_NCCL_TIMEOUT_MINUTES=60 \
-  halo launch environmental-grpo qwen3.6-grpo-sglang.yaml -n 6
+  halo launch environmental-grpo qwen3.6-grpo-sglang.yaml -n 6 \
+  --model_name_or_path=/data/checkpoints/qwen3.6-35b-a3b-sft \
+  --output_dir=/data/checkpoints/qwen3.6-35b-a3b-grpo-sglang
 ```
 
-On SGLang, `rollout_max_thinking_tokens` and `carry_reasoning` are refused at startup, and the effort profiles' `thinking_tokens` cap nothing, so
-`rollout_max_tokens` is the per-turn bound
-([Supported Matrix](../supported-matrix.md#rollout-engines)). Full setup:
-[Async GRPO with Environments](../../agent-docs/training-methods/grpo/async-grpo/README.md) ↗.
+## Settings that matter
+
+- **Attention.** The SFT recipe pins `flash_attention_2`. FA4's backward produces NaN gradients on this
+  family, so Halo replaces an FA4 pick with SDPA. The GRPO recipes pin `sdpa`.
+- **Packing, not padding-free.** Keep `padding_free: false`. Its variable-length path crashes FA2 on this
+  family's multimodal RoPE.
+- **Router balancing.** The SFT recipes set `moe_balancing: bias_update_transient`, and the GRPO recipes
+  set `none`. The router has no bias slot, so plain `bias_update` raises, and `aux_loss` is refused on
+  the multimodal class. The transient bias balances training only: exported checkpoints serve without
+  it, so near-tied expert picks can differ between trainer and server.
+- **Long context.** The SFT recipe sets `fp32_non_ep_params: true` for stable training at 33,000 tokens.
+- **Tool parser and thinking budget.** vLLM needs `VLLM_TOOL_PARSER=qwen3_xml`. The default `hermes`
+  leaves the XML tool calls as text, so every episode scores zero. A thinking budget also needs
+  `VLLM_REASONING_PARSER=qwen3` and `VLLM_USE_V2_MODEL_RUNNER=0`, or every request fails with a 400.
+- **SGLang rollouts.** `rollout_max_thinking_tokens` and `carry_reasoning` are refused at startup, and
+  the effort profiles' `thinking_tokens` cap nothing there.
+
+## Limits
+
+- No CP: the linear-attention layers can't split the sequence across ranks.
+- TP stops at 2 because the checkpoints have two KV heads. TP shards only the 10 full-attention layers,
+  so per-GPU memory drops much less than `1/tp_size`.
+- Online RL refuses `text_only_model: true`.
+- Saves drop the hub checkpoint's `mtp.*` multi-token-prediction head. `reattach-vision-tower` restores
+  it for a text-only export; no tool restores it on a multimodal save.
+
+## Export and serve
+
+Gathered saves keep the language-model experts fused, like the hub checkpoints. Transformers and vLLM
+0.26.0 read that layout directly. `halo run unfuse-moe-experts` rewrites it per expert for a loader that
+needs that layout.
+
+Smoke-test with `AutoModelForImageTextToText` and `AutoTokenizer`
+([snippet](README.md#smoke-test-a-checkpoint)). Serve from the [host](README.md#serve-from-the-host)
+with vLLM on port 8000:
+
+```bash
+VLLM_MODEL=/data/checkpoints/qwen3.6-35b-a3b-sft VLLM_CUDA_DEVICES=0,1,2,3 VLLM_TP=4 \
+VLLM_TOOL_PARSER=qwen3_xml \
+  docker compose -f docker-compose.vllm.yml up -d vllm-server
+```
+
+`text_only_model: true` trains through the text-only class and drops the vision tower from the export.
+Its export, and a merge of its LoRA adapter, carry the run's tokenizer but no processor files. SGLang
+serves that export as it is. vLLM needs the vision tower back first, which also restores the processor
+files:
+
+```bash
+halo run reattach-vision-tower --input_dir /data/checkpoints/<text-only-export> \
+  --model_id Qwen/Qwen3.6-35B-A3B --output_dir /data/checkpoints/<text-only-export>-vl
+```
+
+## Reference
+
+- [Qwen3.5 / Qwen3.6 model notes](../../agent-docs/models/qwen3_5.md) ↗: why CP is blocked, the
+  text-only export, chat templates
+- [Async GRPO with Environments](../training-methods/async-grpo-environments.md)
+- Model cards: [Qwen3.5-35B-A3B](https://huggingface.co/Qwen/Qwen3.5-35B-A3B),
+  [Qwen3.6-35B-A3B](https://huggingface.co/Qwen/Qwen3.6-35B-A3B)

@@ -20,7 +20,8 @@ expert_parallel_size: 4               # 256 routed experts → 64/rank
 save_sharded_ep: false
 
 # --- Attention & kernels ---
-# The pinned revision provides no Flash-Attention path — sdpa is the only supported backend.
+# sdpa: the pinned modeling code never passes sliding_window to flash, which would run the sliding layers
+# as full attention; SDPA applies the sliding mask.
 attn_implementation: sdpa
 packing: true
 max_length: 2048

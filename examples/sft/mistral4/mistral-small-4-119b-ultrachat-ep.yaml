@@ -2,7 +2,7 @@
 # Launch: torchrun --nproc_per_node=8 scripts/training/sft.py <this config>
 
 # --- Model ---
-# The public mistralai/Mistral-Small-4-119B-2603 checkpoint ships FP8 expert weights — dequantize
+# The public mistralai/Mistral-Small-4-119B-2603 checkpoint ships its language-model weights in FP8 — dequantize
 # once with scripts/before_training/convert_mistral4_bf16.py and point this at the result.
 model_name_or_path: /mnt/models/Mistral-Small-4-119B-BF16   # placeholder — your converted checkpoint
 # Mistral4's DeepSeek-V3-style router has no aux-loss term (output_router_logits is inert) and no exportable

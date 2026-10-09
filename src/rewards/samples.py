@@ -6,11 +6,12 @@ A term picks its VIEW of the sample — the final answer, the full transcript or
 the renderers here turn that view into the text a judge reads: numbered turns, the policy's
 reasoning set apart from its visible text, every tool call with its arguments and every result
 under the call it answers, and the turns the engine cut or the policy wasted marked as such, with the
-calls a cut turn was writing marked as never run.
+calls a cut turn was writing marked as never run. Text a view quotes never spells one of the prompt's tags.
 """
 
 import contextlib
 import json
+import re
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Any
@@ -19,6 +20,15 @@ from src.inference.response import get_reasoning_text
 from src.rewards.terms import View
 
 Message = dict[str, Any]
+
+# Each part of a judge's prompt goes between tags of its own, the view last, and a view sets a turn's reasoning apart
+# in a block of its own: a task's markdown headings and a program's comments would read as the prompt's own sections
+# under markdown ones. Text the prompt quotes spells none of these tags (:func:`escape_tags`).
+VIEW_TAGS = {View.FINAL: "final_answer", View.FULL: "transcript", View.DIGEST: "transcript_digest"}
+PART_TAGS = ("setting", "policy_instructions", "task", "policy_tools", "reference_answer", *VIEW_TAGS.values())
+REASONING_TAG = "reasoning"
+# The ``<`` that opens or closes one of them, in any case and with any attributes: a judge reads each as the tag.
+_PROMPT_TAG = re.compile(rf"<(?=/?(?:{'|'.join((*PART_TAGS, REASONING_TAG))})\b)", re.IGNORECASE)
 
 # The turn flags an environment stamps on a sample message, each with the note a judge reads for it.
 TURN_FLAG_NOTES = {
@@ -100,7 +110,8 @@ def scored_messages(sample: ScoringSample, view: View) -> list[Message]:
 
 
 def view_text(sample: ScoringSample, view: View, *, include_reasoning: bool, max_chars: int) -> str:
-    """The text of one view of the sample, cut to ``max_chars`` with its end kept (:func:`cut_middle`)."""
+    """The text of one view of the sample, what it quotes escaped (:func:`escape_tags`), cut to ``max_chars`` with
+    its end kept (:func:`cut_middle`)."""
     if view is View.FINAL:
         text = render_final_answer(sample)
     elif view is View.FULL:
@@ -110,6 +121,12 @@ def view_text(sample: ScoringSample, view: View, *, include_reasoning: bool, max
     else:
         raise ValueError(f"unknown view {view!r}")
     return cut_middle(text, max_chars)
+
+
+def shows_reasoning(sample: ScoringSample, view: View, *, include_reasoning: bool) -> bool:
+    """Whether :func:`view_text` shows any of the sample's reasoning: a ``full`` or ``digest`` view shows each turn's
+    with ``include_reasoning`` on, a ``final`` view never does."""
+    return include_reasoning and view is not View.FINAL and any(map(get_reasoning_text, sample.completion))
 
 
 def render_actions(sample: ScoringSample, view: View, *, max_chars: int) -> str:
@@ -133,10 +150,11 @@ def render_actions(sample: ScoringSample, view: View, *, max_chars: int) -> str:
 
 def render_final_answer(sample: ScoringSample) -> str:
     """The episode's final answer, or a note that there is none with the last assistant text after it,
-    so a judge reads a fragment or a tool-call turn as what it is, never as the answer."""
+    so a judge reads a fragment or a tool-call turn as what it is, never as the answer; either escaped
+    (:func:`escape_tags`)."""
     if sample.final_answer is not None:
-        return sample.final_answer
-    last = final_assistant_text(sample.completion)
+        return escape_tags(sample.final_answer)
+    last = escape_tags(final_assistant_text(sample.completion))
     return f"{NO_FINAL_ANSWER}\nLast assistant turn:\n{last}" if last else NO_FINAL_ANSWER
 
 
@@ -169,7 +187,7 @@ def render_transcript(messages: Sequence[Message], *, include_reasoning: bool, m
     text = "\n\n".join(turns)
     if not include_reasoning or max_chars is None or len(text) <= max_chars:
         return text
-    reasoning = [len(get_reasoning_text(message) or "") for message in messages]
+    reasoning = [len(_reasoning(message)) for message in messages]
     # What stays whole: the joins, every turn less its reasoning, and the marker each cut reasoning gains.
     fixed = len(text) - sum(reasoning) + len(CUT_MARKER.format(dropped=sum(reasoning))) * sum(map(bool, reasoning))
     shares = _even_shares(reasoning, max(0, max_chars - fixed))
@@ -184,7 +202,7 @@ def render_digest(sample: ScoringSample, *, include_reasoning: bool) -> str:
     to their heads (verbatim, so a quote from a program matches), the head and tail of each result —
     then the final answer whole, the artifact an audit reads."""
     turns = [_render_turn(i, m, include_reasoning, digest=True) for i, m in enumerate(sample.completion, 1)]
-    final = sample.final_answer if sample.final_answer is not None else NO_FINAL_ANSWER
+    final = escape_tags(sample.final_answer) if sample.final_answer is not None else NO_FINAL_ANSWER
     return "\n\n".join([*turns, f"Final answer:\n{final}"])
 
 
@@ -196,6 +214,12 @@ def cut_middle(text: str, max_chars: int) -> str:
     head = int(max_chars * CUT_HEAD_SHARE)
     tail = max_chars - head
     return text[:head] + CUT_MARKER.format(dropped=len(text) - head - tail) + (text[-tail:] if tail else "")
+
+
+def escape_tags(text: str) -> str:
+    """``text`` with the ``<`` of every prompt tag it spells (:data:`PART_TAGS`, :data:`REASONING_TAG`, in any case)
+    written ``&lt;``: a judge still reads it, but it neither opens nor closes a part or a reasoning block."""
+    return _PROMPT_TAG.sub("&lt;", text)
 
 
 def samples_from_completions(
@@ -245,25 +269,30 @@ def _render_turn(
     notes = [note for flag, note in TURN_FLAG_NOTES.items() if message.get(flag)]
     if notes:
         header += f"  — {'; '.join(notes)}"
-    lines = [header]
-    reasoning = get_reasoning_text(message) if include_reasoning else None
+    lines = [escape_tags(header)]
+    reasoning = _reasoning(message) if include_reasoning else ""
     if reasoning:
         if digest:
             reasoning = _head(reasoning, DIGEST_CHARS)
         elif reasoning_chars is not None:
             reasoning = cut_middle(reasoning, reasoning_chars)
-        lines.append(f"<reasoning>\n{reasoning}\n</reasoning>")
-    content = _text(message.get("content"))
+        lines.append(f"<{REASONING_TAG}>\n{reasoning}\n</{REASONING_TAG}>")
+    content = escape_tags(_text(message.get("content")))
     if content:
         if digest:
             content = _head(content, DIGEST_CHARS) if role == "assistant" else cut_middle(content, DIGEST_CHARS)
         lines.append(content)
     argument_chars = DIGEST_INLINE_CHARS if digest else None
     for call in message.get("tool_calls") or []:
-        lines.append(_render_call(call, argument_chars))
+        lines.append(escape_tags(_render_call(call, argument_chars)))
     for call in message.get(CUT_CALLS_KEY) or []:
-        lines.append(_render_call(call, argument_chars, note=CUT_CALL_NOTE))
+        lines.append(escape_tags(_render_call(call, argument_chars, note=CUT_CALL_NOTE)))
     return "\n".join(lines)
+
+
+def _reasoning(message: Message) -> str:
+    """A turn's reasoning as a view quotes it (:func:`escape_tags`), ``""`` when it has none."""
+    return escape_tags(get_reasoning_text(message) or "")
 
 
 def _acted_text(message: Message, *, digest: bool) -> str:

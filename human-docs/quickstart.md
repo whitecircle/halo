@@ -1,12 +1,12 @@
 # Quickstart
 
-From a running container to a finished run. If you haven't pulled the image and
-started a container yet, do [Installation](installation.md) first.
+This page takes you from a running container to a finished run. If you don't
+have a container yet, start with [Installation](installation.md).
 
 ## 1. Pick a recipe
 
-`examples/` holds a runnable config per method and model family. Good starting
-points — check the hardware column before launching:
+`examples/` holds a config per method and model family. These make good first
+runs. Check the hardware column before you launch.
 
 | Recipe | Config | Hardware |
 | --- | --- | --- |
@@ -20,17 +20,22 @@ points — check the hardware column before launching:
 | Online GRPO (RLVR) | `examples/grpo/online/qwen3/online-grpo-qwen3-4b-smoke.yaml` | trainer + vLLM server |
 | Async GRPO with environments | `examples/grpo/environmental/environmental-grpo-template.yaml` | trainer + vLLM + Ray |
 
-[Choosing a Method](choosing-a-method.md) maps the data you have to the trainer
-you want, and each [training method](training-methods/README.md) page has its own
-data format and keys. The online RL recipes need a separate
-[rollout server](rollout-servers.md); start with SFT and set that up later.
+The offline GRPO and async GRPO configs ship with a placeholder `dataset`. Point
+it at your data first.
+
+[Choosing a method](choosing-a-method.md) matches your data to a trainer. Each
+[training method](training-methods/README.md) page lists its data format and
+keys.
+
+The online RL recipes also need a separate [rollout server](rollout-servers.md).
+Start with SFT and set that up later.
 
 ## 2. Launch it
 
 Inside the container:
 
 ```bash
-# Single GPU (LoRA): without -n the run uses one GPU, however many the container sees
+# 1 GPU (LoRA). Without -n the run uses one GPU, however many the container sees.
 halo launch sft examples/sft/qwen3/qwen3-4b-ultrachat-lora.yaml
 
 # 8 GPUs, full fine-tune
@@ -40,32 +45,38 @@ halo launch sft examples/sft/qwen3/qwen3-4b-ultrachat.yaml -n 8
 halo launch sft examples/sft/qwen3_5/qwen3.5-35b-a3b-ultrachat-ep.yaml -n 8
 ```
 
-Most config fields can be overridden on the command line after the config
-(`--learning_rate=1e-5 --max_length=32000`; dict-valued fields stay in the YAML),
-and `halo launch --list` shows every method. The full CLI is [The halo CLI](cli.md); what goes in a config file is
-[Writing a Config](configuration.md).
+To change a field without editing the file, add it after the config path:
+`--learning_rate=1e-5 --max_length=32000`. A few container fields, such as
+`dataset` and `rewards`, can only be set in the YAML. `halo launch --list` prints
+every method. See [The `halo` CLI](cli.md) and
+[Writing a config](configuration.md).
 
-For a long run, detach the container instead of holding a terminal open:
-replace `-it` with `-d --name myrun` in the `docker run` command and give it
-a `bash -lc "halo launch ..."` to execute.
+For a long run, detach the container. In the `docker run` command, replace `-it`
+with `-d --name myrun` and pass `bash -lc "halo launch ..."` as the command.
 
 ## 3. Watch it
 
-Everything the run prints is mirrored to `<output_dir>/log/run.log`:
+The run copies rank 0's console output to `<output_dir>/log/run.log`. For the
+full fine-tune above:
 
 ```bash
 tail -f checkpoints/sft-qwen3-4b-ultrachat/log/run.log
 ```
 
-With `report_to: wandb` in the config (most examples have it) and a
-`WANDB_API_KEY` in your `.env`, the run appears in Weights & Biases —
-loss, learning rate, and optionally throughput and MoE metrics. See
-[Monitoring](monitoring.md).
+Most examples set `report_to: wandb`. With `WANDB_API_KEY` in your `.env`, the
+run shows up in Weights & Biases with loss and learning rate; throughput and MoE
+metrics are opt-in. See [Monitoring](monitoring.md).
 
 ## 4. Use the result
 
-Checkpoints land in `output_dir` in standard HuggingFace form: by default you
-can `from_pretrained` them, serve them with vLLM, or upload them to the Hub
-as-is. LoRA runs save an adapter instead, and the opt-in sharded save modes need
-a one-command merge first. [Checkpoints & Export](checkpoints.md) covers all of
-it.
+Checkpoints land in `output_dir` as standard HuggingFace models. Load them with
+`from_pretrained` or upload them to the Hub as they are. Most families also serve
+on vLLM directly; a few need a conversion first or have no serving path.
+
+Two kinds of run need one more step:
+
+- A LoRA run saves an adapter. Serve it as an adapter or merge it into the base.
+- The opt-in sharded EP save (`save_sharded_ep: true`) needs
+  `halo run merge-ep-shards` first.
+
+[Checkpoints](checkpoints.md) covers saving, resuming, export and serving.

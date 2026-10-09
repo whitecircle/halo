@@ -2,8 +2,9 @@
 
 ## Console and log file
 
-Everything a run prints — trainer logs, tqdm, native NCCL output — is
-mirrored to `<output_dir>/log/run.log` on the logging rank. For a detached
+The logging rank (global rank 0, or each node's first rank on per-node disks)
+copies its console output, including tqdm and NCCL messages, to
+`<output_dir>/log/run.log`. Other ranks' output is not in it. For a detached
 run, that file is your console:
 
 ```bash
@@ -11,59 +12,65 @@ tail -f checkpoints/sft-qwen3-4b-ultrachat/log/run.log
 ```
 
 The startup banner prints the parallelism layout (EP/CP/TP/DP sizes) and a
-parameter breakdown, plus the detected GPU and precision when
-`enable_efficiency_metrics: true`. Glance at it to confirm the run is shaped the
-way you intended.
+parameter breakdown. With `enable_efficiency_metrics: true` it also prints the
+detected GPU and precision. Check it to confirm the run has the shape you
+intended.
 
 ## Weights & Biases and ClearML
 
-Tracking rides the standard HuggingFace integration:
+Tracking uses the standard HuggingFace integration:
 
 ```yaml
 report_to: wandb          # or clearml, tensorboard, none
-project_name: my-project  # becomes the W&B project / ClearML project
-run_name: qwen3-sft-lr1e5 # optional; defaults to <script>-<output dir name>
+project_name: my-project  # the W&B or ClearML project
+run_name: qwen3-sft-lr1e5 # optional; defaults to <method>-<mode>-<output dir name>
 ```
 
-Credentials come from your `.env` (`WANDB_API_KEY`; ClearML uses its usual
-`clearml.conf` / `CLEARML_API_*` setup), which the container only sees via
-`--env-file .env`. Halo sets `WANDB_PROJECT` and `CLEARML_PROJECT` from
-`project_name` and `CLEARML_TASK` from the run name, which W&B takes through
-`run_name`, so you don't juggle `WANDB_PROJECT` yourself.
+Credentials come from your `.env`: `WANDB_API_KEY` for W&B, the usual
+`clearml.conf` or `CLEARML_API_*` setup for ClearML. Halo does not load `.env`
+itself; pass it to the container with `--env-file .env`.
 
-When resuming a run and you want the curves to continue in the same W&B run,
-export `WANDB_RUN_ID=<id>` and `WANDB_RESUME=allow` before relaunching;
-otherwise the resume starts a fresh run.
+Halo sets `WANDB_PROJECT` and `CLEARML_PROJECT` from `project_name`, and
+`CLEARML_TASK` from the run name, so you do not set them yourself.
+
+A resumed run starts a new W&B run. To continue the same curves, export
+`WANDB_RUN_ID=<id>` and `WANDB_RESUME=allow` before relaunching.
 
 ## What gets logged
 
-Loss, learning rate, and grad-norm come from the base trainer at every
-`logging_steps` (most examples use `logging_steps: 1`). Halo adds opt-in
-metric groups on top:
+The base trainer logs loss, learning rate and grad norm every `logging_steps`
+(most examples use `1`). Halo adds these metric groups:
 
 | Config field | Default | Adds |
 | --- | --- | --- |
-| `enable_efficiency_metrics` | off | step time, tokens/s per GPU and cluster-wide, allocated/peak GPU memory — the numbers [Performance](performance.md) quotes |
-| `report_mfu_diagnostics` | off | logs MFU and achieved TFLOPS; needs `enable_efficiency_metrics` on. The S-MFU variants appear only for MoE, where plain MFU misreads sparse models |
-| `enable_moe_metrics` | on | expert load balance averaged over the MoE layers: `moe/load_max`, `moe/load_cv`, `moe/dead_frac`, …, plus `moe/load_max_first` / `moe/load_max_last` for the first and last layer (no-op on dense models) |
-| `generate_eval_examples` | on (off for SFT) | a table of sample generations at each evaluation (skipped under TP/CP) |
-| `save_completions` (online / async GRPO) | on | writes each step's rollouts to `<output_dir>/completions/completions_<step>.parquet` (prompt, completion, reward, advantage), plus a `completions` table in W&B when `report_to` includes `wandb` |
-| `log_completions` (online / async GRPO) | off | additionally prints the per-sample table to the console |
+| `enable_efficiency_metrics` | off | step time, tokens/s per GPU and cluster-wide, allocated and peak GPU memory |
+| `report_mfu_diagnostics` | off | MFU and achieved TFLOPS; needs `enable_efficiency_metrics`. MoE runs also get the S-MFU variants, since plain MFU misreads sparse models |
+| `enable_moe_metrics` | on | expert load balance averaged over MoE layers (`moe/load_max`, `moe/load_cv`, `moe/dead_frac`, …), plus `moe/load_max_first` and `moe/load_max_last`. Reports when router logits are on (`moe_balancing: aux_loss`); under `bias_update` the balancing callback logs the `moe/*` keys instead. No-op on dense models |
+| `generate_eval_examples` (SFT, DPO, SMPO, offline GRPO) | on (off for SFT) | a table of sample generations at each evaluation; skipped under TP and CP |
+| `save_completions` (online and async GRPO) | on | each step's rollouts in `<output_dir>/completions/completions_<step>.parquet` (`_eval` suffix for evaluation): prompt, completion, one column per reward function, advantage. Also a W&B `completions` table when `report_to` includes `wandb` |
+| `log_completions` (online and async GRPO) | off | also prints the per-sample table to the console |
 
-For async GRPO with environments, give `sampling/logratio_mean` a standing
-dashboard panel: a steady negative drift means the weight sync to the rollout
-server is broken, or, with `advantage/net_token_mass` staying negative and
-`entropy` climbing after it, a KL-free run drifting, which `balance_token_mass` and the
-[early stop](../agent-docs/training-methods/grpo/async-grpo/monitoring.md#early-stop) ↗
-address. Online GRPO logs TRL's unsigned gap
-`sampling/sampling_logp_difference/mean` instead, with the importance-sampling
-correction on. Details on every callback:
+## RL health
+
+For async GRPO with environments, keep `sampling/logratio_mean` on a dashboard
+panel. A steady negative drift means one of two things:
+
+- the weight sync to the rollout server is broken;
+- a KL-free run is drifting, if `advantage/net_token_mass` stays negative and
+  `entropy` climbs after it. `balance_token_mass` and the
+  [early stop](../agent-docs/training-methods/grpo/async-grpo/monitoring.md#early-stop) ↗
+  address this.
+
+Online GRPO logs TRL's unsigned gap `sampling/sampling_logp_difference/mean`
+instead, with the importance-sampling correction on. Every callback and metric:
 [Callbacks](../agent-docs/training-methods/callbacks.md) ↗.
 
 ## Profiling
 
-To see where the time goes, set `enable_torch_profiler: true` — it captures
-a Chrome trace on rank 0 (`profiler_ranks: "all"` for every rank) with the MoE phases labeled. Feed them to
-`halo run trace-report` for a compute/communication/idle breakdown.
+Set `enable_torch_profiler: true` to see where the time goes. It captures a
+Chrome trace on rank 0, with the EP phases (dispatch, expert compute, combine)
+labeled; `profiler_ranks: "all"` captures every rank. `halo run trace-report`
+turns the traces into a compute, communication and idle breakdown.
 
-Start at [Debugging](../agent-docs/reference/debugging.md) ↗.
+Hangs, memory snapshots and the rest of the toolbox:
+[Debugging](../agent-docs/reference/debugging.md) ↗.

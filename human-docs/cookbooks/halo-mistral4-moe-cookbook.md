@@ -1,224 +1,99 @@
-# Halo / Mistral 4 MoE cookbook
+# Mistral 4 MoE Cookbook
 
-Fine-tune [Mistral Small 4 119B A6B](https://huggingface.co/mistralai/Mistral-Small-4-119B-2603) with Halo.
+[Mistral Small 4 119B](https://huggingface.co/mistralai/Mistral-Small-4-119B-2603) has 128 routed experts
+plus a shared expert and picks four per token. It uses MLA attention and ships with a Pixtral vision
+encoder; the recipe trains on text and keeps the multimodal wrapper intact. The public checkpoint stores
+its language-model weights in FP8, so convert it to BF16 once before training.
 
-The model has 128 routed experts and selects four experts for each token. It also has one shared expert and a Pixtral vision encoder. This recipe uses text data and keeps the multimodal model wrapper intact.
+## Support
 
-## Halo support
+| FSDP | EP | CP | TP | ETP | EP+CP | EP+TP | LoRA | Online RL |
+|:---:|:---:|:---:|:---:|:---:|:---:|:---:|:---:|:---:|
+| Yes | Yes | Yes | Yes | Yes | partial | Yes | Yes | No |
 
-| FSDP | EP | CP | TP | ETP | EP+CP | EP+TP | LoRA |
-|:---:|:---:|:---:|:---:|:---:|:---:|:---:|:---:|
-| Yes | Yes | Yes | Yes | Yes | partial | Yes | Yes |
+`partial`: EP+CP is a valid shape, but its only GPU test on this family is a tiny-model LoRA run. Try a
+short run before a long one.
 
-Halo uses DeepEP for token dispatch and grouped GEMM for the expert projections, and it preserves Mistral 4's group-top-k router and shared expert. CP and selective TP support the MLA attention layers.
+- **Checkpoint:** `mistralai/Mistral-Small-4-119B-2603`, converted to BF16.
+- **GPUs:** eight at EP8, 16 experts per GPU, at 32,000 tokens. Plan for about 500 GB of disk for the FP8
+  download and the BF16 copy together.
 
-This recipe starts with eight NVIDIA B300 GPUs. EP8 places 16 routed experts on each GPU.
+## Recipes
 
-## Start the training container
+Run these in the [training container](README.md#start-the-training-container).
 
-Start the [cookbook container](README.md#start-the-training-container) and run the commands
-below inside it.
-
-## Convert the checkpoint to BF16
-
-The public checkpoint stores its expert weights in FP8, so convert it once before EP training. The source and destination checkpoints need about 500 GB of disk space in total.
+### Convert the checkpoint
 
 ```bash
-hf download mistralai/Mistral-Small-4-119B-2603 \
-  --local-dir /data/models/mistral-small-4-119b-fp8
-
-python scripts/before_training/convert_mistral4_bf16.py \
-  --model_id /data/models/mistral-small-4-119b-fp8 \
+halo run convert-mistral4-bf16 --model_id mistralai/Mistral-Small-4-119B-2603 \
   --output_dir /data/models/mistral-small-4-119b-bf16
 ```
 
-The converter streams one input shard at a time and writes a standard BF16 Hugging Face checkpoint.
+The converter streams one shard at a time and writes a standard BF16 Hugging Face checkpoint.
 
-## Train all weights with EP8
-
-Create `mistral4-sft.yaml`, or start from `examples/sft/mistral4/mistral-small-4-119b-ultrachat-ep.yaml` and change `model_name_or_path` and `output_dir`.
-
-```yaml
-model_name_or_path: /data/models/mistral-small-4-119b-bf16
-moe_balancing: bias_update_transient
-
-dataset:
-- HuggingFaceH4/ultrachat_200k@train_sft
-conversation_field: messages
-test_size: 0.01
-
-expert_parallel_size: 8
-save_sharded_ep: false
-use_grouped_gemm: true
-fp32_router: true
-fp32_experts: true
-fp32_non_ep_params: true
-fp32_output_conversion: false
-
-attn_implementation: flash_attention_2
-use_liger_kernel: true
-packing: true
-max_length: 32000
-bf16: true
-
-per_device_train_batch_size: 1
-per_device_eval_batch_size: 1
-gradient_accumulation_steps: 8
-num_train_epochs: 1.0
-gradient_checkpointing: true
-
-optim: adamw_torch_fused
-learning_rate: 5.0e-06
-lr_scheduler_type: cosine
-warmup_steps: 32
-max_grad_norm: 1.0
-
-save_strategy: steps
-save_steps: 1000
-eval_strategy: steps
-eval_steps: 300
-save_total_limit: 1
-save_only_model: true
-output_dir: /data/checkpoints/mistral-small-4-119b-ultrachat-ep8
-
-logging_steps: 1
-logging_first_step: true
-report_to: wandb
-remove_unused_columns: false
-dataloader_num_workers: 2
-
-use_peft: false
-
-assistant_message_template: "[/INST]"
-train_on_completions_only: true
-pad_token: <pad>
-eos_token: </s>
-chat_template: jinja-templates/mistral4/mistral4-multiturn.jinja
-force_chat_template: true
-```
-
-Launch eight processes.
+### Full fine-tune
 
 ```bash
-halo launch sft mistral4-sft.yaml -n 8
+halo launch sft examples/sft/mistral4/mistral-small-4-119b-ultrachat-ep.yaml -n 8 \
+  --model_name_or_path=/data/models/mistral-small-4-119b-bf16 \
+  --output_dir=/data/checkpoints/mistral-small-4-sft
 ```
 
-Bias-update balancing changes expert selection without adding an auxiliary loss. Mistral 4 needs the `_transient` spelling: the router has no exportable bias slot, so the bias balances training-time routing only and every exported checkpoint serves without it (near-tied top-k picks can flip vs training). Plain `bias_update` raises. Halo gathers the expert weights when it saves because `save_sharded_ep` is false.
+### Other layouts
 
-Keep `flash_attention_2`, the attention the shipped config pins.
+Add one of these to the full fine-tune command:
 
-## Add CP, TP, or ETP
+- EP8 + CP2, for long sequences (`partial`, see above): `--context_parallel_size=2 --packing=false`
+- EP8 + TP2, when attention memory is the limit: `--tensor_parallel_size=2`. TP shards the MLA
+  expansion and output projections and keeps the compression projections whole.
+- Pure ETP8, to shard every expert instead of placing whole experts: `--expert_parallel_size=1 --expert_tensor_parallel_size=8`
+- EP2 + ETP4, experimental: `--expert_parallel_size=2 --expert_tensor_parallel_size=4`
 
-Use CP2 with EP8 for longer sequences. EP+CP is a valid shape, but on this family its only
-GPU test is a tiny-model LoRA row at EP2+CP2, so validate it with a short run first. Disable
-packing when CP splits the sequence.
-
-```yaml
-expert_parallel_size: 8
-context_parallel_size: 2
-packing: false
-```
-
-Use TP2 with EP8 when attention memory is the limit. TP shards the MLA expansion and output projections. The compression projections stay replicated.
-
-```yaml
-expert_parallel_size: 8
-tensor_parallel_size: 2
-```
-
-Use pure ETP8 to shard the experts without DeepEP dispatch. Every rank then keeps all 128
-experts at one-eighth width instead of 16 full experts.
-
-```yaml
-expert_parallel_size: 1
-expert_tensor_parallel_size: 8
-```
-
-All three layouts use eight processes.
+### LoRA
 
 ```bash
-halo launch sft mistral4-sft.yaml -n 8
+halo launch sft examples/sft/mistral4/mistral-small-4-119b-ultrachat-ep.yaml -n 8 \
+  --model_name_or_path=/data/models/mistral-small-4-119b-bf16 \
+  --use_peft=true --learning_rate=1e-4 \
+  --lora_target_modules=q_a_proj,q_b_proj,kv_a_proj_with_mqa,kv_b_proj,o_proj \
+  --output_dir=/data/checkpoints/mistral-small-4-lora
 ```
 
-Do not combine attention TP with ETP. Do not combine LoRA with TP.
+### GRPO
 
-## Run multimodal inference
+Online GRPO is not available for this family (see [Limits](#limits)). Offline GRPO trains on
+pre-generated, scored completions and needs no server: see [Offline GRPO](../training-methods/offline-grpo.md).
 
-```python
-import torch
-from transformers import AutoProcessor, Mistral3ForConditionalGeneration
+## Settings that matter
 
-path = "/data/checkpoints/mistral-small-4-119b-ultrachat-ep8"
-processor = AutoProcessor.from_pretrained(path)
-model = Mistral3ForConditionalGeneration.from_pretrained(
-    path,
-    dtype=torch.bfloat16,
-    device_map="auto",
-)
+- **Router balancing.** The recipe sets `moe_balancing: bias_update_transient`. The router has no bias
+  slot, so plain `bias_update` raises, and it has no auxiliary loss either. The transient bias balances
+  training only: exported checkpoints serve without it, so near-tied expert picks can differ between
+  training and serving.
+- **Chat template.** The recipe forces `jinja-templates/mistral4/mistral4-multiturn.jinja`, because
+  `mistral4-instruct.jinja` accepts only single-turn rows and UltraChat is multi-turn. It marks
+  completions with `assistant_message_template: "[/INST]"`.
+- **Attention.** The recipe pins `flash_attention_2`.
 
-messages = [
-    {
-        "role": "user",
-        "content": [
-            {"type": "text", "text": "Describe the image and list the safety risks."},
-            {
-                "type": "image_url",
-                "image_url": {
-                    "url": "https://huggingface.co/datasets/huggingface/documentation-images/resolve/main/transformers/tasks/car.jpg"
-                },
-            },
-        ],
-    }
-]
-inputs = processor.apply_chat_template(
-    messages,
-    add_generation_prompt=True,
-    tokenize=True,
-    return_dict=True,
-    return_tensors="pt",
-).to(model.device)
+## Limits
 
-output = model.generate(**inputs, max_new_tokens=512, do_sample=True, temperature=0.2)
-print(processor.decode(output[0][inputs["input_ids"].shape[-1]:], skip_special_tokens=True))
-```
+- No online RL. Neither vLLM 0.26.0 nor SGLang 0.5.17 has a `mistral4` model class, so Halo refuses
+  online and async GRPO when it builds the trainer.
+- Neither pinned engine serves a Halo export. vLLM serves the public repo only through its
+  Mistral-native `params.json` layout, which a Halo export does not have. vLLM's generic transformers
+  backend (`--model-impl transformers`) is untested here.
+- LoRA is refused under TP, and attention TP can't combine with ETP.
 
-## Serving
+## Export and serve
 
-Neither pinned rollout engine serves a toolkit Mistral 4 export. vLLM 0.26.0
-registers no `mistral4` class and neither does SGLang 0.5.17: the public
-`mistralai/Mistral-Small-4-*` repos serve only because vLLM detects their
-Mistral-native `params.json` layout, and a toolkit export is plain HF-format with
-no such path. The one remaining route, vLLM's generic transformers backend
-(`--model-impl transformers`), is neither pinned nor verified here. Run inference
-from transformers (above), or serve the pretrained hub repo directly.
+The gathered save is a standard Hugging Face checkpoint with the vision tower intact. Run inference
+with transformers: load it with `AutoModelForImageTextToText` and `AutoProcessor`, which take images
+too ([snippet](README.md#smoke-test-a-checkpoint)). To serve the base model, point vLLM at the public
+hub repo.
 
-## Train a LoRA adapter
+## Reference
 
-Add this block to the EP8 configuration.
-
-```yaml
-use_peft: true
-lora_r: 16
-lora_alpha: 32
-lora_dropout: 0.05
-lora_target_modules:
-- q_a_proj
-- q_b_proj
-- kv_a_proj_with_mqa
-- kv_b_proj
-- o_proj
-
-learning_rate: 1.0e-04
-output_dir: /data/checkpoints/mistral-small-4-119b-ultrachat-lora
-```
-
-Keep EP enabled for expert sharding. Keep TP disabled for LoRA.
-
-## Continue with GRPO
-
-Online GRPO and async GRPO with environments are refused at trainer construction for this
-family. Both pinned engines list `mistral4` as unservable — neither vLLM 0.26.0
-nor SGLang 0.5.17 registers a Mistral4 class — so there is no served model for
-the weight stream to land in. Offline GRPO trains on pre-generated scored
-completions and needs no rollout server, so it remains available:
-[Offline GRPO](../../agent-docs/training-methods/grpo/offline-grpo.md) ↗.
+- [Mistral 4 model notes](../../agent-docs/models/mistral4.md) ↗: routing, the CP and TP plans for MLA,
+  the serving gap
+- [Offline GRPO](../training-methods/offline-grpo.md)
+- [Model card](https://huggingface.co/mistralai/Mistral-Small-4-119B-2603)

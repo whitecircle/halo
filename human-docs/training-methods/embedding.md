@@ -2,17 +2,17 @@
 
 Fine-tune a text encoder for retrieval, semantic similarity, deduplication or clustering, using
 [sentence-transformers](https://sbert.net/) losses under Halo's parallelism. The output loads with
-`SentenceTransformer(path)` — the pipeline config (`modules.json`, the per-module directories) is
+`SentenceTransformer(path)`: the pipeline config (`modules.json` and the per-module directories) is
 written alongside the weights.
 
-Here sentence-transformers owns tokenization and the pipeline around the backbone, so a few shared
-config knobs do not apply (see [What this path does not take](#what-this-path-does-not-take)).
+sentence-transformers owns tokenization and the pipeline around the backbone here, so some shared config
+knobs do not apply ([What this path does not take](#what-this-path-does-not-take)).
 
 ## Data shapes
 
-The collator reads columns **positionally**, not by name: the label is the first of `label`, `labels`,
-`score`, `scores` that exists (in that priority), and every other column, in dataset order, is one text input. So the
-shape of your table picks the losses available to you.
+The collator reads columns **by position**, not by name. The label is the first of `label`, `labels`,
+`score`, `scores` that exists, in that order. Every other column, in dataset order, is one text input.
+The shape of your table therefore decides which losses you can use.
 
 | Text columns | Label | What you are training | Losses |
 | --- | --- | --- | --- |
@@ -24,20 +24,19 @@ shape of your table picks the losses available to you.
 
 ## Choosing a loss
 
-`mnrl` (multiple-negatives ranking, the default) is InfoNCE over in-batch negatives: every other
-positive in the same micro-batch is a negative for this anchor. That makes
-`per_device_train_batch_size` the dominant hyperparameter, and neither gradient accumulation nor
-extra GPUs enlarge the pool: the negatives come from the micro-batch on this device. When a larger batch OOMs,
-switch to `cached_mnrl`, which caches embeddings across sub-forwards of `cached_mnrl_mini_batch_size` rows and gets
+`mnrl` (multiple-negatives ranking, the default) is InfoNCE over in-batch negatives: every other positive
+in the same micro-batch is a negative for this anchor. That makes `per_device_train_batch_size` the
+dominant hyperparameter. Gradient accumulation and extra GPUs do not enlarge the pool, because the
+negatives come from the micro-batch on one device. When a larger batch runs out of memory, switch to
+`cached_mnrl`. It caches embeddings across sub-forwards of `cached_mnrl_mini_batch_size` rows and gets
 the same pool for less memory.
 
-Use `cosent` or `angle` when your labels are graded similarity scores, `triplet` when you mined hard
-negatives, and the contrastive pair for duplicate/not-duplicate data.
+Use `cosent` or `angle` for graded similarity scores, `triplet` when you mined hard negatives, and the
+contrastive pair for duplicate/not-duplicate data.
 
-`matryoshka_dimensions: [256, 128, 64, 32]` wraps any of them so the embedding stays usable when
-truncated to a shorter prefix — useful when you want one model to serve both a cheap first-pass index
-and a precise rerank. Passing `matryoshka_weights` without the dimensions raises rather than being
-quietly dropped.
+`matryoshka_dimensions: [256, 128, 64, 32]` wraps any of them so the embedding stays usable when cut to a
+shorter prefix. One model can then serve both a cheap first-pass index and a precise rerank. Passing
+`matryoshka_weights` without the dimensions raises.
 
 ## Config
 
@@ -57,17 +56,16 @@ learning_rate: 2.0e-05
 output_dir: checkpoints/embedding-qwen3-4b-nq
 ```
 
-`pooling_mode` decides how token states become one vector, and it has to match the backbone:
-decoder-based embedders like Qwen3-Embedding want `lasttoken`, most encoder checkpoints want `mean`.
-On a plain load, a value differing from the checkpoint's own pooling is applied with a warning, not a
-stop, so set it deliberately; under EP/TP the pooling module is built from the config outright.
-`batch_sampler: no_duplicates` keeps two copies of the same text out of one batch, where they would
-become each other's false negatives. `normalize_embeddings` defaults to on; turning it off against a
-checkpoint whose pipeline ends in a `Normalize` module raises rather than silently changing what its
-similarity thresholds mean.
-
-`max_length` defaults to 512. Long-context backbones make it tempting to raise, but embedding batches
-want to be large — keep it at the length you actually embed.
+- `pooling_mode` decides how token states become one vector, and it must match the backbone.
+  Decoder-based embedders like Qwen3-Embedding want `lasttoken`; most encoder checkpoints want `mean`.
+  On a plain load, a value that differs from the checkpoint's own pooling applies with a warning, so set
+  it deliberately. Under EP/TP the pooling module is built from the config outright.
+- `batch_sampler: no_duplicates` keeps two copies of the same text out of one batch, where they would
+  become each other's false negatives.
+- `normalize_embeddings` defaults to on. Turning it off for a checkpoint whose pipeline ends in a
+  `Normalize` module raises, since it would change what the model's similarity thresholds mean.
+- `max_length` defaults to 512. Embedding batches want to be large, so keep it at the length you
+  actually embed, even on a long-context backbone.
 
 ## Run
 
@@ -80,41 +78,48 @@ halo launch embedding examples/embedding/gptoss/embedding-gptoss-20b-gooaq-ep.ya
 ```
 
 Recipes for Qwen3-Embedding, Qwen3.5, GPT-OSS and Gemma 4 ship under `examples/embedding/`. Expert,
-tensor and expert-tensor parallelism all work; context parallelism does not, because pooling needs
-the whole sequence on one rank. Tensor and expert-tensor parallelism, and a pre-sharded dataset,
-batch through Halo's own loader, which builds plain batches, so they refuse any other
-`batch_sampler` (`no_duplicates`, `no_duplicates_hashed`, `group_by_label`): set `batch_sampler: batch_sampler` there (as
-`--batch_sampler=batch_sampler` on the command line). Multi-GPU plain data parallelism and pure EP
-over a map-style, not pre-sharded dataset need `dataloader_drop_last: true`: sentence-transformers
-sets it to `true` on any multi-process launch, and a command-line `--dataloader_drop_last=false` is
-refused at startup, since a kept remainder would give some ranks one more step than the others. A pipeline with weights after the backbone
-that train or that FSDP2 would shard (a `Dense` head) runs on one GPU or under DDP
-(`accelerate launch`) only: FSDP2, TP and EP refuse it at startup. LoRA (`use_peft: true`) is
-supported on the plain data-parallel path only and rejected under EP, ETP and TP; its targets may
-include the input embedding (`embed_tokens`), and DoRA applies. Its saves fold the adapters into the
-weights, so the output loads as a plain `SentenceTransformer`; training checkpoints also keep the
-unfolded adapters, which `resume_from_checkpoint` restores onto the base.
+tensor and expert-tensor parallelism all work. Context parallelism does not, because pooling needs the
+whole sequence on one rank.
+
+Limits by mode:
+
+- **TP, ETP or a pre-sharded dataset** batch through Halo's own loader, which builds plain batches. They
+  refuse any other `batch_sampler` (`no_duplicates`, `no_duplicates_hashed`, `group_by_label`), so set
+  `batch_sampler: batch_sampler` (`--batch_sampler=batch_sampler` on the command line).
+- **Multi-GPU data parallelism and pure EP** over a map-style dataset that is not pre-sharded need
+  `dataloader_drop_last: true`, which sentence-transformers sets on a multi-process launch. A `false`
+  that reaches the trainer is refused at startup, since a kept remainder would give some ranks one more
+  step than the others and hang the run.
+- **A pipeline with weights after the backbone** that train or that FSDP2 would shard (a `Dense` head)
+  runs on one GPU or under DDP (`accelerate launch`) only. FSDP2, TP and EP refuse it at startup.
+- **LoRA** (`use_peft: true`) runs on the plain data-parallel path only; EP, ETP and TP reject it. Its
+  targets may include the input embedding (`embed_tokens`), and DoRA applies. Saves fold the adapters
+  into the weights, so the output loads as a plain `SentenceTransformer`. Training checkpoints also keep
+  the unfolded adapters, which `resume_from_checkpoint` restores onto the base.
 
 ## What this path does not take
 
-sentence-transformers owns tokenization here, so `tokenizer_backend` must stay at its default `hf` —
-a `gigatoken` value is refused, not ignored. The same goes for the chat-template and special-token
-knobs (`chat_template`, `force_chat_template`, `pad_token`, `bos_token`, `eos_token`,
-`added_special_tokens`), `freeze_layers_patterns` / `unfreeze_layers_patterns`, `tools_field`,
-`log_decoded_samples` and `text_only_model`:
-this path has no rendering or freeze stage to honor them, so it raises at startup instead of
-accepting a flag that would do nothing. Image columns (`images`, `image`, `pixel_values`) are refused
-too — embedding training is text-only.
+Because sentence-transformers owns tokenization, `tokenizer_backend` must stay at its default `hf`; a
+`gigatoken` value raises. These knobs also raise at startup, since this path has no rendering or freeze
+stage to honor them:
+
+- the chat-template and special-token knobs: `chat_template`, `force_chat_template`, `pad_token`,
+  `bos_token`, `eos_token`, `added_special_tokens`;
+- `freeze_layers_patterns` / `unfreeze_layers_patterns`;
+- `tools_field`, `log_decoded_samples` and `text_only_model`.
+
+Image columns (`images`, `image`, `pixel_values`) are refused too: embedding training is text-only.
 
 ## What to watch
 
-Metrics come from a small no-grad encoding pass on logging steps. `embed/cos_sim` should rise (and
-`embed/neg_cos_sim` fall, on a dataset with a third text column); `embed/recall@1` and `embed/mrr` are the ranking
-view of the same thing.
-Collapse is the failure mode to watch for, and it shows up two ways: `embed/std` trending to zero, or
-a high `embed/cos_sim` with poor `embed/recall@1` — the model is mapping everything to nearly the
-same vector. `embed/mrr` saturating at 1.0 within a few steps usually means the batch is too small to
-be a real ranking task.
+Metrics come from a small no-grad encoding pass on logging steps.
+
+- `embed/cos_sim` should rise, and `embed/neg_cos_sim` fall on a dataset with a third text column.
+  `embed/recall@1` and `embed/mrr` are the ranking view of the same thing.
+- Collapse shows up two ways: `embed/std` trending to zero, or a high `embed/cos_sim` with poor
+  `embed/recall@1`. The model is mapping everything to nearly the same vector.
+- `embed/mrr` saturating at 1.0 within a few steps usually means the batch is too small to be a real
+  ranking task.
 
 ## Go deeper
 

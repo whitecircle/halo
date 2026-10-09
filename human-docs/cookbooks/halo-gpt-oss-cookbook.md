@@ -1,295 +1,141 @@
-# Halo / GPT-OSS cookbook
+# GPT-OSS Cookbook
 
-Fine-tune [GPT-OSS 20B](https://huggingface.co/openai/gpt-oss-20b) with Halo.
+[GPT-OSS](https://huggingface.co/openai/gpt-oss-20b) is OpenAI's open-weight MoE in two sizes, 20B and
+120B. Its attention adds a learned per-head "sink" logit, and its experts store gate and up projections
+interleaved. Halo trains the BF16 mirrors of the release.
 
-The same recipe supports GPT-OSS 120B. Use a BF16 checkpoint for EP training.
+## Support
 
-## Halo support
+| FSDP | EP | CP | TP | ETP | EP+CP | EP+TP | LoRA | Online RL |
+|:---:|:---:|:---:|:---:|:---:|:---:|:---:|:---:|:---:|
+| Yes | Yes | Yes | Yes | Yes | Yes | Yes | Yes | vLLM, SGLang |
 
-| FSDP | EP | CP | TP | ETP | EP+CP | EP+TP | LoRA |
-|:---:|:---:|:---:|:---:|:---:|:---:|:---:|:---:|
-| Yes | Yes | Yes | Yes | Yes | Yes | Yes | Yes |
+- **Checkpoints:** `unsloth/gpt-oss-20b-BF16` (32 experts, top-4) and `unsloth/gpt-oss-120b-BF16` (128
+  experts, top-4).
+- **GPUs:** the 20B recipe runs at EP8 on eight GPUs. The 120B trains at EP8 on eight B300s. On H100 or
+  H200 it needs two nodes at EP16 (`examples/sft/gptoss/gptoss-120b-multinode-ep.yaml`,
+  [Clusters](../clusters.md)).
 
-Halo supports the GPT-OSS expert layout and attention sinks. It gathers EP, TP, and ETP shards into a standard Hugging Face checkpoint.
+## Recipes
 
-## Select a checkpoint
+Run these in the [training container](README.md#start-the-training-container).
 
-| Model | Training checkpoint | Suggested start |
-|---|---|---|
-| GPT-OSS 20B | `unsloth/gpt-oss-20b-BF16` | Eight GPUs with EP8 |
-| GPT-OSS 120B | `unsloth/gpt-oss-120b-BF16` | Eight B300 GPUs with EP8; multi-node EP on H200 |
-
-The native OpenAI checkpoints store the experts in MXFP4. Halo EP requires dequantized floating-point expert weights. Use the BF16 checkpoint for training.
-
-This recipe uses eight NVIDIA B300 GPUs for EP8.
-
-## Start the training container
-
-Start the [cookbook container](README.md#start-the-training-container) and run the commands
-below inside it, except the server commands marked for the host.
-
-## Train all weights with EP8
-
-Create `gpt-oss-20b-sft.yaml`.
-
-```yaml
-model_name_or_path: unsloth/gpt-oss-20b-BF16
-model_init_kwargs:
-  output_router_logits: true
-  router_aux_loss_coef: 0.001
-moe_balancing: aux_loss
-
-dataset:
-- HuggingFaceH4/ultrachat_200k@train_sft
-conversation_field: messages
-test_size: 0.01
-chat_template: jinja-templates/gpt-oss/gpt-oss-multiturn.jinja
-force_chat_template: true
-assistant_message_template: <|start|>assistant<|channel|>final<|message|>
-train_on_completions_only: true
-
-expert_parallel_size: 8
-save_sharded_ep: false
-use_grouped_gemm: true
-max_concurrent_loading: 2
-fp32_output_conversion: false
-
-use_liger_kernel: true
-packing: true
-max_length: 8192
-bf16: true
-
-per_device_train_batch_size: 2
-per_device_eval_batch_size: 1
-gradient_accumulation_steps: 4
-num_train_epochs: 1.0
-gradient_checkpointing: true
-
-optim: adamw_torch_fused
-learning_rate: 5.0e-06
-lr_scheduler_type: cosine
-warmup_steps: 32
-max_grad_norm: 1.0
-
-save_strategy: steps
-save_steps: 1000
-eval_strategy: steps
-eval_steps: 300
-save_total_limit: 1
-save_only_model: true
-output_dir: /data/checkpoints/gpt-oss-20b-ultrachat-ep8
-
-logging_steps: 5
-logging_first_step: true
-report_to: wandb
-remove_unused_columns: false
-dataloader_num_workers: 2
-
-use_peft: false
-```
-
-Two templates ship for GPT-OSS. `gpt-oss-multiturn.jinja` is the SFT choice: it renders
-the `<|channel|>final` marker on every assistant turn, so completion-only masking trains
-every turn. Under `gpt-oss-harmony.jinja` that marker matches nothing and the run trains
-zero tokens at a loss near zero. RL uses harmony, where the training render must
-byte-match the server's. Both need `force_chat_template: true`.
-
-Launch eight processes.
+### Full fine-tune
 
 ```bash
-halo launch sft gpt-oss-20b-sft.yaml -n 8
+halo launch sft examples/sft/gptoss/gptoss-20b-multinode-ep.yaml -n 8 \
+  --expert_parallel_size=8 --ep_scope=node --use_grouped_gemm=true \
+  --output_dir=/data/checkpoints/gpt-oss-20b-sft
 ```
 
-Halo selects the installed Flash Attention backend. SFT neutralizes the attention sinks by
-default (`reset_sinks: true`) and exports them that way; a later stage with
-`reset_sinks: false`, such as GRPO, runs the sinks as saved. If GRPO should keep the
-pretrained sinks, set `reset_sinks: false` here too (FA4 on Blackwell; the CP variant below
-then does not apply).
+The shipped recipe is a two-node EP16 layout. These overrides run it on one eight-GPU node. They also
+turn grouped GEMM back on: the file turns it off because at EP16, with two experts per rank, the
+per-expert loop keeps up, while at EP8 grouped GEMM is faster.
 
-## Change the parallelism layout
+### Other layouts
 
-On one eight-GPU node pure EP is 8, 2 or 1; for a 4-way expert split use `ep4 + etp2`
-([rules](../parallelism.md#rules-that-save-you-a-wasted-run)).
+Add one of these to the full fine-tune command:
 
-Use CP2 with EP8 for long sequences. EP+CP requires the EP group to fill the NVLink
-domain, so EP8 is the only EP size that pairs with CP here.
+- EP8 + CP2, for long sequences: `--context_parallel_size=2 --packing=false`
+- EP8 + TP2, when attention memory is the limit: `--tensor_parallel_size=2`
 
-```yaml
-expert_parallel_size: 8
-context_parallel_size: 2
-packing: false
-```
+Or replace its `--expert_parallel_size=8` with one of these:
 
-Use EP8 with TP2 when attention weights need more sharding.
+- Pure ETP8, to shard every expert instead of placing whole experts: `--expert_parallel_size=1 --expert_tensor_parallel_size=8`
+- A 4-way expert split: `--expert_parallel_size=4 --expert_tensor_parallel_size=2`
 
-```yaml
-expert_parallel_size: 8
-tensor_parallel_size: 2
-```
-
-Use pure ETP8 when expert weight size is the main memory limit.
-
-```yaml
-expert_parallel_size: 1
-expert_tensor_parallel_size: 8
-```
-
-Expert compute drops to the per-expert loop at `expert_tensor_parallel_size > 1`:
-ETP de-interleaves GPT-OSS's GLU halves and stores the shards where the loop reads
-them, not in the grouped-GEMM layout.
-
-Do not combine attention TP with ETP.
-
-## Run inference
-
-```python
-import torch
-from transformers import AutoModelForCausalLM, AutoTokenizer
-
-path = "/data/checkpoints/gpt-oss-20b-ultrachat-ep8"
-tokenizer = AutoTokenizer.from_pretrained(path)
-model = AutoModelForCausalLM.from_pretrained(
-    path,
-    dtype=torch.bfloat16,
-    device_map="auto",
-)
-
-messages = [{"role": "user", "content": "Write a short plan to diagnose an unstable training loss."}]
-inputs = tokenizer.apply_chat_template(
-    messages,
-    add_generation_prompt=True,
-    return_tensors="pt",
-).to(model.device)
-
-output = model.generate(**inputs, max_new_tokens=512, do_sample=True, temperature=0.2)
-print(tokenizer.decode(output[0][inputs["input_ids"].shape[-1]:], skip_special_tokens=True))
-```
-
-Serve the gathered checkpoint with SGLang on port 30000, from the host
-([server setup](README.md#serve-from-the-host)).
+### LoRA
 
 ```bash
-SGLANG_MODEL="$HALO_SCRATCH/checkpoints/gpt-oss-20b-ultrachat-ep8" \
-  docker compose -f docker-compose.sglang.yml up
+halo launch sft examples/sft/gptoss/gptoss-20b-multinode-ep.yaml -n 8 \
+  --expert_parallel_size=8 --ep_scope=node --use_grouped_gemm=true \
+  --use_peft=true --lora_r=64 --lora_alpha=128 --learning_rate=1e-4 \
+  --lora_target_modules=q_proj,k_proj,v_proj,o_proj,gate_up_proj,down_proj \
+  --lora_modules_to_save=embed_tokens,lm_head,router \
+  --output_dir=/data/checkpoints/gpt-oss-20b-lora
 ```
 
-## Train a LoRA adapter
+The expert targets (`gate_up_proj`, `down_proj`) go to Halo's grouped expert LoRA.
 
-Add this block to the EP8 configuration.
+### GRPO
 
-```yaml
-use_peft: true
-lora_r: 64
-lora_alpha: 128
-lora_dropout: 0.05
-lora_task_type: CAUSAL_LM
-lora_target_modules:
-- q_proj
-- k_proj
-- v_proj
-- o_proj
-- gate_up_proj
-- down_proj
-lora_modules_to_save:
-- embed_tokens
-- lm_head
-- router
+The shipped recipes train on code contests. Read [Before a GRPO run](README.md#before-a-grpo-run) first.
+This one is a full fine-tune at EP4 with two vLLM servers on GPUs 0–3.
 
-learning_rate: 1.0e-04
-output_dir: /data/checkpoints/gpt-oss-20b-ultrachat-lora
-```
-
-Halo sends the expert targets to its grouped LoRA path. Keep TP disabled for LoRA.
-
-## Continue with GRPO
-
-Copy `examples/grpo/environmental/environmental-grpo-template.yaml` to `gpt-oss-grpo.yaml`,
-point `model_name_or_path` at the SFT checkpoint's `/data` path, set the environment and
-reward fields for your task, and set the keys below, editing the template's own line where
-it already has the key (a repeated key fails to parse). The shipped GPT-OSS configs under
-`examples/grpo/environmental/gptoss/sglang/` (full and LoRA, ep1) and `.../vllm/` (full and
-LoRA, ep1 and ep4) are already wired for their engine but list two servers; start the
-ones their header names instead of the single server below.
-
-```yaml
-rollout_backend: sglang
-rollout_server_url: http://localhost:30000
-train_on_sampled_tokens: true
-routing_replay: rollout
-rollout_stop_tokens: ["<|call|>"]
-chat_template: jinja-templates/gpt-oss/gpt-oss-harmony.jinja
-force_chat_template: true
-attn_implementation: flash_attention_4
-reset_sinks: false
-moe_balancing: none
-beta: 0.0
-output_dir: /data/checkpoints/gpt-oss-20b-grpo
-fsdp_reshard_after_backward: false
-use_chunked_grpo_logprobs: true
-```
-
-`rollout_stop_tokens` matters because `<|call|>` is not an eos here: without it the
-model generates past its tool call and hallucinates the result for most of the turn.
-`use_chunked_grpo_logprobs: true` scores completions without the full logits plane, which
-GPT-OSS's ~201k vocabulary makes too large; every shipped GPT-OSS environment recipe sets it, and
-the trainer refuses a full-logits plane that does not fit.
-`fsdp_reshard_after_backward: false` is optional: it leaves one FSDP2 re-gather per
-optimizer step instead of one per grad-accumulation microstep. Peak memory is unchanged:
-the unsharded parameters it keeps are the ones ZeRO-2 already holds from forward to backward.
-`reset_sinks: false` keeps the checkpoint's sinks live and frozen so the trainer's log
-probabilities match the served policy. Live sinks need a sink-carrying attention
-implementation (FA4 on Blackwell); FA2 and SDPA are rejected and CP is unavailable
-([sink handling](../../agent-docs/models/gpt-oss.md#attention-sinks) ↗). `beta: 0.0`
-is required too: the reference model a nonzero `beta` builds cannot carry live sinks.
-
-Serve the same harmony file. On the host ([server setup](README.md#serve-from-the-host)),
-copy it onto the scratch volume, then start the server on GPUs the trainer will not use:
+On the host, start the servers on the SFT checkpoint:
 
 ```bash
 cp jinja-templates/gpt-oss/gpt-oss-harmony.jinja "$HALO_SCRATCH/"
+export VLLM_MODEL=/data/checkpoints/gpt-oss-20b-sft
+export VLLM_CHAT_TEMPLATE=/data/gpt-oss-harmony.jinja VLLM_USE_V2_MODEL_RUNNER=0
+export VLLM_TOOL_PARSER_PLUGIN=/opt/gpt_oss_text_tool_parser.py VLLM_TOOL_PARSER=gpt_oss_text
+export VLLM_REASONING_PARSER_PLUGIN=/opt/gpt_oss_reasoning_parser.py VLLM_REASONING_PARSER=openai_gptoss
+VLLM_CUDA_DEVICES=0,1 VLLM_TP=2 VLLM_PORT=8000 \
+  docker compose -p gptoss-rollout-0 -f docker-compose.vllm.yml up -d vllm-server
+VLLM_CUDA_DEVICES=2,3 VLLM_TP=2 VLLM_PORT=8001 \
+  docker compose -p gptoss-rollout-1 -f docker-compose.vllm.yml up -d vllm-server
 ```
+
+In the training container, copy the recipe, set its `dataset`, and launch on GPUs 4–7:
 
 ```bash
-SGLANG_MODEL="$HALO_SCRATCH/checkpoints/gpt-oss-20b-ultrachat-ep8" \
-SGLANG_CHAT_TEMPLATE="$HALO_SCRATCH/gpt-oss-harmony.jinja" \
-SGLANG_REASONING_PARSER=gpt-oss SGLANG_ENABLE_R3=1 \
-SGLANG_CUDA_DEVICES=0,1,2,3 SGLANG_TP=4 \
-  docker compose -f docker-compose.sglang.yml up sglang-server
+cp examples/grpo/environmental/gptoss/vllm/gptoss-20b-code-contests-full-ep4.yaml gpt-oss-grpo.yaml
+CUDA_VISIBLE_DEVICES=4,5,6,7 DIST_NCCL_TIMEOUT_MINUTES=60 \
+  halo launch environmental-grpo gpt-oss-grpo.yaml -n 4 \
+  --model_name_or_path=/data/checkpoints/gpt-oss-20b-sft \
+  --output_dir=/data/checkpoints/gpt-oss-20b-grpo
 ```
 
-The compose default `--tool-call-parser auto` picks the harmony parser off the template.
-Launch the trainer in the training container on the remaining GPUs; they cannot share one.
+The other configs in `examples/grpo/environmental/gptoss/vllm/` switch to LoRA or to ep1. The ep1
+configs use routing replay, so start their servers with `VLLM_ENABLE_R3=1` as well. The `sglang/` configs
+run the same task on SGLang: serve them on ports 30000 and 30001 with `SGLANG_CHAT_TEMPLATE` on the same
+harmony file, `SGLANG_REASONING_PARSER=gpt-oss` and `SGLANG_ENABLE_R3=1`.
+
+## Settings that matter
+
+- **Chat template.** SFT uses `jinja-templates/gpt-oss/gpt-oss-multiturn.jinja` with
+  `force_chat_template: true`. Under `gpt-oss-harmony.jinja` the SFT completion marker matches no turn,
+  so the run trains on nothing at a loss near zero. RL uses harmony, and the server must serve the same
+  file.
+- **Attention sinks.** SFT neutralizes them (`reset_sinks: true`, the default) and saves them that way.
+  RL sets `reset_sinks: false`, which keeps the sinks live and frozen so the trainer scores what the
+  server samples. A later stage runs the sinks it loads, so to carry the pretrained sinks into GRPO, run
+  SFT with `--reset_sinks=false` too.
+- **Router aux-loss coefficient.** The hub config ships `router_aux_loss_coef: 0.9`, which swamps the SFT
+  loss. The shipped SFT recipes set it to `0.001` in `model_init_kwargs`. Do the same on any other run
+  that balances with `aux_loss`, which is what `auto` picks for GPT-OSS.
+- **RL rollouts.** The environment GRPO recipes set `rollout_stop_tokens: ["<|call|>"]`, without which
+  the model writes past its tool call and invents the result. They also set
+  `use_chunked_grpo_logprobs: true`, because the ~201k-token vocabulary makes the full logits plane too
+  large.
+
+## Limits
+
+- The MXFP4 release (`openai/gpt-oss-*`) fails at load under EP. Train the BF16 mirror. A weight sync into
+  an MXFP4 server also drops every expert weight without an error, so RL serves the BF16 mirror too.
+- Live sinks (`reset_sinks: false`) need a kernel that takes a sink argument. FA2 and SDPA are refused,
+  and so is CP. On Blackwell that kernel is FA4, which the GRPO recipes pin. The Hopper image's FA3 takes
+  no sink, so on H100 or H200 use `--attn_implementation=flex_attention` or `eager`. Both refuse
+  `packing`, so an SFT run there also needs `--packing=false`.
+- `packing: true` needs a flash attention backend. It is refused on eager, SDPA and flex attention.
+- ETP runs the experts through the per-expert loop instead of grouped GEMM.
+
+## Export and serve
+
+The gathered save re-interleaves the experts into the hub layout, so transformers, vLLM and SGLang load
+it directly. Smoke-test it with `AutoModelForCausalLM`
+([snippet](README.md#smoke-test-a-checkpoint)). Serve it from the
+[host](README.md#serve-from-the-host) with SGLang on port 30000:
 
 ```bash
-CUDA_VISIBLE_DEVICES=4,5,6,7 halo launch environmental-grpo gpt-oss-grpo.yaml -n 4
+SGLANG_MODEL="$HALO_SCRATCH/checkpoints/gpt-oss-20b-sft" \
+  docker compose -f docker-compose.sglang.yml up -d
 ```
 
-vLLM (`rollout_backend: vllm`, `rollout_server_url: http://localhost:8000`) is the engine
-the shipped ep4 configs target, and the only one for `rollout_max_thinking_tokens` and
-`carry_reasoning` ([Supported Matrix](../supported-matrix.md#rollout-engines)).
-GPT-OSS tool calls arrive as plain text that the default `hermes` parser cannot read, so
-a native-tool environment on vLLM needs the bundled text tool parser, and a thinking budget needs the bundled reasoning
-parser with Model Runner V1 (V2 answers `thinking_token_budget` with a 400). Set
-`rollout_reasoning_end_token: "<|start|>assistant<|channel|>final<|message|>"` too, as the shipped
-vLLM configs do: it is the opener the budget forces, and naming it keeps those forced tokens out of the loss:
+## Reference
 
-```bash
-VLLM_MODEL=/data/checkpoints/gpt-oss-20b-ultrachat-ep8 \
-VLLM_CHAT_TEMPLATE=/data/gpt-oss-harmony.jinja \
-VLLM_CUDA_DEVICES=0,1,2,3 VLLM_TP=4 VLLM_ENABLE_R3=1 \
-VLLM_TOOL_PARSER_PLUGIN=/opt/gpt_oss_text_tool_parser.py VLLM_TOOL_PARSER=gpt_oss_text \
-VLLM_REASONING_PARSER_PLUGIN=/opt/gpt_oss_reasoning_parser.py VLLM_REASONING_PARSER=openai_gptoss \
-VLLM_USE_V2_MODEL_RUNNER=0 \
-  docker compose -f docker-compose.vllm.yml up vllm-server
-```
-
-The trainer may size `expert_parallel_size` to its own GPU count; the shipped ep4
-configs assume four trainer GPUs.
-
-## Sources
-
-- [GPT-OSS 20B model card](https://huggingface.co/openai/gpt-oss-20b)
-- [GPT-OSS 120B model card](https://huggingface.co/openai/gpt-oss-120b)
-- [Halo GPT-OSS model notes](../../agent-docs/models/gpt-oss.md) ↗
-- Halo GPT-OSS SFT example: `examples/sft/gptoss/gptoss-20b-multinode-ep.yaml`
-- [Async GRPO with Environments](../../agent-docs/training-methods/grpo/async-grpo/README.md) ↗
+- [GPT-OSS model notes](../../agent-docs/models/gpt-oss.md) ↗: sink policies, the expert layout, the
+  vLLM serving flags
+- [Async GRPO with Environments](../training-methods/async-grpo-environments.md)
+- Model cards: [gpt-oss-20b](https://huggingface.co/openai/gpt-oss-20b),
+  [gpt-oss-120b](https://huggingface.co/openai/gpt-oss-120b)

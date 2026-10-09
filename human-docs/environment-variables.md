@@ -1,109 +1,129 @@
-# Environment Variables
+# Environment variables
 
-Two things to know before the tables:
+Most runs need only the paths and secrets below. The image already sets the
+tricky ones.
 
-**`.env` is never auto-loaded** — not by `docker run`, not by the code. Put
-secrets there and pass them in with `docker run --env-file .env` (or a plain
-`export`). Compose is the exception: it reads the repo-root `.env` for `${VAR}`
-substitution, and the vLLM file's training service loads it into the container.
+**`.env` is not loaded automatically.** Halo's code never reads it, and
+`docker run` needs `--env-file .env`. Two launch paths pass it for you:
 
-**The image already sets the tricky ones** — NCCL tuning, CUDA connection
-limits, the TF32 fix. Don't paste `-e NCCL_*=...` flags in from other clusters;
-the baked defaults are deliberate. The exceptions are the EFA recipe
-(`make ... EFA=1`), the no-fabric recipe a GRPO trainer shares with its rollout
-server ([cookbook container](cookbooks/README.md#start-the-training-container)),
-and `NCCL_SOCKET_IFNAME` on a multi-homed host — see [Clusters](clusters.md).
+- `make train` and the GPU test targets (set `ENV_FILE=` to turn it off).
+- The `training` service in `docker-compose.vllm.yml`. Compose also reads the
+  repo-root `.env` for `${VAR}` substitution.
 
-## Paths — pass these, pointed at a big disk
+**Leave NCCL settings to the image.** It bakes in the NCCL tuning, the CUDA
+connection limit and the TF32 fix, so don't copy `-e NCCL_*=...` flags from
+other clusters. The exceptions:
+
+- the EFA recipe (`make ... EFA=1`)
+- the no-fabric recipe a GRPO trainer shares with its rollout server
+  ([cookbook container](cookbooks/README.md#start-the-training-container))
+- `NCCL_SOCKET_IFNAME` on a multi-homed host ([Clusters](clusters.md))
+
+## Paths
+
+Point all four at a large disk:
 
 | Variable | Default | What it holds |
 | --- | --- | --- |
 | `HF_HOME` | `~/.cache/huggingface` | model downloads |
-| `HF_DATASETS_CACHE` | `$HF_HOME/datasets` | dataset / Arrow cache |
+| `HF_DATASETS_CACHE` | `$HF_HOME/datasets` | dataset and Arrow cache |
 | `TMPDIR` | `/tmp` | temp files |
 | `HALO_DATA_ROOT` | `~/.cache/halo` | Halo scratch: S3 dataset cache, profiler output |
 
 The defaults land on the root filesystem, which is usually too small for real
-runs — see [Installation](installation.md). On the host side, the `make`
-targets and the vLLM compose file's `training` service share one variable for
-the large volume: `HALO_SCRATCH` (default `/mnt`). Export it once on a host
-whose big disk lives elsewhere and every `make` target mounts and caches there.
+runs ([Installation](installation.md)).
 
-## Secrets — put these in `.env`
+On the host, the `make` targets take the large volume from `HALO_SCRATCH`
+(default `/mnt`). They mount it and put all four paths on it. The compose
+`training` service uses it for `TMPDIR` and `HALO_DATA_ROOT`; its HF cache
+follows the host's `HF_HOME`. Export `HALO_SCRATCH` once on a host whose large
+disk is elsewhere.
+
+## Secrets
+
+Put these in `.env`:
 
 | Variable | Needed for |
 | --- | --- |
 | `HF_TOKEN` | gated HuggingFace models and datasets |
 | `WANDB_API_KEY` | Weights & Biases logging |
-| `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` / `AWS_DEFAULT_REGION` | `s3://` datasets and checkpoints (mounting `~/.aws` works too) |
+| `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` / `AWS_DEFAULT_REGION` | `s3://` datasets and checkpoints (mounting `~/.aws` also works) |
 | `OPENAI_API_KEY` / `OPENROUTER_API_KEY` | the external-LLM judge and generation scripts |
-| `SERPER_API_KEY` / `TAVILY_API_KEY` / `BRAVE_API_KEY` | the matching web-search backend in the search RL environments (`duckduckgo` needs none) |
-| `VLLM_API_KEY` | the `scripts/inference/` and `scripts/environments/` CLIs dialing an authenticated OpenAI-compatible endpoint (a vLLM or SGLang server, or a hosted one); falls back to `OPENAI_API_KEY`, then to the `EMPTY` placeholder a keyless local server accepts |
+| `SERPER_API_KEY` / `TAVILY_API_KEY` / `BRAVE_API_KEY` | the matching web-search backend in the search RL environments (`duckduckgo` needs no key) |
+| `VLLM_API_KEY` | the `scripts/inference/` and `scripts/environments/` CLIs calling an OpenAI-compatible endpoint that requires a key. Falls back to `OPENAI_API_KEY`, then to `EMPTY`, which a keyless local server accepts |
 
 ## Logging and run identity
 
 | Variable | Default | Notes |
 | --- | --- | --- |
-| `WANDB_PROJECT` | the config's `project_name` | overwritten unconditionally by the trainer setup — an exported value does not survive |
-| `WANDB_RUN_ID` | derived from `output_dir` + launch time | export a fixed value on the whole job to continue the same wandb run across restarts |
-| `WANDB_RESUME` | unset | wandb SDK knob: set `allow` alongside a fixed `WANDB_RUN_ID` to append instead of starting a new run |
-| `CLEARML_PROJECT` / `CLEARML_TASK` | `project_name` / `run_name` basename | set by the trainer, read when `report_to` includes `clearml` |
-| `TOKENIZERS_PARALLELISM` | `false` | set at package import (the Rust thread pool deadlocks against dataset-map workers); an exported value wins |
+| `WANDB_PROJECT` | the config's `project_name` | the trainer always sets it from `project_name`, so an exported value is overwritten |
+| `WANDB_RUN_ID` | derived from `output_dir` and launch time | export a fixed value on the whole job to continue the same W&B run across restarts |
+| `WANDB_RESUME` | unset | a W&B SDK setting: `allow`, with a fixed `WANDB_RUN_ID`, appends to that run instead of starting a new one |
+| `CLEARML_PROJECT` / `CLEARML_TASK` | `project_name` / derived from `run_name` | set by the trainer; read when `report_to` includes `clearml` |
+| `TOKENIZERS_PARALLELISM` | `false` | set at import to avoid a tokenizer deadlock in dataset-map workers; an exported value wins |
 
-## Multi-node — situational
+## Multi-node
+
+Set these only when the situation calls for it:
 
 | Variable | Default | When to set |
 | --- | --- | --- |
-| `DIST_SHARED_FILESYSTEM` | `1` | umbrella for the two below; set `0` when nodes have per-node local disk instead of shared NFS/Lustre |
-| `DIST_INPUT_SHARED_FILESYSTEM` | the umbrella | read side — model/dataset downloads, dataset map/pack, HF caches |
-| `DIST_OUTPUT_SHARED_FILESYSTEM` | the umbrella | write side — checkpoints, `run.log`, dumped artifacts |
-| `DIST_STORE_TIMEOUT_HOURS` | `4` | raise when one rank's download, dataset map or pack, or queued model load runs longer than four hours while the others wait; this is not the NCCL watchdog |
-| `DIST_NCCL_TIMEOUT_MINUTES` | `30` | raise when 100B-scale gathered checkpoint saves or large cross-node all-to-alls outlast the NCCL watchdog |
+| `DIST_SHARED_FILESYSTEM` | `1` | `0` when nodes have their own local disks instead of shared NFS or Lustre; covers both variables below |
+| `DIST_INPUT_SHARED_FILESYSTEM` | follows `DIST_SHARED_FILESYSTEM` | read side: model and dataset downloads, dataset map and pack, HF caches |
+| `DIST_OUTPUT_SHARED_FILESYSTEM` | follows `DIST_SHARED_FILESYSTEM` | write side: checkpoints, `run.log`, dumped artifacts |
+| `DIST_STORE_TIMEOUT_HOURS` | `4` | raise when one rank's download, dataset map or pack, or queued model load takes longer while the others wait. This is not the NCCL watchdog |
+| `DIST_NCCL_TIMEOUT_MINUTES` | `30` | raise when very large gathered checkpoint saves or cross-node all-to-alls outlast the NCCL watchdog |
 | `NVLINK_DOMAIN_SIZE` | GPUs per node | `72` on an NVL72 rack, whose NVLink domain spans the rack |
-| `NCCL_SOCKET_IFNAME` | `^docker,veth` in the compose bases, `make test-gpu-vllm`/`-sglang` and the no-fabric GRPO recipe; `^lo,docker,veth,tailscale` under `EFA=1` and the EFA overlays; otherwise unset | pin NCCL to the fast NIC on multi-homed nodes |
-| `NCCL_NET_PLUGIN=ofi NCCL_NET=Libfabric` | unset | AWS EFA only: the trainer via `make ... EFA=1`, a rollout server via its compose EFA overlay — see [Clusters](clusters.md) |
+| `NCCL_SOCKET_IFNAME` | set by the compose files, `make ... EFA=1` and the rollout-server test targets; otherwise unset | pin NCCL to the fast NIC on a multi-homed node |
+| `NCCL_NET_PLUGIN=ofi NCCL_NET=Libfabric` | unset | AWS EFA only. `make ... EFA=1` sets them for the trainer, the compose EFA overlay for a rollout server ([Clusters](clusters.md)) |
 
-A side variable inherits the umbrella while unset and overrides it once set.
-The case for splitting them: on a multi-node run over NFS/EFS, rank 0 writing
-the HF cache while remote ranks read those same inodes is a cross-node
-read-after-write that NFS surfaces as `Stale file handle`. Set
-`DIST_INPUT_SHARED_FILESYSTEM=0` and leave the umbrella shared, so checkpoints
-still land as one authoritative copy. All three must be identical on every
-rank; rank 0's values are broadcast and any disagreeing rank warns.
+Split the read and write sides when NFS or EFS reports `Stale file handle` on a
+multi-node run. That happens when rank 0 writes the HF cache while other nodes
+read it. Set `DIST_INPUT_SHARED_FILESYSTEM=0` and keep `DIST_SHARED_FILESYSTEM=1`:
+each node downloads its own copy, and checkpoints still land once.
 
-## Tuning knobs worth knowing
+Set all three to the same values on every rank. Rank 0's values win, and a rank
+that disagrees logs a warning.
 
-Halo has some thirty-five more `HALO_*` knobs, all optional and all defaulted to
-production-sane values. They're read through `src/env.py`, so booleans accept
-`1/true/yes/on`, and a non-numeric value warns and falls back instead of
-crashing mid-run. These are the ones that come up:
+The `NCCL_SOCKET_IFNAME` default each recipe sets is in
+[Rollout servers](../agent-docs/infrastructure/rollout-servers.md) ↗.
+
+## Tuning knobs
+
+Halo reads about thirty-five more `HALO_*` knobs, all optional. Booleans accept
+`1`, `true`, `yes` and `on`. A non-numeric value where a number belongs logs a
+warning and falls back to the default. These are the ones that come up:
 
 | Variable | Default | Purpose |
 | --- | --- | --- |
-| `HALO_S3_DEFAULT_BUCKET` | unset | bucket for the key-only S3 helpers when a path names none — they raise until it is set |
-| `HALO_DATASET_NUM_PROC` | `max(1, min(cpus/4, 4))` | dataset map/filter workers; pin it fleet-wide on heterogeneous nodes |
-| `HALO_FP32_MATMUL_PRECISION` | `highest` | fp32 matmul mode; `high` opts back into TF32, which corrupts long-context RoPE — leave it alone |
-| `HALO_DEEPEP_GPU_TIMEOUT_SECONDS` | `100` | device-side spin budget of the dispatch/combine barrier — bounds rank skew |
-| `HALO_DEEPEP_NUM_QPS` | auto | RDMA queue pairs (elastic backend); more can speed the cross-node all-to-all on EFA — A/B it |
-| `HALO_DEEPGEMM_NATIVE` | `0` | native DeepGEMM low-precision kernels — net-slower at the MoE shapes benchmarked here |
-| `HALO_FUSED_GLU` | `1` | `0` runs every GLU combine (experts and dense MLPs) eager instead of the fused Triton kernels — the switch when a GLU kernel fails to compile or launch on your GPU |
-| `HALO_FLEX_SLIDING` | `1` | `0` builds Gemma 4 on plain SDPA instead of FlexAttention on its sliding layers — the switch when that kernel fails on your GPU, or to run `full_determinism` on more than one GPU |
-| `HALO_SANDBOX_BACKEND` / `HALO_SANDBOX_URL` | `local` / unset | code-execution sandbox for RL environments: `local`, `bubblewrap`, or `remote`. `local` does not confine the program; `bubblewrap` needs root and extra container rights ([Async GRPO](training-methods/async-grpo-environments.md#the-environments)) |
-| `HALO_ALLOW_MISSING_CHECKPOINT_KEYS` | `0` | demote the missing-checkpoint-key error to a warning; only for deliberately partial checkpoints |
-| `CUDA_DEVICE_MAX_CONNECTIONS` | `1`, baked into both images | driver-owned, latched at `deep_ep`'s `cuInit` — a Python write is too late; `1` is the setting EP is validated with, at no measurable throughput cost |
+| `HALO_S3_DEFAULT_BUCKET` | unset | bucket for the S3 helpers when a path names only a key; they raise until it is set |
+| `HALO_DATASET_NUM_PROC` | `max(1, min(cpus/4, 4))` | dataset map and filter workers; pin it cluster-wide when nodes differ in CPU count |
+| `HALO_FP32_MATMUL_PRECISION` | `highest` | fp32 matmul mode. `high` turns TF32 back on, which corrupts long-context RoPE, so leave it alone |
+| `HALO_DEEPEP_GPU_TIMEOUT_SECONDS` | `100` | seconds a rank waits at the DeepEP dispatch/combine barrier for its peers, which bounds rank skew |
+| `HALO_DEEPEP_NUM_QPS` | auto | RDMA queue pairs for DeepEP. More can speed up the cross-node all-to-all on EFA; A/B test it |
+| `HALO_DEEPGEMM_NATIVE` | `0` | native DeepGEMM low-precision kernels; net-slower at the MoE shapes benchmarked here |
+| `HALO_FUSED_GLU` | `1` | `0` runs every GLU combine (experts and dense MLPs) in eager PyTorch instead of the fused Triton kernels. Use it when a GLU kernel fails to compile or launch on your GPU |
+| `HALO_FLEX_SLIDING` | `1` | `0` runs Gemma 4 on plain SDPA instead of FlexAttention on its sliding layers. Use it when that kernel fails on your GPU, or to run `full_determinism` on more than one GPU |
+| `HALO_SANDBOX_BACKEND` / `HALO_SANDBOX_URL` | `local` / unset | code-execution sandbox for RL environments: `local`, `bubblewrap` or `remote`. `local` does not isolate the program; `bubblewrap` needs root and extra container privileges ([Async GRPO](training-methods/async-grpo-environments.md#the-environments)) |
+| `HALO_ALLOW_MISSING_CHECKPOINT_KEYS` | `0` | turn the missing-checkpoint-key error into a warning; only for deliberately partial checkpoints |
+| `CUDA_DEVICE_MAX_CONNECTIONS` | `1`, set in both images | read once when CUDA initializes, so setting it from Python is too late. EP is validated at `1`, which costs no measurable throughput |
 
-The compose files' rollout-server switches (`VLLM_ENABLE_R3` / `SGLANG_ENABLE_R3`,
-`VLLM_SPECULATIVE_CONFIG`, `VLLM_ATTENTION_BACKEND` / `SGLANG_ATTENTION_BACKEND`, …)
-are `docker compose` interpolation variables: export them or put them in `.env`
-where you run compose. Neither engine reads them, so a hand-run server takes
-`--enable-return-routed-experts` / `--speculative-config` / `--attention-backend`
-directly. `VLLM_GROUP_HOST` / `SGLANG_GROUP_HOST`, the weight-sync dial-back
-address, are read by the trainer. See [Rollout Servers](rollout-servers.md).
+The rest (DeepEP buffer sizing, gradient-bucket geometry, low-precision cache
+switches, weight-sync timeouts, EP profiling) are listed with their defaults in
+the [Configuration Reference](../agent-docs/reference/configuration-reference.md) ↗.
+The `HALO_TEST_*` and `*_SERVER_URL` variables belong to the test launcher and
+are in [Contributing](../agent-docs/contributing/README.md) ↗. Turn on the debug
+switches when [Troubleshooting](troubleshooting.md) points you to them.
 
-The rest — DeepEP buffer sizing, gradient-bucket geometry, low-precision cache
-switches, weight-sync timeouts, the EP profiling switches — are cataloged with
-their defaults in the
-[Configuration Reference](../agent-docs/reference/configuration-reference.md) ↗;
-the `HALO_TEST_*` and `*_SERVER_URL` variables belong to the test launcher and
-live in [Contributing](../agent-docs/contributing/README.md) ↗. Reach for the
-debug switches when [Troubleshooting](troubleshooting.md) sends you there.
+## Rollout-server switches
+
+The compose files' rollout-server switches (`VLLM_ENABLE_R3` /
+`SGLANG_ENABLE_R3`, `VLLM_SPECULATIVE_CONFIG`, `VLLM_ATTENTION_BACKEND` /
+`SGLANG_ATTENTION_BACKEND` and others) are `docker compose` interpolation
+variables. Export them, or put them in `.env`, where you run compose. A server
+you start by hand takes the matching flags directly: `--enable-return-routed-experts`,
+`--speculative-config`, `--attention-backend`.
+
+`VLLM_GROUP_HOST` and `SGLANG_GROUP_HOST` are read by the trainer: the address
+the rollout server connects back to for weight sync. See
+[Rollout servers](rollout-servers.md).

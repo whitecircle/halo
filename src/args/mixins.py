@@ -428,7 +428,7 @@ class ChunkedLogprobsArguments:
             "help": "Compute per-token log-probs from the backbone hidden state + a vocab-chunked "
             "softmax instead of full [B, T, vocab] logits — bounds the loss-forward peak by the chunk "
             "size, not B*T*vocab. For large-vocab models (gpt-oss ~201k) on long completions where the "
-            "full-logits allocation OOMs. Log-probs match the full path to bf16 tolerance."
+            "full-logits allocation OOMs. Each chunk's log-softmax runs in at least fp32."
         },
     )
 

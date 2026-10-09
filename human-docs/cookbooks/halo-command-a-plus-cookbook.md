@@ -1,230 +1,95 @@
-# Halo / Command A+ cookbook
+# Command A+ Cookbook
 
-Fine-tune [Cohere Command A+](https://huggingface.co/CohereLabs/command-a-plus-05-2026-bf16) with Halo.
+[Command A+](https://huggingface.co/CohereLabs/command-a-plus-05-2026-bf16) is a 200B+ Cohere2 MoE inside a
+vision-language wrapper. It has 128 routed experts and picks eight per token with a sigmoid router. Four
+shared experts run on every token, and their output is averaged with the routed output. The recipe
+trains on text.
 
-This recipe uses the BF16 checkpoint and text-only UltraChat data. The same model can also train on image-text data.
+## Support
 
-Command A+ has 128 routed experts. The router selects eight experts and also runs four shared experts.
+| FSDP | EP | CP | TP | ETP | EP+CP | EP+TP | LoRA | Online RL |
+|:---:|:---:|:---:|:---:|:---:|:---:|:---:|:---:|:---:|
+| Yes | Yes | Yes | Yes | Yes | Yes | Yes | Yes | No |
 
-Validation status: only EP8 has a full-scale run, on the 200B+ checkpoint on an 8-GPU B300
-node. CP, TP, ETP, EP+CP and EP+TP pass the tiny-model 8-GPU parallelism matrix (cp8, tp8,
-etp8, ep2+etp4, ep8+cp2, ep8+tp2). LoRA is verified on the tiny model only: expert and mixed
-adapters at EP2, EP1 and EP2+CP2, through a merged save and an exact resume.
+Only EP8 has run on the full checkpoint. CP, TP, ETP, EP+CP, EP+TP and LoRA pass the GPU tests on a
+tiny model, so try a short run before a long one.
 
-## Halo support
+- **Checkpoint:** `CohereLabs/command-a-plus-05-2026-bf16`, pinned to the revision in the recipe.
+- **GPUs:** eight B300s at EP8, 16 experts per GPU, at 1,024 tokens. Inference in BF16 needs at least
+  four B200s.
 
-| FSDP | EP | CP | TP | ETP | EP+CP | EP+TP | LoRA |
-|:---:|:---:|:---:|:---:|:---:|:---:|:---:|:---:|
-| Yes | Yes | Yes | Yes | Yes | Yes | Yes | Yes |
+## Recipes
 
-Halo wraps the Cohere2 MoE blocks inside the vision model. The EP-gathered save keeps transformers' fused expert
-pair, which `from_pretrained` and vLLM 0.26.0 read; `halo run unfuse-moe-experts` rewrites it to the hub's
-per-expert spelling.
+Run these in the [training container](README.md#start-the-training-container).
 
-The EP path preserves the sigmoid router and averaged shared expert. The CP path preserves each layer's positional-encoding rule.
-
-The EP8 recipe assumes eight NVIDIA B300 GPUs; the BF16 model needs at least four B200 GPUs for inference.
-
-## Start the training container
-
-Start the [cookbook container](README.md#start-the-training-container) and run the commands
-below inside it, except the server commands marked for the host.
-
-## Train all weights with EP8
-
-The config below uses the supervised split of [UltraChat 200K](https://huggingface.co/datasets/HuggingFaceH4/ultrachat_200k). Text-only data takes the text pipeline, where packing works; the recipe keeps `packing: false` to stay on its memory-validated shape.
-
-Create `command-a-plus-sft.yaml`.
-
-```yaml
-model_name_or_path: CohereLabs/command-a-plus-05-2026-bf16
-model_revision: 5fb6fde5fd12ff89356aae552e11883bc49f069b
-moe_balancing: bias_update_transient
-router_balancing_rate: 1.0e-3
-
-dataset:
-- HuggingFaceH4/ultrachat_200k@train_sft
-conversation_field: messages
-test_size: 0.01
-train_on_completions_only: true
-assistant_message_template: "<|START_OF_TURN_TOKEN|><|CHATBOT_TOKEN|>"
-
-expert_parallel_size: 8
-save_sharded_ep: false
-use_grouped_gemm: true
-fp32_router: true
-fp32_experts: false
-
-attn_implementation: flash_attention_2
-use_liger_kernel: true
-packing: false
-# 1024 peaks at 255.8 GiB of the B300's ~268 GiB. At 4096 DeepEP's elastic buffer has no
-# room left to grow and hits a CUDA OOM a few steps in.
-max_length: 1024
-bf16: true
-
-per_device_train_batch_size: 1
-per_device_eval_batch_size: 1
-gradient_accumulation_steps: 16
-num_train_epochs: 1.0
-gradient_checkpointing: true
-
-optim: adamw_torch_fused
-learning_rate: 5.0e-06
-lr_scheduler_type: cosine
-warmup_steps: 32
-max_grad_norm: 1.0
-
-save_strategy: steps
-save_steps: 1000
-eval_strategy: steps
-eval_steps: 300
-save_total_limit: 1
-save_only_model: true
-output_dir: /data/checkpoints/command-a-plus-ultrachat-ep8
-
-logging_steps: 1
-logging_first_step: true
-report_to: wandb
-remove_unused_columns: false
-dataloader_num_workers: 2
-
-use_peft: false
-```
-
-Launch eight processes.
+### Full fine-tune
 
 ```bash
-halo launch sft command-a-plus-sft.yaml -n 8
+halo launch sft examples/sft/cohere2_moe/command-a-plus-ultrachat-ep.yaml -n 8 \
+  --output_dir=/data/checkpoints/command-a-plus-sft
 ```
 
-Each rank owns 16 routed experts. Halo replicates the shared experts and averages their output with the routed output.
+### Other layouts
 
-The model has no usable router auxiliary loss and no exportable bias slot, so plain `bias_update` raises. `moe_balancing: bias_update_transient` (with `router_balancing_rate: 1.0e-3`, as the shipped config sets) balances expert selection during training; exported checkpoints serve without the bias, so near-tied top-k picks can flip between trainer and server. Drop the line for unbalanced-but-serve-exact training.
+These have been tested only on a tiny model. Add one of them to the full fine-tune command:
 
-## Add CP, TP, or ETP
+- EP8 + CP2, for long sequences: `--context_parallel_size=2` (the recipe already turns packing off)
+- EP8 + TP2, when attention memory is the limit: `--tensor_parallel_size=2`
+- Pure ETP8, to shard every expert instead of placing whole experts: `--expert_parallel_size=1 --expert_tensor_parallel_size=8`
+- EP2 + ETP4, experimental: `--expert_parallel_size=2 --expert_tensor_parallel_size=4`
 
-Only EP8 is validated at full scale (see the note at the top); validate any
-layout below with a short run before committing GPU-days to it.
-
-Every layout below stays on the same eight ranks. Pure EP there is 8, 2 or 1, and EP+CP
-needs EP8 ([rules](../parallelism.md#rules-that-save-you-a-wasted-run)).
-
-Use CP when the sequence length causes attention memory pressure.
-
-```yaml
-context_parallel_size: 2
-```
-
-EP8 and CP2 use the same eight ranks. Keep the process count at eight.
+### LoRA
 
 ```bash
-halo launch sft command-a-plus-sft.yaml -n 8
+halo launch sft examples/sft/cohere2_moe/command-a-plus-ultrachat-ep.yaml -n 8 \
+  --use_peft=true --learning_rate=1e-4 \
+  --lora_target_modules=q_proj,k_proj,v_proj,o_proj \
+  --output_dir=/data/checkpoints/command-a-plus-lora
 ```
 
-Use TP when the dense attention weights need more sharding.
+The GPU tests cover LoRA, expert adapters included, on a tiny model: a merged save and an exact resume.
 
-```yaml
-tensor_parallel_size: 2
-```
+### GRPO
 
-EP8 and TP2 also use the same eight ranks.
+Online GRPO is not available for this family (see [Limits](#limits)). Offline GRPO trains on
+pre-generated, scored completions and needs no server: see [Offline GRPO](../training-methods/offline-grpo.md).
 
-```bash
-halo launch sft command-a-plus-sft.yaml -n 8
-```
+## Settings that matter
 
-Use pure ETP when each local expert is too large. This mode keeps all experts and shards each expert across eight GPUs.
+- **Sequence length.** `max_length: 1024` peaks at about 255 GiB of the B300's ~268 GiB. That leaves
+  DeepEP's buffer room to grow. At 4,096 the allocation fails once a longer batch forces it to grow.
+- **Router balancing.** The recipe sets `moe_balancing: bias_update_transient` with
+  `router_balancing_rate: 1.0e-3`. The model has no usable auxiliary loss and no exportable bias slot,
+  so plain `bias_update` raises. Exported checkpoints serve without the transient bias, so near-tied
+  expert picks can differ between training and serving. Drop the line to train unbalanced but serve
+  exactly what you trained.
+- **Precision.** The experts train in BF16 (`fp32_experts: false`). FP32 masters for 200B of expert
+  parameters do not fit.
+- **Pinned settings.** The recipe pins `attn_implementation: flash_attention_2` and the model revision
+  its memory numbers were measured on. It keeps `packing: false` to stay on that measured shape, though
+  text data supports packing.
 
-```yaml
-expert_parallel_size: 1
-expert_tensor_parallel_size: 8
-```
+## Limits
 
-Do not combine LoRA with TP. Validate one topology before a long run.
+- No online RL. Weight sync for this family has not been validated on either engine, so Halo refuses
+  online and async GRPO when it builds the trainer.
+- No verified serving engine for a gathered save. The save writes the vision tower under transformers'
+  in-memory names (`model.vision_tower.embeddings.*`), while vLLM 0.26.0's loader expects the hub's
+  `model.vision_tower.vision_model.*`, so expect vLLM to reject it at load.
 
-## Run text inference
+## Export and serve
 
-Load the gathered checkpoint with Transformers.
+The gathered save keeps transformers' fused expert pair, which `from_pretrained` reads directly.
+`halo run unfuse-moe-experts` rewrites the experts in the hub's per-expert spelling; it does not touch
+the vision tower names.
 
-```python
-import torch
-from transformers import AutoModelForImageTextToText, AutoTokenizer
+Run inference with transformers: load the save with `AutoModelForImageTextToText` and `AutoTokenizer`,
+or `AutoProcessor` for images ([snippet](README.md#smoke-test-a-checkpoint)). To serve the base model,
+point vLLM 0.26.0 at the hub repo, which it registers.
 
-path = "/data/checkpoints/command-a-plus-ultrachat-ep8"
-tokenizer = AutoTokenizer.from_pretrained(path)
-model = AutoModelForImageTextToText.from_pretrained(
-    path,
-    dtype=torch.bfloat16,
-    device_map="auto",
-)
+## Reference
 
-messages = [{"role": "user", "content": "Summarize the causes of a failed database migration."}]
-inputs = tokenizer.apply_chat_template(
-    messages,
-    tokenize=True,
-    add_generation_prompt=True,
-    return_tensors="pt",
-).to(model.device)
-
-output = model.generate(
-    **inputs,
-    max_new_tokens=512,
-    do_sample=True,
-    temperature=0.6,
-    top_p=0.95,
-)
-reply = tokenizer.decode(output[0][inputs["input_ids"].shape[-1]:], skip_special_tokens=True)
-print(reply)
-```
-
-Use `AutoProcessor` when the dataset or request contains images.
-
-Serve the gathered checkpoint with vLLM on port 8000, from the host
-([server setup](README.md#serve-from-the-host)). vLLM 0.26.0 registers the family, and
-its loader reads the gathered save's fused expert pair directly, with nothing to unfuse.
-
-```bash
-VLLM_MODEL=/data/checkpoints/command-a-plus-ultrachat-ep8 \
-VLLM_CUDA_DEVICES=0,1,2,3 VLLM_TP=4 \
-  docker compose -f docker-compose.vllm.yml up vllm-server
-```
-
-## Train an attention LoRA adapter
-
-Add this block to the SFT configuration.
-
-```yaml
-use_peft: true
-lora_r: 16
-lora_alpha: 32
-lora_dropout: 0.05
-lora_target_modules:
-- q_proj
-- k_proj
-- v_proj
-- o_proj
-
-learning_rate: 1.0e-04
-output_dir: /data/checkpoints/command-a-plus-ultrachat-lora
-```
-
-Keep EP enabled if the base model needs expert sharding. Keep TP disabled for LoRA.
-LoRA is verified on the tiny model only; validate a short run on the full checkpoint first.
-
-## Continue with GRPO
-
-Offline GRPO works from the SFT checkpoint: it trains on pre-generated
-completions and needs no rollout server, so the standard offline configuration applies
-unchanged. `packing` is an SFT-only field; the GRPO configs declare none, so a
-`packing:` key there fails to parse.
-
-Online GRPO and async GRPO with environments are refused at construction for this family
-(`_supports_weight_sync = False`: no NCCL weight sync has been validated against a serving
-engine for Cohere2 MoE), on either engine. Use offline methods.
-
-## Sources
-
-- [Command A+ model card](https://huggingface.co/CohereLabs/command-a-plus-05-2026-bf16)
-- [Halo Cohere2 MoE model notes](../../agent-docs/models/cohere2-moe.md) ↗
-- Halo Cohere2 SFT example: `examples/sft/cohere2_moe/command-a-plus-ultrachat-ep.yaml`
+- [Cohere2 MoE model notes](../../agent-docs/models/cohere2-moe.md) ↗: routing, the CP wrapper, test
+  coverage
+- [Offline GRPO](../training-methods/offline-grpo.md)
+- [Model card](https://huggingface.co/CohereLabs/command-a-plus-05-2026-bf16)

@@ -66,7 +66,7 @@ ETP is mechanically reachable (the experts use the shared fused-GLU storage, so 
 
 `examples/sft/laguna/laguna-s-2.1-ultrachat-ep.yaml` (EP=4, 256 experts → 64/rank) and `examples/sft/laguna/laguna-xs-2.1-ultrachat.yaml`. Launch the EP config at `--nproc_per_node=4`: `ep_size=4` is one dispatch group on 4 GPUs, but two racy 4-rank groups on 8, which `ParallelismConfig` rejects at config time. Two more settings are load-bearing:
 
-- `attn_implementation: sdpa` — the pinned hub revision provides no Flash-Attention path. SDPA is not a varlen backend, so the collator factory ([Collators](../data/collators.md)) rejects `padding_free` outright.
+- `attn_implementation: sdpa`: the pinned revision's modeling code never passes `sliding_window` to the attention function, so a flash backend would run its sliding-window layers as full attention; SDPA applies the sliding mask. SDPA is not a varlen backend, so the collator factory ([Collators](../data/collators.md)) rejects `padding_free` outright.
 
     The configs use `packing: true`, which keeps documents isolated but materializes a dense mask over the flattened batch (side up to `per_device_train_batch_size * max_length`) instead of consuming `cu_seqlens`.
 

@@ -1,224 +1,148 @@
-# Halo / Qwen3 MoE cookbook
+# Qwen3 MoE Cookbook
 
-Fine-tune [Qwen3 30B A3B Instruct 2507](https://huggingface.co/Qwen/Qwen3-30B-A3B-Instruct-2507) with Halo.
+[Qwen3-30B-A3B-Instruct-2507](https://huggingface.co/Qwen/Qwen3-30B-A3B-Instruct-2507) has 128 routed
+experts and picks eight per token. Qwen3 MoE has the broadest parallelism coverage in Halo, which makes it
+the reference MoE family.
 
-The model has 128 routed experts and selects eight experts for each token. Halo can distribute the experts with EP, shard each expert with ETP, and shard attention with TP.
+## Support
 
-## Halo support
+| FSDP | EP | CP | TP | ETP | EP+CP | EP+TP | LoRA | Online RL |
+|:---:|:---:|:---:|:---:|:---:|:---:|:---:|:---:|:---:|
+| Yes | Yes | Yes | Yes | Yes | Yes | Yes | Yes | vLLM, SGLang |
 
-| FSDP | EP | CP | TP | ETP | EP+CP | EP+TP | LoRA |
-|:---:|:---:|:---:|:---:|:---:|:---:|:---:|:---:|
-| Yes | Yes | Yes | Yes | Yes | Yes | Yes | Yes |
+- **Checkpoint:** `Qwen/Qwen3-30B-A3B-Instruct-2507`, pinned below. The larger
+  `Qwen/Qwen3-235B-A22B-Instruct-2507` trains at `--expert_parallel_size=8`.
+- **GPUs:** four at EP4, 32 experts per GPU.
 
-Halo uses DeepEP for token dispatch and grouped GEMM for the expert projections. Qwen3 MoE also supports Ulysses CP for long sequences.
+## Recipes
 
-This recipe starts with four NVIDIA B300 GPUs. EP4 places 32 experts on each GPU.
+Run these in the [training container](README.md#start-the-training-container).
 
-## Start the training container
+### Full fine-tune
 
-Start the [cookbook container](README.md#start-the-training-container) and run the commands
-below inside it, except the server commands marked for the host.
-
-## Train all weights with EP4
-
-Create `qwen3-moe-sft.yaml`.
+No Qwen3 MoE SFT recipe ships, so save this as `qwen3-moe-sft.yaml` in the repo root:
 
 ```yaml
 model_name_or_path: Qwen/Qwen3-30B-A3B-Instruct-2507
 model_revision: 0d7cf23991f47feeb3a57ecb4c9cee8ea4a17bfe
-model_init_kwargs:
-  output_router_logits: true
-  router_aux_loss_coef: 0.001
 moe_balancing: aux_loss
 
 dataset:
 - HuggingFaceH4/ultrachat_200k@train_sft
 conversation_field: messages
 test_size: 0.01
-train_on_completions_only: true
 assistant_message_template: "<|im_start|>assistant\n"
 pad_token: <|endoftext|>
 eos_token: <|im_end|>
 
 expert_parallel_size: 4
-save_sharded_ep: false
-use_grouped_gemm: true
 fp32_router: true
-fp32_experts: false
 
-use_liger_kernel: true
 packing: true
 max_length: 8192
-bf16: true
-
 per_device_train_batch_size: 1
 per_device_eval_batch_size: 1
 gradient_accumulation_steps: 8
-num_train_epochs: 1.0
 gradient_checkpointing: true
 
 optim: adamw_torch_fused
 learning_rate: 5.0e-06
 lr_scheduler_type: cosine
 warmup_steps: 32
-max_grad_norm: 1.0
+num_train_epochs: 1.0
 
 save_strategy: steps
 save_steps: 1000
-eval_strategy: steps
-eval_steps: 300
 save_total_limit: 1
 save_only_model: true
-output_dir: /data/checkpoints/qwen3-30b-a3b-ultrachat-ep4
-
+eval_strategy: steps
+eval_steps: 300
 logging_steps: 1
-logging_first_step: true
 report_to: wandb
 remove_unused_columns: false
-dataloader_num_workers: 2
-
-use_peft: false
-```
-
-Launch four processes.
-
-```bash
-halo launch sft qwen3-moe-sft.yaml -n 4
-```
-
-Halo gathers the expert weights when it saves because `save_sharded_ep` is false.
-
-Leave `attn_implementation` unset — Halo auto-selects FA4 on Blackwell and FA3 (FA2 if
-FA3 is absent) on Hopper.
-
-## Add CP, TP, or ETP
-
-Every layout below runs on four ranks, where EP4 is one dispatch group. The EP4 layouts
-are rejected on eight GPUs at config time; use EP8 there. For a 4-way expert split on
-eight GPUs, `ep4 + etp2` replaces the pure EP4 layout only: CP or TP on top of it is
-rejected ([rules](../parallelism.md#rules-that-save-you-a-wasted-run)).
-
-Use CP for longer sequences. EP4 and CP2 use the same four ranks. Disable packing, since
-the collator rejects it when CP splits the sequence.
-
-```yaml
-expert_parallel_size: 4
-context_parallel_size: 2
-packing: false
+output_dir: /data/checkpoints/qwen3-30b-a3b-sft
 ```
 
 ```bash
 halo launch sft qwen3-moe-sft.yaml -n 4
 ```
 
-Use TP when attention memory is the limit. EP4 and TP2 also use the same four ranks.
+### Other layouts
 
-```yaml
-expert_parallel_size: 4
-tensor_parallel_size: 2
-```
+Each of these runs on the same four GPUs. Add one to the launch command:
 
-```bash
-halo launch sft qwen3-moe-sft.yaml -n 4
-```
+- EP4 + CP2, for long sequences: `--context_parallel_size=2 --packing=false`
+- EP4 + TP2, when attention memory is the limit: `--tensor_parallel_size=2`
+- Pure ETP4, to shard every expert instead of placing whole experts: `--expert_parallel_size=1 --expert_tensor_parallel_size=4`
 
-Use pure ETP when each expert needs more sharding.
+On eight GPUs, launch with `-n 8 --expert_parallel_size=8`. EP4 on eight GPUs is rejected at startup.
 
-```yaml
-expert_parallel_size: 1
-expert_tensor_parallel_size: 4
-```
-
-Do not enable TP and ETP together. Do not combine LoRA with TP.
-
-## Run inference
-
-```python
-import torch
-from transformers import AutoModelForCausalLM, AutoTokenizer
-
-path = "/data/checkpoints/qwen3-30b-a3b-ultrachat-ep4"
-tokenizer = AutoTokenizer.from_pretrained(path)
-model = AutoModelForCausalLM.from_pretrained(
-    path,
-    dtype=torch.bfloat16,
-    device_map="auto",
-)
-
-messages = [{"role": "user", "content": "Explain expert parallelism in five sentences."}]
-inputs = tokenizer.apply_chat_template(
-    messages,
-    add_generation_prompt=True,
-    return_tensors="pt",
-).to(model.device)
-
-output = model.generate(**inputs, max_new_tokens=256, do_sample=True, temperature=0.2)
-print(tokenizer.decode(output[0][inputs["input_ids"].shape[-1]:], skip_special_tokens=True))
-```
-
-Serve the gathered checkpoint with SGLang on port 30000, from the host
-([server setup](README.md#serve-from-the-host)).
+### LoRA
 
 ```bash
-SGLANG_MODEL="$HALO_SCRATCH/checkpoints/qwen3-30b-a3b-ultrachat-ep4" \
-  docker compose -f docker-compose.sglang.yml up
+halo launch sft qwen3-moe-sft.yaml -n 4 \
+  --use_peft=true --learning_rate=1e-4 \
+  --lora_target_modules=q_proj,k_proj,v_proj,o_proj \
+  --output_dir=/data/checkpoints/qwen3-30b-a3b-lora
 ```
 
-## Train a LoRA adapter
+Add `gate_proj,up_proj,down_proj` to adapt the experts as well. Under EP they train as grouped expert
+adapters.
 
-Add this block to the SFT configuration.
+### GRPO
 
-```yaml
-use_peft: true
-lora_r: 16
-lora_alpha: 32
-lora_dropout: 0.05
-lora_target_modules:
-- q_proj
-- k_proj
-- v_proj
-- o_proj
+Read [Before a GRPO run](README.md#before-a-grpo-run) first. This setup serves the SFT checkpoint from
+vLLM on GPUs 0–1 and trains on GPUs 2–3.
 
-learning_rate: 1.0e-04
-output_dir: /data/checkpoints/qwen3-30b-a3b-ultrachat-lora
-```
-
-Keep EP enabled if the base model needs expert sharding. Keep TP disabled for LoRA.
-
-## Continue with GRPO
-
-Copy `examples/grpo/environmental/environmental-grpo-template.yaml` to
-`qwen3-moe-grpo.yaml`, set `model_name_or_path` to the gathered SFT checkpoint's `/data`
-path and the environment and reward fields for your task, and set the keys below, editing
-the template's own line where it already has the key (a repeated key fails to parse):
-
-```yaml
-rollout_backend: vllm
-rollout_server_url: http://localhost:8000
-train_on_sampled_tokens: true
-routing_replay: rollout
-beta: 0.0
-output_dir: /data/checkpoints/qwen3-30b-a3b-grpo
-```
-
-Rollouts run on vLLM (the config default). SGLang 0.5.17 also serves and weight-syncs
-Qwen3 MoE (`rollout_backend: sglang`, port 30000), with expert distribution.
-
-Start the server on the host ([server setup](README.md#serve-from-the-host)), on GPUs the
-trainer will not use:
+On the host:
 
 ```bash
-VLLM_MODEL=/data/checkpoints/qwen3-30b-a3b-ultrachat-ep4 \
-VLLM_CUDA_DEVICES=0,1 VLLM_TP=2 VLLM_ENABLE_R3=1 \
-  docker compose -f docker-compose.vllm.yml up vllm-server
+VLLM_MODEL=/data/checkpoints/qwen3-30b-a3b-sft VLLM_CUDA_DEVICES=0,1 VLLM_TP=2 VLLM_ENABLE_R3=1 \
+  docker compose -f docker-compose.vllm.yml up -d vllm-server
 ```
 
-Launch the trainer in the training container on the remaining GPUs; they cannot share
-one. `expert_parallel_size` may match the trainer's GPU count.
+In the training container, copy the template, set `dataset`, `environment_type` and `rewards`, then
+launch:
 
 ```bash
-CUDA_VISIBLE_DEVICES=2,3 halo launch environmental-grpo qwen3-moe-grpo.yaml -n 2
+cp examples/grpo/environmental/environmental-grpo-template.yaml qwen3-moe-grpo.yaml
+CUDA_VISIBLE_DEVICES=2,3 halo launch environmental-grpo qwen3-moe-grpo.yaml -n 2 \
+  --model_name_or_path=/data/checkpoints/qwen3-30b-a3b-sft \
+  --routing_replay=rollout --beta=0.0 \
+  --output_dir=/data/checkpoints/qwen3-30b-a3b-grpo
 ```
 
-Full setup:
-[Async GRPO with Environments](../../agent-docs/training-methods/grpo/async-grpo/README.md) ↗.
+Add `--expert_parallel_size=2` to shard the experts across the two trainer GPUs. On SGLang, add
+`--rollout_backend=sglang --rollout_server_url=http://localhost:30000` and start the server with
+`SGLANG_ENABLE_R3=1`.
+
+## Settings that matter
+
+- **Attention.** Leave `attn_implementation` unset. Halo picks FA4 on Blackwell and FA3 (or FA2) on
+  Hopper.
+- **Router balancing.** `aux_loss` uses the checkpoint's `router_aux_loss_coef` (0.001). The router has no
+  bias slot, so `bias_update` raises. `bias_update_transient` balances training only, and exported
+  checkpoints serve without the bias.
+- **Tool parser.** Qwen3 tool calls parse with vLLM's default `hermes` parser.
+
+## Limits
+
+Qwen3 MoE has no family-specific limits. The general ones apply: LoRA is refused under TP and EP+TP,
+and expert adapters are refused once `expert_tensor_parallel_size > 1`.
+
+## Export and serve
+
+The gathered save writes the hub's per-expert layout, which transformers, vLLM and SGLang read
+directly. Smoke-test it with `AutoModelForCausalLM` ([snippet](README.md#smoke-test-a-checkpoint)).
+Serve it from the [host](README.md#serve-from-the-host) with SGLang on port 30000:
+
+```bash
+SGLANG_MODEL="$HALO_SCRATCH/checkpoints/qwen3-30b-a3b-sft" \
+  docker compose -f docker-compose.sglang.yml up -d
+```
+
+## Reference
+
+- [Qwen3 model notes](../../agent-docs/models/qwen3.md) ↗: the EP, CP and TP wrappers, balancing
+- [Async GRPO with Environments](../training-methods/async-grpo-environments.md)
+- [Model card](https://huggingface.co/Qwen/Qwen3-30B-A3B-Instruct-2507)

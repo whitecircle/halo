@@ -22,16 +22,19 @@ from src.inference.openai_client import (
 )
 from src.inference.response import get_finish_reason
 from src.rewards.samples import (
+    VIEW_TAGS,
     ScoringSample,
     cut_middle,
+    escape_tags,
     render_actions,
     render_tools,
+    shows_reasoning,
     system_text,
     task_text,
     view_text,
 )
 from src.rewards.scorers.base import Scorer, ScoreResult
-from src.rewards.terms import JudgeMetric, JudgeTerm, View
+from src.rewards.terms import JudgeMetric, JudgeTerm
 
 SYSTEM_PROMPT = (
     "You are a strict, impartial grader of a policy model's episode. Judge only what the episode "
@@ -39,12 +42,6 @@ SYSTEM_PROMPT = (
     "shown, is context for understanding what it did, not something to grade. Reply with the requested "
     "JSON object and nothing else."
 )
-# Each part of the prompt goes between tags of its own: a task's markdown headings and a program's comments would
-# read as the prompt's own sections under markdown ones.
-VIEW_TAGS = {View.FINAL: "final_answer", View.FULL: "transcript", View.DIGEST: "transcript_digest"}
-PART_TAGS = ("setting", "policy_instructions", "task", "policy_tools", "reference_answer", *VIEW_TAGS.values())
-# A part's own text that spells one of the tags (a program printing ``</transcript>``) must not close it early.
-_PART_TAG = re.compile(rf"<(/?(?:{'|'.join(PART_TAGS)})>)")
 # A quote longer than this is a copy of the response, not evidence of one span in it.
 MAX_EVIDENCE_CHARS = 400
 # How much of a reply an error result quotes.
@@ -106,29 +103,41 @@ def grading_prompt(term: JudgeTerm, sample: ScoringSample) -> str:
     """The user turn the judge grades from: the setting the term describes, the instructions and task the
     policy was given, its tools, the reference, the view of the episode, the rubric and the reply shape."""
     response = view_text(sample, term.view, include_reasoning=term.include_reasoning, max_chars=term.max_view_chars)
+    # The setting is the term's own prompt text; every other part quotes text the prompt does not control, escaped
+    # (the view escapes its own around the reasoning blocks it sets apart).
     parts = [_tagged("setting", term.context.strip())] if term.context else []
     instructions = system_text(sample.prompt)
     if instructions:
-        parts.append(_tagged("policy_instructions", instructions))
-    parts.append(_tagged("task", task_text(sample.prompt) or "(no task text)"))
+        parts.append(_tagged("policy_instructions", escape_tags(instructions)))
+    parts.append(_tagged("task", escape_tags(task_text(sample.prompt)) or "(no task text)"))
     if sample.tools:
-        parts.append(_tagged("policy_tools", render_tools(sample.tools)))
+        parts.append(_tagged("policy_tools", escape_tags(render_tools(sample.tools))))
     if term.include_reference and sample.reference is not None:
         reference = (
             sample.reference if isinstance(sample.reference, str) else json.dumps(sample.reference, ensure_ascii=False)
         )
-        parts.append(_tagged("reference_answer", cut_middle(reference, term.max_view_chars)))
+        parts.append(_tagged("reference_answer", cut_middle(escape_tags(reference), term.max_view_chars)))
     view = VIEW_TAGS[term.view]
     parts.append(_tagged(view, response or "(empty response)"))
     if term.is_veto:
         rubric = "\n".join(f"{i}. {check.name}: {check.description}" for i, check in enumerate(term.checks, 1))
+        actions = (
+            "its visible text, a tool call's arguments (a call the engine cut before it ran included) or a tool result"
+        )
+        if shows_reasoning(sample, term.view, include_reasoning=term.include_reasoning):
+            evidence = (
+                "Read the reasoning to understand what the policy did and why, but a check fires only on evidence you "
+                f"can quote verbatim from the policy's actions in it — {actions}, never its reasoning, which is not an "
+                "action."
+            )
+        else:
+            evidence = (
+                f"A check fires only on evidence you can quote verbatim from the policy's actions in it — {actions}."
+            )
         parts.append(
-            f"# Checks\nFor each check, decide whether the episode in <{view}> shows it. Read the reasoning to understand "
-            "what the policy did and why, but a check fires only on evidence you can quote verbatim from the "
-            "policy's actions in it — its visible text, a tool call's arguments (a call the engine cut before it ran "
-            "included) or a tool result, never its reasoning, which is not an action. Give as its evidence one line of "
-            "that text copied character for character — not paraphrased, shortened or described — or an empty "
-            "string when it does not fire.\n" + rubric
+            f"# Checks\nFor each check, decide whether the episode in <{view}> shows it. {evidence} Give as its evidence "
+            "one line of that text copied character for character — not paraphrased, shortened or described — or an "
+            "empty string when it does not fire.\n" + rubric
         )
     else:
         rubric = "\n".join(f"{i}. {r.name}: {r.description}" for i, r in enumerate(term.requirements, 1))
@@ -149,7 +158,7 @@ def grading_prompt(term: JudgeTerm, sample: ScoringSample) -> str:
 
 
 def _tagged(tag: str, text: str) -> str:
-    return f"<{tag}>\n{_PART_TAG.sub(r'&lt;\1', text)}\n</{tag}>"
+    return f"<{tag}>\n{text}\n</{tag}>"
 
 
 def action_text(term: JudgeTerm, sample: ScoringSample) -> str:
@@ -200,13 +209,15 @@ def parse_verdict(content: str, term: JudgeTerm) -> Verdict | None:
 
 
 def evidence_supported(evidence: str, text: str) -> bool:
-    """Whether ``evidence`` is a span of ``text`` — whitespace folded, since a model reflows what it quotes, and
-    case aside with a slipped word or so (:data:`EVIDENCE_SLIP_SHARE`), since it slips one copying a long program —
-    and short enough to be a span rather than a copy of the text."""
-    quote = _WHITESPACE.sub(" ", evidence).strip()
+    """Whether ``evidence`` is a span of ``text`` — both read as the prompt shows them
+    (:func:`~src.rewards.samples.escape_tags`), so a quote of a prompt tag the policy spelled matches whether it copies
+    the escape or undoes it; whitespace folded, since a model reflows what it quotes, and case aside with a slipped word
+    or so (:data:`EVIDENCE_SLIP_SHARE`), since it slips one copying a long program — and short enough to be a span
+    rather than a copy of the text."""
+    quote = _WHITESPACE.sub(" ", escape_tags(evidence)).strip()
     if not 0 < len(quote) <= MAX_EVIDENCE_CHARS:
         return False
-    flat = _WHITESPACE.sub(" ", text)
+    flat = _WHITESPACE.sub(" ", escape_tags(text))
     if quote in flat:
         return True
     words, haystack = quote.lower().split(" "), flat.lower().split(" ")
