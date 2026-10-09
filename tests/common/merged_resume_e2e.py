@@ -22,7 +22,7 @@ or 1 (experts FSDP-sharded as DTensors, DP=2), with ``cp_size`` 2 under EP+CP:
      the save; every resumed step's loss matches the uninterrupted run's within
      ``TOL.replayed_resume_loss_abs`` and the final adapters sit within
      ``TOL.replayed_resume_weight_rtol`` of its. Nothing is reset between the runs: the bf16
-     optimizer keys its stochastic rounding by step and parameter position, so the resumed steps
+     optimizer keys its stochastic rounding by step and parameter name, so the resumed steps
      round as the uninterrupted ones did. DeepEP's default dispatch hands out receive slots with
      atomics, so the order an expert's tokens arrive in, and with it the rounding of each expert
      adapter gradient summed over them, changes from run to run; the body builds every DeepEP buffer

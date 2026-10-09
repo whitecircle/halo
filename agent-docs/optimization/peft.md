@@ -307,7 +307,7 @@ mixin therefore also wraps the context for every PEFT model (`make_disable_adapt
 trainable params registered at exit are not the ones registered at entry, it reshards the FSDP2 modules
 before peft's exit, so the restore lands on the sharded params, and the next forward or backward re-gathers
 them once. A pass behind the policy forward (DPO, KTO, offline GRPO) enters and exits on the same unsharded
-params and reshards nothing.
+params and reshards nothing. PEFT fixed the freeze upstream in huggingface/peft#3839, after the pinned 0.18.1.
 
 An explicit `ref_model` (DPO, KTO) or self-distillation's KL `reference_model` is never parallelized, so
 under EP or TP it is a whole dense replica on every rank. Its log-probs match the policy's up to kernel
