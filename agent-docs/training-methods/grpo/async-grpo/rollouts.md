@@ -116,8 +116,8 @@ also in `episode/length_cutoff_in_call_turns`) and pays the protocol's `length_c
 (default `0`); the turn that exhausts the cap, or lands on the last turn, ends the episode truncated,
 priced like a `max_turns` overflow. Under carried reasoning a cut costs the policy only a turn and
 the retry thinks on from where it stopped, so a per-turn budget binds only once the cut is priced.
-The turn after an unproductive one — cut, empty, or every call unknown, refused unrun or a run that
-showed nothing (a code-contests [starved run](../environments/code-contests.md#tools)) — gets a
+The turn after an unproductive one — cut, empty, or every call unknown (under the native tool-call protocol
+also refused unrun or a run that showed nothing, a code-contests [starved run](../environments/code-contests.md#tools)) — gets a
 quarter of its level's reasoning cap, not the whole budget again (`RECOVERY_THINKING_SHARE` in
 `src/environments/episode.py`, clamping what the output budget leaves), and under
 `rollout_max_answer_tokens` a total of that reserve plus the room: room to read the nudge or the
@@ -230,8 +230,8 @@ flag. The importance-sampling correction additionally needs vLLM's
 `--logprobs-mode processed_logprobs` ([Objective](objective.md#importance-sampling-correction)).
 
 Turns the rollout marked untrainable — engine-cut (`truncated`), ended with neither a tool call nor
-visible content (`empty`), or every tool call naming a nonexistent tool, refused unrun or showing
-nothing (`calls_rejected`) — become
+visible content (`empty`), or every tool call naming a nonexistent tool (`calls_rejected`; under the native
+tool-call protocol also every call refused unrun or showing nothing, where ReAct flags unknown tools only) — become
 rows too, tagged: a tagged row stays in the loss only when its trajectory's advantage is negative
 ([Objective](objective.md#untrainable-turns)). Such a turn stays in the next turn's prompt. An episode
 whose turns are all untrainable trains only when its advantage is negative; one that yields no row at all yields
@@ -274,7 +274,10 @@ name — a veto judge's fired checks with the quotes behind them — so a vetoed
 record without scoring it again. Both are `{}` for an episode that kept neither.
 
 The `completion` column renders detokenized message text, unaffected by `train_on_sampled_tokens`
-(raw ids feed the loss only). TRL's `log_completions` controls the console table alone, capped by
+(raw ids feed the loss only). A turn the engine cut while writing a tool call shows the partial call
+after its text, tagged `cut by the engine before the turn closed; never run`: the call never executes,
+the policy's later turns never see it, and its tokens train only inside the cut turn's sampled ids, on
+a negative advantage. TRL's `log_completions` controls the console table alone, capped by
 `num_completions_to_print`.
 
 The writer rank comes from `fs_aware_save_rank`: global rank 0 on a shared output filesystem, one

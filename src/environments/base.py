@@ -17,7 +17,7 @@ from typing import Any
 from src.environments.sandbox.base import SandboxFault, SandboxInfraError
 from src.inference.response import ENGINE_CUT_FINISH_REASONS
 from src.rewards.composer import RewardComposer
-from src.rewards.samples import TURN_FLAG_NOTES, ScoringSample
+from src.rewards.samples import CUT_CALLS_KEY, TURN_FLAG_NOTES, ScoringSample
 from src.rewards.scorers.base import ScoreResult
 from src.rewards.terms import (
     ENVIRONMENT_REWARD_SOURCES,
@@ -53,9 +53,10 @@ EPISODE_ERROR_KEY = "error"
 # Stamped by the rollout driver under an episode output budget: whether the budget no longer held a
 # turn's answer room, so the episode ended there (truncated) or could not have run another turn.
 OUTPUT_BUDGET_EXHAUSTED_KEY = "output_budget_exhausted"
-# Set in a turn's step context by the rollout driver when the engine cut the turn while it held an unfinished
-# tool call, so the recovery can say the call ran past the turn's length limit (``LENGTH_CUTOFF_IN_CALL_NUDGE``).
-CUT_IN_TOOL_CALL_KEY = "cut_in_tool_call"
+# Set in a turn's step context by the rollout driver when the engine cut the turn at its token cap while it held
+# tool calls: the calls the parser salvaged, never run. The recovery says the call ran past the turn's length limit
+# (``LENGTH_CUTOFF_IN_CALL_NUDGE``), and the turn keeps them for the judge (``Message.cut_tool_calls``).
+CUT_TOOL_CALLS_KEY = "cut_tool_calls"
 # Step-context key the driver sets on the last turn the episode's output budget affords: a turn that
 # produced nothing cannot be retried after it, so it ends the episode like a max_turns overflow.
 LAST_TURN_KEY = "last_turn"
@@ -254,10 +255,14 @@ class Message:
     reasoning_tokens: int | None = None
     # Engine cut the turn off at its token cap: the text is a fragment, never rewarded (``untrainable``).
     truncated: bool = False
-    # Every tool call named a tool that does not exist, was refused as carrying nothing to run, or ran and
-    # showed nothing (``UninformativeReply``), so the turn accomplished nothing — never rewarded like a
-    # fragment, or a recovering episode reinforces the invented call, the refused program or the empty run
-    # that cost it a turn.
+    # The calls the parser salvaged from a turn cut at its token cap while writing them (``CUT_TOOL_CALLS_KEY``).
+    # Never run and dropped by to_dict, so neither the engine nor the training render sees them; a scorer's
+    # view and the completions record show them, marked.
+    cut_tool_calls: list[dict[str, Any]] | None = None
+    # Every tool call named a tool that does not exist, was refused unrun (malformed, over budget, or carrying
+    # nothing to run), or ran and showed nothing (``UninformativeReply``), so the turn accomplished nothing —
+    # never rewarded like a fragment, or a recovering episode reinforces the invented or refused call or the
+    # empty run that cost it a turn.
     calls_rejected: bool = False
     # The model ended the turn with neither visible content nor a tool call — never rewarded for the
     # same reason: a recovering episode would reinforce stopping on nothing.
@@ -874,6 +879,7 @@ class BaseEnvironment(ABC):
                 reasoning_tokens=ctx.get("reasoning_tokens"),
                 # An engine abort is a cut turn too: the fragment must never train as a natural stop.
                 truncated=ctx.get("finish_reason") in ENGINE_CUT_FINISH_REASONS,
+                cut_tool_calls=ctx.get(CUT_TOOL_CALLS_KEY),
             )
         )
 
@@ -1091,9 +1097,9 @@ class BaseEnvironment(ABC):
 
     def _scoring_sample(self, trajectory: Trajectory) -> ScoringSample:
         """What an external scorer reads of a finished episode: the prompt turns (everything before the
-        first assistant turn), the policy's turns after them with their reasoning and turn flags, the
-        final answer (:meth:`_final_answer`), the reference (:meth:`_scoring_reference`) and the tools
-        the policy could call."""
+        first assistant turn), the policy's turns after them with their reasoning, turn flags and the calls
+        a cut turn never ran, the final answer (:meth:`_final_answer`), the reference
+        (:meth:`_scoring_reference`) and the tools the policy could call."""
         messages = [self._sample_message(message) for message in trajectory.messages]
         first = next((i for i, m in enumerate(trajectory.messages) if m.role == "assistant"), len(messages))
         return ScoringSample(
@@ -1106,10 +1112,13 @@ class BaseEnvironment(ABC):
 
     @staticmethod
     def _sample_message(message: Message) -> dict[str, Any]:
-        """A message as a scorer reads it: the wire fields with the reasoning, and the turn flags
-        (:data:`~src.rewards.samples.TURN_FLAG_NOTES`) a judge should see named."""
+        """A message as a scorer reads it: the wire fields with the reasoning, the turn flags
+        (:data:`~src.rewards.samples.TURN_FLAG_NOTES`) a judge should see named, and the calls a cut turn
+        never ran under :data:`~src.rewards.samples.CUT_CALLS_KEY`, apart from the calls that ran."""
         rendered = message.to_dict(include_thinking=True)
         rendered.update({flag: True for flag in TURN_FLAG_NOTES if getattr(message, flag)})
+        if message.cut_tool_calls:
+            rendered[CUT_CALLS_KEY] = message.cut_tool_calls
         return rendered
 
     def _apply_external_scores(self, trajectory: Trajectory, verdict: Mapping[str, ScoreResult]) -> None:

@@ -98,19 +98,21 @@ constructor's budgets stand.
 `eval_protocol` names the contract a run is scored under (`EVAL_PROTOCOLS` in `code_contests.py`):
 
 - `harness` (default) pins nothing: the configured budgets stand. This is the agentic loop the recipes train, and its solve rate is attempts-until-accept within the budget.
-- `leaderboard` pins `max_submissions: 1` and `max_test_calls: 0`: one graded program per sample, the scratchpad refused. The prompt, tool-call format and grader stay this environment's, so its numbers are not a benchmark's published ones.
+- `leaderboard` pins `max_submissions: 1` and `max_test_calls: 0`: one graded program per sample, the scratchpad closed. The prompt, tool-call format and grader stay this environment's, so its numbers are not a benchmark's published ones.
 
 A configured value that contradicts a pin raises at construction. An effort profile's
 `max_submissions` / `max_test_calls` are validated, then give way to the pins (logged); the level
 keeps its `thinking_tokens`. The task message states no budget under either protocol: under
-`leaderboard` the model learns the scratchpad is closed from the refusal alone.
+`leaderboard` the model learns the scratchpad is closed from its reply alone. A call to it is a tool error but no
+refusal (`ToolDisabled`): its turn is not flagged and the turn after it gets no retry reserve, which would buy the
+protocol more output per sample than the setting it reproduces ([Tools](#tools)).
 
 ## Tools
 
 - The scratchpad — `python_repl` when the run fixes `python`, else `run_code`. It runs a program through the grading sandbox, standard library included, on the `stdin` the call supplies (empty by default), so the model can feed it the statement's sample input or its own; it never sees the graded tests. Each call is one-shot — nothing a run writes survives into the next. Past `max_test_calls` a call is refused: `Error: Not run: this task's scratchpad budget is spent. Submit your solution with submit_solution.`
 - `submit_solution` — grades a complete stdin/stdout program against the hidden tests. The only graded channel, with no fenced-code-block fallback. A submission that passes every hidden test ends the episode, as reaching `max_submissions` does: past an accept a resubmission can only lose the solve, so one later in the same turn is not graded (`Not graded: an earlier submission already passed every test, …`), and one past the budget in the same turn is refused (`Error: Not graded: this task's submission budget is spent.`). Its description says a passing submission ends the task and the last graded one otherwise counts.
 
-- Both tools refuse a program whose comments carry the reasoning — 16384 characters inside comments or more, outweighing everything else in it (`comment_chars` in `src/environments/envs/tasks/coding/comments.py`: line and block comments by the language's registered syntax wherever they start, string literals skipped, a C-family `#if 0` block and a Python docstring or bare string counted too) — unrun, the call returned to its budget: `Not run: the program's comments carry your reasoning. Keep the reasoning in your thinking and send the program again with documentation comments only.` A turn the thinking cap closes can carry its thought on inside the program, which neither the cap nor any reasoning term counts ([Reasoning length reward](../async-grpo/rollouts.md#reasoning-length-reward)); this guard reads it. The refusal costs the turn and `tool_error_penalty` (`0` on the class, `0.05` in the recipes), a turn of nothing else is flagged untrainable like one whose calls named no tool, and the turn after it runs on the retry reserve. The offline re-grader skips the same programs.
+- Both tools refuse a program whose comments carry the reasoning — 16384 characters inside comments or more, outweighing everything else in it, or 5000 or more holding at least 2 deliberation cues per 1,000 of those characters (`comment_chars` and `deliberation_cues` in `src/environments/envs/tasks/coding/comments.py`: line and block comments by the language's registered syntax wherever they start, string literals skipped, a C-family `#if 0` block and a Python docstring or bare string counted too) — unrun, the call returned to its budget: `Not run: the program's comments carry your reasoning. Keep the reasoning in your thinking and send the program again with documentation comments only.` A turn the thinking cap closes can carry its thought on inside the program, which neither the cap nor any reasoning term counts ([Reasoning length reward](../async-grpo/rollouts.md#reasoning-length-reward)); this guard reads it. A cue is the model talking to itself: an opener such as `Wait,`, `Actually`, `Hmm`, `Let me`, `Let's check`, `No,` or `What if` starting a comment line or clause, or a question closing a comment line. A verb inside a sentence ("minimize wait time") is no cue, and neither is anything outside the comments. The refusal costs the turn and `tool_error_penalty` (`0` on the class, `0.05` in the recipes), a turn of nothing else is flagged untrainable like one whose calls named no tool, and the turn after it runs on the retry reserve. The offline re-grader skips the same programs.
 
 - `submit_solution` also refuses a program identical to one this episode already graded (comments, trailing whitespace and blank lines aside) unrun, the submission returned to its budget: `Not graded: this program is identical to one already graded and would receive the same verdict. Change it before submitting again.` It would only probe the judge; the turn is flagged like any refusal and the offline re-grader takes no slot for it (`episode/identical_resubmissions`).
 
@@ -118,11 +120,22 @@ Neither description states a budget, no reply counts what is left of one, and a 
 
 Both tool descriptions name the toolchain where the sandbox states it (`SandboxExecutor.toolchain`): on `local` and `bubblewrap` the registry's compile flags and the interpreter a Python program runs on (`Here python runs on CPython 3.12 and cpp is compiled with g++ -O2 -pipe -std=c++17.`); `remote` states none.
 
-A scratchpad run gets the per-test time limit its language is graded at ([Grading rules](#grading-rules)), and a timeout says so. Its reply leads with any error — the compiler's first diagnostics, or a crash's signal and stderr tail — ahead of the program's stdout ([Sandboxes](sandbox.md#using-it-from-python)); a clean exit's reply is its stdout alone. A run with no `stdin` adds a note on a line of its own that none was passed: neither a parse error, nor output computed from nothing, nor a clean exit with nothing on stdout names the cause. It spends its run like any other. A silent one — a program that reads input (its language's input calls, found outside its comments and string literals; one that swaps its stdin for an in-memory buffer, Python `sys.stdin = io.StringIO(...)` or C++ `cin.rdbuf(...)`, reads none, nor does a read from an `istringstream`) exiting cleanly with nothing on stdout — showed the model nothing: it stays spent and paid as a run, its reply unchanged, but a turn whose every call was such a run, a refusal or an unknown tool is flagged untrainable like one whose calls named no tool, so the turn after it runs on the retry reserve instead of a fresh reasoning budget. A starved run beside a run that printed or a submission leaves its turn trainable. `episode/starved_test_runs` counts the silent runs, `episode/starved_turns` the turns they flagged. A build failure — a compile error, or Python source that does not compile (on `local` and `bubblewrap`) — ran nothing and gets no note. An empty `stdin` is never refused: a self-test that embeds its input is a real use, and a silent one that reads none passed.
+A scratchpad run gets the per-test time limit its language is graded at ([Grading rules](#grading-rules)), and a timeout says so. Its reply leads with any error — the compiler's first diagnostics, or a crash's signal and stderr tail — ahead of the program's stdout ([Sandboxes](sandbox.md#using-it-from-python)); a clean exit's reply is its stdout alone. A run with no `stdin`, or whitespace alone, adds a note on a line of its own that none was passed: neither a parse error, nor output computed from nothing, nor a clean exit with nothing on stdout names the cause. It spends its run like any other. A clean input-less run (no timeout, exit code 0) is starved, having shown the model nothing, when its program:
+
+- reads the run's input and printed nothing on stdout or a single token of at most 20 characters with no whitespace inside (`TRIVIAL_OUTPUT_CHARS`, the widest 64-bit integer): a default computed from nothing, such as `0`, `No`, `None` or `-1`. Words, a list or a labelled value (`All tests passed`, `[3, 1, 2]`, `N=7 count: 5586`) show something;
+- reads none, or supplies its own input, printed nothing on stdout and holds no assertion (its language's `assertion` pattern: Python's `assert` and `unittest` spellings, `assert(` and `static_assert(` in C++, `_Static_assert(` too in C): a parked draft whose functions are never called, or a check that reported nothing — a self-check passes by asserting or printing.
+
+What a program reads is read off its source with its comments and string literals removed (`reads_stdin` in `comments.py`, on the sandbox registry's `stdin_read` / `stdin_redirect` patterns): its language's input calls, unless it swaps its stdin for an in-memory buffer or a file (Python `sys.stdin = io.StringIO(...)` or `sys.stdin = open(...)` on anything but descriptor 0, C++ `cin.rdbuf(...)`, `freopen(..., stdin)` in C and C++), which supplies its own. An input call named in a string or docstring, an identifier such as `sample_stdin`, or a read from an `istringstream` reads none.
+
+A starved run stays spent and booked as a run, its reply unchanged, and pays `tool_error_penalty` besides, the price of a refused call. A turn whose every call was such a run, a refusal or an unknown tool is flagged untrainable like one whose calls named no tool, so the turn after it runs on the retry reserve instead of a fresh reasoning budget. A starved run beside a run that showed something or a submission leaves its turn trainable. `episode/starved_test_runs` counts the starved runs, `episode/starved_turns` the turns they flagged. A build failure — a compile error, or Python source that does not compile (on `local` and `bubblewrap`) — ran nothing and gets no note. An empty `stdin` is never refused: a self-test that embeds its input is a real use, judged by what it shows — its output, or a passing assertion when it prints nothing.
 
 Output that would push a reply past `max_observation_chars` is cut (`…[truncated N chars]`) so the notes after it survive the protocol's cap, which cuts from the end.
 
-A refused call is a tool error: it pays `tool_error_penalty`, never `tool_success_reward`. A
+A refused call — past its budget, with arguments that do not bind, or stopped by either guard above — is
+a tool error: it pays `tool_error_penalty`, never `tool_success_reward`, and a turn whose every call was
+refused, unknown or starved is flagged untrainable, the turn after it running on the retry reserve. A call to a
+tool whose budget is 0 (the `leaderboard` scratchpad, a level's `max_test_calls: 0`) gets the same reply and price
+but is no refusal: its turn is not flagged. A
 scratchpad run that ends on a sandbox fault ends the episode ([Sandbox faults](sandbox.md#sandbox-faults)). With a
 language list both tools take a required `language` argument enumerating the set, each program is
 graded in the language its call names, and a foreign value is refused before admission. A run that
@@ -201,14 +214,15 @@ shaping still apply.
 | `reward/resubmission` | `resubmission_penalty` | `0` | `−resubmission_penalty` per admitted `submit_solution` call after the first |
 | `reward/tool_shaping` | `no_tool_use_penalty` / `turn_overflow_penalty` | `0` | zero tool calls / burning `max_turns` |
 | `reward/tool_shaping` | `length_cutoff_penalty` | `0` | per engine-cut or empty turn the episode recovers from |
-| `reward/turn_shaping` | `tool_success_reward` / `tool_error_penalty` | `0` / `0` | per executed call; this env zeroes the protocol's 0.05 / 0.1 |
+| `reward/turn_shaping` | `tool_success_reward` / `tool_error_penalty` | `0` / `0` | per executed call, a starved run paid as a run and charged `tool_error_penalty`; this env zeroes the protocol's 0.05 / 0.1 |
 
 The shaping rungs bootstrap a weak base that never submits, and self-neutralize within a group once
 every completion reaches them — keep each small next to the objective's weight. Components log as
 `reward/*` and sum exactly to the reward. A `judge` or `reward_model` term reads the submitted
 program as the episode's final answer, a fenced code block — never the tool-call turn that carried
 it, and never the hidden tests, which reach no scorer; `view: full` or `digest` adds the turns
-([Reward Terms](../rewards.md#what-a-scorer-reads)).
+([Reward Terms](../rewards.md#what-a-scorer-reads)), and a judge's also shows the unrun partial call of a
+turn cut while writing it, as context a veto never quotes ([What a judge reads](../rewards.md#what-a-judge-reads)).
 
 Each graded submission after the first is a probe of the judge, priced flat whether it fixes or
 re-rolls. The price, like the budgets, is never stated to the model: when not to resubmit is learned
@@ -230,11 +244,11 @@ reasons never outweighs whether it resubmits; with `submission_reward`
 and `no_tool_use_penalty` at `0.1` each, a graded submission that passes nothing still scores above
 an episode that never attempts, and at every level a solve that pays every per-episode price (the
 level's resubmissions, the recoveries the cap admits, the overflow and the floor) out-scores any
-zero-objective episode; each failed tool call adds `tool_error_penalty` on top.
+zero-objective episode; each failed tool call or starved run adds `tool_error_penalty` on top.
 `tests/cpu/config/test_env_grpo_reward_economy.py` holds the shipped recipes to those relations.
 
 Behavior counters ride alongside: `episode/submission_rate`, `episode/test_calls` (runs that counted),
-`episode/starved_test_runs` (runs of a program that reads input, given no `stdin`, that exited cleanly with nothing on stdout),
+`episode/starved_test_runs` (clean runs given no `stdin` that showed nothing: a program reading input that printed nothing or one token of at most 20 characters, or one reading none or supplying its own that printed nothing and asserts nothing),
 `episode/starved_turns` (turns flagged untrainable that held such a run beside nothing but refused or unknown calls),
 `episode/tested_before_submission` (over submitting episodes), `episode/grading_budget_hit`,
 `episode/reasoning_in_comments_calls` (programs refused for reasoning in their comments), `episode/identical_resubmissions` (programs refused as already graded) and
@@ -299,16 +313,21 @@ may cover some splits only; one matching no row of any split exits before any sp
 
 ```bash
 python scripts/environments/inference/run_code_contests.py --adapter codeforces \
-    --dataset open-r1/codeforces --config verifiable --split test --language python \
+    --dataset open-r1/codeforces --config verifiable --split test \
+    --training_config examples/grpo/environmental/qwen3_5/vllm/qwen3.6-35b-a3b-code-contests-full-ep1-stage1-codeforces.yaml \
     --base_url http://localhost:8000/v1 --model <served-name> \
     --num_examples 100 --num_samples 4 --reasoning_effort high
 ```
 
-It buckets `success@1` / `success@k` by the adapter's field (rating here; neither is a benchmark's
+`--training_config` gives the eval the recipe's rollout settings and language list (`[python, cpp]` here), which a
+policy trained on it names in every call; under `--language python` alone the tools declare no `language` argument
+and refuse every such call.
+
+The script buckets `success@1` / `success@k` by the adapter's field (rating here; neither is a benchmark's
 mean-over-samples pass@1, see [Evaluating on an Environment](evaluation.md#running-an-evaluation)).
 A problem counts solved when the submitted program passes every test in the pool — the environment's
 verdict, not the shaped total, so the recipe's shaping under `--training_config` (a
-`tool_error_penalty` on every refused scratchpad call under `leaderboard`, a submission bonus) moves
+`tool_error_penalty` on every scratchpad call under `leaderboard`, a submission bonus) moves
 it neither way, and the coding CLI takes no `--success_threshold`. Examples-only problems
 ([Dataset](#dataset)) are left out and counted in the log unless `--include_examples_only`, which
 the trajectory meta records with the selection. The verdict is the episode's last

@@ -28,6 +28,7 @@ from src.environments.base import (
     Trajectory,
 )
 from src.environments.episode import RolloutResult
+from src.rewards.samples import CUT_CALL_NOTE
 from src.rewards.terms import REWARD_COMPONENT_PREFIX
 from src.trainers.grpo.rollout.completions_logging import emit_completion_artifacts
 
@@ -182,7 +183,8 @@ class RolloutMetricsMixin:
 
     @staticmethod
     def _render_trajectory_for_log(trajectory: "Trajectory | None") -> str:
-        """Readable multi-turn render for completion logging: each non-system message plus tool calls and reasoning."""
+        """Readable multi-turn render for completion logging: each non-system message plus tool calls and
+        reasoning, the calls a cut turn never ran marked :data:`~src.rewards.samples.CUT_CALL_NOTE`."""
         if trajectory is None or not trajectory.messages:
             return "(empty trajectory)"
         parts = []
@@ -192,9 +194,12 @@ class RolloutMetricsMixin:
             seg = f"[{m.role}] {m.content or ''}".rstrip()
             if m.thinking:
                 seg += f"\n  <reasoning> {m.thinking}"
-            for tc in m.tool_calls or []:
+            calls = [(tc, "") for tc in m.tool_calls or []] + [
+                (tc, f" ({CUT_CALL_NOTE})") for tc in m.cut_tool_calls or []
+            ]
+            for tc, note in calls:
                 fn = tc.get("function", tc)
-                seg += f"\n  <tool_call {fn.get('name', '?')}> {fn.get('arguments', '')}"
+                seg += f"\n  <tool_call {fn.get('name', '?')}{note}> {fn.get('arguments', '')}"
             parts.append(seg)
         return "\n".join(parts)
 

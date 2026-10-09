@@ -34,6 +34,7 @@ import src.trainers.grpo.rollout.completions_logging as cl
 import src.trainers.grpo.rollout.rollout_metrics as rm
 from src.distributed import runtime
 from src.environments.base import REWARD_COMPONENTS_KEY, REWARD_DETAILS_KEY, Message, Trajectory
+from src.rewards.samples import CUT_CALL_NOTE
 from src.trainers.grpo.environmental import DistributedAsyncEnvironmentalGRPOTrainer
 from src.trainers.grpo.mixins.on_policy_init import OnPolicyGRPOInitMixin
 from src.trainers.grpo.online import DistributedGRPOTrainer
@@ -399,6 +400,27 @@ def test_each_row_carries_its_episodes_reward_components_and_scored_term_rationa
         {},
     ]
     assert [json.loads(cell) for cell in df[REWARD_DETAILS_KEY]] == [vetoed.info[REWARD_DETAILS_KEY], {}, {}]
+
+
+def test_the_record_shows_the_call_a_cut_turn_was_writing_marked_as_never_run() -> None:
+    """The completion column renders a turn cut inside its call with the partial call it was writing, tagged
+    as never run, after the calls that did; a turn without one renders as before."""
+    ran = {"id": "c0", "function": {"name": "run_code", "arguments": '{"code": "print(1)"}'}}
+    cut = {"id": "c1", "function": {"name": "run_code", "arguments": '{"code": "# still reasoning about n'}}
+    trajectory = Trajectory(
+        messages=[
+            Message.user("task"),
+            Message.assistant("trying", tool_calls=[ran]),
+            Message.tool("1", tool_call_id="c0", name="run_code"),
+            Message.assistant("again", truncated=True, cut_tool_calls=[cut]),
+        ]
+    )
+    assert rm.RolloutMetricsMixin._render_trajectory_for_log(trajectory) == (
+        "[user] task\n"
+        '[assistant] trying\n  <tool_call run_code> {"code": "print(1)"}\n'
+        "[tool] 1\n"
+        f'[assistant] again\n  <tool_call run_code ({CUT_CALL_NOTE})> {{"code": "# still reasoning about n'
+    )
 
 
 def test_a_mode_switch_writes_the_pending_rows_under_their_own_mode(tmp_path, monkeypatch) -> None:

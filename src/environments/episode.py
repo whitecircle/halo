@@ -16,7 +16,7 @@ import backoff
 
 from src.configs.rollout_config import REASONING_END_TOKEN_EXAMPLES, RolloutConfig
 from src.environments.base import (
-    CUT_IN_TOOL_CALL_KEY,
+    CUT_TOOL_CALLS_KEY,
     LAST_TURN_KEY,
     OUTPUT_BUDGET_EXHAUSTED_KEY,
     RANDOM_REASONING_EFFORT,
@@ -426,13 +426,14 @@ def step_context_from_generation(
         step_ctx[LAST_TURN_KEY] = True
     # A cut turn is a fragment whatever the parser salvaged from it: the call it holds was never
     # finished, and executing it books a malformed call and trains the fragment as a normal row. A turn
-    # that hit its token cap inside a call is told so, the one case the generic cut nudge misreads; an
-    # abort names no cause the recovery could pass on.
+    # that hit its token cap inside a call carries the salvaged calls apart, never run: the recovery tells
+    # it so, the one case the generic cut nudge misreads, and a judge reads what it wrote. An abort names
+    # no cause the recovery could pass on.
     if gen.tool_calls:
         if gen.finish_reason not in ENGINE_CUT_FINISH_REASONS:
             step_ctx["tool_calls"] = gen.tool_calls
         elif gen.finish_reason == FINISH_REASON_LENGTH:
-            step_ctx[CUT_IN_TOOL_CALL_KEY] = True
+            step_ctx[CUT_TOOL_CALLS_KEY] = gen.tool_calls
     if gen.reasoning:
         step_ctx["reasoning"] = gen.reasoning
     # ``is None``, not truthiness: an empty capture is a zero-token turn the engine did return ids

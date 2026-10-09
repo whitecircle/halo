@@ -6,14 +6,18 @@ Run: python tests/cpu/rewards/test_samples.py  (or pytest)
 """
 
 import json
+from dataclasses import replace
 
 import pytest
 
 from src.rewards.samples import (
+    CUT_CALL_NOTE,
+    CUT_CALLS_KEY,
     CUT_MARKER,
     DIGEST_CHARS,
     DIGEST_INLINE_CHARS,
     NO_FINAL_ANSWER,
+    TURN_FLAG_NOTES,
     WIRE_KEYS,
     ScoringSample,
     cut_middle,
@@ -102,6 +106,93 @@ def test_render_transcript_marks_flagged_turns_with_their_notes():
         "[3] assistant  — cut by the engine at its length limit; every tool call named a tool that does not exist, was refused unrun or ran and showed nothing\n"
         "→ nope"
     )
+
+
+# A program whose comments carry on the reasoning, the call the engine cut at the turn's token cap.
+CUT_CODE = "\n".join(["# the edge case still worries me, so let me think again"] * 40)
+CUT_TURN = {
+    "role": "assistant",
+    "content": "Let me run it.",
+    "truncated": True,
+    CUT_CALLS_KEY: [
+        {"id": "c9", "function": {"name": "run_code", "arguments": json.dumps({"code": CUT_CODE, "language": "py"})}}
+    ],
+}
+UNCUT_TURN = {key: value for key, value in CUT_TURN.items() if key != CUT_CALLS_KEY}
+
+
+def test_a_cut_turns_calls_render_under_it_marked_as_never_run():
+    """A judge reads the calls a turn was writing when the engine cut it under that turn, marked as never run,
+    after any call that ran; the turn without them renders as it always did."""
+    sample = ScoringSample(prompt=PROMPT, completion=[CUT_TURN, *TURNS], final_answer="1")
+    head = f"→ run_code (call c9; {CUT_CALL_NOTE})"
+    assert render_transcript(sample.completion, include_reasoning=False) == (
+        f"[1] assistant  — {TURN_FLAG_NOTES['truncated']}\nLet me run it.\n{head}\n  code:\n{CUT_CODE}\n"
+        "  language: py\n\n"
+        "[2] assistant\nRunning.\n→ run (call call_1)\n  code: print(1)\n  n: 2\n\n"
+        "[3] tool run (call call_1)\n1\n\n"
+        "[4] assistant\nThe answer is 1."
+    )
+    assert render_transcript([UNCUT_TURN], include_reasoning=False) == (
+        f"[1] assistant  — {TURN_FLAG_NOTES['truncated']}\nLet me run it."
+    )
+    # Beside a call that ran, the cut call follows it, and only it carries the note.
+    both = {**TURNS[0], CUT_CALLS_KEY: CUT_TURN[CUT_CALLS_KEY]}
+    rendered = render_transcript([both], include_reasoning=False)
+    assert rendered.index("→ run (call call_1)\n") < rendered.index(head) and rendered.count(CUT_CALL_NOTE) == 1
+
+
+def test_the_digest_cuts_a_cut_calls_arguments_like_every_other_argument():
+    sample = ScoringSample(prompt=PROMPT, completion=[CUT_TURN], final_answer=None)
+    digest = render_digest(sample, include_reasoning=False)
+    kept = f"{CUT_CODE[:DIGEST_INLINE_CHARS]}…[{len(CUT_CODE) - DIGEST_INLINE_CHARS} more chars]"
+    assert f"→ run_code (call c9; {CUT_CALL_NOTE})\n  code:\n{kept}\n  language: py\n" in digest
+    assert CUT_CODE not in digest
+    # A call the engine cut mid-JSON keeps its raw arguments, cut to the same head in the digest, whole in full.
+    raw = '{"code": "' + "x" * 500
+    torn = [
+        {"role": "assistant", "content": "", CUT_CALLS_KEY: [{"function": {"name": "run_code", "arguments": raw}}]}
+    ]
+    torn_digest = render_digest(ScoringSample(prompt=PROMPT, completion=torn), include_reasoning=False)
+    assert (
+        f"→ run_code ({CUT_CALL_NOTE}): {raw[:DIGEST_INLINE_CHARS]}…[{len(raw) - DIGEST_INLINE_CHARS} more chars]"
+        in (torn_digest)
+    )
+    assert render_transcript(torn, include_reasoning=False) == f"[1] assistant\n→ run_code ({CUT_CALL_NOTE}): {raw}"
+
+
+@pytest.mark.parametrize(
+    ("arguments", "shown"),
+    [("ls " + "-la " * 100, "ls " + "-la " * 100), (json.dumps(list(range(100))), json.dumps(list(range(100))))],
+    ids=["raw-text", "json-array"],
+)
+def test_the_digest_cuts_arguments_that_are_not_an_object_to_the_inline_head(arguments, shown):
+    """Arguments that are not a JSON object render on the call's line as written, a JSON value as JSON: whole in
+    the transcript, cut to the inline head in the digest like any argument."""
+    turn = [{"role": "assistant", "content": "", "tool_calls": [{"function": {"name": "sh", "arguments": arguments}}]}]
+    assert len(shown) > DIGEST_INLINE_CHARS
+    assert render_transcript(turn, include_reasoning=False) == f"[1] assistant\n→ sh: {shown}"
+    digest = render_digest(ScoringSample(prompt=PROMPT, completion=turn), include_reasoning=False)
+    cut = f"{shown[:DIGEST_INLINE_CHARS]}…[{len(shown) - DIGEST_INLINE_CHARS} more chars]"
+    assert digest.startswith(f"[1] assistant\n→ sh: {cut}\n\n"), digest
+
+
+def test_a_cut_turns_calls_reach_neither_the_final_view_nor_the_chat_wire():
+    """The final view reads the answer alone, and the chat form a reward model reads has no spelling for a call
+    that never ran: both are what they are without the cut calls."""
+    cut = ScoringSample(prompt=PROMPT, completion=[CUT_TURN, *TURNS], final_answer="1")
+    uncut = replace(cut, completion=[UNCUT_TURN, *TURNS])
+    for view in View:
+        if view is not View.DIGEST:
+            assert scored_messages(cut, view) == scored_messages(uncut, view)
+    assert view_text(cut, View.FINAL, include_reasoning=True, max_chars=10_000) == "1"
+    unanswered = replace(cut, final_answer=None)
+    assert view_text(unanswered, View.FINAL, include_reasoning=True, max_chars=10_000) == view_text(
+        replace(uncut, final_answer=None), View.FINAL, include_reasoning=True, max_chars=10_000
+    )
+    for view in (View.FULL, View.DIGEST):
+        assert CUT_CALL_NOTE in view_text(cut, view, include_reasoning=False, max_chars=100_000)
+        assert CUT_CALL_NOTE not in view_text(uncut, view, include_reasoning=False, max_chars=100_000)
 
 
 def test_render_digest_caps_each_item_and_ends_with_the_final_answer():

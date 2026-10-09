@@ -14,17 +14,21 @@ Run: python tests/cpu/environments/test_length_cutoff_recovery.py  (or pytest)
 """
 
 import importlib
+import json
 import pkgutil
+from dataclasses import replace
 
 import pytest
 
 import src.environments.envs
 from src.environments.base import (
-    CUT_IN_TOOL_CALL_KEY,
+    CUT_TOOL_CALLS_KEY,
     REWARD_COMPONENTS_KEY,
+    TOOL_CALL_COUNTS_KEY,
     BaseEnvironment,
     Message,
     Trajectory,
+    engine_view,
 )
 from src.environments.envs.protocols.native import AsyncNativeToolUseEnvironment, NativeToolUseEnvironment
 from src.environments.envs.protocols.react import ReActEnvironment
@@ -105,6 +109,7 @@ def test_a_turn_cut_before_any_call_keeps_the_plain_nudge():
     env.step([eid], [""], [ctx])
     traj = env.get_trajectories([eid])[0]
     assert traj.messages[-1].content == NativeToolUseEnvironment.LENGTH_CUTOFF_NUDGE
+    assert traj.messages[-2].truncated and traj.messages[-2].cut_tool_calls is None
     assert env.rollout_metrics(traj)["episode/length_cutoff_in_call_turns"] == 0.0
 
 
@@ -188,6 +193,9 @@ def test_a_cut_turn_executes_nothing_the_parser_salvaged(finish_reason):
     fragment, nudge = traj.messages[-2], traj.messages[-1]
     assert fragment.role == "assistant" and fragment.truncated is True and not fragment.tool_calls
     in_call = finish_reason == FINISH_REASON_LENGTH
+    # The calls stay on the turn for a judge only where the engine cut it at its cap; an abort keeps nothing.
+    assert fragment.cut_tool_calls == (_SALVAGED_CALL if in_call else None)
+    assert step.observation[-2] == {"role": "assistant", "content": "Let me implement this"}
     expected = "LENGTH_CUTOFF_IN_CALL_NUDGE" if in_call else "LENGTH_CUTOFF_NUDGE"
     assert nudge.content == getattr(NativeToolUseEnvironment, expected)
     assert env.rollout_metrics(traj)["episode/length_cutoff_in_call_turns"] == float(in_call)
@@ -195,7 +203,51 @@ def test_a_cut_turn_executes_nothing_the_parser_salvaged(finish_reason):
 
 def test_a_completed_turn_keeps_its_tool_calls():
     ctx = step_context_from_generation({}, _generation("tool_calls"))
-    assert ctx["tool_calls"] == _SALVAGED_CALL
+    assert ctx["tool_calls"] == _SALVAGED_CALL and CUT_TOOL_CALLS_KEY not in ctx
+    env = _make_env()
+    eid = _reset(env)
+    env.step([eid], ["Let me implement this"], [ctx])
+    turn = next(m for m in env.get_trajectories([eid])[0].messages if m.role == "assistant")
+    assert turn.tool_calls == _SALVAGED_CALL and turn.cut_tool_calls is None
+
+
+@pytest.mark.parametrize("carry_reasoning", [False, True])
+def test_a_cut_turn_keeps_the_calls_it_was_writing_for_the_judge_alone(carry_reasoning):
+    """What a turn cut inside its call wrote stays on its message, where a judge's view reads it, and
+    nowhere else: the call never runs or spends budget, and the conversation the engine is told on the next
+    turn, like the training render, is byte for byte the one the turn renders without it."""
+    ran = []
+    registry = NativeToolRegistry()
+    registry.register(
+        NativeTool(
+            name="echo",
+            description="echo",
+            parameters=[ToolParameter("text", "string", "text")],
+            handler=lambda text: ran.append(text) or text,
+        )
+    )
+    partial = [{"id": "c1", "type": "function", "function": {"name": "echo", "arguments": '{"text": "# still thin'}}]
+    gen = TurnGeneration(
+        text="Let me implement this",
+        tool_calls=partial,
+        reasoning="r",
+        tokens=4300,
+        finish_reason=FINISH_REASON_LENGTH,
+    )
+    env = NativeToolUseEnvironment(tool_registry=registry, max_turns=4, carry_reasoning=carry_reasoning)
+    eid = _reset(env)
+    step = env.step([eid], [gen.text], [step_context_from_generation({}, gen)])[0]
+
+    traj = env.get_trajectories([eid])[0]
+    fragment = traj.messages[-2]
+    assert fragment.cut_tool_calls == partial and fragment.tool_calls is None
+    assert ran == [] and traj.info["total_tool_calls"] == 0 and not traj.info.get(TOOL_CALL_COUNTS_KEY)
+    without = [replace(m, cut_tool_calls=None) for m in traj.messages]
+    assert json.dumps(step.observation) == json.dumps(
+        [m.to_dict(include_thinking=True) for m in engine_view(without, carry_reasoning)]
+    )
+    assert "still thin" not in json.dumps(step.observation)
+    assert fragment.to_dict(include_thinking=True) == without[-2].to_dict(include_thinking=True)
 
 
 @pytest.mark.parametrize("finish_reason", ENGINE_CUT_FINISH_REASONS)
@@ -294,7 +346,7 @@ def test_a_tool_less_cut_inside_a_call_falls_back_to_the_tool_less_length_nudge(
     one that names a move the model can make. The turn is still counted as cut inside a call."""
     env = NativeToolUseEnvironment(tool_registry=NativeToolRegistry(), max_turns=4)
     ctx = step_context_from_generation({}, _generation(FINISH_REASON_LENGTH))
-    assert ctx[CUT_IN_TOOL_CALL_KEY] is True
+    assert ctx[CUT_TOOL_CALLS_KEY] == _SALVAGED_CALL
     eid = _reset(env)
     assert not env.step([eid], ["Let me implement this"], [ctx])[0].done
     traj = env.get_trajectories([eid])[0]

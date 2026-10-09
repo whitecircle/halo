@@ -161,6 +161,15 @@ def test_each_agent_faulted_call_is_a_failed_call_and_infra_dominates_a_mixed_tu
         assert mixed.trajectory.info[SANDBOX_FAULT_KEY] == SANDBOX_FAULT_INFRA, order
 
 
+@pytest.mark.parametrize("cls", [NativeToolUseEnvironment, AsyncNativeToolUseEnvironment])
+@pytest.mark.parametrize("mode", ["infra", "agent", "crash"])
+def test_a_fault_or_a_broken_tool_never_flags_its_turn_rejected(mode, cls):
+    """Only a refused, unknown or uninformative call flags a turn untrainable: a sandbox fault is booked by its
+    class and a tool that raised failed for real, so the turn keeps its training signal."""
+    step, _ = _native_episode(mode, cls=cls)
+    assert [m.calls_rejected for m in step.trajectory.messages if m.role == "assistant"] == [False]
+
+
 def test_an_ordinary_raising_tool_stays_a_priced_tool_error():
     step, env = _native_episode("crash")
     assert not step.done and not step.trajectory.episode_invalid

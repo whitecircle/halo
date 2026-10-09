@@ -28,7 +28,9 @@ from src.environments.base import (
 )
 from src.environments.envs.protocols.native import NativeToolUseEnvironment
 from src.environments.envs.tasks.coding.comments import (
+    asserts,
     comment_chars,
+    deliberation_cues,
     reads_stdin,
     reasoning_in_comments,
     strip_comments,
@@ -46,6 +48,7 @@ from src.environments.sandbox.base import (
     SANDBOX_DEFAULT_TIMEOUT,
     LanguageSpec,
     SandboxExecutor,
+    SandboxResult,
     require_language,
 )
 from src.environments.sandbox.repl import format_sandbox_repl_output
@@ -80,9 +83,14 @@ SUBMIT_TOOL = "submit_solution"
 # Pass fraction of each graded submission, in order: what ``episode/resubmission_improved`` reads.
 SUBMISSION_PASS_FRACS_KEY = "submission_pass_fracs"
 NO_STDIN_NOTE = "(No stdin was passed to this run; if the program reads input, pass it in the `stdin` argument.)"
-# Scratchpad runs of a program that reads input, given none, that exited cleanly with nothing on stdout
-# (``episode/starved_test_runs``), and the turns flagged untrainable for holding one beside nothing but
-# refused or unknown calls (``episode/starved_turns``).
+# The most an input-less run of a program that reads input may print and still have shown the model nothing: one
+# token, no whitespace inside it, no wider than the widest 64-bit integer (``-9223372036854775808``), room for what a
+# program that parsed nothing prints (a default answer such as ``0``, ``No`` or ``-1``, a ``None``, an uninitialized
+# value). Words, a list or a labelled value (``All tests passed``, ``[3, 1, 2]``, ``N=7 count: 5586``) show something.
+TRIVIAL_OUTPUT_CHARS = 20
+# Scratchpad runs given no input that showed nothing (:func:`_input_less_run_showed_nothing`,
+# ``episode/starved_test_runs``), and the turns flagged untrainable for holding one beside nothing but refused or
+# unknown calls (``episode/starved_turns``).
 STARVED_TEST_RUNS_KEY = "starved_test_runs"
 STARVED_TURNS_KEY = "starved_turns"
 # Programs refused for carrying the reasoning in their comments (``episode/reasoning_in_comments_calls``),
@@ -211,6 +219,21 @@ def evident_language(code: str, language: str, offered: Sequence[str]) -> str | 
     ):
         return "python"
     return None
+
+
+def _input_less_run_showed_nothing(code: str, language: str, result: SandboxResult) -> bool:
+    """Whether a run of ``code`` given no input showed the model nothing to act on. Only a clean exit (no
+    timeout, return code 0) can, its reply being its stdout alone: for a program that reads the run's input
+    (:func:`reads_stdin`), stdout empty or one token of at most :data:`TRIVIAL_OUTPUT_CHARS`, output computed
+    from nothing; for one that reads none or supplies its own, stdout empty and no assertion in the code
+    (:func:`asserts`), a draft whose code never ran. A self-check passes by asserting or printing, so a silent
+    one that does neither shows nothing either."""
+    if result.timed_out or result.returncode not in (0, None):
+        return False
+    stdout = result.stdout.strip()
+    if reads_stdin(code, language):
+        return len(stdout.split()) <= 1 and len(stdout) <= TRIVIAL_OUTPUT_CHARS
+    return not stdout and not asserts(code, language)
 
 
 class CodeContestsEnvironment(NativeToolUseEnvironment):
@@ -570,16 +593,17 @@ class CodeContestsEnvironment(NativeToolUseEnvironment):
         self, code: str, language: str, tool: str, trajectory: Trajectory | None
     ) -> None:
         """Refuse a program whose comments carry its reasoning (:func:`reasoning_in_comments` on its
-        :func:`comment_chars`) unrun, the call returned to the budget: it costs the turn and the protocol's
-        error price, never a run or a submission, and a turn of nothing else is flagged untrainable
-        (:class:`ToolCallRefused`). Records every program's comment and code characters first, the guard's
-        own signal. The thinking cap bounds the reasoning channel alone and no reasoning term counts a call's
-        arguments, so a turn the cap closes could carry its thought on in a program's comments; this reads them."""
+        :func:`comment_chars` and :func:`deliberation_cues`) unrun, the call returned to the budget: it costs
+        the turn and the protocol's error price, never a run or a submission, and a turn of nothing else is
+        flagged untrainable (:class:`ToolCallRefused`). Records every program's comment and code characters
+        first, the guard's own signal. The thinking cap bounds the reasoning channel alone and no reasoning
+        term counts a call's arguments, so a turn the cap closes could carry its thought on in a program's
+        comments; this reads them."""
         comments, rest = comment_chars(code, language)
         if trajectory is not None:
             trajectory.info[COMMENT_CHARS_KEY] = trajectory.info.get(COMMENT_CHARS_KEY, 0) + comments
             trajectory.info[CODE_CHARS_KEY] = trajectory.info.get(CODE_CHARS_KEY, 0) + rest
-        if not reasoning_in_comments(comments, rest):
+        if not reasoning_in_comments(comments, rest, lambda: deliberation_cues(code, language)):
             return
         if trajectory is not None:
             self._uncount_tool_call(trajectory, tool)
@@ -620,18 +644,11 @@ class CodeContestsEnvironment(NativeToolUseEnvironment):
             output += f" {SCRATCHPAD_TIME_LIMIT_NOTE}"
         notes = []
         starved = False
-        # A run on no input says so, since neither the parse error of a program that reads input nor
-        # output computed from nothing names the cause; a build failure ran nothing.
-        if not stdin and not result.compile_failed and not host_build_error(code, language, self.sandbox):
+        # A run on no input (whitespace is none) says so, since neither the parse error of a program that reads
+        # input nor output computed from nothing names the cause; a build failure ran nothing.
+        if not stdin.strip() and not result.compile_failed and not host_build_error(code, language, self.sandbox):
             notes.append(NO_STDIN_NOTE)
-            # Given no input, a program that reads it and exits cleanly with nothing on stdout showed the model
-            # nothing (its reply leaves stderr out); a silent self-test that embeds its input passed.
-            starved = (
-                not result.timed_out
-                and result.returncode in (0, None)
-                and not result.stdout.strip()
-                and reads_stdin(code, language)
-            )
+            starved = _input_less_run_showed_nothing(code, language, result)
             if starved and trajectory is not None:
                 trajectory.info[STARVED_TEST_RUNS_KEY] = trajectory.info.get(STARVED_TEST_RUNS_KEY, 0) + 1
         reply = self._fit_observation(output, notes)

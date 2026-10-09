@@ -25,9 +25,10 @@ import ray
 
 from src.configs.async_training_config import AsyncTrainingConfig
 from src.environments import ray_actors
-from src.environments.base import Trajectory
+from src.environments.base import CUT_TOOL_CALLS_KEY, Trajectory
 from src.environments.envs.protocols.native import AsyncNativeToolUseEnvironment, NativeToolUseEnvironment
 from src.environments.envs.tasks.coding.code_contests import CodeContestsEnvironment
+from src.environments.episode import step_context_from_generation
 from src.environments.ray_actors import (
     EnvironmentActor,
     RolloutConfig,
@@ -552,6 +553,70 @@ async def test_a_turn_that_used_its_whole_cap_is_a_cut_even_when_vllm_says_tool_
     assert generation.finish_reason == FINISH_REASON_LENGTH, (
         "a completion that consumed max_tokens was taken at vLLM's word: the salvaged call executes as a malformed one"
     )
+
+
+_PARTIAL_CALL = {
+    "id": "c1",
+    "type": "function",
+    "function": {"name": "calculate", "arguments": '{"expression": "1+ # still reasoning'},
+}
+
+
+@pytest.mark.parametrize(
+    ("backend", "choice"),
+    [
+        ("vllm", {"finish_reason": "tool_calls"}),
+        ("sglang", {"stop_reason": FINISH_REASON_LENGTH}),
+    ],
+)
+async def test_a_call_cut_at_the_cap_reaches_the_env_as_a_cut_call_on_either_engine(backend, choice):
+    """vLLM labels a turn its cap cut inside a call ``tool_calls``, SGLang spells the cut ``stop_reason``;
+    either way the transport reads a length cut, and the salvaged call travels as a cut call, never as one
+    to run."""
+    actor = _make_actor("native_math")
+    session = _FakeChatCompletionsSession(
+        {
+            "choices": [{"message": {"content": "Computing", "tool_calls": [_PARTIAL_CALL]}, **choice}],
+            "usage": {"completion_tokens": 4300},
+        }
+    )
+    config = RolloutConfig(backend=backend, max_retries=0, max_tokens=4300)
+    generation = await actor._generate(session, "server:8000", [{"role": "user", "content": "2+2?"}], config)
+
+    ctx = step_context_from_generation(None, generation)
+    assert ctx[CUT_TOOL_CALLS_KEY] == [_PARTIAL_CALL] and "tool_calls" not in ctx
+
+
+async def test_the_actor_keeps_a_cut_call_on_its_turn_without_running_or_resending_it():
+    """Through the real episode loop: the call a turn was writing when its cap cut it lands on that turn's
+    message, survives the pickle the Ray object store makes of the result, never runs, and is absent from
+    what the engine is sent next."""
+    actor = _make_actor("native_math", {"max_turns": 5})
+
+    async def _fake_client():
+        return None
+
+    actor._get_http_client = _fake_client
+    sent: list[list[dict]] = []
+
+    async def _fake_generate(client, url, messages, config, reasoning_effort=None, reasoning_budget=None):
+        sent.append(messages)
+        if len(sent) == 1:
+            return TurnGeneration("Computing", [_PARTIAL_CALL], "", 4300, finish_reason=FINISH_REASON_LENGTH)
+        return TurnGeneration("final answer: 4", [], "", 5)
+
+    actor._generate = _fake_generate
+    result = await actor.run_episode("2+2?", {"answer": "4"}, "http://x", RolloutConfig(max_retries=1))
+
+    assert len(sent) == 2 and result.error is None
+    cut_turn = next(m for m in sent[1] if m["role"] == "assistant")
+    assert cut_turn == {"role": "assistant", "content": "Computing"}
+    assert "still reasoning" not in json.dumps(sent[1])
+    assert result.trajectory.info["total_tool_calls"] == 0
+    shipped = pickle.loads(pickle.dumps(result))
+    turns = [m for m in shipped.trajectory.messages if m.role == "assistant"]
+    assert [m.cut_tool_calls for m in turns] == [[_PARTIAL_CALL], None]
+    assert [m.tool_calls for m in turns] == [None, None]
 
 
 # Test: stateful-env session cleanup across rollouts

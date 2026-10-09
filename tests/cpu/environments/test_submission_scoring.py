@@ -6,9 +6,11 @@ near miss scores like a wrong answer. Every graded submission after the first pa
 the price nor the submission budget is stated to the model — a verdict is the grade alone, and the cap
 ends the episode at its last graded submission.
 
-The scratchpad half: a program run on no input says so, since one that reads input it was not given
-ends in a parse error or in silence, and the result names the cause so the next run is not spent the
-same way; a silent one counts in ``episode/starved_test_runs`` and its reply is marked uninformative.
+The scratchpad half: a program run on no input (whitespace is none) says so, since one that reads input it
+was not given ends in a parse error, in silence or in a default answer, and the result names the cause so the
+next run is not spent the same way. A clean input-less run that showed nothing counts in
+``episode/starved_test_runs`` and its reply is marked uninformative: a program that reads input printing
+nothing or one short token, or one that reads none printing nothing with no assertion to pass.
 
 Run: python tests/cpu/environments/test_submission_scoring.py  (or pytest)
 """
@@ -21,9 +23,11 @@ from src.environments.base import EPISODE_TOOL_BUDGETS_KEY, REWARD_COMPONENTS_KE
 from src.environments.envs.tasks.coding.code_contests import (
     NO_STDIN_NOTE,
     SUBMISSION_PASS_FRACS_KEY,
+    TRIVIAL_OUTPUT_CHARS,
     CodeContestsEnvironment,
 )
-from src.environments.sandbox.base import REPL_NO_OUTPUT_MESSAGE, SandboxExecutor, SandboxResult
+from src.environments.sandbox.base import SandboxExecutor, SandboxResult
+from src.environments.sandbox.repl import format_sandbox_repl_output
 from src.environments.tools.definitions import NativeToolCall
 from src.rewards.terms import OBJECTIVE_REWARD_KEY
 from tests.common.code_contests import StubSandbox, retired_budget_phrases
@@ -34,6 +38,8 @@ PROFILES = {"high": {"max_submissions": 3, "max_test_calls": 8}}
 # submitted "program" contains the digit ``i``, so a program's text is its pass set (submitted as a
 # comment, which compiles as Python).
 TESTS = {"answer": {"tests": [{"input": str(i), "output": "ok"} for i in range(4)]}}
+# A program's own input, bound to its stdin before it reads.
+_OWN_INPUT = "import io, sys\nsys.stdin = io.StringIO('3')\n"
 # The resubmission-price rule no task message states.
 PRICE_RULE = "every resubmission costs part of the score"
 
@@ -211,18 +217,35 @@ def test_the_behavior_counter_is_the_share_of_resubmissions_that_improved():
         (SandboxResult(stdout="3\n", stderr="IndexError: list index out of range", returncode=1), "", True, False),
         (SandboxResult(stdout="", stderr="ValueError: invalid literal for int()", returncode=1), "5\n", False, False),
         (SandboxResult(stdout="", returncode=0), "5\n", False, False),
-        # Output computed from no input, and a loop on end-of-file, ran on nothing too.
-        (SandboxResult(stdout="42\n", returncode=0), "", True, False),
+        (SandboxResult(stdout="42\n", returncode=0), "5\n", False, False),
+        # One token computed from no input, up to the widest 64-bit integer; a wider one, words, a list, a labelled
+        # value or a second line told something.
+        (SandboxResult(stdout="42\n", returncode=0), "", True, True),
+        (SandboxResult(stdout="No\n", returncode=0), "", True, True),
+        (SandboxResult(stdout="None\n", returncode=0), "", True, True),
+        (SandboxResult(stdout="-1\n", returncode=0), "", True, True),
+        (SandboxResult(stdout="-9223372036854775808\n", returncode=0), "", True, True),
+        (SandboxResult(stdout="x" * (TRIVIAL_OUTPUT_CHARS + 1) + "\n", returncode=0), "", True, False),
+        (SandboxResult(stdout="All tests passed\n", returncode=0), "", True, False),
+        (SandboxResult(stdout="[3, 1, 2]\n", returncode=0), "", True, False),
+        (SandboxResult(stdout="N=7 count: 5586\n", returncode=0), "", True, False),
+        (SandboxResult(stdout="3\n4\n", returncode=0), "", True, False),
+        # Whitespace alone is no input.
+        (SandboxResult(stdout="", returncode=0), " \n\t", True, True),
+        (SandboxResult(stdout="0\n", returncode=0), "\n", True, True),
+        # A loop on end-of-file ran on nothing too.
         (SandboxResult(timed_out=True), "", True, False),
         # A build that failed, or ran past the compile limit, ran nothing.
         (SandboxResult(stderr="main.py: error: bad", returncode=1, compile_failed=True), "", False, False),
         (SandboxResult(stderr="compilation timed out after 10 s", compile_failed=True), "", False, False),
     ],
 )
-def test_a_scratchpad_run_on_no_input_names_it_and_a_silent_one_counts_as_starved(result, stdin, noted, starved):
-    """Every call here spends its slot; ``episode/starved_test_runs`` counts the input-less runs that exited
-    cleanly with nothing on stdout, and exactly those come back marked uninformative, the mark that flags a
-    turn of nothing else."""
+def test_a_scratchpad_run_on_no_input_names_it_and_one_that_showed_nothing_counts_as_starved(
+    result, stdin, noted, starved
+):
+    """Every call here spends its slot; for a program that reads input, ``episode/starved_test_runs`` counts the
+    input-less runs that exited cleanly with nothing or one short token on stdout, and exactly those come back
+    marked uninformative, the mark that flags a turn of nothing else, their reply unchanged."""
     env = _env(sandbox=StubSandbox(result))
     traj = _episode(env)
     arguments = {"code": "print(int(input()))", **({"stdin": stdin} if stdin else {})}
@@ -232,8 +255,48 @@ def test_a_scratchpad_run_on_no_input_names_it_and_a_silent_one_counts_as_starve
     assert call.uninformative is starved and call.success
     assert env._test_calls(traj) == 1
     assert env.rollout_metrics(traj)["episode/starved_test_runs"] == (1.0 if starved else 0.0)
-    if starved and not result.stdout:
-        assert observation == f"{REPL_NO_OUTPUT_MESSAGE}\n{NO_STDIN_NOTE}", observation
+    if starved:
+        assert observation == f"{format_sandbox_repl_output(result, 1.0)}\n{NO_STDIN_NOTE}", observation
+
+
+@pytest.mark.parametrize(
+    ("code", "result", "starved"),
+    [
+        # A parked draft: functions defined and never called, or nothing at all run.
+        ("def solve(n):\n    return n + 1", SandboxResult(stdout="", returncode=0), True),
+        ("x = 1  # input() later", SandboxResult(stdout="", stderr="log line", returncode=0), True),
+        ("def solve(n):\n    return n + 1\n# assert solve(1) == 2", SandboxResult(stdout="", returncode=0), True),
+        # A silent self-test that asserts passed its checks; anything printed, a crash or a timeout told something.
+        ("def solve(n):\n    return n + 1\nassert solve(1) == 2", SandboxResult(stdout="", returncode=0), False),
+        ("print(7)", SandboxResult(stdout="7\n", returncode=0), False),
+        ("def solve(n):\n    return n + 1", SandboxResult(stderr="boom", returncode=1), False),
+        ("def solve(n):\n    return n + 1", SandboxResult(timed_out=True), False),
+        # A program supplying its own input is judged the same: its one short line is the answer to that input.
+        (_OWN_INPUT + "print(int(input()) * 2)", SandboxResult(stdout="6\n", returncode=0), False),
+        (_OWN_INPUT + "n = int(input())", SandboxResult(stdout="", returncode=0), True),
+    ],
+    ids=[
+        "never-called",
+        "only-a-comment-reads",
+        "assert-in-a-comment",
+        "asserts",
+        "prints",
+        "crash",
+        "timeout",
+        "own-input-printed",
+        "own-input-silent",
+    ],
+)
+def test_an_input_less_run_of_a_program_reading_no_input_is_starved_only_silent_and_unasserted(code, result, starved):
+    """A program that reads no input or supplies its own, run on none, showed the model nothing only when it exited
+    cleanly with nothing on stdout and holds no assertion: one short line is output it computed, not a default
+    from missing input."""
+    env = _env(sandbox=StubSandbox(result))
+    traj = _episode(env)
+    (call,), _ = env._execute_tool_calls([NativeToolCall(id="c", name="python_repl", arguments={"code": code})], traj)
+    assert NO_STDIN_NOTE in call.content and call.uninformative is starved
+    assert env._test_calls(traj) == 1
+    assert env.rollout_metrics(traj)["episode/starved_test_runs"] == (1.0 if starved else 0.0)
 
 
 if __name__ == "__main__":

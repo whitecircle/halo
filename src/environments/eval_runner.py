@@ -30,6 +30,7 @@ from src.configs.rollout_config import RolloutConfig
 from src.data.sources.paths import parse_dataset_source
 from src.environments.base import (
     ANSWER_KEY,
+    CUT_TOOL_CALLS_KEY,
     EPISODE_ERROR_KEY,
     EPISODE_INVALID_REASON_KEY,
     RANDOM_REASONING_EFFORT,
@@ -62,9 +63,10 @@ logger = logging.getLogger(__name__)
 # ``info`` keys a persisted trajectory leaves out: the row payload; ``_``-prefixed grading stamps
 # (hidden tests, checker source) go with it.
 _SERIALIZED_INFO_DROP = frozenset({"context"})
-# Message fields a persisted turn carries beside its render: the reasoning cap the turn ran under.
-# ``Message.to_dict`` is the chat-template and API render, which must not carry it.
-_SERIALIZED_TURN_FIELDS = ("thinking_cap",)
+# Message fields a persisted turn carries beside its render: the reasoning cap the turn ran under, and the
+# calls a cut turn never ran, apart from the ``tool_calls`` the re-grader replays. ``Message.to_dict`` is the
+# chat-template and API render, which must not carry them.
+_SERIALIZED_TURN_FIELDS = ("thinking_cap", CUT_TOOL_CALLS_KEY)
 # The sample-record key of an episode that lost a generation on the driver's side past every retry: it
 # carries no verdict. Stamped on the trajectory under the private key, which the serializer drops.
 GENERATION_ERROR_KEY = "generation_error"

@@ -29,6 +29,13 @@ class ToolBudgetExhausted(Exception):
     """
 
 
+class ToolDisabled(ToolBudgetExhausted):
+    """A call to a tool whose episode budget is zero: the run disabled it (the ``leaderboard`` evaluation
+    protocol's scratchpad, a ``tool_budgets`` cap of 0). Answered and booked like a spent budget, but no refusal
+    (:func:`refused_unrun`): the turn stands as one failed call and the next gets no recovery reserve, which would
+    buy a protocol that disables the tool more output per sample than the setting it reproduces."""
+
+
 class ToolArgumentError(TypeError):
     """A call whose model-authored arguments the tool refuses: a required parameter missing
     (``submit_solution`` with no ``code``), a name its schema does not declare, a value outside its enum,
@@ -44,17 +51,30 @@ class ToolArgumentError(TypeError):
 class ToolCallRefused(ToolArgumentError):
     """A handler refusing an admitted call it will not run, the call returned to the episode's budget
     (code contests: a program whose comments carry its reasoning, or one identical to a program already
-    graded). Under the native protocol a turn whose every call was refused this way is flagged like one
-    that named no existing tool (``calls_rejected``), so an episode that recovers never reinforces it."""
+    graded)."""
+
+
+# What refuses a call unrun, expected control flow logged without a traceback: its arguments failing to bind or
+# its tool's episode budget spent, both at admission, or its handler (:class:`ToolCallRefused`).
+TOOL_CALL_REFUSALS = (ToolBudgetExhausted, ToolArgumentError)
+
+
+def refused_unrun(outcome: object) -> bool:
+    """Whether a call's ``outcome`` refused it unrun (:data:`TOOL_CALL_REFUSALS`), a disabled tool's
+    (:class:`ToolDisabled`) aside. Under the native protocol a turn whose every call was refused, named no
+    existing tool or got an :class:`UninformativeReply` is flagged ``calls_rejected``, so an episode that
+    recovers never reinforces it and the turn after it runs on the recovery reserve."""
+    return isinstance(outcome, TOOL_CALL_REFUSALS) and not isinstance(outcome, ToolDisabled)
 
 
 class UninformativeReply(str):
     """A handler's reply to an admitted call that ran and stays spent yet showed the model nothing to act
-    on (code contests: a program that reads input, run on none, that exited cleanly and printed nothing).
-    The text is the reply as written; the type is the mark, read like :class:`ToolCallRefused`: under the
-    native protocol a turn whose every call was refused, unknown or answered this way is flagged
-    ``calls_rejected``, so it is never rewarded and the turn after it runs on the recovery reserve instead
-    of buying a fresh reasoning budget."""
+    on; which replies those are is the handler's to decide (code contests: a starved scratchpad run, see
+    :class:`~src.environments.envs.tasks.coding.code_contests.CodeContestsEnvironment`). The text is the reply as
+    written; the type is the mark. Under the native protocol the call is booked as the run it was
+    and also pays ``tool_error_penalty``, the price of a refused call, and the mark is read with the refusals
+    (:func:`refused_unrun`) to flag a turn of nothing else, so the turn after it runs on the recovery reserve
+    instead of buying a fresh reasoning budget."""
 
 
 def parse_python_expression(source: str) -> ast.expr:
@@ -320,11 +340,12 @@ class NativeToolResult:
     # can reproduce any wording of it (an MCP server answering "Tool not found: x" is a real failure of
     # a real tool), and the protocol drops a turn from training on this flag alone.
     unknown_tool: bool = False
-    # The handler refused the admitted call and ran nothing (:class:`ToolCallRefused`): structural like
-    # ``unknown_tool``, and read the same way.
+    # The call was refused and nothing ran (:func:`refused_unrun`): at admission, or by its handler
+    # (:class:`ToolCallRefused`). Structural like ``unknown_tool``, and read the same way.
     refused: bool = False
     # The handler answered with an :class:`UninformativeReply`: the call ran and stays spent, but showed
-    # the model nothing. Read with ``refused`` and ``unknown_tool``.
+    # the model nothing. Charged ``tool_error_penalty`` on top of its booking, and read with ``refused`` and
+    # ``unknown_tool``.
     uninformative: bool = False
     # The sandbox fault the call ended on, booked by type (infra or agent-caused) rather than as an
     # ordinary tool error, and ending the episode.

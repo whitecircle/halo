@@ -29,12 +29,14 @@ from src.environments.base import (
 )
 from src.environments.envs.protocols.native import NativeToolUseEnvironment
 from src.environments.envs.tasks.coding.code_contests import CodeContestsEnvironment
-from src.environments.episode import EpisodeDispatcher
+from src.environments.episode import EpisodeDispatcher, TurnGeneration, step_context_from_generation
 from src.environments.registry import resolve_environment
 from src.environments.tools.definitions import NativeToolRegistry
-from src.rewards.samples import render_transcript
+from src.inference.response import FINISH_REASON_LENGTH
+from src.rewards.samples import CUT_CALL_NOTE, CUT_CALLS_KEY, render_transcript
 from src.rewards.scorers import catalog as scorers_module
 from src.rewards.scorers.base import Scorer, ScoreResult
+from src.rewards.scorers.judge import action_text, grading_prompt
 from src.rewards.terms import OBJECTIVE_REWARD_KEY, JudgeTerm, OnError
 
 JUDGE = {
@@ -360,6 +362,36 @@ def test_the_sample_carries_the_turns_with_their_reasoning_and_flags():
     assert final["reasoning_content"] == "two and two" and "truncated" not in final
     assert sample.final_answer == "It is 4" and sample.reference == "4"
     assert sample.tools == env.get_tools_schema() and sample.tools
+
+
+def test_the_judge_reads_the_call_a_cut_turn_was_writing_and_no_other_turn_carries_one():
+    """The driver's salvage of a turn cut inside its call reaches the judge through the sample, marked as
+    never run in the views that render calls, as context a check can never quote (it did nothing), and absent
+    from the final view; the turns around it carry no cut calls."""
+    env = _native(max_turns=3)
+    ids, _ = env.reset(["What is 2+2?"], [{"answer": "4"}])
+    code = "# 2+2 is 4, but let me reconsider the carry once more"
+    partial = [
+        {"id": "c1", "type": "function", "function": {"name": "calculate", "arguments": f'{{"expression": "{code}'}}
+    ]
+    gen = TurnGeneration("Computing", partial, "", 900, finish_reason=FINISH_REASON_LENGTH)
+    env.step(ids, [gen.text], [step_context_from_generation({"answer": "4"}, gen)])
+    env.step(ids, ["It is 4"], [{"answer": "4", "finish_reason": "stop"}])
+    sample = env._scoring_sample(env.get_trajectories(ids)[0])
+
+    cut, nudge, final = sample.completion
+    assert cut[CUT_CALLS_KEY] == partial and "tool_calls" not in cut
+    assert CUT_CALLS_KEY not in nudge and CUT_CALLS_KEY not in final
+    head = f"→ calculate (call c1; {CUT_CALL_NOTE}): "
+    veto = {key: value for key, value in CHECKS.items() if key != "source"}
+    for view in ("full", "digest"):
+        term = JudgeTerm.from_config({**veto, "view": view})
+        assert head in grading_prompt(term, sample) and code in grading_prompt(term, sample)
+        actions = action_text(term, sample)
+        assert code not in actions and CUT_CALL_NOTE not in actions, "a veto never quotes a call that never ran"
+        assert "Computing" in actions and "It is 4" in actions
+    final_view = JudgeTerm.from_config({key: value for key, value in JUDGE.items() if key != "source"})
+    assert final_view.view == "final" and head not in grading_prompt(final_view, sample)
 
 
 def test_a_tool_less_environment_hands_the_scorer_no_tools():

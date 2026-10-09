@@ -6,7 +6,7 @@ import json
 import math
 import re
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any
 
 from openai import AsyncOpenAI
@@ -20,7 +20,7 @@ from src.inference.openai_client import (
     parse_json_object,
 )
 from src.inference.response import get_finish_reason
-from src.rewards.samples import ScoringSample, cut_middle, render_tools, task_text, view_text
+from src.rewards.samples import CUT_CALLS_KEY, ScoringSample, cut_middle, render_tools, task_text, view_text
 from src.rewards.scorers.base import Scorer, ScoreResult
 from src.rewards.terms import JudgeMetric, JudgeTerm, View
 
@@ -121,9 +121,13 @@ def grading_prompt(term: JudgeTerm, sample: ScoringSample) -> str:
 
 def action_text(term: JudgeTerm, sample: ScoringSample) -> str:
     """What a quoted piece of evidence must come from: the view the judge read, less the policy's
-    reasoning — a check is raised on an observable action, never on a thought, or the policy learns
-    to hide its reasoning rather than to act well."""
-    return view_text(sample, term.view, include_reasoning=False, max_chars=term.max_view_chars)
+    reasoning and the calls a cut turn never ran (:data:`~src.rewards.samples.CUT_CALLS_KEY`), which the view
+    shows as context — a check is raised on what the policy did, never on a call that did nothing or on a
+    thought, or the policy learns to hide its reasoning rather than to act well."""
+    acted = [{key: value for key, value in message.items() if key != CUT_CALLS_KEY} for message in sample.completion]
+    return view_text(
+        replace(sample, completion=acted), term.view, include_reasoning=False, max_chars=term.max_view_chars
+    )
 
 
 def parse_verdict(content: str, term: JudgeTerm) -> Verdict | None:

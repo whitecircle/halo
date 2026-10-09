@@ -305,6 +305,48 @@ async def test_length_cutoff_is_recovered_offline_exactly_as_online(monkeypatch)
     assert traj.total_reward == pytest.approx(1.0)
 
 
+async def test_the_eval_keeps_a_cut_call_on_its_turn_and_in_the_record_without_running_or_resending_it(
+    monkeypatch,
+):
+    """The eval driver salvages a turn cut inside its call as the training actor does: the call lands on the
+    turn and in the JSONL apart from the ``tool_calls`` the re-grader replays, never runs, and is absent from
+    what the endpoint is sent next."""
+    partial = types.SimpleNamespace(
+        id="c1", function=types.SimpleNamespace(name="echo", arguments='{"x": "# still re')
+    )
+    cut = types.SimpleNamespace(
+        answer="Computing", finish_reason="length", completion_tokens=16, tool_calls=[partial], reasoning=None
+    )
+    done = types.SimpleNamespace(
+        answer="done", finish_reason="stop", completion_tokens=1, tool_calls=None, reasoning=None
+    )
+    script, sent, ran = [cut, done], [], []
+
+    async def _generate(model, messages, *, client, **kwargs):
+        sent.append(messages)
+        return script.pop(0)
+
+    monkeypatch.setattr(eval_runner, "generate_openai_response", _generate)
+    registry = NativeToolRegistry()
+    registry.register(NativeTool(name="echo", description="echo", parameters=[], handler=lambda **a: ran.append(a)))
+    traj = await run_episode(
+        NativeToolUseEnvironment(tool_registry=registry),
+        "task",
+        {},
+        client=object(),
+        rollout=RolloutConfig(model_name="m", temperature=0.0, max_tokens=16),
+    )
+
+    salvaged = {"id": "c1", "type": "function", "function": {"name": "echo", "arguments": '{"x": "# still re'}}
+    assert ran == [] and traj.info["total_tool_calls"] == 0
+    assert [m.cut_tool_calls for m in traj.messages if m.role == "assistant"] == [[salvaged], None]
+    assert next(m for m in sent[1] if m["role"] == "assistant") == {"role": "assistant", "content": "Computing"}
+    assert "still re" not in json.dumps(sent[1])
+    recorded = [m for m in serialize_trajectory(traj)["messages"] if m["role"] == "assistant"]
+    assert recorded[0]["cut_tool_calls"] == [salvaged] and "tool_calls" not in recorded[0]
+    assert "cut_tool_calls" not in recorded[1]
+
+
 async def test_eval_records_the_reasoning_channel_without_writing_it_to_the_jsonl(monkeypatch):
     """The eval stamps reasoning onto the assistant turn exactly as the training rollout does — and
     the persisted trajectory still ships no chain-of-thought.

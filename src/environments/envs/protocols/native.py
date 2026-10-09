@@ -9,7 +9,7 @@ from typing import Any
 
 from src.environments.base import (
     ANSWER_KEY,
-    CUT_IN_TOOL_CALL_KEY,
+    CUT_TOOL_CALLS_KEY,
     EPISODE_ERROR_KEY,
     EPISODE_TOOL_BUDGETS_KEY,
     LAST_TURN_KEY,
@@ -23,14 +23,15 @@ from src.environments.base import (
 )
 from src.environments.sandbox.base import SandboxFault
 from src.environments.tools.definitions import (
+    TOOL_CALL_REFUSALS,
     NativeTool,
     NativeToolCall,
     NativeToolRegistry,
     NativeToolResult,
-    ToolArgumentError,
     ToolBudgetExhausted,
-    ToolCallRefused,
+    ToolDisabled,
     UninformativeReply,
+    refused_unrun,
 )
 from src.inference.response import ENGINE_CUT_FINISH_REASONS
 from src.rewards.graders.matching import validate_answer
@@ -78,13 +79,13 @@ def admit_tool_call(
 ) -> dict[str, Any]:
     """Admit one call before it runs, under either protocol: bind its arguments (against the handler
     that will run), then spend one of the episode's calls on the tool. Refuses
-    (:class:`ToolArgumentError`, :class:`ToolBudgetExhausted`) without counting, so a call the handler
-    could never run does not consume the budget; runs synchronously before any await so concurrent
-    calls in one turn cannot both pass a one-call cap."""
+    (:class:`ToolArgumentError`, :class:`ToolBudgetExhausted`, :class:`ToolDisabled` under a cap of 0)
+    without counting, so a call the handler could never run does not consume the budget; runs synchronously
+    before any await so concurrent calls in one turn cannot both pass a one-call cap."""
     bound = tool.bind(arguments, for_async=for_async)
     cap = env._tool_budget_exhausted(trajectory, tool.name)
     if cap is not None:
-        raise ToolBudgetExhausted(tool.budget_exhausted_message())
+        raise (ToolDisabled if cap == 0 else ToolBudgetExhausted)(tool.budget_exhausted_message())
     env._count_tool_call(trajectory, tool.name)
     return bound
 
@@ -94,8 +95,8 @@ def tool_call_outcome(name: str, outcome: str | Exception) -> tuple[str, bool, S
     what tool ``name`` returned or raised (admission included), under either protocol. A reply's marker
     type (:class:`UninformativeReply`) is read off the outcome, never carried into the conversation.
 
-    A refusal (:class:`ToolBudgetExhausted`, :class:`ToolArgumentError`) is expected control flow,
-    logged without a traceback: an env with a 2-submission cap in a 15-turn episode refuses by design.
+    A refusal (:data:`TOOL_CALL_REFUSALS`) is expected control flow, logged without a traceback: an env
+    with a 2-submission cap in a 15-turn episode refuses by design.
     A sandbox fault is booked and logged by type in the accounting. Any other exception is a broken
     tool, logged with its traceback: the graded tools run here too, and a submit handler that dies on
     a malformed payload would otherwise grade 0 with nothing anywhere saying why.
@@ -103,7 +104,7 @@ def tool_call_outcome(name: str, outcome: str | Exception) -> tuple[str, bool, S
     if not isinstance(outcome, Exception):
         return str(outcome), True, None
     fault = outcome if isinstance(outcome, SandboxFault) else None
-    if isinstance(outcome, ToolBudgetExhausted | ToolArgumentError):
+    if isinstance(outcome, TOOL_CALL_REFUSALS):
         logger.debug("Tool %r refused the call: %s", name, outcome)
     elif fault is None:
         logger.warning("Tool %r raised during execution", name, exc_info=outcome)
@@ -232,21 +233,27 @@ class NativeToolUseEnvironment(BaseEnvironment):
 
     def _result_from_call(self, tc: NativeToolCall, outcome: str | Exception) -> NativeToolResult:
         """Build a NativeToolResult from a success payload or caught exception (:func:`tool_call_outcome`,
-        observation truncated). A sandbox fault rides on the result, so the accounting books it by type."""
+        observation truncated). A refusal, at admission or by the handler, is marked ``refused`` (a disabled
+        tool's error is not one, :func:`refused_unrun`); a sandbox fault rides on the result, so the accounting
+        books it by type."""
         content, success, fault = tool_call_outcome(tc.name, outcome)
         return NativeToolResult(
             tool_call_id=tc.id,
             name=tc.name,
             content=self._truncate_observation(content),
             success=success,
-            refused=isinstance(outcome, ToolCallRefused),
+            refused=refused_unrun(outcome),
             uninformative=isinstance(outcome, UninformativeReply),
             sandbox_fault=fault,
         )
 
     def _account_tool_result(self, result: NativeToolResult, trajectory: Trajectory) -> float:
-        """Book one result on the episode's counters and return its reward delta (the base's accounting)."""
-        return self._book_tool_call(trajectory, result.name, result.success, result.sandbox_fault)
+        """Book one result on the episode's counters and return its reward delta (the base's accounting). A call
+        that ran and showed nothing (``uninformative``) is booked as the call it was and also pays
+        ``tool_error_penalty``, a refused call's price: a turn of nothing else trains only on a negative
+        advantage, so unpriced, the episode's reward would carry nothing of the call beyond the solve it may cost."""
+        delta = self._book_tool_call(trajectory, result.name, result.success, result.sandbox_fault)
+        return delta - self.tool_error_penalty if result.uninformative else delta
 
     def _finalize_text_response(
         self, trajectory: Trajectory, action: str
@@ -305,7 +312,7 @@ class NativeToolUseEnvironment(BaseEnvironment):
         for result in results:
             trajectory.add_message(result.to_message())
 
-        # Nothing this turn did showed the model anything (an invented tool, a refused program, a reply its
+        # Nothing this turn did showed the model anything (an invented tool, a call refused unrun, a reply its
         # handler marked uninformative): mark the assistant message so the trainer never rewards it and the
         # next turn retries on the recovery reserve. Read off the flags, never the reply text — a tool whose
         # backend answers "Tool not found: x" failed for real, and dropping that turn would hide a broken tool
@@ -337,7 +344,7 @@ class NativeToolUseEnvironment(BaseEnvironment):
         and a turn that ended on nothing recover, anything else is the model's final text answer."""
         last_turn = bool(ctx.get(LAST_TURN_KEY))
         if ctx.get("finish_reason") in ENGINE_CUT_FINISH_REASONS:
-            in_call = bool(ctx.get(CUT_IN_TOOL_CALL_KEY))
+            in_call = bool(ctx.get(CUT_TOOL_CALLS_KEY))
             return self._handle_length_cutoff(trajectory, in_tool_call=in_call, last_turn=last_turn)
         if not action.strip():
             return self._handle_empty_turn(trajectory, last_turn=last_turn)

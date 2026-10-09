@@ -12,6 +12,7 @@ The environments run against a stub sandbox that echoes a canned result (no subp
 Run: python tests/cpu/environments/test_code_contests_protocols.py  (or pytest)
 """
 
+import json
 import sys
 from types import SimpleNamespace
 
@@ -41,6 +42,7 @@ from src.environments.envs.tasks.coding.code_contests import (
 )
 from src.environments.envs.tasks.coding.datasets import ContestSelection
 from src.environments.envs.tasks.coding.grading import VERDICT_DETAIL_FULL
+from src.environments.episode import recovering_turn
 from src.environments.registry import resolve_environment
 from tests.common.code_contests import (
     SINGLE_TEST_ANSWER,
@@ -146,6 +148,38 @@ def test_a_leaderboard_episode_grades_one_program_and_refuses_the_scratchpad():
     assert traj.info[TOOL_CALL_COUNTS_KEY]["submit_solution"] == 1
     assert (traj.info["tests_passed"], traj.info["tests_total"]) == (1, 1)
     assert traj.info["tested_before_submission"] is False
+
+
+def _scratchpad_turn(env, ids):
+    """One turn of a single scratchpad call through the protocol's step."""
+    call = {
+        "id": "c",
+        "function": {"name": "python_repl", "arguments": json.dumps({"code": "print(1)", "stdin": "1"})},
+    }
+    return env.step(ids, [""], [{"finish_reason": "stop", "tool_calls": [call]}])[0]
+
+
+def test_a_leaderboard_scratchpad_call_flags_no_turn_while_a_spent_budget_still_does():
+    """The leaderboard closes the scratchpad: a call to it gets the spent-budget reply and price, but it refuses
+    nothing the protocol offered, so its turn is not flagged and the next one gets no recovery reserve, which would
+    buy the leaderboard more output per sample than the setting it reproduces. A harness budget the episode spent
+    still flags a turn of nothing else."""
+    leaderboard = _env(eval_protocol="leaderboard", tool_error_penalty=0.05)
+    ids, _ = leaderboard.reset(["solve it"], [SINGLE_TEST_ANSWER])
+    step = _scratchpad_turn(leaderboard, ids)
+    traj = step.trajectory
+    assert traj.messages[-1].content == f"Error: {SCRATCHPAD_BUDGET_SPENT_REPLY}"
+    assert step.reward == pytest.approx(-0.05)
+    assert not traj.messages[-2].calls_rejected and not recovering_turn(traj)
+
+    harness = _env(max_test_calls=1, tool_error_penalty=0.05)
+    ids, _ = harness.reset(["solve it"], [SINGLE_TEST_ANSWER])
+    assert not _scratchpad_turn(harness, ids).trajectory.messages[-2].calls_rejected
+    step = _scratchpad_turn(harness, ids)
+    traj = step.trajectory
+    assert traj.messages[-1].content == f"Error: {SCRATCHPAD_BUDGET_SPENT_REPLY}"
+    assert step.reward == pytest.approx(-0.05)
+    assert traj.messages[-2].calls_rejected and recovering_turn(traj)
 
 
 def test_the_registry_presets_take_the_protocol():

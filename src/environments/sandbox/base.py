@@ -180,9 +180,12 @@ class LanguageSpec:
     # the source's comments and string literals removed: how code contests tells a draft run on no input from
     # a self-test that embeds its own. A read it misses leaves such a run unflagged.
     stdin_read: str = r"\bstdin\b"
-    # A pattern a source that swaps its standard input for an in-memory buffer matches, searched the same
-    # way: its reads then read the buffer, not the run's stdin.
+    # A pattern a source that swaps its standard input for an in-memory buffer or a file matches, searched the
+    # same way: its reads then read what it supplied, not the run's stdin.
     stdin_redirect: str | None = None
+    # A pattern a source's own runtime checks match, searched the same way: how code contests tells a silent
+    # self-test that passed from a draft that ran nothing.
+    assertion: str = r"\bassert\b"
 
     @property
     def is_compiled(self) -> bool:
@@ -200,7 +203,10 @@ LANGUAGES: dict[str, LanguageSpec] = {
         # Calls and iteration, so a template's `input = sys.stdin.readline` reads nothing until input() runs.
         stdin_read=r"\binput\s*\(|\bstdin\s*\.\s*(?:buffer\s*\.\s*)?read\w*\s*\(|\bin\s+(?:sys\s*\.\s*)?stdin\b"
         r"|[(,]\s*sys\s*\.\s*stdin\s*[),]|\bopen\s*\(\s*0\b|\bos\s*\.\s*read\s*\(\s*0\b|\bfileinput\b",
-        stdin_redirect=r"\bsys\s*\.\s*stdin\s*=\s*(?:io\s*\.\s*)?(?:StringIO|BytesIO)\s*\(",
+        # A buffer, or any file but descriptor 0 (`sys.stdin = open(0)` still reads the run's stdin).
+        stdin_redirect=r"\bsys\s*\.\s*stdin\s*=\s*(?:(?:io\s*\.\s*)?(?:StringIO|BytesIO)\s*\(|open\s*\((?!\s*0\b))",
+        # The statement and the ``unittest`` / ``numpy.testing`` spellings (``assertEqual``, ``assert_allclose``).
+        assertion=r"\bassert",
     ),
     "bash": LanguageSpec(
         name="bash",
@@ -223,7 +229,8 @@ LANGUAGES: dict[str, LanguageSpec] = {
         stdin_read=r"\bcin\s*>>|\bcin\s*\.\s*(?:get|getline|read|readsome|peek|ignore)\b"
         r"|[(,=]\s*(?:std\s*::\s*)?cin\b(?!\s*\.)|\b(?:scanf|getchar|getchar_unlocked)\b|\bstdin\b"
         r"|\bread\s*\(\s*(?:0|STDIN_FILENO)\b",
-        stdin_redirect=r"\bcin\s*\.\s*rdbuf\s*\(\s*[^\s)]",
+        stdin_redirect=r"\bcin\s*\.\s*rdbuf\s*\(\s*[^\s)]|\bfreopen\s*\([^;]*\bstdin\b",
+        assertion=r"\b(?:static_)?assert\s*\(",
     ),
     "c": LanguageSpec(
         name="c",
@@ -234,6 +241,8 @@ LANGUAGES: dict[str, LanguageSpec] = {
         line_comment="//",
         block_comment=("/*", "*/"),
         stdin_read=r"\b(?:scanf|getchar|getchar_unlocked)\b|\bstdin\b|\bread\s*\(\s*(?:0|STDIN_FILENO)\b",
+        stdin_redirect=r"\bfreopen\s*\([^;]*\bstdin\b",
+        assertion=r"\b(?:_Static_|static_)?assert\s*\(",
     ),
 }
 

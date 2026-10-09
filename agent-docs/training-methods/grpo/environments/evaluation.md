@@ -105,7 +105,8 @@ Each later line is an `episode`, addressed by `index` and `id`: `reward`, `succe
 `generation_error` (null on a scored sample), `stats`, the messages, `reasoning_effort` /
 `reasoning_budget`, `info`. The answer key (`_`-prefixed `info`
 fields), `context` and assistant chain-of-thought are stripped; each message keeps its own
-`tool_calls`, which the re-grader replays, and each assistant turn its `thinking_cap` (its level's
+`tool_calls`, which the re-grader replays, a turn the engine cut while writing a call its unrun
+`cut_tool_calls`, which it does not, and each assistant turn its `thinking_cap` (its level's
 per-turn cap) where it ran under one; no turn records `reasoning_tokens`, since the eval transport
 captures no sampled ids.
 
