@@ -19,7 +19,7 @@ max_turns: 10
 rewards:
   - source: environment      # the env's own grade, logged as reward/objective; weight 1.0, exponent 1.0
   # - {source: judge, name: quality, weight: 0.3, view: final, requirements: [{name: correctness, description: "..."}]}
-  # - {source: judge, name: audit, view: digest, checks: [{name: hardcoded_output, description: "...", veto: true}]}  # a fired veto check zeroes every positive component
+  # - {source: judge, name: audit, view: full, context: "...", checks: [{name: hardcoded_output, description: "...", veto: true}]}  # a fired veto check zeroes every positive component
   # - {source: reward_model, name: preference, weight: 0.5, url: "http://localhost:8100", model: <BT model id>}
   # judge needs OPENROUTER_API_KEY; reward_model needs a served BT model (vllm --runner pooling / sglang --is-embedding)
   # view: final | full | digest (judge only); on_error: invalid (the episode leaves the baseline) | neutral (the term scores 0)

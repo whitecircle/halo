@@ -61,6 +61,27 @@ def test_normalized_program_reads_the_program_without_comments_or_trailing_white
     assert strip_comments("int x; /* c */ y; // tail\nz;", "cpp") == "int x;  y; \nz;"
 
 
+def test_strip_comments_reads_each_languages_registered_syntax_and_keeps_string_literals():
+    assert strip_comments("# a\nx = 1  # note\n", "python") == "\nx = 1  \n"
+    assert strip_comments("// a\nint x;\n/* b\n c */\ny;", "cpp") == "\nint x;\n\ny;"
+    assert strip_comments("#if 0\nold code\n#endif\nz;", "cpp") == "\nz;"
+    assert strip_comments("# a\necho hi\n", "bash") == "\necho hi\n"
+    strings = "s = \"// not a comment\"; t = '# nor this';"
+    assert strip_comments(strings, "cpp") == strings
+    assert strip_comments('s = \'# kept\'\nt = "a \\" # kept"  # note\n', "python") == (
+        's = \'# kept\'\nt = "a \\" # kept"  \n'
+    )
+    docstring = '"""# kept"""\nx = 1\n'
+    assert strip_comments(docstring, "python") == docstring
+    grid = 'grid = """\n#..#\n#..#\n"""\nprint(grid)\n'
+    assert strip_comments(grid, "python") == grid
+    assert normalized_program('print("# a")\n', "python") != normalized_program('print("")\n', "python"), (
+        "a '#' inside a string is the program's, not a comment"
+    )
+    with pytest.raises(ValueError, match="unsupported language"):
+        strip_comments("x", "fortran")
+
+
 def test_an_identical_resubmission_is_refused_unrun_and_a_changed_one_grades():
     sandbox = _ScriptedSandbox(SandboxResult(stdout="X\n", returncode=0))
     env = _env(sandbox, max_submissions=2)

@@ -22,9 +22,10 @@ Message = dict[str, Any]
 
 # The turn flags an environment stamps on a sample message, each with the note a judge reads for it.
 TURN_FLAG_NOTES = {
+    "reasoning_capped": "its reasoning ran to the turn's cap and the engine closed it, so what follows was written past it",
     "truncated": "cut by the engine at its length limit",
     "empty": "ended with neither visible text nor a tool call",
-    "calls_rejected": "every tool call named a tool that does not exist, was refused unrun or ran and showed nothing",
+    "calls_rejected": "every tool call named a tool that does not exist or was refused unrun",
 }
 # The sample-message key an environment puts the calls of a turn the engine cut while writing them under, and
 # the note each renders with. They never ran, so they stay apart from ``tool_calls``, which the chat wire reads.
@@ -41,8 +42,7 @@ CUT_MARKER = "\n…[{dropped} chars cut here]…\n"
 CUT_HEAD_SHARE = 2 / 3
 
 # The digest's per-item budgets, enough to see what each turn did, not what it said at length: one for a
-# turn's reasoning, text and tool result and the final answer, a shorter one for what is shown inline, a
-# tool call's arguments and a tool's description.
+# turn's reasoning, text and tool result, a shorter one for a tool call's arguments.
 DIGEST_CHARS = 400
 DIGEST_INLINE_CHARS = 160
 
@@ -77,6 +77,11 @@ def task_text(prompt: Sequence[Message]) -> str:
     return "\n\n".join(_text(message.get("content")) for message in prompt if message.get("role") == "user")
 
 
+def system_text(prompt: Sequence[Message]) -> str:
+    """The system turns of the prompt, the instructions the policy was given."""
+    return "\n\n".join(_text(message.get("content")) for message in prompt if message.get("role") == "system")
+
+
 def scored_messages(sample: ScoringSample, view: View) -> list[Message]:
     """The conversation a scorer reads as messages: the prompt plus the whole completion (``full``) or
     plus one assistant message holding the final answer (``final``; empty when the episode delivered
@@ -99,9 +104,28 @@ def view_text(sample: ScoringSample, view: View, *, include_reasoning: bool, max
     if view is View.FINAL:
         text = render_final_answer(sample)
     elif view is View.FULL:
-        text = render_transcript(sample.completion, include_reasoning=include_reasoning)
+        text = render_transcript(sample.completion, include_reasoning=include_reasoning, max_chars=max_chars)
     elif view is View.DIGEST:
         text = render_digest(sample, include_reasoning=include_reasoning)
+    else:
+        raise ValueError(f"unknown view {view!r}")
+    return cut_middle(text, max_chars)
+
+
+def render_actions(sample: ScoringSample, view: View, *, max_chars: int) -> str:
+    """What the policy wrote as its actions and the tool results it received, as ``view`` shows them: its visible
+    text, every argument of every call (a call the engine cut while it was being written included) and each result,
+    without the reasoning or the environment's own notes (turn headers and flags, call headers, nudges), so a quote
+    of either is never taken for an action. The ``final`` view is the answer, or the last assistant text when there
+    is none. Cut to ``max_chars`` like the view."""
+    if view is View.FINAL:
+        text = sample.final_answer if sample.final_answer is not None else final_assistant_text(sample.completion)
+    elif view in (View.FULL, View.DIGEST):
+        digest = view is View.DIGEST
+        pieces = [_acted_text(message, digest=digest) for message in sample.completion]
+        if digest and sample.final_answer is not None:
+            pieces.append(sample.final_answer)
+        text = "\n\n".join(piece for piece in pieces if piece)
     else:
         raise ValueError(f"unknown view {view!r}")
     return cut_middle(text, max_chars)
@@ -117,21 +141,42 @@ def render_final_answer(sample: ScoringSample) -> str:
 
 
 def render_tools(tools: Sequence[dict[str, Any]]) -> str:
-    """One line per tool: its name, its parameters and the head of its description."""
-    lines = []
+    """Each tool as the policy read it: its name and parameters, its description, then each described
+    parameter's description on its own line."""
+    blocks = []
     for tool in tools:
         function = tool.get("function", tool) if isinstance(tool, Mapping) else {}
-        parameters = function.get("parameters") or {}
-        names = ", ".join((parameters.get("properties") or {}).keys())
-        description = _head(_text(function.get("description")), DIGEST_INLINE_CHARS)
-        lines.append(f"- {function.get('name', '?')}({names})" + (f": {description}" if description else ""))
-    return "\n".join(lines)
+        properties = (function.get("parameters") or {}).get("properties") or {}
+        description = _text(function.get("description"))
+        lines = [
+            f"- {function.get('name', '?')}({', '.join(properties)})" + (f": {description}" if description else "")
+        ]
+        for name, spec in properties.items():
+            detail = _text(spec.get("description")) if isinstance(spec, Mapping) else ""
+            if detail:
+                lines.append(f"    {name}: {detail}")
+        blocks.append("\n".join(lines))
+    return "\n".join(blocks)
 
 
-def render_transcript(messages: Sequence[Message], *, include_reasoning: bool) -> str:
+def render_transcript(messages: Sequence[Message], *, include_reasoning: bool, max_chars: int | None = None) -> str:
     """Every turn whole: numbered, the reasoning set apart, each tool call with its arguments (a cut
-    turn's after them, marked :data:`CUT_CALL_NOTE`), each tool result under its name and call id."""
-    return "\n\n".join(_render_turn(i, m, include_reasoning, digest=False) for i, m in enumerate(messages, 1))
+    turn's after them, marked :data:`CUT_CALL_NOTE`), each tool result under its name and call id.
+
+    Past ``max_chars`` the reasoning gives way first: every turn's is cut to its head and tail (:func:`cut_middle`)
+    within an even share of what the rest of the transcript leaves, so no action is cut to make room for a thought."""
+    turns = [_render_turn(i, m, include_reasoning, digest=False) for i, m in enumerate(messages, 1)]
+    text = "\n\n".join(turns)
+    if not include_reasoning or max_chars is None or len(text) <= max_chars:
+        return text
+    reasoning = [len(get_reasoning_text(message) or "") for message in messages]
+    # What stays whole: the joins, every turn less its reasoning, and the marker each cut reasoning gains.
+    fixed = len(text) - sum(reasoning) + len(CUT_MARKER.format(dropped=sum(reasoning))) * sum(map(bool, reasoning))
+    shares = _even_shares(reasoning, max(0, max_chars - fixed))
+    return "\n\n".join(
+        _render_turn(i, m, include_reasoning, digest=False, reasoning_chars=share)
+        for i, (m, share) in enumerate(zip(messages, shares, strict=True), 1)
+    )
 
 
 def render_digest(sample: ScoringSample, *, include_reasoning: bool) -> str:
@@ -175,7 +220,21 @@ def samples_from_completions(
     return samples
 
 
-def _render_turn(index: int, message: Message, include_reasoning: bool, *, digest: bool) -> str:
+def _even_shares(lengths: Sequence[int], budget: int) -> list[int]:
+    """``budget`` split over items of ``lengths``: each gets all of itself or an even share of what the shorter
+    ones leave, whichever is less."""
+    shares = [0] * len(lengths)
+    left = budget
+    order = sorted(range(len(lengths)), key=lengths.__getitem__)
+    for rank, i in enumerate(order):
+        shares[i] = min(lengths[i], left // (len(order) - rank))
+        left -= shares[i]
+    return shares
+
+
+def _render_turn(
+    index: int, message: Message, include_reasoning: bool, *, digest: bool, reasoning_chars: int | None = None
+) -> str:
     role = message.get("role", "?")
     name = message.get("name")
     call_id = message.get("tool_call_id")
@@ -189,8 +248,11 @@ def _render_turn(index: int, message: Message, include_reasoning: bool, *, diges
     lines = [header]
     reasoning = get_reasoning_text(message) if include_reasoning else None
     if reasoning:
-        body = _head(reasoning, DIGEST_CHARS) if digest else reasoning
-        lines.append(f"<reasoning>\n{body}\n</reasoning>")
+        if digest:
+            reasoning = _head(reasoning, DIGEST_CHARS)
+        elif reasoning_chars is not None:
+            reasoning = cut_middle(reasoning, reasoning_chars)
+        lines.append(f"<reasoning>\n{reasoning}\n</reasoning>")
     content = _text(message.get("content"))
     if content:
         if digest:
@@ -202,6 +264,27 @@ def _render_turn(index: int, message: Message, include_reasoning: bool, *, diges
     for call in message.get(CUT_CALLS_KEY) or []:
         lines.append(_render_call(call, argument_chars, note=CUT_CALL_NOTE))
     return "\n".join(lines)
+
+
+def _acted_text(message: Message, *, digest: bool) -> str:
+    """One message's share of :func:`render_actions`: an assistant turn's visible text and its calls' arguments, a
+    tool result; a user turn (an environment's nudge) has none."""
+    role = message.get("role")
+    content = _text(message.get("content"))
+    if role == "tool":
+        return cut_middle(content, DIGEST_CHARS) if digest else content
+    if role != "assistant":
+        return ""
+    pieces = [_head(content, DIGEST_CHARS) if digest else content]
+    for call in [*(message.get("tool_calls") or []), *(message.get(CUT_CALLS_KEY) or [])]:
+        function = call.get("function", call) if isinstance(call, Mapping) else {}
+        arguments = function.get("arguments", "")
+        if isinstance(arguments, str):
+            with contextlib.suppress(ValueError):
+                arguments = json.loads(arguments) if arguments else {}
+        values = arguments.values() if isinstance(arguments, Mapping) else [arguments]
+        pieces.extend(_argument_text(value, DIGEST_INLINE_CHARS if digest else None) for value in values)
+    return "\n".join(piece for piece in pieces if piece)
 
 
 def _render_call(call: Any, argument_chars: int | None, *, note: str | None = None) -> str:

@@ -20,7 +20,7 @@ import aiohttp
 import ray
 from ray.util.scheduling_strategies import NodeAffinitySchedulingStrategy
 
-from src.configs.rollout_config import RolloutConfig
+from src.configs.rollout_config import VLLM_BACKEND, RolloutConfig
 from src.distributed.nccl.addresses import is_loopback
 from src.environments.base import EPISODE_ERROR_KEY, Trajectory
 from src.environments.engine_wire import build_payload, capture_generation_tokens, capture_routing_mask
@@ -36,13 +36,15 @@ from src.environments.episode import (
     step_context_from_generation,
 )
 from src.environments.registry import create_environment
-from src.inference.response import get_finish_reason, get_reasoning_text
+from src.inference.response import FINISH_REASON_LENGTH, get_finish_reason, get_reasoning_text
 from src.log import warn_once
 
 logger = logging.getLogger(__name__)
 
 # Backends already warned that their completions carry no ``usage.completion_tokens`` (once per process).
 _COMPLETION_TOKENS_MISSING_WARNED: set[str] = set()
+# Backends already warned that a cut call's text could not be decoded (once per process).
+_CUT_CALL_DECODE_FAILED_WARNED: set[str] = set()
 
 # The engine-paused seconds a deadline credits: the count now, or an awaitable of the count as of the
 # call (a read of the Ray copy an actor process holds).
@@ -409,8 +411,9 @@ class EnvironmentActor:
         reasoning_effort: str | None = None,
         reasoning_budget: int | None = None,
     ) -> TurnGeneration:
-        """One /v1/chat/completions request; returns the turn's :class:`TurnGeneration` (capture fields
-        populated per the ``RolloutConfig`` flags).
+        """One /v1/chat/completions request (and a ``/detokenize`` for a call cut at the cap,
+        :meth:`_cut_calls_as_written`); returns the turn's :class:`TurnGeneration` (capture fields populated per
+        the ``RolloutConfig`` flags).
 
         The request gets ``config.request_timeout`` of engine-serving time: a weight sync that freezes it
         (vLLM ``mode=keep``) is credited back, since expiring it would re-issue a turn the engine
@@ -455,6 +458,13 @@ class EnvironmentActor:
         routing_mask = capture_routing_mask(choice, data) if config.capture_routed_experts else None
         # The engine's prompt length anchors the mask; the trainer's re-render can differ by a token.
         routing_prompt_tokens = usage.get("prompt_tokens") if routing_mask else None
+        finish_reason = get_finish_reason(
+            choice, completion_tokens=usage.get("completion_tokens"), max_tokens=config.max_tokens
+        )
+        if finish_reason == FINISH_REASON_LENGTH and tool_calls and token_ids:
+            tool_calls = await self._cut_calls_as_written(
+                client, url, payload.get("model"), token_ids, tool_calls, config
+            )
         return TurnGeneration(
             text=text,
             tool_calls=tool_calls,
@@ -465,10 +475,50 @@ class EnvironmentActor:
             routing_mask=routing_mask,
             routing_prompt_tokens=routing_prompt_tokens,
             prompt_token_ids=prompt_token_ids,
-            finish_reason=get_finish_reason(
-                choice, completion_tokens=usage.get("completion_tokens"), max_tokens=config.max_tokens
-            ),
+            finish_reason=finish_reason,
         )
+
+    async def _cut_calls_as_written(
+        self,
+        client: aiohttp.ClientSession,
+        url: str,
+        model: str | None,
+        token_ids: list[int],
+        salvaged: list[dict[str, Any]],
+        config: RolloutConfig,
+    ) -> list[dict[str, Any]]:
+        """The call a turn was writing when its cap cut it, as the policy wrote it, for the judge and the completions
+        record: vLLM's parser salvages only the call's name and whatever arguments it closed, so the turn's ids past
+        its reasoning close are decoded (vLLM's ``/detokenize``, which answers ``prompt``; SGLang's answers ``text``)
+        and carried whole as the call's arguments. The salvage stands wherever no single-token reasoning close is
+        resolved to split the ids at (SGLang, which enforces no thinking budget; gpt-oss, whose close spans several
+        tokens; a run with no budget) and when the decode fails — the cut is booked either way; only what a judge
+        reads of it changes."""
+        end = config.reasoning_end_token_id
+        if config.backend != VLLM_BACKEND or end is None or end not in token_ids:
+            return salvaged
+        visible = token_ids[len(token_ids) - token_ids[::-1].index(end) :]
+
+        async def _decode() -> str:
+            async with client.post(f"{url}/detokenize", json={"model": model, "tokens": visible}) as resp:
+                if resp.status != 200:
+                    raise RolloutHTTPError(resp.status, config.backend, await resp.text())
+                return (await resp.json())["prompt"]
+
+        try:
+            written = await _await_with_deadline(_decode(), config.request_timeout, self._paused_clock, what="decode")
+        except Exception as e:  # what a judge reads of a cut call never fails the episode
+            warn_once(
+                logger,
+                _CUT_CALL_DECODE_FAILED_WARNED,
+                config.backend,
+                "Actor %s: decoding a cut call's text failed (%s); the judge reads the call as the parser salvaged it",
+                self.actor_id,
+                describe_exception(e),
+            )
+            return salvaged
+        first = salvaged[0]
+        return [{**first, "function": {**first.get("function", {}), "arguments": written}}]
 
     def _build_payload(
         self,

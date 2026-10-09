@@ -5,11 +5,9 @@ The scratchpad is where the policy debugs, so its reply has to carry the diagnos
 a compile error as the compiler's first diagnostics (the last stderr line of g++ is a caret gutter),
 a crash as its signal and the traceback's tail, ahead of any stdout (the protocol cuts a long
 observation from the end), and a program run under the same limits its graded tests get — the
-problem's time limit, and a stack as large as the memory limit. A run that showed the model nothing
-(no input, a clean exit, and nothing or one short token on stdout from a program that reads input, or nothing
-from one that reads none or supplies its own and asserts nothing) stays spent and pays ``tool_error_penalty``,
-and a turn of nothing else, or of calls refused unrun, is flagged untrainable, so the next turn retries on the
-recovery reserve. Every program here really compiles and runs on the local backend.
+problem's time limit, and a stack as large as the memory limit. A run given no input says so and is booked like
+any other run; a turn of calls refused unrun is flagged untrainable, so the next turn retries on the recovery
+reserve. Every program here really compiles and runs on the local backend.
 
 Run: python tests/cpu/environments/test_scratchpad_feedback.py  (or pytest)
 """
@@ -30,7 +28,6 @@ from src.environments.envs.tasks.coding.code_contests import (
 )
 from src.environments.envs.tasks.coding.grading import run_solution_against_tests
 from src.environments.episode import recovering_turn
-from src.environments.registry import resolve_environment
 from src.environments.sandbox.base import REPL_NO_OUTPUT_MESSAGE, SandboxExecutor, SandboxResult
 from src.environments.sandbox.local import LocalSubprocessSandbox
 from src.environments.sandbox.repl import run_code_via_sandbox
@@ -38,7 +35,6 @@ from src.environments.tools.definitions import NativeToolCall
 from tests.common.code_contests import counts_beside_budget_words, retired_budget_phrases
 
 needs_gpp = pytest.mark.skipif(shutil.which("g++") is None, reason="g++ not installed")
-needs_gcc = pytest.mark.skipif(shutil.which("gcc") is None, reason="gcc not installed")
 
 _UNDECLARED = """
 #include <iostream>
@@ -67,63 +63,6 @@ int main() { std::cout << dfs(200000) << std::endl; }
 _DEEP_RECURSION_STACK_BYTES = 256 * 1024 * 1024
 # Reads its input and prints an answer only when it got one: given no stdin it exits cleanly and silently.
 _READS_INPUT = "import sys\ndata = sys.stdin.read().split()\nif data:\n    print(int(data[0]) + 1)"
-# A silent self-test: unittest reports on stderr, which a clean exit's reply leaves out.
-_UNITTEST_SELF_TEST = (
-    "import unittest\n\nclass T(unittest.TestCase):\n    def test(self):\n        self.assertEqual(1 + 1, 2)\n\n"
-    "unittest.main()"
-)
-# Sample runs that supply their own input, given no stdin: each prints the sample's answer, 6.
-_STRINGIO_SAMPLE = (
-    "import io, sys\nsys.stdin = io.StringIO('3\\n1 2 3\\n')\nn = int(input())\nprint(sum(map(int, input().split())))"
-)
-_FREOPEN_SAMPLE = """
-#include <cstdio>
-int main() {
-    FILE* f = std::fopen("in.txt", "w");
-    std::fputs("3\\n1 2 3\\n", f);
-    std::fclose(f);
-    std::freopen("in.txt", "r", stdin);
-    int n = 0, x = 0, s = 0;
-    std::scanf("%d", &n);
-    for (int i = 0; i < n; ++i) { std::scanf("%d", &x); s += x; }
-    std::printf("%d\\n", s);
-}
-"""
-_FILE_SAMPLE = (
-    "import sys\nwith open('in.txt', 'w') as f:\n    f.write('3\\n1 2 3\\n')\nsys.stdin = open('in.txt')\n"
-    "n = int(input())\nprint(sum(map(int, input().split())))"
-)
-# Programs that read no input naming an input call only in a docstring, an identifier or a string stream's read:
-# each prints its sample's answer, 6.
-_DOCSTRING_SAMPLE = (
-    'def solve(s):\n    """Parse what input() reads off sys.stdin."""\n    return sum(map(int, s.split()))\n'
-    "print(solve('1 2 3'))"
-)
-_NAMED_STDIN_SAMPLE = "sample_stdin = '1 2 3'\nprint(sum(map(int, sample_stdin.split())))"
-_ISTRINGSTREAM_SAMPLE = """
-#include <iostream>
-#include <sstream>
-#include <string>
-int main() {
-    std::istringstream in("3\\n1 2 3\\n");
-    std::string line;
-    std::getline(in, line);
-    int x = 0, s = 0;
-    while (in >> x) s += x;
-    std::cout << s << std::endl;
-}
-"""
-# An asserting self-test whose main, which reads input, is never called.
-_SELF_TEST_BESIDE_MAIN = (
-    "def solve(a):\n    return sum(a)\n\ndef main():\n    n = int(input())\n"
-    "    print(solve(list(map(int, input().split()))))\n\nassert solve([1, 2]) == 3\nprint('All tests passed')"
-)
-# A stress test that reads no input, asserts nothing and prints only on a mismatch: silent, it reported nothing.
-_SILENT_STRESS_TEST = (
-    "import random\ndef fast(a):\n    return sum(a)\ndef brute(a):\n    s = 0\n    for x in a:\n        s += x\n"
-    "    return s\nfor _ in range(200):\n    a = [random.randint(0, 9) for _ in range(5)]\n"
-    "    if fast(a) != brute(a):\n        print('MISMATCH', a)"
-)
 _SPIN_SECONDS = """
 #include <chrono>
 #include <iostream>
@@ -342,24 +281,18 @@ def test_a_scalar_stdin_runs_as_its_string_and_a_null_one_as_none():
     assert reply.startswith("Error: ") and "EOFError" in reply and NO_STDIN_NOTE in reply, reply
 
 
-def test_a_silent_input_less_run_is_booked_as_a_run_and_pays_the_tool_error_penalty():
-    """A run given no input that prints nothing still ran: it spends its slot, counts as a successful call and
-    earns ``tool_success_reward`` like the run beside it, and alone pays ``tool_error_penalty`` besides, a refused
-    call's price."""
+def test_a_silent_input_less_run_is_an_ordinary_run():
+    """A run given no input that prints nothing still ran: its reply carries the no-stdin note, it spends its
+    slot and earns ``tool_success_reward`` like any run, and a turn of nothing else trains like any turn."""
     env = _env(language="python", tool_success_reward=0.05, tool_error_penalty=0.03)
-    traj = _episode(env)
-    calls = [
-        NativeToolCall(id="a", name=env.test_tool_name, arguments={"code": _READS_INPUT}),
-        NativeToolCall(id="b", name=env.test_tool_name, arguments={"code": "print(1)", "stdin": "1\n"}),
-    ]
-    results, reward = env._execute_tool_calls(calls, traj)
-    assert results[0].content == f"{REPL_NO_OUTPUT_MESSAGE}\n{NO_STDIN_NOTE}", results[0].content
-    assert [(r.uninformative, r.success) for r in results] == [(True, True), (False, True)]
-    assert reward == pytest.approx(0.05 + 0.05 - 0.03), "both runs are paid, the silent one also charged"
+    ids = _reset(env)
+    step = _turn(env, ids, (env.test_tool_name, {"code": _READS_INPUT}), (env.test_tool_name, {"code": "x = 1"}))
+    traj = step.trajectory
+    assert [m.content for m in traj.messages[-2:]] == [f"{REPL_NO_OUTPUT_MESSAGE}\n{NO_STDIN_NOTE}"] * 2
+    assert step.reward == pytest.approx(0.05 + 0.05)
     assert (traj.info["total_tool_calls"], traj.info["successful_tool_calls"]) == (2, 2)
     assert env._test_calls(traj) == 2
-    _, informative = env._execute_tool_calls([calls[1]], traj)
-    assert informative == pytest.approx(0.05), "a run that showed something pays no penalty"
+    assert not _last_turn_flagged(traj) and not recovering_turn(traj)
 
 
 def test_output_computed_from_no_input_says_it_got_none():
@@ -383,230 +316,26 @@ def test_a_python_source_that_does_not_compile_gets_no_missing_input_note(code, 
     assert NO_STDIN_NOTE not in reply and not retired_budget_phrases(reply), reply
 
 
-def _starved_runs(env, traj) -> float:
-    return env.rollout_metrics(traj)["episode/starved_test_runs"]
-
-
-def test_every_silent_input_less_run_spends_its_run_and_counts_as_starved():
-    """A solution run with no stdin reads nothing and prints nothing: it spends its run, the reply carries the
-    plain no-stdin note, and ``episode/starved_test_runs`` counts it, again on every such run. A crash, output
-    and a quiet run on real input each told the model something: they spend their runs and are not starved."""
+def test_every_input_less_run_spends_its_run_and_carries_the_note():
+    """A run with no stdin says so whatever it did — printed nothing, crashed or printed — and spends its run; a
+    quiet run on real input carries no note."""
     env = _env(language="python")
     traj = _episode(env)
     silent = _scratchpad(env, traj, code=_READS_INPUT)
     assert silent == f"{REPL_NO_OUTPUT_MESSAGE}\n{NO_STDIN_NOTE}", silent
-    assert env._test_calls(traj) == 1 and _starved_runs(env, traj) == 1.0
     crash = _scratchpad(env, traj, code="print(int(input()) + 1)")
     assert crash.startswith("Error: ") and "EOFError" in crash and crash.endswith(f"\n{NO_STDIN_NOTE}"), crash
     printed = _scratchpad(env, traj, code="print(7)")
     assert printed == f"7\n{NO_STDIN_NOTE}", printed
     quiet_on_input = _scratchpad(env, traj, code="import sys\nsys.stdin.read()", stdin="1\n")
     assert quiet_on_input == REPL_NO_OUTPUT_MESSAGE, quiet_on_input
-    assert env._test_calls(traj) == 4 and _starved_runs(env, traj) == 1.0
-    again = _scratchpad(env, traj, code=_READS_INPUT)
-    assert again == silent and env._test_calls(traj) == 5 and _starved_runs(env, traj) == 2.0
-
-
-def test_a_clean_input_less_run_that_writes_only_to_stderr_is_starved():
-    """A clean exit's reply leaves stderr out, so a program that only logged to stderr showed the model no
-    output: it counts as starved, and spends its run."""
-    env = _env(language="python")
-    traj = _episode(env)
-    reply = _scratchpad(
-        env, traj, code="import sys\ndata = sys.stdin.read()\nsys.stderr.write('debug: read nothing\\n')"
-    )
-    assert reply == f"{REPL_NO_OUTPUT_MESSAGE}\n{NO_STDIN_NOTE}", reply
-    assert env._test_calls(traj) == 1 and _starved_runs(env, traj) == 1.0
-
-
-def test_a_turn_of_only_starved_runs_is_flagged_stays_spent_and_the_next_turn_recovers():
-    """A turn whose every call was a silent input-less run showed the model nothing: it is flagged untrainable
-    like a turn of refused calls, so the next turn runs on the recovery reserve instead of a fresh cap. Unlike a
-    refusal the runs stay spent and booked as runs, their replies unchanged, each charged ``tool_error_penalty``
-    and no recovery price; ``episode/starved_turns`` counts the turn, ``episode/starved_test_runs`` every run."""
-    env = _env(language="python", tool_success_reward=0.05, tool_error_penalty=0.02, length_cutoff_penalty=0.3)
-    ids = _reset(env)
-    step = _turn(
-        env,
-        ids,
-        (env.test_tool_name, {"code": _READS_INPUT}),
-        (env.test_tool_name, {"code": "import sys\nsys.stdin.read()"}),
-    )
-    traj = step.trajectory
-    assert _last_turn_flagged(traj) and recovering_turn(traj)
-    replies = traj.messages[-2:]
-    assert [m.content for m in replies] == [f"{REPL_NO_OUTPUT_MESSAGE}\n{NO_STDIN_NOTE}"] * 2
-    assert all(type(m.content) is str for m in replies), "the reply's marker never reaches the conversation"
-    assert env._test_calls(traj) == 2 and traj.info["successful_tool_calls"] == 2
-    assert step.reward == pytest.approx(0.10 - 0.04), "paid as runs and charged as uninformative: no refund"
-    assert env._tool_use_shaping(traj) == 0.0, "not a cut or empty turn: no length_cutoff_penalty"
-    metrics = env.rollout_metrics(traj)
-    assert (metrics["episode/starved_test_runs"], metrics["episode/starved_turns"]) == (2.0, 1.0)
-
-    step = _turn(env, ids, (env.test_tool_name, {"code": _READS_INPUT, "stdin": "1\n"}))
-    assert step.trajectory.messages[-1].content == "2"
-    assert not _last_turn_flagged(step.trajectory) and not recovering_turn(step.trajectory)
-    assert env._test_calls(step.trajectory) == 3
-    assert env.rollout_metrics(step.trajectory)["episode/starved_turns"] == 1.0
-
-
-def test_a_starved_run_beside_a_productive_call_leaves_the_turn_trainable():
-    """A run that printed on its input, or a graded submission, did something: the turn trains, and the starved
-    run beside it is counted as a run, not as a starved turn."""
-    env = _env(language="python")
-    for productive in (
-        (env.test_tool_name, {"code": "print(int(input()) + 1)", "stdin": "1\n"}),
-        (SUBMIT_TOOL, {"code": "print(0)"}),
-    ):
-        step = _turn(env, _reset(env), (env.test_tool_name, {"code": _READS_INPUT}), productive)
-        traj = step.trajectory
-        assert not _last_turn_flagged(traj) and not recovering_turn(traj), productive
-        metrics = env.rollout_metrics(traj)
-        assert (metrics["episode/starved_test_runs"], metrics["episode/starved_turns"]) == (1.0, 0.0), productive
-
-
-@pytest.mark.parametrize(
-    "arguments",
-    [
-        {"code": "import sys\nsys.stdin.read()", "stdin": "1\n"},
-        {"code": "print(7)"},
-        {"code": "print(int(input()) + 1)"},
-    ],
-    ids=["silent-on-input", "output-on-no-input", "crash-on-no-input"],
-)
-def test_a_run_given_input_or_that_showed_something_is_not_flagged(arguments):
-    env = _env(language="python")
-    step = _turn(env, _reset(env), (env.test_tool_name, arguments))
-    assert not _last_turn_flagged(step.trajectory) and not recovering_turn(step.trajectory)
-    assert env.rollout_metrics(step.trajectory)["episode/starved_turns"] == 0.0
-
-
-@pytest.mark.parametrize(
-    ("language", "code", "stdin", "shown", "starved"),
-    [
-        # Reads input, given none: silence, or one token of at most 20 characters computed from nothing.
-        ("python", "import sys\nfor line in sys.stdin:\n    pass", "", REPL_NO_OUTPUT_MESSAGE, True),
-        ("python", "data = open(0).read()", "", REPL_NO_OUTPUT_MESSAGE, True),
-        ("python", "import sys\nprint('Yes' if sys.stdin.read().split() else 'No')", "", "No", True),
-        ("python", "import sys\nprint(sum(map(int, sys.stdin.read().split())))", "", "0", True),
-        ("python", "import sys\nsys.stdin.read()\nprint('9' * 20)", "", "9" * 20, True),
-        ("python", "import sys\nsys.stdin.read()\nprint('9' * 21)", "", "9" * 21, False),
-        ("python", "import sys\nsys.stdin.read()\nprint('ab')\nprint('cd')", "", "ab\ncd", False),
-        ("python", _SELF_TEST_BESIDE_MAIN, "", "All tests passed", False),
-        pytest.param(
-            "cpp",
-            "#include <iostream>\nint main() { long long n = 0; std::cin >> n; std::cout << n << std::endl; }",
-            "",
-            "0",
-            True,
-            marks=needs_gpp,
-        ),
-        # Supplies its own input: judged like a program reading none, so the answer it printed showed something.
-        ("python", _STRINGIO_SAMPLE, "", "6", False),
-        ("python", _FILE_SAMPLE, "", "6", False),
-        pytest.param("cpp", _FREOPEN_SAMPLE, "", "6", False, marks=needs_gpp),
-        (
-            "python",
-            'import io, sys\nsys.stdin = io.StringIO("1 2\\n")\nassert sum(map(int, input().split())) == 3',
-            "",
-            REPL_NO_OUTPUT_MESSAGE,
-            False,
-        ),
-        (
-            "python",
-            'import io, sys\nsys.stdin = io.StringIO("1 2\\n")\ntotal = sum(map(int, input().split()))',
-            "",
-            REPL_NO_OUTPUT_MESSAGE,
-            True,
-        ),
-        # Whitespace is no input; real input is.
-        ("python", "import sys\nprint('Yes' if sys.stdin.read().split() else 'No')", " \n\t", "No", True),
-        ("python", "import sys\nprint('Yes' if sys.stdin.read().split() else 'No')", "3\n", "Yes", False),
-        # Reads none: a parked draft whose code never runs, unless an assertion checked something.
-        ("python", "def solve(n):\n    return n + 1", "", REPL_NO_OUTPUT_MESSAGE, True),
-        ("python", "# reads input() later\nx = 1", "", REPL_NO_OUTPUT_MESSAGE, True),
-        ("python", "def solve(n):\n    return n + 1\nassert solve(1) == 2", "", REPL_NO_OUTPUT_MESSAGE, False),
-        ("python", _UNITTEST_SELF_TEST, "", REPL_NO_OUTPUT_MESSAGE, False),
-        ("python", _SILENT_STRESS_TEST, "", REPL_NO_OUTPUT_MESSAGE, True),
-        ("python", _DOCSTRING_SAMPLE, "", "6", False),
-        ("python", _NAMED_STDIN_SAMPLE, "", "6", False),
-        pytest.param("cpp", _ISTRINGSTREAM_SAMPLE, "", "6", False, marks=needs_gpp),
-        pytest.param(
-            "cpp",
-            "int solve(int n) { return n + 1; }\nint main() { return 0; }",
-            "",
-            REPL_NO_OUTPUT_MESSAGE,
-            True,
-            marks=needs_gpp,
-        ),
-        pytest.param(
-            "cpp",
-            "#include <cassert>\nint solve(int n) { return n + 1; }\nint main() { assert(solve(1) == 2); }",
-            "",
-            REPL_NO_OUTPUT_MESSAGE,
-            False,
-            marks=needs_gpp,
-        ),
-        pytest.param(
-            "c",
-            '_Static_assert(sizeof(long long) == 8, "64-bit");\nint solve(int n) { return n + 1; }\n'
-            "int main(void) { return 0; }",
-            "",
-            REPL_NO_OUTPUT_MESSAGE,
-            False,
-            marks=needs_gcc,
-        ),
-    ],
-    ids=[
-        "sys-stdin-loop",
-        "open-fd-0",
-        "default-answer",
-        "sum-of-nothing",
-        "twenty-character-token",
-        "twenty-one-character-token",
-        "two-lines",
-        "asserting-self-test-beside-an-uncalled-main",
-        "cpp-zero-from-nothing",
-        "stringio-sample",
-        "file-sample",
-        "cpp-freopen-sample",
-        "stringio-self-test",
-        "silent-stringio-sample",
-        "whitespace-stdin",
-        "real-stdin",
-        "never-called",
-        "input-only-in-a-comment",
-        "passing-assert-self-test",
-        "passing-unittest-self-test",
-        "silent-stress-test",
-        "input-named-in-a-docstring",
-        "stdin-named-in-an-identifier",
-        "cpp-istringstream-sample",
-        "cpp-never-called",
-        "cpp-passing-assert-self-test",
-        "c-static-assert-self-test",
-    ],
-)
-def test_an_input_less_run_that_showed_nothing_is_starved_and_flags_its_turn(language, code, stdin, shown, starved):
-    """A clean input-less run is starved when its program reads the run's input and printed nothing or one token of
-    at most 20 characters, or reads none or supplies its own, printed nothing and asserts nothing: the run stays
-    spent, its reply unchanged, and a turn of nothing else is flagged so the next one recovers. A self-check passes
-    by asserting or printing: a silent one that does neither showed nothing. An input call named only in a
-    docstring, an identifier or a string stream's read is no read, so the one short answer such a program prints
-    showed something."""
-    env = _env(language=language)
-    step = _turn(env, _reset(env), (env.test_tool_name, {"code": code, "stdin": stdin}))
-    traj = step.trajectory
-    assert traj.messages[-1].content == (shown if stdin.strip() else f"{shown}\n{NO_STDIN_NOTE}")
-    assert _last_turn_flagged(traj) is starved and recovering_turn(traj) is starved
-    assert env._test_calls(traj) == 1
-    assert env.rollout_metrics(traj)["episode/starved_test_runs"] == (1.0 if starved else 0.0)
+    assert env._test_calls(traj) == 4
 
 
 def test_a_turn_of_only_malformed_calls_is_flagged_and_the_next_turn_recovers():
-    """A ``run_code`` call missing the ``language`` a language list requires is refused at binding, unrun, unspent
-    and unseen by the comment guard: a turn of nothing else is flagged untrainable and the next turn runs on the
-    recovery reserve, the reply and the tool-error price as they were. Beside a call that ran, it is not."""
+    """A ``run_code`` call missing the ``language`` a language list requires is refused at binding, unrun and
+    unspent: a turn of nothing else is flagged untrainable and the next turn runs on the recovery reserve, the
+    reply and the tool-error price as they were. Beside a call that ran, it is not."""
     env = _env(language=["python", "cpp"], tool_error_penalty=0.05)
     ids = _reset(env)
     step = _turn(env, ids, ("run_code", {"code": "print(1)", "stdin": "1\n"}))
@@ -644,30 +373,9 @@ def test_a_turn_of_only_scratchpad_calls_past_the_budget_is_flagged():
     assert not _last_turn_flagged(step.trajectory)
 
 
-def test_starved_turns_separate_a_starved_run_flagging_its_turn_from_an_unknown_call_alone():
-    """A turn of unknown calls is flagged without a starved run; one whose only other call is unknown is flagged
-    for its starved run, and only that one counts in ``episode/starved_turns``."""
-    env = _env(language="python")
-    ids = _reset(env)
-    step = _turn(env, ids, ("test_tool", {}))
-    assert _last_turn_flagged(step.trajectory)
-    assert env.rollout_metrics(step.trajectory)["episode/starved_turns"] == 0.0
-    step = _turn(env, ids, ("test_tool", {}), (env.test_tool_name, {"code": _READS_INPUT}))
-    assert _last_turn_flagged(step.trajectory) and recovering_turn(step.trajectory)
-    assert env.rollout_metrics(step.trajectory)["episode/starved_turns"] == 1.0
-
-
 def test_a_direct_call_outside_an_episode_gets_the_plain_note():
     env = _env(language="python")
     assert env._run_test(_READS_INPUT) == f"{REPL_NO_OUTPUT_MESSAGE}\n{NO_STDIN_NOTE}"
-
-
-def test_a_config_spelling_the_starved_run_refund_cap_is_refused():
-    """No knob returns a silent input-less run to the budget: ``max_starved_run_refunds`` is refused at
-    construction, as any option the environment does not take is, never dropped."""
-    config = {"sandbox": LocalSubprocessSandbox(), "max_starved_run_refunds": 0}
-    with pytest.raises(TypeError, match=r"unexpected environment option\(s\) \['max_starved_run_refunds'\]"):
-        resolve_environment("codeforces", config)
 
 
 def test_a_garbled_argument_name_is_refused_unspent_and_named():

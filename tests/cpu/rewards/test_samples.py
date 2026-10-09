@@ -6,6 +6,7 @@ Run: python tests/cpu/rewards/test_samples.py  (or pytest)
 """
 
 import json
+import re
 from dataclasses import replace
 
 import pytest
@@ -99,12 +100,15 @@ def test_render_transcript_marks_flagged_turns_with_their_notes():
             "calls_rejected": True,
             "truncated": True,
         },
+        {"role": "assistant", "content": "", "reasoning_capped": True, "reasoning_content": "so the sum is"},
     ]
     assert render_transcript(turns, include_reasoning=True) == (
         "[1] assistant  — cut by the engine at its length limit\nLet me th\n\n"
         "[2] assistant  — ended with neither visible text nor a tool call\n\n"
-        "[3] assistant  — cut by the engine at its length limit; every tool call named a tool that does not exist, was refused unrun or ran and showed nothing\n"
-        "→ nope"
+        "[3] assistant  — cut by the engine at its length limit; every tool call named a tool that does not exist or "
+        "was refused unrun\n→ nope\n\n"
+        "[4] assistant  — its reasoning ran to the turn's cap and the engine closed it, so what follows was written "
+        "past it\n<reasoning>\nso the sum is\n</reasoning>"
     )
 
 
@@ -271,22 +275,64 @@ def test_scored_messages_drops_sample_only_keys_and_uses_the_final_answer():
     assert scored_messages(call_only, View.FULL)[-1] == {"role": "assistant", "content": "", "tool_calls": [CALL]}
 
 
-def test_render_tools_lists_each_tool_with_its_parameters_and_description_head():
+def test_render_tools_shows_each_tool_as_the_policy_read_it():
+    long = "d" * (DIGEST_INLINE_CHARS + 5)
     tools = [
         {
             "type": "function",
             "function": {
                 "name": "run",
                 "description": "Run a program.",
-                "parameters": {"type": "object", "properties": {"code": {"type": "string"}, "timeout": {}}},
+                "parameters": {
+                    "type": "object",
+                    "properties": {"code": {"type": "string", "description": "A whole program"}, "timeout": {}},
+                },
             },
         },
         {"type": "function", "function": {"name": "noop"}},
-        {"name": "flat", "description": "d" * (DIGEST_INLINE_CHARS + 5), "parameters": {"properties": {"q": {}}}},
+        {"name": "flat", "description": long, "parameters": {"properties": {"q": {}}}},
     ]
-    assert render_tools(tools) == (
-        "- run(code, timeout): Run a program.\n- noop()\n" + f"- flat(q): {'d' * DIGEST_INLINE_CHARS}…[5 more chars]"
+    assert (
+        render_tools(tools)
+        == f"- run(code, timeout): Run a program.\n    code: A whole program\n- noop()\n- flat(q): {long}"
     )
+
+
+def test_an_over_long_transcript_cuts_the_reasoning_and_keeps_every_action_whole():
+    """Past the limit every turn's reasoning gives way to an even share of what the actions leave, cut to its head
+    and tail; the calls, results and visible text stay whole, and the whole fits the limit."""
+    call = {"id": "c1", "function": {"name": "run", "arguments": json.dumps({"code": "print(" + "7" * 300 + ")"})}}
+    turns = [
+        {"role": "assistant", "content": "", "reasoning_content": "a" * 3000, "tool_calls": [call]},
+        {"role": "tool", "name": "run", "tool_call_id": "c1", "content": "7" * 300},
+        {"role": "assistant", "content": "Submitted.", "reasoning_content": "b" * 40},
+    ]
+    whole = render_transcript(turns, include_reasoning=True)
+    assert render_transcript(turns, include_reasoning=True, max_chars=len(whole)) == whole
+    budget = len(render_transcript(turns, include_reasoning=False)) + 600
+    cut = render_transcript(turns, include_reasoning=True, max_chars=budget)
+    assert len(cut) <= budget
+    assert "print(" + "7" * 300 + ")" in cut and "\n" + "7" * 300 + "\n" in cut and "Submitted." in cut
+    assert "b" * 40 in cut, "a reasoning shorter than its share stays whole"
+    assert cut.count("a") < 3000 and "<reasoning>\naaaa" in cut and "aaaa\n</reasoning>" in cut
+    assert (
+        view_text(ScoringSample(prompt=PROMPT, completion=turns), View.FULL, include_reasoning=True, max_chars=budget)
+        == cut
+    )
+
+
+def test_a_short_reasoning_leaves_its_unused_share_to_the_long_one():
+    """1400 characters left for two reasonings: the 400-character one stays whole and the 3000-character one gets
+    the other 1000, not an even 700."""
+    turns = [
+        {"role": "assistant", "content": "x", "reasoning_content": "a" * 3000},
+        {"role": "assistant", "content": "y", "reasoning_content": "b" * 400},
+    ]
+    whole = render_transcript(turns, include_reasoning=True)
+    budget = len(whole) - 3400 + 2 * len(CUT_MARKER.format(dropped=3400)) + 1400
+    cut = render_transcript(turns, include_reasoning=True, max_chars=budget)
+    assert len(cut) <= budget and "b" * 400 in cut
+    assert sum(map(len, re.findall("a{10,}", cut))) == 1000
 
 
 def test_samples_from_completions_sets_the_final_answer_to_the_last_assistant_text():

@@ -54,8 +54,9 @@ EPISODE_ERROR_KEY = "error"
 # turn's answer room, so the episode ended there (truncated) or could not have run another turn.
 OUTPUT_BUDGET_EXHAUSTED_KEY = "output_budget_exhausted"
 # Set in a turn's step context by the rollout driver when the engine cut the turn at its token cap while it held
-# tool calls: the calls the parser salvaged, never run. The recovery says the call ran past the turn's length limit
-# (``LENGTH_CUTOFF_IN_CALL_NUDGE``), and the turn keeps them for the judge (``Message.cut_tool_calls``).
+# tool calls: the calls the parser salvaged, or the text the policy wrote where the driver decodes it, never run. The
+# recovery says the call ran past the turn's length limit (``LENGTH_CUTOFF_IN_CALL_NUDGE``), and the turn keeps them
+# for the judge (``Message.cut_tool_calls``).
 CUT_TOOL_CALLS_KEY = "cut_tool_calls"
 # Step-context key the driver sets on the last turn the episode's output budget affords: a turn that
 # produced nothing cannot be retried after it, so it ends the episode like a max_turns overflow.
@@ -255,14 +256,13 @@ class Message:
     reasoning_tokens: int | None = None
     # Engine cut the turn off at its token cap: the text is a fragment, never rewarded (``untrainable``).
     truncated: bool = False
-    # The calls the parser salvaged from a turn cut at its token cap while writing them (``CUT_TOOL_CALLS_KEY``).
+    # The calls a turn cut at its token cap was writing, as the driver recorded them (``CUT_TOOL_CALLS_KEY``).
     # Never run and dropped by to_dict, so neither the engine nor the training render sees them; a scorer's
     # view and the completions record show them, marked.
     cut_tool_calls: list[dict[str, Any]] | None = None
-    # Every tool call named a tool that does not exist, was refused unrun (malformed, over budget, or carrying
-    # nothing to run), or ran and showed nothing (``UninformativeReply``), so the turn accomplished nothing —
-    # never rewarded like a fragment, or a recovering episode reinforces the invented or refused call or the
-    # empty run that cost it a turn.
+    # Every tool call named a tool that does not exist or was refused unrun (malformed, over budget, or an
+    # identical resubmission), so the turn accomplished nothing — never rewarded like a fragment, or a
+    # recovering episode reinforces the invented or refused call that cost it a turn.
     calls_rejected: bool = False
     # The model ended the turn with neither visible content nor a tool call — never rewarded for the
     # same reason: a recovering episode would reinforce stopping on nothing.
@@ -286,12 +286,19 @@ class Message:
     @property
     def untrainable(self) -> bool:
         """An assistant turn no tokenization path may reward: an engine-cut fragment (``truncated``),
-        a turn whose every tool call named a nonexistent tool, was refused unrun or ran and showed nothing
+        a turn whose every tool call named a nonexistent tool or was refused unrun
         (``calls_rejected``) or one that ended on nothing (``empty``). It stays in the render later turns
         condition on; its sampled ids train only under a negative advantage, so the runaway, the invented
         call or the empty stop takes the failure signal of an episode that fails and none of the credit of
         one that recovers."""
         return self.truncated or self.calls_rejected or self.empty
+
+    @property
+    def reasoning_capped(self) -> bool:
+        """The turn's counted reasoning reached the cap it ran under, so the engine closed it and what the turn
+        wrote after it was written past the cap."""
+        cap, sampled = self.thinking_cap, self.reasoning_tokens
+        return cap is not None and sampled is not None and sampled >= cap
 
     @classmethod
     def from_dict(cls, d: dict[str, Any]) -> "Message":
@@ -746,8 +753,8 @@ class BaseEnvironment(ABC):
         return message
 
     def _flag_calls_rejected(self, trajectory: Trajectory) -> None:
-        """Mark the turn just taken as one whose every call named a nonexistent tool, was refused unrun or
-        ran and showed nothing (:attr:`Message.calls_rejected`), so no tokenization path rewards it."""
+        """Mark the turn just taken as one whose every call named a nonexistent tool or was refused unrun
+        (:attr:`Message.calls_rejected`), so no tokenization path rewards it."""
         self._last_assistant_message(trajectory).calls_rejected = True
 
     def _truncate_observation(self, content: str, limit: int | None = None) -> str:
@@ -803,9 +810,7 @@ class BaseEnvironment(ABC):
         # (wherever a vLLM thinking cap can bind), never as a constant 0 that reads as "no cap binds".
         counted = [m for m in trajectory.messages if m.role == "assistant" and m.reasoning_tokens is not None]
         if counted:
-            metrics["episode/thinking_cap_turns"] = float(
-                sum(m.thinking_cap is not None and m.reasoning_tokens >= m.thinking_cap for m in counted)
-            )
+            metrics["episode/thinking_cap_turns"] = float(sum(m.reasoning_capped for m in counted))
         if OUTPUT_BUDGET_EXHAUSTED_KEY in trajectory.info:
             metrics["episode/output_budget_exhausted"] = 1.0 if trajectory.info[OUTPUT_BUDGET_EXHAUSTED_KEY] else 0.0
         metrics["episode/reasoning_cjk_rate"] = (

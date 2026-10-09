@@ -27,14 +27,7 @@ from src.environments.base import (
     require_magnitudes,
 )
 from src.environments.envs.protocols.native import NativeToolUseEnvironment
-from src.environments.envs.tasks.coding.comments import (
-    asserts,
-    comment_chars,
-    deliberation_cues,
-    reads_stdin,
-    reasoning_in_comments,
-    strip_comments,
-)
+from src.environments.envs.tasks.coding.comments import strip_comments
 from src.environments.envs.tasks.coding.grading import (
     DEFAULT_MAX_OUTPUT_SIZE,
     VERDICT_DETAIL_OUTCOME,
@@ -48,7 +41,6 @@ from src.environments.sandbox.base import (
     SANDBOX_DEFAULT_TIMEOUT,
     LanguageSpec,
     SandboxExecutor,
-    SandboxResult,
     require_language,
 )
 from src.environments.sandbox.repl import format_sandbox_repl_output
@@ -56,11 +48,9 @@ from src.environments.sandbox.resolve import resolve_sandbox, warn_if_unisolated
 from src.environments.tools.definitions import (
     NativeTool,
     NativeToolRegistry,
-    NativeToolResult,
     ToolArgumentError,
     ToolCallRefused,
     ToolParameter,
-    UninformativeReply,
 )
 
 logger = logging.getLogger(__name__)
@@ -83,26 +73,6 @@ SUBMIT_TOOL = "submit_solution"
 # Pass fraction of each graded submission, in order: what ``episode/resubmission_improved`` reads.
 SUBMISSION_PASS_FRACS_KEY = "submission_pass_fracs"
 NO_STDIN_NOTE = "(No stdin was passed to this run; if the program reads input, pass it in the `stdin` argument.)"
-# The most an input-less run of a program that reads input may print and still have shown the model nothing: one
-# token, no whitespace inside it, no wider than the widest 64-bit integer (``-9223372036854775808``), room for what a
-# program that parsed nothing prints (a default answer such as ``0``, ``No`` or ``-1``, a ``None``, an uninitialized
-# value). Words, a list or a labelled value (``All tests passed``, ``[3, 1, 2]``, ``N=7 count: 5586``) show something.
-TRIVIAL_OUTPUT_CHARS = 20
-# Scratchpad runs given no input that showed nothing (:func:`_input_less_run_showed_nothing`,
-# ``episode/starved_test_runs``), and the turns flagged untrainable for holding one beside nothing but refused or
-# unknown calls (``episode/starved_turns``).
-STARVED_TEST_RUNS_KEY = "starved_test_runs"
-STARVED_TURNS_KEY = "starved_turns"
-# Programs refused for carrying the reasoning in their comments (``episode/reasoning_in_comments_calls``),
-# and the comment and code characters of every program a call carried (``episode/code_comment_share``).
-REASONING_IN_COMMENTS_KEY = "reasoning_in_comments_calls"
-COMMENT_CHARS_KEY = "comment_chars"
-CODE_CHARS_KEY = "code_chars"
-# The refusal of a program whose comments carry its reasoning (:mod:`.comments`): the fact and what to do.
-REASONING_IN_COMMENTS_REPLY = (
-    "Not {verb}: the program's comments carry your reasoning. Keep the reasoning in your thinking and send the "
-    "program again with documentation comments only."
-)
 # Follows a scratchpad timeout, whose limit is the one this problem's graded tests run under.
 SCRATCHPAD_TIME_LIMIT_NOTE = "(the per-test time limit this problem is graded at)"
 # The refusals of a call past the episode's budget for the tool: the fact and what to do, never the
@@ -219,21 +189,6 @@ def evident_language(code: str, language: str, offered: Sequence[str]) -> str | 
     ):
         return "python"
     return None
-
-
-def _input_less_run_showed_nothing(code: str, language: str, result: SandboxResult) -> bool:
-    """Whether a run of ``code`` given no input showed the model nothing to act on. Only a clean exit (no
-    timeout, return code 0) can, its reply being its stdout alone: for a program that reads the run's input
-    (:func:`reads_stdin`), stdout empty or one token of at most :data:`TRIVIAL_OUTPUT_CHARS`, output computed
-    from nothing; for one that reads none or supplies its own, stdout empty and no assertion in the code
-    (:func:`asserts`), a draft whose code never ran. A self-check passes by asserting or printing, so a silent
-    one that does neither shows nothing either."""
-    if result.timed_out or result.returncode not in (0, None):
-        return False
-    stdout = result.stdout.strip()
-    if reads_stdin(code, language):
-        return len(stdout.split()) <= 1 and len(stdout) <= TRIVIAL_OUTPUT_CHARS
-    return not stdout and not asserts(code, language)
 
 
 class CodeContestsEnvironment(NativeToolUseEnvironment):
@@ -589,29 +544,6 @@ class CodeContestsEnvironment(NativeToolUseEnvironment):
         verb, spent = ("run", "scratchpad run") if tool == self.test_tool_name else ("graded", "submission")
         return MISLABELLED_LANGUAGE_REPLY.format(verb=verb, evident=evident, language=language, spent=spent)
 
-    def _refuse_reasoning_in_comments(
-        self, code: str, language: str, tool: str, trajectory: Trajectory | None
-    ) -> None:
-        """Refuse a program whose comments carry its reasoning (:func:`reasoning_in_comments` on its
-        :func:`comment_chars` and :func:`deliberation_cues`) unrun, the call returned to the budget: it costs
-        the turn and the protocol's error price, never a run or a submission, and a turn of nothing else is
-        flagged untrainable (:class:`ToolCallRefused`). Records every program's comment and code characters
-        first, the guard's own signal. The thinking cap bounds the reasoning channel alone and no reasoning
-        term counts a call's arguments, so a turn the cap closes could carry its thought on in a program's
-        comments; this reads them."""
-        comments, rest = comment_chars(code, language)
-        if trajectory is not None:
-            trajectory.info[COMMENT_CHARS_KEY] = trajectory.info.get(COMMENT_CHARS_KEY, 0) + comments
-            trajectory.info[CODE_CHARS_KEY] = trajectory.info.get(CODE_CHARS_KEY, 0) + rest
-        if not reasoning_in_comments(comments, rest, lambda: deliberation_cues(code, language)):
-            return
-        if trajectory is not None:
-            self._uncount_tool_call(trajectory, tool)
-            trajectory.info[REASONING_IN_COMMENTS_KEY] = trajectory.info.get(REASONING_IN_COMMENTS_KEY, 0) + 1
-        raise ToolCallRefused(
-            REASONING_IN_COMMENTS_REPLY.format(verb="run" if tool == self.test_tool_name else "graded")
-        )
-
     def _fit_observation(self, output: str, notes: list[str]) -> str:
         """``output`` with ``notes`` on lines after it, the output cut when the whole would pass the
         protocol's observation cap (``max_observation_chars``), which cuts from the end, so the notes stay whole."""
@@ -633,7 +565,6 @@ class CodeContestsEnvironment(NativeToolUseEnvironment):
         refusal = self._refuse_mislabelled(code, language, self.test_tool_name, trajectory)
         if refusal is not None:
             return refusal
-        self._refuse_reasoning_in_comments(code, language, self.test_tool_name, trajectory)
         if trajectory is not None:
             self._note_language(trajectory, language)
         stated = trajectory.info.get("_time_limit") if trajectory is not None else None
@@ -643,17 +574,11 @@ class CodeContestsEnvironment(NativeToolUseEnvironment):
         if result.timed_out:
             output += f" {SCRATCHPAD_TIME_LIMIT_NOTE}"
         notes = []
-        starved = False
         # A run on no input (whitespace is none) says so, since neither the parse error of a program that reads
         # input nor output computed from nothing names the cause; a build failure ran nothing.
         if not stdin.strip() and not result.compile_failed and not host_build_error(code, language, self.sandbox):
             notes.append(NO_STDIN_NOTE)
-            starved = _input_less_run_showed_nothing(code, language, result)
-            if starved and trajectory is not None:
-                trajectory.info[STARVED_TEST_RUNS_KEY] = trajectory.info.get(STARVED_TEST_RUNS_KEY, 0) + 1
-        reply = self._fit_observation(output, notes)
-        # Spent all the same: a turn of nothing else is flagged, so it cannot buy the next turn a full cap.
-        return UninformativeReply(reply) if starved else reply
+        return self._fit_observation(output, notes)
 
     def _submit(self, code: str, language: str | None = None) -> str:
         """Grade a submission against the active episode's tests in ``language`` (the run's, or the
@@ -671,7 +596,6 @@ class CodeContestsEnvironment(NativeToolUseEnvironment):
             # grading another program could only replace the solve.
             self._refund_tool_call(trajectory, SUBMIT_TOOL)
             return SUBMISSION_AFTER_ACCEPT_REPLY
-        self._refuse_reasoning_in_comments(code, language, SUBMIT_TOOL, trajectory)
         self._refuse_identical_resubmission(code, language, trajectory)
         self._note_language(trajectory, language)
 
@@ -711,13 +635,6 @@ class CodeContestsEnvironment(NativeToolUseEnvironment):
     def _accepted(info: dict[str, Any]) -> bool:
         """Whether the last graded submission passed every hidden test."""
         return "submission_result" in info and 0 < info.get("tests_total", 0) == info.get("tests_passed", 0)
-
-    def _record_tool_interaction(self, results: list[NativeToolResult], trajectory: Trajectory) -> dict[str, Any]:
-        """The protocol's record, counting a turn it flagged that held a starved run (``episode/starved_turns``)."""
-        info = super()._record_tool_interaction(results, trajectory)
-        if any(r.uninformative for r in results) and self._last_assistant_message(trajectory).calls_rejected:
-            trajectory.info[STARVED_TURNS_KEY] = trajectory.info.get(STARVED_TURNS_KEY, 0) + 1
-        return info
 
     def _step_single(
         self, trajectory: Trajectory, action: str, context: dict[str, Any] | None = None
@@ -909,13 +826,7 @@ class CodeContestsEnvironment(NativeToolUseEnvironment):
         submissions = self._submissions(trajectory)
         metrics["episode/submission_rate"] = 1.0 if submissions > 0 else 0.0
         metrics["episode/test_calls"] = float(self._test_calls(trajectory))
-        metrics["episode/starved_test_runs"] = float(info.get(STARVED_TEST_RUNS_KEY, 0))
-        metrics["episode/starved_turns"] = float(info.get(STARVED_TURNS_KEY, 0))
-        metrics["episode/reasoning_in_comments_calls"] = float(info.get(REASONING_IN_COMMENTS_KEY, 0))
         metrics["episode/identical_resubmissions"] = float(info.get(IDENTICAL_RESUBMISSIONS_KEY, 0))
-        program_chars = info.get(COMMENT_CHARS_KEY, 0) + info.get(CODE_CHARS_KEY, 0)
-        if program_chars:
-            metrics["episode/code_comment_share"] = info.get(COMMENT_CHARS_KEY, 0) / program_chars
         if submissions > 0:
             # Mean over submitting episodes: the share that ran the scratchpad before submitting.
             metrics["episode/tested_before_submission"] = 1.0 if info.get("tested_before_submission") else 0.0

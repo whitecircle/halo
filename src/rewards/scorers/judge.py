@@ -1,12 +1,13 @@
 """A generative judge: an OpenAI-compatible chat model reads the task and one view of the episode
 and answers with one JSON verdict — integer scores per requirement, or per check whether it fires
-and the verbatim span of the policy's actions that shows it."""
+and the line of the policy's actions that shows it."""
 
 import json
 import math
 import re
 from collections.abc import Mapping
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
+from difflib import SequenceMatcher
 from typing import Any
 
 from openai import AsyncOpenAI
@@ -20,7 +21,15 @@ from src.inference.openai_client import (
     parse_json_object,
 )
 from src.inference.response import get_finish_reason
-from src.rewards.samples import CUT_CALLS_KEY, ScoringSample, cut_middle, render_tools, task_text, view_text
+from src.rewards.samples import (
+    ScoringSample,
+    cut_middle,
+    render_actions,
+    render_tools,
+    system_text,
+    task_text,
+    view_text,
+)
 from src.rewards.scorers.base import Scorer, ScoreResult
 from src.rewards.terms import JudgeMetric, JudgeTerm, View
 
@@ -30,11 +39,21 @@ SYSTEM_PROMPT = (
     "shown, is context for understanding what it did, not something to grade. Reply with the requested "
     "JSON object and nothing else."
 )
-VIEW_HEADINGS = {View.FINAL: "Final answer", View.FULL: "Transcript", View.DIGEST: "Transcript digest"}
+# Each part of the prompt goes between tags of its own: a task's markdown headings and a program's comments would
+# read as the prompt's own sections under markdown ones.
+VIEW_TAGS = {View.FINAL: "final_answer", View.FULL: "transcript", View.DIGEST: "transcript_digest"}
+PART_TAGS = ("setting", "policy_instructions", "task", "policy_tools", "reference_answer", *VIEW_TAGS.values())
+# A part's own text that spells one of the tags (a program printing ``</transcript>``) must not close it early.
+_PART_TAG = re.compile(rf"<(/?(?:{'|'.join(PART_TAGS)})>)")
 # A quote longer than this is a copy of the response, not evidence of one span in it.
 MAX_EVIDENCE_CHARS = 400
 # How much of a reply an error result quotes.
 REPLY_EXCERPT_CHARS = 200
+# A judge copying a line out of a long program slips a word now and then (a synonym, a capital, a word dropped); a
+# quote is still evidence when all but this share of its words — one word at least — run in order at one place in
+# the actions, case aside. A quote shorter than the minimum must match whole.
+EVIDENCE_SLIP_SHARE = 0.2
+EVIDENCE_MIN_SLIP_WORDS = 4
 
 _WHITESPACE = re.compile(r"\s+")
 
@@ -84,32 +103,42 @@ def _object_of(properties: dict[str, Any]) -> dict[str, Any]:
 
 
 def grading_prompt(term: JudgeTerm, sample: ScoringSample) -> str:
-    """The user turn the judge grades from: the task, the policy's tools, the reference, the view of
-    the episode, the rubric and the reply shape."""
+    """The user turn the judge grades from: the setting the term describes, the instructions and task the
+    policy was given, its tools, the reference, the view of the episode, the rubric and the reply shape."""
     response = view_text(sample, term.view, include_reasoning=term.include_reasoning, max_chars=term.max_view_chars)
-    parts = [f"# Task\n{task_text(sample.prompt) or '(no task text)'}"]
+    parts = [_tagged("setting", term.context.strip())] if term.context else []
+    instructions = system_text(sample.prompt)
+    if instructions:
+        parts.append(_tagged("policy_instructions", instructions))
+    parts.append(_tagged("task", task_text(sample.prompt) or "(no task text)"))
     if sample.tools:
-        parts.append(f"# Tools the policy could call\n{render_tools(sample.tools)}")
+        parts.append(_tagged("policy_tools", render_tools(sample.tools)))
     if term.include_reference and sample.reference is not None:
         reference = (
             sample.reference if isinstance(sample.reference, str) else json.dumps(sample.reference, ensure_ascii=False)
         )
-        parts.append(f"# Reference answer\n{cut_middle(reference, term.max_view_chars)}")
-    parts.append(f"# {VIEW_HEADINGS[term.view]}\n{response or '(empty response)'}")
+        parts.append(_tagged("reference_answer", cut_middle(reference, term.max_view_chars)))
+    view = VIEW_TAGS[term.view]
+    parts.append(_tagged(view, response or "(empty response)"))
     if term.is_veto:
         rubric = "\n".join(f"{i}. {check.name}: {check.description}" for i, check in enumerate(term.checks, 1))
         parts.append(
-            "# Checks\nFor each check, decide whether the episode above shows it. A check fires only on evidence "
-            "you can quote verbatim from the policy's actions above — its visible text, a tool call's arguments or "
-            "a tool result, never its reasoning, which is not an action: give the exact span (a sentence or a line, "
-            "not the whole text) as its evidence, or an empty string when it does not fire.\n" + rubric
+            f"# Checks\nFor each check, decide whether the episode in <{view}> shows it. Read the reasoning to understand "
+            "what the policy did and why, but a check fires only on evidence you can quote verbatim from the "
+            "policy's actions in it — its visible text, a tool call's arguments (a call the engine cut before it ran "
+            "included) or a tool result, never its reasoning, which is not an action. Give as its evidence one line of "
+            "that text copied character for character — not paraphrased, shortened or described — or an empty "
+            "string when it does not fire.\n" + rubric
         )
     else:
         rubric = "\n".join(f"{i}. {r.name}: {r.description}" for i, r in enumerate(term.requirements, 1))
-        parts.append(f"# Requirements\nScore each requirement from 0 (not met) to {term.scale} (fully met).\n{rubric}")
+        parts.append(
+            f"# Requirements\nScore the episode in <{view}> on each requirement from 0 (not met) to {term.scale} "
+            f"(fully met).\n{rubric}"
+        )
     if term.is_veto:
         keys = ", ".join(
-            f'"{check.name}": {{"fired": <true|false>, "evidence": "<verbatim quote or empty>"}}'
+            f'"{check.name}": {{"fired": <true|false>, "evidence": "<one line copied exactly, or empty>"}}'
             for check in term.checks
         )
         parts.append(f'Reply with one JSON object: {{"checks": {{{keys}}}, "rationale": "<one or two sentences>"}}')
@@ -119,15 +148,16 @@ def grading_prompt(term: JudgeTerm, sample: ScoringSample) -> str:
     return "\n\n".join(parts)
 
 
+def _tagged(tag: str, text: str) -> str:
+    return f"<{tag}>\n{_PART_TAG.sub(r'&lt;\1', text)}\n</{tag}>"
+
+
 def action_text(term: JudgeTerm, sample: ScoringSample) -> str:
-    """What a quoted piece of evidence must come from: the view the judge read, less the policy's
-    reasoning and the calls a cut turn never ran (:data:`~src.rewards.samples.CUT_CALLS_KEY`), which the view
-    shows as context — a check is raised on what the policy did, never on a call that did nothing or on a
-    thought, or the policy learns to hide its reasoning rather than to act well."""
-    acted = [{key: value for key, value in message.items() if key != CUT_CALLS_KEY} for message in sample.completion]
-    return view_text(
-        replace(sample, completion=acted), term.view, include_reasoning=False, max_chars=term.max_view_chars
-    )
+    """What a quoted piece of evidence must come from (:func:`~src.rewards.samples.render_actions`): what the policy
+    wrote as its actions (a call the engine cut while it was being written included) and the results it received,
+    never its reasoning, which the view shows so the judge understands the episode — a check raised on a thought
+    teaches the policy to hide its reasoning rather than to act well — nor the environment's own notes."""
+    return render_actions(sample, term.view, max_chars=term.max_view_chars)
 
 
 def parse_verdict(content: str, term: JudgeTerm) -> Verdict | None:
@@ -170,10 +200,34 @@ def parse_verdict(content: str, term: JudgeTerm) -> Verdict | None:
 
 
 def evidence_supported(evidence: str, text: str) -> bool:
-    """Whether ``evidence`` is a verbatim span of ``text`` — whitespace folded, since a model reflows
-    what it quotes — and short enough to be a span rather than a copy of the text."""
+    """Whether ``evidence`` is a span of ``text`` — whitespace folded, since a model reflows what it quotes, and
+    case aside with a slipped word or so (:data:`EVIDENCE_SLIP_SHARE`), since it slips one copying a long program —
+    and short enough to be a span rather than a copy of the text."""
     quote = _WHITESPACE.sub(" ", evidence).strip()
-    return 0 < len(quote) <= MAX_EVIDENCE_CHARS and quote in _WHITESPACE.sub(" ", text)
+    if not 0 < len(quote) <= MAX_EVIDENCE_CHARS:
+        return False
+    flat = _WHITESPACE.sub(" ", text)
+    if quote in flat:
+        return True
+    words, haystack = quote.lower().split(" "), flat.lower().split(" ")
+    if len(words) < EVIDENCE_MIN_SLIP_WORDS:
+        return False
+    anchor = SequenceMatcher(None, haystack, words, autojunk=False).find_longest_match(0, len(haystack), 0, len(words))
+    if not anchor.size:
+        return False
+    # The words around the longest run, with room for the words a slip added or dropped.
+    slack = max(2, len(words) // 10)
+    start = max(0, anchor.a - anchor.b - slack)
+    window = haystack[start : anchor.a - anchor.b + len(words) + slack]
+    blocks = [
+        block for block in SequenceMatcher(None, window, words, autojunk=False).get_matching_blocks() if block.size
+    ]
+    slips = max(1, int(EVIDENCE_SLIP_SHARE * len(words)))
+    # The matched words must also sit together, and a slip falls inside the quote: the same words strewn among
+    # others are not the line quoted, and words added at either end may be the reasoning's, not the action's.
+    spread = blocks[-1].a + blocks[-1].size - blocks[0].a
+    anchored = blocks[0].b == 0 and blocks[-1].b + blocks[-1].size == len(words)
+    return anchored and len(words) - sum(block.size for block in blocks) <= slips and spread <= len(words) + slips
 
 
 class GenerativeJudge(Scorer):

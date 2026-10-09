@@ -116,12 +116,10 @@ Three decisions matter more than the rest.
   The engine enforces both turn by turn and never tells the model, and an episode left without room for
   another turn ends truncated. The trajectory itself is never cut: a row longer than the context window fails the
   step. Watch `episode/turns`: pinned at the cap, raise it; far below, lower it, since turns are sequential and set
-  step time. A turn cut at its cap, an empty turn, or one whose every call names a tool that does not exist, is
-  refused unrun (arguments that do not bind, a spent tool budget; code contests also refuses a program whose comments
-  carry its reasoning and a resubmission identical to one already graded) or showed nothing (a code-contests
-  scratchpad run given no input that printed nothing or, from a program that reads input, a lone token like `0`; a
-  silent self-test that asserts is not one) is never rewarded: it trains only as a penalty, when its episode scored
-  below the group's mean
+  step time. A turn cut at its cap, an empty turn, or one whose every call names a tool that does not exist or is
+  refused unrun (arguments that do not bind, a spent tool budget; code contests also refuses a resubmission identical
+  to one already graded) is never rewarded: it trains only as a penalty, when its episode scored below the group's
+  mean
   ([Objective](../../agent-docs/training-methods/grpo/async-grpo/objective.md#untrainable-turns) ↗).
 - **Reasoning effort.** `environment_kwargs.reasoning_effort` (`low` / `medium` / `high` / `random`) sets how much the
   model should think, and `reasoning_effort_profiles` gives each level its own caps, as the code-contests recipes do

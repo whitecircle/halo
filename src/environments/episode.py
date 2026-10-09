@@ -167,7 +167,7 @@ def bind_episode_effort(
 
 def recovering_turn(trajectory: Trajectory | None) -> bool:
     """Whether the turn about to start retries an unproductive one: the episode's last assistant turn
-    is untrainable — cut by the engine, ended on nothing, or every call unknown, refused or uninformative — and the
+    is untrainable — cut by the engine, ended on nothing, or every call unknown or refused — and the
     environment has answered it (the nudge, or the refusals' tool replies)."""
     messages = trajectory.messages if trajectory is not None else []
     last = next((m for m in reversed(messages) if m.role == "assistant"), None)

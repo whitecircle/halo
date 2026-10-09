@@ -366,7 +366,7 @@ def test_the_sample_carries_the_turns_with_their_reasoning_and_flags():
 
 def test_the_judge_reads_the_call_a_cut_turn_was_writing_and_no_other_turn_carries_one():
     """The driver's salvage of a turn cut inside its call reaches the judge through the sample, marked as
-    never run in the views that render calls, as context a check can never quote (it did nothing), and absent
+    never run in the views that render calls, as an action a check can quote (the policy wrote it), and absent
     from the final view; the turns around it carry no cut calls."""
     env = _native(max_turns=3)
     ids, _ = env.reset(["What is 2+2?"], [{"answer": "4"}])
@@ -388,10 +388,25 @@ def test_the_judge_reads_the_call_a_cut_turn_was_writing_and_no_other_turn_carri
         term = JudgeTerm.from_config({**veto, "view": view})
         assert head in grading_prompt(term, sample) and code in grading_prompt(term, sample)
         actions = action_text(term, sample)
-        assert code not in actions and CUT_CALL_NOTE not in actions, "a veto never quotes a call that never ran"
+        assert code in actions and CUT_CALL_NOTE not in actions, "a check may quote the call the policy was writing"
         assert "Computing" in actions and "It is 4" in actions
     final_view = JudgeTerm.from_config({key: value for key, value in JUDGE.items() if key != "source"})
     assert final_view.view == "final" and head not in grading_prompt(final_view, sample)
+
+
+def test_a_turn_whose_reasoning_ran_to_its_cap_is_marked_for_the_judge():
+    """A turn whose counted reasoning reached the cap it ran under carries the mark a judge reads — what it
+    wrote came after the engine closed its reasoning — and a turn under its cap, or with no count, carries none."""
+    env = _native(max_turns=4)
+    ids, _ = env.reset(["What is 2+2?"], [{"answer": "4"}])
+    cut = {"answer": "4", "finish_reason": "length", "thinking_cap": 100}
+    env.step(ids, ["calculating"], [{**cut, "reasoning": "two", "reasoning_tokens": 100}])
+    env.step(ids, ["again"], [{**cut, "reasoning": "and two", "reasoning_tokens": 99}])
+    env.step(ids, ["It is 4"], [{"answer": "4", "finish_reason": "stop", "reasoning": "so four"}])
+    trajectory = env.get_trajectories(ids)[0]
+    assert [m.reasoning_capped for m in trajectory.messages if m.role == "assistant"] == [True, False, False]
+    capped, under, final = (m for m in env._scoring_sample(trajectory).completion if m["role"] == "assistant")
+    assert capped["reasoning_capped"] is True and "reasoning_capped" not in under and "reasoning_capped" not in final
 
 
 def test_a_tool_less_environment_hands_the_scorer_no_tools():

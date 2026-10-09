@@ -30,16 +30,11 @@ from src.environments.base import (
     Trajectory,
     engine_view,
 )
-from src.environments.envs.protocols.native import AsyncNativeToolUseEnvironment, NativeToolUseEnvironment
+from src.environments.envs.protocols.native import NativeToolUseEnvironment
 from src.environments.envs.protocols.react import ReActEnvironment
 from src.environments.envs.tasks.qa import ExamQAEnvironment
-from src.environments.episode import TurnGeneration, recovering_turn, step_context_from_generation
-from src.environments.tools.definitions import (
-    NativeTool,
-    NativeToolRegistry,
-    ToolParameter,
-    UninformativeReply,
-)
+from src.environments.episode import TurnGeneration, step_context_from_generation
+from src.environments.tools.definitions import NativeTool, NativeToolRegistry, ToolParameter
 from src.inference.response import ENGINE_CUT_FINISH_REASONS, FINISH_REASON_LENGTH
 from src.trainers.grpo.environmental import BatchBuildFence, DistributedAsyncEnvironmentalGRPOTrainer
 
@@ -507,33 +502,6 @@ def test_partially_valid_turn_is_not_flagged():
     env.step([eid], ["calling"], [{"finish_reason": "stop", "tool_calls": calls}])
     asst = [m for m in env.get_trajectories([eid])[0].messages if m.role == "assistant"][-1]
     assert asst.calls_rejected is False
-
-
-async def _blank_async() -> UninformativeReply:
-    return UninformativeReply("nothing")
-
-
-async def test_a_turn_of_uninformative_replies_is_flagged_under_the_async_protocol():
-    """A reply its handler marks :class:`UninformativeReply` is a spent call that showed nothing: a turn of
-    nothing else — a sync handler run in a thread, an async one — is flagged like a turn of unknown calls and
-    the next one recovers, the observation the reply's plain text; a real reply beside it keeps the turn."""
-    registry = _echo_registry()
-    registry.register(
-        NativeTool(name="blank", description="blank", parameters=[], handler=lambda: UninformativeReply("nothing"))
-    )
-    registry.register(NativeTool(name="blank_async", description="blank", parameters=[], async_handler=_blank_async))
-    env = AsyncNativeToolUseEnvironment(tool_registry=registry, max_turns=4)
-    ids, _ = await env.reset_async(["task"], [{}])
-    blanks = [{"id": name, "function": {"name": name, "arguments": "{}"}} for name in ("blank", "blank_async")]
-    await env.step_async(ids, ["calling"], [{"finish_reason": "stop", "tool_calls": blanks}])
-    traj = env.get_trajectories(ids)[0]
-    assert [m.content for m in traj.messages[-2:]] == ["nothing", "nothing"]
-    assert all(type(m.content) is str for m in traj.messages[-2:])
-    assert traj.info["successful_tool_calls"] == 2 and recovering_turn(traj)
-    echo = {"id": "c2", "function": {"name": "echo", "arguments": '{"text": "hi"}'}}
-    await env.step_async(ids, ["calling"], [{"finish_reason": "stop", "tool_calls": [blanks[0], echo]}])
-    flags = [m.calls_rejected for m in env.get_trajectories(ids)[0].messages if m.role == "assistant"]
-    assert flags == [True, False]
 
 
 def test_a_tools_own_not_found_message_is_not_a_model_rejection():

@@ -587,6 +587,83 @@ async def test_a_call_cut_at_the_cap_reaches_the_env_as_a_cut_call_on_either_eng
     assert ctx[CUT_TOOL_CALLS_KEY] == [_PARTIAL_CALL] and "tool_calls" not in ctx
 
 
+class _FakeEngineSession(_FakeChatCompletionsSession):
+    """Serves the canned completion and vLLM's ``/detokenize``, recording the ids each decode asked for."""
+
+    def __init__(self, body: dict, *, decoded: str = "", decode_status: int = 200):
+        super().__init__(body)
+        self._decoded, self._decode_status, self._url = decoded, decode_status, ""
+        self.decoded: list[list[int]] = []
+
+    def post(self, url, json):  # noqa: A002 — aiohttp's own keyword
+        self._url = url
+        if url.endswith("/detokenize"):
+            self.decoded.append(json["tokens"])
+        return self
+
+    async def __aenter__(self):
+        if self._url.endswith("/detokenize"):
+            return SimpleNamespace(status=self._decode_status, json=self._decode, text=self._text)
+        return await super().__aenter__()
+
+    async def _decode(self):
+        return {"prompt": self._decoded}
+
+
+_END = 99
+_CUT_IDS = [11, _END, 12, _END, 21, 22, 23]
+# The same ids where SGLang reports them, ``[logprob, id, text]`` per sampled token.
+_SGLANG_CUT_META = {"output_token_logprobs": [[-0.1, i, f"t{i}"] for i in _CUT_IDS]}
+_WRITTEN = "<tool_call>\n<function=calculate>\n<parameter=expression>\n1+ # still reasoning, so let me"
+
+
+def _cut_turn_body(backend_choice: dict) -> dict:
+    logprobs = {"content": [{"token": f"token_id:{i}", "logprob": -0.1} for i in _CUT_IDS]}
+    message = {"content": "", "tool_calls": [_PARTIAL_CALL]}
+    return {
+        "choices": [{"message": message, "logprobs": logprobs, **backend_choice}],
+        "usage": {"completion_tokens": len(_CUT_IDS)},
+    }
+
+
+async def test_a_call_cut_at_the_cap_reaches_the_judge_as_the_policy_wrote_it():
+    """vLLM's parser keeps only the name and the closed arguments of a call cut at the cap; the turn's ids past its
+    reasoning close are decoded and travel as that cut call's arguments, so the judge reads the whole call."""
+    actor = _make_actor("native_math")
+    session = _FakeEngineSession(_cut_turn_body({"finish_reason": "tool_calls"}), decoded=_WRITTEN)
+    config = RolloutConfig(
+        max_retries=0, max_tokens=len(_CUT_IDS), capture_token_ids=True, reasoning_end_token_id=_END
+    )
+    generation = await actor._generate(session, "server:8000", [{"role": "user", "content": "2+2?"}], config)
+
+    assert session.decoded == [[21, 22, 23]], "only the ids past the last reasoning close are decoded"
+    written = {**_PARTIAL_CALL, "function": {"name": "calculate", "arguments": _WRITTEN}}
+    assert step_context_from_generation(None, generation)[CUT_TOOL_CALLS_KEY] == [written]
+
+
+@pytest.mark.parametrize(
+    ("backend", "choice", "decode_status", "end"),
+    [
+        ("vllm", {"finish_reason": "tool_calls"}, 500, _END),
+        ("vllm", {"finish_reason": "tool_calls"}, 200, 7),
+        ("sglang", {"stop_reason": FINISH_REASON_LENGTH, "meta_info": _SGLANG_CUT_META}, 200, _END),
+    ],
+    ids=["decode-fails", "no-reasoning-close-in-the-ids", "sglang"],
+)
+async def test_a_cut_call_keeps_the_parsers_salvage_where_it_cannot_be_decoded(backend, choice, decode_status, end):
+    """A failed decode, ids holding no reasoning close, or SGLang (its ids captured, but the decode reads vLLM's
+    ``/detokenize`` answer) leave the salvaged call as it came, still booked as a cut call."""
+    actor = _make_actor("native_math")
+    session = _FakeEngineSession(_cut_turn_body(choice), decoded=_WRITTEN, decode_status=decode_status)
+    config = RolloutConfig(
+        backend=backend, max_retries=0, max_tokens=len(_CUT_IDS), capture_token_ids=True, reasoning_end_token_id=end
+    )
+    generation = await actor._generate(session, "server:8000", [{"role": "user", "content": "2+2?"}], config)
+
+    assert step_context_from_generation(None, generation)[CUT_TOOL_CALLS_KEY] == [_PARTIAL_CALL]
+    assert session.decoded == ([[21, 22, 23]] if decode_status != 200 else [])
+
+
 async def test_the_actor_keeps_a_cut_call_on_its_turn_without_running_or_resending_it():
     """Through the real episode loop: the call a turn was writing when its cap cut it lands on that turn's
     message, survives the pickle the Ray object store makes of the result, never runs, and is absent from

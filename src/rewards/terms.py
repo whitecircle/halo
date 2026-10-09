@@ -282,10 +282,12 @@ class JudgeTerm(ScoredTerm):
       reached defaults, from a config, to ``on_error: neutral``: no flag, and the exact grade stands.
 
     ``view`` selects what the judge reads: the final answer (``final``), every turn with its
-    reasoning, tool calls and results (``full``), or a compact digest of every turn (``digest``), each
-    cut to ``max_view_chars`` with the end kept. ``include_reference`` shows the row's reference answer
-    when the sample carries one; ``include_reasoning`` shows the policy's reasoning in the ``full`` and
-    ``digest`` views. The API key comes from the ``api_key_env`` variable, then the hosted chain
+    reasoning, tool calls and results (``full``, its reasoning cut first when over the limit), or a compact
+    digest of every turn (``digest``), each cut to ``max_view_chars`` with the end kept. ``context`` is what the
+    judge should know of the setting that the episode itself does not show (how the environment and its
+    limits work), read before the policy's own instructions and task. ``include_reference`` shows the row's
+    reference answer when the sample carries one; ``include_reasoning`` shows the policy's reasoning in the
+    ``full`` and ``digest`` views. The API key comes from the ``api_key_env`` variable, then the hosted chain
     (``OPENROUTER_API_KEY``, ``OPENAI_API_KEY``). ``reasoning_effort`` ``None`` sends no such field;
     ``temperature`` ``None`` keeps the served default, which reasoning models require.
     ``structured_output`` asks for the reply through a strict JSON schema; off, the reply is parsed as
@@ -303,6 +305,7 @@ class JudgeTerm(ScoredTerm):
     reasoning_effort: ReasoningEffort | None = ReasoningEffort.MEDIUM
     temperature: float | None = None
     max_tokens: int = 8192
+    context: str | None = None
     include_reference: bool = True
     include_reasoning: bool = True
     max_view_chars: int = 60_000
@@ -328,6 +331,8 @@ class JudgeTerm(ScoredTerm):
                 f"must be <= 0 (0 logs them unpriced), got {self.weight}"
             )
         _require_text(owner, model=self.model, base_url=self.base_url, api_key_env=self.api_key_env)
+        if self.context is not None:
+            _require_text(owner, context=self.context)
         require_positive_int(owner, scale=self.scale, max_tokens=self.max_tokens, max_view_chars=self.max_view_chars)
         if self.reasoning_effort is not None:
             _coerce_enum(self, "reasoning_effort", ReasoningEffort)

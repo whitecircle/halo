@@ -30,7 +30,6 @@ from src.environments.tools.definitions import (
     NativeToolResult,
     ToolBudgetExhausted,
     ToolDisabled,
-    UninformativeReply,
     refused_unrun,
 )
 from src.inference.response import ENGINE_CUT_FINISH_REASONS
@@ -92,8 +91,7 @@ def admit_tool_call(
 
 def tool_call_outcome(name: str, outcome: str | Exception) -> tuple[str, bool, SandboxFault | None]:
     """A call's observation as plain text, whether it succeeded, and the sandbox fault it ended on, from
-    what tool ``name`` returned or raised (admission included), under either protocol. A reply's marker
-    type (:class:`UninformativeReply`) is read off the outcome, never carried into the conversation.
+    what tool ``name`` returned or raised (admission included), under either protocol.
 
     A refusal (:data:`TOOL_CALL_REFUSALS`) is expected control flow, logged without a traceback: an env
     with a 2-submission cap in a 15-turn episode refuses by design.
@@ -243,17 +241,12 @@ class NativeToolUseEnvironment(BaseEnvironment):
             content=self._truncate_observation(content),
             success=success,
             refused=refused_unrun(outcome),
-            uninformative=isinstance(outcome, UninformativeReply),
             sandbox_fault=fault,
         )
 
     def _account_tool_result(self, result: NativeToolResult, trajectory: Trajectory) -> float:
-        """Book one result on the episode's counters and return its reward delta (the base's accounting). A call
-        that ran and showed nothing (``uninformative``) is booked as the call it was and also pays
-        ``tool_error_penalty``, a refused call's price: a turn of nothing else trains only on a negative
-        advantage, so unpriced, the episode's reward would carry nothing of the call beyond the solve it may cost."""
-        delta = self._book_tool_call(trajectory, result.name, result.success, result.sandbox_fault)
-        return delta - self.tool_error_penalty if result.uninformative else delta
+        """Book one result on the episode's counters and return its reward delta (the base's accounting)."""
+        return self._book_tool_call(trajectory, result.name, result.success, result.sandbox_fault)
 
     def _finalize_text_response(
         self, trajectory: Trajectory, action: str
@@ -312,12 +305,11 @@ class NativeToolUseEnvironment(BaseEnvironment):
         for result in results:
             trajectory.add_message(result.to_message())
 
-        # Nothing this turn did showed the model anything (an invented tool, a call refused unrun, a reply its
-        # handler marked uninformative): mark the assistant message so the trainer never rewards it and the
-        # next turn retries on the recovery reserve. Read off the flags, never the reply text — a tool whose
-        # backend answers "Tool not found: x" failed for real, and dropping that turn would hide a broken tool
-        # as a model mistake.
-        if results and all(r.unknown_tool or r.refused or r.uninformative for r in results):
+        # Nothing this turn could execute (an invented tool, a call refused unrun): mark the assistant message so
+        # the trainer never rewards it and the next turn retries on the recovery reserve. Read off the flags, never
+        # the reply text — a tool whose backend answers "Tool not found: x" failed for real, and dropping that turn
+        # would hide a broken tool as a model mistake.
+        if results and all(r.unknown_tool or r.refused for r in results):
             self._flag_calls_rejected(trajectory)
 
         # Executed calls (post per-turn cap), so this cannot disagree with total_tool_calls.
