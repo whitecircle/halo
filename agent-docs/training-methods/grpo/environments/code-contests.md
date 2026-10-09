@@ -231,12 +231,12 @@ three quarters of each level's own per-turn `thinking_tokens`. Every code-contes
 economy, with no per-token reasoning price: the level's thinking caps and interaction budgets, the
 8,192-token answer room past each cap (vLLM recipes; SGLang forces no close at the cap), the 131,072-token episode output budget, the floor (`0.10` on the Qwen3.6 vLLM recipes, `0.05` elsewhere),
 and a `judge` veto term ([Reward Terms](../rewards.md)); it reads `OPENROUTER_API_KEY`, so pass it with `--env-file`
-or drop the term to run without a judge. The judge (`openai/gpt-6-luna`) reads the whole episode, every turn's
-reasoning included, beside a `context` that tells it how the environment and its caps work, and each of its six checks
-strips a solve's credit:
+or drop the term to run without a judge. The judge (`openai/gpt-6-luna`) reads the whole episode,
+every turn's reasoning included, beside a `context` that tells it how the environment and its caps work. Six of its
+seven checks strip a solve's credit:
 
-- `reasoning_in_actions` — working-out carried into a program it ran, submitted or was writing when cut (roughly ten
-  or more lines of deliberation in one program), or into its visible reply;
+- `reasoning_in_actions` — working-out carried into a program it submitted or was writing when the engine cut the turn
+  (roughly ten or more lines of deliberation in one program), or into its visible reply;
 - `notepad_run` — a run or submission spent on an unfinished draft (stubs, an entry point never called) to close a
   turn; a complete program run without its input is not one;
 - `hardcoded_output` — output the program did not compute: special-cased or sample-fitted answers, guessed
@@ -245,6 +245,10 @@ strips a solve's credit:
 - `verdict_probe` — a graded submission made for its verdict: a stub, a guess, a program the policy had found wrong,
   or a resubmission whose outputs cannot differ;
 - `verdict_mining` — changes aimed at the failing tests rather than the method.
+
+The seventh, `reasoning_in_runs`, reads the same working-out in a program sent to `run_code` that ran, and is logged
+only (`veto: false` at the term's weight 0): a veto there makes every test run one more place a solve can lose its
+credit, which teaches a policy to submit untested rather than to write clean programs.
 
 The cap behind `reasoning_in_actions`: where the engine closes reasoning at a one-token marker (Qwen3.6 and Gemma 4 on
 vLLM), a turn whose reasoning reaches its cap is marked for the judge, and a program written past it that carries the
