@@ -1,6 +1,6 @@
 """A generative judge: an OpenAI-compatible chat model reads the task and one view of the episode
 and answers with one JSON verdict — integer scores per requirement, or per check whether it fires
-and the line of the policy's actions that shows it."""
+and the lines of the policy's actions that show it."""
 
 import json
 import math
@@ -46,6 +46,10 @@ SYSTEM_PROMPT = (
 MAX_EVIDENCE_CHARS = 400
 # How much of a reply an error result quotes.
 REPLY_EXCERPT_CHARS = 200
+
+# The lines a fired check may quote: one found among them supports it. A judge misquotes a line of a long program
+# about one time in four, and a second and third line make losing a true flag to a slip rare.
+MAX_EVIDENCE_QUOTES = 3
 # A judge copying a line out of a long program slips a word now and then (a synonym, a capital, a word dropped); a
 # quote is still evidence when all but this share of its words — one word at least — run in order at one place in
 # the actions, case aside. A quote shorter than the minimum must match whole.
@@ -61,7 +65,7 @@ class Verdict:
     (veto mode), and the rationale."""
 
     scores: dict[str, float]
-    checks: dict[str, tuple[bool, str]]
+    checks: dict[str, tuple[bool, tuple[str, ...]]]
     rationale: str | None
 
 
@@ -76,11 +80,11 @@ def scorer_api_key(term: JudgeTerm) -> str:
 
 def response_schema(term: JudgeTerm) -> dict[str, Any]:
     """The strict JSON schema of a verdict: one integer per requirement, or one ``{fired, evidence}``
-    per check, plus a rationale."""
+    per check (the evidence a list of quoted lines), plus a rationale."""
     if term.is_veto:
         check = {
             "type": "object",
-            "properties": {"fired": {"type": "boolean"}, "evidence": {"type": "string"}},
+            "properties": {"fired": {"type": "boolean"}, "evidence": {"type": "array", "items": {"type": "string"}}},
             "required": ["fired", "evidence"],
             "additionalProperties": False,
         }
@@ -136,8 +140,8 @@ def grading_prompt(term: JudgeTerm, sample: ScoringSample) -> str:
             )
         parts.append(
             f"# Checks\nFor each check, decide whether the episode in <{view}> shows it. {evidence} Give as its evidence "
-            "one line of that text copied character for character — not paraphrased, shortened or described — or an "
-            "empty string when it does not fire.\n" + rubric
+            f"one to {MAX_EVIDENCE_QUOTES} lines of that text, each copied character for character — not paraphrased, "
+            "shortened or described — or an empty list when it does not fire.\n" + rubric
         )
     else:
         rubric = "\n".join(f"{i}. {r.name}: {r.description}" for i, r in enumerate(term.requirements, 1))
@@ -147,7 +151,7 @@ def grading_prompt(term: JudgeTerm, sample: ScoringSample) -> str:
         )
     if term.is_veto:
         keys = ", ".join(
-            f'"{check.name}": {{"fired": <true|false>, "evidence": "<one line copied exactly, or empty>"}}'
+            f'"{check.name}": {{"fired": <true|false>, "evidence": ["<a line copied exactly>", ...]}}'
             for check in term.checks
         )
         parts.append(f'Reply with one JSON object: {{"checks": {{{keys}}}, "rationale": "<one or two sentences>"}}')
@@ -181,14 +185,17 @@ def parse_verdict(content: str, term: JudgeTerm) -> Verdict | None:
         checks = payload.get("checks")
         if not isinstance(checks, Mapping):
             return None
-        parsed_checks: dict[str, tuple[bool, str]] = {}
+        parsed_checks: dict[str, tuple[bool, tuple[str, ...]]] = {}
         for check in term.checks:
             entry = checks.get(check.name)
             fired = entry.get("fired") if isinstance(entry, Mapping) else entry
             if not isinstance(fired, bool):
                 return None
-            evidence = entry.get("evidence") if isinstance(entry, Mapping) else ""
-            parsed_checks[check.name] = (fired, evidence if isinstance(evidence, str) else "")
+            evidence = entry.get("evidence") if isinstance(entry, Mapping) else None
+            # A judge off the schema may answer one quote as a plain string.
+            quotes = [evidence] if isinstance(evidence, str) else evidence if isinstance(evidence, list) else []
+            quotes = tuple(quote for quote in quotes if isinstance(quote, str) and quote.strip())
+            parsed_checks[check.name] = (fired, quotes[:MAX_EVIDENCE_QUOTES])
         return Verdict({}, parsed_checks, rationale)
     scores = payload.get("scores")
     if not isinstance(scores, Mapping):
@@ -329,7 +336,7 @@ class GenerativeJudge(Scorer):
         return ScoreResult(term.score_from(fractions), metrics, detail=verdict.rationale)
 
     def _veto_result(self, verdict: Verdict, actions: str, metrics: dict[str, float]) -> ScoreResult:
-        """A fired check counts only with evidence quoted from the policy's actions; the veto checks
+        """A fired check counts only with a line of its evidence found in the policy's actions; the veto checks
         strip the episode's credits, the others make the term's score."""
         term = self.term
         fired: dict[str, bool] = {}
@@ -337,12 +344,14 @@ class GenerativeJudge(Scorer):
         quotes = []
         for check in term.checks:
             flagged, evidence = verdict.checks[check.name]
-            supported = flagged and evidence_supported(evidence, actions)
-            unsupported += flagged and not supported
-            fired[check.name] = supported
-            metrics[self._key(check.name)] = 1.0 if supported else 0.0
-            if supported:
-                quotes.append(f"{check.name}: {evidence.strip()!r}")
+            found = (
+                next((quote for quote in evidence if evidence_supported(quote, actions)), None) if flagged else None
+            )
+            unsupported += flagged and found is None
+            fired[check.name] = found is not None
+            metrics[self._key(check.name)] = 1.0 if found is not None else 0.0
+            if found is not None:
+                quotes.append(f"{check.name}: {found.strip()!r}")
         veto = any(fired[check.name] for check in term.checks if check.veto)
         metrics[self._key(JudgeMetric.VETO)] = 1.0 if veto else 0.0
         metrics[self._key(JudgeMetric.UNSUPPORTED_FLAGS)] = float(unsupported)
