@@ -1,4 +1,4 @@
-# Async GRPO with Environments training template — see agent-docs/training-methods/grpo/async-grpo/README.md.
+# Async GRPO with Environments training template — see agent-docs/training-methods/async-grpo/README.md.
 # Launch: start a vLLM server on the GPUs the trainer does not take, then
 #   torchrun --nproc_per_node=4 scripts/training/environmental_grpo.py <this config>
 
@@ -13,7 +13,7 @@ environment_type: react_math
 # Available: react_math, react_search, native_math, native_coding, native_combined,
 #            swe, codeforces, mcp, qa_search, code_contests, exam_qa
 max_turns: 10
-# --- Rewards (agent-docs/training-methods/grpo/rewards.md) ---
+# --- Rewards (agent-docs/training-methods/grpo/rewards/README.md) ---
 # A sum of terms, each weight x score^exponent over a score in [0, 1]; the environment's per-turn and
 # shaping terms add on top.
 rewards:
@@ -24,12 +24,12 @@ rewards:
   # judge needs OPENROUTER_API_KEY; reward_model needs a served BT model (vllm --runner pooling / sglang --is-embedding)
   # view: final | full | digest (judge only); on_error: invalid (the episode leaves the baseline) | neutral (the term scores 0)
 
-# --- Environment kwargs (per environment: agent-docs/training-methods/grpo/environments/README.md) ---
+# --- Environment kwargs (per environment: agent-docs/training-methods/async-grpo/environments/README.md) ---
 # environment_kwargs:
 #   timeout_per_test: 5          # code_contests / codeforces, seconds per test case
 #   search_backend: duckduckgo   # qa_search, open-book exam_qa
 #   reasoning_effort: null       # every environment: low / medium / high, or random (drawn once per generation group)
-# Shared kwargs: agent-docs/training-methods/grpo/environments/README.md; native-tool shaping: .../environments/native-tool-use.md
+# Shared kwargs: agent-docs/training-methods/async-grpo/environments/README.md; native-tool shaping: .../environments/protocols/native-tool-use.md
 
 # --- Ray Workers (AsyncTrainingConfig fields) ---
 num_rollout_workers: 16
@@ -63,15 +63,16 @@ rollout_top_p: 0.95
 # rollout_min_p: 0.0                  # 0 = off
 # rollout_repetition_penalty: 1.0     # 1 = off
 rollout_max_tokens: 8192
-# rollout_max_thinking_tokens: null   # per-turn reasoning-token cap; vLLM only. A level's thinking_tokens below it caps the turn instead
+# rollout_max_thinking_tokens: null   # per-turn reasoning-token cap; vLLM only. A level's enforced thinking_tokens below it caps the turn instead; under a soft one it is the ceiling (else rollout_max_tokens less rollout_max_answer_tokens)
 # rollout_max_episode_tokens: null    # the most an episode may sample over all its turns, reasoning and visible output together
 # rollout_chat_template_kwargs: {}    # chat-template variables sent with every rollout request
 # rollout_stop_tokens: []             # special-token strings that end a turn (e.g. gpt-oss "<|call|>")
 # train_on_sampled_tokens: true       # the engine's sampled token ids (vLLM needs --return-tokens-as-token-ids)
 # max_train_row_tokens: null          # longest training row a rank takes; null = no cap beyond the context check
 
-# --- Reasoning length economy (agent-docs/training-methods/grpo/async-grpo/rollouts.md#reasoning-length-reward) ---
+# --- Reasoning length economy (agent-docs/training-methods/async-grpo/reasoning.md#reasoning-length-reward) ---
 # reasoning_price: null              # per level, reward units per 1k reasoning tokens, e.g. {low: 0.0037, medium: 0.0013, high: 0.00018} (null = off)
+# reasoning_price_past_budget: false # price only what each turn reasons past its level's soft budget (a profile with enforce_thinking_cap: false)
 # reasoning_price_cap: 0.1           # that price's cap per episode, in reward units
 # reasoning_floor: 0.0               # weight of the under-use floor: an episode reasoning under 0.75x its level's per-turn budget pays up to it (0 = off)
 
@@ -101,14 +102,14 @@ scale_rewards: batch     # global batch std; a per-group std divides by ~0 on a 
 # drop_degenerate_groups: true      # mask GRPO groups whose completions all scored the same environment reward out of the loss
 # use_chunked_grpo_logprobs: false  # vocab-chunked log-probs instead of full [B, T, vocab] logits (large-vocab models on long completions)
 # routing_replay: none              # MoE routing replay: none, recompute (R2), or rollout (R3; needs a capture-capable server)
-# --- Advantage shaping (AdvantageShapingArguments; agent-docs/training-methods/grpo/async-grpo/objective.md#advantages) ---
+# --- Advantage shaping (AdvantageShapingArguments; agent-docs/training-methods/async-grpo/objective.md#advantages) ---
 # scale_rewards_std_floor: 0.0      # floor on the std divisor in advantage scaling; 0 = off
 # balance_token_mass: false         # cancel each round's net token-weighted push; needs loss_type: cispo, dapo or dr_grpo
-# --- IS trust region (engine<->trainer ratio; every knob: agent-docs/training-methods/grpo/async-grpo/objective.md#trust-region-masks) ---
+# --- IS trust region (engine<->trainer ratio; every knob: agent-docs/training-methods/async-grpo/objective.md#trust-region-masks) ---
 # isr_geo_band_min: null            # trajectory band on exp(mean log-ratio); arms only when both bounds are set
 # isr_geo_band_max: null
 # isr_veto_min: null                # any corrected token below this raw ratio masks its whole trajectory
-# --- Early stop (GRPOEarlyStopArguments; agent-docs/training-methods/grpo/async-grpo/monitoring.md#early-stop) ---
+# --- Early stop (GRPOEarlyStopArguments; agent-docs/training-methods/async-grpo/monitoring.md#early-stop) ---
 # early_stop_entropy_band: null     # [low, high]: stop once entropy is outside it on early_stop_patience readings in a row
 # early_stop_logratio_gap: null     # stop once |sampling/logratio_mean| stays above this (needs the IS correction)
 # early_stop_on_skipped_updates: false  # stop once the trust-region breaker skipped every update (needs skip_update_masked_frac)

@@ -34,7 +34,9 @@ def _scripted(actor, finish_reasons: list[str | None]):
     async def _client():
         return None
 
-    async def _generate(client, url, messages, config, reasoning_effort=None, reasoning_budget=None):
+    async def _generate(
+        client, url, messages, config, reasoning_effort=None, reasoning_budget=None, budget_soft=False
+    ):
         served.append(messages)
         reason = finish_reasons[len(served) - 1]
         if reason == FINISH_REASON_ABORT:

@@ -30,7 +30,7 @@ class EnvironmentConfig(RangeValidatedConfig):
             "environment's own grade, logged as reward/objective), 'judge' (a generative judge; model, requirements "
             "or checks, view, ...) and 'reward_model' (a served Bradley-Terry model; url, model, backend, ...). The "
             "environment's per-turn and shaping terms add on top. YAML-only; see "
-            "agent-docs/training-methods/grpo/rewards.md."
+            "agent-docs/training-methods/grpo/rewards/README.md."
         },
     )
 

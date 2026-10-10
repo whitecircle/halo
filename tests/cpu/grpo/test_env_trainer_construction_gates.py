@@ -282,7 +282,9 @@ def test_a_non_grading_environment_accepts_an_answer_less_dataset():
 def _level_host(budgets: dict, effort: str | None = "random", **config):
     host = object.__new__(DistributedAsyncEnvironmentalGRPOTrainer)
     host.async_config = AsyncTrainingConfig(**config)
-    host._rollout_env = types.SimpleNamespace(reasoning_effort=effort, thinking_budget_for_effort=budgets.get)
+    host._rollout_env = types.SimpleNamespace(
+        reasoning_effort=effort, thinking_budget_for_effort=budgets.get, thinking_budget_enforced=lambda level: True
+    )
     return host
 
 
@@ -350,10 +352,14 @@ class _Tokenizer:
         return list(self._encodings[text])
 
 
-def _close_host(budgets: dict, knows_close: bool = True, **config):
+def _close_host(budgets: dict, knows_close: bool = True, soft: tuple = (), **config):
     host = object.__new__(DistributedAsyncEnvironmentalGRPOTrainer)
     host.async_config = AsyncTrainingConfig(**config)
-    host._rollout_env = types.SimpleNamespace(reasoning_effort="random", thinking_budget_for_effort=budgets.get)
+    host._rollout_env = types.SimpleNamespace(
+        reasoning_effort="random",
+        thinking_budget_for_effort=budgets.get,
+        thinking_budget_enforced=lambda level: level not in soft,
+    )
     host._tokenizer = _Tokenizer(knows_close)
     return host
 
@@ -377,6 +383,20 @@ def test_no_forced_close_where_no_budget_can_be_enforced():
     the model itself emitted with certainty."""
     assert _close_host({"high": 16384}, rollout_backend=SGLANG_BACKEND)._resolve_forced_close_ids() is None
     assert _close_host({})._resolve_forced_close_ids() is None
+
+
+def test_a_soft_budget_still_forces_closes_at_its_ceiling_and_its_retries_reserve():
+    """A soft budget forces no close of its own, but its ceiling (where the answer room is left of the turn, or the
+    run's cap) does, and so does every retry's reserve, a hard cap at a quarter of the budget even with no ceiling."""
+    every = {"low": 8192, "medium": 12288, "high": 16384}
+    soft = ("low", "medium", "high")
+    assert _close_host(every, soft=soft)._resolve_forced_close_ids() == (_CLOSE_ID,), "the retry reserve binds"
+    room = _close_host(every, soft=soft, rollout_max_tokens=30000, rollout_max_answer_tokens=8192)
+    assert room._resolve_forced_close_ids() == (_CLOSE_ID,)
+    assert _close_host(every, soft=soft, rollout_max_thinking_tokens=21800)._resolve_forced_close_ids() == (_CLOSE_ID,)
+    assert _close_host(every, soft=("low",))._resolve_forced_close_ids() == (_CLOSE_ID,), (
+        "an enforced level still binds"
+    )
 
 
 def test_a_marker_the_tokenizer_does_not_write_warns_and_trains_on_the_forced_closes(caplog):

@@ -35,7 +35,7 @@ Examples:
 passed through with `--context_fields choices`) and an `answer` that is a letter A-J or a 0-based int
 index into `choices` (a raw `cais/mmlu` ships the index); any other answer, a digit string included,
 raises at episode start.
-Grading notes: `agent-docs/training-methods/grpo/environments/benchmarks.md`.
+Grading notes: `agent-docs/training-methods/async-grpo/environments/tasks/qa-benchmarks.md`.
 """
 
 import argparse

@@ -8,15 +8,17 @@ not attempting, at every effort level a solve paying every per-episode price bea
 zero-objective episode, and — per effort level — the under-use floor out-slopes the reasoning price, so
 below its floor a level is paid to reason more and never less.
 
-The length terms are the floor and, where a recipe runs one, the price; the most they can cost an
-episode is the price's cap plus the floor's weight. No shipped recipe runs a price, so its relations
-bind on a recipe that sets one, and a priced copy of a shipped recipe shows they refuse a bad one.
+The length terms are the floor and, where a recipe runs one, the price: on every token, or — on the recipes whose
+budgets are soft — only on what a turn reasons past its budget. The most they can cost an episode is the price's
+cap plus the floor's weight, or past a budget the larger of the two (an episode pays one at most: a turn past its
+budget leaves it above the floor's reference). No shipped recipe prices every token, so those relations bind on a
+recipe that does, and a priced copy of a shipped recipe shows they refuse a bad one.
 
 The episode output budget (``rollout_max_episode_tokens``) is the other relation: it has to bind below
 what ``max_turns`` turns of ``rollout_max_tokens`` could sample, or it bounds nothing; on vLLM the answer
-room (``rollout_max_answer_tokens``) has to bind below ``rollout_max_tokens`` at every level. And the per-turn
-thinking budgets are one contract at every family, so a recipe states the same reasoning economy
-whichever model it trains.
+room (``rollout_max_answer_tokens``) has to be what a turn keeps past the cap the engine enforces at every level
+(the level's budget, or under a soft one the ceiling that room leaves of the turn). And the per-turn thinking budgets are
+one contract at every family, so a recipe states the same reasoning economy whichever model it trains.
 
 Run: python tests/cpu/config/test_env_grpo_reward_economy.py  (or pytest)
 """
@@ -68,6 +70,7 @@ def _economy(path: Path) -> dict:
         ),
         # The floor's weight: the most it charges, an episode that reasoned nothing.
         "floor": cfg.get("reasoning_floor", _DEFAULTS.reasoning_floor),
+        "past_budget": cfg.get("reasoning_price_past_budget", _DEFAULTS.reasoning_price_past_budget),
         "ceiling": cfg.get("rollout_max_thinking_tokens"),
         "max_tokens": cfg.get("rollout_max_tokens", _DEFAULTS.rollout_max_tokens),
         "episode_tokens": cfg.get("rollout_max_episode_tokens"),
@@ -76,27 +79,42 @@ def _economy(path: Path) -> dict:
     }
 
 
-def _cap(economy: dict, level: str) -> int:
-    """The per-turn thinking cap a turn at ``level`` runs under: the level's budget (every recipe leaves
-    the run-wide cap unset, which another case pins)."""
+def _budget(economy: dict, level: str) -> int:
+    """The per-turn thinking budget of ``level``: what the template states and the floor reads."""
     return economy["profiles"][level]["thinking_tokens"]
+
+
+def _soft(economy: dict, level: str) -> bool:
+    return economy["profiles"][level].get("enforce_thinking_cap") is False
+
+
+def _cap(economy: dict, level: str) -> int | None:
+    """The per-turn reasoning cap the engine enforces at ``level``: the level's budget, or under a soft budget
+    the ceiling the answer room leaves of the turn — none on SGLang, which runs no answer bound and caps no
+    reasoning (every recipe leaves the run-wide cap unset, which another case pins)."""
+    if not _soft(economy, level):
+        return _budget(economy, level)
+    return None if economy["answer_tokens"] is None else economy["max_tokens"] - economy["answer_tokens"]
 
 
 def _floor_tokens(economy: dict, level: str) -> int:
     """The reasoning the floor asks of an episode at ``level``: its share of the level's per-turn budget."""
-    return round(REASONING_TARGET_SHARE * _cap(economy, level))
+    return round(REASONING_TARGET_SHARE * _budget(economy, level))
 
 
 def _worst_length(economy: dict) -> float:
-    """The most the length terms can cost an episode: the price's cap (0 with the price off) and the
-    floor's whole weight, an episode that reasoned nothing."""
+    """The most the length terms can cost an episode: the price's cap (0 with the price off) and the floor's
+    whole weight (an episode that reasoned nothing) — or, priced past a budget, the larger of the two."""
+    if economy["past_budget"]:
+        return max(economy["price_cap"], economy["floor"])
     return economy["price_cap"] + economy["floor"]
 
 
 def _price(economy: dict, level: str, tokens: int) -> float:
     if economy["price"] is None:
         return 0.0
-    return reasoning_price_term([tokens], economy["price"][level], economy["price_cap"])
+    budget = _budget(economy, level) if economy["past_budget"] else None
+    return reasoning_price_term([tokens], economy["price"][level], economy["price_cap"], budget)
 
 
 def _not_paid_to_reason_more(economy: dict, level: str) -> str | None:
@@ -105,8 +123,8 @@ def _not_paid_to_reason_more(economy: dict, level: str) -> str | None:
     leave it no slope above the floor."""
     full = _floor_tokens(economy, level)
     half = full // 2
-    at_half = _price(economy, level, half) + reasoning_floor_term([half], _cap(economy, level), economy["floor"])
-    at_full = _price(economy, level, full) + reasoning_floor_term([full], _cap(economy, level), economy["floor"])
+    at_half = _price(economy, level, half) + reasoning_floor_term([half], _budget(economy, level), economy["floor"])
+    at_full = _price(economy, level, full) + reasoning_floor_term([full], _budget(economy, level), economy["floor"])
     if at_full <= at_half:
         return f"reasoning {full} tokens scores {at_full}, not above the {at_half} of reasoning {half}"
     if economy["price"] is not None and _price(economy, level, full) <= -economy["price_cap"]:
@@ -147,13 +165,23 @@ def test_every_recipe_states_the_reasoning_economy(path):
 @pytest.mark.parametrize("path", RECIPES, ids=_ids(RECIPES))
 def test_the_per_turn_thinking_budgets_are_one_contract_at_every_family(path):
     """Every level's ``thinking_tokens`` is the same per-turn budget whichever family the recipe trains,
-    and every one sits below the turn cap, so the turn keeps its answer room; the run's own cap is unset,
-    so the level's budget is the one the engine enforces."""
+    and every one sits below the turn cap, so the turn keeps its answer room; the run's own cap is unset. Its
+    levels are all enforced or all soft, and soft budgets are priced past them (their only ceiling below the
+    engine's), which an enforced budget, never overrun, is not."""
     e = _economy(path)
-    budgets = {level: e["profiles"][level]["thinking_tokens"] for level in VALID_REASONING_EFFORTS}
+    budgets = {level: _budget(e, level) for level in VALID_REASONING_EFFORTS}
     assert budgets == _PER_TURN_BUDGETS, f"{path.name} states per-turn budgets {budgets}"
     assert max(budgets.values()) < e["max_tokens"]
     assert e["ceiling"] is None
+    soft = {_soft(e, level) for level in VALID_REASONING_EFFORTS}
+    assert len(soft) == 1, f"{path.name} mixes enforced and soft budgets"
+    assert (e["price"] is not None and e["past_budget"]) == (soft == {True}), (
+        f"{path.name}: soft budgets are priced past them, and only soft budgets are"
+    )
+    if soft == {True}:
+        assert all(_cap(e, level) is None or budget < _cap(e, level) for level, budget in budgets.items()), (
+            f"{path.name}: a soft budget at or past its ceiling is no softer than an enforced one"
+        )
 
 
 @pytest.mark.parametrize("path", RECIPES, ids=_ids(RECIPES))
@@ -175,16 +203,18 @@ def test_the_episode_output_budget_binds_below_what_the_turn_caps_alone_allow(pa
 
 @pytest.mark.parametrize("path", RECIPES, ids=_ids(RECIPES))
 def test_the_answer_room_binds_below_the_turn_ceiling_at_every_level(path):
-    """Past its reasoning cap a turn generates at most the answer room, at every level: a level whose cap
-    plus that room reached ``rollout_max_tokens`` would leave the turn its whole ceiling, room enough to
-    carry the reasoning on in a program's comments. SGLang forces no close at the cap, so its recipes run
-    without the bound."""
+    """Past its reasoning cap a turn generates at most the answer room, at every enforced level: a level whose cap
+    plus that room reached ``rollout_max_tokens`` would leave the turn its whole ceiling, room enough to carry the
+    reasoning on in a program's comments. A soft level's ceiling is where that room is left, so it binds by
+    construction. SGLang forces no close at the cap, so its recipes run without the bound."""
     e = _economy(path)
     if e["raw"].get("rollout_backend") == "sglang":
         assert e["answer_tokens"] is None, f"{path.name} bounds an answer room SGLang never opens"
         return
     assert isinstance(e["answer_tokens"], int), f"{path.name} does not state rollout_max_answer_tokens"
     for level in VALID_REASONING_EFFORTS:
+        if _soft(e, level):
+            continue  # the soft ceiling is where the room is left of the turn: the room binds by construction
         assert _cap(e, level) + e["answer_tokens"] < e["max_tokens"], (
             f"at {level}, a {_cap(e, level)}-token cap plus a {e['answer_tokens']}-token answer room does not "
             f"bind below the {e['max_tokens']}-token turn ceiling"
@@ -271,12 +301,12 @@ def test_a_higher_level_is_priced_lower_and_asked_for_no_less(path):
 
 
 def test_the_price_relations_pass_a_sound_price_and_refuse_a_bad_one():
-    """On a priced copy of a shipped recipe (floor 0.05): the templates' example price under a 0.05 cap
-    holds every relation, and each bad price breaks the one it should."""
+    """On a copy of a shipped recipe pricing every token (floor 0.05): the templates' example price under a 0.05
+    cap holds every relation, and each bad price breaks the one it should."""
     base = _economy(RECIPES[0])
 
     def priced(price: dict[str, float], cap: float) -> dict:
-        return {**base, "price": price, "price_cap": cap, "floor": 0.05}
+        return {**base, "price": price, "price_cap": cap, "floor": 0.05, "past_budget": False}
 
     sound = priced({"low": 0.0037, "medium": 0.0013, "high": 0.00018}, cap=0.05)
     assert _worst_length(sound) < sound["resubmission"] and _prices_fall_with_level(sound)

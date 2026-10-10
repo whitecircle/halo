@@ -14,7 +14,7 @@ from dataclasses import replace
 import pytest
 
 from src.configs.async_training_config import AsyncTrainingConfig
-from src.configs.rollout_config import REASONING_BUDGET_TEMPLATE_VAR, RolloutConfig
+from src.configs.rollout_config import REASONING_BUDGET_SOFT_TEMPLATE_VAR, REASONING_BUDGET_TEMPLATE_VAR, RolloutConfig
 from src.environments.engine_wire import generation_control_fields
 from src.trainers.grpo.rollout.trajectory_tokenize import rollout_template_kwargs
 
@@ -51,6 +51,23 @@ def test_the_template_states_the_levels_cap_while_the_engine_enforces_the_turns(
     )
 
 
+def test_a_soft_budget_is_flagged_on_both_sides_and_only_beside_a_budget():
+    """A soft budget rides with its flag so the template states a target, not a cut; the engine meanwhile
+    enforces only the run's ceiling. The flag never travels without a budget, and an enforced budget sends none."""
+    run = AsyncTrainingConfig(rollout_max_thinking_tokens=21800, rollout_max_tokens=30000)
+    fields = generation_control_fields(run.get_rollout_config(), "high", 16384, budget_soft=True)
+    assert fields["thinking_token_budget"] == 21800
+    assert fields["chat_template_kwargs"] == {
+        REASONING_BUDGET_TEMPLATE_VAR: 16384,
+        REASONING_BUDGET_SOFT_TEMPLATE_VAR: True,
+    }
+    render_kwargs = rollout_template_kwargs({}, "high", 16384, budget_soft=True)
+    assert render_kwargs == {**fields["chat_template_kwargs"], "reasoning_effort": "high"}
+    enforced = generation_control_fields(RolloutConfig(max_tokens=20000, max_thinking_tokens=4000), "high", 4000)
+    assert REASONING_BUDGET_SOFT_TEMPLATE_VAR not in enforced["chat_template_kwargs"]
+    assert REASONING_BUDGET_SOFT_TEMPLATE_VAR not in rollout_template_kwargs({}, "high", None, budget_soft=True)
+
+
 def test_the_control_fields_never_ask_for_the_sampled_ids():
     """The id capture is the payload builder's, from ``capture_token_ids``; the control fields the eval
     sends as its extra body carry no capture flag on either engine, so an eval samples without one."""
@@ -81,6 +98,8 @@ def test_run_wide_template_kwargs_refuse_the_per_episode_variables():
         AsyncTrainingConfig(rollout_chat_template_kwargs={REASONING_BUDGET_TEMPLATE_VAR: 8192})
     with pytest.raises(ValueError, match="reasoning_effort"):
         AsyncTrainingConfig(rollout_chat_template_kwargs={"reasoning_effort": "low"})
+    with pytest.raises(ValueError, match="reasoning_budget_soft"):
+        AsyncTrainingConfig(rollout_chat_template_kwargs={REASONING_BUDGET_SOFT_TEMPLATE_VAR: True})
 
 
 def test_run_wide_template_kwargs_must_be_a_mapping():

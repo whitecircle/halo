@@ -44,10 +44,11 @@ from src.environments.base import (
 )
 from src.environments.engine_wire import SGLANG_BACKEND
 from src.environments.episode import (
+    EpisodeEffort,
     RolloutResult,
+    efforts_by_level,
     resolve_reasoning_end_ids,
     resolve_rollout_stop_token_ids,
-    thinking_caps_by_level,
 )
 from src.models.structure import resolve_tokenizer
 from src.trainers.grpo.early_stop import build_early_stop_callback
@@ -641,17 +642,22 @@ class DistributedAsyncEnvironmentalGRPOTrainer(
 
     @property
     def _any_episode_budgeted(self) -> bool:
-        """Whether some episode the run draws carries a per-turn thinking cap: a drawable level's
-        ``thinking_tokens``, or the run's ``rollout_max_thinking_tokens`` (:func:`thinking_caps_by_level`, which
-        refuses a cap that fills the turn). A budgeted level the environment never draws caps no episode."""
-        return any(cap is not None for cap in self._thinking_caps_by_level().values())
+        """Whether some episode the run draws carries a per-turn thinking budget: a drawable level's
+        ``thinking_tokens``, or the run's ``rollout_max_thinking_tokens`` (:func:`efforts_by_level`, which
+        refuses a budget that fills the turn). A budgeted level the environment never draws budgets no episode."""
+        return any(effort.thinking_budget is not None for effort in self._efforts_by_level().values())
 
-    def _thinking_caps_by_level(self) -> dict[str | None, int | None]:
-        """The per-turn thinking cap of every level this run can draw (:func:`thinking_caps_by_level`), which
-        refuses a level whose cap fills the turn, a level without one under an answer-room bound, and an
+    @property
+    def _every_budget_soft(self) -> bool:
+        """Whether every episode the run draws runs under a soft budget, one a turn can reason past."""
+        return all(effort.budget_soft for effort in self._efforts_by_level().values())
+
+    def _efforts_by_level(self) -> dict[str | None, EpisodeEffort]:
+        """The contract every level this run can draw binds (:func:`efforts_by_level`), which refuses a level
+        whose budget fills the turn, a level without an enforced cap under an answer-room bound, and an
         output budget under one turn."""
         cfg = self.async_config
-        return thinking_caps_by_level(
+        return efforts_by_level(
             self._rollout_env,
             max_tokens=cfg.rollout_max_tokens,
             max_thinking_tokens=cfg.rollout_max_thinking_tokens,
@@ -660,12 +666,14 @@ class DistributedAsyncEnvironmentalGRPOTrainer(
         )
 
     def _resolve_forced_close_ids(self) -> tuple[int, ...] | None:
-        """The reasoning-end ids the engine forces when a turn reaches its thinking budget, whose forced
-        occurrences the loss must not train on; ``None`` when no budget can be enforced (SGLang enforces none).
+        """The reasoning-end ids the engine forces when a turn reaches its reasoning cap (a level's enforced budget,
+        a soft level's ceiling, or a retry's reserve), whose forced occurrences the loss must not train on; ``None``
+        when no cap can bind (SGLang enforces none, and an unbudgeted run caps nothing).
 
         A marker the tokenizer does not write (the ``</think>`` default on a family whose reasoning ends
         otherwise) keeps the forced closes in the loss, said loudly."""
         cfg = self.async_config
+        # A budget, soft or not, caps every retry at its reserve, so any budgeted episode can be force-closed.
         if cfg.rollout_backend == SGLANG_BACKEND or not self._any_episode_budgeted:
             return None
         try:
@@ -1554,16 +1562,24 @@ class DistributedAsyncEnvironmentalGRPOTrainer(
                 "reasoning_floor prices an episode against its per-turn thinking cap, but no episode of this run "
                 "carries one: no drawable effort level sets thinking_tokens and rollout_max_thinking_tokens is unset."
             )
+        if cfg.reasoning_price_past_budget and not self._every_budget_soft:
+            raise ValueError(
+                "reasoning_price_past_budget prices reasoning past a soft per-turn budget, but a drawable effort level's "
+                "budget is enforced or unset, so its turns would go unpriced: set thinking_tokens and "
+                "enforce_thinking_cap: false on every level the environment draws, or price every reasoning token."
+            )
 
     def _apply_reasoning_terms(
         self, rewards: torch.Tensor, rollout_results: list[RolloutResult], reasoning_tokens: list[list[int]]
     ) -> None:
         """Charge each episode its level's reasoning price and its under-use floor, in place.
 
-        :func:`reasoning_price_term` prices the episode's reasoning tokens at its level's price;
-        :func:`reasoning_floor_term` prices a shortfall against the per-turn thinking budget the episode ran
-        under. An episode with no level is free of the price, one with no budget of the floor. Logs the batch
-        means under ``reward/reasoning_price`` and ``reward/reasoning_floor``, each only while its term is on.
+        :func:`reasoning_price_term` prices the episode's reasoning tokens at its level's price — every one, or
+        under ``reasoning_price_past_budget`` what its turns reasoned past a soft budget; :func:`reasoning_floor_term`
+        prices a shortfall against the per-turn thinking budget the episode ran under. An episode with no level is
+        free of the price (past a budget, one whose budget the engine enforced too), one with no budget of the
+        floor. Logs the batch means under ``reward/reasoning_price`` and ``reward/reasoning_floor``, each only while
+        its term is on.
         """
         cfg = self.async_config
         price_on, floor_on = cfg.reasoning_price is not None, cfg.reasoning_floor > 0
@@ -1572,9 +1588,11 @@ class DistributedAsyncEnvironmentalGRPOTrainer(
             traj = r.trajectory
             price = floor = 0.0
             if price_on and traj and traj.reasoning_effort in cfg.reasoning_price:
-                price = reasoning_price_term(
-                    tokens, cfg.reasoning_price[traj.reasoning_effort], cfg.reasoning_price_cap
-                )
+                level_price = cfg.reasoning_price[traj.reasoning_effort]
+                if not cfg.reasoning_price_past_budget:
+                    price = reasoning_price_term(tokens, level_price, cfg.reasoning_price_cap)
+                elif traj.reasoning_budget and traj.reasoning_budget_soft:
+                    price = reasoning_price_term(tokens, level_price, cfg.reasoning_price_cap, traj.reasoning_budget)
             if floor_on and traj and traj.reasoning_budget:
                 floor = reasoning_floor_term(tokens, traj.reasoning_budget, cfg.reasoning_floor)
             rewards[i] += price + floor

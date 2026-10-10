@@ -285,7 +285,7 @@ class CodeContestsEnvironment(NativeToolUseEnvironment):
         submission_reward: float = 0.0,
         resubmission_penalty: float = 0.0,
         reasoning_effort: str | None = DEFAULT_REASONING_EFFORT,
-        reasoning_effort_profiles: dict[str, dict[str, int | float]] | None = None,
+        reasoning_effort_profiles: dict[str, dict[str, int | float | bool]] | None = None,
         eval_protocol: str = DEFAULT_EVAL_PROTOCOL,
         **kwargs,
     ):
@@ -682,7 +682,9 @@ class CodeContestsEnvironment(NativeToolUseEnvironment):
             traj.append_to_last_user(UNSTATED_TIME_LIMIT_NOTE.format(limits=limit_text))
         return traj
 
-    def _apply_effort_profile(self, traj: Trajectory, level: str | None, profile: dict[str, int | float]) -> None:
+    def _apply_effort_profile(
+        self, traj: Trajectory, level: str | None, profile: dict[str, int | float | bool]
+    ) -> None:
         """Stamp the episode's interaction budgets — the level's, else the class caps — as the per-tool
         caps the protocol enforces. The task message states none of them: the level the chat template
         states and the engine's caps are what control an episode, and a refused call is told so."""

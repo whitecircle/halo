@@ -94,6 +94,22 @@ def test_effort_line_sits_after_the_system_text_before_the_tools(template):
     assert text.endswith("<|turn>model\n")
 
 
+def test_a_soft_budget_is_stated_as_a_target_not_a_cut(template):
+    text = _render(
+        template,
+        CONVERSATION[:2],
+        add_generation_prompt=False,
+        reasoning_effort="high",
+        reasoning_budget=16384,
+        reasoning_budget_soft=True,
+    )
+    assert (
+        "You are an expert competitive programmer.\n\nReasoning effort: high. Aim to think for at most 16384 tokens "
+        "per turn.<turn|>"
+    ) in text
+    assert "cut off" not in text
+
+
 def test_thinking_is_on_without_a_template_variable(template):
     text = _render(template, [{"role": "user", "content": "q"}], add_generation_prompt=True)
     assert text == "<bos><|turn>system\n<|think|>\n<turn|>\n<|turn>user\nq<turn|>\n<|turn>model\n"

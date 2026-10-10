@@ -17,6 +17,7 @@ eval runner with its generation call stubbed — so the tests fail if either one
     python tests/cpu/environments/test_effort_binding.py
 """
 
+from dataclasses import replace
 from types import SimpleNamespace
 
 import pytest
@@ -24,7 +25,13 @@ import pytest
 import src.environments.eval_runner as eval_runner
 import src.environments.ray_actors as ray_actors
 from src.environments import episode
-from src.environments.base import OUTPUT_BUDGET_EXHAUSTED_KEY, REWARD_COMPONENTS_KEY, VALID_REASONING_EFFORTS, Message
+from src.environments.base import (
+    OUTPUT_BUDGET_EXHAUSTED_KEY,
+    REWARD_COMPONENTS_KEY,
+    VALID_REASONING_EFFORTS,
+    Message,
+    Trajectory,
+)
 from src.environments.engine_wire import generation_control_fields
 from src.environments.envs.protocols.native import NativeToolUseEnvironment
 from src.environments.tools.definitions import NativeTool, NativeToolRegistry
@@ -137,8 +144,10 @@ async def _drive_actor(env_cls, context, config, generations=None, env_kwargs=No
     async def fake_client():
         return None
 
-    async def fake_generate(client, url, messages, cfg, reasoning_effort=None, reasoning_budget=None):
-        payload = actor._build_payload(messages, cfg, reasoning_effort, reasoning_budget)
+    async def fake_generate(
+        client, url, messages, cfg, reasoning_effort=None, reasoning_budget=None, budget_soft=False
+    ):
+        payload = actor._build_payload(messages, cfg, reasoning_effort, reasoning_budget, budget_soft)
         seen.append((cfg, reasoning_effort, reasoning_budget, payload))
         return generations[len(seen) - 1] if generations else _actor_text_turn()
 
@@ -324,7 +333,10 @@ async def test_the_eval_refuses_a_level_cap_that_fills_the_turn_before_generatin
     with pytest.raises(ValueError, match=r"'high' level's thinking_tokens \(4000\) must sit below rollout_max_tokens"):
         await eval_runner.collect_results(env, examples, None, rollout=too_small)
     assert calls == [], "the gate must refuse before the first request"
-    caps = episode.thinking_caps_by_level
+
+    def caps(env, **kwargs):
+        return {level: effort.thinking_budget for level, effort in episode.efforts_by_level(env, **kwargs).items()}
+
     assert caps(env, max_tokens=_MAX_TOKENS, max_thinking_tokens=None) == _BudgetEnv.BUDGETS
     assert caps(_BudgetEnv(reasoning_effort="low"), max_tokens=_MAX_TOKENS, max_thinking_tokens=None) == {"low": 1000}
     assert caps(_PlainEnv(), max_tokens=_MAX_TOKENS, max_thinking_tokens=None) == {None: None}
@@ -361,7 +373,9 @@ def _effort(**overrides) -> episode.EpisodeEffort:
     """A 20000-token turn with a 4000-token reasoning cap (16000 of answer room) under a 50000-token
     episode budget."""
     bound = {"level": None, "thinking_budget": 4000, "max_tokens": _MAX_TOKENS, "episode_tokens": 50000}
-    return episode.EpisodeEffort(**{**bound, **overrides})
+    merged = {**bound, **overrides}
+    merged.setdefault("thinking_cap", merged["thinking_budget"])
+    return episode.EpisodeEffort(**merged)
 
 
 def _caps(effort, generated):
@@ -766,13 +780,111 @@ async def test_an_answer_bound_is_refused_where_a_drawable_level_has_no_reasonin
     with pytest.raises(ValueError, match="rollout_max_answer_tokens"):
         await eval_runner.collect_results(_PlainEnv(reasoning_effort="random"), examples, None, rollout=uncapped)
     assert calls == [], "the gate must refuse before the first request"
-    caps = episode.thinking_caps_by_level(
+    efforts = episode.efforts_by_level(
         _ContestEnv(reasoning_effort="random"),
         max_tokens=_CONTEST_TURN,
         max_thinking_tokens=None,
         max_answer_tokens=_ROOM,
     )
+    caps = {level: effort.thinking_cap for level, effort in efforts.items()}
     assert caps == _ContestEnv.BUDGETS, "every drawable level capped: the gate passes"
+
+
+# The soft shape the code-contests vLLM recipes run: the same per-level budgets, never enforced; the engine closes
+# the reasoning only where the answer room is left of the turn.
+_SOFT_CEILING = _CONTEST_TURN - _ROOM
+
+
+def _soft_env(**kwargs):
+    profiles = {
+        level: {"thinking_tokens": budget, "enforce_thinking_cap": False}
+        for level, budget in _ContestEnv.BUDGETS.items()
+    }
+    return _PlainEnv(reasoning_effort_profiles=profiles, **kwargs)
+
+
+def _soft(level, *, ceiling=None, answer=_ROOM):
+    return episode.bind_episode_effort(
+        {"reasoning_effort": level},
+        _soft_env(),
+        max_tokens=_CONTEST_TURN,
+        max_thinking_tokens=ceiling,
+        max_answer_tokens=answer,
+    )
+
+
+def test_a_soft_budget_is_stated_while_the_engine_closes_only_where_the_answer_room_is_left():
+    """A level with ``enforce_thinking_cap: false`` keeps its budget as what the template states and the reasoning
+    terms read, while the engine closes a turn's reasoning only where ``rollout_max_answer_tokens`` is left of it:
+    the turn keeps that room past the close, and nothing closes at the budget. A retry still runs under a quarter
+    of the budget as a hard cap, so a cut buys no second budget; and the trajectory records the budget soft for
+    the re-render."""
+    for level, budget in _ContestEnv.BUDGETS.items():
+        soft = _soft(level)
+        assert (soft.thinking_budget, soft.thinking_cap, soft.budget_soft) == (budget, _SOFT_CEILING, True)
+        assert (soft.answer_room, _caps(soft, 0)) == (_ROOM, (_CONTEST_TURN, _SOFT_CEILING))
+        reserve = budget // 4
+        assert soft.turn_thinking_cap(recovery=True) == reserve
+        assert _retry_caps(soft, 0) == (reserve + _ROOM, reserve)
+        enforced = _contest(level)
+        assert (enforced.thinking_budget, enforced.thinking_cap, enforced.budget_soft) == (budget, budget, False)
+    trajectory = Trajectory()
+    _soft("high").stamp(trajectory, 0)
+    assert (trajectory.reasoning_budget, trajectory.reasoning_budget_soft) == (16384, True)
+    _contest("high").stamp(trajectory, 0)
+    assert (trajectory.reasoning_budget, trajectory.reasoning_budget_soft) == (16384, False)
+
+
+def test_a_run_cap_is_a_soft_budgets_ceiling_and_without_either_bound_nothing_caps_it():
+    """``rollout_max_thinking_tokens`` sets the ceiling where a run states one; with neither it nor an answer
+    bound, nothing caps the reasoning but the turn, while a retry's reserve still does."""
+    assert _soft("high", ceiling=21000).thinking_cap == 21000
+    bare = _soft("high", answer=None)
+    assert (bare.thinking_budget, bare.thinking_cap, bare.budget_soft) == (16384, None, True)
+    assert _caps(bare, 0) == (_CONTEST_TURN, None)
+    assert _retry_caps(bare, 0) == (_CONTEST_TURN, 4096)
+
+
+def test_a_soft_budget_at_or_past_its_ceiling_is_refused():
+    """At or past its ceiling the engine would enforce the budget, so it is no soft budget: refused whether the
+    ceiling is the run's cap, the one the answer room leaves, or the turn itself."""
+    with pytest.raises(
+        ValueError, match=r"'high' level's soft thinking_tokens \(16384\) must sit below its ceiling \(12000"
+    ):
+        _soft("high", ceiling=12000)
+    with pytest.raises(ValueError, match=r"must sit below its ceiling \(10000"):
+        _soft("high", answer=20000)
+    with pytest.raises(ValueError, match="must sit below rollout_max_tokens"):
+        episode.bind_episode_effort(
+            {"reasoning_effort": "high"},
+            _PlainEnv(reasoning_effort_profiles={"high": {"thinking_tokens": 40000, "enforce_thinking_cap": False}}),
+            max_tokens=_CONTEST_TURN,
+        )
+
+
+async def test_both_drivers_send_the_ceiling_and_state_the_soft_budget(monkeypatch):
+    """The actor and the eval both ask the engine for the ceiling, state the level's budget flagged soft to the
+    template, and leave the episode carrying it for the trainer's re-render and the trajectory file."""
+    context = {"reasoning_effort": "high"}
+    config = ray_actors.RolloutConfig(max_tokens=_CONTEST_TURN, max_answer_tokens=_ROOM)
+    profiles = {"high": {"thinking_tokens": 16384, "enforce_thinking_cap": False}}
+    soft_kwargs = {"reasoning_budget": 16384, "reasoning_budget_soft": True}
+    seen, result = await _drive_actor(_PlainEnv, context, config, env_kwargs={"reasoning_effort_profiles": profiles})
+    assert result.error is None, result.error
+    payload = seen[0][3]
+    assert (payload["max_tokens"], payload["thinking_token_budget"]) == (_CONTEST_TURN, _SOFT_CEILING)
+    assert payload["chat_template_kwargs"] == soft_kwargs
+    assert (result.trajectory.reasoning_budget, result.trajectory.reasoning_budget_soft) == (16384, True)
+    calls, eval_traj = await _drive_eval(
+        monkeypatch,
+        _PlainEnv(reasoning_effort_profiles=profiles),
+        context,
+        responses=[_text_turn()],
+        config=replace(config, model_name="m"),
+    )
+    assert calls[0]["extra_body"]["thinking_token_budget"] == _SOFT_CEILING
+    assert calls[0]["extra_body"]["chat_template_kwargs"] == soft_kwargs
+    assert eval_runner.serialize_trajectory(eval_traj)["reasoning_budget_soft"] is True
 
 
 if __name__ == "__main__":

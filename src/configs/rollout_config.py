@@ -49,6 +49,9 @@ DEFAULT_EPISODE_TIMEOUT_SECONDS = DEFAULT_NCCL_TIMEOUT_MINUTES * 60 * 2 / 3
 # Chat-template variable carrying an episode's per-turn thinking budget, the pair of the request's
 # top-level ``reasoning_effort``; both are per episode, never run-wide.
 REASONING_BUDGET_TEMPLATE_VAR = "reasoning_budget"
+# Set true beside it when that budget is soft (the engine does not enforce it), so a template states it
+# as a target rather than a cut; absent for an enforced budget.
+REASONING_BUDGET_SOFT_TEMPLATE_VAR = "reasoning_budget_soft"
 DEFAULT_REASONING_END_TOKEN = "</think>"
 # Example end strings of the families' reasoning parsers, for the knob's help and its refusal.
 REASONING_END_TOKEN_EXAMPLES = (

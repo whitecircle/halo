@@ -20,6 +20,7 @@ from src.configs.rollout_config import (
     DEFAULT_ROLLOUT_TEMPERATURE,
     DEFAULT_ROLLOUT_TOP_K,
     DEFAULT_ROLLOUT_TOP_P,
+    REASONING_BUDGET_SOFT_TEMPLATE_VAR,
     REASONING_BUDGET_TEMPLATE_VAR,
     REASONING_END_TOKEN_EXAMPLES,
     SGLANG_BACKEND,
@@ -129,7 +130,7 @@ class AsyncTrainingConfig(AdvantageShapingArguments, GRPOEarlyStopArguments, Chu
             "time is its slowest episode and per_device_eval_batch_size-sized rounds idle the servers between them; "
             "size it to what the servers sustain: rows × world_size requests are in flight at once, and a turn "
             "that decodes slower than request_timeout allows fails the episode; a multiple of num_generations_eval, at "
-            "most max_concurrent_rollouts (a wider round runs in serial waves). The final round's padding is never "
+            "most max_concurrent_rollouts (a wider round is refused at startup). The final round's padding is never "
             "rolled out or scored. It bounds the loader's batch, "
             "not eval peak memory: the loss forward still chunks per_device_eval_batch_size rows, but the round's "
             "widest completion sets the padded width. None leaves the round at the eval batch."
@@ -243,9 +244,11 @@ class AsyncTrainingConfig(AdvantageShapingArguments, GRPOEarlyStopArguments, Chu
         metadata={
             "help": "Per-turn reasoning-token cap for reasoning models (vLLM thinking_token_budget): caps the "
             "chain-of-thought, then forces the model to answer with the rest of max_tokens. A level whose profile "
-            "sets a smaller thinking_tokens runs under that instead. Requires a reasoning parser on the vLLM "
-            "server (--reasoning-parser qwen3 for Qwen3.x; the openai_gptoss plugin for gpt-oss). None = only a "
-            "level's thinking_tokens caps reasoning, or nothing does."
+            "sets a smaller enforced thinking_tokens runs under that instead; under a soft one "
+            "(enforce_thinking_cap: false) this is the ceiling. Requires a reasoning parser on the vLLM server "
+            "(--reasoning-parser qwen3 for Qwen3.x; the openai_gptoss plugin for gpt-oss). None = only a level's "
+            "enforced thinking_tokens, a soft level's ceiling under rollout_max_answer_tokens, or a retry's reserve "
+            "caps reasoning, or nothing does."
         },
     )
 
@@ -254,9 +257,10 @@ class AsyncTrainingConfig(AdvantageShapingArguments, GRPOEarlyStopArguments, Chu
         metadata={
             "help": "The most a turn may generate past its reasoning cap (null = rollout_max_tokens alone bounds "
             "the turn). A turn's max_tokens becomes the smaller of rollout_max_tokens and its reasoning cap plus "
-            "this, the cap being its level's or, on a retry, the reserve; under rollout_max_episode_tokens a turn "
-            "starts only while the episode has its answer room left (the smaller of this and rollout_max_tokens less "
-            "the level's cap). Enforced per turn, never stated to the model. Every "
+            "this, the cap being its level's enforced budget, a soft level's ceiling (rollout_max_tokens less this, "
+            "where rollout_max_thinking_tokens is unset) or, on a retry, the reserve; under rollout_max_episode_tokens "
+            "a turn starts only while the episode has its answer room left (the smaller of this and rollout_max_tokens "
+            "less the turn's reasoning cap). Enforced per turn, never stated to the model. Every "
             "episode needs a reasoning cap: a drawable level with no thinking_tokens while "
             "rollout_max_thinking_tokens is unset is refused. On SGLang, which enforces no reasoning cap, it bounds "
             "the whole turn at the cap plus this. Must be an int in [1, rollout_max_tokens)."
@@ -443,9 +447,10 @@ class AsyncTrainingConfig(AdvantageShapingArguments, GRPOEarlyStopArguments, Chu
             "help": "Chat-template variables sent with every rollout request as `chat_template_kwargs` and applied "
             "to the trainer's own renders, so both sides see one template state. The stock Qwen3.x template reads "
             "`preserve_thinking`: with the env's `carry_reasoning`, every prior turn's reasoning stays rendered "
-            "even after a user message (a recovery nudge). `reasoning_effort` and `reasoning_budget` are refused "
-            "here: both are per episode; the level travels as the request's top-level field (SGLang also gets an exact "
-            "nested copy, the spelling it lets override that field), the budget is added to the nested form per request."
+            "even after a user message (a recovery nudge). `reasoning_effort`, `reasoning_budget` and "
+            "`reasoning_budget_soft` are refused here: all are per episode; the level travels as the request's "
+            "top-level field (SGLang also gets an exact nested copy, the spelling it lets override that field), the "
+            "budget and whether it is soft are added to the nested form per request."
         },
     )
 
@@ -457,6 +462,15 @@ class AsyncTrainingConfig(AdvantageShapingArguments, GRPOEarlyStopArguments, Chu
             "trainer construction otherwise, as is an environment whose reasoning_effort is unset); price the lowest "
             "level highest, so the same trace costs most where little reasoning was asked. Capped by "
             "reasoning_price_cap. Logged as reward/reasoning_price."
+        },
+    )
+    reasoning_price_past_budget: bool = field(
+        default=False,
+        metadata={
+            "help": "Price only the reasoning tokens each turn spends past its level's soft per-turn budget (a level "
+            "with enforce_thinking_cap: false), summed over turns, instead of every reasoning token: the soft "
+            "budget's ceiling, free within it. Needs reasoning_price; a run where no drawable level's budget is soft "
+            "is refused at trainer construction."
         },
     )
     reasoning_price_cap: float = field(
@@ -471,8 +485,9 @@ class AsyncTrainingConfig(AdvantageShapingArguments, GRPOEarlyStopArguments, Chu
         default=0.0,
         metadata={
             "help": "Weight of the reasoning under-use floor (0 = off): an episode whose reasoning tokens, summed "
-            "over its turns, fall short of three quarters of its per-turn thinking cap (its level's thinking_tokens, "
-            "clamped by rollout_max_thinking_tokens) pays -weight x shortfall / that reference. The one term that "
+            "over its turns, fall short of three quarters of its per-turn thinking budget (its level's "
+            "thinking_tokens, enforced or soft, clamped by rollout_max_thinking_tokens) pays -weight x shortfall / that "
+            "reference. The one term that "
             "pays for more reasoning; it resists reasoning shrinking toward nothing. Keep it, plus "
             "reasoning_price_cap while the price is on, below what the environment charges for the decisions it "
             "prices (a resubmission, in code contests). An episode with no thinking budget is free of it, and a "
@@ -677,7 +692,11 @@ class AsyncTrainingConfig(AdvantageShapingArguments, GRPOEarlyStopArguments, Chu
                 "rollout_chat_template_kwargs must be a mapping of template variables, got "
                 f"{type(self.rollout_chat_template_kwargs).__name__}"
             )
-        per_episode = {"reasoning_effort", REASONING_BUDGET_TEMPLATE_VAR} & set(self.rollout_chat_template_kwargs)
+        per_episode = {
+            "reasoning_effort",
+            REASONING_BUDGET_TEMPLATE_VAR,
+            REASONING_BUDGET_SOFT_TEMPLATE_VAR,
+        } & set(self.rollout_chat_template_kwargs)
         if per_episode:
             raise ValueError(
                 f"rollout_chat_template_kwargs must not carry {sorted(per_episode)}: the level and its thinking "
@@ -706,6 +725,11 @@ class AsyncTrainingConfig(AdvantageShapingArguments, GRPOEarlyStopArguments, Chu
             raise ValueError(
                 "reasoning_price_cap set with reasoning_price unset: nothing reads it until the price is on. Remove "
                 "it, or set reasoning_price."
+            )
+        if self.reasoning_price is None and self.reasoning_price_past_budget:
+            raise ValueError(
+                "reasoning_price_past_budget set with reasoning_price unset: it chooses what the price counts. Set "
+                "reasoning_price, or remove it."
             )
         if self.reasoning_price is not None:
             if not isinstance(self.reasoning_price, Mapping) or not self.reasoning_price:

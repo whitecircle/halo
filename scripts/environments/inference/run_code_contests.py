@@ -154,14 +154,16 @@ def resolve_effort_setting(flag: str | None, trained_env: dict[str, Any]) -> str
 def default_max_tokens(env: CodeContestsEnvironment, flag: str | None) -> int:
     """``--max_tokens``' default without ``--training_config``: the flag's level's thinking budget as the
     built ``env`` binds it (a ``reasoning_effort_profiles`` override in ``--env_kwargs`` included) plus
-    :data:`SOLUTION_HEADROOM_TOKENS`. Without a level, or a budget for it, there is nothing to size it
-    from, so it takes the training rollout's own default. The level is read off the flag alone: under a
-    training config the YAML's ``rollout_max_tokens`` is the default, and its level may be ``random``,
-    which has no budget."""
+    :data:`SOLUTION_HEADROOM_TOKENS`. Without a level or a budget for it there is nothing to size it from, so
+    it takes the training rollout's own default; a soft budget, which a turn may reason past, takes the larger
+    of the two. The level is read off the flag alone: under a training config the YAML's ``rollout_max_tokens``
+    is the default, and its level may be ``random``, which has no budget."""
     level = resolve_effort_setting(flag, {})
     budget = env.thinking_budget_for_effort(level) if level is not None else None
     if budget is None:
         return DEFAULT_ROLLOUT_MAX_TOKENS
+    if not env.thinking_budget_enforced(level):
+        return max(DEFAULT_ROLLOUT_MAX_TOKENS, budget + SOLUTION_HEADROOM_TOKENS)
     return budget + SOLUTION_HEADROOM_TOKENS
 
 

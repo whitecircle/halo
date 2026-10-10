@@ -255,16 +255,35 @@ class Check:
     """One binary flag a veto judge raises on an observable action: a short name (its diagnostic key)
     and what firing means. A ``veto`` check gates the episode's credit — the objective and every other
     positive component go to 0, the penalties stand; every other check is a process flag, counted into
-    the term's score."""
+    the term's score with its ``weight`` (default 1; 0 logs the flag without counting it). A veto check
+    takes no weight: the gate is all it does."""
 
     name: str
     description: str
     veto: bool = False
+    weight: float | None = None
 
     def __post_init__(self) -> None:
+        owner = f"check {self.name!r}"
         _require_name("check", self.name)
-        _require_text(f"check {self.name!r}", description=self.description)
-        _require_bool(f"check {self.name!r}", veto=self.veto)
+        _require_text(owner, description=self.description)
+        _require_bool(owner, veto=self.veto)
+        if self.weight is None:
+            return
+        if self.veto:
+            raise ValueError(f"{owner}: a veto check gates the credit and takes no weight")
+        require_finite(owner, weight=self.weight)
+        if self.weight < 0:
+            raise ValueError(
+                f"{owner}: weight must be >= 0 (the term's own weight signs the price), got {self.weight}"
+            )
+
+    @property
+    def share(self) -> float:
+        """The process flag's weight in the term's score: 0 for a veto check, 1 unless the config set one."""
+        if self.veto:
+            return 0.0
+        return 1.0 if self.weight is None else self.weight
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -276,7 +295,7 @@ class JudgeTerm(ScoredTerm):
       weight-averaged fraction of the scale, priced as every term is.
     - ``checks`` (veto mode): each either fires, with a verbatim quote of the span that shows it, or
       does not. A fired ``veto`` check zeroes the objective and every other positive component, the
-      penalties standing; the term's own score is the fired fraction of the other checks, so its
+      penalties standing; the term's own score is the weighted fired fraction of the other checks, so its
       ``weight`` (0 by default when parsed from a config, never positive) prices process flags without
       ever adding reward. A verdict the judge never
       reached defaults, from a config, to ``on_error: neutral``: no flag, and the exact grade stands.
@@ -379,12 +398,12 @@ class JudgeTerm(ScoredTerm):
         return min(1.0, weighted / sum(requirement.weight for requirement in self.requirements))
 
     def flag_fraction(self, fired: Mapping[str, bool]) -> float:
-        """The veto-mode term's score: the fired fraction of its process checks, the ones that flag a fault
-        without gating the objective (0 without any)."""
-        checks = [check for check in self.checks if not check.veto]
-        if not checks:
+        """The veto-mode term's score: the weighted fired fraction of its process checks, the ones that flag
+        a fault without gating the objective (0 without any that carries weight)."""
+        total = sum(check.share for check in self.checks)
+        if not total:
             return 0.0
-        return sum(1.0 for check in checks if fired.get(check.name)) / len(checks)
+        return sum(check.share for check in self.checks if fired.get(check.name)) / total
 
 
 @dataclass(frozen=True, kw_only=True)

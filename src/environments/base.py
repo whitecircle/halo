@@ -249,7 +249,7 @@ class Message:
     routing_mask: str | None = None
     routing_prompt_tokens: int | None = None
     prompt_token_ids: list[int] | None = None
-    # The reasoning cap the turn ran under, its level's or a retry's reserve (an output budget may narrow
+    # The reasoning cap the engine enforced on the turn — its level's budget, a soft level's ceiling or a retry's reserve (an output budget may narrow
     # the request's own below it; SGLang ignores the field), and the reasoning tokens the turn sampled, counted off its ids by
     # ``episode.sampled_reasoning_tokens`` (``None`` without them): the pair ``episode/thinking_cap_turns`` reads.
     thinking_cap: int | None = None
@@ -358,6 +358,8 @@ class Trajectory:
     # The per-turn CoT budget the episode ran under: the template states it, so a re-render needs it,
     # and the trainer's under-use floor is a share of it.
     reasoning_budget: int | None = None
+    # Whether that budget was soft (stated, never enforced by the engine): the template words it so.
+    reasoning_budget_soft: bool = False
 
     _assistant_count: int = field(default=0, repr=False)
 
@@ -466,20 +468,27 @@ class BaseEnvironment(ABC):
     # Effort level -> profile defaults. The base binds no budget to any level (the global rollout caps
     # stand); an env that prices effort declares its own table. ``reasoning_effort_profiles`` merges
     # per level over it.
-    REASONING_EFFORT_PROFILES: dict[str, dict[str, int | float]] = {level: {} for level in VALID_REASONING_EFFORTS}
+    REASONING_EFFORT_PROFILES: dict[str, dict[str, int | float | bool]] = {
+        level: {} for level in VALID_REASONING_EFFORTS
+    }
 
     # Profile keys this class admits and the minimum each takes; a subclass declares only the keys it
     # adds, and the union over the MRO is what a profile may carry. ``thinking_tokens`` is the
     # level's per-turn CoT budget. An int minimum declares a count (only ints admitted); a float
     # minimum admits any finite number.
     EFFORT_PROFILE_KEY_MINIMA: dict[str, int | float] = {"thinking_tokens": 1}
+    # Profile keys that take true or false, unioned over the MRO like the minima. ``enforce_thinking_cap``
+    # (default true) has the engine close a turn's reasoning at the level's ``thinking_tokens``; false makes
+    # the budget soft — stated to the model and read by the reasoning terms, never enforced (the run's
+    # ``rollout_max_thinking_tokens`` alone caps the reasoning then).
+    EFFORT_PROFILE_FLAGS: frozenset[str] = frozenset({"enforce_thinking_cap"})
 
     def __init__(
         self,
         max_turns: int | None = None,
         max_observation_chars: int = 16384,
         max_length_cutoff_recoveries: int | None = None,
-        reasoning_effort_profiles: dict[str, dict[str, int | float]] | None = None,
+        reasoning_effort_profiles: dict[str, dict[str, int | float | bool]] | None = None,
         carry_reasoning: bool = False,
         requires_answer: bool | None = None,
         tool_success_reward: float | None = None,
@@ -594,6 +603,11 @@ class BaseEnvironment(ABC):
         return frozenset(name for klass in cls.__mro__ for name in getattr(klass, "SHAPING_COMPONENTS", ()))
 
     @classmethod
+    def effort_profile_flags(cls) -> frozenset[str]:
+        """The true-or-false profile keys this class admits: every ``EFFORT_PROFILE_FLAGS`` along the MRO."""
+        return frozenset(flag for klass in cls.__mro__ for flag in vars(klass).get("EFFORT_PROFILE_FLAGS", ()))
+
+    @classmethod
     def effort_profile_key_minima(cls) -> dict[str, int | float]:
         """The profile keys this class admits with their minima: every ``EFFORT_PROFILE_KEY_MINIMA``
         declared along the MRO, a subclass's entry winning over its bases'."""
@@ -603,22 +617,25 @@ class BaseEnvironment(ABC):
         return minima
 
     def _merge_effort_profiles(
-        self, overrides: dict[str, dict[str, int | float]] | None
-    ) -> dict[str, dict[str, int | float]]:
+        self, overrides: dict[str, dict[str, int | float | bool]] | None
+    ) -> dict[str, dict[str, int | float | bool]]:
         """Validate ``reasoning_effort_profiles`` overrides and merge them per level over the class defaults."""
-        minima = self.effort_profile_key_minima()
+        minima, flags = self.effort_profile_key_minima(), self.effort_profile_flags()
         profiles = {level: dict(entry) for level, entry in self.REASONING_EFFORT_PROFILES.items()}
         for level, entry in (overrides or {}).items():
             if level not in VALID_REASONING_EFFORTS:
                 raise ValueError(
                     f"reasoning_effort_profiles level must be one of {VALID_REASONING_EFFORTS}, got {level!r}"
                 )
-            unknown = set(entry) - set(minima)
+            unknown = set(entry) - set(minima) - flags
             if unknown:
                 raise ValueError(
                     f"reasoning_effort_profiles[{level!r}] has unknown keys {sorted(unknown)}; "
-                    f"allowed: {sorted(minima)}"
+                    f"allowed: {sorted(set(minima) | flags)}"
                 )
+            for flag in flags & set(entry):
+                if not isinstance(entry[flag], bool):
+                    raise ValueError(f"{flag} for effort {level!r} must be true or false, got {entry[flag]!r}")
             for key, minimum in minima.items():
                 if key not in entry:
                     continue
@@ -631,6 +648,12 @@ class BaseEnvironment(ABC):
                 if value < minimum:
                     raise ValueError(f"{key} for effort {level!r} must be >= {minimum}, got {value}")
             profiles.setdefault(level, {}).update(entry)
+        for level, profile in profiles.items():
+            if profile.get("enforce_thinking_cap") is False and profile.get("thinking_tokens") is None:
+                raise ValueError(
+                    f"reasoning_effort_profiles[{level!r}] sets enforce_thinking_cap: false without thinking_tokens: "
+                    "a soft budget is one the model is told and the reasoning terms read, so the level needs one."
+                )
         return profiles
 
     def _bind_effort_profile(self, trajectory: Trajectory, context: dict[str, Any] | None) -> None:
@@ -644,7 +667,7 @@ class BaseEnvironment(ABC):
         self._apply_effort_profile(trajectory, level, profile)
 
     def _apply_effort_profile(  # noqa: B027  optional hook; task envs override
-        self, trajectory: Trajectory, level: str | None, profile: dict[str, int | float]
+        self, trajectory: Trajectory, level: str | None, profile: dict[str, int | float | bool]
     ) -> None:
         """Bind a task's own profile keys (interaction budgets, bonuses) for one episode. Runs after
         ``_reset_single`` on every episode, with ``level`` ``None`` and an empty ``profile`` when the
@@ -773,6 +796,11 @@ class BaseEnvironment(ABC):
         """The per-turn thinking-token budget for a resolved effort level (the level's profile
         ``thinking_tokens``), or ``None`` to use the global one."""
         return self.reasoning_effort_profiles.get(effort, {}).get("thinking_tokens")
+
+    def thinking_budget_enforced(self, effort: str) -> bool:
+        """Whether the engine closes a turn's reasoning at the level's budget (the profile's
+        ``enforce_thinking_cap``, true unless a profile sets it false)."""
+        return self.reasoning_effort_profiles.get(effort, {}).get("enforce_thinking_cap", True)
 
     def reset_effort_level(self, context: dict[str, Any] | None) -> str | None:
         """The episode's effort level when it is already concrete at reset, else ``None``.
