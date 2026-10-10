@@ -58,7 +58,7 @@ panel. A steady negative drift means one of two things:
 - the weight sync to the rollout server is broken;
 - a KL-free run is drifting, if `advantage/net_token_mass` stays negative and
   `entropy` climbs after it. `balance_token_mass` and the
-  [early stop](../agent-docs/training-methods/grpo/async-grpo/monitoring.md#early-stop) ↗
+  [early stop](../agent-docs/training-methods/async-grpo/monitoring.md#early-stop) ↗
   address this.
 
 Online GRPO logs TRL's unsigned gap `sampling/sampling_logp_difference/mean`

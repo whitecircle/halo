@@ -33,7 +33,7 @@ refused at startup.
 The hosts that run the Ray actors need what their environment needs: a sandbox and a large `TMPDIR` for
 the code environments, outbound network (and usually a search API key) for the search ones, and the MCP
 server's launcher on `PATH` for `mcp`. Your own environment class registers alongside these
-([Custom Environments](../../agent-docs/training-methods/grpo/environments/custom-environments.md) ↗).
+([Custom Environments](../../agent-docs/training-methods/async-grpo/environments/custom.md) ↗).
 
 > [!WARNING]
 > The default `local` sandbox does not confine the program it runs. Policy-written code can read the
@@ -42,7 +42,7 @@ server's launcher on `PATH` for `mcp`. Your own environment class registers alon
 > to run as root in a container started with `--init`, either `--privileged` or `SYS_ADMIN` with seccomp
 > and AppArmor unconfined, and a clean `/proc` mounted before launch. The training image ships `bwrap` and
 > `uidmap`
-> ([Sandboxes](../../agent-docs/training-methods/grpo/environments/sandbox.md#choosing-a-backend) ↗).
+> ([Sandboxes](../../agent-docs/training-methods/async-grpo/environments/sandbox.md#choosing-a-backend) ↗).
 
 ## Data
 
@@ -58,7 +58,7 @@ prompt and the tool schema, so this method has no `system_prompt` field.
 
 For code contests, `halo run prepare-code-dataset` builds the pool. It leaves out Codeforces problems
 graded only on their statement's examples unless you pass `--include_examples_only`
-([Code Contests](../../agent-docs/training-methods/grpo/environments/code-contests.md#dataset) ↗).
+([Building a pool](../../agent-docs/training-methods/async-grpo/environments/tasks/code-contests/datasets.md#building-a-pool) ↗).
 
 ## Rewards
 
@@ -75,13 +75,22 @@ rewards:
 Only this arm accepts a **veto judge**: a `judge` that lists `checks` instead of `requirements`. A fired
 `veto: true` check strips the episode of its credit, `reward/objective` included. The judge reads the
 policy's reasoning for context but fires only on what it did: its visible text, its tool calls and their
-results. A veto judge's `weight` must be ≤ 0, and its `on_error` defaults to `neutral`, so a judge outage
-leaves the environment's grade standing. Every code-contests recipe runs one, with six veto checks over
-the whole episode.
+results. Its other checks are process flags: the term's `weight`, which must be ≤ 0, prices the fired
+share of them, each counted by its own `weight` (default 1; `0` logs a flag without pricing it). Its
+`on_error` defaults to `neutral`, so a judge outage leaves the environment's grade standing
+([Veto judge](../../agent-docs/training-methods/grpo/rewards/judge.md#veto-judge) ↗).
+
+Every code-contests recipe runs one over the whole episode, with eight checks. Six are vetoes on hacks
+and tool misuse: working-out carried into a submitted program, or into any call the engine cut before it
+ran, is one of them (`reasoning_in_actions`). `wasted_run` charges 0.1 for a scratchpad run that could
+test nothing, and `reasoning_in_runs` is logged at weight 0. These recipes set `on_error: invalid`: an
+episode the judge could not score leaves training, so an outage trains nothing instead of unjudged
+episodes, and a second step in a row with no valid episode stops the run
+([Audit judge](../../agent-docs/training-methods/async-grpo/environments/tasks/code-contests/reward.md#audit-judge) ↗).
 
 Each component logs as `reward/<name>` (`reward/objective` for the environment term), and the components
 sum exactly to the reward the environment settled. The trainer's reasoning-length charges come on top
-([Reward Terms](../../agent-docs/training-methods/grpo/rewards.md) ↗).
+([Reward Terms](../../agent-docs/training-methods/grpo/rewards/README.md) ↗).
 
 ## Config
 
@@ -121,7 +130,7 @@ SGLang ones are `ep1` only.
 - **The objective** truncates each token's importance-sampling ratio from above. Startup refuses
   `loss_type: vespo`, a `vllm_importance_sampling_mode` other than the default or `token_truncate`, and
   `vllm_importance_sampling_clip_min`
-  ([Objective](../../agent-docs/training-methods/grpo/async-grpo/objective.md) ↗).
+  ([Objective](../../agent-docs/training-methods/async-grpo/objective.md) ↗).
 
 Three decisions matter more than the rest:
 
@@ -130,14 +139,13 @@ Three decisions matter more than the rest:
   `131072` in the code-contests recipes). The trajectory is never truncated: a row longer than the
   context window fails the step. If `episode/turns` sits at the cap, raise `max_turns`; if it sits far
   below, lower it, since turns run one after another
-  ([Trajectory length](../../agent-docs/training-methods/grpo/async-grpo/rollouts.md#trajectory-length) ↗).
+  ([Trajectory length](../../agent-docs/training-methods/async-grpo/episodes.md#trajectory-length) ↗).
 - **Reasoning effort.** `environment_kwargs.reasoning_effort` (`low` / `medium` / `high` / `random`) sets
-  how much the model should think, and `reasoning_effort_profiles` gives each level its own caps. The
-  model sees the level only through a chat template that renders it: pin one with `chat_template:` plus
-  `force_chat_template: true`, and serve the same file. Thinking caps bind on vLLM only, and
-  `rollout_backend: sglang` refuses `rollout_max_thinking_tokens` and `carry_reasoning`.
-  `reasoning_price` and `reasoning_floor` price reasoning length
-  ([Reasoning budget](../../agent-docs/training-methods/grpo/async-grpo/rollouts.md#reasoning-budget) ↗).
+  how much the model should think, and `reasoning_effort_profiles` gives each level its own per-turn
+  budget (`thinking_tokens`). The model sees the level only through a chat template that renders it: pin
+  one with `chat_template:` plus `force_chat_template: true`, and serve the same file. Engine caps on
+  reasoning bind on vLLM only, and `rollout_backend: sglang` refuses `rollout_max_thinking_tokens` and
+  `carry_reasoning` ([Reasoning Budgets](../../agent-docs/training-methods/async-grpo/reasoning.md) ↗).
 - **Tool budgets.** An environment pays `tool_success_reward` per successful call and charges
   `tool_error_penalty` per failed one. `tool_reward_cap` (default `tool_success_reward × max_turns`)
   caps what successful calls earn per episode. Keep them small beside the objective, or calling tools
@@ -145,7 +153,26 @@ Three decisions matter more than the rest:
 
 A turn the engine cut at its cap, an empty turn, or one whose every tool call was invalid or refused earns
 no reward. It trains only as a penalty, when its episode scored below the group's mean
-([Untrainable turns](../../agent-docs/training-methods/grpo/async-grpo/objective.md#untrainable-turns) ↗).
+([Untrainable turns](../../agent-docs/training-methods/async-grpo/objective.md#untrainable-turns) ↗).
+
+### Thinking budgets
+
+A level's `thinking_tokens` is a per-turn budget. By default the engine enforces it: it closes the turn's
+reasoning at the budget, mid-thought if need be. Set `enforce_thinking_cap: false` in the level's profile
+to make the budget soft:
+
+- The Qwen3.6 and Gemma 4 effort templates state a soft budget as a target ("Aim to think for at most N
+  tokens per turn."), and the engine does not cut there.
+- The engine closes the reasoning only at the run's ceiling: `rollout_max_thinking_tokens`, or else
+  `rollout_max_tokens − rollout_max_answer_tokens`. With neither set, only `rollout_max_tokens` ends the
+  turn. A soft budget at or above its ceiling is refused.
+- `reasoning_price_past_budget: true` makes `reasoning_price` count only what each turn reasons past its
+  budget. Every level the run can draw must then be soft.
+
+`reasoning_floor` reads either kind: it charges an episode whose reasoning, summed over its turns, falls
+short of three quarters of the per-turn budget. All the code-contests recipes run soft budgets (8,192 /
+12,288 / 16,384 tokens for low / medium / high), priced past the budget
+([Enforced and soft budgets](../../agent-docs/training-methods/async-grpo/reasoning.md#enforced-and-soft-budgets) ↗).
 
 ### One server or several
 
@@ -188,7 +215,7 @@ halo run run-env --training_config <config>.yaml --dataset <hub-id-or-path> --sp
 `--prompt_field` to the config's dataset.
 
 Evaluation runs the same loop: set `eval_strategy`, and `num_generations_eval: 1` for a fast pass@1
-monitor ([Evaluation](../../agent-docs/training-methods/grpo/async-grpo/monitoring.md#evaluation) ↗).
+monitor ([Evaluation](../../agent-docs/training-methods/async-grpo/evaluation.md#during-training) ↗).
 
 ## What to watch
 
@@ -202,10 +229,12 @@ monitor ([Evaluation](../../agent-docs/training-methods/grpo/async-grpo/monitori
   trains on stale rollouts. If `advantage/net_token_mass` also stays negative and `entropy` climbs, a
   KL-free run is drifting instead: turn on `balance_token_mass` and the early stop.
 - `episode/reward_scored` below 1 means a judge or reward model is failing; `<source>/<name>/scored`
-  names which one.
+  names which one. Under `on_error: invalid` those episodes also leave training, and
+  `sampling/invalid_episode_frac` rises.
 
 Rollouts land in `<output_dir>/completions/` as parquet. Every metric, including the prefetch hit rate:
-[Metrics and Troubleshooting](../../agent-docs/training-methods/grpo/async-grpo/monitoring.md) ↗.
+[Monitoring](../../agent-docs/training-methods/async-grpo/monitoring.md) ↗. Symptoms and fixes:
+[Troubleshooting](../../agent-docs/training-methods/async-grpo/troubleshooting.md) ↗.
 
 ## Sizing a run
 
@@ -220,15 +249,15 @@ decode speed at about that concurrency with the run's own prompts; nothing in th
 - Serving GPUs: start from one per trainer GPU, one engine per GPU while the model and its KV cache fit.
 
 Worked numbers:
-[Memory and Throughput](../../agent-docs/training-methods/grpo/async-grpo/performance.md#sizing-a-run) ↗.
+[Memory and Throughput](../../agent-docs/training-methods/async-grpo/performance.md#sizing-a-run) ↗.
 
 ## Go deeper
 
-- [Async GRPO with Environments](../../agent-docs/training-methods/grpo/async-grpo/README.md) ↗ ·
-  [Environments](../../agent-docs/training-methods/grpo/environments/README.md) ↗: servers, objective,
+- [Async GRPO with Environments](../../agent-docs/training-methods/async-grpo/README.md) ↗ ·
+  [Environments](../../agent-docs/training-methods/async-grpo/environments/README.md) ↗: servers, objective,
   metrics and every knob.
-- [Code Contests](../../agent-docs/training-methods/grpo/environments/code-contests.md) ↗ ·
-  [SWE](../../agent-docs/training-methods/grpo/environments/swe-environment.md) ↗: the two deepest
+- [Code Contests](../../agent-docs/training-methods/async-grpo/environments/tasks/code-contests/README.md) ↗ ·
+  [SWE](../../agent-docs/training-methods/async-grpo/environments/tasks/swe.md) ↗: the two deepest
   environments.
 - [Rollout Servers](../rollout-servers.md) · [Online GRPO (RLVR)](online-grpo.md) ·
   [Training Methods](README.md)

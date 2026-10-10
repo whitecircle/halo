@@ -1,6 +1,6 @@
 # KTO
 
-Kahneman-Tversky Optimization trains on **unpaired** binary feedback: each row is one completion labeled desirable or not. Use it for thumbs-up/down labels rather than preference pairs; for chosen/rejected pairs use [DPO](dpo.md) or [SMPO](smpo.md), for several scored completions per prompt [Offline GRPO](../grpo/offline-grpo.md).
+Kahneman-Tversky Optimization trains on **unpaired** binary feedback: each row is one completion labeled desirable or not. Use it for thumbs-up/down labels rather than preference pairs; for chosen/rejected pairs use [DPO](dpo.md) or [SMPO](smpo.md), for several scored completions per prompt [Offline GRPO](../grpo/offline.md).
 
 Trainer `DistributedKTOTrainer`, script `scripts/training/preference/kto.py` (text or VLM). EP, TP and ETP apply; CP does not — TRL's loss path is not CP-aware. TRL's fused KTO-Liger loss is disabled at construction (it is broken in TRL 1.6); Liger kernels still apply at the model level.
 

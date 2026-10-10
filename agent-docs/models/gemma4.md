@@ -71,7 +71,7 @@ that (`docker/sglang/patches/`). Gemma 4 has no routing replay on either engine
 
 Gemma-4 26B-A4B (30 EP layers, `Gemma4ForConditionalGeneration`) trains text-only under EP=8 at 32,768 max length. Example: `examples/sft/gemma4/gemma4-26b-a4b-ultrachat-ep.yaml`. The multimodal class loads either way, but a text-only dataset takes the **text** data path, which is what makes `packing` legal here ([SFT — VLMs](../training-methods/sft.md#vision-language-models)).
 
-Async GRPO with Environments: `examples/grpo/environmental/gemma4/vllm/` plus the `sglang/` ep1 siblings; both need `use_chunked_grpo_logprobs` for the 262k vocabulary, and the chunked sweep applies the head's `final_logit_softcapping` ([Memory and Throughput](../training-methods/grpo/async-grpo/performance.md#chunked-log-probs)). Both pinned engines read the fused expert pair the gather emits, so either `rollout_backend` takes the weight sync ([Rollout Servers](../infrastructure/rollout-servers.md#which-families-each-engine-serves)).
+Async GRPO with Environments: `examples/grpo/environmental/gemma4/vllm/` plus the `sglang/` ep1 siblings; both need `use_chunked_grpo_logprobs` for the 262k vocabulary, and the chunked sweep applies the head's `final_logit_softcapping` ([Memory and Throughput](../training-methods/async-grpo/performance.md#chunked-log-probs)). Both pinned engines read the fused expert pair the gather emits, so either `rollout_backend` takes the weight sync ([Rollout Servers](../infrastructure/rollout-servers.md#which-families-each-engine-serves)).
 
 **Attention LoRA** (the `-lora-` recipes) adapts the language model alone. The vision tower's
 projections carry the same `q_proj`…`o_proj` names but are `Gemma4ClippableLinear`, a wrapper holding
@@ -107,4 +107,4 @@ assistant turn renders whatever reasoning it carries, the media placeholders and
 `reasoning_budget`, which the hub template has no variable for. The hub template keys thinking on an
 `enable_thinking` variable that the vLLM server sets from `reasoning_effort` and the trainer's renders do
 not, so the pinned template is also what keeps the two prompts identical
-([Reasoning budget](../training-methods/grpo/async-grpo/rollouts.md#reasoning-budget)).
+([Reasoning budget](../training-methods/async-grpo/reasoning.md#reasoning-budget)).

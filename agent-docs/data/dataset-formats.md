@@ -1,6 +1,6 @@
 # Dataset Formats for Training Scripts
 
-Required columns per method. For Async GRPO with Environments see [Async GRPO with Environments](../training-methods/grpo/async-grpo/README.md) — `prompt` plus an `answer` column only where the environment grades against one; for [Distillation](../training-methods/distillation/README.md), teacher and self-distillation use the SFT format (self-distillation adds a privileged-answer field) and online SDPG uses the GRPO prompt/answer format.
+Required columns per method. For Async GRPO with Environments see [Async GRPO with Environments](../training-methods/async-grpo/README.md) — `prompt` plus an `answer` column only where the environment grades against one; for [Distillation](../training-methods/distillation/README.md), teacher and self-distillation use the SFT format (self-distillation adds a privileged-answer field) and online SDPG uses the GRPO prompt/answer format.
 
 Sources are S3, HuggingFace Hub (including the `:config` and `@split` suffixes), or local paths — see
 [S3 Utilities](s3-utilities.md) for resolution rules and caching.
@@ -180,9 +180,9 @@ Reference-model shapes for vision rows: [DPO → Vision-language](../training-me
 - Provide one reward per completion. A length mismatch raises `ValueError` naming the offending row, rather than silently truncating to the shorter list.
 - Each group's rewards become group-relative advantages via `advantage_method` (default `quantile_norm`).
 
-Config in `OfflineGRPOConfig` (`src/configs/offline_grpo_config.py`); defaults: [Offline GRPO → Configuration](../training-methods/grpo/offline-grpo.md#configuration).
+Config in `OfflineGRPOConfig` (`src/configs/offline_grpo_config.py`); defaults: [Offline GRPO → Configuration](../training-methods/grpo/offline.md#configuration).
 
-Full-fine-tune KL runs need a finite, unsharded dataset ([Offline GRPO → Reference model](../training-methods/grpo/offline-grpo.md#reference-model)).
+Full-fine-tune KL runs need a finite, unsharded dataset ([Offline GRPO → Reference model](../training-methods/grpo/offline.md#reference-model)).
 
 ## Classification
 

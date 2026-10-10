@@ -6,9 +6,9 @@ GRPO. Source of truth: `Dockerfile.vllm`, `docker-compose.vllm.yml`,
 `src/configs/async_training_config.py`, `src/configs/environment_config.py`,
 `src/rewards/terms.py` (the reward terms), `src/environments/registry.py`. Cross-link the docs:
 `agent-docs/infrastructure/rollout-servers.md` (server setup, weight sync, SGLang),
-`agent-docs/training-methods/grpo/rewards.md` (the `rewards:` term list),
-`agent-docs/training-methods/grpo/online-grpo.md`,
-`agent-docs/training-methods/grpo/async-grpo/{README,setup}.md`.
+`agent-docs/training-methods/grpo/rewards/README.md` (the `rewards:` term list),
+`agent-docs/training-methods/grpo/online.md`,
+`agent-docs/training-methods/async-grpo/{README,setup}.md`.
 
 ## 1. Bring up the vLLM container
 
@@ -118,10 +118,10 @@ docker run --gpus all --network=host --ipc=host \
 | `ray_address` | `None` | shared Ray cluster; `None` = per-rank local |
 | `rollout_temperature` / `rollout_top_p` / `rollout_max_tokens` | `0.7` / `0.95` / `32768` | rollout sampling (max tokens per turn) |
 | `rollout_max_episode_tokens` | `None` | the most an episode may sample over all its turns, reasoning and visible output together; a turn's caps narrow to what is left, keeping the turn's answer room, and an episode with less than that room left ends truncated; never stated to the model; `>= rollout_max_tokens` |
-| `rollout_max_thinking_tokens` | `None` | per-turn CoT cap (vLLM `thinking_token_budget`); a level's smaller `thinking_tokens` caps the turn instead; needs a server reasoning parser + `VLLM_USE_V2_MODEL_RUNNER=0`, and the IS correction when the reasoning marker resolves; refused under `sglang` and at or above `rollout_max_tokens` |
+| `rollout_max_thinking_tokens` | `None` | per-turn CoT cap (vLLM `thinking_token_budget`); a level's smaller enforced `thinking_tokens` caps the turn instead, and a soft level (`enforce_thinking_cap: false`) runs under this as its ceiling; needs a server reasoning parser + `VLLM_USE_V2_MODEL_RUNNER=0`, and the IS correction when the reasoning marker resolves; refused under `sglang` and at or above `rollout_max_tokens` |
 | `rollout_max_answer_tokens` | `None` | the most a turn may generate past its reasoning cap (a turn's total is the smaller of `rollout_max_tokens` and the cap plus this, a retry's reserve plus this); every drawable level needs a reasoning cap under it; never stated to the model; an int in `[1, rollout_max_tokens)` |
 | `rollout_reasoning_end_token` | `</think>` | the server parser's reasoning end string, encoded as vLLM encodes it and holding at least one added token (Gemma 4 `<channel\|>`, gpt-oss `<\|start\|>assistant<\|channel\|>final<\|message\|>`); a forced run of its ids gets ratio 0 wherever a vLLM budget can bind; a single-token marker also lets `episode/thinking_cap_turns` count each turn's reasoning |
-| `rollout_chat_template_kwargs` | `{}` | chat-template variables sent on every rollout request **and** applied to the trainer's own renders (Qwen3.x `preserve_thinking`); `reasoning_effort` and `reasoning_budget` are refused here — they travel per episode |
+| `rollout_chat_template_kwargs` | `{}` | chat-template variables sent on every rollout request **and** applied to the trainer's own renders (Qwen3.6 `preserve_thinking`); `reasoning_effort`, `reasoning_budget` and `reasoning_budget_soft` are refused here — they travel per episode |
 | `max_train_row_tokens` | `None` | longest training row a rank takes; must exceed `rollout_max_tokens`. Over-cap per-turn rows are left out, whole-trajectory rows train at zero weight (`sampling/rows_over_cap_frac`) |
 | `eval_rollout_batch_size` | `None` | rows per rank in one eval rollout round (eval runs without prefetch); `None` = the eval batch |
 | `reasoning_price` / `reasoning_price_cap` / `reasoning_floor` | `None` / `0.1` / `0.0` | the price is off by default: per level, reward units per 1k reasoning tokens summed over the episode's turns, capped per episode by the cap (refused at a non-default value while the price is off); the floor (off at `0`) prices an episode's shortfall against 0.75 × the per-turn thinking budget it ran under |
@@ -151,7 +151,7 @@ fails before any server is touched. Each term prices one source's score in `[0, 
 `accuracy` and `format`. The `exponent` (`> 0`, above 1 convex) reshapes a fractional score (a judge's, a reward
 model's); a binary grade has nothing to reshape. There is **no failure offset**,
 since a constant cancels in the group baseline. Per-term reference:
-`agent-docs/training-methods/grpo/rewards.md`.
+`agent-docs/training-methods/grpo/rewards/README.md`.
 
 ## 3. NCCL client connect flow
 

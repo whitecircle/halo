@@ -9,8 +9,8 @@ imports either engine, so you start, stop and scale the server yourself.
 [Async GRPO with Environments](training-methods/async-grpo-environments.md) need
 a running server before you launch. No other method uses one.
 
-**The server must own GPUs that no trainer rank uses.** A process cannot
-NCCL-broadcast to itself. Split the GPUs with `CUDA_VISIBLE_DEVICES` on both
+**The server must own GPUs that no trainer rank uses.** NCCL needs a distinct
+device for every member of the sync group. Split the GPUs with `CUDA_VISIBLE_DEVICES` on both
 sides; an overlap hangs at group formation.
 
 ## Start a vLLM server
@@ -43,7 +43,7 @@ variables you normally set:
 | `VLLM_GPU_MEM` | `0.85` | fraction of each GPU for weights and KV cache; `0.9` on dedicated GPUs, at most `0.80` with `isr_engine_reference` |
 | `VLLM_MOE_BACKEND` | `triton` | leave it; any other backend breaks weight sync |
 | `VLLM_TOOL_PARSER` | `hermes` | tool-call parser, set per family (below) |
-| `VLLM_REASONING_PARSER` | unset | required if the run sends a thinking budget |
+| `VLLM_REASONING_PARSER` | unset | required if the run caps reasoning: an enforced thinking budget, or a soft one's ceiling |
 | `VLLM_CHAT_TEMPLATE` | unset | the same `.jinja` file as the trainer's `chat_template:`, visible in this container |
 
 ### Tool parsers
@@ -180,7 +180,7 @@ engine-versus-policy log-ratio drifts negative. The compose files default to
 
 | Sign | Cause and fix |
 | --- | --- |
-| 400 on every rollout, zero tokens back | The server cannot take a thinking budget. Set `VLLM_REASONING_PARSER` **and** `VLLM_USE_V2_MODEL_RUNNER=0`, or drop `rollout_max_thinking_tokens`. Code contests also send a budget whenever `reasoning_effort` is set, as the shipped recipes do. |
+| 400 on every rollout, zero tokens back | The server cannot take a thinking budget. Set `VLLM_REASONING_PARSER` **and** `VLLM_USE_V2_MODEL_RUNNER=0`, or drop `rollout_max_thinking_tokens`. Code contests also send a cap whenever `reasoning_effort` is set, as the shipped recipes do: a soft budget sends its ceiling, and the retry after a cut, empty or refused turn sends a quarter of the budget. |
 | The run finishes with a flat zero reward | Wrong tool-call parser on a tool-using environment; the calls came back as text. A missing parser returns 400 instead. |
 | `Could not bind the weight-transfer group port` | Another process holds the port, two servers share one, or an outbound connection took it. Give each server its own `group_port`, reserve it or pick one outside `32768–60999`, and remove stale containers. |
 | `/health` is 200 but nothing generates | A trainer died mid-sync and left the engine paused. Resume it, or restart the container if the push had started. |

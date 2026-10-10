@@ -1,6 +1,6 @@
 # Online SDPG
 
-Self-Distilled Policy Gradient ([arXiv:2606.04036](https://arxiv.org/abs/2606.04036)) is [Online GRPO (RLVR)](../grpo/online-grpo.md) plus a privileged-teacher distillation term. Each step, the same policy is re-run under `no_grad` in eval mode with a hint revealing the gold answer, and the student is distilled toward that teacher's next-token distribution: `L = L_GRPO + beta(k)·L_OPD`. `DistributedSDPGTrainer` (`src/trainers/distillation/sdpg.py`) subclasses the online trainer, so vLLM server rollouts, NCCL weight sync, EP/TP/ETP and the LoRA rules carry over unchanged.
+Self-Distilled Policy Gradient ([arXiv:2606.04036](https://arxiv.org/abs/2606.04036)) is [Online GRPO (RLVR)](../grpo/online.md) plus a privileged-teacher distillation term. Each step, the same policy is re-run under `no_grad` in eval mode with a hint revealing the gold answer, and the student is distilled toward that teacher's next-token distribution: `L = L_GRPO + beta(k)·L_OPD`. `DistributedSDPGTrainer` (`src/trainers/distillation/sdpg.py`) subclasses the online trainer, so vLLM server rollouts, NCCL weight sync, EP/TP/ETP and the LoRA rules carry over unchanged.
 
 Use it when a verifiable answer exists and the policy solves too few prompts for GRPO's group signal alone. At `sdpg_beta_base: 0` the trainer is plain online GRPO. For a fixed dataset instead of live rollouts use [self-distillation](self-distillation.md).
 
@@ -54,7 +54,7 @@ Run a three-step smoke against a live server before the real run: take one of th
 
 Two keys on top of the online-GRPO metrics: `opd_beta` (the live coefficient, prefixed `eval_` under evaluation) and `opd_loss`. Treat a finite `opd_loss` with a non-zero `opd_beta` as healthy.
 
-Under evaluation `opd_loss` reads the split's own rows alone, but the rest is TRL's online eval: generating the final round's padding prompts, the GRPO term and its reward, length, KL and clamp metrics count them like real prompts ([Eval padding](../grpo/online-grpo.md#what-to-watch)). Async GRPO with Environments never rolls the padding out: its rollout metrics count the split's own episodes alone ([Evaluation](../grpo/async-grpo/monitoring.md#evaluation)).
+Under evaluation `opd_loss` reads the split's own rows alone, but the rest is TRL's online eval: generating the final round's padding prompts, the GRPO term and its reward, length, KL and clamp metrics count them like real prompts ([Eval padding](../grpo/online.md#what-to-watch)). Async GRPO with Environments never rolls the padding out: its rollout metrics count the split's own episodes alone ([Padding and round means](../async-grpo/evaluation.md#padding-and-round-means)).
 
 - **`opd_loss` is exactly 0** — under `opd_positive_advantage_only: true`, no rollout in the batch earned a positive advantage, so the gate masked every token. Expected on easy or fully-failed batches; persistent zeros mean the verifier never separates a group.
 - **OOM the online trainer did not hit** — OPD adds two forwards per micro-batch whose `[B, C, V]` completion logit planes are upcast to fp32 (where the forward takes `logits_to_keep`, the prompt rows stay out of both), and the teacher pass runs the longer prompt+hint+completion sequence. `use_chunked_grpo_logprobs` bounds the GRPO half only; size the batch against the OPD peak.
@@ -64,5 +64,5 @@ Under evaluation `opd_loss` reads the split's own rows alone, but the rest is TR
 
 ## Related pages
 
-- [Online GRPO (RLVR)](../grpo/online-grpo.md) · [Self-Distillation](self-distillation.md) · [Distillation Overview](README.md)
+- [Online GRPO (RLVR)](../grpo/online.md) · [Self-Distillation](self-distillation.md) · [Distillation Overview](README.md)
 - [Configuration Reference](../../reference/configuration-reference.md#rlvronlinegrposcriptarguments) — the RLVR script arguments the `sdpg_*` fields extend

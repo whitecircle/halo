@@ -92,7 +92,7 @@ and full launch examples see [`wiring.md`](wiring.md).
    `mcp_server`, `timeout_per_test`, `carry_reasoning`). Reward shaping is the
    **`rewards:` term list** — each term prices a source's score in `[0, 1]` as
    `weight × score ^ exponent`, defaulting to `[{source: environment}]`
-   (`agent-docs/training-methods/grpo/rewards.md`); `max_turns` defaults to `None` = the
+   (`agent-docs/training-methods/grpo/rewards/README.md`); `max_turns` defaults to `None` = the
    environment class's own. Custom envs: pass `environment_cls`
    (a `BaseEnvironment` subclass) instead. See the table in `wiring.md`.
 
@@ -109,11 +109,12 @@ and full launch examples see [`wiring.md`](wiring.md).
    `VLLM_USE_V2_MODEL_RUNNER=0` and, when `rollout_reasoning_end_token` resolves, the IS
    correction that neutralizes its forced closes; it is refused under `rollout_backend: sglang` — as is
    `carry_reasoning`. On vLLM a level's `thinking_tokens` caps every turn's reasoning
-   below it (SGLang warns once and leaves it uncapped); `rollout_max_episode_tokens` bounds what an episode samples in total, and
+   below it unless its profile sets `enforce_thinking_cap: false`, a soft budget the engine closes only at
+   the run's ceiling (SGLang warns once and leaves it uncapped); `rollout_max_episode_tokens` bounds what an episode samples in total, and
    `rollout_max_answer_tokens` what a turn generates past its reasoning cap. The reasoning terms
    (`reasoning_price` per level per 1k tokens with `reasoning_price_cap`, `reasoning_floor`; the price and
    the floor off by default) price an episode's reasoning length and its shortfall against three quarters
-   of its per-turn cap.
+   of its per-turn budget.
 
 ## Parallelism note
 
