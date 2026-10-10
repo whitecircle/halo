@@ -71,14 +71,39 @@ def silence_cute_dsl_deprecations() -> None:
     warnings.filterwarnings("ignore", category=DeprecationWarning, module=r"cutlass(\.|$)")
 
 
+def _accepts_writes(path: str) -> bool:
+    """Whether ``path`` is a writable directory, or can be created under its nearest existing ancestor."""
+    path = os.path.abspath(path)
+    while not os.path.lexists(path):
+        path = os.path.dirname(path)
+    return os.path.isdir(path) and os.access(path, os.W_OK | os.X_OK)
+
+
 def anchor_jit_cache_dir(var: str, subdir: str) -> None:
     """Point a JIT cache directory at ``HF_HOME`` (else the temp dir) unless the caller already set it.
 
     The default homes are ephemeral inside a ``--rm`` container, so every rank recompiles what a
-    previous run already built. Shared by the FA4 and Triton caches so both land on one volume.
+    previous run already built. Shared by the FA4 and Triton caches so both land on one volume. Both
+    write on their first compile, so a location that cannot be written (a shared cache mounted
+    read-only, a temp dir another user owns) is skipped with a warning: ``HF_HOME`` falls back to the
+    temp dir, and with no writable location the variable stays unset for the library's own default.
     """
-    if var not in os.environ:
-        os.environ[var] = os.path.join(os.environ.get("HF_HOME") or tempfile.gettempdir(), subdir)
+    if var in os.environ:
+        return
+    hf_home = os.environ.get("HF_HOME")
+    temp_path = os.path.join(tempfile.gettempdir(), subdir)
+    path = os.path.join(hf_home, subdir) if hf_home else temp_path
+    if _accepts_writes(path):
+        os.environ[var] = path
+        return
+    # Logged through the stdlib logger: the GPU test harness anchors the FA4 cache before any
+    # accelerate state exists, which the adapter requires, and each rank judges its own mounts.
+    if path != temp_path and _accepts_writes(temp_path):
+        logger.logger.warning("%s is not writable, so %s falls back to %s.", path, var, temp_path)
+        os.environ[var] = temp_path
+        return
+    tried = path if path == temp_path else f"{path}, {temp_path}"
+    logger.logger.warning("No writable location for %s (tried %s), so it is left to the library default.", var, tried)
 
 
 def ensure_fa4_kernel_cache_env() -> None:
