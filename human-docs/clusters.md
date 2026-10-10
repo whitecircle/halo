@@ -62,7 +62,8 @@ Other rules for multi-node storage:
   local checkpoint must then exist on every node). Pin `model_revision` to one
   commit. A Hub fetch takes the repo's top-level files (config, tokenizer,
   weights, remote code); weight dumps in subfolders stay on the Hub.
-- **FA4 kernel cache.** It lives under `HF_HOME` and locks files with `flock`.
+- **FA4 kernel cache.** It lives under `HF_HOME` (the temp dir if `HF_HOME` is
+  read-only) and locks files with `flock`.
   If a shared `HF_HOME` has no cross-node `flock` (Lustre without `flock`, NFS
   `nolock`), point `FLASH_ATTENTION_CUTE_DSL_CACHE_DIR` at node-local storage.
 

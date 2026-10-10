@@ -180,7 +180,8 @@ base NGC image need updating.
 
 `FLASH_ATTENTION_CUTE_DSL_CACHE_DIR` and `TRITON_CACHE_DIR` are not baked. The FA4 cache and the Triton
 kernel/autotune cache both derive their directories from `HF_HOME` (or the temp dir) at runtime, so one
-mounted volume carries every kernel cache across `--rm` containers.
+mounted volume carries every kernel cache across `--rm` containers. Where `HF_HOME` is mounted read-only,
+both fall back to the temp dir with a warning; set the two variables to a writable volume to keep them.
 
 The FA4 cache serializes the writer of each kernel file with `flock`, so a shared `HF_HOME` needs
 locks that hold across nodes. Where `flock` fails (Lustre mounted without `flock`), the first use of
