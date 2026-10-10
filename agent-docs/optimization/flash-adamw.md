@@ -18,7 +18,7 @@ torchrun --nproc_per_node=8 \
     --optim=flash_adamw --learning_rate=1e-4 --weight_decay=0.01
 ```
 
-Both images install `flashoptim` directly (`Dockerfile`, pinned, `--no-deps` so it cannot re-resolve torch and downgrade NCCL), so `optim: flash_adamw` works out of the box. On a bare host, install the extra (resolves from PyPI):
+Both images install `flashoptim` at its locked version with the rest of `uv.lock` (the image's export carries the `flash-optimizers` extra), so `optim: flash_adamw` works out of the box. On a bare host, install the extra (resolves from PyPI):
 
 ```bash
 uv pip install -e ".[flash-optimizers]"   # or: pip install flashoptim
@@ -61,5 +61,5 @@ The wrapper registers a step post-hook that advances each stepped param's versio
 
 ## References
 
-- `flashoptim` — Databricks' implementation; `pyproject.toml` allows `>=0.1.3,<0.2.0`, the images pin `0.1.4`
+- `flashoptim` — Databricks' implementation; `pyproject.toml` allows `>=0.1.3,<0.2.0`, `uv.lock` and so the images pin `0.1.4`
 - [8-Bit Optimizer Paper](https://arxiv.org/abs/2110.02861) — dynamic quantization for Adam states

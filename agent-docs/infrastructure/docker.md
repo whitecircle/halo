@@ -126,7 +126,8 @@ docker build --build-arg SOURCE_REVISION=$(git rev-parse --short HEAD) \
 
 - **Credential-free.** Every dependency is public — no build secret or token is required.
 - **Built with uv, not Poetry.** Deps install into the system interpreter via `uv export --locked` into a
-  requirements file, then `uv pip install --system --no-deps -r` it (hatchling backend, no venv).
+  requirements file, then `uv pip install --system --no-deps -r` it (hatchling backend, no venv). The export
+  carries the `gigatoken` and `flash-optimizers` extras, so both install at their locked versions.
 
     `--no-deps` is load-bearing: without it the resolver reinstalls torch, Flash Attention and DeepEP over
     the source builds earlier layers compiled. The source-built pre-installs (causal-conv1d,

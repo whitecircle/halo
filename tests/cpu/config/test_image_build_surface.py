@@ -1,10 +1,11 @@
 #!/usr/bin/env python
 """Repo pins on the image build surface: locked dependencies and provenance labels.
 
-Before the training image's locked install, a ``pip install`` that resolves dependencies for a
-lock-pinned package pulls whatever PyPI serves that day. The locked install then replaces only the
-packages the lock names, so every other package the resolve brought in stays in the image, unlocked.
-Each such pre-install must pass ``--no-deps``.
+A ``pip install`` in the training image that resolves dependencies for a lock-pinned package pulls
+whatever PyPI serves that day. Before the locked install, the install replaces only the packages the
+lock names, so every other package the resolve brought in stays in the image, unlocked; after it, the
+resolve moves locked packages off their pins. Each such install must pass ``--no-deps``, and the
+optional extras come from the lock export itself, which ``make install`` exports the same way.
 
 Each image labels itself with the Halo commit, version and build date it was built from. Without
 their own labels, the rollout images report their engine's upstream revision and the training image
@@ -21,11 +22,13 @@ from packaging.utils import canonicalize_name
 
 from tests.common.utils import REPO_ROOT
 
-# The training image's locked install; every pre-install above it must leave dependencies to it.
+# The training image's locked install: the one place its dependencies are resolved from.
 LOCKED_INSTALL = "uv pip install --system --no-deps -r"
+LOCK_EXPORT = "uv export --locked"
 PIP_INSTALL = re.compile(r"\bpip3?\s+install\b")
 COMMAND_SEPARATOR = re.compile(r"&&|\|\||;")
 PINNED_REQUIREMENT = re.compile(r'"?([A-Za-z0-9][A-Za-z0-9._-]*)(?:\[[^\]]*\])?==[^\s"]+"?')
+EXPORTED_EXTRA = re.compile(r"--extra[ =](\S+)")
 DOCKERFILES = sorted(path.name for path in REPO_ROOT.glob("Dockerfile*"))
 # Each provenance label and the build arg it is stamped from.
 PROVENANCE_LABELS = {
@@ -55,32 +58,39 @@ def _locked_packages() -> set[str]:
     return {canonicalize_name(package["name"]) for package in lock["package"]}
 
 
-def _resolving_pre_installs(dockerfile_text: str, locked: set[str]) -> list[str]:
-    """The ``pip install`` commands up to the locked install that resolve a lock-pinned package's deps."""
+def _resolving_installs(dockerfile_text: str, locked: set[str]) -> list[str]:
+    """The ``pip install`` commands that resolve a lock-pinned package's dependencies."""
+    lines = _logical_lines(dockerfile_text)
+    if not any(LOCKED_INSTALL in line for line in lines):
+        raise AssertionError(f"no `{LOCKED_INSTALL}` line found: the scan lost its anchor")
     offenders = []
-    for line in _logical_lines(dockerfile_text):
-        if line.startswith("RUN "):
-            for command in COMMAND_SEPARATOR.split(line):
-                install = PIP_INSTALL.search(command)
-                if not install or "--no-deps" in command:
-                    continue
-                pinned = [m.group(1) for m in PINNED_REQUIREMENT.finditer(command[install.end() :])]
-                if hits := [name for name in pinned if canonicalize_name(name) in locked]:
-                    offenders.append(f"{command.strip()}  (lock-pinned: {', '.join(hits)})")
-        if LOCKED_INSTALL in line:
-            return offenders
-    raise AssertionError(f"no `{LOCKED_INSTALL}` line found: the scan lost its anchor")
+    for line in lines:
+        if not line.startswith("RUN "):
+            continue
+        for command in COMMAND_SEPARATOR.split(line):
+            install = PIP_INSTALL.search(command)
+            if not install or "--no-deps" in command:
+                continue
+            pinned = [m.group(1) for m in PINNED_REQUIREMENT.finditer(command[install.end() :])]
+            if hits := [name for name in pinned if canonicalize_name(name) in locked]:
+                offenders.append(f"{command.strip()}  (lock-pinned: {', '.join(hits)})")
+    return offenders
 
 
-def test_pre_installs_take_their_dependencies_from_the_lock():
-    offenders = _resolving_pre_installs((REPO_ROOT / "Dockerfile").read_text(encoding="utf-8"), _locked_packages())
+def _exported_extras(text: str) -> list[set[str]]:
+    """The ``--extra`` set of each lock export in a Dockerfile or the Makefile."""
+    return [set(EXPORTED_EXTRA.findall(line)) for line in _logical_lines(text) if LOCK_EXPORT in line]
+
+
+def test_installs_take_their_dependencies_from_the_lock():
+    offenders = _resolving_installs((REPO_ROOT / "Dockerfile").read_text(encoding="utf-8"), _locked_packages())
     assert not offenders, (
-        "these pre-installs resolve dependencies the locked install will not remove; pass --no-deps:\n  "
-        + "\n  ".join(offenders)
+        "these installs resolve dependencies outside the lock; pass --no-deps, or for an optional extra "
+        "export it with the lock:\n  " + "\n  ".join(offenders)
     )
 
 
-def test_the_scan_flags_a_resolving_pre_install():
+def test_the_scan_flags_a_resolving_install():
     """Guards the pin above against passing vacuously on a parser that sees nothing."""
     dockerfile = (
         "RUN export A=1 \\\n"
@@ -88,15 +98,31 @@ def test_the_scan_flags_a_resolving_pre_install():
         '    && pip install --no-build-isolation "einops==0.8.2"\n'
         f"RUN {LOCKED_INSTALL} /tmp/requirements.txt\n"
     )
-    assert _resolving_pre_installs(dockerfile, {"einops"}), (
-        "a resolving pre-install of a locked package went unflagged"
-    )
-    assert not _resolving_pre_installs(dockerfile.replace("--no-build-isolation", "--no-deps"), {"einops"})
-    assert not _resolving_pre_installs(dockerfile, {"other"}), "a package outside the lock was flagged"
+    assert _resolving_installs(dockerfile, {"einops"}), "a resolving pre-install of a locked package went unflagged"
+    assert not _resolving_installs(dockerfile.replace("--no-build-isolation", "--no-deps"), {"einops"})
+    assert not _resolving_installs(dockerfile, {"other"}), "a package outside the lock was flagged"
     chained = f'RUN pip3 install --no-deps "a==1"; pip3 install "einops==0.8.2"\nRUN {LOCKED_INSTALL} r.txt\n'
-    assert _resolving_pre_installs(chained, {"einops"}), "a resolve chained after a --no-deps install went unflagged"
+    assert _resolving_installs(chained, {"einops"}), "a resolve chained after a --no-deps install went unflagged"
     same_line = f'RUN {LOCKED_INSTALL} r.txt && pip install "einops==0.8.2"\n'
-    assert _resolving_pre_installs(same_line, {"einops"}), "a resolve on the locked install's own line went unflagged"
+    assert _resolving_installs(same_line, {"einops"}), "a resolve on the locked install's own line went unflagged"
+    after = f'RUN {LOCKED_INSTALL} r.txt\nRUN pip install "einops==0.8.2"\n'
+    assert _resolving_installs(after, {"einops"}), "a resolve after the locked install went unflagged"
+    with pytest.raises(AssertionError, match="lost its anchor"):
+        _resolving_installs('RUN pip install --no-deps "einops==0.8.2"\n', {"einops"})
+
+
+def test_the_image_installs_every_optional_extra_from_the_lock():
+    """An extra installed by its own ``pip install`` resolves its dependencies outside the lock, and
+    ``make install`` would then check a different requirement set than the image builds from."""
+    pyproject = tomllib.loads((REPO_ROOT / "pyproject.toml").read_text(encoding="utf-8"))
+    extras = set(pyproject["project"]["optional-dependencies"])
+    assert extras, "pyproject.toml declares no optional extras: the scan lost its root"
+    for name in ("Dockerfile", "Makefile"):
+        exports = _exported_extras((REPO_ROOT / name).read_text(encoding="utf-8"))
+        assert exports, f"no `{LOCK_EXPORT}` found in {name}: the scan lost its anchor"
+        assert all(exported == extras for exported in exports), (
+            f"{name} exports the lock with extras {[sorted(e) for e in exports]}, not {sorted(extras)}"
+        )
 
 
 @pytest.mark.parametrize("dockerfile", DOCKERFILES)

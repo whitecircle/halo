@@ -280,9 +280,11 @@ RUN export TORCH_CUDA_ARCH_LIST=$(cat /etc/cuda_arch) \
     && pip install --no-build-isolation --no-deps "causal-conv1d==1.6.2.post1" "flash-linear-attention==0.4.2"
 
 # Remaining locked deps (flat export; compiled deps already satisfy their pins and are skipped).
-# The export carries the dev group — this image is also the test/docs/lint runtime.
+# The export carries the dev group — this image is also the test/docs/lint runtime — and both optional
+# extras, so FlashAdamW, Gigatoken and their dependencies install at their locked versions.
 COPY pyproject.toml uv.lock* ./
-RUN uv export --locked --no-emit-project --no-hashes --format requirements-txt -o /tmp/requirements.txt \
+RUN uv export --locked --no-emit-project --no-hashes --extra gigatoken --extra flash-optimizers \
+      --format requirements-txt -o /tmp/requirements.txt \
     && uv pip install --system --no-deps -r /tmp/requirements.txt \
     && rm -rf ${UV_CACHE_DIR} /tmp/requirements.txt
 
@@ -300,13 +302,9 @@ RUN pip install --force-reinstall --no-deps \
          echo "FA4 flash_attn.cute assertion skipped (Hopper installs FA2+FA3, not FA4)"; \
        fi
 
-# FlashAdamW (optional `flash-optimizers` extra, pure Triton). --no-deps: a re-resolve would
-# re-enforce torch's own NCCL pin and downgrade the locked one DeepEP was built against.
-RUN pip install "flashoptim==0.1.4" --no-deps \
-    && python -c "from flashoptim import FlashAdamW; print('flashoptim OK')"
-
-# Gigatoken (optional `gigatoken` extra) — Rust bulk tokenizer backend. Exact lock version.
-RUN pip install "gigatoken==0.9.0" \
+# The optional extras the locked install carried: FlashAdamW (`flash-optimizers`, pure Triton) and the
+# Gigatoken Rust bulk tokenizer backend (`gigatoken`).
+RUN python -c "from flashoptim import FlashAdamW; print('flashoptim OK')" \
     && python -c "import gigatoken; print('gigatoken OK')"
 
 # Guards against a silent NCCL downgrade above: asserts the DeepEP floor, equality with uv.lock,
