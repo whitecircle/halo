@@ -51,10 +51,12 @@ On 8× B300, Halo trains gpt-oss-20b at up to 3.5× the throughput of stock TRL 
 
 <!-- Newest first. This feed and GitHub Releases are Halo's changelog. -->
 
-- **2026-10-08 — Halo 1.1.0.** Hardening release: exact resume with fail-loud checkpoint checks,
-  multi-node runs on per-node disks, faster MoE training (atomic-free permute, fused GLU),
-  FlexAttention on sliding-window layers, context parallelism for offline GRPO, and composable reward
-  terms (generative judges, served reward models) with per-turn length controls for async GRPO.
+- **2026-10-09 — Halo 1.1.0.** Faster MoE training, exact resume and more reliable async RL: fused
+  MoE kernels and FlexAttention on sliding-window layers (1.67× over Halo 1.0.0 for Gemma 4 26B-A4B on
+  two GPUs), an atomic-free expert permute (up to 27% faster for gpt-oss at EP8), checkpoint and resume
+  checks that stop the run instead of failing silently, LoRA syncs that leave the frozen base untouched,
+  token-mass balance and fixed engine log-probs for async GRPO, RL environments that pay only for real
+  solutions, and context parallelism for offline GRPO.
 - **2026-08-20 — Halo 1.0.0.** First public release: EP / CP / TP / ETP on native HuggingFace models
   (LLM and VLM), 15 MoE families, pre-training through multi-turn RL with vLLM or SGLang rollouts,
   FlashAttention-4, DeepEP V2, DeepGEMM, and the bf16 `AdamW` optimizer.
@@ -77,7 +79,8 @@ docker pull public.ecr.aws/whitecircle/halo:hopper
 
 Versioned tags (`:blackwell-1.1.0`, `:hopper-1.1.0`) pin the release. There is
  no `latest` tag, since the images are architecture-specific. The RL
-inference images are published alongside them (`:vllm-0.26.0`, `:sglang-0.5.17`).
+inference images are published alongside them (`:vllm-0.26.0`, `:sglang-0.5.17`), pinned as
+`:vllm-0.26.0-1.1.0` and `:sglang-0.5.17-1.1.0`.
 
 To build locally instead: 
 ```bash
