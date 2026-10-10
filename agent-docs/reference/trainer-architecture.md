@@ -433,7 +433,7 @@ but under CP they cover only the local chunk.
 - **DistributedDPOTrainer** — the reference model is never parallelized: under EP/TP a frozen copy is a
   whole dense replica per rank (warned); `precompute_ref_log_probs=True`, or PEFT/LoRA with
   `ref_model=None` (LoRA works under EP, not TP), avoids it.
-- **DistributedDistillationTrainer** — losses `kl_divergence`, `mse`, `soft_cross_entropy`,
+- **DistributedDistillationTrainer** — losses `kl_divergence`, `reverse_kl`, `mse`, `soft_cross_entropy`,
   `cosine_similarity`, `jensen_shannon`, `slim`; the teacher forward runs under `torch.no_grad()` in
   `eval()` mode.
 - **DistributedAsyncEnvironmentalGRPOTrainer** — async multi-turn RL with Ray actors against vLLM or

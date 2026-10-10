@@ -117,7 +117,9 @@ class DistributedDistillationTrainer(StoredMetricsMixin, DistributedTrainerMixin
 
         # The method knobs live on ``args`` (DistillationConfig) and are read there; only the
         # resolved loss callable is worth holding.
-        self.distillation_loss_fn = get_divergence(args.distill_loss)
+        self.distillation_loss_fn = get_divergence(
+            args.distill_loss, jsd_beta=args.distill_jsd_beta, topk=args.distill_topk
+        )
         if args.apply_hard_labels and consumes_hard_labels(self.distillation_loss_fn):
             raise ValueError(
                 f"apply_hard_labels cannot combine with distill_loss={args.distill_loss!r}, which applies its "
@@ -150,6 +152,13 @@ class DistributedDistillationTrainer(StoredMetricsMixin, DistributedTrainerMixin
         self._vocab_width = shared_vocab_width(
             self.model.config, self.teacher_model.config, resolve_tokenizer(self.processing_class), teacher_tokenizer
         )
+        # DistillationConfig can't see the vocabulary, so the top-k bound is checked here.
+        vocab_size = self._vocab_width or self.model.config.get_text_config().vocab_size
+        if self.args.distill_topk is not None and self.args.distill_topk >= vocab_size:
+            raise ValueError(
+                f"distill_topk={self.args.distill_topk} covers the whole vocabulary (vocab_size={vocab_size}). "
+                f"Set distill_topk: null for the full-vocab loss, or a k below the vocab size."
+            )
         device = place_and_freeze(self.teacher_model, self.model)
         logger.info(f"Teacher model moved to {device} and set to eval mode")
 

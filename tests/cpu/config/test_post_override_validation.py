@@ -242,6 +242,14 @@ def test_every_admitted_divergence_resolves_in_the_registry(owner, field_name):
     assert not unresolved, f"{owner.__name__}.{field_name} admits {sorted(unresolved)}, which DIVERGENCES lacks"
 
 
+def test_the_reference_anchor_admits_only_the_divergences_that_take_no_beta():
+    """The anchor resolves its loss with no β, so a β-taking one would raise at trainer construction."""
+    beta_free = {name for name, fn in DIVERGENCES.items() if "jsd_beta" not in inspect.signature(fn).parameters}
+    assert _divergence_choices(SelfDistillationArguments, "reference_kl_loss") == beta_free & _divergence_choices(
+        SDPGArguments, "sdpg_loss"
+    )
+
+
 def test_every_registered_divergence_is_admitted_by_some_arm():
     """A registry entry no Literal admits is dead code that a YAML can never reach."""
     admitted = set().union(*(_divergence_choices(owner, field_name) for owner, field_name in _DIVERGENCE_FIELDS))

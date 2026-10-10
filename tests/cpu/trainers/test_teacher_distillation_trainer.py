@@ -28,9 +28,10 @@ from transformers import Trainer
 
 import scripts.training.distillation.teacher_distill as teacher_distill_script
 import src.trainers.distillation.teacher_distillation as teacher_distillation
+from src.args.mixins import DEFAULT_JSD_BETA
 from src.data.spans import LABEL_IGNORE_INDEX
 from src.distributed.parallelism_config import ParallelismConfig
-from src.trainers.distillation.losses import get_divergence
+from src.trainers.distillation.losses import forward_kl_loss, generalized_jsd_loss, get_divergence, teacher_topk_loss
 from src.trainers.distillation.teacher_distillation import DistributedDistillationTrainer
 from src.training.script_runner import ScriptRuntime
 from tests.common.models import QWEN3_0_6B
@@ -76,6 +77,17 @@ class _Tokenizer:
 
 
 TOKENS = {f"t{i}": i for i in range(VOCAB)}
+
+
+def _args(**overrides) -> types.SimpleNamespace:
+    """The ``DistillationConfig`` loss knobs the constructor reads, at their defaults unless overridden."""
+    defaults = {
+        "distill_loss": "kl_divergence",
+        "apply_hard_labels": False,
+        "distill_jsd_beta": DEFAULT_JSD_BETA,
+        "distill_topk": None,
+    }
+    return types.SimpleNamespace(**{**defaults, **overrides})
 
 
 def _trainer(distill_loss="kl_divergence", *, apply_hard_labels=False, alpha=ALPHA, peft_casted=False):
@@ -204,7 +216,25 @@ def test_slim_takes_its_own_gold_token_weight():
 def test_the_hard_label_gate_is_refused_beside_a_loss_that_weights_gold_tokens_itself():
     """slim applies its own gold-token weight, so the gate on top would count it twice."""
     with pytest.raises(ValueError, match="apply_hard_labels cannot combine with distill_loss='slim'"):
-        _construct(types.SimpleNamespace(distill_loss="slim", apply_hard_labels=True))
+        _construct(_args(distill_loss="slim", apply_hard_labels=True))
+
+
+def test_the_trainer_scores_jensen_shannon_at_the_configured_beta():
+    student, teacher = torch.randn(2, 2, 3, VOCAB, generator=torch.Generator().manual_seed(2))
+    trainer = _construct(_args(distill_loss="jensen_shannon", distill_jsd_beta=0.3))
+    assert torch.equal(
+        trainer.distillation_loss_fn(student, teacher, TEMPERATURE),
+        generalized_jsd_loss(student, teacher, TEMPERATURE, jsd_beta=0.3),
+    )
+
+
+def test_the_trainer_scores_the_configured_teacher_topk():
+    student, teacher = torch.randn(2, 2, 3, VOCAB, generator=torch.Generator().manual_seed(3))
+    trainer = _construct(_args(distill_topk=3))
+    assert torch.equal(
+        trainer.distillation_loss_fn(student, teacher, TEMPERATURE),
+        teacher_topk_loss(student, teacher, TEMPERATURE, loss_fn=forward_kl_loss, topk=3),
+    )
 
 
 def test_a_casted_peft_student_forwards_under_bf16_autocast():
@@ -227,9 +257,7 @@ def test_the_trainer_wraps_peft_through_prepare_peft_model_and_keeps_its_cast_fl
     """The PEFT wrap lives in the trainer, as in every sibling, so the cast flag reaches compute_loss."""
     peft_config, wrapped = LoraConfig(), nn.Linear(2, 2)
     with mock.patch.object(teacher_distillation, "prepare_peft_model", return_value=(wrapped, True)) as prepare:
-        trainer = _construct(
-            types.SimpleNamespace(distill_loss="kl_divergence", apply_hard_labels=False), peft_config=peft_config
-        )
+        trainer = _construct(_args(), peft_config=peft_config)
     assert prepare.call_args.args[1] is peft_config
     assert trainer.model is wrapped
     assert trainer._peft_has_been_casted_to_bf16 is True
@@ -245,8 +273,9 @@ def test_the_teacher_tokenizer_is_keyword_only_so_positional_callers_keep_their_
     ]
 
 
-def _setup(student_rows, teacher_rows, teacher_tokens=TOKENS):
+def _setup(student_rows, teacher_rows, teacher_tokens=TOKENS, topk=None):
     trainer = object.__new__(DistributedDistillationTrainer)
+    trainer.args = _args(distill_topk=topk)
     trainer.model = _TokenTableModel(seed=0, rows=student_rows)
     trainer.teacher_model = _TokenTableModel(seed=1, rows=teacher_rows)
     trainer.processing_class = _Tokenizer(TOKENS)
@@ -278,6 +307,23 @@ def test_embedding_padding_alone_is_compared_over_the_tokenizer_ids():
     reference.teacher_model.table = nn.Parameter(trainer.teacher_model.table.detach()[:, :VOCAB])
     torch.testing.assert_close(_loss(padded), _loss(reference))
     assert not trainer.teacher_model.table.requires_grad, "the teacher must come out frozen"
+
+
+@pytest.mark.parametrize("topk", [VOCAB, VOCAB + 1])
+def test_a_topk_covering_the_whole_vocabulary_is_refused(topk):
+    """``null`` is the full-vocab loss, and a k past the vocabulary would fail in ``torch.topk`` mid-step."""
+    with pytest.raises(ValueError, match="covers the whole vocabulary"):
+        _setup(VOCAB, VOCAB, topk=topk)
+
+
+def test_a_topk_one_below_the_vocabulary_is_accepted():
+    assert not _setup(VOCAB, VOCAB, topk=VOCAB - 1).teacher_model.table.requires_grad
+
+
+def test_the_topk_bound_is_the_compared_width_not_the_padded_rows():
+    """Padded embeddings are sliced to the tokenizer's ids, so k is bounded by those, not the padded rows."""
+    with pytest.raises(ValueError, match=f"vocab_size={VOCAB}"):
+        _setup(VOCAB + 5, VOCAB, topk=VOCAB)
 
 
 class _TeacherWeightsLoaded(Exception):

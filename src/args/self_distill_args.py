@@ -3,7 +3,7 @@
 from dataclasses import dataclass, field, fields
 from typing import ClassVar
 
-from src.args.mixins import DEFAULT_ANSWER_FIELD, SDPGArguments, SelfDistillationLoss, format_field_names
+from src.args.mixins import DEFAULT_ANSWER_FIELD, ReferenceKLLoss, SDPGArguments, format_field_names
 from src.args.sft_args import SFTScriptArguments
 from src.args.validation import require_finite, require_positive
 
@@ -47,9 +47,12 @@ class SelfDistillationArguments(SFTScriptArguments, SDPGArguments):
             "(no reference model is loaded)."
         },
     )
-    reference_kl_loss: SelfDistillationLoss = field(
+    reference_kl_loss: ReferenceKLLoss = field(
         default="unnormalized_kl",
-        metadata={"help": "Reference-policy regularizer: 'unnormalized_kl' (k3/UKL), 'reverse_kl', or 'forward_kl'."},
+        metadata={
+            "help": "Reference-policy regularizer: 'unnormalized_kl' (k3/UKL), 'reverse_kl', or 'forward_kl'. "
+            "Not 'jensen_shannon': the reference term has no β of its own."
+        },
     )
     reference_model_name_or_path: str | None = field(
         default=None,

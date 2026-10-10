@@ -17,7 +17,7 @@ class OPDTermMixin:
         """Pop the SDPG tunables from the ctor ``kwargs`` onto ``self``, under the names and defaults
         :class:`SDPGArguments` declares."""
         vars(self).update(SDPGArguments.pop_from(kwargs, exclude=exclude))
-        self.sdpg_loss_fn = get_divergence(self.sdpg_loss)
+        self.sdpg_loss_fn = get_divergence(self.sdpg_loss, jsd_beta=self.sdpg_jsd_beta)
 
     def _opd_beta(self) -> float:
         """The OPD coefficient ``beta(k)`` at the current optimizer step."""

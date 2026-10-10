@@ -27,8 +27,13 @@ _RLRR_ARG_SPELLINGS = {"lam": "rlrr_lambda"}
 
 # The OPD arms' names in the trainer-side divergence registry (``losses.DIVERGENCES``), pinned to it by a
 # test: the args layer imports no trainer. The annotation gates YAML/CLI and SDPGArguments validates
-# against it.
-SelfDistillationLoss = Literal["reverse_kl", "forward_kl", "unnormalized_kl"]
+# against it. The reference anchor takes the β-free subset: it has no β of its own to give
+# ``jensen_shannon``.
+ReferenceKLLoss = Literal["reverse_kl", "forward_kl", "unnormalized_kl"]
+SelfDistillationLoss = Literal[ReferenceKLLoss, "jensen_shannon"]
+
+# Default generalized-JSD β, at which the divergence is the symmetric JSD.
+DEFAULT_JSD_BETA = 0.5
 
 # The dataset column a ground-truth answer is read from unless a config renames it.
 DEFAULT_ANSWER_FIELD = "answer"
@@ -459,7 +464,17 @@ class SDPGArguments(RangeValidatedConfig):
     )
     sdpg_loss: SelfDistillationLoss = field(
         default="reverse_kl",
-        metadata={"help": "OPD loss: 'reverse_kl' (SDPG), 'forward_kl', or 'unnormalized_kl' (k3/UKL)."},
+        metadata={
+            "help": "OPD loss: 'reverse_kl' (SDPG), 'forward_kl', 'unnormalized_kl' (k3/UKL), or "
+            "'jensen_shannon' (generalized JSD; β set by sdpg_jsd_beta)."
+        },
+    )
+    sdpg_jsd_beta: float = field(
+        default=DEFAULT_JSD_BETA,
+        metadata={
+            "help": "Generalized-JSD β in [0, 1] for sdpg_loss: jensen_shannon. 0 = forward KL, "
+            "1 = reverse KL, 0.5 = symmetric JSD. Any other value needs sdpg_loss: jensen_shannon."
+        },
     )
     sdpg_temperature: float = field(
         default=1.0,
@@ -497,6 +512,16 @@ class SDPGArguments(RangeValidatedConfig):
         super()._validate_ranges()
         if self.sdpg_loss not in get_args(SelfDistillationLoss):
             raise ValueError(f"sdpg_loss must be one of {get_args(SelfDistillationLoss)}, got {self.sdpg_loss!r}")
+        require_finite(type(self).__name__, sdpg_jsd_beta=self.sdpg_jsd_beta)
+        if not 0.0 <= self.sdpg_jsd_beta <= 1.0:
+            raise ValueError(f"sdpg_jsd_beta must be in [0, 1], got {self.sdpg_jsd_beta}")
+        # Every other loss ignores β, so a set β with one of them is a config that does not train
+        # what it states.
+        if self.sdpg_jsd_beta != DEFAULT_JSD_BETA and self.sdpg_loss != "jensen_shannon":
+            raise ValueError(
+                f"sdpg_jsd_beta={self.sdpg_jsd_beta} only applies to sdpg_loss: jensen_shannon, got "
+                f"sdpg_loss={self.sdpg_loss!r}. Set sdpg_loss: jensen_shannon, or drop sdpg_jsd_beta."
+            )
         # Divides both distributions' logits: zero turns them infinite and NaNs the OPD loss without a
         # raise, a negative one inverts them.
         require_positive(type(self).__name__, sdpg_temperature=self.sdpg_temperature)
