@@ -46,7 +46,7 @@ docker tag  public.ecr.aws/whitecircle/halo:blackwell halo:blackwell
 
 Each moving tag has immutable SemVer pins (`blackwell-1.1.0`); there is deliberately no `latest` — it would let a Hopper host silently pull a Blackwell image.
 
-**Build locally** — credential-free, no token or secret needed. The `make` targets pass the `SOURCE_REVISION` build arg that busts the source-COPY cache:
+**Build locally** — credential-free, no token or secret needed. The `make` targets pass the `SOURCE_REVISION` build arg that busts the source-COPY cache and labels the image with its commit:
 
 ```bash
 make build-blackwell     # or: make build-hopper
