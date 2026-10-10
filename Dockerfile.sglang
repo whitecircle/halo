@@ -8,15 +8,10 @@
 ARG SGLANG_VERSION=0.5.17
 FROM lmsysorg/sglang:v${SGLANG_VERSION}
 
-# Label metadata; make build-sglang passes VERSION and BUILD_DATE.
-ARG VERSION=1.1.0
-ARG BUILD_DATE
-
+# Static label metadata; the per-build version, date and revision labels are set last.
 LABEL maintainer="White Circle <hello@whitecircle.com>"
 LABEL org.opencontainers.image.title="Halo SGLang Server"
 LABEL org.opencontainers.image.description="SGLang 0.5.17 with NCCL matched to the Halo training image (RL weight sync over /update_weights_from_distributed)"
-LABEL org.opencontainers.image.version="${VERSION}"
-LABEL org.opencontainers.image.created="${BUILD_DATE}"
 LABEL org.opencontainers.image.vendor="White Circle"
 LABEL org.opencontainers.image.source="https://github.com/whitecircle/halo"
 LABEL org.opencontainers.image.licenses="LicenseRef-Halo"
@@ -107,3 +102,13 @@ RUN python3 /opt/halo/patch_sglang.py
 # request ahead of a live one and fails the build unless the live one reads its own log-probs.
 COPY docker/sglang/patches/verify_prefill_logprob_cursor.py /tmp/verify_prefill_logprob_cursor.py
 RUN python3 /tmp/verify_prefill_logprob_cursor.py && rm /tmp/verify_prefill_logprob_cursor.py
+
+# Per-build labels, set last: an ARG in scope reaches every later RUN as environment, so a new date or
+# commit above the build steps would re-key their cache. make build-sglang passes all three, and
+# the base's revision label (its engine's commit) is replaced.
+ARG VERSION=1.1.0
+ARG BUILD_DATE
+ARG SOURCE_REVISION=dev
+LABEL org.opencontainers.image.version="${VERSION}"
+LABEL org.opencontainers.image.created="${BUILD_DATE}"
+LABEL org.opencontainers.image.revision="${SOURCE_REVISION}"
