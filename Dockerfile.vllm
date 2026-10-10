@@ -7,15 +7,10 @@
 ARG VLLM_VERSION=0.26.0
 FROM vllm/vllm-openai:v${VLLM_VERSION}
 
-# Label metadata; make build-vllm passes VERSION, BUILD_DATE and SOURCE_REVISION (labeled last).
-ARG VERSION=1.1.0
-ARG BUILD_DATE
-
+# Static label metadata; the per-build version, date and revision labels are set last.
 LABEL maintainer="White Circle <hello@whitecircle.com>"
 LABEL org.opencontainers.image.title="Halo vLLM Server"
 LABEL org.opencontainers.image.description="vLLM 0.26.0 (cu13) with NCCL weight transfer + routed-experts capture + tool calling"
-LABEL org.opencontainers.image.version="${VERSION}"
-LABEL org.opencontainers.image.created="${BUILD_DATE}"
 LABEL org.opencontainers.image.vendor="White Circle"
 LABEL org.opencontainers.image.source="https://github.com/whitecircle/halo"
 LABEL org.opencontainers.image.licenses="LicenseRef-Halo"
@@ -172,7 +167,12 @@ ENTRYPOINT ["vllm", "serve"]
 # with weight transfer: the auto-selected Blackwell backends repack the expert weights.
 CMD ["--weight-transfer-config", "{\"backend\": \"nccl\"}", "--moe-backend", "triton", "--enable-auto-tool-choice", "--tool-call-parser", "hermes"]
 
-# Halo's commit, set last so a new revision changes only this layer (the base carries its
-# engine's own revision label).
+# Per-build labels, set last: an ARG in scope reaches every later RUN as environment, so a new date or
+# commit above the build steps would re-key their cache. make build-vllm passes all three, and
+# the base's revision label (its engine's commit) is replaced.
+ARG VERSION=1.1.0
+ARG BUILD_DATE
 ARG SOURCE_REVISION=dev
+LABEL org.opencontainers.image.version="${VERSION}"
+LABEL org.opencontainers.image.created="${BUILD_DATE}"
 LABEL org.opencontainers.image.revision="${SOURCE_REVISION}"
