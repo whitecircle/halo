@@ -7,7 +7,7 @@
 ARG VLLM_VERSION=0.26.0
 FROM vllm/vllm-openai:v${VLLM_VERSION}
 
-# Label metadata; make build-vllm passes VERSION and BUILD_DATE.
+# Label metadata; make build-vllm passes VERSION, BUILD_DATE and SOURCE_REVISION (labeled last).
 ARG VERSION=1.1.0
 ARG BUILD_DATE
 
@@ -171,3 +171,8 @@ ENTRYPOINT ["vllm", "serve"]
 # Default args; docker-compose overrides CMD with model + args. --moe-backend triton is required
 # with weight transfer: the auto-selected Blackwell backends repack the expert weights.
 CMD ["--weight-transfer-config", "{\"backend\": \"nccl\"}", "--moe-backend", "triton", "--enable-auto-tool-choice", "--tool-call-parser", "hermes"]
+
+# Halo's commit, set last so a new revision changes only this layer (the base carries its
+# engine's own revision label).
+ARG SOURCE_REVISION=dev
+LABEL org.opencontainers.image.revision="${SOURCE_REVISION}"

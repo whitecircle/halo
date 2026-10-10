@@ -273,9 +273,11 @@ RUN /tmp/install_efa_userspace.sh \
 RUN pip install --ignore-installed --no-deps PyYAML pygments wheel
 
 # Pre-install source-built deps against the system torch (uv's isolated PEP-517 env would pull a
-# mismatched PyPI torch and abort). Exact uv.lock versions; bump together with the lock.
+# mismatched PyPI torch and abort). Exact uv.lock versions; bump together with the lock. --no-deps:
+# their dependencies come from the locked install below, and a fresh resolve here would leave
+# unlocked packages in the image.
 RUN export TORCH_CUDA_ARCH_LIST=$(cat /etc/cuda_arch) \
-    && pip install --no-build-isolation "causal-conv1d==1.6.2.post1" "flash-linear-attention==0.4.2"
+    && pip install --no-build-isolation --no-deps "causal-conv1d==1.6.2.post1" "flash-linear-attention==0.4.2"
 
 # Remaining locked deps (flat export; compiled deps already satisfy their pins and are skipped).
 # The export carries the dev group — this image is also the test/docs/lint runtime.
@@ -319,7 +321,10 @@ RUN echo "Building Halo source revision: ${SOURCE_REVISION}"
 
 LABEL org.opencontainers.image.revision="${SOURCE_REVISION}"
 ARG VERSION=1.1.0
+ARG BUILD_DATE
 LABEL version="${VERSION}"
+LABEL org.opencontainers.image.version="${VERSION}"
+LABEL org.opencontainers.image.created="${BUILD_DATE}"
 
 COPY src/ ./src/
 COPY scripts/ ./scripts/

@@ -8,7 +8,7 @@
 ARG SGLANG_VERSION=0.5.17
 FROM lmsysorg/sglang:v${SGLANG_VERSION}
 
-# Label metadata; make build-sglang passes VERSION and BUILD_DATE.
+# Label metadata; make build-sglang passes VERSION, BUILD_DATE and SOURCE_REVISION (labeled last).
 ARG VERSION=1.1.0
 ARG BUILD_DATE
 
@@ -107,3 +107,8 @@ RUN python3 /opt/halo/patch_sglang.py
 # request ahead of a live one and fails the build unless the live one reads its own log-probs.
 COPY docker/sglang/patches/verify_prefill_logprob_cursor.py /tmp/verify_prefill_logprob_cursor.py
 RUN python3 /tmp/verify_prefill_logprob_cursor.py && rm /tmp/verify_prefill_logprob_cursor.py
+
+# Halo's commit, set last so a new revision changes only this layer (the base carries its
+# engine's own revision label).
+ARG SOURCE_REVISION=dev
+LABEL org.opencontainers.image.revision="${SOURCE_REVISION}"

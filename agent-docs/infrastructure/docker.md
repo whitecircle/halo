@@ -127,14 +127,18 @@ docker build --build-arg SOURCE_REVISION=$(git rev-parse --short HEAD) \
   requirements file, then `uv pip install --system --no-deps -r` it (hatchling backend, no venv).
 
     `--no-deps` is load-bearing: without it the resolver reinstalls torch, Flash Attention and DeepEP over
-    the source builds earlier layers compiled.
+    the source builds earlier layers compiled. The source-built pre-installs (causal-conv1d,
+    flash-linear-attention) pass it too: their dependencies come from the lock, and a fresh resolve would
+    leave unlocked packages in the image.
 
 - **`SOURCE_REVISION`** busts the source-COPY cache; `make build-*` stamps it with the short git SHA, so a
   code-only change reruns only the COPY + editable reinstall while every heavy dep layer stays cached.
   Pass it explicitly on a raw `docker build`.
 
     It guards against BuildKit occasionally serving a stale `src/` snapshot. The same value is stamped as
-    `org.opencontainers.image.revision`, so
+    `org.opencontainers.image.revision` on all four images (the rollout images would otherwise report their
+    engine's upstream commit), with `VERSION` and `BUILD_DATE` as `org.opencontainers.image.version` and
+    `.created`, so
     `docker inspect --format '{{index .Config.Labels "org.opencontainers.image.revision"}}' halo:blackwell`
     reports which commit an image carries.
 
