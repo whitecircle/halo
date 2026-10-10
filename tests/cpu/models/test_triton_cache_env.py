@@ -7,7 +7,8 @@ sequence length on every run (a per-rank straggler stall, tens of seconds each).
 derive from ``HF_HOME`` exactly like the FA4 kernel cache, must never override an explicit operator
 choice, must actually be applied by the run's setup — an anchor nothing calls is no anchor — and must
 not point at a location it cannot write: a shared ``HF_HOME`` mounted read-only fails the first
-compile with EROFS, so that case falls back to the temp dir and says so.
+compile with EROFS, so that case falls back to the temp dir, or with no writable location leaves the
+library's own default, and says so.
 
     pytest -m cpu tests/cpu/models/test_triton_cache_env.py
 """
@@ -21,6 +22,7 @@ import os
 import tempfile
 
 import pytest
+from accelerate.state import PartialState
 
 from src.models.patches import attention as attention_mod
 from src.models.patches.attention import anchor_jit_cache_dir
@@ -37,7 +39,9 @@ def temp_root(monkeypatch, tmp_path):
     root.mkdir()
     monkeypatch.setenv("TMPDIR", str(root))
     monkeypatch.setattr(tempfile, "tempdir", None)
-    monkeypatch.delenv(_TRITON_VAR, raising=False)
+    # Set first so monkeypatch records the variable and also removes what the anchor writes.
+    monkeypatch.setenv(_TRITON_VAR, "")
+    monkeypatch.delenv(_TRITON_VAR)
     return root
 
 
@@ -87,14 +91,44 @@ def test_read_only_hf_home_falls_back_to_tempdir_with_a_warning(monkeypatch, tem
     hf_home.mkdir()
     monkeypatch.setenv("HF_HOME", str(hf_home))
     _deny_writes_under(monkeypatch, hf_home)
+    # No accelerate state, as when the GPU harness anchors the FA4 cache: accelerate's logging adapter
+    # raises then, so the warning has to go through the stdlib logger.
+    monkeypatch.setattr(PartialState, "_shared_state", {})
     with caplog.at_level(logging.WARNING, logger=attention_mod.__name__):
         anchor_jit_cache_dir(_TRITON_VAR, _TRITON_SUBDIR)
     assert os.environ[_TRITON_VAR] == os.path.join(str(temp_root), _TRITON_SUBDIR), (
         "a read-only HF_HOME must not receive the cache: the first compile would fail with EROFS"
     )
-    assert any(_TRITON_VAR in record.getMessage() for record in caplog.records), (
-        "the fallback costs a recompile in every new container and must be reported"
-    )
+    assert any(_TRITON_VAR in record.getMessage() for record in caplog.records), "the fallback must be reported"
+
+
+def test_no_writable_location_leaves_the_library_default(monkeypatch, temp_root, tmp_path, caplog):
+    """A temp dir another user owns is no fallback: the variable stays unset for the library's default."""
+    hf_home = tmp_path / "hf"
+    hf_home.mkdir()
+    monkeypatch.setenv("HF_HOME", str(hf_home))
+    _deny_writes_under(monkeypatch, hf_home)
+    _deny_writes_under(monkeypatch, temp_root)
+    with caplog.at_level(logging.WARNING, logger=attention_mod.__name__):
+        anchor_jit_cache_dir(_TRITON_VAR, _TRITON_SUBDIR)
+    assert _TRITON_VAR not in os.environ, "an unwritable fallback was set, so the first compile would still fail"
+    assert any(_TRITON_VAR in record.getMessage() for record in caplog.records), "leaving it unset must be reported"
+
+
+@pytest.mark.parametrize("kind", ["file", "dangling link"])
+def test_a_non_directory_at_the_cache_path_falls_back(monkeypatch, temp_root, tmp_path, kind):
+    """Triton cannot create its cache under a file or a broken link, even an executable one."""
+    hf_home = tmp_path / "hf"
+    hf_home.mkdir()
+    target = hf_home / _TRITON_SUBDIR
+    if kind == "file":
+        target.write_text("")
+        target.chmod(0o755)
+    else:
+        target.symlink_to(tmp_path / "missing")
+    monkeypatch.setenv("HF_HOME", str(hf_home))
+    anchor_jit_cache_dir(_TRITON_VAR, _TRITON_SUBDIR)
+    assert os.environ[_TRITON_VAR] == os.path.join(str(temp_root), _TRITON_SUBDIR)
 
 
 def test_read_only_cache_dir_under_a_writable_hf_home_falls_back(monkeypatch, temp_root, tmp_path):
