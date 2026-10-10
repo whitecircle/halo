@@ -51,7 +51,7 @@ On 8× B300, Halo trains gpt-oss-20b at up to 3.5× the throughput of stock TRL 
 
 <!-- Newest first. This feed and GitHub Releases are Halo's changelog. -->
 
-- **2026-10-09 — Halo 1.1.0.** Faster MoE training, exact resume and more reliable async RL: fused
+- **2026-10-10 — Halo 1.1.0.** Faster MoE training, exact resume and more reliable async RL: fused
   MoE kernels and FlexAttention on sliding-window layers (1.67× over Halo 1.0.0 for Gemma 4 26B-A4B on
   two GPUs), an atomic-free expert permute (up to 27% faster for gpt-oss at EP8), checkpoint and resume
   checks that stop the run instead of failing silently, LoRA syncs that leave the frozen base untouched,
