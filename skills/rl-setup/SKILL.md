@@ -136,7 +136,7 @@ the sync.
 
 ## Sources of truth
 
-`wiring.md` + `agent-docs/training-methods/grpo/` document the setup (`rewards.md` owns the
+`wiring.md` + `agent-docs/training-methods/` document the setup (`grpo/rewards/README.md` owns the
 term list, `async-grpo/setup.md` the servers and launch). The code is the **ultimate** authority:
 `src/trainers/grpo/environmental.py`, `src/distributed/nccl/` (the vendored weight-sync client), and
 `Dockerfile.vllm` decide the real handshake — when a doc, this skill, or memory disagrees, or you are
