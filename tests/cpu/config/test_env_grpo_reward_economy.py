@@ -14,11 +14,13 @@ cap plus the floor's weight, or past a budget the larger of the two (an episode 
 budget leaves it above the floor's reference). No shipped recipe prices every token, so those relations bind on a
 recipe that does, and a priced copy of a shipped recipe shows they refuse a bad one.
 
-The episode output budget (``rollout_max_episode_tokens``) is the other relation: it has to bind below
+The episode output budget (``rollout_max_episode_tokens``) is another relation: it has to bind below
 what ``max_turns`` turns of ``rollout_max_tokens`` could sample, or it bounds nothing; on vLLM the answer
 room (``rollout_max_answer_tokens``) has to be what a turn keeps past the cap the engine enforces at every level
 (the level's budget, or under a soft one the ceiling that room leaves of the turn). And the per-turn thinking budgets are
-one contract at every family, so a recipe states the same reasoning economy whichever model it trains.
+one contract at every family, so a recipe states the same reasoning economy whichever model it trains. The audit
+judge is the last: its process flags price a scratchpad run that tested nothing and only log working-out in a
+run that did, and a verdict it never reached voids the episode.
 
 Run: python tests/cpu/config/test_env_grpo_reward_economy.py  (or pytest)
 """
@@ -30,6 +32,7 @@ from ruamel.yaml import YAML
 
 from src.configs.async_training_config import AsyncTrainingConfig
 from src.environments.base import VALID_REASONING_EFFORTS
+from src.rewards.terms import ENVIRONMENT_REWARD_SOURCES, JudgeTerm, OnError, parse_reward_terms
 from src.trainers.grpo.reasoning_terms import REASONING_TARGET_SHARE, reasoning_floor_term, reasoning_price_term
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
@@ -135,6 +138,13 @@ def _not_paid_to_reason_more(economy: dict, level: str) -> str | None:
 def _prices_fall_with_level(economy: dict) -> bool:
     prices = [economy["price"][level] for level in VALID_REASONING_EFFORTS]
     return prices == sorted(prices, reverse=True) and len(set(prices)) == 3
+
+
+def _audit(path: Path) -> JudgeTerm:
+    """The recipe's veto judge, parsed as the trainer parses it."""
+    terms = parse_reward_terms(_yaml.load(path)["rewards"], ENVIRONMENT_REWARD_SOURCES)
+    (judge,) = (term for term in terms if isinstance(term, JudgeTerm))
+    return judge
 
 
 def _ids(paths):
@@ -297,6 +307,19 @@ def test_a_higher_level_is_priced_lower_and_asked_for_no_less(path):
     floors = [_floor_tokens(e, level) for level in VALID_REASONING_EFFORTS]
     assert floors == sorted(floors), (
         f"a higher level is asked for less reasoning: {dict(zip(VALID_REASONING_EFFORTS, floors, strict=True))}"
+    )
+
+
+@pytest.mark.parametrize("path", RECIPES, ids=_ids(RECIPES))
+def test_the_audit_judge_prices_a_wasted_run_and_voids_a_verdict_it_never_reached(path):
+    """The judge's process flags price a scratchpad run that could test nothing and only log working-out in a
+    run that did test: a price on the second would teach a policy to submit untested. A verdict the judge
+    never reached voids the episode, so an outage trains nothing instead of every episode unjudged."""
+    judge = _audit(path)
+    assert judge.on_error is OnError.INVALID, f"{path.name}: an unjudged episode stays in training"
+    assert judge.weight * judge.flag_fraction({"wasted_run": True}) < 0, f"{path.name}: a wasted run costs nothing"
+    assert judge.weight * judge.flag_fraction({"reasoning_in_runs": True}) == 0, (
+        f"{path.name}: working-out in a scratchpad run that tested something is priced"
     )
 
 

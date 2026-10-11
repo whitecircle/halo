@@ -36,6 +36,7 @@ from src.environments.base import Message, Trajectory
 from src.environments.episode import RolloutResult
 from src.trainers.grpo.environmental import BatchBuildFence
 from src.trainers.grpo.environmental import DistributedAsyncEnvironmentalGRPOTrainer as Trainer
+from src.trainers.grpo.rollout.trajectory_tokenize import rollout_template_kwargs
 from tests.common.models import GEMMA3_4B_IT, GPT_OSS_20B_OPENAI, QWEN3_0_6B
 from tests.common.tokenizers import try_cached_tokenizer
 
@@ -542,6 +543,34 @@ def test_template_render_failure_is_reported_not_raised(caplog):
         result, row = _row_with_result(stub, messages)
 
     _assert_dropped_not_guessed(stub, result, row, caplog, "cannot render this trajectory")
+
+
+@pytest.mark.parametrize("soft", [True, False])
+def test_every_render_path_restates_the_budget_the_episode_ran_under(soft):
+    """The whole-trajectory render and the per-turn prompt re-render hand the template the level, its budget
+    and whether the engine enforced it, as the trajectory recorded them. A soft flag dropped at either renders
+    the budget as a cut where the engine rendered a target, and every log-prob after that line is scored
+    against a prompt the policy never saw; a flag added to an enforced budget does the reverse."""
+    stub, messages, _ = _case(QWEN3_0_6B, "chat")
+    render, seen = stub._render_messages_to_ids, []
+
+    def _recording(msgs, add_generation_prompt, template_kwargs, include_thinking=True):
+        seen.append(dict(template_kwargs))
+        return render(msgs, add_generation_prompt, template_kwargs, include_thinking)
+
+    stub._render_messages_to_ids = _recording
+    expected = rollout_template_kwargs({}, "high", 16384, soft)
+    assert ("reasoning_budget_soft" in expected) is soft
+    # The per-turn path re-renders a turn's prompt only where the engine returned sampled ids without it.
+    for tokenize, sampled in ((stub._tokenize_trajectory, False), (stub._tokenize_trajectory_turns, True)):
+        seen.clear()
+        trajectory = _trajectory(
+            [replace(m, token_ids=[1, 2, 3]) if sampled and m.role == "assistant" else m for m in messages]
+        )
+        trajectory.reasoning_effort, trajectory.reasoning_budget = "high", 16384
+        trajectory.reasoning_budget_soft = soft
+        tokenize(RolloutResult(prompt="task", trajectory=trajectory))
+        assert seen and all(kwargs == expected for kwargs in seen), (tokenize.__name__, seen)
 
 
 if __name__ == "__main__":

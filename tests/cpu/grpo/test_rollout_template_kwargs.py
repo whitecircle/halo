@@ -63,6 +63,12 @@ def test_a_soft_budget_is_flagged_on_both_sides_and_only_beside_a_budget():
     }
     render_kwargs = rollout_template_kwargs({}, "high", 16384, budget_soft=True)
     assert render_kwargs == {**fields["chat_template_kwargs"], "reasoning_effort": "high"}
+    # SGLang enforces no cap, so the flag is the whole of what tells its template the budget is a target.
+    sglang = generation_control_fields(
+        RolloutConfig(backend="sglang", max_tokens=30000), "high", 16384, budget_soft=True
+    )
+    assert "thinking_token_budget" not in sglang
+    assert sglang["chat_template_kwargs"] == render_kwargs
     enforced = generation_control_fields(RolloutConfig(max_tokens=20000, max_thinking_tokens=4000), "high", 4000)
     assert REASONING_BUDGET_SOFT_TEMPLATE_VAR not in enforced["chat_template_kwargs"]
     assert REASONING_BUDGET_SOFT_TEMPLATE_VAR not in rollout_template_kwargs({}, "high", None, budget_soft=True)

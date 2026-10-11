@@ -822,6 +822,7 @@ def test_a_soft_budget_is_stated_while_the_engine_closes_only_where_the_answer_r
     for level, budget in _ContestEnv.BUDGETS.items():
         soft = _soft(level)
         assert (soft.thinking_budget, soft.thinking_cap, soft.budget_soft) == (budget, _SOFT_CEILING, True)
+        assert soft.turn_thinking_cap() == _SOFT_CEILING, "a turn records the cap the engine closed at, not the budget"
         assert (soft.answer_room, _caps(soft, 0)) == (_ROOM, (_CONTEST_TURN, _SOFT_CEILING))
         reserve = budget // 4
         assert soft.turn_thinking_cap(recovery=True) == reserve
@@ -845,6 +846,21 @@ def test_a_run_cap_is_a_soft_budgets_ceiling_and_without_either_bound_nothing_ca
     assert _retry_caps(bare, 0) == (_CONTEST_TURN, 4096)
 
 
+def test_an_uncapped_soft_turn_needs_its_whole_total_left_of_the_output_budget():
+    """With no ceiling nothing closes the reasoning below the turn total, so no part of the turn is answer room
+    a narrowed turn could keep: a turn starts only while the output budget still holds the whole total, and
+    never narrower. An enforced level under the same budget narrows instead, down to its answer room."""
+    bare = episode.bind_episode_effort(
+        {"reasoning_effort": "high"}, _soft_env(), max_tokens=_CONTEST_TURN, max_episode_tokens=_CONTEST_EPISODE
+    )
+    assert bare.answer_room == _CONTEST_TURN
+    last_start = _CONTEST_EPISODE - _CONTEST_TURN
+    assert _caps(bare, last_start) == (_CONTEST_TURN, None)
+    assert _caps(bare, last_start + 1) is None
+    enforced = _contest("high", answer=None, episode_tokens=_CONTEST_EPISODE)
+    assert _caps(enforced, last_start + 1) == (_CONTEST_TURN - 1, 16384 - 1)
+
+
 def test_a_soft_budget_at_or_past_its_ceiling_is_refused():
     """At or past its ceiling the engine would enforce the budget, so it is no soft budget: refused whether the
     ceiling is the run's cap, the one the answer room leaves, or the turn itself."""
@@ -854,12 +870,26 @@ def test_a_soft_budget_at_or_past_its_ceiling_is_refused():
         _soft("high", ceiling=12000)
     with pytest.raises(ValueError, match=r"must sit below its ceiling \(10000"):
         _soft("high", answer=20000)
+    with pytest.raises(ValueError, match=r"must sit below its ceiling \(16384"):
+        _soft("high", ceiling=16384)
+    assert _soft("high", ceiling=16385).thinking_cap == 16385
     with pytest.raises(ValueError, match="must sit below rollout_max_tokens"):
         episode.bind_episode_effort(
             {"reasoning_effort": "high"},
             _PlainEnv(reasoning_effort_profiles={"high": {"thinking_tokens": 40000, "enforce_thinking_cap": False}}),
             max_tokens=_CONTEST_TURN,
         )
+
+
+def test_a_soft_levels_ceiling_at_or_past_the_turn_is_refused():
+    """The engine closes a soft level's reasoning at the run's cap, so a cap at or past the turn total closes
+    nothing and leaves the turn no answer room: refused as it is for a level with no budget of its own."""
+    for cap in (_CONTEST_TURN, _CONTEST_TURN + 1):
+        with pytest.raises(
+            ValueError, match=rf"rollout_max_thinking_tokens \({cap}\) must sit below rollout_max_tokens"
+        ):
+            _soft("high", ceiling=cap, answer=None)
+    assert _soft("high", ceiling=_CONTEST_TURN - 1, answer=None).answer_room == 1
 
 
 async def test_both_drivers_send_the_ceiling_and_state_the_soft_budget(monkeypatch):

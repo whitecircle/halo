@@ -54,7 +54,8 @@ from tests.common.code_contests import (
     retired_budget_phrases,
 )
 
-# The shipped recipes' ladder: effort buys submissions and scratchpad runs as well as thinking.
+# The shipped recipes' interaction ladder under enforced budgets: effort buys submissions and scratchpad runs
+# as well as thinking.
 _RECIPE_PROFILES = {
     "low": {"thinking_tokens": 8192, "max_submissions": 1, "max_test_calls": 2},
     "medium": {"thinking_tokens": 12288, "max_submissions": 2, "max_test_calls": 4},

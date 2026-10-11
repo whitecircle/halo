@@ -85,13 +85,15 @@ class RolloutConfig:
 
     max_thinking_tokens: int | None = None
     """Per-turn reasoning-token cap (vLLM ``thinking_token_budget``): caps CoT, then forces an answer
-    within the rest of ``max_tokens``. A level's ``thinking_tokens`` below it is the turn's cap instead.
-    Requires a server-side reasoning parser. None = only a level's ``thinking_tokens`` caps reasoning, or
-    nothing does."""
+    within the rest of ``max_tokens``. A level's enforced ``thinking_tokens`` below it is the turn's cap
+    instead; a soft level's budget must sit below it, and it is that level's ceiling. Requires a server-side
+    reasoning parser. None = only a level's enforced ``thinking_tokens`` caps reasoning, a soft level's
+    ceiling comes from ``max_answer_tokens``, or nothing does."""
 
     max_answer_tokens: int | None = None
     """The most a turn may generate past its reasoning cap: a turn's ``max_tokens`` is at most that cap
-    (the level's, or a retry's reserve) plus this. None = ``max_tokens`` alone bounds the turn. Mirrors
+    (the level's, or a retry's reserve) plus this. Without ``max_thinking_tokens`` it also sets a soft
+    level's ceiling, ``max_tokens`` less this. None = ``max_tokens`` alone bounds the turn. Mirrors
     ``AsyncTrainingConfig.rollout_max_answer_tokens``."""
 
     reasoning_end_token_id: int | None = None

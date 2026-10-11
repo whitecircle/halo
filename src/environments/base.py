@@ -479,8 +479,9 @@ class BaseEnvironment(ABC):
     EFFORT_PROFILE_KEY_MINIMA: dict[str, int | float] = {"thinking_tokens": 1}
     # Profile keys that take true or false, unioned over the MRO like the minima. ``enforce_thinking_cap``
     # (default true) has the engine close a turn's reasoning at the level's ``thinking_tokens``; false makes
-    # the budget soft — stated to the model and read by the reasoning terms, never enforced (the run's
-    # ``rollout_max_thinking_tokens`` alone caps the reasoning then).
+    # the budget soft — stated to the model and read by the reasoning terms, never enforced: the engine then
+    # closes the reasoning only at the run's ceiling (``rollout_max_thinking_tokens``, else where
+    # ``rollout_max_answer_tokens`` is left of the turn) and at a retry's reserve.
     EFFORT_PROFILE_FLAGS: frozenset[str] = frozenset({"enforce_thinking_cap"})
 
     def __init__(

@@ -330,7 +330,7 @@ def parse_args() -> argparse.Namespace:
         )
         + ", or a reasoning_effort_profiles override in --env_kwargs)"
         + f" plus {SOLUTION_HEADROOM_TOKENS} solution headroom; under --reasoning_effort {NO_REASONING_EFFORT}, "
-        f"the training rollout's default {DEFAULT_ROLLOUT_MAX_TOKENS}.",
+        f"the training rollout's default {DEFAULT_ROLLOUT_MAX_TOKENS}, and under a soft budget the larger of the two.",
     )
     p.add_argument("--max_workers", type=int, default=16, help="Concurrent episodes.")
     p.add_argument(

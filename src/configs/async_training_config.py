@@ -469,8 +469,8 @@ class AsyncTrainingConfig(AdvantageShapingArguments, GRPOEarlyStopArguments, Chu
         metadata={
             "help": "Price only the reasoning tokens each turn spends past its level's soft per-turn budget (a level "
             "with enforce_thinking_cap: false), summed over turns, instead of every reasoning token: the soft "
-            "budget's ceiling, free within it. Needs reasoning_price; a run where a drawable level's budget is enforced "
-            "or unset is refused at trainer construction."
+            "budget's ceiling, free within it. Needs reasoning_price; a run where a drawable level's budget is "
+            "enforced or unset is refused at trainer construction."
         },
     )
     reasoning_price_cap: float = field(
@@ -487,9 +487,9 @@ class AsyncTrainingConfig(AdvantageShapingArguments, GRPOEarlyStopArguments, Chu
         metadata={
             "help": "Weight of the reasoning under-use floor (0 = off): an episode whose reasoning tokens, summed "
             "over its turns, fall short of three quarters of its per-turn thinking budget (its level's "
-            "thinking_tokens, enforced or soft, clamped by rollout_max_thinking_tokens) pays -weight x shortfall / that "
-            "reference. The one term that "
-            "pays for more reasoning; it resists reasoning shrinking toward nothing. Keep it, plus "
+            "thinking_tokens, enforced or soft, an enforced one clamped by rollout_max_thinking_tokens) pays "
+            "-weight x shortfall / that reference. The one term that pays for more reasoning; it resists "
+            "reasoning shrinking toward nothing. Keep it, plus "
             "reasoning_price_cap while the price is on, below what the environment charges for the decisions it "
             "prices (a resubmission, in code contests); under reasoning_price_past_budget each alone, since an "
             "episode then pays one at most. An episode with no thinking budget is free of it, and a "

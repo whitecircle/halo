@@ -39,8 +39,8 @@ ENGINE_SERIALIZATION_FAULT = "not JSON compliant"
 # vLLM's and SGLang's "maximum context length" / "model's context length", vLLM's "maximum model
 # length", and the OpenAI API's error code.
 CONTEXT_OVERFLOW_MARKERS = ("context length", "maximum model length", "context_length_exceeded")
-# The share of its level's reasoning cap a turn retrying an unproductive one gets: room to read the
-# nudge or the refusal, fix and act, never a second budget a cut could buy.
+# The share of its level's reasoning budget a turn retrying an unproductive one gets, as a hard cap: room to
+# read the nudge or the refusal, fix and act, never a second budget a cut could buy.
 RECOVERY_THINKING_SHARE = 0.25
 
 
@@ -162,13 +162,17 @@ def bind_episode_effort(
         )
     caps = [cap for cap in (level_budget, None if soft else ceiling) if cap is not None]
     budget = min(caps) if caps else None
-    if budget is not None and budget >= max_tokens:
-        source = f"the {level!r} level's thinking_tokens" if budget == level_budget else "rollout_max_thinking_tokens"
-        raise ValueError(
-            f"{source} ({budget}) must sit below rollout_max_tokens ({max_tokens}), which bounds the whole turn: "
-            "at or above it the turn has no answer room and is cut mid-reasoning."
-        )
     thinking_cap = ceiling if soft else budget
+    # The budget, and under a soft one the ceiling the engine closes at: each has to leave the turn room.
+    for bound in (budget, thinking_cap):
+        if bound is not None and bound >= max_tokens:
+            source = (
+                f"the {level!r} level's thinking_tokens" if bound == level_budget else "rollout_max_thinking_tokens"
+            )
+            raise ValueError(
+                f"{source} ({bound}) must sit below rollout_max_tokens ({max_tokens}), which bounds the whole turn: "
+                "at or above it the turn has no answer room and is cut mid-reasoning."
+            )
     if max_episode_tokens is not None and max_episode_tokens < max_tokens:
         raise ValueError(
             f"rollout_max_episode_tokens ({max_episode_tokens}) must be at least rollout_max_tokens ({max_tokens}), "

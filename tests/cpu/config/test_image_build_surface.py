@@ -1,11 +1,12 @@
 #!/usr/bin/env python
 """Repo pins on the image build surface: locked dependencies and provenance labels.
 
-A ``pip install`` in the training image that resolves dependencies for a lock-pinned package pulls
-whatever PyPI serves that day. Before the locked install, the install replaces only the packages the
-lock names, so every other package the resolve brought in stays in the image, unlocked; after it, the
-resolve moves locked packages off their pins. Each such install must pass ``--no-deps``, and the
-optional extras come from the lock export itself, which ``make install`` exports the same way.
+A ``pip install`` in the training image that resolves dependencies for a package the lock names pulls
+whatever PyPI serves that day. Ahead of the locked install, that install replaces only the packages the
+lock names, so every other package the resolve brought in stays in the image, unlocked; after it, a
+resolve moves locked packages off their pins. Each such install must pass ``--no-deps``, however it
+spells the requirement, and the optional extras come from the lock export itself, which ``make install``
+exports the same way.
 
 Each image labels itself with the Halo commit, version and build date it was built from. Without
 their own labels, the rollout images report their engine's upstream revision and the training image
@@ -25,10 +26,17 @@ from tests.common.utils import REPO_ROOT
 # The training image's locked install: the one place its dependencies are resolved from.
 LOCKED_INSTALL = "uv pip install --system --no-deps -r"
 LOCK_EXPORT = "uv export --locked"
-PIP_INSTALL = re.compile(r"\bpip3?\s+install\b")
+PIP_INSTALL = re.compile(r"\bpip3?\b(?:\s+-\S+)*\s+install\b")
 COMMAND_SEPARATOR = re.compile(r"&&|\|\||;")
-PINNED_REQUIREMENT = re.compile(r'"?([A-Za-z0-9][A-Za-z0-9._-]*)(?:\[[^\]]*\])?==[^\s"]+"?')
+INSTALL_ARGUMENT = re.compile(r'"[^"]*"|\S+')
+REQUIREMENT = re.compile(r'"?([A-Za-z0-9][A-Za-z0-9._-]*)(?:\[[^\]]*\])?(?:\s*(?:===?|~=|!=|[<>]=?)[^"]*)?"?')
+# pip options whose next argument is their value, never a requirement.
+VALUE_OPTIONS = frozenset({"-r", "--requirement", "-c", "--constraint", "-i", "--index-url", "--extra-index-url"})
+# Packages installed by a resolve on purpose, ahead of every source build: the build tool, and the torch the
+# source builds compile against, from the PyTorch index.
+BOOTSTRAP_PACKAGES = frozenset({"ninja", "torch"})
 EXPORTED_EXTRA = re.compile(r"--extra[ =](\S+)")
+ALL_EXTRAS = "--all-extras"
 DOCKERFILES = sorted(path.name for path in REPO_ROOT.glob("Dockerfile*"))
 # Each provenance label and the build arg it is stamped from.
 PROVENANCE_LABELS = {
@@ -58,28 +66,47 @@ def _locked_packages() -> set[str]:
     return {canonicalize_name(package["name"]) for package in lock["package"]}
 
 
+def _requirement_names(arguments: str) -> list[str]:
+    """The package names an install's arguments name, in any spelling: bare, pinned, ranged, with extras.
+    Options, their values, paths and shell variables are not requirements."""
+    names, option_value = [], False
+    for argument in INSTALL_ARGUMENT.findall(arguments):
+        if option_value or argument.startswith(("-", "$", ".")) or "/" in argument:
+            option_value = argument in VALUE_OPTIONS
+            continue
+        if requirement := REQUIREMENT.fullmatch(argument):
+            names.append(canonicalize_name(requirement.group(1)))
+    return names
+
+
 def _resolving_installs(dockerfile_text: str, locked: set[str]) -> list[str]:
-    """The ``pip install`` commands that resolve a lock-pinned package's dependencies."""
+    """The ``pip install`` commands that resolve the dependencies of a package the lock names. Ahead of the
+    locked install the :data:`BOOTSTRAP_PACKAGES` may; from it on nothing may."""
     lines = _logical_lines(dockerfile_text)
     if not any(LOCKED_INSTALL in line for line in lines):
         raise AssertionError(f"no `{LOCKED_INSTALL}` line found: the scan lost its anchor")
-    offenders = []
+    offenders, allowed = [], BOOTSTRAP_PACKAGES
     for line in lines:
+        if LOCKED_INSTALL in line:
+            allowed = frozenset()
         if not line.startswith("RUN "):
             continue
         for command in COMMAND_SEPARATOR.split(line):
             install = PIP_INSTALL.search(command)
             if not install or "--no-deps" in command:
                 continue
-            pinned = [m.group(1) for m in PINNED_REQUIREMENT.finditer(command[install.end() :])]
-            if hits := [name for name in pinned if canonicalize_name(name) in locked]:
-                offenders.append(f"{command.strip()}  (lock-pinned: {', '.join(hits)})")
+            if hits := [name for name in _requirement_names(command[install.end() :]) if name in locked - allowed]:
+                offenders.append(f"{command.strip()}  (in the lock: {', '.join(hits)})")
     return offenders
 
 
-def _exported_extras(text: str) -> list[set[str]]:
-    """The ``--extra`` set of each lock export in a Dockerfile or the Makefile."""
-    return [set(EXPORTED_EXTRA.findall(line)) for line in _logical_lines(text) if LOCK_EXPORT in line]
+def _exported_extras(text: str, extras: set[str]) -> list[set[str]]:
+    """The extras each lock export in a Dockerfile or the Makefile carries, ``extras`` being all of them."""
+    return [
+        set(extras) if ALL_EXTRAS in line else set(EXPORTED_EXTRA.findall(line))
+        for line in _logical_lines(text)
+        if LOCK_EXPORT in line
+    ]
 
 
 def test_installs_take_their_dependencies_from_the_lock():
@@ -105,8 +132,20 @@ def test_the_scan_flags_a_resolving_install():
     assert _resolving_installs(chained, {"einops"}), "a resolve chained after a --no-deps install went unflagged"
     same_line = f'RUN {LOCKED_INSTALL} r.txt && pip install "einops==0.8.2"\n'
     assert _resolving_installs(same_line, {"einops"}), "a resolve on the locked install's own line went unflagged"
-    after = f'RUN {LOCKED_INSTALL} r.txt\nRUN pip install "einops==0.8.2"\n'
-    assert _resolving_installs(after, {"einops"}), "a resolve after the locked install went unflagged"
+    for spelling in ("einops", '"einops>=0.8"', "--upgrade einops", '"einops[extra]~=0.8.0"'):
+        after = f"RUN {LOCKED_INSTALL} r.txt\nRUN pip --no-cache-dir install {spelling}\n"
+        assert _resolving_installs(after, {"einops"}), f"`{spelling}` after the locked install went unflagged"
+    not_requirements = f"RUN pip install --index-url https://einops.example/simple -r einops.txt . $EINOPS\nRUN {LOCKED_INSTALL} r.txt\n"
+    assert not _resolving_installs(not_requirements, {"einops"}), (
+        "an option value, path or variable was read as a requirement"
+    )
+    bootstrap = sorted(BOOTSTRAP_PACKAGES)[0]
+    ahead = f'RUN pip install "{bootstrap}~=1.0"\nRUN {LOCKED_INSTALL} r.txt\n'
+    assert not _resolving_installs(ahead, {bootstrap}), "a bootstrap install ahead of the locked one was flagged"
+    behind = f'RUN {LOCKED_INSTALL} r.txt\nRUN pip install "{bootstrap}~=1.0"\n'
+    assert _resolving_installs(behind, {bootstrap}), (
+        "a bootstrap package resolved after the locked install went unflagged"
+    )
     with pytest.raises(AssertionError, match="lost its anchor"):
         _resolving_installs('RUN pip install --no-deps "einops==0.8.2"\n', {"einops"})
 
@@ -117,8 +156,9 @@ def test_the_image_installs_every_optional_extra_from_the_lock():
     pyproject = tomllib.loads((REPO_ROOT / "pyproject.toml").read_text(encoding="utf-8"))
     extras = set(pyproject["project"]["optional-dependencies"])
     assert extras, "pyproject.toml declares no optional extras: the scan lost its root"
+    assert _exported_extras(f"RUN {LOCK_EXPORT} {ALL_EXTRAS} -o r.txt\n", extras) == [extras]
     for name in ("Dockerfile", "Makefile"):
-        exports = _exported_extras((REPO_ROOT / name).read_text(encoding="utf-8"))
+        exports = _exported_extras((REPO_ROOT / name).read_text(encoding="utf-8"), extras)
         assert exports, f"no `{LOCK_EXPORT}` found in {name}: the scan lost its anchor"
         assert all(exported == extras for exported in exports), (
             f"{name} exports the lock with extras {[sorted(e) for e in exports]}, not {sorted(extras)}"

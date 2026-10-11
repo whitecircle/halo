@@ -124,7 +124,7 @@ def test_overhead_renders_under_the_rollout_template_kwargs(env_grpo_module):
 def test_the_probe_states_the_budget_an_episode_binds(env_grpo_module):
     """The probe renders the budget variable the rollout requests carry, which is the episode's bound
     per-turn cap: the level's 36000 clamped to the run's 18000, the level's own 12000 where the run
-    sets no cap, and nothing but the level and that cap."""
+    sets no cap, and nothing but the level and that cap, flagged where the budget is soft."""
     env = types.SimpleNamespace(
         reasoning_effort="high",
         thinking_budget_for_effort=lambda level: 36000,
