@@ -91,19 +91,27 @@ def anchor_jit_cache_dir(var: str, subdir: str) -> None:
     if var in os.environ:
         return
     hf_home = os.environ.get("HF_HOME")
-    temp_path = os.path.join(tempfile.gettempdir(), subdir)
-    path = os.path.join(hf_home, subdir) if hf_home else temp_path
-    if _accepts_writes(path):
-        os.environ[var] = path
+    anchor = os.path.join(hf_home, subdir) if hf_home else None
+    if anchor is not None and _accepts_writes(anchor):
+        os.environ[var] = anchor
         return
+    try:
+        fallback = os.path.join(tempfile.gettempdir(), subdir)
+    except FileNotFoundError:
+        # Python found no usable temp dir at all: there is no fallback to judge.
+        fallback = None
     # Logged through the stdlib logger: the GPU test harness anchors the FA4 cache before any
     # accelerate state exists, which the adapter requires, and each rank judges its own mounts.
-    if path != temp_path and _accepts_writes(temp_path):
-        logger.logger.warning("%s is not writable, so %s falls back to %s.", path, var, temp_path)
-        os.environ[var] = temp_path
+    if fallback is not None and _accepts_writes(fallback):
+        if anchor is not None:
+            logger.logger.warning("%s is not writable, so %s falls back to %s.", anchor, var, fallback)
+        os.environ[var] = fallback
         return
-    tried = path if path == temp_path else f"{path}, {temp_path}"
-    logger.logger.warning("No writable location for %s (tried %s), so it is left to the library default.", var, tried)
+    tried = [anchor] if anchor is not None else []
+    tried.append(fallback if fallback is not None else "no usable temp dir")
+    logger.logger.warning(
+        "No writable location for %s (tried %s), so it is left to the library default.", var, ", ".join(tried)
+    )
 
 
 def ensure_fa4_kernel_cache_env() -> None:

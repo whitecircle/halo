@@ -28,8 +28,8 @@ LOCKED_INSTALL = "uv pip install --system --no-deps -r"
 LOCK_EXPORT = "uv export --locked"
 PIP_INSTALL = re.compile(r"\bpip3?\b(?:\s+-\S+)*\s+install\b")
 COMMAND_SEPARATOR = re.compile(r"&&|\|\||;")
-INSTALL_ARGUMENT = re.compile(r'"[^"]*"|\S+')
-REQUIREMENT = re.compile(r'"?([A-Za-z0-9][A-Za-z0-9._-]*)(?:\[[^\]]*\])?(?:\s*(?:===?|~=|!=|[<>]=?)[^"]*)?"?')
+INSTALL_ARGUMENT = re.compile(r"""\"[^\"]*\"|'[^']*'|\S+""")
+REQUIREMENT = re.compile(r"([A-Za-z0-9][A-Za-z0-9._-]*)(?:\[[^\]]*\])?(?:\s*(?:===?|~=|!=|[<>]=?).*)?")
 # pip options whose next argument is their value, never a requirement.
 VALUE_OPTIONS = frozenset({"-r", "--requirement", "-c", "--constraint", "-i", "--index-url", "--extra-index-url"})
 # Packages installed by a resolve on purpose, ahead of every source build: the build tool, and the torch the
@@ -74,7 +74,7 @@ def _requirement_names(arguments: str) -> list[str]:
         if option_value or argument.startswith(("-", "$", ".")) or "/" in argument:
             option_value = argument in VALUE_OPTIONS
             continue
-        if requirement := REQUIREMENT.fullmatch(argument):
+        if requirement := REQUIREMENT.fullmatch(argument.strip("\"'")):
             names.append(canonicalize_name(requirement.group(1)))
     return names
 
@@ -132,7 +132,7 @@ def test_the_scan_flags_a_resolving_install():
     assert _resolving_installs(chained, {"einops"}), "a resolve chained after a --no-deps install went unflagged"
     same_line = f'RUN {LOCKED_INSTALL} r.txt && pip install "einops==0.8.2"\n'
     assert _resolving_installs(same_line, {"einops"}), "a resolve on the locked install's own line went unflagged"
-    for spelling in ("einops", '"einops>=0.8"', "--upgrade einops", '"einops[extra]~=0.8.0"'):
+    for spelling in ("einops", '"einops>=0.8"', "'einops==0.8.2'", "--upgrade einops", '"einops[extra]~=0.8.0"'):
         after = f"RUN {LOCKED_INSTALL} r.txt\nRUN pip --no-cache-dir install {spelling}\n"
         assert _resolving_installs(after, {"einops"}), f"`{spelling}` after the locked install went unflagged"
     not_requirements = f"RUN pip install --index-url https://einops.example/simple -r einops.txt . $EINOPS\nRUN {LOCKED_INSTALL} r.txt\n"

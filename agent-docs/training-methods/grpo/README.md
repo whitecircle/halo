@@ -1,6 +1,6 @@
 # GRPO
 
-Group Relative Policy Optimization scores a prompt's completions against each other, not against a learned value model. For prompt `x` with completions `{y1..yk}` and rewards `{r1..rk}`, the advantage is `A(yi) = normalize(ri - mean(r))` and the loss is `L = -E[A(yi) * log pi(yi|x)]`.
+Group Relative Policy Optimization scores a prompt's completions against each other, not against a learned value model. For prompt `x` with completions `{y1..yk}` and rewards `{r1..rk}`, the advantage is, in its simplest form, `A(yi) = normalize(ri - mean(r))` and the loss `L = -E[A(yi) * log pi(yi|x)]`; each method's page gives the advantage rule and the loss it runs.
 
 | | Offline GRPO | Online GRPO (RLVR) | Async GRPO with Environments |
 |---|---|---|---|

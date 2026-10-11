@@ -115,6 +115,29 @@ def test_no_writable_location_leaves_the_library_default(monkeypatch, temp_root,
     assert any(_TRITON_VAR in record.getMessage() for record in caplog.records), "leaving it unset must be reported"
 
 
+def test_a_host_with_no_temp_dir_still_anchors_on_hf_home_and_otherwise_leaves_the_default(
+    monkeypatch, temp_root, tmp_path, caplog
+):
+    """``tempfile.gettempdir`` raises when no candidate directory is usable. That must not cost a run its
+    writable ``HF_HOME`` anchor, nor raise where the anchor is unwritable too: the variable stays unset."""
+
+    def no_temp_dir():
+        raise FileNotFoundError("No usable temporary directory found")
+
+    monkeypatch.setattr(tempfile, "gettempdir", no_temp_dir)
+    hf_home = tmp_path / "hf"
+    hf_home.mkdir()
+    monkeypatch.setenv("HF_HOME", str(hf_home))
+    anchor_jit_cache_dir(_TRITON_VAR, _TRITON_SUBDIR)
+    assert os.environ[_TRITON_VAR] == os.path.join(str(hf_home), _TRITON_SUBDIR)
+    monkeypatch.delenv(_TRITON_VAR)
+    _deny_writes_under(monkeypatch, hf_home)
+    with caplog.at_level(logging.WARNING, logger=attention_mod.__name__):
+        anchor_jit_cache_dir(_TRITON_VAR, _TRITON_SUBDIR)
+    assert _TRITON_VAR not in os.environ
+    assert any("no usable temp dir" in record.getMessage() for record in caplog.records)
+
+
 @pytest.mark.parametrize("kind", ["file", "dangling link"])
 def test_a_non_directory_at_the_cache_path_falls_back(monkeypatch, temp_root, tmp_path, kind):
     """Triton cannot create its cache under a file or a broken link, even an executable one."""

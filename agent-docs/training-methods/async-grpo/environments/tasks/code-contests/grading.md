@@ -1,7 +1,8 @@
 # Grading
 
 `submit_solution` grades through `grade_solution` (`src/environments/envs/tasks/coding/grading.py`). The offline
-re-grader shares it, so a checkpoint scores identically online and offline. How the grade is paid:
+re-grader shares it, so the same rules grade online and offline; the re-grader alone stops at the first failing test
+and runs without `max_grading_seconds` ([Re-grading](../../../evaluation.md#re-grading-recorded-trajectories)). How the grade is paid:
 [Reward ladder](reward.md#reward-ladder).
 
 ## Grading rules

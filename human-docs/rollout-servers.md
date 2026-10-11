@@ -180,7 +180,7 @@ engine-versus-policy log-ratio drifts negative. The compose files default to
 
 | Sign | Cause and fix |
 | --- | --- |
-| 400 on every rollout, zero tokens back | The server cannot take a thinking budget. Set `VLLM_REASONING_PARSER` **and** `VLLM_USE_V2_MODEL_RUNNER=0`, or drop `rollout_max_thinking_tokens`. Code contests also send a cap whenever `reasoning_effort` is set, as the shipped recipes do: a soft budget sends its ceiling, and the retry after a cut, empty or refused turn sends a quarter of the budget. |
+| 400 on every rollout, zero tokens back | The server cannot take a thinking budget. Set `VLLM_REASONING_PARSER` **and** `VLLM_USE_V2_MODEL_RUNNER=0`, or drop `rollout_max_thinking_tokens`. Code contests also send vLLM a cap whenever `reasoning_effort` is set, as the shipped recipes do: a soft budget sends its ceiling, and the retry after a cut, empty or refused turn sends a quarter of the budget. |
 | The run finishes with a flat zero reward | Wrong tool-call parser on a tool-using environment; the calls came back as text. A missing parser returns 400 instead. |
 | `Could not bind the weight-transfer group port` | Another process holds the port, two servers share one, or an outbound connection took it. Give each server its own `group_port`, reserve it or pick one outside `32768–60999`, and remove stale containers. |
 | `/health` is 200 but nothing generates | A trainer died mid-sync and left the engine paused. Resume it, or restart the container if the push had started. |
