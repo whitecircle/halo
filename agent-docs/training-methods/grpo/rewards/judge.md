@@ -73,7 +73,7 @@ rewards:
 
 A fired check must quote one to three lines; one found quote suffices (a judge misquotes a long program's line about one time in four). A flag without a counting quote does not fire and counts in `judge/<name>/unsupported_flags`.
 
-- **Sources:** the policy's actions as the term's `view` shows them (`render_actions`): visible text, tool-call arguments (a cut call's included) and their results; under `final`, the answer alone. Never reasoning, since a veto on a thought teaches the policy to hide it, and never environment notes (headers, flags, nudges).
+- **Sources:** the policy's actions as the term's `view` shows them (`render_actions`): visible text, tool-call arguments (a cut call's included) and their results; under `final`, the answer, or the last assistant text when there is none. Never reasoning, since a veto on a thought teaches the policy to hide it, and never environment notes (headers, flags, nudges).
 - **Match:** a whitespace-folded span of that text, both read as the prompt shows them, so a quoted tag matches with or without its escape. A quote of four or more words also counts when, case aside, it matches in order at one place missing at most a fifth of its words (one at least), first and last words included.
 - **Length:** over 400 characters never counts.
 

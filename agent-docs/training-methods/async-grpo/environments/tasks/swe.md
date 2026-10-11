@@ -46,7 +46,7 @@ Code runs in a `SandboxExecutor` subprocess with imports and the standard librar
 | `bubblewrap` | Confined without `allow_network` | Persist in the workspace |
 | `remote` | Confined | Not kept: a run sees only what `write_file` wrote |
 
-`swe` [warns](../sandbox.md#confinement) when built on `local`. Run untrusted code and shell on `bubblewrap` without network, or on `remote`.
+`swe` [warns](../sandbox.md#confinement) when built on a backend that does not confine the program: `local`, or `bubblewrap` with `allow_network`. Run untrusted code and shell on `bubblewrap` without network, or on `remote`.
 
 ## Reward
 

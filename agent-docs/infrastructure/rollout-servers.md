@@ -230,7 +230,7 @@ every prompt position comes back garbage (NLL 12–22) while sampling stays corr
 ([vllm#53488](https://github.com/vllm-project/vllm/issues/53488)). On a step that schedules a
 prompt-log-prob request, the patch clones the hidden states before the drafter runs. The V2 model
 runner takes prompt log-probs before drafting and needs no patch. The `isr_engine_reference` startup
-probe refuses an unpatched server that speculates ([Objective](../training-methods/async-grpo/objective.md#trust-region-masks)).
+probe refuses an unpatched server that speculates ([Engine reference](../training-methods/async-grpo/objective.md#engine-reference)).
 
 Checkpoint layout and expert un-fuse rules live in
 [Checkpoints](../reference/checkpoints.md#serving-on-vllm--sglang).
@@ -483,7 +483,7 @@ open-book `exam_qa`) the absence of the right one is silent and fatal to RL: cal
 `tool_calls`, every episode reward 0, flat zero gradient.
 
 ReAct envs send no `tools` schema (their tools are named in the system prompt) and parse actions
-from the response text, so the parser plays no part there; the ReAct recipes serve without one
+from the response text; the ReAct recipes serve without a parser
 (`VLLM_TOOL_CALLING_FLAGS=` under compose).
 Native-tool parsers per family:
 

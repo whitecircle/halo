@@ -445,8 +445,8 @@ class AsyncTrainingConfig(AdvantageShapingArguments, GRPOEarlyStopArguments, Chu
         default_factory=dict,
         metadata={
             "help": "Chat-template variables sent with every rollout request as `chat_template_kwargs` and applied "
-            "to the trainer's own renders, so both sides see one template state. The stock Qwen3.x template reads "
-            "`preserve_thinking`: with the env's `carry_reasoning`, every prior turn's reasoning stays rendered "
+            "to the trainer's own renders, so both sides see one template state. The stock Qwen3.6 template reads "
+            "`preserve_thinking`: with the env's `carry_reasoning`, the carried reasoning stays rendered "
             "even after a user message (a recovery nudge). `reasoning_effort`, `reasoning_budget` and "
             "`reasoning_budget_soft` are refused here: all are per episode; the level travels as the request's "
             "top-level field (SGLang also gets an exact nested copy, the spelling it lets override that field), the "
@@ -469,8 +469,8 @@ class AsyncTrainingConfig(AdvantageShapingArguments, GRPOEarlyStopArguments, Chu
         metadata={
             "help": "Price only the reasoning tokens each turn spends past its level's soft per-turn budget (a level "
             "with enforce_thinking_cap: false), summed over turns, instead of every reasoning token: the soft "
-            "budget's ceiling, free within it. Needs reasoning_price; a run where no drawable level's budget is soft "
-            "is refused at trainer construction."
+            "budget's ceiling, free within it. Needs reasoning_price; a run where a drawable level's budget is enforced "
+            "or unset is refused at trainer construction."
         },
     )
     reasoning_price_cap: float = field(
@@ -478,7 +478,8 @@ class AsyncTrainingConfig(AdvantageShapingArguments, GRPOEarlyStopArguments, Chu
         metadata={
             "help": "Cap of reasoning_price per episode, in reward units: a long trace cannot outweigh the task "
             "reward. Keep it, plus reasoning_floor, below what the environment charges for the decisions it "
-            "prices (a resubmission, in code contests)."
+            "prices (a resubmission, in code contests); under reasoning_price_past_budget each alone, since an "
+            "episode then pays one at most."
         },
     )
     reasoning_floor: float = field(
@@ -490,7 +491,8 @@ class AsyncTrainingConfig(AdvantageShapingArguments, GRPOEarlyStopArguments, Chu
             "reference. The one term that "
             "pays for more reasoning; it resists reasoning shrinking toward nothing. Keep it, plus "
             "reasoning_price_cap while the price is on, below what the environment charges for the decisions it "
-            "prices (a resubmission, in code contests). An episode with no thinking budget is free of it, and a "
+            "prices (a resubmission, in code contests); under reasoning_price_past_budget each alone, since an "
+            "episode then pays one at most. An episode with no thinking budget is free of it, and a "
             "run where no drawable level sets one and rollout_max_thinking_tokens is unset is refused at trainer "
             "construction. Logged as reward/reasoning_floor."
         },

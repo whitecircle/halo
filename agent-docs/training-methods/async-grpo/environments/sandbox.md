@@ -62,7 +62,7 @@ docker run --gpus all --init --cap-add SYS_ADMIN --security-opt seccomp=unconfin
 - Every directory above a bound path, `TMPDIR` included, must be searchable by other users, as `/tmp` is.
 - Keep `--init`, so the container's PID 1 reaps the processes of an actor that dies mid-run.
 - A program that exits `128 + n` reads as killed by signal `n`.
-- While a jailed run is in flight the host process is a child subreaper, so orphans of anything else it started are reparented to it until the run ends.
+- While a jailed run is in flight the host process is a child subreaper, so an orphan of anything else it started meanwhile is reparented to it, and only a jail's init is reaped.
 
 ## Using it from Python
 

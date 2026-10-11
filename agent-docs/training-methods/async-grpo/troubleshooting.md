@@ -26,6 +26,7 @@ Symptom → cause → fix for Async GRPO runs. Distributed-training failures (NC
 | `DeadlineExpired: request exceeded its …s deadline` | Server overloaded or wedged (sync pauses are excluded); actors retry with backoff (`request_timeout` 120 s, `max_retries` 3, `retry_base_wait` 1 s) | Check server health first; 4xx are terminal except 408, 429 and vLLM's `not JSON compliant` 400 |
 | Episodes booked into `episode/error_rate` near `episode_timeout` | The episode (generation, tools, grading) passed its deadline (default 1200 s) | Raise `DIST_NCCL_TIMEOUT_MINUTES` first, then `episode_timeout` ([bounds](performance.md#sizing-a-run)) |
 | `500 "Already borrowed"` | A vLLM fast-tokenizer race that scales with concurrency | Harmless unless `gave up after N tries` appears; then raise `max_retries` or `retry_base_wait` |
+| `consecutive steps produced no valid episode anywhere in the world` | Two steps in a row had nothing to train on; the message ends with the cause. `reward term '<name>' scored nothing` is a judge or reward-model outage under `on_error: invalid`; a rollout error points at the server or the sandbox | Fix the scorer's key or endpoint, or the server, and resume ([Batch construction](objective.md#batch-construction)) |
 | `ray.exceptions.RayActorError` | The episode returns as an errored, masked-out row and the actor restarts (`max_restarts=-1`) | Check `ray logs` and per-node memory ([Ray Cluster](../../infrastructure/ray.md#monitoring)) |
 
 ## Sandboxes and environments

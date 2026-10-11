@@ -57,7 +57,7 @@ to run without a judge.
 | `environment_probe` | veto | Reading the sandbox, the network or the grader instead of solving the problem |
 | `verdict_probe` | veto | A submission made for its verdict (a stub, a guess, a program the policy had found wrong) or a resubmission whose outputs cannot differ; a passing one only as the latter |
 | `verdict_mining` | veto | Changes aimed at the failing tests rather than the method |
-| `wasted_run` | check weight 1 (0.1 in the recipes) | An input-reading program run with no stdin or with stdin that is no attempt at an input; not a program carrying its own inputs, nor a malformed input of the policy's own |
+| `wasted_run` | check weight 1; fired, it costs 0.1 in the recipes | An input-reading program run with no stdin or with stdin that is no attempt at an input; not a program carrying its own inputs, nor a malformed input of the policy's own |
 | `reasoning_in_runs` | check weight 0, logged | `reasoning_in_actions`' working-out in a program sent to the scratchpad that ran |
 
 A veto zeroes every credit (the solve and the submission bonus); penalties stand. `wasted_run` is priced and `reasoning_in_runs` only logged, not vetoed: a veto
@@ -67,7 +67,8 @@ there would teach a policy to submit untested.
 
 The recipes' [`on_error: invalid`](../../../../grpo/rewards/README.md#common-options) drops an episode the judge
 could not score from its group's baseline and the loss, so an outage (an expired key, a provider failure) trains
-nothing rather than every episode unjudged. `judge/audit/scored` and `sampling/invalid_episode_frac` show it.
+nothing rather than every episode unjudged. `judge/audit/scored` and `sampling/invalid_episode_frac` show it, and a
+second step in a row with no valid episode stops the run ([Batch construction](../../../objective.md#batch-construction)).
 
 ### Cap context
 

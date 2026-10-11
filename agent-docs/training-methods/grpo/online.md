@@ -70,7 +70,7 @@ All off by default.
 |---|---|---|
 | `scale_rewards_std_floor` | A floor on the std divisor | Not `scale_rewards: none` |
 | `drop_degenerate_groups` | Masks all-equal-reward groups out of the loss and normalizer | — |
-| `balance_token_mass` | Cancels each generation round's net token-weighted push ([Advantages](../async-grpo/objective.md#advantages)) | `loss_type` `cispo`, `dapo` or `dr_grpo`; `top_entropy_quantile: 1.0`; no `off_policy_mask_threshold` |
+| `balance_token_mass` | Cancels each generation round's net token-weighted push ([Token-mass balance](../async-grpo/objective.md#token-mass-balance)) | `loss_type` `cispo`, `dapo` or `dr_grpo`; `top_entropy_quantile: 1.0`; no `off_policy_mask_threshold` |
 | `use_rlrr` | Intra-group ranking advantages ([arXiv:2601.23058](https://arxiv.org/abs/2601.23058)) | Neither the std floor nor the drop |
 | `use_sdpg` | [Online SDPG](../distillation/online-sdpg.md) | — |
 

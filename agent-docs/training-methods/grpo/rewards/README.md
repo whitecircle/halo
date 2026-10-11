@@ -54,6 +54,8 @@ A scorer never raises for a sample. A failed request, an unparseable reply or an
 | `invalid` (default) | The term returns `None`, summed as 0. The row leaves the baseline only when every term returned `None` | The term prices 0 and the episode is `episode_invalid`, out of the group baseline, with the scorer's error as `episode_invalid_reason`. The eval runner reports an error row |
 | `neutral` (veto judge default) | The term returns 0 | The term prices 0; the episode stays valid |
 
+On the environment arm, a second step in a row with no valid episode on any rank stops the run ([Batch construction](../../async-grpo/objective.md#batch-construction)).
+
 Two configuration faults raise instead of booking an outage: a reward model whose tokenizer does not load, and, on the online arm, a term whose dataset column TRL did not forward ([Rewards](../online.md#rewards)).
 
 ## Probe and retries

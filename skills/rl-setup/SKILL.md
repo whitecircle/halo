@@ -114,7 +114,7 @@ and full launch examples see [`wiring.md`](wiring.md).
    `rollout_max_answer_tokens` what a turn generates past its reasoning cap. The reasoning terms
    (`reasoning_price` per level per 1k tokens with `reasoning_price_cap`, `reasoning_floor`; the price and
    the floor off by default) price an episode's reasoning length and its shortfall against three quarters
-   of its per-turn budget.
+   of its per-turn budget; `reasoning_price_past_budget` prices only what each turn reasons past a soft budget.
 
 ## Parallelism note
 

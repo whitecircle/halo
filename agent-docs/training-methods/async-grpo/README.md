@@ -57,10 +57,11 @@ entry, or an `answer_field` renamed away from `answer`, that names no column rai
 ## Quickstart
 
 Point the template's `dataset:` at your data, start a server on a GPU the trainer will not use, wait for `/health`,
-launch:
+launch. The template runs a ReAct environment, which is served without a tool-call parser
+(`VLLM_TOOL_CALLING_FLAGS=`):
 
 ```bash
-VLLM_MODEL=Qwen/Qwen3-4B-Instruct-2507 VLLM_CUDA_DEVICES=7 \
+VLLM_MODEL=Qwen/Qwen3-4B-Instruct-2507 VLLM_CUDA_DEVICES=7 VLLM_TOOL_CALLING_FLAGS= \
     docker compose -f docker-compose.vllm.yml up -d vllm-server
 
 CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6 torchrun --nproc_per_node=7 \

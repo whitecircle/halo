@@ -122,7 +122,7 @@ class RolloutConfig:
     hallucinating the tool result and playing the whole episode in one turn."""
 
     chat_template_kwargs: dict[str, Any] = field(default_factory=dict)
-    """Chat-template variables sent with every request (``chat_template_kwargs``), e.g. Qwen3.x's
+    """Chat-template variables sent with every request (``chat_template_kwargs``), e.g. Qwen3.6's
     ``preserve_thinking`` so reasoning the env carries stays rendered across a later user message. Never
     the per-episode keys: the reasoning effort travels top-level and the level's thinking budget is added
     per request (``generation_control_fields``)."""

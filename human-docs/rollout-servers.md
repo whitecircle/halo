@@ -11,7 +11,7 @@ a running server before you launch. No other method uses one.
 
 **The server must own GPUs that no trainer rank uses.** NCCL needs a distinct
 device for every member of the sync group. Split the GPUs with `CUDA_VISIBLE_DEVICES` on both
-sides; an overlap hangs at group formation.
+sides; an overlap fails group formation at its 120 s deadline.
 
 ## Start a vLLM server
 

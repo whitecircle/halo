@@ -24,7 +24,7 @@ Offline GRPO needs no server ([Launch](offline.md#launch)). Online GRPO and Asyn
 
 - [Offline GRPO](offline.md)
 - [Online GRPO (RLVR)](online.md)
-- [Reward Terms](rewards/README.md): the `rewards:` list both online arms read.
+- [Reward Terms](rewards/README.md): the `rewards:` list the online and environment arms read.
 - [Async GRPO with Environments](../async-grpo/README.md) and its [environments](../async-grpo/environments/README.md)
 
 Pairwise preference alternatives: [SMPO](../preference/smpo.md) · [DPO](../preference/dpo.md). All methods: [Training Methods Overview](../README.md).

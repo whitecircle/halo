@@ -70,7 +70,7 @@ Unparseable `arguments` (neither JSON nor a Python literal) bind as none. An MCP
 
 Three kinds of turn earn nothing and train only on a negative advantage ([Untrainable turns](../../objective.md#untrainable-turns)):
 
-- a turn the engine cut at its token cap or aborted;
+- a turn the engine cut at its token cap;
 - a turn with neither a tool call nor visible content (a stop inside its reasoning);
 - a turn whose every call was unknown or refused unrun: arguments that do not bind, a spent `tool_budgets` cap, or its handler's `ToolCallRefused`.
 

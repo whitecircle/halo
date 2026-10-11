@@ -512,8 +512,8 @@ class BaseEnvironment(ABC):
         conversation, so the next turn (a tool round, the retry after a cut) conditions on the thought
         that produced it instead of restarting; earlier turns stay as visible text, which bounds a
         request's growth to one reasoning budget. Off, the engine sees only visible text. Where the
-        carried thought renders is the chat template's call (Qwen3.x: turns after the last user
-        message, or all of them under ``preserve_thinking``).
+        carried thought renders is the chat template's call (Qwen3.5/3.6: turns after the last user
+        message; Qwen3.6 all of them under ``preserve_thinking``).
         ``requires_answer`` overrides the class's :attr:`requires_answer` declaration that its reward
         grades against ``context["answer"]``, which makes the trainer refuse a dataset carrying no
         ``answer`` column rather than score the whole run on nothing. ``None`` keeps the declaration,

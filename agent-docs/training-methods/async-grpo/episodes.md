@@ -64,7 +64,7 @@ Native-tool environments send their `tools` schema, so the server needs the matc
 
 - A mismatched parser fails silently: calls come back as text with no `tool_calls`, so a native-protocol episode ends on that turn as a plain-text final answer.
 - A missing parser is a 400 on vLLM; SGLang returns the call as text.
-- [ReAct](environments/protocols/react.md) environments send no `tools` and need no parser.
+- [ReAct](environments/protocols/react.md) environments send no `tools` and are served without a parser.
 
 `rollout_stop_tokens` (default empty) lists special-token strings sent as `stop_token_ids`. Use it for a tool-call
 terminator the model's `eos_token_id` omits: gpt-oss with harmony disabled ends a call with `<|call|>` and otherwise
