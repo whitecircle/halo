@@ -42,8 +42,9 @@ lora_r: 16
 
 - `distill_alpha` weights the divergence term against the cross-entropy term; `1.0` drops cross-entropy
   entirely.
-- `distill_loss` takes six losses. `kl_divergence` is the default and the one to start from;
-  `cosine_similarity` tolerates teachers whose logit scale differs.
+- `distill_loss` takes seven losses. `kl_divergence` is the default and the one to start from;
+  `cosine_similarity` tolerates teachers whose logit scale differs, and `jensen_shannon` moves from
+  forward KL (`distill_jsd_beta: 0`) to reverse KL (`1`).
 - Over-length conversations are dropped, not truncated.
 
 ```bash

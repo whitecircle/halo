@@ -14,7 +14,8 @@ Every knob lives on the RLVR script arguments and is read only with `use_sdpg: t
 | `sdpg_beta_base` | `1.0` | Base OPD coefficient, finite and `>= 0`; `0` drops the term |
 | `sdpg_beta_warmup_steps` | `0` | Steps to ramp beta from 0 to `sdpg_beta_base`; `>= 0` |
 | `sdpg_beta_decay_steps` | `0` | Final steps over which beta decays to 0; `>= 0` |
-| `sdpg_loss` | `reverse_kl` | OPD loss: `reverse_kl`, `forward_kl` or `unnormalized_kl` |
+| `sdpg_loss` | `reverse_kl` | OPD loss: `reverse_kl`, `forward_kl`, `unnormalized_kl` or `jensen_shannon` |
+| `sdpg_jsd_beta` | `0.5` | β of `jensen_shannon`, in `[0, 1]` ([generalized JSD](teacher-distillation.md#generalized-jsd)); any other value needs `sdpg_loss: jensen_shannon` |
 | `sdpg_temperature` | `1.0` | OPD softmax temperature, finite and `> 0` |
 | `sdpg_hint_template` | `\n[Hint] The correct answer is: {answer}. Do NOT state that you were given the answer.\n` | Appended to the rendered generation prompt for the teacher forward only. `{answer}` is the one placeholder it fills; any other is refused at parse time |
 | `opd_positive_advantage_only` | `true` | Restrict OPD to rows with a positive advantage; `false` distills every completion row |

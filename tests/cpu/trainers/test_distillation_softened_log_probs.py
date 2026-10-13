@@ -6,8 +6,8 @@ applies Hinton's ``T**2``. Pinned against independent spellings of each loss:
 
 - the OPD losses (reverse, forward, unnormalized KL) equal the upcast-then-divide formulas bit for
   bit, values and student gradients, at every temperature, for bf16 and fp32 logits;
-- the teacher arm's ``kl_divergence``, ``soft_cross_entropy`` and ``jensen_shannon`` agree with the
-  ``kl_div`` / ``softmax`` spellings to fp32 rounding;
+- the teacher arm's ``kl_divergence``, ``soft_cross_entropy`` and ``jensen_shannon`` (at its default,
+  symmetric β) agree with the ``kl_div`` / ``softmax`` spellings to fp32 rounding;
 - a ``-inf`` logit (padded vocabulary, a top-k-truncated teacher) is a zero-probability entry that adds
   exactly 0, not NaN, to the value and the gradient;
 - the student's backward keeps one fp32 ``[..., V]`` plane (``log_softmax``'s output): flooring the
@@ -20,6 +20,7 @@ import pytest
 import torch
 from torch.nn.functional import kl_div, log_softmax, softmax
 
+from src.args.mixins import DEFAULT_JSD_BETA
 from src.trainers.distillation.losses import (
     call_divergence,
     forward_kl_loss,
@@ -102,7 +103,7 @@ def _logits(dtype, seed=0):
 
 
 def _teacher_loss(name):
-    loss_fn = get_divergence(name)
+    loss_fn = get_divergence(name, jsd_beta=DEFAULT_JSD_BETA)
     hard_labels = torch.zeros(BATCH, SEQ, dtype=torch.long)
     return lambda student, teacher, temperature: call_divergence(loss_fn, student, teacher, temperature, hard_labels)
 

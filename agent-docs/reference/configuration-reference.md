@@ -411,8 +411,10 @@ The class also overrides four `TrainingArguments` defaults: `learning_rate=1e-6`
 
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
-| `distill_loss` | `"kl_divergence" \| "mse" \| "soft_cross_entropy" \| "cosine_similarity" \| "jensen_shannon" \| "slim"` | `"kl_divergence"` | Teacher-distillation divergence. |
-| `distill_temperature` | `float` | `1.0` | Softmax temperature — forwarded only to the losses that declare it (`kl_divergence`, `soft_cross_entropy`, `jensen_shannon`, `slim`). Ignored by `mse` and `cosine_similarity`. Must be `> 0`. |
+| `distill_loss` | `"kl_divergence" \| "reverse_kl" \| "mse" \| "soft_cross_entropy" \| "cosine_similarity" \| "jensen_shannon" \| "slim"` | `"kl_divergence"` | Teacher-distillation divergence. |
+| `distill_temperature` | `float` | `1.0` | Softmax temperature — forwarded only to the losses that declare it (`kl_divergence`, `reverse_kl`, `soft_cross_entropy`, `jensen_shannon`, `slim`). Ignored by `mse` and `cosine_similarity`. Must be `> 0`. |
+| `distill_jsd_beta` | `float` | `0.5` | β of the generalized `jensen_shannon` loss, in `[0, 1]`: `0` = forward KL, `1` = reverse KL. Any other value with another `distill_loss` is **rejected** at config time. |
+| `distill_topk` | `int \| None` | `None` | Score the loss on the teacher's top-k tokens plus a tail bin — an approximation that saves no memory. `kl_divergence` and `soft_cross_entropy` only (**rejected** otherwise); must be below the vocab size; `None` = full vocabulary. |
 | `distill_alpha` | `float` | `1.0` | Weight of distillation vs CLM loss. `1.0` = distillation only. Must be in `[0, 1]`. |
 | `apply_hard_labels` | `bool` | `False` | Gate the distillation term per token on the gold token ([Teacher Distillation](../training-methods/distillation/teacher-distillation.md)). Refused at trainer construction with `distill_loss: slim`, which applies its own gold-token weight. |
 | `max_length` | `int \| None` | `2048` | Maximum tokenized sequence length. Over-length conversations are **dropped**, not truncated; `null` → the student's context window. |

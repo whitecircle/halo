@@ -119,6 +119,7 @@ def test_sdpg_tunables_cover_the_shared_block_plus_the_rlvr_only_gate():
     assert set(RLVROnlineGRPOScriptArguments.SDPG_TUNABLES) == {
         "sdpg_hint_template",
         "sdpg_loss",
+        "sdpg_jsd_beta",
         "sdpg_temperature",
         "sdpg_beta_base",
         "sdpg_beta_warmup_steps",

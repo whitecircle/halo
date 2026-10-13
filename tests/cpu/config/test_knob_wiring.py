@@ -18,6 +18,7 @@ from types import SimpleNamespace
 from unittest import mock
 
 import pytest
+import torch
 from datasets import Dataset, DatasetDict
 from trl import SFTConfig
 
@@ -26,6 +27,7 @@ from src.args.mixins import PRIVILEGED_HINT_TEMPLATE, RLRRConfig, SDPGArguments
 from src.args.rlvr_online_grpo_args import RLVROnlineGRPOScriptArguments
 from src.args.self_distill_args import SelfDistillationArguments
 from src.configs.async_training_config import AsyncTrainingConfig, ISMaskConfig
+from src.trainers.distillation.losses import generalized_jsd_loss
 from src.trainers.distillation.sdpg import DistributedSDPGTrainer
 from src.trainers.distillation.self_distillation import DistributedSelfDistillationTrainer
 from src.trainers.grpo.online import DistributedGRPOTrainer
@@ -621,11 +623,15 @@ def test_rlrr_rejects_an_inverted_clip_band_from_the_script_args():
 
 # SDPG: the shared argument mixin and the two arms that hand it to a trainer
 
+# Seeded logits the OPD wiring tests score the resolved loss on.
+_STUDENT_LOGITS, _TEACHER_LOGITS = torch.randn(2, 2, 3, 16, generator=torch.Generator().manual_seed(0))
+
 # Every SDPGArguments field with a value that is NOT its default, so a field the builder drops cannot
 # pass by matching what the trainer would have used anyway.
 _SDPG_TUNABLES = {
     "sdpg_hint_template": "the answer is {answer}",
-    "sdpg_loss": "forward_kl",
+    "sdpg_loss": "jensen_shannon",
+    "sdpg_jsd_beta": 0.3,
     "sdpg_temperature": 0.5,
     "sdpg_beta_base": 0.25,
     "sdpg_beta_warmup_steps": 7,
@@ -839,6 +845,18 @@ def test_self_distill_requires_the_solution_column_only_where_the_template_names
     # A slot the template does not name demands no column: a solution-only hint takes no answer column.
     solution_only = _dataset_with({"prompt": [[{"role": "user", "content": "q"}]], "solution": ["6 * 7"]})
     module._require_privileged_columns(solution_only, _answer_column_args(sdpg_hint_template="worked: {solution}"))
+
+
+@pytest.mark.parametrize(
+    "construct", [_construct_sdpg_shell, _construct_self_distill_shell], ids=["sdpg", "self_distill"]
+)
+def test_sdpg_trainers_score_the_opd_term_at_the_configured_jsd_beta(construct):
+    """The β set in the config is the β the OPD loss runs at, not the dataclass default."""
+    trainer, _ = construct(sdpg_loss="jensen_shannon", sdpg_jsd_beta=0.3)
+    assert torch.equal(
+        trainer.sdpg_loss_fn(_STUDENT_LOGITS, _TEACHER_LOGITS, 1.0),
+        generalized_jsd_loss(_STUDENT_LOGITS, _TEACHER_LOGITS, 1.0, jsd_beta=0.3),
+    )
 
 
 def test_self_distill_trainer_has_no_spelling_of_the_tunables_of_its_own():

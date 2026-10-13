@@ -11,10 +11,12 @@ like its fp32 copy, and the non-negativity a bf16 evaluation breaks survives.
 import pytest
 import torch
 
+from src.args.mixins import DEFAULT_JSD_BETA
 from src.trainers.distillation.losses import (
     DIVERGENCES,
     call_divergence,
     forward_kl_loss,
+    get_divergence,
     masked_token_mean,
     reverse_kl_loss,
     unnormalized_kl_loss,
@@ -44,7 +46,7 @@ def test_every_divergence_scores_bf16_logits_exactly_as_their_fp32_copy(name):
     student, teacher = _near_converged_pair()
     assert not torch.equal((student / INEXACT_TEMPERATURE).float(), student.float() / INEXACT_TEMPERATURE)
     hard_labels = torch.randint(0, VOCAB, student.shape[:2], generator=torch.Generator().manual_seed(1))
-    divergence = DIVERGENCES[name]
+    divergence = get_divergence(name, jsd_beta=DEFAULT_JSD_BETA)
     from_bf16 = call_divergence(divergence, student, teacher, INEXACT_TEMPERATURE, hard_labels)
     from_fp32 = call_divergence(divergence, student.float(), teacher.float(), INEXACT_TEMPERATURE, hard_labels)
     assert from_bf16.dtype == torch.float32

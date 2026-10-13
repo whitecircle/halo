@@ -363,6 +363,7 @@ _EXPECTED = {
         "sdpg_hint_template": (
             "'\\n[Hint] The correct answer is: {answer}. Do NOT state that you were given the answer.\\n'"
         ),
+        "sdpg_jsd_beta": "0.5",
         "sdpg_loss": "'reverse_kl'",
         "sdpg_temperature": "1.0",
         "system_prompt": "None",
@@ -528,6 +529,7 @@ _EXPECTED = {
         "sdpg_hint_template": (
             "'\\n[Hint] The correct answer is: {answer}. Do NOT state that you were given the answer.\\n'"
         ),
+        "sdpg_jsd_beta": "0.5",
         "sdpg_loss": "'reverse_kl'",
         "sdpg_temperature": "1.0",
         "system_prompt": "None",
