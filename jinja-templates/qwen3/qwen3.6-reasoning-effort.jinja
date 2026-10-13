@@ -2,8 +2,9 @@
     reasoning effort stated in the system block. Thinking is always on; an assistant turn renders whatever
     reasoning_content it carries (the hub's preserve_thinking=true branch); tool calls and tool responses
     keep the hub spellings the server's qwen3_xml parser reads. Variables: reasoning_effort (the request's
-    top-level field, merged in by the server) and reasoning_budget (the level's per-turn thinking budget,
-    from chat_template_kwargs); the line depends on reasoning_effort alone. -#}
+    top-level field, merged in by the server), reasoning_budget (the level's per-turn thinking budget, from
+    chat_template_kwargs) and reasoning_budget_soft (true when the engine does not enforce that budget, so
+    the line states a target, not a cut); the line depends on reasoning_effort alone. -#}
 {%- macro render_content(content) %}
     {%- if content is string %}
         {{- content }}
@@ -26,7 +27,9 @@
 {%- endif %}
 {%- set effort = namespace(line='') %}
 {%- if reasoning_effort is defined and reasoning_effort %}
-    {%- if reasoning_budget is defined and reasoning_budget %}
+    {%- if reasoning_budget is defined and reasoning_budget and reasoning_budget_soft is defined and reasoning_budget_soft %}
+        {%- set effort.line = 'Reasoning effort: ' ~ reasoning_effort ~ '. Aim to think for at most ' ~ reasoning_budget ~ ' tokens per turn.' %}
+    {%- elif reasoning_budget is defined and reasoning_budget %}
         {%- set effort.line = 'Reasoning effort: ' ~ reasoning_effort ~ '. Think for at most ' ~ reasoning_budget ~ ' tokens per turn; reasoning past that budget is cut off, so finish the turn within it.' %}
     {%- else %}
         {%- set effort.line = 'Reasoning effort: ' ~ reasoning_effort ~ '.' %}

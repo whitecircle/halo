@@ -169,25 +169,27 @@ docs: ## link and anchor check over agent-docs/, human-docs/, skills/ and the ro
 diagrams: ## regenerate agent-docs/assets figures from scripts/diagrams (in-image; matplotlib ships there)
 	$(DOCKER_RUN_CPU) bash -lc 'set -e; for g in scripts/diagrams/gen_*.py; do echo "$$g"; python "$$g"; done'
 
+BUILD_DATE ?= $(shell date -u +%Y-%m-%d)
+
 build-blackwell: ## build the Blackwell image (credential-free; every dep is public)
 	docker build -t halo:blackwell \
 	  --build-arg TARGET_GPU=blackwell --build-arg SOURCE_REVISION=$(SOURCE_REVISION) \
-	  --build-arg VERSION=$(VERSION) .
+	  --build-arg VERSION=$(VERSION) --build-arg BUILD_DATE=$(BUILD_DATE) .
 
 build-hopper: ## build the Hopper image (TARGET_GPU=hopper is the Dockerfile default)
 	docker build -t halo:hopper \
 	  --build-arg TARGET_GPU=hopper --build-arg SOURCE_REVISION=$(SOURCE_REVISION) \
-	  --build-arg VERSION=$(VERSION) .
-
-BUILD_DATE ?= $(shell date -u +%Y-%m-%d)
+	  --build-arg VERSION=$(VERSION) --build-arg BUILD_DATE=$(BUILD_DATE) .
 
 build-vllm: ## build the vLLM inference image (credential-free; NCCL pinned from uv.lock)
 	docker build -f Dockerfile.vllm -t vllm-server:0.26.0 \
-	  --build-arg VERSION=$(VERSION) --build-arg BUILD_DATE=$(BUILD_DATE) .
+	  --build-arg VERSION=$(VERSION) --build-arg BUILD_DATE=$(BUILD_DATE) \
+	  --build-arg SOURCE_REVISION=$(SOURCE_REVISION) .
 
 build-sglang: ## build the SGLang inference image (NCCL pinned from uv.lock, matching the training images)
 	docker build -f Dockerfile.sglang -t sglang-server:0.5.17 \
-	  --build-arg VERSION=$(VERSION) --build-arg BUILD_DATE=$(BUILD_DATE) .
+	  --build-arg VERSION=$(VERSION) --build-arg BUILD_DATE=$(BUILD_DATE) \
+	  --build-arg SOURCE_REVISION=$(SOURCE_REVISION) .
 
 build-all: build-blackwell build-hopper build-vllm build-sglang ## build all four images
 

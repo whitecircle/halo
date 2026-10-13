@@ -116,25 +116,33 @@ make build-blackwell
 make build-vllm
 make build-sglang
 
-# Equivalent raw build (SOURCE_REVISION is what `make` stamps; pass it yourself here)
-docker build --build-arg SOURCE_REVISION=$(git rev-parse --short HEAD) -t halo:hopper .
+# Equivalent raw build (SOURCE_REVISION and BUILD_DATE are what `make` stamps; pass them yourself here)
 docker build --build-arg SOURCE_REVISION=$(git rev-parse --short HEAD) \
+  --build-arg BUILD_DATE=$(date -u +%Y-%m-%d) -t halo:hopper .
+docker build --build-arg SOURCE_REVISION=$(git rev-parse --short HEAD) \
+  --build-arg BUILD_DATE=$(date -u +%Y-%m-%d) \
   --build-arg TARGET_GPU=blackwell -t halo:blackwell .
 ```
 
 - **Credential-free.** Every dependency is public — no build secret or token is required.
 - **Built with uv, not Poetry.** Deps install into the system interpreter via `uv export --locked` into a
-  requirements file, then `uv pip install --system --no-deps -r` it (hatchling backend, no venv).
+  requirements file, then `uv pip install --system --no-deps -r` it (hatchling backend, no venv). The export
+  carries the `gigatoken` and `flash-optimizers` extras, so both install at their locked versions.
 
     `--no-deps` is load-bearing: without it the resolver reinstalls torch, Flash Attention and DeepEP over
-    the source builds earlier layers compiled.
+    the source builds earlier layers compiled. The source-built pre-installs (causal-conv1d,
+    flash-linear-attention) pass it too: their dependencies come from the lock, and a fresh resolve would
+    leave unlocked packages in the image.
 
 - **`SOURCE_REVISION`** busts the source-COPY cache; `make build-*` stamps it with the short git SHA, so a
   code-only change reruns only the COPY + editable reinstall while every heavy dep layer stays cached.
   Pass it explicitly on a raw `docker build`.
 
     It guards against BuildKit occasionally serving a stale `src/` snapshot. The same value is stamped as
-    `org.opencontainers.image.revision`, so
+    `org.opencontainers.image.revision` on all four images (the rollout images would otherwise report their
+    engine's upstream commit), with `VERSION` and `BUILD_DATE` as `org.opencontainers.image.version` and
+    `.created`; a build that omits them (a raw `docker build`, the compose auto-build) labels `dev` and an
+    empty date. So after a `make` build
     `docker inspect --format '{{index .Config.Labels "org.opencontainers.image.revision"}}' halo:blackwell`
     reports which commit an image carries.
 
@@ -180,7 +188,9 @@ base NGC image need updating.
 
 `FLASH_ATTENTION_CUTE_DSL_CACHE_DIR` and `TRITON_CACHE_DIR` are not baked. The FA4 cache and the Triton
 kernel/autotune cache both derive their directories from `HF_HOME` (or the temp dir) at runtime, so one
-mounted volume carries every kernel cache across `--rm` containers.
+mounted volume carries every kernel cache across `--rm` containers. Where `HF_HOME` is mounted read-only,
+both fall back to the temp dir with a warning (or stay unset for the library default when the temp dir is
+not writable either); set the two variables to a writable volume to keep them.
 
 The FA4 cache serializes the writer of each kernel file with `flock`, so a shared `HF_HOME` needs
 locks that hold across nodes. Where `flock` fails (Lustre mounted without `flock`), the first use of
@@ -259,7 +269,7 @@ Which families this image can serve for RL, and why a family is refused, is stat
 `config.json` patched to `qwen3_5_moe` first.
 
 ```bash
-make build-vllm            # docker build -f Dockerfile.vllm -t vllm-server:0.26.0 .
+make build-vllm            # docker build -f Dockerfile.vllm -t vllm-server:0.26.0 . (plus the label build args)
 ```
 
 Standalone `docker run` gotcha: the ENTRYPOINT is `vllm serve`, so any args REPLACE the compose

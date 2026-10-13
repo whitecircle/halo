@@ -49,6 +49,9 @@ DEFAULT_EPISODE_TIMEOUT_SECONDS = DEFAULT_NCCL_TIMEOUT_MINUTES * 60 * 2 / 3
 # Chat-template variable carrying an episode's per-turn thinking budget, the pair of the request's
 # top-level ``reasoning_effort``; both are per episode, never run-wide.
 REASONING_BUDGET_TEMPLATE_VAR = "reasoning_budget"
+# Set true beside it when that budget is soft (the engine does not enforce it), so a template states it
+# as a target rather than a cut; absent for an enforced budget.
+REASONING_BUDGET_SOFT_TEMPLATE_VAR = "reasoning_budget_soft"
 DEFAULT_REASONING_END_TOKEN = "</think>"
 # Example end strings of the families' reasoning parsers, for the knob's help and its refusal.
 REASONING_END_TOKEN_EXAMPLES = (
@@ -82,13 +85,15 @@ class RolloutConfig:
 
     max_thinking_tokens: int | None = None
     """Per-turn reasoning-token cap (vLLM ``thinking_token_budget``): caps CoT, then forces an answer
-    within the rest of ``max_tokens``. A level's ``thinking_tokens`` below it is the turn's cap instead.
-    Requires a server-side reasoning parser. None = only a level's ``thinking_tokens`` caps reasoning, or
-    nothing does."""
+    within the rest of ``max_tokens``. A level's enforced ``thinking_tokens`` below it is the turn's cap
+    instead; a soft level's budget must sit below it, and it is that level's ceiling. Requires a server-side
+    reasoning parser. None = only a level's enforced ``thinking_tokens`` caps reasoning, a soft level's
+    ceiling comes from ``max_answer_tokens``, or nothing does."""
 
     max_answer_tokens: int | None = None
     """The most a turn may generate past its reasoning cap: a turn's ``max_tokens`` is at most that cap
-    (the level's, or a retry's reserve) plus this. None = ``max_tokens`` alone bounds the turn. Mirrors
+    (the level's, or a retry's reserve) plus this. Without ``max_thinking_tokens`` it also sets a soft
+    level's ceiling, ``max_tokens`` less this. None = ``max_tokens`` alone bounds the turn. Mirrors
     ``AsyncTrainingConfig.rollout_max_answer_tokens``."""
 
     reasoning_end_token_id: int | None = None
@@ -119,7 +124,7 @@ class RolloutConfig:
     hallucinating the tool result and playing the whole episode in one turn."""
 
     chat_template_kwargs: dict[str, Any] = field(default_factory=dict)
-    """Chat-template variables sent with every request (``chat_template_kwargs``), e.g. Qwen3.x's
+    """Chat-template variables sent with every request (``chat_template_kwargs``), e.g. Qwen3.6's
     ``preserve_thinking`` so reasoning the env carries stays rendered across a later user message. Never
     the per-episode keys: the reasoning effort travels top-level and the level's thinking budget is added
     per request (``generation_control_fields``)."""

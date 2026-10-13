@@ -119,7 +119,7 @@ The code-contests environment reads a prepared pool, not a plain dataset:
    name in `dataset:`.
 
 Pool format, build flags and bands:
-[Code Contests](../agent-docs/training-methods/grpo/environments/code-contests.md#dataset) ↗.
+[Code Contests datasets](../agent-docs/training-methods/async-grpo/environments/tasks/code-contests/datasets.md) ↗.
 
 Full schema (multimodal content included), collators and the S3 utilities:
 [Dataset Formats](../agent-docs/data/dataset-formats.md) ↗ ·

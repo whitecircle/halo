@@ -90,7 +90,7 @@ whose docker defaults to a runtime that rejects `--gpus` / `--ipc host` (e.g. sy
 | `WANDB_API_KEY` | Weights & Biases logging | `.env` | — |
 | `HF_TOKEN` | Gated HuggingFace model/dataset access | `.env` | — |
 | `AWS_DEFAULT_REGION` | Region for your S3 bucket / ECR registry | `.env` | [AWS Auth](../infrastructure/aws-auth.md) |
-| `OPENROUTER_API_KEY`, `OPENAI_API_KEY`, `TAVILY_API_KEY`, `SERPER_API_KEY`, `BRAVE_API_KEY` | External LLM + web-search backends | `.env` | [Native Tool-Use](../training-methods/grpo/environments/native-tool-use.md) |
+| `OPENROUTER_API_KEY`, `OPENAI_API_KEY`, `TAVILY_API_KEY`, `SERPER_API_KEY`, `BRAVE_API_KEY` | External LLM + web-search backends | `.env` | [Native Tool-Use](../training-methods/async-grpo/environments/protocols/native-tool-use.md) |
 
 ## Paths
 

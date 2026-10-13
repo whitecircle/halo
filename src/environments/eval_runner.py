@@ -48,12 +48,12 @@ from src.environments.episode import (
     TurnGeneration,
     bind_episode_effort,
     describe_exception,
+    efforts_by_level,
     generate_turn,
     is_context_overflow,
     is_engine_fault,
     recovering_turn,
     step_context_from_generation,
-    thinking_caps_by_level,
 )
 from src.inference.openai_client import generate_openai_response
 from src.inference.response import FINISH_REASON_LENGTH, get_finish_reason
@@ -125,6 +125,7 @@ def serialize_trajectory(traj: Trajectory | None) -> dict[str, Any] | None:
         # effort setting draws per episode, so the meta line cannot say which level produced a row.
         "reasoning_effort": traj.reasoning_effort,
         "reasoning_budget": traj.reasoning_budget,
+        "reasoning_budget_soft": traj.reasoning_budget_soft,
         "info": info,
     }
 
@@ -234,7 +235,7 @@ async def _request_turn(
         client=client,
         tools=tools,
         request_timeout=rollout.request_timeout,
-        extra_body=generation_control_fields(rollout, effort.level, effort.thinking_budget),
+        extra_body=generation_control_fields(rollout, effort.level, effort.thinking_budget, effort.budget_soft),
     )
     # The same stamp the training rollout uses, so an eval treats a turn cut off at the token cap the
     # way training does instead of grading the fragment.
@@ -296,8 +297,8 @@ async def run_episode(
         driver_fault = False
 
         for _ in range(env.max_turns):
-            # The per-turn contract, narrowed as the training actor narrows it, so the request sets the
-            # level's CoT budget here too (vLLM enforces it) rather than the trajectory only recording it.
+            # The per-turn contract, narrowed as the training actor narrows it, so the request carries the
+            # turn's reasoning cap here too rather than the trajectory only recording it.
             recovery = recovering_turn(step.trajectory)
             caps = effort.turn_caps(generated, recovery=recovery)
             if step.done or caps is None:
@@ -386,10 +387,10 @@ async def collect_results(
     retry carries :data:`GENERATION_ERROR_KEY` and no verdict (``reward`` and ``success`` are ``None``).
     ``collect_trajectories=True`` adds a ``"trajectory"`` per sample for :func:`write_trajectories_jsonl`.
 
-    The contract passes the trainer's turn-cap gate first (:func:`thinking_caps_by_level`), so a level
+    The contract passes the trainer's turn-cap gate first (:func:`efforts_by_level`), so a level
     whose cap fills the turn refuses the run rather than scoring every episode as an error sample.
     """
-    thinking_caps_by_level(
+    efforts_by_level(
         env,
         max_tokens=rollout.max_tokens,
         max_thinking_tokens=rollout.max_thinking_tokens,

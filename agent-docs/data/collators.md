@@ -72,7 +72,7 @@ document).
 ### Offline GRPO
 
 `OfflineGRPODataCollatorWithPadding` and, under CP, `OfflineGRPOCPDataCollatorWithPadding` are built
-by the trainer, not this factory: [Offline GRPO](../training-methods/grpo/offline-grpo.md).
+by the trainer, not this factory: [Offline GRPO](../training-methods/grpo/offline.md).
 
 ## Factory: `select_data_collator()`
 

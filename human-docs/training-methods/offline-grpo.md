@@ -71,7 +71,7 @@ gradient_accumulation_steps: 8
   scores with each checkpoint, so a resume keeps the original anchor. That needs a finite, unsharded
   dataset, but no second model copy. A PEFT policy scores its reference live with the adapters off, and
   native expert LoRA loads a frozen copy of the base
-  ([Reference rules](../../agent-docs/training-methods/grpo/offline-grpo.md#reference-model) ↗).
+  ([Reference rules](../../agent-docs/training-methods/grpo/offline.md#reference-model) ↗).
 - **`initial_min_log_prob` / `min_log_prob`:** a floor on low-probability tokens of negative-advantage
   rows. It keeps the loss finite when the policy is pushed away from something it already finds
   unlikely.
@@ -126,7 +126,7 @@ Two mistakes are common:
 
 ## Go deeper
 
-- [Offline GRPO](../../agent-docs/training-methods/grpo/offline-grpo.md) ↗: every knob, the advantage
+- [Offline GRPO](../../agent-docs/training-methods/grpo/offline.md) ↗: every knob, the advantage
   formulas, the reference-model rules.
 - [GRPO overview](../../agent-docs/training-methods/grpo/README.md) ↗: the objective the three variants
   share.

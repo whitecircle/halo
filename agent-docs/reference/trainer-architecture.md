@@ -55,12 +55,12 @@ reference identity checks, resume attachment and atomic sidecar persistence; eac
 score payload and sweep ([Checkpoints](checkpoints.md#what-gets-saved)). Both record the log-prob
 precision each split was scored in (`LOGPROB_PRECISION_KEY`;
 [DPO](../training-methods/preference/dpo.md#resuming-a-precompute-run),
-[offline GRPO](../training-methods/grpo/offline-grpo.md#reference-model)). The preference mixin precedes
+[offline GRPO](../training-methods/grpo/offline.md#reference-model)). The preference mixin precedes
 `DistributedTrainerMixin` in the trainer's bases so the checkpointing default cannot shadow its
 sidecar hook.
 Offline GRPO's `reference_cache.py` streams current-batch scores to filesystem-aware writers and
 maps the ordered ragged token values; its reference mixin attaches those buffers without repacking
-them ([Reference model](../training-methods/grpo/offline-grpo.md#reference-model)).
+them ([Reference model](../training-methods/grpo/offline.md#reference-model)).
 
 Three modules are imported as plain functions — `grad_clip.py` (`clip_coefficient` and
 `scale_shards_to_max_norm_`, the shared clip coefficient, below),
@@ -108,7 +108,7 @@ wraps two models (distillation), or runs a separate-length privileged-teacher or
 
 Offline GRPO scores boundary-aligned local hidden states through the chunked head and reduces its
 token objective across CP with the shared autograd SUM. Its CP path rejects adapters; its
-[full-FT reference](../training-methods/grpo/offline-grpo.md#reference-model) is persisted, not
+[full-FT reference](../training-methods/grpo/offline.md#reference-model) is persisted, not
 recomputed from trained weights on resume.
 
 **PP** needs a single-forward objective on one stage's logits, and the conditional rows above are
@@ -345,7 +345,7 @@ it (EP is orthogonal to DP) unless the dataset is pre-sharded.
 Some trainers diverge: SMPO sets custom tokenized signature columns; Classification defaults
 `remove_unused_columns=False`; online and async GRPO scale the batch by `steps_per_generation`
 and rebuild TRL's `RepeatSampler` at the DP consumption rate
-([batch geometry](../training-methods/grpo/online-grpo.md#data-flow-and-batch-construction));
+([batch geometry](../training-methods/grpo/online.md#data-flow-and-batch-construction));
 Offline GRPO uses `MultiGroupSampler`.
 
 `ParallelismConfig` computes both. DP size is
@@ -439,7 +439,7 @@ but under CP they cover only the local chunk.
 - **DistributedAsyncEnvironmentalGRPOTrainer** — async multi-turn RL with Ray actors against vLLM or
   SGLang servers (`rollout_backend`); rollout generation overlaps training; environments resolved by
   `environment_type` through `src/environments/registry.py`. See
-  [Async GRPO](../training-methods/grpo/async-grpo/README.md).
+  [Async GRPO](../training-methods/async-grpo/README.md).
 
 The `src/trainers/grpo/` package keeps the three trainers (`environmental.py`, `online.py`,
 `offline.py`) and these shared leaves at the top level: `early_stop.py`; `world_metrics.py`, the step
@@ -482,7 +482,7 @@ first forward deadlocks on its first all-reduce.
 `_distributed_sync_weights` calls `sync_trainer_weights`
 (`src/trainers/grpo/rollout/weight_sync.py`, also used by the async GRPO trainer), which gathers,
 sends, and resets the vLLM prefix cache — see
-[the gather](../training-methods/grpo/online-grpo.md#weight-sync) for what it collects.
+[the gather](../training-methods/grpo/online.md#weight-sync) for what it collects.
 EP layers are found by `isinstance(module, EPMoELayerBase)` rather than an `ep_config` probe (a PEFT
 `modules_to_save` wrapper forwards `__getattr__` and would match the wrapper too), and PEFT/LoRA is
 folded out of place into each base weight as it is sent, under base-model param names, without writing
@@ -538,4 +538,4 @@ multi-node filesystem handling, and resume, see [Checkpoints & Resume](checkpoin
 
 - [Checkpoints & Resume](checkpoints.md) · [Pipeline Parallelism](../parallelism/pipeline-parallelism.md)
 - [Expert](../parallelism/expert-parallelism.md) · [Tensor](../parallelism/tensor-parallelism.md) · [Context](../parallelism/context-parallelism.md) Parallelism
-- [SMPO](../training-methods/preference/smpo.md) · [Offline GRPO](../training-methods/grpo/offline-grpo.md) · [RLVR Online GRPO](../training-methods/grpo/online-grpo.md) · [Async GRPO](../training-methods/grpo/async-grpo/README.md)
+- [SMPO](../training-methods/preference/smpo.md) · [Offline GRPO](../training-methods/grpo/offline.md) · [RLVR Online GRPO](../training-methods/grpo/online.md) · [Async GRPO](../training-methods/async-grpo/README.md)

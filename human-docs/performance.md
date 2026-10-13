@@ -55,8 +55,10 @@ Three more are on by default and need no setting:
 - the fused MoE path (fused GLU and RMSNorm, the gradient clip folded into
   `AdamWBF16`): 1.09–1.25× on 2× B300; `HALO_FUSED_GLU=0` turns off its GLU
   kernels;
-- FlexAttention on Gemma 4's sliding layers: 1.34× at 2k and 3.93× at 16k
-  tokens against SDPA; `HALO_FLEX_SLIDING=0` turns it off.
+- `sdpa_flex_sliding` (FlexAttention on Gemma 4's sliding layers, matmul
+  attention on its global ones): 1.34× at 2k and 3.93× at 16k tokens end to
+  end against SDPA, on top of the fused MoE path; `HALO_FLEX_SLIDING=0` turns
+  it off.
 
 Measurements: [Grouped GEMM](../agent-docs/optimization/grouped-gemm.md) ↗ ·
 [Gemma 4](../agent-docs/models/gemma4.md) ↗.

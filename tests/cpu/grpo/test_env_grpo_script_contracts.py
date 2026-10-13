@@ -124,17 +124,43 @@ def test_overhead_renders_under_the_rollout_template_kwargs(env_grpo_module):
 def test_the_probe_states_the_budget_an_episode_binds(env_grpo_module):
     """The probe renders the budget variable the rollout requests carry, which is the episode's bound
     per-turn cap: the level's 36000 clamped to the run's 18000, the level's own 12000 where the run
-    sets no cap, and nothing but the level and that cap."""
-    env = types.SimpleNamespace(reasoning_effort="high", thinking_budget_for_effort=lambda level: 36000)
+    sets no cap, and nothing but the level and that cap, flagged where the budget is soft."""
+    env = types.SimpleNamespace(
+        reasoning_effort="high",
+        thinking_budget_for_effort=lambda level: 36000,
+        thinking_budget_enforced=lambda level: True,
+    )
     clamped = env_grpo_module.probe_template_kwargs(
         AsyncTrainingConfig(rollout_max_tokens=30000, rollout_max_thinking_tokens=18000), env
     )
     assert clamped == {"reasoning_effort": "high", "reasoning_budget": 18000}
-    level = types.SimpleNamespace(reasoning_effort="high", thinking_budget_for_effort=lambda level: 12000)
+    level = types.SimpleNamespace(
+        reasoning_effort="high",
+        thinking_budget_for_effort=lambda level: 12000,
+        thinking_budget_enforced=lambda level: True,
+    )
     assert env_grpo_module.probe_template_kwargs(AsyncTrainingConfig(rollout_max_tokens=30000), level) == {
         "reasoning_effort": "high",
         "reasoning_budget": 12000,
     }
+    # A soft budget renders flagged, as its requests carry it, under the run's ceiling.
+    soft = types.SimpleNamespace(
+        reasoning_effort="high",
+        thinking_budget_for_effort=lambda level: 12000,
+        thinking_budget_enforced=lambda level: False,
+    )
+    assert env_grpo_module.probe_template_kwargs(
+        AsyncTrainingConfig(rollout_max_tokens=30000, rollout_max_thinking_tokens=21800), soft
+    ) == {"reasoning_effort": "high", "reasoning_budget": 12000, "reasoning_budget_soft": True}
+    # The probe binds under the run's own bounds, so a soft budget past the ceiling an answer bound leaves is refused
+    # before the servers are up, as every episode would be.
+    assert env_grpo_module.probe_template_kwargs(
+        AsyncTrainingConfig(rollout_max_tokens=30000, rollout_max_answer_tokens=8192), soft
+    )["reasoning_budget_soft"]
+    with pytest.raises(ValueError, match="must sit below its ceiling"):
+        env_grpo_module.probe_template_kwargs(
+            AsyncTrainingConfig(rollout_max_tokens=30000, rollout_max_answer_tokens=20000), soft
+        )
     # A level whose budget fills the turn binds no episode, and the probe says so before the servers are up.
     with pytest.raises(ValueError, match="must sit below rollout_max_tokens"):
         env_grpo_module.probe_template_kwargs(AsyncTrainingConfig(rollout_max_tokens=30000), env)

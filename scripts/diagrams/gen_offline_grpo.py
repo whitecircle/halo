@@ -1,4 +1,4 @@
-"""Generate the offline GRPO pipeline for training-methods/grpo/offline-grpo.md.
+"""Generate the offline GRPO pipeline for training-methods/grpo/offline.md.
 
 Two bands: what tokenization does once (group → advantages → one row per completion) and what
 every training step does (sampler → per-token loss → normalization). The second band reads

@@ -21,14 +21,14 @@ Authoritative: `agent-docs/data/dataset-formats.md`. Messages are OpenAI ChatML
 - **Offline GRPO** — `prompt: List[Dict]`, `completions: List[List[Dict]]`, `rewards: List[float]`;
   `len(rewards) == len(completions)`, variable group size. A full-fine-tuning KL run scores its own
   reference and needs a finite, unsharded dataset: pre-sharded KL inputs and a supplied grouped
-  `ref_per_token_logps` column are refused (`agent-docs/training-methods/grpo/offline-grpo.md#reference-model`).
+  `ref_per_token_logps` column are refused (`agent-docs/training-methods/grpo/offline.md#reference-model`).
 - **Async GRPO with environments** — `prompt`: the task as `str` **or** a ChatML list, which is
   reduced to its last `user` turn (a conversation with no user turn fails the batch on every rank);
   the environment builds the conversation itself. `answer: Any` (expected) is required only where
   the environment declares `requires_answer` — `code_contests` / `codeforces` take a hidden-test
   payload, `exam_qa` / `qa_search` / `react_*` the expected answer — refused at trainer construction
   when missing, over the train split and every eval split. `swe` needs it unless judge-only
-  ([rule](../../agent-docs/training-methods/grpo/environments/swe-environment.md#reward)); `native_*`
+  ([rule](../../agent-docs/training-methods/async-grpo/environments/tasks/swe.md#reward)); `native_*`
   and `mcp` need none. A ReAct preset given an `answer_validator` clears the requirement, and an
   explicit `environment_kwargs.requires_answer` overrides it, except that `swe` refuses `false`
   without a `test_function` while the reward has an `environment` term. Rename the columns with

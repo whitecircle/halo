@@ -86,7 +86,7 @@ class RLVROnlineGRPOScriptArguments(
             "requirements, view, on_error, reasoning_effort, ...; a veto judge listing checks is refused here, "
             "having no objective to gate) and 'reward_model' (url, model, backend, view, on_error, ...). Each "
             "term is one TRL reward function named after it, weighted by its weight; see "
-            "agent-docs/training-methods/grpo/rewards.md."
+            "agent-docs/training-methods/grpo/rewards/README.md."
         },
     )
 

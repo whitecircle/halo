@@ -12,9 +12,9 @@ multi-turn environments → Async GRPO with Environments.
 | [SMPO](../training-methods/preference/smpo.md) | prompt + chosen + rejected | No | No | `scripts/training/preference/smpo.py` |
 | [DPO](../training-methods/preference/dpo.md) | prompt + chosen + rejected | Yes | No | `scripts/training/preference/dpo.py` |
 | [KTO](../training-methods/preference/kto.md) | prompt + completion + bool label | Yes | No | `scripts/training/preference/kto.py` |
-| [Offline GRPO](../training-methods/grpo/offline-grpo.md) | prompt + completions + rewards | Opt-in (`kl_beta > 0`) | No | `scripts/training/offline_grpo.py` |
-| [Online GRPO (RLVR)](../training-methods/grpo/online-grpo.md) | prompt + ground-truth answer | Opt-in (`beta > 0`) | vLLM | `scripts/training/online_grpo/rlvr.py` |
-| [Async GRPO with Environments](../training-methods/grpo/async-grpo/README.md) | prompt (+ expected answer per env) | Opt-in (`beta > 0`) | vLLM/SGLang + Ray | `scripts/training/environmental_grpo.py` |
+| [Offline GRPO](../training-methods/grpo/offline.md) | prompt + completions + rewards | Opt-in (`kl_beta > 0`) | No | `scripts/training/offline_grpo.py` |
+| [Online GRPO (RLVR)](../training-methods/grpo/online.md) | prompt + ground-truth answer | Opt-in (`beta > 0`) | vLLM | `scripts/training/online_grpo/rlvr.py` |
+| [Async GRPO with Environments](../training-methods/async-grpo/README.md) | prompt (+ expected answer per env) | Opt-in (`beta > 0`) | vLLM/SGLang + Ray | `scripts/training/environmental_grpo.py` |
 | [Distillation](../training-methods/distillation/README.md) | Conversation turns | Teacher | No | `scripts/training/distillation/teacher_distill.py` |
 | [Reward modeling](../training-methods/preference/reward-modeling.md) | chosen + rejected | No | No | `scripts/training/preference/rewards.py` |
 | [Classification](../training-methods/classification.md) | prompt + label | No | No | `scripts/training/classification.py` |
@@ -32,6 +32,6 @@ Every trainer supports EP/TP/ETP. CP supports SFT, SMPO and offline GRPO (full f
 - **Offline vs online GRPO** — offline replays completions you already scored (no vLLM server, variable group sizes); online generates and scores live.
 - **Async GRPO** — the only multi-turn option: the model acts, receives observations, and learns from trajectory rewards, with async Ray-actor rollouts and NCCL weight sync to vLLM or SGLang (`rollout_backend`).
 
-    The environment comes from `environment_type`; see the [Environments overview](../training-methods/grpo/environments/README.md) for the built-in list and [Custom Environments](../training-methods/grpo/environments/custom-environments.md) to add one.
+    The environment comes from `environment_type`; see the [Environments overview](../training-methods/async-grpo/environments/README.md) for the built-in list and [Custom Environments](../training-methods/async-grpo/environments/custom.md) to add one.
 
 - **Teacher vs self distillation** — `teacher_distill.py` transfers from a larger model; two privileged-context self-distillation variants use one model as both student and teacher, offline (`self_distill.py`) and on-policy SDPG (`rlvr.py --use_sdpg=true`). See the [Distillation guide](../training-methods/distillation/README.md).

@@ -87,7 +87,7 @@ per DP rank in DP order. It is an identity when `dp_size == world_size`.
 Pre-sharded datasets are rejected under `precompute_ref_log_probs`: the sweep gathers one set of
 log-probs in dataset order, which each rank would attach to its own different shard. Offline GRPO's
 full-finetuning KL sweep has the same restriction in every mode, CP included; it requires finite,
-unsharded splits ([reference lifecycle](../training-methods/grpo/offline-grpo.md#reference-model)).
+unsharded splits ([reference lifecycle](../training-methods/grpo/offline.md#reference-model)).
 
 The two paths shard by different indices — the standard path by global rank (one distinct batch per
 rank), the custom path by DP rank (ranks in a TP/CP group share a batch):

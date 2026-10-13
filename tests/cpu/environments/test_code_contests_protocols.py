@@ -31,6 +31,7 @@ from scripts.environments.inference.run_code_contests import (
     resolve_eval_protocol,
     run_trajectory_path,
 )
+from src.configs.rollout_config import DEFAULT_ROLLOUT_MAX_TOKENS
 from src.environments.base import EPISODE_TOOL_BUDGETS_KEY, TOOL_CALL_COUNTS_KEY
 from src.environments.envs.tasks.coding.code_contests import (
     DEFAULT_EVAL_PROTOCOL,
@@ -53,7 +54,8 @@ from tests.common.code_contests import (
     retired_budget_phrases,
 )
 
-# The shipped recipes' ladder: effort buys submissions and scratchpad runs as well as thinking.
+# The shipped recipes' interaction ladder under enforced budgets: effort buys submissions and scratchpad runs
+# as well as thinking.
 _RECIPE_PROFILES = {
     "low": {"thinking_tokens": 8192, "max_submissions": 1, "max_test_calls": 2},
     "medium": {"thinking_tokens": 12288, "max_submissions": 2, "max_test_calls": 4},
@@ -298,6 +300,18 @@ def test_the_default_generation_budget_reads_a_profile_override():
         sandbox=StubSandbox(), reasoning_effort_profiles={"medium": {"thinking_tokens": 2000}}
     )
     assert default_max_tokens(env, "medium") == 2000 + SOLUTION_HEADROOM_TOKENS
+
+
+def test_a_soft_budget_sizes_the_default_no_smaller_than_the_rollouts_own():
+    """A turn may reason past a soft budget, so the default never shrinks to the budget plus headroom; a soft budget
+    past the rollout default still gets its headroom, or it would sit at or above its own turn cap."""
+
+    def soft(budget):
+        profiles = {"medium": {"thinking_tokens": budget, "enforce_thinking_cap": False}}
+        return CodeContestsEnvironment(sandbox=StubSandbox(), reasoning_effort_profiles=profiles)
+
+    assert default_max_tokens(soft(2000), "medium") == DEFAULT_ROLLOUT_MAX_TOKENS
+    assert default_max_tokens(soft(40000), "medium") == 40000 + SOLUTION_HEADROOM_TOKENS
 
 
 async def test_a_no_level_episode_sends_no_level_and_records_none(monkeypatch):

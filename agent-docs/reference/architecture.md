@@ -25,8 +25,8 @@ host has no usable Python ([Docker](../infrastructure/docker.md)).
 | Checkpoints | The per-mode saver ladder, weight resume, per-rank optimizer shards + LR scheduler, PEFT adapters, load-coverage gate — over the sharding-agnostic on-disk layer | `src/distributed/checkpoint/`, `src/checkpoint/`, `src/models/loading/checkpoint_coverage.py` | [Checkpoints](checkpoints.md) |
 | Optimizers | AdamWBF16 (SR), Muon, FlashAdamW | `src/optimizers/` | [BF16 Optimizer](../optimization/bf16-optimizer.md) |
 | Models | The sharding-agnostic model side: module-tree introspection, load-time patches (attention selection, GptOss sinks, Zaya), MoE router balancing, the head-path transform contract, the `Auto*`/tokenizer/dtype preparation, and the sequence-classification heads transformers does not ship (`src/models/seq_cls_heads.py`, registered by an import in `src/models/loading/model_preparation.py`) | `src/models/` | [Adding a Model](../models/adding-a-model.md) |
-| Rewards | Config-parsed reward terms (`terms.py`), the sample and the views a scorer reads (`samples.py`), the scorers behind the external sources (`scorers/`: the contract, the generative judge — scoring or veto — the served reward model, their catalog), the settlement of verdicts into one reward (`composer.py`), the TRL adapters (`functions.py`) and the rule-based graders (`graders/`: RLVR graders, answer matching) | `src/rewards/` | [Reward Terms](../training-methods/grpo/rewards.md) |
-| Environments | RL environment registry, Ray rollout actors, tools, sandboxes, eval runner | `src/environments/` | [Environments](../training-methods/grpo/environments/README.md) |
+| Rewards | Config-parsed reward terms (`terms.py`), the sample and the views a scorer reads (`samples.py`), the scorers behind the external sources (`scorers/`: the contract, the generative judge — scoring or veto — the served reward model, their catalog), the settlement of verdicts into one reward (`composer.py`), the TRL adapters (`functions.py`) and the rule-based graders (`graders/`: RLVR graders, answer matching) | `src/rewards/` | [Reward Terms](../training-methods/grpo/rewards/README.md) |
+| Environments | RL environment registry, Ray rollout actors, tools, sandboxes, eval runner | `src/environments/` | [Environments](../training-methods/async-grpo/environments/README.md) |
 | Entry-script plumbing | Environment setup (output dir, HF caches, seed, resume detection), the `scripts/training/**` backbone, the `run.log` tee, root/CLI logging, and the `halo launch` / `halo run` surface | `src/training/`, `src/cli.py`, `src/log.py` | [Scripts](scripts-reference.md) |
 | Served endpoints | The OpenAI-compatible client every rollout, judge and batch-generation script talks through: endpoint defaults and key resolution (`endpoints.py`), the async client, one request with the upstream retry and the structured single request (`openai_client.py`), the parallel resumable batch (`batch_requests.py`) over its JSONL store (`resume_store.py`), and the response record with its finish-reason contract (`response.py`) | `src/inference/` | [Rollout Servers](../infrastructure/rollout-servers.md) |
 
@@ -84,7 +84,7 @@ Offline GRPO's frozen-reference scores span three modules: `src/trainers/grpo/re
 `src/trainers/grpo/mixins/offline_reference.py` (the ragged payload, the training-checkpoint contract
 and evaluation's original-reference scores), and the shared `src/trainers/mixins/reference_logps.py` (checkpoint identity and
 persistence, which DPO/KTO precompute also use). Storage, resume and recovery:
-[Offline GRPO → Reference model](../training-methods/grpo/offline-grpo.md#reference-model).
+[Offline GRPO → Reference model](../training-methods/grpo/offline.md#reference-model).
 
 ## Distributed layer
 
@@ -198,8 +198,8 @@ another node syncs over EFA ([Rollout Servers](../infrastructure/rollout-servers
 Before each generation round that follows a weight update (async GRPO: every
 `sync_weights_every_n_steps`), the trainer gathers EP expert shards, unfolds FSDP2 DTensors via
 `full_tensor()`, gathers TP shards, pushes the weights to the rollout server over NCCL, and resets
-the prefix cache. See [Online GRPO](../training-methods/grpo/online-grpo.md) and
-[Async GRPO](../training-methods/grpo/async-grpo/README.md).
+the prefix cache. See [Online GRPO](../training-methods/grpo/online.md) and
+[Async GRPO](../training-methods/async-grpo/README.md).
 
 ## Related pages
 

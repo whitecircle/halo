@@ -251,6 +251,32 @@ def test_base_rejects_non_finite_and_non_numeric_profile_values():
             )
 
 
+def test_a_profile_may_make_its_budget_soft_but_only_a_budget_it_has():
+    """``enforce_thinking_cap`` is a true-or-false profile key: false leaves the budget stated and priced but
+    unenforced, unset leaves it enforced; a soft flag on a level with no budget has nothing to state."""
+    env = NativeToolUseEnvironment(
+        tool_registry=_registry(),
+        reasoning_effort_profiles={
+            "high": {"thinking_tokens": 2048, "enforce_thinking_cap": False},
+            "medium": {"thinking_tokens": 1024},
+        },
+    )
+    assert (env.thinking_budget_for_effort("high"), env.thinking_budget_enforced("high")) == (2048, False)
+    assert env.thinking_budget_enforced("medium") is True, "a budget is enforced unless its profile says otherwise"
+    for bad in (0, 1, "false", None):
+        with pytest.raises(ValueError, match="enforce_thinking_cap for effort 'high' must be true or false"):
+            NativeToolUseEnvironment(
+                tool_registry=_registry(),
+                reasoning_effort_profiles={"high": {"thinking_tokens": 2048, "enforce_thinking_cap": bad}},
+            )
+    with pytest.raises(ValueError, match="enforce_thinking_cap: false without thinking_tokens"):
+        NativeToolUseEnvironment(
+            tool_registry=_registry(), reasoning_effort_profiles={"high": {"enforce_thinking_cap": False}}
+        )
+    with pytest.raises(ValueError, match=r"allowed: \[.*'enforce_thinking_cap'"):
+        NativeToolUseEnvironment(tool_registry=_registry(), reasoning_effort_profiles={"high": {"enforce_cap": False}})
+
+
 def test_base_rejects_a_fractional_count_budget():
     """A cap of 1.5 calls admits two; the registry's int minimum marks the key a count."""
     with pytest.raises(ValueError, match="thinking_tokens for effort 'low' is a count"):

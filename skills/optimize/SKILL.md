@@ -46,7 +46,7 @@ These fire automatically; mention them only to confirm, not as new advice. Figur
   where the step is expert-GEMM and all-to-all bound. FA2 is the slow outlier on B300.
 - **AdamWBF16 + stochastic rounding** — auto from `bf16: true`; half the per-param state of fp32 AdamW at
   a loss curve that tracks the fp32 master. Auto-OFF under replicated DDP.
-- **CDMC=1** — baked into the image env for multi-group EP correctness; it costs no throughput.
+- **CDMC=1** — baked into the image env; EP is validated at it, and it costs no measurable throughput.
 - **Atomic-free expert permute** — auto on every grouped-GEMM MoE path; win grows with sequence
   length (+24% on gpt-oss-20b EP8).
 - **Fused MoE path** — fused GLU (`HALO_FUSED_GLU`) on every expert and dense-MLP combine, and the

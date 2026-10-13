@@ -31,7 +31,7 @@ Usage (each config's header carries its own exact launch line):
         scripts/training/environmental_grpo.py \\
         examples/grpo/environmental/gptoss/sglang/gptoss-20b-code-contests-full-ep1.yaml
 
-See agent-docs/training-methods/grpo/async-grpo/README.md for the objective, the environment roster and
+See agent-docs/training-methods/async-grpo/README.md for the objective, the environment roster and
 the rollout-server contract.
 """
 
@@ -133,16 +133,19 @@ def measure_env_prompt_overhead(environment, tokenizer, template_kwargs: dict) -
 def probe_template_kwargs(async_config: AsyncTrainingConfig, environment) -> dict:
     """The chat-template kwargs a rollout request of this run carries, for the prompt-overhead probe:
     the run's template variables plus the level and thinking budget an episode binds through
-    :func:`bind_episode_effort` (a ``'random'`` env setting draws one level, as an episode does), so the
-    probe renders the budget an episode's requests state: the level's budget clamped to
-    ``rollout_max_thinking_tokens``."""
+    :func:`bind_episode_effort` under the run's own bounds (a ``'random'`` env setting draws one level, as an
+    episode does), so the probe renders the budget an episode's requests state, flagged where it is soft."""
     effort = bind_episode_effort(
         None,
         environment,
         max_tokens=async_config.rollout_max_tokens,
         max_thinking_tokens=async_config.rollout_max_thinking_tokens,
+        max_episode_tokens=async_config.rollout_max_episode_tokens,
+        max_answer_tokens=async_config.rollout_max_answer_tokens,
     )
-    return rollout_template_kwargs(async_config.rollout_chat_template_kwargs, effort.level, effort.thinking_budget)
+    return rollout_template_kwargs(
+        async_config.rollout_chat_template_kwargs, effort.level, effort.thinking_budget, effort.budget_soft
+    )
 
 
 def worst_case_generation(async_config: AsyncTrainingConfig, max_turns: int) -> int:

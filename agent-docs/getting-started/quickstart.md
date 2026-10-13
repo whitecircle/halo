@@ -52,9 +52,9 @@ Same YAML shape, different script and a few method fields. `halo launch <method>
 |---|---|---|
 | SMPO (reference-free preference) | `scripts/training/preference/smpo.py` | [SMPO](../training-methods/preference/smpo.md) |
 | DPO / KTO | `scripts/training/preference/{dpo,kto}.py` | [DPO](../training-methods/preference/dpo.md) · [KTO](../training-methods/preference/kto.md) |
-| Offline GRPO (pre-scored) | `scripts/training/offline_grpo.py` | [Offline GRPO](../training-methods/grpo/offline-grpo.md) |
-| Online GRPO (RLVR) | `scripts/training/online_grpo/rlvr.py` | [Online GRPO](../training-methods/grpo/online-grpo.md) |
-| Async GRPO with Environments (multi-turn) | `scripts/training/environmental_grpo.py` | [Async GRPO](../training-methods/grpo/async-grpo/README.md) |
+| Offline GRPO (pre-scored) | `scripts/training/offline_grpo.py` | [Offline GRPO](../training-methods/grpo/offline.md) |
+| Online GRPO (RLVR) | `scripts/training/online_grpo/rlvr.py` | [Online GRPO](../training-methods/grpo/online.md) |
+| Async GRPO with Environments (multi-turn) | `scripts/training/environmental_grpo.py` | [Async GRPO](../training-methods/async-grpo/README.md) |
 | Reward modeling / classification | `scripts/training/preference/rewards.py`, `scripts/training/classification.py` | [Reward](../training-methods/preference/reward-modeling.md) · [Classification](../training-methods/classification.md) |
 | Distillation | `scripts/training/distillation/{teacher_distill,self_distill}.py` | [Distillation](../training-methods/distillation/README.md) |
 | Embedding | `scripts/training/embedding.py` | [Embedding](../training-methods/embedding.md) |

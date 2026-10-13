@@ -14,7 +14,7 @@ the whole contract on a tiny random-init model through the real trainer save/res
      trainable weight must equal the save-time snapshot EXACTLY and the LR scheduler must be at
      step 3; the resumed steps 4-6 must then reproduce the continuous run, losses and final weights
      bit for bit. Nothing is reset between the phases: AdamWBF16 keys its stochastic rounding by the
-     parameter's step and position, so a resumed step rounds as the uninterrupted one did, and every
+     parameter's step and name, so a resumed step rounds as the uninterrupted one did, and every
      DeepEP buffer is built in deterministic mode
      (:func:`~tests.common.distributed.pin_deterministic_ep_dispatch`), without which the atomic
      receive order alone changes how each expert weight gradient is summed.

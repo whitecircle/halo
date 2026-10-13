@@ -1,4 +1,4 @@
-"""Generate the online GRPO (RLVR) pipeline for training-methods/grpo/online-grpo.md.
+"""Generate the online GRPO (RLVR) pipeline for training-methods/grpo/online.md.
 
 The step is a cycle: the trainer renders and tokenizes, vLLM generates, the rule-based rewards
 score the completions, and the updated weights go back over NCCL before the next generation.

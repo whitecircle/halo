@@ -61,7 +61,9 @@ rewards:
 - A veto judge (one that lists `checks` instead of `requirements`) is refused here. It gates an
   environment's grade, which only [Async GRPO](async-grpo-environments.md#rewards) has.
 
-All options: [Reward Terms](../../agent-docs/training-methods/grpo/rewards.md) ↗.
+All options: [Reward Terms](../../agent-docs/training-methods/grpo/rewards/README.md) ↗ ·
+[Generative Judge](../../agent-docs/training-methods/grpo/rewards/judge.md#options) ↗ ·
+[Served Reward Model](../../agent-docs/training-methods/grpo/rewards/reward-model.md#options) ↗.
 
 ## Config
 
@@ -175,8 +177,11 @@ are all zero.
 
 ## Go deeper
 
-- [Online GRPO (RLVR)](../../agent-docs/training-methods/grpo/online-grpo.md) ↗: objective knobs and
+- [Online GRPO (RLVR)](../../agent-docs/training-methods/grpo/online.md) ↗: objective knobs and
   batch geometry.
-- [Reward Terms](../../agent-docs/training-methods/grpo/rewards.md) ↗: judge and reward-model options.
+- [Reward Terms](../../agent-docs/training-methods/grpo/rewards/README.md) ↗ ·
+  [Generative Judge](../../agent-docs/training-methods/grpo/rewards/judge.md) ↗ ·
+  [Served Reward Model](../../agent-docs/training-methods/grpo/rewards/reward-model.md) ↗: term, judge and
+  reward-model options.
 - [Rollout Servers](../rollout-servers.md) · [Offline GRPO](offline-grpo.md) ·
   [Async GRPO with Environments](async-grpo-environments.md) · [Training Methods](README.md)

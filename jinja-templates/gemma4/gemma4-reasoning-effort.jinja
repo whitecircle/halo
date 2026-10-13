@@ -3,8 +3,9 @@
     turn, so the trainer's renders and the server's agree without an enable_thinking variable); an assistant
     turn renders whatever reasoning it carries; tool declarations, tool calls and tool responses keep the hub
     spellings. Variables: reasoning_effort (the request's top-level field, merged in by the server),
-    reasoning_budget (the level's per-turn thinking budget, from chat_template_kwargs); the line depends on
-    reasoning_effort alone. -#}
+    reasoning_budget (the level's per-turn thinking budget, from chat_template_kwargs) and
+    reasoning_budget_soft (true when the engine does not enforce that budget, so the line states a target,
+    not a cut); the line depends on reasoning_effort alone. -#}
 {%- macro format_parameters(properties, required, filter_keys=false) -%}
     {%- set standard_keys = ['description', 'type', 'properties', 'required', 'nullable'] -%}
     {%- set ns = namespace(found_first=false) -%}
@@ -202,7 +203,9 @@
         {{- '\n\n' -}}
     {%- endif -%}
     {{- 'Reasoning effort: ' ~ reasoning_effort ~ '.' -}}
-    {%- if reasoning_budget is defined and reasoning_budget -%}
+    {%- if reasoning_budget is defined and reasoning_budget and reasoning_budget_soft is defined and reasoning_budget_soft -%}
+        {{- ' Aim to think for at most ' ~ reasoning_budget ~ ' tokens per turn.' -}}
+    {%- elif reasoning_budget is defined and reasoning_budget -%}
         {{- ' Think for at most ' ~ reasoning_budget ~ ' tokens per turn; reasoning past that budget is cut off, so finish the turn within it.' -}}
     {%- endif -%}
 {%- endif -%}

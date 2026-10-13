@@ -8,7 +8,13 @@ return those facts in different places. Transport and the episode loop belong to
 import logging
 from typing import Any, get_args, get_type_hints
 
-from src.configs.rollout_config import REASONING_BUDGET_TEMPLATE_VAR, SGLANG_BACKEND, VLLM_BACKEND, RolloutConfig
+from src.configs.rollout_config import (
+    REASONING_BUDGET_SOFT_TEMPLATE_VAR,
+    REASONING_BUDGET_TEMPLATE_VAR,
+    SGLANG_BACKEND,
+    VLLM_BACKEND,
+    RolloutConfig,
+)
 from src.log import warn_once
 
 logger = logging.getLogger(__name__)
@@ -135,12 +141,16 @@ def capture_routing_mask(choice: dict[str, Any], data: dict[str, Any]) -> str | 
 
 
 def generation_control_fields(
-    config: RolloutConfig, reasoning_effort: str | None = None, reasoning_budget: int | None = None
+    config: RolloutConfig,
+    reasoning_effort: str | None = None,
+    reasoning_budget: int | None = None,
+    budget_soft: bool = False,
 ) -> dict[str, Any]:
     """The request fields carrying a turn's generation contract: the sampler filters (``config.top_k``,
     ``min_p``, ``repetition_penalty``), the reasoning level, the CoT cap the engine enforces this turn
     (``config.max_thinking_tokens``), the budget the template states (``reasoning_budget``, the level's
-    per-turn budget both drivers pass), and the turn terminator.
+    per-turn budget both drivers pass, with ``budget_soft`` when the engine does not enforce it), and the
+    turn terminator.
     One owner for both drivers — the training payload below and the eval runner's SDK call — so a knob
     cannot reach one and quietly miss the other.
 
@@ -169,13 +179,13 @@ def generation_control_fields(
             # vLLM forces the reasoning-end marker; needs a server-side reasoning parser.
             fields["thinking_token_budget"] = config.max_thinking_tokens
         else:
-            # A budget reaching here came from the env's per-effort profile (a global one is rejected
-            # at config time); it still reaches the reward side, so dropping it is not a full no-op.
+            # A cap reaching here came from the env's profile — a level's budget, a soft level's ceiling or a
+            # retry's reserve (a global one is rejected at config time); the budget still reaches the reward side.
             warn_once(
                 logger,
                 _THINKING_BUDGET_UNENFORCED_WARNED,
                 config.backend,
-                "Per-effort thinking budget of %d tokens is NOT enforced on rollout_backend=%r "
+                "Per-turn thinking cap of %d tokens is NOT enforced on rollout_backend=%r "
                 "(thinking_token_budget is a vLLM-only request field): nothing caps reasoning "
                 "below max_tokens=%d. The level still reaches the chat template and the reasoning "
                 "terms (reasoning_price, reasoning_floor), which price reasoning per level "
@@ -186,11 +196,13 @@ def generation_control_fields(
             )
     template_kwargs = dict(config.chat_template_kwargs or {})
     if reasoning_budget is not None:
-        # The level's budget as a template variable, so a template can state the budget the engine
-        # enforces; a template that does not read it ignores it. Episode-constant: the trainer renders
+        # The level's budget as a template variable, so a template can state it — as a cut where the engine
+        # enforces it, a target where it is soft; a template that does not read it ignores it. Episode-constant: the trainer renders
         # every turn of a trajectory with the one value the trajectory carries, never the narrower cap
         # an output budget leaves a late turn.
         template_kwargs[REASONING_BUDGET_TEMPLATE_VAR] = reasoning_budget
+        if budget_soft:
+            template_kwargs[REASONING_BUDGET_SOFT_TEMPLATE_VAR] = True
     if reasoning_effort is not None:
         fields["reasoning_effort"] = reasoning_effort
         if config.backend != VLLM_BACKEND:
@@ -208,10 +220,11 @@ def build_payload(
     reasoning_effort: str | None = None,
     tools: list[dict] | None = None,
     reasoning_budget: int | None = None,
+    budget_soft: bool = False,
 ) -> dict[str, Any]:
     """Build the OpenAI chat-completions request payload. ``reasoning_effort`` is the per-episode
     resolved level; ``config.max_thinking_tokens`` carries the turn's engine cap and ``reasoning_budget``
-    the level's budget the template states (see :func:`generation_control_fields`)."""
+    the level's budget the template states, soft or not (see :func:`generation_control_fields`)."""
     payload: dict[str, Any] = {
         "messages": messages,
         "temperature": config.temperature,
@@ -241,5 +254,5 @@ def build_payload(
         payload["model"] = config.model_name
     if tools:
         payload["tools"] = tools
-    payload.update(generation_control_fields(config, reasoning_effort, reasoning_budget))
+    payload.update(generation_control_fields(config, reasoning_effort, reasoning_budget, budget_soft))
     return payload

@@ -118,10 +118,15 @@ CUDA_VISIBLE_DEVICES=0,1,2,3,4,5 DIST_NCCL_TIMEOUT_MINUTES=60 \
   it, so near-tied expert picks can differ between trainer and server.
 - **Long context.** The SFT recipe sets `fp32_non_ep_params: true` for stable training at 33,000 tokens.
 - **Tool parser and thinking budget.** vLLM needs `VLLM_TOOL_PARSER=qwen3_xml`. The default `hermes`
-  leaves the XML tool calls as text, so every episode scores zero. A thinking budget also needs
-  `VLLM_REASONING_PARSER=qwen3` and `VLLM_USE_V2_MODEL_RUNNER=0`, or every request fails with a 400.
-- **SGLang rollouts.** `rollout_max_thinking_tokens` and `carry_reasoning` are refused at startup, and
-  the effort profiles' `thinking_tokens` cap nothing there.
+  leaves the XML tool calls as text, so every episode scores zero. The code-contests recipes run soft
+  thinking budgets: the template states each level's `thinking_tokens` as a target, and on vLLM the
+  engine closes the reasoning only at its ceiling, `rollout_max_tokens − rollout_max_answer_tokens`
+  (30,000 − 8,192 tokens). That ceiling needs `VLLM_REASONING_PARSER=qwen3` and
+  `VLLM_USE_V2_MODEL_RUNNER=0`, or every request fails with a 400
+  ([Thinking budgets](../training-methods/async-grpo-environments.md#thinking-budgets)).
+- **SGLang rollouts.** `rollout_max_thinking_tokens` and `carry_reasoning` are refused at startup. The
+  soft budgets are stated and priced as on vLLM, but no engine cap closes the reasoning there: only
+  `rollout_max_tokens` bounds a turn.
 
 ## Limits
 

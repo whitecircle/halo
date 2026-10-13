@@ -91,7 +91,7 @@ EP/long-context throughput tables live in [Throughput Benchmarks](throughput-ben
 
 3. **Variable-length RL (async GRPO) runs FA4 via a per-row dense forward** (`_dense_last_hidden_state`). A padded batch unpads to a `cu_seqlens` **varlen** FA4 call whose cross-row attention would break per-row log-prob identity with the sampling policy.
 
-    The dense kernel is seqlen-invariant, so the path forwards each row on its own, trimmed to its real contiguous span, with `attention_mask=None`: RoPE positions `[0, len)`, log-probs bit-identical to the unpadded forward. FA4 is where the trim is *mandatory*; `rows_forward_densely` also takes it on any attention path at `per_device_train_batch_size: 1`, for the cost alone ([Chunked log-probs](../training-methods/grpo/async-grpo/performance.md#chunked-log-probs)).
+    The dense kernel is seqlen-invariant, so the path forwards each row on its own, trimmed to its real contiguous span, with `attention_mask=None`: RoPE positions `[0, len)`, log-probs bit-identical to the unpadded forward. FA4 is where the trim is *mandatory*; `rows_forward_densely` also takes it on any attention path at `per_device_train_batch_size: 1`, for the cost alone ([Chunked log-probs](../training-methods/async-grpo/performance.md#chunked-log-probs)).
 
     Per-rank forward counts are all-reduced to a max and padded with tied dummy forwards, and every row — the padding included — stays connected to the loss, so the forward **and** backward collective sequences stay in lockstep. A disconnected row would let autograd prune its backbone backward and desync the FSDP/EP grad collectives across ranks.
 
@@ -237,7 +237,7 @@ The backward then recompiles every step: ~190 s/step vs ~10 s on gpt-oss-20b ep4
 
 ## Blackwell notes
 
-vLLM on B200: set `VLLM_ATTENTION_BACKEND=FLASH_ATTN` where FlashInfer JIT-fails on SM 10.0. See [Online GRPO](../training-methods/grpo/online-grpo.md#vllm-on-blackwell-b200).
+vLLM on B200: set `VLLM_ATTENTION_BACKEND=FLASH_ATTN` where FlashInfer JIT-fails on SM 10.0. See [Online GRPO](../training-methods/grpo/online.md#vllm-on-blackwell-b200).
 
 ## Sliding-window and wide-head layers on SDPA
 

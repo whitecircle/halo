@@ -149,7 +149,7 @@ def test_scores_outside_the_unit_interval_are_refused(score):
             "true or false",
         ),
         (
-            {"source": "judge", "name": "q", "checks": [{"name": "a", "description": "d", "weight": 1}]},
+            {"source": "judge", "name": "q", "checks": [{"name": "a", "description": "d", "price": 1}]},
             "unknown option",
         ),
         ({**RM_SPEC, "logit_scale": 0}, "logit_scale"),
@@ -215,6 +215,33 @@ def test_flag_fraction_counts_the_process_checks_only():
     assert veto_only.flag_fraction({"cheat": True}) == 0.0
 
 
+def test_flag_fraction_weighs_each_process_check():
+    term = JudgeTerm(
+        name="gate",
+        weight=-0.2,
+        checks=(
+            Check(name="cheat", description="d", veto=True),
+            Check(name="logged", description="d", weight=0.0),
+            Check(name="wasted", description="d"),
+            Check(name="sloppy", description="d", weight=3.0),
+        ),
+    )
+    # A zero-weight flag is logged, never priced: firing alone it leaves the score at 0.
+    assert term.flag_fraction({"logged": True, "cheat": True}) == 0.0
+    assert term.flag_fraction({"wasted": True}) == 0.25
+    assert term.flag_fraction({"wasted": True, "sloppy": True, "logged": True}) == 1.0
+    assert term.price(term.flag_fraction({"wasted": True})) == -0.05
+    only_logged = JudgeTerm(name="gate", weight=-0.2, checks=(Check(name="logged", description="d", weight=0.0),))
+    assert only_logged.flag_fraction({"logged": True}) == 0.0
+
+
+def test_a_check_weight_parses_from_config():
+    checks = [*CHECKS, {"name": "logged", "description": "d", "weight": 0}]
+    (term,) = parse_reward_terms([{"source": "judge", "name": "gate", "checks": checks, "weight": -0.1}], SOURCES)
+    assert term.checks[-1] == Check(name="logged", description="d", weight=0.0)
+    assert [check.share for check in term.checks] == [0.0, 1.0, 1.0, 0.0]
+
+
 @pytest.mark.parametrize(
     ("kwargs", "message"),
     [
@@ -224,6 +251,10 @@ def test_flag_fraction_counts_the_process_checks_only():
         ({"name": "a", "description": " "}, "description must be a non-blank string"),
         ({"name": "a", "description": "d", "veto": "yes"}, "veto must be true or false"),
         ({"name": "a", "description": "d", "veto": 1}, "veto must be true or false"),
+        ({"name": "a", "description": "d", "weight": -1.0}, "weight must be >= 0"),
+        ({"name": "a", "description": "d", "weight": float("nan")}, "weight must be a finite number"),
+        ({"name": "a", "description": "d", "weight": True}, "weight must be a finite number"),
+        ({"name": "a", "description": "d", "veto": True, "weight": 1.0}, "takes no weight"),
     ],
 )
 def test_check_validation(kwargs, message):

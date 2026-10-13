@@ -309,6 +309,7 @@ class EnvironmentActor:
                     turn_config,
                     effort.level,
                     effort.thinking_budget,
+                    effort.budget_soft,
                     sync_expiries,
                 )
                 generated += gen.tokens
@@ -388,13 +389,16 @@ class EnvironmentActor:
         config: RolloutConfig,
         reasoning_effort: str | None,
         reasoning_budget: int | None,
+        budget_soft: bool,
         sync_expiries: _SyncExpiries,
     ) -> TurnGeneration:
         """One turn under the shared rollout retry policy (:func:`generate_turn`): transport and engine
         faults are retried, a genuine client 4xx or a shutdown error is terminal, and an engine abort is
         re-issued for the same observation. Past the retries the episode errors into a masked row."""
         return await generate_turn(
-            partial(self._generate, client, server_url, messages, config, reasoning_effort, reasoning_budget),
+            partial(
+                self._generate, client, server_url, messages, config, reasoning_effort, reasoning_budget, budget_soft
+            ),
             config,
             retry_on=(TimeoutError, aiohttp.ClientError, RuntimeError),
             giveup=_should_giveup,
@@ -410,6 +414,7 @@ class EnvironmentActor:
         config: RolloutConfig,
         reasoning_effort: str | None = None,
         reasoning_budget: int | None = None,
+        budget_soft: bool = False,
     ) -> TurnGeneration:
         """One /v1/chat/completions request (and a ``/detokenize`` for a call cut at the cap,
         :meth:`_cut_calls_as_written`); returns the turn's :class:`TurnGeneration` (capture fields populated per
@@ -424,7 +429,7 @@ class EnvironmentActor:
         if not url.startswith("http"):
             url = f"http://{url}"
 
-        payload = self._build_payload(messages, config, reasoning_effort, reasoning_budget)
+        payload = self._build_payload(messages, config, reasoning_effort, reasoning_budget, budget_soft)
 
         async def _exchange() -> dict:
             async with client.post(f"{url}/v1/chat/completions", json=payload) as resp:
@@ -526,9 +531,10 @@ class EnvironmentActor:
         config: RolloutConfig,
         reasoning_effort: str | None = None,
         reasoning_budget: int | None = None,
+        budget_soft: bool = False,
     ) -> dict[str, Any]:
         """The turn's request payload, with this actor's env tool schema bound onto the wire format."""
-        return build_payload(messages, config, reasoning_effort, self._tools_schema, reasoning_budget)
+        return build_payload(messages, config, reasoning_effort, self._tools_schema, reasoning_budget, budget_soft)
 
     async def shutdown(self):
         """Close the HTTP session and the environment (idempotent; called by RolloutManager.shutdown)."""

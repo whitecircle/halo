@@ -370,7 +370,7 @@ they desynchronize, and DeepEP's barrier times out — `cudaErrorLaunchFailure`,
 abort, not a raised error. Measured on 2 GPUs: reentrant is grad-exact (worst relative gradient
 error 4.3e-05 vs no checkpointing, across all 155 parameters), non-reentrant aborts.
 
-Under [routing replay](../training-methods/grpo/async-grpo/objective.md#routing-replay)
+Under [routing replay](../training-methods/async-grpo/objective.md#routing-replay)
 the recompute reads the frame's saved expert selection. Expert-load counters record only a scope's
 grad-driven **original** pass, gated on the outer grad mode captured at invocation: the recompute
 never double-counts `moe/*` metrics or bias-update balancing, and a `no_grad` forward through a

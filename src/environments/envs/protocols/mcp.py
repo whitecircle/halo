@@ -72,7 +72,7 @@ class NativeMCPClientEnvironment(AsyncNativeToolUseEnvironment):
     native OpenAI format."""
 
     # Twice the native per-call rate; also stated in
-    # agent-docs/training-methods/grpo/environments/mcp.md, which must be updated alongside it.
+    # agent-docs/training-methods/async-grpo/environments/protocols/mcp.md, which must be updated alongside it.
     DEFAULT_TOOL_SUCCESS_REWARD = 0.1
     TOOLS_ARRIVE_ON_RESET = True
 

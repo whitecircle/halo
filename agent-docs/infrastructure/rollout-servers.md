@@ -3,8 +3,8 @@
 A rollout server is a **separate inference container**, vLLM or SGLang, that generates the model's
 responses (rollouts) during RL. The trainer sends prompts to it over HTTP and pushes updated weights
 back over a per-server NCCL group. Every on-policy GRPO trainer needs one:
-[Online](../training-methods/grpo/online-grpo.md) and
-[Async GRPO with Environments](../training-methods/grpo/async-grpo/README.md).
+[Online](../training-methods/grpo/online.md) and
+[Async GRPO with Environments](../training-methods/async-grpo/README.md).
 
 The training environment never imports either engine (ABI-incompatible stacks); it speaks to them
 through the vendored client in `src/distributed/nccl/`. Select the engine with
@@ -30,14 +30,14 @@ An entry's keys are read by name with no per-entry validation, so a misspelled `
 falls back to `vllm_group_port + index`. The top-level keys are engine-neutral and the parser renames
 none: any other spelling raises the unknown-key error. Trainer-side rollout mechanics (prefetch and
 its one-step staleness, sync cadence, trajectory-length knobs) stay on the
-[Async GRPO with Environments](../training-methods/grpo/async-grpo/setup.md#weight-synchronization) page.
+[Async GRPO with Environments](../training-methods/async-grpo/setup.md#weight-synchronization) page.
 
 | | vLLM 0.26.0 | SGLang 0.5.17 |
 |---|---|---|
 | Trainers | online, async GRPO | async GRPO |
 | Sampled-token ids | `--return-tokens-as-token-ids` (server flag) | per-request `return_meta_info` |
 | IS-reference logprobs (the sampling distribution's) | `--logprobs-mode processed_logprobs` (server flag; the default `raw_logprobs` is pre-temperature and refused at any `rollout_temperature` ≠ 1) | default (post-temperature, pre-nucleus; keep `SGLANG_RETURN_ORIGINAL_LOGPROB` unset) |
-| [R3 routing replay](../training-methods/grpo/async-grpo/objective.md#routing-replay) | `--enable-return-routed-experts` + `--moe-backend triton` | `--enable-return-routed-experts` + `--moe-runner-backend triton` |
+| [R3 routing replay](../training-methods/async-grpo/objective.md#routing-replay) | `--enable-return-routed-experts` + `--moe-backend triton` | `--enable-return-routed-experts` + `--moe-runner-backend triton` |
 | Thinking budget (`rollout_max_thinking_tokens`) | enforced engine-side with a reasoning parser and `VLLM_USE_V2_MODEL_RUNNER=0`; harmony-disabled gpt-oss arms it off the toolkit plugin's marker ([GPT-OSS](../models/gpt-oss.md#serving-for-grpo-vllm)) | rejected at config time |
 | Expert layout on sync | the layout the family's own `gather_expert_state_dict` emits, per-expert or fused; 0.26.0's expert loader reads both. A load that renamed or converted names (Step-3.7's per-layer `moe.gate_proj`/`up_proj` stacks, a SigLIP tower's `vision_model` level) is re-spelled through transformers' save-side revert, so the engine receives its hub keys | the same layouts, read by 0.5.17's per-family loaders; the families they cannot update are listed under [Which families each engine serves](#which-families-each-engine-serves) |
 | Trainer expert distribution ([EP/ETP](../reference/glossary.md#parallelism)) | supported | supported |
@@ -130,12 +130,12 @@ A chunk cannot be replayed. A server that fails **after** its first chunk is rep
 reconnected; the trainer does not hold what already landed. One that fails before any chunk went out
 (an engine restarted between syncs, the common case) is recovered by the reconnect + re-flush. Each
 client owns its own NCCL connection to its server on a `group_port` bound on the *trainer* host
-([group ports](../training-methods/grpo/async-grpo/setup.md#weight-synchronization)).
+([group ports](../training-methods/async-grpo/setup.md#weight-synchronization)).
 
 **The quiesce spans the streaming, not just the final broadcast.** The update opens with the first
 full chunk (~1 GB into the gather) and closes when the last one lands, so a server stops serving for
 as long as the gather runs: minutes at 397B. Every push pauses all servers together
-([single vs multi-server](../training-methods/grpo/async-grpo/setup.md#multiple-servers-and-prefetch)).
+([single vs multi-server](../training-methods/async-grpo/setup.md#multiple-servers-and-prefetch)).
 
 The client pauses vLLM with `/pause?mode=keep`: in-flight generations (the prefetched rollout round)
 freeze and resume under the new weights on `/resume`. That is the one-step staleness the
@@ -230,7 +230,7 @@ every prompt position comes back garbage (NLL 12–22) while sampling stays corr
 ([vllm#53488](https://github.com/vllm-project/vllm/issues/53488)). On a step that schedules a
 prompt-log-prob request, the patch clones the hidden states before the drafter runs. The V2 model
 runner takes prompt log-probs before drafting and needs no patch. The `isr_engine_reference` startup
-probe refuses an unpatched server that speculates ([Objective](../training-methods/grpo/async-grpo/objective.md#trust-region-masks)).
+probe refuses an unpatched server that speculates ([Engine reference](../training-methods/async-grpo/objective.md#engine-reference)).
 
 Checkpoint layout and expert un-fuse rules live in
 [Checkpoints](../reference/checkpoints.md#serving-on-vllm--sglang).
@@ -428,7 +428,7 @@ VLLM_MODEL=Qwen/Qwen3-30B-A3B VLLM_CUDA_DEVICES=6,7 VLLM_TP=2 TRAINER_CUDA_DEVIC
 | `VLLM_TOOL_CALLING_FLAGS` | `--enable-auto-tool-choice --tool-call-parser $VLLM_TOOL_PARSER` | Set to empty (`VLLM_TOOL_CALLING_FLAGS=`) to serve with no tool parser, as the ReAct recipes do; unset keeps the default |
 | `VLLM_TOOL_PARSER_PLUGIN` | *(unset)* | `--tool-parser-plugin` path (gpt-oss uses the baked `/opt/gpt_oss_text_tool_parser.py`) |
 | `VLLM_CHAT_TEMPLATE` | *(unset)* | Set to the SAME `.jinja` the trainer's `chat_template:` uses; the file must be visible inside the server container |
-| `VLLM_REASONING_PARSER` | *(unset)* | Required when training sets `rollout_max_thinking_tokens` |
+| `VLLM_REASONING_PARSER` | *(unset)* | Required when a turn can carry a thinking cap: `rollout_max_thinking_tokens`, or any level's `thinking_tokens` (a soft one through its ceiling and every retry's reserve) |
 | `VLLM_REASONING_PARSER_PLUGIN` | *(unset)* | `--reasoning-parser-plugin` path for families without a built-in parser |
 | `TRAIN_IMAGE` | `halo:blackwell` | Image the compose file's optional trainer service runs |
 
@@ -483,7 +483,7 @@ open-book `exam_qa`) the absence of the right one is silent and fatal to RL: cal
 `tool_calls`, every episode reward 0, flat zero gradient.
 
 ReAct envs send no `tools` schema (their tools are named in the system prompt) and parse actions
-from the response text, so the parser plays no part there; the ReAct recipes serve without one
+from the response text; the ReAct recipes serve without a parser
 (`VLLM_TOOL_CALLING_FLAGS=` under compose).
 Native-tool parsers per family:
 
@@ -493,7 +493,7 @@ Native-tool parsers per family:
 | Qwen3.5 / 3.6, Qwen3-Coder | `qwen3_xml` (hermes does NOT parse their XML `<function=…>` calls) |
 | GPT-OSS | bundled plugin `gpt_oss_text` via `VLLM_TOOL_PARSER_PLUGIN`; reasoning plugin `/opt/gpt_oss_reasoning_parser.py`, parser `openai_gptoss` ([GPT-OSS](../models/gpt-oss.md#serving-for-grpo-vllm)) |
 | GLM-4 | `glm45` / `glm47` |
-| Gemma 4 | `gemma4` (hermes leaves its `<\|tool_call>call:…<tool_call\|>` calls as text, so no tool ever runs); with a thinking budget (`rollout_max_thinking_tokens`, or an env's per-effort `thinking_tokens` profile) also `VLLM_REASONING_PARSER=gemma4` and `VLLM_USE_V2_MODEL_RUNNER=0`, else every request 400s |
+| Gemma 4 | `gemma4` (hermes leaves its `<\|tool_call>call:…<tool_call\|>` calls as text, so no tool ever runs); with a thinking cap (`rollout_max_thinking_tokens`, or any level's `thinking_tokens`: a soft one through its ceiling and every retry's reserve) also `VLLM_REASONING_PARSER=gemma4` and `VLLM_USE_V2_MODEL_RUNNER=0`, else every request 400s |
 | LFM-2 | `lfm2` (pythonic calls between `<\|tool_call_start\|>` and `<\|tool_call_end\|>`) |
 | Laguna | `poolside_v1` (`<tool_call>` with `<arg_key>`/`<arg_value>` pairs) |
 | Step-3.7 Flash | `step3p5` (`<tool_call>` around `<function=…>`/`<parameter=…>` XML) |
@@ -513,7 +513,7 @@ left at `Socket` there sends every collective over TCP and breaks DeepEP.
 server dials back to and the rendezvous store binds ([Group rendezvous](#group-rendezvous)), and
 touches nothing else; a same-host compose stack needs no value, and the
 resolution order is on
-[Online GRPO — Multi-homed nodes](../training-methods/grpo/online-grpo.md#multi-homed-nodes-vllm_group_host).
+[Online GRPO — Multi-homed nodes](../training-methods/grpo/online.md#multi-homed-nodes-vllm_group_host).
 `NCCL_SOCKET_IFNAME` is not a transfer-group knob ([NCCL transport](#nccl-transport-sglang)).
 
 ## SGLang
@@ -784,7 +784,7 @@ throughput rises sub-linearly (+41% for that doubling).
 
 Kernel-level gains (tuned MoE tiles, another attention backend) do not show at this concurrency;
 fewer steps per token do. Turning these numbers into batch sizes and timeouts:
-[Sizing a run](../training-methods/grpo/async-grpo/performance.md#sizing-a-run).
+[Sizing a run](../training-methods/async-grpo/performance.md#sizing-a-run).
 
 **Speculative decoding (MTP).** A checkpoint that ships a multi-token-prediction head (Qwen3.5/3.6,
 `mtp.*` tensors) drafts with it through
@@ -825,8 +825,8 @@ prefill chunk. The file is read once per process, so a new one needs a server re
 
 **Generation volume is the step-time lever** once prefetch overlaps collection into training
 (`async/prefetch_hit_rate` > 0.8): step time tracks mean episode tokens. `rollout_max_tokens` caps a
-turn; on vLLM `rollout_max_thinking_tokens` caps CoT engine-side, on SGLang only the environment's
-per-effort budgets price it.
+turn; on vLLM the turn's reasoning cap (`rollout_max_thinking_tokens`, a level's enforced budget, or a soft level's
+ceiling) caps CoT engine-side; below it a soft budget, and on SGLang every budget, is held only by the reasoning terms.
 
 **Memory.** Raise `--gpu-memory-utilization` / `--mem-fraction-static` to 0.9 (0.80 with
 `isr_engine_reference`, below) when the server GPUs are dedicated; more KV cache means more
@@ -844,7 +844,7 @@ the engine dies of CUDA OOM under load. Serve at `--gpu-memory-utilization` ≤ 
 `--max-num-batched-tokens` when that knob is on.
 
 **Sync cadence.** `sync_weights_every_n_steps: 2–4` for slow environments
-([Async GRPO with Environments](../training-methods/grpo/async-grpo/setup.md#weight-synchronization)).
+([Async GRPO with Environments](../training-methods/async-grpo/setup.md#weight-synchronization)).
 
 **Weight-quantized serving is excluded** by the in-place sync ([Weight sync](#weight-sync)).
 

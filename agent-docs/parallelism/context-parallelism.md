@@ -69,7 +69,7 @@ backward supplies the CP factor canceled by world-wide mean gradient synchroniza
 **not** also use the SFT loss's explicit `cp_size` multiplier. Offline GRPO uses this path for
 training, evaluation and reference scoring; online and environmental GRPO do not declare CP. Its
 reference and resume contract is in
-[Offline GRPO](../training-methods/grpo/offline-grpo.md#reference-model).
+[Offline GRPO](../training-methods/grpo/offline.md#reference-model).
 
 A model that returns an `aux_loss` while its config declares no `router_aux_loss_coef` **raises** — a
 stand-in weight would train a different objective than the same config without CP. Set the field
@@ -113,7 +113,7 @@ SMPO's collator left-pads prompts; its chosen|rejected concat flushes every row 
 trails the completion and any batch size runs.
 
 Offline GRPO's CP collator right-pads each joined prompt+completion row
-([Offline GRPO](../training-methods/grpo/offline-grpo.md)).
+([Offline GRPO](../training-methods/grpo/offline.md)).
 
 ### Supported model architectures
 

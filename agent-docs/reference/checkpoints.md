@@ -114,9 +114,9 @@ depends on whether the mode transforms the model at construction — see
 | `optimizer_meta.pt` | Yes | No | Topology fingerprint gating exact resume |
 | `scheduler.pt` | Yes | Yes | LR scheduler state — re-persisted on every mode so resume continues the schedule |
 | `router_balancing_biases.pt` | Yes | Yes | DeepSeek-V3 router balancing biases, restored on resume |
-| `reference_logps.pt` | Yes | Yes | Frozen per-split reference scores: DPO/KTO `precompute_ref_log_probs` columns and offline GRPO raw completion-token log-probs. Resume validates token digests, row counts and reference settings before attaching them ([DPO](../training-methods/preference/dpo.md#resuming-a-precompute-run), [Offline GRPO](../training-methods/grpo/offline-grpo.md#reference-model)) |
+| `reference_logps.pt` | Yes | Yes | Frozen per-split reference scores: DPO/KTO `precompute_ref_log_probs` columns and offline GRPO raw completion-token log-probs. Resume validates token digests, row counts and reference settings before attaching them ([DPO](../training-methods/preference/dpo.md#resuming-a-precompute-run), [Offline GRPO](../training-methods/grpo/offline.md#reference-model)) |
 | `rng_state_<rank>.pth` | Yes | No | Per-rank RNG state (`rng_state.pth` single-process) |
-| `prefetch_pending-<rank>-of-<world>.pt` | Yes | Yes | Async GRPO with prefetch only: the rounds a rank submitted but had not trained and the layout they were drawn under, submitted again first on a resume under that layout ([Multiple servers and prefetch](../training-methods/grpo/async-grpo/setup.md#multiple-servers-and-prefetch)) |
+| `prefetch_pending-<rank>-of-<world>.pt` | Yes | Yes | Async GRPO with prefetch only: the rounds a rank submitted but had not trained and the layout they were drawn under, submitted again first on a resume under that layout ([Multiple servers and prefetch](../training-methods/async-grpo/setup.md#multiple-servers-and-prefetch)) |
 | `resume_adapter/`, `resume_adapter.json` | Yes | Yes | `merge_expert_lora_on_save` and embedding LoRA only: the unmerged adapter the merged checkpoint resumes from, and the marker that says so ([Merge-on-save checkpoints](#merge-on-save-checkpoints)) |
 
 `optimizer.pt` is dropped under every
@@ -159,7 +159,7 @@ sidecars, `optimizer_meta.pt`, the model card), the withheld `.trainer_state.jso
 the `.<name>.<uuid hex>` / `<name>.staged` staging spellings.
 
 Offline GRPO's mapped reference storage and old-checkpoint recovery are covered in its
-[reference contract](../training-methods/grpo/offline-grpo.md#reference-model).
+[reference contract](../training-methods/grpo/offline.md#reference-model).
 
 The exported `config.json` is serialized with run-scoped router mutations restored
 (`config_export_ready`): the balancing strategy's zeroed `router_aux_loss_coef`, forced

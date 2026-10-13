@@ -1,4 +1,4 @@
-"""Generate the two multi-node topologies for training-methods/grpo/async-grpo/setup.md.
+"""Generate the two multi-node topologies for training-methods/async-grpo/setup.md.
 
 `multi_node_separate_inference.png` — trainer and Ray actors on one node, the engine on another,
 with the ports and env knobs the cross-node paths need.

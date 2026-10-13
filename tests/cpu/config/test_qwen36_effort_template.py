@@ -89,6 +89,28 @@ def test_effort_and_budget_are_stated_once_in_the_system_block(template):
     assert text.endswith("<|im_start|>assistant\n<think>\n")
 
 
+def test_a_soft_budget_is_stated_as_a_target_not_a_cut(template):
+    """The engine does not enforce a soft budget, so the line must not claim reasoning past it is cut off; the
+    flag without a budget states the level alone."""
+    text = _render(
+        template,
+        CONVERSATION[:2],
+        add_generation_prompt=True,
+        reasoning_effort="high",
+        reasoning_budget=16384,
+        reasoning_budget_soft=True,
+    )
+    assert text.startswith(
+        "<|im_start|>system\nYou are an expert competitive programmer.\n\n"
+        "Reasoning effort: high. Aim to think for at most 16384 tokens per turn.<|im_end|>\n"
+    )
+    assert "cut off" not in text
+    bare = _render(
+        template, CONVERSATION[:2], add_generation_prompt=True, reasoning_effort="low", reasoning_budget_soft=True
+    )
+    assert "Reasoning effort: low.<|im_end|>" in bare and "tokens per turn" not in bare
+
+
 def test_level_without_a_budget_states_the_level_alone(template):
     text = _render(template, CONVERSATION[:2], add_generation_prompt=True, reasoning_effort="low")
     assert text.startswith(

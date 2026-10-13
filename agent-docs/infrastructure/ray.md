@@ -1,6 +1,6 @@
 # Ray Cluster
 
-Ray runs the rollout side of [Async GRPO with Environments](../training-methods/grpo/async-grpo/README.md).
+Ray runs the rollout side of [Async GRPO with Environments](../training-methods/async-grpo/README.md).
 Each training rank (one per training GPU) drives a pool of `EnvironmentActor` processes; an actor
 plays one episode against the rollout servers and returns the trajectory with its reward. That is
 Ray's entire job: weight sync and gradients go over NCCL, generation is HTTP to
@@ -123,7 +123,7 @@ are latency-bound, where more actors help only until the remote endpoint rate-li
 
 Leave the default unless `async/mean_rollout_latency` rises while the rollout servers sit idle. The
 trainer-side batch knobs live under
-[Async GRPO with Environments — Batch construction](../training-methods/grpo/async-grpo/objective.md#batch-construction).
+[Async GRPO with Environments — Batch construction](../training-methods/async-grpo/objective.md#batch-construction).
 
 ## What bounds actor concurrency
 
@@ -135,7 +135,7 @@ Not Ray; what binds depends on the environment class:
 
     Each actor is its own process, so N actors on a node can run N × that many concurrent sandbox
     subprocesses unless the var is set so the slots **sum** to the core budget. Per-run rlimits and
-    scratch sizing: [Sandboxes](../training-methods/grpo/environments/sandbox.md#concurrency-and-sizing).
+    scratch sizing: [Sandboxes](../training-methods/async-grpo/environments/sandbox.md#concurrency-and-sizing).
 
 - **Network-bound** (`qa_search`, `react_search`, `mcp`, open-book `exam_qa`): no gate; size against
   the search/MCP endpoint's rate limit, not against cores.
@@ -147,7 +147,7 @@ reaches them; on a shared cluster see the export rule below.
 
 The intended large topology is a training node (or nodes), GPU-less CPU nodes for the actor tier,
 and inference nodes for the rollout servers; the two deployment scenarios are drawn in
-[Async GRPO with Environments — Multi-node deployment](../training-methods/grpo/async-grpo/setup.md#multi-node).
+[Async GRPO with Environments — Multi-node deployment](../training-methods/async-grpo/setup.md#multi-node).
 Start the cluster manually; there are no helper scripts:
 
 ```bash
@@ -170,7 +170,7 @@ The toolkit configures no other Ray ports; upstream defaults apply. What must ho
   `TMPDIR` for the coding envs and `swe` (an SWE session's whole working tree lives in `TMPDIR` for
   its episode); outbound network plus the backend's key for `react_search` / `qa_search` / open-book
   `exam_qa`; `npx`/`uvx` for `mcp`. The per-env list:
-  [Environments](../training-methods/grpo/environments/README.md).
+  [Environments](../training-methods/async-grpo/environments/README.md).
 
 - **Actor processes inherit the `ray start` daemon's environment, not the trainer's.** Export
   `HALO_SANDBOX_*`, `TMPDIR`, search/MCP keys (`SERPER_API_KEY` / `BRAVE_API_KEY` /
@@ -181,7 +181,7 @@ The toolkit configures no other Ray ports; upstream defaults apply. What must ho
 
 Episode results are the heavy Ray payload: a full multi-turn trajectory with token ids, per-token
 logprobs, and, under
-[R3 routing replay](../training-methods/grpo/async-grpo/objective.md#routing-replay),
+[R3 routing replay](../training-methods/async-grpo/objective.md#routing-replay),
 the routing mask, which stays base64-encoded end to end and so remains compact on this path. The
 trainer gathers lightweight per-episode summaries across ranks, never full trajectories.
 

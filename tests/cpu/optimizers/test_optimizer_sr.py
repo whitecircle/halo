@@ -14,7 +14,7 @@ These pin the *numerical* properties that justify SR over nearest rounding:
      second-moment accumulator near the bf16 underflow floor. THIS is the test that
      bites if SR is dropped from the second moment: AdamWBF16's exp_avg_sq tracks
      fp32 Adam, whereas a nearest-rounded reference misses it by more than 15%.
-  4. The rounding noise is keyed by the parameter's step and position, not drawn: a
+  4. The rounding noise is keyed by the parameter's step and name, not drawn: a
      replica missing another param's grad rounds alike, and an optimizer rebuilt and
      restored from a state dict rounds exactly as the uninterrupted one.
 

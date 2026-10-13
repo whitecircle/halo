@@ -307,7 +307,7 @@ mixin therefore also wraps the context for every PEFT model (`make_disable_adapt
 trainable params registered at exit are not the ones registered at entry, it reshards the FSDP2 modules
 before peft's exit, so the restore lands on the sharded params, and the next forward or backward re-gathers
 them once. A pass behind the policy forward (DPO, KTO, offline GRPO) enters and exits on the same unsharded
-params and reshards nothing.
+params and reshards nothing. PEFT fixed the freeze upstream in huggingface/peft#3839, after the pinned 0.18.1.
 
 An explicit `ref_model` (DPO, KTO) or self-distillation's KL `reference_model` is never parallelized, so
 under EP or TP it is a whole dense replica on every rank. Its log-probs match the policy's up to kernel
@@ -316,12 +316,12 @@ avoids the replica. Under TP, LoRA is rejected, so DPO/KTO there precompute or h
 reference-free. Offline GRPO full fine-tuning sweeps and checkpoints its run-start reference without a
 second resident model; only native expert-only LoRA retains an explicit frozen base `ref_model`, which
 the script loads
-([Offline GRPO → Reference model](../training-methods/grpo/offline-grpo.md#reference-model)).
+([Offline GRPO → Reference model](../training-methods/grpo/offline.md#reference-model)).
 
 On online / async GRPO, where no adapter wraps the model — a full fine-tune, or an expert-only LoRA
 run, which builds no `PeftModel` — `beta != 0` holds a frozen reference: the script loads the base the
 way the policy loads and the trainer hands it to TRL in place of the fp32 copy TRL would build
-([Online GRPO](../training-methods/grpo/online-grpo.md#grpo-objective-for-verifiable-rewards)). It is an
+([Online GRPO](../training-methods/grpo/online.md#grpo-objective-for-verifiable-rewards)). It is an
 unparallelized replica per rank, warned about under EP and TP. Add an attention LoRA target (it wraps the
 model, and the disabled adapter is the reference) or set `beta: 0` to hold none.
 
@@ -377,7 +377,7 @@ QLoRA is SFT/offline territory, but offline GRPO rejects it under CP. The online
 construction (`validate_weight_sync_support`). The NCCL weight sync forwards raw parameter storage under
 base-weight names, so a bnb-packed 4-bit base would ship non-floating-point tensors that corrupt the served
 policy. Plain LoRA is the supported
-RL adapter path — see [Online GRPO](../training-methods/grpo/online-grpo.md#lora).
+RL adapter path — see [Online GRPO](../training-methods/grpo/online.md#lora).
 
 Under `torchrun` data parallelism the 4-bit base cannot be FSDP2-sharded (`fully_shard` rejects the non-float
 `Params4bit`), so the trainer skips FSDP2 and all-reduces the (small) adapter gradients across ranks, with

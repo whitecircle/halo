@@ -1,7 +1,7 @@
 # Offline GRPO — gpt-oss-20b on GSM8K (pre-computed completions + rewards), EP=8.
 # Dataset rows need prompt/completions/rewards — generate via
 # scripts/inference/reward_model/rm_rejection_sampling.py --output_format offline_grpo (the default is preference).
-# See agent-docs/training-methods/grpo/offline-grpo.md.
+# See agent-docs/training-methods/grpo/offline.md.
 # Launch: torchrun --nproc_per_node=8 scripts/training/offline_grpo.py <this config>
 
 # --- Model ---

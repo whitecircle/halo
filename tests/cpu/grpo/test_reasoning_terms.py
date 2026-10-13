@@ -1,12 +1,13 @@
 #!/usr/bin/env python
-"""CPU tests for the trainer-side reasoning terms: the per-level, capped reasoning price and the
-under-use floor.
+"""CPU tests for the trainer-side reasoning terms: the per-level, capped reasoning price (on every token or
+past a soft budget) and the under-use floor.
 
 The price is ``-min(cap, price_per_1k * reasoning_tokens / 1000)`` at the level's own price, so one
 trace costs most where little reasoning was asked and the cap keeps a long trace from outweighing the
 task reward. The floor is the only term that pays for MORE reasoning: it prices an episode's shortfall
 against three quarters of the per-turn thinking budget it ran under. Both read the episode's reasoning
-summed over its turns — a short repair turn is not under-use.
+summed over its turns — a short repair turn is not under-use. Past a budget (``reasoning_price_past_budget``)
+the price charges only what each turn reasoned past a soft per-turn budget, and nothing within it.
 
 Run: python tests/cpu/grpo/test_reasoning_terms.py  (or pytest)
 """
@@ -81,8 +82,10 @@ def test_the_floor_target_rounds_a_cap_the_share_does_not_divide():
     assert reasoning_floor_term([750], 1001, 1.0) == pytest.approx(-1 / 751)
 
 
-def _rollout(level, tokens, budget=None):
-    trajectory = types.SimpleNamespace(reasoning_effort=level, reasoning_budget=budget, tokens=tokens)
+def _rollout(level, tokens, budget=None, soft=False):
+    trajectory = types.SimpleNamespace(
+        reasoning_effort=level, reasoning_budget=budget, reasoning_budget_soft=soft, tokens=tokens
+    )
     return types.SimpleNamespace(trajectory=trajectory)
 
 
@@ -229,10 +232,14 @@ def test_a_price_cap_with_the_price_off_is_refused_as_inert():
     assert AsyncTrainingConfig(reasoning_price=PRICE, reasoning_price_cap=0.2).reasoning_price_cap == 0.2
 
 
-def _constructing(budgets, effort="random", **config):
+def _constructing(budgets, effort="random", soft=(), **config):
     trainer = object.__new__(DistributedAsyncEnvironmentalGRPOTrainer)
     trainer.async_config = AsyncTrainingConfig(**config)
-    trainer._rollout_env = types.SimpleNamespace(reasoning_effort=effort, thinking_budget_for_effort=budgets.get)
+    trainer._rollout_env = types.SimpleNamespace(
+        reasoning_effort=effort,
+        thinking_budget_for_effort=budgets.get,
+        thinking_budget_enforced=lambda level: level not in soft,
+    )
     return trainer
 
 
@@ -285,6 +292,53 @@ def test_construction_refuses_a_floor_no_episode_can_ever_be_priced_by():
     _constructing({"high": 16384}, reasoning_floor=0.05)._validate_reasoning_terms()
     _constructing({}, reasoning_floor=0.05, rollout_max_thinking_tokens=8000)._validate_reasoning_terms()
     _constructing({})._validate_reasoning_terms()  # off: nothing to check
+
+
+def test_past_a_budget_the_price_counts_only_what_each_turn_spent_past_it():
+    """Per turn, so a long turn is not excused by short ones beside it; nothing within the budget; capped."""
+    assert reasoning_price_term([9000, 7000, 10000], 0.01, 0.1, budget=8192) == pytest.approx(-0.01 * 2616 / 1000)
+    assert reasoning_price_term([8192, 4000], 0.01, 0.1, budget=8192) == 0.0
+    assert reasoning_price_term([21808, 21808], 0.01, 0.1, budget=8192) == pytest.approx(-0.1)
+    assert reasoning_price_term([9000, 7000], 0.01, 1.0) == pytest.approx(-0.16), "without a budget, every token"
+
+
+def test_the_trainer_prices_past_a_budget_only_where_it_was_soft():
+    """An enforced budget cannot be overrun, so past a budget only a soft one is read; the floor still reads both,
+    and the two never meet on one episode: a turn past its budget leaves the episode above the floor's reference."""
+    rollouts = [
+        _rollout("low", [10192, 2000], budget=8192, soft=True),  # 2000 past the budget
+        _rollout("low", [10192], budget=8192, soft=False),  # enforced: not priced past it
+        _rollout("low", [1024], budget=8192, soft=True),  # short: the floor, not the price
+    ]
+    price = {"low": 0.01, "medium": 0.005, "high": 0.001}
+    rewards, metrics = _apply(rollouts, reasoning_price=price, reasoning_price_past_budget=True, reasoning_floor=0.05)
+    assert rewards[0].item() == pytest.approx(-0.02)
+    assert rewards[1].item() == 0.0
+    assert rewards[2].item() == pytest.approx(-0.05 * (6144 - 1024) / 6144)
+    assert metrics["reward/reasoning_price"] == [pytest.approx(-0.02 / 3)]
+
+
+def test_pricing_past_a_budget_needs_a_price():
+    assert AsyncTrainingConfig().reasoning_price_past_budget is False
+    with pytest.raises(ValueError, match="reasoning_price_past_budget set with reasoning_price unset"):
+        AsyncTrainingConfig(reasoning_price_past_budget=True)
+    assert AsyncTrainingConfig(reasoning_price=PRICE, reasoning_price_past_budget=True).reasoning_price_past_budget
+
+
+def test_construction_refuses_pricing_past_a_budget_unless_every_drawable_budget_is_soft():
+    """An enforced or unset budget cannot be overrun, so its turns would go unpriced: every level the environment
+    draws must be soft, a fixed level only itself."""
+    budgets = {"low": 8192, "medium": 12288, "high": 16384}
+    config = {"reasoning_price": PRICE, "reasoning_price_past_budget": True}
+    for soft in ((), ("high",)):
+        with pytest.raises(ValueError, match="budget is enforced or unset"):
+            _constructing(budgets, soft=soft, **config)._validate_reasoning_terms()
+    with pytest.raises(ValueError, match="budget is enforced or unset"):
+        _constructing({"low": 8192}, effort="high", soft=("low", "high"), **config)._validate_reasoning_terms()
+    _constructing(budgets, effort="high", soft=("high",), **config)._validate_reasoning_terms()
+    _constructing(
+        budgets, soft=("low", "medium", "high"), rollout_max_tokens=30000, rollout_max_answer_tokens=8192, **config
+    )._validate_reasoning_terms()
 
 
 class _CountingTokenizer(_CharTokenizer):
