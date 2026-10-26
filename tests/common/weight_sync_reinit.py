@@ -3,10 +3,12 @@ port each cycle: the body of both engines' weight-transfer re-init suites.
 
 A cycle that leaves either end's NCCL communicator alive strands its device memory while ``/health``
 keeps answering 200, until a later init fails outright; the device-memory checks catch that, and the
-served-policy checks prove each re-init still lands its sync.
+served-policy checks prove each re-init still lands its sync. Whole-checkpoint cycles then catch a
+trainer-side staging buffer left in a pool only the closed client allocated from.
 """
 
 import subprocess
+from collections.abc import Iterable
 
 import torch
 from transformers import AutoModelForCausalLM
@@ -27,6 +29,10 @@ PERTURBATION = 1.02
 # An unreleased communicator strands ~633 MiB per cycle on each end of a vLLM 0.26.0 pair, so a dozen
 # leaking cycles overshoot this budget several times over.
 MAX_MEMORY_GROWTH_MIB = 1024
+# Connect/sync/close cycles that push every parameter (over 1 GiB for the default checkpoint), so each
+# client fills full-size staging buffers: one a closed client strands costs about a chunk per cycle,
+# and the growth after the first such cycle overshoots the budget.
+WHOLE_CHECKPOINT_CYCLES = 4
 CONNECTION_TIMEOUT_S = 120.0
 
 
@@ -57,10 +63,10 @@ def _trainer_gpu_used_mib(device: torch.device) -> int:
     return (total - free) // 2**20
 
 
-def _sync_one_param(
+def _sync(
     client_class: type[BaseWeightSyncClient],
     server_url: str,
-    weight: torch.Tensor,
+    named_params: Iterable[tuple[str, torch.Tensor]],
     device: torch.device,
     group_port: int,
 ) -> None:
@@ -68,7 +74,8 @@ def _sync_one_param(
     client = client_class(base_url=server_url, group_port=group_port, connection_timeout=CONNECTION_TIMEOUT_S)
     client.init_communicator(device=device)
     try:
-        client.update_named_param(PERTURBED_PARAM, weight)
+        for name, tensor in named_params:
+            client.update_named_param(name, tensor)
         client.reset_prefix_cache()
     finally:
         client.close_communicator()
@@ -117,7 +124,7 @@ def run_reinit_cycles(
         with torch.no_grad():
             param.mul_(PERTURBATION)
         try:
-            _sync_one_param(client_class, server_url, param.detach(), ctx.device, group_port)
+            _sync(client_class, server_url, [(PERTURBED_PARAM, param.detach())], ctx.device, group_port)
         except Exception as e:  # noqa: BLE001 — a refused re-init is the defect under test, not an error
             errors.append(f"cycle {cycle}: {type(e).__name__}: {e}")
             log(errors[-1])
@@ -129,12 +136,30 @@ def run_reinit_cycles(
     server_growth = _server_gpu_used_mib(server_gpu) - server_before
     trainer_growth = _trainer_gpu_used_mib(ctx.device) - trainer_before
 
+    # Only the trainer is measured across these: vLLM 0.26.0's packed consumer receives on fresh
+    # streams per update, so its reserved memory grows with whole-model pushes until PyTorch's stream
+    # pool wraps, whatever the trainer does. They leave the served model as the light cycles did, and
+    # the restore below proves they landed exactly.
+    whole_completed = whole_before = 0
+    while not errors and whole_completed < WHOLE_CHECKPOINT_CYCLES:
+        named_params = ((name, tensor.detach()) for name, tensor in model.named_parameters())
+        try:
+            _sync(client_class, server_url, named_params, ctx.device, group_port)
+        except Exception as e:  # noqa: BLE001 — same verdict as a failed cycle
+            errors.append(f"whole-checkpoint cycle {whole_completed + 1}: {type(e).__name__}: {e}")
+            log(errors[-1])
+            break
+        whole_completed += 1
+        if whole_completed == 1:
+            whole_before = _trainer_gpu_used_mib(ctx.device)
+    whole_growth = _trainer_gpu_used_mib(ctx.device) - whole_before
+
     # The restore is a cycle of its own, and its exact-equality verdict is what proves the engine
     # reloaded the pushed tensor rather than drifting under repeated reloads.
     restored: dict[str, float] | None = None
     if not errors:
         try:
-            _sync_one_param(client_class, server_url, original, ctx.device, group_port)
+            _sync(client_class, server_url, [(PERTURBED_PARAM, original)], ctx.device, group_port)
         except Exception as e:  # noqa: BLE001 — same verdict as a failed cycle
             errors.append(f"restore cycle: {type(e).__name__}: {e}")
             log(errors[-1])
@@ -151,15 +176,22 @@ def run_reinit_cycles(
     checks["trainer_frees_its_communicator_each_cycle"] = (
         completed == cycles and trainer_growth <= MAX_MEMORY_GROWTH_MIB
     )
+    checks["trainer_frees_its_staging_buffers_each_cycle"] = (
+        whole_completed == WHOLE_CHECKPOINT_CYCLES and whole_growth <= MAX_MEMORY_GROWTH_MIB
+    )
     checks["server_still_generates"] = _probe_or_none(server_url, model_name) is not None
 
-    log(f"{completed}/{cycles} cycles; server +{server_growth} MiB, trainer +{trainer_growth} MiB")
+    log(
+        f"{completed}/{cycles} cycles; server +{server_growth} MiB, trainer +{trainer_growth} MiB; "
+        f"{whole_completed}/{WHOLE_CHECKPOINT_CYCLES} whole-checkpoint cycles, trainer +{whole_growth} MiB"
+    )
     return {
         "checks": ctx.broadcast_checks(checks),
         "metrics": {
             "cycles_completed": completed,
             "server_growth_mib": server_growth,
             "trainer_growth_mib": trainer_growth,
+            "whole_checkpoint_trainer_growth_mib": whole_growth,
             "first_error": errors[0] if errors else "",
         },
     }

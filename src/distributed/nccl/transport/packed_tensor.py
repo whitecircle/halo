@@ -1,21 +1,29 @@
 """Pack weights into ~1GB buffers before NCCL broadcast to amortize per-tensor overhead; double-buffered with async CUDA streams. Vendored from vLLM v0.18.0, Apache-2.0."""
 
-from collections.abc import Callable, Iterator
+from collections.abc import Iterator
 from typing import Any
 
 import torch
 
 from src.distributed.nccl.transport.pynccl import bounded_stream_sync, resolve_drain_timeout_s
+from src.distributed.nccl.transport.staging import allocate_send_buffer, hold_for_stream
 
 DEFAULT_PACKED_BUFFER_SIZE_BYTES = 1024 * 1024 * 1024  # 1GB
 DEFAULT_PACKED_NUM_BUFFERS = 2
+
+
+def _pack(
+    tensors: list[torch.Tensor], nbytes: int, *, pool_stream: torch.cuda.Stream, send_stream: torch.cuda.Stream
+) -> torch.Tensor:
+    """Concatenate the flat ``uint8`` ``tensors`` into one buffer; called under ``send_stream``."""
+    buffer = allocate_send_buffer(nbytes, send_stream.device, pool_stream=pool_stream, send_stream=send_stream)
+    return torch.cat(tensors, dim=0, out=buffer)
 
 
 def packed_broadcast_producer(
     iterator: Iterator[tuple[str, torch.Tensor]],
     group: Any,
     src: int = 0,
-    post_iter_func: Callable[[tuple[str, torch.Tensor]], torch.Tensor] | None = None,
     buffer_size_bytes: int = DEFAULT_PACKED_BUFFER_SIZE_BYTES,
     streams: list[torch.cuda.Stream] | None = None,
 ) -> None:
@@ -24,16 +32,13 @@ def packed_broadcast_producer(
     src=0 is the trainer. ``buffer_size_bytes`` and :data:`DEFAULT_PACKED_NUM_BUFFERS` are wire
     parameters: the update header announces both, and the consumer must unpack with the same pair.
 
-    A caller invoking this repeatedly must pass its own persistent ``streams`` (one per buffer). Every
-    pack allocation (the H2D uploads and the ~1GB cat) lands on these streams and the caching
-    allocator's pools are per-stream, so per-call streams leave each sync's transient footprint in a
-    pool no later stream can reuse, growing reserved memory by roughly the model size per sync.
+    Each buffer is packed and broadcast on one of ``streams`` (one per buffer) but drawn from the
+    caller's current stream's pool (:func:`allocate_send_buffer`), so a closed client's buffers are
+    reused by the next one and by the training step. The tensors must already be contiguous on the
+    streams' device, landed by the caller on its own stream: a copy made here would be allocated on a
+    pack stream, in that stream's own pool. Each is held for the pack stream that reads it
+    (:func:`hold_for_stream`).
     """
-    if post_iter_func is None:
-
-        def post_iter_func(x):
-            return x[1]
-
     target_packed_tensor_size = buffer_size_bytes
 
     if streams is None:
@@ -42,6 +47,11 @@ def packed_broadcast_producer(
         raise ValueError(
             f"streams must match DEFAULT_PACKED_NUM_BUFFERS ({DEFAULT_PACKED_NUM_BUFFERS}), got {len(streams)}"
         )
+    # The buffers' pool. Every pack stream waits on it: a block it hands back may last have been used
+    # there, and the caller may have written the tensors there.
+    pool_stream = torch.cuda.current_stream(streams[0].device)
+    for stream in streams:
+        stream.wait_stream(pool_stream)
     buffer_idx = 0
 
     packing_tensor_list: list[list[torch.Tensor]] = [[] for _ in range(DEFAULT_PACKED_NUM_BUFFERS)]
@@ -64,16 +74,27 @@ def packed_broadcast_producer(
                 packing_tensor_list[buffer_idx] = []
                 packing_tensor_sizes[buffer_idx] = 0
                 while True:
-                    tensor = post_iter_func(next(iterator)).contiguous().view(torch.uint8).view(-1)
+                    tensor = next(iterator)[1].contiguous().view(torch.uint8).view(-1)
+                    hold_for_stream(tensor, streams[buffer_idx])
                     packing_tensor_list[buffer_idx].append(tensor)
                     packing_tensor_sizes[buffer_idx] += tensor.numel()
                     if packing_tensor_sizes[buffer_idx] > target_packed_tensor_size:
                         break
-                packed_tensors[buffer_idx] = torch.cat(packing_tensor_list[buffer_idx], dim=0)
+                packed_tensors[buffer_idx] = _pack(
+                    packing_tensor_list[buffer_idx],
+                    packing_tensor_sizes[buffer_idx],
+                    pool_stream=pool_stream,
+                    send_stream=streams[buffer_idx],
+                )
                 group.broadcast(packed_tensors[buffer_idx], src=src)
                 buffer_idx = (buffer_idx + 1) % DEFAULT_PACKED_NUM_BUFFERS
             except StopIteration:
                 if len(packing_tensor_list[buffer_idx]) > 0:
-                    packed_tensors[buffer_idx] = torch.cat(packing_tensor_list[buffer_idx], dim=0)
+                    packed_tensors[buffer_idx] = _pack(
+                        packing_tensor_list[buffer_idx],
+                        packing_tensor_sizes[buffer_idx],
+                        pool_stream=pool_stream,
+                        send_stream=streams[buffer_idx],
+                    )
                     group.broadcast(packed_tensors[buffer_idx], src=src)
                 break

@@ -163,12 +163,16 @@ that engine **paused** instead of resuming it, refuses every later sync on that 
 `RESTART the … server`. Restart the container: the trainer kept no copy of what landed and cannot
 repair it.
 
-On vLLM, each client owns **one persistent CUDA stream pair** for the pack uploads. PyTorch's caching
-allocator keeps freed blocks in per-stream pools, so a fresh stream per sync would strand one payload
-of reserved memory every sync; the forwarding rank's steady state is therefore its training footprint
-plus about one sync of pack buffers. The SGLang client keeps one persistent send stream for the same
-reason and drops its arena at the end of every sync, so between syncs that memory is the allocator's
-rather than pinned at the largest chunk's size.
+Both clients send from CUDA streams of their own (a stream pair per vLLM client for the
+double-buffered packs, one send stream per SGLang client), and PyTorch's caching allocator reuses a
+freed block only for the stream that allocated it, so a buffer carved from a client's stream stays
+reserved once the client closes, one per reconnect. The vLLM client therefore lands its tensors and
+allocates its pack buffers on the caller's stream, recorded for the pack stream that sends them. The
+SGLang client allocates its staging arena on the caller's stream, not its own send stream, and drops
+it at the end of every sync, so between syncs the block is back in the pool the training step and a
+reconnected client draw from. Both also record each snapshot for the stream that reads it: SGLang
+replies to a chunk before its sends retire, and the caller drops the chunk's snapshots on that reply,
+so an unrecorded block could be reallocated and overwritten before the queued read ran.
 
 `HALO_WEIGHT_SYNC_MEM_LOG=1` (off by default) brackets each collective sync with a per-rank
 `[mem rankNN] weight-sync pre/post` line ([Debugging](../reference/debugging.md#3-gpu-memory-profiling));

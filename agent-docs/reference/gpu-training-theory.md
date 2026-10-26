@@ -193,7 +193,7 @@ Every overlap trick in §9 rests on that. Data-parallel training hides each laye
 
 Streams also shape **memory**. The caching allocator pools freed blocks *per stream*, since reuse within a stream is safe by ordering alone while cross-stream reuse would need per-block event tracking.
 
-So allocations made on a short-lived stream are stranded when it dies. That is why the RL weight broadcast (§10) keeps one persistent stream pair (vLLM) or send stream (SGLang) per server client ([Rollout Servers](../infrastructure/rollout-servers.md#weight-sync)).
+So a block freed on a stream that then stops being used is stranded: nothing allocates from that pool again. That is why the RL weight broadcast (§10) allocates its staging buffers on the caller's stream rather than the streams each server client sends from, and records them for those streams ([Rollout Servers](../infrastructure/rollout-servers.md#weight-sync)).
 
 `reserved` far above `peak_alloc` in a memory reading means stranded pools, not live tensors ([Debugging](debugging.md#3-gpu-memory-profiling)).
 

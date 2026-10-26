@@ -1,12 +1,12 @@
 #!/usr/bin/env python
-"""Repeated packed_broadcast_producer calls with persistent streams must not ratchet reserved memory.
+"""The vLLM weight-sync path must not ratchet reserved memory, across syncs or across reconnects.
 
-Per-call streams strand each sync's pack allocations (the ~1GB cat) in per-stream allocator pools no
-later stream can reuse, growing reserved memory by ~the model size per sync until CUDA recycles
-stream handles — the production signature is 245 GiB reserved against a 72 GiB allocation peak on
-the forwarding rank. This drives the producer the way VLLMWeightSyncClient does (chunk tensors
-already staged on the device, client-owned streams) and asserts reserved memory stops growing after
-the first sync.
+The caching allocator pools freed blocks per stream, and the producer packs on streams the client
+owns. A pack buffer or upload allocated on one of them stays in that stream's pool, which nothing
+else allocates from once the client closes: every reconnect (each builds a fresh stream pair)
+strands one sync's worth, and per-call streams strand it every sync. This drives the producer the
+way VLLMWeightSyncClient does and the client itself through repeated connect-sync-close cycles, and
+asserts reserved memory stops growing after the first.
 
 Run: torchrun --nproc_per_node=1 tests/gpu/kernels/test_packed_broadcast_memory.py
 """
@@ -26,6 +26,9 @@ _SYNCS = 12
 _PARAMS_PER_SYNC = 24
 _PARAM_BYTES = 32 * 1024 * 1024  # 24 x 32MB per sync: several packs of mixed tensors per call
 _PACK_BYTES = 64 * 1024 * 1024
+_CLIENTS = 4
+# Host-resident params the client lands itself, beside the device-staged ones: one chunk in all.
+_HOST_PARAMS = 4
 
 
 class _SinkGroup:
@@ -38,6 +41,14 @@ class _SinkGroup:
         """No peer to abort."""
 
 
+class _SinkCommunicator(_SinkGroup):
+    """``PyNcclCommunicator`` stand-in on this rank's GPU: the client reads its device and abort state."""
+
+    def __init__(self, device: torch.device):
+        self.device = device
+        self.aborted = False
+
+
 def _run_syncs(streams):
     device = torch.device("cuda", torch.cuda.current_device())
     staged_params = [(f"p{i}", torch.randn(_PARAM_BYTES // 4, device=device)) for i in range(_PARAMS_PER_SYNC)]
@@ -47,7 +58,6 @@ def _run_syncs(streams):
             iterator=iter(staged_params),
             group=_SinkGroup(),
             src=0,
-            post_iter_func=lambda item: item[1].to(device, non_blocking=True),
             buffer_size_bytes=_PACK_BYTES,
             streams=streams,
         )
@@ -79,7 +89,7 @@ def test_client_reuses_one_stream_pair_across_syncs():
 
     captured = []
 
-    def fake_producer(iterator, group, src=0, post_iter_func=None, streams=None, **kwargs):
+    def fake_producer(iterator, group, src=0, streams=None, **kwargs):
         captured.append(streams)
 
     ok = SimpleNamespace(status_code=200)
@@ -99,11 +109,40 @@ def test_client_reuses_one_stream_pair_across_syncs():
     assert len(captured[0]) == DEFAULT_PACKED_NUM_BUFFERS
 
 
+def test_reconnected_clients_reuse_one_pool():
+    """A closed client's pack buffer and uploads must return to the caller's pool: every reconnect builds
+    a fresh stream pair, so anything allocated on the old pair stays reserved with nothing left to
+    reuse it, about one chunk per reconnect."""
+    device = torch.device("cuda", torch.cuda.current_device())
+    params = [(f"p{i}", torch.randn(_PARAM_BYTES // 4, device=device)) for i in range(_PARAMS_PER_SYNC)]
+    params += [(f"h{i}", torch.randn(_PARAM_BYTES // 4)) for i in range(_HOST_PARAMS)]
+    ok = SimpleNamespace(status_code=200)
+    reserved = []
+    with (
+        mock.patch.object(VLLMWeightSyncClient, "_post", return_value=ok),
+        mock.patch.object(VLLMWeightSyncClient, "_post_once", return_value=ok),
+    ):
+        for _ in range(_CLIENTS):
+            client = offline_client(VLLMWeightSyncClient)
+            client.communicator = _SinkCommunicator(device)
+            client.sync_model_weights(params)
+            client.close_communicator()
+            torch.cuda.synchronize()
+            reserved.append(torch.cuda.memory_reserved())
+    growth = reserved[-1] - reserved[0]
+    assert growth <= _PARAM_BYTES, (
+        f"reserved memory ratcheted across {_CLIENTS} connect-sync-close cycles: "
+        f"{[r >> 20 for r in reserved]} MiB (growth {growth >> 20} MiB); a closed client's pack buffer or "
+        f"uploads stayed in its own streams' pools"
+    )
+
+
 @gpu_test_main(exact_world_size=1, prefix="packed_broadcast_memory", partial_state=False)
 def run(ctx) -> dict:
     checks: dict[str, bool] = {}
     record_check(checks, "persistent_streams_bound_reserved_memory", test_persistent_streams_bound_reserved_memory)
     record_check(checks, "client_reuses_one_stream_pair_across_syncs", test_client_reuses_one_stream_pair_across_syncs)
+    record_check(checks, "reconnected_clients_reuse_one_pool", test_reconnected_clients_reuse_one_pool)
     return {"checks": checks}
 
 

@@ -1,13 +1,17 @@
 #!/usr/bin/env python
 """CPU tests for the SGLang weight-sync client's device staging and deferred settle.
 
-The engine acknowledges a chunk as soon as its data arrived, while the sender's kernels retire a
-little later; the client must not wait for that tail before declaring the next chunk (that would
-serialize each chunk's tail with the next declaration), yet a peer that never joins must still be
-bounded. What is pinned:
+The engine acknowledges a chunk once it has queued the receives, before the sender's kernels
+retire; the client must not wait for them before declaring the next chunk (that would serialize each
+chunk's tail with the next declaration), yet a peer that never joins must still be bounded. What is
+pinned:
 
   * a chunk's uploads land in one device arena, sized to the chunk budget and grown for a tensor
     above it, as views carrying each tensor's values, dtype and shape;
+  * the arena is allocated on the caller's stream and held for the send stream, so a closed
+    client leaves it in a pool the next client and the training step reuse;
+  * every source the send stream copies is held for it, so a snapshot the caller drops on the
+    engine's reply is not handed out again before the queued copy reads it;
   * the arena is reused across chunks with no host wait — a chunk's sends are settled two chunks
     later — and every chunk's broadcasts go out in declared order;
   * a chunk that fails before its event is recorded drains the send stream as a whole under the
@@ -46,8 +50,43 @@ class _FakeEvent:
         self.stream = stream
 
 
+class _StreamContexts:
+    """``torch.cuda.stream`` and ``current_stream`` stand-ins: entering a stream makes it current."""
+
+    def __init__(self):
+        self.active = [_FakeStream()]
+
+    def current(self, device=None):
+        return self.active[-1]
+
+    @contextlib.contextmanager
+    def enter(self, stream):
+        self.active.append(stream)
+        try:
+            yield
+        finally:
+            self.active.pop()
+
+
 @pytest.fixture
-def client(monkeypatch):
+def streams() -> _StreamContexts:
+    return _StreamContexts()
+
+
+@pytest.fixture
+def recorded_streams(monkeypatch) -> list:
+    """Every ``record_stream`` call as ``(storage pointer, stream)``; the real one takes CUDA tensors only."""
+    calls: list = []
+    monkeypatch.setattr(
+        torch.Tensor,
+        "record_stream",
+        lambda tensor, stream: calls.append((tensor.untyped_storage().data_ptr(), stream)),
+    )
+    return calls
+
+
+@pytest.fixture
+def client(monkeypatch, streams, recorded_streams):
     """A client staging on the CPU, with the CUDA stream/event calls stubbed and the engine's declare
     answered at once; the arena, the settle bookkeeping and the failure path run as in production."""
     handle = offline_client(SGLangWeightSyncClient)
@@ -55,8 +94,8 @@ def client(monkeypatch):
     handle._group = object()
     handle._send_stream = _FakeStream()
     monkeypatch.setattr(sglang_module, "WEIGHT_SYNC_CHUNK_BYTES", _BUDGET)
-    monkeypatch.setattr(torch.cuda, "stream", lambda stream: contextlib.nullcontext())
-    monkeypatch.setattr(torch.cuda, "current_stream", lambda device=None: _FakeStream())
+    monkeypatch.setattr(torch.cuda, "stream", streams.enter)
+    monkeypatch.setattr(torch.cuda, "current_stream", streams.current)
     monkeypatch.setattr(torch.cuda, "Event", _FakeEvent)
     monkeypatch.setattr(handle, "_post_once", lambda path, **kwargs: None)
     monkeypatch.setattr(handle, "_post", lambda path, **kwargs: None)
@@ -83,7 +122,7 @@ def test_chunks_are_staged_in_one_arena_sized_to_the_budget(client, monkeypatch)
     settled = _settle_probe(monkeypatch)
     first = [torch.arange(6, dtype=torch.bfloat16).reshape(2, 3), torch.full((5,), 2.5, dtype=torch.float32)]
 
-    staged = list(client._stage_on_device(first))
+    staged = list(client._stage_on_device(first, torch.cuda.current_stream()))
     arena = client._arena
     assert arena is not None and arena.dtype == torch.uint8
     assert arena.numel() == _BUDGET, "the arena is sized to the chunk budget, not to the chunk"
@@ -96,7 +135,7 @@ def test_chunks_are_staged_in_one_arena_sized_to_the_budget(client, monkeypatch)
     pending = _FakeEvent()
     client._inflight.append(pending)
     oversized = [torch.zeros(_BUDGET + 1, dtype=torch.uint8)]
-    staged = list(client._stage_on_device(oversized))
+    staged = list(client._stage_on_device(oversized, torch.cuda.current_stream()))
     assert client._arena is not arena and client._arena.numel() >= oversized[0].numel(), (
         "a tensor above the budget must grow the arena"
     )
@@ -104,6 +143,68 @@ def test_chunks_are_staged_in_one_arena_sized_to_the_budget(client, monkeypatch)
         "the arena was regrown while the previous chunk's sends could still be reading it"
     )
     assert torch.equal(staged[0], oversized[0])
+
+
+def test_the_arena_is_allocated_on_the_callers_stream_and_held_for_the_send_stream(
+    client, monkeypatch, streams, recorded_streams
+):
+    """The caching allocator reuses a cached block only for the stream that allocated it, and the send
+    stream is the client's own: an arena allocated under it stays reserved after the client closes,
+    one per reconnect. Allocated under the caller's stream it returns to a pool the next client and
+    the training step share; ``record_stream`` keeps that stream off the block until the sends that
+    read it retire, which the close path relies on, since it drops the arena without settling."""
+    _settle_probe(monkeypatch)
+    monkeypatch.setattr(sglang_module.dist, "broadcast", lambda tensor, src, group: None)
+    caller = streams.current()
+    allocated_under: list = []
+    waited_before_allocation: list = []
+    real_empty = torch.empty
+
+    def tracking_empty(*args, **kwargs):
+        allocated_under.append(streams.current())
+        waited_before_allocation.append(list(client._send_stream.waited_on))
+        return real_empty(*args, **kwargs)
+
+    monkeypatch.setattr(torch, "empty", tracking_empty)
+    client._send_chunk([("w", torch.ones(3, dtype=torch.bfloat16))], flush_cache=False)
+    first = client._arena
+
+    assert allocated_under == [caller], (
+        f"the arena was allocated under {allocated_under}, not under the caller's stream {caller}"
+    )
+    assert waited_before_allocation == [[caller]], (
+        "the send stream must wait on the caller's stream before the arena is allocated: the block may "
+        f"last have been used there (waited on {waited_before_allocation})"
+    )
+    assert recorded_streams == [(first.untyped_storage().data_ptr(), client._send_stream)], (
+        "the arena's use on the send stream was not recorded with the allocator"
+    )
+
+    client._send_chunk([("big", torch.zeros(_BUDGET + 1, dtype=torch.uint8))], flush_cache=False)
+
+    assert client._arena is not first and allocated_under == [caller, caller], "the oversized chunk did not regrow"
+    assert recorded_streams[1:] == [(client._arena.untyped_storage().data_ptr(), client._send_stream)], (
+        "a regrown arena must be recorded for the send stream again"
+    )
+
+
+def test_every_source_is_held_for_the_send_stream(client, monkeypatch):
+    """The engine may reply before the send stream has copied a chunk, and the caller drops the chunk's
+    snapshots on that reply; a block the allocator was not told is still being read goes to the next
+    snapshot, which overwrites it before the queued copy runs."""
+    _settle_probe(monkeypatch)
+    monkeypatch.setattr(sglang_module.dist, "broadcast", lambda tensor, src, group: None)
+    held: list = []
+    monkeypatch.setattr(sglang_module, "hold_for_stream", lambda tensor, stream: held.append((tensor, stream)))
+    chunk = [("a", torch.ones(3, dtype=torch.bfloat16)), ("b", torch.zeros(5, dtype=torch.float32))]
+
+    client._send_chunk(chunk, flush_cache=False)
+
+    assert len(held) == len(chunk), f"{len(held)} of the chunk's {len(chunk)} sources were held"
+    for (tensor, stream), (name, source) in zip(held, chunk, strict=True):
+        assert tensor is source and stream is client._send_stream, (
+            f"source {name!r} was not held for the send stream that copies it"
+        )
 
 
 def test_a_chunks_sends_are_settled_two_chunks_later_not_before_the_next_declaration(client, monkeypatch):
@@ -153,7 +254,8 @@ def test_a_chunk_that_fails_mid_upload_drains_the_stream_and_aborts_on_deadline(
         raise RuntimeError(f"{what} did not complete")
 
     monkeypatch.setattr(sglang_module, "bounded_event_sync", expired)
-    list(client._stage_on_device([torch.ones(3, dtype=torch.bfloat16)]))  # the arena of an earlier chunk
+    # The arena of an earlier chunk.
+    list(client._stage_on_device([torch.ones(3, dtype=torch.bfloat16)], torch.cuda.current_stream()))
     previous = _FakeEvent()
     client._inflight.append(previous)  # the previous chunk, still in flight on the same peer
 
@@ -200,7 +302,7 @@ def test_a_drain_deadline_on_the_failure_path_still_reports_the_engines_own_erro
 
 def test_the_end_of_a_sync_settles_the_outstanding_sends_and_drops_the_arena(client, monkeypatch):
     settled = _settle_probe(monkeypatch)
-    list(client._stage_on_device([torch.ones(3, dtype=torch.bfloat16)]))
+    list(client._stage_on_device([torch.ones(3, dtype=torch.bfloat16)], torch.cuda.current_stream()))
     pending = [_FakeEvent(), _FakeEvent()]
     client._inflight.extend(pending)
     assert client._arena is not None, "nothing was staged — the test would be vacuous"

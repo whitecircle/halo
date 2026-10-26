@@ -48,6 +48,7 @@ from src.distributed.nccl.clients.base import (
     unregistered_bailing_model_types,
 )
 from src.distributed.nccl.transport.pynccl import bounded_event_sync, resolve_drain_timeout_s
+from src.distributed.nccl.transport.staging import allocate_send_buffer, hold_for_stream
 from src.distributed.nccl.transport.torch_group import (
     DEFAULT_WEIGHT_UPDATE_GROUP_NAME,
     create_weight_update_group,
@@ -381,19 +382,20 @@ class SGLangWeightSyncClient(BaseWeightSyncClient):
                 },
             ),
         )
-        # Delivery is confirmed by the engine's reply, which returns once every declared tensor
-        # landed, while the sender's kernels retire a little later. The host does not wait for that
-        # tail here, where it would serialize with the next chunk's declaration: the sends are
-        # settled two chunks later (``_stage_on_device``) and, on any failure, right here under a
-        # short deadline that aborts the group.
+        # The engine replies once it has queued the receives and the load (its wait is a stream
+        # wait), so this chunk's sends may still be pending. The host does not wait for them here,
+        # where it would serialize with the next chunk's declaration: the sends are settled two
+        # chunks later (``_stage_on_device``) and, on any failure, right here under a short deadline
+        # that aborts the group.
         if self._send_stream is None:
             self._send_stream = torch.cuda.Stream(device=self.sync_device)
-        # The whole-payload path stages live params, written by the caller's stream; the streamed
-        # path's snapshots are complete by now, so it costs that path nothing.
-        self._send_stream.wait_stream(torch.cuda.current_stream(self.sync_device))
+        caller_stream = torch.cuda.current_stream(self.sync_device)
+        # Needed on every path: the arena's block may last have been used on the caller's stream
+        # (``allocate_send_buffer``), and the whole-payload path stages live params written there.
+        self._send_stream.wait_stream(caller_stream)
         try:
             with torch.cuda.stream(self._send_stream):
-                for tensor in self._stage_on_device([param for _, param in chunk]):
+                for tensor in self._stage_on_device([param for _, param in chunk], caller_stream):
                     # Synchronous only at stream level: ProcessGroupNCCL's wait() orders the send
                     # stream behind the collective and returns. An async_op work per tensor would
                     # hand hundreds of outstanding works to the watchdog's per-work event polling.
@@ -426,7 +428,7 @@ class SGLangWeightSyncClient(BaseWeightSyncClient):
                 raise drain_error from e
             raise
 
-    def _stage_on_device(self, params: list[torch.Tensor]) -> Iterator[torch.Tensor]:
+    def _stage_on_device(self, params: list[torch.Tensor], pool_stream: torch.cuda.Stream) -> Iterator[torch.Tensor]:
         """Upload a chunk into the device arena, yielding each tensor's view as it is issued.
 
         One arena rather than one allocation per tensor: a block freed mid-chunk returns to the
@@ -438,6 +440,10 @@ class SGLangWeightSyncClient(BaseWeightSyncClient):
         with no host wait. The host settles a chunk's sends two chunks later, which bounds a wedged
         peer without serializing each chunk's tail with the next declaration. The arena is sized to
         the chunk budget, grown for a tensor above it, and lives for one sync (``_release_arena``).
+
+        The arena is drawn from ``pool_stream``'s pool (the caller's, which the send stream already
+        waits on), not the send stream's, which this client owns (:func:`allocate_send_buffer`), and
+        each source is held for the send stream that copies it (:func:`hold_for_stream`).
 
         A generator so each view is handed over right after its copy is issued, in the order the
         engine receives them.
@@ -454,11 +460,17 @@ class SGLangWeightSyncClient(BaseWeightSyncClient):
             # and dropping it under a pending collective leaves the allocator to wait on that
             # collective, outside every deadline here, if the larger block does not fit beside it.
             self._release_arena()
-            self._arena = torch.empty(max(total, WEIGHT_SYNC_CHUNK_BYTES), dtype=torch.uint8, device=self.sync_device)
+            self._arena = allocate_send_buffer(
+                max(total, WEIGHT_SYNC_CHUNK_BYTES),
+                self.sync_device,
+                pool_stream=pool_stream,
+                send_stream=self._send_stream,
+            )
         arena = self._arena
         for param, offset in zip(params, offsets, strict=True):
             view = arena[offset : offset + payload_bytes(param)].view(param.dtype).view(param.shape)
             view.copy_(param, non_blocking=True)
+            hold_for_stream(param, self._send_stream)
             yield view
 
     def _release_arena(self) -> None:

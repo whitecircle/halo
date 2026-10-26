@@ -141,9 +141,9 @@ class _Transport:
         self._form("communicator")
         return _Communicator(self, device)
 
-    def packed_producer(self, *, iterator, post_iter_func, **kwargs) -> None:
-        for item in iterator:
-            self.send(post_iter_func(item))
+    def packed_producer(self, *, iterator, **kwargs) -> None:
+        for _, tensor in iterator:
+            self.send(tensor)
 
     def form_group(self, *args, **kwargs) -> tuple[object, object]:
         self._form("group")
@@ -177,6 +177,8 @@ def _sglang_transport(transport: _Transport) -> list:
         patch.object(sglang_client, "destroy_weight_update_group", transport.destroy_group),
         patch.object(sglang_client, "drop_weight_update_group_bookkeeping", transport.forget_group),
         patch.object(torch.distributed, "broadcast", transport.broadcast),
+        # The arena is a CPU tensor here, and the real call takes CUDA tensors only.
+        patch.object(torch.Tensor, "record_stream", lambda tensor, stream: None),
         patch.object(torch.cuda, "Stream", _Stream),
         patch.object(torch.cuda, "current_stream", lambda device=None: _Stream()),
         patch.object(torch.cuda, "stream", lambda stream: nullcontext()),

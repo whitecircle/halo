@@ -110,9 +110,8 @@ class VLLMWeightSyncClient(BaseWeightSyncClient):
         self.communicator: PyNcclCommunicator | None = None
         # Kept so close_communicator can release the listener; the group carries only the NCCL id.
         self._process_group: StatelessProcessGroup | None = None
-        # Persistent producer streams: per-call streams leave every sync's pack allocations in
-        # unreachable per-stream allocator pools (see packed_broadcast_producer). Created lazily on
-        # the communicator's device; a client's flushes are serialized, so reuse is race-free.
+        # The producer's pack streams, created lazily on the communicator's device; a client's flushes
+        # are serialized, so reuse is race-free.
         self._packed_streams: list[torch.cuda.Stream] | None = None
         # A layerwise reload opened server-side (possibly by a request whose reply was lost), which
         # only /finish_weight_update can end — every later sync fails against it otherwise.
@@ -340,23 +339,18 @@ class VLLMWeightSyncClient(BaseWeightSyncClient):
                 ),
             )
 
-            # post_iter_func lands each tensor on the sync device; a no-op for the device-staged chunk.
             communicator = self._require_communicator()
             device = communicator.device
-            if torch.device(device).type == "cuda":
-                if self._packed_streams is None:
-                    with torch.cuda.device(device):
-                        self._packed_streams = [torch.cuda.Stream() for _ in range(DEFAULT_PACKED_NUM_BUFFERS)]
-                # The whole-payload path packs live params, written by the caller's stream; the
-                # streamed path's snapshots are complete by now, so it costs that path nothing.
-                current = torch.cuda.current_stream(device)
-                for stream in self._packed_streams:
-                    stream.wait_stream(current)
+            if self._packed_streams is None and torch.device(device).type == "cuda":
+                with torch.cuda.device(device):
+                    self._packed_streams = [torch.cuda.Stream() for _ in range(DEFAULT_PACKED_NUM_BUFFERS)]
+            # Landed here, on the caller's stream, rather than by the producer on a pack stream, whose
+            # pool would keep the copies once this client closes. A no-op for the device-staged chunk.
+            landed = [(name, param.contiguous().to(device, non_blocking=True)) for name, param in named_params]
             packed_broadcast_producer(
-                iterator=iter(named_params),
+                iterator=iter(landed),
                 group=communicator,
                 src=0,
-                post_iter_func=lambda item: item[1].to(device, non_blocking=True),
                 streams=self._packed_streams,
             )
 
