@@ -1,6 +1,6 @@
 """CPU tests for ``persistent_buffers`` — the shared save-path helper.
 
-Every gathered checkpoint save (EP via ``_persistent_non_ep_buffers``, TP and plain FSDP2/CP via
+Every gathered checkpoint save (EP with its expert prefixes excluded, TP and plain FSDP2/CP via
 ``saveable_items``) routes non-parameter state through this helper. A
 param-only save loop silently drops PERSISTENT buffers (e.g. a Gemma4 ``layer_scalar`` residual
 scalar, vision ``std_scale``) — corrupting every layer on reload — while NON-persistent buffers

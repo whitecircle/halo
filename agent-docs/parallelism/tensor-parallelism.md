@@ -273,13 +273,13 @@ single-domain multi-group EP with `ep_size > 2` (`ep4+tp2` on 8) and multi-domai
 |---|---|---|
 | `use_peft` / LoRA (incl. EP+TP) | rejected — PEFT adapters are plain tensors outside the TP graph, so the replicated half diverges and the sharded half is corrupted by the replicated-grad sync. Use LoRA with FSDP/DP, CP, or pure ETP | `_validate_lora_tp_compatibility` |
 | native EP expert LoRA | rejected — the grouped expert adapters ride the EP-distributed expert weights, which both TP gates skip by param identity, so no adapter shape under EP+TP is gradient- or save/merge-covered. Train expert LoRA under EP without TP | same |
-| QLoRA / `load_in_4bit` | rejected — the TP loaders materialize plain de-quantized weights | `model_loading/parallel/loader.py` |
+| QLoRA / `load_in_4bit` | rejected — the TP loaders materialize plain de-quantized weights | `model_loading/parallel/load_rules.py` |
 | `fsdp_reshard_after_forward` | rejected at `data_parallel_size > 1` — a plain all-gather on TP-sharded DTensor params has no registered sharding strategy | `_reject_fsdp_settings` |
 | `fsdp_reshard_after_backward: false` | rejected — the TP setup shards through its own `fully_shard` calls | same |
 | `fsdp_defer_grad_sync` | rejected at `data_parallel_size == 1` — no FSDP2 wrap, so no reduce to defer | same |
 | `fsdp_shard_ep1_experts: false` | rejected — the TP path shards `ep1` experts unconditionally | same |
 | `use_hsdp` | rejected — TP builds its own `(dp, tp)` mesh | `_reject_hsdp` |
-| `init_from_scratch` | rejected — no sharded random init | `model_loading/parallel/loader.py` |
+| `init_from_scratch` | rejected — no sharded random init | `model_loading/parallel/load_rules.py` |
 | `accelerate launch` | rejected — TP requires `torchrun` | `reject_unsupported_run`, `ParallelismValidationMixin` |
 | `ref_model` (explicit) | warned — the reference is never parallelized, so every rank holds a whole dense replica; its log-probs match the policy's up to kernel numerics | `warn_unparallelized_reference` |
 | `load_best_model_at_end` | supported under pure TP — the reload distributes each checkpoint tensor into the live placements; rejected as a full fine-tune under TP+DP and under a MoE carrying EP/grouped-GEMM wrappers | `_validate_load_best_model_reloadable` |

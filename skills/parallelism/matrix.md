@@ -10,18 +10,11 @@ method name. `domain` = `nvlink_domain_size` (auto = `NVLINK_DOMAIN_SIZE`, else 
 only differs on NVL72/MNNVL).
 `ep_group_size = ep_size * expert_tp_size`.
 
-## data_parallel_size formula
+## data_parallel_size
 
-```text
-stage_world_size = world_size // pp_size        # PP is the outermost split
-dp_divisor       = max(tp_size, cp_size, expert_tp_size)
-data_parallel_size = stage_world_size // dp_divisor   if dp_divisor > 1
-                   = stage_world_size                 otherwise   # EP-only / DDP
-```
-
-EP is **always orthogonal to DP** — `ep_size` is not in the divisor. PP is, via
-`stage_world_size`: a whole pipeline chain consumes one batch.
-Source: `ParallelismConfig._resolve_topology`.
+Derived in [Stacking the dimensions](../../agent-docs/parallelism/README.md#stacking-the-dimensions)
+(`ParallelismConfig._resolve_topology`); the `dp_size` column below gives it per mode, with
+`stage_world_size = world_size // pp_size`. `ep_size` never divides it.
 
 ## SUPPORTED modes
 

@@ -33,7 +33,7 @@ from transformers.core_model_loading import (
 
 import src.model_loading.lazy_safetensors.conversion_selection as conversion_selection
 from src.checkpoint.reading import resolve_checkpoint_weights
-from src.distributed.expert_parallel.lazy_plan import WeightPlanner, family_key_mapping, loaded_key_mapping
+from src.distributed.expert_parallel.lazy_plan import WeightPlanner
 from src.model_loading.lazy_safetensors.conversion import (
     Concat,
     Deinterleave,
@@ -46,6 +46,7 @@ from src.model_loading.lazy_safetensors.conversion import (
     translate_renaming,
 )
 from src.model_loading.lazy_safetensors.conversion_selection import (
+    family_key_mapping,
     replay_loaded_conversions,
     resolve_conversion_steps,
 )
@@ -575,7 +576,7 @@ def test_eager_replay_accepts_text_only_prefix_changes():
     disk_key = "model.language_model.linear.weight"
     steps = replay_loaded_conversions(model)
     assert steps and convert_disk_keys([disk_key], steps) == {disk_key: (("model.linear.weight", ()),)}
-    mapping, fanout = loaded_key_mapping(model, [disk_key])
+    mapping, fanout = family_key_mapping(model, [disk_key], replay_loaded=True)
     assert mapping == {disk_key: "model.linear.weight"}
     assert fanout == {disk_key: (("model.linear.weight", ()),)}
 

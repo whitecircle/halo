@@ -44,6 +44,7 @@ from src.configs.script_arguments import ModelLoadArguments
 from src.distributed.mesh import MeshDim
 from src.distributed.parallelism_config import ParallelismConfig
 from src.distributed.tensor_parallel.hf_plan import plan_shards_param
+from src.kernels.lowp.spec import LowpSpec
 from src.model_loading.dtype import resolve_load_dtype
 from src.model_loading.lazy_safetensors.meta_shell import instantiate_on_meta
 from src.model_loading.parallel import load_rules, whole_model
@@ -484,6 +485,79 @@ def test_the_family_gate_is_wired_into_the_loader_right_after_the_config_read():
         load_distributed_model(
             "org/x", parallelism_config=_pc(ep_size=2, fp32_non_ep_params=True), trust_remote_code=True
         )
+
+
+# ── reject_unsupported_load: the option refusals land before any of the load runs ──
+
+_FP8 = LowpSpec(precision="fp8")
+_QUANTIZED = SimpleNamespace(load_in_4bit=True)
+# id -> (ParallelismConfig fields, load_distributed_model kwargs, the exception, a fragment of its message).
+_LOAD_REFUSALS = {
+    "qlora_under_ep": ({"ep_size": 2}, {"quantization_config": _QUANTIZED}, ValueError, "Quantized loading"),
+    "qlora_under_tp": ({"tp_size": 2}, {"quantization_config": _QUANTIZED}, ValueError, "Quantized loading"),
+    "scratch_under_cp": ({"cp_size": 2}, {"init_from_scratch": True}, NotImplementedError, "dense data-parallel"),
+    "scratch_with_qlora": (
+        {},
+        {"init_from_scratch": True, "quantization_config": _QUANTIZED},
+        ValueError,
+        "incompatible with quantization",
+    ),
+    "lowp_with_qlora": ({"lowp": _FP8}, {"quantization_config": _QUANTIZED}, ValueError, "quantization_config"),
+    "lowp_under_fp16": ({"lowp": _FP8}, {"dtype": torch.float16}, ValueError, "dtype=float16"),
+}
+
+
+def _reached(stage: str):
+    def fail(*args, **kwargs):
+        raise AssertionError(f"{stage} ran before the load refusal")
+
+    return fail
+
+
+@pytest.mark.parametrize(
+    ("pc_fields", "load_kwargs", "error", "fragment"), _LOAD_REFUSALS.values(), ids=_LOAD_REFUSALS
+)
+def test_every_load_refusal_fires_before_attention_the_tokenizer_and_the_weight_read(
+    pc_fields, load_kwargs, error, fragment
+):
+    """The option refusals run right after the config's own, so an invalid run costs a config read: not
+    the attention resolution, the tokenizer download, the process groups or (for lowp) the full load."""
+    config = Qwen3Config(
+        num_hidden_layers=1, hidden_size=64, intermediate_size=128, num_attention_heads=4, num_key_value_heads=2
+    )
+    with (
+        patch.dict(os.environ, _env({}), clear=True),
+        patch.object(
+            model_loading, "resolve_model_source", lambda path, revision, **kwargs: ModelSource(path, revision, path)
+        ),
+        patch.object(model_loading, "AutoConfig", SimpleNamespace(from_pretrained=lambda *a, **k: config)),
+        patch.object(model_loading, "_resolve_run_attention", _reached("the attention resolution")),
+        patch.object(model_loading, "AutoTokenizer", SimpleNamespace(from_pretrained=_reached("the tokenizer load"))),
+        patch.object(model_loading, "_dispatch_model_loading", _reached("the weight read")),
+        pytest.raises(error, match=fragment),
+    ):
+        load_distributed_model("org/x", parallelism_config=_pc(**pc_fields), trust_remote_code=True, **load_kwargs)
+
+
+def test_qlora_passes_plain_data_parallelism_and_is_refused_under_the_expert_wrappers():
+    """The MoE conjunct: a dense QLoRA run on plain DP keeps its Params4bit, the grouped-GEMM wrappers do not."""
+    load_rules.reject_unsupported_load(
+        _pc(), torch.bfloat16, quantization_config=_QUANTIZED, init_from_scratch=False, wraps_experts=False
+    )
+    with pytest.raises(ValueError, match="grouped-GEMM MoE loaders"):
+        load_rules.reject_unsupported_load(
+            _pc(), torch.bfloat16, quantization_config=_QUANTIZED, init_from_scratch=False, wraps_experts=True
+        )
+
+
+def test_scratch_and_lowp_pass_where_each_is_supported():
+    """Anti-vacuity: a from-scratch build on plain DP and lowp on bf16 masters are production shapes."""
+    load_rules.reject_unsupported_load(
+        _pc(), torch.bfloat16, quantization_config=None, init_from_scratch=True, wraps_experts=False
+    )
+    load_rules.reject_unsupported_load(
+        _pc(lowp=_FP8), torch.bfloat16, quantization_config=None, init_from_scratch=False, wraps_experts=False
+    )
 
 
 def test_should_accelerate_manage_ddp_semantics():

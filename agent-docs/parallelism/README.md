@@ -106,11 +106,18 @@ sequences inside attention.
 
 ### Stacking the dimensions
 
-`data_parallel_size` counts distinct batches: `world_size / max(tp_size, cp_size, expert_tp_size)`;
-EP does not reduce it. FSDP2's shard group is chosen per mode: the whole world for plain DP, CP, EP
-and ETP (CP and ETP ranks shard parameters even though they share a batch); the `dp` dimension of
-the `(dp, tp)` mesh under TP and EP+TP; and the EP group under multi-group EP across NVLink domains,
-where the cross-replica average is deferred to the post-backward sweep.
+`data_parallel_size` counts distinct batches. PP carves the world first (`stage_world_size =
+world_size / pp_size`), then TP, CP or ETP divide each stage:
+
+```text
+data_parallel_size = world_size / pp_size / max(tp_size, cp_size, expert_tp_size)
+```
+
+EP does not reduce it, and the divisor is a max, not a product: no two of TP, CP and ETP may exceed
+1 at once. FSDP2's shard group is chosen per mode: the whole stage (the world at `pp_size` 1) for
+plain DP, CP, EP and ETP (CP and ETP ranks shard parameters even though they share a batch); the
+`dp` dimension of the `(dp, tp)` mesh under TP and EP+TP; and the EP group under multi-group EP
+across NVLink domains, where the cross-replica average is deferred to the post-backward sweep.
 
 HSDP is not a separate layer on top of FSDP2; it is how the plain-DP or CP shard group is meshed.
 The default is 1D full-shard. Under `--use_hsdp` it is a 2D `(dp_replicate, dp_shard)` mesh that

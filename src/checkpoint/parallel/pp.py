@@ -76,7 +76,8 @@ def _write_hub_group(
     hub's names: the save-side revert of the conversions the stage snapshotted, as the EP-gathered save
     applies it. ``tensors`` is consumed here, so a cast it carries runs inside the caller's guard.
     """
-    for key, tensor in revert_conversions(stage, dict(tensors), list(stage.export_conversions)).items():
+    conversions = list(stage.checkpoint_namespace.export_conversions)
+    for key, tensor in revert_conversions(stage, dict(tensors), conversions).items():
         writer.add(key, tensor)
 
 

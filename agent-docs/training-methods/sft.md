@@ -77,7 +77,7 @@ Scalar YAML fields override on the command line (`--learning_rate=1e-5`; contain
 effective_batch = per_device_train_batch_size × gradient_accumulation_steps × data_parallel_size
 ```
 
-EP is orthogonal to DP, so `data_parallel_size = world_size` under pure EP; TP, CP and ETP reduce it ([Parallelism](../parallelism/README.md)). `gptoss-20b-multinode-ep.yaml` runs batch 1 × accumulation 4 × DP=16 (2 nodes × 8 GPUs, EP orthogonal to DP) → effective batch 64; production full-FT configs land at **64–128**. Raise `gradient_accumulation_steps` (costs step latency, not memory) when HBM is tight, `per_device_train_batch_size` for throughput.
+EP is orthogonal to DP, so `data_parallel_size = world_size` under pure EP; PP, TP, CP and ETP reduce it ([Stacking the dimensions](../parallelism/README.md#stacking-the-dimensions)). `gptoss-20b-multinode-ep.yaml` runs batch 1 × accumulation 4 × DP=16 (2 nodes × 8 GPUs, EP orthogonal to DP) → effective batch 64; production full-FT configs land at **64–128**. Raise `gradient_accumulation_steps` (costs step latency, not memory) when HBM is tight, `per_device_train_batch_size` for throughput.
 
 Too high a learning rate erases pretrained capability without showing up in the training loss.
 

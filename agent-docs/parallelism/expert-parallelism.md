@@ -575,7 +575,7 @@ and EP+CP on anything but a node-local EP group filling the NVLink domain.
 
 | Knob | Under EP | Gate |
 |---|---|---|
-| QLoRA / `load_in_4bit` | rejected — the EP loaders materialize plain de-quantized weights, losing `Params4bit` | `model_loading/parallel/loader.py` |
+| QLoRA / `load_in_4bit` | rejected — the EP loaders materialize plain de-quantized weights, losing `Params4bit` | `model_loading/parallel/load_rules.py` |
 | fp32 training (`bf16: false`) | rejected at `expert_parallel_size > 1` — DeepEP's buffer carries 2-byte tokens; FP32 storage comes from the `fp32_*` masters ([Precision control](#precision-control)) | `reject_unsupported_run` |
 | `use_peft` / LoRA | attention adapters are fine; a PEFT `LoraLayer` **inside** an EP layer is rejected — expert LoRA must go through the native grouped adapters | `_validate_lora_ep_compatibility` |
 | expert LoRA | rejected with `expert_tp_size > 1` at config time, before the checkpoint downloads (`EPConfig` re-checks hand-built configs at group construction); rejected under [TP](tensor-parallelism.md#limitations) and alongside `save_sharded_ep`; a `merge_lora` gather under ETP raises | `_reject_expert_tp`, `_validate_lora_tp_compatibility`, `src/checkpoint/parallel/ep.py` |
@@ -584,7 +584,7 @@ and EP+CP on anything but a node-local EP group filling the NVLink domain.
 | `use_hsdp` | rejected — EP already shards over the EP group | `_reject_hsdp` |
 | `bf16_optimizer: false` with a stock AdamW `optim` | rejected at optimizer build ([why](../optimization/bf16-optimizer.md#usage)); `fp32_non_ep_params: true`, `muon` and `flash_adamw` build | `mixins/base.py` |
 | `ref_model` (explicit) | warned — the reference is never parallelized, so every rank holds a whole dense replica; its log-probs match the policy's up to kernel numerics | `warn_unparallelized_reference` |
-| `init_from_scratch` | rejected — no sharded random init | `model_loading/parallel/loader.py` |
+| `init_from_scratch` | rejected — no sharded random init | `model_loading/parallel/load_rules.py` |
 | `accelerate launch` | rejected — EP requires `torchrun`; the same rejection covers a grouped-GEMM MoE at `ep_size == 1` | `load_rules.py`, `ParallelismValidationMixin` |
 | `save_sharded_ep` | needs a single EP group spanning the world; every rejection is listed under [Checkpointing](#checkpointing) | `reject_unmergeable_ep_sharded_save` |
 | `gradient_checkpointing` | supported; `use_reentrant` is forced to `True`. `gradient_checkpointing_kwargs.every_n_layers` selects the checkpointed decoder layers exactly as on the plain path (lifted out of the kwargs at the EP enable seam and at every re-enable). Rejected for a family whose spec declares `supports_gradient_checkpointing=False` | `_setup_ep_gradient_checkpointing` |

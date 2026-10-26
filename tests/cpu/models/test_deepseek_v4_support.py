@@ -320,7 +320,7 @@ def test_moe_balancing_auto_resolves_bias_update_for_v4_ep():
     assert resolve_balancing_mode("auto", host, is_moe=True) == "bias_update"
     # Control: a plain module tree carries no bias, and V4's forward takes no output_router_logits
     # either, so nothing there can balance — auto resolves to none rather than to an aux_loss the
-    # strategy would refuse (tests/cpu/models/test_moe_balancing_auto_resolution.py).
+    # strategy would refuse (tests/cpu/models/test_balancing_auto_resolution.py).
     assert resolve_balancing_mode("auto", nn.Module(), is_moe=True) == "none"
 
 

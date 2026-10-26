@@ -114,7 +114,7 @@ def test_auto_resolves_bailing_to_bias_update():
     assert resolve_balancing_mode("auto", shell, is_moe=True) == "bias_update"
     # Sanity control: without the wrapper nothing carries the bias, and the shell's forward consults
     # no output_router_logits flag either, so auto falls through to none — never to an aux_loss the
-    # balancing strategy refuses (tests/cpu/models/test_moe_balancing_auto_resolution.py).
+    # balancing strategy refuses (tests/cpu/models/test_balancing_auto_resolution.py).
     assert resolve_balancing_mode("auto", _Shell(nn.Linear(4, 4)), is_moe=True) == "none"
 
 

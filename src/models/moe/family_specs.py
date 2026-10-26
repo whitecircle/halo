@@ -13,7 +13,7 @@ from types import MappingProxyType
 
 from src.models.config_access import config_sources
 from src.models.moe.config_fields import has_routed_experts
-from src.models.moe.expert_layout import ExpertLayout, ExpertLayoutKind
+from src.models.moe.expert_layout import SEPARATE_GLU_PROJECTIONS, ExpertLayout, ExpertLayoutKind
 from src.models.moe.expert_lora_spec import EXPERT_LORA_SUFFIXES
 
 GLU_PROJECTIONS: tuple[str, ...] = ("gate_up_proj", "gate_proj", "up_proj", "down_proj")
@@ -78,18 +78,17 @@ class MoEFamilySpec:
 
 
 _E_SCORE_CORRECTION_BIAS = NativeBalancingSlot(("gate.e_score_correction_bias",))
-_GATE_UP_DOWN_PROJ = ("gate_proj", "up_proj", "down_proj")
 
 # Ling-mini-2.0, Ring-mini-linear-2.0 and Ling-3.0 share one MoE block.
 BAILING = MoEFamilySpec(
     model_types=("bailing_moe", "bailing_moe_linear", "bailing_hybrid"),
-    expert_layout=ExpertLayout(ExpertLayoutKind.SEPARATE_GLU, _GATE_UP_DOWN_PROJ),
+    expert_layout=ExpertLayout(ExpertLayoutKind.SEPARATE_GLU, SEPARATE_GLU_PROJECTIONS),
     balancing_slot=NativeBalancingSlot(("gate.expert_bias",)),
     shared_expert_attrs=("shared_experts",),
 )
 COHERE2_MOE = MoEFamilySpec(
     model_types=("cohere2_moe", "cohere2_vision"),
-    expert_layout=ExpertLayout(per_expert_keys=_GATE_UP_DOWN_PROJ),
+    expert_layout=ExpertLayout(per_expert_keys=SEPARATE_GLU_PROJECTIONS),
     shared_expert_attrs=("shared_experts",),
     # No lazy load of the Command A+ checkpoint has been checked against from_pretrained.
     supports_lazy_loading=False,
@@ -124,14 +123,14 @@ GEMMA4 = MoEFamilySpec(
 # The remote-code revisions spell the expert container ``routed_experts`` and the shared expert in the singular.
 GLM4 = MoEFamilySpec(
     model_types=("glm4_moe_lite",),
-    expert_layout=ExpertLayout(ExpertLayoutKind.FUSED_SPLIT_PER_EXPERT, _GATE_UP_DOWN_PROJ),
+    expert_layout=ExpertLayout(ExpertLayoutKind.FUSED_SPLIT_PER_EXPERT, SEPARATE_GLU_PROJECTIONS),
     balancing_slot=_E_SCORE_CORRECTION_BIAS,
     experts_container_attrs=("experts", "routed_experts"),
     shared_expert_attrs=("shared_experts", "shared_expert"),
 )
 GLM5_NEXT = MoEFamilySpec(
     model_types=("glm5_next", "glm5_next_text"),
-    expert_layout=ExpertLayout(per_expert_keys=_GATE_UP_DOWN_PROJ),
+    expert_layout=ExpertLayout(per_expert_keys=SEPARATE_GLU_PROJECTIONS),
     balancing_slot=_E_SCORE_CORRECTION_BIAS,
     shared_expert_attrs=("shared_experts",),
     hub_conversion_keys=("glm5_next",),
@@ -175,7 +174,7 @@ INKLING = MoEFamilySpec(
 # entries by tests/cpu/parallelism/test_laguna_export_key_renames.py.
 LAGUNA = MoEFamilySpec(
     model_types=("laguna",),
-    expert_layout=ExpertLayout(ExpertLayoutKind.FUSED_SPLIT_PER_EXPERT, _GATE_UP_DOWN_PROJ),
+    expert_layout=ExpertLayout(ExpertLayoutKind.FUSED_SPLIT_PER_EXPERT, SEPARATE_GLU_PROJECTIONS),
     balancing_slot=NativeBalancingSlot(("gate.e_score_correction_bias", "experts.e_score_correction_bias")),
     export_key_renames=(
         ("gate.e_score_correction_bias", "experts.e_score_correction_bias"),
@@ -196,12 +195,12 @@ MISTRAL4 = MoEFamilySpec(
     shared_expert_attrs=("shared_experts",),
 )
 QWEN3 = MoEFamilySpec(
-    model_types=("qwen3_moe",), expert_layout=ExpertLayout(ExpertLayoutKind.SEPARATE_GLU, _GATE_UP_DOWN_PROJ)
+    model_types=("qwen3_moe",), expert_layout=ExpertLayout(ExpertLayoutKind.SEPARATE_GLU, SEPARATE_GLU_PROJECTIONS)
 )
 # Qwen3.6 ships under these same types.
 QWEN3_5 = MoEFamilySpec(
     model_types=("qwen3_5_moe", "qwen3_5_moe_text"),
-    expert_layout=ExpertLayout(per_expert_keys=_GATE_UP_DOWN_PROJ),
+    expert_layout=ExpertLayout(per_expert_keys=SEPARATE_GLU_PROJECTIONS),
     shared_expert_attrs=("shared_expert",),
 )
 STEP3P7 = MoEFamilySpec(

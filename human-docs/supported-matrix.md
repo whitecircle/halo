@@ -102,8 +102,9 @@ be served from this repo's image. Setup, ports, weight sync and
 | ETP | experimental | expert FFN memory, experts replicated |
 | EP+CP, EP+TP | supported for selected families | MoE plus long context or attention sharding |
 | EP+ETP | experimental | expert memory pressure; each ETP group stays inside one NVLink domain, and cross-node EP+ETP forms one ETP group per domain |
-| TP+CP, TP+ETP, ETP+CP, any three axes | unsupported | rejected at config validation |
-| PP, PP+EP, PP+ETP | supported for registered families | depth across NVLink domains; each stage is a whole number of domains, so two nodes at least |
+| TP+CP, TP+ETP, ETP+CP, PP+TP, PP+CP, any three axes | unsupported | rejected at config validation |
+| PP, PP+EP | supported for registered families (validated on Blackwell) | depth across NVLink domains; each stage is a whole number of domains, so two nodes at least |
+| PP+ETP | experimental (tiny models only) | expert FFN memory inside each stage, experts replicated |
 
 Layout rules and the shapes rejected before a run starts:
 [Parallelism](parallelism.md).

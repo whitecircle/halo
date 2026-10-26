@@ -24,6 +24,7 @@ from huggingface_hub.errors import (
 from safetensors import safe_open
 
 from src.checkpoint.format import SAFETENSORS_INDEX_FILE, SAFETENSORS_WEIGHTS_FILE
+from src.runtime.ranks import has_process_group
 from src.weight_sync.chunking import resolve_sync_device
 from src.weight_sync.clients.base import POST_TIMEOUT_S, WeightSyncClientBase
 from src.weight_sync.registry import resolve_weight_sync_client
@@ -136,7 +137,7 @@ def parse_nccl_log(text: str) -> TransportReport:
 
 def arm_nccl_debug(log_dir: str) -> str:
     """Point NCCL's debug output at ``log_dir``, before the process's first NCCL call; returns the glob to read."""
-    if torch.distributed.is_available() and torch.distributed.is_initialized():
+    if has_process_group():
         raise RuntimeError(
             "torch.distributed is already initialized in this process: NCCL has read its debug "
             "settings and the preflight cannot observe the transport. Run it in a fresh process."

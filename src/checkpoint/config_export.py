@@ -335,8 +335,7 @@ def save_model_config(model, output_dir: str) -> None:
     # configure this run rather than the artifact: serialize with the pre-mutation values restored.
     with config_export_ready(config):
         config.save_pretrained(output_dir)
-    remote_code_cls = getattr(model, "_remote_code_model_class", None) or remote_code_model_class(model)
-    if remote_code_cls is not None:
+    if (remote_code_cls := remote_code_model_class(model)) is not None:
         custom_object_save(remote_code_cls, output_dir)
     finalize_exported_config(config, output_dir, source=config_schema_source(model))
     generation_config = getattr(model, "generation_config", None)

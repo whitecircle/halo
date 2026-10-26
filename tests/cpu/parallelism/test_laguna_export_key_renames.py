@@ -28,8 +28,8 @@ from transformers.conversion_mapping import get_checkpoint_conversion_mapping
 from transformers.core_model_loading import WeightRenaming
 
 from src.distributed.expert_parallel.families.laguna import EPLagunaMoELayer
-from src.distributed.expert_parallel.lazy_plan import family_key_mapping
 from src.distributed.expert_parallel.moe_layer.layer import EPMoELayerBase
+from src.model_loading.lazy_safetensors.conversion_selection import family_key_mapping
 from src.models.moe.family_specs import MoEFamilySpec, find_moe_family_spec
 
 LAGUNA_MOE_LAYER = 1  # layer 0 is dense (first_k_dense_replace)

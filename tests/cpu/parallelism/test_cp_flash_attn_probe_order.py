@@ -20,6 +20,7 @@ from unittest.mock import patch
 import pytest
 
 import src.distributed.context_parallel.ulysses_attention as base_layer
+import src.models.attention.selection as selection
 
 
 def _importable(name: str) -> bool:
@@ -47,8 +48,8 @@ def _resolve(*, blackwell: bool, hopper: bool, allow_fa4: bool = True):
     base_layer._flash_attn_func.cache_clear()
     try:
         with (
-            patch.object(base_layer, "is_blackwell_gpu", return_value=blackwell),
-            patch.object(base_layer, "is_hopper_gpu", return_value=hopper),
+            patch.object(selection, "is_blackwell_gpu", return_value=blackwell),
+            patch.object(selection, "is_hopper_gpu", return_value=hopper),
         ):
             return base_layer._flash_attn_func(allow_fa4)
     finally:

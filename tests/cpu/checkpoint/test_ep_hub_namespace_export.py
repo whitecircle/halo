@@ -47,10 +47,10 @@ from src.checkpoint.parallel.ep import (
     save_ep_gathered_checkpoint,
 )
 from src.checkpoint.parallel.save import save_fsdp2_checkpoint, save_tp_checkpoint
-from src.distributed.expert_parallel.lazy_plan import family_key_mapping
 from src.distributed.expert_parallel.moe_layer.layer import EPMoELayerBase
 from src.distributed.expert_parallel.parallelize import apply_ep_layers
 from src.model_loading.lazy_safetensors.conversion import Concat
+from src.model_loading.lazy_safetensors.conversion_selection import family_key_mapping
 from src.models.moe.family_specs import experts_container_attrs, is_expert_weight_attr, moe_model_types
 from src.models.param_roles import persistent_buffers
 from src.trainers.grpo.rollout.weight_push import gather_and_send_weights

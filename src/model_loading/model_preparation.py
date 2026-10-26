@@ -22,7 +22,7 @@ from src.models.attention.backend_setup import patch_sdpa_for_wide_heads, patch_
 from src.models.attention.gpt_oss_sinks import SinksPolicy, apply_sinks_policy
 from src.models.attention.packed_position_ids import patch_mistral4_flash_packed_position_ids
 from src.models.attention.sdpa_flex_sliding import resolve_flex_sliding_attn_implementation
-from src.models.attention.selection import has_head_dim_beyond_flash
+from src.models.attention.selection import has_head_dim_beyond_flash, is_flash_attn_implementation
 from src.models.config_access import model_type_matches
 from src.models.zaya import apply_zaya_patches
 
@@ -89,19 +89,6 @@ def resolve_auto_model_class(model_config, *, text_only: bool = False):
     return AutoModelForCausalLM
 
 
-def concrete_model_class(model_class, model_config):
-    """The class an Auto class dispatches ``model_config`` to, which carries the class-level declarations
-    (``_tp_plan``, the tie, the load-ignored keys). Returns the Auto class itself for a remote-code
-    config outside the mapping."""
-    mapping = getattr(model_class, "_model_mapping", None)
-    if mapping is None:
-        return model_class
-    try:
-        return mapping[type(model_config)]
-    except KeyError:
-        return model_class
-
-
 def auto_load_model(
     model_name_or_path: str, *, trust_remote_code: bool = False, model_class=None, text_only: bool = False, **kwargs
 ):
@@ -135,7 +122,7 @@ def apply_family_patches(model_config, attn_implementation: str) -> str:
         patch_sdpa_for_wide_heads()
     # Else Mistral4's attention swallows position_ids before the flash interface, so the varlen
     # packed path never engages and packed documents attend across each other.
-    if attn_implementation.startswith("flash_attention") and model_type_matches(model_config, "mistral4"):
+    if is_flash_attn_implementation(attn_implementation) and model_type_matches(model_config, "mistral4"):
         patch_mistral4_flash_packed_position_ids()
     # Load recording for the native balancing buffer, the GC refusal, and (on flash) the same
     # position_ids plumbing as Mistral4, since Zaya's model forward never passes the tensor down.

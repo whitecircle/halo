@@ -19,7 +19,7 @@ Three knob names carry the length settings. They mean the same thing everywhere;
 |---|---|
 | `max_length` | Total tokenized sequence budget (prompt + completion). `null` or any non-positive value resolves to the **model's context window** at launch (`resolve_length_to_context`, which reads `max_position_embeddings` / `max_seq_length` / `n_positions` off the **text** sub-config so composite VLM configs resolve too, then falls back to `tokenizer.model_max_length`). Also becomes `tokenizer.model_max_length` for the run. |
 | `max_prompt_length` | Prompt share of the budget. |
-| `max_completion_length` | Completion share of the budget, or — under RL — the number of tokens the policy may generate. Async GRPO with Environments' entry script pins it to `rollout_max_tokens`, the generation cap there, and raises on any value other than TRL's default (256) or `rollout_max_tokens`. |
+| `max_completion_length` | Completion share of the budget, or — under RL — the number of tokens the policy may generate. Async GRPO with Environments' entry script pins it to `rollout_max_tokens`, the generation cap there, and raises on any value other than TRL's default or `rollout_max_tokens`. |
 
 *Omitting* a field falls back to the dataclass default in the tables below. Writing `max_length: null` opts into the model's context window; `null` on `max_prompt_length` / `max_completion_length` means whatever the per-trainer row below says (no cap, no prompt filtering, or a derived share of `max_length`) — never the context window.
 
@@ -236,8 +236,9 @@ Unpaired `{prompt, completion, label}` preference optimization. `max_length` (`i
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
 | `num_generations` | `int \| None` | `8` | Completions per prompt. |
-| `max_completion_length` | `int \| None` | `256` | Generation budget (online / vanilla GRPO; TRL `max_new_tokens`). Set it explicitly. **Async GRPO does not use it**: it generates with `rollout_max_tokens` and is bounded by the model context (see [Sequence length](#sequence-length-caps-vs-generation-budgets)). |
+| `max_completion_length` | `int \| None` | `512` | Generation budget (online / vanilla GRPO; TRL `max_new_tokens`). Set it explicitly. **Async GRPO does not use it**: it generates with `rollout_max_tokens` and is bounded by the model context (see [Sequence length](#sequence-length-caps-vs-generation-budgets)). |
 | `beta` | `float` | `0.0` | KL penalty coefficient (`0.0` = no reference model). Non-zero on a policy no PEFT adapter wraps (a full fine-tune, or expert-only LoRA), the online and async GRPO scripts load a frozen reference from `model_name_or_path`, never a resume checkpoint, as the policy loads (run dtype, `model_revision`, its attention and `reset_sinks`), and the trainer hands it to TRL in place of the fp32 copy TRL would build. A trainer constructed without one raises, as does one given a `ref_model` the run never reads. |
+| `use_bias_correction_kl` | `bool` | `True` | Multiplies the KL term by the importance-sampling ratio, the unbiased reverse-KL gradient. It changes the KL gradient of every online and async GRPO run at `beta != 0`, on-policy included (the ratio is differentiable even where it equals 1); `false` keeps the plain k3 term. |
 | `temperature` | `float` | `1.0` | Sampling temperature. Async GRPO **overwrites** it (with a log) with `rollout_temperature`, so log-probs are scored at the temperature the rollout sampled at. |
 | `top_k` | `int` | `0` | Top-k sampling (`0` = disabled). Online GRPO only; refused with a sequence-level IS mode or `vespo` as `top_p < 1` is. |
 | `top_p` | `float` | `1.0` | Top-p sampling. Online GRPO only. With a `sequence_*` `vllm_importance_sampling_mode` or `loss_type: vespo`, `top_p < 1` (or a `top_k`, or a `min_p`) against a server whose logprobs are renormalized over the cut (vLLM `processed_logprobs`) is refused at startup ([Online GRPO](../training-methods/grpo/online.md#configuration)). |
@@ -335,13 +336,7 @@ Five knobs are implemented inside the mixin's own FSDP2 wrap and are therefore *
 
 ### Data parallel size
 
-EP is always orthogonal to data parallelism; TP, CP, and ETP reduce it:
-
-```text
-data_parallel_size = world_size / max(tp_size, cp_size, expert_tp_size)
-```
-
-So standard DDP and EP-only give `world_size`; TP/CP/ETP and EP+TP/EP+CP divide by the respective size. Note the divisor is a **max**, not a product.
+EP is always orthogonal to data parallelism; PP, TP, CP, and ETP reduce it ([Stacking the dimensions](../parallelism/README.md#stacking-the-dimensions)).
 
 > **Pre-sharded datasets:** a per-DP-rank pre-split dataset must have `num_shards >= data_parallel_size`, else a DP rank holds zero examples and training raises `ValueError`. Re-preprocess with a larger `--num-shards`, or use a non-sharded dataset.
 

@@ -21,7 +21,7 @@ their own when relevant. The other six are user-invoked only: name them with
 | Skill | What it does |
 | --- | --- |
 | `launch` | assembles and runs a training/test job — image, mounts, GPU count, detach |
-| `parallelism` | produces a *valid* EP/CP/TP/ETP layout for your model and hardware, and rejects invalid ones before they cost a run |
+| `parallelism` | produces a *valid* EP/CP/TP/ETP/PP layout for your model and hardware, and rejects invalid ones before they cost a run |
 | `optimize` | recommends throughput/memory levers for a config — and tells you which famous levers don't help at Halo's MoE shapes |
 | `debug` | routes a hang, OOM, NaN, or NCCL/DeepEP fault to the right helper and fix |
 | `checkpoints` | merging shards and adapters, converting, resuming, loading into vLLM |

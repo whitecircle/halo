@@ -24,19 +24,9 @@ node trains other rows.
 
 ## Data parallel size
 
-`data_parallel_size` is the number of distinct batches (= unique shards needed):
-
-```text
-dp_size = world_size / max(tp_size, cp_size, expert_tp_size)
-```
-
-- DDP, EP-only: `dp_size = world_size` (EP is orthogonal)
-- TP-only: `world_size / tp_size`
-- CP-only: `world_size / cp_size`
-- EP+TP: `world_size / tp_size` (only TP reduces DP)
-- EP+CP: `world_size / cp_size` (only CP reduces DP)
-- pure ETP (`ep_size=1`): `world_size / expert_tp_size`
-- EP+ETP (`ep_size>1` AND `expert_tp_size>1`): `world_size / expert_tp_size` (experimental; the expert-TP group is node-local, EP itself may be node-local or cross-node)
+`data_parallel_size` is the number of distinct batches (= unique shards needed), derived in
+[Stacking the dimensions](README.md#stacking-the-dimensions) and listed per mode in
+[Supported combinations](README.md#supported-combinations).
 
 Computed once in `ParallelismConfig.__post_init__` (`src/distributed/parallelism_config.py`).
 `get_data_parallel_rank()` derives the shard index per mode — TP/CP take `rank // group_size`,

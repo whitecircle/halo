@@ -43,10 +43,9 @@ Read it before giving a verdict on any non-trivial combo.
   EP+ETP, PP+EP, PP+ETP**. Anything else is rejected with the mechanism from
   `AXIS_SET_MECHANISMS`, or a generic "no validated composition" when unlisted.
 - `ep_group_size = ep_size * expert_tp_size` (the full EP process group).
-- `stage_world_size = world_size // pp_size`, then
-  `data_parallel_size = stage_world_size // max(tp_size, cp_size, expert_tp_size)`;
-  if that max is 1, `dp_size = stage_world_size`. **EP alone never reduces DP** (EP is
-  orthogonal to DP). Only TP, CP, ETP and PP reduce distinct-batch count.
+- **EP alone never reduces DP** (EP is orthogonal to DP); PP, TP, CP and ETP do.
+  [Stacking the dimensions](../../agent-docs/parallelism/README.md#stacking-the-dimensions)
+  derives `data_parallel_size`; [matrix.md](matrix.md) gives it per mode.
 - Locality unit is `nvlink_domain_size` (auto = `NVLINK_DOMAIN_SIZE`, else `gpus_per_node`; set
   it only on NVL72/MNNVL). "Node-local" below means "within one NVLink domain".
 - `ep_scope` defaults to `"auto"` in both the dataclass and on the CLI/YAML

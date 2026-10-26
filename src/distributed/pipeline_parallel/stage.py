@@ -19,7 +19,7 @@ from torch.utils.checkpoint import checkpoint
 from transformers import PretrainedConfig
 
 from src.checkpoint.config_export import hf_architecture_name
-from src.checkpoint.hub_layout import CheckpointNamespace, export_conversions
+from src.checkpoint.hub_layout import CheckpointNamespace
 from src.checkpoint.weights_source import LOADED_WEIGHTS_FROM_ATTR
 from src.distributed.expert_parallel.deepep.capacity import register_forward_generation_hook
 from src.distributed.expert_parallel.moe_layer.layer import named_ep_layers
@@ -28,7 +28,7 @@ from src.distributed.pipeline_parallel.model_rules import reject_unsupported_pp_
 from src.distributed.pipeline_parallel.partition import resolve_layer_partition, validate_partition
 from src.distributed.pipeline_parallel.stage_losses import FusedHeadLossFn
 from src.models.head_transform import IDENTITY_HEAD_TRANSFORM, HeadTransform, resolve_head_transform
-from src.models.model_classes import remote_code_model_class
+from src.models.model_classes import REMOTE_CODE_MODEL_CLASS_ATTR, remote_code_model_class
 from src.models.module_tree import (
     backbone_with_layers,
     decoder_layers,
@@ -171,9 +171,8 @@ class PipelineStageModule(nn.Module):
         # loss instead of logits, so no [mb, S, V] plane is built.
         self.fused_loss_fn: FusedHeadLossFn | None = None
 
-        self.export_conversions = tuple(export_conversions(source))
         self.checkpoint_namespace = CheckpointNamespace.of(source)
-        self._remote_code_model_class = remote_code_model_class(source)
+        setattr(self, REMOTE_CODE_MODEL_CLASS_ATTR, remote_code_model_class(source))
         if source.can_generate():
             self.generation_config = source.generation_config
         if hasattr(source, "config"):

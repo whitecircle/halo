@@ -57,8 +57,8 @@ vllm_mode: server
 learning_rate: 1.0e-06
 ```
 
-- `max_completion_length` must be a positive int; `null` raises. With both length knobs bounded, their sum becomes `model_max_length`.
-- TRL defaults `loss_type` to `dapo` and `scale_rewards` to `group`. The recipes (`examples/grpo/online/`) run `loss_type: grpo`, `beta: 0`, `epsilon` `0.15`–`0.2`, `num_generations` 4 or 8 and `max_completion_length` 128–4096.
+- `max_completion_length` must be a positive int; `null` raises, and leaving it out takes TRL's default, so set it. With both length knobs bounded, their sum becomes `model_max_length`.
+- The recipes (`examples/grpo/online/`) run `loss_type: grpo`, `beta: 0`, `epsilon` `0.15`–`0.2`, `num_generations` 4 or 8 and `max_completion_length` 128–4096; a field a config leaves out takes TRL's default ([GRPOConfig](../../reference/configuration-reference.md#grpoconfig--distributedgrpotrainer-distributedasyncenvironmentalgrpotrainer-trl-docs)).
 - `reasoning_effort` (default unset; `low` / `medium` / `high` / `random`) is applied at dataset-map time and needs a template that reads it.
 - Learning rate: `1e-6` to `5e-6` in the recipes, roughly 10× that for LoRA ([sizing](../sft.md#learning-rate-and-global-batch-size)).
 
@@ -122,7 +122,7 @@ For a shaped reward in `[0, 1]` (a grade plus small shaping terms) over a small 
 - A single binary reward keeps `scale_rewards: group`: the `1e-4` added to the divisor keeps a uniformly-failed group's advantages at zero, not NaN.
 - The clip binds only when a generation batch outlives one optimizer step. At the defaults (`num_iterations: 1`, `steps_per_generation` = `gradient_accumulation_steps`) `epsilon` is inert. `epsilon_high` falls back to `epsilon`.
 
-`beta` is the KL anchor to the base model; every online recipe runs `beta: 0`. Without a PEFT wrapper (a full fine-tune, or expert-only LoRA, which builds no `PeftModel`), `beta != 0` holds a frozen reference:
+`beta` is the KL anchor to the base model; every online recipe runs `beta: 0`. TRL weights the KL term by the importance-sampling ratio (`use_bias_correction_kl`, on by default), which changes its gradient even on-policy; `use_bias_correction_kl: false` keeps the plain k3 term. Without a PEFT wrapper (a full fine-tune, or expert-only LoRA, which builds no `PeftModel`), `beta != 0` holds a frozen reference:
 
 - The script loads it as the policy loads (`load_reference_model_for_on_policy_grpo`, `src/model_loading/parallel/frozen_models.py`): run dtype, `model_revision`, the policy's attention request and `reset_sinks`, the non-persistent buffers repaired, the vocabulary grown with the tokenizer. The trainer hands it to TRL in place of the fp32 copy TRL would build from the hub's default revision.
 - It is a dense replica on every rank, warned about under EP, ETP and TP. A resume loads it from `model_name_or_path`, never the checkpoint.

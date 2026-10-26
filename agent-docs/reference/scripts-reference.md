@@ -37,7 +37,7 @@ Every training entry script runs the shared skeleton in `src/entrypoints/`: `par
 
 | Script | Description |
 |--------|-------------|
-| `scripts/training/sft.py` | SFT (text or VLM, auto-detected); every available axis — EP/CP/TP/ETP — plus `init_from_scratch` (dense data-parallel only) |
+| `scripts/training/sft.py` | SFT (text or VLM, auto-detected); every available axis — EP/CP/TP/ETP/PP — plus `init_from_scratch` (dense data-parallel only) |
 
 ```bash
 python scripts/training/sft.py examples/sft/qwen3/qwen3-4b-ultrachat.yaml
@@ -49,10 +49,10 @@ torchrun --nproc_per_node=8 scripts/training/sft.py \
 
 | Script | Description |
 |--------|-------------|
-| `scripts/training/preference/dpo.py` | DPO (text or VLM, auto-detected); EP/TP/ETP; TRL `loss_type` variants (`sigmoid`, `hinge`, `ipo`, …) |
-| `scripts/training/preference/kto.py` | KTO (text or VLM, auto-detected; unpaired binary feedback); EP/TP/ETP |
-| `scripts/training/preference/smpo.py` | Smooth Margin PO (text or VLM, auto-detected; reference-model-free); EP/CP/TP/ETP |
-| `scripts/training/preference/rewards.py` | Bradley-Terry reward model; EP/TP/ETP |
+| `scripts/training/preference/dpo.py` | DPO (text or VLM, auto-detected); EP/TP/ETP; PP with precomputed reference log-probs; TRL `loss_type` variants (`sigmoid`, `hinge`, `ipo`, …) |
+| `scripts/training/preference/kto.py` | KTO (text or VLM, auto-detected; unpaired binary feedback); EP/TP/ETP; PP with precomputed reference log-probs (`apo_zero_unpaired`) |
+| `scripts/training/preference/smpo.py` | Smooth Margin PO (text or VLM, auto-detected; reference-model-free); EP/CP/TP/ETP/PP |
+| `scripts/training/preference/rewards.py` | Bradley-Terry reward model; EP/TP/ETP/PP |
 
 ### Online GRPO
 
@@ -74,7 +74,7 @@ CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6 torchrun --nproc_per_node=7 \
 
 | Script | Description |
 |--------|-------------|
-| `scripts/training/offline_grpo.py` | Group-relative PO with pre-computed rewards; EP/CP/TP/ETP (CP: full fine-tuning only) |
+| `scripts/training/offline_grpo.py` | Group-relative PO with pre-computed rewards; EP/CP/TP/ETP/PP (CP: full fine-tuning only) |
 
 ```bash
 torchrun --nproc_per_node=8 scripts/training/offline_grpo.py \
@@ -106,7 +106,7 @@ CUDA_VISIBLE_DEVICES=1,2,3,4,5,6,7 torchrun --nproc_per_node=7 \
 
 | Script | Description |
 |--------|-------------|
-| `scripts/training/classification.py` | Multi-class/multi-label sequence classification; EP/TP/ETP |
+| `scripts/training/classification.py` | Multi-class/multi-label sequence classification; EP/TP/ETP/PP |
 | `scripts/training/embedding.py` | Embedding fine-tuning with SBERT losses; EP/TP/ETP (no CP, no PP) |
 | `scripts/training/distillation/teacher_distill.py` | Off-policy teacher→student distillation (text or VLM, auto-detected), multiple loss types; EP/TP/ETP (no CP, no PP) |
 | `scripts/training/distillation/self_distill.py` | Offline SDPG privileged-context self-distillation (text or VLM, auto-detected); faithful online SDPG runs via `online_grpo/rlvr.py --use_sdpg=true` |

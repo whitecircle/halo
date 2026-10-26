@@ -119,8 +119,8 @@ Enforced in `src/distributed/parallelism_rules.py` before model loading:
 > reaches the same 8-way total split through 2-rank dispatch groups, at DP 2 instead of DP 4; it is
 > what the 8-GPU Mistral4 and Cohere2 MoE matrices (`tests/gpu/manifest.py`) run.
 
-ETP reduces data parallelism — it counts toward `max(tp_size, cp_size, expert_tp_size)` in the
-`dp_size` formula owned by [Distributed Data Loading](data-loading.md#data-parallel-size). On 8 GPUs
+ETP reduces data parallelism — within a stage it counts toward the max of TP, CP and ETP
+([Stacking the dimensions](README.md#stacking-the-dimensions)). On 8 GPUs
 (`ep_group_size = 8` throughout): EP-only `ep8` → DP 8; `ep4+etp2` → DP 4; `ep2+etp4` → DP 2; pure
 ETP `etp8` → DP 1.
 
@@ -159,7 +159,7 @@ EP=16 throughput. Validate convergence on your own config before a long run.
 ## Weight sharding
 
 ETP shards the intermediate dimension `M` of expert FFN weights; the recipe is keyed on the model's
-expert layout (`src/distributed/expert_parallel/moe_layer/compute.py` + `layers/`).
+expert layout (`src/distributed/expert_parallel/moe_layer/compute.py` + `families/`).
 
 - **GptOss (fused interleaved GLU)** — `gate_up_proj [E, H, 2M]` is `[g0,u0,g1,u1,…]`. De-interleave
   (`gate = [...,::2]`, `up = [...,1::2]`), shard each along dim 2 to `[E, H, M/tp]`; shard

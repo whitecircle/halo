@@ -13,8 +13,8 @@ from torch.distributed.tensor import DTensor
 from transformers.distributed.tensor_parallel import ALL_PARALLEL_STYLES, TensorParallelLayer, _get_parameter_plan
 
 from src.distributed.tensor_parallel.plain_params import hand_sliced_suffixes, register_per_head_norm_params
-from src.model_loading.model_preparation import concrete_model_class
 from src.models.config_access import text_config, ties_word_embeddings
+from src.models.model_classes import mapped_model_class
 from src.models.module_tree import find_module_path
 from src.runtime.ranks import is_global_main_process
 
@@ -73,7 +73,7 @@ def consistent_tied_tp_plan(model_class, model_config):
     kind, and the first forward fails on mixed plain/DTensor operands. Without the entry the pair stays
     replicated.
     """
-    concrete = concrete_model_class(model_class, model_config)
+    concrete = mapped_model_class(model_config, model_class) or model_class
     heads, embeddings = _tied_module_names(concrete)
     if not ties_word_embeddings(model_config) or not heads or not embeddings:
         yield

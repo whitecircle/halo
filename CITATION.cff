@@ -5,8 +5,9 @@ title: "Halo — LLM Alignment Toolkit"
 abstract: >-
   Halo is an open-source framework built by White Circle for training large
   language and multimodal models: pre-training and post-training (SFT, SMPO,
-  GRPO, distillation, and more) with Expert, Context, Tensor, and Expert-Tensor
-  Parallelism on top of the HuggingFace stack (TRL, Accelerate, Transformers).
+  GRPO, distillation, and more) with Expert, Context, Tensor, Expert-Tensor,
+  and Pipeline Parallelism on top of the HuggingFace stack (TRL, Accelerate,
+  Transformers).
 type: software
 authors:
   - name: "White Circle"

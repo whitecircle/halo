@@ -243,7 +243,7 @@ def _cohere2_moe() -> Cohere2MoeSparseMoeBlock:
 
 
 def _inkling() -> InklingMoE:
-    """``n_shared_experts >= 1`` is required by the wrapper (its ``_route`` slices the last shared
+    """``n_shared_experts >= 1`` is required by the wrapper (its ``_route_joint`` slices the last shared
     logit columns), and > 1 is what the joint routed+shared normalisation is actually about."""
     return InklingMoE(
         InklingTextConfig(n_routed_experts=E, num_experts_per_tok=K, n_shared_experts=2, route_scale=8.0, **_COMMON)

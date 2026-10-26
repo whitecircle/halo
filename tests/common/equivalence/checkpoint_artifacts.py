@@ -64,14 +64,6 @@ RUN_DTYPES = {"fp32": torch.float32, "bf16": torch.bfloat16}
 FULL_WEIGHT_MODES = ("fsdp2", "cp", "cp_fsdp2", "tp", "ep1", "ep")
 CP_MODES = ("cp", "cp_fsdp2")
 EXPERT_LORA_MODES = ("ep_expert_lora", "ep_expert_lora_merged")
-# A CP save of a tied-embedding family hands safetensors both tied keys over one storage, which it refuses,
-# wherever it writes the live tensors: a training checkpoint, and a bf16 export, whose cast is a no-op.
-KNOWN_RAISING = frozenset(
-    f"{family}/{mode}/{dtype}/{kind}"
-    for family in ("cohere2_moe", "cohere2_vision")
-    for mode in CP_MODES
-    for dtype, kind in (("fp32", "training"), ("bf16", "export"), ("bf16", "training"))
-)
 # Written in place of a case's files when its save raises: the exception's type and message.
 RAISED_FILE = f"{RAISED}.json"
 # Reseeded before the adapters are drawn, so their values do not hang on how much randomness the model
@@ -284,11 +276,6 @@ def raised_cases(description: Mapping[str, dict]) -> dict[str, object]:
     }
 
 
-def unexpected_raises(raised: Mapping[str, object]) -> list[str]:
-    """The case paths among ``raised`` that :data:`KNOWN_RAISING` does not name."""
-    return sorted(set(raised) - KNOWN_RAISING)
-
-
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Compare what every saver writes between two commits.")
     mode = parser.add_mutually_exclusive_group(required=True)
@@ -318,14 +305,12 @@ def main(argv: list[str] | None = None) -> int:
         before, after = describe(outputs["base"]), describe(outputs["head"])
     deltas, accepted = split_accepted(compare_outputs(before, after), args.accept)
     raised = raised_cases(after)
-    unexpected = unexpected_raises(raised)
-    verdict = "fail" if deltas or unexpected else "pass"
+    verdict = "fail" if deltas or raised else "pass"
     findings = {
         "families": families,
         "cases": sum(case.family in families for case in ARTIFACT_CASES),
         "files": len(after),
         "raised": raised,
-        "unexpected_raised": unexpected,
         "accepted": accepted,
         "deltas": deltas,
     }
@@ -334,7 +319,7 @@ def main(argv: list[str] | None = None) -> int:
     )
     print(  # noqa: T201 — the CLI's report
         f"checkpoint artifacts: {verdict}, {findings['files']} files, {len(deltas)} deltas, {len(accepted)} "
-        f"accepted, {len(raised)} cases raising, {len(unexpected)} of them unexpected ({path})"
+        f"accepted, {len(raised)} cases raising ({path})"
     )
     return 0 if verdict == "pass" else 1
 

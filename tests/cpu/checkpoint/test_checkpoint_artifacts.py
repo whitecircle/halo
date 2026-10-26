@@ -1,5 +1,5 @@
-"""The checkpoint artifact harness finds nothing between two runs of today's savers, every case but the known ones
-saves what its mode owes at the dtypes it owes, and each seeded change to a saver shows up as a delta.
+"""The checkpoint artifact harness finds nothing between two runs of today's savers, every case saves what its mode
+owes at the dtypes it owes, and each seeded change to a saver shows up as a delta.
 
 Run: python tests/cpu/checkpoint/test_checkpoint_artifacts.py
 """
@@ -19,7 +19,6 @@ from tests.common.equivalence.checkpoint_artifacts import (
     EXPERT_LORA_MODES,
     FAMILIES,
     FULL_WEIGHT_MODES,
-    KNOWN_RAISING,
     PRODUCER_ENV,
     RAISED_FILE,
     RUN_DTYPES,
@@ -27,7 +26,6 @@ from tests.common.equivalence.checkpoint_artifacts import (
     describe,
     produce,
     raised_cases,
-    unexpected_raises,
 )
 from tests.common.equivalence.revisions import OUTPUT_ROOT_MARK, compare_outputs, run_in_tree
 from tests.common.repo import REPO_ROOT
@@ -39,6 +37,9 @@ DENSE_TRAINING = ArtifactCase("qwen3", "fsdp2", "fp32", training=True)
 DENSE_BF16_TRAINING = ArtifactCase("qwen3", "fsdp2", "bf16", training=True)
 # A family whose hub names differ from its module tree: the export reverts them per streamed chunk.
 VENDOR_NAMESPACE_EXPORT = ArtifactCase("deepseek_v4", "ep", "fp32", training=False)
+# A tied-embedding family under the CP saver and under the FSDP2 one.
+TIED_CP_EXPORT = ArtifactCase("cohere2_moe", "cp", "bf16", training=False)
+TIED_FSDP2_EXPORT = ArtifactCase("cohere2_moe", "fsdp2", "bf16", training=False)
 # A bf16 run's training checkpoint keeps the fp32 router master beside its bf16 weights.
 ROUTER = "model.layers.0.mlp.gate.weight"
 EMBEDDING = "model.embed_tokens.weight"
@@ -58,21 +59,17 @@ def test_the_roster_runs_every_family_in_every_mode_at_every_dtype():
     assert {case.mode for case in ARTIFACT_CASES} == {*FULL_WEIGHT_MODES, *EXPERT_LORA_MODES, "peft"}
     assert {case.dtype for case in ARTIFACT_CASES} == set(RUN_DTYPES)
     assert len({case.path for case in ARTIFACT_CASES}) == len(ARTIFACT_CASES)
-    assert KNOWN_RAISING.issubset(case.path for case in ARTIFACT_CASES)
 
 
-def test_every_case_but_the_known_ones_saves_what_its_mode_owes(tmp_path):
+def test_every_case_saves_what_its_mode_owes(tmp_path):
     """Weights in every case, the optimizer shard with its meta in exactly the full-weight training checkpoints,
     and a bf16 training checkpoint's fp32 router beside its bf16 weights. One test over the whole roster, which
     takes a minute and a half to save."""
     roster = _produced(tmp_path, ARTIFACT_CASES)
-    assert set(raised_cases(roster)) == KNOWN_RAISING
-    assert unexpected_raises(raised_cases(roster)) == []
+    assert raised_cases(roster) == {}
     shards = {"optimizer_shard_00000.pt", "optimizer_meta.pt"}
     wrong = []
     for case in ARTIFACT_CASES:
-        if case.path in KNOWN_RAISING:
-            continue
         files = {path.removeprefix(f"{case.path}/") for path in roster if path.startswith(f"{case.path}/")}
         owed_shards = shards if case.training and case.mode in FULL_WEIGHT_MODES else set()
         if not any(name.endswith(".safetensors") for name in files) or shards & files != owed_shards:
@@ -82,6 +79,17 @@ def test_every_case_but_the_known_ones_saves_what_its_mode_owes(tmp_path):
     assert (bf16_training[ROUTER][0], bf16_training[EMBEDDING][0]) == ("F32", "BF16")
     fp32_training = _weights(roster, ArtifactCase("qwen3_moe", "ep", "fp32", training=True))
     assert {dtype for dtype, _, _ in fp32_training.values()} == {"F32"}
+
+
+def test_a_cp_save_of_a_tied_family_writes_the_fsdp2_key_set(tmp_path):
+    """The CP wrapper's ``state_dict()`` names the tied embedding twice over one storage, which safetensors
+    refuses; the save writes it once, as the FSDP2 walk does, and ``from_pretrained`` re-ties the head."""
+    roster = _produced(tmp_path, [TIED_CP_EXPORT, TIED_FSDP2_EXPORT])
+
+    assert raised_cases(roster) == {}
+    cp, fsdp2 = (_weights(roster, case) for case in (TIED_CP_EXPORT, TIED_FSDP2_EXPORT))
+    assert EMBEDDING in cp and "lm_head.weight" not in cp
+    assert cp.keys() == fsdp2.keys()
 
 
 def test_two_producer_processes_match(tmp_path):
@@ -204,7 +212,7 @@ def test_an_export_left_in_the_module_namespace_is_a_key_delta(monkeypatch, tmp_
     )
 
 
-def test_a_saver_that_raises_is_a_delta_and_an_unexpected_raise(monkeypatch, tmp_path):
+def test_a_saver_that_raises_is_a_delta_and_a_raised_case(monkeypatch, tmp_path):
     baseline = _produced(tmp_path / "baseline", [DENSE_EXPORT])
 
     def refuse(ctx, output_dir):
@@ -219,7 +227,6 @@ def test_a_saver_that_raises_is_a_delta_and_an_unexpected_raise(monkeypatch, tmp
             "message": f"refused to write {OUTPUT_ROOT_MARK}/{DENSE_EXPORT.path}",
         }
     }
-    assert unexpected_raises(raised_cases(mutated)) == [DENSE_EXPORT.path]
     deltas = compare_outputs(baseline, mutated)
     assert {delta["delta"] for delta in deltas} == {"only in base", "only in head"}
     assert {"path": f"{DENSE_EXPORT.path}/{RAISED_FILE}", "delta": "only in head"} in deltas

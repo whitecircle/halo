@@ -59,7 +59,7 @@ mechanism.
 
 ## Scale
 
-- [Parallelism](parallelism.md): EP, CP, TP and ETP, and the layout rules that
+- [Parallelism](parallelism.md): EP, CP, TP, ETP and PP, and the layout rules that
   reject a bad shape before it costs you a run.
 - [Clusters and multi-node](clusters.md): one torchrun per node, fabric,
   storage, SkyPilot, RunPod, Nomad.

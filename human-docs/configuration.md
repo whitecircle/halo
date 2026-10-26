@@ -109,7 +109,7 @@ per trainer:
 | SMPO | prompt and completion budgets come out of `max_length`; an unset prompt budget takes half |
 | Offline GRPO | independent truncation caps; set both, and their sum becomes the tokenizer's `model_max_length` |
 | Online GRPO | `max_prompt_length` filters the dataset (over-long rows are dropped, not truncated); `max_completion_length` is the generation budget |
-| Async GRPO with environments | `max_prompt_length` is the same filter. The per-turn generation budget is `rollout_max_tokens`; a `max_completion_length` other than TRL's default (256) must equal it. `rollout_max_episode_tokens` (default `null`) caps a whole episode and must be at least `rollout_max_tokens` |
+| Async GRPO with environments | `max_prompt_length` is the same filter. The per-turn generation budget is `rollout_max_tokens`; a `max_completion_length` other than TRL's default must equal it. `rollout_max_episode_tokens` (default `null`) caps a whole episode and must be at least `rollout_max_tokens` |
 
 Online GRPO and async GRPO have no `max_length` field, so the key fails to parse
 there. Offline GRPO parses it, then refuses it when the trainer is built.

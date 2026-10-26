@@ -5,7 +5,7 @@ blocks. Block indices must therefore come from the model's own decoder (``get_de
 from a vision tower's ``layers.N`` — a deeper vision stack would otherwise inflate ``n_blocks`` and
 shift the kept set off the real text end-blocks.
 
-    python tests/cpu/kernels/test_mixed_precision_scoping.py
+    python tests/cpu/model_loading/test_lowp_compute_scoping.py
 """
 
 import pytest

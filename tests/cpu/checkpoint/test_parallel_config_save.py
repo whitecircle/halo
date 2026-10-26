@@ -29,6 +29,7 @@ from transformers import AutoConfig, AutoModelForCausalLM, LagunaConfig, Pretrai
 
 from src.checkpoint.config_export import drop_unshipped_auto_map, finalize_exported_config, save_model_config
 from src.checkpoint.weights_source import config_schema_source
+from src.models.model_classes import REMOTE_CODE_MODEL_CLASS_ATTR
 from tests.common.models import TINY_LAGUNA_CONFIG
 
 # What ``poolside/Laguna-S-2.1``'s config.json declares beside the in-library ``laguna`` model type.
@@ -112,6 +113,21 @@ def test_remote_code_modules_travel_from_an_fsdp2_sharded_model(tmp_path, monkey
 
     written = sorted(p.name for p in out.iterdir())
     assert "modeling_vendor_moe.py" in written, f"auto_map names a module the save did not write: {written}"
+
+
+def test_remote_code_modules_travel_from_a_stamped_stand_in(tmp_path, monkeypatch):
+    """A module that stands in for the cut model (a pipeline stage) is no remote-code class itself; the
+    class stamped on it at construction is what the save must copy."""
+    source = _dynamic_model(tmp_path / "src", monkeypatch)
+    stage = _VendorModel(source.config)
+    setattr(stage, REMOTE_CODE_MODEL_CLASS_ATTR, type(source))
+    out = tmp_path / "out"
+    out.mkdir()
+
+    save_model_config(stage, str(out))
+
+    written = sorted(p.name for p in out.iterdir())
+    assert "modeling_vendor_moe.py" in written, f"the stamped remote-code module was not written: {written}"
 
 
 def test_model_type_survives_a_vendor_config_with_no_class_attribute(tmp_path, monkeypatch):

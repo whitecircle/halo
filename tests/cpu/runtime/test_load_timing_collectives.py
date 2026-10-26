@@ -1,5 +1,5 @@
 #!/usr/bin/env python
-"""``log_global_load_duration_seconds`` — the load-timing report costs exactly two all_reduces.
+"""``_log_global_load_duration_seconds`` — the load-timing report costs exactly two all_reduces.
 
 Every parallelism mode's loader ends in this call, so whatever it does runs once per model load on
 every rank. It reduces the earliest start and the latest end and reports the span; reading the
@@ -18,7 +18,7 @@ import os
 import pytest
 import torch.distributed as dist
 
-from src.runtime.load_coordination import log_global_load_duration_seconds
+from src.runtime.load_coordination import _log_global_load_duration_seconds
 from tests.common.gloo import run_gloo_ranks
 
 WORLD_SIZE = 2
@@ -44,7 +44,7 @@ def _worker(rank: int, tmp_dir: str) -> None:
     dist.barrier = counting_barrier
     try:
         start, end = RANK_INTERVALS[rank]
-        span = log_global_load_duration_seconds(tag="unit", method="unit", t_start_wall=start, t_end_wall=end)
+        span = _log_global_load_duration_seconds(tag="unit", method="unit", t_start_wall=start, t_end_wall=end)
         result = f"{span:.3f}|{barriers}"
     except Exception as e:
         result = f"{type(e).__name__}: {e}"

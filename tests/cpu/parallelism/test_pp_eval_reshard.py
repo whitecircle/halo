@@ -124,7 +124,7 @@ def test_a_raising_drive_still_restores_the_stage():
 def test_the_shadowed_torch_member_is_declared_in_the_contract():
     """The runner shadows a private torch member, so a rename must fail loud at construction.
 
-    ``_assert_pipelining_schedule_contract`` probes every name in ``_REQUIRED_STAGE_INTERNALS``. If
+    ``_assert_pipelining_contract`` probes every name in ``_REQUIRED_STAGE_INTERNALS``. If
     ``perform_reduce_grad`` were missing from that tuple, a torch version that renamed it would leave
     the shadow on a dead attribute and the reshard would return unnoticed.
     """

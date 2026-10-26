@@ -129,7 +129,8 @@ SGLang ones are `ep1` only.
   raises at startup.
 - **`beta`** above 0 on a full fine-tune or native expert-only LoRA loads a frozen reference the way the
   policy loads (run dtype, revision, attention). Under EP, ETP or TP that is a whole unsharded copy on
-  every rank. A PEFT policy is its own reference with the adapter off.
+  every rank. A PEFT policy is its own reference with the adapter off. TRL weights the KL term by the
+  importance-sampling ratio unless `use_bias_correction_kl: false`.
 - **The objective** truncates each token's importance-sampling ratio from above. Startup refuses
   `loss_type: vespo`, a `vllm_importance_sampling_mode` other than the default or `token_truncate`, and
   `vllm_importance_sampling_clip_min`

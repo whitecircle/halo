@@ -48,7 +48,7 @@ Pretraining runs `sft` on raw text that you tokenize offline first
 `init_from_scratch: true`.
 
 From-scratch runs support data parallelism only (one GPU, DDP or FSDP2) and
-reject EP, CP, TP and ETP. To use those, create the random-init checkpoint in a
+reject EP, CP, TP, ETP and PP. To use those, create the random-init checkpoint in a
 separate step and train from it. See
 [Pretraining](../agent-docs/training-methods/pretraining.md) ↗.
 

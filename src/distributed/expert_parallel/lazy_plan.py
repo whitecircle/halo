@@ -20,10 +20,9 @@ from src.checkpoint.reading import read_checkpoint_config, resolve_checkpoint_we
 from src.distributed.expert_parallel.config import EPConfig
 from src.log import KEY_PREVIEW_COUNT
 from src.model_loading.dtype import resolve_load_dtype
-from src.model_loading.lazy_safetensors.conversion import Concat, ConvertTargets, build_key_mapping
-from src.model_loading.lazy_safetensors.conversion_selection import replay_loaded_conversions, resolve_conversion_steps
+from src.model_loading.lazy_safetensors.conversion import Concat
+from src.model_loading.lazy_safetensors.conversion_selection import family_key_mapping
 from src.model_loading.lazy_safetensors.materialization import WeightAction, WeightPlan
-from src.models.config_access import text_config
 from src.models.moe.config_fields import require_expert_count
 from src.models.moe.expert_layout import HF_FUSED_EXPERT_KEYS
 from src.models.moe.family_specs import experts_container_attrs, find_moe_family_spec, per_expert_fusion_map
@@ -86,28 +85,6 @@ def is_lazy_loadable(model_path: str) -> bool:
     except (FileNotFoundError, KeyError, OSError, ValueError):
         return True
     return not any(_NESTED_EXPERT_KEY_PATTERN.search(k) for k in weight_map)
-
-
-def family_key_mapping(model: nn.Module, disk_keys: list[str]) -> tuple[dict[str, str], dict[str, ConvertTargets]]:
-    """:func:`~src.model_loading.lazy_safetensors.conversion.build_key_mapping` under the conversions and hub
-    renames the family spec declares.
-
-    The family is read through ``text_config``: a composite config keeps ``model_type`` on its text
-    sub-config, and a wrapper-only read would return no renames, a whole module absent from the load.
-    """
-    model_type = getattr(text_config(model.config), "model_type", "")
-    steps = resolve_conversion_steps(model, model_type)
-    spec = find_moe_family_spec(model_type)
-    return build_key_mapping(model, disk_keys, steps=steps, hub_renames=spec.hub_to_module_renames() if spec else ())
-
-
-def loaded_key_mapping(model: nn.Module, disk_keys: list[str]) -> tuple[dict[str, str], dict[str, ConvertTargets]]:
-    """:func:`~src.model_loading.lazy_safetensors.conversion.build_key_mapping` under the conversions an eager
-    load of ``model`` recorded, with the family's hub renames."""
-    model_type = getattr(text_config(model.config), "model_type", "")
-    steps = replay_loaded_conversions(model)
-    spec = find_moe_family_spec(model_type)
-    return build_key_mapping(model, disk_keys, steps=steps, hub_renames=spec.hub_to_module_renames() if spec else ())
 
 
 class WeightPlanner:

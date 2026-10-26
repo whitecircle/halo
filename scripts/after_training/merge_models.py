@@ -61,8 +61,9 @@ from src.checkpoint.reading import header_nbytes, header_numel, iter_checkpoint_
 from src.checkpoint.writing import StreamingShardWriter, is_tie_reconcile_key
 from src.log import configure_cli_logging
 from src.model_loading.dtype import DTYPE_BY_NAME
-from src.model_loading.model_preparation import concrete_model_class, resolve_auto_model_class
+from src.model_loading.model_preparation import resolve_auto_model_class
 from src.models.config_access import TIE_WORD_EMBEDDINGS_FLAG, config_sources
+from src.models.model_classes import mapped_model_class
 from src.models.moe.balancing import is_balancing_state_key
 
 configure_cli_logging()
@@ -158,7 +159,8 @@ def _excused_base_keys(
     if not base_only:
         return set()
     config = AutoConfig.from_pretrained(config_source, trust_remote_code=trust_remote_code)
-    model_class = concrete_model_class(resolve_auto_model_class(config), config)
+    auto_class = resolve_auto_model_class(config)
+    model_class = mapped_model_class(config, auto_class) or auto_class
     patterns = getattr(model_class, "_keys_to_ignore_on_load_unexpected", None) or ()
     # Matched as transformers matches them: searched anywhere in the key.
     load_ignored = {key for key in base_only if any(re.search(pattern, key) for pattern in patterns)}

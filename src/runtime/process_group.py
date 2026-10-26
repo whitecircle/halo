@@ -11,7 +11,13 @@ from torch.distributed import distributed_c10d as c10d
 
 from src.env import nccl_timeout
 from src.runtime.filesystem import resolve_shared_filesystem_consensus
-from src.runtime.ranks import get_local_rank, is_global_main_process, launcher_global_rank, launcher_global_world_size
+from src.runtime.ranks import (
+    get_local_rank,
+    has_process_group,
+    is_global_main_process,
+    launcher_global_rank,
+    launcher_global_world_size,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -43,7 +49,7 @@ def _apply_default_pg_timeout(timeout: datetime.timedelta) -> None:
     c10d.default_pg_nccl_timeout = timeout
 
     # Extend-only: shortening the world group would resurface the straggler aborts.
-    if not dist.is_initialized():
+    if not has_process_group():
         return
     current = _world_group_timeout()
     if current is None:
@@ -80,8 +86,8 @@ def _require_rendezvous_env() -> None:
 
 
 def init_distributed(backend: str = "nccl") -> bool:
-    """Initialize the default process group with ``nccl_timeout()``, bind this rank's CUDA device and
-    agree the shared-filesystem flags; return whether it initialized. COLLECTIVE.
+    """COLLECTIVE: initialize the default process group with ``nccl_timeout()``, bind this rank's CUDA
+    device and agree the shared-filesystem flags; return whether it initialized.
 
     A single process with no launcher vars is a no-op; an already-initialized group (``accelerate
     launch``) still gets the timeout pin and the consensus.
@@ -90,8 +96,8 @@ def init_distributed(backend: str = "nccl") -> bool:
     # A multi-rank world counts even without RANK: that is exactly the bare-srun shape, where
     # skipping init leaves every rank at world 1, "main", and writing the same output_dir.
     world = launcher_global_world_size()
-    if ("RANK" not in os.environ and world <= 1) or dist.is_initialized():
-        if dist.is_initialized():
+    if ("RANK" not in os.environ and world <= 1) or has_process_group():
+        if has_process_group():
             _apply_default_pg_timeout(timeout)
             resolve_shared_filesystem_consensus()
         return False

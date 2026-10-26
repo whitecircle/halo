@@ -92,9 +92,9 @@ def _env_shared_filesystem_flags() -> dict[str, bool]:
 
 
 def resolve_shared_filesystem_consensus() -> None:
-    """Agree the three flags across ranks, rank 0's values winning with a warning, and memoize them
-    once, at the end, so no reader sees a half-resolved state. COLLECTIVE: the flags pick the
-    coordination scope, so ranks that disagree would wait in different scopes."""
+    """COLLECTIVE: agree the three flags across ranks, rank 0's values winning with a warning, and memoize
+    them once, at the end, so no reader sees a half-resolved state. The flags pick the coordination
+    scope, so ranks that disagree would wait in different scopes."""
     global _shared_filesystem_consensus
     local = _env_shared_filesystem_flags()
     agreed = broadcast_from_rank0(local)
@@ -119,8 +119,8 @@ def resolve_shared_filesystem_consensus() -> None:
 
 
 def ensure_shared_filesystem_consensus() -> None:
-    """Agree the flags if no consensus has been taken yet, for a phase that can precede
-    ``init_distributed``. COLLECTIVE on that first call only."""
+    """COLLECTIVE on its first call only: agree the flags if no consensus has been taken yet, for a phase
+    that can precede ``init_distributed``."""
     if _shared_filesystem_consensus is None:
         resolve_shared_filesystem_consensus()
 
@@ -145,8 +145,8 @@ def is_fs_load_rank() -> bool:
 
 
 def fs_aware_makedirs(path: str, writer_rank: Callable[[], bool] = is_fs_save_rank) -> None:
-    """Create ``path`` on ``writer_rank`` (:func:`is_fs_load_rank` for a read-side cache dir), then
-    barrier, even when ``makedirs`` raised. COLLECTIVE."""
+    """COLLECTIVE: create ``path`` on ``writer_rank`` (:func:`is_fs_load_rank` for a read-side cache dir),
+    then barrier, even when ``makedirs`` raised."""
     try:
         if writer_rank():
             os.makedirs(path, exist_ok=True)
@@ -242,8 +242,8 @@ def _visible_within(path: str, seconds: float) -> bool:
 
 
 def verify_output_filesystem_sharing(output_dir: str) -> None:
-    """Probe whether ``output_dir`` really is shared across nodes and raise on a declaration that
-    contradicts it, once per directory per process. COLLECTIVE. Both wrong declarations are otherwise
+    """COLLECTIVE: probe whether ``output_dir`` really is shared across nodes and raise on a declaration
+    that contradicts it, once per directory per process. Both wrong declarations are otherwise
     silent: shared on per-node disks leaves the other nodes no resumable checkpoint, per-node on a
     shared mount races every node's writer on the same paths."""
     world = get_global_world_size()
@@ -290,9 +290,9 @@ def verify_output_filesystem_sharing(output_dir: str) -> None:
 
 
 def agree_input_probe_across_ranks(probe: Callable[[], bool], subject, probe_name: str) -> bool:
-    """:func:`agree_probe_across_ranks` for a probe of the run's input, run only on each input scope's
-    load rank (:func:`is_fs_load_rank`) while the rest abstain with ``False``. COLLECTIVE: a probe that
-    raises is joined over the store first, so its cause raises on every rank."""
+    """COLLECTIVE: :func:`agree_probe_across_ranks` for a probe of the run's input, run only on each input
+    scope's load rank (:func:`is_fs_load_rank`) while the rest abstain with ``False``. A probe that raises
+    is joined over the store first, so its cause raises on every rank."""
     probing = is_fs_load_rank()
     local, failure = False, None
     if probing:

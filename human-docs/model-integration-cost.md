@@ -23,10 +23,10 @@ naming the HF MoE class it claims, one frozen `MoEFamilySpec` holding its config
 one import line in the family roster.
 
 - Wrappers subclass a shared base. A family whose expert-weight layout matches
-  an existing one subclasses that instead: Laguna reuses GLM-4's in about 30 lines.
-- Most wrappers stay under 140 lines.
-- GPT-OSS is the outlier at about 350, because of its interleaved gate/up
-  weights and attention sinks.
+  an existing one subclasses that instead: Laguna reuses GLM-4's in 26 lines.
+- Every other wrapper is 115 lines or fewer.
+- GPT-OSS is the outlier at 194, because of its interleaved, biased gate/up
+  weights and its own clamped SwiGLU compute.
 
 Context parallelism works the same way: one `UlyssesAttention` subclass in
 `src/distributed/context_parallel/families.py` that declares the attention classes it

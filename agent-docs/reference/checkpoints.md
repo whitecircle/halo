@@ -482,7 +482,9 @@ Ulysses-internal keys back to HF paths by stripping the `.original_attention.` s
 introduces. A stale duplicate dense `.mlp.{gate,up,down}_proj` key is dropped **per layer, only on
 layers that carry routed experts** — a hybrid model's genuinely-dense layers (GLM-4 MoE Lite,
 Mistral4 `first_k_dense_replace`) keep their dense MLP weights. `save_cp_checkpoint` gets the wrapper from
-the trainer's `_find_cp_wrapper()`, which finds it in both the plain and PEFT-nested layouts.
+the trainer's `_find_cp_wrapper()`, which finds it in both the plain and PEFT-nested layouts. A tied
+embedding/head pair, which that `state_dict()` names under both keys, is written once under its first key
+(`embed_tokens.weight`): the key set the FSDP2 and TP savers write, which `from_pretrained` re-ties.
 
 ## PEFT (LoRA) saving
 

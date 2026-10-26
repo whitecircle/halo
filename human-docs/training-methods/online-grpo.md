@@ -101,13 +101,15 @@ gradient_accumulation_steps: 8
   often all equal, and an all-equal group gives no gradient.
 - `beta` above 0 adds a KL anchor. On a full fine-tune or native expert-only LoRA, the script loads a
   frozen reference the way the policy loads (run dtype, revision, attention): a full extra copy on every
-  rank, unsharded under EP, ETP or TP. A PEFT policy is its own reference with the adapter off. Every
+  rank, unsharded under EP, ETP or TP. A PEFT policy is its own reference with the adapter off. TRL
+  weights the KL term by the importance-sampling ratio unless `use_bias_correction_kl: false`. Every
   shipped recipe keeps `beta: 0`, and at their `num_iterations: 1` the `epsilon` clip is inert too.
 - `scale_rewards: group` divides by each group's own spread. Keep it for a single binary reward. Use
   `batch` when the reward is a graded fraction whose group spread is mostly noise, or `none` to leave
   it unscaled.
-- `max_completion_length` is the budget handed to vLLM and must be a positive integer. At startup the
-  server's context window is checked against `max_prompt_length + max_completion_length`.
+- `max_completion_length` is the budget handed to vLLM and must be a positive integer; set it, since
+  leaving it out takes TRL's default. At startup the server's context window is checked against
+  `max_prompt_length + max_completion_length`.
 - Leave `top_p` at 1, `top_k` and `min_p` off, and `repetition_penalty` at 1. Under the default
   importance-sampling mode, startup refuses a repetition penalty, and a server whose logprobs are
   renormalized over a sampling cut.

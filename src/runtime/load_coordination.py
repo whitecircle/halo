@@ -81,8 +81,8 @@ def joined_node_load(what: str, max_concurrent: int | None):
     store_join_recorded_failure("node_load", failure, what)
 
 
-def log_global_load_duration_seconds(*, tag: str, method: str, t_start_wall: float, t_end_wall: float) -> float:
-    """Log and return the global load span ``max(t_end) - min(t_start)`` across ranks. COLLECTIVE.
+def _log_global_load_duration_seconds(*, tag: str, method: str, t_start_wall: float, t_end_wall: float) -> float:
+    """COLLECTIVE: log and return the global load span ``max(t_end) - min(t_start)`` across ranks.
 
     Wall-clock times compare only across NTP-synced hosts.
     """
@@ -110,12 +110,12 @@ def log_global_load_duration_seconds(*, tag: str, method: str, t_start_wall: flo
 
 
 def timed_global_load[T](tag: str, method: str, load_fn: Callable[[], T]) -> T:
-    """Run ``load_fn`` and log its global wall span, earliest start to latest end across ranks. COLLECTIVE.
+    """COLLECTIVE: run ``load_fn`` and log its global wall span, earliest start to latest end across ranks.
 
     The log is no ``finally``: a collective entered while one rank unwinds an exception turns that
     rank's traceback into a timeout on every other rank.
     """
     t_start_wall = time.time()
     loaded = load_fn()
-    log_global_load_duration_seconds(tag=tag, method=method, t_start_wall=t_start_wall, t_end_wall=time.time())
+    _log_global_load_duration_seconds(tag=tag, method=method, t_start_wall=t_start_wall, t_end_wall=time.time())
     return loaded

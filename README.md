@@ -20,13 +20,13 @@
 
 Halo is an open-source framework built by [White Circle](https://whitecircle.com) for training large language and multimodal models. It supports pre-training, SFT, preference optimization, fully asynchronous multi-turn RL, and much more.
 
-The same codebase runs on one GPU or across multiple nodes, with EP, CP, TP, ETP, FSDP2, fused kernels, BF16 training, and distributed rollouts.
+The same codebase runs on one GPU or across multiple nodes, with EP, CP, TP, ETP, PP, FSDP2, fused kernels, BF16 training, and distributed rollouts.
 
 Halo trains Hugging Face models directly. Checkpoints still load with `from_pretrained`, and supporting a new model family typically takes under 140 lines of integration code.
 
 On 8× B300, Halo trains gpt-oss-20b at up to 3.5× the throughput of stock TRL (3.2× at 25% less peak memory when both sides shard ZeRO-3).
 
-`Pre- & Post-Training` · `EP / CP / TP / ETP` ·
+`Pre- & Post-Training` · `EP / CP / TP / ETP / PP` ·
 `Multi-Node` · `Verifiable & Multi-Turn RL` · `FA4 + Liger + Grouped GEMM` · `Full BF16`
 
 </br>

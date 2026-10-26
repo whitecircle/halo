@@ -162,17 +162,6 @@ fails on both transports. Past that, split further with CP (EP8+CP8 = 16k/rank a
 (EP1 / dense CP-only — neither uses DeepEP). Transport limits: [DeepEP → Transport backend](../infrastructure/deepep.md#transport-backend) and
 [Dispatch wire-index limit](../infrastructure/deepep.md#dispatch-wire-index-limit).
 
-## Why Halo's EP wins: all-to-all vs masked all-reduce
-
-transformers v5 ships an EP path (`EpRouterParallel` + `MoeExpertsParallel`, the styles a family's
-`base_model_ep_plan` names `ep_router` / `moe_tp_experts`) that never moves tokens:
-every rank holds the whole batch, zeroes the routing scores of the experts it does not own, then
-**all-reduces the full `[tokens, hidden]` output** of every MoE layer (and the hidden states again in
-backward).
-
-Halo routes by **all-to-all** (DeepEP V2): each token is sent once to the rank owning its expert, so the wire
-carries only `top_k/num_experts` of the batch per layer instead of a full-tensor reduction on every rank.
-
 ## Second model: Qwen3-30B-A3B
 
 *Separate run set. b1 · GC-on · TRL ZeRO-3 · Halo ZeRO-2 · elastic.* The win holds but is smaller: the heavier router

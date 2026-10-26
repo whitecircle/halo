@@ -1,10 +1,10 @@
 """Process logging: the root handler and third-party suppression installed at package import, CLI
-verbosity for standalone tools, the warn-once helper, list previews and the run-log names under
+verbosity for standalone tools, the warn-once helper, the key-preview count and the run-log names under
 ``output_dir``."""
 
 import logging
 import sys
-from collections.abc import Hashable, Sequence
+from collections.abc import Hashable
 from typing import Any
 
 # How many offending keys a message lists before truncating.
@@ -78,12 +78,3 @@ def warn_once(
     seen.add(key)
     logger.warning(message, *args)
     return True
-
-
-def preview(items: Sequence[object], n: int = KEY_PREVIEW_COUNT) -> str:
-    """The first ``n`` of ``items`` joined by commas, then ``... (+N more)`` for the ones left out."""
-    if n < 1:
-        raise ValueError(f"preview needs n >= 1, got {n}")
-    shown = ", ".join(str(item) for item in items[:n])
-    hidden = len(items) - n
-    return f"{shown}, ... (+{hidden} more)" if hidden > 0 else shown

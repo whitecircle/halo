@@ -2,7 +2,7 @@
 
 PyTorch FSDP2 (`fully_shard`) handles gradient synchronization for `torchrun` multi-GPU training,
 applied automatically by `DistributedTrainerMixin` from the active parallelism mode. For training
-without EP/CP/TP/ETP, `accelerate launch` with a pre-built config provides FSDP v2 or plain DDP
+without EP/CP/TP/ETP/PP, `accelerate launch` with a pre-built config provides FSDP v2 or plain DDP
 instead.
 
 The wrap decision keys on the **wrap width** each mode passes: the rank block for plain DP, CP and
@@ -14,11 +14,11 @@ all-reduce sweep per optimizer step (`HALO_GRAD_BUCKET_MB`,
 
 ## Two launchers
 
-`torchrun` uses FSDP2 exclusively and is required for any EP/CP/TP/ETP run — the mixin coordinates
+`torchrun` uses FSDP2 exclusively and is required for any EP/CP/TP/ETP/PP run — the mixin coordinates
 FSDP2 with parallelism-specific gradient hooks ([How the mixin manages FSDP](#how-the-mixin-manages-fsdp)).
 
 `accelerate launch` reads an accelerate config YAML (FSDP or DDP) and is for standard multi-GPU
-without EP/CP/TP/ETP; those modes raise under it (`reject_accelerate_launch`). Both paths produce
+without EP/CP/TP/ETP/PP; those modes raise under it (`reject_accelerate_launch`). Both paths produce
 equivalent results there. Dense models run under `accelerate launch` (FSDP or DDP) even
 at the default `use_grouped_gemm: true`: the grouped-GEMM expert wrappers only activate for MoE
 models.
@@ -263,7 +263,7 @@ torchrun --nnodes=2 --nproc_per_node=8 \
 
 ## Accelerate launch configs
 
-For standard multi-GPU without EP/CP/TP/ETP. Only the FSDP v2 configs shard; `multigpu_dp_config.yaml` is plain DDP.
+For standard multi-GPU without EP/CP/TP/ETP/PP. Only the FSDP v2 configs shard; `multigpu_dp_config.yaml` is plain DDP.
 
 | Config file | Strategy | Use case |
 |-------------|----------|----------|
@@ -292,9 +292,8 @@ FSDP2 with [`--use_hsdp`](#hsdp-hybrid-sharded-data-parallel).
 
 ## Data parallel size
 
-`world_size / max(tp_size, cp_size, expert_tp_size)`; EP is orthogonal and does not reduce it. The
-per-mode breakdown lives in [Distributed Data Loading](data-loading.md#data-parallel-size); the
-support matrix in [Supported combinations](README.md#supported-combinations).
+Derived once in [Stacking the dimensions](README.md#stacking-the-dimensions), per mode in
+[Supported combinations](README.md#supported-combinations).
 
 ## How the mixin manages FSDP
 
@@ -342,10 +341,10 @@ MoE.
 | `bf16_optimizer` auto-enable under accelerate DDP | warned and skipped — replicated DDP is outside the validated stochastic-rounding matrix; set it explicitly to override | `mixins/base.py` |
 | accelerate FSDP v1 at `SHARD_GRAD_OP` / `FULL_SHARD` | warned — a known PyTorch bug can corrupt model state after a save. Use the FSDP2 configs or DDP | `mixins/base.py` |
 | `use_hsdp` on a single NVLink domain | warned — no-op; the replica axis engages once the job spans domains | `_reject_hsdp` |
-| QLoRA / `load_in_4bit` | supported on a **dense** model. On a MoE the grouped-GEMM loader takes over and rejects a quantized base (`use_grouped_gemm` is on by default) — set `use_grouped_gemm: false`, under either launcher. QLoRA skips FSDP2, so `use_hsdp`, `fsdp_reshard_after_forward`, `fsdp_reshard_after_backward` and `fsdp_defer_grad_sync` raise under it | `model_loading/parallel/loader.py`, `mixins/base.py` |
+| QLoRA / `load_in_4bit` | supported on a **dense** model. On a MoE the grouped-GEMM loader takes over and rejects a quantized base (`use_grouped_gemm` is on by default) — set `use_grouped_gemm: false`, under either launcher. QLoRA skips FSDP2, so `use_hsdp`, `fsdp_reshard_after_forward`, `fsdp_reshard_after_backward` and `fsdp_defer_grad_sync` raise under it | `model_loading/parallel/load_rules.py`, `mixins/base.py` |
 | `use_peft` / LoRA, `packing`, `padding_free`, `torch_compile`, `gradient_checkpointing` | supported and ungated — plain DP is the mode with the widest knob surface | — |
 | `lowp_precision != "bf16"` | SFT only | `parallelism_config_from_args` |
-| `init_from_scratch` | SFT only; refuses QLoRA and every EP/CP/TP/ETP mode, so plain DP is the one mode it runs in | `parallelism_config_from_args`, `model_loading/parallel/loader.py` |
+| `init_from_scratch` | SFT only; refuses QLoRA and every EP/CP/TP/ETP/PP mode, so plain DP is the one mode it runs in | `parallelism_config_from_args`, `model_loading/parallel/load_rules.py` |
 
 ## Common issues
 

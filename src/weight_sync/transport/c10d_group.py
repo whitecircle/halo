@@ -10,6 +10,7 @@ import torch
 import torch.distributed as dist
 from torch.distributed import distributed_c10d as c10d
 
+from src.runtime.ranks import has_process_group
 from src.weight_sync.transport.rendezvous import RendezvousListener
 
 logger = logging.getLogger(__name__)
@@ -23,7 +24,7 @@ def _store_bootstrapped_communicator():
     communicator with ``ncclCommSplit`` off the trainer's own, which holds only trainer ranks: the trainer
     would broadcast into its own world, silently. Clearing the bound device selects the store handshake.
     """
-    default_pg = c10d._get_default_group() if dist.is_available() and dist.is_initialized() else None
+    default_pg = c10d._get_default_group() if has_process_group() else None
     bound = getattr(default_pg, "bound_device_id", None) if default_pg is not None else None
     if bound is not None:
         default_pg.bound_device_id = None

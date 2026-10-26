@@ -17,7 +17,7 @@ import torch
 
 from src.runtime.collectives import collective_device
 from src.runtime.consensus import agree_across_ranks, rank_consensus
-from src.runtime.load_coordination import log_global_load_duration_seconds
+from src.runtime.load_coordination import _log_global_load_duration_seconds
 
 _MOD = "src.runtime.collectives"
 
@@ -92,7 +92,7 @@ def test_the_collective_call_sites_place_their_tensors_there():
         patch(f"{_MOD}.dist.all_reduce", side_effect=lambda tensor, **kw: devices.append(tensor.device)),
     ):
         rank_consensus(True)
-        log_global_load_duration_seconds(tag="probe", method="test", t_start_wall=0.0, t_end_wall=1.0)
+        _log_global_load_duration_seconds(tag="probe", method="test", t_start_wall=0.0, t_end_wall=1.0)
 
     assert devices, "no collective ran"
     assert all(device.type == "cpu" for device in devices), f"CUDA tensors on a gloo group: {devices}"

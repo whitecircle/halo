@@ -12,6 +12,8 @@ import torch
 # Fused 3-D expert tensor names (dim 0 = expert) as an HF checkpoint spells them, longest first so a suffix
 # matcher never reads a ``_bias`` name as its weight.
 HF_FUSED_EXPERT_KEYS: tuple[str, ...] = ("gate_up_proj_bias", "down_proj_bias", "gate_up_proj", "down_proj")
+# The three projections of a GLU expert stored apart, as runtime attributes and as a per-expert hub spelling.
+SEPARATE_GLU_PROJECTIONS: tuple[str, str, str] = ("gate_proj", "up_proj", "down_proj")
 
 
 class ExpertLayoutKind(enum.Enum):
@@ -32,7 +34,7 @@ class ExpertLayoutKind(enum.Enum):
 _RUNTIME_KEYS: dict[ExpertLayoutKind, frozenset[str]] = {
     ExpertLayoutKind.FUSED: frozenset({*HF_FUSED_EXPERT_KEYS, "gate_proj", "up_proj"}),
     ExpertLayoutKind.FUSED_SPLIT_PER_EXPERT: frozenset({"gate_up_proj", "gate_proj", "up_proj", "down_proj"}),
-    ExpertLayoutKind.SEPARATE_GLU: frozenset({"gate_proj", "up_proj", "down_proj"}),
+    ExpertLayoutKind.SEPARATE_GLU: frozenset(SEPARATE_GLU_PROJECTIONS),
     ExpertLayoutKind.INTERLEAVED_GLU: frozenset(
         {
             *HF_FUSED_EXPERT_KEYS,
@@ -104,7 +106,7 @@ def to_hub_expert_tensors(
     if layout.kind is ExpertLayoutKind.SEPARATE_GLU:
         banks = [
             (tensors[attr], (name,))
-            for attr, name in zip(("gate_proj", "up_proj", "down_proj"), layout.per_expert_keys, strict=True)
+            for attr, name in zip(SEPARATE_GLU_PROJECTIONS, layout.per_expert_keys, strict=True)
         ]
         return {
             f"{prefix}{key}.weight": part.transpose(0, 1).contiguous().to(device)

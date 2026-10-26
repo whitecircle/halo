@@ -12,7 +12,7 @@ diagnose a torn one explicitly, instead of asking the tolerant predicate and the
 file for an unguarded ``json.load`` that surfaces a bare ``JSONDecodeError`` from whichever rank
 holds the torn copy.
 
-Run: pytest tests/cpu/checkpoint/test_is_sharded_checkpoint.py
+Run: pytest tests/cpu/checkpoint/test_is_ep_sharded_checkpoint.py
 """
 
 import json

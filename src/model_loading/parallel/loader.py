@@ -11,7 +11,6 @@ from src.checkpoint.weights_source import LOADED_WEIGHTS_FROM_ATTR
 from src.distributed.expert_parallel.parallelize import apply_ep_layers
 from src.distributed.parallelism_config import ParallelismConfig
 from src.distributed.rank_uniform_env import agree_rank_uniform_env
-from src.hardware import is_blackwell_gpu
 from src.model_loading.buffer_repair import finalize_loaded_model
 from src.model_loading.dtype import configure_float32_matmul_precision
 from src.model_loading.liger.dispatch import apply_liger_kernel
@@ -22,7 +21,11 @@ from src.model_loading.model_preparation import (
 )
 from src.model_loading.parallel.cp import load_cp_model, load_ep_cp_model
 from src.model_loading.parallel.ep import load_ep_model
-from src.model_loading.parallel.load_rules import reject_unsupported_model, reject_unsupported_run
+from src.model_loading.parallel.load_rules import (
+    reject_unsupported_load,
+    reject_unsupported_model,
+    reject_unsupported_run,
+)
 from src.model_loading.parallel.lowp_compute import apply_lowp_compute
 from src.model_loading.parallel.model_source import ModelSource, resolve_model_source
 from src.model_loading.parallel.pp import load_pp_stage_model
@@ -31,7 +34,13 @@ from src.model_loading.parallel.whole_model import cast_loaded_parameters, load_
 from src.model_loading.remote_code import apply_remote_code_compat_shims
 from src.models.attention.backend_setup import patch_flex_attention_compile
 from src.models.attention.gpt_oss_sinks import SinksPolicy, uses_gpt_oss_sinks
-from src.models.attention.selection import resolve_attn_implementation, validate_attn_implementation
+from src.models.attention.selection import (
+    is_fa4_backward_nan_prone,
+    is_flash_attn_implementation,
+    preferred_flash_impl,
+    resolve_attn_implementation,
+    validate_attn_implementation,
+)
 from src.models.config_access import apply_config_overrides
 from src.models.moe.config_fields import has_routed_experts
 from src.runtime.consensus import reject_across_ranks
@@ -81,17 +90,17 @@ def _resolve_run_attention(
                 "but this model resolved to flex_attention under dtype=float32 (fp32 training). "
                 "Train in bf16/fp16, or drop Context Parallelism for fp32 runs."
             )
-        cp_fa = "flash_attention_4" if is_blackwell_gpu() else "flash_attention_2"
+        cp_fa = preferred_flash_impl(allow_fa4=not is_fa4_backward_nan_prone(model_config))
         logger.warning(
             f"flex_attention is not supported with Context Parallelism (Ulysses always uses "
-            f"flash_attn). Switching to {cp_fa}. A native flex_attention Ulysses path may be added later."
+            f"flash_attn). Switching to {cp_fa}."
         )
         # Re-validated, not assigned: the substitute must clear the same sink-capability matrix, or a
         # run keeping live sinks (reset_sinks=false) silently moves to a sink-dropping kernel.
         attn_implementation = validate_attn_implementation(
             model_config, cp_fa, _backend_sinks_policy(sinks_policy, init_from_scratch)
         )
-        if not attn_implementation.startswith("flash_attention"):
+        if not is_flash_attn_implementation(attn_implementation):
             raise ValueError(
                 f"Context Parallelism runs attention through flash_attn regardless of the config's "
                 f"label, but this model accepts neither {cp_fa} nor any other FlashAttention "
@@ -276,6 +285,13 @@ def load_distributed_model(
     # Before the process groups and the meta shell: config.json is all the sharding arithmetic needs,
     # so failing here costs a second instead of minutes.
     reject_unsupported_model(parallelism_config, model_config, sinks_policy=sinks_policy, wraps_experts=wraps_experts)
+    reject_unsupported_load(
+        parallelism_config,
+        dtype,
+        quantization_config=quantization_config,
+        init_from_scratch=init_from_scratch,
+        wraps_experts=wraps_experts,
+    )
 
     # Multimodal wrappers need AutoModelForImageTextToText (CausalLM drops the vision tower);
     # text_only_model opts into that drop deliberately (and restores config-honored aux loss).
@@ -325,45 +341,9 @@ def load_distributed_model(
     if source.revision is not None:
         from_pretrained_kwargs["revision"] = source.revision
     if quantization_config is not None:
-        # Also gated on MoE: a dense QLoRA run routing to DDP (or to CP, which keeps Params4bit) must pass.
-        if (
-            parallelism_config.has_ep_group
-            or parallelism_config.is_tp_mode
-            or parallelism_config.is_pp_mode
-            or wraps_experts
-        ):
-            raise ValueError(
-                "Quantized loading (QLoRA / bitsandbytes) is not supported with EP / TP / PP "
-                "or grouped-GEMM MoE loaders: they materialize plain de-quantized weights, so "
-                "bitsandbytes Params4bit are lost and PEFT's 4-bit adapter dispatch fails (PP "
-                "rejects PEFT outright). For QLoRA use plain data parallelism (on a MoE model with "
-                "`use_grouped_gemm: false`, under torchrun and accelerate launch alike) or CP on a "
-                "dense model, which preserves quantization. Under EP/TP use plain LoRA (no "
-                "quantization)."
-            )
         from_pretrained_kwargs["quantization_config"] = quantization_config
         logger.info(f"Using quantization config: {quantization_config}")
-
     if init_from_scratch:
-        # Identical per-rank seeds give consistent FSDP2 shards; EP/TP/CP would need a sharded random-init.
-        if (
-            parallelism_config.has_ep_group
-            or parallelism_config.is_tp_mode
-            or parallelism_config.is_cp_mode
-            or parallelism_config.is_expert_tp_mode
-            or parallelism_config.is_pp_mode
-        ):
-            raise NotImplementedError(
-                "init_from_scratch is currently supported only for dense data-parallel / "
-                "FSDP2 training (no EP/TP/CP/ETP/PP). PP additionally has nothing to be "
-                "stage-aware about without a checkpoint, so every rank would build the whole "
-                "model. To train from scratch WITH parallelism, materialize the random-init "
-                "checkpoint once outside the distributed job (AutoModelForCausalLM.from_config "
-                "+ save_pretrained), point model_name_or_path at it, and drop init_from_scratch "
-                "— see 'Large or MoE models' in agent-docs/training-methods/pretraining.md."
-            )
-        if quantization_config is not None:
-            raise ValueError("init_from_scratch is incompatible with quantization (QLoRA loads pretrained weights).")
         logger.info("init_from_scratch=True — building model with RANDOM weights from config (no checkpoint load).")
 
     model = _dispatch_model_loading(
@@ -389,17 +369,6 @@ def load_distributed_model(
     )
 
     if parallelism_config.lowp.enabled:
-        if quantization_config is not None:
-            raise ValueError(
-                "lowp_precision (low-precision compute) is incompatible with a quantization_config "
-                "(QLoRA/bitsandbytes): the weights are already quantized and not plain nn.Linear. "
-                "Use one or the other."
-            )
-        if dtype == torch.float16:
-            raise ValueError(
-                "lowp_precision requires bf16/fp32 master weights, but dtype=float16. "
-                "Set bf16 (the toolkit default) — low precision affects only the GEMM operands."
-            )
         apply_lowp_compute(
             model, parallelism_config.lowp, expert_weight_cacheable=not parallelism_config.experts_fsdp_managed
         )

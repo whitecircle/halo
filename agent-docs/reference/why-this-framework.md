@@ -2,7 +2,7 @@
 
 Built on HuggingFace Transformers, Accelerate, and TRL — every distributed trainer subclasses a TRL, Transformers, or SentenceTransformers trainer. What it adds over that stack:
 
-- **EP/CP/TP/ETP on native HF models, no Megatron conversion** (DeepEP for MoE expert parallelism).
+- **EP/CP/TP/ETP/PP on native HF models, no Megatron conversion** (DeepEP for MoE expert parallelism).
 - **EP+TP and pure ETP** shapes that other HF-native tools don't compose (Axolotl composes EP with CP, not TP).
 - **Full BF16 masters + optimizer state** (`AdamWBF16` + stochastic rounding, ~6 bytes/param) — others keep fp32 masters.
 - **SMPO** and **Offline GRPO** (pre-scored completions) — methods absent elsewhere.

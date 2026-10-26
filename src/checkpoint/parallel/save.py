@@ -121,11 +121,17 @@ def save_cp_checkpoint(ctx: CheckpointContext, output_dir: str) -> None:
     """COLLECTIVE: CP without EP, its items the CP wrapper's ``state_dict()``, whose keys it remaps.
 
     That dict carries the persistent buffers under the remapped keys and holds references only, so the
-    streamed gather still resolves them chunk by chunk; the sinks come off the unwrapped model.
+    streamed gather still resolves them chunk by chunk; the sinks come off the unwrapped model. Each tensor
+    is written under its first key only, the key set the FSDP2 and TP savers' ``named_parameters`` walk
+    writes: safetensors refuses two keys over one storage (a tied ``lm_head.weight``).
     """
     cp_wrapper = ctx.cp_wrapper
     inner = unwrap_toolkit_wrappers(cp_wrapper)
-    chunks = chunked_saveable_tensors(inner, retain=ctx.is_save_rank, items=cp_wrapper.state_dict().items())
+    # Under keep_vars a tied parameter is one object under both keys.
+    first_keys: dict[int, tuple[str, torch.Tensor]] = {}
+    for name, value in cp_wrapper.state_dict(keep_vars=True).items():
+        first_keys.setdefault(id(value), (name, value.data if isinstance(value, nn.Parameter) else value))
+    chunks = chunked_saveable_tensors(inner, retain=ctx.is_save_rank, items=first_keys.values())
     _streamed_save(ctx, output_dir, inner, chunks, f"Saved CP model to {output_dir}")
 
 

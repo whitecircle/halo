@@ -1,24 +1,13 @@
-"""The import layering of ``src/``, read off the import graph itself.
-
-Enforced: the sharding-agnostic trees (``src/checkpoint/`` and ``src/model_loading/`` outside their ``parallel/``
-halves, ``src/models/``) import no ``src.distributed``, ``torch.distributed`` or loader dispatch; nothing in
-``src/distributed`` or ``src/checkpoint/parallel`` imports the loader dispatch (``src/model_loading/parallel/``);
-the members of ``src/distributed`` with ``src/checkpoint/parallel``, and of the dispatch, import each other
-acyclically; every toolkit env knob is read through ``src/env.py``.
-
-The final layer table (``_LAYERS`` and the rules beside it) is laid over today's tree, each module placed where
-it lands through ``_PENDING_MOVES``: a break outside ``_KNOWN_LAYER_BREAKS`` fails, a known one is reported, and
-an entry whose break is gone fails. ``TYPE_CHECKING`` imports and the package's own bootstrap ``__init__`` are
-exempt from every rule; a function-local import counts like any other.
-
-    python tests/cpu/conventions/test_import_layering.py
-"""
+"""The import layering of ``src/``, read off the import graph: the sharding-agnostic trees reach no
+``src.distributed``, ``torch.distributed`` or loader dispatch, no parallelism package imports the dispatch, the
+packages import their members acyclically, toolkit env knobs go through ``src/env.py``, and every import follows the
+final layer table ``_LAYERS``, which agent-docs/reference/architecture.md renders. ``TYPE_CHECKING`` imports and the
+package's bootstrap ``__init__`` are exempt; a function-local import counts like any other."""
 
 import ast
-import warnings
+import re
 from collections import Counter, defaultdict
 from collections.abc import Iterable, Mapping
-from functools import cache
 from pathlib import Path
 from typing import NamedTuple
 
@@ -30,6 +19,7 @@ from tests.common.sample_tree import write_sample_tree
 
 _SRC = REPO_ROOT / PACKAGE
 _INDEX = RepoIndex(REPO_ROOT)
+_ARCHITECTURE_DOC = REPO_ROOT / "agent-docs" / "reference" / "architecture.md"
 
 # The package above every parallelism implementation, which nothing in src/distributed imports.
 _DISPATCH_PACKAGE = "model_loading.parallel"
@@ -117,9 +107,6 @@ _PENDING_MOVES = {
     "distributed.nccl": "weight_sync.transport",
     "distributed.nccl._nccl_wrapper": "weight_sync.transport.nccl_library",
 }
-# The breaks today's tree still makes, as (rule, importer, imported) on final paths. The move or split that fixes
-# one drops its entry; any other break fails.
-_KNOWN_LAYER_BREAKS: frozenset[tuple[str, str, str]] = frozenset()
 
 
 class _Import(NamedTuple):
@@ -135,17 +122,13 @@ class _Import(NamedTuple):
 
 
 class _Break(NamedTuple):
-    """One break of the final layer table, pinned in ``_KNOWN_LAYER_BREAKS`` by its ``key``."""
+    """One break of the final layer table."""
 
     rule: str
     importer: str  # a final path; a cycle's members
     imported: str  # a final path or a third-party module; "" for a cycle
     location: str  # "file:line"; "" for a cycle
     detail: str
-
-    @property
-    def key(self) -> tuple[str, str, str]:
-        return self.rule, self.importer, self.imported
 
 
 def _module_name(package_dir: Path, path: Path) -> str:
@@ -410,11 +393,6 @@ def _layer_table_breaks(imports: Iterable[_Import], moves: Mapping[str, str]) ->
     return sorted(set(breaks))
 
 
-@cache
-def _todays_breaks() -> list[_Break]:
-    return _layer_table_breaks(_IMPORTS, _PENDING_MOVES)
-
-
 def _report(breaks: Iterable[_Break]) -> str:
     return "\n".join(f"{found.location or found.importer}: {found.rule}: {found.detail}" for found in breaks)
 
@@ -677,16 +655,20 @@ def test_the_layer_table_sweep_sees_every_unit():
 
 
 def test_imports_follow_the_final_layer_table():
-    breaks = _todays_breaks()
-    new = [found for found in breaks if found.key not in _KNOWN_LAYER_BREAKS]
-    assert not new, f"these imports break the final layer table:\n{_report(new)}"
-    if breaks:
-        warnings.warn(f"{len(breaks)} known breaks of the final layer table:\n{_report(breaks)}", stacklevel=1)
+    breaks = _layer_table_breaks(_IMPORTS, _PENDING_MOVES)
+    assert not breaks, f"these imports break the final layer table:\n{_report(breaks)}"
 
 
-def test_every_known_layer_break_is_still_there():
-    fixed = sorted(_KNOWN_LAYER_BREAKS - {found.key for found in _todays_breaks()})
-    assert not fixed, f"these breaks are gone; drop them from _KNOWN_LAYER_BREAKS: {fixed}"
+def test_architecture_doc_renders_the_layer_table():
+    """The ``L<n>  unit, ...`` block under the Layer table heading of the architecture page is ``_LAYERS``."""
+    section = _ARCHITECTURE_DOC.read_text(encoding="utf-8").partition("\n## Layer table\n")[2].partition("\n## ")[0]
+    block = section.partition("```text\n")[2].partition("```")[0]
+    rows = [re.fullmatch(r"L(\d+)\s+(.+)", line.strip()) for line in block.splitlines() if line.strip()]
+    assert rows and all(rows), f"{_ARCHITECTURE_DOC.name} has no Layer table block of `L<n>  unit, ...` lines"
+    assert [int(row[1]) for row in rows] == list(range(len(rows))), (
+        "the documented levels must run L0, L1, ... in order"
+    )
+    assert tuple(tuple(re.split(r",\s*", row[2])) for row in rows) == _LAYERS
 
 
 if __name__ == "__main__":

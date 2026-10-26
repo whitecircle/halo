@@ -17,7 +17,7 @@ Runnable launches, SLURM, and troubleshooting live in [Launch Recipes](launch-re
 | ETP | always NVLink-local | `expert_tp_size` divides the domain |
 | CP | always NVLink-local | `cp_size <= nvlink_domain_size` and divides it (Ulysses all-to-all is bandwidth-bound) |
 | PP | cross-domain (the only axis meant to be) | stage boundaries fall on domain boundaries, so `pp_size` divides the domain count ([Pipeline Parallelism](pipeline-parallelism.md)) |
-| DP | automatic | `(world_size / pp_size) / max(tp_size, cp_size, expert_tp_size)` |
+| DP | automatic | what the other axes leave ([Stacking the dimensions](README.md#stacking-the-dimensions)) |
 
 EP is **orthogonal** to DP — it routes tokens to experts and returns them to their originating
 ranks, so EP never reduces DP.
@@ -31,7 +31,7 @@ NVLink-wide TP/CP/EP — see [NVL72](#gb200gb300-nvl72-multi-node-nvlink).
 |------|------------|
 | `ep_size` | Number of distinct expert subsets |
 | `ep_group_size` | Full EP process group = `ep_size * expert_tp_size` (auto-computed) |
-| `data_parallel_size` | `world_size / max(tp_size, cp_size, expert_tp_size)`; drives DataLoader sharding |
+| `data_parallel_size` | Distinct batches per step (the DP row above); drives DataLoader sharding |
 | `nvlink_domain_size` | GPUs reachable over NVLink (= `gpus_per_node`, or `NVLINK_DOMAIN_SIZE` on NVL72) |
 
 Gradient-sync scope follows the mode — the world or the EP group

@@ -11,7 +11,7 @@ dies on a ValueError the user did not ask for. It must resolve to ``none`` and s
 The refusal itself stays: an EXPLICIT ``aux_loss`` there is a user assertion about a model that
 cannot honour it, and it must fail loudly at config time rather than train unbalanced in silence.
 
-    python tests/cpu/models/test_moe_balancing_auto_resolution.py
+    python tests/cpu/models/test_balancing_auto_resolution.py
 """
 
 import logging

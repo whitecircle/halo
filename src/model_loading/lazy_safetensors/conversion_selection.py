@@ -17,12 +17,15 @@ from transformers.integrations.bitsandbytes import Bnb4bitDeserialize
 from src.model_loading.dtype import is_packed_4bit_parameter
 from src.model_loading.lazy_safetensors.conversion import (
     ConvertStep,
+    ConvertTargets,
     RenameStep,
+    build_key_mapping,
     is_expert_bank_merge,
     is_sub_model_prefix_change,
     translate_converter,
     translate_renaming,
 )
+from src.models.config_access import text_config
 from src.models.moe.family_specs import find_moe_family_spec
 
 
@@ -138,3 +141,15 @@ def replay_loaded_conversions(model: nn.Module) -> tuple[RenameStep | ConvertSte
         if step is not None:
             steps.append(step)
     return tuple(steps) or None
+
+
+def family_key_mapping(
+    model: nn.Module, disk_keys: list[str], *, replay_loaded: bool = False
+) -> tuple[dict[str, str], dict[str, ConvertTargets]]:
+    """:func:`.conversion.build_key_mapping` under the family's hub renames and its declared conversions, or with
+    ``replay_loaded`` the ones an eager load of ``model`` recorded. The family is read through ``text_config``:
+    a composite config keeps ``model_type`` there, and a wrapper-only read would drop a whole module's renames."""
+    model_type = getattr(text_config(model.config), "model_type", "")
+    steps = replay_loaded_conversions(model) if replay_loaded else resolve_conversion_steps(model, model_type)
+    spec = find_moe_family_spec(model_type)
+    return build_key_mapping(model, disk_keys, steps=steps, hub_renames=spec.hub_to_module_renames() if spec else ())

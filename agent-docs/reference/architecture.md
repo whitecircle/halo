@@ -1,7 +1,7 @@
 # Architecture
 
-Halo extends HuggingFace — Transformers, Accelerate, TRL — with Expert, Context, Tensor, and
-Expert-Tensor parallelism plus alignment methods TRL does not ship (SMPO, Offline GRPO) and Async
+Halo extends HuggingFace — Transformers, Accelerate, TRL — with Expert, Context, Tensor,
+Expert-Tensor, and Pipeline parallelism plus alignment methods TRL does not ship (SMPO, Offline GRPO) and Async
 GRPO with Environments. Every trainer subclasses a TRL, Transformers, or SentenceTransformers trainer
 and adds `DistributedTrainerMixin`.
 
@@ -21,15 +21,15 @@ host has no usable Python ([Docker](../infrastructure/docker.md)).
 | Distributed | EP/CP/TP/ETP/PP setup, process groups, validation, FSDP2 sharding | `src/distributed/parallelism_config.py`, `src/distributed/fsdp.py` | [Parallelism](../parallelism/README.md) |
 | Data | Dataset loading, sharding, collators | `src/data/`, `src/data/collators/` | [Dataset Formats](../data/dataset-formats.md) |
 | Callbacks | Throughput, MoE load, router-bias balancing | `src/callbacks/`, `src/hardware.py` (GPU detection + peak-FLOPs table) | [Callbacks](../training-methods/callbacks.md) |
-| Diagnostics | Opt-in and off by default: py-spy capture, torch-profiler traces, CUDA memory snapshots, EP span timing, the weight-sync transport preflight | `src/diagnostics/` | [Debugging](debugging.md) |
-| Kernels | Grouped GEMM, the fused GLU and MoE permute kernels, chunked fp32 log-probs, Liger, Flash Attention and FlexAttention on sliding-window layers, low-precision quantization | `src/kernels/`, `src/models/attention/selection.py`, `src/models/attention/sdpa_flex_sliding.py` | [Grouped GEMM](../optimization/grouped-gemm.md) |
+| Diagnostics | Opt-in and off by default: py-spy capture, torch-profiler traces, CUDA memory snapshots, EP span timing | `src/diagnostics/` | [Debugging](debugging.md) |
+| Kernels | Grouped GEMM, the fused GLU and MoE permute kernels, chunked fp32 log-probs, Flash Attention and FlexAttention on sliding-window layers, low-precision quantization | `src/kernels/`, `src/models/attention/selection.py`, `src/models/attention/sdpa_flex_sliding.py` | [Grouped GEMM](../optimization/grouped-gemm.md) |
 | Checkpoints | The flat saver ladder and its rungs (PEFT and expert-LoRA adapters, PP, EP, CP, TP, FSDP2), weight resume, per-rank optimizer shards + LR scheduler, load-coverage gate — over the sharding-agnostic on-disk layer | `src/checkpoint/parallel/`, `src/checkpoint/`, `src/model_loading/checkpoint_coverage.py` | [Checkpoints](checkpoints.md) |
 | Optimizers | AdamWBF16 (SR), Muon, FlashAdamW | `src/optimizers/` | [BF16 Optimizer](../optimization/bf16-optimizer.md) |
 | Models | The sharding-agnostic model side: module-tree introspection, composite-config access, the context window, load-time patches (attention selection, GptOss sinks, Zaya), MoE router balancing, the head-path transform contract, and the sequence-classification heads transformers does not ship (`src/models/seq_cls_heads.py`, registered by an import in `src/model_loading/model_preparation.py`) | `src/models/` | [Adding a Model](../models/adding-a-model.md) |
-| Model loading | Sharding-agnostic model construction: the `Auto*` class and the coverage-verified `from_pretrained` call, the family patches and run policies every loaded model takes, the run dtype and the loaded-parameter cast, the processing class and its `model_max_length` pin, remote-code compatibility, the post-load buffer repair, Liger applied at load, and the lazy safetensors core the EP and PP loaders share. Above it, `parallel/` holds the parallelism-aware loads: the `load_distributed_model` dispatcher (`loader.py`), the refusals it runs before any weight (`load_rules.py`), the `ModelSource` every rank agrees on (`model_source.py`), the whole-model load core (`whole_model.py`), the TP and CP loaders (`tp.py`, `cp.py`), the frozen reference and teacher loads, and the PEFT and freeze-pattern setup | `src/model_loading/` | [Models](../models/README.md) |
+| Model loading | Sharding-agnostic model construction: the `Auto*` class and the coverage-verified `from_pretrained` call, the family patches and run policies every loaded model takes, the run dtype and the loaded-parameter cast, the processing class and its `model_max_length` pin, remote-code compatibility, the post-load buffer repair, Liger applied at load (`liger/`), and the lazy safetensors core the EP and PP loaders share. Above it, `parallel/` holds the parallelism-aware loads: the `load_distributed_model` dispatcher (`loader.py`), the refusals it runs before any weight (`load_rules.py`), the `ModelSource` every rank agrees on (`model_source.py`), the whole-model load core (`whole_model.py`), the TP and CP loaders (`tp.py`, `cp.py`), the frozen reference and teacher loads, and the PEFT and freeze-pattern setup | `src/model_loading/` | [Models](../models/README.md) |
 | Rewards | Config-parsed reward terms (`terms.py`), the sample and the views a scorer reads (`samples.py`), the scorers behind the external sources (`scorers/`: the contract, the generative judge — scoring or veto — the served reward model), the scorer catalog and the settlement of verdicts into one reward (`composer.py`), the TRL adapters (`trl_reward_functions.py`) and the rule-based graders (`graders/`: RLVR graders, answer matching) | `src/rewards/` | [Reward Terms](../training-methods/grpo/rewards/README.md) |
 | Environments | RL environment registry, Ray rollout actors, tools, sandboxes, eval runner | `src/environments/` | [Environments](../training-methods/async-grpo/environments/README.md) |
-| Weight sync | Trainer-to-rollout-engine weight sync: one client per engine (`VLLMWeightSyncClient`, `SGLangWeightSyncClient`) and the backend registry, the chunking (the chunk budget, the co-load groups, the snapshots on the sync device), and the NCCL transport — the rendezvous listener and the group-address policy, the bounded broadcast waits, the vLLM pynccl communicator and packed broadcast, the SGLang c10d weight-update group, the send-stream buffers | `src/weight_sync/` | [Rollout Servers](../infrastructure/rollout-servers.md) |
+| Weight sync | Trainer-to-rollout-engine weight sync: one client per engine (`VLLMWeightSyncClient`, `SGLangWeightSyncClient`) and the backend registry, the chunking (the chunk budget, the co-load groups, the snapshots on the sync device), and the NCCL transport — the rendezvous listener and the group-address policy, the bounded broadcast waits, the vLLM pynccl communicator and packed broadcast, the SGLang c10d weight-update group, the send-stream buffers; and the transport preflight (`transport_check.py`) | `src/weight_sync/` | [Rollout Servers](../infrastructure/rollout-servers.md) |
 | Entry-script plumbing | The `scripts/training/**` backbone (`parse_script_args`, `ScriptContext`, the run lifecycle and teardown), run setup (output dir, HF caches, seed, resume detection, the `run.log` tee), the policy load and window pins, script dataset loading; root/CLI logging and the `halo launch` / `halo run` surface | `src/entrypoints/`, `src/cli.py`, `src/log.py` | [Scripts](scripts-reference.md) |
 | Served endpoints | The OpenAI-compatible client every rollout, judge and batch-generation script talks through: endpoint defaults, key resolution and the loopback test (`endpoints.py`), the async client, one request with the upstream retry and the single-request helper that normalizes a reply (`openai_client.py`), the parallel resumable batch with its JSONL resume store (`batch_requests.py`), and the response record with its finish-reason contract (`response.py`) | `src/inference/` | [Rollout Servers](../infrastructure/rollout-servers.md) |
 
@@ -77,6 +77,28 @@ main-first ordering and the output-FS probe (`filesystem.py`), the per-node load
 (`load_coordination.py`) and DTensor access (`dtensor.py`); anything a single rank can compute alone
 lives in the leaves above. It imports only `src.env`, `src.log` and `src.hardware`, and the
 parallelism strategies in `src/distributed/` import it, never the reverse.
+
+## Layer table
+
+A unit imports only units of strictly lower rows; `tests/cpu/conventions/test_import_layering.py`
+enforces it and asserts this block equals its `_LAYERS`.
+
+```text
+L0  env
+L1  log
+L2  hardware, config_validation, subclass_registry, cli
+L3  runtime, kernels, inference, checkpoint.model_free
+L4  models, diagnostics, rewards
+L5  model_loading, optimizers, weight_sync
+L6  checkpoint.model_aware, data
+L7  distributed, environments
+L8  model_loading.parallel, checkpoint.parallel, callbacks, configs
+L9  trainers
+L10 entrypoints
+```
+
+`checkpoint.model_free` is the `src/checkpoint/` modules that read no model (`format`, `atomic`,
+`reading`, `model_card`); the rest of `src/checkpoint/` outside `parallel/` is `checkpoint.model_aware`.
 
 ## Trainers
 

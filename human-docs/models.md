@@ -27,7 +27,7 @@ tuned recipe and GPU-validated coverage. Fifteen of them are MoE.
 | Any other HF causal LM | Llama, Mistral, Phi, … | dense | FSDP2 by default; TP needs a `tp_plan` |
 
 The last column is the one thing most likely to surprise you, not the full
-story. The modes each family supports (EP, CP, TP, ETP and their combinations,
+story. The modes each family supports (EP, CP, TP, ETP, PP and their combinations,
 LoRA, rollout weight sync) are in the [Supported matrix](supported-matrix.md).
 When a recipe disagrees with the matrix, the matrix wins.
 

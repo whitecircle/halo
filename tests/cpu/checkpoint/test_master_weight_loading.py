@@ -32,8 +32,7 @@ import src.model_loading.parallel.whole_model as whole_model
 from src.distributed.context_parallel.ulysses_model import UlyssesModel
 from src.distributed.expert_parallel.config import EPConfig
 from src.distributed.expert_parallel.expert_fuser import ExpertFuser, FusionTask
-from src.distributed.expert_parallel.lazy_plan import family_key_mapping
-from src.model_loading.lazy_safetensors.conversion_selection import replay_loaded_conversions
+from src.model_loading.lazy_safetensors.conversion_selection import family_key_mapping, replay_loaded_conversions
 from src.model_loading.parallel.fp32_masters import fp32_master_param_keys
 from src.model_loading.parallel.model_source import ModelSource
 from src.runtime import consensus, load_coordination

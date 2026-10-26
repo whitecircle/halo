@@ -19,11 +19,12 @@ from src.checkpoint.reading import StreamingCheckpointReader, resolve_checkpoint
 from src.distributed.expert_parallel.config import EPConfig
 from src.distributed.expert_parallel.expert_fuser import ExpertFuser
 from src.distributed.expert_parallel.families.roster import MOE_LAYER_MAP
-from src.distributed.expert_parallel.lazy_plan import ExpertKeyLayout, WeightPlanner, loaded_key_mapping
+from src.distributed.expert_parallel.lazy_plan import ExpertKeyLayout, WeightPlanner
 from src.distributed.expert_parallel.parallelize import ep_claimed_blocks
 from src.distributed.mesh import MeshDim
 from src.log import KEY_PREVIEW_COUNT
 from src.model_loading.dtype import is_packed_4bit_parameter, reject_fp8_tensor
+from src.model_loading.lazy_safetensors.conversion_selection import family_key_mapping
 from src.model_loading.lazy_safetensors.materialization import (
     assign_tensor_to_model,
     materialize_weight_plan,
@@ -170,7 +171,7 @@ def restore_fp32_master_parameters(
     layout = resolve_checkpoint_weights(local_dir)
     disk_keys = layout.key_set()
     weight_map = {key: layout.legacy_bin for key in disk_keys} if layout.legacy_bin is not None else layout.weight_map
-    disk_to_model, fanout = loaded_key_mapping(model, list(weight_map))
+    disk_to_model, fanout = family_key_mapping(model, list(weight_map), replay_loaded=True)
     plans = WeightPlanner(None).build(weight_map, disk_to_model, set(state), fanout=fanout)
     plans = [plan for plan in plans if plan.model_key in masters]
 

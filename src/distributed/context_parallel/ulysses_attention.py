@@ -16,8 +16,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 from src.distributed.context_parallel.all_to_all import heads_to_sequence, sequence_to_heads
-from src.hardware import is_blackwell_gpu, is_hopper_gpu
-from src.models.attention.selection import flash_kernel, is_fa4_backward_nan_prone
+from src.models.attention.selection import flash_kernel, is_fa4_backward_nan_prone, preferred_flash_impl
 
 # The hub flash-attn2 build the kernel probe falls back to; also an accepted attn_implementation.
 HUB_FLASH_ATTN2_KERNEL = "kernels-community/flash-attn2"
@@ -46,20 +45,15 @@ def _adapt_to_fa2_contract(func):
 
 @functools.lru_cache(maxsize=2)
 def _flash_attn_func(allow_fa4: bool = True):
-    """``flash_attn_func``: FA3 on Hopper, FA4 on Blackwell (unless ``allow_fa4`` is False), else FA2, then the
-    hub kernel. This probe, not ``_attn_implementation``, picks a CP run's kernel; the arch probes come first
-    because both images also ship FA2."""
+    """``flash_attn_func`` of :func:`preferred_flash_impl`, else FA2, then the hub kernel. This probe, not
+    ``_attn_implementation``, picks a CP run's kernel; the arch's own build comes first because both images
+    also ship FA2."""
     # Hopper (sm_90) cannot take the FA2 path: the image stubs out the split-K kernels that FA2's
     # non-varlen forward (the one CP calls) selects by occupancy heuristic, so it would raise.
-    if is_hopper_gpu():
+    preferred = preferred_flash_impl(allow_fa4=allow_fa4)
+    if preferred != "flash_attention_2":
         with contextlib.suppress(ImportError):
-            return _adapt_to_fa2_contract(flash_kernel("flash_attention_3", varlen=False))
-
-    # FA4 only on data-center Blackwell (SM100+): its CuTe kernels do not run elsewhere. It is also
-    # the backend the model was labelled with and whose kernels warm_fa4_kernels pre-compiled.
-    if allow_fa4 and is_blackwell_gpu():
-        with contextlib.suppress(ImportError):
-            return _adapt_to_fa2_contract(flash_kernel("flash_attention_4", varlen=False))
+            return _adapt_to_fa2_contract(flash_kernel(preferred, varlen=False))
 
     with contextlib.suppress(ImportError):
         return flash_kernel("flash_attention_2", varlen=False)

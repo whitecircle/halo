@@ -17,7 +17,7 @@ from unittest.mock import patch
 
 import pytest
 import torch
-from transformers import PretrainedConfig
+from transformers import PretrainedConfig, Qwen3Config
 from transformers.models.auto.configuration_auto import CONFIG_MAPPING
 
 from src import hardware
@@ -25,6 +25,7 @@ from src.distributed.context_parallel import ulysses_attention as cp_base_layer
 from src.model_loading.parallel import loader as model_loading
 from src.models.attention import selection as attention_mod
 from src.models.attention.gpt_oss_sinks import SinksPolicy
+from tests.common.parallelism import make_parallelism_config
 
 # Every ``model_type`` transformers actually registers for an FA4-NaN attention stack. Listed
 # literally, NOT splatted from the family specs' ``model_types``: those declare which MoE block a
@@ -153,10 +154,50 @@ def test_context_parallelism_resolves_fa4_over_the_same_capability_range(capabil
         cp_base_layer._flash_attn_func.cache_clear()
 
 
-def test_the_loader_reads_the_shared_blackwell_predicate():
-    """The CP flex→flash substitution in the loader is the third arch-keyed site; a behavioural
-    probe there would need a full ``load_distributed_model``, so pin that it imports the seam."""
-    assert model_loading.is_blackwell_gpu is hardware.is_blackwell_gpu
+@pytest.mark.parametrize(
+    ("capability", "allow_fa4", "preferred"),
+    [
+        ((9, 0), True, "flash_attention_3"),
+        ((10, 0), True, "flash_attention_4"),
+        ((11, 0), True, "flash_attention_4"),
+        ((10, 0), False, "flash_attention_2"),
+        ((8, 0), True, "flash_attention_2"),
+    ],
+)
+def test_the_preferred_flash_backend_follows_the_architecture(capability, allow_fa4, preferred):
+    with (
+        patch.object(hardware.torch.cuda, "is_available", lambda: True),
+        patch.object(hardware.torch.cuda, "get_device_capability", lambda *a, **k: capability),
+    ):
+        assert attention_mod.preferred_flash_impl(allow_fa4=allow_fa4) == preferred
+
+
+@pytest.mark.parametrize(
+    ("hopper", "nan_prone", "label"), [(True, False, "flash_attention_3"), (False, True, "flash_attention_2")]
+)
+def test_the_cp_flex_fallback_labels_the_kernel_ulysses_runs(hopper, nan_prone, label):
+    """The loader's CP flex→flash label and ``_flash_attn_func`` read one preference: FA3 on Hopper, and FA2
+    for a family whose FA4 backward NaNs on Blackwell, where Ulysses vetoes FA4."""
+    config = Qwen3Config(
+        num_hidden_layers=1, hidden_size=64, intermediate_size=128, num_attention_heads=4, num_key_value_heads=2
+    )
+    pc = make_parallelism_config(world_size=2, gpus_per_node=2, cp_size=2)
+    with (
+        patch.object(attention_mod, "is_hopper_gpu", lambda: hopper),
+        patch.object(attention_mod, "is_blackwell_gpu", lambda: not hopper),
+        patch.object(model_loading, "is_fa4_backward_nan_prone", lambda model_config: nan_prone),
+        patch.object(model_loading, "logger"),
+    ):
+        resolved = model_loading._resolve_run_attention(
+            config,
+            pc,
+            "flex_attention",
+            torch.bfloat16,
+            sinks_policy=SinksPolicy.NEUTRALIZED,
+            reset_sinks=True,
+            init_from_scratch=False,
+        )
+    assert resolved == label
 
 
 def test_detect_attn_impl_on_cpu_host_is_silent_fa2():

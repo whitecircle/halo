@@ -140,10 +140,10 @@ If top-k is not detected the sparsity factor stays 1.0 and S-MFU silently collap
 Compare configs with tok/s/GPU and achieved TFLOPS; reach for S-MFU only when you need a roofline fraction
 (see [Why MoE utilization reads low](#why-moe-utilization-reads-low)).
 
-**Cluster throughput** = `per_gpu_tps × dp_actual × cp_size`, where
-`dp_actual = world_size / max(tp_size, cp_size, expert_tp_size)` (`ParallelismConfig.data_parallel_size`). `ep_size` is
-excluded (EP ⊥ DP, each EP rank processes a distinct batch); `expert_tp_size` is included (its ranks
-share one input).
+**Cluster throughput** = `per_gpu_tps × dp_actual × cp_size`, where `dp_actual` is
+`ParallelismConfig.data_parallel_size` ([Stacking the dimensions](../parallelism/README.md#stacking-the-dimensions)).
+`ep_size` does not shrink it (EP ⊥ DP, each EP rank processes a distinct batch); `expert_tp_size`
+does (its ranks share one input).
 
 ## GPT-OSS-20B (8× B300)
 

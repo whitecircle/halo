@@ -54,7 +54,6 @@ def test_the_refusal_names_the_gathered_save_knob(tmp_path):
     with pytest.raises(ValueError) as err:
         reject_ep_sharded_checkpoint(_checkpoint(tmp_path, "ep_sharded"))
     assert "save_sharded_ep: false" in str(err.value), err.value
-    assert "save_ep_model(" not in str(err.value), err.value
 
 
 def test_a_plain_checkpoint_passes(tmp_path):

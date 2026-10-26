@@ -1,5 +1,5 @@
-"""The refusals a load runs before it reads a weight: the run against its launcher and dtype, then the
-model's ``config.json`` against the parallelism shape.
+"""The refusals a load runs before it reads a weight: the run against its launcher and dtype, the model's
+``config.json`` against the parallelism shape, then the quantized, from-scratch and low-precision options.
 
 ``ParallelismConfig`` is model-blind, so these rules are otherwise reached only minutes and several
 collectives into a job (expert assignment after the EP groups exist, the first DeepEP dispatch).
@@ -186,3 +186,46 @@ def reject_unsupported_model(
             f"experts-distributed in plain bf16 — AdamWBF16's stochastic rounding is the supported "
             f"precision floor there."
         )
+
+
+def reject_unsupported_load(
+    pc: ParallelismConfig, dtype: torch.dtype, *, quantization_config, init_from_scratch: bool, wraps_experts: bool
+) -> None:
+    """Refuse a QLoRA, from-scratch or low-precision load ``pc`` and ``dtype`` cannot take, before any weight read."""
+    if quantization_config is not None and (pc.has_ep_group or pc.is_tp_mode or pc.is_pp_mode or wraps_experts):
+        # Also gated on MoE: a dense QLoRA run routing to DDP (or to CP, which keeps Params4bit) must pass.
+        raise ValueError(
+            "Quantized loading (QLoRA / bitsandbytes) is not supported with EP / TP / PP "
+            "or grouped-GEMM MoE loaders: they materialize plain de-quantized weights, so "
+            "bitsandbytes Params4bit are lost and PEFT's 4-bit adapter dispatch fails (PP "
+            "rejects PEFT outright). For QLoRA use plain data parallelism (on a MoE model with "
+            "`use_grouped_gemm: false`, under torchrun and accelerate launch alike) or CP on a "
+            "dense model, which preserves quantization. Under EP/TP use plain LoRA (no "
+            "quantization)."
+        )
+    if init_from_scratch:
+        # Identical per-rank seeds give consistent FSDP2 shards; EP/TP/CP would need a sharded random-init.
+        if pc.has_ep_group or pc.is_tp_mode or pc.is_cp_mode or pc.is_expert_tp_mode or pc.is_pp_mode:
+            raise NotImplementedError(
+                "init_from_scratch is currently supported only for dense data-parallel / "
+                "FSDP2 training (no EP/TP/CP/ETP/PP). PP additionally has nothing to be "
+                "stage-aware about without a checkpoint, so every rank would build the whole "
+                "model. To train from scratch WITH parallelism, materialize the random-init "
+                "checkpoint once outside the distributed job (AutoModelForCausalLM.from_config "
+                "+ save_pretrained), point model_name_or_path at it, and drop init_from_scratch "
+                "— see 'Large or MoE models' in agent-docs/training-methods/pretraining.md."
+            )
+        if quantization_config is not None:
+            raise ValueError("init_from_scratch is incompatible with quantization (QLoRA loads pretrained weights).")
+    if pc.lowp.enabled:
+        if quantization_config is not None:
+            raise ValueError(
+                "lowp_precision (low-precision compute) is incompatible with a quantization_config "
+                "(QLoRA/bitsandbytes): the weights are already quantized and not plain nn.Linear. "
+                "Use one or the other."
+            )
+        if dtype == torch.float16:
+            raise ValueError(
+                "lowp_precision requires bf16/fp32 master weights, but dtype=float16. "
+                "Set bf16 (the toolkit default) — low precision affects only the GEMM operands."
+            )

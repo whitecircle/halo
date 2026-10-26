@@ -72,35 +72,35 @@ def flash_kernel(attn_impl: str, *, varlen: bool = True):
     raise ImportError(f"no installed {attn_impl} build provides {name}")
 
 
+def preferred_flash_impl(*, allow_fa4: bool = True) -> str:
+    """The flash backend this GPU's architecture runs: FA4 on Blackwell (unless ``allow_fa4`` is False), FA3
+    on Hopper, else FA2. Whether its build imports is each caller's own probe."""
+    if allow_fa4 and is_blackwell_gpu():
+        return "flash_attention_4"
+    if is_hopper_gpu():
+        return "flash_attention_3"
+    return "flash_attention_2"
+
+
 def _detect_attention_impl() -> str:
-    """FA4 on Blackwell, FA3 on Hopper, else FA2. A broken (not absent) build warns before degrading,
-    since nothing else would report the slower kernel."""
+    """:func:`preferred_flash_impl` when its build imports, else FA2. A broken (not absent) build warns
+    before degrading, since nothing else would report the slower kernel."""
     if not torch.cuda.is_available():
         return "flash_attention_2"  # CPU host; the choice is re-validated against the model downstream
-    if is_blackwell_gpu():
+    preferred = preferred_flash_impl()
+    if preferred != "flash_attention_2":
+        build = _FLASH_KERNEL_MODULES[preferred][-1]
         try:
-            flash_kernel("flash_attention_4")
-            logger.info("Using FlashAttention-4 (Blackwell GPU detected, flash_attn.cute installed)")
-            return "flash_attention_4"
+            flash_kernel(preferred)
+            logger.info(f"Using {preferred} ({build} installed)")
+            return preferred
         except ImportError:
-            logger.info("Blackwell GPU detected but FA4 (flash_attn.cute) not installed, using FlashAttention-2")
+            logger.info(f"{build} not installed, using FlashAttention-2")
         except Exception as e:
             logger.warning(
-                f"Blackwell GPU detected and FA4 (flash_attn.cute) IS present but unusable "
-                f"({type(e).__name__}: {e}); falling back to FlashAttention-2, which is correct but "
-                f"2-3x slower on attention. Repair the flash_attn.cute install to regain FA4."
-            )
-    elif is_hopper_gpu():
-        try:
-            flash_kernel("flash_attention_3")
-            logger.info("Using FlashAttention-3 (Hopper GPU detected, flash_attn_3 installed)")
-            return "flash_attention_3"
-        except ImportError:
-            logger.info("Hopper GPU detected but flash_attn_3 not installed, using FlashAttention-2")
-        except Exception as e:
-            logger.warning(
-                f"Hopper GPU detected and FA3 (flash_attn_3) IS present but unusable "
-                f"({type(e).__name__}: {e}); falling back to FlashAttention-2."
+                f"{build} IS present but unusable ({type(e).__name__}: {e}); falling back to "
+                f"FlashAttention-2, which is correct but slower on attention. Repair the {build} install "
+                f"to regain {preferred}."
             )
     logger.info("Using FlashAttention-2")
     return "flash_attention_2"

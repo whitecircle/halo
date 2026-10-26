@@ -187,9 +187,9 @@ manifest.
 
     The same sweep holds each reference to the binding it means. An import names the module that
     defines what it takes: a module that only re-binds the name by an import of its own is a second
-    path, which would keep a moved symbol reachable through its old home (one in a sensitive path waits
-    in `_SENSITIVE_REEXPORT_IMPORTS`). An attribute read through a module object only has to exist, since
-    the binding a module imports is what a patch replaces and restores through it. A patch of a module's
+    path, which would keep a moved symbol reachable through its old home. An attribute read through a
+    module object only has to exist, since the binding a module imports is what a patch replaces and
+    restores through it. A patch of a module's
     own top-level name, a `module.name = fake` assignment included, must target a name some function reads
     when it runs, one of that module or, outside the tests, one reading it through the module object;
     patching a name the module only binds intercepts nothing, so the test would pass whatever the code does.
@@ -216,10 +216,10 @@ manifest.
   table (`_LAYERS`: a unit imports only units of lower rows, `cli` imports nothing from the package, the
   tool-safe units reach no process group, parallelism or rollout sync, the member orders inside
   `src/distributed`, one lazy `deep_ep` importer, package-internal modules, no module cycle) over today's
-  tree, each module that has not moved yet placed where it lands through `_PENDING_MOVES`. A break outside
-  `_KNOWN_LAYER_BREAKS` (the ones today's tree still makes, reported as one warning) fails, and so do a
-  module the table cannot place and an entry of either table that is out of date. `TYPE_CHECKING` imports
-  are exempt.
+  tree, each module that has not moved yet placed where it lands through `_PENDING_MOVES`, and asserts
+  `_LAYERS` equals the table [Architecture](../reference/architecture.md#layer-table) renders. Any break
+  fails, and so do a module the table cannot place and a pending move that has landed. `TYPE_CHECKING`
+  imports are exempt.
 
 - **Convention tests also run on the hosted runner.** The `conventions` job in `.github/workflows/lint.yml`
   runs the files it lists on the standard library and pytest alone, so such a test reads the source
@@ -700,7 +700,7 @@ base one or raised, since a perturbation that raises proves nothing about what t
 artifacts in each tree with that tree's own savers and compares them file by file: the file set and
 permission bits, each safetensors header and tensor (dtype, shape and a digest of its bytes), each JSON file
 by value, each torch file by key and tensor, any other file by its bytes. It fails on any delta, and on any
-case outside `KNOWN_RAISING` that raises. `FAMILIES="gpt_oss qwen3_moe"` limits the run to those tiny
+case that raises. `FAMILIES="gpt_oss qwen3_moe"` limits the run to those tiny
 families. Both producers run under one string hash seed, since a set's order reaches `adapter_config.json`.
 
 The cases save a tiny model of every family (the dense roster, every EP family and its multimodal

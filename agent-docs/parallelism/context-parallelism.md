@@ -253,7 +253,7 @@ not activations) — that is the case CP exists for.
 | `packing`, `padding_free` | rejected — the Ulysses path runs a dense causal kernel with no per-document boundaries | `src/data/collators/factory.py`; `_reject_cp_incompatible_collator` re-checks a hand-built collator |
 | left-padded batches | rejected on **every** forward (not cached — a prompt-left-padding collator pads only its ragged batches) | `context_parallel/ulysses_model.py` |
 | `attn_implementation` | must resolve to FA2/FA3/FA4 or a community flash kernel; `flex_attention` is auto-switched with a warning, `eager`/`sdpa` rejected — except for a wrapper declaring `REQUIRES_FLASH_ATTN_LABEL = False` (Bailing), which runs on the `sdpa` label its model build forces | `SUPPORTED_ATTN_IMPLEMENTATIONS`, `reject_unsupported_ulysses_model` |
-| `init_from_scratch` | rejected — no sharded random init | `model_loading/parallel/loader.py` |
+| `init_from_scratch` | rejected — no sharded random init | `model_loading/parallel/load_rules.py` |
 | `reset_sinks: false` on GPT-OSS | rejected at model load — the CP attention kernels drop the sink column, so live sinks would misnormalize the softmax in every layer | `reject_unsupported_model`, re-checked in `GptOssUlyssesAttention` |
 | `label_smoothing_factor > 0`, `loss_type: dft` | rejected — the Trainer pops `labels` and pairs full labels with this rank's chunk logits | `reject_cp_trainer_args` |
 | `compute_metrics`, `preprocess_logits_for_metrics` | rejected whenever set, not gated on `eval_strategy` (a direct `evaluate()`/`predict()` reaches the same misaligned chunk-logits path) — eval under CP is loss-only | same |
@@ -264,7 +264,7 @@ not activations) — that is the case CP exists for.
 | `gradient_checkpointing` | supported; `use_reentrant` is forced to `True` (warned when the config sets `false`) | `mixins/base.py` |
 | `use_liger_kernel` | supported; `cross_entropy` and `fused_linear_cross_entropy` are forced off (warned when explicitly enabled) | `src/model_loading/liger/dispatch.py` |
 | `use_peft` / LoRA | supported for SFT and SMPO — CP leaves attention unsharded, so adapters stay replicated; offline GRPO rejects adapters | `_reject_cp_explicit_options` (offline GRPO) |
-| QLoRA (`load_in_4bit`) | supported for SFT and SMPO on a **dense** model — CP keeps the standard loader and preserves `Params4bit`. On an MoE the grouped-GEMM loader takes over and rejects a quantized base (`use_grouped_gemm` is on by default); offline GRPO rejects adapters | `model_loading/parallel/loader.py`, `_reject_cp_explicit_options` |
+| QLoRA (`load_in_4bit`) | supported for SFT and SMPO on a **dense** model — CP keeps the standard loader and preserves `Params4bit`. On an MoE the grouped-GEMM loader takes over and rejects a quantized base (`use_grouped_gemm` is on by default); offline GRPO rejects adapters | `model_loading/parallel/load_rules.py`, `_reject_cp_explicit_options` |
 | `use_hsdp`, `fsdp_reshard_after_forward` | supported — CP is one of HSDP's two accepted paths (pure DP, CP) and one of ZeRO-3's EP-free shapes | `_reject_hsdp`, `_reject_fsdp_settings` |
 | `torch_compile` | not gated, and no measured benefit — the all-to-all breaks the graph at every attention layer | — |
 | `save_sharded_ep` | rejected on a CP run — per-rank shards carry `.original_attention.` keys the merge script cannot remap | `reject_unmergeable_ep_sharded_save` |

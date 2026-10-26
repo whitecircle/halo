@@ -19,9 +19,9 @@ from src.distributed.expert_parallel.expert_fuser import ExpertFuser  # noqa: E4
 from src.distributed.expert_parallel.lazy_plan import (  # noqa: E402
     ExpertKeyLayout,
     WeightPlanner,
-    family_key_mapping,
     is_lazy_loadable,
 )
+from src.model_loading.lazy_safetensors.conversion_selection import family_key_mapping  # noqa: E402
 from src.model_loading.lazy_safetensors.materialization import (  # noqa: E402
     SafetensorsWeightLoader,
     WeightAction,

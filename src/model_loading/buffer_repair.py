@@ -17,6 +17,7 @@ from src.hardware import current_device
 from src.log import warn_once
 from src.models.attention.layout import resolve_head_dim
 from src.models.config_access import text_config
+from src.models.module_tree import embedding_module
 
 logger = logging.getLogger(__name__)
 
@@ -271,10 +272,8 @@ def _retie_shared_weights(model: nn.Module) -> None:
     """
     if not hasattr(model, "tie_weights"):
         return
-    get_out = getattr(model, "get_output_embeddings", None)
-    get_in = getattr(model, "get_input_embeddings", None)
-    out_w = getattr(get_out() if callable(get_out) else None, "weight", None)
-    in_w = getattr(get_in() if callable(get_in) else None, "weight", None)
+    out_w = getattr(embedding_module(model, "output"), "weight", None)
+    in_w = getattr(embedding_module(model, "input"), "weight", None)
     if (
         out_w is not None
         and in_w is not None

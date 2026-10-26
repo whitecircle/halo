@@ -91,7 +91,7 @@ liger_kernel_config:
 `halo launch <method> <config>` (`src/cli.py`) resolves the method to a script under
 `scripts/training/` and picks the launcher: `accelerate launch` whenever `-a launcher-configs/accelerate/<config>.yaml`
 is given (there `-n N` becomes `--num_processes`), else `torchrun` when `-n N` sets more than one
-process (required for EP/CP/TP/ETP), else plain Python. A plain-Python run trains on the one GPU it binds however many are visible: `init_training_script` pins `n_gpu` to 1, so HF never wraps the model in `nn.DataParallel` (whose loss and gradients scale with the GPU count). Every flag the launcher does not own reaches the trainer, so overrides follow the config directly (`halo launch sft cfg.yaml -n 8 --learning_rate=1e-5`); a standalone `--` is needed only before a flag that collides with the launcher's own (`--help`, `--port`, `--dry-run`, ...).
+process (required for EP/CP/TP/ETP/PP), else plain Python. A plain-Python run trains on the one GPU it binds however many are visible: `init_training_script` pins `n_gpu` to 1, so HF never wraps the model in `nn.DataParallel` (whose loss and gradients scale with the GPU count). Every flag the launcher does not own reaches the trainer, so overrides follow the config directly (`halo launch sft cfg.yaml -n 8 --learning_rate=1e-5`); a standalone `--` is needed only before a flag that collides with the launcher's own (`--help`, `--port`, `--dry-run`, ...).
 `--list` prints the method names, `--dry-run` prints the command, `-p <port>` sets the rendezvous port
 so concurrent launches do not collide (it raises on a single-process launch). A missing config path
 fails before any process starts.
@@ -212,7 +212,7 @@ AdamWBF16 replaces `adamw_torch_fused`/`adamw_torch` automatically when `bf16: t
 
 It is **not** a throughput win: the default simulated fake-quant path re-quantizes operands every step, and the native DeepGEMM kernel (`HALO_DEEPGEMM_NATIVE=1`) is also net-slower, so `bf16` stays the production default. The real win is inference memory — convert the master with `scripts/after_training/quantize_to_lowp.py`. See [Low-Precision MoE](../optimization/low-precision-moe-kernels.md).
 
-It is also **SFT-only**: every other training script builds its `ParallelismConfig` with `allow_low_precision=False`, which rejects a non-`bf16` `lowp_precision` and any stray `lowp_apply_*` / `lowp_keep_*` knob rather than parsing it and doing nothing.
+It is also **SFT-only**: `parallelism_config_from_args` reads the trainer's `SUPPORTS_LOWP_PRECISION` (only `DistributedSFTTrainer` sets it) and otherwise rejects a non-`bf16` `lowp_precision` and any stray `lowp_apply_*` / `lowp_keep_*` knob rather than parsing it and doing nothing.
 
 ## Parallelism parameters
 
@@ -230,7 +230,7 @@ CLI flags under `torchrun` (also settable in YAML):
 | `--ep_lazy_loading` | Lazy safetensors loading for EP paths (default `true`); each rank reads only its expert slice |
 | `--max_concurrent_loading` | Ranks loading per node. Left unset it adapts to the node — `min(4, max(1, local_world_size // 2))`, so 4 on an 8-GPU node and 2 on a 4-GPU tray; any explicit value is used verbatim (`1` for CPU-RAM-constrained hosts, `0` for all-parallel) |
 
-EP is orthogonal to data parallelism; only TP, CP, and ETP reduce it — `data_parallel_size = world_size / max(tp_size, cp_size, expert_tp_size)`. See [Parallelism](../parallelism/README.md) for supported and rejected combinations.
+EP is orthogonal to data parallelism; PP, TP, CP, and ETP reduce it ([Stacking the dimensions](../parallelism/README.md#stacking-the-dimensions)). See [Parallelism](../parallelism/README.md) for supported and rejected combinations.
 
 ## Environment variables
 

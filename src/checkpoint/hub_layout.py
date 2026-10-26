@@ -152,7 +152,8 @@ def reversed_export_transforms(conversions: list) -> tuple[list[WeightRenaming],
 @dataclass(frozen=True)
 class CheckpointNamespace:
     """How a model's checkpoint keys reach its live names: the family's whole conversion mapping, as
-    ``from_pretrained`` replays it, and the base-model prefix a key may carry or lack.
+    ``from_pretrained`` replays it, the base-model prefix a key may carry or lack, and the
+    :func:`export_conversions` a save inverts.
 
     transformers resolves the mapping off a whole model's module tree, scoping each sub-model's entries
     by its path, so a module holding only part of a model (a pipeline stage, named stage-locally) takes
@@ -162,12 +163,14 @@ class CheckpointNamespace:
 
     conversions: tuple[WeightRenaming | WeightConverter, ...] = ()
     base_model_prefix: str | None = None
+    export_conversions: tuple[WeightRenaming | WeightConverter, ...] = ()
 
     @classmethod
     def of(cls, model: torch.nn.Module) -> CheckpointNamespace:
         return cls(
             conversions=tuple(_family_conversions(model, add_legacy=True)),
             base_model_prefix=getattr(model, "base_model_prefix", None) or None,
+            export_conversions=tuple(export_conversions(model)),
         )
 
 

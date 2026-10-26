@@ -10,20 +10,15 @@ mode below only when the model or the sequence does not fit.
 | Shard each expert's FFN | ETP | `--expert_tensor_parallel_size=N` |
 | Shard dense weights (attention and FFN) | TP | `--tensor_parallel_size=N` |
 | Split a long sequence across GPUs | CP | `--context_parallel_size=N` |
+| Split a model's layers across nodes | PP | `--pipeline_parallel_size=N` |
 | Cut cross-node FSDP traffic (DP or CP) | HSDP | `--use_hsdp=true` |
 
 EP combines with one of TP, CP or ETP (EP+TP for MoE plus attention sharding,
-EP+CP for MoE plus long context).
+EP+CP for MoE plus long context). PP combines with EP or ETP inside each stage.
 
-The data-parallel size is what is left:
-
-```text
-data_parallel_size = world_size / max(cp_size, tp_size, expert_tp_size)
-```
-
-EP does not reduce it, because an EP rank is also a data-parallel rank. The
-divisor is a max, not a product, because no two of CP, TP and ETP may exceed 1
-in the same run.
+The data-parallel size is what PP, CP, TP and ETP leave; EP does not reduce it,
+because an EP rank is also a data-parallel rank
+([formula](../agent-docs/parallelism/README.md#stacking-the-dimensions) ↗).
 
 ## How EP groups work
 
@@ -46,7 +41,7 @@ loads; a few (LoRA with TP, CP head counts) fail at model load or trainer
 construction.
 
 - **Allowed combinations.** EP pairs with at most one of TP, CP or ETP. TP+CP,
-  TP+ETP, ETP+CP and any three axes are rejected.
+  TP+ETP, ETP+CP, PP+TP, PP+CP and any three axes are rejected.
 - **Within one NVLink domain, EP fills the domain or uses `ep_size=2`.** Sizes
   in between, such as EP=4 on 8 GPUs, are rejected: the MoE routing collectives
   race FSDP2's and the run faults or deadlocks. For a 4-way expert split on 8
@@ -114,4 +109,5 @@ Deep dives:
 [Context](../agent-docs/parallelism/context-parallelism.md) ↗ ·
 [Tensor](../agent-docs/parallelism/tensor-parallelism.md) ↗ ·
 [Expert-Tensor](../agent-docs/parallelism/expert-tensor-parallelism.md) ↗ ·
+[Pipeline](../agent-docs/parallelism/pipeline-parallelism.md) ↗ ·
 [Multi-Node](../agent-docs/parallelism/multi-node.md) ↗.

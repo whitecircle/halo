@@ -19,15 +19,15 @@ Why tiling attention is the standard fix for the model's most memory-bound op: [
 
 GPU support: A100 (SM80) = FA2/flex/sdpa. H100/H200 (SM90) = FA2/FA3/flex/sdpa, no FA4. B200 (SM100) / B300 (SM103) = FA2/FA4/flex/sdpa, no FA3.
 
-The CP column above is what `reject_unsupported_ulysses_model` (`src/distributed/context_parallel/model_rules.py`) accepts as a config label; it is not which kernel runs. CP's attention call goes through `_flash_attn_func` (`src/distributed/context_parallel/ulysses_attention.py`), which ignores that label and probes in a fixed order: FA3 on Hopper (SM90), FA4 on Blackwell (SM100+), then FA2, then the `kernels-community/flash-attn2` kernel.
+The CP column above is what `reject_unsupported_ulysses_model` (`src/distributed/context_parallel/model_rules.py`) accepts as a config label; it is not which kernel runs. CP's attention call goes through `_flash_attn_func` (`src/distributed/context_parallel/ulysses_attention.py`), which ignores that label and probes in a fixed order: the architecture's `preferred_flash_impl` (`src/models/attention/selection.py`: FA3 on Hopper (SM90), FA4 on Blackwell (SM100+)), then FA2, then the `kernels-community/flash-attn2` kernel.
 
 Both architecture probes precede FA2 because every image ships FA2; an FA2 probe placed first would resolve on every device and leave the arch-matched kernel unreachable.
 
 The one exception is model-level: `_flash_attn_func` takes an `allow_fa4` veto, resolved per wrapper from
 `is_fa4_backward_nan_prone`, so the FA4-backward-NaN families (Qwen3.5/3.6/Qwen3-Next, GLM-4 MoE Lite)
 run FA2 on Blackwell under CP. The probe overrides the configured label, so that veto is their only
-protection. Its device predicates are the same `is_hopper_gpu` / `is_blackwell_gpu` the automatic detection
-uses, so CP and the config-level choice can never disagree about a device.
+protection. `preferred_flash_impl` is also what the automatic detection and the loader's CP label read, so CP
+and the config-level choice can never disagree about a device.
 
 The order matters because CP calls the **non-varlen** forward, the path FA2 serves worst on both architectures. On Hopper the image stubs out the split-K kernels FA2 selects there by occupancy heuristic.
 
@@ -35,13 +35,13 @@ On B300, CP on FA4 measures 1.2–3× FA2 at ≥32k tokens with equal peak memor
 
 ## Automatic detection
 
-`_detect_attention_impl` (`src/models/attention/selection.py`) reads only the compute-capability major:
+`_detect_attention_impl` (`src/models/attention/selection.py`) takes `preferred_flash_impl`, which reads only the compute-capability major:
 
 1. `major >= 10` (Blackwell SM100/SM103): `flash_attention_4` if `flash_attn.cute` imports, else `flash_attention_2`. A build that is present but unusable warns before degrading.
 2. `major == 9` (Hopper): `flash_attention_3` if `flash_attn_interface` (else `flash_attn_3`) provides the varlen kernel, else `flash_attention_2`.
 3. Anything older, or any exception: `flash_attention_2`.
 
-The detection above, the sink probe and the FA4 warm-up resolve kernels through `flash_kernel(attn_impl, varlen=...)`: one module table in transformers' dispatch order (FA3 through `flash_attn_interface` first), FA4 imported only after `ensure_fa4_kernel_cache_env`. A build missing the entry point reads as absent. Context parallelism keeps its own kernel ladder (with a hub fallback), and the trainable-sink rescale imports `flash_attn.cute` directly.
+The detection above, the sink probe and the FA4 warm-up resolve kernels through `flash_kernel(attn_impl, varlen=...)`: one module table in transformers' dispatch order (FA3 through `flash_attn_interface` first), FA4 imported only after `ensure_fa4_kernel_cache_env`. A build missing the entry point reads as absent. Context parallelism resolves its kernel through `flash_kernel` too, in `preferred_flash_impl`'s order under its FA4 veto, then FA2 and the CP-private hub fallback ([above](#supported-backends)); the trainable-sink rescale imports `flash_attn.cute` directly.
 
 The `major >= 10` test also admits consumer Blackwell (SM 12.x, RTX 50-series), where `flash_attn.cute`'s
 SM100 kernels do not run. That is not a supported target — the images build for B200/B300 and H100/H200.
@@ -139,7 +139,7 @@ That default costs throughput at the lengths these methods actually run. Measure
 
 FA4 wins every row, on MoE and dense alike. Set `attn_implementation: flash_attention_4` explicitly in a preference/reward config.
 
-**Context Parallelism**: an explicit `flex_attention` label auto-switches to `flash_attention_4` (Blackwell) / `flash_attention_2` (Hopper) since Ulysses can't dispatch flex — the label is cosmetic, though: see [Supported backends](#supported-backends) for what `_flash_attn_func` actually runs. SDPA/eager unsupported.
+**Context Parallelism**: an explicit `flex_attention` label auto-switches to the kernel `_flash_attn_func` runs (`preferred_flash_impl` under the family's FA4 veto: `flash_attention_4` on Blackwell, `flash_attention_3` on Hopper, else `flash_attention_2`) since Ulysses can't dispatch flex; see [Supported backends](#supported-backends). SDPA/eager unsupported.
 
 ## Installation
 
