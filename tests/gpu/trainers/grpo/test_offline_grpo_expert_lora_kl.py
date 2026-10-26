@@ -21,7 +21,7 @@ from halo.configs.grpo_offline import OfflineGRPOScriptArguments
 from halo.distributed.parallelism_config import ParallelismConfig
 from halo.entrypoints.script import ScriptContext
 from halo.trainers.grpo.offline.trainer import OfflineGRPOTrainer
-from scripts.training.offline_grpo import _load_kl_reference
+from scripts.training.grpo.offline import _load_kl_reference
 from tests.common.checkpoint_io import RestorePointSnapshot
 from tests.common.distributed import pin_deterministic_ep_dispatch, shared_output_dir
 from tests.common.harness import gpu_test_main

@@ -29,10 +29,11 @@ from safetensors import safe_open
 from safetensors.torch import load_file, save_file
 from transformers import AutoConfig, AutoModelForCausalLM
 
-from scripts.after_training.convert_to_bf16 import (
+from halo.checkpoint import offline_export
+from halo.checkpoint.bf16_conversion import (
     _BF16_VERIFY_MIN_FRACTION,
     convert_to_bf16,
-    verify_adapter_save,
+    verify_adapter_conversion,
     verify_model_conversion,
 )
 
@@ -145,27 +146,54 @@ def test_verify_ignores_non_float_tensors(tmp_path):
 
 
 def _lora_adapter(tmp_path, base_dir):
-    """A real PEFT save over ``base_dir`` — the artifact ``--peft`` produces, whose LoRA A/B PEFT
-    deliberately restores to fp32."""
+    """A real PEFT save over ``base_dir``, whose LoRA A/B PEFT writes in fp32."""
     model = AutoModelForCausalLM.from_pretrained(base_dir)
     adapter_dir = tmp_path / "adapter"
     get_peft_model(model, LoraConfig(r=4, target_modules=["q_proj", "v_proj"])).save_pretrained(str(adapter_dir))
     return str(adapter_dir)
 
 
-def test_verify_accepts_an_unmerged_peft_save(tmp_path):
-    """PEFT writes LoRA A/B in fp32 whatever dtype the model was cast to, so a bf16 assertion on an
-    unmerged adapter fails the tool's own correct output — after it has already written it."""
+def _refuse_model_loads(monkeypatch):
+    """Fail any model load the conversion makes: an adapter converts from its weights file alone."""
+
+    def _refused(*_args, **_kwargs):
+        raise AssertionError("the adapter conversion loaded a model")
+
+    monkeypatch.setattr(offline_export, "auto_load_model", _refused)
+    monkeypatch.setattr(offline_export, "from_pretrained_verified", _refused)
+
+
+def test_a_peft_conversion_writes_the_adapter_at_bf16_without_loading_the_base(tmp_path, monkeypatch):
+    """The conversion casts the adapter's tensors, not a base it never needs: loading the whole base to
+    re-save an adapter that PEFT then wrote back in fp32 left a bf16 input upcast."""
     adapter = _lora_adapter(tmp_path, _fp32_checkpoint(tmp_path / "base"))
+    assert set(_stored_dtype_counts_of(os.path.join(adapter, "adapter_model.safetensors"))[0]) == {"F32"}
+    _refuse_model_loads(monkeypatch)
     out = tmp_path / "out"
+
     convert_to_bf16(adapter, str(out), "causal_lm", is_peft=True, verify=True)  # raises if verification fails
 
-    stored = set(_stored_dtype_counts_of(out / "adapter_model.safetensors")[0])
-    assert stored == {"F32"}, f"fixture no longer reproduces PEFT's fp32 restore: {stored}"
+    assert set(_stored_dtype_counts_of(out / "adapter_model.safetensors")[0]) == {"BF16"}
+    assert (out / "adapter_config.json").is_file(), "the adapter's config must travel with its weights"
+
+
+def test_a_bf16_adapter_keeps_its_weights_bit_for_bit(tmp_path, monkeypatch):
+    adapter = _lora_adapter(tmp_path, _fp32_checkpoint(tmp_path / "base"))
+    weights = os.path.join(adapter, "adapter_model.safetensors")
+    bf16 = {key: tensor.to(torch.bfloat16) for key, tensor in load_file(weights).items()}
+    save_file(bf16, weights, metadata={"format": "pt"})
+    _refuse_model_loads(monkeypatch)
+    out = tmp_path / "out"
+
+    convert_to_bf16(adapter, str(out), "causal_lm", is_peft=True)
+
+    written = load_file(str(out / "adapter_model.safetensors"))
+    assert written.keys() == bf16.keys()
+    assert all(torch.equal(written[key], bf16[key]) and written[key].dtype == torch.bfloat16 for key in bf16)
 
 
 def test_an_unmerged_peft_save_verifies_its_adapter_not_a_stale_model(tmp_path):
-    """An unmerged --peft save removes nothing, so an --output_dir that held an earlier fp32 full save
+    """A --peft save writes adapter files only, so an --output_dir that held an earlier fp32 full save
     still carries its model.safetensors. Verifying that stale file would fail the adapter the run just
     wrote (and a stale bf16 one would pass it unchecked)."""
     adapter = _lora_adapter(tmp_path, _fp32_checkpoint(tmp_path / "base"))
@@ -182,7 +210,7 @@ def test_verify_rejects_an_empty_adapter(tmp_path):
     os.makedirs(adapter_dir)
     save_file({}, os.path.join(adapter_dir, "adapter_model.safetensors"), metadata={"format": "pt"})
     with pytest.raises(RuntimeError, match="nothing in it"):
-        verify_adapter_save(os.path.join(adapter_dir, "adapter_model.safetensors"))
+        verify_adapter_conversion(os.path.join(adapter_dir, "adapter_model.safetensors"))
 
 
 def test_verify_threshold_is_strict_at_the_boundary(tmp_path):

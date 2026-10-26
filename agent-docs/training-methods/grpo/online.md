@@ -1,6 +1,6 @@
 # Online GRPO (RLVR)
 
-RLVR (Reinforcement Learning with Verifiable Rewards) is on-policy GRPO scored by the config's [reward terms](rewards/README.md), `\boxed{}` exact match by default. Trainer `DistributedGRPOTrainer`, script `scripts/training/online_grpo/rlvr.py`. A separate vLLM server generates and receives weights over NCCL; the trainer scores rewards.
+RLVR (Reinforcement Learning with Verifiable Rewards) is on-policy GRPO scored by the config's [reward terms](rewards/README.md), `\boxed{}` exact match by default. Trainer `DistributedGRPOTrainer`, script `scripts/training/grpo/online.py`. A separate vLLM server generates and receives weights over NCCL; the trainer scores rewards.
 
 Parallelism: EP, TP, EP+TP, EP+ETP and pure ETP (`ep_size=1`). CP and PP are rejected at config time.
 
@@ -176,11 +176,11 @@ make build-vllm   # or set VLLM_IMAGE to the public image
 VLLM_MODEL=Qwen/Qwen3-30B-A3B docker compose -f docker-compose.vllm.yml up vllm-server
 
 CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6 torchrun --nproc_per_node=7 \
-    scripts/training/online_grpo/rlvr.py examples/grpo/online/rlvr-online-grpo-template.yaml \
+    scripts/training/grpo/online.py examples/grpo/online/rlvr-online-grpo-template.yaml \
     --model_name_or_path=Qwen/Qwen3-30B-A3B
 ```
 
-`halo launch rlvr <config> --nproc 7` builds the same line (FSDP2 data parallelism); the device split stays yours. Add `--tensor_parallel_size` for dense TP or `--expert_parallel_size` for MoE.
+`halo launch grpo/online <config> --nproc 7` builds the same line (FSDP2 data parallelism); the device split stays yours. Add `--tensor_parallel_size` for dense TP or `--expert_parallel_size` for MoE.
 
 Under EP, set `expert_parallel_size` to the training-GPU count so the trainer forms **one** DeepEP group:
 

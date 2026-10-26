@@ -12,15 +12,22 @@ from halo.cli import app, build_launch_command, resolve_config, tool_commands, t
 runner = CliRunner()
 
 
-def stub_exec(monkeypatch) -> tuple[list[Path], list[list[str]]]:
+def stub_exec(monkeypatch, envs: list[dict[str, str]] | None = None) -> tuple[list[Path], list[list[str]]]:
     """Replace the process handover so a non-dry-run invocation is observable.
 
-    Returns ``(chdirs, argvs)`` — what the CLI would have chdir'd to, and the argv it would exec.
+    Returns ``(chdirs, argvs)`` — what the CLI would have chdir'd to, and the argv it would exec; the
+    environment it would exec with lands in ``envs`` when one is given.
     """
     chdirs: list[Path] = []
     argvs: list[list[str]] = []
+
+    def _exec(file, argv, env):
+        argvs.append(argv)
+        if envs is not None:
+            envs.append(env)
+
     monkeypatch.setattr(os, "chdir", chdirs.append)
-    monkeypatch.setattr(os, "execvp", lambda file, argv: argvs.append(argv))
+    monkeypatch.setattr(os, "execvpe", _exec)
     return chdirs, argvs
 
 
@@ -38,15 +45,15 @@ def write_config(path: Path) -> None:
 def test_methods_are_indexed_from_training_file_paths(tmp_path):
     write_script(tmp_path / "scripts/training/sft.py")
     write_script(tmp_path / "scripts/training/preference/smpo.py")
-    write_script(tmp_path / "scripts/training/online_grpo/rlvr.py")
+    write_script(tmp_path / "scripts/training/grpo/online.py")
 
     index = training_methods(tmp_path)
 
     assert index["sft"] == tmp_path / "scripts/training/sft.py"
     assert index["preference/smpo"] == tmp_path / "scripts/training/preference/smpo.py"
     assert index["smpo"] == tmp_path / "scripts/training/preference/smpo.py"
-    assert index["online-grpo/rlvr"] == tmp_path / "scripts/training/online_grpo/rlvr.py"
-    assert index["rlvr"] == tmp_path / "scripts/training/online_grpo/rlvr.py"
+    assert index["grpo/online"] == tmp_path / "scripts/training/grpo/online.py"
+    assert index["online"] == tmp_path / "scripts/training/grpo/online.py"
 
 
 def test_ambiguous_short_names_are_not_indexed(tmp_path):
@@ -76,21 +83,21 @@ def test_nested_methods_index_without_shadowing_flat_methods(tmp_path):
 
 
 def test_singular_plural_stem_variants_get_no_alias(tmp_path):
-    """`reward` (nested) vs `rewards` (preference) differ only by pluralization; a bare-stem
+    """`reward` (nested) vs `rewards` (other) differ only by pluralization; a bare-stem
     alias would silently launch the wrong trainer, so neither stem is aliased."""
-    write_script(tmp_path / "scripts/training/preference/rewards.py")
+    write_script(tmp_path / "scripts/training/other/rewards.py")
     write_script(tmp_path / "scripts/training/nested/reward.py")
 
     index = training_methods(tmp_path)
 
     assert "reward" not in index, "'reward' would silently resolve to the nested trainer"
     assert "rewards" not in index
-    assert index["preference/rewards"] == tmp_path / "scripts/training/preference/rewards.py"
+    assert index["other/rewards"] == tmp_path / "scripts/training/other/rewards.py"
     assert index["nested/reward"] == tmp_path / "scripts/training/nested/reward.py"
 
 
 def test_launch_ambiguous_stem_reports_qualified_names(tmp_path):
-    write_script(tmp_path / "scripts/training/preference/rewards.py")
+    write_script(tmp_path / "scripts/training/other/rewards.py")
     write_script(tmp_path / "scripts/training/nested/reward.py")
     write_config(tmp_path / "config.yaml")
 
@@ -98,56 +105,56 @@ def test_launch_ambiguous_stem_reports_qualified_names(tmp_path):
 
     assert result.exit_code != 0
     assert "ambiguous" in result.output
-    assert "preference/rewards" in result.output
+    assert "other/rewards" in result.output
     assert "nested/reward" in result.output
 
 
 def test_a_stem_whose_candidates_are_one_script_resolves(tmp_path):
     """The singular/plural fold is what makes a stem ambiguous, and with a single script there is
-    nothing to be ambiguous about: `reward` matches `preference/rewards` and its own `rewards` alias,
+    nothing to be ambiguous about: `reward` matches `other/rewards` and its own `rewards` alias,
     two names for one file. Reporting that as ambiguous leaves the method unreachable by its stem."""
-    write_script(tmp_path / "scripts/training/preference/rewards.py")
+    write_script(tmp_path / "scripts/training/other/rewards.py")
     write_config(tmp_path / "config.yaml")
 
     result = runner.invoke(app, ["launch", "reward", "config.yaml", "--dry-run", "--root", str(tmp_path)])
 
     assert result.exit_code == 0, result.output
-    assert str(tmp_path / "scripts/training/preference/rewards.py") in result.stdout
+    assert str(tmp_path / "scripts/training/other/rewards.py") in result.stdout
 
 
 def test_underscored_method_name_resolves_to_the_hyphenated_entry(tmp_path):
-    """The index is hyphenated, but `scripts/training/offline_grpo.py`, its examples directory and
-    half the docs spell the method `offline_grpo` — that spelling must launch it, not be rejected as
-    unknown. The listing stays hyphenated: one canonical entry, no alias."""
-    write_script(tmp_path / "scripts/training/offline_grpo.py")
+    """The index is hyphenated, but a script spells its method with underscores (`my_method.py`) —
+    that spelling must launch it, not be rejected as unknown. The listing stays hyphenated: one
+    canonical entry, no alias."""
+    write_script(tmp_path / "scripts/training/my_method.py")
     write_config(tmp_path / "config.yaml")
 
     commands = set()
-    for spelling in ("offline-grpo", "offline_grpo", "Offline_GRPO"):
+    for spelling in ("my-method", "my_method", "My_Method"):
         result = runner.invoke(app, ["launch", spelling, "config.yaml", "--dry-run", "--root", str(tmp_path)])
         assert result.exit_code == 0, f"{spelling}: {result.output}"
         commands.add(result.stdout.strip())
 
     assert len(commands) == 1, f"spellings must resolve to one command, got {commands}"
-    assert str(tmp_path / "scripts/training/offline_grpo.py") in commands.pop()
+    assert str(tmp_path / "scripts/training/my_method.py") in commands.pop()
 
     listed = runner.invoke(app, ["launch", "--list", "--root", str(tmp_path)])
-    assert [line.split()[0] for line in listed.stdout.splitlines() if line.strip()] == ["offline-grpo"]
+    assert [line.split()[0] for line in listed.stdout.splitlines() if line.strip()] == ["my-method"]
 
 
 def test_unknown_method_still_fails_loud(tmp_path):
     """Normalization must not swallow a typo into a near neighbour: an unindexed name raises, naming
     the known methods and the flag that lists the rest."""
-    write_script(tmp_path / "scripts/training/offline_grpo.py")
+    write_script(tmp_path / "scripts/training/my_method.py")
     write_config(tmp_path / "config.yaml")
 
-    result = runner.invoke(app, ["launch", "offline_grpoo", "config.yaml", "--dry-run", "--root", str(tmp_path)])
+    result = runner.invoke(app, ["launch", "my_methodd", "config.yaml", "--dry-run", "--root", str(tmp_path)])
 
     assert result.exit_code != 0
     # Substrings, not the whole sentence: the error renders through a width-wrapped rich panel.
     assert "unknown method" in result.output
-    assert "offline_grpoo" in result.output
-    assert "offline-grpo" in result.output and "--list" in result.output
+    assert "my_methodd" in result.output
+    assert "my-method" in result.output and "--list" in result.output
 
 
 def test_a_root_with_no_scripts_tree_names_the_root(tmp_path):
@@ -588,16 +595,37 @@ def test_a_flag_in_the_tool_slot_is_refused_by_name(tmp_path):
     assert "TOOL must come before any flag" in result.output
 
 
-def test_the_single_process_port_refusal_names_the_separator(tmp_path):
-    """A tool's own ``--port`` collides with the launcher's; the refusal has to say how to pass it."""
+@pytest.mark.parametrize("tool_flags", [["--port", "7860"], ["-p", "7860"], ["-n", "8"], ["--nproc", "2"]])
+def test_run_is_one_process_and_hands_the_tool_its_own_port_and_count_flags(tmp_path, tool_flags):
+    """Every tool is single-process: N torchrun copies of a checkpoint tool race on one output
+    directory, and a launcher ``--port`` would swallow a Gradio app's own ``--port``. So ``halo run``
+    owns neither, and both reach the tool as typed."""
     write_script(tmp_path / "scripts/inference/serve.py")
 
-    result = runner.invoke(app, ["run", "serve", "--port", "7860", "--dry-run", "--root", str(tmp_path)])
-    forwarded = _dry_run(tmp_path, ["run", "serve", "--", "--port", "7860"])
+    tokens = _dry_run(tmp_path, ["run", "serve", *tool_flags])
 
-    assert result.exit_code != 0
-    assert "`--`" in result.output
-    assert forwarded[-2:] == ["--port", "7860"]
+    assert tokens[0] == sys.executable, tokens
+    assert "torchrun" not in tokens
+    assert tokens[-2:] == tool_flags
+
+
+@pytest.mark.parametrize("verb", ["launch", "run"])
+def test_the_child_imports_the_root_tree_first(tmp_path, monkeypatch, verb):
+    """A script's own directory is all ``python script.py`` puts on ``sys.path``, so a ``--root``
+    checkout would otherwise run its script over the installed tree's ``halo`` and ``scripts``; the
+    root leads ``PYTHONPATH`` and an inherited entry follows it."""
+    write_script(tmp_path / "scripts/training/sft.py")
+    write_script(tmp_path / "scripts/after_training/merge_ep_shards.py")
+    write_config(tmp_path / "config.yaml")
+    monkeypatch.setenv("PYTHONPATH", "/inherited")
+    envs: list[dict[str, str]] = []
+    stub_exec(monkeypatch, envs)
+
+    args = ["launch", "sft", "config.yaml"] if verb == "launch" else ["run", "merge-ep-shards"]
+    result = runner.invoke(app, [*args, "--root", str(tmp_path)])
+
+    assert result.exit_code == 0, result.output
+    assert envs[0]["PYTHONPATH"].split(os.pathsep) == [str(tmp_path.resolve()), "/inherited"]
 
 
 if __name__ == "__main__":

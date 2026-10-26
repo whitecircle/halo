@@ -91,7 +91,7 @@ class DistributedRewardTrainer(DistributedTrainerMixin, TRLDatasetPrepMixin, Rew
     _processor: ProcessorMixin | None = None
 
     def __init__(self, *args, **kwargs):
-        # The run's data path. rewards.py loads a processor only for a run that declares image data
+        # The run's data path. reward_model.py loads a processor only for a run that declares image data
         # (``is_vlm_run``), so the modality of the processing class determines it: a text recipe on
         # a multimodal checkpoint arrives with a plain tokenizer and keeps TRL's own tokenize map
         # and collator unchanged.

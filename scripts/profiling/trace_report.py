@@ -19,7 +19,7 @@ output, report diffs) call the TraceLens CLIs directly: ``TraceLens_generate_per
 Usage (inside the training image):
   python scripts/profiling/trace_report.py                      # $HALO_DATA_ROOT/profiling/torch, all sets
   python scripts/profiling/trace_report.py <trace_dir> --label trace-cycle1
-  python scripts/profiling/trace_report.py --no-collective      # skip the multi-rank NCCL report
+  python scripts/profiling/trace_report.py --no_collective      # skip the multi-rank NCCL report
 """
 
 from __future__ import annotations
@@ -35,7 +35,6 @@ from pathlib import Path
 from halo.env import torch_trace_dir
 from halo.log import configure_cli_logging
 
-configure_cli_logging()
 logger = logging.getLogger(__name__)
 
 # Artifact naming contract of halo/diagnostics/profiling.py::export_profiler_artifacts:
@@ -130,6 +129,7 @@ def write_collective_report(label: str, ranks: dict[int, Path]) -> Path | None:
 
 
 def main() -> None:
+    configure_cli_logging()
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument(
         "trace_dir",
@@ -140,12 +140,12 @@ def main() -> None:
     )
     parser.add_argument("--label", default=None, help="Only process trace sets with this label.")
     parser.add_argument(
-        "--no-collective",
+        "--no_collective",
         action="store_true",
         help="Skip the multi-rank NCCL collective report for multi-rank trace sets.",
     )
     parser.add_argument(
-        "--keep-going",
+        "--keep_going",
         action="store_true",
         help="Exit 0 even when some trace sets produced no report (default: any failure is fatal).",
     )
@@ -182,7 +182,7 @@ def main() -> None:
             # caller would analyse whichever labels survived without knowing any are missing.
             raise SystemExit(
                 f"{len(failed)} of {len(trace_sets)} trace set(s) produced no report "
-                f"({', '.join(failed)}); the failures are logged above. Pass --keep-going to accept "
+                f"({', '.join(failed)}); the failures are logged above. Pass --keep_going to accept "
                 f"a partial run."
             )
 

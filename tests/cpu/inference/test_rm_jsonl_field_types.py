@@ -15,7 +15,7 @@ import types
 
 import pytest
 
-from scripts.inference.reward_model import reward_model_arguments
+from halo.entrypoints import reward_scoring
 
 _PROMPT = [{"role": "user", "content": "q"}]
 _ROWS = [
@@ -28,18 +28,18 @@ _ANSWER_ARGS = types.SimpleNamespace(correct_answer_field="correct_answer")
 def _args(tmp_path, rows=_ROWS):
     prompts = tmp_path / "prompts.jsonl"
     prompts.write_text("".join(json.dumps(row) + "\n" for row in rows))
-    return types.SimpleNamespace(prompts_source=str(prompts), prompt_field="prompt", id_field="id")
+    return types.SimpleNamespace(dataset=str(prompts), prompt_field="prompt", id_field="id")
 
 
 def _answer_context(row) -> str | None:
     """The answer line the reward model is shown for ``row``, or None when it is shown none."""
-    answer = reward_model_arguments.resolve_correct_answer(row, _ANSWER_ARGS)
-    context = reward_model_arguments.prepend_answer_context(list(_PROMPT), answer)
+    answer = reward_scoring.resolve_correct_answer(row, _ANSWER_ARGS)
+    context = reward_scoring.prepend_answer_context(list(_PROMPT), answer)
     return context[0]["content"] if len(context) > len(_PROMPT) else None
 
 
 def test_string_fields_reach_the_reward_model_unchanged(tmp_path):
-    row = reward_model_arguments.load_prompts_dataframe(_args(tmp_path)).iloc[0]
+    row = reward_scoring.load_prompts_dataframe(_args(tmp_path)).iloc[0]
 
     assert row["id"] == "007"
     assert row["created_at"] == "2024-01-01"
@@ -64,18 +64,18 @@ def test_numeric_answers_reach_the_reward_model_as_written(answers, shown, tmp_p
         {"id": str(i), "prompt": _PROMPT, **({} if answer == "absent" else {"correct_answer": answer})}
         for i, answer in enumerate(answers)
     ]
-    frame = reward_model_arguments.load_prompts_dataframe(_args(tmp_path, rows))
+    frame = reward_scoring.load_prompts_dataframe(_args(tmp_path, rows))
 
     expected = [None if value is None else f"The correct final answer must be: {value}" for value in shown]
     assert [_answer_context(row) for _, row in frame.iterrows()] == expected
 
 
 def test_a_resumed_id_matches_the_prompt_it_was_written_for(tmp_path):
-    prompts = reward_model_arguments.load_prompts_dataframe(_args(tmp_path))
+    prompts = reward_scoring.load_prompts_dataframe(_args(tmp_path))
     output = tmp_path / "out.jsonl"
-    reward_model_arguments.append_jsonl_record(output, {"id": "007", "reward": 1.0})
+    reward_scoring.append_jsonl_record(output, {"id": "007", "reward": 1.0})
 
-    processed, _existing = reward_model_arguments.load_local_jsonl_resume(output, "id")
+    processed, _existing = reward_scoring.load_local_jsonl_resume(output, "id")
 
     assert processed == {"007"}
     assert prompts[~prompts["id"].isin(processed)]["id"].tolist() == ["008"]

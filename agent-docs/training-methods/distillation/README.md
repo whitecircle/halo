@@ -9,7 +9,7 @@ Fit a student to a teacher's token-level output distribution. The three methods 
 | Generation | None | None | vLLM rollouts |
 | Objective | `distill_alpha·L_distill + (1−distill_alpha)·L_clm` | `L_sft + beta(k)·L_OPD + alpha·L_ref` | `L_GRPO + beta(k)·L_OPD` |
 | Trainer | `DistributedDistillationTrainer` | `DistributedSelfDistillationTrainer` | `DistributedSDPGTrainer` |
-| Script | `distillation/teacher_distill.py` | `distillation/self_distill.py` | `online_grpo/rlvr.py --use_sdpg` |
+| Script | `distillation/teacher_distill.py` | `distillation/self_distill.py` | `grpo/online.py --use_sdpg` |
 | Modality | Text + VLM | Text + VLM | Text only |
 
 Which to pick:

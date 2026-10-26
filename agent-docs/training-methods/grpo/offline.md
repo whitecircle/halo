@@ -1,6 +1,6 @@
 # Offline GRPO
 
-Offline GRPO trains on pre-collected, off-policy data: several completions per prompt, each with a pre-computed reward. Trainer `OfflineGRPOTrainer`, script `scripts/training/offline_grpo.py`, config `OfflineGRPOConfig` ([field reference](../../reference/configuration-reference.md#offlinegrpoconfig)).
+Offline GRPO trains on pre-collected, off-policy data: several completions per prompt, each with a pre-computed reward. Trainer `OfflineGRPOTrainer`, script `scripts/training/grpo/offline.py`, config `OfflineGRPOConfig` ([field reference](../../reference/configuration-reference.md#offlinegrpoconfig)).
 
 - **Models:** decoder-only, text-only. An encoder-decoder model is refused at construction, and the script refuses an image column.
 - **Parallelism:** EP, TP, EP+TP, EP+ETP, pure ETP (`ep_size=1`), CP and EP+CP.
@@ -131,11 +131,11 @@ The mapped files live under `_reference_cache/<launch>/` in `output_dir` for the
 ## Launch
 
 ```bash
-torchrun --nproc_per_node=8 scripts/training/offline_grpo.py \
+torchrun --nproc_per_node=8 scripts/training/grpo/offline.py \
     examples/grpo/offline/qwen3_5/offline-grpo-qwen3.6-35b-a3b-gsm8k.yaml --expert_parallel_size=8
 ```
 
-`halo launch offline-grpo <config> --nproc 8` builds the same line. From Python, load the model through `load_distributed_model` and pass the same `ParallelismConfig` to the trainer.
+`halo launch grpo/offline <config> --nproc 8` builds the same line. From Python, load the model through `load_distributed_model` and pass the same `ParallelismConfig` to the trainer.
 
 ## Testing a setup
 

@@ -76,22 +76,25 @@ TERMINAL_LOADERS = (
     ("halo/model_loading/parallel/pp.py", "_load_stage_lazy"),
 )
 
+# Where the standalone tools' drivers live: the CLIs themselves, the offline checkpoint tools and the
+# reward-model scorer they parse for.
+TOOL_DRIVER_ROOTS = ("scripts", "halo/checkpoint", "halo/entrypoints/reward_scoring.py")
+
 # Tool loaders whose model is handed to a FORWARD — reward scores, dedup embeddings, the
 # ``--check_inference`` generation. An uninitialized buffer here becomes numbers the operator acts
 # on, with no other symptom, so each must call the seam directly.
 INFERENCE_TOOL_LOADERS = (
-    ("scripts/inference/reward_model/reward_model_arguments.py", "load_reward_model"),
+    ("halo/entrypoints/reward_scoring.py", "load_reward_model"),
     ("scripts/inference/generation/dataset_deduplication.py", "compute_embeddings"),
-    ("scripts/after_training/convert_to_bf16.py", "_load_verified"),
+    ("halo/checkpoint/bf16_conversion.py", "_load_verified"),
 )
 
 # Load → cast/patch/merge → save. No forward exists in these files, and ``state_dict`` omits
 # non-persistent buffers, so an unrepaired one reaches neither a number nor the written checkpoint.
 CONVERSION_TOOL_LOADERS = (
-    ("scripts/after_training/merge_peft_adapters.py", "_load_base_model"),
-    ("scripts/after_training/reset_sinks.py", "_reset_sinks_from_pretrained"),
-    ("scripts/before_training/patch_vocab.py", "main"),
-    ("scripts/before_training/convert_deepseek_v4_bf16.py", "main"),
+    ("halo/checkpoint/adapter_merge.py", "load_task_base_model"),
+    ("halo/checkpoint/vocab_patch.py", "patch_vocabulary"),
+    ("halo/checkpoint/deepseek_v4_dequant.py", "convert_deepseek_v4_checkpoint"),
 )
 
 # How a file betrays that it runs the model it loaded, for the save-only half of the split above.
@@ -256,14 +259,16 @@ def test_every_terminal_loader_calls_the_seam_directly(rel, function):
 
 @functools.cache
 def _tool_loaders() -> dict[tuple[str, str], frozenset[str]]:
-    """(script, function) -> the names it calls, for every ``scripts/`` function whose model comes
+    """(driver, function) -> the names it calls, for every tool-driver function whose model comes
     from a toolkit load entry point (:data:`~tests.common.source_sweep.TOOLKIT_LOAD_CALLS`).
 
     Walked over the whole tree rather than a file list, so a new tool is discovered by the load it
     makes. A tool whose model comes from a third-party loader instead (``SentenceTransformer``)
-    reaches neither entry point and is outside this sweep.
+    reaches no entry point and is outside this sweep. An entry point defined under a tool root
+    (``load_task_model``) is judged at each caller, which is what decides whether a forward follows.
     """
-    return functions_calling(("scripts",), lambda call: call_name(call) in TOOLKIT_LOAD_CALLS)
+    loaders = functions_calling(TOOL_DRIVER_ROOTS, lambda call: call_name(call) in TOOLKIT_LOAD_CALLS)
+    return {key: names for key, names in loaders.items() if key[1] not in TOOLKIT_LOAD_CALLS}
 
 
 def test_tool_load_surface_is_pinned():

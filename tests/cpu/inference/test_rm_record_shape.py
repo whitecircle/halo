@@ -18,7 +18,7 @@ import types
 import pytest
 from openai.types.chat import ChatCompletion
 
-from scripts.inference.reward_model import reward_model_arguments
+from halo.entrypoints import reward_scoring
 
 # A chat completion as vLLM serializes it: every optional field present, null or empty.
 _SERVED_REPLY = {
@@ -56,14 +56,12 @@ class _ServedClient:
         self.chat = types.SimpleNamespace(completions=types.SimpleNamespace(create=_create))
 
 
-_ARGS = types.SimpleNamespace(model="gen-model", temperature=0.0, max_gen_tokens=8)
+_ARGS = types.SimpleNamespace(model="gen-model", temperature=0.0, max_tokens=8)
 
 
 def _generate(client):
     return asyncio.run(
-        reward_model_arguments.generate_chat_message(
-            client, [{"role": "user", "content": "q"}], _ARGS, {"type": "text"}
-        )
+        reward_scoring.generate_chat_message(client, [{"role": "user", "content": "q"}], _ARGS, {"type": "text"})
     )
 
 

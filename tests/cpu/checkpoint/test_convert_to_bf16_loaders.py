@@ -1,8 +1,8 @@
 #!/usr/bin/env python
-"""CPU tests for ``scripts/after_training/convert_to_bf16.py``'s loader dispatch.
+"""CPU tests for ``halo.checkpoint.bf16_conversion``'s loader dispatch.
 
 One table must drive both call sites that load a model (convert, inference check) instead of a repeated
-``model_type`` if-ladder, whose trailing ``else`` silently loads a bare ``AutoModel`` for any unknown
+``--task`` if-ladder, whose trailing ``else`` silently loads a bare ``AutoModel`` for any unknown
 type. An unknown / PEFT-unsupported type must fail loudly.
 
 Which class each type resolves to is asserted at the gate the load actually goes through
@@ -22,8 +22,12 @@ import types
 
 import pytest
 
-import scripts.after_training.convert_to_bf16 as convert_module
-from scripts.after_training.convert_to_bf16 import _MODEL_CLASSES, _PEFT_MODEL_TYPES, load_model
+import halo.checkpoint.bf16_conversion as convert_module
+from halo.checkpoint import offline_export
+from halo.checkpoint.bf16_conversion import load_model
+from halo.checkpoint.offline_export import ADAPTER_TASKS, TASK_MODEL_CLASSES
+from scripts.after_training import convert_to_bf16 as convert_script
+from scripts.after_training import merge_peft_adapters as merge_script
 
 
 @pytest.fixture
@@ -39,35 +43,40 @@ class _ParserBuilt(Exception):
     """Carries the tool's parser out of ``parse_args`` before it reads ``sys.argv``."""
 
 
-def _model_type_choices(monkeypatch) -> set[str]:
-    """The ``--model_type`` choices the CLI advertises, read off the parser ``parse_args`` builds."""
+def _task_choices(monkeypatch, entry) -> set[str]:
+    """The ``--task`` choices a tool's CLI advertises, read off the parser ``entry`` builds."""
 
     def capture(self, *args, **kwargs):
         raise _ParserBuilt(self)
 
     monkeypatch.setattr(argparse.ArgumentParser, "parse_args", capture)
     with pytest.raises(_ParserBuilt) as built:
-        convert_module.parse_args()
+        entry()
     parser = built.value.args[0]
-    return set(next(action.choices for action in parser._actions if "--model_type" in action.option_strings))
+    return set(next(action.choices for action in parser._actions if "--task" in action.option_strings))
 
 
 def test_table_covers_exactly_the_cli_choices(monkeypatch):
     """Read off the parser, not transcribed: a choice added without a loader entry (or a loader
     added without a choice) must fail here rather than silently fall through to a bare AutoModel."""
-    assert set(_MODEL_CLASSES) == _model_type_choices(monkeypatch)
+    assert set(TASK_MODEL_CLASSES) == _task_choices(monkeypatch, convert_script.parse_args)
 
 
-def test_unknown_model_type_raises_instead_of_falling_back():
-    with pytest.raises(ValueError, match="Unknown model_type"):
+def test_the_merge_and_the_conversion_spell_one_head_flag(monkeypatch):
+    """A command line carries from the conversion to the merge: both take ``--task``, over the same names,
+    the merge over the tasks an adapter is trained for."""
+    assert _task_choices(monkeypatch, merge_script.main) == set(ADAPTER_TASKS) < set(TASK_MODEL_CLASSES)
+
+
+def test_unknown_task_raises_instead_of_falling_back():
+    with pytest.raises(ValueError, match="Unknown task"):
         load_model("/nonexistent", "reward_model")
 
 
 def test_peft_unsupported_type_names_the_supported_ones():
     with pytest.raises(ValueError, match="PEFT is only supported") as exc:
         load_model("/nonexistent", "base", is_peft=True)
-    assert all(model_type in str(exc.value) for model_type in _PEFT_MODEL_TYPES)
-    assert set(_PEFT_MODEL_TYPES) < set(_MODEL_CLASSES), "the PEFT-capable types are a subset of the CLI's"
+    assert all(task in str(exc.value) for task in ADAPTER_TASKS)
 
 
 def test_known_types_dispatch_to_their_registered_class_through_the_gate(monkeypatch, finalized):
@@ -76,26 +85,26 @@ def test_known_types_dispatch_to_their_registered_class_through_the_gate(monkeyp
     gated (a VLM base must keep its vision tower), the rest with their pinned class."""
     calls: dict = {}
     monkeypatch.setattr(
-        convert_module,
+        offline_export,
         "from_pretrained_verified",
         lambda cls, path, **kw: calls.setdefault("gated", (cls, path, kw)),
     )
     monkeypatch.setattr(
-        convert_module,
+        offline_export,
         "auto_load_model",
         lambda path, **kw: calls.setdefault("gated", (None, path, kw)),
     )
 
-    for model_type, model_class in _MODEL_CLASSES.items():
+    for task, model_class in TASK_MODEL_CLASSES.items():
         calls.clear()
         finalized.clear()
-        load_model("/some/path", model_type, dtype="bf16")
+        load_model("/some/path", task, dtype="bf16")
         expected = {"dtype": "bf16", "excuse_task_head": False}
         if model_class is None:
             # The config-resolving loader alone takes the class request an adapter's keys can make.
             expected["text_only"] = False
         assert calls["gated"] == (model_class, "/some/path", expected)
-        assert finalized == [calls["gated"]], f"{model_type} skipped the post-load buffer seam"
+        assert finalized == [calls["gated"]], f"{task} skipped the post-load buffer seam"
 
 
 def test_a_peft_load_gates_the_base_the_adapter_names(monkeypatch, finalized):
@@ -113,7 +122,7 @@ def test_a_peft_load_gates_the_base_the_adapter_names(monkeypatch, finalized):
         seen["load"] = (path, kwargs)
         return base_model
 
-    monkeypatch.setattr(convert_module, "auto_load_model", fake_load)
+    monkeypatch.setattr(offline_export, "auto_load_model", fake_load)
     monkeypatch.setattr(convert_module.PeftModel, "from_pretrained", lambda base, path: (base, path))
 
     assert load_model("/adapter", "causal_lm", is_peft=True) == (base_model, "/adapter")
@@ -132,11 +141,11 @@ def test_the_task_head_excuse_follows_the_adapters_declaration(monkeypatch, fina
         ),
     )
     monkeypatch.setattr(
-        convert_module, "from_pretrained_verified", lambda cls, path, **kw: seen.setdefault("load", kw)
+        offline_export, "from_pretrained_verified", lambda cls, path, **kw: seen.setdefault("load", kw)
     )
     monkeypatch.setattr(convert_module.PeftModel, "from_pretrained", lambda base, path: base)
 
-    load_model("/adapter", "classifier", is_peft=True)
+    load_model("/adapter", "classification", is_peft=True)
     assert seen["load"]["excuse_task_head"] is True
     assert finalized == [seen["load"]]
 

@@ -1,5 +1,6 @@
-"""The run's policy model and processing class, for text and multimodal checkpoints, and the window,
-padding and attention defaults every training script applies around that load."""
+"""The run's policy model and processing class, for text and multimodal checkpoints, the window, padding and
+attention defaults every training script applies around that load, and a preference run's policy with its
+reference."""
 
 import logging
 import os
@@ -22,8 +23,10 @@ from halo.distributed.tensor_parallel.hf_plan import is_input_embedding_tp_shard
 from halo.entrypoints.script import ScriptContext
 from halo.model_loading.dtype import resolve_quantization_config, resolve_training_dtype
 from halo.model_loading.liger.dispatch import finalize_liger_after_direct_load
+from halo.model_loading.parallel.frozen_models import load_reference_model_for_preference
 from halo.model_loading.parallel.loader import load_distributed_model
 from halo.model_loading.parallel.model_source import fetch_checkpoint_config, probe_checkpoint
+from halo.model_loading.parallel.peft_setup import configure_adapter_training
 from halo.model_loading.tokenizer_setup import adopt_tokenizer_chat_template, configure_run_tokenizer
 from halo.models.context_window import is_bounded_length, resolve_length_to_context
 from halo.models.modality import is_vlm_model
@@ -335,3 +338,43 @@ def log_model_info(model: PreTrainedModel, tokenizer: PreTrainedTokenizer) -> No
     if is_global_main_process():
         logger.info(f"Tokenizer: {tokenizer}")
         logger.info(f"Model config: {model.config}")
+
+
+class PreferenceModels(NamedTuple):
+    """A preference run's policy, its frozen reference (``None`` under PEFT, whose adapter-free base is the
+    reference, or a precomputed one), the adapter config, and the windowed tokenizer and processing class."""
+
+    model: PreTrainedModel
+    ref_model: PreTrainedModel | None
+    peft_config: Any
+    tokenizer: PreTrainedTokenizer
+    processing_class: Any
+
+
+def load_preference_models(
+    context: ScriptContext, config, model_config: ModelArguments, args, *, vlm_run: bool, method: str
+) -> PreferenceModels:
+    """Load a DPO/KTO run's policy and its reference under one attention binding, set up its adapter, pin
+    the window and install the tokenizer.
+
+    Both loads take the shared padded-workload backend (SDPA, dropped under live sinks): a logratio whose
+    halves came from different attention kernels is biased.
+    """
+    attn_default = default_padded_attn_implementation(model_config, sinks_reset=args.reset_sinks)
+    policy = load_policy_model(context, config, model_config, args, vlm_run=vlm_run, attn_default=attn_default)
+    peft_config = configure_adapter_training(args, policy.model, model_config, "CAUSAL_LM")
+    ref_model = load_reference_model_for_preference(
+        args,
+        model_config,
+        config,
+        context.parallelism_config,
+        policy.tokenizer,
+        is_vlm=policy.is_vlm,
+        method=method,
+        reset_sinks=args.reset_sinks,
+        attn_default=attn_default,
+    )
+    tokenizer = apply_max_length(config, args, policy.model, policy.tokenizer)
+    processing_class = install_resolved_tokenizer(policy.processing_class, tokenizer)
+    log_model_info(policy.model, tokenizer)
+    return PreferenceModels(policy.model, ref_model, peft_config, tokenizer, processing_class)

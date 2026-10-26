@@ -46,7 +46,7 @@ make build-vllm   # or set VLLM_IMAGE to the public image
 VLLM_MODEL=Qwen/Qwen3-4B-Instruct-2507 docker compose -f docker-compose.vllm.yml up -d vllm-server
 
 # trainer on GPUs 0-6
-CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6 halo launch rlvr \
+CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6 halo launch grpo/online \
     examples/grpo/online/rlvr-online-grpo-template.yaml -n 7
 ```
 

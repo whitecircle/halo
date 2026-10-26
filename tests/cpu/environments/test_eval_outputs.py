@@ -10,12 +10,12 @@ import json
 
 import pytest
 
+from halo.entrypoints.environment_eval import write_eval_outputs
 from halo.environments.rollout_config import RolloutConfig
-from scripts.environments.eval_arguments import write_eval_outputs
 
 
 def _write(output: str, results: list[dict]) -> None:
-    args = argparse.Namespace(output=output, model="m", dataset="d", config=None, training_config=None)
+    args = argparse.Namespace(output_path=output, model="m", dataset="d", config=None, training_config=None)
     write_eval_outputs(
         args,
         results,

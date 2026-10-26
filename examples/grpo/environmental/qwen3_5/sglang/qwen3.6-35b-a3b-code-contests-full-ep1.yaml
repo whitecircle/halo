@@ -2,7 +2,7 @@
 # rollout_max_thinking_tokens and carry_reasoning are vLLM-only, so rollout_max_tokens is the per-turn bound.
 # Serve with: 2x TP=1 sglang-server on ports 30000/30001, --moe-runner-backend triton (auto-picked runners repack the expert weights each sync writes), SGLANG_CHAT_TEMPLATE=jinja-templates/qwen3/qwen3.6-reasoning-effort.jinja (the file chat_template: pins below)
 #   --tool-call-parser auto (without it tool calls stay text and every episode scores 0), --reasoning-parser qwen3, NCCL_CUMEM_ENABLE=1 in the server env.
-# Launch: CUDA_VISIBLE_DEVICES=0,1,2,3,4,5 DIST_NCCL_TIMEOUT_MINUTES=60 torchrun --nproc_per_node=6 scripts/training/environmental_grpo.py <this config>
+# Launch: CUDA_VISIBLE_DEVICES=0,1,2,3,4,5 DIST_NCCL_TIMEOUT_MINUTES=60 torchrun --nproc_per_node=6 scripts/training/grpo/environmental.py <this config>
 
 # --- Model ---
 model_name_or_path: Qwen/Qwen3.6-35B-A3B

@@ -1,6 +1,6 @@
 """The standalone tools' model-directory contract: the source resolver, the input gates, the size preflight,
-the non-weight copy, the resume state a shard merge carries, the fp32 norm cast and the one full-model write
-every tool owes its output directory."""
+the non-weight copy, the resume state a shard merge carries, the gated load of the head class per ``--task``,
+the fp32 norm cast and the one full-model write every tool owes its output directory."""
 
 import contextlib
 import logging
@@ -12,6 +12,7 @@ from fnmatch import fnmatch
 import torch
 from accelerate.utils import is_peft_model
 from huggingface_hub import snapshot_download
+from transformers import AutoModel, AutoModelForSequenceClassification
 from transformers.trainer_utils import PREFIX_CHECKPOINT_DIR
 from transformers.utils import GENERATION_CONFIG_NAME
 
@@ -37,10 +38,21 @@ from halo.checkpoint.reading import checkpoint_shard_files
 from halo.checkpoint.weights_source import config_schema_source
 from halo.checkpoint.writing import sweep_after_full_save
 from halo.hardware import available_host_ram_bytes
-from halo.model_loading.model_preparation import sanitize_generation_config
+from halo.model_loading.checkpoint_coverage import from_pretrained_verified
+from halo.model_loading.model_preparation import auto_load_model, sanitize_generation_config
 from halo.models.param_roles import is_normalization_module
 
 logger = logging.getLogger(__name__)
+
+# ``--task`` → the class a tool loads a checkpoint with; None resolves it from the config (``auto_load_model``:
+# AutoModelForCausalLM would drop a VLM's vision tower). One table, so every load goes through the coverage gate.
+TASK_MODEL_CLASSES = {
+    "causal_lm": None,
+    "classification": AutoModelForSequenceClassification,
+    "base": AutoModel,
+}
+# The tasks a PEFT adapter is trained for: a bare backbone has no adapter task type.
+ADAPTER_TASKS = ("causal_lm", "classification")
 
 # Tokenizer files transformers 5 reads but no longer writes. Each overrides its fresh neighbour on load,
 # so a copy carried over from the source must not outlive a fresh save.
@@ -155,6 +167,22 @@ def _file_versions(directory: str, names: tuple[str, ...]) -> dict[str, tuple[in
             continue
         versions[name] = (stat.st_ino, stat.st_mtime_ns)
     return versions
+
+
+def load_task_model(model_path: str, task: str, *, excuse_task_head: bool, text_only: bool = False, **load_kwargs):
+    """``model_path`` loaded as ``task``'s class (:data:`TASK_MODEL_CLASSES`), its missing keys gated.
+
+    ``excuse_task_head`` lets the head the class adds over the backbone be absent, which only the caller can
+    judge (an adapter that saves it, an encoder base under the widest causal-LM class). ``text_only``, the class
+    an adapter may be trained through on a multimodal checkpoint, applies to the causal-LM resolution; a task
+    with one class raises ``ValueError`` on it.
+    """
+    model_class = TASK_MODEL_CLASSES[task]
+    if model_class is None:
+        return auto_load_model(model_path, excuse_task_head=excuse_task_head, text_only=text_only, **load_kwargs)
+    if text_only:
+        raise ValueError(f"task={task!r} loads one class; text_only applies to causal_lm only.")
+    return from_pretrained_verified(model_class, model_path, excuse_task_head=excuse_task_head, **load_kwargs)
 
 
 def cast_norms_to_fp32(model) -> None:

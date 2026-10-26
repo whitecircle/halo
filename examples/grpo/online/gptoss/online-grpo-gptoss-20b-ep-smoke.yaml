@@ -2,7 +2,7 @@
 # Frozen live sinks: the FA2 sinks reset deletes the Parameter the sync ships, so reject_unsyncable_model
 #   passes only under a sink-carrying kernel (FA4 on Blackwell, eager/flex_attention on Hopper).
 # Launch: vllm-server with --weight-transfer-config '{"backend":"nccl"}' --moe-backend triton on GPU 0 (the
-#   auto-picked Blackwell MoE backends repack the expert weights a sync writes), then CUDA_VISIBLE_DEVICES=1,2 torchrun --nproc_per_node=2 scripts/training/online_grpo/rlvr.py <this config>
+#   auto-picked Blackwell MoE backends repack the expert weights a sync writes), then CUDA_VISIBLE_DEVICES=1,2 torchrun --nproc_per_node=2 scripts/training/grpo/online.py <this config>
 
 # --- Model ---
 model_name_or_path: unsloth/gpt-oss-20b-BF16

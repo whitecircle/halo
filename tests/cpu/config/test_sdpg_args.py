@@ -137,7 +137,7 @@ def _run_rlvr_main(tmp_path, yaml_tail: str):
     config.write_text(
         f"model_name_or_path: dummy/model\noutput_dir: {tmp_path / 'out'}\nbf16: false\nuse_cpu: true\n{yaml_tail}"
     )
-    script = load_script_module("scripts/training/online_grpo/rlvr.py", "halo_test_rlvr_sdpg_gate")
+    script = load_script_module("scripts/training/grpo/online.py", "halo_test_rlvr_sdpg_gate")
     with (
         mock.patch("halo.entrypoints.script.install_log_tee"),
         mock.patch.object(sys, "argv", ["prog", str(config)]),

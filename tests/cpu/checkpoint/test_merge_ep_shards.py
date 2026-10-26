@@ -11,6 +11,7 @@ tests assert exact shapes AND values, not just key presence.
 
 import json
 import os
+import sys
 import tempfile
 from collections import defaultdict
 
@@ -18,13 +19,20 @@ import pytest
 import torch
 from safetensors.torch import load_file, save_file
 
-import scripts.after_training.merge_ep_shards as merge_mod
+from halo.checkpoint.ep_shard_merge import (
+    EP_EXPERT_PATTERN,
+    EP_EXPERT_SUFFIXES,
+    group_expert_weights,
+    merge_ep_shards,
+)
 from halo.checkpoint.format import (
     EP_SHARD_KEY_RE,
     OPTIMIZER_META_FILE,
     REFERENCE_LOGPS_FILE,
     ROUTER_BALANCING_BIASES_FILE,
     SCHEDULER_STATE_FILE,
+    ep_shard_filename,
+    is_ep_shard,
     optimizer_shard_filename,
 )
 from halo.checkpoint.parallel.resume_source import classify_resume_weights
@@ -44,12 +52,7 @@ from halo.distributed.expert_parallel.families.qwen3_5 import EPQwen3_5MoELayer
 from halo.distributed.expert_parallel.families.zaya import EPZayaMoELayer
 from halo.models.moe.expert_layout import to_hub_expert_tensors
 from halo.models.moe.family_specs import expert_weight_roots, find_moe_family_spec
-from scripts.after_training.merge_ep_shards import (
-    _EP_EXPERT_PATTERN,
-    _EP_EXPERT_SUFFIXES,
-    _group_expert_weights,
-    merge_ep_shards,
-)
+from scripts.after_training import merge_ep_shards as merge_script
 
 # The whole-dict oracle the streamed merge is pinned against (test-only; see its module docstring).
 from tests.common.ep_merge_oracle import post_process_merged_weights
@@ -86,7 +89,7 @@ def test_shared_expert_params_are_not_grouped_as_routed_experts():
     merge, which refuses the unexpected names, and the whole merge would fail."""
     routed = {f"{PREFIX_MLP}.gate_up_proj": torch.zeros(1), f"{PREFIX_MLP}.down_proj": torch.zeros(1)}
     shared = {f"{PREFIX_MLP}.shared_experts.{name}": torch.zeros(1) for name in ("gate_proj", "up_proj", "down_proj")}
-    groups, rest = _group_expert_weights({**routed, **shared})
+    groups, rest = group_expert_weights({**routed, **shared})
     assert set(groups) == {PREFIX_MLP}
     assert set(rest) == set(shared)
 
@@ -250,7 +253,7 @@ def test_transform_individual():
         assert torch.equal(d, down[i].transpose(0, 1))
 
 
-def test_group_expert_weights():
+def testgroup_expert_weights():
     """Expert weights group by layer; router/attention/shared-expert stay non-expert."""
     weights = {
         f"{PREFIX}.mlp.gate_proj": torch.randn(E, H, M),
@@ -261,7 +264,7 @@ def test_group_expert_weights():
         f"{PREFIX}.mlp.shared_expert.gate_proj.weight": torch.randn(M, H),
     }
 
-    expert_groups, non_expert = _group_expert_weights(weights)
+    expert_groups, non_expert = group_expert_weights(weights)
 
     assert set(expert_groups[PREFIX_MLP].keys()) == {"gate_proj", "up_proj", "down_proj"}
     assert f"{PREFIX}.mlp.gate.weight" in non_expert
@@ -277,7 +280,7 @@ def test_group_expert_weights_multi_layer():
         p = f"model.layers.{layer}"
         weights[f"{p}.mlp.gate_up_proj"] = torch.randn(E, H, 2 * M)
         weights[f"{p}.mlp.down_proj"] = torch.randn(E, M, H)
-    expert_groups, non_expert = _group_expert_weights(weights)
+    expert_groups, non_expert = group_expert_weights(weights)
     assert set(expert_groups) == {f"model.layers.{i}.mlp" for i in range(3)}
     assert non_expert == {}
 
@@ -291,7 +294,7 @@ def test_group_expert_weights_feed_forward_container():
         f"{PREFIX}.feed_forward.down_proj": torch.randn(E, M, H),
         f"{PREFIX}.feed_forward.gate.weight": torch.randn(E, H),
     }
-    expert_groups, non_expert = _group_expert_weights(weights)
+    expert_groups, non_expert = group_expert_weights(weights)
     assert set(expert_groups) == {PREFIX_FF}
     assert set(expert_groups[PREFIX_FF].keys()) == {"gate_up_proj", "down_proj"}
     assert f"{PREFIX}.feed_forward.gate.weight" in non_expert
@@ -496,7 +499,7 @@ def _load_merged(output_dir):
 def _merge_via_tool(weights: dict, model_type: str, ep_size: int = 2) -> dict:
     """``weights`` merged by ``merge_ep_shards`` from the layout the per-rank EP save writes: each
     expert tensor split on its expert dim into ``.shard_<rank>`` slices, every other tensor on rank 0."""
-    expert_groups, non_expert = _group_expert_weights(weights)
+    expert_groups, non_expert = group_expert_weights(weights)
     shards = [dict(non_expert)] + [{} for _ in range(ep_size - 1)]
     for prefix, params in expert_groups.items():
         for suffix, tensor in params.items():
@@ -627,6 +630,30 @@ def test_merge_copies_auxiliary_files():
         assert os.path.exists(os.path.join(output_dir, "tokenizer.json"))
         # Output is HF-style model-*.safetensors; the input shard names are rewritten, not copied.
         assert not any(".shard_" in k for k in _load_merged(output_dir))
+
+
+def test_the_cli_reports_the_merge_and_the_quiet_driver_prints_nothing(monkeypatch, capsys):
+    """The driver is library code the oracle and the tests call: ``verbose=False`` keeps it off stdout, and the
+    script's ``main`` is what tells the user where the merged checkpoint landed."""
+    per = E // 2
+    shards = [
+        {
+            f"{PREFIX}.mlp.gate_up_proj.shard_{rank}": torch.randn(per, H, 2 * M),
+            f"{PREFIX}.mlp.down_proj.shard_{rank}": torch.randn(per, M, H),
+        }
+        for rank in range(2)
+    ]
+    with tempfile.TemporaryDirectory() as input_dir, tempfile.TemporaryDirectory() as root:
+        _write_ep_checkpoint(input_dir, "gpt_oss", shards, 2)
+        merge_ep_shards(input_dir, os.path.join(root, "library"), verbose=False)
+        assert capsys.readouterr().out == ""
+
+        cli_output = os.path.join(root, "cli")
+        monkeypatch.setattr(
+            sys, "argv", ["merge_ep_shards.py", "--input_dir", input_dir, "--output_dir", cli_output, "--quiet"]
+        )
+        merge_script.main()
+        assert f"Merged EP checkpoint saved to: {cli_output}" in capsys.readouterr().out
 
 
 def test_the_merged_directory_is_the_resume_source_the_shards_are_not():
@@ -794,7 +821,7 @@ def _reference_merge(input_dir, model_type):
     """The whole-dict merge pipeline: load every shard, concatenate ``.shard_N`` groups on dim 0,
     post-process. This is the semantics the streamed script must reproduce byte for byte."""
     all_weights = {}
-    for fname in sorted(f for f in os.listdir(input_dir) if merge_mod.is_ep_shard(f)):
+    for fname in sorted(f for f in os.listdir(input_dir) if is_ep_shard(f)):
         all_weights.update(load_file(os.path.join(input_dir, fname)))
     shard_groups = defaultdict(dict)
     reference = {}
@@ -933,11 +960,11 @@ def test_expert_suffixes_cover_every_class_declared_root():
     GptOss ETP-layout biases (gate_proj_bias/up_proj_bias)."""
     roots = expert_weight_roots()
     assert roots, "EP layer classes declare no expert-weight roots — the subclass walk is broken"
-    assert set(_EP_EXPERT_SUFFIXES) == set(roots)
+    assert set(EP_EXPERT_SUFFIXES) == set(roots)
     for root in sorted(roots):
         for container in ("mlp", "feed_forward"):
             key = f"model.layers.0.{container}.{root}"
-            match = _EP_EXPERT_PATTERN.match(key)
+            match = EP_EXPERT_PATTERN.match(key)
             assert match is not None, f"expert root {root!r} not captured by the merge pattern"
             assert match.group(1) == f"model.layers.0.{container}"
             assert match.group(2) == root
@@ -955,7 +982,7 @@ def test_expert_suffixes_include_gptoss_family_roots():
         "gate_up_proj",
         "gate_up_proj_bias",
         "down_proj_bias",
-    } <= set(_EP_EXPERT_SUFFIXES)
+    } <= set(EP_EXPERT_SUFFIXES)
 
 
 def test_expert_pattern_rejects_non_expert_keys():
@@ -970,7 +997,7 @@ def test_expert_pattern_rejects_non_expert_keys():
         f"{PREFIX}.mlp.experts.0.gate_proj.weight",
         f"{PREFIX}.feed_forward.experts.0.w1.weight",
     ):
-        assert _EP_EXPERT_PATTERN.match(key) is None, f"non-expert key {key!r} captured as expert weight"
+        assert EP_EXPERT_PATTERN.match(key) is None, f"non-expert key {key!r} captured as expert weight"
 
 
 def _write_gathered_checkpoint(input_dir, model_type, state, *, metadata=None):
@@ -1042,10 +1069,10 @@ def test_the_reader_accepts_exactly_what_the_writer_names():
     gathered save. Both directions are pinned here, off the writer's own name generator.
     """
     for rank, world in ((0, 1), (0, 8), (7, 8), (3, 16), (63, 64)):
-        name = merge_mod.ep_shard_filename(rank, world)
-        assert merge_mod.is_ep_shard(name), f"the reader rejects the writer's rank-{rank} filename {name}"
+        name = ep_shard_filename(rank, world)
+        assert is_ep_shard(name), f"the reader rejects the writer's rank-{rank} filename {name}"
     for other in ("adapter_model.safetensors", "model.safetensors", "model-tp00000-of-00002.safetensors"):
-        assert not merge_mod.is_ep_shard(other), f"{other} must stay out of the merge"
+        assert not is_ep_shard(other), f"{other} must stay out of the merge"
 
 
 if __name__ == "__main__":

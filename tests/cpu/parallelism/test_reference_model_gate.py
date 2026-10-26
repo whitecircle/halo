@@ -23,6 +23,7 @@ from trl import SFTTrainer
 import halo.model_loading.parallel.frozen_models as frozen_models
 import halo.trainers.distillation.self_distillation as self_distillation
 from halo.configs.script_arguments import ModelArguments
+from halo.entrypoints import model_setup
 from halo.entrypoints.model_setup import PolicyLoad
 from halo.model_loading.parallel.frozen_models import (
     ON_POLICY_GRPO_REFERENCE_ALTERNATIVES,
@@ -277,22 +278,27 @@ def test_the_dpo_script_hands_the_loaded_reference_to_the_trainer(tmp_path):
         "load_script_datasets": mock.Mock(return_value=(None, False)),
         "alias_images_column": lambda ds, *a, **k: ds,
         "resolve_vlm_run": mock.Mock(return_value=False),
-        "load_policy_model": mock.Mock(return_value=PolicyLoad(object(), tokenizer, tokenizer, False)),
-        "configure_adapter_training": mock.Mock(return_value=None),
-        "apply_max_length": lambda cfg, args, model, tok: tok,
-        "install_resolved_tokenizer": lambda processing_class, tok: processing_class,
-        "log_model_info": mock.Mock(),
         "apply_text_path_padding_side": mock.Mock(),
         "prepare_script_preference_data": mock.Mock(return_value=(None, None, None)),
         "configure_balancing_and_build_callbacks": mock.Mock(return_value=[]),
         "barrier": mock.Mock(),
         "DistributedDPOTrainer": trainer,
     }
+    # The policy-and-reference load is shared with KTO; its policy half is stubbed where it runs, and the
+    # reference half is the real one down to the frozen load.
+    shared_stubs = {
+        "load_policy_model": mock.Mock(return_value=PolicyLoad(object(), tokenizer, tokenizer, False)),
+        "configure_adapter_training": mock.Mock(return_value=None),
+        "apply_max_length": lambda cfg, args, model, tok: tok,
+        "install_resolved_tokenizer": lambda processing_class, tok: processing_class,
+        "log_model_info": mock.Mock(),
+    }
     with (
         mock.patch("halo.entrypoints.script.install_log_tee"),
         mock.patch.object(sys, "argv", ["prog", str(config)]),
         mock.patch.object(frozen_models, "load_frozen_reference_model", return_value=loaded),
         mock.patch.multiple(module, **stubs),
+        mock.patch.multiple(model_setup, **shared_stubs),
         pytest.raises(_TrainerReached),
     ):
         module.main()

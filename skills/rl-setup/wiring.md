@@ -30,14 +30,14 @@ must serve the trained model — bare compose serves `Qwen/Qwen3-0.6B` on GPU 7.
 VLLM_MODEL=Qwen/Qwen3-4B-Instruct-2507 VLLM_CUDA_DEVICES=0 \
   docker compose -f docker-compose.vllm.yml up -d vllm-server
 CUDA_VISIBLE_DEVICES=1,2,3 torchrun --nproc_per_node=3 \
-  scripts/training/online_grpo/rlvr.py \
+  scripts/training/grpo/online.py \
   examples/grpo/online/qwen3/online-grpo-qwen3-4b-smoke.yaml
 
 # MoE with EP: one DeepEP group across the trainer GPUs (ep_size = trainer-GPU count)
 VLLM_MODEL=Qwen/Qwen3.6-35B-A3B VLLM_CUDA_DEVICES=4,5,6,7 \
   docker compose -f docker-compose.vllm.yml up -d vllm-server
 CUDA_VISIBLE_DEVICES=0,1,2,3 torchrun --nproc_per_node=4 \
-  scripts/training/online_grpo/rlvr.py \
+  scripts/training/grpo/online.py \
   examples/grpo/online/qwen3_5/online-grpo-qwen3.6-35b-a3b-dapo-math.yaml \
   --expert_parallel_size=4
 ```
@@ -62,11 +62,11 @@ VLLM_TOOL_CALLING_FLAGS= docker compose -f docker-compose.vllm.yml up -d vllm-se
 
 # Trainer — single entry point; resolves the env from environment_type in the YAML
 CUDA_VISIBLE_DEVICES=0,1,2,3 torchrun --nproc_per_node=4 \
-  scripts/training/environmental_grpo.py \
+  scripts/training/grpo/environmental.py \
   examples/grpo/environmental/qwen3_5/vllm/qwen3.6-35b-a3b-react-math-full-ep4.yaml
 ```
 
-Launch with `torchrun` (`halo launch environmental-grpo <config> --nproc N` builds the line); a
+Launch with `torchrun` (`halo launch grpo/environmental <config> --nproc N` builds the line); a
 non-registry environment registers through `register_environment(name, factory)` at import time.
 
 Minimal async-GRPO YAML shape (the load-bearing keys):

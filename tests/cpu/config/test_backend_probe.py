@@ -19,7 +19,7 @@ from halo.entrypoints.script import verify_backend_on_rank0
 from halo.runtime import consensus
 from tests.common.repo import REPO_ROOT
 
-_PROBING_SCRIPTS = ("scripts/training/online_grpo/rlvr.py", "scripts/training/environmental_grpo.py")
+_PROBING_SCRIPTS = ("scripts/training/grpo/online.py", "scripts/training/grpo/environmental.py")
 _PROBE_METHODS = frozenset({"verify", "verify_backend"})
 
 

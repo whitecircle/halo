@@ -10,16 +10,16 @@ change. The last column is the name you pass to `halo launch`
 | SFT | Teach format, behavior or a domain from example conversations | conversations (`prompt`) | `sft` |
 | SFT (VLM) | Same, with images. `sft` takes the VLM path when a multimodal checkpoint meets image data | image conversations | `sft` |
 | Classification | Predict a sequence-level label (safety, topic, toxicity) | conversation (`prompt`) or raw text, + `label` | `classification` |
-| Reward modeling | Train a Bradley-Terry scorer to use later | `chosen` / `rejected` pairs | `rewards` |
+| Reward modeling | Train a Bradley-Terry scorer to use later | `chosen` / `rejected` pairs | `reward/reward-model` |
 | DPO | Align on preference pairs, held close to a reference model by a KL term | `chosen`, `rejected` (+ optional `prompt`) | `dpo` |
 | SMPO | Align on preference pairs without a reference model | `chosen`, `rejected` (+ optional `prompt`) | `smpo` |
 | KTO | Your feedback is unpaired thumbs-up / thumbs-down, not pairs | `prompt`, `completion`, `label` | `kto` |
-| [Offline GRPO](training-methods/offline-grpo.md) | You already have scored completions; no live generation | `prompt`, `completions`, `rewards` | `offline-grpo` |
-| [Online GRPO (RLVR)](training-methods/online-grpo.md) | The model generates and earns rule-based, verifiable rewards (math, format) | `prompt`, `answer` | `rlvr` |
-| [Async GRPO with Environments](training-methods/async-grpo-environments.md) | Multi-turn, tool-using, agentic trajectories | `prompt`, plus `answer` where the environment grades one | `environmental-grpo` |
+| [Offline GRPO](training-methods/offline-grpo.md) | You already have scored completions; no live generation | `prompt`, `completions`, `rewards` | `grpo/offline` |
+| [Online GRPO (RLVR)](training-methods/online-grpo.md) | The model generates and earns rule-based, verifiable rewards (math, format) | `prompt`, `answer` | `grpo/online` |
+| [Async GRPO with Environments](training-methods/async-grpo-environments.md) | Multi-turn, tool-using, agentic trajectories | `prompt`, plus `answer` where the environment grades one | `grpo/environmental` |
 | Teacher distillation | Compress a separate, larger teacher into a smaller student | conversations | `teacher-distill` |
 | Self-distillation | Improve the model with a privileged answer hint, no second model | conversations + answer | `self-distill` |
-| Online SDPG | On-policy self-distillation | `prompt`, `answer` | `rlvr --use_sdpg=true` |
+| Online SDPG | On-policy self-distillation | `prompt`, `answer` | `grpo/online --use_sdpg=true` |
 | Embedding | Tune for retrieval, similarity or clustering | pairs, triplets or scored pairs | `embedding` |
 
 ## Similar methods compared
@@ -31,7 +31,7 @@ change. The last column is the name you pass to `halo launch`
   generation quality. KTO takes unpaired thumbs-up / thumbs-down labels and
   keeps a reference under DPO's rules.
 - **Preference training or reward modeling.** Same pairs, different output.
-  DPO, SMPO and KTO change the policy. `rewards` trains a scorer you use later,
+  DPO, SMPO and KTO change the policy. `reward/reward-model` trains a scorer you use later,
   for rejection sampling or as a GRPO reward.
 - **Offline, online or async GRPO.** Offline GRPO trains on pre-scored
   completions and generates nothing. Online GRPO (RLVR) generates single-turn

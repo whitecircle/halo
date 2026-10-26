@@ -63,11 +63,11 @@ any other loss would silently mis-pool across sequence shards.
 | SFT | `scripts/training/sft.py` | Yes | Yes | also VLM and continued pretraining |
 | SMPO | `scripts/training/preference/smpo.py` | Yes | Yes | reference-free preference |
 | DPO / KTO | `scripts/training/preference/{dpo,kto}.py` | No | Yes | reference log-prob sums block CP; PP needs precomputed reference log-probs, and KTO `loss_type: apo_zero_unpaired` |
-| Reward modeling | `scripts/training/preference/rewards.py` | No | Yes | full-sequence pooling blocks CP |
+| Reward modeling | `scripts/training/reward/reward_model.py` | No | Yes | full-sequence pooling blocks CP |
 | Classification | `scripts/training/classification.py` | No | Yes | full-sequence pooling blocks CP |
-| Offline GRPO | `scripts/training/offline_grpo.py` | Yes | Yes | CP is full fine-tuning only: PEFT, native expert LoRA and an explicit `ref_model` are rejected |
-| Online GRPO (RLVR) | `scripts/training/online_grpo/rlvr.py` | No | No | needs vLLM; `--use_sdpg=true` runs online SDPG |
-| Async GRPO with environments | `scripts/training/environmental_grpo.py` | No | No | needs Ray and a vLLM or SGLang server |
+| Offline GRPO | `scripts/training/grpo/offline.py` | Yes | Yes | CP is full fine-tuning only: PEFT, native expert LoRA and an explicit `ref_model` are rejected |
+| Online GRPO (RLVR) | `scripts/training/grpo/online.py` | No | No | needs vLLM; `--use_sdpg=true` runs online SDPG |
+| Async GRPO with environments | `scripts/training/grpo/environmental.py` | No | No | needs Ray and a vLLM or SGLang server |
 | Distillation | `scripts/training/distillation/` | No | No | teacher and self distillation |
 | Embedding | `scripts/training/embedding.py` | No | No | SentenceTransformer trainer |
 

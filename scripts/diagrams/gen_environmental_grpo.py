@@ -20,24 +20,8 @@ TRAINER_BAR_Y, ENGINE_BAR_Y = 1.58, 1.10
 SYNC, ROUND, UPDATE = 0.65, 4.90, 2.60  # one step, drawn to scale in bar inches
 
 
-def draw(mode):
-    """Render one of the two topologies; `mode` is "single" or "multi"."""
-    multi = mode == "multi"
-    n_trainer = 6 if multi else 7
-
-    fig, ax = canvas(W, H)
-
-    title(
-        ax,
-        "Two rollout servers" if multi else "One rollout server",
-        sub_mono=(
-            "rollout_server_configs: 2 · enable_prefetch: true"
-            if multi
-            else "rollout_server_url · enable_prefetch → off"
-        ),
-    )
-
-    # --- GPUs on the host ---
+def _draw_gpu_split(ax, n_trainer):
+    """The host's eight GPUs, trainer ranks then engines, with the legend."""
     section(ax, LX, 6.55, "GPU SPLIT")
     cw, cgap = 0.58, 0.08
     for g in range(8):
@@ -46,33 +30,9 @@ def draw(mode):
         chip(ax, lx, 5.93, 0.28, 0.28, color=color)
         ax.text(lx + 0.40, 6.07, text, ha="left", va="center", fontsize=SMALL, color=INK2)
 
-    # --- Who talks to whom ---
-    section(ax, LX, 5.64, "TOPOLOGY")
-    card(
-        ax,
-        LX,
-        MID_Y,
-        LW,
-        card_height(3),
-        f"Trainer — GPU 0–{n_trainer - 1}",
-        [
-            f"torchrun --nproc_per_node={n_trainer}",
-            "rank 0 of both sync groups" if multi else "rank 0 of the sync group",
-            "binds :51216 and :51217" if multi else "binds the store on :51216",
-        ],
-        color=BLUE,
-    )
-    card(
-        ax,
-        LX,
-        BOT_Y,
-        LW,
-        card_height(2),
-        "Ray environment actors",
-        ["num_rollout_workers per rank", "round-robin over the server URLs"],
-        color=TEAL,
-    )
 
+def _draw_servers(ax, multi):
+    """The rollout-server cards on the right; returns the x the trainer's arrows land on."""
     if multi:
         card(
             ax,
@@ -100,33 +60,63 @@ def draw(mode):
             xytext=(BRACKET_X, BOT_Y),
             arrowprops={"arrowstyle": "|-|, widthA=0.5, widthB=0.5", "color": VIOLET, "lw": 1.4},
         )
-        target = BRACKET_X
-    else:
-        card(
-            ax,
-            RX,
-            TOP_Y - card_height(8),
-            RW,
-            card_height(8),
-            "Rollout server — GPU 7",
-            [
-                "vLLM :8000 · SGLang :30000 · TP 1",
-                "serves POST /v1/chat/completions",
-                "NCCL ranks 1+; the trainer is rank 0",
-                "one group; store :51216 on the trainer",
-                "for the push: POST /pause?mode=keep",
-                "in-flight requests resume after it",
-                "nothing is served until /resume",
-                "one engine: nothing to prefetch against",
-            ],
-            color=VIOLET,
-        )
-        target = RX
+        return BRACKET_X
+    card(
+        ax,
+        RX,
+        TOP_Y - card_height(8),
+        RW,
+        card_height(8),
+        "Rollout server — GPU 7",
+        [
+            "vLLM :8000 · SGLang :30000 · TP 1",
+            "serves POST /v1/chat/completions",
+            "NCCL ranks 1+; the trainer is rank 0",
+            "one group; store :51216 on the trainer",
+            "for the push: POST /pause?mode=keep",
+            "in-flight requests resume after it",
+            "nothing is served until /resume",
+            "one engine: nothing to prefetch against",
+        ],
+        color=VIOLET,
+    )
+    return RX
 
+
+def _draw_topology(ax, multi, n_trainer):
+    """Who talks to whom: the trainer and actor cards, the servers, and the sync and request arrows."""
+    section(ax, LX, 5.64, "TOPOLOGY")
+    card(
+        ax,
+        LX,
+        MID_Y,
+        LW,
+        card_height(3),
+        f"Trainer — GPU 0–{n_trainer - 1}",
+        [
+            f"torchrun --nproc_per_node={n_trainer}",
+            "rank 0 of both sync groups" if multi else "rank 0 of the sync group",
+            "binds :51216 and :51217" if multi else "binds the store on :51216",
+        ],
+        color=BLUE,
+    )
+    card(
+        ax,
+        LX,
+        BOT_Y,
+        LW,
+        card_height(2),
+        "Ray environment actors",
+        ["num_rollout_workers per rank", "round-robin over the server URLs"],
+        color=TEAL,
+    )
+    target = _draw_servers(ax, multi)
     arrow(ax, LX + LW, NCCL_Y, target, NCCL_Y, "NCCL weight sync", color=VIOLET)
     arrow(ax, LX + LW, HTTP_Y, target, HTTP_Y, "POST\n/v1/chat/completions", color=TEAL, side="below")
 
-    # --- One step, to scale ---
+
+def _draw_step(ax, multi):
+    """One step on the clock, drawn to scale, with its formula."""
     section(ax, LX, 2.28, "ONE STEP ON THE CLOCK")
     for y, text in ((TRAINER_BAR_Y, "trainer"), (ENGINE_BAR_Y, "engines" if multi else "engine")):
         ax.text(BAR_X0 - 0.12, y + BAR_H / 2, text, ha="right", va="center", fontsize=SMALL, color=INK2)
@@ -146,6 +136,27 @@ def draw(mode):
         chip(ax, BAR_X0 + SYNC + ROUND, ENGINE_BAR_Y, UPDATE, BAR_H, "idle", color=ROSE)
         formula = "step = sync + round + update"
     ax.text(BAR_X0, 0.93, formula, fontsize=SMALL, fontweight="bold", color=INK, va="top", fontfamily=MONO)
+
+
+def draw(mode):
+    """Render one of the two topologies; `mode` is "single" or "multi"."""
+    multi = mode == "multi"
+    n_trainer = 6 if multi else 7
+
+    fig, ax = canvas(W, H)
+
+    title(
+        ax,
+        "Two rollout servers" if multi else "One rollout server",
+        sub_mono=(
+            "rollout_server_configs: 2 · enable_prefetch: true"
+            if multi
+            else "rollout_server_url · enable_prefetch → off"
+        ),
+    )
+    _draw_gpu_split(ax, n_trainer)
+    _draw_topology(ax, multi, n_trainer)
+    _draw_step(ax, multi)
 
     footnote(
         ax,

@@ -12,7 +12,7 @@ Every helper here is opt-in and costs nothing when disabled.
 | Rank skew on a collective | TraceLens collective report | `profiler_ranks: "all"`, then `scripts/profiling/trace_report.py` |
 | Cross-rank value divergence | `assert_rank_uniform` | add the call; `strict=True` raises instead of warning |
 | Hang stack dump (every rank on the node) | `scripts/profiling/py_spy_diag.py dump` | run standalone; needs ptrace access ([§1c](#1c-py-spy--cpu-flame-graph-dataloader--python-stalls)) |
-| NVLink lane health (hard errors: Rx, symbol, link recovery, link integrity) | `scripts/profiling/nvlink_health.py` | run standalone; exit 1 = hard lane errors, while a failed `nvidia-smi` or an unrecognized counter layout raises |
+| NVLink lane health (hard errors: Rx, symbol, link recovery, link integrity) | `scripts/profiling/nvlink_health.py` | run standalone; exit 1 = hard lane errors, a down link or a GPU short of links, while a failed `nvidia-smi` or an unrecognized counter layout raises |
 | NCCL watchdog timeout | `init_distributed` | `DIST_NCCL_TIMEOUT_MINUTES` (default 30) |
 | Weight-sync hang or slow sync: the transport the trainer↔rollout-server group formed on (EFA, InfiniBand, sockets, CUDA IPC, shared memory), plugin build, GB/s | `scripts/profiling/weight_sync_transport.py` | run standalone against a live server; `--expect efa` exits 1 off the fabric ([Rollout Servers](../infrastructure/rollout-servers.md#servers-on-other-nodes-efa)) |
 
@@ -86,9 +86,9 @@ python scripts/profiling/trace_report.py /mnt/profiling/torch --label trace-cycl
 ```
 
 Writes `<label>-rankNN.tracelens.xlsx` per rank and, for multi-rank captures dense from 0,
-`<label>.collective.xlsx`, next to the traces (`--no-collective` skips the second). A CUDA-only
+`<label>.collective.xlsx`, next to the traces (`--no_collective` skips the second). A CUDA-only
 capture (`cpu_activity=False`) is refused — the report hangs every kernel off the `cpu_op` that
-launched it — and any trace set left without a report exits 1 unless `--keep-going`. For short-kernel
+launched it — and any trace set left without a report exits 1 unless `--keep_going`. For short-kernel
 studies, CSV output, or report diffs, call the TraceLens CLIs directly
 (`TraceLens_generate_perf_report_pytorch`, `TraceLens_compare_perf_reports_pytorch`).
 
@@ -98,7 +98,7 @@ When GPUs are idle between steps, the bottleneck is CPU-side. Attach to the runn
 shell in the same container — no launch-time flags:
 
 ```bash
-# One SVG per rank → $HALO_DATA_ROOT/profiling/py_spy/flamegraphs/<ts>-rank00/pid<pid>.svg (--output-dir moves it)
+# One SVG per rank → $HALO_DATA_ROOT/profiling/py_spy/flamegraphs/<ts>-rank00/pid<pid>.svg (--output_dir moves it)
 python scripts/profiling/py_spy_diag.py record --duration 30
 ```
 
@@ -227,7 +227,7 @@ timing that decides which step the mismatch lands on.
 ### Dump every rank's stack
 
 ```bash
-python scripts/profiling/py_spy_diag.py dump   # → $HALO_DATA_ROOT/profiling/py_spy/stacks/<ts>-rank00/pid<pid>.txt (--output-dir moves it)
+python scripts/profiling/py_spy_diag.py dump   # → $HALO_DATA_ROOT/profiling/py_spy/stacks/<ts>-rank00/pid<pid>.txt (--output_dir moves it)
 ```
 
 It attaches to every training process on the node, so it needs ptrace access to each ([§1c](#1c-py-spy--cpu-flame-graph-dataloader--python-stalls)).

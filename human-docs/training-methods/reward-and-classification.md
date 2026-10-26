@@ -19,7 +19,7 @@ the rows itself: a `prompt` column whose completions repeat those turns renders 
 silently, so check one rendered row before a long run.
 
 ```bash
-halo launch rewards examples/reward/qwen3_5/rm-qwen3.5-9b-skywork-pref80k.yaml -n 8
+halo launch reward/reward-model examples/reward/qwen3_5/rm-qwen3.5-9b-skywork-pref80k.yaml -n 8
 ```
 
 `max_length` is a filter here: pairs longer than it are dropped. LoRA needs `lora_task_type: SEQ_CLS`,

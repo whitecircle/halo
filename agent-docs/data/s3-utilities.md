@@ -155,11 +155,11 @@ Commands: `push`, `download`, `list`, `exists`, `delete`. Every command takes `-
 
 | Flag | Commands | Notes |
 |---|---|---|
-| `--no-overwrite` | push, download | |
+| `--no_overwrite` | push, download | |
 | `--quiet/-q` | push, download | Suppresses the transfer progress bar |
 | `--recursive/-r` | list, delete | Opt-in on `delete`: removes every object under the prefix. The Python `delete()` above defaults the other way (`recursive=True`) |
 | `--yes/-y` | delete | Skips the confirmation |
-| `--max-keys/-n` | list | Default 100 here, unlike `list_objects`'s 1000 |
+| `--max_keys/-n` | list | Default 100 here, unlike `list_objects`'s 1000 |
 
 CLI `delete` removes ONE object; a non-recursive delete aimed at a prefix is refused rather than
 reported as a no-op success. That refusal, a `--recursive` delete aimed at a single object, and a

@@ -51,7 +51,7 @@ class _Rollout(str):
     trajectory = None
 
 
-env_grpo_script = load_script_module("scripts/training/environmental_grpo.py")
+env_grpo_script = load_script_module("scripts/training/grpo/environmental.py")
 
 
 class _Host(AsyncRolloutMixin, CheckpointingMixin):

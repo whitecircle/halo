@@ -1,6 +1,6 @@
 # Environmental GRPO — Qwen3.6-35B-A3B on AIME 2024 (30 problems), react_math (calculator + Python), EP=4.
 # Launch: start a vLLM server on GPUs 4-7 with --weight-transfer-config '{"backend":"nccl"}', then
-#   CUDA_VISIBLE_DEVICES=0,1,2,3 torchrun --nproc_per_node=4 scripts/training/environmental_grpo.py <this config>
+#   CUDA_VISIBLE_DEVICES=0,1,2,3 torchrun --nproc_per_node=4 scripts/training/grpo/environmental.py <this config>
 # Serve with: --reasoning-parser qwen3 --moe-backend triton, and no --tool-call-parser
 #   (react_math reads its Action out of the assistant text).
 

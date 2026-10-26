@@ -10,8 +10,8 @@ Test-only. The tool never calls this; a second in-tool path holding the whole mo
 defeat the streaming the tool exists for.
 """
 
+from halo.checkpoint.ep_shard_merge import group_expert_weights, resolve_merge_transform
 from halo.models.moe.expert_layout import to_hub_expert_tensors
-from scripts.after_training.merge_ep_shards import _group_expert_weights, _resolve_merge_transform
 
 
 def post_process_merged_weights(
@@ -28,9 +28,9 @@ def post_process_merged_weights(
     actually merged ``.shard_N`` keys, which turns "nothing matched" from a pass-through into an
     error.
     """
-    expert_groups, result = _group_expert_weights(merged_weights)
+    expert_groups, result = group_expert_weights(merged_weights)
 
-    spec = _resolve_merge_transform(model_type, bool(expert_groups), had_expert_shards, len(merged_weights), verbose)
+    spec = resolve_merge_transform(model_type, bool(expert_groups), had_expert_shards, len(merged_weights), verbose)
     if spec is None:
         return merged_weights
 

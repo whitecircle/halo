@@ -36,22 +36,23 @@ import torch
 from safetensors.torch import load_file, save_file
 from transformers import AutoConfig, AutoModelForCausalLM, Qwen3Config, Qwen3ForCausalLM
 
+from halo.checkpoint import deepseek_v4_dequant, vocab_patch
+from halo.checkpoint.adapter_merge import merge_peft_adapter
+from halo.checkpoint.bf16_conversion import convert_to_bf16
+from halo.checkpoint.ep_shard_merge import merge_ep_shards
+from halo.checkpoint.expert_unfuse import unfuse_checkpoint
 from halo.checkpoint.format import SAFETENSORS_INDEX_FILE
+from halo.checkpoint.lowp_export import quantize_checkpoint
+from halo.checkpoint.model_merge import merge_models
 from halo.checkpoint.reading import (
     checkpoint_shard_files,
     detect_model_type,
     is_ep_sharded_checkpoint,
     reject_partial_checkpoint,
 )
+from halo.checkpoint.sink_reset import reset_sinks
 from halo.checkpoint.writing import StreamingShardWriter
 from halo.models.moe.family_specs import per_expert_hub_model_types
-from scripts.after_training.convert_to_bf16 import convert_to_bf16
-from scripts.after_training.merge_ep_shards import merge_ep_shards
-from scripts.after_training.merge_models import merge_models
-from scripts.after_training.merge_peft_adapters import merge_peft_adapter
-from scripts.after_training.quantize_to_lowp import quantize_checkpoint
-from scripts.after_training.reset_sinks import reset_sinks
-from scripts.after_training.unfuse_moe_experts import unfuse_checkpoint
 from scripts.before_training import convert_deepseek_v4_bf16, convert_glm5_bf16, convert_mistral4_bf16, patch_vocab
 from tests.common.repo import REPO_ROOT
 
@@ -436,7 +437,7 @@ def test_convert_to_bf16_refuses_an_in_place_conversion(tmp_path, monkeypatch):
     src = _write_gathered_checkpoint(tmp_path / "src", _fused_moe_tensors(), model_type="qwen3_moe")
     before = sorted(os.listdir(src))
     with pytest.raises(ValueError, match="input and output directory are the same"):
-        convert_to_bf16(str(src), str(src), model_type="qwen3_moe")
+        convert_to_bf16(str(src), str(src), task="causal_lm")
     assert sorted(os.listdir(src)) == before, "the refused input directory must be left untouched"
 
 
@@ -566,7 +567,7 @@ def test_patch_vocab_refuses_a_truncated_checkpoint(tmp_path, monkeypatch):
     assert dropped
     out = tmp_path / "out"
     # The fixture ships no tokenizer; the load gate must fire before the tokenizer is ever used.
-    monkeypatch.setattr(patch_vocab, "load_processing_class", lambda *a, **k: object())
+    monkeypatch.setattr(vocab_patch, "load_processing_class", lambda *a, **k: object())
     monkeypatch.setattr(sys, "argv", ["patch_vocab.py", "--model_id", src, "--output_dir", str(out)])
     with pytest.raises(RuntimeError, match="randomly initialized"):
         patch_vocab.main()
@@ -589,7 +590,7 @@ def test_patch_vocab_refuses_reset_sinks_on_a_family_that_has_none(tmp_path, mon
         )
     ).save_pretrained(str(src))
     # The fixture ships no tokenizer; with no --patterns it is never consulted.
-    monkeypatch.setattr(patch_vocab, "load_processing_class", lambda *a, **k: object())
+    monkeypatch.setattr(vocab_patch, "load_processing_class", lambda *a, **k: object())
     monkeypatch.setattr(
         sys, "argv", ["patch_vocab.py", "--model_id", str(src), "--output_dir", str(out), "--reset_sinks"]
     )
@@ -615,7 +616,7 @@ def test_convert_deepseek_v4_bf16_loads_through_the_coverage_gate(tmp_path, monk
         assert model_id == str(src)
         raise _GateReached
 
-    monkeypatch.setattr(convert_deepseek_v4_bf16, "from_pretrained_verified", _gate)
+    monkeypatch.setattr(deepseek_v4_dequant, "from_pretrained_verified", _gate)
     monkeypatch.setattr(sys, "argv", ["convert_deepseek_v4_bf16.py", "--model_id", str(src), "--output_dir", str(out)])
     with pytest.raises(_GateReached):
         convert_deepseek_v4_bf16.main()
@@ -627,22 +628,29 @@ def test_convert_deepseek_v4_bf16_loads_through_the_coverage_gate(tmp_path, monk
     [
         # The shared FP8 driver logs the per-shard progress of the converters that delegate to it.
         ("scripts.before_training.convert_mistral4_bf16", "halo.checkpoint.fp8_dequant"),
-        ("scripts.before_training.convert_deepseek_v4_bf16", "scripts.before_training.convert_deepseek_v4_bf16"),
+        ("scripts.before_training.convert_deepseek_v4_bf16", "halo.checkpoint.deepseek_v4_dequant"),
         ("scripts.before_training.convert_glm5_bf16", "halo.checkpoint.fp8_dequant"),
     ],
 )
 def test_converter_progress_lines_survive_the_src_root_handler(module, progress_logger):
     """Importing anything under ``halo`` installs a root handler at WARNING, and ``basicConfig`` is a
     no-op once the root has handlers — so an unforced call leaves these converters mute for the whole
-    of a multi-hour, 100+ GiB run, with no way to tell progress from a hang.
+    of a multi-hour, 100+ GiB run, with no way to tell progress from a hang. The entry point configures
+    logging before it parses, so ``--help`` reaches it.
 
     Checked in a subprocess: the root logger is process-wide, so an in-session assertion would read
     whatever an earlier test left behind.
     """
-    probe = (
-        "import importlib, logging; import halo; "
-        f"importlib.import_module({module!r}); "
-        f"print('INFO_ENABLED', logging.getLogger({progress_logger!r}).isEnabledFor(logging.INFO))"
+    probe = "\n".join(
+        [
+            "import contextlib, importlib, logging, sys",
+            "import halo",
+            f"tool = importlib.import_module({module!r})",
+            "sys.argv = ['tool', '--help']",
+            "with contextlib.suppress(SystemExit):",
+            "    tool.main()",
+            f"print('INFO_ENABLED', logging.getLogger({progress_logger!r}).isEnabledFor(logging.INFO))",
+        ]
     )
     completed = subprocess.run(
         [sys.executable, "-c", probe], capture_output=True, text=True, cwd=REPO_ROOT, check=True

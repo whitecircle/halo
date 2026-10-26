@@ -48,7 +48,13 @@ def test_only_the_release_rules_and_the_entry_point_are_public():
         for name, obj in vars(fp8_dequant).items()
         if not name.startswith("_") and getattr(obj, "__module__", None) == fp8_dequant.__name__
     )
-    assert public == ["DequantRules", "run_dequant_conversion"], public
+    assert public == [
+        "DequantRules",
+        "block_fp8_rules",
+        "dequantize_block_fp8",
+        "run_dequant_conversion",
+        "static_fp8_rules",
+    ], public
 
 
 if __name__ == "__main__":

@@ -1,28 +1,15 @@
-"""Shared plumbing for the generation CLIs under ``scripts/inference``: the sampling, resume, merge and abort
-contracts ``openai_batched_generation.py`` and the two reward-model scorers must keep identical (a mismatched
-resume re-generates or drops rows, a mismatched merge discards a batch's own columns, a mismatched abort reports a
-total failure as a completed run), and the address block the ``playground/`` Gradio apps bind and launch on."""
+"""Argparse flags shared by the generation CLIs under ``scripts/inference``: the sampling and concurrency block,
+the prompt-row fields, the S3 prompt-dataset block with its ``--subfolder`` sentinel, and the Gradio server block
+the ``playground/`` apps bind and launch on. Flags and the two calls that read them back (the ``--subfolder``
+funnel and the Gradio launch); the runs they feed live in ``halo/entrypoints/``."""
 
 import argparse
-import asyncio
-import logging
-import signal
-import sys
-from collections.abc import Callable, Coroutine
 from typing import TYPE_CHECKING
-
-from datasets import Dataset
-
-from halo.data.sources.s3_client import S3Client, build_s3_uri
-from halo.data.sources.s3_dataset_store import load_dataset_from_s3_uri, push_dataset_to_s3_uri
-from halo.log import configure_cli_logging
 
 if TYPE_CHECKING:
     # Annotation only: the generation CLIs import this module too, and gradio takes seconds to
     # import.
     import gradio as gr
-
-logger = logging.getLogger(__name__)
 
 # The documented "write at the bucket root" spelling for --subfolder. argparse hands it over as the
 # string "None", which would read and write s3://bucket/None/<key> and so resume against an output
@@ -33,9 +20,9 @@ NO_SUBFOLDER_SENTINEL = "None"
 # same local rollout server through the same async client, so the numbers are shared rather than set
 # per script: a lower concurrency halves a sibling's throughput and a rarer flush widens what an
 # interrupted run regenerates. Override per invocation with the flags.
-DEFAULT_N_PARALLEL = 32
+DEFAULT_MAX_WORKERS = 32
 DEFAULT_CHECKPOINT_INTERVAL = 100
-DEFAULT_MAX_GEN_TOKENS = 3072
+DEFAULT_MAX_TOKENS = 3072
 
 # Loopback, for every Gradio app here: the UI drives a server-side client holding a live API key with
 # no auth in front, so binding every interface would expose that key's spend to anything that can
@@ -48,13 +35,20 @@ def add_generation_args(parser: argparse.ArgumentParser, *, temperature_default:
 
     Only the temperature default is per-script (greedy for batched generation and reward-model
     scoring, sampled for the rejection sampler, which needs distinct hypotheses); the concurrency bound
-    and the token cap are shared, for the reason :data:`DEFAULT_N_PARALLEL` gives.
+    and the token cap are shared, for the reason :data:`DEFAULT_MAX_WORKERS` gives.
     """
     parser.add_argument(
-        "--n_parallel", type=int, default=DEFAULT_N_PARALLEL, help="Max parallel API requests (default: %(default)s)"
+        "--max_workers", type=int, default=DEFAULT_MAX_WORKERS, help="Max parallel API requests (default: %(default)s)"
     )
-    parser.add_argument("--temperature", type=float, default=temperature_default)
-    parser.add_argument("--max_gen_tokens", type=int, default=DEFAULT_MAX_GEN_TOKENS)
+    parser.add_argument(
+        "--temperature", type=float, default=temperature_default, help="Sampling temperature (default: %(default)s)."
+    )
+    parser.add_argument(
+        "--max_tokens",
+        type=int,
+        default=DEFAULT_MAX_TOKENS,
+        help="Generation cap per request; a reply cut at it is dropped, never scored (default: %(default)s).",
+    )
     return parser
 
 
@@ -76,8 +70,10 @@ def add_s3_dataset_args(parser: argparse.ArgumentParser) -> argparse.ArgumentPar
     are the ones :func:`load_prompts_with_resume` and the record builders consume, so a script
     declaring its own would resume against a differently-keyed output.
     """
-    parser.add_argument("--input_path", type=str, required=True, help="S3 path to input dataset")
-    parser.add_argument("--output_path", type=str, required=True, help="S3 path for output dataset")
+    parser.add_argument("--dataset", type=str, required=True, help="S3 key of the input prompt dataset.")
+    parser.add_argument(
+        "--output_path", type=str, required=True, help="S3 key of the output dataset, appended to and resumed from."
+    )
     parser.add_argument(
         "--subfolder",
         type=str,
@@ -143,115 +139,3 @@ def parse_dataset_args(parser: argparse.ArgumentParser):
     if args.subfolder == NO_SUBFOLDER_SENTINEL:
         args.subfolder = None
     return args
-
-
-def load_prompts_with_resume(args) -> tuple[list[dict], list[dict]]:
-    """``(pending rows, rows already written to --output_path)`` for the S3 prompt dataset.
-
-    Ids present in the output dataset are dropped from the input, and the existing rows come back so
-    the caller can write them out again alongside the new ones. An empty first element means every
-    prompt is already done.
-    """
-    logger.info(f"Loading dataset from S3: {args.input_path} (subfolder: {args.subfolder})")
-    dataset = load_dataset_from_s3_uri(build_s3_uri(args.input_path, args.subfolder))
-
-    if args.prompt_field not in dataset.column_names or args.id_field not in dataset.column_names:
-        raise ValueError(f"Dataset must contain '{args.prompt_field}' and '{args.id_field}' columns")
-
-    processed_ids: set = set()
-    existing_results: list[dict] = []
-    if S3Client().exists(args.output_path, subfolder=args.subfolder):
-        logger.info(f"Loading existing results from S3: {args.output_path}")
-        existing_dataset = load_dataset_from_s3_uri(build_s3_uri(args.output_path, args.subfolder))
-        processed_ids = set(existing_dataset[args.id_field])
-        existing_results = list(existing_dataset)
-        logger.info(f"Skipping {len(processed_ids)} already completed prompts")
-
-    return list(dataset.filter(lambda x: x[args.id_field] not in processed_ids)), existing_results
-
-
-def reject_empty_results(produced: int, pending: int, destination, *, drops: str = "", check: str) -> None:
-    """Abort a run that produced no usable row at all, instead of writing an empty result.
-
-    Every pending row failed, which means a dead endpoint or a misconfigured model. Exiting 0 there
-    would report a total failure as a completed run and, on the S3 paths, republish the resumed rows
-    as the whole job. Keyed on "nothing produced" rather than a single failure counter, since rows
-    also drop for reasons no counter tracks.
-
-    ``drops`` is the caller's own per-reason tally, ``check`` the knobs to look at first.
-    """
-    if produced:
-        return
-    raise RuntimeError(
-        f"No usable result for any of the {pending} pending prompt(s){drops} — nothing written to "
-        f"{destination}. Check {check}."
-    )
-
-
-def save_results_to_s3(existing_results: list[dict], results: list[dict], *, output_path: str, subfolder) -> None:
-    """Push ``existing_results + results`` to the S3 output dataset, with the record keys unioned.
-
-    A resume mixes records reloaded from a previously-saved dataset (carrying every column that run
-    wrote) with freshly-built ones, whose optional source columns, or whole output format, may differ.
-    ``Dataset.from_list`` infers its schema from the leading records and drops keys absent there, so
-    the union (missing filled with ``None``) preserves the just-generated batch's own columns.
-    """
-    all_results = existing_results + results
-    all_keys = {key for record in all_results for key in record}
-    all_results = [{key: record.get(key) for key in all_keys} for record in all_results]
-    logger.info(f"Saving {len(all_results)} results to S3: {output_path}")
-    push_dataset_to_s3_uri(Dataset.from_list(all_results), build_s3_uri(output_path, subfolder))
-    logger.info("Done!")
-
-
-def follow_up_messages(row, field: str) -> list[dict] | None:
-    """The row's follow-up turns (``--follow_up_prompt_field``), sent after its first answer: a non-empty
-    message list, else ``None``. An empty list is no follow-up: a second request on a conversation that
-    already ends on the assistant's answer would record two assistant turns in a row."""
-    follow_up = row.get(field)
-    return follow_up if isinstance(follow_up, list) and follow_up else None
-
-
-def assistant_turn(content: str | None, tool_calls: list | None = None) -> dict:
-    """A generated assistant turn as the wire and every saved record spell it: ``role`` and
-    ``content``, plus ``tool_calls`` where the reply made any — never the reply object's other,
-    mostly null, SDK and engine fields.
-
-    ``content`` stays ``None`` on a tool-call-only or empty reply: ``str(None)`` sends the literal
-    text "None" to the next turn, which the model reads as the assistant's answer.
-    """
-    message: dict = {"role": "assistant", "content": content}
-    if tool_calls:
-        message["tool_calls"] = [tool_call.model_dump() for tool_call in tool_calls]
-    return message
-
-
-def _signal_handler(signum, frame):
-    """Exit on an interrupt with the shell's own convention for a signalled process: 128 + signo.
-
-    Exiting 0 here would report an interrupted, incomplete job as a successful one, and a wrapper
-    script, CI step or `&&` chain would then consume a partial output dataset as a finished run. The
-    resume hint makes the non-zero exit actionable.
-    """
-    logger.info(f"\nReceived signal {signum}. Progress has been saved — resume by re-running.")
-    sys.exit(128 + signum)
-
-
-def run_async_cli(main: Callable[[], Coroutine]) -> None:
-    """Run an async CLI ``main`` under SIGINT/SIGTERM handling, exiting non-zero on a fatal error."""
-    configure_cli_logging()
-    signal.signal(signal.SIGINT, _signal_handler)
-    signal.signal(signal.SIGTERM, _signal_handler)
-
-    try:
-        asyncio.run(main())
-    except KeyboardInterrupt:
-        # Same event as the handler above, which a library restoring the default handler can bypass,
-        # so it reports the same way.
-        logger.info("\nInterrupted. Progress has been saved — resume by re-running.")
-        sys.exit(128 + signal.SIGINT)
-    except Exception:
-        # With the traceback: the failures that land here (a raised result guard, an S3 or schema
-        # error inside the merge) are diagnosed from where they were raised, not from the message.
-        logger.exception("Fatal error")
-        sys.exit(1)

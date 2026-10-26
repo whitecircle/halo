@@ -47,7 +47,7 @@ from tests.common.parallelism import make_parallelism_config
 from tests.common.source_sweep import call_name, functions_in
 
 BASE = "org/base"
-ON_POLICY_GRPO_SCRIPTS = ("scripts/training/online_grpo/rlvr.py", "scripts/training/environmental_grpo.py")
+ON_POLICY_GRPO_SCRIPTS = ("scripts/training/grpo/online.py", "scripts/training/grpo/environmental.py")
 BETA = 0.04
 # TRL's own build call, which every constructor must leave bound once it returns or raises.
 _TRL_BUILD = trl_grpo_trainer.create_model_from_path

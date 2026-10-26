@@ -1,5 +1,5 @@
 #!/usr/bin/env python
-"""environmental_grpo.py script contracts: honest prompt conditioning + context accounting.
+"""grpo/environmental.py script contracts: honest prompt conditioning + context accounting.
 
 - ``system_prompt`` must be REJECTED at startup: the environment builds the rollout conversation
   (its own system prompt + tool schema) from only the dataset's user prompt, so a YAML
@@ -31,7 +31,7 @@ from tests.common.repo import REPO_ROOT, load_script_module
 
 @pytest.fixture(scope="module")
 def env_grpo_module():
-    return load_script_module("scripts/training/environmental_grpo.py", "halo_test_environmental_grpo")
+    return load_script_module("scripts/training/grpo/environmental.py", "halo_test_environmental_grpo")
 
 
 # system_prompt is rejected loudly (it cannot condition env rollouts)

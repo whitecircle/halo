@@ -97,11 +97,25 @@ NON_TRAINING_BUILDS = frozenset(
     }
 )
 
+# The standalone tools' own loads, which run no training step: tests/cpu/model_loading/test_load_finalization.py
+# classifies each by what it does with the model (a forward, or only a cast and a save).
+TOOL_BUILDS = frozenset(
+    {
+        ("halo/checkpoint/adapter_merge.py", "load_task_base_model"),
+        ("halo/checkpoint/bf16_conversion.py", "_load_adapter_model"),
+        ("halo/checkpoint/bf16_conversion.py", "_load_verified"),
+        ("halo/checkpoint/deepseek_v4_dequant.py", "convert_deepseek_v4_checkpoint"),
+        ("halo/checkpoint/offline_export.py", "load_task_model"),
+        ("halo/checkpoint/vocab_patch.py", "patch_vocabulary"),
+        ("halo/entrypoints/reward_scoring.py", "load_reward_model"),
+    }
+)
+
 # Functions whose ``from_config`` builds the toolkit's own config-driven objects (the example-generation
 # callback, the reward terms), not a model.
 NON_MODEL_BUILDERS = frozenset(
     {
-        ("scripts/training/offline_grpo.py", "main"),
+        ("scripts/training/grpo/offline.py", "main"),
         ("scripts/training/sft.py", "main"),
         ("halo/rewards/terms.py", "from_config"),
         ("halo/rewards/terms.py", "parse_reward_terms"),
@@ -555,7 +569,9 @@ def _eager_loaders() -> dict[tuple[str, str], frozenset[str]]:
 
 
 def test_the_eager_load_surface_is_pinned():
-    pinned = EAGER_LOADERS | UNCAST_LOADERS | ASSEMBLED_FROM_LOADED | NON_TRAINING_BUILDS | NON_MODEL_BUILDERS
+    pinned = (
+        EAGER_LOADERS | UNCAST_LOADERS | ASSEMBLED_FROM_LOADED | NON_TRAINING_BUILDS | TOOL_BUILDS | NON_MODEL_BUILDERS
+    )
     discovered = set(_eager_loaders())
     assert discovered == pinned, f"the model-build surface changed: {sorted(discovered ^ pinned)}; classify each"
 

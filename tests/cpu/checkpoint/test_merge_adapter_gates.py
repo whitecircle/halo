@@ -26,7 +26,7 @@ import pytest
 import torch
 from safetensors.torch import save_file
 
-from halo.checkpoint import adapter_merge
+from halo.checkpoint import adapter_merge, bf16_conversion
 from halo.checkpoint.adapters import EXPERT_LORA_PEFT_TYPE, assert_no_expert_lora_adapter
 from halo.checkpoint.format import (
     ADAPTER_CONFIG_FILE,
@@ -34,7 +34,6 @@ from halo.checkpoint.format import (
     MERGED_ADAPTER_CONFIG_DIR,
     SAFETENSORS_INDEX_FILE,
 )
-from scripts.after_training import convert_to_bf16, merge_peft_adapters
 
 # The gates that must run for real: each one is the check under test, not a stand-in for it.
 _REAL_GATES = (
@@ -247,7 +246,6 @@ def test_an_unmarked_expert_adapter_is_caught_in_either_weight_file(tmp_path, we
 def test_the_merge_tool_folds_through_the_shared_sequence(tmp_path, monkeypatch):
     """A tool that re-grew its own load→merge→save path would carry none of the gates above, so the
     tool's own entry point is driven here and must arrive at the shared merge."""
-    assert merge_peft_adapters.merge_adapter_into_base is adapter_merge.merge_adapter_into_base
 
     base = tmp_path / "base"
     base.mkdir()
@@ -258,8 +256,8 @@ def test_the_merge_tool_folds_through_the_shared_sequence(tmp_path, monkeypatch)
         tools.append(tool)
         return _Merged()
 
-    monkeypatch.setattr(merge_peft_adapters, "merge_adapter_into_base", capture)
-    merge_peft_adapters.merge_peft_adapter(adapter_dir=adapter, output_dir=str(tmp_path / "out"), verbose=False)
+    monkeypatch.setattr(adapter_merge, "merge_adapter_into_base", capture)
+    adapter_merge.merge_peft_adapter(adapter_dir=adapter, output_dir=str(tmp_path / "out"), verbose=False)
 
     assert tools == ["merge_peft_adapters"], f"merge_peft_adapters did not reach the shared merge (reached: {tools})"
 
@@ -268,15 +266,15 @@ def test_the_merge_tool_folds_through_the_shared_sequence(tmp_path, monkeypatch)
 def test_an_unmerged_adapter_conversion_runs_the_shared_gates(tmp_path, monkeypatch, side):
     """``convert_to_bf16 --peft`` re-saves an adapter a later merge reads,
     so it owes the merge's gates, taken from the one sequence rather than a copy of it."""
-    assert convert_to_bf16.adapter_input_gates is adapter_merge.adapter_input_gates
+    assert bf16_conversion.adapter_input_gates is adapter_merge.adapter_input_gates
 
     base = tmp_path / "base"
     base.mkdir()
     adapter = _adapter_dir(tmp_path, base)
-    monkeypatch.setattr(convert_to_bf16, "load_model", lambda *a, **k: pytest.fail("loaded past a refused gate"))
+    monkeypatch.setattr(bf16_conversion, "load_model", lambda *a, **k: pytest.fail("loaded past a refused gate"))
 
     with pytest.raises(ValueError, match="not in-place"):
-        convert_to_bf16.convert_to_bf16(
+        bf16_conversion.convert_to_bf16(
             adapter, adapter if side == "adapter" else str(base), "causal_lm", is_peft=True
         )
 

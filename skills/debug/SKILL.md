@@ -92,9 +92,9 @@ the others never reach.
    different branch — confirm with the stack dump (hang branch) which subgroup is stuck.
 4. Transport/topology (RDMA not engaging): `NCCL_DEBUG=INFO`, `NCCL_DEBUG_SUBSYS=INIT,NET`.
 5. Marginal NVLink fabric (intermittent stalls, Xid 145 flood in `dmesg`): preflight-gate with
-   `python scripts/profiling/nvlink_health.py` (`--per-link` / `--json`) — flags hard link errors
-   / deep FEC bins, exits non-zero when a link is unhealthy; `nvidia-smi`-only, safe alongside a
-   live job.
+   `python scripts/profiling/nvlink_health.py` (`--per_link` / `--json`) — flags hard link errors
+   / deep FEC bins and down links, exits non-zero when a link is unhealthy or down or a GPU has fewer
+   active links than its peers; `nvidia-smi`-only, safe alongside a live job.
 
 ### Slow but not stuck (throughput / straggler)
 

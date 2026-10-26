@@ -25,7 +25,8 @@ import torch
 from safetensors import safe_open
 from safetensors.torch import save_file
 
-from scripts.before_training.convert_glm5_bf16 import dequantize_block_fp8, main
+from halo.checkpoint.fp8_dequant import dequantize_block_fp8
+from scripts.before_training.convert_glm5_bf16 import main
 
 _BLOCK = (4, 4)
 # Rows are NOT a multiple of the block (10 = 2 full blocks + a 2-row tail), so the tail block must

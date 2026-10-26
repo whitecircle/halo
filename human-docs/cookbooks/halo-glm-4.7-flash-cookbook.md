@@ -65,7 +65,7 @@ non-thinking render. To keep rollouts non-thinking, also add
 
 ```bash
 cp examples/grpo/environmental/environmental-grpo-template.yaml glm47-grpo.yaml
-CUDA_VISIBLE_DEVICES=4,5,6,7 halo launch environmental-grpo glm47-grpo.yaml -n 4 \
+CUDA_VISIBLE_DEVICES=4,5,6,7 halo launch grpo/environmental glm47-grpo.yaml -n 4 \
   --model_name_or_path=/data/checkpoints/glm-4.7-flash-sft \
   --chat_template=jinja-templates/glm/glm-native.jinja --force_chat_template=true \
   --routing_replay=rollout --beta=0.0 \

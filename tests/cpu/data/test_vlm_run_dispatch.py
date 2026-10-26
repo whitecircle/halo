@@ -360,8 +360,8 @@ def test_generative_row_renderer_refuses_an_image_content_part():
 
 @pytest.mark.parametrize("field", ["prompt", "completions"])
 def test_offline_grpo_renderer_refuses_an_image_content_part(field):
-    """``scripts/training/offline_grpo.py`` templates prompt and completions itself."""
-    module = _script_module("offline_grpo.py")
+    """``scripts/training/grpo/offline.py`` templates prompt and completions itself."""
+    module = _script_module("grpo/offline.py")
     row = {"prompt": TEXT_TURNS[:1], "completions": [[{"role": "assistant", "content": "a"}]]}
     if field == "prompt":
         row["prompt"] = IMAGE_TURNS[:1]

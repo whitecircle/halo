@@ -24,8 +24,7 @@ import numpy as np
 import pytest
 from datasets import Dataset
 
-from halo.checkpoint import adapter_merge
-from scripts.after_training import merge_models, merge_peft_adapters, reset_sinks
+from halo.checkpoint import adapter_merge, model_merge, sink_reset
 from scripts.inference.generation import dataset_deduplication
 
 # --- merge_models: a tokenizer-less artifact is not a deliverable ---------------------------------
@@ -43,7 +42,7 @@ def test_a_merge_whose_source_ships_no_tokenizer_raises_and_names_the_flag(tmp_p
     out.mkdir()
 
     with pytest.raises(RuntimeError) as excinfo:
-        merge_models._copy_aux_files(
+        model_merge._copy_aux_files(
             str(_source_without_tokenizer(tmp_path)),
             str(out),
             "bfloat16",
@@ -63,7 +62,7 @@ def test_the_opt_out_accepts_a_tokenizer_less_artifact(tmp_path):
     out = tmp_path / "out"
     out.mkdir()
 
-    merge_models._copy_aux_files(
+    model_merge._copy_aux_files(
         str(_source_without_tokenizer(tmp_path)),
         str(out),
         "bfloat16",
@@ -75,6 +74,15 @@ def test_the_opt_out_accepts_a_tokenizer_less_artifact(tmp_path):
     assert (out / "config.json").is_file()
 
 
+def test_merge_models_refuses_a_hub_tokenizer_source(tmp_path):
+    """Every merge source is a local directory, so --trust_remote_code's local default (on) holds for all
+    of them; a Hub id here would run a third-party repo's config code under that default."""
+    out = tmp_path / "out"
+    with pytest.raises(ValueError, match="--tokenizer_source 'org/third-party' is not a local directory"):
+        model_merge.merge_models(["/nope/a", "/nope/b"], str(out), method="linear", tokenizer_source="org/third-party")
+    assert not out.exists(), "a refused merge left an output directory behind"
+
+
 # --- reset_sinks: in-place is asked for, never defaulted ------------------------------------------
 
 
@@ -83,7 +91,7 @@ def test_reset_sinks_refuses_to_pick_an_output_directory_for_you(tmp_path):
     checkpoint.mkdir()
 
     with pytest.raises(ValueError) as excinfo:
-        reset_sinks.reset_sinks(str(checkpoint))
+        sink_reset.reset_sinks(str(checkpoint))
 
     message = str(excinfo.value)
     assert "--output_dir is required" in message
@@ -97,7 +105,7 @@ def test_reset_sinks_refuses_an_output_dir_aimed_at_its_own_input(tmp_path):
     checkpoint.mkdir()
 
     with pytest.raises(ValueError, match="input and output directory are the same path"):
-        reset_sinks.reset_sinks(str(checkpoint), output_dir=str(checkpoint))
+        sink_reset.reset_sinks(str(checkpoint), output_dir=str(checkpoint))
 
 
 def test_in_place_and_output_dir_together_are_contradictory(tmp_path):
@@ -105,25 +113,27 @@ def test_in_place_and_output_dir_together_are_contradictory(tmp_path):
     checkpoint.mkdir()
 
     with pytest.raises(ValueError, match="cannot be combined with --output_dir"):
-        reset_sinks.reset_sinks(str(checkpoint), output_dir=str(tmp_path / "other"), in_place=True)
+        sink_reset.reset_sinks(str(checkpoint), output_dir=str(tmp_path / "other"), in_place=True)
 
 
 @pytest.mark.parametrize("source", ["org/model", "missing-checkpoint"], ids=["hub-repo-id", "missing-path"])
 def test_in_place_needs_a_local_directory(source, tmp_path, monkeypatch):
     """--in_place rewrites its source, so only a local directory qualifies: a Hub repo id and a
-    mistyped path, slash or not, are refused before anything is loaded."""
+    mistyped path, slash or not, are refused before anything is fetched."""
     monkeypatch.chdir(tmp_path)
-    monkeypatch.setattr(reset_sinks, "auto_load_model", lambda *a, **k: pytest.fail(f"--in_place loaded {source}"))
+    monkeypatch.setattr(
+        sink_reset, "resolve_checkpoint_source", lambda *a, **k: pytest.fail(f"--in_place fetched {source}")
+    )
 
     with pytest.raises(ValueError, match="not a local directory"):
-        reset_sinks.reset_sinks(source, in_place=True)
+        sink_reset.reset_sinks(source, in_place=True)
 
 
 def test_one_spelling_decides_what_a_sink_key_is():
     """The scan, the reset and the verification all read this predicate; three literals could
     verify tensors they never reset."""
-    assert reset_sinks.is_sink_key("model.layers.0.self_attn.sinks")
-    assert not reset_sinks.is_sink_key("model.layers.0.self_attn.q_proj.weight")
+    assert sink_reset.is_sink_key("model.layers.0.self_attn.sinks")
+    assert not sink_reset.is_sink_key("model.layers.0.self_attn.q_proj.weight")
 
 
 # --- merge_peft_adapters: the merge takes the BASE's aux files -----------------------------------
@@ -181,9 +191,9 @@ def test_a_peft_merge_copies_the_base_directory_not_the_adapter(tmp_path, monkey
         "save_full_checkpoint",
         lambda model, output_dir, **kwargs: captured.update(source_dir=kwargs.get("source_dir")),
     )
-    monkeypatch.setattr(merge_peft_adapters, "_load_base_model", lambda *a, **k: _Merged())
+    monkeypatch.setattr(adapter_merge, "load_task_base_model", lambda *a, **k: _Merged())
 
-    merge_peft_adapters.merge_peft_adapter(str(adapter), str(tmp_path / "out"), fp32_norms=True, verbose=False)
+    adapter_merge.merge_peft_adapter(str(adapter), str(tmp_path / "out"), fp32_norms=True, verbose=False)
 
     assert captured["source_dir"] == str(base), "the merged checkpoint must inherit the BASE's aux files"
     assert captured["adapter_config_written_to"].endswith("original_adapter_config"), (

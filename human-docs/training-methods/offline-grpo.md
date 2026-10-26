@@ -24,7 +24,7 @@ model, scores them with a reward model, and writes this shape.
 ## Run
 
 ```bash
-halo launch offline-grpo examples/grpo/offline/qwen3_5/offline-grpo-qwen3.6-35b-a3b-gsm8k.yaml -n 8
+halo launch grpo/offline examples/grpo/offline/qwen3_5/offline-grpo-qwen3.6-35b-a3b-gsm8k.yaml -n 8
 ```
 
 Nothing else has to run. `examples/grpo/offline/` also holds the GPT-OSS and Gemma 4 versions. Test a

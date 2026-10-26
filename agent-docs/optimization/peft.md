@@ -471,7 +471,7 @@ models.
 The base loads through the class the adapter's tensor keys address: an adapter from a `text_only_model: true`
 run (keys under `model.layers`) loads the text-only `*ForCausalLM`, not the multimodal wrapper, and keys
 naming no module of either class are refused — applied to the wrong class, PEFT matches nothing, warns, and
-the tool would write the bare base as a finished model. `convert_to_bf16.py --peft` shares the rule.
+the tool would write the bare base as a finished model.
 `--fp32_norms` writes every normalization leaf in fp32, the layout `convert_to_bf16.py` writes.
 
 The merge re-applies the run's training sidecars to the merged model and copies both files into the output:

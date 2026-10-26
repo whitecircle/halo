@@ -18,17 +18,17 @@ reasoning parsers, and the GPU split between trainer and server.
 Usage (each config's header carries its own exact launch line):
     # Plain data-parallel, 4 train GPUs
     CUDA_VISIBLE_DEVICES=4,5,6,7 torchrun --nproc_per_node=4 \\
-        scripts/training/environmental_grpo.py \\
+        scripts/training/grpo/environmental.py \\
         examples/grpo/environmental/gptoss/vllm/gptoss-20b-code-contests-full-ep1.yaml
 
     # Expert parallelism (MoE), 4 train GPUs, one dispatch group
     CUDA_VISIBLE_DEVICES=0,1,2,3 torchrun --nproc_per_node=4 \\
-        scripts/training/environmental_grpo.py \\
+        scripts/training/grpo/environmental.py \\
         examples/grpo/environmental/qwen3_5/vllm/qwen3.6-35b-a3b-react-math-full-ep4.yaml
 
     # SGLang rollouts
     CUDA_VISIBLE_DEVICES=4,5,6,7 torchrun --nproc_per_node=4 \\
-        scripts/training/environmental_grpo.py \\
+        scripts/training/grpo/environmental.py \\
         examples/grpo/environmental/gptoss/sglang/gptoss-20b-code-contests-full-ep1.yaml
 
 See agent-docs/training-methods/async-grpo/README.md for the objective, the environment roster and

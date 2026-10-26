@@ -33,11 +33,11 @@ from typing import NamedTuple
 import pyarrow as pa
 import pyarrow.parquet as pq
 
+from halo.data.pipeline.coordinated_map import resolve_map_num_proc
 from halo.environments.tasks.coding.contest_datasets import decode_test_payload
 from halo.log import configure_cli_logging
 from scripts.environments.preparation.parquet_parts import parquet_parts
 
-configure_cli_logging()
 logger = logging.getLogger(__name__)
 
 _HARDTESTS_GROUP_ORDER = ("LLMGen", "HackGen", "RPGen", "SPGen")
@@ -173,16 +173,49 @@ def _compact_one(args: tuple[str, str, str, dict]) -> tuple[str, int, int, int]:
 
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description="Compact a test-suite corpus into capped per-problem rows.")
-    p.add_argument("--source", required=True, choices=sorted(_COMPACTORS))
+    p.add_argument(
+        "--source",
+        required=True,
+        choices=sorted(_COMPACTORS),
+        help="Corpus layout: hardtests (base64-zlib-pickled suites) or codeforces_generated (one row per test).",
+    )
     p.add_argument("--input_dir", required=True, help="Directory of the source parquet shards.")
     p.add_argument("--output_dir", required=True, help="Directory for the compacted parquet parts.")
-    for name, default in _CAP_DEFAULTS.items():
-        p.add_argument(f"--{name}", type=int, default=default)
-    p.add_argument("--num_proc", type=int, default=16)
+    p.add_argument(
+        "--max_tests",
+        type=int,
+        default=_CAP_DEFAULTS["max_tests"],
+        help="Tests kept per problem (default: %(default)s).",
+    )
+    p.add_argument(
+        "--max_test_bytes",
+        type=int,
+        default=_CAP_DEFAULTS["max_test_bytes"],
+        help="Largest ordinary test kept, in bytes (default: %(default)s).",
+    )
+    p.add_argument(
+        "--max_large_tests",
+        type=int,
+        default=_CAP_DEFAULTS["max_large_tests"],
+        help="Tests per problem allowed past --max_test_bytes (default: %(default)s).",
+    )
+    p.add_argument(
+        "--max_large_bytes",
+        type=int,
+        default=_CAP_DEFAULTS["max_large_bytes"],
+        help="Largest of those large tests, in bytes (default: %(default)s).",
+    )
+    p.add_argument(
+        "--num_proc",
+        type=int,
+        default=None,
+        help="Worker processes, one source shard each (default: the toolkit's dataset-processing default).",
+    )
     return p.parse_args()
 
 
 def main() -> None:
+    configure_cli_logging()
     args = parse_args()
     shards = parquet_parts(args.input_dir)
     out = Path(args.output_dir)
@@ -190,7 +223,7 @@ def main() -> None:
     caps = {name: getattr(args, name) for name in _CAP_DEFAULTS}
     jobs = [(args.source, shard, str(out / f"{Path(shard).stem}.parquet"), caps) for shard in shards]
     total = undecodable = emptied = 0
-    with Pool(args.num_proc) as pool:
+    with Pool(resolve_map_num_proc(args.num_proc)) as pool:
         for path, kept, skipped, dropped in pool.imap_unordered(_compact_one, jobs):
             total += kept
             undecodable += skipped

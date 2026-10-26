@@ -3,7 +3,7 @@
 # all-correct group still ranks by length bin (rlrr_lambda); an all-wrong group ties at zero advantage.
 # See agent-docs/training-methods/grpo/online.md.
 # Launch: vllm-server with --weight-transfer-config '{"backend":"nccl"}' (GPU 0), then
-#   CUDA_VISIBLE_DEVICES=1,2 torchrun --nproc_per_node=2 scripts/training/online_grpo/rlvr.py <this config>
+#   CUDA_VISIBLE_DEVICES=1,2 torchrun --nproc_per_node=2 scripts/training/grpo/online.py <this config>
 
 # --- Model ---
 model_name_or_path: Qwen/Qwen3-8B

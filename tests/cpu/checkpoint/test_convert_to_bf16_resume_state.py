@@ -20,6 +20,7 @@ from safetensors.torch import save_file
 from transformers import Qwen3Config, Qwen3ForCausalLM
 
 from halo.checkpoint.adapters import EXPERT_LORA_PEFT_TYPE
+from halo.checkpoint.bf16_conversion import convert_to_bf16
 from halo.checkpoint.format import (
     ADAPTER_CONFIG_FILE,
     ADAPTER_SAFETENSORS_FILE,
@@ -30,7 +31,6 @@ from halo.checkpoint.format import (
 )
 from halo.checkpoint.parallel.resume_source import classify_resume_weights
 from halo.checkpoint.reading import resolve_checkpoint_weights
-from scripts.after_training.convert_to_bf16 import convert_to_bf16
 from tests.common.checkpoint_io import mark_resume_adapter
 from tests.common.models import TINY_QWEN3_CONFIG
 

@@ -16,19 +16,20 @@ from types import SimpleNamespace
 import pytest
 from transformers import CONFIG_MAPPING
 
+import halo.entrypoints.environment_eval as training_contract
 import halo.environments.rollout_config as rollout_config
-import scripts.environments.training_contract as training_contract
+from halo.entrypoints.environment_eval import (
+    EVAL_REQUEST_TIMEOUT_SECONDS,
+    TrainingContract,
+    load_training_contract,
+    rollout_config_from_args,
+    write_eval_outputs,
+)
 from halo.env import nccl_timeout
 from halo.environments.registry import build_environment
 from halo.environments.rollout_config import RolloutConfig
 from halo.environments.tasks.coding.code_contests import DEFAULT_REASONING_EFFORT
-from scripts.environments.eval_arguments import (
-    EVAL_REQUEST_TIMEOUT_SECONDS,
-    rollout_config_from_args,
-    write_eval_outputs,
-)
 from scripts.environments.inference.run_code_contests import CODING_ENV_TYPES, resolve_env_config
-from scripts.environments.training_contract import TrainingContract, load_training_contract
 from tests.common.code_contests import StubSandbox
 from tests.common.repo import REPO_ROOT
 
@@ -289,7 +290,7 @@ def test_the_meta_line_records_the_whole_generation_contract(contract, tmp_path)
         _args(), contract, _env(contract), default_temperature=0.2, default_max_tokens=99
     )
     traj_path = tmp_path / "trajectories.jsonl"
-    args = _args(output=None, dataset="d", config=None, training_config=contract.path)
+    args = _args(output_path=None, dataset="d", config=None, training_config=contract.path)
     env = SimpleNamespace(max_turns=7, system_prompt="sp", get_tools_schema=lambda: None)
 
     write_eval_outputs(

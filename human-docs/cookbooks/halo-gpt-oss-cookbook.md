@@ -80,7 +80,7 @@ In the training container, copy the recipe, set its `dataset`, and launch on GPU
 ```bash
 cp examples/grpo/environmental/gptoss/vllm/gptoss-20b-code-contests-full-ep4.yaml gpt-oss-grpo.yaml
 CUDA_VISIBLE_DEVICES=4,5,6,7 DIST_NCCL_TIMEOUT_MINUTES=60 \
-  halo launch environmental-grpo gpt-oss-grpo.yaml -n 4 \
+  halo launch grpo/environmental gpt-oss-grpo.yaml -n 4 \
   --model_name_or_path=/data/checkpoints/gpt-oss-20b-sft \
   --output_dir=/data/checkpoints/gpt-oss-20b-grpo
 ```

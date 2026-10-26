@@ -4,29 +4,32 @@ Catalog of toolkit scripts by category. For config fields see [Configuration](co
 
 Every entry script answers `python <script> --help` with its full flag list, including the CLI overrides for any YAML field.
 
-The `halo` CLI (`halo/cli.py`) runs them by name: `halo launch <method> <config>` for `scripts/training/`, `halo run <tool>` for every other `scripts/` subtree except `diagrams/` (`--list` on either enumerates them). The launcher follows the flags, never the config: `accelerate launch` with `--accelerate <cfg>`, `torchrun` when `--nproc/-n > 1`, plain `python` otherwise. So `halo launch sft <ep-config>.yaml` without `-n` runs single-process.
+The `halo` CLI (`halo/cli.py`) runs them by name: `halo launch <method> <config>` for `scripts/training/`, `halo run <tool>` for every other `scripts/` subtree except `diagrams/` (`--list` on either enumerates them). `halo launch` follows its flags, never the config: `accelerate launch` with `--accelerate <cfg>`, `torchrun` when `--nproc/-n > 1`, plain `python` otherwise, so `halo launch sft <ep-config>.yaml` without `-n` runs single-process. `halo run` always runs one `python` process (every tool is single-process) and owns only `--list`, `--dry-run` and `--root`, so `-n`, `-p` and a tool's own `--port` reach the tool. Both exec the script with `--root` first on `PYTHONPATH`, so a second checkout runs on its own `halo` and `scripts`.
 
 Run scripts from the repo root with the repo root importable. The wheel installs `halo` only (`packages = ["halo"]`), and `python scripts/<subtree>/<tool>.py` puts the *script's* directory on `sys.path`, not the repo root. So every CLI that imports a `scripts.*` helper needs `scripts` importable as well as `halo`.
 
 Both training images set `PYTHONPATH=/workspace` and the Makefile passes it into every container it starts. A host run needs `PYTHONPATH=.` from the repo root.
 
-Those helpers are the shared flag surfaces:
+A tool script parses its flags and calls its driver in `halo/`, which holds the logic and is what the tests exercise. The checkpoint tools' drivers are in `halo/checkpoint/`: `ep_shard_merge.py`, `pp_stage_merge.py`, `model_merge.py`, `adapter_merge.py`, `bf16_conversion.py`, `lowp_export.py`, `sink_reset.py`, `expert_unfuse.py`, `vision_reattach.py`, `vocab_patch.py`, `fp8_dequant.py` (the GLM-5 and Mistral 3/4 converters) and `deepseek_v4_dequant.py`. Each entry point configures CLI logging in `main()`, so importing a script changes no logging state.
+
+The `scripts.*` flag helpers are the shared flag surfaces:
 
 | Helper | Flags |
 |---|---|
-| `scripts/cli_arguments.py` | The shard cap, the Hub source block, `--dtype`, `--device_map` and `--trust_remote_code`, each taken by the `before_training/` and `after_training/` tools that need it (`quantize_to_lowp.py` and `s3_datasets.py` take none, `prepare_dataset.py` only `--trust_remote_code`); `--trust_remote_code` and the dtype flag, spelled `--rm_dtype`, by the reward-model scorers `rm_scoring.py` and `rm_rejection_sampling.py` (their device flag is their own `--rm_device`); `--trust_remote_code` by `inference/generation/dataset_deduplication.py`; the OpenAI-compatible endpoint block (`--base_url`, `--api_key`), taken by every CLI that drives a served model — `openai_batched_generation.py`, the two reward-model scorers, `run_env.py`, `run_code_contests.py` and the two Gradio playgrounds — with a required `--model` on all but the playgrounds (the chatbot declares its own optional `--model`; the environment playground takes the name in its UI) |
-| `scripts/inference/inference_arguments.py` | The generation block (`--n_parallel`, `--temperature`, `--max_gen_tokens`) and the prompt-row fields (`--id_field`, `--prompt_field`, `--local_system_prompt_field`, `--global_system_prompt`), shared by the S3 generation CLI and the reward-model scorers; the S3 dataset block (`--input_path`, `--output_path`, `--subfolder`) and `--checkpoint_interval` of the S3 generation CLI; the Gradio server block (`--host`, `--port`, `--share`) of the two playgrounds |
+| `scripts/cli_arguments.py` | The shard cap, the Hub source block, `--dtype`, `--device_map` and `--trust_remote_code`, each taken by the `before_training/` and `after_training/` tools that need it (`quantize_to_lowp.py` and `s3_datasets.py` take none, `prepare_dataset.py` only `--trust_remote_code`); `--trust_remote_code` and the dtype flag, spelled `--rm_dtype`, by the reward-model scorers `rm_scoring.py` and `rm_rejection_sampling.py` (their device flag is their own `--rm_device`); the Hub source block (`--model_id` without `--revision`) and `--trust_remote_code` by `inference/generation/dataset_deduplication.py`; the OpenAI-compatible endpoint block (`--base_url`, `--api_key`), taken by every CLI that drives a served model — `openai_batched_generation.py`, the two reward-model scorers, `run_env.py`, `run_code_contests.py` and the two Gradio playgrounds — with a required `--model` on all but the playgrounds (the chatbot declares its own optional `--model`; the environment playground takes the name in its UI) |
+| `scripts/inference/inference_arguments.py` | The generation block (`--max_workers`, `--temperature`, `--max_tokens`) and the prompt-row fields (`--id_field`, `--prompt_field`, `--local_system_prompt_field`, `--global_system_prompt`), shared by the S3 generation CLI and the reward-model scorers; the S3 dataset block (`--dataset`, `--output_path`, `--subfolder`) and `--checkpoint_interval` of the S3 generation CLI; the Gradio server block (`--host`, `--port`, `--share`) of the two playgrounds |
 | `scripts/inference/reward_model/reward_model_arguments.py` | The reward-model scoring block, on top of the previous two |
-| `scripts/environments/eval_arguments.py` | The env-eval dataset/endpoint/trajectory flags, their `Namespace` readers, and the output writer |
-| `scripts/environments/training_contract.py` | `TrainingContract`: the `--training_config` YAML read with the training script's config classes |
+| `scripts/environments/eval_arguments.py` | The env-eval dataset/endpoint/training-contract/sampling/trajectory flags; their readers, the output writer and `TrainingContract` (the `--training_config` YAML read with the training script's config classes) live in `halo/entrypoints/environment_eval.py` |
 
-Flag spelling is per script and stable: `scripts/profiling/**` and `before_training/s3_datasets.py` spell their own multi-word flags with dashes (`--server-url`); every other script uses underscores (`--base_url`), matching the YAML field names a training flag overrides. The shared `--trust_remote_code` keeps its one spelling everywhere.
+The generation CLIs' runs live in `halo/entrypoints/`: `resumable_generation.py` (the S3 prompt dataset and its resume, the merged push, the empty-run refusal, the batched generation run and `run_async_cli`), `reward_scoring.py` (the reward-model load, the batched scorer and the `rm_scoring.py` run) and `rejection_sampling.py` (the `rm_rejection_sampling.py` run).
+
+Multi-word flags use underscores (`--base_url`), matching the YAML field names a training flag overrides; `weight_sync_transport.py` alone keeps its dashed spellings (`--server-url`). One concept has one spelling across the tools: `--output_dir` for an output directory, `--output_path` for an output file, `--dataset` / `--split` / `--config` for a dataset source, `--model_id` for a model that may be a Hub repo, `--max_tokens` for a generation cap and `--max_workers` for request or episode concurrency.
 
 The checkpoint tools under `after_training/` and `before_training/` take one source/destination pair: `--input_dir` → `--output_dir` for a local checkpoint directory, `--model_id` → `--output_dir` where the source may also be a Hub repo (`patch_vocab.py`, `convert_deepseek_v4_bf16.py`, `convert_mistral4_bf16.py`, `convert_glm5_bf16.py`, `reset_sinks.py`). `reattach_vision_tower.py` takes both: `--input_dir` for the text-only export, `--model_id` for the multimodal base.
 
 Three tools keep a differently-shaped source because it is a different thing: `merge_models.py --models` (N inputs), `merge_peft_adapters.py --adapter_dir` (an adapter, not a checkpoint), and `prepare_dataset.py --input`/`--output` (dataset URIs — `s3://`, `hf://` or a local path).
 
-`merge_peft_adapters.py` selects the head with `--task {causal_lm,classification}`.
+`merge_peft_adapters.py` and `convert_to_bf16.py` select the head with one `--task` (`add_task_arg`): `causal_lm`, `classification`, and `base` on the conversion alone, since an adapter has no bare-backbone task.
 
 Launcher choice: [Two launchers](../parallelism/data-parallelism.md#two-launchers).
 
@@ -42,10 +45,10 @@ Which parallelism axes each trainer takes: [Trainer compatibility](trainer-archi
 | `scripts/training/preference/dpo.py` | [DPO](../training-methods/preference/dpo.md), text or VLM; TRL `loss_type` variants |
 | `scripts/training/preference/kto.py` | [KTO](../training-methods/preference/kto.md), text or VLM; unpaired binary feedback |
 | `scripts/training/preference/smpo.py` | [SMPO](../training-methods/preference/smpo.md), text or VLM; reference-free |
-| `scripts/training/preference/rewards.py` | [Bradley-Terry reward model](../training-methods/preference/reward-modeling.md) |
-| `scripts/training/online_grpo/rlvr.py` | [Online GRPO](../training-methods/grpo/online.md) scored by the config's reward terms; [online SDPG](../training-methods/distillation/online-sdpg.md) with `--use_sdpg=true` |
-| `scripts/training/offline_grpo.py` | [Offline GRPO](../training-methods/grpo/offline.md) on pre-scored completions |
-| `scripts/training/environmental_grpo.py` | [Async GRPO with Environments](../training-methods/async-grpo/README.md); `environment_type` picks the [environment](../training-methods/async-grpo/environments/README.md#registry) |
+| `scripts/training/reward/reward_model.py` | [Bradley-Terry reward model](../training-methods/preference/reward-modeling.md) |
+| `scripts/training/grpo/online.py` | [Online GRPO](../training-methods/grpo/online.md) scored by the config's reward terms; [online SDPG](../training-methods/distillation/online-sdpg.md) with `--use_sdpg=true` |
+| `scripts/training/grpo/offline.py` | [Offline GRPO](../training-methods/grpo/offline.md) on pre-scored completions |
+| `scripts/training/grpo/environmental.py` | [Async GRPO with Environments](../training-methods/async-grpo/README.md); `environment_type` picks the [environment](../training-methods/async-grpo/environments/README.md#registry) |
 | `scripts/training/classification.py` | [Sequence classification](../training-methods/classification.md), multi-class or multi-label |
 | `scripts/training/embedding.py` | [Embedding fine-tuning](../training-methods/embedding.md) with SBERT losses |
 | `scripts/training/distillation/teacher_distill.py` | [Teacher distillation](../training-methods/distillation/teacher-distillation.md), off-policy, text or VLM |
@@ -57,17 +60,17 @@ Which parallelism axes each trainer takes: [Trainer compatibility](trainer-archi
 |--------|-------------|
 | `scripts/inference/generation/openai_batched_generation.py` | Async batched generation with OpenAI-compatible API. Every request goes out as plain text, so rows carrying a structured `response_format` (any `type` but `text`) are refused before generation; the reward-model scripts honor one |
 | `scripts/inference/generation/dataset_deduplication.py` | FAISS-based semantic deduplication. Keyed on `--text_field` alone: two rows with the same text collapse to one however they differ elsewhere, so an images column does **not** make them distinct — deduplicate a VLM dataset before pairing its images, or on a field that carries the difference |
-| `scripts/inference/reward_model/rm_rejection_sampling.py` | Rejection-sampled preference (or offline-GRPO) dataset generation: hypotheses from any OpenAI-compatible endpoint, scored by a local reward model. A hypothesis the endpoint cut at `--max_gen_tokens` is dropped rather than scored as if it had finished, and a row left with fewer than two usable hypotheses is skipped; both counts are in the run summary. Each generated turn is written as `{role, content}` plus the reply's non-null extras (an engine's `reasoning_content`); null reply fields are dropped |
-| `scripts/inference/reward_model/rm_scoring.py` | Score datasets using reward models. A response cut at `--max_gen_tokens` is dropped and counted (`truncated=`) rather than scored as if it had finished. The scored turn is `{role, content}` plus the reply's non-null extras (an engine's `reasoning_content`) |
+| `scripts/inference/reward_model/rm_rejection_sampling.py` | Rejection-sampled preference (or offline-GRPO) dataset generation: hypotheses from any OpenAI-compatible endpoint, scored by a local reward model. A hypothesis the endpoint cut at `--max_tokens` is dropped rather than scored as if it had finished, and a row left with fewer than two usable hypotheses is skipped; both counts are in the run summary. Each generated turn is written as `{role, content}` plus the reply's non-null extras (an engine's `reasoning_content`); null reply fields are dropped |
+| `scripts/inference/reward_model/rm_scoring.py` | Score datasets using reward models. A response cut at `--max_tokens` is dropped and counted (`truncated=`) rather than scored as if it had finished. The scored turn is `{role, content}` plus the reply's non-null extras (an engine's `reasoning_content`) |
 | `scripts/inference/playground/gradio_openai_chatbot.py` | Chatbot UI (Gradio + OpenAI API). `--api_key` defaults to `$VLLM_API_KEY`, else `$OPENAI_API_KEY`, else vLLM's `EMPTY` placeholder |
 | `scripts/inference/playground/gradio_environment_playground.py` | Environment playground (Gradio) for testing GRPO environments against a rollout server. Episodes run through the shared eval driver (`run_episode` in `halo/environments/eval_runner.py`), so a turn the engine cut off at its token cap, or one the model ended on nothing, is recovered here exactly as in training. `--base_url` prefills the rollout server base URL; `--api_key` defaults to `$VLLM_API_KEY`, else `$OPENAI_API_KEY`, else vLLM's `EMPTY` placeholder, and stays server-side; `--host` binds loopback (`127.0.0.1`), so publishing the UI — and that key's spend — takes an explicit `--host 0.0.0.0` |
 | `scripts/environments/inference/run_code_contests.py` | Evaluate a served model on competitive programming, success@k per rating, difficulty or contest: [Code Contests → Evaluation](../training-methods/async-grpo/environments/tasks/code-contests/evaluation.md) |
 | `scripts/environments/inference/run_env.py` | Evaluate a served model on any other environment (`qa_search`, `exam_qa`, `swe`, `mcp`, …): [Evaluation](../training-methods/async-grpo/evaluation.md#running-an-evaluation) |
 | `scripts/environments/inference/regrade_trajectories.py` | Re-grade saved `run_code_contests.py` trajectories in one bounded process, apart from generation: [Re-grading](../training-methods/async-grpo/evaluation.md#re-grading-recorded-trajectories) |
 
-In `openai_batched_generation.py`, `--input_path` / `--output_path` are S3 **keys**, not URIs:
+In `openai_batched_generation.py`, `--dataset` / `--output_path` are S3 **keys**, not URIs:
 `build_s3_uri` joins them under `HALO_S3_DEFAULT_BUCKET` (required; unset raises) and `--subfolder`
-(default `datasets`, `None` to skip). On `dataset_deduplication.py`, `--input_path` is a
+(default `datasets`, `None` to skip). On `dataset_deduplication.py`, `--dataset` is a
 local file or a Hub dataset id and `--output_path` a local path.
 
 The three async CLIs — `openai_batched_generation.py`, `rm_rejection_sampling.py`, `rm_scoring.py`
@@ -90,10 +93,10 @@ any other endpoint.
 ```bash
 HALO_S3_DEFAULT_BUCKET=your-bucket \
 python scripts/inference/generation/openai_batched_generation.py \
-    --model my-model --input_path prompts --output_path responses
+    --model my-model --dataset prompts --output_path responses
 
 python scripts/inference/reward_model/rm_scoring.py \
-    --model my-model --prompts_source data/prompts.jsonl --rm_model_path path/to/reward-model
+    --model my-model --dataset data/prompts.jsonl --rm_model_id path/to/reward-model
 ```
 
 ## Post-training scripts
@@ -104,9 +107,9 @@ python scripts/inference/reward_model/rm_scoring.py \
 | `scripts/after_training/merge_models.py` | Merge same-architecture checkpoints in weight space (linear / slerp / task_arithmetic / ties). Streams one tensor at a time across the inputs (each key loaded from every model, merged, written), so peak host memory scales with the largest tensor, never the merged model ([Model Merging](model-merging.md#memory-and-output)) |
 | `scripts/after_training/merge_ep_shards.py` | Merge EP sharded checkpoints into a single model, writing each family's `ExpertLayout` through the same `to_hub_expert_tensors` the gathered save applies (GptOss gate/up re-interleaved) (`--max_shard_size` caps the output shards, default `5GB`). It casts nothing — the sharded writer already applied the save dtype — and needs `ep_size` in the per-rank index metadata, so a gathered or already-merged directory is declined. It copies the resume state, every rank's optimizer shard and `optimizer_meta.pt` included, so the merged directory resumes exactly on the save's topology; a meta naming a rank with no shard is refused. `--delete_input_shards` frees the per-rank weight shards once the merged checkpoint is complete — until then peak disk holds both. Refuses an input holding a PEFT adapter beside the shards: the aux copy would carry `adapter_config.json` but no adapter weights. Which runs may save sharded: [Checkpoints](checkpoints.md#expert-parallelism-ep-eptp-epcp) |
 | `scripts/after_training/merge_pp_stages.py` | Merge the per-node directories of a pipeline-parallel save (`--input_dir` one directory per node, `--output_dir`) into one `from_pretrained`-loadable checkpoint that resumes exactly on the save's topology: the inputs must carry one index and one `optimizer_meta.pt`, each part the index names is copied from the first input holding it, every input's optimizer shards and RNG states are copied, and a part or a rank's shard no input holds is refused ([Per-node export](../parallelism/pipeline-parallelism.md#per-node-export)) |
-| `scripts/after_training/convert_to_bf16.py` | Convert model weights to BF16, every normalization leaf (a torch norm base, or a class named `*Norm*`) forced back to fp32. Re-applies the source's training sidecars to a full model before saving (neutralized GptOss sinks, balancing tensors re-read from the source shards at their trained fp32) and carries `router_balancing_biases.pt` / `training_provenance.json` into the output either way, so an adapter conversion still hands them to the later merge (`merge_peft_adapters.py`, the one merge tool). `--peft` loads the base through the class the adapter's keys address and ships the processing class the merge would. `--model_type` (`causal_lm` default, `classifier`, `base`) picks the class the checkpoint loads with and gates the PEFT refusal. `--verify` asserts the STORED dtypes read from the saved safetensors headers — never a `from_pretrained` reload, which casts on the way in and so can never fail — weighted by parameter count, not tensor count. A `--peft` save is exempt: PEFT restores LoRA A/B to fp32 as it writes them. `--check_inference` is the separate diagnostic: it reloads the saved checkpoint and prints what it generates, returning no verdict — `--verify` is the gate that raises |
+| `scripts/after_training/convert_to_bf16.py` | Convert model weights to BF16, every normalization leaf (a torch norm base, or a class named `*Norm*`) forced back to fp32. Re-applies the source's training sidecars to a full model before saving (neutralized GptOss sinks, balancing tensors re-read from the source shards at their trained fp32) and carries `router_balancing_biases.pt` / `training_provenance.json` into the output either way, so an adapter conversion still hands them to the later merge (`merge_peft_adapters.py`, the one merge tool). `--peft` rewrites every floating tensor of `adapter_model.safetensors` at bf16 without loading the base (a bf16 adapter keeps its weights bit for bit) and carries the adapter directory's other files across, so the later merge resolves the processing class off the same directory. `--task` (`causal_lm` default, `classification`, `base`; the same flag as the merge's) picks the class the checkpoint loads with and gates the PEFT refusal. `--verify` asserts the STORED dtypes read from the saved safetensors headers — never a `from_pretrained` reload, which casts on the way in and so can never fail — weighted by parameter count, not tensor count. A `--peft` save verifies its adapter file the same way. `--check_inference` is the separate diagnostic: it reloads the saved checkpoint and prints what it generates, returning no verdict — `--verify` is the gate that raises |
 | `scripts/after_training/quantize_to_lowp.py` | Quantize a bf16/fp32 checkpoint to block-scaled mxfp8/mxfp4/nvfp4 (pairs with QAT — see [Mixed-Precision Training](../optimization/low-precision-moe-kernels.md)). `--format {mxfp8,mxfp4,nvfp4}` is required — the checkpoint names no target. The training run's lowp **scope** is not recorded in the checkpoint either, so four more flags restate it under the `ParallelismConfig` names and defaults — a config's values transfer verbatim: `--lowp_apply_dense_mlp` / `--lowp_apply_moe_experts` (both on; `--no-` prefix to disable) and `--lowp_keep_first_blocks` / `--lowp_keep_last_blocks` (both `0`). It quantizes the dense MLP projections and the declared expert weights, fused 3-D banks included (`experts.gate_up_proj` / `down_proj`), that match `--include` and not `--exclude` (regexes). `--contraction_axis` (default `-1`) applies to 2-D `*.weight` matrices only: a fused 3-D bank uses the `fused_contraction_axis` its family spec declares, and an unresolvable family raises. A sharded input gets a rebuilt index and every non-weight file copied. The output is no `from_pretrained` checkpoint: its `quant_method: block_scaled` is refused by vLLM and SGLang, while plain transformers only warns and random-initializes every quantized weight |
-| `scripts/after_training/reset_sinks.py` | Reset attention sink tokens in `--model_id` (a local checkpoint directory or a Hub repo id). `--dry_run` prints every sink tensor without writing. `--output_dir` is required for a write unless `--in_place` is given (the two are mutually exclusive; `--in_place` takes a local directory only); a `--dry_run` only reads and needs neither. A single-file checkpoint is edited directly in its safetensors file, a sharded one goes through `from_pretrained` + `save_pretrained`. Both branches stage the write — a sibling temp file or a sibling staging directory — verify every sink tensor sits at its dtype min, and only then replace the target, so a write that kept live sinks raises with the target untouched. It writes no `training_provenance.json` — both branches carry the source's record over verbatim, so a checkpoint whose sinks it just neutralized can still claim `live` to the merge tools that trust that record. Only `save_peft_adapters` writes the file |
+| `scripts/after_training/reset_sinks.py` | Reset attention sink tokens in `--model_id` (a local checkpoint directory or a Hub repo id). `--dry_run` prints every sink tensor without writing. `--output_dir` is required for a write unless `--in_place` is given (the two are mutually exclusive; `--in_place` takes a local directory only); a `--dry_run` only reads and needs neither. It works shard by shard and loads no model code (no `--trust_remote_code`): only the shards holding a sink are rewritten, one resident at a time, and the rest are hard-linked (or copied) across, so the output keeps the source's shard layout and index. Every rewritten shard is staged as a sibling, verified at its dtype min, and only once all of them verified renamed over its target, so a write that kept live sinks raises with the target untouched; a failed rename names the verified shards still to place. `--revision` pins a Hub source. A GPT-OSS checkpoint with no key named like a sink raises rather than copying through, and a family without sinks is copied through unchanged. It writes no `training_provenance.json` — the source's record is carried over verbatim, so a checkpoint whose sinks it just neutralized can still claim `live` to the merge tools that trust that record. Only `save_peft_adapters` writes the file |
 | `scripts/after_training/unfuse_moe_experts.py` | Unfuse contiguous fused-GLU MoE experts (`experts.gate_up_proj [E,2I,H]`/`down_proj`), `--input_dir` → `--output_dir` (`--max_shard_size` caps the output shards, default `5GB`), into the per-expert layout the checkpoint's own family declares (`MoEFamilySpec.expert_layout.per_expert_keys`): GLM-4 MoE Lite / Laguna / Qwen3 MoE / Qwen3.5-3.6 / Bailing-Ling / Cohere2 MoE / GLM-5 Next `experts.{i}.{gate,up,down}_proj.weight` — what vLLM's `glm4_moe_lite` loader expects — and LFM-2 / DeepSeek-V4 `experts.{i}.w{1,3,2}.weight`. For Qwen3.5/3.6 that is the spelling transformers' converter fuses on load, not the Hub's: their Hub checkpoints store the language-model experts fused, and only Qwen3.5's MTP layer per expert. A `model_type` whose checkpoint does not store one tensor per expert is refused: Gemma4 and Mistral4 register no per-expert conversion with transformers, GptOss's fused tensor is interleaved, Inkling's hub layout is the interleaved TM `w13_weight` one, Zaya's hub layout is fused already, and Step-3.7 Flash's is per-layer stacked (`moe.{gate,up}_proj [E, M, H]`, `moe.down_proj [E, H, M]`). Weights are unchanged, and a checkpoint with no fused expert keys is copied through |
 | `scripts/after_training/reattach_vision_tower.py` | Rebuild the multimodal wrapper layout from a `text_only_model` export: the trained text weights re-prefix to `model.language_model.*`, the base's untrained vision tower and MTP tail stream back in (`--input_dir` = the export, `--model_id` = the multimodal base, hub or local), and the composite config is regrafted with the trained text config. Both pinned engines (vLLM 0.32.0, SGLang 0.5.22) serve the text-only export as-is; this restores the vision tower, the MTP head and the processor files. A wrapper-layout input is refused, and so is an export whose keys are not the text-only layout its config declares (text keys already under `model.language_model.*`, or a module the base's text tower lacks) |
 
@@ -150,8 +153,8 @@ Every tool here refuses an input it cannot express, rather than writing a plausi
     directory for S3 or the Hub) and publishes with a swap once the bake is done, so its `--output` is
     guarded by `--overwrite`, not by this refusal.
 
-    `reset_sinks.py` is the exception: it holds the whole checkpoint in memory and stages the write,
-    so in-place is safe there, but never implicit. It takes `--in_place`; an `--output_dir` aimed at
+    `reset_sinks.py` is the exception: it stages and verifies every shard it rewrites before any
+    replaces its target, so in-place is safe there, but never implicit. It takes `--in_place`; an `--output_dir` aimed at
     the input is refused like the rest.
 
     Omitting both is an error on a write (a `--dry_run` only reads) rather than a silent rewrite of
@@ -160,26 +163,26 @@ Every tool here refuses an input it cannot express, rather than writing a plausi
 - **Remote code.** Every checkpoint tool that loads a checkpoint's own modeling/config/tokenizer code
   takes one `--trust_remote_code`, spelled once (`add_trust_remote_code_arg` in
   `scripts/cli_arguments.py`): `merge_peft_adapters.py`, `merge_models.py`,
-  `convert_to_bf16.py`, `reset_sinks.py`, `reattach_vision_tower.py`, `patch_vocab.py`,
+  `convert_to_bf16.py`, `reattach_vision_tower.py`, `patch_vocab.py`,
   `prepare_dataset.py`, `convert_deepseek_v4_bf16.py`, the reward-model scoring CLIs
   (`rm_scoring.py`, `rm_rejection_sampling.py`) through `scripts/inference/reward_model/reward_model_arguments.py`,
   and `dataset_deduplication.py`.
 
-    **The default follows the input source.** A local checkpoint or adapter (`--input_dir`,
-    `--adapter_dir`, `--models`, `--rm_model_path`, or the tokenizer of the run being prepared) defaults **on**: the
-    remote-code families in the roster (Bailing/Ling, Laguna) do not load without it, and the operator
-    already produced that artifact.
+    **The default follows the input source.** A local checkpoint, adapter or merge input
+    (`--input_dir`, `--adapter_dir`, `merge_models.py`'s `--models`, `--base_model` and
+    `--tokenizer_source`, all local directories) defaults **on**: the remote-code families in the roster
+    (Bailing/Ling, Laguna) do not load without it, and the operator already produced that artifact.
 
-    A Hub-capable `--model_id` source (`patch_vocab.py`, `convert_deepseek_v4_bf16.py`,
-    `reattach_vision_tower.py`, `reset_sinks.py`), like `dataset_deduplication.py`'s Hub-capable
-    `--model_name`, defaults **off**: a freshly downloaded
+    A source that may be a Hub repo (the `--model_id` of `patch_vocab.py`, `convert_deepseek_v4_bf16.py`,
+    `reattach_vision_tower.py` and `dataset_deduplication.py`, the scorers' `--rm_model_id`, and
+    `prepare_dataset.py`'s `--model_name_or_path`) defaults **off**: a freshly downloaded
     third-party repo must not execute its own code merely because a tool was pointed at it. Either
     way the opposite is one flag away (`--trust_remote_code` / `--no-trust_remote_code`).
 
     The tools that never enable remote code expose no such flag — `merge_ep_shards.py`,
-    `merge_pp_stages.py` (it copies files), `unfuse_moe_experts.py`, `quantize_to_lowp.py`, `convert_mistral4_bf16.py` and
-    `convert_glm5_bf16.py` stream safetensors and rewrite `config.json` as JSON, so no checkpoint
-    code is ever imported.
+    `merge_pp_stages.py` (it copies files), `unfuse_moe_experts.py`, `quantize_to_lowp.py`, `reset_sinks.py`,
+    `convert_mistral4_bf16.py` and `convert_glm5_bf16.py` stream safetensors and rewrite `config.json` as
+    JSON, so no checkpoint code is ever imported.
 
 - **Uninitialized buffers.** A tool whose loaded model is handed to a forward (reward scoring, the
   dedup embeddings, `convert_to_bf16.py --check_inference`) calls `finalize_loaded_model` after
@@ -188,17 +191,17 @@ Every tool here refuses an input it cannot express, rather than writing a plausi
 
     The load-only conversion tools do not: `state_dict` omits those buffers, so an unrepaired one
     reaches neither a number nor the written checkpoint.
-    `tests/cpu/model_loading/test_load_finalization.py` pins each new `scripts/` loader into one of the two
-    groups.
+    `tests/cpu/model_loading/test_load_finalization.py` pins each new tool loader, in a script or its
+    `halo/` driver, into one of the two groups.
 
 - **Shard cap and Hub source.** Two more flags are spelled once each, beside
   `add_trust_remote_code_arg`. `add_max_shard_size_arg` writes `--max_shard_size` (default
   `DEFAULT_MAX_SHARD_SIZE`, `5GB`) for every tool that re-shards its safetensors output;
-  `quantize_to_lowp.py` mirrors the input's shard layout one-for-one and takes no cap.
+  `quantize_to_lowp.py` and `reset_sinks.py` mirror the input's shard layout one-for-one and take no cap.
 
     `add_hub_source_args` writes `--model_id` plus the `--revision` pin for every tool whose source
-    may be a Hub repo. `patch_vocab.py` and `reset_sinks.py` take `--model_id` without `--revision`:
-    they thread none, and an advertised pin a tool ignores would silently convert whatever the Hub's
+    may be a Hub repo. `patch_vocab.py` takes `--model_id` without `--revision`:
+    it threads none, and an advertised pin a tool ignores would silently convert whatever the Hub's
     default branch holds that day. Pin such a source by downloading it first and pointing
     `--model_id` at the directory.
 
@@ -211,7 +214,7 @@ Every tool here refuses an input it cannot express, rather than writing a plausi
     so those keep their own diagnosis.
 
 - **`merge_models.py` inputs.** Asymmetric key sets (past a Hub base's keys the shipped model never
-  reads), a key stored at different shapes and a tokenizer-less `--tokenizer_source` are refused
+  reads), a key stored at different shapes, a `--tokenizer_source` that is not a local directory and a tokenizer-less one are refused
   ([Model Merging](model-merging.md#memory-and-output)).
 
 ## Preparation scripts
@@ -224,7 +227,7 @@ Every tool here refuses an input it cannot express, rather than writing a plausi
 | `scripts/before_training/convert_deepseek_v4_bf16.py` | Dequantize a FineGrained-FP8 DeepSeek-V4 checkpoint to uniform bf16 for training; `--max_shard_size` sizes the output shards (default `5GB`; see [DeepSeek-V4](../models/deepseek-v4.md)) |
 | `scripts/before_training/convert_mistral4_bf16.py` | Dequantize a public FP8 Mistral Small 4 checkpoint to bf16, streaming shard-by-shard (no full-model RAM footprint); `--max_shard_size` caps the output shards (default `5GB`; see [Mistral4](../models/mistral4.md)) |
 | `scripts/before_training/convert_glm5_bf16.py` | Dequantize the fp8 block-quantized GLM-5.3-Flash release to bf16 (block-wise `weight * scale_inv`, unquantized tensors keep their stored dtype), streaming shard-by-shard; `--model_id` may be a Hub repo; `--max_shard_size` caps the output shards (default `5GB`; see [GLM-5 Next](../models/glm5-next.md)) |
-| `scripts/environments/preparation/compact_code_tests.py` | Reduce a bulky test corpus to one capped row per problem for `prepare_code_dataset.py --tests_table`: `--source hardtests` (base64-zlib-pickled suites) or `codeforces_generated` (open-r1's one-row-per-test parquet), `--input_dir` shards → `--output_dir` parquet parts (`key`/`tests`/`checker`), one per source shard, stamped with the caps that built it (a part with the same caps is kept, so an interrupted run resumes; other caps rebuild it). At most `--max_tests` 40 tests within `--max_test_bytes` 262144 bytes each, of which `--max_large_tests` 2 may reach `--max_large_bytes` 4000000; source order preserved; `--num_proc` 16 shard workers; undecodable and emptied suites counted in the final log line |
+| `scripts/environments/preparation/compact_code_tests.py` | Reduce a bulky test corpus to one capped row per problem for `prepare_code_dataset.py --tests_table`: `--source hardtests` (base64-zlib-pickled suites) or `codeforces_generated` (open-r1's one-row-per-test parquet), `--input_dir` shards → `--output_dir` parquet parts (`key`/`tests`/`checker`), one per source shard, stamped with the caps that built it (a part with the same caps is kept, so an interrupted run resumes; other caps rebuild it). At most `--max_tests` 40 tests within `--max_test_bytes` 262144 bytes each, of which `--max_large_tests` 2 may reach `--max_large_bytes` 4000000; source order preserved; `--num_proc` shard workers (default: the toolkit's dataset-processing default); undecodable and emptied suites counted in the final log line |
 | `scripts/environments/preparation/prepare_code_dataset.py` | Prepare a competitive-programming dataset (`--adapter codeforces`/`deepcoder`/`hardtests`) for the coding RL env — composes prompts, packs tests/checker/time-limit. `--tests_table <dir>` joins a compacted suite onto the rows by problem id (a table matching no row of any split exits); `--exclude_keys <file>` drops listed problem ids (a trailing `*` excludes a prefix); `--holdout_per_band N` carves a deterministic `test` split (N rows per rating band plus N below the first band) from a source that ships only `train`; `--push_bands` pushes the `full` config plus one per rating band over the shared `test` split, `--config_name` a single config; `--verify_checkers` (default on, `--no-verify_checkers` off) drops a problem whose special judge rejects its own reference output or accepts garbage on the first test, running the judge in a `SandboxExecutor`. `--min_rating`/`--max_rating` also drop unrated problems (no-op without a `rating` column). A problem whose only tests are its statement's examples is dropped and counted per split unless `--include_examples_only`. `--num_proc` defaults to the toolkit's own dataset-processing default; a `--push_to_hub` repo is created private unless `--no-private`. See [Code Contests](../training-methods/async-grpo/environments/tasks/code-contests/datasets.md) |
 
 ```bash
@@ -234,7 +237,7 @@ python scripts/before_training/prepare_dataset.py \
     --pack_sequences --assistant_message_template $'<|im_start|>assistant\n'
 
 python scripts/before_training/patch_vocab.py \
-    --model_id Zyphra/ZAYA1-8B --output_dir /mnt/models/ZAYA1-8B-patched \
+    --model_id Zyphra/ZAYA1-8B --output_dir <large-volume>/models/ZAYA1-8B-patched \
     --patterns '["<tool_call>", "<tool_result>"]'
 # GptOss sink reset: --reset_sinks
 # remote-code family (Bailing/Ling, Laguna): add --trust_remote_code — a Hub source is opt-in here
@@ -246,9 +249,9 @@ python scripts/before_training/patch_vocab.py \
 
 | Script | Description |
 |--------|-------------|
-| `scripts/profiling/trace_report.py` | TraceLens analysis workbooks from torch.profiler traces — per-rank perf report + multi-rank NCCL collective/skew report (see [Debugging](debugging.md#1b-tracelens--automated-trace-analysis)). Trace sets are independent, so one unreportable capture does not cost the others' workbooks, but any failure exits non-zero; `--keep-going` accepts a partial run |
+| `scripts/profiling/trace_report.py` | TraceLens analysis workbooks from torch.profiler traces — per-rank perf report + multi-rank NCCL collective/skew report (see [Debugging](debugging.md#1b-tracelens--automated-trace-analysis)). Trace sets are independent, so one unreportable capture does not cost the others' workbooks, but any failure exits non-zero; `--keep_going` accepts a partial run |
 | `scripts/profiling/py_spy_diag.py` | Attach py-spy to a running job. Takes a subcommand: `dump` (instantaneous all-rank stack dump, hang triage) or `record` (per-rank CPU flame graphs over `--duration` seconds). Both default to this node's torchrun ranks, attach to every one at once, and exit 1 naming each pid they could not attach to; `--pid` (repeatable) targets others |
-| `scripts/profiling/nvlink_health.py` | Torch-free NVLink preflight from `nvidia-smi`: per-link hard errors, FEC correction depth, active bandwidth. Exits non-zero only when a link is unhealthy, separating real faults from benign `Xid 145` churn (see [Debugging](debugging.md)) |
+| `scripts/profiling/nvlink_health.py` | Torch-free NVLink preflight from `nvidia-smi`: per-link hard errors, FEC correction depth, active bandwidth. Exits non-zero when a link is unhealthy (hard errors) or down (inactive, or no speed reported — an unwired link nvidia-smi lists included, so the check is for fully wired NVLink nodes), or when a GPU has fewer active links than its peers; correctable FEC churn, the benign `Xid 145` source, is reported as marginal and passes. `--per_link` prints every link, `--json` the raw report (see [Debugging](debugging.md)) |
 | `scripts/profiling/weight_sync_transport.py` | Weight-sync transport preflight against a live rollout server (driver `halo/weight_sync/transport_check.py`): forms the group with the toolkit's own client, pushes one parameter of the served checkpoint unchanged and names the transport NCCL formed on. `--server-url` (required), `--backend vllm\|sglang`, `--group-port` (`0` = ephemeral), `--group-host` (auto), `--device` (`cuda:0`), `--param` (the input embedding), `--model-id` / `--revision` (the checkpoint the server loaded; default the id it advertises), `--rounds` (3), `--connection-timeout` (120 s), `--expect efa\|ib\|socket\|p2p\|shm` (exit 1 on a mismatch or an altered served model), `--json`. Procedure and transport legend: [Rollout Servers](../infrastructure/rollout-servers.md#servers-on-other-nodes-efa) |
 
 Throughput benchmarks live under `tests/gpu/profiling/`, grouped by what they measure:
@@ -266,6 +269,12 @@ Throughput benchmarks live under `tests/gpu/profiling/`, grouped by what they me
 make bench BAND=1
 torchrun --nproc_per_node=8 tests/gpu/profiling/benchmark_smpo_ep.py --ep 8 --cp 2
 ```
+
+## Docs scripts
+
+| Script | Description |
+|--------|-------------|
+| `scripts/docs/check_links.py` | The docs link gate (`scripts/docs/check_links.sh`, `make docs`): every relative link, heading anchor and code reference in the given markdown files or directories (default: `agent-docs`, `human-docs`, `skills` and the root markdown) must resolve; exits 1 naming each one that does not |
 
 The docs' own figures are generated by the standalone matplotlib scripts in `scripts/diagrams/`
 (`gen_*.py`); they are linted with the rest of the tree (their per-file exemptions are the

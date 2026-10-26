@@ -25,7 +25,7 @@ from halo.configs.grpo_online import RLVROnlineGRPOScriptArguments
 from halo.configs.parser import HaloArgumentParser
 from tests.common.repo import REPO_ROOT
 
-RLVR_SCRIPT = REPO_ROOT / "scripts/training/online_grpo/rlvr.py"
+RLVR_SCRIPT = REPO_ROOT / "scripts/training/grpo/online.py"
 
 NON_DEFAULT_CONFIG = RLRRConfig(
     mode="prr",

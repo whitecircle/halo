@@ -21,7 +21,7 @@ untouched vision tensors ride every checkpoint under the wrapper layout, and an 
 refused by the pipeline gate.
 
 Usage:
-    torchrun --nproc_per_node=8 scripts/training/preference/rewards.py \\
+    torchrun --nproc_per_node=8 scripts/training/reward/reward_model.py \\
         examples/reward/gptoss/rm-gptoss-20b-skywork-pref80k-ep.yaml
 """
 

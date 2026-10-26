@@ -24,7 +24,7 @@ from tests.cpu.config.test_examples_parse import (
     script_for,
 )
 
-_ENV_GRPO_SCRIPT = "environmental_grpo.py"
+_ENV_GRPO_SCRIPT = "grpo/environmental.py"
 _ENV_GRPO_EXAMPLES = [config for config in _EXAMPLES if script_for(config) == _ENV_GRPO_SCRIPT]
 
 

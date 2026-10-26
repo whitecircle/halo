@@ -16,9 +16,9 @@ import torch
 from safetensors.torch import load_file, save_file
 
 import halo.checkpoint.offline_export as offline_export
+from halo.checkpoint.ep_shard_merge import merge_ep_shards
 from halo.checkpoint.offline_export import preflight_model_load_resources, preflight_resource_warning
 from halo.hardware import available_host_ram_bytes
-from scripts.after_training.merge_ep_shards import merge_ep_shards
 
 H = 32
 

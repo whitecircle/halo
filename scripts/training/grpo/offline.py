@@ -4,7 +4,7 @@
 Group-relative policy optimization over pre-computed completions and rewards — no live generation.
 
 Usage:
-    torchrun --nproc_per_node=8 scripts/training/offline_grpo.py \\
+    torchrun --nproc_per_node=8 scripts/training/grpo/offline.py \\
         examples/grpo/offline/qwen3_5/offline-grpo-qwen3.6-35b-a3b-gsm8k.yaml
 """
 

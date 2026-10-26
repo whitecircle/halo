@@ -160,9 +160,11 @@ manifest.
   run), so `from halo...` / `from tests.common...` work in both `pytest` and a standalone
   `torchrun tests/gpu/<script>.py`.
 
-    A per-file `sys.path.insert` is dead weight that only masks running outside the image. `scripts/`
-    is a namespace package, so a test imports a tool by dotted path
-    (`from scripts.after_training.merge_models import merge_models`);
+    A per-file `sys.path.insert` is dead weight that only masks running outside the image. A tool's
+    driver lives in `halo/` and a test imports it from there
+    (`from halo.checkpoint.model_merge import merge_models`). `scripts/` is a namespace package, so a
+    test imports what a script itself owns by dotted path
+    (`from scripts.environments.inference.run_env import build_examples`);
     `tests.common.repo.load_script_module` loads one by file path where a test needs a module object
     of its own (a fresh copy per case, a name registered for `patch`) or the file sits outside the
     packages (`docker/`).

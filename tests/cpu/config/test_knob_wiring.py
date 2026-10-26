@@ -263,12 +263,12 @@ def _rejected_knobs(script_path: str) -> set[str]:
     ("script", "fields"),
     [
         ("scripts/training/preference/kto.py", {"tools_field", "log_decoded_samples"}),
-        ("scripts/training/preference/rewards.py", {"log_decoded_samples", "text_only_model", "tools_field"}),
+        ("scripts/training/reward/reward_model.py", {"log_decoded_samples", "text_only_model", "tools_field"}),
         ("scripts/training/preference/dpo.py", {"tools_field"}),
         ("scripts/training/preference/smpo.py", {"tools_field"}),
         ("scripts/training/classification.py", {"text_only_model"}),
-        ("scripts/training/environmental_grpo.py", {"tools_field", "text_only_model"}),
-        ("scripts/training/online_grpo/rlvr.py", {"text_only_model"}),
+        ("scripts/training/grpo/environmental.py", {"tools_field", "text_only_model"}),
+        ("scripts/training/grpo/online.py", {"text_only_model"}),
         (
             "scripts/training/embedding.py",
             {
@@ -324,8 +324,8 @@ def _run_script_main(script: str, config_body: str, tmp_path: Path) -> None:
     [
         # The text-only CausalLM spells its decoder model.layers.* while the served multimodal
         # checkpoint spells model.language_model.layers.*; the sync forwards names verbatim.
-        ("online_grpo/rlvr.py", "text_only_model: true\n", "text_only_model"),
-        ("environmental_grpo.py", "text_only_model: true\nenvironment_type: react_math\n", "text_only_model"),
+        ("grpo/online.py", "text_only_model: true\n", "text_only_model"),
+        ("grpo/environmental.py", "text_only_model: true\nenvironment_type: react_math\n", "text_only_model"),
         # TRL's own dataset prep and default collator — the only consumers — are both replaced.
         ("sft.py", "assistant_only_loss: true\n", "assistant_only_loss"),
         ("distillation/self_distill.py", "completion_only_loss: false\n", "completion_only_loss"),

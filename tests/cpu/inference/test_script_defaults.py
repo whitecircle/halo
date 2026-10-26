@@ -10,7 +10,7 @@
   to every interface out of the box. Reaching it from off-box takes an explicit flag. The apps
   declare that block once (``add_gradio_server_args``), so the checks build each app's real parser
   rather than reading a literal out of its source.
-* Throughput/resume defaults: ``--n_parallel`` (4/8/32) and ``--checkpoint_interval`` (50/100) read
+* Throughput/resume defaults: ``--max_workers`` (4/8/32) and ``--checkpoint_interval`` (50/100) read
   one home each rather than four and two independent literals across scripts driving the same
   endpoint.
 * Gradio API: each app's real ``create_demo`` is built and served under the gradio the lock pins.
@@ -46,12 +46,12 @@ import pytest
 import torch
 from openai import AsyncOpenAI
 
+from halo.entrypoints import reward_scoring
 from halo.inference.endpoints import DEFAULT_LOCAL_BASE_URL
 from scripts.cli_arguments import add_dtype_arg, add_openai_endpoint_args
 from scripts.inference import inference_arguments
 from scripts.inference.inference_arguments import add_prompt_field_args
 from scripts.inference.playground import gradio_environment_playground
-from scripts.inference.reward_model import reward_model_arguments
 from scripts.inference.reward_model.reward_model_arguments import build_generation_parser
 from tests.common.ports import free_port
 from tests.common.repo import REPO_ROOT, load_script_module
@@ -101,7 +101,7 @@ def _argparse_default(source: str, flag: str):
 
 def _rm_args(*extra: str):
     parser = build_generation_parser("test", temperature_default=0.0)
-    return parser.parse_args(["--model", "gen", "--prompts_source", "p.jsonl", "--rm_model_path", "org/rm", *extra])
+    return parser.parse_args(["--model", "gen", "--dataset", "p.jsonl", "--rm_model_id", "org/rm", *extra])
 
 
 def test_reward_model_dtype_defaults_to_bfloat16():
@@ -123,18 +123,18 @@ def test_reward_model_loader_applies_the_requested_dtype(monkeypatch, requested,
         def eval(self):
             return self
 
-    monkeypatch.setattr(reward_model_arguments, "reject_partial_checkpoint", lambda path: None)
+    monkeypatch.setattr(reward_scoring, "reject_partial_checkpoint", lambda path: None)
     monkeypatch.setattr(
-        reward_model_arguments,
+        reward_scoring,
         "AutoTokenizer",
         types.SimpleNamespace(from_pretrained=lambda *a, **k: types.SimpleNamespace()),
     )
-    monkeypatch.setattr(reward_model_arguments, "from_pretrained_verified", lambda *a, **k: _Model())
+    monkeypatch.setattr(reward_scoring, "from_pretrained_verified", lambda *a, **k: _Model())
 
     args = _rm_args(*(["--rm_dtype", requested] if requested else []))
-    reward_model_arguments.load_reward_model(
-        args.rm_model_path,
-        args.rm_model_atten_impl,
+    reward_scoring.load_reward_model(
+        args.rm_model_id,
+        args.rm_attn_implementation,
         args.rm_max_seq_len,
         "cpu",
         args.rm_dtype,
@@ -379,14 +379,17 @@ def test_the_generation_clis_share_one_concurrency_and_checkpoint_default():
     """One home per knob, or the siblings drift.
 
     The CLIs drive the same local rollout server through the same async client, so a per-script
-    literal — ``--n_parallel`` at 4, 8 or 32, ``--checkpoint_interval`` at 50 or 100 — silently
+    literal — ``--max_workers`` at 4, 8 or 32, ``--checkpoint_interval`` at 50 or 100 — silently
     throttles a sibling's throughput and widens what an interrupted run must regenerate, with
-    nothing claiming the difference is deliberate.
+    nothing claiming the difference is deliberate. Swept over every CLI that talks to a served model,
+    plus the module the shared block lives in (dedup's ``--max_workers`` counts local threads).
     """
-    expected = {"--n_parallel": "DEFAULT_N_PARALLEL", "--checkpoint_interval": "DEFAULT_CHECKPOINT_INTERVAL"}
+    expected = {"--max_workers": "DEFAULT_MAX_WORKERS", "--checkpoint_interval": "DEFAULT_CHECKPOINT_INTERVAL"}
     declared: dict[str, list] = {flag: [] for flag in expected}
     for script in sorted(_INFERENCE_ROOT.rglob("*.py")):
         source = script.read_text(encoding="utf-8")
+        if script.name != "inference_arguments.py" and "add_openai_endpoint_args" not in source:
+            continue
         for flag in expected:
             default = _argparse_default(source, flag)
             if default is not _ABSENT:

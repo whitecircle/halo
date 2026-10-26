@@ -55,7 +55,7 @@ No shipped config turns it on; start from the template, which carries the block 
 
 ```bash
 # trainer on GPUs 0-6, the vLLM server holding GPU 7
-CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6 halo launch rlvr \
+CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6 halo launch grpo/online \
     examples/grpo/online/rlvr-online-grpo-template.yaml -n 7 \
     --use_sdpg=true --sdpg_beta_base=1.0
 ```

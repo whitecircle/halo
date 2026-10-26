@@ -27,7 +27,7 @@ from halo.data.pipeline.rejected_rows import blank_conversation, build_rejection
 from halo.data.pipeline.text_rows import build_chat_row_processor
 from halo.data.preprocessed.metadata import PreprocessingConfig
 from halo.data.preprocessed.tokenization import tokenize_dataset, tokenize_vlm_dataset
-from scripts.training.online_grpo.rlvr import build_rlvr_row_fn
+from scripts.training.grpo.online import build_rlvr_row_fn
 from tests.common.vlm_fakes import FakeVLMProcessorBase
 
 

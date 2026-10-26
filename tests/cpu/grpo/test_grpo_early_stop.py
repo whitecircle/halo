@@ -210,7 +210,7 @@ def test_online_args_carry_the_shared_conditions_and_no_breaker_one():
 def test_the_online_script_hands_both_knobs_to_the_trainer():
     """The shared knobs parse on the online args; a script that drops them from the trainer call leaves
     a run that looks configured and trains without them."""
-    tree = ast.parse((REPO_ROOT / "scripts/training/online_grpo/rlvr.py").read_text())
+    tree = ast.parse((REPO_ROOT / "scripts/training/grpo/online.py").read_text())
     call = next(
         node for node in ast.walk(tree) if isinstance(node, ast.Call) and getattr(node.func, "id", "") == "trainer_cls"
     )

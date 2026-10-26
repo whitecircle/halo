@@ -19,8 +19,8 @@ import types
 import numpy as np
 import pytest
 
-from scripts.inference.reward_model import rm_rejection_sampling as rm_rs
-from scripts.inference.reward_model.rm_rejection_sampling import degenerate_hypotheses_reason
+from halo.entrypoints import rejection_sampling as rm_rs
+from halo.entrypoints.rejection_sampling import degenerate_hypotheses_reason
 
 
 def test_single_hypothesis_is_degenerate_for_every_format():
@@ -108,7 +108,7 @@ def test_the_rewards_survive_json():
 _PREF_ARGS = types.SimpleNamespace(
     id_field="id",
     model="gen-model",
-    rm_model_path="rm-model",
+    rm_model_id="rm-model",
 )
 _PREFERENCE_KEYS = {
     "prompt",

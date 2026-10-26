@@ -1,5 +1,5 @@
 # Bradley-Terry reward model — Qwen3.5-9B on Skywork-Reward-Preference-80K-v0.2.
-# Launch: accelerate launch --config_file launcher-configs/accelerate/fsdp2_gradop_config.yaml scripts/training/preference/rewards.py <this config>
+# Launch: accelerate launch --config_file launcher-configs/accelerate/fsdp2_gradop_config.yaml scripts/training/reward/reward_model.py <this config>
 
 # --- Model ---
 model_name_or_path: Qwen/Qwen3.5-9B

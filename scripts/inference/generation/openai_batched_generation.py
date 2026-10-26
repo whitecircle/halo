@@ -7,10 +7,10 @@ Paths are S3 keys under ``HALO_S3_DEFAULT_BUCKET`` rather than full URIs; they a
 ``build_s3_uri``, which prepends the bucket.
 
 Usage:
-    HALO_S3_DEFAULT_BUCKET=my-bucket \
-    python scripts/inference/generation/openai_batched_generation.py \
-        --model my-model \
-        --input_path prompts \
+    HALO_S3_DEFAULT_BUCKET=my-bucket \\
+    python scripts/inference/generation/openai_batched_generation.py \\
+        --model my-model \\
+        --dataset prompts \\
         --output_path responses
 
 Input dataset format (HuggingFace Dataset in S3):
@@ -26,39 +26,15 @@ Output dataset format:
 """
 
 import argparse
-import logging
 
-from halo.data.pipeline.conversation import build_base_prompt, resolve_system_prompt
-from halo.inference.batch_requests import parallel_openai_requests
-from halo.inference.openai_client import build_openai_client
+from halo.entrypoints.resumable_generation import run_async_cli, run_batched_generation
 from scripts.cli_arguments import add_openai_endpoint_args
 from scripts.inference.inference_arguments import (
     add_checkpoint_interval_arg,
     add_generation_args,
     add_s3_dataset_args,
-    assistant_turn,
-    follow_up_messages,
-    load_prompts_with_resume,
     parse_dataset_args,
-    reject_empty_results,
-    run_async_cli,
-    save_results_to_s3,
 )
-
-logger = logging.getLogger(__name__)
-
-
-def reject_per_row_response_format(rows: list[dict]) -> None:
-    """Refuse rows carrying a structured ``response_format``: every request here goes out as plain
-    text, so a per-row schema (the reward-model scripts honour one) would be dropped from the output
-    unapplied. A ``{"type": "text"}`` format asks for exactly that and passes."""
-    carrying = [row for row in rows if (row.get("response_format") or {}).get("type", "text") != "text"]
-    if carrying:
-        raise ValueError(
-            f"{len(carrying)} of {len(rows)} rows carry a structured response_format, which this tool does not apply: "
-            f"it would generate them as plain text and drop the column. Remove the column, or generate "
-            f"structured rows with the reward-model scripts, which honour it."
-        )
 
 
 def parse_args():
@@ -68,7 +44,12 @@ def parse_args():
 
     # Data configuration
     add_s3_dataset_args(parser)
-    parser.add_argument("--follow_up_prompt_field", type=str, default="follow_up_prompt")
+    parser.add_argument(
+        "--follow_up_prompt_field",
+        type=str,
+        default="follow_up_prompt",
+        help="Row field with follow-up turns sent after the first answer (default: %(default)s).",
+    )
     parser.add_argument(
         "--tools_field", type=str, default="tools", help="Field with tool definitions in OpenAI format"
     )
@@ -79,161 +60,8 @@ def parse_args():
     return parse_dataset_args(parser)
 
 
-def process_response(
-    row: dict,
-    response,
-    args,
-    initial_messages: list[dict],
-    follow_up_response=None,
-) -> dict:
-    """Process API response into output record.
-
-    Args:
-        row: Original dataset row
-        response: First OpenAI response
-        args: CLI arguments (for field names and the model)
-        initial_messages: Messages sent to API (including system prompt)
-        follow_up_response: Optional follow-up response
-    """
-    conversation = list(initial_messages)
-    conversation.append(assistant_turn(response.answer, response.tool_calls))
-
-    generated_message_indices = [len(conversation) - 1]
-    finish_reasons = [response.finish_reason]
-    prompt_tokens = response.prompt_tokens
-    completion_tokens = response.completion_tokens
-
-    if follow_up_response:
-        conversation.extend(row[args.follow_up_prompt_field])
-        conversation.append(assistant_turn(follow_up_response.answer, follow_up_response.tool_calls))
-        generated_message_indices.append(len(conversation) - 1)
-        finish_reasons.append(follow_up_response.finish_reason)
-        prompt_tokens += follow_up_response.prompt_tokens
-        completion_tokens += follow_up_response.completion_tokens
-
-    # Build output record (drop prompt-related source fields)
-    record = dict(row)
-    for field in [
-        args.prompt_field,
-        args.local_system_prompt_field,
-        args.follow_up_prompt_field,
-        args.tools_field,
-        "response_format",
-    ]:
-        record.pop(field, None)
-
-    return {
-        **record,
-        "model": args.model,
-        "conversation": conversation,
-        "generated_message_indices": generated_message_indices,
-        "finish_reason": finish_reasons,
-        "prompt_tokens": prompt_tokens,
-        "completion_tokens": completion_tokens,
-    }
-
-
 async def main() -> None:
-    args = parse_args()
-
-    client = build_openai_client(
-        base_url=args.base_url,
-        api_key_override=args.api_key,
-    )
-
-    rows, existing_results = load_prompts_with_resume(args)
-    if not rows:
-        logger.info("All prompts already processed.")
-        return
-    reject_per_row_response_format(rows)
-
-    logger.info(f"Generating responses for {len(rows)} prompts...")
-
-    # Build messages with system prompts and collect per-row tools
-    messages = []
-    tools_list = []
-    for row in rows:
-        sys_prompt = resolve_system_prompt(row, args.local_system_prompt_field, args.global_system_prompt)
-        messages.append(build_base_prompt(row, args.prompt_field, sys_prompt))
-        tools = row.get(args.tools_field)
-        tools_list.append(tools)
-
-    logger.info("Generating first responses...")
-    first_responses = await parallel_openai_requests(
-        model=args.model,
-        messages=messages,
-        temperature=args.temperature,
-        max_tokens=args.max_gen_tokens,
-        max_workers=args.n_parallel,
-        flush_interval=args.checkpoint_interval,
-        client=client,
-        tools=tools_list,
-    )
-
-    # Split: rows with follow-up vs. complete
-    results = []
-    rows_with_followup = []
-    dropped_first_response = 0
-
-    for idx, (row, msg, response) in enumerate(zip(rows, messages, first_responses, strict=True)):
-        if response is None:
-            dropped_first_response += 1
-            logger.warning(f"Skipping row {idx}: error in first response")
-            continue
-
-        if follow_up_messages(row, args.follow_up_prompt_field) is not None:
-            rows_with_followup.append((idx, row, msg, response))
-        else:
-            results.append(process_response(row, response, args, msg))
-
-    if rows_with_followup:
-        logger.info(f"Generating {len(rows_with_followup)} follow-up responses...")
-
-        followup_messages = []
-        followup_tools = []
-        for _idx, row, initial_msg, first_response in rows_with_followup:
-            conversation = list(initial_msg)
-            conversation.append(assistant_turn(first_response.answer, first_response.tool_calls))
-            conversation.extend(row[args.follow_up_prompt_field])
-            followup_messages.append(conversation)
-
-            tools = row.get(args.tools_field)
-            followup_tools.append(tools)
-
-        followup_responses = await parallel_openai_requests(
-            model=args.model,
-            messages=followup_messages,
-            temperature=args.temperature,
-            max_tokens=args.max_gen_tokens,
-            max_workers=args.n_parallel,
-            flush_interval=args.checkpoint_interval,
-            client=client,
-            tools=followup_tools,
-        )
-
-        for (idx, row, initial_msg, first_response), followup_response in zip(
-            rows_with_followup, followup_responses, strict=True
-        ):
-            if followup_response is None:
-                logger.warning(f"Row {idx}: follow-up failed, saving first response only")
-            results.append(process_response(row, first_response, args, initial_msg, followup_response))
-
-    # A follow-up failure still records the first response, so an empty result set means every
-    # pending row failed its first request.
-    if dropped_first_response:
-        logger.warning(
-            f"Dropped {dropped_first_response} of {len(rows)} pending row(s) whose first request "
-            f"failed — they are NOT in the dataset about to be written, and a resumed run will "
-            f"retry them. Check --base_url / --model and the endpoint's logs."
-        )
-    reject_empty_results(
-        len(results),
-        len(rows),
-        args.output_path,
-        drops=f" (first-response failures={dropped_first_response})",
-        check="--base_url / --model and the endpoint's logs",
-    )
-    save_results_to_s3(existing_results, results, output_path=args.output_path, subfolder=args.subfolder)
+    await run_batched_generation(parse_args())
 
 
 if __name__ == "__main__":

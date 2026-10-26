@@ -23,12 +23,12 @@ import types
 
 import pytest
 
-from scripts.inference import inference_arguments
+from halo.entrypoints import resumable_generation
 from scripts.inference.generation import openai_batched_generation as batched
 
 _ROWS = [{"id": i, "prompt": [{"role": "user", "content": f"q{i}"}]} for i in range(2)]
 
-_BATCHED_ARGV = ["prog", "--model", "gen-model", "--input_path", "in", "--output_path", "out"]
+_BATCHED_ARGV = ["prog", "--model", "gen-model", "--dataset", "in", "--output_path", "out"]
 
 
 def _response(answer: str):
@@ -53,7 +53,7 @@ def _tool_call_response():
 
 
 def _stub_module(monkeypatch, module, *, rows, existing, request_impl):
-    """Stub a generation script's S3 + API edges; returns the captured request kwargs and pushes."""
+    """Stub a generation run's S3 + API edges; returns the captured request kwargs and pushes."""
     calls: list[dict] = []
     pushed: list = []
     real_requests = inspect.signature(module.parallel_openai_requests)
@@ -66,10 +66,8 @@ def _stub_module(monkeypatch, module, *, rows, existing, request_impl):
     monkeypatch.setattr(module, "load_prompts_with_resume", lambda args: (rows, existing))
     monkeypatch.setattr(module, "build_openai_client", lambda **kwargs: object())
     monkeypatch.setattr(module, "parallel_openai_requests", fake_requests)
-    # The merge-and-push tail is shared, so the S3 edge is stubbed in the shared module — the
-    # scripts reach it through their own main().
-    monkeypatch.setattr(inference_arguments, "build_s3_uri", lambda path, subfolder: f"s3://bucket/{subfolder}/{path}")
-    monkeypatch.setattr(inference_arguments, "push_dataset_to_s3_uri", lambda dataset, uri: pushed.append(dataset))
+    monkeypatch.setattr(module, "build_s3_uri", lambda path, subfolder: f"s3://bucket/{subfolder}/{path}")
+    monkeypatch.setattr(module, "push_dataset_to_s3_uri", lambda dataset, uri: pushed.append(dataset))
     return calls, pushed
 
 
@@ -94,7 +92,11 @@ def test_batched_generation_raises_when_every_request_failed(monkeypatch):
     """Exiting 0 on a dead endpoint reports a total failure as a completed generation run — and on
     a resume it republishes the rows a previous run wrote as if they were the whole job."""
     _, pushed = _stub_module(
-        monkeypatch, batched, rows=_ROWS, existing=[], request_impl=lambda messages: [None] * len(messages)
+        monkeypatch,
+        resumable_generation,
+        rows=_ROWS,
+        existing=[],
+        request_impl=lambda messages: [None] * len(messages),
     )
     monkeypatch.setattr(sys, "argv", list(_BATCHED_ARGV))
 
@@ -108,7 +110,11 @@ def test_batched_generation_refuses_a_per_row_response_format(monkeypatch):
     text and then popped from the record: refused before any request goes out."""
     rows = [{**_ROWS[0], "response_format": {"type": "json_object"}}, _ROWS[1]]
     calls, pushed = _stub_module(
-        monkeypatch, batched, rows=rows, existing=[], request_impl=lambda messages: [_response("a")] * len(messages)
+        monkeypatch,
+        resumable_generation,
+        rows=rows,
+        existing=[],
+        request_impl=lambda messages: [_response("a")] * len(messages),
     )
     monkeypatch.setattr(sys, "argv", list(_BATCHED_ARGV))
 
@@ -122,7 +128,11 @@ def test_batched_generation_accepts_a_plain_text_response_format(monkeypatch):
     tool produces; a dataset shared with those scripts must not be refused over it."""
     rows = [{**row, "response_format": {"type": "text", "json_schema": None}} for row in _ROWS]
     _, pushed = _stub_module(
-        monkeypatch, batched, rows=rows, existing=[], request_impl=lambda messages: [_response("a")] * len(messages)
+        monkeypatch,
+        resumable_generation,
+        rows=rows,
+        existing=[],
+        request_impl=lambda messages: [_response("a")] * len(messages),
     )
     monkeypatch.setattr(sys, "argv", list(_BATCHED_ARGV))
 
@@ -135,7 +145,7 @@ def test_one_surviving_row_is_the_other_side_of_that_boundary(monkeypatch):
     a guard that keyed on "any failure" would throw the run away over a single bad row."""
     _, pushed = _stub_module(
         monkeypatch,
-        batched,
+        resumable_generation,
         rows=_ROWS,
         existing=[],
         request_impl=lambda messages: [None, _response("second")],
@@ -152,7 +162,11 @@ def test_the_checkpoint_interval_flag_is_the_resume_store_flush_interval(monkeyp
     the real signature, so a stale keyword fails here rather than on a live run."""
     row = {**_ROWS[0], "follow_up_prompt": [{"role": "user", "content": "and now?"}]}
     calls, _ = _stub_module(
-        monkeypatch, batched, rows=[row], existing=[], request_impl=lambda messages: [_response("a")] * len(messages)
+        monkeypatch,
+        resumable_generation,
+        rows=[row],
+        existing=[],
+        request_impl=lambda messages: [_response("a")] * len(messages),
     )
     monkeypatch.setattr(sys, "argv", [*_BATCHED_ARGV, "--checkpoint_interval", "7"])
 
@@ -180,7 +194,7 @@ def test_tool_call_only_first_turn_is_replayed_with_a_null_content(monkeypatch):
         passes.append(messages)
         return [_tool_call_response() if len(passes) == 1 else _response("done")]
 
-    calls, pushed = _stub_module(monkeypatch, batched, rows=[row], existing=[], request_impl=request_impl)
+    calls, pushed = _stub_module(monkeypatch, resumable_generation, rows=[row], existing=[], request_impl=request_impl)
     monkeypatch.setattr(sys, "argv", list(_BATCHED_ARGV))
 
     asyncio.run(batched.main())
@@ -213,7 +227,7 @@ def test_a_resume_over_another_record_layout_keeps_the_fresh_batch_columns(monke
     ]
     _, pushed = _stub_module(
         monkeypatch,
-        batched,
+        resumable_generation,
         rows=_ROWS,
         existing=existing,
         request_impl=lambda messages: [_response(f"fresh-{i}") for i in range(len(messages))],
@@ -234,9 +248,9 @@ def test_an_empty_follow_up_is_no_follow_up():
     """Both generation paths read the follow-up column through one predicate: an empty list (or a null)
     sends no second request, which would follow the answer with a second assistant turn."""
     turn = [{"role": "user", "content": "And why?"}]
-    assert inference_arguments.follow_up_messages({"follow_up_prompt": turn}, "follow_up_prompt") == turn
+    assert resumable_generation.follow_up_messages({"follow_up_prompt": turn}, "follow_up_prompt") == turn
     for row in ({"follow_up_prompt": []}, {"follow_up_prompt": None}, {}):
-        assert inference_arguments.follow_up_messages(row, "follow_up_prompt") is None
+        assert resumable_generation.follow_up_messages(row, "follow_up_prompt") is None
 
 
 if __name__ == "__main__":

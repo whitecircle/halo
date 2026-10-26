@@ -129,8 +129,8 @@ The simulated (or native) path is QAT: the bf16 master is quantized to the block
 
 ```bash
 python scripts/after_training/quantize_to_lowp.py \
-    --input_dir  /mnt/checkpoints/my-model \
-    --output_dir /mnt/checkpoints/my-model-mxfp8 \
+    --input_dir  <large-volume>/checkpoints/my-model \
+    --output_dir <large-volume>/checkpoints/my-model-mxfp8 \
     --lowp_keep_first_blocks 1 --lowp_keep_last_blocks 1 \
     --format mxfp8            # or mxfp4 / nvfp4
 ```

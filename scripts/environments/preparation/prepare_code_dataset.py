@@ -14,20 +14,20 @@ evaluation, and training share one definition per dataset. Add an adapter there 
 
 Usage (inside the training image):
     # Codeforces (open-r1/codeforces), rating-filtered
-    python scripts/environments/preparation/prepare_code_dataset.py \
-        --adapter codeforces --dataset open-r1/codeforces --config verifiable \
+    python scripts/environments/preparation/prepare_code_dataset.py \\
+        --adapter codeforces --dataset open-r1/codeforces --config verifiable \\
         --output_dir "$HALO_DATA_ROOT/datasets/codeforces-verifiable-rl" --min_rating 800 --max_rating 2200
 
     # DeepCoder (agentica-org/DeepCoder-Preview-Dataset), the taco config
-    python scripts/environments/preparation/prepare_code_dataset.py \
-        --adapter deepcoder --dataset agentica-org/DeepCoder-Preview-Dataset --config taco \
+    python scripts/environments/preparation/prepare_code_dataset.py \\
+        --adapter deepcoder --dataset agentica-org/DeepCoder-Preview-Dataset --config taco \\
         --output_dir "$HALO_DATA_ROOT/datasets/deepcoder-taco-rl"
 
     # HardTests, suites joined from a compacted tests table, 100 problems per rating band held out,
     # pushed as one Hub config per training stage (full + one per band) over that shared test split
-    python scripts/environments/preparation/prepare_code_dataset.py \
-        --adapter hardtests --dataset sigcp/hardtests_problems \
-        --tests_table "$HALO_DATA_ROOT/hardtests-tests-compact" --holdout_per_band 100 \
+    python scripts/environments/preparation/prepare_code_dataset.py \\
+        --adapter hardtests --dataset sigcp/hardtests_problems \\
+        --tests_table "$HALO_DATA_ROOT/hardtests-tests-compact" --holdout_per_band 100 \\
         --min_rating 800 --push_to_hub org/hardtests-rl --push_bands
 
 A bulky test corpus (open-r1's generated tests, HardTests' suites) is first reduced by
@@ -62,7 +62,6 @@ from halo.environments.tasks.coding.verdicts import build_verdict
 from halo.log import configure_cli_logging
 from scripts.environments.preparation.parquet_parts import parquet_parts
 
-configure_cli_logging()
 logger = logging.getLogger(__name__)
 
 
@@ -254,41 +253,14 @@ def to_rl_row(row: dict, adapter) -> dict:
     }
 
 
-def parse_args() -> argparse.Namespace:
-    p = argparse.ArgumentParser(description="Prepare a competitive-programming dataset for the coding RL env.")
+def _add_source_args(p: argparse.ArgumentParser) -> None:
+    """The adapter, the source dataset, the joined tests table, the excluded ids and the map processes."""
     p.add_argument(
         "--adapter", required=True, choices=_TRAINING_ADAPTERS, help="Dataset adapter to apply (RL training pools)."
     )
     p.add_argument("--dataset", required=True, help="Source HF dataset id.")
     p.add_argument(
         "--config", default=None, help="Dataset config (e.g. 'verifiable' for codeforces, 'taco' for deepcoder)."
-    )
-    p.add_argument("--output_dir", default=None, help="save_to_disk path on a large mounted volume.")
-    p.add_argument("--push_to_hub", default=None, help="Hub repo id to push the prepared dataset to.")
-    p.add_argument(
-        "--min_rating",
-        type=int,
-        default=None,
-        help="Drop problems below this rating, and unrated ones with them. No-op on a dataset with no "
-        "'rating' column (deepcoder).",
-    )
-    p.add_argument("--max_rating", type=int, default=None, help="Drop problems above this rating (see --min_rating).")
-    p.add_argument(
-        "--num_proc",
-        type=int,
-        default=None,
-        help="Processes for the map/filter passes (default: the toolkit's dataset-processing default).",
-    )
-    p.add_argument(
-        "--private",
-        action=argparse.BooleanOptionalAction,
-        default=True,
-        help="Push --push_to_hub as a private dataset (default: True).",
-    )
-    p.add_argument(
-        "--config_name",
-        default=None,
-        help="Hub config to push as (one repo can hold one config per rating band); default config otherwise.",
     )
     p.add_argument(
         "--tests_table",
@@ -301,25 +273,23 @@ def parse_args() -> argparse.Namespace:
         help="File of problem ids to drop (one per line; a trailing * excludes a prefix): held-out and benchmark ids.",
     )
     p.add_argument(
-        "--drop_train_keys",
-        default=None,
-        help="File of problem ids (same format as --exclude_keys) dropped from the train split only, after the "
-        "hold-out is carved, so the test split stays the same: known defects such as "
-        "scripts/environments/preparation/hardtests_train_exclusions.txt.",
-    )
-    p.add_argument(
-        "--holdout_per_band",
+        "--num_proc",
         type=int,
-        default=0,
-        help="Hold out this many rows per rating band (and from the rows below the first band) as the test split "
-        f"of a source that ships only a train split; deterministic (seed {_HOLDOUT_SEED}).",
+        default=None,
+        help="Processes for the map/filter passes (default: the toolkit's dataset-processing default).",
     )
+
+
+def _add_filter_args(p: argparse.ArgumentParser) -> None:
+    """The rating bounds and the suite checks a kept problem must pass."""
     p.add_argument(
-        "--push_bands",
-        action="store_true",
-        help="With --push_to_hub: push the 'full' config plus one config per rating band "
-        f"({', '.join(RATING_BANDS)}), each over the pool's shared test split.",
+        "--min_rating",
+        type=int,
+        default=None,
+        help="Drop problems below this rating, and unrated ones with them. No-op on a dataset with no "
+        "'rating' column (deepcoder).",
     )
+    p.add_argument("--max_rating", type=int, default=None, help="Drop problems above this rating (see --min_rating).")
     p.add_argument(
         "--verify_checkers",
         action=argparse.BooleanOptionalAction,
@@ -339,23 +309,60 @@ def parse_args() -> argparse.Namespace:
         "are the statement's samples and that no --tests_table suite covers), which a program printing a "
         "constant passes for many. Default: dropped and counted per split.",
     )
+
+
+def _add_split_args(p: argparse.ArgumentParser) -> None:
+    """The hold-out carved as the test split and the train-only drops after it."""
+    p.add_argument(
+        "--holdout_per_band",
+        type=int,
+        default=0,
+        help="Hold out this many rows per rating band (and from the rows below the first band) as the test split "
+        f"of a source that ships only a train split; deterministic (seed {_HOLDOUT_SEED}).",
+    )
+    p.add_argument(
+        "--drop_train_keys",
+        default=None,
+        help="File of problem ids (same format as --exclude_keys) dropped from the train split only, after the "
+        "hold-out is carved, so the test split stays the same: known defects such as "
+        "scripts/environments/preparation/hardtests_train_exclusions.txt.",
+    )
+
+
+def _add_publish_args(p: argparse.ArgumentParser) -> None:
+    """Where the prepared pool goes: a local save, a Hub push, and its configs."""
+    p.add_argument("--output_dir", default=None, help="save_to_disk path on a large mounted volume.")
+    p.add_argument("--push_to_hub", default=None, help="Hub repo id to push the prepared dataset to.")
+    p.add_argument(
+        "--private",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Push --push_to_hub as a private dataset (default: True).",
+    )
+    p.add_argument(
+        "--config_name",
+        default=None,
+        help="Hub config to push as (one repo can hold one config per rating band); default config otherwise.",
+    )
+    p.add_argument(
+        "--push_bands",
+        action="store_true",
+        help="With --push_to_hub: push the 'full' config plus one config per rating band "
+        f"({', '.join(RATING_BANDS)}), each over the pool's shared test split.",
+    )
+
+
+def parse_args() -> argparse.Namespace:
+    p = argparse.ArgumentParser(description="Prepare a competitive-programming dataset for the coding RL env.")
+    _add_source_args(p)
+    _add_filter_args(p)
+    _add_split_args(p)
+    _add_publish_args(p)
     return p.parse_args()
 
 
-def main() -> None:
-    args = parse_args()
-    if not args.output_dir and not args.push_to_hub:
-        raise SystemExit("Provide --output_dir and/or --push_to_hub.")
-
-    adapter = CODE_DATASET_ADAPTERS[args.adapter]
-    ds = load_dataset(args.dataset, args.config)
-    logger.info("Loaded %s (%s): %s", args.dataset, args.config, {k: len(v) for k, v in ds.items()})
-
-    # An adapter's code is not part of the map fingerprint (imported functions hash by name), so a
-    # cached step would outlive the adapter change that should have rewritten it.
-    disable_caching()
-    num_proc = resolve_map_num_proc(args.num_proc)
-    keep_kwargs = {"adapter": adapter, "min_rating": args.min_rating, "max_rating": args.max_rating}
+def _stage_splits(ds: DatasetDict, adapter, args: argparse.Namespace, num_proc: int | None) -> dict[str, Dataset]:
+    """Each source split normalized and its excluded ids dropped, then the compacted suites joined on."""
     exact, prefixes = load_exclusions(args.exclude_keys)
     tests_table = load_tests_table(args.tests_table) if args.tests_table else None
 
@@ -374,40 +381,47 @@ def main() -> None:
         staged[split] = split_ds
     if tests_table is not None:
         staged = join_suites(staged, *tests_table)
+    return staged
 
-    prepared = {}
-    for split, split_ds in staged.items():
-        kept = split_ds.filter(keep_row, fn_kwargs=keep_kwargs, num_proc=num_proc, desc=f"filter[{split}]")
-        report_rejected_rows(len(split_ds), len(kept), f"filter[{split}]")
-        if adapter.examples_only is not None and not args.include_examples_only:
-            graded = kept.filter(
-                lambda row: not adapter.is_examples_only(row), num_proc=num_proc, desc=f"examples_only[{split}]"
-            )
-            logger.info(
-                "  %s: left out %d problems graded only on their statement's examples (--include_examples_only "
-                "keeps them)",
-                split,
-                len(kept) - len(graded),
-            )
-            kept = graded
-        mapped = kept.map(
-            to_rl_row,
-            fn_kwargs={"adapter": adapter},
-            num_proc=num_proc,
-            remove_columns=kept.column_names,
-            desc=f"format[{split}]",
+
+def _prepare_split(split: str, split_ds: Dataset, adapter, args: argparse.Namespace, num_proc: int | None) -> Dataset:
+    """One staged split filtered, formatted as RL rows and passed through the suite checks, each drop reported."""
+    keep_kwargs = {"adapter": adapter, "min_rating": args.min_rating, "max_rating": args.max_rating}
+    kept = split_ds.filter(keep_row, fn_kwargs=keep_kwargs, num_proc=num_proc, desc=f"filter[{split}]")
+    report_rejected_rows(len(split_ds), len(kept), f"filter[{split}]")
+    if adapter.examples_only is not None and not args.include_examples_only:
+        graded = kept.filter(
+            lambda row: not adapter.is_examples_only(row), num_proc=num_proc, desc=f"examples_only[{split}]"
         )
-        if args.verify_checkers:
-            sound = mapped.filter(checker_is_sound, num_proc=num_proc, desc=f"verify[{split}]")
-            report_rejected_rows(len(mapped), len(sound), f"verify[{split}]")
-            mapped = sound
-        if args.reject_constant_answers:
-            strict = mapped.filter(suite_rejects_constants, num_proc=num_proc, desc=f"constants[{split}]")
-            report_rejected_rows(len(mapped), len(strict), f"constants[{split}]")
-            mapped = strict
-        prepared[split] = mapped
-        logger.info("  %s: %d -> %d kept", split, len(ds[split]), len(mapped))
+        logger.info(
+            "  %s: left out %d problems graded only on their statement's examples (--include_examples_only "
+            "keeps them)",
+            split,
+            len(kept) - len(graded),
+        )
+        kept = graded
+    mapped = kept.map(
+        to_rl_row,
+        fn_kwargs={"adapter": adapter},
+        num_proc=num_proc,
+        remove_columns=kept.column_names,
+        desc=f"format[{split}]",
+    )
+    if args.verify_checkers:
+        sound = mapped.filter(checker_is_sound, num_proc=num_proc, desc=f"verify[{split}]")
+        report_rejected_rows(len(mapped), len(sound), f"verify[{split}]")
+        mapped = sound
+    if args.reject_constant_answers:
+        strict = mapped.filter(suite_rejects_constants, num_proc=num_proc, desc=f"constants[{split}]")
+        report_rejected_rows(len(mapped), len(strict), f"constants[{split}]")
+        mapped = strict
+    return mapped
 
+
+def _settle_train_and_test(
+    prepared: dict[str, Dataset], args: argparse.Namespace, num_proc: int | None
+) -> DatasetDict:
+    """The hold-out carved off a train-only source as its test split, then the train-only drops."""
     if args.holdout_per_band:
         if "test" in prepared:
             raise SystemExit("--holdout_per_band given, but the source already ships a test split")
@@ -420,9 +434,12 @@ def main() -> None:
             raise SystemExit(f"--drop_train_keys needs a train split; the source ships {sorted(prepared)}")
         # After the hold-out is carved, so dropping training rows never redraws the test split.
         prepared["train"] = drop_listed_rows(prepared["train"], args.drop_train_keys, num_proc)
+    return DatasetDict(prepared)
 
-    prepared = DatasetDict(prepared)
 
+def _publish(prepared: DatasetDict, args: argparse.Namespace) -> None:
+    """The pool saved to ``--output_dir`` and pushed to ``--push_to_hub``, as one config or as the full config
+    plus one per rating band."""
     if args.output_dir:
         prepared.save_to_disk(args.output_dir)
         logger.info("Saved to %s", args.output_dir)
@@ -439,6 +456,27 @@ def main() -> None:
                 push_kwargs["config_name"] = name
             config.push_to_hub(args.push_to_hub, **push_kwargs)
             logger.info("Pushed to hub: %s config=%s (private=%s)", args.push_to_hub, name, args.private)
+
+
+def main() -> None:
+    configure_cli_logging()
+    args = parse_args()
+    if not args.output_dir and not args.push_to_hub:
+        raise SystemExit("Provide --output_dir and/or --push_to_hub.")
+
+    adapter = CODE_DATASET_ADAPTERS[args.adapter]
+    ds = load_dataset(args.dataset, args.config)
+    logger.info("Loaded %s (%s): %s", args.dataset, args.config, {k: len(v) for k, v in ds.items()})
+
+    # An adapter's code is not part of the map fingerprint (imported functions hash by name), so a
+    # cached step would outlive the adapter change that should have rewritten it.
+    disable_caching()
+    num_proc = resolve_map_num_proc(args.num_proc)
+    prepared = {}
+    for split, split_ds in _stage_splits(ds, adapter, args, num_proc).items():
+        prepared[split] = _prepare_split(split, split_ds, adapter, args, num_proc)
+        logger.info("  %s: %d -> %d kept", split, len(ds[split]), len(prepared[split]))
+    _publish(_settle_train_and_test(prepared, args, num_proc), args)
 
 
 if __name__ == "__main__":

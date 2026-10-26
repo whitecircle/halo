@@ -16,11 +16,11 @@ from __future__ import annotations
 
 import pytest
 
-from scripts.inference.reward_model.reward_model_arguments import _MAX_OUTPUT_BASENAME, build_output_path
+from halo.entrypoints.reward_scoring import _MAX_OUTPUT_BASENAME, build_output_path
 
 
-def _path(model_name, suffix="rs", prompts_source="/data/prompts.jsonl"):
-    return build_output_path("/out", prompts_source, model_name, suffix)
+def _path(model_name, suffix="rs", dataset="/data/prompts.jsonl"):
+    return build_output_path("/out", dataset, model_name, suffix)
 
 
 def test_two_models_over_the_same_prompts_get_separate_files():
@@ -49,7 +49,7 @@ def test_slashed_model_name_stays_one_path_component():
 
 
 @pytest.mark.parametrize(
-    ("model_name", "prompts_source", "suffix"),
+    ("model_name", "dataset", "suffix"),
     [
         ("/models/" + "a" * 400, "/data/prompts.jsonl", "rs"),  # vLLM's --served-model-name default
         ("m", "/data/" + "p" * 400 + ".jsonl", "rm_scoring"),  # a long prompt path on its own
@@ -57,10 +57,10 @@ def test_slashed_model_name_stays_one_path_component():
         ("m", "/data/" + "я" * 200 + ".jsonl", "rs"),  # multi-byte: 200 chars is 400 bytes
     ],
 )
-def test_every_over_long_name_fits_a_filesystem_name(model_name, prompts_source, suffix):
+def test_every_over_long_name_fits_a_filesystem_name(model_name, dataset, suffix):
     """The cap is a BYTE cap on the basename, and either half can overrun it alone. The resulting
     OSError(ENAMETOOLONG) lands only after the reward model is already on the GPU."""
-    path = build_output_path("/out", prompts_source, model_name, suffix)
+    path = build_output_path("/out", dataset, model_name, suffix)
     assert len(path.name.encode()) <= _MAX_OUTPUT_BASENAME, path.name
 
 
@@ -74,7 +74,7 @@ def test_two_long_model_names_still_get_separate_files():
 def test_two_long_prompt_sources_still_get_separate_files():
     """Same collision, from the other half of the name."""
     prefix = "/data/" + "p" * 400
-    assert _path("m", prompts_source=prefix + "-one.jsonl") != _path("m", prompts_source=prefix + "-two.jsonl")
+    assert _path("m", dataset=prefix + "-one.jsonl") != _path("m", dataset=prefix + "-two.jsonl")
 
 
 if __name__ == "__main__":

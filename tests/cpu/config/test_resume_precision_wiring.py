@@ -141,12 +141,13 @@ def test_script_model_uses_resolved_checkpoint_identity_not_resume_flag(tmp_path
 
 
 def test_modality_aware_training_calls_forward_the_runtime_checkpoint_identity():
-    """The checkpoint identity reaches the loader only through the script's own context."""
+    """The checkpoint identity reaches the loader only through the script's own context, which the
+    preference load hands on as it got it."""
     calls = [
         (path, node)
-        for path, function in functions_in(("scripts/training",))
+        for path, function in functions_in(("scripts/training", "halo/entrypoints/model_setup.py"))
         for node in ast.walk(function)
-        if isinstance(node, ast.Call) and call_name(node) == "load_policy_model"
+        if isinstance(node, ast.Call) and call_name(node) in ("load_policy_model", "load_preference_models")
     ]
     assert len(calls) >= 6, "the modality-aware policy-construction sweep must remain non-vacuous"
     for path, call in calls:

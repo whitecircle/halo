@@ -5,9 +5,9 @@ Each path below reports partial or failed work as clean work unless the accounti
 
 * ``reward_model/rm_scoring.py`` must count each per-row failure, or neither its own summary nor the
   guard's tally can say how many rows the endpoint lost.
-* ``inference_arguments.run_async_cli``'s signal handler must not exit 0: a SIGTERM'd (or Ctrl-C'd) job then
+* ``resumable_generation.run_async_cli``'s signal handler must not exit 0: a SIGTERM'd (or Ctrl-C'd) job then
   reports success to whatever ran it and the next pipeline stage consumes a partial output dataset.
-* ``rm_rejection_sampling.join_worker_queue`` must not race a queue drain against its worker —
+* ``rejection_sampling.join_worker_queue`` must not race a queue drain against its worker —
   reading the drain first drops the worker's exception whenever the two complete together.
 
 Run: pytest tests/cpu/inference/test_drop_accounting.py
@@ -25,9 +25,10 @@ import pandas as pd
 import pytest
 from openai.types.chat import ChatCompletionMessage
 
+from halo.entrypoints import rejection_sampling, resumable_generation, reward_scoring
 from halo.inference.openai_client import EmptyChoicesError
 from scripts.inference import inference_arguments
-from scripts.inference.reward_model import reward_model_arguments, rm_rejection_sampling, rm_scoring
+from scripts.inference.reward_model import rm_scoring
 
 
 def _prompt_rows(count: int) -> list[dict]:
@@ -53,9 +54,9 @@ def test_rm_scoring_names_how_many_rows_the_endpoint_lost(monkeypatch, tmp_path)
     prompts = tmp_path / "prompts.jsonl"
     prompts.touch()
     df = pd.DataFrame({"id": [1, 2, 3], "prompt": [[{"role": "user", "content": "q"}] for _ in range(3)]})
-    monkeypatch.setattr(rm_scoring, "load_prompts_dataframe", lambda args: df)
-    monkeypatch.setattr(reward_model_arguments, "build_openai_client", lambda *a, **k: _DeadClient())
-    monkeypatch.setattr(reward_model_arguments, "load_reward_model", lambda *a, **k: (None, None, None))
+    monkeypatch.setattr(reward_scoring, "load_prompts_dataframe", lambda args: df)
+    monkeypatch.setattr(reward_scoring, "build_openai_client", lambda *a, **k: _DeadClient())
+    monkeypatch.setattr(reward_scoring, "load_reward_model", lambda *a, **k: (None, None, None))
     monkeypatch.setattr(
         sys,
         "argv",
@@ -63,11 +64,11 @@ def test_rm_scoring_names_how_many_rows_the_endpoint_lost(monkeypatch, tmp_path)
             "rm_scoring.py",
             "--model",
             "gen-model",
-            "--prompts_source",
+            "--dataset",
             str(prompts),
-            "--rm_model_path",
+            "--rm_model_id",
             "org/rm",
-            "--output_folder",
+            "--output_dir",
             str(tmp_path),
         ],
     )
@@ -94,7 +95,7 @@ def _rm_args(**overrides):
     args = types.SimpleNamespace(
         model="gen-model",
         temperature=0.0,
-        max_gen_tokens=8,
+        max_tokens=8,
         id_field="id",
         prompt_field="prompt",
         follow_up_prompt_field="follow_up_prompt",
@@ -110,9 +111,9 @@ def _rm_args(**overrides):
 
 def test_generate_chat_message_reports_the_finish_reason():
     """The reason is part of the contract: without it the scoring scripts cannot tell a finished
-    answer from a fragment cut at --max_gen_tokens."""
+    answer from a fragment cut at --max_tokens."""
     message, finish_reason = asyncio.run(
-        reward_model_arguments.generate_chat_message(
+        reward_scoring.generate_chat_message(
             _TruncatingClient(), [{"role": "user", "content": "q"}], _rm_args(), {"type": "text"}
         )
     )
@@ -133,7 +134,7 @@ def test_generate_chat_message_names_a_reply_without_choices():
 
     with pytest.raises(EmptyChoicesError, match="'gen-model'.*bad request"):
         asyncio.run(
-            reward_model_arguments.generate_chat_message(
+            reward_scoring.generate_chat_message(
                 _EmptyClient(), [{"role": "user", "content": "q"}], _rm_args(), {"type": "text"}
             )
         )
@@ -145,10 +146,10 @@ def test_rm_scoring_drops_and_counts_a_truncated_hypothesis(monkeypatch, tmp_pat
     prompts = tmp_path / "prompts.jsonl"
     prompts.touch()
     df = pd.DataFrame({"id": [1, 2, 3], "prompt": [[{"role": "user", "content": "q"}] for _ in range(3)]})
-    monkeypatch.setattr(rm_scoring, "load_prompts_dataframe", lambda args: df)
-    monkeypatch.setattr(reward_model_arguments, "build_openai_client", lambda *a, **k: _TruncatingClient())
-    monkeypatch.setattr(reward_model_arguments, "load_reward_model", lambda *a, **k: (None, None, None))
-    monkeypatch.setattr(reward_model_arguments, "score_conversations", lambda *a, **k: [1.0])
+    monkeypatch.setattr(reward_scoring, "load_prompts_dataframe", lambda args: df)
+    monkeypatch.setattr(reward_scoring, "build_openai_client", lambda *a, **k: _TruncatingClient())
+    monkeypatch.setattr(reward_scoring, "load_reward_model", lambda *a, **k: (None, None, None))
+    monkeypatch.setattr(reward_scoring, "score_conversations", lambda *a, **k: [1.0])
     monkeypatch.setattr(
         sys,
         "argv",
@@ -156,11 +157,11 @@ def test_rm_scoring_drops_and_counts_a_truncated_hypothesis(monkeypatch, tmp_pat
             "rm_scoring.py",
             "--model",
             "gen-model",
-            "--prompts_source",
+            "--dataset",
             str(prompts),
-            "--rm_model_path",
+            "--rm_model_id",
             "org/rm",
-            "--output_folder",
+            "--output_dir",
             str(tmp_path),
         ],
     )
@@ -179,7 +180,7 @@ def test_rm_rejection_sampling_drops_a_row_whose_hypotheses_were_truncated():
     row = pd.Series({"id": 7, "prompt": [{"role": "user", "content": "q"}]})
 
     asyncio.run(
-        rm_rejection_sampling.generate_hypotheses(
+        rejection_sampling.generate_hypotheses(
             _TruncatingClient(), row, _rm_args(), asyncio.Semaphore(1), queue, stats
         )
     )
@@ -192,7 +193,7 @@ def test_rm_rejection_sampling_drops_a_row_whose_hypotheses_were_truncated():
 
 def test_rm_scoring_output_path_helper_is_the_one_under_test(tmp_path):
     """Pins the driver above to the real output-path contract rather than a path it invented."""
-    assert reward_model_arguments.build_output_path(str(tmp_path), "p.jsonl", "m", "rm_scoring").parent == tmp_path
+    assert reward_scoring.build_output_path(str(tmp_path), "p.jsonl", "m", "rm_scoring").parent == tmp_path
 
 
 # --- run_async_cli: an interrupted run is not a successful one ------------------------------------
@@ -203,15 +204,15 @@ def test_an_interrupt_exits_with_the_shell_convention_for_a_signalled_process(si
     """128 + signo, not 0: a wrapper script, a CI step or a ``&&`` chain reads 0 as "the dataset is
     complete" and proceeds to consume a partially written output."""
     with pytest.raises(SystemExit) as excinfo:
-        inference_arguments._signal_handler(signum, None)
+        resumable_generation._signal_handler(signum, None)
 
     assert excinfo.value.code == 128 + signum
 
 
 def test_the_saved_progress_hint_survives(caplog):
     """The non-zero exit is only actionable with the resume instruction beside it."""
-    with caplog.at_level(logging.INFO, logger=inference_arguments.__name__), pytest.raises(SystemExit):
-        inference_arguments._signal_handler(signal.SIGINT, None)
+    with caplog.at_level(logging.INFO, logger=resumable_generation.__name__), pytest.raises(SystemExit):
+        resumable_generation._signal_handler(signal.SIGINT, None)
 
     assert any("resume by re-running" in message for message in caplog.messages), caplog.messages
 
@@ -243,7 +244,7 @@ def test_a_worker_that_dies_on_the_last_item_still_surfaces_its_exception():
                     queue.task_done()
 
         task = asyncio.create_task(worker())
-        await rm_rejection_sampling.join_worker_queue(queue, task)
+        await rejection_sampling.join_worker_queue(queue, task)
 
     with pytest.raises(RuntimeError, match="no space left on device"):
         asyncio.run(scenario())
@@ -264,7 +265,7 @@ def test_a_drained_queue_with_a_live_worker_returns():
                 queue.task_done()
 
         task = asyncio.create_task(worker())
-        await asyncio.wait_for(rm_rejection_sampling.join_worker_queue(queue, task), timeout=5)
+        await asyncio.wait_for(rejection_sampling.join_worker_queue(queue, task), timeout=5)
         task.cancel()
 
     asyncio.run(scenario())
@@ -279,7 +280,7 @@ def test_the_fixture_rows_carry_the_fields_the_cli_actually_reads():
     """
     parser = argparse.ArgumentParser()
     inference_arguments.add_s3_dataset_args(parser)
-    defaults = parser.parse_args(["--input_path", "in", "--output_path", "out"])
+    defaults = parser.parse_args(["--dataset", "in", "--output_path", "out"])
 
     row = _prompt_rows(1)[0]
     assert defaults.id_field in row, f"the drivers' rows carry no {defaults.id_field!r}: {row}"

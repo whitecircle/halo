@@ -78,7 +78,7 @@ changes.
 | `halo/checkpoint/parallel/adapters.py`, `halo/checkpoint/adapters.py` | `agent-docs/optimization/peft.md`, `agent-docs/reference/checkpoints.md` |
 | `halo/checkpoint/parallel/context.py`, `halo/checkpoint/parallel/sidecars.py` | `agent-docs/reference/checkpoints.md`, `agent-docs/reference/trainer-architecture.md` |
 | `halo/checkpoint/{format,hub_layout,atomic,weights_source,sidecars,writing}.py`, `halo/checkpoint/parallel/completeness.py` | `agent-docs/reference/checkpoints.md` |
-| `halo/checkpoint/reading.py`, `halo/checkpoint/offline_export.py`, `halo/checkpoint/fp8_dequant.py` | `agent-docs/reference/checkpoints.md`, `agent-docs/reference/scripts-reference.md` |
+| `halo/checkpoint/reading.py`, `halo/checkpoint/offline_export.py`, `halo/checkpoint/fp8_dequant.py`, `halo/checkpoint/deepseek_v4_dequant.py`, `halo/checkpoint/sink_reset.py`, `halo/checkpoint/expert_unfuse.py`, `halo/checkpoint/vision_reattach.py`, `halo/checkpoint/vocab_patch.py` | `agent-docs/reference/checkpoints.md`, `agent-docs/reference/scripts-reference.md` |
 | `halo/checkpoint/parallel/resume_source.py` | `agent-docs/reference/checkpoints.md`, `agent-docs/reference/architecture.md` |
 | `halo/checkpoint/parallel/reading.py` | `agent-docs/reference/architecture.md`, `agent-docs/reference/checkpoints.md` |
 | `halo/checkpoint/parallel/optimizer.py`, `halo/checkpoint/parallel/optimizer_meta.py` | `agent-docs/reference/checkpoints.md`, `agent-docs/reference/troubleshooting.md`, `agent-docs/data/filesystem-handling.md` |
@@ -211,12 +211,12 @@ changes.
 | `scripts/training/**`, `scripts/inference/**`, `scripts/before_training/**`, `scripts/after_training/**` | `agent-docs/reference/scripts-reference.md` + the relevant method/data page |
 | `scripts/profiling/**` | `agent-docs/reference/debugging.md`, `agent-docs/reference/scripts-reference.md` |
 | `scripts/environments/**` | `agent-docs/reference/scripts-reference.md`, `agent-docs/training-methods/async-grpo/evaluation.md` |
-| `scripts/cli_arguments.py`, `scripts/inference/inference_arguments.py`, `scripts/inference/reward_model/reward_model_arguments.py` | `agent-docs/reference/scripts-reference.md` |
-| `scripts/after_training/merge_ep_shards.py` | `agent-docs/reference/checkpoints.md` |
+| `scripts/cli_arguments.py`, `scripts/inference/inference_arguments.py`, `scripts/inference/reward_model/reward_model_arguments.py`, `halo/entrypoints/{resumable_generation,reward_scoring,rejection_sampling}.py`, `halo/entrypoints/environment_eval.py` | `agent-docs/reference/scripts-reference.md` |
+| `scripts/after_training/merge_ep_shards.py`, `halo/checkpoint/ep_shard_merge.py` | `agent-docs/reference/checkpoints.md` |
 | `scripts/after_training/merge_pp_stages.py` | `agent-docs/reference/scripts-reference.md`, `agent-docs/reference/checkpoints.md`, `agent-docs/parallelism/pipeline-parallelism.md` |
-| `scripts/after_training/quantize_to_lowp.py` | `agent-docs/optimization/low-precision-moe-kernels.md` |
-| `scripts/after_training/convert_to_bf16.py` | `agent-docs/reference/scripts-reference.md`, `agent-docs/reference/checkpoints.md` |
-| `scripts/after_training/merge_models.py` | `agent-docs/reference/model-merging.md`, `agent-docs/reference/scripts-reference.md` |
+| `scripts/after_training/quantize_to_lowp.py`, `halo/checkpoint/lowp_export.py` | `agent-docs/optimization/low-precision-moe-kernels.md` |
+| `scripts/after_training/convert_to_bf16.py`, `halo/checkpoint/bf16_conversion.py` | `agent-docs/reference/scripts-reference.md`, `agent-docs/reference/checkpoints.md` |
+| `scripts/after_training/merge_models.py`, `halo/checkpoint/model_merge.py` | `agent-docs/reference/model-merging.md`, `agent-docs/reference/scripts-reference.md` |
 | `Dockerfile*`, `docker-compose*`, `docker/*/verify_image.py`, `docker/sglang/patches/` | `agent-docs/infrastructure/docker.md`; `Dockerfile.vllm`/`Dockerfile.sglang` + their compose files and server patches also `agent-docs/infrastructure/rollout-servers.md` |
 | `docker/engine_source_patch.py`, `docker/vllm/patches/`, `docker/vllm/parity/`, `docker/vllm/plugins/` | `agent-docs/infrastructure/rollout-servers.md`, `agent-docs/infrastructure/docker.md`; plugins also `agent-docs/models/gpt-oss.md` |
 | `docker/nccl_pin.py` | `agent-docs/infrastructure/docker.md` |

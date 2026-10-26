@@ -36,20 +36,20 @@ from trl.trainer.utils import generate_model_card
 
 import halo.checkpoint.parallel.adapters as peft_saver
 from halo.checkpoint import model_card
+from halo.checkpoint import model_merge as merge_models_script
 from halo.checkpoint.adapters import EXPERT_LORA_PEFT_TYPES
+from halo.checkpoint.bf16_conversion import convert_to_bf16
 from halo.checkpoint.config_export import finalize_exported_config, save_model_config
 from halo.checkpoint.format import ADAPTER_SAFETENSORS_FILE
 from halo.checkpoint.model_card import MalformedModelCardError, tag_model_card
 from halo.checkpoint.offline_export import copy_checkpoint_aux_files
 from halo.checkpoint.parallel.adapters import save_expert_lora_adapters, save_peft_adapters
+from halo.checkpoint.sink_reset import reset_sinks
 from halo.configs.embedding import EmbeddingConfig
 from halo.configs.script_arguments import ModelArguments
 from halo.model_loading.model_preparation import apply_run_model_policies
 from halo.models.attention.gpt_oss_sinks import SinksPolicy
 from halo.trainers.sft import DistributedSFTTrainer
-from scripts.after_training import merge_models as merge_models_script
-from scripts.after_training.convert_to_bf16 import convert_to_bf16
-from scripts.after_training.reset_sinks import reset_sinks
 from scripts.training.embedding import build_sentence_transformer
 from tests.common.checkpoint_io import save_context
 from tests.common.parallelism import make_parallelism_config
@@ -462,7 +462,7 @@ def test_the_sinks_reset_carries_a_malformed_source_card_and_warns(tmp_path, cap
 
 
 def test_the_unmerged_adapter_conversion_tags_its_output(tmp_path):
-    """The tool loads its base untagged, so PEFT's card for the converted adapter has no Halo tag of its own."""
+    """PEFT's card for an adapter carries no Halo tag of its own; the converted adapter's copy gains it."""
     base, adapter, output = tmp_path / "base", tmp_path / "adapter", tmp_path / "converted"
     _tiny_qwen3().save_pretrained(base)
     word_level_tokenizer(("hello",)).save_pretrained(base)

@@ -46,7 +46,7 @@ reference.
 | `Resolving the checkpoint '<path>' failed on K of N rank(s)`, or `The checkpoint '<repo>' each rank resolved differs across ranks` | Some nodes cannot see the model source, or their Hub caches hold different commits. Put the checkpoint or `HF_HOME` on a shared mount, or set `DIST_INPUT_SHARED_FILESYSTEM=0`, and pin `model_revision` to one commit. |
 | `Dataset <path>: the ranks … that must hold the same rows loaded different ones`, or `The shard index of <path> differs across ranks` | Nodes read different copies of the dataset. Re-sync or delete the stale copy (`$HALO_DATA_ROOT/s3_datasets/<md5>` for an S3 source) and relaunch. |
 | Slow cross-node traffic on AWS | EFA needs its own environment ([Clusters](clusters.md#network-fabric)). The same variables slow down an InfiniBand cluster if left set. |
-| `Xid 145` NVLink messages flood dmesg | Usually benign FEC churn. `halo run nvlink-health` exits non-zero only on real faults; trust it over dmesg volume. |
+| `Xid 145` NVLink messages flood dmesg | Usually benign FEC churn. `halo run nvlink-health` exits non-zero only on real faults (hard errors or down links); trust it over dmesg volume. |
 
 ## RL runs (vLLM / SGLang)
 

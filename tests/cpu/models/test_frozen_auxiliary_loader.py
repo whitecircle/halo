@@ -29,7 +29,7 @@ from transformers import AutoModelForImageTextToText, GenerationConfig
 import halo.model_loading.parallel.frozen_models as frozen_models
 import scripts.training.distillation.self_distill as self_distill_script
 import scripts.training.distillation.teacher_distill as distill_script
-import scripts.training.offline_grpo as offline_grpo_script
+import scripts.training.grpo.offline as offline_grpo_script
 from halo.configs.script_arguments import ModelArguments
 from halo.distributed.parallelism_config import ParallelismConfig
 from halo.model_loading.parallel.frozen_models import (
@@ -66,8 +66,7 @@ FROZEN_LOAD_STEP_OWNERS = frozenset(
         "halo/model_loading/parallel/loader.py",
         "scripts/training/embedding.py",
         "halo/checkpoint/sidecars.py",
-        "scripts/before_training/patch_vocab.py",
-        "scripts/after_training/reset_sinks.py",
+        "halo/checkpoint/vocab_patch.py",
     }
 )
 
@@ -179,8 +178,8 @@ FROZEN_LOAD_SITES = {
     "offline-grpo-reference": _offline_grpo_reference,
 }
 
-# The scripts that load a policy AND a live reference, i.e. the ones whose two loads must agree.
-PREFERENCE_SCRIPTS = tuple(REPO_ROOT / "scripts/training/preference" / f"{name}.py" for name in ("dpo", "kto"))
+# Where the runs that load a policy AND a live reference (DPO, KTO) load both, i.e. where the two loads must agree.
+PREFERENCE_LOADS = REPO_ROOT / "halo/entrypoints/model_setup.py"
 
 
 @pytest.mark.parametrize("site", FROZEN_LOAD_SITES.values(), ids=list(FROZEN_LOAD_SITES))
@@ -356,13 +355,14 @@ def test_the_reference_requests_the_policy_s_attention_default():
     assert captured_load(caps).resolver["attn_implementation"] == "eager"
 
 
-@pytest.mark.parametrize("script", PREFERENCE_SCRIPTS, ids=lambda p: p.stem)
-def test_both_loads_in_a_preference_script_share_one_attention_default(script):
+def test_both_loads_of_a_preference_run_share_one_attention_default():
     """``attn_default`` defaults to None on both loaders, so a call site that passes it to only one
-    silently reopens the split above. Pin that each script hands both the SAME expression."""
-    tree = ast.parse(script.read_text(encoding="utf-8"))
+    silently reopens the split above. Pin that the preference load hands both the SAME expression."""
+    tree = ast.parse(PREFERENCE_LOADS.read_text(encoding="utf-8"))
+    (function,) = (node for node in ast.walk(tree) if getattr(node, "name", None) == "load_preference_models")
+    script = PREFERENCE_LOADS
     defaults = {}
-    for node in ast.walk(tree):
+    for node in ast.walk(function):
         if not isinstance(node, ast.Call) or not isinstance(node.func, ast.Name):
             continue
         if node.func.id not in ("load_policy_model", "load_reference_model_for_preference"):
@@ -401,7 +401,7 @@ def test_the_frozen_load_keeps_the_task_head(is_vlm):
     a run that TRAINS that head supplies it. This model never trains anything — every tensor it
     carries is consumed to score the policy — so an absent head is not an excusable absence but a
     randomly initialized one producing plausible numbers on one side of the objective. The reward
-    scorers already load this way (``scripts/inference/reward_model/reward_model_arguments.py``).
+    scorers already load this way (``halo/entrypoints/reward_scoring.py``).
     """
     with stub_frozen_loader() as caps:
         load_frozen_auxiliary_model(

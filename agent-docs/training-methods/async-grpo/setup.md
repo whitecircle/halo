@@ -53,11 +53,11 @@ Confirm `/health` (`:8000` vLLM, `:30000` SGLang) first, or client init hangs up
 
 ```bash
 CUDA_VISIBLE_DEVICES=0,1,2,3 DIST_NCCL_TIMEOUT_MINUTES=60 torchrun --nproc_per_node=4 \
-    scripts/training/environmental_grpo.py <config>
+    scripts/training/grpo/environmental.py <config>
 ```
 
 - Add `--expert_parallel_size=4` for MoE expert distribution.
-- `halo launch environmental-grpo <config> --nproc 4` builds the same `torchrun` line; the device split and
+- `halo launch grpo/environmental <config> --nproc 4` builds the same `torchrun` line; the device split and
   `DIST_NCCL_TIMEOUT_MINUTES` stay yours.
 - `accelerate launch` works only for plain data parallelism on a dense model; on a MoE it refuses the expert
   wrappers weight sync needs.

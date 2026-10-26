@@ -1,5 +1,5 @@
 """Fold a saved PEFT adapter into its base model and write the merged checkpoint, behind the input gates
-every tool writing from a saved adapter shares."""
+every tool writing from a saved adapter shares; the causal-LM and classification merge drivers."""
 
 from __future__ import annotations
 
@@ -9,12 +9,15 @@ import os
 from collections.abc import Callable
 from typing import NamedTuple
 
+import torch
 from peft import PeftConfig, PeftModel
 from transformers import PreTrainedModel
 
 from halo.checkpoint.adapters import adapter_module_paths, assert_no_expert_lora_adapter
 from halo.checkpoint.format import DEFAULT_MAX_SHARD_SIZE, MERGED_ADAPTER_CONFIG_DIR, PROCESSOR_FILES
 from halo.checkpoint.offline_export import (
+    cast_norms_to_fp32,
+    load_task_model,
     preflight_model_load_resources,
     reject_in_place_conversion,
     save_full_checkpoint,
@@ -163,3 +166,108 @@ def merge_adapter_into_base(
     copy_training_sidecars(adapter_dir, output_dir)
     peft_config.save_pretrained(os.path.join(output_dir, MERGED_ADAPTER_CONFIG_DIR))
     return merged_model
+
+
+def load_task_base_model(
+    base_model_path: str,
+    task: str,
+    dtype: torch.dtype,
+    device_map: str | None,
+    num_labels: int,
+    attn_implementation: str | None,
+    *,
+    excuse_task_head: bool = False,
+    text_only: bool = False,
+    trust_remote_code: bool = True,
+):
+    """The base loaded as ``task`` through :func:`load_task_model`'s coverage gate, with the merge's load settings.
+
+    A base directory that is truncated, or whose keys do not match the architecture, otherwise
+    random-initializes the absent tensors with only a log line and the merge would ship those weights as a
+    finished model. Whether a seq-cls head may be absent, and whether a multimodal base loads as its text-only
+    class, is decided by :func:`merge_adapter_into_base` from the adapter's own declaration and keys. A
+    causal-LM base's head is always excused: its widest class adds one an encoder checkpoint (an embedding
+    run's) never carries.
+    """
+    model_kwargs = {
+        "dtype": dtype,
+        "trust_remote_code": trust_remote_code,
+    }
+    if device_map:
+        model_kwargs["device_map"] = device_map
+    if attn_implementation:
+        model_kwargs["attn_implementation"] = attn_implementation
+
+    if task == "classification":
+        model_kwargs["num_labels"] = num_labels
+    else:
+        excuse_task_head = True
+    return load_task_model(
+        base_model_path, task, excuse_task_head=excuse_task_head, text_only=text_only, **model_kwargs
+    )
+
+
+def merge_peft_adapter(
+    adapter_dir: str,
+    output_dir: str,
+    task: str = "causal_lm",
+    dtype: torch.dtype = torch.bfloat16,
+    device_map: str | None = None,
+    num_labels: int = 1,
+    max_shard_size: str = DEFAULT_MAX_SHARD_SIZE,
+    attn_implementation: str | None = None,
+    trust_remote_code: bool = True,
+    fp32_norms: bool = False,
+    verbose: bool = True,
+):
+    """Merge a PEFT adapter into its base model and save the result.
+
+    Args:
+        adapter_dir: Path to the PEFT adapter directory (contains adapter_model.safetensors)
+        output_dir: Path to save the merged model
+        task: Model task type ("causal_lm" or "classification")
+        dtype: Model dtype for loading/saving
+        device_map: Device map for loading large models (e.g., "auto", "cpu")
+        num_labels: Number of labels for classification models
+        max_shard_size: Maximum shard size for output safetensors
+        attn_implementation: Override attention implementation (e.g., "flash_attention_2", "sdpa")
+        trust_remote_code: Passed to the base-model and processor loads
+        fp32_norms: Write every normalization leaf in fp32 instead of ``dtype``
+        verbose: Log progress messages
+    """
+    if verbose:
+        logger.info(f"Task: {task}, dtype: {dtype}")
+
+    def load_base_model(base_model_path: str, *, excuse_task_head: bool, text_only: bool = False):
+        return load_task_base_model(
+            base_model_path,
+            task,
+            dtype,
+            device_map,
+            num_labels,
+            attn_implementation,
+            excuse_task_head=excuse_task_head,
+            text_only=text_only,
+            trust_remote_code=trust_remote_code,
+        )
+
+    merged_model = merge_adapter_into_base(
+        adapter_dir,
+        output_dir,
+        load_base_model=load_base_model,
+        tool="merge_peft_adapters",
+        device_map=device_map,
+        max_shard_size=max_shard_size,
+        trust_remote_code=trust_remote_code,
+        prepare_for_save=cast_norms_to_fp32 if fp32_norms else None,
+        verbose=verbose,
+    )
+
+    if verbose:
+        total_params = sum(p.numel() for p in merged_model.parameters())
+        logger.info(f"Merged model saved to: {output_dir}")
+        logger.info(f"Total parameters: {total_params:,}")
+
+    del merged_model
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()

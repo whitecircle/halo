@@ -9,13 +9,15 @@ comment is not a call.
 import ast
 from collections.abc import Callable, Iterable, Iterator
 
+from halo.checkpoint.offline_export import load_task_model
 from halo.model_loading.checkpoint_coverage import from_pretrained_verified
 from halo.model_loading.model_preparation import auto_load_model
 from tests.common.repo import REPO_ROOT
 
-# The toolkit's eager load entry points; a model build is one of them, a SentenceTransformer built from a
-# checkpoint path, or a factory on any class but a tokenizer, processor or config one.
-TOOLKIT_LOAD_CALLS = frozenset({from_pretrained_verified.__name__, auto_load_model.__name__})
+# The toolkit's eager load entry points (the standalone tools' per-task load among them); a model build is
+# one of them, a SentenceTransformer built from a checkpoint path, or a factory on any class but a tokenizer,
+# processor or config one.
+TOOLKIT_LOAD_CALLS = frozenset({from_pretrained_verified.__name__, auto_load_model.__name__, load_task_model.__name__})
 MODEL_LOAD_CALLS = TOOLKIT_LOAD_CALLS | {"SentenceTransformer"}
 MODEL_FACTORIES = frozenset({"from_pretrained", "from_config", "_from_config"})
 NON_MODEL_CLASSES = frozenset({"AutoTokenizer", "AutoProcessor", "AutoConfig", "GenerationConfig", "PeftConfig"})

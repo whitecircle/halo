@@ -153,7 +153,7 @@ Every checkpoint Halo writes, full model, adapter or tool output, holds a
 `README.md` model card tagged `halo`, so the upload lists under that Hub tag.
 Before you publish, fill in its body and replace a local-path `base_model` with
 the Hub id. A tool whose source card has malformed metadata copies that card
-untagged and warns; `convert-to-bf16 --peft` raises instead.
+untagged and warns.
 
 Shard layouts, merge flags and the full resume mechanics:
 [Checkpoints](../agent-docs/reference/checkpoints.md) ↗ ·

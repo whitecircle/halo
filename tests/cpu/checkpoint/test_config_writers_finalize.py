@@ -108,9 +108,7 @@ def test_every_exemption_names_an_unfinalized_writer(relative, name):
 def test_the_roster_is_not_vacuous():
     writers = {(str(p.relative_to(REPO_ROOT)), name) for p in _python_files() for name, _ in _config_writers(p)}
     assert ("halo/checkpoint/offline_export.py", "save_full_checkpoint") in writers
-    assert ("scripts/after_training/reattach_vision_tower.py", "main") in writers or any(
-        path.endswith("reattach_vision_tower.py") for path, _ in writers
-    )
+    assert ("halo/checkpoint/vision_reattach.py", "reattach_vision_tower") in writers
 
 
 if __name__ == "__main__":

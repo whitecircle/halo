@@ -90,7 +90,7 @@ def _run_rewards(tmp_path, dataset: DatasetDict, yaml_body: str = "", processor=
     Returns ``(captured trainer kwargs, tokenizer, processor, processor_loader)`` — the loader is a
     mock so a test can assert the text branch never builds a processor at all.
     """
-    module = load_script_module("scripts/training/preference/rewards.py", "halo_test_rewards_dispatch")
+    module = load_script_module("scripts/training/reward/reward_model.py", "halo_test_rewards_dispatch")
 
     config = tmp_path / "config.yaml"
     config.write_text(

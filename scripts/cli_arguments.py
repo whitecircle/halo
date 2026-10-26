@@ -1,12 +1,14 @@
 """Argparse flags shared across the ``scripts/`` subtrees: the shard cap, the Hub-capable source block, the dtype
-and device-map pair, the remote-code switch and the OpenAI-compatible endpoint block.
+and device-map pair, the head-class task, the remote-code switch and the OpenAI-compatible endpoint block.
 
 Defined once so the checkpoint tools chained over one artifact, and every CLI driving a served model, accept one
 spelling and one set of defaults. Flags only; the drivers they feed live in ``halo/``."""
 
 import argparse
+from collections.abc import Sequence
 
 from halo.checkpoint.format import DEFAULT_MAX_SHARD_SIZE
+from halo.checkpoint.offline_export import TASK_MODEL_CLASSES
 from halo.inference.endpoints import DEFAULT_LOCAL_BASE_URL, resolve_local_api_key
 from halo.model_loading.dtype import DTYPE_BY_NAME
 
@@ -83,6 +85,22 @@ def add_dtype_arg(
     """Add a dtype flag, as :data:`DTYPE_BY_NAME` names it: ``--dtype`` for a tool that writes a
     checkpoint, or ``flag``/``help`` for one whose dtype is another model's compute dtype."""
     parser.add_argument(flag, type=str, default="bfloat16", choices=list(DTYPE_BY_NAME), help=help)
+    return parser
+
+
+def add_task_arg(
+    parser: argparse.ArgumentParser, *, tasks: Sequence[str] = tuple(TASK_MODEL_CLASSES)
+) -> argparse.ArgumentParser:
+    """Add ``--task``, the head a checkpoint tool loads a checkpoint with, over ``tasks`` (default: every
+    :data:`~halo.checkpoint.offline_export.TASK_MODEL_CLASSES` key)."""
+    parser.add_argument(
+        "--task",
+        choices=list(tasks),
+        default="causal_lm",
+        help="The head the checkpoint loads with: causal_lm (the widest class its config names, a VLM's "
+        "included), classification (sequence classification) or base (the bare backbone), as offered "
+        "(default: %(default)s).",
+    )
     return parser
 
 

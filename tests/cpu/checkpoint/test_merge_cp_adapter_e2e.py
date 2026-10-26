@@ -39,6 +39,7 @@ from peft import LoraConfig, PeftModel, get_peft_model
 from transformers import Qwen3Config, Qwen3ForCausalLM
 from transformers.models.gemma4.modeling_gemma4 import Gemma4ClippableLinear
 
+from halo.checkpoint.adapter_merge import merge_peft_adapter
 from halo.checkpoint.format import ADAPTER_CONFIG_FILE, ROUTER_BALANCING_BIASES_FILE, TRAINING_PROVENANCE_FILE
 from halo.checkpoint.parallel.adapters import _cp_normalized_config, save_peft_adapters
 from halo.checkpoint.sidecars import PROVENANCE_GPT_OSS_SINKS, apply_training_sidecars
@@ -50,7 +51,6 @@ from halo.model_loading.parallel.peft_setup import build_peft_config
 from halo.models.attention.gpt_oss_sinks import SinksPolicy
 from tests.common.checkpoint_io import save_context
 from tests.common.parallelism import make_parallelism_config
-from tests.common.repo import load_script_module
 from tests.common.tiny_models import word_level_tokenizer
 
 _TINY_QWEN3 = {
@@ -68,10 +68,6 @@ _LORA_R = 4
 _LORA_ALPHA = 8
 _TARGETS = ["q_proj", "v_proj"]
 _UNTARGETED = "k_proj"
-
-
-def _load_merge_script():
-    return load_script_module("scripts/after_training/merge_peft_adapters.py", "merge_peft_adapters_e2e")
 
 
 def _build_base(base_dir: Path) -> None:
@@ -133,15 +129,12 @@ def _write_sidecars(adapter_dir: Path) -> None:
 def test_cp_trained_adapter_merges_into_a_plain_model():
     """The portability contract, end to end: CP-spelled adapter in, adapted plain checkpoint out."""
     PartialState()
-    merge_script = _load_merge_script()
     with tempfile.TemporaryDirectory() as tmp:
         base, adapter, out = Path(tmp) / "base", Path(tmp) / "adapter", Path(tmp) / "out"
         _build_base(base)
         deltas = _train_cp_adapter(base, adapter)
 
-        merge_script.merge_peft_adapter(
-            adapter_dir=str(adapter), output_dir=str(out), dtype=torch.float32, verbose=False
-        )
+        merge_peft_adapter(adapter_dir=str(adapter), output_dir=str(out), dtype=torch.float32, verbose=False)
 
         merged = Qwen3ForCausalLM.from_pretrained(out, dtype=torch.float32).state_dict()
         original = Qwen3ForCausalLM.from_pretrained(base, dtype=torch.float32).state_dict()
@@ -242,7 +235,6 @@ def test_merge_carries_the_training_sidecars_and_warns_about_an_unservable_bias(
     an architecture with no checkpoint slot for it cannot be served: the merge must say so rather
     than write an artifact that quietly routes on the pretrained gate."""
     PartialState()
-    merge_script = _load_merge_script()
     with tempfile.TemporaryDirectory() as tmp:
         base, adapter, out = Path(tmp) / "base", Path(tmp) / "adapter", Path(tmp) / "out"
         _build_base(base)
@@ -255,9 +247,7 @@ def test_merge_carries_the_training_sidecars_and_warns_about_an_unservable_bias(
             f"a dense model has no balancing slot — the merge must warn, got {actions}"
         )
 
-        merge_script.merge_peft_adapter(
-            adapter_dir=str(adapter), output_dir=str(out), dtype=torch.float32, verbose=False
-        )
+        merge_peft_adapter(adapter_dir=str(adapter), output_dir=str(out), dtype=torch.float32, verbose=False)
 
         for name in (TRAINING_PROVENANCE_FILE, ROUTER_BALANCING_BIASES_FILE):
             assert (out / name).is_file(), f"{name} did not travel with the merged model"

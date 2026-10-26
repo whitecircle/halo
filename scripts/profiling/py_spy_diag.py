@@ -37,11 +37,11 @@ from halo.diagnostics.py_spy import (
 )
 from halo.log import configure_cli_logging
 
-configure_cli_logging()
 logger = logging.getLogger(__name__)
 
 
 def main() -> None:
+    configure_cli_logging()
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     # Shared options live on a parent parser so they are accepted after the subcommand (the
     # docstring's `record --pid N` form); options on `parser` itself would not be.
@@ -58,12 +58,12 @@ def main() -> None:
     dump = subparsers.add_parser(
         "dump", parents=[common], help="Instantaneous stack dump of every rank (hang triage)."
     )
-    dump.add_argument("--output-dir", default=STACK_DUMP_DIR, help="Default: %(default)s")
+    dump.add_argument("--output_dir", default=STACK_DUMP_DIR, help="Default: %(default)s")
 
     record = subparsers.add_parser(
         "record", parents=[common], help="Per-rank CPU flame-graph SVGs over a sampling window."
     )
-    record.add_argument("--output-dir", default=FLAMEGRAPH_DIR, help="Default: %(default)s")
+    record.add_argument("--output_dir", default=FLAMEGRAPH_DIR, help="Default: %(default)s")
     record.add_argument("--duration", type=int, default=30, help="Sampling window in seconds (default: %(default)s).")
     record.add_argument("--rate", type=int, default=100, help="Samples per second (default: %(default)s).")
     record.add_argument("--native", action="store_true", help="Also sample native (C/CUDA-runtime) frames.")

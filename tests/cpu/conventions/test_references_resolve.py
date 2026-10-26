@@ -78,8 +78,10 @@ _NOT_REFERENCES = {
         "scripts/inference/serve.py",
         "scripts/training/a/train.py",
         "scripts/training/b/train.py",
+        "scripts/training/my_method.py",
         "scripts/training/nested/reward.py",
         "scripts/training/nested/sft.py",
+        "scripts/training/other/rewards.py",
         "scripts/training/preference/constants.py",
     },
     # A page the release check plants in its scratch copy of the docs.

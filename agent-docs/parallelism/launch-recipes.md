@@ -116,11 +116,11 @@ Weights take ~2 bytes/param in bf16 (7B MoE ≈ 14 GB, 20B ≈ 40 GB, 70B ≈ 14
 
 EP all-to-all rides NVLink inside a node, so a marginal lane silently caps throughput or hangs a run.
 `scripts/profiling/nvlink_health.py` reads `nvidia-smi` counters (no GPU allocation, safe beside a live
-job), separates hard faults from FEC-absorbed churn, and exits non-zero on an unhealthy link; run it
-before a long launch:
+job), separates hard faults from FEC-absorbed churn, and exits non-zero on an unhealthy or down link;
+run it before a long launch:
 
 ```bash
-python scripts/profiling/nvlink_health.py            # summary, exit 1 if unhealthy
+python scripts/profiling/nvlink_health.py            # summary, exit 1 if unhealthy or down
 ```
 
 Pre-tokenized, per-rank sharded datasets (`num_shards >= data_parallel_size`):

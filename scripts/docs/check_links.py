@@ -18,6 +18,7 @@ usage: scripts/docs/check_links.sh [path ...]   (default: agent-docs, human-docs
 
 from __future__ import annotations
 
+import argparse
 import os
 import sys
 from pathlib import Path
@@ -80,12 +81,21 @@ def check_file(file: Path, index: RepoIndex) -> list[str]:
     return problems
 
 
-def main(argv: list[str]) -> int:
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(
+        description="Resolve every relative markdown link, heading anchor and code reference in the doc trees."
+    )
+    parser.add_argument(
+        "paths",
+        nargs="*",
+        default=list(DEFAULT_PATHS),
+        help="Markdown files or directories to check (default: %(default)s).",
+    )
+    paths = parser.parse_args(argv).paths
     # A host interpreter runs this, not the project's, so the project's floor is checked here.
     if sys.version_info < (3, 12):  # noqa: UP036
         print(f"FAIL: needs Python 3.12+ to parse the {PACKAGE} package's source; this is {sys.version.split()[0]}")
         return 2
-    paths = argv or list(DEFAULT_PATHS)
     # A path that no longer exists would leave nothing to scan and the check would pass.
     missing = [path for path in paths if not os.path.exists(path)]
     for path in missing:
@@ -105,4 +115,4 @@ def main(argv: list[str]) -> int:
 
 
 if __name__ == "__main__":
-    raise SystemExit(main(sys.argv[1:]))
+    raise SystemExit(main())

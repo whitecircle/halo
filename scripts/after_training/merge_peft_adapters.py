@@ -20,137 +20,22 @@ Usage:
 """
 
 import argparse
-import logging
 
-import torch
-from transformers import AutoModelForSequenceClassification
-
-from halo.checkpoint.adapter_merge import merge_adapter_into_base
-from halo.checkpoint.format import DEFAULT_MAX_SHARD_SIZE
-from halo.checkpoint.offline_export import cast_norms_to_fp32
+from halo.checkpoint.adapter_merge import merge_peft_adapter
+from halo.checkpoint.offline_export import ADAPTER_TASKS
 from halo.log import configure_cli_logging
-from halo.model_loading.checkpoint_coverage import from_pretrained_verified
 from halo.model_loading.dtype import DTYPE_BY_NAME
-from halo.model_loading.model_preparation import auto_load_model
-from scripts.cli_arguments import add_device_map_arg, add_dtype_arg, add_max_shard_size_arg, add_trust_remote_code_arg
-
-configure_cli_logging()
-logger = logging.getLogger(__name__)
-
-
-def _load_base_model(
-    base_model_path: str,
-    task: str,
-    dtype: torch.dtype,
-    device_map: str | None,
-    num_labels: int,
-    attn_implementation: str | None,
-    *,
-    excuse_task_head: bool = False,
-    text_only: bool = False,
-    trust_remote_code: bool = True,
-):
-    """Load the base model with appropriate class and settings.
-
-    Both branches go through the checkpoint-coverage gate: a base directory that is truncated, or
-    whose keys do not match the architecture, otherwise random-initializes the absent tensors with
-    only a log line and the merge would ship those weights as a finished model. Which absence may be
-    excused, and whether a multimodal base loads as its text-only class, is decided by
-    :func:`merge_adapter_into_base` from the adapter's own declaration and keys.
-    """
-    model_kwargs = {
-        "dtype": dtype,
-        "trust_remote_code": trust_remote_code,
-    }
-    if device_map:
-        model_kwargs["device_map"] = device_map
-    if attn_implementation:
-        model_kwargs["attn_implementation"] = attn_implementation
-
-    if task == "classification":
-        if text_only:
-            raise ValueError("A classification base has one class; text_only applies to causal-LM bases only.")
-        model_kwargs["num_labels"] = num_labels
-        return from_pretrained_verified(
-            AutoModelForSequenceClassification,
-            base_model_path,
-            excuse_task_head=excuse_task_head,
-            **model_kwargs,
-        )
-
-    # causal_lm: resolve the widest Auto* class from the config so VLM base models load as the full
-    # *ForConditionalGeneration wrapper instead of the text-only subclass, unless the adapter was
-    # trained through that subclass.
-    return auto_load_model(base_model_path, text_only=text_only, **model_kwargs)
-
-
-def merge_peft_adapter(
-    adapter_dir: str,
-    output_dir: str,
-    task: str = "causal_lm",
-    dtype: torch.dtype = torch.bfloat16,
-    device_map: str | None = None,
-    num_labels: int = 1,
-    max_shard_size: str = DEFAULT_MAX_SHARD_SIZE,
-    attn_implementation: str | None = None,
-    trust_remote_code: bool = True,
-    fp32_norms: bool = False,
-    verbose: bool = True,
-):
-    """Merge a PEFT adapter into its base model and save the result.
-
-    Args:
-        adapter_dir: Path to the PEFT adapter directory (contains adapter_model.safetensors)
-        output_dir: Path to save the merged model
-        task: Model task type ("causal_lm" or "classification")
-        dtype: Model dtype for loading/saving
-        device_map: Device map for loading large models (e.g., "auto", "cpu")
-        num_labels: Number of labels for classification models
-        max_shard_size: Maximum shard size for output safetensors
-        attn_implementation: Override attention implementation (e.g., "flash_attention_2", "sdpa")
-        trust_remote_code: Passed to the base-model and processor loads
-        fp32_norms: Write every normalization leaf in fp32 instead of ``dtype``
-        verbose: Log progress messages
-    """
-    if verbose:
-        logger.info(f"Task: {task}, dtype: {dtype}")
-
-    def load_base_model(base_model_path: str, *, excuse_task_head: bool, text_only: bool = False):
-        return _load_base_model(
-            base_model_path,
-            task,
-            dtype,
-            device_map,
-            num_labels,
-            attn_implementation,
-            excuse_task_head=excuse_task_head,
-            text_only=text_only,
-            trust_remote_code=trust_remote_code,
-        )
-
-    merged_model = merge_adapter_into_base(
-        adapter_dir,
-        output_dir,
-        load_base_model=load_base_model,
-        tool="merge_peft_adapters",
-        device_map=device_map,
-        max_shard_size=max_shard_size,
-        trust_remote_code=trust_remote_code,
-        prepare_for_save=cast_norms_to_fp32 if fp32_norms else None,
-        verbose=verbose,
-    )
-
-    if verbose:
-        total_params = sum(p.numel() for p in merged_model.parameters())
-        logger.info(f"Merged model saved to: {output_dir}")
-        logger.info(f"Total parameters: {total_params:,}")
-
-    del merged_model
-    if torch.cuda.is_available():
-        torch.cuda.empty_cache()
+from scripts.cli_arguments import (
+    add_device_map_arg,
+    add_dtype_arg,
+    add_max_shard_size_arg,
+    add_task_arg,
+    add_trust_remote_code_arg,
+)
 
 
 def main():
+    configure_cli_logging()
     parser = argparse.ArgumentParser(
         description="Merge PEFT (LoRA) adapter into base model",
         formatter_class=argparse.RawDescriptionHelpFormatter,
@@ -185,12 +70,7 @@ Examples:
         help="Path to save the merged model (every model*.safetensors/index the completed save did not "
         "produce is removed afterwards)",
     )
-    parser.add_argument(
-        "--task",
-        choices=["causal_lm", "classification"],
-        default="causal_lm",
-        help="Model task type (default: causal_lm)",
-    )
+    add_task_arg(parser, tasks=ADAPTER_TASKS)
     add_dtype_arg(parser)
     add_device_map_arg(parser)
     parser.add_argument(

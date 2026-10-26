@@ -24,6 +24,7 @@ import pytest
 from datasets import Dataset, DatasetDict
 from transformers.models.auto.configuration_auto import CONFIG_MAPPING
 
+from halo.entrypoints import model_setup
 from halo.entrypoints.model_setup import PolicyLoad
 from halo.model_loading.parallel import model_source
 from tests.common.repo import REPO_ROOT, load_script_module
@@ -174,12 +175,13 @@ def _run_dpo(tmp_path, dataset: DatasetDict, tokenizer):
 
     patches = [
         mock.patch.object(module, "init_training_script", return_value=runtime),
-        mock.patch.object(module, "load_policy_model", side_effect=load_model),
-        mock.patch.object(module, "load_reference_model_for_preference", return_value=None),
-        mock.patch.object(module, "apply_max_length", side_effect=lambda cfg, args, model, tok: tok),
-        mock.patch.object(module, "install_resolved_tokenizer", side_effect=lambda pc, tok: pc),
-        mock.patch.object(module, "configure_adapter_training", return_value=None),
-        mock.patch.object(module, "log_model_info"),
+        # The policy-and-reference load DPO shares with KTO runs for real around these stubs.
+        mock.patch.object(model_setup, "load_policy_model", side_effect=load_model),
+        mock.patch.object(model_setup, "load_reference_model_for_preference", return_value=None),
+        mock.patch.object(model_setup, "apply_max_length", side_effect=lambda cfg, args, model, tok: tok),
+        mock.patch.object(model_setup, "install_resolved_tokenizer", side_effect=lambda pc, tok: pc),
+        mock.patch.object(model_setup, "configure_adapter_training", return_value=None),
+        mock.patch.object(model_setup, "log_model_info"),
         mock.patch.object(module, "load_script_datasets", return_value=(dataset, False)),
         # The preference prep and the example log both live in the shared data_setup helper the
         # script calls, so the two arms are distinguished on ITS globals: the text arm reaches
@@ -363,10 +365,12 @@ def test_data_dispatch_goes_through_the_shared_seam(script):
 
 
 # Every script that loads a possibly-multimodal checkpoint through the modality-aware loader.
+# The modality-aware loader and the preference load built on it, each taking the run's verdict.
+_POLICY_LOADS = ("load_policy_model", "load_preference_models")
 _LOADING_SCRIPTS = sorted(
     str(path.relative_to(_TRAINING_DIR))
     for path in _TRAINING_DIR.rglob("*.py")
-    if "load_policy_model(" in path.read_text(encoding="utf-8")
+    if any(f"{load}(" in path.read_text(encoding="utf-8") for load in _POLICY_LOADS)
 )
 
 
@@ -392,13 +396,13 @@ def test_every_model_load_takes_the_run_verdict(script):
     loads = [
         node
         for node in ast.walk(tree)
-        if isinstance(node, ast.Call) and getattr(node.func, "id", None) == "load_policy_model"
+        if isinstance(node, ast.Call) and getattr(node.func, "id", None) in _POLICY_LOADS
     ]
     assert verdicts and loads, f"{script} no longer both decides the run and loads through the shared loader"
     for call in loads:
         passed = [kw.value for kw in call.keywords if kw.arg == "vlm_run"]
         assert len(passed) == 1 and isinstance(passed[0], ast.Name) and passed[0].id in verdicts, (
-            f"{script}: load_policy_model is not handed the resolve_vlm_run verdict as vlm_run"
+            f"{script}: {call.func.id} is not handed the resolve_vlm_run verdict as vlm_run"
         )
 
 

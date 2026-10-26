@@ -17,7 +17,7 @@ OPD runs on the tokens the GRPO loss trains, so tool-output tokens are excluded.
 ```bash
 # vLLM on GPU 7 and the trainer on 0-6, the compose defaults (server setup: Online GRPO)
 CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6 torchrun --nproc_per_node=7 \
-    scripts/training/online_grpo/rlvr.py \
+    scripts/training/grpo/online.py \
     examples/grpo/online/rlvr-online-grpo-template.yaml \
     --use_sdpg=true --sdpg_beta_base=1.0
 ```

@@ -12,14 +12,14 @@ have to the trainer that reads it.
 | SMPO | `prompt` / `chosen` / `rejected`, no reference model | `smpo` | [Preference](preference.md) |
 | DPO | `prompt` / `chosen` / `rejected`, against a reference | `dpo` | [Preference](preference.md) |
 | KTO | `prompt` / `completion` / boolean `label` | `kto` | [Preference](preference.md) |
-| Reward modeling | preference pairs, output is a scalar scorer | `rewards` | [Reward & classification](reward-and-classification.md) |
+| Reward modeling | preference pairs, output is a scalar scorer | `reward/reward-model` | [Reward & classification](reward-and-classification.md) |
 | Classification | text plus a single- or multi-label `label` | `classification` | [Reward & classification](reward-and-classification.md) |
-| Offline GRPO | prompts with completions you already scored | `offline-grpo` | [Offline GRPO](offline-grpo.md) |
-| Online GRPO (RLVR) | prompts with a verifiable answer, generated live | `rlvr` | [Online GRPO](online-grpo.md) |
-| Async GRPO with Environments | multi-turn, tool-using trajectories | `environmental-grpo` | [Async GRPO](async-grpo-environments.md) |
+| Offline GRPO | prompts with completions you already scored | `grpo/offline` | [Offline GRPO](offline-grpo.md) |
+| Online GRPO (RLVR) | prompts with a verifiable answer, generated live | `grpo/online` | [Online GRPO](online-grpo.md) |
+| Async GRPO with Environments | multi-turn, tool-using trajectories | `grpo/environmental` | [Async GRPO](async-grpo-environments.md) |
 | Teacher distillation | conversations, plus a second frozen model | `teacher-distill` | [Distillation](distillation.md) |
 | Self-distillation | conversations with gold answers, one model | `self-distill` | [Distillation](distillation.md) |
-| Online SDPG | prompts with an answer, generated live | `rlvr --use_sdpg=true` | [Distillation](distillation.md#online-sdpg) |
+| Online SDPG | prompts with an answer, generated live | `grpo/online --use_sdpg=true` | [Distillation](distillation.md#online-sdpg) |
 | Embedding | text pairs, triplets or scored pairs | `embedding` | [Embedding](embedding.md) |
 
 ## What every method shares

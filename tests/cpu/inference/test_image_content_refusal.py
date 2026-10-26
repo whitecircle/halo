@@ -18,7 +18,7 @@ from concurrent.futures import ThreadPoolExecutor
 
 import pytest
 
-from scripts.inference.reward_model import reward_model_arguments, rm_rejection_sampling, rm_scoring
+from halo.entrypoints import rejection_sampling, reward_scoring
 
 _TEXT_TURNS = [{"role": "user", "content": "2+2?"}, {"role": "assistant", "content": "4"}]
 _IMAGE_TURNS = [
@@ -43,14 +43,14 @@ def _rm_tokenizer():
 def _score_offloaded(*args):
     """The awaited seam both RM scripts call: the batched scorer, run on a worker thread."""
     with ThreadPoolExecutor(max_workers=1) as executor:
-        return asyncio.run(reward_model_arguments.score_conversations_offloaded(executor, *args))
+        return asyncio.run(reward_scoring.score_conversations_offloaded(executor, *args))
 
 
 # Both entry points into the reward model: the batched scorer and the thread offload the scripts
 # await. A guard that the offload path did not carry would leave the scripts unprotected.
 _RM_SCORERS = pytest.mark.parametrize(
     "score",
-    [reward_model_arguments.score_conversations, _score_offloaded],
+    [reward_scoring.score_conversations, _score_offloaded],
     ids=["score_conversations", "score_conversations_offloaded"],
 )
 
@@ -71,10 +71,10 @@ def test_a_text_conversation_still_reaches_the_reward_model(score):
         score(_rm_tokenizer(), None, "cpu", [_TEXT_TURNS], "4", 8)
 
 
-@pytest.mark.parametrize("script", [rm_scoring, rm_rejection_sampling], ids=["rm_scoring", "rm_rejection_sampling"])
-def test_both_rm_scripts_score_through_the_guarded_seam(script):
-    """A script that grew its own scoring loop would score images with no guard in front of it."""
-    assert script.score_conversations_offloaded is reward_model_arguments.score_conversations_offloaded
+def test_rejection_sampling_scores_through_the_guarded_seam():
+    """A run that grew its own scoring loop would score images with no guard in front of it."""
+    script = rejection_sampling
+    assert script.score_conversations_offloaded is reward_scoring.score_conversations_offloaded
     assert not hasattr(script, "score_conversations"), (
         f"{script.__name__} holds its own score_conversations — the image guard covers only the "
         f"shared one, so a second scoring path scores conversations nothing checked"

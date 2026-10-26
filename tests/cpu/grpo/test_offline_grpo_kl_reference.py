@@ -14,7 +14,7 @@ from peft import LoraConfig
 from transformers import AutoConfig, AutoModelForCausalLM
 
 import halo.trainers.grpo.offline.reference as reference_logps_module
-import scripts.training.offline_grpo as offline_grpo_script
+import scripts.training.grpo.offline as offline_grpo_script
 from halo.checkpoint.format import REFERENCE_LOGPS_FILE
 from halo.configs.grpo_offline import OfflineGRPOConfig
 from halo.configs.script_arguments import ModelArguments

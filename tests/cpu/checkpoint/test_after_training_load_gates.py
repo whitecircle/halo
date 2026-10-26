@@ -33,8 +33,7 @@ from peft import LoraConfig, get_peft_model
 from safetensors.torch import load_file, save_file
 from transformers import Qwen3Config, Qwen3ForCausalLM, Qwen3ForSequenceClassification
 
-import scripts.after_training.convert_to_bf16 as convert_to_bf16
-import scripts.after_training.merge_peft_adapters as merge_peft_adapters
+import halo.checkpoint.bf16_conversion as convert_to_bf16
 from halo.checkpoint import adapter_merge
 from halo.model_loading import model_preparation
 from halo.model_loading.parallel.whole_model import resolve_trainer_model
@@ -96,7 +95,7 @@ def _adapter_for(base_path: str, tmp_path) -> str:
 
 
 def _load(path: str, *, excuse_task_head: bool):
-    return merge_peft_adapters._load_base_model(
+    return adapter_merge.load_task_base_model(
         path,
         "classification",
         torch.float32,
@@ -167,13 +166,13 @@ def test_the_excuse_is_derived_from_the_adapter_config():
 # --- convert_to_bf16: every load path is gated, not just the causal-LM one --------------------
 
 
-@pytest.mark.parametrize("model_type", ["causal_lm", "classifier", "base"])
-def test_a_truncated_source_is_refused_on_every_conversion_path(model_type, causal_lm_checkpoint, tmp_path):
-    """Through a direct ``from_pretrained``, ``--model_type classifier`` / ``base`` would
+@pytest.mark.parametrize("task", ["causal_lm", "classification", "base"])
+def test_a_truncated_source_is_refused_on_every_conversion_path(task, causal_lm_checkpoint, tmp_path):
+    """Through a direct ``from_pretrained``, ``--task classification`` / ``base`` would
     random-initialize a checkpoint's missing tensors and write them out as a complete-looking bf16
     model."""
     with pytest.raises(RuntimeError, match="randomly initialized"):
-        convert_to_bf16.load_model(_truncate(causal_lm_checkpoint, tmp_path), model_type, dtype=torch.float32)
+        convert_to_bf16.load_model(_truncate(causal_lm_checkpoint, tmp_path), task, dtype=torch.float32)
 
 
 def test_a_truncated_base_is_refused_under_peft(causal_lm_checkpoint, tmp_path):
@@ -310,17 +309,21 @@ def test_every_loader_that_materializes_weights_applies_the_shims(loader):
     )
 
 
-MODEL_LOADING_SCRIPTS = sorted(
-    path for path in (REPO_ROOT / "scripts").rglob("*.py") if imports_name(path, SHARED_MODEL_LOADER)
+# The tool CLIs and the offline checkpoint drivers they call.
+MODEL_LOADING_TOOLS = sorted(
+    path
+    for root in ("scripts", "halo/checkpoint")
+    for path in (REPO_ROOT / root).rglob("*.py")
+    if imports_name(path, SHARED_MODEL_LOADER)
 )
 
 
 def test_the_sweep_found_the_model_loading_tools():
     """Guard the derivation itself: an empty sweep would pass the assertion below vacuously."""
-    assert len(MODEL_LOADING_SCRIPTS) >= 4, MODEL_LOADING_SCRIPTS
+    assert len(MODEL_LOADING_TOOLS) >= 2, MODEL_LOADING_TOOLS
 
 
-@pytest.mark.parametrize("script", MODEL_LOADING_SCRIPTS, ids=lambda p: p.stem)
+@pytest.mark.parametrize("script", MODEL_LOADING_TOOLS, ids=lambda p: p.stem)
 def test_no_tool_re_applies_the_shims_around_the_loader(script):
     """The shims live INSIDE the loader, so a tool applying them again is a second copy of a contract
     with one owner — and a per-tool copy is what makes "did this CLI remember?" a live question."""

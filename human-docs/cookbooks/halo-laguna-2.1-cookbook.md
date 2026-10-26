@@ -70,7 +70,7 @@ launch:
 
 ```bash
 cp examples/grpo/environmental/environmental-grpo-template.yaml laguna-grpo.yaml
-CUDA_VISIBLE_DEVICES=4,5,6,7 halo launch environmental-grpo laguna-grpo.yaml -n 4 \
+CUDA_VISIBLE_DEVICES=4,5,6,7 halo launch grpo/environmental laguna-grpo.yaml -n 4 \
   --model_name_or_path=/data/checkpoints/laguna-s-2.1-sft \
   --trust_remote_code=true --attn_implementation=sdpa \
   --expert_parallel_size=4 --optim=flash_adamw \

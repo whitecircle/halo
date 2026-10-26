@@ -1,7 +1,7 @@
 # RLVR Online GRPO template — rule-based rewards (math accuracy, format), DistributedGRPOTrainer.
 # Dataset rows: {"prompt": ..., "answer": ...}. See agent-docs/training-methods/grpo/online.md.
 # Usage: start a vLLM server with --weight-transfer-config '{"backend": "nccl"}', then
-#   torchrun --nproc_per_node=4 scripts/training/online_grpo/rlvr.py <this config> — add
+#   torchrun --nproc_per_node=4 scripts/training/grpo/online.py <this config> — add
 #   --expert_parallel_size/--tensor_parallel_size here; accelerate launch stays an option for plain DP.
 
 # --- Model ---

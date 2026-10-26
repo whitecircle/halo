@@ -1,7 +1,7 @@
 #!/usr/bin/env python
 """The staged-push protocol — ``push_dataset`` must never hold the only copy hostage.
 
-The generation CLIs (``scripts/inference/inference_arguments.py``) push their accumulated results through
+The generation CLIs (``halo/entrypoints/resumable_generation.py``) push their accumulated results through
 ``push_dataset`` every checkpoint interval. Deleting the destination prefix before uploading is what
 the staging exists to avoid: a crash in that window either tears the prefix (loud) or — after the
 delete, before the first byte — leaves ``exists()`` False, and the next resume silently regenerates

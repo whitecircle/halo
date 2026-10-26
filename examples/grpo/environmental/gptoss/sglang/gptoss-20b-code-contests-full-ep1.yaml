@@ -2,7 +2,7 @@
 # Serve with: 2x TP=2 sglang-server on ports 30000/30001, --enable-return-routed-experts --moe-runner-backend triton
 #   --tool-call-parser auto --reasoning-parser gpt-oss --chat-template on the file below, NCCL_CUMEM_ENABLE=1 in the
 #   server env, --enable-torch-compile off (unsafe under R3).
-# Launch: CUDA_VISIBLE_DEVICES=4,5,6,7 DIST_NCCL_TIMEOUT_MINUTES=60 torchrun --nproc_per_node=4 scripts/training/environmental_grpo.py <this config>
+# Launch: CUDA_VISIBLE_DEVICES=4,5,6,7 DIST_NCCL_TIMEOUT_MINUTES=60 torchrun --nproc_per_node=4 scripts/training/grpo/environmental.py <this config>
 
 # --- Model ---
 model_name_or_path: unsloth/gpt-oss-20b-BF16

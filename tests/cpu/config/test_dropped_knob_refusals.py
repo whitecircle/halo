@@ -222,7 +222,7 @@ def test_self_distill_accepts_both_spellings_of_its_own_nll(loss_type, tmp_path)
 def test_env_grpo_refuses_a_completion_length_it_would_overwrite(tmp_path):
     with pytest.raises(ValueError, match=r"max_completion_length=1024 is not a knob.*rollout_max_tokens \(512\)"):
         _run_main(
-            "environmental_grpo.py",
+            "grpo/environmental.py",
             "rollout_max_tokens: 512\nmax_completion_length: 1024\n",
             tmp_path,
             init_training_script=_stop,
@@ -239,14 +239,14 @@ def test_env_grpo_refuses_a_completion_length_it_would_overwrite(tmp_path):
 )
 def test_env_grpo_accepts_a_completion_length_it_would_not_change(config_body, tmp_path):
     with pytest.raises(_PastTheGuards):
-        _run_main("environmental_grpo.py", config_body, tmp_path, init_training_script=_stop)
+        _run_main("grpo/environmental.py", config_body, tmp_path, init_training_script=_stop)
 
 
 def test_env_grpo_refuses_a_react_system_prompt_before_the_model_load(tmp_path):
     """The registry refuses the key; the script must reach that refusal before any load."""
     with pytest.raises(ValueError, match="environment_kwargs.system_prompt"):
         _run_main(
-            "environmental_grpo.py",
+            "grpo/environmental.py",
             "environment_type: react_math\nenvironment_kwargs:\n  system_prompt: Answer tersely.\n",
             tmp_path,
             init_training_script=_stop,

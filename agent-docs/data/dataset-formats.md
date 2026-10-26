@@ -72,9 +72,9 @@ RNG API, algorithm or per-split seed would swap the training corpus under an unc
 | DPO | `scripts/training/preference/dpo.py` | `chosen`, `rejected` (+ optional `prompt`) | all `List[Dict]` | hardcoded |
 | SMPO | `scripts/training/preference/smpo.py` | `chosen`, `rejected` (+ optional `prompt`) | all `List[Dict]` | hardcoded |
 | KTO | `scripts/training/preference/kto.py` | `prompt`, `completion`, `label` | `List[Dict]`/`str`, bool | `completion_field`, `label_field` |
-| Offline GRPO | `scripts/training/offline_grpo.py` | `prompt`, `completions`, `rewards` | `List[Dict]`, `List[List[Dict]]`, `List[float]` | hardcoded |
+| Offline GRPO | `scripts/training/grpo/offline.py` | `prompt`, `completions`, `rewards` | `List[Dict]`, `List[List[Dict]]`, `List[float]` | hardcoded |
 | Classification | `scripts/training/classification.py` | `prompt` or `text_field`, `label` | `List[Dict]` or `str`, `str`/`List[str]` | `text_field` (label hardcoded) |
-| Reward Model | `scripts/training/preference/rewards.py` | `chosen`, `rejected` (+ optional `prompt`, `images`) | all `List[Dict]` | `images_field` |
+| Reward Model | `scripts/training/reward/reward_model.py` | `chosen`, `rejected` (+ optional `prompt`, `images`) | all `List[Dict]` | `images_field` |
 
 Every message is `{"role": "system"|"user"|"assistant", "content": str}` (or multimodal content for
 VLM, below).

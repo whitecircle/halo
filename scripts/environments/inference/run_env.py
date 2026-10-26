@@ -20,15 +20,15 @@ tokens, thinking budget, sampling) — with any flag passed explicitly laid over
 
 Examples:
     # Factual QA over SimpleQA against a local vLLM server
-    python scripts/environments/inference/run_env.py \
-        --env_type qa_search --dataset basicv8vc/SimpleQA --split test \
-        --prompt_field problem --answer_field answer \
+    python scripts/environments/inference/run_env.py \\
+        --env_type qa_search --dataset basicv8vc/SimpleQA --split test \\
+        --prompt_field problem --answer_field answer \\
         --base_url http://localhost:8000/v1 --model Qwen/Qwen3.6-35B-A3B --num_examples 100
 
     # Multiple-choice exam, bucketed by category, via OpenRouter
-    python scripts/environments/inference/run_env.py \
-        --env_type exam_qa --dataset <multiple-choice-dataset> --split test \
-        --prompt_field question --answer_field answer --context_fields choices --group_by subject \
+    python scripts/environments/inference/run_env.py \\
+        --env_type exam_qa --dataset <multiple-choice-dataset> --split test \\
+        --prompt_field question --answer_field answer --context_fields choices --group_by subject \\
         --base_url https://openrouter.ai/api/v1 --api_key "$OPENROUTER_API_KEY" --model qwen/qwen3-235b-a22b
 
 `exam_qa` grades multiple choice by letter: the row needs a `choices` column (the option strings,
@@ -45,23 +45,21 @@ import logging
 from typing import Any
 
 from halo.configs.script_arguments import DEFAULT_ANSWER_FIELD
+from halo.entrypoints.environment_eval import (
+    load_training_contract,
+    resolve_setting,
+    resolve_trajectory_path,
+    rollout_config_from_args,
+    write_eval_outputs,
+)
 from halo.environments.episode_keys import ANSWER_KEY
 from halo.environments.eval_runner import collect_results, load_hf_split, reject_answerless_examples, report
 from halo.environments.registry import build_environment
 from halo.environments.rollout_config import RolloutConfig
 from halo.inference.openai_client import build_openai_client
 from halo.log import configure_cli_logging
-from scripts.environments.eval_arguments import (
-    DEFAULT_SPLIT,
-    add_endpoint_args,
-    resolve_setting,
-    resolve_trajectory_path,
-    rollout_config_from_args,
-    write_eval_outputs,
-)
-from scripts.environments.training_contract import load_training_contract
+from scripts.environments.eval_arguments import DEFAULT_SPLIT, add_endpoint_args
 
-configure_cli_logging()
 logger = logging.getLogger(__name__)
 
 # The column naming an example when --id_field is not given; a dataset may carry none.
@@ -174,6 +172,7 @@ def build_examples(args: argparse.Namespace) -> list[dict[str, Any]]:
 
 
 def main() -> None:
+    configure_cli_logging()
     args = parse_args()
     contract = load_training_contract(args.training_config)
     trained_env = contract.env_config.to_env_config() if contract is not None else {}

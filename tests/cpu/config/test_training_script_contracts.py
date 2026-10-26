@@ -55,6 +55,17 @@ def _named_calls(tree: ast.AST, func_name: str) -> list[ast.Call]:
     return calls
 
 
+def _seam_trees(script: Path) -> list[ast.AST]:
+    """The script's tree, plus the shared preference load when the script delegates its tokenizer seams to
+    it, so a seam the shared load drops is charged to every script that calls it."""
+    tree = ast.parse(script.read_text(encoding="utf-8"))
+    if not _named_calls(tree, "load_preference_models"):
+        return [tree]
+    shared = ast.parse((REPO_ROOT / "halo/entrypoints/model_setup.py").read_text(encoding="utf-8"))
+    (load,) = (node for node in shared.body if getattr(node, "name", None) == "load_preference_models")
+    return [tree, load]
+
+
 # Loader-kwarg threading (revision + quantization_config)
 
 
@@ -424,20 +435,20 @@ def test_scripts_bind_the_tokenizer_their_length_seam_returns(script: Path):
 
     ``apply_prompt_completion_window`` returns ``(tokenizer, window)``, so a tuple target counts.
     """
-    tree = ast.parse(script.read_text(encoding="utf-8"))
     seen = 0
-    for seam in _TOKENIZER_SEAMS:
-        for call in _named_calls(tree, seam):
-            seen += 1
-            targets = _assigned_targets(tree, call)
-            assert targets is not None, (
-                f"{script}: {seam}() result is discarded — tokenizer_backend is a silent no-op there."
-            )
-            names = {n.id for t in targets for n in ast.walk(t) if isinstance(n, ast.Name)}
-            assert "tokenizer" in names, (
-                f"{script}: {seam}() result is bound to {sorted(names)}, not `tokenizer` — the "
-                f"backend-resolved tokenizer never reaches the trainer."
-            )
+    for tree in _seam_trees(script):
+        for seam in _TOKENIZER_SEAMS:
+            for call in _named_calls(tree, seam):
+                seen += 1
+                targets = _assigned_targets(tree, call)
+                assert targets is not None, (
+                    f"{script}: {seam}() result is discarded — tokenizer_backend is a silent no-op there."
+                )
+                names = {n.id for t in targets for n in ast.walk(t) if isinstance(n, ast.Name)}
+                assert "tokenizer" in names, (
+                    f"{script}: {seam}() result is bound to {sorted(names)}, not `tokenizer` — the "
+                    f"backend-resolved tokenizer never reaches the trainer."
+                )
     if script.name in _NO_TOKENIZER_SEAM:
         assert not seen, f"{script}: now calls a length seam — drop it from _NO_TOKENIZER_SEAM."
     else:
@@ -464,7 +475,7 @@ def test_init_training_script_takes_the_parsed_parallelism_arguments(script: Pat
     )
 
 
-@pytest.mark.parametrize("rel_path", ["online_grpo/rlvr.py", "environmental_grpo.py"])
+@pytest.mark.parametrize("rel_path", ["grpo/online.py", "grpo/environmental.py"])
 def test_prompt_dataset_scripts_declare_the_prompt_column_to_the_loader(rel_path: str):
     """The GRPO prompt column is the loader's render column: declared, the loader refuses a dataset
     without it and drops the rows whose prompt is empty, which otherwise render as an empty question
@@ -497,10 +508,13 @@ def test_vlm_capable_scripts_install_the_resolved_tokenizer(rel_path: str):
     text branch. ``install_resolved_tokenizer`` is the one seam that does it; a script that stops
     calling it silently hands the trainer the pre-resolution tokenizer.
     """
-    tree = ast.parse((_TRAINING_DIR / rel_path).read_text(encoding="utf-8"))
-    calls = _named_calls(tree, "install_resolved_tokenizer")
+    calls = [
+        (tree, call)
+        for tree in _seam_trees(_TRAINING_DIR / rel_path)
+        for call in _named_calls(tree, "install_resolved_tokenizer")
+    ]
     assert calls, f"{rel_path}: never calls install_resolved_tokenizer — processing_class is unresolved."
-    for call in calls:
+    for tree, call in calls:
         targets = _assigned_targets(tree, call)
         names = {n.id for t in (targets or []) for n in ast.walk(t) if isinstance(n, ast.Name)}
         assert "processing_class" in names, (

@@ -33,4 +33,4 @@ torchrun --nproc_per_node=8 scripts/training/preference/smpo.py \
     --expert_parallel_size=8
 ```
 
-`halo launch smpo <config> --nproc 8` builds the same line; the other methods are `dpo`, `kto` and `preference/rewards`.
+`halo launch smpo <config> --nproc 8` builds the same line; the other methods are `dpo`, `kto` and `reward/reward-model`.

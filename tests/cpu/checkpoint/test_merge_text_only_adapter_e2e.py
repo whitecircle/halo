@@ -45,13 +45,13 @@ from transformers import (
     Qwen3_5MoeForConditionalGeneration,
 )
 
+from halo.checkpoint import adapter_merge, bf16_conversion
 from halo.checkpoint.format import ADAPTER_SAFETENSORS_FILE, PROCESSOR_FILES
 from halo.checkpoint.reading import iter_checkpoint_shard_entries
+from halo.checkpoint.vision_reattach import reattach_vision_tower
 from halo.model_loading.model_preparation import auto_load_model, resolve_auto_model_class
 from halo.model_loading.tokenizer_setup import load_processing_class
-from scripts.after_training.reattach_vision_tower import reattach_vision_tower
 from tests.common.models import QWEN3_5_2B, TINY_QWEN35_CONFIG, TINY_QWEN35_MOE_CONFIG
-from tests.common.repo import load_script_module
 from tests.common.tiny_models import word_level_tokenizer
 from tests.common.tokenizers import load_cached_processor
 
@@ -124,10 +124,6 @@ def _train_text_only_adapter(
     return deltas
 
 
-def _merge_script():
-    return load_script_module("scripts/after_training/merge_peft_adapters.py", "merge_peft_adapters_text_only")
-
-
 def _on_disk_keys(checkpoint_dir: Path) -> set[str]:
     return {key for _shard, _reader, key in iter_checkpoint_shard_entries(str(checkpoint_dir))}
 
@@ -147,7 +143,7 @@ def test_a_text_only_adapter_merges_into_the_class_it_was_trained_through():
         _build_multimodal_base(base, family)
         deltas = _train_text_only_adapter(base, adapter, family)
 
-        _merge_script().merge_peft_adapter(
+        adapter_merge.merge_peft_adapter(
             adapter_dir=str(adapter), output_dir=str(out), dtype=torch.float32, verbose=False
         )
 
@@ -177,7 +173,7 @@ def test_a_merged_text_only_adapter_reattaches_into_a_checkpoint_the_toolkit_loa
         text_base = family.text_cls.from_pretrained(base, dtype=torch.float32)
         reference = PeftModel.from_pretrained(text_base, adapter).merge_and_unload().eval()(input_ids=input_ids).logits
 
-    _merge_script().merge_peft_adapter(
+    adapter_merge.merge_peft_adapter(
         adapter_dir=str(adapter), output_dir=str(merged), dtype=torch.float32, verbose=False
     )
     merged_keys = _on_disk_keys(merged)
@@ -206,7 +202,7 @@ def test_the_fp32_norm_merge_writes_the_text_only_layout_with_fp32_norms(tmp_pat
     _build_multimodal_base(base, family)
     _train_text_only_adapter(base, adapter, family)
 
-    _merge_script().merge_peft_adapter(str(adapter), str(out), fp32_norms=True, verbose=False)
+    adapter_merge.merge_peft_adapter(str(adapter), str(out), fp32_norms=True, verbose=False)
 
     assert _on_disk_keys(out) == _declared_layout(out, tmp_path / "fresh")
     dtypes = {
@@ -248,7 +244,7 @@ def test_the_merge_ships_the_runs_processing_class_for_the_class_it_merged_throu
         processor.tokenizer.add_special_tokens({"additional_special_tokens": [_RUN_SPECIAL_TOKEN]})
         _train_text_only_adapter(base, adapter, family, model_cls=family.wrapper_cls, processing_class=processor)
 
-    _merge_script().merge_peft_adapter(
+    adapter_merge.merge_peft_adapter(
         adapter_dir=str(adapter), output_dir=str(merged), dtype=torch.float32, verbose=False
     )
 
@@ -267,17 +263,16 @@ def test_the_merge_ships_the_runs_processing_class_for_the_class_it_merged_throu
 
 
 def test_an_unmerged_bf16_adapter_save_ships_what_the_merge_ships(tmp_path):
-    """``convert_to_bf16 --peft`` writes the processing class the merge
-    would: for a text-only adapter, the run's tokenizer and none of the multimodal base's processor
-    files, so merging the converted adapter later reaches the same artifact."""
+    """``convert_to_bf16 --peft`` carries the adapter directory's own files: for a text-only adapter, the
+    run's tokenizer and none of the multimodal base's processor files, so merging the converted adapter
+    later reaches the same artifact."""
     PartialState()
     family = _FAMILIES["qwen3_5"]
     base, adapter, out = tmp_path / "base", tmp_path / "adapter", tmp_path / "out"
     _build_multimodal_base_with_processor(base, family)
     _train_text_only_adapter(base, adapter, family)
 
-    convert = load_script_module("scripts/after_training/convert_to_bf16.py", "convert_to_bf16_unmerged_text_only")
-    convert.convert_to_bf16(str(adapter), str(out), "causal_lm", is_peft=True)
+    bf16_conversion.convert_to_bf16(str(adapter), str(out), "causal_lm", is_peft=True)
 
     shipped = [name for name in PROCESSOR_FILES if (out / name).is_file()]
     assert not shipped, f"the text-only adapter save carries the multimodal base's processor files {shipped}"
@@ -296,7 +291,7 @@ def test_an_adapter_whose_keys_address_no_module_of_the_base_is_refused():
         save_file({key.replace(".layers.", ".blocks."): tensor for key, tensor in load_file(weights).items()}, weights)
 
         with pytest.raises(ValueError, match="does not have"):
-            _merge_script().merge_peft_adapter(
+            adapter_merge.merge_peft_adapter(
                 adapter_dir=str(adapter), output_dir=str(out), dtype=torch.float32, verbose=False
             )
         assert not out.exists(), "a refused merge left an output directory behind"

@@ -1,6 +1,6 @@
 # Async GRPO with Environments training template — see agent-docs/training-methods/async-grpo/README.md.
 # Launch: start a vLLM server on the GPUs the trainer does not take, then
-#   torchrun --nproc_per_node=4 scripts/training/environmental_grpo.py <this config>
+#   torchrun --nproc_per_node=4 scripts/training/grpo/environmental.py <this config>
 
 # --- Model ---
 model_name_or_path: Qwen/Qwen3-4B-Instruct-2507

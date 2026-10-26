@@ -21,7 +21,7 @@ import pytest
 from datasets import Dataset, DatasetDict
 from transformers.models.auto.configuration_auto import CONFIG_MAPPING
 
-from halo.entrypoints.model_setup import PolicyLoad
+from halo.entrypoints.model_setup import PreferenceModels
 from tests.common.repo import load_script_module
 
 # The name heuristic reads this as multimodal, so the checkpoint verdict holds offline too.
@@ -85,18 +85,13 @@ def _run_dpo(tmp_path, dataset: DatasetDict, yaml_body: str = "") -> dict:
         reached.update(log_examples)
         raise _VisionPathReached
 
-    def load_model(context, *_args, **kwargs):
+    def load_models(context, *_args, **kwargs):
         assert context is runtime, "the policy load must read the checkpoint identity off the script context"
-        return PolicyLoad(model, types.SimpleNamespace(tokenizer=None), tokenizer, True)
+        return PreferenceModels(model, None, None, tokenizer, types.SimpleNamespace(tokenizer=None))
 
     patches = [
         mock.patch.object(module, "init_training_script", return_value=runtime),
-        mock.patch.object(module, "load_policy_model", side_effect=load_model),
-        mock.patch.object(module, "load_reference_model_for_preference", return_value=None),
-        mock.patch.object(module, "apply_max_length", side_effect=lambda cfg, args, model, tok: tok),
-        mock.patch.object(module, "install_resolved_tokenizer", side_effect=lambda pc, tok: pc),
-        mock.patch.object(module, "configure_adapter_training", return_value=None),
-        mock.patch.object(module, "log_model_info"),
+        mock.patch.object(module, "load_preference_models", side_effect=load_models),
         mock.patch.object(module, "load_script_datasets", return_value=(dataset, False)),
         # Both live in the shared data_setup helper the script calls — patch its globals.
         mock.patch("halo.entrypoints.data_setup.prepare_preference_datasets", side_effect=_TextPathReached),

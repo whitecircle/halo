@@ -2,7 +2,7 @@
 
 A reward model scores a (prompt, completion) pair with one scalar, fit to pairwise preferences under the Bradley-Terry loss. Use it for rejection sampling or as an RL reward signal; to train a policy on the same pairs use [DPO](dpo.md) or [SMPO](smpo.md).
 
-Trainer `DistributedRewardTrainer`, script `scripts/training/preference/rewards.py`, model class `AutoModelForSequenceClassification` with `num_labels=1`. EP, TP, ETP and EP+TP apply; CP does not — the score head pools the whole sequence ([matrix](../../reference/trainer-architecture.md#trainer-compatibility)).
+Trainer `DistributedRewardTrainer`, script `scripts/training/reward/reward_model.py`, model class `AutoModelForSequenceClassification` with `num_labels=1`. EP, TP, ETP and EP+TP apply; CP does not — the score head pools the whole sequence ([matrix](../../reference/trainer-architecture.md#trainer-compatibility)).
 
 ## Dataset
 
@@ -41,15 +41,15 @@ Where the tokenizer pads with eos (DeepSeek-V4), an INFO line names the cost: th
 
 ```bash
 # Dense, plain FSDP2 data parallel
-torchrun --nproc_per_node=8 scripts/training/preference/rewards.py \
+torchrun --nproc_per_node=8 scripts/training/reward/reward_model.py \
     examples/reward/qwen3_5/rm-qwen3.5-9b-skywork-pref80k.yaml
 
 # MoE, expert parallel
-torchrun --nproc_per_node=8 scripts/training/preference/rewards.py \
+torchrun --nproc_per_node=8 scripts/training/reward/reward_model.py \
     examples/reward/gptoss/rm-gptoss-20b-skywork-pref80k-ep.yaml --expert_parallel_size=8
 ```
 
-`halo launch preference/rewards <config> --nproc 8` builds the same line.
+`halo launch reward/reward-model <config> --nproc 8` builds the same line.
 
 ## PEFT / LoRA
 
@@ -84,13 +84,13 @@ Images merge into the **prompt** conversation, which both sides of a pair share:
 ## Testing a setup
 
 ```bash
-torchrun --nproc_per_node=2 scripts/training/preference/rewards.py <config> \
+torchrun --nproc_per_node=2 scripts/training/reward/reward_model.py <config> \
     --max_steps=5 --save_strategy=no --report_to=none
 ```
 
 Covering tests: `pytest tests/cpu/trainers -m cpu`, `tests/gpu/trainers/other/test_reward.py` and `test_reward_vlm_e2e.py`.
 
-Once trained, score fresh generations or build preference pairs with `scripts/inference/reward_model/rm_scoring.py` and `rm_rejection_sampling.py` ([Scripts](../../reference/scripts-reference.md)). Both generate against a served endpoint from a `--prompts_source` prompt file before scoring; neither scores an existing (prompt, completion) corpus. Keep their `--rm_dtype` at `bfloat16`: reward logits are unbounded, and fp16 saturates on the completions the score must separate.
+Once trained, score fresh generations or build preference pairs with `scripts/inference/reward_model/rm_scoring.py` and `rm_rejection_sampling.py` ([Scripts](../../reference/scripts-reference.md)). Both generate against a served endpoint from a `--dataset` prompt file before scoring; neither scores an existing (prompt, completion) corpus. Keep their `--rm_dtype` at `bfloat16`: reward logits are unbounded, and fp16 saturates on the completions the score must separate.
 
 ## What to watch
 

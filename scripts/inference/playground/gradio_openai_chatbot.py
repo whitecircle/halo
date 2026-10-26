@@ -3,7 +3,7 @@
 Async streaming, configurable generation parameters, and system prompts.
 
 Usage:
-    python scripts/inference/playground/gradio_openai_chatbot.py \
+    python scripts/inference/playground/gradio_openai_chatbot.py \\
         --model my-model --base_url http://localhost:8000/v1
 
     # Serving the model:

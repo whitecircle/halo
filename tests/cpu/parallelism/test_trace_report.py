@@ -111,7 +111,7 @@ def _run_main(tmp_path, monkeypatch, failing: set[str], *, keep_going: bool = Fa
         reported.append(label)
         return path.with_suffix(".xlsx")
 
-    argv = ["trace_report.py", str(tmp_path)] + (["--keep-going"] if keep_going else [])
+    argv = ["trace_report.py", str(tmp_path)] + (["--keep_going"] if keep_going else [])
     monkeypatch.setattr(trace_report, "write_rank_report", fake_rank_report)
     monkeypatch.setattr(sys, "argv", argv)
     trace_report.main()
@@ -122,7 +122,7 @@ def test_one_unreportable_label_does_not_cancel_the_others(tmp_path, monkeypatch
     """A CUDA-only (or truncated) capture is per-label: it must not take every other label's report
     with it — the directory holds a whole run's cycles, and re-capturing is a GPU job.
 
-    ``--keep-going`` is what accepts the partial result; the sibling labels are reported either way
+    ``--keep_going`` is what accepts the partial result; the sibling labels are reported either way
     (see the exit-code test below), so the flag changes the verdict, never the work done.
     """
     _touch(tmp_path, "cuda-only-rank00.trace.json", "good-rank00.trace.json", "later-rank00.trace.json")

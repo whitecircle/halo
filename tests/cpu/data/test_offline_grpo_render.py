@@ -22,7 +22,7 @@ PartialState()
 from halo.data.collators.offline_grpo import REF_PER_TOKEN_LOGPS_COLUMN
 from halo.data.pipeline.text_rows import prepare_generative_row
 from halo.trainers.grpo.offline.offline_rules import reject_unsupported_reference_input
-from scripts.training.offline_grpo import render_offline_grpo_row
+from scripts.training.grpo.offline import render_offline_grpo_row
 
 
 class StrictTemplateTokenizer:

@@ -18,13 +18,13 @@ from sentence_transformers.models import Dense, Pooling, Router
 from transformers import Qwen3Config, Qwen3ForCausalLM, Qwen3Model
 
 from halo.checkpoint.adapters import write_adapter_file
+from halo.checkpoint.bf16_conversion import convert_to_bf16
 from halo.checkpoint.offline_export import save_full_checkpoint
 from halo.checkpoint.writing import StreamingShardWriter
 from halo.configs.embedding import EmbeddingConfig
 from halo.distributed.parallelism_config import ParallelismConfig
 from halo.trainers.embedding.preloaded_transformer import PreloadedTransformer
 from halo.trainers.embedding.trainer import EmbeddingTrainer
-from scripts.after_training.convert_to_bf16 import convert_to_bf16
 from tests.common.models import TINY_QWEN3_CONFIG
 from tests.common.tiny_models import word_level_tokenizer
 

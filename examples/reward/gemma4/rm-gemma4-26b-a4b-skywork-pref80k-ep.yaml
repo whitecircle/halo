@@ -1,5 +1,5 @@
 # Bradley-Terry reward model — Gemma-4 26B-A4B on Skywork-Reward-Preference-80K-v0.2, EP=8 (scalar score head on the backbone).
-# Launch: torchrun --nproc_per_node=8 scripts/training/preference/rewards.py <this config>
+# Launch: torchrun --nproc_per_node=8 scripts/training/reward/reward_model.py <this config>
 
 # --- Model ---
 model_name_or_path: google/gemma-4-26B-A4B-it

@@ -5,7 +5,7 @@ Group Relative Policy Optimization scores a prompt's completions against each ot
 | | Offline GRPO | Online GRPO (RLVR) | Async GRPO with Environments |
 |---|---|---|---|
 | Trainer | `OfflineGRPOTrainer` | `DistributedGRPOTrainer` | `DistributedAsyncEnvironmentalGRPOTrainer` |
-| Script | `offline_grpo.py` | `online_grpo/rlvr.py` | `environmental_grpo.py` |
+| Script | `grpo/offline.py` | `grpo/online.py` | `grpo/environmental.py` |
 | Generation | None, pre-collected | Online, vLLM only | Online, vLLM or SGLang (`rollout_backend`), driven by Ray actors |
 | Rewards | Pre-scored in the dataset | [`rewards:` terms](rewards/README.md): `accuracy`, `format` and the [external terms](rewards/README.md#common-options) | [`rewards:` terms](rewards/README.md): the `environment` grade plus the [external terms](rewards/README.md#common-options) |
 | Turns | Single | Single | Multi-turn (single-turn environments exist) |

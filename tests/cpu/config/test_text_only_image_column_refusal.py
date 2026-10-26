@@ -86,8 +86,8 @@ def _run(module, tmp_path, config_body: str, patches: list) -> None:
 
 
 def _run_rlvr(tmp_path, dataset: DatasetDict) -> None:
-    """Run ``online_grpo/rlvr.py:main()`` to its dataset stage."""
-    module = _script_module("online_grpo/rlvr.py")
+    """Run ``grpo/online.py:main()`` to its dataset stage."""
+    module = _script_module("grpo/online.py")
     tokenizer = types.SimpleNamespace(padding_side="right")
 
     patches = [
@@ -117,8 +117,8 @@ def _run_embedding(tmp_path, dataset: DatasetDict) -> None:
 
 
 def _run_environmental_grpo(tmp_path, dataset: DatasetDict) -> None:
-    """Run ``environmental_grpo.py:main()`` to its dataset stage."""
-    module = _script_module("environmental_grpo.py")
+    """Run ``grpo/environmental.py:main()`` to its dataset stage."""
+    module = _script_module("grpo/environmental.py")
     tokenizer = types.SimpleNamespace(padding_side="right")
 
     patches = [
@@ -137,8 +137,8 @@ def _run_environmental_grpo(tmp_path, dataset: DatasetDict) -> None:
 
 
 def _run_offline_grpo(tmp_path, dataset: DatasetDict) -> None:
-    """Run ``offline_grpo.py:main()`` to its dataset stage."""
-    module = _script_module("offline_grpo.py")
+    """Run ``grpo/offline.py:main()`` to its dataset stage."""
+    module = _script_module("grpo/offline.py")
     tokenizer = types.SimpleNamespace(padding_side="right")
 
     patches = [

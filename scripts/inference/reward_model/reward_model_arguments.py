@@ -1,136 +1,10 @@
-"""Shared helpers for the reward-model inference scripts (``rm_scoring`` / ``rm_rejection_sampling``): the run's
-boot (API client + reward model), the CLI parser, the generation helpers, the batched scorer and its event-loop
-offload, and the local-JSONL resume both scripts share."""
+"""The flag surface of the reward-model scorers (``rm_scoring`` / ``rm_rejection_sampling``): the endpoint,
+prompt-row, generation and reward-model blocks on one parser; the runs live in ``halo/entrypoints/``."""
 
 import argparse
-import asyncio
-import hashlib
-import json
-from concurrent.futures import ThreadPoolExecutor
-from pathlib import Path
-from typing import Any
 
-import numpy as np
-import pandas as pd
-import torch
-from transformers import AutoModelForSequenceClassification, AutoTokenizer
-
-from halo.checkpoint.reading import reject_partial_checkpoint
-from halo.data.pipeline.chat_render import tokenize_rendered
-from halo.data.pipeline.conversation import build_base_prompt, reject_image_content, resolve_system_prompt
-from halo.inference.openai_client import build_openai_client, chat_completion
-from halo.inference.response import ENGINE_CUT_FINISH_REASONS, get_finish_reason
-from halo.model_loading.buffer_repair import finalize_loaded_model
-from halo.model_loading.checkpoint_coverage import from_pretrained_verified
-from halo.model_loading.dtype import DTYPE_BY_NAME
-from scripts.cli_arguments import add_dtype_arg, add_openai_endpoint_args, add_trust_remote_code_arg
-from scripts.inference.inference_arguments import (
-    add_generation_args,
-    add_prompt_field_args,
-    assistant_turn,
-    follow_up_messages,
-)
-
-# Reply fields a generated turn never carries: the role and content assistant_turn writes, and the
-# tool-call surface these scripts never request.
-_REPLY_FIELDS_DROPPED = {"role", "content", "function_call", "tool_calls", "refusal", "audio"}
-
-# Longest basename these scripts will build, in bytes. Common filesystems cap a single name at 255
-# bytes, and the failure surfaces as an uncaught OSError(ENAMETOOLONG) from the first
-# `output_path.exists()`, after the reward model is already resident on the GPU. Reachable in
-# practice: vLLM's --served-model-name defaults to the served model's path, which --model then
-# carries.
-_MAX_OUTPUT_BASENAME = 255
-
-
-class TruncatedGenerationError(RuntimeError):
-    """A generation stopped at ``--max_gen_tokens`` instead of finishing.
-
-    Its own class rather than ``ValueError``: the scoring scripts treat ``ValueError`` as a fatal
-    misconfiguration, while a truncated hypothesis is a per-row drop.
-    """
-
-
-class OverlongConversationError(RuntimeError):
-    """A conversation to score exceeds ``--rm_max_seq_len``.
-
-    A per-row drop like :class:`TruncatedGenerationError` rather than a truncation: right-truncation
-    cuts the assistant turn, and the reward model would score the prompt fragment as the answer.
-    """
-
-
-def build_output_path(output_folder: str, prompts_source: str, model_name: str, suffix: str) -> Path:
-    """``<prompts stem>_<model>_<suffix>.jsonl`` under ``output_folder``.
-
-    The generating model is part of the name because both scripts resume from the ids already present
-    in this file: without it a second model's run would read the first model's rows as its own.
-
-    A ``/`` in a hub id would otherwise open a directory that does not exist. An over-long name is cut
-    down to fit, keeping the suffix and a digest of the identifying pair; the cap is measured in bytes
-    and the digest keeps two cut names from colliding.
-    """
-    stem = Path(prompts_source).stem
-    basename = f"{stem}_{model_name.replace('/', '__')}_{suffix}.jsonl"
-    if len(basename.encode()) <= _MAX_OUTPUT_BASENAME:
-        return Path(output_folder) / basename
-
-    digest = hashlib.sha256(f"{stem}\0{model_name}".encode()).hexdigest()[:16]
-    tail = f"_{digest}_{suffix}.jsonl"
-    keep = max(_MAX_OUTPUT_BASENAME - len(tail.encode()), 0)
-    head = basename.encode()[:keep].decode(errors="ignore")
-    return Path(output_folder) / f"{head}{tail}"
-
-
-def load_reward_model(
-    model_path: str, attn_impl: str, max_seq_len: int, device_str: str, dtype: str, *, trust_remote_code: bool
-):
-    """Load reward model and tokenizer in ``dtype`` (a :data:`DTYPE_BY_NAME` name).
-
-    ``max_seq_len`` becomes the tokenizer's ``model_max_length``, the cap :func:`encode_for_scoring`
-    refuses conversations past.
-    """
-    # A per-rank EP-sharded dir loads its non-expert weights under their true names while every expert
-    # is randomly initialized, so the scores would be plausible-looking noise.
-    reject_partial_checkpoint(model_path)
-    print(f"Loading Reward Model from {model_path}...")
-    tokenizer = AutoTokenizer.from_pretrained(model_path, trust_remote_code=trust_remote_code)
-    tokenizer.model_max_length = max_seq_len
-
-    device = torch.device(device_str)
-    # excuse_task_head=False: scoring consumes the reward head, it never trains one. Pointed at a
-    # plain causal-LM directory the head would initialize randomly and every score would be noise.
-    model = from_pretrained_verified(
-        AutoModelForSequenceClassification,
-        model_path,
-        excuse_task_head=False,
-        attn_implementation=attn_impl,
-        trust_remote_code=trust_remote_code,
-    )
-    model.to(dtype=DTYPE_BY_NAME[dtype], device=device).eval()
-    # After the cast, not before: transformers 5 hands every non-persistent buffer back uninitialized
-    # (a remote-code family overriding ``_init_weights`` scores off a dead RoPE), and
-    # ``Module.to(dtype=...)`` downcasts float buffers too, so repairing first would write the fp32
-    # rotary table and then round it to bf16.
-    finalize_loaded_model(model)
-    return tokenizer, model, device
-
-
-def boot_scoring_run(args) -> tuple[Any, Any, Any, torch.device]:
-    """Open the two endpoints a scoring run needs: ``(api client, rm tokenizer, rm model, rm device)``.
-
-    One call for both scripts, so neither drifts onto a different set of ``--rm_*`` knobs; every flag
-    the reward model is loaded under is threaded here.
-    """
-    client = build_openai_client(base_url=args.base_url, api_key_override=args.api_key)
-    rm_tokenizer, rm_model, rm_device = load_reward_model(
-        args.rm_model_path,
-        args.rm_model_atten_impl,
-        args.rm_max_seq_len,
-        args.rm_device,
-        args.rm_dtype,
-        trust_remote_code=args.trust_remote_code,
-    )
-    return client, rm_tokenizer, rm_model, rm_device
+from scripts.cli_arguments import HUB_SOURCE_HELP, add_dtype_arg, add_openai_endpoint_args, add_trust_remote_code_arg
+from scripts.inference.inference_arguments import add_generation_args, add_prompt_field_args
 
 
 def build_generation_parser(description: str, *, temperature_default: float) -> argparse.ArgumentParser:
@@ -143,19 +17,43 @@ def build_generation_parser(description: str, *, temperature_default: float) -> 
     add_openai_endpoint_args(parser, model_help="Model name for API requests")
 
     # Data configuration
-    parser.add_argument("--prompts_source", type=str, required=True, help="Path to JSONL file with prompts")
-    parser.add_argument("--output_folder", type=str, default="data")
+    parser.add_argument("--dataset", type=str, required=True, help="Local JSONL file with the prompts.")
+    parser.add_argument(
+        "--output_dir",
+        type=str,
+        default="data",
+        help="Directory the run's JSONL output (named from the prompts file, the model and the run) is appended "
+        "to and resumed from (default: %(default)s).",
+    )
     add_prompt_field_args(parser)
-    parser.add_argument("--follow_up_prompt_field", type=str, default="follow_up_prompt")
-    parser.add_argument("--correct_answer_field", type=str, default="correct_answer")
+    parser.add_argument(
+        "--follow_up_prompt_field",
+        type=str,
+        default="follow_up_prompt",
+        help="Row field with follow-up turns sent after the first answer (default: %(default)s).",
+    )
+    parser.add_argument(
+        "--correct_answer_field",
+        type=str,
+        default="correct_answer",
+        help="Row field with the ground-truth answer shown to the reward model (default: %(default)s).",
+    )
 
     # Generation configuration
     add_generation_args(parser, temperature_default=temperature_default)
 
     # Reward model configuration
-    parser.add_argument("--rm_model_path", type=str, required=True, help="Path to reward model")
-    add_trust_remote_code_arg(parser, default=True)
-    parser.add_argument("--rm_model_atten_impl", type=str, default="sdpa")
+    parser.add_argument(
+        "--rm_model_id", type=str, required=True, help=f"The sequence-classification reward model — {HUB_SOURCE_HELP}."
+    )
+    # --rm_model_id may be a Hub repo, so remote code stays opt-in.
+    add_trust_remote_code_arg(parser, default=False)
+    parser.add_argument(
+        "--rm_attn_implementation",
+        type=str,
+        default="sdpa",
+        help="Attention implementation the reward model loads with (default: %(default)s).",
+    )
     parser.add_argument(
         "--rm_max_seq_len",
         type=int,
@@ -163,7 +61,9 @@ def build_generation_parser(description: str, *, temperature_default: float) -> 
         help="Longest conversation (tokens) the reward model scores; a longer one is dropped and counted, "
         "never truncated (default: %(default)s)",
     )
-    parser.add_argument("--rm_device", type=str, default="cuda:0")
+    parser.add_argument(
+        "--rm_device", type=str, default="cuda:0", help="Device the reward model scores on (default: %(default)s)."
+    )
     add_dtype_arg(
         parser,
         flag="--rm_dtype",
@@ -172,197 +72,3 @@ def build_generation_parser(description: str, *, temperature_default: float) -> 
     )
 
     return parser
-
-
-def resolve_correct_answer(row, args):
-    """The row's ground-truth answer (``args.correct_answer_field``), or None."""
-    if args.correct_answer_field in row and pd.notna(row[args.correct_answer_field]):
-        return row[args.correct_answer_field]
-    return None
-
-
-async def generate_chat_message(client, messages: list[dict], args, response_format: dict) -> tuple[dict, str]:
-    """One chat completion under the script's generation args.
-
-    Returns ``(assistant turn, finish_reason)``. The turn is :func:`assistant_turn`'s plus the reply's
-    non-null extra fields, so an engine's reasoning (``reasoning_content``) reaches the chat template the
-    reward model scores with and the record a preference run trains on; the null SDK fields stay out.
-    The finish reason is part of the contract because a hypothesis cut at the token cap is a fragment:
-    the reward model would score it as a complete answer and the number would land in a preference /
-    offline-GRPO file.
-    """
-    completion = await chat_completion(
-        client,
-        messages=messages,
-        model=args.model,
-        temperature=args.temperature,
-        response_format=response_format,
-        max_tokens=args.max_gen_tokens,
-    )
-    choice = completion.choices[0]
-    extras = choice.message.model_dump(exclude=_REPLY_FIELDS_DROPPED)
-    turn = {**assistant_turn(choice.message.content), **{k: v for k, v in extras.items() if v is not None}}
-    return turn, get_finish_reason(choice) or ""
-
-
-async def prepare_generation_prompt(client, row: pd.Series, args) -> tuple[list[dict], dict]:
-    """Assemble the row's generation prompt: system prompt + base messages, applying the optional
-    follow-up turn (generate an initial response, then append it plus the follow-up messages).
-
-    Returns ``(base_prompt, response_format)`` ready for the script's own generation calls.
-    """
-    system_prompt = resolve_system_prompt(row, args.local_system_prompt_field, args.global_system_prompt)
-    base_prompt = build_base_prompt(row, args.prompt_field, system_prompt)
-    has_format = "response_format" in row and pd.notna(row["response_format"])
-    response_format = row["response_format"] if has_format else {"type": "text"}
-
-    follow_up = follow_up_messages(row, args.follow_up_prompt_field)
-    if follow_up is not None:
-        answer, finish_reason = await generate_chat_message(client, base_prompt, args, response_format)
-        if finish_reason in ENGINE_CUT_FINISH_REASONS:
-            # The follow-up turn conditions on this answer, so a fragment (token cap or engine abort)
-            # here corrupts every hypothesis the row goes on to produce.
-            raise TruncatedGenerationError(
-                f"the first turn hit --max_gen_tokens ({args.max_gen_tokens}) and the follow-up turn "
-                f"would condition on a fragment"
-            )
-        base_prompt = base_prompt + [answer] + follow_up
-
-    return base_prompt, response_format
-
-
-def prepend_answer_context(conversation: list[dict], correct_answer: str | None) -> list[dict]:
-    """``conversation`` with the ground-truth answer pinned as a leading system turn, when known.
-
-    Both scoring paths have to show the RM the same context, or their scores are not comparable. The
-    image refusal sits here because every scored conversation passes this seam on its way to the
-    reward model's chat template: reward models are text-only sequence classifiers, so an image part
-    would render as placeholder tokens with no pixels behind it and the returned reward would be
-    computed over those, then written into a preference / offline-GRPO training file.
-    """
-    reject_image_content(conversation, "reward-model scoring conversation")
-    if correct_answer is None:
-        return conversation
-    return [{"role": "system", "content": f"The correct final answer must be: {correct_answer}"}] + conversation
-
-
-def encode_for_scoring(tokenizer, conversations: list[list[dict]], correct_answer: str | None) -> dict:
-    """Tokenize ``conversations`` for the reward model the way its training rows were tokenized.
-
-    Render through the chat template, then :func:`tokenize_rendered`, so BOS lands once on a
-    tokenizer whose post-processor prepends it, as in TRL's reward tokenize map (``apply_chat_template``
-    tokenizing its own render without special tokens): re-tokenizing the rendered text would double
-    it and the scores would come from a token sequence the model never trained on. A conversation
-    past ``tokenizer.model_max_length`` (``--rm_max_seq_len``) raises :class:`OverlongConversationError`.
-    """
-    encoded = [
-        tokenize_rendered(
-            tokenizer,
-            tokenizer.apply_chat_template(prepend_answer_context(conv, correct_answer), tokenize=False),
-            truncation=False,
-        )
-        for conv in conversations
-    ]
-    longest = max(len(item["input_ids"]) for item in encoded)
-    if longest > tokenizer.model_max_length:
-        raise OverlongConversationError(
-            f"a conversation renders to {longest} tokens, over --rm_max_seq_len={tokenizer.model_max_length}"
-        )
-    return tokenizer.pad(encoded, padding=True, return_tensors="pt")
-
-
-def score_conversations(
-    rm_tokenizer,
-    rm_model,
-    rm_device,
-    conversations: list[list[dict]],
-    correct_answer: str | None,
-    max_batch_size: int,
-) -> np.ndarray:
-    """Reward-model scores for ``conversations``, scored ``max_batch_size`` at a time."""
-    scores: list[float] = []
-    for i in range(0, len(conversations), max_batch_size):
-        batch = encode_for_scoring(rm_tokenizer, conversations[i : i + max_batch_size], correct_answer)
-        batch = {key: value.to(rm_device) for key, value in batch.items()}
-        with torch.inference_mode():
-            logits = rm_model(**batch).logits
-        # A multi-class classifier would hand back an arbitrary, possibly misaligned, class logit as the reward.
-        if logits.shape[-1] != 1:
-            raise ValueError(
-                f"Expected a single-output reward model, got logits shape {tuple(logits.shape)} "
-                f"— this looks like a multi-class classifier, not an RM."
-            )
-        # .float() first: numpy has no bf16 dtype, and bf16 is the scoring default.
-        scores.extend(logits.detach().cpu().float().view(-1).tolist())
-    return np.array(scores, dtype=float)
-
-
-async def score_conversations_offloaded(
-    executor: ThreadPoolExecutor,
-    rm_tokenizer,
-    rm_model,
-    rm_device,
-    conversations: list[list[dict]],
-    correct_answer: str | None,
-    max_batch_size: int,
-) -> np.ndarray:
-    """:func:`score_conversations` on ``executor``'s thread, awaited from the event loop.
-
-    The reward-model forward is a blocking GPU call; run inline it stalls every generation still in
-    flight on the same loop. One offload for both scripts, so neither drifts off the other's argument
-    order into scoring with the wrong batch size or a missing answer context.
-    """
-    return await asyncio.get_running_loop().run_in_executor(
-        executor,
-        score_conversations,
-        rm_tokenizer,
-        rm_model,
-        rm_device,
-        conversations,
-        correct_answer,
-        max_batch_size,
-    )
-
-
-def read_jsonl_frame(path: str | Path) -> pd.DataFrame:
-    """A JSONL file as an object-dtype DataFrame holding each field as the value ``json`` parses.
-
-    ``pd.read_json`` rewrites values: by default ``"007"`` becomes ``7`` and a ``*_at`` column
-    timestamps, and even with its inference off an int column beside a row lacking the field turns
-    float (``5`` reaches the reward model's prompt as ``5.0``) and ``0.3`` parses as
-    ``0.30000000000000004``. A field a row lacks reads as NaN. One reader for the prompts and the
-    resume output, so an id compares equal across the two.
-    """
-    with open(path, encoding="utf-8") as f:
-        records = [json.loads(line) for line in f if line.strip()]
-    return pd.DataFrame(records, dtype=object)
-
-
-def load_prompts_dataframe(args) -> pd.DataFrame:
-    """Load the JSONL prompts source and validate the required columns."""
-    print("Loading prompts...")
-    df = read_jsonl_frame(args.prompts_source)
-    if args.prompt_field not in df or args.id_field not in df:
-        raise ValueError(f"Input must contain '{args.prompt_field}' and '{args.id_field}' columns")
-    return df
-
-
-def load_local_jsonl_resume(output_path: Path, id_field: str) -> tuple[set, pd.DataFrame]:
-    """``(ids already written, the rows carrying them)`` for a run resuming its own JSONL output.
-
-    The local-file twin of :func:`scripts.inference.inference_arguments.load_prompts_with_resume` (S3 datasets):
-    both scripts append one finished row per line, so the ids in the output file are the work a re-run
-    skips. An output that does not exist yet resumes nothing. The rows themselves come back because a
-    caller reporting summary statistics over the whole job needs them, not just their ids.
-    """
-    if not output_path.exists():
-        return set(), pd.DataFrame()
-    existing = read_jsonl_frame(output_path)
-    return set(existing[id_field]), existing
-
-
-def append_jsonl_record(output_path: Path, record: dict) -> None:
-    """Append one finished row to the run's JSONL output, the file :func:`load_local_jsonl_resume` reads
-    back. The write holds no ``await``, so coroutines sharing the loop never interleave lines."""
-    with open(output_path, "a", encoding="utf-8") as f:
-        f.write(json.dumps(record, ensure_ascii=False) + "\n")

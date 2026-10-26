@@ -5,7 +5,7 @@ trains with GRPO. For pre-collected rewards use [Offline GRPO](../grpo/offline.m
 [Online GRPO](../grpo/online.md); for pairwise preferences, [SMPO](../preference/smpo.md) or
 [DPO](../preference/dpo.md).
 
-- Trainer `DistributedAsyncEnvironmentalGRPOTrainer`, script `scripts/training/environmental_grpo.py`.
+- Trainer `DistributedAsyncEnvironmentalGRPOTrainer`, script `scripts/training/grpo/environmental.py`.
 - Pick an environment with `environment_type` or register your own ([Environments](environments/README.md)).
 - [Reward Terms](../grpo/rewards/README.md#environment-arm) defines how the episode reward is composed.
 - A [rollout server](../../infrastructure/rollout-servers.md) must be serving before you launch;
@@ -67,7 +67,7 @@ VLLM_MODEL=Qwen/Qwen3-4B-Instruct-2507 VLLM_CUDA_DEVICES=7 VLLM_TOOL_CALLING_FLA
     docker compose -f docker-compose.vllm.yml up -d vllm-server
 
 CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6 torchrun --nproc_per_node=7 \
-    scripts/training/environmental_grpo.py \
+    scripts/training/grpo/environmental.py \
     examples/grpo/environmental/environmental-grpo-template.yaml
 ```
 

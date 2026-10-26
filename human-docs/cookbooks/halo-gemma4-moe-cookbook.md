@@ -66,7 +66,7 @@ In the training container, copy the recipe, set its `dataset`, and launch on GPU
 ```bash
 cp examples/grpo/environmental/gemma4/vllm/gemma4-26b-a4b-code-contests-full-ep4.yaml gemma4-grpo.yaml
 CUDA_VISIBLE_DEVICES=0,1,2,3 DIST_NCCL_TIMEOUT_MINUTES=60 \
-  halo launch environmental-grpo gemma4-grpo.yaml -n 4 \
+  halo launch grpo/environmental gemma4-grpo.yaml -n 4 \
   --model_name_or_path=/data/checkpoints/gemma-4-26b-a4b-sft \
   --output_dir=/data/checkpoints/gemma-4-26b-a4b-grpo
 ```

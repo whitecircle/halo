@@ -76,7 +76,7 @@ In the training container, copy the recipe, set its `dataset`, and launch on GPU
 ```bash
 cp examples/grpo/environmental/qwen3_5/vllm/qwen3.6-35b-a3b-code-contests-full-ep4.yaml qwen3.6-grpo.yaml
 CUDA_VISIBLE_DEVICES=0,1,2,3 DIST_NCCL_TIMEOUT_MINUTES=60 \
-  halo launch environmental-grpo qwen3.6-grpo.yaml -n 4 \
+  halo launch grpo/environmental qwen3.6-grpo.yaml -n 4 \
   --model_name_or_path=/data/checkpoints/qwen3.6-35b-a3b-sft \
   --output_dir=/data/checkpoints/qwen3.6-35b-a3b-grpo
 ```
@@ -100,7 +100,7 @@ SGLANG_CUDA_DEVICES=7 SGLANG_PORT=30001 \
 ```bash
 cp examples/grpo/environmental/qwen3_5/sglang/qwen3.6-35b-a3b-code-contests-full-ep1.yaml qwen3.6-grpo-sglang.yaml
 CUDA_VISIBLE_DEVICES=0,1,2,3,4,5 DIST_NCCL_TIMEOUT_MINUTES=60 \
-  halo launch environmental-grpo qwen3.6-grpo-sglang.yaml -n 6 \
+  halo launch grpo/environmental qwen3.6-grpo-sglang.yaml -n 6 \
   --model_name_or_path=/data/checkpoints/qwen3.6-35b-a3b-sft \
   --output_dir=/data/checkpoints/qwen3.6-35b-a3b-grpo-sglang
 ```

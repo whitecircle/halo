@@ -159,9 +159,12 @@ def run_playground_episode(
         env.close()
 
 
-def create_demo(default_base_url: str = DEFAULT_LOCAL_BASE_URL, api_key: str | None = None):
-    available_envs = get_registered_environments()
-    default_env = "react_math" if "react_math" in available_envs else available_envs[0]
+def _episode_handler(api_key: str | None):
+    """The Run button's callback: the episode for the sidebar's values, or the error it raised as the summary.
+
+    The API key is bound here rather than held in a component: a Gradio value, hidden or not, is serialized
+    into every browser's page config.
+    """
 
     def on_run(
         env_type,
@@ -193,60 +196,48 @@ def create_demo(default_base_url: str = DEFAULT_LOCAL_BASE_URL, api_key: str | N
             logger.exception("Playground episode failed")
             return [], f"**Error:** {e}"
 
+    return on_run
+
+
+def _build_sidebar(available_envs: list[str], default_base_url: str) -> tuple[list, gr.Button]:
+    """The sidebar's inputs, in the order :func:`_episode_handler`'s callback takes them, and its Run button."""
+    env_type = gr.Dropdown(
+        choices=available_envs,
+        value="react_math" if "react_math" in available_envs else available_envs[0],
+        label="Environment Type",
+    )
+    prompt = gr.Textbox(label="Prompt", lines=3, placeholder="The task the episode opens with")
+    expected_answer = gr.Textbox(
+        label="Expected Answer (required where the environment grades against one)",
+        placeholder='Plain text, or JSON for a structured answer (code_contests: {"test_cases": [...]})',
+    )
+
+    gr.Markdown("### Rollout Server")
+    server_url = gr.Textbox(label="Rollout Server Base URL", value=default_base_url)
+    model_name = gr.Textbox(label="Model Name (optional)", value="")
+
+    gr.Markdown("### Generation")
+    temperature = gr.Slider(0, 2, step=0.05, value=0.7, label="Temperature")
+    max_tokens = gr.Slider(64, 8192, step=64, value=1024, label="Max Tokens")
+    top_p = gr.Slider(0.1, 1.0, step=0.05, value=0.95, label="Top P")
+
+    gr.Markdown("### Environment")
+    max_turns = gr.Slider(1, 30, step=1, value=10, label="Max Turns")
+
+    inputs = [env_type, prompt, expected_answer, server_url, model_name, temperature, max_tokens, top_p, max_turns]
+    return inputs, gr.Button("Run Episode", variant="primary")
+
+
+def create_demo(default_base_url: str = DEFAULT_LOCAL_BASE_URL, api_key: str | None = None):
     with gr.Blocks(title="Environment Playground") as demo:
         gr.Markdown("# Environment Playground\nTest GRPO environments interactively against a rollout server.")
-
         with gr.Row():
-            # Left sidebar
             with gr.Column(scale=1):
-                env_type = gr.Dropdown(
-                    choices=available_envs,
-                    value=default_env,
-                    label="Environment Type",
-                )
-                prompt = gr.Textbox(label="Prompt", lines=3, placeholder="The task the episode opens with")
-                expected_answer = gr.Textbox(
-                    label="Expected Answer (required where the environment grades against one)",
-                    placeholder='Plain text, or JSON for a structured answer (code_contests: {"test_cases": [...]})',
-                )
-
-                gr.Markdown("### Rollout Server")
-                # The API key is not a component: a Gradio value, hidden or not, is serialized into
-                # every browser's page config. It stays in the create_demo closure.
-                server_url = gr.Textbox(label="Rollout Server Base URL", value=default_base_url)
-                model_name = gr.Textbox(label="Model Name (optional)", value="")
-
-                gr.Markdown("### Generation")
-                temperature = gr.Slider(0, 2, step=0.05, value=0.7, label="Temperature")
-                max_tokens = gr.Slider(64, 8192, step=64, value=1024, label="Max Tokens")
-                top_p = gr.Slider(0.1, 1.0, step=0.05, value=0.95, label="Top P")
-
-                gr.Markdown("### Environment")
-                max_turns = gr.Slider(1, 30, step=1, value=10, label="Max Turns")
-
-                run_btn = gr.Button("Run Episode", variant="primary")
-
-            # Main content
+                inputs, run_btn = _build_sidebar(get_registered_environments(), default_base_url)
             with gr.Column(scale=2):
                 chatbot = gr.Chatbot(label="Episode", height=500)
                 summary = gr.Markdown(label="Episode Summary", value="*Run an episode to see results*")
-
-        run_btn.click(
-            on_run,
-            inputs=[
-                env_type,
-                prompt,
-                expected_answer,
-                server_url,
-                model_name,
-                temperature,
-                max_tokens,
-                top_p,
-                max_turns,
-            ],
-            outputs=[chatbot, summary],
-        )
-
+        run_btn.click(_episode_handler(api_key), inputs=inputs, outputs=[chatbot, summary])
     return demo
 
 

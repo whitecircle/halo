@@ -37,7 +37,7 @@ DEFAULT_CONNECTION_TIMEOUT_S = 120.0
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--server-url", required=True, help="rollout server base URL, e.g. http://10.0.0.7:8000")
-    parser.add_argument("--backend", choices=rollout_backends(), default="vllm")
+    parser.add_argument("--backend", choices=rollout_backends(), default="vllm", help="rollout engine the server runs")
     parser.add_argument("--group-port", type=int, default=0, help="rendezvous port on this host (0 = ephemeral)")
     parser.add_argument("--group-host", default=None, help="address the server dials back to (default: auto)")
     parser.add_argument("--device", default="cuda:0", help="GPU the group forms on; must not be the server's")

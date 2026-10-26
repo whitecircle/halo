@@ -10,10 +10,17 @@ FEC did not absorb). Corrections reaching the deepest FEC bins, or a correction 
 warrant a physical inspection, mark it marginal rather than failed. Plain correctable churn is
 reported only.
 
-Exits non-zero when any link is unhealthy, so it works as a preflight gate before a long run:
+A link that ``nvidia-smi nvlink -s`` reports inactive, or with no speed at all, is down, whatever its
+peers show: that also catches a whole NVSwitch plane down, the same link on every GPU. A link the
+system never wired reads as down too wherever nvidia-smi still lists it, so the check is for fully
+wired NVLink nodes. A GPU with fewer active links than its peers is short of links, which catches a
+link absent from both listings. Either takes NVLink bandwidth from DeepEP and NCCL.
 
-    python scripts/profiling/nvlink_health.py                 # summary, exit 1 if unhealthy
-    python scripts/profiling/nvlink_health.py --per-link      # every link, not just flagged ones
+Exits non-zero when any link is unhealthy or down, or a GPU is short of links, so it works as a
+preflight gate before a long run:
+
+    python scripts/profiling/nvlink_health.py                 # summary, exit 1 if unhealthy or down
+    python scripts/profiling/nvlink_health.py --per_link      # every link, not just flagged ones
     python scripts/profiling/nvlink_health.py --json          # machine-readable
 
 Runs against ``nvidia-smi`` only (no GPU allocation, no torch), so it is safe to run alongside a
@@ -52,6 +59,8 @@ DEEP_FEC_BIN = 3
 CORRECTION_RATE_WARN = 1e-8
 
 _COUNTER_RE = re.compile(r"Link (\d+): (.+?):\s*(\d+)")
+# An up link's ``nvlink -s`` entry is its bandwidth; ``<inactive>`` (or no entry) is a link that is down.
+_ACTIVE_SPEED_RE = re.compile(r"\d+(?:\.\d+)?\s*GB/s")
 
 
 def _nvidia_smi(*args: str) -> str:
@@ -116,20 +125,34 @@ def assess_link(counters: dict[str, int]) -> dict:
     }
 
 
+def is_active_speed(speed: str) -> bool:
+    """Whether a link's ``nvlink -s`` entry reports it up at a bandwidth."""
+    return _ACTIVE_SPEED_RE.fullmatch(speed) is not None
+
+
 def collect() -> dict[int, dict[int, dict]]:
+    """``{gpu: {link: assessment}}``, each link's counter verdict plus its speed and whether it is up."""
     report: dict[int, dict[int, dict]] = {}
     for gpu in range(gpu_count()):
         speeds = link_speeds(gpu)
-        report[gpu] = {
-            link: {**assess_link(counters), "speed": speeds.get(link, "down")}
-            for link, counters in link_counters(gpu).items()
-        }
+        report[gpu] = {}
+        for link, counters in link_counters(gpu).items():
+            speed = speeds.get(link, "down")
+            report[gpu][link] = {**assess_link(counters), "speed": speed, "active": is_active_speed(speed)}
     return report
+
+
+def short_link_gpus(report: dict[int, dict[int, dict]]) -> dict[int, tuple[int, int]]:
+    """``{gpu: (its active links, the most any GPU has)}`` for every GPU with fewer active links than a
+    peer, which also catches a link missing from ``nvidia-smi``'s per-link output altogether."""
+    active = {gpu: sum(result["active"] for result in links.values()) for gpu, links in report.items()}
+    most = max(active.values(), default=0)
+    return {gpu: (count, most) for gpu, count in active.items() if count < most}
 
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("--per-link", action="store_true", help="print every link, not only flagged ones")
+    parser.add_argument("--per_link", action="store_true", help="print every link, not only flagged ones")
     parser.add_argument("--json", action="store_true", help="emit the raw report as JSON")
     args = parser.parse_args()
 
@@ -139,14 +162,21 @@ def main() -> int:
 
     unhealthy = [(g, ln) for g, links in report.items() for ln, r in links.items() if r["unhealthy"]]
     marginal = [(g, ln) for g, links in report.items() for ln, r in links.items() if r["marginal"]]
+    down = [(g, ln) for g, links in report.items() for ln, r in links.items() if not r["active"]]
+    short = short_link_gpus(report)
 
     if not args.json:
         for gpu, links in sorted(report.items()):
             for link, result in sorted(links.items()):
-                flagged = result["unhealthy"] or result["marginal"]
+                flagged = result["unhealthy"] or result["marginal"] or not result["active"]
                 if not (args.per_link or flagged):
                     continue
-                status = "UNHEALTHY" if result["unhealthy"] else ("marginal" if result["marginal"] else "ok")
+                if result["unhealthy"]:
+                    status = "UNHEALTHY"
+                elif not result["active"]:
+                    status = "DOWN"
+                else:
+                    status = "marginal" if result["marginal"] else "ok"
                 print(
                     f"GPU {gpu} link {link:>2}: {status:<9} {result['speed']:>12}  "
                     f"corrected={result['corrected_codewords']:>12,} rate={result['correction_rate']:.2e}"
@@ -156,18 +186,23 @@ def main() -> int:
                 if result["deep_fec_bins"]:
                     print(f"    deep FEC bins (>={DEEP_FEC_BIN}): {result['deep_fec_bins']}")
 
+        for gpu, (active, most) in sorted(short.items()):
+            print(f"GPU {gpu}: {active} active links, peers have {most}")
+
         total_links = sum(len(links) for links in report.values())
+        flagged_links = set(unhealthy) | set(marginal) | set(down)
         print(
-            f"\n{total_links} links checked: {len(unhealthy)} unhealthy, {len(marginal)} marginal "
-            f"(corrected-only, FEC absorbing it), {total_links - len(unhealthy) - len(marginal)} clean"
+            f"\n{total_links} links checked: {len(unhealthy)} unhealthy, {len(down)} down, {len(marginal)} marginal "
+            f"(corrected-only, FEC absorbing it), {total_links - len(flagged_links)} clean; "
+            f"{len(short)} GPU(s) short of links"
         )
-        if marginal and not unhealthy:
+        if marginal and not (unhealthy or down or short):
             print(
                 "Marginal links carry data correctly at full bandwidth — FEC is absorbing the errors, "
                 "and they are the usual source of nonfatal Xid 145 log spam. Track the rate over time; "
                 "a physical reseat is the fix if it climbs or reaches the deep FEC bins."
             )
-    return 1 if unhealthy else 0
+    return 1 if unhealthy or down or short else 0
 
 
 if __name__ == "__main__":

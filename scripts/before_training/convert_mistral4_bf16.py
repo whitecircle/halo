@@ -9,29 +9,16 @@ every other floating tensor is cast to bf16 too, so the output is uniform. The a
 (``*_activation_scale``) describe the fp8 forward and are dropped with the ``quantization_config``.
 
 Usage (inside the training image; point HF_HOME and the output at a large volume):
-    HF_HOME=/mnt/hf python scripts/before_training/convert_mistral4_bf16.py \
-        --model_id mistralai/Mistral-Small-4-119B-2603 \
-        --output_dir /mnt/models/Mistral-Small-4-119B-BF16
+    HF_HOME=<large-volume>/hf python scripts/before_training/convert_mistral4_bf16.py \\
+        --model_id mistralai/Mistral-Small-4-119B-2603 \\
+        --output_dir <large-volume>/models/Mistral-Small-4-119B-BF16
 """
 
-from __future__ import annotations
-
 import argparse
-import math
 
-import torch
-
-from halo.checkpoint.fp8_dequant import DequantRules, run_dequant_conversion
-from halo.checkpoint.reading import SAFETENSORS_FLOAT_DTYPES, header_nbytes, header_numel
-from halo.checkpoint.writing import cast_to_save_dtype
+from halo.checkpoint.fp8_dequant import run_dequant_conversion, static_fp8_rules
 from halo.log import configure_cli_logging
 from scripts.cli_arguments import add_hub_source_args, add_max_shard_size_arg
-
-configure_cli_logging()
-
-_SCALE_SUFFIX = "_scale_inv"
-# The quant sidecars, matched exactly: the per-weight dequant scale and the static activation scales.
-_SIDECAR_SUFFIXES = (_SCALE_SUFFIX, "_activation_scale", ".activation_scale")
 
 
 def parse_args() -> argparse.Namespace:
@@ -42,59 +29,8 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-def is_sidecar(name: str) -> bool:
-    return name.endswith(_SIDECAR_SUFFIXES)
-
-
-def _scale_layout_ok(weight_shape: tuple[int, ...], scale_shape: tuple[int, ...]) -> bool:
-    """One scalar per matrix, or one scale per expert for a 3-D bank ``[E, ...]``."""
-    if math.prod(scale_shape) == 1:
-        return True
-    squeezed = tuple(dim for dim in scale_shape if dim != 1)
-    return len(weight_shape) == 3 and squeezed == (weight_shape[0],)
-
-
-def dequantize(weight: torch.Tensor, scale: torch.Tensor, name: str) -> torch.Tensor:
-    scale = scale.squeeze().float()
-    if scale.numel() == 1:
-        return (weight.float() * scale).to(torch.bfloat16)
-    if scale.dim() == 1 and weight.dim() == 3 and scale.shape[0] == weight.shape[0]:
-        return (weight.float() * scale.view(-1, 1, 1)).to(torch.bfloat16)
-    raise ValueError(
-        f"Unsupported FP8 scale layout for {name}: weight={tuple(weight.shape)}, scale={tuple(scale.shape)}"
-    )
-
-
-def convert(name: str, tensor: torch.Tensor, scale: torch.Tensor | None) -> torch.Tensor:
-    return cast_to_save_dtype(tensor) if scale is None else dequantize(tensor, scale, name)
-
-
-def static_fp8_rules(_source: str) -> DequantRules:
-    """This release's rules: per-matrix (or per-expert) static scales, no block grid.
-
-    The accepted scale layouts are :func:`_scale_layout_ok`'s; every unquantized float lands as bf16,
-    so the disk preflight sizes it that way, and every other tensor at its stored width.
-    """
-
-    def validate_scale(name: str, shape: tuple[int, ...], scale_shape: tuple[int, ...]) -> None:
-        if not _scale_layout_ok(shape, scale_shape):
-            raise ValueError(f"Unsupported FP8 scale layout for {name}: weight={shape}, scale={scale_shape}")
-
-    def passthrough_nbytes(header) -> int:
-        if header.get_dtype() in SAFETENSORS_FLOAT_DTYPES:
-            return header_numel(header) * torch.bfloat16.itemsize
-        return header_nbytes(header)
-
-    return DequantRules(
-        scale_suffix=_SCALE_SUFFIX,
-        is_sidecar=is_sidecar,
-        validate_scale=validate_scale,
-        convert=convert,
-        passthrough_nbytes=passthrough_nbytes,
-    )
-
-
 def main() -> None:
+    configure_cli_logging()
     args = parse_args()
     run_dequant_conversion(
         args.model_id,

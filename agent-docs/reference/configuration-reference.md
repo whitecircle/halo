@@ -185,11 +185,11 @@ Each trainer combines a **trainer config** (hyperparameters) with **script argum
 | `SmoothMarginPOTrainer` | [SmoothMarginPOConfig](#smoothmarginpoconfig) | [SMPOScriptArguments](#other-script-arguments) | `preference/smpo.py` |
 | `DistributedDPOTrainer` | [DPOConfig](#trl-trainer-configs) (TRL) | [DPOScriptArguments](#other-script-arguments) | `preference/dpo.py` |
 | `DistributedKTOTrainer` | [KTOConfig](#trl-trainer-configs) (TRL) | [KTOScriptArguments](#other-script-arguments) | `preference/kto.py` |
-| `OfflineGRPOTrainer` | [OfflineGRPOConfig](#offlinegrpoconfig) | [OfflineGRPOScriptArguments](#other-script-arguments) | `offline_grpo.py` |
-| `DistributedGRPOTrainer` (RLVR) | [GRPOConfig](#trl-trainer-configs) (TRL) | [RLVROnlineGRPOScriptArguments](#rlvronlinegrposcriptarguments) | `online_grpo/rlvr.py` |
-| `DistributedSDPGTrainer` (online SDPG) | [GRPOConfig](#trl-trainer-configs) (TRL) | [RLVROnlineGRPOScriptArguments](#rlvronlinegrposcriptarguments) (`--use_sdpg=true`) | `online_grpo/rlvr.py` |
-| `DistributedAsyncEnvironmentalGRPOTrainer` | [GRPOConfig](#trl-trainer-configs) (TRL) + [EnvironmentConfig](#environmentconfig) + [AsyncTrainingConfig](#asynctrainingconfig) | [EnvironmentalGRPOScriptArguments](#environmentalgrposcriptarguments) | `environmental_grpo.py` |
-| `DistributedRewardTrainer` | [RewardConfig](#trl-trainer-configs) (TRL) | [RewardScriptArguments](#other-script-arguments) | `preference/rewards.py` |
+| `OfflineGRPOTrainer` | [OfflineGRPOConfig](#offlinegrpoconfig) | [OfflineGRPOScriptArguments](#other-script-arguments) | `grpo/offline.py` |
+| `DistributedGRPOTrainer` (RLVR) | [GRPOConfig](#trl-trainer-configs) (TRL) | [RLVROnlineGRPOScriptArguments](#rlvronlinegrposcriptarguments) | `grpo/online.py` |
+| `DistributedSDPGTrainer` (online SDPG) | [GRPOConfig](#trl-trainer-configs) (TRL) | [RLVROnlineGRPOScriptArguments](#rlvronlinegrposcriptarguments) (`--use_sdpg=true`) | `grpo/online.py` |
+| `DistributedAsyncEnvironmentalGRPOTrainer` | [GRPOConfig](#trl-trainer-configs) (TRL) + [EnvironmentConfig](#environmentconfig) + [AsyncTrainingConfig](#asynctrainingconfig) | [EnvironmentalGRPOScriptArguments](#environmentalgrposcriptarguments) | `grpo/environmental.py` |
+| `DistributedRewardTrainer` | [RewardConfig](#trl-trainer-configs) (TRL) | [RewardScriptArguments](#other-script-arguments) | `reward/reward_model.py` |
 | `ClassificationTrainer` | [ClassificationConfig](#classificationconfig) | [ClassificationScriptArguments](#other-script-arguments) | `classification.py` |
 | `DistributedDistillationTrainer` | [DistillationConfig](#distillationconfig) | [TeacherDistillScriptArguments](#teacherdistillscriptarguments) | `distillation/teacher_distill.py` |
 | `DistributedSelfDistillationTrainer` (offline SDPG) | [SFTConfig](#trl-trainer-configs) (TRL) | [SelfDistillScriptArguments](#selfdistillscriptarguments) | `distillation/self_distill.py` |

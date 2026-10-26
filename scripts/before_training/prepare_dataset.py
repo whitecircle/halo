@@ -77,11 +77,13 @@ def bake_num_proc() -> int:
 def parse_args() -> tuple[PrepareDatasetArguments, PreprocessingConfig]:
     """The tool's arguments and the bake's config, built before anything is fetched. Where the tool's defaults
     differ from the config's: completion masking follows the mode as training does (on for chat, while text
-    refuses it), the model's own code is trusted, and the worker count (:func:`bake_num_proc`) and chat template are
-    recorded resolved."""
-    parser = add_trust_remote_code_arg(HaloArgumentParser((PrepareDatasetArguments, PreprocessingConfig)))
-    # The field's dashed alias outlives the canonical flag's takeover of its name, so it takes the default too.
-    parser.set_defaults(trust_remote_code=True, train_on_completions_only=None)
+    refuses it), and the worker count (:func:`bake_num_proc`) and chat template are recorded resolved.
+    ``--model_name_or_path`` may be a Hub repo, so its own code stays opt-in, as in training."""
+    parser = add_trust_remote_code_arg(
+        HaloArgumentParser((PrepareDatasetArguments, PreprocessingConfig)),
+        default=PreprocessingConfig.trust_remote_code,
+    )
+    parser.set_defaults(train_on_completions_only=None)
     values = parser.load_values()
     values.setdefault("trust_remote_code", parser.get_default("trust_remote_code"))
     values.setdefault("train_on_completions_only", values.get("mode", PreprocessingConfig.mode) == "chat")

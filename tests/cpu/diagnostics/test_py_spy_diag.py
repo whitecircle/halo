@@ -64,7 +64,7 @@ def _run(
         env.update(HALO_DATA_ROOT=str(tmp_path / "data"), TMPDIR=str(tmp_path / "tmp"))
         out_dir = tmp_path / "data" / "profiling" / "py_spy" / ("stacks" if command == "dump" else "flamegraphs")
     else:
-        argv += ["--output-dir", str(out_dir)]
+        argv += ["--output_dir", str(out_dir)]
     argv += [arg for pid in _PIDS for arg in ("--pid", str(pid))]
     if command == "record":
         argv += ["--duration", "1"]

@@ -31,6 +31,9 @@ from accelerate import PartialState
 from peft import LoraConfig, get_peft_model
 from transformers import Qwen3Config, Qwen3ForCausalLM
 
+from halo.checkpoint import adapter_merge as mpa
+from halo.checkpoint import bf16_conversion as cb
+from halo.checkpoint import model_merge as mm
 from halo.checkpoint import offline_export
 from tests.common.checkpoint_io import weight_files
 from tests.common.repo import load_script_module
@@ -75,9 +78,6 @@ _REMOTE_CONFIG_JSON = {
 }
 
 
-cb = load_script_module("scripts/after_training/convert_to_bf16.py")
-mpa = load_script_module("scripts/after_training/merge_peft_adapters.py")
-mm = load_script_module("scripts/after_training/merge_models.py")
 pv = load_script_module("scripts/before_training/patch_vocab.py")
 
 
@@ -304,32 +304,23 @@ def _build_fake_remote_code_repo(repo_dir: Path) -> None:
     (repo_dir / "modeling_tiny_remote.py").write_text(_REMOTE_MODELING_MODULE)
 
 
-def test_merge_models_hub_source_ships_the_modules_its_auto_map_names():
-    """A Hub ``--tokenizer_source`` must leave a directory that loads.
+def test_merge_models_remote_code_source_ships_the_modules_its_auto_map_names():
+    """A remote-code ``--tokenizer_source`` must leave a directory that loads.
 
     Re-emitting the source config through ``save_pretrained`` writes its ``auto_map`` while shipping
     none of the modules named there, so the merged checkpoint raises ``does not appear to have a file
-    named modeling_<x>.py`` for every consumer. The snapshot is stubbed to keep the test offline; the
-    repo layout it returns is a real remote-code one.
+    named modeling_<x>.py`` for every consumer.
     """
     with tempfile.TemporaryDirectory() as tmp:
-        repo, out = Path(tmp) / "hub-cache", Path(tmp) / "out"
+        repo, out = Path(tmp) / "remote-code", Path(tmp) / "out"
         _build_fake_remote_code_repo(repo)
         out.mkdir()
 
-        with patch.object(mm, "snapshot_download", side_effect=lambda repo_id, **kwargs: str(repo)) as download:
-            # allow_missing_tokenizer: this fake repo ships config + modules only, and the merge
-            # REFUSES a tokenizer-less artifact by default — a separate contract from the auto_map one
-            # under test here.
-            mm._copy_aux_files(
-                "org/tiny-remote",
-                str(out),
-                "bfloat16",
-                verbose=False,
-                allow_missing_tokenizer=True,
-                trust_remote_code=True,
-            )
-            assert download.call_count == 1, "a Hub id must be resolved to a local snapshot, not re-saved"
+        # allow_missing_tokenizer: this fake repo ships config + modules only, and the merge REFUSES a
+        # tokenizer-less artifact by default — a separate contract from the auto_map one under test here.
+        mm._copy_aux_files(
+            str(repo), str(out), "bfloat16", verbose=False, allow_missing_tokenizer=True, trust_remote_code=True
+        )
 
         with open(out / "config.json") as f:
             written = json.load(f)

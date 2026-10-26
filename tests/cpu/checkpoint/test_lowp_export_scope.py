@@ -22,11 +22,9 @@ import pytest
 import torch
 from safetensors.torch import load_file, save_file
 
+from halo.checkpoint.lowp_export import quantize_checkpoint
 from halo.kernels.lowp.spec import kept_block_indices
 from halo.models.module_tree import decoder_layer_index
-from tests.common.repo import load_script_module
-
-quantize_checkpoint = load_script_module("scripts/after_training/quantize_to_lowp.py").quantize_checkpoint
 
 _BLOCKS = 3
 

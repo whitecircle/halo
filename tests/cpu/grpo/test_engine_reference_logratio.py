@@ -29,7 +29,7 @@ from tests.common.fake_engines import GRAPH_CAPTURE_TOKENS, FakeEngineServer, fa
 from tests.common.repo import REPO_ROOT
 from tests.common.world_metrics import attach_world_metrics, flushed_metrics
 
-ENV_SCRIPT = REPO_ROOT / "scripts/training/environmental_grpo.py"
+ENV_SCRIPT = REPO_ROOT / "scripts/training/grpo/environmental.py"
 
 
 def _pair(stats: dict, key: str) -> tuple[float, float]:

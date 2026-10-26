@@ -21,21 +21,21 @@ need a large `--max_tokens`: too low truncates the chain of thought before any s
 
 Examples:
     # Codeforces verifiable test split, 50 problems, success@1, on a local vLLM server
-    python scripts/environments/inference/run_code_contests.py \
-        --dataset open-r1/codeforces --config verifiable --split test --adapter codeforces \
-        --base_url http://localhost:8000/v1 --model Qwen/Qwen3.6-35B-A3B \
+    python scripts/environments/inference/run_code_contests.py \\
+        --dataset open-r1/codeforces --config verifiable --split test --adapter codeforces \\
+        --base_url http://localhost:8000/v1 --model Qwen/Qwen3.6-35B-A3B \\
         --num_examples 50 --max_tokens 24576
 
     # DeepCoder (taco), success@4 against OpenRouter
-    python scripts/environments/inference/run_code_contests.py \
-        --dataset agentica-org/DeepCoder-Preview-Dataset --config taco --split train --adapter deepcoder \
-        --base_url https://openrouter.ai/api/v1 --api_key "$OPENROUTER_API_KEY" \
+    python scripts/environments/inference/run_code_contests.py \\
+        --dataset agentica-org/DeepCoder-Preview-Dataset --config taco --split train --adapter deepcoder \\
+        --base_url https://openrouter.ai/api/v1 --api_key "$OPENROUTER_API_KEY" \\
         --model qwen/qwen3-235b-a22b --num_examples 100 --num_samples 4
 
     # LiveCodeBench release_v6, AtCoder contests from 2025-01-04 on, leaderboard protocol, success@4
-    python scripts/environments/inference/run_code_contests.py \
-        --dataset livecodebench/code_generation_lite --config release_v6 --adapter livecodebench \
-        --start_date 2025-01-04 --platform atcoder --eval_protocol leaderboard \
+    python scripts/environments/inference/run_code_contests.py \\
+        --dataset livecodebench/code_generation_lite --config release_v6 --adapter livecodebench \\
+        --start_date 2025-01-04 --platform atcoder --eval_protocol leaderboard \\
         --base_url http://localhost:8000/v1 --model <served-name> --num_examples 0 --num_samples 4
 """
 
@@ -45,6 +45,13 @@ import json
 import logging
 from typing import Any
 
+from halo.entrypoints.environment_eval import (
+    load_training_contract,
+    resolve_setting,
+    resolve_trajectory_path,
+    rollout_config_from_args,
+    write_eval_outputs,
+)
 from halo.environments.episode_keys import ANSWER_KEY
 from halo.environments.eval_runner import (
     collect_results,
@@ -63,17 +70,8 @@ from halo.environments.tasks.coding.code_contests import (
 from halo.environments.tasks.coding.contest_datasets import CODE_DATASET_ADAPTERS, CodeDatasetAdapter, ContestSelection
 from halo.inference.openai_client import build_openai_client
 from halo.log import configure_cli_logging
-from scripts.environments.eval_arguments import (
-    DEFAULT_SPLIT,
-    add_endpoint_args,
-    resolve_setting,
-    resolve_trajectory_path,
-    rollout_config_from_args,
-    write_eval_outputs,
-)
-from scripts.environments.training_contract import load_training_contract
+from scripts.environments.eval_arguments import DEFAULT_SPLIT, add_endpoint_args
 
-configure_cli_logging()
 logger = logging.getLogger(__name__)
 
 # thinking_tokens is the CoT budget rather than a completion cap; the headroom keeps the solution and
@@ -217,16 +215,9 @@ def contest_meta(
     }
 
 
-def parse_args() -> argparse.Namespace:
-    p = argparse.ArgumentParser(description="Evaluate a model on competitive programming (code_contests/codeforces).")
-    p.add_argument(
-        "--env_type",
-        default=None,
-        choices=CODING_ENV_TYPES,
-        help=f"Coding env (default: the training config's environment_type under --training_config, else "
-        f"{DEFAULT_ENV_TYPE}).",
-    )
-    add_endpoint_args(p)
+def _add_selection_args(p: argparse.ArgumentParser) -> None:
+    """The flags choosing which problems are scored: the split, the adapter, the date and platform windows,
+    the examples-only filter and the problem and sample counts."""
     # Defaults to None so resolve_split can tell an explicit split, which a single-split source refuses,
     # from an omitted one.
     p.add_argument(
@@ -284,6 +275,11 @@ def parse_args() -> argparse.Namespace:
     p.add_argument(
         "--num_samples", type=int, default=1, help="Samples per problem (success@k; success@1 counts the first)."
     )
+
+
+def _add_generation_args(p: argparse.ArgumentParser) -> None:
+    """The flags shaping each episode: language, turn cap, sampling, reasoning effort, token budget,
+    concurrency and the extra env config."""
     p.add_argument(
         "--language",
         default=None,
@@ -339,6 +335,20 @@ def parse_args() -> argparse.Namespace:
         help="JSON dict merged into the env config, for the grading knobs this script does not expose "
         "(e.g. stop_on_first_failure, timeout_per_test, max_submissions, sandbox_backend).",
     )
+
+
+def parse_args() -> argparse.Namespace:
+    p = argparse.ArgumentParser(description="Evaluate a model on competitive programming (code_contests/codeforces).")
+    p.add_argument(
+        "--env_type",
+        default=None,
+        choices=CODING_ENV_TYPES,
+        help=f"Coding env (default: the training config's environment_type under --training_config, else "
+        f"{DEFAULT_ENV_TYPE}).",
+    )
+    add_endpoint_args(p)
+    _add_selection_args(p)
+    _add_generation_args(p)
     return p.parse_args()
 
 
@@ -391,6 +401,7 @@ def build_examples(
 
 
 def main() -> None:
+    configure_cli_logging()
     args = parse_args()
     adapter = CODE_DATASET_ADAPTERS[args.adapter]
     try:

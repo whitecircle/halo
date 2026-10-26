@@ -34,7 +34,7 @@ from tests.common.repo import REPO_ROOT, load_script_module
 _TRAINING_DIR = REPO_ROOT / "scripts" / "training"
 
 # The three GRPO entry points; each pads its batches and loads through load_model_and_tokenizer.
-_GRPO_SCRIPTS = ["offline_grpo.py", "environmental_grpo.py", "online_grpo/rlvr.py"]
+_GRPO_SCRIPTS = ["grpo/offline.py", "grpo/environmental.py", "grpo/online.py"]
 
 _HELPER = "default_padded_attn_implementation"
 
@@ -84,7 +84,7 @@ def _requested_attn(rel_path: str, yaml_body: str, tmp_path: Path, parallelism_c
             stack.enter_context(mock.patch.object(module, "load_script_datasets", return_value=(None, False)))
             stack.enter_context(mock.patch.object(module, "resolve_vlm_run", return_value=False))
         # Offline GRPO refuses splits its run-start reference cannot read before the model load.
-        elif rel_path == "offline_grpo.py":
+        elif rel_path == "grpo/offline.py":
             splits = DatasetDict(train=offline_grpo_dataset(2), test=offline_grpo_dataset(2, offset=2))
             stack.enter_context(mock.patch.object(module, "load_script_datasets", return_value=(splits, False)))
         # The log tee redirects the process's stdout/stderr fds — keep it out of the test process.
@@ -120,7 +120,7 @@ _CP_PARALLELISM = types.SimpleNamespace(is_cp_mode=True)
 
 
 # The CP-capable scripts that request the padded default.
-_CP_SCRIPTS = ["offline_grpo.py", "preference/smpo.py"]
+_CP_SCRIPTS = ["grpo/offline.py", "preference/smpo.py"]
 
 
 @pytest.mark.parametrize("script", _CP_SCRIPTS)
@@ -173,8 +173,11 @@ def _helper_calls(path: Path) -> list[ast.Call]:
     ]
 
 
+# The training scripts, and the preference load DPO and KTO share.
 _HELPER_CALL_SITES = sorted(
-    path for path in _TRAINING_DIR.rglob("*.py") if _HELPER in path.read_text(encoding="utf-8")
+    path
+    for path in (*_TRAINING_DIR.rglob("*.py"), REPO_ROOT / "halo/entrypoints/model_setup.py")
+    if _HELPER in path.read_text(encoding="utf-8")
 )
 
 

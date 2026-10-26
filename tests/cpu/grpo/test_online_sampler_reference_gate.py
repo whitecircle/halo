@@ -32,8 +32,8 @@ from halo.weight_sync.clients.vllm import VLLMWeightSyncClient
 from tests.common.fake_engines import FakeVLLMServer
 from tests.common.repo import REPO_ROOT
 
-RLVR_SCRIPT = REPO_ROOT / "scripts/training/online_grpo/rlvr.py"
-ENV_SCRIPT = REPO_ROOT / "scripts/training/environmental_grpo.py"
+RLVR_SCRIPT = REPO_ROOT / "scripts/training/grpo/online.py"
+ENV_SCRIPT = REPO_ROOT / "scripts/training/grpo/environmental.py"
 
 
 def _preflight_argument(script, name: str = "sequence_ratio_active") -> str:

@@ -1,6 +1,6 @@
 # Online GRPO smoke — Qwen3-4B on GSM8K, 3 steps; validates the vLLM NCCL weight-transfer round-trip.
 # Launch: vllm-server with --weight-transfer-config '{"backend":"nccl"}' (GPU 0), then
-#   CUDA_VISIBLE_DEVICES=1,2,3 torchrun --nproc_per_node=3 scripts/training/online_grpo/rlvr.py <this config>
+#   CUDA_VISIBLE_DEVICES=1,2,3 torchrun --nproc_per_node=3 scripts/training/grpo/online.py <this config>
 
 # --- Model ---
 model_name_or_path: Qwen/Qwen3-4B-Instruct-2507

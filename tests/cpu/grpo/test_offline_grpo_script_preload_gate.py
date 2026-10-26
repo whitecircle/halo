@@ -13,7 +13,7 @@ import pytest
 from accelerate import PartialState
 from datasets import DatasetDict
 
-import scripts.training.offline_grpo as offline_script
+import scripts.training.grpo.offline as offline_script
 from halo.configs.grpo_offline import OfflineGRPOConfig
 from halo.configs.script_arguments import ModelArguments
 from halo.distributed.parallelism_config import ParallelismConfig

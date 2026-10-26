@@ -75,8 +75,8 @@ def _slug(text: str) -> str:
 def _lookup_key(name: str) -> str:
     """Match key for a name typed on the command line.
 
-    The index is hyphenated (``offline-grpo``) while the script and its config directory spell the
-    method ``offline_grpo``; both spellings must resolve to the same entry.
+    The index is hyphenated (``reward/reward-model``) while the script spells the method
+    ``reward_model``; both spellings must resolve to the same entry.
     """
     return _slug(name).lower()
 
@@ -220,16 +220,22 @@ def _lookup(index: dict[str, Path], name: str, kind: str, root: Path) -> Path:
     raise typer.BadParameter(f"unknown {kind} '{name}'. Known {kind}s: {known} (--list for all)")
 
 
-def _execute(argv: list[str], cwd: Path | None, *, dry_run: bool) -> None:
-    """Exec ``argv``, from ``cwd`` when one is given: ``halo launch`` passes the repo root so a config's
-    relative paths resolve there, ``halo run`` passes ``None`` so a tool's path flags keep the caller's
-    cwd."""
+def _execute(argv: list[str], root: Path, *, cwd: Path | None, dry_run: bool) -> None:
+    """Exec ``argv`` with ``root`` first on ``PYTHONPATH``, from ``cwd`` when one is given: ``halo launch``
+    passes the repo root so a config's relative paths resolve there, ``halo run`` passes ``None`` so a
+    tool's path flags keep the caller's cwd.
+
+    A script's own directory is all ``python script.py`` puts on ``sys.path``, so without the prefix its
+    ``halo`` and ``scripts`` imports would come from whichever tree the install or an inherited
+    ``PYTHONPATH`` names; torchrun and accelerate hand the environment to every rank.
+    """
     if dry_run:
         typer.echo(" ".join(shlex.quote(part) for part in argv))
         return
     if cwd is not None:
         os.chdir(cwd)
-    os.execvp(argv[0], argv)
+    python_path = os.pathsep.join(filter(None, [str(root), os.environ.get("PYTHONPATH")]))
+    os.execvpe(argv[0], argv, {**os.environ, "PYTHONPATH": python_path})
 
 
 @app.callback()
@@ -300,7 +306,7 @@ def launch(
         accelerate_config=accelerate_config,
         port=port,
     )
-    _execute(argv, root, dry_run=dry_run)
+    _execute(argv, root, cwd=root, dry_run=dry_run)
 
 
 @app.command(context_settings=_EXTRA_ARGS)
@@ -309,21 +315,17 @@ def run(
     tool: Annotated[
         str | None, typer.Argument(help="Tool name, e.g. merge-ep-shards or inference/reward-model/rm-scoring")
     ] = None,
-    nproc: Annotated[int, typer.Option("--nproc", "-n", min=1, help="Use torchrun with this many processes")] = 1,
-    port: Annotated[
-        int | None,
-        typer.Option("--port", "-p", help="Rendezvous port (torchrun --master_port), for concurrent runs"),
-    ] = None,
     list_tools: Annotated[bool, typer.Option("--list", help="List indexed tools")] = False,
     dry_run: Annotated[bool, typer.Option("--dry-run", help="Print command without executing")] = False,
     root: Annotated[Path, typer.Option("--root", help="Repository root")] = REPO_ROOT,
 ) -> None:
     """Run a non-training tool (after-training, inference, before-training, environments,
-    profiling, ...) by name.
+    profiling, ...) by name, as one process: every tool is single-process, and N copies of a
+    checkpoint tool would race on one output directory.
 
     Flags after the tool name pass through to the underlying script, except the launcher's own
-    (--nproc/-n, --port/-p, --list, --dry-run, --root), which the CLI consumes first. Put ``--``
-    before a tool flag that collides (``halo run prepare-dataset -- --help``).
+    (--list, --dry-run, --root), which the CLI consumes first. Put ``--`` before a tool flag that
+    collides (``halo run prepare-dataset -- --help``).
 
     The tool runs in the caller's cwd (unlike ``halo launch``), so a relative path flag means what it
     would mean had the script been invoked directly.
@@ -337,8 +339,8 @@ def run(
     if tool is None:
         raise click.UsageError("halo run requires a TOOL name (use --list to see options)")
     script = _lookup(index, tool, "tool", root)
-    argv = build_launch_command(script, None, nproc=nproc, args=ctx.args, port=port)
-    _execute(argv, None, dry_run=dry_run)
+    argv = build_launch_command(script, None, nproc=1, args=ctx.args)
+    _execute(argv, root, cwd=None, dry_run=dry_run)
 
 
 def main() -> None:

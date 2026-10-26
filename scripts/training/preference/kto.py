@@ -31,13 +31,7 @@ from halo.data.pipeline.map_cache_key import carry_cache_key
 from halo.data.render_columns import alias_images_column, reject_missing_render_column
 from halo.data.vlm_routing import dataset_declares_images
 from halo.entrypoints.data_setup import load_script_datasets, log_script_dataset_examples, resolve_vlm_run
-from halo.entrypoints.model_setup import (
-    apply_max_length,
-    default_padded_attn_implementation,
-    install_resolved_tokenizer,
-    load_policy_model,
-    log_model_info,
-)
+from halo.entrypoints.model_setup import load_preference_models
 from halo.entrypoints.script import (
     configure_balancing_and_build_callbacks,
     distributed_trainer_kwargs,
@@ -46,8 +40,6 @@ from halo.entrypoints.script import (
     run_trainer,
     with_distributed_teardown,
 )
-from halo.model_loading.parallel.frozen_models import load_reference_model_for_preference
-from halo.model_loading.parallel.peft_setup import configure_adapter_training
 from halo.runtime.collectives import barrier
 from halo.trainers.preference.kto import DistributedKTOTrainer
 
@@ -137,50 +129,26 @@ def main():
     is_vlm_data = resolve_vlm_run(args, model_config, ds, text_only_model=args.text_only_model)
     _reject_embedded_image_parts(ds, args.completion_field)
 
-    # --- Model (text or VLM, auto-detected); padded preference takes the shared padded-workload
-    # backend (SDPA, dropped under live sinks). The reference load uses the same binding: a logratio
-    # whose halves came from different attention kernels is biased. ---
-    attn_default = default_padded_attn_implementation(model_config, sinks_reset=args.reset_sinks)
-    policy = load_policy_model(context, kto_config, model_config, args, vlm_run=is_vlm_data, attn_default=attn_default)
-    model = policy.model
-
-    peft_config = configure_adapter_training(args, model, model_config, "CAUSAL_LM")
-
-    # Reference model: under PEFT the reference is the adapter-free base; full finetune loads a copy.
-    model_ref = load_reference_model_for_preference(
-        args,
-        model_config,
-        kto_config,
-        parallelism_config,
-        policy.tokenizer,
-        is_vlm=policy.is_vlm,
-        method="KTO",
-        reset_sinks=args.reset_sinks,
-        attn_default=attn_default,
-    )
-
-    tokenizer = apply_max_length(kto_config, args, model, policy.tokenizer)
-    processing_class = install_resolved_tokenizer(policy.processing_class, tokenizer)
-    log_model_info(model, tokenizer)
+    models = load_preference_models(context, kto_config, model_config, args, vlm_run=is_vlm_data, method="KTO")
 
     _require_kto_columns(ds, args)
     train_dataset = _rename_kto_columns(ds["train"], args)
     eval_dataset = _rename_kto_columns(ds["test"], args) if "test" in ds else None
 
-    log_script_dataset_examples({"train": train_dataset, "test": eval_dataset}, tokenizer, args, kto_config)
+    log_script_dataset_examples({"train": train_dataset, "test": eval_dataset}, models.tokenizer, args, kto_config)
 
-    callbacks = configure_balancing_and_build_callbacks(args, kto_config, model, context)
+    callbacks = configure_balancing_and_build_callbacks(args, kto_config, models.model, context)
 
     barrier()
 
     trainer = DistributedKTOTrainer(
-        model=model,
+        model=models.model,
         args=kto_config,
-        ref_model=model_ref,
+        ref_model=models.ref_model,
         train_dataset=train_dataset,
         eval_dataset=eval_dataset,
-        processing_class=processing_class,
-        peft_config=peft_config,
+        processing_class=models.processing_class,
+        peft_config=models.peft_config,
         callbacks=callbacks,
         resume_checkpoint=context.resume_checkpoint,
         policy_from_checkpoint=context.policy_from_checkpoint,

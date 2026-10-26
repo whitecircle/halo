@@ -20,16 +20,15 @@ import torch
 import torch.nn.functional as F
 from safetensors.torch import load_file, save_file
 
+from halo.checkpoint import lowp_export as _quantize_to_lowp
 from halo.kernels.lowp.quantization import BlockScaledTensor, dequantize, fake_quant
 from halo.kernels.lowp.spec import MLP_PROJECTIONS
 from halo.models.moe.expert_layout import HF_FUSED_EXPERT_KEYS
 from halo.models.moe.family_specs import per_expert_layouts
 from tests.common.checkpoint_io import weight_files
-from tests.common.repo import load_script_module
 
-_quantize_to_lowp = load_script_module("scripts/after_training/quantize_to_lowp.py")
-_DEFAULT_EXCLUDE = _quantize_to_lowp._DEFAULT_EXCLUDE
-_DEFAULT_INCLUDE = _quantize_to_lowp._DEFAULT_INCLUDE
+_DEFAULT_EXCLUDE = _quantize_to_lowp.DEFAULT_EXCLUDE
+_DEFAULT_INCLUDE = _quantize_to_lowp.DEFAULT_INCLUDE
 _QUANTIZABLE_WEIGHT_NAMES = _quantize_to_lowp._QUANTIZABLE_WEIGHT_NAMES
 _fused_expert_axis = _quantize_to_lowp._fused_expert_axis
 _should_quantize = _quantize_to_lowp._should_quantize

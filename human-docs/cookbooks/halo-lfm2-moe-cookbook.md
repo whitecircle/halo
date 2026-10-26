@@ -77,7 +77,7 @@ launch:
 
 ```bash
 cp examples/grpo/environmental/environmental-grpo-template.yaml lfm2-grpo.yaml
-CUDA_VISIBLE_DEVICES=2,3 halo launch environmental-grpo lfm2-grpo.yaml -n 2 \
+CUDA_VISIBLE_DEVICES=2,3 halo launch grpo/environmental lfm2-grpo.yaml -n 2 \
   --model_name_or_path=/data/checkpoints/lfm2.5-8b-a1b-sft \
   --routing_replay=rollout --beta=0.0 \
   --output_dir=/data/checkpoints/lfm2.5-8b-a1b-grpo

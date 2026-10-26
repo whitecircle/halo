@@ -34,7 +34,7 @@ from tests.common.source_sweep import called_names, functions_in
 PartialState()
 
 # The two on-policy GRPO entry scripts, whose loaded policy names the KL reference's source.
-ON_POLICY_GRPO_SCRIPTS = ("scripts/training/online_grpo/rlvr.py", "scripts/training/environmental_grpo.py")
+ON_POLICY_GRPO_SCRIPTS = ("scripts/training/grpo/online.py", "scripts/training/grpo/environmental.py")
 
 
 def _save_tiny_qwen3(directory, seed: int) -> dict[str, torch.Tensor]:

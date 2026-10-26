@@ -1,7 +1,7 @@
 # Online GRPO (RLVR) — Gemma-4 26B-A4B on DAPO-Math-17k, rule-based accuracy reward, EP=2 (train GPUs 1,2 + vLLM GPU 0).
 # Serving needs the patched vllm-server image (layerwise-reload covers Gemma4Router) + --moe-backend triton.
 # Launch: vllm-server with --weight-transfer-config '{"backend":"nccl"}' (GPU 0), then
-#   CUDA_VISIBLE_DEVICES=1,2 torchrun --nproc_per_node=2 scripts/training/online_grpo/rlvr.py <this config>
+#   CUDA_VISIBLE_DEVICES=1,2 torchrun --nproc_per_node=2 scripts/training/grpo/online.py <this config>
 
 # --- Model ---
 model_name_or_path: google/gemma-4-26B-A4B-it

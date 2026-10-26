@@ -31,6 +31,7 @@ from transformers import CONFIG_MAPPING, Gemma3Config, Qwen3Config, Qwen3ForCaus
 from transformers.models.qwen3_5_moe import Qwen3_5MoeForCausalLM, Qwen3_5MoeTextConfig
 from transformers.trainer import SCHEDULER_NAME, TRAINER_STATE_NAME
 
+from halo.checkpoint import model_merge as mm
 from halo.checkpoint.format import (
     ADAPTER_CONFIG_FILE,
     ADAPTER_SAFETENSORS_FILE,
@@ -43,9 +44,6 @@ from halo.checkpoint.format import (
 from halo.checkpoint.reading import iter_checkpoint_shard_entries
 from tests.common.checkpoint_io import mark_resume_adapter
 from tests.common.models import TINY_QWEN3_CONFIG
-from tests.common.repo import load_script_module
-
-mm = load_script_module("scripts/after_training/merge_models.py")
 
 _WORKING_SET_NUMEL = 1 << 20
 # The ops also allocate a few 0-d results (norms, the slerp dot); they are not tensor-sized copies.
@@ -112,8 +110,8 @@ def test_every_method_knob_pair_accepts_or_refuses_as_declared(method, knob):
 
 def test_the_method_table_declares_every_method_and_default():
     """The knob defaults have one home, and every method the CLI offers is in it."""
-    assert set(mm._METHODS) == set(_METHOD_KNOBS)
-    assert mm._KNOB_DEFAULTS == {"t": 0.5, "density": 0.6, "lambda": 1.0}
+    assert set(mm.MERGE_METHODS) == set(_METHOD_KNOBS)
+    assert mm.KNOB_DEFAULTS == {"t": 0.5, "density": 0.6, "lambda": 1.0}
     for method, knobs in _METHOD_KNOBS.items():
         assert mm._method_knobs(method) == frozenset(knobs)
         mm._check_method_knobs(method, set())  # nothing explicit is always fine (defaults apply)
@@ -158,9 +156,9 @@ def test_the_domain_edges_and_defaults_are_accepted():
     mm._check_knob_domains("slerp", {"t": 1.0})
     mm._check_knob_domains("ties", {"density": 1.0, "lambda": 0.0})
     mm._check_knob_domains("ties", {"density": 1e-6, "lambda": -1.0})
-    for method in mm._METHODS:
-        mm._check_knob_domains(method, mm._KNOB_DEFAULTS)
-    assert set(mm._KNOB_DOMAINS) == set(mm._KNOB_DEFAULTS), "every knob needs a domain, and nothing else"
+    for method in mm.MERGE_METHODS:
+        mm._check_knob_domains(method, mm.KNOB_DEFAULTS)
+    assert set(mm.KNOB_DOMAINS) == set(mm.KNOB_DEFAULTS), "every knob needs a domain, and nothing else"
 
 
 def test_an_unknown_knob_is_refused():
@@ -436,7 +434,7 @@ def test_a_base_only_key_names_the_model_that_lacks_it():
 
 
 # The methods that take a base, read off the method table: each merges over the base's key set.
-_BASE_METHODS = sorted(name for name, spec in mm._METHODS.items() if "base" in spec.tensor_args)
+_BASE_METHODS = sorted(name for name, spec in mm.MERGE_METHODS.items() if "base" in spec.tensor_args)
 
 
 def _tied_qwen3(path: Path, seed: int, *, store_head: bool, tie: bool = True) -> dict[str, torch.Tensor]:
@@ -474,10 +472,10 @@ def test_a_tied_hub_base_storing_its_head_merges_into_a_tied_checkpoint(method, 
 
     merged_tensors = load_file(str(out / "model.safetensors"))
     assert "lm_head.weight" not in merged_tensors
-    spec = mm._METHODS[method]
+    spec = mm.MERGE_METHODS[method]
     embed = "model.embed_tokens.weight"
     per_key = {"base": base_tensors[embed], "tensors": [t[embed] for t in tuned], "weights": [1.0, 1.0]}
-    knobs = {mm._knob_dest(knob): default for knob, default in spec.knobs.items()}
+    knobs = {mm.knob_dest(knob): default for knob, default in spec.knobs.items()}
     expected = spec.op(**{name: per_key[name] for name in spec.tensor_args}, **knobs)
     torch.testing.assert_close(merged_tensors[embed], expected)
 
@@ -683,7 +681,7 @@ def test_each_method_working_set_bound_covers_its_peak(method, n_models, dtype, 
     int64 cast of the agreement mask coexist. A bound below the peak lets a merge OOM without the
     warning; one above it warns on merges that fit — so bf16 inputs, the worst case, must also land
     within 10% of the bound."""
-    spec = mm._METHODS[method]
+    spec = mm.MERGE_METHODS[method]
     tensors = [torch.randn(_WORKING_SET_NUMEL).to(dtype) for _ in range(n_models)]
     per_key = {
         "tensors": tensors,
@@ -692,7 +690,7 @@ def test_each_method_working_set_bound_covers_its_peak(method, n_models, dtype, 
         "weights": [1.0] * n_models,
         "base": torch.randn(_WORKING_SET_NUMEL).to(dtype),
     }
-    knobs = {mm._knob_dest(knob): value for knob, value in spec.knobs.items()}
+    knobs = {mm.knob_dest(knob): value for knob, value in spec.knobs.items()}
 
     op_args = {name: per_key[name] for name in spec.tensor_args}
     peak = _peak_allocated_bytes(lambda: spec.op(**op_args, **knobs), tmp_path / "trace.json")
@@ -728,7 +726,7 @@ def test_the_ram_preflight_sizes_inputs_as_stored_plus_the_method_working_set(tm
 
     numel = large.numel()
     stored = 3 * numel * 2 + numel * 4
-    working = mm._METHODS["ties"].fp32_copies(3) * 4 * numel
+    working = mm.MERGE_METHODS["ties"].fp32_copies(3) * 4 * numel
     shard = mm.StreamingShardWriter(str(tmp_path), "1MB", enabled=False).max_bytes
     assert captured["ram"] == stored + working + shard
 
@@ -756,7 +754,7 @@ def test_the_ram_preflight_counts_the_costliest_key_when_sizes_tie(tmp_path, mon
 
     numel = tensor.numel()
     stored = 2 * numel * 2 + numel * 4
-    working = mm._METHODS["task_arithmetic"].fp32_copies(2) * 4 * numel
+    working = mm.MERGE_METHODS["task_arithmetic"].fp32_copies(2) * 4 * numel
     shard = mm.StreamingShardWriter(str(tmp_path), "1MB", enabled=False).max_bytes
     assert captured["ram"] == stored + working + shard
 

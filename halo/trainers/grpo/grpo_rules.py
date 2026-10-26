@@ -103,7 +103,7 @@ def reject_tool_calling_loop(ctor_args: tuple, kwargs: dict) -> None:
             f"DistributedGRPOTrainer does not run TRL's tool-calling loop ({', '.join(given)}): it loops as "
             "long as some completion on this rank calls a tool, each round a collective vLLM generate, so ranks "
             "fall out of step. Train tool use with Async GRPO with Environments "
-            "(scripts/training/environmental_grpo.py), whose episodes run in the rollout actors."
+            "(scripts/training/grpo/environmental.py), whose episodes run in the rollout actors."
         )
 
 

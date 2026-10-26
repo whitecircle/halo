@@ -97,7 +97,8 @@ def _cli_exists(args, client: S3Client):
         print(f"✗ {s3_uri} does not exist")
 
 
-def main():
+def build_parser() -> argparse.ArgumentParser:
+    """The CLI: one subcommand per S3 operation, each bound to its handler, over the shared bucket flags."""
     parser = argparse.ArgumentParser(
         description="S3 utilities for uploading/downloading folders",
         formatter_class=argparse.RawDescriptionHelpFormatter,
@@ -138,7 +139,7 @@ Examples:
     )
     push_parser.add_argument("local_path", help="Local folder path to upload")
     push_parser.add_argument("s3_key", help="S3 key/path for the folder")
-    push_parser.add_argument("--no-overwrite", action="store_true", help="Don't overwrite if exists")
+    push_parser.add_argument("--no_overwrite", action="store_true", help="Don't overwrite if exists")
     push_parser.set_defaults(func=_cli_push)
 
     download_parser = subparsers.add_parser(
@@ -146,14 +147,14 @@ Examples:
     )
     download_parser.add_argument("s3_key", help="S3 key/path of the folder")
     download_parser.add_argument("local_path", help="Local path to download to")
-    download_parser.add_argument("--no-overwrite", action="store_true", help="Don't overwrite if local exists")
+    download_parser.add_argument("--no_overwrite", action="store_true", help="Don't overwrite if local exists")
     download_parser.set_defaults(func=_cli_download)
 
     list_parser = subparsers.add_parser("list", parents=[common_parser], help="List objects in S3")
     list_parser.add_argument("prefix", nargs="?", default="", help="Prefix to filter (optional)")
     list_parser.add_argument("--recursive", "-r", action="store_true", help="List recursively")
     list_parser.add_argument(
-        "--max-keys", "-n", type=int, default=100, help="Maximum number of items to list (default: 100)"
+        "--max_keys", "-n", type=int, default=100, help="Maximum number of items to list (default: 100)"
     )
     list_parser.set_defaults(func=_cli_list)
 
@@ -168,8 +169,11 @@ Examples:
     )
     exists_parser.add_argument("s3_key", help="S3 key/path to check")
     exists_parser.set_defaults(func=_cli_exists)
+    return parser
 
-    args = parser.parse_args()
+
+def main():
+    args = build_parser().parse_args()
 
     configure_cli_logging(verbose=args.verbose)
     # Undo the library modules' INFO pins so ``-v`` widens the S3 code that emits the transfer

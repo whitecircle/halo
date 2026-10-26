@@ -37,6 +37,7 @@ from transformers.integrations.mxfp4 import Mxfp4Dequantize
 from transformers.models.auto.modeling_auto import MODEL_FOR_IMAGE_TEXT_TO_TEXT_MAPPING_NAMES
 
 import halo.checkpoint.parallel.ep as ep_save
+from halo.checkpoint.expert_unfuse import unfuse_checkpoint
 from halo.checkpoint.hub_layout import ModuleLayoutView
 from halo.checkpoint.parallel.ep import (
     reject_unmergeable_ep_sharded_save,
@@ -50,7 +51,6 @@ from halo.model_loading.lazy_safetensors.conversion_selection import family_key_
 from halo.models.moe.family_specs import expert_weight_roots, experts_container_attrs, moe_model_types
 from halo.models.param_roles import persistent_buffers
 from halo.trainers.grpo.rollout.weight_push import _dense_params, gather_and_send_weights
-from scripts.after_training.unfuse_moe_experts import unfuse_checkpoint
 from tests.common.checkpoint_io import loading_problems, save_context
 from tests.common.ep_stubs import StubEPLayerBase, bare_ep_layer
 from tests.common.models import TINY_STEP3P7_CONFIG

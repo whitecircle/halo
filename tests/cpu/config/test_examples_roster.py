@@ -88,9 +88,9 @@ _ROLLOUT_EXAMPLES = [config for config in _EXAMPLES if "episode_timeout" in raw_
 # The two methods that push trained weights into a live rollout engine. Their launch comments are the
 # only place the server-side half of the contract is written down, so it is checked as part of the file.
 _WEIGHT_SYNC_EXAMPLES = [
-    config for config in _EXAMPLES if script_for(config) in ("online_grpo/rlvr.py", "environmental_grpo.py")
+    config for config in _EXAMPLES if script_for(config) in ("grpo/online.py", "grpo/environmental.py")
 ]
-_ENV_GRPO_EXAMPLES = [config for config in _EXAMPLES if script_for(config) == "environmental_grpo.py"]
+_ENV_GRPO_EXAMPLES = [config for config in _EXAMPLES if script_for(config) == "grpo/environmental.py"]
 
 
 def launch_topology(config: Path) -> tuple[int, int]:

@@ -54,7 +54,7 @@ A message-list `prompt` reaches the environment as its last `user` turn, as in t
 
 ### Grading under a training config
 
-`--training_config <yaml>` parses the YAML with the training script's config classes (`scripts/environments/training_contract.py`), adopting its `RolloutConfig` (backend, template variables, stop tokens, thinking and episode output budgets, sampling, request timeout) and environment config (rewards, `max_turns`, `environment_kwargs`, `environment_type`). An explicit flag beats the YAML; the YAML beats the default.
+`--training_config <yaml>` parses the YAML with the training script's config classes (`TrainingContract`, `halo/entrypoints/environment_eval.py`), adopting its `RolloutConfig` (backend, template variables, stop tokens, thinking and episode output budgets, sampling, request timeout) and environment config (rewards, `max_turns`, `environment_kwargs`, `environment_type`). An explicit flag beats the YAML; the YAML beats the default.
 
 - It refuses what the trainer refuses, through the same resolvers, before any episode: a `rollout_stop_tokens` entry the config's tokenizer does not know (`resolve_rollout_stop_token_ids`), and under vLLM a thinking budget the served model type cannot enforce (Mistral 4), from the run-wide cap or any effort level the environment can draw (`reject_unenforceable_thinking_budget`).
 - The YAML's dataset keys (`dataset`, `prompt_field`, `answer_field`, `context_fields`) are not read: pass the matching flags.
@@ -88,7 +88,7 @@ A score left with no sample reads `nan`.
 
 ## Output files
 
-`--output <path.json>` dumps per-example results: `group`, `id`, and per sample `reward`, `success`, `stats`, `error` or `generation_error` where set, plus any recorded trajectory.
+`--output_path <path.json>` dumps per-example results: `group`, `id`, and per sample `reward`, `success`, `stats`, `error` or `generation_error` where set, plus any recorded trajectory.
 
 `--save_trajectories <path.jsonl>` records the full run; `--trajectory_dir <folder>` auto-names one file per run: `<model>__<env_type>__<split>.jsonl`, or for the coding script `<model>__<adapter>__<split>__<language>.jsonl` plus `__<eval_protocol>` (other than `harness`) and any contest selection.
 
@@ -107,7 +107,7 @@ Only `run_code_contests.py` dumps carry the meta a re-grade needs; a `run_env.py
 
 ```bash
 python scripts/environments/inference/regrade_trajectories.py \
-    "$HALO_DATA_ROOT/eval/trajectories"/*.jsonl --workers 64 --output regraded.jsonl
+    "$HALO_DATA_ROOT/eval/trajectories"/*.jsonl --max_workers 64 --output_path regraded.jsonl
 ```
 
 It rebuilds each problem's hidden tests by `index` under the meta line's contest `selection` and replays every admitted `submit_solution` (a refused call, a mislabelled language or a repeat of a graded program takes no slot) under the recorded `env_grading` (the grading settings the meta line records):
@@ -122,7 +122,7 @@ A file is refused before any grade when:
 
 A `selection` that records no `include_examples_only` is read as including the examples-only problems.
 
-Per file it reports the protocol and, over the `n` episodes with a verdict, `s@1` (the first admitted submission passes every test) and `s@2` (any submission within the budget does). An episode with a `generation_error` leaves `n` and counts in `generation_errors`. Keep `--workers` at or below the core count.
+Per file it reports the protocol and, over the `n` episodes with a verdict, `s@1` (the first admitted submission passes every test) and `s@2` (any submission within the budget does). An episode with a `generation_error` leaves `n` and counts in `generation_errors`. Keep `--max_workers` at or below the core count.
 
 ## Smoke-testing a config
 

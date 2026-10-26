@@ -8,7 +8,7 @@ shared response tokens (``L = L_sft + beta(k)·L_OPD + alpha·L_ref``). One scri
 and vision-language models: the run's modality (``resolve_vlm_run``, read off the data and the
 checkpoint) selects the text or VLM self-distillation collator. This is the offline SDPG
 approximation (scores a fixed dataset; the faithful on-policy SDPG runs via
-``online_grpo/rlvr.py --use_sdpg``). For off-policy teacher→student distillation use
+``grpo/online.py --use_sdpg``). For off-policy teacher→student distillation use
 ``teacher_distill.py``.
 
 Dataset: raw SFT conversations (``conversation_field``) plus a privileged answer field (VLM adds an

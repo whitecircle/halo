@@ -21,8 +21,8 @@ counted apart.
 
 Usage::
 
-    python scripts/environments/inference/regrade_trajectories.py /path/to/trajectories/*.jsonl \
-        --workers 64 --output /path/to/regraded.jsonl
+    python scripts/environments/inference/regrade_trajectories.py /path/to/trajectories/*.jsonl \\
+        --max_workers 64 --output_path /path/to/regraded.jsonl
 """
 
 import argparse
@@ -267,22 +267,22 @@ def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("trajectories", nargs="+", help="Trajectory JSONL file(s) to re-grade.")
     p.add_argument(
-        "--workers",
+        "--max_workers",
         type=int,
         default=min(64, (os.cpu_count() or 8)),
         help="Concurrent gradings in this single process. Keep at/below the core count so each run "
         "gets a dedicated core and the wall-clock limit stays real.",
     )
-    p.add_argument("--output", help="Optional JSONL to append the corrected per-file metrics to.")
+    p.add_argument("--output_path", help="Optional JSONL file to append the corrected per-file metrics to.")
     return p.parse_args()
 
 
 def main() -> None:
     args = parse_args()
     with contextlib.ExitStack() as stack:
-        output = stack.enter_context(open(args.output, "a")) if args.output else None
+        output = stack.enter_context(open(args.output_path, "a")) if args.output_path else None
         for path in args.trajectories:
-            metrics = regrade_file(path, args.workers)
+            metrics = regrade_file(path, args.max_workers)
             # print (not logging — third-party imports reconfigure the root logger) and persist each
             # result as it lands, so progress is visible and partial runs are not lost.
             print(

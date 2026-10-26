@@ -115,7 +115,7 @@ def test_sequence_classification_head_is_a_legitimate_absence(tmp_path, tie_word
 def test_head_consuming_caller_refuses_a_base_checkpoint(tmp_path):
     """``excuse_task_head=False`` withdraws that excuse for a caller that only scores with the head.
 
-    Reward-model inference (``scripts/inference/reward_model/reward_model_arguments.py``) would otherwise score every
+    Reward-model inference (``halo/entrypoints/reward_scoring.py``) would otherwise score every
     row through a randomly initialized ``score`` and report plausible numbers.
     """
     path = _write_checkpoint(tmp_path / "base")

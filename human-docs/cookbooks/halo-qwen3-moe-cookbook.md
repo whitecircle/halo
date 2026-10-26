@@ -102,7 +102,7 @@ launch:
 
 ```bash
 cp examples/grpo/environmental/environmental-grpo-template.yaml qwen3-moe-grpo.yaml
-CUDA_VISIBLE_DEVICES=2,3 halo launch environmental-grpo qwen3-moe-grpo.yaml -n 2 \
+CUDA_VISIBLE_DEVICES=2,3 halo launch grpo/environmental qwen3-moe-grpo.yaml -n 2 \
   --model_name_or_path=/data/checkpoints/qwen3-30b-a3b-sft \
   --routing_replay=rollout --beta=0.0 \
   --output_dir=/data/checkpoints/qwen3-30b-a3b-grpo

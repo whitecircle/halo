@@ -41,11 +41,13 @@ import subprocess
 import sys
 from collections.abc import Callable
 from pathlib import Path
+from types import ModuleType
 from unittest.mock import patch
 
 import pytest
 from datasets import DatasetDict
 
+from halo.checkpoint import adapter_merge, deepseek_v4_dequant, vocab_patch
 from halo.checkpoint.format import DEFAULT_MAX_SHARD_SIZE
 from halo.data.preprocessed import tokenization
 from scripts.cli_arguments import (
@@ -59,24 +61,27 @@ from tests.common.repo import REPO_ROOT, load_script_module
 
 # (tool, the default its input source earns). Every standalone tool that executes a checkpoint's own
 # modeling/config/tokenizer code is here, including convert_deepseek_v4_bf16 and reattach_vision_tower
-# (both reach from_pretrained/AutoConfig, which imports a remote config module). The four whose source
-# is a Hub-capable --model_id are opt-in; the rest read a local checkpoint/adapter, or the run's
-# tokenizer, and default on. Tools that only stream safetensors (shard merges, unfuse_moe_experts,
-# quantize_to_lowp, convert_mistral4_bf16, convert_glm5_bf16) load no model code and expose no flag.
+# (both reach from_pretrained/AutoConfig, which imports a remote config module). A source that may be a
+# Hub repo (a --model_id, the reward model, the tokenizer prepare_dataset bakes with) is opt-in; a local
+# checkpoint, adapter or merge input defaults on. Tools that only stream safetensors (shard merges, unfuse_moe_experts,
+# quantize_to_lowp, reset_sinks, convert_mistral4_bf16, convert_glm5_bf16) load no model code and expose
+# no flag.
 _TOOLS = (
     ("scripts/after_training/convert_to_bf16.py", True),
     ("scripts/after_training/merge_models.py", True),
     ("scripts/after_training/merge_peft_adapters.py", True),
     ("scripts/after_training/reattach_vision_tower.py", False),
-    ("scripts/after_training/reset_sinks.py", False),
     ("scripts/before_training/convert_deepseek_v4_bf16.py", False),
     ("scripts/before_training/patch_vocab.py", False),
-    ("scripts/before_training/prepare_dataset.py", True),
+    ("scripts/before_training/prepare_dataset.py", False),
+    ("scripts/inference/reward_model/rm_scoring.py", False),
+    ("scripts/inference/reward_model/rm_rejection_sampling.py", False),
+    ("scripts/inference/generation/dataset_deduplication.py", False),
 )
 
 # Hub-source tools that thread no revision, so they must not advertise the pin. The helper's own
 # default is ``revision=True``: a tool is required to thread one until it is listed here.
-_NO_REVISION_TOOLS = frozenset({"scripts/after_training/reset_sinks.py", "scripts/before_training/patch_vocab.py"})
+_NO_REVISION_TOOLS = frozenset({"scripts/before_training/patch_vocab.py"})
 
 
 def _empty_source_dir(tmp_path: Path) -> str:
@@ -105,22 +110,24 @@ def _minimal_adapter_dir(tmp_path: Path) -> str:
     return str(adapter)
 
 
-# (tool, its source flag, a builder for the source it is pointed at, the module attribute its FIRST
-# checkpoint load goes through). One row per default: a tool that parses the flag and then hardcodes
+# (tool, its source flag, a builder for the source it is pointed at, the driver module and attribute its
+# FIRST checkpoint load goes through). One row per default: a tool that parses the flag and then hardcodes
 # trust_remote_code at the load has the same --help as one that threads it, so the surface tests
 # above cannot tell them apart. The load is stubbed out, so no weights are read.
 _LOAD_SITES = (
-    ("scripts/before_training/patch_vocab.py", "--model_id", _empty_source_dir, "load_processing_class"),
+    ("scripts/before_training/patch_vocab.py", "--model_id", _empty_source_dir, vocab_patch, "load_processing_class"),
     (
         "scripts/before_training/convert_deepseek_v4_bf16.py",
         "--model_id",
         _empty_source_dir,
+        deepseek_v4_dequant,
         "source_config",
     ),
     (
         "scripts/after_training/merge_peft_adapters.py",
         "--adapter_dir",
         _minimal_adapter_dir,
+        adapter_merge,
         "merge_adapter_into_base",
     ),
 )
@@ -196,8 +203,9 @@ def test_the_derived_rosters_cover_the_tool_tree():
     paths = _tool_paths()
 
     assert len(paths) >= 10, sorted(paths)
-    assert set(dict(_TOOLS)) <= set(paths), (
-        f"the trust roster names tools that are gone: {sorted(set(dict(_TOOLS)) - set(paths))}"
+    on_disk = {str(path.relative_to(REPO_ROOT)) for path in (REPO_ROOT / "scripts").rglob("*.py")}
+    assert set(dict(_TOOLS)) <= on_disk, (
+        f"the trust roster names tools that are gone: {sorted(set(dict(_TOOLS)) - on_disk)}"
     )
     assert len(_MAX_SHARD_SIZE_TOOLS) >= 8, _MAX_SHARD_SIZE_TOOLS
     assert len(_HUB_SOURCE_TOOLS) >= 4, _HUB_SOURCE_TOOLS
@@ -339,18 +347,19 @@ def test_the_load_flags_are_the_shared_ones(relative_path: str, flag: str, add_a
         )
 
 
-@pytest.mark.parametrize(("relative_path", "source_flag", "build_source", "load_site"), _LOAD_SITES)
+@pytest.mark.parametrize(("relative_path", "source_flag", "build_source", "driver", "load_site"), _LOAD_SITES)
 def test_the_parsed_trust_remote_code_reaches_the_first_load(
     relative_path: str,
     source_flag: str,
     build_source: Callable[[Path], str],
+    driver: ModuleType,
     load_site: str,
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ):
     module = load_script_module(relative_path, f"{Path(relative_path).stem}_wiring")
-    assert hasattr(module, load_site), (
-        f"{relative_path} no longer loads through {load_site} — the row is stale, repoint it at the "
+    assert hasattr(driver, load_site), (
+        f"{driver.__name__} no longer loads through {load_site} — the row is stale, repoint it at the "
         f"call that now reads the flag"
     )
     expected_default = dict(_TOOLS)[relative_path]
@@ -365,7 +374,7 @@ def test_the_parsed_trust_remote_code_reaches_the_first_load(
         seen.update(kwargs)
         raise _LoadReached
 
-    monkeypatch.setattr(module, load_site, _capture)
+    monkeypatch.setattr(driver, load_site, _capture)
 
     for extra, expected in (
         ([], expected_default),
@@ -407,7 +416,7 @@ def test_prepare_dataset_threads_the_flag_into_the_label_bake_config_read(tmp_pa
     argv = ["--input", "org/raw", "--output", str(tmp_path / "out"), "--model_name_or_path", "org/model"]
     argv += ["--assistant_message_template", "<|im_start|>assistant\n"]
 
-    for extra, expected in (([], True), (["--trust_remote_code"], True), (["--no-trust_remote_code"], False)):
+    for extra, expected in (([], False), (["--trust_remote_code"], True), (["--no-trust_remote_code"], False)):
         seen.clear()
         monkeypatch.setattr(sys, "argv", ["prepare_dataset.py", *argv, *extra])
         with pytest.raises(_ConfigRead):

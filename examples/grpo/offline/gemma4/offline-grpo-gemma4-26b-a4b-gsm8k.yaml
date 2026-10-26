@@ -2,7 +2,7 @@
 # Dataset rows need prompt/completions/rewards — generate via
 # scripts/inference/reward_model/rm_rejection_sampling.py --output_format offline_grpo (the default is preference).
 # See agent-docs/training-methods/grpo/offline.md.
-# Launch: torchrun --nproc_per_node=8 scripts/training/offline_grpo.py <this config>
+# Launch: torchrun --nproc_per_node=8 scripts/training/grpo/offline.py <this config>
 
 # --- Model ---
 model_name_or_path: google/gemma-4-26B-A4B-it
@@ -15,8 +15,8 @@ expert_parallel_size: 8
 # so the knob has no fp32 route to take — setting it only logs a per-layer no-op warning.
 
 # --- Dataset ---
-# The file the rejection-sampling step above wrote: <output_folder>/<prompts stem>_<model>_offline_grpo.jsonl
-# (keep --output_folder off the small root FS).
+# The file the rejection-sampling step above wrote: <output_dir>/<prompts stem>_<model>_offline_grpo.jsonl
+# (keep --output_dir off the small root FS).
 dataset:
 - path/to/gsm8k_<model>_offline_grpo.jsonl
 test_size: 0.05

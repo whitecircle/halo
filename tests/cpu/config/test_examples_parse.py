@@ -36,15 +36,15 @@ _SCRIPT_RULES = (
     ("examples/sft", "", "sft.py"),
     ("examples/classification", "", "classification.py"),
     ("examples/embedding", "", "embedding.py"),
-    ("examples/reward", "", "preference/rewards.py"),
+    ("examples/reward", "", "reward/reward_model.py"),
     ("examples/preference", "dpo-", "preference/dpo.py"),
     ("examples/preference", "smpo-", "preference/smpo.py"),
     ("examples/preference", "kto-", "preference/kto.py"),
     ("examples/distillation", "self-distill-", "distillation/self_distill.py"),
     ("examples/distillation", "distill-", "distillation/teacher_distill.py"),
-    ("examples/grpo/offline", "", "offline_grpo.py"),
-    ("examples/grpo/online", "", "online_grpo/rlvr.py"),
-    ("examples/grpo/environmental", "", "environmental_grpo.py"),
+    ("examples/grpo/offline", "", "grpo/offline.py"),
+    ("examples/grpo/online", "", "grpo/online.py"),
+    ("examples/grpo/environmental", "", "grpo/environmental.py"),
 )
 
 _EXAMPLES = sorted(EXAMPLES_ROOT.rglob("*.yaml"))
