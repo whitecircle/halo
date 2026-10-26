@@ -71,6 +71,10 @@ def test_every_registered_model_type_applies_without_raising():
     Once an applier's failure propagates (above), any upstream applier that cannot honour those defaults
     takes the run down at model load. Sweeping the whole registry catches the next such applier.
 
+    Each type resolves as a checkpoint of that type does, a multimodal wrapper with its text tower as the
+    fallback: resolved bare, a wrapper upstream registers (``gemma4``) would run upstream's applier over the
+    classes the tower's toolkit spec owns, which no load does.
+
     Run in a subprocess: applying an applier rebinds upstream HF module classes for the rest of the
     process, which would poison every later test in the session.
     """
@@ -80,12 +84,14 @@ from accelerate import PartialState
 
 PartialState()
 from liger_kernel.transformers.auto_model import MODEL_TYPE_TO_APPLY_LIGER_FN
-from src.model_loading.liger.dispatch import _TOOLKIT_LIGER_APPLIERS, _apply_liger_for_standard_models
+from transformers.models.auto.configuration_auto import CONFIG_MAPPING
+from src.model_loading.liger.dispatch import _TOOLKIT_LIGER_APPLIERS, _apply_liger_for_standard_models, _liger_model_types
 
 failures = []
 for model_type in sorted({**MODEL_TYPE_TO_APPLY_LIGER_FN, **_TOOLKIT_LIGER_APPLIERS}):
+    fallback = _liger_model_types(CONFIG_MAPPING[model_type]())[1] if model_type in CONFIG_MAPPING else None
     try:
-        if _apply_liger_for_standard_models(model_type, {}) is None:
+        if _apply_liger_for_standard_models(model_type, {}, fallback) is None:
             failures.append(f"{model_type}: resolved an applier but reported nothing applied")
     except Exception as exc:
         failures.append(f"{model_type}: {type(exc).__name__}: {exc}")

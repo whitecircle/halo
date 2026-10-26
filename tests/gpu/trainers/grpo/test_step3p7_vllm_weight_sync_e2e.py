@@ -2,7 +2,7 @@
 """Step-3.7 live vLLM weight sync: the served policy must move, and move TO the trainer's policy.
 
 Step-3.7's live tree is spelled behind transformers' from_pretrained-side conversion while vLLM
-0.26.0's ``step3p5`` loader maps the hub namespace and silently drops every other name — so a sync
+0.32.0's ``step3p5`` loader maps the hub namespace and silently drops every other text-tower name — so a sync
 that ships module-tree names returns ``200 OK`` and changes nothing. The gather-side pin
 (``tests/cpu/grpo/test_weight_sync_hub_namespace.py``) proves the forwarded keys equal the hub
 checkpoint's; only a live server proves the engine consumes them. This drives the production sync
@@ -20,7 +20,7 @@ on exactly that step. The agreement tolerance is the bf16 kernel gap between the
 perturbation moves the probe by an order of magnitude more.
 
 The served checkpoint is a random-init Step-3.7 in the HUB repo layout (vendor ``config.json`` and
-config class, hub-namespace safetensors, the real tokenizer) sized to what vLLM 0.26.0 accepts: its
+config class, hub-namespace safetensors, the real tokenizer) sized to what vLLM 0.32.0 accepts: its
 fused-MoE clamp supports ``swiglu_limits`` of exactly 7, the vision tower keeps the hub's 728/14
 geometry (vLLM's image processor is fixed to it), and the vocabulary is the real tokenizer's.
 
@@ -29,7 +29,7 @@ Prerequisites (the server must own a GPU the trainer does not):
     # all GPUs visible, masked by CUDA_VISIBLE_DEVICES: NCCL P2P to the trainer's GPU needs the peer
     # device present in the server container (``--gpus device=7`` fails init with 'unhandled cuda error')
     docker run -d --gpus all -e CUDA_VISIBLE_DEVICES=7 --network host --ipc host -v $DIR:$DIR \\
-        -e NCCL_IB_DISABLE=1 -e NCCL_P2P_LEVEL=NVL vllm-server:0.26.0 $DIR --port 8000 \\
+        -e NCCL_IB_DISABLE=1 -e NCCL_P2P_LEVEL=NVL vllm-server:0.32.0 $DIR --port 8000 \\
         --trust-remote-code --moe-backend triton --weight-transfer-config '{"backend": "nccl"}' \\
         --return-tokens-as-token-ids --max-model-len 1024 --gpu-memory-utilization 0.2 \\
         --max-logprobs 64 --enforce-eager
@@ -84,7 +84,8 @@ MOVE_MIN = 0.3
 NOISE_STD = 0.05
 
 LAYER_TYPES = ["full_attention", "sliding_attention", "full_attention", "sliding_attention"]
-# The vendor spelling vLLM 0.26.0's ``Step3p5Config`` reads (transformers 5.16 loads it natively too).
+# The vendor spelling vLLM 0.32.0 reads through the repo's own config class (transformers 5.20 loads it
+# natively too).
 SERVED_CONFIG = {
     "architectures": ["Step3p7ForConditionalGeneration"],
     "auto_map": {"AutoConfig": "configuration_step3p7.Step3p7Config"},
@@ -170,7 +171,7 @@ def write_checkpoint(out: Path) -> None:
     torch.manual_seed(SEED)
     model = Step3p7ForConditionalGeneration(Step3p7Config.from_pretrained(out)).to(torch.bfloat16)
     # save_pretrained writes the weights in the hub namespace but the config in transformers' own
-    # spelling, which the vLLM image's transformers 5.14 cannot read — keep only the weight files.
+    # spelling, which vLLM 0.32.0's config parsing cannot read — keep only the weight files.
     with tempfile.TemporaryDirectory(dir=out.parent) as tmp:
         model.save_pretrained(tmp)
         for part in Path(tmp).glob("*.safetensors*"):

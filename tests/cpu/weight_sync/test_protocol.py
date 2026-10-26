@@ -261,16 +261,14 @@ def test_producer_failure_surfaces_the_server_rejection(server, client, monkeypa
     assert server.paused is False
 
 
-def test_update_weights_declares_the_packed_layout(server, client, monkeypatch):
-    """The chunk-boundary parameters must be on the wire, not implied by matching defaults."""
+def test_an_update_declares_only_names_dtypes_and_shapes(server, client, monkeypatch):
+    """The engine refuses an update carrying any other field; the packed geometry rides the init."""
     monkeypatch.setattr(wsc, "packed_broadcast_producer", _no_op_producer)
 
     push(client, [("w", torch.zeros(4, dtype=torch.bfloat16))])
 
     update_info = server.bodies["/update_weights"]["update_info"]
-    assert update_info["packed_buffer_size_bytes"] == PACKED_BUFFER_BYTES
-    assert update_info["packed_num_buffers"] == PACKED_NUM_BUFFERS
-    assert update_info["names"] == ["w"] and update_info["shapes"] == [[4]]
+    assert update_info == {"names": ["w"], "dtype_names": ["bfloat16"], "shapes": [[4]]}
 
 
 def test_a_mid_stream_abort_leaves_the_engine_paused_and_refuses_the_next_sync(server, client, monkeypatch):
@@ -711,6 +709,48 @@ def test_init_communicator_surfaces_a_server_side_init_failure(server, monkeypat
     assert "500" in error, f"the server's own failure was not surfaced: {error}"
     assert "VLLM_GROUP_HOST" not in error, f"a server-side 500 was misreported as a topology error: {error}"
     assert closed, "the store formed for a failed init was left holding its listener"
+
+
+def test_init_communicator_refuses_an_engine_older_than_its_wire(server, monkeypatch):
+    """An engine before the init-carried packed geometry would refuse the first update with a bare 500
+    mid-sync; the client names the version before it pauses or joins anything."""
+    monkeypatch.setattr(wsc, "HTTP_PROBE_TIMEOUT_S", 5)
+    server.version = "0.26.0"
+    handle = VLLMWeightSyncClient(base_url=server.url, connection_timeout=5.0)
+
+    with pytest.raises(RuntimeError, match=r"runs vLLM '0\.26\.0'"):
+        handle.init_communicator(device="cpu")
+    assert "POST /init_weight_transfer_engine" not in server.requests
+
+
+def test_init_communicator_refuses_a_server_that_reports_no_version(server, monkeypatch):
+    monkeypatch.setattr(wsc, "HTTP_PROBE_TIMEOUT_S", 5)
+    server.version = None
+    handle = VLLMWeightSyncClient(base_url=server.url, connection_timeout=5.0)
+
+    with pytest.raises(RuntimeError, match="runs vLLM None"):
+        handle.init_communicator(device="cpu")
+    assert "POST /init_weight_transfer_engine" not in server.requests
+
+
+def test_the_packed_geometry_rides_the_init_request(server, monkeypatch):
+    """The engine reads the packed geometry once, from the init; an update carrying it is refused, and
+    an init without it leaves the engine receiving tensor by tensor while the trainer sends packed."""
+    monkeypatch.setattr(wsc, "HTTP_PROBE_TIMEOUT_S", 5)
+    monkeypatch.setattr(client_base, "GROUP_FORMATION_TIMEOUT_S", 20)
+    monkeypatch.setattr(wsc, "PyNcclCommunicator", _StoreHoldingCommunicator)
+    server.world_size = 0
+    handle = VLLMWeightSyncClient(base_url=server.url, connection_timeout=5.0)
+    handle.init_communicator(device="cpu")
+    try:
+        init = server.bodies["/init_weight_transfer_engine"]["init_info"]
+        assert init["packed"] is True
+        assert (init["packed_buffer_size_bytes"], init["packed_num_buffers"]) == (
+            PACKED_BUFFER_BYTES,
+            PACKED_NUM_BUFFERS,
+        )
+    finally:
+        handle.close_communicator()
 
 
 def test_zero_dim_param_is_rejected_before_the_server_is_paused(server, client, monkeypatch):

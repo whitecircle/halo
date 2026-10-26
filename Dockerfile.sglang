@@ -2,16 +2,17 @@
 # userspace (docker/efa/install_efa_userspace.sh) and the source patches below, which together let
 # Environmental GRPO broadcast weights into the live engine over a shared NCCL group and score
 # prompt log-probs correctly.
-# transformers stays at sglang's own pin (transformers==5.12.1); sglang 0.5.17 is the last release on torch 2.11.
-# Build: make build-sglang — prebuilt: public.ecr.aws/whitecircle/halo:sglang-0.5.17.
+# transformers stays at sglang's own pin (transformers==5.19.0), and torch at its 2.14.1, which pairs with the
+# trainer's 2.11 over one TCPStore and one NCCL runtime.
+# Build: make build-sglang — prebuilt: public.ecr.aws/whitecircle/halo:sglang-0.5.22.
 
-ARG SGLANG_VERSION=0.5.17
+ARG SGLANG_VERSION=0.5.22
 FROM lmsysorg/sglang:v${SGLANG_VERSION}
 
 # Static label metadata; the per-build version, date and revision labels are set last.
 LABEL maintainer="White Circle <hello@whitecircle.com>"
 LABEL org.opencontainers.image.title="Halo SGLang Server"
-LABEL org.opencontainers.image.description="SGLang 0.5.17 with NCCL matched to the Halo training image (RL weight sync over /update_weights_from_distributed)"
+LABEL org.opencontainers.image.description="SGLang 0.5.22 with NCCL matched to the Halo training image (RL weight sync over /update_weights_from_distributed)"
 LABEL org.opencontainers.image.vendor="White Circle"
 LABEL org.opencontainers.image.source="https://github.com/whitecircle/halo"
 LABEL org.opencontainers.image.licenses="LicenseRef-Halo"
@@ -41,8 +42,9 @@ RUN /tmp/install_efa_userspace.sh \
 RUN python3 -c "\
 from sglang.srt.entrypoints.http_server import app; \
 paths = {p for p in (getattr(r, 'path', None) for r in app.routes) if p}; \
-required = {'/init_weights_update_group', '/update_weights_from_distributed', '/server_info', \
-            '/pause_generation', '/continue_generation', '/flush_cache', '/health'}; \
+required = {'/init_weights_update_group', '/update_weights_from_distributed', '/begin_weight_update', \
+            '/end_weight_update', '/server_info', '/pause_generation', '/continue_generation', \
+            '/flush_cache', '/health'}; \
 missing = required - paths; \
 assert not missing, f'sglang lost weight-sync routes: {sorted(missing)}'; \
 print(f'weight-sync routes: OK ({len(required)} present)')"
@@ -61,20 +63,16 @@ print('weight-sync request schemas: OK')"
 
 # The trainer vendors sglang's rendezvous convention (src/weight_sync/transport/c10d_group.py):
 # a group_name-prefixed store joined via _new_process_group_helper, trainer at rank 0. A change
-# upstream would hang the group with no error, so assert it here, against whichever module this
-# release keeps the weight update in.
+# upstream would hang the group with no error, so assert it here.
 RUN python3 -c "\
 import inspect; \
 from sglang.srt.utils.common import init_custom_process_group as f; \
+from sglang.srt.model_executor.model_runner_components.weight_updater import WeightUpdater; \
 src = inspect.getsource(f); \
 assert 'PrefixStore(group_name, store)' in src, 'sglang no longer prefixes the store with group_name'; \
 assert '_new_process_group_helper' in src, 'sglang no longer builds the group via _new_process_group_helper'; \
-import importlib, importlib.util; \
-_wu = 'sglang.srt.model_executor.model_runner_components.weight_updater'; \
-owner = importlib.import_module(_wu).WeightUpdater if importlib.util.find_spec(_wu) else importlib.import_module('sglang.srt.model_executor.model_runner').ModelRunner; \
-upd = inspect.getsource(owner.update_weights_from_distributed); \
-assert 'src=0' in upd, 'sglang no longer broadcasts from rank 0'; \
-assert 'rank_offset + self.tp_rank' in inspect.getsource(owner.init_weights_update_group), \
+assert 'src=0' in inspect.getsource(WeightUpdater.receive_weights_from_distributed), 'sglang no longer broadcasts from rank 0'; \
+assert 'rank_offset + self.tp_rank' in inspect.getsource(WeightUpdater.init_weights_update_group), \
     'sglang changed the rank_offset convention'; \
 print('rendezvous + broadcast convention: OK (trainer is rank 0, store prefixed by group_name)')"
 
@@ -91,10 +89,11 @@ assert 'make_expert_params_mapping_fused' not in qwen3_moe and 'make_expert_para
     'qwen3_moe does not map the per-expert hub tensors'; \
 print('expert loader layouts: OK (gpt_oss fused, qwen3_moe per-expert)')"
 
-# Two loaders cache a derived form of a router parameter and keep serving it after an online update
-# rewrites the parameter, and the prefill result loop hands a skipped request's input log-probs to
-# the requests after it (docker/sglang/patches/patch_sglang.py names each). Its pre-image assertions
-# fail the build on an upstream change, and it stays in the image for `--verify`.
+# The Gemma 4 router caches a derived form of its scale and keeps serving it after an online update
+# rewrites the parameter, the GLM-4 gates must keep reading theirs live, and the prefill result loop
+# hands a skipped request's input log-probs to the requests after it (docker/sglang/patches/
+# patch_sglang.py names each). Its pre- and post-image assertions fail the build on an upstream change,
+# and it stays in the image for `--verify`.
 COPY docker/sglang/patches/patch_sglang.py /opt/halo/patch_sglang.py
 RUN python3 /opt/halo/patch_sglang.py
 

@@ -85,10 +85,10 @@ server:
 ```bash
 cd halo
 export HALO_SCRATCH=/path/to/large/volume   # the volume the training container mounts
-docker pull public.ecr.aws/whitecircle/halo:sglang-0.5.17
-docker pull public.ecr.aws/whitecircle/halo:vllm-0.26.0
-docker tag public.ecr.aws/whitecircle/halo:vllm-0.26.0 vllm-server:0.26.0
-export SGLANG_IMAGE=public.ecr.aws/whitecircle/halo:sglang-0.5.17
+docker pull public.ecr.aws/whitecircle/halo:sglang-0.5.22
+docker pull public.ecr.aws/whitecircle/halo:vllm-0.32.0
+docker tag public.ecr.aws/whitecircle/halo:vllm-0.32.0 vllm-server:0.32.0
+export SGLANG_IMAGE=public.ecr.aws/whitecircle/halo:sglang-0.5.22
 export SGLANG_MODEL_DIR="$HALO_SCRATCH"   # SGLang mounts it read-only at the same path
 export HF_HOME="$HALO_SCRATCH/hf"         # both servers share the training container's hub cache
 ```
@@ -101,8 +101,8 @@ which defaults to its `model_name_or_path`.
 
 The compose files already pass the MoE backend that weight sync needs (`--moe-backend triton` and
 `--moe-runner-backend triton`), so leave it alone. A run with `routing_replay: rollout` also needs
-`VLLM_ENABLE_R3=1` or `SGLANG_ENABLE_R3=1` set where you run compose. Plain serving works on any SGLang
-0.5.17 image, but weight sync needs this repo's server images. Parsers, ports and the other variables
+`VLLM_ENABLE_R3=1` or `SGLANG_ENABLE_R3=1` set where you run compose. Plain serving works on the upstream
+SGLang 0.5.22 image, but weight sync needs this repo's server images. Parsers, ports and the other variables
 are in [Rollout Servers](../rollout-servers.md).
 
 ## Before a GRPO run

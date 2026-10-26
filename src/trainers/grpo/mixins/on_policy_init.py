@@ -1,13 +1,15 @@
 """Construction spine shared by the on-policy GRPO trainers (online RLVR and environmental).
 
-Both constructors open the same way (resolve the config, disable TRL's Liger GRPO loss, extract the
-distributed kwargs) and close the same way (parallel modes, reference and head-path gates, weight-sync
-wiring, then dropout off); the closing order is load-bearing, so it lives here.
+Both constructors open the same way (resolve the config, turn off TRL's Liger flag, extract the distributed
+kwargs, refuse the TRL options they cannot honor) and close the same way (parallel modes, reference and head-path
+gates, weight-sync wiring, then dropout off); the closing order is load-bearing, so it lives here.
 """
 
 import contextlib
 from collections.abc import Iterator
 
+import datasets
+import torch
 import trl.trainer.grpo_trainer as trl_grpo_trainer
 from trl import GRPOTrainer
 
@@ -24,20 +26,21 @@ from src.trainers.mixins.validation import ctor_config, ctor_positions, ctor_val
 GRPO_CTOR_POSITIONS = ctor_positions(GRPOTrainer, "model", "args")
 # The slot of the adapter config, which with the model decides whether TRL holds a KL reference.
 _PEFT_CONFIG_CTOR_POSITIONS = ctor_positions(GRPOTrainer, "peft_config")
+_DATASET_CTOR_POSITIONS = ctor_positions(GRPOTrainer, "train_dataset", "eval_dataset")
 
 
 def disable_trl_liger_grpo_loss(training_args) -> None:
     """Keep TRL's ``use_liger_kernel`` off for the on-policy GRPO trainers.
 
-    On GRPO the flag swaps the loss for ``LigerFusedLinearGRPOLoss``, which breaks the global
-    ``num_items_in_batch`` normalizer, bypasses chunked-logprobs OOM protection, and drops the
-    entropy path. Halo's toolkit default sets it True, so force it off before TRL caches it.
+    On GRPO the flag sends the log-probs through TRL's own chunked LM head, which reads the backbone
+    directly and so skips the family's head transform and the toolkit's chunked sweep. Halo's toolkit
+    default sets it True, so force it off before TRL caches it.
     """
     disable_trl_liger(
         training_args,
-        "Disabling TRL's use_liger_kernel for GRPO: it swaps the loss for the fused Liger GRPO "
-        "loss (breaks global token normalization and chunked logprobs). Model-level Liger "
-        "kernels are still applied by load_distributed_model.",
+        "Disabling TRL's use_liger_kernel for GRPO: it sends the log-probs through TRL's chunked LM "
+        "head, which skips the family's head transform. Model-level Liger kernels are still applied "
+        "by load_distributed_model.",
     )
 
 
@@ -59,13 +62,15 @@ class OnPolicyGRPOInitMixin:
     def _begin_on_policy_init(self, args: tuple, kwargs: dict) -> tuple[object, dict]:
         """Resolve the training config and extract the distributed kwargs; ``(config, kwargs)``.
 
-        The config is resolved here, positionally or by keyword, because TRL's Liger GRPO loss has to
+        The config is resolved here, positionally or by keyword, because TRL's Liger flag has to
         be switched off on it before ``_init_distributed_config`` runs; the positionals are forwarded
         so that a positional model reaches the mixin's MoE gates too. ``save_completions`` is taken
         here for :class:`DecoupledCompletionsLogMixin` and ``ref_model`` for
         :meth:`_supplying_kl_reference`, since TRL's ctor would refuse either. A ``ref_model`` the run would
         never read is refused here, ahead of TRL's ctor, which on online GRPO opens the rollout client; the
-        hand-off re-checks it against what TRL actually asks for.
+        hand-off re-checks it against what TRL actually asks for. So are the TRL options the trainer cannot
+        honor (:meth:`_refuse_unhonored_trl_options`), which read ``_use_chunked_grpo_logprobs``: each
+        constructor sets it first.
         """
         self._save_completions = kwargs.pop("save_completions", True)
         self._supplied_ref_model = kwargs.pop("ref_model", None)
@@ -81,9 +86,43 @@ class OnPolicyGRPOInitMixin:
         ):
             raise _unread_reference(training_args.beta)
         disable_trl_liger_grpo_loss(training_args)
-        return training_args, self._init_distributed_config(
+        kwargs = self._init_distributed_config(
             kwargs, training_args=training_args, ctor_args=args, ctor_positions=GRPO_CTOR_POSITIONS
         )
+        if training_args is not None:
+            self._refuse_unhonored_trl_options(training_args, args, kwargs)
+        return training_args, kwargs
+
+    def _refuse_unhonored_trl_options(self, training_args, args: tuple, kwargs: dict) -> None:
+        """Refuse the TRL GRPO options this trainer cannot honor.
+
+        ``use_adaptive_entropy`` keeps its coefficient in a sidecar TRL restores only through the base
+        optimizer load, which a sharded resume replaces. ``entropy_coef`` trains through the entropy's
+        gradient, which the chunked sweep detaches. The DP-sharded loader's prompt-group sampler needs
+        a dataset with a length, which an ``IterableDataset`` lacks.
+        """
+        if training_args.use_adaptive_entropy:
+            raise ValueError(
+                "use_adaptive_entropy is not supported: a sharded resume does not restore TRL's adaptive "
+                "entropy coefficient. Set a fixed entropy_coef instead."
+            )
+        if training_args.entropy_coef != 0.0 and self._use_chunked_grpo_logprobs:
+            raise ValueError(
+                f"entropy_coef={training_args.entropy_coef} trains nothing with use_chunked_grpo_logprobs: the "
+                "chunked sweep returns a detached entropy. Set entropy_coef: 0.0 or turn the chunked sweep off."
+            )
+        if not self._needs_custom_dataloader():
+            return
+        for name in ("train_dataset", "eval_dataset"):
+            dataset = ctor_value(args, kwargs, name, _DATASET_CTOR_POSITIONS)
+            splits = dataset.values() if isinstance(dataset, dict) else [dataset]
+            if any(
+                isinstance(split, (datasets.IterableDataset, torch.utils.data.IterableDataset)) for split in splits
+            ):
+                raise ValueError(
+                    f"{name} is an IterableDataset, which the DP-sharded loader this run uses cannot group "
+                    "into prompt groups (its sampler needs a length). Load it as a map-style Dataset."
+                )
 
     @contextlib.contextmanager
     def _supplying_kl_reference(self) -> Iterator[None]:

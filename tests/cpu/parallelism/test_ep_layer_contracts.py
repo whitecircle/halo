@@ -78,9 +78,12 @@ class _GCSequential(nn.Sequential):
     scoped wrapper its dispatch replay hangs off.
     """
 
-    def gradient_checkpointing_enable(self, gradient_checkpointing_kwargs=None, every_n_layers: int = 1):
+    def gradient_checkpointing_enable(
+        self, gradient_checkpointing_kwargs=None, every_n_layers: int = 1, offload: bool = False
+    ):
         self.gc_kwargs = gradient_checkpointing_kwargs
         self.every_n_layers = every_n_layers
+        self.offload = offload
         self._gradient_checkpointing_func = checkpoint
 
 
@@ -145,25 +148,32 @@ def test_gc_under_pp_is_non_reentrant():
     assert trainer.args.gradient_checkpointing_kwargs["use_reentrant"] is False
 
 
-def test_every_n_layers_is_lifted_out_of_the_checkpoint_kwargs():
-    """``every_n_layers`` is ``gradient_checkpointing_enable``'s own keyword (which decoder layers
-    checkpoint); left inside the kwargs dict it reaches ``torch.utils.checkpoint``. The EP enable
-    lifts it, and so does the re-enable seam TRL drives with the raw args dict after generation."""
-    trainer = _Trainer(_EPStub(), gradient_checkpointing=True, gradient_checkpointing_kwargs={"every_n_layers": 2})
+def test_enable_keywords_are_lifted_out_of_the_checkpoint_kwargs():
+    """``every_n_layers`` and ``offload`` are ``gradient_checkpointing_enable``'s own keywords (which
+    decoder layers checkpoint, where their saved activations live); left inside the kwargs dict they
+    reach ``torch.utils.checkpoint``. The EP enable lifts them, and so does the re-enable seam TRL
+    drives with the raw args dict after generation."""
+    trainer = _Trainer(
+        _EPStub(),
+        gradient_checkpointing=True,
+        gradient_checkpointing_kwargs={"every_n_layers": 2, "offload": True},
+    )
     trainer._setup_ep_gradient_checkpointing()
     model = trainer.model
-    assert (model.gc_kwargs, model.every_n_layers) == ({"use_reentrant": True}, 2)
-    assert trainer.args.gradient_checkpointing_kwargs == {"every_n_layers": 2, "use_reentrant": True}
+    assert (model.gc_kwargs, model.every_n_layers, model.offload) == ({"use_reentrant": True}, 2, True)
+    assert trainer.args.gradient_checkpointing_kwargs == {"every_n_layers": 2, "offload": True, "use_reentrant": True}
 
-    model.every_n_layers = None
+    model.every_n_layers, model.offload = None, None
     model.gradient_checkpointing_enable(trainer.args.gradient_checkpointing_kwargs)  # TRL's raw re-enable
-    assert (model.gc_kwargs, model.every_n_layers) == ({"use_reentrant": True}, 2)
+    assert (model.gc_kwargs, model.every_n_layers, model.offload) == ({"use_reentrant": True}, 2, True)
 
 
 def test_gc_enable_requires_a_real_checkpoint_function():
     # A no-op gradient_checkpointing_enable leaves EP issuing a SECOND dispatch inside backward.
     class _Silent(nn.Sequential):
-        def gradient_checkpointing_enable(self, gradient_checkpointing_kwargs=None, every_n_layers: int = 1):
+        def gradient_checkpointing_enable(
+            self, gradient_checkpointing_kwargs=None, every_n_layers: int = 1, offload: bool = False
+        ):
             pass
 
     with pytest.raises(RuntimeError, match="installed no checkpoint function"):

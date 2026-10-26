@@ -10,16 +10,20 @@ config — deciding from the raw user dict either flips the flag off while the m
     python tests/cpu/model_loading/test_liger_effective_config.py
 """
 
+import inspect
 import logging
 import types
 
 import pytest
 import torch.nn.functional as F
 from accelerate import PartialState
+from liger_kernel.transformers import _apply_liger_kernel_to_instance
 from liger_kernel.transformers.auto_model import MODEL_TYPE_TO_APPLY_LIGER_FN
 from transformers.loss import loss_utils
+from transformers.models.auto.configuration_auto import CONFIG_MAPPING
 
 from src.model_loading.liger import dispatch
+from src.model_loading.liger.applier import LigerApplier
 from src.model_loading.liger.cross_entropy import _TORCH_CROSS_ENTROPY, liger_cross_entropy
 from src.model_loading.liger.dispatch import finalize_liger_after_direct_load
 from src.model_loading.liger.family_specs import LIGER_FAMILY_SPECS
@@ -114,6 +118,27 @@ def test_flce_is_never_applied_through_a_multimodal_wrappers_text_tower(monkeypa
         types.SimpleNamespace(model_type="lfm2", text_config=None), {"fused_linear_cross_entropy": True}
     )
     assert applied["fused_linear_cross_entropy"] is True and applied["cross_entropy"] is False
+
+
+def test_a_wrapper_upstream_registers_still_resolves_to_its_towers_toolkit_applier(monkeypatch):
+    """The toolkit owns a family through its multimodal wrapper, whatever liger-kernel registers for it.
+
+    liger-kernel registers `gemma4`, and its applier runs upstream's Gemma 4 norm and GeGLU swaps over the
+    classes the `gemma4_text` spec takes over. The wrapper must keep resolving to the tower's toolkit
+    applier; upstream's wrapper entry is never called.
+    """
+    upstream_wrapper = _RecordingApplier()
+    tower = _RecordingApplier()
+    monkeypatch.setitem(MODEL_TYPE_TO_APPLY_LIGER_FN, "gemma4", upstream_wrapper)
+    monkeypatch.setitem(dispatch._TOOLKIT_LIGER_APPLIERS, "gemma4_text", tower)
+    applied = dispatch.apply_liger_kernel(_wrapper_config("gemma4", "gemma4_text"), None)
+    assert tower.calls == [applied]
+    assert upstream_wrapper.calls == [], "upstream's wrapper applier ran over the toolkit-owned tower"
+
+    # Anti-vacuity: a wrapper whose tower no toolkit spec claims still resolves upstream's wrapper entry.
+    monkeypatch.setitem(MODEL_TYPE_TO_APPLY_LIGER_FN, "wrapper_of_an_upstream_tower", upstream_wrapper)
+    dispatch.apply_liger_kernel(_wrapper_config("wrapper_of_an_upstream_tower", "llama"), {"cross_entropy": False})
+    assert len(upstream_wrapper.calls) == 1
 
 
 def test_an_upstream_applier_gets_cross_entropy_off_and_the_scoped_patch(monkeypatch):
@@ -398,8 +423,9 @@ def test_every_toolkit_applier_is_registered_in_the_toolkit_registry():
     """One registry, not two: a family self-registering into liger_kernel's own dict would resolve on
     the upstream branch, where ``_PER_MODEL_DEFAULTS`` never looks.
 
-    A DELEGATING spec is the one shape that must appear in both — it exists to run upstream's applier
-    — and it must resolve on the toolkit branch, which is what puts the added role on top.
+    A DELEGATING spec must appear in both — it exists to run upstream's applier — and resolve on the
+    toolkit branch, which is what puts the added role on top. A family the toolkit patches alone may be
+    registered upstream too (DeepSeek-V4 is); the toolkit applier still wins it.
     """
     declared = {model_type for spec in LIGER_FAMILY_SPECS for model_type in spec.model_types}
     delegating = {
@@ -410,8 +436,11 @@ def test_every_toolkit_applier_is_registered_in_the_toolkit_registry():
         f"{sorted(delegating - set(MODEL_TYPE_TO_APPLY_LIGER_FN))} delegate to an upstream applier that "
         f"liger_kernel no longer registers"
     )
-    leaked = (declared - delegating) & set(MODEL_TYPE_TO_APPLY_LIGER_FN)
-    assert not leaked, f"toolkit families also registered into liger_kernel's registry: {sorted(leaked)}"
+    self_registered = sorted(t for t, fn in MODEL_TYPE_TO_APPLY_LIGER_FN.items() if isinstance(fn, LigerApplier))
+    assert not self_registered, f"toolkit appliers registered into liger_kernel's registry: {self_registered}"
+    toolkit = dispatch._TOOLKIT_LIGER_APPLIERS
+    shadowed = sorted(t for t in declared if dispatch.resolve_liger_applier(t) is not toolkit[t])
+    assert not shadowed, f"toolkit families resolving to liger_kernel's own applier: {shadowed}"
 
 
 def test_no_applier_warns_and_records_nothing(monkeypatch, caplog):
@@ -506,13 +535,53 @@ def test_finalize_turns_the_withheld_roles_off_for_trls_reapplication():
     # Through a wrapper's text config too: Gemma 4's dense GeGLU and its norms are the toolkit's.
     wrapper = _wrapper_config("gemma4", "gemma4_text")
     geglu_applied = {"rope": False, "cross_entropy": False, "fused_linear_cross_entropy": True, "geglu": True}
-    assert dispatch.trl_reapplication_config(wrapper, geglu_applied) == {
-        **geglu_applied,
-        "geglu": False,
-        "rms_norm": False,
-    }
+    reapplied = dispatch.trl_reapplication_config(wrapper, geglu_applied)
+    assert reapplied["geglu"] is False and reapplied["rms_norm"] is False
+    assert {flag for flag, on in reapplied.items() if on} == {"fused_linear_cross_entropy"}
     # A family that withholds nothing re-applies exactly what was applied.
     assert dispatch.trl_reapplication_config(_zaya_like_config(), applied) == applied
+
+
+def test_reapplication_runs_nothing_upstream_registers_for_a_family_the_toolkit_patches_alone(monkeypatch):
+    """HF re-applies the applier liger-kernel registers for the model's own type, defaults filling every
+    flag the config omits. A family the toolkit patches alone can have such an entry — DeepSeek-V4 does,
+    whose ``rms_norm=True`` default swaps the norms the spec leaves eager and whose fused head replaces the
+    toolkit's — and that applier must then receive every flag off.
+    """
+    received = []
+
+    def upstream(rope=False, fused_linear_cross_entropy=True, rms_norm=True, swiglu=True, model=None):
+        received.append({"rope": rope, "flce": fused_linear_cross_entropy, "rms_norm": rms_norm, "swiglu": swiglu})
+
+    monkeypatch.setitem(MODEL_TYPE_TO_APPLY_LIGER_FN, "zaya", upstream)
+    applied = {"rope": False, "cross_entropy": False, "fused_linear_cross_entropy": True, "rms_norm": True}
+    reapplied = dispatch.trl_reapplication_config(_zaya_like_config(), applied)
+    # The dispatch HF Trainer's `apply_liger_kernel` runs at train().
+    _apply_liger_kernel_to_instance(model=types.SimpleNamespace(config=_zaya_like_config()), **reapplied)
+    assert received == [{"rope": False, "flce": False, "rms_norm": False, "swiglu": False}]
+
+
+def test_reapplication_hands_no_installed_upstream_applier_a_role_the_toolkit_owns():
+    """Swept over the installed liger-kernel's registry, each type resolved as its checkpoint would be."""
+    leaks, owned_types = [], []
+    for model_type, reapplier in MODEL_TYPE_TO_APPLY_LIGER_FN.items():
+        config = (
+            CONFIG_MAPPING[model_type]()
+            if model_type in CONFIG_MAPPING
+            else types.SimpleNamespace(model_type=model_type, text_config=None)
+        )
+        toolkit = dispatch._toolkit_applier(*dispatch._resolve_applier(*dispatch._liger_model_types(config)))
+        if toolkit is None:
+            continue
+        owned_types.append(model_type)
+        reapplied = dispatch.trl_reapplication_config(
+            config, {flag: True for flag in toolkit.defaults if flag != "model"}
+        )
+        for flag, parameter in inspect.signature(reapplier).parameters.items():
+            if flag != "model" and reapplied.get(flag, parameter.default) and not toolkit.hands_upstream(flag):
+                leaks.append(f"{model_type}: {flag}")
+    assert "gpt_oss" in owned_types, "the sweep reached no toolkit-owned type"
+    assert not leaks, f"HF's re-application would run these toolkit-owned roles through upstream: {leaks}"
 
 
 def test_finalize_disables_flag_when_flce_forced_off():

@@ -24,9 +24,3 @@ class EPLagunaMoELayer(EPGlm4MoELayer):
     # ``LagunaSparseMoeBlock`` declares only ``routed_scaling_factor`` (which stays required): no
     # group limiting and, per the class docstring, no ``norm_topk_prob`` in the chain.
     _OPTIONAL_ROUTING_KNOBS = ("n_group", "topk_group", "norm_topk_prob")
-
-    # vLLM 0.26.0's Laguna loader registers this tensor under an internal name and drops the exported
-    # hub key, so a copy served there routes on the pretrained bias while a transformers reload
-    # routes as trained. Declared on the class so the balancing enable path surfaces it as a run
-    # warning; agent-docs/models/laguna.md has the detail.
-    _SERVED_BALANCING_BIAS_DROPPED_BY = "vLLM 0.26.0"

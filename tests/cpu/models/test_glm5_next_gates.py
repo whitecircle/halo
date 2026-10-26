@@ -71,7 +71,7 @@ TINY_GLM5_NEXT_TEXT_CONFIG = {
     "index_kpool": 4,
     "linear_head_dim": 8,
     "linear_num_heads": 4,
-    "layer_types": ["linear_attention", "deepseek_sparse_attention"],
+    "layer_types": ["linear_attention", "indexed_attention"],
     "mlp_layer_types": ["dense", "sparse"],
     "max_position_embeddings": 128,
     "pad_token_id": 0,

@@ -190,7 +190,7 @@ def test_chunked_layers_are_costed_at_their_chunk():
 
 def test_sparse_layers_cost_top_k_keys_plus_a_pooled_indexer():
     config = _Config(
-        ["deepseek_sparse_attention"] * DEPTH,
+        ["indexed_attention"] * DEPTH,
         index_topk=2048,
         index_n_heads=32,
         index_head_dim=128,

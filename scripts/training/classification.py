@@ -20,11 +20,11 @@ import torch.distributed as dist
 from accelerate.logging import get_logger
 from datasets import DatasetDict
 from transformers import AutoModelForSequenceClassification
-from trl import ModelConfig
 
 from src.config_validation import reject_unsupported_args
 from src.configs.classification import ClassificationConfig, ClassificationScriptArguments
 from src.configs.parallelism_arguments import ParallelismArguments
+from src.configs.script_arguments import ModelArguments
 from src.data.pipeline.conversation import chat_template_kwargs, maybe_parse_json, reject_image_content
 from src.data.pipeline.processing import coordinated_map, resolve_map_num_proc
 from src.data.pipeline.rendered import tokenize_rendered
@@ -221,7 +221,7 @@ def get_label_list(raw_dataset, split="train") -> list[str]:
 
 def main():
     args, classification_config, model_config, dist_args = parse_script_args(
-        ClassificationScriptArguments, ClassificationConfig, ModelConfig, ParallelismArguments
+        ClassificationScriptArguments, ClassificationConfig, ModelArguments, ParallelismArguments
     )
 
     # The score head is pinned to AutoModelForSequenceClassification, so the loader would only warn

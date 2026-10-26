@@ -52,26 +52,31 @@ def _logprob_chunk(chunk_logits: torch.Tensor, chunk_labels: torch.Tensor) -> to
     return logps.gather(-1, chunk_labels.unsqueeze(-1)).squeeze(-1)
 
 
-def selective_logprobs(logits: torch.Tensor, index: torch.Tensor) -> torch.Tensor:
+def selective_logprobs(
+    logits: torch.Tensor, index: torch.Tensor, row_mask: torch.Tensor | None = None
+) -> torch.Tensor:
     """``[B, T]`` log-probs of ``index`` under already-aligned ``[B, T, V]`` logits, in at least fp32.
 
     TRL's ``selective_log_softmax`` contract for one index per position, minus that function's bf16
-    branch, which returns bf16 log-probs. Every chunk is checkpointed, short rows included, so
-    backward holds no fp32 state; rows are taken one at a time, so a non-contiguous view such as
-    ``logits[..., :-1, :]`` is never copied whole.
+    branch, which returns bf16 log-probs: a ``row_mask`` zero yields a zero log-prob there. Every
+    chunk is checkpointed, short rows included, so backward holds no fp32 state; rows are taken one at
+    a time, so a non-contiguous view such as ``logits[..., :-1, :]`` is never copied whole.
     """
     if logits.dim() != 3 or index.shape != logits.shape[:-1]:
         raise ValueError(
             f"selective_logprobs takes [B, T, V] logits and one index per position ([B, T]), got "
             f"logits {tuple(logits.shape)} and index {tuple(index.shape)}."
         )
+    if row_mask is not None and row_mask.shape != index.shape:
+        raise ValueError(f"row_mask {tuple(row_mask.shape)} must match index {tuple(index.shape)}.")
     chunk_rows = logit_chunk_rows(logits.size(-1))
-    return torch.stack(
+    logps = torch.stack(
         [
             torch.cat(list(checkpointed_chunks(_logprob_chunk, row_logits, row_index, chunk_rows)))
             for row_logits, row_index in zip(logits, index, strict=True)
         ]
     )
+    return logps if row_mask is None else logps.masked_fill(row_mask == 0, 0.0)
 
 
 def shift_labels_left(labels: torch.Tensor) -> torch.Tensor:

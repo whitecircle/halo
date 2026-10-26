@@ -43,7 +43,7 @@ The trainer sums sequence log-probs in fp32. TRL's own `selective_log_softmax` k
 
 Terms TRL takes from the logits directly keep TRL's precision: the `sft` loss type's cross-entropy, WPO's normalizer, and the `entropy`, `logits/*` and `mean_token_accuracy` metrics. Reference columns the dataset supplies keep the precision they were computed in.
 
-Nearly every run takes the fp32 path. TRL's fused Liger DPO loss runs only when Liger's fused linear cross-entropy was applied at load (the [per-model default](../../optimization/liger-kernels.md#configuration) for Zaya, DeepSeek-V4 and GLM-4.7-Flash, or `fused_linear_cross_entropy: true`), on an unsharded policy against a frozen reference copy. FSDP2, EP and TP switch it off, and TRL refuses it alongside precompute or PEFT.
+Every run takes the fp32 path. The trainer turns TRL's `use_liger_kernel` off at construction: the flag selects TRL's chunked log-prob path, which refuses the router aux loss and skips the family's head transform. Liger kernels applied at load are unaffected.
 
 ## Reference model
 

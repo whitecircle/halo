@@ -5,7 +5,8 @@
 fixtures below are the verbatim upstream code of that pin, so the build's pre-image assertions are
 exercised here without the image. What is pinned:
 
-  * the GLM gate rewrite leaves no fp32 cache and reads the parameter live;
+  * the GLM gate, which upstream now holds in fp32 and reads live, is asserted and never rewritten,
+    and a gate that caches its weight again fails the build;
   * the Gemma 4 router rewrite gives ``scale`` a loader that releases the fold latch;
   * the prefill-loop rewrite steps the log-prob offset over a skipped request before ``continue``;
   * a file without the pre-image, or with it twice, fails the build rather than patching around it;
@@ -20,9 +21,39 @@ from tests.common.repo import load_script_module
 
 patches = load_script_module("docker/sglang/patches/patch_sglang.py")
 
-# sglang 0.5.17 srt/models/glm4_moe_lite.py, class Glm4MoeLiteGate (the glm4_moe.py gate differs
-# only by an ``is_nextn`` argument the rewrite does not touch).
+# sglang 0.5.22 srt/models/glm4_moe_lite.py, class Glm4MoeLiteGate (the glm4_moe.py gate differs
+# only by an ``is_nextn`` argument the check does not read).
 GLM_GATE = """class Glm4MoeLiteGate(nn.Module):
+    def __init__(
+        self,
+        config,
+        prefix: str = "",
+        is_nextn: bool = False,
+    ):
+        super().__init__()
+        self.is_nextn = is_nextn
+        self.weight = nn.Parameter(
+            torch.empty(
+                (config.n_routed_experts, config.hidden_size), dtype=torch.float32
+            )
+        )
+        self.e_score_correction_bias = nn.Parameter(
+            torch.empty((config.n_routed_experts), dtype=torch.float32)
+        )
+
+    def forward(self, hidden_states):
+        logits = F.linear(hidden_states.to(torch.float32), self.weight, None)
+        return logits
+"""
+
+# The gate's weight declared in the default dtype, as sglang 0.5.17 shipped it.
+_GLM_WEIGHT_DEFAULT_DTYPE = """        self.weight = nn.Parameter(
+            torch.empty((config.n_routed_experts, config.hidden_size))
+        )
+"""
+
+# The same gate as sglang 0.5.17 shipped it, caching an fp32 copy of the weight on its first forward.
+GLM_GATE_CACHING = """class Glm4MoeLiteGate(nn.Module):
     def __init__(
         self,
         config,
@@ -48,7 +79,7 @@ GLM_GATE = """class Glm4MoeLiteGate(nn.Module):
         return logits
 """
 
-# sglang 0.5.17 srt/models/gemma4_causal.py, the Gemma4Router lines the rewrite touches.
+# sglang 0.5.22 srt/models/gemma4_causal.py, the Gemma4Router lines the rewrite touches.
 GEMMA4_ROUTER = '''from sglang.srt.model_loader.weight_utils import default_weight_loader
 
 
@@ -70,6 +101,7 @@ class Gemma4Router(nn.Module):
         self._scale_fused = True
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """Returns raw router logits [T, E]."""
         if not self._scale_fused:
             self.fuse_scale()
         x = self.norm(x)
@@ -77,13 +109,9 @@ class Gemma4Router(nn.Module):
         return router_logits
 '''
 
-# sglang 0.5.17 srt/managers/scheduler_components/batch_result_processor.py, the head of the
-# process_batch_result_prefill loop (its hidden-state capture elided).
-PREFILL_LOOP = """            # Check finish conditions
-            logprob_pt = 0
-
-            for i, (req, next_token_id) in enumerate(zip(batch.reqs, next_token_ids)):
-                if (
+# sglang 0.5.22 srt/managers/scheduler_components/batch_result_processor.py, the skip at the head of
+# the process_batch_result_prefill loop body (its hidden-state capture elided).
+PREFILL_LOOP = """                if (
                     req.finished() and req.inflight_middle_chunks <= 0
                 ) or req.is_retracted:
                     # Decode req in a mixed batch, or a retracted req. Keep an
@@ -96,12 +124,8 @@ PREFILL_LOOP = """            # Check finish conditions
 """
 
 
-def test_glm_gate_reads_its_weight_live_after_the_rewrite():
-    patched = patches.patch_glm_gate(GLM_GATE)
-    assert "_weight_fp32" not in patched
-    assert "dtype=torch.float32" in patched.split("e_score_correction_bias")[0], "the gate weight itself is fp32"
-    assert "F.linear(hidden_states.to(torch.float32), self.weight, None)" in patched
-    patches.verify_glm_gate(patched, "glm4_moe_lite.py")
+def test_the_pinned_glm_gate_reads_its_weight_live():
+    patches.verify_glm_gate(GLM_GATE, "glm4_moe_lite.py")
 
 
 def test_gemma4_scale_loader_releases_the_fold_latch():
@@ -123,9 +147,7 @@ def test_the_prefill_skip_steps_over_the_skipped_requests_log_probs():
     patches.verify_prefill_logprob_cursor(patched, "batch_result_processor.py")
 
 
-@pytest.mark.parametrize(
-    "patch", [patches.patch_glm_gate, patches.patch_gemma4_router, patches.patch_prefill_logprob_cursor]
-)
+@pytest.mark.parametrize("patch", [patches.patch_gemma4_router, patches.patch_prefill_logprob_cursor])
 def test_a_missing_pre_image_fails_the_build(patch):
     with pytest.raises(SystemExit, match="upstream changed"):
         patch("class Something(nn.Module):\n    pass\n")
@@ -133,25 +155,20 @@ def test_a_missing_pre_image_fails_the_build(patch):
 
 def test_a_pre_image_seen_twice_fails_the_build():
     with pytest.raises(SystemExit, match="found 2"):
-        patches.patch_glm_gate(GLM_GATE + GLM_GATE)
+        patches.patch_prefill_logprob_cursor(PREFILL_LOOP + PREFILL_LOOP)
 
 
-@pytest.mark.parametrize(
-    ("patch", "upstream"),
-    [(patches.patch_glm_gate, GLM_GATE), (patches.patch_prefill_logprob_cursor, PREFILL_LOOP)],
-)
-def test_an_already_patched_file_is_not_patched_twice(patch, upstream):
+def test_an_already_patched_file_is_not_patched_twice():
     """Also the build's signal that upstream merged a fix this image carries: the pre-image is gone."""
     with pytest.raises(SystemExit, match="upstream changed"):
-        patch(patch(upstream))
+        patches.patch_prefill_logprob_cursor(patches.patch_prefill_logprob_cursor(PREFILL_LOOP))
 
 
-def test_verify_refuses_a_gate_whose_weight_was_left_in_the_default_dtype():
-    """Cache stripped and forward rewritten but the parameter not fp32: ``F.linear`` would mix dtypes."""
-    half_patched = patches._replace_once(GLM_GATE, patches._GLM_CACHE_BEFORE, "", "cache")
-    half_patched = patches._replace_once(half_patched, patches._GLM_FORWARD_BEFORE, patches._GLM_FORWARD_AFTER, "fwd")
+def test_verify_refuses_a_gate_whose_weight_is_in_the_default_dtype():
+    """A gate reading its weight live but not holding it in fp32: ``F.linear`` would mix dtypes."""
+    default_dtype = GLM_GATE.replace(patches._GLM_WEIGHT_AFTER, _GLM_WEIGHT_DEFAULT_DTYPE)
     with pytest.raises(SystemExit, match="hold its weight in fp32"):
-        patches.verify_glm_gate(half_patched, "glm4_moe_lite.py")
+        patches.verify_glm_gate(default_dtype, "glm4_moe_lite.py")
 
 
 def test_a_gemma4_file_without_the_scale_line_fails_the_build():
@@ -161,7 +178,7 @@ def test_a_gemma4_file_without_the_scale_line_fails_the_build():
 
 def test_verify_refuses_the_unpatched_files():
     with pytest.raises(SystemExit, match="still caches"):
-        patches.verify_glm_gate(GLM_GATE, "glm4_moe.py")
+        patches.verify_glm_gate(GLM_GATE_CACHING, "glm4_moe.py")
     with pytest.raises(SystemExit, match="fold latch"):
         patches.verify_gemma4_router(GEMMA4_ROUTER, "gemma4_causal.py")
     with pytest.raises(SystemExit, match="without stepping over"):

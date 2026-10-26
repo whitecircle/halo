@@ -99,7 +99,7 @@ RANKS_PER_NODE = 2
 PER_NODE_FAMILIES = ("qwen3", "inkling_mm_model")
 
 # The PP families whose load renames tensors, and controls that rename none (Inkling's text tower keeps
-# ``embed_norm`` beside the embedding, which only stage 0 may write). Laguna's renames all sit in its EP
+# ``embed_norm`` inside the embedding, which only stage 0 may write). Laguna's renames all sit in its EP
 # layer, whose gather already writes them; its attention pattern repeats every four layers, so it is
 # doubled to split in two on a period boundary.
 PP_FAMILIES = {**TINY_DENSE_FAMILIES, **TINY_MOE_FAMILIES, **TINY_MOE_VLM_FAMILIES}

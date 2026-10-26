@@ -82,9 +82,10 @@ transformers' fused pair.
 
 - **transformers:** load the save with `AutoModelForImageTextToText` and `AutoTokenizer`, or
   `AutoProcessor` for images ([snippet](README.md#smoke-test-a-checkpoint)).
-- **vLLM 0.26.0:** point it at the save. It reads the fused experts. It also requires tied embeddings,
-  which training keeps unless it trained the output head on its own.
-- **SGLang 0.5.17:** run `halo run unfuse-moe-experts` first. SGLang's Cohere2 loader reads one tensor
+- **vLLM 0.32.0:** point it at the save. It reads the fused experts. It ties the output head to the
+  embeddings, so a save whose training untied the head won't load; training keeps them tied unless it
+  trained the output head on its own.
+- **SGLang 0.5.22:** run `halo run unfuse-moe-experts` first. SGLang's Cohere2 loader reads one tensor
   per expert and skips the fused pair without an error. The rewrite gives the hub's exact layout.
 
 ## Reference

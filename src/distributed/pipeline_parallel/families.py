@@ -31,8 +31,6 @@ class PPFamilySpec:
         head_attrs: the model's task head, probed in order; held by the last stage only.
         tail_module_attrs: further post-layers backbone modules (the hyper-connection collapse
             ``hc_head``), neutralized off the last stage. Exact names; each must exist.
-        input_module_attrs: pre-layers backbone modules applied to the token embedding alone
-            (Inkling's ``embed_norm``), dropped off stage 0 with the embedding. Exact names.
         layer_types_rebase_safe: every per-layer input is selected by the layer's own attributes
             rather than its list position, so stage offsets need not land on a ``layer_types`` period.
         stream_forward: the backbone forward a non-first stage runs; ``None`` = the upstream forward,
@@ -47,7 +45,6 @@ class PPFamilySpec:
     final_norm_attrs: tuple[str, ...] = ("norm", "final_layernorm", "ln_f", "embedding_norm")
     head_attrs: tuple[str, ...] = ("lm_head", "score", "classifier")
     tail_module_attrs: tuple[str, ...] = ()
-    input_module_attrs: tuple[str, ...] = ()
     layer_types_rebase_safe: bool = False
     stream_forward: Callable | None = None
     reject_severed_boundaries: Callable[[nn.Module, list[tuple[int, int]]], None] | None = None
@@ -100,7 +97,7 @@ def deepseek_v4_stream_forward(
     use_cache: bool | None = None,
     **kwargs,
 ) -> MoeModelOutputWithPast:
-    """``DeepseekV4Model.forward`` (transformers ~5.16) minus the embedding widen."""
+    """``DeepseekV4Model.forward`` (transformers ~5.20) minus the embedding widen."""
     hidden_states, embeds_ref, position_ids, past_key_values = _stream_prologue(
         self, inputs_embeds, position_ids, past_key_values, use_cache
     )
@@ -145,7 +142,7 @@ def glm5_next_stream_forward(
     use_cache: bool | None = None,
     **kwargs,
 ) -> MoeModelOutputWithPast:
-    """``Glm5NextTextModel.forward`` (transformers ~5.16) minus the embedding widen.
+    """``Glm5NextTextModel.forward`` (transformers ~5.20) minus the embedding widen.
 
     Each layer's mask is keyed by its own ``block_type`` (set from its global index at construction)
     rather than ``config.layer_types[i]`` at loop position ``i``, which a sliced list re-bases.
@@ -168,7 +165,7 @@ def glm5_next_stream_forward(
             )
         attention_mask = attention_mask.bool()
         causal_mask_mapping = {
-            "deepseek_sparse_attention": attention_mask,
+            "indexed_attention": attention_mask,
             "linear_attention": attention_mask,
         }
 
@@ -247,11 +244,11 @@ DEEPSEEK_V4_PP = PPFamilySpec(
     reject_severed_boundaries=_reject_stranded_hash_routers,
     validated=True,
 )
-# Refused pending validation, yet declared in full for the stage-aware loader rows that admit it.
+# Refused pending validation; past the refusal, the generic split: its embedding module carries
+# ``embed_norm``, so the norm leaves later stages with it.
 INKLING_PP = PPFamilySpec(
     hf_module_names=("InklingTextModel",),
     refusal="Its stages have loader-only validation: no schedule, end-to-end or save/resume row.",
-    input_module_attrs=("embed_norm",),
 )
 GEMMA4_PP = PPFamilySpec(
     hf_module_names=("Gemma4TextModel",),
@@ -285,7 +282,7 @@ def resolve_pp_spec(backbone: nn.Module) -> PPFamilySpec:
 
 def require_pp_attr(module: nn.Module, candidates: tuple[str, ...], what: str) -> str:
     """Name of the first attribute in ``candidates`` that ``module`` carries; the probe for the final
-    norm, the task head and the family's tail and input modules.
+    norm, the task head and the family's tail modules.
 
     Raises:
         ValueError: none is present. Always fatal — a caller would otherwise skip a step (an

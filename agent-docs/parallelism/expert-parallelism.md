@@ -81,14 +81,14 @@ EP surface. The table is pinned against the specs and classes by
 | Zaya | routing replay | `FAMILY.supports_routing_replay` |
 | Cohere2 MoE | RL weight sync — no end-to-end sync validated against either pinned server | `FAMILY.weight_sync_refusal` |
 | Cohere2 MoE | lazy loading — no lazy load of the Command A+ checkpoint has been checked against `from_pretrained` | `FAMILY.supports_lazy_loading` |
-| GLM-5 Next | RL weight sync — neither pinned rollout engine registers `glm5_next` | `FAMILY.weight_sync_refusal` |
+| GLM-5 Next | RL weight sync — both pinned engines' expert loaders are per-expert only, and no sync into either is validated | `FAMILY.weight_sync_refusal` |
 
 A second class of weight-sync restriction sits outside that table, keyed on the model type **and**
 the engine. Each client declares the model types its pinned release cannot take an online update for
 (`UNSERVABLE_MODEL_TYPES` in `src/weight_sync/clients/`), and `reject_unsyncable_model`
 refuses that model+backend pair at trainer construction, quoting the loader fact.
 
-SGLang 0.5.17's list is the longer of the two: Laguna and Step-3.7 sync on vLLM only. Full roster
+SGLang 0.5.22's list is the longer of the two: Laguna and Step-3.7 sync on vLLM only. Full roster
 with each reason:
 [Rollout Servers](../infrastructure/rollout-servers.md#which-families-each-engine-serves).
 

@@ -18,8 +18,8 @@ import torch
 from accelerate import PartialState
 from transformers import AutoModelForCausalLM, GptOssConfig, LlamaConfig, PreTrainedModel
 from transformers.models.gpt_oss.modeling_gpt_oss import GptOssPreTrainedModel
-from trl import ModelConfig
 
+from src.configs.script_arguments import ModelArguments
 from src.distributed.parallelism_config import ParallelismConfig
 from src.model_loading.liger.dispatch import LIGER_APPLIED_CONFIG_ATTR
 from src.model_loading.parallel.frozen_models import load_reference_model_for_preference
@@ -219,7 +219,7 @@ def _ref_load_stubs(checkpoint: str, attn_implementation: str | None = None):
         added_special_tokens=None,
         tokenizer_backend="hf",
     )
-    model_config = ModelConfig(model_name_or_path=checkpoint, attn_implementation=attn_implementation)
+    model_config = ModelArguments(model_name_or_path=checkpoint, attn_implementation=attn_implementation)
     training_config = types.SimpleNamespace()  # no bf16/fp16 flags → fp32 reference
     # Every ``<special>_token_id`` accompanies its token: ``PreTrainedTokenizerBase.__getattr__``
     # resolves them, so no real tokenizer can carry one without the other, and the setup seam the

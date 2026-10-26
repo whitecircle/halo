@@ -18,11 +18,12 @@ Usage:
 """
 
 from accelerate.logging import get_logger
-from trl import ModelConfig, SFTConfig
+from trl import SFTConfig
 
 from src.callbacks.generate_examples import GenerateExamplesCallback
 from src.config_validation import reject_non_default_args
 from src.configs.parallelism_arguments import ParallelismArguments
+from src.configs.script_arguments import ModelArguments
 from src.configs.sft import SFTScriptArguments
 from src.data.collators.factory import select_data_collator
 from src.data.collators.vlm import PreprocessedVLMDataCollator, VLMDataCollator
@@ -213,7 +214,7 @@ def _prepare_vlm_data(ds, is_preprocessed, args, sft_config, model_config, proce
 
 def main():
     args, sft_config, model_config, dist_args = parse_script_args(
-        SFTScriptArguments, SFTConfig, ModelConfig, ParallelismArguments
+        SFTScriptArguments, SFTConfig, ModelArguments, ParallelismArguments
     )
 
     if dist_args.context_parallel_size > 1 and sft_config.padding_free:

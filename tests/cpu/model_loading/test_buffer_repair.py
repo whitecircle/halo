@@ -56,7 +56,7 @@ def test_recompute_default_theta():
 
 
 def test_per_layer_type_recompute_matches_model_init():
-    """Gemma4 registers ``head_dim`` per-layer (256 sliding / 512 global, transformers 5.16
+    """Gemma4 registers ``head_dim`` per-layer (256 sliding / 512 global, transformers 5.20
     heterogeneity): the recompute must size each layer type's table off the layer-type-resolved
     config view, exactly as the module's own ``__init__`` does. A raw-config read raises
     ``AmbiguousGlobalPerLayerAttributeError`` on the sliding leg, and the proportional (global) leg

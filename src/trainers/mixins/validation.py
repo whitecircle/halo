@@ -35,25 +35,13 @@ logger = get_logger(__name__)
 
 
 def _declared_ctor_parameters(trainer_cls: type) -> list[str]:
-    """The named ctor parameters ``trainer_cls`` really takes, ``self`` dropped.
-
-    TRL wraps some trainers in a ``(*args, **kwargs)`` deprecation shim that forwards to the class
-    holding the real signature (``KTOTrainer`` → ``trl.experimental.kto``). A shim declares no slots,
-    so the positions its callers must fill are those of the next informative signature up the MRO,
-    which is what the shim forwards its ``*args`` to.
-    """
-    for cls in trainer_cls.__mro__:
-        init = cls.__dict__.get("__init__")
-        if init is None:
-            continue
-        named = [
-            name
-            for name, param in inspect.signature(init).parameters.items()
-            if name != "self" and param.kind not in (param.VAR_POSITIONAL, param.VAR_KEYWORD)
-        ]
-        if named:
-            return named
-    return []
+    """The named ctor parameters ``trainer_cls`` takes, ``self`` dropped: none for a ``(*args, **kwargs)``
+    signature, whose slots :func:`ctor_positions` then refuses to guess."""
+    return [
+        name
+        for name, param in inspect.signature(trainer_cls.__init__).parameters.items()
+        if name != "self" and param.kind not in (param.VAR_POSITIONAL, param.VAR_KEYWORD)
+    ]
 
 
 def ctor_positions(trainer_cls: type, *names: str) -> dict[str, int]:

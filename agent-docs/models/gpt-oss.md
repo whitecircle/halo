@@ -99,7 +99,7 @@ For RL the training and serving templates must match, since log-probs are comput
 
 ## Serving for GRPO (vLLM)
 
-Use the toolkit `vllm-server:0.26.0` image, not stock upstream vLLM: on B300 the stock `vllm/vllm-openai` image produces garbage GPT-OSS output with harmony on *or* off. The toolkit image (`Dockerfile.vllm` plus `docker/vllm/patches/patch_vllm_disable_gptoss.sh`) forces vLLM's harmony pipeline off and generates coherently.
+Use the toolkit `vllm-server:0.32.0` image, not stock upstream vLLM: on B300 the stock `vllm/vllm-openai` image produces garbage GPT-OSS output with harmony on *or* off. The toolkit image (`Dockerfile.vllm` plus `docker/vllm/patches/patch_vllm_disable_gptoss.sh`) forces vLLM's harmony pipeline off and generates coherently.
 
 With harmony disabled, five settings are load-bearing.
 
@@ -109,15 +109,13 @@ With harmony disabled, five settings are load-bearing.
 
     Only the **first** call is extracted: without `<|call|>` as an eos the model keeps writing `to=functions.*` text and hallucinates its own tool result. A header with no brace-balanced JSON after it is dropped rather than rescued, so the turn scores as a no-tool turn and the policy is pushed toward valid JSON. Non-tool RLVR needs no tool parser.
 
-- **Reasoning budget.** `--reasoning-parser-plugin /opt/gpt_oss_reasoning_parser.py --reasoning-parser openai_gptoss` re-registers the harmony-only stock parser for the harmony-disabled path. It separates the CoT from the answer, and is what lets a request carry `thinking_token_budget` at all (without it every such request 400s). At the budget it forces the final-channel opener `<|start|>assistant<|channel|>final<|message|>`, which the vLLM recipes name as `rollout_reasoning_end_token` so the loss drops those forced tokens ([Objective](../training-methods/async-grpo/objective.md#importance-sampling-correction)).
+- **Reasoning budget.** `--reasoning-parser-plugin /opt/gpt_oss_reasoning_parser.py --reasoning-parser openai_gptoss` re-registers the harmony-only stock parser for the harmony-disabled path. It separates the CoT from the answer, and is what lets a request carry `thinking_token_budget` at all (without it every such request 400s). When an analysis channel overruns the budget it forces the move into the final channel, `<|end|><|start|>assistant<|channel|>final<|message|>`, which the vLLM recipes name as `rollout_reasoning_end_token` so the loss drops those forced tokens ([Objective](../training-methods/async-grpo/objective.md#importance-sampling-correction)).
 
-    vLLM arms the budget on the `reasoning_start_token_ids` it tokenizes from the parser's `reasoning_start_str`, and ends it by forcing `reasoning_end_str`'s ids. The budget bounds every token generated before the `final` channel, whichever channel opened them (vLLM's counter trails the marker by one, so the cut lands at `budget + 1`).
+    The budget counts only inside an analysis channel: the count starts at an analysis opening (`analysis<|message|>`, the parser's `reasoning_start_str`) and stops at any channel header (`<|channel|>`, its `reasoning_end_str`), so a tool call, a commentary preamble and the final answer are never counted or cut. It is per analysis message, and counts up to the three closing tokens (`<|end|><|start|>assistant`) before the next header, so an analysis ending on its own within three tokens of the budget is turned into final.
 
-    No channel opening can serve as that start marker. The parser treats every channel before `final` as reasoning while the render opens `analysis` or `commentary`, and a bare `<|channel|>` also matches the tool-result turn already in the prompt, cutting before the first sampled token. So the plugin arms on `<|start|>assistant`, the generation prompt's own tail.
+    vLLM forces the parser's `reasoning_end_str` unless told otherwise, and stops forcing at the first natural end marker. Two image patches make the gpt-oss cut whole: `vllm_reasoning_forced_end_patch` forces the parser's `reasoning_forced_end_str` (the six-token move) instead, and `vllm_thinking_budget_completion_patch` finishes that sequence past the `<|channel|>` it contains rather than letting the model pick the channel, where a reopened analysis would count afresh. The forced cut carries the role tokens, so it decodes byte-identical to the ending the model writes itself and the split finds the answer behind it.
 
-    `reasoning_end_str` carries the role tokens — `<|start|>assistant<|channel|>final<|message|>` — so the forced cut is byte-identical to the ending the model writes itself. The channel marker alone would decode to a bare `final` glued to the truncated CoT, indistinguishable from prose `final` whenever the cut lands on whitespace, and the whole answer would stay in `reasoning` with `content` empty.
-
-    `docker/vllm/plugins/verify_gptoss_plugins.py` drives vLLM's own budget state machine over a simulated harmony-disabled stream at build time and pins that the forced marker's decoded text still splits, so a render or marker drift fails the image build rather than a run.
+    `docker/vllm/plugins/verify_gptoss_plugins.py` drives Model Runner V2's own budget kernels (on the Triton interpreter) over simulated harmony-disabled streams at build time: a cut lands right after the budget, a cut model cannot reopen analysis, tool calls, preambles and straight-to-final turns are never cut, and a recycled slot forgets a previous cut. A render or marker drift fails the image build rather than a run.
 
     The parser keeps the commentary tool call and the `final` answer in `content`: vLLM extracts tool calls from `content` only, so a call left in `reasoning` would be dropped and the turn mis-scored as a giveup.
 
@@ -129,7 +127,7 @@ With harmony disabled, five settings are load-bearing.
 
 Sinks stay **on** at serving (the default): served sinks-off, the pretrained model degenerates to repetitive garbage with zero tool calls. The trainer matches by freezing the same sinks, so recompute equals vLLM to ~0 nats (`is_ratio ~1`).
 
-GPT-OSS serves from **SGLang** for async GRPO (`rollout_backend: sglang`): SGLang's own built-in detectors replace both vLLM plugins — the compose default `--tool-call-parser auto` resolves gpt-oss off the chat template, and `SGLANG_REASONING_PARSER=gpt-oss` separates the analysis channel (both registered in 0.5.17); thinking budgets are rejected at config time for this backend, and the server container needs `NCCL_CUMEM_ENABLE=1` (the compose default). Flags and constraints: [Rollout Servers](../infrastructure/rollout-servers.md#sglang).
+GPT-OSS serves from **SGLang** for async GRPO (`rollout_backend: sglang`): SGLang's own built-in detectors replace both vLLM plugins — the compose default `--tool-call-parser auto` resolves gpt-oss off the chat template, and `SGLANG_REASONING_PARSER=gpt-oss` separates the analysis channel (both registered in 0.5.22); thinking budgets are rejected at config time for this backend, and the server container needs `NCCL_CUMEM_ENABLE=1` (the compose default). Flags and constraints: [Rollout Servers](../infrastructure/rollout-servers.md#sglang).
 
 ## Router balancing
 

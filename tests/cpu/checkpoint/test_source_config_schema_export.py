@@ -3,7 +3,7 @@
 
 ``exports_source_config_schema`` (Step-3.7 Flash) marks a family whose serving engines have no
 config class of their own and read it only through the source repo's ``auto_map`` modules. Those
-modules spell the config in the vendor's own keys, which transformers 5.16 ABSORBS at load
+modules spell the config in the vendor's own keys, which transformers 5.20 ABSORBS at load
 (``Step3p7TextConfig.attribute_map`` plus the ``kwargs.pop`` derivations in ``__post_init__``) and
 never re-emits — so a transformers-written config is a schema no pinned engine parses, and nothing
 on the save side can invert it. Every toolkit config write therefore carries the source's own

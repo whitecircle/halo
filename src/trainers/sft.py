@@ -4,6 +4,7 @@ import inspect
 from functools import cached_property
 
 import torch
+from accelerate.logging import get_logger
 from transformers import Trainer
 from trl import SFTTrainer
 from trl.trainer.utils import entropy_from_logits
@@ -12,7 +13,9 @@ from src.distributed.context_parallel.sequence_chunks import cp_chunk_bounds, cp
 from src.kernels.logprobs import LABEL_IGNORE_INDEX
 from src.model_loading.tokenizer_setup import resolve_tokenizer
 from src.trainers.mixins.base import DistributedTrainerMixin
-from src.trainers.mixins.validation import ctor_positions, ctor_value
+from src.trainers.mixins.validation import ctor_config, ctor_positions, ctor_value
+
+logger = get_logger(__name__)
 
 # TRL SFTTrainer positional slots, for ctor params arriving via *args — derived from the installed signature.
 _CTOR_POSITIONS = ctor_positions(SFTTrainer, "model", "args", "data_collator")
@@ -56,6 +59,7 @@ class DistributedSFTTrainer(DistributedTrainerMixin, SFTTrainer):
         return self.is_cp_mode
 
     def __init__(self, *args, **kwargs):
+        self._score_through_the_model_forward(ctor_config(args, kwargs, _CTOR_POSITIONS))
         kwargs = self._init_distributed_config(kwargs, ctor_args=args, ctor_positions=_CTOR_POSITIONS)
         collator = ctor_value(args, kwargs, "data_collator", _CTOR_POSITIONS)
         self._reject_cp_incompatible_collator(collator)
@@ -66,6 +70,22 @@ class DistributedSFTTrainer(DistributedTrainerMixin, SFTTrainer):
 
         # Per-mode CP metric sums awaiting their once-per-log reduce (:meth:`_drain_cp_metrics`).
         self._cp_metric_accum: dict[str, torch.Tensor | None] = {}
+
+    @staticmethod
+    def _score_through_the_model_forward(training_args) -> None:
+        """Replace TRL's ``chunked_nll`` loss type with ``nll``.
+
+        TRL defaults an unset ``loss_type`` to ``chunked_nll`` whenever ``use_liger_kernel`` is off, and that
+        type replaces the model's forward with one that projects ``lm_head`` itself: it skips the family's head
+        transform, the router aux loss the forward folds in, and the logits a subclass's loss reads.
+        """
+        if training_args is None or getattr(training_args, "loss_type", None) != "chunked_nll":
+            return
+        logger.warning(
+            "Setting loss_type to 'nll': TRL's 'chunked_nll' replaces the model's forward with its own lm_head "
+            "projection, which skips the family's head transform and the router aux loss."
+        )
+        training_args.loss_type = "nll"
 
     def compute_loss(self, model, inputs, return_outputs=False, num_items_in_batch=None):
         """Validate that inputs carry training signal; under CP reconcile local-chunk logits with

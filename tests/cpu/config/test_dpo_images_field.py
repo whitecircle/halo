@@ -1,7 +1,7 @@
 #!/usr/bin/env python
 """DPO's ``images_field`` must reach TRL's vision route under the spelling TRL probes for.
 
-``is_vlm_run`` calls a run multimodal as soon as ``images_field`` is set, while TRL 1.6's
+``is_vlm_run`` calls a run multimodal as soon as ``images_field`` is set, while TRL 1.14's
 ``DPOTrainer`` decides its own vision branch by probing the first sample for an ``image``/``images``
 key and lists only those two among its signature columns. A hub dataset storing its images under any
 other name therefore has no way in without the alias: the knob does not parse, and parsed alone the
@@ -119,7 +119,7 @@ def _run_dpo(tmp_path, dataset: DatasetDict, yaml_body: str = "") -> dict:
 
 
 def _trl_sees_a_vision_dataset(dataset: Dataset) -> bool:
-    """TRL 1.6's own probe, verbatim (``DPOTrainer.__init__``: ``_is_vision_dataset``)."""
+    """TRL 1.14's own probe, verbatim (``DPOTrainer.__init__``: ``_is_vision_dataset``)."""
     sample = next(iter(dataset))
     return "image" in sample or "images" in sample
 

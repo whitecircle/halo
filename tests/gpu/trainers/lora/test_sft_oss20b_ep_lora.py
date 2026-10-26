@@ -25,8 +25,9 @@ import traceback
 import torch
 from peft import LoraConfig, get_peft_model
 from transformers import AutoTokenizer
-from trl import ModelConfig, SFTConfig, get_quantization_config
+from trl import SFTConfig, get_quantization_config
 
+from src.configs.script_arguments import ModelArguments
 from src.distributed.parallelism_config import ParallelismConfig
 from src.model_loading.parallel.loader import load_distributed_model
 from src.runtime.collectives import barrier
@@ -198,7 +199,7 @@ def run_qlora_ep(
     trainer = None
 
     try:
-        model_config = ModelConfig(
+        model_config = ModelArguments(
             model_name_or_path=MODEL_NAME,
             use_peft=True,
             load_in_4bit=True,

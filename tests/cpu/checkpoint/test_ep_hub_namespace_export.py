@@ -4,7 +4,7 @@
 transformers reads several checkpoints through renames its module tree does not keep — a SigLIP
 tower's ``vision_model`` level (Command A+, LFM2-VL), a vendor namespace (Inkling's ``model.llm.*``,
 DeepSeek-V4's ``layers.N.attn.*``, GLM-5 Next's hyper-connections, Step-3.7's ``moe.*``), Mistral 3's
-legacy llava prefixes — while the serving engines load hub names (vLLM 0.26.0 raises on Command A+'s
+legacy llava prefixes — while the serving engines load hub names (vLLM 0.32.0 raises on Command A+'s
 flattened tower). The gathered save therefore reverts what the load recorded, as ``save_pretrained``
 does, on every streamed chunk; only the expert banks keep the layout their family's gather emits (fused
 or per expert), which ``from_pretrained`` and both engines read either way.
@@ -282,7 +282,7 @@ def test_sharded_save_refused_exactly_where_the_merge_cannot_reproduce_it(name, 
 @pytest.mark.parametrize("name", list(FAMILIES))
 def test_unfuse_turns_the_gathered_save_into_the_hub_checkpoint(name, tmp_path):
     """Where the hub stores one tensor per expert and the gather writes the fused pair,
-    ``unfuse_moe_experts.py`` is the documented step to the hub layout (SGLang 0.5.17's per-expert
+    ``unfuse_moe_experts.py`` is the documented step to the hub layout (SGLang 0.5.22's per-expert
     loaders drop a fused pair); it must land on the hub checkpoint's keys exactly. A family whose hub
     is fused is refused by the script, and its gathered save must already be the hub checkpoint."""
     loaded = _loaded(name, tmp_path)
@@ -392,7 +392,7 @@ def test_the_sharded_refusal_is_wired_into_the_family_check(tmp_path):
 
 
 def test_command_a_plus_writes_the_tower_vllm_loads(tmp_path):
-    """vLLM 0.26.0's ``Cohere2VisionForConditionalGeneration`` holds SigLIP under a ``vision_model``
+    """vLLM 0.32.0's ``Cohere2VisionForConditionalGeneration`` holds SigLIP under a ``vision_model``
     child and raises on a flattened tower key; its composite has no ``lm_head`` and raises on one too.
     The experts stay the fused pair vLLM reads."""
     saved = _loaded("cohere2_vision", tmp_path).saved

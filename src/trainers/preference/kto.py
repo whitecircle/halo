@@ -35,8 +35,7 @@ from src.trainers.parallelism.trainer_rules import (
 from src.trainers.preference.logprobs import FP32LogprobsMixin
 from src.trainers.preference.precompute import PrecomputeRefLogpsRankConsistentMixin
 
-# TRL KTOTrainer positional slots, for ctor params arriving via *args — derived from the installed signature
-# (its public class is a ``(*args, **kwargs)`` shim, so the derivation reads the class it forwards to).
+# TRL KTOTrainer positional slots, for ctor params arriving via *args — derived from the installed signature.
 _CTOR_POSITIONS = ctor_positions(KTOTrainer, "model", "args", "ref_model")
 
 _REF_LOGPS_COLUMN = "ref_logps"
@@ -65,23 +64,25 @@ class DistributedKTOTrainer(
     _reference_token_settings = "per_device_train_batch_size or dataset_num_proc, which pair the KL completions"
 
     PP_REFUSAL = None
-    # TRL's KTO loss adds the aux term itself and this class does not override it, so aux_loss
-    # balancing reaches the graph here (unlike the other preference objectives).
+    # TRL's KTO loss adds the aux term itself and this class does not override it.
     _consumes_router_aux_loss = True
+    _trl_adds_router_aux_loss = True
 
     def __init__(self, *args, **kwargs):
-        # TRL's fused KTO Liger path NPEs when ref_model is None; must precede _init_distributed_config.
+        # TRL's chunked KTO path refuses the router aux loss this trainer hands it; must precede
+        # _init_distributed_config.
         disable_trl_liger(
             ctor_config(args, kwargs, _CTOR_POSITIONS),
-            "Disabling TRL's use_liger_kernel for KTO: the experimental KTO Liger loss path is "
-            "broken in TRL 1.6. Liger kernels are still applied at the model level by "
+            "Disabling TRL's use_liger_kernel for KTO: TRL's chunked KTO log-prob path refuses the "
+            "router aux loss. Liger kernels are still applied at the model level by "
             "load_distributed_model.",
         )
 
         self._init_reference_resume(kwargs)
         kwargs = self._init_distributed_config(kwargs, ctor_args=args, ctor_positions=_CTOR_POSITIONS)
         self._validate_reference_model(ctor_value(args, kwargs, "ref_model", _CTOR_POSITIONS))
-        super().__init__(*args, **kwargs)
+        with self._trl_reference_hash_skipped():
+            super().__init__(*args, **kwargs)
         # Post-super: TRL builds its own reference inside __init__ when none is passed, the model is not
         # PEFT-wrapped and precompute_ref_log_probs is off.
         self._validate_held_reference_model()
@@ -122,7 +123,7 @@ class DistributedKTOTrainer(
             (
                 "TRL's KTO "
                 "prediction_step hands metrics the RAW logits plane (outputs.logits, paired with "
-                "completion_input_ids), and a pipeline can only serve that by broadcasting "
+                "input_ids), and a pipeline can only serve that by broadcasting "
                 "[rows, max_length, vocab] logits from the last stage to every rank in the chain — "
                 "the eval hop the adapter's predictions_fn exists to shrink, and multiple GB per "
                 "row at a production vocabulary. Any smaller tensor would be a different "
@@ -145,8 +146,8 @@ class DistributedKTOTrainer(
 
         Rows are independent, so the microbatch split is safe at any size; ``ref_logps`` and the
         per-row desirability ``label`` ship as extra targets to stay row-aligned. The collator's
-        ``completion_*`` keys are padded to the fixed shape in the batch transform, so no
-        ``pad_spec`` is needed. ``pin_runner_columns=False`` because KTO's dataset columns feed
+        sequence keys are padded to the fixed shape in the batch transform, so no ``pad_spec`` is
+        needed. ``pin_runner_columns=False`` because KTO's dataset columns feed
         TRL's unpaired-preference collator, which needs TRL's own signature set.
         """
         return PipelineLossAdapter(
@@ -159,15 +160,15 @@ class DistributedKTOTrainer(
         )
 
     def _pp_kto_batch_transform(self, batch: dict[str, torch.Tensor]) -> dict[str, torch.Tensor]:
-        """TRL's ``completion_*`` collator keys → the pipeline's fixed-shape batch contract.
+        """TRL's unpaired-preference collator batch → the pipeline's fixed-shape batch contract.
 
         Labels are the completion token ids at their positions (ignore elsewhere) — exactly the
         positions TRL's shifted ``completion_mask`` scores. Right-pads to ``args.max_length``
         because the P2P buffer shapes freeze on the first step; ``label`` (a list of bools from
         the collator) becomes a per-row float tensor so the microbatch split can carry it.
         """
-        input_ids = batch["completion_input_ids"]
-        attention_mask = batch["completion_attention_mask"]
+        input_ids = batch["input_ids"]
+        attention_mask = batch["attention_mask"]
         completion_mask = batch["completion_mask"]
         labels = completion_labels(input_ids, completion_mask)
         # Over-length is unreachable with TRL's collator; the helper's raise guards a custom one.

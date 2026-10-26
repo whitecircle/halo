@@ -346,7 +346,7 @@ class _ResumeCapture(TrainerCallback):
     The adapters are captured by re-saving them through ``save_model`` — the very writer that
     produced the checkpoint — so the two files are comparable bit for bit and no test-side
     re-implementation of the adapter key transform can drift away from the real one. Two effects the
-    save carries into the run: ``restore_special_token_ids`` re-asserts its config snapshot
+    save carries into the run: ``restore_config_fields`` re-asserts its config snapshot
     permanently, and on a warm-restarted optimizer the state read below materializes empty state with
     a zero-grad step. Both are inert here — the offline-GRPO masks come from the collator, and no
     check downstream of a warm restart compares losses.

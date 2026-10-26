@@ -19,7 +19,7 @@ CAUSAL_LM_LAYOUT = StageLayout(
     layer_attr="layers",
     head_attr="lm_head",
     post_layer_paths=("model.norm",),
-    input_paths=("model.embed_tokens",),
+    embedding_path="model.embed_tokens",
 )
 
 

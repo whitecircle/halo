@@ -53,7 +53,7 @@ LAYERS = 4
 BATCH, SEQ = 2, 24
 
 # The GLM-5 Next text tower without its linear-attention layers, whose conv kernel is CUDA-only.
-_GLM5_TEXT = {**TINY_GLM5_CONFIG, "layer_types": ["deepseek_sparse_attention"] * TINY_GLM5_CONFIG["num_hidden_layers"]}
+_GLM5_TEXT = {**TINY_GLM5_CONFIG, "layer_types": ["indexed_attention"] * TINY_GLM5_CONFIG["num_hidden_layers"]}
 
 
 def _qwen3_moe():

@@ -26,11 +26,12 @@ from functools import partial
 
 from accelerate.logging import get_logger
 from transformers import AutoTokenizer, PreTrainedModel
-from trl import ModelConfig, SFTConfig
+from trl import SFTConfig
 
 from src.config_validation import reject_non_default_args
 from src.configs.distillation import SelfDistillScriptArguments
 from src.configs.parallelism_arguments import ParallelismArguments
+from src.configs.script_arguments import ModelArguments
 from src.data.collators.self_distill import (
     SelfDistillTextCollator,
     audit_self_distill_row,
@@ -256,7 +257,7 @@ def _load_sdpg_reference(*, args, model_config, sft_config, tokenizer, is_vlm: b
 
 def main():
     args, sft_config, model_config, distributed_args = parse_script_args(
-        SelfDistillScriptArguments, SFTConfig, ModelConfig, ParallelismArguments
+        SelfDistillScriptArguments, SFTConfig, ModelArguments, ParallelismArguments
     )
 
     # Inherited from SFTScriptArguments but unreachable: GenerateExamplesCallback needs a tokenized

@@ -168,7 +168,7 @@ def build_parallelism_config(config: Path):
     script = script_for(config)
     parsed = parser_for(script).parse_yaml_file(str(config))
     dist_args = next(obj for obj in parsed if type(obj).__name__ == "ParallelismArguments")
-    model_config = next(obj for obj in parsed if type(obj).__name__ == "ModelConfig")
+    model_config = next(obj for obj in parsed if type(obj).__name__ == "ModelArguments")
     flags = script_call_kwargs(script, "init_training_script", ("supports_init_from_scratch",))
     # The peel reads the model's own config; where that is unreachable the expert-LoRA rejections
     # (PP and Expert-TP both refuse it) go unchecked, exactly like the model-dependent cases below.
@@ -251,11 +251,10 @@ def test_example_thinking_budget_has_a_server_side_parser(config):
     """A thinking budget the serving engine cannot enforce is a 400 on EVERY rollout, not a no-op.
 
     ``rollout_max_thinking_tokens`` rides on vLLM's ``thinking_token_budget``, which the server only
-    accepts with a reasoning parser loaded — 0.26.0 registers ``qwen3`` and ``gemma4`` among others,
-    while gpt-oss takes the baked ``openai_gptoss`` plugin (its built-in entry is commented out) —
-    and only with Model Runner V2 off. Sending it anyway errors every episode
-    (``episode/error_rate`` 1) with nothing raised at config time, so the file's own launch
-    instructions have to name the parser flag that makes the knob real.
+    accepts with a reasoning parser loaded — 0.32.0 registers ``qwen3`` and ``gemma4`` among others,
+    while gpt-oss takes the baked ``openai_gptoss`` plugin (the image comments its built-in entry out).
+    Sending it anyway errors every episode (``episode/error_rate`` 1) with nothing raised at config
+    time, so the file's own launch instructions have to name the parser flag that makes the knob real.
     """
     if raw_config(config).get("rollout_max_thinking_tokens") is None:
         return
@@ -270,7 +269,7 @@ def test_vllm_example_names_a_reasoning_close_its_tokenizer_writes(config):
     """The loss finds the reasoning closes vLLM's thinking budget forces by ``rollout_reasoning_end_token``.
 
     A marker the model's tokenizer does not write — the ``</think>`` default on Gemma 4 (``<channel|>``) or
-    gpt-oss (its five-token final-channel opener) — only warns at startup, and every forced close then
+    gpt-oss (its six-token move into the final channel) — only warns at startup, and every forced close then
     trains with the episode's advantage. SGLang enforces no budget, so forces no close to find.
     """
     parsed = parser_for(script_for(config)).parse_yaml_file(str(config))

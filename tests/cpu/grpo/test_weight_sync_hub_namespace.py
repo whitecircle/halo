@@ -3,9 +3,9 @@
 
 Step-3.7's live module tree exists only behind transformers' from_pretrained-side conversion
 (``model.language_model.layers.*.mlp.experts.gate_up_proj`` fused; the vision tower's split,
-RoPE-permuted q/k/v), while vLLM 0.26.0 loads the HUB namespace (``model.layers.*.moe.gate_proj`` /
+RoPE-permuted q/k/v), while vLLM 0.32.0 loads the HUB namespace (``model.layers.*.moe.gate_proj`` /
 ``up_proj`` stacks, ``share_expert.*``, ``vision_model.transformer.resblocks.*.attn.in_proj_weight``)
-and silently drops every name it does not map. The sync therefore runs the same save-side revert the
+and silently drops every language-model name it does not map. The sync therefore runs the same save-side revert the
 gathered EP save applies (``export_conversions``). The oracle is transformers' own
 ``save_pretrained``: the forwarded keys must equal the on-disk keys — minus the router's frozen
 selection-bias buffer, which the parameter-only payload never carries — and every forwarded tensor

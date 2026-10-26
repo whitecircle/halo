@@ -49,7 +49,7 @@ from src.models.moe.config_fields import resolve_moe_routing
 from src.models.moe.family_specs import MoEFamilySpec, NativeBalancingSlot
 from src.models.moe.router_logits import ROUTER_LOGITS_FORCED_OFF_ATTR
 from src.models.zaya import patch_zaya_router_load_recording
-from tests.common.rosters import ep_layer_class_by_model_type
+from src.weight_sync.clients.vllm import VLLMWeightSyncClient
 
 
 class _Cfg:
@@ -324,8 +324,8 @@ class _BiasCapableEPLayer(_BiasRouterStandIn):
 class _MultimodalModel(_Model):
     """Wrapper stand-in whose forward never declares ``output_router_logits``.
 
-    Qwen3_5MoeForConditionalGeneration reads the flag out of ``**kwargs`` only, so the config flag
-    this mode sets never reaches its aux loss — the case the aux_loss raise exists for.
+    A forward that reads the flag out of ``**kwargs`` only never lets the config flag this mode sets
+    reach its aux loss — the case the aux_loss raise exists for.
     """
 
     def forward(self, input_ids=None, **kwargs):
@@ -498,21 +498,20 @@ def test_the_same_model_without_weight_sync_gets_the_balancer() -> None:
     assert any(type(cb).__name__ == "BalancingBiasCallback" for cb in callbacks)
 
 
-# The engine-side serving gap a layer class declares (Laguna under vLLM 0.26.0)
+# The engine-side serving gap a client declares (vLLM's Laguna loader)
 
 
-class _ServedDropEPLayer(_NativeAdoptingEPLayer):
-    _SERVED_BALANCING_BIAS_DROPPED_BY = "vLLM 0.26.0"
-
-
-def test_a_declared_served_bias_drop_is_warned_at_enable(caplog) -> None:
+def test_a_served_bias_drop_is_warned_at_enable(caplog) -> None:
     """A family whose serving engine drops the exported bias key (Laguna) must say so at enable —
     the export is correct and a transformers reload routes as trained, but a vLLM-served copy
-    routes on the pretrained bias with no other symptom."""
-    model = _Model(_Cfg(num_experts=8, num_experts_per_tok=2), submodules=[_ServedDropEPLayer()])
+    never routes on the trained bias, with no other symptom. The engine is named by its client's release."""
+    model = _Model(
+        _Cfg(model_type="laguna", num_experts=8, num_experts_per_tok=2), submodules=[_NativeAdoptingEPLayer()]
+    )
     with caplog.at_level("WARNING"):
         balancing.apply_balancing_mode(model, "bias_update", policy_gradient_loss=True, is_moe=True)
-    assert any("DROPPED by ['vLLM 0.26.0']" in message for message in caplog.messages), caplog.messages
+    expected = f"DROPPED by [{VLLMWeightSyncClient.ENGINE_RELEASE!r}]"
+    assert any(expected in message for message in caplog.messages), caplog.messages
 
 
 def test_families_without_the_declaration_do_not_warn(caplog) -> None:
@@ -520,13 +519,6 @@ def test_families_without_the_declaration_do_not_warn(caplog) -> None:
     with caplog.at_level("WARNING"):
         balancing.apply_balancing_mode(model, "bias_update", policy_gradient_loss=True, is_moe=True)
     assert not any("DROPPED by" in message for message in caplog.messages), caplog.messages
-
-
-def test_laguna_layer_declares_the_served_bias_drop() -> None:
-    """The real class carries the declaration the warning path reads — pinned so an engine upgrade
-    that closes the hole is a deliberate one-line removal, not silent drift."""
-    laguna = ep_layer_class_by_model_type()["laguna"]
-    assert laguna._SERVED_BALANCING_BIAS_DROPPED_BY == "vLLM 0.26.0"
 
 
 def test_moe_balancing_none_leaves_a_yaml_configured_aux_loss_alone() -> None:

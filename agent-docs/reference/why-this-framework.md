@@ -11,7 +11,7 @@ Built on HuggingFace Transformers, Accelerate, and TRL — every distributed tra
 
 ## Framework comparison
 
-Versions compared: TRL 1.6.0 and Accelerate 1.11.0 (the pinned releases), Unsloth, Axolotl 0.19.0, MS-SWIFT 4.0, veRL (Megatron backend), Megatron-LM/Core. "Via Megatron" = needs a Megatron backend + an HF↔MCore checkpoint conversion; "—" = out of scope (a layer the others build on).
+Versions compared: TRL 1.14.2 and Accelerate 1.11.0 (the pinned releases), Unsloth, Axolotl 0.19.0, MS-SWIFT 4.0, veRL (Megatron backend), Megatron-LM/Core. "Via Megatron" = needs a Megatron backend + an HF↔MCore checkpoint conversion; "—" = out of scope (a layer the others build on).
 
 | Feature | This Toolkit | HF TRL | Accelerate | Unsloth | Axolotl | MS-SWIFT | veRL | Megatron-LM |
 |---------|:------------:|:------:|:----------:|:-------:|:-------:|:--------:|:----:|:-----------:|
@@ -22,13 +22,13 @@ Versions compared: TRL 1.6.0 and Accelerate 1.11.0 (the pinned releases), Unslot
 | Tensor Parallelism | Yes (DTensor) | Via Accelerate; needs a newer Accelerate | Yes (ND-parallel) | No | Yes (experimental) | Via Megatron | Via Megatron | MCore |
 | Combined EP+CP / EP+TP / pure ETP | **Yes** | No | No (no EP) | No | Partial (EP×CP and EP×CP×FSDP; EP×TP raises) | Via Megatron | Via Megatron | Yes |
 | Full BF16 (~6 bytes/param) | **AdamWBF16 + SR** | No (FP32 masters) | Plumbing only | No | bf16 MP only | No | No | No |
-| Multi-turn RL | **Async Ray + built-in envs** | Async GRPO (thin envs) | — | Via ART | Async GRPO + NeMo Gym | GYM env | AgentLoop + SGLang | No |
+| Multi-turn RL | **Async Ray + built-in envs** | Async GRPO + env adapters (OpenEnv, Harbor, OpenReward) | — | Via ART | Async GRPO + NeMo Gym | GYM env | AgentLoop + SGLang | No |
 | Native HF models (no conversion) | **Yes (all modes)** | Yes (no EP) | Yes (plumbing) | Yes (no EP/CP/TP) | Yes | MCore for EP/CP/TP | MCore for EP/CP/TP | No |
-| Flash Attention (FA4 Blackwell / FA3 Hopper / FA2 fallback) | **Yes** | Inherited (FA2) | Inherited | No (FA2) | Yes (FA2/3/4) | Yes | Inherited (FA2) | Via TE |
+| Flash Attention (FA4 Blackwell / FA3 Hopper / FA2 fallback) | **Yes** | Inherited (FA2/3) | Inherited | No (FA2) | Yes (FA2/3/4) | Yes | Inherited (FA2) | Via TE |
 | Native `s3://` datasets | **Yes** | No | No | No | Yes | No | No | Via MSC |
 | Multi-node | **Tested** | Via Accelerate | Yes | Paid tiers | Yes | Yes | Yes | Yes |
 
-Megatron-Core stores `torch_dist` sharded checkpoints split by TP/PP/EP/ETP — a separate format from HuggingFace's, so MS-SWIFT, veRL, and Megatron-LM all require an HF↔MCore conversion before EP/CP/TP/PP. This toolkit, Accelerate, TRL, Unsloth, and Axolotl work directly on HuggingFace weights; of those, this toolkit and Axolotl run DeepEP expert parallelism on the upstream HF MoE modules. Two neighbors sit close: NeMo AutoModel keeps HF checkpoints without a conversion step but ships its own implementation of each supported architecture behind the `transformers` API, and transformers itself has an expert-parallel path (`DistributedConfig(enable_expert_parallel=True)`) whose router all-reduces the full MoE output on every rank instead of dispatching tokens. On the pinned transformers 5.16.1 and Accelerate 1.11.0, the transformers `Trainer`, and TRL's trainers that subclass it, run neither TP, CP nor that EP path: each needs Accelerate's `ParallelismConfig` (`TrainingArguments.parallelism_config`), and that `Trainer` fails at construction on any `ParallelismConfig` under this Accelerate release.
+Megatron-Core stores `torch_dist` sharded checkpoints split by TP/PP/EP/ETP — a separate format from HuggingFace's, so MS-SWIFT, veRL, and Megatron-LM all require an HF↔MCore conversion before EP/CP/TP/PP. This toolkit, Accelerate, TRL, Unsloth, and Axolotl work directly on HuggingFace weights; of those, this toolkit and Axolotl run DeepEP expert parallelism on the upstream HF MoE modules. Two neighbors sit close: NeMo AutoModel keeps HF checkpoints without a conversion step but ships its own implementation of each supported architecture behind the `transformers` API, and transformers itself shards a model at load (`from_pretrained(distributed_config=DistributedConfig(...))`) with FSDP2, TP and EP: `ep_size` dispatches tokens through a torch all-to-all (`ep_dispatch_experts`, most MoE families' default plan), and a few families keep a router that all-reduces the full MoE output across `ep_size == tp_size` ranks. On the pinned transformers 5.20.2 and Accelerate 1.11.0, the transformers `Trainer` trains such a model only at `tp_size=1` (FSDP2 plus token dispatch) and without resume; it, and TRL's trainers that subclass it, run neither TP, CP nor the all-reduce EP path: a load-time TP model needs a newer Accelerate, and CP needs Accelerate's `ParallelismConfig` (`TrainingArguments.parallelism_config`), on which that `Trainer` fails at construction under this Accelerate release.
 
 ### When to use which
 

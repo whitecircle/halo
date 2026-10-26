@@ -52,6 +52,7 @@ def _make_stub(trainer_cls, *, presharded: bool, tp: bool):
         dataloader_pin_memory=False,
         dataloader_persistent_workers=False,
         dataloader_drop_last=False,
+        train_sampling_strategy="random",
         dataloader_prefetch_factor=None,
         dataloader_multiprocessing_context=None,
         dataloader_in_order=True,

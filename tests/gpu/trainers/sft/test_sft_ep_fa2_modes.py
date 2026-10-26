@@ -38,8 +38,9 @@ import os
 import torch
 from peft import LoraConfig, get_peft_model
 from transformers import AutoTokenizer
-from trl import ModelConfig, SFTConfig, get_quantization_config
+from trl import SFTConfig, get_quantization_config
 
+from src.configs.script_arguments import ModelArguments
 from src.distributed.parallelism_config import ParallelismConfig
 from src.model_loading.parallel.loader import load_distributed_model
 from src.trainers.sft import DistributedSFTTrainer
@@ -210,7 +211,7 @@ def run_qlora(parallelism_config, tokenizer, train_dataset, eval_dataset, output
     """
     log(f"  Expecting load_distributed_model to reject QLoRA + EP={EP_SIZE} (attn={ATTN_IMPL})...")
 
-    model_config = ModelConfig(
+    model_config = ModelArguments(
         model_name_or_path=MODEL_NAME,
         use_peft=True,
         load_in_4bit=True,

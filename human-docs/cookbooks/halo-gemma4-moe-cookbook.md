@@ -55,7 +55,7 @@ On the host, start the servers on the SFT checkpoint:
 cp jinja-templates/gemma4/gemma4-reasoning-effort.jinja "$HALO_SCRATCH/"
 export VLLM_MODEL=/data/checkpoints/gemma-4-26b-a4b-sft
 export VLLM_CHAT_TEMPLATE=/data/gemma4-reasoning-effort.jinja
-export VLLM_TOOL_PARSER=gemma4 VLLM_REASONING_PARSER=gemma4 VLLM_USE_V2_MODEL_RUNNER=0
+export VLLM_TOOL_PARSER=gemma4 VLLM_REASONING_PARSER=gemma4
 VLLM_CUDA_DEVICES=4,5 VLLM_TP=2 VLLM_PORT=8000 \
   docker compose -p gemma4-rollout-0 -f docker-compose.vllm.yml up -d vllm-server
 VLLM_CUDA_DEVICES=6,7 VLLM_TP=2 VLLM_PORT=8001 \

@@ -6,7 +6,7 @@
 
 services:
   sglang-server:
-    image: ${SGLANG_IMAGE:-sglang-server:0.5.17}
+    image: ${SGLANG_IMAGE:-sglang-server:0.5.22}
     ipc: host
     network_mode: host
     environment:

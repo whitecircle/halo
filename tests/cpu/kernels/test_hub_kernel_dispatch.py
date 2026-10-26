@@ -1,6 +1,6 @@
 """Device-aware kernel dispatch: CPU calls must take the torch path, CUDA-shaped dispatch intact.
 
-transformers 5.16's ``use_kernel_func_from_hub_with_fallback`` captures the CUDA-only original
+transformers 5.20's ``use_kernel_func_from_hub_with_fallback`` captures the CUDA-only original
 package (causal_conv1d/fla) at decoration time and calls it for every input. These tests fail if
 the toolkit shim stops routing CPU tensors to the decorated torch function — the failure is a
 crash (``Expected x.is_cuda()``) in every CPU forward of a conv/linear-attention family.
@@ -90,10 +90,9 @@ def _closure_functions(fn, depth=0, seen=None):
 
 
 def test_cuda_capture_resolves_a_submodule_only_package_kernel():
-    """``fla`` exports nothing at root, so upstream's getattr walk finds no kernel on a bare package
-    import and silently captures the torch body — every CUDA forward then runs the naive scan at
-    ~10x the step time. The shim pre-imports the mapped chain; the decoration must capture fla's
-    real kernel."""
+    """``fla`` exports nothing at root, so a decoration that resolved only off a bare package import
+    would silently capture the torch body — every CUDA forward then running the naive scan at ~10x
+    the step time. The decoration must capture fla's real kernel."""
     pytest.importorskip("fla")
     ensure_device_aware_kernel_dispatch()
 

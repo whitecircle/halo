@@ -60,8 +60,8 @@ make bench BAND=1                            # throughput + peak memory held to 
 # Image builds (credential-free — every dep is public)
 make build-blackwell
 make build-hopper
-make build-vllm                              # vllm-server:0.26.0
-make build-sglang                            # sglang-server:0.5.17 (NCCL matched to the training images)
+make build-vllm                              # vllm-server:0.32.0
+make build-sglang                            # sglang-server:0.5.22 (NCCL matched to the training images)
 make build-all                               # all four
 
 # Rollout-server GPU tiers (the server must already serve on a GPU outside TRAINER_CUDA_DEVICES;
@@ -75,9 +75,9 @@ make build-all                               # all four
 # SERVER_TIER defaults to 'not moe' (dense Qwen/Qwen3-0.6B); the vLLM MoE half is
 # SERVER_TIER='moe and not gptoss' against Qwen/Qwen3-30B-A3B-Instruct-2507, then
 # SERVER_TIER='moe and gptoss' against unsloth/gpt-oss-20b-BF16; SGLang's (SERVER_TIER=moe) is gpt-oss only.
-# The vLLM server needs VLLM_REASONING_PARSER=qwen3 VLLM_USE_V2_MODEL_RUNNER=0: the benchmarks
-# send a per-effort CoT budget, which draws a 400 without a reasoning parser and another under
-# Model Runner V2. The health guard prints the exact compose line when it is missing.
+# The vLLM server needs VLLM_REASONING_PARSER=qwen3: the benchmarks send a per-effort CoT budget,
+# which draws a 400 without a reasoning parser. The health guard prints the exact compose line when
+# it is missing.
 make test-gpu-vllm
 make test-gpu-sglang
 

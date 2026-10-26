@@ -3,9 +3,9 @@
 
 At ``ep_size: 1`` with ``use_grouped_gemm: false`` Halo installs no EP wrapper, so after Liger is
 applied the routed experts run whatever the model builds for them. Liger must not be that:
-``LigerExperts``, upstream liger-kernel's fused MoE kernel, computes the input gradient wrong on
-Blackwell in the pinned release while its forward and weight gradients stay close — a silently wrong
-gradient into every layer below. This drives a Qwen3-MoE experts block through the path Halo
+``LigerExperts``, upstream liger-kernel's fused MoE kernel, computed the input gradient wrong on
+Blackwell until the fix that shipped in liger-kernel 0.8.3, while its forward and weight gradients
+stayed close — a silently wrong gradient into every layer below. This drives a Qwen3-MoE experts block through the path Halo
 selects (``ParallelismConfig`` → ``apply_liger_kernel`` → model build) and checks the forward, the
 input gradient, the routing-weight gradient and both weight gradients against the family's eager
 experts in fp32, with routing held identical so a near-tied top-k pick cannot move the result.
@@ -30,7 +30,7 @@ SEED = 0
 HIDDEN, EXPERT_WIDTH, NUM_EXPERTS, TOP_K, TOKENS = 2048, 768, 128, 8, 8192
 INIT_STD = 0.02
 # Mean relative error against the fp32 oracle. bf16 storage puts every tensor near 6e-3 on the
-# path Halo selects; LigerExperts' input gradient on a B300 sits near 0.6.
+# path Halo selects; LigerExperts' input gradient on a B300 sat near 0.6 before that fix.
 TOL = 2e-2
 GRADIENTS = ("fwd", "dx", "d_routing_weights", "d_gate_up_proj", "d_down_proj")
 

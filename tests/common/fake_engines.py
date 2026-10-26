@@ -5,6 +5,7 @@ replies, as both engines' handlers do, so a scripted failure reply still leaves 
 """
 
 import json
+import re
 import threading
 from collections import deque
 from datetime import timedelta
@@ -16,8 +17,10 @@ from torch.distributed import TCPStore
 from src.weight_sync.clients.base import WeightSyncClientBase
 from src.weight_sync.clients.sglang import SGLangWeightSyncClient
 from src.weight_sync.clients.vllm import VLLMWeightSyncClient
+from tests.common.repo import REPO_ROOT
 
-# vLLM 0.26.0's default CUDA-graph capture range: prefills up to this many tokens replay a captured graph.
+# vLLM's default CUDA-graph capture ceiling on H100/H200 (1024 on B200/B300): prefills up to this many
+# tokens replay a captured graph.
 GRAPH_CAPTURE_TOKENS = 512
 # Stamped on each request by a recorder that needs to tell a request's retries apart from new requests.
 CALL_ID_HEADER = "X-Halo-Call-Id"
@@ -58,7 +61,7 @@ class FakeEngineServer:
         self.max_model_len: int | None = None
         self.logprobs_mode = self.LOGPROBS_MODE
         # Added to every prefill log-prob of a request within the capture range: an engine whose prompt
-        # log-probs depend on whether the prefill replayed a graph (vLLM 0.26.0's spec-decode overwrite).
+        # log-probs depend on whether the prefill replayed a graph (the V1 runner's spec-decode overwrite).
         self.graph_prefill_shift = 0.0
         self.graph_capture_tokens = GRAPH_CAPTURE_TOKENS
         self.requests: list[str] = []
@@ -172,14 +175,31 @@ class FakeVLLMServer(FakeEngineServer):
     """vLLM's weight-transfer routes: tracks whether the engine is paused and its layerwise reload open.
 
     Its ``world_size`` workers join the trainer's rendezvous store on ``/init_weight_transfer_engine``,
-    in the background as the engine's workers do; 0 leaves the trainer a group of one.
+    in the background as the engine's workers do; 0 leaves the trainer a group of one. It reports the
+    release ``Dockerfile.vllm`` builds, and refuses an init or update request whose fields are not the
+    ones that release's request dataclasses declare, as the engine does.
     """
 
     CLIENT_CLASS = VLLMWeightSyncClient
     LOGPROBS_MODE = "raw_logprobs"
+    VERSION = re.search(r"^ARG VLLM_VERSION=(\S+)$", (REPO_ROOT / "Dockerfile.vllm").read_text(), re.M).group(1)
+    INIT_INFO_FIELDS = frozenset(
+        {
+            "master_address",
+            "master_port",
+            "rank_offset",
+            "world_size",
+            "nccl_unique_id_b64",
+            "packed",
+            "packed_buffer_size_bytes",
+            "packed_num_buffers",
+        }
+    )
+    UPDATE_INFO_FIELDS = frozenset({"names", "dtype_names", "shapes"})
 
     def __init__(self):
         super().__init__()
+        self.version = self.VERSION
         self.update_open = False
         self.world_size = 1
         # Held so the workers' store connections live until close(), as an engine's workers stay joined.
@@ -190,6 +210,8 @@ class FakeVLLMServer(FakeEngineServer):
             return 200, {"is_paused": self.paused}
         if (method, path) == ("GET", "/get_world_size"):
             return 200, {"world_size": self.world_size}
+        if (method, path) == ("GET", "/version"):
+            return 200, {} if self.version is None else {"version": self.version}
         if method == "POST" and path == "/v1/completions" and "prompt_logprobs" in (body or {}):
             # Prefill echo: one entry per prompt token (None for the first), keyed by token id.
             prompt = body["prompt"]
@@ -198,6 +220,8 @@ class FakeVLLMServer(FakeEngineServer):
             return 200, {"choices": [{"text": "", "prompt_logprobs": echo}]}
         if method == "POST" and path == "/init_weight_transfer_engine":
             init = body["init_info"]
+            if unknown := set(init) - self.INIT_INFO_FIELDS:
+                return 500, {"error": f"init_info carries fields the engine does not declare: {sorted(unknown)}"}
             address = (init["master_address"], init["master_port"], init["world_size"])
             for _ in range(self.world_size):
                 threading.Thread(target=self._join_store, args=address, daemon=True).start()
@@ -209,6 +233,8 @@ class FakeVLLMServer(FakeEngineServer):
             self.update_open = path == "/start_weight_update"
             return 200, {}
         if method == "POST" and path == "/update_weights":
+            if unknown := set(body["update_info"]) - self.UPDATE_INFO_FIELDS:
+                return 500, {"error": f"update_info carries fields the engine does not declare: {sorted(unknown)}"}
             return 200, {}
         return super().answer(method, path, body)
 
@@ -224,10 +250,13 @@ class FakeVLLMServer(FakeEngineServer):
 
 
 class FakeSGLangServer(FakeEngineServer):
-    """SGLang's weight-update routes: tracks whether generation is paused and the group names it holds.
+    """SGLang's weight-update routes: tracks whether generation is paused, the group names it holds and
+    whether a weight-update session is open.
 
     A join under a name it already holds is rejected, as the engine registers a group by name when
-    asked to join. The routes that parse a request object reject a request without a JSON body.
+    asked to join. An update outside a session, a second begin and an end without a begin are refused,
+    as the engine refuses them. The routes that parse a request object reject a request without a JSON
+    body.
     """
 
     CLIENT_CLASS = SGLangWeightSyncClient
@@ -237,6 +266,8 @@ class FakeSGLangServer(FakeEngineServer):
             "/init_weights_update_group",
             "/destroy_weights_update_group",
             "/update_weights_from_distributed",
+            "/begin_weight_update",
+            "/end_weight_update",
             "/pause_generation",
             "/continue_generation",
             "/generate",
@@ -247,6 +278,7 @@ class FakeSGLangServer(FakeEngineServer):
         super().__init__()
         self.tp_size = 1
         self.groups: set[str] = set()
+        self.session_open = False
 
     def answer(self, method: str, path: str, body: dict | None) -> tuple[int, dict] | None:
         if (method, path) == ("GET", "/server_info"):
@@ -266,7 +298,16 @@ class FakeSGLangServer(FakeEngineServer):
         if path in ("/pause_generation", "/continue_generation"):
             self.paused = path == "/pause_generation"
             return 200, {}
-        if path in ("/update_weights_from_distributed", "/flush_cache"):
+        if path in ("/begin_weight_update", "/end_weight_update"):
+            if self.session_open == (path == "/begin_weight_update"):
+                return 400, {"message": "begin_weight_update() and end_weight_update() must alternate"}
+            self.session_open = path == "/begin_weight_update"
+            return 200, {}
+        if path == "/update_weights_from_distributed":
+            if not self.session_open:
+                return 400, {"message": "must run between begin_weight_update() and end_weight_update()"}
+            return 200, {}
+        if path == "/flush_cache":
             return 200, {}
         if path == "/generate" and body.get("return_logprob"):
             # [logprob, token_id, text] per input token from logprob_start_len; the window's first

@@ -2,14 +2,11 @@
 
 ``/update_weights_from_distributed`` ends in ``model.load_weights`` and nothing else, so a loader that
 caches a derived form of a parameter keeps serving the cached one after the parameter is rewritten.
-Two families do that in this release:
-
-* GLM-4 MoE (``glm4_moe.py``, ``glm4_moe_lite.py``): the router gate keeps an fp32 copy of its
-  weight, filled once on the first forward; a pushed gate weight lands in the parameter and routing
-  never reads it. The gate is rewritten to hold its weight in fp32 and read it live.
-* Gemma 4 (``gemma4_causal.py``, shared by the multimodal classes): the router folds ``scale`` into
-  its norm weight once, behind a latch, so a pushed ``scale`` never reaches the fold. The latch is
-  released by the parameter's own loader.
+Gemma 4 (``gemma4_causal.py``, shared by the multimodal classes) does that: its router folds ``scale``
+into its norm weight once, behind a latch, so a pushed ``scale`` never reaches the fold. The latch is
+released by the parameter's own loader. The GLM-4 MoE gates (``glm4_moe.py``, ``glm4_moe_lite.py``)
+hold their weight in fp32 and read it live upstream; that is asserted, not rewritten, because a
+return of the cached fp32 copy would serve stale routing the same way.
 
 The prefill result loop (``batch_result_processor.py``) reads each request's input log-probs from one
 flat array at a running offset. It skips a retracted request, or one finished in a mixed batch,
@@ -17,8 +14,9 @@ without stepping over that request's block, so each later request in the batch r
 shifted back by it, under its own ids. The skip is rewritten to advance the offset, a port of
 sgl-project/sglang#36939.
 
-Every rewrite asserts its pre-image once and its post-image after, so an upstream change fails the
-image build rather than shipping a server that silently serves stale routing or shifted log-probs.
+Every rewrite asserts its pre-image once and its post-image after, and the asserted-only GLM gate its
+post-image, so an upstream change fails the image build rather than shipping a server that silently
+serves stale routing or shifted log-probs.
 
     python3 patch_sglang.py            # patch the installed sglang in place
     python3 patch_sglang.py --verify   # assert the post-images only
@@ -32,23 +30,11 @@ _GLM_GATE_FILES = ("models/glm4_moe.py", "models/glm4_moe_lite.py")
 _GEMMA4_ROUTER_FILE = "models/gemma4_causal.py"
 _PREFILL_RESULT_FILE = "managers/scheduler_components/batch_result_processor.py"
 
-_GLM_WEIGHT_BEFORE = """        self.weight = nn.Parameter(
-            torch.empty((config.n_routed_experts, config.hidden_size))
-        )
-"""
 _GLM_WEIGHT_AFTER = """        self.weight = nn.Parameter(
             torch.empty(
                 (config.n_routed_experts, config.hidden_size), dtype=torch.float32
             )
         )
-"""
-_GLM_CACHE_BEFORE = """        # GLM requires FP32 gate projection; cache to avoid per-forward cast.
-        # FIXME: if gate weight is updated at runtime (e.g. expert rebalancing), _weight_fp32 must be invalidated.
-        self.register_buffer("_weight_fp32", None, persistent=False)
-"""
-_GLM_FORWARD_BEFORE = """        if self._weight_fp32 is None:
-            self._weight_fp32 = self.weight.data.to(torch.float32)
-        logits = F.linear(hidden_states.to(torch.float32), self._weight_fp32, None)
 """
 _GLM_FORWARD_AFTER = """        logits = F.linear(hidden_states.to(torch.float32), self.weight, None)
 """
@@ -105,13 +91,6 @@ def _replace_once(text: str, before: str, after: str, what: str) -> str:
     return text.replace(before, after)
 
 
-def patch_glm_gate(text: str) -> str:
-    """The GLM router gate holds its weight in fp32 and reads it live."""
-    text = _replace_once(text, _GLM_WEIGHT_BEFORE, _GLM_WEIGHT_AFTER, "GLM gate weight dtype")
-    text = _replace_once(text, _GLM_CACHE_BEFORE, "", "GLM gate fp32 cache")
-    return _replace_once(text, _GLM_FORWARD_BEFORE, _GLM_FORWARD_AFTER, "GLM gate forward")
-
-
 def patch_gemma4_router(text: str) -> str:
     """A load of the Gemma 4 router's ``scale`` releases the fold latch."""
     if "default_weight_loader" not in text:
@@ -154,18 +133,18 @@ def main() -> None:
     parser.add_argument("--verify", action="store_true", help="assert the post-images without rewriting")
     args = parser.parse_args()
     srt = _srt_dir()
-    targets = [(srt / name, patch_glm_gate, verify_glm_gate) for name in _GLM_GATE_FILES]
+    targets = [(srt / name, None, verify_glm_gate) for name in _GLM_GATE_FILES]
     targets.append((srt / _GEMMA4_ROUTER_FILE, patch_gemma4_router, verify_gemma4_router))
     targets.append((srt / _PREFILL_RESULT_FILE, patch_prefill_logprob_cursor, verify_prefill_logprob_cursor))
     for path, patch, verify in targets:
         if not path.is_file():
             raise SystemExit(f"{path} is missing — upstream moved the file")
         text = path.read_text(encoding="utf-8")
-        if not args.verify:
+        if patch is not None and not args.verify:
             text = patch(text)
             path.write_text(text, encoding="utf-8")
         verify(text, path)
-        print(f"{path.name}: {'verified' if args.verify else 'patched'}")
+        print(f"{path.name}: {'patched' if patch is not None and not args.verify else 'verified'}")
 
 
 if __name__ == "__main__":

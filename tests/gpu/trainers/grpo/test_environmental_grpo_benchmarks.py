@@ -15,11 +15,11 @@ also covers the client releasing that listener on close.
 Prerequisites:
     # vLLM server on its OWN GPU (weight sync is NCCL — a server sharing the trainer's GPU cannot
     # broadcast to itself). ``VLLM_MODEL`` must be the model trained here: the trainer broadcasts its
-    # own parameters into the served model. Neither server setting below is optional — code_contests
-    # binds a per-effort CoT budget that reaches the server as ``thinking_token_budget``, which draws a
-    # 400 on EVERY rollout without a reasoning parser and again under Model Runner V2, which does not
-    # implement the field; the benchmark then "runs" with zero generated tokens and loss=0 / reward=0.
-    VLLM_CUDA_DEVICES=7 VLLM_REASONING_PARSER=qwen3 VLLM_USE_V2_MODEL_RUNNER=0 \
+    # own parameters into the served model. The reasoning parser is not optional — code_contests binds
+    # a per-effort CoT budget that reaches the server as ``thinking_token_budget``, which draws a 400 on
+    # EVERY rollout without one; the benchmark then "runs" with zero generated tokens and loss=0 /
+    # reward=0.
+    VLLM_CUDA_DEVICES=7 VLLM_REASONING_PARSER=qwen3 \
         docker compose -f docker-compose.vllm.yml up -d vllm-server
 
 Usage:

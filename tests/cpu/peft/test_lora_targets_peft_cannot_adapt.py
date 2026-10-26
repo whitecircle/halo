@@ -30,9 +30,9 @@ from peft import LoraConfig, get_peft_model
 from transformers.models.deepseek_v4 import DeepseekV4Config
 from transformers.models.deepseek_v4.modeling_deepseek_v4 import DeepseekV4ForCausalLM, DeepseekV4GroupedLinear
 from transformers.models.gemma4.modeling_gemma4 import Gemma4ClippableLinear
-from trl import ModelConfig
 
 import src.model_loading.parallel.peft_setup as peft_setup
+from src.configs.script_arguments import ModelArguments
 from src.kernels.lowp.linear import LowPrecisionLinear
 from src.model_loading.parallel.peft_setup import build_peft_config, configure_adapter_training
 from tests.common.gloo import run_gloo_ranks
@@ -70,8 +70,8 @@ class _Multimodal(nn.Module):
         raise NotImplementedError
 
 
-def _model_config(targets=ATTENTION_TARGETS, **kwargs) -> ModelConfig:
-    return ModelConfig(model_name_or_path="dummy/vlm", use_peft=True, lora_target_modules=targets, **kwargs)
+def _model_config(targets=ATTENTION_TARGETS, **kwargs) -> ModelArguments:
+    return ModelArguments(model_name_or_path="dummy/vlm", use_peft=True, lora_target_modules=targets, **kwargs)
 
 
 def _adapted_modules(peft_model) -> set[str]:

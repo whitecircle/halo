@@ -48,8 +48,8 @@ the local name. They default to `halo:blackwell`. On Hopper, pass
   `:hopper-1.1.0` pin it.
 - There is no `latest` tag, so a Hopper host can't pull a Blackwell image by
   mistake.
-- The RL rollout servers are in the same repository, as `:vllm-0.26.0` and
-  `:sglang-0.5.17`, pinned as `:vllm-0.26.0-1.1.0` and `:sglang-0.5.17-1.1.0`.
+- The RL rollout servers are in the same repository, as `:vllm-0.32.0` and
+  `:sglang-0.5.22`, pinned as `:vllm-0.32.0-1.1.0` and `:sglang-0.5.22-1.1.0`.
 
 To build from source instead (no token or registry login):
 

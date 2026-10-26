@@ -10,7 +10,7 @@
 
 ## Architecture
 
-- **Attention interleave** — 34 `Glm5NextTextLinearAttention` layers (KDA: depthwise conv1d k=4 + delta-rule scan) and 11 `Glm5NextTextAttention` layers (`deepseek_sparse_attention`: MLA with `q_lora_rank` 1536 / `kv_lora_rank` 512, qk 256 **NoPE**), 1-in-4 from index 3.
+- **Attention interleave** — 34 `Glm5NextTextLinearAttention` layers (KDA: depthwise conv1d k=4 + delta-rule scan) and 11 `Glm5NextTextAttention` layers (`indexed_attention`: MLA with `q_lora_rank` 1536 / `kv_lora_rank` 512, qk 256 **NoPE**), 1-in-4 from index 3.
 
     RoPE exists only inside the top-2048 `Glm5NextTextIndexer`. `layer_types` spells `"linear_attention"`, which is what the CP gate reads.
 
@@ -57,7 +57,7 @@ EP loads take the lazy safetensors path. The hub checkpoint keeps a vendor names
 
 There is no full-model host residency at 321B ([host RAM under the lazy path](../parallelism/large-scale-scenarios.md#other-300b-class-checkpoints)): ~628 GB of page cache node-wide at ep8 (the bf16 conversion minus the MTP tail, shared by the 8 ranks), up to ~95 GB of file-backed RSS per rank while its shard handles are open. The per-expert gate+up fusion's 2× transient (~1.2 GB per layer) is on the GPU.
 
-RL weight sync is off (the spec's `weight_sync_refusal`): no pinned rollout engine loads `glm5_next`.
+RL weight sync is off (the spec's `weight_sync_refusal`): both pinned rollout engines register `glm5_next`, but their expert loaders take only per-expert keys where the gather emits the fused pair, and no online update into either has been validated.
 
 ## Router balancing
 

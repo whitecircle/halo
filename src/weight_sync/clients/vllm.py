@@ -2,6 +2,7 @@
 packed broadcasts into a layerwise reload. The vllm package is never imported."""
 
 import logging
+import re
 from collections.abc import Callable
 from functools import partial
 
@@ -13,12 +14,11 @@ from src.weight_sync.clients.base import (
     CLEANUP_TIMEOUT_S,
     GROUP_FORMATION_TIMEOUT_S,
     HTTP_PROBE_TIMEOUT_S,
-    POST_TIMEOUT_S,
     RESCORE_TIMEOUT_S,
     WEIGHT_UPDATE_TIMEOUT_S,
     AsyncCall,
     WeightSyncClientBase,
-    unregistered_bailing_model_types,
+    unservable_bailing_model_types,
 )
 from src.weight_sync.transport.packed_broadcast import (
     PACKED_BUFFER_BYTES,
@@ -32,6 +32,9 @@ logger = logging.getLogger(__name__)
 
 # A merely busy scheduler still answers a 1-token probe in time; a wedged one is reported, not waited out.
 _GENERATION_PROBE_TIMEOUT_S = 60.0
+# The oldest engine whose weight-transfer wire this client speaks: the packed geometry rides
+# /init_weight_transfer_engine, and an update that carries it is refused.
+_MIN_SERVER_VERSION = (0, 32, 0)
 
 
 class VLLMWeightSyncClient(WeightSyncClientBase):
@@ -39,13 +42,16 @@ class VLLMWeightSyncClient(WeightSyncClientBase):
 
     BACKEND_KEY = "vllm"
     BACKEND_NAME = "vLLM"
-    ENGINE_RELEASE = "vLLM 0.26.0"
+    ENGINE_RELEASE = "vLLM 0.32.0"
     GROUP_HOST_ENV = "VLLM_GROUP_HOST"
     PAUSE_ENDPOINT = "/pause"
     # mode=keep resumes in-flight generations under the new weights (the staleness the IS ratio corrects);
     # vLLM's default abort returns each as a fragment with an ordinary stop reason.
     PAUSE_REQUEST = {"params": {"mode": "keep"}}
     RESUME_ENDPOINT = "/resume"
+    # The layerwise reload phase.
+    SESSION_OPEN_ENDPOINT = "/start_weight_update"
+    SESSION_CLOSE_ENDPOINT = "/finish_weight_update"
     UNSERVABLE_MODEL_TYPES = {
         "zaya": f"{ENGINE_RELEASE} ships no Zaya implementation (agent-docs/models/zaya.md)",
         "mistral4": (
@@ -56,7 +62,7 @@ class VLLMWeightSyncClient(WeightSyncClientBase):
         "deepseek_v4": (
             f"{ENGINE_RELEASE}'s DeepSeek-V4 loader targets the fp8/fp4-packed release layout, which no gather can emit"
         ),
-        **unregistered_bailing_model_types(ENGINE_RELEASE),
+        **unservable_bailing_model_types(ENGINE_RELEASE),
     }
     # The Laguna loader registers the bias under an internal name and skips the exported hub key.
     DROPPED_BALANCING_BIAS_MODEL_TYPES = frozenset({"laguna"})
@@ -74,7 +80,8 @@ class VLLMWeightSyncClient(WeightSyncClientBase):
     )
 
     def _fetch_engine_world_size(self) -> int:
-        # A paused or generation-wedged server is reported before the group forms.
+        # An engine off this wire, paused or generation-wedged is reported before the group forms.
+        self._check_server_version()
         self._probe_generation()
         return self.request("GET", "/get_world_size", retry=False, timeout=HTTP_PROBE_TIMEOUT_S).json()["world_size"]
 
@@ -89,6 +96,11 @@ class VLLMWeightSyncClient(WeightSyncClientBase):
                     "master_port": port,
                     "rank_offset": 1,
                     "world_size": world_size,
+                    # Read once per connection: the engine derives every chunk boundary from it, and
+                    # unset it receives tensor by tensor.
+                    "packed": True,
+                    "packed_buffer_size_bytes": PACKED_BUFFER_BYTES,
+                    "packed_num_buffers": PACKED_NUM_BUFFERS,
                 }
             },
         )
@@ -115,20 +127,15 @@ class VLLMWeightSyncClient(WeightSyncClientBase):
         self._unique_id_store: UniqueIdStore | None = None
         # The producer's pack streams, created once on the communicator's device; flushes are serialized.
         self._packed_streams: list[torch.cuda.Stream] | None = None
-        # A layerwise reload opened server-side (its reply possibly lost), which only /finish_weight_update ends.
-        self._phase_started = False
 
     def _start_engine_update(self) -> None:
         """Pause the engine and open its layerwise reload phase, unwinding both on failure."""
         self._require_communicator()
         try:
             self._quiesce()
-            # Flagged first, as the pause is: a lost reply still leaves the reload open.
-            self._phase_started = True
-            # Single-shot: /start_weight_update is a collective RPC and a session retry would issue two.
-            self.request("POST", "/start_weight_update", retry=False, timeout=POST_TIMEOUT_S)
+            self._open_session()
         except Exception:
-            self._close_phase()
+            self._close_session()
             self._lift_pause(CLEANUP_TIMEOUT_S, context="after sync")
             raise
 
@@ -142,17 +149,7 @@ class VLLMWeightSyncClient(WeightSyncClientBase):
             server_call = self._start_collective_rpc(
                 "/update_weights",
                 timeout=WEIGHT_UPDATE_TIMEOUT_S,
-                json={
-                    "update_info": {
-                        "names": names,
-                        "dtype_names": dtype_names,
-                        "shapes": shapes,
-                        "packed": True,
-                        # Sent explicitly: the consumer derives its chunk boundaries from these.
-                        "packed_buffer_size_bytes": PACKED_BUFFER_BYTES,
-                        "packed_num_buffers": PACKED_NUM_BUFFERS,
-                    }
-                },
+                json={"update_info": {"names": names, "dtype_names": dtype_names, "shapes": shapes}},
             )
 
             communicator = self._require_communicator()
@@ -179,10 +176,9 @@ class VLLMWeightSyncClient(WeightSyncClientBase):
         """Send the final chunk and close the layerwise reload; the close runs on every path."""
         try:
             self._transmit_chunk(tail, final=True)
-            self.request("POST", "/finish_weight_update", retry=False, timeout=WEIGHT_UPDATE_TIMEOUT_S)
-            self._phase_started = False
+            self._end_session()
         finally:
-            self._close_phase()
+            self._close_session()
 
     def score_completion_logprobs(
         self, prompt_ids: list[int], completion_ids: list[int], timeout: float = RESCORE_TIMEOUT_S
@@ -213,6 +209,19 @@ class VLLMWeightSyncClient(WeightSyncClientBase):
         # Recorded before the liveness probe that opens the engine's world-size read.
         self._sync_device = resolve_sync_device(device)
         super().init_communicator(device)
+
+    def _check_server_version(self) -> None:
+        """Refuse an engine older than the weight-transfer wire this client speaks (``GET /version``)."""
+        body = self.request("GET", "/version", retry=False, timeout=HTTP_PROBE_TIMEOUT_S).json()
+        reported = body.get("version") if isinstance(body, dict) else None
+        match = re.match(r"(\d+)\.(\d+)\.(\d+)", str(reported)) if reported is not None else None
+        if match is None or tuple(int(part) for part in match.groups()) < _MIN_SERVER_VERSION:
+            minimum = ".".join(map(str, _MIN_SERVER_VERSION))
+            raise RuntimeError(
+                f"vLLM server {self.base_url} runs vLLM {reported!r}; this client speaks the weight-transfer "
+                f"protocol of vLLM >= {minimum}, which carries the packed geometry on "
+                f"/init_weight_transfer_engine. Serve from the toolkit's vLLM image (make build-vllm)."
+            )
 
     def _probe_generation(self):
         """Fail fast when ``/health`` is up but generation is wedged: a single-shot 1-token completion that only a
@@ -266,13 +275,3 @@ class VLLMWeightSyncClient(WeightSyncClientBase):
                 f"collective and cannot be reused — reconnect the client before syncing again."
             )
         return self._transport
-
-    def _close_phase(self) -> None:
-        """Close a started-but-unfinished phase; never raises, as the caller is already failing."""
-        if not self._phase_started:
-            return
-        try:
-            self.request("POST", "/finish_weight_update", retry=False, timeout=CLEANUP_TIMEOUT_S)
-        except Exception as e:
-            logger.warning(f"Failed to close interrupted weight update: {e}")
-        self._phase_started = False

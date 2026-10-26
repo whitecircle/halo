@@ -13,10 +13,10 @@ repo rather than the top-level files a model load reads.
 from types import SimpleNamespace
 
 import pytest
-from trl import ModelConfig
 
 import scripts.training.embedding as embedding_script
 from src.configs.embedding import EmbeddingConfig
+from src.configs.script_arguments import ModelArguments
 from src.model_loading.parallel.model_source import ModelSource
 
 REPO = "org/model"
@@ -48,7 +48,7 @@ def test_the_embedding_backbone_loads_at_the_agreed_revision(monkeypatch, tmp_pa
         embedding_script.build_sentence_transformer(
             runtime,
             EmbeddingConfig(output_dir=str(tmp_path), bf16=False, use_cpu=True),
-            ModelConfig(model_name_or_path=REPO, model_revision="v1"),
+            ModelArguments(model_name_or_path=REPO, model_revision="v1"),
             SimpleNamespace(reset_sinks=True, train_sinks=False),
         )
     assert seen == {"resolve": (REPO, "v1", "embedding_model", True), "load": (REPO, COMMIT_A)}

@@ -27,9 +27,10 @@ from accelerate import PartialState
 from datasets import Dataset
 from peft import LoraConfig, get_peft_model
 from transformers import Qwen3Config, Qwen3ForCausalLM
-from trl import GRPOConfig, GRPOTrainer, ModelConfig
+from trl import GRPOConfig, GRPOTrainer
 
 import src.model_loading.parallel.frozen_models as frozen_models
+from src.configs.script_arguments import ModelArguments
 from src.distributed.parallelism_config import ParallelismConfig
 from src.model_loading.parallel.frozen_models import (
     PREFERENCE_REFERENCE_ALTERNATIVES,
@@ -74,7 +75,7 @@ def _load_reference(source: str, *, beta: float = BETA, peft_config=None, revisi
     """The scripts' reference load for a bf16 run, as their ``main`` calls it."""
     return load_reference_model_for_on_policy_grpo(
         _token_setup_args(),
-        ModelConfig(model_name_or_path=source, model_revision=revision, trust_remote_code=False),
+        ModelArguments(model_name_or_path=source, model_revision=revision, trust_remote_code=False),
         types.SimpleNamespace(beta=beta, bf16=True, fp16=False),
         ParallelismConfig(),
         make_offline_tokenizer(),

@@ -14,13 +14,12 @@ import socket
 import traceback
 from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Any, NamedTuple
+from typing import TYPE_CHECKING, Any, NamedTuple
 
 from huggingface_hub import constants as hub_constants
 from huggingface_hub import snapshot_download
 from huggingface_hub.errors import HFValidationError, LocalEntryNotFoundError
 from transformers import AutoConfig, PretrainedConfig
-from trl import ModelConfig
 
 from src.checkpoint.format import SAFETENSORS_INDEX_FILE, index_declares_ep_shards
 from src.checkpoint.reading import (
@@ -45,6 +44,10 @@ from src.runtime.filesystem import (
     is_fs_load_rank,
     is_input_shared_filesystem,
 )
+
+if TYPE_CHECKING:
+    # Annotation only: the entry scripts' argument layer sits beside this package.
+    from src.configs.script_arguments import ModelArguments
 
 logger = logging.getLogger(__name__)
 
@@ -227,15 +230,15 @@ def resolve_lazy_checkpoint(
     )
 
 
-def fetch_checkpoint_config(model_config: ModelConfig, *, tag: str) -> PretrainedConfig:
+def fetch_checkpoint_config(model_config: ModelArguments, *, tag: str) -> PretrainedConfig:
     """The run's checkpoint config at its pinned revision, read main-rank-first under ``tag``
     (:func:`~src.runtime.filesystem.hub_metadata_main_first`), ahead of the source agreement."""
     return hub_metadata_main_first(
         tag,
         lambda: AutoConfig.from_pretrained(
             model_config.model_name_or_path,
-            revision=getattr(model_config, "model_revision", None),
-            trust_remote_code=getattr(model_config, "trust_remote_code", False),
+            revision=model_config.model_revision,
+            trust_remote_code=model_config.trust_remote_code,
         ),
     )
 

@@ -5,7 +5,8 @@ HF's ``_get_dataloader`` passes ``multiprocessing_context``, ``prefetch_factor``
 every split. The toolkit's builders share one parameter set (``_loader_params``); without the first
 and the last in it, a run setting ``dataloader_multiprocessing_context: spawn`` or
 ``dataloader_in_order: false`` gets neither once TP/CP/ETP/PP or a pre-sharded dataset puts it on
-the toolkit's loader. The pin: each of the three builders hands the configured values to its loader.
+the toolkit's loader. The pin: each of the three builders hands the configured values to its loader,
+and HF's process-sharded batch sampler is refused there.
 
     python tests/cpu/trainers/test_toolkit_loader_arguments.py
 """
@@ -37,6 +38,7 @@ def _host() -> DataParallelDataLoaderMixin:
         dataloader_prefetch_factor=3,
         dataloader_in_order=False,
         dataloader_drop_last=False,
+        train_sampling_strategy="random",
         eval_batch_size=2,
         per_device_eval_batch_size=2,
     )
@@ -62,6 +64,15 @@ def test_every_split_takes_hfs_worker_arguments(build):
     assert loader.multiprocessing_context.get_start_method() == "spawn"
     assert loader.prefetch_factor == 3
     assert loader.in_order is False
+
+
+def test_a_process_sharded_batch_sampler_is_refused():
+    """HF's ``batch_rebalance`` sampler shards batches by global process: under TP/CP the ranks that
+    share a batch would each draw different rows."""
+    host = _host()
+    host.args.train_sampling_strategy = "batch_rebalance"
+    with pytest.raises(ValueError, match="batch_rebalance"):
+        host.get_train_dataloader()
 
 
 if __name__ == "__main__":

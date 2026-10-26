@@ -3,6 +3,8 @@ MoE, and EP+TP with the experts distributed by DeepEP."""
 
 from __future__ import annotations
 
+from contextlib import contextmanager
+
 from accelerate.logging import get_logger
 from transformers import DistributedConfig, PreTrainedModel
 
@@ -12,6 +14,7 @@ from src.distributed.mesh import build_dp_tp_mesh, tp_submesh
 from src.distributed.parallelism_config import ParallelismConfig
 from src.distributed.tensor_parallel.hf_plan import consistent_tied_tp_plan, finish_hf_tp_load
 from src.distributed.tensor_parallel.parallelize_attention import apply_tp_to_attention_only
+from src.hardware import current_device
 from src.model_loading.buffer_repair import finalize_loaded_model
 from src.model_loading.checkpoint_coverage import from_pretrained_verified
 from src.model_loading.parallel.ep import load_ep_model_lazy
@@ -23,6 +26,43 @@ from src.runtime.load_coordination import joined_node_load, timed_global_load
 from src.runtime.ranks import get_global_rank
 
 logger = get_logger(__name__)
+
+
+class _ToolkitMeshViews:
+    """The mesh views transformers' TP-only load reads, answered from the toolkit's (dp, tp) mesh."""
+
+    def __init__(self, device_mesh, tp_mesh):
+        self._views = {("pp", "fsdp", "tp"): device_mesh, ("tp",): tp_mesh}
+
+    def get_mesh(self, dims):
+        key = (dims,) if isinstance(dims, str) else tuple(dims)
+        if key not in self._views:
+            raise RuntimeError(
+                f"transformers asked a TP-only load for the {key} mesh, which the toolkit does not build"
+            )
+        return self._views[key]
+
+
+@contextmanager
+def _toolkit_tp_mesh(device_mesh, tp_mesh):
+    """Shard an HF-native TP load over the toolkit's TP group instead of a mesh transformers builds.
+
+    transformers ignores a passed mesh and builds its own world-wide one, sized to the world unless
+    ``fsdp_size > 1``, which also FSDP-wraps the model the toolkit wraps itself. Its single hook for the
+    mesh is ``prepare_distribute_model``, answered here for the length of the load.
+    """
+    if "prepare_distribute_model" in PreTrainedModel.__dict__:
+        raise RuntimeError("PreTrainedModel.prepare_distribute_model is already overridden")
+    device = current_device()
+
+    def prepare(cls, distributed_config, device_map=None):
+        return distributed_config, device, _ToolkitMeshViews(device_mesh, tp_mesh)
+
+    PreTrainedModel.prepare_distribute_model = classmethod(prepare)
+    try:
+        yield
+    finally:
+        del PreTrainedModel.prepare_distribute_model
 
 
 def load_tp_model(
@@ -42,17 +82,21 @@ def load_tp_model(
     # Not node-throttled: the load ends in ``tie_weights``, whose equality check on a tied pair of
     # DTensors is an all-reduce on the default group, which a rank-serialized region deadlocks. Each
     # rank's shard streams straight onto its GPU anyway, so host RAM never holds the model.
-    with consistent_tied_tp_plan(model_class, from_pretrained_kwargs["config"]):
+    with (
+        consistent_tied_tp_plan(model_class, from_pretrained_kwargs["config"]),
+        _toolkit_tp_mesh(device_mesh, tp_mesh),
+    ):
         model = from_pretrained_verified(
             model_class,
             source.name,
-            # The 5.16 spelling of tp_plan="auto"; with an explicit device_mesh the mesh is authoritative.
-            # The config's derived tp_size (WORLD_SIZE) is read only by the model's own save_pretrained,
-            # which no toolkit path calls on a live TP model.
-            distributed_config=DistributedConfig(tp_plan="auto"),
-            device_mesh=tp_mesh,
+            distributed_config=DistributedConfig(tp_plan="auto", tp_size=tp_size),
             **from_pretrained_kwargs,
         )
+    # The toolkit owns this model's DP wrap, grad reduction, loss scaling and checkpoints. The flag would
+    # send HF's Trainer down its own prepare and save paths and refuse checkpoints that carry optimizer
+    # state; the size would make it rescale token counts and losses and require its own TP accelerator.
+    model._is_distributed_loading_by_transformers = False
+    model._tp_size = None
     precision_guard = DeferredRankFailure(f"FP32-master TP checkpoint load from {source.name}")
     # Throttled: collective-free, and every rank stages each full FP32 tensor in host memory before
     # keeping its own shard.

@@ -38,7 +38,9 @@ class _GCModel(nn.Module):
         super().__init__()
         self.gc_kwargs = None
 
-    def gradient_checkpointing_enable(self, gradient_checkpointing_kwargs=None, every_n_layers: int = 1):
+    def gradient_checkpointing_enable(
+        self, gradient_checkpointing_kwargs=None, every_n_layers: int = 1, offload: bool = False
+    ):
         self.gc_kwargs = gradient_checkpointing_kwargs
         self._gradient_checkpointing_func = checkpoint
 

@@ -65,7 +65,7 @@ LoRA takes `lora_task_type: SEQ_CLS` and is rejected under TP and EP+TP ([PEFT](
 
 Not supported. The script loads through the text-only `load_model_and_tokenizer`, builds no processor, and refuses `text_only_model` as well as any image column.
 
-A multimodal checkpoint is also checked for a sequence-classification head before the load and refused without one. transformers 5.16 ships that head for a few families and the toolkit registers two more ([roster](preference/reward-modeling.md#vision-language)).
+A multimodal checkpoint is also checked for a sequence-classification head before the load and refused without one. transformers 5.20 ships that head for a few families and the toolkit registers two more ([roster](preference/reward-modeling.md#vision-language)).
 
 ## Testing a setup
 

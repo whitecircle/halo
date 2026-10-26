@@ -98,10 +98,9 @@ def router_logits_forced_off(config) -> bool:
 def honors_router_logits_flag(model) -> bool:
     """Whether setting ``config.output_router_logits`` actually reaches this model's aux-loss term.
 
-    HF resolves a config-backed forward flag only on an explicit parameter, so a forward that does not declare it
-    never consults the config (``Qwen3_5MoeForConditionalGeneration`` reads ``kwargs`` only). Probed on the head under
-    every wrapper and on the forward the instance runs: a Liger fused loss can rebind a parameter-less forward on the
-    instance alone.
+    HF resolves a config-backed forward flag only on an explicit parameter, so a forward that reads it from ``kwargs``
+    only never consults the config. Probed on the head under every wrapper and on the forward the instance runs: a
+    Liger fused loss can rebind a parameter-less forward on the instance alone.
     """
     forward = getattr(base_transformers_model(model), "forward", None)
     if forward is None:

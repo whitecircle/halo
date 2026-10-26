@@ -19,8 +19,8 @@ Build the image from `Dockerfile.vllm`, or pull it:
 
 ```bash
 make build-vllm
-# or: docker pull public.ecr.aws/whitecircle/halo:vllm-0.26.0
-#     docker tag public.ecr.aws/whitecircle/halo:vllm-0.26.0 vllm-server:0.26.0
+# or: docker pull public.ecr.aws/whitecircle/halo:vllm-0.32.0
+#     docker tag public.ecr.aws/whitecircle/halo:vllm-0.32.0 vllm-server:0.32.0
 
 VLLM_MODEL=Qwen/Qwen3-30B-A3B VLLM_CUDA_DEVICES=6,7 VLLM_TP=2 \
     docker compose -f docker-compose.vllm.yml up -d vllm-server
@@ -78,7 +78,7 @@ Async GRPO can use SGLang with `rollout_backend: sglang`. Online GRPO is
 vLLM-only.
 
 ```bash
-make build-sglang      # or pull public.ecr.aws/whitecircle/halo:sglang-0.5.17 and set SGLANG_IMAGE to it
+make build-sglang      # or pull public.ecr.aws/whitecircle/halo:sglang-0.5.22 and set SGLANG_IMAGE to it
 SGLANG_MODEL=Qwen/Qwen3-30B-A3B SGLANG_CUDA_DEVICES=7 \
     docker compose -f docker-compose.sglang.yml up -d
 ```
@@ -90,8 +90,8 @@ The variables mirror vLLM's: `SGLANG_MODEL` (required), `SGLANG_PORT` (`30000`),
 `NCCL_CUMEM_ENABLE=1`; a container you start by hand needs it too.
 
 Weight sync needs **this repo's** SGLang image, not upstream's. It matches NCCL
-with the training image and patches the GLM-4 and Gemma 4 routers so a synced
-router weight takes effect.
+with the training image and patches the Gemma 4 router so a synced router weight
+takes effect.
 
 Which families each engine can update online differs. The trainer refuses an
 unsupported pair at construction and names the reason; the lists are in the
@@ -180,7 +180,7 @@ engine-versus-policy log-ratio drifts negative. The compose files default to
 
 | Sign | Cause and fix |
 | --- | --- |
-| 400 on every rollout, zero tokens back | The server cannot take a thinking budget. Set `VLLM_REASONING_PARSER` **and** `VLLM_USE_V2_MODEL_RUNNER=0`, or drop `rollout_max_thinking_tokens`. Code contests also send vLLM a cap whenever `reasoning_effort` is set, as the shipped recipes do: a soft budget sends its ceiling, and the retry after a cut, empty or refused turn sends a quarter of the budget. |
+| 400 on every rollout, zero tokens back | The server cannot take a thinking budget. Set `VLLM_REASONING_PARSER`, or drop `rollout_max_thinking_tokens`. Leave `VLLM_USE_V2_MODEL_RUNNER` unset: the image's Model Runner V2 is the runner R3 and the gpt-oss budget need. Code contests also send vLLM a cap whenever `reasoning_effort` is set, as the shipped recipes do: a soft budget sends its ceiling, and the retry after a cut, empty or refused turn sends a quarter of the budget. |
 | The run finishes with a flat zero reward | Wrong tool-call parser on a tool-using environment; the calls came back as text. A missing parser returns 400 instead. |
 | `Could not bind the weight-transfer group port` | Another process holds the port, two servers share one, or an outbound connection took it. Give each server its own `group_port`, reserve it or pick one outside `32768–60999`, and remove stale containers. |
 | `/health` is 200 but nothing generates | A trainer died mid-sync and left the engine paused. Resume it, or restart the container if the push had started. |

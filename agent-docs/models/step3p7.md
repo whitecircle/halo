@@ -33,9 +33,9 @@ The EP SFT round-trip test pins the on-disk keys against a plain `save_pretraine
 
 Nothing restores that layout from a module-spelled file: `scripts/after_training/unfuse_moe_experts.py` refuses the family (its hub layout stores no per-expert tensors), and a transformers load + `save_pretrained` of a module-layout source reverts nothing (the load consumed no conversions). Sharded EP saves (`save_sharded_ep: true`) are refused for the family for the same reason: the offline merge streams key by key and cannot apply the revert.
 
-The `config.json` beside those weights is the **source checkpoint's own**, not transformers'. The serving engines have no `step3p7` config class (vLLM 0.26.0 ships transformers 5.14) and read the family only through the release's `config.json` and the modules its `auto_map` names, which spell it in the vendor's keys: `moe_num_experts`, `moe_top_k`, `moe_layers_enum`, `attention_other_setting`, per-layer `rope_theta`.
+The `config.json` beside those weights is the **source checkpoint's own**, not transformers'. vLLM 0.32.0 cannot serve the family through transformers' native `step3p7` config class (its config parsing raises `AmbiguousGlobalPerLayerAttributeError` on it) and reads it only through the release's `config.json` and the modules its `auto_map` names, which spell it in the vendor's keys: `moe_num_experts`, `moe_top_k`, `moe_layers_enum`, `attention_other_setting`, per-layer `rope_theta`.
 
-transformers 5.16 absorbs those at load (`Step3p7TextConfig.attribute_map` plus the `kwargs.pop` derivations in `__post_init__`) and re-emits only the native ones, so its own serialization is unservable and nothing on the save side can invert it.
+transformers 5.20 absorbs those at load (`Step3p7TextConfig.attribute_map` plus the `kwargs.pop` derivations in `__post_init__`) and re-emits only the native ones, so its own serialization is unservable and nothing on the save side can invert it.
 
 The family spec therefore declares `exports_source_config_schema`, and every toolkit config write carries the source's config and remote-code modules forward with this run's changed values applied under the source's spellings, a `patch_vocab.py` `vocab_size` included ([Checkpoints](../reference/checkpoints.md#what-gets-saved)). Training is unaffected: this transformers accepts those spellings, so the export reloads to exactly the config that was trained.
 
@@ -75,14 +75,14 @@ There is no full-model host residency at 198B ([host RAM under the lazy path](..
 
 ## Serving for GRPO (vLLM)
 
-Online and async GRPO sync into vLLM 0.26.0, which serves the family from the **hub** namespace (`model.layers.N.moe.gate_proj` / `up_proj` / `down_proj` stacks, `moe.gate.weight`, `share_expert.*`, the vendor-namespace vision tower) and silently drops any name it does not map.
+Online and async GRPO sync into vLLM 0.32.0, which serves the family from the **hub** namespace (`model.layers.N.moe.gate_proj` / `up_proj` / `down_proj` stacks, `moe.gate.weight`, `share_expert.*`, the vendor-namespace vision tower) and silently drops any language-model name it does not map (an unmapped vision name raises).
 
 The sync forwards that namespace: the same save-side revert the gathered save runs rewrites every forwarded key. The fused `experts.gate_up_proj` gather is split into the two hub stacks, the vision q/k/v are fused back into the un-permuted `in_proj`, and the `model.language_model.*` / `mlp.*` spellings return to the hub's, so the served model receives exactly the tensors a gathered checkpoint would carry.
 
 `tests/cpu/grpo/test_weight_sync_hub_namespace.py` pins the two against `save_pretrained`; `tests/gpu/trainers/grpo/test_step3p7_vllm_weight_sync_e2e.py` proves the server's logprobs follow the trainer's, per weight group, on a live server. Serve the hub repo or a toolkit export directly, and note:
 
-- `--trust-remote-code` — the vLLM image's transformers has no native `step3p7`; the composite config is the repo's own `configuration_step3p7.py` (the text tower resolves to vLLM's `step3p5`). A toolkit export ships that module and the ones it imports itself ([Checkpoint](#checkpoint)), so it needs the same flag and nothing else.
-- `--moe-backend triton` and the layerwise-reload patch, as for every MoE family ([Rollout Servers](../infrastructure/rollout-servers.md#weight-sync)); the experts are a `FusedMoE`, which the patch already excludes from the reload lifecycle.
+- `--trust-remote-code` — vLLM cannot parse transformers' native `step3p7` config, so the composite config is the repo's own `configuration_step3p7.py` (the text tower resolves to vLLM's `step3p5`). A toolkit export ships that module and the ones it imports itself ([Checkpoint](#checkpoint)), so it needs the same flag and nothing else.
+- `--moe-backend triton` and the layerwise-reload patch, as for every MoE family ([Rollout Servers](../infrastructure/rollout-servers.md#weight-sync)); the experts are a `RoutedExperts`, which the patch already excludes from the reload lifecycle.
 - The router's selection bias (`moe.router_bias`) is a buffer and the sync ships parameters only: it stays at its checkpoint value on both sides, which is exact because weight-sync RL runs `moe_balancing: none` (bias-update balancing is downgraded before any bias state exists).
 - vLLM's clamped fused-MoE kernel accepts `swiglu_limits` of exactly 7 (the release value); any other clamp fails at server start, not silently.
 - SGLang is refused for the family at construction: `Step3p5ForCausalLM.load_weights` asserts full parameter coverage in each call, which the chunked online update cannot satisfy ([Rollout Servers](../infrastructure/rollout-servers.md#which-families-each-engine-serves)).

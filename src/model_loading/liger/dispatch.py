@@ -1,5 +1,6 @@
-"""Liger Kernel dispatch: resolve the applier per ``model_type`` (toolkit spec, then Liger's registry, then
-the text sub-config) and apply it with the per-family defaults and the parallelism safety rules.
+"""Liger Kernel dispatch: resolve the applier per ``model_type`` (the toolkit spec for it or its text sub-config's,
+then Liger's registry in the same order) and apply it with the per-family defaults and the parallelism safety
+rules.
 
 Cross-entropy is always the toolkit's scoped patch: an upstream applier's CE branch rebinds
 ``torch.nn.functional.cross_entropy`` process-wide, under every caller that is not the model's loss.
@@ -51,6 +52,9 @@ _PER_MODEL_DEFAULTS = {
     for model_type, applier in _TOOLKIT_LIGER_APPLIERS.items()
 }
 
+# Applier lookup order: a toolkit applier wins over Liger's own entry, for either spelling of the family.
+_APPLIER_REGISTRIES = (_TOOLKIT_LIGER_APPLIERS, MODEL_TYPE_TO_APPLY_LIGER_FN)
+
 # The shared Liger defaults; per-family and user overrides layer on top of a fresh copy.
 _LIGER_DEFAULTS = {
     "rope": True,
@@ -62,11 +66,6 @@ _LIGER_DEFAULTS = {
 }
 
 
-def resolve_liger_applier(model_type: str):
-    """The Liger applier claiming ``model_type``, toolkit first, or ``None``."""
-    return _TOOLKIT_LIGER_APPLIERS.get(model_type) or MODEL_TYPE_TO_APPLY_LIGER_FN.get(model_type)
-
-
 def _liger_model_types(model_config) -> tuple[str | None, str | None]:
     """``(model_type, text-config fallback)``: the two spellings an applier may be registered under, since a
     multimodal wrapper carries its decoder classes on its text sub-config."""
@@ -76,12 +75,21 @@ def _liger_model_types(model_config) -> tuple[str | None, str | None]:
 
 
 def _resolve_applier(model_type: str | None, fallback_type: str | None) -> tuple[str | None, Callable | None]:
-    """``(model_type, applier)`` Liger resolves to: ``model_type``'s own applier, else its text tower's."""
-    for candidate in (model_type, fallback_type):
-        applier = resolve_liger_applier(candidate)
-        if applier is not None:
-            return candidate, applier
+    """``(model_type, applier)`` Liger resolves to: the toolkit's applier for either spelling, else upstream's.
+
+    The toolkit owns a family through its multimodal wrappers too: an upstream wrapper applier (Gemma 4's)
+    runs its own text-tower roles, which would replace the ones the tower's spec takes over.
+    """
+    for registry in _APPLIER_REGISTRIES:
+        for candidate in (model_type, fallback_type):
+            if candidate in registry:
+                return candidate, registry[candidate]
     return None, None
+
+
+def resolve_liger_applier(model_type: str):
+    """The Liger applier claiming ``model_type``, toolkit first, or ``None``."""
+    return _resolve_applier(model_type, None)[1]
 
 
 def _toolkit_applier(model_type: str | None, applier) -> LigerApplier | None:
@@ -115,9 +123,9 @@ def liger_ep_disables_fused_glu(needs_ep_wrappers: bool, model_config) -> bool:
 def liger_routed_expert_overrides(needs_ep_wrappers: bool, model_config) -> dict[str, str]:
     """``{"swiglu": reason}`` where upstream Liger's ``swiglu`` could replace routed experts Halo does not wrap.
 
-    Upstream's MoE appliers swap routed experts for ``LigerExperts`` under ``swiglu``, whose input gradient
-    the pinned liger-kernel computes wrong on Blackwell. The rule keys on the config having experts, and
-    the flag goes whole: any dense, shared-expert or vision SwiGLU upstream fuses under it runs eager too.
+    Upstream's MoE appliers swap routed experts for ``LigerExperts`` under ``swiglu``, whose Blackwell
+    input-gradient fix is not validated here. The rule keys on the config having experts, and the flag goes
+    whole: any dense, shared-expert or vision SwiGLU upstream fuses under it runs eager too.
     """
     if not has_routed_experts(model_config) or wraps_experts(model_config, wrappers_requested=needs_ep_wrappers):
         return {}
@@ -138,7 +146,7 @@ def liger_routed_expert_overrides(needs_ep_wrappers: bool, model_config) -> dict
         "swiglu": (
             f"{model_type} has routed experts Halo does not wrap here and upstream liger-kernel owns its "
             f"swiglu, a flag under which upstream's MoE appliers can replace routed experts with LigerExperts "
-            f"(input gradient wrong on Blackwell in the pinned release); the whole flag goes, so any dense, "
+            f"(its Blackwell input-gradient fix is not validated here); the whole flag goes, so any dense, "
             f"shared-expert or vision SwiGLU upstream fuses under it runs eager too"
         )
     }
@@ -217,14 +225,21 @@ def sanitize_liger_config(
 
 
 def trl_reapplication_config(model_config, applied: dict) -> dict:
-    """The config HF Trainer re-applies Liger with at ``train()``: ``applied`` with the taken-over roles off.
+    """The config HF Trainer re-applies Liger with at ``train()``: ``applied`` with the toolkit's roles off.
 
-    HF's re-application runs upstream's applier alone, so a role a delegating spec took over
-    (``upstream_off``) must go off there, or upstream's instance patch binds its variant over the family's.
+    HF's re-application runs the applier liger-kernel registers for the model's own ``model_type`` alone, its
+    defaults filling every omitted flag. Where the toolkit owns the family, every flag that applier declares and
+    the toolkit applier does not hand upstream goes off, as do the roles a delegating spec took over
+    (``upstream_off``); otherwise upstream's instance patch binds its variant over the family's, or, for a family
+    the toolkit patches alone that upstream also registers (DeepSeek-V4), its norm swap and fused head.
     """
     toolkit = _toolkit_applier(*_resolve_applier(*_liger_model_types(model_config)))
-    taken_over = toolkit.spec.upstream_off if toolkit is not None else ()
-    return {**applied, **dict.fromkeys(taken_over, False)}
+    if toolkit is None:
+        return applied
+    reapplier = MODEL_TYPE_TO_APPLY_LIGER_FN.get(getattr(model_config, "model_type", None))
+    reapplied_flags = set(inspect.signature(reapplier).parameters) - {"model"} if reapplier is not None else set()
+    owned = {flag for flag in reapplied_flags if not toolkit.hands_upstream(flag)} | set(toolkit.spec.upstream_off)
+    return {**applied, **dict.fromkeys(sorted(owned), False)}
 
 
 def warn_if_flce_unreachable(model_config: AutoConfig, trainer_name: str) -> None:
@@ -250,7 +265,8 @@ def _apply_liger_for_standard_models(
     fallback_model_type: str | None = None,
     requested_kernels: frozenset[str] = frozenset(),
 ) -> dict | None:
-    """Apply the resolved applier; returns the applied (signature-filtered) config, or ``None`` when none ran.
+    """Apply the applier :func:`_resolve_applier` picks; returns the applied (signature-filtered) config, or
+    ``None`` when none ran.
 
     A family no applier covers warns, since ``use_liger_kernel`` defaults on, and raises when the config
     asked for a specific kernel nothing can deliver.

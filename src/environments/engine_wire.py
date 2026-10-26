@@ -6,6 +6,7 @@ return those facts in different places. Transport and the episode loop belong to
 """
 
 import logging
+from collections.abc import Iterable
 from typing import Any, get_args, get_type_hints
 
 from src.environments.rollout_config import (
@@ -21,6 +22,10 @@ logger = logging.getLogger(__name__)
 
 # Backends already warned that a per-effort thinking budget reaches no engine field (once per process).
 _THINKING_BUDGET_UNENFORCED_WARNED: set[str] = set()
+
+# Model types vLLM serves with its mistral_common tokenizer, whose encode() turns the budget's "[THINK]"
+# and "[/THINK]" markers into plain-text pieces while the model writes them as control tokens.
+VLLM_UNMATCHED_REASONING_MARKER_MODEL_TYPES = frozenset({"mistral4"})
 
 
 def _logprob_entries(choice: dict[str, Any]) -> list[dict[str, Any]] | None:
@@ -212,6 +217,19 @@ def generation_control_fields(
     if template_kwargs:
         fields["chat_template_kwargs"] = template_kwargs
     return fields
+
+
+def refuse_unmatched_reasoning_markers(model_types: Iterable[str], backend: str) -> None:
+    """Refuse a thinking budget vLLM accepts but can never enforce for these ``model_types``."""
+    unmatched = sorted(VLLM_UNMATCHED_REASONING_MARKER_MODEL_TYPES.intersection(model_types))
+    if backend == VLLM_BACKEND and unmatched:
+        raise ValueError(
+            f"vLLM cannot enforce a thinking budget for model_type {unmatched}: it serves this model with its "
+            "mistral_common tokenizer, which encodes the [THINK] and [/THINK] markers as plain text while the "
+            "model writes them as control tokens, so the budget never starts counting and reasoning runs "
+            "uncapped. Unset rollout_max_thinking_tokens and the thinking_tokens of every effort level the "
+            "environment draws, and steer with reasoning_effort instead."
+        )
 
 
 def build_payload(

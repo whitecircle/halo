@@ -11,6 +11,7 @@ the chunks must keep fp32 state out of backward — the reason they exist.
 
 import pytest
 import torch
+from trl.trainer.utils import selective_log_softmax
 
 import src.kernels.logprobs as logprob_kernels
 from src.kernels.logprobs import logit_chunk_rows, next_token_logprobs, selective_logprobs, token_logprobs
@@ -49,6 +50,32 @@ def test_selective_logprobs_match_the_full_plane(monkeypatch, batch, seq, budget
     got.sum().backward()
     want.sum().backward()
     assert torch.equal(chunked_in.grad, full_in.grad), f"max grad diff {(chunked_in.grad - full_in.grad).abs().max()}"
+
+
+def test_a_row_mask_zeroes_the_masked_positions_as_trl_does():
+    """TRL's DPO/KTO paths pass the shifted completion mask as ``row_mask``; masked positions score zero
+    and send back no gradient, the rest are untouched."""
+    torch.manual_seed(0)
+    base = torch.randn(3, 9, VOCAB, dtype=torch.bfloat16)
+    index = torch.randint(0, VOCAB, (3, 8))
+    row_mask = torch.randint(0, 2, (3, 8))
+    ours_in = base.clone().requires_grad_(True)
+    trl_in = base.float().requires_grad_(True)
+
+    got = selective_logprobs(ours_in[:, :-1], index, row_mask=row_mask)
+    want = selective_log_softmax(trl_in[:, :-1], index, row_mask=row_mask)
+
+    torch.testing.assert_close(got, want)
+    assert torch.equal(got[row_mask == 0], torch.zeros_like(got[row_mask == 0]))
+    got.sum().backward()
+    want.sum().backward()
+    torch.testing.assert_close(ours_in.grad.float(), trl_in.grad, rtol=1e-2, atol=1e-2)
+    assert not ours_in.grad[:, :-1][row_mask == 0].any(), "a masked position sent back a gradient"
+
+
+def test_selective_logprobs_refuses_a_row_mask_of_another_shape():
+    with pytest.raises(ValueError, match="row_mask"):
+        selective_logprobs(torch.randn(2, 5, 11), torch.zeros(2, 5, dtype=torch.long), row_mask=torch.ones(2, 4))
 
 
 def test_selective_logprobs_refuses_a_top_k_index():

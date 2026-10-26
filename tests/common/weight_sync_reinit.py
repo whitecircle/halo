@@ -26,8 +26,8 @@ VLLM_REINIT_MODEL = env_str("HALO_TEST_VLLM_REINIT_MODEL", QWEN3_0_6B)
 # it into a degenerate distribution the next cycle could no longer move.
 PERTURBED_PARAM = "model.norm.weight"
 PERTURBATION = 1.02
-# An unreleased communicator strands ~633 MiB per cycle on each end of a vLLM 0.26.0 pair, so a dozen
-# leaking cycles overshoot this budget several times over.
+# An unreleased communicator strands ~633 MiB per cycle on each end of a vLLM pair (measured on 0.26.0),
+# so a dozen leaking cycles overshoot this budget several times over.
 MAX_MEMORY_GROWTH_MIB = 1024
 # Connect/sync/close cycles that push every parameter (over 1 GiB for the default checkpoint), so each
 # client fills full-size staging buffers: one a closed client strands costs about a chunk per cycle,

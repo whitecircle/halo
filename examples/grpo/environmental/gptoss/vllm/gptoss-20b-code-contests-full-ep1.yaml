@@ -1,6 +1,6 @@
 # Environmental GRPO — gpt-oss-20b full fine-tune on Codeforces, no EP, ZeRO-3, KL-free (IS bands as the trust region) + routing_replay: rollout.
 # Serve on the patched vllm-server image (agent-docs/infrastructure/rollout-servers.md#vllm): --enable-return-routed-experts --moe-backend triton,
-#   VLLM_USE_V2_MODEL_RUNNER=0, --enable-auto-tool-choice --tool-parser-plugin /opt/gpt_oss_text_tool_parser.py
+#   --enable-auto-tool-choice --tool-parser-plugin /opt/gpt_oss_text_tool_parser.py
 #   --tool-call-parser gpt_oss_text, --reasoning-parser-plugin /opt/gpt_oss_reasoning_parser.py --reasoning-parser openai_gptoss.
 # Launch: 4 train GPUs + 2 vLLM servers TP=2 on the other 4; CUDA_VISIBLE_DEVICES=4,5,6,7 DIST_NCCL_TIMEOUT_MINUTES=60 torchrun --nproc_per_node=4 scripts/training/environmental_grpo.py <this config>
 
@@ -128,7 +128,7 @@ rollout_stop_tokens: ["<|call|>"]      # end each turn at the harmony tool-call 
 rollout_max_tokens: 30000              # per-turn total; under a soft budget the reasoning may run until only the answer room is left of it
 rollout_max_answer_tokens: 8192      # the most a turn generates past its reasoning cap (never stated to the model): an honest call fits well inside it, a program carrying the reasoning on in its comments is cut at it
 rollout_max_episode_tokens: 131072  # the most an episode may sample over all its turns, reasoning and visible output together (never stated to the model; a turn's caps narrow to what is left)
-rollout_reasoning_end_token: "<|start|>assistant<|channel|>final<|message|>"  # the final-channel opener vLLM's budget forces (openai_gptoss plugin)
+rollout_reasoning_end_token: "<|end|><|start|>assistant<|channel|>final<|message|>"  # the move into the final channel vLLM's budget forces (openai_gptoss plugin)
 reasoning_floor: 0.05  # the one term that pays for MORE reasoning: an episode reasoning under 0.75x its level's per-turn budget, summed over its turns, pays up to this
 reasoning_price: {low: 0.015, medium: 0.01, high: 0.005}  # per 1,000 reasoning tokens a turn spends past its level's soft budget, the lowest level highest
 reasoning_price_past_budget: true  # free within the budget: the soft budget's only ceiling below the engine's

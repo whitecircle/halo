@@ -108,7 +108,8 @@ DEEPSEEK_V4 = MoEFamilySpec(
 GEMMA4 = MoEFamilySpec(
     model_types=("gemma4", "gemma4_text"),
     expert_layout=ExpertLayout(key_prefix=""),
-    # The full-attention layers' geometry, which vLLM 0.26.0's Gemma 4 loader reads off these flat keys.
+    # The full-attention layers' geometry, which older vLLM servers read off these flat keys; the pinned
+    # server's transformers folds them back into ``per_layer_config`` at parse.
     served_flat_config_keys=MappingProxyType(
         {
             "global_head_dim": ("full_attention", "head_dim"),
@@ -134,7 +135,10 @@ GLM5_NEXT = MoEFamilySpec(
     balancing_slot=_E_SCORE_CORRECTION_BIAS,
     shared_expert_attrs=("shared_experts",),
     hub_conversion_keys=("glm5_next",),
-    weight_sync_refusal="neither pinned rollout engine (vLLM 0.26.0, SGLang 0.5.17) registers a glm5_next model",
+    weight_sync_refusal=(
+        "both pinned rollout engines register glm5_next, but their expert loaders take only per-expert keys "
+        "where the gather emits the fused pair, and no online update into either has been validated"
+    ),
 )
 GPT_OSS = MoEFamilySpec(
     model_types=("gpt_oss",),

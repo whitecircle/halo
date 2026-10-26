@@ -46,8 +46,11 @@ The budget is per turn; `rollout_max_tokens` bounds the whole turn, reasoning an
 | `rollout_max_thinking_tokens` | `null` | run-wide per-turn reasoning cap (vLLM `thinking_token_budget`) |
 | `rollout_max_answer_tokens` | `null` | the most a turn may generate past its reasoning cap ([Answer room](#answer-room)) |
 
-Any reasoning cap on vLLM needs a reasoning parser and `VLLM_USE_V2_MODEL_RUNNER=0` on the server
-([Rollout Servers](../../infrastructure/rollout-servers.md#vllm)).
+Any reasoning cap on vLLM needs a reasoning parser on the server, which enforces it on the image's
+Model Runner V2 ([Rollout Servers](../../infrastructure/rollout-servers.md#vllm)). A vLLM cap on Mistral 4 is
+refused at trainer construction and when an eval loads a training config: vLLM serves the family with its
+`mistral_common` tokenizer, which encodes the `[THINK]`/`[/THINK]` markers as plain text, so the budget would
+never start counting ([Mistral4](../../models/mistral4.md#serving)).
 
 ### Enforced and soft budgets
 
@@ -113,7 +116,7 @@ the cap they ran under: an enforced budget, a soft ceiling, or a retry reserve. 
 budget leaves a late turn.
 
 It is logged only with a vLLM cap that can bind, `train_on_sampled_tokens`, and a `rollout_reasoning_end_token` that
-encodes to one added token. gpt-oss's five-token final-channel opener logs none, nor do the standalone eval scripts.
+encodes to one added token. gpt-oss's six-token move into the final channel logs none, nor do the standalone eval scripts.
 
 ## Reasoning length reward
 

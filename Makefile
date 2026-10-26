@@ -10,6 +10,9 @@ SHELL := /bin/bash
 IMAGE        ?= halo:blackwell
 # SemVer for the versioned image tags the push targets publish alongside the moving tags.
 VERSION      ?= 1.1.0
+# The engine release a server image builds, read off its Dockerfile ARG (the one place it is pinned).
+VLLM_VERSION   := $(shell sed -n 's/^ARG VLLM_VERSION=//p' Dockerfile.vllm)
+SGLANG_VERSION := $(shell sed -n 's/^ARG SGLANG_VERSION=//p' Dockerfile.sglang)
 NPROC        ?= 8
 # Training method name for `make train` (any `halo launch --list` entry).
 METHOD       ?= sft
@@ -146,9 +149,9 @@ test-gpu-vllm: SERVER_TIER_DOCKER_ENV = $(NO_FABRIC_ENV) \
 test-gpu-vllm: ## pytest the vLLM-server GPU tier (server on a GPU outside TRAINER_CUDA_DEVICES; SERVER_TIER picks the dense or a MoE pass, see above; EFA=1 on an EFA host)
 	@curl -sf $(VLLM_SERVER_URL)/health >/dev/null || { echo "No vLLM server at $(VLLM_SERVER_URL). Start it on a \
 	  GPU the trainer does not use: VLLM_CUDA_DEVICES=7 VLLM_REASONING_PARSER=qwen3 \
-	  VLLM_USE_V2_MODEL_RUNNER=0 docker compose -f docker-compose.vllm.yml up -d vllm-server \
-	  (the benchmarks need both variables: their per-effort CoT budget draws a 400 without a reasoning \
-	  parser, and another under Model Runner V2; EFA=1: add -f docker-compose.vllm.efa.yml)"; exit 1; }
+	  docker compose -f docker-compose.vllm.yml up -d vllm-server \
+	  (the benchmarks need the reasoning parser: their per-effort CoT budget draws a 400 without one; \
+	  EFA=1: add -f docker-compose.vllm.efa.yml)"; exit 1; }
 	$(DOCKER_RUN) bash -lc "pytest -m 'gpu and vllm_server and ($(SERVER_TIER))' $(GPU_TEST_DIR) $(PYTEST_ARGS)"
 
 test-gpu-sglang: SERVER_TIER_DOCKER_ENV = $(NO_FABRIC_ENV) \
@@ -256,12 +259,12 @@ build-hopper: ## build the Hopper image (TARGET_GPU=hopper is the Dockerfile def
 	  --build-arg VERSION=$(VERSION) --build-arg BUILD_DATE=$(BUILD_DATE) .
 
 build-vllm: ## build the vLLM inference image (credential-free; NCCL pinned from uv.lock)
-	docker build -f Dockerfile.vllm -t vllm-server:0.26.0 \
+	docker build -f Dockerfile.vllm -t vllm-server:$(VLLM_VERSION) \
 	  --build-arg VERSION=$(VERSION) --build-arg BUILD_DATE=$(BUILD_DATE) \
 	  --build-arg SOURCE_REVISION=$(SOURCE_REVISION) .
 
 build-sglang: ## build the SGLang inference image (NCCL pinned from uv.lock, matching the training images)
-	docker build -f Dockerfile.sglang -t sglang-server:0.5.17 \
+	docker build -f Dockerfile.sglang -t sglang-server:$(SGLANG_VERSION) \
 	  --build-arg VERSION=$(VERSION) --build-arg BUILD_DATE=$(BUILD_DATE) \
 	  --build-arg SOURCE_REVISION=$(SOURCE_REVISION) .
 
@@ -291,17 +294,17 @@ push-public-hopper: ecr-public-login ## publish halo:hopper -> ECR Public (hoppe
 	docker push $(ECR_PUBLIC):hopper
 	docker push $(ECR_PUBLIC):hopper-$(VERSION)
 
-push-public-vllm: ecr-public-login ## publish vllm-server:0.26.0 -> ECR Public (vllm-0.26.0 + -$(VERSION))
-	docker tag vllm-server:0.26.0 $(ECR_PUBLIC):vllm-0.26.0
-	docker tag vllm-server:0.26.0 $(ECR_PUBLIC):vllm-0.26.0-$(VERSION)
-	docker push $(ECR_PUBLIC):vllm-0.26.0
-	docker push $(ECR_PUBLIC):vllm-0.26.0-$(VERSION)
+push-public-vllm: ecr-public-login ## publish vllm-server:$(VLLM_VERSION) -> ECR Public (vllm-$(VLLM_VERSION) + -$(VERSION))
+	docker tag vllm-server:$(VLLM_VERSION) $(ECR_PUBLIC):vllm-$(VLLM_VERSION)
+	docker tag vllm-server:$(VLLM_VERSION) $(ECR_PUBLIC):vllm-$(VLLM_VERSION)-$(VERSION)
+	docker push $(ECR_PUBLIC):vllm-$(VLLM_VERSION)
+	docker push $(ECR_PUBLIC):vllm-$(VLLM_VERSION)-$(VERSION)
 
-push-public-sglang: ecr-public-login ## publish sglang-server:0.5.17 -> ECR Public (sglang-0.5.17 + -$(VERSION))
-	docker tag sglang-server:0.5.17 $(ECR_PUBLIC):sglang-0.5.17
-	docker tag sglang-server:0.5.17 $(ECR_PUBLIC):sglang-0.5.17-$(VERSION)
-	docker push $(ECR_PUBLIC):sglang-0.5.17
-	docker push $(ECR_PUBLIC):sglang-0.5.17-$(VERSION)
+push-public-sglang: ecr-public-login ## publish sglang-server:$(SGLANG_VERSION) -> ECR Public (sglang-$(SGLANG_VERSION) + -$(VERSION))
+	docker tag sglang-server:$(SGLANG_VERSION) $(ECR_PUBLIC):sglang-$(SGLANG_VERSION)
+	docker tag sglang-server:$(SGLANG_VERSION) $(ECR_PUBLIC):sglang-$(SGLANG_VERSION)-$(VERSION)
+	docker push $(ECR_PUBLIC):sglang-$(SGLANG_VERSION)
+	docker push $(ECR_PUBLIC):sglang-$(SGLANG_VERSION)-$(VERSION)
 
 push-public-all: push-public-blackwell push-public-hopper push-public-vllm push-public-sglang ## publish all four to ECR Public
 

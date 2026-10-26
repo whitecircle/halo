@@ -412,10 +412,10 @@ def chunked_selective_log_softmax_with_entropy(
 
 
 class ChunkedLogprobsCore:
-    """Trainer-agnostic chunked-logprob machinery: the batched implementation, the FA4 per-row dense
-    forward, and the FSDP2-safe redirection. Subclasses provide ``_get_last_hidden_state`` (the
-    backbone forward), ``self.temperature`` and ``self.accelerator``; the construction-time head-path
-    check also reads ``self.model`` and ``self._use_chunked_grpo_logprobs``.
+    """Trainer-agnostic chunked-logprob machinery: the backbone forward, the batched implementation,
+    the FA4 per-row dense forward, and the FSDP2-safe redirection. Subclasses provide
+    ``self.temperature`` and ``self.accelerator``; the construction-time head-path check also reads
+    ``self.model`` and ``self._use_chunked_grpo_logprobs``.
     """
 
     def _check_full_logits_fit(self, width: LogitsWidth | None) -> None:
@@ -463,7 +463,9 @@ class ChunkedLogprobsCore:
             self._forward_redirection = fr
         return fr
 
-    def _chunked_logps(self, model, input_ids, attention_mask, logits_to_keep, batch_size=None, compute_entropy=False):
+    def _chunked_completion_logps(
+        self, model, input_ids, attention_mask, logits_to_keep, batch_size=None, compute_entropy=False
+    ):
         """Chunked ``(logps, entropies)`` for a possibly-wrapped model; the entry point for callers.
 
         Redirects through the wrapped model so its pre-forward hooks fire (FSDP2 unshards root
@@ -607,6 +609,14 @@ class ChunkedLogprobsCore:
         entropies = torch.cat(all_entropies, dim=0) if compute_entropy else None
         return logps, entropies
 
+    def _get_last_hidden_state(self, unwrapped_model, input_ids, attention_mask, logits_to_keep):
+        """Backbone hidden states for the last ``logits_to_keep`` completion positions (text-only):
+        forward the backbone (no ``lm_head``), drop the final position (the causal next-token shift),
+        keep the last ``logits_to_keep``."""
+        backbone = base_transformers_model(unwrapped_model).base_model
+        hidden = backbone(input_ids=input_ids, attention_mask=attention_mask, use_cache=False).last_hidden_state
+        return hidden[:, :-1, :][:, -logits_to_keep:, :]  # (B, logits_to_keep, H)
+
     def _backbone_hidden_state(self, unwrapped_model, input_ids, attention_mask, logits_to_keep):
         """One sub-forward, opening its own EP capacity scope first.
 
@@ -653,26 +663,51 @@ class ChunkedGRPOLogprobsMixin(ChunkedLogprobsCore):
     """Overrides ``_get_per_token_logps_and_entropies`` with a chunked path that does not materialize
     full logits.
 
-    Gated by ``self._use_chunked_grpo_logprobs``; falls back to TRL's full-logits path when off or for
+    Gated by ``self._use_chunked_grpo_logprobs``; falls back to TRL's full-logits scorer when off or for
     multimodal inputs (the chunked path is text-only). Mixed in ahead of ``GRPOTrainer``, whose method
     it overrides, and behind ``ProtectedTokenEntropyMixin``, whose override reaches it through ``super()``.
     """
 
-    # Derived from TRL's signature rather than hand-listed, so a release adding a modality kwarg does
-    # not slip past this gate into the text-only chunked path.
+    # The modality inputs are the rest of TRL's full-logits scorer's parameters: derived from its
+    # signature rather than hand-listed, so a release adding one does not slip past this gate into the
+    # text-only chunked path.
     _CHUNK_TEXT_KEYS = frozenset(
-        ("self", "model", "input_ids", "attention_mask", "logits_to_keep", "batch_size", "compute_entropy")
+        (
+            "self",
+            "model",
+            "input_ids",
+            "attention_mask",
+            "logits_to_keep",
+            "batch_size",
+            "compute_entropy",
+            "compute_aux_loss",
+        )
     )
 
     @classmethod
     def _multimodal_keys(cls) -> frozenset[str]:
-        params = inspect.signature(GRPOTrainer._get_per_token_logps_and_entropies).parameters
+        params = inspect.signature(GRPOTrainer._full_logits_logps).parameters
         return frozenset(name for name in params if name not in cls._CHUNK_TEXT_KEYS)
 
     @profiling_decorator
     def _get_per_token_logps_and_entropies(
-        self, model, input_ids, attention_mask, logits_to_keep, batch_size=None, compute_entropy=False, **kwargs
+        self,
+        model,
+        input_ids,
+        attention_mask,
+        logits_to_keep,
+        batch_size=None,
+        compute_entropy=False,
+        compute_aux_loss=False,
+        **kwargs,
     ):
+        """``(logps, entropies, aux_loss)``, with ``aux_loss`` always ``None``: the trainer mixin hands TRL's
+        GRPO a zero router aux-loss coefficient, the term being inert under a policy-gradient loss."""
+        if compute_aux_loss:
+            raise RuntimeError(
+                "TRL asked the GRPO log-prob forward for the router aux loss, but the toolkit hands GRPO a zero "
+                "router_aux_loss_coef and its scorers return none."
+            )
         # TRL's loss forward passes batch_size=None; rows are independent, so bounding it is exact. The
         # bound follows the TRAINER's mode, not the passed model's: a frozen reference model is always
         # in eval, and a different bound there can route the KL's two sides through different paths.
@@ -687,11 +722,22 @@ class ChunkedGRPOLogprobsMixin(ChunkedLogprobsCore):
         if chunked and self._model_accepts_multimodal:
             is_multimodal = rank_consensus(is_multimodal).any_ok
         if not chunked or is_multimodal:
+            # TRL's own dispatch would send a use_liger_kernel run to its chunked head, which skips the
+            # family's head transform and the EP capacity scope.
             with self._writable_logits(model):
-                return super()._get_per_token_logps_and_entropies(
-                    model, input_ids, attention_mask, logits_to_keep, batch_size, compute_entropy, **kwargs
+                return self._full_logits_logps(
+                    model,
+                    input_ids,
+                    attention_mask,
+                    logits_to_keep,
+                    batch_size=batch_size,
+                    compute_entropy=compute_entropy,
+                    **kwargs,
                 )
-        return self._chunked_logps(model, input_ids, attention_mask, logits_to_keep, batch_size, compute_entropy)
+        logps, entropies = self._chunked_completion_logps(
+            model, input_ids, attention_mask, logits_to_keep, batch_size, compute_entropy
+        )
+        return logps, entropies, None
 
     @contextmanager
     def _writable_logits(self, model):

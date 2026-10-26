@@ -11,10 +11,10 @@ import pytest
 import torch
 from accelerate import PartialState
 from transformers import Qwen3Config, Qwen3MoeConfig
-from trl import ModelConfig
 
 import src.entrypoints.model_setup as model_setup
 import src.model_loading.parallel.loader as loading
+from src.configs.script_arguments import ModelArguments
 from src.entrypoints.model_setup import load_model_and_tokenizer
 from src.entrypoints.run_setup import prepare_distributed_resume
 from src.entrypoints.script import ScriptContext
@@ -112,7 +112,7 @@ def test_script_model_uses_resolved_checkpoint_identity_not_resume_flag(tmp_path
         use_liger_kernel=False,
         liger_kernel_config=None,
     )
-    model_config = ModelConfig(model_name_or_path="org/base")
+    model_config = ModelArguments(model_name_or_path="org/base")
     pc = make_parallelism_config(world_size=8, gpus_per_node=8, ep_size=8)
     checkpoint, source = prepare_distributed_resume(training, model_config, pc, overwrite_output_dir=False)
     runtime = ScriptContext(pc, 0, checkpoint, source, DistributedSFTTrainer)

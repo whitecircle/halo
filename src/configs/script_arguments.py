@@ -1,8 +1,11 @@
-"""The arguments training scripts share: ``CommonScriptArguments`` (the dataset / logging / callback knobs every
-script parses) and the field bundles several script-argument and trainer-config dataclasses mix in."""
+"""The arguments training scripts share: ``ModelArguments`` (TRL's model config plus remote-code trust),
+``CommonScriptArguments`` (the dataset / logging / callback knobs every script parses) and the field bundles
+several script-argument and trainer-config dataclasses mix in."""
 
 from dataclasses import dataclass, field
 from typing import Any, ClassVar
+
+from trl import ModelConfig
 
 from src.checkpoint.format import DEFAULT_MAX_SHARD_SIZE
 from src.config_validation import ValidatedConfig, present, require_finite, require_int
@@ -85,6 +88,20 @@ class ModelLoadArguments:
             "flash_attention_4 or eager. Refused with flex_attention, FA3, adapter runs and weight-sync RL. "
             "See agent-docs/models/gpt-oss.md#attention-sinks."
         },
+    )
+
+
+@dataclass
+class ModelArguments(ModelConfig):
+    """TRL's ``ModelConfig`` with ``trust_remote_code``, which TRL moved onto its own trainer configs.
+
+    The toolkit's loaders read it here for every method, including those whose training config is not a TRL
+    one; a YAML key shared with a TRL config reaches both dataclasses.
+    """
+
+    trust_remote_code: bool = field(
+        default=False,
+        metadata={"help": "Trust the checkpoint's remote modeling and tokenizer code when loading it."},
     )
 
 

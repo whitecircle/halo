@@ -12,10 +12,10 @@ from types import SimpleNamespace
 import pytest
 import torch.nn as nn
 from peft import LoraConfig, get_peft_model
-from trl import ModelConfig
 from trl.trainer.utils import disable_dropout_in_model
 
 import src.trainers.mixins.validation as validation
+from src.configs.script_arguments import ModelArguments
 from src.trainers.mixins.validation import ParallelismValidationMixin
 
 
@@ -47,7 +47,7 @@ def warnings(monkeypatch) -> list[str]:
 
 def test_omitting_lora_dropout_keeps_a_nonzero_default():
     """Premise of the advice: a recipe that leaves the key out still configures dropout."""
-    assert ModelConfig(model_name_or_path="m").lora_dropout > 0
+    assert ModelArguments(model_name_or_path="m").lora_dropout > 0
 
 
 def test_a_zeroed_dropout_warns_with_the_setting_that_silences_it(warnings):

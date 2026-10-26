@@ -23,7 +23,7 @@ from __future__ import annotations
 import pytest
 import torch.nn as nn
 from torch.distributed.tensor import DTensor
-from transformers.distributed.tensor_parallel import ALL_PARALLEL_STYLES, _get_parameter_tp_plan
+from transformers.distributed.tensor_parallel import ALL_PARALLEL_STYLES, _get_parameter_plan
 from transformers.models.glm5_next.configuration_glm5_next import Glm5NextTextConfig
 from transformers.models.qwen3_moe.configuration_qwen3_moe import Qwen3MoeConfig
 from transformers.models.step3p7.configuration_step3p7 import Step3p7TextConfig
@@ -83,15 +83,15 @@ def test_a_key_the_plan_does_not_cover_shards_nothing():
 def test_embedded_digit_names_are_reported_as_sharded(name):
     """``fc1`` / ``dense_h_to_4h`` carry a digit that is not a layer index; HF shards them, so must
     we — a ``re.sub(r"\\d+", "*")`` wildcard would report them replicated. The lookup is
-    transformers' own ``_get_parameter_tp_plan``, which is what makes that hold."""
+    transformers' own ``_get_parameter_plan``, which is what makes that hold."""
     plan = {"model.layers.*.mlp.fc1": "colwise", "model.layers.*.mlp.dense_h_to_4h": "colwise"}
     assert plan_shards_param(f"{name}.weight", plan)
-    assert _get_parameter_tp_plan(f"{name}.weight", plan) == "colwise"
+    assert _get_parameter_plan(f"{name}.weight", plan) == "colwise"
 
 
 def test_an_unregistered_style_raises_instead_of_answering_no():
     """``embedding_colwise`` was a real 5.14 style the registry dropped — the poster child for a
-    plan entry the running transformers cannot shard (its own ``_validate_tp_plan_styles`` refuses
+    plan entry the running transformers cannot shard (its own ``_validate_parallel_plan_styles`` refuses
     it too). Answering "shards nothing" would report the load as a wasted-replica run."""
     with pytest.raises(ValueError, match="embedding_colwise"):
         plan_shards_param("model.embed_tokens.weight", {"model.embed_tokens": "embedding_colwise"})

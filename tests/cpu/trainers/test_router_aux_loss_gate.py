@@ -79,11 +79,11 @@ def _capture_warnings(trainer) -> list[str]:
 def test_only_labels_forwarding_trainers_declare_consumption():
     # SFT hands the model ``labels`` (HF adds the aux term); everything else builds its own loss.
     assert DistributedSFTTrainer._consumes_router_aux_loss is True
-    # KTO builds its own loss yet TRL adds the aux term back — consumption must be declared, not inferred.
+    # DPO and KTO build their own loss yet TRL adds the aux term back — declared, not inferred.
     assert DistributedKTOTrainer._consumes_router_aux_loss is True
+    assert DistributedDPOTrainer._consumes_router_aux_loss is True
     for trainer_cls in (
         SmoothMarginPOTrainer,
-        DistributedDPOTrainer,
         DistributedRewardTrainer,
         OfflineGRPOTrainer,
         DistributedDistillationTrainer,

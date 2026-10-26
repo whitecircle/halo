@@ -116,8 +116,8 @@ def _reject_engine_fit(model: torch.nn.Module, backend: str, ep_layers: dict[str
     for where, cls in families:
         if cls.FAMILY.weight_sync_refusal is not None:
             raise ValueError(
-                f"{cls.__name__} (at {where!r}) does not support weight sync: the sync feeds the "
-                f"engine's model.load_weights directly, but "
+                f"{cls.__name__} (at {where!r}) does not support weight sync: the sync feeds "
+                f"{client_cls.ENGINE_RELEASE}'s model.load_weights directly, but "
                 f"{cls.FAMILY.weight_sync_refusal}. Online/environmental GRPO with weight sync "
                 f"is unsupported for this model — see {cls.__name__}.FAMILY.weight_sync_refusal."
             )

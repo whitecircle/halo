@@ -30,7 +30,7 @@ import pytest
 import torch
 from accelerate import PartialState
 from datasets import Dataset, Features, List, Value, concatenate_datasets
-from trl import DPOConfig, KTOConfig, ModelConfig
+from trl import DPOConfig, KTOConfig
 
 import src.checkpoint.atomic as atomic_mod
 import src.trainers.mixins.reference_logps as precompute_mod
@@ -38,6 +38,7 @@ from src.checkpoint.format import REFERENCE_LOGPS_FILE
 from src.configs.parallelism_arguments import ParallelismArguments
 from src.configs.parser import HaloArgumentParser
 from src.configs.preference import DPOScriptArguments, KTOScriptArguments
+from src.configs.script_arguments import ModelArguments
 from src.entrypoints.run_setup import resume_checkpoint_from_config
 from src.entrypoints.script import ScriptContext
 from src.runtime import filesystem
@@ -64,8 +65,8 @@ PartialState()
 
 # The dataclasses scripts/training/preference/{dpo,kto}.py parse their config into.
 SCRIPT_CONFIGS = {
-    "dpo": (DPOScriptArguments, DPOConfig, ModelConfig, ParallelismArguments),
-    "kto": (KTOScriptArguments, KTOConfig, ModelConfig, ParallelismArguments),
+    "dpo": (DPOScriptArguments, DPOConfig, ModelArguments, ParallelismArguments),
+    "kto": (KTOScriptArguments, KTOConfig, ModelArguments, ParallelismArguments),
 }
 
 _REFERENCE_WORLD_SIZE = 2

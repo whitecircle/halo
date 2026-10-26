@@ -8,8 +8,8 @@ export-side rewrite a checkpoint writer applies (``export_legacy_per_layer_confi
 no class for the family. A hub fixture, for a family whose export carries its source checkpoint's
 schema, builds it from the release config at a pinned revision plus the remote-code modules that
 schema names. ``unparseable/`` holds the same configs without the rewrites: the form each rewrite
-exists to avoid, which the server's transformers must still refuse. ``check.py`` asserts all of them
-against the server image at build time.
+exists to avoid, which the server must refuse or read as the same model. ``check.py`` asserts all of
+them against the server image at build time.
 
 The roster is derived rather than listed: every MoE family whose spec admits weight sync
 (``weight_sync_refusal is None``) needs a fixture here, because the server has to parse that family's

@@ -25,9 +25,9 @@ Run with 2 GPUs:
 from types import SimpleNamespace
 
 import torch
-from trl import ModelConfig, SFTConfig
+from trl import SFTConfig
 
-from src.configs.script_arguments import CommonScriptArguments
+from src.configs.script_arguments import CommonScriptArguments, ModelArguments
 from src.distributed.parallelism_config import ParallelismConfig
 from src.entrypoints.model_setup import load_policy_model
 from src.trainers.sft import DistributedSFTTrainer
@@ -76,7 +76,7 @@ def run(ctx):
 
     # production entry point, so VLM detection and processor load are under test too
     log("\n[1/5] Loading VLM via load_policy_model (production path)...")
-    model_config = ModelConfig(
+    model_config = ModelArguments(
         model_name_or_path=MODEL_NAME, attn_implementation="flash_attention_2", trust_remote_code=True
     )
     context = SimpleNamespace(

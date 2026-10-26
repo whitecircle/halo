@@ -10,11 +10,10 @@ Usage:
 
 from functools import partial
 
-from trl import ModelConfig
-
 from src.callbacks.generate_examples import GenerateExamplesCallback
 from src.configs.grpo_offline import OfflineGRPOConfig, OfflineGRPOScriptArguments
 from src.configs.parallelism_arguments import ParallelismArguments
+from src.configs.script_arguments import ModelArguments
 from src.data.pipeline.conversation import chat_template_kwargs, reject_image_content
 from src.data.pipeline.preferences import split_rendered_completion
 from src.data.pipeline.processing import coordinated_map, resolve_map_num_proc
@@ -79,7 +78,7 @@ def _load_kl_reference(
     args,
     context: ScriptContext,
     offline_grpo_config: OfflineGRPOConfig,
-    model_config: ModelConfig,
+    model_config: ModelArguments,
     *,
     policy,
     tokenizer,
@@ -108,7 +107,7 @@ def _load_kl_reference(
 
 def main():
     args, offline_grpo_config, model_config, dist_args = parse_script_args(
-        OfflineGRPOScriptArguments, OfflineGRPOConfig, ModelConfig, ParallelismArguments
+        OfflineGRPOScriptArguments, OfflineGRPOConfig, ModelArguments, ParallelismArguments
     )
 
     context = init_training_script(

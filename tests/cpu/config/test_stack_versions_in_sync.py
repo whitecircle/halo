@@ -210,14 +210,13 @@ def stack_pins() -> dict[str, set[str]]:
 def engine_scoped_pins() -> dict[str, set[str]]:
     """Pins claimable only where a rollout image is the nearest thing the number is attributed to.
 
-    Each engine ships its own transformers: vLLM's is installed here (a bounded range this image
-    chooses), SGLang's is its upstream image's exact pin, recorded in its Dockerfile. Both sit a
-    line or two behind the training image's, so leaving them claimable everywhere would let a stale
-    training-stack sentence pass as a statement about a server.
+    Each engine ships its own transformers, its upstream image's exact pin, recorded in its
+    Dockerfile. Both sit a line or two behind the training image's, so leaving them claimable
+    everywhere would let a stale training-stack sentence pass as a statement about a server.
     """
     return {
         "transformers": {
-            _dockerfile_value("Dockerfile.vllm", r'pip install --no-cache-dir "transformers>=([\d.]+),<'),
+            _dockerfile_value("Dockerfile.vllm", r"transformers==([\d.]+)"),
             _dockerfile_value("Dockerfile.sglang", r"transformers==([\d.]+)"),
         }
     }
@@ -328,7 +327,7 @@ def test_a_stale_number_anywhere_in_the_prose_is_reported(tmp_path, monkeypatch)
         "ahead_of_the_pin.md": "The fused path needs transformers >= 9.9.\n",
         "present_tense.md": "vLLM 0.24.0 ships no Zaya implementation, so no export of it is servable.\n",
         "borrowed_marker.md": "The cache fix needs transformers >= 5.10 at minimum.\n\nWe install transformers 5.10.\n",
-        "contrasted.md": "The server image ships transformers 5.14.1; training is on transformers 5.14.\n",
+        "contrasted.md": "The server image ships transformers 5.19.0; training is on transformers 5.19.\n",
     }
     for name, text in planted.items():
         (tmp_path / name).write_text(text, encoding="utf-8")
@@ -341,7 +340,7 @@ def test_a_stale_number_anywhere_in_the_prose_is_reported(tmp_path, monkeypatch)
         "ahead_of_the_pin.md": ("transformers 9.9",),
         "present_tense.md": ("vllm 0.24.0",),
         "borrowed_marker.md": ("transformers 5.10",),  # the floor two lines up is a different claim
-        "contrasted.md": ("transformers 5.14",),  # and NOT the 5.14.1 the server half claims
+        "contrasted.md": ("transformers 5.19",),  # and NOT the 5.19.0 the server half claims
     }
     reported = drifted_statements()
     assert len(reported) == sum(len(statements) for statements in expected.values()), reported

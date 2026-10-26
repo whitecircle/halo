@@ -71,7 +71,7 @@ def flatten_per_layer_config(section: dict, legacy_keys: Mapping[str, tuple[str,
     (``MoEFamilySpec.served_flat_config_keys``), in place; return whether it changed.
 
     Each flat key takes its field's value on the layers of its layer type. ``per_layer_config`` is then
-    dropped, since a 5.14-line reader refuses it and a 5.16 reader rebuilds it; a config the flat keys
+    dropped, since a 5.14-line reader refuses it and a 5.20 reader rebuilds it; a config the flat keys
     cannot express is refused.
     """
     overrides = section.get("per_layer_config")
@@ -109,7 +109,8 @@ def export_legacy_per_layer_config(output_dir: str) -> None:
     """Flatten ``per_layer_config`` in ``output_dir``'s ``config.json`` for every family declaring
     ``served_flat_config_keys``, per section, so a composite config's text tower rewrites too.
 
-    transformers 5.16 dropped the flat fields the pinned rollout servers (transformers 5.14 line) read.
+    transformers 5.20 lacks the flat fields older vLLM servers read; the pinned server folds them back into
+    ``per_layer_config`` at parse, so the flat form is lossless there.
     """
     payload = read_checkpoint_config(output_dir, missing_ok=True)
     if payload is None:
@@ -233,7 +234,7 @@ def export_source_config_schema(config, output_dir: str, *, source: str | None) 
     """Rewrite ``output_dir``'s ``config.json`` into the source checkpoint's own schema, for every family
     declaring ``exports_source_config_schema``; a no-op elsewhere.
 
-    transformers 5.16 absorbs the vendor spellings at load and never re-emits them, so the source
+    transformers 5.20 absorbs the vendor spellings at load and never re-emits them, so the source
     config is carried over with this run's changes applied, plus the modules its ``auto_map`` names.
     """
     spec = find_moe_family_spec(getattr(config, "model_type", None))

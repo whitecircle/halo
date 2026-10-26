@@ -32,7 +32,6 @@ from huggingface_hub.repocard import metadata_load
 from peft import LoraConfig, get_peft_model
 from safetensors.torch import load_file, save_file
 from transformers import GptOssConfig, GptOssForCausalLM, Qwen3Config, Qwen3ForCausalLM
-from trl import ModelConfig
 from trl.trainer import base_trainer as trl_base_trainer
 from trl.trainer.utils import generate_model_card
 
@@ -49,6 +48,7 @@ from src.checkpoint.model_card import MalformedModelCardError, tag_model_card
 from src.checkpoint.offline_export import copy_checkpoint_aux_files
 from src.checkpoint.parallel.adapters import save_expert_lora_adapters, save_peft_adapters
 from src.configs.embedding import EmbeddingConfig
+from src.configs.script_arguments import ModelArguments
 from src.model_loading.model_preparation import apply_run_model_policies
 from src.models.attention.gpt_oss_sinks import SinksPolicy
 from src.trainers.sft import DistributedSFTTrainer
@@ -499,7 +499,7 @@ def test_the_embedding_pipeline_card_carries_the_tag(tmp_path):
     st_model = build_sentence_transformer(
         runtime,
         embedding_config,
-        ModelConfig(model_name_or_path=str(base)),
+        ModelArguments(model_name_or_path=str(base)),
         SimpleNamespace(reset_sinks=True, train_sinks=False),
     )
 

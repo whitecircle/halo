@@ -178,8 +178,9 @@ def _off_gpu(value):
 def cpu_model_builds(trace: CollectiveTrace) -> Iterator[None]:
     """Every model build as one event, on the CPU whatever device the loader names.
 
-    A load onto a TP device mesh is sharded by transformers' ``apply_tensor_parallelism``, the step
-    ``from_pretrained`` takes for one, over the recorder's CPU mesh. A module moved to a GPU stays on
+    A load handed a TP ``distributed_config`` is sharded by transformers' ``apply_tensor_parallelism``,
+    the step ``from_pretrained`` takes for one, over the TP mesh the loader's ``prepare_distribute_model``
+    hook answers (the recorder's CPU mesh). A module moved to a GPU stays on
     the CPU, and a flash attention label is accepted without a GPU, since no traced load runs attention.
     """
     real_from_pretrained = PreTrainedModel.from_pretrained.__func__
@@ -188,16 +189,16 @@ def cpu_model_builds(trace: CollectiveTrace) -> Iterator[None]:
     real_attention_check = PreTrainedModel._check_and_adjust_attn_implementation
 
     def from_pretrained(cls, *args, **kwargs):
-        device_mesh = kwargs.pop("device_mesh", None)
-        kwargs.pop("distributed_config", None)
+        distributed_config = kwargs.pop("distributed_config", None)
         device_map = kwargs.get("device_map")
-        trace.record("from_pretrained", "device_mesh" if device_mesh is not None else f"device_map={device_map}")
+        trace.record("from_pretrained", "tp_plan" if distributed_config is not None else f"device_map={device_map}")
         if device_map not in (None, "meta"):
             kwargs["device_map"] = "cpu"
         with trace.pause():
             loaded = real_from_pretrained(cls, *args, **kwargs)
-            if device_mesh is not None:
-                apply_tensor_parallelism(loaded[0] if isinstance(loaded, tuple) else loaded, device_mesh)
+            if distributed_config is not None:
+                _, _, meshes = cls.prepare_distribute_model(distributed_config)
+                apply_tensor_parallelism(loaded[0] if isinstance(loaded, tuple) else loaded, meshes.get_mesh("tp"))
         return loaded
 
     def from_config(cls, *args, **kwargs):

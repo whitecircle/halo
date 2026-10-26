@@ -19,9 +19,10 @@ from unittest import mock
 
 import pytest
 from accelerate import PartialState
-from trl import ModelConfig, SFTTrainer
+from trl import SFTTrainer
 
 import src.model_loading.parallel.frozen_models as frozen_models
+from src.configs.script_arguments import ModelArguments
 from src.entrypoints.model_setup import PolicyLoad
 from src.model_loading.parallel.frozen_models import (
     ON_POLICY_GRPO_REFERENCE_ALTERNATIVES,
@@ -145,7 +146,7 @@ def _preference_reference(config, *, precompute=False):
     with mock.patch.object(frozen_models, "load_frozen_reference_model", return_value=loaded):
         result = load_reference_model_for_preference(
             types.SimpleNamespace(),
-            ModelConfig(model_name_or_path="org/policy"),
+            ModelArguments(model_name_or_path="org/policy"),
             types.SimpleNamespace(precompute_ref_log_probs=precompute),
             config,
             tokenizer=None,
@@ -164,7 +165,7 @@ def _on_policy_grpo_reference(config):
     with mock.patch.object(frozen_models, "load_frozen_reference_model", return_value=loaded):
         result = load_reference_model_for_on_policy_grpo(
             types.SimpleNamespace(),
-            ModelConfig(model_name_or_path="org/policy"),
+            ModelArguments(model_name_or_path="org/policy"),
             types.SimpleNamespace(beta=0.1),
             config,
             None,

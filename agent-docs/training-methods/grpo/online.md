@@ -39,7 +39,7 @@ A `judge` or `reward_model` term reads the row's `conversation` and `answer` col
 
 ## Configuration
 
-Fields: [`RLVROnlineGRPOScriptArguments`](../../reference/configuration-reference.md#rlvronlinegrposcriptarguments), TRL's `GRPOConfig`, `ModelConfig` and `ParallelismArguments`.
+Fields: [`RLVROnlineGRPOScriptArguments`](../../reference/configuration-reference.md#rlvronlinegrposcriptarguments), TRL's `GRPOConfig`, `ModelArguments` and `ParallelismArguments`.
 
 ```yaml
 model_name_or_path: Qwen/Qwen3-4B-Instruct-2507
@@ -151,7 +151,7 @@ Before the trainer is built, every rank raises if `max_prompt_length + max_compl
 > [!WARNING]
 > **GPT-OSS: toolkit vLLM image, sinks on**
 >
-> Serve GPT-OSS from the toolkit `vllm-server:0.26.0` image with sinks on (the default) and keep `reset_sinks: false` on the trainer; stock vLLM emits garbage GPT-OSS output on Blackwell ([GPT-OSS](../../models/gpt-oss.md#serving-for-grpo-vllm)).
+> Serve GPT-OSS from the toolkit `vllm-server:0.32.0` image with sinks on (the default) and keep `reset_sinks: false` on the trainer; stock vLLM emits garbage GPT-OSS output on Blackwell ([GPT-OSS](../../models/gpt-oss.md#serving-for-grpo-vllm)).
 
 ### Weight sync
 

@@ -9,6 +9,11 @@ from src.weight_sync.clients.vllm import VLLMWeightSyncClient
 
 logger = logging.getLogger(__name__)
 
+_TEXT_ONLY = (
+    "This client's /v1/completions path is text-only — VLM online GRPO with images is unsupported "
+    "(generations would silently be image-blind)."
+)
+
 
 class TrlVLLMClient(VLLMWeightSyncClient):
     """The surface TRL's server-mode generation calls: the vLLM weight sync plus ``generate``."""
@@ -28,10 +33,18 @@ class TrlVLLMClient(VLLMWeightSyncClient):
             )
         super().__init__(*args, **kwargs)
 
+    def image_features(
+        self, images: list[list | None], max_concurrent_requests: int | None = None
+    ) -> list[dict | None]:
+        """TRL's server-side image processing, which feeds :meth:`generate`'s ``features``: refused for any image."""
+        if any(images):
+            raise NotImplementedError(_TEXT_ONLY)
+        return [None] * len(images)
+
     def generate(
         self,
         prompts: list[str] | list[list[int]],
-        images: list | None = None,
+        features: list[dict | None] | None = None,
         n: int = 1,
         repetition_penalty: float = 1.0,
         temperature: float = 1.0,
@@ -45,11 +58,8 @@ class TrlVLLMClient(VLLMWeightSyncClient):
     ) -> dict[str, list]:
         """TRL's ``VLLMClient.generate`` over ``/v1/completions``: ``{prompt_ids, completion_ids, logprobs,
         logprob_token_ids}``, with the sampled token's logprob only."""
-        if images is not None and any(image is not None for image in images):
-            raise NotImplementedError(
-                "This client's /v1/completions path is text-only — VLM online GRPO with images "
-                "is unsupported (generations would silently be image-blind)."
-            )
+        if features is not None and any(feature is not None for feature in features):
+            raise NotImplementedError(_TEXT_ONLY)
         if not prompts:
             return {"prompt_ids": [], "completion_ids": [], "logprobs": [], "logprob_token_ids": []}
         # Every filter is stated, since the server fills an omitted one from generation_config.json; the route

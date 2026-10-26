@@ -1,11 +1,11 @@
 #!/usr/bin/env python
 """Wrapper-less MoE gathered saves must write the layout the model was loaded from.
 
-transformers 5.16 loads several MoE families from a per-expert hub into a module-FUSED expert layout
+transformers 5.20 loads several MoE families from a per-expert hub into a module-FUSED expert layout
 (``experts.gate_up_proj [E,2M,H]``) and ``save_pretrained`` reverts to the per-expert hub layout at
 write time. The toolkit's gathered writer bypasses ``save_pretrained``, so a wrapper-less run
 (``use_grouped_gemm: false`` at ep1 — no EP layer, the FSDP2/CP/TP savers) that emits fused keys
-produces an artifact vLLM 0.26.0 hard-fails on for GLM-4/LFM-2 and silently mis-loads for Laguna.
+produces an artifact vLLM 0.32.0 hard-fails on for GLM-4 MoE Lite and silently mis-loads for LFM-2.
 The writer applies ``revert_weight_conversion`` exactly when the model carries no EP layers.
 
 transformers records in ``model._weight_conversions`` the converters a load actually USED. A source

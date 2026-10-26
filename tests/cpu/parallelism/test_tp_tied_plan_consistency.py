@@ -55,21 +55,22 @@ def test_a_symmetric_tied_plan_is_left_alone(model_type):
 
 
 def test_an_embedding_only_plan_drops_the_embedding():
-    """A multimodal wrapper class declares no ``lm_head`` entry while its text config still injects
+    """A wrapper class declaring no ``lm_head`` entry over a tied text config that still injects
     ``embed_tokens``. Sharding only the embedding hands the tied head a DTensor its un-transformed
     forward cannot multiply, so the entry comes out and the pair stays replicated."""
-    config = CONFIG_MAPPING["gemma3"]()
-    config.get_text_config().tie_word_embeddings = True
-    backbone_config = config.get_text_config()
-    concrete = AutoModelForCausalLM._model_mapping[type(config)]
-    original = dict(backbone_config.base_model_tp_plan)
-    assert "embed_tokens" in original, "premise: the tied text config injects the embedding entry"
-    assert "lm_head" not in (concrete._tp_plan or {}), "premise: this wrapper plans no head"
 
-    with consistent_tied_tp_plan(AutoModelForCausalLM, config):
-        assert "embed_tokens" not in backbone_config.base_model_tp_plan
-        assert set(backbone_config.base_model_tp_plan) == set(original) - {"embed_tokens"}
-    assert backbone_config.base_model_tp_plan == original
+    class _EmbeddingOnly:
+        _tp_plan = {}
+        _tied_weights_keys = {"lm_head.weight": "model.embed_tokens.weight"}
+
+    config = CONFIG_MAPPING["qwen3"](tie_word_embeddings=True)
+    original = dict(config.base_model_tp_plan)
+    assert "embed_tokens" in original, "premise: the tied text config injects the embedding entry"
+
+    with consistent_tied_tp_plan(_EmbeddingOnly, config):
+        assert "embed_tokens" not in config.base_model_tp_plan
+        assert set(config.base_model_tp_plan) == set(original) - {"embed_tokens"}
+    assert config.base_model_tp_plan == original
 
 
 def test_a_head_only_plan_drops_the_head():
@@ -155,7 +156,7 @@ def test_validate_accepts_a_sharded_pair_the_plan_shards():
 
 
 def test_a_tied_pair_reaches_the_export_as_one_key():
-    """One key, one gather. transformers own 5.16 ``save_pretrained`` gathers per key and only then
+    """One key, one gather. transformers own 5.20 ``save_pretrained`` gathers per key and only then
     de-duplicates by storage, so at ``tp_size > 1`` it writes ``lm_head.weight`` a second time — and
     that duplicate is exactly what sends the NEXT load into the tie equality collective. The
     toolkit gathered save de-duplicates FIRST (``named_parameters()`` visits a tied pair once), so

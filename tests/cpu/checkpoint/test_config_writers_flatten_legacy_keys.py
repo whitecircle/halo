@@ -3,7 +3,7 @@
 
 ``finalize_exported_config`` is the whole contract: the live ``model_type`` restored for the vendor
 classes that declare none (Bailing/Ling), the flat legacy per-layer keys the pinned server reads
-(Gemma 4 — transformers 5.16 serializes that geometry only as ``per_layer_config``), and the source
+(Gemma 4 — transformers 5.20 serializes that geometry only as ``per_layer_config``), and the source
 repo's own schema for the families whose serving engines have no config class (Step-3.7). Running
 one of the three is not running the contract: the artifact loads and trains, and fails later in the
 merge tools or the server on a family the run never mentioned. The trainer's writers reach it

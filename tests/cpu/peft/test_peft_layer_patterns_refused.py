@@ -13,8 +13,8 @@ from unittest.mock import patch
 
 import pytest
 import torch.nn as nn
-from trl import ModelConfig
 
+from src.configs.script_arguments import ModelArguments
 from src.model_loading.parallel import peft_setup
 from src.model_loading.parallel.peft_setup import configure_adapter_training
 
@@ -38,7 +38,7 @@ def _args(**patterns):
 
 @pytest.mark.parametrize("pattern_arg", _PATTERN_ARGS)
 def test_attention_lora_refuses_layer_patterns(pattern_arg):
-    config = ModelConfig(model_name_or_path="dummy/dense", use_peft=True, lora_target_modules=["q_proj"])
+    config = ModelArguments(model_name_or_path="dummy/dense", use_peft=True, lora_target_modules=["q_proj"])
 
     with pytest.raises(ValueError, match=f"{pattern_arg} cannot combine with adapters"):
         configure_adapter_training(_args(**{pattern_arg: ["q_proj*"]}), _Dense(), config)
@@ -46,7 +46,7 @@ def test_attention_lora_refuses_layer_patterns(pattern_arg):
 
 @pytest.mark.parametrize("pattern_arg", _PATTERN_ARGS)
 def test_expert_only_lora_refuses_layer_patterns(pattern_arg):
-    config = ModelConfig(model_name_or_path="dummy/moe", use_peft=True, lora_target_modules=[])
+    config = ModelArguments(model_name_or_path="dummy/moe", use_peft=True, lora_target_modules=[])
 
     with (
         patch.object(peft_setup, "model_has_expert_lora", return_value=True),
@@ -56,7 +56,7 @@ def test_expert_only_lora_refuses_layer_patterns(pattern_arg):
 
 
 def test_full_finetune_still_applies_the_patterns():
-    config = ModelConfig(model_name_or_path="dummy/dense", use_peft=False)
+    config = ModelArguments(model_name_or_path="dummy/dense", use_peft=False)
     model = _Dense()
 
     assert configure_adapter_training(_args(freeze_layers_patterns=["q_proj.weight"]), model, config) is None

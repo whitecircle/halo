@@ -29,7 +29,7 @@ import torch
 import torch.distributed as dist
 from datasets import Dataset
 from transformers import AutoTokenizer
-from trl.experimental.kto import KTOConfig
+from trl import KTOConfig
 
 from src.distributed.parallelism_config import ParallelismConfig
 from src.trainers.preference.kto import DistributedKTOTrainer

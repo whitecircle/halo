@@ -175,6 +175,23 @@ def reject_uneven_sentence_transformers_batches(
         )
 
 
+def reject_unresolved_max_length(args: EmbeddingConfig | None) -> None:
+    """Refuse a non-positive ``max_length`` at the trainer.
+
+    sentence-transformers' collator truncates every text column to ``args.max_length``. A non-positive
+    value means the backbone's context window only once the embedding script resolves it
+    (``resolve_embedding_max_length``); unresolved, the tokenizer would cut every text to its special
+    tokens, or fail on a negative length.
+    """
+    if args is None or args.max_length is None or args.max_length > 0:
+        return
+    raise ValueError(
+        f"max_length={args.max_length} reached the embedding trainer unresolved, and sentence-transformers' "
+        f"collator truncates every text column to it. Pass a positive length, or null to keep the model's "
+        f"max_seq_length; only the embedding script resolves a non-positive one to the backbone's context window."
+    )
+
+
 def _folded_backbone_items(backbone: nn.Module) -> Iterator[tuple[str, torch.Tensor]]:
     """The backbone's saveable tensors with its injected LoRA folded in, under the base model's names.
 
@@ -237,9 +254,9 @@ class EmbeddingTrainer(DistributedTrainerMixin, SentenceTransformerTrainer):
         "the default and most registered losses (MNRL, CoSENT/AnglE, online-contrastive, the "
         "batch-* triplet losses) are in-batch similarity matrices over the whole batch (optionally "
         "gathered across devices with gradient), so microbatching changes the negative set and "
-        "therefore the loss — no exact per-microbatch form exists; every loss also runs one forward "
-        "per sentence column (anchor, positive, each hard negative) rather than one per example, "
-        "which the single-input, fused forward-backward pipeline step cannot drive; and the "
+        "therefore the loss — no exact per-microbatch form exists; every loss also runs several "
+        "forwards per batch (the anchor column, then the candidate columns) rather than one per "
+        "example, which the single-input, fused forward-backward pipeline step cannot drive; and the "
         "SentenceTransformer nn.Sequential has neither the backbone-with-layers layout nor the "
         "task head the stage split locates"
     )
@@ -274,6 +291,7 @@ class EmbeddingTrainer(DistributedTrainerMixin, SentenceTransformerTrainer):
             allow_optimizer_warm_restart=allow_optimizer_warm_restart,
         )
         self._reject_batch_sampler_on_toolkit_loader(args)
+        reject_unresolved_max_length(args)
         reject_uneven_sentence_transformers_batches(
             args, train_dataset, toolkit_loader=self._needs_custom_dataloader()
         )

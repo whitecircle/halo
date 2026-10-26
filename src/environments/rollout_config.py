@@ -29,7 +29,7 @@ REASONING_BUDGET_SOFT_TEMPLATE_VAR = "reasoning_budget_soft"
 ReasoningEffortChoice = Literal["low", "medium", "high", "random"]
 # Example end strings of the families' reasoning parsers, for the knob's help and its refusal.
 REASONING_END_TOKEN_EXAMPLES = (
-    "Qwen3.x '</think>', Gemma 4 '<channel|>', gpt-oss '<|start|>assistant<|channel|>final<|message|>'"
+    "Qwen3.x '</think>', Gemma 4 '<channel|>', gpt-oss '<|end|><|start|>assistant<|channel|>final<|message|>'"
 )
 
 

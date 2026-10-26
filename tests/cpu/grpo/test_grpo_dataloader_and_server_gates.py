@@ -61,6 +61,7 @@ def _train_loader(dataset, *, remove_unused_columns: bool):
         dataloader_pin_memory=False,
         dataloader_persistent_workers=False,
         dataloader_drop_last=False,
+        train_sampling_strategy="random",
         dataloader_prefetch_factor=None,
         dataloader_multiprocessing_context=None,
         dataloader_in_order=True,

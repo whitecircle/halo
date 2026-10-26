@@ -252,10 +252,10 @@ def _check_engine_prompt_logprobs(client_cls: type[WeightSyncClientBase], urls: 
                 f"{_PROMPT_LOGPROB_PROBE_MAX_MEAN_NLL}), and its first {length} tokens scored alone differ from the "
                 f"same positions by up to {gap:.2f} nats (tolerance {_PROMPT_LOGPROB_TOLERANCE_NATS}), so "
                 f"isr_engine_reference would compare the sampling log-probs against garbage. The known cause is "
-                f"vLLM 0.26.0 with speculative decoding (MTP) and without the toolkit image's prompt-log-prob patch: "
-                f"the drafter's CUDA graph overwrites the hidden states the prompt log-probs are read from whenever "
-                f"the prefill runs as a graph (vllm-project/vllm#53488). Serve vLLM from the image Dockerfile.vllm "
-                f"builds, turn speculative decoding off, or set isr_engine_reference: false."
+                f"vLLM's V1 model runner with speculative decoding (MTP): the drafter's CUDA graph overwrites the "
+                f"hidden states the prompt log-probs are read from whenever the prefill runs as a graph "
+                f"(vllm-project/vllm#53488). Serve vLLM from the image Dockerfile.vllm builds, which pins Model "
+                f"Runner V2, turn speculative decoding off, or set isr_engine_reference: false."
             )
         logger.info(
             f"Rollout server {url}: prompt log-probs follow from the tokens (probe mean NLL {mean_nll:.3f}, "

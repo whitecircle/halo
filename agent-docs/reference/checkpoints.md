@@ -181,17 +181,17 @@ The exported `config.json` is serialized with run-scoped router mutations restor
 destroy the hub's aux coefficient for later stages and make plain-transformers consumers pay the
 router-logit plane on every forward.
 
-It is also written in the flat form the pinned vLLM server parses. transformers 5.16 serializes a
-family's per-layer attention geometry only as `per_layer_config`, which the vLLM server's transformers
-(the 5.14 line, [Config-schema parity](../infrastructure/rollout-servers.md#config-schema-parity)) refuses at
-parse (SGLang's 5.12.1 reads the flat form too).
+It is also written in the flat form older vLLM servers parse. transformers 5.20 serializes a
+family's per-layer attention geometry only as `per_layer_config`; the pinned rollout servers'
+transformers reads either form and folds the flat keys back at parse
+([Config-schema parity](../infrastructure/rollout-servers.md#config-schema-parity)).
 
 A family whose spec declares `served_flat_config_keys` (Gemma 4:
 `global_head_dim`, `num_global_key_value_heads` — the full-attention layers' geometry) has every
 exported `config.json` rewritten to those keys by `export_legacy_per_layer_config`, on every toolkit
 config write (parallel saves, `save_full_checkpoint`, the trainer fallback).
 
-A 5.16 reload rebuilds `per_layer_config` from the flat keys exactly as it does for the hub
+A 5.20 reload rebuilds `per_layer_config` from the flat keys exactly as it does for the hub
 checkpoint. A config the flat keys cannot express (a per-layer override outside the declared pairs)
 is refused rather than flattened.
 
@@ -305,7 +305,7 @@ family's registered mapping. The EP-gathered save and
 the RL weight sync leave out only the per-expert merges (`export_conversions` in
 `src/checkpoint/hub_layout.py`), since the gather owns the expert layout; the load side picks its
 conversions in `src/model_loading/lazy_safetensors/conversion_selection.py`. vLLM
-0.26.0 raises on a SigLIP tower key that lacks its `vision_model` level.
+0.32.0 raises on a SigLIP tower key that lacks its `vision_model` level.
 
 Two rules apply to some MoE families, on both engines.
 
@@ -333,19 +333,19 @@ no rewrite: its EP-gathered save lands in that hub `moe.*` namespace
 
 | Serving loader | Families | Fused `gate_up_proj` / `down_proj` |
 |---|---|---|
-| vLLM 0.26.0 `RoutedExperts` | Qwen3.5/3.6, Gemma 4 | loaded directly |
-| vLLM 0.26.0 `FusedMoE` (`cohere2_moe`) | Cohere2 MoE ([Command A+](../models/cohere2-moe.md#loading-and-serving)) | loaded directly |
-| vLLM 0.26.0 `step3p5` | Step-3.7 Flash | not needed — the EP-gathered save writes the hub `moe.*` tensors |
-| vLLM 0.26.0 per-expert-only | GLM-4 MoE Lite, Laguna, LFM-2, Bailing/Ling 2.0 | hard-fail or silent drop — un-fuse first |
-| vLLM 0.26.0 — no model class | Mistral4, Ling 3.0 (`bailing_hybrid`), GLM-5 Next, Ring — its `BailingMoeLinearV2ForCausalLM` matches no registered architecture ([Rollout Servers](../infrastructure/rollout-servers.md#which-families-each-engine-serves)) | not servable at all ([Mistral4](../models/mistral4.md#serving), [Bailing](../models/bailing.md)) |
-| vLLM 0.26.0 — release layout only | DeepSeek-V4 (fp8/fp4-packed release), Zaya (no class) | not servable ([DeepSeek-V4](../models/deepseek-v4.md), [Zaya](../models/zaya.md)) |
-| vLLM 0.26.0 `inkling` | Inkling | the export writes the hub's fused `w13_weight` under `model.llm.*`; unverified end to end |
+| vLLM 0.32.0 `RoutedExperts` | Qwen3.5/3.6, Gemma 4, Cohere2 MoE ([Command A+](../models/cohere2-moe.md#loading-and-serving)), Laguna, Bailing/Ling 2.0 | loaded directly |
+| vLLM 0.32.0 `step3p5` | Step-3.7 Flash | not needed — the EP-gathered save writes the hub `moe.*` tensors |
+| vLLM 0.32.0 per-expert-only | GLM-4 MoE Lite (raises), LFM-2 (drops it silently), GLM-5 Next (raises), DeepSeek-V4 (the release's `w1/w2/w3` names) | un-fuse first; GLM-5 Next and DeepSeek-V4 unverified end to end ([DeepSeek-V4](../models/deepseek-v4.md)) |
+| vLLM 0.32.0 `bailing_moe_v3` | Ling 3.0 (`bailing_hybrid`) | per-expert loader; no export served end to end ([Bailing](../models/bailing.md)) |
+| vLLM 0.32.0 — no model class | Mistral4, Ring — its `BailingMoeLinearV2ForCausalLM` matches no registered architecture ([Rollout Servers](../infrastructure/rollout-servers.md#which-families-each-engine-serves)) | not servable at all ([Mistral4](../models/mistral4.md#serving), [Bailing](../models/bailing.md)) |
+| vLLM 0.32.0 — no native class | Zaya | resolves through vLLM's generic transformers backend; unvalidated ([Zaya](../models/zaya.md)) |
+| vLLM 0.32.0 `inkling` | Inkling | the export writes the hub's fused `w13_weight` under `model.llm.*`; unverified end to end |
 
-SGLang 0.5.17 reads each family's hub layout through its own per-family loader, so the same un-fuse
-rule applies, Cohere2 MoE and DeepSeek-V4 included (their loaders drop the fused pair without an
-error; a DeepSeek-V4 export is unverified there even after the rewrite); it registers no class for
-Mistral4, Ling 3.0 or GLM-5 Next, none matching Ring's architecture either, and its Zaya loader reads a
-per-expert layout the gathered export does not carry.
+SGLang 0.5.22 reads each family's hub layout through its own per-family loader, so the same un-fuse
+rule applies, Cohere2 MoE, DeepSeek-V4 and GLM-5 Next included (their loaders drop the fused pair
+without an error; a DeepSeek-V4 export is unverified there even after the rewrite); it registers no
+class for Mistral4, none matching Ring's architecture either, and its Zaya loader reads a per-expert
+layout the gathered export does not carry.
 
 **MLA backend on Blackwell.** GLM-4 MoE Lite uses MLA; flashinfer's MLA kernel rejects its head
 config on SM100+ — serve with vLLM `--attention-backend CUTLASS_MLA` or SGLang

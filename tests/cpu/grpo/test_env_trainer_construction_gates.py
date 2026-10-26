@@ -36,6 +36,7 @@ import pytest
 import torch
 from accelerate import PartialState
 from datasets import Dataset
+from transformers import CONFIG_MAPPING
 from trl import GRPOConfig, GRPOTrainer
 
 from src.configs.grpo_environmental import AsyncTrainingConfig
@@ -351,7 +352,7 @@ class _Tokenizer:
         return list(self._encodings[text])
 
 
-def _close_host(budgets: dict, knows_close: bool = True, soft: tuple = (), **config):
+def _close_host(budgets: dict, knows_close: bool = True, soft: tuple = (), model_config=None, **config):
     host = object.__new__(DistributedAsyncEnvironmentalGRPOTrainer)
     host.async_config = AsyncTrainingConfig(**config)
     host._rollout_env = types.SimpleNamespace(
@@ -360,6 +361,9 @@ def _close_host(budgets: dict, knows_close: bool = True, soft: tuple = (), **con
         thinking_budget_enforced=lambda level: level not in soft,
     )
     host._tokenizer = _Tokenizer(knows_close)
+    host.model = torch.nn.Module()
+    if model_config is not None:
+        host.model.config = model_config
     return host
 
 
@@ -395,6 +399,25 @@ def test_a_soft_budget_still_forces_closes_at_its_ceiling_and_its_retries_reserv
     assert _close_host(every, soft=soft, rollout_max_thinking_tokens=21800)._resolve_forced_close_ids() == (_CLOSE_ID,)
     assert _close_host(every, soft=("low",))._resolve_forced_close_ids() == (_CLOSE_ID,), (
         "an enforced level still binds"
+    )
+
+
+def test_a_vllm_budget_on_a_mistral_common_served_model_is_refused():
+    """vLLM encodes Mistral 4's [THINK]/[/THINK] markers as plain text while the model writes control
+    tokens, so the budget it accepts never counts; the run is refused rather than reasoning uncapped.
+    The wrapper's own model_type is mistral3, so the text tower's spelling is what has to match."""
+    mistral_small_4 = CONFIG_MAPPING["mistral3"](text_config=CONFIG_MAPPING["mistral4"]())
+    with pytest.raises(ValueError, match=r"cannot enforce a thinking budget for model_type \['mistral4'\]"):
+        _close_host({"high": 16384}, model_config=mistral_small_4)._resolve_forced_close_ids()
+    assert (
+        _close_host(
+            {"high": 16384}, model_config=mistral_small_4, rollout_backend=SGLANG_BACKEND
+        )._resolve_forced_close_ids()
+        is None
+    )
+    assert _close_host({}, model_config=mistral_small_4)._resolve_forced_close_ids() is None
+    assert _close_host({"high": 16384}, model_config=CONFIG_MAPPING["mistral3"]())._resolve_forced_close_ids() == (
+        _CLOSE_ID,
     )
 
 

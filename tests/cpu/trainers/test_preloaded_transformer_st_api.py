@@ -18,8 +18,13 @@ import sys
 import warnings
 
 import pytest
+from sentence_transformers import SentenceTransformer
 from sentence_transformers.base.modules.input_module import InputModule
 from sentence_transformers.base.modules.module import Module
+from tokenizers import Tokenizer, models, pre_tokenizers
+from transformers import PreTrainedTokenizerFast, Qwen3Config, Qwen3Model
+
+from tests.common.models import TINY_QWEN3_CONFIG
 
 _MODULE = "src.trainers.embedding.sentence_transformers_compat"
 
@@ -67,11 +72,36 @@ def test_the_wrapper_declares_no_method_name_st_has_retired():
     assert not retired, f"PreloadedTransformer declares retired ST method name(s): {sorted(retired)}"
 
 
+def test_the_wrapper_preprocesses_rather_than_tokenizes():
+    """``InputModule.tokenize`` is the retired entry point: a module that overrides it instead of
+    ``preprocess`` is reached through a deprecation fallback, which drops the per-batch ``max_length``
+    sentence-transformers' collator passes and mangles a prompted text pair."""
+    module = _reimport_under_deprecation_errors()
+    assert "preprocess" in vars(module.PreloadedTransformer)
+    assert module.PreloadedTransformer.tokenize is InputModule.tokenize
+
+
 def test_the_wrapper_answers_the_dimension_query_sentence_transformer_makes():
     """``SentenceTransformer.get_embedding_dimension`` walks its modules asking for this name first;
     a wrapper that answers only under a retired alias rides the deprecation shim to get found."""
     module = _reimport_under_deprecation_errors()
     assert "get_embedding_dimension" in vars(module.PreloadedTransformer)
+
+
+def test_the_collator_length_and_the_prompt_reach_the_tokenizer():
+    """sentence-transformers' training collator passes ``max_length`` per batch and the trainer's
+    ``prompts`` as ``prompt``; both must shape the tokens as they do on ST's own ``Transformer``."""
+    module = _reimport_under_deprecation_errors()
+    backend = Tokenizer(models.WordLevel({"[PAD]": 0, "[UNK]": 1}, unk_token="[UNK]"))
+    backend.pre_tokenizer = pre_tokenizers.Whitespace()
+    tokenizer = PreTrainedTokenizerFast(tokenizer_object=backend, pad_token="[PAD]", unk_token="[UNK]")
+    wrapper = module.PreloadedTransformer(Qwen3Model(Qwen3Config(**TINY_QWEN3_CONFIG)), tokenizer, max_seq_length=8)
+    model = SentenceTransformer(modules=[wrapper], device="cpu")
+    text = " ".join(["word"] * 20)
+
+    assert model.preprocess([text])["input_ids"].shape[1] == 8
+    assert model.preprocess([text], max_length=4)["input_ids"].shape[1] == 4
+    assert model.preprocess([("a b", "c")], prompt="p q ")["input_ids"].shape[1] == 5
 
 
 if __name__ == "__main__":

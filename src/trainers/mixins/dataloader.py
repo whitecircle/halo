@@ -323,6 +323,14 @@ class DataParallelDataLoaderMixin:
 
         if self.train_dataset is None:
             raise ValueError("Training requires a train_dataset.")
+        if self.args.train_sampling_strategy == "batch_rebalance":
+            # HF's batch_rebalance sampler shards batches over every process, not over DP replicas.
+            raise ValueError(
+                "train_sampling_strategy='batch_rebalance' shards batches across every process, while this "
+                "run's loader shards across data-parallel replicas (TP/CP/ETP/PP, or a pre-sharded "
+                "dataset): ranks sharing a batch would draw different rows. Use 'random', 'sequential' "
+                "or 'group_by_length'."
+            )
 
         # Unequal per-rank lengths run different step counts and hang on the next all-reduce.
         if self._dataset_presharded:

@@ -131,7 +131,7 @@ verdict, so a tied or MTP-carrying checkpoint names that reason first.
 | GLM-5 Next text tower (`Glm5NextTextModel`) | registered | hyper-connection boundary, any split offset; a stage may not begin on a `shared` DSA indexer layer (`indexer_types`; GLM-5.3-Flash ships all `full`). The composite `Glm5NextForConditionalGeneration` trains text-only, as Step-3.7's does |
 | Zaya (`ZayaModel`) | refused | two tensors cross every layer boundary — the fp32 residual stream and the accumulating EDA router state (`prev_router_hidden_states`) — a mixed-dtype boundary the single-activation contract does not carry; the loop also selects `layer_types` by list position |
 | Gemma 4 (`Gemma4TextModel`) | refused | per-layer embeddings sliced by enumerate position, and the trailing KV-shared layers read an earlier layer's K/V through a forward-threaded dict |
-| Inkling (`InklingTextModel`) | refused | loader-only validation: no schedule, end-to-end or save/resume row. Its spec still declares `embed_norm` (`input_module_attrs`) for the stage loader |
+| Inkling (`InklingTextModel`) | refused | loader-only validation: no schedule, end-to-end or save/resume row. Its embedding module carries `embed_norm`, so the norm leaves later stages with it |
 | Qwen3 MoE, GLM-4 MoE Lite, Bailing/Ling, Mistral4, Laguna, LFM-2, Cohere2 MoE, any other | not registered | refused by name. LFM-2 and the shipped Cohere2 MoE checkpoints also tie their head (tie gate) |
 
 Models with **live** MTP tail layers are refused: MTP re-embeds `input_ids` mid-backbone, a second

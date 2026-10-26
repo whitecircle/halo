@@ -37,6 +37,7 @@ from src.inference.endpoints import is_loopback
 from src.weight_sync.clients.sglang import SGLangWeightSyncClient
 from src.weight_sync.clients.vllm import VLLMWeightSyncClient
 from src.weight_sync.transport.rendezvous import RendezvousListener, _outbound_ip
+from tests.common.fake_engines import FakeVLLMServer
 from tests.common.ports import free_port
 from tests.common.weight_sync import offline_client
 
@@ -127,10 +128,12 @@ def _group_without_nccl(*args, **kwargs):
 
 
 def _recording_engine(engine_requests: list[_JoinRequest], server_calls: list[str]):
-    """The engine's routes: vLLM's world-size read reports no ranks, and every other request is a group-join
-    request, recorded with who listened on its port when it arrived."""
+    """The engine's routes: vLLM's version and world-size reads report the pinned release and no ranks, and every
+    other request is a group-join request, recorded with who listened on its port when it arrived."""
 
     def request(method, path, **kwargs):
+        if path == "/version":
+            return _Response({"version": FakeVLLMServer.VERSION})
         if path == "/get_world_size":
             return _Response({"world_size": 0})
         server_calls.append(path)

@@ -344,7 +344,7 @@ def test_merge_models_hub_source_ships_the_modules_its_auto_map_names():
 
 
 def test_convert_to_bf16_honours_max_shard_size():
-    """``save_pretrained`` alone caps shards at transformers' own default (50GB in 5.16), not the
+    """``save_pretrained`` alone caps shards at transformers' own default (50GB in 5.20), not the
     toolkit's ``DEFAULT_MAX_SHARD_SIZE``: a 120B conversion then lands in 50GB files every
     single-file reader (the sink reset, ``load_file``) has to hold whole. The flag must reach the save."""
     PartialState()

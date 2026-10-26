@@ -29,7 +29,7 @@ One YAML, six dataclasses.
 | Ray, servers, sync cadence, prefetch, rollout sampling, trust region | `AsyncTrainingConfig` ([fields](../../reference/configuration-reference.md#asynctrainingconfig)) |
 | Dataset columns, prompt filter, `save_completions`, `reset_sinks` | `EnvironmentalGRPOScriptArguments` |
 | Optimizer, batch, `beta`, `num_generations`, `vllm_group_port` | TRL `GRPOConfig` |
-| Model id, LoRA | `ModelConfig` |
+| Model id, LoRA, `trust_remote_code` | `ModelArguments` |
 | Parallel sizes | `ParallelismArguments` |
 
 ## Dataset

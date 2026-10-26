@@ -9,12 +9,12 @@ truth; where a recipe disagrees with this page, this page wins.
 | --- | --- |
 | Python | `>=3.12,<3.13`, installed with uv into the image |
 | PyTorch | 2.11.x, `cu130` wheel (CUDA 13.2 toolkit in the image) |
-| Transformers | 5.16.x |
-| TRL | 1.6.x |
+| Transformers | 5.20.x |
+| TRL | 1.14.x |
 | Accelerate | 1.11.x |
 | PEFT | 0.18.x |
-| vLLM | 0.26.0, separate container: rollouts for both online RL methods |
-| SGLang | 0.5.17, separate container: rollouts for async GRPO with environments |
+| vLLM | 0.32.0, separate container: rollouts for both online RL methods |
+| SGLang | 0.5.22, separate container: rollouts for async GRPO with environments |
 
 | Hardware | Image | Status |
 | --- | --- | --- |

@@ -56,6 +56,26 @@ def test_vllm_compose_pins_the_only_moe_backend_weight_sync_is_correct_under():
     assert "triton" in match.group(1), f"--moe-backend must default to triton, got {match.group(1)!r}"
 
 
+def test_vllm_compose_keeps_prefix_caching_on_by_default():
+    """R3 capture refuses to start without prefix caching, and a multi-turn episode re-prefills its
+    whole context every turn when it is off; the flag stays explicit so a change in vLLM's default
+    cannot drop it."""
+    assert "${VLLM_PREFIX_CACHING_FLAG:---enable-prefix-caching}" in _server_command(VLLM_COMPOSE, "vllm-server")
+
+
+def test_vllm_compose_turns_strict_tool_calling_off_by_default():
+    """vLLM defaults it on, and then every tool-bearing request is masked by a grammar the trainer's
+    log-probs never see."""
+    env = _environment(_services(VLLM_COMPOSE)["vllm-server"])
+    assert env.get("VLLM_ENFORCE_STRICT_TOOL_CALLING") == "${VLLM_ENFORCE_STRICT_TOOL_CALLING:-0}", env
+
+
+def test_vllm_compose_passes_the_model_runner_through_bare():
+    """An empty value kills the server at startup (int() parse), and a default of 0 would force the V1
+    runner, which R3 refuses and on which thinking budgets misfire; bare, the image's pin holds."""
+    assert "VLLM_USE_V2_MODEL_RUNNER" in _services(VLLM_COMPOSE)["vllm-server"].get("environment", [])
+
+
 def test_vllm_compose_enables_the_weight_transfer_endpoints():
     """Without the nccl weight-transfer config the endpoints the trainer drives do not exist."""
     command = _server_command(VLLM_COMPOSE, "vllm-server")

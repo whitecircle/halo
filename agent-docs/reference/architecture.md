@@ -203,11 +203,11 @@ distributed shards back into a standard HuggingFace checkpoint — see
 
 ## RL: the rollout engine as a separate container
 
-Online and async GRPO generate completions with vLLM (0.26.0). vLLM pins its own
+Online and async GRPO generate completions with vLLM (0.32.0). vLLM pins its own
 torch/transformers stack, so it is never imported into the training environment — it runs as its
 own container (`Dockerfile.vllm` + `docker-compose.vllm.yml`). Async GRPO can target SGLang
 instead (`rollout_backend: sglang`, `Dockerfile.sglang` + `docker-compose.sglang.yml`; the sync needs that image, whose
-`docker/sglang/patches/` repair two loaders and the prefill log-prob offset). Each
+`docker/sglang/patches/` repair the Gemma 4 router's `scale` load and the prefill log-prob offset). Each
 engine's pinned loaders refuse a few families — see
 [Rollout Servers](../infrastructure/rollout-servers.md#which-families-each-engine-serves).
 

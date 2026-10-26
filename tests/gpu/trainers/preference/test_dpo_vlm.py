@@ -1,7 +1,7 @@
 #!/usr/bin/env python
 """Test: DistributedDPOTrainer on a VLM (Qwen3-VL-2B) — single-GPU vision-DPO smoke.
 
-Under TRL 1.6, passing a processor as processing_class flips TRL into vision mode (_is_vlm) and an
+Under TRL 1.14, passing a processor as processing_class flips TRL into vision mode (_is_vlm) and an
 images-bearing preference dataset auto-selects TRL's DataCollatorForVisionPreference, threading
 pixel_values to the model. Asserts the trainer enters VLM mode and training completes every step
 with a finite loss. It does not compare the loss to a reference.

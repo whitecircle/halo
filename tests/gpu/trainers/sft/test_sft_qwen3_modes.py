@@ -24,8 +24,9 @@ from types import SimpleNamespace
 
 import torch
 from transformers import AutoTokenizer
-from trl import ModelConfig, SFTConfig, get_quantization_config
+from trl import SFTConfig, get_quantization_config
 
+from src.configs.script_arguments import ModelArguments
 from src.data.collators.factory import select_data_collator
 from src.distributed.parallelism_config import ParallelismConfig
 from src.env import is_accelerate_fsdp_launch
@@ -78,7 +79,7 @@ PEFT_ARGS = SimpleNamespace(
 
 def run_mode(
     mode_name: str,
-    model_config: ModelConfig,
+    model_config: ModelArguments,
     sft_config: SFTConfig,
     parallelism_config: ParallelismConfig,
     tokenizer,
@@ -218,7 +219,7 @@ def run(ctx) -> dict:
     log("  TEST 1: Full Fine-Tune")
     log(f"{'=' * 70}")
 
-    full_model_config = ModelConfig(
+    full_model_config = ModelArguments(
         model_name_or_path=MODEL_NAME,
         use_peft=False,
         trust_remote_code=True,
@@ -249,7 +250,7 @@ def run(ctx) -> dict:
     log("  TEST 2: LoRA")
     log(f"{'=' * 70}")
 
-    lora_model_config = ModelConfig(
+    lora_model_config = ModelArguments(
         model_name_or_path=MODEL_NAME,
         use_peft=True,
         lora_r=64,
@@ -295,7 +296,7 @@ def run(ctx) -> dict:
         log("  TEST 3: QLoRA (4-bit)")
         log(f"{'=' * 70}")
 
-        qlora_model_config = ModelConfig(
+        qlora_model_config = ModelArguments(
             model_name_or_path=MODEL_NAME,
             use_peft=True,
             lora_r=64,
@@ -346,7 +347,7 @@ def run(ctx) -> dict:
 
         tp_parallelism = ParallelismConfig(tp_size=2)
 
-        tp_model_config = ModelConfig(
+        tp_model_config = ModelArguments(
             model_name_or_path=MODEL_NAME,
             use_peft=False,
             trust_remote_code=True,
@@ -386,7 +387,7 @@ def run(ctx) -> dict:
 
         cp_parallelism = ParallelismConfig(cp_size=2)
 
-        cp_model_config = ModelConfig(
+        cp_model_config = ModelArguments(
             model_name_or_path=MODEL_NAME,
             use_peft=False,
             trust_remote_code=True,

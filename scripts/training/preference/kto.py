@@ -4,7 +4,7 @@
 Kahneman-Tversky Optimization on *unpaired* preference data — each row is a single
 ``{prompt, completion, label}`` triple (``label`` marks the completion desirable or not). One
 script serves both text and vision-language models: ``load_policy_model`` auto-detects the
-modality. For a VLM the processor is the ``processing_class``, flipping TRL 1.6's KTOTrainer into
+modality. For a VLM the processor is the ``processing_class``, flipping TRL 1.14's KTOTrainer into
 vision mode (``DataCollatorForVisionUnpairedPreference``; vision KTO is unpaired-only) — add an
 ``images``/``image`` column to the dataset, or point ``images_field`` at the column that holds them.
 
@@ -21,11 +21,12 @@ Usage:
         examples/preference/qwen3_5/kto-qwen3.5-9b-kto-mix-14k.yaml
 """
 
-from trl import KTOConfig, ModelConfig
+from trl import KTOConfig
 
 from src.config_validation import reject_unsupported_args
 from src.configs.parallelism_arguments import ParallelismArguments
 from src.configs.preference import KTOScriptArguments
+from src.configs.script_arguments import ModelArguments
 from src.data.pipeline.processing import carry_cache_key, require_render_column
 from src.data.sources.loading import alias_images_column
 from src.data.vlm import dataset_declares_images
@@ -108,7 +109,7 @@ def _rename_kto_columns(dataset, args):
 
 def main():
     args, kto_config, model_config, dist_args = parse_script_args(
-        KTOScriptArguments, KTOConfig, ModelConfig, ParallelismArguments
+        KTOScriptArguments, KTOConfig, ModelArguments, ParallelismArguments
     )
 
     # TRL's KTOTrainer chat-templates and tokenizes the raw prompt/completion columns itself: it

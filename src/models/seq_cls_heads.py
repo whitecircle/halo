@@ -1,4 +1,4 @@
-"""Sequence-classification heads transformers 5.16 does not ship (Gemma 4, MoE Qwen3.5/3.6), registered
+"""Sequence-classification heads transformers 5.20 does not ship (Gemma 4, MoE Qwen3.5/3.6), registered
 at import, and the live roster of multimodal families carrying a head. Each is the upstream Generic head
 over the family's ``PreTrainedModel``, registered for both spellings a checkpoint can carry (the
 composite wrapper and its text tower); a release that lands a native head takes precedence.
@@ -36,7 +36,7 @@ class Gemma4ForSequenceClassification(GenericForSequenceClassification, Gemma4Pr
 class Gemma4TextForSequenceClassification(GenericForSequenceClassification, Gemma4PreTrainedModel):
     """Pooled-score head over the text-only backbone (``model_type: gemma4_text``).
 
-    Its own registration: 5.16 gives the text tower its own config class, and a CausalLM SFT on a
+    Its own registration: 5.20 gives the text tower its own config class, and a CausalLM SFT on a
     text-only artifact writes ``model_type: gemma4_text``, which the composite head cannot load.
     """
 

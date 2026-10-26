@@ -51,7 +51,13 @@ from src.model_loading.liger.dispatch import (
     warn_if_flce_unreachable,
 )
 from src.models.attention.sdpa_flex_sliding import reject_full_determinism_after_warmup
-from src.models.config_access import config_sources, snapshot_special_token_ids
+from src.models.config_access import (
+    ROUTER_AUX_FIELDS,
+    SPECIAL_TOKEN_ID_FIELDS,
+    config_sources,
+    restore_config_fields,
+    snapshot_config_fields,
+)
 from src.models.moe.family_specs import wraps_experts
 from src.models.peft_adapters import lora_fold_targets
 from src.models.segment_markers import reject_compressed_kv_rows
@@ -84,7 +90,12 @@ from src.trainers.mixins.ep_introspection import (
 from src.trainers.mixins.grad_sync import GradientSyncMixin
 from src.trainers.mixins.pipeline import PipelineTrainerMixin
 from src.trainers.mixins.token_metrics import TokenMetricsMixin
-from src.trainers.mixins.validation import ParallelismValidationMixin, ctor_model_and_config, disable_trl_liger
+from src.trainers.mixins.validation import (
+    ParallelismValidationMixin,
+    active_router_aux_loss_coef,
+    ctor_model_and_config,
+    disable_trl_liger,
+)
 from src.trainers.parallelism.pipeline_loss_adapter import PipelineLossAdapter
 from src.trainers.parallelism.trainer_rules import reject_cp_trainer_args
 
@@ -247,6 +258,10 @@ class DistributedTrainerMixin(
     SYNCS_TO_EXTERNAL_GENERATOR: ClassVar[bool] = False
     # True only where ``labels`` go through ``*ForCausalLM.forward`` and the aux term lands in ``outputs.loss``.
     _consumes_router_aux_loss: bool = False
+    # True where TRL's own loss adds ``router_aux_loss_coef * outputs.aux_loss`` (DPO, KTO): TRL is handed
+    # the coefficient the balancing mode put in effect. Every other TRL trainer is handed 0.0, since the
+    # model's forward adds the term itself (SFT) or a policy-gradient loss leaves it inert (GRPO).
+    _trl_adds_router_aux_loss: bool = False
     # True where the loss runs outside the model's forward with no labels passed (the GRPO family):
     # Liger's CE/FLCE can never fire there, so an applied FLCE draws a warning at construction.
     _loss_outside_model_forward: bool = False
@@ -313,6 +328,17 @@ class DistributedTrainerMixin(
             training_args = ctor_training_args
         model_config = getattr(model, "config", None)
         self._configure_mixed_precision(kwargs, training_args)
+
+        # Taken before TRL's __init__, which writes the tokenizer's pad id (and, in SFT, its own router
+        # aux-loss fields) onto the config. Every save restores the special-token ids (HF's
+        # align_special_tokens also collapses a list-valued eos_token_id at train()); the aux fields are
+        # restored once TRL's construction is done (_setup_distributed_modes).
+        self._pristine_special_token_ids = (
+            snapshot_config_fields(model_config, SPECIAL_TOKEN_ID_FIELDS) if model_config else None
+        )
+        self._router_aux_fields = snapshot_config_fields(model_config, ROUTER_AUX_FIELDS) if model_config else []
+        if training_args is not None and hasattr(training_args, "router_aux_loss_coef"):
+            self._hand_trl_the_router_aux_loss_coef(model, training_args)
 
         if training_args is not None:
             # Every entry point, the Python API included; free after an entry script's own probe.
@@ -466,6 +492,24 @@ class DistributedTrainerMixin(
                         val,
                     )
 
+    def _hand_trl_the_router_aux_loss_coef(self, model, training_args) -> None:
+        """Set TRL's ``router_aux_loss_coef`` to the term this trainer's loss may carry.
+
+        TRL 1.14 reads an unset coefficient off the model config and turns the aux loss on wherever that
+        is non-zero, so a hub coefficient would train the aux term under ``moe_balancing: none`` or a
+        bias mode, add it to a policy-gradient loss, and leak ``output_router_logits`` into the export.
+        The balancing mode owns the term instead.
+        """
+        if training_args.router_aux_loss_coef is not None:
+            raise ValueError(
+                f"router_aux_loss_coef={training_args.router_aux_loss_coef} is set on the trainer config, but the "
+                "router aux loss is owned by moe_balancing and the model config's own router_aux_loss_coef "
+                "(model_init_kwargs). Unset it here."
+            )
+        training_args.router_aux_loss_coef = (
+            active_router_aux_loss_coef(model) if self._trl_adds_router_aux_loss else 0.0
+        )
+
     def _setup_distributed_modes(self):
         """Setup the enabled parallelism modes and data parallel gradient sync.
 
@@ -481,9 +525,13 @@ class DistributedTrainerMixin(
         if self._deferred_liger_kernel:
             self.args.use_liger_kernel = True
 
-        # HF's align_special_tokens collapses a list-valued config.eos_token_id; every save restores this snapshot.
+        restore_config_fields(getattr(self, "_router_aux_fields", []))
         model_config = getattr(getattr(self, "model", None), "config", None)
-        self._pristine_special_token_ids = snapshot_special_token_ids(model_config) if model_config else []
+        # A model passed by id has no config until TRL loads it.
+        if getattr(self, "_pristine_special_token_ids", None) is None:
+            self._pristine_special_token_ids = (
+                snapshot_config_fields(model_config, SPECIAL_TOKEN_ID_FIELDS) if model_config else []
+            )
 
         if self._loss_outside_model_forward and model_config is not None:
             warn_if_flce_unreachable(model_config, type(self).__name__)

@@ -8,9 +8,10 @@ the tool's output must hold every quantized weight as the block-wise ``weight * 
 product an independent loop computes, stored bf16 with no scale sidecar left, under a
 ``config.json`` that lost the quantization scheme and gained nothing else — the parallel plans
 the loader workaround blanks must not leak into it. The two load-time hazards this pins are
-transformers 5.16's ``update_tp_plan`` crash on a config with a class-level EP plan and
-``save_pretrained``'s revert through the quantizer-rewritten conversions, which cannot reach the
-hub layout (the export goes through the registry mapping instead).
+transformers 5.20's ``update_tp_plan`` rewrite of a class-level EP plan (``*_scale_inv`` entries
+for tensors the bf16 output does not carry) and ``save_pretrained``'s revert through the
+quantizer-rewritten conversions, which cannot reach the hub layout (the export goes through the
+registry mapping instead).
 
 Run: ``python tests/cpu/checkpoint/test_convert_deepseek_v4_bf16.py`` (or ``pytest -m cpu``).
 """

@@ -24,7 +24,7 @@ from src.weight_sync.clients.base import (
     WEIGHT_UPDATE_TIMEOUT_S,
     AsyncCall,
     WeightSyncClientBase,
-    unregistered_bailing_model_types,
+    unservable_bailing_model_types,
 )
 from src.weight_sync.transport.bounded_waits import BROADCAST_DRAIN_TIMEOUT_S, bounded_event_sync, bounded_stream_sync
 from src.weight_sync.transport.c10d_group import (
@@ -46,11 +46,11 @@ class SGLangWeightSyncClient(WeightSyncClientBase):
 
     BACKEND_KEY = "sglang"
     BACKEND_NAME = "SGLang"
-    ENGINE_RELEASE = "SGLang 0.5.17"
+    ENGINE_RELEASE = "SGLang 0.5.22"
     GROUP_HOST_ENV = "SGLANG_GROUP_HOST"
     UNSERVABLE_MODEL_TYPES = {
         "mistral4": f"{ENGINE_RELEASE} registers no Mistral4 model class (agent-docs/models/mistral4.md#serving)",
-        **unregistered_bailing_model_types(ENGINE_RELEASE),
+        **unservable_bailing_model_types(ENGINE_RELEASE),
         "zaya": (
             f"{ENGINE_RELEASE}'s zaya loader reads the pre-transformers-5.14 per-expert checkpoint "
             "(zaya_block.experts.local_experts.N.linear_fc1), not the native fused layout the trainer holds"
@@ -74,11 +74,15 @@ class SGLangWeightSyncClient(WeightSyncClientBase):
     # that arrives alone; the fusion exists only where the model has both (``q_lora_rank`` set).
     CO_LOADED_PARAM_GROUPS = (("self_attn.q_a_proj.weight", "self_attn.kv_a_proj_with_mqa.weight"),)
     PAUSE_ENDPOINT = "/pause_generation"
-    # The post-update flush asserts an idle scheduler and SIGQUITs the server otherwise, so requests are aborted.
+    # The post-update flush needs an idle scheduler, so in-flight requests are aborted.
     PAUSE_REQUEST = {"json": {"mode": "abort"}}
     RESUME_ENDPOINT = "/continue_generation"
     # The endpoint takes a request dataclass and rejects an empty body.
     RESUME_REQUEST = {"json": {}}
+    # The engine refuses an update outside this session; its close re-runs each layer's post-load processing.
+    SESSION_OPEN_ENDPOINT = "/begin_weight_update"
+    SESSION_CLOSE_ENDPOINT = "/end_weight_update"
+    SESSION_REQUEST = {"json": {}}
     _INIT_LOG = "SGLang NCCL init: engine_ws={engine_ws}, master={master}:{port}, listening on {bind}"
     _READY_LOG = "SGLang NCCL weight transfer initialized"
     _FORMATION_STEP = "weight-update group formation"
@@ -169,7 +173,7 @@ class SGLangWeightSyncClient(WeightSyncClientBase):
         self._send_stream: torch.cuda.Stream | None = None
 
     def _start_engine_update(self) -> None:
-        """Quiesce the engine, unwinding on failure; the chunk requests are the update."""
+        """Quiesce the engine and open its weight-update session, unwinding both on failure."""
         if self._transport is None:
             raise RuntimeError("Call init_communicator() first")
         if self._aborted:
@@ -182,7 +186,9 @@ class SGLangWeightSyncClient(WeightSyncClientBase):
             torch.cuda.set_device(self.sync_device)
         try:
             self._quiesce()
+            self._open_session()
         except Exception:
+            self._close_session()
             self._lift_pause(CLEANUP_TIMEOUT_S, context="after a failed pause")
             raise
 
@@ -206,7 +212,7 @@ class SGLangWeightSyncClient(WeightSyncClientBase):
                 "dtypes": dtypes,
                 "shapes": shapes,
                 "group_name": self.group_name,
-                # Each flush asserts an idle scheduler, so only the final chunk asks for one.
+                # Each flush needs an idle scheduler, so only the final chunk asks for one.
                 "flush_cache": final,
             },
         )
@@ -254,13 +260,18 @@ class SGLangWeightSyncClient(WeightSyncClientBase):
             raise
 
     def _finish_engine_update(self, tail: list[tuple[str, torch.Tensor]]) -> None:
-        """Send the final chunk with the cache flush, then settle the sends and drop the arena."""
-        if tail:
-            self._transmit_chunk(tail, final=True)
-        else:
-            # With no chunk to ride on, the flush is requested directly, or the new weights serve a stale cache.
-            self.request("POST", "/flush_cache", retry=True, timeout=POST_TIMEOUT_S)
-        self._release_arena()
+        """Send the final chunk with the cache flush, settle the sends, drop the arena and close the session; the
+        close runs on every path."""
+        try:
+            if tail:
+                self._transmit_chunk(tail, final=True)
+            else:
+                # With no chunk to ride on, the flush is requested directly, or the new weights serve a stale cache.
+                self.request("POST", "/flush_cache", retry=True, timeout=POST_TIMEOUT_S)
+            self._release_arena()
+            self._end_session()
+        finally:
+            self._close_session()
 
     def score_completion_logprobs(
         self, prompt_ids: list[int], completion_ids: list[int], timeout: float = RESCORE_TIMEOUT_S

@@ -26,11 +26,12 @@ Usage:
 """
 
 from transformers import AutoModelForSequenceClassification
-from trl import ModelConfig, RewardConfig
+from trl import RewardConfig
 
 from src.config_validation import reject_unsupported_args
 from src.configs.parallelism_arguments import ParallelismArguments
 from src.configs.reward import RewardScriptArguments
+from src.configs.script_arguments import ModelArguments
 from src.data.sources.loading import alias_images_column, alias_tools_column
 from src.data.vlm import is_vlm_run
 from src.entrypoints.data_setup import load_script_datasets, log_script_dataset_examples
@@ -58,7 +59,7 @@ from src.trainers.reward.bradley_terry import DistributedRewardTrainer
 
 def main():
     args, reward_config, model_config, dist_args = parse_script_args(
-        RewardScriptArguments, RewardConfig, ModelConfig, ParallelismArguments
+        RewardScriptArguments, RewardConfig, ModelArguments, ParallelismArguments
     )
 
     # text_only_model: the score head is pinned to AutoModelForSequenceClassification, so the loader

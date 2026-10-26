@@ -2,7 +2,7 @@
 
 [Liger Kernel](https://github.com/linkedin/Liger-Kernel) provides Triton replacements for RMSNorm,
 cross-entropy, SwiGLU, and RoPE. Enabled by default (`use_liger_kernel: true`); set it `false` to disable.
-A required dependency, pinned `liger-kernel>=0.8.0,<0.9.0` (`uv.lock` resolves 0.8.0). A model type no
+A required dependency, pinned `liger-kernel>=0.8.4,<0.9.0` (`uv.lock` resolves 0.8.4). A model type no
 applier covers **warns** that the run trains unfused, and an explicit `liger_kernel_config` key on such a
 model raises rather than being dropped.
 
@@ -12,9 +12,10 @@ Why fusion pays, counted in HBM round trips:
 ## Supported models
 
 The dispatch (`src/model_loading/liger/dispatch.py`) resolves one applier per `model_type`: the toolkit
-registry first, then upstream Liger's `MODEL_TYPE_TO_APPLY_LIGER_FN`, then the wrapper's
-`text_config.model_type`. Multimodal checkpoints register only their inner text path (Gemma 4 is
-`gemma4_text`, with no `gemma4` entry), so kernels still reach the decoder and lm_head.
+registry for the `model_type` or the wrapper's `text_config.model_type`, then upstream Liger's
+`MODEL_TYPE_TO_APPLY_LIGER_FN` in the same order. A multimodal wrapper whose text tower a toolkit spec covers
+resolves to that spec even where upstream registers the wrapper (`gemma4`), so upstream's wrapper applier never
+runs its own text-tower swaps over the roles the spec takes over.
 
 The toolkit registry is built from one declarative spec per family (`src/model_loading/liger/family_specs.py`): a spec
 names the classes filling each role — RMSNorm, GLU MLP, causal-LM head — and only where the kernel computes
@@ -22,10 +23,13 @@ the family's function **exactly**. The applier (`src/model_loading/liger/applier
 preserving its constructor signature and class name.
 
 Upstream Liger 0.8 covers Llama, Qwen2/3, Qwen3 MoE, Qwen3.5/3.6, Mistral, Mixtral, Gemma 2/3/4, GLM-4
-(incl. 4V MoE), OLMo 2/3, GptOss, Qwen3-Next and VLM wrappers; `qwen3_moe`, `qwen3_5*`, `qwen3_next`,
-`gpt_oss` and `gemma4_text` are extended or corrected by a [delegating spec](#upstream-covered-families-the-toolkit-extends).
+(incl. 4V MoE), OLMo 2/3, GptOss, Qwen3-Next, DeepSeek-V3/V4 and VLM wrappers; `qwen3_moe`, `qwen3_5*`,
+`qwen3_next`, `gpt_oss` and `gemma4_text` are extended or corrected by a
+[delegating spec](#upstream-covered-families-the-toolkit-extends).
 
-Toolkit-covered families (upstream has none). ✅ = patched, — = left unfused, with the reason:
+Toolkit-covered families. Upstream has none of them except DeepSeek-V4, whose entry the toolkit spec replaces
+outright (upstream's applier swaps the RMSNorm the spec leaves eager). ✅ = patched, — = left unfused, with the
+reason:
 
 | Model | model_type | RMSNorm | GLU MLP | RoPE | CE | FLCE |
 |---|---|:--:|:--:|:--:|:--:|:--:|
@@ -138,8 +142,7 @@ replaced raises at patch time rather than stacking two swaps.
 
 Everything the dispatch derives then follows the applier that actually **runs**: the `rope`/`swiglu`
 defaults read off its signature, and the EP fused-GLU decision below. CE is the toolkit's scoped patch here
-as everywhere; upstream's branch (broken outright in liger-kernel 0.8.0's Qwen3.5 applier, which imports
-`liger_cross_entropy` from the wrong module) is never called.
+as everywhere; upstream's branch, a process-wide `F.cross_entropy` rebind, is never called.
 
 **The shared expert is the toolkit's; the routed experts never run Liger's fused MoE kernel.** Upstream's
 `swiglu` would swap the routed-experts class (`Qwen3_5MoeExperts` / `Qwen3NextExperts`) for `LigerExperts`, so
@@ -162,11 +165,11 @@ the EP wrapper the toolkit's class swap runs them on Halo's own SwiGLU kernel (`
 wrapper runs.
 
 Upstream's MoE appliers (Qwen3 MoE, Mixtral, Qwen3-VL MoE, GLM-4V MoE, HunYuan MoE, Qwen3.5 MoE, Qwen3-Next)
-swap the routed-experts class for `LigerExperts` under `swiglu`. On Blackwell, liger-kernel 0.8.0's
-`LigerExperts` computes the input gradient wrong (fixed upstream in 0.8.3,
-[Liger-Kernel#1413](https://github.com/linkedin/Liger-Kernel/pull/1413)): against fp32 eager experts on a B300
-at Qwen3-30B-A3B's shape (128 experts, top-8, 8192 tokens), `dx` is off by 0.61 relative while the forward and
-weight gradients stay under 0.5%.
+swap the routed-experts class for `LigerExperts` under `swiglu`. On Blackwell, `LigerExperts` computed the input
+gradient wrong until the fix that shipped in liger-kernel 0.8.3
+([Liger-Kernel#1413](https://github.com/linkedin/Liger-Kernel/pull/1413)): against fp32 eager experts on a B300
+at Qwen3-30B-A3B's shape (128 experts, top-8, 8192 tokens), `dx` was off by 0.61 relative while the forward and
+weight gradients stayed under 0.5%. The routed-experts GPU test has not re-measured the fixed kernel.
 
 Two rules keep it off:
 
@@ -320,12 +323,13 @@ The dispatch records the **effective** applied config on `model.config`, and
 `liger_kernel_config` to the applied dict, so TRL's re-application is an identical re-patch and its entropy
 guard knows logits are `None`; otherwise it turns the flag off.
 
-HF Trainer re-applies through liger-kernel's own registry, upstream's applier alone, so every config it
-re-applies (this pinned dict and the trainer mixin's re-sanitized one) has the roles a delegating spec takes
-over from upstream turned off (`trl_reapplication_config`). Upstream's instance patch would otherwise bind
-its llama-cast norm over GptOss's Gemma-cast one, its GeGLU over Gemma 4's toolkit-fused dense MLP, or
-`LigerExperts` over the Qwen MoE families' routed experts. A model loaded outside Halo's loaders runs those
-roles eager.
+HF Trainer re-applies through liger-kernel's own registry, running the applier registered for the model's
+own `model_type` alone, its defaults filling every omitted flag. Every config it re-applies (this pinned dict
+and the trainer mixin's re-sanitized one) therefore turns off each flag of that applier the toolkit applier
+does not hand upstream (`trl_reapplication_config`). Upstream's instance patch would otherwise bind its
+llama-cast norm over GptOss's Gemma-cast one, its GeGLU over Gemma 4's toolkit-fused dense MLP, `LigerExperts`
+over the Qwen MoE families' routed experts, or its norm swap and fused head over DeepSeek-V4's. A model loaded
+outside Halo's loaders runs those roles eager.
 
 Code loading via `AutoModelForCausalLM.from_pretrained()` instead — the GPU benchmarks — runs
 `apply_liger_kernel` on the config it passes to `from_pretrained`, then `finalize_liger_after_direct_load`.

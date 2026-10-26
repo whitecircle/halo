@@ -245,7 +245,7 @@ def test_a_missing_kernel_is_not_reported_as_an_architecture_refusal(tmp_path):
         )
 
 
-def test_the_remote_modeling_class_comes_from_the_configs_commit(monkeypatch, config):
+def test_the_remote_modeling_class_comes_from_the_runs_revision(monkeypatch, config):
     """The lazy loaders build a remote-code shell from the repo id the config names, not the snapshot
     directory they read weights from, so that fetch is the one place the run's revision can be lost.
     Unpinned it resolves the modeling file at the repo's ``main``: a run pinned to an older commit
@@ -260,13 +260,14 @@ def test_the_remote_modeling_class_comes_from_the_configs_commit(monkeypatch, co
     monkeypatch.setattr(meta_shell, "get_class_from_dynamic_module", fake_fetch)
     config.auto_map = {"AutoModelForCausalLM": "modeling_remote.RemoteForCausalLM"}
     config._name_or_path = "org/remote-moe"
-    config._commit_hash = PINNED_COMMIT
 
-    resolved = meta_shell._resolve_remote_code_class(AutoModelForCausalLM, config, trust_remote_code=True)
+    resolved = meta_shell._resolve_remote_code_class(
+        AutoModelForCausalLM, config, trust_remote_code=True, revision=PINNED_COMMIT
+    )
 
     assert resolved is GptOssForCausalLM
     assert fetched["repo"] == "org/remote-moe"
-    assert fetched.get("revision") == PINNED_COMMIT, f"modeling file fetched off the config's commit: {fetched}"
+    assert fetched.get("revision") == PINNED_COMMIT, f"modeling file fetched off the run's revision: {fetched}"
 
 
 if __name__ == "__main__":

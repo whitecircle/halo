@@ -38,9 +38,8 @@ def run(ctx):
     parser.add_argument("--etp-size", type=int, choices=(1, 2), default=1)
     parser.add_argument("--peft", choices=("lora", "expert_lora"), default=None)
     parser.add_argument("--resume", action="store_true")
-    # The engine enforces the CoT cap, so this row needs a server booted with a reasoning parser and
-    # VLLM_USE_V2_MODEL_RUNNER=0 (see tests/common/thinking_budget.py); it reports the server's own
-    # 400 when it was not.
+    # The engine enforces the CoT cap, so this row needs a server booted with a reasoning parser (see
+    # tests/common/thinking_budget.py); it reports the server's own 400 when it was not.
     parser.add_argument("--thinking-budget", type=int, default=None)
     # R3: needs the server on --enable-return-routed-experts (VLLM_ENABLE_R3=1) with the triton MoE
     # backend, which the compose file already passes.

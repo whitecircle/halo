@@ -69,12 +69,11 @@ def parse_args() -> argparse.Namespace:
 
 
 def source_config(source: str, *, trust_remote_code: bool):
-    """The source's config, prepared for transformers 5.16's dequantizing loader.
+    """The source's config, prepared for transformers 5.20's dequantizing loader.
 
-    ``FineGrainedFP8HfQuantizer.update_tp_plan`` rewrites a config's parallel plans through the
-    expert implementation's override table and dereferences ``None`` for every implementation but
-    ``deepgemm_megamoe``, which is none of them at load time, so a config with a class-level
-    ``base_model_ep_plan`` (DeepSeek-V4's) fails the load. Blanking the instance plans skips the
+    ``FineGrainedFP8HfQuantizer.update_tp_plan`` copies a class-level parallel plan (DeepSeek-V4's
+    ``base_model_ep_plan``) onto the instance with ``*_scale_inv`` entries added for the fp8 scales,
+    which the save would write into the bf16 ``config.json``. Blanking the instance plans skips the
     rewrite; :func:`_restore_parallel_plans` drops the blanks before the save so the class plan shows
     through in ``config.json`` unchanged.
     """

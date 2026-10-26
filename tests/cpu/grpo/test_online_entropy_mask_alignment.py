@@ -41,7 +41,7 @@ class _PlainQuantile:
         return (entropies >= cutoff) & mask.bool()
 
     def _get_per_token_logps_and_entropies(self, model, input_ids, attention_mask, logits_to_keep, *a, **kw):
-        return None, None
+        return None, None, None
 
 
 class _Harness(ProtectedTokenEntropyMixin, _PlainQuantile):

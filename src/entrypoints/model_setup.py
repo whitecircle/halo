@@ -17,8 +17,8 @@ from transformers import (
     PreTrainedTokenizerBase,
 )
 from transformers.utils import IMAGE_PROCESSOR_NAME, PROCESSOR_NAME
-from trl import ModelConfig
 
+from src.configs.script_arguments import ModelArguments
 from src.distributed.tensor_parallel.hf_plan import is_input_embedding_tp_sharded
 from src.entrypoints.script import ScriptContext
 from src.model_loading.dtype import resolve_quantization_config, resolve_training_dtype
@@ -66,7 +66,7 @@ def default_padded_attn_implementation(
     return "sdpa" if sinks_reset else None
 
 
-def require_multimodal_sequence_classification_head(model_config: ModelConfig) -> None:
+def require_multimodal_sequence_classification_head(model_config: ModelArguments) -> None:
     """Refuse a multimodal checkpoint with no sequence-classification head, before the model load.
 
     ``AutoModelForSequenceClassification`` refuses such a family with "Unrecognized configuration
@@ -97,7 +97,7 @@ def require_multimodal_sequence_classification_head(model_config: ModelConfig) -
 def _load_policy(
     context: ScriptContext,
     training_config,
-    model_config: ModelConfig,
+    model_config: ModelArguments,
     args,
     *,
     attn_default: str | None,
@@ -142,7 +142,7 @@ def _load_policy(
 def load_model_and_tokenizer(
     context: ScriptContext,
     training_config,
-    model_config: ModelConfig,
+    model_config: ModelArguments,
     args,
     *,
     model_class=None,
@@ -192,7 +192,7 @@ def _ships_processor_config(model_path: str, revision: str | None) -> bool:
     return False
 
 
-def load_vlm_processor(model_config: ModelConfig, *, required: bool = True):
+def load_vlm_processor(model_config: ModelArguments, *, required: bool = True):
     """The checkpoint's ``AutoProcessor`` at the model revision, loaded main-rank-first.
 
     Hub ``main`` may carry other image geometry than the trained commit, and passing the processor as
@@ -219,7 +219,7 @@ def load_vlm_processor(model_config: ModelConfig, *, required: bool = True):
 def _load_vlm_model_and_processor(
     context: ScriptContext,
     training_config,
-    model_config: ModelConfig,
+    model_config: ModelArguments,
     args,
     *,
     vlm_run: bool,
@@ -254,7 +254,7 @@ def _load_vlm_model_and_processor(
 def load_policy_model(
     context: ScriptContext,
     training_config,
-    model_config: ModelConfig,
+    model_config: ModelArguments,
     args,
     *,
     vlm_run: bool,

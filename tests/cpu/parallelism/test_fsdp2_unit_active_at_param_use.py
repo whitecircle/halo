@@ -73,9 +73,9 @@ from transformers import (
     ZayaConfig,
     ZayaForCausalLM,
 )
-from trl import ModelConfig
 
 import src.distributed.fsdp as fsdp
+from src.configs.script_arguments import ModelArguments
 from src.distributed.fsdp import IdentityParamSet
 from src.model_loading.parallel.peft_setup import build_peft_config
 from tests.common.models import (
@@ -387,7 +387,7 @@ def _attention_lora(model: nn.Module, modules_to_save: list[str] | None) -> nn.M
     )
     # Over one name, TRL hands PEFT a bare string, which PEFT reads as a regex rather than a name.
     assert len(targets) > 1, "fewer than two attention projections found — the case would not adapt by name"
-    model_config = ModelConfig(
+    model_config = ModelArguments(
         use_peft=True,
         lora_r=2,
         lora_alpha=4,

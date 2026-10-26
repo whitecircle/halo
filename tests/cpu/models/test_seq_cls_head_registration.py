@@ -1,7 +1,7 @@
 #!/usr/bin/env python
 """Every toolkit-registered sequence-classification head must be reachable through ``AutoModel``.
 
-transformers 5.16 ships no classification head for Gemma 4 or for MoE Qwen3.5/3.6, and each family
+transformers 5.20 ships no classification head for Gemma 4 or for MoE Qwen3.5/3.6, and each family
 has TWO config classes a checkpoint can carry — the composite (``gemma4``, ``qwen3_5_moe``) and the
 text tower (``gemma4_text``, ``qwen3_5_moe_text``), the latter being what a CausalLM SFT on a
 text-only artifact writes. Reward modeling and classification both resolve the model through

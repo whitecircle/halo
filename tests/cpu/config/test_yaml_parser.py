@@ -16,7 +16,7 @@ from unittest import mock
 
 import pytest
 from transformers import TrainingArguments
-from trl import DPOConfig, GRPOConfig, ModelConfig, RewardConfig, SFTConfig
+from trl import DPOConfig, GRPOConfig, RewardConfig, SFTConfig
 
 from src.configs.distillation import SelfDistillScriptArguments
 from src.configs.grpo_environmental import AsyncTrainingConfig, EnvironmentalGRPOScriptArguments
@@ -25,6 +25,7 @@ from src.configs.parallelism_arguments import ParallelismArguments
 from src.configs.parser import _TOOLKIT_DEFAULTS, HaloArgumentParser, expand_strftime_directives
 from src.configs.preference import DPOScriptArguments, SmoothMarginPOConfig
 from src.configs.reward import RewardScriptArguments
+from src.configs.script_arguments import ModelArguments
 from src.configs.sft import SFTScriptArguments
 from src.entrypoints.script import parse_script_args
 
@@ -521,7 +522,7 @@ def test_flags_only_launch_hands_shared_field_to_every_declarer(script_args_cls,
     """A launch with no YAML, on a script whose tuple declares ``pad_token`` twice (its script args
     and TRL's config), parses and gives the value to both — the tokenizer setup reads the
     script-args copy, TRL its own."""
-    parser = HaloArgumentParser((script_args_cls, trl_config_cls, ModelConfig, ParallelismArguments))
+    parser = HaloArgumentParser((script_args_cls, trl_config_cls, ModelArguments, ParallelismArguments))
     argv = [
         "prog",
         "--model_name_or_path=dummy/model",

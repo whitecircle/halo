@@ -1,6 +1,6 @@
 #!/bin/bash
 # Disables vllm's openai_gptoss reasoning parser and harmony and routes vllm's logging to stderr, so
-# --enable-log-requests / --enable-log-outputs are visible. Every target is a file vllm 0.26.0 ships
+# --enable-log-requests / --enable-log-outputs are visible. Every target is a file vllm 0.32.0 ships
 # and nothing is existence-gated: a missing target or an unmatched form fails the build instead of
 # shipping an unpatched server.
 #   ./docker/vllm/patches/patch_vllm_disable_gptoss.sh [/path/to/site-packages/vllm]  # default: auto-detect
@@ -54,7 +54,7 @@ require_file() {
 }
 
 # Patch 1: force the harmony gates off in the serving + rendering files. Three spellings coexist in
-# 0.26.0, so all three seds run against every file.
+# 0.32.0, so all three seds run against every file.
 HARMONY_PATTERN_A='self\.use_harmony = self\.model_config\.hf_config\.model_type == "gpt_oss"'
 HARMONY_REPLACE_A='self.use_harmony = False  # self.model_config.hf_config.model_type == "gpt_oss"'
 HARMONY_PATTERN_B='self\.use_harmony = model_config\.hf_config\.model_type == "gpt_oss"'

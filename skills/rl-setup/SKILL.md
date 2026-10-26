@@ -2,8 +2,8 @@
 name: rl-setup
 description: >-
   Wire up online GRPO (RLVR) or async GRPO with environments (multi-turn tool-use) for
-  Halo: bring up the separate rollout container — vLLM 0.26.0 (cu13), or
-  SGLang 0.5.17 for async GRPO with environments (rollout_backend: sglang, the families
+  Halo: bring up the separate rollout container — vLLM 0.32.0 (cu13), or
+  SGLang 0.5.22 for async GRPO with environments (rollout_backend: sglang, the families
   its loaders can take an update for)
   — point the trainer at it via AsyncTrainingConfig rollout URLs, establish
   NCCL weight sync through the engine client in src/weight_sync/
@@ -25,15 +25,12 @@ allowed-tools:
 Wire up online GRPO (RLVR) or async GRPO with environments (multi-turn tool-use). The
 generation engine (vLLM) runs in a **separate container** — the training env
 cannot import vLLM (the server image ships its own torch and
-`transformers 5.14.1`, ABI-incompatible with the training image's PyTorch
-2.11+cu130 + `transformers 5.16`). `Dockerfile.vllm` pins that 5.14 line and
-asserts it at build: vLLM's Gemma 4 code reads the 5.14 config schema that 5.16
-folds into `per_layer_config`, so a 5.16 server makes Gemma 4 unservable
-(`agent-docs/infrastructure/rollout-servers.md`, config-schema parity). Further
-build gates keep the sync honest — layerwise-reload skip-list coverage, the
-weight-transfer re-init patch, the `/pause mode=keep` signature the client pauses with,
-and the gpt-oss parser-plugin verifier — and assert the spec-decode prompt-logprob patch the
-engine re-score relies on, so a green build is what proves the server can be synced
+`transformers 5.19.0`, the vLLM base image's own, ABI-incompatible with the training
+image's PyTorch 2.11+cu130 + `transformers 5.20`). Build gates keep the sync honest —
+layerwise-reload skip-list coverage, the weight-transfer re-init patch and wire contract,
+the `/pause mode=keep` cache reset the client pauses with, a per-family config-schema parity
+check through vLLM's own `ModelConfig`, the thinking-budget patches and the gpt-oss
+parser-plugin verifier — so a green build is what proves the server can be synced
 (`wiring.md` §1).
 Trainer and vLLM communicate over **HTTP** (generation) and **NCCL** (weight
 sync via the engine client in `src/weight_sync/`). For concrete commands, field-by-field references,
@@ -41,7 +38,7 @@ and full launch examples see [`wiring.md`](wiring.md).
 
 ## End-to-end wiring
 
-1. **Bring up the vLLM container.** Build `Dockerfile.vllm` (`vllm-server:0.26.0`)
+1. **Bring up the vLLM container.** Build `Dockerfile.vllm` (`vllm-server:0.32.0`)
    and start it via `docker-compose.vllm.yml`. It serves the policy model with
    `--weight-transfer-config '{"backend": "nccl"}'` so the NCCL weight-transfer
    endpoints are live. One flow, no version branch: `/pause` →
@@ -58,7 +55,7 @@ and full launch examples see [`wiring.md`](wiring.md).
    same ABI on both ends.
 
 2. **Point the trainer at it.** Env GRPO reads `AsyncTrainingConfig` from YAML:
-   `rollout_backend` (`vllm` default, `sglang` for the families its 0.5.17
+   `rollout_backend` (`vllm` default, `sglang` for the families its 0.5.22
    loaders take an update for — the trainer refuses the rest at construction,
    naming the loader reason), then
    `rollout_server_url` (single server) or `rollout_server_configs`
@@ -72,8 +69,9 @@ and full launch examples see [`wiring.md`](wiring.md).
 3. **NCCL weight sync** is `VLLMWeightSyncClient` (`SGLangWeightSyncClient` under
    `rollout_backend: sglang`; `src/weight_sync/clients/`) — trainer is NCCL rank 0, server
    workers rank 1+. vLLM takes each `/update_weights` chunk as packed uint8 broadcasts (flow in
-   step 1); SGLang takes one typed `dist.broadcast` per tensor in declaration order, bracketed by
-   `/pause_generation` and `/continue_generation`. Online and env GRPO share **one** gather routine,
+   step 1); SGLang takes one typed `dist.broadcast` per tensor in declaration order, inside a
+   `/begin_weight_update` … `/end_weight_update` session bracketed by `/pause_generation` and
+   `/continue_generation`. Online and env GRPO share **one** gather routine,
    `gather_and_send_weights` (`src/trainers/grpo/rollout/weight_push.py`), which is
    **parallelism- and PEFT-aware**: in EP / TP / ETP modes **and** under
    multi-rank FSDP2 DP, *every* rank joins the collective gather
@@ -105,8 +103,8 @@ and full launch examples see [`wiring.md`](wiring.md).
    sizing (`num_rollout_workers`, `max_concurrent_rollouts`), prefetch
    (`enable_prefetch`), and `sync_weights_every_n_steps`.
    `rollout_max_thinking_tokens` caps CoT per turn and is enforced **engine-side**
-   (vLLM `thinking_token_budget`): it needs a server reasoning parser,
-   `VLLM_USE_V2_MODEL_RUNNER=0` and, when `rollout_reasoning_end_token` resolves, the IS
+   (vLLM `thinking_token_budget`): it needs a server reasoning parser on the image's Model
+   Runner V2 and, when `rollout_reasoning_end_token` resolves, the IS
    correction that neutralizes its forced closes; it is refused under `rollout_backend: sglang` — as is
    `carry_reasoning`. On vLLM a level's `thinking_tokens` caps every turn's reasoning
    below it unless its profile sets `enforce_thinking_cap: false`, a soft budget the engine closes only at

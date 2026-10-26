@@ -194,8 +194,8 @@ Rebuild the multimodal wrapper layout around a `text_only_model` export: text we
 config regrafted with the trained text config. Flags: `--input_dir` (the text-only export),
 `--model_id` + `--revision` (the multimodal base — Hub id or local dir), `--output_dir`,
 `--max_shard_size`, `--trust_remote_code` (default **off** — a Hub-capable source). Refuses a
-wrapper-layout input and a base with no vision keys. Needed because vLLM 0.26.0 registers only the
-wrapper class for Qwen3.5/3.6; SGLang 0.5.17 loads a text-only export as-is.
+wrapper-layout input and a base with no vision keys. Both pinned engines (vLLM 0.32.0, SGLang
+0.5.22) load a text-only export as-is; this restores the multimodal artifact.
 
 ## Training sidecars — `apply_training_sidecars`
 
@@ -234,9 +234,9 @@ and `convert_to_bf16.py` call it and print the returned actions; `copy_training_
   `num_attention_heads` (or non-MLA GQA `num_key_value_heads`) is not divisible by `tp_size`;
   `ColwiseParallel` would otherwise split Q/K/V inside a head and silently corrupt attention. MLA
   (GLM4 latent attn) shards by query head, so the KV-head check is skipped there.
-- **Zaya has no native serving path on either engine** — vLLM 0.26.0 ships no native Zaya class (an
+- **Zaya has no native serving path on either engine** — vLLM 0.32.0 ships no native Zaya class (an
   export resolves only through vLLM's transformers backend, generation quality unverified here), and
-  SGLang 0.5.17's loader reads the pre-transformers-5.14 per-expert layout, not the native fused one
+  SGLang 0.5.22's loader reads the pre-transformers-5.14 per-expert layout, not the native fused one
   the trainer holds. RL weight sync is refused at construction for both, off the engine client's
   `UNSERVABLE_MODEL_TYPES` (`src/weight_sync/clients/`) — **not** off the family spec, whose
   `weight_sync_refusal` covers glm5_next, inkling and cohere2_moe instead. Zaya's gathered

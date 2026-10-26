@@ -125,7 +125,7 @@ def sequence_logprobs(model, input_ids: torch.Tensor, attention_mask: torch.Tens
 def local_kl_mean(policy, reference, batch, device) -> float:
     """This rank's contribution to the KL baseline: the mean policy-minus-reference log-ratio over
     the batch's ROTATED (mismatched) completions."""
-    keys = ("KL_completion_input_ids", "KL_completion_attention_mask", "KL_completion_mask")
+    keys = ("KL_input_ids", "KL_attention_mask", "KL_completion_mask")
     tensors = [batch[key].to(device) for key in keys]
     with torch.no_grad():
         policy_logps = sequence_logprobs(policy, *tensors)
@@ -140,7 +140,7 @@ def kto_loss(policy, reference, batch, kl: float, device) -> torch.Tensor:
     backprops through it. The reference model is frozen, so only the policy side carries grad — the
     KL baseline is a detached constant in TRL too.
     """
-    keys = ("completion_input_ids", "completion_attention_mask", "completion_mask")
+    keys = ("input_ids", "attention_mask", "completion_mask")
     tensors = [batch[key].to(device) for key in keys]
     with torch.no_grad():
         reference_logps = sequence_logprobs(reference, *tensors)
@@ -239,7 +239,7 @@ def run(ctx):
     # ── The world-global KL baseline, rebuilt from every rank's own captured KL batch.
     # Early return, not a bare check: without the capture every line below raises KeyError and the
     # harness reports `error`, so the check itself could never be the thing that says FAIL.
-    checks["captured_step1_batch"] = "KL_completion_input_ids" in captured
+    checks["captured_step1_batch"] = "KL_input_ids" in captured
     if not checks["captured_step1_batch"]:
         return {"checks": checks, "metrics": metrics}
     policy_replica = build_model(POLICY_SEED, tokenizer).to(ctx.device).eval()

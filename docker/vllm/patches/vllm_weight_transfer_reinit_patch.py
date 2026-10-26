@@ -2,12 +2,13 @@
 
 ``NCCLWeightTransferEngine.init_transfer_engine`` builds a fresh ``PyNcclCommunicator`` (a new
 ``ncclCommInitRank``) on every ``/init_weight_transfer_engine`` and only drops the reference to the
-previous one, and ``shutdown()`` does the same. ``PyNcclCommunicator`` has no ``__del__``, so every
-trainer that connects leaves a live communicator, with its CUDA streams and NCCL buffers, on each
-engine-core worker. After a few connect/close cycles ``ncclCommInitRank`` fails with an unhandled
-CUDA error while ``/health`` still answers 200, which a trainer restarted against a long-lived server
-runs into. Only the dense engine is patched: it is the backend this image serves with, and the sparse
-one speaks a wire protocol the toolkit's client does not.
+previous one. ``PyNcclCommunicator`` has no ``__del__``, so every trainer that reconnects without a
+``/shutdown_weight_transfer_engine`` first (any trainer that crashed or was killed) leaves a live
+communicator, with its CUDA streams and NCCL buffers, on each engine-core worker. After a few such
+cycles ``ncclCommInitRank`` fails with an unhandled CUDA error while ``/health`` still answers 200.
+Upstream's ``shutdown()`` destroys the communicator, so only the re-init is patched. Only the dense
+engine is patched: it is the backend this image serves with, and the sparse one speaks a wire protocol
+the toolkit's client does not.
 """
 
 from __future__ import annotations
@@ -16,7 +17,7 @@ import logging
 
 logger = logging.getLogger(__name__)
 
-# Stamped on the replacements so ``Dockerfile.vllm`` can assert the patch took.
+# Stamped on the replacement so ``Dockerfile.vllm`` can assert the patch took.
 PATCH_MARKER = "_halo_weight_transfer_reinit"
 
 _APPLIED = False
@@ -31,12 +32,12 @@ def _destroy_group(engine) -> None:
     engine.model_update_group = None
     try:
         group.destroy()
-    except Exception:  # noqa: BLE001 — cleanup must not fail the init or shutdown around it
+    except Exception:  # noqa: BLE001 — cleanup must not fail the init around it
         logger.exception("failed to destroy the previous weight-transfer communicator")
 
 
 def apply() -> None:
-    """Idempotently patch the NCCL weight-transfer engine's communicator lifecycle."""
+    """Idempotently patch the NCCL weight-transfer engine's re-init."""
     global _APPLIED
     if _APPLIED:
         return
@@ -50,12 +51,7 @@ def apply() -> None:
         _destroy_group(self)
         return original_init(self, init_info)
 
-    def shutdown(self):
-        _destroy_group(self)
-
-    for replacement in (init_transfer_engine, shutdown):
-        setattr(replacement, PATCH_MARKER, True)
+    setattr(init_transfer_engine, PATCH_MARKER, True)
     engine_cls.init_transfer_engine = init_transfer_engine
-    engine_cls.shutdown = shutdown
     _APPLIED = True
-    logger.info("vllm_weight_transfer_reinit_patch applied to %s", engine_cls.__name__)
+    logger.info("vllm_weight_transfer_reinit_patch applied to %s.init_transfer_engine", engine_cls.__name__)

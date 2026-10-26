@@ -1,19 +1,23 @@
 """DPO/KTO reference sweep on the DP axis, with shared frozen-reference persistence.
 
 TRL's reference cache keys off rank-sharded parameter hashes and a rank-0 Arrow file, both wrong under EP/TP
-or per-node storage, so each rank attaches gathered columns in memory. A Path-B resume restores the run-start
-scores from ReferenceLogpsCheckpointMixin's sidecar instead of scoring the trained policy.
+or per-node storage, so each rank attaches gathered columns in memory, and TRL's construction-time hash of the
+reference, which keys only that cache, is skipped. A Path-B resume restores the run-start scores from
+ReferenceLogpsCheckpointMixin's sidecar instead of scoring the trained policy.
 """
 
 from __future__ import annotations
 
-from collections.abc import Mapping, Sequence
+import sys
+from collections.abc import Iterator, Mapping, Sequence
+from contextlib import contextmanager
 
 import torch
 from accelerate.logging import get_logger
 from datasets import Dataset, concatenate_datasets
 from torch.utils.data import DataLoader
 from tqdm.auto import tqdm
+from trl.trainer.utils import hash_module
 
 from src.checkpoint.format import REFERENCE_LOGPS_FILE
 from src.trainers.mixins.reference_logps import (
@@ -27,6 +31,8 @@ from src.trainers.mixins.reference_logps import (
 
 logger = get_logger(__name__, log_level="info")
 
+_TRL_HASH_FN = hash_module.__name__
+
 
 def _attach_reference_columns(dataset: Dataset, columns: Mapping[str, torch.Tensor]) -> Dataset:
     appended = Dataset.from_dict({name: values.float().numpy() for name, values in columns.items()})
@@ -38,6 +44,30 @@ class PrecomputeRefLogpsRankConsistentMixin(ReferenceLogpsCheckpointMixin):
 
     # Declared by FP32LogprobsMixin; part of every saved split's identity.
     logprob_precision: str | None = None
+
+    @contextmanager
+    def _trl_reference_hash_skipped(self) -> Iterator[None]:
+        """Run the TRL base's construction with its reference hash rebound to a no-op.
+
+        With ``precompute_ref_log_probs`` on, TRL hashes the whole reference in ``__init__`` — a CPU
+        copy of every tensor on every rank, and a raise on a DTensor (TP) — only to key its own
+        sweep's cache, which this mixin replaces.
+        """
+        trl_cls = next(
+            cls for cls in type(self).__mro__ if cls.__module__.startswith("trl.") and "__init__" in cls.__dict__
+        )
+        namespace = vars(sys.modules[trl_cls.__module__])
+        if namespace.get(_TRL_HASH_FN) is not hash_module:
+            raise RuntimeError(
+                f"{trl_cls.__module__} no longer binds TRL's {_TRL_HASH_FN}, so its construction-time "
+                f"reference hash cannot be skipped. Re-audit PrecomputeRefLogpsRankConsistentMixin "
+                f"against the installed TRL."
+            )
+        namespace[_TRL_HASH_FN] = lambda module: None
+        try:
+            yield
+        finally:
+            namespace[_TRL_HASH_FN] = hash_module
 
     def _init_reference_resume(self, kwargs: dict) -> None:
         given = "resume_checkpoint" in kwargs
@@ -102,10 +132,11 @@ class PrecomputeRefLogpsRankConsistentMixin(ReferenceLogpsCheckpointMixin):
             pin_memory=self.args.dataloader_pin_memory,
             shuffle=False,
         )
+        model = self.ref_model if self.ref_model is not None else self.model
         parts: dict[str, list[torch.Tensor]] = {column: [] for column in needed}
         with self.data_parallel_sweep():
             for batch in tqdm(self.accelerator.prepare(loader), desc=f"Computing reference log probs for {name}"):
-                outputs = tuple(value for value in self.compute_ref_log_probs(batch) if value is not None)
+                outputs = tuple(value for value in self.compute_ref_log_probs(model, batch) if value is not None)
                 for column, value in zip(needed, self.accelerator.gather_for_metrics(outputs), strict=True):
                     parts[column].append(value.float().cpu())
         return {column: torch.cat(chunks) for column, chunks in parts.items()}

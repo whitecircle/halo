@@ -56,7 +56,7 @@ ETP only shards the expert FFN weights (gate/up/down), leaving attention untouch
 ## Export
 
 Every exported `config.json` carries the flat `global_head_dim` / `num_global_key_value_heads` keys
-beside the per-layer fields: transformers 5.16 folds the full-attention layers' geometry into
+beside the per-layer fields: transformers 5.20 folds the full-attention layers' geometry into
 `per_layer_config`, which the pinned vLLM server's transformers refuses, so the EP layer declares
 the two keys (the spec's `served_flat_config_keys`) and the export rewrites them back
 ([Checkpoints](../reference/checkpoints.md#what-gets-saved)).
@@ -93,7 +93,7 @@ On CUDA the model is then built with the attention implementation `sdpa_flex_sli
 
 End to end, Gemma 4 26B-A4B full SFT at EP2 on 2× B300 without gradient checkpointing runs 14,980 cluster tok/s at 2,048 tokens and 16,204 at 16,384 in the [framework comparison](../optimization/throughput-benchmarks.md#full-parameter-sft-framework-comparison). Plain SDPA, measured in a separate run set, runs 11,152 and 4,124 (1.34× and 3.93× across the two sets), at 237.6 against 225.0 GiB peak at 16,384.
 
-The KV-repeat override is not what makes the global layers legal — transformers 5.16 disables GQA above head_dim 256 itself. It stays because the patch pins mem-efficient as the *only* enabled backend process-wide, where native `enable_gqa` for the 256-dim sliding layers is unverified; the manual repeat is the one measured path. See [Flash Attention](../optimization/flash-attention.md#model-specific-handling).
+The KV-repeat override is not what makes the global layers legal — transformers 5.20 disables GQA above head_dim 256 itself. It stays because the patch pins mem-efficient as the *only* enabled backend process-wide, where native `enable_gqa` for the 256-dim sliding layers is unverified; the manual repeat is the one measured path. See [Flash Attention](../optimization/flash-attention.md#model-specific-handling).
 
 Gemma 4 never reaches a varlen kernel, so `select_data_collator` rejects **`padding_free`** for it — the gate is the resolved `_attn_implementation`, and only `flash_attention_2/_3/_4` qualify. `packing: true` (what the example config uses) still isolates documents through per-document `position_ids`, at the cost of a dense mask over the flattened batch (side up to `per_device_train_batch_size * max_length`) instead of `cu_seqlens` ([Collators](../data/collators.md)).
 

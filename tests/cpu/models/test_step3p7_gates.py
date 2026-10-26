@@ -230,16 +230,15 @@ def test_balancing_auto_resolves_none_and_an_explicit_aux_loss_warns_and_stays_o
     """Plain HF tree: no native ``balancing_biases`` buffer, no EP wrappers, and a forward that never
     takes ``output_router_logits`` — so ``auto`` resolves to ``none``; like Gemma 4, plain-tree
     step3p7 has no balancing route. An EXPLICIT ``aux_loss`` still has to survive the family
-    stripping ``router_aux_loss_coef`` and ``output_router_logits`` from its config entirely: the
-    no-usable-coefficient branch stamps router logits forced-off and leaves them off, instead of
-    crashing on the absent field."""
+    stripping ``router_aux_loss_coef`` from its config entirely: the no-usable-coefficient branch
+    stamps router logits forced-off and leaves them off, instead of crashing on the absent field."""
     model = _tiny_text_model()
     with pytest.raises(AttributeError):
         _ = model.config.router_aux_loss_coef
     assert resolve_balancing_mode("auto", model, is_moe=True) == "none"
     apply_balancing_mode(model, "aux_loss", policy_gradient_loss=False, is_moe=True)
     assert getattr(model.config, ROUTER_LOGITS_FORCED_OFF_ATTR, False) is True
-    assert getattr(model.config, "output_router_logits", None) is None
+    assert not getattr(model.config, "output_router_logits", False)
 
 
 # Per-layer head heterogeneity

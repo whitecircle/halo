@@ -34,6 +34,7 @@ from src.environments.base import (
     stable_reasoning_effort,
     task_prompt,
 )
+from src.environments.engine_wire import refuse_unmatched_reasoning_markers
 from src.environments.episode import (
     EpisodeEffort,
     RolloutResult,
@@ -43,6 +44,8 @@ from src.environments.episode import (
 )
 from src.environments.rollout_config import IDENTITY_SAMPLER, SGLANG_BACKEND
 from src.model_loading.tokenizer_setup import resolve_tokenizer
+from src.models.config_access import config_model_types
+from src.models.unwrapping import unwrap_framework_wrappers
 from src.runtime.consensus import DeferredRankFailure, reject_across_ranks
 from src.runtime.ranks import get_global_rank, is_multi_rank_run
 from src.trainers.grpo.early_stop import build_early_stop_callback
@@ -289,16 +292,14 @@ class DistributedAsyncEnvironmentalGRPOTrainer(
     _replay_row_spans = False
 
     def __init__(self, *args, **kwargs):
+        self.async_config = kwargs.pop("async_config", None) or AsyncTrainingConfig()
+        # Read by ChunkedGRPOLogprobsMixin (avoids full [B,T,vocab] logits).
+        self._use_chunked_grpo_logprobs = self.async_config.use_chunked_grpo_logprobs
         _, kwargs = self._begin_on_policy_init(args, kwargs)
 
-        async_config = kwargs.pop("async_config", None)
         environment_config = kwargs.pop("environment_config", None)
         environment_cls = kwargs.pop("environment_cls", None)
         environment_kwargs = kwargs.pop("environment_kwargs", None)
-
-        self.async_config = async_config or AsyncTrainingConfig()
-        # Read by ChunkedGRPOLogprobsMixin (avoids full [B,T,vocab] logits).
-        self._use_chunked_grpo_logprobs = self.async_config.use_chunked_grpo_logprobs
 
         if environment_config is not None:
             self._environment_spec = environment_config.environment_type
@@ -497,8 +498,8 @@ class DistributedAsyncEnvironmentalGRPOTrainer(
         elif self.eval_dataset is not None:
             datasets["eval_dataset"] = self.eval_dataset
         for name, dataset in datasets.items():
-            # A plain torch Dataset exposes no column names (TRL refuses an IterableDataset before
-            # this runs): warn rather than refuse a shape whose schema only a row would reveal.
+            # A plain torch Dataset, or a streamed one, may expose no column names: warn rather than
+            # refuse a shape whose schema only a row would reveal.
             columns = getattr(dataset, "column_names", None)
             if columns is None:
                 logger.warning(
@@ -670,6 +671,8 @@ class DistributedAsyncEnvironmentalGRPOTrainer(
         # A budget, soft or not, caps every retry at its reserve, so any budgeted episode can be force-closed.
         if cfg.rollout_backend == SGLANG_BACKEND or not self._any_episode_budgeted:
             return None
+        model_config = getattr(unwrap_framework_wrappers(self.model), "config", None)
+        refuse_unmatched_reasoning_markers(config_model_types(model_config), cfg.rollout_backend)
         try:
             return resolve_reasoning_end_ids(self._tokenizer, cfg.rollout_reasoning_end_token)
         except ValueError as e:
@@ -1259,7 +1262,7 @@ class DistributedAsyncEnvironmentalGRPOTrainer(
                     # the ratio comes from a different token distribution than the policy trains on.
                     self._routing_injector.arm(rollout_routing_masks, row_spans=replay_spans)
                 try:
-                    recompute_logps, _ = self._get_per_token_logps_and_entropies(
+                    recompute_logps, _, _ = self._get_per_token_logps_and_entropies(
                         self.model,
                         prompt_completion_ids,
                         attention_mask,
@@ -1610,7 +1613,7 @@ class DistributedAsyncEnvironmentalGRPOTrainer(
 
         # Chunked: a whole-batch DeepEP dispatch exceeds its 32-bit limit on long trajectories.
         with reference_policy(self) as model:
-            ref_per_token_logps, _ = self._get_per_token_logps_and_entropies(
+            ref_per_token_logps, _, _ = self._get_per_token_logps_and_entropies(
                 model,
                 prompt_completion_ids,
                 attention_mask,

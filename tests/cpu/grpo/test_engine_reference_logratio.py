@@ -278,10 +278,10 @@ _ENGINES = pytest.mark.parametrize("client_cls", [VLLMClient, SGLangWeightSyncCl
 def test_prompt_logprob_probe_refuses_an_engine_whose_graph_prefills_are_garbage(
     prefill_server, client_cls, shift, capture_tokens
 ):
-    """vLLM 0.26.0 under MTP returns garbage prompt log-probs whenever the prefill replays a captured graph.
-    The probe's prefixes do while its whole sequence does not, so their shared positions disagree; a capture
-    range raised past the whole sequence corrupts it too, and its mean NLL gives it away. Either way the run
-    is refused with the cause and the remedies."""
+    """vLLM's V1 runner under MTP (measured on 0.26.0) returns garbage prompt log-probs whenever the prefill
+    replays a captured graph. The probe's prefixes do while its whole sequence does not, so their shared
+    positions disagree; a capture range raised past the whole sequence corrupts it too, and its mean NLL gives
+    it away. Either way the run is refused with the cause and the remedies."""
     prefill_server.graph_prefill_shift = shift
     prefill_server.graph_capture_tokens = capture_tokens
     with pytest.raises(ValueError, match="speculative decoding") as raised:

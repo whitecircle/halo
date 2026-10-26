@@ -75,7 +75,6 @@ from src.model_loading.parallel.peft_setup import build_peft_model, peft_bf16_au
 from src.model_loading.parallel.whole_model import resolve_trainer_model
 from src.model_loading.tokenizer_setup import resolve_tokenizer
 from src.models.context_window import is_bounded_length
-from src.models.unwrapping import base_transformers_model
 from src.runtime.collectives import collective_device
 from src.runtime.consensus import DeferredRankFailure, reject_across_ranks
 from src.runtime.ranks import get_global_rank, get_global_world_size, is_global_main_process
@@ -866,17 +865,6 @@ class OfflineGRPOTrainer(ChunkedLogprobsCore, OfflineGRPOReferenceMixin, Distrib
             return self._cached_eval_dataloader(eval_dataset, build, key=f"eval/{eval_dataset._fingerprint}")
         return build(eval_dataset)
 
-    def _get_last_hidden_state(self, unwrapped_model, input_ids, attention_mask, logits_to_keep):
-        """Backbone hidden states for the last ``logits_to_keep`` completion positions (text-only).
-
-        The offline counterpart of TRL's ``GRPOTrainer._get_last_hidden_state``, consumed by
-        ``ChunkedLogprobsCore``: forward the backbone (no ``lm_head``), drop the final position (the
-        causal next-token shift), keep the last ``logits_to_keep``.
-        """
-        backbone = base_transformers_model(unwrapped_model).base_model
-        hidden = backbone(input_ids=input_ids, attention_mask=attention_mask, use_cache=False).last_hidden_state
-        return hidden[:, :-1, :][:, -logits_to_keep:, :]  # (B, logits_to_keep, H)
-
     @property
     def _scores_full_logits(self) -> bool:
         """Whether log-probs come from TRL's ``selective_log_softmax`` over full logits, which keeps the
@@ -913,7 +901,7 @@ class OfflineGRPOTrainer(ChunkedLogprobsCore, OfflineGRPOReferenceMixin, Distrib
             logits = logits[:, -logits_to_keep:]  # restrict to completion tokens
             selected_logps = selective_log_softmax(logits, input_ids)
         else:
-            selected_logps, _ = self._chunked_logps(model, input_ids, attention_mask, logits_to_keep)
+            selected_logps, _ = self._chunked_completion_logps(model, input_ids, attention_mask, logits_to_keep)
 
         return clamp_negative_advantage_logps(selected_logps, advantages, min_log_prob), selected_logps
 

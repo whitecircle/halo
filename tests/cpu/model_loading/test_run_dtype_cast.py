@@ -27,13 +27,13 @@ from bitsandbytes.nn import Linear4bit, Params4bit
 from safetensors.torch import save_file
 from torch.distributed.tensor import Shard, distribute_tensor
 from transformers import AutoConfig
-from trl import ModelConfig
 
 import scripts.training.embedding as embedding_script
 import src.model_loading.parallel.ep as ep_lazy_loader
 import src.model_loading.parallel.pp as pp_lazy_loader
 from src.checkpoint.reading import resolve_checkpoint_weights
 from src.configs.embedding import EmbeddingConfig
+from src.configs.script_arguments import ModelArguments
 from src.distributed.expert_parallel.config import EPConfig
 from src.distributed.expert_parallel.parallelize import ep_claimed_blocks
 from src.distributed.pipeline_parallel.stage import PP_STAGE_PARTITION_ATTR, StageLayout
@@ -529,7 +529,7 @@ def test_the_sentence_transformer_backbone_is_cast_and_finalized(tmp_path):
         st_model = embedding_script.build_sentence_transformer(
             runtime,
             embedding_config,
-            ModelConfig(model_name_or_path=str(base)),
+            ModelArguments(model_name_or_path=str(base)),
             types.SimpleNamespace(reset_sinks=True, train_sinks=False),
         )
 

@@ -119,10 +119,16 @@ def _fix_layer_type_inv_freq(module: nn.Module, module_name: str, layer_type: st
     return True
 
 
+def _own_rope_init_fn(module: nn.Module, rope_type: str) -> Callable | None:
+    """The rotary's own ``compute_<rope_type>_rope_parameters`` (plain, vision axial, NTK-alpha), which the
+    modeling file defines for the types ``ROPE_INIT_FUNCTIONS`` does not register."""
+    return getattr(module, f"compute_{rope_type}_rope_parameters", None)
+
+
 def _resolve_rope_init_fn(module: nn.Module, layer_type: str) -> Callable:
-    """One layer type's init fn, from ``ROPE_INIT_FUNCTIONS`` unless the type asks for plain RoPE."""
+    """One layer type's init fn: the rotary's own for its type, else ``ROPE_INIT_FUNCTIONS``."""
     rope_type = module.rope_type.get(layer_type, "default")
-    return module.compute_default_rope_parameters if rope_type == "default" else ROPE_INIT_FUNCTIONS[rope_type]
+    return _own_rope_init_fn(module, rope_type) or ROPE_INIT_FUNCTIONS[rope_type]
 
 
 def _fix_per_layer_type_rope(module: nn.Module, name: str) -> int | None:
@@ -159,13 +165,14 @@ def _fix_single_inv_freq_rope(module: nn.Module, name: str) -> int | None:
 
     config = getattr(module, "config", None)
     rope_type = getattr(module, "rope_type", "default")
+    own_init_fn = _own_rope_init_fn(module, rope_type)
 
-    if config is not None and (rope_type == "default" or rope_type in ROPE_INIT_FUNCTIONS):
-        if rope_type == "default":
+    if config is not None and (own_init_fn is not None or rope_type == "default" or rope_type in ROPE_INIT_FUNCTIONS):
+        if own_init_fn is not None or rope_type == "default":
             # rope_parameters-aware (a manual getattr(config, "rope_theta") falls back to 10000.0 in v5).
-            init_fn = getattr(module, "compute_default_rope_parameters", None) or default_rope_parameters
+            init_fn = own_init_fn or default_rope_parameters
             inv_freq, scaling = init_fn(config)
-            how = "recomputed in float32"
+            how = f"recomputed via the module's own {rope_type} init in float32"
         else:
             inv_freq, scaling = ROPE_INIT_FUNCTIONS[rope_type](config, _materialized_device(module.inv_freq))
             how = f"recomputed via ROPE_INIT_FUNCTIONS[{rope_type}] in float32"

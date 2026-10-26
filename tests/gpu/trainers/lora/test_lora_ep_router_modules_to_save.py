@@ -33,8 +33,9 @@ from types import SimpleNamespace
 import torch
 import torch.distributed as dist
 from transformers import AutoTokenizer
-from trl import ModelConfig, SFTConfig
+from trl import SFTConfig
 
+from src.configs.script_arguments import ModelArguments
 from src.distributed.expert_parallel.moe_layer.expert_lora import model_has_expert_lora
 from src.distributed.parallelism_config import ParallelismConfig
 from src.env import env_int, env_str
@@ -109,7 +110,7 @@ def run(ctx) -> dict:
 
     # Production path: q_proj attention LoRA + expert LoRA (gate/up/down peeled to native grouped-LoRA)
     # + router full-trained via modules_to_save. get_peft_model wraps the router in a ModulesToSaveWrapper.
-    model_config = ModelConfig(
+    model_config = ModelArguments(
         model_name_or_path=MODEL_NAME,
         use_peft=True,
         lora_r=LORA_R,

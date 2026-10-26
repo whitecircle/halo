@@ -73,7 +73,7 @@ class _FakeMLAAttention(nn.Module):
 
         torch.manual_seed(0)
         self.q_proj = nn.Linear(HIDDEN, NUM_Q_HEADS * QK_HEAD_DIM, bias=False)
-        # transformers 5.16 layout: the unused Q-compression branch is present but None.
+        # transformers 5.20 layout: the unused Q-compression branch is present but None.
         self.q_a_proj = None
         self.q_a_layernorm = None
         self.q_b_proj = None

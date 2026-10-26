@@ -21,11 +21,10 @@ Dataset: text → {"prompt", "chosen", "rejected"} message lists; VLM → the sa
 ``images``/``image`` column (single image or list), which is what declares the VLM run.
 """
 
-from trl import ModelConfig
-
 from src.config_validation import reject_unsupported_args
 from src.configs.parallelism_arguments import ParallelismArguments
 from src.configs.preference import SmoothMarginPOConfig, SMPOScriptArguments
+from src.configs.script_arguments import ModelArguments
 from src.entrypoints.data_setup import load_script_datasets, prepare_script_preference_data, resolve_vlm_run
 from src.entrypoints.model_setup import (
     apply_max_length,
@@ -50,7 +49,7 @@ from src.trainers.preference.smpo import SmoothMarginPOTrainer
 
 def main():
     args, smpo_config, model_config, dist_args = parse_script_args(
-        SMPOScriptArguments, SmoothMarginPOConfig, ModelConfig, ParallelismArguments
+        SMPOScriptArguments, SmoothMarginPOConfig, ModelArguments, ParallelismArguments
     )
 
     context = init_training_script(

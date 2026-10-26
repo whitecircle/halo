@@ -15,6 +15,7 @@ import json
 from types import SimpleNamespace
 
 import pytest
+from transformers import CONFIG_MAPPING
 
 import scripts.environments._common as common
 import src.environments.episode as episode
@@ -67,6 +68,12 @@ class _Tokenizer:
 
     def convert_tokens_to_ids(self, name):
         return _CALL_TOKEN_ID if name == "<|call|>" else None
+
+
+@pytest.fixture(autouse=True)
+def dense_model_config(monkeypatch):
+    """The model config the contract reads to check a vLLM thinking budget is enforceable."""
+    monkeypatch.setattr(common.AutoConfig, "from_pretrained", lambda *a, **k: CONFIG_MAPPING["qwen3"]())
 
 
 @pytest.fixture
@@ -162,6 +169,17 @@ def test_an_unresolvable_stop_token_is_refused(tmp_path, monkeypatch):
     path.write_text(_TRAINING_YAML.replace('["<|call|>"]', '["<|call|>", "<|nope|>"]'))
     monkeypatch.setattr(common.AutoTokenizer, "from_pretrained", lambda *a, **k: _Tokenizer())
     with pytest.raises(ValueError, match="<\\|nope\\|>"):
+        TrainingContract.load(str(path))
+
+
+def test_a_thinking_budget_vllm_cannot_enforce_is_refused(tmp_path, monkeypatch):
+    """vLLM encodes Mistral 4's [THINK] markers as plain text, so the budget the YAML sets never counts."""
+    path = tmp_path / "train.yaml"
+    path.write_text(_TRAINING_YAML)
+    mistral_small_4 = CONFIG_MAPPING["mistral3"](text_config=CONFIG_MAPPING["mistral4"]())
+    monkeypatch.setattr(common.AutoConfig, "from_pretrained", lambda *a, **k: mistral_small_4)
+    monkeypatch.setattr(common.AutoTokenizer, "from_pretrained", lambda *a, **k: _Tokenizer())
+    with pytest.raises(ValueError, match="cannot enforce a thinking budget"):
         TrainingContract.load(str(path))
 
 

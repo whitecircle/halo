@@ -8,23 +8,30 @@ tolerance and FAIL if the chunked math drifts from the reference.
     python tests/cpu/grpo/test_chunked_grpo_logprobs.py
 """
 
+import inspect
 from types import SimpleNamespace
 
 import pytest
 import torch
 from transformers import Gemma2Config, Gemma2ForCausalLM, LlamaConfig, LlamaForCausalLM, PretrainedConfig
+from trl import GRPOTrainer
 from trl.trainer.utils import entropy_from_logits, selective_log_softmax
 
 from src.models.head_transform import IDENTITY_HEAD_TRANSFORM, HeadTransform
 from src.runtime.dtensor import materialize_dtensor
+from src.trainers.distillation.sdpg import DistributedSDPGTrainer
+from src.trainers.grpo.environmental import DistributedAsyncEnvironmentalGRPOTrainer
 from src.trainers.grpo.mixins import chunked_logprobs
 from src.trainers.grpo.mixins.chunked_logprobs import (
     _VOCAB_CHUNK,
     ChunkedGRPOLogprobsMixin,
+    ChunkedLogprobsCore,
     chunked_selective_log_softmax,
     chunked_selective_log_softmax_with_entropy,
     rows_forward_densely,
 )
+from src.trainers.grpo.offline import OfflineGRPOTrainer
+from src.trainers.grpo.online import DistributedGRPOTrainer
 
 # Vocab spans multiple chunk tiles so the online-softmax accumulation across chunks is exercised.
 VOCAB = _VOCAB_CHUNK * 2 + 137
@@ -256,7 +263,7 @@ class _ModeResolutionHarness(ChunkedGRPOLogprobsMixin):
         self.accelerator = SimpleNamespace(unwrap_model=lambda module: module, is_main_process=False)
         self.resolved: list[int] = []
 
-    def _chunked_logps(self, model, input_ids, attention_mask, logits_to_keep, batch_size, compute_entropy):
+    def _chunked_completion_logps(self, model, input_ids, attention_mask, logits_to_keep, batch_size, compute_entropy):
         self.resolved.append(batch_size)
         return torch.zeros(input_ids.size(0), logits_to_keep), None
 
@@ -286,8 +293,83 @@ def test_reference_logps_use_the_trainer_mode_not_the_frozen_model_flag():
     assert harness.resolved[-1] == 4
 
 
+_TRL_TEXT_PARAMS = frozenset(
+    (
+        "self",
+        "model",
+        "input_ids",
+        "attention_mask",
+        "logits_to_keep",
+        "batch_size",
+        "compute_entropy",
+        "compute_aux_loss",
+    )
+)
+# The modality inputs of TRL's full-logits scorer: its parameters past the text ones.
+_TRL_MODALITY_PARAMS = tuple(
+    name for name in inspect.signature(GRPOTrainer._full_logits_logps).parameters if name not in _TRL_TEXT_PARAMS
+)
+
+
+def _trl_loss_forward(harness, model, ids, mask, logits_to_keep, **overrides):
+    """The call TRL 1.14's ``_compute_loss`` makes on a text batch: entropy on, ``compute_aux_loss``
+    passed, every modality input ``None``."""
+    kwargs = {name: None for name in _TRL_MODALITY_PARAMS} | {"compute_entropy": True, "compute_aux_loss": False}
+    return harness._get_per_token_logps_and_entropies(model, ids, mask, logits_to_keep, **(kwargs | overrides))
+
+
+def test_trls_text_loss_forward_takes_the_chunked_path_and_gets_three_values():
+    harness = _ModeResolutionHarness()
+    ids, mask = torch.zeros(2, 6, dtype=torch.long), torch.ones(2, 6, dtype=torch.long)
+
+    logps, entropies, aux_loss = _trl_loss_forward(harness, harness.model, ids, mask, 3)
+
+    assert harness.resolved == [1], "a text batch left the chunked sweep"
+    assert logps.shape == (2, 3) and aux_loss is None
+
+
+class _FullLogitsHarness(ChunkedGRPOLogprobsMixin, GRPOTrainer):
+    """Chunking off, over TRL's own dispatch: ``use_liger_kernel`` on, as TRL holds it for a Liger run."""
+
+    def __init__(self):
+        self.model = torch.nn.Module()
+        self.model.config = PretrainedConfig()
+        self.model.train()
+        self.args = SimpleNamespace(per_device_train_batch_size=1, per_device_eval_batch_size=4)
+        self._use_chunked_grpo_logprobs = False
+        self.use_liger_kernel = True
+        self.accelerator = SimpleNamespace(unwrap_model=lambda module: module, is_main_process=False)
+
+
+def test_the_full_logits_path_is_trls_scorer_with_the_resolved_batch_size(monkeypatch):
+    """TRL 1.14 takes ``batch_size`` by keyword after ``*args``, and its own dispatch would hand a Liger run
+    to TRL's chunked head, which skips the family's head transform."""
+    calls = []
+
+    def full_logits(self, model, input_ids, attention_mask, logits_to_keep, batch_size=None, **kwargs):
+        calls.append((batch_size, kwargs.get("compute_entropy"), kwargs.get("pixel_values", "missing")))
+        return torch.zeros(input_ids.size(0), logits_to_keep), None, None
+
+    monkeypatch.setattr(GRPOTrainer, "_full_logits_logps", full_logits)
+    harness = _FullLogitsHarness()
+    ids, mask = torch.zeros(2, 6, dtype=torch.long), torch.ones(2, 6, dtype=torch.long)
+
+    _, _, aux_loss = _trl_loss_forward(harness, harness.model, ids, mask, 3)
+
+    assert calls == [(1, True, None)] and aux_loss is None
+
+
+def test_an_aux_loss_request_is_refused():
+    """The toolkit hands GRPO a zero coefficient, so TRL asking for the term means that contract broke."""
+    harness = _ModeResolutionHarness()
+    ids, mask = torch.zeros(2, 6, dtype=torch.long), torch.ones(2, 6, dtype=torch.long)
+
+    with pytest.raises(RuntimeError, match="router aux loss"):
+        _trl_loss_forward(harness, harness.model, ids, mask, 3, compute_aux_loss=True)
+
+
 class _RealBackboneHarness(ChunkedGRPOLogprobsMixin):
-    """A real causal LM behind ``_get_last_hidden_state``, reproducing TRL's own slicing.
+    """A real causal LM behind the core's own ``_get_last_hidden_state``.
 
     The embedding harness above is position-free, so it cannot see what the dense path does to
     attention and RoPE: the trimmed row is forwarded mask-free at positions ``[0, len)`` while the
@@ -311,9 +393,26 @@ class _RealBackboneHarness(ChunkedGRPOLogprobsMixin):
         self.model.config._attn_implementation = attn_implementation
         self.model.model.config._attn_implementation = attn_implementation
 
-    def _get_last_hidden_state(self, model, input_ids, attention_mask, logits_to_keep):
-        hidden = model.model(input_ids=input_ids, attention_mask=attention_mask, use_cache=False).last_hidden_state
-        return hidden[:, :-1, :][:, -logits_to_keep:, :]
+
+@pytest.mark.parametrize(
+    "trainer_cls",
+    [DistributedGRPOTrainer, DistributedAsyncEnvironmentalGRPOTrainer, DistributedSDPGTrainer, OfflineGRPOTrainer],
+    ids=lambda cls: cls.__name__,
+)
+def test_every_chunked_trainer_forwards_the_backbone_through_the_core(trainer_cls):
+    """TRL 1.14 dropped ``GRPOTrainer._get_last_hidden_state``, which the online sweep called."""
+    assert trainer_cls._get_last_hidden_state is ChunkedLogprobsCore._get_last_hidden_state
+
+
+def test_the_core_backbone_forward_reproduces_the_models_completion_logits():
+    input_ids, attention_mask, _, ltk = _ragged_batch()
+    harness = _RealBackboneHarness("eager")
+
+    with torch.no_grad():
+        hidden = harness._get_last_hidden_state(harness.model, input_ids, attention_mask, ltk)
+        want = harness.model(input_ids=input_ids, attention_mask=attention_mask).logits[:, :-1][:, -ltk:]
+
+    torch.testing.assert_close(harness.model.lm_head(hidden), want)
 
 
 @pytest.mark.parametrize("attn_implementation", ["sdpa", "eager"])

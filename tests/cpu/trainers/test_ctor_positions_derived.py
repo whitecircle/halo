@@ -5,7 +5,7 @@ A hand-maintained ``{"data_collator": 2}`` silently reads a neighbouring argumen
 TRL inserts a parameter; ``ctor_positions`` must follow the signature instead, and fail loud when
 the parameter disappears from it.
 
-The per-trainer slots below are pinned as LITERALS read off TRL 1.6.0's signatures — recomputing
+The per-trainer slots below are pinned as LITERALS read off TRL 1.14.2's signatures — recomputing
 ``params.index(...)`` here would assert the derivation against itself. A TRL bump that moves one of
 these parameters fails this test, which is the point: the gates that read them (SFT's CP collator
 rejection, DPO/KTO's EP/TP reference rejection, the mixin's positional model/config) would otherwise
@@ -25,24 +25,22 @@ from src.trainers.sft import _CTOR_POSITIONS as SFT_CTOR_POSITIONS
 
 
 def test_sft_slots_match_installed_trl():
-    """TRL 1.6.0: ``SFTTrainer.__init__(self, model, args, data_collator, ...)``."""
+    """TRL 1.14.2: ``SFTTrainer.__init__(self, model, args, data_collator, ...)``."""
     assert SFT_CTOR_POSITIONS == {"model": 0, "args": 1, "data_collator": 2}
 
 
 def test_dpo_slots_match_installed_trl():
-    """TRL 1.6.0: ``DPOTrainer.__init__(self, model, ref_model, args, ...)``."""
+    """TRL 1.14.2: ``DPOTrainer.__init__(self, model, ref_model, args, ...)``."""
     assert DPO_CTOR_POSITIONS == {"model": 0, "args": 2, "ref_model": 1}
 
 
 def test_kto_slots_match_installed_trl():
-    """TRL 1.6.0: the public ``KTOTrainer.__init__`` is a ``(*args, **kwargs)`` deprecation shim, so
-    the slots are ``trl.experimental.kto.kto_trainer.KTOTrainer.__init__(self, model, ref_model,
-    args, ...)`` — the signature the shim forwards to."""
+    """TRL 1.14.2: ``KTOTrainer.__init__(self, model, ref_model, args, ...)``."""
     assert KTO_CTOR_POSITIONS == {"model": 0, "args": 2, "ref_model": 1}
 
 
 def test_reward_and_grpo_slots_match_installed_trl():
-    """TRL 1.6.0: ``RewardTrainer(model, args, ...)``, ``GRPOTrainer(model, reward_funcs, args, ...)``."""
+    """TRL 1.14.2: ``RewardTrainer(model, args, ...)``, ``GRPOTrainer(model, reward_funcs, args, ...)``."""
     assert REWARD_CTOR_POSITIONS == {"model": 0, "args": 1}
     assert GRPO_CTOR_POSITIONS == {"model": 0, "args": 2}
 
@@ -110,9 +108,8 @@ def test_derivation_follows_a_shifted_signature():
     assert ctor_value((None, None, collator, None), {}, "data_collator", shifted) is None
 
 
-def test_derivation_looks_through_a_varargs_shim():
-    """TRL's KTO shape: the public class forwards ``*args``, so the slots live one MRO hop up. A
-    derivation reading only the shim's own signature finds no parameters at all and raises."""
+def test_a_varargs_signature_declares_no_slot():
+    """A ``(*args, **kwargs)`` constructor names no parameter, so its slots are refused, not guessed."""
 
     class _Real:
         def __init__(self, model, ref_model=None, args=None):
@@ -122,9 +119,8 @@ def test_derivation_looks_through_a_varargs_shim():
         def __init__(self, *args, **kwargs):
             super().__init__(*args, **kwargs)
 
-    assert ctor_positions(_Shim, "ref_model") == {"ref_model": 1}
-    ref = object()
-    assert ctor_value((None, ref), {}, "ref_model", ctor_positions(_Shim, "ref_model")) is ref
+    with pytest.raises(ValueError, match="ref_model"):
+        ctor_positions(_Shim, "ref_model")
 
 
 def test_missing_parameter_fails_loud():
@@ -136,14 +132,6 @@ def test_missing_parameter_fails_loud():
 
     with pytest.raises(ValueError, match="data_collator"):
         ctor_positions(_NoCollator, "data_collator")
-
-    # The shim walk must not paper over it either: a shim whose base lacks the name still raises.
-    class _Shim(_NoCollator):
-        def __init__(self, *args, **kwargs):
-            super().__init__(*args, **kwargs)
-
-    with pytest.raises(ValueError, match="data_collator"):
-        ctor_positions(_Shim, "data_collator")
 
 
 if __name__ == "__main__":

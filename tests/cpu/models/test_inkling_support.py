@@ -54,10 +54,9 @@ def test_capability_contracts():
     assert EPInklingMoELayer.FAMILY.hub_conversion_keys == ("inkling_mm_model",)
     assert EPInklingMoELayer.FAMILY.supports_lazy_loading is True
     assert EPInklingMoELayer.FAMILY.weight_sync_refusal is not None
-    # PP: refused until a schedule, end-to-end and save/resume row cover it, yet declared in full: its
-    # spec keeps ``embed_norm`` on stage 0 with the embedding it normalizes for the loader rows.
+    # PP: refused until a schedule, end-to-end and save/resume row cover it; otherwise the generic split
+    # (its embedding module carries ``embed_norm``, so the norm leaves later stages with it).
     spec = PP_SPEC_MAP["InklingTextModel"]
-    assert spec.input_module_attrs == ("embed_norm",)
     assert "loader-only validation" in spec.refusal and not spec.validated
     assert spec.stream_forward is None and not spec.layer_types_rebase_safe
     # CP: the short convolutions run over the sequence axis; the veto fires before the

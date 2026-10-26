@@ -1,7 +1,8 @@
 """Repair of transformers' ``use_kernel_func_from_hub_with_fallback``: route each call by its first
 tensor's device (upstream calls the CUDA-only package on CPU too), and import the mapped submodule chain
-before upstream resolves it, so a package re-exporting nothing at root (``fla``) is captured instead of
-the ~10x slower torch body. Installed by the ``src`` package init, before any modeling module binds it.
+ahead of upstream, which turns any failure of that import into a silent capture of the ~10x slower torch
+body: a broken kernel package raises instead. Installed by the ``src`` package init, before any modeling
+module binds it.
 """
 
 import functools
@@ -72,8 +73,9 @@ _CPU_FALLBACK_FIXUPS = {
 
 
 def _import_mapped_chain(func_name: str, package: str, internal_path: str | None) -> None:
-    """Import the mapped submodule chain so upstream's attribute walk from a bare ``import fla`` finds the
-    real kernel, keeping upstream's own capture, kwargs filtering and export-path semantics."""
+    """Import the mapped submodule chain ahead of upstream, which swallows any failure of that import: a missing
+    module (package absent, chain renamed) is left to upstream's fallback and the capture check, any other error
+    is a broken kernel package and propagates."""
     chain = getattr(hub_kernels, "_KERNELS_INTERNAL_PATH_MAPPINGS", {}).get(func_name, internal_path)
     if not chain:
         return

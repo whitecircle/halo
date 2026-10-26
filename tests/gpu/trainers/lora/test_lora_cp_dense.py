@@ -26,9 +26,10 @@ import torch.distributed as dist
 from peft import LoraConfig, get_peft_model
 from safetensors.torch import load_file
 from transformers import AutoTokenizer
-from trl import ModelConfig, SFTConfig, get_quantization_config
+from trl import SFTConfig, get_quantization_config
 
 from src.checkpoint.parallel.adapters import restore_adapters
+from src.configs.script_arguments import ModelArguments
 from src.distributed.parallelism_config import ParallelismConfig
 from src.env import env_str
 from src.model_loading.parallel.loader import load_distributed_model
@@ -206,7 +207,7 @@ def run_qlora_cp(
 
     try:
         # Quantization config
-        model_config = ModelConfig(
+        model_config = ModelArguments(
             model_name_or_path=MODEL_NAME,
             use_peft=True,
             load_in_4bit=True,

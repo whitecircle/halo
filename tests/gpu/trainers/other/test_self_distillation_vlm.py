@@ -2,7 +2,7 @@
 """
 Test: DistributedSelfDistillationTrainer (offline SDPG approximation) with Qwen3-VL-2B (single-GPU smoke).
 
-Validates the full self-distillation path end-to-end under TRL 1.6.0:
+Validates the full self-distillation path end-to-end:
 1. SelfDistillVLMDataCollator emits the student batch + teacher_* branch (privileged hint).
 2. The trainer runs the student forward + privileged-teacher forward and computes
    L = L_sft + beta(k) * L_OPD on the shared response tokens.

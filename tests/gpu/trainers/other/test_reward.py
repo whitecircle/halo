@@ -1,5 +1,5 @@
 #!/usr/bin/env python
-"""DistributedRewardTrainer end-to-end, with the logged loss pinned to TRL 1.6's exact BT objective.
+"""DistributedRewardTrainer end-to-end, with the logged loss pinned to TRL 1.14's exact BT objective.
 
 A reward model's loss is ``-logsigmoid(r_chosen - r_rejected)`` over a batch that TRL collates as
 ``[all chosen ; all rejected]`` and scores at each row's last non-pad token. Three things there fail

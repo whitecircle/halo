@@ -36,12 +36,12 @@ the rollout-server contract.
 """
 
 from accelerate.logging import get_logger
-from trl import GRPOConfig, ModelConfig
+from trl import GRPOConfig
 
 from src.config_validation import reject_unsupported_args
 from src.configs.grpo_environmental import AsyncTrainingConfig, EnvironmentalGRPOScriptArguments, EnvironmentConfig
 from src.configs.parallelism_arguments import ParallelismArguments
-from src.configs.script_arguments import DEFAULT_ANSWER_FIELD
+from src.configs.script_arguments import DEFAULT_ANSWER_FIELD, ModelArguments
 from src.data.pipeline.conversation import as_conversation
 from src.data.pipeline.processing import (
     missing_render_column_splits,
@@ -251,7 +251,7 @@ def main():
         EnvironmentConfig,
         AsyncTrainingConfig,
         GRPOConfig,
-        ModelConfig,
+        ModelArguments,
         ParallelismArguments,
     )
 

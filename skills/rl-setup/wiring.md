@@ -12,18 +12,17 @@ GRPO. Source of truth: `Dockerfile.vllm`, `docker-compose.vllm.yml`,
 
 ## 1. Bring up the vLLM container
 
-vLLM 0.26.0 (cu13) is a **separate** image — the training env cannot import vLLM
-(ABI-incompatible: the server image ships its own `transformers 5.14.1` / vllm 0.26.0,
-training is on `transformers 5.16` / torch 2.11). `Dockerfile.vllm` pins that 5.14 line and asserts
-it at build — vLLM's Gemma 4 code reads the 5.14 config schema 5.16 folds into `per_layer_config`
-(`agent-docs/infrastructure/rollout-servers.md`, config-schema parity). Colocated in-process vLLM is also
+vLLM 0.32.0 (cu13) is a **separate** image — the training env cannot import vLLM
+(ABI-incompatible: the server image ships its own torch and `transformers 5.19.0`, the vLLM base
+image's own, which the build asserts sits inside vLLM's declared range; training is on
+`transformers 5.20` / torch 2.11). Colocated in-process vLLM is also
 rejected on the trainer: it would build its own NCCL/TP communicators on the training GPUs
 and deadlock against the FSDP2/EP/CP/TP groups. Server mode keeps the two NCCL
 worlds in separate processes (the trainer rejects `vllm_mode != server`).
 
 ```bash
 # Build the server image (or `make build-vllm`). VLLM_VERSION is the one functional build arg.
-docker build -f Dockerfile.vllm -t vllm-server:0.26.0 .
+docker build -f Dockerfile.vllm -t vllm-server:0.32.0 .
 # The tool parser is NOT a build arg, and vLLM reads no VLLM_TOOL_PARSER env. It is a runtime
 # compose variable interpolated into the command (`--tool-call-parser ${VLLM_TOOL_PARSER:-hermes}`).
 
@@ -35,26 +34,29 @@ HF_HOME=$HALO_SCRATCH/hf HF_TOKEN=$HF_TOKEN \
   docker compose -f docker-compose.vllm.yml up vllm-server
 ```
 
-Four build gates keep the weight sync honest, failing the image rather than the run:
+Build gates keep the weight sync honest, failing the image rather than the run:
 the layerwise-reload patch must be applied **and** its `SKIP_LAYER_NAMES` must cover the
 classes that `copy_` their weights directly on this vLLM (`RoutedExperts`, `OAIAttention`,
 `Gemma4Router`, checked through the MRO); the weight-transfer **re-init** patch must replace
-both `NCCLWeightTransferEngine.init_transfer_engine` and `.shutdown` (unpatched, every trainer
-that connects strands a live communicator on each engine-core worker until
-`ncclCommInitRank` fails outright); `/pause` must still accept `mode=keep`, the form the client pauses with so in-flight
-requests survive a sync; and `verify_gptoss_plugins.py` must exercise the gpt-oss
-tool + reasoning parser plugins, which no test suite can reach (they import vLLM). Three more
-assert the transformers 5.14 line with a per-family config-schema parity fixture, the spec-decode
-prompt-logprob patch (unpatched, a speculative drafter overwrites the hidden states the engine re-score
-reads prompt log-probs from), and that `EngineArgs` still carries `weight_transfer_config` /
-`enable_return_routed_experts` and `KernelConfig.moe_backend`.
+`NCCLWeightTransferEngine.init_transfer_engine`, and upstream `shutdown` must still destroy the
+communicator (unpatched, every trainer that reconnects without a clean shutdown strands a live
+communicator on each engine-core worker until `ncclCommInitRank` fails outright); the
+weight-transfer wire (init and update request fields, the packed chunk boundary, the routes) must
+match the client's; `/pause` must still accept `mode=keep`, the form the client pauses with so
+in-flight requests survive a sync, and reset the prefix cache under it; the two thinking-budget
+patches must be applied; and `verify_gptoss_plugins.py` must exercise the gpt-oss tool + reasoning
+parser plugins and the Model Runner V2 budget they drive, which no test suite can reach (they import
+vLLM). Two more assert a per-family config-schema parity fixture through vLLM's own `ModelConfig`,
+and that `EngineArgs` still carries `weight_transfer_config` / `enable_return_routed_experts` and
+`KernelConfig.moe_backend`.
 
 Compose env knobs (`docker-compose.vllm.yml`): `VLLM_MODEL`, `VLLM_PORT` (8000), `VLLM_TP`
 (tensor-parallel size), `VLLM_GPU_MEM` (`--gpu-memory-utilization`, default 0.85),
 `VLLM_TOOL_PARSER` (default `hermes`) and `VLLM_TOOL_PARSER_PLUGIN`, `VLLM_MOE_BACKEND`
 (default `triton` — required for MoE weight sync), `VLLM_ATTENTION_BACKEND` (unset = auto;
 GLM-4 MoE Lite / GLM-4.7-Flash needs `CUTLASS_MLA` on Blackwell), `VLLM_CHAT_TEMPLATE`,
-`VLLM_REASONING_PARSER` / `VLLM_REASONING_PARSER_PLUGIN`, `VLLM_USE_V2_MODEL_RUNNER`,
+`VLLM_REASONING_PARSER` / `VLLM_REASONING_PARSER_PLUGIN`, `VLLM_USE_V2_MODEL_RUNNER` (unset keeps the
+image's pinned `1`),
 `VLLM_ENABLE_R3` (`--enable-return-routed-experts`, required by `routing_replay: rollout`),
 `VLLM_CUDA_DEVICES` / `TRAINER_CUDA_DEVICES`. Each optional one is a `${VAR:+--flag ${VAR}}`
 slot, so leaving it unset omits the flag entirely.
@@ -74,33 +76,27 @@ from `VLLM_TOOL_CALLING_FLAGS`: on by default, dropped by an empty value
 `SGLANG_MOE_RUNNER_BACKEND` (default `triton` — required for MoE weight sync and R3),
 `SGLANG_ENABLE_R3`, `SGLANG_ATTENTION_BACKEND`, `SGLANG_TOOL_PARSER` (default `auto`),
 `SGLANG_REASONING_PARSER`, `SGLANG_CHAT_TEMPLATE`, `SGLANG_TRUST_REMOTE_CODE`,
-`SGLANG_EXTRA_ARGS`, `NCCL_CUMEM_ENABLE=1`. Weight sync needs the repo's `sglang-server:0.5.17` image, not upstream: it
-carries the GLM-4 gate and Gemma 4 router loader patches (`docker/sglang/patches/`) without which a
-synced router never reaches routing.
+`SGLANG_EXTRA_ARGS`, `NCCL_CUMEM_ENABLE=1`. Weight sync needs the repo's `sglang-server:0.5.22` image, not upstream: it
+carries the Gemma 4 router loader patch (`docker/sglang/patches/`, which also asserts the GLM-4 gates'
+live fp32 read) without which a synced router never reaches routing.
 
 **Thinking budget is enforced engine-side.** `rollout_max_thinking_tokens` becomes the
 per-request `thinking_token_budget`, which vLLM honors only with a reasoning parser
 (`--reasoning-parser qwen3` for Qwen3.x; for gpt-oss the bundled
-`/opt/gpt_oss_reasoning_parser.py` plugin, whose budget arms on the generation prompt's own
-trailing `<|start|>assistant` so the count starts at the first sampled token). The run must
-also set `VLLM_USE_V2_MODEL_RUNNER=0` — Model Runner V2 answers `thinking_token_budget` with a
-400 on every rollout. The field is vLLM-only: under `rollout_backend: sglang` it is refused
-at config time.
+`/opt/gpt_oss_reasoning_parser.py` plugin, whose budget counts only inside an analysis channel
+and, once it runs out, forces the whole move into the final channel). The image pins Model
+Runner V2, which enforces the budget. The field is vLLM-only: under `rollout_backend: sglang`
+it is refused at config time.
 
 Standalone (no compose):
 
 ```bash
 docker run --gpus all --network=host --ipc=host \
-  vllm-server:0.26.0 Qwen/Qwen3-4B-Instruct-2507 --port 8000 \
+  vllm-server:0.32.0 Qwen/Qwen3-4B-Instruct-2507 --port 8000 \
   --weight-transfer-config '{"backend": "nccl"}' --moe-backend triton \
   --return-tokens-as-token-ids --logprobs-mode processed_logprobs \
   --enable-auto-tool-choice --tool-call-parser hermes
 ```
-
-> Checkpoint gotcha (`agent-docs/infrastructure/docker.md`): a model saved with
-> `model_type: qwen3_5_moe_text` is rejected by vLLM (expects
-> `Qwen3_5MoeConfig`) — patch `config.json` to `model_type: qwen3_5_moe`
-> before serving.
 
 ## 2. AsyncTrainingConfig fields that matter
 
@@ -108,7 +104,7 @@ docker run --gpus all --network=host --ipc=host \
 
 | Field | Default | Purpose |
 |---|---|---|
-| `rollout_backend` | `vllm` | engine: `vllm` or `sglang` (async GRPO only). SGLang's 0.5.17 loaders refuse a longer family list than vLLM's, quoted at trainer construction; its server needs `NCCL_CUMEM_ENABLE=1` (compose default) and must be the repo's `Dockerfile.sglang` image — `agent-docs/infrastructure/rollout-servers.md#which-families-each-engine-serves` |
+| `rollout_backend` | `vllm` | engine: `vllm` or `sglang` (async GRPO only). SGLang's 0.5.22 loaders refuse a longer family list than vLLM's, quoted at trainer construction; its server needs `NCCL_CUMEM_ENABLE=1` (compose default) and must be the repo's `Dockerfile.sglang` image — `agent-docs/infrastructure/rollout-servers.md#which-families-each-engine-serves` |
 | `rollout_server_url` | `http://localhost:8000` | single-server URL (weight sync + generation) |
 | `rollout_server_configs` | `None` | multi-server: `[{"url": ..., "group_port": ...}]`; overrides `rollout_server_url`; two or more entries enable prefetch overlap |
 | `rollout_connection_timeout` | `120.0` | wait for `/health` |
@@ -118,9 +114,9 @@ docker run --gpus all --network=host --ipc=host \
 | `ray_address` | `None` | shared Ray cluster; `None` = per-rank local |
 | `rollout_temperature` / `rollout_top_p` / `rollout_max_tokens` | `0.7` / `0.95` / `32768` | rollout sampling (max tokens per turn) |
 | `rollout_max_episode_tokens` | `None` | the most an episode may sample over all its turns, reasoning and visible output together; a turn's caps narrow to what is left, keeping the turn's answer room, and an episode with less than that room left ends truncated; never stated to the model; `>= rollout_max_tokens` |
-| `rollout_max_thinking_tokens` | `None` | per-turn CoT cap (vLLM `thinking_token_budget`); a level's smaller enforced `thinking_tokens` caps the turn instead, and a soft level (`enforce_thinking_cap: false`) runs under this as its ceiling; needs a server reasoning parser + `VLLM_USE_V2_MODEL_RUNNER=0`, and the IS correction when the reasoning marker resolves; refused under `sglang` and at or above `rollout_max_tokens` |
+| `rollout_max_thinking_tokens` | `None` | per-turn CoT cap (vLLM `thinking_token_budget`); a level's smaller enforced `thinking_tokens` caps the turn instead, and a soft level (`enforce_thinking_cap: false`) runs under this as its ceiling; needs a server reasoning parser (enforced on the image's Model Runner V2), and the IS correction when the reasoning marker resolves; refused under `sglang` and at or above `rollout_max_tokens` |
 | `rollout_max_answer_tokens` | `None` | the most a turn may generate past its reasoning cap (a turn's total is the smaller of `rollout_max_tokens` and the cap plus this, a retry's reserve plus this); every drawable level needs a reasoning cap under it; never stated to the model; an int in `[1, rollout_max_tokens)` |
-| `rollout_reasoning_end_token` | `</think>` | the server parser's reasoning end string, encoded as vLLM encodes it and holding at least one added token (Gemma 4 `<channel\|>`, gpt-oss `<\|start\|>assistant<\|channel\|>final<\|message\|>`); a forced run of its ids gets ratio 0 wherever a vLLM budget can bind; a single-token marker also lets `episode/thinking_cap_turns` count each turn's reasoning |
+| `rollout_reasoning_end_token` | `</think>` | the server parser's reasoning end string, encoded as vLLM encodes it and holding at least one added token (Gemma 4 `<channel\|>`, gpt-oss `<\|end\|><\|start\|>assistant<\|channel\|>final<\|message\|>`); a forced run of its ids gets ratio 0 wherever a vLLM budget can bind; a single-token marker also lets `episode/thinking_cap_turns` count each turn's reasoning |
 | `rollout_chat_template_kwargs` | `{}` | chat-template variables sent on every rollout request **and** applied to the trainer's own renders (Qwen3.6 `preserve_thinking`); `reasoning_effort`, `reasoning_budget` and `reasoning_budget_soft` are refused here — they travel per episode |
 | `max_train_row_tokens` | `None` | longest training row a rank takes; must exceed `rollout_max_tokens`. Over-cap per-turn rows are left out, whole-trajectory rows train at zero weight (`sampling/rows_over_cap_frac`) |
 | `eval_rollout_batch_size` | `None` | rows per rank in one eval rollout round (eval runs without prefetch); `None` = the eval batch |

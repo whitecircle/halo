@@ -45,9 +45,9 @@ Balancing is where the two families diverge. `LagunaForCausalLM.forward` declare
 
 The inherited `SUPPORTS_BIAS_BALANCING` still accepts an explicit `bias_update` ([Callbacks](../training-methods/callbacks.md#moe-balancing-modes)). Under it the sign-updates land in the gate's own `e_score_correction_bias` (the inherited native-slot adoption), so the trained bias is part of the checkpoint and a transformers reload routes exactly as training did.
 
-vLLM 0.26.0 does not: its Laguna loader registers that tensor under a different internal name and drops the exported `mlp.experts.e_score_correction_bias` key silently, so a served copy routes on the pretrained bias. The balancing enable path warns about this at run start.
+vLLM 0.32.0 does not: its Laguna loader registers that tensor under a different internal name and drops the exported `mlp.experts.e_score_correction_bias` key silently, so a served copy never routes on the trained bias (by the loader's code, the served bias keeps its zero initialization). The balancing enable path warns about this at run start.
 
-RL weight sync runs on vLLM only. SGLang 0.5.17's Laguna loader asserts every routed-expert tensor of every sparse layer in each `load_weights` call, which a chunked online update cannot satisfy, so `rollout_backend: sglang` is refused at trainer construction ([Rollout Servers](../infrastructure/rollout-servers.md#which-families-each-engine-serves)).
+RL weight sync runs on vLLM only. SGLang 0.5.22's Laguna loader asserts every routed-expert tensor of every sparse layer in each `load_weights` call, which a chunked online update cannot satisfy, so `rollout_backend: sglang` is refused at trainer construction ([Rollout Servers](../infrastructure/rollout-servers.md#which-families-each-engine-serves)).
 
 ## Fused SwiGLU
 

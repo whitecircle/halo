@@ -49,7 +49,7 @@ Watch `sampling/logratio_mean` first: the unclamped mean log-ratio in nats, near
 
 A reasoning close the engine forced at a turn's reasoning cap ([Reasoning budget](reasoning.md#reasoning-budget)) gets ratio 0, keeping the DAPO normalizer. The policy did not choose it, so training it would shift the model's own probability of ending its reasoning.
 
-- **Detection.** A forced close is a run of `rollout_reasoning_end_token` ids, each at sampling log-prob exactly 0: one token for Qwen3.x `</think>` and Gemma 4 `<channel|>`, five for gpt-oss's `<|start|>assistant<|channel|>final<|message|>`. `sampling/forced_close_frac` is their share of the tokens carrying sampling log-probs.
+- **Detection.** A forced close is a run of `rollout_reasoning_end_token` ids, each at sampling log-prob exactly 0: one token for Qwen3.x `</think>` and Gemma 4 `<channel|>`, six for gpt-oss's `<|end|><|start|>assistant<|channel|>final<|message|>`. `sampling/forced_close_frac` is their share of the tokens carrying sampling log-probs.
 - **Required correction.** A run whose vLLM reasoning cap can bind (a drawable level's `thinking_tokens`, soft ones included, or `rollout_max_thinking_tokens`) and whose tokenizer resolves the marker is refused at construction without the correction.
 - **Unresolved marker.** A marker the tokenizer does not write (`</think>` on Gemma 4 or gpt-oss) leaves forced closes in the loss, with a warning.
 
@@ -79,7 +79,7 @@ Past a high masked fraction the survivors are a selection-biased sample, the row
 
 `isr_engine_reference: true` (off in the recipes) takes the trainer↔engine floor out of the stages: each training round the engine re-scores every train row that carries sampling log-probs, under the weights it last received, and the stages read that log-ratio. The engine's own decode-vs-prefill gap stays in it (−0.003 nats/token at sampling entropy 0.36 with identical weights, against −0.0003 for trainer-vs-engine-prefill) and grows with entropy, so the band still needs room.
 
-It needs `rollout_temperature` and `rollout_top_p` of `1.0`, with `rollout_top_k`, `rollout_min_p` and `rollout_repetition_penalty` off, and costs one prefill per row, for which a vLLM server needs memory headroom ([Throughput](../../infrastructure/rollout-servers.md#throughput)). A startup probe refuses a server whose prompt log-probs are inconsistent across CUDA-graph prefill sizes, the garbage unpatched vLLM 0.26.0 returns under MTP ([vLLM server patches](../../infrastructure/rollout-servers.md#vllm-server-patches)).
+It needs `rollout_temperature` and `rollout_top_p` of `1.0`, with `rollout_top_k`, `rollout_min_p` and `rollout_repetition_penalty` off, and costs one prefill per row, for which a vLLM server needs memory headroom ([Throughput](../../infrastructure/rollout-servers.md#throughput)). A startup probe refuses a server whose prompt log-probs are inconsistent across CUDA-graph prefill sizes, the garbage vLLM's V1 runner returns under MTP ([vLLM server patches](../../infrastructure/rollout-servers.md#vllm-server-patches)).
 
 ## Advantages
 

@@ -63,7 +63,7 @@ from sentence_transformers.models import Dense
 from tokenizers import Tokenizer, models, pre_tokenizers
 from torch.distributed.tensor import DTensor
 from transformers import AutoModel, PreTrainedTokenizerFast
-from trl import ModelConfig, get_peft_config
+from trl import get_peft_config
 
 from scripts.training.embedding import build_sentence_transformer, inject_lora
 from src.checkpoint.adapters import has_adapter_weight_file, resume_adapter_dir
@@ -71,6 +71,7 @@ from src.checkpoint.format import ADAPTER_CONFIG_FILE, ADAPTER_SAFETENSORS_FILE,
 from src.checkpoint.parallel.resume_source import resolve_resume_weights_source
 from src.checkpoint.reading import load_full_state_dict
 from src.configs.embedding import EmbeddingConfig, EmbeddingScriptArguments
+from src.configs.script_arguments import ModelArguments
 from src.distributed.expert_parallel.moe_layer.layer import named_ep_layers
 from src.distributed.parallelism_config import ParallelismConfig
 from src.entrypoints.script import ScriptContext
@@ -163,10 +164,10 @@ def _lora_targets(family: Family, lora: str) -> tuple[str, ...] | None:
     }[lora]
 
 
-def _model_config(family: Family, source: str, lora: str) -> ModelConfig:
+def _model_config(family: Family, source: str, lora: str) -> ModelArguments:
     """The script's model arguments for this row: the source, and the LoRA the ``--lora`` choice sets."""
     targets = _lora_targets(family, lora)
-    return ModelConfig(
+    return ModelArguments(
         model_name_or_path=source,
         attn_implementation=family.attn_implementation,
         use_peft=targets is not None,
@@ -250,7 +251,7 @@ def _config(output_dir: str, family: Family, *, save: bool) -> EmbeddingConfig:
     )
 
 
-def _build(ctx, model_config: ModelConfig, config: EmbeddingConfig, parallelism_config: ParallelismConfig):
+def _build(ctx, model_config: ModelArguments, config: EmbeddingConfig, parallelism_config: ParallelismConfig):
     """The model exactly as the script builds and adapts it for this run shape."""
     source = model_config.model_name_or_path
     args = EmbeddingScriptArguments()
@@ -379,7 +380,7 @@ def _serves(served: torch.Tensor, expected: torch.Tensor, base: torch.Tensor, pa
 
 def _serving_checks(
     checkpoint: str,
-    model_config: ModelConfig,
+    model_config: ModelArguments,
     at_save: dict[str, torch.Tensor],
     prefix: str,
     embedding: str | None,

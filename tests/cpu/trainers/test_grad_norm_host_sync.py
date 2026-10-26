@@ -42,6 +42,8 @@ class _Accelerator:
 class _Trainer:
     """Stands in for the trainer ``Trainer._get_grad_norm`` is a method of."""
 
+    _has_mixed_mesh_grads = GradientSyncMixin._has_mixed_mesh_grads
+
     def __init__(self):
         self.accelerator = _Accelerator()
         self.model = torch.nn.Linear(2, 2)

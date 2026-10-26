@@ -5,8 +5,8 @@ that executes runs inside an image.
 
 - `halo:hopper` — H100/H200 (SM90): FA2 + FA3 + DeepEP.
 - `halo:blackwell` — B200 (SM100) / B300 (SM103): FA2 + FA4 + DeepEP (no FA3).
-- `vllm-server:0.26.0` — vLLM inference server with native NCCL weight transfer (separate container).
-- `sglang-server:0.5.17` — SGLang inference server, NCCL matched to the training image so it can
+- `vllm-server:0.32.0` — vLLM inference server with native NCCL weight transfer (separate container).
+- `sglang-server:0.5.22` — SGLang inference server, NCCL matched to the training image so it can
   receive weight updates too ([Rollout Servers](rollout-servers.md)). Serving-only use needs no custom build.
 
 All four are published to Amazon ECR Public under `public.ecr.aws/whitecircle/halo` — anonymous pulls,
@@ -76,7 +76,7 @@ On a host whose docker default runtime rejects `--gpus` (sysbox-runc, for one), 
 |-----------|--------|-----------|
 | Base NGC `nvcr.io/nvidia/pytorch:26.03-py3` (Ubuntu 24.04, Python 3.12, CUDA 13.2) | Yes | Yes |
 | PyTorch 2.11.0+cu130 (reinstalled from the cu130 index over the base's build) | Yes | Yes |
-| Transformers 5.16.x · TRL 1.6.x · Accelerate 1.11.x | Yes | Yes |
+| Transformers 5.20.x · TRL 1.14.x · Accelerate 1.11.x | Yes | Yes |
 | Flash Attention 2 | Yes (built from tag `v2.8.3.post1`, split-K kernels are throw-stubs) | Yes — inherited from `BASE_IMAGE`, which is the pin; the build asserts it still imports |
 | Flash Attention 3 (SM90) | Yes | No |
 | Flash Attention 4 (`flash-attn-4[cu13]==4.0.0b16`, `flash_attn.cute`) | No | Yes |
@@ -245,7 +245,7 @@ rollout server on another node selects EFA through its compose overlay and the t
 
 ## vLLM inference server
 
-vLLM runs as a separate container built from upstream `vllm/vllm-openai:v0.26.0` plus toolkit patches
+vLLM runs as a separate container built from upstream `vllm/vllm-openai:v0.32.0` plus toolkit patches
 (`Dockerfile.vllm`; the unsuffixed upstream tag is the CUDA 13 build). It pins its own torch/transformers
 stack, so the training environment uses its own NCCL weight-sync client (`src/weight_sync/`) instead
 of importing vLLM.
@@ -255,21 +255,20 @@ communicator sees an identical NCCL runtime on both ends. Build asserts check th
 the lock, the resolved `libnccl.so.2`, and the `ncclUniqueId` ABI identity between the two stacks.
 
 The image bakes the RL serving contract: native weight transfer (`VLLM_SERVER_DEV_MODE=1`; the
-trainer's client drives the phased update protocol the server exposes), R3 routed-experts capture, and
-three `sitecustomize`-applied patches: layerwise reload, weight-transfer re-init and spec-decode
-prompt log-probs. The patch targets are asserted against the live vLLM at build, so an upstream
+trainer's client drives the phased update protocol the server exposes), R3 routed-experts capture,
+Model Runner V2 (`VLLM_USE_V2_MODEL_RUNNER=1`, the runner thinking budgets and R3 capture run on), and
+four `sitecustomize`-applied patches: layerwise reload, weight-transfer re-init and the two gpt-oss
+thinking-budget patches. The patch targets are asserted against the live vLLM at build, so an upstream
 refactor fails the image build.
 
 What the patches do, the `--moe-backend triton` rule, serving flags, networking, GPU assignment, and
 troubleshooting: [Rollout Servers](rollout-servers.md).
 
 Which families this image can serve for RL, and why a family is refused, is stated once in
-[Rollout Servers → Weight sync](rollout-servers.md#weight-sync). Image-side quirk: vLLM loads the
-`ForConditionalGeneration` archs, so a text-only `qwen3_5_moe_text` checkpoint needs its
-`config.json` patched to `qwen3_5_moe` first.
+[Rollout Servers → Weight sync](rollout-servers.md#weight-sync).
 
 ```bash
-make build-vllm            # docker build -f Dockerfile.vllm -t vllm-server:0.26.0 . (plus the label build args)
+make build-vllm            # docker build -f Dockerfile.vllm -t vllm-server:0.32.0 . (plus the label build args)
 ```
 
 Standalone `docker run` gotcha: the ENTRYPOINT is `vllm serve`, so any args REPLACE the compose
@@ -293,8 +292,8 @@ Prebuilt images live on Amazon ECR Public — anonymous pulls, no AWS account:
 
 ```bash
 docker pull public.ecr.aws/whitecircle/halo:blackwell     # or :hopper
-docker pull public.ecr.aws/whitecircle/halo:vllm-0.26.0
-docker pull public.ecr.aws/whitecircle/halo:sglang-0.5.17
+docker pull public.ecr.aws/whitecircle/halo:vllm-0.32.0
+docker pull public.ecr.aws/whitecircle/halo:sglang-0.5.22
 ```
 
 Each moving tag has immutable SemVer pins (`blackwell-1.1.0`); there is deliberately no `latest` — it

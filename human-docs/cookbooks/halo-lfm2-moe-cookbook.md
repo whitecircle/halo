@@ -84,7 +84,7 @@ CUDA_VISIBLE_DEVICES=2,3 halo launch environmental-grpo lfm2-grpo.yaml -n 2 \
   --output_dir=/data/checkpoints/lfm2.5-8b-a1b-grpo
 ```
 
-Add `--expert_parallel_size=2` to shard the experts across the two trainer GPUs. SGLang 0.5.17 also
+Add `--expert_parallel_size=2` to shard the experts across the two trainer GPUs. SGLang 0.5.22 also
 serves and weight-syncs LFM-2: add `--rollout_backend=sglang --rollout_server_url=http://localhost:30000`
 and leave out `--routing_replay=rollout`, because SGLang's routing capture is not verified for LFM-2.
 

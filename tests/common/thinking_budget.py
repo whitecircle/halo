@@ -7,8 +7,9 @@ reasoning ids are not captured separately from the turn's sampled ids. So both h
 server: whether this one honours the field at all, and what the rollouts then reasoned.
 
 The server needs a reasoning parser (gpt-oss: ``--reasoning-parser-plugin
-/opt/gpt_oss_reasoning_parser.py --reasoning-parser openai_gptoss``) and ``VLLM_USE_V2_MODEL_RUNNER=0``;
-missing either it answers every request carrying the field with a 400.
+/opt/gpt_oss_reasoning_parser.py --reasoning-parser openai_gptoss``); without one it answers every
+request carrying the field with a 400. The vLLM image pins Model Runner V2, the runner the gpt-oss
+budget patches target.
 """
 
 import requests

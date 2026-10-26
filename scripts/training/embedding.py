@@ -19,12 +19,13 @@ from peft import inject_adapter_in_model
 from sentence_transformers import SentenceTransformer
 from sentence_transformers.models import Normalize, Pooling
 from transformers import AutoModel
-from trl import ModelConfig, get_quantization_config
+from trl import get_quantization_config
 
 from src.checkpoint.model_card import HUB_TAGS
 from src.config_validation import reject_non_default_args, reject_unsupported_args
 from src.configs.embedding import EmbeddingConfig, EmbeddingScriptArguments
 from src.configs.parallelism_arguments import ParallelismArguments
+from src.configs.script_arguments import ModelArguments
 from src.data.sources.loading import reject_image_columns
 from src.entrypoints.data_setup import load_script_datasets
 from src.entrypoints.model_setup import load_model_and_tokenizer
@@ -59,7 +60,7 @@ logger = get_logger(__name__, log_level="INFO")
 def build_sentence_transformer(
     context: ScriptContext,
     embedding_config: EmbeddingConfig,
-    model_config: ModelConfig,
+    model_config: ModelArguments,
     args: EmbeddingScriptArguments,
 ) -> SentenceTransformer:
     """Build a SentenceTransformer with optional EP/TP parallelism.
@@ -211,7 +212,7 @@ def align_st_pipeline_to_config(st_model: SentenceTransformer, embedding_config:
         )
 
 
-def inject_lora(model: SentenceTransformer, model_config: ModelConfig, args: EmbeddingScriptArguments) -> None:
+def inject_lora(model: SentenceTransformer, model_config: ModelArguments, args: EmbeddingScriptArguments) -> None:
     """Inject the run's LoRA into ``model``'s transformer backbone in place and train the adapters
     alone; no-op without PEFT.
 
@@ -252,7 +253,7 @@ def inject_lora(model: SentenceTransformer, model_config: ModelConfig, args: Emb
 
 def main():
     args, embedding_config, model_config, dist_args = parse_script_args(
-        EmbeddingScriptArguments, EmbeddingConfig, ModelConfig, ParallelismArguments
+        EmbeddingScriptArguments, EmbeddingConfig, ModelArguments, ParallelismArguments
     )
 
     # The ST path has no configure_run_tokenizer / freeze stage, so these shared knobs would parse

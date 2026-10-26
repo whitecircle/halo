@@ -54,6 +54,7 @@ class _ReferenceForward:
     the rows this rank forwarded are recorded. The KL term is ``None``, as on a KL-free KTO loss."""
 
     _signature_columns = ["prompt_ids", "ref_logps"]
+    model = None
     ref_model = None
     args = SimpleNamespace(dataloader_num_workers=0, dataloader_pin_memory=False, resume_from_checkpoint=None)
 
@@ -63,7 +64,7 @@ class _ReferenceForward:
     def data_collator(self, rows):
         return torch.tensor([row["prompt_ids"][0] for row in rows])
 
-    def compute_ref_log_probs(self, batch):
+    def compute_ref_log_probs(self, model, batch):
         self.observed_rows.extend(int(row) for row in batch)
         return batch.float(), None
 

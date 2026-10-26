@@ -37,7 +37,7 @@ def _ref_forward(ref_model):
 
     def forward(model, ids, mask, keep, compute_entropy):
         seen.update(model=model, adapters_off=policy.adapters_off)
-        return torch.zeros(1, keep), None
+        return torch.zeros(1, keep), None, None
 
     host = types.SimpleNamespace(
         beta=0.04,

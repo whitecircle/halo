@@ -3,26 +3,27 @@
 
 The toolkit serves gpt-oss with vLLM's harmony pipeline disabled, which drops gpt-oss from the
 reasoning-parser registry (and so from ``thinking_token_budget``) and makes the base non-streaming
-``extract_reasoning`` raise. This parser restores both: it arms and ends the budget on markers the
-harmony-disabled render emits, and splits reasoning from answer on the plain-text channel markers the
-model still emits (``…analysis…assistantfinal…``).
+``extract_reasoning`` raise. This parser restores both: its markers bound the budget to the analysis
+channel, and it splits reasoning from answer on the plain-text channel markers the model still emits
+(``…analysis…assistantfinal…``).
 
 Serve alongside the ``gpt_oss_text`` tool parser:
   --reasoning-parser-plugin /opt/gpt_oss_reasoning_parser.py --reasoning-parser openai_gptoss
+The forced cut needs the image's ``vllm_reasoning_forced_end_patch`` and
+``vllm_thinking_budget_completion_patch``.
 """
 
 import threading
 
 import regex as re
-from vllm.entrypoints.openai.engine.protocol import DeltaMessage
+from vllm.entrypoints.generate.base.protocol import DeltaMessage
 from vllm.reasoning import ReasoningParserManager
 from vllm.reasoning.gptoss_reasoning_parser import GptOssReasoningParser
 
-# vLLM builds a parser per request, and the base __init__ calls the shared HF fast tokenizer's
-# ``encode``, which mutates Rust truncation state; under concurrent requests that races the per-token
-# ``logprobs`` detokenization and raises ``RuntimeError: Already borrowed`` (500). Markers are
-# constant, so the constructed state is snapshotted once per tokenizer and replayed without touching
-# the tokenizer.
+# vLLM builds a parser per request, and the HF fast tokenizer's ``encode`` mutates shared Rust
+# truncation state; under concurrent requests that races the per-token ``logprobs`` detokenization and
+# raises ``RuntimeError: Already borrowed`` (500). Markers are constant, so the constructed state is
+# snapshotted once per tokenizer and replayed without touching the tokenizer.
 _STATE_LOCK = threading.Lock()
 _STATE_CACHE: dict[int, dict] = {}
 
@@ -31,10 +32,21 @@ _STATE_CACHE: dict[int, dict] = {}
 # start-or-``assistant`` avoids matching ``final`` inside words such as "finally" in the CoT.
 _FINAL_RE = re.compile(r"(?:^|assistant)final", re.DOTALL)
 
+# Token-level end of reasoning: the ``final`` channel opening, allowing a constrain hint of up to this
+# many tokens before ``<|message|>``, within the current message (the scan stops at the previous
+# message's ``<|end|>``).
+_MAX_TOKENS_BETWEEN = 20
+
 
 @ReasoningParserManager.register_module(["openai_gptoss"], force=True)
 class GptOssBudgetReasoningParser(GptOssReasoningParser):
     """GptOss reasoning parser that works under harmony-disabled serving and concurrent load."""
+
+    # What the budget forces once an analysis channel overruns: the model's own move into the final
+    # channel, ids included, so the cut decodes to the natural ``assistantfinal`` and the split below
+    # finds the answer behind it. vLLM stops forcing at the first natural end marker, which this
+    # sequence reaches at its ``<|channel|>``; the completion patch forces the rest.
+    reasoning_forced_end_str = "<|end|><|start|>assistant<|channel|>final<|message|>"
 
     def __init__(self, tokenizer, *args, **kwargs):
         key = id(tokenizer)
@@ -43,37 +55,58 @@ class GptOssBudgetReasoningParser(GptOssReasoningParser):
             with _STATE_LOCK:
                 if key not in _STATE_CACHE:
                     super().__init__(tokenizer, *args, **kwargs)
+                    self._final_prefix_ids = tokenizer.encode("<|channel|>final", add_special_tokens=False)
+                    self._message_ids = tokenizer.encode("<|message|>", add_special_tokens=False)
+                    (self._end_of_message_id,) = tokenizer.encode("<|end|>", add_special_tokens=False)
                     _STATE_CACHE[key] = self.__dict__.copy()
                     return
                 state = _STATE_CACHE[key]
         self.__dict__.update(state)
 
-    # Harmony markers vLLM tokenizes into the budget's arm/force ids. These override read-only base
-    # properties, so they are properties rather than __init__ assignments.
+    # vLLM counts while the last start marker sits after the last end marker, from the tokens after
+    # the start marker. These override read-only base properties, so they are properties.
     @property
     def reasoning_start_str(self) -> str:
-        """Where the budget arms: the generation prompt's own trailing ``<|start|>assistant``.
+        """Where the count starts: an analysis channel's opening, without its ``<|channel|>``.
 
-        vLLM counts from the last occurrence of one fixed id sequence, so no channel opening works
-        here. This parser treats every channel before ``final`` as reasoning while the
-        harmony-disabled render opens ``analysis`` or ``commentary``, and a bare ``<|channel|>`` also
-        matches the tool-result turn already in the prompt, consuming the budget before the first
-        sampled token. Matching the prompt tail arms vLLM's ``continue_thinking`` state at a zero
-        prompt-side count, so the budget bounds the tokens generated before the ``final`` channel.
+        Every channel header carries ``<|channel|>``, the end marker, so the start marker has to begin
+        after it for an analysis opening to land on the counting side.
         """
-        return "<|start|>assistant"
+        return "analysis<|message|>"
 
     @property
     def reasoning_end_str(self) -> str:
-        """What the budget forces: the model's own final-channel opening, ids included.
+        """Where the count stops: any channel header.
 
-        The engine appends these ids verbatim, so the marker has to decode to the same text the model
-        writes when it ends reasoning on its own. Dropping ``<|start|>assistant`` (the channel marker
-        alone) decodes to a bare ``final`` glued to the truncated CoT, indistinguishable from prose
-        ``final``, and the split would leave the whole answer in ``reasoning``. Carrying the role
-        tokens makes the forced cut byte-identical to the natural ``assistantfinal``.
+        A tool call, a commentary preamble and the final answer each open with ``<|channel|>``, so
+        none of them is counted or cut. The first header of a turn follows the prompt's own
+        ``<|start|>assistant``, and Model Runner V2 matches markers across that boundary.
         """
-        return "<|start|>assistant<|channel|>final<|message|>"
+        return "<|channel|>"
+
+    def is_reasoning_end(self, input_ids) -> bool:
+        """Whether the current message has opened its ``final`` channel.
+
+        The base answers True unconditionally, since harmony parses the output there. Under
+        harmony-disabled serving that ends reasoning at the prompt: streaming routes every delta to
+        content and structured outputs constrain the CoT.
+        """
+        prefix, suffix = self._final_prefix_ids, self._message_ids
+        ids = list(input_ids)
+        for i in range(len(ids) - len(prefix), -1, -1):
+            if ids[i] == self._end_of_message_id:
+                return False
+            if ids[i : i + len(prefix)] == prefix:
+                start = i + len(prefix)
+                for j in range(start, min(start + _MAX_TOKENS_BETWEEN, len(ids) - len(suffix) + 1)):
+                    if ids[j : j + len(suffix)] == suffix:
+                        return True
+        return False
+
+    def is_reasoning_end_streaming(self, input_ids, delta_ids) -> bool:
+        # The window spans the marker plus the whole delta, which speculative decoding can make long.
+        window = len(self._final_prefix_ids) + _MAX_TOKENS_BETWEEN + len(self._message_ids) + len(tuple(delta_ids))
+        return self.is_reasoning_end(list(input_ids)[-window:])
 
     def extract_reasoning(self, model_output: str, request) -> tuple[str | None, str | None]:
         return self._split(model_output)
@@ -109,9 +142,9 @@ class GptOssBudgetReasoningParser(GptOssReasoningParser):
         return DeltaMessage(reasoning=reasoning_delta, content=content_delta)
 
     def extract_content_ids(self, input_ids: list[int]) -> list[int]:
-        """Token ids after the reasoning-end marker (the base raises instead of answering)."""
-        prefix = list(self.reasoning_end_token_ids_prefix)
-        suffix = list(self.reasoning_end_token_ids_suffix)
+        """Token ids after the last ``final`` channel opening (the base raises instead of answering)."""
+        prefix = self._final_prefix_ids
+        suffix = self._message_ids
         ids = list(input_ids)
         for i in range(len(ids) - len(prefix), -1, -1):
             if ids[i : i + len(prefix)] != prefix:

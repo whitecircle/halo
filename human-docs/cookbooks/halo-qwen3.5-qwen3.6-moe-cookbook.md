@@ -65,7 +65,7 @@ On the host, start the servers on the SFT checkpoint:
 cp jinja-templates/qwen3/qwen3.6-reasoning-effort.jinja "$HALO_SCRATCH/"
 export VLLM_MODEL=/data/checkpoints/qwen3.6-35b-a3b-sft
 export VLLM_CHAT_TEMPLATE=/data/qwen3.6-reasoning-effort.jinja
-export VLLM_TOOL_PARSER=qwen3_xml VLLM_REASONING_PARSER=qwen3 VLLM_USE_V2_MODEL_RUNNER=0
+export VLLM_TOOL_PARSER=qwen3_xml VLLM_REASONING_PARSER=qwen3
 VLLM_CUDA_DEVICES=4,5 VLLM_TP=2 VLLM_PORT=8000 \
   docker compose -p qwen36-rollout-0 -f docker-compose.vllm.yml up -d vllm-server
 VLLM_CUDA_DEVICES=6,7 VLLM_TP=2 VLLM_PORT=8001 \
@@ -121,8 +121,8 @@ CUDA_VISIBLE_DEVICES=0,1,2,3,4,5 DIST_NCCL_TIMEOUT_MINUTES=60 \
   leaves the XML tool calls as text, so every episode scores zero. The code-contests recipes run soft
   thinking budgets: the template states each level's `thinking_tokens` as a target, and on vLLM the
   engine closes the reasoning only at its ceiling, `rollout_max_tokens − rollout_max_answer_tokens`
-  (30,000 − 8,192 tokens). That ceiling needs `VLLM_REASONING_PARSER=qwen3` and
-  `VLLM_USE_V2_MODEL_RUNNER=0`, or every request fails with a 400
+  (30,000 − 8,192 tokens). That ceiling needs `VLLM_REASONING_PARSER=qwen3`, or every request fails
+  with a 400
   ([Thinking budgets](../training-methods/async-grpo-environments.md#thinking-budgets)).
 - **SGLang rollouts.** `rollout_max_thinking_tokens` and `carry_reasoning` are refused at startup. The
   soft budgets are stated and priced as on vLLM, but no engine cap closes the reasoning there: only
@@ -140,7 +140,7 @@ CUDA_VISIBLE_DEVICES=0,1,2,3,4,5 DIST_NCCL_TIMEOUT_MINUTES=60 \
 ## Export and serve
 
 Gathered saves keep the language-model experts fused, like the hub checkpoints. Transformers and vLLM
-0.26.0 read that layout directly. `halo run unfuse-moe-experts` rewrites it per expert for a loader that
+0.32.0 read that layout directly. `halo run unfuse-moe-experts` rewrites it per expert for a loader that
 needs that layout.
 
 Smoke-test with `AutoModelForImageTextToText` and `AutoTokenizer`

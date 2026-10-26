@@ -4,7 +4,7 @@ Thinking Machines' `InklingForConditionalGeneration` (`thinkingmachines/Inkling-
 
 Attention is hybrid sliding (5 sliding : 1 full, period 6) with **no RoPE** — position enters as an additive relative-logits bias — plus depthwise causal short convolutions (`InklingShortConvolution`) on the projected K/V and around each decoder sublayer.
 
-Transformers ships `transformers.models.inkling` natively (the image pins 5.16.1), so the family loads with no remote code. The composite config's `model_type` is `inkling_mm_model`, the text config's `inkling_text` (there is no bare `inkling` spelling).
+Transformers ships `transformers.models.inkling` natively (the image pins 5.20.2), so the family loads with no remote code. The composite config's `model_type` is `inkling_mm_model`, the text config's `inkling_text` (there is no bare `inkling` spelling).
 
 | | EP | CP | TP | ETP | EP+CP | EP+TP | LoRA |
 |---|:--:|:--:|:--:|:--:|:--:|:--:|:--:|

@@ -27,8 +27,9 @@ from types import SimpleNamespace
 
 import torch
 from transformers import AutoTokenizer
-from trl import ModelConfig, SFTConfig, get_quantization_config
+from trl import SFTConfig, get_quantization_config
 
+from src.configs.script_arguments import ModelArguments
 from src.distributed.parallelism_config import ParallelismConfig
 from src.model_loading.parallel.loader import load_distributed_model
 from src.model_loading.parallel.peft_setup import configure_adapter_training
@@ -76,7 +77,7 @@ PEFT_ARGS = SimpleNamespace(
 
 def run_mode(
     mode_name: str,
-    model_config: ModelConfig,
+    model_config: ModelArguments,
     sft_config: SFTConfig,
     parallelism_config: ParallelismConfig,
     tokenizer,
@@ -272,7 +273,7 @@ def run(ctx) -> dict:
     log("  TEST 1: LoRA + FSDP (Qwen3-4B)")
     log(f"{'=' * 70}")
 
-    lora_fsdp_model_config = ModelConfig(**lora_model_kwargs)
+    lora_fsdp_model_config = ModelArguments(**lora_model_kwargs)
     lora_fsdp_sft_config = SFTConfig(
         output_dir=os.path.join(base_output_dir, "lora_fsdp_train"),
         learning_rate=LEARNING_RATE,
@@ -301,7 +302,7 @@ def run(ctx) -> dict:
     log("  TEST 2: QLoRA (4-bit) + FSDP (Qwen3-4B)")
     log(f"{'=' * 70}")
 
-    qlora_fsdp_model_config = ModelConfig(
+    qlora_fsdp_model_config = ModelArguments(
         **lora_model_kwargs,
         load_in_4bit=True,
         bnb_4bit_quant_type="nf4",
@@ -338,7 +339,7 @@ def run(ctx) -> dict:
 
     parallelism_tp2 = ParallelismConfig(tp_size=2)
 
-    lora_tp_model_config = ModelConfig(**lora_model_kwargs)
+    lora_tp_model_config = ModelArguments(**lora_model_kwargs)
     lora_tp_sft_config = SFTConfig(
         output_dir=os.path.join(base_output_dir, "lora_tp2_train"),
         learning_rate=LEARNING_RATE,

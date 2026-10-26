@@ -1,7 +1,7 @@
 #!/usr/bin/env python
 """The engine rosters spell shared facts once: the Step-3 spellings come off the family spec,
-the two Bailing loader gaps off one table both clients quote, and the release off each client's
-``ENGINE_RELEASE``, the dropped-balancing-bias roster included.
+the two Bailing gaps off one table both clients quote, and the release off each client's
+``ENGINE_RELEASE``.
 
     python tests/cpu/weight_sync/test_unservable_roster_derivation.py
 """
@@ -9,10 +9,9 @@ the two Bailing loader gaps off one table both clients quote, and the release of
 import pytest
 
 from src.models.moe.family_specs import BAILING, STEP3P7
-from src.weight_sync.clients.base import unregistered_bailing_model_types
+from src.weight_sync.clients.base import unservable_bailing_model_types
 from src.weight_sync.clients.sglang import SGLangWeightSyncClient
 from src.weight_sync.clients.vllm import VLLMWeightSyncClient
-from tests.common.rosters import ep_layer_class_by_model_type
 
 _CLIENTS = (VLLMWeightSyncClient, SGLangWeightSyncClient)
 
@@ -24,11 +23,11 @@ def test_sglang_refuses_every_step3_spelling_the_trainer_knows_with_one_fact():
 
 
 def test_both_clients_quote_the_shared_bailing_gaps_for_their_own_release():
-    shared = set(unregistered_bailing_model_types("x"))
+    shared = set(unservable_bailing_model_types("x"))
     assert shared == {"bailing_hybrid", "bailing_moe_linear"}
     assert shared < set(BAILING.model_types), "the gaps are spellings the toolkit trains"
     for client in _CLIENTS:
-        quoted = unregistered_bailing_model_types(client.ENGINE_RELEASE)
+        quoted = unservable_bailing_model_types(client.ENGINE_RELEASE)
         for model_type in shared:
             assert client.UNSERVABLE_MODEL_TYPES[model_type] == quoted[model_type]
 
@@ -46,14 +45,11 @@ def test_every_roster_fact_names_the_release_its_client_declares(client):
     assert not stale, f"{client.__name__} roster facts that do not name {client.ENGINE_RELEASE!r}: {stale}"
 
 
-def test_the_dropped_balancing_bias_roster_quotes_the_release_the_laguna_fact_names():
-    """vLLM's Laguna loader skips the exported balancing bias, and the run warning names the dropping
-    engine by its ``ENGINE_RELEASE``: it must be the release the Laguna layer's declaration names, or the
-    warning would quote a server the fact was never established for."""
+def test_vllm_alone_drops_the_laguna_balancing_bias():
+    """vLLM's Laguna loader skips the exported balancing bias; the run warning names the dropping engine by
+    its ``ENGINE_RELEASE``, read off this roster."""
     assert {"laguna"} == VLLMWeightSyncClient.DROPPED_BALANCING_BIAS_MODEL_TYPES
     assert frozenset() == SGLangWeightSyncClient.DROPPED_BALANCING_BIAS_MODEL_TYPES
-    laguna = ep_layer_class_by_model_type()["laguna"]
-    assert laguna._SERVED_BALANCING_BIAS_DROPPED_BY == VLLMWeightSyncClient.ENGINE_RELEASE
 
 
 if __name__ == "__main__":

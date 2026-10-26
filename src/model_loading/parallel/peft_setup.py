@@ -5,6 +5,7 @@ from __future__ import annotations
 import contextlib
 import copy
 import warnings
+from typing import TYPE_CHECKING
 
 import torch
 from peft import PeftModel, get_peft_model, prepare_model_for_kbit_training
@@ -12,7 +13,7 @@ from peft.tuners.tuners_utils import BaseTunerLayer, _maybe_include_all_linear_l
 from peft.utils.constants import INCLUDE_LINEAR_LAYERS_SHORTHAND
 from torch.distributed.tensor import DTensor
 from transformers import PreTrainedModel
-from trl import ModelConfig, get_peft_config
+from trl import get_peft_config
 
 from src.distributed.expert_parallel.moe_layer.expert_lora import model_has_expert_lora
 from src.distributed.expert_parallel.moe_layer.layer import named_ep_layers
@@ -25,11 +26,15 @@ from src.models.moe.expert_lora_spec import ExpertLoraSpec, expert_target_projec
 from src.models.param_roles import EMBEDDING_HEAD_MARKERS, is_normalization_module
 from src.runtime.consensus import reject_across_ranks, reject_divergent_settings
 
+if TYPE_CHECKING:
+    # Annotation only: the entry scripts' argument layer sits beside this package.
+    from src.configs.script_arguments import ModelArguments
+
 # The forward-probe verdict cache key: a class can be grouped at one width and plain at another.
 _ProbeKey = tuple[type, int, int]
 
 
-def split_expert_lora_targets(model_config: ModelConfig) -> ExpertLoraSpec | None:
+def split_expert_lora_targets(model_config: ModelArguments) -> ExpertLoraSpec | None:
     """Peel the expert-weight entries out of ``lora_target_modules`` (in place) into an
     :class:`ExpertLoraSpec` for native EP grouped-LoRA, since stock PEFT cannot wrap grouped expert tensors.
 
@@ -94,7 +99,7 @@ def split_expert_lora_targets(model_config: ModelConfig) -> ExpertLoraSpec | Non
     )
 
 
-def wraps_in_peft_model(model_config: ModelConfig) -> bool:
+def wraps_in_peft_model(model_config: ModelArguments) -> bool:
     """Whether stock PEFT has targets left after the expert peel, i.e. the run gets a ``PeftModel``.
 
     ``None`` targets mean the architecture defaults; ``[]`` means every target was an expert
@@ -237,7 +242,7 @@ def _exclude_unadaptable_lora_targets(model: torch.nn.Module, peft_config) -> No
     peft_config.exclude_modules = sorted(set(preset or ()) | set(found))
 
 
-def build_peft_config(model: torch.nn.Module, model_config: ModelConfig) -> object | None:
+def build_peft_config(model: torch.nn.Module, model_config: ModelArguments) -> object | None:
     """COLLECTIVE: the run's ``LoraConfig``, with the name matches PEFT cannot adapt excluded."""
     targets = model_config.lora_target_modules
     # PEFT reads its sentinel only as a bare string, case-insensitively; TRL collapses a one-entry YAML
@@ -255,7 +260,7 @@ def build_peft_config(model: torch.nn.Module, model_config: ModelConfig) -> obje
 def configure_adapter_training(
     args,
     model: PreTrainedModel,
-    model_config: ModelConfig,
+    model_config: ModelArguments,
     expected_task_type: str = "CAUSAL_LM",
 ) -> object | None:
     """COLLECTIVE: set which parameters train and return the PEFT config to wrap the model with, if any.

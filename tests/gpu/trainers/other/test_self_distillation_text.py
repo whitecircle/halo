@@ -1,8 +1,8 @@
 #!/usr/bin/env python
 """Test: DistributedSelfDistillationTrainer (offline SDPG approximation) on a text LLM — single-GPU smoke.
 
-Runs the text self-distillation path end-to-end under TRL 1.6: SelfDistillTextCollator builds the
-student batch plus the privileged-hint teacher_* branch, and the trainer runs the student and
+Runs the text self-distillation path end-to-end: SelfDistillTextCollator builds the student
+batch plus the privileged-hint teacher_* branch, and the trainer runs the student and
 teacher forwards for L = L_sft + beta(k) * L_OPD. It checks only that every configured step ran,
 that every logged step loss is finite and that the opd_loss metric was recorded (the
 privileged-teacher forward ran); it does not compare either loss term against a reference. The

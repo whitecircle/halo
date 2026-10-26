@@ -21,9 +21,9 @@ import torch
 import torch.nn.functional as F
 import trl.trainer.dpo_trainer as trl_dpo
 from datasets import Dataset
-from trl.experimental.kto.kto_trainer import DataCollatorForUnpairedPreference
 from trl.trainer.dpo_trainer import DataCollatorForPreference
-from trl.trainer.utils import selective_log_softmax
+from trl.trainer.kto_trainer import DataCollatorForUnpairedPreference
+from trl.trainer.utils import selective_log_softmax, selective_log_softmax_and_entropy
 
 from tests.common.preference_precompute import column, precompute_trainer
 
@@ -93,14 +93,15 @@ def _loss_trainer(kind: str, policy: TableLM, reference: TableLM, **attrs):
     trainer.beta = BETA
     trainer.precompute_ref_logps = False
     trainer._metrics = {"train": defaultdict(list), "eval": defaultdict(list)}
+    trainer.aux_loss_enabled = False
+    trainer._tp_size = 1
+    trainer._total_train_tokens = 0
     if kind == "dpo":
         trainer.use_weighting = False
         trainer.f_divergence_type = "reverse_kl"
         trainer.loss_types = ["sigmoid"]
         trainer.loss_weights = [1.0]
-        trainer._total_train_tokens = 0
     else:
-        trainer.aux_loss_enabled = False
         trainer.loss_type = "kto"
         trainer.desirable_weight = 1.0
         trainer.undesirable_weight = 1.0
@@ -189,10 +190,10 @@ def test_kto_loss_sequence_logps_match_float64():
     loss = trainer._compute_loss(policy, batch, return_outputs=False)
 
     assert torch.isfinite(loss)
-    ids, mask = batch["completion_input_ids"], batch["completion_mask"]
+    ids, mask = batch["input_ids"], batch["completion_mask"]
     desirable, undesirable = _float64_sequence_logps(policy, ids, mask)
     ref_desirable, ref_undesirable = _float64_sequence_logps(reference, ids, mask)
-    kl_ids, kl_mask = batch["KL_completion_input_ids"], batch["KL_completion_mask"]
+    kl_ids, kl_mask = batch["KL_input_ids"], batch["KL_completion_mask"]
     policy_kl, ref_kl = (_float64_sequence_logps(model, kl_ids, kl_mask) for model in (policy, reference))
     kl = (policy_kl - ref_kl).mean()
     assert kl > 0, "premise: an unclamped KL term, so the metric carries its value"
@@ -206,15 +207,16 @@ def test_kto_loss_sequence_logps_match_float64():
     _assert_nats_close(metrics["kl"], kl, "KL term")
 
 
-def test_a_trl_that_no_longer_reads_selective_log_softmax_is_refused(monkeypatch):
-    """The fp32 path rebinds the name TRL's loss reads its log-probs through; were TRL to bind another
+@pytest.mark.parametrize("name", ["selective_log_softmax", "selective_log_softmax_and_entropy"])
+def test_a_trl_that_no_longer_reads_its_log_prob_functions_is_refused(monkeypatch, name):
+    """The fp32 path rebinds the names TRL's loss reads its log-probs through; were TRL to bind another
     function there, the loss would keep its bf16 sums unnoticed, so it must refuse instead."""
-    monkeypatch.setattr(trl_dpo, "selective_log_softmax", lambda logits, index: logits[..., 0])
+    monkeypatch.setattr(trl_dpo, name, lambda logits, index, **kwargs: logits[..., 0])
     policy = TableLM(seed=0)
     trainer = _loss_trainer("dpo", policy, TableLM(seed=1))
     batch = DataCollatorForPreference(pad_token_id=0)(_dpo_rows(completions=(4, 3)))
 
-    with pytest.raises(RuntimeError, match="selective_log_softmax"):
+    with pytest.raises(RuntimeError, match=name):
         trainer._compute_loss(policy, batch, return_outputs=False)
 
 
@@ -232,6 +234,7 @@ def test_trl_log_softmax_is_restored_when_the_loss_raises():
     with pytest.raises(RuntimeError, match="forward failed"):
         trainer._compute_loss(policy, batch, return_outputs=False)
     assert trl_dpo.selective_log_softmax is selective_log_softmax
+    assert trl_dpo.selective_log_softmax_and_entropy is selective_log_softmax_and_entropy
 
 
 def test_a_reference_pass_nested_in_the_loss_stays_fp32():
@@ -244,7 +247,7 @@ def test_a_reference_pass_nested_in_the_loss_stays_fp32():
     class Nesting(TableLM):
         def forward(self, input_ids, attention_mask=None, **kwargs):
             if not nested:
-                nested.append(trainer.compute_ref_log_probs(ref_batch))
+                nested.append(trainer.compute_ref_log_probs(reference, ref_batch))
             return super().forward(input_ids, attention_mask, **kwargs)
 
     policy = Nesting(seed=0)
@@ -255,6 +258,7 @@ def test_a_reference_pass_nested_in_the_loss_stays_fp32():
     for got, expected, what in zip(nested[0], want, ("chosen", "rejected"), strict=True):
         _assert_nats_close(got, expected, f"nested reference {what} log-prob")
     assert trl_dpo.selective_log_softmax is selective_log_softmax
+    assert trl_dpo.selective_log_softmax_and_entropy is selective_log_softmax_and_entropy
 
 
 def _swept(kind: str, rows: list[dict], collator) -> tuple[Dataset, TableLM, object]:
@@ -279,8 +283,8 @@ def test_kto_reference_sweep_matches_float64():
     rows = _kto_rows()
     swept, model, batch = _swept("kto", rows, DataCollatorForUnpairedPreference(pad_token_id=0))
 
-    want = _float64_sequence_logps(model, batch["completion_input_ids"], batch["completion_mask"])
-    want_kl = _float64_sequence_logps(model, batch["KL_completion_input_ids"], batch["KL_completion_mask"])
+    want = _float64_sequence_logps(model, batch["input_ids"], batch["completion_mask"])
+    want_kl = _float64_sequence_logps(model, batch["KL_input_ids"], batch["KL_completion_mask"])
     _assert_nats_close(column(swept, "ref_logps"), want, "swept ref_logps")
     _assert_nats_close(column(swept, "ref_KL_logps"), want_kl, "swept ref_KL_logps")
 

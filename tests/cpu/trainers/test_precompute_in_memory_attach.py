@@ -17,8 +17,8 @@ import os
 import pytest
 from accelerate import PartialState
 from datasets import Dataset, concatenate_datasets, load_from_disk
-from trl.experimental.kto.kto_trainer import KTOTrainer as TrlKTOTrainer
 from trl.trainer.dpo_trainer import DPOTrainer as TrlDPOTrainer
+from trl.trainer.kto_trainer import KTOTrainer as TrlKTOTrainer
 
 from src.trainers.preference.precompute import PrecomputeRefLogpsRankConsistentMixin
 from tests.common.preference_precompute import (

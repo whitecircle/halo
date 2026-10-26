@@ -10,7 +10,7 @@ from contextlib import contextmanager
 import torch.nn as nn
 from torch.distributed.device_mesh import DeviceMesh
 from torch.distributed.tensor import DTensor
-from transformers.distributed.tensor_parallel import ALL_PARALLEL_STYLES, TensorParallelLayer, _get_parameter_tp_plan
+from transformers.distributed.tensor_parallel import ALL_PARALLEL_STYLES, TensorParallelLayer, _get_parameter_plan
 
 from src.distributed.tensor_parallel.plain_params import hand_sliced_suffixes, register_per_head_norm_params
 from src.model_loading.model_preparation import concrete_model_class
@@ -30,12 +30,12 @@ def plan_shards_param(key: str, tp_plan: dict[str, str]) -> bool:
     """Whether ``tp_plan`` puts ``key`` under a style that shards parameters: one whose class overrides the base
     no-op ``shard_param`` (the activation-transform styles, ``mla_kv_a_proj`` or ``ep_router``, leave theirs
     whole). Both the lookup and the decision are transformers' own, which a restated table would drift from."""
-    style_name = _get_parameter_tp_plan(key, tp_plan)
+    style_name = _get_parameter_plan(key, tp_plan)
     if style_name is None:
         return False
     style = ALL_PARALLEL_STYLES.get(style_name)
     if style is None:
-        # transformers rejects such a plan at apply time (``_validate_tp_plan_styles``); answering
+        # transformers rejects such a plan at apply time (``_validate_parallel_plan_styles``); answering
         # "replicated" here would report a load that cannot run as one that shards nothing.
         raise ValueError(
             f"TP plan style {style_name!r} (for parameter {key!r}) is not registered in transformers' "
@@ -201,11 +201,15 @@ def finish_hf_tp_load(model: nn.Module, device_mesh: DeviceMesh, tp_size: int) -
     """Check a ``tp_plan="auto"`` load against the plan it applied, stamp ``device_mesh`` on ``model`` and move
     the per-backward norm all-reduces onto the trainer's step-time SUM.
 
-    ``tp_plan="auto"`` resolves to an empty plan for an architecture shipping no ``base_model_tp_plan``
-    (Qwen3-VL) and transformers only warns, so a plan sharding no parameter is refused here by name.
+    ``tp_plan="auto"`` plans at most the head for an architecture shipping no ``base_model_tp_plan`` (Qwen3-VL)
+    and transformers only warns, so a plan sharding no backbone parameter is refused here by name.
     """
     applied_plan = getattr(model, "_tp_plan", None) or {}
-    if tp_size > 1 and not any(plan_shards_param(name, applied_plan) for name, _ in model.named_parameters()):
+    head = model.get_output_embeddings()
+    head_ids = {id(param) for param in head.parameters()} if head is not None else set()
+    if tp_size > 1 and not any(
+        plan_shards_param(name, applied_plan) for name, param in model.named_parameters() if id(param) not in head_ids
+    ):
         raise ValueError(
             f"tensor_parallel_size={tp_size} sharded ZERO parameters: this architecture ships no "
             f"base_model_tp_plan, so TP would run {tp_size} full replicas at 1/{tp_size} throughput. "

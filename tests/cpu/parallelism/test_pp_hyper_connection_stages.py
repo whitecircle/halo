@@ -38,7 +38,7 @@ from tests.common.models import TINY_DSV4_CONFIG, TINY_GLM5_CONFIG, TINY_GLM5_VI
 _DSV4_CONFIG = dict(TINY_DSV4_CONFIG)
 
 # All-DSA stack for the CPU-runnable chained checks (see module docstring for why no KDA here).
-_GLM5_TEXT_CONFIG = {**TINY_GLM5_CONFIG, "layer_types": ["deepseek_sparse_attention"] * 4}
+_GLM5_TEXT_CONFIG = {**TINY_GLM5_CONFIG, "layer_types": ["indexed_attention"] * 4}
 
 _BATCH, _SEQ = 2, 16
 
@@ -178,7 +178,7 @@ def test_glm5_shared_indexer_chain_may_not_be_severed():
 def test_rebase_safe_families_skip_the_layer_type_offset_gate():
     """Both families select per-layer inputs by the layer's own attributes, so heterogeneous
     ``layer_types`` must not reject their (otherwise shift-variant) split offsets."""
-    for model in (_dsv4_model(), _glm5_model(layer_types=["linear_attention"] * 3 + ["deepseek_sparse_attention"])):
+    for model in (_dsv4_model(), _glm5_model(layer_types=["linear_attention"] * 3 + ["indexed_attention"])):
         layer_types = model.config.get_text_config().layer_types
         assert len(set(layer_types)) > 1, "premise: heterogeneous layer_types"
         assert layer_types[1:] != layer_types[:-1], "premise: offset 1 is not shift-invariant"

@@ -11,6 +11,7 @@ import torch.distributed as dist
 from src.callbacks.moe_metrics import MoELoadMetricsCallback, compute_moe_load_metrics
 from src.distributed.parallelism_config import ParallelismConfig
 from src.models.config_access import (
+    config_model_types,
     get_config_field,
     set_config_field,
     set_config_field_run_scoped,
@@ -33,6 +34,7 @@ from src.models.moe.router_aux_gradient import install_router_aux_gradient
 from src.models.moe.router_logits import honors_router_logits_flag, mark_router_logits_forced_off
 from src.runtime.consensus import rank_consensus, reject_across_ranks
 from src.runtime.ranks import get_global_world_size, is_global_main_process
+from src.weight_sync.registry import resolve_weight_sync_client, rollout_backends
 
 logger = logging.getLogger(__name__)
 
@@ -132,18 +134,19 @@ def _apply_bias_update(model, cfg, mode: BalancingMode, is_moe: bool) -> None:
             enabled += bool(hook())
     if enabled:
         logger.info(f"Enabled bias-update balancing on {enabled} EP MoE layers.")
-    # Declared by the layer class where a serving engine's loader drops the exported key (Laguna under
-    # vLLM 0.26.0): training and the export are correct, so it is warned, not rejected.
-    dropped_by = {
-        engine
-        for module in model.modules()
-        if (engine := getattr(type(module), "_SERVED_BALANCING_BIAS_DROPPED_BY", None))
-    }
+    # The engines whose loader drops the family's exported key (vLLM's Laguna loader): training and the export
+    # are correct, so it is warned, not rejected.
+    model_types = set(config_model_types(cfg))
+    dropped_by = sorted(
+        client.ENGINE_RELEASE
+        for client in map(resolve_weight_sync_client, rollout_backends())
+        if client.DROPPED_BALANCING_BIAS_MODEL_TYPES & model_types
+    )
     if enabled and dropped_by:
         logger.warning(
             f"moe_balancing={mode}: this family's exported routing bias is DROPPED by "
-            f"{sorted(dropped_by)} at serve time (the engine loader skips the key), so a copy "
-            f"served there routes on the PRETRAINED bias. A transformers reload routes as "
+            f"{dropped_by} at serve time (the engine loader skips the key), so a copy "
+            f"served there never routes on the TRAINED bias. A transformers reload routes as "
             f"trained. See agent-docs/models/laguna.md."
         )
     # World-wide: a PP stage holding no MoE layer accepts nothing by construction.
@@ -156,9 +159,9 @@ def _apply_bias_update(model, cfg, mode: BalancingMode, is_moe: bool) -> None:
             f"balancing_biases buffer (Zaya). Prefer moe_balancing: auto, which resolves the one "
             f"strategy this model supports — naming a mode by family is unreliable here, because "
             f"whether aux_loss works depends on the loaded CLASS, not the family: a wrapper whose "
-            f"forward never declares output_router_logits (the multimodal Qwen3.5/3.6 checkpoints) "
-            f"rejects aux_loss, while its text-only sibling accepts it. moe_balancing: none trains "
-            f"unbalanced, which for a large expert count is a real cost, not a neutral default."
+            f"forward never declares output_router_logits rejects aux_loss, while a sibling class "
+            f"that declares it accepts it. moe_balancing: none trains unbalanced, which for a large "
+            f"expert count is a real cost, not a neutral default."
         )
     # After the enable: adoption can fall back to the transient side-buffer at runtime (a DTensor
     # slot, an upstream rename), so the contract reads the post-enable state.
@@ -243,9 +246,7 @@ def _apply_aux_loss(model, cfg, policy_gradient_loss: bool) -> None:
             f"(HF's config fallback lives on that parameter). The flag would still switch router-"
             f"logit RECORDING on — a [tokens, num_experts] plane per MoE layer, every forward — "
             f"while router_aux_loss_coef={get_config_field(cfg, 'router_aux_loss_coef')!r} never "
-            f"reaches the loss. Multimodal wrappers are the case that bites: "
-            f"Qwen3_5MoeForConditionalGeneration reads the flag from kwargs only, while its "
-            f"text-only Qwen3_5MoeForCausalLM sibling honours the config. {remedy}"
+            f"reaches the loss. {remedy}"
         )
     if not get_config_field(cfg, "output_router_logits", False):
         logger.info(

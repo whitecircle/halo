@@ -199,24 +199,38 @@ def test_has_routed_experts_tolerates_none():
 # Does config.output_router_logits actually reach the aux loss?
 
 
-def test_multimodal_wrapper_does_not_honor_the_router_logits_config_flag():
+def _forward_declaring_the_flag(self, input_ids=None, output_router_logits=None, **kwargs):
+    raise NotImplementedError
+
+
+def _forward_reading_the_flag_from_kwargs(self, input_ids=None, **kwargs):
+    raise NotImplementedError
+
+
+def test_a_forward_reading_the_flag_from_kwargs_does_not_honor_the_config_flag():
     """The composite trap that costs balancing rather than crashing.
 
-    ``Qwen3_5MoeForConditionalGeneration.forward`` reads ``output_router_logits`` out of ``kwargs``
-    and never falls back to the config, while its text-only ``Qwen3_5MoeForCausalLM`` sibling takes
-    it as a parameter and does. So ``moe_balancing: aux_loss`` on the multimodal wrapper switches
-    router-logit RECORDING on — a ``[tokens, num_experts]`` plane per MoE layer — while the aux loss
-    never enters the loss. A 512-expert router trains unbalanced, and nothing in the loss curve says so.
+    HF resolves a config-backed flag on an explicit parameter only, so a forward that reads
+    ``output_router_logits`` out of ``kwargs`` never falls back to the config. ``moe_balancing:
+    aux_loss`` there switches router-logit RECORDING on — a ``[tokens, num_experts]`` plane per MoE
+    layer — while the aux loss never enters the loss. A 512-expert router trains unbalanced, and
+    nothing in the loss curve says so.
     """
 
-    class _Model(torch.nn.Module):
-        forward = Qwen3_5MoeForConditionalGeneration.forward
+    class _KwargsOnly(torch.nn.Module):
+        forward = _forward_reading_the_flag_from_kwargs
 
-    class _TextOnly(torch.nn.Module):
-        forward = Qwen3_5MoeForCausalLM.forward
+    class _Declared(torch.nn.Module):
+        forward = _forward_declaring_the_flag
 
-    assert honors_router_logits_flag(_TextOnly()) is True
-    assert honors_router_logits_flag(_Model()) is False
+    assert honors_router_logits_flag(_Declared()) is True
+    assert honors_router_logits_flag(_KwargsOnly()) is False
+    for head in (Qwen3_5MoeForConditionalGeneration, Qwen3_5MoeForCausalLM):
+
+        class _Head(torch.nn.Module):
+            forward = head.forward
+
+        assert honors_router_logits_flag(_Head()) is True, head.__name__
 
 
 def test_aux_loss_balancing_refuses_a_model_it_cannot_reach():
@@ -225,7 +239,7 @@ def test_aux_loss_balancing_refuses_a_model_it_cannot_reach():
     set_config_field(config, "router_aux_loss_coef", 0.001, only_declared=True)
 
     class _Model(torch.nn.Module):
-        forward = Qwen3_5MoeForConditionalGeneration.forward
+        forward = _forward_reading_the_flag_from_kwargs
 
         def __init__(self, cfg):
             super().__init__()
@@ -288,7 +302,7 @@ def test_zero_bias_routing_matches_the_stock_qwen3_5_router():
 
 
 def _declared_head_dim(decoder):
-    """The config's declared head_dim, read per-layer-aware (5.16 heterogeneity raises on the
+    """The config's declared head_dim, read per-layer-aware (5.20 heterogeneity raises on the
     global attribute); the max mirrors resolve_head_dim's sizing contract."""
     try:
         return getattr(decoder, "head_dim", None)

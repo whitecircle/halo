@@ -3,7 +3,7 @@
 
 A long-lived server outlives its trainers: a crashed run resumed from a checkpoint, or a sequence of
 short runs, reconnects to the same engine. Neither end of that weight-transfer group destroys its
-``PyNcclCommunicator`` on its own — the class has no ``__del__``, and stock vLLM 0.26.0's
+``PyNcclCommunicator`` on its own — the class has no ``__del__``, and stock vLLM 0.32.0's
 ``init_transfer_engine`` only dereferences the previous one — so without
 ``docker/vllm/patches/vllm_weight_transfer_reinit_patch.py`` (server half) and
 ``VLLMWeightSyncClient.close_communicator`` (trainer half) every cycle strands a live NCCL

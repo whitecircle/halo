@@ -1,13 +1,12 @@
 """Re-attach a multimodal base's vision tower to a text-only export, restoring the wrapper layout.
 
 A ``text_only_model`` run trains and exports the CausalLM sibling of a VLM checkpoint (``model.*``
-keys, ``*_text`` config, no vision tower), which vLLM 0.26.0 cannot load natively: its registry
-carries only the multimodal wrapper class for Qwen3.5/3.6. (SGLang 0.5.17 registers the text
-CausalLM classes and loads the export as-is.) This script rebuilds the wrapper-layout artifact: the
-trained text weights are re-prefixed to ``model.language_model.*``, the untrained vision tower
-(``model.visual.*``) and any MTP tail (``mtp.*``) stream back in from the base checkpoint, and the
-composite config is regrafted with the trained text config, so the served model runs the trained
-text weights (router balancing included) under the class the engines register.
+keys, ``*_text`` config, no vision tower, no MTP tail). Both pinned engines register the text CausalLM
+classes for Qwen3.5/3.6 and load that export as-is, text only. This script rebuilds the wrapper-layout
+artifact: the trained text weights are re-prefixed to ``model.language_model.*``, the untrained vision
+tower (``model.visual.*``) and any MTP tail (``mtp.*``) stream back in from the base checkpoint, and
+the composite config is regrafted with the trained text config, so the served model runs the trained
+text weights (router balancing included) under the multimodal class.
 
 The input must be a text-only export (its ``model_type`` names the ``*_text`` sub-config) whose keys
 are in that layout; a wrapper-layout checkpoint, or text keys already under the wrapper prefix, is

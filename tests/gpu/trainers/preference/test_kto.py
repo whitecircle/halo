@@ -1,5 +1,5 @@
 #!/usr/bin/env python
-"""DistributedKTOTrainer end-to-end, with the logged loss pinned to TRL 1.6's exact KTO objective.
+"""DistributedKTOTrainer end-to-end, with the logged loss pinned to TRL 1.14's exact KTO objective.
 
 KTO is unpaired: each row carries a boolean desirability label, and the loss pushes desirable rows'
 log-ratio above — and undesirable rows' below — a KL estimate taken on deliberately MISMATCHED
@@ -154,7 +154,7 @@ def run(ctx):
         beta=BETA,
         bf16=True,
         gradient_checkpointing=True,
-        use_liger_kernel=True,  # the trainer must force this OFF (TRL 1.6's Liger KTO loss is broken)
+        use_liger_kernel=True,  # the trainer must force this OFF (TRL's chunked KTO path refuses the aux loss)
         logging_steps=1,
         save_strategy="no",
         report_to="none",
@@ -206,9 +206,7 @@ def run(ctx):
     # ANTI-VACUITY: with one-sided labels only half the objective runs and the split cannot be wrong.
     checks["pinned_batch_has_both_labels"] = bool(desirable.any()) and bool((~desirable).any())
     # A KL batch that copied the scored one would make the term identically 0, leaving it untested.
-    checks["kl_batch_is_mismatched"] = not torch.equal(
-        captured["KL_completion_input_ids"], captured["completion_input_ids"]
-    )
+    checks["kl_batch_is_mismatched"] = not torch.equal(captured["KL_input_ids"], captured["input_ids"])
 
     policy = build_model()
     policy.load_state_dict(weights)
@@ -216,12 +214,12 @@ def run(ctx):
     reference_model = trainer.ref_model  # frozen: an input to the objective, not part of the math
     forwards = {}
     for tag, model in (("policy", policy), ("ref", reference_model)):
-        for prefix in ("completion", "KL_completion"):
-            forwards[f"{tag}_{prefix}"] = sequence_logps(
+        for name, prefix in (("completion", ""), ("KL_completion", "KL_")):
+            forwards[f"{tag}_{name}"] = sequence_logps(
                 model,
-                captured[f"{prefix}_input_ids"],
-                captured[f"{prefix}_attention_mask"],
-                captured[f"{prefix}_mask"],
+                captured[f"{prefix}input_ids"],
+                captured[f"{prefix}attention_mask"],
+                captured[f"{prefix}completion_mask"],
             )
 
     raw_kl = float((forwards["policy_KL_completion"] - forwards["ref_KL_completion"]).mean())

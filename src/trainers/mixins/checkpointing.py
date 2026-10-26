@@ -30,7 +30,7 @@ from src.checkpoint.weights_source import config_schema_source
 from src.distributed.fsdp import reshard_fsdp2_modules
 from src.model_loading.tokenizer_setup import pristine_model_max_length
 from src.models.attention.gpt_oss_sinks import gpt_oss_sinks_restored
-from src.models.config_access import config_export_ready, restore_special_token_ids
+from src.models.config_access import config_export_ready, restore_config_fields
 from src.models.unwrapping import base_transformers_model
 from src.runtime.collectives import barrier
 from src.runtime.consensus import DeferredRankFailure
@@ -225,7 +225,7 @@ class CheckpointingMixin:
         reshard_fsdp2_modules(self._top_level_model())
         fs_aware_makedirs(output_dir)
 
-        restore_special_token_ids(getattr(self, "_pristine_special_token_ids", []))
+        restore_config_fields(getattr(self, "_pristine_special_token_ids", []))
         save_balancing_biases(self._top_level_model(), output_dir, is_pp_mode=self.parallelism_config.is_pp_mode)
 
         ctx = self._checkpoint_context()

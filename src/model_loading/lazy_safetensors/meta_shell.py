@@ -27,8 +27,8 @@ logger = logging.getLogger(__name__)
 _ATTN_IMPLEMENTATION_CHECK = "_check_and_adjust_attn_implementation"
 
 
-def _resolve_remote_code_class(model_class, config, trust_remote_code: bool):
-    """The concrete remote-code model class, resolved from the config's hub id at the commit it was read from.
+def _resolve_remote_code_class(model_class, config, trust_remote_code: bool, revision: str | None):
+    """The concrete remote-code model class, resolved from the config's hub id at the run's ``revision``.
 
     Auto dispatch against the local snapshot dir hits a transformers HF-cache-symlink bug (relative imports
     fail); unpinned, the modeling file would come from the repo's ``main`` while the weights come from the
@@ -42,7 +42,7 @@ def _resolve_remote_code_class(model_class, config, trust_remote_code: bool):
     if not ref or os.path.isdir(ref):
         return model_class
     try:
-        return get_class_from_dynamic_module(auto_map[class_name], ref, revision=getattr(config, "_commit_hash", None))
+        return get_class_from_dynamic_module(auto_map[class_name], ref, revision=revision)
     except Exception as exc:  # best-effort; fall back to the Auto class on any failure
         logger.warning(f"Could not pre-resolve remote-code class {auto_map[class_name]!r} from {ref!r}: {exc}")
         return model_class
@@ -166,7 +166,7 @@ def instantiate_on_meta(
     save), which ``from_pretrained`` would open. The run's dtype, not the checkpoint's: what the checkpoint
     omits (a task head) keeps the shell's dtype.
     """
-    model_class = _resolve_remote_code_class(model_class, config, trust_remote_code)
+    model_class = _resolve_remote_code_class(model_class, config, trust_remote_code, model_kwargs.get("revision"))
     dtype = resolve_load_dtype(dtype, config)
     if not config_only:
         try:

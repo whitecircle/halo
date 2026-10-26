@@ -10,8 +10,8 @@ body keeps what differs: its trainer classes, its config, its rollout wiring and
 exercises.
 
 Both phases of a resume row run in one process against one server on the same weight-transfer group
-port: a second ``init_communicator`` after ``close_communicator`` succeeds and its sync lands (on vLLM
-0.26.0). The trainer-side close is what allows that: it aborts an interrupted update, lifts the pause
+port: a second ``init_communicator`` after ``close_communicator`` succeeds and its sync lands. The
+trainer-side close is what allows that: it aborts an interrupted update, lifts the pause
 so the server generates again, and frees the group port
 (``src/weight_sync/clients/vllm.py``), without reaching into the server's engine. The server's
 previous communicator is destroyed by the next ``/init_weight_transfer_engine``, before that call

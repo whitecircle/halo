@@ -102,10 +102,10 @@ CUDA_VISIBLE_DEVICES=4,5,6,7 halo launch environmental-grpo laguna-grpo.yaml -n 
 ## Limits
 
 - No CP or TP: Laguna attention has no wrapper for either.
-- No SGLang weight sync. SGLang 0.5.17's Laguna loader expects every expert weight in every update,
+- No SGLang weight sync. SGLang 0.5.22's Laguna loader expects every expert weight in every update,
   which a chunked update can't provide. Online RL runs on vLLM.
-- vLLM 0.26.0 drops the exported correction bias. A model trained with `bias_update` serves on the
-  pretrained bias there.
+- vLLM 0.32.0 drops the exported correction bias. A model trained with `bias_update` never serves on
+  the trained bias there.
 
 ## Export and serve
 

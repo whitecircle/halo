@@ -79,8 +79,8 @@ docker pull public.ecr.aws/whitecircle/halo:hopper
 
 Versioned tags (`:blackwell-1.1.0`, `:hopper-1.1.0`) pin the release. There is
  no `latest` tag, since the images are architecture-specific. The RL
-inference images are published alongside them (`:vllm-0.26.0`, `:sglang-0.5.17`), pinned as
-`:vllm-0.26.0-1.1.0` and `:sglang-0.5.17-1.1.0`.
+inference images are published alongside them (`:vllm-0.32.0`, `:sglang-0.5.22`), pinned as
+`:vllm-0.32.0-1.1.0` and `:sglang-0.5.22-1.1.0`.
 
 To build locally instead: 
 ```bash

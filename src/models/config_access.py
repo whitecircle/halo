@@ -2,7 +2,7 @@
 
 ``PreTrainedConfig`` has no ``__getattr__``, so on a composite (VLM) config a decoder field lives only
 on ``get_text_config()`` while others live only on the wrapper, and a one-level read returns the
-default instead. The run-scoped writes, the embedding-tie readers and the special-token snapshot
+default instead. The run-scoped writes, the embedding-tie readers and the field snapshots
 build on the same level enumeration."""
 
 import contextlib
@@ -16,6 +16,12 @@ logger = get_logger(__name__)
 
 # The config field every family spells its input/output embedding tie with.
 TIE_WORD_EMBEDDINGS_FLAG = "tie_word_embeddings"
+# HF's align_special_tokens collapses a list-valued stop set (Gemma 4's ``[1, 106]``) to the tokenizer's single id
+# in the config every export ships, and TRL's trainers write the tokenizer's pad id there at construction.
+SPECIAL_TOKEN_ID_FIELDS = ("eos_token_id", "bos_token_id", "pad_token_id")
+# TRL's SFTTrainer writes these onto the text config at construction, over what the balancing mode set for the
+# run and what an export carries.
+ROUTER_AUX_FIELDS = ("output_router_logits", "router_aux_loss_coef")
 
 # A field the level did not hold when its value was captured, so the restore removes it rather than
 # writing a value back: a special-token id a composite wrapper lacked until align_special_tokens
@@ -169,14 +175,12 @@ def config_export_ready(cfg):
                 setattr(source, field, value)
 
 
-def snapshot_special_token_ids(config) -> list[tuple[object, str, object]]:
-    """Capture every config level's special-token ids, list-valued ones copied: HF's
-    ``align_special_tokens`` collapses a list-valued stop set (Gemma 4's ``[1, 106]``) to the
-    tokenizer's single id in the config every export ships.
-    """
+def snapshot_config_fields(config, fields: tuple[str, ...]) -> list[tuple[object, str, object]]:
+    """``fields`` on every config level as ``(level, field, value)``, list values copied, absence recorded,
+    for :func:`restore_config_fields`."""
     snapshot = []
     for level in config_sources(config):
-        for field in ("eos_token_id", "bos_token_id", "pad_token_id"):
+        for field in fields:
             if hasattr(level, field):
                 value = getattr(level, field)
                 snapshot.append((level, field, list(value) if isinstance(value, list) else value))
@@ -185,9 +189,9 @@ def snapshot_special_token_ids(config) -> list[tuple[object, str, object]]:
     return snapshot
 
 
-def restore_special_token_ids(snapshot: list[tuple[object, str, object]]) -> None:
-    """Re-assert the special-token ids captured by :func:`snapshot_special_token_ids`, before every
-    config write; the generation config keeps HF's unioned EOS set."""
+def restore_config_fields(snapshot: list[tuple[object, str, object]]) -> None:
+    """Re-assert the config fields a snapshot captured, removing those a level did not hold. The special-token
+    ids are restored before every config write; the generation config keeps HF's unioned EOS set."""
     for level, field, value in snapshot:
         if value is _ABSENT:
             if field in getattr(level, "__dict__", {}):

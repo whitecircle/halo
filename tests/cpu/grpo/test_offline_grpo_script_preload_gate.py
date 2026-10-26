@@ -12,10 +12,10 @@ from types import SimpleNamespace
 import pytest
 from accelerate import PartialState
 from datasets import DatasetDict
-from trl import ModelConfig
 
 import scripts.training.offline_grpo as offline_script
 from src.configs.grpo_offline import OfflineGRPOConfig
+from src.configs.script_arguments import ModelArguments
 from src.distributed.parallelism_config import ParallelismConfig
 from tests.common.offline_grpo import offline_grpo_dataset
 
@@ -30,7 +30,7 @@ def _run_script(monkeypatch, tmp_path, *, presharded: bool, kl_beta: float, use_
     config = OfflineGRPOConfig(
         output_dir=str(tmp_path), kl_beta=kl_beta, use_cpu=True, bf16=False, use_liger_kernel=False, report_to="none"
     )
-    model_config = ModelConfig(model_name_or_path="local-policy", use_peft=use_peft)
+    model_config = ModelArguments(model_name_or_path="local-policy", use_peft=use_peft)
     parsed = (SimpleNamespace(reset_sinks=True), config, model_config, SimpleNamespace())
     splits = DatasetDict(train=offline_grpo_dataset(2), test=offline_grpo_dataset(2, offset=2))
 

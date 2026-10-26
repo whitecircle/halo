@@ -13,12 +13,12 @@ from accelerate import PartialState
 from datasets import Dataset
 from peft import LoraConfig
 from transformers import AutoConfig, AutoModelForCausalLM
-from trl import ModelConfig
 
 import scripts.training.offline_grpo as offline_grpo_script
 import src.trainers.grpo.mixins.offline_reference as reference_logps_module
 from src.checkpoint.format import REFERENCE_LOGPS_FILE
 from src.configs.grpo_offline import OfflineGRPOConfig
+from src.configs.script_arguments import ModelArguments
 from src.data.collators.offline_grpo import REF_PER_TOKEN_LOGPS_COLUMN
 from src.distributed.parallelism_config import ParallelismConfig
 from src.models.attention.gpt_oss_sinks import SinksPolicy
@@ -265,7 +265,7 @@ def _load(policy, *, model_source: str, reset_sinks: bool, parallelism=None):
         args,
         types.SimpleNamespace(parallelism_config=parallelism or ParallelismConfig(), model_source=model_source),
         _config(),
-        ModelConfig(model_name_or_path=BASE, model_revision="abc123", trust_remote_code=False),
+        ModelArguments(model_name_or_path=BASE, model_revision="abc123", trust_remote_code=False),
         policy=policy,
         tokenizer=_tokenizer(),
         peft_config=None,

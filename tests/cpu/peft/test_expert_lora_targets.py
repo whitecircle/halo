@@ -30,6 +30,8 @@ class _MockModelConfig:
     lora_dropout: float = 0.05
     lora_target_modules: object = None
     model_name_or_path: str = "dummy/moe"
+    model_revision: str = "main"
+    trust_remote_code: bool = False
 
 
 @contextmanager

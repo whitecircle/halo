@@ -64,13 +64,17 @@ class _SetupDone(Exception):
 
 @pytest.fixture(autouse=True)
 def stop_after_distributed_setup(monkeypatch):
+    """The trainers whose setup ran, in order."""
     real = DistributedTrainerMixin._init_distributed_config
+    set_up = []
 
     def _run_then_stop(self, kwargs, *args, **extra):
         real(self, kwargs, *args, **extra)
+        set_up.append(self)
         raise _SetupDone
 
     monkeypatch.setattr(DistributedTrainerMixin, "_init_distributed_config", _run_then_stop)
+    return set_up
 
 
 def _training_args():
@@ -118,6 +122,17 @@ def test_keyword_model_and_config_get_the_same_setup(trainer_cls, args_slot):
     training_args = _training_args()
     _construct(trainer_cls, model=_moe_model(), args=training_args)
     _assert_setup_applied(training_args)
+
+
+@pytest.mark.parametrize(("trainer_cls", "args_slot"), TRAINERS, ids=lambda v: getattr(v, "__name__", str(v)))
+def test_the_special_token_snapshot_precedes_trls_construction(trainer_cls, args_slot, stop_after_distributed_setup):
+    """TRL writes the tokenizer's pad id onto the model config in its own ``__init__``; the snapshot every
+    save restores has to hold the checkpoint's id, so it is taken before TRL runs."""
+    model = _moe_model()
+    model.config.pad_token_id = 7
+    _construct(trainer_cls, model=model, args=_training_args())
+    (trainer,) = stop_after_distributed_setup
+    assert (model.config, "pad_token_id", 7) in trainer._pristine_special_token_ids
 
 
 class _OwnSignatureSFTTrainer(DistributedSFTTrainer):

@@ -18,8 +18,8 @@ from unittest.mock import patch
 import pytest
 import torch.nn as nn
 from peft import LoraConfig
-from trl import ModelConfig
 
+from src.configs.script_arguments import ModelArguments
 from src.model_loading.parallel import model_source
 from src.model_loading.parallel import peft_setup as model_info
 from src.model_loading.parallel.peft_setup import configure_adapter_training, split_expert_lora_targets
@@ -37,8 +37,8 @@ def _as_moe(is_moe: bool = True):
         yield
 
 
-def _model_config(**kwargs) -> ModelConfig:
-    return ModelConfig(model_name_or_path="dummy/moe", use_peft=True, **kwargs)
+def _model_config(**kwargs) -> ModelArguments:
+    return ModelArguments(model_name_or_path="dummy/moe", use_peft=True, **kwargs)
 
 
 def _args():
@@ -163,7 +163,7 @@ def test_use_peft_with_no_resulting_adapter_raises():
 
 def test_use_peft_false_still_full_finetunes():
     """The raise must not leak into deliberate full fine-tuning."""
-    config = ModelConfig(model_name_or_path="dummy/moe", use_peft=False, lora_target_modules=[])
+    config = ModelArguments(model_name_or_path="dummy/moe", use_peft=False, lora_target_modules=[])
     model = _Dense()
 
     assert configure_adapter_training(_args(), model, config) is None

@@ -45,8 +45,7 @@ def resolve_auto_model_class(model_config, *, text_only: bool = False):
 
     ``text_only=True`` forces ``AutoModelForCausalLM`` for a multimodal config, i.e. the deliberate
     text-only load of a VLM checkpoint: the CausalLM sibling drops the vision tower (and any MTP
-    tail) and, unlike the wrapper's forward, honors ``config.output_router_logits``, which is what
-    ``moe_balancing: aux_loss`` needs. ``mistral4`` resolves to ``Mistral4ForCausalLM`` even via the
+    tail). ``mistral4`` resolves to ``Mistral4ForCausalLM`` even via the
     image-text-to-text mapping (there, ``mistral4`` is the text decoder; ``mistral3`` is the VLM).
 
     Raises:

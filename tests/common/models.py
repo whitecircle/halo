@@ -159,9 +159,9 @@ TINY_COHERE2_MOE_CONFIG = {
 
 # Tiny Gemma 4 MoE text config at the hub's attention geometry: sliding layers at ``head_dim`` /
 # ``num_key_value_heads``, full-attention layers at ``global_head_dim`` / ``num_global_key_value_heads``
-# under ``attention_k_eq_v`` (google/gemma-4-26B-A4B-it: 256/512 and 8/2). transformers 5.16 folds the
-# two global keys into ``per_layer_config``, so this exercises the export-side flatten the rollout
-# server's transformers 5.14 needs — homogeneous heads make that rewrite a no-op. ``enable_moe_block``
+# under ``attention_k_eq_v`` (google/gemma-4-26B-A4B-it: 256/512 and 8/2). transformers 5.20 folds the
+# two global keys into ``per_layer_config``, so this exercises the export-side flatten older rollout
+# servers need — homogeneous heads make that rewrite a no-op. ``enable_moe_block``
 # is off by default (no experts to wrap without it); the per-layer-input table is shrunk from 262144x256.
 TINY_GEMMA4_MOE_CONFIG = {
     "vocab_size": 128,

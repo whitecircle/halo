@@ -70,7 +70,6 @@ from transformers import (
     TrainerCallback,
 )
 from transformers.trainer_utils import rotate_checkpoints
-from trl import ModelConfig
 
 import src.checkpoint.parallel.adapters as peft_mod
 import src.trainers.embedding.trainer as embedding_module
@@ -90,6 +89,7 @@ from src.checkpoint.parallel.resume_source import classify_resume_weights, resol
 from src.checkpoint.parallel.resume_weights import resume_numel_coverage
 from src.checkpoint.reading import resolve_checkpoint_weights
 from src.configs.embedding import EmbeddingConfig, EmbeddingScriptArguments
+from src.configs.script_arguments import ModelArguments
 from src.distributed.parallelism_config import ParallelismConfig
 from src.runtime import filesystem
 from src.trainers.embedding.trainer import EmbeddingTrainer
@@ -151,7 +151,7 @@ def _lora_model(
     script's own ``inject_lora``."""
     torch.manual_seed(seed)  # the adapter init draws from the global generator
     model = model if model is not None else SentenceTransformer(source, device="cpu")
-    model_config = ModelConfig(
+    model_config = ModelArguments(
         model_name_or_path=source,
         use_peft=True,
         lora_r=r,

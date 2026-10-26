@@ -150,15 +150,16 @@ def install_recompute_scopes(model) -> int:
     return installed
 
 
-def _split_every_n_layers(
-    gradient_checkpointing_kwargs: dict | None, every_n_layers: int = 1
-) -> tuple[dict | None, int]:
-    """Lift ``every_n_layers``, ``gradient_checkpointing_enable``'s own keyword, out of the checkpoint
-    kwargs, where it would reach ``torch.utils.checkpoint`` and fail the first recompute (TRL's
-    re-enable passes the args dict unchanged)."""
+def _split_enable_kwargs(
+    gradient_checkpointing_kwargs: dict | None, every_n_layers: int = 1, offload: bool = False
+) -> tuple[dict | None, int, bool]:
+    """Lift ``every_n_layers`` and ``offload``, ``gradient_checkpointing_enable``'s own keywords, out of the
+    checkpoint kwargs, where they would reach ``torch.utils.checkpoint`` and fail the first recompute
+    (TRL's re-enable passes the args dict unchanged)."""
     kwargs = dict(gradient_checkpointing_kwargs or {})
     every_n_layers = kwargs.pop("every_n_layers", every_n_layers)
-    return kwargs or None, every_n_layers
+    offload = kwargs.pop("offload", offload)
+    return kwargs or None, every_n_layers, offload
 
 
 def _rescope_on_reenable(model: nn.Module) -> None:
@@ -170,9 +171,9 @@ def _rescope_on_reenable(model: nn.Module) -> None:
         return
 
     @functools.wraps(enable)
-    def enable_with_scopes(gradient_checkpointing_kwargs=None, every_n_layers: int = 1):
-        kwargs, every_n_layers = _split_every_n_layers(gradient_checkpointing_kwargs, every_n_layers)
-        result = enable(gradient_checkpointing_kwargs=kwargs, every_n_layers=every_n_layers)
+    def enable_with_scopes(gradient_checkpointing_kwargs=None, every_n_layers: int = 1, offload: bool = False):
+        kwargs, every_n_layers, offload = _split_enable_kwargs(gradient_checkpointing_kwargs, every_n_layers, offload)
+        result = enable(gradient_checkpointing_kwargs=kwargs, every_n_layers=every_n_layers, offload=offload)
         install_recompute_scopes(model)  # idempotent: already-scoped functions are skipped
         return result
 
@@ -196,8 +197,10 @@ def enable_scoped_gradient_checkpointing(model: nn.Module, *, gradient_checkpoin
             f"profile of a run that asked for it. Disable gradient_checkpointing for this model."
         )
 
-    kwargs, every_n_layers = _split_every_n_layers(gradient_checkpointing_kwargs)
-    model.gradient_checkpointing_enable(gradient_checkpointing_kwargs=kwargs, every_n_layers=every_n_layers)
+    kwargs, every_n_layers, offload = _split_enable_kwargs(gradient_checkpointing_kwargs)
+    model.gradient_checkpointing_enable(
+        gradient_checkpointing_kwargs=kwargs, every_n_layers=every_n_layers, offload=offload
+    )
     scoped = install_recompute_scopes(model)
     if scoped == 0:
         raise RuntimeError(

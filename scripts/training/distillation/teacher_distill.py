@@ -18,10 +18,10 @@ EP applies to the student, so the dense-student config above takes no --expert_p
 
 from accelerate.logging import get_logger
 from transformers import AutoConfig, AutoTokenizer, PreTrainedModel, PreTrainedTokenizerBase
-from trl import ModelConfig
 
 from src.configs.distillation import DistillationConfig, TeacherDistillScriptArguments
 from src.configs.parallelism_arguments import ParallelismArguments
+from src.configs.script_arguments import ModelArguments
 from src.data.collators.factory import select_data_collator
 from src.data.collators.packing import DataCollatorForCausalLMWithPadding
 from src.data.collators.vlm import VLMDataCollator
@@ -164,7 +164,7 @@ def _prepare_vlm_distill_data(ds, args, training_config, processor, tokenizer, m
 
 def main():
     args, training_config, model_config, dist_args = parse_script_args(
-        TeacherDistillScriptArguments, DistillationConfig, ModelConfig, ParallelismArguments
+        TeacherDistillScriptArguments, DistillationConfig, ModelArguments, ParallelismArguments
     )
 
     context = init_training_script(

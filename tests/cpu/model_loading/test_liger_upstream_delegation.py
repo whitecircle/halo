@@ -16,8 +16,8 @@ this file pins is the seam, not the kernel numerics (those are
 * a role the spec takes over (``upstream_off``) is the toolkit's variant, not upstream's — GptOss's
   Gemma-cast norm, Gemma 4's always-on dense MLP, the Qwen MoE families' shared-expert MLP (whose
   upstream flag would also swap the routed experts);
-* cross-entropy never reaches upstream's branch (a process-wide ``F.cross_entropy`` rebind, and broken
-  outright in liger-kernel 0.8.0's Qwen3.5 applier): the toolkit's scoped patch serves it;
+* cross-entropy never reaches upstream's branch (a process-wide ``F.cross_entropy`` rebind): the
+  toolkit's scoped patch serves it;
 * the EP fused-GLU decision still fires through the delegation.
 
     pytest -m cpu tests/cpu/model_loading/test_liger_upstream_delegation.py
@@ -246,10 +246,9 @@ def test_a_delegating_spec_that_adds_nothing_is_refused():
 
 
 def test_cross_entropy_never_reaches_upstreams_branch():
-    """Upstream's CE branch is a process-wide ``F.cross_entropy`` rebind, and liger-kernel 0.8.0's
-    Qwen3.5 applier cannot even run it (it imports ``liger_cross_entropy`` from the wrong module).
+    """Upstream's CE branch is a process-wide ``F.cross_entropy`` rebind.
 
-    Both are moot because a delegating applier withholds the flag from upstream and installs the
+    It is moot because a delegating applier withholds the flag from upstream and installs the
     toolkit's scoped patch itself — so the dense Qwen3.5 family keeps a fused loss with CE on.
 
     Subprocess: applying rebinds the family's classes for the rest of the process.

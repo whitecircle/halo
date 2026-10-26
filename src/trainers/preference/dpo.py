@@ -102,7 +102,8 @@ class DistributedDPOTrainer(
 ):
     """TRL's DPOTrainer plus EP/TP/PP via DistributedTrainerMixin. CP unsupported (see module docstring).
 
-    ``FP32LogprobsMixin`` keeps TRL's non-Liger loss and reference pass on fp32 sequence log-probs.
+    ``FP32LogprobsMixin`` keeps TRL's loss and reference pass on fp32 sequence log-probs; TRL's own
+    chunked (``use_liger_kernel``) path is switched off at construction.
 
     ``PrecomputeRefLogpsRankConsistentMixin`` runs ``precompute_ref_log_probs`` (the EP/TP
     full-finetune reference path) on the DP axis, attaches its columns in memory on every rank and
@@ -114,23 +115,26 @@ class DistributedDPOTrainer(
     _tag_names = ["trl", "dpo"]
 
     PP_REFUSAL = None
+    # TRL's DPO loss adds the aux term itself and this class does not override it.
+    _consumes_router_aux_loss = True
+    _trl_adds_router_aux_loss = True
     # TRL concatenates chosen ⧺ rejected into one forward, so every MoE layer sees twice the rows.
     FORWARD_ROWS_PER_EXAMPLE = 2
 
     def __init__(self, *args, **kwargs):
-        config = kwargs.get("parallelism_config")
-        if config is not None and config.is_pp_mode:
-            # Must run before _init_distributed_config, which drives the PP gate and the split.
-            disable_trl_liger(
-                ctor_config(args, kwargs, _CTOR_POSITIONS),
-                "DPO under pipeline parallelism: disabling use_liger_kernel — TRL's Liger DPO loss "
-                "has no precompute_ref_log_probs branch, and the PP last-stage loss replaces TRL's "
-                "loss path entirely.",
-            )
+        # TRL's chunked DPO path refuses the router aux loss this trainer hands it and skips the family's
+        # head transform; must precede _init_distributed_config.
+        disable_trl_liger(
+            ctor_config(args, kwargs, _CTOR_POSITIONS),
+            "Disabling TRL's use_liger_kernel for DPO: TRL's chunked DPO log-prob path refuses the router "
+            "aux loss and skips the family's head transform. Liger kernels are still applied at the model "
+            "level by load_distributed_model.",
+        )
         self._init_reference_resume(kwargs)
         kwargs = self._init_distributed_config(kwargs, ctor_args=args, ctor_positions=_CTOR_POSITIONS)
         self._validate_reference_model(ctor_value(args, kwargs, "ref_model", _CTOR_POSITIONS))
-        super().__init__(*args, **kwargs)
+        with self._trl_reference_hash_skipped():
+            super().__init__(*args, **kwargs)
         # Post-super: TRL builds its own reference inside __init__ when none is passed, the model is not
         # PEFT-wrapped and precompute_ref_log_probs is off.
         self._validate_held_reference_model()

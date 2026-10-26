@@ -4,7 +4,7 @@
 # optimizer state adapter-only; confirm free GPU memory with nvidia-smi. See agent-docs/models/step3p7.md.
 # Launch: torchrun --nproc_per_node=8 scripts/training/sft.py <this config>
 
-# --- Model — hub bf16 release; transformers 5.16 drops the 3 trailing MTP layers at load ---
+# --- Model — hub bf16 release; transformers 5.20 drops the 3 trailing MTP layers at load ---
 model_name_or_path: stepfun-ai/Step-3.7-Flash
 # Native step3p7 classes; the repo's remote config (its auto_map, for the serving engines) is one the
 # native class cannot build from. The text run loads the tokenizer: the repo ships no processor config.

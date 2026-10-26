@@ -34,12 +34,13 @@ from peft.tuners.lora import LoraLayer
 from safetensors.torch import load_file
 from torch.distributed.tensor import DTensor
 from transformers import AutoModelForCausalLM
-from trl import ModelConfig, get_quantization_config
+from trl import get_quantization_config
 
 from src.checkpoint.adapters import has_adapter_weight_file
 from src.checkpoint.format import ADAPTER_CONFIG_FILE, ADAPTER_SAFETENSORS_FILE, SAFETENSORS_INDEX_FILE
 from src.checkpoint.reading import read_checkpoint_index
 from src.checkpoint.writing import cast_to_save_dtype
+from src.configs.script_arguments import ModelArguments
 from src.distributed.expert_parallel.moe_layer.expert_lora import gather_expert_lora_adapters, model_has_expert_lora
 from src.distributed.parallelism_config import ParallelismConfig
 from src.model_loading.buffer_repair import finalize_loaded_model
@@ -162,9 +163,9 @@ def parallelism_config_for(mode: str, size: int):
 
 def _build_model_config(
     mode: str, model_name: str, revision: str | None = None, targets: list[str] | None = None
-) -> ModelConfig:
+) -> ModelArguments:
     targets = targets or _mode_targets(mode, model_name, revision)
-    return ModelConfig(
+    return ModelArguments(
         model_name_or_path=model_name,
         # Carried here as well as on the load: split_expert_lora_targets reads the config off the hub
         # to decide whether the model has experts, and a pinned family (Zaya, whose `main` serves an
@@ -191,7 +192,7 @@ def peft_model_config(
     model_name: str | None = None,
     revision: str | None = None,
     lora_target_modules: list[str] | None = None,
-) -> ModelConfig:
+) -> ModelArguments:
     """The ``ModelConfig`` a mode trains with, its expert targets peeled into ``parallelism_config``.
 
     The peel runs before any load, as the training scripts' ``init_training_script`` runs it, and
@@ -207,7 +208,7 @@ def peft_model_config(
 
 
 def load_peft_model_from_config(
-    model_config: ModelConfig,
+    model_config: ModelArguments,
     parallelism_config,
     *,
     attn_implementation: str | None = None,

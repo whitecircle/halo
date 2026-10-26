@@ -381,15 +381,15 @@ def test_stage_zero_owns_embedding_and_last_owns_head():
 
 
 @registered_pp_backbones("InklingTextModel")
-def test_input_modules_stay_on_stage_zero_with_the_embedding():
+def test_an_embedding_norm_stays_on_stage_zero_with_the_embedding():
     """Inkling's ``embed_norm`` normalizes the token embedding only stage 0 computes: a later stage
-    drops it at the build (else every stage writes it), and its loader counts the module droppable,
-    so a per-node checkpoint without stage 0's shard still loads there."""
+    drops it with the embedding module that carries it (else every stage writes it), and its loader
+    counts that module droppable, so a per-node checkpoint without stage 0's shard still loads there."""
     s0, s1 = (build_pipeline_stage(_inkling_model(), rank, 2, moe_balancing="none") for rank in (0, 1))
-    assert "model.embed_norm.weight" in s0.checkpoint_name_map()
+    assert "model.embed_tokens.embed_norm.weight" in s0.checkpoint_name_map()
     assert not any("embed_norm" in name for name in s1.checkpoint_name_map())
-    assert "model.embed_norm" in StageLayout.of(_inkling_model()).dropped_prefixes(False, True)
-    assert "model.embed_norm" not in StageLayout.of(_inkling_model()).dropped_prefixes(True, False)
+    assert "model.embed_tokens" in StageLayout.of(_inkling_model()).dropped_prefixes(False, True)
+    assert "model.embed_tokens" not in StageLayout.of(_inkling_model()).dropped_prefixes(True, False)
 
 
 def test_persistent_buffers_survive_the_split():

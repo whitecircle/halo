@@ -38,11 +38,11 @@ from accelerate import PartialState
 from peft import LoraConfig, PeftModel, get_peft_model
 from transformers import Qwen3Config, Qwen3ForCausalLM
 from transformers.models.gemma4.modeling_gemma4 import Gemma4ClippableLinear
-from trl import ModelConfig
 
 from src.checkpoint.format import ADAPTER_CONFIG_FILE, ROUTER_BALANCING_BIASES_FILE, TRAINING_PROVENANCE_FILE
 from src.checkpoint.parallel.adapters import _cp_normalized_config, save_peft_adapters
 from src.checkpoint.sidecars import PROVENANCE_GPT_OSS_SINKS, apply_training_sidecars
+from src.configs.script_arguments import ModelArguments
 from src.distributed.context_parallel.config import CPConfig
 from src.distributed.context_parallel.model_rules import SUPPORTED_ATTN_IMPLEMENTATIONS
 from src.distributed.context_parallel.ulysses_model import UlyssesModel
@@ -178,7 +178,7 @@ def test_cp_saved_exclusions_are_spelled_for_a_plain_model():
             SimpleNamespace(use_clipped_linears=False), attention.q_proj.in_features, attention.q_proj.out_features
         )
         wrapper = UlyssesModel(inner, CPConfig(1, stage_world_size=1, stage_base_rank=0, nvlink_domain_size=1))
-        model_config = ModelConfig(
+        model_config = ModelArguments(
             model_name_or_path=str(base),
             use_peft=True,
             lora_target_modules=_TARGETS,

@@ -171,8 +171,9 @@ def run(ctx) -> dict:
     fused_lm_head_calls = lm_head_calls["count"]
     log(f"Fused eval_loss: {fused_loss:.6f}, lm_head calls: {fused_lm_head_calls}")
 
-    # TRL 1.6's SFTTrainer injects skip_logits natively whenever args.use_liger_kernel is set, so
-    # the reference must clear it too; lce_forward then defaults to the unfused full-logits path.
+    # TRL 1.14's SFTTrainer sets skip_logits itself (True for loss-only eval) whenever
+    # args.use_liger_kernel is set, so the reference must clear it too; lce_forward then defaults to
+    # the unfused full-logits path.
     log("\n--- Run B: unfused reference evaluation ---")
     trainer.__dict__["_forward_accepts_skip_logits"] = False
     trainer.args.use_liger_kernel = False

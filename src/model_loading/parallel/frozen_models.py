@@ -1,14 +1,16 @@
 """The frozen teacher / reference models a run holds beside its policy: never sharded, but loaded to
 match the policy in everything that changes a logprob, and the parallelism rules on holding one."""
 
+from __future__ import annotations
+
 import contextlib
 import dataclasses
 import logging
+from typing import TYPE_CHECKING
 
 import torch
 from accelerate.utils import is_peft_model
 from transformers import AutoConfig, AutoModelForImageTextToText, PreTrainedModel
-from trl import ModelConfig
 
 from src.distributed.parallelism_config import ParallelismConfig
 from src.distributed.tensor_parallel.hf_plan import is_input_embedding_tp_sharded
@@ -29,6 +31,10 @@ from src.model_loading.tokenizer_setup import configure_run_tokenizer
 from src.models.attention.gpt_oss_sinks import SinksPolicy
 from src.models.attention.selection import resolve_attn_implementation
 from src.runtime.load_coordination import joined_node_load
+
+if TYPE_CHECKING:
+    # Annotation only: the entry scripts' argument layer sits beside this package.
+    from src.configs.script_arguments import ModelArguments
 
 # Stdlib, not accelerate's adapter: warn_once marks a message seen on every rank, so each rank must emit it.
 logger = logging.getLogger(__name__)
@@ -178,7 +184,7 @@ def place_and_freeze(auxiliary: PreTrainedModel, policy: torch.nn.Module) -> tor
 
 def load_frozen_reference_model(
     args,
-    model_config: ModelConfig,
+    model_config: ModelArguments,
     training_config,
     tokenizer,
     model_name_or_path: str,
@@ -219,7 +225,7 @@ def load_frozen_reference_model(
 
 def load_reference_model_for_on_policy_grpo(
     args,
-    model_config: ModelConfig,
+    model_config: ModelArguments,
     training_config,
     parallelism_config: ParallelismConfig,
     tokenizer,
@@ -252,7 +258,7 @@ def load_reference_model_for_on_policy_grpo(
 
 def load_reference_model_for_preference(
     args,
-    model_config: ModelConfig,
+    model_config: ModelArguments,
     training_config,
     parallelism_config: ParallelismConfig,
     tokenizer,

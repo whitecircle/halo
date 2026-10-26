@@ -309,7 +309,7 @@ TINY_MOE_FAMILIES: dict[str, TinyFamily] = {
     # Neither attention is one the Ulysses wrapper implements.
     "laguna": TinyFamily(_causal(LagunaConfig, LagunaForCausalLM, TINY_LAGUNA_CONFIG), ulysses_cp=False),
     "lfm2_moe": TinyFamily(_causal(Lfm2MoeConfig, Lfm2MoeForCausalLM, TINY_LFM2_MOE_CONFIG), ulysses_cp=False),
-    # No AutoModelForCausalLM entry for mistral4 in transformers 5.16.
+    # No AutoModelForCausalLM entry for mistral4 in transformers 5.20.
     "mistral4": TinyFamily(
         _causal(Mistral4Config, Mistral4ForCausalLM, TINY_MISTRAL4_CONFIG), load_class=Mistral4ForCausalLM
     ),

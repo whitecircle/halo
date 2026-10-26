@@ -202,13 +202,12 @@ ENGINES = {
         declaration_route="/update_weights",
         finish_route="/finish_weight_update",
     ),
-    # The last chunk's declaration is SGLang's finish: the cache flush rides on it.
     "sglang": Engine(
         SGLangWeightSyncClient,
         _sglang_transport,
         init_route="/init_weights_update_group",
         declaration_route="/update_weights_from_distributed",
-        finish_route="/update_weights_from_distributed",
+        finish_route="/end_weight_update",
     ),
 }
 

@@ -296,7 +296,7 @@ def tp_materialized_model(sharding_model):
 @pytest.fixture(scope="module")
 def planless_model():
     """A real Qwen3-VL: ``base_model_tp_plan`` is None on both the wrapper and the text tower, so
-    ``tp_plan="auto"`` resolves to ``{}`` and transformers only warns."""
+    ``tp_plan="auto"`` resolves to the wrapper's head entry alone and transformers only warns."""
     config = Qwen3VLConfig(
         text_config={
             "vocab_size": 64,
@@ -318,7 +318,7 @@ def test_the_plan_is_what_separates_a_sharding_architecture_from_a_planless_one(
 
     ``model._tp_plan`` is the plan transformers actually applied (base plan, prefixed at
     ``post_init``); ``plan_shards_param`` over ``named_parameters()`` is exactly what the guard
-    counts. Qwen3 must come out with sharded parameters and Qwen3-VL with none — if those two
+    counts. Qwen3 must come out with sharded backbone parameters and Qwen3-VL with none — if those two
     collapsed to the same answer, the guard could not tell a working TP run from a wasted one.
     """
     sharded = [
@@ -327,9 +327,12 @@ def test_the_plan_is_what_separates_a_sharding_architecture_from_a_planless_one(
     assert sharded, "premise: qwen3 ships a base_model_tp_plan covering q/k/v/o and the MLP"
     assert any("q_proj" in name for name in sharded) and any("down_proj" in name for name in sharded)
 
-    assert not (planless_model._tp_plan or {}), "premise: qwen3-vl ships no base_model_tp_plan"
+    head = planless_model.get_output_embeddings().weight
+    assert set(planless_model._tp_plan or {}) <= {"lm_head"}, "premise: qwen3-vl ships no base_model_tp_plan"
     assert not [
-        name for name, _ in planless_model.named_parameters() if plan_shards_param(name, planless_model._tp_plan or {})
+        name
+        for name, param in planless_model.named_parameters()
+        if param is not head and plan_shards_param(name, planless_model._tp_plan or {})
     ]
 
 
@@ -348,7 +351,12 @@ def test_tp_load_refuses_an_architecture_whose_plan_shards_nothing(planless_mode
 
 def test_tp_load_accepts_an_architecture_that_does_shard(tp_materialized_model):
     """Anti-vacuity: an architecture whose plan does shard, materialized the way HF materializes it,
-    must pass every post-load gate and come back stamped with the mesh."""
+    must pass every post-load gate and come back stamped with the mesh.
+
+    What transformers stamps on a model it distributes is cleared: the toolkit owns the DP wrap, the
+    loss scaling and the checkpoints, which HF's Trainer would otherwise take over for that model."""
+    tp_materialized_model._is_distributed_loading_by_transformers = True
+    tp_materialized_model._tp_size = _TP_SIZE
     with _load_collaborators(tp_materialized_model):
         model = tp_loading.load_tp_model(
             _SOURCE,
@@ -359,6 +367,7 @@ def test_tp_load_accepts_an_architecture_that_does_shard(tp_materialized_model):
         )
     assert model is tp_materialized_model
     assert model._device_mesh is _DP_TP_MESH
+    assert not model.is_distributed_loading_by_transformers and model.tp_size is None
 
 
 def test_tp_load_refuses_a_plainly_materialized_load(sharding_model):

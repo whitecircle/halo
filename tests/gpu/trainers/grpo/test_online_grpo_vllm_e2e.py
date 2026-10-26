@@ -12,8 +12,8 @@ vLLM server with native NCCL weight transfer. Validates:
 
 Prerequisites:
     # Start vLLM server in Docker (--gpus all required for NCCL P2P):
-    docker run --gpus all --network=host --ipc=host -e VLLM_USE_V2_MODEL_RUNNER=0 \
-        vllm-server:0.26.0 Qwen/Qwen3-0.6B --port 8000 --dtype bfloat16 \
+    docker run --gpus all --network=host --ipc=host \
+        vllm-server:0.32.0 Qwen/Qwen3-0.6B --port 8000 --dtype bfloat16 \
         --max-model-len 512 --enforce-eager --reasoning-parser qwen3 \
         --weight-transfer-config '{"backend": "nccl"}'
 

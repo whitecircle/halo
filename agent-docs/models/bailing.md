@@ -118,9 +118,9 @@ freeze_layers_patterns:
 
 ## Serving and weight sync
 
-Only **Ling 2.0** (`bailing_moe`) is servable and syncable on both pinned engines: vLLM 0.26.0 registers `BailingMoeV2ForCausalLM`, SGLang 0.5.17 the same spelling, and gathered saves land in their per-expert expert loaders.
+Only **Ling 2.0** (`bailing_moe`) is servable and syncable on both pinned engines: vLLM 0.32.0 registers `BailingMoeV2ForCausalLM`, SGLang 0.5.22 the same spelling, and gathered saves land in their per-expert expert loaders.
 
-**Ling 3.0** (`bailing_hybrid`) has no model class in either pinned engine, and **Ring**'s checkpoints declare `BailingMoeLinearV2ForCausalLM` where both engines register `BailingMoeV2_5ForCausalLM`, an architecture-string mismatch. Both clients list the two spellings in their `UNSERVABLE_MODEL_TYPES`, so RL weight sync is refused at trainer construction on either backend: the server cannot load the base model, so no broadcast could land ([Rollout Servers](../infrastructure/rollout-servers.md#which-families-each-engine-serves)).
+**Ling 3.0** (`bailing_hybrid`) is registered on both pinned engines (`BailingMoeV3ForCausalLM`), but no online update into it has been validated end to end. **Ring**'s checkpoints declare `BailingMoeLinearV2ForCausalLM` where both engines register `BailingMoeV2_5ForCausalLM`, an architecture-string mismatch, so the server cannot load the base model. Both clients list the two spellings in their `UNSERVABLE_MODEL_TYPES`, so RL weight sync is refused at trainer construction on either backend ([Rollout Servers](../infrastructure/rollout-servers.md#which-families-each-engine-serves)).
 
 The SGLang server needs `SGLANG_TRUST_REMOTE_CODE=1` (the repo ships its modeling code), and its routed-experts capturer raises at the first capture for this family, so serve without `SGLANG_ENABLE_R3` and replay routing with `recompute` there.
 

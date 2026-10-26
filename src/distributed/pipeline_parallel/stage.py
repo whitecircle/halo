@@ -73,14 +73,14 @@ class StageLayout:
         layer_attr: the backbone attribute holding the decoder-layer list.
         head_attr: the model attribute holding the task head.
         post_layer_paths: the final norm, then the family's tail modules; neutralized off the last stage.
-        input_paths: the input embedding, then the family's input modules; dropped off stage 0.
+        embedding_path: the input embedding (with any norm it carries); dropped off stage 0.
     """
 
     backbone_prefix: str
     layer_attr: str
     head_attr: str
     post_layer_paths: tuple[str, ...]
-    input_paths: tuple[str, ...]
+    embedding_path: str
 
     @classmethod
     def of(cls, model: nn.Module) -> StageLayout:
@@ -91,7 +91,6 @@ class StageLayout:
         prefix = module_path(model, backbone)
         norm = require_pp_attr(backbone, spec.final_norm_attrs, "final norm")
         tails = [require_pp_attr(backbone, (attr,), "tail module") for attr in spec.tail_module_attrs]
-        inputs = [require_pp_attr(backbone, (attr,), "input module") for attr in spec.input_module_attrs]
         # A non-first stage must drop the embedding: a name guess that misses would leave it in every
         # stage's state_dict, and the merged index would resolve it to the last stage's untrained copy.
         embedding = embedding_module(model, "input")
@@ -105,7 +104,7 @@ class StageLayout:
             layer_attr=decoder_layers_attr(backbone),
             head_attr=require_pp_attr(model, spec.head_attrs, "task head"),
             post_layer_paths=tuple(_join(prefix, attr) for attr in (norm, *tails)),
-            input_paths=(module_path(model, embedding), *(_join(prefix, attr) for attr in inputs)),
+            embedding_path=module_path(model, embedding),
         )
 
     @property
@@ -115,7 +114,7 @@ class StageLayout:
 
     def dropped_prefixes(self, is_first: bool, is_last: bool) -> tuple[str, ...]:
         """The module paths a stage at this position drops or neutralizes at the build."""
-        dropped_inputs = () if is_first else self.input_paths
+        dropped_inputs = () if is_first else (self.embedding_path,)
         return dropped_inputs if is_last else (*dropped_inputs, *self.post_layer_paths, self.head_attr)
 
 
@@ -203,13 +202,21 @@ class PipelineStageModule(nn.Module):
             if tag not in self.model_tags:
                 self.model_tags.append(tag)
 
-    def gradient_checkpointing_enable(self, gradient_checkpointing_kwargs=None, every_n_layers: int = 1) -> None:
+    def gradient_checkpointing_enable(
+        self, gradient_checkpointing_kwargs=None, every_n_layers: int = 1, offload: bool = False
+    ) -> None:
         """Enable non-reentrant activation checkpointing on this stage's decoder layers.
 
         Mirrors ``PreTrainedModel.gradient_checkpointing_enable`` minus ``enable_input_require_grads``
-        (a non-first stage has no input embedding, and its recv buffer already requires grad).
-        ``every_n_layers`` counts from this stage's first local layer.
+        (a non-first stage has no input embedding, and its recv buffer already requires grad) and minus
+        ``offload`` (host-staged activations are not validated against the schedule's interleaved
+        forwards and backwards). ``every_n_layers`` counts from this stage's first local layer.
         """
+        if offload:
+            raise ValueError(
+                "Activation offload (gradient_checkpointing_kwargs offload=True) is not supported under "
+                "pipeline parallelism. Drop offload, or train without pipeline_parallel_size."
+            )
         kwargs = dict(gradient_checkpointing_kwargs or {})
         reject_reentrant_checkpointing(kwargs)
         kwargs.setdefault("use_reentrant", False)
@@ -405,8 +412,7 @@ def build_pipeline_stage(
             _replace_submodule(model, path, nn.Identity())
         setattr(model, layout.head_attr, None)
     if not is_first:
-        for path in layout.input_paths:
-            _replace_submodule(model, path, None)
+        _replace_submodule(model, layout.embedding_path, None)
         stream_forward = resolve_pp_spec(backbone).stream_forward
         if stream_forward is not None:
             # Per instance, not on the class: stage 0 and any unsplit model in the process keep the

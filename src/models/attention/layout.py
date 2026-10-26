@@ -47,7 +47,7 @@ LAYER_TYPE_KINDS: dict[str, AttentionKind] = {
     "sliding_attention": AttentionKind.WINDOW,
     "hybrid_sliding": AttentionKind.WINDOW,
     "chunked_attention": AttentionKind.CHUNKED,
-    "deepseek_sparse_attention": AttentionKind.SPARSE,
+    "indexed_attention": AttentionKind.SPARSE,
     "compressed_sparse_attention": AttentionKind.COMPRESSED,
     "heavily_compressed_attention": AttentionKind.COMPRESSED,
     "linear_attention": AttentionKind.NONE,
@@ -58,7 +58,7 @@ LAYER_TYPE_KINDS: dict[str, AttentionKind] = {
 _BOUNDED_KINDS = frozenset({AttentionKind.WINDOW, AttentionKind.CHUNKED, AttentionKind.SPARSE})
 
 # The layer types that select their keys through a QK-only indexer bounded by ``index_topk``.
-_INDEXED_LAYER_TYPES = frozenset({"deepseek_sparse_attention", "compressed_sparse_attention"})
+_INDEXED_LAYER_TYPES = frozenset({"indexed_attention", "compressed_sparse_attention"})
 
 # A decoder layer's own declaration of its type, read before ``config.layer_types`` because a sliced
 # pipeline stage re-bases list positions.

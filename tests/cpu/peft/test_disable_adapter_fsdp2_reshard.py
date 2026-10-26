@@ -24,8 +24,8 @@ from torch.distributed.device_mesh import init_device_mesh
 from torch.distributed.fsdp import MixedPrecisionPolicy
 from torch.distributed.tensor import DTensor
 from transformers import Qwen3Config, Qwen3ForCausalLM
-from trl import ModelConfig
 
+from src.configs.script_arguments import ModelArguments
 from src.distributed.fsdp import (
     IdentityParamSet,
     apply_fsdp2_per_layer,
@@ -56,7 +56,7 @@ def sharded_lora(tmp_path, reshard_after_forward, modules_to_save):
     try:
         torch.manual_seed(0)
         model = Qwen3ForCausalLM(Qwen3Config(**TINY_QWEN3_CONFIG)).train()
-        model_config = ModelConfig(
+        model_config = ModelArguments(
             use_peft=True,
             lora_r=2,
             lora_alpha=4,

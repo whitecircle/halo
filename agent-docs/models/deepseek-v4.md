@@ -14,9 +14,9 @@ Around that sit Manifold-Constrained Hyper-Connections (`hc_mult` parallel resid
 - **PP** — registered (`DEEPSEEK_V4_PP`): the stages carry the `hc_mult`-widened stream, any split offset is exact, and every `hash_moe` layer must sit on stage 0, whose `input_ids` its `tid2eid` router reads ([Pipeline Parallelism](../parallelism/pipeline-parallelism.md#model-support)).
 - **RL weight sync** — online and async GRPO reject DeepSeek-V4 at trainer construction (`reject_unsyncable_model`, off each client's `UNSERVABLE_MODEL_TYPES`). The sync feeds the engine's `model.load_weights` directly, and neither pinned engine has a loader that takes it ([Rollout Servers](../infrastructure/rollout-servers.md#which-families-each-engine-serves)).
 
-    vLLM 0.26.0 serves V4 from an out-of-tree package whose loader targets DeepSeek's original fp8/fp4-packed release: its o-projection reads a `weight_scale_inv` unconditionally, so a BF16 checkpoint is not servable there, whatever its names. A gathered save writes the names transformers' own `save_pretrained` reverts to (`model.layers.N.attn.*`, `model.layers.N.ffn.*`, `head.weight`), with the experts as the fused pair.
+    vLLM 0.32.0 serves V4 in tree, with a bf16 o-projection path, but its routed-expert loader maps only the release's per-expert `experts.{i}.w1/w2/w3` names. A gathered save writes the names transformers' own `save_pretrained` reverts to (`model.layers.N.attn.*`, `model.layers.N.ffn.*`, `head.weight`), with the experts as the fused pair, which that loader does not take. Serving a BF16 checkpoint there is unverified.
 
-    SGLang 0.5.17 maps per-expert `w1/w3/w2` names where the gather emits the fused pair, and no end-to-end sync has been validated for the family. No key mapping fixes this from the gather side. A saved checkpoint reaches that layout through `unfuse_moe_experts.py`; serving one on SGLang is unverified.
+    SGLang 0.5.22 maps per-expert `w1/w3/w2` names where the gather emits the fused pair, and no end-to-end sync has been validated for the family. No key mapping fixes this from the gather side. A saved checkpoint reaches that layout through `unfuse_moe_experts.py`; serving one on SGLang is unverified.
 
 ## Attention: eager-only
 

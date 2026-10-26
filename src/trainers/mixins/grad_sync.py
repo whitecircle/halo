@@ -657,6 +657,15 @@ class GradientSyncMixin:
             return None
         return super()._get_grad_norm(model, grad_norm=grad_norm)
 
+    def _has_mixed_mesh_grads(self, model) -> bool:
+        """Always ``False``, so HF's clip and its unclipped norm both go through ``accelerator.clip_grad_norm_``.
+
+        HF sends gradients that mix DTensor and plain tensors (EP, TP-replicated params, EP+LoRA) to its
+        own per-mesh norm instead, bypassing the EP/TP/QLoRA replacements of that clip: the global norm
+        over every group, the deferred EP sweep and the TP-replicated sync all live there.
+        """
+        return False
+
     def _register_qlora_grad_sync_hook(self) -> None:
         """Cover the QLoRA sweep when clipping is disabled.
 

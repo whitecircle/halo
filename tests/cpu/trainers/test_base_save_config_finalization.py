@@ -120,7 +120,7 @@ def test_the_base_save_path_finalizes_the_config_it_just_wrote(tmp_path, monkeyp
     # False = no parallelism strategy claimed the write, so the base Trainer's save runs.
     monkeypatch.setattr(f"{module}.save_checkpoint", lambda ctx, output_dir: False)
     monkeypatch.setattr(f"{module}.fs_aware_makedirs", lambda path: Path(path).mkdir(parents=True, exist_ok=True))
-    monkeypatch.setattr(f"{module}.restore_special_token_ids", lambda ids: None)
+    monkeypatch.setattr(f"{module}.restore_config_fields", lambda ids: None)
     monkeypatch.setattr(f"{module}.save_balancing_biases", lambda *args, **kwargs: None)
 
     trainer = _Trainer(str(tmp_path))

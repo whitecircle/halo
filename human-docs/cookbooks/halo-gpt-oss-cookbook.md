@@ -67,7 +67,7 @@ On the host, start the servers on the SFT checkpoint:
 ```bash
 cp jinja-templates/gpt-oss/gpt-oss-harmony.jinja "$HALO_SCRATCH/"
 export VLLM_MODEL=/data/checkpoints/gpt-oss-20b-sft
-export VLLM_CHAT_TEMPLATE=/data/gpt-oss-harmony.jinja VLLM_USE_V2_MODEL_RUNNER=0
+export VLLM_CHAT_TEMPLATE=/data/gpt-oss-harmony.jinja
 export VLLM_TOOL_PARSER_PLUGIN=/opt/gpt_oss_text_tool_parser.py VLLM_TOOL_PARSER=gpt_oss_text
 export VLLM_REASONING_PARSER_PLUGIN=/opt/gpt_oss_reasoning_parser.py VLLM_REASONING_PARSER=openai_gptoss
 VLLM_CUDA_DEVICES=0,1 VLLM_TP=2 VLLM_PORT=8000 \

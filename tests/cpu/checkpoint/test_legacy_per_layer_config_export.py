@@ -1,18 +1,19 @@
 #!/usr/bin/env python
-"""Every exported ``config.json`` must carry the flat legacy attention keys the rollout server reads.
+"""Every exported ``config.json`` must carry the flat legacy attention keys older rollout servers read.
 
-transformers 5.16 folds Gemma 4's full-attention geometry (``global_head_dim``,
-``num_global_key_value_heads``) into ``per_layer_config`` and serializes only that folded form. The
-pinned vLLM server parses checkpoints with the transformers 5.14 line, which refuses a config that
-carries ``per_layer_config`` at all (``AmbiguousGlobalPerLayerAttributeError`` at parse) and reads
-the two flat keys instead. The family declares the mapping on its spec
+transformers 5.20 folds Gemma 4's full-attention geometry (``global_head_dim``,
+``num_global_key_value_heads``) into ``per_layer_config`` and serializes only that folded form. Older
+vLLM servers parse checkpoints with a transformers that refuses a config carrying
+``per_layer_config`` at all (the 5.14 line, ``AmbiguousGlobalPerLayerAttributeError`` at parse) and
+read the two flat keys instead; the pinned server's transformers folds the flat keys back at parse,
+so the rewrite is lossless there. The family declares the mapping on its spec
 (``served_flat_config_keys``) and every config writer the toolkit owns flattens through it —
 ``save_model_config`` (the parallel saves), ``save_full_checkpoint`` (the after-training tools, the
 PEFT merge output) and the EP gathered save on top of them.
 
-Nothing raises on the export side without the rewrite: the artifact loads on 5.16 and only the
+Nothing raises on the export side without the rewrite: the artifact loads on 5.20 and only an older
 server refuses it, so the gate is the written JSON — the flat keys present at the values the
-full-attention layers carry, ``per_layer_config`` gone, and a 5.16 reload rebuilding the same
+full-attention layers carry, ``per_layer_config`` gone, and a 5.20 reload rebuilding the same
 per-layer geometry from the flat keys.
 
     python tests/cpu/checkpoint/test_legacy_per_layer_config_export.py
@@ -78,7 +79,7 @@ def test_premise_a_plain_5_16_write_folds_the_keys(tmp_path):
     of the flat keys — otherwise every assertion below passes without the rewrite."""
     Gemma4Config(text_config=TINY_GEMMA4_MOE_CONFIG, vision_config=None, audio_config=None).save_pretrained(tmp_path)
     text = _config_json(str(tmp_path))["text_config"]
-    assert text["per_layer_config"], "5.16 no longer folds Gemma 4's geometry — the rewrite may be retired"
+    assert text["per_layer_config"], "transformers no longer folds Gemma 4's geometry — the rewrite may be retired"
     assert not any(key in text for key in LEGACY_KEYS)
     # And the geometry is genuinely heterogeneous, so a flatten has something to express.
     assert TINY_GEMMA4_MOE_CONFIG["head_dim"] != GLOBAL_HEAD_DIM
@@ -100,7 +101,7 @@ def test_a_text_only_export_writes_the_flat_keys_on_the_root_section(tmp_path):
 
 def test_the_flat_form_reloads_to_the_same_per_layer_geometry(tmp_path):
     """The flat keys are the whole of what a reload rebuilds, so the rewrite is lossless only if a
-    5.16 reload of the flattened file yields the per-layer geometry the source carried."""
+    5.20 reload of the flattened file yields the per-layer geometry the source carried."""
     source = Gemma4Config(text_config=TINY_GEMMA4_MOE_CONFIG, vision_config=None, audio_config=None)
     save_model_config(_carrier(source), str(tmp_path))
     reloaded = Gemma4Config.from_pretrained(str(tmp_path))

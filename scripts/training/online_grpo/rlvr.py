@@ -12,12 +12,13 @@ Usage:
         examples/grpo/online/rlvr-online-grpo-template.yaml
 """
 
-from trl import GRPOConfig, ModelConfig
+from trl import GRPOConfig
 
 from src.config_validation import reject_non_default_args, reject_unsupported_args
 from src.configs.grpo import RLRRArguments
 from src.configs.grpo_online import RLVROnlineGRPOScriptArguments
 from src.configs.parallelism_arguments import ParallelismArguments
+from src.configs.script_arguments import ModelArguments
 from src.data.pipeline.conversation import as_conversation, chat_template_kwargs, fold_system_into_conversation
 from src.data.pipeline.processing import process_dataset_with_map_and_filter, require_render_column
 from src.data.pipeline.rendered import render_generation_prompt
@@ -94,7 +95,7 @@ def build_rlvr_row_fn(args: RLVROnlineGRPOScriptArguments, tokenizer):
 
 def main():
     args, grpo_config, model_config, dist_args = parse_script_args(
-        RLVROnlineGRPOScriptArguments, GRPOConfig, ModelConfig, ParallelismArguments
+        RLVROnlineGRPOScriptArguments, GRPOConfig, ModelArguments, ParallelismArguments
     )
 
     # The weight sync forwards trainer parameter names verbatim, and the text-only CausalLM sibling

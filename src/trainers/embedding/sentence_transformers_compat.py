@@ -2,7 +2,8 @@
 
 :class:`PreloadedTransformer` wraps an already-loaded backbone in ST's ``Transformer`` interface (ST's own
 reloads from a path, discarding the EP/TP patches). Importing the module replaces ST's
-``gradient_checkpointing_*`` methods, which lack the ``every_n_layers`` / ``disable`` transformers calls.
+``gradient_checkpointing_*`` methods, which lack the ``every_n_layers`` / ``offload`` / ``disable`` transformers
+calls.
 """
 
 import inspect
@@ -59,30 +60,36 @@ class PreloadedTransformer(InputModule):
 
         return features
 
-    def tokenize(
+    def preprocess(
         self,
-        texts: list[str] | list[dict] | list[tuple[str, str]],
+        inputs: list[str] | list[dict] | list[tuple[str, str]],
+        prompt: str | None = None,
         padding: str | bool = True,
+        max_length: int | None = None,
         **kwargs,
     ) -> dict[str, torch.Tensor]:
-        """Tokenize texts, matching ``sentence_transformers.models.Transformer.tokenize``.
+        """Tokenize texts, as sentence-transformers' ``Transformer.preprocess`` does for text.
 
-        Extra kwargs (``task``/``prompt_name`` hints) are accepted and ignored: this module embeds raw text.
+        ``prompt`` is prepended to each text (a pair's first). ``max_length``, the per-batch override
+        sentence-transformers' collator passes, replaces ``max_seq_length`` as ST's own module does.
+        Other hints (``task``) are accepted and ignored: this module embeds raw text.
         """
+        if prompt:
+            inputs = [(prompt + text[0], *text[1:]) if isinstance(text, tuple) else prompt + text for text in inputs]
         output: dict = {}
-        if isinstance(texts[0], str):
-            to_tokenize = [texts]
-        elif isinstance(texts[0], dict):
+        if isinstance(inputs[0], str):
+            to_tokenize = [inputs]
+        elif isinstance(inputs[0], dict):
             to_tokenize = []
             output["text_keys"] = []
-            for lookup in texts:
+            for lookup in inputs:
                 text_key, text = next(iter(lookup.items()))
                 to_tokenize.append(text)
                 output["text_keys"].append(text_key)
             to_tokenize = [to_tokenize]
         else:
             batch1, batch2 = [], []
-            for text_tuple in texts:
+            for text_tuple in inputs:
                 batch1.append(text_tuple[0])
                 batch2.append(text_tuple[1])
             to_tokenize = [batch1, batch2]
@@ -97,7 +104,7 @@ class PreloadedTransformer(InputModule):
                 padding=padding,
                 truncation="longest_first",
                 return_tensors="pt",
-                max_length=self.max_seq_length,
+                max_length=max_length if max_length is not None else self.max_seq_length,
             )
         )
         return output
@@ -134,9 +141,11 @@ def _transformers_model(self) -> PreTrainedModel:
     return model
 
 
-def _gradient_checkpointing_enable(self, gradient_checkpointing_kwargs=None, every_n_layers: int = 1) -> None:
+def _gradient_checkpointing_enable(
+    self, gradient_checkpointing_kwargs=None, every_n_layers: int = 1, offload: bool = False
+) -> None:
     _transformers_model(self).gradient_checkpointing_enable(
-        gradient_checkpointing_kwargs, every_n_layers=every_n_layers
+        gradient_checkpointing_kwargs, every_n_layers=every_n_layers, offload=offload
     )
 
 

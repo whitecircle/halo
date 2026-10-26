@@ -494,7 +494,7 @@ def test_canonical_checkpoint_keys_resume_untouched(model_type):
 
     The steps are resolved and re-applied on every load of a declaring family, including an EP/PP
     RESUME from a checkpoint this toolkit itself wrote in the canonical namespace. transformers'
-    conversion sources are not vendor-anchored (5.16's deepseek_v4 maps ``\\.norm\\.`` →
+    conversion sources are not vendor-anchored (5.20's deepseek_v4 maps ``\\.norm\\.`` →
     ``.kv_norm.``, which also matches the canonical final ``model.norm.weight``), so the identity is
     enforced by the mapping's model-key fallback — the same validation transformers' own loader
     applies before accepting a rename — and this test drives the full mapping seam the loaders use.
@@ -527,7 +527,7 @@ def test_canonical_checkpoint_keys_resume_untouched(model_type):
 
 
 def test_unanchored_source_falls_back_to_the_canonical_key():
-    """Pin of the model-key fallback (transformers 5.16 semantics): a rename whose target misses the
+    """Pin of the model-key fallback (transformers 5.20 semantics): a rename whose target misses the
     model's key space while the source key itself resolves is undone, and a genuine vendor key
     converting onto a real model key is NOT — the fallback must never mask a needed conversion."""
     model = module_with_weight_keys(["model.norm.weight", "model.layers.0.self_attn.kv_norm.weight"])

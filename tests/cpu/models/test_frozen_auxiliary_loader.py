@@ -26,12 +26,12 @@ import torch
 from accelerate import PartialState
 from torch import nn
 from transformers import AutoModelForImageTextToText, GenerationConfig
-from trl import ModelConfig
 
 import scripts.training.distillation.self_distill as self_distill_script
 import scripts.training.distillation.teacher_distill as distill_script
 import scripts.training.offline_grpo as offline_grpo_script
 import src.model_loading.parallel.frozen_models as frozen_models
+from src.configs.script_arguments import ModelArguments
 from src.distributed.parallelism_config import ParallelismConfig
 from src.model_loading.parallel.frozen_models import (
     load_frozen_auxiliary_model,
@@ -108,7 +108,7 @@ def _preference_reference(*, reset_sinks, attn_default=None, attn_implementation
     """The DPO/KTO full-finetune reference load, driven through its real call site."""
     return load_reference_model_for_preference(
         _token_setup_args(),
-        ModelConfig(model_name_or_path=AUX_MODEL, attn_implementation=attn_implementation),
+        ModelArguments(model_name_or_path=AUX_MODEL, attn_implementation=attn_implementation),
         types.SimpleNamespace(bf16=True, fp16=False, precompute_ref_log_probs=False),
         ParallelismConfig(),
         _tokenizer(),
@@ -136,7 +136,7 @@ def _sdpg_reference(*, reset_sinks):
     args.reference_kl_coef, args.reference_model_name_or_path, args.reset_sinks = 0.1, AUX_MODEL, reset_sinks
     return self_distill_script._load_sdpg_reference(
         args=args,
-        model_config=ModelConfig(model_name_or_path=AUX_MODEL),
+        model_config=ModelArguments(model_name_or_path=AUX_MODEL),
         sft_config=types.SimpleNamespace(bf16=True, fp16=False),
         tokenizer=_tokenizer(),
         is_vlm=False,
@@ -153,7 +153,7 @@ def _offline_grpo_reference(*, reset_sinks):
             parallelism_config=ParallelismConfig(expert_lora=ExpertLoraSpec(r=2, alpha=4)), model_source=AUX_MODEL
         ),
         types.SimpleNamespace(kl_beta=0.1, bf16=True, fp16=False),
-        ModelConfig(model_name_or_path=AUX_MODEL),
+        ModelArguments(model_name_or_path=AUX_MODEL),
         policy=nn.Sequential(StubEPLayerBase()),
         tokenizer=_tokenizer(),
         peft_config=None,
@@ -165,7 +165,7 @@ def _on_policy_grpo_reference(*, reset_sinks):
     """The online and environmental GRPO full-finetune KL reference, handed to TRL in place of its own."""
     return load_reference_model_for_on_policy_grpo(
         _token_setup_args(),
-        ModelConfig(model_name_or_path=AUX_MODEL),
+        ModelArguments(model_name_or_path=AUX_MODEL),
         types.SimpleNamespace(beta=0.1, bf16=True, fp16=False),
         ParallelismConfig(),
         _tokenizer(),
@@ -218,7 +218,7 @@ def _repo_tokenizers(vocabs):
     return types.SimpleNamespace(from_pretrained=from_pretrained), fetched
 
 
-POLICY_CONFIG = ModelConfig(model_name_or_path=AUX_MODEL, model_revision="abc123")
+POLICY_CONFIG = ModelArguments(model_name_or_path=AUX_MODEL, model_revision="abc123")
 
 
 def _anchor_args(reference):

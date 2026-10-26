@@ -126,7 +126,7 @@ def test_generate_returns_the_server_token_ids_aligned_with_the_logprobs():
 
     assert out["prompt_ids"] == [[11, 12]]
     assert out["completion_ids"] == [[21, 22, 99]]
-    # TRL 1.6's VLLMClient contract: (batch, len, num_logprobs) with the sampled token at index 0.
+    # TRL's VLLMClient contract: (batch, len, num_logprobs) with the sampled token at index 0.
     assert out["logprobs"] == [[[-0.1], [-0.2], [-0.3]]]
     assert out["logprob_token_ids"] == [[[21], [22], [99]]]
 
@@ -208,11 +208,14 @@ def test_generate_raises_when_the_server_omits_token_ids():
 
 
 def test_a_prompt_with_an_image_is_refused_before_any_request():
-    """The completions route is text-only: an image would be dropped and the rollout image-blind."""
+    """The completions route is text-only: an image would be dropped and the rollout image-blind. TRL
+    processes images through ``image_features`` before it generates with the features it returns."""
     client, tokenized, bodies = _serve([])
 
     with pytest.raises(NotImplementedError, match="text-only"):
-        client.generate(["prompt", "prompt"], images=[None, object()])
+        client.image_features([None, [object()]])
+    with pytest.raises(NotImplementedError, match="text-only"):
+        client.generate(["prompt", "prompt"], features=[None, {"pixel_values": object()}])
 
     assert tokenized == bodies == []
 
@@ -220,9 +223,10 @@ def test_a_prompt_with_an_image_is_refused_before_any_request():
 def test_an_image_slot_left_empty_is_text_generation():
     client, _, bodies = _serve([])
 
-    client.generate([[1, 2]], images=[None])
+    features = client.image_features([None])
+    client.generate([[1, 2]], features=features)
 
-    assert len(bodies) == 1
+    assert features == [None] and len(bodies) == 1
 
 
 def test_no_prompts_sends_no_request():
@@ -293,7 +297,7 @@ def _constructor_keywords() -> list[set[str]]:
 
 def test_every_attribute_trl_uses_is_on_the_client():
     read, called = _client_references()
-    assert {"generate", "init_communicator", "update_named_param"} <= called, (
+    assert {"generate", "init_communicator", "image_features"} <= called, (
         f"TRL's generation module no longer reads as the server-mode client contract: {sorted(called)}"
     )
     client = offline_client(TrlVLLMClient)
@@ -305,7 +309,7 @@ def test_every_attribute_trl_uses_is_on_the_client():
 
 def test_the_client_takes_every_keyword_trl_generates_with():
     keywords = _generate_keywords()
-    assert {"prompts", "images", "n", "max_tokens", "generation_kwargs"} <= keywords, (
+    assert {"prompts", "features", "n", "max_tokens", "generation_kwargs"} <= keywords, (
         f"TRL's generate call no longer reads as the server-mode contract: {sorted(keywords)}"
     )
     inspect.signature(TrlVLLMClient.generate).bind(None, **dict.fromkeys(keywords))

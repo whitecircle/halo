@@ -13,23 +13,25 @@ import os
 from dataclasses import asdict, dataclass, replace
 from typing import Any
 
-from transformers import AutoTokenizer
-from trl import ModelConfig
+from transformers import AutoConfig, AutoTokenizer
 
 from scripts._common import add_openai_endpoint_args
 from src.configs.grpo_environmental import AsyncTrainingConfig, EnvironmentConfig
 from src.configs.parser import HaloArgumentParser
+from src.configs.script_arguments import ModelArguments
 from src.environments.base import BaseEnvironment
+from src.environments.engine_wire import refuse_unmatched_reasoning_markers
 from src.environments.episode import resolve_rollout_stop_token_ids
 from src.environments.eval_runner import trajectory_path, write_trajectories_jsonl
-from src.environments.rollout_config import RolloutConfig
+from src.environments.rollout_config import VLLM_BACKEND, RolloutConfig
+from src.models.config_access import config_model_types
 
 logger = logging.getLogger(__name__)
 
 # The training script's config classes an eval reads its contract from: the environment's, the
 # rollout's, and the model's (its tokenizer resolves ``rollout_stop_tokens``). The YAML's other keys
 # (training arguments, dataset fields) belong to classes the eval never instantiates.
-TRAINING_CONTRACT_CLASSES = (EnvironmentConfig, AsyncTrainingConfig, ModelConfig)
+TRAINING_CONTRACT_CLASSES = (EnvironmentConfig, AsyncTrainingConfig, ModelArguments)
 
 # The sampling flags an explicit CLI value lays over the training config, by ``RolloutConfig`` field.
 _SAMPLING_FLAGS = ("temperature", "top_p", "max_tokens", "request_timeout")
@@ -110,6 +112,13 @@ class TrainingContract:
         """Parse ``path``; the stop tokens go through the tokenizer of the model the YAML trains."""
         parser = HaloArgumentParser(TRAINING_CONTRACT_CLASSES)
         env_config, async_config, model_config = parser.parse_yaml_file(path, allow_extra_keys=True)
+        if async_config.rollout_backend == VLLM_BACKEND and async_config.rollout_max_thinking_tokens is not None:
+            hf_config = AutoConfig.from_pretrained(
+                model_config.model_name_or_path,
+                revision=model_config.model_revision,
+                trust_remote_code=model_config.trust_remote_code,
+            )
+            refuse_unmatched_reasoning_markers(config_model_types(hf_config), async_config.rollout_backend)
         stop_token_ids = None
         if async_config.rollout_stop_tokens:
             tokenizer = AutoTokenizer.from_pretrained(

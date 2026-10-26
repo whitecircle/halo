@@ -215,6 +215,7 @@ def test_sglang_declares_one_request_per_chunk(monkeypatch):
     client._start_engine_update = lambda: None
     client._broadcast_chunk = lambda chunk, final: declares.append([name for name, _ in chunk])
     client._lift_pause = lambda timeout, context: None
+    client._end_session = lambda: None
 
     # 1536 B each: two per 4 KiB chunk.
     push(client, [(f"w{index}", torch.zeros(384, dtype=torch.float32)) for index in range(10)])

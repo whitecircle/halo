@@ -99,12 +99,14 @@ memory-validated shape.
   `model.vision_tower.vision_model.*`, the text tower under `model.language_model.*`, no
   `lm_head.weight` (the head is tied), and the fused expert pair.
 
-    vLLM 0.26.0 registers `Cohere2VisionForConditionalGeneration` and `Cohere2MoeForCausalLM`, and
+    vLLM 0.32.0 registers `Cohere2VisionForConditionalGeneration` and `Cohere2MoeForCausalLM`, and
     its weight loader reads that save as written: the fused pair, the tower only with its
-    `vision_model` level (a flattened key raises), no top-level `lm_head.weight` (one raises). It
-    asserts `tie_word_embeddings: true`, so an export whose training untied the head does not load.
+    `vision_model` level (a flattened key raises), no top-level `lm_head.weight` (one raises in the
+    composite). Its Cohere2 MoE model computes logits from the input embeddings, so an export whose
+    training untied the head does not load as the composite, and the text-only class drops the head
+    and serves the tied one without an error.
 
-    SGLang 0.5.17 registers both too, but its Cohere2 expert loader reads per-expert keys only and
+    SGLang 0.5.22 registers both too, but its Cohere2 expert loader reads per-expert keys only and
     drops the fused pair without an error: run `unfuse_moe_experts.py` first. Its tower loader takes
     either spelling.
 

@@ -86,6 +86,7 @@ class DistributedGRPOTrainer(
     _loss_outside_model_forward = True
 
     def __init__(self, *args, **kwargs):
+        self._use_chunked_grpo_logprobs = kwargs.pop("use_chunked_grpo_logprobs", False)
         training_args, kwargs = self._begin_on_policy_init(args, kwargs)
         self._require_vllm_server_mode(training_args)
         self._reject_tool_calling_loop(args, kwargs)
@@ -99,8 +100,6 @@ class DistributedGRPOTrainer(
         )
 
         self._last_rewards_per_func: torch.Tensor | None = None
-
-        self._use_chunked_grpo_logprobs = kwargs.pop("use_chunked_grpo_logprobs", False)
 
         with self._installing_trl_vllm_client(), self._supplying_kl_reference():
             super().__init__(*args, **kwargs)
@@ -256,13 +255,13 @@ class DistributedGRPOTrainer(
                 _trl_vllm_generation.VLLMClient,
             ) = originals
 
-    def _generate_single_turn(self, prompt_ids, images, multimodal_fields):
+    def _generate_single_turn(self, *args, **kwargs):
         """Override TRL's single-turn vLLM generation to be TP-consistent.
 
         TRL slices the result by ``process_index``, so TP ranks land on different completions and
         deadlock at the first all-reduce in ``model.forward``. Broadcast the tuple from the TP leader.
         """
-        result = super()._generate_single_turn(prompt_ids, images, multimodal_fields)
+        result = super()._generate_single_turn(*args, **kwargs)
         return self._broadcast_object_from_tp_leader(result)
 
     def _generate_and_score_completions(

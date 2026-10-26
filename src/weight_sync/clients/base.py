@@ -100,10 +100,14 @@ def _wait_for_calls(calls: list[AsyncCall], timeout: float) -> None:
         time.sleep(0.1)
 
 
-def unregistered_bailing_model_types(release: str) -> dict[str, str]:
-    """``model_type`` → loader fact for the Bailing spellings neither pinned engine registers, quoting ``release``."""
+def unservable_bailing_model_types(release: str) -> dict[str, str]:
+    """``model_type`` → loader fact for the Bailing spellings neither pinned engine takes an online update for,
+    quoting ``release``."""
     return {
-        "bailing_hybrid": f"{release} registers no model class for Ling 3.0's BailingMoeV3ForCausalLM",
+        "bailing_hybrid": (
+            f"{release} registers Ling 3.0's BailingMoeV3ForCausalLM, but no online update into it has been "
+            "validated end to end"
+        ),
         "bailing_moe_linear": (
             f"Ring's checkpoints declare BailingMoeLinearV2ForCausalLM where {release} registers BailingMoeV2_5ForCausalLM"
         ),
@@ -127,6 +131,10 @@ class WeightSyncClientBase(ABC):
     PAUSE_REQUEST: Mapping[str, object] = {}
     RESUME_ENDPOINT: str
     RESUME_REQUEST: Mapping[str, object] = {}
+    # The session the engine brackets an update with inside the quiesce, and the request keywords both routes take.
+    SESSION_OPEN_ENDPOINT: str
+    SESSION_CLOSE_ENDPOINT: str
+    SESSION_REQUEST: Mapping[str, object] = {}
     # ``model_type`` → why the pinned release cannot take an online update of the family (the gate quotes it).
     UNSERVABLE_MODEL_TYPES: Mapping[str, str] = {}
     # Per-module parameter suffixes the engine's loader takes only together, so they ride one chunk.
@@ -179,6 +187,8 @@ class WeightSyncClientBase(ABC):
         self._unusable_reason: str | None = None
         # The engine may be quiesced, so the close or the exit hook must lift it.
         self._paused = False
+        # An update session opened server-side (its reply possibly lost), which only the session close ends.
+        self._session_open = False
         # What the group formation built, released by the close.
         self._transport: Any = None
         self._reset_buffer_state()
@@ -482,6 +492,31 @@ class WeightSyncClientBase(ABC):
         """Pause the engine for an update; flagged first, since an engine pauses before its reply can be lost."""
         self._paused = True
         self.request("POST", self.PAUSE_ENDPOINT, retry=True, timeout=POST_TIMEOUT_S, **self.PAUSE_REQUEST)
+
+    def _open_session(self) -> None:
+        """Open the engine's update session; flagged first, as the pause is. Single-shot: the route is a collective
+        RPC, which a session retry would issue twice."""
+        self._session_open = True
+        self.request("POST", self.SESSION_OPEN_ENDPOINT, retry=False, timeout=POST_TIMEOUT_S, **self.SESSION_REQUEST)
+
+    def _end_session(self) -> None:
+        """Close the session once the update landed; raises, as the update is then not complete."""
+        self.request(
+            "POST", self.SESSION_CLOSE_ENDPOINT, retry=False, timeout=WEIGHT_UPDATE_TIMEOUT_S, **self.SESSION_REQUEST
+        )
+        self._session_open = False
+
+    def _close_session(self) -> None:
+        """Close a session left open; never raises, as the caller is already failing."""
+        if not self._session_open:
+            return
+        try:
+            self.request(
+                "POST", self.SESSION_CLOSE_ENDPOINT, retry=False, timeout=CLEANUP_TIMEOUT_S, **self.SESSION_REQUEST
+            )
+        except Exception as e:  # advisory on a failing path
+            logger.warning(f"Failed to close the interrupted weight-update session on {self.base_url}: {e}")
+        self._session_open = False
 
     def _lift_pause(self, timeout: float, context: str) -> None:
         """Resume a quiesced engine, unless it was left partly written (:meth:`_mark_unusable`).

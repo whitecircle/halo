@@ -2,8 +2,9 @@
 """Liger's fused MoE kernel never runs routed experts: Halo's EP wrapper or the model's own implementation does.
 
 Upstream liger-kernel's MoE appliers swap a family's routed-experts class for ``LigerExperts``, that
-kernel, under ``swiglu``; liger-kernel 0.8.0's ``LigerExperts`` computes the input gradient wrong on
-Blackwell (``tests/gpu/kernels/test_liger_routed_experts.py`` measures it). Two rules keep it off:
+kernel, under ``swiglu``; ``LigerExperts`` computed the input gradient wrong on Blackwell until the fix
+that shipped in liger-kernel 0.8.3, which ``tests/gpu/kernels/test_liger_routed_experts.py`` has not
+re-measured. Two rules keep it off:
 
 * a delegating spec that serves its family's dense and shared-expert MLPs (Qwen3.5-MoE, Qwen3-Next)
   withholds ``swiglu`` from upstream, so the shared expert stays fused while the experts stay stock;

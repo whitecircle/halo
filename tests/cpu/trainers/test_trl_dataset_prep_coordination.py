@@ -16,6 +16,7 @@ import datetime
 import inspect
 import json
 import os
+import re
 import time
 
 import pytest
@@ -23,9 +24,10 @@ import torch.distributed as dist
 from accelerate import PartialState
 from datasets import Dataset, DatasetDict, load_from_disk
 from trl import DPOConfig, DPOTrainer
+from trl.trainer import utils as trl_trainer_utils
 
 from src.data.sources.loading import load_datasets
-from src.trainers.mixins.trl_dataset_prep import CoordinatedTRLDatasetPrepMixin
+from src.trainers.mixins.trl_dataset_prep import _MAIN_FIRST_METHODS, CoordinatedTRLDatasetPrepMixin
 from src.trainers.preference.dpo import DistributedDPOTrainer
 from src.trainers.preference.kto import DistributedKTOTrainer
 from src.trainers.reward.bradley_terry import DistributedRewardTrainer
@@ -135,16 +137,26 @@ def _trl_prepare_owner(cls) -> type | None:
     )
 
 
+def _main_first_scopes(prepare) -> set[str]:
+    """The ``PartialState`` main-first scopes ``prepare`` enters, directly or through TRL's helper."""
+    source = inspect.getsource(prepare)
+    if "global_then_local_main_first" in source:
+        source += inspect.getsource(trl_trainer_utils.global_then_local_main_first)
+    return set(re.findall(r"\.(\w*main\w*_first)\(", source))
+
+
 @pytest.mark.parametrize("trainer_cls", [DistributedDPOTrainer, DistributedKTOTrainer, DistributedRewardTrainer])
 def test_every_trainer_over_a_trl_preparation_routes_through_the_seam(trainer_cls):
     """The trainers whose scripts let TRL prepare their datasets (DPO, KTO, BT reward) route that preparation
     through the seam, ahead of TRL's main-first one: one left out would hold its peers in the NCCL barrier
     again and write one tokenized copy per rank per run. The SFT-derived trainers skip TRL's preparation
-    (their scripts call ``disable_trl_dataset_prep``), so they never reach it."""
+    (their scripts call ``disable_trl_dataset_prep``), so they never reach it. A main-first scope the seam
+    does not neutralize would pair its barrier with nothing."""
     owner = _trl_prepare_owner(trainer_cls)
-    assert owner is not None and "main_process_first" in inspect.getsource(owner._prepare_dataset), (
-        f"{trainer_cls.__name__}: TRL no longer prepares under main_process_first — revisit the seam"
-    )
+    assert owner is not None, f"{trainer_cls.__name__}: TRL no longer prepares its dataset — revisit the seam"
+    scopes = _main_first_scopes(owner._prepare_dataset)
+    assert scopes, f"{trainer_cls.__name__}: TRL no longer prepares under a main-first scope — revisit the seam"
+    assert scopes <= set(_MAIN_FIRST_METHODS), f"{trainer_cls.__name__}: the seam leaves {scopes} live"
     mro = trainer_cls.__mro__
     assert CoordinatedTRLDatasetPrepMixin in mro, f"{trainer_cls.__name__} prepares through TRL uncoordinated"
     assert mro.index(CoordinatedTRLDatasetPrepMixin) < mro.index(owner)

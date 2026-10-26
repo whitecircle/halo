@@ -17,10 +17,10 @@ import pytest
 import torch
 from accelerate import PartialState
 from transformers import Qwen3Config, Qwen3ForCausalLM
-from trl import ModelConfig
 
 import src.entrypoints.model_setup as model_setup
 from src.checkpoint.weights_source import LOADED_WEIGHTS_FROM_ATTR, config_schema_source, weights_read_from
+from src.configs.script_arguments import ModelArguments
 from src.entrypoints.model_setup import load_model_and_tokenizer
 from src.entrypoints.run_setup import prepare_distributed_resume
 from src.entrypoints.script import ScriptContext
@@ -72,7 +72,7 @@ def _resumed_policy(tmp_path, monkeypatch):
         use_liger_kernel=False,
         liger_kernel_config=None,
     )
-    model_config = ModelConfig(model_name_or_path=str(base_dir))
+    model_config = ModelArguments(model_name_or_path=str(base_dir))
     parallelism_config = make_parallelism_config(world_size=8, gpus_per_node=8, ep_size=8)
     checkpoint, source = prepare_distributed_resume(
         training, model_config, parallelism_config, overwrite_output_dir=False

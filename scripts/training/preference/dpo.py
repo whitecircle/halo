@@ -3,7 +3,7 @@
 
 Direct Preference Optimization on preference pairs (chosen vs rejected). One script serves both
 text and vision-language models: ``load_policy_model`` auto-detects the modality. For a VLM
-the processor is the ``processing_class``, which flips TRL 1.6's DPOTrainer into vision mode and
+the processor is the ``processing_class``, which flips TRL 1.14's DPOTrainer into vision mode and
 auto-selects ``DataCollatorForVisionPreference`` for an images-bearing dataset; for a text model
 the repo tokenizes the pairs and runs generation-eval examples.
 
@@ -22,11 +22,12 @@ Dataset: text → {"prompt", "chosen", "rejected"} message lists; VLM → the sa
 ``images_field`` naming the column a hub dataset stores them in.
 """
 
-from trl import DPOConfig, ModelConfig
+from trl import DPOConfig
 
 from src.config_validation import reject_unsupported_args
 from src.configs.parallelism_arguments import ParallelismArguments
 from src.configs.preference import DPOScriptArguments
+from src.configs.script_arguments import ModelArguments
 from src.data.sources.loading import alias_images_column
 from src.entrypoints.data_setup import load_script_datasets, prepare_script_preference_data, resolve_vlm_run
 from src.entrypoints.model_setup import (
@@ -53,7 +54,7 @@ from src.trainers.preference.dpo import DistributedDPOTrainer
 
 def main():
     args, dpo_config, model_config, dist_args = parse_script_args(
-        DPOScriptArguments, DPOConfig, ModelConfig, ParallelismArguments
+        DPOScriptArguments, DPOConfig, ModelArguments, ParallelismArguments
     )
 
     context = init_training_script(

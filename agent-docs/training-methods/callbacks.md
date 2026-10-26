@@ -90,7 +90,7 @@ The mode holds an **export contract**: `bias_update` is accepted only where the 
 | Qwen3, Qwen3.5/3.6, Mistral4, Cohere2 MoE | None — `bias_update_transient` only |
 | Gemma 4 | None, and no balancing route at all ([below](#gemma-4-has-no-balancing-path)) |
 
-The contract is checked on the **enabled tree**, not the class declaration: a renamed upstream slot, or one already FSDP-sharded as a DTensor, falls back to the side-buffer and `bias_update` then raises. Bailing has no fallback at all (`_supports_transient_balancing_bias = False`). A class declaring `_SERVED_BALANCING_BIAS_DROPPED_BY` (Laguna, vLLM 0.26.0) warns that the engine's loader skips the exported key, so a copy served there routes on the pretrained bias.
+The contract is checked on the **enabled tree**, not the class declaration: a renamed upstream slot, or one already FSDP-sharded as a DTensor, falls back to the side-buffer and `bias_update` then raises. Bailing has no fallback at all (`_supports_transient_balancing_bias = False`). A family on a weight-sync client's `DROPPED_BALANCING_BIAS_MODEL_TYPES` (Laguna on vLLM) warns, naming that client's `ENGINE_RELEASE`, that the engine's loader skips the exported key, so a copy served there never routes on the trained bias.
 
 > [!WARNING]
 > **Scale the rate with the injection space**
@@ -127,7 +127,7 @@ router_balancing_rate: 1.0e-3    # gamma; only used when a bias-update mode is a
 
 Both bias modes force `output_router_logits=False`, overriding `model_init_kwargs`: the EP bias path bypasses the HF router module the recorder hooks, so leaving it on returns an empty `router_logits` tuple and `load_balancing_loss_func` raises `IndexError`. These writes are **run-scoped** — every exported `config.json` carries the hub's coefficient and flag.
 
-`aux_loss` sets `output_router_logits=True` only where `router_aux_loss_coef > 0`; without a usable coef, or where the EP wrappers sever the aux path (DeepSeek-V4), it leaves the flag off and warns rather than letting TRL read an `outputs.aux_loss` those models never populate. With a usable coef it **raises** where the `forward` declares no `output_router_logits` parameter — HF's config fallback lives on that parameter, and `Qwen3_5MoeForConditionalGeneration` reads the flag from `kwargs` only. The probe reads the model under a PEFT or CP wrapper, both of which pass the flag through.
+`aux_loss` sets `output_router_logits=True` only where `router_aux_loss_coef > 0`; without a usable coef, or where the EP wrappers sever the aux path (DeepSeek-V4), it leaves the flag off and warns rather than letting TRL read an `outputs.aux_loss` those models never populate. With a usable coef it **raises** where the `forward` declares no `output_router_logits` parameter — HF's config fallback lives on that parameter, so a forward that reads the flag from `kwargs` only never reaches the aux term. The probe reads the model under a PEFT or CP wrapper, both of which pass the flag through.
 
 The resolved mode is reconciled world-wide with precedence `bias_update > bias_update_transient > aux_loss > none`, so every rank runs the same collectives.
 
@@ -147,9 +147,9 @@ Every case the hooks cannot route raises instead of dropping the gradient: a kep
 
 It **commits** only where the bias would land in exported state. GLM-4 MoE Lite, LFM-2 and Step-3.7 qualify on the third signal — none of their modelings has aux-loss machinery. GLM-5 Next does not: its forward honors the flag, so `auto` gives `aux_loss` while the exported slot still serves an explicit `bias_update`, the Laguna shape.
 
-**Mistral4, Cohere2 MoE and multimodal Qwen3.5/3.6** have no slot and resolve to `none`, warning that `bias_update_transient` is the deliberate opt-in.
+**Mistral4 and Cohere2 MoE** have no slot and resolve to `none`, warning that `bias_update_transient` is the deliberate opt-in.
 
-`aux_loss` follows for the families whose `forward` declares the parameter: GPT-OSS, Qwen3, Laguna, GLM-5 Next, the text-only `Qwen3_5MoeForCausalLM`. Where it does not and no wrapper accepts a bias either, the model has **no balancing route at all**, `auto` resolves to `none` with the reason, and an explicit `aux_loss` raises.
+`aux_loss` follows for the families whose `forward` declares the parameter: GPT-OSS, Qwen3, Qwen3.5/3.6 (multimodal and text-only), Laguna, GLM-5 Next. Where it does not and no wrapper accepts a bias either, the model has **no balancing route at all**, `auto` resolves to `none` with the reason, and an explicit `aux_loss` raises.
 
 That is also what `use_grouped_gemm: false` at `ep_size = 1` does to GLM-4 MoE Lite, LFM-2 and Step-3.7: with no wrappers to carry the bias, the run trains unbalanced.
 
@@ -161,14 +161,14 @@ Either way Gemma 4 gets no balancing **and** no `moe/*` metrics, and `output_rou
 
 ### Where `aux_loss` is inert
 
-`*ForCausalLM.forward` adds `router_aux_loss_coef * load_balancing_loss_func(...)` **only when `labels is not None`**, so `aux_loss` balances experts under SFT and pretraining, with or without [gradient checkpointing](#aux_loss-under-gradient-checkpointing). KTO reaches it another way: TRL's `KTOTrainer` sets the flag and adds the term itself. Everywhere else the term never reaches the loss:
+`*ForCausalLM.forward` adds `router_aux_loss_coef * load_balancing_loss_func(...)` **only when `labels is not None`**, so `aux_loss` balances experts under SFT and pretraining, with or without [gradient checkpointing](#aux_loss-under-gradient-checkpointing). DPO and KTO reach it another way: TRL's `DPOTrainer` and `KTOTrainer` add the term themselves, at the coefficient the balancing mode put in effect. Everywhere else the term never reaches the loss:
 
-- **DPO / SMPO / reward** — the forward runs without `labels`, and none of the three add the term.
+- **SMPO / reward** — the forward runs without `labels`, and neither adds the term.
 - **Distillation (teacher and self)** — both strip `labels`, for full-vocab logits.
 - **Classification / embedding** — non-causal heads; the causal-LM forward never runs.
 - **GRPO (offline / online / async)** — the loss is per-token log-probs, so the mode warns and leaves the flag off; with `output_router_logits` already on at a positive `router_aux_loss_coef`, an explicit `aux_loss` raises at construction (below).
 
-Inertness is a **trainer-class contract**: `_consumes_router_aux_loss` declares whether the objective goes through a `labels` forward (`True` only on `DistributedSFTTrainer` and `DistributedKTOTrainer`). An explicit `aux_loss` on a non-consuming trainer **raises**; an `auto` resolution landing there turns `output_router_logits` back off.
+Inertness is a **trainer-class contract**: `_consumes_router_aux_loss` declares whether the objective goes through a `labels` forward (`True` only on `DistributedSFTTrainer`, `DistributedDPOTrainer` and `DistributedKTOTrainer`). An explicit `aux_loss` on a non-consuming trainer **raises**; an `auto` resolution landing there turns `output_router_logits` back off.
 
 Online and async GRPO go further: syncing weights to a live rollout engine downgrades **both bias modes to `none`**, since the sync ships parameters only — an adopted native slot is a buffer, a transient bias a plain attribute — and a bias the generator never sees drifts trainer routing off the trajectories it produced.
 

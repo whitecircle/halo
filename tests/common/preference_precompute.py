@@ -69,7 +69,7 @@ class StubReference:
         self.weights = weights
         self.batches = 0
 
-    def __call__(self, batch: torch.Tensor):
+    def __call__(self, model, batch: torch.Tensor):
         self.batches += 1
         values = [-(self.weights + 100 * index + batch) for index in range(self.outputs)]
         return (values[0], values[1] if self.outputs == 2 else None)
@@ -112,6 +112,7 @@ def precompute_trainer(
     trainer.ref_model = ref_model
     trainer.calculate_KL = calculate_kl
     trainer.ld_alpha = None
+    trainer.use_liger_kernel = False
     trainer.args = SimpleNamespace(
         dataloader_num_workers=0,
         dataloader_pin_memory=False,

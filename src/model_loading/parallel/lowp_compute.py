@@ -7,7 +7,7 @@ from __future__ import annotations
 import logging
 
 import torch.nn as nn
-from transformers.distributed.tensor_parallel import ALL_PARALLEL_STYLES, _get_parameter_tp_plan
+from transformers.distributed.tensor_parallel import ALL_PARALLEL_STYLES, _get_parameter_plan
 
 from src.distributed.expert_parallel.moe_layer.layer import EPMoELayerBase
 from src.distributed.mesh import model_tp_mesh
@@ -59,7 +59,7 @@ def _convert_dense_linear(linear: nn.Linear, name: str, quant_format: QuantForma
     if "forward" not in vars(linear):
         LowPrecisionLinear.convert_(linear, quant_format)
         return
-    style_name = _get_parameter_tp_plan(name, tp_plan, is_weight=False) if tp_plan else None
+    style_name = _get_parameter_plan(name, tp_plan, is_weight=False) if tp_plan else None
     if style_name is None or tp_mesh is None:
         raise RuntimeError(
             f"{name} carries an instance-level forward this conversion cannot re-install: it is not a "

@@ -401,7 +401,7 @@ def test_a_writing_run_still_requires_an_output_dir(tmp_path):
 
 def test_the_sharded_branch_honours_max_shard_size(tmp_path):
     """The from_pretrained branch re-saves the whole model; without the toolkit's cap it lands in
-    transformers' own default shards (50GB in 5.16), which every single-file reader downstream has
+    transformers' own default shards (50GB in 5.20), which every single-file reader downstream has
     to hold whole. The flag must reach the staged save and survive the swap."""
     source, out = tmp_path / "src", tmp_path / "out"
     sinks = _build_source(source, sharded=True)
