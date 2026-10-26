@@ -55,7 +55,7 @@ adam_beta2: 0.999
 optim: adamw_torch  # adamw_torch / adamw_torch_fused both auto-enable AdamWBF16 under bf16: true; any other optim (e.g. adamw_bnb_8bit) suppresses it
 ```
 
-`bf16_optimizer` (a `DistributedArguments` field, so every training script parses it) overrides that
+`bf16_optimizer` (a `ParallelismArguments` field, so every training script parses it) overrides that
 resolution: `true` forces AdamWBF16 on where the auto path would decline (an `optim` other than
 `adamw_torch` / `adamw_torch_fused` — except `muon` and `flash_adamw`, which raise, below — and replicated DDP), `false` forces the stock AdamW over the parameters
 as loaded. Under `bf16: true` those are bf16, so `false` keeps bf16 master weights and moments with

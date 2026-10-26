@@ -1,7 +1,7 @@
 #!/usr/bin/env python
 """Every shipped ``examples/`` YAML must parse through its own entry script's parser.
 
-``H4ArgumentParser`` runs with ``allow_extra_keys=False``, so a key that matches no field of the
+``parse_script_args`` parses with ``allow_extra_keys=False``, so a key that matches no field of the
 script's dataclass tuple is rejected — which makes "does it parse?" a real gate: it catches a
 renamed/removed knob left behind in a config, a typo that would otherwise be silently dropped, a
 value outside a ``Literal``'s choices, and any ``__post_init__`` guard the config now violates.
@@ -20,8 +20,8 @@ import pytest
 import transformers.training_args
 import yaml
 
+from src.configs.parser import HaloArgumentParser
 from src.distributed.expert_parallel.deepep.capacity import GIN_MAX_TOKENS_PER_RANK
-from src.training.parser import H4ArgumentParser
 from tests.common.repo import REPO_ROOT, load_script_module
 
 EXAMPLES_ROOT = REPO_ROOT / "examples"
@@ -95,15 +95,16 @@ def parsed_field(parsed: tuple, name: str):
     raise AssertionError(f"no parsed config object declares {name!r}")
 
 
-def parser_for(script: str) -> H4ArgumentParser:
-    """The parser the script builds, read off its own ``H4ArgumentParser((...))`` call."""
+def parser_for(script: str) -> HaloArgumentParser:
+    """The parser over the dataclasses the script hands its own ``parse_script_args(...)`` call."""
     module = _script_module(script)
     tree = ast.parse((TRAINING_ROOT / script).read_text(encoding="utf-8"))
     for node in ast.walk(tree):
-        if isinstance(node, ast.Call) and getattr(node.func, "id", None) == "H4ArgumentParser":
-            names = [element.id for element in node.args[0].elts]
-            return H4ArgumentParser(tuple(getattr(module, name) for name in names))
-    raise AssertionError(f"{script} builds no H4ArgumentParser")
+        if isinstance(node, ast.Call) and getattr(node.func, "id", None) == "parse_script_args":
+            names = [argument.id for argument in node.args]
+            assert len(names) >= 4, f"{script} parses only {names}: the script args, configs and ParallelismArguments"
+            return HaloArgumentParser(tuple(getattr(module, name) for name in names))
+    raise AssertionError(f"{script} calls no parse_script_args")
 
 
 @pytest.fixture(autouse=True)

@@ -14,18 +14,34 @@ Usage:
 
 from trl import GRPOConfig, ModelConfig
 
-from src.args.distributed_args import DistributedArguments
-from src.args.rlvr_online_grpo_args import RLVROnlineGRPOScriptArguments
 from src.config_validation import reject_non_default_args, reject_unsupported_args
 from src.configs.grpo import RLRRArguments
+from src.configs.grpo_online import RLVROnlineGRPOScriptArguments
+from src.configs.parallelism_arguments import ParallelismArguments
 from src.data.pipeline.conversation import as_conversation, chat_template_kwargs, fold_system_into_conversation
 from src.data.pipeline.processing import process_dataset_with_map_and_filter, require_render_column
 from src.data.pipeline.rendered import render_generation_prompt
 from src.data.pipeline.row_processors import blank_conversation
 from src.data.sources.loading import reject_image_columns
+from src.entrypoints.data_setup import load_script_datasets, log_script_dataset_examples
+from src.entrypoints.model_setup import (
+    apply_prompt_completion_window,
+    default_padded_attn_implementation,
+    load_model_and_tokenizer,
+    log_model_info,
+)
+from src.entrypoints.script import (
+    apply_distributed_trainer_config,
+    configure_balancing_and_build_callbacks,
+    distributed_trainer_kwargs,
+    init_training_script,
+    parse_script_args,
+    run_trainer,
+    verify_backend_on_rank0,
+    with_distributed_teardown,
+)
 from src.environments.base import resolve_reasoning_effort
 from src.environments.rollout_config import VLLM_BACKEND
-from src.model_loading.model_preparation import log_model_info
 from src.model_loading.parallel.frozen_models import load_reference_model_for_on_policy_grpo
 from src.model_loading.parallel.peft_setup import configure_adapter_training
 from src.rewards.functions import ScorerRewardFunction, reward_functions
@@ -33,25 +49,7 @@ from src.rewards.graders.verifiable import RLVR_GRADERS
 from src.runtime.collectives import barrier
 from src.trainers.distillation.sdpg import DistributedSDPGTrainer
 from src.trainers.grpo.online import DistributedGRPOTrainer
-from src.trainers.grpo.rollout.weight_sync_clients import (
-    verify_context_window_synced,
-    verify_sampler_logprob_reference_synced,
-)
-from src.training.environment import run_training
-from src.training.parser import H4ArgumentParser
-from src.training.script_runner import (
-    apply_distributed_trainer_config,
-    apply_prompt_completion_window,
-    build_training_callbacks,
-    distributed_trainer_kwargs,
-    init_training_script,
-    load_script_datasets,
-    load_script_model,
-    log_script_dataset_examples,
-    padded_workload_attn_implementation,
-    run_trainer,
-    verify_backend_on_rank0,
-)
+from src.trainers.grpo.rollout.engine_preflight import verify_context_window, verify_sampler_logprob_reference
 
 
 def build_rlvr_row_fn(args: RLVROnlineGRPOScriptArguments, tokenizer):
@@ -96,13 +94,14 @@ def build_rlvr_row_fn(args: RLVROnlineGRPOScriptArguments, tokenizer):
 
 
 def main():
-    parser = H4ArgumentParser((RLVROnlineGRPOScriptArguments, GRPOConfig, ModelConfig, DistributedArguments))
-    args, grpo_config, model_config, dist_args = parser.parse()
+    args, grpo_config, model_config, dist_args = parse_script_args(
+        RLVROnlineGRPOScriptArguments, GRPOConfig, ModelConfig, ParallelismArguments
+    )
 
     # The weight sync forwards trainer parameter names verbatim, and the text-only CausalLM sibling
     # spells its decoder model.layers.* where the multimodal checkpoint the server loads spells
     # model.language_model.layers.*, so every dense tensor would miss its slot on the first sync.
-    reject_unsupported_args("RLVR Online GRPO", text_only_model=dist_args.text_only_model)
+    reject_unsupported_args("RLVR Online GRPO", text_only_model=args.text_only_model)
     # Each block's tunables reach the trainer only through its gate, so a value set beside a closed
     # gate is inert (its defaults are truthy, hence the default-comparing form).
     if not args.use_rlrr:
@@ -114,7 +113,7 @@ def main():
     # positive-advantage rollouts). It reuses the same rollout and verifier machinery, so only the
     # class and the OPD kwargs differ.
     trainer_cls = DistributedSDPGTrainer if args.use_sdpg else DistributedGRPOTrainer
-    runtime = init_training_script(
+    context = init_training_script(
         args,
         grpo_config,
         model_config,
@@ -122,13 +121,11 @@ def main():
         script_prefix="rlvr-online-grpo",
         trainer_cls=trainer_cls,
     )
-    parallelism_config = runtime.parallelism_config
+    parallelism_config = context.parallelism_config
 
     # Prompts and completions are collated into padded batches.
-    requested_attn = padded_workload_attn_implementation(model_config, sinks_reset=dist_args.reset_sinks)
-    model, tokenizer = load_script_model(
-        runtime, grpo_config, model_config, dist_args, attn_implementation=requested_attn
-    )
+    requested_attn = default_padded_attn_implementation(model_config, sinks_reset=args.reset_sinks)
+    model, tokenizer = load_model_and_tokenizer(context, grpo_config, model_config, args, attn_default=requested_attn)
 
     # max_completion_length is the generation budget here (TRL passes it to vLLM), so it is an explicit
     # hyperparameter; max_prompt_length is a dataset filter (rows over it are dropped, not truncated).
@@ -202,7 +199,7 @@ def main():
         if grpo_config.vllm_server_base_url is not None
         else f"http://{grpo_config.vllm_server_host}:{grpo_config.vllm_server_port}"
     )
-    verify_context_window_synced(
+    verify_context_window(
         [vllm_base_url],
         single_turn_tokens=(args.max_prompt_length or 0) + grpo_config.max_completion_length,
         backend=VLLM_BACKEND,
@@ -210,7 +207,7 @@ def main():
     # TRL's IS correction divides by the engine's logprobs too: they must carry the sampling temperature,
     # and a sequence-level IS mode sums the per-token log-ratios, which a reference renormalized over the
     # sampler's cut drives toward a zero sequence weight. TRL's unset min_p (None) samples with no cut.
-    verify_sampler_logprob_reference_synced(
+    verify_sampler_logprob_reference(
         [vllm_base_url],
         temperature=grpo_config.temperature,
         top_p=grpo_config.top_p,
@@ -229,7 +226,7 @@ def main():
         parallelism_config,
         tokenizer,
         peft_config=peft_config,
-        reset_sinks=dist_args.reset_sinks,
+        reset_sinks=args.reset_sinks,
         attn_default=requested_attn,
     )
 
@@ -238,11 +235,11 @@ def main():
 
     barrier()
 
-    callbacks = build_training_callbacks(
+    callbacks = configure_balancing_and_build_callbacks(
         args,
         grpo_config,
         model,
-        parallelism_config,
+        context,
         policy_gradient_loss=True,
         syncs_to_external_generator=True,
     )
@@ -256,19 +253,19 @@ def main():
         peft_config=peft_config,
         ref_model=ref_model,
         callbacks=callbacks,
-        **distributed_trainer_kwargs(args, dist_args, parallelism_config, dataset_presharded=dataset_presharded),
+        **distributed_trainer_kwargs(args, parallelism_config, dataset_presharded=dataset_presharded),
         rlrr_config=args.build_rlrr_config(),
         drop_degenerate_groups=args.drop_degenerate_groups,
         scale_rewards_std_floor=args.scale_rewards_std_floor,
         balance_token_mass=args.balance_token_mass,
-        early_stop=args.build_early_stop(),
+        early_stop=args.build_early_stop_config(),
         use_chunked_grpo_logprobs=args.use_chunked_grpo_logprobs,
         save_completions=args.save_completions,
         **args.build_sdpg_kwargs(),
     )
     run_trainer(
         trainer,
-        runtime,
+        context,
         method_name="RLVR Online GRPO",
         extra_start_log=[
             f"Reward functions: {[f.__name__ for f in reward_funcs]}",
@@ -278,4 +275,4 @@ def main():
 
 
 if __name__ == "__main__":
-    run_training(main)()
+    with_distributed_teardown(main)()

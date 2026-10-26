@@ -1,8 +1,6 @@
-"""Schedule-based :mod:`torch.profiler` integration for the HF Trainer loop.
-
-Captures a bounded ``wait`` → ``warmup`` → ``active`` window and writes per-rank artifacts (Chrome
-trace, memory-allocation timeline, top-ops table, optional CUDA memory-snapshot pickle). Opt-in and
-one-shot because profiling costs throughput; only global rank 0 profiles unless ``ranks`` says more.
+"""Schedule-based :mod:`torch.profiler` capture for the HF Trainer loop: a bounded ``wait`` → ``warmup`` →
+``active`` window writing per-rank artifacts (Chrome trace, memory timeline, top-ops table, optional CUDA
+memory-snapshot pickle). Only global rank 0 profiles unless ``ranks`` says more.
 """
 
 from __future__ import annotations
@@ -28,7 +26,7 @@ logger = logging.getLogger(__name__)
 
 
 class TorchProfilerCallback(TrainerCallback):
-    """Wire :class:`torch.profiler.profile` into training via a step schedule.
+    """:class:`torch.profiler.profile` over a step schedule.
 
     Args:
         output_dir: per-rank artifact directory (defaults under ``HALO_DATA_ROOT``).
@@ -127,7 +125,7 @@ class TorchProfilerCallback(TrainerCallback):
             self._prof = None
 
     def _on_trace_ready(self, prof) -> None:
-        """Called by torch.profiler at the end of each active window."""
+        """torch.profiler's hook at the end of each active window."""
         self._cycle += 1
         export_profiler_artifacts(
             prof,

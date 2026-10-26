@@ -25,10 +25,11 @@ fails to form.
 import argparse
 import json
 import sys
+from dataclasses import asdict
 
-from src.diagnostics.weight_sync_transport import TRANSPORT_PREFIXES, format_report, run_preflight
 from src.log import configure_cli_logging
 from src.weight_sync.registry import rollout_backends
+from src.weight_sync.transport_check import TRANSPORT_PREFIXES, format_report, run_transport_check
 
 DEFAULT_CONNECTION_TIMEOUT_S = 120.0
 
@@ -59,7 +60,7 @@ def main() -> int:
     args = parser.parse_args()
     configure_cli_logging()
 
-    result = run_preflight(
+    result = run_transport_check(
         server_url=args.server_url,
         backend=args.backend,
         group_port=args.group_port,
@@ -71,12 +72,12 @@ def main() -> int:
         rounds=args.rounds,
         connection_timeout=args.connection_timeout,
     )
-    print(json.dumps(result, indent=2) if args.json else format_report(result))
+    print(json.dumps(asdict(result), indent=2) if args.json else format_report(result))
 
     failures = []
-    if args.expect and result["verdict"] != args.expect:
-        failures.append(f"transport is {result['verdict']}, expected {args.expect}")
-    if not result["served_unchanged"]:
+    if args.expect and result.verdict != args.expect:
+        failures.append(f"transport is {result.verdict}, expected {args.expect}")
+    if not result.served_unchanged:
         failures.append("the push changed the served model")
     for failure in failures:
         print(f"FAIL: {failure}", file=sys.stderr)

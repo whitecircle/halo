@@ -46,15 +46,22 @@ def snapshot_efficiency(cb) -> dict:
         "training_peak_allocated_gb": cb.memory.training_peak_allocated_gb,
         "avg_step_time_seconds": cb.time.avg_step_time_seconds,
     }
+    flops = cb.flops_model
+    if flops is not None:
+        local_params, sparsity_factor = flops.local_params, flops.sparsity_factor
+    else:
+        # A FLOPs estimate that raised leaves the rank's parameter count to the model itself.
+        local_params = sum(p.numel() for p in cb.model_ref.parameters()) if cb.model_ref is not None else 0
+        sparsity_factor = 1.0
     diagnostics = {
-        "gpu_model": cb.state.gpu_model,
-        "precision": cb.state.precision,
+        "gpu_model": cb.gpu_model,
+        "precision": cb.precision,
         "mfu_percent": cb.mfu.avg_mfu_percent,
         "smfu_percent": cb.smfu.avg_smfu_percent,
         "achieved_tflops_dense": cb.mfu.avg_tflops_per_sec,
         "achieved_tflops_active": cb.smfu.avg_smfu_tflops_per_sec,
-        "local_params_b": round(cb.mfu.local_params / 1e9, 3),
-        "sparsity_factor": cb.smfu.sparsity_factor,
+        "local_params_b": round(local_params / 1e9, 3),
+        "sparsity_factor": sparsity_factor,
     }
     return {**headline, "diagnostics": diagnostics}
 

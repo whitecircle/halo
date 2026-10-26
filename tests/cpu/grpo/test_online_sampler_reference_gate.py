@@ -23,10 +23,10 @@ from trl import GRPOTrainer
 
 from src.configs.grpo_environmental import AsyncTrainingConfig
 from src.trainers.grpo.online import DistributedGRPOTrainer
-from src.trainers.grpo.rollout import weight_sync_clients
-from src.trainers.grpo.rollout.weight_sync_clients import (
+from src.trainers.grpo.rollout import engine_preflight
+from src.trainers.grpo.rollout.engine_preflight import (
+    _check_sampler_logprob_reference,
     verify_sampler_logprob_reference,
-    verify_sampler_logprob_reference_synced,
 )
 from src.weight_sync.clients.vllm import VLLMWeightSyncClient
 from tests.common.fake_engines import FakeVLLMServer
@@ -39,7 +39,7 @@ ENV_SCRIPT = REPO_ROOT / "scripts/training/environmental_grpo.py"
 def _preflight_argument(script, name: str = "sequence_ratio_active") -> str:
     """The source of the ``name=`` argument the script feeds the preflight, from its own AST."""
     for node in ast.walk(ast.parse(script.read_text())):
-        if isinstance(node, ast.Call) and ast.unparse(node.func) == "verify_sampler_logprob_reference_synced":
+        if isinstance(node, ast.Call) and ast.unparse(node.func) == "verify_sampler_logprob_reference":
             for keyword in node.keywords:
                 if keyword.arg == name:
                     return ast.unparse(keyword.value)
@@ -90,13 +90,13 @@ def test_vespo_folds_every_tokens_engine_ratio_into_one_sequence_weight():
 def test_a_nucleus_reference_is_refused_for_any_sequence_summing_consumer(nucleus_server):
     """The refusal names both remedies, since either consumer may be the one summing."""
     with pytest.raises(ValueError, match="top_p: 1.0") as excinfo:
-        verify_sampler_logprob_reference(
+        _check_sampler_logprob_reference(
             VLLMWeightSyncClient, [nucleus_server.url], 1.0, 0.95, 0, 0.0, 1.0, sequence_ratio_active=True
         )
     message = str(excinfo.value)
     assert "vllm_importance_sampling_mode" in message and "isr_geo_band" in message, message
     # A token-level consumer takes the ratio per token: the lift cancels nothing, so it passes.
-    verify_sampler_logprob_reference(
+    _check_sampler_logprob_reference(
         VLLMWeightSyncClient, [nucleus_server.url], 1.0, 0.95, 0, 0.0, 1.0, sequence_ratio_active=False
     )
 
@@ -110,18 +110,18 @@ def test_both_refusals_point_each_arm_at_the_remedy_it_honors(nucleus_server):
         r"environmental arm[^;.]*drop isr_geo_band_min/max and isr_opsm_delta"
     )
     with pytest.raises(ValueError) as penalty:
-        verify_sampler_logprob_reference(VLLMWeightSyncClient, [], 1.0, 1.0, 0, 0.0, 1.1, sequence_ratio_active=True)
+        _check_sampler_logprob_reference(VLLMWeightSyncClient, [], 1.0, 1.0, 0, 0.0, 1.1, sequence_ratio_active=True)
     with pytest.raises(ValueError) as nucleus:
-        verify_sampler_logprob_reference(
+        _check_sampler_logprob_reference(
             VLLMWeightSyncClient, [nucleus_server.url], 1.0, 0.95, 0, 0.0, 1.0, sequence_ratio_active=True
         )
     for refusal in (penalty, nucleus):
         assert per_arm.search(str(refusal.value)), str(refusal.value)
 
 
-def test_the_synced_form_takes_the_consumer_flag(nucleus_server):
+def test_the_collective_form_takes_the_consumer_flag(nucleus_server):
     with pytest.raises(ValueError, match="summed over each sequence"):
-        verify_sampler_logprob_reference_synced(
+        verify_sampler_logprob_reference(
             [nucleus_server.url],
             temperature=1.0,
             top_p=0.95,
@@ -145,9 +145,9 @@ def test_a_preflight_failure_reaches_every_rank_with_its_type(monkeypatch, error
     def fail(*args):
         raise error
 
-    monkeypatch.setattr(weight_sync_clients, "verify_sampler_logprob_reference", fail)
+    monkeypatch.setattr(engine_preflight, "_check_sampler_logprob_reference", fail)
     with pytest.raises(ValueError, match=message) as raised:
-        verify_sampler_logprob_reference_synced(
+        verify_sampler_logprob_reference(
             ["http://unused"],
             temperature=1.0,
             top_p=1.0,

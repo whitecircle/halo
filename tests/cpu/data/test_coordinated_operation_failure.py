@@ -10,7 +10,7 @@ rather than stalling the suite: (1) both ranks raise, (2) the non-failing rank i
 cause rather than a timeout, (3) the rank that failed keeps its OWN exception type — the peers take
 the uniform ``RuntimeError``, but ``tokenize_vlm_dataset``'s ``NotImplementedError`` capability
 refusal is a contract, and (4) a failure on a NON-main rank (a torn cache read) propagates the same
-way. The teardown half is pinned too: ``run_training`` enters no teardown collective when the entry
+way. The teardown half is pinned too: ``with_distributed_teardown`` enters no teardown collective when the entry
 point raises, so the failing rank exits with its traceback.
 
     python tests/cpu/data/test_coordinated_operation_failure.py
@@ -25,7 +25,7 @@ import pytest
 from datasets import Dataset
 
 from src.data.pipeline.processing import coordinated_dataset_operation
-from src.training import environment
+from src.entrypoints import script
 from tests.common.gloo import run_gloo_ranks
 
 WORLD_SIZE = 2
@@ -164,21 +164,21 @@ def test_writer_map_may_outlive_the_process_group_timeout(tmp_path):
 
 def _record_teardown(monkeypatch) -> list[str]:
     torn_down: list[str] = []
-    monkeypatch.setattr(environment, "destroy_all_dispatchers", lambda: torn_down.append("dispatchers"))
-    monkeypatch.setattr(environment.dist, "is_available", lambda: True)
-    monkeypatch.setattr(environment.dist, "is_initialized", lambda: True)
-    monkeypatch.setattr(environment.dist, "destroy_process_group", lambda: torn_down.append("process_group"))
+    monkeypatch.setattr(script, "destroy_all_dispatchers", lambda: torn_down.append("dispatchers"))
+    monkeypatch.setattr(script.dist, "is_available", lambda: True)
+    monkeypatch.setattr(script.dist, "is_initialized", lambda: True)
+    monkeypatch.setattr(script.dist, "destroy_process_group", lambda: torn_down.append("process_group"))
     return torn_down
 
 
-def test_run_training_skips_the_collective_teardown_when_main_raises(monkeypatch):
+def test_with_distributed_teardown_skips_the_collective_teardown_when_main_raises(monkeypatch):
     """Both teardown halves are collectives (``destroy_all_dispatchers`` opens with a barrier and
     ``destroy_process_group`` is one). A rank failing mid-step has peers still inside the step's own
     collective, so entering teardown parks the failed rank in the NCCL watchdog instead of exiting
     and letting torchrun reap the peers. The exception must propagate with NO teardown call."""
     torn_down = _record_teardown(monkeypatch)
 
-    @environment.run_training
+    @script.with_distributed_teardown
     def main():
         raise ValueError("the real cause")
 
@@ -188,11 +188,11 @@ def test_run_training_skips_the_collective_teardown_when_main_raises(monkeypatch
     assert torn_down == [], f"teardown collectives ran on the failure path: {torn_down}"
 
 
-def test_run_training_tears_down_dispatchers_before_the_process_group_on_success(monkeypatch):
+def test_with_distributed_teardown_tears_down_dispatchers_before_the_process_group_on_success(monkeypatch):
     """Gin frees a DeepEP buffer through the group communicator, so the order is load-bearing."""
     torn_down = _record_teardown(monkeypatch)
 
-    @environment.run_training
+    @script.with_distributed_teardown
     def main():
         return "done"
 
@@ -200,14 +200,14 @@ def test_run_training_tears_down_dispatchers_before_the_process_group_on_success
     assert torn_down == ["dispatchers", "process_group"]
 
 
-def test_run_training_tears_down_before_an_early_stop_exits(monkeypatch):
+def test_with_distributed_teardown_tears_down_before_an_early_stop_exits(monkeypatch):
     """Every rank leaves an early-stopped run at the same step, so the teardown collectives meet their peers;
     skipped, a DeepEP buffer outside the trained model (a reference model's) outlives the process group."""
     torn_down = _record_teardown(monkeypatch)
 
-    @environment.run_training
+    @script.with_distributed_teardown
     def main():
-        raise environment.TrainingStoppedEarly("GRPO training stopped early at step 3 of 5.")
+        raise script.EarlyStopExit("GRPO training stopped early at step 3 of 5.")
 
     with pytest.raises(SystemExit, match="stopped early at step 3 of 5"):
         main()

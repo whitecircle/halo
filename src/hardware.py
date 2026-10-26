@@ -107,6 +107,7 @@ GPU_PEAK_FLOPS = {
         flops={"bf16": 154.8e12, "fp16": 154.8e12, "tf32": 77.4e12, "fp32": 38.7e12},
     ),
 }
+PEAK_KEY_BY_DTYPE = {torch.bfloat16: "bf16", torch.float16: "fp16"}
 
 
 def _classify_gpu_name(gpu_name_upper: str) -> str | None:
@@ -146,6 +147,24 @@ def get_gpu_peak_flops(gpu_model: str, precision: str) -> float | None:
     """Get peak FLOPS for the given GPU model and precision, or None when either is unknown."""
     entry = GPU_PEAK_FLOPS.get(gpu_model)
     return entry.flops.get(precision) if entry is not None else None
+
+
+def _fp32_compute_precision() -> str:
+    """The peak key fp32 matmuls run at: ``float32_matmul_precision`` routes them to Tensor Cores
+    (``high`` → TF32, ``medium`` → bf16), whose higher peak an ``"fp32"`` key would report MFU above."""
+    precision = torch.get_float32_matmul_precision()
+    if precision == "medium":
+        return "bf16"
+    if precision == "high" or torch.backends.cuda.matmul.allow_tf32:
+        return "tf32"
+    return "fp32"
+
+
+def peak_precision_key(dtype: torch.dtype | None) -> str | None:
+    """The :data:`GPU_PEAK_FLOPS` precision key for a parameter dtype, or ``None`` when it has none."""
+    if dtype == torch.float32:
+        return _fp32_compute_precision()
+    return PEAK_KEY_BY_DTYPE.get(dtype)
 
 
 def available_host_ram_bytes() -> int | None:

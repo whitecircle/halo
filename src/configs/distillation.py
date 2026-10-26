@@ -6,7 +6,7 @@ from typing import Any, ClassVar, Literal, get_args
 
 from transformers import TrainingArguments
 
-from src.config_validation import RangeValidatedConfig, present, require_finite, require_int, require_positive
+from src.config_validation import ValidatedConfig, present, require_finite, require_int
 from src.configs.script_arguments import DEFAULT_ANSWER_FIELD, CommonScriptArguments, DatasetNumProcArguments
 from src.configs.sft import ConversationRenderArguments, SFTScriptArguments
 from src.data.collators.self_distill import format_field_names
@@ -14,14 +14,12 @@ from src.data.collators.self_distill import format_field_names
 # The teacher hint both OPD flows default to, through SDPGArguments.
 PRIVILEGED_HINT_TEMPLATE = "\n[Hint] The correct answer is: {answer}. Do NOT state that you were given the answer.\n"
 
-# Both arms' loss names, the OPD arms' here and the teacher arm's in DistillationConfig.distill_loss, are
-# keys of the trainer-side divergence registry (``losses.DIVERGENCES``), pinned to it by a test: the config
-# layer imports no trainer. This annotation gates YAML/CLI and SDPGArguments validates against it.
+# Keys of the trainer-side divergence registry (``losses.DIVERGENCES``), which a test pins this to.
 SelfDistillationLoss = Literal["reverse_kl", "forward_kl", "unnormalized_kl"]
 
 
 @dataclass
-class SDPGArguments(RangeValidatedConfig):
+class SDPGArguments(ValidatedConfig):
     """Privileged-teacher OPD term (SDPG, arXiv:2606.04036), shared by the offline self-distillation
     SFT script and the online RLVR GRPO script.
 
@@ -48,24 +46,22 @@ class SDPGArguments(RangeValidatedConfig):
         metadata={"help": "OPD loss: 'reverse_kl' (SDPG), 'forward_kl', or 'unnormalized_kl' (k3/UKL)."},
     )
     sdpg_temperature: float = field(
-        default=1.0,
-        metadata={"help": "Softmax temperature for the OPD loss (finite, > 0)."},
+        default=1.0, metadata={"help": "Softmax temperature for the OPD loss (finite, > 0)."}
     )
     sdpg_beta_base: float = field(
-        default=1.0,
-        metadata={"help": "Base distillation coefficient beta_base (finite, >= 0; 0 drops the OPD term)."},
+        default=1.0, metadata={"help": "Base distillation coefficient beta_base (finite, >= 0; 0 drops the OPD term)."}
     )
     sdpg_beta_warmup_steps: int = field(
-        default=0,
-        metadata={"help": "Steps to ramp beta from 0 to sdpg_beta_base (SDPG warmup; 0 = off)."},
+        default=0, metadata={"help": "Steps to ramp beta from 0 to sdpg_beta_base (SDPG warmup; 0 = off)."}
     )
     sdpg_beta_decay_steps: int = field(
-        default=0,
-        metadata={"help": "Final steps over which beta decays back to 0 (SDPG decay; 0 = off)."},
+        default=0, metadata={"help": "Final steps over which beta decays back to 0 (SDPG decay; 0 = off)."}
     )
 
-    def __post_init__(self) -> None:
-        self._validate_ranges()
+    @staticmethod
+    def sdpg_field_names(exclude: frozenset[str] = frozenset()) -> tuple[str, ...]:
+        """The :class:`SDPGArguments` field names but ``exclude``, never a subclass's own fields."""
+        return tuple(f.name for f in fields(SDPGArguments) if f.name not in exclude)
 
     @classmethod
     def pop_from(cls, kwargs: dict, *, exclude: frozenset[str] = frozenset()) -> dict[str, Any]:
@@ -75,17 +71,20 @@ class SDPGArguments(RangeValidatedConfig):
         identical YAML run would. A misspelt field stays in ``kwargs``, where the parent's explicit
         signature rejects it.
         """
-        names = [f.name for f in fields(cls) if f.name not in exclude]
-        block = cls(**{name: kwargs.pop(name) for name in names if name in kwargs})
-        return {name: getattr(block, name) for name in names}
+        block = cls(**{name: kwargs.pop(name) for name in cls.sdpg_field_names(exclude) if name in kwargs})
+        return block.sdpg_kwargs(exclude=exclude)
 
-    def _validate_ranges(self) -> None:
-        super()._validate_ranges()
+    def sdpg_kwargs(self, *, exclude: frozenset[str] = frozenset()) -> dict[str, Any]:
+        """This block's field values by name, but ``exclude``."""
+        return {name: getattr(self, name) for name in self.sdpg_field_names(exclude)}
+
+    def _validate_fields(self) -> None:
+        super()._validate_fields()
         if self.sdpg_loss not in get_args(SelfDistillationLoss):
             raise ValueError(f"sdpg_loss must be one of {get_args(SelfDistillationLoss)}, got {self.sdpg_loss!r}")
         # Divides both distributions' logits: zero turns them infinite and NaNs the OPD loss without a
         # raise, a negative one inverts them.
-        require_positive(type(self).__name__, sdpg_temperature=self.sdpg_temperature)
+        require_finite(type(self).__name__, gt=0, sdpg_temperature=self.sdpg_temperature)
         # A NaN coefficient NaNs every loss; a negative one trains the student away from the teacher.
         require_finite(type(self).__name__, sdpg_beta_base=self.sdpg_beta_base)
         if self.sdpg_beta_base < 0:
@@ -150,7 +149,6 @@ class SelfDistillScriptArguments(SFTScriptArguments, SDPGArguments):
         default="solution",
         metadata={"help": "Optional dataset column holding a reference solution, which fills {solution}."},
     )
-
     reference_kl_coef: float = field(
         default=0.0,
         metadata={
@@ -169,7 +167,6 @@ class SelfDistillScriptArguments(SFTScriptArguments, SDPGArguments):
             "when reference_kl_coef > 0 and this is unset."
         },
     )
-
     confidence_field: str | None = field(
         default=None,
         metadata={
@@ -179,8 +176,7 @@ class SelfDistillScriptArguments(SFTScriptArguments, SDPGArguments):
         },
     )
     confidence_power: float = field(
-        default=4.0,
-        metadata={"help": "Exponent p in the per-sample weight conf**p (finite, > 0)."},
+        default=4.0, metadata={"help": "Exponent p in the per-sample weight conf**p (finite, > 0)."}
     )
     confidence_weight_opd: bool = field(
         default=True,
@@ -189,7 +185,6 @@ class SelfDistillScriptArguments(SFTScriptArguments, SDPGArguments):
             "SDPG positive-advantage gating). If False, only the SFT loss is weighted."
         },
     )
-
     opd_exclude_eos: bool = field(
         default=True,
         metadata={
@@ -201,18 +196,16 @@ class SelfDistillScriptArguments(SFTScriptArguments, SDPGArguments):
     def build_sdpg_kwargs(self) -> dict:
         """The SDPG trainer kwargs: every :class:`SDPGArguments` field but the dataset-side ones, the
         complement the trainer pops."""
-        return {
-            f.name: getattr(self, f.name) for f in fields(SDPGArguments) if f.name not in self.DATASET_SIDE_SDPG_FIELDS
-        }
+        return self.sdpg_kwargs(exclude=self.DATASET_SIDE_SDPG_FIELDS)
 
-    def _validate_ranges(self) -> None:
-        super()._validate_ranges()
+    def _validate_fields(self) -> None:
+        super()._validate_fields()
         # A NaN coefficient NaNs every loss; a negative one pushes the student away from the anchor.
         require_finite(type(self).__name__, reference_kl_coef=self.reference_kl_coef)
         if self.reference_kl_coef < 0:
             raise ValueError(f"reference_kl_coef must be a finite value >= 0, got {self.reference_kl_coef}")
         # p <= 0 inverts or flattens the weighting, and a zero confidence then divides by zero.
-        require_positive(type(self).__name__, confidence_power=self.confidence_power)
+        require_finite(type(self).__name__, gt=0, confidence_power=self.confidence_power)
         unfilled = sorted(
             self.HINT_SLOT_FIELDS[slot]
             for slot in format_field_names(self.sdpg_hint_template)
@@ -237,10 +230,7 @@ class SelfDistillScriptArguments(SFTScriptArguments, SDPGArguments):
 class TeacherDistillScriptArguments(ConversationRenderArguments, CommonScriptArguments):
     PROJECT_NAME: ClassVar[str] = "llm_distillation"
 
-    teacher_model: str | None = field(
-        default=None,
-        metadata={"help": "Name or path of the teacher model."},
-    )
+    teacher_model: str | None = field(default=None, metadata={"help": "Name or path of the teacher model."})
     teacher_model_revision: str | None = field(
         default=None,
         metadata={
@@ -250,20 +240,19 @@ class TeacherDistillScriptArguments(ConversationRenderArguments, CommonScriptArg
     )
     # Distillation datasets conventionally ship a "messages" column (SFT's default is "prompt").
     conversation_field: str | None = field(
-        default="messages",
-        metadata={"help": "Dataset column holding the conversation, a list of role/content dicts."},
+        default="messages", metadata={"help": "Dataset column holding the conversation, a list of role/content dicts."}
     )
 
-    def _validate_ranges(self) -> None:
+    def _validate_fields(self) -> None:
         """Require ``teacher_model``: an empty value reaches the loader as a blank model id and only
         fails there."""
-        super()._validate_ranges()
+        super()._validate_fields()
         if not self.teacher_model:
             raise ValueError("teacher_model must be specified for distillation")
 
 
 @dataclass
-class DistillationConfig(DatasetNumProcArguments, RangeValidatedConfig, TrainingArguments):
+class DistillationConfig(DatasetNumProcArguments, ValidatedConfig, TrainingArguments):
     """Configuration for distillation training, extending HuggingFace TrainingArguments."""
 
     distill_loss: Literal[
@@ -306,14 +295,10 @@ class DistillationConfig(DatasetNumProcArguments, RangeValidatedConfig, Training
         },
     )
 
-    def __post_init__(self):
-        self._validate_ranges()
-        super().__post_init__()
-
-    def _validate_ranges(self) -> None:
-        super()._validate_ranges()
+    def _validate_fields(self) -> None:
+        super()._validate_fields()
         owner = type(self).__name__
-        require_positive(owner, distill_temperature=self.distill_temperature)
+        require_finite(owner, gt=0, distill_temperature=self.distill_temperature)
         require_finite(owner, distill_alpha=self.distill_alpha)
         # A non-positive length is legal: it resolves to the student's context window at launch.
         require_int(owner, **present(max_length=self.max_length))

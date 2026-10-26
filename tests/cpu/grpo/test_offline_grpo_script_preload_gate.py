@@ -2,7 +2,7 @@
 
 The trainer refuses a pre-sharded dataset (and every other split its sweep cannot read) at
 construction, which follows the policy load: minutes on a large model, on every rank. The script
-loads its raw splits first and runs the same refusal before ``load_script_model``.
+loads its raw splits first and runs the same refusal before ``load_model_and_tokenizer``.
 
     python tests/cpu/grpo/test_offline_grpo_script_preload_gate.py
 """
@@ -31,19 +31,19 @@ def _run_script(monkeypatch, tmp_path, *, presharded: bool, kl_beta: float, use_
         output_dir=str(tmp_path), kl_beta=kl_beta, use_cpu=True, bf16=False, use_liger_kernel=False, report_to="none"
     )
     model_config = ModelConfig(model_name_or_path="local-policy", use_peft=use_peft)
-    parsed = (SimpleNamespace(), config, model_config, SimpleNamespace(reset_sinks=True))
+    parsed = (SimpleNamespace(reset_sinks=True), config, model_config, SimpleNamespace())
     splits = DatasetDict(train=offline_grpo_dataset(2), test=offline_grpo_dataset(2, offset=2))
 
     def model_load(*_args, **_kwargs):
         raise _ModelLoadReached
 
-    monkeypatch.setattr(offline_script, "H4ArgumentParser", lambda *_: SimpleNamespace(parse=lambda: parsed))
+    monkeypatch.setattr(offline_script, "parse_script_args", lambda *_: parsed)
     monkeypatch.setattr(
         offline_script, "init_training_script", lambda *a, **k: SimpleNamespace(parallelism_config=ParallelismConfig())
     )
     monkeypatch.setattr(offline_script, "load_script_datasets", lambda *a, **k: (splits, presharded))
-    monkeypatch.setattr(offline_script, "padded_workload_attn_implementation", lambda *a, **k: "sdpa")
-    monkeypatch.setattr(offline_script, "load_script_model", model_load)
+    monkeypatch.setattr(offline_script, "default_padded_attn_implementation", lambda *a, **k: "sdpa")
+    monkeypatch.setattr(offline_script, "load_model_and_tokenizer", model_load)
     offline_script.main()
 
 

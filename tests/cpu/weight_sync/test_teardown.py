@@ -22,7 +22,7 @@ Five facts are load-bearing and invisible in a passing run:
     python tests/cpu/weight_sync/test_teardown.py
 """
 
-import inspect
+import atexit
 import logging
 import threading
 
@@ -66,7 +66,7 @@ def test_the_pause_is_lifted_on_sglangs_own_route_with_a_body(monkeypatch):
 def test_explicit_close_keeps_the_full_local_destroy(monkeypatch):
     client = offline_client(SGLangWeightSyncClient)
     group = object()
-    client._group = group
+    client._transport = (group, None)
     calls = _teardown_probe(client, monkeypatch)
 
     client.close_communicator()
@@ -74,7 +74,7 @@ def test_explicit_close_keeps_the_full_local_destroy(monkeypatch):
     assert ("destroy", group) in calls, "the reconnect path must destroy the local group or its name/port leak"
     assert all(kind != "drop" for kind, _ in calls)
     assert ("remote", None) in calls
-    assert client._group is None and client._store is None
+    assert client._transport is None
 
 
 def test_the_engine_side_release_runs_while_the_local_destroy_blocks(monkeypatch):
@@ -82,7 +82,7 @@ def test_the_engine_side_release_runs_while_the_local_destroy_blocks(monkeypatch
     asked by then. The fake destroy waits for the engine-side release to start; a client that only
     releases the engine after the destroy returned never satisfies it."""
     client = offline_client(SGLangWeightSyncClient)
-    client._group = object()
+    client._transport = (object(), None)
     remote_started = threading.Event()
     monkeypatch.setattr(client, "_destroy_remote_group", remote_started.set)
     seen_during_destroy: list[bool] = []
@@ -105,7 +105,7 @@ def test_an_aborted_group_is_dropped_not_destroyed(monkeypatch):
     raises "Invalid process group", and the engine-side release must still run."""
     client = offline_client(SGLangWeightSyncClient)
     group = object()
-    client._group = group
+    client._transport = (group, None)
     client._aborted = True
     calls = _teardown_probe(client, monkeypatch)
 
@@ -130,10 +130,10 @@ def test_a_client_that_never_formed_its_group_does_not_ask_the_engine_to_release
 def test_the_atexit_invocation_skips_the_local_nccl_destroy(monkeypatch):
     client = offline_client(SGLangWeightSyncClient)
     group = object()
-    client._group = group
+    client._transport = (group, None)
     calls = _teardown_probe(client, monkeypatch)
 
-    client.close_communicator(_local_destroy=False)
+    client.close_communicator(at_exit=True)
 
     assert all(kind != "destroy" for kind, _ in calls), (
         "the atexit path entered dist.destroy_process_group — against a dead engine that blocks "
@@ -141,16 +141,24 @@ def test_the_atexit_invocation_skips_the_local_nccl_destroy(monkeypatch):
     )
     assert ("drop", group) in calls, "the rank-map bookkeeping must still be dropped"
     assert ("remote", None) in calls, "skipping the engine-side release leaves the server refusing every future join"
-    assert client._group is None and client._store is None
+    assert client._transport is None
 
 
-def test_init_registers_the_no_destroy_variant_at_atexit():
-    """Read from the source: the registration site lives inside ``init_communicator``, which needs a
-    live engine to execute — but the flag it registers is what decides whether interpreter exit can
-    wedge, so its spelling is the contract."""
-    source = inspect.getsource(SGLangWeightSyncClient.init_communicator)
-    assert "atexit.register(self.close_communicator, _local_destroy=False)" in source, (
-        "init_communicator no longer registers the no-local-destroy teardown at atexit"
+def test_init_registers_the_no_destroy_close_at_atexit(monkeypatch):
+    """The exit hook decides whether interpreter exit can wedge, so its registration is the contract: the
+    client's own close, called with ``at_exit=True`` (the variant the test above pins as destroy-free)."""
+    client = offline_client(SGLangWeightSyncClient, "http://127.0.0.1:30000")
+    registered: list[tuple[object, tuple, dict]] = []
+    monkeypatch.setattr(atexit, "register", lambda fn, *args, **kwargs: registered.append((fn, args, kwargs)))
+    monkeypatch.setattr(client, "_fetch_engine_world_size", lambda: 0)
+    monkeypatch.setattr(client, "_destroy_remote_group", lambda: None)
+    monkeypatch.setattr(client, "request", lambda method, path, **kwargs: None)
+    monkeypatch.setattr(sglang_module, "build_weight_update_group", lambda **kwargs: (object(), None))
+
+    client.init_communicator(device="cpu")
+
+    assert registered == [(client.close_communicator, (), {"at_exit": True})], (
+        f"init_communicator registered {registered} at exit, not the destroy-free close"
     )
 
 

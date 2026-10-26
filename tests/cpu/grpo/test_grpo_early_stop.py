@@ -20,16 +20,15 @@ import pytest
 from accelerate import PartialState
 from transformers import TrainerControl, TrainerState
 
-from src.args.rlvr_online_grpo_args import RLVROnlineGRPOScriptArguments
+from src.callbacks.early_stop import StopsTrainingEarly
 from src.configs.grpo import EarlyStopConfig
 from src.configs.grpo_environmental import AsyncTrainingConfig
+from src.configs.grpo_online import RLVROnlineGRPOScriptArguments
+from src.entrypoints.script import EarlyStopExit, run_trainer
 from src.trainers.grpo.early_stop import SAMPLING_LOGP_GAP_KEY, GRPOEarlyStopCallback, build_early_stop_callback
 from src.trainers.grpo.environmental import DistributedAsyncEnvironmentalGRPOTrainer
 from src.trainers.grpo.objective.logratio import LOGRATIO_MEAN_KEY, UPDATE_SKIPPED_KEY
 from src.trainers.grpo.online import DistributedGRPOTrainer
-from src.training.early_stopping import StopsTrainingEarly
-from src.training.environment import TrainingStoppedEarly
-from src.training.script_runner import run_trainer
 from tests.common.repo import REPO_ROOT
 
 PartialState()  # the stop logs through accelerate's logger, which refuses to log without it
@@ -127,7 +126,7 @@ def test_a_stopped_run_exits_non_zero_after_its_cleanup_and_any_other_returns():
     from its output; the EP buffers are released first either way. A run that ends short of its plan without
     a stop (a ``no_duplicates`` sampler yields fewer batches than its length) trained all its data."""
     stopped = _StoppableTrainer([_step(0.5)] * 5)
-    with pytest.raises(TrainingStoppedEarly) as exited:
+    with pytest.raises(EarlyStopExit) as exited:
         run_trainer(stopped, _RUNTIME, method_name="GRPO")
     assert exited.value.code == "GRPO training stopped early at step 3 of 5."
     assert stopped.events == ["train", "cleanup"]
@@ -150,7 +149,7 @@ def test_the_runner_exits_on_any_callback_that_stopped_the_run():
         train=lambda resume_from_checkpoint=None: None,
         cleanup_ep=lambda: None,
     )
-    with pytest.raises(TrainingStoppedEarly):
+    with pytest.raises(EarlyStopExit):
         run_trainer(trainer, _RUNTIME, method_name="SFT")
 
 
@@ -191,13 +190,13 @@ def test_conditions_keep_separate_streaks():
 
 
 def test_the_env_config_adds_the_breaker_condition_to_the_shared_ones():
-    assert not AsyncTrainingConfig().build_early_stop().active
+    assert not AsyncTrainingConfig().build_early_stop_config().active
     config = AsyncTrainingConfig(
         early_stop_entropy_band=[0.15, 0.35],
         early_stop_on_skipped_updates=True,
         skip_update_masked_frac=0.4,
         early_stop_patience=4,
-    ).build_early_stop()
+    ).build_early_stop_config()
     assert config == EarlyStopConfig(entropy_band=(0.15, 0.35), on_skipped_updates=True, patience=4)
 
 
@@ -208,7 +207,7 @@ def test_online_args_carry_the_shared_conditions_and_no_breaker_one():
     args = RLVROnlineGRPOScriptArguments(
         early_stop_entropy_band=[0.2, 0.6], early_stop_logratio_gap=0.01, early_stop_patience=5
     )
-    assert args.build_early_stop() == EarlyStopConfig(entropy_band=(0.2, 0.6), logratio_gap=0.01, patience=5)
+    assert args.build_early_stop_config() == EarlyStopConfig(entropy_band=(0.2, 0.6), logratio_gap=0.01, patience=5)
 
 
 def test_the_online_script_hands_both_knobs_to_the_trainer():
@@ -220,7 +219,7 @@ def test_the_online_script_hands_both_knobs_to_the_trainer():
     )
     passed = {kw.arg: ast.unparse(kw.value) for kw in call.keywords if kw.arg}
     assert passed["balance_token_mass"] == "args.balance_token_mass"
-    assert passed["early_stop"] == "args.build_early_stop()"
+    assert passed["early_stop"] == "args.build_early_stop_config()"
 
 
 def test_a_gap_the_run_never_logs_is_refused_and_no_condition_attaches_nothing():

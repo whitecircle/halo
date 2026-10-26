@@ -10,10 +10,14 @@ none of them.
     python tests/cpu/callbacks/test_efficiency_measured_attention.py
 """
 
+from types import SimpleNamespace
+
 import pytest
 import torch
 
+from src.callbacks import efficiency
 from src.callbacks.efficiency import EfficiencyCallback
+from src.callbacks.model_flops import RankFlopsModel
 from src.models.attention.layout import AttentionLayout, LayerAttention
 from src.trainers.mixins.token_metrics import TokenMetricsMixin
 from tests.common.parallelism import make_parallelism_config
@@ -23,6 +27,8 @@ _NO_PARALLELISM = make_parallelism_config(world_size=1, gpus_per_node=1)
 LINEAR_FLOPS_PER_TOKEN = 1.0e9
 MAX_SEQ_LEN = 4096
 PEAK_FLOPS = 1.0e15
+# Short enough that the attention term moves the step's TFLOP/s by many of its reported hundredths.
+STEP_SECONDS = 1.0e-3
 
 LAYOUT = AttentionLayout((LayerAttention("full", 1024.0), LayerAttention("window", 1024.0, keys=128)))
 
@@ -50,16 +56,40 @@ def _documents(lengths) -> list[int]:
 
 
 def _callback(parallelism=_NO_PARALLELISM, layout=LAYOUT, attention_share=1.0):
-    callback = EfficiencyCallback(parallelism)
-    callback.state.attention_layout = layout
-    callback.state.attention_share = attention_share
+    callback = EfficiencyCallback(parallelism, n_warmup_steps=0)
     fallback = layout.flops_per_token(MAX_SEQ_LEN) * attention_share / max(parallelism.tp_size, 1) if layout else 0.0
-    callback.state.attention_flops_per_token = fallback
-    callback.state.model_flops_per_token = LINEAR_FLOPS_PER_TOKEN + fallback
-    callback.state.active_model_flops_per_token = 0.5 * LINEAR_FLOPS_PER_TOKEN + fallback
-    callback.state.gpu_peak_flops = PEAK_FLOPS
-    callback.state.elapsed_time = 1.0
+    callback.flops_model = RankFlopsModel(
+        model_flops_per_token=LINEAR_FLOPS_PER_TOKEN + fallback,
+        active_model_flops_per_token=0.5 * LINEAR_FLOPS_PER_TOKEN + fallback,
+        attention_flops_per_token=fallback,
+        attention_layout=layout,
+        attention_share=attention_share,
+        local_params=1.0,
+        full_params=1.0,
+        params_ratio=1.0,
+        num_experts=0,
+        top_k=0,
+        sparsity_factor=1.0,
+        local_expert_params=0.0,
+        local_active_params=1.0,
+        full_active_params=1.0,
+    )
+    callback.gpu_peak_flops = PEAK_FLOPS
+    callback.training_args = SimpleNamespace(per_device_train_batch_size=1, gradient_accumulation_steps=1)
     return callback
+
+
+def _step_tflops(monkeypatch, callback, tokens: int) -> tuple[float, float]:
+    """The dense and active TFLOP/s one hook-driven step of ``tokens`` tokens reports."""
+    clock = iter((0.0, STEP_SECONDS))
+    monkeypatch.setattr(efficiency, "time", SimpleNamespace(perf_counter=lambda: next(clock)))
+    callback.on_step_begin(None, SimpleNamespace(global_step=0, num_input_tokens_seen=0), None)
+    callback.on_step_end(None, SimpleNamespace(global_step=1, num_input_tokens_seen=tokens), None)
+    return callback.mfu.step_tflops_per_sec, callback.smfu.step_smfu_tflops_per_sec
+
+
+def _tflops(step_flops: float) -> float:
+    return step_flops / STEP_SECONDS / 1e12
 
 
 def _bound(parallelism=_NO_PARALLELISM, **kwargs):
@@ -143,23 +173,19 @@ def test_a_callback_without_a_layout_keeps_the_trainer_accumulator_off():
     assert callback._drain_measured_attention_flops() is None
 
 
-def test_measured_work_replaces_the_config_term_in_both_estimates():
+def test_measured_work_replaces_the_config_term_in_both_estimates(monkeypatch):
     callback, trainer = _bound()
     lengths = torch.tensor([500] * 7 + [250])
     trainer._accumulate_attention_flops(_batch(lengths[:5]))
     trainer._accumulate_attention_flops(_batch(lengths[5:]))
-    measured = callback._drain_measured_attention_flops()
-    assert measured == pytest.approx(float(LAYOUT.flops_for_documents(lengths)), rel=1e-12)
-
+    measured = float(LAYOUT.flops_for_documents(lengths))
     tokens = int(lengths.sum())
-    callback._compute_mfu(tokens, 0.5, measured)
-    callback._compute_smfu(tokens, 0.5, measured)
-    assert callback.state.total_flops == pytest.approx(tokens * LINEAR_FLOPS_PER_TOKEN + measured, rel=1e-12)
-    assert callback.state.total_active_flops == pytest.approx(
-        tokens * 0.5 * LINEAR_FLOPS_PER_TOKEN + measured, rel=1e-12
-    )
-    # The accumulator was reset by the drain.
-    assert callback._drain_measured_attention_flops() is None
+
+    dense, active = _step_tflops(monkeypatch, callback, tokens)
+    assert dense == pytest.approx(_tflops(tokens * LINEAR_FLOPS_PER_TOKEN + measured), abs=0.01)
+    assert active == pytest.approx(_tflops(tokens * 0.5 * LINEAR_FLOPS_PER_TOKEN + measured), abs=0.01)
+    # The accumulator was reset by the step's drain.
+    assert trainer.drain_attention_flops() == (0.0, 0)
 
 
 def test_the_measurement_differs_from_the_config_term_on_short_documents():
@@ -169,19 +195,17 @@ def test_the_measurement_differs_from_the_config_term_on_short_documents():
     assert float(LAYOUT.flops_for_documents(lengths)) < 0.25 * tokens * LAYOUT.flops_per_token(MAX_SEQ_LEN)
 
 
-def test_without_documents_the_step_keeps_the_config_term():
+def test_without_documents_the_step_keeps_the_config_term(monkeypatch):
     callback, trainer = _bound()
     trainer._accumulate_attention_flops({"chosen_input_ids": torch.zeros(1, 4)})
-    measured = callback._drain_measured_attention_flops()
-    assert measured is None
-    callback._compute_mfu(1000, 0.5, measured)
-    assert callback.state.total_flops == pytest.approx(1000 * callback.state.model_flops_per_token, rel=1e-12)
+    dense, _ = _step_tflops(monkeypatch, callback, 1000)
+    assert dense == pytest.approx(_tflops(1000 * callback.flops_model.model_flops_per_token), abs=0.01)
 
 
-def test_an_unbound_callback_keeps_the_config_term():
+def test_an_unbound_callback_keeps_the_config_term(monkeypatch):
     callback = _callback()
-    callback._compute_mfu(1000, 0.5, callback._drain_measured_attention_flops())
-    assert callback.state.total_flops == pytest.approx(1000 * callback.state.model_flops_per_token, rel=1e-12)
+    dense, _ = _step_tflops(monkeypatch, callback, 1000)
+    assert dense == pytest.approx(_tflops(1000 * callback.flops_model.model_flops_per_token), abs=0.01)
 
 
 @pytest.mark.parametrize("tp_size", (2, 4))

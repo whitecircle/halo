@@ -32,11 +32,11 @@ import pytest
 from accelerate import PartialState
 from transformers import TrainerState
 
+from src.entrypoints.run_setup import resume_checkpoint_from_config
 from src.runtime import collectives, filesystem
 from src.runtime.filesystem import is_fs_save_rank
 from src.runtime.ranks import get_global_rank
 from src.trainers.mixins.base import DistributedTrainerMixin
-from src.training.environment import detect_resume_checkpoint
 from tests.common.base_save import BaseTrainerSave
 from tests.common.gloo import run_gloo_ranks
 
@@ -144,14 +144,14 @@ def _worker(rank: int, root: str, per_node: bool, rewrite: bool, stop: str) -> N
         outcome["trainer_state_in_stopped_step"] = os.path.exists(os.path.join(stopped, TRAINER_STATE))
 
         # The explicit path first: an accepted resume moves the stopped step out of the namespace.
-        explicit = SimpleNamespace(output_dir=run_dir, resume_from_checkpoint=stopped, overwrite_output_dir=False)
+        explicit = SimpleNamespace(output_dir=run_dir, resume_from_checkpoint=stopped)
         try:
-            detect_resume_checkpoint(explicit)
+            resume_checkpoint_from_config(explicit, overwrite_output_dir=False)
             outcome["explicit"] = "accepted"
         except RuntimeError as e:
             outcome["explicit"] = str(e)
-        auto = SimpleNamespace(output_dir=run_dir, resume_from_checkpoint=True, overwrite_output_dir=False)
-        outcome["auto_resume"] = os.path.basename(detect_resume_checkpoint(auto))
+        auto = SimpleNamespace(output_dir=run_dir, resume_from_checkpoint=True)
+        outcome["auto_resume"] = os.path.basename(resume_checkpoint_from_config(auto, overwrite_output_dir=False))
     except Exception as e:  # the setup failing must still leave a verdict file for the assertions
         outcome["setup"] = f"{type(e).__name__}: {e}"
     finally:
@@ -215,8 +215,8 @@ def _uncommittable_worker(rank: int, root: str, per_node: bool, cause: str) -> N
         except RuntimeError as e:
             outcome["save"] = str(e)
         outcome["previous_kept"] = os.path.isfile(os.path.join(run_dir, "checkpoint-1", TRAINER_STATE))
-        auto = SimpleNamespace(output_dir=run_dir, resume_from_checkpoint=True, overwrite_output_dir=False)
-        resumed = detect_resume_checkpoint(auto)
+        auto = SimpleNamespace(output_dir=run_dir, resume_from_checkpoint=True)
+        resumed = resume_checkpoint_from_config(auto, overwrite_output_dir=False)
         outcome["auto_resume"] = resumed and os.path.basename(resumed)
     except Exception as e:  # the setup failing must still leave a verdict file for the assertions
         outcome["setup"] = f"{type(e).__name__}: {e}"

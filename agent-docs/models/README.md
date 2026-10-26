@@ -67,7 +67,7 @@ Every MoE family shares three settings:
 - **Expert compute** — [Grouped GEMM](../optimization/grouped-gemm.md) (`use_grouped_gemm`, default on at SM90+) batches the per-expert matmuls.
 - **Load balancing** — `moe_balancing`: `auto` (default), `aux_loss`, `bias_update` (DeepSeek-V3 auxiliary-loss-free bias, step size `router_balancing_rate`), `bias_update_transient`, or `none`.
 
-`auto` resolves per family ([Callbacks → `auto` resolution per family](../training-methods/callbacks.md#auto-resolution-per-family)); which families export an explicit `bias_update` is the slot table under [RouterBiasBalancingCallback](../training-methods/callbacks.md#routerbiasbalancingcallback).
+`auto` resolves per family ([Callbacks → `auto` resolution per family](../training-methods/callbacks.md#auto-resolution-per-family)); which families export an explicit `bias_update` is the slot table under [BalancingBiasCallback](../training-methods/callbacks.md#balancingbiascallback).
 
 `aux_loss` trains the routers only where the trainer's loss adds the term — SFT and KTO — and does so with or without gradient checkpointing ([Callbacks](../training-methods/callbacks.md#aux_loss-under-gradient-checkpointing)).
 

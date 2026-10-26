@@ -21,6 +21,7 @@ src/kernels/lowp/spec.py
 src/models/gradient_checkpointing.py
 src/models/moe/expert_lora_spec.py
 src/model_loading/parallel/**
+src/callbacks/balancing.py
 
 # Rollout-engine weight sync
 src/weight_sync/**

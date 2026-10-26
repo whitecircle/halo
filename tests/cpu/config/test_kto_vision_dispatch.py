@@ -23,6 +23,7 @@ import pytest
 from datasets import Dataset, DatasetDict
 from transformers.models.auto.configuration_auto import CONFIG_MAPPING
 
+from src.entrypoints.model_setup import PolicyLoad
 from tests.common.repo import load_script_module
 
 # Model ids the name heuristic reads the same way offline as against the hub, paired with a config
@@ -108,13 +109,13 @@ def _run_kto(
             logged.update(datasets)
         raise _TrainerHandoffReached
 
-    def load_model(*_args, **kwargs):
-        assert kwargs["preserve_checkpoint_precision"] is False
-        return model, types.SimpleNamespace(tokenizer=None), tokenizer, vlm_checkpoint
+    def load_model(context, *_args, **kwargs):
+        assert context is runtime, "the policy load must read the checkpoint identity off the script context"
+        return PolicyLoad(model, types.SimpleNamespace(tokenizer=None), tokenizer, vlm_checkpoint)
 
     patches = [
         mock.patch.object(module, "init_training_script", return_value=runtime),
-        mock.patch.object(module, "load_model_for_training", side_effect=load_model),
+        mock.patch.object(module, "load_policy_model", side_effect=load_model),
         mock.patch.object(module, "load_reference_model_for_preference", return_value=None),
         mock.patch.object(module, "apply_max_length", side_effect=lambda cfg, args, model, tok: tok),
         mock.patch.object(module, "install_resolved_tokenizer", side_effect=lambda pc, tok: pc),
@@ -122,11 +123,11 @@ def _run_kto(
         mock.patch.object(module, "log_model_info"),
         mock.patch.object(module, "load_script_datasets", return_value=(dataset, False)),
         mock.patch.object(module, "log_script_dataset_examples", side_effect=capture_and_stop),
-        mock.patch("src.training.parser.install_log_tee"),
+        mock.patch("src.entrypoints.script.install_log_tee"),
         mock.patch.object(sys, "argv", ["prog", str(config)]),
     ]
 
-    with mock.patch.object(module, "run_training", lambda fn: fn):
+    with mock.patch.object(module, "with_distributed_teardown", lambda fn: fn):
         for patch in patches:
             patch.start()
         try:

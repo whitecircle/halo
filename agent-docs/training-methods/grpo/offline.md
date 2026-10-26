@@ -92,7 +92,7 @@ The default path materializes `[B, T_completion, vocab]` logits, the memory peak
 
 ### MoE balancing
 
-`moe_balancing: aux_loss` warns and does nothing (a policy-gradient loss adds no router aux term), or raises at construction with `output_router_logits` on and a positive `router_aux_loss_coef`. `bias_update` works on a family whose bias exports ([Callbacks](../callbacks.md#routerbiasbalancingcallback)). The recipes set `none`.
+`moe_balancing: aux_loss` warns and does nothing (a policy-gradient loss adds no router aux term), or raises at construction with `output_router_logits` on and a positive `router_aux_loss_coef`. `bias_update` works on a family whose bias exports ([Callbacks](../callbacks.md#balancingbiascallback)). The recipes set `none`.
 
 ### Reference model
 

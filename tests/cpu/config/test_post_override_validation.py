@@ -1,16 +1,18 @@
 #!/usr/bin/env python
 """CLI overrides must clear the same guards a YAML value does.
 
-``H4ArgumentParser.parse_yaml_and_args`` builds each dataclass once from the YAML and the
+``HaloArgumentParser.parse_dict`` builds each dataclass once from the YAML and the
 ``--key=value`` overrides, so every guard ``__post_init__`` runs sees the CLI value. Guarded configs
-keep their guards in ``RangeValidatedConfig._validate_ranges``. These tests fail if a guard is
+keep their guards in ``ValidatedConfig._validate_fields``. These tests fail if a guard is
 dropped, if a guarded config stops running its chain, or if a Literal field's allowed set drifts
 from the runtime table it mirrors.
 
 Run: pytest tests/cpu/config/test_post_override_validation.py
 """
 
+import ast
 import inspect
+import textwrap
 from dataclasses import fields
 from pathlib import Path
 from typing import get_type_hints
@@ -18,9 +20,7 @@ from typing import get_type_hints
 import pytest
 from transformers import TrainingArguments
 
-from src.args.distributed_args import DistributedArguments
-from src.args.rlvr_online_grpo_args import RLVROnlineGRPOScriptArguments
-from src.config_validation import RangeValidatedConfig
+from src.config_validation import ValidatedConfig
 from src.configs.classification import ClassificationConfig
 from src.configs.distillation import (
     DistillationConfig,
@@ -29,16 +29,17 @@ from src.configs.distillation import (
     TeacherDistillScriptArguments,
 )
 from src.configs.embedding import EmbeddingConfig
-from src.configs.environment_config import EnvironmentConfig
-from src.configs.grpo_environmental import AsyncTrainingConfig
+from src.configs.grpo_environmental import AsyncTrainingConfig, EnvironmentConfig
 from src.configs.grpo_offline import OfflineGRPOConfig
+from src.configs.grpo_online import RLVROnlineGRPOScriptArguments
+from src.configs.parallelism_arguments import ParallelismArguments
+from src.configs.parser import HaloArgumentParser, _literal_choices
 from src.configs.preference import SmoothMarginPOConfig
+from src.configs.script_arguments import CheckpointArguments
+from src.entrypoints.script import init_training_script
 from src.env import DEFAULT_NCCL_TIMEOUT_MINUTES
-from src.environments.base import VALID_REASONING_EFFORTS
 from src.subclass_registry import iter_subclasses
 from src.trainers.distillation.losses import DIVERGENCES
-from src.training.parser import H4ArgumentParser, _literal_choices
-from src.training.script_runner import init_training_script
 
 # bf16/use_cpu keep TrainingArguments constructible on a GPU-less runner.
 _CPU_TAIL = "bf16: false\nuse_cpu: true\n"
@@ -51,8 +52,8 @@ def _parse(dataclass_type, tmp_path, overrides: list[str], yaml_body: str = ""):
         body += f"output_dir: {tmp_path / 'out'}\n" + _CPU_TAIL
     path = tmp_path / "config.yaml"
     path.write_text(body or "{}\n")
-    parser = H4ArgumentParser((dataclass_type,))
-    (parsed,) = parser.parse_yaml_and_args(str(path), overrides)
+    parser = HaloArgumentParser((dataclass_type,))
+    (parsed,) = parser.parse_dict(parser.load_values([str(path), *overrides]))
     return parsed
 
 
@@ -142,33 +143,38 @@ def test_classification_class_weight_exclusivity_survives_override(tmp_path):
         _parse(ClassificationConfig, tmp_path, ["--derive_class_weights=true"], "class_weights: [1.0, 2.0]\n")
 
 
-def test_every_range_validated_subclass_implements_and_calls_the_hook():
-    """Derived from the class hierarchy, not a hand list: inheriting the base without implementing
-    ``_validate_ranges`` runs no guard at all, and defining ``__post_init__`` without calling it leaves
-    the config unguarded."""
-    configs = iter_subclasses(RangeValidatedConfig)
-    assert configs, "no config routes through RangeValidatedConfig — the seam is dead"
+def test_every_validated_config_implements_the_hook_and_keeps_one_post_init_chain():
+    """Derived from the class hierarchy, not a hand list: a subclass implementing no ``_validate_fields`` runs
+    no guard, a ``__post_init__`` override that skips ``super().__post_init__()`` leaves the config unguarded,
+    and one that also calls ``_validate_fields`` validates twice."""
+    configs = iter_subclasses(ValidatedConfig)
+    assert configs, "no config routes through ValidatedConfig — the seam is dead"
     for cls in configs:
-        assert cls._validate_ranges is not RangeValidatedConfig._validate_ranges, (
-            f"{cls.__name__} inherits RangeValidatedConfig but never implements _validate_ranges"
+        assert cls._validate_fields is not ValidatedConfig._validate_fields, (
+            f"{cls.__name__} inherits ValidatedConfig but never implements _validate_fields"
         )
-        if "__post_init__" in cls.__dict__:
-            assert "_validate_ranges" in inspect.getsource(cls.__post_init__), (
-                f"{cls.__name__}.__post_init__ does not call _validate_ranges, so YAML values go unguarded"
+        override = cls.__dict__.get("__post_init__")
+        if override is not None:
+            source = inspect.getsource(override)
+            assert "super().__post_init__()" in source, (
+                f"{cls.__name__}.__post_init__ skips super().__post_init__(), so its fields go unguarded"
+            )
+            assert "_validate_fields" not in source, (
+                f"{cls.__name__}.__post_init__ calls _validate_fields beside the base hook, validating twice"
             )
 
 
-def test_every_validate_ranges_override_opens_the_cooperative_chain():
-    """``_validate_ranges`` is cooperative (the contract is stated on ``RangeValidatedConfig``): an
+def test_every_validate_fields_override_opens_the_cooperative_chain():
+    """``_validate_fields`` is cooperative (the contract is stated on ``ValidatedConfig``): an
     override that skips ``super()`` keeps only its own guards, so a class mixing two guarded bases
     silently drops one base's checks. ``OfflineGRPOConfig`` already mixes ``ChunkedLogprobsArguments``
-    with ``RangeValidatedConfig``, which puts it one guarded base away from that."""
-    for cls in iter_subclasses(RangeValidatedConfig):
-        override = cls.__dict__.get("_validate_ranges")
+    with ``ValidatedConfig``, which puts it one guarded base away from that."""
+    for cls in iter_subclasses(ValidatedConfig):
+        override = cls.__dict__.get("_validate_fields")
         if override is None:
             continue
-        assert "super()._validate_ranges()" in inspect.getsource(override), (
-            f"{cls.__name__}._validate_ranges does not open with super()._validate_ranges(), so any "
+        assert "super()._validate_fields()" in inspect.getsource(override), (
+            f"{cls.__name__}._validate_fields does not open with super()._validate_fields(), so any "
             f"guarded base earlier in its MRO is skipped"
         )
 
@@ -177,26 +183,41 @@ def test_dead_knobs_are_rejected_not_ignored():
     """``num_labels`` (derived from the dataset) and ``partial_reward`` (no reward tier the grader
     ever pays) would be settable no-ops; the parser refuses them."""
     for parser, key in (
-        (H4ArgumentParser((ClassificationConfig,)), "num_labels"),
-        (H4ArgumentParser((EnvironmentConfig,)), "partial_reward"),
+        (HaloArgumentParser((ClassificationConfig,)), "num_labels"),
+        (HaloArgumentParser((EnvironmentConfig,)), "partial_reward"),
     ):
         with pytest.raises(ValueError, match=key):
             parser.parse_dict({key: 2})
 
 
-@pytest.mark.parametrize("field_name", ["save_max_shard_size", "overwrite_output_dir", "allow_optimizer_warm_restart"])
-def test_distributed_only_knob_is_forwarded_to_the_training_config(field_name):
-    """These knobs are declared ONLY on DistributedArguments, but every consumer reads them off the
+@pytest.mark.parametrize("field_name", ["save_max_shard_size", "allow_optimizer_warm_restart"])
+def test_checkpoint_knob_is_forwarded_to_the_training_config(field_name):
+    """These knobs are declared ONLY on CheckpointArguments, but every consumer reads them off the
     HF/TRL training config (``self.args`` / ``training_config``). The parser routes a YAML key only
     to the dataclass declaring it, so without ``init_training_script``'s forward the reads always
     take their ``getattr(..., default)`` fallback and the knobs are unsettable in practice."""
-    declared = {f.name for f in fields(DistributedArguments)}
+    declared = {f.name for f in fields(CheckpointArguments)}
     assert field_name in declared
     assert field_name not in {f.name for f in fields(TrainingArguments)}, (
         f"{field_name} is now native to TrainingArguments — the forward is redundant, drop one"
     )
     forwarder = Path(inspect.getfile(init_training_script)).read_text()
     assert field_name in forwarder, f"init_training_script no longer forwards {field_name} onto training_config"
+
+
+def test_overwrite_output_dir_reaches_both_output_dir_guards():
+    """The flag is declared ONLY on CheckpointArguments, and the parser routes a YAML key only to the
+    dataclass declaring it: ``init_training_script`` hands it to the setup guard and to the resume one
+    (a resume that finds nothing re-runs the guard), or an overwrite request still refuses the run."""
+    tree = ast.parse(textwrap.dedent(inspect.getsource(init_training_script)))
+    handed = {
+        call.func.id
+        for call in ast.walk(tree)
+        if isinstance(call, ast.Call) and isinstance(call.func, ast.Name)
+        for keyword in call.keywords
+        if keyword.arg == "overwrite_output_dir" and ast.unparse(keyword.value) == "args.overwrite_output_dir"
+    }
+    assert handed == {"configure_training_run", "prepare_distributed_resume"}, handed
 
 
 def test_offline_grpo_max_completion_length_defaults_to_none():
@@ -208,15 +229,6 @@ def test_offline_grpo_max_completion_length_defaults_to_none():
 def test_async_episode_timeout_default_clears_the_watchdog_warning():
     """The shipped default must not trip AsyncTrainingConfig's own >= 0.8 * NCCL-watchdog warning."""
     assert AsyncTrainingConfig.episode_timeout < 0.8 * DEFAULT_NCCL_TIMEOUT_MINUTES * 60
-
-
-def test_reasoning_effort_literal_matches_its_runtime_table():
-    """The field restates VALID_REASONING_EFFORTS because importing it would drag the environments
-    package into the arg dataclasses. Pin the equality — via the parser's own choice extractor — so
-    the restatement cannot drift."""
-    declared = _literal_choices(get_type_hints(RLVROnlineGRPOScriptArguments)["reasoning_effort"])
-    assert declared is not None, "reasoning_effort is not Literal-annotated, so the parser cannot gate it"
-    assert set(declared) == {*VALID_REASONING_EFFORTS, "random", None}
 
 
 # Each distillation arm admits its own slice of the one divergence registry.
@@ -253,7 +265,7 @@ def test_unknown_pipeline_schedule_is_rejected_at_parse_time(tmp_path):
     path = tmp_path / "config.yaml"
     path.write_text("pipeline_schedule: 1f1c\n")
     with pytest.raises(ValueError, match="pipeline_schedule"):
-        H4ArgumentParser((DistributedArguments,)).parse_yaml_file(str(path))
+        HaloArgumentParser((ParallelismArguments,)).parse_yaml_file(str(path))
 
 
 def test_unknown_reasoning_effort_is_rejected_at_parse_time(tmp_path):

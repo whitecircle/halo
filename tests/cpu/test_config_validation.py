@@ -1,14 +1,22 @@
-"""The declared-default comparison and the argument refusals: a parsed knob a script cannot honor raises
-instead of being dropped, read off its truthiness or against the field's declared default.
+"""The config validation seam: the guard hook every validated config runs, the declared-default comparison
+and the argument refusals (a parsed knob a script cannot honor raises instead of being dropped).
 
 python tests/cpu/test_config_validation.py
 """
 
+import re
 from dataclasses import dataclass, field
 
 import pytest
 
-from src.config_validation import differs_from_default, reject_non_default_args, reject_unsupported_args
+from src.config_validation import (
+    ValidatedConfig,
+    differs_from_default,
+    reject_non_default_args,
+    reject_unsupported_args,
+    require_finite,
+    require_int,
+)
 from src.configs.distillation import SelfDistillScriptArguments
 
 
@@ -17,6 +25,72 @@ class _Knobs:
     path: str
     count: int = 50
     names: list[str] = field(default_factory=list)
+
+
+# require_finite / require_int: the bounds vocabulary every guard renders its refusal in
+
+
+@pytest.mark.parametrize(
+    ("bounds", "value", "message"),
+    [
+        ({"gt": 0}, 0, "Cfg: knob must be > 0, got 0"),
+        ({"ge": 0, "why": " (0 = off)"}, -1.5, "Cfg: knob must be >= 0 (0 = off), got -1.5"),
+        ({"gt": 0, "le": 1}, 1.5, "Cfg: knob must be in (0, 1], got 1.5"),
+        ({"ge": 0, "lt": 1}, 1, "Cfg: knob must be in [0, 1), got 1"),
+        ({}, float("nan"), "Cfg: knob must be a finite number, got nan"),
+        ({"gt": 0}, True, "Cfg: knob must be a finite number, got True"),
+    ],
+)
+def test_require_finite_refuses_with_the_rendered_bound(bounds, value, message):
+    with pytest.raises(ValueError, match=f"^{re.escape(message)}$"):
+        require_finite("Cfg", **bounds, knob=value)
+
+
+def test_require_finite_checks_every_value_finite_before_any_bound():
+    with pytest.raises(ValueError, match="b must be a finite number"):
+        require_finite("Cfg", gt=0, a=0, b=float("inf"))
+
+
+@pytest.mark.parametrize(
+    ("bounds", "value", "message"),
+    [
+        ({"ge": 1}, 0, "Cfg: knob must be an integer >= 1, got 0"),
+        ({"ge": 1}, 2.0, "Cfg: knob must be an integer >= 1, got 2.0"),
+        ({}, True, "Cfg: knob must be an integer, got True"),
+    ],
+)
+def test_require_int_refuses_a_non_int_and_an_out_of_bound_int_alike(bounds, value, message):
+    with pytest.raises(ValueError, match=f"^{re.escape(message)}$"):
+        require_int("Cfg", **bounds, knob=value)
+
+
+def test_in_bound_values_pass():
+    require_finite("Cfg", gt=0, le=1, a=1, b=0.5)
+    require_int("Cfg", ge=0, a=0, b=7)
+
+
+# ValidatedConfig: the guards run on construction, before the next __post_init__ in the MRO
+
+
+def test_validated_config_guards_before_the_next_post_init():
+    """TrainingArguments derives state in its own ``__post_init__``; the guards must see the parsed values first."""
+    calls = []
+
+    @dataclass
+    class _Upstream:
+        def __post_init__(self):
+            calls.append("upstream")
+
+    @dataclass
+    class _Guarded(ValidatedConfig, _Upstream):
+        value: int = 1
+
+        def _validate_fields(self):
+            super()._validate_fields()
+            calls.append("guard")
+
+    _Guarded()
+    assert calls == ["guard", "upstream"]
 
 
 # differs_from_default: whether a config set a field, read off its declared default

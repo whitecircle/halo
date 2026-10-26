@@ -82,7 +82,8 @@ def test_client_reuses_one_stream_pair_across_syncs():
     pass the same list into every producer call — dropping ``streams=``, or re-creating them per
     sync, reintroduces the production ratchet while the producer-contract test stays green."""
     client = offline_client(VLLMWeightSyncClient)
-    client.communicator = SimpleNamespace(device=torch.device("cuda", torch.cuda.current_device()), aborted=False)
+    client._sync_device = torch.device("cuda", torch.cuda.current_device())
+    client._transport = SimpleNamespace(device=client._sync_device, aborted=False)
 
     captured = []
 
@@ -119,7 +120,8 @@ def test_reconnected_clients_reuse_one_pool():
     ):
         for _ in range(_CLIENTS):
             client = offline_client(VLLMWeightSyncClient)
-            client.communicator = _SinkCommunicator(device)
+            client._sync_device = device
+            client._transport = _SinkCommunicator(device)
             push(client, params)
             client.close_communicator()
             torch.cuda.synchronize()

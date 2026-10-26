@@ -22,7 +22,7 @@ import torch.nn as nn
 from peft import LoraConfig, get_peft_model
 from transformers import PretrainedConfig
 
-from src.distributed.expert_parallel.balancing_strategy import apply_balancing_strategy
+from src.callbacks.balancing import apply_balancing_mode
 from src.model_loading.liger.cross_entropy import build_lce_forward
 from src.models.moe_balancing import _WARNED_UNSERVABLE_AUTO, resolve_balancing_mode
 
@@ -69,12 +69,12 @@ def test_auto_never_resolves_to_the_mode_this_tree_refuses():
     """``auto`` must never pick ``aux_loss`` where the strategy then raises on it.
 
     Pinned as the invariant rather than the string: whatever ``auto`` returns must survive
-    ``apply_balancing_strategy``, the same call ``build_perf_callbacks`` makes.
+    ``apply_balancing_mode``, the same call ``configure_moe_balancing`` makes.
     """
     model = _NoRouterLogitFlag()
     mode = _resolve(model)
     assert mode == "none", f"auto resolved to {mode!r} on a tree that can serve neither balancing route"
-    apply_balancing_strategy(model, mode, is_moe=True)  # must not raise: auto's verdict is applicable
+    apply_balancing_mode(model, mode, is_moe=True)  # must not raise: auto's verdict is applicable
 
 
 def test_auto_says_why_it_gave_up_on_balancing(caplog):
@@ -118,7 +118,7 @@ def test_a_fused_loss_bound_on_the_instance_alone_is_seen():
     model.forward = MethodType(build_lce_forward(router_aux_loss_in_head=True), model)
     mode = _resolve(model)
     assert mode == "none", f"auto resolved to {mode!r} off the class while the instance runs a fused loss"
-    apply_balancing_strategy(model, mode, is_moe=True)
+    apply_balancing_mode(model, mode, is_moe=True)
     assert not getattr(model.config, "output_router_logits", False), (
         "the strategy enabled a flag the fused forward refuses"
     )
@@ -128,18 +128,18 @@ def test_auto_still_picks_aux_loss_where_the_forward_honours_the_flag():
     """Anti-over-rejection: the resolution must not disarm balancing for the families that do honour it."""
     model = _HonorsRouterLogitFlag()
     assert _resolve(model) == "aux_loss"
-    apply_balancing_strategy(model, "aux_loss", is_moe=True)
+    apply_balancing_mode(model, "aux_loss", is_moe=True)
     assert model.config.output_router_logits is True, "the aux-loss strategy must still enable router logits"
 
 
 def test_an_explicit_aux_loss_still_raises_loudly():
     """The guard is not weakened: an explicit mode this model cannot honour dies at config time.
 
-    Config time, not step 1 — this is the call ``build_perf_callbacks`` makes while wiring the
+    Config time, not step 1 — this is the call ``configure_moe_balancing`` makes while wiring the
     callbacks, before any training step runs.
     """
     with pytest.raises(ValueError, match="does not take output_router_logits"):
-        apply_balancing_strategy(_NoRouterLogitFlag(), "aux_loss", is_moe=True)
+        apply_balancing_mode(_NoRouterLogitFlag(), "aux_loss", is_moe=True)
 
 
 if __name__ == "__main__":

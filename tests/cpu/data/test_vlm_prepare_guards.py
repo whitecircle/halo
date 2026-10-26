@@ -16,7 +16,7 @@ from datasets import Dataset, DatasetDict
 
 from src.data.pipeline import vlm_dataset
 from src.data.pipeline.vlm_dataset import prepare_vlm_dataset, vlm_map_features
-from src.distributed.loading import vlm_setup
+from src.entrypoints import model_setup
 
 
 def _args(**overrides) -> types.SimpleNamespace:
@@ -92,12 +92,12 @@ def test_pinned_schema_with_kept_columns_is_refused_at_the_seam():
 
 def test_the_vlm_loader_takes_the_modality_verdict_instead_of_re_probing(monkeypatch):
     """``probe_checkpoint`` enters the ``vlm_probe`` c10d-store phase, and only multimodal runs reach
-    ``load_vlm_model_and_processor``. Probing again from inside that branch makes the phase count
+    ``_load_vlm_model_and_processor``. Probing again from inside that branch makes the phase count
     rank-dependent the moment two ranks disagree on the verdict, leaving the peers waiting on a key
     nobody writes. The caller owns the verdict, so this loader must reach the processor without it."""
 
     def _must_not_probe(*args, **kwargs):
-        raise AssertionError("load_vlm_model_and_processor re-entered the vlm_probe store phase")
+        raise AssertionError("_load_vlm_model_and_processor re-entered the vlm_probe store phase")
 
     class _Sentinel(Exception):
         pass
@@ -105,12 +105,12 @@ def test_the_vlm_loader_takes_the_modality_verdict_instead_of_re_probing(monkeyp
     def _processor_reached(*args, **kwargs):
         raise _Sentinel
 
-    monkeypatch.setattr(vlm_setup, "probe_checkpoint", _must_not_probe)
+    monkeypatch.setattr(model_setup, "probe_checkpoint", _must_not_probe)
     # The processor load is the loader's first step; reaching it proves no probe ran.
-    monkeypatch.setattr(vlm_setup, "load_vlm_processor", _processor_reached)
+    monkeypatch.setattr(model_setup, "load_vlm_processor", _processor_reached)
     model_config = types.SimpleNamespace(model_name_or_path="Qwen/Qwen3-4B", model_revision=None)
     with pytest.raises(_Sentinel):
-        vlm_setup.load_vlm_model_and_processor(model_config, None, None, vlm_run=True)
+        model_setup._load_vlm_model_and_processor(None, None, model_config, None, vlm_run=True, attn_default=None)
 
 
 if __name__ == "__main__":

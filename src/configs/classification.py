@@ -5,7 +5,7 @@ from typing import ClassVar, Literal
 
 from transformers import TrainingArguments
 
-from src.config_validation import RangeValidatedConfig, present, require_finite, require_int
+from src.config_validation import ValidatedConfig, present, require_finite, require_int
 from src.configs.script_arguments import CommonScriptArguments, DatasetNumProcArguments
 
 
@@ -23,7 +23,7 @@ class ClassificationScriptArguments(CommonScriptArguments):
 
 
 @dataclass
-class ClassificationConfig(DatasetNumProcArguments, RangeValidatedConfig, TrainingArguments):
+class ClassificationConfig(DatasetNumProcArguments, ValidatedConfig, TrainingArguments):
     r"""TrainingArguments for [`ClassificationTrainer`]; per-field docs are in each field's ``help`` metadata."""
 
     max_length: int | None = field(
@@ -33,10 +33,7 @@ class ClassificationConfig(DatasetNumProcArguments, RangeValidatedConfig, Traini
             "dataset handed to the trainer is filtered to it. Unset or non-positive = the model's context window."
         },
     )
-    disable_dropout: bool = field(
-        default=True,
-        metadata={"help": "Whether to disable dropout in the model."},
-    )
+    disable_dropout: bool = field(default=True, metadata={"help": "Whether to disable dropout in the model."})
     remove_unused_columns: bool = field(
         default=False,
         metadata={
@@ -44,7 +41,6 @@ class ClassificationConfig(DatasetNumProcArguments, RangeValidatedConfig, Traini
             "if the dataset is pretokenized."
         },
     )
-
     loss_type: Literal["cross_entropy", "focal", "label_smoothing_ce"] = field(
         default="cross_entropy",
         metadata={
@@ -88,7 +84,6 @@ class ClassificationConfig(DatasetNumProcArguments, RangeValidatedConfig, Traini
             "in the training set (sklearn 'balanced' strategy). Mutually exclusive with class_weights."
         },
     )
-
     multi_label_threshold: float = field(
         default=0.5,
         metadata={
@@ -115,12 +110,8 @@ class ClassificationConfig(DatasetNumProcArguments, RangeValidatedConfig, Traini
         },
     )
 
-    def __post_init__(self):
-        self._validate_ranges()
-        super().__post_init__()
-
-    def _validate_ranges(self) -> None:
-        super()._validate_ranges()
+    def _validate_fields(self) -> None:
+        super()._validate_fields()
         owner = type(self).__name__
         require_finite(owner, focal_gamma=self.focal_gamma, label_smoothing=self.label_smoothing)
         if self.focal_gamma < 0:

@@ -5,7 +5,7 @@ formation fails.
 product — SGLang's c10d group + rendezvous TCPStore, vLLM's ncclComm — can already exist while the
 client attribute that owns it is still ``None``. Leaking it is not a spare object: c10d keeps the
 process-global registration under the derived group name and the store keeps its listener on the
-group port, so ``reconnect_client`` rebuilds the same name and torch refuses it ("The specified
+group port, so a reconnect rebuilds the same name and torch refuses it ("The specified
 group name has already been created") — the server becomes permanently unreachable for weight sync
 without restarting the trainer. The vLLM twin leaks an ncclComm and the device memory NCCL pinned
 for it for the life of the process.
@@ -22,6 +22,7 @@ import threading
 
 import pytest
 
+import src.weight_sync.clients.base as base_module
 import src.weight_sync.clients.sglang as sglang_module
 import src.weight_sync.clients.vllm as vllm_module
 from src.weight_sync.clients.sglang import SGLangWeightSyncClient
@@ -30,17 +31,6 @@ from tests.common.ports import free_port
 from tests.common.weight_sync import offline_client
 
 _SERVER_REFUSED = "server refused the group-init request"
-
-
-class _FakeResponse:
-    def __init__(self, payload: dict):
-        self._payload = payload
-
-    def raise_for_status(self):
-        return None
-
-    def json(self):
-        return self._payload
 
 
 def _recording_destroy(destroyed: list):
@@ -54,12 +44,9 @@ def _recording_destroy(destroyed: list):
 
 
 def _failing_server_call(built: threading.Event):
-    """Stand-in for the engine's routes: ``/get_world_size`` reports one rank, and the group-init POST
-    fails only once the local half has succeeded."""
+    """Stand-in for the engine's group-init POST: it fails only once the local half has succeeded."""
 
     def request(method, path, **kwargs):
-        if path == "/get_world_size":
-            return _FakeResponse({"world_size": 1})
         assert built.wait(timeout=30), "the local half never completed — test would not exercise the leak window"
         raise RuntimeError(_SERVER_REFUSED)
 
@@ -77,7 +64,7 @@ def test_sglang_releases_a_group_it_formed_when_the_server_half_fails(monkeypatc
         built.set()
         return group, store
 
-    monkeypatch.setattr(client, "fetch_engine_world_size", lambda: 1)
+    monkeypatch.setattr(client, "_fetch_engine_world_size", lambda: 1)
     monkeypatch.setattr(client, "_destroy_remote_group", lambda: None)
     monkeypatch.setattr(client, "request", _failing_server_call(built))
     monkeypatch.setattr(sglang_module, "build_weight_update_group", fake_create)
@@ -91,7 +78,7 @@ def test_sglang_releases_a_group_it_formed_when_the_server_half_fails(monkeypatc
         f"registration under the derived group name survives and every later reconnect to this server "
         f"is refused with 'group name has already been created'"
     )
-    assert client._group is None and client._store is None
+    assert client._transport is None
 
 
 def test_sglang_releases_the_group_when_the_local_half_cannot_even_start(monkeypatch):
@@ -103,24 +90,24 @@ def test_sglang_releases_the_group_when_the_local_half_cannot_even_start(monkeyp
     client = offline_client(SGLangWeightSyncClient, "http://localhost:30000", group_port=port)
 
     destroyed: list[object] = []
-    real_async_call = sglang_module.AsyncCall
+    real_async_call = base_module.AsyncCall
 
     def no_threads(fn, name="server call"):
         if name == "weight-update group formation":
             raise RuntimeError("can't start new thread")
         return real_async_call(fn, name=name)
 
-    monkeypatch.setattr(client, "fetch_engine_world_size", lambda: 1)
+    monkeypatch.setattr(client, "_fetch_engine_world_size", lambda: 1)
     monkeypatch.setattr(client, "_destroy_remote_group", lambda: None)
-    monkeypatch.setattr(client, "request", lambda method, path, **kwargs: _FakeResponse({}))
-    monkeypatch.setattr(sglang_module, "AsyncCall", no_threads)
+    monkeypatch.setattr(client, "request", lambda method, path, **kwargs: None)
+    monkeypatch.setattr(base_module, "AsyncCall", no_threads)
     monkeypatch.setattr(sglang_module, "release_weight_update_group", _recording_destroy(destroyed))
 
     with pytest.raises(RuntimeError, match="can't start new thread"):
         client.init_communicator(device="cpu")
 
-    assert destroyed == [None], "the failure handler skipped _release_group, so the group name stays claimed"
-    assert client._group is None and client._store is None
+    assert destroyed == [None], "the failure handler skipped _release_transport, so the group name stays claimed"
+    assert client._transport is None
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as rebind:
         rebind.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         rebind.bind(("127.0.0.1", port))  # EADDRINUSE while the listener no store took is still open
@@ -148,7 +135,7 @@ def test_vllm_aborts_a_communicator_it_built_when_the_server_half_fails(monkeypa
         def close(self):
             closed.append("close")
 
-    monkeypatch.setattr(client, "_probe_generation", lambda *a, **kw: None)
+    monkeypatch.setattr(client, "_fetch_engine_world_size", lambda: 1)
     monkeypatch.setattr(client, "request", _failing_server_call(built))
     monkeypatch.setattr(vllm_module, "UniqueIdStore", _FakeStore)
     monkeypatch.setattr(vllm_module, "PyNcclCommunicator", _FakeCommunicator)
@@ -161,7 +148,7 @@ def test_vllm_aborts_a_communicator_it_built_when_the_server_half_fails(monkeypa
         "pinned for it leak for the life of the trainer process"
     )
     assert closed == ["close"], "the unique-id store must still be closed so its port can be rebound"
-    assert client.communicator is None
+    assert client._transport is None
 
 
 if __name__ == "__main__":

@@ -2,7 +2,7 @@
 """Contracts every training entry script must uphold.
 
 - Loader-kwarg threading: any module calling ``load_distributed_model`` (the scripts, and the
-  shared ``script_runner.load_script_model`` they route through) must thread
+  shared ``model_setup.load_model_and_tokenizer`` they route through) must thread
   ``revision=`` and ``quantization_config=`` (or explicitly reject quantization via a
   ``get_quantization_config`` guard, like embedding.py). A missing kwarg silently loads hub
   ``main`` instead of a pinned ``model_revision``, or trains full-precision under a QLoRA YAML.
@@ -58,13 +58,13 @@ def _named_calls(tree: ast.AST, func_name: str) -> list[ast.Call]:
 # Loader-kwarg threading (revision + quantization_config)
 
 
-# Every training script loads through ``script_runner.load_script_model`` or
-# ``vlm_setup.load_model_for_training``, both of which route the one ``load_distributed_model`` call
-# through ``vlm_setup.load_model_consuming_init_kwargs``; a script may still call the loader directly,
+# Every training script loads through ``model_setup.load_model_and_tokenizer`` or
+# ``model_setup.load_policy_model``, both of which route the one ``load_distributed_model`` call
+# through ``model_setup._load_policy``; a script may still call the loader directly,
 # so all are held to the same contract. The shared helper is listed explicitly because a vacuous
 # parametrization (all scripts skipping) would silently stop testing anything —
 # ``test_loader_contract_is_not_vacuous`` pins that.
-_LOADER_CALL_SITES = [*_TRAINING_SCRIPTS, REPO_ROOT / "src" / "distributed" / "loading" / "vlm_setup.py"]
+_LOADER_CALL_SITES = [*_TRAINING_SCRIPTS, REPO_ROOT / "src" / "entrypoints" / "model_setup.py"]
 
 
 def _threads_loader_kwargs(script: Path) -> bool:
@@ -90,7 +90,7 @@ def test_loader_contract_is_not_vacuous():
     threading = [p for p in _LOADER_CALL_SITES if _threads_loader_kwargs(p)]
     assert threading, (
         "No load_distributed_model call site found across the training scripts or "
-        "src/distributed/loading/vlm_setup.py — the loader-kwarg contract is no longer tested. "
+        "src/entrypoints/model_setup.py — the loader-kwarg contract is no longer tested. "
         "Add the module that now owns the load."
     )
 
@@ -125,12 +125,12 @@ def test_training_script_index_is_nonempty():
 
 # Modality detection must read the SAME commit the weights load from
 
-# script_runner.py holds the scripts' ``resolve_vlm_run``, whose ``probe_checkpoint`` call is where their
+# data_setup.py holds the scripts' ``resolve_vlm_run``, whose ``probe_checkpoint`` call is where their
 # pin is threaded.
 _VLM_PROBE_CALL_SITES = [
     *_TRAINING_SCRIPTS,
-    REPO_ROOT / "src" / "distributed" / "loading" / "vlm_setup.py",
-    REPO_ROOT / "src" / "training" / "script_runner.py",
+    REPO_ROOT / "src" / "entrypoints" / "model_setup.py",
+    REPO_ROOT / "src" / "entrypoints" / "data_setup.py",
 ]
 
 
@@ -298,7 +298,7 @@ def _run_main_with_yaml(module, yaml_body: str, tmp_path: Path):
     )
     # The log tee redirects the process's stdout/stderr fds — keep it out of the test process.
     with (
-        mock.patch("src.training.parser.install_log_tee"),
+        mock.patch("src.entrypoints.script.install_log_tee"),
         mock.patch.object(sys, "argv", ["prog", str(config)]),
     ):
         module.main()
@@ -338,7 +338,7 @@ def test_smpo_refuses_a_vlm_run_under_cp_or_pp_before_the_model_load(tmp_path, a
     with (
         mock.patch.object(module, "init_training_script"),
         mock.patch.object(module, "load_script_datasets", return_value=({}, False)),
-        mock.patch.object(module, "load_model_for_training", side_effect=AssertionError("the model load ran")),
+        mock.patch.object(module, "load_policy_model", side_effect=AssertionError("the model load ran")),
     ):
         with (
             mock.patch.object(module, "resolve_vlm_run", return_value=True),
@@ -390,7 +390,7 @@ def test_no_script_calls_bare_get_peft_config(script: Path):
 _TOKENIZER_SEAMS = (
     "apply_max_length",
     "apply_prompt_completion_window",
-    "apply_context_window",
+    "apply_tokenizer_window",
     "configure_run_tokenizer",
 )
 
@@ -441,6 +441,26 @@ def test_scripts_bind_the_tokenizer_their_length_seam_returns(script: Path):
         assert not seen, f"{script}: now calls a length seam — drop it from _NO_TOKENIZER_SEAM."
     else:
         assert seen, f"{script}: calls no tokenizer length seam ({', '.join(_TOKENIZER_SEAMS)})."
+
+
+@pytest.mark.parametrize(
+    "script",
+    _TRAINING_SCRIPTS,
+    ids=[str(p.relative_to(_TRAINING_DIR)) for p in _TRAINING_SCRIPTS],
+)
+def test_init_training_script_takes_the_parsed_parallelism_arguments(script: Path):
+    """``init_training_script`` builds the ``ParallelismConfig`` from its fourth argument, so handing
+    it any other parsed dataclass fails the run at the config build, after the process group is up."""
+    tree = ast.parse(script.read_text(encoding="utf-8"))
+    (parse_call,) = _named_calls(tree, "parse_script_args")
+    slot = [argument.id for argument in parse_call.args].index("ParallelismArguments")
+    (target,) = _assigned_targets(tree, parse_call)
+    parsed_name = target.elts[slot].id
+    (init_call,) = _named_calls(tree, "init_training_script")
+    assert ast.unparse(init_call.args[3]) == parsed_name, (
+        f"{script}: init_training_script gets {ast.unparse(init_call.args[3])!r}, not the parsed "
+        f"ParallelismArguments {parsed_name!r}"
+    )
 
 
 @pytest.mark.parametrize("rel_path", ["online_grpo/rlvr.py", "environmental_grpo.py"])

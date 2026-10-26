@@ -1,11 +1,8 @@
-"""Validation every config class shares: the value guards, the range-validation base the guarded
-script-argument and trainer-config classes inherit, the declared-default comparison, and the refusals of
-parsed knobs a script cannot honor.
+"""Validation every config class shares: the bounds guards, the validation base guarded configs inherit, the
+declared-default comparison, and the refusals of parsed knobs a script cannot honor.
 
-A NaN passes every ordered comparison, so a bare range check (``value <= 0``) admits it; the value guards
-check finiteness first. A bool is an int subclass that a range check reads as 0 or 1, so every value
-guard refuses it.
-"""
+A NaN passes every ordered comparison and a bool is an int a range check reads as 0 or 1, so the guards refuse
+both before any bound applies."""
 
 import math
 from dataclasses import MISSING, fields
@@ -17,47 +14,54 @@ def present(**values: Any) -> dict[str, Any]:
     return {key: value for key, value in values.items() if value is not None}
 
 
-def require_finite(owner: str, **values: Any) -> None:
+def _check_bounds(owner: str, values: dict[str, Any], *, integer: bool, gt, ge, lt, le, why: str) -> None:
+    """Raise on the first of ``values`` the bounds exclude (or, ``integer``, that is no int) as
+    ``"<owner>: <key> must be [an integer] <bounds><why>, got <value>"``; two bounds read as an interval."""
+    if (gt is not None or ge is not None) and (lt is not None or le is not None):
+        opening, low = ("(", gt) if gt is not None else ("[", ge)
+        closing, high = (")", lt) if lt is not None else ("]", le)
+        bounds = f"in {opening}{low}, {high}{closing}"
+    else:
+        bounds = next((f"{op} {b}" for op, b in ((">", gt), (">=", ge), ("<", lt), ("<=", le)) if b is not None), "")
+    requirement = " ".join(part for part in ("an integer" if integer else "", bounds) if part)
+    for key, value in values.items():
+        if (
+            (integer and (isinstance(value, bool) or not isinstance(value, int)))
+            or (gt is not None and value <= gt)
+            or (ge is not None and value < ge)
+            or (lt is not None and value >= lt)
+            or (le is not None and value > le)
+        ):
+            raise ValueError(f"{owner}: {key} must be {requirement}{why}, got {value!r}")
+
+
+def require_finite(owner: str, *, gt=None, ge=None, lt=None, le=None, why: str = "", **values: Any) -> None:
+    """Refuse a value that is not a finite number, then one outside the given bounds."""
     for key, value in values.items():
         if isinstance(value, bool) or not isinstance(value, int | float) or not math.isfinite(value):
             raise ValueError(f"{owner}: {key} must be a finite number, got {value!r}")
+    _check_bounds(owner, values, integer=False, gt=gt, ge=ge, lt=lt, le=le, why=why)
 
 
-def require_positive(owner: str, **values: Any) -> None:
-    require_finite(owner, **values)
-    for key, value in values.items():
-        if value <= 0:
-            raise ValueError(f"{owner}: {key} must be > 0, got {value!r}")
+def require_int(owner: str, *, gt=None, ge=None, lt=None, le=None, why: str = "", **values: Any) -> None:
+    """Refuse anything but an int inside the given bounds; a float would stand in for a count."""
+    _check_bounds(owner, values, integer=True, gt=gt, ge=ge, lt=lt, le=le, why=why)
 
 
-def require_int(owner: str, *, minimum: int | None = None, **values: Any) -> None:
-    """Refuse anything but an int (at least ``minimum`` when given); a float would stand in for a count."""
-    for key, value in values.items():
-        if isinstance(value, bool) or not isinstance(value, int) or (minimum is not None and value < minimum):
-            bound = "" if minimum is None else f" >= {minimum}"
-            raise ValueError(f"{owner}: {key} must be an integer{bound}, got {value!r}")
+class ValidatedConfig:
+    """Base for configs whose fields carry guards: ``__post_init__`` runs the cooperative :meth:`_validate_fields`
+    chain (each override opens with ``super()._validate_fields()``), then the next ``__post_init__`` in the MRO
+    (``TrainingArguments``'). The parser builds each dataclass once from the merged YAML and CLI values, so the
+    guards see CLI overrides too. A class that normalizes a field first overrides ``__post_init__`` and ends it
+    with ``super().__post_init__()``."""
 
+    def __post_init__(self) -> None:
+        self._validate_fields()
+        next_hook = getattr(super(), "__post_init__", None)
+        if next_hook is not None:
+            next_hook()
 
-def require_positive_int(owner: str, **values: Any) -> None:
-    require_int(owner, minimum=1, **values)
-
-
-class RangeValidatedConfig:
-    """Base for configs whose ``__post_init__`` holds numeric/range guards.
-
-    Subclasses put their guards in :meth:`_validate_ranges` and call it from ``__post_init__``, which
-    sees every value, CLI overrides included: ``H4ArgumentParser`` builds each dataclass once from the
-    merged YAML and CLI values.
-
-    :meth:`_validate_ranges` is cooperative — an implementation opens with
-    ``super()._validate_ranges()`` so a class mixing two guarded bases runs both instead of the MRO
-    keeping only the first. This base terminates the chain, hence a no-op rather than a raise; a
-    subclass that inherits the base and implements nothing is caught by
-    ``tests/cpu/config/test_post_override_validation.py``, which compares each subclass's bound
-    method against this one.
-    """
-
-    def _validate_ranges(self) -> None:
+    def _validate_fields(self) -> None:
         """No-op terminator for the cooperative chain."""
 
 
@@ -76,7 +80,6 @@ def differs_from_default(args: Any, name: str) -> bool:
 
 
 def _reject_ignored_fields(context: str, set_fields: list[str]) -> None:
-    """Shared raise for both rejection forms, so they report the same way."""
     if set_fields:
         raise ValueError(
             f"{context} does not support these config fields (they would be silently ignored): "

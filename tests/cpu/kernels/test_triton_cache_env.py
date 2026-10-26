@@ -24,9 +24,9 @@ import tempfile
 import pytest
 from accelerate.state import PartialState
 
+from src.entrypoints.run_setup import configure_training_run
 from src.kernels import jit_cache
 from src.kernels.jit_cache import anchor_jit_cache_dir
-from src.training.environment import setup_training_environment
 
 _TRITON_VAR = "TRITON_CACHE_DIR"
 _TRITON_SUBDIR = "triton_cache"
@@ -176,7 +176,7 @@ def test_the_run_setup_anchors_it_before_anything_can_compile():
     """Read off the setup's own source: the anchor has to be applied there, and this is the only
     assertion that survives the call being dropped. Triton reads the variable lazily at first
     compile, so a setup that stops anchoring costs a re-benchmark per run and fails nothing."""
-    tree = ast.parse(inspect.getsource(setup_training_environment))
+    tree = ast.parse(inspect.getsource(configure_training_run))
     anchored = {
         node.args[0].value
         for node in ast.walk(tree)
@@ -187,7 +187,7 @@ def test_the_run_setup_anchors_it_before_anything_can_compile():
         and isinstance(node.args[0], ast.Constant)
         and isinstance(node.args[0].value, str)
     }
-    assert _TRITON_VAR in anchored, f"setup_training_environment anchors {sorted(anchored)}, not {_TRITON_VAR}"
+    assert _TRITON_VAR in anchored, f"configure_training_run anchors {sorted(anchored)}, not {_TRITON_VAR}"
 
 
 if __name__ == "__main__":

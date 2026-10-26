@@ -58,7 +58,7 @@ class _RecordingClient:
     def update_named_param(self, name: str, weights: torch.Tensor) -> None:
         self.sent.append((name, weights))
 
-    def reset_prefix_cache(self) -> None:
+    def finish_weight_update(self) -> None:
         self.flushed = True
 
 
@@ -110,7 +110,7 @@ def test_dense_sync_forwards_the_full_tensor(mesh):
     assert type(weight) is torch.Tensor, f"forwarded a {type(weight).__name__}, not a materialized tensor"
     assert weight.shape == (ROWS, COLS)
     assert torch.equal(weight, model.full_weight)
-    assert client.flushed, "the buffered broadcast was never flushed (reset_prefix_cache)"
+    assert client.flushed, "the buffered broadcast was never flushed (finish_weight_update)"
 
 
 def test_a_peft_push_sends_merged_weights():

@@ -12,7 +12,7 @@ from dataclasses import dataclass, fields
 from enum import StrEnum
 from typing import Any, ClassVar, Self
 
-from src.config_validation import require_finite, require_positive, require_positive_int
+from src.config_validation import present, require_finite, require_int
 from src.inference.endpoints import DEFAULT_OPENROUTER_BASE_URL
 
 # Metric key of a term's contribution, ``reward/<name>``; the keys of one reward sum to the reward.
@@ -169,7 +169,7 @@ class RewardTerm:
     def __post_init__(self) -> None:
         _require_name("reward term", self.name)
         require_finite(self.owner, weight=self.weight)
-        require_positive(self.owner, exponent=self.exponent)
+        require_finite(self.owner, gt=0, exponent=self.exponent)
 
     @property
     def owner(self) -> str:
@@ -232,8 +232,8 @@ class ScoredTerm(RewardTerm):
             raise ValueError(
                 f"{self.owner}: view must be one of {tuple(v.value for v in self.views)}, got {self.view!r}"
             )
-        require_positive(self.owner, request_timeout=self.request_timeout)
-        require_positive_int(self.owner, max_concurrency=self.max_concurrency)
+        require_finite(self.owner, gt=0, request_timeout=self.request_timeout)
+        require_int(self.owner, ge=1, max_concurrency=self.max_concurrency)
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -247,7 +247,7 @@ class Requirement:
     def __post_init__(self) -> None:
         _require_name("requirement", self.name)
         _require_text(f"requirement {self.name!r}", description=self.description)
-        require_positive(f"requirement {self.name!r}", weight=self.weight)
+        require_finite(f"requirement {self.name!r}", gt=0, weight=self.weight)
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -272,11 +272,7 @@ class Check:
             return
         if self.veto:
             raise ValueError(f"{owner}: a veto check gates the credit and takes no weight")
-        require_finite(owner, weight=self.weight)
-        if self.weight < 0:
-            raise ValueError(
-                f"{owner}: weight must be >= 0 (the term's own weight signs the price), got {self.weight}"
-            )
+        require_finite(owner, ge=0, why=" (the term's own weight signs the price)", weight=self.weight)
 
     @property
     def share(self) -> float:
@@ -352,13 +348,10 @@ class JudgeTerm(ScoredTerm):
         _require_text(owner, model=self.model, base_url=self.base_url, api_key_env=self.api_key_env)
         if self.context is not None:
             _require_text(owner, context=self.context)
-        require_positive_int(owner, scale=self.scale, max_tokens=self.max_tokens, max_view_chars=self.max_view_chars)
+        require_int(owner, ge=1, scale=self.scale, max_tokens=self.max_tokens, max_view_chars=self.max_view_chars)
         if self.reasoning_effort is not None:
             _coerce_enum(self, "reasoning_effort", ReasoningEffort)
-        if self.temperature is not None:
-            require_finite(owner, temperature=self.temperature)
-            if self.temperature < 0:
-                raise ValueError(f"{owner}: temperature must be >= 0, got {self.temperature}")
+        require_finite(owner, ge=0, **present(temperature=self.temperature))
         _require_bool(
             owner,
             include_reference=self.include_reference,
@@ -439,11 +432,10 @@ class RewardModelTerm(ScoredTerm):
         if self.tokenizer is not None:
             _require_text(owner, tokenizer=self.tokenizer)
         _coerce_enum(self, "backend", RewardModelBackend)
-        if isinstance(self.label_index, bool) or not isinstance(self.label_index, int) or self.label_index < 0:
-            raise ValueError(f"{owner}: label_index must be an integer >= 0, got {self.label_index!r}")
+        require_int(owner, ge=0, label_index=self.label_index)
         require_finite(owner, logit_shift=self.logit_shift)
-        require_positive(owner, logit_scale=self.logit_scale)
-        require_positive_int(owner, batch_size=self.batch_size)
+        require_finite(owner, gt=0, logit_scale=self.logit_scale)
+        require_int(owner, ge=1, batch_size=self.batch_size)
 
     def normalize(self, logit: float) -> float:
         """The score of a head output: a numerically safe logistic of the shifted, scaled logit."""

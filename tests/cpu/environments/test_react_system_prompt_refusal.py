@@ -12,7 +12,7 @@ Usage:
 
 import pytest
 
-from src.configs.environment_config import EnvironmentConfig
+from src.configs.grpo_environmental import EnvironmentConfig
 from src.environments.registry import resolve_environment
 
 _REACT_TYPES = ["react_math", "react_search"]

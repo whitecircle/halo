@@ -1,5 +1,5 @@
 #!/usr/bin/env python
-"""CLI-override casting/dispatch tests for H4ArgumentParser (src/training/parser.py).
+"""CLI-override casting/dispatch tests for HaloArgumentParser (src/configs/parser.py).
 
 Pins the Optional cast — Optional-typed numeric fields are cast, not left as raw strings —
 plus bool override parsing (truthy/falsey accepted, garbage rejected) and the ``--key=value``
@@ -14,7 +14,7 @@ from dataclasses import dataclass
 
 import pytest
 
-from src.training.parser import H4ArgumentParser
+from src.configs.parser import HaloArgumentParser
 from tests.common.repo import REPO_ROOT
 
 
@@ -34,8 +34,8 @@ def _parse(overrides):
     with tempfile.NamedTemporaryFile("w", suffix=".yaml", delete=False) as f:
         f.write("lr: 0.001\n")
         yaml_path = f.name
-    parser = H4ArgumentParser((_ScriptArgs, _TrainConfig))
-    return parser.parse_yaml_and_args(yaml_path, overrides)  # returns [_ScriptArgs, _TrainConfig]
+    parser = HaloArgumentParser((_ScriptArgs, _TrainConfig))
+    return parser.parse_dict(parser.load_values([yaml_path, *overrides]))  # returns [_ScriptArgs, _TrainConfig]
 
 
 def test_optional_int_and_float_cast():
@@ -61,7 +61,7 @@ def test_bool_override_rejects_garbage():
 
 
 def test_example_launch_commands_use_the_equals_form():
-    """``parse_yaml_and_args`` only accepts ``--key=value``; the space form raises immediately.
+    """``load_values`` only accepts ``--key=value``; the space form raises immediately.
 
     Example headers are copy-pasted verbatim, so a ``--expert_parallel_size 2`` written there is a
     launch command that cannot run. Scans the tree rather than a list.
@@ -79,7 +79,7 @@ def test_example_launch_commands_use_the_equals_form():
                 offenders.append(f"{config.relative_to(REPO_ROOT)}:{lineno}: {line.strip()}")
     assert not offenders, (
         "example launch commands must pass overrides as --key=value; these use the space form, "
-        "which parse_yaml_and_args rejects outright:\n  " + "\n  ".join(offenders)
+        "which load_values rejects outright:\n  " + "\n  ".join(offenders)
     )
 
 

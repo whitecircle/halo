@@ -11,7 +11,7 @@ from types import SimpleNamespace
 import pytest
 from transformers import AutoModelForCausalLM, AutoModelForImageTextToText
 
-from src.distributed.loading import vlm_setup
+from src.entrypoints import model_setup
 from src.model_loading.model_preparation import resolve_auto_model_class
 
 
@@ -94,25 +94,24 @@ def test_text_only_keeps_a_genuine_sibling_beside_a_vision_entry():
     assert resolve_auto_model_class(config, text_only=True) is AutoModelForCausalLM
 
 
-def test_text_only_skips_the_vlm_branch_in_load_model_for_training(monkeypatch):
+def test_text_only_skips_the_vlm_branch_in_load_policy_model(monkeypatch):
     """The flag must divert BEFORE the VLM probe: the probe enters a rank-coordinated store phase,
     and the wrapper class it leads to is exactly what text_only_model exists to avoid — patching
     the resolver alone is not enough, since sft.py loads through this entry point."""
     calls = {}
     monkeypatch.setattr(
-        vlm_setup, "probe_checkpoint", lambda *a, **k: calls.setdefault("probe", True) and (None, True)
+        model_setup, "probe_checkpoint", lambda *a, **k: calls.setdefault("probe", True) and (None, True)
     )
     monkeypatch.setattr(
-        vlm_setup,
-        "load_model_consuming_init_kwargs",
-        lambda *a, **k: calls.setdefault("loader_kwargs", k) and ("model", "tokenizer"),
+        model_setup,
+        "_load_policy",
+        lambda *a, **k: calls.setdefault("args", a[3]) and ("model", "tokenizer"),
     )
     model_config = SimpleNamespace(model_name_or_path="fake/vlm", model_revision=None, trust_remote_code=False)
-    result = vlm_setup.load_model_for_training(
-        model_config, SimpleNamespace(), SimpleNamespace(), vlm_run=False, text_only_model=True
-    )
+    args = SimpleNamespace(text_only_model=True)
+    result = model_setup.load_policy_model(SimpleNamespace(), SimpleNamespace(), model_config, args, vlm_run=False)
     assert "probe" not in calls, "text_only_model=True must not enter the vlm_probe store phase"
-    assert calls["loader_kwargs"]["text_only_model"] is True
+    assert calls["args"].text_only_model is True
     assert result == ("model", "tokenizer", "tokenizer", False)
 
 

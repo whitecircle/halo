@@ -21,6 +21,7 @@ import pytest
 from datasets import Dataset, DatasetDict
 from transformers.models.auto.configuration_auto import CONFIG_MAPPING
 
+from src.entrypoints.model_setup import PolicyLoad
 from tests.common.repo import load_script_module
 
 # The name heuristic reads this as multimodal, so the checkpoint verdict holds offline too.
@@ -84,27 +85,27 @@ def _run_dpo(tmp_path, dataset: DatasetDict, yaml_body: str = "") -> dict:
         reached.update(log_examples)
         raise _VisionPathReached
 
-    def load_model(*_args, **kwargs):
-        assert kwargs["preserve_checkpoint_precision"] is False
-        return model, types.SimpleNamespace(tokenizer=None), tokenizer, True
+    def load_model(context, *_args, **kwargs):
+        assert context is runtime, "the policy load must read the checkpoint identity off the script context"
+        return PolicyLoad(model, types.SimpleNamespace(tokenizer=None), tokenizer, True)
 
     patches = [
         mock.patch.object(module, "init_training_script", return_value=runtime),
-        mock.patch.object(module, "load_model_for_training", side_effect=load_model),
+        mock.patch.object(module, "load_policy_model", side_effect=load_model),
         mock.patch.object(module, "load_reference_model_for_preference", return_value=None),
         mock.patch.object(module, "apply_max_length", side_effect=lambda cfg, args, model, tok: tok),
         mock.patch.object(module, "install_resolved_tokenizer", side_effect=lambda pc, tok: pc),
         mock.patch.object(module, "configure_adapter_training", return_value=None),
         mock.patch.object(module, "log_model_info"),
         mock.patch.object(module, "load_script_datasets", return_value=(dataset, False)),
-        # Both live in the shared script_runner helper the script calls — patch its globals.
-        mock.patch("src.training.script_runner.prepare_preference_datasets", side_effect=_TextPathReached),
-        mock.patch("src.training.script_runner.log_dataset_examples", side_effect=capture),
-        mock.patch("src.training.parser.install_log_tee"),
+        # Both live in the shared data_setup helper the script calls — patch its globals.
+        mock.patch("src.entrypoints.data_setup.prepare_preference_datasets", side_effect=_TextPathReached),
+        mock.patch("src.entrypoints.data_setup.log_dataset_examples", side_effect=capture),
+        mock.patch("src.entrypoints.script.install_log_tee"),
         mock.patch.object(sys, "argv", ["prog", str(config)]),
     ]
 
-    with mock.patch.object(module, "run_training", lambda fn: fn):
+    with mock.patch.object(module, "with_distributed_teardown", lambda fn: fn):
         for patch in patches:
             patch.start()
         try:
@@ -130,7 +131,7 @@ def test_the_dispatch_and_trls_probe_agree_on_the_declared_column(tmp_path):
     the images away. Both verdicts, on the one dataset the trainer receives."""
     reached = _run_dpo(tmp_path, _dataset("image_bytes"), "images_field: image_bytes\n")
 
-    # The shared script_runner helper logs every non-None split, generate included.
+    # The shared data_setup helper logs every non-None split, generate included.
     assert set(reached) == {"train", "test", "generate"}
     assert "images" in reached["train"].column_names
     assert "image_bytes" not in reached["train"].column_names

@@ -2,9 +2,9 @@
 """Contract of the shared script-argument fields: the values every training script assumes it has.
 
   * ``project_name`` is written straight into ``WANDB_PROJECT`` / ``CLEARML_PROJECT`` by
-    ``setup_training_environment``. ``os.environ`` accepts strings only, so a YAML ``project_name:
+    ``configure_training_run``. ``os.environ`` accepts strings only, so a YAML ``project_name:
     null`` would surface as a bare ``TypeError`` from the tracking setup, phases into the run and
-    nowhere near the key that caused it. The gate is ``CommonScriptArguments._validate_ranges``,
+    nowhere near the key that caused it. The gate is ``CommonScriptArguments._validate_fields``,
     which every script-arg class runs from ``__post_init__``, where a ``--project_name=`` override
     is held to the same rule.
   * The SFT re-declarations of the ``GenerationEvalArguments`` / collator flags are plain ``bool``:
@@ -20,18 +20,18 @@ from typing import get_type_hints
 
 import pytest
 
-from src.args.environmental_grpo_args import EnvironmentalGRPOScriptArguments
-from src.args.offline_grpo_args import OfflineGRPOScriptArguments
-from src.args.rlvr_online_grpo_args import RLVROnlineGRPOScriptArguments
 from src.configs.classification import ClassificationScriptArguments
 from src.configs.distillation import SelfDistillScriptArguments, TeacherDistillScriptArguments
 from src.configs.embedding import EmbeddingScriptArguments
+from src.configs.grpo_environmental import EnvironmentalGRPOScriptArguments
+from src.configs.grpo_offline import OfflineGRPOScriptArguments
+from src.configs.grpo_online import RLVROnlineGRPOScriptArguments
+from src.configs.parser import HaloArgumentParser
 from src.configs.preference import DPOScriptArguments, KTOScriptArguments, SMPOScriptArguments
 from src.configs.reward import RewardScriptArguments
 from src.configs.script_arguments import GenerationEvalArguments
 from src.configs.sft import SFTScriptArguments
-from src.training.environment import _setup_tracking_env_vars
-from src.training.parser import H4ArgumentParser
+from src.entrypoints.run_setup import _setup_tracking_env_vars
 
 # Every script-arg class and the tracking project its runs land in. Pinned by NAME, not merely "not
 # the placeholder": a class that declares no ``PROJECT_NAME`` of its own inherits a parent's project
@@ -85,7 +85,7 @@ def test_yaml_null_project_name_is_refused_by_the_parser(tmp_path):
     path = tmp_path / "sft.yaml"
     path.write_text("project_name:\n")
     with pytest.raises(ValueError, match="project_name"):
-        H4ArgumentParser((SFTScriptArguments,)).parse_yaml_file(str(path))
+        HaloArgumentParser((SFTScriptArguments,)).parse_yaml_file(str(path))
 
 
 @pytest.mark.parametrize("cls", _SCRIPT_ARG_CLASSES)
@@ -98,15 +98,17 @@ def test_cli_override_cannot_null_the_project_name(cls, value, tmp_path):
     """
     path = tmp_path / "config.yaml"
     path.write_text("{}\n")
+    parser = HaloArgumentParser((cls,))
     with pytest.raises(ValueError, match="project_name"):
-        H4ArgumentParser((cls,)).parse_yaml_and_args(str(path), [f"--project_name={value}"])
+        parser.parse_dict(parser.load_values([str(path), f"--project_name={value}"]))
 
 
 def test_a_real_cli_project_name_still_parses(tmp_path):
     """Anti-over-rejection: the override the guard exists to allow must reach the args unchanged."""
     path = tmp_path / "config.yaml"
     path.write_text("{}\n")
-    (parsed,) = H4ArgumentParser((SFTScriptArguments,)).parse_yaml_and_args(str(path), ["--project_name=nonsense-42"])
+    parser = HaloArgumentParser((SFTScriptArguments,))
+    (parsed,) = parser.parse_dict(parser.load_values([str(path), "--project_name=nonsense-42"]))
     assert parsed.project_name == "nonsense-42"
 
 

@@ -85,7 +85,7 @@ def test_load_recording_counts_expert_selections():
     # a moe_balancing=none run must not accumulate counts nothing consumes.
     assert router.expert_load_counter is None
 
-    router.balancing_active = True  # RouterBiasBalancingCallback stamps this at train begin
+    router.balancing_active = True  # BalancingBiasCallback stamps this at train begin
     model(input_ids=input_ids, position_ids=position_ids, use_cache=False)
     assert router.expert_load_counter is not None  # created by the recorder, not the callback
     assert router.expert_load_counter.sum().item() == input_ids.shape[1]
@@ -103,7 +103,7 @@ def test_discarded_tokens_count_toward_the_discard_slot():
     patch_zaya_router_load_recording()
     model = _tiny_model().train()
     router = model.model.layers[1].mlp.gate
-    router.balancing_active = True  # RouterBiasBalancingCallback stamps this at train begin
+    router.balancing_active = True  # BalancingBiasCallback stamps this at train begin
     with torch.no_grad():  # force every token onto the discard slot
         router.balancing_biases.fill_(-1e9)
         router.balancing_biases[-1] = 1e9

@@ -38,8 +38,7 @@ from transformers import AutoTokenizer
 from trl import GRPOConfig
 
 from src.checkpoint.parallel.resume_source import resolve_resume_weights_source
-from src.configs.environment_config import EnvironmentConfig
-from src.configs.grpo_environmental import AsyncTrainingConfig
+from src.configs.grpo_environmental import AsyncTrainingConfig, EnvironmentConfig
 from src.distributed.fsdp import reshard_fsdp2_modules
 from src.env import env_int, env_str
 from src.trainers.grpo.environmental import DistributedAsyncEnvironmentalGRPOTrainer

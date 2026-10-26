@@ -86,7 +86,7 @@ train_on_completions_only: false   # matches the text-mode artifact
 
 Under `bf16` (the toolkit default) with a stock AdamW, AdamWBF16 with stochastic rounding is the optimizer unless accelerate manages DDP ([BF16 Optimizer](../optimization/bf16-optimizer.md)). Checkpoints write as HF-standard safetensors sharded at `save_max_shard_size` (default `5GB`); exact optimizer resume needs the same world size ([Checkpoints](../reference/checkpoints.md)).
 
-For MoE pre-training, router balancing matters from step 0: [`RouterBiasBalancingCallback`](callbacks.md#routerbiasbalancingcallback) implements DeepSeek-V3's aux-loss-free bias update.
+For MoE pre-training, router balancing matters from step 0: [`BalancingBiasCallback`](callbacks.md#balancingbiascallback) implements DeepSeek-V3's aux-loss-free bias update.
 
 ## Large corpora
 

@@ -34,8 +34,8 @@ from transformers.models.auto.modeling_auto import MODEL_FOR_IMAGE_TEXT_TO_TEXT_
 from trl import RewardConfig, RewardTrainer
 
 from src.data.collators.vlm_preference import DataCollatorForVLMPreference
-from src.distributed.loading import vlm_setup
 from src.distributed.parallelism_config import ParallelismConfig
+from src.entrypoints import model_setup
 from src.model_loading.tokenizer_setup import resolve_tokenizer
 from src.models.modality import config_declares_multimodality, is_vlm_model
 from src.models.seq_cls_heads import multimodal_sequence_classification_model_types
@@ -128,21 +128,21 @@ def _run_rewards(tmp_path, dataset: DatasetDict, yaml_body: str = "", processor=
     patches = [
         mock.patch.object(module, "require_multimodal_sequence_classification_head"),
         mock.patch.object(module, "init_training_script", return_value=runtime),
-        mock.patch.object(module, "load_script_model", return_value=(model, tokenizer)),
+        mock.patch.object(module, "load_model_and_tokenizer", return_value=(model, tokenizer)),
         mock.patch.object(module, "apply_max_length", side_effect=lambda cfg, args, model, tok: tok),
         mock.patch.object(module, "configure_adapter_training", return_value=None),
         mock.patch.object(module, "log_model_info"),
         mock.patch.object(module, "load_script_datasets", return_value=(dataset, False)),
         mock.patch.object(module, "load_vlm_processor", processor_loader),
         mock.patch.object(module, "log_script_dataset_examples"),
-        mock.patch.object(module, "build_training_callbacks", return_value=[]),
+        mock.patch.object(module, "configure_balancing_and_build_callbacks", return_value=[]),
         mock.patch.object(module, "barrier"),
         mock.patch.object(module, "DistributedRewardTrainer", side_effect=capture_trainer),
         mock.patch.object(module, "run_trainer"),
-        mock.patch("src.training.parser.install_log_tee"),
+        mock.patch("src.entrypoints.script.install_log_tee"),
         mock.patch.object(sys, "argv", ["prog", str(config)]),
     ]
-    with mock.patch.object(module, "run_training", lambda fn: fn):
+    with mock.patch.object(module, "with_distributed_teardown", lambda fn: fn):
         for patch in patches:
             patch.start()
         try:
@@ -391,17 +391,17 @@ def _model_config(name: str):
 
 @pytest.mark.parametrize("model_type", ["qwen3_vl", "llava"])
 def test_multimodal_family_without_a_score_head_is_refused(model_type):
-    with mock.patch.object(vlm_setup.AutoConfig, "from_pretrained", return_value=CONFIG_MAPPING[model_type]()):
+    with mock.patch.object(model_setup.AutoConfig, "from_pretrained", return_value=CONFIG_MAPPING[model_type]()):
         with pytest.raises(ValueError, match="no sequence-classification head") as excinfo:
-            vlm_setup.require_multimodal_sequence_classification_head(_model_config(f"stub/{model_type}"))
+            model_setup.require_multimodal_sequence_classification_head(_model_config(f"stub/{model_type}"))
     # Actionable: the message names the families that DO work, off the live registry.
     assert "gemma4" in str(excinfo.value)
 
 
 @pytest.mark.parametrize("model_type", ["gemma3", "qwen3_5", "qwen3"])
 def test_supported_and_text_only_families_pass_the_gate(model_type):
-    with mock.patch.object(vlm_setup.AutoConfig, "from_pretrained", return_value=CONFIG_MAPPING[model_type]()):
-        vlm_setup.require_multimodal_sequence_classification_head(_model_config(f"stub/{model_type}"))
+    with mock.patch.object(model_setup.AutoConfig, "from_pretrained", return_value=CONFIG_MAPPING[model_type]()):
+        model_setup.require_multimodal_sequence_classification_head(_model_config(f"stub/{model_type}"))
 
 
 def test_both_spellings_of_a_declared_vision_tower_classify_the_same():

@@ -11,7 +11,7 @@ Run: python tests/cpu/environments/test_registry_defaults.py  (or pytest)
 
 import pytest
 
-from src.configs.environment_config import EnvironmentConfig
+from src.configs.grpo_environmental import EnvironmentConfig
 from src.environments.base import EPISODE_INVALID_KEY, EPISODE_INVALID_REASON_KEY, BaseEnvironment
 from src.environments.envs.protocols.react import create_react_math_environment
 from src.environments.registry import get_registered_environments, resolve_environment

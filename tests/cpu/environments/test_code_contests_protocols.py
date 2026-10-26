@@ -44,7 +44,7 @@ from src.environments.envs.tasks.coding.datasets import ContestSelection
 from src.environments.envs.tasks.coding.grading import VERDICT_DETAIL_FULL
 from src.environments.episode import recovering_turn
 from src.environments.registry import resolve_environment
-from src.environments.rollout_config import DEFAULT_ROLLOUT_MAX_TOKENS
+from src.environments.rollout_config import RolloutConfig
 from tests.common.code_contests import (
     SINGLE_TEST_ANSWER,
     StubSandbox,
@@ -310,7 +310,7 @@ def test_a_soft_budget_sizes_the_default_no_smaller_than_the_rollouts_own():
         profiles = {"medium": {"thinking_tokens": budget, "enforce_thinking_cap": False}}
         return CodeContestsEnvironment(sandbox=StubSandbox(), reasoning_effort_profiles=profiles)
 
-    assert default_max_tokens(soft(2000), "medium") == DEFAULT_ROLLOUT_MAX_TOKENS
+    assert default_max_tokens(soft(2000), "medium") == RolloutConfig.max_tokens
     assert default_max_tokens(soft(40000), "medium") == 40000 + SOLUTION_HEADROOM_TOKENS
 
 

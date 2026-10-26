@@ -5,14 +5,7 @@ from typing import ClassVar, Literal
 
 from transformers import TrainingArguments
 
-from src.config_validation import (
-    RangeValidatedConfig,
-    present,
-    require_finite,
-    require_int,
-    require_positive,
-    require_positive_int,
-)
+from src.config_validation import ValidatedConfig, present, require_finite, require_int
 from src.configs.script_arguments import (
     CommonScriptArguments,
     DatasetNumProcArguments,
@@ -43,10 +36,10 @@ class DPOScriptArguments(GenerationEvalArguments, CommonScriptArguments):
         },
     )
 
-    def _validate_ranges(self) -> None:
-        super()._validate_ranges()
-        require_positive_int(
-            type(self).__name__, **present(generation_max_prompt_length=self.generation_max_prompt_length)
+    def _validate_fields(self) -> None:
+        super()._validate_fields()
+        require_int(
+            type(self).__name__, ge=1, **present(generation_max_prompt_length=self.generation_max_prompt_length)
         )
 
 
@@ -67,8 +60,7 @@ class KTOScriptArguments(CommonScriptArguments):
         metadata={"help": "Dataset column holding the completion, a string or a conversation list."},
     )
     label_field: str = field(
-        default="label",
-        metadata={"help": "Dataset column holding the desirability bool (true = desirable)."},
+        default="label", metadata={"help": "Dataset column holding the desirability bool (true = desirable)."}
     )
     images_field: str | None = field(
         default=None,
@@ -88,65 +80,44 @@ class SMPOScriptArguments(GenerationEvalArguments, CommonScriptArguments):
 
 
 @dataclass
-class SmoothMarginPOConfig(DatasetNumProcArguments, ModelInitKwargsArguments, RangeValidatedConfig, TrainingArguments):
+class SmoothMarginPOConfig(DatasetNumProcArguments, ModelInitKwargsArguments, ValidatedConfig, TrainingArguments):
     """Config for SmoothMarginPOTrainer (SMPO): a reference-model-free, margin-based preference
     method with optional SFT loss. Per-field docs are in each field's ``help`` metadata."""
 
-    learning_rate: float = field(
-        default=1e-6,
-        metadata={"help": "Initial learning rate for AdamW optimizer."},
-    )
-    logging_steps: float = field(
-        default=10,
-        metadata={"help": "Log every X steps."},
-    )
+    learning_rate: float = field(default=1e-6, metadata={"help": "Initial learning rate for AdamW optimizer."})
+    logging_steps: float = field(default=10, metadata={"help": "Log every X steps."})
     gradient_checkpointing: bool = field(
-        default=True,
-        metadata={"help": "Enable gradient checkpointing to save memory."},
+        default=True, metadata={"help": "Enable gradient checkpointing to save memory."}
     )
     bf16: bool | None = field(
-        default=None,
-        metadata={"help": "Use bf16 mixed precision. Defaults to True if fp16 is False."},
+        default=None, metadata={"help": "Use bf16 mixed precision. Defaults to True if fp16 is False."}
     )
-
-    beta: float = field(
-        default=1.2,
-        metadata={"help": "Temperature parameter for loss sensitivity."},
-    )
+    beta: float = field(default=1.2, metadata={"help": "Temperature parameter for loss sensitivity."})
     target_margin: float = field(
-        default=0.35,
-        metadata={"help": "Target margin for chosen vs rejected log prob ratio."},
+        default=0.35, metadata={"help": "Target margin for chosen vs rejected log prob ratio."}
     )
     loss_type: Literal["sigmoid", "hinge", "ipo", "smooth_lower_bound"] = field(
-        default="smooth_lower_bound",
-        metadata={"help": "Type of margin loss function."},
+        default="smooth_lower_bound", metadata={"help": "Type of margin loss function."}
     )
     chosen_sft_ratio: float = field(
-        default=0.8,
-        metadata={"help": "Weight for chosen completions in combined SFT loss (1.0 = only chosen)."},
+        default=0.8, metadata={"help": "Weight for chosen completions in combined SFT loss (1.0 = only chosen)."}
     )
     use_margin_schedule: bool = field(
-        default=True,
-        metadata={"help": "Linearly increase target_margin during training."},
+        default=True, metadata={"help": "Linearly increase target_margin during training."}
     )
     initial_margin: float = field(
         default=0.01,
         metadata={"help": "Initial margin when using margin schedule (starts small for curriculum learning)."},
     )
-
     lower_clip_percentile: float | None = field(
-        default=0.02,
-        metadata={"help": "Percentile for clipping low log probs in rejected (0.01-0.05 recommended)."},
+        default=0.02, metadata={"help": "Percentile for clipping low log probs in rejected (0.01-0.05 recommended)."}
     )
     upper_clip_percentile: float | None = field(
-        default=None,
-        metadata={"help": "Percentile for clipping high log probs in chosen (0.95-0.99 if used)."},
+        default=None, metadata={"help": "Percentile for clipping high log probs in chosen (0.95-0.99 if used)."}
     )
     min_log_prob: float | None = field(
-        default=-2.3,
-        metadata={"help": "Absolute min log prob threshold for rejected tokens."},
+        default=-2.3, metadata={"help": "Absolute min log prob threshold for rejected tokens."}
     )
-
     padding_free: bool = field(
         default=False,
         metadata={
@@ -184,22 +155,19 @@ class SmoothMarginPOConfig(DatasetNumProcArguments, ModelInitKwargsArguments, Ra
             "nearest the completion) or 'keep_start'. Completions always truncate from the end."
         },
     )
-    disable_dropout: bool = field(
-        default=True,
-        metadata={"help": "Disable dropout for training stability."},
-    )
+    disable_dropout: bool = field(default=True, metadata={"help": "Disable dropout for training stability."})
+
+    def __post_init__(self):
+        if self.bf16 is None:
+            self.bf16 = not self.fp16
+        super().__post_init__()
 
     def resolve_length_budget(self) -> tuple[int, int, int]:
-        """Split ``max_length`` into ``(max_length, max_prompt_length, max_completion_length)``.
+        """Split a resolved ``max_length`` into ``(max_length, max_prompt_length, max_completion_length)``.
 
-        An unset prompt share takes half of ``max_length`` so it scales with a context-resolved
-        ``max_length`` (a fixed constant would truncate prompts to it on a long-context run); an
-        unset completion share takes the remainder. The shares must fit inside ``max_length``: SMPO
-        truncates prompt and completion independently, so an over-budget split would exceed it
-        without either cut firing.
-
-        Callers must resolve a null / non-positive ``max_length`` to the model context window first
-        (:func:`~src.models.context_window.resolve_length_to_context`).
+        An unset prompt share takes half, so it scales with a context-resolved ``max_length``; an unset completion
+        share takes the remainder. The shares must fit: SMPO truncates prompt and completion independently, so an
+        over-budget split would exceed ``max_length`` without either cut firing.
         """
         max_length = self.max_length
         if max_length is None or max_length <= 0:
@@ -230,15 +198,8 @@ class SmoothMarginPOConfig(DatasetNumProcArguments, ModelInitKwargsArguments, Ra
             )
         return max_length, max_prompt_length, max_completion_length
 
-    def __post_init__(self):
-        if self.bf16 is None:
-            self.bf16 = not self.fp16
-
-        self._validate_ranges()
-        super().__post_init__()
-
-    def _validate_ranges(self) -> None:
-        super()._validate_ranges()
+    def _validate_fields(self) -> None:
+        super()._validate_fields()
         owner = type(self).__name__
         require_finite(
             owner,
@@ -249,11 +210,12 @@ class SmoothMarginPOConfig(DatasetNumProcArguments, ModelInitKwargsArguments, Ra
             logging_steps=self.logging_steps,
         )
         # Scales the preference logits: zero flattens the loss, a negative value inverts the preference.
-        require_positive(owner, beta=self.beta)
+        require_finite(owner, gt=0, beta=self.beta)
         # A non-positive max_length is legal: it resolves to the model's context window at launch.
         require_int(owner, **present(max_length=self.max_length))
-        require_positive_int(
+        require_int(
             owner,
+            ge=1,
             **present(max_prompt_length=self.max_prompt_length, max_completion_length=self.max_completion_length),
         )
         if self.target_margin < 0:
@@ -272,7 +234,7 @@ class SmoothMarginPOConfig(DatasetNumProcArguments, ModelInitKwargsArguments, Ra
             raise ValueError("upper_clip_percentile must be in [0.5, 1)")
 
         if self.min_log_prob is not None:
-            require_finite(type(self).__name__, min_log_prob=self.min_log_prob)
+            require_finite(owner, min_log_prob=self.min_log_prob)
             if self.min_log_prob >= 0:
                 raise ValueError("min_log_prob must be negative (log probabilities are <= 0)")
 

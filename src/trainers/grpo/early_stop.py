@@ -8,10 +8,10 @@ evaluating that step, so the run keeps only the periodic checkpoints taken befor
 
 from accelerate.logging import get_logger
 
+from src.callbacks.early_stop import StopsTrainingEarly
 from src.configs.grpo import EarlyStopConfig
 from src.runtime.consensus import rank_consensus
 from src.trainers.grpo.objective.logratio import UPDATE_SKIPPED_KEY
-from src.training.early_stopping import StopsTrainingEarly
 
 logger = get_logger(__name__)
 

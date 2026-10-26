@@ -1,42 +1,25 @@
-"""Field bundles shared by the GRPO script-argument and trainer-config dataclasses.
-
-Pure dataclass mixins (no ``CommonScriptArguments`` base): each holds fields that several classes
-would otherwise declare identically, so a spelling or help fix lands once. A subclass re-declares a
-field only to change its default (e.g. ``AsyncTrainingConfig``'s ``drop_degenerate_groups=True``).
-"""
+"""Field bundles the GRPO script-argument and trainer-config dataclasses mix in, each declaring fields several
+classes would otherwise repeat; a subclass re-declares one only to change its default."""
 
 from dataclasses import dataclass, field, fields, make_dataclass
 from typing import ClassVar, Literal, get_args
 
-from src.config_validation import (
-    RangeValidatedConfig,
-    present,
-    require_finite,
-    require_positive,
-    require_positive_int,
-)
+from src.config_validation import ValidatedConfig, present, require_finite, require_int
 
 # The RLRR shaping modes: the annotation gates YAML/CLI and RLRRConfig validates against it.
 RLRRMode = Literal["hrr", "prr"]
 
-# The script-argument spelling of each RLRRConfig field is ``rlrr_<field>``, except λ: ``lambda`` is a
-# keyword, so the config field is ``lam`` while the YAML keeps the full word.
-_RLRR_ARG_SPELLINGS = {"lam": "rlrr_lambda"}
-
 
 def rlrr_arg_name(config_field: str) -> str:
-    """The YAML/CLI spelling of one :class:`RLRRConfig` field."""
-    return _RLRR_ARG_SPELLINGS.get(config_field, f"rlrr_{config_field}")
+    """The YAML/CLI spelling of one :class:`RLRRConfig` field: ``rlrr_<field>``, except λ, whose config field is
+    ``lam`` because ``lambda`` is a keyword."""
+    return "rlrr_lambda" if config_field == "lam" else f"rlrr_{config_field}"
 
 
 @dataclass
-class PromptDatasetArguments(RangeValidatedConfig):
-    """Prompt-dataset shape shared by the GRPO-family trainers (prompt column + length cap).
-
-    No ``system_prompt``: environmental GRPO builds the rollout conversation from the environment's
-    system prompt, so a shared field here would be ignored on that surface. Trainers that template
-    their own system turn declare it themselves.
-    """
+class PromptDatasetArguments(ValidatedConfig):
+    """Prompt column and length cap of the GRPO-family trainers. No ``system_prompt``: environmental GRPO takes the
+    environment's, so the trainers that template their own system turn declare it themselves."""
 
     max_prompt_length: int | None = field(
         default=None,
@@ -47,25 +30,20 @@ class PromptDatasetArguments(RangeValidatedConfig):
         },
     )
     prompt_field: str = field(
-        default="prompt",
-        metadata={"help": "Dataset column holding the prompt, a string or a conversation list."},
+        default="prompt", metadata={"help": "Dataset column holding the prompt, a string or a conversation list."}
     )
 
-    def _validate_ranges(self) -> None:
-        super()._validate_ranges()
+    def _validate_fields(self) -> None:
+        super()._validate_fields()
         # A budget below one token drops every row.
-        require_positive_int(type(self).__name__, **present(max_prompt_length=self.max_prompt_length))
+        require_int(type(self).__name__, ge=1, **present(max_prompt_length=self.max_prompt_length))
 
 
 @dataclass
 class RLRRConfig:
-    """Hyperparameters for RLRR relative-reward shaping (defaults from the paper's Appendix A.1).
-
-    The single declaration of the tunables: :class:`RLRRArguments` derives its ``rlrr_*`` script
-    fields from these (same type, default and help), so the ``help`` metadata here is the CLI help.
-    Every invariant lives in ``__post_init__``; the script args build the config eagerly at parse
-    time, so a bad value fails before any model is loaded. Messages name the YAML spelling.
-    """
+    """Hyperparameters for RLRR relative-reward shaping (defaults from the paper's Appendix A.1): the single
+    declaration :class:`RLRRArguments` derives its ``rlrr_*`` fields from, help included. Messages name the YAML
+    spelling, since the script arguments build one at parse time."""
 
     mode: RLRRMode = field(
         default="hrr",
@@ -103,7 +81,9 @@ class RLRRConfig:
             raise ValueError(f"{rlrr_arg_name('mode')} must be one of {get_args(RLRRMode)}, got {self.mode!r}")
         # Both divide inside the shaping (Eq. 3 / Eq. 6): zero is a ZeroDivisionError deep in the advantage
         # pass, a negative one inverts the ranking, an infinite λ silently disables the length tie-break.
-        require_positive(type(self).__name__, **{rlrr_arg_name(name): getattr(self, name) for name in ("tau", "lam")})
+        require_finite(
+            type(self).__name__, gt=0, **{rlrr_arg_name(name): getattr(self, name) for name in ("tau", "lam")}
+        )
         # A NaN band or threshold fails silently: NaN clip bounds NaN every advantage, and no reward
         # ever compares >= NaN, so every response reads as incorrect.
         require_finite(
@@ -126,7 +106,7 @@ _RLRRTunables = make_dataclass(
 
 
 @dataclass
-class RLRRArguments(_RLRRTunables, RangeValidatedConfig):
+class RLRRArguments(_RLRRTunables, ValidatedConfig):
     """``use_rlrr`` plus the ``rlrr_*`` tunables of :class:`RLRRConfig` under their YAML spellings.
 
     Every knob is validated at parse time by building the config eagerly, gate on or off (fail-loud:
@@ -140,8 +120,8 @@ class RLRRArguments(_RLRRTunables, RangeValidatedConfig):
         metadata={"help": "Enable RLRR relative-reward advantage shaping in place of group-normalized advantages."},
     )
 
-    def _validate_ranges(self) -> None:
-        super()._validate_ranges()
+    def _validate_fields(self) -> None:
+        super()._validate_fields()
         self._rlrr_config()
 
     def _rlrr_config(self) -> RLRRConfig:
@@ -153,15 +133,10 @@ class RLRRArguments(_RLRRTunables, RangeValidatedConfig):
 
 
 @dataclass
-class AdvantageShapingArguments(RangeValidatedConfig):
-    """Reward scaling, the degenerate-group drop and the token-mass balance of the GRPO group-relative
-    advantages.
-
-    Shared by the online (RLVR) and environmental GRPO configs, which feed the same
-    ``group_relative_advantages`` normalizer.
-    ``drop_degenerate_groups`` defaults differ per trainer (opt-in online, on by default for
-    env-GRPO's sparse verifiable rewards), so that one is re-declared on the env config.
-    """
+class AdvantageShapingArguments(ValidatedConfig):
+    """Reward scaling, the degenerate-group drop and the token-mass balance of the group-relative advantages the
+    online and environmental GRPO trainers share; the environmental config re-declares ``drop_degenerate_groups``
+    on by default for its sparse verifiable rewards."""
 
     scale_rewards_std_floor: float = field(
         default=0.0,
@@ -189,10 +164,10 @@ class AdvantageShapingArguments(RangeValidatedConfig):
         },
     )
 
-    def _validate_ranges(self) -> None:
+    def _validate_fields(self) -> None:
         """Refuse a negative or NaN std floor, which fails silently: ``max(std, floor)`` becomes a
         no-op or a NaN that propagates to every advantage in the batch."""
-        super()._validate_ranges()
+        super()._validate_fields()
         require_finite(type(self).__name__, scale_rewards_std_floor=self.scale_rewards_std_floor)
         if self.scale_rewards_std_floor < 0:
             raise ValueError(
@@ -219,8 +194,8 @@ class EarlyStopConfig:
             if not (len(band) == 2 and 0.0 <= band[0] < band[1]):
                 raise ValueError(f"early_stop_entropy_band must be [low, high] with 0 <= low < high, got {list(band)}")
         if self.logratio_gap is not None:
-            require_positive(type(self).__name__, early_stop_logratio_gap=self.logratio_gap)
-        require_positive_int(type(self).__name__, early_stop_patience=self.patience)
+            require_finite(type(self).__name__, gt=0, early_stop_logratio_gap=self.logratio_gap)
+        require_int(type(self).__name__, ge=1, early_stop_patience=self.patience)
         if not self.active and self.patience != EarlyStopConfig.patience:
             raise ValueError(f"early_stop_patience is {self.patience} but no early-stop condition is set to count it")
 
@@ -230,14 +205,10 @@ class EarlyStopConfig:
 
 
 @dataclass
-class GRPOEarlyStopArguments(RangeValidatedConfig):
-    """Early stop for a KL-free GRPO run, shared by the online and environmental configs.
-
-    A policy without a KL anchor drifts slowly before it fails: entropy leaves its band and the
-    trainer-vs-sampler log-ratio widens with it. A condition ends training once it breaches on
-    ``early_stop_patience`` readings in a row, without saving or evaluating that step; the run keeps the
-    periodic checkpoints it took before.
-    """
+class GRPOEarlyStopArguments(ValidatedConfig):
+    """Early stop for a KL-free GRPO run (online and environmental), whose policy drifts slowly before it fails:
+    entropy leaves its band and the trainer-vs-sampler log-ratio widens. A condition breaching on
+    ``early_stop_patience`` readings in a row ends training without saving or evaluating that step."""
 
     early_stop_entropy_band: list[float] | None = field(
         default=None,
@@ -265,11 +236,11 @@ class GRPOEarlyStopArguments(RangeValidatedConfig):
         },
     )
 
-    def _validate_ranges(self) -> None:
-        super()._validate_ranges()
-        self.build_early_stop()
+    def _validate_fields(self) -> None:
+        super()._validate_fields()
+        self.build_early_stop_config()
 
-    def build_early_stop(self) -> EarlyStopConfig:
+    def build_early_stop_config(self) -> EarlyStopConfig:
         band = self.early_stop_entropy_band
         return EarlyStopConfig(
             entropy_band=tuple(band) if band is not None else None,

@@ -2,10 +2,9 @@
 
 import pytest
 
-from src.args.distributed_args import DistributedArguments
 from src.configs.grpo_offline import OfflineGRPOConfig
+from src.configs.parallelism_arguments import ParallelismArguments, declared_row_length, parallelism_config_from_args
 from src.trainers.grpo.offline import OfflineGRPOTrainer
-from src.training.parallelism_args import declared_row_length, parallelism_config_from_args
 from tests.common.parallelism import simulated_world
 
 
@@ -47,7 +46,7 @@ def test_the_builder_hands_the_ep_gate_the_declared_row_length(tmp_path):
     """Offline GRPO refuses ``max_length``, so its budget reaches the EP capacity gate only through
     this wiring; dropped, the gate would judge the run against the model's whole context window."""
     config = _offline(tmp_path, max_prompt_length=512, max_completion_length=1024, per_device_train_batch_size=2)
-    args = DistributedArguments(expert_parallel_size=8, ep_scope="node", fsdp_shard_ep1_experts=False)
+    args = ParallelismArguments(expert_parallel_size=8, ep_scope="node", fsdp_shard_ep1_experts=False)
     with simulated_world(world_size=8, gpus_per_node=8):
         built = parallelism_config_from_args(args, trainer_cls=OfflineGRPOTrainer, training_config=config)
     assert built.ep_declared_max_length == 512 + 1024

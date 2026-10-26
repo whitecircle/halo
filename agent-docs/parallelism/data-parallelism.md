@@ -301,7 +301,7 @@ support matrix in [Supported combinations](README.md#supported-combinations).
 Under `torchrun`, `DistributedTrainerMixin` (`src/trainers/mixins/base.py`) owns FSDP2:
 `_setup_distributed_modes()` dispatches to the per-mode setup after `super().__init__()`. HF's own
 FSDP wiring is disabled ahead of it: `apply_distributed_trainer_config`
-(`src/training/script_runner.py`) blanks `fsdp` on every distributed trainer's config.
+(`src/entrypoints/script.py`) blanks `fsdp` on every distributed trainer's config.
 Accelerate's DDP wrapping is skipped whenever the mixin syncs gradients
 (`_should_skip_ddp_wrapping()`).
 

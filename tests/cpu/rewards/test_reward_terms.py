@@ -8,8 +8,8 @@ import math
 
 import pytest
 
-from src.args.rlvr_online_grpo_args import RLVROnlineGRPOScriptArguments
-from src.configs.environment_config import EnvironmentConfig
+from src.configs.grpo_environmental import EnvironmentConfig
+from src.configs.grpo_online import RLVROnlineGRPOScriptArguments
 from src.inference.endpoints import DEFAULT_OPENROUTER_BASE_URL
 from src.rewards.composer import RewardComposer
 from src.rewards.graders.verifiable import AccuracyTerm, FormatTerm

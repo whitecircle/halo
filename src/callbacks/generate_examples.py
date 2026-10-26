@@ -30,13 +30,10 @@ from src.runtime.ranks import get_global_rank, get_global_world_size, is_global_
 
 logger = logging.getLogger(__name__)
 
-# Fixed seed for every sampling this callback does (which prompts to show, which rows to print). It
-# must be a constant rather than a run seed: the sample is drawn independently on every rank, and a
-# per-rank value would make ranks generate from different prompts and gather mismatched rows.
+# A constant, not the run seed: every rank draws the sample independently, and differing seeds would
+# make ranks generate from different prompts and gather mismatched rows.
 _SAMPLE_SEED = 42
-
-# Prompts are tail-truncated to this many characters in the log table, so a long-context prompt does
-# not crowd out the completion.
+# Prompts are tail-truncated in the log table, so a long-context prompt does not crowd out the completion.
 _MAX_PRINTED_PROMPT_CHARS = 200
 
 

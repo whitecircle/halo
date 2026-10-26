@@ -40,7 +40,7 @@ from src.runtime.consensus import (
 from src.runtime.filesystem import agree_input_probe_across_ranks
 from src.runtime.ranks import get_global_world_size, get_local_world_size
 
-# INFO opt-in (the convention vlm_setup and the training scripts use): this module's INFO lines are
+# INFO opt-in (the convention model_setup and the training scripts use): this module's INFO lines are
 # the run's only record of what data actually loaded (columns kept, split sizes, source dispatch).
 logger = get_logger(__name__, log_level="INFO")
 

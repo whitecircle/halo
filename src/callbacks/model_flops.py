@@ -1,66 +1,126 @@
-"""Per-token training-FLOPS estimation behind MFU / S-MFU: PaLM/Megatron ``6·N`` plus the
-attention-score term of :mod:`src.models.attention.layout`.
+"""Per-rank training-FLOPs model behind MFU / S-MFU: PaLM/Megatron ``6·N`` plus the attention-score term of
+:mod:`src.models.attention.layout`.
 
-Every count is the RANK's own (``local_numel`` reads the TP/PP shard off the parameter, the layout
-comes off this rank's decoder layers), so the estimate describes what this GPU computes.
+Every count is the RANK's own (``local_numel`` reads the TP/PP shard off the parameter, the layout comes off
+this rank's decoder layers), so the estimate describes what this GPU computes.
 """
 
-from transformers.utils import logging
+from dataclasses import dataclass
 
+from transformers.utils import logging as hf_logging
+
+from src.callbacks.parameter_stats import count_model_parameters
 from src.distributed.expert_parallel.expert_weights import expert_weight_roots, experts_container_attrs
+from src.distributed.parallelism_config import ParallelismConfig
 from src.models.attention.layout import AttentionLayout, attention_layout
 from src.models.config_access import get_config_field, text_config
+from src.models.moe_balancing import detect_moe_experts_topk
 from src.runtime.dtensor import local_numel
 
-logger = logging.get_logger(__name__)
+logger = hf_logging.get_logger(__name__)
+
+
+@dataclass(frozen=True)
+class RankFlopsModel:
+    """This rank's training FLOPs per token, dense and active, and the parameter counts behind them.
+
+    Only ``top_k`` of ``num_experts`` routed experts fire per token, so the active figure charges
+    ``sparsity_factor`` of the expert parameters (MoE-CAP, arXiv:2412.07067); dense models have a factor
+    of 1. Both figures include ``attention_flops_per_token``, the score term at the length bound over the
+    ``attention_share`` of ``attention_layout`` this rank computes, which a step that measured its
+    documents replaces with the measurement.
+    """
+
+    model_flops_per_token: float
+    active_model_flops_per_token: float
+    attention_flops_per_token: float
+    attention_layout: AttentionLayout | None
+    attention_share: float
+    local_params: float
+    full_params: float
+    params_ratio: float
+    num_experts: int
+    top_k: int
+    sparsity_factor: float
+    local_expert_params: float
+    local_active_params: float
+    full_active_params: float
 
 
 def _is_expert_param(name: str) -> bool:
-    """Whether a named parameter belongs to a sparse (routed) MoE expert.
-
-    Only these take the ``top_k / num_experts`` sparsity factor; shared experts and router/gate params
-    are always active. Both vocabularies come from the registry rather than a hardcoded name list.
-    """
+    """Whether a named parameter belongs to a routed MoE expert, the only ones the sparsity factor scales;
+    shared experts and router/gate parameters are always active."""
     name_lower = name.lower()
-
     if "shared_expert" in name_lower:
         return False
     if ".gate." in name_lower or ".router." in name_lower:
         return False
-
     if name.rsplit(".", 1)[-1] in expert_weight_roots():
         return True
     return "shared" not in name_lower and any(f".{attr}." in name for attr in experts_container_attrs())
 
 
-def compute_expert_params(model, trainable_only: bool = False) -> float:
-    """Sum the local element count of sparse (routed) expert parameters.
-
-    ``trainable_only=True`` restricts to ``requires_grad`` experts; the default counts every expert,
-    since a frozen LoRA base still runs the expert forward and its input gradient.
-    """
-    return float(
-        sum(
-            local_numel(p)
-            for name, p in model.named_parameters()
-            if (p.requires_grad or not trainable_only) and _is_expert_param(name)
-        )
-    )
-
-
-def training_flops_per_token(trainable_params: float, frozen_params: float) -> float:
-    """``6·N_trainable + 4·N_frozen``: forward 2N and input gradient 2N for every parameter, plus the
-    weight gradient 2N for a trainable one. A rank holding only frozen parameters (a frozen LoRA base,
-    a frozen stage) still back-propagates the input gradient the trainable ones need, hence 4N, not 6N."""
+def _training_flops_per_token(trainable_params: float, frozen_params: float) -> float:
+    """``6·N_trainable + 4·N_frozen``: forward 2N and input gradient 2N for every parameter, plus the weight
+    gradient 2N for a trainable one. A frozen rank still back-propagates the input gradient upstream needs."""
     return 6.0 * trainable_params + 4.0 * frozen_params
 
 
-def estimate_linear_flops_per_token(model, local_params: int, trainable_params: int) -> float:
-    """The projection term over this rank's
-    :func:`~src.callbacks.parameter_stats.count_model_parameters` counts, by
-    :func:`training_flops_per_token`. A parameter-less (meta) model falls back to ``12·d²·L``
-    trainable parameters."""
+def _attention_term(model, seq_len: int, pp_size: int, tp_size: int) -> tuple[AttentionLayout | None, float, float]:
+    """``(layout, share, flops_per_token)`` of the attention-score term for documents of ``seq_len`` tokens.
+
+    The share is 1 when the layout was read off the rank's own decoder layers and ``1 / pp_size`` when the
+    config's full depth stands in; the rank computes ``1 / tp_size`` of every layer's heads, and CP does not
+    divide the term (already per token). A config describing no depth omits the term, loudly.
+    """
+    config = getattr(model, "config", None)
+    if config is None:
+        return None, 1.0, 0.0
+    decoder = text_config(config)
+    if get_config_field(decoder, "layer_types") is None and get_config_field(decoder, "num_hidden_layers") is None:
+        logger.warning_once(
+            f"{type(config).__name__} declares neither layer_types nor num_hidden_layers (text config "
+            "included); the attention-score term is omitted from the FLOPS estimate, so reported MFU "
+            "is an under-estimate."
+        )
+        return None, 1.0, 0.0
+    layout = attention_layout(model)
+    share = 1.0 if layout.source == "layers" else 1.0 / max(pp_size, 1)
+    return layout, share, layout.flops_per_token(seq_len) * share / max(tp_size, 1)
+
+
+def _moe_param_split(model, num_experts: int, top_k: int) -> tuple[float, float, float, float]:
+    """``(sparsity_factor, expert, trainable_expert, frozen_expert)`` local parameter counts; ``(1, 0, 0, 0)``
+    for a model routing no experts. A frozen expert still counts: a frozen LoRA base runs the expert forward
+    and its input gradient."""
+    if num_experts <= 0 or top_k <= 0:
+        return 1.0, 0.0, 0.0, 0.0
+    experts = [p for name, p in model.named_parameters() if _is_expert_param(name)]
+    expert_params = float(sum(local_numel(p) for p in experts))
+    trainable_expert_params = float(sum(local_numel(p) for p in experts if p.requires_grad))
+    return (
+        top_k / num_experts,
+        expert_params,
+        trainable_expert_params,
+        max(expert_params - trainable_expert_params, 0.0),
+    )
+
+
+def estimate_rank_flops(
+    model, *, seq_len: int, parallelism_config: ParallelismConfig, full_model_params: float | None
+) -> RankFlopsModel:
+    """This rank's :class:`RankFlopsModel` at a length bound of ``seq_len``; ``full_model_params`` is the
+    full model's size, the baseline the distributed-efficiency ratios divide by.
+
+    Raises on a model it cannot measure; the caller degrades.
+    """
+    layout, share, attention_flops = _attention_term(
+        model, seq_len, parallelism_config.pp_size, parallelism_config.tp_size
+    )
+    local_params, trainable_params = count_model_parameters(model)
+    frozen_params = local_params - trainable_params
     if next(model.parameters(), None) is None:
+        # A parameter-less (meta) model stands in 12·d²·L trainable parameters.
         config = getattr(model, "config", None)
         d_model = getattr(config, "hidden_size", None)
         n_layers = getattr(config, "num_hidden_layers", None)
@@ -69,39 +129,51 @@ def estimate_linear_flops_per_token(model, local_params: int, trainable_params: 
                 "Cannot estimate model FLOPS/token: the model exposes no parameters and its config "
                 "carries neither hidden_size nor num_hidden_layers."
             )
-        return training_flops_per_token(12 * d_model * d_model * n_layers, 0)
-    return training_flops_per_token(trainable_params, local_params - trainable_params)
+        linear_flops = _training_flops_per_token(12 * d_model * d_model * n_layers, 0)
+    else:
+        linear_flops = _training_flops_per_token(trainable_params, frozen_params)
 
+    has_full_baseline = full_model_params is not None and full_model_params > 0
+    full_params = float(full_model_params) if has_full_baseline else float(local_params)
+    params_ratio = full_params / float(local_params) if has_full_baseline else 1.0
 
-def resolve_attention_layout(model, pp_size: int = 1) -> tuple[AttentionLayout, float] | None:
-    """This rank's attention layout and the share of it the rank computes.
+    # The shared router probe, so the balancing setup and the MoE load metrics classify a family alike.
+    num_experts, top_k = detect_moe_experts_topk(model)
+    sparsity, expert_params, trainable_expert_params, frozen_expert_params = _moe_param_split(
+        model, num_experts, top_k
+    )
+    # Sparsity applies inside the 6N and 4N buckets separately.
+    trainable_active = trainable_params - trainable_expert_params * (1.0 - sparsity)
+    frozen_active = frozen_params - frozen_expert_params * (1.0 - sparsity)
+    local_active_params = float(trainable_active + frozen_active)
+    # FLOPs, not params: this rank holds num_experts/ep_size experts but serves the whole EP group's tokens,
+    # so per-rank active FLOPs/token is ep-invariant; expert_tp_size already divides the expert counts.
+    expert_duty = sparsity * parallelism_config.ep_size
+    trainable_active_flops = trainable_params - trainable_expert_params * (1.0 - expert_duty)
+    frozen_active_flops = frozen_params - frozen_expert_params * (1.0 - expert_duty)
 
-    The share is 1 when the layout was read off the rank's own decoder layers (a pipeline stage holds
-    exactly its slice) and ``1 / pp_size`` when the tree exposes no layer list and the config's full
-    depth stands in. ``None`` for a model without a config, or one whose config describes no depth
-    (the term is then omitted, loudly — an under-estimate rather than a guess).
-    """
-    config = getattr(model, "config", None)
-    if config is None:
-        return None
-    decoder = text_config(config)
-    if get_config_field(decoder, "layer_types") is None and get_config_field(decoder, "num_hidden_layers") is None:
-        logger.warning_once(
-            f"{type(config).__name__} declares neither layer_types nor num_hidden_layers (text config "
-            "included); the attention-score term is omitted from the FLOPS estimate, so reported MFU "
-            "is an under-estimate."
-        )
-        return None
-    layout = attention_layout(model)
-    return layout, 1.0 if layout.source == "layers" else 1.0 / max(pp_size, 1)
+    if has_full_baseline and sparsity < 1.0:
+        # Both axes shard the expert FFN; counting only EP would push expert_tp_size of the bank into shared.
+        full_expert_params = expert_params * parallelism_config.ep_size * parallelism_config.expert_tp_size
+        full_shared_params = full_model_params - full_expert_params
+        full_active_params = full_shared_params + sparsity * full_expert_params
+    else:
+        full_active_params = local_active_params
 
-
-def rank_attention_flops(layout: AttentionLayout, share: float, seq_length: int, tp_size: int = 1) -> float:
-    """Attention-score FLOPS per token for documents of ``seq_length`` tokens, over ``share`` of
-    ``layout`` (both from :func:`resolve_attention_layout`) and the rank's ``1 / tp_size`` share of
-    every layer's heads.
-
-    The per-layer rule (full, sliding, chunked, sparse, compressed, none) and head width come from
-    the layout; CP does not divide the term (already per-token).
-    """
-    return layout.flops_per_token(seq_length) * share / max(tp_size, 1)
+    return RankFlopsModel(
+        model_flops_per_token=linear_flops + attention_flops,
+        active_model_flops_per_token=_training_flops_per_token(trainable_active_flops, frozen_active_flops)
+        + attention_flops,
+        attention_flops_per_token=attention_flops,
+        attention_layout=layout,
+        attention_share=share,
+        local_params=float(local_params),
+        full_params=full_params,
+        params_ratio=params_ratio,
+        num_experts=num_experts,
+        top_k=top_k,
+        sparsity_factor=sparsity,
+        local_expert_params=expert_params,
+        local_active_params=local_active_params,
+        full_active_params=full_active_params,
+    )

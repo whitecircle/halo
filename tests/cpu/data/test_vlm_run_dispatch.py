@@ -51,8 +51,9 @@ from src.data.vlm import (
     is_vlm_run,
     process_vlm_conversation,
 )
-from src.training import script_runner
-from src.training.script_runner import enforce_text_path_padding_side, resolve_vlm_run
+from src.entrypoints import data_setup
+from src.entrypoints.data_setup import resolve_vlm_run
+from src.entrypoints.model_setup import apply_text_path_padding_side
 from tests.common.repo import load_script_module
 
 # Real configs, not stand-ins: the verdict must follow what transformers says about the architecture.
@@ -165,7 +166,7 @@ def test_the_script_seam_probes_the_checkpoint_the_run_loads(monkeypatch):
     can name a different modality, and a forced trust would execute code the run never trusted."""
     seen = []
     monkeypatch.setattr(
-        script_runner, "probe_checkpoint", lambda *args, **kwargs: seen.append((args, kwargs)) or (None, True)
+        data_setup, "probe_checkpoint", lambda *args, **kwargs: seen.append((args, kwargs)) or (None, True)
     )
     model_config = SimpleNamespace(model_name_or_path="org/ckpt", model_revision="abc123", trust_remote_code=True)
 
@@ -180,9 +181,7 @@ def test_a_run_verdict_needs_the_checkpoint_config_or_its_probe_verdict():
 
 @pytest.mark.parametrize("vlm_checkpoint", [True, False])
 def test_a_checkpoint_verdict_already_taken_is_not_probed_again(monkeypatch, vlm_checkpoint):
-    monkeypatch.setattr(
-        script_runner, "probe_checkpoint", lambda *a, **k: pytest.fail("the checkpoint was probed again")
-    )
+    monkeypatch.setattr(data_setup, "probe_checkpoint", lambda *a, **k: pytest.fail("the checkpoint was probed again"))
     model_config = SimpleNamespace(model_name_or_path="org/ckpt", model_revision=None, trust_remote_code=False)
 
     verdict = resolve_vlm_run(
@@ -468,7 +467,7 @@ def test_text_path_forces_right_padding():
     the text path normalizes it as the text load does. The packing collator refuses a left-padding
     tokenizer outright, so a multimodal checkpoint's text run would otherwise die at collator build."""
     tokenizer = SimpleNamespace(padding_side="left")
-    enforce_text_path_padding_side(tokenizer, False)
+    apply_text_path_padding_side(tokenizer, False)
     assert tokenizer.padding_side == "right"
 
 
@@ -476,7 +475,7 @@ def test_vlm_run_keeps_the_processor_padding_side():
     """VLM batches pad through the processor, not the text collators — flipping its side would
     change every existing VLM run."""
     tokenizer = SimpleNamespace(padding_side="left")
-    enforce_text_path_padding_side(tokenizer, True)
+    apply_text_path_padding_side(tokenizer, True)
     assert tokenizer.padding_side == "left"
 
 

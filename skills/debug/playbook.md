@@ -3,7 +3,7 @@
 Companion to `SKILL.md`. Sources: `src/runtime/consensus.py` (`assert_rank_uniform`), `src/diagnostics/py_spy.py`,
 `src/diagnostics/profiling.py` (CUDA-memory helpers),
 `src/callbacks/torch_profiler.py` (`TorchProfilerCallback`),
-`src/callbacks/wiring.py` (wiring), `src/env.py` (`env_flag`, `DIST_NCCL_TIMEOUT_MINUTES`),
+`src/callbacks/factory.py` (the callback roster), `src/env.py` (`env_flag`, `DIST_NCCL_TIMEOUT_MINUTES`),
 `src/models/attention/sdpa_flex_sliding.py` (`HALO_FLEX_SLIDING`), and the user-facing guide
 `agent-docs/reference/debugging.md`. Every env var / helper name below is verbatim
 from those files or the file cited beside it — do not paraphrase them.
@@ -116,7 +116,7 @@ torch.cuda.reset_peak_memory_stats(); log_cuda_memory("after forward")   # quick
 
 ## 4. Reading `TorchProfilerCallback` traces
 
-Enable from any training YAML (wired in `wiring.build_perf_callbacks` when
+Enable from any training YAML (built in `factory.build_run_callbacks` when
 `enable_torch_profiler: true`):
 
 ```yaml

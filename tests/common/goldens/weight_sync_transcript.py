@@ -257,7 +257,7 @@ class Scenario:
     formation_thread_fails: bool = False
 
 
-_SYNC = ("construct", "init_communicator", "update_named_param", "reset_prefix_cache")
+_SYNC = ("construct", "init_communicator", "update_named_param", "finish_weight_update")
 _FAILED_INIT = ("construct", "init_communicator", "close_communicator")
 _ABORTED = ("construct", "init_communicator", "update_named_param", "abort_weight_update", "close_communicator")
 
@@ -414,8 +414,8 @@ class Driver:
         for name, dtype, shape in PAYLOADS[self.scenario.payload]:
             self.client.update_named_param(name, torch.zeros(shape, dtype=dtype))
 
-    def reset_prefix_cache(self) -> None:
-        self.client.reset_prefix_cache()
+    def finish_weight_update(self) -> None:
+        self.client.finish_weight_update()
 
     def abort_weight_update(self) -> None:
         self.client.abort_weight_update()

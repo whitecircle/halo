@@ -29,10 +29,11 @@ from transformers import Trainer
 import scripts.training.distillation.teacher_distill as teacher_distill_script
 import src.trainers.distillation.teacher_distillation as teacher_distillation
 from src.distributed.parallelism_config import ParallelismConfig
+from src.entrypoints.model_setup import PolicyLoad
+from src.entrypoints.script import ScriptContext
 from src.kernels.logprobs import LABEL_IGNORE_INDEX
 from src.trainers.distillation.losses import get_divergence
 from src.trainers.distillation.teacher_distillation import DistributedDistillationTrainer
-from src.training.script_runner import ScriptRuntime
 from tests.common.models import QWEN3_0_6B
 from tests.common.tokenizers import load_cached_tokenizer
 
@@ -288,19 +289,19 @@ def _run_teacher_script(tmp_path, teacher_tokens):
     """Drive the script's ``main()`` with every load stubbed, the teacher's tokenizer and config included."""
     student = _TokenTableModel(seed=0)
     stubs = {
-        "init_training_script": lambda *a, **k: ScriptRuntime(
+        "init_training_script": lambda *a, **k: ScriptContext(
             parallelism_config=ParallelismConfig(),
-            mode_suffix="",
             local_rank=0,
             resume_checkpoint=None,
             model_source="stub/student",
+            trainer_cls=DistributedDistillationTrainer,
         ),
         "load_script_datasets": lambda *a, **k: (None, False),
         "resolve_vlm_run": lambda *a, **k: False,
-        "load_model_for_training": lambda *a, **k: (student, _Tokenizer(TOKENS), _Tokenizer(TOKENS), False),
+        "load_policy_model": lambda *a, **k: PolicyLoad(student, _Tokenizer(TOKENS), _Tokenizer(TOKENS), False),
         "apply_max_length": lambda config, args, model, tokenizer: tokenizer,
         "install_resolved_tokenizer": lambda processing_class, tokenizer: tokenizer,
-        "enforce_text_path_padding_side": lambda *a, **k: None,
+        "apply_text_path_padding_side": lambda *a, **k: None,
         "configure_adapter_training": lambda *a, **k: None,
         "AutoTokenizer": types.SimpleNamespace(from_pretrained=lambda *a, **k: _Tokenizer(teacher_tokens)),
         "AutoConfig": types.SimpleNamespace(from_pretrained=lambda *a, **k: student.config),
@@ -312,7 +313,7 @@ def _run_teacher_script(tmp_path, teacher_tokens):
         f"output_dir: {tmp_path / 'out'}\nbf16: false\nuse_cpu: true\n"
     )
     with (
-        mock.patch("src.training.parser.install_log_tee"),
+        mock.patch("src.entrypoints.script.install_log_tee"),
         mock.patch.object(sys, "argv", ["prog", str(config)]),
         contextlib.ExitStack() as stack,
     ):

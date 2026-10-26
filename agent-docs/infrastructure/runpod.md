@@ -88,7 +88,7 @@ python -c "from huggingface_hub import snapshot_download; snapshot_download('uns
 - **EP+TP**: TP groups are contiguous rank blocks, so `tp_size` must **divide** the NVLink domain. Cross-node EP+TP must be a single
   global EP group (`ep_size == world`) — a multi-domain multi-group EP+TP shape is rejected at config time.
 
-CLI arguments come from `DistributedArguments`: `--expert_parallel_size` (default `1`), `--ep_scope`
+CLI arguments come from `ParallelismArguments`: `--expert_parallel_size` (default `1`), `--ep_scope`
 (`auto` | `node` | `global`, default `auto`), `--context_parallel_size`, `--tensor_parallel_size`,
 `--save_sharded_ep`, `--fp32_router`.
 

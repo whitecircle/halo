@@ -102,7 +102,7 @@ def init_distributed() -> tuple[int, int, int]:
     production does.
     """
     # Before any model load, and so before the first ``import flash_attn.cute``, which reads this env
-    # at import. Production sets it in ``setup_training_environment``; a GPU test that loads through
+    # at import. Production sets it in ``configure_training_run``; a GPU test that loads through
     # ``from_pretrained`` directly would otherwise leave the CuTe DSL with the cache enabled but no
     # directory and re-JIT every kernel on every run, past any suite timeout.
     ensure_fa4_kernel_cache_env()
@@ -156,7 +156,7 @@ def setup_cache_dirs(prefix: str, rank: int) -> tuple[str, str]:
     os.environ["HF_DATASETS_CACHE"] = cache_dir
     # datasets froze the env at import (datasets.config latches at module load), so the env write
     # alone doesn't isolate direct load_dataset callers — update the live config too (mirrors
-    # src/training/environment.py).
+    # src/entrypoints/run_setup.py).
     datasets.config.HF_DATASETS_CACHE = Path(cache_dir)
     output_dir = tempfile.mkdtemp(prefix=f"{SCRATCH_DIR_TAG}{prefix}_out_")
     return output_dir, cache_dir

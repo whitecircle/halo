@@ -97,17 +97,17 @@ SDPA consumes no cu_seqlens, so keep `per_device_train_batch_size: 1` under pack
 
 The KDA layers run fla's Triton kernels, whose autotuners re-benchmark on shape-derived keys. The causal-conv1d key includes `ceil(tokens/1024)`, so a fresh packed-row width costs that rank tens of seconds of autotuning while its 7 peers spin in the next collective at idle power.
 
-Measured configs persist in the Triton disk cache, which `setup_training_environment` anchors on `HF_HOME` (`TRITON_CACHE_DIR`), so the warm-up is paid once per volume and the slow-step pattern appears only against a fresh cache.
+Measured configs persist in the Triton disk cache, which `configure_training_run` anchors on `HF_HOME` (`TRITON_CACHE_DIR`), so the warm-up is paid once per volume and the slow-step pattern appears only against a fresh cache.
 
 ## Router balancing
 
 Bailing is aux-loss-free by design (`moe_router_enable_expert_bias: true`; Ling 3.0 also declares `topk_method: noaux_tc`): no modeling variant computes a load-balancing loss and the config carries no `router_aux_loss_coef`. The family's native mechanism is the gate's persistent `expert_bias` buffer, added to the sigmoid scores for **selection only** — combine weights stay unbiased.
 
-`EPBailingMoELayer` hands exactly that buffer to `RouterBiasBalancingCallback`: under `moe_balancing: bias_update` (or `auto`, which resolves there whenever the wrapper is applied) the DeepSeek-V3 sign-updates land in `expert_bias` itself, upcast to fp32 at enable so the 1e-3 steps survive the add.
+`EPBailingMoELayer` hands exactly that buffer to `BalancingBiasCallback`: under `moe_balancing: bias_update` (or `auto`, which resolves there whenever the wrapper is applied) the DeepSeek-V3 sign-updates land in `expert_bias` itself, upcast to fp32 at enable so the 1e-3 steps survive the add.
 
 The wrapper exposes it as a live property, so callback updates and the `router_balancing_biases.pt` resume-restore always reach the buffer the gate reads. Because the buffer is part of the checkpoint, a gathered save exports the **final** bias and a served checkpoint routes exactly as training did.
 
-Most wrapper families adopt a native slot the same way; the per-family slots and the exceptions are in the [RouterBiasBalancingCallback](../training-methods/callbacks.md#routerbiasbalancingcallback) table. `moe/*` load metrics come with the callback.
+Most wrapper families adopt a native slot the same way; the per-family slots and the exceptions are in the [BalancingBiasCallback](../training-methods/callbacks.md#balancingbiascallback) table. `moe/*` load metrics come with the callback.
 
 An explicit `aux_loss` warns and stays off (there is no aux term to enable). Without the EP wrapper — `use_grouped_gemm: false` at `expert_parallel_size: 1` — nothing counts expert loads, so `bias_update` raises at setup; freezing the gate is the fallback mitigation there:
 

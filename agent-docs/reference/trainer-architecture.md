@@ -449,7 +449,8 @@ reference forward runs (a held `ref_model`, else the PEFT policy with its adapte
 `mixins/offline_reference.py`), and `rollout/`. `environmental.py` keeps the objective itself: batch assembly, advantages, the IS
 trust region and the rank-uniform fences.
 
-`rollout/` holds `weight_sync.py`, `weight_sync_clients.py`, `trl_vllm_client.py`,
+`rollout/` holds `weight_push.py` (the push and its construction gate), `engine_preflight.py` (the COLLECTIVE
+rollout-server preflights), `trl_vllm_client.py`,
 `trajectory_spans.py` and `routing_replay.py`, plus four mixins. The async GRPO trainer composes three of them:
 `AsyncRolloutMixin` (`async_rollouts.py` — Ray actors, the prefetch thread, engine weight sync),
 `TrajectoryTokenizeMixin` (`trajectory_tokenize.py` — trajectory → training rows) and
@@ -464,7 +465,7 @@ the artifact writers it routes `log` through): it writes the completions record 
 `VLLMGeneration.sync_weights` with `_distributed_sync_weights` at construction, and raises when TRL
 built no `vllm_generation` (server-mode vLLM is required). Before it, the init spine both on-policy
 trainers close through (`OnPolicyGRPOInitMixin._finish_on_policy_init`) runs
-`validate_weight_sync_support` against the trainer's engine.
+`reject_unsyncable_model` against the trainer's engine.
 TRL builds `TrlVLLMClient` (`src/trainers/grpo/rollout/trl_vllm_client.py`), TRL's `generate`
 contract over the vLLM weight-sync client, in place of its own `VLLMClient`, which would import the
 vLLM package ([generation](../training-methods/grpo/online.md#server-mode-only)).
@@ -479,8 +480,8 @@ TRL slices the broadcast by `process_index`, each TP rank lands on different com
 first forward deadlocks on its first all-reduce.
 
 `_distributed_sync_weights` calls `sync_trainer_weights`
-(`src/trainers/grpo/rollout/weight_sync.py`, also used by the async GRPO trainer), which gathers,
-sends, and resets the vLLM prefix cache — see
+(`src/trainers/grpo/rollout/weight_push.py`, also used by the async GRPO trainer), which gathers,
+sends, and closes the engine's update with `finish_weight_update` — see
 [the gather](../training-methods/grpo/online.md#weight-sync) for what it collects.
 EP layers are found by `isinstance(module, EPMoELayerBase)` rather than an `ep_config` probe (a PEFT
 `modules_to_save` wrapper forwards `__getattr__` and would match the wrapper too), and PEFT/LoRA is

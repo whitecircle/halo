@@ -13,12 +13,11 @@ import os
 import pytest
 
 import src.configs.grpo_environmental as grpo_environmental
-from src.args.rlvr_online_grpo_args import RLVROnlineGRPOScriptArguments
-from src.configs.environment_config import EnvironmentConfig
-from src.configs.grpo_environmental import POSITIVE_ROLLOUT_FIELDS, AsyncTrainingConfig
+from src.configs.grpo_environmental import AsyncTrainingConfig, EnvironmentConfig
+from src.configs.grpo_online import RLVROnlineGRPOScriptArguments
+from src.configs.parser import HaloArgumentParser
 from src.configs.preference import SmoothMarginPOConfig
 from src.rewards.terms import EnvironmentTerm
-from src.training.parser import H4ArgumentParser
 
 OUTPUT_DIR = "/tmp/test_output"
 
@@ -30,8 +29,7 @@ OUTPUT_DIR = "/tmp/test_output"
 # bf16 at its default and never reach the GPU check.
 _CPU_OK = {"output_dir": OUTPUT_DIR, "bf16": False}
 
-# The rollout knobs AsyncTrainingConfig refuses at or below 0, spelled out so the sweep is static at
-# collection; test_positive_rollout_knob_sweep_covers_the_production_tuple holds it to the source.
+# The rollout knobs AsyncTrainingConfig refuses at or below 0.
 _POSITIVE_ROLLOUT_KNOBS = (
     "rollout_temperature",
     "rollout_max_tokens",
@@ -260,7 +258,7 @@ def test_smpo_invalid_loss_type_value():
 
     SMPO's ``__post_init__`` stores a bogus value verbatim, so the dataclass Literal is advisory to
     a caller that builds the config by hand. Every supported entry point goes through
-    ``H4ArgumentParser`` instead, and that is the gate this pins: if the parser's Literal check
+    ``HaloArgumentParser`` instead, and that is the gate this pins: if the parser's Literal check
     stops firing, a typo'd loss_type reaches the loss dispatch as a live config.
     """
 
@@ -268,7 +266,7 @@ def test_smpo_invalid_loss_type_value():
     assert cfg.loss_type == "bogus"
 
     with pytest.raises(ValueError, match="loss_type"):
-        H4ArgumentParser((SmoothMarginPOConfig,)).parse_dict({"loss_type": "bogus", **_CPU_OK})
+        HaloArgumentParser((SmoothMarginPOConfig,)).parse_dict({"loss_type": "bogus", **_CPU_OK})
 
 
 # EnvironmentConfig tests
@@ -348,8 +346,9 @@ def test_env_config_rejects_non_positive_max_turns():
 def test_env_config_max_turns_guard_survives_cli_override(tmp_path):
     config = tmp_path / "env.yaml"
     config.write_text("max_turns: 4\n")
+    parser = HaloArgumentParser((EnvironmentConfig,))
     with pytest.raises(ValueError, match="max_turns"):
-        H4ArgumentParser((EnvironmentConfig,)).parse_yaml_and_args(str(config), ["--max_turns=0"])
+        parser.parse_dict(parser.load_values([str(config), "--max_turns=0"]))
 
 
 def test_env_config_custom_env_type_passthrough():
@@ -369,9 +368,8 @@ def test_env_config_spells_environment_type_as_the_registry_keys_it(tmp_path):
     assert EnvironmentConfig(environment_type="Code_Contests").environment_type == "code_contests"
     config = tmp_path / "env.yaml"
     config.write_text("environment_type: react_math\n")
-    (cfg,) = H4ArgumentParser((EnvironmentConfig,)).parse_yaml_and_args(
-        str(config), ["--environment_type=Native_Math"]
-    )
+    parser = HaloArgumentParser((EnvironmentConfig,))
+    (cfg,) = parser.parse_dict(parser.load_values([str(config), "--environment_type=Native_Math"]))
     assert cfg.environment_type == "native_math"
     with pytest.raises(ValueError, match="^environment_type must be a registry name, got None$"):
         EnvironmentConfig(environment_type=None)
@@ -514,12 +512,6 @@ def test_async_config_watchdog_warnings_are_said_once_not_once_per_rank(monkeypa
         assert (warning in caplog.text) is main_process, warning
 
 
-def test_positive_rollout_knob_sweep_covers_the_production_tuple():
-    """The sweep below spells its fields out; this fails if the guarded tuple grows or shrinks."""
-
-    assert set(POSITIVE_ROLLOUT_FIELDS) == set(_POSITIVE_ROLLOUT_KNOBS)
-
-
 @pytest.mark.parametrize("field", _POSITIVE_ROLLOUT_KNOBS)
 @pytest.mark.parametrize("bad", [0, -1, float("nan"), float("inf")])
 def test_async_config_rejects_non_positive_or_non_finite_rollout_knobs(field, bad):
@@ -643,8 +635,9 @@ def test_async_config_rejects_a_thinking_budget_that_is_not_a_positive_int(bad):
 def test_async_config_range_guards_survive_a_cli_override(tmp_path):
     config = tmp_path / "async.yaml"
     config.write_text("rollout_temperature: 1.0\n")
+    parser = HaloArgumentParser((AsyncTrainingConfig,))
     with pytest.raises(ValueError, match="rollout_temperature"):
-        H4ArgumentParser((AsyncTrainingConfig,)).parse_yaml_and_args(str(config), ["--rollout_temperature=0"])
+        parser.parse_dict(parser.load_values([str(config), "--rollout_temperature=0"]))
 
 
 def test_async_config_template_variables_are_the_yamls_own_kwargs():

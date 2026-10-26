@@ -50,7 +50,7 @@
         "at_exit_hooks": 1
       },
       {
-        "step": "reset_prefix_cache",
+        "step": "finish_weight_update",
         "outcome": "ok",
         "requests": [
           "POST /update_weights {\"update_info\":{\"dtype_names\":[\"bfloat16\"],\"names\":[\"lm_head.weight\"],\"packed\":true,\"packed_buffer_size_bytes\":1073741824,\"packed_num_buffers\":2,\"shapes\":[[64,16]]}} timeout=600 single-shot retry(total=0,read=False)",
@@ -120,7 +120,7 @@
         "at_exit_hooks": 1
       },
       {
-        "step": "reset_prefix_cache",
+        "step": "finish_weight_update",
         "outcome": "ok",
         "requests": [
           "POST /update_weights {\"update_info\":{\"dtype_names\":[\"bfloat16\"],\"names\":[\"lm_head.weight\"],\"packed\":true,\"packed_buffer_size_bytes\":1073741824,\"packed_num_buffers\":2,\"shapes\":[[64,16]]}} timeout=600 single-shot retry(total=0,read=False)",
@@ -302,7 +302,7 @@
         "at_exit_hooks": 1
       },
       {
-        "step": "reset_prefix_cache",
+        "step": "finish_weight_update",
         "outcome": "HTTPError",
         "requests": [
           "POST /pause?mode=keep timeout=60 session retry(total=5,connect=5,read=5,status=3,allowed_methods=[GET,POST],status_forcelist=[500,502,503],backoff_factor=2)",
@@ -360,7 +360,7 @@
         "at_exit_hooks": 1
       },
       {
-        "step": "reset_prefix_cache",
+        "step": "finish_weight_update",
         "outcome": "HTTPError",
         "requests": [
           "POST /pause?mode=keep timeout=60 session retry(total=5,connect=5,read=5,status=3,allowed_methods=[GET,POST],status_forcelist=[500,502,503],backoff_factor=2)",
@@ -607,7 +607,7 @@
         "at_exit_hooks": 1
       },
       {
-        "step": "reset_prefix_cache",
+        "step": "finish_weight_update",
         "outcome": "ok",
         "requests": [
           "POST /pause?mode=keep timeout=60 session retry(total=5,connect=5,read=5,status=3,allowed_methods=[GET,POST],status_forcelist=[500,502,503],backoff_factor=2)",
@@ -680,7 +680,7 @@
         "at_exit_hooks": 1
       },
       {
-        "step": "reset_prefix_cache",
+        "step": "finish_weight_update",
         "outcome": "ok",
         "requests": [
           "POST /update_weights_from_distributed {\"dtypes\":[\"bfloat16\"],\"flush_cache\":true,\"group_name\":\"weight_update_group_<server>\",\"names\":[\"lm_head.weight\"],\"shapes\":[[64,16]]} timeout=600 single-shot retry(total=0,read=False)",
@@ -748,7 +748,7 @@
         "at_exit_hooks": 1
       },
       {
-        "step": "reset_prefix_cache",
+        "step": "finish_weight_update",
         "outcome": "ok",
         "requests": [
           "POST /update_weights_from_distributed {\"dtypes\":[\"bfloat16\"],\"flush_cache\":true,\"group_name\":\"weight_update_group_<server>\",\"names\":[\"lm_head.weight\"],\"shapes\":[[64,16]]} timeout=600 single-shot retry(total=0,read=False)",
@@ -925,7 +925,7 @@
         "at_exit_hooks": 1
       },
       {
-        "step": "reset_prefix_cache",
+        "step": "finish_weight_update",
         "outcome": "HTTPError",
         "requests": [
           "POST /pause_generation {\"mode\":\"abort\"} timeout=60 session retry(total=5,connect=5,read=5,status=3,allowed_methods=[GET,POST],status_forcelist=[500,502,503],backoff_factor=2)",
@@ -980,7 +980,7 @@
         "at_exit_hooks": 1
       },
       {
-        "step": "reset_prefix_cache",
+        "step": "finish_weight_update",
         "outcome": "HTTPError",
         "requests": [
           "POST /pause_generation {\"mode\":\"abort\"} timeout=60 session retry(total=5,connect=5,read=5,status=3,allowed_methods=[GET,POST],status_forcelist=[500,502,503],backoff_factor=2)",
@@ -1221,7 +1221,7 @@
         "at_exit_hooks": 1
       },
       {
-        "step": "reset_prefix_cache",
+        "step": "finish_weight_update",
         "outcome": "ok",
         "requests": [
           "POST /pause_generation {\"mode\":\"abort\"} timeout=60 session retry(total=5,connect=5,read=5,status=3,allowed_methods=[GET,POST],status_forcelist=[500,502,503],backoff_factor=2)",

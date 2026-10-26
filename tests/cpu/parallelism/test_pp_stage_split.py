@@ -449,7 +449,7 @@ def test_aux_loss_balanced_moe_is_rejected():
 def test_bias_update_balanced_moe_is_accepted():
     """Families balanced by the aux-loss-free bias update do not touch the severed path.
 
-    Mirrors what ``_enable_router_bias_balancing`` installs (plain attributes on the router), which
+    Mirrors what ``apply_balancing_mode``'s bias enable installs (plain attributes on the router), which
     is what ``moe_balancing: auto`` keys on to resolve ``bias_update``.
     """
     model = _moe_model()

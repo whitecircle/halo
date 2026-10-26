@@ -47,7 +47,7 @@ _BAD_NUMBERS = {"true": True, "false": False, "nan": math.nan, "inf": math.inf}
 
 
 def _parse_targets() -> list[type]:
-    """Every toolkit dataclass a training entry script hands to ``H4ArgumentParser``.
+    """Every toolkit dataclass a training entry script hands to ``parse_script_args``.
 
     Read from the scripts' ASTs rather than a hand list, so a new entry script — or a new config tuple on
     an existing one — is swept the moment it lands.
@@ -62,7 +62,7 @@ def _parse_targets() -> list[type]:
             for alias in node.names
         }
         for node in ast.walk(tree):
-            if not (isinstance(node, ast.Call) and getattr(node.func, "id", None) == "H4ArgumentParser"):
+            if not (isinstance(node, ast.Call) and getattr(node.func, "id", None) == "parse_script_args"):
                 continue
             for argument in node.args:
                 for element in argument.elts if isinstance(argument, ast.Tuple | ast.List) else [argument]:

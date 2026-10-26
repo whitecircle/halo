@@ -60,7 +60,7 @@ The CCA convolution and the delayed-value recurrence still carry state **across 
 
 `ZayaForCausalLM` computes no aux loss. `ZayaRouter` instead carries a persistent fp32 `balancing_biases` buffer of width `num_experts + 1`, added to the **detached** gating probabilities before top-1 selection, so the bias steers which expert is chosen while the routed weight (and its gradient) comes from the unbiased path. Being persistent, it round-trips with every checkpoint. Without a periodic update the biases stay at init.
 
-`moe_balancing: auto` resolves to `bias_update` off that buffer, and [`RouterBiasBalancingCallback`](../training-methods/callbacks.md#routerbiasbalancingcallback) applies the DeepSeek-V3 auxiliary-loss-free update `b_i ← b_i + γ·sign(mean_count − count_i)`.
+`moe_balancing: auto` resolves to `bias_update` off that buffer, and [`BalancingBiasCallback`](../training-methods/callbacks.md#balancingbiascallback) applies the DeepSeek-V3 auxiliary-loss-free update `b_i ← b_i + γ·sign(mean_count − count_i)`.
 
 `count_i` is tokens routed to expert *i* over the last optimizer step, summed across DP/EP ranks. The gate masks discarded picks to index 0 with zero weight, and the load recorder re-points them to the counter's last slot, so discards inflate neither expert 0 nor the real-expert mean. `mean_count` averages over the real experts, the discard-slot bias is clamped, and γ is sign-only and tiny.
 

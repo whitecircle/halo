@@ -26,7 +26,7 @@ runs one model through four modes —
 
 Modes 1-3 must record EXACTLY ``tokens * top_k`` per layer and agree tensor-for-tensor; the frozen
 pass and eval must record nothing. A forward-entry counter proves the recompute actually ran —
-without it "counts did not double" is vacuous — and the finale drives ``RouterBiasBalancingCallback``
+without it "counts did not double" is vacuous — and the finale drives ``BalancingBiasCallback``
 after a checkpointed step and asserts the bias MOVED by the exact DeepSeek-V3 sign step, in
 ``router.bias``: the tensor ``state_dict`` exports and vLLM/SGLang route on.
 
@@ -41,8 +41,7 @@ import torch
 import torch.distributed as dist
 from transformers import GptOssConfig, GptOssForCausalLM, TrainerState
 
-from src.callbacks.router_bias_balancing import RouterBiasBalancingCallback
-from src.distributed.expert_parallel.balancing_strategy import apply_balancing_strategy
+from src.callbacks.balancing import BalancingBiasCallback, apply_balancing_mode
 from src.distributed.expert_parallel.moe_layer.layer import EPMoELayerBase
 from src.distributed.expert_parallel.patching import patch_moe_model_for_ep
 from src.distributed.parallelism_config import ParallelismConfig
@@ -150,7 +149,7 @@ def run(ctx):
 
     # bias_update through the real strategy seam: GptOss adopts the hub router's own `router.bias`,
     # so everything below is measured on the tensor an export actually carries.
-    apply_balancing_strategy(model, "bias_update", is_moe=True)
+    apply_balancing_mode(model, "bias_update", is_moe=True)
     checks["balancing_bias_is_the_native_router_bias"] = all(
         layer.balancing_biases is layer.router.bias for layer in ep_layers
     )
@@ -241,7 +240,7 @@ def run(ctx):
     checks["load_is_imbalanced_enough_to_move_the_bias"] = bool((expected_delta[0] != 0).any())
 
     before = [layer.balancing_biases.clone() for layer in ep_layers]
-    RouterBiasBalancingCallback(update_rate=GAMMA).on_step_end(None, TrainerState(global_step=1), None, model=model)
+    BalancingBiasCallback(update_rate=GAMMA).on_step_end(None, TrainerState(global_step=1), None, model=model)
     after = [layer.balancing_biases for layer in ep_layers]
 
     moved = [(a - b) for a, b in zip(after, before, strict=True)]

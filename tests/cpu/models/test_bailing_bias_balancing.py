@@ -8,7 +8,7 @@ export key, buffer-not-Parameter, idempotence — is pinned once for the whole r
 ``tests/cpu/parallelism/test_native_bias_balancing_adoption.py``. What lives here is what is
 Bailing's own: the class declarations that make ``auto`` resolve the family to ``bias_update``, the
 expert-load recording its routing feeds, and the round trip from a real
-``RouterBiasBalancingCallback`` step into the gate buffer.
+``BalancingBiasCallback`` step into the gate buffer.
 
     python tests/cpu/models/test_bailing_bias_balancing.py
 """
@@ -19,7 +19,7 @@ import pytest
 import torch
 import torch.nn as nn
 
-from src.callbacks.router_bias_balancing import RouterBiasBalancingCallback
+from src.callbacks.balancing import BalancingBiasCallback
 from src.distributed.expert_parallel.layers.bailing import EPBailingMoELayer
 from src.models.moe_balancing import resolve_balancing_mode
 
@@ -100,7 +100,7 @@ def test_callback_sign_update_lands_in_the_gate_buffer():
     counts[0] = 10.0  # expert 0 overloaded, everything else starved
     layer.expert_load_counter = counts.clone()
 
-    callback = RouterBiasBalancingCallback(update_rate=1e-3)
+    callback = BalancingBiasCallback(update_rate=1e-3)
     callback.on_step_end(args=None, state=SimpleNamespace(global_step=1), control=None, model=_Shell(layer))
 
     bias = layer.gate.expert_bias

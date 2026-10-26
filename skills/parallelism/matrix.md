@@ -1,7 +1,7 @@
 # Parallelism reference matrix
 
 Every row traces to `src/distributed/parallelism_rules.py` (the `reject_*` refusals),
-`src/distributed/parallelism_config.py` (`_resolve_and_validate`), `src/model_loading/parallel/load_rules.py` (`reject_unsupported_model`), `parallelism_config_from_args` (`src/training/parallelism_args.py`),
+`src/distributed/parallelism_config.py` (`_resolve_and_validate`), `src/model_loading/parallel/load_rules.py` (`reject_unsupported_model`), `parallelism_config_from_args` (`src/configs/parallelism_arguments.py`),
 the trainer mixins under `src/trainers/mixins/` (`base.py`, `validation.py`, `pp_gates.py`, `pipeline.py`,
 `ep_introspection.py`, `grad_sync.py`), the helpers those call (`tensor_parallel/parallelize_attention.py`,
 `expert_parallel/config.py`, `pipeline_parallel/model_rules.py`, `partition.py` and `runner.py`), or a `CLAUDE.md`
@@ -42,7 +42,7 @@ Source: `ParallelismConfig._resolve_topology`.
 Notes:
 
 - For pure EP, prefer `ep_scope="auto"` so the scope resolves correctly; `"auto"` is
-  the default in both the dataclass and `DistributedArguments`. Cross-node (`global`)
+  the default in both the dataclass and `ParallelismArguments`. Cross-node (`global`)
   EP needs `ep_group_size` to tile `stage_world_size` (`world_size // pp_size`) as
   equal contiguous per-domain blocks — divisibility alone is not enough.
 - "Node-local" = within one NVLink domain. On a standard cluster that is one OS node
@@ -107,7 +107,7 @@ The authoritative gate is the per-class `_supports_cp` / `_supports_pp` attribut
 (`src/trainers/mixins/base.py`, checked in
 `src/trainers/mixins/validation.py`), so a hand-built config is rejected too. Each training
 script additionally passes its trainer class to `parallelism_config_from_args(..., trainer_cls=...)`
-(`src/training/parallelism_args.py`), which reads the same flags and rejects a CLI-requested `context_parallel_size > 1` or `pipeline_parallel_size > 1` with a clear
+(`src/configs/parallelism_arguments.py`), which reads the same flags and rejects a CLI-requested `context_parallel_size > 1` or `pipeline_parallel_size > 1` with a clear
 error — passing CP there is a config error, not a silent no-op.
 
 ### CP incompatibility list

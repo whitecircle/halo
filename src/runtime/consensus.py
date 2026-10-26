@@ -48,6 +48,11 @@ def raise_rank0_failure(
         raise exc_type(failure) from cause
 
 
+def refusal_text(error: Exception) -> str:
+    """A check's own refusal (a ``ValueError``) verbatim; any other failure with its type, which ``str`` drops."""
+    return str(error) if isinstance(error, ValueError) else f"{type(error).__name__}: {error}"
+
+
 def gathered_failure_summary(reasons: list[str | None], what: str) -> str | None:
     """``what`` failed on which ranks, with the first one's reason; None when no rank reported one."""
     failed = [rank for rank, reason in enumerate(reasons) if reason]

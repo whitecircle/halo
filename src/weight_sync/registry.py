@@ -8,12 +8,8 @@ import_package_modules(_clients)
 
 
 def _client_registry() -> dict[str, type[WeightSyncClientBase]]:
-    """Backend key → client class, derived from the subclasses rather than a parallel table.
-
-    Restricted to the clients in ``clients``: ``__subclasses__()`` also returns classes
-    defined outside it (a test double, or this module tree loaded a second time under another name),
-    and such a class capturing a backend key would replace the production client with no error.
-    """
+    """Backend key → client class, from the subclasses in ``clients`` only: a test double or a second copy
+    of the tree capturing a key would otherwise replace the production client silently."""
     registry: dict[str, type[WeightSyncClientBase]] = {}
     for cls in iter_subclasses(WeightSyncClientBase):
         if not cls.__module__.startswith(f"{_clients.__name__}."):
@@ -30,8 +26,7 @@ def _client_registry() -> dict[str, type[WeightSyncClientBase]]:
 
 
 def rollout_backends() -> list[str]:
-    """Every selectable rollout backend. Tests pin this against the ``rollout_backend`` config
-    ``Literal`` so a new client cannot land unselectable."""
+    """Every selectable rollout backend."""
     return sorted(_client_registry())
 
 

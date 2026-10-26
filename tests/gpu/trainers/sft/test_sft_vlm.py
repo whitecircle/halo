@@ -22,11 +22,14 @@ Run with 2 GPUs:
         tests/gpu/trainers/sft/test_sft_vlm.py
 """
 
+from types import SimpleNamespace
+
 import torch
 from trl import ModelConfig, SFTConfig
 
-from src.distributed.loading.vlm_setup import load_model_for_training
+from src.configs.script_arguments import CommonScriptArguments
 from src.distributed.parallelism_config import ParallelismConfig
+from src.entrypoints.model_setup import load_policy_model
 from src.trainers.sft import DistributedSFTTrainer
 from tests.common.datasets import create_sft_dataset
 from tests.common.harness import gpu_test_main
@@ -73,14 +76,17 @@ def run(ctx):
     parallelism_config = ParallelismConfig()
 
     # production entry point, so VLM detection and processor load are under test too
-    log("\n[1/5] Loading VLM via load_model_for_training (production path)...")
+    log("\n[1/5] Loading VLM via load_policy_model (production path)...")
     model_config = ModelConfig(
         model_name_or_path=MODEL_NAME, attn_implementation="flash_attention_2", trust_remote_code=True
     )
-    model, processing_class, tokenizer, is_vlm = load_model_for_training(
-        model_config, config, parallelism_config, vlm_run=False
+    context = SimpleNamespace(
+        parallelism_config=parallelism_config, model_source=MODEL_NAME, policy_from_checkpoint=False
     )
-    assert is_vlm, "Qwen3-VL must be detected as a VLM by load_model_for_training"
+    model, processing_class, tokenizer, is_vlm = load_policy_model(
+        context, config, model_config, CommonScriptArguments(), vlm_run=False
+    )
+    assert is_vlm, "Qwen3-VL must be detected as a VLM by load_policy_model"
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
     log(f"  Model: {type(model).__name__}, processor: {type(processing_class).__name__}")

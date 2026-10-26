@@ -3,7 +3,7 @@
 
 A dense-model QLoRA RL run constructs cleanly (the loader's rejection covers only MoE + EP/TP/
 grouped-GEMM), and ``_send_dense_weights`` then ships the bnb ``Params4bit`` packed uint8 storage
-under base-weight names — the server fails opaquely after full startup. ``validate_weight_sync_support``
+under base-weight names — the server fails opaquely after full startup. ``reject_unsyncable_model``
 is the construction gate, run by the init spine both the online and environmental GRPO trainers close through.
 
 Run: ``python tests/cpu/grpo/test_grpo_weight_sync_qlora_gate.py`` (or ``pytest -m cpu``).
@@ -25,7 +25,7 @@ PartialState()
 from src.trainers.grpo.environmental import DistributedAsyncEnvironmentalGRPOTrainer
 from src.trainers.grpo.mixins.on_policy_init import OnPolicyGRPOInitMixin
 from src.trainers.grpo.online import DistributedGRPOTrainer
-from src.trainers.grpo.rollout.weight_sync import validate_weight_sync_support
+from src.trainers.grpo.rollout.weight_push import reject_unsyncable_model
 
 
 class _QuantizedStub(nn.Module):
@@ -47,12 +47,12 @@ class _FloatStub(nn.Module):
 @pytest.mark.parametrize("backend", ["vllm", "sglang"])
 def test_gate_rejects_quantized_model(backend):
     with pytest.raises(ValueError, match="QLoRA .* not supported with rollout-engine weight sync"):
-        validate_weight_sync_support(_QuantizedStub(), backend)
+        reject_unsyncable_model(_QuantizedStub(), backend)
 
 
 @pytest.mark.parametrize("backend", ["vllm", "sglang"])
 def test_gate_passes_float_model(backend):
-    validate_weight_sync_support(_FloatStub(), backend)  # must not raise
+    reject_unsyncable_model(_FloatStub(), backend)  # must not raise
 
 
 def _install_host(model, vllm_generation):

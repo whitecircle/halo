@@ -1,20 +1,20 @@
 """Pre-training parameter / dtype summary.
 
-Counts are per rank throughout (``local_numel``): the callback runs on the wrapped model, where a
-plain ``numel()`` would report FSDP2/TP DTensor params globally while EP experts, which are
-FSDP-ignored plain tensors, report locally, mixing two scopes in one sum.
+Counts are per rank throughout (``local_numel``): the callback runs on the wrapped model, where a plain
+``numel()`` would report FSDP2/TP DTensor params globally but FSDP-ignored EP experts locally.
 """
 
 import re
+from collections import defaultdict
 
 import torch
 from transformers import TrainerCallback
-from transformers.utils import logging
+from transformers.utils import logging as hf_logging
 
 from src.runtime.dtensor import local_numel
 from src.runtime.ranks import is_global_main_process
 
-logger = logging.get_logger(__name__)
+logger = hf_logging.get_logger(__name__)
 
 
 def count_model_parameters(model: torch.nn.Module) -> tuple[int, int]:
@@ -33,41 +33,25 @@ def _normalize_module_name(module_name: str) -> str:
 
 def _module_trainable_stats(model: torch.nn.Module) -> dict[str, tuple[int, int]]:
     """Per-module ``(total, trainable)`` counts, keyed by normalized name."""
-    stats: dict[str, tuple[int, int]] = {}
+    stats: defaultdict[str, list[int]] = defaultdict(lambda: [0, 0])
     for param_name, param in model.named_parameters():
-        total = local_numel(param)
-        trainable = total if param.requires_grad else 0
-        norm_name = _normalize_module_name(param_name)
-        if norm_name in stats:
-            prev_total, prev_trainable = stats[norm_name]
-            stats[norm_name] = (prev_total + total, prev_trainable + trainable)
-        else:
-            stats[norm_name] = (total, trainable)
-    return stats
+        numel = local_numel(param)
+        tally = stats[_normalize_module_name(param_name)]
+        tally[0] += numel
+        tally[1] += numel if param.requires_grad else 0
+    return {name: tuple(tally) for name, tally in stats.items()}
 
 
 def _dtype_stats(model: torch.nn.Module) -> dict[torch.dtype, tuple[int, int, int]]:
     """Parameter counts grouped by dtype: ``dtype -> (total, trainable, memory_bytes)``."""
-    dtype_stats = {}
-
-    for _param_name, param in model.named_parameters():
-        dtype = param.dtype
-        total_params = local_numel(param)
-        trainable_params = total_params if param.requires_grad else 0
-
-        memory_bytes = total_params * param.element_size()
-
-        if dtype in dtype_stats:
-            prev_total, prev_trainable, prev_memory = dtype_stats[dtype]
-            dtype_stats[dtype] = (
-                prev_total + total_params,
-                prev_trainable + trainable_params,
-                prev_memory + memory_bytes,
-            )
-        else:
-            dtype_stats[dtype] = (total_params, trainable_params, memory_bytes)
-
-    return dtype_stats
+    stats: defaultdict[torch.dtype, list[int]] = defaultdict(lambda: [0, 0, 0])
+    for param in model.parameters():
+        numel = local_numel(param)
+        tally = stats[param.dtype]
+        tally[0] += numel
+        tally[1] += numel if param.requires_grad else 0
+        tally[2] += numel * param.element_size()
+    return {dtype: tuple(tally) for dtype, tally in stats.items()}
 
 
 def _format_memory_size(bytes_size: float) -> str:

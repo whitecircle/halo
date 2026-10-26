@@ -123,12 +123,12 @@ def _run_to_tokenization(classification, tmp_path, eval_strategy: str, test_labe
             classification, "load_script_datasets", return_value=(DatasetDict({"train": train, "test": test}), False)
         ),
         mock.patch.object(classification, "require_multimodal_sequence_classification_head"),
-        mock.patch.object(classification, "load_script_model", return_value=(model, object())),
+        mock.patch.object(classification, "load_model_and_tokenizer", return_value=(model, object())),
         mock.patch.object(classification, "apply_max_length", side_effect=lambda config, args, model, tok: tok),
         mock.patch.object(classification, "configure_adapter_training", return_value=None),
         mock.patch.object(classification, "log_model_info"),
         mock.patch.object(classification, "coordinated_map", side_effect=_map),
-        mock.patch("src.training.parser.install_log_tee"),
+        mock.patch("src.entrypoints.script.install_log_tee"),
         mock.patch.object(sys, "argv", ["prog", str(config)]),
     ]
     with contextlib.ExitStack() as stack:

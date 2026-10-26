@@ -17,8 +17,8 @@ import pytest
 from datasets import Dataset
 
 from src.data.pipeline import processing
+from src.entrypoints import run_setup as run_logger
 from src.runtime import filesystem
-from src.training import run_logging as run_logger
 
 FS_VARS = ("DIST_SHARED_FILESYSTEM", "DIST_INPUT_SHARED_FILESYSTEM", "DIST_OUTPUT_SHARED_FILESYSTEM")
 RANK_VARS = ("RANK", "SLURM_PROCID", "LOCAL_RANK", "SLURM_LOCALID")
@@ -142,7 +142,7 @@ def test_log_tee_elects_its_writer_with_is_fs_save_rank(monkeypatch, tmp_path):
         return False
 
     monkeypatch.setattr(run_logger, "is_fs_save_rank", _not_the_writer)
-    monkeypatch.setattr(run_logger, "_TEE_LOG_PATH", None)
+    monkeypatch.setattr(run_logger, "_tee_log_path", None)
 
     run_logger.install_log_tee(str(tmp_path))
 
@@ -212,7 +212,7 @@ def test_a_second_log_tee_for_another_output_dir_warns_instead_of_silently_dropp
     Silently returning would leave that run's console output in the FIRST run's run.log with no
     trace; the guard must name both paths.
     """
-    monkeypatch.setattr(run_logger, "_TEE_LOG_PATH", os.path.abspath("/first/log/run.log"))
+    monkeypatch.setattr(run_logger, "_tee_log_path", os.path.abspath("/first/log/run.log"))
     monkeypatch.setattr(run_logger, "is_fs_save_rank", lambda: True)
 
     with caplog.at_level(logging.WARNING, logger=run_logger.__name__):
@@ -221,12 +221,12 @@ def test_a_second_log_tee_for_another_output_dir_warns_instead_of_silently_dropp
     assert "/first/log/run.log" in caplog.text and "/second" in caplog.text, (
         "a second install_log_tee for a different output_dir was dropped without a warning"
     )
-    assert os.path.abspath("/first/log/run.log") == run_logger._TEE_LOG_PATH, "the live tee target was overwritten"
+    assert os.path.abspath("/first/log/run.log") == run_logger._tee_log_path, "the live tee target was overwritten"
 
 
 def test_a_second_log_tee_for_the_same_output_dir_is_a_silent_no_op(monkeypatch, caplog):
     """Re-entering the same run's setup is ordinary (the parser can run twice) — no warning there."""
-    monkeypatch.setattr(run_logger, "_TEE_LOG_PATH", os.path.abspath("/same/log/run.log"))
+    monkeypatch.setattr(run_logger, "_tee_log_path", os.path.abspath("/same/log/run.log"))
     monkeypatch.setattr(run_logger, "is_fs_save_rank", lambda: True)
 
     with caplog.at_level(logging.WARNING, logger=run_logger.__name__):
@@ -238,7 +238,7 @@ def test_a_second_log_tee_for_the_same_output_dir_is_a_silent_no_op(monkeypatch,
 def test_a_log_tee_that_cannot_start_warns(monkeypatch, caplog, tmp_path):
     """The writer rank whose run.log cannot be set up (no ``tee``, an unwritable output_dir) loses the
     run's whole console record; the run goes on, but not in silence."""
-    monkeypatch.setattr(run_logger, "_TEE_LOG_PATH", None)
+    monkeypatch.setattr(run_logger, "_tee_log_path", None)
     monkeypatch.setattr(run_logger, "is_fs_save_rank", lambda: True)
 
     def no_tee(*args, **kwargs):
@@ -250,7 +250,7 @@ def test_a_log_tee_that_cannot_start_warns(monkeypatch, caplog, tmp_path):
         run_logger.install_log_tee(str(tmp_path))
 
     assert "not persisted" in caplog.text and str(tmp_path) in caplog.text
-    assert run_logger._TEE_LOG_PATH is None
+    assert run_logger._tee_log_path is None
 
 
 if __name__ == "__main__":

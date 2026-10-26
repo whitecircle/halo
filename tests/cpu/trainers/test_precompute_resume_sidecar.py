@@ -34,17 +34,17 @@ from trl import DPOConfig, KTOConfig, ModelConfig
 
 import src.checkpoint.atomic as atomic_mod
 import src.trainers.mixins.reference_logps as precompute_mod
-from src.args.distributed_args import DistributedArguments
 from src.checkpoint.format import REFERENCE_LOGPS_FILE
+from src.configs.parallelism_arguments import ParallelismArguments
+from src.configs.parser import HaloArgumentParser
 from src.configs.preference import DPOScriptArguments, KTOScriptArguments
+from src.entrypoints.run_setup import resume_checkpoint_from_config
+from src.entrypoints.script import ScriptContext
 from src.runtime import filesystem
 from src.runtime.consensus import RankConsensus
 from src.trainers.mixins.checkpointing import CheckpointingMixin
 from src.trainers.mixins.reference_logps import token_digest as _token_digest
 from src.trainers.preference.precompute import PrecomputeRefLogpsRankConsistentMixin
-from src.training.environment import detect_resume_checkpoint
-from src.training.parser import H4ArgumentParser
-from src.training.script_runner import ScriptRuntime
 from tests.common.gloo import run_gloo_ranks
 from tests.common.preference_precompute import (
     BASE,
@@ -64,8 +64,8 @@ PartialState()
 
 # The dataclasses scripts/training/preference/{dpo,kto}.py parse their config into.
 SCRIPT_CONFIGS = {
-    "dpo": (DPOScriptArguments, DPOConfig, ModelConfig, DistributedArguments),
-    "kto": (KTOScriptArguments, KTOConfig, ModelConfig, DistributedArguments),
+    "dpo": (DPOScriptArguments, DPOConfig, ModelConfig, ParallelismArguments),
+    "kto": (KTOScriptArguments, KTOConfig, ModelConfig, ParallelismArguments),
 }
 
 _REFERENCE_WORLD_SIZE = 2
@@ -239,12 +239,17 @@ def test_the_named_recovery_parses_into_a_fresh_one_step_save(kind, tmp_path):
         f"model_name_or_path: base/model\noutput_dir: {run_dir}\nbf16: false\nuse_cpu: true\n"
         f"precompute_ref_log_probs: true\nsave_total_limit: 1\nresume_from_checkpoint: {resumed_from}\n"
     )
-    as_resumed = H4ArgumentParser(SCRIPT_CONFIGS[kind]).parse_yaml_and_args(str(config_path), [])[1]
-    assert detect_resume_checkpoint(as_resumed) == str(resumed_from), "premise: the config resumes"
+    parser = HaloArgumentParser(SCRIPT_CONFIGS[kind])
+    as_resumed = parser.parse_dict(parser.load_values([str(config_path)]))[1]
+    assert resume_checkpoint_from_config(as_resumed, overwrite_output_dir=False) == str(resumed_from), (
+        "premise: the config resumes"
+    )
 
-    config = H4ArgumentParser(SCRIPT_CONFIGS[kind]).parse_yaml_and_args(str(config_path), recovery)[1]
+    config = parser.parse_dict(parser.load_values([str(config_path), *recovery]))[1]
 
-    assert detect_resume_checkpoint(config) is None, "the recovery run must start from the base"
+    assert resume_checkpoint_from_config(config, overwrite_output_dir=False) is None, (
+        "the recovery run must start from the base"
+    )
     assert (config.max_steps, config.save_strategy, config.save_steps) == (1, "steps", 1)
     assert config.save_only_model is True
     assert os.path.commonpath([os.path.abspath(config.output_dir), str(run_dir)]) != str(run_dir), (
@@ -851,9 +856,9 @@ def test_the_trainers_checkpoint_hook_is_the_precompute_mixins(kind):
     ],
     ids=["fresh", "path_a", "path_b"],
 )
-def test_the_runtime_reports_a_policy_built_from_the_checkpoint(resume_checkpoint, model_source, expected):
-    runtime = ScriptRuntime(None, "ep2", 0, resume_checkpoint, model_source)
-    assert runtime.policy_from_checkpoint is expected
+def test_the_context_reports_a_policy_built_from_the_checkpoint(resume_checkpoint, model_source, expected):
+    context = ScriptContext(None, 0, resume_checkpoint, model_source, None)
+    assert context.policy_from_checkpoint is expected
 
 
 if __name__ == "__main__":

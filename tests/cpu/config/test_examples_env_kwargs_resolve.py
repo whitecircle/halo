@@ -19,7 +19,7 @@ from pathlib import Path
 import pytest
 import yaml
 
-from src.configs.environment_config import EnvironmentConfig
+from src.configs.grpo_environmental import EnvironmentConfig
 from src.environments.registry import resolve_environment
 from tests.common.repo import REPO_ROOT
 

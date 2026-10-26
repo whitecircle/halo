@@ -12,8 +12,7 @@ class ConversationRenderArguments:
     """Chat-template rendering knobs shared by conversation-rendering trainers (SFT, distillation)."""
 
     conversation_field: str | None = field(
-        default="prompt",
-        metadata={"help": "Dataset column holding the conversation, a list of role/content dicts."},
+        default="prompt", metadata={"help": "Dataset column holding the conversation, a list of role/content dicts."}
     )
     images_field: str | None = field(
         default=None,
@@ -24,8 +23,7 @@ class ConversationRenderArguments:
         },
     )
     system_prompt: str | None = field(
-        default=None,
-        metadata={"help": "System prompt added to a conversation that has none; unset adds nothing."},
+        default=None, metadata={"help": "System prompt added to a conversation that has none; unset adds nothing."}
     )
     train_on_completions_only: bool = field(
         default=True, metadata={"help": "Train only on assistant completions, masking the prompt tokens."}
@@ -67,4 +65,3 @@ class SFTScriptArguments(ConversationRenderArguments, GenerationEvalArguments, C
             "Requires train_on_completions_only=True."
         },
     )
-    # use_liger_kernel, liger_kernel_config, packing/packing_strategy/eval_packing/padding_free live in TRL's SFTConfig.

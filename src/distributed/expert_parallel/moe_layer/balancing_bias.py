@@ -1,6 +1,6 @@
 """The balancing bias on EP MoE layers: the DeepSeek-V3 sign-updated bias, adopted into the family's own
 exported slot where one exists or kept in a transient side-buffer, and the expert-load counts
-:class:`~src.callbacks.router_bias_balancing.RouterBiasBalancingCallback` steers it by.
+:class:`~src.callbacks.balancing.BalancingBiasCallback` steers it by.
 
 A bias outside the checkpoint leaves a served copy routing on the pretrained one, so ``moe_balancing:
 bias_update`` rejects a family that only holds the side-buffer; ``bias_update_transient`` opts into it.

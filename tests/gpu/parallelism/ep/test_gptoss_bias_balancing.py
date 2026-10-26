@@ -6,13 +6,13 @@ tiny randomly-initialised model (no download):
 
   1. `auto` resolution stays `aux_loss` for GPT-OSS *until* the bias is enabled
      (opt-in; existing configs unaffected).
-  2. `apply_balancing_strategy(model, "bias_update")` adopts the hub router's own
+  2. `apply_balancing_mode(model, "bias_update")` adopts the hub router's own
      `router.bias` as the balancing state on every `EPGptOssMoELayer` via
      `enable_bias_balancing` (native slot — the strict mode's export contract holds).
   3. Adoption re-registers the Parameter as a persistent BUFFER under the same key:
      frozen out of gradient training (the sign controller owns it), still in
      `state_dict()` — that IS the export path vLLM/SGLang load `router.bias` from.
-  4. `RouterBiasBalancingCallback` detects the routers.
+  4. `BalancingBiasCallback` detects the routers.
   5. Routing math: `_route_with_bias` reproduces the stock `GptOssTopKRouter`
      selection AND gate weights exactly — at zero bias and at a large steering
      bias alike, because both read the identical bias-inclusive logits. Trainer
@@ -37,8 +37,7 @@ from types import SimpleNamespace
 import torch
 from transformers import GptOssConfig, GptOssForCausalLM, TrainerState
 
-from src.callbacks.router_bias_balancing import RouterBiasBalancingCallback
-from src.distributed.expert_parallel.balancing_strategy import apply_balancing_strategy
+from src.callbacks.balancing import BalancingBiasCallback, apply_balancing_mode
 from src.distributed.expert_parallel.layers.glm4 import EPGlm4MoELayer
 from src.distributed.expert_parallel.layers.gpt_oss import EPGptOssMoELayer
 from src.distributed.expert_parallel.layers.lfm2 import EPLfm2MoELayer
@@ -165,10 +164,10 @@ def run(ctx) -> dict:
     # Simulate a config that requested router logits (e.g. for MoE metrics): the
     # EP bias path bypasses the router module the HF OutputRecorder hooks, so
     # leaving output_router_logits on makes the model's load_balancing_loss_func
-    # crash on an empty router_logits tuple. apply_balancing_strategy must force
+    # crash on an empty router_logits tuple. apply_balancing_mode must force
     # it back off.
     model.config.output_router_logits = True
-    apply_balancing_strategy(model, "bias_update")
+    apply_balancing_mode(model, "bias_update")
     check(
         checks,
         "bias_update forces output_router_logits=False",
@@ -247,7 +246,7 @@ def run(ctx) -> dict:
     for layer in ep_layers:
         layer.balancing_biases.zero_()
         layer.expert_load_counter = forced.clone()
-    RouterBiasBalancingCallback(update_rate=gamma).on_step_end(None, TrainerState(global_step=1), None, model=model)
+    BalancingBiasCallback(update_rate=gamma).on_step_end(None, TrainerState(global_step=1), None, model=model)
     b0 = ep_layers[0].balancing_biases
     check(checks, "overloaded expert bias decreased", b0[0].item() < 0, f"bias[0]={b0[0].item():.3f}")
     check(checks, "underloaded expert bias increased", (b0[1:] > 0).all().item(), f"bias[1:]={b0[1:].tolist()}")

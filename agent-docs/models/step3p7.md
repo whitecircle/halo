@@ -89,7 +89,7 @@ The sync forwards that namespace: the same save-side revert the gathered save ru
 
 ## Router balancing
 
-The router carries a native `e_score_correction_bias` buffer that exports with every checkpoint (hub key `moe.router_bias`), and the modeling has no aux-loss machinery at all (no `router_aux_loss_coef`, no `output_router_logits` parameter). Under the EP wrappers `moe_balancing: auto` therefore resolves to `bias_update`: [RouterBiasBalancingCallback](../training-methods/callbacks.md#routerbiasbalancingcallback) sign-updates the gate's own slot (selection only) and a served copy routes as trained.
+The router carries a native `e_score_correction_bias` buffer that exports with every checkpoint (hub key `moe.router_bias`), and the modeling has no aux-loss machinery at all (no `router_aux_loss_coef`, no `output_router_logits` parameter). Under the EP wrappers `moe_balancing: auto` therefore resolves to `bias_update`: [BalancingBiasCallback](../training-methods/callbacks.md#balancingbiascallback) sign-updates the gate's own slot (selection only) and a served copy routes as trained.
 
 On the wrapper-less tree (`ep_size=1` with `use_grouped_gemm: false`) nothing carries the bias and no aux term can reach the loss, so `auto` resolves to `none` with a warning.
 

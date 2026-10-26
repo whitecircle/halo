@@ -1,30 +1,25 @@
 #!/usr/bin/env python
-"""Unit tests for :func:`src.distributed.expert_parallel.balancing_strategy.apply_balancing_strategy` — the
-MoE balancing side effects on ``model.config``, with emphasis on the silent-failure guards:
+"""Run-level MoE balancing (:mod:`src.callbacks.balancing`): what :func:`apply_balancing_mode` writes to
+``model.config`` and the live routers, its refusals, the cross-rank agreement, and what
+:func:`configure_moe_balancing` resolves end to end, emphasizing the silent-failure guards:
 
-* ``aux_loss`` under a policy-gradient (GRPO) trainer is INERT (the loss never adds the model's
-  router aux loss), so it must WARN loudly and leave ``output_router_logits`` off — not silently
-  flip it on with a misleading "enabling" INFO.
-* ``aux_loss`` under a normal LM-loss trainer with a usable coefficient enables
-  ``output_router_logits``.
-* ``bias_update`` zeroes the aux coefficient and forces ``output_router_logits`` off.
-* an EXPLICIT ``bias_update`` on a MoE model where no EP layer accepts the bias AND no native
-  ``balancing_biases`` router exists (Zaya) must RAISE — it would silently balance nothing.
-  A supporting EP layer, a native-bias router, or a non-MoE model must not raise.
-* the export contract: strict ``bias_update`` refuses a transient side-buffer (the export would
-  silently serve without the trained bias) and points at ``bias_update_transient``; the transient
-  spelling warns on a side-buffer, raises where every router exports natively, and ``auto`` resolves
-  to ``none`` (not a silent transient bias) where no exportable slot exists. A materialized
-  config-gated slot mirrors its flag (LFM-2 ``use_expert_bias``) into ``model.config``.
+* ``aux_loss`` under a policy-gradient (GRPO) trainer is inert, so it warns and leaves
+  ``output_router_logits`` off; under an LM loss with a usable coefficient it turns the flag on.
+* ``bias_update`` zeroes the aux coefficient, forces ``output_router_logits`` off, and raises where
+  nothing accepts the bias (no accepting EP layer, no native ``balancing_biases`` router).
+* the export contract: strict ``bias_update`` refuses a transient side-buffer and names
+  ``bias_update_transient``, which warns on a side-buffer, raises where every router exports natively
+  and is refused under pipeline parallelism; ``auto`` resolves to ``none`` where no exportable slot
+  exists, and a config-gated slot mirrors its flag (LFM-2 ``use_expert_bias``) into ``model.config``.
+* weight-sync RL downgrades both bias modes to ``none``.
 
-Plus :func:`src.callbacks.wiring._detect_moe`'s discard-slot detection, which is derived
-from the router CLASS attribute ``_has_discard_expert_slot`` and from nothing else: any family
-declaring it opts in, and the hub-native Zaya modeling gets it from the load-time patch (there is no
-model_type list to keep in sync — a family whose router does not declare it must NOT be excluded).
+Plus :func:`~src.models.moe.config_fields.resolve_moe_routing`'s discard slot, read off the router
+CLASS attribute ``_has_discard_expert_slot`` alone (the hub-native Zaya modeling gets it from its load
+patch), never off a model_type list.
 
 Run::
 
-    python tests/cpu/callbacks/test_wiring_balancing.py
+    python tests/cpu/callbacks/test_balancing.py
 """
 
 from __future__ import annotations
@@ -36,16 +31,16 @@ import torch
 from accelerate import PartialState
 from transformers.models.zaya import modeling_zaya
 
-import src.callbacks.wiring as wiring
-import src.distributed.expert_parallel.balancing_strategy as balancing_strategy
+import src.callbacks.balancing as balancing
+import src.callbacks.factory as factory
 import src.models.moe_balancing as moe_balancing
-from src.callbacks.wiring import _detect_moe
-from src.distributed.expert_parallel.balancing_strategy import apply_balancing_strategy
+from src.callbacks.balancing import apply_balancing_mode
 from src.distributed.expert_parallel.expert_weights import ep_layer_class_by_model_type
 from src.models.config_access import (
     config_export_ready,
     set_config_field_run_scoped,
 )
+from src.models.moe.config_fields import resolve_moe_routing
 from src.models.moe_balancing import (
     _WARNED_TRANSIENT_ONLY_AUTO,
     NATIVE_BALANCING_BIAS_ADOPTED_ATTR,
@@ -60,7 +55,7 @@ class _Cfg:
         self.output_router_logits = output_router_logits
         self.router_aux_loss_coef = router_aux_loss_coef
         self.model_type = model_type
-        for name, value in extra.items():  # e.g. num_experts / num_experts_per_tok for _detect_moe
+        for name, value in extra.items():  # e.g. num_experts / num_experts_per_tok for resolve_moe_routing
             setattr(self, name, value)
 
 
@@ -153,12 +148,12 @@ class _ConfigGatedNativeEPLayer(_NativeAdoptingEPLayer):
 
 def _capture_warnings(fn):
     calls: list[str] = []
-    orig = balancing_strategy.logger.warning
-    balancing_strategy.logger.warning = lambda msg, *a, **k: calls.append(str(msg))
+    orig = balancing.logger.warning
+    balancing.logger.warning = lambda msg, *a, **k: calls.append(str(msg))
     try:
         fn()
     finally:
-        balancing_strategy.logger.warning = orig
+        balancing.logger.warning = orig
     return calls
 
 
@@ -176,7 +171,7 @@ def _capture_resolver_warnings(fn):
 def test_aux_loss_under_grpo_warns_and_stays_off() -> None:
     """aux_loss + policy_gradient_loss: loud warning, output_router_logits left OFF (inert under GRPO)."""
     model = _Model(_Cfg(output_router_logits=False, router_aux_loss_coef=0.001))
-    warnings = _capture_warnings(lambda: apply_balancing_strategy(model, "aux_loss", policy_gradient_loss=True))
+    warnings = _capture_warnings(lambda: apply_balancing_mode(model, "aux_loss", policy_gradient_loss=True))
     assert model.config.output_router_logits is False, "GRPO aux_loss must not enable router logits"
     assert any("NO EFFECT" in w and "bias_update" in w for w in warnings), warnings
 
@@ -184,21 +179,21 @@ def test_aux_loss_under_grpo_warns_and_stays_off() -> None:
 def test_aux_loss_lm_trainer_enables_router_logits() -> None:
     """aux_loss on a normal LM-loss trainer with a usable coef still enables output_router_logits."""
     model = _Model(_Cfg(output_router_logits=False, router_aux_loss_coef=0.001))
-    apply_balancing_strategy(model, "aux_loss", policy_gradient_loss=False)
+    apply_balancing_mode(model, "aux_loss", policy_gradient_loss=False)
     assert model.config.output_router_logits is True
 
 
 def test_aux_loss_zero_coef_stays_off() -> None:
     """aux_loss with no usable coefficient (aux-loss-free router) leaves output_router_logits off."""
     model = _Model(_Cfg(output_router_logits=False, router_aux_loss_coef=0.0))
-    apply_balancing_strategy(model, "aux_loss", policy_gradient_loss=False)
+    apply_balancing_mode(model, "aux_loss", policy_gradient_loss=False)
     assert model.config.output_router_logits is False
 
 
 def test_bias_update_forces_router_logits_off_and_zeros_coef() -> None:
     """bias_update zeroes the aux coefficient and forces output_router_logits off (EP recorder bypass)."""
     model = _Model(_Cfg(output_router_logits=True, router_aux_loss_coef=0.01), submodules=[_NativeAdoptingEPLayer()])
-    apply_balancing_strategy(model, "bias_update", policy_gradient_loss=True, is_moe=True)
+    apply_balancing_mode(model, "bias_update", policy_gradient_loss=True, is_moe=True)
     assert model.config.output_router_logits is False
     assert model.config.router_aux_loss_coef == 0.0
 
@@ -208,7 +203,7 @@ def test_bias_update_on_moe_without_any_supporting_layer_raises() -> None:
     router: silently balancing NOTHING is the failure mode — must raise, naming the layer family."""
     model = _Model(_Cfg(), submodules=[_NonSupportingEPLayer()])
     with pytest.raises(ValueError, match="_NonSupportingEPLayer"):
-        apply_balancing_strategy(model, "bias_update", policy_gradient_loss=False, is_moe=True)
+        apply_balancing_mode(model, "bias_update", policy_gradient_loss=False, is_moe=True)
 
 
 def test_bias_update_on_moe_without_ep_wrappers_raises() -> None:
@@ -216,19 +211,19 @@ def test_bias_update_on_moe_without_ep_wrappers_raises() -> None:
     no-op, must raise."""
     model = _Model(_Cfg())
     with pytest.raises(ValueError, match="bias_update"):
-        apply_balancing_strategy(model, "bias_update", policy_gradient_loss=False, is_moe=True)
+        apply_balancing_mode(model, "bias_update", policy_gradient_loss=False, is_moe=True)
 
 
 def test_bias_update_with_supporting_ep_layer_passes() -> None:
     model = _Model(_Cfg(), submodules=[_SupportingEPLayer()])
-    apply_balancing_strategy(model, "bias_update", policy_gradient_loss=False, is_moe=True)
+    apply_balancing_mode(model, "bias_update", policy_gradient_loss=False, is_moe=True)
 
 
 def test_bias_update_with_native_bias_router_passes() -> None:
     """Zaya: no EP layer accepts the bias but the router ships balancing_biases natively — the
     callback drives it, so bias_update must keep working."""
     model = _Model(_Cfg(model_type="zaya"), submodules=[_NativeBiasRouter()])
-    apply_balancing_strategy(model, "bias_update", policy_gradient_loss=False, is_moe=True)
+    apply_balancing_mode(model, "bias_update", policy_gradient_loss=False, is_moe=True)
 
 
 def test_bias_update_on_dense_raises() -> None:
@@ -236,13 +231,13 @@ def test_bias_update_on_dense_raises() -> None:
     train behind a silently inert controller."""
     model = _Model(_Cfg())
     with pytest.raises(ValueError, match="dense"):
-        apply_balancing_strategy(model, "bias_update", policy_gradient_loss=False, is_moe=False)
+        apply_balancing_mode(model, "bias_update", policy_gradient_loss=False, is_moe=False)
 
 
 def test_none_mode_is_noop() -> None:
     """none: leave both config fields untouched."""
     model = _Model(_Cfg(output_router_logits=True, router_aux_loss_coef=0.01))
-    apply_balancing_strategy(model, "none", policy_gradient_loss=False)
+    apply_balancing_mode(model, "none", policy_gradient_loss=False)
     assert model.config.output_router_logits is True
     assert model.config.router_aux_loss_coef == 0.01
 
@@ -256,13 +251,13 @@ def test_bias_update_refuses_a_transient_side_buffer() -> None:
     would silently serve without the trained bias, so it must raise and name the opt-in."""
     model = _Model(_Cfg(), submodules=[_TransientEPLayer()])
     with pytest.raises(ValueError, match="bias_update_transient"):
-        apply_balancing_strategy(model, "bias_update", policy_gradient_loss=False, is_moe=True)
+        apply_balancing_mode(model, "bias_update", policy_gradient_loss=False, is_moe=True)
 
 
 def test_bias_update_transient_warns_and_passes_on_side_buffer() -> None:
     model = _Model(_Cfg(), submodules=[_TransientEPLayer()])
     warnings = _capture_warnings(
-        lambda: apply_balancing_strategy(model, "bias_update_transient", policy_gradient_loss=False, is_moe=True)
+        lambda: apply_balancing_mode(model, "bias_update_transient", policy_gradient_loss=False, is_moe=True)
     )
     assert any("TRAINING-TIME routing only" in w for w in warnings), warnings
 
@@ -271,7 +266,7 @@ def test_bias_update_transient_on_native_model_raises() -> None:
     """The transient spelling on a model whose bias exports natively misdocuments the run."""
     model = _Model(_Cfg(), submodules=[_NativeAdoptingEPLayer()])
     with pytest.raises(ValueError, match="Use moe_balancing=bias_update"):
-        apply_balancing_strategy(model, "bias_update_transient", policy_gradient_loss=False, is_moe=True)
+        apply_balancing_mode(model, "bias_update_transient", policy_gradient_loss=False, is_moe=True)
 
 
 def test_bias_update_still_passes_on_native_adoption() -> None:
@@ -279,7 +274,7 @@ def test_bias_update_still_passes_on_native_adoption() -> None:
     strategy that silently left the router transient would satisfy a bare "did not raise"."""
     layer = _NativeAdoptingEPLayer()
     model = _Model(_Cfg(), submodules=[layer])
-    apply_balancing_strategy(model, "bias_update", policy_gradient_loss=False, is_moe=True)
+    apply_balancing_mode(model, "bias_update", policy_gradient_loss=False, is_moe=True)
     assert getattr(layer, NATIVE_BALANCING_BIAS_ADOPTED_ATTR, False) is True, (
         "the layer must be flagged as having adopted its native slot"
     )
@@ -293,7 +288,7 @@ def test_native_config_flag_mirrors_into_model_config() -> None:
     or the exported config.json tells serving engines to skip the trained tensor."""
     cfg = _Cfg(use_expert_bias=False)
     model = _Model(cfg, submodules=[_ConfigGatedNativeEPLayer()])
-    apply_balancing_strategy(model, "bias_update", policy_gradient_loss=False, is_moe=True)
+    apply_balancing_mode(model, "bias_update", policy_gradient_loss=False, is_moe=True)
     assert cfg.use_expert_bias is True
 
 
@@ -326,7 +321,7 @@ def test_aux_loss_dead_end_names_the_knobs_that_create_a_bias_acceptor() -> None
     """
     model = _MultimodalModel(_Cfg(router_aux_loss_coef=0.001))
     with pytest.raises(ValueError) as excinfo:
-        apply_balancing_strategy(model, "aux_loss", policy_gradient_loss=False, is_moe=True)
+        apply_balancing_mode(model, "aux_loss", policy_gradient_loss=False, is_moe=True)
     message = str(excinfo.value)
     assert "does not take output_router_logits" in message
     assert "use_grouped_gemm" in message and "expert_parallel_size" in message, message
@@ -337,7 +332,7 @@ def test_aux_loss_still_recommends_bias_update_where_a_wrapper_accepts_it() -> N
     """Anti-vacuity: with an acceptor present bias_update IS the remedy, and the knob advice is absent."""
     model = _MultimodalModel(_Cfg(router_aux_loss_coef=0.001), submodules=[_BiasCapableEPLayer()])
     with pytest.raises(ValueError) as excinfo:
-        apply_balancing_strategy(model, "aux_loss", policy_gradient_loss=False, is_moe=True)
+        apply_balancing_mode(model, "aux_loss", policy_gradient_loss=False, is_moe=True)
     message = str(excinfo.value)
     assert "Use moe_balancing=bias_update" in message, message
     assert "use_grouped_gemm" not in message, message
@@ -349,11 +344,11 @@ class _DiscardSlotRouter:
     _has_discard_expert_slot = True
 
 
-def test_detect_moe_excludes_discard_slot_from_router_class() -> None:
+def test_moe_routing_excludes_discard_slot_from_router_class() -> None:
     """The class attribute is the primary signal — any family declaring it opts in."""
     cfg = _Cfg(model_type="some_new_family", num_experts=8, num_experts_per_tok=2)
     model = _Model(cfg, submodules=[_DiscardSlotRouter()])
-    is_moe, top_k, exclude_last_slot = _detect_moe(model)
+    is_moe, top_k, exclude_last_slot = resolve_moe_routing(model)
     assert (is_moe, top_k) == (True, 2)
     assert exclude_last_slot is True
 
@@ -362,7 +357,7 @@ def test_zaya_load_patch_declares_the_discard_slot_end_to_end() -> None:
     """Hub-native Zaya reaches the exclusion through the load patch, not a model_type list.
 
     Both halves of the derivation are pinned: ``patch_zaya_router_load_recording`` must stamp
-    ``_has_discard_expert_slot`` on the hub router class, and ``_detect_moe`` must read it off an
+    ``_has_discard_expert_slot`` on the hub router class, and ``resolve_moe_routing`` must read it off an
     instance of that class. Break either and the discard slot is bias-balanced like a real expert.
     """
     PartialState()  # the patch logs through accelerate's logger, which needs an initialized state
@@ -375,31 +370,31 @@ def test_zaya_load_patch_declares_the_discard_slot_end_to_end() -> None:
     # would need a full Zaya config.
     router = modeling_zaya.ZayaRouter.__new__(modeling_zaya.ZayaRouter)
     model = _Model(_Cfg(model_type="zaya", num_experts=8, num_experts_per_tok=2), submodules=[router])
-    is_moe, _, exclude_last_slot = _detect_moe(model)
+    is_moe, _, exclude_last_slot = resolve_moe_routing(model)
     assert is_moe is True
     assert exclude_last_slot is True
 
 
-def test_detect_moe_keeps_last_slot_when_no_router_class_declares_it() -> None:
+def test_moe_routing_keeps_last_slot_when_no_router_class_declares_it() -> None:
     """The model_type is NOT a signal: a family whose routers declare nothing keeps every slot.
 
     Guards against re-introducing a hand-maintained model-type list beside the class attribute —
     such a list silently excludes a real expert on any family whose name happens to be on it.
     """
     model = _Model(_Cfg(model_type="zaya", num_experts=8, num_experts_per_tok=2))
-    is_moe, _, exclude_last_slot = _detect_moe(model)
+    is_moe, _, exclude_last_slot = resolve_moe_routing(model)
     assert is_moe is True
     assert exclude_last_slot is False
 
 
-def test_detect_moe_keeps_last_slot_for_ordinary_moe() -> None:
+def test_moe_routing_keeps_last_slot_for_ordinary_moe() -> None:
     """A normal MoE family must keep every expert slot in the balancing statistics."""
     model = _Model(_Cfg(model_type="qwen3_moe", num_experts=8, num_experts_per_tok=2))
-    _, _, exclude_last_slot = _detect_moe(model)
+    _, _, exclude_last_slot = resolve_moe_routing(model)
     assert exclude_last_slot is False
 
 
-# moe_balancing: none must be a genuine no-op, end to end through build_perf_callbacks
+# moe_balancing: none must be a genuine no-op, end to end through configure + build
 
 
 def _perf_args(moe_balancing: str):
@@ -417,11 +412,17 @@ def _perf_args(moe_balancing: str):
 _NO_PARALLELISM = SimpleNamespace(tp_size=1, ep_size=1, cp_size=1, expert_tp_size=1, pp_size=1)
 
 
+def _configure_and_build(args, training_config, model, parallelism_config, **balancing_kwargs):
+    mode = balancing.configure_moe_balancing(args, model, parallelism_config, **balancing_kwargs)
+    return factory.build_run_callbacks(args, training_config, model, parallelism_config, balancing_mode=mode)
+
+
 def _build_and_start(moe_balancing: str, model):
-    """Run the real wiring path, then the callbacks' ``on_train_begin`` (where the writes happen)."""
-    callbacks = wiring.build_perf_callbacks(_perf_args(moe_balancing), SimpleNamespace(), model, _NO_PARALLELISM)
+    """Configure balancing and build the roster as the scripts do, then the callbacks' ``on_train_begin`` (where the writes happen)."""
+    callbacks = _configure_and_build(_perf_args(moe_balancing), SimpleNamespace(), model, _NO_PARALLELISM)
     for cb in callbacks:
-        cb.on_train_begin(args=None, state=None, control=None, model=model)
+        if not isinstance(cb, type):
+            cb.on_train_begin(args=None, state=None, control=None, model=model)
     return callbacks
 
 
@@ -433,7 +434,7 @@ def test_weight_sync_downgrades_bias_update_to_none() -> None:
     anywhere fails."""
     layer = _NativeAdoptingEPLayer()
     model = _Model(_Cfg(num_experts=8, num_experts_per_tok=2), submodules=[layer])
-    callbacks = wiring.build_perf_callbacks(
+    callbacks = _configure_and_build(
         _perf_args("bias_update"),
         SimpleNamespace(),
         model,
@@ -441,7 +442,7 @@ def test_weight_sync_downgrades_bias_update_to_none() -> None:
         policy_gradient_loss=True,
         syncs_to_external_generator=True,
     )
-    assert not any(type(cb).__name__ == "RouterBiasBalancingCallback" for cb in callbacks), (
+    assert not any(type(cb).__name__ == "BalancingBiasCallback" for cb in callbacks), (
         "the weight-sync downgrade did not fire — the trainer would balance on a bias the generator never sees"
     )
     assert not getattr(layer, "_native_balancing_bias_adopted", False), (
@@ -452,7 +453,7 @@ def test_weight_sync_downgrades_bias_update_to_none() -> None:
 def test_weight_sync_downgrades_the_transient_mode_too() -> None:
     """``bias_update_transient`` is equally invisible to the sync (a ``__dict__`` side-buffer)."""
     model = _Model(_Cfg(num_experts=8, num_experts_per_tok=2), submodules=[_TransientEPLayer()])
-    callbacks = wiring.build_perf_callbacks(
+    callbacks = _configure_and_build(
         _perf_args("bias_update_transient"),
         SimpleNamespace(),
         model,
@@ -460,13 +461,13 @@ def test_weight_sync_downgrades_the_transient_mode_too() -> None:
         policy_gradient_loss=True,
         syncs_to_external_generator=True,
     )
-    assert not any(type(cb).__name__ == "RouterBiasBalancingCallback" for cb in callbacks)
+    assert not any(type(cb).__name__ == "BalancingBiasCallback" for cb in callbacks)
 
 
 def test_the_same_model_without_weight_sync_gets_the_balancer() -> None:
     """Anti-vacuity twin of the downgrade tests: the ONLY difference is the sync flag."""
     model = _Model(_Cfg(num_experts=8, num_experts_per_tok=2), submodules=[_NativeAdoptingEPLayer()])
-    callbacks = wiring.build_perf_callbacks(
+    callbacks = _configure_and_build(
         _perf_args("bias_update"),
         SimpleNamespace(),
         model,
@@ -474,7 +475,7 @@ def test_the_same_model_without_weight_sync_gets_the_balancer() -> None:
         policy_gradient_loss=True,
         syncs_to_external_generator=False,
     )
-    assert any(type(cb).__name__ == "RouterBiasBalancingCallback" for cb in callbacks)
+    assert any(type(cb).__name__ == "BalancingBiasCallback" for cb in callbacks)
 
 
 # The engine-side serving gap a layer class declares (Laguna under vLLM 0.26.0)
@@ -490,14 +491,14 @@ def test_a_declared_served_bias_drop_is_warned_at_enable(caplog) -> None:
     routes on the pretrained bias with no other symptom."""
     model = _Model(_Cfg(num_experts=8, num_experts_per_tok=2), submodules=[_ServedDropEPLayer()])
     with caplog.at_level("WARNING"):
-        balancing_strategy.apply_balancing_strategy(model, "bias_update", policy_gradient_loss=True, is_moe=True)
+        balancing.apply_balancing_mode(model, "bias_update", policy_gradient_loss=True, is_moe=True)
     assert any("DROPPED by ['vLLM 0.26.0']" in message for message in caplog.messages), caplog.messages
 
 
 def test_families_without_the_declaration_do_not_warn(caplog) -> None:
     model = _Model(_Cfg(num_experts=8, num_experts_per_tok=2), submodules=[_NativeAdoptingEPLayer()])
     with caplog.at_level("WARNING"):
-        balancing_strategy.apply_balancing_strategy(model, "bias_update", policy_gradient_loss=True, is_moe=True)
+        balancing.apply_balancing_mode(model, "bias_update", policy_gradient_loss=True, is_moe=True)
     assert not any("DROPPED by" in message for message in caplog.messages), caplog.messages
 
 
@@ -560,7 +561,7 @@ def test_auto_prefers_native_bias_update_over_none() -> None:
     cfg = _Cfg(num_experts=8, num_experts_per_tok=2)
     model = _MultimodalModel(cfg, submodules=[_NativeAdoptingEPLayer()])
     callbacks = _build_and_start("auto", model)
-    assert any(type(cb).__name__ == "RouterBiasBalancingCallback" for cb in callbacks)
+    assert any(type(cb).__name__ == "BalancingBiasCallback" for cb in callbacks)
 
 
 class _AliasedCfg(_Cfg):
@@ -598,7 +599,7 @@ def test_run_scoped_mutations_are_restored_for_config_export() -> None:
     values, and the run state comes back afterwards."""
     cfg = _Cfg(output_router_logits=True, router_aux_loss_coef=0.01)
     model = _Model(cfg, submodules=[_NativeAdoptingEPLayer()])
-    apply_balancing_strategy(model, "bias_update", policy_gradient_loss=False, is_moe=True)
+    apply_balancing_mode(model, "bias_update", policy_gradient_loss=False, is_moe=True)
     assert cfg.router_aux_loss_coef == 0.0
     assert cfg.output_router_logits is False
     assert getattr(cfg, ROUTER_LOGITS_FORCED_OFF_ATTR, False) is True
@@ -644,8 +645,8 @@ class _StubDist:
 def stub_dist(monkeypatch):
     def _install(peer_values):
         stub = _StubDist(peer_values)
-        monkeypatch.setattr(balancing_strategy, "dist", stub)
-        monkeypatch.setattr(balancing_strategy, "get_global_world_size", stub.get_world_size)
+        monkeypatch.setattr(balancing, "dist", stub)
+        monkeypatch.setattr(balancing, "get_global_world_size", stub.get_world_size)
         return stub
 
     return _install
@@ -667,23 +668,23 @@ def stub_dist(monkeypatch):
 )
 def test_a_split_balancing_verdict_converges_by_precedence(stub_dist, gathered, expected):
     """Every rank must leave with the SAME mode, or the stages take different branches of
-    ``apply_balancing_strategy`` — different collectives, and a raise on some ranks only."""
+    ``apply_balancing_mode`` — different collectives, and a raise on some ranks only."""
     stub_dist(gathered)
     for local in gathered:
-        assert balancing_strategy.agree_balancing_mode(local) == expected, f"rank resolving {local!r} did not converge"
+        assert balancing.agree_balancing_mode(local) == expected, f"rank resolving {local!r} did not converge"
 
 
 def test_every_rank_enters_the_agreement_gather(stub_dist):
     """The gather is collective: a rank that already holds the winning mode must still call it."""
     stub = stub_dist(["bias_update", "bias_update"])
-    balancing_strategy.agree_balancing_mode("bias_update")
+    balancing.agree_balancing_mode("bias_update")
     assert stub.gathers == ["bias_update"], "the agreed-already rank skipped the gather"
 
 
 def test_the_agreement_is_the_identity_outside_distributed():
     """Anti-vacuity for the fixture: without a group the function must not invent a verdict."""
     for mode in ("none", "aux_loss", "bias_update", "bias_update_transient"):
-        assert balancing_strategy.agree_balancing_mode(mode) == mode
+        assert balancing.agree_balancing_mode(mode) == mode
 
 
 def test_a_clean_rank_still_enters_the_export_contract_collective(monkeypatch):
@@ -699,9 +700,9 @@ def test_a_clean_rank_still_enters_the_export_contract_collective(monkeypatch):
         if local_reason:
             raise exc_type(local_reason)
 
-    monkeypatch.setattr(balancing_strategy, "reject_across_ranks", _record)
+    monkeypatch.setattr(balancing, "reject_across_ranks", _record)
     model = _Model(_Cfg(), submodules=[_NativeAdoptingEPLayer()])
-    apply_balancing_strategy(model, "bias_update", policy_gradient_loss=False, is_moe=True)
+    apply_balancing_mode(model, "bias_update", policy_gradient_loss=False, is_moe=True)
 
     assert len(calls) == 1, f"the export contract did not reach the consensus seam exactly once: {calls}"
     reason, what = calls[0]
@@ -719,13 +720,48 @@ def test_a_transient_rank_reports_its_reason_through_the_same_seam(monkeypatch):
         if local_reason:
             raise exc_type(local_reason)
 
-    monkeypatch.setattr(balancing_strategy, "reject_across_ranks", _record)
+    monkeypatch.setattr(balancing, "reject_across_ranks", _record)
     model = _Model(_Cfg(), submodules=[_TransientEPLayer()])
     with pytest.raises(ValueError, match="NO EXPORT CARRIES"):
-        apply_balancing_strategy(model, "bias_update", policy_gradient_loss=False, is_moe=True)
+        apply_balancing_mode(model, "bias_update", policy_gradient_loss=False, is_moe=True)
 
     assert len(calls) == 1 and calls[0][0] is not None
     assert "bias_update_transient" in calls[0][0], "the carried reason must name the opt-in spelling"
+
+
+# bias_update_transient under pipeline parallelism
+
+
+def test_bias_update_transient_is_refused_under_pipeline_parallelism(monkeypatch):
+    """Refused before any collective, which is safe because pp_size is rank-uniform: every stage raises at
+    the same point and none is left waiting in the nothing-balanced consensus."""
+
+    def collective(*args, **kwargs):
+        raise AssertionError("a balancing collective ran before the pipeline-parallel refusal")
+
+    monkeypatch.setattr(balancing, "rank_consensus", collective)
+    monkeypatch.setattr(balancing, "reject_across_ranks", collective)
+    layer = _TransientEPLayer()
+    model = _Model(_Cfg(), submodules=[layer])
+    with pytest.raises(ValueError, match="untested under pipeline parallelism"):
+        apply_balancing_mode(model, "bias_update_transient", is_moe=True, pp_size=2)
+    assert not hasattr(layer, "balancing_biases"), "the refusal came after the side-buffer was attached"
+
+
+def test_configure_passes_the_pipeline_size_to_the_refusal():
+    model = _Model(_Cfg(num_experts=8, num_experts_per_tok=2), submodules=[_TransientEPLayer()])
+    with pytest.raises(ValueError, match="untested under pipeline parallelism"):
+        balancing.configure_moe_balancing(
+            _perf_args("bias_update_transient"), model, SimpleNamespace(pp_size=2), policy_gradient_loss=False
+        )
+
+
+@pytest.mark.parametrize(("mode", "pp_size"), [("bias_update_transient", 1), ("bias_update", 2)])
+def test_the_pipeline_refusal_is_scoped_to_the_transient_mode_under_pp(mode, pp_size):
+    """Anti-over-rejection twin: the same mode without PP, and the exported mode under PP, still apply."""
+    layer = _TransientEPLayer() if mode == "bias_update_transient" else _NativeAdoptingEPLayer()
+    apply_balancing_mode(_Model(_Cfg(), submodules=[layer]), mode, is_moe=True, pp_size=pp_size)
+    assert hasattr(layer, "balancing_biases")
 
 
 if __name__ == "__main__":

@@ -11,7 +11,7 @@ import asyncio
 
 import pytest
 
-from src.configs.environment_config import EnvironmentConfig
+from src.configs.grpo_environmental import EnvironmentConfig
 from src.environments import base as base_module
 from src.environments.base import (
     EPISODE_ERROR_KEY,

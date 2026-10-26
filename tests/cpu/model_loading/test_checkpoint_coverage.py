@@ -1,7 +1,7 @@
 """The initial model load must refuse a checkpoint that does not cover the live model.
 
 ``from_pretrained`` re-initializes every key it cannot find and reports it through the transformers
-logger only — which ``setup_logging`` silences on every non-logging rank. A truncated or
+logger only — which ``configure_training_run`` silences on every non-logging rank. A truncated or
 wrong-architecture directory therefore trains half a model of random weights with no exception and no
 output. :mod:`src.model_loading.checkpoint_coverage` turns that into a raise.
 

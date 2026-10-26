@@ -30,7 +30,7 @@ import torch.nn as nn
 
 from src.distributed.expert_parallel.moe_layer.layer import EPMoELayerBase
 from src.models.moe.expert_lora_spec import ExpertLoraSpec
-from src.trainers.grpo.rollout.weight_sync import gather_and_send_weights
+from src.trainers.grpo.rollout.weight_push import gather_and_send_weights
 
 LAYER_PATH = "mlp"
 # HIDDEN != 2 * INTERMEDIATE on purpose: at equal dims a stray transpose still satisfies every shape.
@@ -115,7 +115,7 @@ class _RecordingSender:
     def update_named_param(self, name: str, weights: torch.Tensor) -> None:
         self.sent[name] = weights
 
-    def reset_prefix_cache(self) -> None:  # pragma: no cover - the caller flushes, not the gather
+    def finish_weight_update(self) -> None:  # pragma: no cover - the caller flushes, not the gather
         pass
 
 

@@ -3,14 +3,9 @@
 builds for the Ray rollout actors.
 
 ``AsyncTrainingConfig.get_rollout_config`` copies every same-named (or ``rollout_``-prefixed) field
-under a mirrored name. Every pair reads one module constant; this pins that they still do. Unlinked
-declarations agree only by coincidence, and a mismatch is silent: a directly built ``RolloutConfig()``
-generating 1024 tokens per turn where the YAML path allows 32768 would be a 32x truncation that reads
-as the model refusing to finish rather than as a config bug.
-
-The other fields are DERIVED from different knobs, so their defaults are not required to agree,
-and ``capture_token_ids``' does not: off in a hand-built config, on through the YAML path. Those
-derivations are pinned below instead of exempted.
+under a mirrored name; this pins that every RolloutConfig field is reachable and that each copy happens.
+The other fields are DERIVED from different knobs, and ``capture_token_ids``' default does not agree:
+off in a hand-built config, on through the YAML path. Those derivations are pinned below.
 
 Run: pytest tests/cpu/config/test_rollout_config_mirror.py
 """
@@ -57,21 +52,6 @@ _NON_DEFAULT_VALUES = {
 }
 
 
-def _defaults(cls) -> dict:
-    return {f.name: f.default for f in fields(cls)}
-
-
-@pytest.mark.parametrize(("rollout_field", "async_field"), sorted(_FORWARDED.items()))
-def test_forwarded_default_matches_on_both_sides(rollout_field, async_field):
-    async_default = _defaults(AsyncTrainingConfig)[async_field]
-    rollout_default = _defaults(RolloutConfig)[rollout_field]
-    assert async_default == rollout_default, (
-        f"AsyncTrainingConfig.{async_field}={async_default!r} but RolloutConfig.{rollout_field}="
-        f"{rollout_default!r}: a directly built RolloutConfig silently runs a different budget from "
-        f"the identical YAML run. Point both at one module constant in src/environments/rollout_config.py."
-    )
-
-
 def test_every_rollout_field_is_either_mirrored_or_derived():
     """``rollout_field_sources`` pairs the two declarations by name, so a RolloutConfig field the
     YAML surface does not spell falls out of the map silently. Unless it is one of the derived
@@ -101,14 +81,6 @@ def test_every_mirrored_knob_reaches_the_built_rollout_config(rollout_field, asy
 def test_the_non_default_table_covers_every_mirrored_knob():
     """Guards the table above: a knob added to the mirror without an entry would go untested."""
     assert set(_NON_DEFAULT_VALUES) == set(_FORWARDED.values())
-
-
-def test_default_async_config_builds_an_identical_rollout_config():
-    """The end-to-end statement of the same fact: on stock settings the built config equals the
-    directly constructed one, so neither entry point is the odd one out."""
-    built = AsyncTrainingConfig().get_rollout_config()
-    for rollout_field in _FORWARDED:
-        assert getattr(built, rollout_field) == getattr(RolloutConfig(), rollout_field), rollout_field
 
 
 @pytest.mark.parametrize("sampled_tokens", [True, False])

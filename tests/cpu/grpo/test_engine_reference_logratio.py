@@ -19,11 +19,8 @@ from src.configs.grpo_environmental import AsyncTrainingConfig
 from src.trainers.grpo import environmental
 from src.trainers.grpo.environmental import DistributedAsyncEnvironmentalGRPOTrainer
 from src.trainers.grpo.objective.logratio import select_mask_logratio
-from src.trainers.grpo.rollout import async_rollouts, weight_sync_clients
-from src.trainers.grpo.rollout.weight_sync_clients import (
-    _probe_prompt_logprobs,
-    verify_engine_prompt_logprobs_synced,
-)
+from src.trainers.grpo.rollout import async_rollouts, engine_preflight
+from src.trainers.grpo.rollout.engine_preflight import _probe_prompt_logprobs, verify_engine_prompt_logprobs
 from src.weight_sync.clients.sglang import SGLangWeightSyncClient
 from src.weight_sync.clients.vllm import VLLMWeightSyncClient as VLLMClient
 from tests.common.fake_engines import GRAPH_CAPTURE_TOKENS, FakeEngineServer, fake_server_class
@@ -288,7 +285,7 @@ def test_prompt_logprob_probe_refuses_an_engine_whose_graph_prefills_are_garbage
     prefill_server.graph_prefill_shift = shift
     prefill_server.graph_capture_tokens = capture_tokens
     with pytest.raises(ValueError, match="speculative decoding") as raised:
-        verify_engine_prompt_logprobs_synced([prefill_server.url], _word_tokenizer, backend=client_cls.BACKEND_KEY)
+        verify_engine_prompt_logprobs([prefill_server.url], _word_tokenizer, backend=client_cls.BACKEND_KEY)
     assert "Dockerfile.vllm" in str(raised.value) and "isr_engine_reference: false" in str(raised.value)
 
 
@@ -298,7 +295,7 @@ def test_prompt_logprob_probe_accepts_batch_shape_noise(prefill_server, client_c
     eagerly and prefixes of it that each replay a graph; the gap it measures is that shift alone, so each
     prefix position is compared with the same position of the whole."""
     prefill_server.graph_prefill_shift = -0.5
-    verify_engine_prompt_logprobs_synced([prefill_server.url], _word_tokenizer, backend=client_cls.BACKEND_KEY)
+    verify_engine_prompt_logprobs([prefill_server.url], _word_tokenizer, backend=client_cls.BACKEND_KEY)
     whole, *prefixes = _scored_lengths(prefill_server)
     assert whole > GRAPH_CAPTURE_TOKENS, "the reference must prefill outside the graph capture range"
     assert prefixes and all(length <= GRAPH_CAPTURE_TOKENS for length in prefixes), prefixes
@@ -329,7 +326,7 @@ def test_a_preflight_request_never_retries_a_read_past_its_timeout(prefill_serve
     """Every rank waits on rank 0's probes: a stalled server must cost one timeout per request, where the
     client's own session would retry the read five times."""
     url = prefill_server.url
-    retry = weight_sync_clients._probe_server(
+    retry = engine_preflight._probe_server(
         client_cls, url, lambda client: client._session.get_adapter(url).max_retries, None, "probe"
     )
     assert retry.read == 0 and retry.connect > 0
@@ -342,7 +339,7 @@ def test_the_env_script_runs_the_prompt_logprob_probe_under_isr_engine_reference
         for node in ast.walk(ast.parse(ENV_SCRIPT.read_text()))
         if isinstance(node, ast.If)
         and any(
-            isinstance(call, ast.Call) and ast.unparse(call.func) == "verify_engine_prompt_logprobs_synced"
+            isinstance(call, ast.Call) and ast.unparse(call.func) == "verify_engine_prompt_logprobs"
             for call in ast.walk(node)
         )
     ]

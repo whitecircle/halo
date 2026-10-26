@@ -13,9 +13,9 @@ from datasets import Dataset
 import src.trainers.grpo.reference_cache as cache_module
 from src.checkpoint.format import REFERENCE_CACHE_DIR_NAME
 from src.data.collators.offline_grpo import REF_PER_TOKEN_LOGPS_COLUMN
+from src.entrypoints.run_setup import _validate_output_dir
 from src.runtime import consensus
 from src.trainers.grpo.reference_cache import ReferenceScoreCache, reference_cache_writers
-from src.training.environment import _validate_output_dir
 from tests.common.distributed import shared_output_dir
 from tests.common.gloo import run_gloo_ranks
 from tests.common.offline_grpo_reference import (

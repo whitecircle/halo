@@ -19,7 +19,7 @@ from src.distributed.expert_parallel.expert_weights import ep_layer_class_by_mod
 from src.environments.engine_wire import capture_generation_tokens
 from src.environments.ray_actors import EnvironmentActor
 from src.environments.rollout_config import RolloutConfig
-from src.trainers.grpo.rollout.weight_sync import validate_weight_sync_support
+from src.trainers.grpo.rollout.weight_push import reject_unsyncable_model
 from src.weight_sync.clients.sglang import SGLangWeightSyncClient
 from src.weight_sync.clients.vllm import VLLMWeightSyncClient
 from src.weight_sync.registry import resolve_weight_sync_client, rollout_backends
@@ -105,7 +105,7 @@ def test_every_unservable_entry_refuses_its_family_with_its_loader_fact(client):
     client's backend key, and the refusal carries the entry's reason verbatim."""
     for model_type, reason in client.UNSERVABLE_MODEL_TYPES.items():
         with pytest.raises(ValueError, match=re.escape(reason)):
-            validate_weight_sync_support(StockModel(model_type), client.BACKEND_KEY)
+            reject_unsyncable_model(StockModel(model_type), client.BACKEND_KEY)
 
 
 def test_sglang_declares_the_fused_a_proj_halves_as_one_request():

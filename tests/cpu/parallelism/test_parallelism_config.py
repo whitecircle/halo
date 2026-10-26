@@ -11,7 +11,7 @@ import os
 import pytest
 import torch.distributed as dist
 
-from src.args.distributed_args import DistributedArguments
+from src.configs.parallelism_arguments import ParallelismArguments, parallelism_config_from_args
 from src.distributed.expert_parallel.config import EPConfig
 from src.distributed.group_layout import NodeLocalLayout
 from src.kernels.lowp.spec import LowpSpec
@@ -19,7 +19,6 @@ from src.models.moe.expert_lora_spec import ExpertLoraSpec
 from src.trainers.mixins.base import DistributedTrainerMixin
 from src.trainers.preference.dpo import DistributedDPOTrainer
 from src.trainers.sft import DistributedSFTTrainer
-from src.training.parallelism_args import parallelism_config_from_args
 from tests.common.gloo import run_gloo_ranks
 from tests.common.parallelism import create_config, make_parallelism_config, simulated_world
 
@@ -710,14 +709,14 @@ def test_summary_standard_ddp_string():
 # Convenience factory functions
 
 
-def _DistArgs() -> DistributedArguments:
-    """Parsed DistributedArguments as the entry scripts hand them to the builder.
+def _DistArgs() -> ParallelismArguments:
+    """Parsed ParallelismArguments as the entry scripts hand them to the builder.
 
     The real dataclass, not a hand-rolled stand-in: a stub would have to be updated by hand for
     every new field, and the builder reads its fields directly — a missing one is an AttributeError
     at launch, exactly what these tests exist to catch.
     """
-    return DistributedArguments(
+    return ParallelismArguments(
         expert_parallel_size=8,
         ep_scope="node",
         max_concurrent_loading=1,
@@ -726,7 +725,7 @@ def _DistArgs() -> DistributedArguments:
 
 
 def test_parallelism_config_from_args_basic():
-    """parallelism_config_from_args wires DistributedArguments into a ParallelismConfig."""
+    """parallelism_config_from_args wires ParallelismArguments into a ParallelismConfig."""
     with simulated_world(world_size=8, gpus_per_node=8):
         # Non-default values on the knobs most prone to silent drift, so the asserts below fail if
         # the builder drops them back to ParallelismConfig defaults instead of forwarding.
@@ -750,7 +749,7 @@ def test_parallelism_config_from_args_builds_pp_only_for_trainers_that_support_i
     stage. PP+TP stays refused by the axis allowlist, so the acceptance is not the builder passing
     every shape through.
     """
-    args = DistributedArguments(pipeline_parallel_size=2, nvlink_domain_size=8)
+    args = ParallelismArguments(pipeline_parallel_size=2, nvlink_domain_size=8)
     with simulated_world(world_size=16, gpus_per_node=8):
         with pytest.raises(ValueError, match="DistributedTrainerMixin does not support Pipeline Parallelism"):
             parallelism_config_from_args(args, trainer_cls=DistributedTrainerMixin)
@@ -760,7 +759,7 @@ def test_parallelism_config_from_args_builds_pp_only_for_trainers_that_support_i
         assert cfg.stage_world_size == 8
         assert cfg.data_parallel_size == 8
 
-        pp_tp = DistributedArguments(pipeline_parallel_size=2, tensor_parallel_size=2, nvlink_domain_size=8)
+        pp_tp = ParallelismArguments(pipeline_parallel_size=2, tensor_parallel_size=2, nvlink_domain_size=8)
         with pytest.raises(ValueError, match="is not a supported parallelism combination") as excinfo:
             parallelism_config_from_args(pp_tp, trainer_cls=DistributedSFTTrainer)
         assert "pipeline_parallel_size=2" in str(excinfo.value)
@@ -770,7 +769,7 @@ def test_parallelism_config_from_args_builds_pp_only_for_trainers_that_support_i
 def test_parallelism_config_from_args_rejects_cp_when_unsupported():
     """A trainer class declaring ``_supports_cp = False`` rejects a requested context_parallel_size>1
     at config time, before any model loads; a trainer declaring it builds the CP config."""
-    args = DistributedArguments(context_parallel_size=2)
+    args = ParallelismArguments(context_parallel_size=2)
     with simulated_world(world_size=8, gpus_per_node=8):
         with pytest.raises(ValueError, match="DistributedDPOTrainer does not support Context Parallelism"):
             parallelism_config_from_args(args, trainer_cls=DistributedDPOTrainer)

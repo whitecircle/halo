@@ -12,36 +12,36 @@ from functools import partial
 
 from trl import ModelConfig
 
-from src.args.distributed_args import DistributedArguments
-from src.args.offline_grpo_args import OfflineGRPOScriptArguments
 from src.callbacks.generate_examples import GenerateExamplesCallback
-from src.configs.grpo_offline import OfflineGRPOConfig
+from src.configs.grpo_offline import OfflineGRPOConfig, OfflineGRPOScriptArguments
+from src.configs.parallelism_arguments import ParallelismArguments
 from src.data.pipeline.conversation import chat_template_kwargs, reject_image_content
 from src.data.pipeline.preferences import split_rendered_completion
 from src.data.pipeline.processing import coordinated_map, resolve_map_num_proc
 from src.data.pipeline.row_processors import prepare_generative_row
 from src.data.sources.loading import reject_image_columns
-from src.model_loading.model_preparation import log_model_info
+from src.entrypoints.data_setup import load_script_datasets, log_script_dataset_examples
+from src.entrypoints.model_setup import (
+    apply_prompt_completion_window,
+    default_padded_attn_implementation,
+    load_model_and_tokenizer,
+    log_model_info,
+)
+from src.entrypoints.script import (
+    ScriptContext,
+    apply_distributed_trainer_config,
+    configure_balancing_and_build_callbacks,
+    distributed_trainer_kwargs,
+    init_training_script,
+    parse_script_args,
+    run_trainer,
+    with_distributed_teardown,
+)
 from src.model_loading.parallel.frozen_models import load_frozen_reference_model
 from src.model_loading.parallel.peft_setup import configure_adapter_training, wraps_in_peft_model
 from src.runtime.collectives import barrier
 from src.trainers.grpo.mixins.offline_reference import reject_unsupported_reference_input
 from src.trainers.grpo.offline import OfflineGRPOTrainer
-from src.training.environment import run_training
-from src.training.parser import H4ArgumentParser
-from src.training.script_runner import (
-    ScriptRuntime,
-    apply_distributed_trainer_config,
-    apply_prompt_completion_window,
-    build_training_callbacks,
-    distributed_trainer_kwargs,
-    init_training_script,
-    load_script_datasets,
-    load_script_model,
-    log_script_dataset_examples,
-    padded_workload_attn_implementation,
-    run_trainer,
-)
 
 
 def build_chat_template_row_fn(tokenizer, tools_field: str | None):
@@ -78,10 +78,9 @@ def build_chat_template_row_fn(tokenizer, tools_field: str | None):
 
 def _load_kl_reference(
     args,
-    runtime: ScriptRuntime,
+    context: ScriptContext,
     offline_grpo_config: OfflineGRPOConfig,
     model_config: ModelConfig,
-    dist_args: DistributedArguments,
     *,
     policy,
     tokenizer,
@@ -94,7 +93,7 @@ def _load_kl_reference(
     Only native expert LoRA needs a live, unadapted base; PEFT can disable its adapters in place.
     Load that base from the configured model, not a trained resume checkpoint.
     """
-    if not OfflineGRPOTrainer.requires_ref_model(policy, offline_grpo_config, runtime.parallelism_config, peft_config):
+    if not OfflineGRPOTrainer.requires_ref_model(policy, offline_grpo_config, context.parallelism_config, peft_config):
         return None
     return load_frozen_reference_model(
         args,
@@ -103,16 +102,17 @@ def _load_kl_reference(
         tokenizer,
         model_config.model_name_or_path,
         is_vlm=False,
-        reset_sinks=dist_args.reset_sinks,
+        reset_sinks=args.reset_sinks,
         attn_default=attn_default,
     )
 
 
 def main():
-    parser = H4ArgumentParser((OfflineGRPOScriptArguments, OfflineGRPOConfig, ModelConfig, DistributedArguments))
-    args, offline_grpo_config, model_config, dist_args = parser.parse()
+    args, offline_grpo_config, model_config, dist_args = parse_script_args(
+        OfflineGRPOScriptArguments, OfflineGRPOConfig, ModelConfig, ParallelismArguments
+    )
 
-    runtime = init_training_script(
+    context = init_training_script(
         args,
         offline_grpo_config,
         model_config,
@@ -120,7 +120,7 @@ def main():
         script_prefix="offline-grpo",
         trainer_cls=OfflineGRPOTrainer,
     )
-    parallelism_config = runtime.parallelism_config
+    parallelism_config = context.parallelism_config
 
     ds, dataset_presharded = load_script_datasets(
         args,
@@ -142,11 +142,11 @@ def main():
     )
 
     # Padded batches: the CP collator right-pads full rows, the non-CP layout left-pads prompts.
-    requested_attn = padded_workload_attn_implementation(
-        model_config, sinks_reset=dist_args.reset_sinks, context_parallel=parallelism_config.is_cp_mode
+    requested_attn = default_padded_attn_implementation(
+        model_config, sinks_reset=args.reset_sinks, context_parallel=parallelism_config.is_cp_mode
     )
-    model, tokenizer = load_script_model(
-        runtime, offline_grpo_config, model_config, dist_args, attn_implementation=requested_attn
+    model, tokenizer = load_model_and_tokenizer(
+        context, offline_grpo_config, model_config, args, attn_default=requested_attn
     )
 
     # Both budgets are truncation caps here, and either may be null ("no cap"), so the tokenizer is
@@ -163,10 +163,9 @@ def main():
 
     ref_model = _load_kl_reference(
         args,
-        runtime,
+        context,
         offline_grpo_config,
         model_config,
-        dist_args,
         policy=model,
         tokenizer=tokenizer,
         peft_config=peft_config,
@@ -216,11 +215,11 @@ def main():
         offline_grpo_config,
     )
 
-    callbacks = build_training_callbacks(
+    callbacks = configure_balancing_and_build_callbacks(
         args,
         offline_grpo_config,
         model,
-        parallelism_config,
+        context,
         generate_callback=GenerateExamplesCallback.from_config(args, offline_grpo_config, generate_dataset, tokenizer),
         policy_gradient_loss=True,
     )
@@ -238,11 +237,11 @@ def main():
         peft_config=peft_config,
         ref_model=ref_model,
         callbacks=callbacks,
-        resume_checkpoint=runtime.resume_checkpoint,
-        **distributed_trainer_kwargs(args, dist_args, parallelism_config, dataset_presharded=dataset_presharded),
+        resume_checkpoint=context.resume_checkpoint,
+        **distributed_trainer_kwargs(args, parallelism_config, dataset_presharded=dataset_presharded),
     )
-    run_trainer(trainer, runtime, method_name="Offline GRPO")
+    run_trainer(trainer, context, method_name="Offline GRPO")
 
 
 if __name__ == "__main__":
-    run_training(main)()
+    with_distributed_teardown(main)()

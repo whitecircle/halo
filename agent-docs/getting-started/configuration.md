@@ -8,7 +8,7 @@ python scripts/training/sft.py examples/sft/qwen3/qwen3-4b-ultrachat.yaml
 
 ## YAML parser
 
-`H4ArgumentParser` (`src/training/parser.py`) extends `HfArgumentParser` with:
+`HaloArgumentParser` (`src/configs/parser.py`) extends `HfArgumentParser` with:
 
 - **Toolkit defaults**, applied unless explicitly set in the YAML or on the CLI: `use_liger_kernel: true`, `bf16: true`, `logging_nan_inf_filter: false`. Each is a value the YAML did not write, handed to every config declaring the field before it is built, so `TrainingArguments` derives `mixed_precision` from it. The `bf16` default yields to an explicitly-enabled `fp16`.
 
@@ -17,8 +17,13 @@ python scripts/training/sft.py examples/sft/qwen3/qwen3-4b-ultrachat.yaml
 - **Literal validation** — fields annotated `Literal[...]` (e.g. `advantage_method`) reject out-of-set values at parse time, in YAML and `--key=value` alike. Mixed unions (`float | Literal["auto"]`) are not validated.
 - **Boolean spellings** — YAML 1.2 booleans are unquoted `true`/`false`; the 1.1 spellings `yes`/`no`/`on`/`off` parse as (truthy) strings, so a string value on a bool field is rejected at parse time instead of silently inverting `packing: no`.
 - **No field renames.** Nothing is migrated and nothing is stripped: every key no config declares raises and names the field, ecosystem spellings this toolkit does not accept included (TRL's own `max_seq_length` — use `max_length`).
-- **`output_dir` strftime expansion** — `%<letter>` directives expand from one shared timestamp, so `checkpoints/sft-%Y-%m-%dT%H-%M-%S` becomes a timestamped path; `%%` collapses to a literal `%`, and any other `%` (`sft-100%-data`) survives byte-identical.
-- **Distributed init happens first.** `parse()` calls `init_distributed()` before building the dataclasses: constructing a `TrainingArguments` touches `self.device`, which lets accelerate create the default process group *without* `device_id`. Losing that binding costs a `new_group` per mesh dimension instead of one `ncclCommSplit` and leaves every barrier guessing its device.
+- **One value load.** `load_values(argv)` reads the YAML (`argv[0]` when it ends in `.yaml`/`.yml`) or a flags-only command line, casts the `--key=value` overrides and applies the toolkit defaults, with no other side effect; `parse_dict` then builds each dataclass once from those values, so every `__post_init__` validates the final config.
+
+The parser itself is pure. Every training script parses through `parse_script_args` (`src/entrypoints/script.py`), which adds three effects around it:
+
+- **Distributed init happens first.** `init_distributed()` runs before any dataclass is built: constructing a `TrainingArguments` touches `self.device`, which lets accelerate create the default process group *without* `device_id`. Losing that binding costs a `new_group` per mesh dimension instead of one `ncclCommSplit` and leaves every barrier guessing its device.
+- **`output_dir` strftime expansion** — `%<letter>` directives expand from one shared timestamp (`expand_strftime_directives`), so `checkpoints/sft-%Y-%m-%dT%H-%M-%S` becomes a timestamped path; `%%` collapses to a literal `%`, and any other `%` (`sft-100%-data`) survives byte-identical. Rank 0's expansion is broadcast, so every node agrees on the directory.
+- **The `run.log` tee** into that `output_dir` ([Production launch](quickstart.md#5-production-launch)).
 
 ## CLI overrides
 

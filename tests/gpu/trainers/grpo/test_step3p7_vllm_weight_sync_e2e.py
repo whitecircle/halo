@@ -57,7 +57,7 @@ from src.distributed.parallelism_config import ParallelismConfig
 from src.env import env_str
 from src.hardware import supports_grouped_mm
 from src.model_loading.parallel.loader import load_distributed_model
-from src.trainers.grpo.rollout.weight_sync import sync_weights_to_client, validate_weight_sync_support
+from src.trainers.grpo.rollout.weight_push import reject_unsyncable_model, sync_weights_to_client
 from src.weight_sync.clients.vllm import VLLMWeightSyncClient
 from tests.common.harness import gpu_test_main, skip_unless_local_checkpoint
 from tests.common.utils import log, max_or_nan
@@ -281,7 +281,7 @@ def run(ctx) -> dict:
     checks["ep_wrapped"] = bool(named_ep_layers(model))
     gate_refusal = ""
     try:
-        validate_weight_sync_support(model, "vllm")
+        reject_unsyncable_model(model, "vllm")
     except ValueError as e:
         gate_refusal = str(e)
     checks["construction_gate_admits_step3p7"] = not gate_refusal

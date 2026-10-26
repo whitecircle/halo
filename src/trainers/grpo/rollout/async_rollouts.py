@@ -32,11 +32,10 @@ from src.environments.ray_actors import RolloutManager, ray_init_kwargs
 from src.runtime.collectives import broadcast_from_rank0
 from src.runtime.consensus import DeferredRankFailure, rank_consensus
 from src.runtime.ranks import get_global_rank, get_global_world_size, get_num_nodes, is_global_main_process
-from src.trainers.grpo.rollout.weight_sync import sync_trainer_weights
-from src.trainers.grpo.rollout.weight_sync_clients import InferenceClientManager
+from src.trainers.grpo.rollout.weight_push import sync_trainer_weights
 from src.trainers.grpo.world_metrics import world_sums
-from src.weight_sync.chunking import resolve_sync_device
 from src.weight_sync.clients.base import WeightSyncClientBase
+from src.weight_sync.pool import WeightSyncPool
 from src.weight_sync.registry import resolve_weight_sync_client
 
 logger = logging.getLogger(__name__)
@@ -111,7 +110,7 @@ class AsyncRolloutMixin:
     def _init_async_state(self):
         """Rollout-manager, weight-sync-client and prefetch state, before any of them is built."""
         self._rollout_manager = None
-        self._weight_sync_client = None  # one engine client, or an InferenceClientManager over several
+        self._weight_sync_client = None  # one engine client, or a WeightSyncPool over several
         # Score-only clients, one per rollout server on EVERY rank (isr_engine_reference).
         self._engine_rescore_clients: list[WeightSyncClientBase] | None = None
         self._loop = None
@@ -291,18 +290,17 @@ class AsyncRolloutMixin:
         if not self.accelerator.is_main_process:
             return
 
-        device = resolve_sync_device(self.accelerator.device)
-
+        device = self.accelerator.device
         client_cls = resolve_weight_sync_client(self.async_config.rollout_backend)
 
         if self._multi_server_mode:
-            self._weight_sync_client = InferenceClientManager(
+            self._weight_sync_client = WeightSyncPool(
                 server_configs=self.async_config.rollout_server_configs,
                 connection_timeout=self.async_config.rollout_connection_timeout,
                 client_cls=client_cls,
                 base_group_port=self.args.vllm_group_port,
             )
-            self._weight_sync_client.init_communicators(device=device)
+            self._weight_sync_client.init_communicator(device=device)
         else:
             logger.info(f"Initializing {client_cls.BACKEND_NAME} weight-sync client on device: {device}")
 
@@ -316,7 +314,7 @@ class AsyncRolloutMixin:
 
             logger.info(
                 f"{client_cls.BACKEND_NAME} weight-sync client initialized: {self.async_config.rollout_server_url}, "
-                f"device={device}, group_port={self.args.vllm_group_port}"
+                f"device={self._weight_sync_client.sync_device}, group_port={self.args.vllm_group_port}"
             )
 
     def _build_engine_rescore_clients(self) -> list[WeightSyncClientBase]:
@@ -349,10 +347,7 @@ class AsyncRolloutMixin:
 
         if self._weight_sync_client is not None:
             try:
-                if self._multi_server_mode:
-                    self._weight_sync_client.close_communicators()
-                else:
-                    self._weight_sync_client.close_communicator()
+                self._weight_sync_client.close_communicator()
             except Exception as e:  # teardown must not mask the run's own outcome
                 logger.warning(f"Error closing the {self._rollout_engine_name} weight-sync client: {e}")
             self._weight_sync_client = None

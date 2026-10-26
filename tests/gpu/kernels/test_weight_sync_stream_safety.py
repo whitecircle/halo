@@ -79,7 +79,7 @@ def test_the_sglang_client_holds_its_sources_for_the_send_stream():
     device = torch.device("cuda", torch.cuda.current_device())
     client = offline_client(SGLangWeightSyncClient)
     client._sync_device = device
-    client._group = object()
+    client._transport = (object(), None)
     client._send_stream = torch.cuda.Stream(device=device)
     sources = _sources(device)
     expected = [source.clone() for source in sources]
@@ -90,7 +90,7 @@ def test_the_sglang_client_holds_its_sources_for_the_send_stream():
         mock.patch.object(sglang_module.dist, "broadcast", lambda tensor, src, group: sent.append(tensor.clone())),
         mock.patch.object(client, "request", return_value=None),
     ):
-        client._send_chunk([(f"p{i}", s) for i, s in enumerate(sources)], flush_cache=False)
+        client._broadcast_chunk([(f"p{i}", s) for i, s in enumerate(sources)], final=False)
         del sources
         _overwrites = _refill_freed_blocks(device)
         client._release_arena()

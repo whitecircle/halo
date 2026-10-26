@@ -3,7 +3,7 @@
 
 Smooth Margin Preference Optimization — reference-model-free preference training. One script serves
 both text and vision-language models. The model class follows the checkpoint
-(``load_model_for_training`` auto-detects it); the data path follows the run (``is_vlm_run``), so a
+(``load_policy_model`` auto-detects it); the data path follows the run (``is_vlm_run``), so a
 natively-multimodal checkpoint trained on text-only pairs takes the text path and keeps CP,
 padding_free and PP. A VLM run passes its raw rows through: the trainer normalizes and
 chat-templates them itself and auto-selects ``DataCollatorForVLMSMPO`` (image processing at
@@ -23,40 +23,41 @@ Dataset: text → {"prompt", "chosen", "rejected"} message lists; VLM → the sa
 
 from trl import ModelConfig
 
-from src.args.distributed_args import DistributedArguments
 from src.config_validation import reject_unsupported_args
+from src.configs.parallelism_arguments import ParallelismArguments
 from src.configs.preference import SmoothMarginPOConfig, SMPOScriptArguments
-from src.distributed.loading.vlm_setup import load_model_for_training
-from src.model_loading.model_preparation import log_model_info
+from src.entrypoints.data_setup import load_script_datasets, prepare_script_preference_data, resolve_vlm_run
+from src.entrypoints.model_setup import (
+    apply_max_length,
+    apply_text_path_padding_side,
+    default_padded_attn_implementation,
+    install_resolved_tokenizer,
+    load_policy_model,
+    log_model_info,
+)
+from src.entrypoints.script import (
+    apply_distributed_trainer_config,
+    configure_balancing_and_build_callbacks,
+    distributed_trainer_kwargs,
+    init_training_script,
+    parse_script_args,
+    run_trainer,
+    with_distributed_teardown,
+)
 from src.model_loading.parallel.peft_setup import configure_adapter_training
 from src.runtime.collectives import barrier
 from src.trainers.preference.smpo import SmoothMarginPOTrainer
-from src.training.environment import run_training
-from src.training.parser import H4ArgumentParser
-from src.training.script_runner import (
-    apply_distributed_trainer_config,
-    apply_max_length,
-    build_training_callbacks,
-    distributed_trainer_kwargs,
-    enforce_text_path_padding_side,
-    init_training_script,
-    install_resolved_tokenizer,
-    load_script_datasets,
-    padded_workload_attn_implementation,
-    prepare_script_preference_data,
-    resolve_vlm_run,
-    run_trainer,
-)
 
 
 def main():
-    parser = H4ArgumentParser((SMPOScriptArguments, SmoothMarginPOConfig, ModelConfig, DistributedArguments))
-    args, smpo_config, model_config, dist_args = parser.parse()
+    args, smpo_config, model_config, dist_args = parse_script_args(
+        SMPOScriptArguments, SmoothMarginPOConfig, ModelConfig, ParallelismArguments
+    )
 
-    runtime = init_training_script(
+    context = init_training_script(
         args, smpo_config, model_config, dist_args, script_prefix="smpo", trainer_cls=SmoothMarginPOTrainer
     )
-    parallelism_config = runtime.parallelism_config
+    parallelism_config = context.parallelism_config
 
     ds, dataset_presharded = load_script_datasets(args, parallelism_config)
 
@@ -64,7 +65,7 @@ def main():
     # pairs is a text run, and CP / padding_free / PP stay legal for it. Decided before the model
     # load, which needs the checkpoint's processor for a VLM run, so the CP and PP refusals below
     # raise before any weight is read (the trainer repeats them and adds padding_free).
-    is_vlm = resolve_vlm_run(args, model_config, ds, text_only_model=dist_args.text_only_model)
+    is_vlm = resolve_vlm_run(args, model_config, ds, text_only_model=args.text_only_model)
     if dist_args.context_parallel_size > 1 and is_vlm:
         raise ValueError("SMPO VLM mode does not support Context Parallelism — drop --context_parallel_size.")
     if dist_args.pipeline_parallel_size > 1 and is_vlm:
@@ -76,24 +77,20 @@ def main():
 
     # --- Model (class follows the checkpoint); padded preference takes the shared padded-workload
     # backend (SDPA, dropped under live sinks and under CP) ---
-    model, processing_class, tokenizer, _ = load_model_for_training(
-        model_config,
+    policy = load_policy_model(
+        context,
         smpo_config,
-        parallelism_config,
+        model_config,
+        args,
         vlm_run=is_vlm,
-        attn_default=padded_workload_attn_implementation(
-            model_config, sinks_reset=dist_args.reset_sinks, context_parallel=parallelism_config.is_cp_mode
+        attn_default=default_padded_attn_implementation(
+            model_config, sinks_reset=args.reset_sinks, context_parallel=parallelism_config.is_cp_mode
         ),
-        reset_sinks=dist_args.reset_sinks,
-        train_sinks=dist_args.train_sinks,
-        weights_source=runtime.model_source,
-        preserve_checkpoint_precision=runtime.policy_from_checkpoint,
-        text_only_model=dist_args.text_only_model,
     )
-
-    tokenizer = apply_max_length(smpo_config, args, model, tokenizer)
-    processing_class = install_resolved_tokenizer(processing_class, tokenizer)
-    enforce_text_path_padding_side(tokenizer, is_vlm)
+    model = policy.model
+    tokenizer = apply_max_length(smpo_config, args, model, policy.tokenizer)
+    processing_class = install_resolved_tokenizer(policy.processing_class, tokenizer)
+    apply_text_path_padding_side(tokenizer, is_vlm)
 
     peft_config = configure_adapter_training(args, model, model_config, "CAUSAL_LM")
 
@@ -110,8 +107,8 @@ def main():
         generation_max_prompt_length=smpo_config.max_prompt_length,
     )
 
-    callbacks = build_training_callbacks(
-        args, smpo_config, model, parallelism_config, generate_callback=generate_callback
+    callbacks = configure_balancing_and_build_callbacks(
+        args, smpo_config, model, context, generate_callback=generate_callback
     )
 
     apply_distributed_trainer_config(smpo_config, parallelism_config)
@@ -126,16 +123,16 @@ def main():
         processing_class=processing_class,
         peft_config=peft_config,
         callbacks=callbacks,
-        **distributed_trainer_kwargs(args, dist_args, parallelism_config, dataset_presharded=dataset_presharded),
+        **distributed_trainer_kwargs(args, parallelism_config, dataset_presharded=dataset_presharded),
         is_vlm=is_vlm,
     )
     run_trainer(
         trainer,
-        runtime,
+        context,
         method_name="SMPO",
         extra_start_log=[f"modality: {'vlm' if is_vlm else 'text'}"],
     )
 
 
 if __name__ == "__main__":
-    run_training(main)()
+    with_distributed_teardown(main)()

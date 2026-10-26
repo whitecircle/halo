@@ -20,9 +20,9 @@ Usage:
 from accelerate.logging import get_logger
 from trl import ModelConfig, SFTConfig
 
-from src.args.distributed_args import DistributedArguments
 from src.callbacks.generate_examples import GenerateExamplesCallback
 from src.config_validation import reject_non_default_args
+from src.configs.parallelism_arguments import ParallelismArguments
 from src.configs.sft import SFTScriptArguments
 from src.data.collators.factory import select_data_collator
 from src.data.collators.vlm import PreprocessedVLMDataCollator, VLMDataCollator
@@ -35,34 +35,37 @@ from src.data.pipeline.processing import (
 from src.data.pipeline.row_processors import create_llm_processor, text_render_kwargs
 from src.data.pipeline.vlm_dataset import prepare_vlm_dataset
 from src.data.sources.loading import load_datasets_auto
-from src.distributed.loading.vlm_setup import load_model_for_training
-from src.model_loading.model_preparation import log_model_info
+from src.entrypoints.data_setup import (
+    disable_trl_dataset_prep,
+    load_script_datasets,
+    log_script_dataset_examples,
+    reject_trl_dataset_prep_args,
+    resolve_vlm_run,
+)
+from src.entrypoints.model_setup import (
+    apply_max_length,
+    apply_text_path_padding_side,
+    install_resolved_tokenizer,
+    load_policy_model,
+    log_model_info,
+)
+from src.entrypoints.script import (
+    apply_distributed_trainer_config,
+    configure_balancing_and_build_callbacks,
+    distributed_trainer_kwargs,
+    init_training_script,
+    parse_script_args,
+    run_trainer,
+    with_distributed_teardown,
+)
 from src.model_loading.parallel.model_source import probe_checkpoint
 from src.model_loading.parallel.peft_setup import configure_adapter_training
 from src.models.context_window import is_bounded_length
 from src.models.segment_markers import reject_compressed_kv_rows
 from src.runtime.collectives import barrier
 from src.runtime.consensus import agree_probe_across_ranks
-from src.runtime.process_group import init_distributed
 from src.runtime.ranks import is_global_main_process
 from src.trainers.sft import DistributedSFTTrainer
-from src.training.environment import run_training
-from src.training.parser import H4ArgumentParser
-from src.training.script_runner import (
-    apply_distributed_trainer_config,
-    apply_max_length,
-    build_training_callbacks,
-    disable_trl_dataset_prep,
-    distributed_trainer_kwargs,
-    enforce_text_path_padding_side,
-    init_training_script,
-    install_resolved_tokenizer,
-    load_script_datasets,
-    log_script_dataset_examples,
-    reject_trl_dataset_prep_args,
-    resolve_vlm_run,
-    run_trainer,
-)
 
 logger = get_logger(__name__, log_level="INFO")
 
@@ -210,8 +213,9 @@ def _prepare_vlm_data(ds, is_preprocessed, args, sft_config, model_config, proce
 
 
 def main():
-    parser = H4ArgumentParser((SFTScriptArguments, SFTConfig, ModelConfig, DistributedArguments))
-    args, sft_config, model_config, dist_args = parser.parse()
+    args, sft_config, model_config, dist_args = parse_script_args(
+        SFTScriptArguments, SFTConfig, ModelConfig, ParallelismArguments
+    )
 
     if dist_args.context_parallel_size > 1 and sft_config.padding_free:
         raise ValueError("Context Parallelism (CP) is NOT compatible with padding_free mode. Disable padding_free.")
@@ -246,11 +250,7 @@ def main():
 
     # The checkpoint's modality names the run, which init_training_script needs before the dataset
     # exists. Pinned like the model load: an unpinned probe reads hub `main`, whose config can
-    # name a different modality than the commit this run trains. The process group is initialized
-    # first (init_training_script's own call is then a no-op) because the main-rank-first ordering
-    # that guards transformers' unlocked remote-code module cache needs a live group; without it
-    # every rank of every node fetches at once.
-    init_distributed()
+    # name a different modality than the commit this run trains.
     checkpoint_config, is_vlm_checkpoint = probe_checkpoint(
         model_config.model_name_or_path,
         revision=model_config.model_revision,
@@ -259,17 +259,17 @@ def main():
     # The collator factory refuses the same rows, but only after the model load and the packing pass.
     if sft_config.packing or sft_config.padding_free:
         reject_compressed_kv_rows(checkpoint_config, "packing" if sft_config.packing else "padding_free")
-    runtime = init_training_script(
+    context = init_training_script(
         args,
         sft_config,
         model_config,
         dist_args,
-        script_prefix=f"sft{'-vlm' if is_vlm_checkpoint and not dist_args.text_only_model else ''}",
+        script_prefix=f"sft{'-vlm' if is_vlm_checkpoint and not args.text_only_model else ''}",
         trainer_cls=DistributedSFTTrainer,
         allow_low_precision=True,
         supports_init_from_scratch=True,
     )
-    parallelism_config = runtime.parallelism_config
+    parallelism_config = context.parallelism_config
 
     (ds, is_preprocessed), dataset_presharded = load_script_datasets(
         args,
@@ -286,25 +286,16 @@ def main():
     # run, and packing / padding_free / train_on_last_assistant_only stay legal for it. The model
     # class is unaffected; it follows the checkpoint.
     is_vlm = resolve_vlm_run(
-        args, model_config, ds, text_only_model=dist_args.text_only_model, vlm_checkpoint=is_vlm_checkpoint
+        args, model_config, ds, text_only_model=args.text_only_model, vlm_checkpoint=is_vlm_checkpoint
     )
 
-    model, processing_class, tokenizer, _ = load_model_for_training(
-        model_config,
-        sft_config,
-        parallelism_config,
-        vlm_run=is_vlm,
-        reset_sinks=dist_args.reset_sinks,
-        train_sinks=dist_args.train_sinks,
-        init_from_scratch=dist_args.init_from_scratch,
-        weights_source=runtime.model_source,
-        preserve_checkpoint_precision=runtime.policy_from_checkpoint,
-        text_only_model=dist_args.text_only_model,
+    policy = load_policy_model(
+        context, sft_config, model_config, args, vlm_run=is_vlm, init_from_scratch=dist_args.init_from_scratch
     )
-
-    tokenizer = apply_max_length(sft_config, args, model, tokenizer)
-    processing_class = install_resolved_tokenizer(processing_class, tokenizer)
-    enforce_text_path_padding_side(tokenizer, is_vlm)
+    model = policy.model
+    tokenizer = apply_max_length(sft_config, args, model, policy.tokenizer)
+    processing_class = install_resolved_tokenizer(policy.processing_class, tokenizer)
+    apply_text_path_padding_side(tokenizer, is_vlm)
 
     peft_config = configure_adapter_training(args, model, model_config, "CAUSAL_LM")
     log_model_info(model, tokenizer)
@@ -330,8 +321,8 @@ def main():
             "generate_eval_examples skipped: %s.",
             "not supported for VLM datasets" if is_vlm else "a pre-processed dataset carries no raw prompts",
         )
-    callbacks = build_training_callbacks(
-        args, sft_config, model, parallelism_config, generate_callback=generate_callback
+    callbacks = configure_balancing_and_build_callbacks(
+        args, sft_config, model, context, generate_callback=generate_callback
     )
 
     disable_trl_dataset_prep(sft_config)
@@ -348,15 +339,15 @@ def main():
         peft_config=peft_config,
         data_collator=collator,
         callbacks=callbacks,
-        **distributed_trainer_kwargs(args, dist_args, parallelism_config, dataset_presharded=dataset_presharded),
+        **distributed_trainer_kwargs(args, parallelism_config, dataset_presharded=dataset_presharded),
     )
     run_trainer(
         trainer,
-        runtime,
+        context,
         method_name="SFT",
         extra_start_log=[f"modality: {'vlm' if is_vlm else 'text'}"],
     )
 
 
 if __name__ == "__main__":
-    run_training(main)()
+    with_distributed_teardown(main)()

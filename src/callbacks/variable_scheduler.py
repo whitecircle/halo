@@ -6,10 +6,7 @@ from transformers import TrainerCallback
 
 
 class VariableSchedulerCallback(TrainerCallback):
-    """Schedule an attribute on the model linearly from ``initial_value`` to ``final_value``.
-
-    The value reaches ``final_value`` at ``max_steps`` and holds there.
-    """
+    """Move a model attribute linearly from ``initial_value`` to ``final_value`` at ``max_steps``, then hold it."""
 
     def __init__(self, attribute_name: str, initial_value: float, final_value: float):
         self.attribute_name = attribute_name
@@ -23,7 +20,6 @@ class VariableSchedulerCallback(TrainerCallback):
             raise ValueError(f"Total training steps ({state.max_steps}) must be positive to schedule over.")
 
         target_obj = self._get_target_object(kwargs)
-
         if not hasattr(target_obj, self.attribute_name):
             setattr(target_obj, self.attribute_name, self.initial_value)
 
@@ -34,11 +30,8 @@ class VariableSchedulerCallback(TrainerCallback):
 
     @staticmethod
     def _get_target_object(kwargs: dict) -> Any:
-        """The model from the callback kwargs, unwrapped so the attribute lands on the module that reads it.
-
-        Only the top-level ``.module`` is peeled: a recursive unwrap would replace every nested child
-        exposing ``.module`` on each step, rewriting the model mid-training.
-        """
+        """The callback's model with its top-level ``.module`` peeled, so the attribute lands on the module
+        that reads it; a recursive unwrap would rewrite every nested ``.module`` child each step."""
         target_obj = kwargs.get("model")
         if target_obj is None:
             raise ValueError(

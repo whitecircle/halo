@@ -43,7 +43,7 @@ Actors run environments on CPU and inherit the `ray start` daemon's environment,
 
 ## Configuration
 
-`EnvironmentConfig` (`src/configs/environment_config.py`) has four top-level fields. Everything else goes in `environment_kwargs`.
+`EnvironmentConfig` (`src/configs/grpo_environmental.py`) has four top-level fields. Everything else goes in `environment_kwargs`.
 
 ```yaml
 environment_type: react_math

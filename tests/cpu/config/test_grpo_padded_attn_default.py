@@ -9,7 +9,7 @@ same request ``teacher_distill.py`` / ``classification.py`` / the reward scripts
 It is a *request*, not a pin: with live sinks (``reset_sinks: false`` — the on-policy gpt-oss flow)
 the backend resolver refuses a sink-dropping impl, so forcing SDPA there would reject the run
 outright. The default must therefore be dropped exactly in that case — which is the whole reason
-the exemption lives in ``padded_workload_attn_implementation`` rather than in a ternary each script
+the exemption lives in ``default_padded_attn_implementation`` rather than in a ternary each script
 copies: four copies is four chances for one of them to keep requesting SDPA, and the run that
 notices is an on-policy gpt-oss run failing at model load.
 
@@ -27,16 +27,16 @@ import pytest
 from datasets import DatasetDict
 
 from src.distributed.parallelism_config import ParallelismConfig
-from src.training.script_runner import padded_workload_attn_implementation
+from src.entrypoints.model_setup import default_padded_attn_implementation
 from tests.common.offline_grpo import offline_grpo_dataset
 from tests.common.repo import REPO_ROOT, load_script_module
 
 _TRAINING_DIR = REPO_ROOT / "scripts" / "training"
 
-# The three GRPO entry points; each pads its batches and loads through load_script_model.
+# The three GRPO entry points; each pads its batches and loads through load_model_and_tokenizer.
 _GRPO_SCRIPTS = ["offline_grpo.py", "environmental_grpo.py", "online_grpo/rlvr.py"]
 
-_HELPER = "padded_workload_attn_implementation"
+_HELPER = "default_padded_attn_implementation"
 
 
 class _StopAtModelLoad(Exception):
@@ -51,7 +51,7 @@ def _load_script_module(rel_path: str):
 def _requested_attn(rel_path: str, yaml_body: str, tmp_path: Path, parallelism_config=None) -> str | None:
     """The attention implementation the script's model load would actually resolve under.
 
-    ``load_script_model`` falls back to ``model_config.attn_implementation`` when the script passes
+    ``load_model_and_tokenizer`` falls back to ``model_config.attn_implementation`` when the script passes
     none, so the effective request — not the kwarg alone — is what the run behaves on.
     """
     module = _load_script_module(rel_path)
@@ -62,11 +62,7 @@ def _requested_attn(rel_path: str, yaml_body: str, tmp_path: Path, parallelism_c
     )
     captured: dict = {}
 
-    def fake_load_script_model(runtime, training_config, model_config, dist_args, **kwargs):
-        captured["requested"] = kwargs.get("attn_implementation") or model_config.attn_implementation
-        raise _StopAtModelLoad
-
-    def fake_load_model_for_training(model_config, training_config, parallelism_config, **kwargs):
+    def fake_load(context, training_config, model_config, dist_args, **kwargs):
         captured["requested"] = model_config.attn_implementation or kwargs.get("attn_default")
         raise _StopAtModelLoad
 
@@ -77,7 +73,7 @@ def _requested_attn(rel_path: str, yaml_body: str, tmp_path: Path, parallelism_c
         mode_suffix="",
         local_rank=0,
     )
-    loaders = {"load_script_model": fake_load_script_model, "load_model_for_training": fake_load_model_for_training}
+    loaders = {"load_model_and_tokenizer": fake_load, "load_policy_model": fake_load}
     with contextlib.ExitStack() as stack:
         stack.enter_context(mock.patch.object(module, "init_training_script", return_value=runtime))
         for name, fake in loaders.items():
@@ -92,7 +88,7 @@ def _requested_attn(rel_path: str, yaml_body: str, tmp_path: Path, parallelism_c
             splits = DatasetDict(train=offline_grpo_dataset(2), test=offline_grpo_dataset(2, offset=2))
             stack.enter_context(mock.patch.object(module, "load_script_datasets", return_value=(splits, False)))
         # The log tee redirects the process's stdout/stderr fds — keep it out of the test process.
-        stack.enter_context(mock.patch("src.training.parser.install_log_tee"))
+        stack.enter_context(mock.patch("src.entrypoints.script.install_log_tee"))
         stack.enter_context(mock.patch.object(sys, "argv", ["prog", str(config)]))
         stack.enter_context(pytest.raises(_StopAtModelLoad))
         module.main()
@@ -163,7 +159,7 @@ def test_the_seam_owns_the_padded_default_exemptions(pinned, sinks_reset, contex
     sinks are being reset and the run is not context-parallel."""
     model_config = types.SimpleNamespace(attn_implementation=pinned)
     assert (
-        padded_workload_attn_implementation(model_config, sinks_reset=sinks_reset, context_parallel=context_parallel)
+        default_padded_attn_implementation(model_config, sinks_reset=sinks_reset, context_parallel=context_parallel)
         == expected
     )
 

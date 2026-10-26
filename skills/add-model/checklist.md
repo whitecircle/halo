@@ -38,7 +38,7 @@ routing, interleaved weights), `layers/deepseek_v4.py` (most class attributes in
 The field is `Literal["auto", "none", "aux_loss", "bias_update", "bias_update_transient"]`, default
 `auto` (`src/configs/script_arguments.py`); `resolve_balancing_mode`
 (`src/models/moe_balancing.py`) resolves it against the live model and
-`apply_balancing_strategy` (`src/distributed/expert_parallel/balancing_strategy.py`) applies it.
+`apply_balancing_mode` (`src/callbacks/balancing.py`) applies it.
 Leave the YAML at `auto` and make the family resolvable:
 
 - **Selection inside the HF gate** and the loaded class's forward declares
@@ -62,7 +62,7 @@ verdict there rather than keeping a second copy.
 **Traps.**
 
 - Both bias modes downgrade to `none` on the weight-sync RL scripts (online / async GRPO):
-  the sync ships parameters and the bias is a buffer (`src/callbacks/wiring.py`), so those
+  the sync ships parameters and the bias is a buffer (`src/callbacks/balancing.py`), so those
   runs train unbalanced. `aux_loss` is inert under a policy-gradient loss.
 - A construction hook may issue **no collective** and allocate nothing sized by `world_size` —
   some load paths patch layers before every rank reaches group setup, and 8-GPU-invisible state is

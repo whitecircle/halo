@@ -22,7 +22,7 @@ from src.distributed.expert_parallel.layers.laguna import EPLagunaMoELayer
 from src.distributed.expert_parallel.layers.qwen3 import EPQwen3MoELayer
 from src.distributed.expert_parallel.layers.qwen3_5 import EPQwen3_5MoELayer
 from src.distributed.expert_parallel.moe_layer.layer import EPMoELayerBase
-from src.trainers.grpo.rollout.weight_sync import validate_weight_sync_support
+from src.trainers.grpo.rollout.weight_push import reject_unsyncable_model
 from tests.common.weight_sync import StockModel
 
 
@@ -38,32 +38,32 @@ def _wrapped(model: nn.Module, layer_cls: type[EPMoELayerBase]) -> nn.Module:
 @pytest.mark.parametrize("backend", ["vllm", "sglang"])
 def test_flag_false_family_is_refused_without_wrappers(backend):
     with pytest.raises(ValueError, match="does not support weight sync"):
-        validate_weight_sync_support(StockModel("inkling_mm_model"), backend)
+        reject_unsyncable_model(StockModel("inkling_mm_model"), backend)
 
 
 @pytest.mark.parametrize("backend", ["vllm", "sglang"])
 def test_unservable_model_type_is_refused_without_wrappers(backend):
     with pytest.raises(ValueError, match="cannot serve model_type"):
-        validate_weight_sync_support(StockModel("bailing_hybrid"), backend)
+        reject_unsyncable_model(StockModel("bailing_hybrid"), backend)
 
 
 def test_unservable_model_type_is_refused_with_a_live_wrapper():
     with pytest.raises(ValueError, match="cannot serve model_type"):
-        validate_weight_sync_support(_wrapped(StockModel("bailing_hybrid"), EPBailingMoELayer), "vllm")
+        reject_unsyncable_model(_wrapped(StockModel("bailing_hybrid"), EPBailingMoELayer), "vllm")
 
 
 def test_unservability_is_per_engine():
     """One engine's loader gap must not refuse the family on the other: Laguna's SGLang loader
     refuses any partial update while vLLM's layerwise reload takes it."""
     with pytest.raises(ValueError, match="cannot serve model_type"):
-        validate_weight_sync_support(_wrapped(StockModel("laguna"), EPLagunaMoELayer), "sglang")
-    validate_weight_sync_support(_wrapped(StockModel("laguna"), EPLagunaMoELayer), "vllm")
+        reject_unsyncable_model(_wrapped(StockModel("laguna"), EPLagunaMoELayer), "sglang")
+    reject_unsyncable_model(_wrapped(StockModel("laguna"), EPLagunaMoELayer), "vllm")
 
 
 @pytest.mark.parametrize("backend", ["vllm", "sglang"])
 def test_servable_wrapped_sibling_and_dense_models_pass(backend):
-    validate_weight_sync_support(_wrapped(StockModel("bailing_moe"), EPBailingMoELayer), backend)  # Ling 2.0
-    validate_weight_sync_support(StockModel("qwen3"), backend)  # dense: no EP family resolves at all
+    reject_unsyncable_model(_wrapped(StockModel("bailing_moe"), EPBailingMoELayer), backend)  # Ling 2.0
+    reject_unsyncable_model(StockModel("qwen3"), backend)  # dense: no EP family resolves at all
 
 
 @pytest.mark.parametrize("backend", ["vllm", "sglang"])
@@ -77,19 +77,19 @@ def test_servable_moe_without_a_live_wrapper_is_refused_with_the_remedy(backend,
     wrapper, not the family). Per-expert and fused-native hub layouts alike: the validated layout is
     the gather's, whichever it is. GptOss is the sink-gate test's wrapped stub."""
     with pytest.raises(ValueError, match="no live EP wrapper") as refused:
-        validate_weight_sync_support(StockModel(model_type), backend)
+        reject_unsyncable_model(StockModel(model_type), backend)
     assert "use_grouped_gemm: true" in str(refused.value)
     assert layer_cls.__name__ in str(refused.value)
-    validate_weight_sync_support(_wrapped(StockModel(model_type), layer_cls), backend)
+    reject_unsyncable_model(_wrapped(StockModel(model_type), layer_cls), backend)
 
 
 def test_wrapperless_refusal_yields_to_the_sharper_family_and_engine_facts():
     """A family no engine serves, or one engine cannot take, is refused for THAT reason even without a
     wrapper: the loader fact names the remedy (another engine, or none), the wrapper hint would not."""
     with pytest.raises(ValueError, match="does not support weight sync"):
-        validate_weight_sync_support(StockModel("glm5_next"), "vllm")
+        reject_unsyncable_model(StockModel("glm5_next"), "vllm")
     with pytest.raises(ValueError, match="cannot serve model_type"):
-        validate_weight_sync_support(StockModel("zaya"), "sglang")
+        reject_unsyncable_model(StockModel("zaya"), "sglang")
 
 
 if __name__ == "__main__":

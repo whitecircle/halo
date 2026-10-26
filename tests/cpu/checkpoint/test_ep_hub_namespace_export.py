@@ -59,7 +59,7 @@ from src.distributed.expert_parallel.moe_layer.layer import EPMoELayerBase
 from src.distributed.expert_parallel.patching import patch_moe_model_for_ep
 from src.model_loading.lazy_safetensors.conversion import Concat
 from src.models.param_roles import persistent_buffers
-from src.trainers.grpo.rollout.weight_sync import gather_and_send_weights
+from src.trainers.grpo.rollout.weight_push import gather_and_send_weights
 from tests.common.checkpoint_io import loading_problems, save_context
 from tests.common.models import TINY_STEP3P7_CONFIG
 from tests.common.parallelism import single_process_ep_config
@@ -220,7 +220,7 @@ class _RecordingSender:
         assert name not in self.sent, f"{name} forwarded twice"
         self.sent[name] = weights
 
-    def reset_prefix_cache(self) -> None:  # pragma: no cover - the caller flushes, not the gather
+    def finish_weight_update(self) -> None:  # pragma: no cover - the caller flushes, not the gather
         pass
 
 

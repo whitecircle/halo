@@ -1,7 +1,7 @@
 """Script arguments for RLVR online GRPO (verifiable rule-based rewards)."""
 
-from dataclasses import dataclass, field, fields
-from typing import Any, ClassVar, Literal
+from dataclasses import dataclass, field
+from typing import Any, ClassVar
 
 from src.configs.distillation import SDPGArguments
 from src.configs.grpo import (
@@ -12,6 +12,7 @@ from src.configs.grpo import (
     RLRRArguments,
 )
 from src.configs.script_arguments import DEFAULT_ANSWER_FIELD, CommonScriptArguments
+from src.environments.rollout_config import ReasoningEffortChoice
 from src.rewards.graders.verifiable import RLVR_REWARD_SOURCES
 from src.rewards.terms import RewardTerm, parse_reward_terms, refuse_veto_judges
 
@@ -40,25 +41,18 @@ class RLVROnlineGRPOScriptArguments(
     # The tunables ``use_sdpg`` gates, each under the name the trainer takes it by: the shared block
     # plus the advantage gate, declared here rather than on SDPGArguments because the offline
     # self-distillation arm has no advantages to gate on.
-    SDPG_TUNABLES: ClassVar[tuple[str, ...]] = (
-        *(f.name for f in fields(SDPGArguments)),
-        "opd_positive_advantage_only",
-    )
+    SDPG_TUNABLES: ClassVar[tuple[str, ...]] = (*SDPGArguments.sdpg_field_names(), "opd_positive_advantage_only")
 
     answer_field: str = field(
         default=DEFAULT_ANSWER_FIELD,
         metadata={"help": "Dataset column holding the ground-truth answer the rewards verify against."},
     )
     system_prompt: str | None = field(
-        default=None,
-        metadata={"help": "System prompt prepended to every conversation."},
+        default=None, metadata={"help": "System prompt prepended to every conversation."}
     )
     # Literal, not str: an unknown level would reach the chat template as an unrecognized string most
-    # templates ignore, leaving the run with no steer. The parser's Literal gate covers YAML and CLI;
-    # tests/cpu/config pins the set against VALID_REASONING_EFFORTS (src/environments/base.py), which
-    # cannot be imported here without pulling the environments package and its torch/vLLM tail into
-    # the argument dataclasses.
-    reasoning_effort: Literal["low", "medium", "high", "random"] | None = field(
+    # templates ignore, leaving the run with no steer.
+    reasoning_effort: ReasoningEffortChoice | None = field(
         default=None,
         metadata={
             "help": "Chat-template reasoning-effort steer (low/medium/high) or 'random' (sampled per prompt); "
@@ -66,7 +60,6 @@ class RLVROnlineGRPOScriptArguments(
             "like gpt-oss harmony."
         },
     )
-
     rewards: list[dict[str, Any]] = field(
         default_factory=lambda: [{"source": "accuracy"}],
         metadata={
@@ -76,7 +69,6 @@ class RLVROnlineGRPOScriptArguments(
             "See agent-docs/training-methods/grpo/rewards/README.md."
         },
     )
-
     # SDPG (arXiv:2606.04036): privileged-teacher reverse-KL OPD term on positive-advantage
     # rollouts — the same model re-run with a gold-answer hint — added atop the GRPO loss.
     use_sdpg: bool = field(
@@ -96,7 +88,8 @@ class RLVROnlineGRPOScriptArguments(
         if not self.use_sdpg:
             return {}
         return {
-            **{name: getattr(self, name) for name in self.SDPG_TUNABLES},
+            **self.sdpg_kwargs(),
+            "opd_positive_advantage_only": self.opd_positive_advantage_only,
             # process_for_rlvr normalizes the answer column to "answer", so use that, not answer_field.
             "sdpg_answer_field": "answer",
         }
@@ -116,6 +109,6 @@ class RLVROnlineGRPOScriptArguments(
         if self.use_sdpg or self.sdpg_hint_template is not None:
             super()._validate_hint_template()
 
-    def _validate_ranges(self) -> None:
-        super()._validate_ranges()
+    def _validate_fields(self) -> None:
+        super()._validate_fields()
         self.reward_terms  # noqa: B018  parse at config time so a bad or empty list fails before any server is touched

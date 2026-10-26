@@ -21,11 +21,23 @@ from sentence_transformers.models import Normalize, Pooling
 from transformers import AutoModel
 from trl import ModelConfig, get_quantization_config
 
-from src.args.distributed_args import DistributedArguments
 from src.checkpoint.model_card import HUB_TAGS
 from src.config_validation import reject_non_default_args, reject_unsupported_args
 from src.configs.embedding import EmbeddingConfig, EmbeddingScriptArguments
+from src.configs.parallelism_arguments import ParallelismArguments
 from src.data.sources.loading import reject_image_columns
+from src.entrypoints.data_setup import load_script_datasets
+from src.entrypoints.model_setup import load_model_and_tokenizer
+from src.entrypoints.script import (
+    ScriptContext,
+    apply_distributed_trainer_config,
+    configure_balancing_and_build_callbacks,
+    distributed_trainer_kwargs,
+    init_training_script,
+    parse_script_args,
+    run_trainer,
+    with_distributed_teardown,
+)
 from src.model_loading.buffer_repair import finalize_loaded_model
 from src.model_loading.dtype import cast_parameters_to_run_dtype, resolve_training_dtype
 from src.model_loading.model_preparation import apply_run_model_policies
@@ -41,32 +53,20 @@ from src.runtime.ranks import is_global_main_process
 from src.trainers.embedding.sentence_transformers_compat import PreloadedTransformer
 from src.trainers.embedding.trainer import EmbeddingTrainer, reject_uneven_sentence_transformers_batches
 from src.trainers.mixins.dataloader import needs_dp_sharded_loader
-from src.training.environment import run_training
-from src.training.parser import H4ArgumentParser
-from src.training.script_runner import (
-    ScriptRuntime,
-    apply_distributed_trainer_config,
-    build_training_callbacks,
-    distributed_trainer_kwargs,
-    init_training_script,
-    load_script_datasets,
-    load_script_model,
-    run_trainer,
-)
 
 logger = get_logger(__name__, log_level="INFO")
 
 
 def build_sentence_transformer(
-    runtime: ScriptRuntime,
+    context: ScriptContext,
     embedding_config: EmbeddingConfig,
     model_config: ModelConfig,
-    dist_args: DistributedArguments,
+    args: EmbeddingScriptArguments,
 ) -> SentenceTransformer:
     """Build a SentenceTransformer with optional EP/TP parallelism.
 
     Standard mode uses ``SentenceTransformer(model_name)`` directly; EP/TP mode loads the backbone
-    with ``load_script_model(model_class=AutoModel)``, wraps it in :class:`PreloadedTransformer` and
+    with ``load_model_and_tokenizer(model_class=AutoModel)``, wraps it in :class:`PreloadedTransformer` and
     builds the ``SentenceTransformer`` pipeline from modules.
     """
     # QLoRA/k-bit is unsupported here: neither the EP/TP loader nor the SentenceTransformer path
@@ -77,13 +77,13 @@ def build_sentence_transformer(
             "loader does not apply a quantization_config, so --load_in_4bit/--load_in_8bit would be "
             "silently ignored. Use full-precision LoRA (--use_peft) or full fine-tuning."
         )
-    parallelism_config = runtime.parallelism_config
+    parallelism_config = context.parallelism_config
     if parallelism_config.has_ep_group or parallelism_config.is_tp_mode:
-        backbone, tokenizer = load_script_model(
-            runtime,
+        backbone, tokenizer = load_model_and_tokenizer(
+            context,
             embedding_config,
             model_config,
-            dist_args,
+            args,
             model_class=AutoModel,
         )
 
@@ -120,13 +120,13 @@ def build_sentence_transformer(
         # over the store. The whole repo: the pipeline's pooling and dense modules sit in subfolders.
         apply_remote_code_compat_shims()
         revision = resolve_model_source(
-            runtime.model_source, model_config.model_revision, tag="embedding_model", whole_repo=True
+            context.model_source, model_config.model_revision, tag="embedding_model", whole_repo=True
         ).revision
         with joined_node_load(
-            f"Embedding model load from {runtime.model_source}", parallelism_config.max_concurrent_loading
+            f"Embedding model load from {context.model_source}", parallelism_config.max_concurrent_loading
         ):
             st_model = SentenceTransformer(
-                runtime.model_source,
+                context.model_source,
                 revision=revision,
                 trust_remote_code=model_config.trust_remote_code,
                 model_kwargs=model_kwargs,
@@ -142,7 +142,7 @@ def build_sentence_transformer(
         apply_run_model_policies(
             backbone,
             backbone.config,
-            sinks_policy=SinksPolicy.from_flags(reset_sinks=dist_args.reset_sinks, train_sinks=dist_args.train_sinks),
+            sinks_policy=SinksPolicy.from_flags(reset_sinks=args.reset_sinks, train_sinks=args.train_sinks),
             attn_implementation=model_kwargs.get("attn_implementation"),
         )
         # The checkpoint's modules.json decides pooling/normalization/length here while the EP/TP branch
@@ -212,7 +212,7 @@ def align_st_pipeline_to_config(st_model: SentenceTransformer, embedding_config:
         )
 
 
-def inject_lora(model: SentenceTransformer, model_config: ModelConfig, dist_args: DistributedArguments) -> None:
+def inject_lora(model: SentenceTransformer, model_config: ModelConfig, args: EmbeddingScriptArguments) -> None:
     """Inject the run's LoRA into ``model``'s transformer backbone in place and train the adapters
     alone; no-op without PEFT.
 
@@ -236,7 +236,7 @@ def inject_lora(model: SentenceTransformer, model_config: ModelConfig, dist_args
             "saved model no longer reloads. Train those modules with a full fine-tune instead."
         )
     # The freeze below re-freezes everything that is not an adapter — trainable sinks included.
-    if dist_args.train_sinks:
+    if args.train_sinks:
         raise ValueError(
             "train_sinks: true needs full fine-tuning: embedding LoRA freezes every non-adapter "
             "parameter after injection, so the sinks would train nowhere. Keep the sinks live and "
@@ -252,8 +252,9 @@ def inject_lora(model: SentenceTransformer, model_config: ModelConfig, dist_args
 
 
 def main():
-    parser = H4ArgumentParser((EmbeddingScriptArguments, EmbeddingConfig, ModelConfig, DistributedArguments))
-    args, embedding_config, model_config, dist_args = parser.parse()
+    args, embedding_config, model_config, dist_args = parse_script_args(
+        EmbeddingScriptArguments, EmbeddingConfig, ModelConfig, ParallelismArguments
+    )
 
     # The ST path has no configure_run_tokenizer / freeze stage, so these shared knobs would parse
     # and do nothing (a freeze request would become a full fine-tune). Reject them instead.
@@ -272,14 +273,14 @@ def main():
         log_decoded_samples=args.log_decoded_samples,
         # Neither branch can honor it: the EP/TP loader pins model_class=AutoModel (the loader then
         # only warns), and the SentenceTransformer branch never reads the flag.
-        text_only_model=dist_args.text_only_model,
+        text_only_model=args.text_only_model,
     )
     # SentenceTransformer owns tokenization, so only the default backend is accepted.
     reject_non_default_args("Embedding training", args, "tokenizer_backend")
 
     # LoRA on the SentenceTransformer path is injected below via inject_adapter_in_model (not the EP
     # grouped-adapter split, which is rejected together with EP/TP further down).
-    runtime = init_training_script(
+    context = init_training_script(
         args,
         embedding_config,
         model_config,
@@ -288,7 +289,7 @@ def main():
         trainer_cls=EmbeddingTrainer,
         split_expert_lora=False,
     )
-    parallelism_config = runtime.parallelism_config
+    parallelism_config = context.parallelism_config
 
     ds, dataset_presharded = load_script_datasets(args, parallelism_config, conversation_field=None)
     reject_image_columns(ds, "Embedding training")
@@ -305,19 +306,19 @@ def main():
         if eval_dataset is not None:
             logger.info(f"Eval dataset: {len(eval_dataset)} examples")
 
-    model = build_sentence_transformer(runtime, embedding_config, model_config, dist_args)
+    model = build_sentence_transformer(context, embedding_config, model_config, args)
 
     if is_global_main_process():
         logger.info(f"Model: {model}")
         logger.info(f"Embedding dimension: {model.get_sentence_embedding_dimension()}")
 
-    inject_lora(model, model_config, dist_args)
+    inject_lora(model, model_config, args)
 
     apply_distributed_trainer_config(embedding_config, parallelism_config)
 
     barrier()
 
-    callbacks = build_training_callbacks(args, embedding_config, model, parallelism_config)
+    callbacks = configure_balancing_and_build_callbacks(args, embedding_config, model, context)
 
     trainer = EmbeddingTrainer(
         model=model,
@@ -325,15 +326,15 @@ def main():
         train_dataset=train_dataset,
         eval_dataset=eval_dataset,
         callbacks=callbacks,
-        **distributed_trainer_kwargs(args, dist_args, parallelism_config, dataset_presharded=dataset_presharded),
+        **distributed_trainer_kwargs(args, parallelism_config, dataset_presharded=dataset_presharded),
     )
     run_trainer(
         trainer,
-        runtime,
+        context,
         method_name="Embedding",
         extra_start_log=[f"Loss: {embedding_config.loss_type}"],
     )
 
 
 if __name__ == "__main__":
-    run_training(main)()
+    with_distributed_teardown(main)()

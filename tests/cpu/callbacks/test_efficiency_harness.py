@@ -175,7 +175,7 @@ def test_unclassified_experts_are_a_delta_in_every_moe_case(monkeypatch, tmp_pat
 def test_a_changed_flops_rule_is_a_delta_in_every_case(monkeypatch, tmp_path):
     baseline = _reports(tmp_path / "baseline", SAMPLE)
     monkeypatch.setattr(
-        model_flops, "training_flops_per_token", lambda trainable, frozen: 6.0 * trainable + 2.0 * frozen + 1.0
+        model_flops, "_training_flops_per_token", lambda trainable, frozen: 6.0 * trainable + 2.0 * frozen + 1.0
     )
 
     deltas = compare_outputs(baseline, _reports(tmp_path / "mutated", SAMPLE))
@@ -187,8 +187,10 @@ def test_a_pipeline_blind_attention_share_is_a_delta_in_the_staged_config_term_o
     """A stage whose layers are not reachable owns 1 / pp_size of the config's full depth; read off its own layers,
     the share is whole, so dropping pp_size moves only the layerless stage."""
     baseline = _reports(tmp_path / "baseline", STAGED)
-    resolve = efficiency.resolve_attention_layout
-    monkeypatch.setattr(efficiency, "resolve_attention_layout", lambda model, pp_size=1: resolve(model))
+    term = model_flops._attention_term
+    monkeypatch.setattr(
+        model_flops, "_attention_term", lambda model, seq_len, pp_size, tp_size: term(model, seq_len, 1, tp_size)
+    )
 
     deltas = compare_outputs(baseline, _reports(tmp_path / "mutated", STAGED))
 
@@ -213,7 +215,7 @@ def test_a_full_depth_layout_on_a_stage_is_a_delta_in_every_staged_case_only(mon
 
 def test_a_looser_token_bound_is_a_delta_in_the_outlier_case_only(monkeypatch, tmp_path):
     baseline = _reports(tmp_path / "baseline", SAMPLE)
-    monkeypatch.setattr(efficiency, "_TOKEN_COUNT_SANITY_FACTOR", 1000.0)
+    monkeypatch.setattr(efficiency, "_TOKEN_DELTA_UPPER_BOUND", 2000.0)
 
     deltas = compare_outputs(baseline, _reports(tmp_path / "mutated", SAMPLE))
 

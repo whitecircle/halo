@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import ast
 import contextlib
+import dataclasses
 import inspect
 import os
 from types import SimpleNamespace
@@ -39,11 +40,11 @@ from transformers.distributed.tensor_parallel import apply_tensor_parallelism
 from transformers.models.qwen3 import Qwen3Config
 from transformers.models.qwen3_vl import Qwen3VLConfig
 
+from src.configs.script_arguments import ModelLoadArguments
 from src.distributed.expert_parallel.layers.gemma4 import EPGemma4MoELayer
 from src.distributed.expert_parallel.lazy_loader import load_ep_model_lazy
 from src.distributed.expert_parallel.loading import load_ep_model
 from src.distributed.expert_parallel.moe_layer.layer import EPMoELayerBase
-from src.distributed.loading.vlm_setup import load_model_for_training
 from src.distributed.mesh import MeshDim
 from src.distributed.parallelism_config import ParallelismConfig
 from src.distributed.pipeline_parallel.lazy_loader import load_pp_stage_model
@@ -598,7 +599,7 @@ def test_no_transformers_call_in_the_loader_passes_the_deprecated_dtype_alias():
 
 
 def test_reset_sinks_defaults_agree_across_loaders():
-    entry = inspect.signature(load_model_for_training).parameters["reset_sinks"].default
+    entry = next(f.default for f in dataclasses.fields(ModelLoadArguments) if f.name == "reset_sinks")
     direct = inspect.signature(load_distributed_model).parameters["reset_sinks"].default
     # The frozen reference/teacher loader is scored against the policy loaders, so a different
     # default here pairs a reset policy with a live-sink reference.

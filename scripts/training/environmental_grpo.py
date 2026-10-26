@@ -38,11 +38,9 @@ the rollout-server contract.
 from accelerate.logging import get_logger
 from trl import GRPOConfig, ModelConfig
 
-from src.args.distributed_args import DistributedArguments
-from src.args.environmental_grpo_args import EnvironmentalGRPOScriptArguments
 from src.config_validation import reject_unsupported_args
-from src.configs.environment_config import EnvironmentConfig
-from src.configs.grpo_environmental import AsyncTrainingConfig
+from src.configs.grpo_environmental import AsyncTrainingConfig, EnvironmentalGRPOScriptArguments, EnvironmentConfig
+from src.configs.parallelism_arguments import ParallelismArguments
 from src.configs.script_arguments import DEFAULT_ANSWER_FIELD
 from src.data.pipeline.conversation import as_conversation
 from src.data.pipeline.processing import (
@@ -53,35 +51,37 @@ from src.data.pipeline.processing import (
 from src.data.pipeline.rendered import render_generation_prompt
 from src.data.pipeline.row_processors import blank_conversation
 from src.data.sources.loading import reject_image_columns
+from src.entrypoints.data_setup import load_script_datasets, log_script_dataset_examples
+from src.entrypoints.model_setup import (
+    apply_tokenizer_window,
+    default_padded_attn_implementation,
+    load_model_and_tokenizer,
+    log_model_info,
+)
+from src.entrypoints.script import (
+    apply_distributed_trainer_config,
+    configure_balancing_and_build_callbacks,
+    distributed_trainer_kwargs,
+    init_training_script,
+    parse_script_args,
+    run_trainer,
+    verify_backend_on_rank0,
+    with_distributed_teardown,
+)
 from src.environments.base import ANSWER_KEY
 from src.environments.episode import bind_episode_effort
 from src.environments.registry import create_environment
-from src.model_loading.model_preparation import log_model_info
 from src.model_loading.parallel.frozen_models import load_reference_model_for_on_policy_grpo
 from src.model_loading.parallel.peft_setup import configure_adapter_training
+from src.models.context_window import get_model_context_window
 from src.runtime.collectives import barrier
 from src.trainers.grpo.environmental import DistributedAsyncEnvironmentalGRPOTrainer
+from src.trainers.grpo.rollout.engine_preflight import (
+    verify_context_window,
+    verify_engine_prompt_logprobs,
+    verify_sampler_logprob_reference,
+)
 from src.trainers.grpo.rollout.trajectory_tokenize import rollout_template_kwargs
-from src.trainers.grpo.rollout.weight_sync_clients import (
-    verify_context_window_synced,
-    verify_engine_prompt_logprobs_synced,
-    verify_sampler_logprob_reference_synced,
-)
-from src.training.environment import run_training
-from src.training.parser import H4ArgumentParser
-from src.training.script_runner import (
-    apply_context_window,
-    apply_distributed_trainer_config,
-    build_training_callbacks,
-    distributed_trainer_kwargs,
-    init_training_script,
-    load_script_datasets,
-    load_script_model,
-    log_script_dataset_examples,
-    padded_workload_attn_implementation,
-    run_trainer,
-    verify_backend_on_rank0,
-)
 
 logger = get_logger(__name__, log_level="INFO")
 
@@ -247,26 +247,21 @@ def process_dataset(args: EnvironmentalGRPOScriptArguments, tokenizer, ds):
 
 
 def main():
-    parser = H4ArgumentParser(
-        (
-            EnvironmentalGRPOScriptArguments,
-            EnvironmentConfig,
-            AsyncTrainingConfig,
-            GRPOConfig,
-            ModelConfig,
-            DistributedArguments,
-        )
+    args, env_config, async_config, grpo_config, model_config, dist_args = parse_script_args(
+        EnvironmentalGRPOScriptArguments,
+        EnvironmentConfig,
+        AsyncTrainingConfig,
+        GRPOConfig,
+        ModelConfig,
+        ParallelismArguments,
     )
-    args, env_config, async_config, grpo_config, model_config, dist_args = parser.parse()
 
     # The environment's tool registry supplies the schema sent to the rollout server (get_tools_schema),
     # so a dataset tool column would never reach the rollout template. The weight sync forwards trainer
     # parameter names verbatim, and the text-only CausalLM sibling spells its decoder model.layers.*
     # where the multimodal checkpoint the server loads spells model.language_model.layers.*, so every
     # dense tensor would miss its slot on the first sync.
-    reject_unsupported_args(
-        "Environmental GRPO", tools_field=args.tools_field, text_only_model=dist_args.text_only_model
-    )
+    reject_unsupported_args("Environmental GRPO", tools_field=args.tools_field, text_only_model=args.text_only_model)
     # The script pins max_completion_length to rollout_max_tokens below, so any other value is discarded.
     if grpo_config.max_completion_length not in (GRPOConfig.max_completion_length, async_config.rollout_max_tokens):
         raise ValueError(
@@ -282,7 +277,7 @@ def main():
     env_settings = env_config.to_env_config()
     probe_env = create_environment(env_config.environment_type, env_settings)
 
-    runtime = init_training_script(
+    context = init_training_script(
         args,
         grpo_config,
         model_config,
@@ -290,13 +285,11 @@ def main():
         script_prefix=f"env-grpo-{env_config.environment_type}",
         trainer_cls=DistributedAsyncEnvironmentalGRPOTrainer,
     )
-    parallelism_config = runtime.parallelism_config
+    parallelism_config = context.parallelism_config
 
     # Trajectories are collated into padded batches.
-    requested_attn = padded_workload_attn_implementation(model_config, sinks_reset=dist_args.reset_sinks)
-    model, tokenizer = load_script_model(
-        runtime, grpo_config, model_config, dist_args, attn_implementation=requested_attn
-    )
+    requested_attn = default_padded_attn_implementation(model_config, sinks_reset=args.reset_sinks)
+    model, tokenizer = load_model_and_tokenizer(context, grpo_config, model_config, args, attn_default=requested_attn)
 
     # The per-turn generation budget is rollout_max_tokens; a trajectory accumulates across turns and
     # is bounded by the context window (the trainer raises on overflow rather than truncating), so
@@ -305,7 +298,7 @@ def main():
     grpo_config.max_completion_length = async_config.rollout_max_tokens
 
     # The trainer raises on a trajectory past the window rather than truncating.
-    tokenizer = apply_context_window(args, model, tokenizer)
+    tokenizer = apply_tokenizer_window(args, model, tokenizer, get_model_context_window(model, tokenizer))
 
     peft_config = configure_adapter_training(args, model, model_config, "CAUSAL_LM")
     log_model_info(model, tokenizer)
@@ -337,14 +330,14 @@ def main():
     template_kwargs = probe_template_kwargs(async_config, probe_env)
     prompt_budget = (args.max_prompt_length or 0) + measure_env_prompt_overhead(probe_env, tokenizer, template_kwargs)
     full_trajectory_tokens = prompt_budget + worst_case_generation(async_config, max_turns)
-    verify_context_window_synced(
+    verify_context_window(
         async_config.get_server_urls(),
         single_turn_tokens=prompt_budget + async_config.rollout_max_tokens,
         full_trajectory_tokens=full_trajectory_tokens,
         backend=async_config.rollout_backend,
     )
     # The IS ratio divides by the engine's logprobs: they must be the sampling distribution's.
-    verify_sampler_logprob_reference_synced(
+    verify_sampler_logprob_reference(
         async_config.get_server_urls(),
         temperature=async_config.rollout_temperature,
         top_p=async_config.rollout_top_p,
@@ -356,9 +349,7 @@ def main():
     )
     # The engine re-score reads each train row off the prompt log-probs: they must not depend on the batch.
     if async_config.isr_engine_reference:
-        verify_engine_prompt_logprobs_synced(
-            async_config.get_server_urls(), tokenizer, backend=async_config.rollout_backend
-        )
+        verify_engine_prompt_logprobs(async_config.get_server_urls(), tokenizer, backend=async_config.rollout_backend)
 
     # Environments that score through an external backend (an LLM judge) probe it here: a bad
     # URL/key/model would otherwise mark every episode invalid and the job would train on zero
@@ -375,7 +366,7 @@ def main():
         parallelism_config,
         tokenizer,
         peft_config=peft_config,
-        reset_sinks=dist_args.reset_sinks,
+        reset_sinks=args.reset_sinks,
         attn_default=requested_attn,
     )
 
@@ -384,11 +375,11 @@ def main():
 
     barrier()
 
-    callbacks = build_training_callbacks(
+    callbacks = configure_balancing_and_build_callbacks(
         args,
         grpo_config,
         model,
-        parallelism_config,
+        context,
         policy_gradient_loss=True,
         syncs_to_external_generator=True,
         # A trajectory accumulates every turn, so the declared prompt + per-turn budgets are not its
@@ -407,15 +398,15 @@ def main():
         async_config=async_config,
         environment_config=env_config,
         save_completions=args.save_completions,
-        **distributed_trainer_kwargs(args, dist_args, parallelism_config, dataset_presharded=dataset_presharded),
+        **distributed_trainer_kwargs(args, parallelism_config, dataset_presharded=dataset_presharded),
     )
     run_trainer(
         trainer,
-        runtime,
+        context,
         method_name=f"Environmental GRPO ({env_config.environment_type})",
         extra_start_log=rollout_start_log(env_settings, async_config),
     )
 
 
 if __name__ == "__main__":
-    run_training(main)()
+    with_distributed_teardown(main)()

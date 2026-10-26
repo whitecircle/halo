@@ -24,6 +24,7 @@ import pytest
 from datasets import Dataset, DatasetDict
 from transformers.models.auto.configuration_auto import CONFIG_MAPPING
 
+from src.entrypoints.model_setup import PolicyLoad
 from src.model_loading.parallel import model_source
 from tests.common.repo import REPO_ROOT, load_script_module
 
@@ -104,28 +105,28 @@ def _run_sft(tmp_path, yaml_body: str, dataset: DatasetDict, *, stub_vlm_prep: b
     def fail_vlm(*_args, **_kwargs):
         raise _VLMPathReached
 
-    def load_model(*_args, **kwargs):
-        assert kwargs["preserve_checkpoint_precision"] is False
+    def load_model(context, *_args, **kwargs):
+        assert context is runtime, "the policy load must read the checkpoint identity off the script context"
         if loads is not None:
             loads.append(kwargs)
-        return model, processing_class, tokenizer, True
+        return PolicyLoad(model, processing_class, tokenizer, True)
 
     patches = [
         mock.patch.object(module, "init_training_script", return_value=runtime),
-        mock.patch.object(module, "load_model_for_training", side_effect=load_model),
+        mock.patch.object(module, "load_policy_model", side_effect=load_model),
         mock.patch.object(module, "apply_max_length", side_effect=lambda cfg, args, model, tok: tok),
         mock.patch.object(module, "install_resolved_tokenizer", side_effect=lambda pc, tok: pc),
         mock.patch.object(module, "configure_adapter_training", return_value=None),
         mock.patch.object(module, "log_model_info"),
         mock.patch.object(module, "load_script_datasets", return_value=((dataset, False), False)),
         mock.patch.object(module, "_prepare_text_data", side_effect=fail_text),
-        mock.patch("src.training.parser.install_log_tee"),
+        mock.patch("src.entrypoints.script.install_log_tee"),
         mock.patch.object(sys, "argv", ["prog", str(config)]),
     ]
     if stub_vlm_prep:
         patches.append(mock.patch.object(module, "_prepare_vlm_data", side_effect=fail_vlm))
 
-    with mock.patch.object(module, "run_training", lambda fn: fn):
+    with mock.patch.object(module, "with_distributed_teardown", lambda fn: fn):
         for patch in patches:
             patch.start()
         try:
@@ -167,29 +168,29 @@ def _run_dpo(tmp_path, dataset: DatasetDict, tokenizer):
     def fail_vlm(*_args, **_kwargs):
         raise _VLMPathReached
 
-    def load_model(*_args, **kwargs):
-        assert kwargs["preserve_checkpoint_precision"] is False
-        return model, processing_class, tokenizer, True
+    def load_model(context, *_args, **kwargs):
+        assert context is runtime, "the policy load must read the checkpoint identity off the script context"
+        return PolicyLoad(model, processing_class, tokenizer, True)
 
     patches = [
         mock.patch.object(module, "init_training_script", return_value=runtime),
-        mock.patch.object(module, "load_model_for_training", side_effect=load_model),
+        mock.patch.object(module, "load_policy_model", side_effect=load_model),
         mock.patch.object(module, "load_reference_model_for_preference", return_value=None),
         mock.patch.object(module, "apply_max_length", side_effect=lambda cfg, args, model, tok: tok),
         mock.patch.object(module, "install_resolved_tokenizer", side_effect=lambda pc, tok: pc),
         mock.patch.object(module, "configure_adapter_training", return_value=None),
         mock.patch.object(module, "log_model_info"),
         mock.patch.object(module, "load_script_datasets", return_value=(dataset, False)),
-        # The preference prep and the example log both live in the shared script_runner helper the
+        # The preference prep and the example log both live in the shared data_setup helper the
         # script calls, so the two arms are distinguished on ITS globals: the text arm reaches
         # the tokenizing prep first, the VLM arm (which has no prep) reaches the log.
-        mock.patch("src.training.script_runner.prepare_preference_datasets", side_effect=fail_text),
-        mock.patch("src.training.script_runner.log_dataset_examples", side_effect=fail_vlm),
-        mock.patch("src.training.parser.install_log_tee"),
+        mock.patch("src.entrypoints.data_setup.prepare_preference_datasets", side_effect=fail_text),
+        mock.patch("src.entrypoints.data_setup.log_dataset_examples", side_effect=fail_vlm),
+        mock.patch("src.entrypoints.script.install_log_tee"),
         mock.patch.object(sys, "argv", ["prog", str(config)]),
     ]
 
-    with mock.patch.object(module, "run_training", lambda fn: fn):
+    with mock.patch.object(module, "with_distributed_teardown", lambda fn: fn):
         for patch in patches:
             patch.start()
         try:
@@ -334,7 +335,7 @@ def test_every_dispatching_script_settles_the_text_path_padding_side(script):
     called = {
         node.func.id for node in ast.walk(tree) if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
     }
-    assert "enforce_text_path_padding_side" in called, (
+    assert "apply_text_path_padding_side" in called, (
         f"{script} dispatches on modality without settling the text path's padding side"
     )
 
@@ -355,7 +356,7 @@ def test_data_dispatch_goes_through_the_shared_seam(script):
 _LOADING_SCRIPTS = sorted(
     str(path.relative_to(_TRAINING_DIR))
     for path in _TRAINING_DIR.rglob("*.py")
-    if "load_model_for_training(" in path.read_text(encoding="utf-8")
+    if "load_policy_model(" in path.read_text(encoding="utf-8")
 )
 
 
@@ -381,13 +382,13 @@ def test_every_model_load_takes_the_run_verdict(script):
     loads = [
         node
         for node in ast.walk(tree)
-        if isinstance(node, ast.Call) and getattr(node.func, "id", None) == "load_model_for_training"
+        if isinstance(node, ast.Call) and getattr(node.func, "id", None) == "load_policy_model"
     ]
     assert verdicts and loads, f"{script} no longer both decides the run and loads through the shared loader"
     for call in loads:
         passed = [kw.value for kw in call.keywords if kw.arg == "vlm_run"]
         assert len(passed) == 1 and isinstance(passed[0], ast.Name) and passed[0].id in verdicts, (
-            f"{script}: load_model_for_training is not handed the resolve_vlm_run verdict as vlm_run"
+            f"{script}: load_policy_model is not handed the resolve_vlm_run verdict as vlm_run"
         )
 
 

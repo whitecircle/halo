@@ -103,7 +103,7 @@ A CPU test, in the shape of `tests/cpu/environments/test_environments.py`:
 ```python
 import pytest
 
-from src.configs.environment_config import EnvironmentConfig
+from src.configs.grpo_environmental import EnvironmentConfig
 from src.environments.registry import register_environment, resolve_environment
 
 def test_guess_env_grades_a_correct_answer(isolated_registry):

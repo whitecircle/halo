@@ -30,7 +30,8 @@ from torch.distributed.checkpoint.state_dict import StateDictOptions, get_optimi
 from transformers import AutoTokenizer, GptOssConfig, GptOssForCausalLM, default_data_collator
 from trl import SFTConfig
 
-from src.callbacks.wiring import build_perf_callbacks
+from src.callbacks.balancing import configure_moe_balancing
+from src.callbacks.factory import build_run_callbacks
 from src.configs.script_arguments import CommonScriptArguments
 from src.distributed.expert_parallel.moe_layer.layer import EPMoELayerBase
 from src.distributed.expert_parallel.patching import patch_moe_model_for_ep
@@ -108,7 +109,8 @@ def run(ctx):
         patch_moe_model_for_ep(model, config.ep_config())
         args = build_args(os.path.join(root, subdir), max_steps, save_steps)
         script_args = CommonScriptArguments(moe_balancing="bias_update")
-        callbacks = build_perf_callbacks(script_args, args, model, config)
+        mode = configure_moe_balancing(script_args, model, config)
+        callbacks = build_run_callbacks(script_args, args, model, config, balancing_mode=mode)
         return DistributedSFTTrainer(
             model=model,
             args=args,

@@ -30,7 +30,7 @@ Read it before giving a verdict on any non-trivial combo.
 - `src/distributed/parallelism_config.py` — the dataclass + `__post_init__` →
   `_resolve_and_validate`, which applies the refusals in `src/distributed/parallelism_rules.py`
   (`reject_unsupported_axes`, then `reject_invalid_composition`). Every config-time `raise` lives there or in
-  `parallelism_config_from_args` (`src/training/parallelism_args.py`): `lowp_*` knobs or
+  `parallelism_config_from_args` (`src/configs/parallelism_arguments.py`): `lowp_*` knobs or
   `init_from_scratch` outside SFT, a trainer's `_supports_cp` / `_supports_pp`.
 - `CLAUDE.md` "## Parallelism" table + DeepEP / trainer-support notes.
 - User docs to cross-link: `agent-docs/parallelism/{expert,context,tensor,expert-tensor}-parallelism.md`,
@@ -50,7 +50,7 @@ Read it before giving a verdict on any non-trivial combo.
 - Locality unit is `nvlink_domain_size` (auto = `NVLINK_DOMAIN_SIZE`, else `gpus_per_node`; set
   it only on NVL72/MNNVL). "Node-local" below means "within one NVLink domain".
 - `ep_scope` defaults to `"auto"` in both the dataclass and on the CLI/YAML
-  (`src/args/distributed_args.py`). `"auto"` resolves to `node` if
+  (`src/configs/parallelism_arguments.py`). `"auto"` resolves to `node` if
   `ep_group_size <= nvlink_domain_size`, else `global`.
 - PP flags: `--pipeline_parallel_size`, `--pipeline_microbatches`,
   `--pipeline_schedule` (`1f1b` | `gpipe`), `--pipeline_split`.

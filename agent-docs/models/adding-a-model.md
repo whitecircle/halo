@@ -95,7 +95,7 @@ No hook may allocate state sized by `world_size` either — invisible at 8 GPUs,
 
 - **Rollout-engine support is not a family declaration.** Both pinned engines read the layout `gather_expert_state_dict` already emits, so nothing here is per engine.
 
-    Which families an engine can take an *online* update for lives on its weight-sync client (`UNSERVABLE_MODEL_TYPES` in `src/weight_sync/clients/`), one loader fact per `model_type`. Add an entry there when the engine's loader cannot take the chunked update; `validate_weight_sync_support` then refuses the pair at trainer construction quoting it ([Rollout Servers](../infrastructure/rollout-servers.md#which-families-each-engine-serves)).
+    Which families an engine can take an *online* update for lives on its weight-sync client (`UNSERVABLE_MODEL_TYPES` in `src/weight_sync/clients/`), one loader fact per `model_type`. Add an entry there when the engine's loader cannot take the chunked update; `reject_unsyncable_model` then refuses the pair at trainer construction quoting it ([Rollout Servers](../infrastructure/rollout-servers.md#which-families-each-engine-serves)).
 
 - `_EXPORT_KEY_RENAMES` — `(module spelling, hub spelling)` pairs for a family whose in-library module names differ from its checkpoint's inside an EP layer. The gathered save and the RL weight sync revert transformers' own `WeightRenaming` entries off the load's record, but the key-by-key paths with no model behind them — the lazy loader and `merge_ep_shards.py` — read only these pairs.
 
@@ -112,7 +112,7 @@ No hook may allocate state sized by `world_size` either — invisible at 8 GPUs,
 
     Strict `bias_update` refuses a family without one, since the export would silently serve without the trained bias (`bias_update_transient` is the user's explicit opt-in). A config-gated slot pairs the declaration with `_NATIVE_BALANCING_CONFIG_FLAG` + the `_materialize_native_balancing_slot` hook (LFM-2).
 
-- `_ep_severs_aux_loss` — `True` when the wrapper bypasses the HF router *module* entirely, so `outputs.router_logits` never populates and the HF aux-loss path is dead under EP. `moe_balancing: auto` then resolves the family to `bias_update` (`resolve_balancing_mode` in `src/models/moe_balancing.py`, applied by `src/distributed/expert_parallel/balancing_strategy.py`).
+- `_ep_severs_aux_loss` — `True` when the wrapper bypasses the HF router *module* entirely, so `outputs.router_logits` never populates and the HF aux-loss path is dead under EP. `moe_balancing: auto` then resolves the family to `bias_update` (`resolve_balancing_mode` in `src/models/moe_balancing.py`, applied by `src/callbacks/balancing.py`).
 - `_supports_routing_replay` — defaults `True`; set `False` where the layer cannot re-derive gate weights at a forced selection (Gemma4's sibling router, Zaya's EDA cross-layer state). The replay injector also rejects any layer that never set `self.top_k`.
 - `_SHARED_EXPERT_ATTRS` / `_SHARED_EXPERT_REQUIRED` — the attribute name(s) the block may hold its shared expert under, tried in order. The first the block carries is adopted and becomes `_shared_expert_attr`, which is the *export* key.
 

@@ -104,7 +104,7 @@ NON_MODEL_BUILDERS = frozenset(
         ("scripts/training/sft.py", "main"),
         ("src/rewards/terms.py", "from_config"),
         ("src/rewards/terms.py", "parse_reward_terms"),
-        ("src/training/script_runner.py", "prepare_script_preference_data"),
+        ("src/entrypoints/data_setup.py", "prepare_script_preference_data"),
     }
 )
 

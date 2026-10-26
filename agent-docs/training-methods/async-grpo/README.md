@@ -27,10 +27,10 @@ One YAML, six dataclasses.
 |---|---|
 | `environment_type`, `rewards`, `max_turns`, `environment_kwargs` | `EnvironmentConfig` ([fields](../../reference/configuration-reference.md#environmentconfig)) |
 | Ray, servers, sync cadence, prefetch, rollout sampling, trust region | `AsyncTrainingConfig` ([fields](../../reference/configuration-reference.md#asynctrainingconfig)) |
-| Dataset columns, prompt filter, `save_completions` | `EnvironmentalGRPOScriptArguments` |
+| Dataset columns, prompt filter, `save_completions`, `reset_sinks` | `EnvironmentalGRPOScriptArguments` |
 | Optimizer, batch, `beta`, `num_generations`, `vllm_group_port` | TRL `GRPOConfig` |
 | Model id, LoRA | `ModelConfig` |
-| Parallel sizes, `reset_sinks` | `DistributedArguments` |
+| Parallel sizes | `ParallelismArguments` |
 
 ## Dataset
 

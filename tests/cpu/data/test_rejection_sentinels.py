@@ -22,7 +22,7 @@ import pytest
 from datasets import Dataset
 
 from scripts.training.online_grpo.rlvr import build_rlvr_row_fn
-from src.args.rlvr_online_grpo_args import RLVROnlineGRPOScriptArguments
+from src.configs.grpo_online import RLVROnlineGRPOScriptArguments
 from src.data.pipeline.preprocessed_metadata import PreprocessingConfig
 from src.data.pipeline.preprocessing import tokenize_dataset, tokenize_vlm_dataset
 from src.data.pipeline.processing import process_dataset_with_map_and_filter

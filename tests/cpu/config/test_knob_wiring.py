@@ -21,22 +21,19 @@ import pytest
 from datasets import Dataset, DatasetDict
 from trl import SFTConfig
 
-from src.args.distributed_args import DistributedArguments
-from src.args.rlvr_online_grpo_args import RLVROnlineGRPOScriptArguments
 from src.configs.distillation import PRIVILEGED_HINT_TEMPLATE, SDPGArguments, SelfDistillScriptArguments
 from src.configs.grpo import RLRRConfig
 from src.configs.grpo_environmental import AsyncTrainingConfig, ISMaskConfig
+from src.configs.grpo_online import RLVROnlineGRPOScriptArguments
+from src.configs.parallelism_arguments import ParallelismArguments, parallelism_config_from_args
+from src.entrypoints.data_setup import reject_trl_dataset_prep_args
+from src.entrypoints.script import distributed_trainer_kwargs
 from src.trainers.distillation.sdpg import DistributedSDPGTrainer
 from src.trainers.distillation.self_distillation import DistributedSelfDistillationTrainer
 from src.trainers.grpo.online import DistributedGRPOTrainer
 from src.trainers.mixins.base import DistributedTrainerMixin
 from src.trainers.preference.precompute import PrecomputeRefLogpsRankConsistentMixin
 from src.trainers.sft import DistributedSFTTrainer
-from src.training.parallelism_args import parallelism_config_from_args
-from src.training.script_runner import (
-    distributed_trainer_kwargs,
-    reject_trl_dataset_prep_args,
-)
 from tests.common.repo import REPO_ROOT, load_script_module
 
 # bf16_optimizer: YAML/CLI reachable, tri-state, and honored by the mixin
@@ -44,10 +41,10 @@ from tests.common.repo import REPO_ROOT, load_script_module
 
 @pytest.mark.parametrize("requested", [None, True, False])
 def test_bf16_optimizer_reaches_parallelism_config(requested):
-    """The DistributedArguments knob must survive into ParallelismConfig — that object is the only
+    """The ParallelismArguments knob must survive into ParallelismConfig — that object is the only
     thing every entry script threads into every trainer, so a drop here makes the knob unreachable."""
     config = parallelism_config_from_args(
-        DistributedArguments(bf16_optimizer=requested), trainer_cls=DistributedTrainerMixin
+        ParallelismArguments(bf16_optimizer=requested), trainer_cls=DistributedTrainerMixin
     )
     assert config.bf16_optimizer is requested
 
@@ -351,7 +348,7 @@ def _run_script_main(script: str, config_body: str, tmp_path: Path) -> None:
         f"bf16: false\nuse_cpu: true\n{config_body}"
     )
     with (
-        mock.patch("src.training.parser.install_log_tee"),
+        mock.patch("src.entrypoints.script.install_log_tee"),
         mock.patch.object(sys, "argv", ["prog", str(config)]),
     ):
         module.main()
@@ -444,7 +441,7 @@ _TRAINER_SCRIPTS = sorted(
 
 
 def test_every_training_script_forwards_moe_balancing_to_its_trainer():
-    """``build_perf_callbacks`` reads ``moe_balancing`` off the script args to pick the strategy, but the
+    """``configure_moe_balancing`` reads ``moe_balancing`` off the script args to pick the strategy, but the
     trainer needs its own copy: ``_validate_router_aux_loss_consumable`` decides raise-vs-warn from
     ``self._moe_balancing``, which ``_init_distributed_config`` defaults to ``"auto"``. A script
     that omits the kwarg silently downgrades that rejection to a warning, so a run asking for
@@ -484,13 +481,13 @@ def test_precompute_trainers_receive_the_resume_context():
         wired[str(script.relative_to(REPO_ROOT))] = all(
             isinstance(passed.get(field), ast.Attribute)
             and passed[field].attr == field
-            and getattr(passed[field].value, "id", None) == "runtime"
+            and getattr(passed[field].value, "id", None) == "context"
             for field in ("resume_checkpoint", "policy_from_checkpoint")
         )
     assert len(wired) >= 2, f"the scan found {sorted(wired)}, not the DPO and KTO scripts"
     unwired = sorted(script for script, ok in wired.items() if not ok)
     assert not unwired, (
-        f"these scripts do not hand their trainer runtime.resume_checkpoint/policy_from_checkpoint: {unwired}"
+        f"these scripts do not hand their trainer context.resume_checkpoint/policy_from_checkpoint: {unwired}"
     )
 
 
@@ -499,14 +496,13 @@ def test_the_shared_bundle_carries_every_distributed_knob():
     dropped from every trainer at once — and the AST scan would still see a well-formed splat.
 
     Each value is checked against its own source, not merely present: wiring ``moe_balancing`` to the
-    distributed args (where the field does not live) would hand every trainer ``None`` and restore
+    parallelism args (where the field does not live) would hand every trainer ``None`` and restore
     the same silent downgrade.
     """
-    args = SimpleNamespace(moe_balancing="aux_loss")
-    dist_args = SimpleNamespace(save_sharded_ep=True)
+    args = SimpleNamespace(moe_balancing="aux_loss", save_sharded_ep=True)
     parallelism_config = object()
 
-    bundle = distributed_trainer_kwargs(args, dist_args, parallelism_config, dataset_presharded=True)
+    bundle = distributed_trainer_kwargs(args, parallelism_config, dataset_presharded=True)
 
     assert set(bundle) == _BUNDLED_KNOBS, f"the shared bundle no longer carries {_BUNDLED_KNOBS ^ set(bundle)}"
     assert bundle["parallelism_config"] is parallelism_config

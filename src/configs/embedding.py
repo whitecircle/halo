@@ -5,7 +5,7 @@ from typing import ClassVar, Literal
 
 from sentence_transformers import SentenceTransformerTrainingArguments
 
-from src.config_validation import RangeValidatedConfig, present, require_int, require_positive, require_positive_int
+from src.config_validation import ValidatedConfig, present, require_finite, require_int
 from src.configs.script_arguments import CommonScriptArguments
 
 
@@ -15,7 +15,7 @@ class EmbeddingScriptArguments(CommonScriptArguments):
 
 
 @dataclass
-class EmbeddingConfig(RangeValidatedConfig, SentenceTransformerTrainingArguments):
+class EmbeddingConfig(ValidatedConfig, SentenceTransformerTrainingArguments):
     r"""SentenceTransformerTrainingArguments for [`EmbeddingTrainer`] (loss, pooling,
     normalization); per-field docs are in each field's ``help`` metadata."""
 
@@ -43,7 +43,6 @@ class EmbeddingConfig(RangeValidatedConfig, SentenceTransformerTrainingArguments
             "'batch_hard_triplet': BatchHardTripletLoss."
         },
     )
-
     loss_scale: float = field(
         default=20.0,
         metadata={
@@ -51,7 +50,6 @@ class EmbeddingConfig(RangeValidatedConfig, SentenceTransformerTrainingArguments
             "Used by MNRL, CachedMNRL, CoSENT, and AnglE."
         },
     )
-
     cached_mnrl_mini_batch_size: int = field(
         default=32,
         metadata={
@@ -59,7 +57,6 @@ class EmbeddingConfig(RangeValidatedConfig, SentenceTransformerTrainingArguments
             "effective batch, raise it for throughput. The loss value is unaffected."
         },
     )
-
     matryoshka_dimensions: list[int] | None = field(
         default=None,
         metadata={
@@ -67,7 +64,6 @@ class EmbeddingConfig(RangeValidatedConfig, SentenceTransformerTrainingArguments
             "MatryoshkaLoss."
         },
     )
-
     matryoshka_weights: list[float] | None = field(
         default=None,
         metadata={
@@ -75,7 +71,6 @@ class EmbeddingConfig(RangeValidatedConfig, SentenceTransformerTrainingArguments
             "Unset = uniform weights."
         },
     )
-
     pooling_mode: Literal["mean", "cls", "max", "lasttoken", "weightedmean", "mean_sqrt_len_tokens"] = field(
         default="mean",
         metadata={
@@ -84,12 +79,7 @@ class EmbeddingConfig(RangeValidatedConfig, SentenceTransformerTrainingArguments
             "the standard path overrides the checkpoint's own modules.json setting with it."
         },
     )
-
-    normalize_embeddings: bool = field(
-        default=True,
-        metadata={"help": "Whether to L2-normalize output embeddings."},
-    )
-
+    normalize_embeddings: bool = field(default=True, metadata={"help": "Whether to L2-normalize output embeddings."})
     max_length: int | None = field(
         default=512,
         metadata={
@@ -98,21 +88,15 @@ class EmbeddingConfig(RangeValidatedConfig, SentenceTransformerTrainingArguments
             "so keep it small unless you embed long documents."
         },
     )
-
     disable_dropout: bool = field(
-        default=False,
-        metadata={"help": "Whether to disable dropout in the model during training."},
+        default=False, metadata={"help": "Whether to disable dropout in the model during training."}
     )
 
-    def __post_init__(self):
-        self._validate_ranges()
-        super().__post_init__()
-
-    def _validate_ranges(self) -> None:
-        super()._validate_ranges()
+    def _validate_fields(self) -> None:
+        super()._validate_fields()
         owner = type(self).__name__
-        require_positive(owner, loss_scale=self.loss_scale)
-        require_positive_int(owner, cached_mnrl_mini_batch_size=self.cached_mnrl_mini_batch_size)
+        require_finite(owner, gt=0, loss_scale=self.loss_scale)
+        require_int(owner, ge=1, cached_mnrl_mini_batch_size=self.cached_mnrl_mini_batch_size)
         # A non-positive length is legal: it resolves to the backbone's context window.
         require_int(owner, **present(max_length=self.max_length))
         if self.matryoshka_dimensions is None and self.matryoshka_weights is not None:

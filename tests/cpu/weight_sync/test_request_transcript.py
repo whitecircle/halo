@@ -14,9 +14,12 @@ import pytest
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 
+from src.subclass_registry import iter_subclasses
+from src.trainers.grpo.rollout.trl_vllm_client import TrlVLLMClient
 from src.weight_sync.clients import base as client_base
 from src.weight_sync.clients.base import WeightSyncClientBase
 from src.weight_sync.clients.sglang import SGLangWeightSyncClient
+from src.weight_sync.clients.vllm import VLLMWeightSyncClient
 from tests.common.goldens.weight_sync_transcript import ENGINES, GOLDEN_PATH, SCENARIOS, scenario_record
 
 GOLDEN = json.loads(GOLDEN_PATH.read_text(encoding="utf-8"))
@@ -51,10 +54,10 @@ def test_a_retried_session_request_counts_every_receipt():
     scenario = dataclasses.replace(SCENARIO["at exit after a sync"], script=refuse_the_first_pause)
     record = scenario_record("vllm", scenario)
     golden = GOLDEN["vllm"]["at exit after a sync"]
-    [reset_step] = [index for index, step in enumerate(record) if step["step"] == "reset_prefix_cache"]
-    first, *rest = record[reset_step]["requests"]
-    assert first == golden[reset_step]["requests"][0] + " received=2"
-    assert rest == golden[reset_step]["requests"][1:]
+    [finish_step] = [index for index, step in enumerate(record) if step["step"] == "finish_weight_update"]
+    first, *rest = record[finish_step]["requests"]
+    assert first == golden[finish_step]["requests"][0] + " received=2"
+    assert rest == golden[finish_step]["requests"][1:]
 
 
 def test_a_collective_rpc_sent_through_the_retrying_session_breaks_the_transcript(monkeypatch):
@@ -97,6 +100,15 @@ def test_an_exit_hook_that_destroys_the_local_group_breaks_the_transcript(monkey
     golden = GOLDEN["sglang"]["at exit after a sync"]
     assert _routes(record) == _routes(golden), "premise: the mutant sends the same routes"
     assert record[-1]["transport"] == ["destroy group"] and golden[-1]["transport"] == ["forget group"]
+
+
+def test_no_client_overrides_the_chunk_accounting():
+    """Every chunk is counted, and its failure judged, in ``WeightSyncClientBase._transmit_chunk``: the
+    count behind ``can_replay_sync`` and the verdict that keeps a partly written engine paused. A client
+    overriding it would bypass both while every transcript above still passes."""
+    clients = [cls for cls in iter_subclasses(WeightSyncClientBase) if cls.__module__.startswith("src.")]
+    assert {VLLMWeightSyncClient, SGLangWeightSyncClient, TrlVLLMClient} <= set(clients)
+    assert [cls.__qualname__ for cls in clients if "_transmit_chunk" in vars(cls)] == []
 
 
 if __name__ == "__main__":

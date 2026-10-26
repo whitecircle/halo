@@ -20,7 +20,7 @@ import zlib
 import pytest
 
 from scripts.environments.preparation.prepare_code_dataset import rating_in_bounds
-from src.configs.environment_config import EnvironmentConfig
+from src.configs.grpo_environmental import EnvironmentConfig
 from src.environments.base import REWARD_COMPONENTS_KEY
 from src.environments.envs.tasks.coding.code_contests import (
     DEFAULT_REASONING_EFFORT,

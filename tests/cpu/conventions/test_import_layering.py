@@ -114,17 +114,9 @@ _PACKAGE_INTERNAL = {
 # Where each module that has not moved yet lands, by its longest entry: today's dotted path under the package
 # root -> the final one. A move deletes its entry; a module staying in its unit and member needs none.
 _PENDING_MOVES = {
-    "args": "configs",
-    "training": "entrypoints",
-    "training.early_stopping": "callbacks.early_stop",
-    "training.parallelism_args": "configs.parallelism_arguments",
-    "training.parser": "configs.parser",
-    "diagnostics.weight_sync_transport": "weight_sync.transport_check",
-    "distributed.loading.vlm_setup": "entrypoints.model_setup",
     "distributed.nccl": "weight_sync.transport",
     "distributed.nccl._nccl_wrapper": "weight_sync.transport.nccl_library",
     "distributed.pipeline_parallel.lazy_loader": "model_loading.parallel.pp",
-    "distributed.expert_parallel.balancing_strategy": "callbacks.balancing",
     "distributed.expert_parallel.expert_gather": "distributed.expert_parallel.moe_layer.gather",
     "distributed.expert_parallel.expert_weights": "distributed.expert_parallel.families.roster",
     "distributed.expert_parallel.fp32_masters": "model_loading.parallel.fp32_masters",
@@ -140,7 +132,6 @@ _PENDING_MOVES = {
 _KNOWN_LAYER_BREAKS = frozenset(
     {
         ("layer order", "checkpoint.parallel.pp", "model_loading.parallel.pp"),
-        ("layer order", "configs.parser", "entrypoints.run_logging"),
         ("layer order", "distributed.expert_parallel.lazy_plan", "model_loading.parallel.fp32_masters"),
         (
             "layer order",

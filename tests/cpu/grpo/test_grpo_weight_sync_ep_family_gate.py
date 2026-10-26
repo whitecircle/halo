@@ -5,7 +5,7 @@ not at the first sync.
 ``sync_weights_to_client`` feeds the engine's ``model.load_weights`` directly, so a family declaring
 ``_supports_weight_sync = False`` (no engine registers it, or no end-to-end sync has been validated
 into the one that does) would otherwise fail, or land nowhere, mid-run.
-``validate_weight_sync_support`` is the construction gate.
+``reject_unsyncable_model`` is the construction gate.
 
 Run: ``python tests/cpu/grpo/test_grpo_weight_sync_ep_family_gate.py`` (or ``pytest -m cpu``).
 """
@@ -17,7 +17,7 @@ import torch.nn as nn
 
 from src.distributed.expert_parallel.moe_layer.layer import EPMoELayerBase
 from src.distributed.expert_parallel.patching import MOE_LAYER_MAP
-from src.trainers.grpo.rollout.weight_sync import validate_weight_sync_support
+from src.trainers.grpo.rollout.weight_push import reject_unsyncable_model
 
 # Families refused on every engine; each reason is stated at the class declaration. What one engine
 # alone cannot serve is that engine client's ``UNSERVABLE_MODEL_TYPES``
@@ -76,7 +76,7 @@ def test_gate_rejects_unsupported_ep_family(backend):
     model = nn.Module()
     model.mlp = _UnsupportedEPModuleStub()
     with pytest.raises(ValueError, match="does not support weight sync"):
-        validate_weight_sync_support(model, backend)
+        reject_unsyncable_model(model, backend)
 
 
 def test_gate_reports_the_offending_module_path():
@@ -84,13 +84,13 @@ def test_gate_reports_the_offending_module_path():
     model = nn.Module()
     model.layers = nn.ModuleList([_EPModuleStub(), _UnsupportedEPModuleStub()])
     with pytest.raises(ValueError, match=r"layers\.1"):
-        validate_weight_sync_support(model, "vllm")
+        reject_unsyncable_model(model, "vllm")
 
 
 def test_gate_passes_supported_ep_family():
     model = nn.Module()
     model.mlp = _EPModuleStub()
-    validate_weight_sync_support(model, "vllm")  # must not raise
+    reject_unsyncable_model(model, "vllm")  # must not raise
 
 
 def test_gate_ignores_non_ep_modules_declaring_the_flag():
@@ -99,7 +99,7 @@ def test_gate_ignores_non_ep_modules_declaring_the_flag():
     model = nn.Module()
     model.dense = nn.Linear(4, 4)
     model.dense._supports_weight_sync = False
-    validate_weight_sync_support(model, "vllm")  # must not raise
+    reject_unsyncable_model(model, "vllm")  # must not raise
 
 
 def test_gate_survives_a_peft_wrapper_around_a_supported_family():
@@ -107,7 +107,7 @@ def test_gate_survives_a_peft_wrapper_around_a_supported_family():
     would raise AttributeError on a family that IS supported."""
     model = nn.Module()
     model.mlp = _PeftStyleWrapper(_EPModuleStub())
-    validate_weight_sync_support(model, "vllm")  # must not raise
+    reject_unsyncable_model(model, "vllm")  # must not raise
 
 
 def test_gate_still_rejects_an_unsupported_family_behind_a_peft_wrapper():
@@ -115,7 +115,7 @@ def test_gate_still_rejects_an_unsupported_family_behind_a_peft_wrapper():
     model = nn.Module()
     model.mlp = _PeftStyleWrapper(_UnsupportedEPModuleStub())
     with pytest.raises(ValueError, match="does not support weight sync"):
-        validate_weight_sync_support(model, "vllm")
+        reject_unsyncable_model(model, "vllm")
 
 
 if __name__ == "__main__":

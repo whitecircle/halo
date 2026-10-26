@@ -1,7 +1,7 @@
 #!/usr/bin/env python
 """MoEMetricsCallback must respect the balancing strategy's router-logits off decision.
 
-``apply_balancing_strategy`` deliberately keeps ``output_router_logits`` OFF in several modes
+``apply_balancing_mode`` deliberately keeps ``output_router_logits`` OFF in several modes
 (bias_update's EP bypass, aux-severed EP wrappers, coef-0 crash avoidance, GRPO inert-aux) and
 stamps that decision on the config via ``mark_router_logits_forced_off``. An ``on_train_begin`` that
 unconditionally flips ``output_router_logits = True`` undoes the decision (and re-arms the very crash
@@ -13,8 +13,8 @@ Run: pytest tests/cpu/callbacks/test_moe_metrics_router_logits_guard.py
 import pytest
 import torch
 
+from src.callbacks.balancing import apply_balancing_mode
 from src.callbacks.moe_metrics import MoEMetricsCallback
-from src.distributed.expert_parallel.balancing_strategy import apply_balancing_strategy
 from src.models.moe_balancing import mark_router_logits_forced_off, router_logits_forced_off
 
 
@@ -98,7 +98,7 @@ def test_strategy_off_decisions_survive_the_callback(mode, kwargs, adopted_route
     model = _Model(_Cfg(output_router_logits=False, router_aux_loss_coef=0.0))
     if adopted_router:
         model.ep_layer = _AdoptedBiasEPLayer()
-    apply_balancing_strategy(model, mode, **{"is_moe": False, **kwargs})
+    apply_balancing_mode(model, mode, **{"is_moe": False, **kwargs})
     assert router_logits_forced_off(model.config), f"{mode} {kwargs} did not stamp the config"
     _run_callback(model)
     assert model.config.output_router_logits is False
@@ -109,7 +109,7 @@ def test_explicit_bias_mode_on_a_dense_model_raises():
     controller — the strategy must refuse rather than stamp and balance nothing."""
     model = _Model(_Cfg(output_router_logits=False, router_aux_loss_coef=0.0))
     with pytest.raises(ValueError, match="dense model"):
-        apply_balancing_strategy(model, "bias_update", is_moe=False)
+        apply_balancing_mode(model, "bias_update", is_moe=False)
 
 
 def test_severed_ep_aux_loss_stays_off_through_callback():
@@ -119,7 +119,7 @@ def test_severed_ep_aux_loss_stays_off_through_callback():
     cfg = _Cfg(output_router_logits=False, router_aux_loss_coef=0.01)
     model = _Model(cfg)
     model.ep_layer = _SeveredEPLayer()
-    apply_balancing_strategy(model, "aux_loss", is_moe=True)
+    apply_balancing_mode(model, "aux_loss", is_moe=True)
     assert router_logits_forced_off(cfg)
     _run_callback(model)
     assert cfg.output_router_logits is False
@@ -129,7 +129,7 @@ def test_aux_loss_with_usable_coef_not_stamped():
     """The normal aux_loss path must NOT stamp the config — metrics observation stays possible."""
     cfg = _Cfg(output_router_logits=False, router_aux_loss_coef=0.01)
     model = _Model(cfg)
-    apply_balancing_strategy(model, "aux_loss", is_moe=True)
+    apply_balancing_mode(model, "aux_loss", is_moe=True)
     assert cfg.output_router_logits is True
     assert not router_logits_forced_off(cfg)
 

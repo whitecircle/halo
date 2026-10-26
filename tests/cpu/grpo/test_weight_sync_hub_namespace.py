@@ -28,8 +28,8 @@ from transformers.models.step3p7.modeling_step3p7 import Step3p7ForConditionalGe
 
 from src.distributed.expert_parallel.layers.step3p7 import EPStep3p7MoELayer
 from src.models.param_roles import persistent_buffers
-from src.trainers.grpo.rollout import weight_sync
-from src.trainers.grpo.rollout.weight_sync import gather_and_send_weights
+from src.trainers.grpo.rollout import weight_push
+from src.trainers.grpo.rollout.weight_push import gather_and_send_weights
 from tests.common.models import TINY_STEP3P7_CONFIG, TINY_STEP3P7_VISION_CONFIG
 from tests.common.utils import safetensors_state_dict
 
@@ -88,7 +88,7 @@ class _RecordingSender:
         assert name not in self.sent, f"{name} forwarded twice"
         self.sent[name] = weights
 
-    def reset_prefix_cache(self) -> None:  # pragma: no cover - the caller flushes, not the gather
+    def finish_weight_update(self) -> None:  # pragma: no cover - the caller flushes, not the gather
         pass
 
 
@@ -151,7 +151,7 @@ def test_the_held_converter_tensors_are_bounded_on_the_forwarding_rank(monkeypat
     1x-model rank-local allocation the streamed sync exists to avoid. Silently, since the held set
     is invisible until the host OOMs.
     """
-    monkeypatch.setattr(weight_sync, "_HELD_CONVERTER_BUDGET_BYTES", 512)
+    monkeypatch.setattr(weight_push, "WEIGHT_SYNC_CHUNK_BYTES", 512)
 
     with pytest.raises(RuntimeError, match="reverse WeightConverter"):
         _sync(_ep_wrapped(_tiny_step3p7()))

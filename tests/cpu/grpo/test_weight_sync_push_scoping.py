@@ -10,9 +10,8 @@ sends the halves in separate requests — which the engine drops, leaving it ser
 weights with no error.
 
 What is pinned: the environmental trainer's push scopes its client whether that is one SGLang client
-or a pool of them, a manager's clients keep the engine's full groups until a push scopes them, a
-reconnected client is built like the first connect (scope, group port, NIC and device), and the
-collective push scopes its forwarding client exactly once.
+or a pool of them, and the collective push scopes its forwarding client exactly once (the pool's own
+scoping is pinned in ``tests/cpu/weight_sync/test_pool.py``).
 
 Run: ``python tests/cpu/grpo/test_weight_sync_push_scoping.py`` (or ``pytest -m cpu``).
 """
@@ -25,14 +24,14 @@ import pytest
 import torch
 import torch.nn as nn
 
-import src.trainers.grpo.rollout.weight_sync_clients as pool_module
 import src.weight_sync.clients.base as base_module
+import src.weight_sync.pool as pool_module
 from src.distributed.parallelism_config import ParallelismConfig
 from src.trainers.grpo.environmental import DistributedAsyncEnvironmentalGRPOTrainer
-from src.trainers.grpo.rollout.weight_sync import sync_trainer_weights, sync_weights_to_client
-from src.trainers.grpo.rollout.weight_sync_clients import InferenceClientManager
+from src.trainers.grpo.rollout.weight_push import sync_trainer_weights, sync_weights_to_client
 from src.weight_sync.clients.sglang import SGLangWeightSyncClient
-from tests.common.weight_sync import Wire, offline_client
+from src.weight_sync.pool import WeightSyncPool
+from tests.common.weight_sync import ServerlessSGLangClient, Wire, offline_client
 
 # Each projection is a 2x2 bf16 weight, 8 bytes: a 16-byte budget holds two, so the cut falls between
 # the halves of the pair and only the scoped groups keep it whole.
@@ -64,21 +63,6 @@ class _MLAModel(nn.Module):
         return x
 
 
-class _ServerlessSGLangClient(SGLangWeightSyncClient):
-    """The real SGLang client with no server behind it: the engine side is a recording :class:`Wire`."""
-
-    def __init__(self, **kwargs):
-        super().__init__(**kwargs)
-        self.wire = Wire()
-        self.wire.attach(self)
-
-    def check_server(self, total_timeout: float = 0.0):
-        """No server to probe."""
-
-    def init_communicator(self, device=0):
-        self._resolve_sync_device(device)
-
-
 def _stub_trainer(model: nn.Module, client):
     """The environmental trainer's sync entrypoint, on the smallest object it needs."""
     trainer = object.__new__(DistributedAsyncEnvironmentalGRPOTrainer)
@@ -92,16 +76,16 @@ def _stub_trainer(model: nn.Module, client):
     return trainer
 
 
-def _sglang_pool(num_servers: int) -> InferenceClientManager:
-    """A manager whose clients are built by its own ``init_communicators``, as the trainer builds them."""
-    manager = InferenceClientManager(
+def _sglang_pool(num_servers: int) -> WeightSyncPool:
+    """A pool whose clients are built by its own ``init_communicator``, as the trainer builds them."""
+    pool = WeightSyncPool(
         [{"url": f"http://localhost:{30000 + index}"} for index in range(num_servers)],
         connection_timeout=0.0,
-        client_cls=_ServerlessSGLangClient,
+        client_cls=ServerlessSGLangClient,
         base_group_port=51216,
     )
-    manager.init_communicators("cpu")
-    return manager
+    pool.init_communicator("cpu")
+    return pool
 
 
 @pytest.fixture(autouse=True)
@@ -137,20 +121,13 @@ def test_the_streamed_push_keeps_a_declared_pair_in_one_request():
     ]
 
 
-def test_a_pool_keeps_the_engines_groups_until_a_push_scopes_them():
-    """A client built before any push must hold the pair and refuse it incomplete, not send it apart."""
-    manager = _sglang_pool(2)
-
-    assert all(client._co_load_groups == SGLangWeightSyncClient.CO_LOADED_PARAM_GROUPS for client in manager._clients)
-
-
 def test_a_pool_push_keeps_a_declared_pair_in_one_request_on_every_server():
     """The pool drains each chunk on every server; a request that splits the pair loses a half."""
-    manager = _sglang_pool(2)
+    pool = _sglang_pool(2)
 
-    _stub_trainer(_MLAModel(_MLA_LEAVES), manager)._sync_weights_to_engine(force=True)
+    _stub_trainer(_MLAModel(_MLA_LEAVES), pool)._sync_weights_to_engine(force=True)
 
-    for client in manager._clients:
+    for client in pool._clients:
         assert client.wire.chunk_names == [
             [_param("q_b_proj")],
             [_param("q_a_proj"), _param("kv_a_proj_with_mqa")],
@@ -159,41 +136,16 @@ def test_a_pool_push_keeps_a_declared_pair_in_one_request_on_every_server():
 
 
 def test_a_pool_push_does_not_refuse_a_model_without_q_a_proj():
-    manager = _sglang_pool(2)
+    pool = _sglang_pool(2)
     model = _MLAModel(("q_b_proj", "kv_a_proj_with_mqa", "o_proj"))
 
-    _stub_trainer(model, manager)._sync_weights_to_engine(force=True)
+    _stub_trainer(model, pool)._sync_weights_to_engine(force=True)
 
-    for client in manager._clients:
+    for client in pool._clients:
         assert [name for name, _ in client.wire.sent] == [
             _param(leaf) for leaf in ("q_b_proj", "kv_a_proj_with_mqa", "o_proj")
         ]
         assert client._co_load_groups == (("self_attn.kv_a_proj_with_mqa.weight",),)
-
-
-def test_a_reconnected_client_is_built_like_the_first_connect():
-    """A reconnect re-flushes the failed sync's buffer through the replacement, so it must dial back on
-    the server's configured port and NIC and keep the scope the push gave the pool: an unscoped
-    replacement would hold a model without ``q_a_proj`` back for a partner it never declares."""
-    manager = InferenceClientManager(
-        [{"url": "http://localhost:30000", "group_port": 52000, "group_host": "10.0.0.7"}],
-        connection_timeout=0.0,
-        client_cls=_ServerlessSGLangClient,
-        base_group_port=51216,
-    )
-    manager.init_communicators("cpu")
-    model = _MLAModel(("q_b_proj", "kv_a_proj_with_mqa", "o_proj"))
-    manager.scope_co_load_groups(name for name, _ in model.named_modules())
-    first = manager._clients[0]
-    scoped = (("self_attn.kv_a_proj_with_mqa.weight",),)
-    assert first._co_load_groups == scoped
-
-    replacement = manager.reconnect_client(0)
-
-    assert replacement is not first and manager._clients == [replacement]
-    for client in (first, replacement):
-        assert (client.group_port, client.group_host, client.sync_device) == (52000, "10.0.0.7", torch.device("cpu"))
-    assert replacement._co_load_groups == scoped, "the replacement lost the scope the push gave the pool"
 
 
 class _EventClient:
@@ -208,7 +160,7 @@ class _EventClient:
     def update_named_param(self, name: str, weights: torch.Tensor) -> None:
         self.events.append(("send", name))
 
-    def reset_prefix_cache(self) -> None:
+    def finish_weight_update(self) -> None:
         self.events.append(("close", None))
 
     def abort_weight_update(self) -> None:  # pragma: no cover - the push does not fail here

@@ -27,8 +27,8 @@ from datasets import Dataset
 from transformers import AutoTokenizer, GptOssConfig, GptOssForCausalLM, default_data_collator
 from trl import SFTConfig
 
-from src.callbacks.router_bias_balancing import RouterBiasBalancingCallback
-from src.callbacks.wiring import build_perf_callbacks
+from src.callbacks.balancing import BalancingBiasCallback, configure_moe_balancing
+from src.callbacks.factory import build_run_callbacks
 from src.configs.script_arguments import CommonScriptArguments
 from src.distributed.expert_parallel.patching import patch_moe_model_for_ep
 from src.distributed.parallelism_config import ParallelismConfig
@@ -95,11 +95,12 @@ def run(ctx):
     model = build_model()
     patch_moe_model_for_ep(model, config.ep_config())
 
-    # The production balancing seam: build_perf_callbacks applies the bias_update side effects
-    # (creates balancing_biases + expert_load_counter on the EP layers) and returns the callback.
+    # The production balancing seam: configure_moe_balancing applies the bias_update side effects
+    # (creates balancing_biases + expert_load_counter on the EP layers), build_run_callbacks the callback.
     script_args = CommonScriptArguments(moe_balancing="bias_update")
-    callbacks = build_perf_callbacks(script_args, args, model, config)
-    checks["bias_balancing_callback_built"] = any(isinstance(c, RouterBiasBalancingCallback) for c in callbacks)
+    mode = configure_moe_balancing(script_args, model, config)
+    callbacks = build_run_callbacks(script_args, args, model, config, balancing_mode=mode)
+    checks["bias_balancing_callback_built"] = any(isinstance(c, BalancingBiasCallback) for c in callbacks)
 
     trainer = DistributedSFTTrainer(
         model=model,
@@ -116,7 +117,7 @@ def run(ctx):
     checks["accumulation_became_microbatches"] = (
         args.gradient_accumulation_steps == 1 and trainer._pp_n_microbatches == 2
     )
-    balancing_cb = next(c for c in trainer.callback_handler.callbacks if isinstance(c, RouterBiasBalancingCallback))
+    balancing_cb = next(c for c in trainer.callback_handler.callbacks if isinstance(c, BalancingBiasCallback))
     checks["balancing_reduce_group_is_stage_scoped"] = balancing_cb.reduce_group is trainer._pp_stage_group
 
     trainer.train()

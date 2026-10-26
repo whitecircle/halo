@@ -136,7 +136,7 @@ that rows are flattened, as does packing on a dense-mask backend for a family th
 build flash-attn `cu_seq_lens`. `wrapped` has no `seq_lengths` (cross-document attention — avoid with
 FlashAttention). VLM: packing/padding-free both unsupported. `packing` / `padding_free` in YAML
 choose the collator; after building it the scripts call `disable_trl_dataset_prep`
-(`src/training/script_runner.py`), which clears both on the TRL config and sets
+(`src/entrypoints/data_setup.py`), which clears both on the TRL config and sets
 `dataset_kwargs: {skip_prepare_dataset: true}` so TRL keeps the script's collator. A custom script
 must call it. A non-default `dataset_kwargs` (or `dataset_text_field`) is refused at startup
 (`reject_trl_dataset_prep_args`).

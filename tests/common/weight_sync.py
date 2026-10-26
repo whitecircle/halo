@@ -1,6 +1,6 @@
 """Weight-sync stand-ins shared by the suites: the rollout endpoints and group ports the GPU tiers use,
-an offline client, the trainer's push, a recording wire, a recording sender, a stock model, and the
-probes of what a LoRA push leaves behind."""
+an offline client, the trainer's push, a recording wire, a serverless SGLang client, a recording sender,
+a stock model, and the probes of what a LoRA push leaves behind."""
 
 import copy
 from collections.abc import Callable, Iterable, Iterator
@@ -21,8 +21,10 @@ from src.env import env_int, env_str
 from src.runtime.collectives import broadcast_from_rank0
 from src.runtime.consensus import DeferredRankFailure
 from src.runtime.dtensor import materialize_dtensor, to_local
-from src.trainers.grpo.rollout.weight_sync import _HubForwarder
+from src.trainers.grpo.rollout.weight_push import _HubForwarder
+from src.weight_sync.chunking import resolve_sync_device
 from src.weight_sync.clients.base import WeightSyncClientBase
+from src.weight_sync.clients.sglang import SGLangWeightSyncClient
 from tests.common.ports import free_port
 
 # The rollout endpoints the GPU server tiers drive. ``or`` rather than an env_str default: an
@@ -64,7 +66,7 @@ def push(client: WeightSyncClientBase, named_params: Iterable[tuple[str, torch.T
     try:
         for name, tensor in named_params:
             client.update_named_param(name, tensor)
-        client.reset_prefix_cache()
+        client.finish_weight_update()
     except BaseException:
         client.abort_weight_update()
         raise
@@ -86,8 +88,8 @@ class StockModel(nn.Module):
 class Wire:
     """The engine side of one client: records each chunk put on the wire, in order.
 
-    Stubs the per-engine seams only (``_broadcast_chunk`` and the phase calls), so the client's own
-    chunk accounting — the count ``can_replay_sync`` reads — runs as it does in production.
+    Stubs the engine seams only (the update hooks, ``_broadcast_chunk`` and the resume), so the client's
+    own chunk accounting — the count ``can_replay_sync`` reads — runs as it does in production.
     """
 
     def __init__(self, fail_on_send: bool = False, retain: bool = True):
@@ -102,22 +104,23 @@ class Wire:
 
     def attach(self, client: WeightSyncClientBase) -> WeightSyncClientBase:
         self.client = client
-        client.begin_weight_update = self._begin
+        client._start_engine_update = self._begin
         client._broadcast_chunk = self._send
-        client.end_weight_update = self._end
+        client._finish_engine_update = self._end
+        client._lift_pause = lambda timeout, context: None
         return client
 
     def _begin(self):
         self.opened += 1
 
-    def _send(self, named_params, final: bool = False):
+    def _send(self, named_params, final: bool):
         if self.fail_on_send:
             raise ConnectionError("server died mid-flush")
         self.chunks.append(list(named_params) if self.retain else [(name, None) for name, _ in named_params])
 
     def _end(self, tail):
         try:
-            self.client.send_weights(tail, final=True)  # as both real clients close: through the seam
+            self.client._transmit_chunk(tail, final=True)  # as both real clients close: through the seam
         finally:
             self.closed += 1  # the real clients close and resume in a finally too
 
@@ -128,6 +131,22 @@ class Wire:
     @property
     def chunk_names(self) -> list[list[str]]:
         return [[name for name, _ in chunk] for chunk in self.chunks]
+
+
+class ServerlessSGLangClient(SGLangWeightSyncClient):
+    """The real SGLang client with no server behind it: the engine side is a recording :class:`Wire`, and
+    forming the group only records the sync device."""
+
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        self.wire = Wire()
+        self.wire.attach(self)
+
+    def check_server(self, total_timeout: float = 0.0):
+        """No server to probe."""
+
+    def init_communicator(self, device=0):
+        self._sync_device = resolve_sync_device(device)
 
 
 class ForwardedParam(NamedTuple):
@@ -159,7 +178,7 @@ class RecordingSender:
         value = data.detach().clone() if self.keep_values else None
         self.params.append(ForwardedParam(name, tuple(data.shape), isinstance(data, DTensor), value))
 
-    def reset_prefix_cache(self) -> None:
+    def finish_weight_update(self) -> None:
         pass
 
     def abort_weight_update(self) -> None:

@@ -16,10 +16,10 @@ import torch
 from transformers import AutoTokenizer, PreTrainedModel
 from trl import SFTConfig
 
-from src.callbacks.wiring import build_perf_callbacks
 from src.configs.script_arguments import CommonScriptArguments
 from src.distributed.expert_parallel.lazy_loader import lazy_loader_supports_checkpoint
 from src.distributed.parallelism_config import ParallelismConfig
+from src.entrypoints.script import ScriptContext, configure_balancing_and_build_callbacks
 from src.model_loading.parallel.loader import load_distributed_model
 from src.models.module_tree import backbone_with_layers
 from src.trainers.sft import DistributedSFTTrainer
@@ -163,10 +163,12 @@ class EPSftRoundTrip:
             fsdp="",
             ddp_find_unused_parameters=True,
         )
-        # A trainer built bare never enables balancing; the script's wiring (``build_training_callbacks``
-        # → ``build_perf_callbacks``) resolves it.
+        # A trainer built bare never enables balancing; the scripts' ``configure_balancing_and_build_callbacks`` does.
+        context = ScriptContext(pc, ctx.local_rank, None, base_dir, DistributedSFTTrainer)
         callbacks = (
-            build_perf_callbacks(CommonScriptArguments(), sft_config, model, pc) if self.balancing_callbacks else None
+            configure_balancing_and_build_callbacks(CommonScriptArguments(), sft_config, model, context)
+            if self.balancing_callbacks
+            else None
         )
         trainer = DistributedSFTTrainer(
             model=model,

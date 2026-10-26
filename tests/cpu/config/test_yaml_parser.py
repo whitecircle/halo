@@ -1,6 +1,6 @@
 #!/usr/bin/env python
 """
-Tests for H4ArgumentParser YAML parsing, unknown-key rejection, toolkit defaults, and CLI
+Tests for HaloArgumentParser YAML parsing, unknown-key rejection, toolkit defaults, and CLI
 override type casting.
 
 Run: python tests/cpu/config/test_yaml_parser.py
@@ -18,19 +18,15 @@ import pytest
 from transformers import TrainingArguments
 from trl import DPOConfig, GRPOConfig, ModelConfig, RewardConfig, SFTConfig
 
-from src.args.distributed_args import DistributedArguments
-from src.args.environmental_grpo_args import EnvironmentalGRPOScriptArguments
 from src.configs.distillation import SelfDistillScriptArguments
-from src.configs.grpo_environmental import AsyncTrainingConfig
+from src.configs.grpo_environmental import AsyncTrainingConfig, EnvironmentalGRPOScriptArguments
 from src.configs.grpo_offline import OfflineGRPOConfig
+from src.configs.parallelism_arguments import ParallelismArguments
+from src.configs.parser import _TOOLKIT_DEFAULTS, HaloArgumentParser, expand_strftime_directives
 from src.configs.preference import DPOScriptArguments, SmoothMarginPOConfig
 from src.configs.reward import RewardScriptArguments
 from src.configs.sft import SFTScriptArguments
-from src.training.parser import (
-    _TOOLKIT_DEFAULTS,
-    H4ArgumentParser,
-    _expand_output_dir,
-)
+from src.entrypoints.script import parse_script_args
 
 # Simple target dataclasses for parsing
 
@@ -69,16 +65,13 @@ def _write_yaml(content: str, suffix: str = ".yaml") -> str:
 
 
 def _parse_with_argv(parser, argv):
-    old_argv = sys.argv
-    sys.argv = argv
-    try:
-        return parser.parse()
-    finally:
-        sys.argv = old_argv
+    """The dataclasses ``argv`` (``sys.argv`` form) parses into, the lone instance for one type."""
+    output = parser.parse_dict(parser.load_values(argv[1:]))
+    return output[0] if len(output) == 1 else output
 
 
 def _parse_yaml_launch(parser, yaml_body: str, *overrides: str):
-    """``parse()`` as a ``<script> config.yaml [--overrides]`` launch does it."""
+    """The parse a ``<script> config.yaml [--overrides]`` launch does."""
     path = _write_yaml(yaml_body)
     try:
         return _parse_with_argv(parser, ["prog", path, *overrides])
@@ -95,7 +88,7 @@ def test_unknown_field_is_not_silently_stripped():
     nothing."""
     path = _write_yaml("name: unknown_test\nuse_unsloth: true\n")
     try:
-        parser = H4ArgumentParser((SimpleConfig,))
+        parser = HaloArgumentParser((SimpleConfig,))
         with pytest.raises(ValueError, match="use_unsloth"):
             parser.parse_yaml_file(path, allow_extra_keys=False)
     finally:
@@ -107,7 +100,7 @@ def test_retired_ecosystem_spelling_is_not_migrated():
     naming the field, instead of being quietly rewritten onto ``max_length`` forever."""
     path = _write_yaml("max_seq_length: 2048\nname: retired\n")
     try:
-        parser = H4ArgumentParser((SimpleConfig,))
+        parser = HaloArgumentParser((SimpleConfig,))
         with pytest.raises(ValueError, match="max_seq_length"):
             parser.parse_yaml_file(path, allow_extra_keys=False)
     finally:
@@ -118,7 +111,7 @@ def test_plain_config_parses_unchanged():
     """A YAML using only current spellings parses with nothing rewritten."""
     path = _write_yaml("name: clean\n")
     try:
-        parser = H4ArgumentParser((SimpleConfig,))
+        parser = HaloArgumentParser((SimpleConfig,))
         (result,) = parser.parse_yaml_file(path, allow_extra_keys=False)
         assert result.name == "clean"
     finally:
@@ -130,7 +123,7 @@ def test_plain_config_parses_unchanged():
 
 def test_toolkit_defaults_applied():
     """use_liger_kernel and bf16 default to True when not explicitly set."""
-    result = _parse_yaml_launch(H4ArgumentParser((SimpleConfig,)), "name: defaults_test\n")
+    result = _parse_yaml_launch(HaloArgumentParser((SimpleConfig,)), "name: defaults_test\n")
     assert result.use_liger_kernel is True, "use_liger_kernel should be True"
     assert result.bf16 is True, "bf16 should be True"
 
@@ -143,19 +136,21 @@ def test_every_declared_toolkit_default_is_applied():
     the running average. A default that silently stops being applied restores the upstream behavior
     with nothing said.
     """
-    opposites = {name: (not value if isinstance(value, bool) else None) for name, value in _TOOLKIT_DEFAULTS.items()}
+    opposites = {
+        name: (not value if isinstance(value, bool) else None) for name, (value, _) in _TOOLKIT_DEFAULTS.items()
+    }
     all_defaults = make_dataclass("AllDefaults", [(name, bool, field(default=v)) for name, v in opposites.items()])
 
-    config = _parse_yaml_launch(H4ArgumentParser((all_defaults,)), "{}\n")
+    config = _parse_yaml_launch(HaloArgumentParser((all_defaults,)), "{}\n")
 
-    for name, expected in _TOOLKIT_DEFAULTS.items():
+    for name, (expected, _) in _TOOLKIT_DEFAULTS.items():
         assert getattr(config, name) == expected, f"toolkit default {name}={expected} was not applied"
 
 
 def test_toolkit_defaults_not_overridden():
     """Explicitly set fields are not overridden by toolkit defaults."""
     result = _parse_yaml_launch(
-        H4ArgumentParser((SimpleConfig,)), "use_liger_kernel: false\nbf16: false\nname: explicit\n"
+        HaloArgumentParser((SimpleConfig,)), "use_liger_kernel: false\nbf16: false\nname: explicit\n"
     )
     assert result.use_liger_kernel is False, "Should remain False when explicitly set"
     assert result.bf16 is False, "Should remain False when explicitly set"
@@ -163,14 +158,14 @@ def test_toolkit_defaults_not_overridden():
 
 def test_toolkit_defaults_partial_override():
     """Only the toolkit defaults the user left unset are applied."""
-    result = _parse_yaml_launch(H4ArgumentParser((SimpleConfig,)), "use_liger_kernel: false\nname: partial\n")
+    result = _parse_yaml_launch(HaloArgumentParser((SimpleConfig,)), "use_liger_kernel: false\nname: partial\n")
     assert result.use_liger_kernel is False, "Explicitly set, should stay False"
     assert result.bf16 is True, "Not explicitly set, should become True"
 
 
 def test_cli_override_counts_as_explicitly_set():
     """A CLI value, dashed spelling included, is explicit: the default must not reverse it."""
-    result = _parse_yaml_launch(H4ArgumentParser((SimpleConfig,)), "name: cli\n", "--use-liger-kernel=false")
+    result = _parse_yaml_launch(HaloArgumentParser((SimpleConfig,)), "name: cli\n", "--use-liger-kernel=false")
     assert result.use_liger_kernel is False, "toolkit default reversed --use-liger-kernel=false"
     assert result.bf16 is True
 
@@ -187,7 +182,7 @@ def test_toolkit_default_reaches_every_declarer_like_a_yaml_value():
     class Second:
         bf16: bool = False
 
-    a, b = _parse_yaml_launch(H4ArgumentParser((First, Second)), "{}\n")
+    a, b = _parse_yaml_launch(HaloArgumentParser((First, Second)), "{}\n")
     assert (a.bf16, b.bf16) == (True, True)
 
 
@@ -203,21 +198,21 @@ def test_toolkit_defaults_skip_dataclasses_without_the_field():
     class HasFlag:
         use_liger_kernel: bool = False
 
-    no_flags, has_flag = _parse_yaml_launch(H4ArgumentParser((NoFlags, HasFlag)), "{}\n")
+    no_flags, has_flag = _parse_yaml_launch(HaloArgumentParser((NoFlags, HasFlag)), "{}\n")
     assert has_flag.use_liger_kernel is True
     assert not hasattr(no_flags, "use_liger_kernel")
-    assert _parse_yaml_launch(H4ArgumentParser((NoFlags,)), "{}\n").x == 1
+    assert _parse_yaml_launch(HaloArgumentParser((NoFlags,)), "{}\n").x == 1
 
 
-# parse_yaml_and_args: CLI override type casting
+# load_values: CLI override type casting
 
 
 def test_cli_override_int():
     """CLI args should cast int fields properly."""
     path = _write_yaml("name: cli_int\n")
     try:
-        parser = H4ArgumentParser((SimpleConfig,))
-        (result,) = parser.parse_yaml_and_args(path, ["--max_length=2048"])
+        parser = HaloArgumentParser((SimpleConfig,))
+        (result,) = parser.parse_dict(parser.load_values([path, "--max_length=2048"]))
         assert result.max_length == 2048
         assert isinstance(result.max_length, int)
     finally:
@@ -228,8 +223,8 @@ def test_cli_override_float():
     """CLI args should cast float fields properly."""
     path = _write_yaml("name: cli_float\n")
     try:
-        parser = H4ArgumentParser((SimpleConfig,))
-        (result,) = parser.parse_yaml_and_args(path, ["--learning_rate=0.001"])
+        parser = HaloArgumentParser((SimpleConfig,))
+        (result,) = parser.parse_dict(parser.load_values([path, "--learning_rate=0.001"]))
         assert abs(result.learning_rate - 0.001) < 1e-10
         assert isinstance(result.learning_rate, float)
     finally:
@@ -240,8 +235,8 @@ def test_cli_override_bool_true():
     """CLI args should cast bool fields: 'true'/'True' -> True."""
     path = _write_yaml("name: cli_bool\n")
     try:
-        parser = H4ArgumentParser((SimpleConfig,))
-        (result,) = parser.parse_yaml_and_args(path, ["--use_liger_kernel=True"])
+        parser = HaloArgumentParser((SimpleConfig,))
+        (result,) = parser.parse_dict(parser.load_values([path, "--use_liger_kernel=True"]))
         assert result.use_liger_kernel is True
     finally:
         os.unlink(path)
@@ -251,8 +246,8 @@ def test_cli_override_bool_false():
     """CLI args should cast bool fields: anything else -> False."""
     path = _write_yaml("use_liger_kernel: true\nname: cli_bool_f\n")
     try:
-        parser = H4ArgumentParser((SimpleConfig,))
-        (result,) = parser.parse_yaml_and_args(path, ["--use_liger_kernel=false"])
+        parser = HaloArgumentParser((SimpleConfig,))
+        (result,) = parser.parse_dict(parser.load_values([path, "--use_liger_kernel=false"]))
         assert result.use_liger_kernel is False
     finally:
         os.unlink(path)
@@ -262,8 +257,8 @@ def test_cli_override_list_str():
     """CLI args should split comma-separated values into List[str]."""
     path = _write_yaml("batch_size: 16\n")
     try:
-        parser = H4ArgumentParser((ExtraConfig,))
-        (result,) = parser.parse_yaml_and_args(path, ["--tags=a,b,c"])
+        parser = HaloArgumentParser((ExtraConfig,))
+        (result,) = parser.parse_dict(parser.load_values([path, "--tags=a,b,c"]))
         assert result.tags == ["a", "b", "c"]
     finally:
         os.unlink(path)
@@ -274,8 +269,8 @@ def test_cli_override_list_str_replaces_yaml_list():
     values the CLI named."""
     path = _write_yaml("tags:\n- from yaml\n")
     try:
-        parser = H4ArgumentParser((ExtraConfig,))
-        (result,) = parser.parse_yaml_and_args(path, ["--tags=first,second"])
+        parser = HaloArgumentParser((ExtraConfig,))
+        (result,) = parser.parse_dict(parser.load_values([path, "--tags=first,second"]))
         assert result.tags == ["first", "second"], f"--tags override did not replace the YAML list: {result.tags}"
     finally:
         os.unlink(path)
@@ -286,9 +281,9 @@ def test_cli_override_unknown_arg_raises():
     run the job with the un-overridden value)."""
     path = _write_yaml("name: ignore_unknown\n")
     try:
-        parser = H4ArgumentParser((SimpleConfig,))
+        parser = HaloArgumentParser((SimpleConfig,))
         with pytest.raises(ValueError, match="not_a_field"):
-            parser.parse_yaml_and_args(path, ["--not_a_field=123", "--max_length=64"])
+            parser.parse_dict(parser.load_values([path, "--not_a_field=123", "--max_length=64"]))
     finally:
         os.unlink(path)
 
@@ -305,10 +300,10 @@ def test_cli_override_shared_field_sets_on_both_dataclasses():
     class DupB:
         shared: int = 0
 
-    parser = H4ArgumentParser((DupA, DupB))
+    parser = HaloArgumentParser((DupA, DupB))
     path = _write_yaml("shared: 1\n")
     try:
-        a, b = parser.parse_yaml_and_args(path, ["--shared=7"])
+        a, b = parser.parse_dict(parser.load_values([path, "--shared=7"]))
         assert a.shared == 7 and b.shared == 7
     finally:
         os.unlink(path)
@@ -316,10 +311,10 @@ def test_cli_override_shared_field_sets_on_both_dataclasses():
 
 def test_cli_override_genuinely_repeated_flag_raises():
     """The same flag passed twice on the CLI is a real duplicate and must raise (not last-wins)."""
-    parser = H4ArgumentParser((SimpleConfig,))
+    parser = HaloArgumentParser((SimpleConfig,))
     path = _write_yaml("max_length: 100\n")
     try:
-        parser.parse_yaml_and_args(path, ["--max_length=1", "--max_length=2"])
+        parser.parse_dict(parser.load_values([path, "--max_length=1", "--max_length=2"]))
         raise AssertionError("Should have raised ValueError for a repeated CLI flag")
     except ValueError as e:
         assert "duplicate" in str(e).lower()
@@ -331,8 +326,8 @@ def test_cli_override_applies_after_yaml_value():
     """A CLI override beats the YAML-loaded value for the same field."""
     path = _write_yaml("max_length: 100\nname: override_me\n")
     try:
-        parser = H4ArgumentParser((SimpleConfig,))
-        (result,) = parser.parse_yaml_and_args(path, ["--max_length=999"])
+        parser = HaloArgumentParser((SimpleConfig,))
+        (result,) = parser.parse_dict(parser.load_values([path, "--max_length=999"]))
         assert result.max_length == 999
     finally:
         os.unlink(path)
@@ -356,7 +351,7 @@ def test_overlapping_fields_resolved():
         only_b: str = "b"
 
     # Should not raise — conflict_handler='resolve' allows duplicate fields
-    parser = H4ArgumentParser((OverlapA, OverlapB))
+    parser = HaloArgumentParser((OverlapA, OverlapB))
 
     path = _write_yaml("shared_field: 42\nonly_a: hello\nonly_b: world\n")
     try:
@@ -365,7 +360,7 @@ def test_overlapping_fields_resolved():
         assert result_a.only_a == "hello"
         assert result_b.only_b == "world"
 
-        result_a, result_b = parser.parse_yaml_and_args(path, ["--shared_field=7"])
+        result_a, result_b = parser.parse_dict(parser.load_values([path, "--shared_field=7"]))
         assert (result_a.shared_field, result_b.shared_field) == (7, 7)
     finally:
         os.unlink(path)
@@ -378,7 +373,7 @@ def test_empty_yaml():
     """Empty YAML file should produce dataclass with all defaults."""
     path = _write_yaml("")
     try:
-        parser = H4ArgumentParser((SimpleConfig,))
+        parser = HaloArgumentParser((SimpleConfig,))
         (result,) = parser.parse_yaml_file(path, allow_extra_keys=False)
         assert result.max_length == 512
         assert result.name == "default"
@@ -386,11 +381,11 @@ def test_empty_yaml():
         os.unlink(path)
 
 
-# _expand_output_dir: strftime expansion
+# expand_strftime_directives: strftime expansion in output_dir
 
 
 def _expanded(output_dir: str) -> str:
-    return _expand_output_dir({"output_dir": output_dir, "name": "fmt"})["output_dir"]
+    return expand_strftime_directives(output_dir)
 
 
 def test_format_output_dir_with_strftime():
@@ -429,11 +424,14 @@ def test_format_output_dir_percent_escape():
     assert _expanded("output/100%%-data") == "output/100%-data"
 
 
-def test_format_output_dir_leaves_other_values_alone():
-    """Only output_dir expands, and only when it is a string."""
-    values = {"name": "run-%Y", "output_dir": None}
-    assert _expand_output_dir(values) == values
-    assert _expand_output_dir({"name": "run-%Y"}) == {"name": "run-%Y"}
+def test_parse_script_args_expands_output_dir_alone(tmp_path):
+    """Only output_dir expands: a directive in any other string value reaches its field verbatim."""
+    path = tmp_path / "out.yaml"
+    path.write_text(f'output_dir: "{tmp_path}/run-%Y"\nname: "run-%Y"\n')
+    with mock.patch.object(sys, "argv", ["prog", str(path)]), mock.patch("src.entrypoints.script.install_log_tee"):
+        config = parse_script_args(OutputDirConfig)
+    assert config.output_dir == f"{tmp_path}/run-{datetime.now():%Y}"
+    assert config.name == "run-%Y"
 
 
 # YAML 1.2 numeric parsing (ruamel.yaml)
@@ -443,7 +441,7 @@ def test_scientific_notation_no_decimal_parsed_as_float():
     """YAML 1.2 should parse '3e-5' as float (PyYAML 1.1 returns string)."""
     path = _write_yaml("learning_rate: 3e-5\nname: sci\n")
     try:
-        parser = H4ArgumentParser((SimpleConfig,))
+        parser = HaloArgumentParser((SimpleConfig,))
         (result,) = parser.parse_yaml_file(path, allow_extra_keys=False)
         assert isinstance(result.learning_rate, float), f"Expected float, got {type(result.learning_rate)}"
         assert abs(result.learning_rate - 3e-5) < 1e-10
@@ -455,7 +453,7 @@ def test_scientific_notation_with_decimal_parsed_as_float():
     """YAML 1.2 should also parse '1.5e-5' as float (regression check)."""
     path = _write_yaml("learning_rate: 1.5e-5\nname: sci_dec\n")
     try:
-        parser = H4ArgumentParser((SimpleConfig,))
+        parser = HaloArgumentParser((SimpleConfig,))
         (result,) = parser.parse_yaml_file(path, allow_extra_keys=False)
         assert isinstance(result.learning_rate, float)
         assert abs(result.learning_rate - 1.5e-5) < 1e-10
@@ -467,8 +465,8 @@ def test_list_cli_override_replaces_yaml_list():
     """A CLI list override must fully replace the YAML list, never merge with it."""
     path = _write_yaml("context_fields:\n- old_field\n")
     try:
-        parser = H4ArgumentParser((EnvironmentalGRPOScriptArguments,))
-        (result,) = parser.parse_yaml_and_args(path, ["--context_fields=first_field,second_field"])
+        parser = HaloArgumentParser((EnvironmentalGRPOScriptArguments,))
+        (result,) = parser.parse_dict(parser.load_values([path, "--context_fields=first_field,second_field"]))
         assert result.context_fields == ["first_field", "second_field"], (
             f"--context_fields override did not replace the YAML list: {result.context_fields}"
         )
@@ -483,7 +481,7 @@ def test_parse_accepts_yml_suffix():
     """A .yml config must go down the YAML branch, not be mistaken for argparse flags."""
     path = _write_yaml("max_length: 777\nname: yml\n", suffix=".yml")
     try:
-        parser = H4ArgumentParser((SimpleConfig,))
+        parser = HaloArgumentParser((SimpleConfig,))
         result = _parse_with_argv(parser, ["prog", path])
         assert result.max_length == 777
         assert result.name == "yml"
@@ -494,7 +492,7 @@ def test_parse_accepts_yml_suffix():
 def test_first_cli_flag_counts_as_explicit_without_yaml():
     """In the pure-CLI launch form the first flag is sys.argv[1]; it must still block the
     toolkit default from overwriting it (bf16 defaults to True when not explicitly set)."""
-    parser = H4ArgumentParser((SimpleConfig,))
+    parser = HaloArgumentParser((SimpleConfig,))
     result = _parse_with_argv(parser, ["prog", "--bf16", "false", "--name", "cli"])
     assert result.name == "cli"
     assert result.bf16 is False, "explicit first-position --bf16 false was clobbered by the toolkit default"
@@ -504,7 +502,7 @@ def test_dashed_cli_flag_counts_as_explicit():
     """argparse accepts `--use-liger-kernel=false`, so the explicit-set scan must normalize the
     dashed spelling to the underscore field name the toolkit-default check reads — recording it
     dashed lets the default REVERSE the user's false back to True."""
-    parser = H4ArgumentParser((SimpleConfig,))
+    parser = HaloArgumentParser((SimpleConfig,))
     result = _parse_with_argv(parser, ["prog", "--use-liger-kernel=false", "--name", "cli"])
     assert result.use_liger_kernel is False, "toolkit default reversed the dashed-spelled --use-liger-kernel=false"
 
@@ -523,7 +521,7 @@ def test_flags_only_launch_hands_shared_field_to_every_declarer(script_args_cls,
     """A launch with no YAML, on a script whose tuple declares ``pad_token`` twice (its script args
     and TRL's config), parses and gives the value to both — the tokenizer setup reads the
     script-args copy, TRL its own."""
-    parser = H4ArgumentParser((script_args_cls, trl_config_cls, ModelConfig, DistributedArguments))
+    parser = HaloArgumentParser((script_args_cls, trl_config_cls, ModelConfig, ParallelismArguments))
     argv = [
         "prog",
         "--model_name_or_path=dummy/model",
@@ -532,8 +530,7 @@ def test_flags_only_launch_hands_shared_field_to_every_declarer(script_args_cls,
         "--use_cpu=true",
         "--bf16=false",
     ]
-    with mock.patch("src.training.parser.install_log_tee"):
-        script_args, trl_config, model_config, _ = _parse_with_argv(parser, argv)
+    script_args, trl_config, model_config, _ = _parse_with_argv(parser, argv)
     assert (script_args.pad_token, trl_config.pad_token) == ("<|pad|>", "<|pad|>")
     assert script_args.eos_token is None
     assert model_config.model_name_or_path == "dummy/model"
@@ -553,7 +550,7 @@ def test_flags_only_launch_leaves_unset_shared_field_at_each_default():
     class OverlapB:
         shared_field: int = 99
 
-    parser = H4ArgumentParser((OverlapA, OverlapB))
+    parser = HaloArgumentParser((OverlapA, OverlapB))
     result_a, result_b = _parse_with_argv(parser, ["prog", "--only_a=hello"])
     assert (result_a.only_a, result_a.shared_field, result_b.shared_field) == ("hello", 0, 99)
 
@@ -562,7 +559,7 @@ def test_flags_only_launch_leaves_unset_shared_field_at_each_default():
 
 
 def test_flags_only_launch_rejects_an_unknown_flag(capsys):
-    parser = H4ArgumentParser((SimpleConfig,))
+    parser = HaloArgumentParser((SimpleConfig,))
     with pytest.raises(SystemExit):
         _parse_with_argv(parser, ["prog", "--name=cli", "--no_such_field=1"])
     assert "unrecognized arguments: --no_such_field=1" in capsys.readouterr().err
@@ -573,8 +570,8 @@ def test_dashed_cli_override_with_yaml():
     as argparse — instead of rejecting them as unknown."""
     path = _write_yaml("use_liger_kernel: true\nname: dash\n")
     try:
-        parser = H4ArgumentParser((SimpleConfig,))
-        (result,) = parser.parse_yaml_and_args(path, ["--use-liger-kernel=false"])
+        parser = HaloArgumentParser((SimpleConfig,))
+        (result,) = parser.parse_dict(parser.load_values([path, "--use-liger-kernel=false"]))
         assert result.use_liger_kernel is False
     finally:
         os.unlink(path)
@@ -584,9 +581,9 @@ def test_dashed_and_underscored_spellings_are_one_flag():
     """The duplicate-flag guard must see through the spelling difference."""
     path = _write_yaml("name: dash_dup\n")
     try:
-        parser = H4ArgumentParser((SimpleConfig,))
+        parser = HaloArgumentParser((SimpleConfig,))
         with pytest.raises(ValueError, match="[Dd]uplicate"):
-            parser.parse_yaml_and_args(path, ["--use-liger-kernel=false", "--use_liger_kernel=true"])
+            parser.parse_dict(parser.load_values([path, "--use-liger-kernel=false", "--use_liger_kernel=true"]))
     finally:
         os.unlink(path)
 
@@ -600,7 +597,7 @@ def test_toolkit_bf16_default_syncs_mixed_precision():
     # use_cpu keeps TrainingArguments' bf16-support validation off GPU-less test machines.
     path = _write_yaml("output_dir: /tmp/h4_mp_default\nuse_cpu: true\n")
     try:
-        parser = H4ArgumentParser((TrainingArguments,))
+        parser = HaloArgumentParser((TrainingArguments,))
         result = _parse_with_argv(parser, ["prog", path])
         assert result.bf16 is True
         assert result.mixed_precision == "bf16", f"stale mixed_precision: {result.mixed_precision}"
@@ -613,7 +610,7 @@ def test_toolkit_bf16_default_yields_to_explicit_fp16():
     fp16+bf16 pair TrainingArguments rejects (and an fp16 GradScaler over a bf16 autocast)."""
     path = _write_yaml("output_dir: /tmp/h4_mp_fp16\nfp16: true\nuse_cpu: true\n")
     try:
-        parser = H4ArgumentParser((TrainingArguments,))
+        parser = HaloArgumentParser((TrainingArguments,))
         result = _parse_with_argv(parser, ["prog", path])
         assert result.fp16 is True
         assert result.bf16 is False, "toolkit bf16 default must not apply on top of explicit fp16"
@@ -628,7 +625,7 @@ def test_cli_bf16_false_override_rederives_mixed_precision():
     # use_cpu keeps TrainingArguments' bf16-support validation off GPU-less test machines.
     path = _write_yaml("output_dir: /tmp/h4_mp_cli\nbf16: true\nuse_cpu: true\n")
     try:
-        parser = H4ArgumentParser((TrainingArguments,))
+        parser = HaloArgumentParser((TrainingArguments,))
         result = _parse_with_argv(parser, ["prog", path, "--bf16=false"])
         assert result.bf16 is False
         assert result.mixed_precision == "no", f"stale mixed_precision: {result.mixed_precision}"
@@ -641,7 +638,7 @@ def test_cli_fp16_override_conflicting_with_yaml_bf16_raises():
     instead of training with both flags set."""
     path = _write_yaml("output_dir: /tmp/h4_mp_conflict\nbf16: true\nuse_cpu: true\n")
     try:
-        parser = H4ArgumentParser((TrainingArguments,))
+        parser = HaloArgumentParser((TrainingArguments,))
         with pytest.raises(ValueError, match="At most one of fp16 and bf16"):
             _parse_with_argv(parser, ["prog", path, "--fp16=true"])
     finally:
@@ -665,7 +662,7 @@ def test_literal_field_invalid_yaml_value_raises():
     not deep in training."""
     path = _write_yaml("mode: banana\n")
     try:
-        parser = H4ArgumentParser((LiteralConfig,))
+        parser = HaloArgumentParser((LiteralConfig,))
         with pytest.raises(ValueError, match="banana.*mode.*alpha"):
             parser.parse_yaml_file(path, allow_extra_keys=False)
     finally:
@@ -675,7 +672,7 @@ def test_literal_field_invalid_yaml_value_raises():
 def test_literal_field_valid_values_pass_through():
     path = _write_yaml("mode: beta\nlevel: 2\nopt_mode: y\n")
     try:
-        parser = H4ArgumentParser((LiteralConfig,))
+        parser = HaloArgumentParser((LiteralConfig,))
         (result,) = parser.parse_yaml_file(path, allow_extra_keys=False)
         assert result.mode == "beta"
         assert result.level == 2
@@ -687,14 +684,14 @@ def test_literal_field_valid_values_pass_through():
 def test_optional_literal_field_validates_and_allows_none():
     path = _write_yaml("opt_mode: banana\n")
     try:
-        parser = H4ArgumentParser((LiteralConfig,))
+        parser = HaloArgumentParser((LiteralConfig,))
         with pytest.raises(ValueError, match="opt_mode"):
             parser.parse_yaml_file(path, allow_extra_keys=False)
     finally:
         os.unlink(path)
     path = _write_yaml("opt_mode: null\n")
     try:
-        parser = H4ArgumentParser((LiteralConfig,))
+        parser = HaloArgumentParser((LiteralConfig,))
         (result,) = parser.parse_yaml_file(path, allow_extra_keys=False)
         assert result.opt_mode is None, "Optional[Literal] must keep accepting None"
     finally:
@@ -705,7 +702,7 @@ def test_mixed_union_literal_is_not_validated():
     """Literal['auto'] | str admits values outside the literal set — no confident validation."""
     path = _write_yaml("hybrid: custom-value\n")
     try:
-        parser = H4ArgumentParser((LiteralConfig,))
+        parser = HaloArgumentParser((LiteralConfig,))
         (result,) = parser.parse_yaml_file(path, allow_extra_keys=False)
         assert result.hybrid == "custom-value"
     finally:
@@ -716,10 +713,10 @@ def test_literal_cli_override_validates_and_casts():
     """CLI overrides bypass argparse too: invalid values raise, valid str and int literals cast."""
     path = _write_yaml("name: lit_cli\n")
     try:
-        parser = H4ArgumentParser((LiteralConfig,))
+        parser = HaloArgumentParser((LiteralConfig,))
         with pytest.raises(ValueError, match="banana.*--mode|--mode.*banana"):
-            parser.parse_yaml_and_args(path, ["--mode=banana"])
-        (result,) = parser.parse_yaml_and_args(path, ["--mode=beta", "--level=3"])
+            parser.parse_dict(parser.load_values([path, "--mode=banana"]))
+        (result,) = parser.parse_dict(parser.load_values([path, "--mode=beta", "--level=3"]))
         assert result.mode == "beta"
         assert result.level == 3, f"int literal must cast to int, got {result.level!r}"
     finally:
@@ -731,7 +728,7 @@ def test_real_config_literal_field_validated():
     a typo at parse time."""
     path = _write_yaml("output_dir: /tmp/h4_lit_real\nadvantage_method: banana\n")
     try:
-        parser = H4ArgumentParser((OfflineGRPOConfig,))
+        parser = HaloArgumentParser((OfflineGRPOConfig,))
         with pytest.raises(ValueError, match="advantage_method"):
             parser.parse_yaml_file(path, allow_extra_keys=False)
     finally:
@@ -753,7 +750,7 @@ def test_yaml_11_bool_spelling_on_bool_field_raises():
     for spelling in ("no", "off", "yes", "on", "No", "OFF"):
         path = _write_yaml(f"use_liger_kernel: {spelling}\nname: y11\n")
         try:
-            parser = H4ArgumentParser((SimpleConfig,))
+            parser = HaloArgumentParser((SimpleConfig,))
             with pytest.raises(ValueError, match=rf"use_liger_kernel.*{spelling}"):
                 parser.parse_yaml_file(path, allow_extra_keys=False)
         finally:
@@ -764,7 +761,7 @@ def test_quoted_bool_string_raises():
     """A quoted "false" is a string too — same silent inversion, same loud failure."""
     path = _write_yaml('bf16: "false"\nname: quoted\n')
     try:
-        parser = H4ArgumentParser((SimpleConfig,))
+        parser = HaloArgumentParser((SimpleConfig,))
         with pytest.raises(ValueError, match="bf16"):
             parser.parse_yaml_file(path, allow_extra_keys=False)
     finally:
@@ -776,7 +773,7 @@ def test_real_config_bool_string_rejected():
     silently enable gradient checkpointing."""
     path = _write_yaml("output_dir: /tmp/h4_bool_no\ngradient_checkpointing: no\n")
     try:
-        parser = H4ArgumentParser((TrainingArguments,))
+        parser = HaloArgumentParser((TrainingArguments,))
         with pytest.raises(ValueError, match="gradient_checkpointing.*'no'"):
             parser.parse_yaml_file(path, allow_extra_keys=False)
     finally:
@@ -787,21 +784,21 @@ def test_optional_bool_keeps_real_booleans_and_null():
     """The rejection targets strings only: real YAML 1.2 booleans and null still parse."""
     path = _write_yaml("maybe: true\n")
     try:
-        parser = H4ArgumentParser((BoolUnionConfig,))
+        parser = HaloArgumentParser((BoolUnionConfig,))
         (result,) = parser.parse_yaml_file(path, allow_extra_keys=False)
         assert result.maybe is True
     finally:
         os.unlink(path)
     path = _write_yaml("maybe: null\n")
     try:
-        parser = H4ArgumentParser((BoolUnionConfig,))
+        parser = HaloArgumentParser((BoolUnionConfig,))
         (result,) = parser.parse_yaml_file(path, allow_extra_keys=False)
         assert result.maybe is None
     finally:
         os.unlink(path)
     path = _write_yaml("maybe: no\n")
     try:
-        parser = H4ArgumentParser((BoolUnionConfig,))
+        parser = HaloArgumentParser((BoolUnionConfig,))
         with pytest.raises(ValueError, match="maybe"):
             parser.parse_yaml_file(path, allow_extra_keys=False)
     finally:
@@ -812,7 +809,7 @@ def test_bool_union_with_string_member_admits_strings():
     """bool | str legitimately carries strings — no rejection."""
     path = _write_yaml("mode: balanced\n")
     try:
-        parser = H4ArgumentParser((BoolUnionConfig,))
+        parser = HaloArgumentParser((BoolUnionConfig,))
         (result,) = parser.parse_yaml_file(path, allow_extra_keys=False)
         assert result.mode == "balanced"
     finally:
@@ -836,10 +833,10 @@ def test_cli_override_container_union_rejected():
     exception: they clear an optional field instead."""
     path = _write_yaml("name: uncast\n")
     try:
-        parser = H4ArgumentParser((UncastableConfig,))
+        parser = HaloArgumentParser((UncastableConfig,))
         with pytest.raises(ValueError, match="trackers.*YAML|YAML.*trackers"):
-            parser.parse_yaml_and_args(path, ["--trackers=wandb"])
-        (parsed,) = parser.parse_yaml_and_args(path, ["--trackers=none"])
+            parser.parse_dict(parser.load_values([path, "--trackers=wandb"]))
+        (parsed,) = parser.parse_dict(parser.load_values([path, "--trackers=none"]))
         assert parsed.trackers is None
     finally:
         os.unlink(path)
@@ -848,9 +845,9 @@ def test_cli_override_container_union_rejected():
 def test_cli_override_dict_field_rejected():
     path = _write_yaml("name: uncast_dict\n")
     try:
-        parser = H4ArgumentParser((UncastableConfig,))
+        parser = HaloArgumentParser((UncastableConfig,))
         with pytest.raises(ValueError, match="options"):
-            parser.parse_yaml_and_args(path, ["--options=a:1"])
+            parser.parse_dict(parser.load_values([path, "--options=a:1"]))
     finally:
         os.unlink(path)
 
@@ -860,13 +857,13 @@ def test_cli_override_report_to_none_silences_reporting(spelling):
     """Pin the real seam: every none-spelling reaches transformers as its own "none", which
     ``__post_init__`` turns into no integrations. None would come out as [None], which the Trainer
     refuses; a value override still fails loud."""
-    path = _write_yaml("output_dir: /tmp/h4_report_to\nreport_to: wandb\n")
+    path = _write_yaml("output_dir: /tmp/h4_report_to\nbf16: false\nreport_to: wandb\n")
     try:
-        parser = H4ArgumentParser((TrainingArguments,))
-        (parsed,) = parser.parse_yaml_and_args(path, [f"--report_to={spelling}"])
+        parser = HaloArgumentParser((TrainingArguments,))
+        (parsed,) = parser.parse_dict(parser.load_values([path, f"--report_to={spelling}"]))
         assert parsed.report_to == []
         with pytest.raises(ValueError, match="report_to"):
-            parser.parse_yaml_and_args(path, ["--report_to=wandb"])
+            parser.parse_dict(parser.load_values([path, "--report_to=wandb"]))
     finally:
         os.unlink(path)
 
@@ -875,8 +872,8 @@ def test_cli_override_scalar_union_keeps_current_cast():
     """float | str unions keep the existing numeric cast (consumers handle both)."""
     path = _write_yaml("name: scalar_union\n")
     try:
-        parser = H4ArgumentParser((UncastableConfig,))
-        (result,) = parser.parse_yaml_and_args(path, ["--threshold=0.25"])
+        parser = HaloArgumentParser((UncastableConfig,))
+        (result,) = parser.parse_dict(parser.load_values([path, "--threshold=0.25"]))
         assert result.threshold == 0.25
     finally:
         os.unlink(path)
@@ -893,9 +890,9 @@ def test_cli_override_list_of_dict_rejected():
     consumer (Ray setup); the override must fail at parse time and point at YAML."""
     path = _write_yaml("name: listdict\n")
     try:
-        parser = H4ArgumentParser((ListDictConfig,))
+        parser = HaloArgumentParser((ListDictConfig,))
         with pytest.raises(ValueError, match="servers.*YAML|YAML.*servers"):
-            parser.parse_yaml_and_args(path, ["--servers=http://localhost:8000"])
+            parser.parse_dict(parser.load_values([path, "--servers=http://localhost:8000"]))
     finally:
         os.unlink(path)
 
@@ -904,9 +901,9 @@ def test_cli_override_rollout_server_configs_rejected():
     """Pin the real seam: --rollout_server_configs=... must raise, not ship a list[str] into Ray."""
     path = _write_yaml("{}\n")
     try:
-        parser = H4ArgumentParser((AsyncTrainingConfig,))
+        parser = HaloArgumentParser((AsyncTrainingConfig,))
         with pytest.raises(ValueError, match="rollout_server_configs"):
-            parser.parse_yaml_and_args(path, ["--rollout_server_configs=http://localhost:8000"])
+            parser.parse_dict(parser.load_values([path, "--rollout_server_configs=http://localhost:8000"]))
     finally:
         os.unlink(path)
 
@@ -926,8 +923,8 @@ def test_cli_none_clears_optional_str():
     for spelling in ("None", "null"):
         path = _write_yaml("note: from-yaml\n")
         try:
-            parser = H4ArgumentParser((OptionalStrConfig,))
-            (result,) = parser.parse_yaml_and_args(path, [f"--note={spelling}"])
+            parser = HaloArgumentParser((OptionalStrConfig,))
+            (result,) = parser.parse_dict(parser.load_values([path, f"--note={spelling}"]))
             assert result.note is None, f"--note={spelling} set {result.note!r} instead of None"
         finally:
             os.unlink(path)
@@ -937,8 +934,8 @@ def test_cli_none_on_plain_str_stays_literal():
     """A non-Optional str field cannot hold None; the value stays the literal string."""
     path = _write_yaml("note: plain_str\n")
     try:
-        parser = H4ArgumentParser((OptionalStrConfig,))
-        (result,) = parser.parse_yaml_and_args(path, ["--label=None"])
+        parser = HaloArgumentParser((OptionalStrConfig,))
+        (result,) = parser.parse_dict(parser.load_values([path, "--label=None"]))
         assert result.label == "None"
     finally:
         os.unlink(path)
@@ -959,7 +956,7 @@ class PercentHelpConfig:
 
 def test_help_renders_percent_in_field_help():
     """argparse expands help via ``help % params``; a bare percent in prose must not blow up --help."""
-    parser = H4ArgumentParser((PercentHelpConfig,))
+    parser = HaloArgumentParser((PercentHelpConfig,))
     text = parser.format_help()
     # Assertions stay inside one help line — argparse hard-wraps the rendered text.
     assert "-19%/-37%" in text, f"percent prose must render literally, got:\n{text}"
@@ -970,16 +967,16 @@ def test_help_renders_percent_in_field_help():
 
 def test_help_keeps_argparse_default_placeholder():
     """Escaping percents must not break argparse's own ``%(default)s`` expansion."""
-    parser = H4ArgumentParser((PercentHelpConfig,))
+    parser = HaloArgumentParser((PercentHelpConfig,))
     text = parser.format_help()
     assert "(default: 0.5)" in text, f"default expansion must survive, got:\n{text}"
     assert "%(default)s" not in text
 
 
 def test_help_renders_for_real_script_dataclasses():
-    """Pin the real seam: every training script parses DistributedArguments, whose help carries a
+    """Pin the real seam: every training script parses ParallelismArguments, whose help carries a
     bare percent — ``--help`` must render for the shipped dataclasses, not just synthetic ones."""
-    parser = H4ArgumentParser((DistributedArguments, OfflineGRPOConfig))
+    parser = HaloArgumentParser((ParallelismArguments, OfflineGRPOConfig))
     text = parser.format_help()
     assert "--fsdp_shard_ep1_experts" in text
     assert "--advantage_method" in text
@@ -1009,7 +1006,8 @@ def test_cli_override_reaches_post_init_derived_state():
     """State ``__post_init__`` derives from a field follows the CLI value, not the YAML one."""
     path = _write_yaml("base: 3\n")
     try:
-        (result,) = H4ArgumentParser((_DerivedStateConfig,)).parse_yaml_and_args(path, ["--base=5"])
+        parser = HaloArgumentParser((_DerivedStateConfig,))
+        (result,) = parser.parse_dict(parser.load_values([path, "--base=5"]))
     finally:
         os.unlink(path)
     assert (result.base, result.doubled) == (5, 10), f"derived state kept the YAML value: {result.doubled}"
@@ -1019,9 +1017,10 @@ def test_cli_override_meets_every_post_init_guard():
     """A guard in any ``__post_init__`` holds a CLI value to the bound a YAML value meets, with no
     opt-in base class on the config."""
     path = _write_yaml("count: 2\n")
+    parser = HaloArgumentParser((_GuardedConfig,))
     try:
         with pytest.raises(ValueError, match="count must be >= 1"):
-            H4ArgumentParser((_GuardedConfig,)).parse_yaml_and_args(path, ["--count=0"])
+            parser.parse_dict(parser.load_values([path, "--count=0"]))
     finally:
         os.unlink(path)
 
@@ -1041,7 +1040,8 @@ def test_cli_override_rederives_the_grpo_generation_geometry(
         f"output_dir: {tmp_path / 'out'}\nuse_cpu: true\nbf16: false\nnum_generations: 2\n"
         "per_device_train_batch_size: 2\ngradient_accumulation_steps: 8\n"
     )
-    (config,) = H4ArgumentParser((GRPOConfig,)).parse_yaml_and_args(str(path), [override])
+    parser = HaloArgumentParser((GRPOConfig,))
+    (config,) = parser.parse_dict(parser.load_values([str(path), override]))
     assert config.world_size == 1
     assert (config.steps_per_generation, config.generation_batch_size) == (
         steps_per_generation,
@@ -1055,8 +1055,7 @@ def test_cli_fp16_override_reaches_the_toolkit_bf16_derivation(tmp_path):
     for."""
     path = tmp_path / "smpo.yaml"
     path.write_text(f"output_dir: {tmp_path / 'out'}\nuse_cpu: true\n")
-    with mock.patch("src.training.parser.install_log_tee"):
-        config = _parse_with_argv(H4ArgumentParser((SmoothMarginPOConfig,)), ["prog", str(path), "--fp16=true"])
+    config = _parse_with_argv(HaloArgumentParser((SmoothMarginPOConfig,)), ["prog", str(path), "--fp16=true"])
     assert (config.fp16, config.bf16, config.mixed_precision) == (True, False, "fp16")
 
 
@@ -1072,12 +1071,23 @@ def test_output_dir_is_rank0s_expansion_broadcast_once(tmp_path):
         return str(tmp_path / "rank0")
 
     with (
-        mock.patch("src.training.parser.broadcast_from_rank0", side_effect=rank0_value),
-        mock.patch("src.training.parser.install_log_tee"),
+        mock.patch.object(sys, "argv", ["prog", str(path)]),
+        mock.patch("src.entrypoints.script.broadcast_from_rank0", side_effect=rank0_value),
+        mock.patch("src.entrypoints.script.install_log_tee") as tee,
     ):
-        config = _parse_with_argv(H4ArgumentParser((OutputDirConfig,)), ["prog", str(path)])
+        config = parse_script_args(OutputDirConfig)
     assert config.output_dir == str(tmp_path / "rank0")
     assert len(broadcasts) == 1 and "%" not in broadcasts[0], broadcasts
+    tee.assert_called_once_with(str(tmp_path / "rank0"))
+
+
+def test_parse_leaves_output_dir_verbatim(tmp_path):
+    """The parser is pure: the output_dir expansion is the script entry's, so a launcher-free caller
+    (the environment tools) reads the YAML's value as written."""
+    path = tmp_path / "out.yaml"
+    path.write_text('output_dir: "run-%Y"\n')
+    config = _parse_with_argv(HaloArgumentParser((OutputDirConfig,)), ["prog", str(path)])
+    assert config.output_dir == "run-%Y"
 
 
 if __name__ == "__main__":

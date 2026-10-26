@@ -35,7 +35,7 @@ import src.trainers.grpo.rollout.async_rollouts as async_mod
 from src.distributed.parallelism_config import ParallelismConfig
 from src.runtime import collectives, consensus
 from src.trainers.grpo.environmental import DistributedAsyncEnvironmentalGRPOTrainer
-from src.trainers.grpo.rollout.weight_sync import sync_trainer_weights, sync_weights_to_client
+from src.trainers.grpo.rollout.weight_push import sync_trainer_weights, sync_weights_to_client
 from src.trainers.mixins.base import DistributedTrainerMixin
 from tests.common.gloo import run_gloo_ranks
 from tests.common.weight_sync import RecordingSender
@@ -78,7 +78,7 @@ def test_each_optimizer_step_enters_one_fenced_sync(monkeypatch, synced_at_step)
 class _SlowFlush(RecordingSender):
     """The forwarding rank's client, whose closing broadcast takes ``_FLUSH_S`` to land."""
 
-    def reset_prefix_cache(self) -> None:
+    def finish_weight_update(self) -> None:
         time.sleep(_FLUSH_S)
         self.landed = time.monotonic()
 
@@ -144,9 +144,9 @@ class _EngineClient(RecordingSender):
         self.BUILT.append(self)
 
     def init_communicator(self, device) -> None:
-        pass
+        self.sync_device = device
 
-    def reset_prefix_cache(self) -> None:
+    def finish_weight_update(self) -> None:
         self.flushes += 1
 
     def close_communicator(self) -> None:

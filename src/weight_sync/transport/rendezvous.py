@@ -18,23 +18,17 @@ logger = logging.getLogger(__name__)
 
 _ALL_INTERFACES = "0.0.0.0"
 _BIND_ALL_ENV = "HALO_WEIGHT_SYNC_BIND_ALL"
-# UDP "connect" target used only to make the kernel pick this host's outbound interface, whose local
-# address is then its routable IP. No packet is sent, so the address only has to be off-link and
-# non-loopback; a missing route falls back to loopback in :func:`_outbound_ip`.
+# A UDP "connect" target that makes the kernel pick the outbound interface; no packet is sent.
 _OUTBOUND_ROUTE_PROBE = ("8.8.8.8", 80)
 
 
 class RendezvousListener:
-    """An IPv4 socket bound and listening on ``bind_address:port`` for a ``TCPStore`` master to take over.
+    """An IPv4 socket listening on ``bind_address:port`` (0 = kernel-assigned), for a ``TCPStore`` master to
+    take over.
 
-    Opened before the peers are told where to dial, and held from the bind on: a port probed and
-    released first can be taken in between, and a peer retrying against a port nobody holds can be
-    handed that port as its own source (a TCP self-connect), after which the bind fails with the peer
-    already waiting. ``port`` 0 lets the kernel assign one; :attr:`port` is the port actually bound.
-
-    Handed to the store :meth:`start_store` builds, the fd is the store's only listener; a master that
-    opens its own listens on every interface whatever host it is given. Until then the socket is this
-    object's, and :meth:`close` (or leaving its ``with`` block) frees the port.
+    Held from the bind on, before the peers are told where to dial: a port probed and released first can be
+    taken in between, or handed to a retrying peer as its own source port. Until :meth:`start_store` hands it
+    over, :meth:`close` (or leaving the ``with`` block) frees the port.
     """
 
     def __init__(self, bind_address: str, port: int):
@@ -50,16 +44,11 @@ class RendezvousListener:
         self.port: int = listener.getsockname()[1]
         self.handed_over = False
         self._socket: socket.socket | None = listener
-        # The SGLang client hands the listener over on its group-formation thread while its failure
-        # path may close it from the caller's.
+        # The handover may run on a formation thread while a failure path closes from the caller's.
         self._lock = threading.Lock()
 
     def start_store(self, host: str, world_size: int, *, timeout_s: float, **options) -> TCPStore:
-        """The master ``TCPStore`` of a group of ``world_size`` ranks, serving on this listener.
-
-        ``options`` are the store's own keyword options (``use_libuv``, ``wait_for_workers``), set by each
-        group's bootstrap to what its engine side expects.
-        """
+        """The master ``TCPStore`` of a ``world_size`` group serving on this listener; ``options`` are the store's own."""
         with self._handover() as listen_fd:
             return TCPStore(
                 host_name=host,
@@ -73,13 +62,8 @@ class RendezvousListener:
 
     @contextmanager
     def _handover(self) -> Iterator[int]:
-        """Yield the fd to the one ``TCPStore(master_listen_fd=...)`` call that takes it over.
-
-        The store owns the fd from that call on, closing it in its destructor and on a failed start,
-        so the socket is detached on exit rather than closed: closing it under a live store aborts the
-        store's daemon thread, and after a failed start it would close whatever reused the fd number.
-        The store must be given :attr:`port`, which it checks the fd against.
-        """
+        """Yield the fd to the one ``TCPStore(master_listen_fd=...)`` call that owns it from then on, so the socket
+        is detached, not closed: closing it would abort a live store's daemon or a reused fd number."""
         with self._lock:
             listener, self._socket = self._socket, None
             if listener is None:
@@ -115,7 +99,7 @@ def _outbound_ip() -> str:
 
 
 def _is_local_address(host: str) -> bool:
-    """True when ``host`` is a bindable address of this machine (covers same-host-by-routable-IP)."""
+    """True when ``host`` is a bindable address of this machine."""
     if is_loopback(host):
         return True
     try:
@@ -129,12 +113,8 @@ def _is_local_address(host: str) -> bool:
 def _master_address(
     *, engine: str, server_url: str, server_host: str, advertised_host: str | None, host_env: str
 ) -> str:
-    """The address the engine's workers dial back to, as configured or detected.
-
-    Resolution order: ``advertised_host``, the engine's group-host env var ``host_env``, loopback when
-    the server is on this machine, then the default-route NIC. Raises when a remote server would be
-    told to dial a loopback address, which forms no group and times out.
-    """
+    """The address the engine's workers dial back to: ``advertised_host``, else ``host_env``, else loopback for a
+    server on this machine, else the default-route NIC. A remote server is never told to dial loopback."""
     master_address = advertised_host or (env_str(host_env) if host_env else None)
     if not master_address:
         # Same-host groups stay on loopback: firewalls drop hairpin traffic on the external NIC.
@@ -152,17 +132,9 @@ def _master_address(
 
 
 def _bind_address(master_address: str, *, engine: str, server_host: str, host_env: str) -> str:
-    """The local address the rendezvous listener binds: the advertised ``master_address``, resolved.
-
-    The store is unauthenticated and the engine reads the group's bootstrap from it, so it listens
-    only where the engine is told to dial. A name resolves once, here, to the one IPv4 address the
-    listener and the engine both use; the listener is IPv4-only, so an address with no IPv4 form
-    (an IPv6 literal, a name without an A record) raises whatever the bind mode.
-    ``HALO_WEIGHT_SYNC_BIND_ALL`` widens the listener to every interface for a trainer reached
-    through NAT or a port mapping, whose advertised address is not its own. Without it, an address
-    that is not local, the wildcard, or a name resolving to loopback while the server is remote
-    raises rather than widening.
-    """
+    """The IPv4 address the listener binds: ``master_address`` resolved once, since the unauthenticated store
+    listens only where the engine dials. ``HALO_WEIGHT_SYNC_BIND_ALL`` widens it to every interface for a
+    trainer behind NAT; otherwise an address that is not this host's own raises."""
     host_knob = f"{host_env or 'the group host'} (or the per-server group_host)"
     try:
         bind_address = socket.gethostbyname(master_address)
@@ -202,13 +174,9 @@ def open_group_rendezvous(
 ) -> tuple[str, RendezvousListener]:
     """``(master address, listener)``: the group's rendezvous, listening before the engine hears of it.
 
-    The listener binds the resolved master address (:func:`_master_address`, :func:`_bind_address`)
-    and ``port``, or a port the kernel assigns when it is 0, and the engine is told the port it holds
-    (:class:`RendezvousListener`). Outside ``HALO_WEIGHT_SYNC_BIND_ALL`` the engine is sent the bind
-    address rather than the name it was resolved from, since a name the server resolves differently
-    would be dialed where nothing listens. A configured port another socket holds raises here, before
-    the engine is asked anything, rather than leaving it waiting on a group that cannot form. The
-    caller hands the listener to the store, or closes it.
+    The engine is sent the bound address, not the name it came from, which the server could resolve
+    elsewhere. A configured port another socket holds raises before the engine is asked anything. The caller
+    hands the listener to the store, or closes it.
     """
     master_address = _master_address(
         engine=engine,

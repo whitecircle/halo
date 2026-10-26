@@ -3,7 +3,7 @@
 Each actor (own process) drives env interactions and generates via the rollout server's
 /v1/chat/completions (vLLM or SGLang).
 RolloutManager fans prompts across actors and server URLs round-robin under a bounded Semaphore.
-Weight sync is separate, over NCCL (:mod:`src.trainers.grpo.rollout.weight_sync_clients`)."""
+Weight sync is separate, over NCCL (:mod:`src.weight_sync`)."""
 
 import asyncio
 import inspect

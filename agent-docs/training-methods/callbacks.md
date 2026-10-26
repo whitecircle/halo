@@ -2,7 +2,7 @@
 
 Callbacks extend `transformers.TrainerCallback` to log metrics, generate samples, schedule hyperparameters and balance MoE routers. Source: `src/callbacks/`.
 
-Scripts assemble them in `build_training_callbacks(...)` (`src/training/script_runner.py`), which delegates the efficiency / MoE / profiler callbacks and the `moe_balancing` resolution to `build_perf_callbacks(...)` (`src/callbacks/wiring.py`). `run_trainer` then reorders HF's report-to integrations last: they fire before user callbacks, so otherwise every key added via `logs.update(...)` is lost.
+Scripts assemble them in `configure_balancing_and_build_callbacks(...)` (`src/entrypoints/script.py`): `configure_moe_balancing` (`src/callbacks/balancing.py`, collective) resolves, agrees and applies `moe_balancing`, then `build_run_callbacks` (`src/callbacks/factory.py`) builds the roster for that mode. `run_trainer` then reorders HF's report-to integrations last: they fire before user callbacks, so otherwise every key added via `logs.update(...)` is lost.
 
 ## Built-in callbacks
 
@@ -12,7 +12,7 @@ Scripts assemble them in `build_training_callbacks(...)` (`src/training/script_r
 | `GenerateExamplesCallback` | Eval-time sample generations | `generate_eval_examples: true` |
 | `EfficiencyCallback` | tokens/s/GPU, step time, memory | `enable_efficiency_metrics: true` |
 | `MoEMetricsCallback` | `moe/*` per-expert load | `enable_moe_metrics: true` (default) |
-| `RouterBiasBalancingCallback` | DeepSeek-V3 bias update, plus `moe/*` | a `bias_update` mode |
+| `BalancingBiasCallback` | DeepSeek-V3 bias update, plus `moe/*` | a `bias_update` mode |
 | `TorchProfilerCallback` | Per-rank traces, memory timeline | `enable_torch_profiler: true` ([Debugging](../reference/debugging.md)) |
 | `VariableSchedulerCallback` | Schedules a model attribute | Manual |
 
@@ -66,15 +66,15 @@ Counted is the router's **own** selection, not `topk(router_logits)`: a DeepSeek
 
 It emits nothing in three cases:
 
-- Under either bias-update mode — `RouterBiasBalancingCallback` emits the same keys from its load counter.
+- Under either bias-update mode — `BalancingBiasCallback` emits the same keys from its load counter.
 - Under pipeline parallelism, where it is not wired: the stage forwards return bare tensors without `router_logits`, so `bias_update` is the route to load metrics there.
 - Where `output_router_logits` is off, stamped forced-off by the balancing strategy or just unset. The flag costs a `[B*S, num_experts]` tensor per MoE layer per forward **and** adds the aux loss, so metrics never enable it; opt in via `model_init_kwargs`.
 
 Two live paths bypass the hooks even when wired: a wrapper routing without the HF router module (`_ep_severs_aux_loss` — Bailing/Ling, Inkling, DeepSeek-V4), and a GRPO trainer taking log-probs from the backbone alone. Both warn once after the first step; use `bias_update` there.
 
-### RouterBiasBalancingCallback
+### BalancingBiasCallback
 
-DeepSeek-V3 auxiliary-loss-free router balancing (`src/callbacks/router_bias_balancing.py`). The bias is added to the *detached* top-k scores, so gradients flow through un-biased gating weights and quality matches no-balancing.
+DeepSeek-V3 auxiliary-loss-free router balancing (`src/callbacks/balancing.py`). The bias is added to the *detached* top-k scores, so gradients flow through un-biased gating weights and quality matches no-balancing.
 
 The rule is `b_i ← b_i + γ · sign(mean_count − count_i)` over tokens routed to expert *i* in the last step, summed across ranks. It runs every step; only the `moe/*` summary is periodic, since it ends in a host sync. Defaults: `update_rate=1e-3`, `log_every_n_steps=1`, `exclude_last_slot` off the router class attribute `_has_discard_expert_slot`.
 
@@ -97,7 +97,7 @@ The contract is checked on the **enabled tree**, not the class declaration: a re
 >
 > The side-buffer families add the bias to **softmax probabilities** of scale `1/num_experts`: the 1e-3 default is one sign step of ~50% of uniform at 512 experts, and the callback warns past 25%. GPT-OSS's adopted `router.bias` is in **logit space**, where 1e-3 is sub-ULP in bf16 — raise it toward 1e-2 and watch `moe/load_cv`.
 
-**Requires EP patching** — `ep_group_size > 1 or use_grouped_gemm`, so `expert_parallel_size=1` still qualifies with grouped GEMM on. Without those wrappers, and on a dense model, an explicit `bias_update` raises rather than balancing nothing, except on routers with a native buffer (Zaya).
+**Requires EP patching** — `ep_group_size > 1 or use_grouped_gemm`, so `expert_parallel_size=1` still qualifies with grouped GEMM on. Without those wrappers, and on a dense model, an explicit `bias_update` raises rather than balancing nothing, except on routers with a native buffer (Zaya). `bias_update_transient` is refused under pipeline parallelism.
 
 ### VariableSchedulerCallback
 
@@ -120,8 +120,8 @@ router_balancing_rate: 1.0e-3    # gamma; only used when a bias-update mode is a
 
 | `moe_balancing` | Effect | `router_aux_loss_coef` | `output_router_logits` | Callback |
 |---|---|---|---|---|
-| `bias_update` | Sign update into the family's own checkpoint slot; **raises** on any router left on the side-buffer | **forced 0** | **forced False** | `RouterBiasBalancingCallback` |
-| `bias_update_transient` | The same update in a trainer-only side-buffer; **raises** where every router exports natively | **forced 0** | **forced False** | `RouterBiasBalancingCallback` |
+| `bias_update` | Sign update into the family's own checkpoint slot; **raises** on any router left on the side-buffer | **forced 0** | **forced False** | `BalancingBiasCallback` |
+| `bias_update_transient` | The same update in a trainer-only side-buffer; **raises** where every router exports natively | **forced 0** | **forced False** | `BalancingBiasCallback` |
 | `aux_loss` | The model's own switch-style aux loss | preserved | **True** only where the term reaches the loss | none |
 | `none` | No intervention; a self-balancing model keeps doing so | preserved | preserved | none |
 

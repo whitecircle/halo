@@ -1,7 +1,7 @@
 #!/usr/bin/env python
 """Router balancing-bias checkpoint save/restore round-trip.
 
-The DeepSeek-V3 bias-update balancer (``RouterBiasBalancingCallback``) accumulates a per-expert routing
+The DeepSeek-V3 bias-update balancer (``BalancingBiasCallback``) accumulates a per-expert routing
 correction that is a plain attribute on each EP/router module — invisible to FSDP2 and therefore absent
 from the model checkpoint. ``save_balancing_biases`` / ``restore_balancing_biases`` carry it across a
 resume so a preempted MoE run keeps its balance instead of re-imbalancing from zero. This exercises that round-trip on a fake module tree (no GPU/dist:

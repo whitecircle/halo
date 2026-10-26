@@ -259,12 +259,13 @@ def _tokenizer():
 
 def _load(policy, *, model_source: str, reset_sinks: bool, parallelism=None):
     """The script's reference load for ``policy``, as ``main`` calls it."""
+    args = _script_args()
+    args.reset_sinks = reset_sinks
     return offline_grpo_script._load_kl_reference(
-        _script_args(),
+        args,
         types.SimpleNamespace(parallelism_config=parallelism or ParallelismConfig(), model_source=model_source),
         _config(),
         ModelConfig(model_name_or_path=BASE, model_revision="abc123", trust_remote_code=False),
-        types.SimpleNamespace(reset_sinks=reset_sinks),
         policy=policy,
         tokenizer=_tokenizer(),
         peft_config=None,

@@ -122,10 +122,9 @@ def _preference_reference(*, reset_sinks, attn_default=None, attn_implementation
 def _script_teacher(*, reset_sinks):
     """The shipped distillation launch path (the script preloads the teacher for the trainer)."""
     return distill_script._load_distill_teacher(
-        args=types.SimpleNamespace(teacher_model=AUX_MODEL, teacher_model_revision=None),
+        args=types.SimpleNamespace(teacher_model=AUX_MODEL, teacher_model_revision=None, reset_sinks=reset_sinks),
         model_config=types.SimpleNamespace(attn_implementation=None, trust_remote_code=False),
         training_config=types.SimpleNamespace(bf16=True, fp16=False),
-        dist_args=types.SimpleNamespace(reset_sinks=reset_sinks),
         is_vlm=False,
         local_rank=0,
     )
@@ -134,12 +133,11 @@ def _script_teacher(*, reset_sinks):
 def _sdpg_reference(*, reset_sinks):
     """The SDPG self-distillation ``L_ref`` KL anchor."""
     args = _token_setup_args()
-    args.reference_kl_coef, args.reference_model_name_or_path = 0.1, AUX_MODEL
+    args.reference_kl_coef, args.reference_model_name_or_path, args.reset_sinks = 0.1, AUX_MODEL, reset_sinks
     return self_distill_script._load_sdpg_reference(
         args=args,
         model_config=ModelConfig(model_name_or_path=AUX_MODEL),
         sft_config=types.SimpleNamespace(bf16=True, fp16=False),
-        dist_args=types.SimpleNamespace(reset_sinks=reset_sinks),
         tokenizer=_tokenizer(),
         is_vlm=False,
     )
@@ -147,14 +145,15 @@ def _sdpg_reference(*, reset_sinks):
 
 def _offline_grpo_reference(*, reset_sinks):
     """Native expert LoRA uses a live unadapted base rather than full-FT's run-start score cache."""
+    args = _token_setup_args()
+    args.reset_sinks = reset_sinks
     return offline_grpo_script._load_kl_reference(
-        _token_setup_args(),
+        args,
         types.SimpleNamespace(
             parallelism_config=ParallelismConfig(expert_lora=ExpertLoraSpec(r=2, alpha=4)), model_source=AUX_MODEL
         ),
         types.SimpleNamespace(kl_beta=0.1, bf16=True, fp16=False),
         ModelConfig(model_name_or_path=AUX_MODEL),
-        types.SimpleNamespace(reset_sinks=reset_sinks),
         policy=nn.Sequential(StubEPLayerBase()),
         tokenizer=_tokenizer(),
         peft_config=None,
@@ -224,7 +223,7 @@ POLICY_CONFIG = ModelConfig(model_name_or_path=AUX_MODEL, model_revision="abc123
 
 def _anchor_args(reference):
     args = _token_setup_args()
-    args.reference_kl_coef, args.reference_model_name_or_path = 0.1, reference
+    args.reference_kl_coef, args.reference_model_name_or_path, args.reset_sinks = 0.1, reference, True
     return args
 
 
@@ -236,7 +235,6 @@ def test_the_sdpg_reference_takes_the_policy_pin_only_from_the_policy_repo(refer
             args=_anchor_args(reference),
             model_config=POLICY_CONFIG,
             sft_config=types.SimpleNamespace(bf16=True, fp16=False),
-            dist_args=types.SimpleNamespace(reset_sinks=True),
             tokenizer=_tokenizer(),
             is_vlm=False,
         )
@@ -369,7 +367,7 @@ def test_both_loads_in_a_preference_script_share_one_attention_default(script):
     for node in ast.walk(tree):
         if not isinstance(node, ast.Call) or not isinstance(node.func, ast.Name):
             continue
-        if node.func.id not in ("load_model_for_training", "load_reference_model_for_preference"):
+        if node.func.id not in ("load_policy_model", "load_reference_model_for_preference"):
             continue
         passed = [kw.value for kw in node.keywords if kw.arg == "attn_default"]
         assert passed, f"{script.name}: {node.func.id} does not pass attn_default"

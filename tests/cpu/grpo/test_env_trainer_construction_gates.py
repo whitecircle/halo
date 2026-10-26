@@ -40,7 +40,7 @@ from trl import GRPOConfig, GRPOTrainer
 
 from src.configs.grpo_environmental import AsyncTrainingConfig
 from src.environments.registry import resolve_environment
-from src.environments.rollout_config import DEFAULT_REASONING_END_TOKEN, SGLANG_BACKEND, VLLM_BACKEND
+from src.environments.rollout_config import SGLANG_BACKEND, VLLM_BACKEND
 from src.trainers.grpo.environmental import (
     DistributedAsyncEnvironmentalGRPOTrainer,
     reject_off_policy_mask_threshold,
@@ -341,7 +341,7 @@ class _Tokenizer:
 
     def __init__(self, knows_close: bool):
         self._encodings = {
-            DEFAULT_REASONING_END_TOKEN: [_CLOSE_ID] if knows_close else [60, 61, 62],
+            AsyncTrainingConfig.rollout_reasoning_end_token: [_CLOSE_ID] if knows_close else [60, 61, 62],
             _OPENER: _OPENER_IDS,
         }
         self.added_tokens_decoder = dict.fromkeys(({_CLOSE_ID} if knows_close else set()) | {70, 72, 74})
@@ -405,7 +405,9 @@ def test_a_marker_the_tokenizer_does_not_write_warns_and_trains_on_the_forced_cl
     with caplog.at_level(logging.WARNING, logger="src.trainers.grpo.environmental"):
         assert host._resolve_forced_close_ids() is None
     warnings = [r.getMessage() for r in caplog.records if r.levelno == logging.WARNING]
-    assert any("stay in the policy loss" in w and DEFAULT_REASONING_END_TOKEN in w for w in warnings), warnings
+    assert any(
+        "stay in the policy loss" in w and AsyncTrainingConfig.rollout_reasoning_end_token in w for w in warnings
+    ), warnings
 
 
 def _count_end_id(budgets: dict, knows_close: bool = True, **config) -> int | None:

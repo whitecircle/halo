@@ -1,5 +1,4 @@
-"""Deadline-bounded host waits on the CUDA work a weight-sync broadcast queued: these comms have no torch
-watchdog, so a peer that never joins would otherwise park the trainer."""
+"""Deadline-bounded host waits on the CUDA work a weight-sync broadcast queued, which no torch watchdog covers."""
 
 import time
 from collections.abc import Callable, Iterator
@@ -9,16 +8,9 @@ import torch
 
 from src.env import env_positive_float
 
-# Deadline for draining one chunk's broadcasts (a vLLM packed buffer, a SGLang chunk's sends), sized for a
-# full chunk over a slow link; HALO_NCCL_SYNC_TIMEOUT_SECONDS replaces it, while the warm-up and the
-# failure-path cleanup keep their own shorter deadlines. Read once at import, so a malformed value cannot
-# raise mid-RL-step.
+# Deadline for draining one chunk's broadcasts over a slow link (HALO_NCCL_SYNC_TIMEOUT_SECONDS), read once
+# at import so a malformed value cannot raise mid-RL-step.
 BROADCAST_DRAIN_TIMEOUT_S = env_positive_float("HALO_NCCL_SYNC_TIMEOUT_SECONDS", None) or 600.0
-
-# Poll cadence of the bounded sync loop. It sits on the critical path once per drained buffer or
-# chunk, a few milliseconds of transfer each, so the granularity is a direct per-chunk tax; 1 ms
-# still yields the GIL between polls.
-_SYNC_POLL_INTERVAL_S = 0.001
 
 
 @contextmanager
@@ -32,12 +24,8 @@ def _aborting_on_failure(abort: Callable[[], None]) -> Iterator[None]:
 
 
 def bounded_event_sync(event: torch.cuda.Event, timeout_s: float, what: str, *, abort: Callable[[], None]) -> None:
-    """Wait for a recorded ``event``; when ``timeout_s`` passes or the wait itself fails, call ``abort`` and raise.
-
-    ``abort`` ends the transport the event's work runs on: a kernel left spinning on a peer that never
-    answers hangs every later device synchronization until the abort kills it, and a transport whose wait
-    failed (a sticky CUDA error) is then refused by name rather than reused or destroyed as if healthy.
-    """
+    """Wait for a recorded ``event``; when ``timeout_s`` passes or the wait fails, ``abort`` the transport (a
+    kernel spinning on a dead peer hangs every later device sync) and raise."""
     deadline = time.monotonic() + timeout_s
     with _aborting_on_failure(abort):
         while not event.query():
@@ -52,7 +40,8 @@ def bounded_event_sync(event: torch.cuda.Event, timeout_s: float, what: str, *, 
                     f"(NCCL_CUMEM_ENABLE). scripts/profiling/weight_sync_transport.py reports the "
                     f"transport the group actually formed on."
                 )
-            time.sleep(_SYNC_POLL_INTERVAL_S)
+            # 1 ms: the poll is on the per-chunk critical path and still yields the GIL.
+            time.sleep(0.001)
 
 
 def bounded_stream_sync(stream: torch.cuda.Stream, timeout_s: float, what: str, *, abort: Callable[[], None]) -> None:

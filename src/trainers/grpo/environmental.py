@@ -370,7 +370,7 @@ class DistributedAsyncEnvironmentalGRPOTrainer(
         self._world_metrics = WorldMetrics()
         self._truncation_alarm_rate = self.async_config.truncation_alarm_rate
         self._drop_degenerate_groups = self.async_config.drop_degenerate_groups
-        # Both range-validated by AsyncTrainingConfig._validate_ranges (finiteness included).
+        # Both range-validated by AsyncTrainingConfig._validate_fields (finiteness included).
         self._scale_rewards_std_floor = self.async_config.scale_rewards_std_floor
         reject_inert_std_floor(self.args.scale_rewards, self._scale_rewards_std_floor)
         # Ahead of the balance gate, which refuses both beside it: here each is refused on its own.
@@ -422,7 +422,7 @@ class DistributedAsyncEnvironmentalGRPOTrainer(
                 "trajectory is ever masked and the circuit breaker would silently never fire."
             )
         early_stop = build_early_stop_callback(
-            self.async_config.build_early_stop(), gap_key=LOGRATIO_MEAN_KEY, gap_logged=self._is_correction
+            self.async_config.build_early_stop_config(), gap_key=LOGRATIO_MEAN_KEY, gap_logged=self._is_correction
         )
         if early_stop is not None:
             self.add_callback(early_stop)

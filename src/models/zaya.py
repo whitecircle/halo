@@ -36,7 +36,7 @@ def patch_zaya_router_load_recording() -> None:
         return
 
     router_cls.expert_load_counter = None  # the slot iter_balancing_routers keys on
-    # Armed by RouterBiasBalancingCallback: the native buffer always exists, so presence cannot gate
+    # Armed by BalancingBiasCallback: the native buffer always exists, so presence cannot gate
     # recording as it does on the EP base.
     router_cls.balancing_active = False
     # The discard-slot exclusion (bias update and load metrics) keys on this.

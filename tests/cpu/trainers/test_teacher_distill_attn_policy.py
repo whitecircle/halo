@@ -39,16 +39,14 @@ def _script_teacher_load_capturing(
     *, revision=None, reset_sinks=True, is_vlm=False, bf16=True, fp16=False, pinned_attn=None, trust_remote_code=False
 ):
     """Run the shipped script's teacher load with the shared loader's hub calls stubbed."""
-    args = types.SimpleNamespace(teacher_model="org/teacher", teacher_model_revision=revision)
+    args = types.SimpleNamespace(teacher_model="org/teacher", teacher_model_revision=revision, reset_sinks=reset_sinks)
     model_config = types.SimpleNamespace(attn_implementation=pinned_attn, trust_remote_code=trust_remote_code)
     training_config = types.SimpleNamespace(bf16=bf16, fp16=fp16)
-    dist_args = types.SimpleNamespace(reset_sinks=reset_sinks)
     with stub_frozen_loader() as caps:
         teacher = distill_script._load_distill_teacher(
             args=args,
             model_config=model_config,
             training_config=training_config,
-            dist_args=dist_args,
             is_vlm=is_vlm,
             local_rank=LOCAL_RANK,
         )

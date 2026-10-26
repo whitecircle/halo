@@ -27,10 +27,10 @@ from transformers.models.glm5_next.modeling_glm5_next import Glm5NextForConditio
 from transformers.models.laguna.configuration_laguna import LagunaConfig
 from transformers.models.laguna.modeling_laguna import LagunaForCausalLM
 
+from src.callbacks.balancing import apply_balancing_mode
 from src.distributed.context_parallel.config import CPConfig
 from src.distributed.context_parallel.model_rules import SUPPORTED_ATTN_IMPLEMENTATIONS
 from src.distributed.context_parallel.ulysses_model import UlyssesModel
-from src.distributed.expert_parallel.balancing_strategy import apply_balancing_strategy
 from src.distributed.expert_parallel.moe_layer.layer import EPMoELayerBase
 from src.distributed.expert_parallel.patching import patch_moe_model_for_ep
 from src.models import moe_aux_loss
@@ -92,7 +92,7 @@ def _build(family: str, *, balanced: bool, ep: bool = False):
     if ep:
         patch_moe_model_for_ep(model, single_process_ep_config(detect_moe_experts_topk(model)[0]))
     if balanced:
-        apply_balancing_strategy(model, "aux_loss", is_moe=True)
+        apply_balancing_mode(model, "aux_loss", is_moe=True)
     else:
         model.config.get_text_config().output_router_logits = True
     model.train()
@@ -236,7 +236,7 @@ def test_cp_wrapper_resolves_and_routes_through_its_inner_model(tmp_path):
         inner.config._attn_implementation = SUPPORTED_ATTN_IMPLEMENTATIONS[0]
         wrapper = UlyssesModel(inner, CPConfig(1, stage_world_size=1, stage_base_rank=0, nvlink_domain_size=1))
         assert resolve_balancing_mode("auto", wrapper, is_moe=True) == "aux_loss"
-        apply_balancing_strategy(wrapper, "aux_loss", is_moe=True)
+        apply_balancing_mode(wrapper, "aux_loss", is_moe=True)
         assert getattr(inner.model, moe_aux_loss._INSTALLED_ATTR, None) is not None
     finally:
         dist.destroy_process_group()

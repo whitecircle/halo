@@ -234,7 +234,7 @@ def run(ctx):
 
     # Only rank 0 built and wrote the checkpoint above, so its RNG is one draw ahead. Re-seed every
     # rank identically — the property the absent-head init relies on, which production gets from
-    # setup_training_environment's set_seed before the model load.
+    # configure_training_run's set_seed before the model load.
     ctx.broadcast_seed(1234)
     head_initialized = True
 

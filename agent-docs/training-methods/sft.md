@@ -94,7 +94,7 @@ Two verdicts decide a vision-language run. The **model class follows the checkpo
 
 The **data path follows the run** (`is_vlm_run`, `src/data/vlm.py`): the VLM path only when the checkpoint is multimodal **and** the run declares image data. A natively-multimodal checkpoint (Gemma 4, Qwen3.5/3.6, Inkling) on text-only rows is a text run, so packing, padding-free and `train_on_last_assistant_only` stay available.
 
-The processing class is the checkpoint's processor wherever it ships a processor config (`processor_config.json` / `preprocessor_config.json`), text runs included: the export saves it, and vLLM builds the multimodal class's processor from it at startup. A multimodal checkpoint shipping none ([Step-3.7 Flash](../models/step3p7.md#model-loading)) trains text runs through its tokenizer and refuses an image run at the processor load (`src/distributed/loading/vlm_setup.py`).
+The processing class is the checkpoint's processor wherever it ships a processor config (`processor_config.json` / `preprocessor_config.json`), text runs included: the export saves it, and vLLM builds the multimodal class's processor from it at startup. A multimodal checkpoint shipping none ([Step-3.7 Flash](../models/step3p7.md#model-loading)) trains text runs through its tokenizer and refuses an image run at the processor load (`src/entrypoints/model_setup.py`).
 
 Images ride embedded in message content, or in a column named by `images_field`, pairing with any image placeholders, else the first user turn — so hub datasets that keep images outside the conversation (FineVision, the_cauldron, Docmatix) need only field mappings. Either shape declares the run VLM, as does an `images` / `image` / `pixel_values` column ([rules](../data/dataset-formats.md#sft-vlm)):
 

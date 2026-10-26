@@ -11,7 +11,7 @@
 * SFT refuses ``packing`` / ``padding_free`` for a checkpoint with compressed-KV layers off the
   config its modality probe already read, before the training setup and the model load.
 
-Each refusal must fire before the distributed init and the model load; the anti-over-rejection
+Each refusal must fire before the training setup and the model load; the anti-over-rejection
 cases reach the first stubbed step past the guards instead.
 
 Usage:
@@ -52,14 +52,14 @@ def _run_main(script: str, config_body: str, tmp_path: Path, **stubs) -> None:
         f"bf16: false\nuse_cpu: true\n{config_body}"
     )
     with contextlib.ExitStack() as stack:
-        stack.enter_context(mock.patch("src.training.parser.install_log_tee"))
+        stack.enter_context(mock.patch("src.entrypoints.script.install_log_tee"))
         stack.enter_context(mock.patch.object(sys, "argv", ["prog", str(config)]))
         for name, stub in stubs.items():
             stack.enter_context(mock.patch.object(module, name, stub))
         module.main()
 
 
-# SFT: before init_distributed, the first step that touches the process group or the hub.
+# SFT: before the modality probe, the first step that touches the hub.
 
 
 @pytest.mark.parametrize(
@@ -71,12 +71,12 @@ def _run_main(script: str, config_body: str, tmp_path: Path, **stubs) -> None:
 )
 def test_sft_refuses_trl_dataset_prep_knobs(config_body, knob, tmp_path):
     with pytest.raises(ValueError, match=rf"{_REFUSED}.*{knob}"):
-        _run_main("sft.py", config_body, tmp_path, init_distributed=_stop)
+        _run_main("sft.py", config_body, tmp_path, probe_checkpoint=_stop)
 
 
 def test_sft_refuses_eval_packing_without_packing(tmp_path):
     with pytest.raises(ValueError, match="eval_packing=True packs nothing without packing=True"):
-        _run_main("sft.py", "eval_packing: true\n", tmp_path, init_distributed=_stop)
+        _run_main("sft.py", "eval_packing: true\n", tmp_path, probe_checkpoint=_stop)
 
 
 @pytest.mark.parametrize(
@@ -93,7 +93,7 @@ def test_sft_refuses_eval_packing_without_packing(tmp_path):
 )
 def test_sft_accepts_what_it_honors(config_body, tmp_path):
     with pytest.raises(_PastTheGuards):
-        _run_main("sft.py", config_body, tmp_path, init_distributed=_stop)
+        _run_main("sft.py", config_body, tmp_path, probe_checkpoint=_stop)
 
 
 def _run_sft_to_dataset(tmp_path, config_body: str, *, preprocessed: bool) -> None:
@@ -102,7 +102,6 @@ def _run_sft_to_dataset(tmp_path, config_body: str, *, preprocessed: bool) -> No
         "sft.py",
         config_body,
         tmp_path,
-        init_distributed=lambda: None,
         probe_checkpoint=lambda *args, **kwargs: (None, False),
         init_training_script=lambda *args, **kwargs: SimpleNamespace(parallelism_config=None),
         load_script_datasets=lambda *args, **kwargs: ((None, preprocessed), False),
@@ -131,7 +130,6 @@ def test_sft_refuses_multi_document_rows_on_compressed_kv_before_the_setup(confi
         "sft.py",
         config_body,
         tmp_path,
-        init_distributed=lambda: None,
         probe_checkpoint=lambda *args, **kwargs: (checkpoint_config, False),
         init_training_script=_stop,
     )

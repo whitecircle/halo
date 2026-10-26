@@ -1,22 +1,28 @@
-"""``OfflineGRPOConfig`` — training config for offline GRPO."""
+"""Offline GRPO script arguments and ``OfflineGRPOConfig``."""
 
 from dataclasses import dataclass, field
-from typing import Literal
+from typing import ClassVar, Literal
 
 from transformers import TrainingArguments
 
-from src.config_validation import RangeValidatedConfig, present, require_finite, require_int, require_positive_int
+from src.config_validation import ValidatedConfig, present, require_finite, require_int
 from src.configs.grpo import ChunkedLogprobsArguments
-from src.configs.script_arguments import DatasetNumProcArguments, ModelInitKwargsArguments
+from src.configs.script_arguments import (
+    CommonScriptArguments,
+    DatasetNumProcArguments,
+    GenerationEvalArguments,
+    ModelInitKwargsArguments,
+)
+
+
+@dataclass
+class OfflineGRPOScriptArguments(GenerationEvalArguments, CommonScriptArguments):
+    PROJECT_NAME: ClassVar[str] = "offline-grpo-tuning"
 
 
 @dataclass
 class OfflineGRPOConfig(
-    ChunkedLogprobsArguments,
-    DatasetNumProcArguments,
-    ModelInitKwargsArguments,
-    RangeValidatedConfig,
-    TrainingArguments,
+    ChunkedLogprobsArguments, DatasetNumProcArguments, ModelInitKwargsArguments, ValidatedConfig, TrainingArguments
 ):
     r"""Training arguments for [`OfflineGRPOTrainer`]; per-field docs are in each field's ``help`` metadata."""
 
@@ -42,16 +48,10 @@ class OfflineGRPOConfig(
             "parallelism. See agent-docs/reference/configuration-reference.md#offlinegrpoconfig."
         },
     )
-
     kl_beta: float = field(
-        default=0.0,
-        metadata={"help": "Coefficient of the KL penalty to the reference policy; 0 = no KL term."},
+        default=0.0, metadata={"help": "Coefficient of the KL penalty to the reference policy; 0 = no KL term."}
     )
-
-    disable_dropout: bool = field(
-        default=True,
-        metadata={"help": "Whether to disable dropout in the model."},
-    )
+    disable_dropout: bool = field(default=True, metadata={"help": "Whether to disable dropout in the model."})
     padding_value: int | None = field(
         default=None,
         metadata={"help": "Pad token id used by the collator; unset takes the processing class's pad token."},
@@ -109,12 +109,8 @@ class OfflineGRPOConfig(
         },
     )
 
-    def __post_init__(self):
-        self._validate_ranges()
-        super().__post_init__()
-
-    def _validate_ranges(self) -> None:
-        super()._validate_ranges()
+    def _validate_fields(self) -> None:
+        super()._validate_fields()
         owner = type(self).__name__
         # The ``float | str`` union bypasses the parser's Literal gate, so a misspelled sentinel would
         # otherwise fail only inside ``datasets.map`` on ``float(...)``.
@@ -133,14 +129,13 @@ class OfflineGRPOConfig(
                     f"{emphasis}. The consumer applies the factor only when it exceeds 1.0, so (0.0, 1.0] "
                     f"and negative values are silent no-ops."
                 )
-        require_finite(owner, kl_beta=self.kl_beta)
-        if self.kl_beta < 0:
-            raise ValueError(f"{owner}: kl_beta must be >= 0 (0 = no KL term), got {self.kl_beta}")
+        require_finite(owner, ge=0, why=" (0 = no KL term)", kl_beta=self.kl_beta)
         require_finite(
             owner, **present(min_log_prob=self.min_log_prob, initial_min_log_prob=self.initial_min_log_prob)
         )
-        require_positive_int(
+        require_int(
             owner,
+            ge=1,
             **present(
                 max_prompt_length=self.max_prompt_length,
                 max_completion_length=self.max_completion_length,
@@ -148,4 +143,4 @@ class OfflineGRPOConfig(
             ),
         )
         # A token id indexes the embedding table.
-        require_int(owner, minimum=0, **present(padding_value=self.padding_value))
+        require_int(owner, ge=0, **present(padding_value=self.padding_value))

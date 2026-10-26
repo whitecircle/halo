@@ -247,7 +247,7 @@ Checkpoint layout and expert un-fuse rules live in
 ### Construction gates
 
 Which families each backend accepts for RL is gated trainer-side at construction
-(`validate_weight_sync_support`, `src/trainers/grpo/rollout/weight_sync.py`). Inkling, GLM-5 Next
+(`reject_unsyncable_model`, `src/trainers/grpo/rollout/weight_push.py`). Inkling, GLM-5 Next
 and Cohere2 MoE declare `_supports_weight_sync = False` and are refused on both engines; every other
 refusal is an engine fact on that engine's client
 ([Which families each engine serves](#which-families-each-engine-serves)).

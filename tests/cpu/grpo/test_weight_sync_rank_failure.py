@@ -12,7 +12,7 @@ parked on one rank's HTTP 500, and the real cause is in a log nobody reads.
 So the sends run under a :class:`DeferredRankFailure`: the forwarding rank records the failure, keeps
 entering every remaining collective, and the verdict is taken at a rank-uniform ``reject`` that
 raises on all ranks with the originating rank and its real cause. Both halves of the push are covered
-here — the streamed sends and the buffered flush (``reset_prefix_cache``, where the broadcast
+here — the streamed sends and the buffered flush (``finish_weight_update``, where the broadcast
 actually lands) — plus the retaining expert gather, whose assembly is the largest rank-local
 allocation in the sync and therefore the likeliest thing to fail on the forwarding rank alone.
 
@@ -35,7 +35,7 @@ import torch.nn as nn
 from torch.distributed.tensor import Shard, distribute_tensor, init_device_mesh
 
 from src.runtime.consensus import DeferredRankFailure
-from src.trainers.grpo.rollout.weight_sync import _send_ep_expert_weights, sync_weights_to_client
+from src.trainers.grpo.rollout.weight_push import _send_ep_expert_weights, sync_weights_to_client
 from tests.common.gloo import run_gloo_ranks
 
 WORLD_SIZE = 2
@@ -77,7 +77,7 @@ class _FakeClient:
         if self._fail_send_at and len(self.sent) == self._fail_send_at:
             raise _EngineRejected(f"engine refused parameter {len(self.sent)}")
 
-    def reset_prefix_cache(self) -> None:
+    def finish_weight_update(self) -> None:
         self.flushes += 1
         if self._fail_flush:
             raise _EngineRejected("engine refused the buffered broadcast")

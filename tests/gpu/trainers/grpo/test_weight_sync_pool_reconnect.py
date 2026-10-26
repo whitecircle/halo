@@ -2,7 +2,7 @@
 """A weight-sync pool whose client fails to open an update before any chunk went out reconnects once and
 lands the whole sync through the rebuilt client.
 
-``InferenceClientManager`` retries a failed client step once, on a fresh client, only while nothing of
+``WeightSyncPool`` retries a failed client step once, on a fresh client, only while nothing of
 the sync reached the engine, since re-sending the snapshots it kept then puts the whole update there.
 The pool's client here fails its first update open, as against a server that dropped the request; the
 pool must retire it (closing its communicator and freeing the group port), form a new client on the
@@ -23,8 +23,8 @@ from unittest.mock import patch
 import torch
 from transformers import AutoModelForCausalLM
 
-from src.trainers.grpo.rollout.weight_sync_clients import InferenceClientManager
 from src.weight_sync.clients.vllm import VLLMWeightSyncClient
+from src.weight_sync.pool import WeightSyncPool
 from src.weight_sync.transport.pynccl import PyNcclCommunicator
 from tests.common.harness import gpu_test_main
 from tests.common.on_policy_e2e import probe_top_logprobs, record_served_baseline, served_policy_moved
@@ -33,16 +33,16 @@ from tests.common.weight_sync import VLLM_DENSE_SERVER_URL, weight_transfer_port
 from tests.common.weight_sync_reinit import CONNECTION_TIMEOUT_S, PERTURBATION, PERTURBED_PARAM, VLLM_REINIT_MODEL
 
 
-def _push(manager: InferenceClientManager, weight: torch.Tensor) -> None:
-    manager.update_named_param(PERTURBED_PARAM, weight)
-    manager.reset_prefix_cache()
+def _push(pool: WeightSyncPool, weight: torch.Tensor) -> None:
+    pool.update_named_param(PERTURBED_PARAM, weight)
+    pool.finish_weight_update()
 
 
-def _restore(manager: InferenceClientManager, original: torch.Tensor) -> dict[str, float] | None:
+def _restore(pool: WeightSyncPool, original: torch.Tensor) -> dict[str, float] | None:
     """Push the checkpoint's own weight back and probe it, or ``None`` if that failed. Runs on every
     path: the tier's next suite asserts against the unperturbed server."""
     try:
-        _push(manager, original)
+        _push(pool, original)
         return probe_top_logprobs(VLLM_DENSE_SERVER_URL, VLLM_REINIT_MODEL)
     except Exception as e:  # noqa: BLE001 — a failed restore fails its own check
         log(f"restoring sync failed: {type(e).__name__}: {e}")
@@ -59,44 +59,44 @@ def run(ctx) -> dict:
     with torch.no_grad():
         param.mul_(PERTURBATION)
 
-    manager = InferenceClientManager(
+    pool = WeightSyncPool(
         [{"url": VLLM_DENSE_SERVER_URL}],
         connection_timeout=CONNECTION_TIMEOUT_S,
         client_cls=VLLMWeightSyncClient,
         base_group_port=weight_transfer_port("HALO_TEST_VLLM_GROUP_PORT"),
     )
-    begin = VLLMWeightSyncClient.begin_weight_update
+    begin = VLLMWeightSyncClient._start_engine_update
     opened_by: list[VLLMWeightSyncClient] = []
     # Each opening client's communicator, kept here because its close drops the client's own reference.
     communicators: list[PyNcclCommunicator] = []
 
     def first_open_dropped(client):
         opened_by.append(client)
-        communicators.append(client.communicator)
+        communicators.append(client._transport)
         if len(opened_by) == 1:
             raise ConnectionError("the engine dropped the update's opening request")
         return begin(client)
 
-    reconnect = InferenceClientManager.reconnect_client
+    reconnect = WeightSyncPool._reconnect
     rebuilt: list[VLLMWeightSyncClient] = []
 
     def counted_reconnect(pool, index):
-        rebuilt.append(reconnect(pool, index))
-        return rebuilt[-1]
+        reconnect(pool, index)
+        rebuilt.append(pool._clients[index])
 
-    manager.init_communicators(ctx.device)
+    pool.init_communicator(ctx.device)
     try:
         with (
-            patch.object(VLLMWeightSyncClient, "begin_weight_update", first_open_dropped),
-            patch.object(InferenceClientManager, "reconnect_client", counted_reconnect),
+            patch.object(VLLMWeightSyncClient, "_start_engine_update", first_open_dropped),
+            patch.object(WeightSyncPool, "_reconnect", counted_reconnect),
         ):
-            _push(manager, param.detach())
+            _push(pool, param.detach())
         recovered = probe_top_logprobs(VLLM_DENSE_SERVER_URL, VLLM_REINIT_MODEL)
-        _push(manager, param.detach())
+        _push(pool, param.detach())
         undisturbed = probe_top_logprobs(VLLM_DENSE_SERVER_URL, VLLM_REINIT_MODEL)
     finally:
-        restored = _restore(manager, original)
-        manager.close_communicators()
+        restored = _restore(pool, original)
+        pool.close_communicator()
 
     retry_client = opened_by[1] if len(opened_by) == 2 else None
     checks["one_reconnect"] = len(rebuilt) == 1
@@ -106,7 +106,7 @@ def run(ctx) -> dict:
         and opened_by[0] is not retry_client
         and communicators[0] is not None
         and communicators[0].aborted
-        and opened_by[0].communicator is None
+        and opened_by[0]._transport is None
     )
     checks["the_recovered_sync_moved_the_served_policy"] = served_policy_moved(recovered, baseline)
     checks["the_recovered_sync_landed_what_an_undisturbed_one_lands"] = recovered == undisturbed

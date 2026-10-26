@@ -1,0 +1,634 @@
+{
+  "dense / auto / policy_gradient_loss=False / syncs_to_external_generator=False": [
+    "all_gather_object object[2] world",
+    "roster ['ParameterStatsCallback', '_GenerateStandIn', 'EfficiencyCallback']",
+    "config output_router_logits=False router_aux_loss_coef=0.001 forced_off=False"
+  ],
+  "dense / auto / policy_gradient_loss=False / syncs_to_external_generator=True": [
+    "all_gather_object object[2] world",
+    "roster ['ParameterStatsCallback', '_GenerateStandIn', 'EfficiencyCallback']",
+    "config output_router_logits=False router_aux_loss_coef=0.001 forced_off=False"
+  ],
+  "dense / auto / policy_gradient_loss=True / syncs_to_external_generator=False": [
+    "all_gather_object object[2] world",
+    "roster ['ParameterStatsCallback', '_GenerateStandIn', 'EfficiencyCallback']",
+    "config output_router_logits=False router_aux_loss_coef=0.001 forced_off=False"
+  ],
+  "dense / auto / policy_gradient_loss=True / syncs_to_external_generator=True": [
+    "all_gather_object object[2] world",
+    "roster ['ParameterStatsCallback', '_GenerateStandIn', 'EfficiencyCallback']",
+    "config output_router_logits=False router_aux_loss_coef=0.001 forced_off=False"
+  ],
+  "dense / aux_loss / policy_gradient_loss=False / syncs_to_external_generator=False": [
+    "all_gather_object object[2] world",
+    "log INFO moe_balancing=aux_loss \u2014 setting output_router_logits=True (required for HF MoE forwards to add aux loss to the total loss). Run-scoped: exported, the flag would make every plain-transformers forward of the artifact materialize the router-logit plane and inflate its eval loss.",
+    "log WARNING moe_balancing=aux_loss: _Model declares no transformers router_logits capture, so under gradient checkpointing a checkpointed layer's router aux loss reaches the logged loss but adds no router gradient.",
+    "roster ['ParameterStatsCallback', '_GenerateStandIn', 'EfficiencyCallback']",
+    "config output_router_logits=True router_aux_loss_coef=0.001 forced_off=False"
+  ],
+  "dense / aux_loss / policy_gradient_loss=False / syncs_to_external_generator=True": [
+    "all_gather_object object[2] world",
+    "log INFO moe_balancing=aux_loss \u2014 setting output_router_logits=True (required for HF MoE forwards to add aux loss to the total loss). Run-scoped: exported, the flag would make every plain-transformers forward of the artifact materialize the router-logit plane and inflate its eval loss.",
+    "log WARNING moe_balancing=aux_loss: _Model declares no transformers router_logits capture, so under gradient checkpointing a checkpointed layer's router aux loss reaches the logged loss but adds no router gradient.",
+    "roster ['ParameterStatsCallback', '_GenerateStandIn', 'EfficiencyCallback']",
+    "config output_router_logits=True router_aux_loss_coef=0.001 forced_off=False"
+  ],
+  "dense / aux_loss / policy_gradient_loss=True / syncs_to_external_generator=False": [
+    "all_gather_object object[2] world",
+    "log WARNING moe_balancing=aux_loss has NO EFFECT under a policy-gradient (GRPO) trainer: the loss is computed from per-token log-probs and never adds the model's router aux loss, so expert load is left unbalanced and no moe/* metrics are produced. Use moe_balancing=bias_update (aux-loss-free DeepSeek-V3 bias update \u2014 works under EP and emits moe/* load metrics via BalancingBiasCallback) for real balancing, or moe_balancing=none to silence this.",
+    "roster ['ParameterStatsCallback', '_GenerateStandIn', 'EfficiencyCallback']",
+    "config output_router_logits=False router_aux_loss_coef=0.001 forced_off=True"
+  ],
+  "dense / aux_loss / policy_gradient_loss=True / syncs_to_external_generator=True": [
+    "all_gather_object object[2] world",
+    "log WARNING moe_balancing=aux_loss has NO EFFECT under a policy-gradient (GRPO) trainer: the loss is computed from per-token log-probs and never adds the model's router aux loss, so expert load is left unbalanced and no moe/* metrics are produced. Use moe_balancing=bias_update (aux-loss-free DeepSeek-V3 bias update \u2014 works under EP and emits moe/* load metrics via BalancingBiasCallback) for real balancing, or moe_balancing=none to silence this.",
+    "roster ['ParameterStatsCallback', '_GenerateStandIn', 'EfficiencyCallback']",
+    "config output_router_logits=False router_aux_loss_coef=0.001 forced_off=True"
+  ],
+  "dense / bias_update / policy_gradient_loss=False / syncs_to_external_generator=False": [
+    "all_gather_object object[2] world",
+    "log INFO moe_balancing=bias_update \u2014 overriding router_aux_loss_coef (0.001) to 0 to avoid double-balancing.",
+    "all_reduce SUM int64[1] world",
+    "raised ValueError moe_balancing=bias_update would silently balance NOTHING on this model (model_type='golden_moe'): it is a dense model \u2014 there are no experts to balance, and no router ships a native balancing_biases buffer (Zaya). Prefer moe_balancing: auto, which resolves the one strategy this model supports \u2014 naming a mode by family is unreliable here, because whether aux_loss works depends on the loaded CLASS, not the family: a wrapper whose forward never declares output_router_logits (the multimodal Qwen3.5/3.6 checkpoints) rejects aux_loss, while its text-only sibling accepts it. moe_balancing: none trains unbalanced, which for a large expert count is a real cost, not a neutral default.",
+    "config output_router_logits=False router_aux_loss_coef=0.0 forced_off=True"
+  ],
+  "dense / bias_update / policy_gradient_loss=False / syncs_to_external_generator=True": [
+    "all_gather_object object[2] world",
+    "log WARNING moe_balancing=bias_update is incompatible with on-policy weight-sync RL: the routing bias isn't forwarded by the rollout-engine weight sync (parameters only \u2014 an adopted native slot is a buffer), so trainer\u2194generator routing diverges. Downgrading to moe_balancing=none \u2014 with aux_loss also inert under a policy-gradient loss, THIS RUN HAS NO ROUTER BALANCING AT ALL and router_balancing_rate is unreachable. Families that only balance via bias_update (Zaya, DeepSeek-V4) train with unbalanced experts here.",
+    "roster ['ParameterStatsCallback', '_GenerateStandIn', 'EfficiencyCallback']",
+    "config output_router_logits=False router_aux_loss_coef=0.001 forced_off=False"
+  ],
+  "dense / bias_update / policy_gradient_loss=True / syncs_to_external_generator=False": [
+    "all_gather_object object[2] world",
+    "log INFO moe_balancing=bias_update \u2014 overriding router_aux_loss_coef (0.001) to 0 to avoid double-balancing.",
+    "all_reduce SUM int64[1] world",
+    "raised ValueError moe_balancing=bias_update would silently balance NOTHING on this model (model_type='golden_moe'): it is a dense model \u2014 there are no experts to balance, and no router ships a native balancing_biases buffer (Zaya). Prefer moe_balancing: auto, which resolves the one strategy this model supports \u2014 naming a mode by family is unreliable here, because whether aux_loss works depends on the loaded CLASS, not the family: a wrapper whose forward never declares output_router_logits (the multimodal Qwen3.5/3.6 checkpoints) rejects aux_loss, while its text-only sibling accepts it. moe_balancing: none trains unbalanced, which for a large expert count is a real cost, not a neutral default.",
+    "config output_router_logits=False router_aux_loss_coef=0.0 forced_off=True"
+  ],
+  "dense / bias_update / policy_gradient_loss=True / syncs_to_external_generator=True": [
+    "all_gather_object object[2] world",
+    "log WARNING moe_balancing=bias_update is incompatible with on-policy weight-sync RL: the routing bias isn't forwarded by the rollout-engine weight sync (parameters only \u2014 an adopted native slot is a buffer), so trainer\u2194generator routing diverges. Downgrading to moe_balancing=none \u2014 with aux_loss also inert under a policy-gradient loss, THIS RUN HAS NO ROUTER BALANCING AT ALL and router_balancing_rate is unreachable. Families that only balance via bias_update (Zaya, DeepSeek-V4) train with unbalanced experts here.",
+    "roster ['ParameterStatsCallback', '_GenerateStandIn', 'EfficiencyCallback']",
+    "config output_router_logits=False router_aux_loss_coef=0.001 forced_off=False"
+  ],
+  "dense / bias_update_transient / policy_gradient_loss=False / syncs_to_external_generator=False": [
+    "all_gather_object object[2] world",
+    "log INFO moe_balancing=bias_update_transient \u2014 overriding router_aux_loss_coef (0.001) to 0 to avoid double-balancing.",
+    "all_reduce SUM int64[1] world",
+    "raised ValueError moe_balancing=bias_update_transient would silently balance NOTHING on this model (model_type='golden_moe'): it is a dense model \u2014 there are no experts to balance, and no router ships a native balancing_biases buffer (Zaya). Prefer moe_balancing: auto, which resolves the one strategy this model supports \u2014 naming a mode by family is unreliable here, because whether aux_loss works depends on the loaded CLASS, not the family: a wrapper whose forward never declares output_router_logits (the multimodal Qwen3.5/3.6 checkpoints) rejects aux_loss, while its text-only sibling accepts it. moe_balancing: none trains unbalanced, which for a large expert count is a real cost, not a neutral default.",
+    "config output_router_logits=False router_aux_loss_coef=0.0 forced_off=True"
+  ],
+  "dense / bias_update_transient / policy_gradient_loss=False / syncs_to_external_generator=True": [
+    "all_gather_object object[2] world",
+    "log WARNING moe_balancing=bias_update_transient is incompatible with on-policy weight-sync RL: the routing bias isn't forwarded by the rollout-engine weight sync (parameters only \u2014 an adopted native slot is a buffer), so trainer\u2194generator routing diverges. Downgrading to moe_balancing=none \u2014 with aux_loss also inert under a policy-gradient loss, THIS RUN HAS NO ROUTER BALANCING AT ALL and router_balancing_rate is unreachable. Families that only balance via bias_update (Zaya, DeepSeek-V4) train with unbalanced experts here.",
+    "roster ['ParameterStatsCallback', '_GenerateStandIn', 'EfficiencyCallback']",
+    "config output_router_logits=False router_aux_loss_coef=0.001 forced_off=False"
+  ],
+  "dense / bias_update_transient / policy_gradient_loss=True / syncs_to_external_generator=False": [
+    "all_gather_object object[2] world",
+    "log INFO moe_balancing=bias_update_transient \u2014 overriding router_aux_loss_coef (0.001) to 0 to avoid double-balancing.",
+    "all_reduce SUM int64[1] world",
+    "raised ValueError moe_balancing=bias_update_transient would silently balance NOTHING on this model (model_type='golden_moe'): it is a dense model \u2014 there are no experts to balance, and no router ships a native balancing_biases buffer (Zaya). Prefer moe_balancing: auto, which resolves the one strategy this model supports \u2014 naming a mode by family is unreliable here, because whether aux_loss works depends on the loaded CLASS, not the family: a wrapper whose forward never declares output_router_logits (the multimodal Qwen3.5/3.6 checkpoints) rejects aux_loss, while its text-only sibling accepts it. moe_balancing: none trains unbalanced, which for a large expert count is a real cost, not a neutral default.",
+    "config output_router_logits=False router_aux_loss_coef=0.0 forced_off=True"
+  ],
+  "dense / bias_update_transient / policy_gradient_loss=True / syncs_to_external_generator=True": [
+    "all_gather_object object[2] world",
+    "log WARNING moe_balancing=bias_update_transient is incompatible with on-policy weight-sync RL: the routing bias isn't forwarded by the rollout-engine weight sync (parameters only \u2014 an adopted native slot is a buffer), so trainer\u2194generator routing diverges. Downgrading to moe_balancing=none \u2014 with aux_loss also inert under a policy-gradient loss, THIS RUN HAS NO ROUTER BALANCING AT ALL and router_balancing_rate is unreachable. Families that only balance via bias_update (Zaya, DeepSeek-V4) train with unbalanced experts here.",
+    "roster ['ParameterStatsCallback', '_GenerateStandIn', 'EfficiencyCallback']",
+    "config output_router_logits=False router_aux_loss_coef=0.001 forced_off=False"
+  ],
+  "dense / none / policy_gradient_loss=False / syncs_to_external_generator=False": [
+    "all_gather_object object[2] world",
+    "roster ['ParameterStatsCallback', '_GenerateStandIn', 'EfficiencyCallback']",
+    "config output_router_logits=False router_aux_loss_coef=0.001 forced_off=False"
+  ],
+  "dense / none / policy_gradient_loss=False / syncs_to_external_generator=True": [
+    "all_gather_object object[2] world",
+    "roster ['ParameterStatsCallback', '_GenerateStandIn', 'EfficiencyCallback']",
+    "config output_router_logits=False router_aux_loss_coef=0.001 forced_off=False"
+  ],
+  "dense / none / policy_gradient_loss=True / syncs_to_external_generator=False": [
+    "all_gather_object object[2] world",
+    "roster ['ParameterStatsCallback', '_GenerateStandIn', 'EfficiencyCallback']",
+    "config output_router_logits=False router_aux_loss_coef=0.001 forced_off=False"
+  ],
+  "dense / none / policy_gradient_loss=True / syncs_to_external_generator=True": [
+    "all_gather_object object[2] world",
+    "roster ['ParameterStatsCallback', '_GenerateStandIn', 'EfficiencyCallback']",
+    "config output_router_logits=False router_aux_loss_coef=0.001 forced_off=False"
+  ],
+  "moe without wrappers / auto / policy_gradient_loss=False / syncs_to_external_generator=False": [
+    "all_gather_object object[2] world",
+    "log INFO moe_balancing=aux_loss \u2014 setting output_router_logits=True (required for HF MoE forwards to add aux loss to the total loss). Run-scoped: exported, the flag would make every plain-transformers forward of the artifact materialize the router-logit plane and inflate its eval loss.",
+    "log WARNING moe_balancing=aux_loss: _Model declares no transformers router_logits capture, so under gradient checkpointing a checkpointed layer's router aux loss reaches the logged loss but adds no router gradient.",
+    "roster ['ParameterStatsCallback', '_GenerateStandIn', 'EfficiencyCallback', \"MoEMetricsCallback {'topk': 2, 'enable_router_logits': True, 'exclude_last_slot': False, 'log_every_n_steps': 5}\"]",
+    "config output_router_logits=True router_aux_loss_coef=0.001 forced_off=False"
+  ],
+  "moe without wrappers / auto / policy_gradient_loss=False / syncs_to_external_generator=True": [
+    "all_gather_object object[2] world",
+    "log INFO moe_balancing=aux_loss \u2014 setting output_router_logits=True (required for HF MoE forwards to add aux loss to the total loss). Run-scoped: exported, the flag would make every plain-transformers forward of the artifact materialize the router-logit plane and inflate its eval loss.",
+    "log WARNING moe_balancing=aux_loss: _Model declares no transformers router_logits capture, so under gradient checkpointing a checkpointed layer's router aux loss reaches the logged loss but adds no router gradient.",
+    "roster ['ParameterStatsCallback', '_GenerateStandIn', 'EfficiencyCallback', \"MoEMetricsCallback {'topk': 2, 'enable_router_logits': True, 'exclude_last_slot': False, 'log_every_n_steps': 5}\"]",
+    "config output_router_logits=True router_aux_loss_coef=0.001 forced_off=False"
+  ],
+  "moe without wrappers / auto / policy_gradient_loss=True / syncs_to_external_generator=False": [
+    "all_gather_object object[2] world",
+    "log WARNING moe_balancing=aux_loss has NO EFFECT under a policy-gradient (GRPO) trainer: the loss is computed from per-token log-probs and never adds the model's router aux loss, so expert load is left unbalanced and no moe/* metrics are produced. Use moe_balancing=bias_update (aux-loss-free DeepSeek-V3 bias update \u2014 works under EP and emits moe/* load metrics via BalancingBiasCallback) for real balancing, or moe_balancing=none to silence this.",
+    "roster ['ParameterStatsCallback', '_GenerateStandIn', 'EfficiencyCallback', \"MoEMetricsCallback {'topk': 2, 'enable_router_logits': True, 'exclude_last_slot': False, 'log_every_n_steps': 5}\"]",
+    "config output_router_logits=False router_aux_loss_coef=0.001 forced_off=True"
+  ],
+  "moe without wrappers / auto / policy_gradient_loss=True / syncs_to_external_generator=True": [
+    "all_gather_object object[2] world",
+    "log WARNING moe_balancing=aux_loss has NO EFFECT under a policy-gradient (GRPO) trainer: the loss is computed from per-token log-probs and never adds the model's router aux loss, so expert load is left unbalanced and no moe/* metrics are produced. Use moe_balancing=bias_update (aux-loss-free DeepSeek-V3 bias update \u2014 works under EP and emits moe/* load metrics via BalancingBiasCallback) for real balancing, or moe_balancing=none to silence this.",
+    "roster ['ParameterStatsCallback', '_GenerateStandIn', 'EfficiencyCallback', \"MoEMetricsCallback {'topk': 2, 'enable_router_logits': True, 'exclude_last_slot': False, 'log_every_n_steps': 5}\"]",
+    "config output_router_logits=False router_aux_loss_coef=0.001 forced_off=True"
+  ],
+  "moe without wrappers / aux_loss / policy_gradient_loss=False / syncs_to_external_generator=False": [
+    "all_gather_object object[2] world",
+    "log INFO moe_balancing=aux_loss \u2014 setting output_router_logits=True (required for HF MoE forwards to add aux loss to the total loss). Run-scoped: exported, the flag would make every plain-transformers forward of the artifact materialize the router-logit plane and inflate its eval loss.",
+    "log WARNING moe_balancing=aux_loss: _Model declares no transformers router_logits capture, so under gradient checkpointing a checkpointed layer's router aux loss reaches the logged loss but adds no router gradient.",
+    "roster ['ParameterStatsCallback', '_GenerateStandIn', 'EfficiencyCallback', \"MoEMetricsCallback {'topk': 2, 'enable_router_logits': True, 'exclude_last_slot': False, 'log_every_n_steps': 5}\"]",
+    "config output_router_logits=True router_aux_loss_coef=0.001 forced_off=False"
+  ],
+  "moe without wrappers / aux_loss / policy_gradient_loss=False / syncs_to_external_generator=True": [
+    "all_gather_object object[2] world",
+    "log INFO moe_balancing=aux_loss \u2014 setting output_router_logits=True (required for HF MoE forwards to add aux loss to the total loss). Run-scoped: exported, the flag would make every plain-transformers forward of the artifact materialize the router-logit plane and inflate its eval loss.",
+    "log WARNING moe_balancing=aux_loss: _Model declares no transformers router_logits capture, so under gradient checkpointing a checkpointed layer's router aux loss reaches the logged loss but adds no router gradient.",
+    "roster ['ParameterStatsCallback', '_GenerateStandIn', 'EfficiencyCallback', \"MoEMetricsCallback {'topk': 2, 'enable_router_logits': True, 'exclude_last_slot': False, 'log_every_n_steps': 5}\"]",
+    "config output_router_logits=True router_aux_loss_coef=0.001 forced_off=False"
+  ],
+  "moe without wrappers / aux_loss / policy_gradient_loss=True / syncs_to_external_generator=False": [
+    "all_gather_object object[2] world",
+    "log WARNING moe_balancing=aux_loss has NO EFFECT under a policy-gradient (GRPO) trainer: the loss is computed from per-token log-probs and never adds the model's router aux loss, so expert load is left unbalanced and no moe/* metrics are produced. Use moe_balancing=bias_update (aux-loss-free DeepSeek-V3 bias update \u2014 works under EP and emits moe/* load metrics via BalancingBiasCallback) for real balancing, or moe_balancing=none to silence this.",
+    "roster ['ParameterStatsCallback', '_GenerateStandIn', 'EfficiencyCallback', \"MoEMetricsCallback {'topk': 2, 'enable_router_logits': True, 'exclude_last_slot': False, 'log_every_n_steps': 5}\"]",
+    "config output_router_logits=False router_aux_loss_coef=0.001 forced_off=True"
+  ],
+  "moe without wrappers / aux_loss / policy_gradient_loss=True / syncs_to_external_generator=True": [
+    "all_gather_object object[2] world",
+    "log WARNING moe_balancing=aux_loss has NO EFFECT under a policy-gradient (GRPO) trainer: the loss is computed from per-token log-probs and never adds the model's router aux loss, so expert load is left unbalanced and no moe/* metrics are produced. Use moe_balancing=bias_update (aux-loss-free DeepSeek-V3 bias update \u2014 works under EP and emits moe/* load metrics via BalancingBiasCallback) for real balancing, or moe_balancing=none to silence this.",
+    "roster ['ParameterStatsCallback', '_GenerateStandIn', 'EfficiencyCallback', \"MoEMetricsCallback {'topk': 2, 'enable_router_logits': True, 'exclude_last_slot': False, 'log_every_n_steps': 5}\"]",
+    "config output_router_logits=False router_aux_loss_coef=0.001 forced_off=True"
+  ],
+  "moe without wrappers / bias_update / policy_gradient_loss=False / syncs_to_external_generator=False": [
+    "all_gather_object object[2] world",
+    "log INFO moe_balancing=bias_update \u2014 overriding router_aux_loss_coef (0.001) to 0 to avoid double-balancing.",
+    "all_reduce SUM int64[1] world",
+    "raised ValueError moe_balancing=bias_update would silently balance NOTHING on this model (model_type='golden_moe'): it has no EP MoE wrappers or native balancing_biases routers, and no router ships a native balancing_biases buffer (Zaya). Prefer moe_balancing: auto, which resolves the one strategy this model supports \u2014 naming a mode by family is unreliable here, because whether aux_loss works depends on the loaded CLASS, not the family: a wrapper whose forward never declares output_router_logits (the multimodal Qwen3.5/3.6 checkpoints) rejects aux_loss, while its text-only sibling accepts it. moe_balancing: none trains unbalanced, which for a large expert count is a real cost, not a neutral default.",
+    "config output_router_logits=False router_aux_loss_coef=0.0 forced_off=True"
+  ],
+  "moe without wrappers / bias_update / policy_gradient_loss=False / syncs_to_external_generator=True": [
+    "all_gather_object object[2] world",
+    "log WARNING moe_balancing=bias_update is incompatible with on-policy weight-sync RL: the routing bias isn't forwarded by the rollout-engine weight sync (parameters only \u2014 an adopted native slot is a buffer), so trainer\u2194generator routing diverges. Downgrading to moe_balancing=none \u2014 with aux_loss also inert under a policy-gradient loss, THIS RUN HAS NO ROUTER BALANCING AT ALL and router_balancing_rate is unreachable. Families that only balance via bias_update (Zaya, DeepSeek-V4) train with unbalanced experts here.",
+    "roster ['ParameterStatsCallback', '_GenerateStandIn', 'EfficiencyCallback', \"MoEMetricsCallback {'topk': 2, 'enable_router_logits': False, 'exclude_last_slot': False, 'log_every_n_steps': 5}\"]",
+    "config output_router_logits=False router_aux_loss_coef=0.001 forced_off=False"
+  ],
+  "moe without wrappers / bias_update / policy_gradient_loss=True / syncs_to_external_generator=False": [
+    "all_gather_object object[2] world",
+    "log INFO moe_balancing=bias_update \u2014 overriding router_aux_loss_coef (0.001) to 0 to avoid double-balancing.",
+    "all_reduce SUM int64[1] world",
+    "raised ValueError moe_balancing=bias_update would silently balance NOTHING on this model (model_type='golden_moe'): it has no EP MoE wrappers or native balancing_biases routers, and no router ships a native balancing_biases buffer (Zaya). Prefer moe_balancing: auto, which resolves the one strategy this model supports \u2014 naming a mode by family is unreliable here, because whether aux_loss works depends on the loaded CLASS, not the family: a wrapper whose forward never declares output_router_logits (the multimodal Qwen3.5/3.6 checkpoints) rejects aux_loss, while its text-only sibling accepts it. moe_balancing: none trains unbalanced, which for a large expert count is a real cost, not a neutral default.",
+    "config output_router_logits=False router_aux_loss_coef=0.0 forced_off=True"
+  ],
+  "moe without wrappers / bias_update / policy_gradient_loss=True / syncs_to_external_generator=True": [
+    "all_gather_object object[2] world",
+    "log WARNING moe_balancing=bias_update is incompatible with on-policy weight-sync RL: the routing bias isn't forwarded by the rollout-engine weight sync (parameters only \u2014 an adopted native slot is a buffer), so trainer\u2194generator routing diverges. Downgrading to moe_balancing=none \u2014 with aux_loss also inert under a policy-gradient loss, THIS RUN HAS NO ROUTER BALANCING AT ALL and router_balancing_rate is unreachable. Families that only balance via bias_update (Zaya, DeepSeek-V4) train with unbalanced experts here.",
+    "roster ['ParameterStatsCallback', '_GenerateStandIn', 'EfficiencyCallback', \"MoEMetricsCallback {'topk': 2, 'enable_router_logits': False, 'exclude_last_slot': False, 'log_every_n_steps': 5}\"]",
+    "config output_router_logits=False router_aux_loss_coef=0.001 forced_off=False"
+  ],
+  "moe without wrappers / bias_update_transient / policy_gradient_loss=False / syncs_to_external_generator=False": [
+    "all_gather_object object[2] world",
+    "log INFO moe_balancing=bias_update_transient \u2014 overriding router_aux_loss_coef (0.001) to 0 to avoid double-balancing.",
+    "all_reduce SUM int64[1] world",
+    "raised ValueError moe_balancing=bias_update_transient would silently balance NOTHING on this model (model_type='golden_moe'): it has no EP MoE wrappers or native balancing_biases routers, and no router ships a native balancing_biases buffer (Zaya). Prefer moe_balancing: auto, which resolves the one strategy this model supports \u2014 naming a mode by family is unreliable here, because whether aux_loss works depends on the loaded CLASS, not the family: a wrapper whose forward never declares output_router_logits (the multimodal Qwen3.5/3.6 checkpoints) rejects aux_loss, while its text-only sibling accepts it. moe_balancing: none trains unbalanced, which for a large expert count is a real cost, not a neutral default.",
+    "config output_router_logits=False router_aux_loss_coef=0.0 forced_off=True"
+  ],
+  "moe without wrappers / bias_update_transient / policy_gradient_loss=False / syncs_to_external_generator=True": [
+    "all_gather_object object[2] world",
+    "log WARNING moe_balancing=bias_update_transient is incompatible with on-policy weight-sync RL: the routing bias isn't forwarded by the rollout-engine weight sync (parameters only \u2014 an adopted native slot is a buffer), so trainer\u2194generator routing diverges. Downgrading to moe_balancing=none \u2014 with aux_loss also inert under a policy-gradient loss, THIS RUN HAS NO ROUTER BALANCING AT ALL and router_balancing_rate is unreachable. Families that only balance via bias_update (Zaya, DeepSeek-V4) train with unbalanced experts here.",
+    "roster ['ParameterStatsCallback', '_GenerateStandIn', 'EfficiencyCallback', \"MoEMetricsCallback {'topk': 2, 'enable_router_logits': False, 'exclude_last_slot': False, 'log_every_n_steps': 5}\"]",
+    "config output_router_logits=False router_aux_loss_coef=0.001 forced_off=False"
+  ],
+  "moe without wrappers / bias_update_transient / policy_gradient_loss=True / syncs_to_external_generator=False": [
+    "all_gather_object object[2] world",
+    "log INFO moe_balancing=bias_update_transient \u2014 overriding router_aux_loss_coef (0.001) to 0 to avoid double-balancing.",
+    "all_reduce SUM int64[1] world",
+    "raised ValueError moe_balancing=bias_update_transient would silently balance NOTHING on this model (model_type='golden_moe'): it has no EP MoE wrappers or native balancing_biases routers, and no router ships a native balancing_biases buffer (Zaya). Prefer moe_balancing: auto, which resolves the one strategy this model supports \u2014 naming a mode by family is unreliable here, because whether aux_loss works depends on the loaded CLASS, not the family: a wrapper whose forward never declares output_router_logits (the multimodal Qwen3.5/3.6 checkpoints) rejects aux_loss, while its text-only sibling accepts it. moe_balancing: none trains unbalanced, which for a large expert count is a real cost, not a neutral default.",
+    "config output_router_logits=False router_aux_loss_coef=0.0 forced_off=True"
+  ],
+  "moe without wrappers / bias_update_transient / policy_gradient_loss=True / syncs_to_external_generator=True": [
+    "all_gather_object object[2] world",
+    "log WARNING moe_balancing=bias_update_transient is incompatible with on-policy weight-sync RL: the routing bias isn't forwarded by the rollout-engine weight sync (parameters only \u2014 an adopted native slot is a buffer), so trainer\u2194generator routing diverges. Downgrading to moe_balancing=none \u2014 with aux_loss also inert under a policy-gradient loss, THIS RUN HAS NO ROUTER BALANCING AT ALL and router_balancing_rate is unreachable. Families that only balance via bias_update (Zaya, DeepSeek-V4) train with unbalanced experts here.",
+    "roster ['ParameterStatsCallback', '_GenerateStandIn', 'EfficiencyCallback', \"MoEMetricsCallback {'topk': 2, 'enable_router_logits': False, 'exclude_last_slot': False, 'log_every_n_steps': 5}\"]",
+    "config output_router_logits=False router_aux_loss_coef=0.001 forced_off=False"
+  ],
+  "moe without wrappers / none / policy_gradient_loss=False / syncs_to_external_generator=False": [
+    "all_gather_object object[2] world",
+    "roster ['ParameterStatsCallback', '_GenerateStandIn', 'EfficiencyCallback', \"MoEMetricsCallback {'topk': 2, 'enable_router_logits': False, 'exclude_last_slot': False, 'log_every_n_steps': 5}\"]",
+    "config output_router_logits=False router_aux_loss_coef=0.001 forced_off=False"
+  ],
+  "moe without wrappers / none / policy_gradient_loss=False / syncs_to_external_generator=True": [
+    "all_gather_object object[2] world",
+    "roster ['ParameterStatsCallback', '_GenerateStandIn', 'EfficiencyCallback', \"MoEMetricsCallback {'topk': 2, 'enable_router_logits': False, 'exclude_last_slot': False, 'log_every_n_steps': 5}\"]",
+    "config output_router_logits=False router_aux_loss_coef=0.001 forced_off=False"
+  ],
+  "moe without wrappers / none / policy_gradient_loss=True / syncs_to_external_generator=False": [
+    "all_gather_object object[2] world",
+    "roster ['ParameterStatsCallback', '_GenerateStandIn', 'EfficiencyCallback', \"MoEMetricsCallback {'topk': 2, 'enable_router_logits': False, 'exclude_last_slot': False, 'log_every_n_steps': 5}\"]",
+    "config output_router_logits=False router_aux_loss_coef=0.001 forced_off=False"
+  ],
+  "moe without wrappers / none / policy_gradient_loss=True / syncs_to_external_generator=True": [
+    "all_gather_object object[2] world",
+    "roster ['ParameterStatsCallback', '_GenerateStandIn', 'EfficiencyCallback', \"MoEMetricsCallback {'topk': 2, 'enable_router_logits': False, 'exclude_last_slot': False, 'log_every_n_steps': 5}\"]",
+    "config output_router_logits=False router_aux_loss_coef=0.001 forced_off=False"
+  ],
+  "moe native slot / auto / policy_gradient_loss=False / syncs_to_external_generator=False": [
+    "all_gather_object object[2] world",
+    "log INFO moe_balancing=aux_loss \u2014 setting output_router_logits=True (required for HF MoE forwards to add aux loss to the total loss). Run-scoped: exported, the flag would make every plain-transformers forward of the artifact materialize the router-logit plane and inflate its eval loss.",
+    "log WARNING moe_balancing=aux_loss: _Model declares no transformers router_logits capture, so under gradient checkpointing a checkpointed layer's router aux loss reaches the logged loss but adds no router gradient.",
+    "roster ['ParameterStatsCallback', '_GenerateStandIn', 'EfficiencyCallback', \"MoEMetricsCallback {'topk': 2, 'enable_router_logits': True, 'exclude_last_slot': False, 'log_every_n_steps': 5}\"]",
+    "config output_router_logits=True router_aux_loss_coef=0.001 forced_off=False"
+  ],
+  "moe native slot / auto / policy_gradient_loss=False / syncs_to_external_generator=True": [
+    "all_gather_object object[2] world",
+    "log INFO moe_balancing=aux_loss \u2014 setting output_router_logits=True (required for HF MoE forwards to add aux loss to the total loss). Run-scoped: exported, the flag would make every plain-transformers forward of the artifact materialize the router-logit plane and inflate its eval loss.",
+    "log WARNING moe_balancing=aux_loss: _Model declares no transformers router_logits capture, so under gradient checkpointing a checkpointed layer's router aux loss reaches the logged loss but adds no router gradient.",
+    "roster ['ParameterStatsCallback', '_GenerateStandIn', 'EfficiencyCallback', \"MoEMetricsCallback {'topk': 2, 'enable_router_logits': True, 'exclude_last_slot': False, 'log_every_n_steps': 5}\"]",
+    "config output_router_logits=True router_aux_loss_coef=0.001 forced_off=False"
+  ],
+  "moe native slot / auto / policy_gradient_loss=True / syncs_to_external_generator=False": [
+    "all_gather_object object[2] world",
+    "log WARNING moe_balancing=aux_loss has NO EFFECT under a policy-gradient (GRPO) trainer: the loss is computed from per-token log-probs and never adds the model's router aux loss, so expert load is left unbalanced and no moe/* metrics are produced. Use moe_balancing=bias_update (aux-loss-free DeepSeek-V3 bias update \u2014 works under EP and emits moe/* load metrics via BalancingBiasCallback) for real balancing, or moe_balancing=none to silence this.",
+    "roster ['ParameterStatsCallback', '_GenerateStandIn', 'EfficiencyCallback', \"MoEMetricsCallback {'topk': 2, 'enable_router_logits': True, 'exclude_last_slot': False, 'log_every_n_steps': 5}\"]",
+    "config output_router_logits=False router_aux_loss_coef=0.001 forced_off=True"
+  ],
+  "moe native slot / auto / policy_gradient_loss=True / syncs_to_external_generator=True": [
+    "all_gather_object object[2] world",
+    "log WARNING moe_balancing=aux_loss has NO EFFECT under a policy-gradient (GRPO) trainer: the loss is computed from per-token log-probs and never adds the model's router aux loss, so expert load is left unbalanced and no moe/* metrics are produced. Use moe_balancing=bias_update (aux-loss-free DeepSeek-V3 bias update \u2014 works under EP and emits moe/* load metrics via BalancingBiasCallback) for real balancing, or moe_balancing=none to silence this.",
+    "roster ['ParameterStatsCallback', '_GenerateStandIn', 'EfficiencyCallback', \"MoEMetricsCallback {'topk': 2, 'enable_router_logits': True, 'exclude_last_slot': False, 'log_every_n_steps': 5}\"]",
+    "config output_router_logits=False router_aux_loss_coef=0.001 forced_off=True"
+  ],
+  "moe native slot / aux_loss / policy_gradient_loss=False / syncs_to_external_generator=False": [
+    "all_gather_object object[2] world",
+    "log INFO moe_balancing=aux_loss \u2014 setting output_router_logits=True (required for HF MoE forwards to add aux loss to the total loss). Run-scoped: exported, the flag would make every plain-transformers forward of the artifact materialize the router-logit plane and inflate its eval loss.",
+    "log WARNING moe_balancing=aux_loss: _Model declares no transformers router_logits capture, so under gradient checkpointing a checkpointed layer's router aux loss reaches the logged loss but adds no router gradient.",
+    "roster ['ParameterStatsCallback', '_GenerateStandIn', 'EfficiencyCallback', \"MoEMetricsCallback {'topk': 2, 'enable_router_logits': True, 'exclude_last_slot': False, 'log_every_n_steps': 5}\"]",
+    "config output_router_logits=True router_aux_loss_coef=0.001 forced_off=False"
+  ],
+  "moe native slot / aux_loss / policy_gradient_loss=False / syncs_to_external_generator=True": [
+    "all_gather_object object[2] world",
+    "log INFO moe_balancing=aux_loss \u2014 setting output_router_logits=True (required for HF MoE forwards to add aux loss to the total loss). Run-scoped: exported, the flag would make every plain-transformers forward of the artifact materialize the router-logit plane and inflate its eval loss.",
+    "log WARNING moe_balancing=aux_loss: _Model declares no transformers router_logits capture, so under gradient checkpointing a checkpointed layer's router aux loss reaches the logged loss but adds no router gradient.",
+    "roster ['ParameterStatsCallback', '_GenerateStandIn', 'EfficiencyCallback', \"MoEMetricsCallback {'topk': 2, 'enable_router_logits': True, 'exclude_last_slot': False, 'log_every_n_steps': 5}\"]",
+    "config output_router_logits=True router_aux_loss_coef=0.001 forced_off=False"
+  ],
+  "moe native slot / aux_loss / policy_gradient_loss=True / syncs_to_external_generator=False": [
+    "all_gather_object object[2] world",
+    "log WARNING moe_balancing=aux_loss has NO EFFECT under a policy-gradient (GRPO) trainer: the loss is computed from per-token log-probs and never adds the model's router aux loss, so expert load is left unbalanced and no moe/* metrics are produced. Use moe_balancing=bias_update (aux-loss-free DeepSeek-V3 bias update \u2014 works under EP and emits moe/* load metrics via BalancingBiasCallback) for real balancing, or moe_balancing=none to silence this.",
+    "roster ['ParameterStatsCallback', '_GenerateStandIn', 'EfficiencyCallback', \"MoEMetricsCallback {'topk': 2, 'enable_router_logits': True, 'exclude_last_slot': False, 'log_every_n_steps': 5}\"]",
+    "config output_router_logits=False router_aux_loss_coef=0.001 forced_off=True"
+  ],
+  "moe native slot / aux_loss / policy_gradient_loss=True / syncs_to_external_generator=True": [
+    "all_gather_object object[2] world",
+    "log WARNING moe_balancing=aux_loss has NO EFFECT under a policy-gradient (GRPO) trainer: the loss is computed from per-token log-probs and never adds the model's router aux loss, so expert load is left unbalanced and no moe/* metrics are produced. Use moe_balancing=bias_update (aux-loss-free DeepSeek-V3 bias update \u2014 works under EP and emits moe/* load metrics via BalancingBiasCallback) for real balancing, or moe_balancing=none to silence this.",
+    "roster ['ParameterStatsCallback', '_GenerateStandIn', 'EfficiencyCallback', \"MoEMetricsCallback {'topk': 2, 'enable_router_logits': True, 'exclude_last_slot': False, 'log_every_n_steps': 5}\"]",
+    "config output_router_logits=False router_aux_loss_coef=0.001 forced_off=True"
+  ],
+  "moe native slot / bias_update / policy_gradient_loss=False / syncs_to_external_generator=False": [
+    "all_gather_object object[2] world",
+    "log INFO moe_balancing=bias_update \u2014 overriding router_aux_loss_coef (0.001) to 0 to avoid double-balancing.",
+    "log INFO Enabled bias-update balancing on 1 EP MoE layers.",
+    "all_reduce SUM int64[1] world",
+    "all_reduce MAX int64[1] world",
+    "roster ['ParameterStatsCallback', '_GenerateStandIn', 'EfficiencyCallback', \"BalancingBiasCallback {'update_rate': 0.001, 'exclude_last_slot': False, 'log_every_n_steps': 5}\"]",
+    "config output_router_logits=False router_aux_loss_coef=0.0 forced_off=True"
+  ],
+  "moe native slot / bias_update / policy_gradient_loss=False / syncs_to_external_generator=True": [
+    "all_gather_object object[2] world",
+    "log WARNING moe_balancing=bias_update is incompatible with on-policy weight-sync RL: the routing bias isn't forwarded by the rollout-engine weight sync (parameters only \u2014 an adopted native slot is a buffer), so trainer\u2194generator routing diverges. Downgrading to moe_balancing=none \u2014 with aux_loss also inert under a policy-gradient loss, THIS RUN HAS NO ROUTER BALANCING AT ALL and router_balancing_rate is unreachable. Families that only balance via bias_update (Zaya, DeepSeek-V4) train with unbalanced experts here.",
+    "roster ['ParameterStatsCallback', '_GenerateStandIn', 'EfficiencyCallback', \"MoEMetricsCallback {'topk': 2, 'enable_router_logits': False, 'exclude_last_slot': False, 'log_every_n_steps': 5}\"]",
+    "config output_router_logits=False router_aux_loss_coef=0.001 forced_off=False"
+  ],
+  "moe native slot / bias_update / policy_gradient_loss=True / syncs_to_external_generator=False": [
+    "all_gather_object object[2] world",
+    "log INFO moe_balancing=bias_update \u2014 overriding router_aux_loss_coef (0.001) to 0 to avoid double-balancing.",
+    "log INFO Enabled bias-update balancing on 1 EP MoE layers.",
+    "all_reduce SUM int64[1] world",
+    "all_reduce MAX int64[1] world",
+    "roster ['ParameterStatsCallback', '_GenerateStandIn', 'EfficiencyCallback', \"BalancingBiasCallback {'update_rate': 0.001, 'exclude_last_slot': False, 'log_every_n_steps': 5}\"]",
+    "config output_router_logits=False router_aux_loss_coef=0.0 forced_off=True"
+  ],
+  "moe native slot / bias_update / policy_gradient_loss=True / syncs_to_external_generator=True": [
+    "all_gather_object object[2] world",
+    "log WARNING moe_balancing=bias_update is incompatible with on-policy weight-sync RL: the routing bias isn't forwarded by the rollout-engine weight sync (parameters only \u2014 an adopted native slot is a buffer), so trainer\u2194generator routing diverges. Downgrading to moe_balancing=none \u2014 with aux_loss also inert under a policy-gradient loss, THIS RUN HAS NO ROUTER BALANCING AT ALL and router_balancing_rate is unreachable. Families that only balance via bias_update (Zaya, DeepSeek-V4) train with unbalanced experts here.",
+    "roster ['ParameterStatsCallback', '_GenerateStandIn', 'EfficiencyCallback', \"MoEMetricsCallback {'topk': 2, 'enable_router_logits': False, 'exclude_last_slot': False, 'log_every_n_steps': 5}\"]",
+    "config output_router_logits=False router_aux_loss_coef=0.001 forced_off=False"
+  ],
+  "moe native slot / bias_update_transient / policy_gradient_loss=False / syncs_to_external_generator=False": [
+    "all_gather_object object[2] world",
+    "log INFO moe_balancing=bias_update_transient \u2014 overriding router_aux_loss_coef (0.001) to 0 to avoid double-balancing.",
+    "log INFO Enabled bias-update balancing on 1 EP MoE layers.",
+    "all_reduce SUM int64[1] world",
+    "all_reduce SUM int64[1] world",
+    "raised ValueError moe_balancing=bias_update_transient, but every balancing router on this model carries its bias in checkpoint-exported state \u2014 nothing here is transient, and the exported bias serves exactly as trained. Use moe_balancing=bias_update.",
+    "config output_router_logits=False router_aux_loss_coef=0.0 forced_off=True"
+  ],
+  "moe native slot / bias_update_transient / policy_gradient_loss=False / syncs_to_external_generator=True": [
+    "all_gather_object object[2] world",
+    "log WARNING moe_balancing=bias_update_transient is incompatible with on-policy weight-sync RL: the routing bias isn't forwarded by the rollout-engine weight sync (parameters only \u2014 an adopted native slot is a buffer), so trainer\u2194generator routing diverges. Downgrading to moe_balancing=none \u2014 with aux_loss also inert under a policy-gradient loss, THIS RUN HAS NO ROUTER BALANCING AT ALL and router_balancing_rate is unreachable. Families that only balance via bias_update (Zaya, DeepSeek-V4) train with unbalanced experts here.",
+    "roster ['ParameterStatsCallback', '_GenerateStandIn', 'EfficiencyCallback', \"MoEMetricsCallback {'topk': 2, 'enable_router_logits': False, 'exclude_last_slot': False, 'log_every_n_steps': 5}\"]",
+    "config output_router_logits=False router_aux_loss_coef=0.001 forced_off=False"
+  ],
+  "moe native slot / bias_update_transient / policy_gradient_loss=True / syncs_to_external_generator=False": [
+    "all_gather_object object[2] world",
+    "log INFO moe_balancing=bias_update_transient \u2014 overriding router_aux_loss_coef (0.001) to 0 to avoid double-balancing.",
+    "log INFO Enabled bias-update balancing on 1 EP MoE layers.",
+    "all_reduce SUM int64[1] world",
+    "all_reduce SUM int64[1] world",
+    "raised ValueError moe_balancing=bias_update_transient, but every balancing router on this model carries its bias in checkpoint-exported state \u2014 nothing here is transient, and the exported bias serves exactly as trained. Use moe_balancing=bias_update.",
+    "config output_router_logits=False router_aux_loss_coef=0.0 forced_off=True"
+  ],
+  "moe native slot / bias_update_transient / policy_gradient_loss=True / syncs_to_external_generator=True": [
+    "all_gather_object object[2] world",
+    "log WARNING moe_balancing=bias_update_transient is incompatible with on-policy weight-sync RL: the routing bias isn't forwarded by the rollout-engine weight sync (parameters only \u2014 an adopted native slot is a buffer), so trainer\u2194generator routing diverges. Downgrading to moe_balancing=none \u2014 with aux_loss also inert under a policy-gradient loss, THIS RUN HAS NO ROUTER BALANCING AT ALL and router_balancing_rate is unreachable. Families that only balance via bias_update (Zaya, DeepSeek-V4) train with unbalanced experts here.",
+    "roster ['ParameterStatsCallback', '_GenerateStandIn', 'EfficiencyCallback', \"MoEMetricsCallback {'topk': 2, 'enable_router_logits': False, 'exclude_last_slot': False, 'log_every_n_steps': 5}\"]",
+    "config output_router_logits=False router_aux_loss_coef=0.001 forced_off=False"
+  ],
+  "moe native slot / none / policy_gradient_loss=False / syncs_to_external_generator=False": [
+    "all_gather_object object[2] world",
+    "roster ['ParameterStatsCallback', '_GenerateStandIn', 'EfficiencyCallback', \"MoEMetricsCallback {'topk': 2, 'enable_router_logits': False, 'exclude_last_slot': False, 'log_every_n_steps': 5}\"]",
+    "config output_router_logits=False router_aux_loss_coef=0.001 forced_off=False"
+  ],
+  "moe native slot / none / policy_gradient_loss=False / syncs_to_external_generator=True": [
+    "all_gather_object object[2] world",
+    "roster ['ParameterStatsCallback', '_GenerateStandIn', 'EfficiencyCallback', \"MoEMetricsCallback {'topk': 2, 'enable_router_logits': False, 'exclude_last_slot': False, 'log_every_n_steps': 5}\"]",
+    "config output_router_logits=False router_aux_loss_coef=0.001 forced_off=False"
+  ],
+  "moe native slot / none / policy_gradient_loss=True / syncs_to_external_generator=False": [
+    "all_gather_object object[2] world",
+    "roster ['ParameterStatsCallback', '_GenerateStandIn', 'EfficiencyCallback', \"MoEMetricsCallback {'topk': 2, 'enable_router_logits': False, 'exclude_last_slot': False, 'log_every_n_steps': 5}\"]",
+    "config output_router_logits=False router_aux_loss_coef=0.001 forced_off=False"
+  ],
+  "moe native slot / none / policy_gradient_loss=True / syncs_to_external_generator=True": [
+    "all_gather_object object[2] world",
+    "roster ['ParameterStatsCallback', '_GenerateStandIn', 'EfficiencyCallback', \"MoEMetricsCallback {'topk': 2, 'enable_router_logits': False, 'exclude_last_slot': False, 'log_every_n_steps': 5}\"]",
+    "config output_router_logits=False router_aux_loss_coef=0.001 forced_off=False"
+  ],
+  "moe transient / auto / policy_gradient_loss=False / syncs_to_external_generator=False": [
+    "all_gather_object object[2] world",
+    "log INFO moe_balancing=aux_loss \u2014 setting output_router_logits=True (required for HF MoE forwards to add aux loss to the total loss). Run-scoped: exported, the flag would make every plain-transformers forward of the artifact materialize the router-logit plane and inflate its eval loss.",
+    "log WARNING moe_balancing=aux_loss: _Model declares no transformers router_logits capture, so under gradient checkpointing a checkpointed layer's router aux loss reaches the logged loss but adds no router gradient.",
+    "roster ['ParameterStatsCallback', '_GenerateStandIn', 'EfficiencyCallback', \"MoEMetricsCallback {'topk': 2, 'enable_router_logits': True, 'exclude_last_slot': False, 'log_every_n_steps': 5}\"]",
+    "config output_router_logits=True router_aux_loss_coef=0.001 forced_off=False"
+  ],
+  "moe transient / auto / policy_gradient_loss=False / syncs_to_external_generator=True": [
+    "all_gather_object object[2] world",
+    "log INFO moe_balancing=aux_loss \u2014 setting output_router_logits=True (required for HF MoE forwards to add aux loss to the total loss). Run-scoped: exported, the flag would make every plain-transformers forward of the artifact materialize the router-logit plane and inflate its eval loss.",
+    "log WARNING moe_balancing=aux_loss: _Model declares no transformers router_logits capture, so under gradient checkpointing a checkpointed layer's router aux loss reaches the logged loss but adds no router gradient.",
+    "roster ['ParameterStatsCallback', '_GenerateStandIn', 'EfficiencyCallback', \"MoEMetricsCallback {'topk': 2, 'enable_router_logits': True, 'exclude_last_slot': False, 'log_every_n_steps': 5}\"]",
+    "config output_router_logits=True router_aux_loss_coef=0.001 forced_off=False"
+  ],
+  "moe transient / auto / policy_gradient_loss=True / syncs_to_external_generator=False": [
+    "all_gather_object object[2] world",
+    "log WARNING moe_balancing=aux_loss has NO EFFECT under a policy-gradient (GRPO) trainer: the loss is computed from per-token log-probs and never adds the model's router aux loss, so expert load is left unbalanced and no moe/* metrics are produced. Use moe_balancing=bias_update (aux-loss-free DeepSeek-V3 bias update \u2014 works under EP and emits moe/* load metrics via BalancingBiasCallback) for real balancing, or moe_balancing=none to silence this.",
+    "roster ['ParameterStatsCallback', '_GenerateStandIn', 'EfficiencyCallback', \"MoEMetricsCallback {'topk': 2, 'enable_router_logits': True, 'exclude_last_slot': False, 'log_every_n_steps': 5}\"]",
+    "config output_router_logits=False router_aux_loss_coef=0.001 forced_off=True"
+  ],
+  "moe transient / auto / policy_gradient_loss=True / syncs_to_external_generator=True": [
+    "all_gather_object object[2] world",
+    "log WARNING moe_balancing=aux_loss has NO EFFECT under a policy-gradient (GRPO) trainer: the loss is computed from per-token log-probs and never adds the model's router aux loss, so expert load is left unbalanced and no moe/* metrics are produced. Use moe_balancing=bias_update (aux-loss-free DeepSeek-V3 bias update \u2014 works under EP and emits moe/* load metrics via BalancingBiasCallback) for real balancing, or moe_balancing=none to silence this.",
+    "roster ['ParameterStatsCallback', '_GenerateStandIn', 'EfficiencyCallback', \"MoEMetricsCallback {'topk': 2, 'enable_router_logits': True, 'exclude_last_slot': False, 'log_every_n_steps': 5}\"]",
+    "config output_router_logits=False router_aux_loss_coef=0.001 forced_off=True"
+  ],
+  "moe transient / aux_loss / policy_gradient_loss=False / syncs_to_external_generator=False": [
+    "all_gather_object object[2] world",
+    "log INFO moe_balancing=aux_loss \u2014 setting output_router_logits=True (required for HF MoE forwards to add aux loss to the total loss). Run-scoped: exported, the flag would make every plain-transformers forward of the artifact materialize the router-logit plane and inflate its eval loss.",
+    "log WARNING moe_balancing=aux_loss: _Model declares no transformers router_logits capture, so under gradient checkpointing a checkpointed layer's router aux loss reaches the logged loss but adds no router gradient.",
+    "roster ['ParameterStatsCallback', '_GenerateStandIn', 'EfficiencyCallback', \"MoEMetricsCallback {'topk': 2, 'enable_router_logits': True, 'exclude_last_slot': False, 'log_every_n_steps': 5}\"]",
+    "config output_router_logits=True router_aux_loss_coef=0.001 forced_off=False"
+  ],
+  "moe transient / aux_loss / policy_gradient_loss=False / syncs_to_external_generator=True": [
+    "all_gather_object object[2] world",
+    "log INFO moe_balancing=aux_loss \u2014 setting output_router_logits=True (required for HF MoE forwards to add aux loss to the total loss). Run-scoped: exported, the flag would make every plain-transformers forward of the artifact materialize the router-logit plane and inflate its eval loss.",
+    "log WARNING moe_balancing=aux_loss: _Model declares no transformers router_logits capture, so under gradient checkpointing a checkpointed layer's router aux loss reaches the logged loss but adds no router gradient.",
+    "roster ['ParameterStatsCallback', '_GenerateStandIn', 'EfficiencyCallback', \"MoEMetricsCallback {'topk': 2, 'enable_router_logits': True, 'exclude_last_slot': False, 'log_every_n_steps': 5}\"]",
+    "config output_router_logits=True router_aux_loss_coef=0.001 forced_off=False"
+  ],
+  "moe transient / aux_loss / policy_gradient_loss=True / syncs_to_external_generator=False": [
+    "all_gather_object object[2] world",
+    "log WARNING moe_balancing=aux_loss has NO EFFECT under a policy-gradient (GRPO) trainer: the loss is computed from per-token log-probs and never adds the model's router aux loss, so expert load is left unbalanced and no moe/* metrics are produced. Use moe_balancing=bias_update (aux-loss-free DeepSeek-V3 bias update \u2014 works under EP and emits moe/* load metrics via BalancingBiasCallback) for real balancing, or moe_balancing=none to silence this.",
+    "roster ['ParameterStatsCallback', '_GenerateStandIn', 'EfficiencyCallback', \"MoEMetricsCallback {'topk': 2, 'enable_router_logits': True, 'exclude_last_slot': False, 'log_every_n_steps': 5}\"]",
+    "config output_router_logits=False router_aux_loss_coef=0.001 forced_off=True"
+  ],
+  "moe transient / aux_loss / policy_gradient_loss=True / syncs_to_external_generator=True": [
+    "all_gather_object object[2] world",
+    "log WARNING moe_balancing=aux_loss has NO EFFECT under a policy-gradient (GRPO) trainer: the loss is computed from per-token log-probs and never adds the model's router aux loss, so expert load is left unbalanced and no moe/* metrics are produced. Use moe_balancing=bias_update (aux-loss-free DeepSeek-V3 bias update \u2014 works under EP and emits moe/* load metrics via BalancingBiasCallback) for real balancing, or moe_balancing=none to silence this.",
+    "roster ['ParameterStatsCallback', '_GenerateStandIn', 'EfficiencyCallback', \"MoEMetricsCallback {'topk': 2, 'enable_router_logits': True, 'exclude_last_slot': False, 'log_every_n_steps': 5}\"]",
+    "config output_router_logits=False router_aux_loss_coef=0.001 forced_off=True"
+  ],
+  "moe transient / bias_update / policy_gradient_loss=False / syncs_to_external_generator=False": [
+    "all_gather_object object[2] world",
+    "log INFO moe_balancing=bias_update \u2014 overriding router_aux_loss_coef (0.001) to 0 to avoid double-balancing.",
+    "log INFO Enabled bias-update balancing on 1 EP MoE layers.",
+    "all_reduce SUM int64[1] world",
+    "all_reduce MAX int64[1] world",
+    "all_gather_object object[2] world",
+    "raised ValueError moe_balancing=bias_update export contract failed on 2 of 2 rank(s) [0, 1]. First (rank 0): moe_balancing=bias_update would train a routing bias that NO EXPORT CARRIES on _TransientLayer: this architecture has no checkpoint slot for a selection bias, so every exported checkpoint would silently serve WITHOUT the bias the model trained with \u2014 vLLM/SGLang route on the raw gate scores and near-tied top-k picks flip vs training. Set moe_balancing=bias_update_transient to accept trainer-only balancing deliberately, or moe_balancing=none. bias_update stays available on model types with an exportable slot (bailing_hybrid, bailing_moe, bailing_moe_linear, deepseek_v4, glm4_moe_lite, glm5_next, glm5_next_text, gpt_oss, inkling_mm_model, inkling_text, laguna, lfm2_moe, lfm2_vl, step3p5, step3p7), plus any router shipping a native balancing_biases buffer (Zaya).",
+    "config output_router_logits=False router_aux_loss_coef=0.0 forced_off=True"
+  ],
+  "moe transient / bias_update / policy_gradient_loss=False / syncs_to_external_generator=True": [
+    "all_gather_object object[2] world",
+    "log WARNING moe_balancing=bias_update is incompatible with on-policy weight-sync RL: the routing bias isn't forwarded by the rollout-engine weight sync (parameters only \u2014 an adopted native slot is a buffer), so trainer\u2194generator routing diverges. Downgrading to moe_balancing=none \u2014 with aux_loss also inert under a policy-gradient loss, THIS RUN HAS NO ROUTER BALANCING AT ALL and router_balancing_rate is unreachable. Families that only balance via bias_update (Zaya, DeepSeek-V4) train with unbalanced experts here.",
+    "roster ['ParameterStatsCallback', '_GenerateStandIn', 'EfficiencyCallback', \"MoEMetricsCallback {'topk': 2, 'enable_router_logits': False, 'exclude_last_slot': False, 'log_every_n_steps': 5}\"]",
+    "config output_router_logits=False router_aux_loss_coef=0.001 forced_off=False"
+  ],
+  "moe transient / bias_update / policy_gradient_loss=True / syncs_to_external_generator=False": [
+    "all_gather_object object[2] world",
+    "log INFO moe_balancing=bias_update \u2014 overriding router_aux_loss_coef (0.001) to 0 to avoid double-balancing.",
+    "log INFO Enabled bias-update balancing on 1 EP MoE layers.",
+    "all_reduce SUM int64[1] world",
+    "all_reduce MAX int64[1] world",
+    "all_gather_object object[2] world",
+    "raised ValueError moe_balancing=bias_update export contract failed on 2 of 2 rank(s) [0, 1]. First (rank 0): moe_balancing=bias_update would train a routing bias that NO EXPORT CARRIES on _TransientLayer: this architecture has no checkpoint slot for a selection bias, so every exported checkpoint would silently serve WITHOUT the bias the model trained with \u2014 vLLM/SGLang route on the raw gate scores and near-tied top-k picks flip vs training. Set moe_balancing=bias_update_transient to accept trainer-only balancing deliberately, or moe_balancing=none. bias_update stays available on model types with an exportable slot (bailing_hybrid, bailing_moe, bailing_moe_linear, deepseek_v4, glm4_moe_lite, glm5_next, glm5_next_text, gpt_oss, inkling_mm_model, inkling_text, laguna, lfm2_moe, lfm2_vl, step3p5, step3p7), plus any router shipping a native balancing_biases buffer (Zaya).",
+    "config output_router_logits=False router_aux_loss_coef=0.0 forced_off=True"
+  ],
+  "moe transient / bias_update / policy_gradient_loss=True / syncs_to_external_generator=True": [
+    "all_gather_object object[2] world",
+    "log WARNING moe_balancing=bias_update is incompatible with on-policy weight-sync RL: the routing bias isn't forwarded by the rollout-engine weight sync (parameters only \u2014 an adopted native slot is a buffer), so trainer\u2194generator routing diverges. Downgrading to moe_balancing=none \u2014 with aux_loss also inert under a policy-gradient loss, THIS RUN HAS NO ROUTER BALANCING AT ALL and router_balancing_rate is unreachable. Families that only balance via bias_update (Zaya, DeepSeek-V4) train with unbalanced experts here.",
+    "roster ['ParameterStatsCallback', '_GenerateStandIn', 'EfficiencyCallback', \"MoEMetricsCallback {'topk': 2, 'enable_router_logits': False, 'exclude_last_slot': False, 'log_every_n_steps': 5}\"]",
+    "config output_router_logits=False router_aux_loss_coef=0.001 forced_off=False"
+  ],
+  "moe transient / bias_update_transient / policy_gradient_loss=False / syncs_to_external_generator=False": [
+    "all_gather_object object[2] world",
+    "log INFO moe_balancing=bias_update_transient \u2014 overriding router_aux_loss_coef (0.001) to 0 to avoid double-balancing.",
+    "log INFO Enabled bias-update balancing on 1 EP MoE layers.",
+    "all_reduce SUM int64[1] world",
+    "all_reduce SUM int64[1] world",
+    "log WARNING moe_balancing=bias_update_transient \u2014 the routing bias on _TransientLayer steers TRAINING-TIME routing only: it is a plain attribute no checkpoint, export or weight-sync carries (resume rides the router_balancing_biases.pt sidecar). Every exported checkpoint serves without it \u2014 near-tied top-k picks flip between trainer and server, and serving-time expert load reverts to the raw gate's.",
+    "roster ['ParameterStatsCallback', '_GenerateStandIn', 'EfficiencyCallback', \"BalancingBiasCallback {'update_rate': 0.001, 'exclude_last_slot': False, 'log_every_n_steps': 5}\"]",
+    "config output_router_logits=False router_aux_loss_coef=0.0 forced_off=True"
+  ],
+  "moe transient / bias_update_transient / policy_gradient_loss=False / syncs_to_external_generator=True": [
+    "all_gather_object object[2] world",
+    "log WARNING moe_balancing=bias_update_transient is incompatible with on-policy weight-sync RL: the routing bias isn't forwarded by the rollout-engine weight sync (parameters only \u2014 an adopted native slot is a buffer), so trainer\u2194generator routing diverges. Downgrading to moe_balancing=none \u2014 with aux_loss also inert under a policy-gradient loss, THIS RUN HAS NO ROUTER BALANCING AT ALL and router_balancing_rate is unreachable. Families that only balance via bias_update (Zaya, DeepSeek-V4) train with unbalanced experts here.",
+    "roster ['ParameterStatsCallback', '_GenerateStandIn', 'EfficiencyCallback', \"MoEMetricsCallback {'topk': 2, 'enable_router_logits': False, 'exclude_last_slot': False, 'log_every_n_steps': 5}\"]",
+    "config output_router_logits=False router_aux_loss_coef=0.001 forced_off=False"
+  ],
+  "moe transient / bias_update_transient / policy_gradient_loss=True / syncs_to_external_generator=False": [
+    "all_gather_object object[2] world",
+    "log INFO moe_balancing=bias_update_transient \u2014 overriding router_aux_loss_coef (0.001) to 0 to avoid double-balancing.",
+    "log INFO Enabled bias-update balancing on 1 EP MoE layers.",
+    "all_reduce SUM int64[1] world",
+    "all_reduce SUM int64[1] world",
+    "log WARNING moe_balancing=bias_update_transient \u2014 the routing bias on _TransientLayer steers TRAINING-TIME routing only: it is a plain attribute no checkpoint, export or weight-sync carries (resume rides the router_balancing_biases.pt sidecar). Every exported checkpoint serves without it \u2014 near-tied top-k picks flip between trainer and server, and serving-time expert load reverts to the raw gate's.",
+    "roster ['ParameterStatsCallback', '_GenerateStandIn', 'EfficiencyCallback', \"BalancingBiasCallback {'update_rate': 0.001, 'exclude_last_slot': False, 'log_every_n_steps': 5}\"]",
+    "config output_router_logits=False router_aux_loss_coef=0.0 forced_off=True"
+  ],
+  "moe transient / bias_update_transient / policy_gradient_loss=True / syncs_to_external_generator=True": [
+    "all_gather_object object[2] world",
+    "log WARNING moe_balancing=bias_update_transient is incompatible with on-policy weight-sync RL: the routing bias isn't forwarded by the rollout-engine weight sync (parameters only \u2014 an adopted native slot is a buffer), so trainer\u2194generator routing diverges. Downgrading to moe_balancing=none \u2014 with aux_loss also inert under a policy-gradient loss, THIS RUN HAS NO ROUTER BALANCING AT ALL and router_balancing_rate is unreachable. Families that only balance via bias_update (Zaya, DeepSeek-V4) train with unbalanced experts here.",
+    "roster ['ParameterStatsCallback', '_GenerateStandIn', 'EfficiencyCallback', \"MoEMetricsCallback {'topk': 2, 'enable_router_logits': False, 'exclude_last_slot': False, 'log_every_n_steps': 5}\"]",
+    "config output_router_logits=False router_aux_loss_coef=0.001 forced_off=False"
+  ],
+  "moe transient / none / policy_gradient_loss=False / syncs_to_external_generator=False": [
+    "all_gather_object object[2] world",
+    "roster ['ParameterStatsCallback', '_GenerateStandIn', 'EfficiencyCallback', \"MoEMetricsCallback {'topk': 2, 'enable_router_logits': False, 'exclude_last_slot': False, 'log_every_n_steps': 5}\"]",
+    "config output_router_logits=False router_aux_loss_coef=0.001 forced_off=False"
+  ],
+  "moe transient / none / policy_gradient_loss=False / syncs_to_external_generator=True": [
+    "all_gather_object object[2] world",
+    "roster ['ParameterStatsCallback', '_GenerateStandIn', 'EfficiencyCallback', \"MoEMetricsCallback {'topk': 2, 'enable_router_logits': False, 'exclude_last_slot': False, 'log_every_n_steps': 5}\"]",
+    "config output_router_logits=False router_aux_loss_coef=0.001 forced_off=False"
+  ],
+  "moe transient / none / policy_gradient_loss=True / syncs_to_external_generator=False": [
+    "all_gather_object object[2] world",
+    "roster ['ParameterStatsCallback', '_GenerateStandIn', 'EfficiencyCallback', \"MoEMetricsCallback {'topk': 2, 'enable_router_logits': False, 'exclude_last_slot': False, 'log_every_n_steps': 5}\"]",
+    "config output_router_logits=False router_aux_loss_coef=0.001 forced_off=False"
+  ],
+  "moe transient / none / policy_gradient_loss=True / syncs_to_external_generator=True": [
+    "all_gather_object object[2] world",
+    "roster ['ParameterStatsCallback', '_GenerateStandIn', 'EfficiencyCallback', \"MoEMetricsCallback {'topk': 2, 'enable_router_logits': False, 'exclude_last_slot': False, 'log_every_n_steps': 5}\"]",
+    "config output_router_logits=False router_aux_loss_coef=0.001 forced_off=False"
+  ],
+  "moe native router / auto / policy_gradient_loss=False / syncs_to_external_generator=False": [
+    "all_gather_object object[2] world",
+    "all_reduce SUM int64[1] world",
+    "all_reduce MAX int64[1] world",
+    "roster ['ParameterStatsCallback', '_GenerateStandIn', 'EfficiencyCallback', \"BalancingBiasCallback {'update_rate': 0.001, 'exclude_last_slot': True, 'log_every_n_steps': 5}\"]",
+    "config output_router_logits=False router_aux_loss_coef=0.0 forced_off=True"
+  ],
+  "moe native router / auto / policy_gradient_loss=False / syncs_to_external_generator=True": [
+    "all_gather_object object[2] world",
+    "log WARNING moe_balancing=bias_update is incompatible with on-policy weight-sync RL: the routing bias isn't forwarded by the rollout-engine weight sync (parameters only \u2014 an adopted native slot is a buffer), so trainer\u2194generator routing diverges. Downgrading to moe_balancing=none \u2014 with aux_loss also inert under a policy-gradient loss, THIS RUN HAS NO ROUTER BALANCING AT ALL and router_balancing_rate is unreachable. Families that only balance via bias_update (Zaya, DeepSeek-V4) train with unbalanced experts here.",
+    "roster ['ParameterStatsCallback', '_GenerateStandIn', 'EfficiencyCallback', \"MoEMetricsCallback {'topk': 2, 'enable_router_logits': False, 'exclude_last_slot': True, 'log_every_n_steps': 5}\"]",
+    "config output_router_logits=False router_aux_loss_coef=0.0 forced_off=False"
+  ],
+  "moe native router / auto / policy_gradient_loss=True / syncs_to_external_generator=False": [
+    "all_gather_object object[2] world",
+    "all_reduce SUM int64[1] world",
+    "all_reduce MAX int64[1] world",
+    "roster ['ParameterStatsCallback', '_GenerateStandIn', 'EfficiencyCallback', \"BalancingBiasCallback {'update_rate': 0.001, 'exclude_last_slot': True, 'log_every_n_steps': 5}\"]",
+    "config output_router_logits=False router_aux_loss_coef=0.0 forced_off=True"
+  ],
+  "moe native router / auto / policy_gradient_loss=True / syncs_to_external_generator=True": [
+    "all_gather_object object[2] world",
+    "log WARNING moe_balancing=bias_update is incompatible with on-policy weight-sync RL: the routing bias isn't forwarded by the rollout-engine weight sync (parameters only \u2014 an adopted native slot is a buffer), so trainer\u2194generator routing diverges. Downgrading to moe_balancing=none \u2014 with aux_loss also inert under a policy-gradient loss, THIS RUN HAS NO ROUTER BALANCING AT ALL and router_balancing_rate is unreachable. Families that only balance via bias_update (Zaya, DeepSeek-V4) train with unbalanced experts here.",
+    "roster ['ParameterStatsCallback', '_GenerateStandIn', 'EfficiencyCallback', \"MoEMetricsCallback {'topk': 2, 'enable_router_logits': False, 'exclude_last_slot': True, 'log_every_n_steps': 5}\"]",
+    "config output_router_logits=False router_aux_loss_coef=0.0 forced_off=False"
+  ],
+  "moe native router / aux_loss / policy_gradient_loss=False / syncs_to_external_generator=False": [
+    "all_gather_object object[2] world",
+    "log WARNING moe_balancing=aux_loss but model.config.router_aux_loss_coef is 0.0; this model has no usable aux-loss term (e.g. aux-loss-free routers like GLM-4 MoE Lite's noaux_tc). Leaving output_router_logits off to avoid a TRL 'outputs.aux_loss' crash. Use moe_balancing=bias_update for real balancing. Setting router_aux_loss_coef in model_init_kwargs only works on a config that already declares the field \u2014 where it is absent the override is rejected at load.",
+    "roster ['ParameterStatsCallback', '_GenerateStandIn', 'EfficiencyCallback', \"MoEMetricsCallback {'topk': 2, 'enable_router_logits': True, 'exclude_last_slot': True, 'log_every_n_steps': 5}\"]",
+    "config output_router_logits=False router_aux_loss_coef=0.0 forced_off=True"
+  ],
+  "moe native router / aux_loss / policy_gradient_loss=False / syncs_to_external_generator=True": [
+    "all_gather_object object[2] world",
+    "log WARNING moe_balancing=aux_loss but model.config.router_aux_loss_coef is 0.0; this model has no usable aux-loss term (e.g. aux-loss-free routers like GLM-4 MoE Lite's noaux_tc). Leaving output_router_logits off to avoid a TRL 'outputs.aux_loss' crash. Use moe_balancing=bias_update for real balancing. Setting router_aux_loss_coef in model_init_kwargs only works on a config that already declares the field \u2014 where it is absent the override is rejected at load.",
+    "roster ['ParameterStatsCallback', '_GenerateStandIn', 'EfficiencyCallback', \"MoEMetricsCallback {'topk': 2, 'enable_router_logits': True, 'exclude_last_slot': True, 'log_every_n_steps': 5}\"]",
+    "config output_router_logits=False router_aux_loss_coef=0.0 forced_off=True"
+  ],
+  "moe native router / aux_loss / policy_gradient_loss=True / syncs_to_external_generator=False": [
+    "all_gather_object object[2] world",
+    "log WARNING moe_balancing=aux_loss has NO EFFECT under a policy-gradient (GRPO) trainer: the loss is computed from per-token log-probs and never adds the model's router aux loss, so expert load is left unbalanced and no moe/* metrics are produced. Use moe_balancing=bias_update (aux-loss-free DeepSeek-V3 bias update \u2014 works under EP and emits moe/* load metrics via BalancingBiasCallback) for real balancing, or moe_balancing=none to silence this.",
+    "roster ['ParameterStatsCallback', '_GenerateStandIn', 'EfficiencyCallback', \"MoEMetricsCallback {'topk': 2, 'enable_router_logits': True, 'exclude_last_slot': True, 'log_every_n_steps': 5}\"]",
+    "config output_router_logits=False router_aux_loss_coef=0.0 forced_off=True"
+  ],
+  "moe native router / aux_loss / policy_gradient_loss=True / syncs_to_external_generator=True": [
+    "all_gather_object object[2] world",
+    "log WARNING moe_balancing=aux_loss has NO EFFECT under a policy-gradient (GRPO) trainer: the loss is computed from per-token log-probs and never adds the model's router aux loss, so expert load is left unbalanced and no moe/* metrics are produced. Use moe_balancing=bias_update (aux-loss-free DeepSeek-V3 bias update \u2014 works under EP and emits moe/* load metrics via BalancingBiasCallback) for real balancing, or moe_balancing=none to silence this.",
+    "roster ['ParameterStatsCallback', '_GenerateStandIn', 'EfficiencyCallback', \"MoEMetricsCallback {'topk': 2, 'enable_router_logits': True, 'exclude_last_slot': True, 'log_every_n_steps': 5}\"]",
+    "config output_router_logits=False router_aux_loss_coef=0.0 forced_off=True"
+  ],
+  "moe native router / bias_update / policy_gradient_loss=False / syncs_to_external_generator=False": [
+    "all_gather_object object[2] world",
+    "all_reduce SUM int64[1] world",
+    "all_reduce MAX int64[1] world",
+    "roster ['ParameterStatsCallback', '_GenerateStandIn', 'EfficiencyCallback', \"BalancingBiasCallback {'update_rate': 0.001, 'exclude_last_slot': True, 'log_every_n_steps': 5}\"]",
+    "config output_router_logits=False router_aux_loss_coef=0.0 forced_off=True"
+  ],
+  "moe native router / bias_update / policy_gradient_loss=False / syncs_to_external_generator=True": [
+    "all_gather_object object[2] world",
+    "log WARNING moe_balancing=bias_update is incompatible with on-policy weight-sync RL: the routing bias isn't forwarded by the rollout-engine weight sync (parameters only \u2014 an adopted native slot is a buffer), so trainer\u2194generator routing diverges. Downgrading to moe_balancing=none \u2014 with aux_loss also inert under a policy-gradient loss, THIS RUN HAS NO ROUTER BALANCING AT ALL and router_balancing_rate is unreachable. Families that only balance via bias_update (Zaya, DeepSeek-V4) train with unbalanced experts here.",
+    "roster ['ParameterStatsCallback', '_GenerateStandIn', 'EfficiencyCallback', \"MoEMetricsCallback {'topk': 2, 'enable_router_logits': False, 'exclude_last_slot': True, 'log_every_n_steps': 5}\"]",
+    "config output_router_logits=False router_aux_loss_coef=0.0 forced_off=False"
+  ],
+  "moe native router / bias_update / policy_gradient_loss=True / syncs_to_external_generator=False": [
+    "all_gather_object object[2] world",
+    "all_reduce SUM int64[1] world",
+    "all_reduce MAX int64[1] world",
+    "roster ['ParameterStatsCallback', '_GenerateStandIn', 'EfficiencyCallback', \"BalancingBiasCallback {'update_rate': 0.001, 'exclude_last_slot': True, 'log_every_n_steps': 5}\"]",
+    "config output_router_logits=False router_aux_loss_coef=0.0 forced_off=True"
+  ],
+  "moe native router / bias_update / policy_gradient_loss=True / syncs_to_external_generator=True": [
+    "all_gather_object object[2] world",
+    "log WARNING moe_balancing=bias_update is incompatible with on-policy weight-sync RL: the routing bias isn't forwarded by the rollout-engine weight sync (parameters only \u2014 an adopted native slot is a buffer), so trainer\u2194generator routing diverges. Downgrading to moe_balancing=none \u2014 with aux_loss also inert under a policy-gradient loss, THIS RUN HAS NO ROUTER BALANCING AT ALL and router_balancing_rate is unreachable. Families that only balance via bias_update (Zaya, DeepSeek-V4) train with unbalanced experts here.",
+    "roster ['ParameterStatsCallback', '_GenerateStandIn', 'EfficiencyCallback', \"MoEMetricsCallback {'topk': 2, 'enable_router_logits': False, 'exclude_last_slot': True, 'log_every_n_steps': 5}\"]",
+    "config output_router_logits=False router_aux_loss_coef=0.0 forced_off=False"
+  ],
+  "moe native router / bias_update_transient / policy_gradient_loss=False / syncs_to_external_generator=False": [
+    "all_gather_object object[2] world",
+    "all_reduce SUM int64[1] world",
+    "all_reduce SUM int64[1] world",
+    "raised ValueError moe_balancing=bias_update_transient, but every balancing router on this model carries its bias in checkpoint-exported state \u2014 nothing here is transient, and the exported bias serves exactly as trained. Use moe_balancing=bias_update.",
+    "config output_router_logits=False router_aux_loss_coef=0.0 forced_off=True"
+  ],
+  "moe native router / bias_update_transient / policy_gradient_loss=False / syncs_to_external_generator=True": [
+    "all_gather_object object[2] world",
+    "log WARNING moe_balancing=bias_update_transient is incompatible with on-policy weight-sync RL: the routing bias isn't forwarded by the rollout-engine weight sync (parameters only \u2014 an adopted native slot is a buffer), so trainer\u2194generator routing diverges. Downgrading to moe_balancing=none \u2014 with aux_loss also inert under a policy-gradient loss, THIS RUN HAS NO ROUTER BALANCING AT ALL and router_balancing_rate is unreachable. Families that only balance via bias_update (Zaya, DeepSeek-V4) train with unbalanced experts here.",
+    "roster ['ParameterStatsCallback', '_GenerateStandIn', 'EfficiencyCallback', \"MoEMetricsCallback {'topk': 2, 'enable_router_logits': False, 'exclude_last_slot': True, 'log_every_n_steps': 5}\"]",
+    "config output_router_logits=False router_aux_loss_coef=0.0 forced_off=False"
+  ],
+  "moe native router / bias_update_transient / policy_gradient_loss=True / syncs_to_external_generator=False": [
+    "all_gather_object object[2] world",
+    "all_reduce SUM int64[1] world",
+    "all_reduce SUM int64[1] world",
+    "raised ValueError moe_balancing=bias_update_transient, but every balancing router on this model carries its bias in checkpoint-exported state \u2014 nothing here is transient, and the exported bias serves exactly as trained. Use moe_balancing=bias_update.",
+    "config output_router_logits=False router_aux_loss_coef=0.0 forced_off=True"
+  ],
+  "moe native router / bias_update_transient / policy_gradient_loss=True / syncs_to_external_generator=True": [
+    "all_gather_object object[2] world",
+    "log WARNING moe_balancing=bias_update_transient is incompatible with on-policy weight-sync RL: the routing bias isn't forwarded by the rollout-engine weight sync (parameters only \u2014 an adopted native slot is a buffer), so trainer\u2194generator routing diverges. Downgrading to moe_balancing=none \u2014 with aux_loss also inert under a policy-gradient loss, THIS RUN HAS NO ROUTER BALANCING AT ALL and router_balancing_rate is unreachable. Families that only balance via bias_update (Zaya, DeepSeek-V4) train with unbalanced experts here.",
+    "roster ['ParameterStatsCallback', '_GenerateStandIn', 'EfficiencyCallback', \"MoEMetricsCallback {'topk': 2, 'enable_router_logits': False, 'exclude_last_slot': True, 'log_every_n_steps': 5}\"]",
+    "config output_router_logits=False router_aux_loss_coef=0.0 forced_off=False"
+  ],
+  "moe native router / none / policy_gradient_loss=False / syncs_to_external_generator=False": [
+    "all_gather_object object[2] world",
+    "roster ['ParameterStatsCallback', '_GenerateStandIn', 'EfficiencyCallback', \"MoEMetricsCallback {'topk': 2, 'enable_router_logits': False, 'exclude_last_slot': True, 'log_every_n_steps': 5}\"]",
+    "config output_router_logits=False router_aux_loss_coef=0.0 forced_off=False"
+  ],
+  "moe native router / none / policy_gradient_loss=False / syncs_to_external_generator=True": [
+    "all_gather_object object[2] world",
+    "roster ['ParameterStatsCallback', '_GenerateStandIn', 'EfficiencyCallback', \"MoEMetricsCallback {'topk': 2, 'enable_router_logits': False, 'exclude_last_slot': True, 'log_every_n_steps': 5}\"]",
+    "config output_router_logits=False router_aux_loss_coef=0.0 forced_off=False"
+  ],
+  "moe native router / none / policy_gradient_loss=True / syncs_to_external_generator=False": [
+    "all_gather_object object[2] world",
+    "roster ['ParameterStatsCallback', '_GenerateStandIn', 'EfficiencyCallback', \"MoEMetricsCallback {'topk': 2, 'enable_router_logits': False, 'exclude_last_slot': True, 'log_every_n_steps': 5}\"]",
+    "config output_router_logits=False router_aux_loss_coef=0.0 forced_off=False"
+  ],
+  "moe native router / none / policy_gradient_loss=True / syncs_to_external_generator=True": [
+    "all_gather_object object[2] world",
+    "roster ['ParameterStatsCallback', '_GenerateStandIn', 'EfficiencyCallback', \"MoEMetricsCallback {'topk': 2, 'enable_router_logits': False, 'exclude_last_slot': True, 'log_every_n_steps': 5}\"]",
+    "config output_router_logits=False router_aux_loss_coef=0.0 forced_off=False"
+  ]
+}

@@ -11,7 +11,7 @@ wrong, both of which serve a corrupt policy with no error at sync time:
   the engine is paused and partly written);
 * skip them and forget the drain — nothing is ever pushed for those slots, and the engine keeps
   generating with the pretrained sinks while the trainer moves on. Permanently off-policy, which is
-  exactly the failure ``validate_weight_sync_support`` refuses the FA2 sink reset over.
+  exactly the failure ``reject_unsyncable_model`` refuses the FA2 sink reset over.
 
 So ``_send_dense_weights`` skips them by suffix in the streaming loop and re-sends them gathered from
 ``iter_hand_sliced_full``. This pins that wiring: the sinks arrive once, at full shape,
@@ -29,8 +29,8 @@ import torch
 import torch.nn as nn
 
 from src.distributed.tensor_parallel.plain_params import hand_sliced_dims, hand_sliced_suffixes, register_hand_sliced
-from src.trainers.grpo.rollout import weight_sync
-from src.trainers.grpo.rollout.weight_sync import gather_and_send_weights
+from src.trainers.grpo.rollout import weight_push
+from src.trainers.grpo.rollout.weight_push import gather_and_send_weights
 
 HIDDEN, NUM_HEADS, TP_SIZE = 8, 4, 2
 SINK_NAME = "layers.0.self_attn.sinks"
@@ -74,7 +74,7 @@ class _RecordingSender:
     def update_named_param(self, name: str, weights: torch.Tensor) -> None:
         self.sent.append((name, weights.clone()))
 
-    def reset_prefix_cache(self) -> None:  # pragma: no cover - the caller flushes, not the gather
+    def finish_weight_update(self) -> None:  # pragma: no cover - the caller flushes, not the gather
         pass
 
 
@@ -89,7 +89,7 @@ def _fake_tp_drain(model: nn.Module):
 
 
 def _sync(model: nn.Module, monkeypatch) -> _RecordingSender:
-    monkeypatch.setattr(weight_sync, "iter_hand_sliced_full", _fake_tp_drain)
+    monkeypatch.setattr(weight_push, "iter_hand_sliced_full", _fake_tp_drain)
     sender = _RecordingSender()
     gather_and_send_weights(model, sender)
     return sender

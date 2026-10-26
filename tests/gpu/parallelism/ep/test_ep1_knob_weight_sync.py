@@ -46,7 +46,7 @@ from src.env import env_flag, env_str
 from src.hardware import supports_grouped_mm
 from src.model_loading.parallel.loader import load_distributed_model
 from src.runtime.collectives import barrier
-from src.trainers.grpo.rollout.weight_sync import gather_and_send_weights
+from src.trainers.grpo.rollout.weight_push import gather_and_send_weights
 from src.trainers.sft import DistributedSFTTrainer
 from tests.common.datasets import create_sft_dataset
 from tests.common.distributed import ensure_model_downloaded

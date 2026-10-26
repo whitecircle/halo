@@ -1,15 +1,6 @@
-"""Torch-native NCCL group for SGLang weight sync: the trainer joins as rank 0, the engine as 1..N.
-
-SGLang builds its weight-update group with ``init_custom_process_group``: a plain c10d group over a
-TCPStore wrapped in ``PrefixStore(group_name, ...)``, then broadcasts typed tensors with
-``torch.distributed.broadcast(..., src=0)``. That bootstrap differs from the vLLM path
-(``pynccl.py``), which publishes a pickled ``ncclUniqueId`` under one raw store key and drives pynccl
-directly, and the two cannot interoperate because c10d derives its own store keys.
-
-This mirrors SGLang's side (``sglang.srt.utils.common.init_custom_process_group``) without importing
-sglang, which the training image never installs. ``Dockerfile.sglang`` asserts at build time that the
-two load-bearing halves of that convention still hold.
-"""
+"""Rank 0's half of SGLang's weight-update group: a plain c10d group over a ``PrefixStore(group_name, ...)``-wrapped
+TCPStore, mirroring ``sglang.srt.utils.common.init_custom_process_group`` without importing sglang.
+``Dockerfile.sglang`` asserts at build that both halves of that convention still hold."""
 
 import logging
 from contextlib import contextmanager
@@ -28,13 +19,9 @@ logger = logging.getLogger(__name__)
 def _store_bootstrapped_communicator():
     """Force the new group to bootstrap through its store instead of splitting the default one.
 
-    When the default process group was initialized eagerly (``init_process_group(device_id=...)``, as
-    the trainer's launcher does), ``_new_process_group_helper`` takes
-    ``split_from = _get_split_source(default_pg)`` and builds the communicator with ``ncclCommSplit``
-    off the trainer's own communicator. A split contains only ranks of its parent, so the engine — a
-    separate process that joined through the store — is absent: the trainer broadcasts into its own
-    world while the engine waits out the collective, with no error on either side. Clearing the bound
-    device for the duration selects the store handshake, which both sides can reach.
+    An eagerly initialized default group (``init_process_group(device_id=...)``) makes c10d build the
+    communicator with ``ncclCommSplit`` off the trainer's own, which holds only trainer ranks: the trainer
+    would broadcast into its own world, silently. Clearing the bound device selects the store handshake.
     """
     default_pg = c10d._get_default_group() if dist.is_available() and dist.is_initialized() else None
     bound = getattr(default_pg, "bound_device_id", None) if default_pg is not None else None
@@ -56,35 +43,18 @@ def build_weight_update_group(
     group_name: str,
     timeout_s: float,
 ) -> tuple[dist.ProcessGroup, dist.TCPStore]:
-    """Host the rendezvous store and join the weight-update group ``group_name`` as rank 0.
+    """Host the rendezvous store on ``listener`` and join group ``group_name`` as rank 0 of ``world_size``.
 
-    ``world_size`` counts the trainer and every engine rank. Returns the group and the store, which the
-    caller must keep alive: dropping the store closes the listener and the engine can no longer re-join.
-    Pair with :func:`release_weight_update_group`.
-
-    The store takes over ``listener`` (:class:`RendezvousListener`), which the client opened before
-    it asked the engine to join: bound on ``master_address`` itself, or on every interface under the
-    client's explicit opt-in.
-
-    ``timeout_s`` has no default because this half of the handshake blocks against a concurrent HTTP
-    request to the engine, and the client sets that deadline (``GROUP_FORMATION_TIMEOUT_S``); a
-    second spelling here could drift and let one half give up first.
-
-    The store is constructed directly rather than through ``torch.distributed.rendezvous``, which
-    under ``torchrun`` returns the elastic agent's store, making rank 0 join as a client so both sides
-    wait out the timeout. ``wait_for_workers=False`` because the engine only dials in after the
-    caller's ``/init_weights_update_group`` request, issued concurrently with this call.
-
-    ``device`` is made current but not passed as ``device_id``: NCCL infers the device from the
-    calling thread at the first collective, and an unpinned trainer can infer a GPU the tensors do not
-    live on, while ``device_id`` initializes the communicator eagerly and deadlocks against SGLang's
-    lazy join (its peer calls ``ncclCommInitRank`` only at its first broadcast).
+    Returns the group and the store, which the caller keeps alive: dropping it frees the port. ``timeout_s``
+    is the client's formation deadline, so neither half gives up first. The store is built directly, since
+    ``torch.distributed.rendezvous`` under torchrun returns the elastic agent's. ``device`` is made current
+    but not passed as ``device_id``, which would init the communicator eagerly and deadlock against SGLang's
+    lazy join.
     """
     if device.type == "cuda":
         torch.cuda.set_device(device)
     store = listener.start_store(master_address, world_size, timeout_s=timeout_s, wait_for_workers=False)
-    # SGLang wraps the rendezvous store in PrefixStore(group_name) before handing it to c10d, so an
-    # unprefixed store here would leave the two sides reading different keys and hanging.
+    # SGLang prefixes its store with the group name; an unprefixed one here reads different keys and hangs.
     prefixed = dist.PrefixStore(group_name, store)
     try:
         with _store_bootstrapped_communicator():
@@ -98,13 +68,11 @@ def build_weight_update_group(
                 timeout=timedelta(seconds=timeout_s),
             )
     except Exception:
-        # Drop this frame's reference so the listener dies with the failed attempt; otherwise it
-        # outlives the raise and the port cannot be rebound by a retry.
+        # Dropped so the listener dies with the failed attempt and a retry can rebind the port.
         store = None
         raise
-    # c10d resolves a global rank to a group rank through this map. The group is not a subset of the
-    # trainer's own world (its peers are engine processes), so it declares the identity mapping SGLang
-    # declares; without it `broadcast(..., src=0)` cannot translate the root rank.
+    # The group is no subset of the trainer's world, so it declares SGLang's identity rank map, without which
+    # `broadcast(..., src=0)` cannot translate the root rank.
     c10d._world.pg_group_ranks[group] = {i: i for i in range(world_size)}
     logger.info(
         f"Weight-update group formed: rank 0 of {world_size} at {master_address}:{listener.port} (group {group_name!r})"
@@ -113,13 +81,8 @@ def build_weight_update_group(
 
 
 def release_weight_update_group(group: dist.ProcessGroup | None, *, destroy: bool) -> None:
-    """Release a group from :func:`build_weight_update_group`; never raises, so it cannot mask the error
-    that triggered the teardown.
-
-    ``destroy`` runs the NCCL destroy, tolerating an already-dead peer. ``destroy=False`` drops only
-    torch's rank-map entry: the engine peers never enter destroy, so on an interrupted sync
-    ``dist.destroy_process_group`` would block, and process teardown reclaims the communicator.
-    """
+    """Release a group from :func:`build_weight_update_group`; never raises. ``destroy=False`` drops only torch's
+    rank-map entry: at interpreter exit the engine never enters destroy, so the NCCL destroy would block."""
     if group is None:
         return
     if destroy:
@@ -131,8 +94,7 @@ def release_weight_update_group(group: dist.ProcessGroup | None, *, destroy: boo
 
 
 def abort_weight_update_group(group: dist.ProcessGroup | None) -> None:
-    """Abort ``group``, ending the kernels spinning on a peer that never answered; torch drops its
-    bookkeeping, so no destroy may follow. Never raises: it runs on an already-failing path."""
+    """Abort ``group``, ending kernels spinning on a silent peer; no destroy may follow. Never raises."""
     if group is None:
         return
     try:

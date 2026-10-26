@@ -22,6 +22,7 @@ from accelerate import PartialState
 from trl import ModelConfig, SFTTrainer
 
 import src.model_loading.parallel.frozen_models as frozen_models
+from src.entrypoints.model_setup import PolicyLoad
 from src.model_loading.parallel.frozen_models import (
     ON_POLICY_GRPO_REFERENCE_ALTERNATIVES,
     PREFERENCE_REFERENCE_ALTERNATIVES,
@@ -273,20 +274,20 @@ def test_the_dpo_script_hands_the_loaded_reference_to_the_trainer(tmp_path):
         "load_script_datasets": mock.Mock(return_value=(None, False)),
         "alias_images_column": lambda ds, *a, **k: ds,
         "resolve_vlm_run": mock.Mock(return_value=False),
-        "load_model_for_training": mock.Mock(return_value=(object(), tokenizer, tokenizer, False)),
+        "load_policy_model": mock.Mock(return_value=PolicyLoad(object(), tokenizer, tokenizer, False)),
         "configure_adapter_training": mock.Mock(return_value=None),
         "apply_max_length": lambda cfg, args, model, tok: tok,
         "install_resolved_tokenizer": lambda processing_class, tok: processing_class,
         "log_model_info": mock.Mock(),
-        "enforce_text_path_padding_side": mock.Mock(),
+        "apply_text_path_padding_side": mock.Mock(),
         "prepare_script_preference_data": mock.Mock(return_value=(None, None, None)),
         "apply_distributed_trainer_config": mock.Mock(),
-        "build_training_callbacks": mock.Mock(return_value=[]),
+        "configure_balancing_and_build_callbacks": mock.Mock(return_value=[]),
         "barrier": mock.Mock(),
         "DistributedDPOTrainer": trainer,
     }
     with (
-        mock.patch("src.training.parser.install_log_tee"),
+        mock.patch("src.entrypoints.script.install_log_tee"),
         mock.patch.object(sys, "argv", ["prog", str(config)]),
         mock.patch.object(frozen_models, "load_frozen_reference_model", return_value=loaded),
         mock.patch.multiple(module, **stubs),

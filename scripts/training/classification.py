@@ -22,36 +22,37 @@ from datasets import DatasetDict
 from transformers import AutoModelForSequenceClassification
 from trl import ModelConfig
 
-from src.args.distributed_args import DistributedArguments
 from src.config_validation import reject_unsupported_args
 from src.configs.classification import ClassificationConfig, ClassificationScriptArguments
+from src.configs.parallelism_arguments import ParallelismArguments
 from src.data.pipeline.conversation import chat_template_kwargs, maybe_parse_json, reject_image_content
 from src.data.pipeline.processing import coordinated_map, resolve_map_num_proc
 from src.data.pipeline.rendered import tokenize_rendered
 from src.data.sources.loading import reject_image_columns
 from src.data.sources.paths import EVAL_SPLIT_NAMES
-from src.distributed.loading.vlm_setup import require_multimodal_sequence_classification_head
-from src.model_loading.model_preparation import log_model_info
+from src.entrypoints.data_setup import load_script_datasets, log_script_dataset_examples
+from src.entrypoints.model_setup import (
+    apply_max_length,
+    default_padded_attn_implementation,
+    load_model_and_tokenizer,
+    log_model_info,
+    require_multimodal_sequence_classification_head,
+)
+from src.entrypoints.script import (
+    apply_distributed_trainer_config,
+    configure_balancing_and_build_callbacks,
+    distributed_trainer_kwargs,
+    init_training_script,
+    parse_script_args,
+    run_trainer,
+    with_distributed_teardown,
+)
 from src.model_loading.parallel.peft_setup import configure_adapter_training
 from src.runtime.collectives import barrier
 from src.runtime.consensus import reject_across_ranks
 from src.runtime.ranks import get_global_world_size, is_global_main_process
 from src.trainers.mixins.validation import evaluation_runs
 from src.trainers.reward.classification import ClassificationTrainer
-from src.training.environment import run_training
-from src.training.parser import H4ArgumentParser
-from src.training.script_runner import (
-    apply_distributed_trainer_config,
-    apply_max_length,
-    build_training_callbacks,
-    distributed_trainer_kwargs,
-    init_training_script,
-    load_script_datasets,
-    load_script_model,
-    log_script_dataset_examples,
-    padded_workload_attn_implementation,
-    run_trainer,
-)
 
 logger = get_logger(__name__, log_level="INFO")
 
@@ -220,14 +221,15 @@ def get_label_list(raw_dataset, split="train") -> list[str]:
 
 
 def main():
-    parser = H4ArgumentParser((ClassificationScriptArguments, ClassificationConfig, ModelConfig, DistributedArguments))
-    args, classification_config, model_config, dist_args = parser.parse()
+    args, classification_config, model_config, dist_args = parse_script_args(
+        ClassificationScriptArguments, ClassificationConfig, ModelConfig, ParallelismArguments
+    )
 
     # The score head is pinned to AutoModelForSequenceClassification, so the loader would only warn
     # and build the wrapper anyway; reject the flag rather than accept one that cannot take effect.
-    reject_unsupported_args("Classification", text_only_model=dist_args.text_only_model)
+    reject_unsupported_args("Classification", text_only_model=args.text_only_model)
 
-    runtime = init_training_script(
+    context = init_training_script(
         args,
         classification_config,
         model_config,
@@ -235,7 +237,7 @@ def main():
         script_prefix="classification",
         trainer_cls=ClassificationTrainer,
     )
-    parallelism_config = runtime.parallelism_config
+    parallelism_config = context.parallelism_config
 
     # Dataset first: num_labels comes from it.
     ds, dataset_presharded = load_script_datasets(args, parallelism_config)
@@ -266,14 +268,14 @@ def main():
 
     # ClassificationTrainer's DataCollatorWithPadding right-pads every batch — keep those shapes off
     # the auto-selected FA4's slow varlen path.
-    model, tokenizer = load_script_model(
-        runtime,
+    model, tokenizer = load_model_and_tokenizer(
+        context,
         classification_config,
         model_config,
-        dist_args,
+        args,
         model_class=AutoModelForSequenceClassification,
         model_config_overrides={"num_labels": num_labels},
-        attn_implementation=padded_workload_attn_implementation(model_config, sinks_reset=dist_args.reset_sinks),
+        attn_default=default_padded_attn_implementation(model_config, sinks_reset=args.reset_sinks),
     )
 
     tokenizer = apply_max_length(classification_config, args, model, tokenizer)
@@ -319,7 +321,7 @@ def main():
 
     barrier()
 
-    callbacks = build_training_callbacks(args, classification_config, model, parallelism_config)
+    callbacks = configure_balancing_and_build_callbacks(args, classification_config, model, context)
 
     trainer = ClassificationTrainer(
         model=model,
@@ -332,10 +334,10 @@ def main():
         is_binary=len(label_to_id) == 2 and not is_multi_label,
         is_multi_label=is_multi_label,
         label_names_list=label_list,
-        **distributed_trainer_kwargs(args, dist_args, parallelism_config, dataset_presharded=dataset_presharded),
+        **distributed_trainer_kwargs(args, parallelism_config, dataset_presharded=dataset_presharded),
     )
-    run_trainer(trainer, runtime, method_name="Classification")
+    run_trainer(trainer, context, method_name="Classification")
 
 
 if __name__ == "__main__":
-    run_training(main)()
+    with_distributed_teardown(main)()

@@ -22,21 +22,16 @@ from src.weight_sync.transport.rendezvous import RendezvousListener
 
 logger = logging.getLogger(__name__)
 
-# The store carries one key and lives for one group, so this bounds the id handshake alone, not
-# DIST_STORE_TIMEOUT_HOURS' whole-job coordination waits.
+# Bounds the one-key id handshake alone, not DIST_STORE_TIMEOUT_HOURS' whole-job waits.
 _STORE_TIMEOUT_S = 300
 
-# Where vLLM's workers read the id: the key of the first object rank 0 broadcasts through vLLM's
-# StatelessProcessGroup.
+# Where vLLM's workers read the id: the key of rank 0's first StatelessProcessGroup broadcast.
 _UNIQUE_ID_KEY = "broadcast_from/0/0"
 
-# vLLM's own truthy spellings for VLLM_DISABLE_PYNCCL, and only those. It is the server's variable:
-# the toolkit's env_flag would also accept "yes"/"on", so a value the server ignores would reject the
-# trainer here.
+# vLLM's own truthy spellings for its VLLM_DISABLE_PYNCCL, narrower than the toolkit's env_flag.
 _VLLM_TRUE_VALUES = ("1", "true")
 
-# Deadline for the one-element warm-up all-reduce that proves the freshly built communicator can
-# actually talk; generous because it also covers the peer's own NCCL init.
+# The warm-up all-reduce proving the new communicator talks; it also covers the peer's own NCCL init.
 _WARMUP_SYNC_TIMEOUT_S = 120.0
 
 
@@ -46,8 +41,7 @@ def vllm_pynccl_disabled() -> bool:
 
 
 class UniqueIdStore:
-    """Rank 0's rendezvous store for one vLLM weight-transfer group: it carries the NCCL unique id the engine's
-    workers read, and nothing else."""
+    """Rank 0's rendezvous store for one vLLM weight-transfer group, carrying only the NCCL unique id."""
 
     def __init__(self, store: TCPStore, world_size: int):
         self._store: TCPStore | None = store
@@ -55,10 +49,7 @@ class UniqueIdStore:
 
     @classmethod
     def create(cls, *, host: str, listener: RendezvousListener, world_size: int) -> "UniqueIdStore":
-        """Host the store on ``listener`` and block until every engine worker has joined it.
-
-        The engine is told where to dial before this call, and the listener is what it reaches meanwhile.
-        """
+        """Host the store on ``listener`` and block until every engine worker joined it."""
         return cls(listener.start_store(host, world_size, timeout_s=_STORE_TIMEOUT_S, use_libuv=False), world_size)
 
     def publish(self, unique_id: ncclUniqueId) -> None:
@@ -68,12 +59,8 @@ class UniqueIdStore:
         self._store.set(_UNIQUE_ID_KEY, pickle.dumps(unique_id))
 
     def close(self) -> None:
-        """Release the listener so the group port can be rebound; idempotent.
-
-        The store owns the listening fd, so dropping the last reference to it stops its daemon and closes
-        the fd. Dropped here rather than at garbage collection, so the port comes free even while a thread
-        parked in ``ncclCommInitRank`` still holds this object.
-        """
+        """Release the listener so the group port can be rebound, even while a thread parked in
+        ``ncclCommInitRank`` still holds this object; idempotent."""
         self._store = None
 
 
@@ -82,15 +69,12 @@ class PyNcclCommunicator:
 
     def __init__(self, store: UniqueIdStore, device: torch.device):
         world_size = store.world_size
-        # Assigned before the disabled short-circuit: callers read ``.device`` to stage weights, and
-        # a missing attribute would surface as an AttributeError with the server already paused.
+        # Assigned before the disabled short-circuit: callers read ``.device`` with the server paused.
         self.device = device
         # Set by abort(), so a null-handle communicator fails by name rather than "invalid argument".
         self.aborted = False
 
-        # VLLM_DISABLE_PYNCCL is a vLLM server knob. Reaching the trainer (usually via a server-aimed
-        # --env-file) it would disable the broadcast, leaving the generator on the initial policy for
-        # the whole run with nothing raised.
+        # A server knob that, reaching the trainer, would silently disable the broadcast for the whole run.
         if vllm_pynccl_disabled() and world_size > 1:
             raise RuntimeError(
                 "VLLM_DISABLE_PYNCCL is set in the trainer process, which would silently disable the "
@@ -106,8 +90,7 @@ class PyNcclCommunicator:
         try:
             self.nccl = NCCLLibrary()
         except Exception as e:
-            # A disabled communicator would broadcast nothing while the server blocks for the full
-            # timeout, so this raises instead.
+            # Raised, not disabled: the server would block for the full timeout on a broadcast that never comes.
             raise ImportError(f"libnccl.so.2 unavailable — NCCL weight sync cannot run: {e}") from e
 
         self.disabled = False

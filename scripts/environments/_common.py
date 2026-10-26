@@ -17,13 +17,12 @@ from transformers import AutoTokenizer
 from trl import ModelConfig
 
 from scripts._common import add_openai_endpoint_args
-from src.configs.environment_config import EnvironmentConfig
-from src.configs.grpo_environmental import AsyncTrainingConfig
+from src.configs.grpo_environmental import AsyncTrainingConfig, EnvironmentConfig
+from src.configs.parser import HaloArgumentParser
 from src.environments.base import BaseEnvironment
 from src.environments.episode import resolve_rollout_stop_token_ids
 from src.environments.eval_runner import trajectory_path, write_trajectories_jsonl
-from src.environments.rollout_config import DEFAULT_ROLLOUT_TOP_P, RolloutConfig
-from src.training.parser import H4ArgumentParser
+from src.environments.rollout_config import RolloutConfig
 
 logger = logging.getLogger(__name__)
 
@@ -67,7 +66,7 @@ def add_endpoint_args(parser: argparse.ArgumentParser) -> None:
         type=float,
         default=None,
         help=f"Nucleus-sampling cutoff. Default: the training config's rollout_top_p under --training_config, "
-        f"else the training rollout's own default ({DEFAULT_ROLLOUT_TOP_P}), so an eval samples the policy the "
+        f"else the training rollout's own default ({RolloutConfig.top_p}), so an eval samples the policy the "
         f"way training did rather than at whatever the server defaults to.",
     )
     parser.add_argument(
@@ -109,7 +108,7 @@ class TrainingContract:
     @classmethod
     def load(cls, path: str) -> "TrainingContract":
         """Parse ``path``; the stop tokens go through the tokenizer of the model the YAML trains."""
-        parser = H4ArgumentParser(TRAINING_CONTRACT_CLASSES)
+        parser = HaloArgumentParser(TRAINING_CONTRACT_CLASSES)
         env_config, async_config, model_config = parser.parse_yaml_file(path, allow_extra_keys=True)
         stop_token_ids = None
         if async_config.rollout_stop_tokens:
@@ -159,7 +158,7 @@ def rollout_config_from_args(
     else:
         base = RolloutConfig(
             temperature=default_temperature,
-            top_p=DEFAULT_ROLLOUT_TOP_P,
+            top_p=RolloutConfig.top_p,
             max_tokens=default_max_tokens,
             request_timeout=EVAL_REQUEST_TIMEOUT_SECONDS,
         )

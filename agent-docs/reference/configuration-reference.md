@@ -1,6 +1,6 @@
 # Configuration Reference
 
-Every training script takes a YAML config file as its first positional argument. Config classes extend HuggingFace `TrainingArguments`, so all its parameters (learning rate, batch size, scheduler, …) are valid everywhere. Any field can be overridden on the command line; CLI wins, and every config is built from the merged values ([CLI overrides](../getting-started/configuration.md#cli-overrides)). Every numeric knob the toolkit declares refuses a bool and a NaN or infinity at parse time, and an integer knob a fraction (`DistributedArguments` checks only the type; `ParallelismConfig` owns the ranges):
+Every training script takes a YAML config file as its first positional argument. Config classes extend HuggingFace `TrainingArguments`, so all its parameters (learning rate, batch size, scheduler, …) are valid everywhere. Any field can be overridden on the command line; CLI wins, and every config is built from the merged values ([CLI overrides](../getting-started/configuration.md#cli-overrides)). Every numeric knob the toolkit declares refuses a bool and a NaN or infinity at parse time, and an integer knob a fraction (`ParallelismArguments` checks only the type; `ParallelismConfig` owns the ranges):
 
 ```bash
 python scripts/training/sft.py examples/sft/qwen3/qwen3-4b-ultrachat.yaml \
@@ -46,14 +46,14 @@ Two knobs are *not* a plain cap:
 
 ### The tokenizer's window
 
-Every training script but embedding routes its `tokenizer.model_max_length` write through one of three seams in `src/training/script_runner.py`:
+Every training script but embedding routes its `tokenizer.model_max_length` write through one of three seams in `src/entrypoints/model_setup.py`, each pinning its window through `apply_tokenizer_window`:
 
 - `apply_max_length` — every single-budget script (SFT, DPO, KTO, SMPO, reward, classification, distillation). It resolves `max_length` against the context window, writes the resolved number back onto the config, and pins the same number, so collators, length filters and packers all read one already-resolved value.
 - `apply_prompt_completion_window` — offline and online GRPO, which have no single `max_length`. The window is `max_prompt_length + max_completion_length`, pinned **only when both halves are bounded**.
 
     HF resolves any `truncation=True, max_length=None` call against `model_max_length`, so pinning a partial sum would turn the *unbounded* half into a silent cap at the other half's budget. An unbounded half therefore leaves the tokenizer at its own value. On the on-policy scripts the completion half is a generation budget with no unbounded setting; an unset one is rejected here.
 
-- `apply_context_window` — Async GRPO, whose multi-turn trajectory no configured length bounds (`rollout_max_episode_tokens` caps the generated share alone). It pins the raw context window (`get_model_context_window`), the same hard limit the rollout server enforces, which the trainer fails against rather than truncating.
+- `apply_tokenizer_window` with `get_model_context_window` — Async GRPO, whose multi-turn trajectory no configured length bounds (`rollout_max_episode_tokens` caps the generated share alone). It pins the raw context window, the same hard limit the rollout server enforces, which the trainer fails against rather than truncating.
 
 Boundedness is one predicate everywhere (`is_bounded_length`): a positive int bounds, while `null` and any non-positive value mean unset.
 
@@ -65,14 +65,14 @@ The YAML parser migrates no spelling: `max_seq_length` is a field of no config, 
 
 ## Performance & balancing flags
 
-Every standard training script inherits these from `CommonScriptArguments`; they wire the observability and balancing callbacks via `build_perf_callbacks` (`src/callbacks/wiring.py`).
+Every standard training script inherits these from `CommonScriptArguments`; `configure_moe_balancing` (`src/callbacks/balancing.py`) applies the balancing mode and `build_run_callbacks` (`src/callbacks/factory.py`) builds the observability and balancing callbacks.
 
 | Parameter | Type | Default | Description |
 |---|---|---|---|
 | `enable_efficiency_metrics` | `bool` | `false` | Construct [EfficiencyCallback](../training-methods/callbacks.md#efficiencycallback). Off by default: multi-sequence trainers (DPO/SMPO/Reward forward chosen + rejected; Distillation also forwards a teacher) report a misleading utilization. Sets `include_num_input_tokens_seen="all"` when on — the HF field is tri-state (`"no" \| "all" \| "non_padding"`), not a bool. |
-| `enable_moe_metrics` | `bool` | `true` | Construct [MoEMetricsCallback](../training-methods/callbacks.md#moemetricscallback): `moe/load_{max,min,cv}`, `moe/dead_frac`, `moe/load_max_{first,last}`, emitted every `logging_steps`. No-op for dense models. It turns `output_router_logits` on itself only under `moe_balancing: aux_loss`, so asking for metrics never adds the router-logit tensor or the aux term as a side effect. Not wired under either bias mode, where `RouterBiasBalancingCallback` emits the same keys from its load counter instead, nor under pipeline parallelism, whose stage forwards return no `router_logits` (`bias_update` is the route to load metrics there). It reports nothing under **GRPO** (backbone-only log-probs) or where the EP wrapper bypasses HF's router recorder (DeepSeek-V4), warning loudly rather than going silent. |
+| `enable_moe_metrics` | `bool` | `true` | Construct [MoEMetricsCallback](../training-methods/callbacks.md#moemetricscallback): `moe/load_{max,min,cv}`, `moe/dead_frac`, `moe/load_max_{first,last}`, emitted every `logging_steps`. No-op for dense models. It turns `output_router_logits` on itself only under `moe_balancing: aux_loss`, so asking for metrics never adds the router-logit tensor or the aux term as a side effect. Not wired under either bias mode, where `BalancingBiasCallback` emits the same keys from its load counter instead, nor under pipeline parallelism, whose stage forwards return no `router_logits` (`bias_update` is the route to load metrics there). It reports nothing under **GRPO** (backbone-only log-probs) or where the EP wrapper bypasses HF's router recorder (DeepSeek-V4), warning loudly rather than going silent. |
 | `moe_balancing` | `"auto" \| "none" \| "aux_loss" \| "bias_update" \| "bias_update_transient"` | `"auto"` | Router balancing; `auto` resolves per model. Resolution rules, per-family support, the trainers `aux_loss` reaches and the weight-sync downgrade: [MoE balancing modes](../training-methods/callbacks.md#moe-balancing-modes). |
-| `router_balancing_rate` | `float` | `1.0e-3` | Sign-step magnitude (γ) for `RouterBiasBalancingCallback` when a bias-update mode is active. |
+| `router_balancing_rate` | `float` | `1.0e-3` | Sign-step magnitude (γ) for `BalancingBiasCallback` when a bias-update mode is active. |
 | `num_full_model_params` | `float \| null` | `null` | Total param count across all EP/TP ranks. When set, `EfficiencyCallback` computes `distributed_efficiency = params_ratio * mfu`. |
 | `enable_torch_profiler` | `bool` | `false` | Construct [TorchProfilerCallback](debugging.md#1a-torchprofiler--gpuoperator-trace) — captures a step window, writes per-rank Chrome trace + flame-graph stacks + memory timeline. |
 | `profiler_output_dir` | `str` | `$HALO_DATA_ROOT/profiling/torch` | Output dir for torch.profiler artifacts (derives from `HALO_DATA_ROOT`; set explicitly to override). |
@@ -96,9 +96,9 @@ Every standard training script inherits these from `CommonScriptArguments`; they
 
 ---
 
-## DistributedArguments (model & from-scratch)
+## Model, checkpoint and from-scratch flags
 
-Parsed by every training script from `src/args/distributed_args.py` (parallelism sizes are under [ParallelismConfig](#parallelismconfig)).
+Every training script parses these. `reset_sinks`, `train_sinks` and `text_only_model` (`ModelLoadArguments`) and the four checkpoint flags (`CheckpointArguments`) are on every script's `CommonScriptArguments` (`src/configs/script_arguments.py`); `init_from_scratch` and `merge_expert_lora_on_save` are `ParallelismArguments` flags (`src/configs/parallelism_arguments.py`, whose parallelism sizes are under [ParallelismConfig](#parallelismconfig)).
 
 | Parameter | Type | Default | Description |
 |---|---|---|---|
@@ -176,7 +176,7 @@ Read from the environment (not the YAML); set in the launch command / `.env`. To
 
 ## Trainer-to-config quick reference
 
-Each trainer combines a **trainer config** (hyperparameters) with **script arguments** (dataset, tokenizer, infra). All configs also accept standard `TrainingArguments` fields. Every script additionally parses TRL's `ModelConfig` — `model_name_or_path`, `model_revision`, `dtype`, `attn_implementation`, and the LoRA fields ([PEFT](../optimization/peft.md)) — and [DistributedArguments](#distributedarguments-model--from-scratch); all four dataclasses draw from the one YAML.
+Each trainer combines a **trainer config** (hyperparameters) with **script arguments** (dataset, tokenizer, infra). All configs also accept standard `TrainingArguments` fields. Every script additionally parses TRL's `ModelConfig` — `model_name_or_path`, `model_revision`, `dtype`, `attn_implementation`, and the LoRA fields ([PEFT](../optimization/peft.md)) — and `ParallelismArguments` (the [ParallelismConfig](#parallelismconfig) knobs); all four dataclasses draw from the one YAML.
 
 | Trainer | Config Class | Script Arguments | Source |
 |---------|-------------|-----------------|--------|
@@ -271,9 +271,9 @@ Both on-policy trainers force `use_liger_kernel` off at construction: TRL's Lige
 
 ## ParallelismConfig
 
-Unified config for Expert (EP), Context (CP), Tensor (TP), Expert-Tensor (ETP), and Pipeline (PP) Parallelism. See [Pipeline Parallelism](../parallelism/pipeline-parallelism.md) for the `pp_*` fields. The class itself is built at construction; users set it through `DistributedArguments` (`src/args/distributed_args.py`), whose names go in the YAML or on the CLI and differ from the field names below.
+Unified config for Expert (EP), Context (CP), Tensor (TP), Expert-Tensor (ETP), and Pipeline (PP) Parallelism. See [Pipeline Parallelism](../parallelism/pipeline-parallelism.md) for the `pp_*` fields. The class itself is built at construction; users set it through `ParallelismArguments` (`src/configs/parallelism_arguments.py`), whose names go in the YAML or on the CLI and differ from the field names below.
 
-| `ParallelismConfig` field | `DistributedArguments` name |
+| `ParallelismConfig` field | `ParallelismArguments` name |
 |---|---|
 | `ep_size` | `expert_parallel_size` |
 | `cp_size` | `context_parallel_size` |
@@ -286,7 +286,7 @@ Unified config for Expert (EP), Context (CP), Tensor (TP), Expert-Tensor (ETP), 
 | `ep_fp32_router` | `fp32_router` |
 | `ep_fp32_experts` | `fp32_experts` |
 
-Every other field below keeps its name, except `world_size` / `gpus_per_node` (auto-detected, not settable), `expert_lora` (built from the PEFT `LoraConfig`, so it has no flag; row below) and `merge_expert_lora_on_save` (a `DistributedArguments` flag, documented above).
+Every other field below keeps its name, except `world_size` / `gpus_per_node` (auto-detected, not settable), `expert_lora` (built from the PEFT `LoraConfig`, so it has no flag; row below) and `merge_expert_lora_on_save` (a `ParallelismArguments` flag, documented above).
 
 **Source:** `src/distributed/parallelism_config.py`
 
@@ -327,7 +327,7 @@ Every other field below keeps its name, except `world_size` / `gpus_per_node` (a
 
 Besides these, `num_nodes`, `num_nvlink_domains`, `ep_group_size`, `data_parallel_size`, `stage_world_size`, `pp_rank`, and the stage-local rank coordinates are computed in `__post_init__`.
 
-Two more carry no `DistributedArguments` spelling and are derived from the training config by `parallelism_config_from_args` (`src/training/parallelism_args.py`): `ep_rows_per_device` (the rows one MoE forward carries per device — the trainer's rows-per-example × `per_device_train_batch_size`) and `ep_declared_max_length`, which the config-time dispatch-ceiling gate multiplies out into a per-rank token budget before any weight is read.
+Two more carry no `ParallelismArguments` spelling and are derived from the training config by `parallelism_config_from_args` (`src/configs/parallelism_arguments.py`): `ep_rows_per_device` (the rows one MoE forward carries per device — the trainer's rows-per-example × `per_device_train_batch_size`) and `ep_declared_max_length`, which the config-time dispatch-ceiling gate multiplies out into a per-rank token budget before any weight is read.
 
 A trainer whose config declares no `max_length` field stamps neither and leaves the ceiling to the dispatcher's runtime backstop. `max_length: null` still stamps the rows; the gate then takes `max_prompt_length + max_completion_length` where the config bounds both (offline GRPO, or SMPO with both shares set), else the model's context window.
 
@@ -462,7 +462,7 @@ The class also overrides four `TrainingArguments` defaults: `learning_rate=1e-6`
 
 ## EnvironmentConfig
 
-Environment selection, reward terms and turn budget for Async GRPO with Environments. **Source:** `src/configs/environment_config.py`
+Environment selection, reward terms and turn budget for Async GRPO with Environments. **Source:** `src/configs/grpo_environmental.py`
 
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
@@ -502,7 +502,7 @@ environment_kwargs:
 
 ## AsyncTrainingConfig
 
-`DistributedAsyncEnvironmentalGRPOTrainer`: Ray workers, rollout-server connections, weight sync, rollout generation, async prefetch. **Source:** `src/configs/grpo_environmental.py`. Every numeric field also refuses a bool (`true` would read as 1) and a non-finite value, beside its own range.
+`DistributedAsyncEnvironmentalGRPOTrainer`: Ray workers, rollout-server connections, weight sync, rollout generation, async prefetch. **Source:** `src/configs/grpo_environmental.py`, where the sampling, budget, IS-correction and reasoning-cost fields come from the `RolloutSamplingArguments`, `RolloutBudgetArguments`, `ISCorrectionArguments` and `ReasoningCostArguments` bundles it mixes in. A field it copies into the actors' `RolloutConfig` (`src/environments/rollout_config.py`) defaults to `RolloutConfig`'s own value. Every numeric field also refuses a bool (`true` would read as 1) and a non-finite value, beside its own range.
 
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
@@ -561,7 +561,7 @@ environment_kwargs:
 
 ### CommonScriptArguments
 
-Base shared by all training scripts. **Source:** `src/configs/script_arguments.py`
+Base shared by all training scripts, mixing in `TorchProfilerArguments` (`enable_torch_profiler`, `profiler_*`), `CheckpointArguments` and `ModelLoadArguments` ([their flags](#model-checkpoint-and-from-scratch-flags)). **Source:** `src/configs/script_arguments.py`
 
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
@@ -600,7 +600,7 @@ Base shared by all training scripts. **Source:** `src/configs/script_arguments.p
 
 ### RLVROnlineGRPOScriptArguments
 
-RLVR Online GRPO. **Source:** `src/args/rlvr_online_grpo_args.py`
+RLVR Online GRPO. **Source:** `src/configs/grpo_online.py`
 
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
@@ -623,7 +623,7 @@ It inherits `GRPOEarlyStopArguments` as well: `early_stop_entropy_band`, `early_
 
 ### EnvironmentalGRPOScriptArguments
 
-**Source:** `src/args/environmental_grpo_args.py`
+**Source:** `src/configs/grpo_environmental.py`
 
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
@@ -642,7 +642,7 @@ These extend `CommonScriptArguments` with minimal additions:
 |-------|--------|-------------|
 | `SMPOScriptArguments` | `src/configs/preference.py` | `generate_eval_examples` (`True`), `num_eval_examples` (`50`) |
 | `DPOScriptArguments` | `src/configs/preference.py` | `generate_eval_examples` (`True`), `num_eval_examples` (`50`), `generation_max_prompt_length` (`512`) — bounds the eval-time generation dataset only; DPO has no training-side prompt cap — and `images_field` (`None`) — VLM only: image column renamed to the `images` spelling TRL's vision probe reads, ahead of the dispatch |
-| `OfflineGRPOScriptArguments` | `src/args/offline_grpo_args.py` | `generate_eval_examples` (`True`), `num_eval_examples` (`50`) |
+| `OfflineGRPOScriptArguments` | `src/configs/grpo_offline.py` | `generate_eval_examples` (`True`), `num_eval_examples` (`50`) |
 | `KTOScriptArguments` | `src/configs/preference.py` | `completion_field` (`"completion"`), `label_field` (`"label"`) — KTO uses an *unpaired* `{prompt, completion, label}` dataset — and `images_field` (`None`) — VLM only: renamed to TRL's `images` spelling; the vision path refuses `precompute_ref_log_probs` and paired columns |
 | `RewardScriptArguments` | `src/configs/reward.py` | `images_field` (`None`) — VLM only: image column, renamed to `images` and merged into the shared prompt conversation; declares the run VLM on a score-headed multimodal checkpoint ([reward VLMs](../training-methods/preference/reward-modeling.md#vision-language)) |
 | `ClassificationScriptArguments` | `src/configs/classification.py` | `text_field` (`None`) — raw-text column wrapped as one user turn when the dataset has no `prompt` conversation (e.g. text/label sets like imdb) |

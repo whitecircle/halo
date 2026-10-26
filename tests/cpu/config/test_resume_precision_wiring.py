@@ -13,11 +13,13 @@ from accelerate import PartialState
 from transformers import Qwen3Config, Qwen3MoeConfig
 from trl import ModelConfig
 
-import src.distributed.loading.vlm_setup as vlm_setup
+import src.entrypoints.model_setup as model_setup
 import src.model_loading.parallel.loader as loading
+from src.entrypoints.model_setup import load_model_and_tokenizer
+from src.entrypoints.run_setup import prepare_distributed_resume
+from src.entrypoints.script import ScriptContext
 from src.model_loading.parallel.model_source import ModelSource
-from src.training.environment import prepare_distributed_resume
-from src.training.script_runner import ScriptRuntime, load_script_model
+from src.trainers.sft import DistributedSFTTrainer
 from tests.common.parallelism import make_parallelism_config
 from tests.common.source_sweep import call_name, functions_in
 
@@ -112,20 +114,20 @@ def test_script_model_uses_resolved_checkpoint_identity_not_resume_flag(tmp_path
     )
     model_config = ModelConfig(model_name_or_path="org/base")
     pc = make_parallelism_config(world_size=8, gpus_per_node=8, ep_size=8)
-    checkpoint, source = prepare_distributed_resume(training, model_config, pc)
-    runtime = ScriptRuntime(pc, "ep", 0, checkpoint, source)
+    checkpoint, source = prepare_distributed_resume(training, model_config, pc, overwrite_output_dir=False)
+    runtime = ScriptContext(pc, 0, checkpoint, source, DistributedSFTTrainer)
 
     def load(**kwargs):
         # The name from_pretrained gives the config of the directory it read.
         return SimpleNamespace(config=SimpleNamespace(_name_or_path=kwargs["model_name_or_path"])), SimpleNamespace()
 
     loader = Mock(side_effect=load)
-    monkeypatch.setattr(vlm_setup, "load_distributed_model", loader)
-    model, _ = load_script_model(
+    monkeypatch.setattr(model_setup, "load_distributed_model", loader)
+    model, _ = load_model_and_tokenizer(
         runtime,
         training,
         model_config,
-        SimpleNamespace(reset_sinks=True, train_sinks=False, text_only_model=False),
+        SimpleNamespace(reset_sinks=True, train_sinks=False, text_only_model=False, init_from_scratch=False),
     )
     expected = resume in ("explicit", True)
     assert loader.call_args.kwargs["preserve_checkpoint_precision"] is expected
@@ -137,17 +139,16 @@ def test_script_model_uses_resolved_checkpoint_identity_not_resume_flag(tmp_path
 
 
 def test_modality_aware_training_calls_forward_the_runtime_checkpoint_identity():
+    """The checkpoint identity reaches the loader only through the script's own context."""
     calls = [
         (path, node)
         for path, function in functions_in(("scripts/training",))
         for node in ast.walk(function)
-        if isinstance(node, ast.Call) and call_name(node) == "load_model_for_training"
+        if isinstance(node, ast.Call) and call_name(node) == "load_policy_model"
     ]
     assert len(calls) >= 6, "the modality-aware policy-construction sweep must remain non-vacuous"
     for path, call in calls:
-        value = {keyword.arg: keyword.value for keyword in call.keywords}.get("preserve_checkpoint_precision")
-        assert isinstance(value, ast.Attribute) and value.attr == "policy_from_checkpoint", path
-        assert isinstance(value.value, ast.Name) and value.value.id == "runtime", path
+        assert isinstance(call.args[0], ast.Name) and call.args[0].id == "context", path
 
 
 def test_the_dispatch_matrix_reaches_every_leaf_loader():

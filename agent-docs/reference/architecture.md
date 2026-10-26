@@ -15,7 +15,7 @@ host has no usable Python ([Docker](../infrastructure/docker.md)).
 
 | Layer | Owns | Source | Deeper page |
 |---|---|---|---|
-| Config | YAML parse, toolkit defaults, strict rejection of unknown or retired keys; env knobs read through one seam; the per-method argument/config dataclasses and the field guards and argument refusals they share | `src/training/parser.py`, `src/env.py`, `src/args/`, `src/configs/`, `src/config_validation.py` | [Configuration](../getting-started/configuration.md) |
+| Config | YAML parse, toolkit defaults, strict rejection of unknown or retired keys; env knobs read through one seam; the per-method argument/config dataclasses and the field guards and argument refusals they share | `src/configs/` (`parser.py` among them), `src/env.py`, `src/config_validation.py` | [Configuration](../getting-started/configuration.md) |
 | Trainers | Training loop, loss, gradient clipping, saving | `src/trainers/mixins/` (the spine is `base.py`) | [Trainer Architecture](trainer-architecture.md) |
 | Runtime | Process plumbing every layer above shares: rank and node math, process-group construction and timeouts, barriers and broadcasts, cross-rank verdicts and the c10d-store joins, the shared-filesystem scope and main-first ordering, the per-node load throttle, DTensor access | `src/runtime/` | [Multi-Node](../parallelism/multi-node.md) |
 | Distributed | EP/CP/TP/ETP/PP setup, process groups, validation, FSDP2 sharding | `src/distributed/parallelism_config.py`, `src/distributed/fsdp.py` | [Parallelism](../parallelism/README.md) |
@@ -30,7 +30,7 @@ host has no usable Python ([Docker](../infrastructure/docker.md)).
 | Rewards | Config-parsed reward terms (`terms.py`), the sample and the views a scorer reads (`samples.py`), the scorers behind the external sources (`scorers/`: the contract, the generative judge — scoring or veto — the served reward model, their catalog), the settlement of verdicts into one reward (`composer.py`), the TRL adapters (`functions.py`) and the rule-based graders (`graders/`: RLVR graders, answer matching) | `src/rewards/` | [Reward Terms](../training-methods/grpo/rewards/README.md) |
 | Environments | RL environment registry, Ray rollout actors, tools, sandboxes, eval runner | `src/environments/` | [Environments](../training-methods/async-grpo/environments/README.md) |
 | Weight sync | Trainer-to-rollout-engine weight sync: one client per engine (`VLLMWeightSyncClient`, `SGLangWeightSyncClient`) and the backend registry, the chunking (the chunk budget, the co-load groups, the snapshots on the sync device), and the NCCL transport — the rendezvous listener and the group-address policy, the bounded broadcast waits, the vLLM pynccl communicator and packed broadcast, the SGLang c10d weight-update group, the send-stream buffers | `src/weight_sync/` | [Rollout Servers](../infrastructure/rollout-servers.md) |
-| Entry-script plumbing | Environment setup (output dir, HF caches, seed, resume detection), the `scripts/training/**` backbone, the `run.log` tee, root/CLI logging, and the `halo launch` / `halo run` surface | `src/training/`, `src/cli.py`, `src/log.py` | [Scripts](scripts-reference.md) |
+| Entry-script plumbing | The `scripts/training/**` backbone (`parse_script_args`, `ScriptContext`, the run lifecycle and teardown), run setup (output dir, HF caches, seed, resume detection, the `run.log` tee), the policy load and window pins, script dataset loading; root/CLI logging and the `halo launch` / `halo run` surface | `src/entrypoints/`, `src/cli.py`, `src/log.py` | [Scripts](scripts-reference.md) |
 | Served endpoints | The OpenAI-compatible client every rollout, judge and batch-generation script talks through: endpoint defaults, key resolution and the loopback test (`endpoints.py`), the async client, one request with the upstream retry and the single-request helper that normalizes a reply (`openai_client.py`), the parallel resumable batch with its JSONL resume store (`batch_requests.py`), and the response record with its finish-reason contract (`response.py`) | `src/inference/` | [Rollout Servers](../infrastructure/rollout-servers.md) |
 
 Leaf modules keep those imports one-way, each holding a contract several layers share:
@@ -57,12 +57,12 @@ Leaf modules keep those imports one-way, each holding a contract several layers 
 | `src/data/sources/s3_client.py` | the boto3 `S3Client`, the s3fs control-file reads and the default-bucket helpers | the loader, the preprocessing pipeline, `ShardedDatasetLoader`, the inference scripts and the `scripts/before_training/s3_datasets.py` CLI |
 | `src/checkpoint/parallel/writing.py` | the collective half of a gathered write: retain-gated DTensor resolve of params AND buffers (with the neutralized GptOss sinks), the conversion-closed chunks and the streamed writer they feed | the FSDP2, CP, TP and EP gathered saves, the PP stage writes and the embedding save — the leg every gathered writer must run symmetrically or hang |
 | `src/checkpoint/parallel/reading.py` | the two reads a resume shares: one file every rank agrees on (`consensus_read`), and a checkpoint's shards opened on every rank (`joined_streaming_reader`) | the weight resume, the optimizer shards, the adapter restore and the sidecars |
-| `src/checkpoint/parallel/resume_source.py` | which checkpoint a run resumes from (the newest complete on every rank, incomplete ones moved out of rotation's sight) and which weights its policy is built from | resume detection (`src/training/environment.py`, the trainer's `train(resume_from_checkpoint=True)`) |
+| `src/checkpoint/parallel/resume_source.py` | which checkpoint a run resumes from (the newest complete on every rank, incomplete ones moved out of rotation's sight) and which weights its policy is built from | resume detection (`src/entrypoints/run_setup.py`, the trainer's `train(resume_from_checkpoint=True)`) |
 | `src/data/shard_index.py` | the torch-free `shard_index.json` contract and the stamped-sidecar writer both halves of a preprocessed artifact use | written by the preprocessing pipeline, read by `ShardedDatasetLoader` |
 | `src/data/vlm.py` | the VLM chat render, the processor call and the over-length refusal | the runtime collators, the offline bake and the run-intent probe, so a batch and a bake of one row tokenize identically |
 | `src/data/pipeline/preprocessed_metadata.py` | the `metadata.json` contract: the recorded `PreprocessingConfig`, the stamp and the compatibility verdicts | the training entry points and the loader, which read the stamp without importing the bake that wrote the rows |
-| `src/environments/rollout_config.py` | `RolloutConfig` | built by `AsyncTrainingConfig`, received pickled by the Ray rollout actors — keeping the Ray import out of `src.configs` |
-| `src/config_validation.py` | the value guards, the range-validation base, the declared-default comparison and the argument refusals — standard library only | the argument and config dataclasses, the reward terms, the training scripts and the Muon builder |
+| `src/environments/rollout_config.py` | `RolloutConfig` and the rollout defaults `AsyncTrainingConfig` reads | built by `AsyncTrainingConfig`, received pickled by the Ray rollout actors — keeping the Ray import out of `src.configs` |
+| `src/config_validation.py` | the bounds guards, the validation base, the declared-default comparison and the argument refusals — standard library only | the argument and config dataclasses, the reward terms, the training scripts and the Muon builder |
 | `src/subclass_registry.py` | the subclass-tree walk, the class-claim maps (a key claimed twice raises), the swap of claimed modules and the package import that registers every family — torch only | the EP and CP patchers, the head-path contract, the EP `model_type` roster and the weight-sync backend registry, so a family registers by subclassing, with no list to edit |
 | `src/rewards/terms.py` | the typed reward terms and their config parse — the endpoint defaults and the `src/config_validation.py` guards are its only first-party imports | the argument dataclasses and `EnvironmentConfig`, which parse `rewards:` at config time without pulling in the scorers' SDK client |
 | `src/inference/endpoints.py` | the OpenAI-compatible endpoint defaults, key resolution and the loopback test (`is_loopback`) — `src/env.py` only | the reward terms, the CLI endpoint flag block (`scripts/_common.py`), the judge clients, the Ray rollout actors and the weight-sync group-address policy — none of them imports the SDK |
@@ -157,7 +157,7 @@ Which axis combinations may run is an allowlist, not a denylist — see
 
 ```text
 YAML config
-   │  H4ArgumentParser: toolkit defaults (use_liger_kernel, bf16, logging_nan_inf_filter)
+   │  HaloArgumentParser: toolkit defaults (use_liger_kernel, bf16, logging_nan_inf_filter)
    ▼
 ParallelismConfig  ── validate mode, build process groups
    │
@@ -177,7 +177,7 @@ trainer.train()  ── HF training loop, DDP wrapping skipped
    │  • EP-aware global grad-norm clip (DTensor + replica groups)
    │  • AdamWBF16 step (bf16 weights, stochastic rounding — no fp32 master)
    │  • callbacks: EfficiencyCallback (tokens/s/GPU), MoEMetricsCallback,
-   │               RouterBiasBalancingCallback
+   │               BalancingBiasCallback
    ▼
 trainer.save_model  ── save_checkpoint (src/checkpoint/parallel/) gathers shards → HF checkpoint
 ```

@@ -61,7 +61,7 @@ The routed experts use fused-GLU contiguous-halves storage, so at `expert_tp_siz
 
 GLM-4 MoE Lite's router is DeepSeek-V3 aux-loss-free (sigmoid + a static `e_score_correction_bias`) and the forward has no aux-loss term, so `aux_loss` adds no balancing. `Glm4MoeLiteForCausalLM.forward` declares no `output_router_logits` parameter, so `auto` resolves to `bias_update` wherever the EP wrappers are present (`ep_size > 1` or `use_grouped_gemm`, the default under torchrun); the shipped EP configs set it explicitly.
 
-[RouterBiasBalancingCallback](../training-methods/callbacks.md#routerbiasbalancingcallback) sign-updates the gate's own `e_score_correction_bias` — the native slot the family's selection arithmetic already consults, adopted whole rather than stacked with a side buffer — so the final bias exports with every checkpoint and a served copy routes as training did. To freeze the router instead, use `freeze_layers_patterns: ["*.mlp.gate.weight"]`.
+[BalancingBiasCallback](../training-methods/callbacks.md#balancingbiascallback) sign-updates the gate's own `e_score_correction_bias` — the native slot the family's selection arithmetic already consults, adopted whole rather than stacked with a side buffer — so the final bias exports with every checkpoint and a served copy routes as training did. To freeze the router instead, use `freeze_layers_patterns: ["*.mlp.gate.weight"]`.
 
 Router precision comes from `fp32_router`, and `fp32_non_ep_params` (dense attention/embeddings/lm_head) turns it on regardless, since that upcast skips the EP-owned router. The example config sets both.
 

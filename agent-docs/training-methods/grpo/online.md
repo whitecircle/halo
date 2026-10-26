@@ -39,7 +39,7 @@ A `judge` or `reward_model` term reads the row's `conversation` and `answer` col
 
 ## Configuration
 
-Fields: [`RLVROnlineGRPOScriptArguments`](../../reference/configuration-reference.md#rlvronlinegrposcriptarguments), TRL's `GRPOConfig`, `ModelConfig` and `DistributedArguments`.
+Fields: [`RLVROnlineGRPOScriptArguments`](../../reference/configuration-reference.md#rlvronlinegrposcriptarguments), TRL's `GRPOConfig`, `ModelConfig` and `ParallelismArguments`.
 
 ```yaml
 model_name_or_path: Qwen/Qwen3-4B-Instruct-2507
@@ -106,7 +106,7 @@ TRL sends `top_k`, `min_p` and `repetition_penalty` on every request, so the mod
 ### Forced settings
 
 - **Dropout is off**, EP expert-LoRA dropout included, overriding `disable_dropout: false`; a config-level float only warns.
-- **MoE balancing is off:** `aux_loss` is inert under a policy-gradient loss, and both bias-update modes downgrade to `none` ([Callbacks](../callbacks.md#routerbiasbalancingcallback)).
+- **MoE balancing is off:** `aux_loss` is inert under a policy-gradient loss, and both bias-update modes downgrade to `none` ([Callbacks](../callbacks.md#balancingbiascallback)).
 
 ## GRPO objective for verifiable rewards
 
@@ -155,7 +155,7 @@ Before the trainer is built, every rank raises if `max_prompt_length + max_compl
 
 ### Weight sync
 
-Weights are pushed before the **next** generation, not at the optimizer step; a resumed run pushes before its first rollout ([mechanics](../../infrastructure/rollout-servers.md#weight-sync)). `validate_weight_sync_support` refuses at construction:
+Weights are pushed before the **next** generation, not at the optimizer step; a resumed run pushes before its first rollout ([mechanics](../../infrastructure/rollout-servers.md#weight-sync)). `reject_unsyncable_model` refuses at construction:
 
 - QLoRA (`load_in_4bit` / `load_in_8bit`).
 - A PEFT layer the sync cannot fold, or an adapter on a tensor the dense push does not send, such as EP expert weights ([PEFT](../../optimization/peft.md#online-rl--rollout-server-weight-sync)).
@@ -172,7 +172,7 @@ Set `VLLM_GROUP_HOST` to the trainer IP a **remote** server should dial when the
 > [!NOTE]
 > **Multi-server sync belongs to Async GRPO with Environments**
 >
-> The list-of-dicts `server_configs` API (per-server `url`/`group_port`/`group_host` via `InferenceClientManager`) belongs to [Async GRPO with Environments](../async-grpo/setup.md#multiple-servers-and-prefetch) (`AsyncTrainingConfig.rollout_server_configs`), not this single-server RLVR trainer.
+> The list-of-dicts `server_configs` API (per-server `url`/`group_port`/`group_host` via `WeightSyncPool`) belongs to [Async GRPO with Environments](../async-grpo/setup.md#multiple-servers-and-prefetch) (`AsyncTrainingConfig.rollout_server_configs`), not this single-server RLVR trainer.
 
 ## Launch
 

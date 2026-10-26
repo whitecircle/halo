@@ -1,13 +1,14 @@
 #!/usr/bin/env python
 """The engine rosters spell shared facts once: the Step-3 spellings come off the family's EP layer class,
 the two Bailing loader gaps off one table both clients quote, and the release off each client's
-``ENGINE_RELEASE``.
+``ENGINE_RELEASE``, the dropped-balancing-bias roster included.
 
     python tests/cpu/weight_sync/test_unservable_roster_derivation.py
 """
 
 import pytest
 
+from src.distributed.expert_parallel.expert_weights import ep_layer_class_by_model_type
 from src.distributed.expert_parallel.layers.bailing import EPBailingMoELayer
 from src.distributed.expert_parallel.layers.step3p7 import EPStep3p7MoELayer
 from src.weight_sync.clients.base import unregistered_bailing_model_types
@@ -44,6 +45,16 @@ def test_every_roster_fact_names_the_release_its_client_declares(client):
         if client.ENGINE_RELEASE not in fact
     }
     assert not stale, f"{client.__name__} roster facts that do not name {client.ENGINE_RELEASE!r}: {stale}"
+
+
+def test_the_dropped_balancing_bias_roster_quotes_the_release_the_laguna_fact_names():
+    """vLLM's Laguna loader skips the exported balancing bias, and the run warning names the dropping
+    engine by its ``ENGINE_RELEASE``: it must be the release the Laguna layer's declaration names, or the
+    warning would quote a server the fact was never established for."""
+    assert {"laguna"} == VLLMWeightSyncClient.DROPPED_BALANCING_BIAS_MODEL_TYPES
+    assert frozenset() == SGLangWeightSyncClient.DROPPED_BALANCING_BIAS_MODEL_TYPES
+    laguna = ep_layer_class_by_model_type()["laguna"]
+    assert laguna._SERVED_BALANCING_BIAS_DROPPED_BY == VLLMWeightSyncClient.ENGINE_RELEASE
 
 
 if __name__ == "__main__":

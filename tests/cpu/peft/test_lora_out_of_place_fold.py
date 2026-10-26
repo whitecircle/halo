@@ -23,7 +23,7 @@ from peft import LoraConfig, get_peft_model
 from torch import nn
 
 from src.models.peft_adapters import lora_fold_targets, lora_folded
-from src.trainers.grpo.rollout.weight_sync import gather_and_send_weights, validate_weight_sync_support
+from src.trainers.grpo.rollout.weight_push import gather_and_send_weights, reject_unsyncable_model
 from tests.common.ep_stubs import StubEPLayerBase
 from tests.common.peft_helpers import adapter_param_items, randomize_adapters
 from tests.common.weight_sync import RecordingSender, as_pushed, local_parameters, merged_by_peft, moved_parameters
@@ -207,7 +207,7 @@ def test_a_layer_the_fold_cannot_reproduce_is_refused_at_construction(build, con
     the trainers' construction gate refuses them rather than push their base unfolded."""
     model = get_peft_model(build(), LoraConfig(r=4, lora_alpha=8, **config))
     with pytest.raises(ValueError, match="cannot be folded out of place"):
-        validate_weight_sync_support(model, "vllm")
+        reject_unsyncable_model(model, "vllm")
 
 
 def test_a_peft_target_the_dense_push_skips_is_refused():
@@ -216,7 +216,7 @@ def test_a_peft_target_the_dense_push_skips_is_refused():
     that reaches it anyway raises on every rank as it ends rather than completing unfolded."""
     model = get_peft_model(_EPMoeNet(), LoraConfig(r=4, lora_alpha=8, target_parameters=["experts.gate_up_proj"]))
     with pytest.raises(ValueError, match="does not send through its dense push"):
-        validate_weight_sync_support(model, "vllm")
+        reject_unsyncable_model(model, "vllm")
     with pytest.raises(ValueError, match="does not send through its dense push"):
         gather_and_send_weights(model, RecordingSender())
 

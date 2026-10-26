@@ -19,7 +19,7 @@ from src.model_loading.parallel.frozen_models import (
     place_and_freeze,
 )
 from src.trainers.grpo.mixins.chunked_logprobs import LogitsWidth
-from src.trainers.grpo.rollout.weight_sync import validate_weight_sync_support
+from src.trainers.grpo.rollout.weight_push import reject_unsyncable_model
 from src.trainers.mixins.validation import ctor_config, ctor_positions, ctor_value, disable_trl_liger
 
 # TRL GRPOTrainer positional slots, for ctor params arriving via *args — derived from the installed signature.
@@ -142,7 +142,7 @@ class OnPolicyGRPOInitMixin:
         self._validate_held_reference_model()
         self._resolve_chunked_head_transform()
         self._check_full_logits_fit(self._loss_logits_width())
-        validate_weight_sync_support(self.model, self._rollout_backend)
+        reject_unsyncable_model(self.model, self._rollout_backend)
         self._setup_weight_sync()
         self._disable_dropout_for_onpolicy()
 

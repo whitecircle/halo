@@ -26,8 +26,7 @@ import yaml
 from accelerate import PartialState
 from datasets import Dataset, DatasetDict
 
-from src.args.environmental_grpo_args import EnvironmentalGRPOScriptArguments
-from src.configs.grpo_environmental import AsyncTrainingConfig
+from src.configs.grpo_environmental import AsyncTrainingConfig, EnvironmentalGRPOScriptArguments
 from tests.common.repo import REPO_ROOT, load_script_module
 
 PartialState()  # the script logs through accelerate, which refuses to log without it
@@ -51,7 +50,7 @@ def test_system_prompt_rejected_at_startup(env_grpo_module, tmp_path):
         "bf16: false\nuse_cpu: true\nenvironment_type: code_contests\nsystem_prompt: 'be helpful'\n"
     )
     with (
-        mock.patch("src.training.parser.install_log_tee"),
+        mock.patch("src.entrypoints.script.install_log_tee"),
         mock.patch.object(sys, "argv", ["prog", str(config)]),
         pytest.raises(ValueError, match="system_prompt"),
     ):
@@ -67,7 +66,7 @@ def test_unknown_environment_type_fails_before_any_load(env_grpo_module, tmp_pat
         "bf16: false\nuse_cpu: true\nenvironment_type: no_such_env\n"
     )
     with (
-        mock.patch("src.training.parser.install_log_tee"),
+        mock.patch("src.entrypoints.script.install_log_tee"),
         mock.patch.object(sys, "argv", ["prog", str(config)]),
         mock.patch.object(env_grpo_module, "init_training_script", side_effect=AssertionError("reached the load")),
         pytest.raises(ValueError, match=r"Unknown environment type: 'no_such_env'.*code_contests"),

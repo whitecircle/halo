@@ -1,5 +1,5 @@
 # Online GRPO (RLVR) weight-transfer smoke — gpt-oss-20b on GSM8K, 3 steps, EP=2 (train GPUs 1,2 + vLLM GPU 0).
-# Frozen live sinks: the FA2 sinks reset deletes the Parameter the sync ships, so validate_weight_sync_support
+# Frozen live sinks: the FA2 sinks reset deletes the Parameter the sync ships, so reject_unsyncable_model
 #   passes only under a sink-carrying kernel (FA4 on Blackwell, eager/flex_attention on Hopper).
 # Launch: vllm-server with --weight-transfer-config '{"backend":"nccl"}' --moe-backend triton on GPU 0 (the
 #   auto-picked Blackwell MoE backends repack the expert weights a sync writes), then CUDA_VISIBLE_DEVICES=1,2 torchrun --nproc_per_node=2 scripts/training/online_grpo/rlvr.py <this config>

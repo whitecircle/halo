@@ -1,11 +1,11 @@
 #!/usr/bin/env python
-"""CPU tests for :class:`RouterBiasBalancingCallback`: zero-load warning, summary gate, lazy counter.
+"""CPU tests for :class:`BalancingBiasCallback`: zero-load warning, summary gate, lazy counter.
 
 All-zero expert-load counters make the DeepSeek-V3 sign update ``sign(0-0)=0`` — a silent no-op
 every step. The callback must WARN ONCE at the first bias update when the (all-reduced) counters
 are entirely zero, and stay silent when real load was recorded.
 
-Run: ``python tests/cpu/callbacks/test_router_bias_balancing_callback.py``
+Run: ``python tests/cpu/callbacks/test_balancing_bias_callback.py``
 """
 
 from __future__ import annotations
@@ -15,8 +15,8 @@ from types import SimpleNamespace
 import pytest
 import torch
 
-import src.callbacks.router_bias_balancing as rbb
-from src.callbacks.router_bias_balancing import RouterBiasBalancingCallback
+import src.callbacks.balancing as balancing
+from src.callbacks.balancing import BalancingBiasCallback
 
 
 class _Router(torch.nn.Module):
@@ -34,12 +34,12 @@ class _Model(torch.nn.Module):
 
 def _capture_warnings(fn):
     calls: list[str] = []
-    orig = rbb.logger.warning
-    rbb.logger.warning = lambda msg, *a, **k: calls.append(str(msg))
+    orig = balancing.logger.warning
+    balancing.logger.warning = lambda msg, *a, **k: calls.append(str(msg))
     try:
         fn()
     finally:
-        rbb.logger.warning = orig
+        balancing.logger.warning = orig
     return calls
 
 
@@ -49,7 +49,7 @@ def _step(callback, model):
 
 def test_warns_once_on_all_zero_counters_at_first_update():
     model = _Model([_Router(counts=[0, 0, 0, 0])])
-    callback = RouterBiasBalancingCallback()
+    callback = BalancingBiasCallback()
     warnings = _capture_warnings(lambda: _step(callback, model))
     assert any("ZERO" in w for w in warnings), f"no zero-counter warning emitted: {warnings}"
     # Sign update with zero counters is a no-op — biases must stay zero.
@@ -62,7 +62,7 @@ def test_warns_once_on_all_zero_counters_at_first_update():
 
 def test_no_warning_with_real_load_and_bias_moves():
     model = _Model([_Router(counts=[10, 0, 0, 0])])
-    callback = RouterBiasBalancingCallback(update_rate=1e-3)
+    callback = BalancingBiasCallback(update_rate=1e-3)
     warnings = _capture_warnings(lambda: _step(callback, model))
     assert not any("ZERO" in w for w in warnings), f"spurious zero-counter warning: {warnings}"
     biases = model.routers[0].balancing_biases
@@ -75,7 +75,7 @@ def test_metric_summary_derives_on_the_first_step_and_every_nth():
     Slot 0 carries the lowest load, so each update raises its bias by one ``update_rate`` step.
     """
     model = _Model([_Router(counts=[1, 2, 3, 4])])
-    callback = RouterBiasBalancingCallback(log_every_n_steps=3)
+    callback = BalancingBiasCallback(log_every_n_steps=3)
     derived, slot0_bias = [], []
     for step in range(1, 8):
         model.routers[0].expert_load_counter = torch.tensor([1.0, 2.0, 3.0, 4.0])
@@ -92,7 +92,7 @@ def test_metric_summary_derives_on_the_first_step_and_every_nth():
 def test_missing_counter_is_created_at_the_bias_width():
     """A router that recorded nothing gets an fp32 zero counter of its bias width; the step is a no-op."""
     router = _Router(counts=None, num_experts=5)
-    _step(RouterBiasBalancingCallback(), _Model([router]))
+    _step(BalancingBiasCallback(), _Model([router]))
     assert router.expert_load_counter.dtype == torch.float32
     assert torch.equal(router.expert_load_counter, torch.zeros(5))
     assert torch.equal(router.balancing_biases, torch.zeros(5))

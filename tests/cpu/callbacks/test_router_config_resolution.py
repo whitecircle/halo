@@ -14,7 +14,7 @@ import pytest
 import torch
 import torch.nn as nn
 
-from src.distributed.expert_parallel.balancing_strategy import apply_balancing_strategy
+from src.callbacks.balancing import apply_balancing_mode
 from src.models.config_access import get_config_field, set_config_field
 from src.models.moe_balancing import (
     detect_moe_experts_topk,
@@ -72,7 +72,7 @@ def test_aux_loss_enables_router_logits_on_the_text_config():
     """aux_loss must find the text config's coef and turn router logits ON, not force them off."""
     model = _composite(router_aux_loss_coef=0.001, output_router_logits=False)
 
-    apply_balancing_strategy(model, "aux_loss", is_moe=True)
+    apply_balancing_mode(model, "aux_loss", is_moe=True)
 
     text_cfg = model.config.text_config
     assert text_cfg.output_router_logits is True, (
@@ -99,7 +99,7 @@ def test_bias_update_zeroes_the_text_config_coef():
     model = _composite(router_aux_loss_coef=0.001, output_router_logits=True)
     model.router = _NativeBiasRouter()  # without an acceptor the balance-nothing gate raises first
 
-    apply_balancing_strategy(model, "bias_update", is_moe=True)
+    apply_balancing_mode(model, "bias_update", is_moe=True)
 
     text_cfg = model.config.text_config
     assert text_cfg.router_aux_loss_coef == 0.0, (
@@ -129,7 +129,7 @@ def test_plain_config_is_untouched_by_the_resolver():
     """A non-composite config reads and writes its own fields — one source, no aliasing."""
     model = _Model(_TextConfig(router_aux_loss_coef=0.001, output_router_logits=False))
 
-    apply_balancing_strategy(model, "aux_loss", is_moe=True)
+    apply_balancing_mode(model, "aux_loss", is_moe=True)
 
     assert model.config.output_router_logits is True
     assert not router_logits_forced_off(model.config)

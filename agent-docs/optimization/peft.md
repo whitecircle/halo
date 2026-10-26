@@ -352,7 +352,7 @@ tensor the sync's dense push does not send (an EP layer's expert weights, which 
 since only that push folds PEFT adapters. Each sync checks again: the layers before it streams, the
 targets as its dense push ends.
 
-Both trainers share this path (`gather_and_send_weights` in `src/trainers/grpo/rollout/weight_sync.py`),
+Both trainers share this path (`gather_and_send_weights` in `src/trainers/grpo/rollout/weight_push.py`),
 which also folds in the EP / FSDP2 / TP gathers; the fold is a collective on all ranks under FSDP2.
 
 ## Embedding models
@@ -374,7 +374,7 @@ TRL's `ModelConfig.dtype` — whose `"float32"` default nothing else here reads,
 dequantize and compute every 4-bit matmul in fp32.
 
 QLoRA is SFT/offline territory, but offline GRPO rejects it under CP. The online and async GRPO trainers reject a quantized base at
-construction (`validate_weight_sync_support`). The NCCL weight sync forwards raw parameter storage under
+construction (`reject_unsyncable_model`). The NCCL weight sync forwards raw parameter storage under
 base-weight names, so a bnb-packed 4-bit base would ship non-floating-point tensors that corrupt the served
 policy. Plain LoRA is the supported
 RL adapter path — see [Online GRPO](../training-methods/grpo/online.md#lora).

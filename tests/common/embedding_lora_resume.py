@@ -66,16 +66,15 @@ from transformers import AutoModel, PreTrainedTokenizerFast
 from trl import ModelConfig, get_peft_config
 
 from scripts.training.embedding import build_sentence_transformer, inject_lora
-from src.args.distributed_args import DistributedArguments
 from src.checkpoint.adapters import has_adapter_weight_file, resume_adapter_dir
 from src.checkpoint.format import ADAPTER_CONFIG_FILE, ADAPTER_SAFETENSORS_FILE, RESUME_ADAPTER_DIR
 from src.checkpoint.parallel.resume_source import resolve_resume_weights_source
 from src.checkpoint.reading import load_full_state_dict
-from src.configs.embedding import EmbeddingConfig
+from src.configs.embedding import EmbeddingConfig, EmbeddingScriptArguments
 from src.distributed.expert_parallel.moe_layer.layer import named_ep_layers
 from src.distributed.parallelism_config import ParallelismConfig
+from src.entrypoints.script import ScriptContext, apply_distributed_trainer_config
 from src.trainers.embedding.trainer import EmbeddingTrainer
-from src.training.script_runner import ScriptRuntime, apply_distributed_trainer_config
 from tests.common.checkpoint_io import RestorePointSnapshot, loading_problems
 from tests.common.distributed import pin_deterministic_ep_dispatch, shared_output_dir
 from tests.common.models import PARAPHRASE_MINILM
@@ -254,11 +253,10 @@ def _config(output_dir: str, family: Family, *, save: bool) -> EmbeddingConfig:
 def _build(ctx, model_config: ModelConfig, config: EmbeddingConfig, parallelism_config: ParallelismConfig):
     """The model exactly as the script builds and adapts it for this run shape."""
     source = model_config.model_name_or_path
-    dist_args = DistributedArguments()
-    mode_suffix = parallelism_config.mode_string or "standard"
-    runtime = ScriptRuntime(parallelism_config, mode_suffix, ctx.local_rank, None, source)
-    model = build_sentence_transformer(runtime, config, model_config, dist_args)
-    inject_lora(model, model_config, dist_args)
+    args = EmbeddingScriptArguments()
+    context = ScriptContext(parallelism_config, ctx.local_rank, None, source, EmbeddingTrainer)
+    model = build_sentence_transformer(context, config, model_config, args)
+    inject_lora(model, model_config, args)
     apply_distributed_trainer_config(config, parallelism_config)
     return model
 

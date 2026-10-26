@@ -2,7 +2,7 @@
 
 Defines a family's router-field spellings, which balancing strategy a run gets, and where a trained
 routing bias lands in an exported checkpoint; applying that verdict to a live model is
-:mod:`src.distributed.expert_parallel.balancing_strategy`. Depends on neither ``src.distributed`` nor
+:mod:`src.callbacks.balancing`. Depends on neither ``src.distributed`` nor
 ``torch.distributed``, so its consumers (the callbacks package, the checkpoint writers and tools, the
 PP split gate) cannot form an import cycle through each other. The EP layer classes push their family
 declarations in at subclass definition.

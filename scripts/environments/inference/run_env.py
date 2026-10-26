@@ -62,7 +62,7 @@ from src.environments.eval_runner import (
     require_answers,
 )
 from src.environments.registry import resolve_environment
-from src.environments.rollout_config import DEFAULT_ROLLOUT_MAX_TOKENS, DEFAULT_ROLLOUT_TEMPERATURE
+from src.environments.rollout_config import RolloutConfig
 from src.inference.openai_client import build_openai_client
 from src.log import configure_cli_logging
 
@@ -119,14 +119,14 @@ def parse_args() -> argparse.Namespace:
         type=float,
         default=None,
         help=f"Sampling temperature (default: the training config's under --training_config, else "
-        f"{DEFAULT_ROLLOUT_TEMPERATURE}).",
+        f"{RolloutConfig.temperature}).",
     )
     p.add_argument(
         "--max_tokens",
         type=int,
         default=None,
         help=f"Max tokens per generation (default: the training config's under --training_config, else "
-        f"{DEFAULT_ROLLOUT_MAX_TOKENS}; reasoning models need a lot).",
+        f"{RolloutConfig.max_tokens}; reasoning models need a lot).",
     )
     p.add_argument("--max_workers", type=int, default=32, help="Concurrent episodes.")
     return p.parse_args()
@@ -198,8 +198,8 @@ def main() -> None:
         rollout = rollout_config_from_args(
             args,
             contract,
-            default_temperature=DEFAULT_ROLLOUT_TEMPERATURE,
-            default_max_tokens=DEFAULT_ROLLOUT_MAX_TOKENS,
+            default_temperature=RolloutConfig.temperature,
+            default_max_tokens=RolloutConfig.max_tokens,
         )
 
         traj_path = resolve_trajectory_path(args, env_type, args.split)

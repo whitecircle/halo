@@ -5,7 +5,7 @@ Under ``reset_sinks: true`` (the default) with FA2, the sink Parameter is set to
 ``named_parameters()``. The RL weight-sync sends named parameters only, so nothing is ever pushed
 for those slots — the rollout engine keeps generating with the PRETRAINED sinks while the trainer
 runs without them, a permanent trainer↔generator log-prob offset no sync heals and no error names.
-``validate_weight_sync_support`` must refuse that shape at construction; sink layouts the sync CAN
+``reject_unsyncable_model`` must refuse that shape at construction; sink layouts the sync CAN
 represent (live sinks, or the in-place ``dtype.min`` reset every non-FA2 implementation applies)
 must keep passing.
 
@@ -18,7 +18,7 @@ import torch.nn as nn
 from transformers import CONFIG_MAPPING
 
 from src.distributed.expert_parallel.layers.gpt_oss import EPGptOssMoELayer
-from src.trainers.grpo.rollout.weight_sync import validate_weight_sync_support
+from src.trainers.grpo.rollout.weight_push import reject_unsyncable_model
 
 NUM_HEADS = 4
 
@@ -57,17 +57,17 @@ class _GptOssStub(nn.Module):
 
 def test_sync_refuses_fa2_removed_sinks():
     with pytest.raises(ValueError, match="reset_sinks"):
-        validate_weight_sync_support(_GptOssStub(sinks=None), "vllm")
+        reject_unsyncable_model(_GptOssStub(sinks=None), "vllm")
 
 
 def test_sync_accepts_live_sinks():
-    validate_weight_sync_support(_GptOssStub(sinks=torch.zeros(NUM_HEADS)), "vllm")
+    reject_unsyncable_model(_GptOssStub(sinks=torch.zeros(NUM_HEADS)), "vllm")
 
 
 def test_sync_accepts_in_place_neutralized_sinks():
     """The non-FA2 reset fills dtype.min IN PLACE — the Parameter survives, syncs, and the engine
     serves the same neutralized sinks the trainer computes with. Consistent, so allowed."""
-    validate_weight_sync_support(_GptOssStub(sinks=torch.full((NUM_HEADS,), torch.finfo(torch.bfloat16).min)), "vllm")
+    reject_unsyncable_model(_GptOssStub(sinks=torch.full((NUM_HEADS,), torch.finfo(torch.bfloat16).min)), "vllm")
 
 
 if __name__ == "__main__":

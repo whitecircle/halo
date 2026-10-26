@@ -18,7 +18,7 @@ entry (``sync_trainer_weights``) into a recording sender, the step syncs through
   1. Cover the roster and the layout it names: the tiny MoE roster has a model for every EP family
      some engine takes an online update for (the syncable roster, derived from the layer registry and
      the clients' refusals, which ``tests/cpu/conventions/test_tiny_family_roster.py`` holds the
-     manifest rows to); the production gate (``validate_weight_sync_support``) admits the model for
+     manifest rows to); the production gate (``reject_unsyncable_model``) admits the model for
      at least one engine; the LoRA'd base weights are FSDP2 DTensor shards (pure ETP included, whose
      FSDP2 spans the world at data parallel 1); experts are DTensor at ep1 and plain otherwise; a
      mixed row carries native expert adapters.
@@ -68,10 +68,10 @@ from src.distributed.parallelism_config import ParallelismConfig
 from src.models.peft_adapters import lora_fold_targets
 from src.models.unwrapping import find_peft_model, unwrap_framework_wrappers
 from src.runtime.collectives import broadcast_from_rank0
-from src.trainers.grpo.rollout.weight_sync import (
+from src.trainers.grpo.rollout.weight_push import (
     gather_and_send_weights,
+    reject_unsyncable_model,
     sync_trainer_weights,
-    validate_weight_sync_support,
 )
 from src.trainers.sft import DistributedSFTTrainer
 from src.weight_sync.registry import resolve_weight_sync_client, rollout_backends
@@ -315,7 +315,7 @@ def _layout_checks(family: str, mode: str, adapters: str, unwrapped, peft_model)
     admitted = []
     for backend in rollout_backends():
         try:
-            validate_weight_sync_support(unwrapped, backend)
+            reject_unsyncable_model(unwrapped, backend)
             admitted.append(backend)
         except ValueError as refusal:
             log(f"  {backend} refuses the sync: {str(refusal).splitlines()[0][:160]}")

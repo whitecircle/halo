@@ -11,7 +11,7 @@ import pytest
 
 from src.configs.grpo_environmental import AsyncTrainingConfig
 from src.environments.ray_actors import _await_with_deadline
-from src.environments.rollout_config import DEFAULT_EPISODE_TIMEOUT_SECONDS, RolloutConfig
+from src.environments.rollout_config import RolloutConfig
 
 
 class _SlowRef:
@@ -46,13 +46,12 @@ def test_deadline_is_enforced_promptly():
 
 
 def test_episode_timeout_is_configurable_and_defaults_sanely():
-    """Both configs must read the ONE shared default, which AsyncTrainingConfig validates against the
-    NCCL watchdog. Identity, not equality: a side that re-declares its own literal compares equal
-    today and drifts the moment the other moves, letting a straggler outlive the watchdog."""
+    """AsyncTrainingConfig reads RolloutConfig's default, which it validates against the NCCL watchdog.
+    Identity, not equality: a side that re-declares its own literal compares equal today and drifts the
+    moment the other moves, letting a straggler outlive the watchdog."""
     async_default = next(f for f in fields(AsyncTrainingConfig) if f.name == "episode_timeout").default
-    assert async_default is DEFAULT_EPISODE_TIMEOUT_SECONDS
-    assert RolloutConfig().episode_timeout is DEFAULT_EPISODE_TIMEOUT_SECONDS
-    assert DEFAULT_EPISODE_TIMEOUT_SECONDS == 1200.0
+    assert async_default is RolloutConfig.episode_timeout
+    assert RolloutConfig().episode_timeout == 1200.0
     assert RolloutConfig(episode_timeout=42.0).episode_timeout == 42.0
 
 

@@ -8,7 +8,6 @@ from transformers import (
     AutoModelForCausalLM,
     AutoModelForImageTextToText,
     PreTrainedModel,
-    PreTrainedTokenizer,
 )
 from transformers.models.auto.modeling_auto import (
     MODEL_FOR_CAUSAL_LM_MAPPING_NAMES,
@@ -183,9 +182,3 @@ def apply_run_model_policies(
     sanitize_generation_config(model)
     if sinks_pretrained or sinks_policy is not SinksPolicy.NEUTRALIZED:
         apply_sinks_policy(model, model_config, policy=sinks_policy, attn_implementation=attn_implementation)
-
-
-def log_model_info(model: PreTrainedModel, tokenizer: PreTrainedTokenizer) -> None:
-    """Log model and tokenizer information on the main process."""
-    logger.info(f"Tokenizer: {tokenizer}")
-    logger.info(f"Model config: {model.config}")

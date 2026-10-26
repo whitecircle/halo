@@ -83,7 +83,7 @@ EP surface. The table is pinned against the classes by
 
 A second class of weight-sync restriction sits outside that table, keyed on the model type **and**
 the engine. Each client declares the model types its pinned release cannot take an online update for
-(`UNSERVABLE_MODEL_TYPES` in `src/weight_sync/clients/`), and `validate_weight_sync_support`
+(`UNSERVABLE_MODEL_TYPES` in `src/weight_sync/clients/`), and `reject_unsyncable_model`
 refuses that model+backend pair at trainer construction, quoting the loader fact.
 
 SGLang 0.5.17's list is the longer of the two: Laguna and Step-3.7 sync on vLLM only. Full roster
@@ -94,7 +94,7 @@ Attention-side support is a separate question owned by each axis: which families
 `TP_SHARDABLE_ATTENTION_CLASSES` ([TP](tensor-parallelism.md#supported-models)), and which CP can
 split is the Ulysses wrapper registry
 ([CP](context-parallelism.md#supported-model-architectures)). Router balancing per family:
-[Callbacks](../training-methods/callbacks.md#routerbiasbalancingcallback).
+[Callbacks](../training-methods/callbacks.md#balancingbiascallback).
 
 ## EP grouping
 
@@ -180,7 +180,7 @@ EP patching and gradient sync are automatic. Programmatically, pass
 
 ## Configuration
 
-EP flags live on `DistributedArguments` (`src/args/distributed_args.py`):
+EP flags live on `ParallelismArguments` (`src/configs/parallelism_arguments.py`):
 
 ```python
 expert_parallel_size: int = 1     # >1 enables EP
@@ -587,7 +587,7 @@ and EP+CP on anything but a node-local EP group filling the NVLink domain.
 | `gradient_checkpointing` | supported; `use_reentrant` is forced to `True`. `gradient_checkpointing_kwargs.every_n_layers` selects the checkpointed decoder layers exactly as on the plain path (lifted out of the kwargs at the EP enable seam and at every re-enable). Rejected for a family declaring `_supports_gradient_checkpointing = False` | `_setup_ep_gradient_checkpointing` |
 | `ep_lazy_loading` | honored on every EP path (EP, EP+CP, EP+TP, pure ETP). Falls back to `from_pretrained` + patch when no local safetensors snapshot resolves, the checkpoint is natively quantized, or its expert layout is one the lazy loader cannot read (`_supports_lazy_loading = False`); that fallback is the only EP path `max_concurrent_loading` throttles | `resolve_lazy_checkpoint`, `expert_parallel/loading.py` |
 | `use_liger_kernel` | supported. `swiglu`/`geglu` default off only for an **upstream** applier, whose expert-FFN swap the EP layers replace (an explicit `liger_kernel_config` request is honored but inert there). A toolkit spec patches the dense and shared-expert MLPs, which the wrappers adopt unchanged, so its fused GLU stays on. RMSNorm, RoPE and CE/FLCE are unaffected by EP | `src/model_loading/liger/dispatch.py` |
-| `moe_balancing` | `aux_loss` is inert on families whose EP wrapper severs the aux path (warned); `bias_update` raises where nothing carries the bias, and also where the family has no checkpoint slot to export it (Qwen3, Qwen3.5/3.6, Mistral4, Cohere2 MoE — `bias_update_transient` is the trainer-only opt-in there, and its bias reaches no export); both bias modes are downgraded to `none` under on-policy weight-sync RL | `expert_parallel/balancing_strategy.py` |
+| `moe_balancing` | `aux_loss` is inert on families whose EP wrapper severs the aux path (warned); `bias_update` raises where nothing carries the bias, and also where the family has no checkpoint slot to export it (Qwen3, Qwen3.5/3.6, Mistral4, Cohere2 MoE — `bias_update_transient` is the trainer-only opt-in there, and its bias reaches no export); both bias modes are downgraded to `none` under on-policy weight-sync RL | `callbacks/balancing.py` |
 | `full_determinism` | supported within one NVLink domain ([Determinism](#determinism)); rejected for an EP group spanning domains | `parallelism_rules.py` |
 | `ddp_find_unused_parameters` | must be `True`; the entry scripts set it — do not rely on setting it yourself | — |
 | `packing`, `padding_free`, `torch_compile`, `lowp_precision`, `dataset_num_proc` | not gated under EP | — |

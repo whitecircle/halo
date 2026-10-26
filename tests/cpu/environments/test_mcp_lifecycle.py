@@ -24,7 +24,7 @@ import pytest
 import src.environments.envs.protocols.mcp as mcp_module
 from src.environments.envs.protocols.mcp import NativeMCPClientEnvironment, create_native_mcp_environment
 from src.environments.registry import resolve_environment
-from src.environments.rollout_config import DEFAULT_EPISODE_TIMEOUT_SECONDS
+from src.environments.rollout_config import RolloutConfig
 
 
 class _StubTransport:
@@ -104,7 +104,7 @@ def test_the_session_bounds_every_request_it_makes(monkeypatch):
 
     assert env._create_session("r", "w") == "session"
     assert seen["read_timeout_seconds"] == timedelta(seconds=mcp_module.MCP_REQUEST_TIMEOUT_S)
-    assert 0 < mcp_module.MCP_REQUEST_TIMEOUT_S < DEFAULT_EPISODE_TIMEOUT_SECONDS
+    assert 0 < mcp_module.MCP_REQUEST_TIMEOUT_S < RolloutConfig.episode_timeout
 
 
 async def test_connect_discovers_tools_and_disconnect_unwinds_in_owner_task():

@@ -71,7 +71,7 @@ from tests.common.weight_sync import moved_parameters
 MODEL_NAME = QWEN3_0_6B
 VLLM_SERVER_URL = env_str("VLLM_SERVER_URL") or "http://localhost:8000"
 # Rollout endpoints the environmental legs drive, comma-separated. The single process always pushes
-# through an InferenceClientManager; two or more URLs make it pause every server together and stream
+# through a WeightSyncPool; two or more URLs make it pause every server together and stream
 # each chunk to all of them concurrently. Every server must serve MODEL_NAME.
 VLLM_SERVER_URLS = [
     url.strip() for url in (env_str("HALO_TEST_VLLM_SERVER_URLS") or VLLM_SERVER_URL).split(",") if url.strip()
@@ -454,8 +454,8 @@ def test_environmental_grpo_e2e():
                 if "layers.0" in name and name.endswith(".weight") and param.dtype.is_floating_point:
                     param.mul_(1.05)
         assert trainer._sync_weights_to_engine(force=True), "the forced weight sync pushed nothing"
-        assert trainer._multi_server_mode and trainer._weight_sync_client.num_servers == len(VLLM_SERVER_URLS), (
-            f"the leg drove {getattr(trainer._weight_sync_client, 'num_servers', None)} client(s) for "
+        assert trainer._multi_server_mode and len(trainer._weight_sync_client._clients) == len(VLLM_SERVER_URLS), (
+            f"the leg drove {len(getattr(trainer._weight_sync_client, '_clients', ()))} client(s) for "
             f"{len(VLLM_SERVER_URLS)} configured server(s)"
         )
         for url in VLLM_SERVER_URLS:

@@ -31,17 +31,17 @@ from __future__ import annotations
 
 import pytest
 
-from src.args.distributed_args import DistributedArguments
+from src.configs.parallelism_arguments import (
+    FORWARD_ROWS_PER_EXAMPLE_ATTR,
+    ParallelismArguments,
+    forward_rows_per_example,
+    parallelism_config_from_args,
+)
 from src.distributed.expert_parallel.deepep.capacity import GIN_MAX_TOKENS_PER_RANK, ep_dispatch_capacity
 from src.distributed.parallelism_config import ParallelismConfig
 from src.model_loading.parallel.load_rules import reject_unsupported_model
 from src.models.attention.gpt_oss_sinks import SinksPolicy
 from src.trainers.mixins.base import DistributedTrainerMixin
-from src.training.parallelism_args import (
-    FORWARD_ROWS_PER_EXAMPLE_ATTR,
-    forward_rows_per_example,
-    parallelism_config_from_args,
-)
 from tests.common.parallelism import make_parallelism_config
 from tests.common.rosters import distributed_trainer_classes
 
@@ -291,7 +291,7 @@ class _GenerationTrainingConfig:
 def _built(trainer_cls, training_config) -> ParallelismConfig:
     """The config the entry-script prologue builds for this trainer, through the real builder."""
     return parallelism_config_from_args(
-        DistributedArguments(),
+        ParallelismArguments(),
         training_config=training_config,
         trainer_cls=trainer_cls,
     )

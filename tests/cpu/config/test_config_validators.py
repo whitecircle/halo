@@ -15,12 +15,12 @@ Run: pytest tests/cpu/config/test_config_validators.py
 
 import pytest
 
-from src.args.rlvr_online_grpo_args import RLVROnlineGRPOScriptArguments
 from src.configs.classification import ClassificationConfig
 from src.configs.distillation import DistillationConfig, TeacherDistillScriptArguments
 from src.configs.embedding import EmbeddingConfig
+from src.configs.grpo_online import RLVROnlineGRPOScriptArguments
+from src.configs.parser import HaloArgumentParser
 from src.configs.preference import SmoothMarginPOConfig
-from src.training.parser import H4ArgumentParser
 
 OUTPUT_DIR = "/tmp/test_config_validators"
 # Clears the bf16/GPU tail check for configs expected to construct successfully.
@@ -167,8 +167,9 @@ def test_embedding_weights_without_dimensions_raises():
 def test_embedding_weights_without_dimensions_raises_on_cli_override(tmp_path):
     config = tmp_path / "embedding.yaml"
     config.write_text(f"output_dir: {OUTPUT_DIR}\nbf16: false\nuse_cpu: true\n")
+    parser = HaloArgumentParser((EmbeddingConfig,))
     with pytest.raises(ValueError, match="matryoshka_weights"):
-        H4ArgumentParser((EmbeddingConfig,)).parse_yaml_and_args(str(config), ["--matryoshka_weights=1.0,0.5"])
+        parser.parse_dict(parser.load_values([str(config), "--matryoshka_weights=1.0,0.5"]))
 
 
 # DistillationConfig / TeacherDistillScriptArguments / RLVROnlineGRPOScriptArguments range guards

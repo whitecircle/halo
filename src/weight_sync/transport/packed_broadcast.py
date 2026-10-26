@@ -26,22 +26,13 @@ def packed_broadcast_producer(
     streams: list[torch.cuda.Stream],
     buffer_size_bytes: int = PACKED_BUFFER_BYTES,
 ) -> None:
-    """Pack tensors into ~buffer_size_bytes buffers and broadcast each from the trainer as one NCCL op.
-
-    ``buffer_size_bytes`` and :data:`PACKED_NUM_BUFFERS` are wire parameters: the update header
-    announces both, and the consumer must unpack with the same pair.
-
-    Each buffer is packed and broadcast on one of ``streams`` (one per buffer) but drawn from the
-    caller's current stream's pool (:func:`allocate_send_buffer`), so a closed client's buffers are
-    reused by the next one and by the training step. The tensors must already be contiguous on the
-    streams' device, landed by the caller on its own stream: a copy made here would be allocated on a
-    pack stream, in that stream's own pool. Each is held for the pack stream that reads it
-    (:func:`hold_for_stream`).
+    """Pack tensors into ~``buffer_size_bytes`` buffers and broadcast each as one NCCL op, one of ``streams`` per
+    buffer. ``buffer_size_bytes`` and :data:`PACKED_NUM_BUFFERS` are wire parameters the consumer unpacks with.
+    The tensors must already be on the streams' device: a copy made here would land in a pack stream's pool.
     """
     if len(streams) != PACKED_NUM_BUFFERS:
         raise ValueError(f"streams must match PACKED_NUM_BUFFERS ({PACKED_NUM_BUFFERS}), got {len(streams)}")
-    # The buffers' pool. Every pack stream waits on it: a block it hands back may last have been used
-    # there, and the caller may have written the tensors there.
+    # The buffers' pool, which every pack stream waits on: its blocks and the tensors were last written there.
     pool_stream = torch.cuda.current_stream(streams[0].device)
     for stream in streams:
         stream.wait_stream(pool_stream)

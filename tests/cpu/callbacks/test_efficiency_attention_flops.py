@@ -18,11 +18,12 @@ here, so these tests keep policing the callback if the partitioning heuristic ch
     python tests/cpu/callbacks/test_efficiency_attention_flops.py
 """
 
+from types import SimpleNamespace
+
 import pytest
 from torch import nn
 
-from src.callbacks.efficiency import EfficiencyCallback
-from src.callbacks.model_flops import rank_attention_flops, resolve_attention_layout
+from src.callbacks.model_flops import RankFlopsModel, estimate_rank_flops
 from src.distributed.pipeline_parallel.partition import (
     compute_layer_partition,
     head_cost_layer_equivalents,
@@ -106,16 +107,22 @@ def _tp_parallelism(tp_size: int):
     return make_parallelism_config(tp_size=tp_size, world_size=tp_size, gpus_per_node=tp_size)
 
 
-def _callback_state(tp_size: int, model: nn.Module | None = None):
-    """The estimates ``EfficiencyCallback`` stores for a TP-``tp_size`` rank holding ``model``."""
-    callback = EfficiencyCallback(_tp_parallelism(tp_size))
-    callback._initialize_model_flops(_Model(NUM_LAYERS) if model is None else model, SEQ_LEN)
-    return callback.state
+def _callback_state(tp_size: int, model: nn.Module | None = None) -> RankFlopsModel:
+    """The estimates for a TP-``tp_size`` rank holding ``model``."""
+    return estimate_rank_flops(
+        _Model(NUM_LAYERS) if model is None else model,
+        seq_len=SEQ_LEN,
+        parallelism_config=_tp_parallelism(tp_size),
+        full_model_params=None,
+    )
 
 
 def _stage_attention_flops(model, pp_size: int, tp_size: int = 1) -> float:
-    """A pipeline stage's attention term, off the layout pair the callback composes it from."""
-    return rank_attention_flops(*resolve_attention_layout(model, pp_size), SEQ_LEN, tp_size)
+    """A pipeline stage's attention term; the estimate reads only these axis sizes."""
+    parallelism = SimpleNamespace(pp_size=pp_size, tp_size=tp_size, ep_size=1, expert_tp_size=1)
+    return estimate_rank_flops(
+        model, seq_len=SEQ_LEN, parallelism_config=parallelism, full_model_params=None
+    ).attention_flops_per_token
 
 
 def test_premise_attention_is_a_material_share_of_the_estimate():
@@ -215,10 +222,9 @@ def test_the_config_depth_fallback_carries_both_divisors(pp_size, tp_size):
     """A module tree exposing no layer list falls back to config depth — which is the FULL model's,
     so it needs the stage share (``/pp_size``) and the head share (``/tp_size``) applied to it."""
 
-    class _Bare:
-        config = _Config()
-
-    got = _stage_attention_flops(_Bare(), pp_size, tp_size)
+    bare = nn.Module()
+    bare.config = _Config()
+    got = _stage_attention_flops(bare, pp_size, tp_size)
     assert got == pytest.approx(_attention_flops(NUM_LAYERS / pp_size) / tp_size), (
         f"the fallback at pp{pp_size}/tp{tp_size} is {got:.6e}, expected the full-depth term divided by both axes"
     )

@@ -16,13 +16,12 @@ from peft import PeftModel
 from transformers import AutoModelForCausalLM
 
 from scripts.training.offline_grpo import _load_kl_reference
-from src.args.distributed_args import DistributedArguments
-from src.args.offline_grpo_args import OfflineGRPOScriptArguments
 from src.checkpoint.format import RESUME_ADAPTER_DIR, RESUME_ADAPTER_MARKER_FILE
 from src.checkpoint.parallel.resume_source import resolve_resume_weights_source
+from src.configs.grpo_offline import OfflineGRPOScriptArguments
 from src.distributed.parallelism_config import ParallelismConfig
+from src.entrypoints.script import ScriptContext
 from src.trainers.grpo.offline import OfflineGRPOTrainer
-from src.training.script_runner import ScriptRuntime
 from tests.common.checkpoint_io import RestorePointSnapshot
 from tests.common.distributed import pin_deterministic_ep_dispatch, shared_output_dir
 from tests.common.harness import gpu_test_main
@@ -85,14 +84,13 @@ def _build(ctx, base, output, train, evaluation, *, checkpoint=None):
         sequence_length=16,
         lr_scheduler_type="constant",
     )
-    # A trained runtime source must not replace model_name_or_path as the reference's base.
-    runtime = ScriptRuntime(parallelism, "ep8", ctx.local_rank, checkpoint, checkpoint or base)
+    # A trained resume source must not replace model_name_or_path as the reference's base.
+    context = ScriptContext(parallelism, ctx.local_rank, checkpoint, checkpoint or base, OfflineGRPOTrainer)
     reference = _load_kl_reference(
         OfflineGRPOScriptArguments(),
-        runtime,
+        context,
         args,
         configured,
-        DistributedArguments(expert_parallel_size=8),
         policy=model,
         tokenizer=tokenizer,
         peft_config=peft_config,

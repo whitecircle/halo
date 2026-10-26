@@ -42,7 +42,7 @@ card(
     "Trainer — torchrun ranks",
     [
         "model + optimizer, FSDP2 / EP / TP",
-        "InferenceClientManager on the main process",
+        "WeightSyncPool on the main process",
         "rank 0 binds the sync store, one per server",
         "a push pauses the server, then resumes it",
     ],
@@ -169,7 +169,7 @@ card(
     "Trainer — torchrun ranks",
     [
         "model + optimizer, FSDP2 / EP / TP",
-        "InferenceClientManager on the main process",
+        "WeightSyncPool on the main process",
         "one NCCL group per server, trainer is rank 0",
         "each group port is bound on this host",
         "a push pauses every server, then resumes",

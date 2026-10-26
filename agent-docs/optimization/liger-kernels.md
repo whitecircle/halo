@@ -240,7 +240,7 @@ Per-model defaults are read off each applier's own signature (`_PER_MODEL_DEFAUL
 `flce_default`, set by the three large-vocab families above and nothing else.
 
 Two library defaults are overridden: TRL's `use_liger_kernel=False` (toolkit → `True`, via
-`_TOOLKIT_DEFAULTS` in `src/training/parser.py`), and Liger's `fused_linear_cross_entropy=True,
+`_TOOLKIT_DEFAULTS` in `src/configs/parser.py`), and Liger's `fused_linear_cross_entropy=True,
 cross_entropy=False` (toolkit → the reverse, because CE preserves logits for metrics and works with every
 trainer).
 

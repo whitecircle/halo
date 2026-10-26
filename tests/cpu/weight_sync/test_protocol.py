@@ -16,8 +16,6 @@ Every defect pinned here leaves a *running* RL job broken with no usable error:
   unreachable one, else startup spins silently forever.
 - A paused server must be *reported* as paused: the probe's ``/v1/completions`` request is QUEUED by
   a paused engine, so it can only time out and misreport a wedged scheduler.
-- The reconnect path must retire the old client (which owns the ``/resume``) before probing its
-  replacement, or recovery from a paused server is impossible.
 - The ``/v1/models`` read must go over the retrying session: a still-warming server answers 503, and
   a bare request would fail the startup context-window preflight on it.
 
@@ -41,11 +39,12 @@ import torch.distributed as dist
 from torch.distributed.tensor import Shard, distribute_tensor, init_device_mesh
 
 from src.distributed.nccl._nccl_wrapper import ncclUniqueId
-from src.trainers.grpo.rollout.weight_sync_clients import (
-    InferenceClientManager,
-    verify_context_window,
-    verify_sampler_logprob_reference,
+from src.trainers.grpo.rollout.engine_preflight import (
+    _check_context_window,
+    _check_sampler_logprob_reference,
+    probe_sampler_logprob_semantics,
 )
+from src.weight_sync.clients import base as client_base
 from src.weight_sync.clients import vllm as wsc
 from src.weight_sync.clients.sglang import SGLangWeightSyncClient
 from src.weight_sync.clients.vllm import VLLMWeightSyncClient
@@ -120,7 +119,7 @@ def client(server, monkeypatch):
     monkeypatch.setattr(wsc, "HTTP_PROBE_TIMEOUT_S", 5)
     monkeypatch.setattr(wsc, "WEIGHT_UPDATE_TIMEOUT_S", 10)
     handle = VLLMWeightSyncClient(base_url=server.url, connection_timeout=5.0)
-    handle.communicator = FakeCommunicator()
+    handle._transport = FakeCommunicator()
     return handle
 
 
@@ -321,7 +320,7 @@ def test_a_failed_tail_chunk_after_a_streamed_one_is_not_resumed(server, client,
 
     server.status["/update_weights"] = 500
     with pytest.raises(requests.exceptions.HTTPError, match="500"):
-        client.reset_prefix_cache()
+        client.finish_weight_update()
 
     assert server.count("POST /resume") == 0, "the engine was resumed holding a half-written model"
     assert server.paused is True
@@ -364,7 +363,7 @@ def test_a_failed_snapshot_completion_still_closes_the_update(server, client, mo
 
     client.update_named_param("w", torch.zeros(4, dtype=torch.bfloat16))
     with pytest.raises(RuntimeError, match="illegal memory access"):
-        client.reset_prefix_cache()
+        client.finish_weight_update()
 
     assert server.update_open is False, "the layerwise reload was left open by the failed snapshot completion"
     assert server.paused is False, "the engine was left quiesced by the failed snapshot completion"
@@ -387,7 +386,7 @@ def test_a_dropped_tail_after_a_streamed_chunk_is_not_resumed(server, client, mo
 
     monkeypatch.setattr(VLLMWeightSyncClient, "_complete_snapshots", sticky_cuda_error)
     with pytest.raises(RuntimeError, match="illegal memory access"):
-        client.reset_prefix_cache()
+        client.finish_weight_update()
 
     assert server.update_open is False, "the reload phase was left open"
     assert server.count("POST /resume") == 0 and server.paused is True, (
@@ -412,12 +411,12 @@ def test_the_snapshot_completion_waits_on_the_staged_copies_not_the_device(clien
             self.waited += 1
 
     event = _Event()
-    client._staged_event = event
+    client._snapshot_event = event
     client._complete_snapshots()
     assert event.waited == 1, "the flush did not wait for the staged copies"
     assert synchronized == [], "the flush synchronized the whole device instead of the staged copies"
 
-    client._staged_event = None
+    client._snapshot_event = None
     client._complete_snapshots()
     assert synchronized == [] and event.waited == 1
 
@@ -497,9 +496,9 @@ def test_context_window_preflight_raises_on_a_server_that_cannot_hold_one_turn(s
     server.max_model_len = 1024
 
     with pytest.raises(ValueError, match="context window"):
-        verify_context_window(VLLMWeightSyncClient, [server.url], 4096, None)
+        _check_context_window(VLLMWeightSyncClient, [server.url], 4096, None)
 
-    verify_context_window(VLLMWeightSyncClient, [server.url], 512, None)
+    _check_context_window(VLLMWeightSyncClient, [server.url], 512, None)
 
 
 # The filters' off values the preflight hands the probe, so each probe request moves one knob only.
@@ -516,7 +515,7 @@ def _preflight(
     min_p=0.0,
     repetition_penalty=1.0,
 ):
-    verify_sampler_logprob_reference(
+    _check_sampler_logprob_reference(
         VLLMWeightSyncClient, [url], temperature, top_p, top_k, min_p, repetition_penalty, sequence_ratio_active
     )
 
@@ -524,11 +523,11 @@ def _preflight(
 def test_sampler_logprob_probe_reads_each_engine_default(server, client):
     """vLLM's raw default carries neither temperature nor nucleus; its processed mode carries both;
     SGLang's default carries the temperature only."""
-    assert client.probe_sampler_logprob_semantics(**_FILTERS_OFF) == (False, False)
+    assert probe_sampler_logprob_semantics(client, **_FILTERS_OFF) == (False, False)
     server.logprobs_mode = "processed_logprobs"
-    assert client.probe_sampler_logprob_semantics(**_FILTERS_OFF) == (True, True)
+    assert probe_sampler_logprob_semantics(client, **_FILTERS_OFF) == (True, True)
     server.logprobs_mode = "sglang_default"
-    assert client.probe_sampler_logprob_semantics(**_FILTERS_OFF) == (True, False)
+    assert probe_sampler_logprob_semantics(client, **_FILTERS_OFF) == (True, False)
 
 
 def test_sampler_logprob_preflight_refuses_a_raw_reference_at_any_temperature_but_one(server):
@@ -604,7 +603,7 @@ def test_context_window_preflight_skips_an_unreachable_server(server):
     """An unreadable probe must never be what fails the run — it warns and moves on."""
     server.close()
 
-    verify_context_window(VLLMWeightSyncClient, [server.url], 10**9, None)
+    _check_context_window(VLLMWeightSyncClient, [server.url], 10**9, None)
 
 
 @pytest.mark.parametrize("client_cls", [VLLMWeightSyncClient, SGLangWeightSyncClient], ids=["vllm", "sglang"])
@@ -615,9 +614,9 @@ def test_the_preflight_probe_reads_each_engines_server(client_cls, caplog):
     try:
         server.max_model_len = 1024
         with caplog.at_level(logging.WARNING):
-            verify_context_window(client_cls, [server.url], 512, None)
+            _check_context_window(client_cls, [server.url], 512, None)
             with pytest.raises(ValueError, match=r"context window \(1024\)"):
-                verify_context_window(client_cls, [server.url], 4096, None)
+                _check_context_window(client_cls, [server.url], 4096, None)
     finally:
         server.close()
     assert not [record.getMessage() for record in caplog.records if "Could not" in record.getMessage()]
@@ -634,7 +633,7 @@ def test_group_port_is_released_when_group_formation_fails(server, monkeypatch):
     with ``Address already in use`` instead of retrying.
     """
     monkeypatch.setattr(wsc, "HTTP_PROBE_TIMEOUT_S", 5)
-    monkeypatch.setattr(wsc, "GROUP_FORMATION_TIMEOUT_S", 20)
+    monkeypatch.setattr(client_base, "GROUP_FORMATION_TIMEOUT_S", 20)
     # The server's 500 is held until the communicator parked, so the failure lands with the init in flight.
     server.status["/init_weight_transfer_engine"] = 500
     server.hold.add("/init_weight_transfer_engine")
@@ -662,7 +661,7 @@ def test_group_port_is_released_on_close(server, monkeypatch):
     every run after the first fail before it starts.
     """
     monkeypatch.setattr(wsc, "HTTP_PROBE_TIMEOUT_S", 5)
-    monkeypatch.setattr(wsc, "GROUP_FORMATION_TIMEOUT_S", 20)
+    monkeypatch.setattr(client_base, "GROUP_FORMATION_TIMEOUT_S", 20)
     monkeypatch.setattr(wsc, "PyNcclCommunicator", _StoreHoldingCommunicator)
     server.world_size = 0
     port = free_port()
@@ -672,7 +671,7 @@ def test_group_port_is_released_on_close(server, monkeypatch):
     assert not _bindable(port), "the group listener was never bound — the test proves nothing"
 
     # Pinned like a parked ncclCommInitRank thread would: the release must not need a GC of the comm.
-    pinned = handle.communicator
+    pinned = handle._transport
     handle.close_communicator()
 
     assert _bindable(port), f"group_port {port} still held after close_communicator: {_bind_error(port)}"
@@ -692,7 +691,7 @@ def test_a_closed_store_cannot_publish():
 def test_init_communicator_surfaces_a_server_side_init_failure(server, monkeypatch):
     """A 500 from ``/init_weight_transfer_engine`` must win over the blocking ``ncclCommInitRank``."""
     monkeypatch.setattr(wsc, "HTTP_PROBE_TIMEOUT_S", 5)
-    monkeypatch.setattr(wsc, "GROUP_FORMATION_TIMEOUT_S", 20)
+    monkeypatch.setattr(client_base, "GROUP_FORMATION_TIMEOUT_S", 20)
     handle = VLLMWeightSyncClient(base_url=server.url, connection_timeout=5.0)
     server.status["/init_weight_transfer_engine"] = 500
     server.world_size = 0  # the stub forms no store, so no engine worker may dial the listener
@@ -747,17 +746,17 @@ def test_close_aborts_the_communicator(server, client):
     memory for the process lifetime — one leak per reconnect and per served endpoint.
     """
     communicator = FakeCommunicator()
-    client.communicator = communicator
+    client._transport = communicator
 
     client.close_communicator()
 
     assert communicator.aborted, "close_communicator dropped the communicator without aborting it"
-    assert client.communicator is None
+    assert client._transport is None
 
 
 def test_aborted_communicator_is_refused_by_name(server, client):
     """An aborted communicator holds a NULL handle; reusing it must not read as an argument bug."""
-    client.communicator = FakeCommunicator(aborted=True)
+    client._transport = FakeCommunicator(aborted=True)
 
     with pytest.raises(RuntimeError, match="aborted"):
         push(client, [("w", torch.zeros(4, dtype=torch.bfloat16))])
@@ -798,76 +797,6 @@ def test_disabled_communicator_still_exposes_its_device():
 
     assert comm.disabled is True
     assert comm.device == torch.device("cpu"), "a disabled communicator must still carry its device"
-
-
-def test_reconnect_retires_the_old_client_before_probing_the_replacement():
-    """The old client owns the ``/resume`` for the pause its failed sync left; a replacement probed
-    first would only time out against the still-paused server."""
-    order: list[str] = []
-
-    class RecordingClient:
-        def __init__(self, **kwargs):
-            self.base_url = kwargs["base_url"]
-            self.group_port = kwargs.get("group_port")
-            self._param_buffer: list = []
-            order.append("construct new client")
-
-        def init_communicator(self, device):
-            order.append("probe + init new client")
-
-        def close_communicator(self):
-            order.append("close old client")
-
-        def drain_param_buffer(self):
-            order.append("drain old buffer")
-            buffered, self._param_buffer = self._param_buffer, []
-            return buffered
-
-        def buffer_param(self, name, snapshot):
-            self._param_buffer.append((name, snapshot))
-
-    manager = InferenceClientManager(
-        server_configs=[{"url": "http://server0:8000", "group_port": 51216}],
-        connection_timeout=0.0,
-        client_cls=RecordingClient,
-        base_group_port=51216,
-    )
-    old = RecordingClient(base_url="http://server0:8000")
-    old.buffer_param("w", torch.zeros(4))
-    order.clear()
-    manager._clients = [old]
-    manager._initialized = True
-    manager._device = torch.device("cpu")
-
-    new_client = manager.reconnect_client(0)
-
-    assert order.index("close old client") < order.index("probe + init new client"), (
-        f"the replacement was probed before the old client lifted its pause: {order}"
-    )
-    assert [name for name, _ in new_client._param_buffer] == ["w"], "the pending buffer was not carried over"
-    assert manager._clients[0] is new_client, "the replacement was not swapped into the client pool"
-    # The engine node dials back to the configured port, so the replacement must rebind it, not drift.
-    assert new_client.group_port == 51216, f"reconnect moved off the configured group_port: {new_client.group_port}"
-
-
-def test_unconfigured_group_ports_are_seeded_from_the_run_knob():
-    """``vllm_group_port`` must mean the same thing whichever client shape is built.
-
-    An entry without its own ``group_port`` takes ``base_group_port + index``; binding the module
-    default instead would listen on 51216/51217 for a run that configured 52000, while the engines
-    dial the port they were launched with — every sync then times out with nothing to point at.
-    """
-    manager = InferenceClientManager(
-        server_configs=[
-            {"url": "http://s0:8000"},
-            {"url": "http://s1:8000"},
-            {"url": "http://s2:8000", "group_port": 9000},
-        ],
-        connection_timeout=0.0,
-        client_cls=VLLMWeightSyncClient,
-        base_group_port=52000,
-    )
-    assert [manager._group_port(i) for i in range(3)] == [52000, 52001, 9000]
 
 
 def test_score_completion_logprobs_returns_the_completion_slice_by_token_id():

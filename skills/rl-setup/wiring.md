@@ -3,7 +3,7 @@
 Concrete commands, config fields, and launch examples for online / async-environment
 GRPO. Source of truth: `Dockerfile.vllm`, `docker-compose.vllm.yml`,
 `src/weight_sync/clients/vllm.py`, `src/trainers/grpo/environmental.py`,
-`src/configs/grpo_environmental.py`, `src/configs/environment_config.py`,
+`src/configs/grpo_environmental.py`, `src/configs/grpo_environmental.py`,
 `src/rewards/terms.py` (the reward terms), `src/environments/registry.py`. Cross-link the docs:
 `agent-docs/infrastructure/rollout-servers.md` (server setup, weight sync, SGLang),
 `agent-docs/training-methods/grpo/rewards/README.md` (the `rewards:` term list),
@@ -134,7 +134,7 @@ docker run --gpus all --network=host --ipc=host \
 field (`self.args.vllm_group_port`) read when constructing `VLLMWeightSyncClient`;
 set it in YAML (e.g. `vllm_group_port: 51216`).
 
-### EnvironmentConfig fields (`src/configs/environment_config.py`)
+### EnvironmentConfig fields (`src/configs/grpo_environmental.py`)
 
 `environment_type` (registry name), `rewards` (the term list, default
 `[{source: environment}]`), `max_turns` (`int | None`, default **`None`** = keep the environment
@@ -171,17 +171,17 @@ the trainer's `_init_weight_sync_client` → `_sync_weights_to_engine`:
    listener's port, while the trainer (rank 0) hands the listener to the
    `UniqueIdStore` and builds the `PyNcclCommunicator` concurrently.
    Done once, while vLLM is idle.
-3. Each sync: the gather calls `update_named_param()` per param, which stages it on the sync
+3. Each sync: the gather calls `update_named_param()` per param, which snapshots it on the sync
    GPU and flushes a chunk whenever the next param would overflow `HALO_WEIGHT_SYNC_CHUNK_MB`
    (default 1024). The first flush opens the update (`/pause?mode=keep` → `/start_weight_update`);
    each chunk is a `/update_weights` declaration alongside `packed_broadcast_producer`.
-   `reset_prefix_cache()` sends the tail chunk, then `/finish_weight_update` → `/resume`. PEFT
+   `finish_weight_update()` sends the tail chunk, then `/finish_weight_update` → `/resume`. PEFT
    adapters are folded into each base weight as it is sent, names stripped of `base_model.model.`.
    The transport preflight (`scripts/profiling/weight_sync_transport.py`) pushes through the same
    two calls.
 
 The parallelism-aware gather is the shared `gather_and_send_weights`
-(`src/trainers/grpo/rollout/weight_sync.py`) that both the online trainer and env
+(`src/trainers/grpo/rollout/weight_push.py`) that both the online trainer and env
 GRPO reach through `sync_trainer_weights`: EP experts via each layer's
 `gather_expert_state_dict` (collective across the EP group); non-EP /
 router / shared / dense params through `materialize_dtensor`, which returns each FSDP2-DP and

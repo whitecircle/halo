@@ -27,7 +27,7 @@ from accelerate import PartialState
 from transformers import CONFIG_MAPPING, Qwen3_5MoeForCausalLM, Qwen3_5MoeForConditionalGeneration
 from transformers.models.qwen3_5_moe.modeling_qwen3_5_moe import Qwen3_5MoeTopKRouter
 
-from src.distributed.expert_parallel.balancing_strategy import apply_balancing_strategy
+from src.callbacks.balancing import apply_balancing_mode
 from src.distributed.expert_parallel.layers.qwen3_5 import EPQwen3_5MoELayer
 from src.distributed.expert_parallel.moe_layer.layer import EPMoELayerBase
 from src.model_loading.tokenizer_setup import sync_special_token_id
@@ -251,7 +251,7 @@ def test_aux_loss_balancing_refuses_a_model_it_cannot_reach():
             return iter(())
 
     with pytest.raises(ValueError, match="does not take output_router_logits"):
-        apply_balancing_strategy(_Model(config), "aux_loss", is_moe=True)
+        apply_balancing_mode(_Model(config), "aux_loss", is_moe=True)
 
 
 def test_qwen3_5_ep_layer_declares_the_bias_update_contract():

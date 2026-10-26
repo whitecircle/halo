@@ -1,4 +1,5 @@
-"""Per-rank active-FLOPs (S-MFU) accounting in :class:`EfficiencyCallback`.
+"""Per-rank active-FLOPs (S-MFU) accounting in :func:`estimate_rank_flops`, and the warmup window of
+:class:`EfficiencyCallback`.
 
 S-MFU is the metric the debugging docs point MoE users at, so its FLOPs/token must describe the work a
 rank actually does. The invariant these tests pin: expert parallelism moves experts between ranks but
@@ -10,6 +11,7 @@ import torch
 from torch import nn
 
 from src.callbacks.efficiency import EfficiencyCallback
+from src.callbacks.model_flops import estimate_rank_flops
 from tests.common.parallelism import make_parallelism_config
 
 # Warmup accounting reads no axis size; a single-process config keeps those tests topology-free.
@@ -58,10 +60,9 @@ def _active_flops_per_token(ep_size: int, expert_tp_size: int = 1) -> float:
     parallelism = make_parallelism_config(
         ep_size=ep_size, expert_tp_size=expert_tp_size, world_size=width, gpus_per_node=width
     )
-    cb = EfficiencyCallback(parallelism)
     model = _MoEModel(local_experts=NUM_EXPERTS // ep_size, expert_tp_size=expert_tp_size)
-    cb._initialize_model_flops(model, SEQ_LEN)
-    return cb.state.active_model_flops_per_token
+    flops = estimate_rank_flops(model, seq_len=SEQ_LEN, parallelism_config=parallelism, full_model_params=None)
+    return flops.active_model_flops_per_token
 
 
 @pytest.mark.parametrize("ep_size", [2, 4, 8])
@@ -119,29 +120,35 @@ class _State:
         self.num_input_tokens_seen = None
 
 
+def _warmup_steps(cb: EfficiencyCallback, start_step: int, steps) -> list[int]:
+    """The ``steps`` after a train begin at ``start_step`` whose logs the callback leaves empty."""
+    cb.on_train_begin(None, _State(start_step), None)
+    skipped = []
+    for step in steps:
+        logs: dict = {}
+        cb.on_log(None, _State(step), None, logs)
+        if not logs:
+            skipped.append(step)
+    return skipped
+
+
 def test_warmup_excludes_exactly_n_steps():
     """HF increments global_step before on_step_end, so the bound must be inclusive.
 
     An exclusive bound would skip only one step at ``n_warmup_steps=2``, leaving first-step JIT and
     allocator skew inside the reported averages.
     """
-    cb = EfficiencyCallback(_NO_PARALLELISM, n_warmup_steps=2)
-    cb.state.global_start_step = 0
-
-    skipped = [step for step in (1, 2, 3, 4) if cb._is_warmup_step(_State(step))]
+    skipped = _warmup_steps(EfficiencyCallback(_NO_PARALLELISM, n_warmup_steps=2), 0, (1, 2, 3, 4))
     assert skipped == [1, 2], f"expected steps [1, 2] to be warmup, got {skipped}"
 
 
 def test_zero_warmup_measures_every_step():
     cb = EfficiencyCallback(_NO_PARALLELISM, n_warmup_steps=0)
-    cb.state.global_start_step = 0
-    assert not cb._is_warmup_step(_State(1)), "n_warmup_steps=0 must measure the very first step"
+    assert _warmup_steps(cb, 0, (1,)) == [], "n_warmup_steps=0 must measure the very first step"
 
 
 def test_warmup_is_relative_to_the_resume_step():
-    cb = EfficiencyCallback(_NO_PARALLELISM, n_warmup_steps=2)
-    cb.state.global_start_step = 500
-    skipped = [step for step in (501, 502, 503) if cb._is_warmup_step(_State(step))]
+    skipped = _warmup_steps(EfficiencyCallback(_NO_PARALLELISM, n_warmup_steps=2), 500, (501, 502, 503))
     assert skipped == [501, 502], f"expected [501, 502] after resuming at 500, got {skipped}"
 
 

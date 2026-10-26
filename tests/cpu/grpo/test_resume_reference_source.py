@@ -19,11 +19,13 @@ from accelerate import PartialState
 from transformers import Qwen3Config, Qwen3ForCausalLM
 from trl import ModelConfig
 
-import src.distributed.loading.vlm_setup as vlm_setup
+import src.entrypoints.model_setup as model_setup
 from src.checkpoint.weights_source import LOADED_WEIGHTS_FROM_ATTR, config_schema_source, weights_read_from
+from src.entrypoints.model_setup import load_model_and_tokenizer
+from src.entrypoints.run_setup import prepare_distributed_resume
+from src.entrypoints.script import ScriptContext
 from src.model_loading.parallel.frozen_models import load_reference_model_for_on_policy_grpo
-from src.training.environment import prepare_distributed_resume
-from src.training.script_runner import ScriptRuntime, load_script_model
+from src.trainers.grpo.online import DistributedGRPOTrainer
 from tests.common.models import TINY_QWEN3_CONFIG
 from tests.common.offline_grpo import make_offline_tokenizer
 from tests.common.parallelism import make_parallelism_config
@@ -56,7 +58,7 @@ def _same_weights(model: torch.nn.Module, expected: dict[str, torch.Tensor]) -> 
 
 def _resumed_policy(tmp_path, monkeypatch):
     """A step-3 EP resume of a tiny base: ``(policy, model_config, parallelism_config, checkpoint, base,
-    trained)``, the policy built from the checkpoint as ``load_script_model`` builds it."""
+    trained)``, the policy built from the checkpoint as ``load_model_and_tokenizer`` builds it."""
     base_dir, checkpoint_dir = tmp_path / "base", tmp_path / "run" / "checkpoint-3"
     base = _save_tiny_qwen3(base_dir, seed=0)
     trained = _save_tiny_qwen3(checkpoint_dir, seed=1)
@@ -72,13 +74,18 @@ def _resumed_policy(tmp_path, monkeypatch):
     )
     model_config = ModelConfig(model_name_or_path=str(base_dir))
     parallelism_config = make_parallelism_config(world_size=8, gpus_per_node=8, ep_size=8)
-    checkpoint, source = prepare_distributed_resume(training, model_config, parallelism_config)
-    runtime = ScriptRuntime(parallelism_config, "ep8", 0, checkpoint, source)
+    checkpoint, source = prepare_distributed_resume(
+        training, model_config, parallelism_config, overwrite_output_dir=False
+    )
+    runtime = ScriptContext(parallelism_config, 0, checkpoint, source, DistributedGRPOTrainer)
     assert runtime.policy_from_checkpoint, "premise: an EP resume builds the policy from its checkpoint"
-    monkeypatch.setattr(vlm_setup, "load_distributed_model", _from_pretrained_loader)
+    monkeypatch.setattr(model_setup, "load_distributed_model", _from_pretrained_loader)
 
-    policy, _ = load_script_model(
-        runtime, training, model_config, SimpleNamespace(reset_sinks=True, train_sinks=False, text_only_model=False)
+    policy, _ = load_model_and_tokenizer(
+        runtime,
+        training,
+        model_config,
+        SimpleNamespace(reset_sinks=True, train_sinks=False, text_only_model=False, init_from_scratch=False),
     )
     return policy, model_config, parallelism_config, checkpoint, base, trained
 
@@ -123,11 +130,11 @@ def test_a_resumed_runs_toolkit_reference_is_the_base(tmp_path, monkeypatch):
 
 
 def test_the_on_policy_grpo_scripts_load_their_policy_through_the_corrected_seam():
-    """The base name lives in ``load_script_model``; a script loading its policy elsewhere loses it."""
+    """The base name lives in ``load_model_and_tokenizer``; a script loading its policy elsewhere loses it."""
     loading = {
         path
         for path, function in functions_in(ON_POLICY_GRPO_SCRIPTS)
-        if load_script_model.__name__ in called_names(function)
+        if load_model_and_tokenizer.__name__ in called_names(function)
     }
     assert loading == set(ON_POLICY_GRPO_SCRIPTS)
 

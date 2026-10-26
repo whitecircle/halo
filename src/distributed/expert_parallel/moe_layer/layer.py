@@ -159,7 +159,7 @@ class EPMoELayerBase(
     # (``export_source_config_schema``); registered per claimed ``model_type`` by ``__init_subclass__``.
     _EXPORTS_SOURCE_CONFIG_SCHEMA: bool = False
 
-    # False makes ``validate_weight_sync_support`` reject online/env GRPO on every engine: no
+    # False makes ``reject_unsyncable_model`` reject online/env GRPO on every engine: no
     # end-to-end sync into the family's served model has been validated. What one pinned engine
     # cannot serve is the engine client's ``UNSERVABLE_MODEL_TYPES``.
     _supports_weight_sync: bool = True

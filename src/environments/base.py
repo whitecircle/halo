@@ -12,8 +12,9 @@ import re
 from abc import ABC, abstractmethod
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field, replace
-from typing import Any
+from typing import Any, get_args
 
+from src.environments.rollout_config import ReasoningEffortChoice
 from src.environments.sandbox.base import SandboxFault, SandboxInfraError
 from src.inference.response import ENGINE_CUT_FINISH_REASONS
 from src.rewards.composer import RewardComposer
@@ -30,10 +31,10 @@ from src.rewards.terms import (
 
 logger = logging.getLogger(__name__)
 
-# Reasoning-effort levels for the chat template ("Reasoning: <level>"), and the setting that resolves to one
-# per episode.
-VALID_REASONING_EFFORTS = ("low", "medium", "high")
+# The setting that resolves to one reasoning-effort level per episode, and the levels themselves, each a chat
+# template steer ("Reasoning: <level>").
 RANDOM_REASONING_EFFORT = "random"
+VALID_REASONING_EFFORTS = tuple(level for level in get_args(ReasoningEffortChoice) if level != RANDOM_REASONING_EFFORT)
 
 # The context key, and so the dataset column, an episode's expected answer travels under (the training
 # script carries the configured ``answer_field`` into it); a ``requires_answer`` env grades against it.

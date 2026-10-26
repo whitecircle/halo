@@ -133,9 +133,11 @@ def test_emitted_lines_read_back_as_one_measurement_per_key(tmp_path, monkeypatc
             tps=SimpleNamespace(avg_tokens_per_second=tokens, avg_cluster_tokens_per_second=3 * tokens),
             memory=SimpleNamespace(peak_allocated_gb=peak, training_peak_allocated_gb=peak),
             time=SimpleNamespace(avg_step_time_seconds=0.4),
-            state=SimpleNamespace(gpu_model="B300", precision="bf16"),
-            mfu=SimpleNamespace(avg_mfu_percent=30.0, avg_tflops_per_sec=700.0, local_params=11e9),
-            smfu=SimpleNamespace(avg_smfu_percent=12.0, avg_smfu_tflops_per_sec=300.0, sparsity_factor=0.125),
+            gpu_model="B300",
+            precision="bf16",
+            flops_model=SimpleNamespace(local_params=11e9, sparsity_factor=0.125),
+            mfu=SimpleNamespace(avg_mfu_percent=30.0, avg_tflops_per_sec=700.0),
+            smfu=SimpleNamespace(avg_smfu_percent=12.0, avg_smfu_tflops_per_sec=300.0),
         )
         emit_benchmark(TRAIN, callback)
         emit_save_benchmark(SAVE, seconds, rss)

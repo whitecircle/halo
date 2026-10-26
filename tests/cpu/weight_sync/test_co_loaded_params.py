@@ -107,7 +107,7 @@ def test_the_close_refuses_a_pair_the_sync_never_completed(streamed):
     client, wire = streamed
     client.update_named_param(_layer(0, "q_a_proj"), _param())
     with pytest.raises(RuntimeError, match="missing their partners"):
-        client.reset_prefix_cache()
+        client.finish_weight_update()
     assert wire.chunks == [], "nothing may reach the engine once the close is refused"
 
 
@@ -128,7 +128,7 @@ def test_a_scoped_client_sends_a_partnerless_half_and_closes(streamed):
     client, wire = streamed
     client.scope_co_load_groups(["model.layers.0.self_attn.kv_a_proj_with_mqa"])
     client.update_named_param(_layer(0, "kv_a_proj_with_mqa"), _param())
-    client.reset_prefix_cache()
+    client.finish_weight_update()
     assert wire.chunk_names == [[_layer(0, "kv_a_proj_with_mqa")]]
 
 

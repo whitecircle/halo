@@ -72,10 +72,10 @@ def _run(module, tmp_path, config_body: str, patches: list) -> None:
     )
     patches = [
         *patches,
-        mock.patch("src.training.parser.install_log_tee"),
+        mock.patch("src.entrypoints.script.install_log_tee"),
         mock.patch.object(sys, "argv", ["prog", str(config)]),
     ]
-    with mock.patch.object(module, "run_training", lambda fn: fn):
+    with mock.patch.object(module, "with_distributed_teardown", lambda fn: fn):
         for patch in patches:
             patch.start()
         try:
@@ -92,7 +92,9 @@ def _run_rlvr(tmp_path, dataset: DatasetDict) -> None:
 
     patches = [
         mock.patch.object(module, "init_training_script", return_value=_runtime()),
-        mock.patch.object(module, "load_script_model", return_value=(types.SimpleNamespace(config=None), tokenizer)),
+        mock.patch.object(
+            module, "load_model_and_tokenizer", return_value=(types.SimpleNamespace(config=None), tokenizer)
+        ),
         mock.patch.object(module, "apply_prompt_completion_window", return_value=(tokenizer, None)),
         mock.patch.object(module, "configure_adapter_training", return_value=None),
         mock.patch.object(module, "log_model_info"),
@@ -121,8 +123,11 @@ def _run_environmental_grpo(tmp_path, dataset: DatasetDict) -> None:
 
     patches = [
         mock.patch.object(module, "init_training_script", return_value=_runtime()),
-        mock.patch.object(module, "load_script_model", return_value=(types.SimpleNamespace(config=None), tokenizer)),
-        mock.patch.object(module, "apply_context_window", side_effect=lambda args, model, tok: tok),
+        mock.patch.object(
+            module, "load_model_and_tokenizer", return_value=(types.SimpleNamespace(config=None), tokenizer)
+        ),
+        mock.patch.object(module, "get_model_context_window", return_value=None),
+        mock.patch.object(module, "apply_tokenizer_window", side_effect=lambda args, model, tok, window: tok),
         mock.patch.object(module, "configure_adapter_training", return_value=None),
         mock.patch.object(module, "log_model_info"),
         mock.patch.object(module, "load_script_datasets", return_value=(dataset, False)),
@@ -138,7 +143,9 @@ def _run_offline_grpo(tmp_path, dataset: DatasetDict) -> None:
 
     patches = [
         mock.patch.object(module, "init_training_script", return_value=_runtime()),
-        mock.patch.object(module, "load_script_model", return_value=(types.SimpleNamespace(config=None), tokenizer)),
+        mock.patch.object(
+            module, "load_model_and_tokenizer", return_value=(types.SimpleNamespace(config=None), tokenizer)
+        ),
         mock.patch.object(module, "apply_prompt_completion_window", return_value=(tokenizer, None)),
         mock.patch.object(module, "configure_adapter_training", return_value=None),
         mock.patch.object(module, "log_model_info"),

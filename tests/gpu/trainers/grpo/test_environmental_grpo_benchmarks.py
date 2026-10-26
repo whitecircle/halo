@@ -50,8 +50,7 @@ from datasets import Dataset, load_dataset
 from transformers import AutoModelForCausalLM, AutoTokenizer
 from trl import GRPOConfig
 
-from src.configs.environment_config import EnvironmentConfig
-from src.configs.grpo_environmental import AsyncTrainingConfig
+from src.configs.grpo_environmental import AsyncTrainingConfig, EnvironmentConfig
 from src.distributed.parallelism_config import ParallelismConfig
 from src.env import env_int, env_str
 from src.environments.envs.protocols.react import ReActEnvironment

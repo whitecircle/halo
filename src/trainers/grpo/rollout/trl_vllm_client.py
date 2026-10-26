@@ -1,8 +1,5 @@
-"""TRL's ``VLLMClient`` for online GRPO: TRL's generation contract over the vLLM weight-sync client.
-
-TRL's own client imports vLLM, which the training image does not carry, so online GRPO hands TRL this
-class in its place.
-"""
+"""TRL's ``VLLMClient`` contract over the vLLM weight-sync client, installed in its place by online GRPO since
+TRL's own client imports vLLM, which the training image does not carry."""
 
 import logging
 
@@ -14,11 +11,10 @@ logger = logging.getLogger(__name__)
 
 
 class TrlVLLMClient(VLLMWeightSyncClient):
-    """The surface TRL's server-mode generation calls: the parent's weight sync plus ``generate``."""
+    """The surface TRL's server-mode generation calls: the vLLM weight sync plus ``generate``."""
 
     def __init__(self, *args, **kwargs):
-        # Derived rather than a literal: a generation request blocks every peer at the next collective,
-        # so it must stay under the watchdog, a lowered one included.
+        # Under the collective watchdog: a generation blocks every peer at the next collective.
         self._generation_timeout = env_positive_float(
             "HALO_VLLM_GENERATION_TIMEOUT_SECONDS", watchdog_bounded_seconds()
         )
@@ -47,11 +43,8 @@ class TrlVLLMClient(VLLMWeightSyncClient):
         structured_outputs_regex: str | None = None,
         generation_kwargs: dict | None = None,
     ) -> dict[str, list]:
-        """Generate completions via native vLLM ``/v1/completions``.
-
-        Matches TRL's ``VLLMClient.generate`` contract, returning ``{prompt_ids, completion_ids,
-        logprobs, logprob_token_ids}``. Only the sampled token's logprob is available here (num_logprobs=1).
-        """
+        """TRL's ``VLLMClient.generate`` over ``/v1/completions``: ``{prompt_ids, completion_ids, logprobs,
+        logprob_token_ids}``, with the sampled token's logprob only."""
         if images is not None and any(image is not None for image in images):
             raise NotImplementedError(
                 "This client's /v1/completions path is text-only — VLM online GRPO with images "
@@ -59,9 +52,8 @@ class TrlVLLMClient(VLLMWeightSyncClient):
             )
         if not prompts:
             return {"prompt_ids": [], "completion_ids": [], "logprobs": [], "logprob_token_ids": []}
-        # Every filter is stated, an off one included, since the server fills an omitted one from the
-        # model's generation_config.json; TRL's top_k 0 is vLLM's own off value. The completions route
-        # fills token_logprobs only from logprobs 1, and GRPO asks for 0.
+        # Every filter is stated, since the server fills an omitted one from generation_config.json; the route
+        # fills token_logprobs only from logprobs 1, where GRPO asks for 0.
         sampling = {
             "n": n,
             "temperature": temperature,
@@ -85,8 +77,7 @@ class TrlVLLMClient(VLLMWeightSyncClient):
                 reply = self.request("POST", "/tokenize", retry=True, timeout=POST_TIMEOUT_S, json={"prompt": prompt})
                 prompt_ids.append(reply.json()["tokens"])
 
-        # One batched request: continuous batching schedules all prompts together (wall clock ~max).
-        # Single-shot: a retrying session's read timeout would re-queue a full generation server-side.
+        # One batched, single-shot request: a session retry would re-queue a full generation server-side.
         data = self.request(
             "POST",
             "/v1/completions",
@@ -99,7 +90,15 @@ class TrlVLLMClient(VLLMWeightSyncClient):
         all_logprob_token_ids: list[list[list[int]]] = []
         for choice in sorted(data["choices"], key=lambda c: c.get("index", 0)):
             token_logprobs = (choice.get("logprobs") or {}).get("token_logprobs") or []
-            completion_ids = self._completion_ids(choice)
+            completion_ids = choice.get("token_ids")
+            if completion_ids is None:
+                raise RuntimeError(
+                    f"vLLM server {self.base_url} returned a completion without `token_ids` even though "
+                    f"the request set `return_token_ids`. Recovering the ids by re-tokenizing the text "
+                    f"would silently desync the GRPO importance-sampling ratio, so the rollout is "
+                    f"refused — serve this model on vLLM >= 0.10.2, which honors the flag."
+                )
+            completion_ids = list(completion_ids)
             all_completion_ids.append(completion_ids)
             all_logprobs.append([[v] for v in token_logprobs])
             all_logprob_token_ids.append([[tid] for tid in completion_ids[: len(token_logprobs)]])
@@ -110,20 +109,3 @@ class TrlVLLMClient(VLLMWeightSyncClient):
             "logprobs": all_logprobs,
             "logprob_token_ids": all_logprob_token_ids,
         }
-
-    def _completion_ids(self, choice: dict) -> list[int]:
-        """The sampled token IDs the server returned for one choice.
-
-        Not reconstructed from the decoded text: a BPE re-merge need not reproduce the sampled stream,
-        and ids that disagree with the logprobs desync the GRPO importance ratio. A missing field means
-        the server ignored ``return_token_ids``, which raises.
-        """
-        token_ids = choice.get("token_ids")
-        if token_ids is None:
-            raise RuntimeError(
-                f"vLLM server {self.base_url} returned a completion without `token_ids` even though "
-                f"the request set `return_token_ids`. Recovering the ids by re-tokenizing the text "
-                f"would silently desync the GRPO importance-sampling ratio, so the rollout is "
-                f"refused — serve this model on vLLM >= 0.10.2, which honors the flag."
-            )
-        return list(token_ids)

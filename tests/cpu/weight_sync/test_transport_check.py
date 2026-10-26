@@ -8,7 +8,7 @@ EFA with GPUDirect, NCCL's own InfiniBand transport, the socket fallback, same-h
 shared memory. The push is pinned against a recording client, and the CLI's gate (``--expect``,
 the unchanged-server check) against a stubbed preflight result.
 
-    python tests/cpu/diagnostics/test_weight_sync_transport.py
+    python tests/cpu/weight_sync/test_transport_check.py
 """
 
 import json
@@ -20,8 +20,9 @@ import pytest
 import torch
 from safetensors.torch import save_file
 
-from src.diagnostics import weight_sync_transport as wst
-from src.weight_sync.clients.base import WeightSyncClientBase
+from src.weight_sync import transport_check as wst
+from src.weight_sync.chunking import resolve_sync_device
+from src.weight_sync.clients.vllm import VLLMWeightSyncClient
 from tests.common.fake_engines import FakeVLLMServer
 from tests.common.repo import load_script_module
 from tests.common.weight_sync import Wire
@@ -74,6 +75,32 @@ _FORCED_SIMPLE = (
     "FI_OPT_EFA_WRITE_IN_ORDER_ALIGNED_128_BYTES not supported\n"
 )
 _PROVIDER_LINE = "host:1:257 [0] NCCL INFO NET/OFI Selected provider"
+# The --json keys, in order: what a launch script parsing the check's output reads.
+_JSON_KEYS = [
+    "server_url",
+    "backend",
+    "model_id",
+    "served_model",
+    "param",
+    "payload_gb",
+    "init_seconds",
+    "close_seconds",
+    "rates_gbps",
+    "served_unchanged",
+    "verdict",
+    "gpudirect",
+    "nccl_log_dir",
+    "nccl_version",
+    "plugin",
+    "net_plugin",
+    "net_plugin_api",
+    "provider",
+    "fabric",
+    "plugin_missing",
+    "transports",
+    "in_order_writes",
+    "forced_simple_protocol",
+]
 
 
 def test_efa_log_reads_as_efa_with_gpudirect_and_the_plugin_identity():
@@ -251,21 +278,12 @@ def test_a_hub_checkpoint_is_read_at_the_requested_revision(monkeypatch, tmp_pat
         wst.load_checkpoint_tensor("/mnt/models/on-the-server", None)
 
 
-class _StreamedClient(WeightSyncClientBase):
-    """The engine-agnostic client over a fake server's HTTP routes: forming the group only records the
-    sync device, and a :class:`Wire` stands in for the engine's update phases."""
-
-    BACKEND_NAME = "fake engine"
-
-    def _reset_transport_state(self) -> None:
-        pass
+class _StreamedClient(VLLMWeightSyncClient):
+    """The vLLM client over a fake server's HTTP routes: forming the group only records the sync device,
+    and a :class:`Wire` stands in for the engine's update phases."""
 
     def init_communicator(self, device=0):
-        self._resolve_sync_device(device)
-
-    def close_communicator(self):
-        self.abort_weight_update()
-        self._finalize_close()
+        self._sync_device = resolve_sync_device(device)
 
 
 @pytest.mark.usefixtures("nccl_debug_env")
@@ -294,7 +312,7 @@ def test_each_round_is_the_trainers_streamed_push(tmp_path, monkeypatch):
     )
     server = FakeVLLMServer()
     try:
-        result = wst.run_preflight(
+        result = wst.run_transport_check(
             server_url=server.url,
             backend="vllm",
             group_port=0,
@@ -309,7 +327,8 @@ def test_each_round_is_the_trainers_streamed_push(tmp_path, monkeypatch):
     finally:
         server.close()
 
-    assert len(result["rates_gbps"]) == 2
+    assert len(result.rates_gbps) == 2
+    assert list(asdict(result)) == _JSON_KEYS, "the --json keys or their order moved"
     assert (wire.opened, wire.closed) == (2, 2), "each round must open one update and close it"
     [source] = loaded
     assert len(wire.chunks) == 2
@@ -318,8 +337,8 @@ def test_each_round_is_the_trainers_streamed_push(tmp_path, monkeypatch):
         assert sent.data_ptr() != source.data_ptr(), "the round pushed the loaded tensor, not a staged copy"
 
 
-def _result(**overrides) -> dict:
-    result = {
+def _result(**overrides) -> wst.TransportCheckResult:
+    fields = {
         "server_url": "http://server:8000",
         "backend": "vllm",
         "model_id": "Qwen/Qwen3-8B",
@@ -335,15 +354,14 @@ def _result(**overrides) -> dict:
         "nccl_log_dir": "/tmp/preflight",
         **asdict(wst.parse_nccl_log(EFA_LOG)),
     }
-    result.update(overrides)
-    return result
+    return wst.TransportCheckResult(**{**fields, **overrides})
 
 
 def test_the_cli_gates_on_the_expected_transport_and_an_unchanged_server(monkeypatch, capsys):
     """The exit code is the gate a launch script reads: a transport other than ``--expect`` or a
     push that altered the served model must be 1, and the report must name which."""
     results: list[dict] = []
-    monkeypatch.setattr(preflight_cli, "run_preflight", lambda **kwargs: results.pop(0))
+    monkeypatch.setattr(preflight_cli, "run_transport_check", lambda **kwargs: results.pop(0))
 
     def run(*argv: str) -> int:
         monkeypatch.setattr("sys.argv", ["weight_sync_transport.py", "--server-url", "http://server:8000", *argv])
@@ -364,7 +382,9 @@ def test_the_cli_gates_on_the_expected_transport_and_an_unchanged_server(monkeyp
 
     results.append(_result())
     assert run("--json") == 0
-    assert json.loads(capsys.readouterr().out)["verdict"] == "efa"
+    printed = json.loads(capsys.readouterr().out)
+    assert list(printed) == _JSON_KEYS, "the --json keys or their order moved"
+    assert printed["verdict"] == "efa" and printed["transports"] == ["NET/Libfabric/0/GDRDMA"]
 
 
 if __name__ == "__main__":

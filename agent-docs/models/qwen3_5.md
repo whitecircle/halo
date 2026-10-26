@@ -43,7 +43,7 @@ These layers need no CP for memory: the recurrent state is independent of `S`, p
 
 ## Model loading
 
-Qwen3.5/3.6 ship as multimodal: `model_type` `qwen3_5_moe` (or `qwen3_5` dense), top-level class `Qwen3_5MoeForConditionalGeneration`, registered under `AutoModelForImageTextToText`. `resolve_auto_model_class()` keeps the vision tower intact, and the config detection routes the **load** through `load_distributed_model`, adding the processor on top (`src/distributed/loading/vlm_setup.py`). The MoE VLM therefore gets the same EP/TP support as a standalone causal LM — `config_has_experts` finds the experts on the nested `text_config`.
+Qwen3.5/3.6 ship as multimodal: `model_type` `qwen3_5_moe` (or `qwen3_5` dense), top-level class `Qwen3_5MoeForConditionalGeneration`, registered under `AutoModelForImageTextToText`. `resolve_auto_model_class()` keeps the vision tower intact, and the config detection routes the **load** through `load_distributed_model`, adding the processor on top (`src/entrypoints/model_setup.py`). The MoE VLM therefore gets the same EP/TP support as a standalone causal LM — `config_has_experts` finds the experts on the nested `text_config`.
 
 That verdict does not decide the data path: a text-only dataset on these checkpoints is a text run, which is what lets the text SFT recipes below use `packing` ([SFT — VLMs](../training-methods/sft.md#vision-language-models)).
 

@@ -2,7 +2,7 @@
 """Distributed off-policy distillation (text or VLM).
 
 Trains a student to match a frozen teacher's token distribution. One script serves both text and
-vision-language models: ``load_model_for_training`` auto-detects the student modality and the
+vision-language models: ``load_policy_model`` auto-detects the student modality and the
 teacher is loaded with the matching class. The distillation trainer forwards ``model(**inputs)`` /
 ``teacher(**inputs)``, so ``pixel_values`` thread to both models. Teacher and student must share
 processor/tokenizer geometry (full-vocabulary logit alignment).
@@ -20,17 +20,33 @@ from accelerate.logging import get_logger
 from transformers import AutoConfig, AutoTokenizer, PreTrainedModel, PreTrainedTokenizerBase
 from trl import ModelConfig
 
-from src.args.distributed_args import DistributedArguments
 from src.configs.distillation import DistillationConfig, TeacherDistillScriptArguments
+from src.configs.parallelism_arguments import ParallelismArguments
 from src.data.collators.factory import select_data_collator
 from src.data.collators.packing import DataCollatorForCausalLMWithPadding
 from src.data.collators.vlm import VLMDataCollator
 from src.data.pipeline.processing import process_dataset_with_map_and_filter, resolve_map_num_proc
 from src.data.pipeline.row_processors import create_llm_processor, text_render_kwargs
 from src.data.pipeline.vlm_dataset import prepare_vlm_dataset
-from src.distributed.loading.vlm_setup import load_model_for_training
+from src.entrypoints.data_setup import load_script_datasets, log_script_dataset_examples, resolve_vlm_run
+from src.entrypoints.model_setup import (
+    apply_max_length,
+    apply_text_path_padding_side,
+    default_padded_attn_implementation,
+    install_resolved_tokenizer,
+    load_policy_model,
+    log_model_info,
+)
+from src.entrypoints.script import (
+    apply_distributed_trainer_config,
+    configure_balancing_and_build_callbacks,
+    distributed_trainer_kwargs,
+    init_training_script,
+    parse_script_args,
+    run_trainer,
+    with_distributed_teardown,
+)
 from src.model_loading.dtype import resolve_training_dtype
-from src.model_loading.model_preparation import log_model_info
 from src.model_loading.parallel.frozen_models import load_frozen_auxiliary_model
 from src.model_loading.parallel.peft_setup import configure_adapter_training
 from src.runtime.collectives import barrier
@@ -38,29 +54,11 @@ from src.runtime.filesystem import hub_metadata_main_first
 from src.runtime.ranks import is_global_main_process
 from src.trainers.distillation.losses import shared_vocab_width
 from src.trainers.distillation.teacher_distillation import DistributedDistillationTrainer
-from src.training.environment import run_training
-from src.training.parser import H4ArgumentParser
-from src.training.script_runner import (
-    apply_distributed_trainer_config,
-    apply_max_length,
-    build_training_callbacks,
-    distributed_trainer_kwargs,
-    enforce_text_path_padding_side,
-    init_training_script,
-    install_resolved_tokenizer,
-    load_script_datasets,
-    log_script_dataset_examples,
-    padded_workload_attn_implementation,
-    resolve_vlm_run,
-    run_trainer,
-)
 
 logger = get_logger(__name__, log_level="INFO")
 
 
-def _load_distill_teacher(
-    *, args, model_config, training_config, dist_args, is_vlm: bool, local_rank: int
-) -> PreTrainedModel:
+def _load_distill_teacher(*, args, model_config, training_config, is_vlm: bool, local_rank: int) -> PreTrainedModel:
     """Load the frozen teacher: its own pinned revision, the run's dtype, and a backend resolved
     against the teacher's own config under the student's sinks policy.
 
@@ -71,7 +69,7 @@ def _load_distill_teacher(
     live sinks falls back to auto-detection: a teacher on a sink-dropping backend would shift every
     logprob it scores against its student.
     """
-    requested_attn = padded_workload_attn_implementation(model_config, sinks_reset=dist_args.reset_sinks)
+    requested_attn = default_padded_attn_implementation(model_config, sinks_reset=args.reset_sinks)
     return load_frozen_auxiliary_model(
         args.teacher_model,
         # The teacher's logits are the target the student is fit to, so it loads in the run's own
@@ -81,7 +79,7 @@ def _load_distill_teacher(
         revision=args.teacher_model_revision or None,
         trust_remote_code=model_config.trust_remote_code,
         attn_implementation=requested_attn,
-        reset_sinks=dist_args.reset_sinks,
+        reset_sinks=args.reset_sinks,
         is_vlm=is_vlm,
         # VLM only: the text teacher lands in host memory and the trainer moves it (_setup_teacher_model).
         device_map={"": local_rank} if is_vlm else None,
@@ -166,10 +164,11 @@ def _prepare_vlm_distill_data(ds, args, training_config, processor, tokenizer, m
 
 
 def main():
-    parser = H4ArgumentParser((TeacherDistillScriptArguments, DistillationConfig, ModelConfig, DistributedArguments))
-    args, training_config, model_config, dist_args = parser.parse()
+    args, training_config, model_config, dist_args = parse_script_args(
+        TeacherDistillScriptArguments, DistillationConfig, ModelConfig, ParallelismArguments
+    )
 
-    runtime = init_training_script(
+    context = init_training_script(
         args,
         training_config,
         model_config,
@@ -177,8 +176,7 @@ def main():
         script_prefix="distill",
         trainer_cls=DistributedDistillationTrainer,
     )
-    parallelism_config = runtime.parallelism_config
-    local_rank = runtime.local_rank
+    parallelism_config = context.parallelism_config
 
     ds, dataset_presharded = load_script_datasets(
         args,
@@ -188,25 +186,22 @@ def main():
     # The data path follows the run, not the checkpoint class: a natively-multimodal student
     # distilled on text-only rows is a text run (see is_vlm_run). Decided before the model load,
     # which requires the checkpoint's processor for an image run.
-    is_vlm = resolve_vlm_run(args, model_config, ds, text_only_model=dist_args.text_only_model)
+    is_vlm = resolve_vlm_run(args, model_config, ds, text_only_model=args.text_only_model)
 
     # Same padded-workload request the teacher load makes: the two forwards are compared token by
     # token, so a backend split between them biases the distillation targets.
-    student_model, processing_class, tokenizer, is_vlm_checkpoint = load_model_for_training(
-        model_config,
+    policy = load_policy_model(
+        context,
         training_config,
-        parallelism_config,
+        model_config,
+        args,
         vlm_run=is_vlm,
-        attn_default=padded_workload_attn_implementation(model_config, sinks_reset=dist_args.reset_sinks),
-        reset_sinks=dist_args.reset_sinks,
-        train_sinks=dist_args.train_sinks,
-        weights_source=runtime.model_source,
-        preserve_checkpoint_precision=runtime.policy_from_checkpoint,
-        text_only_model=dist_args.text_only_model,
+        attn_default=default_padded_attn_implementation(model_config, sinks_reset=args.reset_sinks),
     )
-    tokenizer = apply_max_length(training_config, args, student_model, tokenizer)
-    processing_class = install_resolved_tokenizer(processing_class, tokenizer)
-    enforce_text_path_padding_side(tokenizer, is_vlm)
+    student_model = policy.model
+    tokenizer = apply_max_length(training_config, args, student_model, policy.tokenizer)
+    processing_class = install_resolved_tokenizer(policy.processing_class, tokenizer)
+    apply_text_path_padding_side(tokenizer, is_vlm)
 
     peft_config = configure_adapter_training(args, student_model, model_config, "CAUSAL_LM")
 
@@ -217,9 +212,8 @@ def main():
         args=args,
         model_config=model_config,
         training_config=training_config,
-        dist_args=dist_args,
-        is_vlm=is_vlm_checkpoint,
-        local_rank=local_rank,
+        is_vlm=policy.is_vlm,
+        local_rank=context.local_rank,
     )
 
     log_model_info(student_model, tokenizer)
@@ -240,7 +234,7 @@ def main():
 
     apply_distributed_trainer_config(training_config, parallelism_config)
 
-    callbacks = build_training_callbacks(args, training_config, student_model, parallelism_config)
+    callbacks = configure_balancing_and_build_callbacks(args, training_config, student_model, context)
 
     barrier()
 
@@ -255,15 +249,15 @@ def main():
         processing_class=processing_class,
         callbacks=callbacks,
         peft_config=peft_config,
-        **distributed_trainer_kwargs(args, dist_args, parallelism_config, dataset_presharded=dataset_presharded),
+        **distributed_trainer_kwargs(args, parallelism_config, dataset_presharded=dataset_presharded),
     )
     run_trainer(
         trainer,
-        runtime,
+        context,
         method_name="Distillation",
         extra_start_log=[f"modality: {'vlm' if is_vlm else 'text'}"],
     )
 
 
 if __name__ == "__main__":
-    run_training(main)()
+    with_distributed_teardown(main)()

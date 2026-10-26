@@ -27,7 +27,7 @@ from src.models.attention.gpt_oss_sinks import (
     has_live_attention_sinks,
     stamped_sinks_policy,
 )
-from src.trainers.grpo.rollout.weight_sync import validate_weight_sync_support
+from src.trainers.grpo.rollout.weight_push import reject_unsyncable_model
 
 
 def _tiny_gpt_oss():
@@ -132,7 +132,7 @@ def test_weight_sync_refuses_trainable_sinks():
     model, config = _tiny_gpt_oss()
     apply_sinks_policy(model, config, policy=SinksPolicy.TRAINABLE, attn_implementation="eager")
     with pytest.raises(ValueError, match="SFT-only"):
-        validate_weight_sync_support(model, "vllm")
+        reject_unsyncable_model(model, "vllm")
     # The frozen live policy on an EP-wrapped MoE — the shipped RL shape — passes the same gate
     # (a wrapper-less MoE is refused before the sink verdict matters).
     model, config = _tiny_gpt_oss()
@@ -140,7 +140,7 @@ def test_weight_sync_refuses_trainable_sinks():
     layer = object.__new__(EPGptOssMoELayer)
     torch.nn.Module.__init__(layer)
     model.model.layers[0].mlp = layer
-    validate_weight_sync_support(model, "vllm")
+    reject_unsyncable_model(model, "vllm")
 
 
 if __name__ == "__main__":

@@ -39,7 +39,7 @@ from src.trainers.grpo.objective.logratio import KL_CLAMP_FRAC_KEY, clamp_ref_lo
 from src.trainers.grpo.objective.relative_rewards import relative_advantages_grouped
 from src.trainers.grpo.rollout.completions_logging import DecoupledCompletionsLogMixin
 from src.trainers.grpo.rollout.trl_vllm_client import TrlVLLMClient
-from src.trainers.grpo.rollout.weight_sync import sync_trainer_weights
+from src.trainers.grpo.rollout.weight_push import sync_trainer_weights
 from src.trainers.grpo.world_metrics import gathered_fractions
 from src.trainers.mixins.base import DistributedTrainerMixin
 from src.trainers.mixins.loss_masks import effective_loss_mask
@@ -126,7 +126,7 @@ class DistributedGRPOTrainer(
     def _resolve_advantage_hooks(self, kwargs: dict[str, Any], grpo_args) -> None:
         """Pop the advantage-hook kwargs and refuse the combinations that cancel or diverge, before
         TRL's ctor opens the NCCL group to the rollout server. The floor is range-validated
-        (finiteness included) by ``RangeValidatedConfig._validate_ranges``.
+        (finiteness included) by ``ValidatedConfig._validate_fields``.
         """
         self._rlrr_config: RLRRConfig | None = kwargs.pop("rlrr_config", None)
         self._drop_degenerate_groups: bool = kwargs.pop("drop_degenerate_groups", False)

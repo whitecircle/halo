@@ -19,10 +19,10 @@ from pathlib import Path
 
 import pytest
 
-from src.args.rlvr_online_grpo_args import RLVROnlineGRPOScriptArguments
 from src.config_validation import reject_non_default_args
 from src.configs.grpo import RLRRArguments, RLRRConfig, rlrr_arg_name
-from src.training.parser import H4ArgumentParser
+from src.configs.grpo_online import RLVROnlineGRPOScriptArguments
+from src.configs.parser import HaloArgumentParser
 from tests.common.repo import REPO_ROOT
 
 RLVR_SCRIPT = REPO_ROOT / "scripts/training/online_grpo/rlvr.py"
@@ -67,7 +67,7 @@ def test_forwarded_config_equals_the_explicit_one():
 
 def test_the_parser_surfaces_the_derived_fields_with_their_choices():
     """A make_dataclass field must reach the parser like a hand-written one: parsed, and its Literal gated."""
-    parser = H4ArgumentParser((RLVROnlineGRPOScriptArguments,))
+    parser = HaloArgumentParser((RLVROnlineGRPOScriptArguments,))
     (args,) = parser.parse_dict({"use_rlrr": True, "rlrr_mode": "prr", "rlrr_lambda": 64.0})
     assert args.build_rlrr_config() == RLRRConfig(mode="prr", lam=64.0)
     with pytest.raises(ValueError, match="rlrr_mode"):
@@ -94,12 +94,12 @@ def test_every_rlrr_invariant_fails_when_the_args_are_built(kwargs, match, use_r
 
 
 def test_an_inverted_band_fails_on_the_cli_override_path(tmp_path):
-    """A ``--key=value`` override meets the RLRR block of the cooperative ``_validate_ranges`` chain."""
+    """A ``--key=value`` override meets the RLRR block of the cooperative ``_validate_fields`` chain."""
     yaml_path = tmp_path / "rlvr.yaml"
     yaml_path.write_text("use_rlrr: true\n")
-    parser = H4ArgumentParser((RLVROnlineGRPOScriptArguments,))
+    parser = HaloArgumentParser((RLVROnlineGRPOScriptArguments,))
     with pytest.raises(ValueError, match="rlrr_xi_neg <= rlrr_xi_pos"):
-        parser.parse_yaml_and_args(str(yaml_path), ["--rlrr_xi_neg=1.0"])
+        parser.parse_dict(parser.load_values([str(yaml_path), "--rlrr_xi_neg=1.0"]))
 
 
 # --- Tunables set beside a closed gate are refused, not ignored ---

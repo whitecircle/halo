@@ -28,9 +28,9 @@ from accelerate.logging import get_logger
 from transformers import AutoTokenizer, PreTrainedModel
 from trl import ModelConfig, SFTConfig
 
-from src.args.distributed_args import DistributedArguments
 from src.config_validation import reject_non_default_args
 from src.configs.distillation import SelfDistillScriptArguments
+from src.configs.parallelism_arguments import ParallelismArguments
 from src.data.collators.self_distill import (
     SelfDistillTextCollator,
     audit_self_distill_row,
@@ -43,8 +43,29 @@ from src.data.collators.vlm import SelfDistillVLMDataCollator
 from src.data.pipeline.processing import coordinated_map, require_render_column, resolve_map_num_proc
 from src.data.pipeline.row_processors import text_render_kwargs
 from src.data.pipeline.vlm_dataset import prepare_vlm_dataset
-from src.distributed.loading.vlm_setup import load_model_for_training
-from src.model_loading.model_preparation import log_model_info
+from src.entrypoints.data_setup import (
+    disable_trl_dataset_prep,
+    load_script_datasets,
+    log_script_dataset_examples,
+    reject_trl_dataset_prep_args,
+    resolve_vlm_run,
+)
+from src.entrypoints.model_setup import (
+    apply_max_length,
+    apply_text_path_padding_side,
+    install_resolved_tokenizer,
+    load_policy_model,
+    log_model_info,
+)
+from src.entrypoints.script import (
+    apply_distributed_trainer_config,
+    configure_balancing_and_build_callbacks,
+    distributed_trainer_kwargs,
+    init_training_script,
+    parse_script_args,
+    run_trainer,
+    with_distributed_teardown,
+)
 from src.model_loading.parallel.frozen_models import load_frozen_reference_model
 from src.model_loading.parallel.peft_setup import configure_adapter_training
 from src.runtime.collectives import barrier
@@ -52,23 +73,6 @@ from src.runtime.filesystem import hub_metadata_main_first
 from src.runtime.ranks import is_global_main_process
 from src.trainers.distillation.losses import require_same_token_ids
 from src.trainers.distillation.self_distillation import DistributedSelfDistillationTrainer
-from src.training.environment import run_training
-from src.training.parser import H4ArgumentParser
-from src.training.script_runner import (
-    apply_distributed_trainer_config,
-    apply_max_length,
-    build_training_callbacks,
-    disable_trl_dataset_prep,
-    distributed_trainer_kwargs,
-    enforce_text_path_padding_side,
-    init_training_script,
-    install_resolved_tokenizer,
-    load_script_datasets,
-    log_script_dataset_examples,
-    reject_trl_dataset_prep_args,
-    resolve_vlm_run,
-    run_trainer,
-)
 
 logger = get_logger(__name__, log_level="INFO")
 
@@ -225,9 +229,7 @@ def _require_reference_token_ids(args, model_config) -> None:
     require_same_token_ids(*hub_metadata_main_first("reference_tokenizers", fetch))
 
 
-def _load_sdpg_reference(
-    *, args, model_config, sft_config, dist_args, tokenizer, is_vlm: bool
-) -> PreTrainedModel | None:
+def _load_sdpg_reference(*, args, model_config, sft_config, tokenizer, is_vlm: bool) -> PreTrainedModel | None:
     """Load the frozen reference for the ``L_ref`` KL anchor, or ``None`` when the anchor is off.
 
     It goes through the shared frozen-reference loader for the reason the KL term exists: ``L_ref``
@@ -245,7 +247,7 @@ def _load_sdpg_reference(
         tokenizer,
         ref_path,
         is_vlm=is_vlm,
-        reset_sinks=dist_args.reset_sinks,
+        reset_sinks=args.reset_sinks,
         attn_default=None,
     )
     if is_global_main_process():
@@ -254,8 +256,9 @@ def _load_sdpg_reference(
 
 
 def main():
-    parser = H4ArgumentParser((SelfDistillScriptArguments, SFTConfig, ModelConfig, DistributedArguments))
-    args, sft_config, model_config, distributed_args = parser.parse()
+    args, sft_config, model_config, distributed_args = parse_script_args(
+        SelfDistillScriptArguments, SFTConfig, ModelConfig, ParallelismArguments
+    )
 
     # Inherited from SFTScriptArguments but unreachable: GenerateExamplesCallback needs a tokenized
     # "generate" split and self-distillation keeps the dataset raw. num_eval_examples rides along on
@@ -312,7 +315,7 @@ def main():
     # and privileged columns have to survive HF's remove_unused_columns=True, which would strip them.
     sft_config.remove_unused_columns = False
 
-    runtime = init_training_script(
+    context = init_training_script(
         args,
         sft_config,
         model_config,
@@ -320,7 +323,7 @@ def main():
         script_prefix="self-distill",
         trainer_cls=DistributedSelfDistillationTrainer,
     )
-    parallelism_config = runtime.parallelism_config
+    parallelism_config = context.parallelism_config
     _require_reference_token_ids(args, model_config)
 
     ds, dataset_presharded = load_script_datasets(args, parallelism_config, conversation_field=args.conversation_field)
@@ -334,22 +337,13 @@ def main():
     # The data path follows the run, not the checkpoint class: a natively-multimodal student
     # distilled on text-only rows is a text run (see is_vlm_run). Decided before the model load,
     # which requires the checkpoint's processor for an image run.
-    is_vlm = resolve_vlm_run(args, model_config, ds, text_only_model=distributed_args.text_only_model)
+    is_vlm = resolve_vlm_run(args, model_config, ds, text_only_model=args.text_only_model)
 
-    model, processing_class, tokenizer, is_vlm_checkpoint = load_model_for_training(
-        model_config,
-        sft_config,
-        parallelism_config,
-        vlm_run=is_vlm,
-        reset_sinks=distributed_args.reset_sinks,
-        train_sinks=distributed_args.train_sinks,
-        weights_source=runtime.model_source,
-        preserve_checkpoint_precision=runtime.policy_from_checkpoint,
-        text_only_model=distributed_args.text_only_model,
-    )
-    tokenizer = apply_max_length(sft_config, args, model, tokenizer)
-    processing_class = install_resolved_tokenizer(processing_class, tokenizer)
-    enforce_text_path_padding_side(tokenizer, is_vlm)
+    policy = load_policy_model(context, sft_config, model_config, args, vlm_run=is_vlm)
+    model = policy.model
+    tokenizer = apply_max_length(sft_config, args, model, policy.tokenizer)
+    processing_class = install_resolved_tokenizer(policy.processing_class, tokenizer)
+    apply_text_path_padding_side(tokenizer, is_vlm)
     peft_config = configure_adapter_training(args, model, model_config, "CAUSAL_LM")
     log_model_info(model, tokenizer)
 
@@ -371,15 +365,14 @@ def main():
         args=args,
         model_config=model_config,
         sft_config=sft_config,
-        dist_args=distributed_args,
         tokenizer=tokenizer,
-        is_vlm=is_vlm_checkpoint,
+        is_vlm=policy.is_vlm,
     )
 
     disable_trl_dataset_prep(sft_config)
     apply_distributed_trainer_config(sft_config, parallelism_config)
 
-    callbacks = build_training_callbacks(args, sft_config, model, parallelism_config)
+    callbacks = configure_balancing_and_build_callbacks(args, sft_config, model, context)
 
     barrier()
 
@@ -392,9 +385,7 @@ def main():
         peft_config=peft_config,
         data_collator=collator,
         callbacks=callbacks,
-        **distributed_trainer_kwargs(
-            args, distributed_args, parallelism_config, dataset_presharded=dataset_presharded
-        ),
+        **distributed_trainer_kwargs(args, parallelism_config, dataset_presharded=dataset_presharded),
         **args.build_sdpg_kwargs(),
         reference_model=reference_model,
         reference_kl_coef=args.reference_kl_coef,
@@ -404,11 +395,11 @@ def main():
     )
     run_trainer(
         trainer,
-        runtime,
+        context,
         method_name="Self-distillation",
         extra_start_log=[f"modality: {'vlm' if is_vlm else 'text'}"],
     )
 
 
 if __name__ == "__main__":
-    run_training(main)()
+    with_distributed_teardown(main)()

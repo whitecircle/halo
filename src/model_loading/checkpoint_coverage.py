@@ -1,7 +1,7 @@
 """Checkpoint-coverage gate: refuse a load that leaves live weights randomly initialized.
 
 ``from_pretrained`` reports the keys it re-initialized only through the transformers logger, which
-``setup_logging`` silences off the logging rank. Which absences are legitimate is read off the model class.
+``configure_training_run`` silences off the logging rank. Which absences are legitimate is read off the model class.
 """
 
 from __future__ import annotations
@@ -98,7 +98,7 @@ def from_pretrained_verified(
     """``model_class.from_pretrained`` with the missing-key report captured and gated.
 
     The report is taken from ``output_loading_info`` rather than the transformers logger so it
-    survives the ``set_verbosity_error`` that ``setup_logging`` applies off the logging rank.
+    survives the ``set_verbosity_error`` that ``configure_training_run`` applies off the logging rank.
     """
     model, loading_info = model_class.from_pretrained(model_name_or_path, output_loading_info=True, **kwargs)
     reject_untieable_list_ties(model)

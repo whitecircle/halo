@@ -4,18 +4,12 @@ script parses) and the field bundles several script-argument and trainer-config 
 from dataclasses import dataclass, field
 from typing import Any, ClassVar
 
-from src.config_validation import (
-    RangeValidatedConfig,
-    present,
-    require_finite,
-    require_int,
-    require_positive,
-    require_positive_int,
-)
+from src.checkpoint.format import DEFAULT_MAX_SHARD_SIZE
+from src.config_validation import ValidatedConfig, present, require_finite, require_int
+from src.configs.parser import is_null_string
 from src.env import torch_trace_dir
 from src.model_loading.tokenizer_backend import TokenizerBackend
 from src.models.moe_balancing import BalancingMode
-from src.training.parser import is_null_string
 
 _DEFAULT_PROJECT = "default-project"
 
@@ -24,7 +18,126 @@ DEFAULT_ANSWER_FIELD = "answer"
 
 
 @dataclass
-class CommonScriptArguments(RangeValidatedConfig):
+class CheckpointArguments:
+    """How a run writes and resumes its checkpoints."""
+
+    overwrite_output_dir: bool = field(
+        default=False,
+        metadata={
+            "help": "Allow starting a run in a non-empty output_dir. Off by default so a fresh run "
+            "cannot silently interleave its checkpoints with an existing one's."
+        },
+    )
+    save_sharded_ep: bool = field(
+        default=False,
+        metadata={
+            "help": "Save EP checkpoints as per-rank expert shards written in parallel instead of the gathered HF "
+            "checkpoint from_pretrained loads. Nothing loads the shards until "
+            "scripts/after_training/merge_ep_shards.py merges them, without optimizer state, so pair it with "
+            "save_only_model. See agent-docs/reference/checkpoints.md#expert-parallelism-ep-eptp-epcp."
+        },
+    )
+    save_max_shard_size: str = field(
+        default=DEFAULT_MAX_SHARD_SIZE,
+        metadata={
+            "help": "Largest safetensors shard the gathered EP/TP/FSDP2/CP saves write, like '5GB'; HF's own "
+            "save_pretrained keeps its default. A sharded EP save writes one file per rank regardless, and "
+            "merge_ep_shards.py sizes its output by its own --max_shard_size."
+        },
+    )
+    allow_optimizer_warm_restart: bool = field(
+        default=False,
+        metadata={
+            "help": "On resume, continue with a freshly initialized optimizer (weights, step and LR schedule still "
+            "resume) when restoring this topology's optimizer shards fails on a rank, or the checkpoint holds an "
+            "interrupted save's optimizer state. Off, both raise on every rank, since a warm restart resets the "
+            "optimizer moments mid-run. "
+            "See agent-docs/reference/checkpoints.md#warm-restart-vs-exact-resume-torchrun."
+        },
+    )
+
+
+@dataclass
+class ModelLoadArguments:
+    """How the policy model is built from its checkpoint."""
+
+    text_only_model: bool = field(
+        default=False,
+        metadata={
+            "help": "Load a multimodal checkpoint through its text-only CausalLM class (Qwen3.5/3.6: "
+            "Qwen3_5MoeForCausalLM), dropping the vision tower and any MTP tail from the build and the export. For "
+            "text-only datasets; it also restores the output_router_logits path moe_balancing: aux_loss needs. "
+            "See agent-docs/reference/configuration-reference.md#model-checkpoint-and-from-scratch-flags."
+        },
+    )
+    reset_sinks: bool = field(
+        default=True,
+        metadata={
+            "help": "GptOss only: true neutralizes the attention sinks for fine-tuning; false keeps the pretrained "
+            "sinks live and frozen, the on-policy RL setting, which needs a sink-carrying attention implementation "
+            "and no context parallelism. See agent-docs/models/gpt-oss.md#attention-sinks."
+        },
+    )
+    train_sinks: bool = field(
+        default=False,
+        metadata={
+            "help": "GptOss only: train the live sinks (requires reset_sinks: false) under full fine-tuning with "
+            "flash_attention_4 or eager. Refused with flex_attention, FA3, adapter runs and weight-sync RL. "
+            "See agent-docs/models/gpt-oss.md#attention-sinks."
+        },
+    )
+
+
+@dataclass
+class TorchProfilerArguments(ValidatedConfig):
+    """The opt-in ``TorchProfilerCallback`` and its ``torch.profiler`` schedule."""
+
+    enable_torch_profiler: bool = field(
+        default=False,
+        metadata={
+            "help": "Enable TorchProfilerCallback: per-rank Chrome traces, flame-graph stacks, an optional memory "
+            "timeline and a top-ops table over a short window of steps. Off by default for the overhead of its "
+            "active window. See agent-docs/reference/debugging.md#1a-torchprofiler--gpuoperator-trace."
+        },
+    )
+    profiler_output_dir: str = field(
+        default_factory=torch_trace_dir,
+        metadata={"help": "Output directory for torch.profiler artifacts (defaults under HALO_DATA_ROOT)."},
+    )
+    profiler_wait: int = field(
+        default=5, metadata={"help": "torch.profiler schedule: steps to skip before profiling."}
+    )
+    profiler_warmup: int = field(
+        default=1, metadata={"help": "torch.profiler schedule: warmup steps before recording."}
+    )
+    profiler_active: int = field(
+        default=3, metadata={"help": "torch.profiler schedule: number of steps recorded into the trace."}
+    )
+    profiler_ranks: str = field(
+        default="0",
+        metadata={
+            "help": "Which global ranks profile: '0', 'all' or a comma list like '0,8'. "
+            "Use 'all' to capture every rank when diagnosing rank skew or stragglers."
+        },
+    )
+    profiler_record_memory_snapshot: bool = field(
+        default=False,
+        metadata={
+            "help": "Also record CUDA allocation history over the profiler's active window and dump a "
+            ".pickle for https://pytorch.org/memory_viz (allocation timeline + flame graph)."
+        },
+    )
+
+    def _validate_fields(self) -> None:
+        super()._validate_fields()
+        owner = type(self).__name__
+        # torch.profiler.schedule's own bounds.
+        require_int(owner, ge=0, profiler_wait=self.profiler_wait, profiler_warmup=self.profiler_warmup)
+        require_int(owner, ge=1, profiler_active=self.profiler_active)
+
+
+@dataclass
+class CommonScriptArguments(TorchProfilerArguments, CheckpointArguments, ModelLoadArguments):
     # The tracking project a run lands in when the config names none, declared per script class so the
     # ``project_name`` field and its help stay declared once rather than redeclared in every subclass.
     PROJECT_NAME: ClassVar[str] = _DEFAULT_PROJECT
@@ -74,8 +187,7 @@ class CommonScriptArguments(RangeValidatedConfig):
         },
     )
     force_chat_template: bool = field(
-        default=False,
-        metadata={"help": "Use chat_template even when the tokenizer ships its own."},
+        default=False, metadata={"help": "Use chat_template even when the tokenizer ships its own."}
     )
     added_special_tokens: list[str] | None = field(
         default=None, metadata={"help": "Special tokens added to the tokenizer's existing extra-special set."}
@@ -170,57 +282,19 @@ class CommonScriptArguments(RangeValidatedConfig):
     router_balancing_rate: float = field(
         default=1.0e-3,
         metadata={
-            "help": "Sign-step magnitude (gamma) of RouterBiasBalancingCallback under a bias_update mode; the "
+            "help": "Sign-step magnitude (gamma) of BalancingBiasCallback under a bias_update mode; the "
             "DeepSeek-V3 paper used 1e-3. Ignored under every other resolved mode, so also on the weight-sync RL "
             "scripts."
-        },
-    )
-    enable_torch_profiler: bool = field(
-        default=False,
-        metadata={
-            "help": "Enable TorchProfilerCallback: per-rank Chrome traces, flame-graph stacks, an optional memory "
-            "timeline and a top-ops table over a short window of steps. Off by default for the overhead of its "
-            "active window. See agent-docs/reference/debugging.md#1a-torchprofiler--gpuoperator-trace."
-        },
-    )
-    profiler_output_dir: str = field(
-        default_factory=torch_trace_dir,
-        metadata={"help": "Output directory for torch.profiler artifacts (defaults under HALO_DATA_ROOT)."},
-    )
-    profiler_wait: int = field(
-        default=5,
-        metadata={"help": "torch.profiler schedule: steps to skip before profiling."},
-    )
-    profiler_warmup: int = field(
-        default=1,
-        metadata={"help": "torch.profiler schedule: warmup steps before recording."},
-    )
-    profiler_active: int = field(
-        default=3,
-        metadata={"help": "torch.profiler schedule: number of steps recorded into the trace."},
-    )
-    profiler_ranks: str = field(
-        default="0",
-        metadata={
-            "help": "Which global ranks profile: '0', 'all' or a comma list like '0,8'. "
-            "Use 'all' to capture every rank when diagnosing rank skew or stragglers."
-        },
-    )
-    profiler_record_memory_snapshot: bool = field(
-        default=False,
-        metadata={
-            "help": "Also record CUDA allocation history over the profiler's active window and dump a "
-            ".pickle for https://pytorch.org/memory_viz (allocation timeline + flame graph)."
         },
     )
 
     def __post_init__(self):
         if self.project_name == _DEFAULT_PROJECT:
             self.project_name = self.PROJECT_NAME
-        self._validate_ranges()
+        super().__post_init__()
 
-    def _validate_ranges(self) -> None:
-        super()._validate_ranges()
+    def _validate_fields(self) -> None:
+        super()._validate_fields()
         # ``project_name`` becomes WANDB_PROJECT / CLEARML_PROJECT verbatim: ``--project_name=`` or
         # ``--project_name=None`` would name the tracking project "" or "None", and a YAML null reaches
         # os.environ as None, where the assignment raises TypeError later in the run. Annotated ``str``,
@@ -237,35 +311,30 @@ class CommonScriptArguments(RangeValidatedConfig):
         # above 1 cannot be drawn without replacement.
         if self.dataset_ratio is not None:
             for ratio in self.dataset_ratio if isinstance(self.dataset_ratio, list) else [self.dataset_ratio]:
-                require_finite(owner, dataset_ratio=ratio)
-                if not 0 < ratio <= 1:
-                    raise ValueError(f"{owner}: dataset_ratio must be in (0, 1], got {ratio!r}")
+                require_finite(owner, gt=0, le=1, dataset_ratio=ratio)
         # The proportion train_test_split re-splits at; an int there would be a row count.
         if self.test_size is not None:
             require_finite(owner, test_size=self.test_size)
             if not 0 < self.test_size < 1:
                 raise ValueError(f"{owner}: test_size must be a proportion in (0, 1), got {self.test_size!r}")
-        require_positive(owner, **present(num_full_model_params=self.num_full_model_params))
-        require_positive(owner, router_balancing_rate=self.router_balancing_rate)
-        # torch.profiler.schedule's own bounds.
-        require_int(owner, minimum=0, profiler_wait=self.profiler_wait, profiler_warmup=self.profiler_warmup)
-        require_positive_int(owner, profiler_active=self.profiler_active)
+        require_finite(owner, gt=0, **present(num_full_model_params=self.num_full_model_params))
+        require_finite(owner, gt=0, router_balancing_rate=self.router_balancing_rate)
 
 
 @dataclass
-class GenerationEvalArguments(RangeValidatedConfig):
+class GenerationEvalArguments(ValidatedConfig):
     """Eval-time example-generation knobs (SFT, DPO, SMPO, offline GRPO)."""
 
     generate_eval_examples: bool = field(default=True, metadata={"help": "Generate text examples during evaluation."})
     num_eval_examples: int = field(default=50, metadata={"help": "Examples to generate per evaluation."})
 
-    def _validate_ranges(self) -> None:
-        super()._validate_ranges()
-        require_positive_int(type(self).__name__, num_eval_examples=self.num_eval_examples)
+    def _validate_fields(self) -> None:
+        super()._validate_fields()
+        require_int(type(self).__name__, ge=1, num_eval_examples=self.num_eval_examples)
 
 
 @dataclass
-class DatasetNumProcArguments(RangeValidatedConfig):
+class DatasetNumProcArguments(ValidatedConfig):
     """Dataset-preprocessing worker count of the trainer configs that map their own data, read through
     :func:`~src.data.pipeline.processing.resolve_map_num_proc`."""
 
@@ -277,9 +346,9 @@ class DatasetNumProcArguments(RangeValidatedConfig):
         },
     )
 
-    def _validate_ranges(self) -> None:
-        super()._validate_ranges()
-        require_positive_int(type(self).__name__, **present(dataset_num_proc=self.dataset_num_proc))
+    def _validate_fields(self) -> None:
+        super()._validate_fields()
+        require_int(type(self).__name__, ge=1, **present(dataset_num_proc=self.dataset_num_proc))
 
 
 @dataclass

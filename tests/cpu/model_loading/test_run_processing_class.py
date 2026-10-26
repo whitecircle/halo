@@ -27,9 +27,9 @@ from transformers import (
     Step3p7Processor,
 )
 
-from src.distributed.loading import vlm_setup
+from src.entrypoints import model_setup
+from src.entrypoints.model_setup import install_resolved_tokenizer
 from src.model_loading.model_preparation import resolve_auto_model_class
-from src.training.script_runner import install_resolved_tokenizer
 from tests.common.models import (
     PINNED_REVISIONS,
     STEP3P7_FLASH,
@@ -53,7 +53,7 @@ def _hub_offline(monkeypatch):
 def _no_weight_load(monkeypatch):
     """The processing-class rule runs ahead of the weight load, which is stubbed out here."""
     PartialState()  # the loader logs through accelerate
-    monkeypatch.setattr(vlm_setup, "load_model_consuming_init_kwargs", lambda *args, **kwargs: ("model", None))
+    monkeypatch.setattr(model_setup, "_load_policy", lambda *args, **kwargs: ("model", None))
 
 
 def _step3p7_checkpoint(path, *, with_processor: bool) -> str:
@@ -70,7 +70,10 @@ def _load(model_name_or_path: str, *, vlm_run: bool, revision: str | None = None
     model_config = SimpleNamespace(
         model_name_or_path=model_name_or_path, model_revision=revision, trust_remote_code=False
     )
-    return vlm_setup.load_model_for_training(model_config, SimpleNamespace(), SimpleNamespace(), vlm_run=vlm_run)
+    dist_args = SimpleNamespace(text_only_model=False, init_from_scratch=False)
+    return model_setup.load_policy_model(
+        SimpleNamespace(), SimpleNamespace(), model_config, dist_args, vlm_run=vlm_run
+    )
 
 
 def test_a_text_run_on_a_checkpoint_without_a_processor_loads_its_tokenizer(tmp_path):
@@ -107,7 +110,7 @@ def _hub_answers(monkeypatch, error: Exception):
     def download(repo_id, filename, **_kwargs):
         raise error
 
-    monkeypatch.setattr(vlm_setup, "hf_hub_download", download)
+    monkeypatch.setattr(model_setup, "hf_hub_download", download)
 
 
 _HUB_MODEL = SimpleNamespace(model_name_or_path="org/multimodal", model_revision=None, trust_remote_code=False)
@@ -118,7 +121,7 @@ def test_a_hub_404_reads_as_no_processor_config(monkeypatch):
     _hub_answers(monkeypatch, RemoteEntryNotFoundError("404", response=httpx.Response(404, request=request)))
     monkeypatch.setattr(hub_constants, "HF_HUB_OFFLINE", False)
 
-    assert vlm_setup.load_vlm_processor(_HUB_MODEL, required=False) is None
+    assert model_setup.load_vlm_processor(_HUB_MODEL, required=False) is None
 
 
 def test_an_unreachable_hub_is_not_read_as_no_processor_config(monkeypatch):
@@ -127,10 +130,10 @@ def test_an_unreachable_hub_is_not_read_as_no_processor_config(monkeypatch):
     _hub_answers(monkeypatch, LocalEntryNotFoundError("unreachable, not cached"))
     monkeypatch.setattr(hub_constants, "HF_HUB_OFFLINE", False)
     with pytest.raises(LocalEntryNotFoundError):
-        vlm_setup.load_vlm_processor(_HUB_MODEL, required=False)
+        model_setup.load_vlm_processor(_HUB_MODEL, required=False)
 
     monkeypatch.setattr(hub_constants, "HF_HUB_OFFLINE", True)
-    assert vlm_setup.load_vlm_processor(_HUB_MODEL, required=False) is None
+    assert model_setup.load_vlm_processor(_HUB_MODEL, required=False) is None
 
 
 def test_the_resolved_tokenizer_lands_on_whichever_class_the_run_loaded(tmp_path):

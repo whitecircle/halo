@@ -141,7 +141,7 @@ minimum, keeping every rank's optimizer-step count equal; a global minimum of 0 
 
 A sharded dataset (a `train/shard_index.json` layout) loads at the **shard level** before the
 DataLoader is built. Every training script passes DP rank/size (not global rank/world_size) to its
-loader (`load_script_datasets`, `src/training/script_runner.py`), so CP/TP/ETP group members load the
+loader (`load_script_datasets`, `src/entrypoints/data_setup.py`), so CP/TP/ETP group members load the
 same shards; SFT additionally detects a pre-processed (tokenized) dataset via `load_datasets_auto()`.
 Each DP rank takes a **contiguous** range of shards, remainder to the first ranks — 10 shards over 3
 ranks gives `[4, 3, 3]` (`ShardedDatasetLoader`, `src/data/sources/sharded_dataset.py`).

@@ -1,10 +1,8 @@
-"""Generic MoE load-distribution metrics (``moe/*``) for any HF MoE model that declares a router.
+"""MoE load-distribution metrics (``moe/*``) for any HF MoE model that declares a router.
 
-A forward hook counts each router's own selection, since a balancing bias or group-limited routing
-moves it away from ``topk(router_logits)`` (the fallback for a router publishing logits alone).
-``on_step_end`` all-reduces the per-step counts and ``on_log`` merges the summary. Asking for metrics
-does not turn ``output_router_logits`` on by itself, because that also couples the router aux loss
-into the training loss.
+A forward hook counts each router's own selection, since a balancing bias or group-limited routing moves
+it away from ``topk(router_logits)`` (the fallback for a router publishing logits alone). Asking for
+metrics does not turn ``output_router_logits`` on by itself: that also couples the aux loss into the loss.
 """
 
 from __future__ import annotations
@@ -37,10 +35,7 @@ def compute_moe_load_metrics(
     counts: torch.Tensor,
     exclude_last_slot: bool = False,
 ) -> dict[str, float]:
-    """Summarize per-layer expert load counts into the standard ``moe/`` metrics.
-
-    Shared by both collection strategies (router-selection counts, EP ``expert_load_counter``) so the
-    keys and units stay identical whichever callback emits them.
+    """Summarize per-layer expert load counts into the ``moe/`` metrics both load callbacks emit.
 
     Args:
         counts: ``[num_layers, num_experts]`` token totals per (layer, expert); already all-reduced if distributed.
@@ -62,8 +57,7 @@ def compute_moe_load_metrics(
     per_layer_cv = per_layer_std / per_layer_mean.clamp(min=1e-9)
     per_layer_dead = (counts == 0).float().mean(dim=-1)
 
-    # A single device-to-host sync for all six scalars; separate .item() calls stall the stream once
-    # each.
+    # One device-to-host sync for all six scalars.
     load_max, load_min, load_cv, dead_frac, load_max_first, load_max_last = torch.stack(
         (
             per_layer_max.mean(),
@@ -149,7 +143,7 @@ class MoELoadMetricsCallback(TrainerCallback):
 
 
 class MoEMetricsCallback(MoELoadMetricsCallback):
-    """Generic MoE expert-load metrics.
+    """Expert-load metrics counted off the routers' forward hooks.
 
     Args (beyond the base's ``exclude_last_slot`` / ``log_every_n_steps``):
         topk: experts selected per token. Default 1 (top-1 routers); pass the model's top-k otherwise.
@@ -193,7 +187,7 @@ class MoEMetricsCallback(MoELoadMetricsCallback):
                 logger.warning(
                     "MoEMetricsCallback: output_router_logits is forced off by the moe_balancing "
                     "strategy for this model; skipping wiring (no moe/* metrics from this callback). "
-                    "Use moe_balancing=bias_update for load metrics via RouterBiasBalancingCallback."
+                    "Use moe_balancing=bias_update for load metrics via BalancingBiasCallback."
                 )
             return
         if not get_config_field(cfg, "output_router_logits", False):
@@ -264,7 +258,7 @@ class MoEMetricsCallback(MoELoadMetricsCallback):
                         "emitting no moe/* metrics. Likely because the routing bypasses the HF router "
                         "module (Expert Parallelism) or the trainer computes log-probs from the "
                         "backbone only (GRPO). For MoE load metrics in those cases use "
-                        "moe_balancing=bias_update (metrics come from RouterBiasBalancingCallback)."
+                        "moe_balancing=bias_update (metrics come from BalancingBiasCallback)."
                     )
             return
 

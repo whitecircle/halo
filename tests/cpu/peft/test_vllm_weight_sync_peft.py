@@ -3,7 +3,7 @@
 
 ``gather_and_send_weights`` folds the LoRA delta into each base weight out of place and forwards the
 result under the base-model name; the weight-sync client snapshots each ``update_named_param`` payload
-and flushes the snapshots later via ``reset_prefix_cache``. A recording client that snapshots exactly as
+and flushes the snapshots later via ``finish_weight_update``. A recording client that snapshots exactly as
 the real one does pins that the flushed weight is ``W + B @ A``, not the base ``W``. CPU: neither
 property depends on the device or the real NCCL transport.
 
@@ -29,7 +29,7 @@ from peft import LoraConfig, get_peft_model
 from torch.distributed.fsdp import fully_shard
 from torch.distributed.tensor import DTensor, init_device_mesh
 
-from src.trainers.grpo.rollout.weight_sync import gather_and_send_weights, sync_weights_to_client
+from src.trainers.grpo.rollout.weight_push import gather_and_send_weights, sync_weights_to_client
 from src.weight_sync.chunking import WEIGHT_SYNC_CHUNK_BYTES, snapshot_to_sync_device
 from tests.common.gloo import run_gloo_ranks
 from tests.common.peft_helpers import randomize_adapters
@@ -68,13 +68,13 @@ class _RecordingClient:
 
     def update_named_param(self, name: str, weights: torch.Tensor) -> None:
         # The client's own snapshot, taken when the tensor is forwarded, never a reference. The
-        # whole push rides one chunk, sent by reset_prefix_cache, so nothing is buffered toward a cut.
+        # whole push rides one chunk, sent by finish_weight_update, so nothing is buffered toward a cut.
         snapshot = snapshot_to_sync_device(
             name, weights, device=None, buffered_bytes=0, budget=WEIGHT_SYNC_CHUNK_BYTES, flush=lambda: None
         )
         self._buffer.append((name, snapshot))
 
-    def reset_prefix_cache(self) -> None:
+    def finish_weight_update(self) -> None:
         # The broadcast happens here, after gather_and_send_weights has returned.
         self.flushed = {name: tensor.detach().clone() for name, tensor in self._buffer}
         self._buffer = []
@@ -97,7 +97,7 @@ def test_peft_sync_broadcasts_merged_not_base():
     client = _RecordingClient()
     gather_and_send_weights(model, client)
     # The caller flushes after the gather returns, as the real sync does.
-    client.reset_prefix_cache()
+    client.finish_weight_update()
 
     assert "proj.weight" in client.flushed, "base weight was never forwarded"
     # No adapter-only params should leak to vLLM.

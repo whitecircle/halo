@@ -12,7 +12,7 @@ Around that sit Manifold-Constrained Hyper-Connections (`hc_mult` parallel resid
 - **TP** — `DeepseekV4Attention` (shared-KV MQA broadcast to all heads + the compressor branch) is not shardable; `apply_tp_to_attention_only` raises when a model ends up with zero shardable attention layers under `tp_size > 1`.
 - **ETP** — the experts use the shared fused-GLU storage, split through `_init_fused_glu_params`. Pure ETP and EP+ETP train, save and resume on the tiny model (the precompute-resume suites, `--mode etp2` / `ep2etp2`); the full V4-Flash checkpoint is not run under ETP.
 - **PP** — [not yet available in this release](../parallelism/pipeline-parallelism.md).
-- **RL weight sync** — online and async GRPO reject DeepSeek-V4 at trainer construction (`validate_weight_sync_support`, off each client's `UNSERVABLE_MODEL_TYPES`). The sync feeds the engine's `model.load_weights` directly, and neither pinned engine has a loader that takes it ([Rollout Servers](../infrastructure/rollout-servers.md#which-families-each-engine-serves)).
+- **RL weight sync** — online and async GRPO reject DeepSeek-V4 at trainer construction (`reject_unsyncable_model`, off each client's `UNSERVABLE_MODEL_TYPES`). The sync feeds the engine's `model.load_weights` directly, and neither pinned engine has a loader that takes it ([Rollout Servers](../infrastructure/rollout-servers.md#which-families-each-engine-serves)).
 
     vLLM 0.26.0 serves V4 from an out-of-tree package whose loader targets DeepSeek's original fp8/fp4-packed release: its o-projection reads a `weight_scale_inv` unconditionally, so a BF16 checkpoint is not servable there, whatever its names. A gathered save writes the names transformers' own `save_pretrained` reverts to (`model.layers.N.attn.*`, `model.layers.N.ffn.*`, `head.weight`), with the experts as the fused pair.
 
@@ -43,7 +43,7 @@ Consequences:
 
 ## Router balancing
 
-Under EP the wrapper re-derives routing from `gate.weight`, so the HF router module never fires and `outputs.router_logits` stays empty: the aux-loss path is severed (`_ep_severs_aux_loss`). `moe_balancing: auto` therefore resolves to `bias_update` (DeepSeek-V3 sign update via [RouterBiasBalancingCallback](../training-methods/callbacks.md#routerbiasbalancingcallback)); an explicit `aux_loss` warns and stays off.
+Under EP the wrapper re-derives routing from `gate.weight`, so the HF router module never fires and `outputs.router_logits` stays empty: the aux-loss path is severed (`_ep_severs_aux_loss`). `moe_balancing: auto` therefore resolves to `bias_update` (DeepSeek-V3 sign update via [BalancingBiasCallback](../training-methods/callbacks.md#balancingbiascallback)); an explicit `aux_loss` warns and stays off.
 
 The update lands in the gate's own exported `e_score_correction_bias`, so the trained bias ships with every checkpoint. Hash layers refuse the balancing bias (their selection is frozen); only top-k layers receive it.
 

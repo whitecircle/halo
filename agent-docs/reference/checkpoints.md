@@ -594,7 +594,7 @@ where `fsdp_shard_ep1_experts` (default on) shards them.
 ## Load coverage gate
 
 `from_pretrained` re-initializes any key the checkpoint does not carry and reports it through the
-transformers logger only — which `setup_logging` lowers to `error` on every non-logging rank. A
+transformers logger only — which `configure_training_run` lowers to `error` on every non-logging rank. A
 truncated, partially uploaded or wrong-architecture directory would therefore train from random
 weights with no exception and no output.
 
@@ -628,7 +628,7 @@ Set `resume_from_checkpoint: true` in YAML (or on the CLI) and re-run the same c
 torchrun --nproc_per_node=8 scripts/training/sft.py config.yaml --resume_from_checkpoint=true
 ```
 
-Resume is resolved once in `init_training_script` (`src/training/script_runner.py`). It picks the
+Resume is resolved once in `init_training_script` (`src/entrypoints/script.py`). It picks the
 checkpoint ([Checkpoint detection](#checkpoint-detection)), then asks `resolve_resume_weights_source()`
 whether to repoint the weights source.
 
@@ -647,7 +647,7 @@ the read for a model constructed from the checkpoint.
 
 `model_config` is not mutated, so a frozen reference/teacher model and the preprocessed-dataset
 compatibility check keep using the base path. A policy built from the checkpoint keeps the base as
-its config's `_name_or_path` too (`load_script_model`), so the model card a resumed run writes names
+its config's `_name_or_path` too (`load_model_and_tokenizer`), so the model card a resumed run writes names
 the same `base_model` as an uninterrupted run's. `trainer.train()` then reads `global_step` / `epoch`
 from `trainer_state.json`, computes batches to skip, and restores optimizer and LR scheduler.
 
@@ -697,7 +697,7 @@ records ([PEFT](../optimization/peft.md#checkpoint-saving)).
 >
 > Under `bias_update_transient` the bias is a plain per-layer attribute, deliberately off the
 > sharded state, and exports **nowhere**
-> ([mechanism](../training-methods/callbacks.md#routerbiasbalancingcallback)).
+> ([mechanism](../training-methods/callbacks.md#balancingbiascallback)).
 
 The save rank writes both modes' biases to `router_balancing_biases.pt` and every rank restores them
 on resume ([The balancing sidecar](../training-methods/callbacks.md#the-balancing-sidecar)). The
@@ -730,7 +730,7 @@ read failure raises (a torn checkpoint on a non-shared FS).
 
 ### Checkpoint detection
 
-`detect_resume_checkpoint()` (`src/training/environment.py`) handles three cases: `true`
+`resume_checkpoint_from_config()` (`src/entrypoints/run_setup.py`) handles three cases: `true`
 auto-detects the newest `checkpoint-N` in `output_dir` whose `trainer_state.json` exists on every
 rank, passing over newer step directories a save never completed ([Interrupted
 saves](#interrupted-saves)) and raising when only incomplete ones exist; an explicit

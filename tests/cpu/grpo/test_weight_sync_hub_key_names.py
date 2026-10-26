@@ -23,7 +23,7 @@ import torch.nn as nn
 from src.distributed.expert_parallel.expert_weights import gather_ep_layer_weights
 from src.distributed.expert_parallel.layers.laguna import EPLagunaMoELayer
 from src.distributed.expert_parallel.moe_layer.layer import EPMoELayerBase
-from src.trainers.grpo.rollout.weight_sync import gather_and_send_weights
+from src.trainers.grpo.rollout.weight_push import gather_and_send_weights
 
 LAYER_PATH = "mlp"
 NUM_EXPERTS, HIDDEN, INTERMEDIATE = 2, 6, 4
@@ -98,7 +98,7 @@ class _RecordingSender:
         assert name not in self.sent, f"{name} forwarded twice"
         self.sent[name] = weights
 
-    def reset_prefix_cache(self) -> None:  # pragma: no cover - the caller flushes, not the gather
+    def finish_weight_update(self) -> None:  # pragma: no cover - the caller flushes, not the gather
         pass
 
 

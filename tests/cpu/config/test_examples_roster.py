@@ -25,6 +25,7 @@ from pathlib import Path
 import pytest
 import yaml
 
+from src.configs.parallelism_arguments import parallelism_config_from_args
 from src.distributed.expert_parallel.expert_weights import ep_layer_classes_for_config
 from src.environments.episode import resolve_reasoning_end_ids
 from src.model_loading.parallel.load_rules import reject_unsupported_model
@@ -34,7 +35,6 @@ from src.models.attention.selection import validate_attn_implementation
 from src.models.config_access import text_config
 from src.models.context_window import is_bounded_length
 from src.models.moe_balancing import BIAS_UPDATE_MODES, config_has_experts, native_balancing_bias_attrs
-from src.training.parallelism_args import parallelism_config_from_args
 from tests.common.parallelism import make_parallelism_config
 from tests.common.repo import REPO_ROOT
 from tests.common.tokenizers import load_cached_config, load_cached_tokenizer, try_cached_config
@@ -166,7 +166,7 @@ def build_parallelism_config(config: Path):
     """
     script = script_for(config)
     parsed = parser_for(script).parse_yaml_file(str(config))
-    dist_args = next(obj for obj in parsed if type(obj).__name__ == "DistributedArguments")
+    dist_args = next(obj for obj in parsed if type(obj).__name__ == "ParallelismArguments")
     model_config = next(obj for obj in parsed if type(obj).__name__ == "ModelConfig")
     flags = script_call_kwargs(script, "init_training_script", ("allow_low_precision", "supports_init_from_scratch"))
     # The peel reads the model's own config; where that is unreachable the expert-LoRA rejections
@@ -536,10 +536,10 @@ def test_weight_sync_example_keeps_a_pushable_sink_parameter(config):
     other kernel fills with ``dtype.min`` and keeps the slot). The weight sync ships
     ``named_parameters`` only, so nothing is ever pushed for the removed slots and the rollout
     engine keeps generating with the pretrained sinks against a sink-free trainer — permanently
-    off-policy, which ``validate_weight_sync_support`` refuses at construction.
+    off-policy, which ``reject_unsyncable_model`` refuses at construction.
     """
     script = script_for(config)
-    if not script_call_kwargs(script, "build_training_callbacks", ("syncs_to_external_generator",)).get(
+    if not script_call_kwargs(script, "configure_balancing_and_build_callbacks", ("syncs_to_external_generator",)).get(
         "syncs_to_external_generator"
     ):
         return

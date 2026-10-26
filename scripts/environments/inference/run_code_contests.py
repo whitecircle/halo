@@ -69,7 +69,7 @@ from src.environments.eval_runner import (
     report,
 )
 from src.environments.registry import resolve_environment
-from src.environments.rollout_config import DEFAULT_ROLLOUT_MAX_TOKENS
+from src.environments.rollout_config import RolloutConfig
 from src.inference.openai_client import build_openai_client
 from src.log import configure_cli_logging
 
@@ -161,9 +161,9 @@ def default_max_tokens(env: CodeContestsEnvironment, flag: str | None) -> int:
     level = resolve_effort_setting(flag, {})
     budget = env.thinking_budget_for_effort(level) if level is not None else None
     if budget is None:
-        return DEFAULT_ROLLOUT_MAX_TOKENS
+        return RolloutConfig.max_tokens
     if not env.thinking_budget_enforced(level):
-        return max(DEFAULT_ROLLOUT_MAX_TOKENS, budget + SOLUTION_HEADROOM_TOKENS)
+        return max(RolloutConfig.max_tokens, budget + SOLUTION_HEADROOM_TOKENS)
     return budget + SOLUTION_HEADROOM_TOKENS
 
 
@@ -330,7 +330,7 @@ def parse_args() -> argparse.Namespace:
         )
         + ", or a reasoning_effort_profiles override in --env_kwargs)"
         + f" plus {SOLUTION_HEADROOM_TOKENS} solution headroom; under --reasoning_effort {NO_REASONING_EFFORT}, "
-        f"the training rollout's default {DEFAULT_ROLLOUT_MAX_TOKENS}, and under a soft budget the larger of the two.",
+        f"the training rollout's default {RolloutConfig.max_tokens}, and under a soft budget the larger of the two.",
     )
     p.add_argument("--max_workers", type=int, default=16, help="Concurrent episodes.")
     p.add_argument(

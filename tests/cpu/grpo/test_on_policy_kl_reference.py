@@ -281,11 +281,11 @@ def test_both_scripts_load_the_reference_as_their_policy_and_pass_it(script):
     calls = [node for node in ast.walk(main) if isinstance(node, ast.Call)]
     (load,) = (call for call in calls if call_name(call) == load_reference_model_for_on_policy_grpo.__name__)
     keywords = {keyword.arg: ast.unparse(keyword.value) for keyword in load.keywords}
-    (policy_load,) = (call for call in calls if call_name(call) == "load_script_model")
-    policy_attn = next(ast.unparse(k.value) for k in policy_load.keywords if k.arg == "attn_implementation")
+    (policy_load,) = (call for call in calls if call_name(call) == "load_model_and_tokenizer")
+    policy_attn = next(ast.unparse(k.value) for k in policy_load.keywords if k.arg == "attn_default")
     assert keywords == {
         "peft_config": "peft_config",
-        "reset_sinks": "dist_args.reset_sinks",
+        "reset_sinks": "args.reset_sinks",
         "attn_default": policy_attn,
     }
     assert ast.unparse(load.args[1]) == "model_config", "the reference must load from the configured model"
@@ -348,7 +348,7 @@ def test_both_scripts_run_the_server_preflights_before_the_reference_load(script
         if isinstance(node, ast.Call) and (name := call_name(node)) is not None:
             first_line[name] = min(node.lineno, first_line.get(name, node.lineno))
     load = first_line[load_reference_model_for_on_policy_grpo.__name__]
-    for preflight in ("verify_context_window_synced", "verify_sampler_logprob_reference_synced"):
+    for preflight in ("verify_context_window", "verify_sampler_logprob_reference"):
         assert first_line[preflight] < load, f"{script} loads the reference before {preflight}"
 
 

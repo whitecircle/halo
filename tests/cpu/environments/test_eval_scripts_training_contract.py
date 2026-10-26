@@ -29,7 +29,7 @@ from scripts.environments.inference.run_code_contests import CODING_ENV_TYPES, r
 from src.env import nccl_timeout
 from src.environments.envs.tasks.coding.code_contests import DEFAULT_REASONING_EFFORT
 from src.environments.registry import resolve_environment
-from src.environments.rollout_config import DEFAULT_ROLLOUT_TOP_P
+from src.environments.rollout_config import RolloutConfig
 from tests.common.code_contests import StubSandbox
 from tests.common.repo import REPO_ROOT
 
@@ -108,7 +108,7 @@ def test_without_the_flag_the_script_defaults_stand():
     rollout = rollout_config_from_args(_args(), None, default_temperature=0.2, default_max_tokens=99)
     assert (rollout.temperature, rollout.top_p, rollout.max_tokens, rollout.request_timeout) == (
         0.2,
-        DEFAULT_ROLLOUT_TOP_P,
+        RolloutConfig.top_p,
         99,
         EVAL_REQUEST_TIMEOUT_SECONDS,
     )

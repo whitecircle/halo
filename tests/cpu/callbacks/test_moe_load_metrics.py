@@ -3,7 +3,7 @@
 
 ``compute_moe_load_metrics`` is the single source of truth for the ``moe/``
 metric keys used by both :class:`MoEMetricsCallback` (router-logits path,
-``moe_balancing`` ``aux_loss`` / ``none``) and :class:`RouterBiasBalancingCallback`
+``moe_balancing`` ``aux_loss`` / ``none``) and :class:`BalancingBiasCallback`
 (EP ``expert_load_counter`` path, ``moe_balancing: bias_update``). Locking down the
 math here means the two callbacks agree on units across every supported MoE family.
 

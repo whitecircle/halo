@@ -1,24 +1,7 @@
-"""Weight-sync transport preflight: which NCCL transport the trainer↔rollout-server group forms on.
-
-Every failure of that group is a hang, not an error: two containers on different NCCL nets, on
-different aws-ofi-nccl builds, or with cuMem enabled on one side only all form the group and then
-spin at the first collective. This forms the group against a live server with the toolkit's own
-client, pushes one real checkpoint parameter through the trainer's streamed path (its unchanged
-value, so the served model is unchanged), and reads the transport NCCL chose out of its own debug log
-— ``NET/Libfabric/.../GDRDMA`` is EFA with GPUDirect, ``NET/IB`` NCCL's own InfiniBand transport,
-``NET/Socket`` TCP over the host network, ``P2P/CUMEM`` same-host CUDA IPC and ``SHM`` same-host
-shared memory.
-
-The pushed value is the checkpoint's own, so the served model is unchanged as long as the
-checkpoint named (``--model-id``, else the id the server advertises) is the one the server loaded;
-a greedy completion before and after the push is the check, coarse enough to survive numeric
-jitter and fine enough to catch a wrong tensor.
-
-The NCCL debug variables are set here, before the first NCCL call, and NCCL reads them once per
-process; the preflight therefore runs in a fresh process (``scripts/profiling/weight_sync_transport.py``)
-rather than inside a trainer. Only the trainer side of the group is observable here; the server's
-own log carries its half.
-"""
+"""Which NCCL transport the trainer↔rollout-server weight-sync group forms on, read from NCCL's own debug log. Every
+failure of that group is a hang at the first collective (different NCCL nets, aws-ofi-nccl builds, cuMem on one
+side only), so the check forms the group against a live server, pushes one checkpoint tensor unchanged through the
+trainer's streamed path and parses the transport, in a fresh process: NCCL reads its debug settings once."""
 
 import glob
 import json
@@ -42,25 +25,17 @@ from safetensors import safe_open
 
 from src.checkpoint.format import SAFETENSORS_INDEX_FILE, SAFETENSORS_WEIGHTS_FILE
 from src.weight_sync.chunking import resolve_sync_device
-from src.weight_sync.clients.base import WeightSyncClientBase
+from src.weight_sync.clients.base import POST_TIMEOUT_S, WeightSyncClientBase
 from src.weight_sync.registry import resolve_weight_sync_client
 
 logger = logging.getLogger(__name__)
 
-# The parameter pushed when none is named: the input embedding, which every family carries under its
-# language model (``model.embed_tokens.weight``; ``model.language_model.embed_tokens.weight`` on the
-# multimodal ones).
+# The parameter pushed when none is named: the input embedding every family carries under its language model.
 DEFAULT_PARAM_SUFFIX = "embed_tokens.weight"
-# Transport verdict → the prefix NCCL prints after ``via`` on a channel line of that transport.
-TRANSPORT_PREFIXES = {
-    "efa": "NET/Libfabric",
-    "ib": "NET/IB",
-    "socket": "NET/Socket",
-    "p2p": "P2P/",
-    "shm": "SHM",
-}
+# Transport verdict → the prefix NCCL prints after ``via`` on a channel line of that transport:
+# ``NET/Libfabric/.../GDRDMA`` is EFA with GPUDirect, ``P2P/CUMEM`` same-host CUDA IPC.
+TRANSPORT_PREFIXES = {"efa": "NET/Libfabric", "ib": "NET/IB", "socket": "NET/Socket", "p2p": "P2P/", "shm": "SHM"}
 VERDICT_UNKNOWN = "unknown"
-_NCCL_DEBUG_ENV = {"NCCL_DEBUG": "INFO", "NCCL_DEBUG_SUBSYS": "INIT,NET,P2P"}
 _LOG_STEM = "nccl-weight-sync-preflight"
 # ``NET/<net>/<device>[(proxy rank)][/GDRDMA]``, ``P2P/<kind>[/<mode>...][ pointer]`` or ``SHM[/<mode>...]``.
 _CHANNEL_RE = re.compile(
@@ -70,15 +45,11 @@ _PLUGIN_RE = re.compile(r"NET/OFI Initializing aws-ofi-nccl (\S+)")
 _NET_PLUGIN_RE = re.compile(r"NET/Plugin: Loaded net plugin (\S+) \(v(\d+)\)")
 _PROVIDER_RE = re.compile(r"NET/OFI Selected provider is (\S+), fabric is (\S+)")
 _PLUGIN_MISSING_RE = re.compile(r"NET/Plugin: Could not find: (.+?)\s*$", re.M)
-# The plugin probes each endpoint for in-order RDMA writes and sends at init; the answer comes from
-# rdma-core's EFA provider, so it differs between userspace builds. Where a probe fails the plugin
-# forces NCCL_PROTO=simple itself, on a separate line it skips on the platforms it exempts.
+# The plugin's init probe for in-order RDMA writes and sends, answered by rdma-core's EFA provider (so it differs
+# between userspace builds); a failed probe forces NCCL_PROTO=simple, on a line exempt platforms skip.
 _IN_ORDER_UNSUPPORTED_RE = re.compile(r"FI_OPT_EFA_\w+_IN_ORDER_ALIGNED_128_BYTES not supported")
 _FORCED_SIMPLE_PROTOCOL_RE = re.compile(r"NET/OFI Need to force simple protocol")
 _NCCL_VERSION_RE = re.compile(r"NCCL version (\S+)")
-_COMPLETION_PROMPT = "The capital of France is"
-_COMPLETION_TOKENS = 8
-_HTTP_TIMEOUT_S = 60.0
 
 
 @dataclass
@@ -93,8 +64,7 @@ class TransportReport:
     fabric: str | None = None
     plugin_missing: list[str] = field(default_factory=list)
     transports: list[str] = field(default_factory=list)
-    # Both None without a plugin. The probe answer, and whether the plugin forced NCCL_PROTO=simple
-    # on this side because of it.
+    # Both None without a plugin: the in-order probe's answer, and whether it forced NCCL_PROTO=simple here.
     in_order_writes: bool | None = None
     forced_simple_protocol: bool | None = None
 
@@ -110,6 +80,36 @@ class TransportReport:
     @property
     def gpudirect(self) -> bool:
         return any(transport.endswith("/GDRDMA") for transport in self.transports)
+
+
+@dataclass(frozen=True)
+class TransportCheckResult:
+    """One check: the run, then the :class:`TransportReport` fields; ``asdict`` is the ``--json`` output."""
+
+    server_url: str
+    backend: str
+    model_id: str
+    served_model: str
+    param: str
+    payload_gb: float
+    init_seconds: float
+    close_seconds: float
+    rates_gbps: list[float]
+    # False when the push altered the served model: the checkpoint read here is not the one the server loaded.
+    served_unchanged: bool
+    verdict: str
+    gpudirect: bool
+    nccl_log_dir: str
+    nccl_version: str | None
+    plugin: str | None
+    net_plugin: str | None
+    net_plugin_api: int | None
+    provider: str | None
+    fabric: str | None
+    plugin_missing: list[str]
+    transports: list[str]
+    in_order_writes: bool | None
+    forced_simple_protocol: bool | None
 
 
 def parse_nccl_log(text: str) -> TransportReport:
@@ -135,27 +135,18 @@ def parse_nccl_log(text: str) -> TransportReport:
 
 
 def arm_nccl_debug(log_dir: str) -> str:
-    """Point NCCL's debug output at ``log_dir`` for this process; returns the file glob to read back.
-
-    Must run before the first NCCL call in the process (NCCL reads these once). A process that already
-    formed a torch.distributed group has an initialized NCCL and cannot be re-armed.
-    """
+    """Point NCCL's debug output at ``log_dir``, before the process's first NCCL call; returns the glob to read."""
     if torch.distributed.is_available() and torch.distributed.is_initialized():
         raise RuntimeError(
             "torch.distributed is already initialized in this process: NCCL has read its debug "
             "settings and the preflight cannot observe the transport. Run it in a fresh process."
         )
     pattern = os.path.join(log_dir, f"{_LOG_STEM}.%p.log")
-    os.environ.update(_NCCL_DEBUG_ENV)
+    os.environ.update({"NCCL_DEBUG": "INFO", "NCCL_DEBUG_SUBSYS": "INIT,NET,P2P"})
     os.environ["NCCL_DEBUG_FILE"] = pattern
-    # Named up front: a formation that hangs is the case this tool exists for, and the log is then
-    # the only thing to read.
+    # Named up front: a hung formation, the case this tool exists for, leaves the log the only thing to read.
     logger.info(f"NCCL debug log: {pattern}")
     return os.path.join(log_dir, f"{_LOG_STEM}.*.log")
-
-
-def read_nccl_log(pattern: str) -> str:
-    return "".join(Path(path).read_text(encoding="utf-8", errors="replace") for path in sorted(glob.glob(pattern)))
 
 
 def _checkpoint_file(model_id: str, filename: str, revision: str | None) -> str:
@@ -167,9 +158,8 @@ def _checkpoint_file(model_id: str, filename: str, revision: str | None) -> str:
     try:
         return hf_hub_download(model_id, filename, revision=revision)
     except LocalEntryNotFoundError:
-        # Kept apart from EntryNotFoundError, which it subclasses: offline it says the file is not
-        # cached, not that the repo lacks it. Still a FileNotFoundError, so an uncached index falls
-        # through to the single-file layout, the only one an offline single-file checkpoint has.
+        # Not the repo lacking the file but an uncached one offline: still a FileNotFoundError, so an uncached
+        # index falls through to the single-file layout.
         raise
     except EntryNotFoundError as e:
         raise FileNotFoundError(f"{model_id}/{filename}") from e
@@ -202,12 +192,8 @@ def _resolve_param(name: str | None, keys: list[str], model_id: str) -> str:
 def load_checkpoint_tensor(
     model_id: str, name: str | None, *, revision: str | None = None, device: str = "cpu"
 ) -> tuple[str, torch.Tensor]:
-    """One tensor of the checkpoint ``model_id`` serves, from its safetensors shard: ``name``, or the
-    input embedding when ``None``. Returns the resolved name with the tensor.
-
-    Only the index and the shard holding the tensor are fetched; a hub checkpoint lands in the
-    Hugging Face cache like any other download.
-    """
+    """``(name, tensor)`` of one checkpoint tensor (the input embedding when ``name`` is ``None``), fetching only
+    the index and the shard holding it."""
     try:
         index_path = _checkpoint_file(model_id, SAFETENSORS_INDEX_FILE, revision)
     except FileNotFoundError:
@@ -226,33 +212,28 @@ def load_checkpoint_tensor(
         return name, fh.get_tensor(name)
 
 
-def served_model_id(client: WeightSyncClientBase) -> str:
-    """The model id the server advertises on the OpenAI route both engines serve."""
-    cards = client.request("GET", "/v1/models", retry=True, timeout=_HTTP_TIMEOUT_S).json().get("data", [])
+def _served_model_id(client: WeightSyncClientBase) -> str:
+    """The model id the server advertises on ``/v1/models``."""
+    cards = client.request("GET", "/v1/models", retry=True, timeout=POST_TIMEOUT_S).json().get("data", [])
     if not cards:
         raise RuntimeError(f"{client.base_url}/v1/models lists no model")
     return cards[0]["id"]
 
 
 def greedy_completion(client: WeightSyncClientBase, model_id: str) -> str:
-    """A deterministic completion, compared before and after the push to prove the model unchanged."""
+    """A deterministic completion, compared before and after the push to prove the model unchanged: coarse
+    enough to survive numeric jitter, fine enough to catch a wrong tensor."""
     resp = client.request(
         "POST",
         "/v1/completions",
         retry=True,
-        timeout=_HTTP_TIMEOUT_S,
-        json={
-            "model": model_id,
-            "prompt": _COMPLETION_PROMPT,
-            "max_tokens": _COMPLETION_TOKENS,
-            "temperature": 0,
-            "seed": 0,
-        },
+        timeout=POST_TIMEOUT_S,
+        json={"model": model_id, "prompt": "The capital of France is", "max_tokens": 8, "temperature": 0, "seed": 0},
     )
     return resp.json()["choices"][0]["text"]
 
 
-def run_preflight(
+def run_transport_check(
     *,
     server_url: str,
     backend: str,
@@ -264,13 +245,9 @@ def run_preflight(
     revision: str | None,
     rounds: int,
     connection_timeout: float,
-) -> dict:
-    """Form the group, push ``param`` ``rounds`` times, tear down, and report transport plus rates.
-
-    Returns a JSON-ready dict; ``verdict`` is one of the transport words above and ``served_unchanged``
-    is False when the push altered the served model, i.e. the checkpoint read here is not the one the
-    server loaded.
-    """
+) -> TransportCheckResult:
+    """Form the group, push ``param`` ``rounds`` times, tear down, and report the trainer side's transport and
+    rates (the server's own log carries its half)."""
     log_dir = tempfile.mkdtemp(prefix="weight-sync-preflight-")
     log_glob = arm_nccl_debug(log_dir)
     torch_device = resolve_sync_device(device)
@@ -284,9 +261,8 @@ def run_preflight(
         connection_timeout=connection_timeout,
         group_host=group_host,
     )
-    # The completion is requested under the served name (vLLM rejects any other); the checkpoint
-    # read here is the one the server loaded, named by --model-id when the served id is not it.
-    served = served_model_id(client)
+    # The completion goes under the served name (vLLM rejects any other); --model-id names the checkpoint.
+    served = _served_model_id(client)
     checkpoint = model_id or served
     param, tensor = load_checkpoint_tensor(checkpoint, param, revision=revision, device=str(torch_device))
     nbytes = tensor.nbytes
@@ -302,7 +278,7 @@ def run_preflight(
                 torch.cuda.synchronize(torch_device)
             started = time.perf_counter()
             client.update_named_param(param, tensor)
-            client.reset_prefix_cache()
+            client.finish_weight_update()
             if torch_device.type == "cuda":
                 torch.cuda.synchronize(torch_device)
             rates_gbps.append(nbytes / (time.perf_counter() - started) / 1e9)
@@ -312,51 +288,54 @@ def run_preflight(
         close_seconds = time.perf_counter() - started
     after = greedy_completion(client, served)
 
-    report = parse_nccl_log(read_nccl_log(log_glob))
-    return {
-        "server_url": server_url,
-        "backend": backend,
-        "model_id": checkpoint,
-        "served_model": served,
-        "param": param,
-        "payload_gb": nbytes / 1e9,
-        "init_seconds": init_seconds,
-        "close_seconds": close_seconds,
-        "rates_gbps": rates_gbps,
-        "served_unchanged": before == after,
-        "verdict": report.verdict,
-        "gpudirect": report.gpudirect,
-        "nccl_log_dir": log_dir,
+    nccl_log = "".join(
+        Path(path).read_text(encoding="utf-8", errors="replace") for path in sorted(glob.glob(log_glob))
+    )
+    report = parse_nccl_log(nccl_log)
+    return TransportCheckResult(
+        server_url=server_url,
+        backend=backend,
+        model_id=checkpoint,
+        served_model=served,
+        param=param,
+        payload_gb=nbytes / 1e9,
+        init_seconds=init_seconds,
+        close_seconds=close_seconds,
+        rates_gbps=rates_gbps,
+        served_unchanged=before == after,
+        verdict=report.verdict,
+        gpudirect=report.gpudirect,
+        nccl_log_dir=log_dir,
         **asdict(report),
-    }
+    )
 
 
-def format_report(result: dict) -> str:
-    """Human summary of :func:`run_preflight`'s result."""
-    rates = result["rates_gbps"]
+def format_report(result: TransportCheckResult) -> str:
+    """Human summary of :func:`run_transport_check`'s result."""
+    rates = result.rates_gbps
     lines = [
-        f"weight-sync transport preflight: {result['backend']} at {result['server_url']}",
-        f"  transport      {result['verdict']}  ({', '.join(result['transports']) or 'no channel lines'})"
-        + ("  GPUDirect RDMA" if result["gpudirect"] else ""),
-        f"  nccl           {result['nccl_version'] or '?'}",
-        f"  plugin         {result['plugin'] or 'none loaded'}"
-        + (f"  net {result['net_plugin']} v{result['net_plugin_api']}" if result["net_plugin"] else ""),
-        f"  provider       {result['provider'] or '-'}" + (f" ({result['fabric']})" if result["fabric"] else ""),
-        f"  payload        {result['param']} of {result['model_id']}, {result['payload_gb']:.3f} GB"
-        + (f" (served as {result['served_model']})" if result["served_model"] != result["model_id"] else ""),
-        f"  group          formed in {result['init_seconds']:.2f}s, closed in {result['close_seconds']:.2f}s",
+        f"weight-sync transport preflight: {result.backend} at {result.server_url}",
+        f"  transport      {result.verdict}  ({', '.join(result.transports) or 'no channel lines'})"
+        + ("  GPUDirect RDMA" if result.gpudirect else ""),
+        f"  nccl           {result.nccl_version or '?'}",
+        f"  plugin         {result.plugin or 'none loaded'}"
+        + (f"  net {result.net_plugin} v{result.net_plugin_api}" if result.net_plugin else ""),
+        f"  provider       {result.provider or '-'}" + (f" ({result.fabric})" if result.fabric else ""),
+        f"  payload        {result.param} of {result.model_id}, {result.payload_gb:.3f} GB"
+        + (f" (served as {result.served_model})" if result.served_model != result.model_id else ""),
+        f"  group          formed in {result.init_seconds:.2f}s, closed in {result.close_seconds:.2f}s",
         "  rounds         "
         + (", ".join(f"{rate:.1f} GB/s" for rate in rates) if rates else "none")
         + " (one parameter per push: a latency-bound floor, not the full-model rate)",
-        f"  served model   {'unchanged' if result['served_unchanged'] else 'CHANGED by the push'}",
+        f"  served model   {'unchanged' if result.served_unchanged else 'CHANGED by the push'}",
     ]
-    if result["plugin_missing"]:
-        lines.append(f"  missing plugin {', '.join(result['plugin_missing'])} (NCCL fell back)")
-    if result["forced_simple_protocol"] or result["in_order_writes"] is False:
-        forced = "forced NCCL_PROTO=simple" if result["forced_simple_protocol"] else "left NCCL_PROTO as set"
+    if result.plugin_missing:
+        lines.append(f"  missing plugin {', '.join(result.plugin_missing)} (NCCL fell back)")
+    if result.forced_simple_protocol or result.in_order_writes is False:
+        forced = "forced NCCL_PROTO=simple" if result.forced_simple_protocol else "left NCCL_PROTO as set"
         lines.append(
             f"  protocol       no in-order RDMA from this side's rdma-core; the plugin {forced}. The "
             f"server must match: the same EFA userspace build, or NCCL_PROTO=simple on both ends"
         )
-    lines.append(f"  nccl log       {result['nccl_log_dir']}")
+    lines.append(f"  nccl log       {result.nccl_log_dir}")
     return "\n".join(lines)

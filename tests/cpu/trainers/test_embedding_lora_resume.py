@@ -79,7 +79,6 @@ from scripts.after_training.convert_to_bf16 import convert_to_bf16
 from scripts.after_training.merge_models import merge_models
 from scripts.after_training.merge_peft_adapters import merge_peft_adapter
 from scripts.training.embedding import inject_lora
-from src.args.distributed_args import DistributedArguments
 from src.checkpoint.adapters import resume_adapter_dir
 from src.checkpoint.format import (
     ADAPTER_CONFIG_FILE,
@@ -90,7 +89,7 @@ from src.checkpoint.format import (
 from src.checkpoint.parallel.resume_source import classify_resume_weights, resolve_resume_weights_source
 from src.checkpoint.parallel.resume_weights import resume_numel_coverage
 from src.checkpoint.reading import resolve_checkpoint_weights
-from src.configs.embedding import EmbeddingConfig
+from src.configs.embedding import EmbeddingConfig, EmbeddingScriptArguments
 from src.distributed.parallelism_config import ParallelismConfig
 from src.runtime import filesystem
 from src.trainers.embedding.trainer import EmbeddingTrainer
@@ -161,7 +160,7 @@ def _lora_model(
         lora_target_modules=list(target_modules),
         **lora,
     )
-    inject_lora(model, model_config, DistributedArguments())
+    inject_lora(model, model_config, EmbeddingScriptArguments())
     return model
 
 
