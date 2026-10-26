@@ -37,6 +37,7 @@ from src.distributed.expert_parallel.deepep.dispatcher import destroy_all_dispat
 from src.distributed.pipeline_parallel.stage import build_pipeline_stage
 from src.model_loading.parallel.ep import load_ep_model_lazy
 from src.model_loading.parallel.pp import _load_stage_lazy
+from tests.common import pp_equivalence as ppeq
 from tests.common.harness import gpu_test_main
 from tests.common.models import TINY_INKLING_CONFIG
 from tests.common.pp_fakes import registered_pp_backbones
@@ -72,24 +73,6 @@ def _write_checkpoint(ctx) -> str:
     return path
 
 
-def _snapshot(stage) -> tuple[dict[str, torch.Tensor], list[str]]:
-    tensors: dict[str, torch.Tensor] = {}
-    stranded: list[str] = []
-    for name, tensor in stage.named_parameters():
-        if tensor.is_meta:
-            stranded.append(name)
-            continue
-        tensors[stage.global_parameter_name(name)] = tensor.detach().clone()
-    return tensors, stranded
-
-
-def _release(*models) -> None:
-    for model in models:
-        del model
-    destroy_all_dispatchers()
-    cleanup_memory()
-
-
 # Inkling is refused for PP until a schedule, end-to-end and save/resume row cover it; this is its loader row.
 @registered_pp_backbones("InklingTextModel")
 def run(ctx):
@@ -122,9 +105,10 @@ def run(ctx):
             attn_implementation="eager",
         )
         reference = build_pipeline_stage(reference_model, pp_rank, PP_SIZE)
-        ref_tensors, ref_stranded = _snapshot(reference)
+        ref_tensors, ref_stranded = ppeq.snapshot_stage(reference)
         ref_range = reference.layer_range
-        _release(reference, reference_model)
+        destroy_all_dispatchers()
+        cleanup_memory()
 
         stage_model = _load_stage_lazy(
             ckpt,
@@ -137,9 +121,10 @@ def run(ctx):
             attn_implementation="eager",
         )
         stage = build_pipeline_stage(stage_model, pp_rank, PP_SIZE)
-        new_tensors, new_stranded = _snapshot(stage)
+        new_tensors, new_stranded = ppeq.snapshot_stage(stage)
         new_range = stage.layer_range
-        _release(stage, stage_model)
+        destroy_all_dispatchers()
+        cleanup_memory()
 
         checks[f"stage{pp_rank}_same_layer_range"] = ref_range == new_range
         checks[f"stage{pp_rank}_no_meta_tensors"] = not ref_stranded and not new_stranded

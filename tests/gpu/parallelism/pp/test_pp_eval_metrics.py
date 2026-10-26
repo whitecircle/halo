@@ -27,7 +27,6 @@ import sys
 
 import torch
 import torch.distributed as dist
-from datasets import Dataset
 from transformers import AutoTokenizer, default_data_collator
 from trl import SFTConfig
 
@@ -36,27 +35,13 @@ from src.trainers.sft import DistributedSFTTrainer
 from tests.common.harness import gpu_test_main
 from tests.common.models import QWEN3_0_6B, TINY_QWEN3_CONFIG
 from tests.common.pp_equivalence import build_dense_model
+from tests.common.pp_trainers import build_pp_args, build_sft_rows
 from tests.common.utils import log
 
 PP_SIZE = 2
 SEQ_LEN = 64
 EVAL_ROWS = 8
 BATCH = 4
-
-
-def build_dataset(vocab_size: int, n_rows: int, seed: int) -> Dataset:
-    g = torch.Generator().manual_seed(seed)
-    rows = torch.randint(4, vocab_size, (n_rows, SEQ_LEN), generator=g)
-    labels = rows.clone()
-    for i in range(labels.size(0)):
-        labels[i, : 4 + (i % 11)] = -100  # ragged prompt masks, as in real SFT batches
-    return Dataset.from_dict(
-        {
-            "input_ids": rows.tolist(),
-            "labels": labels.tolist(),
-            "attention_mask": torch.ones_like(rows).tolist(),
-        }
-    )
 
 
 def token_accuracy(predictions, labels) -> float:
@@ -98,22 +83,15 @@ def reference_accuracy(eval_dataset) -> float:
 @gpu_test_main(exact_world_size=4, prefix="pp_eval_metrics")
 def run(ctx):
     config = ParallelismConfig(world_size=ctx.world_size, gpus_per_node=2, nvlink_domain_size=2, pp_size=PP_SIZE)
-    eval_dataset = build_dataset(TINY_QWEN3_CONFIG["vocab_size"], n_rows=EVAL_ROWS, seed=23)
+    eval_dataset = build_sft_rows(TINY_QWEN3_CONFIG["vocab_size"], n_rows=EVAL_ROWS, seed=23)
 
-    args = SFTConfig(
-        output_dir=ctx.output_dir,
+    args = build_pp_args(
+        SFTConfig,
+        ctx.output_dir,
         max_steps=1,
         per_device_train_batch_size=BATCH,
-        gradient_accumulation_steps=2,
         learning_rate=0.0,  # frozen weights: the metric must match the reference at init
-        lr_scheduler_type="constant",
         max_length=SEQ_LEN,
-        logging_steps=1,
-        save_strategy="no",
-        report_to=[],
-        logging_nan_inf_filter=False,
-        seed=42,
-        bf16=False,
         eval_strategy="no",  # evaluate() is called explicitly below, at the init weights
         per_device_eval_batch_size=BATCH,
     )
@@ -121,7 +99,7 @@ def run(ctx):
     trainer = DistributedSFTTrainer(
         model=build_dense_model(),
         args=args,
-        train_dataset=build_dataset(TINY_QWEN3_CONFIG["vocab_size"], n_rows=16, seed=7),
+        train_dataset=build_sft_rows(TINY_QWEN3_CONFIG["vocab_size"]),
         eval_dataset=eval_dataset,
         processing_class=AutoTokenizer.from_pretrained(QWEN3_0_6B),
         data_collator=default_data_collator,

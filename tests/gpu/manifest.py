@@ -207,6 +207,44 @@ _LORA_SFT_ROWS = {
     ),
 }
 
+# Embedding resume, family x --lora (attention adapters = no flag; mixed / embedding adapters, DoRA on the
+# attention, off = full fine-tune) x run shape. Core: every data-parallel shape on the ST encoder, FSDP2 and
+# the TP refusal on a decoder, the input-embedding targets, the full fine-tune's FSDP2 / pre-sharded / TP
+# reloads, and --head (a projection head after the pooling: refused under FSDP2 and TP, accepted under DDP).
+# The roster scripts run the rest: full fine-tunes under TP too, and EP's refusal of attention and embedding
+# adapters beside its full fine-tune. The 4-GPU script runs TP over FSDP2 on the TP families.
+_EMBEDDING_FAMILIES = ("bert", "qwen3", "qwen3_5", "gemma4", "gpt_oss")
+_EMBEDDING_LORA_FLAGS = {
+    lora: "" if lora == "attention" else f" --lora {lora}"
+    for lora in ("attention", "mixed", "embedding", "dora", "off")
+}
+_EMBEDDING_TP_FAMILIES = ("qwen3", "qwen3_5", "gpt_oss")
+_EMBEDDING_CORE_ROWS = (
+    "--family bert --mode fsdp",
+    "--family bert --mode ddp",
+    "--family bert --mode presharded",
+    "--family bert --mode ddp --lora mixed",
+    "--family qwen3 --mode fsdp",
+    "--family qwen3 --mode tp",
+    "--family qwen3 --mode fsdp --lora mixed",
+    "--family qwen3 --mode fsdp --lora embedding",
+    "--family qwen3 --mode fsdp --lora dora",
+    "--family qwen3 --mode fsdp --lora off",
+    "--family qwen3 --mode presharded --lora off",
+    "--family qwen3 --mode tp --lora off",
+    "--family bert --mode fsdp --head",
+    "--family bert --mode fsdp --lora off --head",
+    "--family bert --mode ddp --head",
+    "--family qwen3 --mode tp --lora off --head",
+)
+_EMBEDDING_CORE_1GPU_ROWS = (
+    "--family bert",
+    "--family qwen3",
+    "--family qwen3 --lora embedding",
+    "--family qwen3 --lora dora",
+    "--family qwen3 --lora off",
+)
+
 MANIFEST: dict[str, TestSpec] = {
     # ── data ──
     "data/test_cache_isolation.py": TestSpec(nproc=2, markers=("gpu", "core", "2gpu"), timeout=600),
@@ -607,11 +645,11 @@ MANIFEST: dict[str, TestSpec] = {
         timeout=1200,
         args_matrix=("--family glm5_next", "--family step3p7"),
     ),
-    "parallelism/pp/test_pp_dpo_precompute.py": TestSpec(
-        nproc=4, markers=("gpu", "full", "4gpu", "pp", "qwen3"), timeout=1500
-    ),
-    "parallelism/pp/test_pp_kto_apo.py": TestSpec(
-        nproc=4, markers=("gpu", "full", "4gpu", "pp", "qwen3"), timeout=1500
+    "parallelism/pp/test_pp_preference_precompute.py": TestSpec(
+        nproc=4,
+        markers=("gpu", "full", "4gpu", "pp", "qwen3"),
+        timeout=1500,
+        args_matrix=("--trainer dpo", "--trainer kto"),
     ),
     "parallelism/pp/test_pp_combos_8gpu.py": TestSpec(
         nproc=8,
@@ -844,18 +882,18 @@ MANIFEST: dict[str, TestSpec] = {
         markers=("gpu", "core", "2gpu", "tp", "qwen3"),
         timeout=2400,
     ),
-    # One node per leg: each leg binds its own trainer-side weight-transfer port. The online legs hold
-    # it until the client's atexit close_communicator; the environmental legs close it when train()
-    # ends and additionally stand up Ray actors.
-    "trainers/grpo/test_online_grpo_vllm_e2e.py": TestSpec(
+    # The single-process rows of the online and environmental bodies, on the dense server. The --servers 2
+    # row needs a second server of the same checkpoint in HALO_TEST_VLLM_SERVER_URLS and skips without one.
+    "trainers/grpo/test_online_grpo_vllm_1gpu_e2e.py": TestSpec(
         nproc=1,
         markers=("gpu", "full", "1gpu", "lora", "qwen3", "vllm_server"),
         args_matrix=(
-            "--mode online",
-            "--mode sdpg",
-            "--mode online_lora",
-            "--mode environmental",
-            "--mode environmental_lora",
+            "--trainer online --mode full_world1",
+            "--trainer sdpg --mode full_world1",
+            "--trainer online --mode lora_world1",
+            "--trainer environmental --mode full_world1",
+            "--trainer environmental --mode lora_world1",
+            "--trainer environmental --mode full_world1 --servers 2",
         ),
         timeout=3000,
         flaky=True,
@@ -918,156 +956,50 @@ MANIFEST: dict[str, TestSpec] = {
     "trainers/grpo/test_weight_sync_pool_reconnect.py": TestSpec(
         nproc=1, markers=("gpu", "full", "1gpu", "qwen3", "vllm_server"), timeout=600
     ),
-    # Embedding resume, family x run shape x --lora (attention / mixed / embedding adapters, DoRA on the
-    # attention, off = full fine-tune). Core: every data-parallel shape on the ST encoder, FSDP2 and the TP refusal on a
-    # decoder, the input-embedding targets and the full fine-tune's FSDP2 / pre-sharded / TP reloads,
-    # and --head: a projection head after the pooling, refused under FSDP2 and TP, accepted under DDP;
-    # the roster scripts carry the other families and the EP rows.
     "trainers/lora/test_embedding_lora_resume.py": TestSpec(
         nproc=2,
         markers=("gpu", "core", "2gpu", "lora", "tp", "qwen3"),
-        args_matrix=(
-            "--family bert --mode fsdp",
-            "--family bert --mode ddp",
-            "--family bert --mode presharded",
-            "--family bert --mode ddp --lora mixed",
-            "--family qwen3 --mode fsdp",
-            "--family qwen3 --mode tp",
-            "--family qwen3 --mode fsdp --lora mixed",
-            "--family qwen3 --mode fsdp --lora embedding",
-            "--family qwen3 --mode fsdp --lora dora",
-            "--family qwen3 --mode fsdp --lora off",
-            "--family qwen3 --mode presharded --lora off",
-            "--family qwen3 --mode tp --lora off",
-            "--family bert --mode fsdp --head",
-            "--family bert --mode fsdp --lora off --head",
-            "--family bert --mode ddp --head",
-            "--family qwen3 --mode tp --lora off --head",
-        ),
+        args_matrix=_EMBEDDING_CORE_ROWS,
         timeout=900,
     ),
     "trainers/lora/test_embedding_lora_resume_1gpu.py": TestSpec(
         nproc=1,
         markers=("gpu", "core", "1gpu", "lora", "qwen3"),
-        args_matrix=(
-            "--family bert",
-            "--family qwen3",
-            "--family qwen3 --lora embedding",
-            "--family qwen3 --lora dora",
-            "--family qwen3 --lora off",
-        ),
+        args_matrix=_EMBEDDING_CORE_1GPU_ROWS,
         timeout=600,
     ),
     "trainers/lora/test_embedding_lora_resume_4gpu.py": TestSpec(
         nproc=4,
         markers=("gpu", "full", "4gpu", "tp", "moe", "qwen3", "gptoss"),
-        args_matrix=("--family qwen3", "--family qwen3_5", "--family gpt_oss"),
+        args_matrix=tuple(f"--family {family}" for family in _EMBEDDING_TP_FAMILIES),
         timeout=900,
     ),
     "trainers/lora/test_embedding_lora_resume_roster.py": TestSpec(
         nproc=2,
         markers=("gpu", "full", "2gpu", "lora", "tp", "ep", "moe", "qwen3", "gemma4", "gptoss"),
-        args_matrix=(
-            "--family qwen3 --mode ddp",
-            "--family qwen3 --mode presharded",
-            "--family qwen3_5 --mode fsdp",
-            "--family qwen3_5 --mode ddp",
-            "--family qwen3_5 --mode presharded",
-            "--family gemma4 --mode fsdp",
-            "--family gemma4 --mode ddp",
-            "--family gemma4 --mode presharded",
-            "--family gemma4 --mode ep",
-            "--family gpt_oss --mode fsdp",
-            "--family gpt_oss --mode ddp",
-            "--family gpt_oss --mode presharded",
-            "--family gpt_oss --mode ep",
-            "--family bert --mode fsdp --lora mixed",
-            "--family bert --mode presharded --lora mixed",
-            "--family qwen3 --mode ddp --lora mixed",
-            "--family qwen3 --mode presharded --lora mixed",
-            "--family qwen3_5 --mode fsdp --lora mixed",
-            "--family qwen3_5 --mode ddp --lora mixed",
-            "--family qwen3_5 --mode presharded --lora mixed",
-            "--family gemma4 --mode fsdp --lora mixed",
-            "--family gemma4 --mode ddp --lora mixed",
-            "--family gemma4 --mode presharded --lora mixed",
-            "--family gpt_oss --mode fsdp --lora mixed",
-            "--family gpt_oss --mode ddp --lora mixed",
-            "--family gpt_oss --mode presharded --lora mixed",
-            "--family bert --mode fsdp --lora embedding",
-            "--family bert --mode ddp --lora embedding",
-            "--family bert --mode presharded --lora embedding",
-            "--family qwen3 --mode ddp --lora embedding",
-            "--family qwen3 --mode presharded --lora embedding",
-            "--family qwen3_5 --mode fsdp --lora embedding",
-            "--family qwen3_5 --mode ddp --lora embedding",
-            "--family qwen3_5 --mode presharded --lora embedding",
-            "--family gemma4 --mode fsdp --lora embedding",
-            "--family gemma4 --mode ddp --lora embedding",
-            "--family gemma4 --mode presharded --lora embedding",
-            "--family gemma4 --mode ep --lora embedding",
-            "--family gpt_oss --mode fsdp --lora embedding",
-            "--family gpt_oss --mode ddp --lora embedding",
-            "--family gpt_oss --mode presharded --lora embedding",
-            "--family gpt_oss --mode ep --lora embedding",
-            "--family bert --mode fsdp --lora dora",
-            "--family bert --mode ddp --lora dora",
-            "--family bert --mode presharded --lora dora",
-            "--family qwen3 --mode ddp --lora dora",
-            "--family qwen3 --mode presharded --lora dora",
-            "--family qwen3_5 --mode fsdp --lora dora",
-            "--family qwen3_5 --mode ddp --lora dora",
-            "--family qwen3_5 --mode presharded --lora dora",
-            "--family gemma4 --mode fsdp --lora dora",
-            "--family gemma4 --mode ddp --lora dora",
-            "--family gemma4 --mode presharded --lora dora",
-            "--family gpt_oss --mode fsdp --lora dora",
-            "--family gpt_oss --mode ddp --lora dora",
-            "--family gpt_oss --mode presharded --lora dora",
-            "--family bert --mode fsdp --lora off",
-            "--family bert --mode ddp --lora off",
-            "--family bert --mode presharded --lora off",
-            "--family qwen3 --mode ddp --lora off",
-            "--family qwen3_5 --mode fsdp --lora off",
-            "--family qwen3_5 --mode ddp --lora off",
-            "--family qwen3_5 --mode presharded --lora off",
-            "--family qwen3_5 --mode tp --lora off",
-            "--family gemma4 --mode fsdp --lora off",
-            "--family gemma4 --mode ddp --lora off",
-            "--family gemma4 --mode presharded --lora off",
-            "--family gemma4 --mode ep --lora off",
-            "--family gpt_oss --mode fsdp --lora off",
-            "--family gpt_oss --mode ddp --lora off",
-            "--family gpt_oss --mode presharded --lora off",
-            "--family gpt_oss --mode tp --lora off",
-            "--family gpt_oss --mode ep --lora off",
+        args_matrix=tuple(
+            row
+            for lora, flag in _EMBEDDING_LORA_FLAGS.items()
+            for family in _EMBEDDING_FAMILIES
+            for mode in (
+                "fsdp",
+                "ddp",
+                "presharded",
+                *(("tp",) if lora == "off" and family in _EMBEDDING_TP_FAMILIES else ()),
+                *(("ep",) if lora in ("attention", "embedding", "off") and family in ("gemma4", "gpt_oss") else ()),
+            )
+            if (row := f"--family {family} --mode {mode}{flag}") not in _EMBEDDING_CORE_ROWS
         ),
         timeout=1200,
     ),
     "trainers/lora/test_embedding_lora_resume_roster_1gpu.py": TestSpec(
         nproc=1,
         markers=("gpu", "full", "1gpu", "lora", "moe", "qwen3", "gemma4", "gptoss"),
-        args_matrix=(
-            "--family qwen3_5",
-            "--family gemma4",
-            "--family gpt_oss",
-            "--family bert --lora mixed",
-            "--family qwen3 --lora mixed",
-            "--family qwen3_5 --lora mixed",
-            "--family gemma4 --lora mixed",
-            "--family gpt_oss --lora mixed",
-            "--family bert --lora embedding",
-            "--family qwen3_5 --lora embedding",
-            "--family gemma4 --lora embedding",
-            "--family gpt_oss --lora embedding",
-            "--family bert --lora dora",
-            "--family qwen3_5 --lora dora",
-            "--family gemma4 --lora dora",
-            "--family gpt_oss --lora dora",
-            "--family bert --lora off",
-            "--family qwen3_5 --lora off",
-            "--family gemma4 --lora off",
-            "--family gpt_oss --lora off",
+        args_matrix=tuple(
+            row
+            for flag in _EMBEDDING_LORA_FLAGS.values()
+            for family in _EMBEDDING_FAMILIES
+            if (row := f"--family {family}{flag}") not in _EMBEDDING_CORE_1GPU_ROWS
         ),
         timeout=900,
     ),
@@ -1214,21 +1146,20 @@ MANIFEST: dict[str, TestSpec] = {
         ),
         timeout=900,
     ),
-    "trainers/other/test_checkpoint_roundtrip_gptoss_20b.py": TestSpec(
+    "trainers/other/test_checkpoint_roundtrip.py": TestSpec(
         nproc=2,
-        markers=("gpu", "full", "2gpu", "ep", "tp", "moe", "gptoss"),
+        markers=("gpu", "full", "2gpu", "ep", "etp", "tp", "cp", "moe", "qwen3", "gptoss"),
         timeout=1500,
         # Every implemented mode gets a row; an unregistered one would report coverage never run.
-        args_matrix=("--mode ep2", "--mode ep2_tp2", "--mode ep2_no_gmm", "--mode etp"),
-    ),
-    "trainers/other/test_checkpoint_roundtrip_qwen3_8b.py": TestSpec(
-        nproc=2,
-        markers=("gpu", "full", "2gpu", "tp", "cp", "qwen3"),
-        timeout=1500,
-        args_matrix=("--mode fsdp", "--mode tp2", "--mode cp2"),
-    ),
-    "trainers/other/test_checkpoint_save_load.py": TestSpec(
-        nproc=2, markers=("gpu", "full", "2gpu", "cp", "tp", "qwen3"), timeout=1500
+        args_matrix=(
+            "--mode fsdp",
+            "--mode tp2",
+            "--mode cp2",
+            "--mode ep2",
+            "--mode ep2_tp2",
+            "--mode ep2_no_gmm",
+            "--mode etp",
+        ),
     ),
     "trainers/other/test_classification.py": TestSpec(nproc=2, markers=("gpu", "core", "2gpu", "qwen3"), timeout=600),
     "trainers/other/test_distillation.py": TestSpec(nproc=2, markers=("gpu", "core", "2gpu", "qwen3"), timeout=600),
@@ -1278,9 +1209,11 @@ MANIFEST: dict[str, TestSpec] = {
     "trainers/preference/test_smpo_ep_cp.py": TestSpec(
         nproc=2, markers=("gpu", "full", "2gpu", "ep", "cp", "moe", "gptoss"), timeout=1000
     ),
-    "trainers/preference/test_smpo_fsdp.py": TestSpec(nproc=2, markers=("gpu", "core", "2gpu", "qwen3"), timeout=600),
-    "trainers/preference/test_smpo_padding_free.py": TestSpec(
-        nproc=2, markers=("gpu", "core", "2gpu", "qwen3"), timeout=600
+    "trainers/preference/test_smpo_fsdp.py": TestSpec(
+        nproc=2,
+        markers=("gpu", "core", "2gpu", "qwen3"),
+        args_matrix=("--mode fsdp", "--mode padding_free"),
+        timeout=600,
     ),
     "trainers/preference/test_smpo_padding_free_segments.py": TestSpec(
         nproc=1, markers=("gpu", "core", "1gpu", "moe", "lfm2", "qwen3"), timeout=600
@@ -1315,14 +1248,14 @@ MANIFEST: dict[str, TestSpec] = {
     ),
     "trainers/sft/test_sft_checkpoint_resume.py": TestSpec(
         # Every mode the script implements gets a row; an unregistered one would report coverage
-        # never run. All four are 2-GPU (cp_size=2 / tp_size=2 / ep_size=2 on world 2).
+        # never run. All are 2-GPU (cp_size=2 / tp_size=2 / ep_size=2 on world 2).
         nproc=2,
         # The markers are the union over the rows, so `-m "gpu and cp"` selects the fsdp and tp rows
         # too.
         markers=("gpu", "core", "2gpu", "cp", "tp", "qwen3", "gptoss"),
-        args_matrix=("--mode fsdp", "--mode cp", "--mode tp", "--mode ep"),
-        # 2400s: the cp row trains at MAX_SEQ_LENGTH_CP=4096 on auto-selected FA4, which JITs per
-        # shape, and every mode runs the same 6-step two-phase resume.
+        args_matrix=("--mode fsdp", "--mode fsdp_base", "--mode cp", "--mode tp", "--mode ep"),
+        # 2400s: the cp row trains at a 4096-token cap on auto-selected FA4, which JITs per shape, and
+        # every mode runs the same 6-step two-phase resume plus two host copies of its optimizer state.
         timeout=2400,
     ),
     # EP+TP only (EP+TP+ETP is not a supported axis set, so this carries no `etp` marker).
@@ -1367,7 +1300,6 @@ MANIFEST: dict[str, TestSpec] = {
     "trainers/sft/test_sft_ep_multinode_sim.py": TestSpec(
         nproc=4, markers=("gpu", "full", "4gpu", "ep", "moe", "gptoss"), timeout=1200
     ),
-    "trainers/sft/test_sft_fsdp_resume.py": TestSpec(nproc=2, markers=("gpu", "core", "2gpu", "qwen3"), timeout=1500),
     "trainers/sft/test_fsdp2_pretrain_eval_then_train.py": TestSpec(
         nproc=2, markers=("gpu", "core", "2gpu", "qwen3"), timeout=900
     ),
@@ -1559,9 +1491,9 @@ def script_path(rel: str) -> Path:
     return GPU_DIR / rel
 
 
-# Measurement entry points driven by hand from a docs recipe or a `tests/gpu/profiling/run_*.sh`
-# runner, never by the pytest launcher. Listing them here is what marks an unlisted `bench*.py` as an
-# orphan, since nothing else globs those files.
+# Measurement entry points driven by hand from a docs recipe or by `make bench`, never by the pytest
+# launcher. Listing them here is what marks an unlisted `bench*.py` as an orphan, since nothing else
+# globs those files.
 _UNMANIFESTED_BENCHMARKS = {
     "optimizers/bench_adamw_bf16.py",
     "optimizers/bench_muon.py",
@@ -1577,10 +1509,7 @@ _UNMANIFESTED_BENCHMARKS = {
     "profiling/benchmark_roofline.py",
     "profiling/benchmark_sft_dense.py",
     "profiling/benchmark_sft_ep.py",
-    "profiling/benchmark_sft_ep_cp.py",
-    "profiling/benchmark_sft_ep_tp.py",
     "profiling/benchmark_smpo_ep.py",
-    "profiling/benchmark_smpo_ep_cp.py",
     "profiling/benchmark_torch_compile.py",
     "profiling/benchmark_trl_baseline.py",
 }

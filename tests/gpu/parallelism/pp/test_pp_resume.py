@@ -27,8 +27,6 @@ import sys
 
 import torch
 import torch.distributed as dist
-from datasets import Dataset
-from torch.distributed.checkpoint.state_dict import StateDictOptions, get_optimizer_state_dict
 from transformers import AutoTokenizer, default_data_collator
 from trl import SFTConfig
 
@@ -38,50 +36,17 @@ from src.model_loading.parallel.loader import load_distributed_model
 from src.models.unwrapping import unwrap_toolkit_wrappers
 from src.runtime.dtensor import full_cpu_tensor
 from src.trainers.sft import DistributedSFTTrainer
+from tests.common.distributed import shared_output_dir, world_all
 from tests.common.harness import gpu_test_main
 from tests.common.models import QWEN3_0_6B, TINY_QWEN3_CONFIG
 from tests.common.pp_equivalence import build_dense_model
+from tests.common.pp_trainers import build_pp_args, build_sft_rows, restored_moments_match_shard
 from tests.common.utils import log
 
 PP_SIZE = 2
 SEQ_LEN = 64
 N_STEPS = 8
 SAVE_STEP = 4
-
-
-def build_dataset(vocab_size: int, n_rows: int = 16, seed: int = 7) -> Dataset:
-    g = torch.Generator().manual_seed(seed)
-    rows = torch.randint(4, vocab_size, (n_rows, SEQ_LEN), generator=g)
-    labels = rows.clone()
-    for i in range(labels.size(0)):
-        labels[i, : 4 + (i % 11)] = -100  # ragged -> DP replicas hold unequal loss-token counts
-    return Dataset.from_dict(
-        {
-            "input_ids": rows.tolist(),
-            "labels": labels.tolist(),
-            "attention_mask": torch.ones_like(rows).tolist(),
-        }
-    )
-
-
-def build_args(output_dir: str, max_steps: int, save_steps: int | None = None) -> SFTConfig:
-    return SFTConfig(
-        output_dir=output_dir,
-        max_steps=max_steps,
-        per_device_train_batch_size=4,
-        gradient_accumulation_steps=2,  # becomes the pipeline's microbatch count
-        learning_rate=5e-3,
-        lr_scheduler_type="constant",
-        max_length=SEQ_LEN,
-        logging_steps=1,
-        save_strategy="steps" if save_steps else "no",
-        save_steps=save_steps or 500,
-        report_to=[],
-        logging_nan_inf_filter=False,
-        seed=42,
-        bf16=False,
-        gradient_checkpointing=False,
-    )
 
 
 def _expect_raise(fn, *args) -> bool:
@@ -92,17 +57,7 @@ def _expect_raise(fn, *args) -> bool:
     except (RuntimeError, ValueError) as exc:
         log(f"[gate] raised as expected: {str(exc)[:140]}")
         raised = True
-    flag = torch.tensor([1.0 if raised else 0.0], device=torch.cuda.current_device())
-    dist.all_reduce(flag, op=dist.ReduceOp.MIN)
-    return bool(flag.item())
-
-
-def _tamper_checkpoint(source: str, dest: str, mutate) -> None:
-    """Rank 0 copies the checkpoint and applies ``mutate(meta_or_dir)``; all ranks wait."""
-    if dist.get_rank() == 0:
-        shutil.copytree(source, dest, dirs_exist_ok=True)
-        mutate(dest)
-    dist.barrier()
+    return world_all(raised)
 
 
 @gpu_test_main(exact_world_size=4, prefix="pp_resume")
@@ -112,28 +67,36 @@ def run(ctx):
     config = ParallelismConfig(world_size=ctx.world_size, gpus_per_node=2, nvlink_domain_size=2, pp_size=PP_SIZE)
 
     # The PP checkpoint is a multi-writer single-directory format: all ranks must share one root.
-    dirs: list = [None] * ctx.world_size
-    dist.all_gather_object(dirs, ctx.output_dir)
-    root = dirs[0]
+    root = shared_output_dir(ctx)
 
-    def make_trainer(subdir: str, max_steps: int, save_steps: int | None = None, model=None) -> DistributedSFTTrainer:
+    def build_trainer(subdir: str, max_steps: int, save_steps: int | None = None, model=None) -> DistributedSFTTrainer:
+        args = build_pp_args(
+            SFTConfig,
+            os.path.join(root, subdir),
+            max_steps=max_steps,
+            per_device_train_batch_size=4,
+            max_length=SEQ_LEN,
+            save_strategy="steps" if save_steps else "no",
+            save_steps=save_steps or 500,
+            gradient_checkpointing=False,
+        )
         return DistributedSFTTrainer(
             model=build_dense_model() if model is None else model,
-            args=build_args(os.path.join(root, subdir), max_steps, save_steps),
-            train_dataset=build_dataset(TINY_QWEN3_CONFIG["vocab_size"]),
+            args=args,
+            train_dataset=build_sft_rows(TINY_QWEN3_CONFIG["vocab_size"]),
             processing_class=tokenizer,
             data_collator=default_data_collator,
             parallelism_config=config,
         )
 
     # ── run A: 8 straight steps (the reference loss curve) ──────────────────────────────────────
-    trainer_a = make_trainer("runA", N_STEPS)
+    trainer_a = build_trainer("runA", N_STEPS)
     trainer_a.train()
     losses_a = [e["loss"] for e in trainer_a.state.log_history if "loss" in e]
     checks["run_a_completed"] = trainer_a.state.global_step == N_STEPS and len(losses_a) == N_STEPS
 
     # ── run B: 4 steps, checkpoint at step 4 ────────────────────────────────────────────────────
-    trainer_b = make_trainer("runB", SAVE_STEP, save_steps=SAVE_STEP)
+    trainer_b = build_trainer("runB", SAVE_STEP, save_steps=SAVE_STEP)
     trainer_b.train()
     ckpt = os.path.join(root, "runB", f"checkpoint-{SAVE_STEP}")
     dist.barrier()
@@ -148,13 +111,12 @@ def run(ctx):
     meta = torch.load(os.path.join(ckpt, "optimizer_meta.pt"), map_location="cpu", weights_only=False)
     saved_partition = [tuple(entry) for entry in meta.get("pp_stage_partition", [])]
     stage_b = unwrap_toolkit_wrappers(trainer_b.model)
-    partition_ok = len(saved_partition) == PP_SIZE and saved_partition[config.pp_rank] == stage_b.layer_range
-    flag = torch.tensor([1.0 if partition_ok else 0.0], device=torch.cuda.current_device())
-    dist.all_reduce(flag, op=dist.ReduceOp.MIN)
-    checks["meta_carries_live_partition"] = bool(flag.item())
+    checks["meta_carries_live_partition"] = world_all(
+        len(saved_partition) == PP_SIZE and saved_partition[config.pp_rank] == stage_b.layer_range
+    )
 
     # ── bitwise restore checks on a fresh trainer ───────────────────────────────────────────────
-    trainer_c = make_trainer("runC", N_STEPS)
+    trainer_c = build_trainer("runC", N_STEPS)
     trainer_c._load_from_checkpoint(ckpt)
     stage = unwrap_toolkit_wrappers(trainer_c.model)
     local_state = stage.state_dict()
@@ -185,7 +147,7 @@ def run(ctx):
         preserve_checkpoint_precision=True,
         trust_remote_code=True,
     )
-    stage_e = unwrap_toolkit_wrappers(make_trainer("runE", N_STEPS, model=resumed_model).model)
+    stage_e = unwrap_toolkit_wrappers(build_trainer("runE", N_STEPS, model=resumed_model).model)
     built_ok, n_built = True, 0
     for local, value in sorted(stage_e.state_dict().items()):
         full = full_cpu_tensor(value).cpu()  # collective inside the stage mesh — sorted order
@@ -196,33 +158,13 @@ def run(ctx):
 
     trainer_c.create_optimizer_and_scheduler(num_training_steps=N_STEPS)
     trainer_c._load_optimizer_and_scheduler(ckpt)
-    shard = torch.load(os.path.join(ckpt, f"optimizer_shard_{rank:05d}.pt"), map_location="cpu", weights_only=False)
-    live_osd = get_optimizer_state_dict(
-        stage, trainer_c.optimizer, options=StateDictOptions(full_state_dict=False, cpu_offload=True)
+    checks["optimizer_moments_bitwise_equal_shard"], _ = restored_moments_match_shard(
+        stage, trainer_c.optimizer, ckpt, rank
     )
-
-    def _local(t):
-        return t.to_local() if isinstance(t, torch.distributed.tensor.DTensor) else t
-
-    optim_ok = bool(shard["state"])
-    for fqn, saved_state in shard["state"].items():
-        live_state = live_osd["state"].get(fqn)
-        if live_state is None:
-            log(f"[optim] live state missing for {fqn}")
-            optim_ok = False
-            continue
-        for key, saved_value in saved_state.items():
-            if not torch.is_tensor(saved_value):
-                continue
-            live_value = live_state.get(key)
-            if live_value is None or not torch.equal(_local(saved_value).cpu(), _local(live_value).cpu()):
-                log(f"[optim] mismatch at {fqn}.{key}")
-                optim_ok = False
-    checks["optimizer_moments_bitwise_equal_shard"] = optim_ok
 
     # ── run D: resume from the checkpoint, steps 5-8 must reproduce run A ───────────────────────
     losses_b = [e["loss"] for e in trainer_b.state.log_history if "loss" in e]
-    trainer_d = make_trainer("runD", N_STEPS)
+    trainer_d = build_trainer("runD", N_STEPS)
     trainer_d.train(resume_from_checkpoint=ckpt)
     # Resume restores log_history from trainer_state.json, so trainer_d carries run B's steps 1-4
     # followed by the freshly trained steps 5-8.
@@ -261,8 +203,12 @@ def run(ctx):
         ("deleted_shard_raises", drop_shard),
         ("fingerprint_pp_size_mismatch_raises", wrong_pp_size),
     ):
+        # Rank 0 copies the checkpoint and tampers with the copy; every rank waits for it.
         tampered_dir = os.path.join(root, f"tampered_{name}")
-        _tamper_checkpoint(ckpt, tampered_dir, mutate)
+        if rank == 0:
+            shutil.copytree(ckpt, tampered_dir, dirs_exist_ok=True)
+            mutate(tampered_dir)
+        dist.barrier()
         checks[name] = _expect_raise(trainer_c._load_optimizer_and_scheduler, tampered_dir)
 
     return {"checks": checks, "metrics": metrics}

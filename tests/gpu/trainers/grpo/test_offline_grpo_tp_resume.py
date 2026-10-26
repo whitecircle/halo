@@ -1,30 +1,14 @@
 #!/usr/bin/env python
-"""
-Offline GRPO checkpoint resume test with Tensor Parallelism (TP=2) or Expert Parallelism (EP=2).
+"""OfflineGRPOTrainer saves a mid-training checkpoint and resumes from it, under TP=2 or EP=2.
 
-Validates that OfflineGRPOTrainer can train, save a mid-training checkpoint, resume from it, and
-restore the trained weights BY VALUE (|L_post - L_pre| < tol at on_train_begin), the per-rank Adam
-shards and the LR scheduler, in either mode.
-
-Mode via HALO_TEST_OFFGRPO_PARALLEL: "tp" (default, Qwen3-0.6B dense, tp_plan="auto") or "ep" (gpt-oss-20b MoE).
-
-Usage:
-    torchrun --nproc_per_node=2 \
-        tests/gpu/trainers/grpo/test_offline_grpo_tp_resume.py            # TP
-    HALO_TEST_OFFGRPO_PARALLEL=ep torchrun --nproc_per_node=2 \
-        tests/gpu/trainers/grpo/test_offline_grpo_tp_resume.py            # EP
-
-Requirements:
-    - 2x GPUs
+``HALO_TEST_OFFGRPO_PARALLEL=tp`` (default) trains Qwen3-0.6B, ``ep`` gpt-oss-20b. The resume builds the
+model from the checkpoint by the production rule; the checks are
+:func:`~tests.common.checkpoint_io.run_two_phase_resume`'s.
 """
 
-import math
-import os
-import traceback
 from types import SimpleNamespace
 
 import torch
-import torch.distributed as dist
 from transformers import AutoTokenizer
 
 from src.checkpoint.parallel.resume_source import resolve_resume_weights_source
@@ -32,313 +16,72 @@ from src.configs.grpo_offline import OfflineGRPOConfig
 from src.distributed.parallelism_config import ParallelismConfig
 from src.env import env_str
 from src.model_loading.parallel.loader import load_distributed_model
-from src.runtime.collectives import barrier
 from src.trainers.grpo.offline.trainer import OfflineGRPOTrainer
-from tests.common.checkpoint_io import (
-    TP_RESUME_PROBE_TEXT,
-    ResumeCapture,
-    fixed_batch_loss,
-    fixed_text_batch,
-    resume_checkpoint_checks,
-    resume_continuity_checks,
-)
+from tests.common.checkpoint_io import RESUME_PROBE_TEXT, fixed_text_batch, run_two_phase_resume
 from tests.common.datasets import create_offline_grpo_dataset
+from tests.common.distributed import shared_output_dir
 from tests.common.harness import gpu_test_main
 from tests.common.models import GPT_OSS_20B, QWEN3_0_6B
-from tests.common.parallel_shape import parallel_shape_checks
-from tests.common.tolerances import TOL
-from tests.common.utils import cleanup_memory, log, step_losses, training_run_checks
 
-# Configuration
-
-# HALO_TEST_OFFGRPO_PARALLEL=ep runs the same resume test under Expert Parallelism (EP=2) on an MoE model;
-# default tp runs Tensor Parallelism (TP=2).
-_MODE = env_str("HALO_TEST_OFFGRPO_PARALLEL", "tp")
-_IS_EP = _MODE == "ep"
-MODEL_NAME = GPT_OSS_20B if _IS_EP else QWEN3_0_6B
-TP_SIZE = 2
-EP_SIZE = 2
-TOTAL_STEPS = 6
-SAVE_AT_STEP = 3
-BATCH_SIZE = 1
-LEARNING_RATE = 5e-6
-MAX_PROMPT_LENGTH = 1024
-MAX_COMPLETION_LENGTH = 1024
-NUM_TRAIN_SAMPLES = 64
-NUM_EVAL_SAMPLES = 8
+IS_EP = env_str("HALO_TEST_OFFGRPO_PARALLEL", "tp") == "ep"
+MODEL_NAME = GPT_OSS_20B if IS_EP else QWEN3_0_6B
 SEED = 42
 
 
-# By-value weight-restoration probes (catch a silent-base-weights / corrupted-gather resume)
-
-LOSS_TOL = TOL.resume_fixed_batch_loss_abs
-
-
-# Phase 1: Train + Save Checkpoint
-
-
-def phase1_train_and_save(
-    rank,
-    world_size,
-    local_rank,
-    tokenizer,
-    train_dataset,
-    eval_dataset,
-    output_dir,
-) -> tuple[bool, list[float], float]:
-    """Train for SAVE_AT_STEP steps with TP=2, save checkpoint. Returns (ok, losses, l_pre).
-
-    ``l_pre`` is the fixed-batch forward loss on the TRAINED weights — Phase 2 must reproduce it after
-    resume (else the checkpoint did not restore the trained weights; the silent-base-weights regression).
-    """
-    log(f"\n{'=' * 60}")
-    log(f"  Phase 1: Train {SAVE_AT_STEP} steps + Save (TP={TP_SIZE})")
-    log(f"{'=' * 60}")
-
-    try:
-        parallelism_config = ParallelismConfig(ep_size=EP_SIZE) if _IS_EP else ParallelismConfig(tp_size=TP_SIZE)
-
-        log("Loading model with TP...")
-        model, _ = load_distributed_model(
-            model_name_or_path=MODEL_NAME,
-            parallelism_config=parallelism_config,
-            dtype=torch.bfloat16,
-            trust_remote_code=True,
-            use_liger_kernel=True,
-        )
-        log(f"Model loaded. GPU mem: {torch.cuda.memory_allocated() / 1e9:.2f} GB")
-
-        config = OfflineGRPOConfig(
-            output_dir=output_dir,
-            max_steps=SAVE_AT_STEP,
-            per_device_train_batch_size=BATCH_SIZE,
-            gradient_accumulation_steps=1,
-            learning_rate=LEARNING_RATE,
-            bf16=True,
-            gradient_checkpointing=True,
-            use_liger_kernel=False,
-            logging_steps=1,
-            save_strategy="steps",
-            save_steps=SAVE_AT_STEP,
-            save_total_limit=1,
-            report_to="none",
-            logging_nan_inf_filter=False,
-            max_prompt_length=MAX_PROMPT_LENGTH,
-            max_completion_length=MAX_COMPLETION_LENGTH,
-            dataloader_drop_last=True,
-        )
-
-        trainer = OfflineGRPOTrainer(
-            model=model,
-            args=config,
-            train_dataset=train_dataset,
-            eval_dataset=eval_dataset,
-            processing_class=tokenizer,
-            parallelism_config=parallelism_config,
-        )
-
-        assert all(parallel_shape_checks(model, parallelism_config).values()), f"{_MODE} did not take effect"
-
-        log(f"Training for {SAVE_AT_STEP} steps...")
-        train_result = trainer.train()
-
-        training_loss = train_result.training_loss
-        losses = step_losses(trainer)
-        log(f"Phase 1 loss: {training_loss:.6f}")
-        log(f"Phase 1 step losses: {[f'{l:.4f}' for l in losses]}")
-
-        # Fixed-batch loss on the TRAINED weights (before they're freed) — the by-value anchor for resume.
-        ids, labels = fixed_text_batch(tokenizer, torch.cuda.current_device(), TP_RESUME_PROBE_TEXT)
-        l_pre = fixed_batch_loss(trainer.model, ids, labels)
-        log(f"Phase 1 L_pre (fixed-batch forward loss, trained weights): {l_pre:.6f}")
-
-        # Rank 0 reads the checkpoint's files and every rank takes its verdict, so all of them leave
-        # together on a missing file instead of stranding the peers in the barrier below.
-        expected_ckpt = os.path.join(output_dir, f"checkpoint-{SAVE_AT_STEP}")
-        barrier()
-        ckpt_ok = [all(resume_checkpoint_checks(expected_ckpt, world_size).values()) if rank == 0 else None]
-        dist.broadcast_object_list(ckpt_ok, src=0)
-        if not ckpt_ok[0]:
-            log(f"ERROR: checkpoint at {expected_ckpt} missing required files")
-            return False, losses, l_pre
-
-        loss_ok = math.isfinite(training_loss)
-        if not loss_ok:
-            log(f"ERROR: Phase 1 loss not finite: {training_loss}")
-
-        del trainer, model
-        cleanup_memory()
-        barrier()
-
-        return loss_ok, losses, l_pre
-
-    except Exception as e:
-        log(f"Phase 1 FAILED: {e}")
-        traceback.print_exc()
-        return False, [], float("nan")
-
-
-# Phase 2: Resume from Checkpoint
-
-
-def phase2_resume_and_train(
-    rank,
-    world_size,
-    local_rank,
-    tokenizer,
-    train_dataset,
-    eval_dataset,
-    output_dir,
-    l_pre,
-) -> tuple[bool, list[float]]:
-    """Resume from checkpoint and train to TOTAL_STEPS, asserting the trained weights were restored.
-
-    The by-value check (``|L_post - L_pre| < LOSS_TOL`` at on_train_begin) catches a
-    silent-base-weights / corrupted-gather resume, and the Adam-2nd-moment + scheduler checks lock the
-    full-continuity contract (:func:`~tests.common.checkpoint_io.resume_continuity_checks`).
-    """
-    log(f"\n{'=' * 60}")
-    log(f"  Phase 2: Resume + Train to step {TOTAL_STEPS} (TP={TP_SIZE})")
-    log(f"{'=' * 60}")
-
-    checkpoint_path = os.path.join(output_dir, f"checkpoint-{SAVE_AT_STEP}")
-
-    try:
-        parallelism_config = ParallelismConfig(ep_size=EP_SIZE) if _IS_EP else ParallelismConfig(tp_size=TP_SIZE)
-
-        # Resolve the weights source via the SAME production helper the training scripts use: EP skips the
-        # loader's weight reload, so the trained weights must come from the checkpoint at construction (else
-        # the model silently carries BASE weights and the by-value check passes only because few steps barely
-        # moved them). TP gets the checkpoint dir too (``is_tp_mode``), and the TP loader skips its re-read.
-        weights_source = resolve_resume_weights_source(
-            checkpoint_path, SimpleNamespace(model_name_or_path=MODEL_NAME), parallelism_config
-        )
-        log(
-            f"Loading fresh model for resume (weights_source={'checkpoint' if weights_source == checkpoint_path else 'base'})..."
-        )
-        model, _ = load_distributed_model(
-            model_name_or_path=weights_source,
-            parallelism_config=parallelism_config,
-            dtype=torch.bfloat16,
-            trust_remote_code=True,
-            use_liger_kernel=True,
-        )
-        log(f"Model loaded. GPU mem: {torch.cuda.memory_allocated() / 1e9:.2f} GB")
-
-        config = OfflineGRPOConfig(
-            output_dir=output_dir,
-            max_steps=TOTAL_STEPS,
-            per_device_train_batch_size=BATCH_SIZE,
-            gradient_accumulation_steps=1,
-            learning_rate=LEARNING_RATE,
-            bf16=True,
-            gradient_checkpointing=True,
-            use_liger_kernel=False,
-            logging_steps=1,
-            save_strategy="no",
-            report_to="none",
-            logging_nan_inf_filter=False,
-            max_prompt_length=MAX_PROMPT_LENGTH,
-            max_completion_length=MAX_COMPLETION_LENGTH,
-            dataloader_drop_last=True,
-        )
-
-        trainer = OfflineGRPOTrainer(
-            model=model,
-            args=config,
-            train_dataset=train_dataset,
-            eval_dataset=eval_dataset,
-            processing_class=tokenizer,
-            parallelism_config=parallelism_config,
-        )
-
-        assert all(parallel_shape_checks(model, parallelism_config).values()), f"{_MODE} did not take effect"
-
-        # Capture restored state at on_train_begin (post-resume, pre-first-step).
-        ids, labels = fixed_text_batch(tokenizer, torch.cuda.current_device(), TP_RESUME_PROBE_TEXT)
-        resume_capture = ResumeCapture(trainer, ids, labels)
-        trainer.add_callback(resume_capture)
-
-        log(f"Resuming from: {checkpoint_path}")
-        train_result = trainer.train(resume_from_checkpoint=checkpoint_path)
-
-        losses = step_losses(trainer)
-        checks = training_run_checks(train_result, trainer, TOTAL_STEPS)
-        checks |= resume_continuity_checks(resume_capture.capture, l_pre, save_step=SAVE_AT_STEP, loss_tol=LOSS_TOL)
-
-        del trainer, model
-        cleanup_memory()
-        barrier()
-        return all(checks.values()), losses
-
-    except Exception as e:
-        log(f"Phase 2 FAILED: {e}")
-        traceback.print_exc()
-        return False, []
-
-
-# Main
-
-
 def run(ctx) -> dict:
-    log(f"\n{'#' * 70}")
-    log(f"  Offline GRPO + TP={TP_SIZE} Checkpoint Resume Test")
-    log(f"  Model: {MODEL_NAME}")
-    log(f"  World: {ctx.world_size}, GPU: {torch.cuda.get_device_name(ctx.local_rank)}")
-    log(f"  Plan: Train {SAVE_AT_STEP} steps -> Save -> Resume -> Train to {TOTAL_STEPS}")
-    log(f"{'#' * 70}")
-
-    # Broadcast output_dir from rank 0 so all ranks use the same checkpoint path
-    dirs = [ctx.output_dir]
-    dist.broadcast_object_list(dirs, src=0)
-    output_dir = dirs[0]
-
-    log("\nLoading tokenizer...")
     tokenizer = AutoTokenizer.from_pretrained(MODEL_NAME, trust_remote_code=True)
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
+    train_dataset = create_offline_grpo_dataset(tokenizer, 64, seed=SEED)
+    eval_dataset = create_offline_grpo_dataset(tokenizer, 8, seed=SEED + 100)
 
-    log("Creating synthetic datasets...")
-    train_dataset = create_offline_grpo_dataset(tokenizer, NUM_TRAIN_SAMPLES, seed=SEED)
-    eval_dataset = create_offline_grpo_dataset(tokenizer, NUM_EVAL_SAMPLES, seed=SEED + 100)
-    log(f"Train: {len(train_dataset)}, Eval: {len(eval_dataset)}")
+    def build_trainer(checkpoint: str | None, **schedule) -> OfflineGRPOTrainer:
+        parallelism_config = ParallelismConfig(ep_size=2) if IS_EP else ParallelismConfig(tp_size=2)
+        # EP skips the loader's weight reload, so its trained weights come only from a model built on the
+        # checkpoint; TP is built on it too, and its loader then skips the re-read.
+        weights = resolve_resume_weights_source(
+            checkpoint, SimpleNamespace(model_name_or_path=MODEL_NAME), parallelism_config
+        )
+        model, _ = load_distributed_model(
+            model_name_or_path=weights,
+            parallelism_config=parallelism_config,
+            dtype=torch.bfloat16,
+            trust_remote_code=True,
+            use_liger_kernel=True,
+        )
+        return OfflineGRPOTrainer(
+            model=model,
+            args=OfflineGRPOConfig(
+                **schedule,
+                per_device_train_batch_size=1,
+                gradient_accumulation_steps=1,
+                learning_rate=5e-6,
+                bf16=True,
+                gradient_checkpointing=True,
+                use_liger_kernel=False,
+                logging_steps=1,
+                report_to="none",
+                logging_nan_inf_filter=False,
+                max_prompt_length=1024,
+                max_completion_length=1024,
+                dataloader_drop_last=True,
+            ),
+            train_dataset=train_dataset,
+            eval_dataset=eval_dataset,
+            processing_class=tokenizer,
+            parallelism_config=parallelism_config,
+        )
 
-    # Phase 1: Train + Save
-    phase1_ok, phase1_losses, l_pre = phase1_train_and_save(
-        ctx.rank,
-        ctx.world_size,
-        ctx.local_rank,
-        tokenizer,
-        train_dataset,
-        eval_dataset,
-        output_dir,
+    checks = run_two_phase_resume(
+        ctx,
+        build_trainer,
+        output_dir=shared_output_dir(ctx),
+        probe=fixed_text_batch(tokenizer, ctx.device, RESUME_PROBE_TEXT),
     )
-    checks = {"phase1_train_and_save": phase1_ok}
-
-    if not phase1_ok:
-        log("\nPhase 1 FAILED - skipping Phase 2")
-        return {"checks": checks}
-
-    # Phase 2: Resume + Train (asserts trained weights restored by value)
-    phase2_ok, phase2_losses = phase2_resume_and_train(
-        ctx.rank,
-        ctx.world_size,
-        ctx.local_rank,
-        tokenizer,
-        train_dataset,
-        eval_dataset,
-        output_dir,
-        l_pre,
-    )
-    checks["phase2_resume_and_train"] = phase2_ok
-
-    log(f"  Phase 1 losses: {[f'{l:.4f}' for l in phase1_losses]}")
-    log(f"  Phase 2 losses: {[f'{l:.4f}' for l in phase2_losses]}")
-
     return {"checks": checks}
 
 
-main = gpu_test_main(min_world_size=TP_SIZE, prefix="offline_grpo_tp_resume")(run)
+main = gpu_test_main(min_world_size=2, prefix="offline_grpo_tp_resume")(run)
 
 if __name__ == "__main__":
     main()

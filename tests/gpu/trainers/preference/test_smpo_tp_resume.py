@@ -1,383 +1,76 @@
 #!/usr/bin/env python
+"""SmoothMarginPOTrainer at TP=2 saves a mid-training checkpoint and resumes from it on Qwen3-0.6B.
+
+The DTensor parameters are gathered for the save and re-sharded on the resume, which streams the
+checkpoint's weights into a base-loaded TP model; the checks are
+:func:`~tests.common.checkpoint_io.run_two_phase_resume`'s.
 """
-SMPO checkpoint resume test with Tensor Parallelism (TP=2).
-
-Validates that SmoothMarginPOTrainer can:
-1. Train with TP=2, save a mid-training checkpoint
-2. Resume from that checkpoint and continue training
-3. Produce finite losses after resume
-
-This specifically tests the checkpoint save/load path under TP mode,
-where model parameters are DTensors that need to be gathered for saving
-and re-sharded when loading.
-
-Model: Qwen/Qwen3-0.6B (dense, supports tp_plan="auto")
-
-Usage:
-    torchrun --nproc_per_node=2 \
-        tests/gpu/trainers/preference/test_smpo_tp_resume.py
-
-Requirements:
-    - 2x GPUs
-"""
-
-import math
-import os
-import traceback
 
 import torch
-import torch.distributed as dist
 from transformers import AutoTokenizer
 
 from src.configs.preference import SmoothMarginPOConfig
 from src.distributed.parallelism_config import ParallelismConfig
 from src.model_loading.parallel.loader import load_distributed_model
-from src.runtime.collectives import barrier
 from src.trainers.preference.smpo import SmoothMarginPOTrainer
-from tests.common.checkpoint_io import (
-    TP_RESUME_PROBE_TEXT,
-    ResumeCapture,
-    fixed_batch_loss,
-    fixed_text_batch,
-    resume_checkpoint_checks,
-)
+from tests.common.checkpoint_io import RESUME_PROBE_TEXT, fixed_text_batch, run_two_phase_resume
 from tests.common.datasets import create_preference_dataset
-from tests.common.distributed import cleanup_dirs, shared_scratch_dir
+from tests.common.distributed import shared_output_dir
 from tests.common.harness import gpu_test_main
 from tests.common.models import QWEN3_0_6B
-from tests.common.tolerances import TOL
-from tests.common.utils import cleanup_memory, log, step_losses
-
-# Configuration
 
 MODEL_NAME = QWEN3_0_6B
 TP_SIZE = 2
-TOTAL_STEPS = 6
-SAVE_AT_STEP = 3  # Save checkpoint at step 3, resume and train to step 6
-BATCH_SIZE = 1
-GRADIENT_ACCUMULATION_STEPS = 1
-LEARNING_RATE = 5e-6
-MAX_LENGTH = 2048
-MAX_PROMPT_LENGTH = 1024
-NUM_TRAIN_SAMPLES = 64
-NUM_EVAL_SAMPLES = 8
 SEED = 42
 
-# The TP DTensor gather→re-shard is the point of this test: a correct resume reloads the trained
-# weights, so the fixed-batch loss before the save and after the resume match to bf16 round-trip noise.
-LOSS_TOL = TOL.resume_fixed_batch_loss_abs
 
-
-# Phase 1: Train + Save Checkpoint
-
-
-def phase1_train_and_save(
-    rank,
-    world_size,
-    local_rank,
-    tokenizer,
-    train_dataset,
-    eval_dataset,
-    output_dir,
-    checkpoint_dir,
-) -> tuple[bool, list[float], float]:
-    """Train for SAVE_AT_STEP steps with TP=2, save checkpoint.
-
-    Returns (ok, losses, L_pre) — L_pre is the fixed-batch causal-LM forward loss
-    with the trained (== saved) weights, the reference for the Phase 2 round-trip check.
-    """
-    log(f"\n{'=' * 60}")
-    log(f"  Phase 1: Train {SAVE_AT_STEP} steps + Save Checkpoint (TP={TP_SIZE})")
-    log(f"{'=' * 60}")
-
-    try:
-        parallelism_config = ParallelismConfig(tp_size=TP_SIZE)
-
-        log("Loading model with TP...")
-        model, _ = load_distributed_model(
-            model_name_or_path=MODEL_NAME,
-            parallelism_config=parallelism_config,
-            dtype=torch.bfloat16,
-            trust_remote_code=True,
-            use_liger_kernel=True,
-            attn_implementation="sdpa",  # padded preference: avoid FA4 varlen-bwd cold-compile (see test_smpo_tp)
-        )
-        log(f"Model loaded. GPU mem: {torch.cuda.memory_allocated() / 1e9:.2f} GB")
-
-        config = SmoothMarginPOConfig(
-            output_dir=output_dir,
-            max_steps=SAVE_AT_STEP,
-            per_device_train_batch_size=BATCH_SIZE,
-            gradient_accumulation_steps=GRADIENT_ACCUMULATION_STEPS,
-            learning_rate=LEARNING_RATE,
-            bf16=True,
-            gradient_checkpointing=True,
-            use_liger_kernel=False,
-            logging_steps=1,
-            save_strategy="steps",
-            save_steps=SAVE_AT_STEP,
-            save_total_limit=1,
-            report_to="none",
-            logging_nan_inf_filter=False,
-            max_length=MAX_LENGTH,
-            max_prompt_length=MAX_PROMPT_LENGTH,
-            dataloader_drop_last=True,
-        )
-
-        trainer = SmoothMarginPOTrainer(
-            model=model,
-            args=config,
-            train_dataset=train_dataset,
-            eval_dataset=eval_dataset,
-            processing_class=tokenizer,
-            parallelism_config=parallelism_config,
-        )
-
-        assert trainer.parallelism_config.is_tp_mode, "trainer.parallelism_config.is_tp_mode should be True"
-
-        log(f"Training for {SAVE_AT_STEP} steps...")
-        train_result = trainer.train()
-
-        training_loss = train_result.training_loss
-        losses = step_losses(trainer)
-        log(f"Phase 1 training loss: {training_loss:.6f}")
-        log(f"Phase 1 step losses: {[f'{l:.4f}' for l in losses]}")
-
-        # Reference forward loss on a FIXED batch with the trained (== saved) weights.
-        ids, labels = fixed_text_batch(tokenizer, torch.cuda.current_device(), TP_RESUME_PROBE_TEXT)
-        l_pre = fixed_batch_loss(trainer.model, ids, labels)
-        log(f"Phase 1 L_pre (fixed-batch forward loss, trained weights): {l_pre:.6f}")
-
-        # The trainer should have saved a checkpoint at step SAVE_AT_STEP — assert per-file.
-        expected_ckpt = os.path.join(output_dir, f"checkpoint-{SAVE_AT_STEP}")
-        barrier()
-
-        ckpt_ok = True
-        if rank == 0:
-            ckpt_ok = all(resume_checkpoint_checks(expected_ckpt, world_size).values())
-        result_t = torch.tensor([1 if ckpt_ok else 0], dtype=torch.int64, device=torch.cuda.current_device())
-        dist.broadcast(result_t, src=0)
-        if result_t.item() == 0:
-            log(f"ERROR: checkpoint at {expected_ckpt} missing required files")
-            return False, losses, l_pre
-
-        loss_ok = math.isfinite(training_loss)
-        if not loss_ok:
-            log(f"ERROR: Phase 1 training loss not finite: {training_loss}")
-            return False, losses, l_pre
-
-        del trainer, model
-        cleanup_memory()
-        barrier()
-
-        return True, losses, l_pre
-
-    except Exception as e:
-        log(f"Phase 1 FAILED: {e}")
-        traceback.print_exc()
-        return False, [], float("nan")
-
-
-# Phase 2: Resume from Checkpoint
-
-
-def phase2_resume_and_train(
-    rank,
-    world_size,
-    local_rank,
-    tokenizer,
-    train_dataset,
-    eval_dataset,
-    output_dir,
-    l_pre,
-) -> tuple[bool, list[float]]:
-    """Resume training from checkpoint and train to TOTAL_STEPS.
-
-    Adds the TP weight round-trip check (|L_post - L_pre| < LOSS_TOL on a fixed batch,
-    captured post-resume/pre-step) plus full optimizer continuity (exp_avg_sq restored,
-    nonzero, finite) — TP does a full optimizer restore, not a warm restart.
-    """
-    log(f"\n{'=' * 60}")
-    log(f"  Phase 2: Resume from Checkpoint + Train to step {TOTAL_STEPS} (TP={TP_SIZE})")
-    log(f"{'=' * 60}")
-
-    checkpoint_path = os.path.join(output_dir, f"checkpoint-{SAVE_AT_STEP}")
-
-    try:
-        parallelism_config = ParallelismConfig(tp_size=TP_SIZE)
-
-        log("Loading fresh model with TP for resume...")
-        model, _ = load_distributed_model(
-            model_name_or_path=MODEL_NAME,
-            parallelism_config=parallelism_config,
-            dtype=torch.bfloat16,
-            trust_remote_code=True,
-            use_liger_kernel=True,
-            attn_implementation="sdpa",  # padded preference: avoid FA4 varlen-bwd cold-compile (see test_smpo_tp)
-        )
-        log(f"Model loaded. GPU mem: {torch.cuda.memory_allocated() / 1e9:.2f} GB")
-
-        config = SmoothMarginPOConfig(
-            output_dir=output_dir,
-            max_steps=TOTAL_STEPS,
-            per_device_train_batch_size=BATCH_SIZE,
-            gradient_accumulation_steps=GRADIENT_ACCUMULATION_STEPS,
-            learning_rate=LEARNING_RATE,
-            bf16=True,
-            gradient_checkpointing=True,
-            use_liger_kernel=False,
-            logging_steps=1,
-            save_strategy="no",
-            report_to="none",
-            logging_nan_inf_filter=False,
-            max_length=MAX_LENGTH,
-            max_prompt_length=MAX_PROMPT_LENGTH,
-            dataloader_drop_last=True,
-        )
-
-        trainer = SmoothMarginPOTrainer(
-            model=model,
-            args=config,
-            train_dataset=train_dataset,
-            eval_dataset=eval_dataset,
-            processing_class=tokenizer,
-            parallelism_config=parallelism_config,
-        )
-
-        assert trainer.parallelism_config.is_tp_mode, "trainer.parallelism_config.is_tp_mode should be True"
-
-        # Capture restored state at on_train_begin (post-resume, pre-first-step).
-        ids, labels = fixed_text_batch(tokenizer, torch.cuda.current_device(), TP_RESUME_PROBE_TEXT)
-        resume_capture = ResumeCapture(trainer, ids, labels)
-        trainer.add_callback(resume_capture)
-
-        log(f"Resuming from checkpoint: {checkpoint_path}")
-        train_result = trainer.train(resume_from_checkpoint=checkpoint_path)
-
-        training_loss = train_result.training_loss
-        losses = step_losses(trainer)
-        log(f"Phase 2 training loss: {training_loss:.6f}")
-        log(f"Phase 2 step losses: {[f'{l:.4f}' for l in losses]}")
-        log(f"Phase 2 global step: {trainer.state.global_step}")
-
-        # Validate
-        loss_ok = math.isfinite(training_loss)
-        steps_ok = trainer.state.global_step == TOTAL_STEPS
-        all_finite = all(math.isfinite(l) for l in losses)
-
-        if not loss_ok:
-            log(f"ERROR: Phase 2 loss not finite: {training_loss}")
-        if not steps_ok:
-            log(f"ERROR: Expected {TOTAL_STEPS} steps, got {trainer.state.global_step}")
-        if not all_finite:
-            log("ERROR: NaN/Inf in step losses")
-
-        # ---- By-value resume continuity (TP DTensor gather→re-shard round-trip) ----
-        cap = resume_capture.capture
-        if cap is None:
-            log("ERROR: resume-capture callback did not fire (on_train_begin missed)")
-            weights_ok = optim_ok = False
-        else:
-            l_post = cap["l_post"]
-            loss_delta = abs(l_post - l_pre)
-            weights_ok = math.isfinite(l_post) and loss_delta < LOSS_TOL
-            optim_ok = cap["moments_materialized"] and cap["moments_nonzero"] and cap["moments_finite"]
-            sched_ok = cap["sched_last_epoch"] == SAVE_AT_STEP
-            log(f"L_pre={l_pre:.6f}  L_post={l_post:.6f}  |delta|={loss_delta:.6f} (tol {LOSS_TOL})")
-            log(
-                f"optimizer exp_avg_sq materialized={cap['moments_materialized']} "
-                f"nonzero={cap['moments_nonzero']} finite={cap['moments_finite']}"
-            )
-            log(f"lr_scheduler.last_epoch={cap['sched_last_epoch']} (expected {SAVE_AT_STEP})")
-            if not weights_ok:
-                log(
-                    f"ERROR: weights not restored — |L_post - L_pre|={loss_delta:.6f} >= {LOSS_TOL} "
-                    "(TP gather/re-shard corrupted the round-trip)"
-                )
-            if not optim_ok:
-                log("ERROR: optimizer 2nd moment not restored (zero/non-finite/absent after TP resume)")
-            if not sched_ok:
-                log(
-                    f"ERROR: LR scheduler not restored — last_epoch={cap['sched_last_epoch']} "
-                    f"(expected {SAVE_AT_STEP})"
-                )
-            optim_ok = optim_ok and sched_ok
-
-        del trainer, model
-        cleanup_memory()
-        barrier()
-
-        return loss_ok and steps_ok and all_finite and weights_ok and optim_ok, losses
-
-    except Exception as e:
-        log(f"Phase 2 FAILED: {e}")
-        traceback.print_exc()
-        return False, []
-
-
-def run(ctx):
-    log(f"\n{'#' * 70}")
-    log(f"  SMPO + TP={TP_SIZE} Checkpoint Resume Test")
-    log(f"  Model: {MODEL_NAME}")
-    log(f"  World: {ctx.world_size}, GPU: {torch.cuda.get_device_name(ctx.local_rank)}")
-    log(f"  Plan: Train {SAVE_AT_STEP} steps -> Save -> Resume -> Train to {TOTAL_STEPS}")
-    log(f"{'#' * 70}")
-
-    # Rank-shared: the checkpoint rank 0 writes is the one every rank resumes from. Rank 0 clears it
-    # first so a checkpoint left by an earlier run cannot stand in for the one this run must save.
-    output_dir = shared_scratch_dir("smpo_tp_resume_out")
-    if ctx.rank == 0:
-        cleanup_dirs(output_dir)
-        os.makedirs(output_dir, exist_ok=True)
-    ctx.on_teardown(lambda: cleanup_dirs(output_dir))
-    ctx.barrier()
-    checkpoint_dir = os.path.join(output_dir, f"checkpoint-{SAVE_AT_STEP}")
-
-    # Load tokenizer
-    log("\nLoading tokenizer...")
+def run(ctx) -> dict:
     tokenizer = AutoTokenizer.from_pretrained(MODEL_NAME, trust_remote_code=True)
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
+    train_dataset = create_preference_dataset(64, tokenizer, seed=SEED)
+    eval_dataset = create_preference_dataset(8, tokenizer, seed=SEED + 100)
 
-    # Create datasets
-    log("Creating synthetic preference datasets...")
-    train_dataset = create_preference_dataset(NUM_TRAIN_SAMPLES, tokenizer, seed=SEED)
-    eval_dataset = create_preference_dataset(NUM_EVAL_SAMPLES, tokenizer, seed=SEED + 100)
-    log(f"Train: {len(train_dataset)}, Eval: {len(eval_dataset)}")
+    def build_trainer(checkpoint: str | None, **schedule) -> SmoothMarginPOTrainer:
+        # Both phases build on the base weights: the resume's own TP reload streams the checkpoint's in.
+        parallelism_config = ParallelismConfig(tp_size=TP_SIZE)
+        model, _ = load_distributed_model(
+            model_name_or_path=MODEL_NAME,
+            parallelism_config=parallelism_config,
+            dtype=torch.bfloat16,
+            trust_remote_code=True,
+            use_liger_kernel=True,
+            attn_implementation="sdpa",  # padded preference: avoid FA4 varlen-bwd cold-compile (see test_smpo_tp)
+        )
+        return SmoothMarginPOTrainer(
+            model=model,
+            args=SmoothMarginPOConfig(
+                **schedule,
+                per_device_train_batch_size=1,
+                gradient_accumulation_steps=1,
+                learning_rate=5e-6,
+                bf16=True,
+                gradient_checkpointing=True,
+                use_liger_kernel=False,
+                logging_steps=1,
+                report_to="none",
+                logging_nan_inf_filter=False,
+                max_length=2048,
+                max_prompt_length=1024,
+                dataloader_drop_last=True,
+            ),
+            train_dataset=train_dataset,
+            eval_dataset=eval_dataset,
+            processing_class=tokenizer,
+            parallelism_config=parallelism_config,
+        )
 
-    # Phase 1: Train + Save
-    phase1_ok, phase1_losses, l_pre = phase1_train_and_save(
-        ctx.rank,
-        ctx.world_size,
-        ctx.local_rank,
-        tokenizer,
-        train_dataset,
-        eval_dataset,
-        output_dir,
-        checkpoint_dir,
+    checks = run_two_phase_resume(
+        ctx,
+        build_trainer,
+        output_dir=shared_output_dir(ctx),
+        probe=fixed_text_batch(tokenizer, ctx.device, RESUME_PROBE_TEXT),
     )
-    checks = {"phase1_train_and_save": phase1_ok}
-
-    if not phase1_ok:
-        log("\nPhase 1 FAILED - skipping Phase 2")
-        return {"checks": checks}
-
-    # Phase 2: Resume + Train
-    phase2_ok, phase2_losses = phase2_resume_and_train(
-        ctx.rank,
-        ctx.world_size,
-        ctx.local_rank,
-        tokenizer,
-        train_dataset,
-        eval_dataset,
-        output_dir,
-        l_pre,
-    )
-    checks["phase2_resume_and_train"] = phase2_ok
-
-    log(f"  Phase 1 losses: {[f'{l:.4f}' for l in phase1_losses]}")
-    log(f"  Phase 2 losses: {[f'{l:.4f}' for l in phase2_losses]}")
-
     return {"checks": checks}
 
 

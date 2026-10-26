@@ -29,16 +29,17 @@ import sys
 
 import torch
 import torch.distributed as dist
-import torch.nn.functional as F
-from datasets import Dataset
-from transformers import AutoTokenizer, GptOssConfig, GptOssForCausalLM, default_data_collator
+from transformers import AutoTokenizer, GptOssForCausalLM, default_data_collator
 from trl import SFTConfig
 
 from src.distributed.parallelism_config import ParallelismConfig
 from src.models.attention.gpt_oss_sinks import _reset_gpt_oss_sinks
 from src.trainers.sft import DistributedSFTTrainer
+from tests.common.distributed import shared_output_dir
 from tests.common.harness import gpu_test_main, skip_unless_blackwell
 from tests.common.models import QWEN3_0_6B, TINY_GPTOSS_CONFIG
+from tests.common.pp_equivalence import build_gptoss_model
+from tests.common.pp_trainers import build_pp_args, build_sft_rows, probe_step, reload_reproduces_probe_loss
 from tests.common.utils import log
 
 PP_SIZE = 2
@@ -46,30 +47,6 @@ SEQ_LEN = 64
 N_STEPS = 4
 NUM_LAYERS = TINY_GPTOSS_CONFIG["num_hidden_layers"]
 NUM_HEADS = TINY_GPTOSS_CONFIG["num_attention_heads"]
-
-
-def build_model(attn_implementation: str = "eager"):
-    torch.manual_seed(1234)
-    cfg = GptOssConfig(**TINY_GPTOSS_CONFIG, pad_token_id=0, eos_token_id=1)
-    model = GptOssForCausalLM(cfg).to(torch.bfloat16)
-    if attn_implementation != "eager":
-        model.set_attn_implementation(attn_implementation)
-    return model
-
-
-def build_dataset() -> Dataset:
-    g = torch.Generator().manual_seed(7)
-    rows = torch.randint(4, TINY_GPTOSS_CONFIG["vocab_size"], (16, SEQ_LEN), generator=g)
-    labels = rows.clone()
-    for i in range(labels.size(0)):
-        labels[i, : 4 + (i % 11)] = -100
-    return Dataset.from_dict(
-        {
-            "input_ids": rows.tolist(),
-            "labels": labels.tolist(),
-            "attention_mask": torch.ones_like(rows).tolist(),
-        }
-    )
 
 
 @gpu_test_main(exact_world_size=4, prefix="pp_gptoss_fa2_sinks")
@@ -81,30 +58,25 @@ def run(ctx):
 
     # The Hopper FA2 production state (sinks=None), reproduced under FA4 — its sink pass-through
     # tolerates None, and the save path only keys on the None state, not the attention impl.
-    model = build_model("flash_attention_4")
+    model = build_gptoss_model()
+    model.set_attn_implementation("flash_attention_4")
     _reset_gpt_oss_sinks(model, model.config, attn_implementation="flash_attention_2")
     checks["sinks_dropped_from_state_dict"] = not any("sinks" in k for k in model.state_dict())
 
-    args = SFTConfig(
-        output_dir=ctx.output_dir,
+    args = build_pp_args(
+        SFTConfig,
+        ctx.output_dir,
         max_steps=N_STEPS,
         per_device_train_batch_size=4,
-        gradient_accumulation_steps=2,  # becomes the pipeline's microbatch count
-        learning_rate=5e-3,
-        lr_scheduler_type="constant",
         max_length=SEQ_LEN,
-        logging_steps=1,
-        save_strategy="no",
-        report_to=[],
-        logging_nan_inf_filter=False,
-        seed=42,
         bf16=True,
         gradient_checkpointing=False,
     )
+    rows = build_sft_rows(TINY_GPTOSS_CONFIG["vocab_size"])
     trainer = DistributedSFTTrainer(
         model=model,
         args=args,
-        train_dataset=build_dataset(),
+        train_dataset=rows,
         processing_class=tokenizer,
         data_collator=default_data_collator,
         parallelism_config=config,
@@ -119,22 +91,10 @@ def run(ctx):
 
     # Probe loss on the final weights: one more pipeline step with no optimizer update after it,
     # so the reloaded model must reproduce this replica's loss on the same batch.
-    probe_dataset = build_dataset()
-    dp_rank = config.get_data_parallel_rank()
-    probe_rows = torch.tensor(probe_dataset["input_ids"][dp_rank * 4 : dp_rank * 4 + 4])
-    probe_labels = torch.tensor(probe_dataset["labels"][dp_rank * 4 : dp_rank * 4 + 4])
-    probe_batch = {
-        "input_ids": probe_rows,
-        "labels": probe_labels,
-        "attention_mask": torch.ones_like(probe_rows),
-    }
-    trainer.state.global_step += 1
-    probe_loss = trainer.training_step(trainer.model, dict(probe_batch))
+    probe_batch, probe_loss = probe_step(trainer, rows, 4)
     metrics["probe_loss"] = float(probe_loss)
 
-    dirs: list = [None] * ctx.world_size
-    dist.all_gather_object(dirs, ctx.output_dir)
-    save_dir = dirs[0]
+    save_dir = shared_output_dir(ctx)
     # The trainer synced config.pad/eos to the real Qwen tokenizer's ids, which exceed the tiny
     # vocab — restore so from_pretrained can build the embedding.
     trainer.model.config.pad_token_id, trainer.model.config.eos_token_id = 0, 1
@@ -147,7 +107,7 @@ def run(ctx):
     if ctx.rank == 0:
         try:
             reloaded = GptOssForCausalLM.from_pretrained(save_dir, dtype=torch.bfloat16)
-            reference_keys = set(build_model().state_dict())  # eager reference — sinks present
+            reference_keys = set(build_gptoss_model().state_dict())  # eager reference — sinks present
             reloaded_keys = set(reloaded.state_dict())
             if reloaded_keys != reference_keys:
                 log(
@@ -168,25 +128,9 @@ def run(ctx):
         try:
             # Eager forward with neutralized sinks = FA2's no-sink softmax (the sink column's
             # exp(dtype min) underflows to 0), so the reloaded probe loss must match the pipeline's.
-            with torch.no_grad():
-                out = reloaded.to(ctx.device)(
-                    input_ids=probe_batch["input_ids"].to(ctx.device),
-                    attention_mask=probe_batch["attention_mask"].to(ctx.device),
-                )
-            shift_logits = out.logits[:, :-1].float()
-            shift_labels = probe_batch["labels"][:, 1:].to(ctx.device)
-            ce_sum = F.cross_entropy(
-                shift_logits.reshape(-1, shift_logits.size(-1)),
-                shift_labels.reshape(-1),
-                ignore_index=-100,
-                reduction="sum",
+            values_ok = reload_reproduces_probe_loss(
+                reloaded.to(ctx.device), probe_batch, rows, config.data_parallel_size, probe_loss, ctx.device
             )
-            global_count = float((torch.tensor(probe_dataset["labels"][:8])[:, 1:] != -100).sum())
-            expected_loss = float(ce_sum / (global_count / config.data_parallel_size))
-            rel = abs(expected_loss - float(probe_loss)) / max(abs(expected_loss), 1e-9)
-            log(f"[reload-value] probe={float(probe_loss):.6f} reloaded={expected_loss:.6f} rel={rel:.3e}")
-            if rel > 5e-2:  # FA4 vs eager bf16 kernels differ; gate loose but real
-                values_ok = False
         except Exception as exc:
             log(f"[reload-value] FAILED: {exc!r}")
             values_ok = False

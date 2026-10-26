@@ -27,7 +27,7 @@ from src.configs.grpo_offline import OfflineGRPOConfig
 from src.distributed.parallelism_config import ParallelismConfig
 from src.trainers.grpo.offline.trainer import OfflineGRPOTrainer
 from tests.common.checkpoint_io import (
-    TP_RESUME_PROBE_TEXT,
+    RESUME_PROBE_TEXT,
     RestorePointSnapshot,
     ResumeCapture,
     fixed_batch_loss,
@@ -60,9 +60,7 @@ PARITY_MAX_TOL = 0.5
 
 class _SavedWeights(RestorePointSnapshot):
     def extra(self):
-        ids, labels = fixed_text_batch(
-            self.trainer.processing_class, torch.cuda.current_device(), TP_RESUME_PROBE_TEXT
-        )
+        ids, labels = fixed_text_batch(self.trainer.processing_class, torch.cuda.current_device(), RESUME_PROBE_TEXT)
         live_loss = fixed_batch_loss(self.trainer.model, ids, labels)
         checkpoint = os.path.join(self.trainer.args.output_dir, f"checkpoint-{self.trainer.state.global_step}")
         # The checkpoint oracle separates a stale live forward from an incorrect resume without
@@ -192,7 +190,7 @@ def run(ctx) -> dict:
         original_reference, resumed._reference_storage_by_split["training"].values
     )
     checks["no_second_reference_model"] = resumed.ref_model is None
-    ids, labels = fixed_text_batch(tokenizer, ctx.device, TP_RESUME_PROBE_TEXT)
+    ids, labels = fixed_text_batch(tokenizer, ctx.device, RESUME_PROBE_TEXT)
     capture = ResumeCapture(resumed, ids, labels)
     resumed.add_callback(capture)
     result = resumed.train(resume_from_checkpoint=checkpoint)

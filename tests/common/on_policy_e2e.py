@@ -552,3 +552,10 @@ def record_optimizer_restore(checks: dict[str, bool], saved: dict, restored: dic
     checks["resume_restored_the_optimizer_state"] = ok
     if not ok:
         log(f"  optimizer state was NOT continued: {detail}")
+
+
+def record_parallelism_engaged(ctx, trainer, ep_size: int, tp_size: int, expert_tp_size: int, checks: dict) -> None:
+    """Record :func:`parallelism_engaged` in ``checks``; a single process shards nothing, so it has no axis to realize."""
+    if ctx.world_size > 1:
+        checks["parallelism_engaged"] = parallelism_engaged(trainer, ep_size, tp_size, expert_tp_size)
+        log(f"  parallelism engaged: {checks['parallelism_engaged']}")

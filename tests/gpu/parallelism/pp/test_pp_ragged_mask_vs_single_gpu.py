@@ -21,23 +21,16 @@ Modes (manifest ``args_matrix``):
 Run: torchrun --nproc_per_node=4 tests/gpu/parallelism/pp/test_pp_ragged_mask_vs_single_gpu.py
 """
 
-import math
 import sys
 
 import torch
-import torch.distributed as dist
-import torch.nn.functional as F
-from torch.distributed.device_mesh import init_device_mesh
-from torch.distributed.fsdp import fully_shard
 from transformers import Qwen3Config, Qwen3ForCausalLM
 from transformers.models.qwen3_5.configuration_qwen3_5 import Qwen3_5TextConfig
 from transformers.models.qwen3_5.modeling_qwen3_5 import Qwen3_5ForCausalLM
 
 from src.distributed.parallelism_config import ParallelismConfig
-from src.distributed.pipeline_parallel.groups import build_pipeline_group
-from src.distributed.pipeline_parallel.runner import PipelineRunner
-from src.distributed.pipeline_parallel.stage import build_pipeline_stage
-from src.distributed.pipeline_parallel.stage_losses import TokenLoss
+from tests.common import pp_equivalence as ppeq
+from tests.common.distributed import world_min
 from tests.common.harness import gpu_test_main, skip_unless_blackwell
 from tests.common.models import TINY_QWEN3_CONFIG, TINY_QWEN35_CONFIG
 from tests.common.utils import log, log_all
@@ -67,11 +60,6 @@ def _dtype() -> torch.dtype:
     return torch.bfloat16 if ATTN_IMPL == "flash_attention_4" else torch.float32
 
 
-def _tolerances() -> tuple[float, float]:
-    """(loss_rel, grad_rel): exact in fp32; bf16 kernels get the EP-test-style loose gate."""
-    return (1e-2, 3e-2) if _dtype() == torch.bfloat16 else (1e-4, 2e-3)
-
-
 # The recurrent decay parameter of a linear-attention family (Qwen3.5 GatedDeltaNet ``A_log``) is
 # ill-conditioned by construction: its gradient flows through an exponentiated cumulative product over
 # the whole sequence scan, so reordering that accumulation — which is exactly what splitting a batch
@@ -83,10 +71,6 @@ DECAY_GRAD_TOL = 1e-2
 _DECAY_PARAM_SUFFIXES = ("A_log", "dt_bias")
 
 
-def _is_recurrent_decay_param(fqn: str) -> bool:
-    return fqn.endswith(_DECAY_PARAM_SUFFIXES)
-
-
 def build_model(device):
     torch.manual_seed(1234)
     if FAMILY == "qwen3_5":
@@ -96,7 +80,7 @@ def build_model(device):
     return Qwen3ForCausalLM(config).to(device=device, dtype=_dtype())
 
 
-def make_batch(device, vocab_size):
+def build_batch(device, vocab_size):
     """Ragged true lengths right-padded to SEQ_LEN: mask zeros + -100 labels on every pad."""
     g = torch.Generator(device="cpu").manual_seed(99)
     input_ids = torch.randint(4, vocab_size, (GLOBAL_BATCH, SEQ_LEN), generator=g)
@@ -110,17 +94,6 @@ def make_batch(device, vocab_size):
     return (t.to(device) for t in (input_ids, labels, attention_mask, position_ids))
 
 
-def summed_ce(logits, labels):
-    shift_logits = logits[:, :-1, :].contiguous()
-    shift_labels = labels[:, 1:].contiguous()
-    return F.cross_entropy(
-        shift_logits.view(-1, shift_logits.size(-1)).float(),
-        shift_labels.view(-1),
-        ignore_index=-100,
-        reduction="sum",
-    )
-
-
 @gpu_test_main(min_world_size=4, prefix="pp_ragged_mask")
 def run(ctx):
     device = torch.device("cuda", ctx.local_rank)
@@ -128,29 +101,22 @@ def run(ctx):
     n_microbatches = max(2, pp_size)
     config = ParallelismConfig(world_size=ctx.world_size, gpus_per_node=2, nvlink_domain_size=2, pp_size=pp_size)
 
-    input_ids, labels, attention_mask, position_ids = make_batch(device, TINY_QWEN3_CONFIG["vocab_size"])
+    input_ids, labels, attention_mask, position_ids = build_batch(device, TINY_QWEN3_CONFIG["vocab_size"])
     global_count = (labels[:, 1:] != -100).sum().float()
 
     # Baseline: unsplit model, full batch, same attention implementation and dtype.
     model = build_model(device)
     kwargs = {"position_ids": position_ids} if EXPLICIT_POSITIONS else {}
-    ref_loss = summed_ce(model(input_ids=input_ids, attention_mask=attention_mask, **kwargs).logits, labels)
-    ref_loss = ref_loss / global_count
+    logits = model(input_ids=input_ids, attention_mask=attention_mask, **kwargs).logits
+    ref_loss = ppeq.causal_lm_loss(logits, labels, reduction="sum") / global_count
     ref_loss.backward()
     ref_grads = {n: p.grad.detach().float().clone() for n, p in model.named_parameters() if p.grad is not None}
-    del model
+    del model, logits
     torch.cuda.empty_cache()
     log(f"[baseline:{ATTN_IMPL}] loss={ref_loss.item():.6f}")
 
-    mesh = init_device_mesh("cuda", (pp_size, config.stage_world_size), mesh_dim_names=("pp", "dp"))
-    dp_mesh = mesh["dp"]
-    pp_group = build_pipeline_group(config)
-
-    stage_module = build_pipeline_stage(build_model(device), config.pp_rank, pp_size)
-    for layer in stage_module.model.layers:
-        fully_shard(layer, mesh=dp_mesh, reshard_after_forward=False)
-    fully_shard(stage_module, mesh=dp_mesh, reshard_after_forward=False)
-    runner = PipelineRunner(stage_module, config, pp_group, device, n_microbatches, TokenLoss())
+    groups = ppeq.build_stage_groups(config)
+    stage_module, runner, _ = ppeq.build_runner_stage(build_model(device), config, groups, device, n_microbatches)
 
     # Ragged rows make DP replicas hold unequal counts — the exact case the rank-local default
     # normalizer gets wrong. Pass the trainer's G/dp so per-replica losses average to S_total/G.
@@ -165,47 +131,27 @@ def run(ctx):
         num_items_in_batch=global_count / config.data_parallel_size,
     )
 
-    loss_tol, grad_tol = _tolerances()
-    checks, metrics = {}, {}
-    loss_err_t = torch.zeros(1, device=device)
-    if config.is_last_pp_stage:
-        mean_loss = loss.detach().float().clone()
-        dist.all_reduce(mean_loss, op=dist.ReduceOp.AVG, group=dp_mesh.get_group())
-        loss_err_t[0] = abs(mean_loss.item() - ref_loss.item()) / abs(ref_loss.item())
-        log(f"[pp:{ATTN_IMPL}] loss={mean_loss.item():.6f} baseline={ref_loss.item():.6f} rel={loss_err_t.item():.3e}")
-    dist.all_reduce(loss_err_t, op=dist.ReduceOp.MAX)
-    checks["loss_matches_baseline"] = loss_err_t.item() < loss_tol
-    metrics["loss_rel_err"] = loss_err_t.item()
+    # (loss_rel, grad_rel): exact in fp32; bf16 kernels get the EP-test-style loose gate.
+    loss_tol, grad_tol = (1e-2, 3e-2) if _dtype() == torch.bfloat16 else (1e-4, 2e-3)
+    checks, metrics = ppeq.check_loss_vs_baseline(loss, ref_loss, config, groups, loss_tol)
 
-    worst_name, worst_err, n_checked, missing = None, 0.0, 0, []
-    decay_name, decay_err = None, 0.0
-    for name, param in stage_module.named_parameters():
-        fqn = stage_module.global_parameter_name(name)
-        if fqn not in ref_grads or param.grad is None:
-            missing.append(fqn)
-            continue
-        grad = param.grad
-        grad = grad.full_tensor() if isinstance(grad, torch.distributed.tensor.DTensor) else grad
-        ref = ref_grads[fqn]
-        err = ((grad.float() - ref).abs().max() / ref.abs().max().clamp_min(1e-12)).item()
-        n_checked += 1
-        # A NaN compares false against every bound, so a non-finite error counts as infinite.
-        err = err if math.isfinite(err) else math.inf
-        if _is_recurrent_decay_param(fqn):
-            if err > decay_err:
-                decay_name, decay_err = fqn, err
-        elif err > worst_err:
-            worst_name, worst_err = fqn, err
+    errors, _ = ppeq.max_abs_grad_errors(ppeq.gather_stage_grads(stage_module), ref_grads)
+    stage_names = {stage_module.global_parameter_name(n) for n, _ in stage_module.named_parameters()}
+    missing = sorted(stage_names - errors.keys())
+    decay = {name: err for name, err in errors.items() if name.endswith(_DECAY_PARAM_SUFFIXES)}
+    rest = {name: err for name, err in errors.items() if name not in decay}
+    worst_name = max(rest, key=rest.get, default=None)
+    decay_name = max(decay, key=decay.get, default=None)
+    worst_err, decay_err = rest.get(worst_name, 0.0), decay.get(decay_name, 0.0)
     # log_all, not log: the per-stage worst offender is exactly what a failure needs, and only
     # rank 0 reporting it makes another stage's mismatch undiagnosable.
     log_all(
-        f"[rank {ctx.rank} stage {config.pp_rank}] checked={n_checked} worst={worst_err:.3e} @ {worst_name}"
+        f"[rank {ctx.rank} stage {config.pp_rank}] checked={len(errors)} worst={worst_err:.3e} @ {worst_name}"
         + (f" | decay {decay_err:.3e} @ {decay_name}" if decay_name else "")
     )
 
-    expected = len(list(stage_module.named_parameters()))
-    checks["all_stage_params_compared"] = n_checked == expected and not missing
-    checks["grads_match_baseline"] = n_checked > 0 and worst_err < grad_tol
+    checks["all_stage_params_compared"] = bool(errors) and not missing
+    checks["grads_match_baseline"] = bool(errors) and worst_err < grad_tol
     checks["decay_grads_match_baseline"] = decay_err < DECAY_GRAD_TOL
     metrics["worst_grad_rel_err"] = worst_err
     metrics["worst_decay_grad_rel_err"] = decay_err
@@ -213,10 +159,7 @@ def run(ctx):
     # The mask must have actually carried zeros into the stage — otherwise this run silently
     # degenerated to the unmasked gate.
     checks["mask_has_padding"] = bool((attention_mask[sl] == 0).any().item())
-
-    stage_param_count = torch.tensor([float(n_checked)], device=device)
-    dist.all_reduce(stage_param_count, op=dist.ReduceOp.MIN)
-    checks["every_stage_has_params"] = stage_param_count.item() > 0
+    checks["every_stage_has_params"] = world_min(len(errors), device) > 0
     return {"checks": checks, "metrics": metrics}
 
 

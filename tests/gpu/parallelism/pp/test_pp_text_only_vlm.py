@@ -30,7 +30,6 @@ import sys
 
 import torch
 import torch.distributed as dist
-import torch.nn.functional as F
 from transformers import (
     AutoTokenizer,
     Glm5NextConfig,
@@ -44,6 +43,7 @@ from trl import SFTConfig
 from src.distributed.parallelism_config import ParallelismConfig
 from src.trainers.parallelism.pipeline_trainer import wrapper_state_outside_stages
 from src.trainers.sft import DistributedSFTTrainer
+from tests.common.distributed import shared_output_dir, world_mean
 from tests.common.harness import gpu_test_main
 from tests.common.models import (
     QWEN3_0_6B,
@@ -52,8 +52,15 @@ from tests.common.models import (
     TINY_STEP3P7_CONFIG,
     TINY_STEP3P7_VISION_CONFIG,
 )
+from tests.common.pp_equivalence import causal_lm_loss, full_batch_eval_loss
+from tests.common.pp_trainers import (
+    build_pp_args,
+    build_pp_trainer,
+    build_sft_rows,
+    expect_construction_error,
+    losses_identical_across_ranks,
+)
 from tests.common.utils import log
-from tests.gpu.parallelism.pp.test_pp_sft_trainer_e2e import build_dataset
 
 PP_SIZE = 2
 SEQ_LEN = 64
@@ -114,41 +121,18 @@ def build_composite(dtype=torch.float32):
     return family["model_cls"](config).to(dtype)
 
 
-def mean_ce(model, batch: dict) -> float:
-    """Per-batch mean CE exactly as the pipeline computes it (sum CE / non-ignored count)."""
-    with torch.no_grad():
-        logits = model(input_ids=batch["input_ids"], attention_mask=batch["attention_mask"]).logits
-    shift_logits, shift_labels = logits[:, :-1, :], batch["labels"][:, 1:]
-    total = F.cross_entropy(
-        shift_logits.reshape(-1, shift_logits.size(-1)).float(),
-        shift_labels.reshape(-1),
-        ignore_index=-100,
-        reduction="sum",
+def build_args(output_dir: str) -> SFTConfig:
+    return build_pp_args(
+        SFTConfig,
+        output_dir,
+        max_steps=N_STEPS,
+        per_device_train_batch_size=BATCH,
+        per_device_eval_batch_size=BATCH,
+        max_length=SEQ_LEN,
+        bf16=True,
+        eval_strategy="steps",
+        eval_steps=N_STEPS,
     )
-    return float(total / (shift_labels != -100).sum().clamp(min=1))
-
-
-def make_args(output_dir: str, **overrides) -> SFTConfig:
-    base = {
-        "output_dir": output_dir,
-        "max_steps": N_STEPS,
-        "per_device_train_batch_size": BATCH,
-        "per_device_eval_batch_size": BATCH,
-        "gradient_accumulation_steps": 2,  # becomes the pipeline's microbatch count
-        "learning_rate": 5e-3,
-        "lr_scheduler_type": "constant",
-        "max_length": SEQ_LEN,
-        "logging_steps": 1,
-        "save_strategy": "no",
-        "report_to": [],
-        "logging_nan_inf_filter": False,
-        "seed": 42,
-        "bf16": True,
-        "eval_strategy": "steps",
-        "eval_steps": N_STEPS,
-    }
-    base.update(overrides)
-    return SFTConfig(**base)
 
 
 @gpu_test_main(exact_world_size=4, prefix="pp_text_only_vlm")
@@ -158,32 +142,30 @@ def run(ctx):
     )
     tokenizer = AutoTokenizer.from_pretrained(QWEN3_0_6B)
     vocab = TEXT_CONFIG["vocab_size"]
-    train_dataset = build_dataset(vocab)
-    eval_dataset = build_dataset(vocab, n_rows=8, seed=23)
+    train_dataset = build_sft_rows(vocab)
+    eval_dataset = build_sft_rows(vocab, n_rows=8, seed=23)
     checks, metrics = {}, {}
 
     # ── An image-bearing run of the same wrapper stays refused, on every rank, before any collective.
-    image_dataset = train_dataset.add_column("images", [["not-an-image"]] * len(train_dataset))
-    try:
-        DistributedSFTTrainer(
-            model=build_composite(),
-            args=make_args(ctx.output_dir + "/images"),
-            train_dataset=image_dataset,
-            processing_class=tokenizer,
-            data_collator=default_data_collator,
-            parallelism_config=config,
-            moe_balancing="none",
-        )
-        checks["image_bearing_run_refused"] = False
-    except ValueError as exc:
-        checks["image_bearing_run_refused"] = "Vision-language training is not supported" in str(exc)
-        if not checks["image_bearing_run_refused"]:
-            log(f"[refusal] raised without the mechanism: {exc}")
+    expect_construction_error(
+        DistributedSFTTrainer,
+        "image_bearing_run_refused",
+        checks,
+        "Vision-language training is not supported",
+        model=build_composite(),
+        args=build_args(ctx.output_dir + "/images"),
+        train_dataset=train_dataset.add_column("images", [["not-an-image"]] * len(train_dataset)),
+        processing_class=tokenizer,
+        data_collator=default_data_collator,
+        parallelism_config=config,
+        moe_balancing="none",
+    )
 
     # ── The text-only run ─────────────────────────────────────────────────────────────────────────
-    trainer = DistributedSFTTrainer(
+    trainer, steps, _ = build_pp_trainer(
+        DistributedSFTTrainer,
         model=build_composite(),
-        args=make_args(ctx.output_dir),
+        args=build_args(ctx.output_dir),
         train_dataset=train_dataset,
         eval_dataset=eval_dataset,
         processing_class=tokenizer,
@@ -208,22 +190,6 @@ def run(ctx):
         else stash == {}
     )
 
-    captured: dict = {}
-    real_step = trainer._pp_runner.step
-
-    def spying_step(input_ids, labels, **kw):
-        if "input_ids" not in captured:
-            captured.update(
-                {
-                    "input_ids": input_ids.clone(),
-                    "labels": labels.clone(),
-                    "attention_mask": kw["attention_mask"].clone(),
-                    "normalizer": float(kw["num_items_in_batch"]),
-                }
-            )
-        return real_step(input_ids, labels, **kw)
-
-    trainer._pp_runner.step = spying_step
     trainer.train()
 
     losses = [e["loss"] for e in trainer.state.log_history if "loss" in e]
@@ -234,33 +200,20 @@ def run(ctx):
 
     # Step 1 on init weights == the unsplit composite's token-mean CE over this replica's batch,
     # normalized like the pipeline (this replica's summed CE over the DP-global count / dp).
+    captured = steps[0]
     reference_model = build_composite().to(ctx.device).eval()
     with torch.no_grad():
         logits = reference_model(input_ids=captured["input_ids"], attention_mask=captured["attention_mask"]).logits
-    shift_logits, shift_labels = logits[:, :-1, :], captured["labels"][:, 1:]
-    summed = F.cross_entropy(
-        shift_logits.reshape(-1, shift_logits.size(-1)).float(),
-        shift_labels.reshape(-1),
-        ignore_index=-100,
-        reduction="sum",
-    )
-    replica_loss = summed / captured["normalizer"]
-    expected = replica_loss.clone()
-    dist.all_reduce(expected, op=dist.ReduceOp.AVG)
-    metrics["step1_loss"], metrics["step1_reference"] = losses[0], float(expected)
-    checks["step1_loss_matches_unsplit_composite"] = abs(losses[0] - float(expected)) < LOSS_REL_TOL * float(expected)
+    expected = world_mean(float(causal_lm_loss(logits, captured["labels"], reduction="sum") / captured["num_items"]))
+    metrics["step1_loss"], metrics["step1_reference"] = losses[0], expected
+    checks["step1_loss_matches_unsplit_composite"] = abs(losses[0] - expected) < LOSS_REL_TOL * expected
 
-    local = torch.tensor(losses, device=ctx.device)
-    gathered = [torch.zeros_like(local) for _ in range(ctx.world_size)]
-    dist.all_gather(gathered, local)
-    checks["losses_identical_across_ranks"] = all(torch.allclose(local, g, atol=1e-6) for g in gathered)
+    checks["losses_identical_across_ranks"] = losses_identical_across_ranks(losses)
     eval_losses = [e["eval_loss"] for e in trainer.state.log_history if "eval_loss" in e]
     checks["eval_ran_finite"] = len(eval_losses) == 1 and bool(torch.isfinite(torch.tensor(eval_losses)).all())
 
     # ── Save → the composite class reloads whole: nothing missing, vision untouched, text moved.
-    dirs: list = [None] * ctx.world_size
-    dist.all_gather_object(dirs, ctx.output_dir)
-    save_dir = dirs[0]
+    save_dir = shared_output_dir(ctx)
     # TRL copied the full-size tokenizer's special-token ids into the tiny config; restore ids inside
     # the tiny vocab so from_pretrained reflects PP mechanics, not the test's size mismatch.
     text_config = trainer.model.config.get_text_config()
@@ -289,13 +242,7 @@ def run(ctx):
             log(f"[reload] vision intact={vision_intact} text params moved: {moved}/{len(text_keys)}")
             if not vision_intact or moved < len(text_keys) * 0.9:
                 reload_ok = False
-            reloaded = reloaded.to(ctx.device).eval()
-            eval_batches = [eval_dataset[i : i + BATCH] for i in (0, BATCH)]
-            shard_means = [
-                mean_ce(reloaded, {k: torch.tensor(v, device=ctx.device) for k, v in batch.items()})
-                for batch in eval_batches
-            ]
-            reference_eval = sum(shard_means) / len(shard_means)
+            reference_eval = full_batch_eval_loss(reloaded.to(ctx.device).eval(), eval_dataset, BATCH, ctx.device)
             log(f"[reload] reference eval={reference_eval:.6f} logged={eval_losses[-1]:.6f}")
             if abs(reference_eval - eval_losses[-1]) / abs(reference_eval) > EVAL_REL_TOL:
                 reload_ok = False

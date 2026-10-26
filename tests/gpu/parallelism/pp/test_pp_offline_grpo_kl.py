@@ -26,7 +26,6 @@ import math
 import sys
 
 import torch
-import torch.distributed as dist
 from transformers import AutoTokenizer
 
 from src.data.collators.offline_grpo import REF_PER_TOKEN_LOGPS_COLUMN
@@ -37,6 +36,7 @@ from tests.common.distributed import hf_eval_loss_reference, shared_output_dir, 
 from tests.common.harness import gpu_test_main
 from tests.common.models import QWEN3_0_6B
 from tests.common.pp_equivalence import build_dense_model
+from tests.common.pp_trainers import build_pp_trainer, losses_identical_across_ranks
 from tests.gpu.parallelism.pp.test_pp_offline_grpo import (
     BATCH,
     EVAL_GROUP_SIZES,
@@ -45,8 +45,8 @@ from tests.gpu.parallelism.pp.test_pp_offline_grpo import (
     PP_SIZE,
     REL_TOL,
     VOCAB_SIZE,
+    build_args,
     build_dataset,
-    make_args,
 )
 
 KL_BETA = 0.2
@@ -143,8 +143,10 @@ def perturb_column(dataset, seed: int):
 
 
 def run_trainer(config, args, dataset, tokenizer, eval_dataset):
-    """Build the PP trainer (the sweep runs inside construction), perturb both columns, spy, eval, train."""
-    trainer = OfflineGRPOTrainer(
+    """Build the PP trainer (the sweep runs inside construction), perturb both columns, eval, train; returns
+    the trainer, the swept datasets, the first step's batch, and the init-weights eval calls and metrics."""
+    trainer, steps, evals = build_pp_trainer(
+        OfflineGRPOTrainer,
         model=build_dense_model(tokenizer, vocab_size=VOCAB_SIZE),
         args=args,
         train_dataset=dataset,
@@ -155,47 +157,16 @@ def run_trainer(config, args, dataset, tokenizer, eval_dataset):
     swept = {"train": trainer.train_dataset, "eval": trainer.eval_dataset}
     trainer.train_dataset = perturb_column(trainer.train_dataset, PERTURB_SEED)
     trainer.eval_dataset = perturb_column(trainer.eval_dataset, PERTURB_SEED + 1)
-
-    captured: dict = {}
-    real_step = trainer._pp_runner.step
-
-    def spying_step(input_ids, labels, **kw):
-        if "input_ids" not in captured:
-            captured["input_ids"] = input_ids.clone()
-            captured["labels"] = labels.clone()
-            captured["attention_mask"] = kw["attention_mask"].clone()
-            captured.update({k: v.clone() for k, v in kw["extra_targets"].items()})
-        return real_step(input_ids, labels, **kw)
-
-    trainer._pp_runner.step = spying_step
-
-    eval_calls: list[dict] = []
-    real_eval = trainer._pp_runner.eval_loss
-
-    def spying_eval(input_ids, labels, **kw):
-        eval_calls.append(
-            {
-                "input_ids": input_ids.clone(),
-                "labels": labels.clone(),
-                "attention_mask": kw["attention_mask"].clone(),
-                **{k: v.clone() for k, v in kw["extra_targets"].items()},
-            }
-        )
-        return real_eval(input_ids, labels, **kw)
-
-    trainer._pp_runner.eval_loss = spying_eval
     init_eval_metrics = trainer.evaluate()
-    init_eval_calls = list(eval_calls)
+    init_eval_calls = list(evals)
     trainer.train()
-    return trainer, swept, captured, init_eval_calls, init_eval_metrics
+    return trainer, swept, steps[0], init_eval_calls, init_eval_metrics
 
 
 @gpu_test_main(exact_world_size=4, prefix="pp_offline_grpo_kl")
 def run(ctx):
     config = ParallelismConfig(world_size=ctx.world_size, gpus_per_node=2, nvlink_domain_size=2, pp_size=PP_SIZE)
     tokenizer = AutoTokenizer.from_pretrained(QWEN3_0_6B)
-    if tokenizer.pad_token is None:
-        tokenizer.pad_token = tokenizer.eos_token
     dataset = build_dataset(sizes=TRAIN_GROUP_SIZES)
     eval_dataset = build_dataset(sizes=EVAL_GROUP_SIZES, prompt_offset=100)
     checks, metrics = {}, {}
@@ -204,7 +175,7 @@ def run(ctx):
 
     # The run-start reference cache lives under output_dir: one rank writes it, every rank maps it.
     output_dir = shared_output_dir(ctx)
-    args = make_args(output_dir, max_steps=N_STEPS, kl_beta=KL_BETA, eval_strategy="steps", eval_steps=N_STEPS)
+    args = build_args(output_dir, max_steps=N_STEPS, kl_beta=KL_BETA, eval_strategy="steps", eval_steps=N_STEPS)
     trainer, swept, captured, eval_calls, init_eval_metrics = run_trainer(
         config, args, dataset, tokenizer, eval_dataset
     )
@@ -286,17 +257,14 @@ def run(ctx):
         bool((call["labels"] != -100).any(dim=-1).all()) for call in eval_calls
     )
 
-    local = torch.tensor(losses + [eval_loss], device=ctx.device)
-    gathered = [torch.zeros_like(local) for _ in range(ctx.world_size)]
-    dist.all_gather(gathered, local)
-    checks["losses_identical_across_ranks"] = all(torch.allclose(local, g, atol=1e-6) for g in gathered)
+    checks["losses_identical_across_ranks"] = losses_identical_across_ranks(losses + [eval_loss])
     checks["loss_decreased"] = losses[-1] < losses[0] - 0.01
     metrics["first_loss"], metrics["last_loss"] = losses[0], losses[-1]
     grad_norms = [e["grad_norm"] for e in trainer.state.log_history if "grad_norm" in e]
     checks["grad_norm_logged_finite"] = bool(grad_norms) and bool(torch.isfinite(torch.tensor(grad_norms)).all())
 
     # ── bnpo / prob_weighted / no clamp: the KL rides every loss type's numerator ─────────────────
-    bnpo_args = make_args(
+    bnpo_args = build_args(
         output_dir + "/bnpo",
         max_steps=2,
         kl_beta=KL_BETA,

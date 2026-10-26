@@ -33,19 +33,13 @@ from dataclasses import dataclass
 
 import torch
 import torch.distributed as dist
-from torch.distributed.device_mesh import init_device_mesh
-from torch.distributed.fsdp import fully_shard
 from torch.distributed.tensor import DTensor
-from transformers import Qwen3Config, Qwen3ForCausalLM
 
-from src.distributed.expert_parallel.moe_layer.layer import EPMoELayerBase
+from src.distributed.expert_parallel.moe_layer.layer import named_ep_layers
 from src.distributed.parallelism_config import ParallelismConfig
-from src.distributed.pipeline_parallel.groups import build_pipeline_group
-from src.distributed.pipeline_parallel.runner import PipelineRunner
-from src.distributed.pipeline_parallel.stage import build_pipeline_stage
-from src.distributed.pipeline_parallel.stage_losses import TokenLoss
 from src.trainers.parallelism.grad_clipping import pp_clip_grad_norm
 from tests.common import pp_equivalence as ppeq
+from tests.common.distributed import world_min
 from tests.common.harness import gpu_test_main
 from tests.common.models import TINY_QWEN3_CONFIG
 from tests.common.utils import log
@@ -104,13 +98,6 @@ MOE_MODES = {
 # ── dense_pp2_dp4: runner-level fp32 grad exactness ────────────────────────────────────────────
 
 
-def build_dense_model(device):
-    """Identical weights on every rank — the baseline and the split model must start equal."""
-    torch.manual_seed(1234)
-    config = Qwen3Config(**TINY_QWEN3_CONFIG, attn_implementation="eager")
-    return Qwen3ForCausalLM(config).to(device=device, dtype=torch.float32)
-
-
 def run_dense_pp2_dp4(ctx):
     """pp2 × dp4: every stage-local grad must equal the unsplit fp32 model's, per parameter.
 
@@ -122,19 +109,18 @@ def run_dense_pp2_dp4(ctx):
     config = ParallelismConfig(world_size=ctx.world_size, gpus_per_node=2, nvlink_domain_size=2, pp_size=2)
     assert config.stage_world_size == 4, config.stage_world_size
 
-    g = torch.Generator().manual_seed(99)
-    rows = torch.randint(0, TINY_QWEN3_CONFIG["vocab_size"], (GLOBAL_BATCH, DENSE_SEQ_LEN), generator=g)
-    labels = rows.clone()
-    reference = ppeq.run_unsplit_reference(build_dense_model(device), rows, labels, device, dp_size=4)
+    rows, labels = ppeq.build_unmasked_batch(TINY_QWEN3_CONFIG["vocab_size"], GLOBAL_BATCH, DENSE_SEQ_LEN)
+    reference = ppeq.run_unsplit_reference(
+        ppeq.build_dense_model(attn_implementation="eager").to(device), rows, labels, device, dp_size=4
+    )
 
-    mesh = init_device_mesh("cuda", (2, 4), mesh_dim_names=("pp", "dp"))
-    pp_group = build_pipeline_group(config)
-    model = build_dense_model(device)
-    stage_module = build_pipeline_stage(model, config.pp_rank, config.pp_size)
-    for layer in stage_module.model.layers:
-        fully_shard(layer, mesh=mesh["dp"], reshard_after_forward=False)
-    fully_shard(stage_module, mesh=mesh["dp"], reshard_after_forward=False)
-    runner = PipelineRunner(stage_module, config, pp_group, device, 2, TokenLoss())
+    stage_module, runner, _ = ppeq.build_runner_stage(
+        ppeq.build_dense_model(attn_implementation="eager").to(device),
+        config,
+        ppeq.build_stage_groups(config),
+        device,
+        2,
+    )
 
     dp_rank = config.get_data_parallel_rank()
     batch = ppeq.dp_slice_batch(rows, labels, dp_rank, GLOBAL_BATCH // 4)
@@ -155,9 +141,7 @@ def run_dense_pp2_dp4(ctx):
     metrics.update(m)
 
     # Every stage must have contributed parameters, or the split silently produced empty stages.
-    stage_param_count = torch.tensor([float(m["params_compared"])], device=device)
-    dist.all_reduce(stage_param_count, op=dist.ReduceOp.MIN)
-    checks["every_stage_has_params"] = stage_param_count.item() > 0
+    checks["every_stage_has_params"] = world_min(m["params_compared"], device) > 0
     return {"checks": checks, "metrics": metrics}
 
 
@@ -293,7 +277,7 @@ def run_moe_mode(ctx, mode: str):
     twin = ppeq.bf16_twin_reference(ctx, rows, labels)
 
     model = ppeq.build_patched_moe_model(config)
-    checks["unsplit_model_has_8_ep_layers"] = ppeq.count_ep_layers(model) == 8
+    checks["unsplit_model_has_8_ep_layers"] = len(named_ep_layers(model)) == 8
 
     trainer = ppeq.build_pp_sft_trainer(
         ctx,
@@ -305,7 +289,7 @@ def run_moe_mode(ctx, mode: str):
         n_microbatches=spec.n_microbatches,
     )
     stage = trainer._top_level_model()
-    ep_modules = [(name, m) for name, m in stage.named_modules() if isinstance(m, EPMoELayerBase)]
+    ep_modules = named_ep_layers(stage)
     checks["stage_keeps_expected_ep_layers"] = len(ep_modules) == spec.kept_ep_layers
     checks["defer_grad_sync_active"] = bool(trainer._ep_config.defer_grad_sync)
     checks["no_in_backward_ep_hooks"] = all(not m._grad_sync_hooks for _, m in ep_modules)
@@ -364,7 +348,7 @@ def run_ep1_dp4(ctx):
     model = ppeq.build_patched_moe_model(config)
     trainer = ppeq.build_pp_sft_trainer(ctx, config, model, rows, labels, per_device_batch=2, n_microbatches=2)
     stage = trainer._top_level_model()
-    ep_modules = [(n, m) for n, m in stage.named_modules() if isinstance(m, EPMoELayerBase)]
+    ep_modules = named_ep_layers(stage)
     checks["stage_keeps_expected_ep_layers"] = len(ep_modules) == 4
 
     # ep1-shard contract: experts are stage-mesh DTensors (width 4), no EP hooks, plain PP clip.

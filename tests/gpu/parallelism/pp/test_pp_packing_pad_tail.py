@@ -20,15 +20,15 @@ import sys
 
 import torch
 from datasets import Dataset
-from transformers import AutoTokenizer
 from trl import SFTConfig
 
 from src.data.collators.packing import PAD_TAIL_SEGMENT_CHUNK, DataCollatorWithPacking
 from src.distributed.parallelism_config import ParallelismConfig
 from src.trainers.sft import DistributedSFTTrainer
 from tests.common.harness import gpu_test_main
-from tests.common.models import QWEN3_0_6B, TINY_QWEN3_CONFIG
+from tests.common.models import TINY_QWEN3_CONFIG
 from tests.common.pp_equivalence import build_dense_model
+from tests.common.pp_trainers import build_pp_args, tiny_vocab_tokenizer
 from tests.common.utils import log
 
 PP_SIZE = 2
@@ -53,28 +53,18 @@ def build_packed_dataset(vocab_size: int, n_rows: int = 16, seed: int = 7) -> Da
 def _losses_at(ctx, max_length: int) -> list[float]:
     # Same topology as the PP e2e test: 4 GPUs as 2 simulated nodes of 2, stage per node.
     config = ParallelismConfig(world_size=ctx.world_size, gpus_per_node=2, nvlink_domain_size=2, pp_size=PP_SIZE)
-    args = SFTConfig(
-        output_dir=f"{ctx.output_dir}/len{max_length}",
+    # fp32 (the default): the two runs must match to float tolerance, not bf16 noise.
+    args = build_pp_args(
+        SFTConfig,
+        f"{ctx.output_dir}/len{max_length}",
         max_steps=N_STEPS,
         # PP packing requires one packed row per microbatch: batch == microbatch count.
         per_device_train_batch_size=2,
-        gradient_accumulation_steps=2,
-        learning_rate=5e-3,
-        lr_scheduler_type="constant",
         max_length=max_length,
-        logging_steps=1,
-        save_strategy="no",
-        report_to=[],
-        logging_nan_inf_filter=False,
-        seed=42,
-        bf16=False,  # fp32: the two runs must match to float tolerance, not bf16 noise
         gradient_checkpointing=True,
     )
-    tokenizer = AutoTokenizer.from_pretrained(QWEN3_0_6B)
-    # The tiny model's vocab cannot embed the real tokenizer's pad id (151643): FixedShapeCollator
-    # pads input_ids with tokenizer.pad_token_id, and an out-of-vocab id is an embedding-gather
-    # CUDA assert. Pin it to the model config's pad id instead.
-    tokenizer.pad_token = tokenizer.convert_ids_to_tokens(0)
+    # The FixedShapeCollator pads input_ids with the tokenizer's pad id, which must embed in the tiny vocab.
+    tokenizer = tiny_vocab_tokenizer()
     trainer = DistributedSFTTrainer(
         model=build_dense_model(),
         args=args,

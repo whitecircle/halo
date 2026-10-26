@@ -22,17 +22,24 @@ import sys
 
 import numpy as np
 import torch
-import torch.distributed as dist
 import torch.nn.functional as F
 from datasets import Dataset
 from sklearn.metrics import accuracy_score
-from transformers import AutoTokenizer, Qwen3Config, Qwen3ForSequenceClassification
 
 from src.configs.classification import ClassificationConfig
 from src.distributed.parallelism_config import ParallelismConfig
 from src.trainers.reward.classification import ClassificationTrainer
+from tests.common.distributed import world_mean
 from tests.common.harness import gpu_test_main
-from tests.common.models import QWEN3_0_6B, TINY_QWEN3_CONFIG
+from tests.common.models import TINY_QWEN3_CONFIG
+from tests.common.pp_trainers import (
+    build_pp_args,
+    build_pp_trainer,
+    build_seq_cls_model,
+    losses_identical_across_ranks,
+    right_pad,
+    tiny_vocab_tokenizer,
+)
 from tests.common.utils import log
 
 PP_SIZE = 2
@@ -41,15 +48,8 @@ N_STEPS = 10
 BATCH = 4  # rows per rank; gradient_accumulation_steps=2 becomes 2 microbatches of 2 rows
 MICROBATCHES = 2
 NUM_LABELS = 4
-PAD_ID = 0
 CLASS_WEIGHTS = [0.5, 1.5, 1.0, 2.0]
 LOSS_RTOL = 2e-4
-
-
-def build_model(seed: int):
-    torch.manual_seed(seed)
-    config = Qwen3Config(**TINY_QWEN3_CONFIG, num_labels=NUM_LABELS, pad_token_id=PAD_ID, eos_token_id=1)
-    return Qwen3ForSequenceClassification(config)
 
 
 def random_rows(n_rows: int, vocab_size: int, g: torch.Generator) -> tuple[list, list]:
@@ -76,53 +76,23 @@ def build_multi_label_dataset(n_rows: int, seed: int) -> Dataset:
     return Dataset.from_dict({"input_ids": ids, "attention_mask": masks, "labels": labels})
 
 
-def pad_batch(ids: list[list[int]], device) -> dict:
-    input_ids = torch.full((len(ids), SEQ_LEN), PAD_ID, dtype=torch.long)
-    attention_mask = torch.zeros((len(ids), SEQ_LEN), dtype=torch.long)
-    for i, row in enumerate(ids):
-        input_ids[i, : len(row)] = torch.tensor(row)
-        attention_mask[i, : len(row)] = 1
-    return {"input_ids": input_ids.to(device), "attention_mask": attention_mask.to(device)}
-
-
 def pooled_reference_logits(model, batch: dict) -> torch.Tensor:
     with torch.no_grad():
         return model(input_ids=batch["input_ids"], attention_mask=batch["attention_mask"]).logits.float()
 
 
 def base_args(output_dir: str, **overrides) -> ClassificationConfig:
-    return ClassificationConfig(
-        output_dir=output_dir,
+    return build_pp_args(
+        ClassificationConfig,
+        output_dir,
         max_steps=N_STEPS,
         per_device_train_batch_size=BATCH,
         per_device_eval_batch_size=BATCH,
         gradient_accumulation_steps=MICROBATCHES,  # becomes the pipeline's microbatch count
         learning_rate=8e-3,
-        lr_scheduler_type="constant",
         max_length=SEQ_LEN,
-        logging_steps=1,
-        save_strategy="no",
-        report_to=[],
-        logging_nan_inf_filter=False,
-        seed=42,
-        bf16=False,
         **overrides,
     )
-
-
-def make_spy(trainer, captured: dict, normalizers: list):
-    real_step = trainer._pp_runner.step
-
-    def spying_step(input_ids, labels, **kwargs):
-        normalizers.append(float(kwargs.get("num_items_in_batch")))
-        if not captured:
-            captured["input_ids"] = input_ids.clone()
-            captured["attention_mask"] = kwargs["attention_mask"].clone()
-            captured["labels"] = labels.clone()
-            captured["extras"] = {k: v.clone() for k, v in (kwargs.get("extra_targets") or {}).items()}
-        return real_step(input_ids, labels, **kwargs)
-
-    trainer._pp_runner.step = spying_step
 
 
 def decode_plane(plane: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
@@ -133,26 +103,34 @@ def decode_plane(plane: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
     return positions, values
 
 
-def check_common(trainer, losses: list, decrease: float) -> dict:
+def check_training(trainer, step1_reference: float, decrease: float, prefix: str) -> tuple[dict, dict]:
+    """COLLECTIVE (the rank-identical loss gather). The finished run's shape and loss curve, and its step-1
+    loss against the world-averaged exact objective ``step1_reference``; metrics named under ``prefix``."""
+    losses = [entry["loss"] for entry in trainer.state.log_history if "loss" in entry]
+    log(f"[{prefix}] step1={losses[0]:.6f} reference={step1_reference:.6f}")
     checks = {
+        "step1_loss_matches_reference": abs(losses[0] - step1_reference) / abs(step1_reference) < LOSS_RTOL,
         "accumulation_became_microbatches": trainer._pp_n_microbatches == MICROBATCHES,
         "ran_all_steps": trainer.state.global_step == N_STEPS,
         "losses_finite": len(losses) == N_STEPS and bool(torch.isfinite(torch.tensor(losses)).all()),
         "loss_decreased": losses[-1] < losses[0] - decrease,
+        "losses_identical_across_ranks": losses_identical_across_ranks(losses),
     }
-    device = torch.cuda.current_device()
-    local = torch.tensor(losses, device=device)
-    gathered = [torch.zeros_like(local) for _ in range(dist.get_world_size())]
-    dist.all_gather(gathered, local)
-    checks["losses_identical_across_ranks"] = all(torch.allclose(local, peer, atol=1e-6) for peer in gathered)
-    return checks
+    metrics = {
+        f"{prefix}_step1": losses[0],
+        f"{prefix}_step1_reference": step1_reference,
+        f"{prefix}_first_loss": losses[0],
+        f"{prefix}_last_loss": losses[-1],
+    }
+    return checks, metrics
 
 
 def scenario_weighted_ce(ctx, tokenizer, output_dir) -> tuple[dict, dict]:
     config = ParallelismConfig(world_size=ctx.world_size, gpus_per_node=2, nvlink_domain_size=2, pp_size=PP_SIZE)
     eval_dataset = build_single_label_dataset(2 * BATCH, seed=23)
-    trainer = ClassificationTrainer(
-        model=build_model(1234),
+    trainer, steps, _ = build_pp_trainer(
+        ClassificationTrainer,
+        model=build_seq_cls_model(NUM_LABELS),
         # eval_strategy exercises the in-loop PP eval too (the construction-time PP eval gates run
         # only when it is set); the exactness checks below use a manual evaluate() at init weights.
         args=base_args(
@@ -165,7 +143,7 @@ def scenario_weighted_ce(ctx, tokenizer, output_dir) -> tuple[dict, dict]:
         is_multi_label=False,
         parallelism_config=config,
     )
-    reference = build_model(1234).to(ctx.device).float().eval()
+    reference = build_seq_cls_model(NUM_LABELS).to(ctx.device).float().eval()
     weight = torch.tensor(CLASS_WEIGHTS, device=ctx.device)
     checks, metrics = {}, {}
     checks["no_extra_targets_single_label"] = trainer._pp_adapter.extra_target_keys == ()
@@ -174,7 +152,7 @@ def scenario_weighted_ce(ctx, tokenizer, output_dir) -> tuple[dict, dict]:
     # mean) and sklearn metrics from the pooled logits the PP prediction step broadcasts.
     eval_metrics = trainer.evaluate()
     all_labels = torch.tensor(eval_dataset["labels"], device=ctx.device)
-    pooled_full = pooled_reference_logits(reference, pad_batch(eval_dataset["input_ids"], ctx.device))
+    pooled_full = pooled_reference_logits(reference, right_pad(eval_dataset["input_ids"], SEQ_LEN, ctx.device))
     shard_losses = [
         float(F.cross_entropy(pooled_full[lo : lo + BATCH], all_labels[lo : lo + BATCH], weight=weight))
         for lo in (0, BATCH)
@@ -191,9 +169,9 @@ def scenario_weighted_ce(ctx, tokenizer, output_dir) -> tuple[dict, dict]:
     checks["eval_accuracy_matches_sklearn_recompute"] = abs(eval_metrics["eval_accuracy"] - reference_accuracy) < 1e-6
     metrics["ce_eval_loss"], metrics["ce_reference_eval"] = eval_metrics["eval_loss"], reference_eval
 
-    captured, normalizers = {}, []
-    make_spy(trainer, captured, normalizers)
     trainer.train()
+    captured = steps[0]
+    normalizers = [step["num_items"] for step in steps]
 
     positions, targets = decode_plane(captured["labels"])
     lengths = captured["attention_mask"].sum(dim=-1)
@@ -208,15 +186,7 @@ def scenario_weighted_ce(ctx, tokenizer, output_dir) -> tuple[dict, dict]:
     pooled = pooled_reference_logits(
         reference, {"input_ids": captured["input_ids"], "attention_mask": captured["attention_mask"]}
     )
-    local_reference = F.cross_entropy(pooled, targets, weight=weight)
-    dist.all_reduce(local_reference, op=dist.ReduceOp.AVG)
-    losses = [entry["loss"] for entry in trainer.state.log_history if "loss" in entry]
-    log(f"[rank {ctx.rank}] weighted-CE step1={losses[0]:.6f} reference={float(local_reference):.6f}")
-    checks["step1_loss_matches_reference"] = (
-        abs(losses[0] - float(local_reference)) / abs(float(local_reference)) < LOSS_RTOL
-    )
-    metrics["ce_step1"], metrics["ce_step1_reference"] = losses[0], float(local_reference)
-    metrics["ce_first_loss"], metrics["ce_last_loss"] = losses[0], losses[-1]
+    expected = world_mean(float(F.cross_entropy(pooled, targets, weight=weight)))
 
     # eval_strategy="steps" ran two in-loop evals (steps 5 and 10) through the PP prediction step
     # with compute_metrics active on trained weights — they must have produced finite losses.
@@ -225,7 +195,9 @@ def scenario_weighted_ce(ctx, tokenizer, output_dir) -> tuple[dict, dict]:
         torch.isfinite(torch.tensor(eval_losses)).all()
     )
 
-    checks.update(check_common(trainer, losses, decrease=0.05))
+    c, m = check_training(trainer, expected, decrease=0.05, prefix="ce")
+    checks.update(c)
+    metrics.update(m)
     del trainer
     torch.cuda.empty_cache()
     return {f"ce_{name}": ok for name, ok in checks.items()}, metrics
@@ -234,8 +206,9 @@ def scenario_weighted_ce(ctx, tokenizer, output_dir) -> tuple[dict, dict]:
 def scenario_multi_label_bce(ctx, tokenizer, output_dir) -> tuple[dict, dict]:
     config = ParallelismConfig(world_size=ctx.world_size, gpus_per_node=2, nvlink_domain_size=2, pp_size=PP_SIZE)
     train_dataset = build_multi_label_dataset(24, seed=11)
-    trainer = ClassificationTrainer(
-        model=build_model(4321),
+    trainer, steps, _ = build_pp_trainer(
+        ClassificationTrainer,
+        model=build_seq_cls_model(NUM_LABELS, seed=4321),
         args=base_args(output_dir, loss_type="cross_entropy", class_weights=CLASS_WEIGHTS),
         train_dataset=train_dataset,
         processing_class=tokenizer,
@@ -243,7 +216,7 @@ def scenario_multi_label_bce(ctx, tokenizer, output_dir) -> tuple[dict, dict]:
         is_multi_label=True,
         parallelism_config=config,
     )
-    reference = build_model(4321).to(ctx.device).float().eval()
+    reference = build_seq_cls_model(NUM_LABELS, seed=4321).to(ctx.device).float().eval()
     pos_weight = torch.tensor(CLASS_WEIGHTS, device=ctx.device)
     checks, metrics = {}, {}
     checks["class_targets_declared"] = trainer._pp_adapter.extra_target_keys == ("class_targets",)
@@ -251,7 +224,7 @@ def scenario_multi_label_bce(ctx, tokenizer, output_dir) -> tuple[dict, dict]:
     # ── Direct partial-batch prediction step (2 rows < frozen 4): exercises inert row padding,
     # trimming, and the pooled-logits broadcast against transformers' own pooled forward.
     small = train_dataset[:2]
-    small_batch = pad_batch(small["input_ids"], ctx.device)
+    small_batch = right_pad(small["input_ids"], SEQ_LEN, ctx.device)
     small_batch["labels"] = torch.tensor(small["labels"], dtype=torch.float32, device=ctx.device)
     loss, logits, returned_labels = trainer.prediction_step(trainer.model, dict(small_batch), False)
     reference_pooled = pooled_reference_logits(reference, small_batch)
@@ -261,14 +234,14 @@ def scenario_multi_label_bce(ctx, tokenizer, output_dir) -> tuple[dict, dict]:
     checks["partial_batch_loss_matches"] = abs(float(loss) - float(reference_loss)) < 1e-4
     checks["partial_batch_labels_roundtrip"] = torch.equal(returned_labels, small_batch["labels"])
 
-    captured, normalizers = {}, []
-    make_spy(trainer, captured, normalizers)
     trainer.train()
+    captured = steps[0]
+    normalizers = [step["num_items"] for step in steps]
 
     checks["normalizer_is_element_count"] = len(normalizers) == N_STEPS and all(
         abs(value - BATCH * NUM_LABELS) < 1e-6 for value in normalizers
     )
-    targets = captured["extras"]["class_targets"]
+    targets = captured["class_targets"]
     checks["class_targets_are_multi_hot"] = targets.shape == (BATCH, NUM_LABELS) and bool(
         ((targets == 0) | (targets == 1)).all()
     )
@@ -276,17 +249,10 @@ def scenario_multi_label_bce(ctx, tokenizer, output_dir) -> tuple[dict, dict]:
     pooled = pooled_reference_logits(
         reference, {"input_ids": captured["input_ids"], "attention_mask": captured["attention_mask"]}
     )
-    local_reference = F.binary_cross_entropy_with_logits(pooled, targets, pos_weight=pos_weight)
-    dist.all_reduce(local_reference, op=dist.ReduceOp.AVG)
-    losses = [entry["loss"] for entry in trainer.state.log_history if "loss" in entry]
-    log(f"[rank {ctx.rank}] BCE step1={losses[0]:.6f} reference={float(local_reference):.6f}")
-    checks["step1_loss_matches_reference"] = (
-        abs(losses[0] - float(local_reference)) / abs(float(local_reference)) < LOSS_RTOL
-    )
-    metrics["bce_step1"], metrics["bce_step1_reference"] = losses[0], float(local_reference)
-    metrics["bce_first_loss"], metrics["bce_last_loss"] = losses[0], losses[-1]
-
-    checks.update(check_common(trainer, losses, decrease=0.03))
+    expected = world_mean(float(F.binary_cross_entropy_with_logits(pooled, targets, pos_weight=pos_weight)))
+    c, m = check_training(trainer, expected, decrease=0.03, prefix="bce")
+    checks.update(c)
+    metrics.update(m)
     del trainer
     torch.cuda.empty_cache()
     return {f"bce_{name}": ok for name, ok in checks.items()}, metrics
@@ -294,10 +260,7 @@ def scenario_multi_label_bce(ctx, tokenizer, output_dir) -> tuple[dict, dict]:
 
 @gpu_test_main(exact_world_size=4, prefix="pp_classification")
 def run(ctx):
-    tokenizer = AutoTokenizer.from_pretrained(QWEN3_0_6B)
-    # The tiny model's vocab is 1024; Qwen's real pad id would overflow the embedding, so pad with
-    # token 0 (data rows are drawn from [4, vocab) — pad never collides with a real token).
-    tokenizer.pad_token = tokenizer.convert_ids_to_tokens(PAD_ID)
+    tokenizer = tiny_vocab_tokenizer()
 
     checks, metrics = {}, {}
     ce_checks, ce_metrics = scenario_weighted_ce(ctx, tokenizer, ctx.output_dir)

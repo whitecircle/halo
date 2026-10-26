@@ -38,7 +38,7 @@ import sys
 import torch
 import torch.distributed as dist
 
-from src.distributed.expert_parallel.moe_layer.layer import EPMoELayerBase
+from src.distributed.expert_parallel.moe_layer.layer import named_ep_layers
 from src.distributed.parallelism_config import ParallelismConfig
 from tests.common import pp_equivalence as ppeq
 from tests.common.harness import gpu_test_main
@@ -80,7 +80,7 @@ def run(ctx):
     )
 
     model = ppeq.build_patched_moe_model(config, dtype=torch.float32)
-    checks["unsplit_model_has_all_ep_layers"] = ppeq.count_ep_layers(model) == TOTAL_LAYERS
+    checks["unsplit_model_has_all_ep_layers"] = len(named_ep_layers(model)) == TOTAL_LAYERS
 
     trainer = ppeq.build_pp_sft_trainer(
         ctx,
@@ -93,7 +93,7 @@ def run(ctx):
         bf16=False,
     )
     stage = trainer._top_level_model()
-    ep_modules = [(name, m) for name, m in stage.named_modules() if isinstance(m, EPMoELayerBase)]
+    ep_modules = named_ep_layers(stage)
     ep_cfg = trainer._ep_config
     checks["stage_keeps_half_the_ep_layers"] = len(ep_modules) == TOTAL_LAYERS // PP_SIZE
     checks["defer_grad_sync_active"] = bool(ep_cfg.defer_grad_sync)

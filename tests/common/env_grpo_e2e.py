@@ -1,32 +1,7 @@
-"""Shared body for the per-engine Environmental-GRPO end-to-end tests.
-
-``test_env_grpo_vllm_e2e.py`` and ``test_env_grpo_sglang_e2e.py`` are thin wrappers over
-:func:`run_env_grpo_e2e`: the engines differ only in which server the rollouts and the weight-sync
-group talk to, so the assertions live in one place. They stay separate scripts because the manifest
-attaches ``vllm_server`` / ``sglang_server`` markers per file, and a single file carrying both would
-require both servers for either selection.
-
-The assertions are on the served policy rather than the trainer's tensors: a run whose weight sync
-never landed still returns from ``train()``. The trainer-agnostic half (the served-policy probe, the
-perturbation round, the restore-point snapshot and the resume comparisons) lives in
-:mod:`tests.common.on_policy_e2e`, which the online-GRPO body drives too; what is here is what
+"""Shared body of the Environmental-GRPO end-to-end tests: the vLLM and SGLang wrappers (one per engine, since
+the manifest attaches each server marker per file) and the single-process one drive :func:`run_env_grpo_e2e`.
+The assertions are on the served policy, through :mod:`tests.common.on_policy_e2e`; what is here is what
 Environmental GRPO alone needs (Ray rollout actors, multi-turn trajectories, per-turn token capture).
-
-The model is a MoE in both modes, so each engine's rows are an A/B across the ep split:
-``ep_size=1`` shards experts as DTensor under FSDP2 (``fsdp_shard_ep1_experts``), while
-``ep_size>1`` leaves them FSDP-ignored plain tensors. Those are different gather paths into the same
-engine loader, and only the served policy distinguishes them.
-
-``peft`` puts the run on the adapter path (``"lora"`` attention PEFT, ``"expert_lora"`` native
-grouped expert adapters), where an adapter reaches the engine only through the fold the sync performs
-(the out-of-place PEFT fold for attention, ``merge_lora=True`` in the expert gather).
-
-``resume`` covers the train-begin force sync. Phase 1 trains to ``RESUME_MAX_STEPS`` with a
-checkpoint at ``RESUME_SAVE_STEP``, and the perturbation round then moves the engine off that policy.
-Phase 2 is a fresh model and trainer resuming with one step left, so the train-begin push is the only
-thing that can reach the engine before the resumed rollout. The resumed policy must land exactly on
-the checkpoint's: a full fine-tune's checkpoint restores the weights, an adapter row's restores its
-adapters bit-equal over a freshly loaded base, which phase 1's syncs left as loaded.
 """
 
 import math
@@ -55,12 +30,12 @@ from tests.common.on_policy_e2e import (
     fresh_parallelism_config,
     load_policy,
     logged_lrs,
-    parallelism_engaged,
     perturbation_round,
     probe_top_logprobs,
     qa_dataset,
     record_adapter_training,
     record_optimizer_restore,
+    record_parallelism_engaged,
     record_resume_continuity,
     record_scheduler_restore,
     record_served_baseline,
@@ -91,7 +66,16 @@ LEARNING_RATE = 1e-4
 
 
 def _make_trainer(
-    *, model, tokenizer, dataset, parallelism_config, peft_config, grpo_config, async_config, trainer_cls
+    *,
+    model,
+    tokenizer,
+    dataset,
+    parallelism_config,
+    peft_config,
+    grpo_config,
+    async_config,
+    trainer_cls,
+    environment_type,
 ):
     return trainer_cls(
         model=model,
@@ -101,7 +85,7 @@ def _make_trainer(
         async_config=async_config,
         parallelism_config=parallelism_config,
         peft_config=peft_config,
-        environment_config=EnvironmentConfig(environment_type="native_math", max_turns=2),
+        environment_config=EnvironmentConfig(environment_type=environment_type, max_turns=2),
     )
 
 
@@ -134,11 +118,19 @@ def _grpo_config(*, output_dir: str, max_steps: int, group_port: int, save: bool
 
 
 def _async_config(
-    *, backend: str, server_url: str, model_name: str, thinking_budget: int | None, routing_replay: str
+    *,
+    backend: str,
+    server_url: str,
+    pool_urls: tuple[str, ...],
+    model_name: str,
+    thinking_budget: int | None,
+    routing_replay: str,
 ) -> AsyncTrainingConfig:
     return AsyncTrainingConfig(
         rollout_backend=backend,
         rollout_server_url=server_url,
+        # Each pool server's group port is the base vllm_group_port plus its index.
+        rollout_server_configs=[{"url": url} for url in pool_urls] or None,
         rollout_connection_timeout=180.0,
         num_rollout_workers=2,
         max_concurrent_rollouts=2,
@@ -188,17 +180,17 @@ def run_env_grpo_e2e(
     model_name: str = MODEL_NAME,
     thinking_budget: int | None = None,
     routing_replay: str = "none",
+    environment_type: str = "native_math",
+    pool_urls: tuple[str, ...] = (),
 ) -> dict:
     """Train Environmental GRPO against a live ``backend`` server and assert the sync landed.
 
-    ``model_name`` is the checkpoint both sides use: the trainer loads it and the server must already
-    serve it. It is a parameter because each engine's default family differs and a per-family pass
-    points both wrappers at the family under test.
-
-    ``peft`` selects the adapter path (``"lora"`` / ``"expert_lora"``) and ``resume`` adds the
-    second, resumed phase; both are described in the module docstring. ``thinking_budget`` sets
-    ``rollout_max_thinking_tokens`` and grades what the engine reasoned against it
-    (:mod:`tests.common.thinking_budget`).
+    ``model_name`` is the checkpoint both sides use, which the server must already serve. ``ep_size`` 1 and 2
+    are an A/B across the expert gather (DTensor experts in the FSDP2 shard vs FSDP-ignored plain tensors).
+    ``peft`` puts the run on an adapter fold; ``resume`` adds a fresh phase with one step left, whose
+    train-begin push must land the engine on the checkpoint's policy; ``thinking_budget`` sets and grades
+    ``rollout_max_thinking_tokens``. ``pool_urls`` (``server_url`` among them) pushes through a WeightSyncPool
+    instead of one client, and every one of those servers must serve the moved policy.
     """
     checks: dict[str, bool] = {}
     metrics: dict[str, float] = {}
@@ -235,6 +227,7 @@ def run_env_grpo_e2e(
     async_config = _async_config(
         backend=backend,
         server_url=server_url,
+        pool_urls=pool_urls,
         model_name=model_name,
         thinking_budget=thinking_budget,
         routing_replay=routing_replay,
@@ -259,6 +252,7 @@ def run_env_grpo_e2e(
         "trainer_cls": ReasoningTurnRecorder
         if thinking_budget is not None
         else DistributedAsyncEnvironmentalGRPOTrainer,
+        "environment_type": environment_type,
     }
 
     # Adapters under TP are refused where the trainer realizes its parallel modes, so the refusal
@@ -298,10 +292,10 @@ def run_env_grpo_e2e(
     if resume:
         trainer.add_callback(saved_state)
 
-    checks["parallelism_engaged"] = parallelism_engaged(trainer, ep_size, tp_size, expert_tp_size)
+    record_parallelism_engaged(ctx, trainer, ep_size, tp_size, expert_tp_size, checks)
     log(
         f"  ep_size={ep_size} tp_size={tp_size} expert_tp_size={expert_tp_size} peft={peft} "
-        f"engaged={checks['parallelism_engaged']} (ep_config={getattr(trainer._ep_config, 'ep_size', None)})"
+        f"(ep_config={getattr(trainer._ep_config, 'ep_size', None)})"
     )
 
     adapters_before: dict[str, torch.Tensor] = {}
@@ -338,10 +332,15 @@ def run_env_grpo_e2e(
         record_adapter_training(trainer, checks, before=adapters_before, expert_lora=expert_lora, trained=trained)
 
     # ── 4. a sync through the trainer's own client must reach the served policy ───────────────
+    # On every server: a pool push whose chunks stop at the first leaves the rest serving a stale policy
+    # with no error at all.
+    servers = pool_urls or (server_url,)
+    served: dict[str, dict[str, float]] = {}
     ctx.barrier()
     if ctx.rank == 0:
-        pre_perturb = probe_top_logprobs(server_url, model_name)
-        checks["served_logprobs_finite"] = all(math.isfinite(v) for v in pre_perturb.values())
+        served = {url: probe_top_logprobs(url, model_name) for url in servers}
+        pre_perturb = served[server_url]
+        checks["served_logprobs_finite"] = all(math.isfinite(v) for probe in served.values() for v in probe.values())
         log(f"  post-training: { {k: round(v, 4) for k, v in pre_perturb.items()} }")
     what = perturbation_round(
         ctx,
@@ -353,14 +352,18 @@ def run_env_grpo_e2e(
     ctx.barrier()
 
     if ctx.rank == 0:
-        after = probe_top_logprobs(server_url, model_name)
-        checks["forced_sync_moved_the_served_policy"] = served_policy_moved(after, pre_perturb)
-        if not checks["forced_sync_moved_the_served_policy"]:
-            log(f"  IDENTICAL or non-finite logprobs after a {what} perturbation: the weight sync did not land")
-        log(f"  post-forced-sync: { {k: round(v, 4) for k, v in after.items()} }")
+        after = {url: probe_top_logprobs(url, model_name) for url in servers}
+        unmoved = [url for url in servers if not served_policy_moved(after[url], served[url])]
+        checks["forced_sync_moved_the_served_policy"] = not unmoved
+        if unmoved:
+            log(f"  IDENTICAL or non-finite logprobs on {unmoved} after a {what} perturbation: the sync did not land")
+        log(f"  post-forced-sync: { {k: round(v, 4) for k, v in after[server_url].items()} }")
         # A failed update leaves the engine partially written, and both engines' docs say to discard
         # such a server rather than keep serving from it, so check that it still answers.
         checks["server_usable_after_sync"] = bool(probe_top_logprobs(server_url, model_name))
+        if pool_urls:
+            clients = len(getattr(trainer._weight_sync_client, "_clients", ()))
+            checks["pool_drove_one_client_per_server"] = trainer._multi_server_mode and clients == len(pool_urls)
     ctx.barrier()
 
     # ── 5. the expert stream alone must move the served policy ───────────────────────────────
@@ -446,6 +449,7 @@ def run_env_grpo_e2e(
         ),
         async_config=async_config,
         trainer_cls=DistributedAsyncEnvironmentalGRPOTrainer,
+        environment_type=environment_type,
     )
     live["trainer"] = trainer
     restored_state = RestorePointSnapshot(

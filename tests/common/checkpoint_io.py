@@ -1,28 +1,13 @@
-"""Readers for the artifacts the toolkit's checkpoint writers produce, and the probes round-trip tests
-compare them by.
-
-Key-set assertions go through the production reader (``load_full_state_dict``): it accepts both
-layouts the writers pick between by size (index+shards vs a bare ``model.safetensors``) and refuses a
-per-rank EP/TP index, which a test-local reader would accept as a whole checkpoint. A stock
-``from_pretrained`` load of a checkpoint is clean when :func:`loading_problems` reports nothing.
-
-A two-phase resume compares the state at the save with the state the resume restored
-(:class:`RestorePointSnapshot`).
-
-A save→reload or save→resume test proves the weights survived by value: the same fixed batch's forward
-loss before the save and after the reload (:func:`fixed_batch_loss`). A resume test also reads the
-optimizer and scheduler state the checkpoint restored, snapshotted before the first resumed step
-(:class:`ResumeCapture`) and graded by :func:`resume_continuity_checks`. The file probes (:func:`model_save_checks`, :func:`resume_checkpoint_checks`)
-name what a save must have left on disk before any of that is read.
-
-The CPU tests of the per-rank optimizer shard store save and resume a tiny model through
-:func:`shard_store_context`, which routes it to the sharded path without FSDP; a test driving a saver
-builds its context with :func:`save_context`.
+"""Readers for the artifacts the toolkit's checkpoint writers produce, and the probes save, reload and resume
+tests compare them by: key sets through the production reader (``load_full_state_dict``), the files a save
+must leave, the same fixed batch's loss before a save and after its reload or resume, and the optimizer and
+scheduler state a resume restored (:func:`run_two_phase_resume` drives the whole save-then-resume shape).
 """
 
 import json
 import math
 import os
+from collections.abc import Callable
 
 import torch
 import torch.nn as nn
@@ -40,13 +25,21 @@ from src.checkpoint.parallel.context import CheckpointContext, CheckpointLoadCon
 from src.checkpoint.reading import has_whole_model_weight_file, load_full_state_dict
 from src.distributed.fsdp import reshard_fsdp2_modules
 from src.runtime.filesystem import is_fs_save_rank
+from tests.common.parallel_shape import parallel_shape_checks
 from tests.common.parallelism import make_parallelism_config
 from tests.common.peft_helpers import snapshot_adapters, unwrap
-from tests.common.utils import local_optimizer_state, log, optimizer_state_matches
+from tests.common.tolerances import TOL
+from tests.common.utils import (
+    cleanup_memory,
+    local_optimizer_state,
+    log,
+    optimizer_state_matches,
+    training_run_checks,
+)
 
 # The key lists ``from_pretrained``'s loading info reports; a clean load leaves every one empty.
 LOADING_INFO_KINDS = ("missing_keys", "unexpected_keys", "mismatched_keys")
-# Truncation bound for a :func:`fixed_text_batch` sequence; the short probe texts stay under it.
+# Truncation bound and padded length of a :func:`fixed_text_batch` sequence; the probe texts stay under it.
 FIXED_TEXT_BATCH_MAX_TOKENS = 64
 # The per-rank optimizer shards and the fingerprint meta a sharded save writes, spelled independently of
 # the writer so a rename fails here instead of agreeing with itself.
@@ -54,15 +47,19 @@ OPTIMIZER_SHARD_FILE = "optimizer_shard_{rank:05d}.pt"
 OPTIMIZER_META_FILE = "optimizer_meta.pt"
 # Exported so a resume test can assert the learning rate a restore leaves in place.
 SHARD_ROUND_TRIP_LR = 0.05
-# The fixed-batch probe of the TP resume suites, scored before the save and after the resume.
-TP_RESUME_PROBE_TEXT = (
+# The fixed-batch probe of the resume suites, scored before the save and after the resume.
+RESUME_PROBE_TEXT = (
     "User: What is 17 plus 25?\nAssistant: The answer is 42. "
-    "The TP gather and re-shard must survive a checkpoint save and resume intact."
+    "Weights must survive a checkpoint save and resume intact across parallelism modes."
 )
 
 
 def written_keys(output_dir: str) -> set[str]:
-    """Every tensor key present in the gathered checkpoint at ``output_dir`` (see module docstring)."""
+    """Every tensor key present in the gathered checkpoint at ``output_dir``.
+
+    Read through the production reader, which takes both writer layouts (index plus shards, or a bare
+    ``model.safetensors``) and refuses a per-rank EP/TP index a test-local reader would accept.
+    """
     state = load_full_state_dict(output_dir)
     assert state is not None, f"no checkpoint at {output_dir}"
     return set(state)
@@ -144,16 +141,26 @@ def resume_checkpoint_checks(checkpoint_dir: str, world_size: int) -> dict[str, 
     return checks
 
 
-def fixed_text_batch(tokenizer, device, text: str) -> tuple[torch.Tensor, torch.Tensor]:
+def fixed_text_batch(tokenizer, device, text: str, *, pad: bool = False) -> tuple[torch.Tensor, torch.Tensor]:
     """``text`` as a one-sequence ``(input_ids, labels)`` batch for :func:`fixed_batch_loss`, every token
     scored.
 
     Tokenized identically on every call, so the loss before a save and after the reload or resume
-    compares the same tokens.
+    compares the same tokens. ``pad`` pads to the even :data:`FIXED_TEXT_BATCH_MAX_TOKENS`, which CP can
+    split, and leaves the padding unscored.
     """
-    encoded = tokenizer(text, return_tensors="pt", truncation=True, max_length=FIXED_TEXT_BATCH_MAX_TOKENS)
+    encoded = tokenizer(
+        text,
+        return_tensors="pt",
+        truncation=True,
+        max_length=FIXED_TEXT_BATCH_MAX_TOKENS,
+        padding="max_length" if pad else False,
+    )
     input_ids = encoded["input_ids"].to(device)
-    return input_ids, input_ids.clone()
+    labels = input_ids.clone()
+    if pad:
+        labels[input_ids == tokenizer.pad_token_id] = -100
+    return input_ids, labels
 
 
 def fixed_batch_loss(model, input_ids: torch.Tensor, labels: torch.Tensor) -> float:
@@ -423,3 +430,70 @@ def resume_continuity_checks(
         if not bit_exact:
             log(f"  ERROR: optimizer state not bit-exact after resume: {why}")
     return checks
+
+
+def run_two_phase_resume(
+    ctx,
+    build_trainer: Callable[..., object],
+    *,
+    output_dir: str,
+    probe: tuple[torch.Tensor, torch.Tensor],
+    save_at_step: int = 3,
+    total_steps: int = 6,
+    optimizer_state: bool = False,
+) -> dict[str, bool]:
+    """COLLECTIVE. Train to ``save_at_step`` with a checkpoint there, resume a fresh trainer from it to
+    ``total_steps``, and return both phases' named checks, phase 2's prefixed ``resume_``.
+
+    ``build_trainer(checkpoint, **schedule)`` builds one phase's trainer: ``checkpoint`` is ``None`` in
+    phase 1 and the checkpoint directory in phase 2, which the suite turns into its weights source, and
+    ``schedule`` carries the phase's ``output_dir``, ``max_steps`` and save arguments for its config.
+    ``probe`` is the fixed batch :func:`fixed_batch_loss` scores before the save and at the first resumed
+    step; ``optimizer_state`` adds the bit-exact optimizer compare (:class:`ResumeCapture`).
+    """
+    checkpoint = os.path.join(output_dir, f"checkpoint-{save_at_step}")
+    log(f"\n  Phase 1: train {save_at_step} steps, checkpoint at the last")
+    trainer = build_trainer(
+        None,
+        output_dir=output_dir,
+        max_steps=save_at_step,
+        save_strategy="steps",
+        save_steps=save_at_step,
+        save_total_limit=1,
+    )
+    shape_checks = parallel_shape_checks(trainer.model, trainer.parallelism_config)
+    checks = training_run_checks(trainer.train(), trainer, save_at_step)
+    l_pre = fixed_batch_loss(trainer.model, *probe)
+    # Nothing steps the optimizer after the save at the last step, so this is the state its shards hold.
+    saved_optimizer = local_optimizer_state(trainer.model, trainer.optimizer) if optimizer_state else None
+    ctx.barrier()
+    checks |= ctx.broadcast_checks(resume_checkpoint_checks(checkpoint, ctx.world_size) if ctx.rank == 0 else {})
+    trainer.cleanup_ep()
+    del trainer
+    cleanup_memory()
+    ctx.barrier()
+    # Gated on the rank-uniform checks alone (world-mean losses, rank 0's file verdict), so every rank
+    # takes the same branch; the shape checks are each rank's own.
+    if not all(checks.values()):
+        log("  Phase 1 FAILED, skipping the resume")
+        return shape_checks | checks
+
+    log(f"\n  Phase 2: resume from {checkpoint} to step {total_steps}")
+    trainer = build_trainer(checkpoint, output_dir=output_dir, max_steps=total_steps, save_strategy="no")
+    capture = ResumeCapture(trainer, *probe, optimizer_state=optimizer_state)
+    trainer.add_callback(capture)
+    resumed = parallel_shape_checks(trainer.model, trainer.parallelism_config)
+    resumed |= training_run_checks(trainer.train(resume_from_checkpoint=checkpoint), trainer, total_steps)
+    checks |= {f"resume_{name}": ok for name, ok in resumed.items()}
+    checks |= resume_continuity_checks(
+        capture.capture,
+        l_pre,
+        save_step=save_at_step,
+        loss_tol=TOL.resume_fixed_batch_loss_abs,
+        optimizer_state=saved_optimizer,
+    )
+    trainer.cleanup_ep()
+    del trainer, capture
+    cleanup_memory()
+    ctx.barrier()
+    return shape_checks | checks

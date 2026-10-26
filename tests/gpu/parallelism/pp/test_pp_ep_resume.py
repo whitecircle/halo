@@ -25,21 +25,23 @@ import sys
 
 import torch
 import torch.distributed as dist
-from datasets import Dataset
-from torch.distributed.checkpoint.state_dict import StateDictOptions, get_optimizer_state_dict
-from transformers import AutoTokenizer, GptOssConfig, GptOssForCausalLM, default_data_collator
+from transformers import AutoTokenizer, GptOssForCausalLM
 from trl import SFTConfig
 
-from src.callbacks.balancing import configure_moe_balancing
-from src.callbacks.factory import build_run_callbacks
-from src.configs.script_arguments import CommonScriptArguments
-from src.distributed.expert_parallel.moe_layer.layer import EPMoELayerBase
-from src.distributed.expert_parallel.parallelize import apply_ep_layers
+from src.distributed.expert_parallel.moe_layer.layer import named_ep_layers
 from src.distributed.parallelism_config import ParallelismConfig
 from src.models.unwrapping import unwrap_toolkit_wrappers
-from src.trainers.sft import DistributedSFTTrainer
+from tests.common.distributed import shared_output_dir, world_all
 from tests.common.harness import gpu_test_main
 from tests.common.models import QWEN3_0_6B, TINY_GPTOSS_CONFIG
+from tests.common.pp_equivalence import build_gptoss_model
+from tests.common.pp_trainers import (
+    build_bias_balanced_sft_trainer,
+    build_pp_args,
+    build_sft_rows,
+    losses_identical_across_ranks,
+    restored_moments_match_shard,
+)
 from tests.common.utils import log
 
 PP_SIZE = 2
@@ -47,49 +49,6 @@ EP_SIZE = 2
 SEQ_LEN = 64
 N_STEPS = 8
 SAVE_STEP = 4
-
-
-def build_model(name_or_path: str | None = None):
-    torch.manual_seed(1234)
-    if name_or_path is not None:
-        return GptOssForCausalLM.from_pretrained(name_or_path, dtype=torch.bfloat16, attn_implementation="eager")
-    cfg = GptOssConfig(**TINY_GPTOSS_CONFIG, pad_token_id=0, eos_token_id=1)
-    return GptOssForCausalLM(cfg).to(torch.bfloat16)
-
-
-def build_dataset(vocab_size: int) -> Dataset:
-    g = torch.Generator().manual_seed(7)
-    rows = torch.randint(4, vocab_size, (16, SEQ_LEN), generator=g)
-    labels = rows.clone()
-    for i in range(labels.size(0)):
-        labels[i, : 4 + (i % 11)] = -100
-    return Dataset.from_dict(
-        {
-            "input_ids": rows.tolist(),
-            "labels": labels.tolist(),
-            "attention_mask": torch.ones_like(rows).tolist(),
-        }
-    )
-
-
-def build_args(output_dir: str, max_steps: int, save_steps: int | None = None) -> SFTConfig:
-    return SFTConfig(
-        output_dir=output_dir,
-        max_steps=max_steps,
-        per_device_train_batch_size=4,
-        gradient_accumulation_steps=2,  # becomes the pipeline's microbatch count
-        learning_rate=5e-3,
-        lr_scheduler_type="constant",
-        max_length=SEQ_LEN,
-        logging_steps=1,
-        save_strategy="steps" if save_steps else "no",
-        save_steps=save_steps or 500,
-        report_to=[],
-        logging_nan_inf_filter=False,
-        seed=42,
-        bf16=True,
-        gradient_checkpointing=False,  # resume compares optimizer state, not the checkpoint path
-    )
 
 
 @gpu_test_main(exact_world_size=4, prefix="pp_ep_resume")
@@ -100,30 +59,31 @@ def run(ctx):
         world_size=ctx.world_size, gpus_per_node=2, nvlink_domain_size=2, pp_size=PP_SIZE, ep_size=EP_SIZE
     )
 
-    dirs: list = [None] * ctx.world_size
-    dist.all_gather_object(dirs, ctx.output_dir)
-    root = dirs[0]
+    root = shared_output_dir(ctx)
 
-    def make_trainer(subdir: str, max_steps: int, save_steps: int | None = None, from_ckpt: str | None = None):
-        model = build_model(from_ckpt)
-        apply_ep_layers(model, config.ep_config())
-        args = build_args(os.path.join(root, subdir), max_steps, save_steps)
-        script_args = CommonScriptArguments(moe_balancing="bias_update")
-        mode = configure_moe_balancing(script_args, model, config)
-        callbacks = build_run_callbacks(script_args, args, model, config, balancing_mode=mode)
-        return DistributedSFTTrainer(
-            model=model,
-            args=args,
-            train_dataset=build_dataset(TINY_GPTOSS_CONFIG["vocab_size"]),
-            processing_class=tokenizer,
-            data_collator=default_data_collator,
-            callbacks=callbacks,
-            parallelism_config=config,
-            moe_balancing=script_args.moe_balancing,
+    def build_trainer(subdir: str, max_steps: int, save_steps: int | None = None, from_ckpt: str | None = None):
+        model = (
+            build_gptoss_model()
+            if from_ckpt is None
+            else GptOssForCausalLM.from_pretrained(from_ckpt, dtype=torch.bfloat16, attn_implementation="eager")
+        )
+        args = build_pp_args(
+            SFTConfig,
+            os.path.join(root, subdir),
+            max_steps=max_steps,
+            per_device_train_batch_size=4,
+            max_length=SEQ_LEN,
+            save_strategy="steps" if save_steps else "no",
+            save_steps=save_steps or 500,
+            bf16=True,
+            gradient_checkpointing=False,  # resume compares optimizer state, not the checkpoint path
+        )
+        return build_bias_balanced_sft_trainer(
+            model, args, config, tokenizer, build_sft_rows(TINY_GPTOSS_CONFIG["vocab_size"])
         )
 
     # ── train 4 steps, checkpoint at step 4 (EP gather + biases + optimizer shards) ─────────────
-    trainer_a = make_trainer("runA", SAVE_STEP, save_steps=SAVE_STEP)
+    trainer_a = build_trainer("runA", SAVE_STEP, save_steps=SAVE_STEP)
     ctx.on_teardown(trainer_a.cleanup_ep)
     trainer_a.train()
     ckpt = os.path.join(root, "runA", f"checkpoint-{SAVE_STEP}")
@@ -150,7 +110,7 @@ def run(ctx):
     )
 
     # ── the construction guard: a base-built model must be rejected by the load path ────────────
-    trainer_base = make_trainer("runBase", N_STEPS)
+    trainer_base = build_trainer("runBase", N_STEPS)
     ctx.on_teardown(trainer_base.cleanup_ep)
     guard_raised = False
     try:
@@ -158,12 +118,10 @@ def run(ctx):
     except ValueError as exc:
         guard_raised = "constructed FROM the checkpoint" in str(exc)
         log(f"[guard] raised as expected: {str(exc)[:120]}")
-    flag = torch.tensor([1.0 if guard_raised else 0.0], device=ctx.device)
-    dist.all_reduce(flag, op=dist.ReduceOp.MIN)
-    checks["base_built_model_rejected"] = bool(flag.item())
+    checks["base_built_model_rejected"] = world_all(guard_raised)
 
     # ── the production resume path: model constructed from the checkpoint ───────────────────────
-    trainer_b = make_trainer("runB", N_STEPS, from_ckpt=ckpt)
+    trainer_b = build_trainer("runB", N_STEPS, from_ckpt=ckpt)
     ctx.on_teardown(trainer_b.cleanup_ep)
     trainer_b._load_from_checkpoint(ckpt)
     stage = unwrap_toolkit_wrappers(trainer_b.model)
@@ -191,43 +149,18 @@ def run(ctx):
     # Expert optimizer moments: plain per-rank tensors keyed by stage-local FQN, restored bitwise.
     trainer_b.create_optimizer_and_scheduler(num_training_steps=N_STEPS)
     trainer_b._load_optimizer_and_scheduler(ckpt)
-    shard = torch.load(os.path.join(ckpt, f"optimizer_shard_{rank:05d}.pt"), map_location="cpu", weights_only=False)
-    live_osd = get_optimizer_state_dict(
-        stage, trainer_b.optimizer, options=StateDictOptions(full_state_dict=False, cpu_offload=True)
-    )
-    expert_prefixes = tuple(f"{name}." for name, module in stage.named_modules() if isinstance(module, EPMoELayerBase))
+    expert_prefixes = tuple(f"{name}." for name, _ in named_ep_layers(stage))
     checks["stage_has_ep_layers"] = bool(expert_prefixes)
-
-    def _local(t):
-        return t.to_local() if isinstance(t, torch.distributed.tensor.DTensor) else t
-
-    expert_fqns = [fqn for fqn in shard["state"] if fqn.startswith(expert_prefixes)]
-    expert_ok = bool(expert_fqns)
-    for fqn in expert_fqns:
-        live_state = live_osd["state"].get(fqn)
-        if live_state is None:
-            log(f"[optim] live state missing for expert param {fqn}")
-            expert_ok = False
-            continue
-        for key, saved_value in shard["state"][fqn].items():
-            if not torch.is_tensor(saved_value):
-                continue
-            live_value = live_state.get(key)
-            if live_value is None or not torch.equal(_local(saved_value).cpu(), _local(live_value).cpu()):
-                log(f"[optim] expert moment mismatch at {fqn}.{key}")
-                expert_ok = False
+    expert_ok, n_expert_fqns = restored_moments_match_shard(stage, trainer_b.optimizer, ckpt, rank, expert_prefixes)
     checks["expert_optimizer_moments_bitwise_equal_shard"] = expert_ok
-    metrics["expert_state_fqns"] = len(expert_fqns)
+    metrics["expert_state_fqns"] = n_expert_fqns
 
     # ── end-to-end: resume to completion with finite losses ─────────────────────────────────────
     trainer_b.train(resume_from_checkpoint=ckpt)
     losses = [e["loss"] for e in trainer_b.state.log_history if "loss" in e]
     checks["resume_trained_to_completion"] = trainer_b.state.global_step == N_STEPS and len(losses) == N_STEPS
     checks["resumed_losses_finite"] = bool(torch.isfinite(torch.tensor(losses)).all())
-    local = torch.tensor(losses, device=ctx.device)
-    gathered = [torch.zeros_like(local) for _ in range(ctx.world_size)]
-    dist.all_gather(gathered, local)
-    checks["losses_identical_across_ranks"] = all(torch.allclose(local, g, atol=1e-6) for g in gathered)
+    checks["losses_identical_across_ranks"] = losses_identical_across_ranks(losses)
     metrics["losses"] = ", ".join(f"{v:.5f}" for v in losses)
 
     return {"checks": checks, "metrics": metrics}

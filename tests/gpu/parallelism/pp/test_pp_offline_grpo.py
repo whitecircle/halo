@@ -28,7 +28,6 @@ Run: torchrun --nproc_per_node=4 tests/gpu/parallelism/pp/test_pp_offline_grpo.p
 import sys
 
 import torch
-import torch.distributed as dist
 from datasets import Dataset
 from transformers import AutoTokenizer
 
@@ -39,7 +38,12 @@ from tests.common.distributed import hf_eval_loss_reference, world_mean
 from tests.common.harness import gpu_test_main
 from tests.common.models import QWEN3_0_6B
 from tests.common.pp_equivalence import build_dense_model
-from tests.common.utils import log
+from tests.common.pp_trainers import (
+    build_pp_args,
+    build_pp_trainer,
+    expect_construction_error,
+    losses_identical_across_ranks,
+)
 
 PP_SIZE = 2
 MICROBATCHES = 2
@@ -108,53 +112,36 @@ def offline_grpo_reference(
     return float(weighted.sum() / (group_weights.sum() * MAX_COMPLETION))  # dr_grpo
 
 
-def make_args(output_dir: str, **overrides) -> OfflineGRPOConfig:
-    base = {
-        "output_dir": output_dir,
-        "max_steps": N_STEPS,
-        "per_device_train_batch_size": BATCH,
-        "per_device_eval_batch_size": BATCH,  # PP freezes eval batches to the train shape
-        "gradient_accumulation_steps": MICROBATCHES,  # becomes the pipeline's microbatch count
-        "learning_rate": 5e-3,
-        "lr_scheduler_type": "constant",
-        "logging_steps": 1,
-        "save_strategy": "no",
-        "report_to": [],
-        "logging_nan_inf_filter": False,
-        "seed": 42,
-        "bf16": False,
-        "max_prompt_length": MAX_PROMPT,
-        "max_completion_length": MAX_COMPLETION,
-        "kl_beta": 0.0,
-        "advantage_method": "z_norm",
-        "loss_type": "grpo",
-        "policy_gradient_formulation": "reinforce",
-        "min_log_prob": MIN_LOG_PROB,
-    }
-    base.update(overrides)
-    return OfflineGRPOConfig(**base)
-
-
-def expect_construction_error(name: str, checks: dict, match: str, **trainer_kwargs) -> None:
-    """Construct on every rank expecting a uniform pre-collective ValueError."""
-    try:
-        OfflineGRPOTrainer(**trainer_kwargs)
-        checks[name] = False
-    except ValueError as exc:
-        checks[name] = match in str(exc)
-        if not checks[name]:
-            log(f"[{name}] raised without the expected mechanism: {exc}")
+def build_args(output_dir: str, **overrides) -> OfflineGRPOConfig:
+    return build_pp_args(
+        OfflineGRPOConfig,
+        output_dir,
+        **{
+            "max_steps": N_STEPS,
+            "per_device_train_batch_size": BATCH,
+            "per_device_eval_batch_size": BATCH,  # PP freezes eval batches to the train shape
+            "max_prompt_length": MAX_PROMPT,
+            "max_completion_length": MAX_COMPLETION,
+            "kl_beta": 0.0,
+            "advantage_method": "z_norm",
+            "loss_type": "grpo",
+            "policy_gradient_formulation": "reinforce",
+            "min_log_prob": MIN_LOG_PROB,
+            **overrides,
+        },
+    )
 
 
 def run_trainer(config, args, dataset, tokenizer, eval_dataset=None):
-    """Build a PP offline-GRPO trainer with spies on the train step and (when evaluating) the eval step.
+    """Build a PP offline-GRPO trainer with its runner spied, train it, and return the first step's batch.
 
     With ``eval_dataset``, before training (weights still init, so an unsplit copy can reproduce
-    them): an init-weights ``evaluate()`` runs with its per-call eval batches captured, then a
-    direct partial-batch ``prediction_step`` (2 rows < the frozen 4) exercises the inert row
-    padding — its post-pad batch lands in the capture list too and its loss is returned.
+    them): an init-weights ``evaluate()`` runs, then a direct partial-batch ``prediction_step`` (2 rows
+    < the frozen 4) exercises the inert row padding — its post-pad batch lands in the eval captures too
+    and its loss is returned.
     """
-    trainer = OfflineGRPOTrainer(
+    trainer, steps, evals = build_pp_trainer(
+        OfflineGRPOTrainer,
         model=build_dense_model(tokenizer, vocab_size=VOCAB_SIZE),
         args=args,
         train_dataset=dataset,
@@ -162,72 +149,35 @@ def run_trainer(config, args, dataset, tokenizer, eval_dataset=None):
         processing_class=tokenizer,
         parallelism_config=config,
     )
-
-    captured: dict = {}
-    normalizers: list[float] = []
-    real_step = trainer._pp_runner.step
-
-    def spying_step(input_ids, labels, **kw):
-        normalizers.append(float(kw["num_items_in_batch"]))
-        if "input_ids" not in captured:
-            captured["input_ids"] = input_ids.clone()
-            captured["labels"] = labels.clone()
-            captured["attention_mask"] = kw["attention_mask"].clone()
-            captured.update({k: v.clone() for k, v in kw["extra_targets"].items()})
-        return real_step(input_ids, labels, **kw)
-
-    trainer._pp_runner.step = spying_step
-
-    eval_calls: list[dict] = []
-    init_eval_metrics = None
-    partial_loss = None
+    init_eval_metrics = partial_loss = None
     if eval_dataset is not None:
-        real_eval = trainer._pp_runner.eval_loss
-
-        def spying_eval(input_ids, labels, **kw):
-            eval_calls.append(
-                {
-                    "input_ids": input_ids.clone(),
-                    "labels": labels.clone(),
-                    "attention_mask": kw["attention_mask"].clone(),
-                    "num_items": float(kw["num_items_in_batch"]),
-                    **{k: v.clone() for k, v in kw["extra_targets"].items()},
-                }
-            )
-            return real_eval(input_ids, labels, **kw)
-
-        trainer._pp_runner.eval_loss = spying_eval
         init_eval_metrics = trainer.evaluate()
-        # Direct partial-batch prediction step: 2 collated rows < the frozen 4. Collective — every
-        # rank calls it with the same rows (eval_dataset is rank-identical).
+        # Collective — every rank calls it with the same rows (eval_dataset is rank-identical).
         partial_batch = trainer.data_collator([trainer.eval_dataset[i] for i in range(2)])
         loss, _, _ = trainer.prediction_step(trainer.model, partial_batch, prediction_loss_only=True)
         partial_loss = float(loss)
-
-    # Snapshot the init-weights captures under a new name: in-loop evals keep appending to
-    # eval_calls (the closure's cell), and trained-weights batches must not leak into the
+    # In-loop evals keep appending to evals; trained-weights batches must stay out of the
     # init-weights reference.
-    init_eval_calls = list(eval_calls)
+    init_eval_calls = list(evals)
     trainer.train()
-    return trainer, captured, normalizers, init_eval_calls, init_eval_metrics, partial_loss
+    return trainer, steps[0], init_eval_calls, init_eval_metrics, partial_loss
 
 
 @gpu_test_main(exact_world_size=4, prefix="pp_offline_grpo")
 def run(ctx):
     config = ParallelismConfig(world_size=ctx.world_size, gpus_per_node=2, nvlink_domain_size=2, pp_size=PP_SIZE)
     tokenizer = AutoTokenizer.from_pretrained(QWEN3_0_6B)
-    if tokenizer.pad_token is None:
-        tokenizer.pad_token = tokenizer.eos_token
     dataset = build_dataset()
     checks, metrics = {}, {}
 
     # ── Construction-time rejections (all raise before any collective or model load) ─────────────
     expect_construction_error(
+        OfflineGRPOTrainer,
         "undersized_max_length_rejected",
         checks,
         "below max_prompt_length",
         model=build_dense_model(tokenizer, vocab_size=VOCAB_SIZE),
-        args=make_args(ctx.output_dir + "/short", max_length=8),
+        args=build_args(ctx.output_dir + "/short", max_length=8),
         train_dataset=dataset,
         processing_class=tokenizer,
         parallelism_config=config,
@@ -236,11 +186,12 @@ def run(ctx):
     # prediction convention for the pipeline to reproduce — serving compute_metrics under PP would
     # broadcast the raw logits plane and feed metrics a tensor no non-PP run produces.
     expect_construction_error(
+        OfflineGRPOTrainer,
         "compute_metrics_rejected",
         checks,
         "NO predictions",
         model=build_dense_model(tokenizer, vocab_size=VOCAB_SIZE),
-        args=make_args(ctx.output_dir + "/metrics"),
+        args=build_args(ctx.output_dir + "/metrics"),
         train_dataset=dataset,
         processing_class=tokenizer,
         parallelism_config=config,
@@ -248,9 +199,9 @@ def run(ctx):
     )
 
     # ── Main run: loss_type=grpo, reinforce, live min_log_prob clamp, loss-only PP eval leg ──────
-    args = make_args(ctx.output_dir, eval_strategy="steps", eval_steps=EVAL_STEPS)
+    args = build_args(ctx.output_dir, eval_strategy="steps", eval_steps=EVAL_STEPS)
     eval_dataset = build_dataset(sizes=EVAL_GROUP_SIZES, prompt_offset=100)
-    trainer, captured, normalizers, eval_calls, init_eval_metrics, partial_loss = run_trainer(
+    trainer, captured, eval_calls, init_eval_metrics, partial_loss = run_trainer(
         config, args, dataset, tokenizer, eval_dataset=eval_dataset
     )
 
@@ -296,7 +247,7 @@ def run(ctx):
 
     # The runner's per-step divisor must be this loss type's whole-batch denominator.
     expected_normalizer = float((1.0 / captured["group_size"].float()).sum())
-    checks["normalizer_is_group_weight_sum"] = abs(normalizers[0] - expected_normalizer) < 1e-6
+    checks["normalizer_is_group_weight_sum"] = abs(captured["num_items"] - expected_normalizer) < 1e-6
 
     # Step-1 logged loss == the exact objective on the unsplit model over the captured batches.
     reference_model = build_dense_model(tokenizer, vocab_size=VOCAB_SIZE).to(ctx.device).eval()
@@ -384,10 +335,7 @@ def run(ctx):
         1.0, abs(partial_reference)
     )
 
-    local_eval = torch.tensor([eval_loss], device=ctx.device)
-    gathered_eval = [torch.zeros_like(local_eval) for _ in range(ctx.world_size)]
-    dist.all_gather(gathered_eval, local_eval)
-    checks["eval_loss_identical_across_ranks"] = all(torch.allclose(local_eval, g) for g in gathered_eval)
+    checks["eval_loss_identical_across_ranks"] = losses_identical_across_ranks([eval_loss])
 
     # Two in-loop evals (steps 5 and 10) ran on trained weights: finite and rank-identical.
     inloop_eval = [e["eval_loss"] for e in trainer.state.log_history if "eval_loss" in e]
@@ -396,23 +344,20 @@ def run(ctx):
     checks["loss_decreased"] = losses[-1] < losses[0] - 0.01
     metrics["first_loss"], metrics["last_loss"] = losses[0], losses[-1]
 
-    local = torch.tensor(losses, device=ctx.device)
-    gathered = [torch.zeros_like(local) for _ in range(ctx.world_size)]
-    dist.all_gather(gathered, local)
-    checks["losses_identical_across_ranks"] = all(torch.allclose(local, g, atol=1e-6) for g in gathered)
+    checks["losses_identical_across_ranks"] = losses_identical_across_ranks(losses)
 
     grad_norms = [e["grad_norm"] for e in trainer.state.log_history if "grad_norm" in e]
     checks["grad_norm_logged_finite"] = bool(grad_norms) and bool(torch.isfinite(torch.tensor(grad_norms)).all())
 
     # ── dr_grpo run: constant-length denominator, prob_weighted formulation, no clamp ────────────
-    dr_args = make_args(
+    dr_args = build_args(
         ctx.output_dir + "/dr",
         max_steps=2,
         loss_type="dr_grpo",
         policy_gradient_formulation="prob_weighted",
         min_log_prob=None,
     )
-    dr_trainer, dr_captured, dr_normalizers, _, _, _ = run_trainer(config, dr_args, dataset, tokenizer)
+    dr_trainer, dr_captured, _, _, _ = run_trainer(config, dr_args, dataset, tokenizer)
     dr_losses = [e["loss"] for e in dr_trainer.state.log_history if "loss" in e]
     dr_expected = world_mean(
         offline_grpo_reference(
@@ -432,11 +377,11 @@ def run(ctx):
         1.0, abs(dr_expected)
     )
     dr_expected_normalizer = float((1.0 / dr_captured["group_size"].float()).sum()) * MAX_COMPLETION
-    checks["dr_grpo_normalizer"] = abs(dr_normalizers[0] - dr_expected_normalizer) < 1e-5
+    checks["dr_grpo_normalizer"] = abs(dr_captured["num_items"] - dr_expected_normalizer) < 1e-5
 
     # ── bnpo run: group-weighted token-count denominator ─────────────────────────────────────────
-    bnpo_args = make_args(ctx.output_dir + "/bnpo", max_steps=2, loss_type="bnpo", min_log_prob=None)
-    bnpo_trainer, bnpo_captured, _, _, _, _ = run_trainer(config, bnpo_args, dataset, tokenizer)
+    bnpo_args = build_args(ctx.output_dir + "/bnpo", max_steps=2, loss_type="bnpo", min_log_prob=None)
+    bnpo_trainer, bnpo_captured, _, _, _ = run_trainer(config, bnpo_args, dataset, tokenizer)
     bnpo_losses = [e["loss"] for e in bnpo_trainer.state.log_history if "loss" in e]
     bnpo_expected = world_mean(
         offline_grpo_reference(

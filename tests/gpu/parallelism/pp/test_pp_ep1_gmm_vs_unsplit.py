@@ -22,7 +22,7 @@ import sys
 
 from torch.distributed.tensor import DTensor
 
-from src.distributed.expert_parallel.moe_layer.layer import EPMoELayerBase
+from src.distributed.expert_parallel.moe_layer.layer import named_ep_layers
 from src.distributed.parallelism_config import ParallelismConfig
 from src.trainers.parallelism.grad_clipping import pp_clip_grad_norm
 from tests.common import pp_equivalence as ppeq
@@ -49,7 +49,7 @@ def run(ctx):
         ctx, config, model, rows, labels, per_device_batch=PER_DEVICE_BATCH, n_microbatches=2, max_steps=1
     )
     stage = trainer._top_level_model()
-    ep_modules = [(n, m) for n, m in stage.named_modules() if isinstance(m, EPMoELayerBase)]
+    ep_modules = named_ep_layers(stage)
     checks["stage_keeps_4_ep_layers"] = len(ep_modules) == 4
 
     # ep1-shard contract: experts are stage-mesh DTensors, no EP hooks, plain PP clip installed.

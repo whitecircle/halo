@@ -26,7 +26,6 @@ import math
 import sys
 
 import torch
-from torch.distributed.tensor import DTensor
 
 from src.distributed.parallelism_config import ParallelismConfig
 from tests.common import pp_equivalence as ppeq
@@ -67,15 +66,7 @@ def run_leg(ctx, config, rows, labels, *, gradient_checkpointing):
     loss = float(trainer.training_step(trainer.model, dict(batch)))
     clip_norm = float(trainer.accelerator.clip_grad_norm_(trainer.model.parameters(), 1e6))
     peak = torch.cuda.max_memory_allocated() / 1e9
-
-    grads = {}
-    for local_name, param in stage.named_parameters():
-        if param.grad is None:
-            continue
-        grad = param.grad
-        # full_tensor() is collective over the mesh — every rank walks the params in the same order.
-        full = grad.full_tensor() if isinstance(grad, DTensor) else grad
-        grads[stage.global_parameter_name(local_name)] = full.detach().float().clone()
+    grads = ppeq.gather_stage_grads(stage)
 
     trainer.cleanup_ep()
     del trainer, model, stage

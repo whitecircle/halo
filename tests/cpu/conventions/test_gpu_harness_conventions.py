@@ -46,8 +46,6 @@ _FORBIDDEN_PATH_PREFIX = "/mnt/"
 # Manifest scripts that keep their own lifecycle, each for a reason the harness cannot express.
 _OWN_LIFECYCLE = {
     "kernels/test_deepgemm.py": "prints SKIP: when deep_gemm is absent; the harness has no skip channel",
-    "trainers/other/test_checkpoint_roundtrip_gptoss_20b.py": "tears the group down before a rank-0 verify",
-    "trainers/other/test_checkpoint_roundtrip_qwen3_8b.py": "its rank-0-only reload skips the closing barrier",
 }
 
 

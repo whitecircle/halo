@@ -1,30 +1,7 @@
-"""Shared body for the online-GRPO and SDPG end-to-end tests against a live vLLM server.
-
-``test_online_grpo_vllm_moe_e2e.py`` (Qwen3-30B-A3B) and ``test_online_grpo_vllm_dense_e2e.py``
-(Qwen3-0.6B) are thin wrappers over :func:`run_online_grpo_e2e`. Both trainers and every
-adapter x parallelism shape assert the same things about the same server, so the assertions live in
-one place; the scripts stay separate because the manifest attaches the family markers and the
-model-size timeout per file, and because one URL cannot serve both checkpoints.
-
-The assertions are on the served policy rather than the trainer's tensors: a sync that gathered the
-wrong shard, or an adapter fold that never ran, still returns a finite loss from ``train()``. The
-shape both on-policy families share (the probe, the perturbation round, the restore-point snapshot,
-the parallelism-engaged verdict, the resume comparisons) is :mod:`tests.common.on_policy_e2e`; what
-lives here is the axis x adapter table, the vLLM-server ``GRPOConfig``, the two trainer classes, the
-TP + LoRA refusal and SDPG's OPD term.
-
-``adapter`` puts the row on a fold no full fine-tune needs: attention PEFT reaches the engine through
-the sync's out-of-place PEFT fold, native grouped expert LoRA through ``merge_lora=True`` in the expert
-gather. ``beta`` puts a full fine-tune on the KL term, whose frozen reference the row loads as the entry
-scripts do and the trainer hands to TRL.
-
-``resume`` covers the invariant TRL's ``_last_loaded_step`` sentinel carries: a resumed run generates
-its first rollout from the checkpoint's weights rather than from whatever the engine still held.
-Phase 1 trains to ``RESUME_MAX_STEPS`` with a checkpoint at ``RESUME_SAVE_STEP``, and the
-perturbation round then moves the engine off that policy. Phase 2 is a fresh model and trainer
-resuming with one step left, so the sentinel's push is the only thing that can reach the engine
-before the resumed rollout. Both phases run in one process against one server on the same
-weight-transfer group port, as described in :mod:`tests.common.on_policy_e2e`.
+"""Shared body of the online-GRPO and SDPG end-to-end tests against a live vLLM server, one row per
+(trainer, mode, resume): the MoE (EP/ETP), dense (TP, FSDP2) and single-process wrappers drive it. The
+assertions are on the served policy, through :mod:`tests.common.on_policy_e2e`: a sync that gathered the wrong
+shard, or an adapter fold that never ran, still returns a finite loss from ``train()``.
 """
 
 import math
@@ -57,12 +34,12 @@ from tests.common.on_policy_e2e import (
     load_policy,
     local_view,
     logged_lrs,
-    parallelism_engaged,
     perturbation_round,
     probe_top_logprobs,
     qa_dataset,
     record_adapter_training,
     record_optimizer_restore,
+    record_parallelism_engaged,
     record_resume_continuity,
     record_scheduler_restore,
     record_served_baseline,
@@ -95,7 +72,7 @@ class _Mode:
     built inside the EP layers). ``refuses_lora_under_tp`` marks the row that asserts a
     construction-time refusal instead of training; ``rejects_expert_lora`` marks the ETP row, which
     asserts the config-time expert-LoRA refusal before it loads anything. ``family`` is the script a
-    mode belongs to, so neither script repeats the list.
+    mode belongs to, so no script repeats the list.
 
     ``beta`` is the KL coefficient; non-zero on a full fine-tune, the row holds a frozen reference.
 
@@ -131,6 +108,9 @@ MODES = {
     "lora_fsdp": _Mode("dense", adapter="lora"),
     "lora_tp2_rejected": _Mode("dense", tp_size=2, adapter="lora", refuses_lora_under_tp=True),
     "full_fsdp_kl": _Mode("dense", beta=0.01),
+    # One process and no FSDP wrap: the common small-model path.
+    "full_world1": _Mode("world1"),
+    "lora_world1": _Mode("world1", adapter="lora"),
 }
 
 
@@ -380,7 +360,13 @@ def _lora_under_tp_refused(**build_kwargs) -> dict[str, bool]:
 
 
 def _run_resume(ctx, *, trainer_kind, spec: _Mode, model_name, tokenizer, server_url, group_port, checks) -> dict:
-    """Phase 1 (train, checkpoint, move the engine off it) then phase 2 (resume, prove the push)."""
+    """The invariant TRL's ``_last_loaded_step`` sentinel carries: a resumed run's first rollout comes from the
+    checkpoint's weights, not from whatever the engine still held.
+
+    Phase 1 trains to ``RESUME_MAX_STEPS`` with a checkpoint at ``RESUME_SAVE_STEP``, then moves the engine
+    off that policy. Phase 2 is a fresh model and trainer with one step left, so the sentinel's push is the
+    only thing that can reach the engine before the resumed rollout.
+    """
     output_dir = shared_output_dir(ctx)
     checkpoint = os.path.join(output_dir, f"checkpoint-{RESUME_SAVE_STEP}")
 
@@ -400,7 +386,7 @@ def _run_resume(ctx, *, trainer_kind, spec: _Mode, model_name, tokenizer, server
     trainer.add_callback(_CheckpointOnce(RESUME_SAVE_STEP))
     saved = _RestorePoint("save", trainer, spec, capture_optimizer=spec.checkpoint_optimizer)
     trainer.add_callback(saved)
-    checks["parallelism_engaged"] = parallelism_engaged(trainer, spec.ep_size, spec.tp_size, spec.expert_tp_size)
+    record_parallelism_engaged(ctx, trainer, spec.ep_size, spec.tp_size, spec.expert_tp_size, checks)
 
     trainer.train()
     record_step_losses(trainer, checks)
@@ -574,8 +560,7 @@ def run_online_grpo_e2e(
 
     trainer, _ = _build_trainer(**build_kwargs, max_steps=MAX_STEPS, save_steps=0)
     ctx.on_teardown(lambda: _release(trainer))
-    checks["parallelism_engaged"] = parallelism_engaged(trainer, spec.ep_size, spec.tp_size, spec.expert_tp_size)
-    log(f"  parallelism engaged: {checks['parallelism_engaged']} ({mode})")
+    record_parallelism_engaged(ctx, trainer, spec.ep_size, spec.tp_size, spec.expert_tp_size, checks)
 
     adapters_before, base_before = {}, {}
     if spec.adapter:
@@ -620,4 +605,7 @@ def run_online_grpo_e2e(
     if spec.beta:
         _kl_checks(trainer, checks)
 
-    return {"checks": ctx.broadcast_checks(checks), "metrics": {"steps_logged": float(len(losses))}}
+    return {
+        "checks": ctx.broadcast_checks(checks),
+        "metrics": {"steps_logged": float(len(losses)), "training_had_a_gradient": float(trained)},
+    }

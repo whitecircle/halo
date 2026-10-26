@@ -22,16 +22,16 @@ import sys
 
 import torch
 import torch.distributed as dist
-import torch.nn.functional as F
-from datasets import Dataset
 from transformers import AutoTokenizer, Qwen3ForCausalLM, default_data_collator
 from trl import SFTConfig
 
 from src.distributed.parallelism_config import ParallelismConfig
 from src.trainers.sft import DistributedSFTTrainer
+from tests.common.distributed import shared_output_dir
 from tests.common.harness import gpu_test_main
 from tests.common.models import QWEN3_0_6B, TINY_QWEN3_CONFIG
-from tests.common.pp_equivalence import build_dense_model
+from tests.common.pp_equivalence import build_dense_model, full_batch_eval_loss
+from tests.common.pp_trainers import build_pp_args, build_pp_trainer, build_sft_rows, losses_identical_across_ranks
 from tests.common.tolerances import TOL
 from tests.common.utils import log
 
@@ -40,55 +40,16 @@ SEQ_LEN = 64
 N_STEPS = 12
 
 
-def build_dataset(vocab_size: int, n_rows: int = 16, seed: int = 7) -> Dataset:
-    g = torch.Generator().manual_seed(seed)
-    rows = torch.randint(4, vocab_size, (n_rows, SEQ_LEN), generator=g)
-    # Ragged prompt masks (-100 prefixes of varying length): DP replicas then hold unequal loss-token
-    # counts, which is what exercises the num_items_in_batch -> G/dp normalizer threading — the
-    # failure mode is silently mis-scaled gradients, visible here as a stalled loss.
-    labels = rows.clone()
-    for i in range(labels.size(0)):
-        labels[i, : 4 + (i % 11)] = -100
-    return Dataset.from_dict(
-        {
-            "input_ids": rows.tolist(),
-            "labels": labels.tolist(),
-            "attention_mask": torch.ones_like(rows).tolist(),
-        }
-    )
-
-
-def _mean_ce(model, batch: dict) -> float:
-    """Per-batch mean CE exactly as the eval step computes it (sum CE / non-ignored count)."""
-    with torch.no_grad():
-        logits = model(input_ids=batch["input_ids"], attention_mask=batch["attention_mask"]).logits
-    shift_logits, shift_labels = logits[:, :-1, :], batch["labels"][:, 1:]
-    total = F.cross_entropy(
-        shift_logits.reshape(-1, shift_logits.size(-1)).float(),
-        shift_labels.reshape(-1),
-        ignore_index=-100,
-        reduction="sum",
-    )
-    return float(total / (shift_labels != -100).sum().clamp(min=1))
-
-
 @gpu_test_main(exact_world_size=4, prefix="pp_sft_e2e")
 def run(ctx):
     config = ParallelismConfig(world_size=ctx.world_size, gpus_per_node=2, nvlink_domain_size=2, pp_size=PP_SIZE)
 
-    args = SFTConfig(
-        output_dir=ctx.output_dir,
+    args = build_pp_args(
+        SFTConfig,
+        ctx.output_dir,
         max_steps=N_STEPS,
         per_device_train_batch_size=4,
-        gradient_accumulation_steps=2,  # becomes the pipeline's microbatch count
-        learning_rate=5e-3,
-        lr_scheduler_type="constant",
         max_length=SEQ_LEN,
-        logging_steps=1,
-        save_strategy="no",
-        report_to=[],
-        logging_nan_inf_filter=False,
-        seed=42,
         # Production precision. Also load-bearing for the reload check: trained dtype == save dtype
         # (save_dtype_caster exports bf16), so the save is lossless and the reloaded model must
         # reproduce the logged eval loss to float precision.
@@ -101,11 +62,12 @@ def run(ctx):
         per_device_eval_batch_size=4,
     )
 
-    eval_dataset = build_dataset(TINY_QWEN3_CONFIG["vocab_size"], n_rows=8, seed=23)
-    trainer = DistributedSFTTrainer(
+    eval_dataset = build_sft_rows(TINY_QWEN3_CONFIG["vocab_size"], n_rows=8, seed=23)
+    trainer, steps, _ = build_pp_trainer(
+        DistributedSFTTrainer,
         model=build_dense_model(),
         args=args,
-        train_dataset=build_dataset(TINY_QWEN3_CONFIG["vocab_size"]),
+        train_dataset=build_sft_rows(TINY_QWEN3_CONFIG["vocab_size"]),
         eval_dataset=eval_dataset,
         processing_class=AutoTokenizer.from_pretrained(QWEN3_0_6B),
         data_collator=default_data_collator,
@@ -117,41 +79,28 @@ def run(ctx):
         args.gradient_accumulation_steps == 1 and trainer._pp_n_microbatches == 2
     )
 
-    # Spy on the runner step to prove the loss normalizer is actually wired: it must equal the
-    # stage-summed loss-token count / stage_world_size (= G/dp) every step. An unwired normalizer
-    # (None, or HF's never-computed num_items_in_batch) fails here even though the loss still
-    # decreases.
-    captured: list[tuple[float, float]] = []
-    batch_sums: list[torch.Tensor] = []
-    real_step = trainer._pp_runner.step
-
-    def spying_step(input_ids, labels, **kwargs):
-        local = float((labels[:, 1:] != -100).sum())
-        normalizer = kwargs.get("num_items_in_batch")
-        captured.append((float(normalizer) if normalizer is not None else float("nan"), local))
-        batch_sums.append(input_ids.to(torch.float64).sum())
-        return real_step(input_ids, labels, **kwargs)
-
-    trainer._pp_runner.step = spying_step
-
     trainer.train()
 
     # Chain consistency: every rank of a pipeline chain must consume the same batch (stage 0 embeds
     # the rows whose labels the last stage scores). Accelerate's default global-rank sharding breaks
     # exactly this — this check fails without the PP-aware dataloader path.
     chain_ok = True
-    for step_sum in batch_sums:
+    for step in steps:
+        step_sum = step["input_ids"].to(torch.float64).sum()
         peers = [torch.zeros_like(step_sum) for _ in range(config.pp_size)]
         dist.all_gather(peers, step_sum, group=trainer._pp_chain_group)
         chain_ok &= all(torch.equal(peers[0], p) for p in peers)
-    checks["chain_ranks_consume_identical_batches"] = chain_ok and len(batch_sums) == N_STEPS
+    checks["chain_ranks_consume_identical_batches"] = chain_ok and len(steps) == N_STEPS
 
+    # The loss normalizer must be wired: the stage-summed loss-token count / stage_world_size (= G/dp)
+    # every step. An unwired one (None, or HF's never-computed num_items_in_batch) fails here even
+    # though the loss still decreases.
     stage_world = trainer.parallelism_config.stage_world_size
-    normalizer_ok = len(captured) == N_STEPS
-    for norm_value, local_count in captured:
-        expected = torch.tensor([local_count], device=torch.cuda.current_device())
+    normalizer_ok = len(steps) == N_STEPS
+    for step in steps:
+        expected = (step["labels"][:, 1:] != -100).sum().float().reshape(1)
         dist.all_reduce(expected, group=trainer._pp_stage_group)
-        normalizer_ok &= abs(norm_value - float(expected) / stage_world) < TOL.recomputed_normalizer_abs
+        normalizer_ok &= abs(step["num_items"] - float(expected) / stage_world) < TOL.recomputed_normalizer_abs
     checks["normalizer_is_stage_global_count_over_dp"] = normalizer_ok
     losses = [e["loss"] for e in trainer.state.log_history if "loss" in e]
     log(f"[rank {ctx.rank}] losses={[f'{v:.4f}' for v in losses]}")
@@ -165,10 +114,7 @@ def run(ctx):
 
     # The broadcast makes every rank log the same loss; a divergence means chains saw different data
     # or the broadcast source is wrong.
-    local = torch.tensor(losses, device=torch.cuda.current_device())
-    gathered = [torch.zeros_like(local) for _ in range(ctx.world_size)]
-    dist.all_gather(gathered, local)
-    checks["losses_identical_across_ranks"] = all(torch.allclose(local, g, atol=1e-6) for g in gathered)
+    checks["losses_identical_across_ranks"] = losses_identical_across_ranks(losses)
 
     grad_norms = [e["grad_norm"] for e in trainer.state.log_history if "grad_norm" in e]
     checks["grad_norm_logged_finite"] = bool(grad_norms) and all(torch.isfinite(torch.tensor(grad_norms)))
@@ -178,18 +124,13 @@ def run(ctx):
     # below (the step-12 eval sees exactly the weights the save captures).
     eval_losses = [e["eval_loss"] for e in trainer.state.log_history if "eval_loss" in e]
     checks["eval_ran_twice_and_finite"] = len(eval_losses) == 2 and all(torch.isfinite(torch.tensor(eval_losses)))
-    local_eval = torch.tensor(eval_losses or [float("nan")], device=torch.cuda.current_device())
-    gathered_eval = [torch.zeros_like(local_eval) for _ in range(ctx.world_size)]
-    dist.all_gather(gathered_eval, local_eval)
-    checks["eval_loss_identical_across_ranks"] = all(torch.allclose(local_eval, g) for g in gathered_eval)
+    checks["eval_loss_identical_across_ranks"] = losses_identical_across_ranks(eval_losses or [float("nan")])
     metrics["final_eval_loss"] = eval_losses[-1] if eval_losses else float("nan")
 
     # Save: per-stage shards under global names, merged index, reload into the unsplit class.
     # The harness hands every rank its own isolated output dir; the PP save is a multi-writer
     # single-directory format, so all ranks must agree on rank 0's directory.
-    dirs: list = [None] * ctx.world_size
-    dist.all_gather_object(dirs, ctx.output_dir)
-    save_dir = dirs[0]
+    save_dir = shared_output_dir(ctx)
     # TRL copied the (full-size) tokenizer's special-token ids into the tiny config; restore ids
     # that exist in the tiny vocab so from_pretrained's padding_idx assert reflects PP mechanics,
     # not the test's tokenizer/model size mismatch.
@@ -233,11 +174,7 @@ def run(ctx):
             # The step-12 eval_loss must reproduce on the reloaded full model: HF's eval_loss is
             # the mean of the gathered per-batch means, = the average of the two DP shards' mean
             # CE here. Catches a wrong eval normalizer, a stale-weights eval, or a bad save alike.
-            eval_batches = [eval_dataset[i : i + 4] for i in (0, 4)]
-            shard_means = [
-                _mean_ce(reloaded, {k: torch.tensor(v) for k, v in batch.items()}) for batch in eval_batches
-            ]
-            reference_eval = sum(shard_means) / len(shard_means)
+            reference_eval = full_batch_eval_loss(reloaded, eval_dataset, 4)
             log(f"[reload] reference eval={reference_eval:.6f} logged={eval_losses[-1]:.6f}")
             if abs(reference_eval - eval_losses[-1]) / abs(reference_eval) > 1e-4:
                 checks_reload = False

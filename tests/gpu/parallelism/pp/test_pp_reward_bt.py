@@ -26,16 +26,23 @@ Run: torchrun --nproc_per_node=4 tests/gpu/parallelism/pp/test_pp_reward_bt.py
 import sys
 
 import torch
-import torch.distributed as dist
 import torch.nn.functional as F
 from datasets import Dataset
-from transformers import AutoTokenizer, Qwen3Config, Qwen3ForSequenceClassification
 from trl import RewardConfig
 
 from src.distributed.parallelism_config import ParallelismConfig
 from src.trainers.reward.bradley_terry import DistributedRewardTrainer
+from tests.common.distributed import world_mean
 from tests.common.harness import gpu_test_main
-from tests.common.models import QWEN3_0_6B, TINY_QWEN3_CONFIG
+from tests.common.models import TINY_QWEN3_CONFIG
+from tests.common.pp_trainers import (
+    build_pp_args,
+    build_pp_trainer,
+    build_seq_cls_model,
+    losses_identical_across_ranks,
+    right_pad,
+    tiny_vocab_tokenizer,
+)
 from tests.common.utils import log
 
 PP_SIZE = 2
@@ -43,15 +50,8 @@ SEQ_LEN = 48
 N_STEPS = 10
 PAIRS_PER_RANK = 4  # per_device_train_batch_size counts pairs; the collator doubles the rows
 MICROBATCHES = 2
-PAD_ID = 0
 CENTER_COEF = 0.05
 LOSS_RTOL = 2e-4
-
-
-def build_model():
-    torch.manual_seed(1234)
-    config = Qwen3Config(**TINY_QWEN3_CONFIG, num_labels=1, pad_token_id=PAD_ID, eos_token_id=1)
-    return Qwen3ForSequenceClassification(config)
 
 
 def build_dataset(vocab_size: int, n_rows: int, seed: int) -> Dataset:
@@ -89,55 +89,24 @@ def interleave_pairs(rows) -> list[list[int]]:
 
 def reference_pair_scores(model, rows, device) -> torch.Tensor:
     """``[pairs, 2]`` pooled (chosen, rejected) scores — what the BT adapter's ``predictions_fn`` must produce."""
-    input_ids, attention_mask = pad_to(interleave_pairs(rows), SEQ_LEN)
     with torch.no_grad():
-        pooled = model(input_ids=input_ids.to(device), attention_mask=attention_mask.to(device))
+        pooled = model(**right_pad(interleave_pairs(rows), SEQ_LEN, device))
     scores = pooled.logits.squeeze(-1).float()
     return torch.stack((scores[0::2], scores[1::2]), dim=-1)
-
-
-def reference_pairwise_accuracy(model, rows, device) -> float:
-    """``pairwise_accuracy`` recomputed from the dataset, over every pair exactly once.
-
-    The metric the trainer reports is a mean, so it survives the per-stage duplication of the
-    prediction rows unchanged — but not a dropped pair, and not an inert pad pair, which scores as a
-    tie and lands on ``argmax == 0``, i.e. counts as correct.
-    """
-    scores = reference_pair_scores(model, rows, device)
-    return float((scores[:, 0] >= scores[:, 1]).float().mean())
-
-
-def pad_to(ids: list[list[int]], length: int) -> tuple[torch.Tensor, torch.Tensor]:
-    batch = torch.full((len(ids), length), PAD_ID, dtype=torch.long)
-    mask = torch.zeros((len(ids), length), dtype=torch.long)
-    for i, row in enumerate(ids):
-        batch[i, : len(row)] = torch.tensor(row)
-        mask[i, : len(row)] = 1
-    return batch, mask
 
 
 @gpu_test_main(exact_world_size=4, prefix="pp_reward_bt")
 def run(ctx):
     config = ParallelismConfig(world_size=ctx.world_size, gpus_per_node=2, nvlink_domain_size=2, pp_size=PP_SIZE)
-    tokenizer = AutoTokenizer.from_pretrained(QWEN3_0_6B)
-    # The tiny model's vocab is 1024; Qwen's real pad id would overflow the embedding, so pad with
-    # token 0 (data rows are drawn from [4, vocab) — pad never collides with a real token).
-    tokenizer.pad_token = tokenizer.convert_ids_to_tokens(PAD_ID)
-
-    args = RewardConfig(
-        output_dir=ctx.output_dir,
+    tokenizer = tiny_vocab_tokenizer()
+    args = build_pp_args(
+        RewardConfig,
+        ctx.output_dir,
         max_steps=N_STEPS,
         per_device_train_batch_size=PAIRS_PER_RANK,
         gradient_accumulation_steps=MICROBATCHES,  # becomes the pipeline's microbatch count
         learning_rate=8e-3,
-        lr_scheduler_type="constant",
         max_length=SEQ_LEN,
-        logging_steps=1,
-        save_strategy="no",
-        report_to=[],
-        logging_nan_inf_filter=False,
-        seed=42,
-        bf16=False,
         gradient_checkpointing=False,
         center_rewards_coefficient=CENTER_COEF,
         per_device_eval_batch_size=PAIRS_PER_RANK,
@@ -155,8 +124,9 @@ def run(ctx):
         seen_shapes.append(tuple(predictions.shape))
         return {"accuracy": float((predictions.argmax(dim=-1) == 0).float().mean())}
 
-    trainer = DistributedRewardTrainer(
-        model=build_model(),
+    trainer, steps, _ = build_pp_trainer(
+        DistributedRewardTrainer,
+        model=build_seq_cls_model(num_labels=1),
         args=args,
         train_dataset=build_dataset(TINY_QWEN3_CONFIG["vocab_size"], n_rows=32, seed=7),
         eval_dataset=eval_dataset,
@@ -172,7 +142,7 @@ def run(ctx):
     checks["margin_shipped_as_extra_target"] = "margin" in trainer._pp_adapter.extra_target_keys
     checks["paired_examples_declared"] = trainer._pp_runner.rows_per_example == 2
 
-    reference = build_model().to(ctx.device).float().eval()
+    reference = build_seq_cls_model(num_labels=1).to(ctx.device).float().eval()
 
     # ── Eval with the init weights (before any training step): the logged eval_loss must equal the
     # mean over the two DP shards of TRL's per-batch BT loss, computed with transformers' own
@@ -182,13 +152,9 @@ def run(ctx):
     shard_losses = []
     for lo in (0, PAIRS_PER_RANK):
         shard = eval_dataset[lo : lo + PAIRS_PER_RANK]
-        input_ids, attention_mask = pad_to(interleave_pairs(shard), SEQ_LEN)
-        margin = torch.tensor(shard["margin"]).repeat_interleave(2)
-        shard_losses.append(
-            reference_bt_loss(
-                reference, input_ids.to(ctx.device), attention_mask.to(ctx.device), margin.to(ctx.device)
-            )
-        )
+        padded = right_pad(interleave_pairs(shard), SEQ_LEN, ctx.device)
+        margin = torch.tensor(shard["margin"], device=ctx.device).repeat_interleave(2)
+        shard_losses.append(reference_bt_loss(reference, padded["input_ids"], padded["attention_mask"], margin))
     reference_eval = sum(shard_losses) / len(shard_losses)
     log(f"[rank {ctx.rank}] eval_loss={eval_metrics['eval_loss']:.6f} reference={reference_eval:.6f}")
     checks["eval_loss_matches_reference"] = (
@@ -205,7 +171,10 @@ def run(ctx):
     # The value, not a range: ``0 <= accuracy <= 1`` holds for any input of any shape, so it passes
     # on a predictions_fn that scores the wrong pairs, half of them, or inert padding.
     accuracy = eval_metrics.get("eval_accuracy")
-    reference_accuracy = reference_pairwise_accuracy(reference, eval_dataset[:], ctx.device)
+    # Recomputed from the dataset over every pair exactly once: a mean survives the per-stage duplication of
+    # the prediction rows, but not a dropped pair, nor an inert pad pair (a tie: argmax 0, counted correct).
+    reference_scores = reference_pair_scores(reference, eval_dataset[:], ctx.device)
+    reference_accuracy = float((reference_scores[:, 0] >= reference_scores[:, 1]).float().mean())
     checks["pairwise_accuracy_matches_reference"] = accuracy is not None and abs(accuracy - reference_accuracy) < 1e-6
     # Every rank of a chain returns that chain's predictions, so a world gather would carry the
     # dataset pp_size times; the metric gather is scoped to the data-parallel replicas, which is
@@ -225,14 +194,9 @@ def run(ctx):
     # trimmed back off, or compute_metrics gets 4 pairs where 1 belongs, three of them ties scoring as
     # correct. prediction_step keeps accelerate's gather out of it. Collective: every rank calls it.
     one_pair = eval_dataset[:1]
-    chosen_ids, chosen_mask = pad_to(one_pair["chosen_ids"], SEQ_LEN)
-    rejected_ids, rejected_mask = pad_to(one_pair["rejected_ids"], SEQ_LEN)
-    partial_batch = {
-        # The [chosen ⧺ rejected] concat TRL's collator emits, which the batch transform interleaves.
-        "input_ids": torch.cat([chosen_ids, rejected_ids]).to(ctx.device),
-        "attention_mask": torch.cat([chosen_mask, rejected_mask]).to(ctx.device),
-        "margin": torch.tensor(one_pair["margin"], device=ctx.device),
-    }
+    # The [chosen ⧺ rejected] concat TRL's collator emits, which the batch transform interleaves.
+    partial_batch = right_pad(one_pair["chosen_ids"] + one_pair["rejected_ids"], SEQ_LEN, ctx.device)
+    partial_batch["margin"] = torch.tensor(one_pair["margin"], device=ctx.device)
     _, partial_predictions, partial_labels = trainer.prediction_step(trainer.model, partial_batch, False)
     partial_reference = reference_pair_scores(reference, one_pair, ctx.device)
     log(f"[rank {ctx.rank}] partial-batch predictions={tuple(partial_predictions.shape)} vs 1 real pair")
@@ -243,28 +207,15 @@ def run(ctx):
     # Predictions and labels trim together or compute_metrics gets mismatched lengths.
     checks["partial_eval_batch_labels_trim_with_predictions"] = partial_labels.shape[0] == 1
 
-    # ── Spy on the runner step: capture step 1's interleaved batch + extras + normalizer.
-    captured: dict = {}
-    normalizers: list[float] = []
-    real_step = trainer._pp_runner.step
-
-    def spying_step(input_ids, labels, **kwargs):
-        normalizers.append(float(kwargs.get("num_items_in_batch")))
-        if not captured:
-            captured["input_ids"] = input_ids.clone()
-            captured["labels"] = labels.clone()
-            captured["attention_mask"] = kwargs["attention_mask"].clone()
-            captured["extras"] = {k: v.clone() for k, v in (kwargs.get("extra_targets") or {}).items()}
-        return real_step(input_ids, labels, **kwargs)
-
-    trainer._pp_runner.step = spying_step
     trainer.train()
+    captured = steps[0]
+    normalizers = [step["num_items"] for step in steps]
 
     checks["normalizer_is_chain_pair_count"] = len(normalizers) == N_STEPS and all(
         abs(value - PAIRS_PER_RANK) < 1e-6 for value in normalizers
     )
     # The plane carries the pooling: exactly one marker per row, at that row's last non-pad token
-    # (rows are right-padded with PAD_ID and data tokens start at 4, so length-1 is that position).
+    # (rows are right-padded with pad id 0 and data tokens start at 4, so length-1 is that position).
     # Marking only the chosen rows would leave the rejected halves unpooled and unvalidated.
     marked = captured["labels"] != -100
     checks["plane_marks_every_row_at_pooled_position"] = bool(
@@ -276,27 +227,20 @@ def run(ctx):
     # ── Step-1 loss against the exact TRL objective on the captured batch (init weights). The
     # logged loss is the world mean of the per-chain losses; each chain contributes pp_size times
     # with identical values, so the mean over ranks equals the mean over chains.
-    local_reference = torch.tensor(
-        reference_bt_loss(reference, captured["input_ids"], captured["attention_mask"], captured["extras"]["margin"]),
-        device=ctx.device,
+    expected = world_mean(
+        reference_bt_loss(reference, captured["input_ids"], captured["attention_mask"], captured["margin"])
     )
-    dist.all_reduce(local_reference, op=dist.ReduceOp.AVG)
     losses = [entry["loss"] for entry in trainer.state.log_history if "loss" in entry]
-    log(f"[rank {ctx.rank}] step1={losses[0]:.6f} reference={float(local_reference):.6f}")
-    checks["step1_loss_matches_reference"] = (
-        abs(losses[0] - float(local_reference)) / abs(float(local_reference)) < LOSS_RTOL
-    )
-    metrics["step1_loss"], metrics["step1_reference"] = losses[0], float(local_reference)
+    log(f"[rank {ctx.rank}] step1={losses[0]:.6f} reference={expected:.6f}")
+    checks["step1_loss_matches_reference"] = abs(losses[0] - expected) / abs(expected) < LOSS_RTOL
+    metrics["step1_loss"], metrics["step1_reference"] = losses[0], expected
 
     checks["ran_all_steps"] = trainer.state.global_step == N_STEPS
     checks["losses_finite"] = len(losses) == N_STEPS and bool(torch.isfinite(torch.tensor(losses)).all())
     checks["loss_decreased"] = losses[-1] < losses[0] - 0.05
     metrics["first_loss"], metrics["last_loss"] = losses[0], losses[-1]
 
-    local = torch.tensor(losses, device=ctx.device)
-    gathered = [torch.zeros_like(local) for _ in range(ctx.world_size)]
-    dist.all_gather(gathered, local)
-    checks["losses_identical_across_ranks"] = all(torch.allclose(local, peer, atol=1e-6) for peer in gathered)
+    checks["losses_identical_across_ranks"] = losses_identical_across_ranks(losses)
 
     # ── Negative check: a batch whose rows cannot be microbatched pair-aligned must raise. 6 rows
     # (3 pairs) across 2 microbatches would split pair 1 — the runner validates before any

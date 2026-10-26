@@ -22,19 +22,25 @@ import sys
 
 import torch
 import torch.distributed as dist
-import torch.nn.functional as F
-from datasets import Dataset
-from transformers import AutoTokenizer, GptOssConfig, GptOssForCausalLM, default_data_collator
+from transformers import AutoTokenizer, GptOssForCausalLM, default_data_collator
 from trl import SFTConfig
 
-from src.callbacks.balancing import BalancingBiasCallback, configure_moe_balancing
-from src.callbacks.factory import build_run_callbacks
-from src.configs.script_arguments import CommonScriptArguments
-from src.distributed.expert_parallel.parallelize import apply_ep_layers
+from src.callbacks.balancing import BalancingBiasCallback
 from src.distributed.parallelism_config import ParallelismConfig
 from src.trainers.sft import DistributedSFTTrainer
+from tests.common.distributed import shared_output_dir, world_all
 from tests.common.harness import gpu_test_main
 from tests.common.models import QWEN3_0_6B, TINY_GPTOSS_CONFIG
+from tests.common.pp_equivalence import build_gptoss_model
+from tests.common.pp_trainers import (
+    build_bias_balanced_sft_trainer,
+    build_pp_args,
+    build_sft_rows,
+    expect_construction_error,
+    losses_identical_across_ranks,
+    probe_step,
+    reload_reproduces_probe_loss,
+)
 from tests.common.utils import log
 
 PP_SIZE = 2
@@ -43,41 +49,13 @@ SEQ_LEN = 64
 N_STEPS = 12
 
 
-def build_model(**config_overrides):
-    torch.manual_seed(1234)
-    cfg = GptOssConfig(**{**TINY_GPTOSS_CONFIG, **config_overrides}, pad_token_id=0, eos_token_id=1)
-    return GptOssForCausalLM(cfg).to(torch.bfloat16)
-
-
-def build_dataset(vocab_size: int) -> Dataset:
-    g = torch.Generator().manual_seed(7)
-    rows = torch.randint(4, vocab_size, (16, SEQ_LEN), generator=g)
-    labels = rows.clone()
-    for i in range(labels.size(0)):
-        labels[i, : 4 + (i % 11)] = -100  # ragged -> DP replicas hold unequal loss-token counts
-    return Dataset.from_dict(
-        {
-            "input_ids": rows.tolist(),
-            "labels": labels.tolist(),
-            "attention_mask": torch.ones_like(rows).tolist(),
-        }
-    )
-
-
 def build_args(output_dir: str) -> SFTConfig:
-    return SFTConfig(
-        output_dir=output_dir,
+    return build_pp_args(
+        SFTConfig,
+        output_dir,
         max_steps=N_STEPS,
         per_device_train_batch_size=4,
-        gradient_accumulation_steps=2,  # becomes the pipeline's microbatch count
-        learning_rate=5e-3,
-        lr_scheduler_type="constant",
         max_length=SEQ_LEN,
-        logging_steps=1,
-        save_strategy="no",
-        report_to=[],
-        logging_nan_inf_filter=False,
-        seed=42,
         bf16=True,
         gradient_checkpointing=True,  # TRL's default; exercises the stage's non-reentrant GC + EP dispatch replay
     )
@@ -92,33 +70,16 @@ def run(ctx):
     config = ParallelismConfig(
         world_size=ctx.world_size, gpus_per_node=2, nvlink_domain_size=2, pp_size=PP_SIZE, ep_size=EP_SIZE
     )
-    model = build_model()
-    apply_ep_layers(model, config.ep_config())
-
-    # The production balancing seam: configure_moe_balancing applies the bias_update side effects
-    # (creates balancing_biases + expert_load_counter on the EP layers), build_run_callbacks the callback.
-    script_args = CommonScriptArguments(moe_balancing="bias_update")
-    mode = configure_moe_balancing(script_args, model, config)
-    callbacks = build_run_callbacks(script_args, args, model, config, balancing_mode=mode)
-    checks["bias_balancing_callback_built"] = any(isinstance(c, BalancingBiasCallback) for c in callbacks)
-
-    trainer = DistributedSFTTrainer(
-        model=model,
-        args=args,
-        train_dataset=build_dataset(TINY_GPTOSS_CONFIG["vocab_size"]),
-        processing_class=tokenizer,
-        data_collator=default_data_collator,
-        callbacks=callbacks,
-        parallelism_config=config,
-        moe_balancing=script_args.moe_balancing,
-    )
+    rows = build_sft_rows(TINY_GPTOSS_CONFIG["vocab_size"])
+    trainer = build_bias_balanced_sft_trainer(build_gptoss_model(), args, config, tokenizer, rows)
     ctx.on_teardown(trainer.cleanup_ep)
 
     checks["accumulation_became_microbatches"] = (
         args.gradient_accumulation_steps == 1 and trainer._pp_n_microbatches == 2
     )
-    balancing_cb = next(c for c in trainer.callback_handler.callbacks if isinstance(c, BalancingBiasCallback))
-    checks["balancing_reduce_group_is_stage_scoped"] = balancing_cb.reduce_group is trainer._pp_stage_group
+    balancing_cbs = [c for c in trainer.callback_handler.callbacks if isinstance(c, BalancingBiasCallback)]
+    checks["bias_balancing_callback_built"] = bool(balancing_cbs)
+    checks["balancing_reduce_group_is_stage_scoped"] = balancing_cbs[0].reduce_group is trainer._pp_stage_group
 
     trainer.train()
 
@@ -129,10 +90,7 @@ def run(ctx):
     checks["loss_decreased"] = losses[-1] < losses[0] - 0.05
     metrics["first_loss"], metrics["last_loss"] = losses[0], losses[-1]
 
-    local = torch.tensor(losses, device=ctx.device)
-    gathered = [torch.zeros_like(local) for _ in range(ctx.world_size)]
-    dist.all_gather(gathered, local)
-    checks["losses_identical_across_ranks"] = all(torch.allclose(local, g, atol=1e-6) for g in gathered)
+    checks["losses_identical_across_ranks"] = losses_identical_across_ranks(losses)
 
     grad_norms = [e["grad_norm"] for e in trainer.state.log_history if "grad_norm" in e]
     checks["grad_norm_logged_finite"] = bool(grad_norms) and bool(torch.isfinite(torch.tensor(grad_norms)).all())
@@ -155,23 +113,11 @@ def run(ctx):
     # the reloaded full model must reproduce this rank's per-replica loss on the same batch. This
     # is the value check on the EP gather — a save that permutes experts or swaps layers under each
     # other's global names keeps the key set intact but cannot reproduce the loss.
-    probe_dataset = build_dataset(TINY_GPTOSS_CONFIG["vocab_size"])
-    dp_rank = config.get_data_parallel_rank()
-    probe_rows = torch.tensor(probe_dataset["input_ids"][dp_rank * 4 : dp_rank * 4 + 4])
-    probe_labels = torch.tensor(probe_dataset["labels"][dp_rank * 4 : dp_rank * 4 + 4])
-    probe_batch = {
-        "input_ids": probe_rows,
-        "labels": probe_labels,
-        "attention_mask": torch.ones_like(probe_rows),
-    }
-    trainer.state.global_step += 1  # the sweep's double-run guard keys on the step
-    probe_loss = trainer.training_step(trainer.model, dict(probe_batch))
+    probe_batch, probe_loss = probe_step(trainer, rows, 4)
     metrics["probe_loss"] = float(probe_loss)
 
     # ── save: EP gather under global names, reload into the unsplit class ───────────────────────
-    dirs: list = [None] * ctx.world_size
-    dist.all_gather_object(dirs, ctx.output_dir)
-    save_dir = dirs[0]
+    save_dir = shared_output_dir(ctx)
     trainer.model.config.pad_token_id, trainer.model.config.eos_token_id = 0, 1
     trainer.save_model(save_dir)
     dist.barrier()
@@ -181,7 +127,7 @@ def run(ctx):
     if ctx.rank == 0:
         try:
             reloaded = GptOssForCausalLM.from_pretrained(save_dir)
-            reference_keys = set(build_model().state_dict())
+            reference_keys = set(build_gptoss_model().state_dict())
             reloaded_keys = set(reloaded.state_dict())
             if reloaded_keys != reference_keys:
                 log(
@@ -190,7 +136,7 @@ def run(ctx):
                 )
                 reload_ok = False
             else:
-                init_sd = build_model().state_dict()
+                init_sd = build_gptoss_model().state_dict()
                 moved = sum(
                     not torch.allclose(reloaded.state_dict()[k].to(torch.bfloat16), init_sd[k]) for k in reference_keys
                 )
@@ -202,28 +148,15 @@ def run(ctx):
             reload_ok = False
         try:
             # Value check: the reloaded model on this rank's probe batch must reproduce the probe
-            # loss the pipeline computed on the final weights, under the same normalizer: the
-            # summed CE over (G/dp).
-            with torch.no_grad():
-                out = reloaded.to(ctx.device).to(torch.bfloat16)(
-                    input_ids=probe_batch["input_ids"].to(ctx.device),
-                    attention_mask=probe_batch["attention_mask"].to(ctx.device),
-                )
-            shift_logits = out.logits[:, :-1].float()
-            shift_labels = probe_batch["labels"][:, 1:].to(ctx.device)
-            ce_sum = F.cross_entropy(
-                shift_logits.reshape(-1, shift_logits.size(-1)),
-                shift_labels.reshape(-1),
-                ignore_index=-100,
-                reduction="sum",
+            # loss the pipeline computed on the final weights (grouped-mm EP vs dense HF experts).
+            values_ok = reload_reproduces_probe_loss(
+                reloaded.to(ctx.device).to(torch.bfloat16),
+                probe_batch,
+                rows,
+                config.data_parallel_size,
+                probe_loss,
+                ctx.device,
             )
-            # G = the probe step's DP-global count (both replicas' 4-row slices), not the dataset's.
-            global_count = float((torch.tensor(probe_dataset["labels"][:8])[:, 1:] != -100).sum())
-            expected_loss = float(ce_sum / (global_count / config.data_parallel_size))
-            rel = abs(expected_loss - float(probe_loss)) / max(abs(expected_loss), 1e-9)
-            log(f"[reload-value] probe={float(probe_loss):.6f} reloaded={expected_loss:.6f} rel={rel:.3e}")
-            if rel > 5e-2:  # bf16 kernels differ (grouped-mm EP vs dense HF experts); gate loose but real
-                values_ok = False
         except Exception as exc:
             log(f"[reload-value] FAILED: {exc!r}")
             values_ok = False
@@ -253,29 +186,27 @@ def run(ctx):
         device=ctx.device,
     )
     dist.broadcast(flags, src=0)
-    bias_flag = torch.tensor([1.0 if bias_values_ok else 0.0], device=ctx.device)
-    dist.all_reduce(bias_flag, op=dist.ReduceOp.MIN)
+    bias_values_ok = world_all(bias_values_ok)
     checks["save_reloads_into_unsplit_model"] = bool(flags[0].item())
     checks["balancing_biases_saved_globally_for_all_8_layers"] = bool(flags[1].item())
     checks["reloaded_model_reproduces_probe_loss"] = bool(flags[2].item())
-    checks["saved_bias_values_match_in_memory"] = bool(bias_flag.item())
+    checks["saved_bias_values_match_in_memory"] = bias_values_ok
 
     # ── negative: aux-loss balancing with a live coefficient must be rejected at construction ───
     # (a PP stage severs the *ForCausalLM aux-loss add — silently unbalanced experts otherwise).
-    aux_model = build_model(router_aux_loss_coef=0.02)
-    try:
-        DistributedSFTTrainer(
-            model=aux_model,
-            args=build_args(ctx.output_dir),
-            train_dataset=build_dataset(TINY_GPTOSS_CONFIG["vocab_size"]),
-            processing_class=tokenizer,
-            data_collator=default_data_collator,
-            parallelism_config=config,
-            moe_balancing="aux_loss",
-        )
-        checks["aux_loss_pp_rejected_at_construction"] = False
-    except ValueError as exc:
-        checks["aux_loss_pp_rejected_at_construction"] = "aux" in str(exc).lower()
+    expect_construction_error(
+        DistributedSFTTrainer,
+        "aux_loss_pp_rejected_at_construction",
+        checks,
+        "aux",
+        model=build_gptoss_model(router_aux_loss_coef=0.02),
+        args=build_args(ctx.output_dir),
+        train_dataset=rows,
+        processing_class=tokenizer,
+        data_collator=default_data_collator,
+        parallelism_config=config,
+        moe_balancing="aux_loss",
+    )
 
     return {"checks": checks, "metrics": metrics}
 

@@ -33,6 +33,10 @@ class _Tolerances:
     # all-reduce hands every rank one sum, and a loss or grad norm read off a shard misses by orders of
     # magnitude more.
     all_reduced_rank_spread_abs: float = 1e-4
+    # The per-step losses every rank of a pipeline run logs (``torch.allclose``, its default rtol on top):
+    # the last stage broadcasts each loss down its chain and HF logs the world mean, so every rank holds
+    # the same floats. A chain fed another batch, or a wrong broadcast source, moves a rank's curve by far more.
+    pp_rank_identical_loss_abs: float = 1e-6
 
     # ── Parallel mode vs single-GPU / FSDP reference ────────────────────────
     # Step-0 loss, before optimizer drift: routing/all-to-all is not bitwise-dense.

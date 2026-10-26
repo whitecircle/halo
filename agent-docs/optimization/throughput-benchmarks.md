@@ -388,12 +388,12 @@ torchrun --nproc_per_node=8 \
 
 # EP+CP (long context)
 torchrun --nproc_per_node=8 \
-    tests/gpu/profiling/benchmark_sft_ep_cp.py \
+    tests/gpu/profiling/benchmark_sft_ep.py \
     --model gpt-oss-20b --ep 8 --cp 8 --seq 32768 --steps 10 --warmup 3
 
 # EP+TP (ep8 with tp2/tp4/tp8 on 8 GPUs; ep must be a multiple of tp, and ep4 on 8 GPUs is rejected)
 torchrun --nproc_per_node=8 \
-    tests/gpu/profiling/benchmark_sft_ep_tp.py \
+    tests/gpu/profiling/benchmark_sft_ep.py \
     --model gpt-oss-20b --ep 8 --tp 8 --seq 16384 --steps 10 --warmup 3
 
 # Single-GPU dense (defaults: seq 8192, FA4, bs=1, GC on; --model defaults to gpt-oss-20b)
@@ -403,9 +403,8 @@ torchrun --nproc_per_node=1 \
     --no_grad_checkpoint --batch_size 2
 ```
 
-`tests/gpu/profiling/run_baseline_benchmarks.sh` runs the rows `make bench` holds to `tests/baselines/bench/` ([Golden performance baselines](../contributing/README.md#golden-performance-baselines)). `tests/gpu/profiling/run_all_benchmarks.sh` is the master runner across all throughput/TFLOPS benchmarks. `tests/gpu/profiling/run_mfu_benchmarks.sh` sweeps seq 4096/8192/16384 for the SFT/SMPO benchmarks (defaults `GPUS=2 EP=2`; parses `--gpus=`, `--ep=`, `--steps=`, `--warmup=`):
+`tests/gpu/profiling/run_baseline_benchmarks.sh` runs the rows `make bench` holds to `tests/baselines/bench/` ([Golden performance baselines](../contributing/README.md#golden-performance-baselines)). Any other layout or length is a flag of the same scripts, and a sweep is a loop over them:
 
 ```bash
-./tests/gpu/profiling/run_all_benchmarks.sh
-./tests/gpu/profiling/run_mfu_benchmarks.sh --gpus=8 --ep=8
+for seq in 4096 8192 16384; do torchrun --nproc_per_node=8 tests/gpu/profiling/benchmark_smpo_ep.py --ep 8 --cp 2 --seq $seq; done
 ```

@@ -27,18 +27,23 @@ Run: torchrun --nproc_per_node=4 tests/gpu/parallelism/pp/test_pp_smpo.py
 import sys
 
 import torch
-import torch.distributed as dist
 import torch.nn.functional as F
 from datasets import Dataset
-from transformers import AutoTokenizer
 
 from src.configs.preference import SmoothMarginPOConfig
 from src.distributed.parallelism_config import ParallelismConfig
 from src.trainers.preference.smpo import SmoothMarginPOTrainer
-from tests.common.distributed import hf_eval_loss_reference
+from tests.common.distributed import hf_eval_loss_reference, world_any, world_mean
 from tests.common.harness import gpu_test_main
-from tests.common.models import QWEN3_0_6B, TINY_QWEN3_CONFIG
+from tests.common.models import TINY_QWEN3_CONFIG
 from tests.common.pp_equivalence import build_dense_model
+from tests.common.pp_trainers import (
+    build_pp_args,
+    build_pp_trainer,
+    expect_construction_error,
+    losses_identical_across_ranks,
+    tiny_vocab_tokenizer,
+)
 from tests.common.utils import log
 
 PP_SIZE = 2
@@ -106,59 +111,33 @@ def smpo_reference(model, input_ids, attention_mask, labels, *, margin, min_log_
     return float(pair_losses.mean() + sft)
 
 
-def make_args(output_dir: str, **overrides) -> SmoothMarginPOConfig:
-    base = {
-        "output_dir": output_dir,
-        "max_steps": N_STEPS,
-        "per_device_train_batch_size": PAIRS_PER_RANK,
-        "per_device_eval_batch_size": PAIRS_PER_RANK,  # PP freezes eval batches to the train shape
-        # even_batches would complete the tail eval batch by wrapping around to the dataset start;
-        # off, the final batch stays partial and must be row-padded with inert rows.
-        "accelerator_config": {"even_batches": False},
-        "gradient_accumulation_steps": 2,  # becomes the pipeline's microbatch count
-        "learning_rate": 5e-3,
-        "lr_scheduler_type": "constant",
-        "logging_steps": 1,
-        "save_strategy": "no",
-        "report_to": [],
-        "logging_nan_inf_filter": False,
-        "seed": 42,
-        "bf16": False,
-        "max_length": SEQ_LEN,
-        "max_prompt_length": 16,
-        "max_completion_length": 16,
-        "beta": BETA,
-        "chosen_sft_ratio": SFT_RATIO,
-        "loss_type": "sigmoid",
-        "target_margin": TARGET_MARGIN,
-        "initial_margin": INITIAL_MARGIN,
-        "use_margin_schedule": True,
-        "min_log_prob": MIN_LOG_PROB,
-        # The config defaults enable the percentile clip; PP rejects it (batch-global quantiles).
-        "lower_clip_percentile": None,
-        "upper_clip_percentile": None,
-    }
-    base.update(overrides)
-    return SmoothMarginPOConfig(**base)
-
-
-def gathered_mean(value: float, world_size: int) -> float:
-    """Mean of a rank-local scalar across all ranks — HF logs the world-gathered mean loss."""
-    local = torch.tensor([value], device=torch.cuda.current_device())
-    peers = [torch.zeros_like(local) for _ in range(world_size)]
-    dist.all_gather(peers, local)
-    return float(torch.stack(peers).mean())
-
-
-def expect_construction_error(name: str, checks: dict, match: str, **trainer_kwargs) -> None:
-    """Construct on every rank expecting a uniform pre-collective ValueError."""
-    try:
-        SmoothMarginPOTrainer(**trainer_kwargs)
-        checks[name] = False
-    except ValueError as exc:
-        checks[name] = match in str(exc)
-        if not checks[name]:
-            log(f"[{name}] raised without the expected mechanism: {exc}")
+def build_args(output_dir: str, **overrides) -> SmoothMarginPOConfig:
+    return build_pp_args(
+        SmoothMarginPOConfig,
+        output_dir,
+        **{
+            "max_steps": N_STEPS,
+            "per_device_train_batch_size": PAIRS_PER_RANK,
+            "per_device_eval_batch_size": PAIRS_PER_RANK,  # PP freezes eval batches to the train shape
+            # even_batches would complete the tail eval batch by wrapping around to the dataset start;
+            # off, the final batch stays partial and must be row-padded with inert rows.
+            "accelerator_config": {"even_batches": False},
+            "max_length": SEQ_LEN,
+            "max_prompt_length": 16,
+            "max_completion_length": 16,
+            "beta": BETA,
+            "chosen_sft_ratio": SFT_RATIO,
+            "loss_type": "sigmoid",
+            "target_margin": TARGET_MARGIN,
+            "initial_margin": INITIAL_MARGIN,
+            "use_margin_schedule": True,
+            "min_log_prob": MIN_LOG_PROB,
+            # The config defaults enable the percentile clip; PP rejects it (batch-global quantiles).
+            "lower_clip_percentile": None,
+            "upper_clip_percentile": None,
+            **overrides,
+        },
+    )
 
 
 def stage_shards(trainer) -> dict[str, torch.Tensor]:
@@ -167,14 +146,17 @@ def stage_shards(trainer) -> dict[str, torch.Tensor]:
 
 
 def run_trainer(config, args, dataset, tokenizer, eval_dataset=None):
-    """Build a PP SMPO trainer with spies on the train step and (when evaluating) the eval step.
+    """Build a PP SMPO trainer with its runner spied (each call also records the live margin the step state
+    carried), and train it.
 
-    With ``eval_dataset``, an init-weights ``evaluate()`` runs before training (its per-call eval
-    batches and the live margin the step state carried are captured for the exact eval reference —
-    trained-weights evals cannot be reproduced on an unsplit copy) and its metrics are returned
-    alongside the captures, together with the init-weights shards taken before that eval.
+    With ``eval_dataset``, an init-weights ``evaluate()`` runs before training (its eval batches feed the
+    exact eval reference — trained-weights evals cannot be reproduced on an unsplit copy). Returns the
+    trainer, the first step's batch on CPU (the reference model's device), every step's margin, the
+    init-weights eval calls and metrics, and the init-weights shards taken before that eval.
     """
-    trainer = SmoothMarginPOTrainer(
+    trainer, steps, evals = build_pp_trainer(
+        SmoothMarginPOTrainer,
+        also_record=lambda trainer: {"margin": float(trainer._pp_loss.constants.target_margin)},
         model=build_dense_model(),
         args=args,
         train_dataset=dataset,
@@ -183,86 +165,49 @@ def run_trainer(config, args, dataset, tokenizer, eval_dataset=None):
         parallelism_config=config,
     )
     init_shards = stage_shards(trainer)
-
-    captured: dict = {}
-    margins: list[float] = []
-    real_step = trainer._pp_runner.step
-
-    def spying_step(input_ids, labels, **kw):
-        if "batch" not in captured:
-            captured["batch"] = (
-                input_ids.detach().cpu(),
-                kw["attention_mask"].detach().cpu(),
-                labels.detach().cpu(),
-            )
-        margins.append(float(trainer._pp_loss.constants.target_margin))
-        return real_step(input_ids, labels, **kw)
-
-    trainer._pp_runner.step = spying_step
-
-    eval_calls: list[dict] = []
-    init_eval_metrics = None
-    if eval_dataset is not None:
-        real_eval = trainer._pp_runner.eval_loss
-
-        def spying_eval(input_ids, labels, **kw):
-            eval_calls.append(
-                {
-                    "input_ids": input_ids.detach().cpu(),
-                    "labels": labels.detach().cpu(),
-                    "attention_mask": kw["attention_mask"].detach().cpu(),
-                    "margin": float(trainer._pp_loss.constants.target_margin),
-                    "num_items": float(kw["num_items_in_batch"]),
-                }
-            )
-            return real_eval(input_ids, labels, **kw)
-
-        trainer._pp_runner.eval_loss = spying_eval
-        init_eval_metrics = trainer.evaluate()
-
-    # Snapshot the init-weights captures under a new name: in-loop evals keep appending to
-    # eval_calls (the closure's cell), and trained-weights batches must not leak into the
-    # init-weights reference.
-    init_eval_calls = list(eval_calls)
+    init_eval_metrics = trainer.evaluate() if eval_dataset is not None else None
+    # On CPU, the reference model's device. In-loop evals keep appending to evals; trained-weights batches
+    # must stay out of the init-weights reference.
+    init_eval_calls = [{key: v.cpu() if torch.is_tensor(v) else v for key, v in call.items()} for call in evals]
     trainer.train()
-    return trainer, captured["batch"], margins, init_eval_calls, init_eval_metrics, init_shards
+    batch = tuple(steps[0][key].cpu() for key in ("input_ids", "attention_mask", "labels"))
+    return trainer, batch, [step["margin"] for step in steps], init_eval_calls, init_eval_metrics, init_shards
 
 
 @gpu_test_main(exact_world_size=4, prefix="pp_smpo")
 def run(ctx):
     config = ParallelismConfig(world_size=ctx.world_size, gpus_per_node=2, nvlink_domain_size=2, pp_size=PP_SIZE)
-    tokenizer = AutoTokenizer.from_pretrained(QWEN3_0_6B)
-    # The full tokenizer's pad id (151643) is outside the tiny 1024-token vocab and would send the
-    # stage-0 embedding gather out of bounds; repoint padding at id 0 (the model config's pad id).
-    tokenizer.pad_token = tokenizer.convert_ids_to_tokens(0)
+    tokenizer = tiny_vocab_tokenizer()
     dataset = build_pref_dataset(TINY_QWEN3_CONFIG["vocab_size"])
     checks, metrics = {}, {}
 
     # ── Construction-time rejections (all raise before any collective) ───────────────────────────
     # Percentile clip: the config default (lower_clip_percentile=0.02) must be rejected under PP.
     expect_construction_error(
+        SmoothMarginPOTrainer,
         "percentile_clip_rejected",
         checks,
         "quantile",
         model=build_dense_model(),
-        args=make_args(ctx.output_dir + "/clip", lower_clip_percentile=0.02),
+        args=build_args(ctx.output_dir + "/clip", lower_clip_percentile=0.02),
         train_dataset=dataset,
         processing_class=tokenizer,
         parallelism_config=config,
     )
     # Pair alignment: bs=3 with 2 microbatches would split a chosen/rejected pair.
     expect_construction_error(
+        SmoothMarginPOTrainer,
         "pair_splitting_batch_rejected",
         checks,
         "divisible",
         model=build_dense_model(),
-        args=make_args(ctx.output_dir + "/odd", per_device_train_batch_size=3),
+        args=build_args(ctx.output_dir + "/odd", per_device_train_batch_size=3),
         train_dataset=dataset,
         processing_class=tokenizer,
         parallelism_config=config,
     )
     # ── Main run: sigmoid + margin schedule + min_log_prob clamp + loss-only PP eval leg ─────────
-    args = make_args(ctx.output_dir, eval_strategy="steps", eval_steps=EVAL_STEPS)
+    args = build_args(ctx.output_dir, eval_strategy="steps", eval_steps=EVAL_STEPS)
     eval_dataset = build_pref_dataset(TINY_QWEN3_CONFIG["vocab_size"], n_rows=EVAL_PAIRS, seed=23)
     trainer, (ids, mask, labels), margins, eval_calls, init_eval_metrics, init_shards = run_trainer(
         config, args, dataset, tokenizer, eval_dataset=eval_dataset
@@ -292,20 +237,18 @@ def run(ctx):
     reference = smpo_reference(
         ref_model, ids, mask, labels, margin=INITIAL_MARGIN, min_log_prob=MIN_LOG_PROB, loss_type="sigmoid"
     )
-    expected = gathered_mean(reference, ctx.world_size)
+    expected = world_mean(reference)
     metrics["step1_loss"], metrics["step1_reference"] = losses[0], expected
     checks["step1_loss_matches_reference"] = abs(losses[0] - expected) / max(1.0, abs(expected)) < REL_TOL
 
     # The margin genuinely enters the loss: a zero-margin reference must not match.
-    zero_margin = gathered_mean(
-        smpo_reference(ref_model, ids, mask, labels, margin=0.0, min_log_prob=MIN_LOG_PROB, loss_type="sigmoid"),
-        ctx.world_size,
+    zero_margin = world_mean(
+        smpo_reference(ref_model, ids, mask, labels, margin=0.0, min_log_prob=MIN_LOG_PROB, loss_type="sigmoid")
     )
     checks["margin_shifts_the_loss"] = abs(losses[0] - zero_margin) > 0.01
     # And so does the clamp: an unclamped reference must not match (random init logps ~ -6.9).
-    unclamped = gathered_mean(
-        smpo_reference(ref_model, ids, mask, labels, margin=INITIAL_MARGIN, min_log_prob=None, loss_type="sigmoid"),
-        ctx.world_size,
+    unclamped = world_mean(
+        smpo_reference(ref_model, ids, mask, labels, margin=INITIAL_MARGIN, min_log_prob=None, loss_type="sigmoid")
     )
     checks["min_log_prob_clamp_wired"] = abs(losses[0] - unclamped) > 0.01
 
@@ -342,16 +285,9 @@ def run(ctx):
     # SMPO normalizes inside the loss closure — the runner's eval divisor must stay 1.
     checks["eval_normalizer_is_one"] = all(abs(call["num_items"] - 1.0) < 1e-9 for call in eval_calls)
     # The partial batch genuinely occurred somewhere in the world (inert rows were padded in).
-    had_partial = torch.tensor(
-        float(any(not bool(real.all()) for real in real_row_flags)), device=torch.cuda.current_device()
-    )
-    dist.all_reduce(had_partial, op=dist.ReduceOp.MAX)
-    checks["partial_eval_batch_exercised"] = bool(had_partial)
+    checks["partial_eval_batch_exercised"] = world_any(any(not bool(real.all()) for real in real_row_flags))
 
-    local_eval = torch.tensor([eval_loss], device=torch.cuda.current_device())
-    gathered_eval = [torch.zeros_like(local_eval) for _ in range(ctx.world_size)]
-    dist.all_gather(gathered_eval, local_eval)
-    checks["eval_loss_identical_across_ranks"] = all(torch.allclose(local_eval, g) for g in gathered_eval)
+    checks["eval_loss_identical_across_ranks"] = losses_identical_across_ranks([eval_loss])
 
     # Two in-loop evals (steps 6 and 12) ran on trained weights: finite and rank-identical.
     inloop_eval = [e["eval_loss"] for e in trainer.state.log_history if "eval_loss" in e]
@@ -365,16 +301,13 @@ def run(ctx):
     checks["loss_decreased"] = losses[-1] < losses[0] - 0.05
     metrics["first_loss"], metrics["last_loss"] = losses[0], losses[-1]
 
-    local = torch.tensor(losses, device=torch.cuda.current_device())
-    gathered = [torch.zeros_like(local) for _ in range(ctx.world_size)]
-    dist.all_gather(gathered, local)
-    checks["losses_identical_across_ranks"] = all(torch.allclose(local, g, atol=1e-6) for g in gathered)
+    checks["losses_identical_across_ranks"] = losses_identical_across_ranks(losses)
 
     grad_norms = [e["grad_norm"] for e in trainer.state.log_history if "grad_norm" in e]
     checks["grad_norm_logged_finite"] = bool(grad_norms) and all(torch.isfinite(torch.tensor(grad_norms)))
 
     # ── IPO run: second loss type through the same closure, fixed nonzero margin, no clamp ───────
-    ipo_args = make_args(
+    ipo_args = build_args(
         ctx.output_dir + "/ipo",
         max_steps=2,
         loss_type="ipo",
@@ -386,11 +319,8 @@ def run(ctx):
         config, ipo_args, build_pref_dataset(TINY_QWEN3_CONFIG["vocab_size"], seed=11), tokenizer
     )
     ipo_losses = [e["loss"] for e in ipo_trainer.state.log_history if "loss" in e]
-    ipo_expected = gathered_mean(
-        smpo_reference(
-            ref_model, ipo_ids, ipo_mask, ipo_labels, margin=IPO_MARGIN, min_log_prob=None, loss_type="ipo"
-        ),
-        ctx.world_size,
+    ipo_expected = world_mean(
+        smpo_reference(ref_model, ipo_ids, ipo_mask, ipo_labels, margin=IPO_MARGIN, min_log_prob=None, loss_type="ipo")
     )
     metrics["ipo_step1_loss"], metrics["ipo_step1_reference"] = ipo_losses[0], ipo_expected
     checks["ipo_step1_loss_matches_reference"] = (
@@ -410,7 +340,7 @@ def run(ctx):
 
     metrics_trainer = SmoothMarginPOTrainer(
         model=build_dense_model(),
-        args=make_args(ctx.output_dir + "/metrics", max_steps=1, use_margin_schedule=False),
+        args=build_args(ctx.output_dir + "/metrics", max_steps=1, use_margin_schedule=False),
         train_dataset=dataset,
         # PAIRS_PER_RANK pairs per DP shard: exactly one full eval batch each, no partial tail.
         eval_dataset=build_pref_dataset(TINY_QWEN3_CONFIG["vocab_size"], n_rows=2 * PAIRS_PER_RANK, seed=31),

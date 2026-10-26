@@ -63,6 +63,7 @@ from src.distributed.pipeline_parallel.partition import resolve_layer_partition
 from src.distributed.pipeline_parallel.stage import PP_STAGE_PARTITION_ATTR, build_pipeline_stage
 from src.model_loading.parallel.ep import load_ep_model_lazy
 from src.model_loading.parallel.pp import _load_stage_lazy
+from tests.common import pp_equivalence as ppeq
 from tests.common.harness import gpu_test_main
 from tests.common.models import TINY_GPTOSS_CONFIG, TINY_QWEN3_CONFIG, TINY_QWEN3_MOE_CONFIG
 from tests.common.pp_fakes import registered_pp_backbones
@@ -165,42 +166,6 @@ def _stage_aware_stage(ckpt: str, pp_rank: int, ep_config, device):
     return build_pipeline_stage(model, pp_rank, PP_SIZE, pp_split=PP_SPLIT), head
 
 
-def _snapshot(stage) -> tuple[dict[str, torch.Tensor], list[str]]:
-    """``{global name: tensor}`` for every parameter and buffer, plus any left on meta."""
-    tensors: dict[str, torch.Tensor] = {}
-    stranded: list[str] = []
-    for name, tensor in [*stage.named_parameters(), *stage.named_buffers()]:
-        if tensor is None:
-            continue
-        if tensor.is_meta:
-            stranded.append(name)
-            continue
-        tensors[stage.global_parameter_name(name)] = tensor.detach().clone()
-    return tensors, stranded
-
-
-def _expert_bank_names(stage) -> set[str]:
-    """Global names of every EP layer's local expert bank on ``stage``.
-
-    The EP layer holds its slice of the experts as its own attributes (``mlp.gate_up_proj``), not under
-    the checkpoint's keys (``mlp.experts.gate_up_proj``), so a comparison scoped to checkpoint keys alone
-    would never look at the experts both loaders are responsible for.
-    """
-    return {
-        stage.global_parameter_name(f"{path}.{name}")
-        for path, layer in named_ep_layers(stage)
-        for name, _ in layer._base_expert_named_params()
-    }
-
-
-def _release(*models) -> None:
-    """Free the models and their DeepEP buffers before the next load (collective, same order)."""
-    for model in models:
-        del model
-    destroy_all_dispatchers()
-    cleanup_memory()
-
-
 @gpu_test_main(min_world_size=2, exact_world_size=2, prefix="pp_lazy_load_equivalence")
 def run(ctx):
     device = torch.device("cuda", ctx.local_rank)
@@ -244,17 +209,26 @@ def run(ctx):
 
     for pp_rank in range(PP_SIZE):
         reference = _reference_stage(ckpt, pp_rank, ep_config, device)
-        ref_tensors, ref_stranded = _snapshot(reference)
+        ref_tensors, ref_stranded = ppeq.snapshot_stage(reference, buffers=True)
         ref_range = reference.layer_range
-        _release(reference)
+        destroy_all_dispatchers()
+        cleanup_memory()
 
         stage, head = _stage_aware_stage(ckpt, pp_rank, ep_config, device)
         if HEAD == "seq_cls":
             head_initialized &= _absent_head_is_usable(head, device)
-        new_tensors, new_stranded = _snapshot(stage)
+        new_tensors, new_stranded = ppeq.snapshot_stage(stage, buffers=True)
         new_range = stage.layer_range
-        expert_banks = _expert_bank_names(stage)
-        _release(stage)
+        # The EP layers hold their expert slices as their own attributes (``mlp.gate_up_proj``), not under the
+        # checkpoint's keys (``mlp.experts.gate_up_proj``): a comparison scoped to checkpoint keys alone would
+        # never look at the experts both loaders are responsible for.
+        expert_banks = {
+            stage.global_parameter_name(f"{path}.{name}")
+            for path, layer in named_ep_layers(stage)
+            for name, _ in layer._base_expert_named_params()
+        }
+        destroy_all_dispatchers()
+        cleanup_memory()
 
         checks[f"stage{pp_rank}_same_layer_range"] = ref_range == new_range
         checks[f"stage{pp_rank}_no_meta_tensors"] = not ref_stranded and not new_stranded

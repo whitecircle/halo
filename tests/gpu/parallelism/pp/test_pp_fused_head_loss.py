@@ -41,17 +41,13 @@ import sys
 
 import torch
 import torch.distributed as dist
-from torch.distributed.device_mesh import init_device_mesh
-from torch.distributed.fsdp import fully_shard
 from transformers import Qwen3Config, Qwen3ForCausalLM
 
 from src.distributed.fsdp import reshard_fsdp2_modules
 from src.distributed.parallelism_config import ParallelismConfig
-from src.distributed.pipeline_parallel.groups import build_pipeline_group
-from src.distributed.pipeline_parallel.runner import PipelineRunner
-from src.distributed.pipeline_parallel.stage import build_pipeline_stage
 from src.distributed.pipeline_parallel.stage_losses import FusedHeadLoss, TokenLoss
 from src.kernels import logprobs as logprob_kernels
+from tests.common import pp_equivalence as ppeq
 from tests.common.harness import gpu_test_main
 from tests.common.models import TINY_QWEN3_CONFIG
 from tests.common.utils import log_all
@@ -90,17 +86,7 @@ def build_model(device):
     return Qwen3ForCausalLM(config).to(device=device, dtype=torch.float32)
 
 
-def make_batch(device, rows):
-    g = torch.Generator(device="cpu").manual_seed(99)
-    input_ids = torch.randint(0, FUSED_LOSS_CONFIG["vocab_size"], (rows, SEQ_LEN), generator=g).to(device)
-    labels = input_ids.clone()
-    # An ignored span in every row: the chunk loop must skip those targets, not renormalize around
-    # them. Placed mid-sequence so it straddles a chunk boundary rather than sitting inside one.
-    labels[:, SEQ_LEN // 2 - 8 : SEQ_LEN // 2 + 8] = -100
-    return input_ids, labels
-
-
-def run_once(ctx, config, pp_group, dp_mesh, input_ids, labels, n_microbatches, *, fused, eval_first=False):
+def run_once(ctx, config, groups, input_ids, labels, n_microbatches, *, fused, eval_first=False):
     """One full step through a freshly built pipeline; returns loss, grads (on CPU), and peak memory.
 
     Everything is rebuilt per run because the stage latches its output metadata at the first step —
@@ -112,26 +98,16 @@ def run_once(ctx, config, pp_group, dp_mesh, input_ids, labels, n_microbatches, 
     torch.cuda.empty_cache()
     torch.cuda.reset_peak_memory_stats()
 
-    stage_module = build_pipeline_stage(build_model(device), config.pp_rank, config.pp_size)
-    gc_calls = [0]
-    if USE_GC:
-        # Same order as production: TRL enables GC before the stage FSDP wrap. The counter proves the
-        # checkpoint path actually ran — the silent failure is HF's training/no-grad gate skipping it.
-        stage_module.gradient_checkpointing_enable()
-        for layer in stage_module.model.layers:
-            inner_fn = layer._gradient_checkpointing_func
-
-            def counting_fn(*args, _inner=inner_fn, **kw):
-                gc_calls[0] += 1
-                return _inner(*args, **kw)
-
-            layer._gradient_checkpointing_func = counting_fn
-    for layer in stage_module.model.layers:
-        fully_shard(layer, mesh=dp_mesh, reshard_after_forward=False)
-    fully_shard(stage_module, mesh=dp_mesh, reshard_after_forward=False)
-
-    runner = PipelineRunner(
-        stage_module, config, pp_group, device, n_microbatches, FusedHeadLoss() if fused else TokenLoss()
+    # The GC counter proves the checkpoint path actually ran: the silent failure is HF's training/no-grad
+    # gate skipping it.
+    stage_module, runner, gc_calls = ppeq.build_runner_stage(
+        build_model(device),
+        config,
+        groups,
+        device,
+        n_microbatches,
+        FusedHeadLoss() if fused else TokenLoss(),
+        gc=USE_GC,
     )
     assert (stage_module.fused_loss_fn is not None) == (fused and config.is_last_pp_stage)
 
@@ -167,18 +143,10 @@ def run_once(ctx, config, pp_group, dp_mesh, input_ids, labels, n_microbatches, 
     # thing at every state-dict boundary, for the same reason.
     reshard_fsdp2_modules(stage_module)
 
-    grads = {}
-    for name, param in stage_module.named_parameters():
-        if param.grad is None:
-            continue
-        grad = param.grad
-        grad = grad.full_tensor() if isinstance(grad, torch.distributed.tensor.DTensor) else grad
-        grads[stage_module.global_parameter_name(name)] = grad.detach().float().cpu()
-
     result = {
         "loss": float(loss) if loss is not None else 0.0,
         "eval_loss": float(eval_loss) if eval_loss is not None else 0.0,
-        "grads": grads,
+        "grads": ppeq.gather_stage_grads(stage_module, to_cpu=True),
         "n_params": len(list(stage_module.named_parameters())),
         "peak": float(peak),
         "gc_calls": gc_calls[0],
@@ -201,18 +169,11 @@ def worst_grad_error(reference: dict, other: dict) -> tuple[float, str | None, i
     A parameter present in one run and not the other is reported as an infinite error rather than
     skipped — a silently narrowed comparison set is the failure this gate exists to catch.
     """
-    worst, worst_name, n = 0.0, None, 0
-    for name, ref in reference.items():
-        got = other.get(name)
-        if got is None:
-            return float("inf"), name, n
-        err = ((got - ref).abs().max() / ref.abs().max().clamp_min(1e-12)).item()
-        n += 1
-        # A NaN compares false against every bound, so a non-finite error counts as infinite.
-        err = err if math.isfinite(err) else math.inf
-        if err > worst:
-            worst, worst_name = err, name
-    return worst, worst_name, n
+    absent = next((name for name in reference if name not in other), None)
+    if absent is not None:
+        return math.inf, absent, 0
+    errors, worst_name = ppeq.max_abs_grad_errors(other, reference)
+    return errors.get(worst_name, 0.0), worst_name, len(errors)
 
 
 @gpu_test_main(min_world_size=4, prefix="pp_fused_head_loss")
@@ -224,15 +185,16 @@ def run(ctx):
     pp_size = ctx.world_size // 2
     n_microbatches = max(MIN_MICROBATCHES, pp_size)
     config = ParallelismConfig(world_size=ctx.world_size, gpus_per_node=2, nvlink_domain_size=2, pp_size=pp_size)
-    pp_group = build_pipeline_group(config)
-    mesh = init_device_mesh("cuda", (pp_size, config.stage_world_size), mesh_dim_names=("pp", "dp"))
-    dp_mesh = mesh["dp"]
+    groups = ppeq.build_stage_groups(config)
 
-    batch = make_batch(device, n_microbatches)
-    unfused = run_once(ctx, config, pp_group, dp_mesh, *batch, n_microbatches, fused=False)
-    control = run_once(ctx, config, pp_group, dp_mesh, *batch, n_microbatches, fused=False)
-    fused = run_once(ctx, config, pp_group, dp_mesh, *batch, n_microbatches, fused=True)
-    eval_first = run_once(ctx, config, pp_group, dp_mesh, *batch, n_microbatches, fused=True, eval_first=True)
+    input_ids, labels = ppeq.build_unmasked_batch(FUSED_LOSS_CONFIG["vocab_size"], n_microbatches, SEQ_LEN, device)
+    # An ignored span in every row: the chunk loop must skip those targets, not renormalize around
+    # them. Placed mid-sequence so it straddles a chunk boundary rather than sitting inside one.
+    labels[:, SEQ_LEN // 2 - 8 : SEQ_LEN // 2 + 8] = -100
+    unfused = run_once(ctx, config, groups, input_ids, labels, n_microbatches, fused=False)
+    control = run_once(ctx, config, groups, input_ids, labels, n_microbatches, fused=False)
+    fused = run_once(ctx, config, groups, input_ids, labels, n_microbatches, fused=True)
+    eval_first = run_once(ctx, config, groups, input_ids, labels, n_microbatches, fused=True, eval_first=True)
 
     checks, metrics = {}, {}
 
