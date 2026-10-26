@@ -39,7 +39,7 @@ import sys
 
 import torch
 import torch.distributed as dist
-from transformers import GptOssConfig, GptOssForCausalLM
+from transformers import GptOssConfig, GptOssForCausalLM, TrainerState
 
 from src.callbacks.router_bias_balancing import RouterBiasBalancingCallback
 from src.distributed.expert_parallel.balancing_strategy import apply_balancing_strategy
@@ -245,7 +245,7 @@ def run(ctx):
     checks["load_is_imbalanced_enough_to_move_the_bias"] = bool((expected_delta[0] != 0).any())
 
     before = [layer.balancing_biases.clone() for layer in ep_layers]
-    RouterBiasBalancingCallback(update_rate=GAMMA).on_step_end(None, None, None, model=model)
+    RouterBiasBalancingCallback(update_rate=GAMMA).on_step_end(None, TrainerState(global_step=1), None, model=model)
     after = [layer.balancing_biases for layer in ep_layers]
 
     moved = [(a - b) for a, b in zip(after, before, strict=True)]

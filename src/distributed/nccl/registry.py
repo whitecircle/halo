@@ -1,11 +1,11 @@
 """Rollout-backend key → weight-sync client, derived from the client subclasses shipped in this package."""
 
-from src.distributed.module_registry import iter_subclasses
 from src.distributed.nccl.clients.base import BaseWeightSyncClient
 from src.distributed.nccl.clients.sglang import (
     SGLangWeightSyncClient,  # noqa: F401 — a shipped client registers by being imported
 )
 from src.distributed.nccl.clients.vllm import VLLMWeightSyncClient  # noqa: F401
+from src.subclass_registry import iter_subclasses
 
 
 def _client_registry() -> dict[str, type[BaseWeightSyncClient]]:

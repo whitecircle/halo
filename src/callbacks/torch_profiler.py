@@ -10,13 +10,12 @@ from __future__ import annotations
 import logging
 import os
 
-import torch
-from torch.profiler import ProfilerActivity, profile, schedule
+from torch.profiler import schedule
 from transformers import TrainerCallback
 
 from src.diagnostics.profiling import (
+    build_profiler,
     dump_memory_snapshot,
-    ensure_artifact_dir,
     export_profiler_artifacts,
     should_profile_this_rank,
     start_memory_history,
@@ -85,18 +84,14 @@ class TorchProfilerCallback(TrainerCallback):
         if not self._active_rank:
             return
 
-        activities = [ProfilerActivity.CPU] if self.cpu_activity else []
-        if torch.cuda.is_available():
-            activities.append(ProfilerActivity.CUDA)
-
-        ensure_artifact_dir(self.output_dir)
-        self._prof = profile(
-            activities=activities,
-            schedule=schedule(wait=self.wait, warmup=self.warmup, active=self.active, repeat=self.repeat),
-            on_trace_ready=self._on_trace_ready,
+        self._prof = build_profiler(
+            self.output_dir,
+            cpu_activity=self.cpu_activity,
             record_shapes=self.record_shapes,
             profile_memory=self.profile_memory,
             with_stack=self.with_stack,
+            schedule=schedule(wait=self.wait, warmup=self.warmup, active=self.active, repeat=self.repeat),
+            on_trace_ready=self._on_trace_ready,
         )
         self._prof.__enter__()
         logger.info(

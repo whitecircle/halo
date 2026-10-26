@@ -24,7 +24,7 @@ from scripts.inference._common import add_generation_args, add_prompt_field_args
 from src.checkpoint.tool_io import reject_sharded_checkpoint
 from src.data.pipeline.conversation import build_base_prompt, reject_image_content, resolve_system_prompt
 from src.data.pipeline.rendered import tokenize_rendered
-from src.inference.openai_client import chat_completion, create_openai_client
+from src.inference.openai_client import build_openai_client, chat_completion
 from src.inference.response import ENGINE_CUT_FINISH_REASONS, get_finish_reason
 from src.models.loading.checkpoint_coverage import from_pretrained_verified
 from src.models.loading.dtype import DTYPE_BY_NAME
@@ -120,7 +120,7 @@ def boot_scoring_run(args) -> tuple[Any, Any, Any, torch.device]:
     One call for both scripts, so neither drifts onto a different set of ``--rm_*`` knobs; every flag
     the reward model is loaded under is threaded here.
     """
-    client = create_openai_client(base_url=args.base_url, api_key_override=args.api_key)
+    client = build_openai_client(base_url=args.base_url, api_key_override=args.api_key)
     rm_tokenizer, rm_model, rm_device = load_reward_model(
         args.rm_model_path,
         args.rm_model_atten_impl,

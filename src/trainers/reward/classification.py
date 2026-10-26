@@ -64,7 +64,7 @@ from src.data.pipeline.processing import (
 from src.distributed.loading.peft_setup import peft_bf16_autocast, prepare_peft_model
 from src.distributed.parallelism_config import ParallelismConfig
 from src.distributed.pipeline_parallel.losses import PPLossAdapter
-from src.distributed.runtime import current_device
+from src.hardware import current_device
 from src.trainers.mixins.base import DistributedTrainerMixin
 from src.trainers.reward.pooling import (
     decode_pooling_plane,

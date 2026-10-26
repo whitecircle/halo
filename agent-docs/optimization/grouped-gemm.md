@@ -49,7 +49,7 @@ Around the kernel sit the token permutation and, for expert-bias models (GptOss)
 
 PyTorch's default backward for a duplicate-valued gather is `index_add_`, whose bf16 kernel has no native atomic add and emulates one with a CAS loop that serializes under the duplicate-row contention. On a profiled gpt-oss-20b EP step that atomic scatter took ≈20% of all GPU time and inflated the DeepEP combine wait.
 
-**Rule: never let a duplicate-valued gather fall back to the default `index_add_` backward in a training forward.** Both gathers route through custom autograd Functions that keep the gather forward and replace the backward: `MoEGatherPermute` (`src/kernels/moe_permute.py`) and `MoEExpertBiasGather` (`src/distributed/expert_parallel/autograd.py`).
+**Rule: never let a duplicate-valued gather fall back to the default `index_add_` backward in a training forward.** Both gathers route through custom autograd Functions that keep the gather forward and replace the backward: `MoEGatherPermute` and `MoEExpertBiasGather` (`src/kernels/moe_permute.py`).
 
 The bias gather (`MoEExpertBiasGather`, applied in `EPGptOssMoELayer`'s grouped path) computes `grad_bias` as one GEMM (`onehot(eids)ᵀ @ grad_out`, fp32 tensor-core accumulation): atomic-free and numerically identical (more accurate than the bf16 atomic add).
 
@@ -110,7 +110,7 @@ An empty group takes a fresh `torch.empty` instead of `.contiguous()`: at `M == 
 
 ### Detection and disabling
 
-At model load the EP MoE layer enables grouped GEMM when `use_grouped_gemm` is `True` (default) and `has_grouped_mm()` (`src/distributed/expert_parallel/base_layer.py`) holds — `F.grouped_mm` exists and compute capability is ≥ 9.0. That predicate is the single authority; a test asking for grouped GEMM on pre-SM90 hardware still gets the loop path. Opt out with `use_grouped_gemm: false` in the YAML config.
+At model load the EP MoE layer enables grouped GEMM when `use_grouped_gemm` is `True` (default) and `supports_grouped_mm()` (`src/hardware.py`) holds — CUDA is available and compute capability is ≥ 9.0. That predicate is the single authority; a test asking for grouped GEMM on pre-SM90 hardware still gets the loop path. Opt out with `use_grouped_gemm: false` in the YAML config.
 
 ## Supported models
 

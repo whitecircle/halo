@@ -23,7 +23,6 @@ import torch
 
 import src.distributed.expert_parallel.layers.roster  # noqa: F401 — registers every family subclass
 from src.distributed.expert_parallel.base_layer import EPMoELayerBase
-from src.distributed.module_registry import build_class_claim_map, iter_subclasses
 from src.distributed.runtime import (
     broadcast_from_rank0,
     get_global_rank,
@@ -33,6 +32,7 @@ from src.distributed.runtime import (
 from src.models.loading.config_levels import config_sources
 from src.models.moe_balancing import apply_export_renames
 from src.models.structure import persistent_buffers, unwrap_framework_wrappers
+from src.subclass_registry import build_class_claim_map, iter_subclasses
 
 
 def ep_layer_classes() -> list[type[EPMoELayerBase]]:
@@ -106,7 +106,7 @@ def ep_layer_class_by_model_type() -> dict[str, type[EPMoELayerBase]]:
     as the sharded-merge transforms. Same builder as the patcher's map, on this registry's own
     attribute: own declarations only, and it raises on a key two families claim.
     """
-    return build_class_claim_map(EPMoELayerBase, "HF_MODEL_TYPES", "model_type")
+    return build_class_claim_map(EPMoELayerBase, "model_type", attr="HF_MODEL_TYPES")
 
 
 def resolve_ep_merge_layer_class(model_type: str) -> type[EPMoELayerBase] | None:

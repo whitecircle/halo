@@ -13,8 +13,8 @@ from transformers import TrainerCallback
 
 from src.callbacks.efficiency import EfficiencyCallback
 from src.callbacks.moe_metrics import MoEMetricsCallback
-from src.callbacks.profiler import TorchProfilerCallback
 from src.callbacks.router_bias_balancing import RouterBiasBalancingCallback
+from src.callbacks.torch_profiler import TorchProfilerCallback
 from src.distributed.expert_parallel.balancing_strategy import agree_balancing_mode, apply_balancing_strategy
 from src.distributed.parallelism_config import ParallelismConfig
 from src.distributed.runtime import get_global_world_size

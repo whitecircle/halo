@@ -22,7 +22,8 @@ import torch
 import torch.distributed as dist
 
 from src.distributed.parallelism_config import ParallelismConfig
-from src.distributed.runtime import current_device, get_nccl_timeout
+from src.distributed.runtime import get_nccl_timeout
+from src.hardware import current_device
 
 logger = logging.getLogger(__name__)
 

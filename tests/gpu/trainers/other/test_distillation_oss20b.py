@@ -37,10 +37,10 @@ from datasets import Dataset
 from transformers import AutoModelForCausalLM, AutoTokenizer, DataCollatorForLanguageModeling
 
 from src.configs.distillation_config import DistillationConfig
-from src.distributed.expert_parallel.base_layer import has_grouped_mm
 from src.distributed.loading.model_loading import load_distributed_model
 from src.distributed.parallelism_config import ParallelismConfig
 from src.distributed.runtime import barrier
+from src.hardware import supports_grouped_mm
 from src.trainers.distillation.teacher_distillation import DistributedDistillationTrainer
 from tests.common.distributed import ensure_model_downloaded
 from tests.common.harness import gpu_test_main
@@ -89,7 +89,7 @@ def create_distillation_dataset(num_samples: int, tokenizer, seed: int = SEED) -
 
 def run_distillation_test(mode: str, rank: int, world_size: int, local_rank: int, base_output_dir: str) -> bool:
     """Run a single distillation test with the given parallelism mode."""
-    use_gmm = has_grouped_mm()
+    use_gmm = supports_grouped_mm()
     if mode == "fsdp":
         pc = ParallelismConfig()
         attn_impl = "flash_attention_2"

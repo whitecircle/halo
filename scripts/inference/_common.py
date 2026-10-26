@@ -37,9 +37,9 @@ logger = logging.getLogger(__name__)
 # it never finds, hence the :func:`parse_dataset_args` funnel.
 NO_SUBFOLDER_SENTINEL = "None"
 
-# Concurrency and resume cadence shared by the checkpointing generation CLIs. The scripts drive the
+# Concurrency and resume cadence shared by the resumable generation CLIs. The scripts drive the
 # same local rollout server through the same async client, so the numbers are shared rather than set
-# per script: a lower concurrency halves a sibling's throughput and a rarer checkpoint widens what an
+# per script: a lower concurrency halves a sibling's throughput and a rarer flush widens what an
 # interrupted run regenerates. Override per invocation with the flags.
 DEFAULT_N_PARALLEL = 32
 DEFAULT_CHECKPOINT_INTERVAL = 100
@@ -67,12 +67,12 @@ def add_generation_args(parser: argparse.ArgumentParser, *, temperature_default:
 
 
 def add_checkpoint_interval_arg(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
-    """Add the resume cadence every checkpointing generation CLI writes its partial output on."""
+    """Add the resume-store flush cadence of the batched generation CLI."""
     parser.add_argument(
         "--checkpoint_interval",
         type=int,
         default=DEFAULT_CHECKPOINT_INTERVAL,
-        help="Save a generation checkpoint every N results (default: %(default)s)",
+        help="Flush finished results to the resume store every N results (default: %(default)s)",
     )
     return parser
 

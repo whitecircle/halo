@@ -14,12 +14,7 @@ from openai import AsyncOpenAI
 
 from src.env import env_str
 from src.inference.endpoints import EXTERNAL_API_KEY_CHAIN, resolve_external_api_key
-from src.inference.openai_client import (
-    chat_completion,
-    create_openai_client,
-    json_schema_response_format,
-    parse_json_object,
-)
+from src.inference.openai_client import build_openai_client, chat_completion
 from src.inference.response import get_finish_reason
 from src.rewards.samples import (
     VIEW_TAGS,
@@ -57,6 +52,7 @@ EVIDENCE_SLIP_SHARE = 0.2
 EVIDENCE_MIN_SLIP_WORDS = 4
 
 _WHITESPACE = re.compile(r"\s+")
+_JSON_OBJECT = re.compile(r"\{.*\}", re.DOTALL)
 
 
 @dataclass(frozen=True)
@@ -173,10 +169,24 @@ def action_text(term: JudgeTerm, sample: ScoringSample) -> str:
     return render_actions(sample, term.view, max_chars=term.max_view_chars)
 
 
+def _parse_json_object(content: str) -> Any | None:
+    """The JSON value ``content`` is, or the first JSON object it embeds in prose; ``None`` when
+    neither parses."""
+    match = _JSON_OBJECT.search(content)
+    for candidate in (content, match.group(0) if match else None):
+        if candidate is None:
+            continue
+        try:
+            return json.loads(candidate)
+        except ValueError:
+            continue
+    return None
+
+
 def parse_verdict(content: str, term: JudgeTerm) -> Verdict | None:
     """The verdict in a judge reply, or ``None`` when the reply holds no JSON object answering every
     requirement with a finite number (score mode) or every check with a ``fired`` boolean (veto mode)."""
-    payload = parse_json_object(content)
+    payload = _parse_json_object(content)
     if not isinstance(payload, Mapping):
         return None
     rationale = payload.get("rationale")
@@ -271,9 +281,7 @@ class GenerativeJudge(Scorer):
 
     def _connect(self) -> AsyncOpenAI:
         if self._client is None:
-            self._client = create_openai_client(
-                base_url=self.term.base_url, api_key_override=scorer_api_key(self.term)
-            )
+            self._client = build_openai_client(base_url=self.term.base_url, api_key_override=scorer_api_key(self.term))
         return self._client
 
     async def aclose(self) -> None:
@@ -305,7 +313,10 @@ class GenerativeJudge(Scorer):
         if term.temperature is not None:
             request["temperature"] = term.temperature
         if term.structured_output:
-            request["response_format"] = json_schema_response_format("verdict", response_schema(term))
+            request["response_format"] = {
+                "type": "json_schema",
+                "json_schema": {"name": "verdict", "strict": True, "schema": response_schema(term)},
+            }
         return request
 
     async def score_one(self, sample: ScoringSample) -> ScoreResult:

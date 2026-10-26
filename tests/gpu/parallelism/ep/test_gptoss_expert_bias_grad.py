@@ -19,7 +19,7 @@ so the test is not vacuous. Single GPU; no DeepEP.
 
 import torch
 
-from src.distributed.expert_parallel.autograd import MoEExpertBiasGather
+from src.kernels.moe_permute import MoEExpertBiasGather
 from tests.common.harness import gpu_test_main, record_check
 from tests.common.utils import max_abs_rel_err
 

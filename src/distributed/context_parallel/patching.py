@@ -16,7 +16,7 @@ from src.distributed.context_parallel.validation import (
     UlyssesConfigError,
     validate_model_for_ulysses,
 )
-from src.distributed.module_registry import swap_registered_modules
+from src.subclass_registry import swap_registered_modules
 
 logger = logging.getLogger(__name__)
 

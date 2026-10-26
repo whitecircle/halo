@@ -12,6 +12,8 @@ uv.lock
 
 # Parallelism core
 src/distributed/**
+src/subclass_registry.py
+src/kernels/moe_permute.py
 
 # Trainers
 src/trainers/**

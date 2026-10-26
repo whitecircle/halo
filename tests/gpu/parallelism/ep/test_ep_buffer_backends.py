@@ -24,11 +24,11 @@ Requirements:
 import torch
 from transformers import AutoTokenizer
 
-from src.distributed.expert_parallel.base_layer import has_grouped_mm
 from src.distributed.expert_parallel.dispatcher import _ElasticBackend, _LegacyBackend
 from src.distributed.loading.model_loading import load_distributed_model
 from src.distributed.parallelism_config import ParallelismConfig
 from src.distributed.runtime import barrier
+from src.hardware import supports_grouped_mm
 from tests.common.distributed import ensure_model_downloaded
 from tests.common.ep_reference import ep_layers, find_router_weight, fixed_chat_batch, full_grad
 from tests.common.harness import gpu_test_main
@@ -64,7 +64,7 @@ def run_backend(backend, tokenizer, local_rank):
     device = f"cuda:{local_rank}"
     log(f"\n{'=' * 70}\nBACKEND ep_buffer_backend={backend} (EP={EP_SIZE})\n{'=' * 70}")
     parallelism_config = ParallelismConfig(
-        ep_size=EP_SIZE, use_grouped_gemm=has_grouped_mm(), ep_buffer_backend=backend
+        ep_size=EP_SIZE, use_grouped_gemm=supports_grouped_mm(), ep_buffer_backend=backend
     )
     model, _ = load_distributed_model(
         model_name_or_path=MODEL_NAME,

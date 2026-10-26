@@ -63,7 +63,7 @@ from src.environments.eval_runner import (
     require_answers,
 )
 from src.environments.registry import resolve_environment
-from src.inference.openai_client import create_openai_client
+from src.inference.openai_client import build_openai_client
 from src.log import configure_cli_logging
 
 configure_cli_logging()
@@ -194,7 +194,7 @@ def main() -> None:
         env.verify_backend()
         examples = build_examples(args)
         require_answers(env, examples, f"the {args.answer_field!r} field of {args.dataset} (--answer_field)")
-        client = create_openai_client(base_url=args.base_url, api_key_override=args.api_key)
+        client = build_openai_client(base_url=args.base_url, api_key_override=args.api_key)
         rollout = rollout_config_from_args(
             args,
             contract,

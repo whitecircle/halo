@@ -23,6 +23,7 @@ from torch.distributed import distributed_c10d as c10d
 from torch.distributed.tensor import DTensor, distribute_tensor
 
 from src.env import env_flag, resolve_nccl_timeout_minutes, resolve_store_timeout_hours
+from src.hardware import current_device
 from src.log import KEY_PREVIEW_COUNT, warn_once
 
 logger = logging.getLogger(__name__)
@@ -48,11 +49,6 @@ _UNDIGESTIBLE = (2**_AGREEMENT_DIGEST_BITS, 0)
 
 # NCCL has no 16-bit-integer type; such tensors ride the wire as a lossless uint8 bit view.
 _NCCL_UNSUPPORTED_DTYPES = (torch.int16, torch.uint16)
-
-
-def current_device() -> torch.device:
-    """This rank's CUDA device, or CPU when CUDA is unavailable."""
-    return torch.device("cuda", torch.cuda.current_device()) if torch.cuda.is_available() else torch.device("cpu")
 
 
 def collective_device() -> torch.device:

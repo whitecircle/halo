@@ -12,7 +12,8 @@ import torch
 import torch.distributed as dist
 from accelerate.utils import gather_object
 
-from src.distributed.runtime import collective_device, current_device, is_multi_rank_run
+from src.distributed.runtime import collective_device, is_multi_rank_run
+from src.hardware import current_device
 
 Count = torch.Tensor | float | int
 

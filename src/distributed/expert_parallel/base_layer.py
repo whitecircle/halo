@@ -19,16 +19,13 @@ from abc import ABC, abstractmethod
 from collections.abc import Callable
 
 import torch
+import torch.distributed as dist
 import torch.nn as nn
 import torch.nn.functional as F
 from transformers.activations import ACT2FN
 
 from src.diagnostics.performance_monitor import get_performance_monitor
-from src.distributed.expert_parallel.autograd import (
-    ReduceFromExpertTP,
-    ReplayCombineFunction,
-    ReplayDispatchFunction,
-)
+from src.distributed.expert_parallel.autograd import ReplayCombineFunction, ReplayDispatchFunction
 from src.distributed.expert_parallel.balancing import EPRouterBalancingMixin
 from src.distributed.expert_parallel.config import EPConfig
 from src.distributed.expert_parallel.dispatcher import DeepEPDispatcher
@@ -43,16 +40,14 @@ from src.distributed.expert_parallel.grad_sync import (
     has_grad_sync_peers,
 )
 from src.distributed.grad_reduce import SumGradAcrossGroup
-from src.distributed.runtime import (
-    current_device,
-    is_global_main_process,
-)
+from src.distributed.runtime import is_global_main_process
 from src.env import env_flag
+from src.hardware import current_device, supports_grouped_mm
 from src.kernels.fused_glu import FusedGluMul, fused_glu_enabled, packed_glu_mul, resolve_fused_glu_mul
 from src.kernels.grouped_gemm import GroupedGemmPrecision, grouped_gemm
 from src.kernels.grouped_mm_autograd import GROUPED_MM_STRIDE_ALIGNMENT_BYTES
 from src.kernels.histogram import sync_free_bincount
-from src.kernels.moe_permute import MoEGatherPermute, MoEWeightedUnpermute, build_inv_map
+from src.kernels.moe_permute import MoEGatherPermute, MoEWeightedUnpermute, build_inv_map, warm_permute_kernels
 from src.models.moe_balancing import (
     ROUTER_TOPK_FIELDS,
     NativeBalancingSlot,
@@ -110,26 +105,23 @@ def _resolve_expert_count(layer: nn.Module, path: str) -> int | None:
     return None
 
 
-def has_grouped_mm() -> bool:
-    """Whether ``F.grouped_mm`` can run here: SM90+ compute capability."""
-    if not torch.cuda.is_available():
-        return False
-    try:
-        major, minor = torch.cuda.get_device_capability()
-    except RuntimeError as e:
-        # ``is_available()`` already returned True, so this is a broken CUDA context on this rank (a
-        # fork re-init), not an old GPU. Logged because the answer decides a weight layout — GptOss
-        # stores gate/up de-interleaved on the grouped path — so a rank that answers differently from
-        # its peers enters the expert all-gather with different keys and the job hangs.
-        logger.warning(
-            "grouped-GEMM capability probe failed on this rank (%s: %s); falling back to the per-expert "
-            "loop path. If peer ranks probe successfully they store expert weights under DIFFERENT "
-            "attribute names — set use_grouped_gemm=false uniformly instead of running like this.",
-            type(e).__name__,
-            e,
-        )
-        return False
-    return (major * 10 + minor) >= 90
+class ReduceFromExpertTP(torch.autograd.Function):
+    """All-reduce SUM forward, identity backward, on the combined MoE output (token space, after combine).
+
+    Sums each expert-TP shard's partial per-token output; exact because combine is linear. The identity
+    backward is correct because :class:`SumGradAcrossGroup` all-reduces the input grad on the way in and
+    each shard's weight grad is independently correct.
+    """
+
+    @staticmethod
+    def forward(ctx, x: torch.Tensor, group):
+        out = x.clone()
+        dist.all_reduce(out, op=dist.ReduceOp.SUM, group=group)
+        return out
+
+    @staticmethod
+    def backward(ctx, grad_output):
+        return grad_output, None
 
 
 class EPMoELayerBase(EPExpertGatherMixin, EPRouterBalancingMixin, nn.Module, ABC):
@@ -383,7 +375,7 @@ class EPMoELayerBase(EPExpertGatherMixin, EPRouterBalancingMixin, nn.Module, ABC
         self._grad_sync_hooks = []
         self._hook_synced_expert_params: list = []  # populated only in the in-backward hook regime
 
-        self._use_grouped_mm = ep_config.use_grouped_gemm and has_grouped_mm()
+        self._use_grouped_mm = ep_config.use_grouped_gemm and supports_grouped_mm()
 
         # Latched by _warm_activation_graphs on the first forward (init is too early: the eager loader
         # still has this layer on CPU, and a CPU trace is not the graph the run calls).
@@ -911,21 +903,9 @@ class EPMoELayerBase(EPExpertGatherMixin, EPRouterBalancingMixin, nn.Module, ABC
                 torch.autograd.grad(self._warm_expert_activation(gate_up).sum(), gate_up)
                 # The fused permute runs only on the grouped path (_compute_experts, _sort_tokens_for_grouped_mm).
                 if self._grouped_mm_enabled():
-                    self._warm_permute_kernels(hidden, top_k, device, dtype)
+                    warm_permute_kernels(_WARMUP_TOKENS, hidden, top_k, device, dtype)
             with torch.no_grad():
                 self._warm_expert_activation(self._warmup_input((_WARMUP_TOKENS, width), device, dtype))
-
-    def _warm_permute_kernels(self, hidden: int, top_k: int, device: torch.device, dtype: torch.dtype) -> None:
-        """Run the fused permute's backward and the weighted unpermute forward and backward once, over
-        every token routed to ``top_k`` rows (the unpermute forward is the same kernel in both grad modes)."""
-        sorted_token_idx = torch.arange(_WARMUP_TOKENS, device=device).repeat_interleave(top_k)
-        inv_map = build_inv_map(sorted_token_idx, _WARMUP_TOKENS, top_k)
-        tokens = self._warmup_input((_WARMUP_TOKENS, hidden), device, dtype, requires_grad=True)
-        expert_out = self._warmup_input((sorted_token_idx.numel(), hidden), device, dtype, requires_grad=True)
-        weights = self._warmup_input((sorted_token_idx.numel(),), device, dtype, requires_grad=True)
-        permuted = MoEGatherPermute.apply(tokens, sorted_token_idx, inv_map)
-        unpermuted = MoEWeightedUnpermute.apply(expert_out, weights, sorted_token_idx, inv_map)
-        torch.autograd.grad(permuted.sum() + unpermuted.sum(), (tokens, expert_out, weights))
 
     @staticmethod
     def _warmup_input(

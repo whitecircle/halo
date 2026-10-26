@@ -31,9 +31,9 @@ from src.configs.embedding_config import EmbeddingConfig
 from src.configs.environment_config import EnvironmentConfig
 from src.configs.offline_grpo_config import OfflineGRPOConfig
 from src.configs.smpo_config import SmoothMarginPOConfig
-from src.distributed.module_registry import iter_subclasses
 from src.env import DEFAULT_NCCL_TIMEOUT_MINUTES
 from src.environments.base import VALID_REASONING_EFFORTS
+from src.subclass_registry import iter_subclasses
 from src.trainers.distillation.losses import DIVERGENCES
 from src.training.parser import H4ArgumentParser, _literal_choices
 from src.training.script_runner import init_training_script

@@ -70,7 +70,7 @@ from src.environments.eval_runner import (
     report,
 )
 from src.environments.registry import resolve_environment
-from src.inference.openai_client import create_openai_client
+from src.inference.openai_client import build_openai_client
 from src.log import configure_cli_logging
 
 configure_cli_logging()
@@ -416,7 +416,7 @@ def main() -> None:
         # A judge or reward-model term is probed before any episode runs, as the trainer does at launch.
         env.verify_backend()
         examples = build_examples(args, adapter, selection)
-        client = create_openai_client(base_url=args.base_url, api_key_override=args.api_key)
+        client = build_openai_client(base_url=args.base_url, api_key_override=args.api_key)
 
         # Without a training config the flag's effort level sets the generation budget unless --max_tokens
         # overrides it: too small a budget truncates the chain of thought before any solution and scores

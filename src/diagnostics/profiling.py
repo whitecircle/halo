@@ -1,4 +1,4 @@
-"""Opt-in profiling helpers: operator/kernel traces, CUDA memory snapshots, and summaries.
+"""Opt-in profiling: CUDA memory reads, allocation history and snapshots, torch profiler traces.
 
 Artifacts are rank-tagged so per-rank files never collide. Only global rank 0 profiles by
 default (``ranks="0"``); ``ranks="all"`` captures every rank for rank-skew triage.
@@ -9,36 +9,30 @@ from __future__ import annotations
 import logging
 import os
 import time
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from contextlib import contextmanager
+from typing import NamedTuple
 
 import torch
-from torch.profiler import ProfilerActivity, profile
+from torch.profiler import ProfilerAction, ProfilerActivity, profile
 
-from src.distributed.runtime import (
-    current_device,
-    get_global_rank,
-    rank_tag,
-)
+from src.distributed.runtime import get_global_rank, rank_tag
 from src.env import data_path, torch_trace_dir
+from src.hardware import current_device
 
 logger = logging.getLogger(__name__)
 
 # Alloc/free events the recorded CUDA memory history keeps before dropping the oldest.
 _MEMORY_HISTORY_MAX_ENTRIES = 100_000
 
-__all__ = [
-    "should_profile_this_rank",
-    "ensure_artifact_dir",
-    "log_cuda_memory",
-    "reset_peak_memory_stats",
-    "start_memory_history",
-    "stop_memory_history",
-    "dump_memory_snapshot",
-    "cuda_memory_history",
-    "torch_profiler_session",
-    "export_profiler_artifacts",
-]
+
+class CudaMemoryGiB(NamedTuple):
+    """This rank's CUDA allocator counters in GiB; the peaks run since the last peak reset."""
+
+    allocated: float
+    reserved: float
+    peak_allocated: float
+    peak_reserved: float
 
 
 def _parse_rank_spec(spec: str | int | None) -> set[int] | None:
@@ -65,45 +59,29 @@ def should_profile_this_rank(spec: str | int | None) -> bool:
     return get_global_rank() in selected
 
 
-def ensure_artifact_dir(output_dir: str) -> None:
-    """Create ``output_dir`` for this rank's artifacts.
-
-    Not ``fs_aware_makedirs``: its barrier would deadlock against the ranks that the ``ranks``
-    selection returned early on.
-    """
-    os.makedirs(output_dir, exist_ok=True)
-
-
-def reset_peak_memory_stats() -> None:
-    """Reset the CUDA peak-memory counters (call at the start of a region of interest)."""
-    if torch.cuda.is_available():
-        torch.cuda.reset_peak_memory_stats()
-
-
-def log_cuda_memory(tag: str = "") -> dict[str, float]:
-    """Log and return this rank's current/peak CUDA memory (GiB).
-
-    Peak counters are left running; :func:`reset_peak_memory_stats` scopes them to a region.
-    """
+def read_cuda_memory() -> CudaMemoryGiB | None:
+    """This rank's current and peak CUDA memory, or ``None`` without CUDA."""
     if not torch.cuda.is_available():
-        return {}
-    gib = 1024.0**3
-    stats = {
-        "allocated_gib": torch.cuda.memory_allocated() / gib,
-        "reserved_gib": torch.cuda.memory_reserved() / gib,
-        "max_allocated_gib": torch.cuda.max_memory_allocated() / gib,
-        "max_reserved_gib": torch.cuda.max_memory_reserved() / gib,
-    }
-    logger.info(
-        "[mem%s] %s: allocated=%.2f reserved=%.2f peak_alloc=%.2f peak_reserved=%.2f GiB",
-        f" {rank_tag()}",
-        tag or "cuda",
-        stats["allocated_gib"],
-        stats["reserved_gib"],
-        stats["max_allocated_gib"],
-        stats["max_reserved_gib"],
+        return None
+    return CudaMemoryGiB(
+        allocated=torch.cuda.memory_allocated() / 2**30,
+        reserved=torch.cuda.memory_reserved() / 2**30,
+        peak_allocated=torch.cuda.max_memory_allocated() / 2**30,
+        peak_reserved=torch.cuda.max_memory_reserved() / 2**30,
     )
-    return stats
+
+
+def log_cuda_memory(tag: str = "") -> None:
+    """Log this rank's current and peak CUDA memory (GiB); nothing without CUDA."""
+    memory = read_cuda_memory()
+    if memory is None:
+        return
+    logger.info(
+        "[mem %s] %s: allocated=%.2f reserved=%.2f peak_alloc=%.2f peak_reserved=%.2f GiB",
+        rank_tag(),
+        tag or "cuda",
+        *memory,
+    )
 
 
 def start_memory_history(max_entries: int = _MEMORY_HISTORY_MAX_ENTRIES) -> bool:
@@ -159,7 +137,9 @@ def cuda_memory_history(
         yield
         return
 
-    ensure_artifact_dir(output_dir)
+    # Before recording, so a bad output_dir fails here and not at the dump; a plain makedirs, since
+    # a barrier would hang on the ranks the selection left out.
+    os.makedirs(output_dir, exist_ok=True)
     start_memory_history(max_entries=max_entries)
     try:
         yield
@@ -168,8 +148,39 @@ def cuda_memory_history(
         stop_memory_history()
 
 
+def build_profiler(
+    output_dir: str,
+    *,
+    cpu_activity: bool,
+    record_shapes: bool,
+    profile_memory: bool,
+    with_stack: bool,
+    with_flops: bool = False,
+    schedule: Callable[[int], ProfilerAction] | None = None,
+    on_trace_ready: Callable[[profile], None] | None = None,
+) -> profile:
+    """An unentered ``torch.profiler.profile`` tracing CUDA when available and CPU ops with ``cpu_activity``.
+
+    Creates ``output_dir`` for this rank's artifacts with a plain ``os.makedirs``: ``fs_aware_makedirs``'s
+    barrier would deadlock against the ranks that the ``ranks`` selection left out.
+    """
+    activities = [ProfilerActivity.CPU] if cpu_activity else []
+    if torch.cuda.is_available():
+        activities.append(ProfilerActivity.CUDA)
+    os.makedirs(output_dir, exist_ok=True)
+    return profile(
+        activities=activities,
+        schedule=schedule,
+        on_trace_ready=on_trace_ready,
+        record_shapes=record_shapes,
+        profile_memory=profile_memory,
+        with_stack=with_stack,
+        with_flops=with_flops,
+    )
+
+
 def export_profiler_artifacts(
-    prof: torch.profiler.profile,
+    prof: profile,
     output_dir: str,
     *,
     label: str,
@@ -238,11 +249,11 @@ def torch_profiler_session(
     with_stack: bool = True,
     with_flops: bool = False,
     export_memory_timeline: bool = True,
-) -> Iterator[torch.profiler.profile | None]:
+) -> Iterator[profile | None]:
     """One-shot :class:`torch.profiler.profile` over a bounded code region.
 
     For schedule-based in-loop profiling of an HF Trainer run, prefer
-    :class:`src.callbacks.profiler.TorchProfilerCallback`. Yields the profiler (or
+    :class:`src.callbacks.torch_profiler.TorchProfilerCallback`. Yields the profiler (or
     ``None`` on non-selected ranks); on exit writes per-rank trace/stacks/table to ``output_dir``
     (defaults under ``HALO_DATA_ROOT``).
     """
@@ -251,20 +262,17 @@ def torch_profiler_session(
         yield None
         return
 
-    activities = [ProfilerActivity.CPU]
-    if torch.cuda.is_available():
-        activities.append(ProfilerActivity.CUDA)
-
-    ensure_artifact_dir(output_dir)
-    started = time.perf_counter()
-    with profile(
-        activities=activities,
+    profiler = build_profiler(
+        output_dir,
+        cpu_activity=True,
         record_shapes=record_shapes,
         profile_memory=profile_memory,
         with_stack=with_stack,
         with_flops=with_flops,
-    ) as prof:
-        yield prof
+    )
+    started = time.perf_counter()
+    with profiler:
+        yield profiler
 
     logger.info(
         "[profiler %s] region '%s' profiled in %.2fs; exporting…",
@@ -273,7 +281,7 @@ def torch_profiler_session(
         time.perf_counter() - started,
     )
     export_profiler_artifacts(
-        prof,
+        profiler,
         output_dir,
         label=label,
         with_stack=with_stack,

@@ -10,16 +10,17 @@ Every helper here is opt-in and costs nothing when disabled.
 | CPU-side stalls (dataloader, tokenization) | py-spy flame graph | `scripts/profiling/py_spy_diag.py record` |
 | Step time, tokens/s, peak memory, MFU/S-MFU | `EfficiencyCallback` | `enable_efficiency_metrics` YAML flag; MFU/S-MFU also need `report_mfu_diagnostics` |
 | Rank skew on a collective | TraceLens collective report | `profiler_ranks: "all"`, then `scripts/profiling/trace_report.py` |
-| Cross-rank value divergence | `assert_consistent` | add the call, then `HALO_TP_CONSISTENCY_CHECK=1` |
+| Cross-rank value divergence | `assert_rank_uniform` | add the call, then `HALO_TP_CONSISTENCY_CHECK=1` |
 | Hang stack dump (every rank on the node) | `scripts/profiling/py_spy_diag.py dump` | run standalone; needs ptrace access ([§1c](#1c-py-spy--cpu-flame-graph-dataloader--python-stalls)) |
 | NVLink lane health (hard errors: Rx, symbol, link recovery, link integrity) | `scripts/profiling/nvlink_health.py` | run standalone; exit 1 = hard lane errors, while a failed `nvidia-smi` or an unrecognized counter layout raises |
 | NCCL watchdog timeout | `init_distributed` | `DIST_NCCL_TIMEOUT_MINUTES` (default 30) |
 | Weight-sync hang or slow sync: the transport the trainer↔rollout-server group formed on (EFA, InfiniBand, sockets, CUDA IPC, shared memory), plugin build, GB/s | `scripts/profiling/weight_sync_transport.py` | run standalone against a live server; `--expect efa` exits 1 off the fabric ([Rollout Servers](../infrastructure/rollout-servers.md#servers-on-other-nodes-efa)) |
 
-The consistency helpers live in `src/diagnostics/debugging.py`. They are **manual
-instrumentation** — the toolkit ships no call sites for them, so the env flag does nothing until you
+The consistency check lives in `src/diagnostics/rank_divergence.py`. It is **manual
+instrumentation** — the toolkit ships no call sites for it, so the env flag does nothing until you
 add the call to the code you are investigating. The profiler session and CUDA-memory helpers live in
-`src/diagnostics/profiling.py`; the in-loop callbacks in `src/callbacks/`.
+`src/diagnostics/profiling.py`, the py-spy captures behind `py_spy_diag.py` in
+`src/diagnostics/py_spy.py`, and the in-loop callbacks in `src/callbacks/`.
 
 ## 1. Flame graphs
 
@@ -183,9 +184,10 @@ with cuda_memory_history(ranks="all"):  # → $HALO_DATA_ROOT/profiling/memory/s
 
 Drag the `.pickle` onto <https://pytorch.org/memory_viz> for the allocation timeline and
 per-allocation flame graph, each block traced to its Python call site — the fastest way to find an
-OOM source or a leak. For quick textual checks, `log_cuda_memory("after forward")` and
-`reset_peak_memory_stats()` live in `src.diagnostics.profiling`; `EfficiencyCallback`
-already reports peak memory per step.
+OOM source or a leak. For a quick textual check, `log_cuda_memory("after forward")` in
+`src.diagnostics.profiling` logs this rank's allocated, reserved and peak memory
+(`read_cuda_memory()` returns them as GiB); `torch.cuda.reset_peak_memory_stats()` scopes the peaks to
+a region. `EfficiencyCallback` already reports peak memory per step.
 
 `HALO_WEIGHT_SYNC_MEM_LOG=1` brackets every collective weight sync with per-rank
 `[mem rankNN] weight-sync pre/post` lines (allocated / reserved / peaks, GiB) — Online GRPO and
@@ -232,17 +234,18 @@ The rank *not* in a collective (still in the dataloader, or a different `if` bra
 
 ### Catch divergence before it deadlocks
 
-`assert_consistent` / `assert_tensor_shape_consistent` compare a value across a process group and
-raise a clear error instead of a downstream NCCL hang. Add the call at the suspect point — nothing
-in the toolkit calls them for you:
+`assert_rank_uniform` compares a value's digest across a process group, so a divergence surfaces as
+a warning, or a clear error, instead of a downstream NCCL hang. Pass `tuple(t.shape)` to compare only
+a shape, the usual first sign of a TP/EP collective deadlock. Add the call at the suspect point —
+nothing in the toolkit calls it for you:
 
 ```bash
-export HALO_TP_CONSISTENCY_CHECK=1   # make assert_consistent raise instead of warn
+export HALO_TP_CONSISTENCY_CHECK=1   # make assert_rank_uniform raise instead of warn
 ```
 
 ```python
-from src.diagnostics.debugging import assert_tensor_shape_consistent
-assert_tensor_shape_consistent(hidden_states, group=tp_group, label="attn_in")
+from src.diagnostics.rank_divergence import assert_rank_uniform
+assert_rank_uniform(tuple(hidden_states.shape), group=tp_group, label="attn_in")
 ```
 
 ### NCCL flight recorder + watchdog timeout

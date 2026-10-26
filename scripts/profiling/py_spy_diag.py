@@ -1,6 +1,6 @@
 """Attach py-spy to a running training job: all-rank stack dumps and CPU flame graphs.
 
-Out-of-process CLI over the :mod:`src.diagnostics.debugging` helpers. It needs no profiling flags at
+Out-of-process CLI over the :mod:`src.diagnostics.py_spy` helpers. It needs no profiling flags at
 launch time, so it works on a job that is already running or already hung. Discovers this node's
 torchrun training ranks (or takes explicit ``--pid``) and either:
 
@@ -28,7 +28,7 @@ import logging
 import os
 import sys
 
-from src.diagnostics.debugging import (
+from src.diagnostics.py_spy import (
     FLAMEGRAPH_DIR,
     STACK_DUMP_DIR,
     dump_distributed_stacks,

@@ -25,11 +25,11 @@ from torch.distributed.tensor import DTensor
 from transformers import AutoTokenizer, TrainerCallback
 from trl import SFTConfig
 
-from src.distributed.expert_parallel.base_layer import has_grouped_mm
 from src.distributed.loading.model_loading import load_distributed_model
 from src.distributed.parallelism_config import ParallelismConfig
 from src.distributed.runtime import materialize_dtensor
 from src.distributed.tensor_parallel.state_dict import iter_tp_sharded_non_dtensor_full
+from src.hardware import supports_grouped_mm
 from src.models.patches.gpt_oss_sinks import SinksPolicy, stamped_sinks_policy
 from src.trainers.sft import DistributedSFTTrainer
 from tests.common.datasets import create_sft_dataset
@@ -92,7 +92,7 @@ def run(ctx) -> dict:
         tokenizer.pad_token = tokenizer.eos_token
     train_dataset = create_sft_dataset(NUM_TRAIN_SAMPLES, tokenizer, seed=SEED)
 
-    parallelism_config = ParallelismConfig(use_grouped_gemm=has_grouped_mm(), **MODE_CONFIGS[mode])
+    parallelism_config = ParallelismConfig(use_grouped_gemm=supports_grouped_mm(), **MODE_CONFIGS[mode])
     model, _ = load_distributed_model(
         model_name_or_path=MODEL_NAME,
         parallelism_config=parallelism_config,

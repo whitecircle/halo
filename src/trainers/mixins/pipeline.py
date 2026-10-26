@@ -37,7 +37,6 @@ from src.distributed.pipeline_parallel.runtime import PP_BATCH_PAD_VALUES, Pipel
 from src.distributed.pipeline_parallel.split import resolve_module_attr, resolve_pp_spec
 from src.distributed.pipeline_parallel.stage import PipelineStageModule, build_pipeline_stage, module_path
 from src.distributed.runtime import (
-    current_device,
     fs_aware_save_rank,
     get_num_nodes,
     is_global_main_process,
@@ -45,6 +44,7 @@ from src.distributed.runtime import (
     reject_across_ranks,
 )
 from src.env import env_flag
+from src.hardware import current_device
 from src.models.modality import is_vlm_model
 from src.models.structure import backbone_with_layers, resolve_tokenizer
 from src.trainers.mixins.grad_clip import (

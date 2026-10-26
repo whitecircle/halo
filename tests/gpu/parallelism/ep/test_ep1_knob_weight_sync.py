@@ -41,11 +41,11 @@ from torch.distributed.tensor import DTensor
 from transformers import AutoTokenizer
 from trl import SFTConfig
 
-from src.distributed.expert_parallel.base_layer import has_grouped_mm
 from src.distributed.loading.model_loading import load_distributed_model
 from src.distributed.parallelism_config import ParallelismConfig
 from src.distributed.runtime import barrier
 from src.env import env_flag, env_str
+from src.hardware import supports_grouped_mm
 from src.trainers.grpo.rollout.weight_sync import gather_and_send_weights
 from src.trainers.sft import DistributedSFTTrainer
 from tests.common.datasets import create_sft_dataset
@@ -97,7 +97,7 @@ def gather_is_full(reshard, tokenizer, local_rank, output_dir):
     # safetensors loader, for a checkpoint whose expert layout the lazy loader declines.
     pc = ParallelismConfig(
         ep_size=1,
-        use_grouped_gemm=has_grouped_mm(),
+        use_grouped_gemm=supports_grouped_mm(),
         fsdp_reshard_after_forward=reshard,
         ep_lazy_loading=env_flag("HALO_TEST_EP1_KNOB_LAZY", True),
     )

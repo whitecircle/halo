@@ -30,7 +30,7 @@ from src.environments.base import ANSWER_KEY, Trajectory
 from src.environments.eval_runner import EVAL_STATS_KEY, require_answers, run_episode
 from src.environments.registry import get_registered_environments, resolve_environment
 from src.inference.endpoints import DEFAULT_LOCAL_BASE_URL
-from src.inference.openai_client import create_openai_client
+from src.inference.openai_client import build_openai_client
 
 logger = logging.getLogger(__name__)
 
@@ -131,7 +131,7 @@ def run_playground_episode(
         # A hand-edited "localhost:8000/v1" is not a URL the SDK can route. The field is prefilled with a
         # full one, so the scheme is restored rather than refused.
         url = server_url if server_url.startswith("http") else f"http://{server_url}"
-        client = create_openai_client(base_url=url, api_key_override=api_key)
+        client = build_openai_client(base_url=url, api_key_override=api_key)
 
         start_time = time.time()
         trajectory = asyncio.run(

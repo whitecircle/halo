@@ -45,7 +45,7 @@ def _prepare_rm_scoring(monkeypatch, tmp_path, *, prompt_ids, resumed_rows, clie
     monkeypatch.setattr(rm_scoring, "load_prompts_dataframe", lambda args: df)
     # Both endpoints are opened, and the batch is scored, through the shared module — that is where
     # the stubs go, or the script would boot a real client and load a real reward model.
-    monkeypatch.setattr(rm_common, "create_openai_client", lambda *a, **k: client)
+    monkeypatch.setattr(rm_common, "build_openai_client", lambda *a, **k: client)
     monkeypatch.setattr(rm_common, "load_reward_model", lambda *a, **k: (None, None, None))
     # The reward head is never reached on the failure paths; on the success path it stands in for it.
     monkeypatch.setattr(rm_common, "score_conversations", lambda *a, **k: [1.0])

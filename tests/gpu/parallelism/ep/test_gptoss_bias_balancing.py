@@ -35,7 +35,7 @@ Run with 1 or 2 GPUs (ep_size = world_size):
 from types import SimpleNamespace
 
 import torch
-from transformers import GptOssConfig, GptOssForCausalLM
+from transformers import GptOssConfig, GptOssForCausalLM, TrainerState
 
 from src.callbacks.router_bias_balancing import RouterBiasBalancingCallback
 from src.distributed.expert_parallel.balancing_strategy import apply_balancing_strategy
@@ -247,7 +247,7 @@ def run(ctx) -> dict:
     for layer in ep_layers:
         layer.balancing_biases.zero_()
         layer.expert_load_counter = forced.clone()
-    RouterBiasBalancingCallback(update_rate=gamma).on_step_end(None, None, None, model=model)
+    RouterBiasBalancingCallback(update_rate=gamma).on_step_end(None, TrainerState(global_step=1), None, model=model)
     b0 = ep_layers[0].balancing_biases
     check(checks, "overloaded expert bias decreased", b0[0].item() < 0, f"bias[0]={b0[0].item():.3f}")
     check(checks, "underloaded expert bias increased", (b0[1:] > 0).all().item(), f"bias[1:]={b0[1:].tolist()}")

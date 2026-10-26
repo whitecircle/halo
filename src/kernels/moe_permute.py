@@ -1,4 +1,4 @@
-"""Atomic-free token permute/unpermute for grouped-GEMM MoE expert compute.
+"""Atomic-free token permute/unpermute and per-expert bias gather for grouped-GEMM MoE expert compute.
 
 The permute's gather has ``index_add_`` as its default backward, and the unpermute is one: a bf16 kernel
 that emulates an atomic add with a CAS loop, which serializes under high ``top_k``. Both directions here
@@ -11,6 +11,9 @@ The routing-weight multiply is folded into the unpermute, and its backward emits
 gradient and the routing-weight gradient from one read of each operand. The expert outputs feed only
 the routing-weight gradient, so they are saved, and that gradient computed, only when the weights
 need one.
+
+:func:`warm_permute_kernels` compiles the permute kernels ahead of their first call inside an EP
+dispatch-combine span.
 """
 
 from __future__ import annotations
@@ -211,3 +214,43 @@ class MoEWeightedUnpermute(torch.autograd.Function):
                 BLOCK_H=_BLOCK_H,
             )
         return grad_expert, grad_weights.to(weights.dtype) if ctx.weight_grad else None, None, None
+
+
+class MoEExpertBiasGather(torch.autograd.Function):
+    """Per-expert bias broadcast ``bias[eids]`` to expert-sorted tokens, with an atomic-free backward.
+
+    The default index_add_ backward is a bf16 atomic scatter that serialises, since all of an expert's
+    tokens hit the same bias row. ``grad_bias`` is instead a per-expert grad sum via one GEMM
+    ``onehot(eids)ᵀ @ grad_out``: tensor-core fp32 accum, no atomics, order-independent."""
+
+    @staticmethod
+    def forward(ctx, bias: torch.Tensor, eids: torch.Tensor):
+        ctx.save_for_backward(eids)
+        ctx.num_experts = bias.shape[0]
+        return bias.index_select(0, eids)
+
+    @staticmethod
+    def backward(ctx, grad_out):
+        (eids,) = ctx.saved_tensors
+        # onehot[e, t] = 1 where token t routed to expert e; ([E, N] @ [N, I]) sums grad per expert.
+        onehot = (torch.arange(ctx.num_experts, device=eids.device).unsqueeze(1) == eids).to(grad_out.dtype)
+        return onehot @ grad_out, None
+
+
+def warm_permute_kernels(num_tokens: int, hidden: int, top_k: int, device: torch.device, dtype: torch.dtype) -> None:
+    """Run the fused permute's backward and the weighted unpermute forward and backward once, over
+    ``num_tokens`` tokens each routed to ``top_k`` rows (the unpermute forward is the same kernel in both
+    grad modes). Call with grad enabled.
+
+    The operands are zeros, drawn from no generator, so a call inside a recompute region leaves the RNG
+    where the recompute expects it; the kernels compile on shape and dtype alone.
+    """
+    sorted_token_idx = torch.arange(num_tokens, device=device).repeat_interleave(top_k)
+    inv_map = build_inv_map(sorted_token_idx, num_tokens, top_k)
+    n_sorted = sorted_token_idx.numel()
+    tokens = torch.zeros((num_tokens, hidden), device=device, dtype=dtype, requires_grad=True)
+    expert_out = torch.zeros((n_sorted, hidden), device=device, dtype=dtype, requires_grad=True)
+    weights = torch.zeros((n_sorted,), device=device, dtype=dtype, requires_grad=True)
+    permuted = MoEGatherPermute.apply(tokens, sorted_token_idx, inv_map)
+    unpermuted = MoEWeightedUnpermute.apply(expert_out, weights, sorted_token_idx, inv_map)
+    torch.autograd.grad(permuted.sum() + unpermuted.sum(), (tokens, expert_out, weights))

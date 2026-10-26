@@ -2,6 +2,7 @@
 
 import logging
 import random
+from contextlib import contextmanager
 
 import pandas as pd
 import torch
@@ -46,68 +47,63 @@ def _pretty_print_dataframe(df):
     logger.info("\n" + tabulate(formatted_df, headers="keys", tablefmt="simple", showindex=False))
 
 
-def _is_cp_wrapped(model) -> bool:
-    """Whether a CP wrapper sits anywhere in the tree, not just at its root.
+def _generation_skip_reason(model) -> str | None:
+    """Why ``model`` cannot ``generate()`` here, or None.
 
-    Under ``use_peft`` the wrapper sits inside ``PeftModel.base_model.model`` and PEFT delegates
-    ``generate`` to it, so a root ``isinstance`` check would let the callback generate against a
-    sequence-sharded model.
+    The CP wrapper is searched for in the whole tree: under ``use_peft`` it sits inside
+    ``PeftModel.base_model.model`` and PEFT delegates ``generate`` to it. A TP shard is a DTensor on a
+    mesh naming a ``tp`` dim (HF ``tp_plan`` and toolkit attention-only TP alike); ``_tp_plan`` is
+    populated on every load, TP or not, so it is no signal.
     """
-    return any(isinstance(module, UlyssesCPModelWrapper) for module in model.modules())
+    if isinstance(model, PipelineStageModule):
+        return (
+            "a pipeline-parallel stage holds only part of the model and cannot generate. "
+            "Generate from a saved checkpoint instead."
+        )
+    if any(isinstance(module, UlyssesCPModelWrapper) for module in model.modules()):
+        return "Context Parallelism is incompatible with autoregressive generation."
+    if any(isinstance(param.data, DTensor) and has_tp_dim(param.data.device_mesh) for param in model.parameters()):
+        return "Tensor Parallelism (DTensor) is incompatible with autoregressive generation."
+    return None
 
 
-def _has_tp_dtensor_params(model) -> bool:
-    """Whether the model has TP-sharded parameters (incompatible with generate()).
+def _uses_collective_forward(model) -> bool:
+    """Whether every rank must join the forward: FSDP, EP layers or DTensor parameters.
 
-    A TP shard is a DTensor on a mesh naming a ``tp`` dim, which covers HF ``tp_plan`` and toolkit
-    attention-only TP alike. ``_tp_plan`` is populated on every load, TP or not, so it is not a
-    usable signal.
+    FSDP is read off the ``_is_fsdp_managed_module`` stamp it puts on every module it manages; a
+    DTensor check alone would miss FSDP2 under ``reshard_after_forward=False``, which leaves plain
+    tensors.
     """
-    return any(isinstance(param.data, DTensor) and has_tp_dim(param.data.device_mesh) for param in model.parameters())
+    return (
+        hasattr(model, "_is_fsdp_managed_module")
+        or bool(find_ep_layers(model))
+        or any(isinstance(param.data, DTensor) for param in model.parameters())
+    )
 
 
-def _has_any_dtensor_params(model) -> bool:
-    """Check if the model has any DTensor parameters (TP or FSDP2)."""
-    return any(isinstance(param.data, DTensor) for param in model.parameters())
+@contextmanager
+def _gradient_checkpointing_disabled(model):
+    """Gradient checkpointing off for the block, then back on for exactly the modules that had it.
 
-
-def _is_fsdp2_model(model) -> bool:
-    """Whether the model is wrapped with FSDP2 (fully_shard).
-
-    ``fully_shard`` stamps ``_is_fsdp_managed_module`` on every module it manages, so the flag answers
-    for any module. A DTensor check would not: ``reshard_after_forward=False`` leaves plain tensors.
+    Switching it back on everywhere would enable it on layers a partially checkpointed model
+    deliberately left off, changing memory and step time for the rest of training.
     """
-    return hasattr(model, "_is_fsdp_managed_module")
-
-
-def _is_distributed_parallel_model(model) -> bool:
-    """Whether the model uses parallelism (EP, FSDP2, TP DTensors) requiring all ranks in forward."""
-    return _is_fsdp2_model(model) or bool(find_ep_layers(model)) or _has_any_dtensor_params(model)
-
-
-def _disable_gradient_checkpointing(model) -> list[torch.nn.Module]:
-    """Disable gradient checkpointing everywhere it is on; return the modules that had it on."""
-    was_enabled = [module for module in model.modules() if getattr(module, "gradient_checkpointing", False)]
-    for module in was_enabled:
+    enabled = [module for module in model.modules() if getattr(module, "gradient_checkpointing", False)]
+    for module in enabled:
         module.gradient_checkpointing = False
-    return was_enabled
-
-
-def _restore_gradient_checkpointing(modules: list[torch.nn.Module]) -> None:
-    """Re-enable gradient checkpointing on exactly the modules that had it.
-
-    Restored module by module: switching it back on everywhere would enable it on layers a partially
-    checkpointed model deliberately left off, changing memory and step time for the rest of training.
-    """
-    for module in modules:
-        module.gradient_checkpointing = True
+    try:
+        yield
+    finally:
+        for module in enabled:
+            module.gradient_checkpointing = True
 
 
 class GenerateExamplesCallback(TrainerCallback):
-    """Generate text examples during evaluation and log them.
+    """Generate text examples from a tokenized dataset during evaluation and log them.
 
-    DDP splits across ranks (gathered on rank 0); FSDP2/EP generate on all ranks together; TP and CP are
-    skipped (incompatible with generate).
+    ``logger_backend`` (``'clearml'`` or ``'wandb'``) receives the table; any other value only prints
+    the sample to the log. DDP splits the samples across ranks (gathered on rank 0); FSDP and EP
+    generate on all ranks together; PP, CP and TP are skipped (incompatible with generate).
     """
 
     def __init__(
@@ -118,11 +114,6 @@ class GenerateExamplesCallback(TrainerCallback):
         max_new_tokens=256,
         logger_backend="wandb",
     ):
-        """
-        Args:
-            preprocessed_dataset: tokenized ``datasets.Dataset``.
-            logger_backend: ``'clearml'`` or ``'wandb'``.
-        """
         self.dataset = preprocessed_dataset
         self.tokenizer = tokenizer
         self.num_examples = min(num_examples, len(self.dataset))
@@ -156,44 +147,23 @@ class GenerateExamplesCallback(TrainerCallback):
         model = kwargs["model"]
         model.eval()
 
-        # unwrap_framework_wrappers rather than a DDP-only peel: it also drops torch.compile's
-        # OptimizedModule, whose _orig_mod indirection would make the PP-stage and CP-wrapper
-        # isinstance guards below miss and run generate() on a partial or sequence-sharded model.
+        # The peel must drop torch.compile's OptimizedModule too: a compiled root would hide a PP stage
+        # from the root isinstance check and run generate() on a partial model.
         unwrapped = unwrap_framework_wrappers(model)
 
-        # A PP stage is a partial model with no generate(); calling it raises at the first eval.
-        if isinstance(unwrapped, PipelineStageModule):
+        reason = _generation_skip_reason(unwrapped)
+        if reason is not None:
             if is_global_main_process():
-                logger.warning(
-                    "[GenerateExamplesCallback] Skipping: a pipeline-parallel stage holds only part "
-                    "of the model and cannot generate. Generate from a saved checkpoint instead."
-                )
+                logger.warning(f"[GenerateExamplesCallback] Skipping: {reason}")
             return
 
-        if _is_cp_wrapped(unwrapped):
-            if is_global_main_process():
-                logger.warning(
-                    "[GenerateExamplesCallback] Skipping: "
-                    "Context Parallelism is incompatible with autoregressive generation."
-                )
-            return
-
-        if _has_tp_dtensor_params(unwrapped):
-            if is_global_main_process():
-                logger.warning(
-                    "[GenerateExamplesCallback] Skipping: "
-                    "Tensor Parallelism (DTensor) is incompatible with autoregressive generation."
-                )
-            return
-
-        if _is_distributed_parallel_model(unwrapped):
-            # FSDP2/EP generation is collective, so swallowing a per-rank error would desync the
-            # next collective.
-            self._generate_standard(unwrapped, state, is_parallel=True)
+        if _uses_collective_forward(unwrapped):
+            # Collective generation, so swallowing a per-rank error would desync the next collective.
+            self._generate_and_log(unwrapped, state, collective=True)
             return
         try:
-            # DDP / single GPU: generation is rank-local, so a failure can be swallowed.
-            self._generate_standard(unwrapped, state, is_parallel=False)
+            # Rank-local generation, so a failure can be swallowed.
+            self._generate_and_log(unwrapped, state, collective=False)
         except RuntimeError as e:
             if is_global_main_process():
                 logger.warning(
@@ -201,21 +171,12 @@ class GenerateExamplesCallback(TrainerCallback):
                     f"{state.global_step}: {e}. Training will continue."
                 )
 
-    def _generate_standard(self, gen_model, state: TrainerState, *, is_parallel: bool):
-        """Generate examples using model.generate().
-
-        Distributed parallel models (FSDP2, EP): all ranks participate in forward. DDP: work split.
-        """
-        world_size = get_global_world_size()
-
-        gc_enabled_modules = _disable_gradient_checkpointing(gen_model)
-        try:
-            if is_parallel or world_size <= 1:
-                records = self._generate_all_ranks(gen_model)
+    def _generate_and_log(self, model, state: TrainerState, *, collective: bool):
+        with _gradient_checkpointing_disabled(model):
+            if collective or get_global_world_size() <= 1:
+                records = self._generate_all_ranks(model)
             else:
-                records = self._generate_split_ranks(gen_model)
-        finally:
-            _restore_gradient_checkpointing(gc_enabled_modules)
+                records = self._generate_split_ranks(model)
 
         if is_global_main_process() and records:
             combined_df = pd.DataFrame(records)
@@ -223,39 +184,28 @@ class GenerateExamplesCallback(TrainerCallback):
             n_print = min(3, len(combined_df))
             _pretty_print_dataframe(combined_df.sample(n_print, random_state=_SAMPLE_SEED))
 
-    def _generate_all_ranks(self, model) -> list:
-        """Generate on all ranks together (required for EP/FSDP2 or single-GPU).
+    def _generate_all_ranks(self, model) -> list[dict]:
+        """Generate every sample on every rank, between barriers.
 
-        Forced greedy: the collective forward requires every rank to run the same number of decode
+        Forced greedy: a collective forward requires every rank to run the same number of decode
         steps, and sampling would diverge ranks on EOS timing and hang the job.
         """
-        records = []
-
         barrier()
-
-        for example in tqdm(
-            self.samples,
-            desc="Generating examples",
-            disable=not is_global_main_process(),
-        ):
-            record = self._generate_single(model, example, deterministic=True)
-            records.append(record)
-
+        records = [
+            self._generate_single(model, example, greedy=True)
+            for example in tqdm(self.samples, desc="Generating examples", disable=not is_global_main_process())
+        ]
         barrier()
-
         return records
 
-    def _generate_split_ranks(self, model) -> list:
-        """Split generation across DDP ranks, gather results on rank 0."""
+    def _generate_split_ranks(self, model) -> list[dict]:
+        """Generate every ``world_size``-th sample on this rank; rank 0 returns all ranks' records."""
         rank = get_global_rank()
         world_size = get_global_world_size()
 
-        all_indices = list(range(len(self.samples)))
-        my_indices = [i for i in all_indices if i % world_size == rank]
-
         local_records = []
-        for idx in my_indices:
-            example = self.samples[idx]
+        for index in range(rank, len(self.samples), world_size):
+            example = self.samples[index]
             # A per-example failure must not skip the collective all_gather_object below, which
             # would hang the peers.
             try:
@@ -264,31 +214,22 @@ class GenerateExamplesCallback(TrainerCallback):
                 record = self._build_record("", f"<generation failed: {e}>", example)
             local_records.append(record)
 
-        all_records = [None] * world_size
-        dist.all_gather_object(all_records, local_records)
+        gathered = [None] * world_size
+        dist.all_gather_object(gathered, local_records)
+        if not is_global_main_process():
+            return []
+        return [record for rank_records in gathered for record in rank_records]
 
-        if is_global_main_process():
-            records = []
-            for rank_records in all_records:
-                records.extend(rank_records)
-            return records
-        return []
-
-    def _generate_single(self, model, example, deterministic: bool = False) -> dict:
-        """Generate a single example. ``deterministic=True`` forces greedy so FSDP2/EP stay rank-synced."""
+    def _generate_single(self, model, example, greedy: bool = False) -> dict:
         input_ids = torch.tensor(example["input_ids"]).unsqueeze(0).to(model.device)
         attention_mask = torch.tensor(example["attention_mask"]).unsqueeze(0).to(model.device)
 
         generate_kwargs = {"max_new_tokens": self.max_new_tokens}
-        if deterministic:
+        if greedy:
             generate_kwargs.update(do_sample=False, temperature=None, top_p=None, top_k=None)
 
         with torch.no_grad():
-            outputs = model.generate(
-                input_ids,
-                attention_mask=attention_mask,
-                **generate_kwargs,
-            )
+            outputs = model.generate(input_ids, attention_mask=attention_mask, **generate_kwargs)
 
         prompt_text = self.tokenizer.decode(input_ids.squeeze(), skip_special_tokens=False)
         completion_text = self.tokenizer.decode(outputs.squeeze(), skip_special_tokens=False)
@@ -298,7 +239,7 @@ class GenerateExamplesCallback(TrainerCallback):
 
     @staticmethod
     def _build_record(prompt_text: str, completion_text: str, example: dict) -> dict:
-        """Build output record with optional chosen/rejected fields."""
+        """The logged row; preference examples add their chosen and rejected replies."""
         record = {"Prompt": prompt_text, "Completion": completion_text}
         if "chosen" in example:
             record["Chosen"] = example["chosen"][0]["content"]
@@ -307,7 +248,6 @@ class GenerateExamplesCallback(TrainerCallback):
         return record
 
     def _log_results(self, df: pd.DataFrame, state: TrainerState):
-        """Log results to the configured backend."""
         if self.logger_backend == "clearml":
             task = Task.current_task()
             if task:

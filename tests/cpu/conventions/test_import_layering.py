@@ -118,6 +118,7 @@ _PENDING_MOVES = {
     "training.parser": "configs.parser",
     "data.pipeline.tokenizer_backend": "model_loading.tokenizer_backend",
     "data.probe_consensus": "runtime.consensus",
+    "diagnostics.rank_divergence": "runtime.consensus",
     "diagnostics.weight_sync_transport": "weight_sync.transport_check",
     "kernels.liger": "model_loading.liger",
     "kernels.lowp.mixed_precision": "model_loading.parallel.lowp_compute",
@@ -131,7 +132,6 @@ _PENDING_MOVES = {
     "distributed.filesystem": "runtime.filesystem",
     "distributed.loading": "model_loading.parallel",
     "distributed.loading.vlm_setup": "entrypoints.model_setup",
-    "distributed.module_registry": "subclass_registry",
     "distributed.nccl": "weight_sync",
     "distributed.nccl.addresses": "inference.endpoints",
     "distributed.runtime": "runtime.ranks",
@@ -174,7 +174,6 @@ _KNOWN_LAYER_BREAKS = frozenset(
         ),
         ("layer order", "weight_sync.clients.sglang", "distributed.expert_parallel.families.step3p7"),
         ("module cycle", "distributed.expert_parallel.lazy_plan, model_loading.parallel.fp32_masters", ""),
-        ("tool-safe", "model_loading.buffer_repair", "runtime.ranks"),
         (
             "tool-safe",
             "model_loading.lazy_safetensors.conversion_selection",

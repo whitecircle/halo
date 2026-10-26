@@ -16,7 +16,8 @@ import torch
 import torch.distributed as dist
 from transformers import TrainerCallback
 
-from src.distributed.runtime import current_device, get_global_world_size, is_global_main_process
+from src.distributed.runtime import get_global_world_size, is_global_main_process
+from src.hardware import current_device
 from src.kernels.histogram import accumulate_bincount
 from src.log import warn_once
 from src.models.loading.config_levels import (
@@ -122,12 +123,9 @@ def _selected_experts(router_output, logits_index: int) -> torch.Tensor | None:
 class MoELoadMetricsCallback(TrainerCallback):
     """Base for the callbacks that derive ``moe/*`` from per-expert load counters.
 
-    :class:`MoEMetricsCallback` (hooked routers) and
-    :class:`~src.callbacks.router_bias_balancing.RouterBiasBalancingCallback` (the bias-update load
-    counter) share the periodic-summary contract, the pending-metrics handoff to the trainer log, and
-    ``reduce_group``, which the PP mixin sets by scanning for this base type so a third such callback
-    is covered too. ``reduce_group`` narrows the expert-load all-reduce to a subset of the world
-    (``None`` = world); under PP a world reduce would blend stages holding different routers.
+    A derived summary waits in ``_pending`` until the next ``on_log`` merges it into the logs.
+    ``reduce_group`` is the expert-load all-reduce group (``None`` = world); the trainer narrows it to
+    the stage under PP, where a world reduce would blend stages holding different routers.
 
     Args:
         exclude_last_slot: drop the trailing expert from stats — for routers with a learned
@@ -180,50 +178,6 @@ class MoEMetricsCallback(MoELoadMetricsCallback):
         self._warned_logits_only: set = set()
         self._warned_empty = False
 
-    def _router_hook(self, position: int, router: DeclaredRouter, module, inputs, output):
-        """Count what this router selected; re-rank its logits only if it returns no selection.
-
-        Gradient checkpointing re-runs the router in the recompute pass; every metric is a per-layer
-        share, so the doubled counts cancel and no de-duplication is needed.
-        """
-        if not module.training:
-            return
-        with torch.no_grad():
-            logits = output[router.logits_index] if isinstance(output, (tuple, list)) else output
-            if not isinstance(logits, torch.Tensor):
-                return
-            indices = None if router.folds_discard_slot else _selected_experts(output, router.logits_index)
-            if indices is None and not router.folds_discard_slot:
-                warn_once(
-                    logger,
-                    self._warned_logits_only,
-                    type(module),
-                    "MoEMetricsCallback: %s (%s, model_type=%s) returns router logits but no selected "
-                    "expert ids, so moe/* counts topk(router_logits). That is the model's routing only "
-                    "while the router adds no balancing bias and limits no expert groups before its "
-                    "own top-k; otherwise the logged load approximates it.",
-                    router.name,
-                    type(module).__name__,
-                    self._model_type,
-                )
-            if indices is None:
-                indices = torch.topk(logits, self.topk, dim=-1).indices
-            self._counters[position] = accumulate_bincount(self._counters[position], indices, logits.shape[-1])
-
-    def _hook(self, module, inputs, output):
-        """Fallback: per-layer logits off the model output, for a modeling declaring no router."""
-        if not module.training:
-            return
-        router_logits = _extract_router_logits(output)
-        if router_logits is None:
-            return
-        with torch.no_grad():
-            if len(self._counters) != len(router_logits):
-                self._counters = [None] * len(router_logits)
-            for i, logits in enumerate(router_logits):
-                _, top_idx = torch.topk(logits, self.topk, dim=-1)
-                self._counters[i] = accumulate_bincount(self._counters[i], top_idx, logits.shape[-1])
-
     def on_train_begin(self, args, state, control, **kwargs):
         model = kwargs.get("model")
         if model is None:
@@ -267,7 +221,7 @@ class MoEMetricsCallback(MoELoadMetricsCallback):
                 for position, router in enumerate(routers)
             ]
         else:
-            self._hook_handles = [model.register_forward_hook(self._hook)]
+            self._hook_handles = [model.register_forward_hook(self._model_output_hook)]
         if is_global_main_process():
             source = f"{len(routers)} routers" if routers else "the model output's router_logits"
             logger.info(
@@ -275,20 +229,6 @@ class MoEMetricsCallback(MoELoadMetricsCallback):
                 f"(topk={self.topk}, exclude_last_slot={self.exclude_last_slot}, "
                 f"log_every={self.log_every_n_steps})"
             )
-
-    def _remove_hooks(self) -> None:
-        for handle in self._hook_handles:
-            handle.remove()
-        self._hook_handles = []
-
-    def on_train_end(self, args, state, control, **kwargs):
-        self._remove_hooks()
-
-    def _reset_counters(self) -> None:
-        """Zero every router's counts; done each optimizer step, logged or not, so each metric covers one."""
-        for counter in self._counters:
-            if counter is not None:
-                counter.zero_()
 
     @torch.no_grad()
     def on_step_end(self, args, state, control, **kwargs):
@@ -342,3 +282,61 @@ class MoEMetricsCallback(MoELoadMetricsCallback):
             logger.info(f"MoEMetricsCallback first metrics: L={num_layers}, {self._pending}")
         self._first_log = False
         self._reset_counters()
+
+    def on_train_end(self, args, state, control, **kwargs):
+        self._remove_hooks()
+
+    def _router_hook(self, position: int, router: DeclaredRouter, module, inputs, output):
+        """Count what this router selected; re-rank its logits only if it returns no selection.
+
+        Gradient checkpointing re-runs the router in the recompute pass; every metric is a per-layer
+        share, so the doubled counts cancel and no de-duplication is needed.
+        """
+        if not module.training:
+            return
+        with torch.no_grad():
+            logits = output[router.logits_index] if isinstance(output, (tuple, list)) else output
+            if not isinstance(logits, torch.Tensor):
+                return
+            indices = None if router.folds_discard_slot else _selected_experts(output, router.logits_index)
+            if indices is None and not router.folds_discard_slot:
+                warn_once(
+                    logger,
+                    self._warned_logits_only,
+                    type(module),
+                    "MoEMetricsCallback: %s (%s, model_type=%s) returns router logits but no selected "
+                    "expert ids, so moe/* counts topk(router_logits). That is the model's routing only "
+                    "while the router adds no balancing bias and limits no expert groups before its "
+                    "own top-k; otherwise the logged load approximates it.",
+                    router.name,
+                    type(module).__name__,
+                    self._model_type,
+                )
+            if indices is None:
+                indices = torch.topk(logits, self.topk, dim=-1).indices
+            self._counters[position] = accumulate_bincount(self._counters[position], indices, logits.shape[-1])
+
+    def _model_output_hook(self, module, inputs, output):
+        """Fallback: per-layer logits off the model output, for a modeling declaring no router."""
+        if not module.training:
+            return
+        router_logits = _extract_router_logits(output)
+        if router_logits is None:
+            return
+        with torch.no_grad():
+            if len(self._counters) != len(router_logits):
+                self._counters = [None] * len(router_logits)
+            for i, logits in enumerate(router_logits):
+                _, top_idx = torch.topk(logits, self.topk, dim=-1)
+                self._counters[i] = accumulate_bincount(self._counters[i], top_idx, logits.shape[-1])
+
+    def _remove_hooks(self) -> None:
+        for handle in self._hook_handles:
+            handle.remove()
+        self._hook_handles = []
+
+    def _reset_counters(self) -> None:
+        """Zero every router's counts; done each optimizer step, logged or not, so each metric covers one."""
+        for counter in self._counters:
+            if counter is not None:
+                counter.zero_()

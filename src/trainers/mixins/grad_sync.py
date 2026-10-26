@@ -23,8 +23,8 @@ from transformers.trainer_utils import IntervalStrategy
 from src.distributed.fsdp import fsdp2_modules, setup_fsdp2_for_tp
 from src.distributed.grad_reduce import agree_grad_presence, reduce_grads_bucketed
 from src.distributed.mesh import MeshDim, mesh_dim_names
-from src.distributed.runtime import current_device
 from src.distributed.tensor_parallel.state_dict import tp_sharded_non_dtensor_suffixes
+from src.hardware import current_device
 from src.models.structure import model_has_quantized_params
 from src.trainers.mixins.ep_introspection import require_ep_config
 from src.trainers.mixins.grad_clip import (

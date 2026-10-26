@@ -7,7 +7,7 @@ description: >-
   mode. Auto-fire when a training run hangs/deadlocks, OOMs, produces
   loss=NaN/Inf, or hits a DeepEP/NCCL fault, or when the user asks to debug,
   triage, or diagnose such a problem. Grounds every recommendation in
-  src/diagnostics/debugging.py, src/callbacks/profiler.py, and
+  src/diagnostics/, src/callbacks/torch_profiler.py, and
   agent-docs/reference/debugging.md.
 allowed-tools:
   - Read
@@ -19,12 +19,12 @@ allowed-tools:
 # Distributed-training failure triage
 
 Diagnose a hang / OOM / NaN-loss / DeepEP fault / NCCL timeout. Every helper and
-env var below matches its owner **exactly** — `src/diagnostics/debugging.py` (consistency checks,
-py-spy capture), `src/diagnostics/profiling.py` (`cuda_memory_history`, `log_cuda_memory`),
-`src/env.py` (`DIST_NCCL_TIMEOUT_MINUTES`), `src/models/patches/attention.py`
-(`model_fa4_backward_nan_prone`) — do not invent flags. The full symptom→cause→fix table and
-helper-enable recipes are in **[playbook.md](playbook.md)**; read it before giving a verdict on
-anything non-trivial. User-facing guide: `agent-docs/reference/debugging.md`.
+env var below matches its owner **exactly** — `src/diagnostics/rank_divergence.py` (consistency
+check), `src/diagnostics/py_spy.py` (py-spy capture), `src/diagnostics/profiling.py`
+(`cuda_memory_history`, `log_cuda_memory`), `src/env.py` (`DIST_NCCL_TIMEOUT_MINUTES`),
+`src/models/patches/attention.py` (`model_fa4_backward_nan_prone`) — do not invent flags. The full
+symptom→cause→fix table and helper-enable recipes are in **[playbook.md](playbook.md)**; read it
+before giving a verdict on anything non-trivial. User-facing guide: `agent-docs/reference/debugging.md`.
 
 **First, classify the symptom**, then follow the matching branch.
 
@@ -41,7 +41,7 @@ the others never reach.
    per rank under `$TMPDIR/halo_diag_stacks`. Attaching needs `--cap-add=SYS_PTRACE` unless the
    host's `kernel.yama.ptrace_scope` is 0, else py-spy fails with `Permission denied`.
 2. Suspect a shape/value divergence upstream of the stuck collective →
-   `HALO_TP_CONSISTENCY_CHECK=1` + `assert_tensor_shape_consistent(t, group=..., label=...)`.
+   `HALO_TP_CONSISTENCY_CHECK=1` + `assert_rank_uniform(tuple(t.shape), group=..., label=...)`.
 3. An EP job that stops at startup with `ValueError: parallelism config failed on … First (rank 0):
    expert_parallel_size=N on a single M-GPU NVLink domain forms K concurrent >2-rank DeepEP dispatch groups` is a
    rejected topology, not a hang — see the **DeepEP fault** branch.
@@ -66,7 +66,7 @@ the others never reach.
 2. bf16 path: AdamWBF16 stochastic rounding (SR on weight write + `exp_avg_sq`) is what
    makes tiny LRs converge; a NaN right after an optimizer step suggests SR/precision —
    check `fp32_grad_reduce` / `fp32_non_ep_params`.
-3. `assert_consistent` does not find a NaN: it compares a hash across ranks, so a NaN every rank
+3. `assert_rank_uniform` does not find a NaN: it compares a hash across ranks, so a NaN every rank
    computes identically passes. It helps only where ranks that must agree (TP-replicated
    activations) diverge — add the call there, then `HALO_TP_CONSISTENCY_CHECK=1`.
 
@@ -112,12 +112,12 @@ the others never reach.
 See **[playbook.md](playbook.md)** for the per-failure-mode table (DeepEP ep4
 rejection, qwen3.5 FA4 NaN, gemma4 attn, Zaya GC refusal, tokenizer-cache
 embedding-OOB, fused EP export an engine rejects), the exact env-var enable recipe for each
-`debugging.py` helper, and how to read `TorchProfilerCallback` artifacts.
+opt-in helper, and how to read `TorchProfilerCallback` artifacts.
 
 ## Sources of truth
 
 `agent-docs/reference/debugging.md` + `playbook.md` capture the known failure modes. The code is the
-**ultimate** authority: `src/diagnostics/debugging.py` (the opt-in helpers) and the failing
+**ultimate** authority: `src/diagnostics/` (the opt-in helpers) and the failing
 `src/` path itself are what actually behave — when a doc, this skill, or memory disagrees, or you are
 unsure, read the real file before concluding. (`CLAUDE.md`: docs-first, the code wins.) Related skill:
 `data` (data loading: `num_shards < DP` raises at train load, S3 path split), `parallelism` (rejected/deadlocking combos).

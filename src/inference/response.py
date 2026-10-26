@@ -1,6 +1,5 @@
-"""The normalized response record every OpenAI-compatible call returns, plus the finish-reason and
-reasoning-text accessors shared by the client, the JSONL resume store and the aiohttp rollout path.
-"""
+"""The normalized response record of an OpenAI-compatible call, with the finish-reason and reasoning-text
+accessors that read either engine's spelling."""
 
 from collections.abc import Mapping
 from typing import Any

@@ -25,7 +25,8 @@ from transformers.trainer_pt_utils import LengthGroupedSampler
 from transformers.trainer_utils import seed_worker
 from trl.trainer.utils import RepeatSampler
 
-from src.distributed.runtime import current_device, get_global_world_size, is_multi_rank_run, rank_consensus
+from src.distributed.runtime import get_global_world_size, is_multi_rank_run, rank_consensus
+from src.hardware import current_device
 
 logger = get_logger(__name__, log_level="info")
 

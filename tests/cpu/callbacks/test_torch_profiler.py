@@ -3,10 +3,10 @@
 
 Drives the callback through the HF Trainer callback lifecycle (on_train_begin →
 on_step_end x N → on_train_end) with real torch.profiler activity and asserts it
-honors the wait->warmup->active schedule, writes a chrome-trace artifact, and
-no-ops on non-selected ranks.
+builds its profiler from its own settings and schedule, writes a chrome-trace
+artifact, and no-ops on non-selected ranks.
 
-Run: python tests/cpu/callbacks/test_profiler_callback.py
+Run: python tests/cpu/callbacks/test_torch_profiler.py
 """
 
 import os
@@ -15,8 +15,10 @@ from types import SimpleNamespace
 
 import pytest
 import torch
+from torch.profiler import ProfilerAction
 
-from src.callbacks.profiler import TorchProfilerCallback
+from src.callbacks.torch_profiler import TorchProfilerCallback
+from src.diagnostics.profiling import build_profiler
 
 
 def _drive(cb, n_steps):
@@ -52,6 +54,52 @@ def test_profiler_writes_trace_artifact():
         assert artifacts, f"profiler wrote no artifacts to {d}"
         assert any(("json" in f) or ("trace" in f.lower()) for f in artifacts), f"no chrome trace among {artifacts}"
         assert cb._prof is None, "profiler not cleaned up after on_train_end"
+
+
+def test_profiler_is_built_from_the_callbacks_settings(tmp_path, monkeypatch):
+    """Every setting the callback holds reaches build_profiler, including its step schedule."""
+    built: list[tuple[str, dict[str, object]]] = []
+
+    def recording_build_profiler(output_dir, **settings):
+        built.append((output_dir, settings))
+        return build_profiler(output_dir, **settings)
+
+    monkeypatch.setattr("src.callbacks.torch_profiler.build_profiler", recording_build_profiler)
+    cb = TorchProfilerCallback(
+        output_dir=str(tmp_path),
+        wait=2,
+        warmup=1,
+        active=2,
+        repeat=1,
+        ranks="0",
+        cpu_activity=False,
+        record_shapes=False,
+        profile_memory=False,
+        with_stack=False,
+        export_memory_timeline=False,
+    )
+    _drive(cb, n_steps=1)
+
+    [(output_dir, settings)] = built
+    schedule = settings.pop("schedule")
+    assert output_dir == str(tmp_path)
+    assert settings == {
+        "cpu_activity": False,
+        "record_shapes": False,
+        "profile_memory": False,
+        "with_stack": False,
+        "on_trace_ready": cb._on_trace_ready,
+    }
+    assert [schedule(step) for step in range(8)] == [
+        ProfilerAction.NONE,
+        ProfilerAction.NONE,
+        ProfilerAction.WARMUP,
+        ProfilerAction.RECORD,
+        ProfilerAction.RECORD_AND_SAVE,
+        ProfilerAction.NONE,
+        ProfilerAction.NONE,
+        ProfilerAction.NONE,
+    ]
 
 
 def test_profiler_inactive_rank_is_noop():

@@ -42,7 +42,7 @@ changes.
 | `src/distributed/pipeline_parallel/` (stage split + stage module, losses, P2P groups, stage loader, the `PipelineRuntime` schedule engine) | `agent-docs/parallelism/pipeline-parallelism.md`, `agent-docs/reference/checkpoints.md` (stage shards) |
 | `src/models/loading/lazy_safetensors/` (safetensors lazy-load core shared by the EP + PP loaders) | `agent-docs/parallelism/expert-parallelism.md` (lazy loading), `agent-docs/parallelism/pipeline-parallelism.md`, `agent-docs/reference/checkpoints.md` |
 | `src/distributed/group_layout.py`, `mesh.py` (rank math, DeviceMesh + the typed group view) | `agent-docs/parallelism/multi-node.md`, `agent-docs/parallelism/data-parallelism.md`, `agent-docs/reference/architecture.md` |
-| `src/distributed/module_registry.py` (HF-class → wrapper registries) | `agent-docs/models/adding-a-model.md`, `agent-docs/reference/architecture.md` |
+| `src/subclass_registry.py` (class-claim maps over a subclass tree: HF class → EP/CP wrapper, PP split spec, head transform) | `agent-docs/models/adding-a-model.md`, `agent-docs/reference/architecture.md` |
 | `src/distributed/grad_reduce.py` (bucketed gradient all-reduce — EP cross-replica, TP replicated, QLoRA sweeps) | `agent-docs/parallelism/data-parallelism.md`, `agent-docs/reference/configuration-reference.md` (`HALO_GRAD_BUCKET_MB`) |
 | `src/distributed/nccl/` (weight sync clients + transport) | `agent-docs/infrastructure/rollout-servers.md` (weight sync, NCCL transport), `agent-docs/training-methods/grpo/online.md` |
 | `src/trainers/grpo/rollout/weight_sync.py` (gather/gates/LoRA fold/memory bracket) | `agent-docs/infrastructure/rollout-servers.md`, `agent-docs/training-methods/grpo/online.md` (construction gates), `agent-docs/optimization/peft.md` (LoRA fold), `agent-docs/training-methods/async-grpo/setup.md`, `agent-docs/reference/debugging.md` (memory bracket) |
@@ -74,7 +74,7 @@ changes.
 | `src/distributed/fsdp.py` (FSDP2 wrapping + reshard) | `agent-docs/parallelism/data-parallelism.md`, `agent-docs/reference/checkpoints.md` |
 | `src/distributed/runtime.py` (rank/world state, barriers, cross-rank consensus, group timeouts), `src/distributed/filesystem.py` (c10d-store phases, main-first ordering, output-FS probe, load throttle) | `agent-docs/parallelism/multi-node.md`, `agent-docs/data/filesystem-handling.md`, `agent-docs/reference/architecture.md` |
 | `src/distributed/nvlink.py` (fabric probes behind `nvlink_domain_size`) | `agent-docs/parallelism/multi-node.md`, `agent-docs/infrastructure/deepep.md` |
-| `src/diagnostics/profiling.py` (torch-profiler traces, CUDA memory snapshots), `src/diagnostics/debugging.py` (opt-in consistency checks, py-spy capture) | `agent-docs/reference/debugging.md`, `agent-docs/optimization/throughput-benchmarks.md` |
+| `src/diagnostics/profiling.py` (torch-profiler construction and traces, CUDA memory reads and snapshots), `src/diagnostics/rank_divergence.py` (opt-in cross-rank consistency check), `src/diagnostics/py_spy.py` (py-spy capture) | `agent-docs/reference/debugging.md`, `agent-docs/optimization/throughput-benchmarks.md` |
 | `src/diagnostics/weight_sync_transport.py` + `scripts/profiling/weight_sync_transport.py` (weight-sync transport preflight) | `agent-docs/infrastructure/rollout-servers.md` (Servers on other nodes), `agent-docs/reference/scripts-reference.md`, `agent-docs/reference/debugging.md` |
 | `src/diagnostics/performance_monitor.py` | `agent-docs/optimization/throughput-benchmarks.md`, `agent-docs/reference/debugging.md` |
 
@@ -124,7 +124,7 @@ changes.
 | `src/kernels/histogram.py` (the expert-load histogram behind the `moe/*` metrics and the bias update) | `agent-docs/training-methods/callbacks.md` |
 | `src/kernels/grouped_gemm.py` (precision dispatch), `src/kernels/grouped_mm_autograd.py` (bf16 primitive) | `agent-docs/optimization/grouped-gemm.md` |
 | `src/kernels/fused_glu.py` (fused GLU kernels, activation probes, the `HALO_FUSED_GLU` switch) | `agent-docs/models/glm4.md` (gate), `agent-docs/models/gpt-oss.md` (clamped variant), `agent-docs/optimization/liger-kernels.md` (Fused GLU under an EP wrapper), `agent-docs/reference/configuration-reference.md` (`HALO_FUSED_GLU`), `agent-docs/reference/troubleshooting.md` (Turning off a fused kernel), `agent-docs/optimization/grouped-gemm.md` (packed GLU), `agent-docs/optimization/torch-compile.md`, `agent-docs/parallelism/expert-parallelism.md` (the EP warm-up) |
-| `src/kernels/moe_permute.py` (atomic-free token permute: `build_inv_map`, `MoEGatherPermute`, the fused weighted un-permute) | `agent-docs/optimization/grouped-gemm.md` |
+| `src/kernels/moe_permute.py` (atomic-free token permute: `build_inv_map`, `MoEGatherPermute`, the fused weighted un-permute, `MoEExpertBiasGather`, `warm_permute_kernels`) | `agent-docs/optimization/grouped-gemm.md`, `agent-docs/parallelism/expert-parallelism.md` (the EP warm-up) |
 | `src/kernels/logprobs.py` (chunked fp32 log-probs: `selective_logprobs` and the logit chunk budget, shared by the PP last-stage losses and SMPO's loss paths in `src/distributed/pipeline_parallel/losses.py`, and by the DPO/KTO loss paths) | `agent-docs/training-methods/preference/dpo.md` (Log-prob precision), `agent-docs/training-methods/preference/smpo.md`, `agent-docs/parallelism/pipeline-parallelism.md` |
 | attention selection (`src/models/patches/attention.py`, `_detect_attention_impl`) | `agent-docs/optimization/flash-attention.md` |
 | `src/models/patches/flex_sliding_attention.py` (FlexAttention on SDPA sliding-window and wide-head layers) | `agent-docs/optimization/flash-attention.md`, `agent-docs/models/gemma4.md` |
@@ -139,7 +139,7 @@ changes.
 | `src/callbacks/` (ParameterStatsCallback, GenerateExamplesCallback, EfficiencyCallback, MoEMetricsCallback, RouterBiasBalancingCallback, VariableSchedulerCallback, TorchProfilerCallback) | `agent-docs/training-methods/callbacks.md` |
 | `src/callbacks/wiring.py` (`build_perf_callbacks`, `moe_balancing`) | `agent-docs/training-methods/callbacks.md`, `agent-docs/optimization/throughput-benchmarks.md` |
 | `src/models/moe_balancing.py` (`resolve_balancing_mode`, the router field registries), `src/models/moe_aux_loss.py` (the aux-loss gradient under reentrant checkpointing) and `src/distributed/expert_parallel/balancing_strategy.py` (`apply_balancing_strategy`, the export contract) | `agent-docs/training-methods/callbacks.md` (MoE balancing modes), `agent-docs/models/README.md` |
-| `src/hardware.py` (architecture predicates, GPU model detection, peak-FLOPS registry, host-RAM probe) | `agent-docs/optimization/throughput-benchmarks.md`, `agent-docs/optimization/flash-attention.md` |
+| `src/hardware.py` (this rank's device, architecture predicates, `supports_grouped_mm`, GPU model detection, peak-FLOPS registry, host-RAM probe) | `agent-docs/optimization/throughput-benchmarks.md`, `agent-docs/optimization/flash-attention.md`, `agent-docs/optimization/grouped-gemm.md` (Detection and disabling) |
 
 ## Environments (Async GRPO with Environments)
 
@@ -174,7 +174,7 @@ changes.
 | `src/training/parallelism_args.py` (`DistributedArguments` → `ParallelismConfig`, the per-script CP/PP/lowp gates) | `agent-docs/parallelism/*`, `agent-docs/reference/configuration-reference.md` |
 | `src/training/run_logging.py` (per-rank transformers verbosity, the `run.log` console tee) | `agent-docs/reference/debugging.md` |
 | `src/training/early_stopping.py` (`StopsTrainingEarly`, the marker the script runner reads to exit a stopped run non-zero) | `agent-docs/training-methods/async-grpo/monitoring.md`, `agent-docs/reference/scripts-reference.md` |
-| `src/inference/endpoints.py` (endpoint defaults, key resolution), `src/inference/openai_client.py` (async client, one request with the upstream retry, the single-request helper), `src/inference/batch_requests.py` (the parallel resumable batch), `src/inference/response.py` (`OpenAIResponse`, the finish-reason contract), `src/inference/resume_store.py` (resumable request checkpoints) | `agent-docs/reference/scripts-reference.md`, `agent-docs/training-methods/grpo/rewards/README.md` (Probe and retries) |
+| `src/inference/endpoints.py` (endpoint defaults, key resolution), `src/inference/openai_client.py` (async client, one request with the upstream retry, the single-request helper), `src/inference/batch_requests.py` (the parallel resumable batch and its JSONL resume store), `src/inference/response.py` (`OpenAIResponse`, the finish-reason contract) | `agent-docs/reference/scripts-reference.md`, `agent-docs/training-methods/grpo/rewards/README.md` (Probe and retries) |
 
 ## Scripts & infrastructure
 

@@ -15,8 +15,8 @@ from src.distributed.expert_parallel.dispatcher import (
     verify_rank_uniform_env,
 )
 from src.distributed.expert_parallel.gc_scope import install_ep_checkpoint_scopes
-from src.distributed.module_registry import build_hf_module_name_map, swap_registered_modules
 from src.distributed.runtime import is_global_main_process
+from src.subclass_registry import build_class_claim_map, swap_registered_modules
 
 # Registers every EP wrapper as an ``EPMoELayerBase`` subclass for ``build_moe_layer_map()`` to discover.
 import src.distributed.expert_parallel.layers.roster  # noqa: F401  isort:skip
@@ -31,7 +31,7 @@ def build_moe_layer_map() -> dict[str, type[EPMoELayerBase]]:
     Walks the ``EPMoELayerBase`` subclass tree (concrete wrappers may sit under intermediate bases) so a
     new family self-registers on import. Raises on a duplicate HF name.
     """
-    return build_hf_module_name_map(EPMoELayerBase, "MoE")
+    return build_class_claim_map(EPMoELayerBase, "HF MoE class name")
 
 
 MOE_LAYER_MAP = build_moe_layer_map()

@@ -31,11 +31,12 @@ _TRANSIENT_STEP_SUGGESTED_FRACTION_OF_UNIFORM = 0.1
 _DISCARD_SLOT_BIAS = -1.0
 
 
-def _ensure_counter(router, num_slots: int) -> torch.Tensor:
-    """Return ``router.expert_load_counter``, lazy-initialising on the bias device."""
+def _expert_load_counter(router) -> torch.Tensor:
+    """``router.expert_load_counter``, lazily created as fp32 zeros of the bias's width and device."""
     counter = router.expert_load_counter
     if counter is None:
-        counter = torch.zeros(num_slots, dtype=torch.float32, device=router.balancing_biases.device)
+        biases = router.balancing_biases
+        counter = torch.zeros(biases.numel(), dtype=torch.float32, device=biases.device)
         router.expert_load_counter = counter
     return counter
 
@@ -117,7 +118,7 @@ class RouterBiasBalancingCallback(MoELoadMetricsCallback):
                 f"RouterBiasBalancingCallback requires one expert-slot width across routers, got "
                 f"{sorted(widths)}. The per-slot bias update and its all-reduce assume a single width."
             )
-        counters = torch.stack([_ensure_counter(r, r.balancing_biases.numel()).to(device) for r in routers], dim=0)
+        counters = torch.stack([_expert_load_counter(r).to(device) for r in routers], dim=0)
 
         if get_global_world_size() > 1:
             dist.all_reduce(counters, op=dist.ReduceOp.SUM, group=self.reduce_group)
@@ -133,8 +134,7 @@ class RouterBiasBalancingCallback(MoELoadMetricsCallback):
         # MoEMetricsCallback is skipped under bias_update; the shared helper keeps moe/* keys identical.
         # It ends in a GPU→CPU sync only on_log consumes, so it runs on the steps the trainer logs —
         # a rank-uniform gate; the all-reduce above stays unconditional because the update needs it.
-        step = getattr(state, "global_step", None)
-        if self._first_log or step is None or step % self.log_every_n_steps == 0:
+        if self._first_log or state.global_step % self.log_every_n_steps == 0:
             self._pending = compute_moe_load_metrics(counters, exclude_last_slot=self.exclude_last_slot)
 
         real_counts = counters[:, :-1] if self.exclude_last_slot else counters
@@ -150,7 +150,6 @@ class RouterBiasBalancingCallback(MoELoadMetricsCallback):
                 router.balancing_biases[-1] = _DISCARD_SLOT_BIAS
             else:
                 router.balancing_biases.add_(upd)
-            # _ensure_counter above assigned every router's counter, so this is unconditional.
             router.expert_load_counter.zero_()
 
         if self._first_log:

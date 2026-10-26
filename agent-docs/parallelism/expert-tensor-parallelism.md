@@ -46,7 +46,7 @@ wait and the barrier times out.
 
 The Megatron-LM scatter-gather pattern, a matched autograd pair — the scatter half is the toolkit-wide
 `SumGradAcrossGroup` (`src/distributed/grad_reduce.py`, shared with TP), the gather half
-`ReduceFromExpertTP` (`src/distributed/expert_parallel/autograd.py`):
+`ReduceFromExpertTP` (`src/distributed/expert_parallel/base_layer.py`):
 
 - **`SumGradAcrossGroup`** — identity forward; `all_reduce(SUM)` backward over `expert_tp_group`. It is
   applied to **both** the layer input tokens **and** the routing weights.

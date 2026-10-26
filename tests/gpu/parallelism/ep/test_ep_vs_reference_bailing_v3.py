@@ -86,7 +86,7 @@ def run(ctx):
     apply_remote_code_compat_shims()
 
     # ── 1. Both registries claim V3 ───────────────────────────────────────────
-    checks["module_registry_claims_v3"] = MOE_LAYER_MAP.get("BailingMoeV3SparseMoeBlock") is EPBailingMoELayer
+    checks["moe_layer_map_claims_v3"] = MOE_LAYER_MAP.get("BailingMoeV3SparseMoeBlock") is EPBailingMoELayer
     checks["model_type_registry_claims_v3"] = ep_layer_class_by_model_type().get("bailing_hybrid") is EPBailingMoELayer
 
     config = _tiny_config()

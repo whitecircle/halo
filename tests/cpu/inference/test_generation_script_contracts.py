@@ -17,6 +17,7 @@ Run: python tests/cpu/inference/test_generation_script_contracts.py  (or pytest)
 """
 
 import asyncio
+import inspect
 import sys
 import types
 
@@ -55,13 +56,15 @@ def _stub_module(monkeypatch, module, *, rows, existing, request_impl):
     """Stub a generation script's S3 + API edges; returns the captured request kwargs and pushes."""
     calls: list[dict] = []
     pushed: list = []
+    real_requests = inspect.signature(module.parallel_openai_requests)
 
     async def fake_requests(**kwargs):
+        real_requests.bind(**kwargs)
         calls.append(kwargs)
         return request_impl(kwargs["messages"])
 
     monkeypatch.setattr(module, "load_prompts_with_resume", lambda args: (rows, existing))
-    monkeypatch.setattr(module, "create_openai_client", lambda **kwargs: object())
+    monkeypatch.setattr(module, "build_openai_client", lambda **kwargs: object())
     monkeypatch.setattr(module, "parallel_openai_requests", fake_requests)
     # The merge-and-push tail is shared, so the S3 edge is stubbed in the shared module — the
     # scripts reach it through their own main().
@@ -142,6 +145,21 @@ def test_one_surviving_row_is_the_other_side_of_that_boundary(monkeypatch):
     asyncio.run(batched.main())
     assert len(pushed) == 1
     assert pushed[0].num_rows == 1
+
+
+def test_the_checkpoint_interval_flag_is_the_resume_store_flush_interval(monkeypatch):
+    """Both passes resume from the store and flush it on the CLI's cadence; the fake binds each call to
+    the real signature, so a stale keyword fails here rather than on a live run."""
+    row = {**_ROWS[0], "follow_up_prompt": [{"role": "user", "content": "and now?"}]}
+    calls, _ = _stub_module(
+        monkeypatch, batched, rows=[row], existing=[], request_impl=lambda messages: [_response("a")] * len(messages)
+    )
+    monkeypatch.setattr(sys, "argv", [*_BATCHED_ARGV, "--checkpoint_interval", "7"])
+
+    asyncio.run(batched.main())
+
+    assert [call["flush_interval"] for call in calls] == [7, 7]
+    assert all(call.get("resume", True) for call in calls)
 
 
 # --- batched generation: the follow-up request replays the first turn verbatim -----------------

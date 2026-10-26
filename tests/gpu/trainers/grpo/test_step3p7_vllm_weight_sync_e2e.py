@@ -52,11 +52,11 @@ from transformers import AutoTokenizer
 from transformers.models.step3p7.configuration_step3p7 import Step3p7Config
 from transformers.models.step3p7.modeling_step3p7 import Step3p7ForConditionalGeneration
 
-from src.distributed.expert_parallel.base_layer import has_grouped_mm
 from src.distributed.loading.model_loading import load_distributed_model
 from src.distributed.nccl.clients.vllm import VLLMWeightSyncClient
 from src.distributed.parallelism_config import ParallelismConfig
 from src.env import env_str
+from src.hardware import supports_grouped_mm
 from src.trainers.grpo.rollout.weight_sync import sync_weights_to_client, validate_weight_sync_support
 from src.trainers.mixins.ep_introspection import named_ep_layers
 from tests.common.harness import gpu_test_main, skip_unless_local_checkpoint
@@ -273,7 +273,7 @@ def run(ctx) -> dict:
     log(f"server {VLLM_SERVER_URL} serves {model_id}; trainer loads {CHECKPOINT}")
 
     # The production load: the hub checkpoint through the native class, EP-wrapped at ep_size 1.
-    parallelism_config = ParallelismConfig(ep_size=1, use_grouped_gemm=has_grouped_mm())
+    parallelism_config = ParallelismConfig(ep_size=1, use_grouped_gemm=supports_grouped_mm())
     model, _ = load_distributed_model(
         CHECKPOINT, parallelism_config, dtype=torch.bfloat16, trust_remote_code=False, attn_implementation="sdpa"
     )

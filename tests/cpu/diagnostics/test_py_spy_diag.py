@@ -16,7 +16,7 @@ import sys
 
 import pytest
 
-from src.diagnostics import debugging
+from src.diagnostics import py_spy
 from tests.common.repo import REPO_ROOT
 
 _PIDS = (101, 102, 103)
@@ -102,12 +102,12 @@ def started(monkeypatch) -> list[subprocess.Popen]:
         processes.append(real_popen(*args, **kwargs))
         return processes[-1]
 
-    monkeypatch.setattr(debugging.subprocess, "Popen", recording_popen)
+    monkeypatch.setattr(py_spy.subprocess, "Popen", recording_popen)
     return processes
 
 
 def test_an_attach_past_its_timeout_is_killed_and_reported(tmp_path, started):
-    capture = debugging._run_py_spy_per_pid(
+    capture = py_spy._run_py_spy_per_pid(
         tmp_path, [7], lambda _pid, _target: _SLEEPER, timeout=1, output_suffix=".log"
     )
 
@@ -122,7 +122,7 @@ def test_a_sweep_interrupted_mid_launch_leaves_no_process_running(tmp_path, star
         return _SLEEPER
 
     with pytest.raises(KeyboardInterrupt):
-        debugging._run_py_spy_per_pid(tmp_path, [1, 2], command, timeout=60, output_suffix=".log")
+        py_spy._run_py_spy_per_pid(tmp_path, [1, 2], command, timeout=60, output_suffix=".log")
 
     assert started and all(process.poll() is not None for process in started), (
         "an interrupted sweep left py-spy running"

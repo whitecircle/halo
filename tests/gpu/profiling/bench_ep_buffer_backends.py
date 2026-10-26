@@ -18,10 +18,10 @@ import sys
 import torch
 from accelerate import PartialState
 
-from src.distributed.expert_parallel.base_layer import has_grouped_mm
 from src.distributed.loading.model_loading import load_distributed_model
 from src.distributed.parallelism_config import ParallelismConfig
 from src.distributed.runtime import barrier
+from src.hardware import supports_grouped_mm
 from tests.common.distributed import (
     ensure_model_downloaded,
     init_distributed,
@@ -39,7 +39,7 @@ ITERS = 10
 
 def time_backend(backend, local_rank):
     device = f"cuda:{local_rank}"
-    cfg = ParallelismConfig(ep_size=EP_SIZE, use_grouped_gemm=has_grouped_mm(), ep_buffer_backend=backend)
+    cfg = ParallelismConfig(ep_size=EP_SIZE, use_grouped_gemm=supports_grouped_mm(), ep_buffer_backend=backend)
     model = load_distributed_model(
         model_name_or_path=MODEL_NAME,
         parallelism_config=cfg,

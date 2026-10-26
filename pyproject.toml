@@ -102,7 +102,7 @@ test = [
     "pillow>=12.3,<13.0",
     "pytest-xdist>=3.8,<4",
 ]
-# Trace analysis + CPU flame graphs (scripts/profiling/, src/diagnostics/debugging.py).
+# Trace analysis + CPU flame graphs (scripts/profiling/, src/diagnostics/py_spy.py).
 # TraceLens is git-only — the PyPI name `tracelens` is an unrelated project; openpyxl backs its
 # .xlsx reports; py-spy backs the stack dumps / CPU flame graphs.
 profiling = [

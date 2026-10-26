@@ -25,7 +25,6 @@ import torch
 import torch.nn as nn
 from torch.utils.checkpoint import checkpoint
 
-from src.distributed.expert_parallel import base_layer
 from src.distributed.expert_parallel.base_layer import _WARMUP_TOKENS
 from src.distributed.expert_parallel.gc_scope import active_checkpoint_scope, scoped_checkpoint_func
 from src.distributed.expert_parallel.layers import gpt_oss as gpt_oss_layer
@@ -168,10 +167,10 @@ _PERMUTE_BACKWARDS = {("MoEGatherPermute", "backward"), ("MoEWeightedUnpermute",
 
 
 def _record_permute_backwards(monkeypatch) -> list[tuple[str, str]]:
-    """Wrap the layer's two permute Functions so each backward they run appends to the returned list."""
+    """Wrap the warm-up's two permute Functions so each backward they run appends to the returned list."""
     calls = []
     for name in ("MoEGatherPermute", "MoEWeightedUnpermute"):
-        function = getattr(base_layer, name)
+        function = getattr(moe_permute, name)
 
         class _Recording(function):
             @staticmethod
@@ -179,7 +178,7 @@ def _record_permute_backwards(monkeypatch) -> list[tuple[str, str]]:
                 calls.append((_name, "backward"))
                 return _function.backward(ctx, *grads)
 
-        monkeypatch.setattr(base_layer, name, _Recording)
+        monkeypatch.setattr(moe_permute, name, _Recording)
     return calls
 
 

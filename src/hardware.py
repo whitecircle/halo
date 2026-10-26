@@ -1,5 +1,5 @@
-"""Host and accelerator facts: architecture predicates, GPU model detection, the dense Tensor-Core
-peak-FLOPS table, and available host RAM.
+"""Host and accelerator facts: this rank's device, architecture predicates, GPU model detection, the
+dense Tensor-Core peak-FLOPS table, and available host RAM.
 
 Two lookup mechanisms, deliberately: the kernel predicates read compute capability (what a kernel is
 compiled for), while the FLOPS table is keyed by SKU name because peaks differ within one
@@ -16,6 +16,11 @@ import torch
 logger = logging.getLogger(__name__)
 
 
+def current_device() -> torch.device:
+    """This rank's CUDA device, or CPU when CUDA is unavailable."""
+    return torch.device("cuda", torch.cuda.current_device()) if torch.cuda.is_available() else torch.device("cpu")
+
+
 def is_blackwell_gpu() -> bool:
     """Whether the local CUDA device is data-center Blackwell (SM100+), the FA4 architecture.
 
@@ -30,6 +35,28 @@ def is_blackwell_gpu() -> bool:
 def is_hopper_gpu() -> bool:
     """Whether the local CUDA device is Hopper (SM90), the FA3 architecture."""
     return torch.cuda.is_available() and torch.cuda.get_device_capability()[0] == 9
+
+
+def supports_grouped_mm() -> bool:
+    """Whether ``F.grouped_mm`` can run here: SM90+ compute capability."""
+    if not torch.cuda.is_available():
+        return False
+    try:
+        major, minor = torch.cuda.get_device_capability()
+    except RuntimeError as e:
+        # ``is_available()`` already returned True, so this is a broken CUDA context on this rank (a
+        # fork re-init), not an old GPU. Logged because the answer decides a weight layout — GptOss
+        # stores gate/up de-interleaved on the grouped path — so a rank that answers differently from
+        # its peers enters the expert all-gather with different keys and the job hangs.
+        logger.warning(
+            "grouped-GEMM capability probe failed on this rank (%s: %s); falling back to the per-expert "
+            "loop path. If peer ranks probe successfully they store expert weights under DIFFERENT "
+            "attribute names — set use_grouped_gemm=false uniformly instead of running like this.",
+            type(e).__name__,
+            e,
+        )
+        return False
+    return (major * 10 + minor) >= 90
 
 
 @dataclass(frozen=True)

@@ -28,9 +28,9 @@ import math
 
 import torch
 
-from src.distributed.expert_parallel.base_layer import has_grouped_mm
 from src.distributed.loading.model_loading import load_distributed_model
 from src.distributed.parallelism_config import ParallelismConfig
+from src.hardware import supports_grouped_mm
 from tests.common.distributed import ensure_model_downloaded
 from tests.common.harness import gpu_test_main
 from tests.common.models import GPT_OSS_20B
@@ -47,7 +47,7 @@ SWEEP = (45056, 47104, 65536)
 @gpu_test_main(exact_world_size=EP_SIZE, prefix="ep_long_context")
 def run(ctx):
     ensure_model_downloaded(MODEL_NAME, ctx.rank)
-    cfg = ParallelismConfig(ep_size=EP_SIZE, use_grouped_gemm=has_grouped_mm(), ep_buffer_backend="elastic")
+    cfg = ParallelismConfig(ep_size=EP_SIZE, use_grouped_gemm=supports_grouped_mm(), ep_buffer_backend="elastic")
     model = load_distributed_model(
         model_name_or_path=MODEL_NAME,
         parallelism_config=cfg,

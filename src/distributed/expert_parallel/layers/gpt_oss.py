@@ -9,9 +9,9 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from src.distributed.expert_parallel.autograd import MoEExpertBiasGather
 from src.distributed.expert_parallel.base_layer import EPMoELayerBase
 from src.kernels.fused_glu import fused_glu_enabled, fused_gptoss_glu
+from src.kernels.moe_permute import MoEExpertBiasGather
 
 
 def interleave_gate_up(gate: torch.Tensor, up: torch.Tensor) -> torch.Tensor:

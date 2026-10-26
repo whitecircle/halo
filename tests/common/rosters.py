@@ -4,7 +4,7 @@ import importlib
 import pkgutil
 
 import src.trainers
-from src.distributed.module_registry import iter_subclasses
+from src.subclass_registry import iter_subclasses
 from src.trainers.mixins.base import DistributedTrainerMixin
 
 

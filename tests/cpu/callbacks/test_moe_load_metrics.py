@@ -256,8 +256,8 @@ def test_callback_hook_accumulates_and_emits() -> None:
     layer1 = torch.tensor([[9.0, 0.0, 0.0], [0.0, 9.0, 0.0], [0.0, 0.0, 9.0]] * 2)
 
     out = _make_output((layer0, layer1))
-    cb._hook(mod, None, out)
-    cb._hook(mod, None, out)  # second micro-batch — must accumulate
+    cb._model_output_hook(mod, None, out)
+    cb._model_output_hook(mod, None, out)  # second micro-batch — must accumulate
 
     # After two forwards, layer 0 expert 0 saw 12 tokens, layer 1 saw 4 each.
     assert cb._counters[0].tolist() == [12.0, 0.0, 0.0]
@@ -286,7 +286,7 @@ def test_callback_hook_skips_when_not_training() -> None:
     class _Mod:
         training = False
 
-    cb._hook(_Mod(), None, _make_output((torch.randn(4, 3),)))
+    cb._model_output_hook(_Mod(), None, _make_output((torch.randn(4, 3),)))
     assert cb._counters == []
 
 
@@ -299,7 +299,7 @@ def test_callback_topk_counts_multiple_experts() -> None:
 
     # 4 tokens, E=4; each token strongly prefers experts 0 and 1.
     logits = torch.tensor([[5.0, 4.0, 0.0, 0.0]] * 4)
-    cb._hook(_Mod(), None, _make_output((logits,)))
+    cb._model_output_hook(_Mod(), None, _make_output((logits,)))
     # top-2 per token = experts {0,1}; 4 tokens → 4 hits each on 0 and 1, 0 on 2,3.
     assert cb._counters[0].tolist() == [4.0, 4.0, 0.0, 0.0]
 
@@ -311,7 +311,7 @@ def test_callback_log_every_n_resets_without_emit() -> None:
     class _Mod:
         training = True
 
-    cb._hook(_Mod(), None, _make_output((torch.tensor([[9.0, 0.0]] * 3),)))
+    cb._model_output_hook(_Mod(), None, _make_output((torch.tensor([[9.0, 0.0]] * 3),)))
     # global_step=2 is not a multiple of 4 → no metrics, counters cleared.
     cb.on_step_end(args=None, state=_State(global_step=2), control=None)
     assert cb._pending == {}
@@ -354,7 +354,7 @@ def test_callback_warns_once_when_no_router_logits() -> None:
     orig = mm.logger.warning
     mm.logger.warning = lambda msg, *a, **k: calls.append(str(msg))
     try:
-        # _hook never fired (no router_logits) → counters stay empty across steps.
+        # _model_output_hook never fired (no router_logits) → counters stay empty across steps.
         cb.on_step_end(args=None, state=_State(global_step=1), control=None)
         cb.on_step_end(args=None, state=_State(global_step=2), control=None)
     finally:

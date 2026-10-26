@@ -81,12 +81,12 @@ from src.distributed.pipeline_parallel.losses import (
 from src.distributed.runtime import (
     DeferredRankFailure,
     collective_device,
-    current_device,
     get_global_rank,
     get_global_world_size,
     is_global_main_process,
     reject_across_ranks,
 )
+from src.hardware import current_device
 from src.models.loading.dtype import resolve_training_dtype
 from src.models.loading.tokenizer_setup import is_bounded_length
 from src.models.structure import base_transformers_model, resolve_tokenizer

@@ -1,8 +1,8 @@
 # Debug playbook — symptom → cause → fix
 
-Companion to `SKILL.md`. Sources: `src/diagnostics/debugging.py`,
+Companion to `SKILL.md`. Sources: `src/diagnostics/rank_divergence.py`, `src/diagnostics/py_spy.py`,
 `src/diagnostics/profiling.py` (CUDA-memory helpers),
-`src/callbacks/profiler.py` (`TorchProfilerCallback`),
+`src/callbacks/torch_profiler.py` (`TorchProfilerCallback`),
 `src/callbacks/wiring.py` (wiring), `src/env.py` (`env_flag`, `DIST_NCCL_TIMEOUT_MINUTES`),
 `src/models/patches/flex_sliding_attention.py` (`HALO_FLEX_SLIDING`), and the user-facing guide
 `agent-docs/reference/debugging.md`. Every env var / helper name below is verbatim
@@ -26,25 +26,25 @@ from those files or the file cited beside it — do not paraphrase them.
 | GPUs idle between steps, CPU busy | Dataloader / tokenization / collation host overhead | `record_distributed_flamegraph(duration=30)` py-spy SVG (§2.4) | Raise `dataloader_num_workers`; pre-process dataset offline |
 | CUDA OOM mid-step | Activation/state memory over budget | Memory snapshot (§3) → memory_viz allocation flame graph | GC on (mind Zaya/EP-GC limits above); lower batch / `max_length`; CP or TP to cut DP |
 
-## 2. Enabling the `debugging.py` helpers
+## 2. Enabling the opt-in helpers
 
-The consistency checks (§2.1) run only where you add a call — the toolkit ships none; the py-spy
+The consistency check (§2.1) runs only where you add a call — the toolkit ships none; the py-spy
 helpers (§2.2, §2.4) run when you invoke `py_spy_diag.py` or call them in-script. For
 `HALO_TP_CONSISTENCY_CHECK` the accepted truthy values are `1`, `true`, `yes`, `on` (`env_flag`,
 `src/env.py`); a set-but-empty value counts as unset and yields the default.
 
-### 2.1 Cross-rank consistency — `assert_consistent` / `assert_tensor_shape_consistent`
+### 2.1 Cross-rank consistency — `assert_rank_uniform`
 
 Catches a shape/value divergence as a clear error instead of a downstream NCCL hang.
 
 ```bash
-export HALO_TP_CONSISTENCY_CHECK=1   # makes assert_consistent RAISE on mismatch (else just warns)
+export HALO_TP_CONSISTENCY_CHECK=1   # makes assert_rank_uniform RAISE on mismatch (else just warns)
 ```
 
 ```python
-from src.diagnostics.debugging import assert_tensor_shape_consistent, assert_consistent
-assert_tensor_shape_consistent(hidden_states, group=tp_group, label="attn_in")
-assert_consistent(some_scalar, group=ep_group, label="n_tokens")
+from src.diagnostics.rank_divergence import assert_rank_uniform
+assert_rank_uniform(tuple(hidden_states.shape), group=tp_group, label="attn_in")
+assert_rank_uniform(some_scalar, group=ep_group, label="n_tokens")
 ```
 
 `group=None` or world≤1 is a no-op. Pass `strict=True`/`False` to override the env var per call.
@@ -88,7 +88,7 @@ python scripts/profiling/py_spy_diag.py record --duration 30   # every torchrun 
 In-script equivalent:
 
 ```python
-from src.diagnostics.debugging import record_distributed_flamegraph
+from src.diagnostics.py_spy import record_distributed_flamegraph
 record_distributed_flamegraph(duration=30)                  # this rank only
 record_distributed_flamegraph(duration=30, this_rank_only=False)  # every rank on node (spot a straggler)
 ```
@@ -107,10 +107,11 @@ profiler_record_memory_snapshot: true  # mem-<label>-rankNN.pickle: end of the f
 ```
 
 ```python
-from src.diagnostics.profiling import cuda_memory_history, log_cuda_memory, reset_peak_memory_stats
+import torch
+from src.diagnostics.profiling import cuda_memory_history, log_cuda_memory
 with cuda_memory_history(ranks="all"):
     trainer.train()                  # → $HALO_DATA_ROOT/profiling/memory/snapshot-rankNN.pickle
-reset_peak_memory_stats(); log_cuda_memory("after forward")   # quick textual allocated/reserved/peak
+torch.cuda.reset_peak_memory_stats(); log_cuda_memory("after forward")   # quick textual allocated/reserved/peak
 ```
 
 ## 4. Reading `TorchProfilerCallback` traces
@@ -160,7 +161,7 @@ and the EP degree, never the dense ceiling.
 ## References
 
 - `agent-docs/reference/debugging.md` — full user-facing guide (this playbook mirrors it)
-- `src/diagnostics/debugging.py` — consistency-check + py-spy capture helpers (authoritative for env vars/signatures)
-- `src/diagnostics/profiling.py` — CUDA-memory helpers (`log_cuda_memory`, `cuda_memory_history`, `reset_peak_memory_stats`)
-- `src/callbacks/profiler.py` — `TorchProfilerCallback`
+- `src/diagnostics/rank_divergence.py`, `src/diagnostics/py_spy.py` — consistency-check and py-spy capture helpers (authoritative for env vars/signatures)
+- `src/diagnostics/profiling.py` — CUDA-memory helpers (`read_cuda_memory`, `log_cuda_memory`, `cuda_memory_history`)
+- `src/callbacks/torch_profiler.py` — `TorchProfilerCallback`
 - `agent-docs/parallelism/multi-node.md` — NCCL/IB env vars, FS coordination

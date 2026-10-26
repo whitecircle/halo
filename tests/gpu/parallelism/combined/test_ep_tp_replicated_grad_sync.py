@@ -31,9 +31,9 @@ from torch.distributed.tensor import DTensor
 from transformers import AutoTokenizer
 from trl import SFTConfig
 
-from src.distributed.expert_parallel.base_layer import has_grouped_mm
 from src.distributed.loading.model_loading import load_distributed_model
 from src.distributed.parallelism_config import ParallelismConfig
+from src.hardware import supports_grouped_mm
 from src.trainers.sft import DistributedSFTTrainer
 from tests.common.datasets import create_sft_dataset
 from tests.common.distributed import ensure_model_downloaded, group_max_abs_diff
@@ -61,7 +61,7 @@ def run(ctx):
         tokenizer.pad_token = tokenizer.eos_token
     train_dataset = create_sft_dataset(32, tokenizer, seed=SEED)
 
-    parallelism_config = ParallelismConfig(ep_size=EP_SIZE, tp_size=TP_SIZE, use_grouped_gemm=has_grouped_mm())
+    parallelism_config = ParallelismConfig(ep_size=EP_SIZE, tp_size=TP_SIZE, use_grouped_gemm=supports_grouped_mm())
     log(f"Config: {parallelism_config.summary()}")
     model, _ = load_distributed_model(
         model_name_or_path=MODEL_NAME,

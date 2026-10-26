@@ -396,6 +396,14 @@ def test_verdict_embedded_in_prose_and_numeric_strings_parse():
     assert parse_verdict(content, _term()) == Verdict({"correctness": 9.0, "clarity": 7.5}, {}, "fine")
 
 
+def test_a_reply_is_read_whole_before_the_object_it_embeds():
+    """A reply that is one JSON value is that value: an array holding a verdict is not a verdict object."""
+    verdict = {"scores": {"correctness": 9, "clarity": 7}, "rationale": "fine"}
+    assert parse_verdict(json.dumps(verdict), _term()) == Verdict({"correctness": 9.0, "clarity": 7.0}, {}, "fine")
+    assert parse_verdict(json.dumps([verdict]), _term()) is None
+    assert parse_verdict("no json here", _term()) is None
+
+
 def test_parse_verdict_in_veto_mode():
     term = _veto_term()
     content = json.dumps(
@@ -848,11 +856,11 @@ def test_client_is_built_against_the_term_endpoint(monkeypatch):
     monkeypatch.setenv("OPENROUTER_API_KEY", "sk-or-test")
     captured = {}
 
-    def fake_create(base_url, api_key_override):
+    def fake_build_openai_client(base_url, api_key_override):
         captured.update(base_url=base_url, api_key_override=api_key_override)
         return _FakeClient([])
 
-    monkeypatch.setattr(judge_module, "create_openai_client", fake_create)
+    monkeypatch.setattr(judge_module, "build_openai_client", fake_build_openai_client)
     GenerativeJudge(_term(base_url="http://judge:8000/v1"))._connect()
     assert captured == {"base_url": "http://judge:8000/v1", "api_key_override": "sk-or-test"}
 

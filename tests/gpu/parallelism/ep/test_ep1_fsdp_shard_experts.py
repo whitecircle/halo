@@ -42,9 +42,9 @@ from torch.distributed.tensor import DTensor
 from transformers import AutoTokenizer
 from trl import SFTConfig
 
-from src.distributed.expert_parallel.base_layer import has_grouped_mm
 from src.distributed.loading.model_loading import load_distributed_model
 from src.distributed.parallelism_config import ParallelismConfig
+from src.hardware import supports_grouped_mm
 from src.trainers.sft import DistributedSFTTrainer
 from tests.common.datasets import create_sft_dataset
 from tests.common.distributed import ensure_model_downloaded
@@ -93,7 +93,7 @@ def run_mode(fsdp_shard_ep1_experts, tokenizer, local_rank, output_dir):
 
     parallelism_config = ParallelismConfig(
         ep_size=1,
-        use_grouped_gemm=has_grouped_mm(),
+        use_grouped_gemm=supports_grouped_mm(),
         fsdp_shard_ep1_experts=fsdp_shard_ep1_experts,
     )
     model, _ = load_distributed_model(

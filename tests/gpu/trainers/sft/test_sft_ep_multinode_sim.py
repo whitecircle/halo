@@ -35,9 +35,9 @@ from torch.distributed.tensor import DTensor
 from transformers import AutoTokenizer
 from trl import SFTConfig
 
-from src.distributed.expert_parallel.base_layer import has_grouped_mm
 from src.distributed.loading.model_loading import load_distributed_model
 from src.distributed.parallelism_config import ParallelismConfig
+from src.hardware import supports_grouped_mm
 from src.trainers.sft import DistributedSFTTrainer
 from tests.common.datasets import create_sft_dataset
 from tests.common.distributed import ensure_model_downloaded, group_max_abs_diff
@@ -169,7 +169,7 @@ def run(ctx):
         ep_size=simulated_gpus_per_node,
         gpus_per_node=simulated_gpus_per_node,
         ep_scope="node",
-        use_grouped_gemm=has_grouped_mm(),
+        use_grouped_gemm=supports_grouped_mm(),
     )
     log(f"Config: {parallelism_config.summary()}")
     # The whole point — confirm we got the multi-group (multi-node) deferred-DP topology.

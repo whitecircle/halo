@@ -1,12 +1,4 @@
-"""Subclass-tree helpers for the toolkit's self-registering registries.
-
-:func:`iter_subclasses` walks a base class's descendants; :func:`build_class_claim_map` resolves a
-key each subclass declares back to the class claiming it. Consumers: the EP patcher (HF MoE block →
-``EP*MoELayer``), the CP patcher (HF attention → ``*UlyssesAttention``), the PP splitter (HF backbone
-→ ``PPModelSpec``), the head-path contract (HF causal LM → ``HeadTransformSpec``), the EP
-``config.model_type`` roster, and the rollout weight-sync clients (keyed by ``BACKEND_KEY``, walking
-the tree directly). A new family or backend registers by subclassing.
-"""
+"""Registries read off a base class's subclass tree: a class registers by subclassing and claiming keys."""
 
 from __future__ import annotations
 
@@ -40,7 +32,7 @@ def iter_subclasses(base_cls: type[_T]) -> list[type[_T]]:
     return found
 
 
-def build_class_claim_map(base_cls: type[_T], attr: str, kind: str) -> dict[str, type[_T]]:
+def build_class_claim_map(base_cls: type[_T], kind: str, *, attr: str = "HF_MODULE_NAMES") -> dict[str, type[_T]]:
     """Claimed key → claiming class, over ``base_cls``'s whole subclass tree.
 
     Walks the tree (concrete classes may sit under intermediate bases) reading each class's own
@@ -49,8 +41,9 @@ def build_class_claim_map(base_cls: type[_T], attr: str, kind: str) -> dict[str,
 
     Args:
         base_cls: the base whose subclass tree is scanned.
-        attr: per-class tuple of claimed keys (e.g. ``"HF_MODULE_NAMES"``, ``"HF_MODEL_TYPES"``).
         kind: noun for the error message (e.g. ``"HF MoE class name"``, ``"model_type"``).
+        attr: name of the class attribute holding the claimed keys; ``HF_MODULE_NAMES`` (the HF module
+            classes a claimant takes over) by default.
 
     Raises:
         ValueError: two classes claim the same key — the resolution would be order-dependent.
@@ -62,16 +55,6 @@ def build_class_claim_map(base_cls: type[_T], attr: str, kind: str) -> dict[str,
             if existing is not cls:
                 raise ValueError(f"{kind} '{key}' claimed by both {existing.__name__} and {cls.__name__}")
     return mapping
-
-
-def build_hf_module_name_map(base_cls: type[_T], kind: str) -> dict[str, type[_T]]:
-    """HF module class name → claiming class, from each claimant's own ``HF_MODULE_NAMES``.
-
-    Patcher-facing spelling of :func:`build_class_claim_map`: ``kind`` is the claimed module's noun
-    (e.g. ``"MoE"``, ``"attention"``, ``"backbone"``, ``"causal-LM head"``). The claimant is a wrapper
-    for EP/CP, a split spec for PP and a ``HeadTransformSpec`` for the causal-LM head.
-    """
-    return build_class_claim_map(base_cls, "HF_MODULE_NAMES", f"HF {kind} class name")
 
 
 def swap_registered_modules(

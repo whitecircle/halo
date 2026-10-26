@@ -57,7 +57,7 @@ def _run_step(callback) -> dict:
         patch(f"{_RBB_MOD}.dist", fake_dist),
         patch(f"{_RBB_MOD}.get_global_world_size", return_value=2),
     ):
-        callback.on_step_end(args=None, state=None, control=None, model=_RouterModel())
+        callback.on_step_end(args=None, state=SimpleNamespace(global_step=1), control=None, model=_RouterModel())
     assert "group" in captured, "counter all-reduce was never issued"
     return captured
 

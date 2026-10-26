@@ -144,7 +144,7 @@ local file or a Hub dataset id and `--output_path` a local path.
 The three async CLIs — `openai_batched_generation.py`, `rm_rejection_sampling.py`, `rm_scoring.py`
 — run under a shared SIGINT/SIGTERM handler
 (`run_async_cli`) that exits `128 + signo`, the shell's own convention for a signalled process.
-Progress is checkpointed (generation through `parallel_openai_requests` in `src/inference/batch_requests.py`, over the JSONL store in `resume_store.py`; the two `rm_*` CLIs in their own JSONL output), so re-running resumes; the non-zero exit is what stops a wrapper script or
+Progress is stored for resume (generation through `parallel_openai_requests` and its JSONL resume store in `src/inference/batch_requests.py`; the two `rm_*` CLIs in their own JSONL output), so re-running resumes; the non-zero exit is what stops a wrapper script or
 `&&` chain from consuming a partial output dataset as a finished one.
 
 A run that produced no usable row raises rather than writing an empty result (`reject_empty_results`), so a dead endpoint or a
@@ -152,7 +152,7 @@ wrong `--model` cannot republish the resumed rows as a finished job. Each CLI's 
 names its per-reason drop counts (first-response failures, degenerate skips).
 
 Every endpoint these CLIs talk to is OpenAI-compatible (`--base_url` / `--api_key`),
-reached through the one shared client (`create_openai_client`, `src/inference/openai_client.py`) with the toolkit's retry policy;
+reached through the one shared client (`build_openai_client`, `src/inference/openai_client.py`) with the toolkit's retry policy;
 `--base_url` defaults to `http://localhost:8000/v1` and `--api_key` to `VLLM_API_KEY`, then `OPENAI_API_KEY`, then the
 `EMPTY` placeholder (`src/inference/endpoints.py`). There
 is no separate Azure mode — point `--base_url` at the deployment's OpenAI-compatible route like

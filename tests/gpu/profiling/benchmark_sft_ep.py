@@ -55,7 +55,7 @@ from transformers import AutoTokenizer
 from trl import SFTConfig
 
 from src.callbacks.efficiency import EfficiencyCallback
-from src.callbacks.profiler import TorchProfilerCallback
+from src.callbacks.torch_profiler import TorchProfilerCallback
 from src.diagnostics.performance_monitor import get_performance_monitor
 from src.distributed.expert_parallel.base_layer import EPMoELayerBase, find_ep_layers
 from src.distributed.expert_parallel.config import ExpertLoraSpec

@@ -119,7 +119,7 @@ def test_the_eval_driver_refuses_an_answerless_dataset_before_generating(monkeyp
     """The trainer's dataset gate, held by the generic eval driver too: an answer-graded environment
     over a dataset without the column fails before any episode runs, not after each one."""
     monkeypatch.setattr(run_env, "load_hf_split", lambda *args: Dataset.from_list([{"prompt": "fix the bug"}]))
-    monkeypatch.setattr(run_env, "create_openai_client", lambda **kwargs: pytest.fail("generation must not start"))
+    monkeypatch.setattr(run_env, "build_openai_client", lambda **kwargs: pytest.fail("generation must not start"))
     argv = [
         "run_env.py",
         "--env_type",

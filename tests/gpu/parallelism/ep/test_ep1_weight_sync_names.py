@@ -38,9 +38,9 @@ Requirements:
 
 import torch
 
-from src.distributed.expert_parallel.base_layer import has_grouped_mm
 from src.distributed.loading.model_loading import load_distributed_model
 from src.distributed.parallelism_config import ParallelismConfig
+from src.hardware import supports_grouped_mm
 from src.trainers.grpo.rollout.weight_sync import gather_and_send_weights
 from tests.common.distributed import ensure_model_downloaded
 from tests.common.ep_reference import ep_layers
@@ -58,7 +58,7 @@ FORBIDDEN_NAME_SUBSTRINGS = ("gate_proj_gmm", "up_proj_gmm")
 def run(ctx):
     ensure_model_downloaded(MODEL_NAME, ctx.rank)
 
-    parallelism_config = ParallelismConfig(ep_size=1, use_grouped_gemm=has_grouped_mm())
+    parallelism_config = ParallelismConfig(ep_size=1, use_grouped_gemm=supports_grouped_mm())
     model, _ = load_distributed_model(
         model_name_or_path=MODEL_NAME,
         parallelism_config=parallelism_config,

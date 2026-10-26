@@ -17,7 +17,7 @@ import torch
 import torch.nn as nn
 from transformers.modeling_rope_utils import ROPE_INIT_FUNCTIONS
 
-from src.distributed.runtime import current_device
+from src.hardware import current_device
 from src.log import warn_once
 from src.models.attention_geometry import resolve_head_dim
 from src.models.loading.config_levels import text_config

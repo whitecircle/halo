@@ -1,10 +1,8 @@
-"""Autograd primitives for EP MoE layers: DeepEP dispatch/combine, GC-recompute replay variants,
-Megatron scatter/reduce around expert-TP compute, and the atomic-free expert-bias gather."""
+"""Autograd functions for the DeepEP dispatch and combine, and their GC-recompute replay variants."""
 
 from __future__ import annotations
 
 import torch
-import torch.distributed as dist
 
 from src.distributed.expert_parallel.extension import deep_ep
 
@@ -128,48 +126,3 @@ class ReplayCombineFunction(torch.autograd.Function):
     @staticmethod
     def backward(ctx, grad_combined_x):
         return _combine_backward(ctx, grad_combined_x), None, None, None, None
-
-
-# Expert-TP scatter-gather (Megatron-LM): input → SumGradAcrossGroup → expert_compute(W_shard) →
-# ReduceFromExpertTP. The scatter half is the toolkit-wide :class:`SumGradAcrossGroup`, shared with TP.
-
-
-class ReduceFromExpertTP(torch.autograd.Function):
-    """All-reduce SUM forward, identity backward, on the combined MoE output (token space, after combine).
-
-    Sums each expert-TP shard's partial per-token output; exact because combine is linear. The identity
-    backward is correct because :class:`SumGradAcrossGroup` all-reduces the input grad on the way in and
-    each shard's weight grad is independently correct.
-    """
-
-    @staticmethod
-    def forward(ctx, x: torch.Tensor, group):
-        ctx.group = group
-        out = x.clone()
-        dist.all_reduce(out, op=dist.ReduceOp.SUM, group=group)
-        return out
-
-    @staticmethod
-    def backward(ctx, grad_output):
-        return grad_output, None
-
-
-class MoEExpertBiasGather(torch.autograd.Function):
-    """Per-expert bias broadcast ``bias[eids]`` to expert-sorted tokens, with an atomic-free backward.
-
-    The default index_add_ backward is a bf16 atomic scatter that serialises, since all of an expert's
-    tokens hit the same bias row. ``grad_bias`` is instead a per-expert grad sum via one GEMM
-    ``onehot(eids)ᵀ @ grad_out``: tensor-core fp32 accum, no atomics, order-independent."""
-
-    @staticmethod
-    def forward(ctx, bias: torch.Tensor, eids: torch.Tensor):
-        ctx.save_for_backward(eids)
-        ctx.num_experts = bias.shape[0]
-        return bias.index_select(0, eids)
-
-    @staticmethod
-    def backward(ctx, grad_out):
-        (eids,) = ctx.saved_tensors
-        # onehot[e, t] = 1 where token t routed to expert e; ([E, N] @ [N, I]) sums grad per expert.
-        onehot = (torch.arange(ctx.num_experts, device=eids.device).unsqueeze(1) == eids).to(grad_out.dtype)
-        return onehot @ grad_out, None

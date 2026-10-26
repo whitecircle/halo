@@ -46,7 +46,7 @@ The base trainer logs loss, learning rate and grad norm every `logging_steps`
 | `enable_efficiency_metrics` | off | step time, tokens/s per GPU and cluster-wide, allocated and peak GPU memory |
 | `report_mfu_diagnostics` | off | MFU and achieved TFLOPS; needs `enable_efficiency_metrics`. MoE runs also get the S-MFU variants, since plain MFU misreads sparse models |
 | `enable_moe_metrics` | on | expert load balance averaged over MoE layers (`moe/load_max`, `moe/load_cv`, `moe/dead_frac`, …), plus `moe/load_max_first` and `moe/load_max_last`. Reports when router logits are on (`moe_balancing: aux_loss`); under `bias_update` the balancing callback logs the `moe/*` keys instead. No-op on dense models |
-| `generate_eval_examples` (SFT, DPO, SMPO, offline GRPO) | on (off for SFT) | a table of sample generations at each evaluation; skipped under TP and CP |
+| `generate_eval_examples` (SFT, DPO, SMPO, offline GRPO) | on (off for SFT) | a table of sample generations at each evaluation; skipped under TP, CP and PP |
 | `save_completions` (online and async GRPO) | on | each step's rollouts in `<output_dir>/completions/completions_<step>.parquet` (`_eval` suffix for evaluation): prompt, completion, one column per reward function, advantage. Also a W&B `completions` table when `report_to` includes `wandb` |
 | `log_completions` (online and async GRPO) | off | also prints the per-sample table to the console |
 

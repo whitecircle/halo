@@ -277,7 +277,7 @@ def _mock_playground_client(monkeypatch, seen, *, finish_reason="stop", content=
 
     monkeypatch.setattr(
         mod,
-        "create_openai_client",
+        "build_openai_client",
         lambda base_url, api_key_override: AsyncOpenAI(
             base_url=base_url,
             api_key=api_key_override,

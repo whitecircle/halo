@@ -18,7 +18,7 @@ from openai import NOT_GIVEN, AsyncOpenAI
 
 from scripts._common import add_openai_endpoint_args
 from scripts.inference._common import add_gradio_server_args, launch_gradio
-from src.inference.openai_client import create_openai_client
+from src.inference.openai_client import build_openai_client
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -121,7 +121,7 @@ def create_demo(client: AsyncOpenAI, model: str | None, stop_token_ids: list[int
 def main():
     args = build_parser().parse_args()
 
-    client = create_openai_client(base_url=args.base_url, api_key_override=args.api_key)
+    client = build_openai_client(base_url=args.base_url, api_key_override=args.api_key)
 
     stop_ids = []
     if args.stop_token_ids:

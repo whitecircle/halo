@@ -43,7 +43,7 @@ from scripts.inference._common import (
 )
 from src.data.pipeline.conversation import build_base_prompt, resolve_system_prompt
 from src.inference.batch_requests import parallel_openai_requests
-from src.inference.openai_client import create_openai_client
+from src.inference.openai_client import build_openai_client
 
 logger = logging.getLogger(__name__)
 
@@ -136,7 +136,7 @@ def process_response(
 async def main() -> None:
     args = parse_args()
 
-    client = create_openai_client(
+    client = build_openai_client(
         base_url=args.base_url,
         api_key_override=args.api_key,
     )
@@ -165,8 +165,7 @@ async def main() -> None:
         temperature=args.temperature,
         max_tokens=args.max_gen_tokens,
         max_workers=args.n_parallel,
-        checkpoint_interval=args.checkpoint_interval,
-        disable_checkpoints=False,
+        flush_interval=args.checkpoint_interval,
         client=client,
         tools=tools_list,
     )
@@ -207,8 +206,7 @@ async def main() -> None:
             temperature=args.temperature,
             max_tokens=args.max_gen_tokens,
             max_workers=args.n_parallel,
-            checkpoint_interval=args.checkpoint_interval,
-            disable_checkpoints=False,
+            flush_interval=args.checkpoint_interval,
             client=client,
             tools=followup_tools,
         )

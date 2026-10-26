@@ -25,9 +25,9 @@ import torch
 import torch.nn as nn
 from transformers.modeling_outputs import BaseModelOutputWithPast
 
-from src.distributed.module_registry import build_hf_module_name_map
 from src.models.loading.config_levels import get_config_field, text_config
 from src.models.structure import base_transformers_model, transformers_model_class
+from src.subclass_registry import build_class_claim_map
 
 # The probe's hidden state is diagonal with log-spaced magnitudes, so its logits span 1e-2..1e3 times
 # the stand-in weights: a softcap of any practical width saturates on some positions and stays linear
@@ -152,7 +152,12 @@ class MiniCPM3HeadTransform(HeadTransformSpec):
         return HeadTransform(hidden_scale=1.0 / text_config(config).logits_scaling)
 
 
-HEAD_TRANSFORM_SPEC_MAP = build_hf_module_name_map(HeadTransformSpec, "causal-LM head")
+def build_head_transform_spec_map() -> dict[str, type[HeadTransformSpec]]:
+    """HF causal-LM class name → :class:`HeadTransformSpec`, derived from every registered spec."""
+    return build_class_claim_map(HeadTransformSpec, "HF causal-LM head class name")
+
+
+HEAD_TRANSFORM_SPEC_MAP = build_head_transform_spec_map()
 
 
 def resolve_head_transform_spec(model_class: type) -> type[HeadTransformSpec]:

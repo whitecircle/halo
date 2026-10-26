@@ -8,7 +8,7 @@ contiguous cut would sever declare themselves here.
 
 Registration mirrors the EP/CP wrapper registries: a family self-registers by subclassing
 :class:`PPModelSpec` with its own ``HF_MODULE_NAMES``, discovered via
-:func:`~src.distributed.module_registry.build_hf_module_name_map`. Absence of a spec means the
+:func:`~src.subclass_registry.build_class_claim_map`. Absence of a spec means the
 generic path applies.
 """
 
@@ -19,7 +19,6 @@ from types import MethodType
 
 import torch.nn as nn
 
-from src.distributed.module_registry import build_hf_module_name_map
 from src.distributed.pipeline_parallel.stage_adapters import deepseek_v4_stream_forward, glm5_next_stream_forward
 from src.models.attention_geometry import resolve_head_dim, resolve_num_key_value_heads
 from src.models.head_transform import resolve_head_transform
@@ -30,6 +29,7 @@ from src.models.moe_balancing import (
     resolve_router_topk,
 )
 from src.models.structure import DECODER_LAYER_LIST_ATTRS, backbone_with_layers, decoder_layers
+from src.subclass_registry import build_class_claim_map
 
 # The config field every family spells its input/output embedding tie with.
 TIE_WORD_EMBEDDINGS_FLAG = "tie_word_embeddings"
@@ -228,7 +228,7 @@ class Glm5NextPPSpec(PPModelSpec):
 
 def build_pp_spec_map() -> dict[str, type[PPModelSpec]]:
     """HF backbone class name → :class:`PPModelSpec`, derived from every registered spec."""
-    return build_hf_module_name_map(PPModelSpec, "backbone")
+    return build_class_claim_map(PPModelSpec, "HF backbone class name")
 
 
 PP_SPEC_MAP = build_pp_spec_map()

@@ -6,7 +6,7 @@ import torch
 import torch.nn as nn
 
 from src.distributed.expert_parallel.base_layer import EPSharedExpertsMoELayerBase
-from src.distributed.runtime import current_device
+from src.hardware import current_device
 
 
 class EPLfm2MoELayer(EPSharedExpertsMoELayerBase):

@@ -55,7 +55,7 @@ def test_rm_scoring_names_how_many_rows_the_endpoint_lost(monkeypatch, tmp_path)
     prompts.touch()
     df = pd.DataFrame({"id": [1, 2, 3], "prompt": [[{"role": "user", "content": "q"}] for _ in range(3)]})
     monkeypatch.setattr(rm_scoring, "load_prompts_dataframe", lambda args: df)
-    monkeypatch.setattr(rm_common, "create_openai_client", lambda *a, **k: _DeadClient())
+    monkeypatch.setattr(rm_common, "build_openai_client", lambda *a, **k: _DeadClient())
     monkeypatch.setattr(rm_common, "load_reward_model", lambda *a, **k: (None, None, None))
     monkeypatch.setattr(
         sys,
@@ -147,7 +147,7 @@ def test_rm_scoring_drops_and_counts_a_truncated_hypothesis(monkeypatch, tmp_pat
     prompts.touch()
     df = pd.DataFrame({"id": [1, 2, 3], "prompt": [[{"role": "user", "content": "q"}] for _ in range(3)]})
     monkeypatch.setattr(rm_scoring, "load_prompts_dataframe", lambda args: df)
-    monkeypatch.setattr(rm_common, "create_openai_client", lambda *a, **k: _TruncatingClient())
+    monkeypatch.setattr(rm_common, "build_openai_client", lambda *a, **k: _TruncatingClient())
     monkeypatch.setattr(rm_common, "load_reward_model", lambda *a, **k: (None, None, None))
     monkeypatch.setattr(rm_common, "score_conversations", lambda *a, **k: [1.0])
     monkeypatch.setattr(
